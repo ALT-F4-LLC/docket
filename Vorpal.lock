@@ -1,0 +1,41 @@
+lockfile = 1
+
+[[sources]]
+name = "git"
+path = "https://www.kernel.org/pub/software/scm/git/git-2.52.0.tar.gz"
+includes = []
+excludes = []
+digest = "c7811ed4fe8c1c5afcecea15929178c33dcef4fa885086df96cb558cd9466f29"
+platform = "aarch64-darwin"
+
+[[sources]]
+name = "go"
+path = "https://go.dev/dl/go1.24.2.darwin-arm64.tar.gz"
+includes = []
+excludes = []
+digest = "5380e02cdfe2b254af7c3306671fbacc0bfefeb3a9684b502e4af3ad5db917e7"
+platform = "aarch64-darwin"
+
+[[sources]]
+name = "protoc"
+path = "https://github.com/protocolbuffers/protobuf/releases/download/v25.4/protoc-25.4-osx-aarch_64.zip"
+includes = []
+excludes = []
+digest = "d105abb1c1d2c024f29df884f0592f1307984d63aeb10f0e61ccb94aee2c2feb"
+platform = "aarch64-darwin"
+
+[[sources]]
+name = "protoc-gen-go"
+path = "https://github.com/protocolbuffers/protobuf-go/releases/download/v1.36.3/protoc-gen-go.v1.36.3.darwin.arm64.tar.gz"
+includes = []
+excludes = []
+digest = "55c2a0cc7137f3625bd1bf3be85ed940c643e56fa1ceaf51f94c6434980f65a5"
+platform = "aarch64-darwin"
+
+[[sources]]
+name = "protoc-gen-go-grpc"
+path = "https://github.com/grpc/grpc-go/archive/refs/tags/v1.70.0.tar.gz"
+includes = []
+excludes = []
+digest = "eba0f83ab252cffe2c6209f894c4c8238b2473a403bbdbcb985af25140aac95d"
+platform = "aarch64-darwin"
