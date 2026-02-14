@@ -38,12 +38,12 @@ func (w *Writer) Success(data any, message string) {
 }
 
 // Error renders an error. In JSON mode the error is wrapped in an error
-// envelope written to Stderr. In human mode the error is printed to Stderr
+// envelope written to Stdout. In human mode the error is printed to Stderr
 // with an "Error: " prefix. The corresponding exit code is returned so the
 // caller can pass it to os.Exit.
 func (w *Writer) Error(err error, code ErrorCode) int {
 	if w.JSONMode {
-		writeJSONError(w.Stderr, err, code)
+		writeJSONError(w.Stdout, err, code)
 	} else {
 		writeHumanError(w.Stderr, err)
 	}

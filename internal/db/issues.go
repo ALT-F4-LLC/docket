@@ -499,6 +499,107 @@ func GetSubIssueProgress(db *sql.DB, parentID int) (int, int, error) {
 	return done, total, nil
 }
 
+// IsDescendant returns true if potentialDescendantID is a descendant of issueID.
+// This is used to detect cycles when reparenting an issue.
+func IsDescendant(db *sql.DB, issueID, potentialDescendantID int) (bool, error) {
+	var found bool
+	err := db.QueryRow(
+		`WITH RECURSIVE tree(id) AS (
+			SELECT id FROM issues WHERE parent_id = ?
+			UNION ALL
+			SELECT i.id FROM issues i JOIN tree t ON i.parent_id = t.id
+		)
+		SELECT EXISTS(SELECT 1 FROM tree WHERE id = ?)`, issueID, potentialDescendantID,
+	).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("checking descendant: %w", err)
+	}
+	return found, nil
+}
+
+// OrphanSubIssues sets parent_id to NULL for all direct children of the given issue.
+// Activity is recorded for each affected child within a transaction.
+func OrphanSubIssues(db *sql.DB, parentID int, author string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Find all direct children before updating.
+	rows, err := tx.Query("SELECT id FROM issues WHERE parent_id = ?", parentID)
+	if err != nil {
+		return fmt.Errorf("querying children: %w", err)
+	}
+	defer rows.Close()
+	var childIDs []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scanning child id: %w", err)
+		}
+		childIDs = append(childIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating children: %w", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = tx.Exec(
+		`UPDATE issues SET parent_id = NULL, updated_at = ? WHERE parent_id = ?`,
+		now, parentID,
+	)
+	if err != nil {
+		return fmt.Errorf("orphaning sub-issues: %w", err)
+	}
+
+	// Record activity for each orphaned child.
+	oldParent := fmt.Sprintf("%d", parentID)
+	for _, childID := range childIDs {
+		if err := RecordActivity(tx, childID, "parent_id", oldParent, "", author); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// CascadeDeleteIssue deletes an issue and all its descendants recursively
+// in a single transaction. The recursive CTE finds all descendant issues;
+// ON DELETE CASCADE constraints on comments, issue_labels, issue_relations,
+// and activity_log handle cleanup of related rows automatically.
+func CascadeDeleteIssue(db *sql.DB, id int) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Verify the root issue exists.
+	var exists bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)", id).Scan(&exists); err != nil {
+		return fmt.Errorf("checking issue existence: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+
+	// Delete all descendants and the root issue itself using a recursive CTE.
+	_, err = tx.Exec(
+		`WITH RECURSIVE tree(id) AS (
+			SELECT id FROM issues WHERE id = ?
+			UNION ALL
+			SELECT i.id FROM issues i JOIN tree t ON i.parent_id = t.id
+		)
+		DELETE FROM issues WHERE id IN (SELECT id FROM tree)`, id,
+	)
+	if err != nil {
+		return fmt.Errorf("cascade deleting issue: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // --- helpers ---
 
 // scanIssueFrom scans a single issue from any scanner (*sql.Row or *sql.Rows).
