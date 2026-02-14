@@ -95,6 +95,7 @@ func main() {
 		WithBuildDirectory("cmd/docket").
 		WithIncludes([]string{
 			"cmd/docket",
+			"internal",
 			"go.mod",
 			"go.sum",
 		}).
