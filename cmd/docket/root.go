@@ -99,6 +99,9 @@ func getCfg(cmd *cobra.Command) *config.Config {
 
 func getDB(cmd *cobra.Command) *sql.DB {
 	conn, _ := cmd.Context().Value(dbKey).(*sql.DB)
+	if conn == nil {
+		panic("bug: getDB called on a command with no database connection (missing PersistentPreRunE guard?)")
+	}
 	return conn
 }
 

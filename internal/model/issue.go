@@ -192,26 +192,33 @@ type Issue struct {
 	Priority    Priority
 	Kind        IssueKind
 	Assignee    string
+	Labels      []string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
 
 // issueJSON is the JSON wire format for Issue.
 type issueJSON struct {
-	ID          string  `json:"id"`
-	ParentID    *string `json:"parent_id,omitempty"`
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Status      string  `json:"status"`
-	Priority    string  `json:"priority"`
-	Kind        string  `json:"kind"`
-	Assignee    string  `json:"assignee"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	ID          string   `json:"id"`
+	ParentID    *string  `json:"parent_id,omitempty"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Status      string   `json:"status"`
+	Priority    string   `json:"priority"`
+	Kind        string   `json:"kind"`
+	Assignee    string   `json:"assignee"`
+	Labels      []string `json:"labels"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Issue.
 func (i Issue) MarshalJSON() ([]byte, error) {
+	labels := i.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+
 	j := issueJSON{
 		ID:          FormatID(i.ID),
 		Title:       i.Title,
@@ -220,6 +227,7 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 		Priority:    string(i.Priority),
 		Kind:        string(i.Kind),
 		Assignee:    i.Assignee,
+		Labels:      labels,
 		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -271,6 +279,7 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	}
 
 	i.Assignee = j.Assignee
+	i.Labels = j.Labels
 
 	createdAt, err := time.Parse(time.RFC3339, j.CreatedAt)
 	if err != nil {

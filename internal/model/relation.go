@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -68,4 +69,60 @@ type Relation struct {
 	TargetIssueID int
 	RelationType  RelationType
 	CreatedAt     time.Time
+}
+
+// relationJSON is the JSON wire format for Relation.
+type relationJSON struct {
+	ID            int    `json:"id"`
+	SourceIssueID string `json:"source_issue_id"`
+	TargetIssueID string `json:"target_issue_id"`
+	RelationType  string `json:"relation_type"`
+	CreatedAt     string `json:"created_at"`
+}
+
+// MarshalJSON implements custom JSON serialization for Relation.
+func (r Relation) MarshalJSON() ([]byte, error) {
+	return json.Marshal(relationJSON{
+		ID:            r.ID,
+		SourceIssueID: FormatID(r.SourceIssueID),
+		TargetIssueID: FormatID(r.TargetIssueID),
+		RelationType:  string(r.RelationType),
+		CreatedAt:     r.CreatedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// UnmarshalJSON implements custom JSON deserialization for Relation.
+func (r *Relation) UnmarshalJSON(data []byte) error {
+	var j relationJSON
+	if err := json.Unmarshal(data, &j); err != nil {
+		return err
+	}
+
+	r.ID = j.ID
+
+	sourceID, err := ParseID(j.SourceIssueID)
+	if err != nil {
+		return fmt.Errorf("parsing source issue id: %w", err)
+	}
+	r.SourceIssueID = sourceID
+
+	targetID, err := ParseID(j.TargetIssueID)
+	if err != nil {
+		return fmt.Errorf("parsing target issue id: %w", err)
+	}
+	r.TargetIssueID = targetID
+
+	rt, err := ParseRelationType(j.RelationType)
+	if err != nil {
+		return err
+	}
+	r.RelationType = rt
+
+	createdAt, err := time.Parse(time.RFC3339, j.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("parsing created_at: %w", err)
+	}
+	r.CreatedAt = createdAt
+
+	return nil
 }
