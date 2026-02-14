@@ -19,7 +19,7 @@ type showResult struct {
 	Issue     *model.Issue     `json:"-"`
 	SubIssues []*model.Issue   `json:"sub_issues"`
 	Relations []model.Relation `json:"relations"`
-	Comments  []model.Comment  `json:"comments"`
+	Comments  []*model.Comment `json:"comments"`
 	Activity  []model.Activity `json:"activity"`
 }
 
@@ -39,7 +39,7 @@ type showResultJSON struct {
 	UpdatedAt   string           `json:"updated_at"`
 	SubIssues   []*model.Issue   `json:"sub_issues"`
 	Relations   []model.Relation `json:"relations"`
-	Comments    []model.Comment  `json:"comments"`
+	Comments    []*model.Comment `json:"comments"`
 	Activity    []model.Activity `json:"activity"`
 }
 
@@ -60,7 +60,7 @@ func (s showResult) MarshalJSON() ([]byte, error) {
 	}
 	comments := s.Comments
 	if comments == nil {
-		comments = []model.Comment{}
+		comments = []*model.Comment{}
 	}
 	activity := s.Activity
 	if activity == nil {
@@ -124,9 +124,13 @@ var showCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
 		}
 
-		// Relations and comments not yet implemented in DB layer.
+		// Relations not yet implemented in DB layer.
 		relations := []model.Relation{}
-		comments := []model.Comment{}
+
+		comments, err := db.ListComments(conn, id)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
+		}
 
 		activity, err := db.GetActivity(conn, id, 10)
 		if err != nil {

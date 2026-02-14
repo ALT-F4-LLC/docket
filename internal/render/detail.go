@@ -14,7 +14,7 @@ import (
 
 // RenderDetail renders a full issue detail view including metadata, description,
 // sub-issues, relations, comments, and recent activity.
-func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, comments []model.Comment, activity []model.Activity) string {
+func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, comments []*model.Comment, activity []model.Activity) string {
 	if !ColorsEnabled() {
 		return renderPlainDetail(issue, subIssues, relations, comments, activity)
 	}
@@ -172,7 +172,7 @@ func renderRelations(issueID int, relations []model.Relation) string {
 	return header + "\n" + strings.Join(lines, "\n")
 }
 
-func renderComments(comments []model.Comment) string {
+func renderComments(comments []*model.Comment) string {
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	authorStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -187,7 +187,7 @@ func renderComments(comments []model.Comment) string {
 		}
 
 		commentHeader := fmt.Sprintf("%s  %s",
-			authorStyle.Render(c.Author),
+			authorStyle.Render(c.AuthorOrAnonymous()),
 			timeStyle.Render(humanize.Time(c.CreatedAt)),
 		)
 
@@ -231,7 +231,7 @@ func renderActivity(activity []model.Activity) string {
 }
 
 // renderPlainDetail renders a detail view without any color or styling.
-func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, comments []model.Comment, activity []model.Activity) string {
+func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, comments []*model.Comment, activity []model.Activity) string {
 	var b strings.Builder
 
 	// Header
@@ -293,7 +293,7 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	if len(comments) > 0 {
 		b.WriteString("\nComments\n")
 		for _, c := range comments {
-			fmt.Fprintf(&b, "  %s  %s\n  %s\n\n", c.Author, humanize.Time(c.CreatedAt), c.Body)
+			fmt.Fprintf(&b, "  %s  %s\n  %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt), c.Body)
 		}
 	}
 

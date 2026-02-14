@@ -15,6 +15,15 @@ type Comment struct {
 	CreatedAt time.Time
 }
 
+// AuthorOrAnonymous returns the author name, falling back to "anonymous"
+// when the field is empty.
+func (c Comment) AuthorOrAnonymous() string {
+	if c.Author == "" {
+		return "anonymous"
+	}
+	return c.Author
+}
+
 // commentJSON is the JSON wire format for Comment.
 type commentJSON struct {
 	ID        int    `json:"id"`
@@ -30,7 +39,7 @@ func (c Comment) MarshalJSON() ([]byte, error) {
 		ID:        c.ID,
 		IssueID:   FormatID(c.IssueID),
 		Body:      c.Body,
-		Author:    c.Author,
+		Author:    c.AuthorOrAnonymous(),
 		CreatedAt: c.CreatedAt.UTC().Format(time.RFC3339),
 	})
 }

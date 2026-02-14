@@ -15,8 +15,8 @@ import (
 // safeIdentifier matches valid SQL column identifiers (lowercase letters and underscores only).
 var safeIdentifier = regexp.MustCompile(`^[a-z_]+$`)
 
-// ErrNotFound is returned when a requested issue does not exist.
-var ErrNotFound = errors.New("issue not found")
+// ErrNotFound is returned when a requested resource does not exist.
+var ErrNotFound = errors.New("not found")
 
 // scanner abstracts *sql.Row and *sql.Rows for scanning a single row.
 type scanner interface {
