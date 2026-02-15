@@ -547,6 +547,49 @@ func GetSubIssueProgress(db *sql.DB, parentID int) (int, int, error) {
 	return done, total, nil
 }
 
+// GetBatchSubIssueProgress returns (done, total) counts for descendants of each
+// given parent ID in a single query, avoiding N+1 overhead.
+func GetBatchSubIssueProgress(conn *sql.DB, parentIDs []int) (map[int][2]int, error) {
+	if len(parentIDs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(parentIDs))
+	args := make([]interface{}, len(parentIDs))
+	for i, id := range parentIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := `WITH RECURSIVE tree(id, root_parent_id) AS (
+		SELECT id, parent_id FROM issues WHERE parent_id IN (` + strings.Join(placeholders, ",") + `)
+		UNION ALL
+		SELECT i.id, t.root_parent_id FROM issues i JOIN tree t ON i.parent_id = t.id
+	)
+	SELECT
+		t.root_parent_id,
+		COALESCE(SUM(CASE WHEN i.status = 'done' THEN 1 ELSE 0 END), 0),
+		COUNT(*)
+	FROM issues i JOIN tree t ON i.id = t.id
+	GROUP BY t.root_parent_id`
+
+	rows, err := conn.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying batch sub-issue progress: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int][2]int)
+	for rows.Next() {
+		var parentID, done, total int
+		if err := rows.Scan(&parentID, &done, &total); err != nil {
+			return nil, fmt.Errorf("scanning batch sub-issue progress: %w", err)
+		}
+		result[parentID] = [2]int{done, total}
+	}
+	return result, rows.Err()
+}
+
 // IsDescendant returns true if potentialDescendantID is a descendant of issueID.
 // This is used to detect cycles when reparenting an issue.
 func IsDescendant(db *sql.DB, issueID, potentialDescendantID int) (bool, error) {
