@@ -2,7 +2,7 @@
 # Section M: Edit Reparenting
 
 test_m_edit_reparent() {
-  printf "Section M: Edit Reparenting\n"
+  printf "Section M: Edit Reparenting"
 
   run create --json -t "Parent Issue"
   assert_exit "M" "M1" 0

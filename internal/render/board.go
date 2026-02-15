@@ -27,6 +27,15 @@ var StatusOrder = []model.Status{
 	model.StatusDone,
 }
 
+// PriorityOrder defines the display order for priorities (highest first).
+var PriorityOrder = []model.Priority{
+	model.PriorityCritical,
+	model.PriorityHigh,
+	model.PriorityMedium,
+	model.PriorityLow,
+	model.PriorityNone,
+}
+
 // SubIssueProgress holds pre-computed sub-issue completion data for a parent issue.
 type SubIssueProgress struct {
 	Done  int

@@ -2,7 +2,7 @@
 # Section O: Delete (Cascade & Orphan)
 
 test_o_delete_cascade() {
-  printf "Section O: Delete (Cascade & Orphan)\n"
+  printf "Section O: Delete (Cascade & Orphan)"
 
   run create --json -t "Cascade Parent"
   assert_exit "O" "O1" 0

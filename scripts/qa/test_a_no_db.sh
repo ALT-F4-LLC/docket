@@ -2,7 +2,7 @@
 # Section A: No-DB Commands
 
 test_a_no_db() {
-  printf "Section A: No-DB Commands\n"
+  printf "Section A: No-DB Commands"
   local NO_DB_DIR
   NO_DB_DIR=$(mktemp -d)
   mkdir -p "$NO_DB_DIR"

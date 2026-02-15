@@ -2,7 +2,7 @@
 # Section Q: JSON Contracts
 
 test_q_json_contracts() {
-  printf "Section Q: JSON Contracts\n"
+  printf "Section Q: JSON Contracts"
 
   run version --json
   assert_exit "Q" "Q1" 0
@@ -74,4 +74,55 @@ test_q_json_contracts() {
   assert_exit "Q" "Q11" 0
   assert_json "Q" "Q11" ".ok" "true"
   assert_json_exists "Q" "Q11" ".data.id"
+
+  # Q12: comment contract
+  run comment "$Q_ISSUE_ID" --json -m "Q12 contract"
+  assert_exit "Q" "Q12" 0
+  assert_json_exists "Q" "Q12" ".data.id"
+  assert_json_exists "Q" "Q12" ".data.body"
+  assert_json_exists "Q" "Q12" ".data.issue_id"
+  assert_json_exists "Q" "Q12" ".data.created_at"
+
+  # Q13: comments contract
+  run comments "$Q_ISSUE_ID" --json
+  assert_exit "Q" "Q13" 0
+  assert_json "Q" "Q13" ".ok" "true"
+  assert_json_array_min "Q" "Q13" ".data" 1
+
+  # Q14: log contract
+  run log "$Q_ISSUE_ID" --json
+  assert_exit "Q" "Q14" 0
+  assert_json_exists "Q" "Q14" ".data.issue_id"
+  assert_json_exists "Q" "Q14" ".data.entries"
+  assert_json_exists "Q" "Q14" ".data.total"
+
+  # Q15: stats contract
+  run stats --json
+  assert_exit "Q" "Q15" 0
+  assert_json_exists "Q" "Q15" ".data.total"
+  assert_json_exists "Q" "Q15" ".data.root_issues"
+  assert_json_exists "Q" "Q15" ".data.sub_issues"
+  assert_json_exists "Q" "Q15" ".data.by_status"
+  assert_json_exists "Q" "Q15" ".data.by_priority"
+  assert_json_exists "Q" "Q15" ".data.labels"
+
+  # Q16: board contract
+  run board --json
+  assert_exit "Q" "Q16" 0
+  assert_json_exists "Q" "Q16" ".data.columns"
+  assert_json_all "Q" "Q16_col" ".data.columns" '.status != null and .count != null and .issues != null'
+
+  # Q17: next contract
+  run next --json
+  assert_exit "Q" "Q17" 0
+  assert_json_exists "Q" "Q17" ".data.issues"
+  assert_json_exists "Q" "Q17" ".data.total"
+
+  # Q18: plan contract
+  run plan --json
+  assert_exit "Q" "Q18" 0
+  assert_json_exists "Q" "Q18" ".data.phases"
+  assert_json_exists "Q" "Q18" ".data.total_issues"
+  assert_json_exists "Q" "Q18" ".data.total_phases"
+  assert_json_exists "Q" "Q18" ".data.max_parallelism"
 }

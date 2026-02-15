@@ -2,7 +2,7 @@
 # Section X: Next Command
 
 test_x_next() {
-  printf "Section X: Next Command\n"
+  printf "Section X: Next Command"
 
   # Setup: create issues with various states and relations for next-readiness testing.
   # We need: independent issues, blocked issues, parent/child issues, done issues.

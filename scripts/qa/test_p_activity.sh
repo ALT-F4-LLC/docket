@@ -2,7 +2,7 @@
 # Section P: Activity Log
 
 test_p_activity() {
-  printf "Section P: Activity Log\n"
+  printf "Section P: Activity Log"
 
   run create --json -t "Activity Test"
   assert_exit "P" "P1" 0
@@ -54,4 +54,12 @@ test_p_activity() {
 
   # P14: human output contains "Activity for"
   assert_stdout_contains "P" "P14" "Activity for"
+
+  # P15: log with no args returns error.
+  run log
+  assert_exit_nonzero "P" "P15"
+
+  # P16: log with invalid ID format returns validation error.
+  run log abc --json
+  assert_exit "P" "P16" 3
 }

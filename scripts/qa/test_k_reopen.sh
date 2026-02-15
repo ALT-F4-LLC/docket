@@ -2,7 +2,7 @@
 # Section K: Reopen Command
 
 test_k_reopen() {
-  printf "Section K: Reopen Command\n"
+  printf "Section K: Reopen Command"
 
   run reopen 1 --json
   assert_exit "K" "K1" 0

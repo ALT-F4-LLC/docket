@@ -2,7 +2,7 @@
 # Section S: Error Paths (No DB)
 
 test_s_error_paths() {
-  printf "Section S: Error Paths (No DB)\n"
+  printf "Section S: Error Paths (No DB)"
   local NO_DB_DIR2
   NO_DB_DIR2=$(mktemp -d)
   mkdir -p "$NO_DB_DIR2"
@@ -54,6 +54,46 @@ test_s_error_paths() {
 
   run_env "$NO_DB_DIR2" label delete "bug" --force --json
   assert_exit_nonzero "S" "S16"
+
+  # S17: link without DB
+  run_env "$NO_DB_DIR2" link 1 blocks 2 --json
+  assert_exit_nonzero "S" "S17"
+
+  # S18: unlink without DB
+  run_env "$NO_DB_DIR2" unlink 1 blocks 2 --json
+  assert_exit_nonzero "S" "S18"
+
+  # S19: links without DB
+  run_env "$NO_DB_DIR2" links 1 --json
+  assert_exit_nonzero "S" "S19"
+
+  # S20: next without DB
+  run_env "$NO_DB_DIR2" next --json
+  assert_exit_nonzero "S" "S20"
+
+  # S21: plan without DB
+  run_env "$NO_DB_DIR2" plan --json
+  assert_exit_nonzero "S" "S21"
+
+  # S22: graph without DB
+  run_env "$NO_DB_DIR2" graph 1 --json
+  assert_exit_nonzero "S" "S22"
+
+  # S23: log without DB
+  run_env "$NO_DB_DIR2" log 1 --json
+  assert_exit_nonzero "S" "S23"
+
+  # S24: stats without DB
+  run_env "$NO_DB_DIR2" stats --json
+  assert_exit_nonzero "S" "S24"
+
+  # S25: board without DB
+  run_env "$NO_DB_DIR2" board --json
+  assert_exit_nonzero "S" "S25"
+
+  # S26: export without DB
+  run_env "$NO_DB_DIR2" export
+  assert_exit_nonzero "S" "S26"
 
   rm -rf "$NO_DB_DIR2"
 }

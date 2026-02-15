@@ -2,7 +2,7 @@
 # Section I: Move Command
 
 test_i_move() {
-  printf "Section I: Move Command\n"
+  printf "Section I: Move Command"
 
   run move 1 todo --json
   assert_exit "I" "I1" 0

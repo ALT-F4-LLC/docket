@@ -2,7 +2,7 @@
 # Section Z: Graph Command
 
 test_z_graph() {
-  printf "Section Z: Graph Command\n"
+  printf "Section Z: Graph Command"
 
   # Setup: create a small dependency graph for testing.
   # G_A blocks G_B blocks G_C (linear chain).

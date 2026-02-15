@@ -2,7 +2,7 @@
 # Section D: DOCKET_PATH Override
 
 test_d_path_override() {
-  printf "Section D: DOCKET_PATH Override\n"
+  printf "Section D: DOCKET_PATH Override"
   mkdir -p /tmp/docket-qa-alt
 
   run_env /tmp/docket-qa-alt init

@@ -2,7 +2,7 @@
 # Section U: Comments Command
 
 test_u_comments() {
-  printf "Section U: Comments Command\n"
+  printf "Section U: Comments Command"
 
   # U1: list comments (JSON) — should have comments from Section T
   run comments 1 --json

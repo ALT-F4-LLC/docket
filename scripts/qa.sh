@@ -3,10 +3,11 @@
 # Docket CLI QA Test Suite
 #
 # Usage:
-#   ./scripts/qa.sh [path/to/docket-binary] [section-letter]
+#   ./scripts/qa.sh [--verbose] [path/to/docket-binary] [section-letter]
 #
 # If no binary path is given, builds from source with `go build`.
 # Runs all functional checks and prints a summary report.
+# By default only failures are shown. Pass --verbose to see all results.
 # Optional section letter (A-Z) runs only that section.
 # Note: Sections B-U share a single DB and run sequentially. Later sections
 # depend on state created by earlier ones (e.g., G uses issues from F).
@@ -19,12 +20,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Configuration -----------------------------------------------------------
 
+VERBOSE=false
+if [ "${1:-}" = "--verbose" ]; then
+  VERBOSE=true
+  shift
+fi
+
 DOCKET="${1:-}"
 SECTION="${2:-}"
 QA_DIR=""
 PASS_COUNT=0
 FAIL_COUNT=0
 RESULTS=()
+
+# Millisecond-precision timer (portable — uses perl Time::HiRes).
+_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
+_elapsed() { local e=$(( $(_ms) - $1 )); printf " (%d.%03ds)\n" "$((e / 1000))" "$((e % 1000))"; }
+SUITE_START=$(_ms)
 
 # --- Source helpers and test files -------------------------------------------
 
@@ -61,7 +73,7 @@ fi
 # --- Run sections ------------------------------------------------------------
 
 # Ordered list of sections and their test functions.
-# Sections B-W share a DB and depend on earlier sections' state.
+# Sections B-ZC share a DB and depend on earlier sections' state.
 SECTIONS=(
   A:test_a_no_db
   B:test_b_init
@@ -89,6 +101,9 @@ SECTIONS=(
   X:test_x_next
   Y:test_y_plan
   Z:test_z_graph
+  ZA:test_za_stats
+  ZB:test_zb_board
+  ZC:test_zc_export_import
 )
 
 REACHED_TARGET=false
@@ -100,7 +115,9 @@ for entry in "${SECTIONS[@]}"; do
   # Section A is self-contained and runs before DB setup.
   if [ "$letter" = "A" ]; then
     if [ -z "$SECTION" ] || [ "$SECTION" = "A" ]; then
+      sec_start=$(_ms)
       "$func"
+      _elapsed "$sec_start"
     fi
     if [ "$SECTION" = "A" ]; then
       break
@@ -109,16 +126,19 @@ for entry in "${SECTIONS[@]}"; do
     continue
   fi
 
+  sec_start=$(_ms)
   if [ -z "$SECTION" ]; then
     # No filter — run everything.
     "$func"
   else
     # Run all sections up to and including the target so prerequisites are met.
     "$func"
-    if [ "$letter" = "$SECTION" ]; then
-      REACHED_TARGET=true
-      break
-    fi
+  fi
+  _elapsed "$sec_start"
+
+  if [ -n "$SECTION" ] && [ "$letter" = "$SECTION" ]; then
+    REACHED_TARGET=true
+    break
   fi
 done
 
@@ -129,17 +149,19 @@ fi
 
 # --- Report ------------------------------------------------------------------
 
-printf "\n=== QA Report ===\n\n"
-printf "%-8s | %-8s | %-6s | %s\n" "Section" "Check" "Result" "Details"
-printf "%-8s-+-%-8s-+-%-6s-+-%s\n" "--------" "--------" "------" "-------"
-
-for r in "${RESULTS[@]}"; do
-  IFS='|' read -r sec id res det <<< "$r"
-  printf "%-8s | %-8s | %-6s | %s\n" "$sec" "$id" "$res" "$det"
-done
-
 TOTAL=$((PASS_COUNT + FAIL_COUNT))
-printf "\nQA Result: %d/%d checks passed\n" "$PASS_COUNT" "$TOTAL"
+SUITE_ELAPSED=$(( $(_ms) - SUITE_START ))
+
+if [ "$VERBOSE" = true ]; then
+  printf "\n=== QA Report ===\n\n"
+  printf "%-8s | %-8s | %-6s | %s\n" "Section" "Check" "Result" "Details"
+  printf "%-8s-+-%-8s-+-%-6s-+-%s\n" "--------" "--------" "------" "-------"
+
+  for r in "${RESULTS[@]}"; do
+    IFS='|' read -r sec id res det <<< "$r"
+    printf "%-8s | %-8s | %-6s | %s\n" "$sec" "$id" "$res" "$det"
+  done
+fi
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
   printf "\nFailed checks:\n"
@@ -149,6 +171,12 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
       printf "  %s %s: %s\n" "$sec" "$id" "$det"
     fi
   done
+fi
+
+printf "\nQA Result: %d/%d checks passed in %d.%03ds\n" \
+  "$PASS_COUNT" "$TOTAL" "$((SUITE_ELAPSED / 1000))" "$((SUITE_ELAPSED % 1000))"
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
   exit 1
 fi
 

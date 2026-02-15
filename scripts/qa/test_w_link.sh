@@ -2,7 +2,7 @@
 # Section W: Link Commands (link, unlink, links)
 
 test_w_link() {
-  printf "Section W: Link Commands\n"
+  printf "Section W: Link Commands"
 
   # Setup: create 4 issues for relation tests.
   run create --json -t "Link Source"

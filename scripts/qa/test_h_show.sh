@@ -2,7 +2,7 @@
 # Section H: Show Command
 
 test_h_show() {
-  printf "Section H: Show Command\n"
+  printf "Section H: Show Command"
 
   run show 1 --json
   assert_exit "H" "H1" 0

@@ -2,7 +2,7 @@
 # Section F: Create Command
 
 test_f_create() {
-  printf "Section F: Create Command\n"
+  printf "Section F: Create Command"
 
   run create --json -t "QA Test Issue"
   assert_exit "F" "F1" 0

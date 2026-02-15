@@ -2,7 +2,7 @@
 # Section N: Delete (Simple)
 
 test_n_delete_simple() {
-  printf "Section N: Delete (Simple)\n"
+  printf "Section N: Delete (Simple)"
 
   run create --json -t "Delete Me"
   assert_exit "N" "N1" 0

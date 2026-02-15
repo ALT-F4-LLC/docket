@@ -2,7 +2,7 @@
 # Section V: Label Commands
 
 test_v_label() {
-  printf "Section V: Label Commands\n"
+  printf "Section V: Label Commands"
 
   # Create a dedicated issue for label tests.
   run create --json -t "Label Test Issue"

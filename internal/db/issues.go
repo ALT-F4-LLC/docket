@@ -856,6 +856,45 @@ func CountIssues(db *sql.DB) (int, error) {
 	return count, nil
 }
 
+// CountRootIssues returns the number of issues with no parent.
+func CountRootIssues(db *sql.DB) (int, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issues WHERE parent_id IS NULL`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting root issues: %w", err)
+	}
+	return count, nil
+}
+
+// countByColumn returns a map of value -> count for the given column grouped by that column.
+func countByColumn(db *sql.DB, column string) (map[string]int, error) {
+	rows, err := db.Query(fmt.Sprintf(`SELECT %s, COUNT(*) FROM issues GROUP BY %s`, column, column))
+	if err != nil {
+		return nil, fmt.Errorf("counting by %s: %w", column, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var key string
+		var count int
+		if err := rows.Scan(&key, &count); err != nil {
+			return nil, fmt.Errorf("scanning %s count: %w", column, err)
+		}
+		result[key] = count
+	}
+	return result, rows.Err()
+}
+
+// CountByStatus returns a map of status -> count for all issues.
+func CountByStatus(db *sql.DB) (map[string]int, error) {
+	return countByColumn(db, "status")
+}
+
+// CountByPriority returns a map of priority -> count for all issues.
+func CountByPriority(db *sql.DB) (map[string]int, error) {
+	return countByColumn(db, "priority")
+}
+
 // ClearAllData deletes all data from all tables (issues, comments, labels,
 // issue_labels, issue_relations, activity_log) within a single transaction.
 // The schema and meta table are preserved.
@@ -915,7 +954,7 @@ func HydrateLabels(db *sql.DB, issues []*model.Issue) error {
 		return nil
 	}
 
-	ids := make([]interface{}, len(issues))
+	ids := make([]any, len(issues))
 	issueMap := make(map[int]*model.Issue, len(issues))
 	for i, issue := range issues {
 		ids[i] = issue.ID

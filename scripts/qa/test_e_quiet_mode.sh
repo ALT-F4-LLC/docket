@@ -2,7 +2,7 @@
 # Section E: Quiet Mode
 
 test_e_quiet_mode() {
-  printf "Section E: Quiet Mode\n"
+  printf "Section E: Quiet Mode"
   local QUIET_DIR
   QUIET_DIR=$(mktemp -d)
   mkdir -p "$QUIET_DIR"

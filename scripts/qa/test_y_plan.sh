@@ -2,7 +2,7 @@
 # Section Y: Plan Command
 
 test_y_plan() {
-  printf "Section Y: Plan Command\n"
+  printf "Section Y: Plan Command"
 
   # Setup: create a small dependency chain for plan testing.
   # A (no deps) -> B (blocked by A) -> C (blocked by B)

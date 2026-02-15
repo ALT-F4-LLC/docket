@@ -2,7 +2,7 @@
 # Section C: Config After Init
 
 test_c_config() {
-  printf "Section C: Config After Init\n"
+  printf "Section C: Config After Init"
 
   run config
   assert_exit "C" "C1" 0

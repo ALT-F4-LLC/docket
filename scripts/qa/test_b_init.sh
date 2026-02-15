@@ -2,7 +2,7 @@
 # Section B: Init Lifecycle
 
 test_b_init() {
-  printf "Section B: Init Lifecycle\n"
+  printf "Section B: Init Lifecycle"
 
   run init
   assert_exit "B" "B1" 0

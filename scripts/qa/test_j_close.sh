@@ -2,7 +2,7 @@
 # Section J: Close Command
 
 test_j_close() {
-  printf "Section J: Close Command\n"
+  printf "Section J: Close Command"
 
   run close 1 --json
   assert_exit "J" "J1" 0

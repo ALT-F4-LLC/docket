@@ -2,7 +2,7 @@
 # Section L: Edit Command
 
 test_l_edit() {
-  printf "Section L: Edit Command\n"
+  printf "Section L: Edit Command"
 
   run edit 1 --json -t "Updated Title"
   assert_exit "L" "L1" 0

@@ -2,7 +2,7 @@
 # Section T: Comment Command
 
 test_t_comment() {
-  printf "Section T: Comment Command\n"
+  printf "Section T: Comment Command"
 
   # T1: add comment with -m flag (JSON)
   run comment 1 --json -m "QA inline comment"

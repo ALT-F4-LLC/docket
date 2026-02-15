@@ -2,7 +2,7 @@
 # Section R: Exit Codes
 
 test_r_exit_codes() {
-  printf "Section R: Exit Codes\n"
+  printf "Section R: Exit Codes"
 
   run version
   assert_exit "R" "R1" 0
