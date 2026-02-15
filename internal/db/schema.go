@@ -57,6 +57,18 @@ CREATE TABLE IF NOT EXISTS issue_relations (
 	UNIQUE(source_issue_id, target_issue_id, relation_type)
 );
 
+CREATE TRIGGER IF NOT EXISTS trg_no_inverse_duplicate_relation
+BEFORE INSERT ON issue_relations
+WHEN EXISTS (
+	SELECT 1 FROM issue_relations
+	WHERE relation_type = NEW.relation_type
+	  AND source_issue_id = NEW.target_issue_id
+	  AND target_issue_id = NEW.source_issue_id
+)
+BEGIN
+	SELECT RAISE(ABORT, 'inverse duplicate relation');
+END;
+
 CREATE TABLE IF NOT EXISTS activity_log (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
 	issue_id      INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,

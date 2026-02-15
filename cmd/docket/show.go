@@ -124,8 +124,10 @@ var showCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
 		}
 
-		// Relations not yet implemented in DB layer.
-		relations := []model.Relation{}
+		relations, err := db.GetIssueRelations(conn, id)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+		}
 
 		comments, err := db.ListComments(conn, id)
 		if err != nil {

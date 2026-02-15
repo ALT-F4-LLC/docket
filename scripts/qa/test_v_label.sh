@@ -169,8 +169,8 @@ test_v_label() {
     check "V" "V21_gone" "FAIL" "label 'disposable' still appears after delete"
   fi
 
-  # V22: label add with --color on existing label should fail
-  # "bug" already exists from V1
-  run label add "$LABEL_ISSUE_ID" "bug" --color "#00ff00" --json
+  # V22: label add with conflicting --color on existing label should fail
+  # "critical" already exists with color "#ff0000" from V4
+  run label add "$LABEL_ISSUE_ID" "critical" --color "#00ff00" --json
   assert_exit_nonzero "V" "V22"
 }
