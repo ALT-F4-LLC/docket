@@ -816,6 +816,98 @@ func GetIssueLabels(db *sql.DB, issueID int) ([]string, error) {
 	return labels, rows.Err()
 }
 
+// ListAllIssues returns every issue in the database, including done issues,
+// with no filters, sorting, or pagination. Labels are hydrated on all results.
+func ListAllIssues(db *sql.DB) ([]*model.Issue, error) {
+	rows, err := db.Query(
+		`SELECT id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at
+		 FROM issues ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all issues: %w", err)
+	}
+	defer rows.Close()
+
+	var issues []*model.Issue
+	for rows.Next() {
+		issue, err := scanIssueRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating issue rows: %w", err)
+	}
+
+	if err := HydrateLabels(db, issues); err != nil {
+		return nil, fmt.Errorf("hydrating labels: %w", err)
+	}
+
+	return issues, nil
+}
+
+// CountIssues returns the total number of issues in the database.
+func CountIssues(db *sql.DB) (int, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting issues: %w", err)
+	}
+	return count, nil
+}
+
+// ClearAllData deletes all data from all tables (issues, comments, labels,
+// issue_labels, issue_relations, activity_log) within a single transaction.
+// The schema and meta table are preserved.
+func ClearAllData(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	tables := []string{
+		"activity_log",
+		"issue_relations",
+		"issue_labels",
+		"comments",
+		"issues",
+		"labels",
+	}
+	for _, table := range tables {
+		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
+			return fmt.Errorf("clearing %s: %w", table, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// InsertIssueWithID inserts an issue with a specific ID (not auto-increment),
+// skipping if the ID already exists. Returns true if the row was inserted.
+// Must be called within an existing transaction.
+func InsertIssueWithID(tx *sql.Tx, issue *model.Issue) (bool, error) {
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO issues (id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		issue.ID,
+		nilIfZeroPtr(issue.ParentID),
+		issue.Title,
+		issue.Description,
+		string(issue.Status),
+		string(issue.Priority),
+		string(issue.Kind),
+		issue.Assignee,
+		issue.CreatedAt.UTC().Format(time.RFC3339),
+		issue.UpdatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting issue with id %d: %w", issue.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // HydrateLabels bulk-loads labels for a set of issues, populating each issue's
 // Labels field. This avoids N+1 queries when displaying lists.
 func HydrateLabels(db *sql.DB, issues []*model.Issue) error {

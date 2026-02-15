@@ -241,6 +241,62 @@ func GetAllDirectionalRelations(db *sql.DB) ([]model.Relation, error) {
 	return relations, nil
 }
 
+// GetAllRelations returns every relation in the database, ordered by creation
+// time ascending.
+func GetAllRelations(db *sql.DB) ([]model.Relation, error) {
+	rows, err := db.Query(
+		`SELECT id, source_issue_id, target_issue_id, relation_type, created_at
+		 FROM issue_relations
+		 ORDER BY created_at ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all relations: %w", err)
+	}
+	defer rows.Close()
+
+	var relations []model.Relation
+	for rows.Next() {
+		var r model.Relation
+		var relType string
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.SourceIssueID, &r.TargetIssueID, &relType, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning relation row: %w", err)
+		}
+		r.RelationType = model.RelationType(relType)
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		r.CreatedAt = t
+		relations = append(relations, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating relation rows: %w", err)
+	}
+
+	return relations, nil
+}
+
+// InsertRelationWithID inserts a relation with a specific ID (not auto-increment),
+// skipping if the ID already exists. Returns true if the row was inserted.
+// Must be called within an existing transaction.
+func InsertRelationWithID(tx *sql.Tx, rel *model.Relation) (bool, error) {
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO issue_relations (id, source_issue_id, target_issue_id, relation_type, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		rel.ID,
+		rel.SourceIssueID,
+		rel.TargetIssueID,
+		string(rel.RelationType),
+		rel.CreatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting relation with id %d: %w", rel.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // checkDuplicateTx checks for existing relations that would conflict with a new
 // relation between sourceID and targetID of the given type. For any relation
 // type, both the exact direction and the reverse direction between the same pair

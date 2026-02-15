@@ -73,6 +73,96 @@ func ListAllLabels(db *sql.DB) ([]*model.LabelWithCount, error) {
 	return labels, nil
 }
 
+// ListAllLabelsRaw returns every label as a model.Label object (without issue
+// counts), sorted alphabetically by name.
+func ListAllLabelsRaw(db *sql.DB) ([]*model.Label, error) {
+	rows, err := db.Query(
+		`SELECT id, name, color FROM labels ORDER BY name`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all labels: %w", err)
+	}
+	defer rows.Close()
+
+	var labels []*model.Label
+	for rows.Next() {
+		var l model.Label
+		var color sql.NullString
+		if err := rows.Scan(&l.ID, &l.Name, &color); err != nil {
+			return nil, fmt.Errorf("scanning label: %w", err)
+		}
+		l.Color = color.String
+		labels = append(labels, &l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating label rows: %w", err)
+	}
+
+	return labels, nil
+}
+
+// ListAllIssueLabelMappings returns all (issue_id, label_id) pairs from the
+// issue_labels table.
+func ListAllIssueLabelMappings(db *sql.DB) ([]model.IssueLabelMapping, error) {
+	rows, err := db.Query(
+		`SELECT issue_id, label_id FROM issue_labels ORDER BY issue_id, label_id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying issue-label mappings: %w", err)
+	}
+	defer rows.Close()
+
+	var mappings []model.IssueLabelMapping
+	for rows.Next() {
+		var m model.IssueLabelMapping
+		if err := rows.Scan(&m.IssueID, &m.LabelID); err != nil {
+			return nil, fmt.Errorf("scanning issue-label mapping: %w", err)
+		}
+		mappings = append(mappings, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating issue-label mappings: %w", err)
+	}
+
+	return mappings, nil
+}
+
+// InsertLabelWithID inserts a label with a specific ID (not auto-increment),
+// skipping if the ID already exists. Returns true if the row was inserted.
+// Must be called within an existing transaction.
+func InsertLabelWithID(tx *sql.Tx, label *model.Label) (bool, error) {
+	var colorVal any
+	if label.Color != "" {
+		colorVal = label.Color
+	}
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO labels (id, name, color) VALUES (?, ?, ?)`,
+		label.ID,
+		label.Name,
+		colorVal,
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting label with id %d: %w", label.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// InsertIssueLabelMapping inserts an issue_labels row linking an issue to a label,
+// skipping if the mapping already exists. Returns true if the row was inserted.
+// Must be called within an existing transaction.
+func InsertIssueLabelMapping(tx *sql.Tx, issueID, labelID int) (bool, error) {
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)`,
+		issueID, labelID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting issue-label mapping (issue=%d, label=%d): %w", issueID, labelID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // DeleteLabel removes a label by ID. CASCADE constraints handle cleanup of
 // issue_labels rows. Activity is recorded for each affected issue using the
 // provided name. Returns the list of issue IDs that were attached to the label.

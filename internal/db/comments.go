@@ -107,6 +107,53 @@ func GetComment(db *sql.DB, id int) (*model.Comment, error) {
 	return c, nil
 }
 
+// ListAllComments returns every comment in the database across all issues,
+// ordered by created_at ascending.
+func ListAllComments(db *sql.DB) ([]*model.Comment, error) {
+	rows, err := db.Query(
+		`SELECT id, issue_id, body, author, created_at
+		 FROM comments ORDER BY created_at ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all comments: %w", err)
+	}
+	defer rows.Close()
+
+	var comments []*model.Comment
+	for rows.Next() {
+		c, err := scanCommentFrom(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning comment row: %w", err)
+		}
+		comments = append(comments, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating comment rows: %w", err)
+	}
+
+	return comments, nil
+}
+
+// InsertCommentWithID inserts a comment with a specific ID (not auto-increment),
+// skipping if the ID already exists. Returns true if the row was inserted.
+// Must be called within an existing transaction.
+func InsertCommentWithID(tx *sql.Tx, comment *model.Comment) (bool, error) {
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO comments (id, issue_id, body, author, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		comment.ID,
+		comment.IssueID,
+		comment.Body,
+		comment.Author,
+		comment.CreatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting comment with id %d: %w", comment.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // scanCommentFrom scans a single comment from any scanner (*sql.Row or *sql.Rows).
 func scanCommentFrom(s scanner) (*model.Comment, error) {
 	var c model.Comment
