@@ -43,5 +43,17 @@ test_s_error_paths() {
   run_env "$NO_DB_DIR2" comments 1 --json
   assert_exit_nonzero "S" "S12"
 
+  run_env "$NO_DB_DIR2" label add 1 "bug" --json
+  assert_exit_nonzero "S" "S13"
+
+  run_env "$NO_DB_DIR2" label rm 1 "bug" --json
+  assert_exit_nonzero "S" "S14"
+
+  run_env "$NO_DB_DIR2" label list --json
+  assert_exit_nonzero "S" "S15"
+
+  run_env "$NO_DB_DIR2" label delete "bug" --force --json
+  assert_exit_nonzero "S" "S16"
+
   rm -rf "$NO_DB_DIR2"
 }
