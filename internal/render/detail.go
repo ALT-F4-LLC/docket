@@ -59,10 +59,10 @@ func renderHeader(issue *model.Issue) string {
 	idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	titleStyle := lipgloss.NewStyle().Bold(true)
 	statusStyle := lipgloss.NewStyle().
-		Foreground(colorFromName(issue.Status.Color())).
+		Foreground(ColorFromName(issue.Status.Color())).
 		Bold(true)
 	priorityStyle := lipgloss.NewStyle().
-		Foreground(colorFromName(issue.Priority.Color())).
+		Foreground(ColorFromName(issue.Priority.Color())).
 		Bold(true)
 
 	return fmt.Sprintf("%s  %s\n%s  %s",
@@ -137,8 +137,8 @@ func renderSubIssues(subIssues []*model.Issue) string {
 }
 
 func formatSubIssueNode(issue *model.Issue) string {
-	statusStyle := lipgloss.NewStyle().Foreground(colorFromName(issue.Status.Color()))
-	priorityStyle := lipgloss.NewStyle().Foreground(colorFromName(issue.Priority.Color()))
+	statusStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Status.Color()))
+	priorityStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Priority.Color()))
 
 	return fmt.Sprintf("%s %s %s %s",
 		statusStyle.Render(statusLabel(issue.Status)),

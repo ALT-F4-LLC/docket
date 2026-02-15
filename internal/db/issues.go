@@ -133,6 +133,54 @@ func GetIssue(db *sql.DB, id int) (*model.Issue, error) {
 	return scanIssue(row)
 }
 
+// GetIssuesByIDs retrieves multiple issues by their IDs in a single query.
+// The returned map is keyed by issue ID. IDs that don't exist are silently
+// skipped (no error for missing rows). Labels are hydrated on all returned issues.
+func GetIssuesByIDs(db *sql.DB, ids []int) (map[int]*model.Issue, error) {
+	if len(ids) == 0 {
+		return make(map[int]*model.Issue), nil
+	}
+
+	placeholders := makePlaceholders(len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(
+		`SELECT id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at
+		 FROM issues WHERE id IN (%s)`, placeholders,
+	)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying issues by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	issues := make([]*model.Issue, 0, len(ids))
+	for rows.Next() {
+		issue, err := scanIssueRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating issue rows: %w", err)
+	}
+
+	if err := HydrateLabels(db, issues); err != nil {
+		return nil, fmt.Errorf("hydrating labels: %w", err)
+	}
+
+	result := make(map[int]*model.Issue, len(issues))
+	for _, issue := range issues {
+		result[issue.ID] = issue
+	}
+	return result, nil
+}
+
 // ListIssues retrieves issues matching the given filters. It returns the
 // matching issues, the total count of matching rows (ignoring Limit/Offset),
 // and an error.

@@ -7,7 +7,7 @@
 #
 # If no binary path is given, builds from source with `go build`.
 # Runs all functional checks and prints a summary report.
-# Optional section letter (A-W) runs only that section.
+# Optional section letter (A-Z) runs only that section.
 # Note: Sections B-U share a single DB and run sequentially. Later sections
 # depend on state created by earlier ones (e.g., G uses issues from F).
 # Only section A is fully self-contained. When running a single section,
@@ -86,6 +86,9 @@ SECTIONS=(
   U:test_u_comments
   V:test_v_label
   W:test_w_link
+  X:test_x_next
+  Y:test_y_plan
+  Z:test_z_graph
 )
 
 REACHED_TARGET=false

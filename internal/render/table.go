@@ -16,8 +16,8 @@ import (
 
 const maxTitleWidth = 40
 
-// colorFromName maps model color name strings to lipgloss colors.
-func colorFromName(name string) lipgloss.Color {
+// ColorFromName maps model color name strings to lipgloss colors.
+func ColorFromName(name string) lipgloss.Color {
 	switch name {
 	case "red":
 		return lipgloss.Color("9")
@@ -111,9 +111,9 @@ func RenderTable(issues []*model.Issue, treeMode bool) string {
 			case 0: // ID
 				return s.Foreground(lipgloss.Color("15"))
 			case 1: // Status
-				return s.Foreground(colorFromName(rc.statusColor))
+				return s.Foreground(ColorFromName(rc.statusColor))
 			case 2: // Priority
-				return s.Foreground(colorFromName(rc.priorityColor))
+				return s.Foreground(ColorFromName(rc.priorityColor))
 			case 3: // Type
 				return s
 			case 4: // Title
@@ -210,8 +210,8 @@ func formatTreeNode(issue *model.Issue) string {
 	}
 
 	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
-	statusStyle := lipgloss.NewStyle().Foreground(colorFromName(issue.Status.Color()))
-	priorityStyle := lipgloss.NewStyle().Foreground(colorFromName(issue.Priority.Color()))
+	statusStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Status.Color()))
+	priorityStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Priority.Color()))
 	titleStyle := lipgloss.NewStyle().Bold(true)
 
 	return fmt.Sprintf("%s %s %s %s",
