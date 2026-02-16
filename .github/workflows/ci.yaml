@@ -66,6 +66,10 @@ jobs:
           ARTIFACT_PATH=$(vorpal build --path '${{ matrix.artifact }}')
           echo "ARTIFACT_PATH=$ARTIFACT_PATH" >> $GITHUB_ENV
 
+      - run: |
+          echo "ARCH=$(uname -m | tr '[:upper:]' '[:lower:]' | sed 's/arm64/aarch64/')" >> $GITHUB_ENV
+          echo "OS=$(uname -s | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - uses: actions/upload-artifact@v6
         with:
           name: docket-${{ env.ARCH }}-${{ env.OS }}
