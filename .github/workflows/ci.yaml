@@ -62,4 +62,11 @@ jobs:
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - run: vorpal build '${{ matrix.artifact }}'
+      - run: |
+          ARTIFACT_PATH=$(vorpal build --path '${{ matrix.artifact }}')
+          echo "ARTIFACT_PATH=$ARTIFACT_PATH" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: docket-${{ env.ARCH }}-${{ env.OS }}
+          path: ${{ env.ARTIFACT_PATH }}
