@@ -113,6 +113,14 @@ digest = "c7811ed4fe8c1c5afcecea15929178c33dcef4fa885086df96cb558cd9466f29"
 platform = "aarch64-linux"
 
 [[sources]]
+name = "git"
+path = "https://www.kernel.org/pub/software/scm/git/git-2.52.0.tar.gz"
+includes = []
+excludes = []
+digest = "c7811ed4fe8c1c5afcecea15929178c33dcef4fa885086df96cb558cd9466f29"
+platform = "x86_64-darwin"
+
+[[sources]]
 name = "glibc"
 path = "https://ftpmirror.gnu.org/gnu/glibc/glibc-2.42.tar.gz"
 includes = []
@@ -151,6 +159,14 @@ includes = []
 excludes = []
 digest = "87116daeec496cbc32774c024839ce7a7d0dfced9959fb54527bd55b8890791e"
 platform = "aarch64-linux"
+
+[[sources]]
+name = "go"
+path = "https://go.dev/dl/go1.24.2.darwin-amd64.tar.gz"
+includes = []
+excludes = []
+digest = "b5903639cc049e527796b8c1330cec3be12ef11d15668c08a1732c03f0cf1dcd"
+platform = "x86_64-darwin"
 
 [[sources]]
 name = "grep"
@@ -266,6 +282,14 @@ platform = "aarch64-linux"
 
 [[sources]]
 name = "protoc"
+path = "https://github.com/protocolbuffers/protobuf/releases/download/v25.4/protoc-25.4-osx-x86_64.zip"
+includes = []
+excludes = []
+digest = "759e4b1cbb9b9d6146f0e372530283ac10d04fb35f1d08b026ae893d918e7590"
+platform = "x86_64-darwin"
+
+[[sources]]
+name = "protoc"
 path = "https://github.com/protocolbuffers/protobuf/releases/download/v25.4/protoc-25.4-linux-aarch_64.zip"
 includes = []
 excludes = []
@@ -279,6 +303,14 @@ includes = []
 excludes = []
 digest = "d105abb1c1d2c024f29df884f0592f1307984d63aeb10f0e61ccb94aee2c2feb"
 platform = "aarch64-darwin"
+
+[[sources]]
+name = "protoc-gen-go"
+path = "https://github.com/protocolbuffers/protobuf-go/releases/download/v1.36.3/protoc-gen-go.v1.36.3.darwin.amd64.tar.gz"
+includes = []
+excludes = []
+digest = "2fef5cf3ddb65da0b072b74c03bd870fbd0baf30161386880700cf787e1f3265"
+platform = "x86_64-darwin"
 
 [[sources]]
 name = "protoc-gen-go"
@@ -311,6 +343,14 @@ includes = []
 excludes = []
 digest = "eba0f83ab252cffe2c6209f894c4c8238b2473a403bbdbcb985af25140aac95d"
 platform = "aarch64-linux"
+
+[[sources]]
+name = "protoc-gen-go-grpc"
+path = "https://github.com/grpc/grpc-go/archive/refs/tags/v1.70.0.tar.gz"
+includes = []
+excludes = []
+digest = "eba0f83ab252cffe2c6209f894c4c8238b2473a403bbdbcb985af25140aac95d"
+platform = "x86_64-darwin"
 
 [[sources]]
 name = "python"
