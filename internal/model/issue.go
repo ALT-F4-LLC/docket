@@ -193,6 +193,7 @@ type Issue struct {
 	Kind        IssueKind
 	Assignee    string
 	Labels      []string
+	Files       []string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -208,6 +209,7 @@ type issueJSON struct {
 	Kind        string   `json:"kind"`
 	Assignee    string   `json:"assignee"`
 	Labels      []string `json:"labels"`
+	Files       []string `json:"files"`
 	CreatedAt   string   `json:"created_at"`
 	UpdatedAt   string   `json:"updated_at"`
 }
@@ -219,6 +221,11 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 		labels = []string{}
 	}
 
+	files := i.Files
+	if files == nil {
+		files = []string{}
+	}
+
 	j := issueJSON{
 		ID:          FormatID(i.ID),
 		Title:       i.Title,
@@ -228,6 +235,7 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 		Kind:        string(i.Kind),
 		Assignee:    i.Assignee,
 		Labels:      labels,
+		Files:       files,
 		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -280,6 +288,7 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 
 	i.Assignee = j.Assignee
 	i.Labels = j.Labels
+	i.Files = j.Files
 
 	createdAt, err := time.Parse(time.RFC3339, j.CreatedAt)
 	if err != nil {

@@ -70,11 +70,11 @@ func TestWriterErrorJSON(t *testing.T) {
 	if code != ExitValidation {
 		t.Errorf("exit code = %d, want %d", code, ExitValidation)
 	}
-	if stderr.Len() == 0 {
-		t.Error("expected JSON error on stderr")
+	if stdout.Len() == 0 {
+		t.Error("expected JSON error on stdout")
 	}
 	var env errorEnvelope
-	if err := json.Unmarshal(stderr.Bytes(), &env); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if env.OK {

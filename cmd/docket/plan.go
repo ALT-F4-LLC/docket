@@ -54,6 +54,11 @@ var planCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
 		}
 
+		// Hydrate file attachments so the planner can detect file collisions.
+		if err := db.HydrateFiles(conn, issues); err != nil {
+			return cmdErr(fmt.Errorf("hydrating files: %w", err), output.ErrGeneral)
+		}
+
 		// Fetch all directional relations.
 		relations, err := db.GetAllDirectionalRelations(conn)
 		if err != nil {

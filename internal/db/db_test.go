@@ -63,7 +63,7 @@ func TestInitializeCreatesAllTables(t *testing.T) {
 
 	tables := []string{
 		"meta", "issues", "comments", "labels",
-		"issue_labels", "issue_relations", "activity_log",
+		"issue_labels", "issue_relations", "activity_log", "issue_files",
 	}
 
 	for _, table := range tables {
@@ -88,8 +88,8 @@ func TestInitializeSetsSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion failed: %v", err)
 	}
-	if v != 1 {
-		t.Errorf("schema_version = %d, want 1", v)
+	if v != 2 {
+		t.Errorf("schema_version = %d, want 2", v)
 	}
 }
 
@@ -107,8 +107,8 @@ func TestInitializeIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion failed: %v", err)
 	}
-	if v != 1 {
-		t.Errorf("schema_version = %d after double init, want 1", v)
+	if v != 2 {
+		t.Errorf("schema_version = %d after double init, want 2", v)
 	}
 }
 
@@ -181,7 +181,7 @@ func TestMigrateNoOpAtLatestVersion(t *testing.T) {
 		t.Fatalf("Initialize failed: %v", err)
 	}
 
-	// Should be a no-op at version 1.
+	// Should be a no-op at version 2.
 	if err := Migrate(db); err != nil {
 		t.Fatalf("Migrate failed: %v", err)
 	}
@@ -190,8 +190,127 @@ func TestMigrateNoOpAtLatestVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion failed: %v", err)
 	}
-	if v != 1 {
-		t.Errorf("schema_version = %d after Migrate, want 1", v)
+	if v != 2 {
+		t.Errorf("schema_version = %d after Migrate, want 2", v)
+	}
+}
+
+func TestMigrateFromV1ToV2(t *testing.T) {
+	db := mustOpen(t)
+
+	// Manually create a v1 schema (everything except issue_files).
+	v1DDL := `
+CREATE TABLE IF NOT EXISTS meta (
+	key   TEXT PRIMARY KEY,
+	value TEXT
+);
+CREATE TABLE IF NOT EXISTS issues (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	parent_id   INTEGER REFERENCES issues(id) ON DELETE SET NULL,
+	title       TEXT NOT NULL,
+	description TEXT,
+	status      TEXT NOT NULL DEFAULT 'backlog',
+	priority    TEXT NOT NULL DEFAULT 'none',
+	kind        TEXT NOT NULL DEFAULT 'task',
+	assignee    TEXT,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS comments (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	issue_id   INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	body       TEXT NOT NULL,
+	author     TEXT,
+	created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS labels (
+	id    INTEGER PRIMARY KEY AUTOINCREMENT,
+	name  TEXT NOT NULL UNIQUE,
+	color TEXT
+);
+CREATE TABLE IF NOT EXISTS issue_labels (
+	issue_id INTEGER REFERENCES issues(id) ON DELETE CASCADE,
+	label_id INTEGER REFERENCES labels(id) ON DELETE CASCADE,
+	PRIMARY KEY (issue_id, label_id)
+);
+CREATE TABLE IF NOT EXISTS issue_relations (
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
+	source_issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	target_issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	relation_type   TEXT NOT NULL,
+	created_at      TEXT NOT NULL,
+	UNIQUE(source_issue_id, target_issue_id, relation_type)
+);
+CREATE TABLE IF NOT EXISTS activity_log (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	issue_id      INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	field_changed TEXT NOT NULL,
+	old_value     TEXT,
+	new_value     TEXT,
+	changed_by    TEXT,
+	created_at    TEXT NOT NULL
+);
+`
+	if _, err := db.Exec(v1DDL); err != nil {
+		t.Fatalf("creating v1 schema: %v", err)
+	}
+
+	// Set schema version to 1.
+	if _, err := db.Exec(`INSERT INTO meta (key, value) VALUES ('schema_version', '1')`); err != nil {
+		t.Fatalf("setting schema version: %v", err)
+	}
+
+	// Verify issue_files does NOT exist before migration.
+	var name string
+	err := db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='issue_files'",
+	).Scan(&name)
+	if err == nil {
+		t.Fatal("issue_files table should not exist before migration")
+	}
+
+	// Run migration.
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// Verify schema version is now 2.
+	v, err := SchemaVersion(db)
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if v != 2 {
+		t.Errorf("schema_version = %d after migration, want 2", v)
+	}
+
+	// Verify issue_files table exists.
+	err = db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='issue_files'",
+	).Scan(&name)
+	if err != nil {
+		t.Errorf("issue_files table should exist after migration: %v", err)
+	}
+
+	// Verify the table is functional by inserting data.
+	now := "2024-01-01T00:00:00Z"
+	if _, err := db.Exec(
+		"INSERT INTO issues (title, status, priority, kind, created_at, updated_at) VALUES ('test', 'backlog', 'none', 'task', ?, ?)",
+		now, now,
+	); err != nil {
+		t.Fatalf("inserting issue: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO issue_files (issue_id, file_path) VALUES (1, 'main.go')",
+	); err != nil {
+		t.Fatalf("inserting file mapping after migration: %v", err)
+	}
+
+	var fp string
+	if err := db.QueryRow("SELECT file_path FROM issue_files WHERE issue_id = 1").Scan(&fp); err != nil {
+		t.Fatalf("querying file mapping: %v", err)
+	}
+	if fp != "main.go" {
+		t.Errorf("file_path = %q, want %q", fp, "main.go")
 	}
 }
 

@@ -27,6 +27,7 @@ var createCmd = &cobra.Command{
 		priority, _ := cmd.Flags().GetString("priority")
 		kind, _ := cmd.Flags().GetString("type")
 		labelFlag, _ := cmd.Flags().GetStringSlice("label")
+		fileFlag, _ := cmd.Flags().GetStringSlice("file")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		parent, _ := cmd.Flags().GetString("parent")
 		jsonMode, _ := cmd.Flags().GetBool("json")
@@ -42,6 +43,7 @@ var createCmd = &cobra.Command{
 		// ensures the select widgets pre-select the matching default.
 		if !jsonMode && title == "" {
 			var labelStr string
+			var fileStr string
 			form := huh.NewForm(
 				huh.NewGroup(
 					huh.NewInput().
@@ -92,6 +94,9 @@ var createCmd = &cobra.Command{
 					huh.NewInput().
 						Title("Labels (comma-separated)").
 						Value(&labelStr),
+					huh.NewInput().
+						Title("Files (comma-separated)").
+						Value(&fileStr),
 				),
 			)
 
@@ -108,6 +113,15 @@ var createCmd = &cobra.Command{
 					l = strings.TrimSpace(l)
 					if l != "" {
 						labelFlag = append(labelFlag, l)
+					}
+				}
+			}
+
+			if fileStr != "" {
+				for _, f := range strings.Split(fileStr, ",") {
+					f = strings.TrimSpace(f)
+					if f != "" {
+						fileFlag = append(fileFlag, f)
 					}
 				}
 			}
@@ -161,7 +175,7 @@ var createCmd = &cobra.Command{
 			Assignee:    assignee,
 		}
 
-		id, err := db.CreateIssue(conn, &issue, labelFlag)
+		id, err := db.CreateIssue(conn, &issue, labelFlag, fileFlag)
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
 		}
@@ -185,6 +199,7 @@ func init() {
 	createCmd.Flags().StringP("priority", "p", "none", "Issue priority")
 	createCmd.Flags().StringP("type", "T", "task", "Issue type")
 	createCmd.Flags().StringSliceP("label", "l", nil, "Issue labels (repeatable)")
+	createCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable)")
 	createCmd.Flags().StringP("assignee", "a", "", "Issue assignee")
 	createCmd.Flags().String("parent", "", "Parent issue ID")
 	rootCmd.AddCommand(createCmd)

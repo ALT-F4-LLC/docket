@@ -110,6 +110,8 @@ func formatActivityLog(issueID string, activity []model.Activity) string {
 			rows[i].field = fmt.Sprintf("%-14s %s -> %s", a.FieldChanged, a.OldValue, a.NewValue)
 		case a.NewValue != "":
 			rows[i].field = fmt.Sprintf("%-14s %q", a.FieldChanged, a.NewValue)
+		case a.OldValue != "":
+			rows[i].field = fmt.Sprintf("%-14s removed %q", a.FieldChanged, a.OldValue)
 		default:
 			rows[i].field = a.FieldChanged
 		}

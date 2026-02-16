@@ -36,6 +36,7 @@ var editCmd = &cobra.Command{
 		}
 
 		updates := make(map[string]interface{})
+		filesChanged := false
 
 		if cmd.Flags().Changed("title") {
 			title, _ := cmd.Flags().GetString("title")
@@ -84,6 +85,14 @@ var editCmd = &cobra.Command{
 			updates["assignee"] = assignee
 		}
 
+		if cmd.Flags().Changed("file") {
+			fileFlag, _ := cmd.Flags().GetStringSlice("file")
+			if err := db.SetIssueFiles(conn, id, fileFlag, config.DefaultAuthor()); err != nil {
+				return cmdErr(fmt.Errorf("setting files: %w", err), output.ErrGeneral)
+			}
+			filesChanged = true
+		}
+
 		if cmd.Flags().Changed("parent") {
 			parent, _ := cmd.Flags().GetString("parent")
 			if strings.EqualFold(parent, "0") || strings.EqualFold(parent, "none") {
@@ -113,7 +122,7 @@ var editCmd = &cobra.Command{
 			}
 		}
 
-		if len(updates) == 0 {
+		if len(updates) == 0 && !filesChanged {
 			if w.JSONMode {
 				issue, err := db.GetIssue(conn, id)
 				if err != nil {
@@ -126,11 +135,13 @@ var editCmd = &cobra.Command{
 			return nil
 		}
 
-		if err := db.UpdateIssue(conn, id, updates, config.DefaultAuthor()); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
+		if len(updates) > 0 {
+			if err := db.UpdateIssue(conn, id, updates, config.DefaultAuthor()); err != nil {
+				if errors.Is(err, db.ErrNotFound) {
+					return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
+				}
+				return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
 			}
-			return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
 		}
 
 		issue, err := db.GetIssue(conn, id)
@@ -151,6 +162,7 @@ func init() {
 	editCmd.Flags().StringP("priority", "p", "", "Issue priority")
 	editCmd.Flags().StringP("type", "T", "", "Issue type")
 	editCmd.Flags().StringP("assignee", "a", "", "Issue assignee")
+	editCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable, replaces existing)")
 	editCmd.Flags().String("parent", "", "Parent issue ID (use \"0\" or \"none\" to make root)")
 	rootCmd.AddCommand(editCmd)
 }

@@ -6,6 +6,12 @@ type IssueLabelMapping struct {
 	LabelID int `json:"label_id"`
 }
 
+// IssueFileMapping represents a row in the issue_files join table.
+type IssueFileMapping struct {
+	IssueID  int    `json:"issue_id"`
+	FilePath string `json:"file_path"`
+}
+
 // ExportData is the top-level structure for a full database export.
 type ExportData struct {
 	Version            int                `json:"version"`
@@ -15,4 +21,5 @@ type ExportData struct {
 	Relations          []Relation         `json:"relations"`
 	Labels             []*Label           `json:"labels"`
 	IssueLabelMappings []IssueLabelMapping `json:"issue_label_mappings"`
+	IssueFileMappings  []IssueFileMapping  `json:"issue_file_mappings"`
 }

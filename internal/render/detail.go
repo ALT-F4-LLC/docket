@@ -27,6 +27,11 @@ func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []mode
 	// Metadata
 	sections = append(sections, renderMetadata(issue))
 
+	// Files
+	if len(issue.Files) > 0 {
+		sections = append(sections, renderFiles(issue.Files))
+	}
+
 	// Description
 	if issue.Description != "" {
 		sections = append(sections, renderDescription(issue.Description))
@@ -96,6 +101,18 @@ func renderMetadata(issue *model.Issue) string {
 	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Updated:"), humanize.Time(issue.UpdatedAt)))
 
 	return strings.Join(lines, "\n")
+}
+
+func renderFiles(files []string) string {
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	header := sectionStyle.Render("Files")
+
+	var lines []string
+	for _, f := range files {
+		lines = append(lines, "  "+f)
+	}
+
+	return header + "\n" + strings.Join(lines, "\n")
 }
 
 func renderDescription(description string) string {
@@ -216,11 +233,19 @@ func renderActivity(activity []model.Activity) string {
 			if actor == "" {
 				actor = "system"
 			}
-			line = fmt.Sprintf("  %s changed %s: %s -> %s  %s",
+			var detail string
+			switch {
+			case a.OldValue != "" && a.NewValue != "":
+				detail = fmt.Sprintf("%s -> %s", a.OldValue, a.NewValue)
+			case a.NewValue != "":
+				detail = fmt.Sprintf("added %s", a.NewValue)
+			case a.OldValue != "":
+				detail = fmt.Sprintf("removed %s", a.OldValue)
+			}
+			line = fmt.Sprintf("  %s changed %s: %s  %s",
 				actor,
 				fieldStyle.Render(a.FieldChanged),
-				a.OldValue,
-				a.NewValue,
+				detail,
 				timeStyle.Render(humanize.Time(a.CreatedAt)),
 			)
 		}
@@ -252,6 +277,14 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	}
 	fmt.Fprintf(&b, "Created: %s\n", humanize.Time(issue.CreatedAt))
 	fmt.Fprintf(&b, "Updated: %s\n", humanize.Time(issue.UpdatedAt))
+
+	// Files
+	if len(issue.Files) > 0 {
+		b.WriteString("\nFiles\n")
+		for _, f := range issue.Files {
+			fmt.Fprintf(&b, "  %s\n", f)
+		}
+	}
 
 	// Description
 	if issue.Description != "" {
@@ -308,8 +341,17 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 				if actor == "" {
 					actor = "system"
 				}
-				fmt.Fprintf(&b, "  %s changed %s: %s -> %s  %s\n",
-					actor, a.FieldChanged, a.OldValue, a.NewValue, humanize.Time(a.CreatedAt))
+				var detail string
+				switch {
+				case a.OldValue != "" && a.NewValue != "":
+					detail = fmt.Sprintf("%s -> %s", a.OldValue, a.NewValue)
+				case a.NewValue != "":
+					detail = fmt.Sprintf("added %s", a.NewValue)
+				case a.OldValue != "":
+					detail = fmt.Sprintf("removed %s", a.OldValue)
+				}
+				fmt.Fprintf(&b, "  %s changed %s: %s  %s\n",
+					actor, a.FieldChanged, detail, humanize.Time(a.CreatedAt))
 			}
 		}
 	}

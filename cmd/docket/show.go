@@ -35,6 +35,7 @@ type showResultJSON struct {
 	Kind        string           `json:"kind"`
 	Assignee    string           `json:"assignee"`
 	Labels      []string         `json:"labels"`
+	Files       []string         `json:"files"`
 	CreatedAt   string           `json:"created_at"`
 	UpdatedAt   string           `json:"updated_at"`
 	SubIssues   []*model.Issue   `json:"sub_issues"`
@@ -49,6 +50,10 @@ func (s showResult) MarshalJSON() ([]byte, error) {
 	labels := i.Labels
 	if labels == nil {
 		labels = []string{}
+	}
+	files := i.Files
+	if files == nil {
+		files = []string{}
 	}
 	subIssues := s.SubIssues
 	if subIssues == nil {
@@ -76,6 +81,7 @@ func (s showResult) MarshalJSON() ([]byte, error) {
 		Kind:        string(i.Kind),
 		Assignee:    i.Assignee,
 		Labels:      labels,
+		Files:       files,
 		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
 		SubIssues:   subIssues,
@@ -117,6 +123,12 @@ var showCmd = &cobra.Command{
 		issue.Labels, err = db.GetIssueLabels(conn, id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
+		}
+
+		// Hydrate files.
+		issue.Files, err = db.GetIssueFiles(conn, id)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 		}
 
 		subIssues, err := db.GetSubIssues(conn, id)

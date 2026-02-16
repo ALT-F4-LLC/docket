@@ -68,6 +68,11 @@ var exportCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching label mappings: %w", err), output.ErrGeneral)
 		}
 
+		fileMappings, err := db.ListAllIssueFileMappings(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching file mappings: %w", err), output.ErrGeneral)
+		}
+
 		// Apply filters if provided.
 		if len(statuses) > 0 || len(labels) > 0 {
 			issues = filterIssues(issues, statuses, labels)
@@ -105,6 +110,15 @@ var exportCmd = &cobra.Command{
 			}
 			mappings = filteredMappings
 
+			// Filter file mappings to only those for filtered issues.
+			filteredFileMappings := make([]model.IssueFileMapping, 0, len(fileMappings))
+			for _, m := range fileMappings {
+				if issueIDs[m.IssueID] {
+					filteredFileMappings = append(filteredFileMappings, m)
+				}
+			}
+			fileMappings = filteredFileMappings
+
 			// Filter labels to only those referenced by remaining mappings.
 			usedLabelIDs := make(map[int]bool)
 			for _, m := range mappings {
@@ -128,6 +142,7 @@ var exportCmd = &cobra.Command{
 			Relations:          relations,
 			Labels:             allLabels,
 			IssueLabelMappings: mappings,
+			IssueFileMappings:  fileMappings,
 		}
 
 		// Ensure nil slices become empty arrays in JSON.
@@ -145,6 +160,9 @@ var exportCmd = &cobra.Command{
 		}
 		if data.IssueLabelMappings == nil {
 			data.IssueLabelMappings = []model.IssueLabelMapping{}
+		}
+		if data.IssueFileMappings == nil {
+			data.IssueFileMappings = []model.IssueFileMapping{}
 		}
 
 		// Generate output based on format.
@@ -230,7 +248,7 @@ func renderExportCSV(issues []*model.Issue) (string, error) {
 	var buf strings.Builder
 	cw := csv.NewWriter(&buf)
 
-	header := []string{"id", "parent_id", "title", "description", "status", "priority", "type", "assignee", "labels", "created_at", "updated_at"}
+	header := []string{"id", "parent_id", "title", "description", "status", "priority", "type", "assignee", "labels", "files", "created_at", "updated_at"}
 	if err := cw.Write(header); err != nil {
 		return "", err
 	}
@@ -242,6 +260,8 @@ func renderExportCSV(issues []*model.Issue) (string, error) {
 		}
 
 		labelsStr := strings.Join(issue.Labels, ",")
+		// Use ";" to separate file paths since paths may contain commas.
+		filesStr := strings.Join(issue.Files, ";")
 
 		row := []string{
 			model.FormatID(issue.ID),
@@ -253,6 +273,7 @@ func renderExportCSV(issues []*model.Issue) (string, error) {
 			string(issue.Kind),
 			issue.Assignee,
 			labelsStr,
+			filesStr,
 			issue.CreatedAt.UTC().Format(time.RFC3339),
 			issue.UpdatedAt.UTC().Format(time.RFC3339),
 		}
@@ -335,6 +356,13 @@ func renderExportMarkdown(issues []*model.Issue, comments []*model.Comment) (str
 					escaped[i] = escapeMarkdown(l)
 				}
 				buf.WriteString(fmt.Sprintf("- **Labels:** %s\n", strings.Join(escaped, ", ")))
+			}
+			if len(issue.Files) > 0 {
+				escapedFiles := make([]string, len(issue.Files))
+				for i, f := range issue.Files {
+					escapedFiles[i] = escapeMarkdown(f)
+				}
+				buf.WriteString(fmt.Sprintf("- **Files:** %s\n", strings.Join(escapedFiles, ", ")))
 			}
 			buf.WriteString("\n")
 

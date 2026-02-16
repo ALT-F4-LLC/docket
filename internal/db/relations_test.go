@@ -17,7 +17,7 @@ func mustCreateIssue(t *testing.T, d *sql.DB, title string) int {
 		Status:   model.StatusBacklog,
 		Priority: model.PriorityNone,
 		Kind:     model.IssueKindTask,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("creating issue %q: %v", title, err)
 	}

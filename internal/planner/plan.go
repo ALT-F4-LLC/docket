@@ -84,10 +84,16 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 
 		sortIssues(phaseIssues)
 
-		plan.Phases = append(plan.Phases, Phase{
-			Number: len(plan.Phases) + 1,
-			Issues: phaseIssues,
-		})
+		// Split the phase by file collisions. Issues that touch the same
+		// file(s) are placed in separate sub-phases so no two concurrent
+		// issues modify the same file.
+		subPhases := splitByFileCollision(phaseIssues)
+		for _, sp := range subPhases {
+			plan.Phases = append(plan.Phases, Phase{
+				Number: len(plan.Phases) + 1,
+				Issues: sp,
+			})
+		}
 	}
 
 	// Compute summary stats.
@@ -186,6 +192,54 @@ func sortIssues(issues []*model.Issue) {
 		}
 		return issues[i].ID < issues[j].ID
 	})
+}
+
+// splitByFileCollision takes a sorted slice of issues (one topo-level phase)
+// and splits it into sub-phases so that no two issues in the same sub-phase
+// touch the same file. Issues with no files never cause collisions.
+// The input must already be sorted by sortIssues (priority desc, ID asc).
+func splitByFileCollision(issues []*model.Issue) [][]*model.Issue {
+	if len(issues) == 0 {
+		return nil
+	}
+
+	var result [][]*model.Issue
+	remaining := issues
+
+	for len(remaining) > 0 {
+		usedFiles := make(map[string]struct{})
+		var current, deferred []*model.Issue
+
+		for _, issue := range remaining {
+			if len(issue.Files) == 0 {
+				// No files — never collides, safe in any sub-phase.
+				current = append(current, issue)
+				continue
+			}
+
+			collision := false
+			for _, f := range issue.Files {
+				if _, exists := usedFiles[f]; exists {
+					collision = true
+					break
+				}
+			}
+
+			if collision {
+				deferred = append(deferred, issue)
+			} else {
+				for _, f := range issue.Files {
+					usedFiles[f] = struct{}{}
+				}
+				current = append(current, issue)
+			}
+		}
+
+		result = append(result, current)
+		remaining = deferred
+	}
+
+	return result
 }
 
 // scopeToDescendants returns a new DAG containing only the root node and its

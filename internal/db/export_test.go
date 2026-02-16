@@ -26,7 +26,7 @@ func TestListAllIssues(t *testing.T) {
 			Priority: model.PriorityMedium,
 			Kind:     model.IssueKindTask,
 		}
-		id, err := CreateIssue(db, issue, nil)
+		id, err := CreateIssue(db, issue, nil, nil)
 		if err != nil {
 			t.Fatalf("CreateIssue %d: %v", i, err)
 		}
@@ -65,13 +65,13 @@ func TestListAllComments(t *testing.T) {
 	// Create two issues.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 1: %v", err)
 	}
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusTodo, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 2: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestGetAllRelations(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		id, err := CreateIssue(db, &model.Issue{
 			Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-		}, nil)
+		}, nil, nil)
 		if err != nil {
 			t.Fatalf("CreateIssue %d: %v", i, err)
 		}
@@ -151,7 +151,7 @@ func TestListAllLabelsRaw(t *testing.T) {
 	// Create labels via issues.
 	if _, err := CreateIssue(db, &model.Issue{
 		Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, []string{"bug", "urgent", "frontend"}); err != nil {
+	}, []string{"bug", "urgent", "frontend"}, nil); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
 
@@ -180,14 +180,14 @@ func TestListAllIssueLabelMappings(t *testing.T) {
 	// Create two issues with labels.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, []string{"bug", "urgent"})
+	}, []string{"bug", "urgent"}, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 1: %v", err)
 	}
 
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusTodo, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, []string{"bug"})
+	}, []string{"bug"}, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 2: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestCountIssues(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		if _, err := CreateIssue(db, &model.Issue{
 			Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-		}, nil); err != nil {
+		}, nil, nil); err != nil {
 			t.Fatalf("CreateIssue %d: %v", i, err)
 		}
 	}
@@ -254,13 +254,13 @@ func TestClearAllData(t *testing.T) {
 	// Populate all tables.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, []string{"bug"})
+	}, []string{"bug"}, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 1: %v", err)
 	}
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusTodo, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 2: %v", err)
 	}
@@ -285,6 +285,7 @@ func TestClearAllData(t *testing.T) {
 		"comments":        "SELECT COUNT(*) FROM comments",
 		"labels":          "SELECT COUNT(*) FROM labels",
 		"issue_labels":    "SELECT COUNT(*) FROM issue_labels",
+		"issue_files":     "SELECT COUNT(*) FROM issue_files",
 		"issue_relations": "SELECT COUNT(*) FROM issue_relations",
 		"activity_log":    "SELECT COUNT(*) FROM activity_log",
 	}
@@ -354,7 +355,7 @@ func TestInsertCommentWithID(t *testing.T) {
 	// Create an issue first (FK dependency).
 	issueID, err := CreateIssue(db, &model.Issue{
 		Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
@@ -401,13 +402,13 @@ func TestInsertRelationWithID(t *testing.T) {
 	// Create two issues.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 1: %v", err)
 	}
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue 2: %v", err)
 	}
@@ -548,7 +549,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Priority:    model.PriorityHigh,
 		Kind:        model.IssueKindEpic,
 		Assignee:    "alice",
-	}, []string{"epic", "v1"})
+	}, []string{"epic", "v1"}, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue parent: %v", err)
 	}
@@ -559,7 +560,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Status:   model.StatusTodo,
 		Priority: model.PriorityMedium,
 		Kind:     model.IssueKindTask,
-	}, []string{"backend"})
+	}, []string{"backend"}, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue child1: %v", err)
 	}
@@ -573,7 +574,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Status:   model.StatusDone,
 		Priority: model.PriorityLow,
 		Kind:     model.IssueKindBug,
-	}, []string{"frontend"})
+	}, []string{"frontend"}, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue child2: %v", err)
 	}
@@ -587,7 +588,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Status:   model.StatusBacklog,
 		Priority: model.PriorityNone,
 		Kind:     model.IssueKindFeature,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue standalone: %v", err)
 	}
@@ -664,7 +665,7 @@ func TestImportToEmptyDB(t *testing.T) {
 	// Populate source.
 	if _, err := CreateIssue(srcDB, &model.Issue{
 		Title: "test issue", Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask,
-	}, []string{"tag1"}); err != nil {
+	}, []string{"tag1"}, nil); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
 
@@ -800,7 +801,7 @@ func TestImportReplaceClears(t *testing.T) {
 	// Pre-populate with data that should be replaced.
 	if _, err := CreateIssue(db, &model.Issue{
 		Title: "old issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, []string{"old-label"}); err != nil {
+	}, []string{"old-label"}, nil); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
 
@@ -883,6 +884,10 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 	if err != nil {
 		t.Fatalf("ListAllIssueLabelMappings: %v", err)
 	}
+	fileMappings, err := ListAllIssueFileMappings(db)
+	if err != nil {
+		t.Fatalf("ListAllIssueFileMappings: %v", err)
+	}
 
 	// Ensure nil slices become empty for JSON consistency.
 	if issues == nil {
@@ -900,6 +905,9 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 	if mappings == nil {
 		mappings = []model.IssueLabelMapping{}
 	}
+	if fileMappings == nil {
+		fileMappings = []model.IssueFileMapping{}
+	}
 
 	return &model.ExportData{
 		Version:            1,
@@ -909,6 +917,7 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 		Relations:          relations,
 		Labels:             labels,
 		IssueLabelMappings: mappings,
+		IssueFileMappings:  fileMappings,
 	}
 }
 
@@ -957,14 +966,21 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 		}
 	}
 
-	// 4. Comments.
+	// 4. Issue-file mappings.
+	for _, m := range data.IssueFileMappings {
+		if _, err := InsertIssueFileMapping(tx, m.IssueID, m.FilePath); err != nil {
+			t.Fatalf("InsertIssueFileMapping (issue=%d, file=%q): %v", m.IssueID, m.FilePath, err)
+		}
+	}
+
+	// 5. Comments.
 	for _, comment := range data.Comments {
 		if _, err := InsertCommentWithID(tx,comment); err != nil {
 			t.Fatalf("InsertCommentWithID %d: %v", comment.ID, err)
 		}
 	}
 
-	// 5. Relations.
+	// 6. Relations.
 	for i := range data.Relations {
 		if _, err := InsertRelationWithID(tx,&data.Relations[i]); err != nil {
 			t.Fatalf("InsertRelationWithID %d: %v", data.Relations[i].ID, err)

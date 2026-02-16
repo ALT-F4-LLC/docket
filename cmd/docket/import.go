@@ -221,7 +221,20 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 4. Comments.
+	// 4. Issue-file mappings.
+	for _, m := range export.IssueFileMappings {
+		inserted, err := db.InsertIssueFileMapping(tx, m.IssueID, m.FilePath)
+		if err != nil {
+			return nil, fmt.Errorf("inserting issue-file mapping (issue=%d, file=%q): %w", m.IssueID, m.FilePath, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 5. Comments.
 	for _, comment := range export.Comments {
 		inserted, err := db.InsertCommentWithID(tx, comment)
 		if err != nil {
@@ -234,7 +247,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 5. Relations.
+	// 6. Relations.
 	for _, rel := range export.Relations {
 		inserted, err := db.InsertRelationWithID(tx, &rel)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -66,7 +67,8 @@ var validUpdateFields = map[string]bool{
 
 // CreateIssue inserts a new issue and returns its ID. Labels are created
 // (find-or-create) and linked to the issue within the same transaction.
-func CreateIssue(db *sql.DB, issue *model.Issue, labels []string) (int, error) {
+// Files are attached to the issue if provided.
+func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string) (int, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	tx, err := db.Begin()
@@ -112,9 +114,28 @@ func CreateIssue(db *sql.DB, issue *model.Issue, labels []string) (int, error) {
 		}
 	}
 
+	// Attach files.
+	for _, fp := range files {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO issue_files (issue_id, file_path) VALUES (?, ?)`,
+			id, fp,
+		); err != nil {
+			return 0, fmt.Errorf("attaching file %q: %w", fp, err)
+		}
+	}
+
 	// Record creation activity.
 	if err := RecordActivity(tx, id, "created", "", "", ""); err != nil {
 		return 0, err
+	}
+
+	// Record file attachment activity if files were provided at creation.
+	if len(files) > 0 {
+		sorted := slices.Clone(files)
+		sort.Strings(sorted)
+		if err := RecordActivity(tx, id, "files", "", strings.Join(sorted, ", "), ""); err != nil {
+			return 0, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -172,6 +193,10 @@ func GetIssuesByIDs(db *sql.DB, ids []int) (map[int]*model.Issue, error) {
 
 	if err := HydrateLabels(db, issues); err != nil {
 		return nil, fmt.Errorf("hydrating labels: %w", err)
+	}
+
+	if err := HydrateFiles(db, issues); err != nil {
+		return nil, fmt.Errorf("hydrating files: %w", err)
 	}
 
 	result := make(map[int]*model.Issue, len(issues))
@@ -334,6 +359,10 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 	// Hydrate labels for all returned issues to avoid N+1 queries in callers.
 	if err := HydrateLabels(db, issues); err != nil {
 		return nil, 0, fmt.Errorf("hydrating labels: %w", err)
+	}
+
+	if err := HydrateFiles(db, issues); err != nil {
+		return nil, 0, fmt.Errorf("hydrating files: %w", err)
 	}
 
 	return issues, totalCount, nil
@@ -844,6 +873,10 @@ func ListAllIssues(db *sql.DB) ([]*model.Issue, error) {
 		return nil, fmt.Errorf("hydrating labels: %w", err)
 	}
 
+	if err := HydrateFiles(db, issues); err != nil {
+		return nil, fmt.Errorf("hydrating files: %w", err)
+	}
+
 	return issues, nil
 }
 
@@ -908,6 +941,7 @@ func ClearAllData(db *sql.DB) error {
 	tables := []string{
 		"activity_log",
 		"issue_relations",
+		"issue_files",
 		"issue_labels",
 		"comments",
 		"issues",
