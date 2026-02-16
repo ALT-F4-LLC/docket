@@ -6,29 +6,29 @@ test_y_plan() {
 
   # Setup: create a small dependency chain for plan testing.
   # A (no deps) -> B (blocked by A) -> C (blocked by B)
-  run create --json -t "Plan Phase1" -p high
+  run issue create --json -t "Plan Phase1" -p high
   assert_exit "Y" "Y0_a" 0
   local PLAN_A
   PLAN_A=$(extract_id)
 
-  run create --json -t "Plan Phase2" -p medium
+  run issue create --json -t "Plan Phase2" -p medium
   assert_exit "Y" "Y0_b" 0
   local PLAN_B
   PLAN_B=$(extract_id)
 
-  run create --json -t "Plan Phase3" -p low
+  run issue create --json -t "Plan Phase3" -p low
   assert_exit "Y" "Y0_c" 0
   local PLAN_C
   PLAN_C=$(extract_id)
 
   # A blocks B, B blocks C.
-  run link "$PLAN_A" blocks "$PLAN_B" --json
+  run issue link add "$PLAN_A" blocks "$PLAN_B" --json
   assert_exit "Y" "Y0_link1" 0
-  run link "$PLAN_B" blocks "$PLAN_C" --json
+  run issue link add "$PLAN_B" blocks "$PLAN_C" --json
   assert_exit "Y" "Y0_link2" 0
 
   # Also create an independent issue (should be in Phase 1 alongside A).
-  run create --json -t "Plan Independent" -p critical
+  run issue create --json -t "Plan Independent" -p critical
   assert_exit "Y" "Y0_ind" 0
   local PLAN_IND
   PLAN_IND=$(extract_id)
@@ -104,17 +104,17 @@ test_y_plan() {
   # Y11: Root scoping — scope to a parent issue and its children.
   # --root uses parent-child hierarchy, not dependency edges.
   # Create a parent with two children to test scoping.
-  run create --json -t "Plan Root Parent" -p high
+  run issue create --json -t "Plan Root Parent" -p high
   assert_exit "Y" "Y11_root_create" 0
   local PLAN_ROOT
   PLAN_ROOT=$(extract_id)
 
-  run create --json -t "Plan Root Child1" -p medium --parent "$PLAN_ROOT"
+  run issue create --json -t "Plan Root Child1" -p medium --parent "$PLAN_ROOT"
   assert_exit "Y" "Y11_child1_create" 0
   local PLAN_RC1
   PLAN_RC1=$(extract_id)
 
-  run create --json -t "Plan Root Child2" -p low --parent "$PLAN_ROOT"
+  run issue create --json -t "Plan Root Child2" -p low --parent "$PLAN_ROOT"
   assert_exit "Y" "Y11_child2_create" 0
   local PLAN_RC2
   PLAN_RC2=$(extract_id)
@@ -144,9 +144,9 @@ test_y_plan() {
 
   # Y13: Empty plan (all done issues).
   # Close root-scoped issues and check.
-  run close "$PLAN_RC1" --json
-  run close "$PLAN_RC2" --json
-  run close "$PLAN_ROOT" --json
+  run issue close "$PLAN_RC1" --json
+  run issue close "$PLAN_RC2" --json
+  run issue close "$PLAN_ROOT" --json
   run plan --json --root "$PLAN_ROOT"
   assert_exit "Y" "Y13" 0
   local EMPTY_TOTAL
@@ -158,11 +158,11 @@ test_y_plan() {
   fi
 
   # Reopen for other tests.
-  run reopen "$PLAN_A" --json
-  run reopen "$PLAN_B" --json
-  run reopen "$PLAN_C" --json
-  run reopen "$PLAN_IND" --json
-  run reopen "$PLAN_ROOT" --json
-  run reopen "$PLAN_RC1" --json
-  run reopen "$PLAN_RC2" --json
+  run issue reopen "$PLAN_A" --json
+  run issue reopen "$PLAN_B" --json
+  run issue reopen "$PLAN_C" --json
+  run issue reopen "$PLAN_IND" --json
+  run issue reopen "$PLAN_ROOT" --json
+  run issue reopen "$PLAN_RC1" --json
+  run issue reopen "$PLAN_RC2" --json
 }

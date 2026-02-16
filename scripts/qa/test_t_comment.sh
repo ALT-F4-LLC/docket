@@ -5,7 +5,7 @@ test_t_comment() {
   printf "Section T: Comment Command"
 
   # T1: add comment with -m flag (JSON)
-  run comment 1 --json -m "QA inline comment"
+  run issue comment add 1 --json -m "QA inline comment"
   assert_exit "T" "T1" 0
   assert_json "T" "T1" ".ok" "true"
 
@@ -24,29 +24,29 @@ test_t_comment() {
   fi
 
   # T3: add comment human mode
-  run comment 1 -m "Human mode comment"
+  run issue comment add 1 -m "Human mode comment"
   assert_exit "T" "T3" 0
   assert_stdout_contains "T" "T3" "Comment added to DKT-1"
 
   # T4: JSON mode without -m → validation error (exit 3)
-  run comment 1 --json
+  run issue comment add 1 --json
   assert_exit "T" "T4" 3
 
   # T5: comment via stdin pipe
-  run_stdin "piped comment body" comment 1 --json
+  run_stdin "piped comment body" issue comment add 1 --json
   assert_exit "T" "T5" 0
   assert_json "T" "T5_body" ".data.body" "piped comment body"
 
   # T6: comment on non-existent issue → not found (exit 2)
-  run comment 9999 --json -m "ghost"
+  run issue comment add 9999 --json -m "ghost"
   assert_exit "T" "T6" 2
 
   # T7: comment with no args → error
-  run comment
+  run issue comment add
   assert_exit_nonzero "T" "T7"
 
   # T8: verify activity log records comment_added
-  run show 1 --json
+  run issue show 1 --json
   assert_exit "T" "T8" 0
   local COMMENT_ACTIVITY
   COMMENT_ACTIVITY=$(echo "$CMD_STDOUT" | jq '[.data.activity[] | select(.field_changed == "comment_added")] | length' 2>/dev/null)
@@ -57,7 +57,7 @@ test_t_comment() {
   fi
 
   # T9: DKT-prefix accepted as issue ID
-  run comment DKT-1 --json -m "prefix test"
+  run issue comment add DKT-1 --json -m "prefix test"
   assert_exit "T" "T9" 0
   assert_json "T" "T9" ".data.issue_id" "DKT-1"
 }

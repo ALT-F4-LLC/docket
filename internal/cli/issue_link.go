@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -27,7 +27,12 @@ type unlinkResult struct {
 }
 
 var linkCmd = &cobra.Command{
-	Use:   "link <id> <relation> <target_id>",
+	Use:   "link",
+	Short: "Manage issue relations",
+}
+
+var linkAddCmd = &cobra.Command{
+	Use:   "add <id> <relation> <target_id>",
 	Short: "Create a relation between two issues",
 	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -80,8 +85,8 @@ var linkCmd = &cobra.Command{
 	},
 }
 
-var unlinkCmd = &cobra.Command{
-	Use:   "unlink <id> <relation> <target_id>",
+var linkRemoveCmd = &cobra.Command{
+	Use:   "remove <id> <relation> <target_id>",
 	Short: "Remove a relation between two issues",
 	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -122,8 +127,8 @@ var unlinkCmd = &cobra.Command{
 	},
 }
 
-var linksCmd = &cobra.Command{
-	Use:   "links <id>",
+var linkListCmd = &cobra.Command{
+	Use:   "list <id>",
 	Short: "Show all relations for an issue",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -186,7 +191,8 @@ var linksCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(linkCmd)
-	rootCmd.AddCommand(unlinkCmd)
-	rootCmd.AddCommand(linksCmd)
+	linkCmd.AddCommand(linkAddCmd)
+	linkCmd.AddCommand(linkRemoveCmd)
+	linkCmd.AddCommand(linkListCmd)
+	issueCmd.AddCommand(linkCmd)
 }

@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 1
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 const schemaDDL = `
@@ -136,19 +136,7 @@ func SchemaVersion(db *sql.DB) (int, error) {
 
 // migrations is a list of migration functions keyed by the version they migrate TO.
 // For example, migrations[2] migrates from version 1 to version 2.
-var migrations = map[int]func(tx *sql.Tx) error{
-	2: func(tx *sql.Tx) error {
-		_, err := tx.Exec(`
-CREATE TABLE IF NOT EXISTS issue_files (
-	issue_id  INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-	file_path TEXT NOT NULL,
-	PRIMARY KEY (issue_id, file_path)
-);
-CREATE INDEX IF NOT EXISTS idx_issue_files_file_path ON issue_files(file_path);
-`)
-		return err
-	},
-}
+var migrations = map[int]func(tx *sql.Tx) error{}
 
 // Migrate checks the current schema version and applies any pending migrations
 // sequentially. It is a no-op when already at the latest version.

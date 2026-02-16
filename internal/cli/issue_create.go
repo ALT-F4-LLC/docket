@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -202,5 +202,5 @@ func init() {
 	createCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable)")
 	createCmd.Flags().StringP("assignee", "a", "", "Issue assignee")
 	createCmd.Flags().String("parent", "", "Parent issue ID")
-	rootCmd.AddCommand(createCmd)
+	issueCmd.AddCommand(createCmd)
 }

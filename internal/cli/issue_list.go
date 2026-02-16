@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -112,5 +112,5 @@ func init() {
 	listCmd.Flags().String("sort", "", "Sort by field:direction (e.g. priority:asc)")
 	listCmd.Flags().Int("limit", 50, "Maximum number of results")
 	listCmd.Flags().Bool("all", false, "Include done issues")
-	rootCmd.AddCommand(listCmd)
+	issueCmd.AddCommand(listCmd)
 }

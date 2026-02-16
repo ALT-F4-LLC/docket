@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -342,5 +342,5 @@ func init() {
 	graphCmd.Flags().Int("depth", 0, "Maximum traversal depth (0 = unlimited)")
 	graphCmd.Flags().String("direction", "both", "Traversal direction: up, down, or both")
 	graphCmd.Flags().Bool("mermaid", false, "Output as Mermaid flowchart syntax")
-	rootCmd.AddCommand(graphCmd)
+	issueCmd.AddCommand(graphCmd)
 }

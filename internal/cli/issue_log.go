@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -149,5 +149,5 @@ func formatActivityLog(issueID string, activity []model.Activity) string {
 
 func init() {
 	logCmd.Flags().Int("limit", 20, "Maximum number of entries to show")
-	rootCmd.AddCommand(logCmd)
+	issueCmd.AddCommand(logCmd)
 }

@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -16,7 +16,12 @@ import (
 )
 
 var commentCmd = &cobra.Command{
-	Use:   "comment [id]",
+	Use:   "comment",
+	Short: "Manage comments",
+}
+
+var commentAddCmd = &cobra.Command{
+	Use:   "add [id]",
 	Short: "Add a comment to an issue",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -131,6 +136,7 @@ var commentCmd = &cobra.Command{
 }
 
 func init() {
-	commentCmd.Flags().StringP("message", "m", "", "Comment body")
-	rootCmd.AddCommand(commentCmd)
+	commentAddCmd.Flags().StringP("message", "m", "", "Comment body")
+	commentCmd.AddCommand(commentAddCmd)
+	issueCmd.AddCommand(commentCmd)
 }

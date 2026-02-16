@@ -4,7 +4,7 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "de
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
+LDFLAGS := -X github.com/ALT-F4-LLC/docket/internal/cli.version=$(VERSION) -X github.com/ALT-F4-LLC/docket/internal/cli.commit=$(COMMIT) -X github.com/ALT-F4-LLC/docket/internal/cli.buildDate=$(BUILD_DATE)
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ./bin/docket ./cmd/docket

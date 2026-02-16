@@ -13,13 +13,13 @@ Docket serves two audiences equally: **human developers** who want a fast, beaut
 docket init
 
 # Create your first issue
-docket create -t "My first issue"
+docket issue create -t "My first issue"
 
 # List all open issues
-docket list
+docket issue list
 
 # Show full details for an issue
-docket show DKT-1
+docket issue show DKT-1
 ```
 
 ## Installation
@@ -46,57 +46,74 @@ make install
 --quiet, -q   Suppress non-essential output
 ```
 
-### Core Commands
+### Issue Commands (`docket issue` / `docket i`)
+
+| Command | Description |
+|---------|-------------|
+| `docket issue create` | Create a new issue (interactive or via flags) |
+| `docket issue list` / `docket issue ls` | List issues with filtering and sorting |
+| `docket issue show <id>` | Show full issue detail with sub-issues, relations, comments |
+| `docket issue edit <id>` | Edit issue fields |
+| `docket issue move <id> <status>` | Change issue status |
+| `docket issue close <id>` | Shorthand for `move <id> done` |
+| `docket issue reopen <id>` | Shorthand for `move <id> todo` |
+| `docket issue delete <id>` | Delete an issue (with confirmation prompt) |
+
+### Comments (`docket issue comment`)
+
+| Command | Description |
+|---------|-------------|
+| `docket issue comment add <id>` | Add a comment (`-m` for inline, stdin, or `$EDITOR`) |
+| `docket issue comment list <id>` | List all comments on an issue |
+
+### Labels (`docket issue label`)
+
+| Command | Description |
+|---------|-------------|
+| `docket issue label add <id> <label>...` | Add labels to an issue |
+| `docket issue label rm <id> <label>...` | Remove labels from an issue |
+| `docket issue label list` | List all labels in the database |
+| `docket issue label delete <label>` | Delete a label entirely |
+
+### Relations (`docket issue link`)
+
+| Command | Description |
+|---------|-------------|
+| `docket issue link add <id> <relation> <target_id>` | Create a relation (blocks, depends-on, relates-to, duplicates) |
+| `docket issue link remove <id> <relation> <target_id>` | Remove a relation |
+| `docket issue link list <id>` | Show all relations for an issue |
+
+### Graph (`docket issue graph`)
+
+| Command | Description |
+|---------|-------------|
+| `docket issue graph <id>` | Show the dependency graph for an issue |
+
+### Planning (`docket plan`)
+
+| Command | Description |
+|---------|-------------|
+| `docket plan next` | Show work-ready issues (unblocked, sorted by priority) |
+| `docket plan show` | Compute a phased execution plan from the dependency graph |
+| `docket plan board` | Kanban board view in the terminal |
+
+### Files (`docket issue file`)
+
+| Command | Description |
+|---------|-------------|
+| `docket issue file add <id> <path>...` | Attach files to an issue |
+| `docket issue file rm <id> <path>...` | Remove file attachments from an issue |
+| `docket issue file list <id>` | List file attachments on an issue |
+
+### Top-Level Commands
 
 | Command | Description |
 |---------|-------------|
 | `docket init` | Initialize `.docket/` directory and database |
-| `docket create` | Create a new issue (interactive or via flags) |
-| `docket list` / `docket ls` | List issues with filtering and sorting |
-| `docket show <id>` | Show full issue detail with sub-issues, relations, comments |
-| `docket edit <id>` | Edit issue fields |
-| `docket move <id> <status>` | Change issue status |
-| `docket close <id>` | Shorthand for `move <id> done` |
-| `docket reopen <id>` | Shorthand for `move <id> todo` |
-| `docket delete <id>` | Delete an issue (with confirmation prompt) |
-
-### Comments
-
-| Command | Description |
-|---------|-------------|
-| `docket comment <id>` | Add a comment (`-m` for inline, stdin, or `$EDITOR`) |
-| `docket comments <id>` | List all comments on an issue |
-
-### Labels
-
-| Command | Description |
-|---------|-------------|
-| `docket label add <id> <label>...` | Add labels to an issue |
-| `docket label rm <id> <label>...` | Remove labels from an issue |
-| `docket label list` | List all labels in the database |
-| `docket label delete <label>` | Delete a label entirely |
-
-### Relations
-
-| Command | Description |
-|---------|-------------|
-| `docket link <id> <relation> <target_id>` | Create a relation (blocks, depends-on, relates-to, duplicates) |
-| `docket unlink <id> <relation> <target_id>` | Remove a relation |
-| `docket links <id>` | Show all relations for an issue |
-
-### Planning
-
-| Command | Description |
-|---------|-------------|
-| `docket next` | Show work-ready issues (unblocked, sorted by priority) |
-| `docket plan` | Compute a phased execution plan from the dependency graph |
-| `docket graph <id>` | Show the dependency graph for an issue |
-
-### Board
-
-| Command | Description |
-|---------|-------------|
-| `docket board` | Kanban board view in the terminal |
+| `docket config` | Show current configuration (database path, schema version, etc.) |
+| `docket version` | Print version, commit, and build date |
+| `docket stats` | Show summary statistics for the issue database |
+| `docket issue log` | View issue activity history |
 
 ### Export / Import
 
@@ -104,14 +121,6 @@ make install
 |---------|-------------|
 | `docket export` | Export issues as JSON (default), CSV, or Markdown |
 | `docket import <file>` | Import issues from a JSON export file |
-
-### Meta
-
-| Command | Description |
-|---------|-------------|
-| `docket stats` | Show summary statistics for the issue database |
-| `docket version` | Print version, commit, and build date |
-| `docket config` | Show current configuration (database path, schema version, etc.) |
 
 ## Agent Usage
 
@@ -142,7 +151,7 @@ Error codes: `GENERAL_ERROR` (exit 1), `NOT_FOUND` (exit 2), `VALIDATION_ERROR` 
 ### Example: Create an issue
 
 ```bash
-docket create --json -t "Build auth module" -p high -T feature --parent DKT-3
+docket issue create --json -t "Build auth module" -p high -T feature --parent DKT-3
 ```
 
 ```json
@@ -168,7 +177,7 @@ docket create --json -t "Build auth module" -p high -T feature --parent DKT-3
 ### Example: Get work-ready issues
 
 ```bash
-docket next --json
+docket plan next --json
 ```
 
 ```json
@@ -196,7 +205,7 @@ docket next --json
 ### Example: Compute execution plan
 
 ```bash
-docket plan --json --root DKT-3
+docket plan show --json --root DKT-3
 ```
 
 ```json
@@ -226,7 +235,7 @@ docket plan --json --root DKT-3
 ### Example: List issues with filters
 
 ```bash
-docket list --json -s todo -s in-progress -p high
+docket issue list --json -s todo -s in-progress -p high
 ```
 
 ## Build from Source

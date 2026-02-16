@@ -7,42 +7,42 @@ test_x_next() {
   # Setup: create issues with various states and relations for next-readiness testing.
   # We need: independent issues, blocked issues, parent/child issues, done issues.
 
-  run create --json -t "Next Independent" -p high
+  run issue create --json -t "Next Independent" -p high
   assert_exit "X" "X0_ind" 0
   local NEXT_IND
   NEXT_IND=$(extract_id)
 
-  run create --json -t "Next Blocker" -p critical
+  run issue create --json -t "Next Blocker" -p critical
   assert_exit "X" "X0_blocker" 0
   local NEXT_BLOCKER
   NEXT_BLOCKER=$(extract_id)
 
-  run create --json -t "Next Blocked" -p medium
+  run issue create --json -t "Next Blocked" -p medium
   assert_exit "X" "X0_blocked" 0
   local NEXT_BLOCKED
   NEXT_BLOCKED=$(extract_id)
 
   # Create a blocks relation: BLOCKER blocks BLOCKED.
-  run link "$NEXT_BLOCKER" blocks "$NEXT_BLOCKED" --json
+  run issue link add "$NEXT_BLOCKER" blocks "$NEXT_BLOCKED" --json
   assert_exit "X" "X0_link" 0
 
   # Create a parent with a child (parent should not appear in next since it's not a leaf).
-  run create --json -t "Next Parent" -p high
+  run issue create --json -t "Next Parent" -p high
   assert_exit "X" "X0_parent" 0
   local NEXT_PARENT
   NEXT_PARENT=$(extract_id)
 
-  run create --json -t "Next Child" -p medium --parent "$NEXT_PARENT"
+  run issue create --json -t "Next Child" -p medium --parent "$NEXT_PARENT"
   assert_exit "X" "X0_child" 0
   local NEXT_CHILD
   NEXT_CHILD=$(extract_id)
 
   # Create a done issue (should never appear in next).
-  run create --json -t "Next Done Issue"
+  run issue create --json -t "Next Done Issue"
   assert_exit "X" "X0_done" 0
   local NEXT_DONE
   NEXT_DONE=$(extract_id)
-  run close "$NEXT_DONE" --json
+  run issue close "$NEXT_DONE" --json
   assert_exit "X" "X0_close" 0
 
   # X1: Basic next (JSON) — returns ready issues.
@@ -138,7 +138,7 @@ test_x_next() {
   assert_json_exists "X" "X13_total" ".data.total"
 
   # X14: After closing the blocker, the previously blocked issue becomes ready.
-  run close "$NEXT_BLOCKER" --json
+  run issue close "$NEXT_BLOCKER" --json
   assert_exit "X" "X14_close" 0
   run next --json
   assert_exit "X" "X14" 0

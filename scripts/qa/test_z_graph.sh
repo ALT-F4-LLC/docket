@@ -6,28 +6,28 @@ test_z_graph() {
 
   # Setup: create a small dependency graph for testing.
   # G_A blocks G_B blocks G_C (linear chain).
-  run create --json -t "Graph Root"
+  run issue create --json -t "Graph Root"
   assert_exit "Z" "Z0_a" 0
   local G_A
   G_A=$(extract_id)
 
-  run create --json -t "Graph Middle"
+  run issue create --json -t "Graph Middle"
   assert_exit "Z" "Z0_b" 0
   local G_B
   G_B=$(extract_id)
 
-  run create --json -t "Graph Leaf"
+  run issue create --json -t "Graph Leaf"
   assert_exit "Z" "Z0_c" 0
   local G_C
   G_C=$(extract_id)
 
-  run link "$G_A" blocks "$G_B" --json
+  run issue link add "$G_A" blocks "$G_B" --json
   assert_exit "Z" "Z0_link1" 0
-  run link "$G_B" blocks "$G_C" --json
+  run issue link add "$G_B" blocks "$G_C" --json
   assert_exit "Z" "Z0_link2" 0
 
   # Z1: Basic graph (JSON) — centered on G_B (has both upstream and downstream).
-  run graph "DKT-$G_B" --json
+  run issue graph "DKT-$G_B" --json
   assert_exit "Z" "Z1" 0
   assert_json "Z" "Z1_ok" ".ok" "true"
 
@@ -43,7 +43,7 @@ test_z_graph() {
   assert_json_array_min "Z" "Z4_edges" ".data.edges" 2
 
   # Z5: Direction=down — only shows downstream (B blocks C).
-  run graph "DKT-$G_B" --json --direction down
+  run issue graph "DKT-$G_B" --json --direction down
   assert_exit "Z" "Z5" 0
   # Should NOT include G_A (upstream of B).
   local HAS_A_DOWN
@@ -55,7 +55,7 @@ test_z_graph() {
   fi
 
   # Z6: Direction=up — only shows upstream (A blocks B).
-  run graph "DKT-$G_B" --json --direction up
+  run issue graph "DKT-$G_B" --json --direction up
   assert_exit "Z" "Z6" 0
   # Should NOT include G_C (downstream of B).
   local HAS_C_UP
@@ -67,28 +67,28 @@ test_z_graph() {
   fi
 
   # Z7: Depth limit — depth=1 from B should show A and C but not traverse further.
-  run graph "DKT-$G_B" --json --depth 1
+  run issue graph "DKT-$G_B" --json --depth 1
   assert_exit "Z" "Z7" 0
   assert_json_array_min "Z" "Z7_nodes" ".data.nodes" 2
 
   # Z8: Non-existent issue (exit 2).
-  run graph "DKT-9999" --json
+  run issue graph "DKT-9999" --json
   assert_exit "Z" "Z8" 2
 
   # Z9: Invalid issue ID format (exit 3).
-  run graph "abc" --json
+  run issue graph "abc" --json
   assert_exit "Z" "Z9" 3
 
   # Z10: Invalid direction (exit 3).
-  run graph "DKT-$G_B" --json --direction invalid
+  run issue graph "DKT-$G_B" --json --direction invalid
   assert_exit "Z" "Z10" 3
 
   # Z11: Negative depth (exit 3).
-  run graph "DKT-$G_B" --json --depth -1
+  run issue graph "DKT-$G_B" --json --depth -1
   assert_exit "Z" "Z11" 3
 
   # Z12: Mermaid output contains "graph TD".
-  run graph "DKT-$G_B" --mermaid
+  run issue graph "DKT-$G_B" --mermaid
   assert_exit "Z" "Z12" 0
   assert_stdout_contains "Z" "Z12_header" "graph TD"
 
@@ -96,16 +96,16 @@ test_z_graph() {
   assert_stdout_contains "Z" "Z13_arrow" "] -->"
 
   # Z14: Human mode output (tree rendering).
-  run graph "DKT-$G_B"
+  run issue graph "DKT-$G_B"
   assert_exit "Z" "Z14" 0
   assert_stdout_contains "Z" "Z14_focal" "DKT-$G_B"
 
   # Z15: Graph on isolated issue (no relations) — still works.
-  run create --json -t "Graph Isolated"
+  run issue create --json -t "Graph Isolated"
   assert_exit "Z" "Z15_setup" 0
   local G_ISOLATED
   G_ISOLATED=$(extract_id)
-  run graph "DKT-$G_ISOLATED" --json
+  run issue graph "DKT-$G_ISOLATED" --json
   assert_exit "Z" "Z15" 0
   assert_json "Z" "Z15_ok" ".ok" "true"
   # Only the focal node, no edges.
@@ -119,10 +119,10 @@ test_z_graph() {
   fi
 
   # Z16: DKT- prefix accepted in argument.
-  run graph "DKT-$G_B" --json
+  run issue graph "DKT-$G_B" --json
   assert_exit "Z" "Z16" 0
 
   # Z17: Numeric ID accepted (without prefix).
-  run graph "$G_B" --json
+  run issue graph "$G_B" --json
   assert_exit "Z" "Z17" 0
 }

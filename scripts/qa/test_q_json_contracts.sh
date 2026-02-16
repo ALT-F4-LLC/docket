@@ -23,7 +23,7 @@ test_q_json_contracts() {
   assert_json_exists "Q" "Q3" ".data.db_path"
   assert_json_exists "Q" "Q3" ".data.schema_version"
 
-  run create --json -t "Contract Test"
+  run issue create --json -t "Contract Test"
   assert_exit "Q" "Q4" 0
   assert_json_exists "Q" "Q4" ".data.id"
   assert_json_exists "Q" "Q4" ".data.title"
@@ -35,48 +35,48 @@ test_q_json_contracts() {
   local Q_ISSUE_ID
   Q_ISSUE_ID=$(extract_id)
 
-  run list --json
+  run issue list --json
   assert_exit "Q" "Q5" 0
   assert_json_exists "Q" "Q5" ".data.issues"
   assert_json_exists "Q" "Q5" ".data.total"
 
-  run show "$Q_ISSUE_ID" --json
+  run issue show "$Q_ISSUE_ID" --json
   assert_exit "Q" "Q6" 0
   assert_json_exists "Q" "Q6" ".data.sub_issues"
   assert_json_exists "Q" "Q6" ".data.relations"
   assert_json_exists "Q" "Q6" ".data.comments"
   assert_json_exists "Q" "Q6" ".data.activity"
 
-  run move "$Q_ISSUE_ID" backlog --json
+  run issue move "$Q_ISSUE_ID" backlog --json
   assert_exit "Q" "Q7" 0
   assert_json "Q" "Q7" ".data.status" "backlog"
   assert_json_exists "Q" "Q7" ".data.id"
 
-  run edit "$Q_ISSUE_ID" --json -t "Contract Edit"
+  run issue edit "$Q_ISSUE_ID" --json -t "Contract Edit"
   assert_exit "Q" "Q8" 0
   assert_json "Q" "Q8" ".data.title" "Contract Edit"
   assert_json_exists "Q" "Q8" ".data.id"
 
-  run close "$Q_ISSUE_ID" --json
+  run issue close "$Q_ISSUE_ID" --json
   assert_exit "Q" "Q9" 0
   assert_json "Q" "Q9" ".data.status" "done"
 
-  run reopen "$Q_ISSUE_ID" --json
+  run issue reopen "$Q_ISSUE_ID" --json
   assert_exit "Q" "Q10" 0
   assert_json "Q" "Q10" ".data.status" "backlog"
 
   # Q11: delete contract
   local Q11_PARENT
-  run create --json -t "Q11 Parent"
+  run issue create --json -t "Q11 Parent"
   Q11_PARENT=$(extract_id)
-  run create --json -t "Q11 Child" --parent "$Q11_PARENT"
-  run delete "$Q11_PARENT" --json --force
+  run issue create --json -t "Q11 Child" --parent "$Q11_PARENT"
+  run issue delete "$Q11_PARENT" --json --force
   assert_exit "Q" "Q11" 0
   assert_json "Q" "Q11" ".ok" "true"
   assert_json_exists "Q" "Q11" ".data.id"
 
   # Q12: comment contract
-  run comment "$Q_ISSUE_ID" --json -m "Q12 contract"
+  run issue comment add "$Q_ISSUE_ID" --json -m "Q12 contract"
   assert_exit "Q" "Q12" 0
   assert_json_exists "Q" "Q12" ".data.id"
   assert_json_exists "Q" "Q12" ".data.body"
@@ -84,13 +84,13 @@ test_q_json_contracts() {
   assert_json_exists "Q" "Q12" ".data.created_at"
 
   # Q13: comments contract
-  run comments "$Q_ISSUE_ID" --json
+  run issue comment list "$Q_ISSUE_ID" --json
   assert_exit "Q" "Q13" 0
   assert_json "Q" "Q13" ".ok" "true"
   assert_json_array_min "Q" "Q13" ".data" 1
 
   # Q14: log contract
-  run log "$Q_ISSUE_ID" --json
+  run issue log "$Q_ISSUE_ID" --json
   assert_exit "Q" "Q14" 0
   assert_json_exists "Q" "Q14" ".data.issue_id"
   assert_json_exists "Q" "Q14" ".data.entries"

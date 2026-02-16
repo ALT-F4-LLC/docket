@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -12,12 +12,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var filesCmd = &cobra.Command{
-	Use:   "files",
+var fileCmd = &cobra.Command{
+	Use:   "file",
 	Short: "Manage issue file attachments",
 }
 
-var filesAddCmd = &cobra.Command{
+var fileAddCmd = &cobra.Command{
 	Use:   "add <id> <file-path>...",
 	Short: "Add files to an issue",
 	Args:  cobra.MinimumNArgs(2),
@@ -52,7 +52,7 @@ var filesAddCmd = &cobra.Command{
 	},
 }
 
-var filesRemoveCmd = &cobra.Command{
+var fileRemoveCmd = &cobra.Command{
 	Use:   "remove <id> <file-path>...",
 	Short: "Remove files from an issue",
 	Args:  cobra.MinimumNArgs(2),
@@ -87,7 +87,7 @@ var filesRemoveCmd = &cobra.Command{
 	},
 }
 
-var filesListCmd = &cobra.Command{
+var fileListCmd = &cobra.Command{
 	Use:   "list <id>",
 	Short: "List files attached to an issue",
 	Args:  cobra.ExactArgs(1),
@@ -134,8 +134,8 @@ var filesListCmd = &cobra.Command{
 }
 
 func init() {
-	filesCmd.AddCommand(filesAddCmd)
-	filesCmd.AddCommand(filesRemoveCmd)
-	filesCmd.AddCommand(filesListCmd)
-	rootCmd.AddCommand(filesCmd)
+	fileCmd.AddCommand(fileAddCmd)
+	fileCmd.AddCommand(fileRemoveCmd)
+	fileCmd.AddCommand(fileListCmd)
+	issueCmd.AddCommand(fileCmd)
 }

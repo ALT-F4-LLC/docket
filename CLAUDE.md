@@ -32,7 +32,7 @@ The `--system` flag can target: `aarch64-darwin`, `aarch64-linux`, `x8664-darwin
 
 ### Two Entrypoints
 
-- **`cmd/docket/main.go`** — The actual docket CLI application (the thing being built).
+- **`cmd/docket/main.go`** — Minimal entrypoint that calls `cli.Execute()`. All CLI command definitions live in **`internal/cli/`**.
 - **`cmd/vorpal/main.go`** — The Vorpal build configuration (defines how to build docket and its dev environment). This is Go code that uses the Vorpal SDK to declare artifacts, not a runtime application.
 
 ### Vorpal Build Configuration (`cmd/vorpal/main.go`)

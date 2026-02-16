@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -11,9 +11,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var reopenCmd = &cobra.Command{
-	Use:   "reopen [id]",
-	Short: "Reopen a closed issue",
+var closeCmd = &cobra.Command{
+	Use:   "close [id]",
+	Short: "Close an issue (shorthand for move <id> done)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
@@ -32,17 +32,18 @@ var reopenCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 		}
 
-		if issue.Status != model.StatusDone {
+		if issue.Status == model.StatusDone {
 			if w.JSONMode {
 				w.Success(issue, "")
 			} else {
-				w.Info("Issue %s is not closed", model.FormatID(id))
+				w.Info("Issue %s is already closed", model.FormatID(id))
 			}
 			return nil
 		}
 
-		if err := db.UpdateIssue(conn, id, map[string]interface{}{"status": "backlog"}, config.DefaultAuthor()); err != nil {
-			return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
+		err = db.UpdateIssue(conn, id, map[string]interface{}{"status": "done"}, config.DefaultAuthor())
+		if err != nil {
+			return cmdErr(fmt.Errorf("closing issue: %w", err), output.ErrGeneral)
 		}
 
 		issue, err = db.GetIssue(conn, id)
@@ -50,12 +51,11 @@ var reopenCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(issue, fmt.Sprintf("Reopened %s", model.FormatID(id)))
-
+		w.Success(issue, fmt.Sprintf("Closed %s", model.FormatID(id)))
 		return nil
 	},
 }
 
 func init() {
-	rootCmd.AddCommand(reopenCmd)
+	issueCmd.AddCommand(closeCmd)
 }

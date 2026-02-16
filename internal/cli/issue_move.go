@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -62,5 +62,5 @@ var moveCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(moveCmd)
+	issueCmd.AddCommand(moveCmd)
 }

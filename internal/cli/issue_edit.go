@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -164,5 +164,5 @@ func init() {
 	editCmd.Flags().StringP("assignee", "a", "", "Issue assignee")
 	editCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable, replaces existing)")
 	editCmd.Flags().String("parent", "", "Parent issue ID (use \"0\" or \"none\" to make root)")
-	rootCmd.AddCommand(editCmd)
+	issueCmd.AddCommand(editCmd)
 }

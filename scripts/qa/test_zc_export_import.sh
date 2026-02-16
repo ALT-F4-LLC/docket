@@ -53,7 +53,7 @@ test_zc_export_import() {
   # ZC5: Export CSV format.
   run export -o csv
   assert_exit "ZC" "ZC5" 0
-  assert_stdout_contains "ZC" "ZC5_header" "id,parent_id,title,description,status,priority,type,assignee,labels,created_at,updated_at"
+  assert_stdout_contains "ZC" "ZC5_header" "id,parent_id,title,description,status,priority,type,assignee,labels,files,created_at,updated_at"
 
   # ZC6: Export Markdown format.
   run export -o markdown
@@ -145,7 +145,7 @@ test_zc_export_import() {
   NONEMPTY_DIR=$(mktemp -d)
   run_env "$NONEMPTY_DIR" init --json
   assert_exit "ZC" "ZC12_init" 0
-  run_env "$NONEMPTY_DIR" create --json -t "Blocker issue"
+  run_env "$NONEMPTY_DIR" issue create --json -t "Blocker issue"
   assert_exit "ZC" "ZC12_create" 0
   run_env "$NONEMPTY_DIR" import --json "$IMPORT_FILE"
   assert_exit_nonzero "ZC" "ZC12"
@@ -156,7 +156,7 @@ test_zc_export_import() {
   MERGE_DIR=$(mktemp -d)
   run_env "$MERGE_DIR" init --json
   assert_exit "ZC" "ZC13_init" 0
-  run_env "$MERGE_DIR" create --json -t "Pre-existing issue"
+  run_env "$MERGE_DIR" issue create --json -t "Pre-existing issue"
   assert_exit "ZC" "ZC13_create" 0
   run_env "$MERGE_DIR" import --json --merge "$IMPORT_FILE"
   assert_exit "ZC" "ZC13" 0
@@ -169,7 +169,7 @@ test_zc_export_import() {
   REPLACE_DIR=$(mktemp -d)
   run_env "$REPLACE_DIR" init --json
   assert_exit "ZC" "ZC14_init" 0
-  run_env "$REPLACE_DIR" create --json -t "Will be replaced"
+  run_env "$REPLACE_DIR" issue create --json -t "Will be replaced"
   assert_exit "ZC" "ZC14_create" 0
   run_env "$REPLACE_DIR" import --json --replace "$IMPORT_FILE"
   assert_exit "ZC" "ZC14" 0

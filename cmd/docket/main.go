@@ -1,7 +1,11 @@
 package main
 
-import "os"
+import (
+	"os"
+
+	"github.com/ALT-F4-LLC/docket/internal/cli"
+)
 
 func main() {
-	os.Exit(Execute())
+	os.Exit(cli.Execute())
 }

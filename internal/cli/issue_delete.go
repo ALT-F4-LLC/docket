@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"database/sql"
@@ -130,5 +130,5 @@ func doOrphanDelete(w *output.Writer, conn *sql.DB, id int, subCount int) error 
 func init() {
 	deleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation and cascade-delete all sub-issues")
 	deleteCmd.Flags().Bool("orphan", false, "Remove parent reference from sub-issues (make them root issues)")
-	rootCmd.AddCommand(deleteCmd)
+	issueCmd.AddCommand(deleteCmd)
 }

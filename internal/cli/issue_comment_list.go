@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -13,8 +13,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var commentsCmd = &cobra.Command{
-	Use:   "comments [id]",
+var commentListCmd = &cobra.Command{
+	Use:   "list [id]",
 	Short: "List comments on an issue",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -62,5 +62,5 @@ var commentsCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(commentsCmd)
+	commentCmd.AddCommand(commentListCmd)
 }

@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -226,5 +226,5 @@ func init() {
 	labelCmd.AddCommand(labelRmCmd)
 	labelCmd.AddCommand(labelListCmd)
 	labelCmd.AddCommand(labelDeleteCmd)
-	rootCmd.AddCommand(labelCmd)
+	issueCmd.AddCommand(labelCmd)
 }
