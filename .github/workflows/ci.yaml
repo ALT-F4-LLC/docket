@@ -72,5 +72,59 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: docket-${{ env.ARCH }}-${{ env.OS }}
+          name: docket-dist-${{ env.ARCH }}-${{ env.OS }}
           path: ${{ env.ARTIFACT_PATH }}
+
+  release:
+    # if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
+    needs:
+      - build
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          fail-on-cache-miss: true
+          pattern: docket-dist-*
+
+      - run: ls -alh
+
+      # - uses: softprops/action-gh-release@v2
+      #   with:
+      #     fail_on_unmatched_files: true
+      #     files: |
+      #       docket-dist-aarch64-darwin/docket-aarch64-darwin.tar.gz
+      #       docket-dist-aarch64-linux/docket-aarch64-linux.tar.gz
+      #       docket-dist-x86_64-darwin/docket-x86_64-darwin.tar.gz
+      #       docket-dist-x86_64-linux/docket-x86_64-linux.tar.gz
+      #     name: ${{ github.ref_name }}
+      #     prerelease: true
+      #     tag_name: ${{ github.ref }}
+      #
+      # - run: |
+      #     mkdir -pv dist/aarch64-darwin
+      #     mkdir -pv dist/aarch64-linux
+      #     mkdir -pv dist/x86_64-darwin
+      #     mkdir -pv dist/x86_64-linux
+      #     tar -xzvf docket-dist-aarch64-darwin/docket-aarch64-darwin.tar.gz -C dist/aarch64-darwin
+      #     tar -xzvf docket-dist-aarch64-linux/docket-aarch64-linux.tar.gz -C dist/aarch64-linux
+      #     tar -xzvf docket-dist-x86_64-darwin/docket-x86_64-darwin.tar.gz -C dist/x86_64-darwin
+      #     tar -xzvf docket-dist-x86_64-linux/docket-x86_64-linux.tar.gz -C dist/x86_64-linux
+      #     mv dist/aarch64-darwin/docket dist/aarch64-darwin/docket-aarch64-darwin
+      #     mv dist/aarch64-linux/docket dist/aarch64-linux/docket-aarch64-linux
+      #     mv dist/x86_64-darwin/docket dist/x86_64-darwin/docket-x86_64-darwin
+      #     mv dist/x86_64-linux/docket dist/x86_64-linux/docket-x86_64-linux
+      #
+      # - uses: actions/attest-build-provenance@v3
+      #   with:
+      #     subject-path: |
+      #       dist/aarch64-darwin/docket-aarch64-darwin
+      #       dist/aarch64-linux/docket-aarch64-linux
+      #       dist/x86_64-darwin/docket-x86_64-darwin
+      #       dist/x86_64-linux/docket-x86_64-linux
