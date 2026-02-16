@@ -186,7 +186,7 @@ var createCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching created issue: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(created, fmt.Sprintf("Created %s", model.FormatID(id)))
+		w.Success(created, fmt.Sprintf("Created %s: %s", model.FormatID(id), created.Title))
 
 		return nil
 	},

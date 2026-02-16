@@ -24,14 +24,16 @@ func makeIssue(id int, title string, status model.Status, priority model.Priorit
 
 func TestRenderBoardEmpty(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	want := "No issues on the board.\nCreate one with: docket issue create"
+
 	got := RenderBoard(nil, BoardOptions{})
-	if got != "" {
-		t.Errorf("RenderBoard(nil) = %q, want empty string", got)
+	if got != want {
+		t.Errorf("RenderBoard(nil) = %q, want %q", got, want)
 	}
 
 	got = RenderBoard([]*model.Issue{}, BoardOptions{})
-	if got != "" {
-		t.Errorf("RenderBoard([]) = %q, want empty string", got)
+	if got != want {
+		t.Errorf("RenderBoard([]) = %q, want %q", got, want)
 	}
 }
 
@@ -46,17 +48,17 @@ func TestRenderPlainBoardGroupsByStatus(t *testing.T) {
 
 	got := RenderBoard(issues, BoardOptions{})
 
-	// Should have TODO column with 2 issues
-	if !strings.Contains(got, "=== TODO (2) ===") {
+	// Should have TODO column with 2 issues (status icon before name)
+	if !strings.Contains(got, "TODO (2) ===") {
 		t.Errorf("expected TODO column with 2 issues, got:\n%s", got)
 	}
 	// Should have DONE column with 1 issue
-	if !strings.Contains(got, "=== DONE (1) ===") {
+	if !strings.Contains(got, "DONE (1) ===") {
 		t.Errorf("expected DONE column with 1 issue, got:\n%s", got)
 	}
 	// Should NOT have BACKLOG, IN-PROGRESS, or REVIEW columns (no issues in those)
 	for _, status := range []string{"BACKLOG", "IN-PROGRESS", "REVIEW"} {
-		if strings.Contains(got, "=== "+status) {
+		if strings.Contains(got, status+" (") {
 			t.Errorf("should not have %s column when no issues have that status, got:\n%s", status, got)
 		}
 	}
@@ -76,11 +78,11 @@ func TestRenderPlainBoardColumnOrder(t *testing.T) {
 	got := RenderBoard(issues, BoardOptions{})
 
 	// Verify column order: backlog < todo < in-progress < review < done
-	backlogIdx := strings.Index(got, "=== BACKLOG")
-	todoIdx := strings.Index(got, "=== TODO")
-	inProgressIdx := strings.Index(got, "=== IN-PROGRESS")
-	reviewIdx := strings.Index(got, "=== REVIEW")
-	doneIdx := strings.Index(got, "=== DONE")
+	backlogIdx := strings.Index(got, "BACKLOG (1) ===")
+	todoIdx := strings.Index(got, "TODO (1) ===")
+	inProgressIdx := strings.Index(got, "IN-PROGRESS (1) ===")
+	reviewIdx := strings.Index(got, "REVIEW (1) ===")
+	doneIdx := strings.Index(got, "DONE (1) ===")
 
 	if backlogIdx < 0 || todoIdx < 0 || inProgressIdx < 0 || reviewIdx < 0 || doneIdx < 0 {
 		t.Fatalf("missing column headers in output:\n%s", got)
@@ -175,8 +177,8 @@ func TestRenderPlainBoardOverflow(t *testing.T) {
 
 	got := RenderBoard(issues, BoardOptions{})
 
-	// Should show count of 13
-	if !strings.Contains(got, "=== TODO (13) ===") {
+	// Should show count of 13 (with status icon before name)
+	if !strings.Contains(got, "TODO (13) ===") {
 		t.Errorf("expected TODO (13) header, got:\n%s", got)
 	}
 	// Should show "+3 more" (13 - maxCardsPerColumn=10 = 3 overflow)
@@ -212,13 +214,13 @@ func TestRenderPlainBoardAllIssuesOneStatus(t *testing.T) {
 
 	got := RenderBoard(issues, BoardOptions{})
 
-	// Should only have IN-PROGRESS column
-	if !strings.Contains(got, "=== IN-PROGRESS (2) ===") {
+	// Should only have IN-PROGRESS column (with status icon before name)
+	if !strings.Contains(got, "IN-PROGRESS (2) ===") {
 		t.Errorf("expected IN-PROGRESS column with 2 issues, got:\n%s", got)
 	}
-	// Should not have other columns
+	// Should not have other columns (check for "STATUS (" pattern in headers)
 	for _, status := range []string{"BACKLOG", "TODO", "REVIEW", "DONE"} {
-		if strings.Contains(got, "=== "+status) {
+		if strings.Contains(got, status+" (") {
 			t.Errorf("should not have %s column, got:\n%s", status, got)
 		}
 	}
@@ -405,5 +407,103 @@ func TestRenderPlainBoardCardFormat(t *testing.T) {
 	}
 	if !foundLabel {
 		t.Errorf("expected label 'urgent' in card, got:\n%s", got)
+	}
+}
+
+func TestRenderPlainBoardCardIncludesKindText(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	tests := []struct {
+		kind     model.IssueKind
+		wantText string
+	}{
+		{model.IssueKindBug, "(bug)"},
+		{model.IssueKindFeature, "(feature)"},
+		{model.IssueKindTask, "(task)"},
+		{model.IssueKindEpic, "(epic)"},
+		{model.IssueKindChore, "(chore)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.kind), func(t *testing.T) {
+			issue := makeIssue(1, "Test", model.StatusTodo, model.PriorityMedium)
+			issue.Kind = tt.kind
+			got := RenderBoard([]*model.Issue{issue}, BoardOptions{})
+			if !strings.Contains(got, tt.wantText) {
+				t.Errorf("expected kind text %q in plain-text card, got:\n%s", tt.wantText, got)
+			}
+		})
+	}
+}
+
+func TestRenderPlainBoardColumnHeadersIncludeStatusIcons(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	issues := []*model.Issue{
+		makeIssue(1, "Backlog task", model.StatusBacklog, model.PriorityNone),
+		makeIssue(2, "Todo task", model.StatusTodo, model.PriorityNone),
+		makeIssue(3, "In-progress task", model.StatusInProgress, model.PriorityNone),
+		makeIssue(4, "Review task", model.StatusReview, model.PriorityNone),
+		makeIssue(5, "Done task", model.StatusDone, model.PriorityNone),
+	}
+
+	got := RenderBoard(issues, BoardOptions{})
+
+	// Each column header should include the status icon
+	for _, status := range []model.Status{
+		model.StatusBacklog, model.StatusTodo, model.StatusInProgress,
+		model.StatusReview, model.StatusDone,
+	} {
+		icon := status.Icon()
+		upperName := strings.ToUpper(string(status))
+		expected := icon + " " + upperName
+		if !strings.Contains(got, expected) {
+			t.Errorf("expected column header to include status icon %q in %q, got:\n%s", icon, expected, got)
+		}
+	}
+}
+
+func TestEmptyStatePlainNoHint(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	got := EmptyState("No items.", "", false)
+	if got != "No items." {
+		t.Errorf("EmptyState with empty hint = %q, want %q", got, "No items.")
+	}
+}
+
+func TestEmptyStatePlainWithHint(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	got := EmptyState("No items.", "Try adding one.", false)
+	want := "No items.\nTry adding one."
+	if got != want {
+		t.Errorf("EmptyState with hint = %q, want %q", got, want)
+	}
+}
+
+func TestEmptyStatePlainQuietSuppressesHint(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	got := EmptyState("No items.", "Try adding one.", true)
+	if got != "No items." {
+		t.Errorf("EmptyState quiet mode = %q, want %q", got, "No items.")
+	}
+}
+
+func TestRenderPlainBoardCardKindAllTypes(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	// Verify all issue kinds produce cards with their kind icon
+	for _, kind := range []model.IssueKind{
+		model.IssueKindBug, model.IssueKindFeature, model.IssueKindTask,
+		model.IssueKindEpic, model.IssueKindChore,
+	} {
+		issue := makeIssue(1, "Test", model.StatusTodo, model.PriorityMedium)
+		issue.Kind = kind
+		got := RenderBoard([]*model.Issue{issue}, BoardOptions{})
+		if got == "" {
+			t.Errorf("RenderBoard with kind %q returned empty string", kind)
+		}
 	}
 }

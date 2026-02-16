@@ -68,7 +68,13 @@ var logCmd = &cobra.Command{
 		}
 
 		if len(activity) == 0 {
-			w.Success(result, fmt.Sprintf("No activity for %s", model.FormatID(id)))
+			quiet, _ := cmd.Flags().GetBool("quiet")
+			msg := render.EmptyState(
+				fmt.Sprintf("No activity for %s", model.FormatID(id)),
+				"",
+				quiet,
+			)
+			w.Success(result, msg)
 			return nil
 		}
 

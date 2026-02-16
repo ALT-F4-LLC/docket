@@ -51,7 +51,7 @@ var closeCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(issue, fmt.Sprintf("Closed %s", model.FormatID(id)))
+		w.Success(issue, fmt.Sprintf("Closed %s: %s", model.FormatID(id), issue.Title))
 		return nil
 	},
 }

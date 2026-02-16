@@ -3,13 +3,11 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"strings"
-
-	"github.com/dustin/go-humanize"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/spf13/cobra"
 )
 
@@ -46,17 +44,17 @@ var commentListCmd = &cobra.Command{
 		}
 
 		if len(comments) == 0 {
-			w.Success(nil, fmt.Sprintf("No comments on %s", model.FormatID(id)))
+			quiet, _ := cmd.Flags().GetBool("quiet")
+			msg := render.EmptyState(
+				fmt.Sprintf("No comments on %s", model.FormatID(id)),
+				fmt.Sprintf("Add one with: docket issue comment add %s -m \"...\"", model.FormatID(id)),
+				quiet,
+			)
+			w.Success(nil, msg)
 			return nil
 		}
 
-		var parts []string
-		for _, c := range comments {
-			parts = append(parts, fmt.Sprintf("%s  %s\n  %s", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt), c.Body))
-		}
-		message := strings.Join(parts, "\n\n")
-
-		w.Success(comments, message)
+		w.Success(comments, render.RenderCommentList(comments))
 		return nil
 	},
 }

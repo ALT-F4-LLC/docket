@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/spf13/cobra"
 )
 
@@ -110,6 +113,40 @@ func formatEnvValue(val string) string {
 }
 
 func formatConfigHuman(info configInfo, notFound bool) string {
+	if !render.ColorsEnabled() {
+		return formatConfigPlain(info, notFound)
+	}
+
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	valStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+
+	var lines string
+	lines = headerStyle.Render("Docket Configuration") + "\n\n"
+
+	// DB path with green/red indicator.
+	if notFound {
+		indicator := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("●")
+		lines += fmt.Sprintf("  %s %s %s\n", keyStyle.Render("Database path:"), indicator, valStyle.Render(info.DBPath+" (not found)"))
+	} else {
+		indicator := lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("●")
+		lines += fmt.Sprintf("  %s %s %s\n", keyStyle.Render("Database path:"), indicator, valStyle.Render(info.DBPath))
+	}
+
+	if !notFound {
+		lines += fmt.Sprintf("  %s  %s\n", keyStyle.Render("Database size:"), valStyle.Render(formatSize(info.DBSizeBytes)))
+		lines += fmt.Sprintf("  %s %s\n", keyStyle.Render("Schema version:"), valStyle.Render(fmt.Sprintf("%d", info.SchemaVersion)))
+	}
+
+	lines += fmt.Sprintf("  %s   %s\n", keyStyle.Render("Issue prefix:"), valStyle.Render(info.IssuePrefix))
+
+	envVal := formatEnvValue(info.DocketPathEnv)
+	lines += fmt.Sprintf("  %s    %s", keyStyle.Render("DOCKET_PATH:"), valStyle.Render(envVal))
+
+	return lines
+}
+
+func formatConfigPlain(info configInfo, notFound bool) string {
 	dbPath := info.DBPath
 	if notFound {
 		dbPath = fmt.Sprintf("%s (not found)", info.DBPath)

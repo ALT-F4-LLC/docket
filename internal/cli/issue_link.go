@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/spf13/cobra"
 )
 
@@ -154,7 +157,13 @@ var linkListCmd = &cobra.Command{
 		}
 
 		if len(relations) == 0 {
-			w.Success([]relationDisplay{}, fmt.Sprintf("No relations found for %s", model.FormatID(id)))
+			quiet, _ := cmd.Flags().GetBool("quiet")
+			msg := render.EmptyState(
+				fmt.Sprintf("No relations found for %s", model.FormatID(id)),
+				fmt.Sprintf("Add one with: docket issue link add %s <relation> <target>", model.FormatID(id)),
+				quiet,
+			)
+			w.Success([]relationDisplay{}, msg)
 			return nil
 		}
 
@@ -180,9 +189,26 @@ var linkListCmd = &cobra.Command{
 		}
 
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "Relations for %s:\n", model.FormatID(id))
-		for _, d := range displays {
-			fmt.Fprintf(&sb, "  %s %s\n", d.RelationType, d.IssueID)
+		if render.ColorsEnabled() {
+			sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+			boldStyle := lipgloss.NewStyle().Bold(true)
+			fmt.Fprintf(&sb, "%s\n", sectionStyle.Render(fmt.Sprintf("Relations for %s", model.FormatID(id))))
+			for _, d := range displays {
+				relType := model.RelationType(d.RelationType)
+				typeStyle := lipgloss.NewStyle().Foreground(render.ColorFromName(render.RelationColor(relType)))
+				var arrow string
+				if d.Direction == "outgoing" {
+					arrow = render.RelationArrow(relType, true)
+				} else {
+					arrow = render.RelationArrow(relType, false)
+				}
+				fmt.Fprintf(&sb, "  %s %s %s\n", arrow, typeStyle.Render(d.RelationType), boldStyle.Render(d.IssueID))
+			}
+		} else {
+			fmt.Fprintf(&sb, "Relations for %s:\n", model.FormatID(id))
+			for _, d := range displays {
+				fmt.Fprintf(&sb, "  %s %s\n", d.RelationType, d.IssueID)
+			}
 		}
 
 		w.Success(displays, sb.String())

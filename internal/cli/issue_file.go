@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/spf13/cobra"
 )
 
@@ -30,7 +33,8 @@ var fileAddCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
 		}
 
-		if _, err := db.GetIssue(conn, id); err != nil {
+		issue, err := db.GetIssue(conn, id)
+		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
 			}
@@ -47,7 +51,7 @@ var fileAddCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(files, fmt.Sprintf("Added file(s) to %s", model.FormatID(id)))
+		w.Success(files, fmt.Sprintf("Added file(s) to %s: %s", model.FormatID(id), issue.Title))
 		return nil
 	},
 }
@@ -65,7 +69,8 @@ var fileRemoveCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
 		}
 
-		if _, err := db.GetIssue(conn, id); err != nil {
+		issue, err := db.GetIssue(conn, id)
+		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
 			}
@@ -82,7 +87,7 @@ var fileRemoveCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(files, fmt.Sprintf("Removed file(s) from %s", model.FormatID(id)))
+		w.Success(files, fmt.Sprintf("Removed file(s) from %s: %s", model.FormatID(id), issue.Title))
 		return nil
 	},
 }
@@ -113,7 +118,13 @@ var fileListCmd = &cobra.Command{
 		}
 
 		if len(files) == 0 {
-			w.Success([]string{}, fmt.Sprintf("No files attached to %s", model.FormatID(id)))
+			quiet, _ := cmd.Flags().GetBool("quiet")
+			msg := render.EmptyState(
+				fmt.Sprintf("No files attached to %s", model.FormatID(id)),
+				fmt.Sprintf("Add one with: docket issue file add %s <path>", model.FormatID(id)),
+				quiet,
+			)
+			w.Success([]string{}, msg)
 			return nil
 		}
 
@@ -123,9 +134,18 @@ var fileListCmd = &cobra.Command{
 		}
 
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "Files for %s:\n", model.FormatID(id))
-		for _, f := range files {
-			fmt.Fprintf(&sb, "  %s\n", f)
+		if render.ColorsEnabled() {
+			sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+			dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+			fmt.Fprintf(&sb, "%s\n", sectionStyle.Render(fmt.Sprintf("Files for %s", model.FormatID(id))))
+			for _, f := range files {
+				fmt.Fprintf(&sb, "  %s\n", dimStyle.Render("\u25b8 "+f))
+			}
+		} else {
+			fmt.Fprintf(&sb, "Files for %s:\n", model.FormatID(id))
+			for _, f := range files {
+				fmt.Fprintf(&sb, "  %s\n", f)
+			}
 		}
 
 		w.Success(files, sb.String())

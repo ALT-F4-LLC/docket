@@ -6,10 +6,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
+	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/spf13/cobra"
 )
 
@@ -123,9 +126,78 @@ var planCmd = &cobra.Command{
 // renderPlanHuman renders the execution plan as human-readable text.
 func renderPlanHuman(plan *planner.Plan, dag *planner.DAG) string {
 	if plan.TotalIssues == 0 {
-		return "No issues to plan."
+		return render.EmptyState("No issues to plan.", "Create issues first with: docket issue create", false)
 	}
 
+	if !render.ColorsEnabled() {
+		return renderPlanPlain(plan, dag)
+	}
+
+	var b strings.Builder
+
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	phaseStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	titleStyle := lipgloss.NewStyle().Bold(true)
+	depStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
+	separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	boldMetric := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+
+	b.WriteString(headerStyle.Render("Execution Plan:"))
+	b.WriteString("\n")
+
+	for i, phase := range plan.Phases {
+		if i > 0 {
+			b.WriteString(separatorStyle.Render("  ────────────────────────────────"))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		if phase.Number == 1 {
+			b.WriteString(phaseStyle.Render(fmt.Sprintf("Phase %d (start):", phase.Number)))
+		} else {
+			b.WriteString(phaseStyle.Render(fmt.Sprintf("Phase %d (parallel, after Phase %d):", phase.Number, phase.Number-1)))
+		}
+		b.WriteString("\n")
+
+		for _, issue := range phase.Issues {
+			priStyle := lipgloss.NewStyle().Foreground(render.ColorFromName(issue.Priority.Color()))
+			statusIcon := lipgloss.NewStyle().Foreground(render.ColorFromName(issue.Status.Color())).Render(issue.Status.Icon())
+			kindIcon := lipgloss.NewStyle().Foreground(render.ColorFromName(issue.Kind.Color())).Render(issue.Kind.Icon())
+
+			deps := collectDeps(issue.ID, dag)
+			if len(deps) > 0 {
+				fmt.Fprintf(&b, "  %s %s %s %s %s  %s\n",
+					statusIcon,
+					kindIcon,
+					idStyle.Render(fmt.Sprintf("%-6s", model.FormatID(issue.ID))),
+					priStyle.Render(fmt.Sprintf("[%-8s]", string(issue.Priority))),
+					titleStyle.Render(issue.Title),
+					depStyle.Render(fmt.Sprintf("(depends on %s)", strings.Join(deps, ", "))),
+				)
+			} else {
+				fmt.Fprintf(&b, "  %s %s %s %s %s\n",
+					statusIcon,
+					kindIcon,
+					idStyle.Render(fmt.Sprintf("%-6s", model.FormatID(issue.ID))),
+					priStyle.Render(fmt.Sprintf("[%-8s]", string(issue.Priority))),
+					titleStyle.Render(issue.Title),
+				)
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "Summary: %s issues, %s phases, max parallelism: %s",
+		boldMetric.Render(fmt.Sprintf("%d", plan.TotalIssues)),
+		boldMetric.Render(fmt.Sprintf("%d", plan.TotalPhases)),
+		boldMetric.Render(fmt.Sprintf("%d", plan.MaxParallelism)),
+	)
+
+	return b.String()
+}
+
+// renderPlanPlain renders the execution plan without colors.
+func renderPlanPlain(plan *planner.Plan, dag *planner.DAG) string {
 	var b strings.Builder
 
 	b.WriteString("Execution Plan:\n")

@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/render"
+
 	"github.com/spf13/cobra"
 )
 
@@ -36,6 +40,8 @@ var initCmd = &cobra.Command{
 				return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
 			}
 
+			msg := render.StyledText("Database already initialized", lipgloss.NewStyle().Foreground(lipgloss.Color("3")))
+
 			w.Success(struct {
 				Path          string `json:"path"`
 				DBPath        string `json:"db_path"`
@@ -46,7 +52,7 @@ var initCmd = &cobra.Command{
 				DBPath:        cfg.DBPath,
 				SchemaVersion: schemaVersion,
 				Created:       false,
-			}, "Database already initialized")
+			}, msg)
 
 			return nil
 		}
@@ -74,6 +80,8 @@ var initCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
 		}
 
+		successMsg := render.StyledText("Initialized docket database", lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")))
+
 		w.Success(struct {
 			Path          string `json:"path"`
 			DBPath        string `json:"db_path"`
@@ -84,9 +92,9 @@ var initCmd = &cobra.Command{
 			DBPath:        cfg.DBPath,
 			SchemaVersion: schemaVersion,
 			Created:       true,
-		}, "Initialized docket database")
+		}, successMsg)
 
-		w.Info("Initialized docket database at %s", cfg.DBPath)
+		w.Info("Database created at %s", cfg.DBPath)
 		w.Info("Consider adding .docket/ to your .gitignore")
 
 		return nil

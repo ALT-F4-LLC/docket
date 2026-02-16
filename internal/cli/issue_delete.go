@@ -37,7 +37,8 @@ var deleteCmd = &cobra.Command{
 			return cmdErr(err, output.ErrValidation)
 		}
 
-		if _, err := db.GetIssue(conn, id); err != nil {
+		issue, err := db.GetIssue(conn, id)
+		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				return cmdErr(fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
 			}
@@ -54,17 +55,17 @@ var deleteCmd = &cobra.Command{
 			if err := db.DeleteIssue(conn, id); err != nil {
 				return cmdErr(fmt.Errorf("deleting issue: %w", err), output.ErrGeneral)
 			}
-			w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s", model.FormatID(id)))
+			w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s: %s", model.FormatID(id), issue.Title))
 			return nil
 		}
 
 		// Sub-issues exist: handle based on flags.
 		if force {
-			return doCascadeDelete(w, conn, id, len(subIssues))
+			return doCascadeDelete(w, conn, id, issue.Title, len(subIssues))
 		}
 
 		if orphan {
-			return doOrphanDelete(w, conn, id, len(subIssues))
+			return doOrphanDelete(w, conn, id, issue.Title, len(subIssues))
 		}
 
 		// JSON mode requires explicit flag when sub-issues exist.
@@ -97,9 +98,9 @@ var deleteCmd = &cobra.Command{
 
 		switch choice {
 		case "cascade":
-			return doCascadeDelete(w, conn, id, len(subIssues))
+			return doCascadeDelete(w, conn, id, issue.Title, len(subIssues))
 		case "orphan":
-			return doOrphanDelete(w, conn, id, len(subIssues))
+			return doOrphanDelete(w, conn, id, issue.Title, len(subIssues))
 		case "cancel":
 			w.Info("Cancelled.")
 		}
@@ -108,22 +109,22 @@ var deleteCmd = &cobra.Command{
 	},
 }
 
-func doCascadeDelete(w *output.Writer, conn *sql.DB, id int, subCount int) error {
+func doCascadeDelete(w *output.Writer, conn *sql.DB, id int, title string, subCount int) error {
 	if err := db.CascadeDeleteIssue(conn, id); err != nil {
 		return cmdErr(fmt.Errorf("cascade deleting issue: %w", err), output.ErrGeneral)
 	}
-	w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s and %d sub-issue(s)", model.FormatID(id), subCount))
+	w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s: %s (and %d sub-issue(s))", model.FormatID(id), title, subCount))
 	return nil
 }
 
-func doOrphanDelete(w *output.Writer, conn *sql.DB, id int, subCount int) error {
+func doOrphanDelete(w *output.Writer, conn *sql.DB, id int, title string, subCount int) error {
 	if err := db.OrphanSubIssues(conn, id, config.DefaultAuthor()); err != nil {
 		return cmdErr(fmt.Errorf("orphaning sub-issues: %w", err), output.ErrGeneral)
 	}
 	if err := db.DeleteIssue(conn, id); err != nil {
 		return cmdErr(fmt.Errorf("deleting issue: %w", err), output.ErrGeneral)
 	}
-	w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s, orphaned %d sub-issue(s)", model.FormatID(id), subCount))
+	w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s: %s (orphaned %d sub-issue(s))", model.FormatID(id), title, subCount))
 	return nil
 }
 

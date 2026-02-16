@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/ALT-F4-LLC/docket/internal/render"
 )
 
 // Writer handles output for a command, dispatching between JSON and
@@ -56,7 +60,14 @@ func (w *Writer) Info(format string, args ...any) {
 	if w.QuietMode || w.JSONMode {
 		return
 	}
-	fmt.Fprintf(w.Stderr, format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	if render.ColorsEnabled() {
+		icon := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("\u2139")
+		text := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(msg)
+		fmt.Fprintf(w.Stderr, "%s %s\n", icon, text)
+	} else {
+		fmt.Fprintln(w.Stderr, msg)
+	}
 }
 
 // Warn writes a warning to Stderr. Warnings are always emitted in human mode,
@@ -66,5 +77,12 @@ func (w *Writer) Warn(format string, args ...any) {
 	if w.JSONMode {
 		return
 	}
-	fmt.Fprintf(w.Stderr, "Warning: "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	if render.ColorsEnabled() {
+		icon := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render("\u26a0")
+		label := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render("Warning:")
+		fmt.Fprintf(w.Stderr, "%s %s %s\n", icon, label, msg)
+	} else {
+		fmt.Fprintf(w.Stderr, "Warning: %s\n", msg)
+	}
 }

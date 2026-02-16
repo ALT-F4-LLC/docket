@@ -51,7 +51,7 @@ type BoardOptions struct {
 // RenderBoard renders a list of issues as a Kanban board with columns per status.
 func RenderBoard(issues []*model.Issue, opts BoardOptions) string {
 	if len(issues) == 0 {
-		return ""
+		return EmptyState("No issues on the board.", "Create one with: docket issue create", false)
 	}
 
 	if !ColorsEnabled() {
@@ -122,7 +122,7 @@ func renderColorColumn(status model.Status, issues []*model.Issue, colWidth, con
 		Width(colWidth).
 		Align(lipgloss.Center)
 
-	header := headerStyle.Render(fmt.Sprintf("%s (%d)", strings.ToUpper(string(status)), len(issues)))
+	header := headerStyle.Render(fmt.Sprintf("%s %s (%d)", status.Icon(), strings.ToUpper(string(status)), len(issues)))
 
 	// Render cards up to the maximum.
 	visible := issues
@@ -156,10 +156,15 @@ func renderColorCard(issue *model.Issue, colWidth, contentWidth int, opts BoardO
 		contentWidth = 5
 	}
 
-	// Line 1: ID [priority]
+	// Line 1: kind icon + ID + priority icon
+	kindIcon := lipgloss.NewStyle().
+		Foreground(ColorFromName(issue.Kind.Color())).
+		Render(issue.Kind.Icon())
 	idStr := model.FormatID(issue.ID)
-	priStr := fmt.Sprintf("[%s]", string(issue.Priority))
-	line1 := fmt.Sprintf("%s %s", idStr, priStr)
+	priIcon := lipgloss.NewStyle().
+		Foreground(ColorFromName(issue.Priority.Color())).
+		Render(issue.Priority.Icon())
+	line1 := fmt.Sprintf("%s %s %s", kindIcon, idStr, priIcon)
 
 	// Line 2: Title (truncated)
 	line2 := truncate(issue.Title, contentWidth)
@@ -247,7 +252,7 @@ func renderPlainBoard(issues []*model.Issue, opts BoardOptions) string {
 		}
 
 		issuesInCol := groups[status]
-		fmt.Fprintf(&b, "=== %s (%d) ===\n", strings.ToUpper(string(status)), len(issuesInCol))
+		fmt.Fprintf(&b, "=== %s %s (%d) ===\n", status.Icon(), strings.ToUpper(string(status)), len(issuesInCol))
 
 		visible := issuesInCol
 		overflow := 0
@@ -269,7 +274,7 @@ func renderPlainBoard(issues []*model.Issue, opts BoardOptions) string {
 }
 
 func renderPlainCard(b *strings.Builder, issue *model.Issue, opts BoardOptions) {
-	fmt.Fprintf(b, "  %s [%s]\n", model.FormatID(issue.ID), string(issue.Priority))
+	fmt.Fprintf(b, "  %s [%s] (%s)\n", model.FormatID(issue.ID), string(issue.Priority), string(issue.Kind))
 	fmt.Fprintf(b, "  %s\n", truncate(issue.Title, maxTitleWidth))
 
 	if len(issue.Labels) > 0 {

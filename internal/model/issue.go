@@ -58,6 +58,24 @@ func (s Status) Color() string {
 	}
 }
 
+// Icon returns a Unicode icon representing the status.
+func (s Status) Icon() string {
+	switch s {
+	case StatusBacklog:
+		return "○"
+	case StatusTodo:
+		return "●"
+	case StatusInProgress:
+		return "◐"
+	case StatusReview:
+		return "◎"
+	case StatusDone:
+		return "✔"
+	default:
+		return "○"
+	}
+}
+
 // Priority represents the urgency of an issue.
 type Priority string
 
@@ -105,21 +123,21 @@ func (p Priority) Color() string {
 	}
 }
 
-// Emoji returns an emoji string for the priority level.
-func (p Priority) Emoji() string {
+// Icon returns a Unicode icon representing the priority level.
+func (p Priority) Icon() string {
 	switch p {
 	case PriorityCritical:
-		return "!!!"
+		return "⏫"
 	case PriorityHigh:
-		return "!!"
+		return "↑"
 	case PriorityMedium:
-		return "!"
+		return "↔"
 	case PriorityLow:
-		return "-"
+		return "↓"
 	case PriorityNone:
-		return " "
+		return "•"
 	default:
-		return " "
+		return "•"
 	}
 }
 
@@ -140,6 +158,42 @@ var validIssueKinds = []IssueKind{
 	IssueKindTask,
 	IssueKindEpic,
 	IssueKindChore,
+}
+
+// Icon returns a Unicode icon representing the issue kind.
+func (k IssueKind) Icon() string {
+	switch k {
+	case IssueKindBug:
+		return "■"
+	case IssueKindFeature:
+		return "✦"
+	case IssueKindTask:
+		return "▶"
+	case IssueKindEpic:
+		return "⬡"
+	case IssueKindChore:
+		return "⚒"
+	default:
+		return "▶"
+	}
+}
+
+// Color returns a color name string suitable for terminal rendering.
+func (k IssueKind) Color() string {
+	switch k {
+	case IssueKindBug:
+		return "red"
+	case IssueKindFeature:
+		return "green"
+	case IssueKindTask:
+		return "blue"
+	case IssueKindEpic:
+		return "magenta"
+	case IssueKindChore:
+		return "yellow"
+	default:
+		return "white"
+	}
 }
 
 // ValidateIssueKind returns an error if k is not a recognized issue kind.

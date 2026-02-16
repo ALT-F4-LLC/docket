@@ -63,6 +63,9 @@ func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []mode
 func renderHeader(issue *model.Issue) string {
 	idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	titleStyle := lipgloss.NewStyle().Bold(true)
+	kindStyle := lipgloss.NewStyle().
+		Foreground(ColorFromName(issue.Kind.Color())).
+		Bold(true)
 	statusStyle := lipgloss.NewStyle().
 		Foreground(ColorFromName(issue.Status.Color())).
 		Bold(true)
@@ -70,11 +73,12 @@ func renderHeader(issue *model.Issue) string {
 		Foreground(ColorFromName(issue.Priority.Color())).
 		Bold(true)
 
-	return fmt.Sprintf("%s  %s\n%s  %s",
+	return fmt.Sprintf("%s %s  %s\n%s  %s",
+		kindStyle.Render(issue.Kind.Icon()),
 		idStyle.Render(model.FormatID(issue.ID)),
 		titleStyle.Render(issue.Title),
 		statusStyle.Render(statusLabel(issue.Status)),
-		priorityStyle.Render(fmt.Sprintf("%s %s", issue.Priority.Emoji(), string(issue.Priority))),
+		priorityStyle.Render(fmt.Sprintf("%s %s", issue.Priority.Icon(), string(issue.Priority))),
 	)
 }
 
@@ -83,7 +87,8 @@ func renderMetadata(issue *model.Issue) string {
 
 	var lines []string
 
-	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Type:"), string(issue.Kind)))
+	kindStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Kind.Color()))
+	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Type:"), kindStyle.Render(fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)))))
 
 	if issue.Assignee != "" {
 		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Assignee:"), issue.Assignee))
@@ -105,11 +110,12 @@ func renderMetadata(issue *model.Issue) string {
 
 func renderFiles(files []string) string {
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	header := sectionStyle.Render("Files")
 
 	var lines []string
 	for _, f := range files {
-		lines = append(lines, "  "+f)
+		lines = append(lines, "  "+dimStyle.Render("▸ "+f))
 	}
 
 	return header + "\n" + strings.Join(lines, "\n")
@@ -156,13 +162,46 @@ func renderSubIssues(subIssues []*model.Issue) string {
 func formatSubIssueNode(issue *model.Issue) string {
 	statusStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Status.Color()))
 	priorityStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Priority.Color()))
+	kindStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Kind.Color()))
 
-	return fmt.Sprintf("%s %s %s %s",
+	return fmt.Sprintf("%s %s %s %s %s",
 		statusStyle.Render(statusLabel(issue.Status)),
-		priorityStyle.Render(issue.Priority.Emoji()),
+		priorityStyle.Render(issue.Priority.Icon()),
+		kindStyle.Render(issue.Kind.Icon()),
 		model.FormatID(issue.ID),
 		truncate(issue.Title, maxTitleWidth),
 	)
+}
+
+// RelationArrow returns a directional arrow for the given relation type.
+func RelationArrow(rt model.RelationType, isSource bool) string {
+	if isSource {
+		switch rt {
+		case model.RelationBlocks:
+			return "\u2192" // →
+		case model.RelationDependsOn:
+			return "\u2190" // ←
+		case model.RelationRelatesTo:
+			return "\u2194" // ↔
+		case model.RelationDuplicates:
+			return "\u2261" // ≡
+		default:
+			return "\u2192" // →
+		}
+	}
+	// Inverse direction
+	switch rt {
+	case model.RelationBlocks:
+		return "\u2190" // ←
+	case model.RelationDependsOn:
+		return "\u2192" // →
+	case model.RelationRelatesTo:
+		return "\u2194" // ↔
+	case model.RelationDuplicates:
+		return "\u2261" // ≡
+	default:
+		return "\u2190" // ←
+	}
 }
 
 func renderRelations(issueID int, relations []model.Relation) string {
@@ -173,13 +212,19 @@ func renderRelations(issueID int, relations []model.Relation) string {
 	for _, rel := range relations {
 		var line string
 		if rel.SourceIssueID == issueID {
-			line = fmt.Sprintf("  %s %s",
-				string(rel.RelationType),
+			typeStyle := lipgloss.NewStyle().Foreground(ColorFromName(RelationColor(rel.RelationType)))
+			arrow := RelationArrow(rel.RelationType, true)
+			line = fmt.Sprintf("  %s %s %s",
+				arrow,
+				typeStyle.Render(string(rel.RelationType)),
 				model.FormatID(rel.TargetIssueID),
 			)
 		} else {
-			line = fmt.Sprintf("  %s %s",
-				rel.RelationType.Inverse(),
+			typeStyle := lipgloss.NewStyle().Foreground(ColorFromName(RelationColor(rel.RelationType)))
+			arrow := RelationArrow(rel.RelationType, false)
+			line = fmt.Sprintf("  %s %s %s",
+				arrow,
+				typeStyle.Render(rel.RelationType.Inverse()),
 				model.FormatID(rel.SourceIssueID),
 			)
 		}
@@ -187,6 +232,28 @@ func renderRelations(issueID int, relations []model.Relation) string {
 	}
 
 	return header + "\n" + strings.Join(lines, "\n")
+}
+
+// RelationColor returns a color name for the given relation type.
+func RelationColor(rt model.RelationType) string {
+	switch rt {
+	case model.RelationBlocks:
+		return "red"
+	case model.RelationDependsOn:
+		return "yellow"
+	case model.RelationRelatesTo:
+		return "blue"
+	case model.RelationDuplicates:
+		return "gray"
+	default:
+		return "white"
+	}
+}
+
+// RenderCommentList renders a styled comment list. Exported for reuse by the
+// comment list CLI command.
+func RenderCommentList(comments []*model.Comment) string {
+	return renderComments(comments)
 }
 
 func renderComments(comments []*model.Comment) string {
@@ -214,6 +281,20 @@ func renderComments(comments []*model.Comment) string {
 	return header + "\n" + strings.Join(parts, "\n\n")
 }
 
+// activityIcon returns a semantic icon for an activity entry.
+func activityIcon(a model.Activity) string {
+	if a.FieldChanged == "created" {
+		return "\u2728" // ✨
+	}
+	if a.FieldChanged == "status" {
+		if a.NewValue != "" {
+			return model.Status(a.NewValue).Icon()
+		}
+		return "\u25cb" // ○
+	}
+	return "\u270e" // ✎
+}
+
 func renderActivity(activity []model.Activity) string {
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	fieldStyle := lipgloss.NewStyle().Bold(true)
@@ -223,9 +304,11 @@ func renderActivity(activity []model.Activity) string {
 
 	var lines []string
 	for _, a := range activity {
+		icon := activityIcon(a)
 		var line string
 		if a.FieldChanged == "created" {
-			line = fmt.Sprintf("  Issue created  %s",
+			line = fmt.Sprintf("  %s Issue created  %s",
+				icon,
 				timeStyle.Render(humanize.Time(a.CreatedAt)),
 			)
 		} else {
@@ -242,7 +325,8 @@ func renderActivity(activity []model.Activity) string {
 			case a.OldValue != "":
 				detail = fmt.Sprintf("removed %s", a.OldValue)
 			}
-			line = fmt.Sprintf("  %s changed %s: %s  %s",
+			line = fmt.Sprintf("  %s %s changed %s: %s  %s",
+				icon,
 				actor,
 				fieldStyle.Render(a.FieldChanged),
 				detail,
@@ -260,12 +344,12 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	var b strings.Builder
 
 	// Header
-	fmt.Fprintf(&b, "%s  %s\n", model.FormatID(issue.ID), issue.Title)
-	fmt.Fprintf(&b, "%s  %s %s\n", statusLabel(issue.Status), issue.Priority.Emoji(), string(issue.Priority))
+	fmt.Fprintf(&b, "%s %s  %s\n", issue.Kind.Icon(), model.FormatID(issue.ID), issue.Title)
+	fmt.Fprintf(&b, "%s  %s %s\n", statusLabel(issue.Status), issue.Priority.Icon(), string(issue.Priority))
 
 	// Metadata
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "Type: %s\n", string(issue.Kind))
+	fmt.Fprintf(&b, "Type: %s %s\n", issue.Kind.Icon(), string(issue.Kind))
 	if issue.Assignee != "" {
 		fmt.Fprintf(&b, "Assignee: %s\n", issue.Assignee)
 	}
@@ -282,7 +366,7 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	if len(issue.Files) > 0 {
 		b.WriteString("\nFiles\n")
 		for _, f := range issue.Files {
-			fmt.Fprintf(&b, "  %s\n", f)
+			fmt.Fprintf(&b, "  > %s\n", f)
 		}
 	}
 
@@ -301,9 +385,10 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 		}
 		fmt.Fprintf(&b, "\nSub-issues (%d/%d done)\n", doneCount, len(subIssues))
 		for _, sub := range subIssues {
-			fmt.Fprintf(&b, "  %s %s %s %s\n",
+			fmt.Fprintf(&b, "  %s %s %s %s %s\n",
 				statusLabel(sub.Status),
-				sub.Priority.Emoji(),
+				sub.Priority.Icon(),
+				sub.Kind.Icon(),
 				model.FormatID(sub.ID),
 				truncate(sub.Title, maxTitleWidth),
 			)
@@ -315,9 +400,11 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 		b.WriteString("\nRelations\n")
 		for _, rel := range relations {
 			if rel.SourceIssueID == issue.ID {
-				fmt.Fprintf(&b, "  %s %s\n", string(rel.RelationType), model.FormatID(rel.TargetIssueID))
+				arrow := RelationArrow(rel.RelationType, true)
+				fmt.Fprintf(&b, "  %s %s %s\n", arrow, string(rel.RelationType), model.FormatID(rel.TargetIssueID))
 			} else {
-				fmt.Fprintf(&b, "  %s %s\n", rel.RelationType.Inverse(), model.FormatID(rel.SourceIssueID))
+				arrow := RelationArrow(rel.RelationType, false)
+				fmt.Fprintf(&b, "  %s %s %s\n", arrow, rel.RelationType.Inverse(), model.FormatID(rel.SourceIssueID))
 			}
 		}
 	}
@@ -334,8 +421,9 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	if len(activity) > 0 {
 		b.WriteString("\nActivity\n")
 		for _, a := range activity {
+			icon := activityIcon(a)
 			if a.FieldChanged == "created" {
-				fmt.Fprintf(&b, "  Issue created  %s\n", humanize.Time(a.CreatedAt))
+				fmt.Fprintf(&b, "  %s Issue created  %s\n", icon, humanize.Time(a.CreatedAt))
 			} else {
 				actor := a.ChangedBy
 				if actor == "" {
@@ -350,8 +438,8 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 				case a.OldValue != "":
 					detail = fmt.Sprintf("removed %s", a.OldValue)
 				}
-				fmt.Fprintf(&b, "  %s changed %s: %s  %s\n",
-					actor, a.FieldChanged, detail, humanize.Time(a.CreatedAt))
+				fmt.Fprintf(&b, "  %s %s changed %s: %s  %s\n",
+					icon, actor, a.FieldChanged, detail, humanize.Time(a.CreatedAt))
 			}
 		}
 	}

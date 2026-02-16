@@ -34,7 +34,8 @@ var commentAddCmd = &cobra.Command{
 		}
 
 		// Verify issue exists.
-		if _, err := db.GetIssue(conn, id); err != nil {
+		issue, err := db.GetIssue(conn, id)
+		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
 			}
@@ -129,7 +130,7 @@ var commentAddCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching created comment: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(created, fmt.Sprintf("Comment added to %s", model.FormatID(id)))
+		w.Success(created, fmt.Sprintf("Comment added to %s: %s", model.FormatID(id), issue.Title))
 
 		return nil
 	},

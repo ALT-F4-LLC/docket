@@ -95,20 +95,171 @@ func TestValidateIssueKind(t *testing.T) {
 }
 
 func TestStatusColor(t *testing.T) {
-	if c := StatusDone.Color(); c != "green" {
-		t.Errorf("StatusDone.Color() = %q, want %q", c, "green")
+	tests := []struct {
+		status Status
+		want   string
+	}{
+		{StatusBacklog, "gray"},
+		{StatusTodo, "blue"},
+		{StatusInProgress, "yellow"},
+		{StatusReview, "magenta"},
+		{StatusDone, "green"},
 	}
-	if c := StatusInProgress.Color(); c != "yellow" {
-		t.Errorf("StatusInProgress.Color() = %q, want %q", c, "yellow")
+	for _, tt := range tests {
+		if got := tt.status.Color(); got != tt.want {
+			t.Errorf("%q.Color() = %q, want %q", tt.status, got, tt.want)
+		}
 	}
 }
 
-func TestPriorityColorAndEmoji(t *testing.T) {
+func TestStatusColorDefaultFallback(t *testing.T) {
+	if got := Status("unknown").Color(); got != "white" {
+		t.Errorf("Status(\"unknown\").Color() = %q, want %q", got, "white")
+	}
+}
+
+func TestPriorityColor(t *testing.T) {
+	tests := []struct {
+		priority Priority
+		want     string
+	}{
+		{PriorityCritical, "red"},
+		{PriorityHigh, "yellow"},
+		{PriorityMedium, "blue"},
+		{PriorityLow, "gray"},
+		{PriorityNone, "white"},
+	}
+	for _, tt := range tests {
+		if got := tt.priority.Color(); got != tt.want {
+			t.Errorf("%q.Color() = %q, want %q", tt.priority, got, tt.want)
+		}
+	}
+}
+
+func TestPriorityColorDefaultFallback(t *testing.T) {
+	if got := Priority("unknown").Color(); got != "white" {
+		t.Errorf("Priority(\"unknown\").Color() = %q, want %q", got, "white")
+	}
+}
+
+func TestPriorityColorAndIcon(t *testing.T) {
 	if c := PriorityCritical.Color(); c != "red" {
 		t.Errorf("PriorityCritical.Color() = %q, want %q", c, "red")
 	}
-	if e := PriorityCritical.Emoji(); e != "!!!" {
-		t.Errorf("PriorityCritical.Emoji() = %q, want %q", e, "!!!")
+	if i := PriorityCritical.Icon(); i != "⏫" {
+		t.Errorf("PriorityCritical.Icon() = %q, want %q", i, "⏫")
+	}
+}
+
+func TestStatusIconNonEmpty(t *testing.T) {
+	for _, s := range []Status{StatusBacklog, StatusTodo, StatusInProgress, StatusReview, StatusDone} {
+		if got := s.Icon(); got == "" {
+			t.Errorf("%q.Icon() returned empty string", s)
+		}
+	}
+}
+
+func TestIssueKindIconNonEmpty(t *testing.T) {
+	for _, k := range []IssueKind{IssueKindBug, IssueKindFeature, IssueKindTask, IssueKindEpic, IssueKindChore} {
+		if got := k.Icon(); got == "" {
+			t.Errorf("%q.Icon() returned empty string", k)
+		}
+	}
+}
+
+func TestIssueKindColorDefaultFallback(t *testing.T) {
+	if got := IssueKind("unknown").Color(); got != "white" {
+		t.Errorf("IssueKind(\"unknown\").Color() = %q, want %q", got, "white")
+	}
+}
+
+func TestStatusIconDefaultFallback(t *testing.T) {
+	if got := Status("unknown").Icon(); got != "○" {
+		t.Errorf("Status(\"unknown\").Icon() = %q, want %q", got, "○")
+	}
+}
+
+func TestPriorityIconDefaultFallback(t *testing.T) {
+	if got := Priority("unknown").Icon(); got != "•" {
+		t.Errorf("Priority(\"unknown\").Icon() = %q, want %q", got, "•")
+	}
+}
+
+func TestIssueKindIconDefaultFallback(t *testing.T) {
+	if got := IssueKind("unknown").Icon(); got != "▶" {
+		t.Errorf("IssueKind(\"unknown\").Icon() = %q, want %q", got, "▶")
+	}
+}
+
+func TestStatusIcon(t *testing.T) {
+	tests := []struct {
+		status Status
+		want   string
+	}{
+		{StatusBacklog, "○"},
+		{StatusTodo, "●"},
+		{StatusInProgress, "◐"},
+		{StatusReview, "◎"},
+		{StatusDone, "✔"},
+	}
+	for _, tt := range tests {
+		if got := tt.status.Icon(); got != tt.want {
+			t.Errorf("%q.Icon() = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestPriorityIcon(t *testing.T) {
+	tests := []struct {
+		priority Priority
+		want     string
+	}{
+		{PriorityCritical, "⏫"},
+		{PriorityHigh, "↑"},
+		{PriorityMedium, "↔"},
+		{PriorityLow, "↓"},
+		{PriorityNone, "•"},
+	}
+	for _, tt := range tests {
+		if got := tt.priority.Icon(); got != tt.want {
+			t.Errorf("%q.Icon() = %q, want %q", tt.priority, got, tt.want)
+		}
+	}
+}
+
+func TestIssueKindIcon(t *testing.T) {
+	tests := []struct {
+		kind IssueKind
+		want string
+	}{
+		{IssueKindBug, "■"},
+		{IssueKindFeature, "✦"},
+		{IssueKindTask, "▶"},
+		{IssueKindEpic, "⬡"},
+		{IssueKindChore, "⚒"},
+	}
+	for _, tt := range tests {
+		if got := tt.kind.Icon(); got != tt.want {
+			t.Errorf("%q.Icon() = %q, want %q", tt.kind, got, tt.want)
+		}
+	}
+}
+
+func TestIssueKindColor(t *testing.T) {
+	tests := []struct {
+		kind IssueKind
+		want string
+	}{
+		{IssueKindBug, "red"},
+		{IssueKindFeature, "green"},
+		{IssueKindTask, "blue"},
+		{IssueKindEpic, "magenta"},
+		{IssueKindChore, "yellow"},
+	}
+	for _, tt := range tests {
+		if got := tt.kind.Color(); got != tt.want {
+			t.Errorf("%q.Color() = %q, want %q", tt.kind, got, tt.want)
+		}
 	}
 }
 

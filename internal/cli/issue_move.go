@@ -37,7 +37,9 @@ var moveCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 		}
 
-		if issue.Status == newStatus {
+		oldStatus := issue.Status
+
+		if oldStatus == newStatus {
 			if w.JSONMode {
 				w.Success(issue, "")
 			} else {
@@ -55,7 +57,7 @@ var moveCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(issue, fmt.Sprintf("Moved %s to %s", model.FormatID(id), newStatus))
+		w.Success(issue, fmt.Sprintf("Moved %s: %s \u2192 %s", model.FormatID(id), oldStatus, newStatus))
 
 		return nil
 	},
