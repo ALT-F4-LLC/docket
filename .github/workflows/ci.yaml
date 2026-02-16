@@ -93,7 +93,7 @@ jobs:
           fail-on-cache-miss: true
           pattern: docket-dist-*
 
-      - run: ls -alh
+      - run: ls -alh docket-dist-aarch64-darwin
 
       # - uses: softprops/action-gh-release@v2
       #   with:
@@ -106,7 +106,7 @@ jobs:
       #     name: ${{ github.ref_name }}
       #     prerelease: true
       #     tag_name: ${{ github.ref }}
-      #
+
       # - run: |
       #     mkdir -pv dist/aarch64-darwin
       #     mkdir -pv dist/aarch64-linux
@@ -120,7 +120,7 @@ jobs:
       #     mv dist/aarch64-linux/docket dist/aarch64-linux/docket-aarch64-linux
       #     mv dist/x86_64-darwin/docket dist/x86_64-darwin/docket-x86_64-darwin
       #     mv dist/x86_64-linux/docket dist/x86_64-linux/docket-x86_64-linux
-      #
+
       # - uses: actions/attest-build-provenance@v3
       #   with:
       #     subject-path: |
