@@ -91,4 +91,15 @@ jobs:
       - uses: actions/download-artifact@v7
         with:
           fail-on-cache-miss: true
+          merge-multiple: true
           pattern: docket-dist-*
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*
