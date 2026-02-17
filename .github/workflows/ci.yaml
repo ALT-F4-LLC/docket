@@ -83,7 +83,7 @@ jobs:
           path: ${{ env.ARCHIVE_NAME }}
 
   release:
-    # if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
+    if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
     needs:
       - build
     permissions:
@@ -101,8 +101,6 @@ jobs:
           merge-multiple: true
           pattern: docket-dist-*
           path: dist
-
-      - run: ls -alh dist
 
       - uses: softprops/action-gh-release@v2
         with:

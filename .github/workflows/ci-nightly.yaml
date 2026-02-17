@@ -1,0 +1,49 @@
+name: ci-nightly
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - id: generate-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.ALTF4LLC_GITHUB_APP_ID }}
+          owner: ${{ github.repository_owner }}
+          private-key: ${{ secrets.ALTF4LLC_GITHUB_APP_PRIVATE_KEY }}
+          repositories: docket
+
+      - env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          gh release view nightly >/dev/null 2>&1 && gh release delete --cleanup-tag --yes nightly || true
+
+      - id: main-sha
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          SHA=$(gh api repos/${{ github.repository }}/commits/main --jq '.sha')
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      - env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/nightly 2>/dev/null || true
+
+      - env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          gh api repos/${{ github.repository }}/git/refs \
+            -f ref=refs/tags/nightly \
+            -f sha=${{ steps.main-sha.outputs.sha }}
