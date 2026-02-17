@@ -92,39 +92,3 @@ jobs:
         with:
           fail-on-cache-miss: true
           pattern: docket-dist-*
-
-      - run: ls -alh docket-dist-aarch64-darwin/bin
-
-      # - uses: softprops/action-gh-release@v2
-      #   with:
-      #     fail_on_unmatched_files: true
-      #     files: |
-      #       docket-dist-aarch64-darwin/bin/docket
-      #       docket-dist-aarch64-linux/bin/docket
-      #       docket-dist-x86_64-darwin/bin/docket
-      #       docket-dist-x86_64-linux/bin/docket
-      #     name: ${{ github.ref_name }}
-      #     prerelease: true
-      #     tag_name: ${{ github.ref }}
-
-      # - run: |
-      #     mkdir -pv dist/aarch64-darwin
-      #     mkdir -pv dist/aarch64-linux
-      #     mkdir -pv dist/x86_64-darwin
-      #     mkdir -pv dist/x86_64-linux
-      #     tar -xzvf docket-dist-aarch64-darwin/docket-aarch64-darwin.tar.gz -C dist/aarch64-darwin
-      #     tar -xzvf docket-dist-aarch64-linux/docket-aarch64-linux.tar.gz -C dist/aarch64-linux
-      #     tar -xzvf docket-dist-x86_64-darwin/docket-x86_64-darwin.tar.gz -C dist/x86_64-darwin
-      #     tar -xzvf docket-dist-x86_64-linux/docket-x86_64-linux.tar.gz -C dist/x86_64-linux
-      #     mv dist/aarch64-darwin/docket dist/aarch64-darwin/docket-aarch64-darwin
-      #     mv dist/aarch64-linux/docket dist/aarch64-linux/docket-aarch64-linux
-      #     mv dist/x86_64-darwin/docket dist/x86_64-darwin/docket-x86_64-darwin
-      #     mv dist/x86_64-linux/docket dist/x86_64-linux/docket-x86_64-linux
-
-      # - uses: actions/attest-build-provenance@v3
-      #   with:
-      #     subject-path: |
-      #       dist/aarch64-darwin/docket-aarch64-darwin
-      #       dist/aarch64-linux/docket-aarch64-linux
-      #       dist/x86_64-darwin/docket-x86_64-darwin
-      #       dist/x86_64-linux/docket-x86_64-linux
