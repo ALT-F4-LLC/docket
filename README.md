@@ -38,7 +38,30 @@ docket issue list --json -s todo -s in-progress
 
 ## Installation
 
-### From source
+### Quick Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ALT-F4-LLC/docket/main/scripts/install.sh | sh
+```
+
+This installs the latest `nightly` build to `$HOME/.local/bin`.
+
+**Customize with environment variables:**
+
+```bash
+# Install a specific version
+DOCKET_VERSION=v1.0.0 curl -fsSL https://raw.githubusercontent.com/ALT-F4-LLC/docket/main/scripts/install.sh | sh
+
+# Install to a custom directory
+DOCKET_INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/ALT-F4-LLC/docket/main/scripts/install.sh | sh
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOCKET_INSTALL_DIR` | `$HOME/.local/bin` | Directory to install the binary |
+| `DOCKET_VERSION` | `nightly` | Release tag to download |
+
+### From Source
 
 Requires Go 1.24.2+.
 
