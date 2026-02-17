@@ -4,7 +4,9 @@ on:
   pull_request:
   push:
     branches:
-      - main
+      - "main"
+    tags:
+      - "*"
 
 jobs:
   build-shell:
@@ -33,7 +35,7 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: ${{ runner.arch }}-${{ runner.os }}-vorpal-lock
+          name: vorpal-lock-${{ runner.arch }}-${{ runner.os }}
           path: Vorpal.lock
 
   build:
@@ -63,17 +65,22 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - run: |
-          ARTIFACT_PATH=$(vorpal build --path '${{ matrix.artifact }}')
+          ARTIFACT_PATH=$(vorpal build --path '${{ matrix.artifact }}')/bin/docket
           echo "ARTIFACT_PATH=$ARTIFACT_PATH" >> $GITHUB_ENV
 
       - run: |
           echo "ARCH=$(uname -m | tr '[:upper:]' '[:lower:]' | sed 's/arm64/aarch64/')" >> $GITHUB_ENV
           echo "OS=$(uname -s | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
+      - run: |
+          ARCHIVE_NAME="docket-${{ env.ARCH }}-${{ env.OS }}.tar.gz"
+          tar -czf "$ARCHIVE_NAME" -C "$(dirname ${{ env.ARTIFACT_PATH }})" "$(basename ${{ env.ARTIFACT_PATH }})"
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+
       - uses: actions/upload-artifact@v6
         with:
           name: docket-dist-${{ env.ARCH }}-${{ env.OS }}
-          path: ${{ env.ARTIFACT_PATH }}
+          path: ${{ env.ARCHIVE_NAME }}
 
   release:
     # if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
@@ -95,10 +102,15 @@ jobs:
           pattern: docket-dist-*
           path: dist
 
+      - run: ls -alh dist
+
       - uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
           files: dist/*
-          generate_release_notes: true
+          name: ${{ github.ref_name }}
+          prerelease: true
+          tag_name: ${{ github.ref }}
 
       - uses: actions/attest-build-provenance@v3
         with:
