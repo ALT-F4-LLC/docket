@@ -7,7 +7,7 @@
 
 Docket is a local-first, SQLite-backed CLI issue tracker that lives inside your repository. It provides enterprise-grade issue tracking without requiring a server, network connection, or third-party service.
 
-Docket serves two audiences equally: **human developers** who want a fast, beautiful terminal experience with rich lipgloss styling, and **AI coding agents** that need structured, machine-readable output to plan and execute work. Every command renders colorful, styled output by default and clean, parseable JSON with `--json`. Neither mode is an afterthought. Both are first-class.
+Docket serves two audiences equally: **human developers** who want a fast, beautiful terminal experience with rich styling, and **AI coding agents** that need structured, machine-readable output to plan and execute work. Every command renders colorful, styled output by default and clean, parseable JSON with `--json`. Neither mode is an afterthought. Both are first-class.
 
 ## Quick Start
 
