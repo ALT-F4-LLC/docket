@@ -9,33 +9,6 @@ Docket is a local-first, SQLite-backed CLI issue tracker that lives inside your 
 
 Docket serves two audiences equally: **human developers** who want a fast, beautiful terminal experience with rich styling, and **AI coding agents** that need structured, machine-readable output to plan and execute work. Every command renders colorful, styled output by default and clean, parseable JSON with `--json`. Neither mode is an afterthought. Both are first-class.
 
-## Quick Start
-
-```bash
-# Initialize a new issue database in the current directory
-docket init
-
-# Create an issue with priority and type
-docket issue create -t "Build auth module" -p high -T feature
-
-# Create a sub-issue that depends on the first
-docket issue create -t "Set up database schema" -p high -T task --parent DKT-1
-docket issue link add DKT-2 depends-on DKT-1
-
-# See what's ready to work on (unblocked, sorted by priority)
-docket next
-
-# View the Kanban board
-docket board
-```
-
-**AI agents:** add `--json` to any command for structured, machine-readable output:
-
-```bash
-docket next --json
-docket issue list --json -s todo -s in-progress
-```
-
 ## Installation
 
 ### Quick Install
@@ -72,6 +45,33 @@ make build
 
 # Install to $GOPATH/bin
 make install
+```
+
+## Quick Start
+
+```bash
+# Initialize a new issue database in the current directory
+docket init
+
+# Create an issue with priority and type
+docket issue create -t "Build auth module" -p high -T feature
+
+# Create a sub-issue that depends on the first
+docket issue create -t "Set up database schema" -p high -T task --parent DKT-1
+docket issue link add DKT-2 depends-on DKT-1
+
+# See what's ready to work on (unblocked, sorted by priority)
+docket next
+
+# View the Kanban board
+docket board
+```
+
+**AI agents:** add `--json` to any command for structured, machine-readable output:
+
+```bash
+docket next --json
+docket issue list --json -s todo -s in-progress
 ```
 
 ## Why Docket?
