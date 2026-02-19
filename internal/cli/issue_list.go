@@ -163,12 +163,13 @@ var listCmd = &cobra.Command{
 			}
 		}
 
-		_ = parentMap // will be consumed by grouped renderer in a subsequent change
-		_ = progress  // will be consumed by grouped renderer in a subsequent change
-
 		var message string
 		if !jsonMode {
-			message = render.RenderTable(issues, treeMode)
+			if treeMode {
+				message = render.RenderTable(issues, true)
+			} else {
+				message = render.RenderGroupedTable(issues, parentMap, progress)
+			}
 		}
 		w.Success(result, message)
 

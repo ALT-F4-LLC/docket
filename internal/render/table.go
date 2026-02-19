@@ -485,64 +485,113 @@ func RenderGroupedTable(issues []*model.Issue, parentMap map[int]*model.Issue, p
 	return renderGroupedColorTable(groups, standalone, progress)
 }
 
-// renderGroupedColorTable renders grouped issues with lipgloss styling.
-func renderGroupedColorTable(groups []parentGroup, standalone []*model.Issue, progress map[int]SubIssueProgress) string {
-	var sections []string
-
+// buildParentTitle builds the styled title string for a parent group header,
+// truncating the issue title so the total visual width does not exceed maxWidth.
+func buildParentTitle(g parentGroup, progress map[int]SubIssueProgress, maxWidth int) string {
 	headerBoldStyle := lipgloss.NewStyle().Bold(true)
 	idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
-	for _, g := range groups {
-		// Build section header.
-		kindStyle := lipgloss.NewStyle().
-			Foreground(ColorFromName(g.parent.Kind.Color())).
-			Bold(true)
-		statusStyle := lipgloss.NewStyle().
-			Foreground(ColorFromName(g.parent.Status.Color())).
-			Bold(true)
-		priorityStyle := lipgloss.NewStyle().
-			Foreground(ColorFromName(g.parent.Priority.Color())).
-			Bold(true)
+	kindStyle := lipgloss.NewStyle().
+		Foreground(ColorFromName(g.parent.Kind.Color())).
+		Bold(true)
+	statusStyle := lipgloss.NewStyle().
+		Foreground(ColorFromName(g.parent.Status.Color())).
+		Bold(true)
+	priorityStyle := lipgloss.NewStyle().
+		Foreground(ColorFromName(g.parent.Priority.Color())).
+		Bold(true)
 
-		// Progress indicator.
-		prog := ""
-		if progress != nil {
-			if p, ok := progress[g.parent.ID]; ok && p.Total > 0 {
-				prog = dimStyle.Render(fmt.Sprintf("(%d/%d done)", p.Done, p.Total))
-			}
+	// Build fixed-width parts.
+	kindPart := kindStyle.Render(g.parent.Kind.Icon())
+	idPart := idStyle.Render(model.FormatID(g.parent.ID))
+	statusPart := statusStyle.Render(fmt.Sprintf("%s %s", g.parent.Status.Icon(), string(g.parent.Status)))
+	priorityPart := priorityStyle.Render(fmt.Sprintf("%s %s", g.parent.Priority.Icon(), string(g.parent.Priority)))
+
+	progPart := ""
+	if progress != nil {
+		if p, ok := progress[g.parent.ID]; ok && p.Total > 0 {
+			progPart = "  " + dimStyle.Render(fmt.Sprintf("(%d/%d done)", p.Done, p.Total))
 		}
-
-		header := fmt.Sprintf("%s %s  %s  %s  %s",
-			kindStyle.Render(g.parent.Kind.Icon()),
-			idStyle.Render(model.FormatID(g.parent.ID)),
-			headerBoldStyle.Render(g.parent.Title),
-			statusStyle.Render(fmt.Sprintf("%s %s", g.parent.Status.Icon(), string(g.parent.Status))),
-			priorityStyle.Render(fmt.Sprintf("%s %s", g.parent.Priority.Icon(), string(g.parent.Priority))),
-		)
-		if prog != "" {
-			header += "  " + prog
-		}
-
-		// Render children as an indented table.
-		childTable := renderColorChildTable(g.children)
-
-		sections = append(sections, header+"\n"+childTable)
 	}
 
-	// Render standalone issues.
+	// Template: "{kind} {id}  {title}  {status}  {priority}{prog}"
+	// Spacing:       1     2         2         2
+	overhead := lipgloss.Width(kindPart) + 1 +
+		lipgloss.Width(idPart) + 2 +
+		2 + lipgloss.Width(statusPart) + 2 +
+		lipgloss.Width(priorityPart) +
+		lipgloss.Width(progPart)
+
+	availableForTitle := maxWidth - overhead
+	if availableForTitle < 10 {
+		availableForTitle = 10
+	}
+
+	truncatedTitle := truncate(g.parent.Title, availableForTitle)
+	titlePart := headerBoldStyle.Render(truncatedTitle)
+
+	return fmt.Sprintf("%s %s  %s  %s  %s%s",
+		kindPart, idPart, titlePart, statusPart, priorityPart, progPart)
+}
+
+// buildTitleBox constructs a bordered title box (top border + centered title line)
+// at the given innerWidth, using the provided border style.
+func buildTitleBox(title string, innerWidth int, borderStyle lipgloss.Style) string {
+	topLine := borderStyle.Render("┌" + strings.Repeat("─", innerWidth) + "┐")
+
+	titleWidth := lipgloss.Width(title)
+	padding := innerWidth - titleWidth
+	if padding < 0 {
+		padding = 0
+	}
+	leftPad := padding / 2
+	rightPad := padding - leftPad
+	titleLine := borderStyle.Render("│") +
+		strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) +
+		borderStyle.Render("│")
+
+	return topLine + "\n" + titleLine
+}
+
+// renderGroupedColorTable renders grouped issues with lipgloss styling.
+func renderGroupedColorTable(groups []parentGroup, standalone []*model.Issue, progress map[int]SubIssueProgress) string {
+	var sections []string
+
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	for _, g := range groups {
+		childTable := renderColorChildTable(g.children, true)
+		innerWidth := colorTableInnerWidth(childTable)
+		title := buildParentTitle(g, progress, innerWidth-4)
+		titleBox := buildTitleBox(title, innerWidth, borderStyle)
+		sections = append(sections, titleBox+"\n"+childTable)
+	}
+
 	if len(standalone) > 0 {
 		sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
-		standaloneHeader := sectionStyle.Render("Standalone Issues")
-		childTable := renderColorChildTable(standalone)
-		sections = append(sections, standaloneHeader+"\n"+childTable)
+		childTable := renderColorChildTable(standalone, true)
+		innerWidth := colorTableInnerWidth(childTable)
+		standaloneTitle := sectionStyle.Render("Standalone Issues")
+		titleBox := buildTitleBox(standaloneTitle, innerWidth, borderStyle)
+		sections = append(sections, titleBox+"\n"+childTable)
 	}
 
 	return strings.Join(sections, "\n\n")
 }
 
-// renderColorChildTable renders a set of issues as a lipgloss-styled table with 2-space indent.
-func renderColorChildTable(issues []*model.Issue) string {
+// colorTableInnerWidth returns the content width (excluding border chars) of a rendered table.
+func colorTableInnerWidth(rendered string) int {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+	return lipgloss.Width(lines[0]) - 2
+}
+
+// renderColorChildTable renders a set of issues as a lipgloss-styled table.
+// If withConnector is true, the top border uses ├/┤ to connect with a title box above.
+func renderColorChildTable(issues []*model.Issue, withConnector bool) string {
 	headers := []string{"ID", "Status", "Priority", "Type", "Title", "Assignee", "Updated"}
 
 	rows := make([][]string, 0, len(issues))
@@ -564,9 +613,17 @@ func renderColorChildTable(issues []*model.Issue) string {
 		}
 	}
 
+	border := lipgloss.NormalBorder()
+	if withConnector {
+		border.TopLeft = "├"
+		border.TopRight = "┤"
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
 	t := table.New().
-		Border(lipgloss.NormalBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("8"))).
+		Border(border).
+		BorderStyle(borderStyle).
 		Headers(headers...).
 		Rows(rows...).
 		StyleFunc(func(row, col int) lipgloss.Style {
@@ -597,19 +654,11 @@ func renderColorChildTable(issues []*model.Issue) string {
 			}
 		})
 
-	// Indent the entire table by 2 spaces.
-	rendered := t.Render()
-	var indented strings.Builder
-	for i, line := range strings.Split(rendered, "\n") {
-		if i > 0 {
-			indented.WriteString("\n")
-		}
-		indented.WriteString("  ")
-		indented.WriteString(line)
-	}
-
-	return indented.String()
+	return t.Render()
 }
+
+// plainTableWidth is the content width for plain-text grouped tables.
+const plainTableWidth = 120
 
 // renderGroupedPlainTable renders grouped issues as plain text without color.
 func renderGroupedPlainTable(groups []parentGroup, standalone []*model.Issue, progress map[int]SubIssueProgress) string {
@@ -620,7 +669,7 @@ func renderGroupedPlainTable(groups []parentGroup, standalone []*model.Issue, pr
 			b.WriteString("\n")
 		}
 
-		// Progress indicator.
+		// Build title string, truncating the issue title to fit within plainTableWidth.
 		prog := ""
 		if progress != nil {
 			if p, ok := progress[g.parent.ID]; ok && p.Total > 0 {
@@ -628,18 +677,31 @@ func renderGroupedPlainTable(groups []parentGroup, standalone []*model.Issue, pr
 			}
 		}
 
-		// Section header.
-		fmt.Fprintf(&b, "=== %s %s  %s  %s %s  %s %s%s ===\n",
+		// Template: "{kind} {id}  {title}  {status_icon} {status}  {priority_icon} {priority}{prog}"
+		// Calculate fixed overhead to determine available space for the issue title.
+		fixedParts := fmt.Sprintf("%s %s    %s %s  %s %s%s",
 			g.parent.Kind.Icon(),
 			model.FormatID(g.parent.ID),
-			g.parent.Title,
+			g.parent.Status.Icon(), string(g.parent.Status),
+			g.parent.Priority.Icon(), string(g.parent.Priority),
+			prog,
+		)
+		availableForTitle := plainTableWidth - len([]rune(fixedParts))
+		if availableForTitle < 10 {
+			availableForTitle = 10
+		}
+		truncatedTitle := truncate(g.parent.Title, availableForTitle)
+
+		title := fmt.Sprintf("%s %s  %s  %s %s  %s %s%s",
+			g.parent.Kind.Icon(),
+			model.FormatID(g.parent.ID),
+			truncatedTitle,
 			g.parent.Status.Icon(), string(g.parent.Status),
 			g.parent.Priority.Icon(), string(g.parent.Priority),
 			prog,
 		)
 
-		// Children as indented plain rows.
-		renderPlainChildRows(&b, g.children)
+		renderPlainSection(&b, title, g.children)
 	}
 
 	// Standalone issues.
@@ -647,24 +709,49 @@ func renderGroupedPlainTable(groups []parentGroup, standalone []*model.Issue, pr
 		if len(groups) > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString("=== Standalone Issues ===\n")
-		renderPlainChildRows(&b, standalone)
+		renderPlainSection(&b, "Standalone Issues", standalone)
 	}
 
 	return b.String()
 }
 
-// renderPlainChildRows renders issue rows with 2-space indent in plain-text format.
-func renderPlainChildRows(b *strings.Builder, issues []*model.Issue) {
+// renderPlainSection renders a plain-text section with a centered title box
+// connected to the data rows below.
+func renderPlainSection(b *strings.Builder, title string, issues []*model.Issue) {
+	w := plainTableWidth
+
+	// Title box: top border, centered title, connector.
+	fmt.Fprintf(b, "┌%s┐\n", strings.Repeat("─", w))
+
+	titleRunes := []rune(title)
+	titleLen := len(titleRunes)
+	padding := w - titleLen
+	if padding < 0 {
+		padding = 0
+	}
+	leftPad := padding / 2
+	rightPad := padding - leftPad
+	fmt.Fprintf(b, "│%s%s%s│\n",
+		strings.Repeat(" ", leftPad), title, strings.Repeat(" ", rightPad))
+	fmt.Fprintf(b, "├%s┤\n", strings.Repeat("─", w))
+
+	// Column header and data rows.
+	fmt.Fprintf(b, "│ %-9s %-15s %-17s %-11s %-39s %-14s %s │\n",
+		"ID", "Status", "Priority", "Type", "Title", "Assignee", "Updated")
+	fmt.Fprintf(b, "├%s┤\n", strings.Repeat("─", w))
+
 	for _, issue := range issues {
-		fmt.Fprintf(b, "  %-10s %-16s %-18s %-12s %-40s %-15s %s\n",
+		fmt.Fprintf(b, "│ %-9s %-17s %-17s %-13s %-39s %-14s %s │\n",
 			model.FormatID(issue.ID),
 			statusLabel(issue.Status),
 			fmt.Sprintf("%s %s", issue.Priority.Icon(), string(issue.Priority)),
 			fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)),
-			truncate(issue.Title, maxTitleWidth),
+			truncate(issue.Title, maxTitleWidth-1),
 			issue.Assignee,
 			humanize.Time(issue.UpdatedAt),
 		)
 	}
+
+	// Bottom border.
+	fmt.Fprintf(b, "└%s┘\n", strings.Repeat("─", w))
 }

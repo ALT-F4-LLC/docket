@@ -189,3 +189,94 @@ func TestListIssuesDefaultSortWithDoneStatus(t *testing.T) {
 		t.Errorf("issues[2].Status = %q, want done", issues[2].Status)
 	}
 }
+
+// createTestIssueWithParent creates a child issue with the specified parent ID.
+func createTestIssueWithParent(t *testing.T, conn *sql.DB, title string, status model.Status, priority model.Priority, parentID int) int {
+	t.Helper()
+	issue := &model.Issue{
+		Title:    title,
+		Status:   status,
+		Priority: priority,
+		Kind:     model.IssueKindTask,
+		ParentID: &parentID,
+	}
+	id, err := CreateIssue(conn, issue, nil, nil)
+	if err != nil {
+		t.Fatalf("CreateIssue(%q): %v", title, err)
+	}
+	time.Sleep(time.Millisecond)
+	return id
+}
+
+func TestListIssues_ParentFetchingPattern(t *testing.T) {
+	db := mustOpen(t)
+	if err := Initialize(db); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	// Create a parent issue that is in-progress (will be excluded by a "todo" filter).
+	parentID := createTestIssue(t, db, "parent-epic", model.StatusInProgress, model.PriorityHigh)
+
+	// Create child issues that are "todo" (will match the filter).
+	child1ID := createTestIssueWithParent(t, db, "child-1", model.StatusTodo, model.PriorityHigh, parentID)
+	child2ID := createTestIssueWithParent(t, db, "child-2", model.StatusTodo, model.PriorityMedium, parentID)
+	child3ID := createTestIssueWithParent(t, db, "child-3", model.StatusTodo, model.PriorityLow, parentID)
+
+	// Filter for "todo" status only -- parent (in-progress) should be excluded.
+	issues, total, err := ListIssues(db, ListOptions{
+		Statuses: []string{string(model.StatusTodo)},
+	})
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3", total)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("len(issues) = %d, want 3", len(issues))
+	}
+
+	// Verify only children are returned (parent should not be in the result).
+	returnedIDs := make(map[int]bool)
+	for _, iss := range issues {
+		returnedIDs[iss.ID] = true
+	}
+	if returnedIDs[parentID] {
+		t.Errorf("parent (ID=%d) should NOT be in filtered results, but it is", parentID)
+	}
+	for _, childID := range []int{child1ID, child2ID, child3ID} {
+		if !returnedIDs[childID] {
+			t.Errorf("child (ID=%d) should be in filtered results, but it is not", childID)
+		}
+	}
+
+	// Verify all children reference the parent.
+	for _, iss := range issues {
+		if iss.ParentID == nil {
+			t.Errorf("issue %d should have ParentID set, got nil", iss.ID)
+		} else if *iss.ParentID != parentID {
+			t.Errorf("issue %d ParentID = %d, want %d", iss.ID, *iss.ParentID, parentID)
+		}
+	}
+
+	// Now fetch the parent via GetIssuesByIDs -- this is the pattern used by
+	// the CLI to get parent headers for children whose parents were excluded by filters.
+	parentMap, err := GetIssuesByIDs(db, []int{parentID})
+	if err != nil {
+		t.Fatalf("GetIssuesByIDs: %v", err)
+	}
+	if len(parentMap) != 1 {
+		t.Fatalf("parentMap length = %d, want 1", len(parentMap))
+	}
+
+	parent, ok := parentMap[parentID]
+	if !ok {
+		t.Fatalf("parentMap missing parent ID %d", parentID)
+	}
+	if parent.Title != "parent-epic" {
+		t.Errorf("parent.Title = %q, want %q", parent.Title, "parent-epic")
+	}
+	if parent.Status != model.StatusInProgress {
+		t.Errorf("parent.Status = %q, want %q", parent.Status, model.StatusInProgress)
+	}
+}
