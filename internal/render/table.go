@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -302,4 +303,455 @@ func renderPlainTreeNode(b *strings.Builder, issue *model.Issue, children map[in
 	for _, child := range children[issue.ID] {
 		renderPlainTreeNode(b, child, children, depth+1)
 	}
+}
+
+// statusRank returns a numeric rank for sorting by status: lower = higher priority.
+func statusRank(s model.Status) int {
+	switch s {
+	case model.StatusInProgress:
+		return 0
+	case model.StatusReview:
+		return 1
+	case model.StatusTodo:
+		return 2
+	case model.StatusBacklog:
+		return 3
+	case model.StatusDone:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// priorityRank returns a numeric rank for sorting by priority: lower = higher priority.
+func priorityRank(p model.Priority) int {
+	switch p {
+	case model.PriorityCritical:
+		return 0
+	case model.PriorityHigh:
+		return 1
+	case model.PriorityMedium:
+		return 2
+	case model.PriorityLow:
+		return 3
+	case model.PriorityNone:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// sortIssuesByRank sorts issues by status rank, then priority rank, then created_at DESC.
+func sortIssuesByRank(issues []*model.Issue) {
+	sort.SliceStable(issues, func(i, j int) bool {
+		si, sj := statusRank(issues[i].Status), statusRank(issues[j].Status)
+		if si != sj {
+			return si < sj
+		}
+		pi, pj := priorityRank(issues[i].Priority), priorityRank(issues[j].Priority)
+		if pi != pj {
+			return pi < pj
+		}
+		return issues[i].CreatedAt.After(issues[j].CreatedAt)
+	})
+}
+
+// parentGroup holds a parent issue and its children for grouped rendering.
+type parentGroup struct {
+	parent   *model.Issue
+	children []*model.Issue
+}
+
+// RenderGroupedTable renders issues grouped by parent-child relationships.
+// Parent issues are displayed as section headers with progress indicators,
+// and their children are rendered as indented table rows beneath them.
+// Standalone issues (no parent and no children) appear in a separate section at the bottom.
+//
+// Parameters:
+//   - issues: the filtered result set from the query.
+//   - parentMap: parent issues fetched separately that are NOT in the filtered set.
+//   - progress: sub-issue progress data keyed by parent issue ID.
+func RenderGroupedTable(issues []*model.Issue, parentMap map[int]*model.Issue, progress map[int]SubIssueProgress) string {
+	if len(issues) == 0 {
+		return EmptyState("No issues found.", "Create one with: docket issue create", false)
+	}
+
+	// Build a set of issue IDs in the result set for fast lookup.
+	issueSet := make(map[int]bool, len(issues))
+	for _, issue := range issues {
+		issueSet[issue.ID] = true
+	}
+
+	// Identify which issues in the result set are parents (have children pointing to them).
+	parentIDs := make(map[int]bool)
+	for _, issue := range issues {
+		if issue.ParentID != nil {
+			parentIDs[*issue.ParentID] = true
+		}
+	}
+
+	// Classify issues into three buckets.
+	childrenByParent := make(map[int][]*model.Issue)
+	var standalone []*model.Issue
+
+	for _, issue := range issues {
+		if issue.ParentID != nil {
+			childrenByParent[*issue.ParentID] = append(childrenByParent[*issue.ParentID], issue)
+		} else if parentIDs[issue.ID] {
+			// This issue is a parent (has children in the result set).
+			// It will be used as a group header; don't add to standalone.
+		} else {
+			standalone = append(standalone, issue)
+		}
+	}
+
+	// Build parent groups.
+	var groups []parentGroup
+
+	// Collect unique parent IDs that actually have children in the result.
+	seenParents := make(map[int]bool)
+	for parentID, children := range childrenByParent {
+		if seenParents[parentID] {
+			continue
+		}
+		seenParents[parentID] = true
+
+		var parent *model.Issue
+		if issueSet[parentID] {
+			// Parent is in the result set -- find it.
+			for _, issue := range issues {
+				if issue.ID == parentID {
+					parent = issue
+					break
+				}
+			}
+		} else if parentMap != nil {
+			// Parent was fetched separately.
+			parent = parentMap[parentID]
+		}
+
+		if parent == nil {
+			// Parent not available anywhere -- treat children as standalone.
+			standalone = append(standalone, children...)
+			continue
+		}
+
+		groups = append(groups, parentGroup{
+			parent:   parent,
+			children: children,
+		})
+	}
+
+	// Handle parents in the result set that have zero children in the result.
+	// They should be treated as standalone.
+	for _, issue := range issues {
+		if issue.ParentID == nil && parentIDs[issue.ID] {
+			if _, hasChildren := childrenByParent[issue.ID]; !hasChildren {
+				standalone = append(standalone, issue)
+			}
+		}
+	}
+
+	// If there are no groups at all, render as a flat table.
+	if len(groups) == 0 {
+		return RenderTable(issues, false)
+	}
+
+	// Sort parent groups by status rank, priority rank, created_at DESC.
+	sort.SliceStable(groups, func(i, j int) bool {
+		si, sj := statusRank(groups[i].parent.Status), statusRank(groups[j].parent.Status)
+		if si != sj {
+			return si < sj
+		}
+		pi, pj := priorityRank(groups[i].parent.Priority), priorityRank(groups[j].parent.Priority)
+		if pi != pj {
+			return pi < pj
+		}
+		return groups[i].parent.CreatedAt.After(groups[j].parent.CreatedAt)
+	})
+
+	// Sort children within each group.
+	for i := range groups {
+		sortIssuesByRank(groups[i].children)
+	}
+
+	// Sort standalone issues.
+	sortIssuesByRank(standalone)
+
+	if !ColorsEnabled() {
+		return renderGroupedPlainTable(groups, standalone, progress)
+	}
+
+	return renderGroupedColorTable(groups, standalone, progress)
+}
+
+// buildParentTitle builds the styled title string for a parent group header,
+// truncating the issue title so the total visual width does not exceed maxWidth.
+func buildParentTitle(g parentGroup, progress map[int]SubIssueProgress, maxWidth int) string {
+	headerBoldStyle := lipgloss.NewStyle().Bold(true)
+	idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	kindStyle := lipgloss.NewStyle().
+		Foreground(ColorFromName(g.parent.Kind.Color())).
+		Bold(true)
+	statusStyle := lipgloss.NewStyle().
+		Foreground(ColorFromName(g.parent.Status.Color())).
+		Bold(true)
+	priorityStyle := lipgloss.NewStyle().
+		Foreground(ColorFromName(g.parent.Priority.Color())).
+		Bold(true)
+
+	// Build fixed-width parts.
+	kindPart := kindStyle.Render(g.parent.Kind.Icon())
+	idPart := idStyle.Render(model.FormatID(g.parent.ID))
+	statusPart := statusStyle.Render(fmt.Sprintf("%s %s", g.parent.Status.Icon(), string(g.parent.Status)))
+	priorityPart := priorityStyle.Render(fmt.Sprintf("%s %s", g.parent.Priority.Icon(), string(g.parent.Priority)))
+
+	progPart := ""
+	if progress != nil {
+		if p, ok := progress[g.parent.ID]; ok && p.Total > 0 {
+			progPart = "  " + dimStyle.Render(fmt.Sprintf("(%d/%d done)", p.Done, p.Total))
+		}
+	}
+
+	// Template: "{kind} {id}  {title}  {status}  {priority}{prog}"
+	// Spacing:       1     2         2         2
+	overhead := lipgloss.Width(kindPart) + 1 +
+		lipgloss.Width(idPart) + 2 +
+		2 + lipgloss.Width(statusPart) + 2 +
+		lipgloss.Width(priorityPart) +
+		lipgloss.Width(progPart)
+
+	availableForTitle := maxWidth - overhead
+	if availableForTitle < 10 {
+		availableForTitle = 10
+	}
+
+	truncatedTitle := truncate(g.parent.Title, availableForTitle)
+	titlePart := headerBoldStyle.Render(truncatedTitle)
+
+	return fmt.Sprintf("%s %s  %s  %s  %s%s",
+		kindPart, idPart, titlePart, statusPart, priorityPart, progPart)
+}
+
+// buildTitleBox constructs a bordered title box (top border + centered title line)
+// at the given innerWidth, using the provided border style.
+func buildTitleBox(title string, innerWidth int, borderStyle lipgloss.Style) string {
+	topLine := borderStyle.Render("┌" + strings.Repeat("─", innerWidth) + "┐")
+
+	titleWidth := lipgloss.Width(title)
+	padding := innerWidth - titleWidth
+	if padding < 0 {
+		padding = 0
+	}
+	leftPad := padding / 2
+	rightPad := padding - leftPad
+	titleLine := borderStyle.Render("│") +
+		strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) +
+		borderStyle.Render("│")
+
+	return topLine + "\n" + titleLine
+}
+
+// renderGroupedColorTable renders grouped issues with lipgloss styling.
+func renderGroupedColorTable(groups []parentGroup, standalone []*model.Issue, progress map[int]SubIssueProgress) string {
+	var sections []string
+
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	for _, g := range groups {
+		childTable := renderColorChildTable(g.children, true)
+		innerWidth := colorTableInnerWidth(childTable)
+		title := buildParentTitle(g, progress, innerWidth-4)
+		titleBox := buildTitleBox(title, innerWidth, borderStyle)
+		sections = append(sections, titleBox+"\n"+childTable)
+	}
+
+	if len(standalone) > 0 {
+		sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+		childTable := renderColorChildTable(standalone, true)
+		innerWidth := colorTableInnerWidth(childTable)
+		standaloneTitle := sectionStyle.Render("Standalone Issues")
+		titleBox := buildTitleBox(standaloneTitle, innerWidth, borderStyle)
+		sections = append(sections, titleBox+"\n"+childTable)
+	}
+
+	return strings.Join(sections, "\n\n")
+}
+
+// colorTableInnerWidth returns the content width (excluding border chars) of a rendered table.
+func colorTableInnerWidth(rendered string) int {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+	return lipgloss.Width(lines[0]) - 2
+}
+
+// renderColorChildTable renders a set of issues as a lipgloss-styled table.
+// If withConnector is true, the top border uses ├/┤ to connect with a title box above.
+func renderColorChildTable(issues []*model.Issue, withConnector bool) string {
+	headers := []string{"ID", "Status", "Priority", "Type", "Title", "Assignee", "Updated"}
+
+	rows := make([][]string, 0, len(issues))
+	for _, issue := range issues {
+		rows = append(rows, issueToRow(issue))
+	}
+
+	type rowColors struct {
+		statusColor   string
+		priorityColor string
+		kindColor     string
+	}
+	colorMap := make([]rowColors, len(issues))
+	for i, issue := range issues {
+		colorMap[i] = rowColors{
+			statusColor:   issue.Status.Color(),
+			priorityColor: issue.Priority.Color(),
+			kindColor:     issue.Kind.Color(),
+		}
+	}
+
+	border := lipgloss.NormalBorder()
+	if withConnector {
+		border.TopLeft = "├"
+		border.TopRight = "┤"
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	t := table.New().
+		Border(border).
+		BorderStyle(borderStyle).
+		Headers(headers...).
+		Rows(rows...).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			s := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1)
+
+			if row == table.HeaderRow {
+				return s.Bold(true).Foreground(lipgloss.Color("15"))
+			}
+
+			if row < 0 || row >= len(colorMap) {
+				return s
+			}
+
+			rc := colorMap[row]
+			switch col {
+			case 0: // ID
+				return s.Foreground(lipgloss.Color("15"))
+			case 1: // Status
+				return s.Foreground(ColorFromName(rc.statusColor))
+			case 2: // Priority
+				return s.Foreground(ColorFromName(rc.priorityColor))
+			case 3: // Type
+				return s.Foreground(ColorFromName(rc.kindColor))
+			case 4: // Title
+				return s.Bold(true)
+			default:
+				return s
+			}
+		})
+
+	return t.Render()
+}
+
+// plainTableWidth is the content width for plain-text grouped tables.
+const plainTableWidth = 120
+
+// renderGroupedPlainTable renders grouped issues as plain text without color.
+func renderGroupedPlainTable(groups []parentGroup, standalone []*model.Issue, progress map[int]SubIssueProgress) string {
+	var b strings.Builder
+
+	for i, g := range groups {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+
+		// Build title string, truncating the issue title to fit within plainTableWidth.
+		prog := ""
+		if progress != nil {
+			if p, ok := progress[g.parent.ID]; ok && p.Total > 0 {
+				prog = fmt.Sprintf("  (%d/%d done)", p.Done, p.Total)
+			}
+		}
+
+		// Template: "{kind} {id}  {title}  {status_icon} {status}  {priority_icon} {priority}{prog}"
+		// Calculate fixed overhead to determine available space for the issue title.
+		fixedParts := fmt.Sprintf("%s %s    %s %s  %s %s%s",
+			g.parent.Kind.Icon(),
+			model.FormatID(g.parent.ID),
+			g.parent.Status.Icon(), string(g.parent.Status),
+			g.parent.Priority.Icon(), string(g.parent.Priority),
+			prog,
+		)
+		availableForTitle := plainTableWidth - len([]rune(fixedParts))
+		if availableForTitle < 10 {
+			availableForTitle = 10
+		}
+		truncatedTitle := truncate(g.parent.Title, availableForTitle)
+
+		title := fmt.Sprintf("%s %s  %s  %s %s  %s %s%s",
+			g.parent.Kind.Icon(),
+			model.FormatID(g.parent.ID),
+			truncatedTitle,
+			g.parent.Status.Icon(), string(g.parent.Status),
+			g.parent.Priority.Icon(), string(g.parent.Priority),
+			prog,
+		)
+
+		renderPlainSection(&b, title, g.children)
+	}
+
+	// Standalone issues.
+	if len(standalone) > 0 {
+		if len(groups) > 0 {
+			b.WriteString("\n")
+		}
+		renderPlainSection(&b, "Standalone Issues", standalone)
+	}
+
+	return b.String()
+}
+
+// renderPlainSection renders a plain-text section with a centered title box
+// connected to the data rows below.
+func renderPlainSection(b *strings.Builder, title string, issues []*model.Issue) {
+	w := plainTableWidth
+
+	// Title box: top border, centered title, connector.
+	fmt.Fprintf(b, "┌%s┐\n", strings.Repeat("─", w))
+
+	titleRunes := []rune(title)
+	titleLen := len(titleRunes)
+	padding := w - titleLen
+	if padding < 0 {
+		padding = 0
+	}
+	leftPad := padding / 2
+	rightPad := padding - leftPad
+	fmt.Fprintf(b, "│%s%s%s│\n",
+		strings.Repeat(" ", leftPad), title, strings.Repeat(" ", rightPad))
+	fmt.Fprintf(b, "├%s┤\n", strings.Repeat("─", w))
+
+	// Column header and data rows.
+	fmt.Fprintf(b, "│ %-9s %-15s %-17s %-11s %-39s %-14s %s │\n",
+		"ID", "Status", "Priority", "Type", "Title", "Assignee", "Updated")
+	fmt.Fprintf(b, "├%s┤\n", strings.Repeat("─", w))
+
+	for _, issue := range issues {
+		fmt.Fprintf(b, "│ %-9s %-17s %-17s %-13s %-39s %-14s %s │\n",
+			model.FormatID(issue.ID),
+			statusLabel(issue.Status),
+			fmt.Sprintf("%s %s", issue.Priority.Icon(), string(issue.Priority)),
+			fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)),
+			truncate(issue.Title, maxTitleWidth-1),
+			issue.Assignee,
+			humanize.Time(issue.UpdatedAt),
+		)
+	}
+
+	// Bottom border.
+	fmt.Fprintf(b, "└%s┘\n", strings.Repeat("─", w))
 }
