@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -10,8 +11,14 @@ import (
 )
 
 // writeHumanSuccess writes a human-readable success message to w.
+// Single-line messages get a checkmark prefix; multi-line content (tables,
+// boards, detail views) is printed as-is to avoid corrupting formatted output.
 func writeHumanSuccess(w io.Writer, message string) {
 	if message == "" {
+		return
+	}
+	if strings.Contains(message, "\n") {
+		fmt.Fprintln(w, message)
 		return
 	}
 	if render.ColorsEnabled() {

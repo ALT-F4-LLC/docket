@@ -170,6 +170,47 @@ func TestWriteHumanSuccessPlainNoColor(t *testing.T) {
 	}
 }
 
+func TestWriteHumanSuccessMultiLineNoCheckmark(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	var buf bytes.Buffer
+	table := "┌────┬───────┐\n│ ID │ Title │\n└────┴───────┘"
+	writeHumanSuccess(&buf, table)
+
+	got := buf.String()
+	want := table + "\n"
+	if got != want {
+		t.Errorf("writeHumanSuccess(multi-line) = %q, want %q", got, want)
+	}
+	// Multi-line output must NOT contain the checkmark icon
+	if bytes.Contains(buf.Bytes(), []byte("\u2714")) {
+		t.Error("expected no checkmark icon for multi-line output")
+	}
+}
+
+func TestWriteHumanSuccessMultiLineWithColorsNoCheckmark(t *testing.T) {
+	// Even when colors are enabled, multi-line content should not get a checkmark
+	t.Setenv("TERM", "xterm-256color")
+	// Unset NO_COLOR to ensure colors would be enabled
+	t.Setenv("NO_COLOR", "")
+	// Note: render.ColorsEnabled() may still return false in test environments,
+	// but the newline check comes first regardless — this test verifies the
+	// multi-line branch is taken before the color check.
+
+	var buf bytes.Buffer
+	table := "line1\nline2\nline3"
+	writeHumanSuccess(&buf, table)
+
+	got := buf.String()
+	want := table + "\n"
+	if got != want {
+		t.Errorf("writeHumanSuccess(multi-line, colors) = %q, want %q", got, want)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("\u2714")) {
+		t.Error("expected no checkmark icon for multi-line output even with colors")
+	}
+}
+
 func TestWriteHumanSuccessEmptyMessage(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -210,6 +251,28 @@ func TestWriterSuccessHumanMode(t *testing.T) {
 	got := stdout.String()
 	if got != "Operation succeeded\n" {
 		t.Errorf("Writer.Success human mode stdout = %q, want %q", got, "Operation succeeded\n")
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no stderr output, got %q", stderr.String())
+	}
+}
+
+func TestWriterSuccessHumanModeMultiLine(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	var stdout, stderr bytes.Buffer
+	w := &Writer{JSONMode: false, Stdout: &stdout, Stderr: &stderr}
+
+	table := "┌────┐\n│ OK │\n└────┘"
+	w.Success(nil, table)
+
+	got := stdout.String()
+	want := table + "\n"
+	if got != want {
+		t.Errorf("Writer.Success human mode multi-line stdout = %q, want %q", got, want)
+	}
+	if bytes.Contains(stdout.Bytes(), []byte("\u2714")) {
+		t.Error("expected no checkmark icon for multi-line output via Writer.Success")
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("expected no stderr output, got %q", stderr.String())
