@@ -304,26 +304,47 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 	}
 
 	// Determine sort.
-	sortField := "created_at"
+	var orderBySQL string
 	if opts.Sort != "" && validSortFields[opts.Sort] {
-		sortField = opts.Sort
-	}
-	// Defense-in-depth: reject any sort field that doesn't look like a plain column name,
-	// even if it passed the allowlist check above.
-	if !safeIdentifier.MatchString(sortField) {
-		return nil, 0, fmt.Errorf("invalid sort field %q", sortField)
-	}
-	sortDir := "DESC"
-	if strings.EqualFold(opts.SortDir, "asc") {
-		sortDir = "ASC"
+		sortField := opts.Sort
+		// Defense-in-depth: reject any sort field that doesn't look like a plain column name,
+		// even if it passed the allowlist check above.
+		if !safeIdentifier.MatchString(sortField) {
+			return nil, 0, fmt.Errorf("invalid sort field %q", sortField)
+		}
+		sortDir := "DESC"
+		if strings.EqualFold(opts.SortDir, "asc") {
+			sortDir = "ASC"
+		}
+		// Safe: sortField validated against validSortFields and safeIdentifier; sortDir is "ASC" or "DESC".
+		orderBySQL = fmt.Sprintf("ORDER BY i.%s %s", sortField, sortDir)
+	} else {
+		// Default composite sort: status rank, then priority rank, then newest first.
+		orderBySQL = `ORDER BY
+			CASE i.status
+				WHEN 'in-progress' THEN 0
+				WHEN 'review'      THEN 1
+				WHEN 'todo'        THEN 2
+				WHEN 'backlog'     THEN 3
+				WHEN 'done'        THEN 4
+				ELSE 5
+			END ASC,
+			CASE i.priority
+				WHEN 'critical' THEN 0
+				WHEN 'high'     THEN 1
+				WHEN 'medium'   THEN 2
+				WHEN 'low'      THEN 3
+				WHEN 'none'     THEN 4
+				ELSE 5
+			END ASC,
+			i.created_at DESC`
 	}
 
 	// Main query.
-	// Safe: sortField validated against validSortFields and safeIdentifier; sortDir is "ASC" or "DESC".
 	mainQuery := fmt.Sprintf(
 		`SELECT i.id, i.parent_id, i.title, i.description, i.status, i.priority, i.kind, i.assignee, i.created_at, i.updated_at
-		 FROM issues i %s %s %s %s ORDER BY i.%s %s`,
-		joinClause, whereSQL, groupBySQL, havingSQL, sortField, sortDir,
+		 FROM issues i %s %s %s %s %s`,
+		joinClause, whereSQL, groupBySQL, havingSQL, orderBySQL,
 	)
 
 	mainArgs := make([]interface{}, len(args))
