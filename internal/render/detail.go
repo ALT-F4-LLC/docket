@@ -316,20 +316,10 @@ func renderActivity(activity []model.Activity) string {
 			if actor == "" {
 				actor = "system"
 			}
-			var detail string
-			switch {
-			case a.OldValue != "" && a.NewValue != "":
-				detail = fmt.Sprintf("%s -> %s", a.OldValue, a.NewValue)
-			case a.NewValue != "":
-				detail = fmt.Sprintf("added %s", a.NewValue)
-			case a.OldValue != "":
-				detail = fmt.Sprintf("removed %s", a.OldValue)
-			}
-			line = fmt.Sprintf("  %s %s changed %s: %s  %s",
+			line = fmt.Sprintf("  %s %s changed %s  %s",
 				icon,
 				actor,
 				fieldStyle.Render(a.FieldChanged),
-				detail,
 				timeStyle.Render(humanize.Time(a.CreatedAt)),
 			)
 		}
@@ -429,17 +419,8 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 				if actor == "" {
 					actor = "system"
 				}
-				var detail string
-				switch {
-				case a.OldValue != "" && a.NewValue != "":
-					detail = fmt.Sprintf("%s -> %s", a.OldValue, a.NewValue)
-				case a.NewValue != "":
-					detail = fmt.Sprintf("added %s", a.NewValue)
-				case a.OldValue != "":
-					detail = fmt.Sprintf("removed %s", a.OldValue)
-				}
-				fmt.Fprintf(&b, "  %s %s changed %s: %s  %s\n",
-					icon, actor, a.FieldChanged, detail, humanize.Time(a.CreatedAt))
+				fmt.Fprintf(&b, "  %s %s changed %s  %s\n",
+					icon, actor, a.FieldChanged, humanize.Time(a.CreatedAt))
 			}
 		}
 	}
