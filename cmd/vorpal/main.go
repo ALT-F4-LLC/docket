@@ -23,6 +23,11 @@ func main() {
 
 	// Artifact dependencies
 
+	ffmpeg, err := context.FetchArtifactAlias("ffmpeg:7.1.3")
+	if err != nil {
+		log.Fatalf("failed to get ffmpeg: %v", err)
+	}
+
 	gobin, err := artifact.GoBin(context)
 	if err != nil {
 		log.Fatalf("failed to get go: %v", err)
@@ -58,6 +63,16 @@ func main() {
 		log.Fatalf("failed to get staticcheck: %v", err)
 	}
 
+	ttyd, err := context.FetchArtifactAlias("ttyd:1.7.7")
+	if err != nil {
+		log.Fatalf("failed to get ttyd: %v", err)
+	}
+
+	vhs, err := context.FetchArtifactAlias("vhs:0.10.0")
+	if err != nil {
+		log.Fatalf("failed to get vhs: %v", err)
+	}
+
 	// Artifacts
 
 	goarch, err := language.GetGOARCH(contextTarget)
@@ -73,6 +88,7 @@ func main() {
 	_, err = artifact.
 		NewProjectEnvironment("docket-shell", Systems).
 		WithArtifacts([]*string{
+			ffmpeg,
 			gobin,
 			goimports,
 			gopls,
@@ -80,6 +96,8 @@ func main() {
 			protocGenGo,
 			protocGenGoGRPC,
 			staticcheck,
+			ttyd,
+			vhs,
 		}).
 		WithEnvironments([]string{
 			"CGO_ENABLED=0",

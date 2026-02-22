@@ -9,6 +9,10 @@ Docket is a local-first, SQLite-backed CLI issue tracker that lives inside your 
 
 Docket serves two audiences equally: **human developers** who want a fast, beautiful terminal experience with rich styling, and **AI coding agents** that need structured, machine-readable output to plan and execute work. Every command renders colorful, styled output by default and clean, parseable JSON with `--json`. Neither mode is an afterthought. Both are first-class.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="Docket CLI demo showing issue creation, Kanban board, and execution planning" width="800" />
+</p>
+
 ## Installation
 
 ### Quick Install

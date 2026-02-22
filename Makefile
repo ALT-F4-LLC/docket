@@ -1,4 +1,4 @@
-.PHONY: build test lint vet install clean
+.PHONY: build test lint vet install clean demo
 
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
@@ -23,3 +23,7 @@ install:
 
 clean:
 	rm -rf ./bin/
+
+demo: build
+	@command -v vhs >/dev/null 2>&1 || { echo "vhs is required: brew install vhs"; exit 1; }
+	vhs scripts/demo.tape
