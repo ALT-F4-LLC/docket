@@ -23,7 +23,7 @@ func main() {
 
 	// Artifact dependencies
 
-	ffmpeg, err := context.FetchArtifactAlias("ffmpeg:7.1.3")
+	ffmpeg, err := context.FetchArtifactAlias("ffmpeg:8.0.1")
 	if err != nil {
 		log.Fatalf("failed to get ffmpeg: %v", err)
 	}
