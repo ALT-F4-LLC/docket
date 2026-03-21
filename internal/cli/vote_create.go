@@ -30,6 +30,7 @@ var voteCreateCmd = &cobra.Command{
 		createdBy, _ := cmd.Flags().GetString("created-by")
 		domainTagsRaw, _ := cmd.Flags().GetString("domain-tags")
 		filesChangedRaw, _ := cmd.Flags().GetString("files-changed")
+		escalationReason, _ := cmd.Flags().GetString("escalation-reason")
 		jsonMode, _ := cmd.Flags().GetBool("json")
 
 		// Default created-by to git user.name.
@@ -175,16 +176,22 @@ var voteCreateCmd = &cobra.Command{
 			return cmdErr(err, output.ErrValidation)
 		}
 
+		var escalationReasonPtr *string
+		if escalationReason != "" {
+			escalationReasonPtr = &escalationReason
+		}
+
 		proposal := model.Proposal{
-			Description:    description,
-			Rationale:      rationale,
-			Criticality:    model.Criticality(criticality),
-			Status:         model.ProposalStatusOpen,
-			RequiredVoters: voters,
-			Threshold:      threshold,
-			CreatedBy:      createdBy,
-			DomainTags:     domainTags,
-			FilesChanged:   filesChanged,
+			Description:      description,
+			Rationale:        rationale,
+			Criticality:      model.Criticality(criticality),
+			Status:           model.ProposalStatusOpen,
+			RequiredVoters:   voters,
+			Threshold:        threshold,
+			CreatedBy:        createdBy,
+			DomainTags:       domainTags,
+			FilesChanged:     filesChanged,
+			EscalationReason: escalationReasonPtr,
 		}
 
 		id, err := db.CreateProposal(conn, &proposal)
@@ -213,5 +220,6 @@ func init() {
 	voteCreateCmd.Flags().String("created-by", "", "Creator identity (default: git user.name)")
 	voteCreateCmd.Flags().String("domain-tags", "", "Comma-separated domain tags (e.g. cli,database,api)")
 	voteCreateCmd.Flags().String("files-changed", "", "Comma-separated file paths affected by this proposal")
+	voteCreateCmd.Flags().String("escalation-reason", "", "Reason for escalation (if applicable)")
 	voteCmd.AddCommand(voteCreateCmd)
 }

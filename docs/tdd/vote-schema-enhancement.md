@@ -1,6 +1,6 @@
 ---
 project: "docket"
-maturity: "draft"
+maturity: "implemented"
 last_updated: "2026-03-20"
 updated_by: "@staff-engineer"
 scope: "Enhance vote schema (v2->v3) with structured findings, richer proposal metadata, approve-with-concerns verdict, and committed lifecycle status"
@@ -482,11 +482,11 @@ Since all changes are additive columns, rollback means ignoring the new columns.
 
 ### Open Questions
 
-1. **Should `docket vote commit` accept `--escalation-reason`?** The reference JSON includes `escalation_reason` on the proposal. This TDD places it on the proposal table but does not expose a CLI command to set it. **Recommendation:** Expose it as an optional flag on `vote commit` and also accept it on `vote create`. Escalation is an exceptional path -- the flag exists but is rarely used. **Decision needed from operator.**
+1. **Should `docket vote commit` accept `--escalation-reason`?** Yes — `--escalation-reason` added to both `vote commit` and `vote create`. When provided, it sets the `escalation_reason` field on the proposal. When empty (default), the existing value is preserved. ✅ Resolved.
 
-2. **Should `domain_tags` filtering use exact match or substring?** Substring (`LIKE`) is simpler but less precise. `json_each()` is exact but requires SQLite JSON1 extension (compiled in by default since 3.38.0, 2022). **Recommendation:** Use `json_each()` for correctness. Docket already requires a recent SQLite via go-sqlite3. **Decision needed from operator.**
+2. **Should `domain_tags` filtering use exact match or substring?** Exact match via `json_each()`. Docket requires a recent SQLite via go-sqlite3 which includes JSON1. ✅ Resolved.
 
-3. **Should `effective_weight` appear in the human-readable table, or only in `--json` output?** Adding another column to the vote breakdown table makes it wider. **Recommendation:** Add it to both -- the value is directly meaningful and the table already has space. Implemented as a computed column in render, not stored.
+3. **Should `effective_weight` appear in the human-readable table, or only in `--json` output?** Both — appears in the vote breakdown table as a "Weight" column and inline in detail views. Computed at render time, not stored. ✅ Resolved.
 
 ## 9. Testing Strategy
 

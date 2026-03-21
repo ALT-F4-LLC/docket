@@ -13,10 +13,11 @@ import (
 
 // voteCommitResult is the JSON wire format for the vote commit response.
 type voteCommitResult struct {
-	ID           string `json:"id"`
-	Status       string `json:"status"`
-	FinalOutcome string `json:"final_outcome"`
-	UpdatedAt    string `json:"updated_at"`
+	ID               string  `json:"id"`
+	Status           string  `json:"status"`
+	FinalOutcome     string  `json:"final_outcome"`
+	EscalationReason *string `json:"escalation_reason"`
+	UpdatedAt        string  `json:"updated_at"`
 }
 
 var voteCommitCmd = &cobra.Command{
@@ -33,8 +34,9 @@ var voteCommitCmd = &cobra.Command{
 		}
 
 		outcome, _ := cmd.Flags().GetString("outcome")
+		escalationReason, _ := cmd.Flags().GetString("escalation-reason")
 
-		err = db.CommitProposal(conn, proposalID, outcome)
+		err = db.CommitProposal(conn, proposalID, outcome, escalationReason)
 		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				return cmdErr(fmt.Errorf("proposal %s not found", model.FormatProposalID(proposalID)), output.ErrNotFound)
@@ -48,11 +50,17 @@ var voteCommitCmd = &cobra.Command{
 		fmtID := model.FormatProposalID(proposalID)
 		msg := fmt.Sprintf("%s committed: %s", fmtID, outcome)
 
+		var escalationReasonPtr *string
+		if escalationReason != "" {
+			escalationReasonPtr = &escalationReason
+		}
+
 		data := voteCommitResult{
-			ID:           fmtID,
-			Status:       string(model.ProposalStatusCommitted),
-			FinalOutcome: outcome,
-			UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+			ID:               fmtID,
+			Status:           string(model.ProposalStatusCommitted),
+			FinalOutcome:     outcome,
+			EscalationReason: escalationReasonPtr,
+			UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
 		}
 
 		w.Success(data, msg)
@@ -63,5 +71,6 @@ var voteCommitCmd = &cobra.Command{
 
 func init() {
 	voteCommitCmd.Flags().String("outcome", "Committed", "Final outcome description")
+	voteCommitCmd.Flags().String("escalation-reason", "", "Reason for escalation (if applicable)")
 	voteCmd.AddCommand(voteCommitCmd)
 }

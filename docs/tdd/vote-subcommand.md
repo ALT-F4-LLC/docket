@@ -1,6 +1,6 @@
 ---
 project: "docket"
-maturity: "draft"
+maturity: "implemented"
 last_updated: "2026-03-20"
 updated_by: "@staff-engineer"
 scope: "Add `docket vote` subcommand group for PBFT-inspired consensus voting persistence and quorum checking"
@@ -508,11 +508,11 @@ This follows the existing migration pattern in `schema.go` where `Migrate()` is 
 
 ### Open Questions
 
-1. **Should `docket vote unlink` be included?** The spec mentions `link` but not `unlink`. Recommendation: include it for completeness, following the `issue link remove` pattern. **Decision needed from operator.**
+1. **Should `docket vote unlink` be included?** Yes — included, following the `issue link remove` pattern. ✅ Resolved.
 
-2. **Should proposals support deletion?** Currently not specified. Recommendation: omit for now; proposals are audit records. Add later if needed.
+2. **Should proposals support deletion?** No — omitted. Proposals are audit records. ✅ Resolved.
 
-3. **Should the human-readable output for `vote list` use the same grouped-table pattern as `issue list`?** Recommendation: use a simple table (ID, description truncated, status, votes cast/required, criticality) since proposals don't have parent/child relationships.
+3. **Should the human-readable output for `vote list` use the same grouped-table pattern as `issue list`?** No — uses a simple flat table (ID, description, status, votes cast/required, criticality). ✅ Resolved.
 
 ## 9. Testing Strategy
 

@@ -427,7 +427,8 @@ func GetProposalIssues(db *sql.DB, proposalID int) ([]int, error) {
 }
 
 // CommitProposal transitions an approved proposal to committed status with a final outcome.
-func CommitProposal(db *sql.DB, id int, outcome string) error {
+// If escalationReason is non-empty, it is stored on the proposal.
+func CommitProposal(db *sql.DB, id int, outcome string, escalationReason string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -451,9 +452,15 @@ func CommitProposal(db *sql.DB, id int, outcome string) error {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	var escalationReasonVal any
+	if escalationReason != "" {
+		escalationReasonVal = escalationReason
+	}
+
 	_, err = tx.Exec(
-		"UPDATE proposals SET status = ?, final_outcome = ?, updated_at = ? WHERE id = ?",
-		string(model.ProposalStatusCommitted), outcome, now, id,
+		"UPDATE proposals SET status = ?, final_outcome = ?, escalation_reason = COALESCE(?, escalation_reason), updated_at = ? WHERE id = ?",
+		string(model.ProposalStatusCommitted), outcome, escalationReasonVal, now, id,
 	)
 	if err != nil {
 		return fmt.Errorf("committing proposal: %w", err)

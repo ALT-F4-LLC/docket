@@ -811,7 +811,7 @@ func TestCommitProposalHappyPath(t *testing.T) {
 
 	// Commit the approved proposal.
 	outcome := "Changes applied to main branch."
-	if err := CommitProposal(db, id, outcome); err != nil {
+	if err := CommitProposal(db, id, outcome, ""); err != nil {
 		t.Fatalf("CommitProposal: %v", err)
 	}
 
@@ -831,7 +831,7 @@ func TestCommitProposalHappyPath(t *testing.T) {
 func TestCommitProposalNotFound(t *testing.T) {
 	db := mustInitAndMigrate(t)
 
-	err := CommitProposal(db, 999, "outcome")
+	err := CommitProposal(db, 999, "outcome", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -848,7 +848,7 @@ func TestCommitProposalOpenRejected(t *testing.T) {
 		Threshold:      0.67,
 	})
 
-	err := CommitProposal(db, id, "outcome")
+	err := CommitProposal(db, id, "outcome", "")
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("expected ErrConflict for open proposal, got %v", err)
 	}
@@ -874,7 +874,7 @@ func TestCommitProposalRejectedRejected(t *testing.T) {
 		t.Fatalf("CastVote: %v", err)
 	}
 
-	err = CommitProposal(db, id, "outcome")
+	err = CommitProposal(db, id, "outcome", "")
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("expected ErrConflict for rejected proposal, got %v", err)
 	}
@@ -899,14 +899,91 @@ func TestCommitProposalAlreadyCommitted(t *testing.T) {
 		t.Fatalf("CastVote: %v", err)
 	}
 
-	if err := CommitProposal(db, id, "first commit"); err != nil {
+	if err := CommitProposal(db, id, "first commit", ""); err != nil {
 		t.Fatalf("CommitProposal: %v", err)
 	}
 
 	// Second commit should fail.
-	err = CommitProposal(db, id, "second commit")
+	err = CommitProposal(db, id, "second commit", "")
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("expected ErrConflict for already committed, got %v", err)
+	}
+}
+
+func TestCommitProposalWithEscalationReason(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	id, err := CreateProposal(db, &model.Proposal{
+		Description:    "Escalation commit test",
+		Criticality:    model.CriticalityHigh,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	_, err = CastVote(db, &model.Vote{
+		ProposalID: id, VoterName: "voter-1",
+		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("CastVote: %v", err)
+	}
+
+	reason := "Quorum not reached after 3 rounds"
+	if err := CommitProposal(db, id, "Committed with escalation", reason); err != nil {
+		t.Fatalf("CommitProposal: %v", err)
+	}
+
+	p, err := GetProposal(db, id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.EscalationReason == nil || *p.EscalationReason != reason {
+		t.Errorf("EscalationReason = %v, want %q", p.EscalationReason, reason)
+	}
+	if p.FinalOutcome != "Committed with escalation" {
+		t.Errorf("FinalOutcome = %q, want %q", p.FinalOutcome, "Committed with escalation")
+	}
+}
+
+func TestCommitProposalPreservesExistingEscalationReason(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	original := "Set at creation time"
+	id, err := CreateProposal(db, &model.Proposal{
+		Description:      "Preserve escalation test",
+		Criticality:      model.CriticalityHigh,
+		Status:           model.ProposalStatusOpen,
+		RequiredVoters:   1,
+		Threshold:        0.67,
+		EscalationReason: &original,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	_, err = CastVote(db, &model.Vote{
+		ProposalID: id, VoterName: "voter-1",
+		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("CastVote: %v", err)
+	}
+
+	// Commit with empty escalation reason — should preserve the original.
+	if err := CommitProposal(db, id, "Done", ""); err != nil {
+		t.Fatalf("CommitProposal: %v", err)
+	}
+
+	p, err := GetProposal(db, id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.EscalationReason == nil || *p.EscalationReason != original {
+		t.Errorf("EscalationReason = %v, want %q (preserved from create)", p.EscalationReason, original)
 	}
 }
 
