@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -50,6 +51,23 @@ var rootCmd = &cobra.Command{
 
 		ctx := context.WithValue(cmd.Context(), cfgKey, cfg)
 
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			if !isWatchEligible(cmd) {
+				return cmdErr(
+					fmt.Errorf("--watch is not supported on write commands"),
+					output.ErrValidation,
+				)
+			}
+			interval, _ := cmd.Flags().GetDuration("interval")
+			if interval < 500*time.Millisecond {
+				return cmdErr(
+					fmt.Errorf("--interval must be at least 500ms"),
+					output.ErrValidation,
+				)
+			}
+		}
+
 		if _, ok := cmd.Annotations["skipDB"]; ok {
 			cmd.SetContext(ctx)
 			return nil
@@ -86,8 +104,16 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().Bool("json", false, "Output in JSON format")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "Suppress non-essential output")
+	rootCmd.PersistentFlags().BoolP("watch", "w", false, "Watch for changes and refresh output")
+	rootCmd.PersistentFlags().Duration("interval", 2*time.Second, "Refresh interval for --watch")
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
+}
+
+// initWatchFlags must be called after all subcommands are registered to hide
+// --watch and --interval on ineligible commands. This is invoked from Execute.
+func initWatchFlags() {
+	hideWatchFlags(rootCmd)
 }
 
 func getWriter(cmd *cobra.Command) *output.Writer {
@@ -111,6 +137,7 @@ func getDB(cmd *cobra.Command) *sql.DB {
 
 // Execute runs the root command and returns an exit code.
 func Execute() int {
+	initWatchFlags()
 	if err := rootCmd.Execute(); err != nil {
 		jsonMode, _ := rootCmd.PersistentFlags().GetBool("json")
 		quietMode, _ := rootCmd.PersistentFlags().GetBool("quiet")

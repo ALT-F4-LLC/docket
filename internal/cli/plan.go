@@ -1,10 +1,16 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
+
+	"golang.org/x/term"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -13,6 +19,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
 
@@ -34,93 +41,113 @@ var planCmd = &cobra.Command{
 	Use:   "plan",
 	Short: "Show execution plan with phased grouping",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		statuses, _ := cmd.Flags().GetStringSlice("status")
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		rootFlag, _ := cmd.Flags().GetString("root")
-
-		// Validate status filter values.
-		for _, s := range statuses {
-			if err := model.ValidateStatus(model.Status(s)); err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			jsonMode, _ := cmd.Flags().GetBool("json")
+			quietMode, _ := cmd.Flags().GetBool("quiet")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return watch.RunWatch(ctx, watch.Options{
+				Interval:  interval,
+				JSONMode:  jsonMode,
+				QuietMode: quietMode,
+				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+			}, func(ctx context.Context, w *output.Writer) error {
+				return runPlan(cmd, args, w)
+			})
 		}
-
-		// Fetch all non-done issues.
-		issues, _, err := db.ListIssues(conn, db.ListOptions{
-			IncludeDone: false,
-			Limit:       0,
-		})
-		if err != nil {
-			return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
-		}
-
-		// Hydrate file attachments so the planner can detect file collisions.
-		if err := db.HydrateFiles(conn, issues); err != nil {
-			return cmdErr(fmt.Errorf("hydrating files: %w", err), output.ErrGeneral)
-		}
-
-		// Fetch all directional relations.
-		relations, err := db.GetAllDirectionalRelations(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-		}
-
-		// Build the DAG.
-		dag := planner.BuildDAG(issues, relations)
-
-		// Build plan filters.
-		filters := planner.PlanFilters{
-			Statuses: statuses,
-			Labels:   labels,
-		}
-
-		// Parse --root flag.
-		if rootFlag != "" {
-			rootID, err := model.ParseID(rootFlag)
-			if err != nil {
-				return cmdErr(fmt.Errorf("invalid root ID: %w", err), output.ErrValidation)
-			}
-			filters.RootID = &rootID
-		}
-
-		// Generate the plan (includes cycle detection via TopoSort).
-		plan, err := planner.GeneratePlan(dag, filters)
-		if err != nil {
-			var cycleErr *planner.CycleError
-			if errors.As(err, &cycleErr) {
-				return cmdErr(err, output.ErrConflict)
-			}
-			return cmdErr(fmt.Errorf("generating plan: %w", err), output.ErrGeneral)
-		}
-
-		// Build JSON result.
-		phases := make([]planPhaseJSON, len(plan.Phases))
-		for i, phase := range plan.Phases {
-			phases[i] = planPhaseJSON{
-				Phase:  phase.Number,
-				Issues: phase.Issues,
-			}
-		}
-
-		result := planResult{
-			Phases:         phases,
-			TotalIssues:    plan.TotalIssues,
-			TotalPhases:    plan.TotalPhases,
-			MaxParallelism: plan.MaxParallelism,
-		}
-
-		jsonMode, _ := cmd.Flags().GetBool("json")
-		var message string
-		if !jsonMode {
-			message = renderPlanHuman(plan, dag)
-		}
-		w.Success(result, message)
-
-		return nil
+		return runPlan(cmd, args, getWriter(cmd))
 	},
+}
+
+func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	statuses, _ := cmd.Flags().GetStringSlice("status")
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	rootFlag, _ := cmd.Flags().GetString("root")
+
+	// Validate status filter values.
+	for _, s := range statuses {
+		if err := model.ValidateStatus(model.Status(s)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+
+	// Fetch all non-done issues.
+	issues, _, err := db.ListIssues(conn, db.ListOptions{
+		IncludeDone: false,
+		Limit:       0,
+	})
+	if err != nil {
+		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
+	}
+
+	// Hydrate file attachments so the planner can detect file collisions.
+	if err := db.HydrateFiles(conn, issues); err != nil {
+		return cmdErr(fmt.Errorf("hydrating files: %w", err), output.ErrGeneral)
+	}
+
+	// Fetch all directional relations.
+	relations, err := db.GetAllDirectionalRelations(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+	}
+
+	// Build the DAG.
+	dag := planner.BuildDAG(issues, relations)
+
+	// Build plan filters.
+	filters := planner.PlanFilters{
+		Statuses: statuses,
+		Labels:   labels,
+	}
+
+	// Parse --root flag.
+	if rootFlag != "" {
+		rootID, err := model.ParseID(rootFlag)
+		if err != nil {
+			return cmdErr(fmt.Errorf("invalid root ID: %w", err), output.ErrValidation)
+		}
+		filters.RootID = &rootID
+	}
+
+	// Generate the plan (includes cycle detection via TopoSort).
+	plan, err := planner.GeneratePlan(dag, filters)
+	if err != nil {
+		var cycleErr *planner.CycleError
+		if errors.As(err, &cycleErr) {
+			return cmdErr(err, output.ErrConflict)
+		}
+		return cmdErr(fmt.Errorf("generating plan: %w", err), output.ErrGeneral)
+	}
+
+	// Build JSON result.
+	phases := make([]planPhaseJSON, len(plan.Phases))
+	for i, phase := range plan.Phases {
+		phases[i] = planPhaseJSON{
+			Phase:  phase.Number,
+			Issues: phase.Issues,
+		}
+	}
+
+	result := planResult{
+		Phases:         phases,
+		TotalIssues:    plan.TotalIssues,
+		TotalPhases:    plan.TotalPhases,
+		MaxParallelism: plan.MaxParallelism,
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = renderPlanHuman(plan, dag)
+	}
+	w.Success(result, message)
+
+	return nil
 }
 
 // renderPlanHuman renders the execution plan as human-readable text.

@@ -1,18 +1,24 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/tree"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // graphNode represents an issue in the dependency graph.
@@ -41,100 +47,119 @@ var graphCmd = &cobra.Command{
 	Short: "Show dependency graph for an issue",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		id, err := model.ParseID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
-		}
-
-		issue, err := db.GetIssue(conn, id)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
-		}
-
-		direction, _ := cmd.Flags().GetString("direction")
-		if direction != "up" && direction != "down" && direction != "both" {
-			return cmdErr(fmt.Errorf("invalid direction %q: must be one of [up, down, both]", direction), output.ErrValidation)
-		}
-
-		depth, _ := cmd.Flags().GetInt("depth")
-		if depth < 0 {
-			return cmdErr(fmt.Errorf("depth must be non-negative"), output.ErrValidation)
-		}
-
-		// Fetch all directional relations for graph traversal.
-		allRelations, err := db.GetAllDirectionalRelations(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-		}
-
-		// Build adjacency lists from relations.
-		forward, backward := planner.BuildAdjacency(allRelations)
-
-		// BFS to collect reachable nodes.
-		visited := map[int]bool{id: true}
-		var edges []graphEdge
-
-		// maxDepth: 0 means unlimited.
-		maxDepth := depth
-
-		if direction == "down" || direction == "both" {
-			bfsGraph(id, forward, visited, &edges, "blocks", maxDepth)
-		}
-
-		if direction == "up" || direction == "both" {
-			bfsGraph(id, backward, visited, &edges, "blocked_by", maxDepth)
-		}
-
-		// Bulk-fetch issue details for all visited nodes.
-		visitedIDs := make([]int, 0, len(visited))
-		for nodeID := range visited {
-			visitedIDs = append(visitedIDs, nodeID)
-		}
-		issueMap, err := db.GetIssuesByIDs(conn, visitedIDs)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching issues: %w", err), output.ErrGeneral)
-		}
-		// Ensure the focal issue is in the map (it was already fetched above).
-		issueMap[id] = issue
-
-		// Build nodes list.
-		nodes := make([]graphNode, 0, len(issueMap))
-		for _, iss := range issueMap {
-			nodes = append(nodes, graphNode{
-				ID:     model.FormatID(iss.ID),
-				Title:  iss.Title,
-				Status: string(iss.Status),
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			jsonMode, _ := cmd.Flags().GetBool("json")
+			quietMode, _ := cmd.Flags().GetBool("quiet")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return watch.RunWatch(ctx, watch.Options{
+				Interval:  interval,
+				JSONMode:  jsonMode,
+				QuietMode: quietMode,
+				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+			}, func(ctx context.Context, w *output.Writer) error {
+				return runIssueGraph(cmd, args, w)
 			})
 		}
-
-		result := graphResult{
-			IssueID: id,
-			Nodes:   nodes,
-			Edges:   edges,
-		}
-
-		mermaidMode, _ := cmd.Flags().GetBool("mermaid")
-		jsonMode, _ := cmd.Flags().GetBool("json")
-
-		if jsonMode {
-			w.Success(result, "")
-			return nil
-		}
-
-		if mermaidMode {
-			w.Success(result, renderMermaid(issueMap, edges))
-			return nil
-		}
-
-		w.Success(result, renderGraphTree(id, issueMap, forward, backward, direction, maxDepth))
-		return nil
+		return runIssueGraph(cmd, args, getWriter(cmd))
 	},
+}
+
+func runIssueGraph(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	id, err := model.ParseID(args[0])
+	if err != nil {
+		return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+	}
+
+	issue, err := db.GetIssue(conn, id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
+		}
+		return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+	}
+
+	direction, _ := cmd.Flags().GetString("direction")
+	if direction != "up" && direction != "down" && direction != "both" {
+		return cmdErr(fmt.Errorf("invalid direction %q: must be one of [up, down, both]", direction), output.ErrValidation)
+	}
+
+	depth, _ := cmd.Flags().GetInt("depth")
+	if depth < 0 {
+		return cmdErr(fmt.Errorf("depth must be non-negative"), output.ErrValidation)
+	}
+
+	// Fetch all directional relations for graph traversal.
+	allRelations, err := db.GetAllDirectionalRelations(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+	}
+
+	// Build adjacency lists from relations.
+	forward, backward := planner.BuildAdjacency(allRelations)
+
+	// BFS to collect reachable nodes.
+	visited := map[int]bool{id: true}
+	var edges []graphEdge
+
+	// maxDepth: 0 means unlimited.
+	maxDepth := depth
+
+	if direction == "down" || direction == "both" {
+		bfsGraph(id, forward, visited, &edges, "blocks", maxDepth)
+	}
+
+	if direction == "up" || direction == "both" {
+		bfsGraph(id, backward, visited, &edges, "blocked_by", maxDepth)
+	}
+
+	// Bulk-fetch issue details for all visited nodes.
+	visitedIDs := make([]int, 0, len(visited))
+	for nodeID := range visited {
+		visitedIDs = append(visitedIDs, nodeID)
+	}
+	issueMap, err := db.GetIssuesByIDs(conn, visitedIDs)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching issues: %w", err), output.ErrGeneral)
+	}
+	// Ensure the focal issue is in the map (it was already fetched above).
+	issueMap[id] = issue
+
+	// Build nodes list.
+	nodes := make([]graphNode, 0, len(issueMap))
+	for _, iss := range issueMap {
+		nodes = append(nodes, graphNode{
+			ID:     model.FormatID(iss.ID),
+			Title:  iss.Title,
+			Status: string(iss.Status),
+		})
+	}
+
+	result := graphResult{
+		IssueID: id,
+		Nodes:   nodes,
+		Edges:   edges,
+	}
+
+	mermaidMode, _ := cmd.Flags().GetBool("mermaid")
+	if w.JSONMode {
+		w.Success(result, "")
+		return nil
+	}
+
+	if mermaidMode {
+		w.Success(result, renderMermaid(issueMap, edges))
+		return nil
+	}
+
+	w.Success(result, renderGraphTree(id, issueMap, forward, backward, direction, maxDepth))
+	return nil
 }
 
 // bfsGraph performs BFS from the start node, following the given adjacency list,

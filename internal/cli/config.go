@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"golang.org/x/term"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -10,6 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
 
@@ -27,63 +33,84 @@ var configCmd = &cobra.Command{
 	Short:       "Display docket configuration",
 	Annotations: map[string]string{"skipDB": "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		cfg := getCfg(cmd)
-
-		docketPathEnv := os.Getenv("DOCKET_PATH")
-
-		exists, err := cfg.Exists()
-		if err != nil {
-			return cmdErr(fmt.Errorf("checking database: %w", err), output.ErrGeneral)
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			jsonMode, _ := cmd.Flags().GetBool("json")
+			quietMode, _ := cmd.Flags().GetBool("quiet")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return watch.RunWatch(ctx, watch.Options{
+				Interval:  interval,
+				JSONMode:  jsonMode,
+				QuietMode: quietMode,
+				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+			}, func(ctx context.Context, w *output.Writer) error {
+				return runConfig(cmd, args, w)
+			})
 		}
+		return runConfig(cmd, args, getWriter(cmd))
+	},
+}
 
-		if !exists {
-			w.Warn("No docket database found. Run 'docket init' to create one.")
+func runConfig(cmd *cobra.Command, args []string, w *output.Writer) error {
+	cfg := getCfg(cmd)
 
-			info := configInfo{
-				DBPath:        cfg.DBPath,
-				DBSizeBytes:   0,
-				SchemaVersion: 0,
-				IssuePrefix:   model.IDPrefix,
-				DocketPathEnv: docketPathEnv,
-				DocketPathSet: cfg.EnvVarSet,
-			}
+	docketPathEnv := os.Getenv("DOCKET_PATH")
 
-			w.Success(info, formatConfigHuman(info, true))
+	exists, err := cfg.Exists()
+	if err != nil {
+		return cmdErr(fmt.Errorf("checking database: %w", err), output.ErrGeneral)
+	}
 
-			return nil
-		}
-
-		conn, err := db.Open(cfg.DBPath)
-		if err != nil {
-			return cmdErr(fmt.Errorf("opening database: %w", err), output.ErrGeneral)
-		}
-		defer conn.Close()
-
-		schemaVersion, err := db.SchemaVersion(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
-		}
-
-		stat, err := os.Stat(cfg.DBPath)
-		if err != nil {
-			return cmdErr(fmt.Errorf("reading database file: %w", err), output.ErrGeneral)
-		}
-		dbSize := stat.Size()
+	if !exists {
+		w.Warn("No docket database found. Run 'docket init' to create one.")
 
 		info := configInfo{
 			DBPath:        cfg.DBPath,
-			DBSizeBytes:   dbSize,
-			SchemaVersion: schemaVersion,
+			DBSizeBytes:   0,
+			SchemaVersion: 0,
 			IssuePrefix:   model.IDPrefix,
 			DocketPathEnv: docketPathEnv,
 			DocketPathSet: cfg.EnvVarSet,
 		}
 
-		w.Success(info, formatConfigHuman(info, false))
+		w.Success(info, formatConfigHuman(info, true))
 
 		return nil
-	},
+	}
+
+	conn, err := db.Open(cfg.DBPath)
+	if err != nil {
+		return cmdErr(fmt.Errorf("opening database: %w", err), output.ErrGeneral)
+	}
+	defer conn.Close()
+
+	schemaVersion, err := db.SchemaVersion(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
+	}
+
+	stat, err := os.Stat(cfg.DBPath)
+	if err != nil {
+		return cmdErr(fmt.Errorf("reading database file: %w", err), output.ErrGeneral)
+	}
+	dbSize := stat.Size()
+
+	info := configInfo{
+		DBPath:        cfg.DBPath,
+		DBSizeBytes:   dbSize,
+		SchemaVersion: schemaVersion,
+		IssuePrefix:   model.IDPrefix,
+		DocketPathEnv: docketPathEnv,
+		DocketPathSet: cfg.EnvVarSet,
+	}
+
+	w.Success(info, formatConfigHuman(info, false))
+
+	return nil
 }
 
 func formatSize(bytes int64) string {

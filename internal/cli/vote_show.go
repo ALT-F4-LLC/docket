@@ -1,16 +1,22 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // voteShowResult composes a proposal with its votes and linked issues
@@ -92,47 +98,68 @@ var voteShowCmd = &cobra.Command{
 	Short: "Show proposal details",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		id, err := model.ParseProposalID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			jsonMode, _ := cmd.Flags().GetBool("json")
+			quietMode, _ := cmd.Flags().GetBool("quiet")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return watch.RunWatch(ctx, watch.Options{
+				Interval:  interval,
+				JSONMode:  jsonMode,
+				QuietMode: quietMode,
+				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+			}, func(ctx context.Context, w *output.Writer) error {
+				return runVoteShow(cmd, args, w)
+			})
 		}
-
-		proposal, err := db.GetProposal(conn, id)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("proposal %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching proposal: %w", err), output.ErrGeneral)
-		}
-
-		votes, err := db.GetProposalVotes(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
-		}
-
-		linkedIssues, err := db.GetProposalIssues(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
-		}
-
-		result := voteShowResult{
-			Proposal:     proposal,
-			Votes:        votes,
-			LinkedIssues: linkedIssues,
-		}
-
-		jsonMode, _ := cmd.Flags().GetBool("json")
-		var message string
-		if !jsonMode {
-			message = render.RenderProposalDetail(proposal, votes, linkedIssues)
-		}
-		w.Success(result, message)
-
-		return nil
+		return runVoteShow(cmd, args, getWriter(cmd))
 	},
+}
+
+// runVoteShow contains the query + render + output logic for vote show.
+func runVoteShow(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	id, err := model.ParseProposalID(args[0])
+	if err != nil {
+		return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
+	}
+
+	proposal, err := db.GetProposal(conn, id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return cmdErr(fmt.Errorf("proposal %s not found", args[0]), output.ErrNotFound)
+		}
+		return cmdErr(fmt.Errorf("fetching proposal: %w", err), output.ErrGeneral)
+	}
+
+	votes, err := db.GetProposalVotes(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
+	}
+
+	linkedIssues, err := db.GetProposalIssues(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
+	}
+
+	result := voteShowResult{
+		Proposal:     proposal,
+		Votes:        votes,
+		LinkedIssues: linkedIssues,
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = render.RenderProposalDetail(proposal, votes, linkedIssues)
+	}
+	w.Success(result, message)
+
+	return nil
 }
 
 func init() {

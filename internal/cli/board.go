@@ -1,12 +1,19 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"golang.org/x/term"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
 
@@ -26,94 +33,115 @@ var boardCmd = &cobra.Command{
 	Use:   "board",
 	Short: "Show Kanban board",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		priorities, _ := cmd.Flags().GetStringSlice("priority")
-		assignee, _ := cmd.Flags().GetString("assignee")
-		expand, _ := cmd.Flags().GetBool("expand")
-
-		// Validate filter enum values.
-		for _, p := range priorities {
-			if err := model.ValidatePriority(model.Priority(p)); err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			jsonMode, _ := cmd.Flags().GetBool("json")
+			quietMode, _ := cmd.Flags().GetBool("quiet")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return watch.RunWatch(ctx, watch.Options{
+				Interval:  interval,
+				JSONMode:  jsonMode,
+				QuietMode: quietMode,
+				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+			}, func(ctx context.Context, w *output.Writer) error {
+				return runBoard(cmd, args, w)
+			})
 		}
-
-		opts := db.ListOptions{
-			Priorities:  priorities,
-			Labels:      labels,
-			Assignee:    assignee,
-			IncludeDone: true,
-		}
-
-		issues, _, err := db.ListIssues(conn, opts)
-		if err != nil {
-			return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
-		}
-
-		// By default, roll up sub-issues into their parent (exclude issues that
-		// have a parent). When --expand is set, show all issues individually.
-		if !expand {
-			var roots []*model.Issue
-			for _, issue := range issues {
-				if issue.ParentID == nil {
-					roots = append(roots, issue)
-				}
-			}
-			issues = roots
-		}
-
-		if w.JSONMode {
-			// Group issues by status for structured output.
-			groups := make(map[model.Status][]*model.Issue)
-			for _, issue := range issues {
-				groups[issue.Status] = append(groups[issue.Status], issue)
-			}
-
-			var columns []boardColumn
-			for _, status := range render.StatusOrder {
-				col := groups[status]
-				if col == nil {
-					col = []*model.Issue{}
-				}
-				columns = append(columns, boardColumn{
-					Status: string(status),
-					Count:  len(col),
-					Issues: col,
-				})
-			}
-
-			w.Success(boardResult{Columns: columns}, "")
-			return nil
-		}
-
-		// Build sub-issue progress map for parent issues in a single query.
-		parentIDs := make([]int, len(issues))
-		for i, issue := range issues {
-			parentIDs[i] = issue.ID
-		}
-		batchProgress, err := db.GetBatchSubIssueProgress(conn, parentIDs)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
-		}
-		progress := make(map[int]render.SubIssueProgress, len(batchProgress))
-		for id, counts := range batchProgress {
-			if counts[1] > 0 {
-				progress[id] = render.SubIssueProgress{Done: counts[0], Total: counts[1]}
-			}
-		}
-
-		boardOpts := render.BoardOptions{
-			Expand:   expand,
-			Progress: progress,
-		}
-		message := render.RenderBoard(issues, boardOpts)
-		w.Success(nil, message)
-
-		return nil
+		return runBoard(cmd, args, getWriter(cmd))
 	},
+}
+
+func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	assignee, _ := cmd.Flags().GetString("assignee")
+	expand, _ := cmd.Flags().GetBool("expand")
+
+	// Validate filter enum values.
+	for _, p := range priorities {
+		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+
+	opts := db.ListOptions{
+		Priorities:  priorities,
+		Labels:      labels,
+		Assignee:    assignee,
+		IncludeDone: true,
+	}
+
+	issues, _, err := db.ListIssues(conn, opts)
+	if err != nil {
+		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
+	}
+
+	// By default, roll up sub-issues into their parent (exclude issues that
+	// have a parent). When --expand is set, show all issues individually.
+	if !expand {
+		var roots []*model.Issue
+		for _, issue := range issues {
+			if issue.ParentID == nil {
+				roots = append(roots, issue)
+			}
+		}
+		issues = roots
+	}
+
+	if w.JSONMode {
+		// Group issues by status for structured output.
+		groups := make(map[model.Status][]*model.Issue)
+		for _, issue := range issues {
+			groups[issue.Status] = append(groups[issue.Status], issue)
+		}
+
+		var columns []boardColumn
+		for _, status := range render.StatusOrder {
+			col := groups[status]
+			if col == nil {
+				col = []*model.Issue{}
+			}
+			columns = append(columns, boardColumn{
+				Status: string(status),
+				Count:  len(col),
+				Issues: col,
+			})
+		}
+
+		w.Success(boardResult{Columns: columns}, "")
+		return nil
+	}
+
+	// Build sub-issue progress map for parent issues in a single query.
+	parentIDs := make([]int, len(issues))
+	for i, issue := range issues {
+		parentIDs[i] = issue.ID
+	}
+	batchProgress, err := db.GetBatchSubIssueProgress(conn, parentIDs)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
+	}
+	progress := make(map[int]render.SubIssueProgress, len(batchProgress))
+	for id, counts := range batchProgress {
+		if counts[1] > 0 {
+			progress[id] = render.SubIssueProgress{Done: counts[0], Total: counts[1]}
+		}
+	}
+
+	boardOpts := render.BoardOptions{
+		Expand:   expand,
+		Progress: progress,
+	}
+	message := render.RenderBoard(issues, boardOpts)
+	w.Success(nil, message)
+
+	return nil
 }
 
 func init() {

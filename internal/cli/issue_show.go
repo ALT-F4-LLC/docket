@@ -1,16 +1,22 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // showResult composes the issue fields with additional detail fields
@@ -103,71 +109,91 @@ var showCmd = &cobra.Command{
 	Short: "Show issue details",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		id, err := model.ParseID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			jsonMode, _ := cmd.Flags().GetBool("json")
+			quietMode, _ := cmd.Flags().GetBool("quiet")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return watch.RunWatch(ctx, watch.Options{
+				Interval:  interval,
+				JSONMode:  jsonMode,
+				QuietMode: quietMode,
+				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+			}, func(ctx context.Context, w *output.Writer) error {
+				return runIssueShow(cmd, args, w)
+			})
 		}
-
-		issue, err := db.GetIssue(conn, id)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
-		}
-
-		// Hydrate labels.
-		issue.Labels, err = db.GetIssueLabels(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
-		}
-
-		// Hydrate files.
-		issue.Files, err = db.GetIssueFiles(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-		}
-
-		subIssues, err := db.GetSubIssues(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
-		}
-
-		relations, err := db.GetIssueRelations(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-		}
-
-		comments, err := db.ListComments(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-		}
-
-		activity, err := db.GetActivity(conn, id, 10)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
-		}
-
-		result := showResult{
-			Issue:     issue,
-			SubIssues: subIssues,
-			Relations: relations,
-			Comments:  comments,
-			Activity:  activity,
-		}
-
-		jsonMode, _ := cmd.Flags().GetBool("json")
-		var message string
-		if !jsonMode {
-			message = render.RenderDetail(issue, subIssues, relations, comments, activity)
-		}
-		w.Success(result, message)
-
-		return nil
+		return runIssueShow(cmd, args, getWriter(cmd))
 	},
+}
+
+func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	id, err := model.ParseID(args[0])
+	if err != nil {
+		return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+	}
+
+	issue, err := db.GetIssue(conn, id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
+		}
+		return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+	}
+
+	// Hydrate labels.
+	issue.Labels, err = db.GetIssueLabels(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
+	}
+
+	// Hydrate files.
+	issue.Files, err = db.GetIssueFiles(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
+	}
+
+	subIssues, err := db.GetSubIssues(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
+	}
+
+	relations, err := db.GetIssueRelations(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+	}
+
+	comments, err := db.ListComments(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
+	}
+
+	activity, err := db.GetActivity(conn, id, 10)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
+	}
+
+	result := showResult{
+		Issue:     issue,
+		SubIssues: subIssues,
+		Relations: relations,
+		Comments:  comments,
+		Activity:  activity,
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = render.RenderDetail(issue, subIssues, relations, comments, activity)
+	}
+	w.Success(result, message)
+
+	return nil
 }
 
 func init() {

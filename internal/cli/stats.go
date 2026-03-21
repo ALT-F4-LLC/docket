@@ -1,14 +1,21 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+
+	"golang.org/x/term"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
 
@@ -30,56 +37,77 @@ var statsCmd = &cobra.Command{
 	Use:   "stats",
 	Short: "Show summary statistics for the issue database",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		total, err := db.CountIssues(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("counting issues: %w", err), output.ErrGeneral)
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		if watchMode {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			jsonMode, _ := cmd.Flags().GetBool("json")
+			quietMode, _ := cmd.Flags().GetBool("quiet")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return watch.RunWatch(ctx, watch.Options{
+				Interval:  interval,
+				JSONMode:  jsonMode,
+				QuietMode: quietMode,
+				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+			}, func(ctx context.Context, w *output.Writer) error {
+				return runStats(cmd, args, w)
+			})
 		}
-
-		rootCount, err := db.CountRootIssues(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("counting root issues: %w", err), output.ErrGeneral)
-		}
-
-		byStatus, err := db.CountByStatus(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("counting by status: %w", err), output.ErrGeneral)
-		}
-
-		byPriority, err := db.CountByPriority(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("counting by priority: %w", err), output.ErrGeneral)
-		}
-
-		labels, err := db.ListAllLabels(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
-		}
-
-		labelStats := make([]labelStat, len(labels))
-		for i, l := range labels {
-			labelStats[i] = labelStat{Name: l.Name, Count: l.IssueCount}
-		}
-
-		result := statsResult{
-			Total:      total,
-			RootIssues: rootCount,
-			SubIssues:  total - rootCount,
-			ByStatus:   byStatus,
-			ByPriority: byPriority,
-			Labels:     labelStats,
-		}
-
-		var message string
-		if !w.JSONMode {
-			message = renderStats(result)
-		}
-		w.Success(result, message)
-
-		return nil
+		return runStats(cmd, args, getWriter(cmd))
 	},
+}
+
+func runStats(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	total, err := db.CountIssues(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("counting issues: %w", err), output.ErrGeneral)
+	}
+
+	rootCount, err := db.CountRootIssues(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("counting root issues: %w", err), output.ErrGeneral)
+	}
+
+	byStatus, err := db.CountByStatus(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("counting by status: %w", err), output.ErrGeneral)
+	}
+
+	byPriority, err := db.CountByPriority(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("counting by priority: %w", err), output.ErrGeneral)
+	}
+
+	labels, err := db.ListAllLabels(conn)
+	if err != nil {
+		return cmdErr(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
+	}
+
+	labelStats := make([]labelStat, len(labels))
+	for i, l := range labels {
+		labelStats[i] = labelStat{Name: l.Name, Count: l.IssueCount}
+	}
+
+	result := statsResult{
+		Total:      total,
+		RootIssues: rootCount,
+		SubIssues:  total - rootCount,
+		ByStatus:   byStatus,
+		ByPriority: byPriority,
+		Labels:     labelStats,
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = renderStats(result)
+	}
+	w.Success(result, message)
+
+	return nil
 }
 
 func init() {
