@@ -14,14 +14,16 @@ import (
 
 // voteResultData is the JSON wire format for vote result output.
 type voteResultData struct {
-	ID            string       `json:"id"`
-	Status        string       `json:"status"`
-	WeightedScore *float64     `json:"weighted_score"`
-	Threshold     float64      `json:"threshold"`
-	VotesCast     int          `json:"votes_cast"`
-	VotesRequired int          `json:"votes_required"`
-	QuorumReached bool         `json:"quorum_reached"`
-	Votes         []*model.Vote `json:"votes"`
+	ID               string        `json:"id"`
+	Status           string        `json:"status"`
+	FinalOutcome     string        `json:"final_outcome"`
+	EscalationReason *string       `json:"escalation_reason"`
+	WeightedScore    *float64      `json:"weighted_score"`
+	Threshold        float64       `json:"threshold"`
+	VotesCast        int           `json:"votes_cast"`
+	VotesRequired    int           `json:"votes_required"`
+	QuorumReached    bool          `json:"quorum_reached"`
+	Votes            []*model.Vote `json:"votes"`
 }
 
 func (d voteResultData) MarshalJSON() ([]byte, error) {
@@ -63,14 +65,16 @@ var voteResultCmd = &cobra.Command{
 		quorumReached := votesCast >= proposal.RequiredVoters
 
 		result := voteResultData{
-			ID:            model.FormatProposalID(proposal.ID),
-			Status:        string(proposal.Status),
-			WeightedScore: proposal.WeightedScore,
-			Threshold:     proposal.Threshold,
-			VotesCast:     votesCast,
-			VotesRequired: proposal.RequiredVoters,
-			QuorumReached: quorumReached,
-			Votes:         votes,
+			ID:               model.FormatProposalID(proposal.ID),
+			Status:           string(proposal.Status),
+			FinalOutcome:     proposal.FinalOutcome,
+			EscalationReason: proposal.EscalationReason,
+			WeightedScore:    proposal.WeightedScore,
+			Threshold:        proposal.Threshold,
+			VotesCast:        votesCast,
+			VotesRequired:    proposal.RequiredVoters,
+			QuorumReached:    quorumReached,
+			Votes:            votes,
 		}
 
 		var message string

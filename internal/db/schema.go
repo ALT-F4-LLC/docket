@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 const schemaDDL = `
@@ -138,6 +138,7 @@ func SchemaVersion(db *sql.DB) (int, error) {
 // For example, migrations[2] migrates from version 1 to version 2.
 var migrations = map[int]func(tx *sql.Tx) error{
 	2: migrateV1ToV2,
+	3: migrateV2ToV3,
 }
 
 // migrateV1ToV2 creates the proposals, votes, and proposal_issues tables.
@@ -181,6 +182,31 @@ CREATE INDEX IF NOT EXISTS idx_votes_proposal_id ON votes(proposal_id);
 `
 	_, err := tx.Exec(ddl)
 	return err
+}
+
+// migrateV2ToV3 adds new columns to proposals and votes tables for enhanced
+// vote tracking (rationale, domain tags, files changed, outcome, and findings).
+func migrateV2ToV3(tx *sql.Tx) error {
+	alterStmts := []struct {
+		table string
+		stmt  string
+	}{
+		{"proposals", `ALTER TABLE proposals ADD COLUMN rationale TEXT NOT NULL DEFAULT ''`},
+		{"proposals", `ALTER TABLE proposals ADD COLUMN domain_tags TEXT NOT NULL DEFAULT '[]'`},
+		{"proposals", `ALTER TABLE proposals ADD COLUMN files_changed TEXT NOT NULL DEFAULT '[]'`},
+		{"proposals", `ALTER TABLE proposals ADD COLUMN final_outcome TEXT NOT NULL DEFAULT ''`},
+		{"proposals", `ALTER TABLE proposals ADD COLUMN escalation_reason TEXT`},
+		{"votes", `ALTER TABLE votes ADD COLUMN findings_json TEXT`},
+		{"votes", `ALTER TABLE votes ADD COLUMN summary TEXT NOT NULL DEFAULT ''`},
+	}
+
+	for _, alt := range alterStmts {
+		if _, err := tx.Exec(alt.stmt); err != nil {
+			return fmt.Errorf("migrating v2 to v3: ALTER TABLE %s failed: %w", alt.table, err)
+		}
+	}
+
+	return nil
 }
 
 // Migrate checks the current schema version and applies any pending migrations

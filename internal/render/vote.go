@@ -43,6 +43,8 @@ func proposalStatusColor(s model.ProposalStatus) string {
 		return "green"
 	case model.ProposalStatusRejected:
 		return "red"
+	case model.ProposalStatusCommitted:
+		return "magenta"
 	default:
 		return "white"
 	}
@@ -55,6 +57,8 @@ func verdictColor(v model.Verdict) string {
 		return "green"
 	case model.VerdictReject:
 		return "red"
+	case model.VerdictApproveWithConcerns:
+		return "yellow"
 	default:
 		return "white"
 	}
@@ -222,6 +226,31 @@ func renderProposalMetadata(proposal *model.Proposal) string {
 	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Created:"), humanize.Time(proposal.CreatedAt)))
 	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Updated:"), humanize.Time(proposal.UpdatedAt)))
 
+	if proposal.FinalOutcome != "" {
+		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Final outcome:"), proposal.FinalOutcome))
+	}
+	if proposal.EscalationReason != nil {
+		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Escalation reason:"), *proposal.EscalationReason))
+	}
+
+	if proposal.Rationale != "" {
+		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Rationale:"), proposal.Rationale))
+	}
+	if len(proposal.DomainTags) > 0 {
+		tagStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+		var tags []string
+		for _, tag := range proposal.DomainTags {
+			tags = append(tags, tagStyle.Render("["+tag+"]"))
+		}
+		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Domain tags:"), strings.Join(tags, " ")))
+	}
+	if len(proposal.FilesChanged) > 0 {
+		lines = append(lines, labelStyle.Render("Files changed:"))
+		for _, f := range proposal.FilesChanged {
+			lines = append(lines, "  "+f)
+		}
+	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -247,20 +276,52 @@ func renderVoteList(votes []*model.Vote) string {
 		timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 		nameStyle := lipgloss.NewStyle().Bold(true)
 
-		line := fmt.Sprintf("  %s  %s  conf=%.2f  rel=%.2f  %s",
+		effectiveWeight := v.Confidence * v.DomainRelevance
+		line := fmt.Sprintf("  %s  %s  conf=%.2f  rel=%.2f  weight=%.2f  %s",
 			nameStyle.Render(v.VoterName),
 			verdictStyle.Render(string(v.Verdict)),
 			v.Confidence,
 			v.DomainRelevance,
+			effectiveWeight,
 			timeStyle.Render(humanize.Time(v.CreatedAt)),
 		)
-		if v.Findings != "" {
+
+		if v.FindingsJSON != nil {
+			line += renderStructuredFindings(v.FindingsJSON)
+		} else if v.Findings != "" {
 			line += "\n    " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(truncate(v.Findings, 80))
 		}
+
+		if v.Summary != "" {
+			line += "\n    " + lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("8")).Render(v.Summary)
+		}
+
 		lines = append(lines, line)
 	}
 
 	return header + "\n" + strings.Join(lines, "\n")
+}
+
+func renderStructuredFindings(f *model.Findings) string {
+	var parts []string
+	blockerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("red"))
+	concernStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("yellow"))
+	suggestionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	for _, b := range f.Blockers {
+		parts = append(parts, "    "+blockerStyle.Render("BLOCKER: "+b))
+	}
+	for _, c := range f.Concerns {
+		parts = append(parts, "    "+concernStyle.Render("CONCERN: "+c))
+	}
+	for _, s := range f.Suggestions {
+		parts = append(parts, "    "+suggestionStyle.Render("SUGGESTION: "+s))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return "\n" + strings.Join(parts, "\n")
 }
 
 func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, linkedIssues []int) string {
@@ -282,6 +343,24 @@ func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, li
 	}
 	fmt.Fprintf(&b, "Created: %s\n", humanize.Time(proposal.CreatedAt))
 	fmt.Fprintf(&b, "Updated: %s\n", humanize.Time(proposal.UpdatedAt))
+	if proposal.FinalOutcome != "" {
+		fmt.Fprintf(&b, "Final outcome: %s\n", proposal.FinalOutcome)
+	}
+	if proposal.EscalationReason != nil {
+		fmt.Fprintf(&b, "Escalation reason: %s\n", *proposal.EscalationReason)
+	}
+	if proposal.Rationale != "" {
+		fmt.Fprintf(&b, "Rationale: %s\n", proposal.Rationale)
+	}
+	if len(proposal.DomainTags) > 0 {
+		fmt.Fprintf(&b, "Domain tags: %s\n", strings.Join(proposal.DomainTags, ", "))
+	}
+	if len(proposal.FilesChanged) > 0 {
+		b.WriteString("Files changed:\n")
+		for _, f := range proposal.FilesChanged {
+			fmt.Fprintf(&b, "  %s\n", f)
+		}
+	}
 
 	// Description
 	if proposal.Description != "" {
@@ -300,15 +379,30 @@ func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, li
 	if len(votes) > 0 {
 		b.WriteString("\nVotes\n")
 		for _, v := range votes {
-			fmt.Fprintf(&b, "  %s  %s  conf=%.2f  rel=%.2f  %s\n",
+			effectiveWeight := v.Confidence * v.DomainRelevance
+			fmt.Fprintf(&b, "  %s  %s  conf=%.2f  rel=%.2f  weight=%.2f  %s\n",
 				v.VoterName,
 				string(v.Verdict),
 				v.Confidence,
 				v.DomainRelevance,
+				effectiveWeight,
 				humanize.Time(v.CreatedAt),
 			)
-			if v.Findings != "" {
+			if v.FindingsJSON != nil {
+				for _, bl := range v.FindingsJSON.Blockers {
+					fmt.Fprintf(&b, "    BLOCKER: %s\n", bl)
+				}
+				for _, c := range v.FindingsJSON.Concerns {
+					fmt.Fprintf(&b, "    CONCERN: %s\n", c)
+				}
+				for _, s := range v.FindingsJSON.Suggestions {
+					fmt.Fprintf(&b, "    SUGGESTION: %s\n", s)
+				}
+			} else if v.Findings != "" {
 				fmt.Fprintf(&b, "    %s\n", truncate(v.Findings, 80))
+			}
+			if v.Summary != "" {
+				fmt.Fprintf(&b, "    %s\n", v.Summary)
 			}
 		}
 	}
@@ -373,16 +467,18 @@ func renderVoteBreakdownTable(votes []*model.Vote) string {
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	header := sectionStyle.Render("Vote Breakdown")
 
-	headers := []string{"Voter", "Role", "Verdict", "Confidence", "Relevance"}
+	headers := []string{"Voter", "Role", "Verdict", "Confidence", "Relevance", "Weight"}
 
 	rows := make([][]string, 0, len(votes))
 	for _, v := range votes {
+		effectiveWeight := v.Confidence * v.DomainRelevance
 		rows = append(rows, []string{
 			v.VoterName,
 			v.VoterRole,
 			string(v.Verdict),
 			fmt.Sprintf("%.2f", v.Confidence),
 			fmt.Sprintf("%.2f", v.DomainRelevance),
+			fmt.Sprintf("%.2f", effectiveWeight),
 		})
 	}
 
@@ -438,17 +534,19 @@ func renderPlainVoteResult(proposal *model.Proposal, votes []*model.Vote) string
 	// Vote breakdown
 	if len(votes) > 0 {
 		b.WriteString("\nVote Breakdown\n")
-		fmt.Fprintf(&b, "%-20s %-15s %-10s %-12s %s\n",
-			"Voter", "Role", "Verdict", "Confidence", "Relevance")
-		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 70))
+		fmt.Fprintf(&b, "%-20s %-15s %-22s %-12s %-12s %s\n",
+			"Voter", "Role", "Verdict", "Confidence", "Relevance", "Weight")
+		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 90))
 
 		for _, v := range votes {
-			fmt.Fprintf(&b, "%-20s %-15s %-10s %-12.2f %.2f\n",
+			effectiveWeight := v.Confidence * v.DomainRelevance
+			fmt.Fprintf(&b, "%-20s %-15s %-22s %-12.2f %-12.2f %.2f\n",
 				v.VoterName,
 				v.VoterRole,
 				string(v.Verdict),
 				v.Confidence,
 				v.DomainRelevance,
+				effectiveWeight,
 			)
 		}
 	}

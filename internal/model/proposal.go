@@ -41,15 +41,17 @@ func ValidateCriticality(c Criticality) error {
 type ProposalStatus string
 
 const (
-	ProposalStatusOpen     ProposalStatus = "open"
-	ProposalStatusApproved ProposalStatus = "approved"
-	ProposalStatusRejected ProposalStatus = "rejected"
+	ProposalStatusOpen      ProposalStatus = "open"
+	ProposalStatusApproved  ProposalStatus = "approved"
+	ProposalStatusRejected  ProposalStatus = "rejected"
+	ProposalStatusCommitted ProposalStatus = "committed"
 )
 
 var validProposalStatuses = []ProposalStatus{
 	ProposalStatusOpen,
 	ProposalStatusApproved,
 	ProposalStatusRejected,
+	ProposalStatusCommitted,
 }
 
 // ValidateProposalStatus returns an error if s is not a recognized proposal status.
@@ -64,12 +66,14 @@ func ValidateProposalStatus(s ProposalStatus) error {
 type Verdict string
 
 const (
-	VerdictApprove Verdict = "approve"
-	VerdictReject  Verdict = "reject"
+	VerdictApprove             Verdict = "approve"
+	VerdictApproveWithConcerns Verdict = "approve-with-concerns"
+	VerdictReject              Verdict = "reject"
 )
 
 var validVerdicts = []Verdict{
 	VerdictApprove,
+	VerdictApproveWithConcerns,
 	VerdictReject,
 }
 
@@ -109,47 +113,78 @@ func ParseProposalID(input string) (int, error) {
 	return id, nil
 }
 
+// Findings represents structured review findings.
+type Findings struct {
+	Blockers    []string `json:"blockers"`
+	Concerns    []string `json:"concerns"`
+	Suggestions []string `json:"suggestions"`
+}
+
 // Proposal represents a consensus proposal for PBFT-inspired voting.
 type Proposal struct {
-	ID             int
-	Description    string
-	Criticality    Criticality
-	Status         ProposalStatus
-	RequiredVoters int
-	Threshold      float64
-	WeightedScore  *float64
-	CreatedBy      string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID               int
+	Description      string
+	Criticality      Criticality
+	Status           ProposalStatus
+	RequiredVoters   int
+	Threshold        float64
+	WeightedScore    *float64
+	CreatedBy        string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	Rationale        string
+	DomainTags       []string
+	FilesChanged     []string
+	FinalOutcome     string
+	EscalationReason *string
 }
 
 // proposalJSON is the JSON wire format for Proposal.
 type proposalJSON struct {
-	ID             string   `json:"id"`
-	Description    string   `json:"description"`
-	Criticality    string   `json:"criticality"`
-	Status         string   `json:"status"`
-	RequiredVoters int      `json:"required_voters"`
-	Threshold      float64  `json:"threshold"`
-	WeightedScore  *float64 `json:"weighted_score"`
-	CreatedBy      string   `json:"created_by"`
-	CreatedAt      string   `json:"created_at"`
-	UpdatedAt      string   `json:"updated_at"`
+	ID               string    `json:"id"`
+	Description      string    `json:"description"`
+	Rationale        string    `json:"rationale"`
+	DomainTags       []string  `json:"domain_tags"`
+	FilesChanged     []string  `json:"files_changed"`
+	Criticality      string    `json:"criticality"`
+	Status           string    `json:"status"`
+	FinalOutcome     string    `json:"final_outcome"`
+	EscalationReason *string   `json:"escalation_reason"`
+	RequiredVoters   int       `json:"required_voters"`
+	Threshold        float64   `json:"threshold"`
+	WeightedScore    *float64  `json:"weighted_score"`
+	CreatedBy        string    `json:"created_by"`
+	CreatedAt        string    `json:"created_at"`
+	UpdatedAt        string    `json:"updated_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Proposal.
 func (p Proposal) MarshalJSON() ([]byte, error) {
+	domainTags := p.DomainTags
+	if domainTags == nil {
+		domainTags = []string{}
+	}
+	filesChanged := p.FilesChanged
+	if filesChanged == nil {
+		filesChanged = []string{}
+	}
+
 	j := proposalJSON{
-		ID:             FormatProposalID(p.ID),
-		Description:    p.Description,
-		Criticality:    string(p.Criticality),
-		Status:         string(p.Status),
-		RequiredVoters: p.RequiredVoters,
-		Threshold:      p.Threshold,
-		WeightedScore:  p.WeightedScore,
-		CreatedBy:      p.CreatedBy,
-		CreatedAt:      p.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:      p.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:               FormatProposalID(p.ID),
+		Description:      p.Description,
+		Rationale:        p.Rationale,
+		DomainTags:       domainTags,
+		FilesChanged:     filesChanged,
+		Criticality:      string(p.Criticality),
+		Status:           string(p.Status),
+		FinalOutcome:     p.FinalOutcome,
+		EscalationReason: p.EscalationReason,
+		RequiredVoters:   p.RequiredVoters,
+		Threshold:        p.Threshold,
+		WeightedScore:    p.WeightedScore,
+		CreatedBy:        p.CreatedBy,
+		CreatedAt:        p.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:        p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 
 	return json.Marshal(j)
@@ -185,6 +220,16 @@ func (p *Proposal) UnmarshalJSON(data []byte) error {
 	p.WeightedScore = j.WeightedScore
 	p.CreatedBy = j.CreatedBy
 
+	p.Rationale = j.Rationale
+	if j.DomainTags != nil {
+		p.DomainTags = j.DomainTags
+	}
+	if j.FilesChanged != nil {
+		p.FilesChanged = j.FilesChanged
+	}
+	p.FinalOutcome = j.FinalOutcome
+	p.EscalationReason = j.EscalationReason
+
 	createdAt, err := time.Parse(time.RFC3339, j.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("parsing created_at: %w", err)
@@ -210,20 +255,25 @@ type Vote struct {
 	Confidence      float64
 	DomainRelevance float64
 	Findings        string
+	FindingsJSON    *Findings
+	Summary         string
 	CreatedAt       time.Time
 }
 
 // voteJSON is the JSON wire format for Vote.
 type voteJSON struct {
-	ID              int     `json:"id"`
-	ProposalID      string  `json:"proposal_id,omitempty"`
-	VoterName       string  `json:"voter_name"`
-	VoterRole       string  `json:"voter_role"`
-	Verdict         string  `json:"verdict"`
-	Confidence      float64 `json:"confidence"`
-	DomainRelevance float64 `json:"domain_relevance"`
-	Findings        string  `json:"findings"`
-	CreatedAt       string  `json:"created_at"`
+	ID              int        `json:"id"`
+	ProposalID      string     `json:"proposal_id,omitempty"`
+	VoterName       string     `json:"voter_name"`
+	VoterRole       string     `json:"voter_role"`
+	Verdict         string     `json:"verdict"`
+	Confidence      float64    `json:"confidence"`
+	DomainRelevance float64    `json:"domain_relevance"`
+	EffectiveWeight float64    `json:"effective_weight"`
+	Findings        string     `json:"findings"`
+	FindingsJSON    *Findings  `json:"findings_json"`
+	Summary         string     `json:"summary"`
+	CreatedAt       string     `json:"created_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Vote.
@@ -236,7 +286,10 @@ func (v Vote) MarshalJSON() ([]byte, error) {
 		Verdict:         string(v.Verdict),
 		Confidence:      v.Confidence,
 		DomainRelevance: v.DomainRelevance,
+		EffectiveWeight: v.Confidence * v.DomainRelevance,
 		Findings:        v.Findings,
+		FindingsJSON:    v.FindingsJSON,
+		Summary:         v.Summary,
 		CreatedAt:       v.CreatedAt.UTC().Format(time.RFC3339),
 	}
 
@@ -271,6 +324,8 @@ func (v *Vote) UnmarshalJSON(data []byte) error {
 	v.Confidence = j.Confidence
 	v.DomainRelevance = j.DomainRelevance
 	v.Findings = j.Findings
+	v.FindingsJSON = j.FindingsJSON
+	v.Summary = j.Summary
 
 	createdAt, err := time.Parse(time.RFC3339, j.CreatedAt)
 	if err != nil {

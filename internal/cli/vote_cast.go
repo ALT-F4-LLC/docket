@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,8 @@ var voteCastCmd = &cobra.Command{
 		confidence, _ := cmd.Flags().GetFloat64("confidence")
 		domainRelevance, _ := cmd.Flags().GetFloat64("domain-relevance")
 		findings, _ := cmd.Flags().GetString("findings")
+		findingsJSONRaw, _ := cmd.Flags().GetString("findings-json")
+		summary, _ := cmd.Flags().GetString("summary")
 		jsonMode, _ := cmd.Flags().GetBool("json")
 
 		// Default voter to git user.name.
@@ -95,6 +98,7 @@ var voteCastCmd = &cobra.Command{
 						Title("Verdict").
 						Options(
 							huh.NewOption("approve", "approve"),
+							huh.NewOption("approve-with-concerns", "approve-with-concerns"),
 							huh.NewOption("reject", "reject"),
 						).
 						Value(&verdict),
@@ -133,6 +137,9 @@ var voteCastCmd = &cobra.Command{
 					huh.NewText().
 						Title("Findings").
 						Value(&findings),
+					huh.NewInput().
+						Title("Summary (one-line review summary)").
+						Value(&summary),
 				),
 			)
 
@@ -149,6 +156,11 @@ var voteCastCmd = &cobra.Command{
 			fmt.Sscanf(domainRelevanceStr, "%f", &domainRelevance)
 		}
 
+		// Prevent both flags from reading stdin.
+		if findings == "-" && findingsJSONRaw == "-" {
+			return cmdErr(fmt.Errorf("cannot read both --findings and --findings-json from stdin"), output.ErrValidation)
+		}
+
 		// Read findings from stdin if "-".
 		if findings == "-" {
 			const maxStdinSize = 1 << 20 // 1 MiB
@@ -157,6 +169,26 @@ var voteCastCmd = &cobra.Command{
 				return cmdErr(fmt.Errorf("reading findings from stdin: %w", err), output.ErrGeneral)
 			}
 			findings = strings.TrimRight(string(data), "\n")
+		}
+
+		// Read findings-json from stdin if "-".
+		if findingsJSONRaw == "-" {
+			const maxStdinSize = 1 << 20 // 1 MiB
+			data, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinSize))
+			if err != nil {
+				return cmdErr(fmt.Errorf("reading findings-json from stdin: %w", err), output.ErrGeneral)
+			}
+			findingsJSONRaw = strings.TrimRight(string(data), "\n")
+		}
+
+		// Parse and validate --findings-json.
+		var findingsJSON *model.Findings
+		if findingsJSONRaw != "" {
+			var f model.Findings
+			if err := json.Unmarshal([]byte(findingsJSONRaw), &f); err != nil {
+				return cmdErr(fmt.Errorf("--findings-json is not valid JSON: %w", err), output.ErrValidation)
+			}
+			findingsJSON = &f
 		}
 
 		// Validate ranges.
@@ -180,6 +212,8 @@ var voteCastCmd = &cobra.Command{
 			Confidence:      confidence,
 			DomainRelevance: domainRelevance,
 			Findings:        findings,
+			FindingsJSON:    findingsJSON,
+			Summary:         summary,
 		}
 
 		result, err := db.CastVote(conn, vote)
@@ -219,9 +253,11 @@ var voteCastCmd = &cobra.Command{
 func init() {
 	voteCastCmd.Flags().String("voter", "", "Voter name (default: git user.name)")
 	voteCastCmd.Flags().String("role", "", "Voter role")
-	voteCastCmd.Flags().StringP("verdict", "v", "", "Vote: approve|reject")
+	voteCastCmd.Flags().StringP("verdict", "v", "", "Vote: approve|approve-with-concerns|reject")
 	voteCastCmd.Flags().Float64("confidence", 0, "Confidence 0.0-1.0")
 	voteCastCmd.Flags().Float64("domain-relevance", 0, "Domain relevance 0.0-1.0")
 	voteCastCmd.Flags().String("findings", "", "Review findings (use \"-\" for stdin)")
+	voteCastCmd.Flags().String("findings-json", "", "Structured findings JSON (use \"-\" for stdin)")
+	voteCastCmd.Flags().String("summary", "", "One-line review summary")
 	voteCmd.AddCommand(voteCastCmd)
 }

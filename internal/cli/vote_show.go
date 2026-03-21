@@ -23,18 +23,23 @@ type voteShowResult struct {
 
 // voteShowResultJSON is the wire format for vote show.
 type voteShowResultJSON struct {
-	ID             string        `json:"id"`
-	Description    string        `json:"description"`
-	Criticality    string        `json:"criticality"`
-	Status         string        `json:"status"`
-	RequiredVoters int           `json:"required_voters"`
-	Threshold      float64       `json:"threshold"`
-	WeightedScore  *float64      `json:"weighted_score"`
-	CreatedBy      string        `json:"created_by"`
-	CreatedAt      string        `json:"created_at"`
-	UpdatedAt      string        `json:"updated_at"`
-	Votes          []*model.Vote `json:"votes"`
-	LinkedIssues   []string      `json:"linked_issues"`
+	ID               string        `json:"id"`
+	Description      string        `json:"description"`
+	Rationale        string        `json:"rationale"`
+	DomainTags       []string      `json:"domain_tags"`
+	FilesChanged     []string      `json:"files_changed"`
+	Criticality      string        `json:"criticality"`
+	Status           string        `json:"status"`
+	FinalOutcome     string        `json:"final_outcome"`
+	EscalationReason *string       `json:"escalation_reason"`
+	RequiredVoters   int           `json:"required_voters"`
+	Threshold        float64       `json:"threshold"`
+	WeightedScore    *float64      `json:"weighted_score"`
+	CreatedBy        string        `json:"created_by"`
+	CreatedAt        string        `json:"created_at"`
+	UpdatedAt        string        `json:"updated_at"`
+	Votes            []*model.Vote `json:"votes"`
+	LinkedIssues     []string      `json:"linked_issues"`
 }
 
 func (r voteShowResult) MarshalJSON() ([]byte, error) {
@@ -50,19 +55,33 @@ func (r voteShowResult) MarshalJSON() ([]byte, error) {
 		linkedIssues = append(linkedIssues, model.FormatID(id))
 	}
 
+	domainTags := p.DomainTags
+	if domainTags == nil {
+		domainTags = []string{}
+	}
+	filesChanged := p.FilesChanged
+	if filesChanged == nil {
+		filesChanged = []string{}
+	}
+
 	j := voteShowResultJSON{
-		ID:             model.FormatProposalID(p.ID),
-		Description:    p.Description,
-		Criticality:    string(p.Criticality),
-		Status:         string(p.Status),
-		RequiredVoters: p.RequiredVoters,
-		Threshold:      p.Threshold,
-		WeightedScore:  p.WeightedScore,
-		CreatedBy:      p.CreatedBy,
-		CreatedAt:      p.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:      p.UpdatedAt.UTC().Format(time.RFC3339),
-		Votes:          votes,
-		LinkedIssues:   linkedIssues,
+		ID:               model.FormatProposalID(p.ID),
+		Description:      p.Description,
+		Rationale:        p.Rationale,
+		DomainTags:       domainTags,
+		FilesChanged:     filesChanged,
+		Criticality:      string(p.Criticality),
+		Status:           string(p.Status),
+		FinalOutcome:     p.FinalOutcome,
+		EscalationReason: p.EscalationReason,
+		RequiredVoters:   p.RequiredVoters,
+		Threshold:        p.Threshold,
+		WeightedScore:    p.WeightedScore,
+		CreatedBy:        p.CreatedBy,
+		CreatedAt:        p.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:        p.UpdatedAt.UTC().Format(time.RFC3339),
+		Votes:            votes,
+		LinkedIssues:     linkedIssues,
 	}
 
 	return json.Marshal(j)

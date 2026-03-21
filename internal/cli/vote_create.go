@@ -23,10 +23,13 @@ var voteCreateCmd = &cobra.Command{
 		conn := getDB(cmd)
 
 		description, _ := cmd.Flags().GetString("description")
+		rationale, _ := cmd.Flags().GetString("rationale")
 		criticality, _ := cmd.Flags().GetString("criticality")
 		voters, _ := cmd.Flags().GetInt("voters")
 		threshold, _ := cmd.Flags().GetFloat64("threshold")
 		createdBy, _ := cmd.Flags().GetString("created-by")
+		domainTagsRaw, _ := cmd.Flags().GetString("domain-tags")
+		filesChangedRaw, _ := cmd.Flags().GetString("files-changed")
 		jsonMode, _ := cmd.Flags().GetBool("json")
 
 		// Default created-by to git user.name.
@@ -51,6 +54,9 @@ var voteCreateCmd = &cobra.Command{
 				votersStr = fmt.Sprintf("%d", voters)
 			}
 
+			domainTagsInput := domainTagsRaw
+			filesChangedInput := filesChangedRaw
+
 			form := huh.NewForm(
 				huh.NewGroup(
 					huh.NewText().
@@ -62,6 +68,10 @@ var voteCreateCmd = &cobra.Command{
 							}
 							return nil
 						}),
+					huh.NewText().
+						Title("Rationale").
+						Description("Why is this decision needed?").
+						Value(&rationale),
 					huh.NewSelect[string]().
 						Title("Criticality").
 						Options(
@@ -84,6 +94,14 @@ var voteCreateCmd = &cobra.Command{
 							}
 							return nil
 						}),
+					huh.NewInput().
+						Title("Domain tags").
+						Description("Comma-separated (e.g. cli,database,api)").
+						Value(&domainTagsInput),
+					huh.NewInput().
+						Title("Files changed").
+						Description("Comma-separated file paths").
+						Value(&filesChangedInput),
 				),
 			)
 
@@ -97,6 +115,10 @@ var voteCreateCmd = &cobra.Command{
 
 			// Parse voters from the form string.
 			fmt.Sscanf(votersStr, "%d", &voters)
+
+			// Capture form values back into raw flag variables.
+			domainTagsRaw = domainTagsInput
+			filesChangedRaw = filesChangedInput
 		}
 
 		// Read description from stdin if "-".
@@ -107,6 +129,35 @@ var voteCreateCmd = &cobra.Command{
 				return cmdErr(fmt.Errorf("reading description from stdin: %w", err), output.ErrGeneral)
 			}
 			description = strings.TrimRight(string(data), "\n")
+		}
+
+		// Read rationale from stdin if "-".
+		if rationale == "-" {
+			const maxStdinSize = 1 << 20 // 1 MiB
+			data, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinSize))
+			if err != nil {
+				return cmdErr(fmt.Errorf("reading rationale from stdin: %w", err), output.ErrGeneral)
+			}
+			rationale = strings.TrimRight(string(data), "\n")
+		}
+
+		// Parse comma-separated flags into slices.
+		var domainTags []string
+		if domainTagsRaw != "" {
+			for _, tag := range strings.Split(domainTagsRaw, ",") {
+				if t := strings.TrimSpace(tag); t != "" {
+					domainTags = append(domainTags, t)
+				}
+			}
+		}
+
+		var filesChanged []string
+		if filesChangedRaw != "" {
+			for _, f := range strings.Split(filesChangedRaw, ",") {
+				if p := strings.TrimSpace(f); p != "" {
+					filesChanged = append(filesChanged, p)
+				}
+			}
 		}
 
 		// Validate voters.
@@ -126,11 +177,14 @@ var voteCreateCmd = &cobra.Command{
 
 		proposal := model.Proposal{
 			Description:    description,
+			Rationale:      rationale,
 			Criticality:    model.Criticality(criticality),
 			Status:         model.ProposalStatusOpen,
 			RequiredVoters: voters,
 			Threshold:      threshold,
 			CreatedBy:      createdBy,
+			DomainTags:     domainTags,
+			FilesChanged:   filesChanged,
 		}
 
 		id, err := db.CreateProposal(conn, &proposal)
@@ -152,9 +206,12 @@ var voteCreateCmd = &cobra.Command{
 
 func init() {
 	voteCreateCmd.Flags().StringP("description", "d", "", "Proposal description (use \"-\" for stdin)")
+	voteCreateCmd.Flags().StringP("rationale", "r", "", "Rationale for the proposal (use \"-\" for stdin)")
 	voteCreateCmd.Flags().StringP("criticality", "c", "medium", "Criticality level: low|medium|high|critical")
 	voteCreateCmd.Flags().IntP("voters", "n", 0, "Required number of voters")
 	voteCreateCmd.Flags().Float64("threshold", 0.67, "Approval threshold 0.0-1.0")
 	voteCreateCmd.Flags().String("created-by", "", "Creator identity (default: git user.name)")
+	voteCreateCmd.Flags().String("domain-tags", "", "Comma-separated domain tags (e.g. cli,database,api)")
+	voteCreateCmd.Flags().String("files-changed", "", "Comma-separated file paths affected by this proposal")
 	voteCmd.AddCommand(voteCreateCmd)
 }

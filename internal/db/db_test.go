@@ -190,11 +190,11 @@ func TestMigrateNoOpAtLatestVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion failed: %v", err)
 	}
-	if v != 2 {
-		t.Errorf("schema_version = %d after Migrate, want 2", v)
+	if v != 3 {
+		t.Errorf("schema_version = %d after Migrate, want 3", v)
 	}
 
-	// Second Migrate should be a no-op at version 2.
+	// Second Migrate should be a no-op at version 3.
 	if err := Migrate(db); err != nil {
 		t.Fatalf("second Migrate failed: %v", err)
 	}

@@ -43,13 +43,13 @@ func TestMigrateV1ToV2CreatesProposalTables(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	// Schema should now be at v2.
+	// Schema should now be at v3.
 	v, err = SchemaVersion(db)
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if v != 2 {
-		t.Fatalf("schema_version = %d after migration, want 2", v)
+	if v != 3 {
+		t.Fatalf("schema_version = %d after migration, want 3", v)
 	}
 
 	// Verify new tables exist.
@@ -173,7 +173,7 @@ func TestListProposals(t *testing.T) {
 	}
 
 	// List all (no filters).
-	list, total, err := ListProposals(db, "", "", 0)
+	list, total, err := ListProposals(db, "", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListProposals (all): %v", err)
 	}
@@ -185,7 +185,7 @@ func TestListProposals(t *testing.T) {
 	}
 
 	// Filter by status.
-	list, total, err = ListProposals(db, "open", "", 0)
+	list, total, err = ListProposals(db, "open", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListProposals (open): %v", err)
 	}
@@ -197,7 +197,7 @@ func TestListProposals(t *testing.T) {
 	}
 
 	// Filter by criticality.
-	list, total, err = ListProposals(db, "", "high", 0)
+	list, total, err = ListProposals(db, "", "high", "", 0)
 	if err != nil {
 		t.Fatalf("ListProposals (high): %v", err)
 	}
@@ -206,7 +206,7 @@ func TestListProposals(t *testing.T) {
 	}
 
 	// Limit.
-	list, _, err = ListProposals(db, "", "", 1)
+	list, _, err = ListProposals(db, "", "", "", 1)
 	if err != nil {
 		t.Fatalf("ListProposals (limit 1): %v", err)
 	}
@@ -733,5 +733,534 @@ func TestUnlinkProposalIssueNotFound(t *testing.T) {
 	err := UnlinkProposalIssue(db, 999, 999)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound for unlink non-existent, got %v", err)
+	}
+}
+
+// --- Gap 4: Proposal new fields roundtrip through DB ---
+
+func TestCreateAndGetProposalWithV3Fields(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	escalation := "Security review required"
+	p := &model.Proposal{
+		Description:      "V3 proposal test",
+		Rationale:        "Schema gaps identified in v2",
+		DomainTags:       []string{"architecture", "security"},
+		FilesChanged:     []string{"internal/db/schema.go", "internal/model/proposal.go"},
+		Criticality:      model.CriticalityHigh,
+		Status:           model.ProposalStatusOpen,
+		FinalOutcome:     "Pending",
+		EscalationReason: &escalation,
+		RequiredVoters:   3,
+		Threshold:        0.67,
+		CreatedBy:        "test-user",
+	}
+
+	id, err := CreateProposal(db, p)
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	got, err := GetProposal(db, id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+
+	if got.Rationale != "Schema gaps identified in v2" {
+		t.Errorf("Rationale = %q, want %q", got.Rationale, "Schema gaps identified in v2")
+	}
+	if len(got.DomainTags) != 2 || got.DomainTags[0] != "architecture" || got.DomainTags[1] != "security" {
+		t.Errorf("DomainTags = %v, want [architecture security]", got.DomainTags)
+	}
+	if len(got.FilesChanged) != 2 || got.FilesChanged[0] != "internal/db/schema.go" {
+		t.Errorf("FilesChanged = %v", got.FilesChanged)
+	}
+	if got.FinalOutcome != "Pending" {
+		t.Errorf("FinalOutcome = %q, want %q", got.FinalOutcome, "Pending")
+	}
+	if got.EscalationReason == nil || *got.EscalationReason != "Security review required" {
+		t.Errorf("EscalationReason = %v", got.EscalationReason)
+	}
+}
+
+// --- Gap 6: CommitProposal happy path and error cases ---
+
+func TestCommitProposalHappyPath(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	// Create and approve a proposal via votes.
+	id, err := CreateProposal(db, &model.Proposal{
+		Description:    "Commit test",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	// Single approve vote to finalize as approved.
+	_, err = CastVote(db, &model.Vote{
+		ProposalID: id, VoterName: "voter-1",
+		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("CastVote: %v", err)
+	}
+
+	// Commit the approved proposal.
+	outcome := "Changes applied to main branch."
+	if err := CommitProposal(db, id, outcome); err != nil {
+		t.Fatalf("CommitProposal: %v", err)
+	}
+
+	// Verify persisted state.
+	p, err := GetProposal(db, id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.Status != model.ProposalStatusCommitted {
+		t.Errorf("Status = %q, want 'committed'", p.Status)
+	}
+	if p.FinalOutcome != outcome {
+		t.Errorf("FinalOutcome = %q, want %q", p.FinalOutcome, outcome)
+	}
+}
+
+func TestCommitProposalNotFound(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	err := CommitProposal(db, 999, "outcome")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestCommitProposalOpenRejected(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	id, _ := CreateProposal(db, &model.Proposal{
+		Description:    "Open proposal",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 3,
+		Threshold:      0.67,
+	})
+
+	err := CommitProposal(db, id, "outcome")
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("expected ErrConflict for open proposal, got %v", err)
+	}
+}
+
+func TestCommitProposalRejectedRejected(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	id, _ := CreateProposal(db, &model.Proposal{
+		Description:    "Rejected proposal",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+
+	// Cast a reject vote to finalize as rejected.
+	_, err := CastVote(db, &model.Vote{
+		ProposalID: id, VoterName: "voter-1",
+		Verdict: model.VerdictReject, Confidence: 0.9, DomainRelevance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("CastVote: %v", err)
+	}
+
+	err = CommitProposal(db, id, "outcome")
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("expected ErrConflict for rejected proposal, got %v", err)
+	}
+}
+
+func TestCommitProposalAlreadyCommitted(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	id, _ := CreateProposal(db, &model.Proposal{
+		Description:    "Double commit",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+
+	_, err := CastVote(db, &model.Vote{
+		ProposalID: id, VoterName: "voter-1",
+		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("CastVote: %v", err)
+	}
+
+	if err := CommitProposal(db, id, "first commit"); err != nil {
+		t.Fatalf("CommitProposal: %v", err)
+	}
+
+	// Second commit should fail.
+	err = CommitProposal(db, id, "second commit")
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("expected ErrConflict for already committed, got %v", err)
+	}
+}
+
+// --- Gap 7: approve-with-concerns quorum math (weight = 1.0) ---
+
+func TestCastVoteApproveWithConcernsQuorumMath(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	id, err := CreateProposal(db, &model.Proposal{
+		Description:    "Approve with concerns quorum",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 2,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	// Vote 1: approve-with-concerns, conf=0.8, rel=0.9 -> weight=0.72, verdict_weight=1.0
+	_, err = CastVote(db, &model.Vote{
+		ProposalID:      id,
+		VoterName:       "voter-1",
+		VoterRole:       "architecture",
+		Verdict:         model.VerdictApproveWithConcerns,
+		Confidence:      0.8,
+		DomainRelevance: 0.9,
+		FindingsJSON: &model.Findings{
+			Blockers:    []string{},
+			Concerns:    []string{"hardcoded paths"},
+			Suggestions: []string{},
+		},
+		Summary: "Sound with concerns",
+	})
+	if err != nil {
+		t.Fatalf("CastVote 1: %v", err)
+	}
+
+	// Vote 2: approve, conf=0.9, rel=1.0 -> weight=0.9, verdict_weight=1.0
+	result, err := CastVote(db, &model.Vote{
+		ProposalID:      id,
+		VoterName:       "voter-2",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 1.0,
+	})
+	if err != nil {
+		t.Fatalf("CastVote 2: %v", err)
+	}
+
+	if !result.QuorumReached {
+		t.Error("expected quorum_reached = true")
+	}
+	// Both votes are approvals (approve-with-concerns treated as 1.0).
+	// score = (0.72 + 0.9) / (0.72 + 0.9) = 1.0
+	if result.WeightedScore == nil || *result.WeightedScore != 1.0 {
+		t.Errorf("weighted_score = %v, want 1.0", result.WeightedScore)
+	}
+	if result.ProposalStatus != model.ProposalStatusApproved {
+		t.Errorf("status = %q, want 'approved'", result.ProposalStatus)
+	}
+}
+
+// --- Gap 8: findings_json round-trip through CastVote / GetProposalVotes ---
+
+func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	id, err := CreateProposal(db, &model.Proposal{
+		Description:    "Findings JSON roundtrip",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 3,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	// Vote with structured findings.
+	findings := &model.Findings{
+		Blockers:    []string{"critical issue"},
+		Concerns:    []string{"concern A", "concern B"},
+		Suggestions: []string{"suggestion 1"},
+	}
+	_, err = CastVote(db, &model.Vote{
+		ProposalID:      id,
+		VoterName:       "voter-with-findings",
+		VoterRole:       "security",
+		Verdict:         model.VerdictApproveWithConcerns,
+		Confidence:      0.85,
+		DomainRelevance: 0.9,
+		Findings:        "Plain text findings",
+		FindingsJSON:    findings,
+		Summary:         "Has concerns but approves",
+	})
+	if err != nil {
+		t.Fatalf("CastVote with findings: %v", err)
+	}
+
+	// Vote without structured findings.
+	_, err = CastVote(db, &model.Vote{
+		ProposalID:      id,
+		VoterName:       "voter-no-findings",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Findings:        "Just text",
+	})
+	if err != nil {
+		t.Fatalf("CastVote without findings: %v", err)
+	}
+
+	votes, err := GetProposalVotes(db, id)
+	if err != nil {
+		t.Fatalf("GetProposalVotes: %v", err)
+	}
+	if len(votes) != 2 {
+		t.Fatalf("expected 2 votes, got %d", len(votes))
+	}
+
+	// First vote should have structured findings.
+	v1 := votes[0]
+	if v1.FindingsJSON == nil {
+		t.Fatal("vote 1 FindingsJSON is nil")
+	}
+	if len(v1.FindingsJSON.Blockers) != 1 || v1.FindingsJSON.Blockers[0] != "critical issue" {
+		t.Errorf("vote 1 Blockers = %v", v1.FindingsJSON.Blockers)
+	}
+	if len(v1.FindingsJSON.Concerns) != 2 {
+		t.Errorf("vote 1 Concerns = %v, want 2 items", v1.FindingsJSON.Concerns)
+	}
+	if len(v1.FindingsJSON.Suggestions) != 1 {
+		t.Errorf("vote 1 Suggestions = %v", v1.FindingsJSON.Suggestions)
+	}
+	if v1.Summary != "Has concerns but approves" {
+		t.Errorf("vote 1 Summary = %q", v1.Summary)
+	}
+	if v1.Findings != "Plain text findings" {
+		t.Errorf("vote 1 Findings = %q", v1.Findings)
+	}
+
+	// Second vote should have nil findings_json.
+	v2 := votes[1]
+	if v2.FindingsJSON != nil {
+		t.Errorf("vote 2 FindingsJSON should be nil, got %v", v2.FindingsJSON)
+	}
+	if v2.Findings != "Just text" {
+		t.Errorf("vote 2 Findings = %q", v2.Findings)
+	}
+}
+
+// --- Gap 9: domainTag filtering via json_each() ---
+
+func TestListProposalsDomainTagFilter(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	// Create proposals with different domain tags.
+	_, err := CreateProposal(db, &model.Proposal{
+		Description:    "Architecture proposal",
+		DomainTags:     []string{"architecture", "security"},
+		Criticality:    model.CriticalityHigh,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal 1: %v", err)
+	}
+
+	_, err = CreateProposal(db, &model.Proposal{
+		Description:    "Security-only proposal",
+		DomainTags:     []string{"security"},
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal 2: %v", err)
+	}
+
+	_, err = CreateProposal(db, &model.Proposal{
+		Description:    "No tags proposal",
+		DomainTags:     []string{},
+		Criticality:    model.CriticalityLow,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal 3: %v", err)
+	}
+
+	// Filter by "security" - should match 2 proposals.
+	list, total, err := ListProposals(db, "", "", "security", 0)
+	if err != nil {
+		t.Fatalf("ListProposals(security): %v", err)
+	}
+	if total != 2 {
+		t.Errorf("total for 'security' = %d, want 2", total)
+	}
+	if len(list) != 2 {
+		t.Errorf("len for 'security' = %d, want 2", len(list))
+	}
+
+	// Filter by "architecture" - should match 1 proposal.
+	list, total, err = ListProposals(db, "", "", "architecture", 0)
+	if err != nil {
+		t.Fatalf("ListProposals(architecture): %v", err)
+	}
+	if total != 1 {
+		t.Errorf("total for 'architecture' = %d, want 1", total)
+	}
+
+	// Filter by nonexistent tag - should match 0.
+	list, total, err = ListProposals(db, "", "", "nonexistent", 0)
+	if err != nil {
+		t.Fatalf("ListProposals(nonexistent): %v", err)
+	}
+	if total != 0 {
+		t.Errorf("total for 'nonexistent' = %d, want 0", total)
+	}
+
+	// Verify exact match (not substring): "api-security" should NOT match "security".
+	_, err = CreateProposal(db, &model.Proposal{
+		Description:    "API security proposal",
+		DomainTags:     []string{"api-security"},
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal 4: %v", err)
+	}
+
+	list, total, err = ListProposals(db, "", "", "security", 0)
+	if err != nil {
+		t.Fatalf("ListProposals(security) after api-security: %v", err)
+	}
+	// Should still be 2 -- json_each() does exact match, not substring.
+	if total != 2 {
+		t.Errorf("total for 'security' after api-security = %d, want 2 (exact match)", total)
+	}
+}
+
+// --- Gap 10: v2->v3 migration specifically ---
+
+func TestMigrateV2ToV3Columns(t *testing.T) {
+	db := mustOpen(t)
+	if err := Initialize(db); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	// Apply only v1->v2 migration first.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := migrateV1ToV2(tx); err != nil {
+		t.Fatalf("migrateV1ToV2: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE meta SET value = '2' WHERE key = 'schema_version'`); err != nil {
+		t.Fatalf("updating version to 2: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Verify we're at v2.
+	v, err := SchemaVersion(db)
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if v != 2 {
+		t.Fatalf("schema_version = %d, want 2", v)
+	}
+
+	// Insert a v2-style proposal (no v3 columns).
+	now := "2026-03-20T10:00:00Z"
+	_, err = db.Exec(
+		`INSERT INTO proposals (description, criticality, status, required_voters, threshold, created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"Pre-migration proposal", "medium", "open", 3, 0.67, "test", now, now,
+	)
+	if err != nil {
+		t.Fatalf("Insert v2 proposal: %v", err)
+	}
+
+	// Insert a v2-style vote.
+	_, err = db.Exec(
+		`INSERT INTO votes (proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		1, "voter-1", "security", "approve", 0.9, 0.8, "Looks good", now,
+	)
+	if err != nil {
+		t.Fatalf("Insert v2 vote: %v", err)
+	}
+
+	// Now run Migrate() which should apply v2->v3.
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate v2->v3: %v", err)
+	}
+
+	// Verify version is now 3.
+	v, err = SchemaVersion(db)
+	if err != nil {
+		t.Fatalf("SchemaVersion after migration: %v", err)
+	}
+	if v != 3 {
+		t.Fatalf("schema_version = %d after migration, want 3", v)
+	}
+
+	// Verify existing proposal has correct defaults for new columns.
+	p, err := GetProposal(db, 1)
+	if err != nil {
+		t.Fatalf("GetProposal after migration: %v", err)
+	}
+	if p.Rationale != "" {
+		t.Errorf("Rationale = %q, want empty default", p.Rationale)
+	}
+	if len(p.DomainTags) != 0 {
+		t.Errorf("DomainTags = %v, want empty array default", p.DomainTags)
+	}
+	if len(p.FilesChanged) != 0 {
+		t.Errorf("FilesChanged = %v, want empty array default", p.FilesChanged)
+	}
+	if p.FinalOutcome != "" {
+		t.Errorf("FinalOutcome = %q, want empty default", p.FinalOutcome)
+	}
+	if p.EscalationReason != nil {
+		t.Errorf("EscalationReason = %v, want nil default", p.EscalationReason)
+	}
+
+	// Verify existing vote has correct defaults for new columns.
+	votes, err := GetProposalVotes(db, 1)
+	if err != nil {
+		t.Fatalf("GetProposalVotes after migration: %v", err)
+	}
+	if len(votes) != 1 {
+		t.Fatalf("expected 1 vote, got %d", len(votes))
+	}
+	if votes[0].FindingsJSON != nil {
+		t.Errorf("FindingsJSON = %v, want nil default", votes[0].FindingsJSON)
+	}
+	if votes[0].Summary != "" {
+		t.Errorf("Summary = %q, want empty default", votes[0].Summary)
+	}
+	// Verify existing data survived.
+	if votes[0].Findings != "Looks good" {
+		t.Errorf("Findings = %q, want 'Looks good'", votes[0].Findings)
+	}
+	if p.Description != "Pre-migration proposal" {
+		t.Errorf("Description = %q, want 'Pre-migration proposal'", p.Description)
 	}
 }

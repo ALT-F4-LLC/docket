@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,12 +29,27 @@ type CastVoteResult struct {
 func CreateProposal(db *sql.DB, p *model.Proposal) (int, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	domainTagsJSON, err := json.Marshal(p.DomainTags)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling domain_tags: %w", err)
+	}
+
+	filesChangedJSON, err := json.Marshal(p.FilesChanged)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling files_changed: %w", err)
+	}
+
 	res, err := db.Exec(
-		`INSERT INTO proposals (description, criticality, status, required_voters, threshold, weighted_score, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO proposals (description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Description,
+		p.Rationale,
+		string(domainTagsJSON),
+		string(filesChangedJSON),
 		string(p.Criticality),
 		string(p.Status),
+		p.FinalOutcome,
+		p.EscalationReason,
 		p.RequiredVoters,
 		p.Threshold,
 		p.WeightedScore,
@@ -56,7 +72,7 @@ func CreateProposal(db *sql.DB, p *model.Proposal) (int, error) {
 // GetProposal returns a proposal by ID, or ErrNotFound if it does not exist.
 func GetProposal(db *sql.DB, id int) (*model.Proposal, error) {
 	row := db.QueryRow(
-		`SELECT id, description, criticality, status, required_voters, threshold, weighted_score, created_by, created_at, updated_at
+		`SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at
 		 FROM proposals WHERE id = ?`, id,
 	)
 	p, err := scanProposalFrom(row)
@@ -71,7 +87,7 @@ func GetProposal(db *sql.DB, id int) (*model.Proposal, error) {
 
 // ListProposals returns proposals with optional filters. It returns the matching
 // proposals and the total count (before limit).
-func ListProposals(db *sql.DB, status string, criticality string, limit int) ([]*model.Proposal, int, error) {
+func ListProposals(db *sql.DB, status string, criticality string, domainTag string, limit int) ([]*model.Proposal, int, error) {
 	var whereClauses []string
 	var args []any
 
@@ -82,6 +98,10 @@ func ListProposals(db *sql.DB, status string, criticality string, limit int) ([]
 	if criticality != "" {
 		whereClauses = append(whereClauses, "criticality = ?")
 		args = append(args, criticality)
+	}
+	if domainTag != "" {
+		whereClauses = append(whereClauses, "EXISTS (SELECT 1 FROM json_each(domain_tags) WHERE value = ?)")
+		args = append(args, domainTag)
 	}
 
 	where := ""
@@ -97,7 +117,7 @@ func ListProposals(db *sql.DB, status string, criticality string, limit int) ([]
 	}
 
 	// Get rows.
-	query := "SELECT id, description, criticality, status, required_voters, threshold, weighted_score, created_by, created_at, updated_at FROM proposals " + where + " ORDER BY created_at ASC"
+	query := "SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at FROM proposals " + where + " ORDER BY created_at ASC"
 	queryArgs := append([]any{}, args...)
 	if limit > 0 {
 		query += " LIMIT ?"
@@ -139,12 +159,15 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 	var p model.Proposal
 	var weightedScore sql.NullFloat64
 	var createdBy sql.NullString
+	var domainTagsRaw, filesChangedRaw string
+	var escalationReason sql.NullString
 	var createdAt, updatedAt string
 	err = tx.QueryRow(
-		`SELECT id, description, criticality, status, required_voters, threshold, weighted_score, created_by, created_at, updated_at
+		`SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at
 		 FROM proposals WHERE id = ?`, v.ProposalID,
 	).Scan(
-		&p.ID, &p.Description, &p.Criticality, &p.Status,
+		&p.ID, &p.Description, &p.Rationale, &domainTagsRaw, &filesChangedRaw,
+		&p.Criticality, &p.Status, &p.FinalOutcome, &escalationReason,
 		&p.RequiredVoters, &p.Threshold, &weightedScore, &createdBy,
 		&createdAt, &updatedAt,
 	)
@@ -159,6 +182,10 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 		p.WeightedScore = &ws
 	}
 	p.CreatedBy = createdBy.String
+	if escalationReason.Valid {
+		er := escalationReason.String
+		p.EscalationReason = &er
+	}
 
 	// Reject if already finalized.
 	if p.Status != model.ProposalStatusOpen {
@@ -167,9 +194,19 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 
 	// Insert the vote.
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	var findingsJSONStr any
+	if v.FindingsJSON != nil {
+		b, merr := json.Marshal(v.FindingsJSON)
+		if merr != nil {
+			return nil, fmt.Errorf("marshaling findings_json: %w", merr)
+		}
+		findingsJSONStr = string(b)
+	}
+
 	res, err := tx.Exec(
-		`INSERT INTO votes (proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO votes (proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.ProposalID,
 		v.VoterName,
 		v.VoterRole,
@@ -177,6 +214,8 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 		v.Confidence,
 		v.DomainRelevance,
 		v.Findings,
+		findingsJSONStr,
+		v.Summary,
 		now,
 	)
 	if err != nil {
@@ -236,7 +275,7 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 			}
 			weight := confidence * domainRelevance
 			totalWeight += weight
-			if model.Verdict(verdict) == model.VerdictApprove {
+			if model.Verdict(verdict) == model.VerdictApprove || model.Verdict(verdict) == model.VerdictApproveWithConcerns {
 				weightedSum += weight
 			}
 		}
@@ -280,7 +319,7 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 // GetProposalVotes returns all votes for a proposal, ordered by creation time.
 func GetProposalVotes(db *sql.DB, proposalID int) ([]*model.Vote, error) {
 	rows, err := db.Query(
-		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, created_at
+		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, created_at
 		 FROM votes WHERE proposal_id = ? ORDER BY created_at ASC`, proposalID,
 	)
 	if err != nil {
@@ -387,6 +426,46 @@ func GetProposalIssues(db *sql.DB, proposalID int) ([]int, error) {
 	return ids, nil
 }
 
+// CommitProposal transitions an approved proposal to committed status with a final outcome.
+func CommitProposal(db *sql.DB, id int, outcome string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var status string
+	err = tx.QueryRow("SELECT status FROM proposals WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("loading proposal: %w", err)
+	}
+
+	if model.ProposalStatus(status) == model.ProposalStatusCommitted {
+		return fmt.Errorf("%w: proposal %s is already committed", ErrConflict, model.FormatProposalID(id))
+	}
+	if model.ProposalStatus(status) != model.ProposalStatusApproved {
+		return fmt.Errorf("%w: proposal %s must be approved before it can be committed; current status: %s", ErrConflict, model.FormatProposalID(id), status)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = tx.Exec(
+		"UPDATE proposals SET status = ?, final_outcome = ?, updated_at = ? WHERE id = ?",
+		string(model.ProposalStatusCommitted), outcome, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("committing proposal: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
+}
+
 // --- helpers ---
 
 // scanProposalFrom scans a single proposal from any scanner (*sql.Row or *sql.Rows).
@@ -394,10 +473,13 @@ func scanProposalFrom(s scanner) (*model.Proposal, error) {
 	var p model.Proposal
 	var weightedScore sql.NullFloat64
 	var createdBy sql.NullString
+	var domainTagsRaw, filesChangedRaw string
+	var escalationReason sql.NullString
 	var createdAt, updatedAt string
 
 	err := s.Scan(
-		&p.ID, &p.Description, &p.Criticality, &p.Status,
+		&p.ID, &p.Description, &p.Rationale, &domainTagsRaw, &filesChangedRaw,
+		&p.Criticality, &p.Status, &p.FinalOutcome, &escalationReason,
 		&p.RequiredVoters, &p.Threshold, &weightedScore, &createdBy,
 		&createdAt, &updatedAt,
 	)
@@ -410,6 +492,21 @@ func scanProposalFrom(s scanner) (*model.Proposal, error) {
 		p.WeightedScore = &ws
 	}
 	p.CreatedBy = createdBy.String
+	if escalationReason.Valid {
+		er := escalationReason.String
+		p.EscalationReason = &er
+	}
+
+	if domainTagsRaw != "" {
+		if err := json.Unmarshal([]byte(domainTagsRaw), &p.DomainTags); err != nil {
+			return nil, fmt.Errorf("unmarshaling domain_tags: %w", err)
+		}
+	}
+	if filesChangedRaw != "" {
+		if err := json.Unmarshal([]byte(filesChangedRaw), &p.FilesChanged); err != nil {
+			return nil, fmt.Errorf("unmarshaling files_changed: %w", err)
+		}
+	}
 
 	t, err := time.Parse(time.RFC3339, createdAt)
 	if err != nil {
@@ -429,15 +526,24 @@ func scanProposalFrom(s scanner) (*model.Proposal, error) {
 // scanVoteFrom scans a single vote from any scanner (*sql.Row or *sql.Rows).
 func scanVoteFrom(s scanner) (*model.Vote, error) {
 	var v model.Vote
+	var findingsJSONRaw sql.NullString
 	var createdAt string
 
 	err := s.Scan(
 		&v.ID, &v.ProposalID, &v.VoterName, &v.VoterRole,
 		&v.Verdict, &v.Confidence, &v.DomainRelevance, &v.Findings,
-		&createdAt,
+		&findingsJSONRaw, &v.Summary, &createdAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	if findingsJSONRaw.Valid {
+		var f model.Findings
+		if err := json.Unmarshal([]byte(findingsJSONRaw.String), &f); err != nil {
+			return nil, fmt.Errorf("unmarshaling findings_json: %w", err)
+		}
+		v.FindingsJSON = &f
 	}
 
 	t, err := time.Parse(time.RFC3339, createdAt)

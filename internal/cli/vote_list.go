@@ -26,6 +26,7 @@ var voteListCmd = &cobra.Command{
 
 		status, _ := cmd.Flags().GetString("status")
 		criticality, _ := cmd.Flags().GetString("criticality")
+		domainTag, _ := cmd.Flags().GetString("domain-tag")
 		all, _ := cmd.Flags().GetBool("all")
 		limit, _ := cmd.Flags().GetInt("limit")
 
@@ -50,7 +51,7 @@ var voteListCmd = &cobra.Command{
 			status = ""
 		}
 
-		proposals, total, err := db.ListProposals(conn, status, criticality, limit)
+		proposals, total, err := db.ListProposals(conn, status, criticality, domainTag, limit)
 		if err != nil {
 			return cmdErr(fmt.Errorf("listing proposals: %w", err), output.ErrGeneral)
 		}
@@ -98,8 +99,9 @@ func getVoteCounts(conn *sql.DB, proposals []*model.Proposal) (map[int]int, erro
 }
 
 func init() {
-	voteListCmd.Flags().StringP("status", "s", "", "Filter by status: open|approved|rejected")
+	voteListCmd.Flags().StringP("status", "s", "", "Filter by status: open|approved|rejected|committed")
 	voteListCmd.Flags().StringP("criticality", "c", "", "Filter by criticality: low|medium|high|critical")
+	voteListCmd.Flags().StringP("domain-tag", "d", "", "Filter by domain tag")
 	voteListCmd.Flags().Bool("all", false, "Include resolved proposals (default: open only)")
 	voteListCmd.Flags().Int("limit", 50, "Maximum number of results")
 	voteCmd.AddCommand(voteListCmd)
