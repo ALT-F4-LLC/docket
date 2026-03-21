@@ -35,6 +35,10 @@ var initCmd = &cobra.Command{
 			}
 			defer conn.Close()
 
+			if err := db.Migrate(conn); err != nil {
+				return cmdErr(fmt.Errorf("migrating database: %w", err), output.ErrGeneral)
+			}
+
 			schemaVersion, err := db.SchemaVersion(conn)
 			if err != nil {
 				return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)

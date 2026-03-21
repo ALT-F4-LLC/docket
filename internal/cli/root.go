@@ -67,6 +67,10 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("failed to open database: %w", err)
 		}
 
+		if err := db.Migrate(conn); err != nil {
+			return fmt.Errorf("failed to migrate database: %w", err)
+		}
+
 		cmd.SetContext(context.WithValue(ctx, dbKey, conn))
 		return nil
 	},
