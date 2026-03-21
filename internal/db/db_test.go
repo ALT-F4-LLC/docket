@@ -181,7 +181,7 @@ func TestMigrateNoOpAtLatestVersion(t *testing.T) {
 		t.Fatalf("Initialize failed: %v", err)
 	}
 
-	// Should be a no-op at version 1.
+	// Migrate applies pending migrations (v1 -> v2).
 	if err := Migrate(db); err != nil {
 		t.Fatalf("Migrate failed: %v", err)
 	}
@@ -190,8 +190,13 @@ func TestMigrateNoOpAtLatestVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion failed: %v", err)
 	}
-	if v != 1 {
-		t.Errorf("schema_version = %d after Migrate, want 1", v)
+	if v != 2 {
+		t.Errorf("schema_version = %d after Migrate, want 2", v)
+	}
+
+	// Second Migrate should be a no-op at version 2.
+	if err := Migrate(db); err != nil {
+		t.Fatalf("second Migrate failed: %v", err)
 	}
 }
 

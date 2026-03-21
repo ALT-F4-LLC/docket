@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 const schemaDDL = `
@@ -106,10 +106,10 @@ func Initialize(db *sql.DB) error {
 		return fmt.Errorf("creating schema: %w", err)
 	}
 
-	// Set schema version only if not already set.
+	// Set schema version to 1 (matching schemaDDL) only if not already set.
+	// Migrate() will then apply any pending migrations (e.g. v1->v2).
 	_, err = tx.Exec(
-		`INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)`,
-		strconv.Itoa(currentSchemaVersion),
+		`INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')`,
 	)
 	if err != nil {
 		return fmt.Errorf("setting schema version: %w", err)
@@ -136,7 +136,52 @@ func SchemaVersion(db *sql.DB) (int, error) {
 
 // migrations is a list of migration functions keyed by the version they migrate TO.
 // For example, migrations[2] migrates from version 1 to version 2.
-var migrations = map[int]func(tx *sql.Tx) error{}
+var migrations = map[int]func(tx *sql.Tx) error{
+	2: migrateV1ToV2,
+}
+
+// migrateV1ToV2 creates the proposals, votes, and proposal_issues tables.
+func migrateV1ToV2(tx *sql.Tx) error {
+	const ddl = `
+CREATE TABLE IF NOT EXISTS proposals (
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
+	description     TEXT NOT NULL,
+	criticality     TEXT NOT NULL DEFAULT 'medium',
+	status          TEXT NOT NULL DEFAULT 'open',
+	required_voters INTEGER NOT NULL,
+	threshold       REAL NOT NULL DEFAULT 0.67,
+	weighted_score  REAL,
+	created_by      TEXT,
+	created_at      TEXT NOT NULL,
+	updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS votes (
+	id               INTEGER PRIMARY KEY AUTOINCREMENT,
+	proposal_id      INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+	voter_name       TEXT NOT NULL,
+	voter_role       TEXT NOT NULL DEFAULT '',
+	verdict          TEXT NOT NULL,
+	confidence       REAL NOT NULL,
+	domain_relevance REAL NOT NULL,
+	findings         TEXT NOT NULL DEFAULT '',
+	created_at       TEXT NOT NULL,
+	UNIQUE(proposal_id, voter_name)
+);
+
+CREATE TABLE IF NOT EXISTS proposal_issues (
+	proposal_id INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+	issue_id    INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	PRIMARY KEY (proposal_id, issue_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+CREATE INDEX IF NOT EXISTS idx_proposals_created_at ON proposals(created_at);
+CREATE INDEX IF NOT EXISTS idx_votes_proposal_id ON votes(proposal_id);
+`
+	_, err := tx.Exec(ddl)
+	return err
+}
 
 // Migrate checks the current schema version and applies any pending migrations
 // sequentially. It is a no-op when already at the latest version.
@@ -144,6 +189,19 @@ func Migrate(db *sql.DB) error {
 	version, err := SchemaVersion(db)
 	if err != nil {
 		return err
+	}
+
+	// Handle databases that were stamped as v2 by a buggy Initialize() that
+	// skipped the v2 migration. All v2 DDL uses IF NOT EXISTS, so re-running
+	// is safe.
+	if version >= 2 {
+		var hasProposals bool
+		err := db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='proposals')`,
+		).Scan(&hasProposals)
+		if err == nil && !hasProposals {
+			version = 1
+		}
 	}
 
 	if version == currentSchemaVersion {
