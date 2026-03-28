@@ -144,6 +144,12 @@ Any agent that can run shell commands works with Docket. Point it at `docket nex
 
 [`skills/docket/SKILL.md`](skills/docket/SKILL.md) is a thorough reference teaching the full Docket CLI workflow and command/flag reference in one file, so your agent doesn't need to re-derive usage from `--help` output. See [Agent Skill Setup](#agent-skill-setup) in the Installation section above for where to drop it in for Claude Code, Codex, and Opencode.
 
+### Interactive UI
+
+Use `docket ui` when you want an interactive browser instead of command output. It opens a read-only terminal UI for list and board browsing, requires an interactive terminal, and does not support `--json`.
+
+If you need to debug terminal-specific behavior, set `DOCKET_UI_DEBUG_LOG=/tmp/docket-ui.log` before running `docket ui`.
+
 <details>
 <summary>Verbose JSON examples</summary>
 
