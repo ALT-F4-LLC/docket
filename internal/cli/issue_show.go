@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/app"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -19,8 +20,6 @@ import (
 	"golang.org/x/term"
 )
 
-// showResult composes the issue fields with additional detail fields
-// (sub-issues, relations, comments, activity) into a single flat JSON object.
 type showResult struct {
 	Issue     *model.Issue     `json:"-"`
 	SubIssues []*model.Issue   `json:"sub_issues"`
@@ -29,8 +28,6 @@ type showResult struct {
 	Activity  []model.Activity `json:"activity"`
 }
 
-// showResultJSON is the wire format that explicitly lists all fields,
-// avoiding the fragile marshal-unmarshal-remarshal pattern.
 type showResultJSON struct {
 	ID          string           `json:"id"`
 	ParentID    *string          `json:"parent_id,omitempty"`
@@ -139,57 +136,25 @@ func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
 	}
 
-	issue, err := db.GetIssue(conn, id)
+	data, err := app.GetIssueDetail(conn, id)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
 		}
-		return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
-	}
-
-	// Hydrate labels.
-	issue.Labels, err = db.GetIssueLabels(conn, id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
-	}
-
-	// Hydrate files.
-	issue.Files, err = db.GetIssueFiles(conn, id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-	}
-
-	subIssues, err := db.GetSubIssues(conn, id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
-	}
-
-	relations, err := db.GetIssueRelations(conn, id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-	}
-
-	comments, err := db.ListComments(conn, id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-	}
-
-	activity, err := db.GetActivity(conn, id, 10)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
+		return cmdErr(err, output.ErrGeneral)
 	}
 
 	result := showResult{
-		Issue:     issue,
-		SubIssues: subIssues,
-		Relations: relations,
-		Comments:  comments,
-		Activity:  activity,
+		Issue:     data.Issue,
+		SubIssues: data.SubIssues,
+		Relations: data.Relations,
+		Comments:  data.Comments,
+		Activity:  data.Activity,
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = render.RenderDetail(issue, subIssues, relations, comments, activity)
+		message = render.RenderDetail(data.Issue, data.SubIssues, data.Relations, data.Comments, data.Activity)
 	}
 	w.Success(result, message)
 

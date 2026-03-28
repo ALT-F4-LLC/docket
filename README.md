@@ -69,9 +69,12 @@ docket next
 
 # View the Kanban board
 docket board
+
+# Browse issues in the interactive terminal UI
+docket ui
 ```
 
-**AI agents:** add `--json` to any command for structured, machine-readable output:
+**AI agents:** add `--json` to supported non-interactive commands for structured, machine-readable output:
 
 ```bash
 docket next --json
@@ -81,14 +84,16 @@ docket issue list --json -s todo -s in-progress
 ## Why Docket?
 
 - **No servers, no network** — everything is a local SQLite file in `.docket/`. Works offline, on planes, in CI.
-- **AI-native from day one** — every command supports `--json` with a consistent envelope. Agents can create, query, plan, and update issues without parsing human text.
+- **AI-native from day one** — machine-readable commands support `--json` with a consistent envelope. Agents can create, query, plan, and update issues without parsing human text.
 - **Dependency-aware planning** — `docket next` and `docket plan` use a DAG to surface only unblocked, work-ready issues. No stale sprint boards.
 - **Zero configuration** — `docket init` and you're done. No accounts, no tokens, no YAML.
 - **Portable data** — the `.docket/` directory travels with your repo. Clone it, fork it, archive it.
 
 ## AI Agent Integration
 
-Every command supports `--json` for structured, machine-readable output. All JSON responses use a consistent envelope:
+Most commands support `--json` for structured, machine-readable output. All JSON responses use a consistent envelope:
+
+`docket ui` is the exception: it opens a read-only interactive terminal UI, requires a real TTY, and rejects `--json`.
 
 **Success:** `{"ok": true, "data": { ... }, "message": "..."}`
 
@@ -116,6 +121,12 @@ Run `docket next --json` to find work. Move issues to `in-progress` before start
 ### Configuring Other Agents
 
 Any agent that can run shell commands works with Docket. Point it at `docket next --json` to discover work items, and use `docket issue show <id> --json` to get full context before starting a task. The consistent JSON envelope (`ok`, `data`, `error`, `code`) makes parsing straightforward in any language.
+
+### Interactive UI
+
+Use `docket ui` when you want an interactive browser instead of command output. It opens a read-only terminal UI for list and board browsing, requires an interactive terminal, and does not support `--json`.
+
+If you need to debug terminal-specific behavior, set `DOCKET_UI_DEBUG_LOG=/tmp/docket-ui.log` before running `docket ui`.
 
 <details>
 <summary>Verbose JSON examples</summary>
@@ -222,6 +233,8 @@ docket issue list --json -s todo -s in-progress -p high
 --quiet, -q   Suppress non-essential output
 ```
 
+`docket ui` is interactive-only and rejects `--json`.
+
 ### Issue Commands (`docket issue` / `docket i`)
 
 | Command | Description |
@@ -290,6 +303,7 @@ docket issue list --json -s todo -s in-progress -p high
 | `docket config` | Show current configuration (database path, schema version, etc.) |
 | `docket version` | Print version, commit, and build date |
 | `docket stats` | Show summary statistics for the issue database |
+| `docket ui` | Browse issues in an interactive terminal UI |
 
 ### Export / Import
 
