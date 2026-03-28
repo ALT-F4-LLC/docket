@@ -36,5 +36,7 @@ func hideWatchFlags(cmd *cobra.Command) {
 	if cmd != rootCmd && !isWatchEligible(cmd) {
 		cmd.Flags().MarkHidden("watch")
 		cmd.Flags().MarkHidden("interval")
+		cmd.InheritedFlags().MarkHidden("watch")
+		cmd.InheritedFlags().MarkHidden("interval")
 	}
 }

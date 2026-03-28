@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/ALT-F4-LLC/docket/internal/app"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -110,95 +111,31 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
-	issues, total, err := db.ListIssues(conn, opts)
+	data, err := app.ListIssues(conn, app.ListIssuesParams{
+		Statuses:    opts.Statuses,
+		Priorities:  opts.Priorities,
+		Labels:      opts.Labels,
+		Types:       opts.Types,
+		Assignee:    opts.Assignee,
+		ParentID:    opts.ParentID,
+		RootsOnly:   opts.RootsOnly,
+		IncludeDone: opts.IncludeDone,
+		Sort:        opts.Sort,
+		SortDir:     opts.SortDir,
+		Limit:       opts.Limit,
+	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
+		return cmdErr(err, output.ErrGeneral)
 	}
 
-	if err := db.HydrateDocs(conn, issues); err != nil {
-		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
-	}
-
-	result := listResult{Issues: issues, Total: total}
-
-	// Fetch parent issues and sub-issue progress for the grouped display.
-	// Only needed for human-readable output (JSON stays flat).
-	var parentMap map[int]*model.Issue
-	var progress map[int]render.SubIssueProgress
-	if !w.JSONMode {
-		// Build a set of issue IDs in the result set for quick lookup.
-		resultIDs := make(map[int]struct{}, len(issues))
-		for _, issue := range issues {
-			resultIDs[issue.ID] = struct{}{}
-		}
-
-		// Collect parent IDs that are referenced but not in the result set.
-		missingParentIDs := make(map[int]struct{})
-		for _, issue := range issues {
-			if issue.ParentID != nil {
-				pid := *issue.ParentID
-				if _, inResult := resultIDs[pid]; !inResult {
-					missingParentIDs[pid] = struct{}{}
-				}
-			}
-		}
-
-		// Batch-fetch missing parents if any exist.
-		if len(missingParentIDs) > 0 {
-			ids := make([]int, 0, len(missingParentIDs))
-			for id := range missingParentIDs {
-				ids = append(ids, id)
-			}
-			parentMap, err = db.GetIssuesByIDs(conn, ids)
-			if err != nil {
-				return cmdErr(fmt.Errorf("fetching parent issues: %w", err), output.ErrGeneral)
-			}
-		}
-
-		// Collect IDs of all parent issues that have children in the
-		// result set. This includes parents fetched into parentMap
-		// (excluded by filters) and parents already in the result set.
-		parentIDSet := make(map[int]struct{})
-		for id := range parentMap {
-			parentIDSet[id] = struct{}{}
-		}
-		for _, issue := range issues {
-			if issue.ParentID != nil {
-				pid := *issue.ParentID
-				if _, inResult := resultIDs[pid]; inResult {
-					parentIDSet[pid] = struct{}{}
-				} else if _, inMap := parentMap[pid]; inMap {
-					parentIDSet[pid] = struct{}{}
-				}
-			}
-		}
-
-		// Fetch sub-issue progress (done/total counts) for parent
-		// issues in a single batch query.
-		if len(parentIDSet) > 0 {
-			parentIDs := make([]int, 0, len(parentIDSet))
-			for id := range parentIDSet {
-				parentIDs = append(parentIDs, id)
-			}
-			batchProgress, err := db.GetBatchSubIssueProgress(conn, parentIDs)
-			if err != nil {
-				return cmdErr(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
-			}
-			progress = make(map[int]render.SubIssueProgress, len(batchProgress))
-			for id, counts := range batchProgress {
-				if counts[1] > 0 {
-					progress[id] = render.SubIssueProgress{Done: counts[0], Total: counts[1]}
-				}
-			}
-		}
-	}
+	result := listResult{Issues: data.Issues, Total: data.Total}
 
 	var message string
 	if !w.JSONMode {
 		if treeMode {
-			message = render.RenderTable(issues, true)
+			message = render.RenderTable(data.Issues, true)
 		} else {
-			message = render.RenderGroupedTable(issues, parentMap, progress)
+			message = render.RenderGroupedTable(data.Issues, data.ParentMap, data.Progress)
 		}
 	}
 	w.Success(result, message)
