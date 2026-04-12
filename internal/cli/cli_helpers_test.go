@@ -10,6 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
+	"os"
 )
 
 func newTestDB(t *testing.T) *sql.DB {
@@ -41,6 +42,20 @@ func bufWriter(jsonMode bool) (*output.Writer, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
 	w := &output.Writer{JSONMode: jsonMode, Stdout: buf, Stderr: &bytes.Buffer{}}
 	return w, buf
+}
+func unsetNoColor(t *testing.T) {
+	t.Helper()
+	old, ok := os.LookupEnv("NO_COLOR")
+	if err := os.Unsetenv("NO_COLOR"); err != nil {
+		t.Fatalf("Unsetenv(NO_COLOR): %v", err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv("NO_COLOR", old)
+		} else {
+			_ = os.Unsetenv("NO_COLOR")
+		}
+	})
 }
 
 func createIssue(t *testing.T, conn *sql.DB, title string, status model.Status, priority model.Priority) int {

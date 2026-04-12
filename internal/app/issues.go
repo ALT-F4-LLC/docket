@@ -207,6 +207,9 @@ func loadParentProgress(conn *sql.DB, issues []*model.Issue) (map[int]*model.Iss
 	}
 
 	parentIDSet := make(map[int]struct{})
+	for _, issue := range issues {
+		parentIDSet[issue.ID] = struct{}{}
+	}
 	for id := range parentMap {
 		parentIDSet[id] = struct{}{}
 	}

@@ -71,7 +71,7 @@ docket next
 docket board
 
 # Browse issues in the interactive terminal UI
-docket ui
+docket tui
 ```
 
 **AI agents:** add `--json` to supported non-interactive commands for structured, machine-readable output:
@@ -93,7 +93,7 @@ docket issue list --json -s todo -s in-progress
 
 Most commands support `--json` for structured, machine-readable output. All JSON responses use a consistent envelope:
 
-`docket ui` is the exception: it opens a read-only interactive terminal UI, requires a real TTY, and rejects `--json`.
+`docket tui` is the exception: it opens a read-only interactive terminal UI, requires a real TTY, and rejects `--json`.
 
 **Success:** `{"ok": true, "data": { ... }, "message": "..."}`
 
@@ -124,9 +124,30 @@ Any agent that can run shell commands works with Docket. Point it at `docket nex
 
 ### Interactive UI
 
-Use `docket ui` when you want an interactive browser instead of command output. It opens a read-only terminal UI for list and board browsing, requires an interactive terminal, and does not support `--json`.
+Use `docket tui` when you want an interactive browser instead of command output. It opens a read-only terminal UI for list and board browsing, auto-refreshes by default, supports `p` to pause or resume polling, supports list sorting with `s` (cycle sort field) and `S` (toggle sort direction), requires an interactive terminal, and does not support `--json`.
 
-If you need to debug terminal-specific behavior, set `DOCKET_UI_DEBUG_LOG=/tmp/docket-ui.log` before running `docket ui`.
+If you need to debug terminal-specific behavior, set `DOCKET_TUI_DEBUG_LOG=/tmp/docket-tui.log` before running `docket tui`.
+
+#### TUI Keybinds
+
+| Key | Action |
+|-----|--------|
+| `1` | Switch to list view |
+| `2` | Switch to board view |
+| `j` / `k` | Move selection in the focused pane |
+| `J` / `K` | Move detail selection while browse stays focused |
+| `s` | Cycle list sort field |
+| `S` | Toggle list sort direction |
+| `o` | Drill into the selected epic |
+| `tab` | Switch between browse and detail panes |
+| `enter` | Expand detail or open the selected sub-issue |
+| `h` / `l` | Switch board column or detail region |
+| `u` | Go to parent issue or back |
+| `ctrl+u` / `ctrl+d` | Half-page scroll in detail |
+| `r` | Refresh current view |
+| `p` | Pause or resume auto-refresh |
+| `?` | Toggle help |
+| `q` | Quit |
 
 <details>
 <summary>Verbose JSON examples</summary>
@@ -233,7 +254,7 @@ docket issue list --json -s todo -s in-progress -p high
 --quiet, -q   Suppress non-essential output
 ```
 
-`docket ui` is interactive-only and rejects `--json`.
+`docket tui` is interactive-only and rejects `--json`.
 
 ### Issue Commands (`docket issue` / `docket i`)
 
@@ -303,7 +324,7 @@ docket issue list --json -s todo -s in-progress -p high
 | `docket config` | Show current configuration (database path, schema version, etc.) |
 | `docket version` | Print version, commit, and build date |
 | `docket stats` | Show summary statistics for the issue database |
-| `docket ui` | Browse issues in an interactive terminal UI |
+| `docket tui` | Browse issues in an interactive terminal UI |
 
 ### Export / Import
 
