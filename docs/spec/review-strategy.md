@@ -71,7 +71,7 @@ The following dimensions are weighted by their relevance to the docket project, 
 **JSON API Contract Stability (Critical)**
 - Non-interactive commands support `--json` with a documented envelope (`{"ok": true, "data": ..., "message": ...}`)
 - AI agents depend on stable JSON shapes — breaking changes silently break agent workflows
-- Interactive commands like `docket ui` are exceptions and must fail clearly when `--json` is unsupported
+- Interactive commands like `docket tui` are exceptions and must fail clearly when `--json` is unsupported
 - Error codes (`GENERAL_ERROR`, `NOT_FOUND`, `VALIDATION_ERROR`, `CONFLICT`) are part of the contract
 - The QA suite has dedicated sections (Q, R) for contract and exit code validation
 - Review must verify: no field renames/removals without versioning, exit codes match documented behavior

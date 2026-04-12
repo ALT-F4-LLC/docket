@@ -64,6 +64,76 @@ func TestListIssuesBuildsParentContext(t *testing.T) {
 	}
 }
 
+func TestListIssuesKeepsProgressForStandaloneParentRows(t *testing.T) {
+	conn := mustOpenDB(t)
+
+	parentID := createIssue(t, conn, model.Issue{
+		Title:    "Standalone parent",
+		Status:   model.StatusBacklog,
+		Priority: model.PriorityHigh,
+		Kind:     model.IssueKindEpic,
+	}, nil, nil)
+
+	createIssue(t, conn, model.Issue{
+		ParentID: &parentID,
+		Title:    "Hidden child one",
+		Status:   model.StatusTodo,
+		Priority: model.PriorityMedium,
+		Kind:     model.IssueKindTask,
+	}, nil, nil)
+	createIssue(t, conn, model.Issue{
+		ParentID: &parentID,
+		Title:    "Hidden child two",
+		Status:   model.StatusDone,
+		Priority: model.PriorityLow,
+		Kind:     model.IssueKindTask,
+	}, nil, nil)
+
+	data, err := ListIssues(conn, ListIssuesParams{Statuses: []string{string(model.StatusBacklog)}})
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+
+	if data.Total != 1 || len(data.Issues) != 1 {
+		t.Fatalf("got total=%d len=%d, want 1/1", data.Total, len(data.Issues))
+	}
+	if data.Issues[0].ID != parentID {
+		t.Fatalf("got issue %d, want parent %d", data.Issues[0].ID, parentID)
+	}
+	if progress, ok := data.Progress[parentID]; !ok || progress.Done != 1 || progress.Total != 2 {
+		t.Fatalf("expected standalone parent progress 1/2 for %d, got %#v", parentID, data.Progress[parentID])
+	}
+}
+
+func TestListIssuesHonorsExplicitIDDescSort(t *testing.T) {
+	conn := mustOpenDB(t)
+
+	olderID := createIssue(t, conn, model.Issue{
+		Title:    "Older but higher-ranked by default sort",
+		Status:   model.StatusInProgress,
+		Priority: model.PriorityCritical,
+		Kind:     model.IssueKindTask,
+	}, nil, nil)
+	newerID := createIssue(t, conn, model.Issue{
+		Title:    "Newer by id",
+		Status:   model.StatusBacklog,
+		Priority: model.PriorityLow,
+		Kind:     model.IssueKindTask,
+	}, nil, nil)
+
+	data, err := ListIssues(conn, ListIssuesParams{Sort: "id", SortDir: "desc"})
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+
+	if data.Total != 2 || len(data.Issues) != 2 {
+		t.Fatalf("got total=%d len=%d, want 2/2", data.Total, len(data.Issues))
+	}
+	if data.Issues[0].ID != newerID || data.Issues[1].ID != olderID {
+		t.Fatalf("order = [%d, %d], want [%d, %d]", data.Issues[0].ID, data.Issues[1].ID, newerID, olderID)
+	}
+}
+
 func TestLoadBoardRollsUpChildrenByDefault(t *testing.T) {
 	conn := mustOpenDB(t)
 
