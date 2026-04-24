@@ -2,7 +2,7 @@ lockfile = 1
 
 [[sources]]
 name = "git"
-path = "https://www.kernel.org/pub/software/scm/git/git-2.53.0.tar.gz"
+path = "https://sdk.vorpal.build/source/git-2.53.0.tar.gz"
 includes = []
 excludes = []
 digest = "4c08acf32a9dd52cb4f64d1835bade4128af51dd85742245987643cde0aeb9b1"
@@ -10,15 +10,31 @@ platform = "aarch64-darwin"
 
 [[sources]]
 name = "go"
-path = "https://go.dev/dl/go1.26.0.darwin-arm64.tar.gz"
+path = "https://sdk.vorpal.build/source/go1.26.0.darwin-arm64.tar.gz"
 includes = []
 excludes = []
 digest = "83d3ebad7958766647de4d3a8a1b2d3860da607632ac07889085b933e3e97f0f"
 platform = "aarch64-darwin"
 
 [[sources]]
+name = "goimports"
+path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
+includes = []
+excludes = []
+digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
+platform = "aarch64-darwin"
+
+[[sources]]
+name = "gopls"
+path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
+includes = []
+excludes = []
+digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
+platform = "aarch64-darwin"
+
+[[sources]]
 name = "protoc"
-path = "https://github.com/protocolbuffers/protobuf/releases/download/v34.0/protoc-34.0-osx-aarch_64.zip"
+path = "https://sdk.vorpal.build/source/protoc-34.0-osx-aarch_64.zip"
 includes = []
 excludes = []
 digest = "f45e1434669e1f88fd6f7ebf750388ef3135f5477fd7e34d7531e3c18f4751f3"
@@ -26,7 +42,7 @@ platform = "aarch64-darwin"
 
 [[sources]]
 name = "protoc-gen-go"
-path = "https://github.com/protocolbuffers/protobuf-go/releases/download/v1.36.11/protoc-gen-go.v1.36.11.darwin.arm64.tar.gz"
+path = "https://sdk.vorpal.build/source/protoc-gen-go.v1.36.11.darwin.arm64.tar.gz"
 includes = []
 excludes = []
 digest = "33e98fb84e72b46f47f06f3452dad81c2804ae6d32a0045862818332a4c2a0cd"
@@ -34,8 +50,16 @@ platform = "aarch64-darwin"
 
 [[sources]]
 name = "protoc-gen-go-grpc"
-path = "https://github.com/grpc/grpc-go/archive/refs/tags/v1.79.1.tar.gz"
+path = "https://sdk.vorpal.build/source/protoc-gen-go-grpc-v1.79.1.tar.gz"
 includes = []
 excludes = []
 digest = "f1d541547bc8d5199a9877209b5a65ee26a3e983965ccbf9000785c75c91c0bd"
+platform = "aarch64-darwin"
+
+[[sources]]
+name = "staticcheck"
+path = "https://sdk.vorpal.build/source/staticcheck-2026.1.tar.gz"
+includes = []
+excludes = []
+digest = "fb3b8a69d94d507016bea39129274c2329704a451c0db6af620bcd8486288241"
 platform = "aarch64-darwin"
