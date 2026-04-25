@@ -217,6 +217,14 @@ digest = "4c08acf32a9dd52cb4f64d1835bade4128af51dd85742245987643cde0aeb9b1"
 platform = "aarch64-linux"
 
 [[sources]]
+name = "git"
+path = "https://sdk.vorpal.build/source/git-2.53.0.tar.gz"
+includes = []
+excludes = []
+digest = "4c08acf32a9dd52cb4f64d1835bade4128af51dd85742245987643cde0aeb9b1"
+platform = "x86_64-darwin"
+
+[[sources]]
 name = "glibc"
 path = "https://sdk.vorpal.build/source/glibc-2.42.tar.gz"
 includes = []
@@ -263,6 +271,14 @@ includes = []
 excludes = []
 digest = "191226cef6e9ce60e291e178db47682aadea28cb3e92f35f006ba317f3e10195"
 platform = "aarch64-linux"
+
+[[sources]]
+name = "go"
+path = "https://sdk.vorpal.build/source/go1.26.0.darwin-amd64.tar.gz"
+includes = []
+excludes = []
+digest = "73226b2c27fc779b8e9432dd8a9db76d6baebe3fb123c76028e20bf3ace33808"
+platform = "x86_64-darwin"
 
 [[sources]]
 name = "go"
@@ -313,6 +329,14 @@ digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
 platform = "aarch64-linux"
 
 [[sources]]
+name = "goimports"
+path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
+includes = []
+excludes = []
+digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
+platform = "x86_64-darwin"
+
+[[sources]]
 name = "gopls"
 path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
 includes = []
@@ -337,6 +361,14 @@ digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
 platform = "aarch64-linux"
 
 [[sources]]
+name = "gopls"
+path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
+includes = []
+excludes = []
+digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
+platform = "x86_64-darwin"
+
+[[sources]]
 name = "grep"
 path = "https://sdk.vorpal.build/source/grep-3.12.tar.gz"
 includes = []
@@ -559,6 +591,14 @@ includes = []
 excludes = []
 digest = "43a6f8cf15fcedeb66e95c4957ec8bc43db40515de89483e507c01c255fce853"
 platform = "aarch64-linux"
+
+[[sources]]
+name = "protoc"
+path = "https://sdk.vorpal.build/source/protoc-34.0-osx-x86_64.zip"
+includes = []
+excludes = []
+digest = "337d9687929aaccd10b82bd7103f7dfa57080f312d8c249ce27c7a0db0ab81b0"
+platform = "x86_64-darwin"
 
 [[sources]]
 name = "protoc"
@@ -602,6 +642,14 @@ platform = "x86_64-linux"
 
 [[sources]]
 name = "protoc-gen-go"
+path = "https://sdk.vorpal.build/source/protoc-gen-go.v1.36.11.darwin.amd64.tar.gz"
+includes = []
+excludes = []
+digest = "853fdd384cea7d946dd387167b3b2fe4c5a8b45d7f05425c81fdbc68a2962a21"
+platform = "x86_64-darwin"
+
+[[sources]]
+name = "protoc-gen-go"
 path = "https://sdk.vorpal.build/source/protoc-gen-go.v1.36.11.linux.arm64.tar.gz"
 includes = []
 excludes = []
@@ -633,6 +681,14 @@ digest = "f1d541547bc8d5199a9877209b5a65ee26a3e983965ccbf9000785c75c91c0bd"
 platform = "aarch64-linux"
 
 [[sources]]
+name = "protoc-gen-go-grpc"
+path = "https://sdk.vorpal.build/source/protoc-gen-go-grpc-v1.79.1.tar.gz"
+includes = []
+excludes = []
+digest = "f1d541547bc8d5199a9877209b5a65ee26a3e983965ccbf9000785c75c91c0bd"
+platform = "x86_64-darwin"
+
+[[sources]]
 name = "python"
 path = "https://sdk.vorpal.build/source/Python-3.13.7.tar.xz"
 includes = []
@@ -687,6 +743,14 @@ includes = []
 excludes = []
 digest = "fb3b8a69d94d507016bea39129274c2329704a451c0db6af620bcd8486288241"
 platform = "aarch64-linux"
+
+[[sources]]
+name = "staticcheck"
+path = "https://sdk.vorpal.build/source/staticcheck-2026.1.tar.gz"
+includes = []
+excludes = []
+digest = "fb3b8a69d94d507016bea39129274c2329704a451c0db6af620bcd8486288241"
+platform = "x86_64-darwin"
 
 [[sources]]
 name = "tar"
