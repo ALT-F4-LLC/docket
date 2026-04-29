@@ -2,14 +2,13 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"golang.org/x/term"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/app"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
@@ -70,34 +69,20 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
-	opts := db.ListOptions{
-		Priorities:  priorities,
-		Labels:      labels,
-		Assignee:    assignee,
-		IncludeDone: true,
-	}
-
-	issues, _, err := db.ListIssues(conn, opts)
+	data, err := app.LoadBoard(conn, app.BoardParams{
+		Labels:     labels,
+		Priorities: priorities,
+		Assignee:   assignee,
+		Expand:     expand,
+	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
-	}
-
-	// By default, roll up sub-issues into their parent (exclude issues that
-	// have a parent). When --expand is set, show all issues individually.
-	if !expand {
-		var roots []*model.Issue
-		for _, issue := range issues {
-			if issue.ParentID == nil {
-				roots = append(roots, issue)
-			}
-		}
-		issues = roots
+		return cmdErr(err, output.ErrGeneral)
 	}
 
 	if w.JSONMode {
 		// Group issues by status for structured output.
 		groups := make(map[model.Status][]*model.Issue)
-		for _, issue := range issues {
+		for _, issue := range data.Issues {
 			groups[issue.Status] = append(groups[issue.Status], issue)
 		}
 
@@ -118,27 +103,11 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return nil
 	}
 
-	// Build sub-issue progress map for parent issues in a single query.
-	parentIDs := make([]int, len(issues))
-	for i, issue := range issues {
-		parentIDs[i] = issue.ID
-	}
-	batchProgress, err := db.GetBatchSubIssueProgress(conn, parentIDs)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
-	}
-	progress := make(map[int]render.SubIssueProgress, len(batchProgress))
-	for id, counts := range batchProgress {
-		if counts[1] > 0 {
-			progress[id] = render.SubIssueProgress{Done: counts[0], Total: counts[1]}
-		}
-	}
-
 	boardOpts := render.BoardOptions{
 		Expand:   expand,
-		Progress: progress,
+		Progress: data.Progress,
 	}
-	message := render.RenderBoard(issues, boardOpts)
+	message := render.RenderBoard(data.Issues, boardOpts)
 	w.Success(nil, message)
 
 	return nil

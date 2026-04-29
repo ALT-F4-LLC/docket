@@ -69,15 +69,16 @@ The following dimensions are weighted by their relevance to the docket project, 
 - Review must verify: migration idempotency, rollback safety, data preservation across versions
 
 **JSON API Contract Stability (Critical)**
-- Every command supports `--json` with a documented envelope (`{"ok": true, "data": ..., "message": ...}`)
+- Non-interactive commands support `--json` with a documented envelope (`{"ok": true, "data": ..., "message": ...}`)
 - AI agents depend on stable JSON shapes — breaking changes silently break agent workflows
+- Interactive commands like `docket tui` are exceptions and must fail clearly when `--json` is unsupported
 - Error codes (`GENERAL_ERROR`, `NOT_FOUND`, `VALIDATION_ERROR`, `CONFLICT`) are part of the contract
 - The QA suite has dedicated sections (Q, R) for contract and exit code validation
 - Review must verify: no field renames/removals without versioning, exit codes match documented behavior
 
 **CLI UX Consistency (High)**
 - One-file-per-command pattern in `internal/cli/` must be maintained
-- All commands must support `--json` and `--quiet` flags via `getWriter()`
+- Non-interactive commands should support `--json` and `--quiet` via `getWriter()`; interactive commands must document and enforce any exceptions
 - Interactive forms (via `charmbracelet/huh`) must degrade gracefully in non-TTY contexts
 - Review must verify: new commands follow established patterns, help text is consistent
 
