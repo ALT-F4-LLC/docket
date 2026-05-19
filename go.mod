@@ -3,7 +3,7 @@ module github.com/ALT-F4-LLC/docket
 go 1.26.0
 
 require (
-	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260422192343-8683bf68c9a9
+	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260519164333-504fda438571
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
@@ -57,7 +57,7 @@ require (
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
-	google.golang.org/grpc v1.80.0 // indirect
+	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	modernc.org/libc v1.72.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

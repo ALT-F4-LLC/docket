@@ -1,5 +1,7 @@
 github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260422192343-8683bf68c9a9 h1:5Qs6K+nDCgi4RWoAxAYLdn5dmPRZB7VWn1WZcL+y5oE=
 github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260422192343-8683bf68c9a9/go.mod h1:kZdb7mbdBU6/cKjxYUhRg/SP7rQjhKbiqGMUAfuZHfk=
+github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260519164333-504fda438571 h1:/em+PWVj3B1ob8B7OPCMp6ewoOoy7OVR9Jhk/PX/zs8=
+github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260519164333-504fda438571/go.mod h1:LnxjOk1cYJPm2s1mmsn26qvquhz3CgxVaxU9RR6CcDY=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
@@ -164,6 +166,8 @@ google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 h1:
 google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529/go.mod h1:4Hqkh8ycfw05ld/3BWL7rJOSfebL2Q+DVDeRgYgxUU8=
 google.golang.org/grpc v1.80.0 h1:Xr6m2WmWZLETvUNvIUmeD5OAagMw3FiKmMlTdViWsHM=
 google.golang.org/grpc v1.80.0/go.mod h1:ho/dLnxwi3EDJA4Zghp7k2Ec1+c2jqup0bFkw07bwF4=
+google.golang.org/grpc v1.81.1 h1:VnnIIZ88UzOOKLukQi+ImGz8O1Wdp8nAGGnvOfEIWQQ=
+google.golang.org/grpc v1.81.1/go.mod h1:xGH9GfzOyMTGIOXBJmXt+BX/V0kcdQbdcuwQ/zNw42I=
 google.golang.org/protobuf v1.36.11 h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=
 google.golang.org/protobuf v1.36.11/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
