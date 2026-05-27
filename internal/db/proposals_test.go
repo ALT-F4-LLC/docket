@@ -43,13 +43,14 @@ func TestMigrateV1ToV2CreatesProposalTables(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	// Schema should now be at v3.
+	// Migrate advances all the way to head; this test verifies v1→v2 in
+	// particular, but Migrate is contractually all-or-head.
 	v, err = SchemaVersion(db)
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if v != 3 {
-		t.Fatalf("schema_version = %d after migration, want 3", v)
+	if v != currentSchemaVersion {
+		t.Fatalf("schema_version = %d after migration, want %d", v, currentSchemaVersion)
 	}
 
 	// Verify new tables exist.
@@ -1289,13 +1290,14 @@ func TestMigrateV2ToV3Columns(t *testing.T) {
 		t.Fatalf("Migrate v2->v3: %v", err)
 	}
 
-	// Verify version is now 3.
+	// Verify version is now at head (Migrate advances v2 to the current
+	// schema version, applying v3 and any later migrations in sequence).
 	v, err = SchemaVersion(db)
 	if err != nil {
 		t.Fatalf("SchemaVersion after migration: %v", err)
 	}
-	if v != 3 {
-		t.Fatalf("schema_version = %d after migration, want 3", v)
+	if v != currentSchemaVersion {
+		t.Fatalf("schema_version = %d after migration, want %d", v, currentSchemaVersion)
 	}
 
 	// Verify existing proposal has correct defaults for new columns.

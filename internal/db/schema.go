@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 const schemaDDL = `
@@ -139,6 +139,7 @@ func SchemaVersion(db *sql.DB) (int, error) {
 var migrations = map[int]func(tx *sql.Tx) error{
 	2: migrateV1ToV2,
 	3: migrateV2ToV3,
+	4: migrateV3ToV4,
 }
 
 // migrateV1ToV2 creates the proposals, votes, and proposal_issues tables.
@@ -209,6 +210,66 @@ func migrateV2ToV3(tx *sql.Tx) error {
 	return nil
 }
 
+// migrateV3ToV4 creates the docs, doc_revisions, doc_comments, doc_issue_links,
+// and proposal_docs tables (TDD docket-doc-cli §5.1).
+func migrateV3ToV4(tx *sql.Tx) error {
+	const ddl = `
+CREATE TABLE IF NOT EXISTS docs (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	type        TEXT NOT NULL,
+	status      TEXT NOT NULL DEFAULT 'draft',
+	title       TEXT NOT NULL,
+	body        TEXT NOT NULL DEFAULT '',
+	author      TEXT,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS doc_revisions (
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
+	doc_id          INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+	revision_number INTEGER NOT NULL,
+	body            TEXT NOT NULL,
+	change_kind     TEXT NOT NULL DEFAULT 'body',
+	author          TEXT,
+	created_at      TEXT NOT NULL,
+	UNIQUE(doc_id, revision_number)
+);
+
+CREATE TABLE IF NOT EXISTS doc_comments (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	doc_id     INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+	body       TEXT NOT NULL,
+	author     TEXT,
+	created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS doc_issue_links (
+	doc_id     INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+	issue_id   INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (doc_id, issue_id)
+);
+
+CREATE TABLE IF NOT EXISTS proposal_docs (
+	proposal_id INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+	doc_id      INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+	created_at  TEXT NOT NULL,
+	PRIMARY KEY (proposal_id, doc_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_docs_type ON docs(type);
+CREATE INDEX IF NOT EXISTS idx_docs_status ON docs(status);
+CREATE INDEX IF NOT EXISTS idx_docs_created_at ON docs(created_at);
+CREATE INDEX IF NOT EXISTS idx_doc_revisions_doc_id ON doc_revisions(doc_id);
+CREATE INDEX IF NOT EXISTS idx_doc_comments_doc_id ON doc_comments(doc_id);
+CREATE INDEX IF NOT EXISTS idx_doc_issue_links_issue_id ON doc_issue_links(issue_id);
+CREATE INDEX IF NOT EXISTS idx_proposal_docs_doc_id ON proposal_docs(doc_id);
+`
+	_, err := tx.Exec(ddl)
+	return err
+}
+
 // Migrate checks the current schema version and applies any pending migrations
 // sequentially. It is a no-op when already at the latest version.
 func Migrate(db *sql.DB) error {
@@ -227,6 +288,18 @@ func Migrate(db *sql.DB) error {
 		).Scan(&hasProposals)
 		if err == nil && !hasProposals {
 			version = 1
+		}
+	}
+
+	// Same defensive guard for v4 (TDD §5.1 S10): if stamped >=4 but the docs
+	// table is absent, rewind to v3 and re-run. v4 DDL uses IF NOT EXISTS.
+	if version >= 4 {
+		var hasDocs bool
+		err := db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='docs')`,
+		).Scan(&hasDocs)
+		if err == nil && !hasDocs {
+			version = 3
 		}
 	}
 
