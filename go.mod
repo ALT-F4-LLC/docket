@@ -3,14 +3,14 @@ module github.com/ALT-F4-LLC/docket
 go 1.26.0
 
 require (
-	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260519164333-504fda438571
+	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260522183231-0898253a54a2
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/dustin/go-humanize v1.0.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.43.0
-	modernc.org/sqlite v1.49.1
+	modernc.org/sqlite v1.50.1
 )
 
 require (
@@ -53,10 +53,10 @@ require (
 	github.com/yuin/goldmark v1.8.2 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
-	golang.org/x/net v0.53.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	modernc.org/libc v1.72.5 // indirect
