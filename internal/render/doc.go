@@ -323,3 +323,7 @@ func renderPlainDocDetail(doc *model.Doc, revisions []*model.DocRevision, commen
 
 	return strings.TrimRight(b.String(), "\n")
 }
+
+func RenderDocCommentList(comments []*model.DocComment) string {
+	return renderDocComments(comments)
+}

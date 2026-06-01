@@ -5,19 +5,22 @@ import "github.com/spf13/cobra"
 // watchEligible is the set of command paths that support --watch mode.
 // Keys are Cobra CommandPath() values for unambiguous matching.
 var watchEligible = map[string]bool{
-	"docket board":                true,
-	"docket issue list":           true,
-	"docket issue show":           true,
-	"docket issue log":            true,
-	"docket issue graph":          true,
-	"docket issue comment list":   true,
-	"docket next":                 true,
-	"docket plan":                 true,
-	"docket stats":                true,
-	"docket config":               true,
-	"docket vote list":            true,
-	"docket vote show":            true,
-	"docket vote result":          true,
+	"docket board":              true,
+	"docket issue list":         true,
+	"docket issue show":         true,
+	"docket issue log":          true,
+	"docket issue graph":        true,
+	"docket issue comment list": true,
+	"docket doc list":           true,
+	"docket doc show":           true,
+	"docket doc comment list":   true,
+	"docket next":               true,
+	"docket plan":               true,
+	"docket stats":              true,
+	"docket config":             true,
+	"docket vote list":          true,
+	"docket vote show":          true,
+	"docket vote result":        true,
 }
 
 func isWatchEligible(cmd *cobra.Command) bool {
