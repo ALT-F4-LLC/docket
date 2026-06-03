@@ -1,5 +1,7 @@
 github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260522183231-0898253a54a2 h1:JjkN0bRj36DMemGK/roI9p1GwePny82oqDRzkvOxVY8=
 github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260522183231-0898253a54a2/go.mod h1:LnxjOk1cYJPm2s1mmsn26qvquhz3CgxVaxU9RR6CcDY=
+github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260602231358-501858cf198b h1:Blw9y7PQL5suojzBKkq1xN6ouYXKfHJu0PVcidp/vC0=
+github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260602231358-501858cf198b/go.mod h1:LnxjOk1cYJPm2s1mmsn26qvquhz3CgxVaxU9RR6CcDY=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
