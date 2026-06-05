@@ -42,6 +42,7 @@ type showResultJSON struct {
 	Assignee    string           `json:"assignee"`
 	Labels      []string         `json:"labels"`
 	Files       []string         `json:"files"`
+	Docs        []model.DocRef   `json:"docs"`
 	CreatedAt   string           `json:"created_at"`
 	UpdatedAt   string           `json:"updated_at"`
 	SubIssues   []*model.Issue   `json:"sub_issues"`
@@ -60,6 +61,10 @@ func (s showResult) MarshalJSON() ([]byte, error) {
 	files := i.Files
 	if files == nil {
 		files = []string{}
+	}
+	docs := i.Docs
+	if docs == nil {
+		docs = []model.DocRef{}
 	}
 	subIssues := s.SubIssues
 	if subIssues == nil {
@@ -88,6 +93,7 @@ func (s showResult) MarshalJSON() ([]byte, error) {
 		Assignee:    i.Assignee,
 		Labels:      labels,
 		Files:       files,
+		Docs:        docs,
 		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
 		SubIssues:   subIssues,
@@ -157,6 +163,10 @@ func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 	issue.Files, err = db.GetIssueFiles(conn, id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
+	}
+
+	if err := db.HydrateDocs(conn, []*model.Issue{issue}); err != nil {
+		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
 	subIssues, err := db.GetSubIssues(conn, id)

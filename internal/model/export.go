@@ -14,12 +14,12 @@ type IssueFileMapping struct {
 
 // ExportData is the top-level structure for a full database export.
 type ExportData struct {
-	Version            int                `json:"version"`
-	ExportedAt         string             `json:"exported_at"`
-	Issues             []*Issue           `json:"issues"`
-	Comments           []*Comment         `json:"comments"`
-	Relations          []Relation         `json:"relations"`
-	Labels             []*Label           `json:"labels"`
+	Version            int                 `json:"version"`
+	ExportedAt         string              `json:"exported_at"`
+	Issues             []*Issue            `json:"issues"`
+	Comments           []*Comment          `json:"comments"`
+	Relations          []Relation          `json:"relations"`
+	Labels             []*Label            `json:"labels"`
 	IssueLabelMappings []IssueLabelMapping `json:"issue_label_mappings"`
 	IssueFileMappings  []IssueFileMapping  `json:"issue_file_mappings"`
 }

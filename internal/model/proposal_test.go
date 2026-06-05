@@ -292,7 +292,7 @@ func TestFindingsJSONRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "nil arrays",
+			name:     "nil arrays",
 			findings: Findings{},
 		},
 	}

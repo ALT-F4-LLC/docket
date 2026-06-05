@@ -382,6 +382,68 @@ func TestIssueJSONNoParent(t *testing.T) {
 	}
 }
 
+func TestIssue_MarshalJSON_DocsEmptyIsArray(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	issue := Issue{
+		ID:        1,
+		Title:     "Test",
+		Status:    StatusBacklog,
+		Priority:  PriorityNone,
+		Kind:      IssueKindTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	data, err := json.Marshal(issue)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal into map error: %v", err)
+	}
+	docs, exists := raw["docs"]
+	if !exists {
+		t.Fatal("JSON must include docs key")
+	}
+	if string(docs) != "[]" {
+		t.Errorf("docs = %s, want [] (never null)", docs)
+	}
+
+	hydrated := issue
+	hydrated.Docs = []DocRef{{ID: 3, Type: "tdd", Status: "approved", Title: "T"}}
+	data2, err := json.Marshal(hydrated)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	var raw2 map[string]json.RawMessage
+	if err := json.Unmarshal(data2, &raw2); err != nil {
+		t.Fatalf("Unmarshal into map error: %v", err)
+	}
+	if string(raw2["docs"]) != `[{"id":"DOC-3","type":"tdd","title":"T","status":"approved"}]` {
+		t.Errorf("hydrated docs = %s", raw2["docs"])
+	}
+}
+
+func TestIssue_UnmarshalJSON_DocsNoOp(t *testing.T) {
+	input := `{"id":"DKT-1","title":"t","description":"","status":"todo","priority":"none","kind":"task","assignee":"","labels":[],"files":[],"docs":[{"id":"DOC-3","type":"tdd","title":"T","status":"approved"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`
+
+	var issue Issue
+	if err := json.Unmarshal([]byte(input), &issue); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+	if issue.Docs != nil {
+		t.Errorf("Docs = %v, want nil (read-only projection, not parsed from input)", issue.Docs)
+	}
+
+	noDocs := `{"id":"DKT-1","title":"t","description":"","status":"todo","priority":"none","kind":"task","assignee":"","labels":[],"files":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`
+	var issue2 Issue
+	if err := json.Unmarshal([]byte(noDocs), &issue2); err != nil {
+		t.Fatalf("Unmarshal without docs key error: %v", err)
+	}
+}
+
 func TestCommentJSONRoundTrip(t *testing.T) {
 	now := time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC)
 	comment := Comment{

@@ -109,6 +109,10 @@ func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 		ready = ready[:limit]
 	}
 
+	if err := db.HydrateDocs(conn, ready); err != nil {
+		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+	}
+
 	result := nextResult{Issues: ready, Total: len(ready)}
 
 	var message string

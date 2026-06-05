@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
 // LinkDocIssue links a doc to an issue. Returns ErrNotFound if either side is
@@ -64,6 +66,46 @@ func GetIssueDocs(db *sql.DB, issueID int) ([]int, error) {
 		`SELECT doc_id FROM doc_issue_links WHERE issue_id = ? ORDER BY doc_id ASC`,
 		issueID,
 	)
+}
+
+func HydrateDocs(db *sql.DB, issues []*model.Issue) error {
+	if len(issues) == 0 {
+		return nil
+	}
+
+	ids := make([]any, len(issues))
+	issueMap := make(map[int]*model.Issue, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+		issueMap[issue.ID] = issue
+	}
+
+	placeholders := makePlaceholders(len(ids))
+	query := fmt.Sprintf(
+		`SELECT l.issue_id, d.id, d.type, d.status, d.title
+		 FROM doc_issue_links l
+		 JOIN docs d ON d.id = l.doc_id
+		 WHERE l.issue_id IN (%s)
+		 ORDER BY d.id ASC`, placeholders,
+	)
+
+	rows, err := db.Query(query, ids...)
+	if err != nil {
+		return fmt.Errorf("querying docs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var issueID int
+		var ref model.DocRef
+		if err := rows.Scan(&issueID, &ref.ID, &ref.Type, &ref.Status, &ref.Title); err != nil {
+			return fmt.Errorf("scanning doc: %w", err)
+		}
+		if issue, ok := issueMap[issueID]; ok {
+			issue.Docs = append(issue.Docs, ref)
+		}
+	}
+	return rows.Err()
 }
 
 // LinkProposalDoc links a proposal (vote) to a doc. Returns ErrNotFound if

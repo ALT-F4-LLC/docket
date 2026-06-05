@@ -67,6 +67,42 @@ func TestFormatParseDocIDRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDocRef_MarshalJSON(t *testing.T) {
+	ref := DocRef{
+		ID:     3,
+		Type:   "tdd",
+		Status: "approved",
+		Title:  "Docket Doc CLI",
+	}
+
+	data, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	want := `{"id":"DOC-3","type":"tdd","title":"Docket Doc CLI","status":"approved"}`
+	if string(data) != want {
+		t.Errorf("DocRef JSON = %s, want %s", data, want)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal into map error: %v", err)
+	}
+	if raw["id"] != "DOC-3" {
+		t.Errorf("JSON id = %v, want %q", raw["id"], "DOC-3")
+	}
+	if _, hasBody := raw["body"]; hasBody {
+		t.Error("DocRef JSON must not include body")
+	}
+	if _, hasAuthor := raw["author"]; hasAuthor {
+		t.Error("DocRef JSON must not include author")
+	}
+	if _, hasCreated := raw["created_at"]; hasCreated {
+		t.Error("DocRef JSON must not include created_at")
+	}
+}
+
 func TestDocJSONRoundTrip(t *testing.T) {
 	now := time.Date(2026, 5, 26, 16, 0, 0, 0, time.UTC)
 	doc := Doc{

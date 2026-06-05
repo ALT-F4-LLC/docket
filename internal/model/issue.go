@@ -248,6 +248,7 @@ type Issue struct {
 	Assignee    string
 	Labels      []string
 	Files       []string
+	Docs        []DocRef
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -264,6 +265,7 @@ type issueJSON struct {
 	Assignee    string   `json:"assignee"`
 	Labels      []string `json:"labels"`
 	Files       []string `json:"files"`
+	Docs        []DocRef `json:"docs"`
 	CreatedAt   string   `json:"created_at"`
 	UpdatedAt   string   `json:"updated_at"`
 }
@@ -280,6 +282,11 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 		files = []string{}
 	}
 
+	docs := i.Docs
+	if docs == nil {
+		docs = []DocRef{}
+	}
+
 	j := issueJSON{
 		ID:          FormatID(i.ID),
 		Title:       i.Title,
@@ -290,6 +297,7 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 		Assignee:    i.Assignee,
 		Labels:      labels,
 		Files:       files,
+		Docs:        docs,
 		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
 	}

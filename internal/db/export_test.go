@@ -323,7 +323,7 @@ func TestInsertIssueWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertIssueWithID(tx,issue); err != nil {
+	if _, err := InsertIssueWithID(tx, issue); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -373,7 +373,7 @@ func TestInsertCommentWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertCommentWithID(tx,comment); err != nil {
+	if _, err := InsertCommentWithID(tx, comment); err != nil {
 		t.Fatalf("InsertCommentWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -426,7 +426,7 @@ func TestInsertRelationWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertRelationWithID(tx,rel); err != nil {
+	if _, err := InsertRelationWithID(tx, rel); err != nil {
 		t.Fatalf("InsertRelationWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -465,7 +465,7 @@ func TestInsertLabelWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertLabelWithID(tx,label); err != nil {
+	if _, err := InsertLabelWithID(tx, label); err != nil {
 		t.Fatalf("InsertLabelWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -503,16 +503,16 @@ func TestInsertIssueLabelMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertIssueWithID(tx,&model.Issue{
+	if _, err := InsertIssueWithID(tx, &model.Issue{
 		ID: 10, Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone,
 		Kind: model.IssueKindTask, CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
-	if _, err := InsertLabelWithID(tx,&model.Label{ID: 20, Name: "test-label"}); err != nil {
+	if _, err := InsertLabelWithID(tx, &model.Label{ID: 20, Name: "test-label"}); err != nil {
 		t.Fatalf("InsertLabelWithID: %v", err)
 	}
-	if _, err := InsertIssueLabelMapping(tx,10, 20); err != nil {
+	if _, err := InsertIssueLabelMapping(tx, 10, 20); err != nil {
 		t.Fatalf("InsertIssueLabelMapping: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -719,17 +719,17 @@ func TestImportMergeSkipsDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertLabelWithID(tx,&model.Label{ID: 1, Name: "existing-label"}); err != nil {
+	if _, err := InsertLabelWithID(tx, &model.Label{ID: 1, Name: "existing-label"}); err != nil {
 		t.Fatalf("InsertLabelWithID: %v", err)
 	}
-	if _, err := InsertIssueWithID(tx,&model.Issue{
+	if _, err := InsertIssueWithID(tx, &model.Issue{
 		ID: 1, Title: "existing issue", Status: model.StatusBacklog,
 		Priority: model.PriorityNone, Kind: model.IssueKindTask,
 		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
-	if _, err := InsertIssueLabelMapping(tx,1, 1); err != nil {
+	if _, err := InsertIssueLabelMapping(tx, 1, 1); err != nil {
 		t.Fatalf("InsertIssueLabelMapping: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -933,7 +933,7 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 
 	// 1. Labels first (no FK deps).
 	for _, label := range data.Labels {
-		if _, err := InsertLabelWithID(tx,label); err != nil {
+		if _, err := InsertLabelWithID(tx, label); err != nil {
 			t.Fatalf("InsertLabelWithID %q: %v", label.Name, err)
 		}
 	}
@@ -947,7 +947,7 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 			parentIDs[issue.ID] = &pid
 			issue.ParentID = nil
 		}
-		if _, err := InsertIssueWithID(tx,issue); err != nil {
+		if _, err := InsertIssueWithID(tx, issue); err != nil {
 			issue.ParentID = origParentID
 			t.Fatalf("InsertIssueWithID %d: %v", issue.ID, err)
 		}
@@ -961,7 +961,7 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 
 	// 3. Issue-label mappings.
 	for _, m := range data.IssueLabelMappings {
-		if _, err := InsertIssueLabelMapping(tx,m.IssueID, m.LabelID); err != nil {
+		if _, err := InsertIssueLabelMapping(tx, m.IssueID, m.LabelID); err != nil {
 			t.Fatalf("InsertIssueLabelMapping (%d, %d): %v", m.IssueID, m.LabelID, err)
 		}
 	}
@@ -975,14 +975,14 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 
 	// 5. Comments.
 	for _, comment := range data.Comments {
-		if _, err := InsertCommentWithID(tx,comment); err != nil {
+		if _, err := InsertCommentWithID(tx, comment); err != nil {
 			t.Fatalf("InsertCommentWithID %d: %v", comment.ID, err)
 		}
 	}
 
 	// 6. Relations.
 	for i := range data.Relations {
-		if _, err := InsertRelationWithID(tx,&data.Relations[i]); err != nil {
+		if _, err := InsertRelationWithID(tx, &data.Relations[i]); err != nil {
 			t.Fatalf("InsertRelationWithID %d: %v", data.Relations[i].ID, err)
 		}
 	}
@@ -991,4 +991,3 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 		t.Fatalf("Commit: %v", err)
 	}
 }
-

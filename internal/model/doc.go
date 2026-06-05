@@ -114,6 +114,33 @@ func (d *Doc) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type DocRef struct {
+	ID     int
+	Type   string
+	Status string
+	Title  string
+}
+
+type docRefJSON struct {
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+func (r DocRef) MarshalJSON() ([]byte, error) {
+	return json.Marshal(docRefJSON{
+		ID:     FormatDocID(r.ID),
+		Type:   r.Type,
+		Title:  r.Title,
+		Status: r.Status,
+	})
+}
+
+func (r *DocRef) UnmarshalJSON([]byte) error {
+	return nil
+}
+
 // DocRevision is an append-only history row for a Doc. `ChangeKind` is a
 // free-form descriptor: "create", "body", "status", "title", "type", or
 // comma-joined for combined edits (e.g. "status+body") per TDD §5.4 C8.

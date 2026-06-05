@@ -107,6 +107,68 @@ func TestUnlinkDocIssue(t *testing.T) {
 	}
 }
 
+func TestHydrateDocs_BatchNoNPlus1(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	docA := mustCreateDoc(t, db, "Title A", "tdd", "approved", "body")
+	docB := mustCreateDoc(t, db, "Title B", "adr", "draft", "body")
+	docC := mustCreateDoc(t, db, "Title C", "ux", "draft", "body")
+
+	id1 := createTestIssue(t, db, "i1", model.StatusTodo, model.PriorityMedium)
+	id2 := createTestIssue(t, db, "i2", model.StatusTodo, model.PriorityMedium)
+	id3 := createTestIssue(t, db, "i3", model.StatusTodo, model.PriorityMedium)
+
+	if err := LinkDocIssue(db, docB, id1); err != nil {
+		t.Fatalf("LinkDocIssue docB→id1: %v", err)
+	}
+	if err := LinkDocIssue(db, docA, id1); err != nil {
+		t.Fatalf("LinkDocIssue docA→id1: %v", err)
+	}
+	if err := LinkDocIssue(db, docC, id1); err != nil {
+		t.Fatalf("LinkDocIssue docC→id1: %v", err)
+	}
+	if err := LinkDocIssue(db, docB, id2); err != nil {
+		t.Fatalf("LinkDocIssue docB→id2: %v", err)
+	}
+
+	issues := []*model.Issue{{ID: id1}, {ID: id2}, {ID: id3}}
+	if err := HydrateDocs(db, issues); err != nil {
+		t.Fatalf("HydrateDocs: %v", err)
+	}
+
+	if len(issues[0].Docs) != 3 {
+		t.Fatalf("issue 1: expected 3 docs, got %d", len(issues[0].Docs))
+	}
+	if issues[0].Docs[0].ID != docA || issues[0].Docs[1].ID != docB || issues[0].Docs[2].ID != docC {
+		t.Errorf("issue 1 docs not ordered by doc_id ASC: %+v", issues[0].Docs)
+	}
+	if issues[0].Docs[0].Type != "tdd" || issues[0].Docs[0].Status != "approved" || issues[0].Docs[0].Title != "Title A" {
+		t.Errorf("issue 1 doc A projection wrong: %+v", issues[0].Docs[0])
+	}
+
+	if len(issues[1].Docs) != 1 {
+		t.Fatalf("issue 2: expected 1 doc, got %d", len(issues[1].Docs))
+	}
+	if issues[1].Docs[0].ID != docB {
+		t.Errorf("issue 2: expected doc %d, got %d", docB, issues[1].Docs[0].ID)
+	}
+
+	if len(issues[2].Docs) != 0 {
+		t.Errorf("issue 3: expected 0 docs, got %d", len(issues[2].Docs))
+	}
+}
+
+func TestHydrateDocs_Empty(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	if err := HydrateDocs(db, nil); err != nil {
+		t.Fatalf("HydrateDocs nil: %v", err)
+	}
+	if err := HydrateDocs(db, []*model.Issue{}); err != nil {
+		t.Fatalf("HydrateDocs empty: %v", err)
+	}
+}
+
 // --- Doc ↔ Proposal links ---
 
 func TestLinkDocProposal(t *testing.T) {
@@ -297,4 +359,3 @@ func TestInsertProposalDocLink_RoundTrip(t *testing.T) {
 		t.Errorf("GetProposalDocs = %v, want [%d]", ids, docID)
 	}
 }
-

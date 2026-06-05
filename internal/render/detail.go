@@ -32,6 +32,10 @@ func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []mode
 		sections = append(sections, renderFiles(issue.Files))
 	}
 
+	if len(issue.Docs) > 0 {
+		sections = append(sections, renderDocRefs(issue.Docs))
+	}
+
 	// Description
 	if issue.Description != "" {
 		sections = append(sections, renderDescription(issue.Description))
@@ -116,6 +120,35 @@ func renderFiles(files []string) string {
 	var lines []string
 	for _, f := range files {
 		lines = append(lines, "  "+dimStyle.Render("▸ "+f))
+	}
+
+	return header + "\n" + strings.Join(lines, "\n")
+}
+
+func renderDocRefs(docs []model.DocRef) string {
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	header := sectionStyle.Render("Linked Docs")
+
+	var idWidth, typeWidth, statusWidth int
+	for _, d := range docs {
+		idWidth = max(idWidth, len(model.FormatDocID(d.ID)))
+		typeWidth = max(typeWidth, len(d.Type))
+		statusWidth = max(statusWidth, len(d.Status))
+	}
+
+	var lines []string
+	for _, d := range docs {
+		id := model.FormatDocID(d.ID)
+		line := fmt.Sprintf("  %s %s   %s   %s   %s",
+			dimStyle.Render("▸"),
+			idStyle.Render(id)+strings.Repeat(" ", idWidth-len(id)),
+			d.Type+strings.Repeat(" ", typeWidth-len(d.Type)),
+			d.Status+strings.Repeat(" ", statusWidth-len(d.Status)),
+			d.Title,
+		)
+		lines = append(lines, line)
 	}
 
 	return header + "\n" + strings.Join(lines, "\n")
@@ -357,6 +390,24 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 		b.WriteString("\nFiles\n")
 		for _, f := range issue.Files {
 			fmt.Fprintf(&b, "  > %s\n", f)
+		}
+	}
+
+	if len(issue.Docs) > 0 {
+		var idWidth, typeWidth, statusWidth int
+		for _, d := range issue.Docs {
+			idWidth = max(idWidth, len(model.FormatDocID(d.ID)))
+			typeWidth = max(typeWidth, len(d.Type))
+			statusWidth = max(statusWidth, len(d.Status))
+		}
+		b.WriteString("\nLinked Docs\n")
+		for _, d := range issue.Docs {
+			fmt.Fprintf(&b, "  > %-*s   %-*s   %-*s   %s\n",
+				idWidth, model.FormatDocID(d.ID),
+				typeWidth, d.Type,
+				statusWidth, d.Status,
+				d.Title,
+			)
 		}
 	}
 
