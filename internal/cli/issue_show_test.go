@@ -266,6 +266,67 @@ func TestIssueShow_OmitsLinkedProposalsWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestIssueShowJSON_LinkedProposalsArrayShapeAndOrder(t *testing.T) {
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "issue", model.StatusTodo, model.PriorityHigh)
+	p1 := createProposal(t, conn, "Adopt new schema", string(model.ProposalStatusOpen))
+	p2 := createProposal(t, conn, "Deprecate old API", string(model.ProposalStatusApproved))
+	linkProposalIssue(t, conn, p2, issueID)
+	linkProposalIssue(t, conn, p1, issueID)
+
+	cmd := cmdWithDB(conn)
+	w, buf := bufWriter(true)
+	if err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w); err != nil {
+		t.Fatalf("runIssueShow: %v", err)
+	}
+
+	var env struct {
+		Data struct {
+			LinkedProposals []string `json:"linked_proposals"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	got := env.Data.LinkedProposals
+	want := []string{"DKT-V1", "DKT-V2"}
+	if len(got) != len(want) {
+		t.Fatalf("len(linked_proposals) = %d, want %d:\n%s", len(got), len(want), buf.String())
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("linked_proposals[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestIssueShowJSON_LinkedProposalsEmptyIsArray(t *testing.T) {
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "issue", model.StatusTodo, model.PriorityHigh)
+
+	cmd := cmdWithDB(conn)
+	w, buf := bufWriter(true)
+	if err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w); err != nil {
+		t.Fatalf("runIssueShow: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(raw["data"], &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	proposalsRaw, ok := data["linked_proposals"]
+	if !ok {
+		t.Fatalf("linked_proposals key absent:\n%s", buf.String())
+	}
+	if string(proposalsRaw) != "[]" {
+		t.Errorf("empty linked_proposals = %s, want []", proposalsRaw)
+	}
+}
+
 func TestIssueShowJSON_DocsEmptyIsArray(t *testing.T) {
 	conn := newTestDB(t)
 	issueID := createIssue(t, conn, "issue", model.StatusTodo, model.PriorityHigh)

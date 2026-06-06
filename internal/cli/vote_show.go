@@ -25,6 +25,7 @@ type voteShowResult struct {
 	Proposal     *model.Proposal `json:"-"`
 	Votes        []*model.Vote   `json:"-"`
 	LinkedIssues []int           `json:"-"`
+	LinkedDocs   []int           `json:"-"`
 }
 
 // voteShowResultJSON is the wire format for vote show.
@@ -46,6 +47,7 @@ type voteShowResultJSON struct {
 	UpdatedAt        string        `json:"updated_at"`
 	Votes            []*model.Vote `json:"votes"`
 	LinkedIssues     []string      `json:"linked_issues"`
+	LinkedDocs       []string      `json:"linked_docs"`
 }
 
 func (r voteShowResult) MarshalJSON() ([]byte, error) {
@@ -59,6 +61,11 @@ func (r voteShowResult) MarshalJSON() ([]byte, error) {
 	linkedIssues := make([]string, 0, len(r.LinkedIssues))
 	for _, id := range r.LinkedIssues {
 		linkedIssues = append(linkedIssues, model.FormatID(id))
+	}
+
+	linkedDocs := make([]string, 0, len(r.LinkedDocs))
+	for _, id := range r.LinkedDocs {
+		linkedDocs = append(linkedDocs, model.FormatDocID(id))
 	}
 
 	domainTags := p.DomainTags
@@ -88,6 +95,7 @@ func (r voteShowResult) MarshalJSON() ([]byte, error) {
 		UpdatedAt:        p.UpdatedAt.UTC().Format(time.RFC3339),
 		Votes:            votes,
 		LinkedIssues:     linkedIssues,
+		LinkedDocs:       linkedDocs,
 	}
 
 	return json.Marshal(j)
@@ -147,15 +155,21 @@ func runVoteShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
 	}
 
+	linkedDocs, err := db.GetProposalDocs(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+	}
+
 	result := voteShowResult{
 		Proposal:     proposal,
 		Votes:        votes,
 		LinkedIssues: linkedIssues,
+		LinkedDocs:   linkedDocs,
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = render.RenderProposalDetail(proposal, votes, linkedIssues)
+		message = render.RenderProposalDetail(proposal, votes, linkedIssues, linkedDocs)
 	}
 	w.Success(result, message)
 

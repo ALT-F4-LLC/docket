@@ -22,33 +22,35 @@ import (
 // showResult composes the issue fields with additional detail fields
 // (sub-issues, relations, comments, activity) into a single flat JSON object.
 type showResult struct {
-	Issue     *model.Issue     `json:"-"`
-	SubIssues []*model.Issue   `json:"sub_issues"`
-	Relations []model.Relation `json:"relations"`
-	Comments  []*model.Comment `json:"comments"`
-	Activity  []model.Activity `json:"activity"`
+	Issue           *model.Issue     `json:"-"`
+	SubIssues       []*model.Issue   `json:"sub_issues"`
+	Relations       []model.Relation `json:"relations"`
+	LinkedProposals []model.Proposal `json:"-"`
+	Comments        []*model.Comment `json:"comments"`
+	Activity        []model.Activity `json:"activity"`
 }
 
 // showResultJSON is the wire format that explicitly lists all fields,
 // avoiding the fragile marshal-unmarshal-remarshal pattern.
 type showResultJSON struct {
-	ID          string           `json:"id"`
-	ParentID    *string          `json:"parent_id,omitempty"`
-	Title       string           `json:"title"`
-	Description string           `json:"description"`
-	Status      string           `json:"status"`
-	Priority    string           `json:"priority"`
-	Kind        string           `json:"kind"`
-	Assignee    string           `json:"assignee"`
-	Labels      []string         `json:"labels"`
-	Files       []string         `json:"files"`
-	Docs        []model.DocRef   `json:"docs"`
-	CreatedAt   string           `json:"created_at"`
-	UpdatedAt   string           `json:"updated_at"`
-	SubIssues   []*model.Issue   `json:"sub_issues"`
-	Relations   []model.Relation `json:"relations"`
-	Comments    []*model.Comment `json:"comments"`
-	Activity    []model.Activity `json:"activity"`
+	ID              string           `json:"id"`
+	ParentID        *string          `json:"parent_id,omitempty"`
+	Title           string           `json:"title"`
+	Description     string           `json:"description"`
+	Status          string           `json:"status"`
+	Priority        string           `json:"priority"`
+	Kind            string           `json:"kind"`
+	Assignee        string           `json:"assignee"`
+	Labels          []string         `json:"labels"`
+	Files           []string         `json:"files"`
+	Docs            []model.DocRef   `json:"docs"`
+	CreatedAt       string           `json:"created_at"`
+	UpdatedAt       string           `json:"updated_at"`
+	SubIssues       []*model.Issue   `json:"sub_issues"`
+	Relations       []model.Relation `json:"relations"`
+	LinkedProposals []string         `json:"linked_proposals"`
+	Comments        []*model.Comment `json:"comments"`
+	Activity        []model.Activity `json:"activity"`
 }
 
 func (s showResult) MarshalJSON() ([]byte, error) {
@@ -74,6 +76,10 @@ func (s showResult) MarshalJSON() ([]byte, error) {
 	if relations == nil {
 		relations = []model.Relation{}
 	}
+	linkedProposals := make([]string, 0, len(s.LinkedProposals))
+	for _, p := range s.LinkedProposals {
+		linkedProposals = append(linkedProposals, model.FormatProposalID(p.ID))
+	}
 	comments := s.Comments
 	if comments == nil {
 		comments = []*model.Comment{}
@@ -84,22 +90,23 @@ func (s showResult) MarshalJSON() ([]byte, error) {
 	}
 
 	j := showResultJSON{
-		ID:          model.FormatID(i.ID),
-		Title:       i.Title,
-		Description: i.Description,
-		Status:      string(i.Status),
-		Priority:    string(i.Priority),
-		Kind:        string(i.Kind),
-		Assignee:    i.Assignee,
-		Labels:      labels,
-		Files:       files,
-		Docs:        docs,
-		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
-		SubIssues:   subIssues,
-		Relations:   relations,
-		Comments:    comments,
-		Activity:    activity,
+		ID:              model.FormatID(i.ID),
+		Title:           i.Title,
+		Description:     i.Description,
+		Status:          string(i.Status),
+		Priority:        string(i.Priority),
+		Kind:            string(i.Kind),
+		Assignee:        i.Assignee,
+		Labels:          labels,
+		Files:           files,
+		Docs:            docs,
+		CreatedAt:       i.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:       i.UpdatedAt.UTC().Format(time.RFC3339),
+		SubIssues:       subIssues,
+		Relations:       relations,
+		LinkedProposals: linkedProposals,
+		Comments:        comments,
+		Activity:        activity,
 	}
 
 	if i.ParentID != nil {
@@ -195,11 +202,12 @@ func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	result := showResult{
-		Issue:     issue,
-		SubIssues: subIssues,
-		Relations: relations,
-		Comments:  comments,
-		Activity:  activity,
+		Issue:           issue,
+		SubIssues:       subIssues,
+		Relations:       relations,
+		LinkedProposals: linkedProposals,
+		Comments:        comments,
+		Activity:        activity,
 	}
 
 	var message string

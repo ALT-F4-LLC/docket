@@ -337,7 +337,7 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 				WHEN 'none'     THEN 4
 				ELSE 5
 			END ASC,
-			i.created_at ASC`
+			i.created_at DESC`
 	}
 
 	// Main query.
