@@ -476,3 +476,35 @@ func TestCommentJSONRoundTrip(t *testing.T) {
 		t.Errorf("Unmarshaled comment: ID=%d IssueID=%d, want 3 and 5", comment2.ID, comment2.IssueID)
 	}
 }
+
+func TestIssueRef_MarshalJSON(t *testing.T) {
+	ref := IssueRef{
+		ID:     12,
+		Kind:   "feature",
+		Status: "in-progress",
+		Title:  "Wire up CLI",
+	}
+
+	data, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	want := `{"id":"DKT-12","kind":"feature","title":"Wire up CLI","status":"in-progress"}`
+	if string(data) != want {
+		t.Errorf("IssueRef JSON = %s, want %s", data, want)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal into map error: %v", err)
+	}
+	if raw["id"] != "DKT-12" {
+		t.Errorf("JSON id = %v, want %q", raw["id"], "DKT-12")
+	}
+	for _, excluded := range []string{"description", "assignee", "labels", "files", "docs", "created_at"} {
+		if _, present := raw[excluded]; present {
+			t.Errorf("IssueRef JSON must not include %q", excluded)
+		}
+	}
+}

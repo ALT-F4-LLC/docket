@@ -93,7 +93,7 @@ func renderPlainDocList(rows []DocRow) string {
 	return b.String()
 }
 
-func RenderDocDetail(doc *model.Doc, revisions []*model.DocRevision, comments []*model.DocComment, linkedIssues []int, linkedProposals []int) string {
+func RenderDocDetail(doc *model.Doc, revisions []*model.DocRevision, comments []*model.DocComment, linkedIssues []model.IssueRef, linkedProposals []int) string {
 	if !ColorsEnabled() {
 		return renderPlainDocDetail(doc, revisions, comments, linkedIssues, linkedProposals)
 	}
@@ -165,13 +165,30 @@ func renderDocBody(body string) string {
 	return header + "\n" + rendered
 }
 
-func renderDocLinkedIssues(issueIDs []int) string {
+func renderDocLinkedIssues(issues []model.IssueRef) string {
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
 	header := sectionStyle.Render("Linked Issues")
 
+	var idWidth, kindWidth, statusWidth int
+	for _, i := range issues {
+		idWidth = max(idWidth, len(model.FormatID(i.ID)))
+		kindWidth = max(kindWidth, len(i.Kind))
+		statusWidth = max(statusWidth, len(i.Status))
+	}
+
 	var lines []string
-	for _, id := range issueIDs {
-		lines = append(lines, "  "+model.FormatID(id))
+	for _, i := range issues {
+		id := model.FormatID(i.ID)
+		line := fmt.Sprintf("  %s %s   %s   %s   %s",
+			dimStyle.Render("▸"),
+			idStyle.Render(id)+strings.Repeat(" ", idWidth-len(id)),
+			i.Kind+strings.Repeat(" ", kindWidth-len(i.Kind)),
+			i.Status+strings.Repeat(" ", statusWidth-len(i.Status)),
+			i.Title,
+		)
+		lines = append(lines, line)
 	}
 
 	return header + "\n" + strings.Join(lines, "\n")
@@ -273,7 +290,7 @@ func renderPlainRevisionHistory(revisions []*model.DocRevision) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func renderPlainDocDetail(doc *model.Doc, revisions []*model.DocRevision, comments []*model.DocComment, linkedIssues []int, linkedProposals []int) string {
+func renderPlainDocDetail(doc *model.Doc, revisions []*model.DocRevision, comments []*model.DocComment, linkedIssues []model.IssueRef, linkedProposals []int) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "%s  %s\n", model.FormatDocID(doc.ID), doc.Title)
@@ -291,9 +308,20 @@ func renderPlainDocDetail(doc *model.Doc, revisions []*model.DocRevision, commen
 	}
 
 	if len(linkedIssues) > 0 {
+		var idWidth, kindWidth, statusWidth int
+		for _, i := range linkedIssues {
+			idWidth = max(idWidth, len(model.FormatID(i.ID)))
+			kindWidth = max(kindWidth, len(i.Kind))
+			statusWidth = max(statusWidth, len(i.Status))
+		}
 		b.WriteString("\nLinked Issues\n")
-		for _, id := range linkedIssues {
-			fmt.Fprintf(&b, "  %s\n", model.FormatID(id))
+		for _, i := range linkedIssues {
+			fmt.Fprintf(&b, "  > %-*s   %-*s   %-*s   %s\n",
+				idWidth, model.FormatID(i.ID),
+				kindWidth, i.Kind,
+				statusWidth, i.Status,
+				i.Title,
+			)
 		}
 	}
 

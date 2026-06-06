@@ -1343,3 +1343,113 @@ func TestMigrateV2ToV3Columns(t *testing.T) {
 		t.Errorf("Description = %q, want 'Pre-migration proposal'", p.Description)
 	}
 }
+
+// --- GetIssueProposals (reverse edge of GetProposalIssues) ---
+
+func TestGetIssueProposalsZero(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	iid := createTestIssueForProposal(t, db, "no-proposals")
+
+	proposals, err := GetIssueProposals(db, iid)
+	if err != nil {
+		t.Fatalf("GetIssueProposals: %v", err)
+	}
+	if len(proposals) != 0 {
+		t.Errorf("len(proposals) = %d, want 0", len(proposals))
+	}
+}
+
+func TestGetIssueProposalsOne(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	iid := createTestIssueForProposal(t, db, "one-proposal")
+
+	pid, err := CreateProposal(db, &model.Proposal{
+		Description: "Solo proposal", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	if err := LinkProposalIssue(db, pid, iid); err != nil {
+		t.Fatalf("LinkProposalIssue: %v", err)
+	}
+
+	proposals, err := GetIssueProposals(db, iid)
+	if err != nil {
+		t.Fatalf("GetIssueProposals: %v", err)
+	}
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	if proposals[0].ID != pid {
+		t.Errorf("proposals[0].ID = %d, want %d", proposals[0].ID, pid)
+	}
+	if proposals[0].Description != "Solo proposal" {
+		t.Errorf("proposals[0].Description = %q, want 'Solo proposal'", proposals[0].Description)
+	}
+	if proposals[0].Status != model.ProposalStatusOpen {
+		t.Errorf("proposals[0].Status = %q, want %q", proposals[0].Status, model.ProposalStatusOpen)
+	}
+}
+
+func TestGetIssueProposalsManyMixedStatusDeterministicOrder(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	iid := createTestIssueForProposal(t, db, "many-proposals")
+	other := createTestIssueForProposal(t, db, "unrelated-issue")
+
+	statuses := []model.ProposalStatus{
+		model.ProposalStatusOpen,
+		model.ProposalStatusApproved,
+		model.ProposalStatusRejected,
+		model.ProposalStatusCommitted,
+	}
+	var want []int
+	for i, st := range statuses {
+		pid, err := CreateProposal(db, &model.Proposal{
+			Description: "Proposal " + string(rune('A'+i)), Criticality: model.CriticalityMedium,
+			Status: st, RequiredVoters: 1, Threshold: 0.67,
+		})
+		if err != nil {
+			t.Fatalf("CreateProposal %d: %v", i, err)
+		}
+		want = append(want, pid)
+	}
+
+	for i := len(want) - 1; i >= 0; i-- {
+		if err := LinkProposalIssue(db, want[i], iid); err != nil {
+			t.Fatalf("LinkProposalIssue %d: %v", want[i], err)
+		}
+	}
+
+	otherIssuePID, err := CreateProposal(db, &model.Proposal{
+		Description: "Other", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal other: %v", err)
+	}
+	if err := LinkProposalIssue(db, otherIssuePID, other); err != nil {
+		t.Fatalf("LinkProposalIssue other: %v", err)
+	}
+
+	proposals, err := GetIssueProposals(db, iid)
+	if err != nil {
+		t.Fatalf("GetIssueProposals: %v", err)
+	}
+	for _, p := range proposals {
+		if p.ID == otherIssuePID {
+			t.Errorf("proposal linked only to another issue must not appear in results, got %v", p.ID)
+		}
+	}
+	if len(proposals) != len(want) {
+		t.Fatalf("len(proposals) = %d, want %d", len(proposals), len(want))
+	}
+	for i, p := range proposals {
+		if p.ID != want[i] {
+			t.Errorf("proposals[%d].ID = %d, want %d (results must be sorted by query, not insertion order)", i, p.ID, want[i])
+		}
+		if p.Status != statuses[i] {
+			t.Errorf("proposals[%d].Status = %q, want %q", i, p.Status, statuses[i])
+		}
+	}
+}

@@ -426,6 +426,37 @@ func GetProposalIssues(db *sql.DB, proposalID int) ([]int, error) {
 	return ids, nil
 }
 
+// GetIssueProposals returns the proposals linked to an issue, ordered by
+// proposal id ascending. It is the reverse edge of GetProposalIssues.
+func GetIssueProposals(db *sql.DB, issueID int) ([]model.Proposal, error) {
+	rows, err := db.Query(
+		`SELECT p.id, p.description, p.rationale, p.domain_tags, p.files_changed, p.criticality, p.status, p.final_outcome, p.escalation_reason, p.required_voters, p.threshold, p.weighted_score, p.created_by, p.created_at, p.updated_at
+		 FROM proposals p
+		 JOIN proposal_issues pi ON pi.proposal_id = p.id
+		 WHERE pi.issue_id = ?
+		 ORDER BY p.id ASC`,
+		issueID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying issue proposals: %w", err)
+	}
+	defer rows.Close()
+
+	var proposals []model.Proposal
+	for rows.Next() {
+		p, err := scanProposalFrom(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning proposal row: %w", err)
+		}
+		proposals = append(proposals, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating issue proposal rows: %w", err)
+	}
+
+	return proposals, nil
+}
+
 // CommitProposal transitions an approved proposal to committed status with a final outcome.
 // If escalationReason is non-empty, it is stored on the proposal.
 func CommitProposal(db *sql.DB, id int, outcome string, escalationReason string) error {

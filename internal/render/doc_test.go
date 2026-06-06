@@ -128,7 +128,9 @@ func TestRenderDocDetail_PlainAllSections(t *testing.T) {
 	comments := []*model.DocComment{
 		{ID: 1, DocID: 42, Body: "Looks good", Author: "Alex", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
-	linkedIssues := []int{12}
+	linkedIssues := []model.IssueRef{
+		{ID: 12, Kind: "feature", Status: "in-progress", Title: "Wire up CLI"},
+	}
 	linkedProposals := []int{3}
 
 	got := RenderDocDetail(doc, revisions, comments, linkedIssues, linkedProposals)
@@ -143,6 +145,9 @@ func TestRenderDocDetail_PlainAllSections(t *testing.T) {
 		"doc body content",
 		"Linked Issues",
 		model.FormatID(12),
+		"feature",
+		"in-progress",
+		"Wire up CLI",
 		"Linked Proposals",
 		model.FormatProposalID(3),
 		"Comments",
@@ -206,9 +211,52 @@ func TestRenderDocDetail_ColorPathExecutes(t *testing.T) {
 		{ID: 1, DocID: 1, Body: "c", Author: "Alex", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	got := RenderDocDetail(doc, revisions, comments, []int{2}, []int{3})
+	got := RenderDocDetail(doc, revisions, comments, []model.IssueRef{{ID: 2, Kind: "bug", Status: "todo", Title: "T"}}, []int{3})
 	if got == "" {
 		t.Error("expected non-empty output from color detail render")
+	}
+}
+
+func TestRenderDocLinkedIssues_RichRefsStyledAndPlain(t *testing.T) {
+	issues := []model.IssueRef{
+		{ID: 1, Kind: "feature", Status: "in-progress", Title: "Short"},
+		{ID: 200, Kind: "bug", Status: "done", Title: "A longer issue title"},
+	}
+
+	got := renderDocLinkedIssues(issues)
+
+	wantSubstrings := []string{
+		"Linked Issues",
+		model.FormatID(1),
+		model.FormatID(200),
+		"feature",
+		"bug",
+		"in-progress",
+		"done",
+		"Short",
+		"A longer issue title",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in styled linked-issues output, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderDocDetail_PlainLinkedIssuesRichColumns(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	doc := makeTestDoc(5, "Doc", "tdd", "draft", "Erik")
+	linkedIssues := []model.IssueRef{
+		{ID: 7, Kind: "task", Status: "review", Title: "Verify"},
+	}
+
+	got := RenderDocDetail(doc, nil, nil, linkedIssues, nil)
+
+	for _, want := range []string{"Linked Issues", model.FormatID(7), "task", "review", "Verify"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in plain linked-issues output, got:\n%s", want, got)
+		}
 	}
 }
 

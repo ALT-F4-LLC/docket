@@ -115,6 +115,10 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
 	}
 
+	if err := db.HydrateDocs(conn, issues); err != nil {
+		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+	}
+
 	result := listResult{Issues: issues, Total: total}
 
 	// Fetch parent issues and sub-issue progress for the grouped display.

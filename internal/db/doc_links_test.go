@@ -169,6 +169,70 @@ func TestHydrateDocs_Empty(t *testing.T) {
 	}
 }
 
+func TestHydrateLinkedIssues_BatchNoNPlus1(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	docA := mustCreateDoc(t, db, "Doc A", "tdd", "draft", "body")
+	docB := mustCreateDoc(t, db, "Doc B", "adr", "draft", "body")
+
+	id1 := createTestIssue(t, db, "Alpha", model.StatusInProgress, model.PriorityMedium)
+	id2 := createTestIssue(t, db, "Beta", model.StatusTodo, model.PriorityMedium)
+	id3 := createTestIssue(t, db, "Gamma", model.StatusDone, model.PriorityMedium)
+
+	if err := LinkDocIssue(db, docA, id2); err != nil {
+		t.Fatalf("LinkDocIssue docA→id2: %v", err)
+	}
+	if err := LinkDocIssue(db, docA, id1); err != nil {
+		t.Fatalf("LinkDocIssue docA→id1: %v", err)
+	}
+	if err := LinkDocIssue(db, docB, id3); err != nil {
+		t.Fatalf("LinkDocIssue docB→id3: %v", err)
+	}
+
+	refs, err := HydrateLinkedIssues(db, []int{docA, docB})
+	if err != nil {
+		t.Fatalf("HydrateLinkedIssues: %v", err)
+	}
+
+	if len(refs[docA]) != 2 {
+		t.Fatalf("docA: expected 2 linked issues, got %d", len(refs[docA]))
+	}
+	if refs[docA][0].ID != id1 || refs[docA][1].ID != id2 {
+		t.Errorf("docA refs not ordered by issue_id ASC: %+v", refs[docA])
+	}
+	if refs[docA][0].Kind != "task" || refs[docA][0].Status != string(model.StatusInProgress) || refs[docA][0].Title != "Alpha" {
+		t.Errorf("docA ref[0] projection wrong: %+v", refs[docA][0])
+	}
+
+	if len(refs[docB]) != 1 || refs[docB][0].ID != id3 {
+		t.Errorf("docB: expected [%d], got %+v", id3, refs[docB])
+	}
+	if refs[docB][0].Status != string(model.StatusDone) || refs[docB][0].Title != "Gamma" {
+		t.Errorf("docB ref projection wrong: %+v", refs[docB][0])
+	}
+}
+
+func TestHydrateLinkedIssues_Empty(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	refs, err := HydrateLinkedIssues(db, nil)
+	if err != nil {
+		t.Fatalf("HydrateLinkedIssues nil: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Errorf("expected empty map, got %+v", refs)
+	}
+
+	docID := mustCreateDoc(t, db, "Unlinked", "tdd", "draft", "b")
+	refs, err = HydrateLinkedIssues(db, []int{docID})
+	if err != nil {
+		t.Fatalf("HydrateLinkedIssues unlinked: %v", err)
+	}
+	if len(refs[docID]) != 0 {
+		t.Errorf("expected no refs for unlinked doc, got %+v", refs[docID])
+	}
+}
+
 // --- Doc ↔ Proposal links ---
 
 func TestLinkDocProposal(t *testing.T) {

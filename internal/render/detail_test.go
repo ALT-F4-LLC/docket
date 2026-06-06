@@ -21,7 +21,7 @@ func TestRenderDetail_PlainLinkedDocsAfterFilesBeforeDescription(t *testing.T) {
 	issue.Files = []string{"internal/db/doc_links.go"}
 	issue.Description = "the description"
 
-	out := RenderDetail(issue, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil)
 
 	if !strings.Contains(out, "\nLinked Docs\n") {
 		t.Fatalf("missing Linked Docs header:\n%s", out)
@@ -44,7 +44,7 @@ func TestRenderDetail_PlainLinkedDocsAligned(t *testing.T) {
 		{ID: 100, Type: "ux", Status: "draft", Title: "Beta"},
 	})
 
-	out := RenderDetail(issue, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil)
 
 	wantLines := []string{
 		"  > DOC-3     tdd   approved   Alpha",
@@ -60,7 +60,7 @@ func TestRenderDetail_PlainLinkedDocsAligned(t *testing.T) {
 func TestRenderDetail_PlainOmitsLinkedDocsWhenEmpty(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	issue := issueWithDocs(nil)
-	out := RenderDetail(issue, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil)
 	if strings.Contains(out, "Linked Docs") {
 		t.Errorf("empty docs should omit section:\n%s", out)
 	}
@@ -72,7 +72,7 @@ func TestRenderDetail_StyledLinkedDocsUsesArrowGlyph(t *testing.T) {
 		{ID: 3, Type: "tdd", Status: "approved", Title: "Docket Doc CLI"},
 	})
 
-	out := RenderDetail(issue, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil)
 
 	if !strings.Contains(out, "Linked Docs") {
 		t.Fatalf("missing Linked Docs header:\n%s", out)

@@ -179,6 +179,11 @@ func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
 	}
 
+	linkedProposals, err := db.GetIssueProposals(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("fetching linked proposals: %w", err), output.ErrGeneral)
+	}
+
 	comments, err := db.ListComments(conn, id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
@@ -199,7 +204,7 @@ func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	var message string
 	if !w.JSONMode {
-		message = render.RenderDetail(issue, subIssues, relations, comments, activity)
+		message = render.RenderDetail(issue, subIssues, relations, linkedProposals, comments, activity)
 	}
 	w.Success(result, message)
 

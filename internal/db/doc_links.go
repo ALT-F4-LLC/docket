@@ -108,6 +108,46 @@ func HydrateDocs(db *sql.DB, issues []*model.Issue) error {
 	return rows.Err()
 }
 
+func HydrateLinkedIssues(db *sql.DB, docIDs []int) (map[int][]model.IssueRef, error) {
+	out := make(map[int][]model.IssueRef, len(docIDs))
+	if len(docIDs) == 0 {
+		return out, nil
+	}
+
+	ids := make([]any, len(docIDs))
+	for i, id := range docIDs {
+		ids[i] = id
+	}
+
+	placeholders := makePlaceholders(len(ids))
+	query := fmt.Sprintf(
+		`SELECT l.doc_id, i.id, i.kind, i.status, i.title
+		 FROM doc_issue_links l
+		 JOIN issues i ON i.id = l.issue_id
+		 WHERE l.doc_id IN (%s)
+		 ORDER BY i.id ASC`, placeholders,
+	)
+
+	rows, err := db.Query(query, ids...)
+	if err != nil {
+		return nil, fmt.Errorf("querying linked issues: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var docID int
+		var ref model.IssueRef
+		if err := rows.Scan(&docID, &ref.ID, &ref.Kind, &ref.Status, &ref.Title); err != nil {
+			return nil, fmt.Errorf("scanning linked issue: %w", err)
+		}
+		out[docID] = append(out[docID], ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating linked issue rows: %w", err)
+	}
+	return out, nil
+}
+
 // LinkProposalDoc links a proposal (vote) to a doc. Returns ErrNotFound if
 // either side is missing; ErrConflict if the link already exists.
 func LinkProposalDoc(db *sql.DB, proposalID, docID int) error {

@@ -366,3 +366,30 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 
 	return nil
 }
+
+type IssueRef struct {
+	ID     int
+	Kind   string
+	Status string
+	Title  string
+}
+
+type issueRefJSON struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+func (r IssueRef) MarshalJSON() ([]byte, error) {
+	return json.Marshal(issueRefJSON{
+		ID:     FormatID(r.ID),
+		Kind:   r.Kind,
+		Title:  r.Title,
+		Status: r.Status,
+	})
+}
+
+func (r *IssueRef) UnmarshalJSON([]byte) error {
+	return nil
+}

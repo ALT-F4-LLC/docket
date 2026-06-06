@@ -13,10 +13,10 @@ import (
 )
 
 // RenderDetail renders a full issue detail view including metadata, description,
-// sub-issues, relations, comments, and recent activity.
-func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, comments []*model.Comment, activity []model.Activity) string {
+// sub-issues, relations, linked proposals, comments, and recent activity.
+func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, linkedProposals []model.Proposal, comments []*model.Comment, activity []model.Activity) string {
 	if !ColorsEnabled() {
-		return renderPlainDetail(issue, subIssues, relations, comments, activity)
+		return renderPlainDetail(issue, subIssues, relations, linkedProposals, comments, activity)
 	}
 
 	var sections []string
@@ -49,6 +49,10 @@ func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []mode
 	// Relations
 	if len(relations) > 0 {
 		sections = append(sections, renderRelations(issue.ID, relations))
+	}
+
+	if len(linkedProposals) > 0 {
+		sections = append(sections, renderLinkedProposals(linkedProposals))
 	}
 
 	// Comments
@@ -147,6 +151,34 @@ func renderDocRefs(docs []model.DocRef) string {
 			d.Type+strings.Repeat(" ", typeWidth-len(d.Type)),
 			d.Status+strings.Repeat(" ", statusWidth-len(d.Status)),
 			d.Title,
+		)
+		lines = append(lines, line)
+	}
+
+	return header + "\n" + strings.Join(lines, "\n")
+}
+
+func renderLinkedProposals(proposals []model.Proposal) string {
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	header := sectionStyle.Render("Linked Proposals")
+
+	var idWidth, statusWidth int
+	for _, p := range proposals {
+		idWidth = max(idWidth, len(model.FormatProposalID(p.ID)))
+		statusWidth = max(statusWidth, len(string(p.Status)))
+	}
+
+	var lines []string
+	for _, p := range proposals {
+		id := model.FormatProposalID(p.ID)
+		status := string(p.Status)
+		line := fmt.Sprintf("  %s %s   %s   %s",
+			dimStyle.Render("▸"),
+			idStyle.Render(id)+strings.Repeat(" ", idWidth-len(id)),
+			status+strings.Repeat(" ", statusWidth-len(status)),
+			truncate(p.Description, maxTitleWidth),
 		)
 		lines = append(lines, line)
 	}
@@ -363,7 +395,7 @@ func renderActivity(activity []model.Activity) string {
 }
 
 // renderPlainDetail renders a detail view without any color or styling.
-func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, comments []*model.Comment, activity []model.Activity) string {
+func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, linkedProposals []model.Proposal, comments []*model.Comment, activity []model.Activity) string {
 	var b strings.Builder
 
 	// Header
@@ -447,6 +479,22 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 				arrow := RelationArrow(rel.RelationType, false)
 				fmt.Fprintf(&b, "  %s %s %s\n", arrow, rel.RelationType.Inverse(), model.FormatID(rel.SourceIssueID))
 			}
+		}
+	}
+
+	if len(linkedProposals) > 0 {
+		var idWidth, statusWidth int
+		for _, p := range linkedProposals {
+			idWidth = max(idWidth, len(model.FormatProposalID(p.ID)))
+			statusWidth = max(statusWidth, len(string(p.Status)))
+		}
+		b.WriteString("\nLinked Proposals\n")
+		for _, p := range linkedProposals {
+			fmt.Fprintf(&b, "  > %-*s   %-*s   %s\n",
+				idWidth, model.FormatProposalID(p.ID),
+				statusWidth, string(p.Status),
+				truncate(p.Description, maxTitleWidth),
+			)
 		}
 	}
 

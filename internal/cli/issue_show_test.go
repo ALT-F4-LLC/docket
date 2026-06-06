@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
@@ -130,6 +132,137 @@ func TestIssueShowJSON_DocsArrayShapeAndOrder(t *testing.T) {
 	}
 	if docs[0].Type != "adr" || docs[0].Title != "Beta" || docs[0].Status != "accepted" {
 		t.Errorf("doc[0] shape wrong: %+v", docs[0])
+	}
+}
+
+func createProposal(t *testing.T, conn *sql.DB, description, status string) int {
+	t.Helper()
+	id, err := db.CreateProposal(conn, &model.Proposal{
+		Description:    description,
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatus(status),
+		RequiredVoters: 1,
+		Threshold:      0.67,
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal(%q): %v", description, err)
+	}
+	return id
+}
+
+func linkProposalIssue(t *testing.T, conn *sql.DB, proposalID, issueID int) {
+	t.Helper()
+	if err := db.LinkProposalIssue(conn, proposalID, issueID); err != nil {
+		t.Fatalf("LinkProposalIssue(%d,%d): %v", proposalID, issueID, err)
+	}
+}
+
+func TestIssueShow_LinksLinkedProposals(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "issue with proposals", model.StatusTodo, model.PriorityHigh)
+	p1 := createProposal(t, conn, "Adopt new schema", string(model.ProposalStatusOpen))
+	p2 := createProposal(t, conn, "Deprecate old API", string(model.ProposalStatusApproved))
+	linkProposalIssue(t, conn, p2, issueID)
+	linkProposalIssue(t, conn, p1, issueID)
+
+	cmd := cmdWithDB(conn)
+	w, buf := bufWriter(false)
+	if err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w); err != nil {
+		t.Fatalf("runIssueShow: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Linked Proposals") {
+		t.Fatalf("output missing Linked Proposals header:\n%s", out)
+	}
+	if !strings.Contains(out, "▸") {
+		t.Errorf("styled output missing ▸ prefix:\n%s", out)
+	}
+	for _, want := range []string{"DKT-V1", "DKT-V2", "open", "approved", "Adopt new schema", "Deprecate old API"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "DKT-V1") > strings.Index(out, "DKT-V2") {
+		t.Errorf("proposals not ordered by id ascending:\n%s", out)
+	}
+}
+
+func TestIssueShow_LinksLinkedProposalsPlain(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "issue with proposals", model.StatusTodo, model.PriorityHigh)
+	pid := createProposal(t, conn, "Adopt new schema", string(model.ProposalStatusOpen))
+	linkProposalIssue(t, conn, pid, issueID)
+
+	cmd := cmdWithDB(conn)
+	w, buf := bufWriter(false)
+	if err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w); err != nil {
+		t.Fatalf("runIssueShow: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Linked Proposals") {
+		t.Fatalf("plain output missing Linked Proposals header:\n%s", out)
+	}
+	if !strings.Contains(out, "  > DKT-V1   open   Adopt new schema") {
+		t.Errorf("plain output missing expected proposal line:\n%s", out)
+	}
+	if strings.Contains(out, "▸") {
+		t.Errorf("plain output should not contain ▸:\n%s", out)
+	}
+}
+
+func TestIssueShow_LinkedProposalsDescriptionTruncated(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "issue", model.StatusTodo, model.PriorityHigh)
+	longDesc := "This proposal description is far longer than forty characters and must be truncated"
+	pid := createProposal(t, conn, longDesc, string(model.ProposalStatusOpen))
+	linkProposalIssue(t, conn, pid, issueID)
+
+	cmd := cmdWithDB(conn)
+	w, buf := bufWriter(false)
+	if err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w); err != nil {
+		t.Fatalf("runIssueShow: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, longDesc) {
+		t.Errorf("long description should be truncated, got full text:\n%s", out)
+	}
+	if !strings.Contains(out, "This proposal description is far long...") {
+		t.Errorf("expected truncated description with ellipsis:\n%s", out)
+	}
+}
+
+func TestIssueShow_OmitsLinkedProposalsWhenEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		noColor bool
+	}{
+		{"styled", false},
+		{"plain", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noColor {
+				t.Setenv("NO_COLOR", "1")
+			} else {
+				t.Setenv("TERM", "xterm-256color")
+			}
+			conn := newTestDB(t)
+			issueID := createIssue(t, conn, "no proposals", model.StatusTodo, model.PriorityHigh)
+
+			cmd := cmdWithDB(conn)
+			w, buf := bufWriter(false)
+			if err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w); err != nil {
+				t.Fatalf("runIssueShow: %v", err)
+			}
+			if strings.Contains(buf.String(), "Linked Proposals") {
+				t.Errorf("empty issue should omit Linked Proposals section:\n%s", buf.String())
+			}
+		})
 	}
 }
 

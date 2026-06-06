@@ -86,9 +86,8 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
 	}
 
-	// Hydrate file attachments so the planner can detect file collisions.
-	if err := db.HydrateFiles(conn, issues); err != nil {
-		return cmdErr(fmt.Errorf("hydrating files: %w", err), output.ErrGeneral)
+	if err := db.HydrateDocs(conn, issues); err != nil {
+		return cmdErr(fmt.Errorf("hydrating docs: %w", err), output.ErrGeneral)
 	}
 
 	// Fetch all directional relations.

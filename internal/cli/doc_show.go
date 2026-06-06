@@ -24,7 +24,7 @@ type docShowResult struct {
 	Doc             *model.Doc
 	Revisions       []*model.DocRevision
 	Comments        []*model.DocComment
-	LinkedIssues    []int
+	LinkedIssues    []model.IssueRef
 	LinkedProposals []int
 }
 
@@ -39,7 +39,7 @@ type docShowResultJSON struct {
 	UpdatedAt       string               `json:"updated_at"`
 	Revisions       []*model.DocRevision `json:"revisions"`
 	Comments        []*model.DocComment  `json:"comments"`
-	LinkedIssues    []string             `json:"linked_issues"`
+	LinkedIssues    []model.IssueRef     `json:"linked_issues"`
 	LinkedProposals []string             `json:"linked_proposals"`
 }
 
@@ -55,9 +55,9 @@ func (s docShowResult) MarshalJSON() ([]byte, error) {
 		comments = []*model.DocComment{}
 	}
 
-	linkedIssues := make([]string, 0, len(s.LinkedIssues))
-	for _, id := range s.LinkedIssues {
-		linkedIssues = append(linkedIssues, model.FormatID(id))
+	linkedIssues := s.LinkedIssues
+	if linkedIssues == nil {
+		linkedIssues = []model.IssueRef{}
 	}
 	linkedProposals := make([]string, 0, len(s.LinkedProposals))
 	for _, id := range s.LinkedProposals {
@@ -138,10 +138,11 @@ func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
 	}
 
-	linkedIssues, err := db.GetDocIssues(conn, id)
+	linkedIssuesByDoc, err := db.HydrateLinkedIssues(conn, []int{id})
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
 	}
+	linkedIssues := linkedIssuesByDoc[id]
 
 	linkedProposals, err := db.GetDocProposals(conn, id)
 	if err != nil {
