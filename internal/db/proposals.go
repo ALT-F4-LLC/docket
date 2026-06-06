@@ -592,3 +592,168 @@ func scanVoteFrom(s scanner) (*model.Vote, error) {
 
 	return &v, nil
 }
+
+// ListAllProposals returns every proposal row ordered by id ASC, for a full
+// export.
+func ListAllProposals(db *sql.DB) ([]*model.Proposal, error) {
+	rows, err := db.Query(
+		`SELECT id, description, rationale, domain_tags, files_changed, criticality,
+		        status, final_outcome, escalation_reason, required_voters, threshold,
+		        weighted_score, created_by, created_at, updated_at
+		 FROM proposals ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all proposals: %w", err)
+	}
+	defer rows.Close()
+
+	var proposals []*model.Proposal
+	for rows.Next() {
+		p, err := scanProposalFrom(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning proposal row: %w", err)
+		}
+		proposals = append(proposals, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating proposal rows: %w", err)
+	}
+	return proposals, nil
+}
+
+// ListAllVotes returns every vote row ordered by id ASC, for a full export.
+func ListAllVotes(db *sql.DB) ([]*model.Vote, error) {
+	rows, err := db.Query(
+		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence,
+		        domain_relevance, findings, findings_json, summary, created_at
+		 FROM votes ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all votes: %w", err)
+	}
+	defer rows.Close()
+
+	var votes []*model.Vote
+	for rows.Next() {
+		v, err := scanVoteFrom(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning vote row: %w", err)
+		}
+		votes = append(votes, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating vote rows: %w", err)
+	}
+	return votes, nil
+}
+
+// ListAllProposalIssues returns every proposal_issues row ordered by
+// (proposal_id, issue_id), for a full export.
+func ListAllProposalIssues(db *sql.DB) ([]model.ProposalIssueLink, error) {
+	rows, err := db.Query(
+		`SELECT proposal_id, issue_id
+		 FROM proposal_issues ORDER BY proposal_id ASC, issue_id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all proposal_issues: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]model.ProposalIssueLink, 0)
+	for rows.Next() {
+		var l model.ProposalIssueLink
+		if err := rows.Scan(&l.ProposalID, &l.IssueID); err != nil {
+			return nil, fmt.Errorf("scanning proposal_issue row: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating proposal_issue rows: %w", err)
+	}
+	return out, nil
+}
+
+// InsertProposalWithID inserts a proposal row with a caller-supplied ID,
+// skipping if the ID already exists. Must be called within an existing
+// transaction. Returns true if inserted. Mirrors InsertIssueWithID; domain_tags
+// and files_changed are JSON-encoded identically to CreateProposal.
+func InsertProposalWithID(tx *sql.Tx, p *model.Proposal) (bool, error) {
+	domainTagsJSON, err := json.Marshal(p.DomainTags)
+	if err != nil {
+		return false, fmt.Errorf("marshaling domain_tags: %w", err)
+	}
+	filesChangedJSON, err := json.Marshal(p.FilesChanged)
+	if err != nil {
+		return false, fmt.Errorf("marshaling files_changed: %w", err)
+	}
+
+	var weightedScore any
+	if p.WeightedScore != nil {
+		weightedScore = *p.WeightedScore
+	}
+	var escalationReason any
+	if p.EscalationReason != nil {
+		escalationReason = *p.EscalationReason
+	}
+
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO proposals
+		 (id, description, rationale, domain_tags, files_changed, criticality, status,
+		  final_outcome, escalation_reason, required_voters, threshold, weighted_score,
+		  created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.Description, p.Rationale, string(domainTagsJSON), string(filesChangedJSON),
+		string(p.Criticality), string(p.Status), p.FinalOutcome, escalationReason,
+		p.RequiredVoters, p.Threshold, weightedScore, p.CreatedBy,
+		p.CreatedAt.UTC().Format(time.RFC3339), p.UpdatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting proposal with id %d: %w", p.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// InsertVoteWithID inserts a vote row with a caller-supplied ID, skipping if the
+// ID already exists. Must be called within an existing transaction. Returns true
+// if inserted. findings_json is JSON-encoded (NULL when absent) identically to
+// CastVote.
+func InsertVoteWithID(tx *sql.Tx, v *model.Vote) (bool, error) {
+	var findingsJSONStr any
+	if v.FindingsJSON != nil {
+		b, err := json.Marshal(v.FindingsJSON)
+		if err != nil {
+			return false, fmt.Errorf("marshaling findings_json: %w", err)
+		}
+		findingsJSONStr = string(b)
+	}
+
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO votes
+		 (id, proposal_id, voter_name, voter_role, verdict, confidence,
+		  domain_relevance, findings, findings_json, summary, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		v.ID, v.ProposalID, v.VoterName, v.VoterRole, string(v.Verdict), v.Confidence,
+		v.DomainRelevance, v.Findings, findingsJSONStr, v.Summary,
+		v.CreatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting vote with id %d: %w", v.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// InsertProposalIssueLink inserts a proposal_issues row, skipping on PK
+// conflict. Must be called within a transaction. Returns true if inserted.
+func InsertProposalIssueLink(tx *sql.Tx, proposalID, issueID int) (bool, error) {
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO proposal_issues (proposal_id, issue_id) VALUES (?, ?)`,
+		proposalID, issueID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting proposal_issue (%d,%d): %w", proposalID, issueID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}

@@ -374,6 +374,56 @@ func TestListDocsWithCounts_FilterByStatus(t *testing.T) {
 	}
 }
 
+func TestListDocs_OffsetWithoutLimitSkipsRows(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	var ids []int
+	for i := 0; i < 6; i++ {
+		ids = append(ids, mustCreateDoc(t, db, "doc", "tdd", "draft", "body"))
+	}
+
+	docs, total, err := ListDocs(db, DocListOptions{Sort: "id", SortDir: "asc", Offset: 2})
+	if err != nil {
+		t.Fatalf("ListDocs: %v", err)
+	}
+	if total != 6 {
+		t.Errorf("total = %d, want 6", total)
+	}
+	if len(docs) != 4 {
+		t.Fatalf("len(docs) = %d, want 4 (offset 2 of 6 honored)", len(docs))
+	}
+	if docs[0].ID != ids[2] {
+		t.Errorf("first returned doc ID = %d, want %d (3rd doc after skipping 2)", docs[0].ID, ids[2])
+	}
+	if docs[3].ID != ids[5] {
+		t.Errorf("last returned doc ID = %d, want %d", docs[3].ID, ids[5])
+	}
+}
+
+func TestListDocsWithCounts_OffsetWithoutLimitSkipsRows(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	var ids []int
+	for i := 0; i < 6; i++ {
+		ids = append(ids, mustCreateDoc(t, db, "doc", "tdd", "draft", "body"))
+	}
+
+	summaries, total, err := ListDocsWithCounts(db, DocListOptions{Sort: "id", SortDir: "asc", Offset: 2})
+	if err != nil {
+		t.Fatalf("ListDocsWithCounts: %v", err)
+	}
+	if total != 6 {
+		t.Errorf("total = %d, want 6", total)
+	}
+	if len(summaries) != 4 {
+		t.Fatalf("len(summaries) = %d, want 4 (offset 2 of 6 honored)", len(summaries))
+	}
+	if summaries[0].Doc.ID != ids[2] {
+		t.Errorf("first returned doc ID = %d, want %d (3rd doc after skipping 2)", summaries[0].Doc.ID, ids[2])
+	}
+	if summaries[3].Doc.ID != ids[5] {
+		t.Errorf("last returned doc ID = %d, want %d", summaries[3].Doc.ID, ids[5])
+	}
+}
+
 // --- GetDocRevision (TDD §3.3 Q1 semantics) ---
 
 func TestGetDocRevision(t *testing.T) {

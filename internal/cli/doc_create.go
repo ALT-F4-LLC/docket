@@ -25,11 +25,17 @@ func loadDocBody(body string) (string, error) {
 		if path == "" {
 			return "", cmdErr(fmt.Errorf("empty file path after @"), output.ErrValidation)
 		}
-		data, err := os.ReadFile(path)
+		f, err := os.Open(path)
 		if err != nil {
 			return "", cmdErr(fmt.Errorf("reading body from %q: %w", path, err), output.ErrValidation)
 		}
-		if len(data) > maxDocBodySize {
+		defer f.Close()
+		lr := &io.LimitedReader{R: f, N: maxDocBodySize + 1}
+		data, err := io.ReadAll(lr)
+		if err != nil {
+			return "", cmdErr(fmt.Errorf("reading body from %q: %w", path, err), output.ErrValidation)
+		}
+		if int64(len(data)) > maxDocBodySize {
 			return "", cmdErr(fmt.Errorf("body from %q exceeds %d bytes", path, maxDocBodySize), output.ErrValidation)
 		}
 		return strings.TrimRight(string(data), "\n"), nil

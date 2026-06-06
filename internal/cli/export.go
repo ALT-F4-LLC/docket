@@ -73,6 +73,46 @@ var exportCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching file mappings: %w", err), output.ErrGeneral)
 		}
 
+		docs, err := db.ListAllDocs(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching docs: %w", err), output.ErrGeneral)
+		}
+
+		docRevisions, err := db.ListAllDocRevisions(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching doc revisions: %w", err), output.ErrGeneral)
+		}
+
+		docComments, err := db.ListAllDocComments(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching doc comments: %w", err), output.ErrGeneral)
+		}
+
+		docIssueLinks, err := db.ListAllDocIssueLinks(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching doc-issue links: %w", err), output.ErrGeneral)
+		}
+
+		proposalDocs, err := db.ListAllProposalDocs(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching proposal-doc links: %w", err), output.ErrGeneral)
+		}
+
+		proposals, err := db.ListAllProposals(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching proposals: %w", err), output.ErrGeneral)
+		}
+
+		votes, err := db.ListAllVotes(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
+		}
+
+		proposalIssues, err := db.ListAllProposalIssues(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching proposal-issue links: %w", err), output.ErrGeneral)
+		}
+
 		// Apply filters if provided.
 		if len(statuses) > 0 || len(labels) > 0 {
 			issues = filterIssues(issues, statuses, labels)
@@ -119,6 +159,24 @@ var exportCmd = &cobra.Command{
 			}
 			fileMappings = filteredFileMappings
 
+			// Filter doc-issue links to only those whose issue survives the filter.
+			filteredDocIssueLinks := make([]model.DocIssueLink, 0, len(docIssueLinks))
+			for _, l := range docIssueLinks {
+				if issueIDs[l.IssueID] {
+					filteredDocIssueLinks = append(filteredDocIssueLinks, l)
+				}
+			}
+			docIssueLinks = filteredDocIssueLinks
+
+			// Filter proposal-issue links to only those whose issue survives the filter.
+			filteredProposalIssues := make([]model.ProposalIssueLink, 0, len(proposalIssues))
+			for _, l := range proposalIssues {
+				if issueIDs[l.IssueID] {
+					filteredProposalIssues = append(filteredProposalIssues, l)
+				}
+			}
+			proposalIssues = filteredProposalIssues
+
 			// Filter labels to only those referenced by remaining mappings.
 			usedLabelIDs := make(map[int]bool)
 			for _, m := range mappings {
@@ -143,6 +201,14 @@ var exportCmd = &cobra.Command{
 			Labels:             allLabels,
 			IssueLabelMappings: mappings,
 			IssueFileMappings:  fileMappings,
+			Docs:               docs,
+			DocRevisions:       docRevisions,
+			DocComments:        docComments,
+			DocIssueLinks:      docIssueLinks,
+			Proposals:          proposals,
+			Votes:              votes,
+			ProposalIssues:     proposalIssues,
+			ProposalDocs:       proposalDocs,
 		}
 
 		// Ensure nil slices become empty arrays in JSON.
@@ -163,6 +229,30 @@ var exportCmd = &cobra.Command{
 		}
 		if data.IssueFileMappings == nil {
 			data.IssueFileMappings = []model.IssueFileMapping{}
+		}
+		if data.Docs == nil {
+			data.Docs = []*model.Doc{}
+		}
+		if data.DocRevisions == nil {
+			data.DocRevisions = []*model.DocRevision{}
+		}
+		if data.DocComments == nil {
+			data.DocComments = []*model.DocComment{}
+		}
+		if data.DocIssueLinks == nil {
+			data.DocIssueLinks = []model.DocIssueLink{}
+		}
+		if data.Proposals == nil {
+			data.Proposals = []*model.Proposal{}
+		}
+		if data.Votes == nil {
+			data.Votes = []*model.Vote{}
+		}
+		if data.ProposalIssues == nil {
+			data.ProposalIssues = []model.ProposalIssueLink{}
+		}
+		if data.ProposalDocs == nil {
+			data.ProposalDocs = []model.ProposalDocLink{}
 		}
 
 		// Generate output based on format.

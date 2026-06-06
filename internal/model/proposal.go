@@ -245,6 +245,14 @@ func (p *Proposal) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ProposalIssueLink is an export-format row from the proposal_issues join
+// table. IDs are plain ints (mirrors DocIssueLink); the table carries no
+// created_at column.
+type ProposalIssueLink struct {
+	ProposalID int `json:"proposal_id"`
+	IssueID    int `json:"issue_id"`
+}
+
 // Vote represents an individual vote on a proposal.
 type Vote struct {
 	ID              int

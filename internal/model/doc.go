@@ -137,6 +137,8 @@ func (r DocRef) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// UnmarshalJSON is a deliberate no-op: DocRef is a render-only output
+// projection hydrated from the link table, never parsed back from JSON.
 func (r *DocRef) UnmarshalJSON([]byte) error {
 	return nil
 }

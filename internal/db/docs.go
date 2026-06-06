@@ -155,6 +155,9 @@ func ListDocs(db *sql.DB, opts DocListOptions) ([]*model.Doc, int, error) {
 			query += " OFFSET ?"
 			queryArgs = append(queryArgs, opts.Offset)
 		}
+	} else if opts.Offset > 0 {
+		query += " LIMIT -1 OFFSET ?"
+		queryArgs = append(queryArgs, opts.Offset)
 	}
 
 	rows, err := db.Query(query, queryArgs...)
@@ -224,6 +227,9 @@ func ListDocsWithCounts(db *sql.DB, opts DocListOptions) ([]*DocSummary, int, er
 			query += " OFFSET ?"
 			queryArgs = append(queryArgs, opts.Offset)
 		}
+	} else if opts.Offset > 0 {
+		query += " LIMIT -1 OFFSET ?"
+		queryArgs = append(queryArgs, opts.Offset)
 	}
 
 	rows, err := db.Query(query, queryArgs...)
@@ -514,6 +520,57 @@ func InsertDocRevisionWithID(tx *sql.Tx, r *model.DocRevision) (bool, error) {
 	return n > 0, nil
 }
 
+// ListAllDocs returns every doc row ordered by id ASC, for a full export.
+func ListAllDocs(db *sql.DB) ([]*model.Doc, error) {
+	rows, err := db.Query(
+		`SELECT id, type, status, title, body, author, created_at, updated_at
+		 FROM docs ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all docs: %w", err)
+	}
+	defer rows.Close()
+
+	var docs []*model.Doc
+	for rows.Next() {
+		d, err := scanDocFrom(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning doc row: %w", err)
+		}
+		docs = append(docs, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating doc rows: %w", err)
+	}
+	return docs, nil
+}
+
+// ListAllDocRevisions returns every doc_revisions row ordered by id ASC, for a
+// full export.
+func ListAllDocRevisions(db *sql.DB) ([]*model.DocRevision, error) {
+	rows, err := db.Query(
+		`SELECT id, doc_id, revision_number, body, change_kind, author, created_at
+		 FROM doc_revisions ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all doc revisions: %w", err)
+	}
+	defer rows.Close()
+
+	var revs []*model.DocRevision
+	for rows.Next() {
+		r, err := scanDocRevisionFrom(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning doc revision row: %w", err)
+		}
+		revs = append(revs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating doc revision rows: %w", err)
+	}
+	return revs, nil
+}
+
 // --- private helpers ---
 
 // appendDocRevision inserts the next revision row for docID inside the supplied
@@ -652,6 +709,11 @@ func buildDocOrder(opts DocListOptions, tablePrefix string) (string, error) {
 		field = "created_at"
 	}
 	if !validDocSortFields[field] {
+		return "", fmt.Errorf("%w: invalid sort field %q", ErrValidation, field)
+	}
+	// Defense-in-depth: reject any sort field that doesn't look like a plain
+	// column name, even if it passed the allowlist check above.
+	if !safeIdentifier.MatchString(field) {
 		return "", fmt.Errorf("%w: invalid sort field %q", ErrValidation, field)
 	}
 

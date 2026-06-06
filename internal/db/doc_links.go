@@ -237,6 +237,58 @@ func InsertProposalDocLink(tx *sql.Tx, proposalID, docID int, createdAt string) 
 	return n > 0, nil
 }
 
+// ListAllDocIssueLinks returns every doc_issue_links row ordered by (doc_id,
+// issue_id), for a full export.
+func ListAllDocIssueLinks(db *sql.DB) ([]model.DocIssueLink, error) {
+	rows, err := db.Query(
+		`SELECT doc_id, issue_id, created_at
+		 FROM doc_issue_links ORDER BY doc_id ASC, issue_id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all doc_issue_links: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]model.DocIssueLink, 0)
+	for rows.Next() {
+		var l model.DocIssueLink
+		if err := rows.Scan(&l.DocID, &l.IssueID, &l.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning doc_issue_link row: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating doc_issue_link rows: %w", err)
+	}
+	return out, nil
+}
+
+// ListAllProposalDocs returns every proposal_docs row ordered by (proposal_id,
+// doc_id), for a full export.
+func ListAllProposalDocs(db *sql.DB) ([]model.ProposalDocLink, error) {
+	rows, err := db.Query(
+		`SELECT proposal_id, doc_id, created_at
+		 FROM proposal_docs ORDER BY proposal_id ASC, doc_id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all proposal_docs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]model.ProposalDocLink, 0)
+	for rows.Next() {
+		var l model.ProposalDocLink
+		if err := rows.Scan(&l.ProposalID, &l.DocID, &l.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning proposal_doc row: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating proposal_doc rows: %w", err)
+	}
+	return out, nil
+}
+
 // --- helpers ---
 
 func assertDocExists(db *sql.DB, id int) error {

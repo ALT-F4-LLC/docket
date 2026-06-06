@@ -122,6 +122,32 @@ func InsertDocCommentWithID(tx *sql.Tx, c *model.DocComment) (bool, error) {
 	return n > 0, nil
 }
 
+// ListAllDocComments returns every doc_comments row ordered by id ASC, for a
+// full export.
+func ListAllDocComments(db *sql.DB) ([]*model.DocComment, error) {
+	rows, err := db.Query(
+		`SELECT id, doc_id, body, author, created_at
+		 FROM doc_comments ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all doc comments: %w", err)
+	}
+	defer rows.Close()
+
+	var comments []*model.DocComment
+	for rows.Next() {
+		c, err := scanDocCommentFrom(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning doc comment row: %w", err)
+		}
+		comments = append(comments, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating doc comment rows: %w", err)
+	}
+	return comments, nil
+}
+
 // scanDocCommentFrom scans a single doc_comments row from any scanner. Author
 // is stored as sql.NullString and projected to a plain string per S5.
 func scanDocCommentFrom(s scanner) (*model.DocComment, error) {
