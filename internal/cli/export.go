@@ -73,6 +73,11 @@ var exportCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching file mappings: %w", err), output.ErrGeneral)
 		}
 
+		activityLog, err := db.ListAllActivity(conn)
+		if err != nil {
+			return cmdErr(fmt.Errorf("fetching activity log: %w", err), output.ErrGeneral)
+		}
+
 		docs, err := db.ListAllDocs(conn)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching docs: %w", err), output.ErrGeneral)
@@ -159,6 +164,15 @@ var exportCmd = &cobra.Command{
 			}
 			fileMappings = filteredFileMappings
 
+			// Filter activity log to only entries for filtered issues.
+			filteredActivity := make([]*model.Activity, 0, len(activityLog))
+			for _, a := range activityLog {
+				if issueIDs[a.IssueID] {
+					filteredActivity = append(filteredActivity, a)
+				}
+			}
+			activityLog = filteredActivity
+
 			// Filter doc-issue links to only those whose issue survives the filter.
 			filteredDocIssueLinks := make([]model.DocIssueLink, 0, len(docIssueLinks))
 			for _, l := range docIssueLinks {
@@ -201,6 +215,7 @@ var exportCmd = &cobra.Command{
 			Labels:             allLabels,
 			IssueLabelMappings: mappings,
 			IssueFileMappings:  fileMappings,
+			ActivityLog:        activityLog,
 			Docs:               docs,
 			DocRevisions:       docRevisions,
 			DocComments:        docComments,
@@ -229,6 +244,9 @@ var exportCmd = &cobra.Command{
 		}
 		if data.IssueFileMappings == nil {
 			data.IssueFileMappings = []model.IssueFileMapping{}
+		}
+		if data.ActivityLog == nil {
+			data.ActivityLog = []*model.Activity{}
 		}
 		if data.Docs == nil {
 			data.Docs = []*model.Doc{}

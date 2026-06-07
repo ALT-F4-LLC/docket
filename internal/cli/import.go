@@ -279,7 +279,20 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 7. Proposals (FK: none; must precede votes/proposal_issues/proposal_docs).
+	// 7. Activity log (FK: issues).
+	for _, a := range export.ActivityLog {
+		inserted, err := db.InsertActivityWithID(tx, a)
+		if err != nil {
+			return nil, fmt.Errorf("inserting activity %d: %w", a.ID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 8. Proposals (FK: none; must precede votes/proposal_issues/proposal_docs).
 	for _, p := range export.Proposals {
 		inserted, err := db.InsertProposalWithID(tx, p)
 		if err != nil {
@@ -292,7 +305,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 8. Votes (FK: proposals).
+	// 9. Votes (FK: proposals).
 	for _, v := range export.Votes {
 		inserted, err := db.InsertVoteWithID(tx, v)
 		if err != nil {
@@ -305,7 +318,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 9. Proposal-issue links (FK: proposals, issues).
+	// 10. Proposal-issue links (FK: proposals, issues).
 	for _, l := range export.ProposalIssues {
 		inserted, err := db.InsertProposalIssueLink(tx, l.ProposalID, l.IssueID)
 		if err != nil {
@@ -318,7 +331,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 10. Docs (FK: none; must precede revisions/comments/links).
+	// 11. Docs (FK: none; must precede revisions/comments/links).
 	for _, doc := range export.Docs {
 		inserted, err := db.InsertDocWithID(tx, doc)
 		if err != nil {
@@ -331,7 +344,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 11. Doc revisions (FK: docs).
+	// 12. Doc revisions (FK: docs).
 	for _, rev := range export.DocRevisions {
 		inserted, err := db.InsertDocRevisionWithID(tx, rev)
 		if err != nil {
@@ -344,7 +357,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 12. Doc comments (FK: docs).
+	// 13. Doc comments (FK: docs).
 	for _, c := range export.DocComments {
 		inserted, err := db.InsertDocCommentWithID(tx, c)
 		if err != nil {
@@ -357,7 +370,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 13. Doc-issue links (FK: docs, issues).
+	// 14. Doc-issue links (FK: docs, issues).
 	for _, l := range export.DocIssueLinks {
 		inserted, err := db.InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt)
 		if err != nil {
@@ -370,7 +383,7 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		}
 	}
 
-	// 14. Proposal-doc links (FK: proposals, docs — both inserted above).
+	// 15. Proposal-doc links (FK: proposals, docs — both inserted above).
 	for _, l := range export.ProposalDocs {
 		inserted, err := db.InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt)
 		if err != nil {

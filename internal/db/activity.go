@@ -72,3 +72,60 @@ func GetActivity(db *sql.DB, issueID int, limit int) ([]model.Activity, error) {
 
 	return activities, nil
 }
+
+// ListAllActivity returns every activity_log row ordered by id ASC, for a full
+// export.
+func ListAllActivity(db *sql.DB) ([]*model.Activity, error) {
+	rows, err := db.Query(
+		`SELECT id, issue_id, field_changed, old_value, new_value, changed_by, created_at
+		 FROM activity_log ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all activity: %w", err)
+	}
+	defer rows.Close()
+
+	var activities []*model.Activity
+	for rows.Next() {
+		var a model.Activity
+		var oldVal, newVal, changedBy sql.NullString
+		var createdAt string
+		if err := rows.Scan(&a.ID, &a.IssueID, &a.FieldChanged, &oldVal, &newVal, &changedBy, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning activity row: %w", err)
+		}
+		a.OldValue = oldVal.String
+		a.NewValue = newVal.String
+		a.ChangedBy = changedBy.String
+
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing activity created_at: %w", err)
+		}
+		a.CreatedAt = t
+
+		activities = append(activities, &a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating activity rows: %w", err)
+	}
+
+	return activities, nil
+}
+
+// InsertActivityWithID inserts an activity_log row with a caller-supplied ID,
+// skipping if the ID already exists. Must be called within an existing
+// transaction. Returns true if inserted. Mirrors InsertIssueWithID.
+func InsertActivityWithID(tx *sql.Tx, a *model.Activity) (bool, error) {
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO activity_log
+		 (id, issue_id, field_changed, old_value, new_value, changed_by, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.IssueID, a.FieldChanged, a.OldValue, a.NewValue, a.ChangedBy,
+		a.CreatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting activity with id %d: %w", a.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}

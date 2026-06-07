@@ -22,6 +22,7 @@ type ExportData struct {
 	Labels             []*Label            `json:"labels"`
 	IssueLabelMappings []IssueLabelMapping `json:"issue_label_mappings"`
 	IssueFileMappings  []IssueFileMapping  `json:"issue_file_mappings"`
+	ActivityLog        []*Activity         `json:"activity_log"`
 	Docs               []*Doc              `json:"docs"`
 	DocRevisions       []*DocRevision      `json:"doc_revisions"`
 	DocComments        []*DocComment       `json:"doc_comments"`

@@ -67,6 +67,10 @@ func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
 	if err != nil {
 		t.Fatalf("ListAllProposalIssues: %v", err)
 	}
+	activityLog, err := db.ListAllActivity(conn)
+	if err != nil {
+		t.Fatalf("ListAllActivity: %v", err)
+	}
 
 	return &model.ExportData{
 		Version:            1,
@@ -81,6 +85,7 @@ func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
 		DocRevisions:       docRevisions,
 		DocComments:        docComments,
 		DocIssueLinks:      docIssueLinks,
+		ActivityLog:        activityLog,
 		Proposals:          proposals,
 		Votes:              votes,
 		ProposalIssues:     proposalIssues,
@@ -262,5 +267,59 @@ func TestDoImportRoundTripPreservesProposalsSubsystem(t *testing.T) {
 	}
 	if len(gotProposalDocs) != 1 || gotProposalDocs[0].ProposalID != proposalID || gotProposalDocs[0].DocID != docID {
 		t.Errorf("expected proposal-doc link (%d,%d), got %+v", proposalID, docID, gotProposalDocs)
+	}
+}
+
+func TestDoImportRoundTripPreservesActivityLog(t *testing.T) {
+	src := newTestDB(t)
+
+	issueID := createIssue(t, src, "tracked issue", model.StatusTodo, model.PriorityMedium)
+	if err := db.RecordActivity(src, issueID, "status", "todo", "in-progress", "@senior-engineer"); err != nil {
+		t.Fatalf("RecordActivity: %v", err)
+	}
+
+	wantActivity, err := db.ListAllActivity(src)
+	if err != nil {
+		t.Fatalf("ListAllActivity(src): %v", err)
+	}
+	if len(wantActivity) < 2 {
+		t.Fatalf("expected at least 2 activity rows in source (created + status), got %d", len(wantActivity))
+	}
+
+	export := buildExport(t, src)
+
+	dst := newTestDB(t)
+	if err := db.ClearAllData(dst); err != nil {
+		t.Fatalf("ClearAllData(dst): %v", err)
+	}
+	if _, err := doImport(dst, export); err != nil {
+		t.Fatalf("doImport: %v", err)
+	}
+
+	gotActivity, err := db.ListAllActivity(dst)
+	if err != nil {
+		t.Fatalf("ListAllActivity(dst): %v", err)
+	}
+	if len(gotActivity) != len(wantActivity) {
+		t.Fatalf("expected %d activity rows after import, got %d", len(wantActivity), len(gotActivity))
+	}
+	for i := range wantActivity {
+		w, g := wantActivity[i], gotActivity[i]
+		if g.ID != w.ID {
+			t.Errorf("activity[%d] id mismatch: want %d, got %d", i, w.ID, g.ID)
+		}
+		if g.IssueID != w.IssueID || g.FieldChanged != w.FieldChanged ||
+			g.OldValue != w.OldValue || g.NewValue != w.NewValue || g.ChangedBy != w.ChangedBy {
+			t.Errorf("activity[%d] field mismatch: want %+v, got %+v", i, w, g)
+		}
+	}
+
+	rows, err := dst.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("PRAGMA foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Errorf("expected no foreign key violations after import, found at least one")
 	}
 }

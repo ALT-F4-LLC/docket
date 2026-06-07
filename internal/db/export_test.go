@@ -1002,6 +1002,10 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 	if err != nil {
 		t.Fatalf("ListAllProposalIssues: %v", err)
 	}
+	activityLog, err := ListAllActivity(db)
+	if err != nil {
+		t.Fatalf("ListAllActivity: %v", err)
+	}
 
 	// Ensure nil slices become empty for JSON consistency.
 	if issues == nil {
@@ -1021,6 +1025,9 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 	}
 	if fileMappings == nil {
 		fileMappings = []model.IssueFileMapping{}
+	}
+	if activityLog == nil {
+		activityLog = []*model.Activity{}
 	}
 	if docs == nil {
 		docs = []*model.Doc{}
@@ -1047,6 +1054,7 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 		Labels:             labels,
 		IssueLabelMappings: mappings,
 		IssueFileMappings:  fileMappings,
+		ActivityLog:        activityLog,
 		Docs:               docs,
 		DocRevisions:       docRevisions,
 		DocComments:        docComments,
@@ -1124,56 +1132,63 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 		}
 	}
 
-	// 7. Proposals.
+	// 7. Activity log.
+	for _, a := range data.ActivityLog {
+		if _, err := InsertActivityWithID(tx, a); err != nil {
+			t.Fatalf("InsertActivityWithID %d: %v", a.ID, err)
+		}
+	}
+
+	// 8. Proposals.
 	for _, p := range data.Proposals {
 		if _, err := InsertProposalWithID(tx, p); err != nil {
 			t.Fatalf("InsertProposalWithID %d: %v", p.ID, err)
 		}
 	}
 
-	// 8. Votes.
+	// 9. Votes.
 	for _, v := range data.Votes {
 		if _, err := InsertVoteWithID(tx, v); err != nil {
 			t.Fatalf("InsertVoteWithID %d: %v", v.ID, err)
 		}
 	}
 
-	// 9. Proposal-issue links.
+	// 10. Proposal-issue links.
 	for _, l := range data.ProposalIssues {
 		if _, err := InsertProposalIssueLink(tx, l.ProposalID, l.IssueID); err != nil {
 			t.Fatalf("InsertProposalIssueLink (%d,%d): %v", l.ProposalID, l.IssueID, err)
 		}
 	}
 
-	// 10. Docs.
+	// 11. Docs.
 	for _, doc := range data.Docs {
 		if _, err := InsertDocWithID(tx, doc); err != nil {
 			t.Fatalf("InsertDocWithID %d: %v", doc.ID, err)
 		}
 	}
 
-	// 11. Doc revisions.
+	// 12. Doc revisions.
 	for _, rev := range data.DocRevisions {
 		if _, err := InsertDocRevisionWithID(tx, rev); err != nil {
 			t.Fatalf("InsertDocRevisionWithID %d: %v", rev.ID, err)
 		}
 	}
 
-	// 12. Doc comments.
+	// 13. Doc comments.
 	for _, c := range data.DocComments {
 		if _, err := InsertDocCommentWithID(tx, c); err != nil {
 			t.Fatalf("InsertDocCommentWithID %d: %v", c.ID, err)
 		}
 	}
 
-	// 13. Doc-issue links.
+	// 14. Doc-issue links.
 	for _, l := range data.DocIssueLinks {
 		if _, err := InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt); err != nil {
 			t.Fatalf("InsertDocIssueLink (%d,%d): %v", l.DocID, l.IssueID, err)
 		}
 	}
 
-	// 14. Proposal-doc links.
+	// 15. Proposal-doc links.
 	for _, l := range data.ProposalDocs {
 		if _, err := InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt); err != nil {
 			t.Fatalf("InsertProposalDocLink (%d,%d): %v", l.ProposalID, l.DocID, err)
