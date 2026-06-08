@@ -141,21 +141,21 @@ type Proposal struct {
 
 // proposalJSON is the JSON wire format for Proposal.
 type proposalJSON struct {
-	ID               string    `json:"id"`
-	Description      string    `json:"description"`
-	Rationale        string    `json:"rationale"`
-	DomainTags       []string  `json:"domain_tags"`
-	FilesChanged     []string  `json:"files_changed"`
-	Criticality      string    `json:"criticality"`
-	Status           string    `json:"status"`
-	FinalOutcome     string    `json:"final_outcome"`
-	EscalationReason *string   `json:"escalation_reason"`
-	RequiredVoters   int       `json:"required_voters"`
-	Threshold        float64   `json:"threshold"`
-	WeightedScore    *float64  `json:"weighted_score"`
-	CreatedBy        string    `json:"created_by"`
-	CreatedAt        string    `json:"created_at"`
-	UpdatedAt        string    `json:"updated_at"`
+	ID               string   `json:"id"`
+	Description      string   `json:"description"`
+	Rationale        string   `json:"rationale"`
+	DomainTags       []string `json:"domain_tags"`
+	FilesChanged     []string `json:"files_changed"`
+	Criticality      string   `json:"criticality"`
+	Status           string   `json:"status"`
+	FinalOutcome     string   `json:"final_outcome"`
+	EscalationReason *string  `json:"escalation_reason"`
+	RequiredVoters   int      `json:"required_voters"`
+	Threshold        float64  `json:"threshold"`
+	WeightedScore    *float64 `json:"weighted_score"`
+	CreatedBy        string   `json:"created_by"`
+	CreatedAt        string   `json:"created_at"`
+	UpdatedAt        string   `json:"updated_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Proposal.
@@ -245,6 +245,14 @@ func (p *Proposal) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ProposalIssueLink is an export-format row from the proposal_issues join
+// table. IDs are plain ints (mirrors DocIssueLink); the table carries no
+// created_at column.
+type ProposalIssueLink struct {
+	ProposalID int `json:"proposal_id"`
+	IssueID    int `json:"issue_id"`
+}
+
 // Vote represents an individual vote on a proposal.
 type Vote struct {
 	ID              int
@@ -262,18 +270,18 @@ type Vote struct {
 
 // voteJSON is the JSON wire format for Vote.
 type voteJSON struct {
-	ID              int        `json:"id"`
-	ProposalID      string     `json:"proposal_id,omitempty"`
-	VoterName       string     `json:"voter_name"`
-	VoterRole       string     `json:"voter_role"`
-	Verdict         string     `json:"verdict"`
-	Confidence      float64    `json:"confidence"`
-	DomainRelevance float64    `json:"domain_relevance"`
-	EffectiveWeight float64    `json:"effective_weight"`
-	Findings        string     `json:"findings"`
-	FindingsJSON    *Findings  `json:"findings_json"`
-	Summary         string     `json:"summary"`
-	CreatedAt       string     `json:"created_at"`
+	ID              int       `json:"id"`
+	ProposalID      string    `json:"proposal_id,omitempty"`
+	VoterName       string    `json:"voter_name"`
+	VoterRole       string    `json:"voter_role"`
+	Verdict         string    `json:"verdict"`
+	Confidence      float64   `json:"confidence"`
+	DomainRelevance float64   `json:"domain_relevance"`
+	EffectiveWeight float64   `json:"effective_weight"`
+	Findings        string    `json:"findings"`
+	FindingsJSON    *Findings `json:"findings_json"`
+	Summary         string    `json:"summary"`
+	CreatedAt       string    `json:"created_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Vote.

@@ -11,9 +11,9 @@ import (
 type RelationType string
 
 const (
-	RelationBlocks    RelationType = "blocks"
-	RelationDependsOn RelationType = "depends_on"
-	RelationRelatesTo RelationType = "relates_to"
+	RelationBlocks     RelationType = "blocks"
+	RelationDependsOn  RelationType = "depends_on"
+	RelationRelatesTo  RelationType = "relates_to"
 	RelationDuplicates RelationType = "duplicates"
 )
 

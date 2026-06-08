@@ -12,9 +12,9 @@ import (
 
 // Sentinel errors for relation operations.
 var (
-	ErrSelfRelation    = errors.New("self-referential relation")
+	ErrSelfRelation      = errors.New("self-referential relation")
 	ErrDuplicateRelation = errors.New("duplicate relation")
-	ErrCycleDetected   = errors.New("cycle detected")
+	ErrCycleDetected     = errors.New("cycle detected")
 )
 
 // CycleError wraps ErrCycleDetected and carries the path of IDs forming the cycle.

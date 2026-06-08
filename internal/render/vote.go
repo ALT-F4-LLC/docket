@@ -156,9 +156,9 @@ func renderPlainProposalTable(rows []ProposalRow) string {
 }
 
 // RenderProposalDetail renders a full proposal detail view with votes and linked issues.
-func RenderProposalDetail(proposal *model.Proposal, votes []*model.Vote, linkedIssues []int) string {
+func RenderProposalDetail(proposal *model.Proposal, votes []*model.Vote, linkedIssues []int, linkedDocs []int) string {
 	if !ColorsEnabled() {
-		return renderPlainProposalDetail(proposal, votes, linkedIssues)
+		return renderPlainProposalDetail(proposal, votes, linkedIssues, linkedDocs)
 	}
 
 	var sections []string
@@ -179,6 +179,10 @@ func RenderProposalDetail(proposal *model.Proposal, votes []*model.Vote, linkedI
 	// Linked Issues
 	if len(linkedIssues) > 0 {
 		sections = append(sections, renderLinkedIssues(linkedIssues))
+	}
+
+	if len(linkedDocs) > 0 {
+		sections = append(sections, renderLinkedDocs(linkedDocs))
 	}
 
 	// Votes
@@ -266,6 +270,18 @@ func renderLinkedIssues(issueIDs []int) string {
 	return header + "\n" + strings.Join(lines, "\n")
 }
 
+func renderLinkedDocs(docIDs []int) string {
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	header := sectionStyle.Render("Linked Docs")
+
+	var lines []string
+	for _, id := range docIDs {
+		lines = append(lines, "  "+model.FormatDocID(id))
+	}
+
+	return header + "\n" + strings.Join(lines, "\n")
+}
+
 func renderVoteList(votes []*model.Vote) string {
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	header := sectionStyle.Render("Votes")
@@ -324,7 +340,7 @@ func renderStructuredFindings(f *model.Findings) string {
 	return "\n" + strings.Join(parts, "\n")
 }
 
-func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, linkedIssues []int) string {
+func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, linkedIssues []int, linkedDocs []int) string {
 	var b strings.Builder
 
 	// Header
@@ -372,6 +388,13 @@ func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, li
 		b.WriteString("\nLinked Issues\n")
 		for _, id := range linkedIssues {
 			fmt.Fprintf(&b, "  %s\n", model.FormatID(id))
+		}
+	}
+
+	if len(linkedDocs) > 0 {
+		b.WriteString("\nLinked Docs\n")
+		for _, id := range linkedDocs {
+			fmt.Fprintf(&b, "  %s\n", model.FormatDocID(id))
 		}
 	}
 

@@ -3,19 +3,19 @@ module github.com/ALT-F4-LLC/docket
 go 1.26.0
 
 require (
-	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260522183231-0898253a54a2
+	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260602231358-501858cf198b
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/dustin/go-humanize v1.0.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.43.0
-	modernc.org/sqlite v1.50.1
+	modernc.org/sqlite v1.52.0
 )
 
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
-	github.com/alecthomas/chroma/v2 v2.25.0 // indirect
+	github.com/alecthomas/chroma/v2 v2.26.1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
@@ -25,12 +25,12 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
-	github.com/charmbracelet/x/exp/slice v0.0.0-20260525135217-abeec2b8bf0b // indirect
+	github.com/charmbracelet/x/exp/slice v0.0.0-20260607010151-cd19a2bba55f // indirect
 	github.com/charmbracelet/x/exp/strings v0.1.0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/dlclark/regexp2/v2 v2.1.0 // indirect
+	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
@@ -38,7 +38,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
-	github.com/mattn/go-runewidth v0.0.23 // indirect
+	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect

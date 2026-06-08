@@ -86,10 +86,6 @@ var importCmd = &cobra.Command{
 					return nil
 				}
 			}
-
-			if err := db.ClearAllData(conn); err != nil {
-				return cmdErr(fmt.Errorf("clearing database: %w", err), output.ErrGeneral)
-			}
 		} else if !merge {
 			// Default mode: require empty database.
 			count, err := db.CountIssues(conn)
@@ -105,7 +101,7 @@ var importCmd = &cobra.Command{
 		}
 
 		// Perform the import within a single transaction.
-		result, err := doImport(conn, &export)
+		result, err := doImport(conn, &export, replace)
 		if err != nil {
 			return cmdErr(fmt.Errorf("importing data: %w", err), output.ErrGeneral)
 		}
@@ -151,17 +147,38 @@ func validateExportData(export *model.ExportData) []string {
 		}
 	}
 
+	for _, p := range export.Proposals {
+		if err := model.ValidateCriticality(p.Criticality); err != nil {
+			errs = append(errs, fmt.Sprintf("proposal %s: %s", model.FormatProposalID(p.ID), err))
+		}
+		if err := model.ValidateProposalStatus(p.Status); err != nil {
+			errs = append(errs, fmt.Sprintf("proposal %s: %s", model.FormatProposalID(p.ID), err))
+		}
+	}
+
+	for _, v := range export.Votes {
+		if err := model.ValidateVerdict(v.Verdict); err != nil {
+			errs = append(errs, fmt.Sprintf("vote %d: %s", v.ID, err))
+		}
+	}
+
 	return errs
 }
 
 // doImport inserts all export data into the database. In merge mode, existing
 // IDs are skipped. Returns counts of imported and skipped entities.
-func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
+func doImport(conn *sql.DB, export *model.ExportData, replace bool) (*importResult, error) {
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	if replace {
+		if err := db.ClearAllDataTx(tx); err != nil {
+			return nil, fmt.Errorf("clearing database: %w", err)
+		}
+	}
 
 	var imported, skipped int
 
@@ -206,6 +223,13 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 
 	// Now restore parent_id references for newly inserted issues.
 	for issueID, parentID := range parentIDs {
+		var parentExists bool
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)", *parentID).Scan(&parentExists); err != nil {
+			return nil, fmt.Errorf("checking parent for issue %s: %w", model.FormatID(issueID), err)
+		}
+		if !parentExists {
+			continue
+		}
 		_, err := tx.Exec(`UPDATE issues SET parent_id = ? WHERE id = ?`, *parentID, issueID)
 		if err != nil {
 			return nil, fmt.Errorf("setting parent_id for issue %s: %w", model.FormatID(issueID), err)
@@ -256,6 +280,123 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 		inserted, err := db.InsertRelationWithID(tx, &rel)
 		if err != nil {
 			return nil, fmt.Errorf("inserting relation %d: %w", rel.ID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 7. Activity log (FK: issues).
+	for _, a := range export.ActivityLog {
+		inserted, err := db.InsertActivityWithID(tx, a)
+		if err != nil {
+			return nil, fmt.Errorf("inserting activity %d: %w", a.ID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 8. Proposals (FK: none; must precede votes/proposal_issues/proposal_docs).
+	for _, p := range export.Proposals {
+		inserted, err := db.InsertProposalWithID(tx, p)
+		if err != nil {
+			return nil, fmt.Errorf("inserting proposal %s: %w", model.FormatProposalID(p.ID), err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 9. Votes (FK: proposals).
+	for _, v := range export.Votes {
+		inserted, err := db.InsertVoteWithID(tx, v)
+		if err != nil {
+			return nil, fmt.Errorf("inserting vote %d: %w", v.ID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 10. Proposal-issue links (FK: proposals, issues).
+	for _, l := range export.ProposalIssues {
+		inserted, err := db.InsertProposalIssueLink(tx, l.ProposalID, l.IssueID)
+		if err != nil {
+			return nil, fmt.Errorf("inserting proposal-issue link (proposal=%d, issue=%d): %w", l.ProposalID, l.IssueID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 11. Docs (FK: none; must precede revisions/comments/links).
+	for _, doc := range export.Docs {
+		inserted, err := db.InsertDocWithID(tx, doc)
+		if err != nil {
+			return nil, fmt.Errorf("inserting doc %s: %w", model.FormatDocID(doc.ID), err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 12. Doc revisions (FK: docs).
+	for _, rev := range export.DocRevisions {
+		inserted, err := db.InsertDocRevisionWithID(tx, rev)
+		if err != nil {
+			return nil, fmt.Errorf("inserting doc revision %d: %w", rev.ID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 13. Doc comments (FK: docs).
+	for _, c := range export.DocComments {
+		inserted, err := db.InsertDocCommentWithID(tx, c)
+		if err != nil {
+			return nil, fmt.Errorf("inserting doc comment %d: %w", c.ID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 14. Doc-issue links (FK: docs, issues).
+	for _, l := range export.DocIssueLinks {
+		inserted, err := db.InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("inserting doc-issue link (doc=%d, issue=%d): %w", l.DocID, l.IssueID, err)
+		}
+		if inserted {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+
+	// 15. Proposal-doc links (FK: proposals, docs — both inserted above).
+	for _, l := range export.ProposalDocs {
+		inserted, err := db.InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("inserting proposal-doc link (proposal=%d, doc=%d): %w", l.ProposalID, l.DocID, err)
 		}
 		if inserted {
 			imported++

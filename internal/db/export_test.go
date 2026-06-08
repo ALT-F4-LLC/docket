@@ -323,7 +323,7 @@ func TestInsertIssueWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertIssueWithID(tx,issue); err != nil {
+	if _, err := InsertIssueWithID(tx, issue); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -373,7 +373,7 @@ func TestInsertCommentWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertCommentWithID(tx,comment); err != nil {
+	if _, err := InsertCommentWithID(tx, comment); err != nil {
 		t.Fatalf("InsertCommentWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -426,7 +426,7 @@ func TestInsertRelationWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertRelationWithID(tx,rel); err != nil {
+	if _, err := InsertRelationWithID(tx, rel); err != nil {
 		t.Fatalf("InsertRelationWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -465,7 +465,7 @@ func TestInsertLabelWithID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertLabelWithID(tx,label); err != nil {
+	if _, err := InsertLabelWithID(tx, label); err != nil {
 		t.Fatalf("InsertLabelWithID: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -503,16 +503,16 @@ func TestInsertIssueLabelMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertIssueWithID(tx,&model.Issue{
+	if _, err := InsertIssueWithID(tx, &model.Issue{
 		ID: 10, Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone,
 		Kind: model.IssueKindTask, CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
-	if _, err := InsertLabelWithID(tx,&model.Label{ID: 20, Name: "test-label"}); err != nil {
+	if _, err := InsertLabelWithID(tx, &model.Label{ID: 20, Name: "test-label"}); err != nil {
 		t.Fatalf("InsertLabelWithID: %v", err)
 	}
-	if _, err := InsertIssueLabelMapping(tx,10, 20); err != nil {
+	if _, err := InsertIssueLabelMapping(tx, 10, 20); err != nil {
 		t.Fatalf("InsertIssueLabelMapping: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -539,6 +539,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 	srcDB := mustOpen(t)
 	if err := Initialize(srcDB); err != nil {
 		t.Fatalf("Initialize src: %v", err)
+	}
+	if err := Migrate(srcDB); err != nil {
+		t.Fatalf("Migrate src: %v", err)
 	}
 
 	// Create a parent issue.
@@ -611,6 +614,76 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("CreateRelation: %v", err)
 	}
 
+	// Create docs with revisions, comments, and an issue link.
+	doc1ID, err := CreateDoc(srcDB, &model.Doc{
+		Type: "tdd", Status: "draft", Title: "design doc", Body: "initial body", Author: "alice",
+	})
+	if err != nil {
+		t.Fatalf("CreateDoc 1: %v", err)
+	}
+	// Append a revision by editing the body.
+	newBody := "revised body"
+	if _, err := UpdateDoc(srcDB, doc1ID, DocUpdate{Body: &newBody, Author: "bob"}); err != nil {
+		t.Fatalf("UpdateDoc 1: %v", err)
+	}
+
+	doc2ID, err := CreateDoc(srcDB, &model.Doc{
+		Type: "adr", Status: "accepted", Title: "decision record", Body: "the decision", Author: "carol",
+	})
+	if err != nil {
+		t.Fatalf("CreateDoc 2: %v", err)
+	}
+
+	// Comments on docs.
+	for _, c := range []*model.DocComment{
+		{DocID: doc1ID, Body: "looks good", Author: "bob"},
+		{DocID: doc1ID, Body: "one nit", Author: "carol"},
+		{DocID: doc2ID, Body: "approved", Author: "alice"},
+	} {
+		if _, err := CreateDocComment(srcDB, c); err != nil {
+			t.Fatalf("CreateDocComment: %v", err)
+		}
+	}
+
+	// Link a doc to an issue.
+	if err := LinkDocIssue(srcDB, doc1ID, parentID); err != nil {
+		t.Fatalf("LinkDocIssue: %v", err)
+	}
+
+	// Create a proposal with a vote and issue/doc links.
+	proposalID, err := CreateProposal(srcDB, &model.Proposal{
+		Description:    "ship the feature",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 2,
+		Threshold:      0.67,
+		CreatedBy:      "@team-lead",
+		Rationale:      "ready",
+		DomainTags:     []string{"backend"},
+		FilesChanged:   []string{"main.go"},
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	if _, err := CastVote(srcDB, &model.Vote{
+		ProposalID:      proposalID,
+		VoterName:       "@senior-engineer",
+		VoterRole:       "senior-engineer",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Summary:         "approved",
+		FindingsJSON:    &model.Findings{Concerns: []string{"nit"}},
+	}); err != nil {
+		t.Fatalf("CastVote: %v", err)
+	}
+	if err := LinkProposalIssue(srcDB, proposalID, standaloneID); err != nil {
+		t.Fatalf("LinkProposalIssue: %v", err)
+	}
+	if err := LinkProposalDoc(srcDB, proposalID, doc2ID); err != nil {
+		t.Fatalf("LinkProposalDoc: %v", err)
+	}
+
 	// Phase 2: Export from source DB.
 	srcExport := exportDB(t, srcDB)
 
@@ -624,6 +697,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 	dstDB := mustOpen(t)
 	if err := Initialize(dstDB); err != nil {
 		t.Fatalf("Initialize dst: %v", err)
+	}
+	if err := Migrate(dstDB); err != nil {
+		t.Fatalf("Migrate dst: %v", err)
 	}
 
 	var importData model.ExportData
@@ -661,6 +737,9 @@ func TestImportToEmptyDB(t *testing.T) {
 	if err := Initialize(srcDB); err != nil {
 		t.Fatalf("Initialize src: %v", err)
 	}
+	if err := Migrate(srcDB); err != nil {
+		t.Fatalf("Migrate src: %v", err)
+	}
 
 	// Populate source.
 	if _, err := CreateIssue(srcDB, &model.Issue{
@@ -679,6 +758,9 @@ func TestImportToEmptyDB(t *testing.T) {
 	dstDB := mustOpen(t)
 	if err := Initialize(dstDB); err != nil {
 		t.Fatalf("Initialize dst: %v", err)
+	}
+	if err := Migrate(dstDB); err != nil {
+		t.Fatalf("Migrate dst: %v", err)
 	}
 
 	var importData model.ExportData
@@ -719,17 +801,17 @@ func TestImportMergeSkipsDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := InsertLabelWithID(tx,&model.Label{ID: 1, Name: "existing-label"}); err != nil {
+	if _, err := InsertLabelWithID(tx, &model.Label{ID: 1, Name: "existing-label"}); err != nil {
 		t.Fatalf("InsertLabelWithID: %v", err)
 	}
-	if _, err := InsertIssueWithID(tx,&model.Issue{
+	if _, err := InsertIssueWithID(tx, &model.Issue{
 		ID: 1, Title: "existing issue", Status: model.StatusBacklog,
 		Priority: model.PriorityNone, Kind: model.IssueKindTask,
 		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
-	if _, err := InsertIssueLabelMapping(tx,1, 1); err != nil {
+	if _, err := InsertIssueLabelMapping(tx, 1, 1); err != nil {
 		t.Fatalf("InsertIssueLabelMapping: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -888,6 +970,42 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 	if err != nil {
 		t.Fatalf("ListAllIssueFileMappings: %v", err)
 	}
+	docs, err := ListAllDocs(db)
+	if err != nil {
+		t.Fatalf("ListAllDocs: %v", err)
+	}
+	docRevisions, err := ListAllDocRevisions(db)
+	if err != nil {
+		t.Fatalf("ListAllDocRevisions: %v", err)
+	}
+	docComments, err := ListAllDocComments(db)
+	if err != nil {
+		t.Fatalf("ListAllDocComments: %v", err)
+	}
+	docIssueLinks, err := ListAllDocIssueLinks(db)
+	if err != nil {
+		t.Fatalf("ListAllDocIssueLinks: %v", err)
+	}
+	proposalDocs, err := ListAllProposalDocs(db)
+	if err != nil {
+		t.Fatalf("ListAllProposalDocs: %v", err)
+	}
+	proposals, err := ListAllProposals(db)
+	if err != nil {
+		t.Fatalf("ListAllProposals: %v", err)
+	}
+	votes, err := ListAllVotes(db)
+	if err != nil {
+		t.Fatalf("ListAllVotes: %v", err)
+	}
+	proposalIssues, err := ListAllProposalIssues(db)
+	if err != nil {
+		t.Fatalf("ListAllProposalIssues: %v", err)
+	}
+	activityLog, err := ListAllActivity(db)
+	if err != nil {
+		t.Fatalf("ListAllActivity: %v", err)
+	}
 
 	// Ensure nil slices become empty for JSON consistency.
 	if issues == nil {
@@ -908,6 +1026,24 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 	if fileMappings == nil {
 		fileMappings = []model.IssueFileMapping{}
 	}
+	if activityLog == nil {
+		activityLog = []*model.Activity{}
+	}
+	if docs == nil {
+		docs = []*model.Doc{}
+	}
+	if docRevisions == nil {
+		docRevisions = []*model.DocRevision{}
+	}
+	if docComments == nil {
+		docComments = []*model.DocComment{}
+	}
+	if proposals == nil {
+		proposals = []*model.Proposal{}
+	}
+	if votes == nil {
+		votes = []*model.Vote{}
+	}
 
 	return &model.ExportData{
 		Version:            1,
@@ -918,6 +1054,15 @@ func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 		Labels:             labels,
 		IssueLabelMappings: mappings,
 		IssueFileMappings:  fileMappings,
+		ActivityLog:        activityLog,
+		Docs:               docs,
+		DocRevisions:       docRevisions,
+		DocComments:        docComments,
+		DocIssueLinks:      docIssueLinks,
+		Proposals:          proposals,
+		Votes:              votes,
+		ProposalIssues:     proposalIssues,
+		ProposalDocs:       proposalDocs,
 	}
 }
 
@@ -933,7 +1078,7 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 
 	// 1. Labels first (no FK deps).
 	for _, label := range data.Labels {
-		if _, err := InsertLabelWithID(tx,label); err != nil {
+		if _, err := InsertLabelWithID(tx, label); err != nil {
 			t.Fatalf("InsertLabelWithID %q: %v", label.Name, err)
 		}
 	}
@@ -947,7 +1092,7 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 			parentIDs[issue.ID] = &pid
 			issue.ParentID = nil
 		}
-		if _, err := InsertIssueWithID(tx,issue); err != nil {
+		if _, err := InsertIssueWithID(tx, issue); err != nil {
 			issue.ParentID = origParentID
 			t.Fatalf("InsertIssueWithID %d: %v", issue.ID, err)
 		}
@@ -961,7 +1106,7 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 
 	// 3. Issue-label mappings.
 	for _, m := range data.IssueLabelMappings {
-		if _, err := InsertIssueLabelMapping(tx,m.IssueID, m.LabelID); err != nil {
+		if _, err := InsertIssueLabelMapping(tx, m.IssueID, m.LabelID); err != nil {
 			t.Fatalf("InsertIssueLabelMapping (%d, %d): %v", m.IssueID, m.LabelID, err)
 		}
 	}
@@ -975,15 +1120,78 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 
 	// 5. Comments.
 	for _, comment := range data.Comments {
-		if _, err := InsertCommentWithID(tx,comment); err != nil {
+		if _, err := InsertCommentWithID(tx, comment); err != nil {
 			t.Fatalf("InsertCommentWithID %d: %v", comment.ID, err)
 		}
 	}
 
 	// 6. Relations.
 	for i := range data.Relations {
-		if _, err := InsertRelationWithID(tx,&data.Relations[i]); err != nil {
+		if _, err := InsertRelationWithID(tx, &data.Relations[i]); err != nil {
 			t.Fatalf("InsertRelationWithID %d: %v", data.Relations[i].ID, err)
+		}
+	}
+
+	// 7. Activity log.
+	for _, a := range data.ActivityLog {
+		if _, err := InsertActivityWithID(tx, a); err != nil {
+			t.Fatalf("InsertActivityWithID %d: %v", a.ID, err)
+		}
+	}
+
+	// 8. Proposals.
+	for _, p := range data.Proposals {
+		if _, err := InsertProposalWithID(tx, p); err != nil {
+			t.Fatalf("InsertProposalWithID %d: %v", p.ID, err)
+		}
+	}
+
+	// 9. Votes.
+	for _, v := range data.Votes {
+		if _, err := InsertVoteWithID(tx, v); err != nil {
+			t.Fatalf("InsertVoteWithID %d: %v", v.ID, err)
+		}
+	}
+
+	// 10. Proposal-issue links.
+	for _, l := range data.ProposalIssues {
+		if _, err := InsertProposalIssueLink(tx, l.ProposalID, l.IssueID); err != nil {
+			t.Fatalf("InsertProposalIssueLink (%d,%d): %v", l.ProposalID, l.IssueID, err)
+		}
+	}
+
+	// 11. Docs.
+	for _, doc := range data.Docs {
+		if _, err := InsertDocWithID(tx, doc); err != nil {
+			t.Fatalf("InsertDocWithID %d: %v", doc.ID, err)
+		}
+	}
+
+	// 12. Doc revisions.
+	for _, rev := range data.DocRevisions {
+		if _, err := InsertDocRevisionWithID(tx, rev); err != nil {
+			t.Fatalf("InsertDocRevisionWithID %d: %v", rev.ID, err)
+		}
+	}
+
+	// 13. Doc comments.
+	for _, c := range data.DocComments {
+		if _, err := InsertDocCommentWithID(tx, c); err != nil {
+			t.Fatalf("InsertDocCommentWithID %d: %v", c.ID, err)
+		}
+	}
+
+	// 14. Doc-issue links.
+	for _, l := range data.DocIssueLinks {
+		if _, err := InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt); err != nil {
+			t.Fatalf("InsertDocIssueLink (%d,%d): %v", l.DocID, l.IssueID, err)
+		}
+	}
+
+	// 15. Proposal-doc links.
+	for _, l := range data.ProposalDocs {
+		if _, err := InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt); err != nil {
+			t.Fatalf("InsertProposalDocLink (%d,%d): %v", l.ProposalID, l.DocID, err)
 		}
 	}
 
@@ -991,4 +1199,3 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 		t.Fatalf("Commit: %v", err)
 	}
 }
-

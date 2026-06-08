@@ -337,7 +337,7 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 				WHEN 'none'     THEN 4
 				ELSE 5
 			END ASC,
-			i.created_at ASC`
+			i.created_at DESC`
 	}
 
 	// Main query.
@@ -949,9 +949,17 @@ func CountByPriority(db *sql.DB) (map[string]int, error) {
 	return countByColumn(db, "priority")
 }
 
-// ClearAllData deletes all data from all tables (issues, comments, labels,
-// issue_labels, issue_relations, activity_log) within a single transaction.
-// The schema and meta table are preserved.
+// ClearAllData deletes all data from every persistent table within a single
+// transaction. The schema and meta table are preserved.
+//
+// Tables are deleted in FK-correct order — children before parents. FK CASCADE
+// would handle dependents implicitly, but the explicit ordering keeps
+// behaviour identical to the pre-v4 function and makes the contract auditable
+// from the function body.
+//
+// Doc tables and the pre-existing proposals/votes/proposal_issues tables are
+// included; prior to v4 the latter three were silently omitted, which broke
+// `--replace` import on any DB containing proposals (TDD §5.4 S4 / R7).
 func ClearAllData(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -959,7 +967,23 @@ func ClearAllData(db *sql.DB) error {
 	}
 	defer tx.Rollback()
 
+	if err := ClearAllDataTx(tx); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func ClearAllDataTx(tx *sql.Tx) error {
 	tables := []string{
+		"doc_comments",
+		"doc_revisions",
+		"proposal_docs",
+		"doc_issue_links",
+		"docs",
+		"proposal_issues",
+		"votes",
+		"proposals",
 		"activity_log",
 		"issue_relations",
 		"issue_files",
@@ -970,11 +994,14 @@ func ClearAllData(db *sql.DB) error {
 	}
 	for _, table := range tables {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				continue
+			}
 			return fmt.Errorf("clearing %s: %w", table, err)
 		}
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 // InsertIssueWithID inserts an issue with a specific ID (not auto-increment),
