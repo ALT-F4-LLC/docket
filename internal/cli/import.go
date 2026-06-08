@@ -86,10 +86,6 @@ var importCmd = &cobra.Command{
 					return nil
 				}
 			}
-
-			if err := db.ClearAllData(conn); err != nil {
-				return cmdErr(fmt.Errorf("clearing database: %w", err), output.ErrGeneral)
-			}
 		} else if !merge {
 			// Default mode: require empty database.
 			count, err := db.CountIssues(conn)
@@ -105,7 +101,7 @@ var importCmd = &cobra.Command{
 		}
 
 		// Perform the import within a single transaction.
-		result, err := doImport(conn, &export)
+		result, err := doImport(conn, &export, replace)
 		if err != nil {
 			return cmdErr(fmt.Errorf("importing data: %w", err), output.ErrGeneral)
 		}
@@ -171,12 +167,18 @@ func validateExportData(export *model.ExportData) []string {
 
 // doImport inserts all export data into the database. In merge mode, existing
 // IDs are skipped. Returns counts of imported and skipped entities.
-func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
+func doImport(conn *sql.DB, export *model.ExportData, replace bool) (*importResult, error) {
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	if replace {
+		if err := db.ClearAllDataTx(tx); err != nil {
+			return nil, fmt.Errorf("clearing database: %w", err)
+		}
+	}
 
 	var imported, skipped int
 
@@ -221,6 +223,13 @@ func doImport(conn *sql.DB, export *model.ExportData) (*importResult, error) {
 
 	// Now restore parent_id references for newly inserted issues.
 	for issueID, parentID := range parentIDs {
+		var parentExists bool
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)", *parentID).Scan(&parentExists); err != nil {
+			return nil, fmt.Errorf("checking parent for issue %s: %w", model.FormatID(issueID), err)
+		}
+		if !parentExists {
+			continue
+		}
 		_, err := tx.Exec(`UPDATE issues SET parent_id = ? WHERE id = ?`, *parentID, issueID)
 		if err != nil {
 			return nil, fmt.Errorf("setting parent_id for issue %s: %w", model.FormatID(issueID), err)

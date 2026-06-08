@@ -967,6 +967,14 @@ func ClearAllData(db *sql.DB) error {
 	}
 	defer tx.Rollback()
 
+	if err := ClearAllDataTx(tx); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func ClearAllDataTx(tx *sql.Tx) error {
 	tables := []string{
 		"doc_comments",
 		"doc_revisions",
@@ -986,10 +994,6 @@ func ClearAllData(db *sql.DB) error {
 	}
 	for _, table := range tables {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
-			// Tolerate missing tables: ClearAllData is called from
-			// `import --replace` against arbitrary DBs that may be at an
-			// older schema version. Dropping rows from a non-existent
-			// table is a no-op by intent.
 			if strings.Contains(err.Error(), "no such table") {
 				continue
 			}
@@ -997,7 +1001,7 @@ func ClearAllData(db *sql.DB) error {
 		}
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 // InsertIssueWithID inserts an issue with a specific ID (not auto-increment),

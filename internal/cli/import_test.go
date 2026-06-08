@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/spf13/cobra"
 )
 
 func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
@@ -121,7 +126,7 @@ func TestDoImportRoundTripPreservesDocs(t *testing.T) {
 	export := buildExport(t, src)
 
 	dst := newTestDB(t)
-	if _, err := doImport(dst, export); err != nil {
+	if _, err := doImport(dst, export, false); err != nil {
 		t.Fatalf("doImport: %v", err)
 	}
 
@@ -220,7 +225,7 @@ func TestDoImportRoundTripPreservesProposalsSubsystem(t *testing.T) {
 	export := buildExport(t, src)
 
 	dst := newTestDB(t)
-	if _, err := doImport(dst, export); err != nil {
+	if _, err := doImport(dst, export, false); err != nil {
 		t.Fatalf("doImport: %v", err)
 	}
 
@@ -292,7 +297,7 @@ func TestDoImportRoundTripPreservesActivityLog(t *testing.T) {
 	if err := db.ClearAllData(dst); err != nil {
 		t.Fatalf("ClearAllData(dst): %v", err)
 	}
-	if _, err := doImport(dst, export); err != nil {
+	if _, err := doImport(dst, export, false); err != nil {
 		t.Fatalf("doImport: %v", err)
 	}
 
@@ -321,5 +326,359 @@ func TestDoImportRoundTripPreservesActivityLog(t *testing.T) {
 	defer rows.Close()
 	if rows.Next() {
 		t.Errorf("expected no foreign key violations after import, found at least one")
+	}
+}
+
+func TestDoImportReplaceRollsBackOnFailure(t *testing.T) {
+	dst := newTestDB(t)
+	seededIssueID := createIssue(t, dst, "must survive", model.StatusTodo, model.PriorityHigh)
+	if err := db.AddLabelToIssue(dst, seededIssueID, "keep-me", "", "tester"); err != nil {
+		t.Fatalf("AddLabelToIssue: %v", err)
+	}
+
+	src := newTestDB(t)
+	createIssue(t, src, "incoming", model.StatusTodo, model.PriorityMedium)
+	docID := createDoc(t, src, "incoming doc", "tdd", "draft")
+
+	export := buildExport(t, src)
+	export.DocIssueLinks = append(export.DocIssueLinks, model.DocIssueLink{
+		DocID:     docID,
+		IssueID:   999999,
+		CreatedAt: "2026-01-01T00:00:00Z",
+	})
+
+	if _, err := doImport(dst, export, true); err == nil {
+		t.Fatal("expected doImport(replace=true) to fail on dangling doc-issue link, got nil")
+	}
+
+	gotIssues, err := db.ListAllIssues(dst)
+	if err != nil {
+		t.Fatalf("ListAllIssues(dst): %v", err)
+	}
+	if len(gotIssues) != 1 || gotIssues[0].ID != seededIssueID || gotIssues[0].Title != "must survive" {
+		t.Fatalf("expected seeded issue preserved after rollback, got %+v", gotIssues)
+	}
+
+	gotLabels, err := db.ListAllLabelsRaw(dst)
+	if err != nil {
+		t.Fatalf("ListAllLabelsRaw(dst): %v", err)
+	}
+	if len(gotLabels) != 1 || gotLabels[0].Name != "keep-me" {
+		t.Fatalf("expected seeded label preserved after rollback, got %+v", gotLabels)
+	}
+}
+
+func TestDoImportReplaceClearsThenImports(t *testing.T) {
+	dst := newTestDB(t)
+	createIssue(t, dst, "old data", model.StatusTodo, model.PriorityHigh)
+
+	src := newTestDB(t)
+	createIssue(t, src, "new data", model.StatusTodo, model.PriorityMedium)
+
+	export := buildExport(t, src)
+
+	if _, err := doImport(dst, export, true); err != nil {
+		t.Fatalf("doImport(replace=true): %v", err)
+	}
+
+	gotIssues, err := db.ListAllIssues(dst)
+	if err != nil {
+		t.Fatalf("ListAllIssues(dst): %v", err)
+	}
+	if len(gotIssues) != 1 || gotIssues[0].Title != "new data" {
+		t.Fatalf("expected only imported issue after successful replace, got %+v", gotIssues)
+	}
+}
+
+func createChildIssue(t *testing.T, conn *sql.DB, title string, status model.Status, parentID int) int {
+	t.Helper()
+	id, err := db.CreateIssue(conn, &model.Issue{
+		Title:    title,
+		Status:   status,
+		Priority: model.PriorityMedium,
+		Kind:     model.IssueKindFeature,
+		ParentID: &parentID,
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("CreateIssue(child %q): %v", title, err)
+	}
+	return id
+}
+
+func runFilteredExport(t *testing.T, conn *sql.DB, statuses []string) *model.ExportData {
+	t.Helper()
+
+	cmd := &cobra.Command{}
+	cmd.Flags().StringP("format", "o", "json", "")
+	cmd.Flags().StringP("file", "f", "", "")
+	cmd.Flags().StringSliceP("status", "s", nil, "")
+	cmd.Flags().StringSliceP("label", "l", nil, "")
+	cmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
+
+	outPath := filepath.Join(t.TempDir(), "export.json")
+	if err := cmd.Flags().Set("file", outPath); err != nil {
+		t.Fatalf("set file flag: %v", err)
+	}
+	for _, s := range statuses {
+		if err := cmd.Flags().Set("status", s); err != nil {
+			t.Fatalf("set status flag: %v", err)
+		}
+	}
+
+	if err := exportCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("exportCmd.RunE: %v", err)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", outPath, err)
+	}
+	var export model.ExportData
+	if err := json.Unmarshal(raw, &export); err != nil {
+		t.Fatalf("Unmarshal export: %v", err)
+	}
+	return &export
+}
+
+func TestFilteredExportRoundTripDropsUnlinkedAndNullsParent(t *testing.T) {
+	src := newTestDB(t)
+
+	parentID := createIssue(t, src, "in-progress parent", model.StatusInProgress, model.PriorityMedium)
+	childID := createChildIssue(t, src, "done child", model.StatusDone, parentID)
+
+	linkedDocID := createDoc(t, src, "linked design doc", "tdd", "draft")
+	linkDocIssue(t, src, linkedDocID, childID)
+	if _, err := db.CreateDocComment(src, &model.DocComment{DocID: linkedDocID, Body: "on linked doc", Author: "alice"}); err != nil {
+		t.Fatalf("CreateDocComment(linked): %v", err)
+	}
+
+	standaloneDocID := createDoc(t, src, "standalone adr", "adr", "accepted")
+	if _, err := db.CreateDocComment(src, &model.DocComment{DocID: standaloneDocID, Body: "on standalone doc", Author: "bob"}); err != nil {
+		t.Fatalf("CreateDocComment(standalone): %v", err)
+	}
+
+	linkedProposalID, err := db.CreateProposal(src, &model.Proposal{
+		Description: "linked proposal", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.5, CreatedBy: "@team-lead",
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal(linked): %v", err)
+	}
+	if _, err := db.CastVote(src, &model.Vote{
+		ProposalID: linkedProposalID, VoterName: "@senior-engineer", VoterRole: "senior-engineer",
+		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8, Summary: "ok",
+	}); err != nil {
+		t.Fatalf("CastVote(linked): %v", err)
+	}
+	if err := db.LinkProposalIssue(src, linkedProposalID, childID); err != nil {
+		t.Fatalf("LinkProposalIssue(linked): %v", err)
+	}
+	if err := db.LinkProposalDoc(src, linkedProposalID, linkedDocID); err != nil {
+		t.Fatalf("LinkProposalDoc(linked): %v", err)
+	}
+
+	standaloneProposalID, err := db.CreateProposal(src, &model.Proposal{
+		Description: "standalone proposal", Criticality: model.CriticalityLow,
+		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.5, CreatedBy: "@team-lead",
+	})
+	if err != nil {
+		t.Fatalf("CreateProposal(standalone): %v", err)
+	}
+	if _, err := db.CastVote(src, &model.Vote{
+		ProposalID: standaloneProposalID, VoterName: "@sdet", VoterRole: "sdet",
+		Verdict: model.VerdictApprove, Confidence: 0.5, DomainRelevance: 0.5, Summary: "ok",
+	}); err != nil {
+		t.Fatalf("CastVote(standalone): %v", err)
+	}
+
+	export := runFilteredExport(t, src, []string{string(model.StatusDone)})
+
+	if len(export.Issues) != 1 || export.Issues[0].ID != childID {
+		t.Fatalf("expected only the done child in filtered export, got %+v", export.Issues)
+	}
+	if export.Issues[0].ParentID != nil {
+		t.Errorf("expected filtered-out parent to be nulled, got parent_id=%v", *export.Issues[0].ParentID)
+	}
+	if len(export.Docs) != 1 || export.Docs[0].ID != linkedDocID {
+		t.Errorf("expected only the linked doc in filtered export, got %+v", export.Docs)
+	}
+	for _, c := range export.DocComments {
+		if c.DocID == standaloneDocID {
+			t.Errorf("standalone doc comment leaked into filtered export: %+v", c)
+		}
+	}
+	if len(export.Proposals) != 1 || export.Proposals[0].ID != linkedProposalID {
+		t.Errorf("expected only the linked proposal in filtered export, got %+v", export.Proposals)
+	}
+	for _, v := range export.Votes {
+		if v.ProposalID == standaloneProposalID {
+			t.Errorf("standalone proposal's vote leaked into filtered export: %+v", v)
+		}
+	}
+	if len(export.ProposalDocs) != 1 || export.ProposalDocs[0].ProposalID != linkedProposalID || export.ProposalDocs[0].DocID != linkedDocID {
+		t.Errorf("expected single surviving proposal-doc link, got %+v", export.ProposalDocs)
+	}
+
+	dst := newTestDB(t)
+	if err := db.ClearAllData(dst); err != nil {
+		t.Fatalf("ClearAllData(dst): %v", err)
+	}
+	if _, err := doImport(dst, export, false); err != nil {
+		t.Fatalf("doImport of filtered export: %v", err)
+	}
+
+	gotIssues, err := db.ListAllIssues(dst)
+	if err != nil {
+		t.Fatalf("ListAllIssues(dst): %v", err)
+	}
+	if len(gotIssues) != 1 || gotIssues[0].ID != childID {
+		t.Fatalf("expected single child issue imported, got %+v", gotIssues)
+	}
+	if gotIssues[0].ParentID != nil {
+		t.Errorf("expected imported child to have NULL parent_id, got %v", *gotIssues[0].ParentID)
+	}
+
+	gotDocs, err := db.ListAllDocs(dst)
+	if err != nil {
+		t.Fatalf("ListAllDocs(dst): %v", err)
+	}
+	if len(gotDocs) != 1 || gotDocs[0].ID != linkedDocID {
+		t.Errorf("expected only linked doc imported, got %+v", gotDocs)
+	}
+
+	gotProposals, err := db.ListAllProposals(dst)
+	if err != nil {
+		t.Fatalf("ListAllProposals(dst): %v", err)
+	}
+	if len(gotProposals) != 1 || gotProposals[0].ID != linkedProposalID {
+		t.Errorf("expected only linked proposal imported, got %+v", gotProposals)
+	}
+
+	rows, err := dst.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("PRAGMA foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Errorf("expected no foreign key violations after import, found at least one")
+	}
+}
+
+func TestFilteredExportReplaceImportRoundTripsAndDropsStandalone(t *testing.T) {
+	src := newTestDB(t)
+
+	parentID := createIssue(t, src, "in-progress parent", model.StatusInProgress, model.PriorityMedium)
+	childID := createChildIssue(t, src, "done child", model.StatusDone, parentID)
+
+	linkedDocID := createDoc(t, src, "linked design doc", "tdd", "draft")
+	linkDocIssue(t, src, linkedDocID, childID)
+	standaloneDocID := createDoc(t, src, "standalone adr", "adr", "accepted")
+
+	export := runFilteredExport(t, src, []string{string(model.StatusDone)})
+
+	dst := newTestDB(t)
+	staleID := createIssue(t, dst, "stale data to be replaced", model.StatusTodo, model.PriorityHigh)
+
+	if _, err := doImport(dst, export, true); err != nil {
+		t.Fatalf("doImport(filtered, replace=true): %v", err)
+	}
+
+	gotIssues, err := db.ListAllIssues(dst)
+	if err != nil {
+		t.Fatalf("ListAllIssues(dst): %v", err)
+	}
+	if len(gotIssues) != 1 || gotIssues[0].ID != childID {
+		t.Fatalf("expected only the filtered child after replace, got %+v", gotIssues)
+	}
+	if gotIssues[0].ID == staleID {
+		t.Fatalf("stale issue survived --replace import")
+	}
+	if gotIssues[0].ParentID != nil {
+		t.Errorf("expected dangling parent nulled after filtered replace import, got parent_id=%v", *gotIssues[0].ParentID)
+	}
+
+	gotDocs, err := db.ListAllDocs(dst)
+	if err != nil {
+		t.Fatalf("ListAllDocs(dst): %v", err)
+	}
+	if len(gotDocs) != 1 || gotDocs[0].ID != linkedDocID {
+		t.Errorf("expected only linked doc after filtered replace import, got %+v", gotDocs)
+	}
+	for _, d := range gotDocs {
+		if d.ID == standaloneDocID {
+			t.Errorf("standalone doc leaked into filtered replace import: %+v", d)
+		}
+	}
+
+	rows, err := dst.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("PRAGMA foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Errorf("expected no foreign key violations after filtered replace import, found at least one")
+	}
+}
+
+func TestFilteredExportReplaceImportRollsBackOnFailure(t *testing.T) {
+	src := newTestDB(t)
+	parentID := createIssue(t, src, "in-progress parent", model.StatusInProgress, model.PriorityMedium)
+	childID := createChildIssue(t, src, "done child", model.StatusDone, parentID)
+	docID := createDoc(t, src, "linked doc", "tdd", "draft")
+	linkDocIssue(t, src, docID, childID)
+
+	export := runFilteredExport(t, src, []string{string(model.StatusDone)})
+	export.DocIssueLinks = append(export.DocIssueLinks, model.DocIssueLink{
+		DocID:     docID,
+		IssueID:   999999,
+		CreatedAt: "2026-01-01T00:00:00Z",
+	})
+
+	dst := newTestDB(t)
+	survivorID := createIssue(t, dst, "must survive failed replace", model.StatusTodo, model.PriorityHigh)
+	if err := db.AddLabelToIssue(dst, survivorID, "keep-me", "", "tester"); err != nil {
+		t.Fatalf("AddLabelToIssue: %v", err)
+	}
+
+	if _, err := doImport(dst, export, true); err == nil {
+		t.Fatal("expected doImport(filtered, replace=true) to fail on dangling doc-issue link, got nil")
+	}
+
+	gotIssues, err := db.ListAllIssues(dst)
+	if err != nil {
+		t.Fatalf("ListAllIssues(dst): %v", err)
+	}
+	if len(gotIssues) != 1 || gotIssues[0].ID != survivorID || gotIssues[0].Title != "must survive failed replace" {
+		t.Fatalf("expected pre-existing data preserved after failed filtered replace, got %+v", gotIssues)
+	}
+
+	gotLabels, err := db.ListAllLabelsRaw(dst)
+	if err != nil {
+		t.Fatalf("ListAllLabelsRaw(dst): %v", err)
+	}
+	if len(gotLabels) != 1 || gotLabels[0].Name != "keep-me" {
+		t.Fatalf("expected pre-existing label preserved after failed filtered replace, got %+v", gotLabels)
+	}
+}
+
+func TestUnfilteredExportIncludesStandaloneDocsAndProposals(t *testing.T) {
+	src := newTestDB(t)
+
+	createIssue(t, src, "some issue", model.StatusTodo, model.PriorityMedium)
+	createDoc(t, src, "standalone doc", "adr", "accepted")
+	if _, err := db.CreateProposal(src, &model.Proposal{
+		Description: "standalone proposal", Criticality: model.CriticalityLow,
+		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.5, CreatedBy: "@team-lead",
+	}); err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	export := runFilteredExport(t, src, nil)
+
+	if len(export.Docs) != 1 {
+		t.Errorf("unfiltered export should include standalone doc, got %d docs", len(export.Docs))
+	}
+	if len(export.Proposals) != 1 {
+		t.Errorf("unfiltered export should include standalone proposal, got %d proposals", len(export.Proposals))
 	}
 }

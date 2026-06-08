@@ -191,6 +191,62 @@ var exportCmd = &cobra.Command{
 			}
 			proposalIssues = filteredProposalIssues
 
+			survivingDocIDs := make(map[int]bool, len(docIssueLinks))
+			for _, l := range docIssueLinks {
+				survivingDocIDs[l.DocID] = true
+			}
+			filteredDocs := make([]*model.Doc, 0, len(docs))
+			for _, d := range docs {
+				if survivingDocIDs[d.ID] {
+					filteredDocs = append(filteredDocs, d)
+				}
+			}
+			docs = filteredDocs
+
+			filteredDocRevisions := make([]*model.DocRevision, 0, len(docRevisions))
+			for _, r := range docRevisions {
+				if survivingDocIDs[r.DocID] {
+					filteredDocRevisions = append(filteredDocRevisions, r)
+				}
+			}
+			docRevisions = filteredDocRevisions
+
+			filteredDocComments := make([]*model.DocComment, 0, len(docComments))
+			for _, c := range docComments {
+				if survivingDocIDs[c.DocID] {
+					filteredDocComments = append(filteredDocComments, c)
+				}
+			}
+			docComments = filteredDocComments
+
+			survivingProposalIDs := make(map[int]bool, len(proposalIssues))
+			for _, l := range proposalIssues {
+				survivingProposalIDs[l.ProposalID] = true
+			}
+			filteredProposals := make([]*model.Proposal, 0, len(proposals))
+			for _, p := range proposals {
+				if survivingProposalIDs[p.ID] {
+					filteredProposals = append(filteredProposals, p)
+				}
+			}
+			proposals = filteredProposals
+
+			filteredVotes := make([]*model.Vote, 0, len(votes))
+			for _, v := range votes {
+				if survivingProposalIDs[v.ProposalID] {
+					filteredVotes = append(filteredVotes, v)
+				}
+			}
+			votes = filteredVotes
+
+			filteredProposalDocs := make([]model.ProposalDocLink, 0, len(proposalDocs))
+			for _, l := range proposalDocs {
+				if survivingProposalIDs[l.ProposalID] && survivingDocIDs[l.DocID] {
+					filteredProposalDocs = append(filteredProposalDocs, l)
+				}
+			}
+			proposalDocs = filteredProposalDocs
+
 			// Filter labels to only those referenced by remaining mappings.
 			usedLabelIDs := make(map[int]bool)
 			for _, m := range mappings {
@@ -339,6 +395,17 @@ func filterIssues(issues []*model.Issue, statuses, labels []string) []*model.Iss
 		}
 		filtered = append(filtered, issue)
 	}
+
+	survivingIDs := make(map[int]bool, len(filtered))
+	for _, issue := range filtered {
+		survivingIDs[issue.ID] = true
+	}
+	for _, issue := range filtered {
+		if issue.ParentID != nil && !survivingIDs[*issue.ParentID] {
+			issue.ParentID = nil
+		}
+	}
+
 	return filtered
 }
 
@@ -374,14 +441,14 @@ func renderExportCSV(issues []*model.Issue) (string, error) {
 		row := []string{
 			model.FormatID(issue.ID),
 			parentID,
-			issue.Title,
-			issue.Description,
+			csvSafe(issue.Title),
+			csvSafe(issue.Description),
 			string(issue.Status),
 			string(issue.Priority),
 			string(issue.Kind),
-			issue.Assignee,
-			labelsStr,
-			filesStr,
+			csvSafe(issue.Assignee),
+			csvSafe(labelsStr),
+			csvSafe(filesStr),
 			issue.CreatedAt.UTC().Format(time.RFC3339),
 			issue.UpdatedAt.UTC().Format(time.RFC3339),
 		}
@@ -396,6 +463,18 @@ func renderExportCSV(issues []*model.Issue) (string, error) {
 	}
 
 	return buf.String(), nil
+}
+
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	default:
+		return s
+	}
 }
 
 // escapeMarkdown replaces characters that have special meaning in Markdown so
