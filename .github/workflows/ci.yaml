@@ -33,7 +33,7 @@ jobs:
 
       - run: vorpal build 'docket-shell'
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: vorpal-lock-${{ runner.arch }}-${{ runner.os }}
           path: Vorpal.lock
@@ -77,7 +77,7 @@ jobs:
           tar -czf "$ARCHIVE_NAME" -C "$(dirname ${{ env.ARTIFACT_PATH }})" "$(basename ${{ env.ARTIFACT_PATH }})"
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: docket-dist-${{ env.ARCH }}-${{ env.OS }}
           path: ${{ env.ARCHIVE_NAME }}
@@ -95,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           fail-on-cache-miss: true
           merge-multiple: true
