@@ -76,7 +76,7 @@ SQLite (modernc.org/sqlite) -- .docket/issues.db
 
 Built on **spf13/cobra**. The root command (`docket`) defines:
 
-- Global flags: `--json` (structured output), `--quiet` (suppress non-essential output)
+- Global flags: `--json` (structured output), `--quiet` (suppress non-essential output). Interactive commands can reject unsupported flags at runtime; `docket tui` rejects `--json`.
 - `PersistentPreRunE`: Resolves config, opens SQLite DB, runs migrations. Commands annotated with `skipDB` bypass DB initialization (e.g., `init`).
 - `PersistentPostRunE`: Closes the DB connection.
 - Version info injected via ldflags at build time (`version`, `commit`, `buildDate`).
@@ -87,6 +87,7 @@ Built on **spf13/cobra**. The root command (`docket`) defines:
 |---------|-------------|-------------|
 | `init` | -- | Create `.docket/` directory and initialize schema |
 | `board` | -- | Kanban board view (columns by status) |
+| `tui` | -- | Read-only interactive terminal UI for browsing issues |
 | `plan` | -- | DAG-based execution plan with phased grouping |
 | `next` | -- | Work-ready issues (unblocked leaf tasks) |
 | `stats` | -- | Summary statistics (counts by status/priority/label) |

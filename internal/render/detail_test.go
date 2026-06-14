@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"os"
 )
 
 func issueWithDocs(docs []model.DocRef) *model.Issue {
@@ -66,7 +67,23 @@ func TestRenderDetail_PlainOmitsLinkedDocsWhenEmpty(t *testing.T) {
 	}
 }
 
+func unsetNoColor(t *testing.T) {
+	t.Helper()
+	old, ok := os.LookupEnv("NO_COLOR")
+	if err := os.Unsetenv("NO_COLOR"); err != nil {
+		t.Fatalf("Unsetenv(NO_COLOR): %v", err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv("NO_COLOR", old)
+		} else {
+			_ = os.Unsetenv("NO_COLOR")
+		}
+	})
+}
+
 func TestRenderDetail_StyledLinkedDocsUsesArrowGlyph(t *testing.T) {
+	unsetNoColor(t)
 	t.Setenv("TERM", "xterm-256color")
 	issue := issueWithDocs([]model.DocRef{
 		{ID: 3, Type: "tdd", Status: "approved", Title: "Docket Doc CLI"},

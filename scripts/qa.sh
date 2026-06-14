@@ -104,6 +104,7 @@ SECTIONS=(
   ZA:test_za_stats
   ZB:test_zb_board
   ZC:test_zc_export_import
+  ZD:test_zd_ui
 )
 
 REACHED_TARGET=false
