@@ -19,7 +19,7 @@ jobs:
           - ubuntu-latest
           - ubuntu-latest-arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ALT-F4-LLC/setup-vorpal-action@main
         with:
@@ -52,7 +52,7 @@ jobs:
           - ubuntu-latest
           - ubuntu-latest-arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ALT-F4-LLC/setup-vorpal-action@main
         with:
@@ -93,7 +93,7 @@ jobs:
       packages: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:
