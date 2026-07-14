@@ -25,6 +25,7 @@ jobs:
         with:
           registry-backend: s3
           registry-backend-s3-bucket: altf4llc-vorpal-registry
+          version: 0.4.0
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
@@ -57,6 +58,7 @@ jobs:
         with:
           registry-backend: s3
           registry-backend-s3-bucket: altf4llc-vorpal-registry
+          version: 0.4.0
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
