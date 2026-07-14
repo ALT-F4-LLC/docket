@@ -117,6 +117,10 @@ Run `docket next --json` to find work. Move issues to `in-progress` before start
 
 Any agent that can run shell commands works with Docket. Point it at `docket next --json` to discover work items, and use `docket issue show <id> --json` to get full context before starting a task. The consistent JSON envelope (`ok`, `data`, `error`, `code`) makes parsing straightforward in any language.
 
+### Drop-in Skill
+
+For a more thorough reference, drop [`skills/docket/SKILL.md`](skills/docket/SKILL.md) into your agent's skills directory. It teaches the full Docket CLI workflow and command/flag reference in one file, so the agent doesn't need to re-derive usage from `--help` output.
+
 <details>
 <summary>Verbose JSON examples</summary>
 
