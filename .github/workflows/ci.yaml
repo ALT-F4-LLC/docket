@@ -21,11 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: ALT-F4-LLC/setup-vorpal-action@main
+      - uses: ALT-F4-LLC/setup-vorpal-action@0.2.0
         with:
           registry-backend: s3
           registry-backend-s3-bucket: altf4llc-vorpal-registry
-          version: 0.2.2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
@@ -54,11 +53,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: ALT-F4-LLC/setup-vorpal-action@main
+      - uses: ALT-F4-LLC/setup-vorpal-action@0.2.0
         with:
           registry-backend: s3
           registry-backend-s3-bucket: altf4llc-vorpal-registry
-          version: 0.2.2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
