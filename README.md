@@ -306,7 +306,7 @@ docket issue list --json -s todo -s in-progress -p high
 | Command | Description |
 |---------|-------------|
 | `docket next` | Show work-ready issues (unblocked, sorted by priority) |
-| `docket plan` | Compute a phased execution plan from the dependency graph |
+| `docket plan` | Compute a phased execution plan from the dependency graph (filterable by `--status`/`-s`, `--label`/`-l`, `--priority`/`-p`, `--type`/`-T`, `--assignee`/`-a`) |
 | `docket board` | Kanban board view in the terminal |
 
 ### Top-Level Commands

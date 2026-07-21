@@ -257,6 +257,7 @@ phases (topological sort; a cycle returns `CONFLICT`):
 docket plan --json
 docket plan --json --root DKT-1                      # scope to a parent issue's subtree
 docket plan --json -s backlog -s todo -l must-have    # filter by status/label
+docket plan --json -p high -p critical -T bug -a alice # filter by priority/type/assignee
 ```
 
 `docket next` finds work-ready issues — no incomplete blockers, in one of
@@ -498,8 +499,18 @@ Watch-eligible.
 | `--root` | — | string | `""` | scope to a parent issue subtree |
 | `--status` | `-s` | stringSlice | `nil` | repeatable |
 | `--label` | `-l` | stringSlice | `nil` | repeatable |
+| `--priority` | `-p` | stringSlice | `nil` | repeatable |
+| `--type` | `-T` | stringSlice | `nil` | repeatable |
+| `--assignee` | `-a` | string | `""` | |
 
-Watch-eligible. Cycle in the dependency graph → `CONFLICT`.
+Watch-eligible. Cycle in the dependency graph → `CONFLICT`. `--json` output
+additionally includes per-issue `blocked_by` (array of formatted blocker IDs,
+`[]` if none), per-phase `level` (1-based topological-level index —
+sub-phases produced by splitting one topo-level across file collisions share
+the same `level`), and top-level `total_levels` (count of distinct levels).
+Human/plain rendering distinguishes a same-level file-collision split
+("Phase N (same dependency level as Phase N-1, split by file collision):")
+from a genuine new dependency level ("Phase N (parallel, after Phase N-1):").
 
 ### `docket next` — `next.go`
 

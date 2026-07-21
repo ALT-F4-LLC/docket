@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 
@@ -25,8 +27,79 @@ import (
 
 // planPhaseJSON is the JSON wire format for a single execution phase.
 type planPhaseJSON struct {
-	Phase  int            `json:"phase"`
-	Issues []*model.Issue `json:"issues"`
+	Phase  int         `json:"phase"`
+	Level  int         `json:"level"`
+	Issues []planIssue `json:"issues"`
+}
+
+// planIssue pairs an issue with its blocker IDs for plan JSON output.
+type planIssue struct {
+	Issue     *model.Issue
+	BlockedBy []string
+}
+
+// planIssueJSON is the explicit JSON wire format for planIssue, avoiding the
+// fragile marshal-unmarshal-remarshal pattern (mirrors showResultJSON).
+type planIssueJSON struct {
+	ID          string         `json:"id"`
+	ParentID    *string        `json:"parent_id,omitempty"`
+	Title       string         `json:"title"`
+	Description string         `json:"description"`
+	Status      string         `json:"status"`
+	Priority    string         `json:"priority"`
+	Kind        string         `json:"kind"`
+	Assignee    string         `json:"assignee"`
+	Labels      []string       `json:"labels"`
+	Files       []string       `json:"files"`
+	Docs        []model.DocRef `json:"docs"`
+	CreatedAt   string         `json:"created_at"`
+	UpdatedAt   string         `json:"updated_at"`
+	BlockedBy   []string       `json:"blocked_by"`
+}
+
+// MarshalJSON implements custom JSON serialization for planIssue.
+func (p planIssue) MarshalJSON() ([]byte, error) {
+	i := p.Issue
+
+	labels := i.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	files := i.Files
+	if files == nil {
+		files = []string{}
+	}
+	docs := i.Docs
+	if docs == nil {
+		docs = []model.DocRef{}
+	}
+	blockedBy := p.BlockedBy
+	if blockedBy == nil {
+		blockedBy = []string{}
+	}
+
+	j := planIssueJSON{
+		ID:          model.FormatID(i.ID),
+		Title:       i.Title,
+		Description: i.Description,
+		Status:      string(i.Status),
+		Priority:    string(i.Priority),
+		Kind:        string(i.Kind),
+		Assignee:    i.Assignee,
+		Labels:      labels,
+		Files:       files,
+		Docs:        docs,
+		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
+		BlockedBy:   blockedBy,
+	}
+
+	if i.ParentID != nil {
+		pid := model.FormatID(*i.ParentID)
+		j.ParentID = &pid
+	}
+
+	return json.Marshal(j)
 }
 
 // planResult is the JSON wire format for the plan command output.
@@ -34,6 +107,7 @@ type planResult struct {
 	Phases         []planPhaseJSON `json:"phases"`
 	TotalIssues    int             `json:"total_issues"`
 	TotalPhases    int             `json:"total_phases"`
+	TotalLevels    int             `json:"total_levels"`
 	MaxParallelism int             `json:"max_parallelism"`
 }
 
@@ -68,11 +142,24 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	labels, _ := cmd.Flags().GetStringSlice("label")
+	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	types, _ := cmd.Flags().GetStringSlice("type")
+	assignee, _ := cmd.Flags().GetString("assignee")
 	rootFlag, _ := cmd.Flags().GetString("root")
 
 	// Validate status filter values.
 	for _, s := range statuses {
 		if err := model.ValidateStatus(model.Status(s)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+	for _, p := range priorities {
+		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+	for _, t := range types {
+		if err := model.ValidateIssueKind(model.IssueKind(t)); err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
 	}
@@ -101,8 +188,11 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	// Build plan filters.
 	filters := planner.PlanFilters{
-		Statuses: statuses,
-		Labels:   labels,
+		Statuses:   statuses,
+		Labels:     labels,
+		Priorities: priorities,
+		Types:      types,
+		Assignee:   assignee,
 	}
 
 	// Parse --root flag.
@@ -127,9 +217,17 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// Build JSON result.
 	phases := make([]planPhaseJSON, len(plan.Phases))
 	for i, phase := range plan.Phases {
+		planIssues := make([]planIssue, len(phase.Issues))
+		for j, issue := range phase.Issues {
+			planIssues[j] = planIssue{
+				Issue:     issue,
+				BlockedBy: collectDeps(issue.ID, dag),
+			}
+		}
 		phases[i] = planPhaseJSON{
 			Phase:  phase.Number,
-			Issues: phase.Issues,
+			Level:  phase.Level,
+			Issues: planIssues,
 		}
 	}
 
@@ -137,6 +235,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 		Phases:         phases,
 		TotalIssues:    plan.TotalIssues,
 		TotalPhases:    plan.TotalPhases,
+		TotalLevels:    plan.TotalLevels,
 		MaxParallelism: plan.MaxParallelism,
 	}
 
@@ -178,9 +277,12 @@ func renderPlanHuman(plan *planner.Plan, dag *planner.DAG) string {
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
-		if phase.Number == 1 {
+		switch {
+		case phase.Number == 1:
 			b.WriteString(phaseStyle.Render(fmt.Sprintf("Phase %d (start):", phase.Number)))
-		} else {
+		case phase.Level == plan.Phases[i-1].Level:
+			b.WriteString(phaseStyle.Render(fmt.Sprintf("Phase %d (same dependency level as Phase %d, split by file collision):", phase.Number, phase.Number-1)))
+		default:
 			b.WriteString(phaseStyle.Render(fmt.Sprintf("Phase %d (parallel, after Phase %d):", phase.Number, phase.Number-1)))
 		}
 		b.WriteString("\n")
@@ -228,11 +330,14 @@ func renderPlanPlain(plan *planner.Plan, dag *planner.DAG) string {
 
 	b.WriteString("Execution Plan:\n")
 
-	for _, phase := range plan.Phases {
+	for i, phase := range plan.Phases {
 		b.WriteString("\n")
-		if phase.Number == 1 {
+		switch {
+		case phase.Number == 1:
 			fmt.Fprintf(&b, "Phase %d (start):\n", phase.Number)
-		} else {
+		case phase.Level == plan.Phases[i-1].Level:
+			fmt.Fprintf(&b, "Phase %d (same dependency level as Phase %d, split by file collision):\n", phase.Number, phase.Number-1)
+		default:
 			fmt.Fprintf(&b, "Phase %d (parallel, after Phase %d):\n", phase.Number, phase.Number-1)
 		}
 
@@ -295,5 +400,8 @@ func init() {
 	planCmd.Flags().String("root", "", "Scope to a parent issue and its descendants")
 	planCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (repeatable; default: backlog, todo, in-progress)")
 	planCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
+	planCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
+	planCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")
+	planCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	rootCmd.AddCommand(planCmd)
 }
