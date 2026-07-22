@@ -10,6 +10,12 @@ import (
 // Phase is a group of issues that can be worked in parallel.
 type Phase struct {
 	Number int
+	// Level is the 1-based index of the originating topological level
+	// (counted only over non-empty levels that survive filtering).
+	// Sub-phases produced by splitByFileCollision from the same topo-level
+	// share the same Level, distinguishing a same-level file-collision
+	// split from a genuine dependency-driven phase transition.
+	Level  int
 	Issues []*model.Issue
 }
 
@@ -18,20 +24,25 @@ type Plan struct {
 	Phases         []Phase
 	TotalIssues    int
 	TotalPhases    int
+	TotalLevels    int
 	MaxParallelism int
 }
 
 // PlanFilters controls which issues are included in the generated plan.
 type PlanFilters struct {
-	Statuses []string
-	Labels   []string
-	RootID   *int
+	Statuses   []string
+	Labels     []string
+	Priorities []string
+	Types      []string
+	Assignee   string
+	RootID     *int
 }
 
 // GeneratePlan builds an execution plan from the DAG. It uses topological
 // level grouping to create phases: phase 1 contains issues with no blockers,
 // phase N contains issues whose blockers are all in earlier phases. Issues
-// already done are skipped, and optional status/label/root filters are applied.
+// already done are skipped, and optional status/label/priority/type/assignee/root
+// filters are applied.
 func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 	// When RootID is set, scope the DAG to the root and its descendants.
 	if filters.RootID != nil {
@@ -41,6 +52,8 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 	// Build filter sets for O(1) lookup.
 	statusSet := filter.ToStringSet(filters.Statuses)
 	labelSet := filter.ToStringSet(filters.Labels)
+	prioritySet := filter.ToStringSet(filters.Priorities)
+	typeSet := filter.ToStringSet(filters.Types)
 
 	levels, err := TopoSort(dag)
 	if err != nil {
@@ -49,6 +62,7 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 
 	plan := &Plan{}
 
+	levelNumber := 0
 	for _, level := range levels {
 		var phaseIssues []*model.Issue
 		for _, id := range level {
@@ -75,6 +89,25 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 				continue
 			}
 
+			// Apply priority filter.
+			if len(prioritySet) > 0 {
+				if _, ok := prioritySet[string(issue.Priority)]; !ok {
+					continue
+				}
+			}
+
+			// Apply type filter.
+			if len(typeSet) > 0 {
+				if _, ok := typeSet[string(issue.Kind)]; !ok {
+					continue
+				}
+			}
+
+			// Apply assignee filter.
+			if filters.Assignee != "" && issue.Assignee != filters.Assignee {
+				continue
+			}
+
 			phaseIssues = append(phaseIssues, issue)
 		}
 
@@ -82,15 +115,18 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 			continue
 		}
 
+		levelNumber++
 		sortIssues(phaseIssues)
 
 		// Split the phase by file collisions. Issues that touch the same
 		// file(s) are placed in separate sub-phases so no two concurrent
-		// issues modify the same file.
+		// issues modify the same file. Sub-phases share the same Level
+		// since they originate from a single topological level.
 		subPhases := splitByFileCollision(phaseIssues)
 		for _, sp := range subPhases {
 			plan.Phases = append(plan.Phases, Phase{
 				Number: len(plan.Phases) + 1,
+				Level:  levelNumber,
 				Issues: sp,
 			})
 		}
@@ -104,6 +140,7 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 		}
 	}
 	plan.TotalPhases = len(plan.Phases)
+	plan.TotalLevels = levelNumber
 
 	return plan, nil
 }

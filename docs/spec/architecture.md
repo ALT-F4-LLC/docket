@@ -160,7 +160,7 @@ Implements dependency-aware execution planning:
 
 2. **Topological sort** (`TopoSort`): Kahn's algorithm producing level-grouped output. Returns `CycleError` listing involved issue IDs when cycles are detected.
 
-3. **Plan generation** (`GeneratePlan`): Groups issues into parallelizable phases by topological level. Applies filters (status, label, root scoping). Splits phases by file collision detection -- issues touching the same file are placed in separate sub-phases.
+3. **Plan generation** (`GeneratePlan`): Groups issues into parallelizable phases by topological level. Applies filters (status, label, root scoping). Splits phases by file collision detection -- issues touching the same file are placed in separate sub-phases. Each `Phase` records the `Level` (1-based topo-level index) it originated from, and `Plan.TotalLevels` counts distinct levels, so file-collision splits (same `Level`, different `Phase.Number`) can be distinguished from genuine dependency-driven phase transitions.
 
 4. **Ready issue detection** (`FindReady`): Finds unblocked leaf tasks (no children, all blockers done) in specified statuses. Sorted by priority (highest first), then ID (oldest first).
 

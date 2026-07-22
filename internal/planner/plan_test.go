@@ -121,6 +121,164 @@ func TestSplitByFileCollisionMultipleFiles(t *testing.T) {
 	}
 }
 
+func TestGeneratePlanFilterByPriority(t *testing.T) {
+	issues := []*model.Issue{
+		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask},
+		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityLow, Kind: model.IssueKindTask},
+	}
+	dag := BuildDAG(issues, nil)
+
+	plan, err := GeneratePlan(dag, PlanFilters{Priorities: []string{"high"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TotalIssues != 1 {
+		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
+	}
+	if plan.Phases[0].Issues[0].ID != 1 {
+		t.Errorf("expected issue 1 (high priority), got %d", plan.Phases[0].Issues[0].ID)
+	}
+}
+
+func TestGeneratePlanFilterByType(t *testing.T) {
+	issues := []*model.Issue{
+		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindBug},
+		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindFeature},
+	}
+	dag := BuildDAG(issues, nil)
+
+	plan, err := GeneratePlan(dag, PlanFilters{Types: []string{"bug"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TotalIssues != 1 {
+		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
+	}
+	if plan.Phases[0].Issues[0].ID != 1 {
+		t.Errorf("expected issue 1 (bug), got %d", plan.Phases[0].Issues[0].ID)
+	}
+}
+
+func TestGeneratePlanFilterByAssignee(t *testing.T) {
+	issues := []*model.Issue{
+		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask, Assignee: "alice"},
+		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask, Assignee: "bob"},
+	}
+	dag := BuildDAG(issues, nil)
+
+	plan, err := GeneratePlan(dag, PlanFilters{Assignee: "alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TotalIssues != 1 {
+		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
+	}
+	if plan.Phases[0].Issues[0].ID != 1 {
+		t.Errorf("expected issue 1 (alice), got %d", plan.Phases[0].Issues[0].ID)
+	}
+}
+
+func TestGeneratePlanFiltersAndCompose(t *testing.T) {
+	// Issue 1 matches both priority and type filters; issue 2 matches priority
+	// only; issue 3 matches type only. Only issue 1 should survive.
+	issues := []*model.Issue{
+		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindBug},
+		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindFeature},
+		{ID: 3, Status: model.StatusTodo, Priority: model.PriorityLow, Kind: model.IssueKindBug},
+	}
+	dag := BuildDAG(issues, nil)
+
+	plan, err := GeneratePlan(dag, PlanFilters{Priorities: []string{"high"}, Types: []string{"bug"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TotalIssues != 1 {
+		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
+	}
+	if plan.Phases[0].Issues[0].ID != 1 {
+		t.Errorf("expected issue 1, got %d", plan.Phases[0].Issues[0].ID)
+	}
+}
+
+func TestGeneratePlanLevelsNoCollisions(t *testing.T) {
+	// Two independent issues at the same topo-level, no file collisions:
+	// TotalLevels should equal TotalPhases (one phase per level).
+	issues := []*model.Issue{
+		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask, Files: []string{"a.go"}},
+		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask, Files: []string{"b.go"}},
+	}
+	dag := BuildDAG(issues, nil)
+
+	plan, err := GeneratePlan(dag, PlanFilters{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TotalPhases != 1 {
+		t.Fatalf("expected 1 phase, got %d", plan.TotalPhases)
+	}
+	if plan.TotalLevels != plan.TotalPhases {
+		t.Errorf("expected TotalLevels (%d) == TotalPhases (%d)", plan.TotalLevels, plan.TotalPhases)
+	}
+	if plan.Phases[0].Level != 1 {
+		t.Errorf("expected phase 1 to have Level 1, got %d", plan.Phases[0].Level)
+	}
+}
+
+func TestGeneratePlanLevelsFileCollisionSplit(t *testing.T) {
+	// Two independent issues (no dependency between them) that share a file:
+	// same topo-level, split into 2 sub-phases by file collision.
+	// TotalLevels should be less than TotalPhases, and both sub-phases share Level 1.
+	issues := []*model.Issue{
+		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask, Files: []string{"shared.go"}},
+		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask, Files: []string{"shared.go"}},
+	}
+	dag := BuildDAG(issues, nil)
+
+	plan, err := GeneratePlan(dag, PlanFilters{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TotalPhases != 2 {
+		t.Fatalf("expected 2 phases (file collision split), got %d", plan.TotalPhases)
+	}
+	if plan.TotalLevels != 1 {
+		t.Fatalf("expected 1 level, got %d", plan.TotalLevels)
+	}
+	if plan.TotalLevels >= plan.TotalPhases {
+		t.Errorf("expected TotalLevels (%d) < TotalPhases (%d)", plan.TotalLevels, plan.TotalPhases)
+	}
+	if plan.Phases[0].Level != plan.Phases[1].Level {
+		t.Errorf("expected both sub-phases to share Level, got %d and %d", plan.Phases[0].Level, plan.Phases[1].Level)
+	}
+}
+
+func TestGeneratePlanLevelsAcrossDependency(t *testing.T) {
+	// Issue 2 depends on issue 1: two distinct topo-levels, no file collision.
+	// TotalLevels should equal TotalPhases (2), and levels should increment.
+	issues := []*model.Issue{
+		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask},
+		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask},
+	}
+	relations := []model.Relation{
+		{SourceIssueID: 2, TargetIssueID: 1, RelationType: model.RelationDependsOn},
+	}
+	dag := BuildDAG(issues, relations)
+
+	plan, err := GeneratePlan(dag, PlanFilters{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TotalPhases != 2 {
+		t.Fatalf("expected 2 phases, got %d", plan.TotalPhases)
+	}
+	if plan.TotalLevels != 2 {
+		t.Fatalf("expected 2 levels, got %d", plan.TotalLevels)
+	}
+	if plan.Phases[0].Level != 1 || plan.Phases[1].Level != 2 {
+		t.Errorf("expected Levels [1, 2], got [%d, %d]", plan.Phases[0].Level, plan.Phases[1].Level)
+	}
+}
+
 func TestSplitByFileCollisionNoFilesNeverCollide(t *testing.T) {
 	// Multiple issues without files should all land in the same phase.
 	issues := []*model.Issue{
