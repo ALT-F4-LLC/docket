@@ -3,7 +3,7 @@ module github.com/ALT-F4-LLC/docket
 go 1.26.0
 
 require (
-	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260721011709-a327b6ca3856
+	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260722204433-a335d3bf0144
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
