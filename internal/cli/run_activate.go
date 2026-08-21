@@ -52,7 +52,16 @@ refuses the activation and names both paths.
 
 Re-activating an active run expands newly-unblocked phases only and INHERITS
 the original pin set — a workflow re-registered or a pinned file edited since
-activation does not reach a run already under way.`,
+activation does not reach a run already under way.
+
+The JSON envelope carries the run's expected cost as TWO distinct fields:
+` + "`expected_cost_total`" + ` is every step the run holds, including ones a
+prior activation already created; ` + "`expected_cost_added`" + ` is only
+what THIS call just added — equal to the total on a first activation, and
+the newly-expanded phase's cost alone on a re-activation. A skipped step
+still counts toward both sums. The human summary line prints the added
+figure before the total, for the same reason: reading the total as the
+increment is how a budget cap once got raised against the wrong number.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRunActivate(cmd, args, getWriter(cmd))
@@ -78,8 +87,20 @@ type activateResult struct {
 	IssuesBound    int        `json:"issues_bound"`
 	IssuesExpanded int        `json:"issues_expanded"`
 	StepsCreated   int        `json:"steps_created"`
+	// ExpectedCostAdded is the increment `expected_cost_total` moved BY THIS
+	// ACTIVATION — the steps it just created, and none of the run's prior
+	// ones — named distinctly from the total so a conductor reading the
+	// envelope cannot mistake the whole roster for what this call added
+	// (DKT-517: a conductor read `expected_cost_total=35.1` as a 5-step
+	// increment whose real cost, this field, was 2.1, and a budget cap raise
+	// was approved against the wrong number). Equal to `expected_cost_total`
+	// on a first activation, since the run held no prior steps. A skipped
+	// step still counts toward this sum, same as the total.
+	ExpectedCostAdded float64 `json:"expected_cost_added"`
 	// ExpectedCostTotal is the run-wide expected-cost sum as this activation
-	// leaves (or, on --dry-run, would leave) it — cap-vs-cost for an
+	// leaves (or, on --dry-run, would leave) it — the WHOLE roster, every
+	// step the run holds including ones a prior activation created, not this
+	// call's increment (see ExpectedCostAdded for that) — cap-vs-cost for an
 	// activation gate, beside the step count (DKT-54).
 	ExpectedCostTotal float64                 `json:"expected_cost_total"`
 	PinsRecorded      int                     `json:"pins_recorded"`
@@ -214,6 +235,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		IssuesBound:       result.IssuesBound,
 		IssuesExpanded:    result.IssuesExpanded,
 		StepsCreated:      result.StepsCreated,
+		ExpectedCostAdded: result.ExpectedCostAdded,
 		ExpectedCostTotal: result.ExpectedCostTotal,
 		PinsRecorded:      result.PinsRecorded,
 		FencesHarvested:   result.FencesHarvested,
@@ -265,7 +287,12 @@ func renderActivation(r activateResult) string {
 	parts = append(parts,
 		fmt.Sprintf("%d issue(s) expanded", r.IssuesExpanded),
 		fmt.Sprintf("%d step(s)", r.StepsCreated),
-		fmt.Sprintf("%.2f expected cost", r.ExpectedCostTotal))
+		// The increment BEFORE the total (DKT-517): the total alone read as
+		// "what this activation cost" when it was in fact the whole run's
+		// roster, and that misreading is what got a budget cap raised
+		// against the wrong number.
+		fmt.Sprintf("%.2f expected cost added", r.ExpectedCostAdded),
+		fmt.Sprintf("%.2f expected cost total", r.ExpectedCostTotal))
 	if r.PinsRecorded > 0 {
 		parts = append(parts, fmt.Sprintf("%d pin(s)", r.PinsRecorded))
 	}

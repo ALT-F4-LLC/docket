@@ -49,11 +49,28 @@ type ActivateResult struct {
 	IssuesExpanded int
 	StepsCreated   int
 	// ExpectedCostTotal is the run-wide SUM of the steps' expected_cost as
-	// this activation leaves it, computed inside the SAME transaction — so a
-	// --dry-run projects the steps it provisionally created (DKT-54's
+	// this activation leaves it — every step the run holds, including any a
+	// PRIOR activation already created, computed inside the SAME transaction
+	// so a --dry-run projects the steps it provisionally created (DKT-54's
 	// activation half: cap-vs-cost in front of a panel before any step
-	// exists for `step list` to enumerate).
+	// exists for `step list` to enumerate). This is the whole roster, NOT
+	// this activation's delta — see ExpectedCostAdded for that (DKT-517: a
+	// conductor read this total as a 5-step increment when the real
+	// increment, ExpectedCostAdded, was a fifth of it).
+	//
+	// A skipped step (workflow.StatusSkipped) is still an inserted row with
+	// its own expected_cost, so it counts toward this sum exactly as an
+	// un-skipped step does — the sum reads the `steps` table, not step
+	// status.
 	ExpectedCostTotal float64
+	// ExpectedCostAdded is the SUM of expected_cost across only the steps
+	// THIS activation created — ExpectedCostTotal's increment, named
+	// distinctly so a conductor cannot mistake the whole roster for the
+	// delta (DKT-517). On a first activation the run holds no prior steps,
+	// so this equals ExpectedCostTotal; on a re-activation it is the newly
+	// expanded phase's cost alone. Same skipped-step accounting as
+	// ExpectedCostTotal.
+	ExpectedCostAdded float64
 	PinsRecorded      int
 	FencesHarvested   int
 	// PromotedIssues names, by display id, every issue stage 7 moved
@@ -716,6 +733,18 @@ func activateTx(
 		result.PinsRecorded++
 	}
 
+	// Baseline for ExpectedCostAdded, read BEFORE stage 6 expands anything.
+	// On a first activation the run has no steps yet and this is 0; on a
+	// re-activation it is every step a PRIOR activation already created —
+	// either way, ExpectedCostTotal minus this baseline is exactly what THIS
+	// activation added (DKT-517).
+	var baselineCost float64
+	if err := tx.QueryRow(
+		`SELECT COALESCE(SUM(expected_cost), 0) FROM steps WHERE run_id = ?`,
+		runID).Scan(&baselineCost); err != nil {
+		return nil, fmt.Errorf("summing baseline expected cost: %w", err)
+	}
+
 	// ---- Stages 4-6, per issue. --------------------------------------------
 	expandable := expandableIssues(levels, issues)
 
@@ -809,6 +838,7 @@ func activateTx(
 		runID).Scan(&result.ExpectedCostTotal); err != nil {
 		return nil, fmt.Errorf("summing expected cost: %w", err)
 	}
+	result.ExpectedCostAdded = result.ExpectedCostTotal - baselineCost
 
 	// ---- Stage 7: flip the run. --------------------------------------------
 	if err := setRunActiveTx(tx, runID, reactivation, opts.NowMS); err != nil {

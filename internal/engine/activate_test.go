@@ -1222,6 +1222,119 @@ func TestReactivationRA1ExpandsNewPhasesOnly(t *testing.T) {
 	}
 }
 
+// TestReactivationReportsCostAddedDistinctFromTotal is DKT-517: a conductor
+// misread `ExpectedCostTotal` — the whole run's roster — as the cost of a
+// re-activation's 5 new steps, and a budget cap was raised against that wrong
+// number. `ExpectedCostAdded` must carry the increment alone, so on a
+// re-activation with steps already present it differs from the total by
+// exactly the first activation's cost.
+func TestReactivationReportsCostAddedDistinctFromTotal(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+
+	first := createIssue(t, conn, "first", "body", "task", nil)
+	second := createIssue(t, conn, "second", "body", "task", nil)
+	_, err := conn.Exec(
+		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
+		 VALUES (?, ?, 'depends_on', '2026-08-02T00:00:00Z')`,
+		second, first,
+	)
+	testsupport.Must(t, err, "seeding relation: %v", err)
+
+	run := startRun(t, conn, first, second)
+	firstResult, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "first activate: %v", err)
+
+	// A first activation has no prior steps: the increment IS the total.
+	if firstResult.ExpectedCostAdded != firstResult.ExpectedCostTotal {
+		t.Errorf("first activation: ExpectedCostAdded = %v, ExpectedCostTotal = %v, want equal",
+			firstResult.ExpectedCostAdded, firstResult.ExpectedCostTotal)
+	}
+	if firstResult.ExpectedCostAdded <= 0 {
+		t.Fatalf("first activation: ExpectedCostAdded = %v, want > 0 (fixture steps carry cost)",
+			firstResult.ExpectedCostAdded)
+	}
+
+	// The predecessor completes; the second phase — existing steps already
+	// present from the first activation — is now expandable.
+	err = db.UpdateIssue(conn, first, map[string]any{
+		"status": string(model.StatusDone),
+	}, "")
+	testsupport.Must(t, err, "completing the predecessor: %v", err)
+
+	reResult, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "re-activate: %v", err)
+
+	if reResult.IssuesExpanded != 1 {
+		t.Fatalf("re-activation expanded %d issues, want 1", reResult.IssuesExpanded)
+	}
+	// The whole point: on a re-activation with existing steps, the increment
+	// must NOT equal the total — the total also carries the first phase's
+	// already-counted cost.
+	if reResult.ExpectedCostAdded == reResult.ExpectedCostTotal {
+		t.Errorf("re-activation: ExpectedCostAdded (%v) == ExpectedCostTotal (%v), "+
+			"want the increment distinct from the whole roster",
+			reResult.ExpectedCostAdded, reResult.ExpectedCostTotal)
+	}
+	// And precisely: the total moved by exactly the increment reported.
+	if got, want := reResult.ExpectedCostTotal-firstResult.ExpectedCostTotal, reResult.ExpectedCostAdded; got != want {
+		t.Errorf("ExpectedCostTotal moved by %v across re-activation, want it to match "+
+			"ExpectedCostAdded (%v)", got, want)
+	}
+}
+
+// TestDryRunReactivationReportsCostAdded is DKT-517's literal shape: `docket
+// run activate RUN-N --dry-run --json` on a re-activation with existing steps
+// already present must carry both the increment and the run total, named
+// distinctly — not just a real (committing) re-activation.
+func TestDryRunReactivationReportsCostAdded(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+
+	first := createIssue(t, conn, "first", "body", "task", nil)
+	second := createIssue(t, conn, "second", "body", "task", nil)
+	_, err := conn.Exec(
+		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
+		 VALUES (?, ?, 'depends_on', '2026-08-02T00:00:00Z')`,
+		second, first,
+	)
+	testsupport.Must(t, err, "seeding relation: %v", err)
+
+	run := startRun(t, conn, first, second)
+	firstResult, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "first activate: %v", err)
+
+	err = db.UpdateIssue(conn, first, map[string]any{
+		"status": string(model.StatusDone),
+	}, "")
+	testsupport.Must(t, err, "completing the predecessor: %v", err)
+
+	dryResult, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run re-activation: %v", err)
+
+	if dryResult.ExpectedCostAdded == dryResult.ExpectedCostTotal {
+		t.Errorf("dry-run re-activation: ExpectedCostAdded (%v) == ExpectedCostTotal (%v), "+
+			"want the increment distinct from the whole roster",
+			dryResult.ExpectedCostAdded, dryResult.ExpectedCostTotal)
+	}
+	if got, want := dryResult.ExpectedCostTotal-firstResult.ExpectedCostTotal, dryResult.ExpectedCostAdded; got != want {
+		t.Errorf("dry-run ExpectedCostTotal implies an increment of %v, want it to match "+
+			"ExpectedCostAdded (%v)", got, want)
+	}
+
+	// And it wrote nothing: the committed total is still the first
+	// activation's alone.
+	var committedTotal float64
+	err = conn.QueryRow(
+		`SELECT COALESCE(SUM(expected_cost), 0) FROM steps WHERE run_id = ?`, run.ID,
+	).Scan(&committedTotal)
+	testsupport.Must(t, err, "summing committed cost: %v", err)
+	if committedTotal != firstResult.ExpectedCostTotal {
+		t.Errorf("committed cost total = %v after a dry run, want %v (unchanged)",
+			committedTotal, firstResult.ExpectedCostTotal)
+	}
+}
+
 // TestDryRunReportsPromotedIssueIDs is DKT-102: a dry run's activation gate
 // must not be answered on an undercounted roster. RUN-8's shape — a
 // dependency-gated issue that was ALREADY bound (from a first activation) but

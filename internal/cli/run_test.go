@@ -304,11 +304,13 @@ func TestRunActivateSucceeds(t *testing.T) {
 	var envelope struct {
 		OK   bool `json:"ok"`
 		Data struct {
-			Run            json.RawMessage `json:"run"`
-			IssuesBound    int             `json:"issues_bound"`
-			IssuesExpanded int             `json:"issues_expanded"`
-			StepsCreated   int             `json:"steps_created"`
-			PinsRecorded   int             `json:"pins_recorded"`
+			Run               json.RawMessage `json:"run"`
+			IssuesBound       int             `json:"issues_bound"`
+			IssuesExpanded    int             `json:"issues_expanded"`
+			StepsCreated      int             `json:"steps_created"`
+			ExpectedCostAdded float64         `json:"expected_cost_added"`
+			ExpectedCostTotal float64         `json:"expected_cost_total"`
+			PinsRecorded      int             `json:"pins_recorded"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
@@ -327,12 +329,58 @@ func TestRunActivateSucceeds(t *testing.T) {
 	if envelope.Data.PinsRecorded != 1 {
 		t.Errorf("recorded %d pins, want 1 (the bound workflow)", envelope.Data.PinsRecorded)
 	}
+	// DKT-517: `expected_cost_added` and `expected_cost_total` both ride the
+	// envelope, named distinctly. On a first activation they agree — the
+	// increment IS the total — but both keys must be present so a consumer
+	// never has to infer one from the other.
+	if envelope.Data.ExpectedCostAdded != envelope.Data.ExpectedCostTotal {
+		t.Errorf("first activation: expected_cost_added = %v, expected_cost_total = %v, want equal",
+			envelope.Data.ExpectedCostAdded, envelope.Data.ExpectedCostTotal)
+	}
 
 	// The issue was promoted out of backlog by the transaction's stage 7.
 	issue, err := db.GetIssue(conn, issueID)
 	testsupport.Must(t, err, "reading issue: %v", err)
 	if issue.Status != model.StatusTodo {
 		t.Errorf("issue status = %q after activation, want %q", issue.Status, model.StatusTodo)
+	}
+}
+
+// TestRunActivateHumanLinePrintsAddedBeforeTotal is DKT-517's human-mode
+// acceptance criterion: the summary line must print the cost increment
+// BEFORE the run-wide total, so a reader scanning left to right sees "what
+// this activation cost" first rather than the whole roster.
+func TestRunActivateHumanLinePrintsAddedBeforeTotal(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+
+	w, buf := bufWriter(false)
+
+	err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID))
+	testsupport.Must(t, err, "run activate: %v", err)
+
+	text := buf.String()
+	addedIdx := strings.Index(text, "expected cost added")
+	totalIdx := strings.Index(text, "expected cost total")
+	if addedIdx == -1 || totalIdx == -1 {
+		t.Fatalf("summary line %q missing 'expected cost added' or 'expected cost total'", text)
+	}
+	if addedIdx >= totalIdx {
+		t.Errorf("summary line %q prints the total before the increment, want added first", text)
+	}
+}
+
+// TestRunActivateHelpDocumentsCostFields is DKT-517's --help acceptance
+// criterion: an operator reading `docket run activate --help` must be told
+// both JSON field names exist and what distinguishes them, not just find
+// them undocumented in the envelope.
+func TestRunActivateHelpDocumentsCostFields(t *testing.T) {
+	cmd := newRunActivateCmd()
+	long := cmd.Long
+	for _, field := range []string{"expected_cost_total", "expected_cost_added"} {
+		if !strings.Contains(long, field) {
+			t.Errorf("--help text does not document `%s`", field)
+		}
 	}
 }
 
