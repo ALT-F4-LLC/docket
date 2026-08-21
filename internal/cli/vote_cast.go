@@ -57,8 +57,16 @@ func newVoteCastCmd() *cobra.Command {
 			findings, _ := cmd.Flags().GetString("findings")
 			findingsJSONRaw, _ := cmd.Flags().GetString("findings-json")
 			summary, _ := cmd.Flags().GetString("summary")
+			summaryFile, _ := cmd.Flags().GetString("summary-file")
 			metadataRaw, _ := cmd.Flags().GetString("metadata")
 			jsonMode, _ := jsonModeOf(cmd)
+
+			// One source for the summary, decided before anything else runs.
+			// Both flags write the same field, so a caster that passed both
+			// has two rationales and no way to know which one landed.
+			if cmd.Flags().Changed("summary") && cmd.Flags().Changed("summary-file") {
+				return cmdErr(fmt.Errorf("--summary and --summary-file are mutually exclusive; pass one"), output.ErrValidation)
+			}
 
 			// Default voter to git user.name.
 			if voter == "" {
@@ -183,29 +191,65 @@ func newVoteCastCmd() *cobra.Command {
 				fmt.Sscanf(domainRelevanceStr, "%f", &domainRelevance)
 			}
 
-			// Prevent both flags from reading stdin.
-			if findings == "-" && findingsJSONRaw == "-" {
-				return cmdErr(fmt.Errorf("cannot read both --findings and --findings-json from stdin"), output.ErrValidation)
+			// STDIN FEEDS EXACTLY ONE FLAG. Three flags accept "-" and they
+			// all read the same pipe: the second reader finds it drained and
+			// would store an empty value in silence. The refusal names every
+			// flag that asked, because the caster has to know which pair
+			// collided to fix the invocation.
+			var stdinFlags []string
+			if findings == "-" {
+				stdinFlags = append(stdinFlags, "--findings")
+			}
+			if findingsJSONRaw == "-" {
+				stdinFlags = append(stdinFlags, "--findings-json")
+			}
+			if summary == "-" {
+				stdinFlags = append(stdinFlags, "--summary")
+			}
+			if len(stdinFlags) > 1 {
+				return cmdErr(fmt.Errorf(
+					"cannot read %s from stdin at once; stdin feeds one flag — pass the others inline, or use --summary-file",
+					strings.Join(stdinFlags, " and ")), output.ErrValidation)
 			}
 
 			// Read findings from stdin if "-".
 			if findings == "-" {
-				const maxStdinSize = 1 << 20 // 1 MiB
-				data, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinSize))
+				s, err := readStdinFlag("--findings")
 				if err != nil {
-					return cmdErr(fmt.Errorf("reading findings from stdin: %w", err), output.ErrGeneral)
+					return err
 				}
-				findings = strings.TrimRight(string(data), "\n")
+				findings = s
 			}
 
 			// Read findings-json from stdin if "-".
 			if findingsJSONRaw == "-" {
-				const maxStdinSize = 1 << 20 // 1 MiB
-				data, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinSize))
+				s, err := readStdinFlag("--findings-json")
 				if err != nil {
-					return cmdErr(fmt.Errorf("reading findings-json from stdin: %w", err), output.ErrGeneral)
+					return err
 				}
-				findingsJSONRaw = strings.TrimRight(string(data), "\n")
+				findingsJSONRaw = s
+			}
+
+			// THE SUMMARY HAS AN OFF-ARGV PATH (DKT-519). A seat's rationale
+			// is routinely kilobytes of prose, and argv is the one channel
+			// that runs it past a shell first: a summary carrying backticks
+			// was once expanded by the shell and stored expanded, and a voter
+			// casts once, so there was no amend path afterwards. `-` and
+			// --summary-file both hand the bytes over untouched, mirroring
+			// what --findings already offered.
+			switch {
+			case summary == "-":
+				s, err := readStdinFlag("--summary")
+				if err != nil {
+					return err
+				}
+				summary = s
+			case summaryFile != "":
+				data, err := os.ReadFile(summaryFile)
+				if err != nil {
+					return cmdErr(fmt.Errorf("reading --summary-file: %w", err), output.ErrGeneral)
+				}
+				summary = strings.TrimRight(string(data), "\n")
 			}
 
 			// Parse and validate --findings-json.
@@ -249,12 +293,25 @@ func newVoteCastCmd() *cobra.Command {
 			// and the only difference was where the ballot executed.
 			//
 			// stderr, not a refusal: the cast is valid and the vote must land.
-			if strings.TrimSpace(usageRaw) == "" {
-				fmt.Fprintln(os.Stderr,
+			//
+			// The note does NOT claim the spend is unrecoverable (DKT-519).
+			// It once ended "nothing else will supply it later", which is
+			// false for the fleet: a seat cannot measure its own tokens —
+			// they live in the harness transcripts the conductor reads — so
+			// `vote backfill-usage` (DKT-115) is the DESIGNED path, not a
+			// workaround, and conductors run it minutes after a panel casts.
+			// Naming it turns the note into the instruction it should have
+			// been. `-q` silences it: a caster who has already chosen not to
+			// report asked for no non-essential output, and the cast itself
+			// still lands.
+			if strings.TrimSpace(usageRaw) == "" && !w.QuietMode {
+				fmt.Fprintf(cmd.ErrOrStderr(),
 					"note: this seat reported no --usage, so its spend is missing "+
 						"from the run's totals rather than zero. A vote step is "+
-						"never claimed, so the step ledger cannot hold it and "+
-						"nothing else will supply it later.")
+						"never claimed, so the step ledger cannot hold it; record "+
+						"it later with `docket vote backfill-usage %s` if a ledger "+
+						"outside the seat holds it.\n",
+					model.FormatProposalID(proposalID))
 			}
 			usage, err := parseVoteUsage(usageRaw)
 			if err != nil {
@@ -332,7 +389,10 @@ func newVoteCastCmd() *cobra.Command {
 	cmd.Flags().Float64("domain-relevance", 0, "Domain relevance 0.0-1.0")
 	cmd.Flags().String("findings", "", "Review findings (use \"-\" for stdin)")
 	cmd.Flags().String("findings-json", "", "Structured findings JSON (use \"-\" for stdin)")
-	cmd.Flags().String("summary", "", "One-line review summary")
+	cmd.Flags().String("summary", "", "Review summary (use \"-\" for stdin)")
+	cmd.Flags().String("summary-file", "",
+		"Read the review summary from PATH (alternative to --summary; use when "+
+			"stdin already feeds --findings)")
 	cmd.Flags().String("metadata", "",
 		"Opaque JSON object claiming what cast this vote — worked example in "+
 			"skills/docket/SKILL.md; unverified, visible to anyone who can list "+
@@ -348,6 +408,25 @@ var voteCastCmd = newVoteCastCmd()
 
 func init() {
 	voteCmd.AddCommand(voteCastCmd)
+}
+
+// readStdinFlag drains stdin for a flag whose value was given as "-", and is
+// the ONE copy of that read: --findings, --findings-json and --summary all
+// take "-" now, and three hand-inlined copies of the same limit-read is how
+// one of them would end up with a different cap or a different trailing-
+// newline rule than the others. The 1 MiB limit stops a wedged pipe from
+// filling memory; the trailing newline goes because every shell here-doc and
+// every `... > file` ends with one and no caster means it as content.
+//
+// A failure comes back already wrapped as a GENERAL_ERROR naming the flag, so
+// a RunE call site is `return err`.
+func readStdinFlag(flag string) (string, error) {
+	const maxStdinSize = 1 << 20 // 1 MiB
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinSize))
+	if err != nil {
+		return "", cmdErr(fmt.Errorf("reading %s from stdin: %w", flag, err), output.ErrGeneral)
+	}
+	return strings.TrimRight(string(data), "\n"), nil
 }
 
 // parseVoteMetadata decodes a vote's opaque --metadata bag for THIS FLAG's

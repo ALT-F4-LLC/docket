@@ -5,6 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -195,6 +198,179 @@ func TestVoteCastCommandRefusesAnOverCapBag(t *testing.T) {
 	}
 }
 
+// TestVoteCastSummaryReadsStdinAndFile pins DKT-519(b): a seat's rationale can
+// reach `--summary` WITHOUT passing through argv.
+//
+// The fixture is the incident's own shape — backticks, `$( )` and newlines. On
+// a command line those are the shell's to expand before docket ever runs, and
+// a voter casts once, so an expanded rationale is stored permanently with no
+// amend path. Both off-argv forms must land the bytes verbatim; the inline
+// seat is the control that shows the assertion reads each vote's own cell.
+func TestVoteCastSummaryReadsStdinAndFile(t *testing.T) {
+	conn := newTestDB(t)
+
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description:    "summary off argv",
+		RequiredVoters: 5,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	id := model.FormatProposalID(proposalID)
+
+	rationale := "verdict rests on `git log` and $(whoami)\n\nsecond paragraph"
+
+	withStdin(t, rationale+"\n")
+	err = runVoteCastCmd(t, conn, id, "--voter", "seat-stdin", "--verdict", "approve",
+		"--confidence", "0.9", "--domain-relevance", "0.8", "--summary", "-")
+	testsupport.Must(t, err, "vote cast with --summary -: %v", err)
+
+	path := filepath.Join(t.TempDir(), "summary.txt")
+	testsupport.Must(t, os.WriteFile(path, []byte(rationale+"\n"), 0o600), "writing the fixture: %v", err)
+	err = runVoteCastCmd(t, conn, id, "--voter", "seat-file", "--verdict", "approve",
+		"--confidence", "0.9", "--domain-relevance", "0.8", "--summary-file", path)
+	testsupport.Must(t, err, "vote cast with --summary-file: %v", err)
+
+	err = runVoteCastCmd(t, conn, id, "--voter", "seat-inline", "--verdict", "approve",
+		"--confidence", "0.9", "--domain-relevance", "0.8", "--summary", "LGTM")
+	testsupport.Must(t, err, "vote cast with an inline --summary: %v", err)
+
+	byVoter := votesByVoter(t, conn, proposalID)
+	for _, voter := range []string{"seat-stdin", "seat-file"} {
+		v, ok := byVoter[voter]
+		if !ok {
+			t.Fatalf("no vote stored for %s", voter)
+		}
+		if v.Summary != rationale {
+			t.Errorf("%s summary = %q, want %q", voter, v.Summary, rationale)
+		}
+	}
+	if got := byVoter["seat-inline"].Summary; got != "LGTM" {
+		t.Errorf("seat-inline summary = %q, want %q", got, "LGTM")
+	}
+}
+
+// TestVoteCastSummarySourceRefusals pins the two ways a caster can name more
+// than one source for one field. Both must refuse BEFORE the transaction: a
+// vote cannot be amended, so a half-right summary that landed is permanent.
+func TestVoteCastSummarySourceRefusals(t *testing.T) {
+	conn := newTestDB(t)
+
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description:    "summary refusals",
+		RequiredVoters: 5,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	id := model.FormatProposalID(proposalID)
+
+	base := []string{"--verdict", "approve", "--confidence", "0.9", "--domain-relevance", "0.8"}
+
+	// Two flags racing for the same pipe: the loser reads a drained stdin and
+	// would store "" without a word.
+	withStdin(t, "shared pipe")
+	err = runVoteCastCmd(t, conn, append([]string{id, "--voter", "seat-a", "--findings", "-", "--summary", "-"}, base...)...)
+	if err == nil {
+		t.Fatal("vote cast accepted --findings - together with --summary -")
+	}
+	for _, want := range []string{"--findings", "--summary"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("stdin-collision refusal %q does not name %s", err, want)
+		}
+	}
+
+	err = runVoteCastCmd(t, conn, append([]string{id, "--voter", "seat-b",
+		"--summary", "inline", "--summary-file", filepath.Join(t.TempDir(), "unread.txt")}, base...)...)
+	if err == nil {
+		t.Fatal("vote cast accepted --summary together with --summary-file")
+	}
+	if !strings.Contains(err.Error(), "--summary-file") {
+		t.Errorf("refusal %q does not name --summary-file", err)
+	}
+
+	votes, err := db.GetProposalVotes(conn, proposalID)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	if len(votes) != 0 {
+		t.Errorf("refused invocations stored %d vote(s)", len(votes))
+	}
+}
+
+// TestVoteCastUsageNoteNamesBackfill pins DKT-519(a). The note used to end
+// "nothing else will supply it later", which is false: a seat cannot measure
+// its own tokens — they live in the harness transcript a conductor reads — so
+// `vote backfill-usage` is the designed path and conductors run it minutes
+// after a panel casts. The note must point at it, and `-q` must silence it.
+func TestVoteCastUsageNoteNamesBackfill(t *testing.T) {
+	conn := newTestDB(t)
+
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description:    "usage note",
+		RequiredVoters: 5,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	id := model.FormatProposalID(proposalID)
+	base := []string{"--verdict", "approve", "--confidence", "0.9", "--domain-relevance", "0.8"}
+
+	stderr, err := runVoteCastCapturingStderr(t, conn, append([]string{id, "--voter", "seat-silent"}, base...)...)
+	testsupport.Must(t, err, "vote cast without --usage: %v", err)
+	if !strings.Contains(stderr, "note: this seat reported no --usage") {
+		t.Fatalf("a seat that reported no usage was told nothing; stderr = %q", stderr)
+	}
+	if strings.Contains(stderr, "nothing else will supply") {
+		t.Errorf("the note still claims nothing else can supply usage: %q", stderr)
+	}
+	if !strings.Contains(stderr, "docket vote backfill-usage "+id) {
+		t.Errorf("the note does not name the back-fill path for %s: %q", id, stderr)
+	}
+
+	stderr, err = runVoteCastCapturingStderr(t, conn, append([]string{id, "--voter", "seat-quiet", "--quiet"}, base...)...)
+	testsupport.Must(t, err, "vote cast with --quiet: %v", err)
+	if strings.Contains(stderr, "note:") {
+		t.Errorf("--quiet did not suppress the usage note; stderr = %q", stderr)
+	}
+
+	stderr, err = runVoteCastCapturingStderr(t, conn,
+		append([]string{id, "--voter", "seat-reporting", "--usage", `{"tokens":1200}`}, base...)...)
+	testsupport.Must(t, err, "vote cast with --usage: %v", err)
+	if strings.Contains(stderr, "note:") {
+		t.Errorf("a seat that DID report usage was noted at anyway; stderr = %q", stderr)
+	}
+}
+
+// votesByVoter reads a proposal's votes back out of the store, keyed by voter.
+func votesByVoter(t *testing.T, conn *sql.DB, proposalID int) map[string]*model.Vote {
+	t.Helper()
+	votes, err := db.GetProposalVotes(conn, proposalID)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	byVoter := map[string]*model.Vote{}
+	for _, v := range votes {
+		byVoter[v.VoterName] = v
+	}
+	return byVoter
+}
+
+// withStdin points os.Stdin at a temp file holding content for the duration of
+// one test. A file rather than a pipe: the RunE reads to EOF, and an unclosed
+// pipe writer would hang the suite instead of failing it.
+func withStdin(t *testing.T, content string) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stdin")
+	testsupport.Must(t, err, "CreateTemp: %v", err)
+	_, err = f.WriteString(content)
+	testsupport.Must(t, err, "writing stdin fixture: %v", err)
+	_, err = f.Seek(0, io.SeekStart)
+	testsupport.Must(t, err, "rewinding stdin fixture: %v", err)
+	orig := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() {
+		os.Stdin = orig
+		_ = f.Close()
+	})
+}
+
 // runVoteCastCmd drives a FRESH `vote cast` through cobra's own arg parsing,
 // the way a shell invocation would, per runActivateViaCLI's pattern
 // (run_test.go). Building through newVoteCastCmd — the same factory the
@@ -203,11 +379,21 @@ func TestVoteCastCommandRefusesAnOverCapBag(t *testing.T) {
 // testing nothing.
 func runVoteCastCmd(t *testing.T, conn *sql.DB, args ...string) error {
 	t.Helper()
+	_, err := runVoteCastCapturingStderr(t, conn, args...)
+	return err
+}
+
+// runVoteCastCapturingStderr is the same drive, returning what the command
+// wrote to its error stream. The usage note goes to cmd.ErrOrStderr() rather
+// than straight to os.Stderr precisely so this can read it back.
+func runVoteCastCapturingStderr(t *testing.T, conn *sql.DB, args ...string) (string, error) {
+	t.Helper()
+	var stderr bytes.Buffer
 	cmd := newVoteCastCmd()
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
 	// --json and --quiet are persistent flags rootCmd normally supplies; this
 	// instance is parentless, so register the ones RunE reads. Human mode is
 	// deliberate: it is the path that reaches the interactive form, so a
@@ -216,5 +402,6 @@ func runVoteCastCmd(t *testing.T, conn *sql.DB, args ...string) error {
 	cmd.Flags().Bool("quiet", false, "")
 	cmd.SetArgs(args)
 	ctx := context.WithValue(context.Background(), dbKey, conn)
-	return cmd.ExecuteContext(ctx)
+	err := cmd.ExecuteContext(ctx)
+	return stderr.String(), err
 }
