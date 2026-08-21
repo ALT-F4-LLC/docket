@@ -280,6 +280,12 @@ func AssembleContext(
 	// inputs resolve to the loop body's own account of them (DKT-63).
 	inputs = append(inputs, previousRoundInputs(sched, step, spec, artifacts)...)
 
+	// One artifact, one entry — however many declarations reached it (DKT-491).
+	// Applied over the WHOLE assembled list, because the three sources above
+	// resolve independently and a duplicate is a duplicate wherever it came
+	// from.
+	inputs = dedupeInputs(inputs)
+
 	// Source 5: the pin LIST — paths and hashes, never contents.
 	pins, err := contextPins(tx, step.RunID)
 	if err != nil {
@@ -534,6 +540,59 @@ func artifactInputs(artifacts []*db.Artifact, producers map[int]*db.Step) []Cont
 			Body:         a.Body,
 			Payload:      a.Payload,
 		})
+	}
+	return out
+}
+
+// dedupeInputs collapses inputs naming the SAME artifact down to their first
+// occurrence (DKT-491).
+//
+// A step's declared `inputs` is one entry per EDGE ITS AUTHOR DREW, and several
+// edges legitimately land on one artifact. The multi-lane authoring shape is
+// where it bites: a consuming step declares one `<lane>.<kind>` entry per lane
+// because only expansion knows which lane an issue takes, and at ordinal 0 that
+// is exactly right — the lanes not taken are `skipped` and resolve to nothing.
+// On a loop re-entry, loopProducerRedirect rebinds each stale producer to the
+// loop body's emit OF THE SAME KIND (DKT-12), and the kind is the one thing
+// every lane shares — so every lane entry redirects onto the ONE live artifact
+// and the packet inlined it once per entry. A six-lane review brief carried six
+// byte-identical copies of one 1,339-line document: 670KB of the 777KB packet,
+// paid for by every consumer of it.
+//
+// THE IDENTITY IS THE ARTIFACT, NEVER THE BYTES. Two fanned-out judges that
+// happen to record identical findings are two findings, and collapsing them
+// would misreport a panel's agreement as one voice. `artifact` alone is not the
+// identity either — the engine-produced forms (`issue.body`, `gate-results`)
+// share one name across producers — so the key is the triple the bundle
+// renders: which artifact, of which kind, from which producer instance.
+//
+// The kept entry is the FIRST: §6.11 presents inputs in declared order, and a
+// collapse that kept a later occurrence would move an artifact to a position no
+// author wrote. A list with nothing repeated is returned untouched, so every
+// bundle that never had a duplicate is byte-identical to what it always was.
+func dedupeInputs(inputs []ContextInput) []ContextInput {
+	type identity struct {
+		artifact string
+		kind     string
+		producer string
+	}
+	seen := make(map[identity]struct{}, len(inputs))
+	for _, in := range inputs {
+		seen[identity{in.Artifact, in.Kind, in.ProducerStep}] = struct{}{}
+	}
+	if len(seen) == len(inputs) {
+		return inputs
+	}
+
+	kept := make(map[identity]struct{}, len(seen))
+	out := make([]ContextInput, 0, len(seen))
+	for _, in := range inputs {
+		id := identity{in.Artifact, in.Kind, in.ProducerStep}
+		if _, ok := kept[id]; ok {
+			continue
+		}
+		kept[id] = struct{}{}
+		out = append(out, in)
 	}
 	return out
 }
