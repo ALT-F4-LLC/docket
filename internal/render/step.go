@@ -83,6 +83,14 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 		fmt.Fprintf(&b, "  proposal:  %s\n", row.Proposal)
 	}
 	fmt.Fprintf(&b, "  attempt:   %d\n", row.Attempt)
+	// The outcome breakdown (DKT-490), only once there is one to report:
+	// `attempt` counts claims, and a reader deciding what "attempt 3" means —
+	// three failures, or one failure and two silent reaps — should not have to
+	// leave this surface to find out.
+	if row.FailedAttempts > 0 || row.ReapedClaims > 0 {
+		fmt.Fprintf(&b, "  of which:  %d failed, %d reaped\n",
+			row.FailedAttempts, row.ReapedClaims)
+	}
 
 	// A held lease is reported with its owner, mirroring the v6 `lease` object's
 	// rule: a field that is not a fact yet does not appear.

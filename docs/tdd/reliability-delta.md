@@ -53,6 +53,7 @@ Stage-to-version mapping, recorded here so later stages do not re-litigate it:
 | **v20** | — operator loop grants (amendment, DKT-237) | `run_issues.loop_grants` |
 | **v21** | — hollow-assurance marker (amendment, DKT-265) | `gate_results.stub_entry` |
 | **v22** | — pause origin (amendment, DKT-305) | `runs.pause_origin` |
+| **v23** | — attempt-outcome breakdown (amendment, DKT-490) | `steps.failed_attempts`, `steps.reaped_claims` |
 
 v5's contents, exactly:
 
@@ -550,6 +551,46 @@ default would ship the defect one last time on exactly the databases that have
 it — a run parked at the moment of upgrade would come up unmarked and be resumed
 by the next step to route. Runs already resumed, done, or abandoned are
 untouched; their park is history, and history is in the event log.
+
+### AMENDMENT — the span extends to v23 (DKT-490, 2026-08-21)
+
+**What changed.** v23 adds TWO counter columns on `steps`, both `INTEGER NOT
+NULL DEFAULT 0`: `failed_attempts` — claims ended by an explicit `step fail` —
+and `reaped_claims` — claims reaped without one (lease expiry,
+`max_step_duration`, the forced `step reap`). Together they are the OUTCOME
+breakdown of the claims `attempt` counts. A claim that recorded counts in
+neither; `step resolve --as retry` touches neither, exactly as it leaves
+`attempt` alone; and `failed_attempts + reaped_claims` never exceeds `attempt`
+— the remainder is live claims, recorded completions, and pre-v23 history.
+
+**What it fixes.** `attempt` is a claims-so-far spent-count (DKT-64,
+docs/tdd/attempt-numbering.md), and that is all it is — it moves at a winning
+claim's CAS commit and nowhere else. Two independent consumers in one run
+read more into it: an escalation policy walked `attempt - 1` escalation hops
+as though every spent claim were a failure, and so escalated a tier on a step
+whose only prior claim had been REAPED — a lease expiry, nothing measured,
+nothing failed; and a human surface presented the pre-claim sample as the
+count while `step show` reported the post-claim one. The sampling half was
+already documented; the failure-vs-reap half was not documented because it was
+not DERIVABLE: no field on any row carried the distinction, and the event log
+that does (`step-failed` vs `lease-reaped`) is prunable and keyed by instance
+labels that repeat across a run's issues. attempt-numbering.md §"What to
+check" named this exact gap — "a consumer that needs that distinction needs a
+separate marker on the row" — and v23 is that marker.
+
+**Why the ratified arithmetic is untouched.** Like v11–v22, v23 is an
+amendment, not a stage: two additive columns with defaults, `hasColumn`-probed
+`ALTER`s so the migration is idempotent and re-runnable, and a rewind guard
+that probes the COLUMNS (the v13 form, since v23 adds no table and no index).
+It BACK-FILLS NOTHING, returning to the v11–v21 default deliberately: the
+event log could seed a count, but events are prunable, so a derived count is a
+lower bound that decays with retention — stamping it into a column would make
+the row assert more than the store can promise, where v22's back-fill read
+facts STANDING on the rows. Zero on a pre-v23 claim therefore means "no
+recorded breakdown", the same never-captured honesty as v21's stub marker;
+the counters are authoritative only for claims that ended after v23. The wire
+fields are `omitempty`, so every row with no counted outcome serializes
+byte-identically to v22's rendering.
 
 ### 2.1 The never-mutate rule
 

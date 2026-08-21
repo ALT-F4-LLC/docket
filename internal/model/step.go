@@ -83,18 +83,48 @@ type StepRow struct {
 	Proposal string `json:"proposal,omitempty"`
 	// Attempt is a monotonic, 0-based, spent-count of claims committed against
 	// this step: 0 = never claimed, N = claimed N times. It increments only at
-	// a winning claim's CAS commit and resets only on an explicit
-	// `step resolve --as retry`. `next --run` and `step show` read this column
-	// at fetch time, which for `next` is necessarily BEFORE that cycle's own
-	// claim — so a step about to be claimed for the first time reads 0. A
-	// rendered packet (`claim --render`) reads the SAME column AFTER the
-	// claim's increment has committed, so the packet for that identical claim
-	// reads 1. There are not two counters or two bases; it is one column
-	// sampled at two different moments. See docs/tdd/attempt-numbering.md
-	// (DKT-64) before wiring any threshold (e.g. "escalate when attempt > N")
-	// against this field — get the pre-/post-claim read timing right first.
-	Attempt      int     `json:"attempt"`
-	ExpectedCost float64 `json:"expected_cost"`
+	// a winning claim's CAS commit and NOWHERE ELSE — a heartbeat, a reap, a
+	// `step fail`, and a `step resolve --as retry` all leave it untouched (the
+	// retry refreshes the budget by moving `attempt_base`; the counter itself
+	// is never reset, DKT-86/DKT-90). It counts CLAIMS, not failures: a lease
+	// that expired and was reaped spent an attempt with nothing failing, so a
+	// consumer reading this as "attempts that failed" over-counts — that is
+	// FailedAttempts/ReapedClaims below (DKT-490). `next --run` and `step
+	// show` read this column at fetch time, which for `next` is necessarily
+	// BEFORE that cycle's own claim — so a step about to be claimed for the
+	// first time reads 0. A rendered packet (`claim --render`) reads the SAME
+	// column AFTER the claim's increment has committed, so the packet for that
+	// identical claim reads 1. There are not two counters or two bases; it is
+	// one column sampled at two different moments. See
+	// docs/tdd/attempt-numbering.md (DKT-64) before wiring any threshold
+	// (e.g. "escalate when attempt > N") against this field — get the
+	// pre-/post-claim read timing right first.
+	Attempt int `json:"attempt"`
+	// FailedAttempts and ReapedClaims are the OUTCOME breakdown of the claims
+	// Attempt counts (DKT-490): FailedAttempts is how many ended in an
+	// explicit `step fail` — the holder measured its own work and recorded the
+	// failure — and ReapedClaims is how many were reaped WITHOUT one (lease
+	// expiry, `max_step_duration`, a forced `step reap`): the holder went
+	// silent and nothing measured anything.
+	//
+	// They exist because Attempt alone cannot carry the distinction, and a
+	// consumer that needed it guessed: an escalation policy walking
+	// `attempt - 1` hops as though every spent claim were a failure escalated
+	// a tier on a step whose only prior claim had merely been reaped. With the
+	// breakdown on the row, "how many attempts genuinely failed" is
+	// FailedAttempts, read directly — no event-log reconstruction (the log is
+	// prunable, and instance labels repeat across a run's issues).
+	//
+	// A claim that RECORDED counts in neither — its ending is the artifact —
+	// and `step resolve --as retry` touches neither, exactly as it leaves
+	// Attempt alone. FailedAttempts+ReapedClaims never exceeds Attempt; the
+	// remainder is live claims, recorded completions, and pre-v23 history
+	// (zero on a pre-v23 claim means "no recorded breakdown", not "nothing
+	// happened"). Both sample at the same moment Attempt does. `omitempty`,
+	// so a row with no counted outcome serializes exactly as before.
+	FailedAttempts int     `json:"failed_attempts,omitempty"`
+	ReapedClaims   int     `json:"reaped_claims,omitempty"`
+	ExpectedCost   float64 `json:"expected_cost"`
 	// LeaseTTLS is SECONDS, per §11.4's `_s` suffix. Resolved from the
 	// workflow's [limits] for the step's class, then `lease.ttl.<class>`, then
 	// `lease.ttl.default`.

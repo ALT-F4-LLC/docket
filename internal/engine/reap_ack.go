@@ -116,6 +116,13 @@ func reapOneTx(
 		if err := db.ReapStepTx(tx, step.ID, nowMS); err != nil {
 			return err
 		}
+		// The outcome, counted where it is decided (DKT-490): this claim ended
+		// in a reap, not a failure — expiry and the forced path alike — and the
+		// row's breakdown says so, so a consumer needing "how many attempts
+		// failed" never has to reconstruct it from the (prunable) event feed.
+		if err := db.MarkStepClaimReapedTx(tx, step.ID, nowMS); err != nil {
+			return err
+		}
 		if err := recordEvent(tx, eventRecord{
 			Kind: EventLeaseReaped, RunID: runID,
 			Instance: step.Instance, IssueID: step.IssueID, Data: data, AtMS: nowMS,
@@ -154,10 +161,13 @@ func reapOneTx(
 		}
 
 		// Reflect the reap in the loaded snapshot, so the readiness pass sees
-		// the step it just freed rather than the row it read a moment ago.
+		// the step it just freed rather than the row it read a moment ago —
+		// the counter too, so the offer this same call renders carries the
+		// reap it performed.
 		step.Status = db.StepPending
 		step.Owner, step.TokenHash, step.ExpiresMS = "", "", 0
 		step.StartedMS = nil
+		step.ReapedClaims++
 	}
 	return nil
 }

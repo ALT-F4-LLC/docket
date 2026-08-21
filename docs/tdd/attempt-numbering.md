@@ -1,10 +1,12 @@
 # Note: `attempt` numbering across surfaces (DKT-64)
 
-Status: reconciliation note, not a new stage. Pins the semantics of the
-`steps.attempt` / `issues.attempt` column (introduced in
+Status: reconciliation note, not a new stage — 2026-08-21 · Pins the semantics
+of the `steps.attempt` / `issues.attempt` column (introduced in
 docs/tdd/claims-leases.md §2, schema v6) across every surface that renders it,
 after RUN-5 (2026-08-08) found the rendering inconsistent enough to mislead
-two independent consumers.
+two independent consumers. Amended for DKT-490 (schema v23): the retry-reset
+claim v16 obsoleted is corrected, and the failure-vs-reap marker §"What to
+check" called for now exists (`failed_attempts` / `reaped_claims`).
 
 ## The one counter
 
@@ -14,10 +16,18 @@ place it changes:
 - **Increment**: `internal/db/leases.go` — `attempt = attempt + 1` inside the
   CAS transaction of a *winning* claim. This is shared by issue-level and
   step-level leases (`docket issue claim`, `step claim`).
-- **Reset**: `internal/db/steps.go` (`step resolve --as retry`) sets
-  `attempt = 0` for that step instance. Nothing else ever changes it —
-  `heartbeat` and `release` both leave it untouched (docs/tdd/claims-leases.md
-  §9, R8/R9-adjacent rows).
+- **Nothing else ever changes it.** `heartbeat` and `release` leave it
+  untouched (docs/tdd/claims-leases.md §9, R8/R9-adjacent rows), a reap leaves
+  it untouched (the dead claim already counted itself), `step fail` leaves it
+  untouched (E-8: bumping at failure made the counter measure claims PLUS
+  failures), and — since v16, DKT-86/DKT-90 — `step resolve --as retry`
+  leaves it untouched too: retry refreshes the budget by moving
+  `steps.attempt_base` to the current attempt, so exhaustion compares
+  `attempt - attempt_base` against `max_attempts` while the counter itself
+  stays the usage ledger's key half. (This section originally said retry
+  resets `attempt` to 0; that was true until v16 and is exactly the zeroing
+  that made a retried step's second execution collide with the first's ledger
+  slot.)
 
 Semantically it is a **monotonic, 0-based, spent-count**: 0 means "never
 claimed", N means "claimed N times so far". It is never a 1-based
@@ -71,8 +81,18 @@ from the same number:
    same.
 2. `attempt` alone cannot distinguish an infrastructure-retry (e.g. a reaped
    lease with no real work done) from a genuine quality-failure retry — both
-   bump the same counter. A consumer that needs that distinction needs a
-   separate marker on the row, not a finer read of `attempt`.
+   bump the same counter. The separate marker that distinction needs exists
+   since schema v23 (DKT-490): `failed_attempts` counts claims ended by an
+   explicit `step fail`, `reaped_claims` counts claims reaped without one
+   (lease expiry, `max_step_duration`, forced `step reap`), and both ride on
+   the same rows `attempt` does (`next`, `dispatch open`, `step show`,
+   `step list`; `omitempty`, so they appear once nonzero). A claim that
+   recorded counts in neither, and `step resolve --as retry` touches neither.
+   `failed_attempts + reaped_claims` never exceeds `attempt`; the remainder
+   is live claims, recorded completions, and pre-v23 history (the migration
+   back-fills nothing, so zero on pre-v23 claims means "no recorded
+   breakdown"). An escalation policy that means "escalate after N *failures*"
+   reads `failed_attempts`, and never `attempt`.
 
 ## Regression coverage
 
@@ -82,3 +102,9 @@ read via the ready-steps path before any claim is `0`; the packet rendered
 by the claim that takes it to `1` shows `attempt: 1`; a subsequent read of
 the same step (post-claim) also shows `1` — proving it is one field sampled
 at two moments, not two counters.
+
+`internal/engine/attempt_breakdown_test.go` pins the outcome breakdown
+(DKT-490): an expiry reap counts `reaped_claims` and not `failed_attempts`,
+`step fail` counts the reverse in both its branches, a lazy reap at `claim`
+counts like the scheduler's, a recorded park and its `resolve --as retry`
+touch neither, and `attempt` moves at claims alone throughout.

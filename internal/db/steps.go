@@ -144,19 +144,31 @@ type Step struct {
 	// ever" — so `step resolve --as retry` refreshes the budget by moving this
 	// base to the current attempt instead of zeroing the counter. Exhaustion
 	// compares Attempt-AttemptBase against MaxAttempts.
-	AttemptBase  int
-	MaxAttempts  *int
-	ExpectedCost float64
-	Owner        string
-	TokenHash    string
-	ExpiresMS    int64
-	StartedMS    *int64
-	ActivityMS   *int64
-	SagaStage    string
-	GateTrail    string
-	Routing      string
-	Metadata     string
-	ContextBytes int
+	AttemptBase int
+	// FailedAttempts and ReapedClaims are the OUTCOME breakdown of the claims
+	// Attempt counts (v23, DKT-490): how many ended in an explicit `step fail`,
+	// and how many were reaped without one (lease expiry, `max_step_duration`,
+	// `step reap`). Attempt alone cannot answer that — it spends one count per
+	// claim whatever the ending — and a consumer that read it as "attempts
+	// that failed" escalated on claims that never failed at all. A claim that
+	// RECORDED counts in neither, and `step resolve --as retry` touches
+	// neither. FailedAttempts+ReapedClaims never exceeds Attempt; the
+	// remainder is live claims, recorded completions, and pre-v23 history
+	// (the migration back-fills nothing — see migrateV22ToV23).
+	FailedAttempts int
+	ReapedClaims   int
+	MaxAttempts    *int
+	ExpectedCost   float64
+	Owner          string
+	TokenHash      string
+	ExpiresMS      int64
+	StartedMS      *int64
+	ActivityMS     *int64
+	SagaStage      string
+	GateTrail      string
+	Routing        string
+	Metadata       string
+	ContextBytes   int
 	// Materialized reports a step the ENGINE minted rather than one the pinned
 	// definition declares — the `<step>-held` human step a tripped `hold_spread`
 	// creates (payloads-thresholds §7.7 H4). Its spec is synthesized from the
@@ -197,7 +209,8 @@ func (s *Step) InSaga() bool { return s.SagaStage != "" }
 
 const stepFullSelect = `
 SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, instance,
-       kind, executor, class, status, attempt, attempt_base, max_attempts, expected_cost,
+       kind, executor, class, status, attempt, attempt_base, failed_attempts,
+       reaped_claims, max_attempts, expected_cost,
        owner, token_hash, expires_ms, started_ms, activity_ms, saga_stage,
        gate_trail, routing, metadata, context_bytes, materialized, usage_recorded,
        created_at_ms, updated_at_ms, row_version, work_root
@@ -294,7 +307,8 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 	err := s.Scan(
 		&step.ID, &step.RunID, &step.IssueID, &step.WorkflowID, &step.StepName,
 		&step.Ordinal, &sibling, &step.Instance, &step.Kind, &executor, &class,
-		&step.Status, &step.Attempt, &step.AttemptBase, &maxAtt, &step.ExpectedCost,
+		&step.Status, &step.Attempt, &step.AttemptBase, &step.FailedAttempts,
+		&step.ReapedClaims, &maxAtt, &step.ExpectedCost,
 		&owner, &tokenHash, &expires, &started, &activity, &saga,
 		&gateTrail, &routing, &metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
@@ -607,6 +621,14 @@ func SetStepMetadataTx(tx *sql.Tx, id int, metadata string, nowMS int64) error {
 // one attempt per claim, for all time (claims-leases §5), which is exactly what
 // §9 item 4's "attempt trail is complete" asks for.
 //
+// It is MECHANISM, not classification: `step fail`'s below-the-budget branch
+// shares it to return a failed step to the pool, so the outcome counters
+// (DKT-490) deliberately live outside it — each caller records what actually
+// ended the claim, MarkStepClaimReapedTx on the reap paths and
+// MarkStepAttemptFailedTx on the failure paths. Folding either bump in here
+// would classify a failure as a reap at exactly the call site that knows
+// better.
+//
 // This is one of the two places a lease write may happen (§6.3: "lazy reaping
 // confined to next/claim"). No read verb reaches it.
 func ReapStepTx(tx *sql.Tx, id int, nowMS int64) error {
@@ -655,6 +677,57 @@ func ReleaseStepLeaseTx(tx *sql.Tx, id int, nowMS int64) error {
 	)
 	if err != nil {
 		return fmt.Errorf("releasing the step lease: %w", err)
+	}
+	return nil
+}
+
+// MarkStepAttemptFailedTx counts one claim ended by an explicit `step fail`
+// into the step's outcome breakdown (v23, DKT-490).
+//
+// It exists because `attempt` spends one count per claim WHATEVER the ending,
+// and a consumer that needed "how many attempts genuinely failed" had nothing
+// to read but the event log — which is prunable, and whose instance labels
+// repeat across a run's issues. Both `step fail` branches call it (the
+// below-budget return to the pool and the exhausted routing): each is a claim
+// whose holder measured its own work and recorded the failure.
+//
+// It is a COUNTER BUMP ONLY — the lease write it accompanies (ReapStepTx or
+// RetireStepTokenTx) stays the caller's, per ReapStepTx's mechanism/
+// classification split. It follows SetStepMetadataTx's shape — row_version
+// bump, updated_at_ms — because a counter move is a step-row mutation
+// CAS-guarded readers must see.
+func MarkStepAttemptFailedTx(tx *sql.Tx, id int, nowMS int64) error {
+	_, err := tx.Exec(
+		`UPDATE steps SET failed_attempts = failed_attempts + 1, updated_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE id = ?`,
+		nowMS, id,
+	)
+	if err != nil {
+		return fmt.Errorf("counting the failed attempt: %w", err)
+	}
+	return nil
+}
+
+// MarkStepClaimReapedTx counts one claim reaped WITHOUT a recorded failure
+// into the step's outcome breakdown (v23, DKT-490) — MarkStepAttemptFailedTx's
+// other half, called on the reap paths only: the lazy expiry reap (`next`,
+// `dispatch open`, `claim`) and the forced `step reap`.
+//
+// The distinction is the whole point. A reaped claim spent an `attempt`
+// without anything failing — the holder went silent, or an operator asserted
+// it dead — and an escalation policy that cannot tell that from a measured
+// failure escalates on it, which is the DKT-490 misread. `step fail`'s return
+// to the pool shares ReapStepTx's row reset but never this counter.
+func MarkStepClaimReapedTx(tx *sql.Tx, id int, nowMS int64) error {
+	_, err := tx.Exec(
+		`UPDATE steps SET reaped_claims = reaped_claims + 1, updated_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE id = ?`,
+		nowMS, id,
+	)
+	if err != nil {
+		return fmt.Errorf("counting the reaped claim: %w", err)
 	}
 	return nil
 }

@@ -2004,7 +2004,9 @@ The `next row` shape (engine-spec §11.4):
 | `voters` | the step's opaque voter list; **present only on vote steps** |
 | `proposal` | `DKT-VN` of the proposal this vote step opened; **absent** until it is opened |
 | `class` | opaque concurrency-accounting key |
-| `attempt` | claims made against this step, ever |
+| `attempt` | **claims made against this step, ever** — a 0-based spent-count, incremented at claim time ONLY. Nothing else moves it: not a reap, not `step fail`, not `step resolve --as retry` (retry refreshes the budget base; the counter is never reset). A `next` row necessarily samples it BEFORE the claim it invites, so a fresh step reads `0` and a step with one dead claim reads `1`; the packet/`step show` after that claim reads one higher. It counts claims, NOT failures — a reaped lease spends one with nothing failing. An escalation policy wants `failed_attempts` below, not this |
+| `failed_attempts` | how many of those claims ended in an explicit `step fail` — the holder measured its work and recorded the failure (DKT-490). **Omitted when 0** |
+| `reaped_claims` | how many were reaped **without** a failure — lease expiry, `max_step_duration`, forced `step reap`: the holder went silent, nothing was measured (DKT-490). **Omitted when 0.** `failed_attempts + reaped_claims ≤ attempt`; the remainder is live claims, recorded completions, and pre-v23 history (the migration back-fills nothing) |
 | `expected_cost` | declared cost; accrues to the run's budget floor when this step is claimed |
 | `lease_ttl_s` | lease TTL in **seconds** |
 | `stage` | start-order constraint **within this offer**: do not start a row until every lower-stage row in the set has completed; rows sharing a stage run concurrently. `0` (omitted) means unstaged. NOT a priority — for `ready` rows it is a hint, for `staged` rows `claim` itself enforces the predicate |
@@ -3236,12 +3238,12 @@ then **completed** with an artifact.
 | `step heartbeat STEP-N` | **yes** | extends the lease; does not touch `attempt` |
 | `step reap STEP-N --reason R` | no | forced reap of a dead holder's claim, without waiting out the lease |
 | `step complete STEP-N --artifact-file F …` | **yes** (stages 0–1) | the saga |
-| `step fail STEP-N [--note …] [--metadata …]` | **yes** | routes per `on_fail` when the CLAIM count reaches `max_attempts` (E-8: attempt counts claims, never failures) |
+| `step fail STEP-N [--note …] [--metadata …]` | **yes** | routes per `on_fail` when the CLAIM count reaches `max_attempts` (E-8: attempt counts claims, never failures); counts the failure into the row's `failed_attempts` (a reap counts into `reaped_claims` instead — DKT-490) |
 | `step annotate STEP-N --metadata JSON` | no | merges opaque KV onto a **finished** step's record; event-logged |
 | `step approve\|reject STEP-N [--note …] [--value V]` | no | `type="human"` gate steps, and a materialized held step of either kind (a vote-minted one once a failed tally parks it) |
-| `step resolve STEP-N --as …` | no | `waiting-human` resolutions; `retry` **resets attempts** |
+| `step resolve STEP-N --as …` | no | `waiting-human` resolutions; `retry` **resets the retry budget** (moves `attempt_base`) — `attempt` itself and the `failed_attempts`/`reaped_claims` breakdown are never reset and not incremented by it |
 | `step show STEP-N` | no | read-only; effective status |
-| `step list (--run RUN-N \| --issue ISSUE-N)` | no | read-only; steps with id, run, instance, issue, kind, effective status, attempt, expected_cost — in (issue, creation) order. Scope by `--run` (the whole run), `--issue` (that issue across every run holding a step for it), or both (that issue inside that run); at least one is required. The budget-projection enumeration (DKT-54): step ids are a store-wide sequence, so id arithmetic cannot enumerate a run. `--issue` is the issue-shaped question a conductor actually holds (DKT-244). Watch-eligible. |
+| `step list (--run RUN-N \| --issue ISSUE-N)` | no | read-only; steps with id, run, instance, issue, kind, effective status, attempt (plus its `failed_attempts`/`reaped_claims` breakdown when nonzero — DKT-490), expected_cost — in (issue, creation) order. Scope by `--run` (the whole run), `--issue` (that issue across every run holding a step for it), or both (that issue inside that run); at least one is required. The budget-projection enumeration (DKT-54): step ids are a store-wide sequence, so id arithmetic cannot enumerate a run. `--issue` is the issue-shaped question a conductor actually holds (DKT-244). Watch-eligible. |
 | `step context STEP-N [--meta]` | no | re-emits `context` read-only |
 | `step render STEP-N [--template F]` | no | context bundle → rendered work packet |
 | `step artifacts STEP-N` | no | read-only; lists what the step PRODUCED, sizes not bodies |

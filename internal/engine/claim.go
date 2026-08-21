@@ -142,6 +142,12 @@ func claimStepWithGates(
 		if err := db.ReapStepTx(tx, fresh.ID, opts.NowMS); err != nil {
 			return nil, err
 		}
+		// The outcome breakdown (DKT-490): a claim reaped here spent an
+		// attempt in silence, and the counter is what keeps that from reading
+		// as a failure on the row this same transaction re-claims.
+		if err := db.MarkStepClaimReapedTx(tx, fresh.ID, opts.NowMS); err != nil {
+			return nil, err
+		}
 		if err := recordEvent(tx, eventRecord{
 			Kind: EventLeaseReaped, RunID: fresh.RunID,
 			Instance: fresh.Instance, IssueID: fresh.IssueID,
@@ -151,6 +157,7 @@ func claimStepWithGates(
 		fresh.Status = db.StepPending
 		fresh.Owner, fresh.TokenHash, fresh.ExpiresMS = "", "", 0
 		fresh.StartedMS = nil
+		fresh.ReapedClaims++
 	}
 
 	spec := materializedSpec(defs[fresh.WorkflowID], fresh, sched.holdTally)

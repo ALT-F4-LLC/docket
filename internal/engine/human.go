@@ -722,7 +722,14 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 
 	if !exhausted {
 		// Back to the pool, lease cleared, schedule-to-close clock reset.
+		// ReapStepTx is the MECHANISM here, not the classification: this claim
+		// ended in a recorded failure, so it counts into `failed_attempts`,
+		// never `reaped_claims` (DKT-490) — the breakdown is what lets a
+		// dispatcher escalate on measured failures and shrug at silences.
 		if err := db.ReapStepTx(tx, step.ID, nowMS); err != nil {
+			return err
+		}
+		if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
 			return err
 		}
 		if err := recordEvent(tx, eventRecord{
@@ -765,6 +772,12 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	status := statusForRouting(routing)
 
 	if err := db.RetireStepTokenTx(tx, step.ID); err != nil {
+		return err
+	}
+	// The exhausting failure counts like every other (DKT-490): the routed
+	// step's row still answers "how many attempts failed" — which is exactly
+	// what an operator reading the park, or a `step show` beside it, asks.
+	if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
 	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {

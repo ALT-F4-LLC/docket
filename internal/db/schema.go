@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 22
+const currentSchemaVersion = 23
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -191,6 +191,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	20: migrateV19ToV20,
 	21: migrateV20ToV21,
 	22: migrateV21ToV22,
+	23: migrateV22ToV23,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -555,6 +556,8 @@ CREATE TABLE IF NOT EXISTS steps (
 	class          TEXT,
 	status         TEXT    NOT NULL DEFAULT 'pending',
 	attempt        INTEGER NOT NULL DEFAULT 0,
+	failed_attempts INTEGER NOT NULL DEFAULT 0,
+	reaped_claims  INTEGER NOT NULL DEFAULT 0,
 	max_attempts   INTEGER,
 	expected_cost  REAL    NOT NULL DEFAULT 0,
 	owner          TEXT,
@@ -2123,6 +2126,75 @@ func migrateV21ToV22(tx *sql.Tx) error {
 	return nil
 }
 
+// v23AddedColumns is v23's whole schema change: two counters on `steps` —
+// `failed_attempts` and `reaped_claims`, the OUTCOME breakdown of the claims
+// `attempt` counts (DKT-490).
+//
+// `attempt` is a claims-so-far spent-count and says nothing about how each
+// claim ended, and that silence misled two independent consumers in one run:
+// an escalation policy read it as "attempts that failed" and walked one
+// escalation hop too many when a claim had merely been reaped (a lease expiry
+// spends a claim without anything failing), and a human surface presented the
+// pre-claim sample as the count while `step show` reported the post-claim one.
+// Documentation fixes the sampling half; the failure-vs-reap half needs a fact
+// no column carried. The event log records both endings (`step-failed`,
+// `lease-reaped`) but is prunable and per-row derivation from it is exactly
+// the consumer-side counting these columns exist to replace.
+//
+// So the row states it: `failed_attempts` counts claims ended by an explicit
+// `step fail`, `reaped_claims` counts claims reaped without one (lease expiry,
+// `max_step_duration`, `step reap`). A claim that RECORDED counts in neither —
+// its ending is the artifact — and `step resolve --as retry` touches neither,
+// exactly as it leaves `attempt` alone. failed + reaped never exceeds
+// `attempt`; the remainder is live claims, recorded completions, and pre-v23
+// history.
+var v23AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "failed_attempts",
+		`ALTER TABLE steps ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0`},
+	{"steps", "reaped_claims",
+		`ALTER TABLE steps ADD COLUMN reaped_claims INTEGER NOT NULL DEFAULT 0`},
+}
+
+// v23ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v13 through v22 use and for the same reason: v23 adds no table and no
+// index, so a database stamped 23 by a binary built mid-change carries every
+// v22 sentinel, the rewind never fires, and the breakdown columns never arrive.
+var v23ColumnSentinels = []struct{ table, column string }{
+	{"steps", "failed_attempts"},
+	{"steps", "reaped_claims"},
+}
+
+// migrateV22ToV23 adds the attempt-breakdown columns.
+//
+// It BACK-FILLS NOTHING, back to the v11–v21 default, and deliberately so
+// despite the event log holding `step-failed` and `lease-reaped` rows a count
+// could be derived from: events are PRUNABLE, so a derived count is a lower
+// bound that decays with retention, and stamping it into a column would make
+// the row assert more than the store can promise. v22's precedent allows a
+// back-fill that reads facts standing on the rows; a log is not that. Zero on
+// a pre-v23 claim therefore means "no recorded breakdown", the same
+// never-captured honesty as v21's stub marker — the counters are authoritative
+// only for claims that ended after v23.
+//
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration probes
+// first and stays re-runnable, the same shape v10 through v22 use.
+func migrateV22ToV23(tx *sql.Tx) error {
+	for _, col := range v23AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v22 to v23: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v22 to v23: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -2620,6 +2692,21 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 21
+				break
+			}
+		}
+	}
+
+	// The v23 guard, same COLUMN form, same reason.
+	if version >= 23 {
+		for _, col := range v23ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v23 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 22
 				break
 			}
 		}

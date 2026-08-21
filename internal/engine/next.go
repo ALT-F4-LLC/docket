@@ -132,7 +132,9 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// NOT incremented here: the claim that died already incremented it, and the
 	// next claim will increment again, so the trail counts one attempt per
 	// claim for all time (claims-leases §5) — which is exactly what §9 item 4's
-	// "the attempt trail is complete" asks for.
+	// "the attempt trail is complete" asks for. What IS counted here is the
+	// OUTCOME: the reap bumps `reaped_claims` (DKT-490), so the row itself says
+	// this spent attempt was a silence, not a failure.
 	//
 	// Stage 6 moved the body into reapExpiredTx, SHARED WITH `dispatch open`,
 	// because §5.2 P5 requires that verb to perform "the same lazy reap `next`
@@ -515,12 +517,18 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		// The issue's frozen labels, so a dispatcher can apply label-keyed
 		// routing policy BEFORE it spawns. Without them every such rule fell
 		// through to its default silently (see model.StepRow.Labels).
-		Labels:       sched.LabelsFor(step.IssueID),
-		Attempt:      step.Attempt,
-		ExpectedCost: step.ExpectedCost,
-		LeaseTTLS:    int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
-		Status:       db.StepReady,
-		Metadata:     metadata,
+		Labels:  sched.LabelsFor(step.IssueID),
+		Attempt: step.Attempt,
+		// The outcome breakdown rides beside the count it explains (DKT-490):
+		// a dispatcher deciding whether to escalate reads how many of those
+		// attempts FAILED from the row, instead of guessing it from `attempt`
+		// — which also counts claims that were merely reaped.
+		FailedAttempts: step.FailedAttempts,
+		ReapedClaims:   step.ReapedClaims,
+		ExpectedCost:   step.ExpectedCost,
+		LeaseTTLS:      int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
+		Status:         db.StepReady,
+		Metadata:       metadata,
 	}, nil
 }
 
@@ -565,9 +573,16 @@ type StepListEntry struct {
 	// inventory row too: `step list` is where a caller reconciling this
 	// listing against a `run repin` CONFLICT sees WHICH `ready` rows still
 	// carry an unreaped claim the repin is refusing over.
-	LeaseExpired bool    `json:"lease_expired,omitempty"`
-	Attempt      int     `json:"attempt"`
-	ExpectedCost float64 `json:"expected_cost"`
+	LeaseExpired bool `json:"lease_expired,omitempty"`
+	Attempt      int  `json:"attempt"`
+	// FailedAttempts / ReapedClaims are StepRow's fields of the same name
+	// (DKT-490), on the inventory row too: `step list` is where an operator
+	// scanning a run asks "why is this step on attempt 3", and the breakdown
+	// is the answer — how many of those claims failed outright vs were reaped
+	// with nothing measured.
+	FailedAttempts int     `json:"failed_attempts,omitempty"`
+	ReapedClaims   int     `json:"reaped_claims,omitempty"`
+	ExpectedCost   float64 `json:"expected_cost"`
 }
 
 // RunStepList answers `docket step list --run RUN-N`: every step of one run,
@@ -601,16 +616,18 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	out := make([]StepListEntry, 0, len(steps))
 	for _, step := range steps {
 		out = append(out, StepListEntry{
-			Step:          model.FormatStepID(step.ID),
-			Run:           model.FormatRunID(runID),
-			Instance:      step.Instance,
-			Issue:         model.FormatID(step.IssueID),
-			Kind:          step.Kind,
-			Status:        EffectiveStatus(sched, step),
-			BlockedReason: BlockedReason(sched, step),
-			LeaseExpired:  sched.Expired(step),
-			Attempt:       step.Attempt,
-			ExpectedCost:  step.ExpectedCost,
+			Step:           model.FormatStepID(step.ID),
+			Run:            model.FormatRunID(runID),
+			Instance:       step.Instance,
+			Issue:          model.FormatID(step.IssueID),
+			Kind:           step.Kind,
+			Status:         EffectiveStatus(sched, step),
+			BlockedReason:  BlockedReason(sched, step),
+			LeaseExpired:   sched.Expired(step),
+			Attempt:        step.Attempt,
+			FailedAttempts: step.FailedAttempts,
+			ReapedClaims:   step.ReapedClaims,
+			ExpectedCost:   step.ExpectedCost,
 		})
 	}
 	return out, nil
