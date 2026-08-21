@@ -1818,6 +1818,7 @@ a **project migration** (`<id>` plus `--project`, no status arg).
 | Flag | Short | Type | Default | Notes |
 |---|---|---|---|---|
 | `--if-version` | — | int | `0` | apply only at this version; `CONFLICT` otherwise (enforced even on a no-op move). Status moves only — with `--project` it is a `VALIDATION_ERROR` |
+| `--note` | — | string | `""` | why the issue moved; recorded as an issue **comment** in the **same transaction** as the move, so a refused move records no comment (DKT-480). Recorded even on a no-op move. Status moves only — with `--project` it is a `VALIDATION_ERROR` |
 | `--project` | — | string | `""` | migrate the issue **and its whole sub-issue tree** to another project in the shared store |
 
 **Migration (`--project`)** re-homes work that landed in the wrong project —

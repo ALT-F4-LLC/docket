@@ -120,6 +120,56 @@ func InsertEngineComment(tx *sql.Tx, issueID int, body string, nowMS int64) (int
 	return int(id64), nil
 }
 
+// InsertNoteTx records an author-attributed comment against the caller's
+// already-open transaction: the row `issue comment add` writes, minus the
+// transaction it opens for itself. It is what a verb taking `--note` uses to
+// land the note and the mutation it explains in ONE transaction (DKT-480), so
+// a failed move leaves no orphan comment and a recorded comment never narrates
+// a move that did not happen.
+//
+// Unlike InsertEngineComment the author is the caller's, not EngineAuthor: a
+// note an operator typed is an operator's comment, indistinguishable from the
+// two-verb form it replaces. It touches the issue's updated_at and records the
+// same `comment_added` activity CreateComment does, for the same reasons.
+//
+// The updated_at touch runs FIRST so a missing issue is ErrNotFound rather than
+// a foreign-key error from the insert.
+//
+// The caller supplies the timestamp rather than this reading the clock, so the
+// note carries the same stamp as the mutation it narrates.
+func InsertNoteTx(tx *sql.Tx, issueID int, body, author, now string) (int, error) {
+	res, err := tx.Exec(`UPDATE issues SET updated_at = ? WHERE id = ?`, now, issueID)
+	if err != nil {
+		return 0, fmt.Errorf("updating issue timestamp: %w", err)
+	}
+	if err := requireAffected(res); err != nil {
+		return 0, err
+	}
+
+	res, err = tx.Exec(
+		`INSERT INTO comments (issue_id, body, author, created_at)
+		 VALUES (?, ?, ?, ?)`,
+		issueID,
+		body,
+		author,
+		now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("inserting comment: %w", err)
+	}
+
+	id64, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("getting last insert id: %w", err)
+	}
+
+	if err := RecordActivity(tx, issueID, "comment_added", "", body, author); err != nil {
+		return 0, err
+	}
+
+	return int(id64), nil
+}
+
 // ListComments retrieves all comments for an issue, ordered by the auto-minted
 // `id` alone — INSERTION ORDER, which for the activity trail is the only order
 // that is always true (DKT-378).

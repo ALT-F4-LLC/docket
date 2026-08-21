@@ -519,7 +519,21 @@ func UpdateIssue(db *sql.DB, id int, updates map[string]interface{}, changedBy s
 // The version is bumped either way, so concurrent CAS writers are detected
 // even when this caller did not supply a precondition.
 func UpdateIssueCAS(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int) error {
-	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, nil)
+	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, nil, "")
+}
+
+// UpdateIssueCASNote is UpdateIssueCAS with a note recorded as an issue comment
+// in the SAME transaction as the update (DKT-480), so moving an issue and
+// saying why is one verb: the two either both land or neither does, where the
+// two-verb `issue comment add` + `issue move` form can leave a comment
+// narrating a move that was refused.
+//
+// An empty note is exactly UpdateIssueCAS, down to the writes it makes. A note
+// with no field to update still records — a move to the status an issue already
+// holds must not swallow the reason it was given — and does NOT bump the
+// issue's version, since a comment never has.
+func UpdateIssueCASNote(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int, note string) error {
+	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, nil, note)
 }
 
 // UpdateIssueCASLease is UpdateIssueCAS for a verb that ends a lease: when the
@@ -532,16 +546,21 @@ func UpdateIssueCAS(db *sql.DB, id int, updates map[string]interface{}, changedB
 // is outside the lease mechanism, so a repo that never claims sees no change on
 // any verb (engine-spec.md §9 item 8).
 func UpdateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int, token string) error {
-	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, &token)
+	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, &token, "")
 }
 
 // updateIssueCASLease is the shared implementation. A nil token means the verb
-// is not lease-mediated and no lease check runs at all.
-func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int, token *string) error {
+// is not lease-mediated and no lease check runs at all; an empty note means
+// nothing is commented and the write set is exactly what it was before notes
+// existed.
+func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int, token *string, note string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+
 	if len(updates) == 0 {
 		// Still enforce the precondition: `--if-version` on a no-op edit must
 		// not silently succeed against a row that moved underneath the caller.
-		if ifVersion == nil {
+		// A note is a write in its own right, so it opens the transaction too.
+		if ifVersion == nil && note == "" {
 			return nil
 		}
 		tx, err := db.Begin()
@@ -549,11 +568,18 @@ func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, cha
 			return fmt.Errorf("beginning transaction: %w", err)
 		}
 		defer tx.Rollback()
-		if err := CheckAndBumpVersion(tx, "issues", id, ifVersion); err != nil {
-			return err
+		if ifVersion != nil {
+			if err := CheckAndBumpVersion(tx, "issues", id, ifVersion); err != nil {
+				return err
+			}
 		}
 		if token != nil {
 			if err := AuthorizeLeaseMutation(tx, id, *token, model.NowMS()); err != nil {
+				return err
+			}
+		}
+		if note != "" {
+			if _, err := InsertNoteTx(tx, id, note, changedBy, now); err != nil {
 				return err
 			}
 		}
@@ -606,7 +632,7 @@ func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, cha
 	}
 
 	setClauses = append(setClauses, "updated_at = ?")
-	args = append(args, time.Now().UTC().Format(time.RFC3339))
+	args = append(args, now)
 	args = append(args, id)
 
 	query := fmt.Sprintf(
@@ -631,6 +657,14 @@ func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, cha
 			if err := RecordActivity(tx, id, field, oldVal, newVal, changedBy); err != nil {
 				return err
 			}
+		}
+	}
+
+	// The note last, and inside the same transaction: it explains the update
+	// above, so it commits with it or not at all.
+	if note != "" {
+		if _, err := InsertNoteTx(tx, id, note, changedBy, now); err != nil {
+			return err
 		}
 	}
 

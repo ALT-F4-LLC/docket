@@ -24,6 +24,15 @@ in the shared store:
 
   docket issue move DKT-1 --project <prefix|name|identity|id>
 
+--note records the reason for the move as an issue comment, in the SAME
+transaction as the move itself:
+
+  docket issue move DKT-1 done --note "closed on RUN-40's outcome"
+
+It is the two-verb ` + "`issue comment add` + `issue move`" + ` form in one verb,
+and atomic: a refused move records no comment, and a recorded comment never
+narrates a move that did not happen. Applies to status moves only.
+
 Migration re-homes work that landed in the wrong project (a gap recorded by
 a run whose repository does not own the fix, most commonly). Labels re-map
 by name into the target project; comments, relations, and activity ride
@@ -40,6 +49,8 @@ root, not alone.`,
 			return err
 		}
 
+		note, _ := cmd.Flags().GetString("note")
+
 		if project, _ := cmd.Flags().GetString("project"); project != "" {
 			if len(args) != 1 {
 				return cmdErr(fmt.Errorf(
@@ -49,6 +60,12 @@ root, not alone.`,
 			if cmd.Flags().Changed("if-version") {
 				return cmdErr(fmt.Errorf(
 					"--if-version applies to status moves only"), output.ErrValidation)
+			}
+			// Refused rather than dropped: a migration records no note, and a
+			// note silently discarded is worse than one that never landed.
+			if note != "" {
+				return cmdErr(fmt.Errorf(
+					"--note applies to status moves only"), output.ErrValidation)
 			}
 			return moveIssueToProject(cmd, id, project)
 		}
@@ -77,9 +94,11 @@ root, not alone.`,
 
 		if oldStatus == newStatus {
 			// A no-op move must still honor --if-version, so a caller cannot
-			// read a stale version and conclude its precondition held.
-			if ifVersion != nil {
-				if err := db.UpdateIssueCAS(conn, id, nil, config.DefaultAuthor(), ifVersion); err != nil {
+			// read a stale version and conclude its precondition held — and it
+			// must still record --note, since the two-verb form it replaces
+			// would have.
+			if ifVersion != nil || note != "" {
+				if err := db.UpdateIssueCASNote(conn, id, nil, config.DefaultAuthor(), ifVersion, note); err != nil {
 					if e := casError(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
 						return e
 					}
@@ -94,7 +113,7 @@ root, not alone.`,
 			return nil
 		}
 
-		if err := db.UpdateIssueCAS(conn, id, map[string]interface{}{"status": string(newStatus)}, config.DefaultAuthor(), ifVersion); err != nil {
+		if err := db.UpdateIssueCASNote(conn, id, map[string]interface{}{"status": string(newStatus)}, config.DefaultAuthor(), ifVersion, note); err != nil {
 			if e := casError(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
 				return e
 			}
@@ -161,5 +180,7 @@ func init() {
 	addIfVersionFlag(moveCmd)
 	moveCmd.Flags().String("project", "",
 		"Migrate the issue (and its sub-issue tree) to this project instead of moving status; prefix, name, identity path, or row id")
+	moveCmd.Flags().String("note", "",
+		"Why the issue moved; recorded as an issue comment in the same transaction as the move (status moves only)")
 	issueCmd.AddCommand(moveCmd)
 }
