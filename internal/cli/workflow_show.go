@@ -101,7 +101,9 @@ func renderWorkflowShow(wf *model.Workflow) string {
 	}
 
 	fmt.Fprintf(&b, "\nsteps (%d):\n", len(def.Steps))
+	var total float64
 	for _, step := range def.Steps {
+		total += stepExpectedCost(step)
 		fmt.Fprintf(&b, "  %-20s %s", step.Name, describeStepClass(step))
 		if len(step.After) > 0 {
 			fmt.Fprintf(&b, "  after=[%s]", strings.Join(step.After, ", "))
@@ -109,7 +111,7 @@ func renderWorkflowShow(wf *model.Workflow) string {
 		if step.Loop {
 			b.WriteString("  loop")
 		}
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "  %s\n", describeStepCost(step))
 		// Gates decide whether a step's work is accepted, so a definition
 		// summary that omitted them would hide the checks it imposes.
 		for _, gate := range step.Gates {
@@ -120,7 +122,67 @@ func renderWorkflowShow(wf *model.Workflow) string {
 			b.WriteString("\n")
 		}
 	}
+	// The floor a plan's budget arithmetic is compared against. It is stated
+	// here because it existed NOWHERE a reader could reach: the per-step values
+	// lived only in the registered TOML, so budgeting a run meant re-summing a
+	// file by hand (DKT-528).
+	fmt.Fprintf(&b, "\nexpected_cost total: %.2f  "+
+		"(fanout expanded; `when`-gated and `loop` steps included)\n", total)
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// stepSiblings is how many expanded rows one [[step]] produces — one per
+// `fanout` hint, or one when it does not fan out (internal/workflow/expand.go).
+func stepSiblings(step *workflow.Step) int {
+	if len(step.Fanout) == 0 {
+		return 1
+	}
+	return len(step.Fanout)
+}
+
+// stepExpectedCost is what one [[step]] contributes to the workflow's
+// expected-cost floor, WITH FANOUT EXPANDED.
+//
+// `expected_cost` is PER EXPANDED SIBLING: expansion copies the declared value
+// onto every sibling row, and each sibling claims separately, so the budget
+// floor accrues it once per sibling (internal/engine/budget.go §4.3 sums the
+// per-claim events). A four-hint step declaring 0.60 therefore contributes 2.40.
+func stepExpectedCost(step *workflow.Step) float64 {
+	if step.ExpectedCost == nil {
+		return 0
+	}
+	return *step.ExpectedCost * float64(stepSiblings(step))
+}
+
+// describeStepCost renders a step's declared cost. Every step carries the
+// column — a step that declares nothing renders `cost=-` rather than being
+// silently omitted, so a reader can tell "declares no cost" from "the summary
+// does not show costs".
+//
+// A declared `expected_cost = 0` renders as `cost=-` too: registration
+// materializes the §11.1 default into the parsed form (applyDefaults), so an
+// absent field and an explicit zero are the same stored value by the time this
+// reads it, and both contribute nothing to the floor.
+func describeStepCost(step *workflow.Step) string {
+	declared := 0.0
+	if step.ExpectedCost != nil {
+		declared = *step.ExpectedCost
+	}
+	if declared == 0 {
+		return "cost=-"
+	}
+
+	out := fmt.Sprintf("cost=%.2f", declared)
+	if n := stepSiblings(step); n > 1 {
+		out = fmt.Sprintf("cost=%.2f x%d = %.2f", declared, n, declared*float64(n))
+	}
+	// A `loop` step is not expanded at ordinal 0 at all: it instantiates once
+	// per loop entry (§11.3 (3)). The total counts one entry, which is the
+	// floor — every additional fix round costs this much again.
+	if step.Loop {
+		out += " per loop entry"
+	}
+	return out
 }
 
 // renderMatch renders a `[match]` clause's four terms, omitting the absent

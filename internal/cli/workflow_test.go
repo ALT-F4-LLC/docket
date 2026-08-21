@@ -241,6 +241,114 @@ func TestWorkflowShowSelectsHighestVersion(t *testing.T) {
 	}
 }
 
+// costWorkflow exercises the three cases the cost column has to render apart:
+// a plain step declaring a cost, a fanout step whose declared cost is PER
+// SIBLING, and a step declaring no cost at all.
+const costWorkflow = `
+[pipeline]
+name = "costed"
+version = 1
+[[step]]
+name = "implement"
+after = []
+executor = "implement"
+emits = "change-summary"
+expected_cost = 1.50
+[[step]]
+name = "review"
+after = ["implement"]
+fanout = ["judge-a", "judge-b", "judge-c", "judge-d"]
+emits = "findings"
+expected_cost = 0.60
+[[step]]
+name = "approve"
+after = ["review"]
+type = "human"
+on_fail = "skip"
+`
+
+// TestWorkflowShowRendersExpectedCost: the human summary carries the per-step
+// `expected_cost` and a fanout-expanded total, which is the floor a plan's
+// budget arithmetic is compared against (DKT-528). Before this the numbers
+// existed only in the registered TOML and no read verb answered for them.
+func TestWorkflowShowRendersExpectedCost(t *testing.T) {
+	conn := newTestDB(t)
+	err := registerSource(t, conn, costWorkflow)
+	testsupport.Must(t, err, "register: %v", err)
+
+	cmd := workflowShowCmdWithDB(conn, false)
+	w, buf := bufWriter(false)
+	err = runWorkflowShow(cmd, []string{"costed"}, w)
+	testsupport.Must(t, err, "show: %v", err)
+	out := buf.String()
+
+	for _, want := range []string{
+		// A plain step's declared cost.
+		"cost=1.50",
+		// A fanout step is PER SIBLING: four hints at 0.60 contribute 2.40,
+		// and the arithmetic is shown rather than left for the reader.
+		"cost=0.60 x4 = 2.40",
+		// A step declaring nothing renders explicitly, never silently omitted.
+		"cost=-",
+		// 1.50 + 2.40 + 0.
+		"expected_cost total: 3.90",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestWorkflowShowCostTotalIncludesGatedAndLoopSteps: the floor the plan skill
+// budgets against sums `when`-gated and `loop` steps IN. A gated step may not
+// run, but a budget that assumed it would not is a budget that breaks the first
+// time the label is present.
+func TestWorkflowShowCostTotalIncludesGatedAndLoopSteps(t *testing.T) {
+	conn := newTestDB(t)
+	err := registerSource(t, conn, `
+[pipeline]
+name = "gated"
+version = 1
+[[step]]
+name = "implement"
+after = []
+executor = "implement"
+emits = "change-summary"
+expected_cost = 1.00
+[[step]]
+name = "review-security"
+after = ["implement"]
+executor = "judge-security"
+when = "labels contains security"
+emits = "findings"
+expected_cost = 0.60
+[[step]]
+name = "fix"
+executor = "fix"
+emits = "change-summary"
+expected_cost = 0.40
+loop = true
+after_loop = "review-security"
+`)
+	testsupport.Must(t, err, "register: %v", err)
+
+	cmd := workflowShowCmdWithDB(conn, false)
+	w, buf := bufWriter(false)
+	err = runWorkflowShow(cmd, []string{"gated"}, w)
+	testsupport.Must(t, err, "show: %v", err)
+	out := buf.String()
+
+	if !strings.Contains(out, "expected_cost total: 2.00") {
+		t.Errorf("the total does not include the gated and loop steps:\n%s", out)
+	}
+	// A loop step's cost is per loop ENTRY — the total counts one, and every
+	// additional fix round costs it again. Saying so is what stops the floor
+	// from being read as a ceiling.
+	if !strings.Contains(out, "cost=0.40 per loop entry") {
+		t.Errorf("a loop step's cost is not annotated per entry:\n%s", out)
+	}
+}
+
 func TestWorkflowShowNotFound(t *testing.T) {
 	conn := newTestDB(t)
 	cmd := workflowShowCmdWithDB(conn, false)
