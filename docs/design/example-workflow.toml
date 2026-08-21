@@ -1,0 +1,113 @@
+# Canonical workflow-grammar example and register-test fixture (engine-spec §11.1).
+# Ported from the reference instance's standard-change workflow (upstream 05 §1),
+# with `emits`/`output` added per §11.1 (the upstream example predates the field).
+# Every `executor` value is an opaque string — core never interprets them; a
+# human-only team would put role names here (genericity.md).
+# Engine-supplied semantics are not restated per workflow: readiness, leases and
+# attempts, artifact recording, context assembly, event logging (engine-core §5, §8).
+# A workflow author writes topology and thresholds only.
+# `issue.diff` is the engine-computed VCS diff artifact, snapshotted and
+# fingerprinted when its producing step completed (engine-spec §11.1).
+# NOTE (schemas): stage 5 has landed, so threshold FIELDS and LITERALS are now
+# cross-validated against the registered payload schema at `workflow register`
+# time (engine-spec §11.2). This file therefore requires `findings@1` to be
+# registered before it: `reconcile` declares `payload = "findings@1"`, which its
+# ordered `any(severity >= high)` and its `aggregate` action both need, and a
+# schema that declares `severity` as an `ordered_enum` is what makes `high`
+# comparable at all. `verify`'s `any(status == unmet)` still needs no schema and
+# still declares none — equality has never needed an order. `severity` and
+# `status` remain opaque field names to core: the order is the schema author's.
+
+[pipeline]
+name    = "standard-change"
+version = 1
+
+[match]                      # binding rule, evaluated at run activation
+kind   = ["task", "feature", "bug", "chore"]
+unless_labels = ["security-load-bearing", "ui", "docs-only", "investigation"]
+
+[[step]]
+name = "implement"
+executor = "implement"
+class = "write"
+emits = "change-summary"
+expected_cost = 1.50
+gates = ["build", "tests", "scope", "self-hygiene", "secret-scan"]
+max_attempts = 2
+on_fail = "waiting-human"
+
+[[step]]
+name = "review"
+after = ["implement"]
+fanout = ["judge-correctness", "judge-architecture", "judge-simplicity", "judge-testing"]
+emits = "findings"
+expected_cost = 0.60                 # per expanded sibling
+inputs = ["implement.change-summary", "issue.diff"]
+
+[[step]]
+name = "synthesize"
+after = ["review"]
+executor = "synthesize-findings"
+emits = "findings"
+expected_cost = 0.40
+inputs = ["review.*"]
+
+[[step]]                     # deterministic: an action, no worker
+name = "reconcile"
+after = ["synthesize"]
+action = "aggregate"                 # builtin (engine-spec §2); held clusters
+params = { field = "severity", method = "median", hold_spread = 2, output = "findings" }
+                                     #   materialize a type=human held step
+inputs = ["synthesize.findings"]     # the builtin's INPUT (§2, DKT-28): it
+                                     #   reduces the payloads of the artifacts
+                                     #   named here. Required non-empty by V31 —
+                                     #   an aggregate with no input computes
+                                     #   nothing. The engine runs this step
+                                     #   itself; no worker ever claims it
+payload = "findings@1"               # required on aggregate steps (§11.2, V29):
+                                     #   `severity` is ordered because this
+                                     #   schema declares it so, and for no
+                                     #   other reason
+threshold = { "fix-loop" = "any(severity >= high)" }   # no match -> pass (§11.2)
+max_fix_loops = 2                    # loops exhausted -> waiting-human (§11.3)
+
+[[step]]
+name = "fix"
+executor = "fix"
+class = "write"
+emits = "change-summary"
+expected_cost = 1.00
+loop = true                          # instantiated per fix-loop entry (§11.3)
+inputs = ["reconcile.findings", "implement.change-summary"]
+gates = ["build", "tests", "scope", "secret-scan"]
+after_loop = "review"                # re-review the delta; engine re-enters at review
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify-ac"
+emits = "ac-report"
+expected_cost = 0.50
+gates = [{ name = "ac-commands", pre = true }]   # pre-gate: runs at claim, results
+                                     #   land in the context bundle (§11.1)
+inputs = ["issue.body", "issue.diff", "implement.change-summary"]
+threshold = { "fix-loop" = "any(status == unmet)", "waiting-human" = "any(status == unverifiable)" }
+
+[[step]]
+name = "commit-gate"
+after = ["verify"]
+type = "human"                       # operator approval step
+on_fail = "fix-loop"                 # reject routes here; `type="human"` steps must
+                                     #   declare on_fail explicitly and may not route
+                                     #   `waiting-human` — that would park the issue on
+                                     #   the resolution of the thing that just rejected
+                                     #   (engine-spec §11.1 on_fail, amended 2026-08-03;
+                                     #   §2's reject-routing rule)
+
+[[step]]
+name = "commit"
+after = ["commit-gate"]
+executor = "commit-author"
+emits = "commit-record"
+expected_cost = 0.10
+gates = ["commit-msg", "commit-exec"]

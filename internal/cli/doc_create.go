@@ -65,7 +65,7 @@ var docCreateCmd = &cobra.Command{
 		body, _ := cmd.Flags().GetString("description")
 		docType, _ := cmd.Flags().GetString("type")
 		status, _ := cmd.Flags().GetString("status")
-		jsonMode, _ := cmd.Flags().GetBool("json")
+		jsonMode, _ := jsonModeOf(cmd)
 
 		if jsonMode && title == "" {
 			return cmdErr(fmt.Errorf("--title is required in JSON mode"), output.ErrValidation)
@@ -114,14 +114,20 @@ var docCreateCmd = &cobra.Command{
 		body = loadedBody
 
 		doc := model.Doc{
-			Type:   docType,
-			Status: status,
-			Title:  title,
-			Body:   body,
-			Author: config.DefaultAuthor(),
+			ProjectID: getProjectID(cmd),
+			Type:      docType,
+			Status:    status,
+			Title:     title,
+			Body:      body,
+			Author:    config.DefaultAuthor(),
 		}
 
-		id, err := db.CreateDoc(conn, &doc)
+		idempotencyKey, err := idempotencyKeyOf(cmd)
+		if err != nil {
+			return err
+		}
+
+		id, err := db.CreateDocIdempotent(conn, &doc, idempotencyKey)
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating doc: %w", err), output.ErrGeneral)
 		}
@@ -142,5 +148,6 @@ func init() {
 	docCreateCmd.Flags().StringP("description", "d", "", "Document body (use \"@path\" for a file or \"-\" for stdin)")
 	docCreateCmd.Flags().StringP("type", "T", "", "Document type")
 	docCreateCmd.Flags().StringP("status", "s", "", "Document status")
+	addIdempotencyKeyFlag(docCreateCmd)
 	docCmd.AddCommand(docCreateCmd)
 }

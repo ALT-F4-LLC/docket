@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestRunWatch_CallsFnImmediately(t *testing.T) {
@@ -29,9 +30,7 @@ func TestRunWatch_CallsFnImmediately(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if !called {
 		t.Fatal("fn was not called on first cycle")
 	}
@@ -59,9 +58,7 @@ func TestRunWatch_CallsFnAfterInterval(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if callCount < 3 {
 		t.Fatalf("expected at least 3 calls, got %d", callCount)
 	}
@@ -82,9 +79,7 @@ func TestRunWatch_ReturnsOnContextCancel(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("expected nil error on context cancel, got: %v", err)
-	}
+	testsupport.Must(t, err, "expected nil error on context cancel, got: %v", err)
 }
 
 func TestRunWatch_TTYEmitsANSIClear(t *testing.T) {
@@ -108,9 +103,7 @@ func TestRunWatch_TTYEmitsANSIClear(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 
 	out := stdout.String()
 	if !strings.Contains(out, "\033[2J\033[H") {
@@ -139,9 +132,7 @@ func TestRunWatch_NonTTYEmitsBlankLineSeparator(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 
 	out := stdout.String()
 	if !strings.Contains(out, "line\n\nline\n") {
@@ -173,9 +164,7 @@ func TestRunWatch_JSONModeNoANSI(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 
 	out := stdout.String()
 	if strings.Contains(out, "\033[") {
@@ -208,9 +197,7 @@ func TestRunWatch_QuietModeSuppressesStatusLine(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 
 	out := stdout.String()
 	if strings.Contains(out, "Watching") {
@@ -243,9 +230,7 @@ func TestRunWatch_SingleErrorContinues(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if callCount < 2 {
 		t.Fatal("expected watch to continue after single error")
 	}
@@ -297,9 +282,7 @@ func TestRunWatch_BufferReused(t *testing.T) {
 		return nil
 	})
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 
 	out := stdout.String()
 	// Each cycle should have its own content, not accumulated

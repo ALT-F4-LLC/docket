@@ -8,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
 
@@ -48,9 +49,8 @@ func runPlanJSON(t *testing.T, conn *sql.DB) planJSON {
 	t.Helper()
 	cmd := planCmdWithDB(conn)
 	w, buf := bufWriter(true)
-	if err := runPlan(cmd, nil, w); err != nil {
-		t.Fatalf("runPlan: %v", err)
-	}
+	err := runPlan(cmd, nil, w)
+	testsupport.Must(t, err, "runPlan: %v", err)
 	var pj planJSON
 	if err := json.Unmarshal(buf.Bytes(), &pj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
@@ -89,13 +89,11 @@ func TestPlanJSON_FilterByPriority(t *testing.T) {
 	createIssue(t, conn, "low prio", model.StatusTodo, model.PriorityLow)
 
 	cmd := planCmdWithDB(conn)
-	if err := cmd.Flags().Set("priority", "high"); err != nil {
-		t.Fatalf("Set(priority): %v", err)
-	}
+	err := cmd.Flags().Set("priority", "high")
+	testsupport.Must(t, err, "Set(priority): %v", err)
 	w, buf := bufWriter(true)
-	if err := runPlan(cmd, nil, w); err != nil {
-		t.Fatalf("runPlan: %v", err)
-	}
+	err = runPlan(cmd, nil, w)
+	testsupport.Must(t, err, "runPlan: %v", err)
 
 	var pj planJSON
 	if err := json.Unmarshal(buf.Bytes(), &pj); err != nil {
@@ -116,9 +114,8 @@ func TestPlanJSON_FilterByPriorityInvalid(t *testing.T) {
 	conn := newTestDB(t)
 
 	cmd := planCmdWithDB(conn)
-	if err := cmd.Flags().Set("priority", "not-a-priority"); err != nil {
-		t.Fatalf("Set(priority): %v", err)
-	}
+	err := cmd.Flags().Set("priority", "not-a-priority")
+	testsupport.Must(t, err, "Set(priority): %v", err)
 	w, _ := bufWriter(true)
 	if err := runPlan(cmd, nil, w); err == nil {
 		t.Fatal("expected validation error for invalid priority, got nil")
@@ -131,9 +128,8 @@ func TestPlanJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 
 	cmd := planCmdWithDB(conn)
 	w, buf := bufWriter(true)
-	if err := runPlan(cmd, nil, w); err != nil {
-		t.Fatalf("runPlan: %v", err)
-	}
+	err := runPlan(cmd, nil, w)
+	testsupport.Must(t, err, "runPlan: %v", err)
 
 	var env struct {
 		Data struct {
@@ -142,9 +138,8 @@ func TestPlanJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 			} `json:"phases"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err = json.Unmarshal(buf.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if len(env.Data.Phases) != 1 || len(env.Data.Phases[0].Issues) != 1 {
 		t.Fatalf("expected 1 phase with 1 issue, got %+v", env.Data.Phases)
 	}
@@ -194,9 +189,8 @@ func TestPlanHuman_SameLevelSplitVsNewLevel(t *testing.T) {
 
 	cmd := planCmdWithDB(conn)
 	w, buf := bufWriter(false)
-	if err := runPlan(cmd, nil, w); err != nil {
-		t.Fatalf("runPlan: %v", err)
-	}
+	err := runPlan(cmd, nil, w)
+	testsupport.Must(t, err, "runPlan: %v", err)
 	out := buf.String()
 
 	if !strings.Contains(out, "Phase 2 (same dependency level as Phase 1, split by file collision):") {

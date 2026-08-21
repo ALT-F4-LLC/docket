@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "aggregate@1",
+  "description": "The output payload of the builtin `aggregate` action: one element per input cluster. The reduced value lives under the author's own field key, which this document cannot name, so every key beyond the four below is carried through and unconstrained.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "members": {
+        "description": "The cluster's member values, in the order they arrived.",
+        "type": "array",
+        "minItems": 1
+      },
+      "held": {
+        "description": "Whether the cluster's spread reached `hold_spread`.",
+        "type": "boolean"
+      },
+      "demoted_from": {
+        "description": "The maximum member value, when the computed value's position is below it. Absent when nothing was demoted."
+      },
+      "operator_resolved": {
+        "description": "Whether an operator accepted this cluster's computed value.",
+        "type": "boolean"
+      }
+    },
+    "required": ["members", "held"],
+    "additionalProperties": true
+  }
+}

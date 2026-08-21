@@ -1,0 +1,11 @@
+# CI-only routing-sweep fixture — see README.md in this directory.
+#
+# Highest precedence: no `unless_labels`, so nothing yields to it.
+
+[pipeline]
+name        = "ci-urgent-fix"
+version     = 1
+description = "Routing-sweep fixture: highest-precedence lane, triggered by ci-urgent."
+
+[match]
+labels_any = ["ci-urgent"]

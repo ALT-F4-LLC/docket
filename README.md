@@ -1,6 +1,6 @@
 # Docket
 
-[![Go](https://img.shields.io/badge/Go-1.24.2+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26.0+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Issue tracking for AI and humans.**
@@ -63,7 +63,7 @@ See [Drop-in Skill](#drop-in-skill) for what the skill teaches.
 
 ### From Source
 
-Requires Go 1.24.2+.
+Requires Go 1.26.0+ (toolchain go1.26.5).
 
 ```bash
 # Build the binary to ./bin/docket
@@ -329,29 +329,70 @@ docket issue list --json -s todo -s in-progress -p high
 
 ## Configuration
 
-### Repository Setup
-
-Add `.docket/` to your `.gitignore` to keep the issue database local:
-
-```bash
-echo ".docket/" >> .gitignore
-```
-
-> **Note:** `docket init` will remind you to do this if `.docket/` is not already ignored.
-
 ### Database Location
 
-Docket stores its SQLite database at `$PWD/.docket/issues.db` by default. This means each project gets its own isolated issue database.
+Docket keeps ONE shared SQLite store at `~/.docket/issues.db`, serving every
+project on the machine. Each repository is a **project** in that store, keyed
+by a worktree-stable identity (the git common directory), so every worktree of
+a repository — including throwaway ones — reads and writes the same issues.
 
-Override the location with the `DOCKET_PATH` environment variable:
+Resolution order, checked on every invocation:
+
+1. **`DOCKET_PATH`** — points directly at a `.docket` directory (the database
+   file is `$DOCKET_PATH/issues.db`). The escape hatch for custom layouts and
+   for reaching a legacy repo-local store.
+2. **A repo-local `.docket/issues.db`** — discovered by walking up from the
+   current directory to the worktree root. Pre-global stores keep working
+   exactly as before, now from subdirectories too. Create one deliberately
+   with `docket init --local` (and gitignore it).
+3. **`~/.docket`** — the shared store. `docket init` creates it.
+
+Use `docket config` to see the resolved store, its source (`env` / `local` /
+`global`), the execution root, and the project identity.
+
+Instance configuration (workflows, schemas, contracts, fragments, policy) is read
+from an **ordered list of roots**, and activation registers and pins the union of
+what they hold:
+
+| store | roots, in precedence order |
+| --- | --- |
+| `DOCKET_PATH` | `$DOCKET_PATH/config/` |
+| repo-local | `<repo>/.docket/config/` |
+| `~/.docket` | `~/.docket/config/`, then `<worktree>/.docket/config/` |
+
+With the shared store, `~/.docket/config/` is the corpus every project draws
+from and a repository's own `.docket/config/` adds to it — so a repo that ships
+nothing needs no `.docket/` directory at all, and a linked worktree resolves the
+same files as the checkout beside it. A root that does not exist is skipped; a
+root that is a **broken symlink** is an error, because a broken install must not
+look like having no config. A workflow, schema, or pinned file offered by two
+roots with **different bytes** refuses the activation and names both paths —
+which is what makes "first root wins" a rule rather than a coin flip.
+
+`docket workflow init` writes into the **repository's** root, never the shared
+one.
+
+### Consolidating legacy per-repo stores
+
+Move an old repo-local database into the shared store with export/import —
+colliding ids are remapped automatically, nothing is dropped:
 
 ```bash
-export DOCKET_PATH=/path/to/custom/.docket
+DOCKET_PATH=/path/to/repo/.docket docket export -f repo.json
+cd /path/to/repo && docket import repo.json
 ```
 
-When set, `DOCKET_PATH` points to the `.docket` directory (the database file will be `$DOCKET_PATH/issues.db`).
+### Multiple projects, one store
 
-Use `docket config` to verify the resolved database path and whether `DOCKET_PATH` is active.
+Issue ids (`DKT-N`) stay globally unique across projects, so an id names one
+issue machine-wide. `docket project set-prefix VOR` gives a project its own
+display voice — issues render and parse as `VOR-N` there, while `DKT-N` and
+bare numbers keep working everywhere, because the number is the identity.
+`docket project list` shows the store's projects. Lists, boards, plans, labels, workflows, schemas, and
+engine configuration are scoped to the invoking project; `docket config set`
+writes a per-project override, or a store-wide default with `--global`. The
+event feed (`docket events list`) is project-scoped too — store-level events
+like trust changes always show — with `--all-projects` for the whole stream.
 
 ### Statuses
 
@@ -398,13 +439,20 @@ internal/
   cli/             Cobra command definitions (one file per command)
   config/          Configuration resolution (DOCKET_PATH, defaults)
   db/              SQLite queries and migrations
+  engine/          Run activation, claims, gates, and the dispatch saga
+  exec/            Registered-command execution with env policy and capture
   filter/          Shared filtering helpers
   model/           Domain types (Issue, Status, Priority, Activity, etc.)
   output/          JSON envelope writer (ok/data/error/code)
   planner/         DAG builder, topological sort, phase planner
   render/          Lipgloss-based terminal rendering (tables, board, graphs)
+  schema/          Payload validation and the ordered_enum annotation
+  testsupport/     Helpers shared across the repo's test packages
+  trust/           User-level allowlist of commands Docket may execute
+  watch/           Live-updating watch output
+  workflow/        Workflow-definition grammar and matching
 scripts/
-  qa.sh            End-to-end QA test suite
+  qa.sh            End-to-end QA test suite (drives scripts/qa/)
 ```
 
 ## Contributing

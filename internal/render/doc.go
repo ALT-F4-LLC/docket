@@ -207,11 +207,7 @@ func renderDocLinkedProposals(proposalIDs []int) string {
 }
 
 func renderDocComments(comments []*model.DocComment) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
-	authorStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-
-	header := sectionStyle.Render("Comments")
+	header, styles := commentSectionHeader()
 
 	var parts []string
 	for _, c := range comments {
@@ -226,8 +222,8 @@ func renderDocComments(comments []*model.DocComment) string {
 		}
 
 		commentHeader := fmt.Sprintf("%s  %s",
-			authorStyle.Render(author),
-			timeStyle.Render(humanize.Time(c.CreatedAt)),
+			styles.author.Render(author),
+			styles.time.Render(humanize.Time(c.CreatedAt)),
 		)
 
 		parts = append(parts, commentHeader+"\n"+body)

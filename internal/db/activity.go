@@ -27,6 +27,20 @@ func RecordActivity(ex execer, issueID int, field, oldVal, newVal, changedBy str
 	return nil
 }
 
+// CountActivity returns the total number of activity log entries for an issue,
+// ignoring any limit. Callers pair it with GetActivity to report an honest
+// pre-limit total and flag truncation.
+func CountActivity(db *sql.DB, issueID int) (int, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM activity_log WHERE issue_id = ?`, issueID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("counting activity: %w", err)
+	}
+	return count, nil
+}
+
 // GetActivity retrieves activity log entries for an issue, ordered by most recent first.
 func GetActivity(db *sql.DB, issueID int, limit int) ([]model.Activity, error) {
 	query := `SELECT id, issue_id, field_changed, old_value, new_value, changed_by, created_at
@@ -44,30 +58,11 @@ func GetActivity(db *sql.DB, issueID int, limit int) ([]model.Activity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying activity: %w", err)
 	}
-	defer rows.Close()
-
-	var activities []model.Activity
-	for rows.Next() {
-		var a model.Activity
-		var oldVal, newVal, changedBy sql.NullString
-		var createdAt string
-		if err := rows.Scan(&a.ID, &a.IssueID, &a.FieldChanged, &oldVal, &newVal, &changedBy, &createdAt); err != nil {
-			return nil, fmt.Errorf("scanning activity row: %w", err)
-		}
-		a.OldValue = oldVal.String
-		a.NewValue = newVal.String
-		a.ChangedBy = changedBy.String
-
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing activity created_at: %w", err)
-		}
-		a.CreatedAt = t
-
-		activities = append(activities, a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating activity rows: %w", err)
+	activities, err := scanRows(rows, "activity rows", func(r *sql.Rows) (model.Activity, error) {
+		return scanActivityFrom(r)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return activities, nil
@@ -75,41 +70,51 @@ func GetActivity(db *sql.DB, issueID int, limit int) ([]model.Activity, error) {
 
 // ListAllActivity returns every activity_log row ordered by id ASC, for a full
 // export.
-func ListAllActivity(db *sql.DB) ([]*model.Activity, error) {
+func ListAllActivity(db *sql.DB, projectID int) ([]*model.Activity, error) {
+	where, args := projectFilterVia(projectID, `issue_id IN (SELECT id FROM issues WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT id, issue_id, field_changed, old_value, new_value, changed_by, created_at
-		 FROM activity_log ORDER BY id ASC`,
+		 FROM activity_log `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all activity: %w", err)
 	}
-	defer rows.Close()
-
-	var activities []*model.Activity
-	for rows.Next() {
-		var a model.Activity
-		var oldVal, newVal, changedBy sql.NullString
-		var createdAt string
-		if err := rows.Scan(&a.ID, &a.IssueID, &a.FieldChanged, &oldVal, &newVal, &changedBy, &createdAt); err != nil {
-			return nil, fmt.Errorf("scanning activity row: %w", err)
-		}
-		a.OldValue = oldVal.String
-		a.NewValue = newVal.String
-		a.ChangedBy = changedBy.String
-
-		t, err := time.Parse(time.RFC3339, createdAt)
+	activities, err := scanRows(rows, "activity rows", func(r *sql.Rows) (*model.Activity, error) {
+		a, err := scanActivityFrom(r)
 		if err != nil {
-			return nil, fmt.Errorf("parsing activity created_at: %w", err)
+			return nil, err
 		}
-		a.CreatedAt = t
-
-		activities = append(activities, &a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating activity rows: %w", err)
+		return &a, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return activities, nil
+}
+
+// scanActivityFrom scans one activity_log row. Shared by GetActivity (which
+// returns values) and ListAllActivity (which returns pointers) — both read
+// the same seven columns and apply the same NullString projection and
+// created_at parse.
+func scanActivityFrom(r *sql.Rows) (model.Activity, error) {
+	var a model.Activity
+	var oldVal, newVal, changedBy sql.NullString
+	var createdAt string
+	if err := r.Scan(&a.ID, &a.IssueID, &a.FieldChanged, &oldVal, &newVal, &changedBy, &createdAt); err != nil {
+		return model.Activity{}, fmt.Errorf("scanning activity row: %w", err)
+	}
+	a.OldValue = oldVal.String
+	a.NewValue = newVal.String
+	a.ChangedBy = changedBy.String
+
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return model.Activity{}, fmt.Errorf("parsing activity created_at: %w", err)
+	}
+	a.CreatedAt = t
+
+	return a, nil
 }
 
 // InsertActivityWithID inserts an activity_log row with a caller-supplied ID,

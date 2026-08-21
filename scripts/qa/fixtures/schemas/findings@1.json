@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "findings@1",
+  "description": "A QA fixture: instance data, by location. scripts/qa/fixtures/ is not scanned by the genericity gate, and that is the enforcement (payloads-thresholds §1.1.1).",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "severity": {
+        "type": "string",
+        "enum": ["info", "low", "medium", "high", "blocker"],
+        "ordered_enum": true
+      },
+      "status": {
+        "type": "string",
+        "enum": ["met", "unmet"]
+      }
+    },
+    "required": ["severity"],
+    "additionalProperties": true
+  }
+}

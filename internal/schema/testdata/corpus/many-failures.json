@@ -1,0 +1,19 @@
+{
+  "why": "§4.8 C3's cap has something to cap: seven bad elements produce seven failures, of which five are rendered",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {"risk": {"type": "string", "enum": ["low", "high"], "ordered_enum": true}},
+      "required": ["risk"]
+    }
+  },
+  "document": [
+    {"risk": "no"}, {"risk": "no"}, {"risk": "no"}, {"risk": "no"},
+    {"risk": "no"}, {"risk": "no"}, {"risk": "no"}
+  ],
+  "valid": false,
+  "failures": 7,
+  "message_contains": "payload[0].risk: value \"no\" is not one of [\"low\",\"high\"]"
+}

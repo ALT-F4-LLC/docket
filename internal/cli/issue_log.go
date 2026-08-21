@@ -1,13 +1,8 @@
 package cli
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/dustin/go-humanize"
@@ -16,9 +11,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 // logResult is the JSON wire format for the log command output.
@@ -26,6 +19,20 @@ type logResult struct {
 	IssueID string           `json:"issue_id"`
 	Entries []model.Activity `json:"entries"`
 	Total   int              `json:"total"`
+	// entryTotal is the full activity count BEFORE --limit, and limit the
+	// effective limit. Both unexported so the v1 payload is untouched: v1's
+	// Total is len(Entries), a post-limit count that hides how many entries
+	// were dropped.
+	entryTotal int
+	limit      int
+}
+
+// logResult implements output.Collection for the v2 envelope, reporting the
+// honest pre-limit entry count rather than v1's len(Entries).
+func (r logResult) CollectionItems() any { return r.Entries }
+func (r logResult) CollectionTotal() int { return r.entryTotal }
+func (r logResult) CollectionTruncated() bool {
+	return output.IsTruncated(r.limit, r.entryTotal, len(r.Entries))
 }
 
 var logCmd = &cobra.Command{
@@ -33,44 +40,28 @@ var logCmd = &cobra.Command{
 	Short: "Show activity history for an issue",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runIssueLog(cmd, args, w)
-			})
-		}
-		return runIssueLog(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runIssueLog)
 	},
 }
 
 func runIssueLog(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
 
-	id, err := model.ParseID(args[0])
+	id, err := issueArg(args[0])
 	if err != nil {
-		return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+		return err
 	}
 
-	if _, err := db.GetIssue(conn, id); err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-		}
-		return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+	if _, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0])); err != nil {
+		return err
 	}
 
 	limit, _ := cmd.Flags().GetInt("limit")
+	if err := validateLimit(cmd, limit); err != nil {
+		return err
+	}
+	// v1 silently clamps a non-positive limit to 1. Preserved exactly:
+	// validateLimit has already rejected negatives under v2.
 	limit = max(limit, 1)
 
 	activity, err := db.GetActivity(conn, id, limit)
@@ -78,15 +69,24 @@ func runIssueLog(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
 	}
 
+	entryTotal, err := db.CountActivity(conn, id)
+	if err != nil {
+		return cmdErr(fmt.Errorf("counting activity: %w", err), output.ErrGeneral)
+	}
+
 	entries := activity
 	if entries == nil {
 		entries = []model.Activity{}
 	}
 
+	// Total stays len(entries) — the v1 field is frozen. The honest pre-limit
+	// count rides in entryTotal and surfaces only under --json=v2.
 	result := logResult{
-		IssueID: model.FormatID(id),
-		Entries: entries,
-		Total:   len(entries),
+		IssueID:    model.FormatID(id),
+		Entries:    entries,
+		Total:      len(entries),
+		entryTotal: entryTotal,
+		limit:      limit,
 	}
 
 	if w.JSONMode {

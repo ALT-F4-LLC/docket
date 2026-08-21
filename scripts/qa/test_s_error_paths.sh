@@ -4,7 +4,7 @@
 test_s_error_paths() {
   printf "Section S: Error Paths (No DB)"
   local NO_DB_DIR2
-  NO_DB_DIR2=$(mktemp -d)
+  NO_DB_DIR2=$(qa_mktemp_d)
   mkdir -p "$NO_DB_DIR2"
 
   run_env "$NO_DB_DIR2" config

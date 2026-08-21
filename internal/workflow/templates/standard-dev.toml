@@ -1,0 +1,53 @@
+# standard-dev — a two-step check-then-approve workflow.
+#
+# This is what a team gets by typing one command. There is nothing automated
+# about it: a person runs the checks, a person approves. Every `executor` value
+# is an opaque hint the engine never interprets — put a role name, a team name,
+# or a person's name there and it will mean exactly what you intend it to.
+#
+# You do not register this file. Activation auto-registers everything under
+# .docket/config/, so the next step is to start a run:
+#     docket run start --issue DKT-1 && docket run activate RUN-1
+#
+# Editing it after a run has registered it needs a version bump below: a
+# registered name@version is frozen so a run that pinned it can reproduce.
+
+[pipeline]
+name        = "standard-dev"
+version     = 2
+description = "Run the checks, then have a person approve the result."
+
+[match]                       # which issues this workflow binds to at activation
+kind = ["task", "bug", "chore", "feature"]
+
+[[step]]
+name     = "check"
+after    = []                 # [] means root — this step starts the workflow
+executor = "author"           # an opaque hint: who does the work
+emits    = "check-report"     # the artifact kind this step records
+gates    = [{ name = "checks", source = "fence:checks" }]
+                              # runs the commands fenced as ```checks in the
+                              #   issue body, harvested when the run activates
+on_fail  = "fix-loop"
+
+[[step]]
+name    = "approve"
+after   = ["check"]
+type    = "human"             # a person decides; no worker claims this step
+on_fail = "fix-loop"          # a reject sends the issue back rather than
+                              #   parking it — `waiting-human` is not a legal
+                              #   value here, since it would park the issue on
+                              #   the resolution of the thing that just
+                              #   rejected it
+
+[[step]]
+name       = "fix"
+executor   = "author"         # the same role returns to address what failed
+emits      = "fix-summary"
+loop       = true             # instantiated per fix-loop entry: this is what a
+                              #   `fix-loop` routing above actually creates —
+                              #   without a `loop = true` step the routing
+                              #   would supersede work and replace it with
+                              #   nothing
+after_loop = "check"          # after the fix, re-enter at `check`, so the
+                              #   checks and the approval both run again

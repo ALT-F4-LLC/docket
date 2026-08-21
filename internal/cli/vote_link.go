@@ -30,14 +30,14 @@ var voteLinkCmd = &cobra.Command{
 		}
 
 		issueFlag, _ := cmd.Flags().GetString("issue")
-		issueID, err := model.ParseID(issueFlag)
+		issueID, err := issueArg(issueFlag)
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
 		if err := db.LinkProposalIssue(conn, proposalID, issueID); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("proposal or issue not found"), output.ErrNotFound)
+			if e := notFound(err, "proposal or issue"); e != nil {
+				return e
 			}
 			if errors.Is(err, db.ErrConflict) {
 				return cmdErr(fmt.Errorf("link already exists"), output.ErrConflict)
@@ -70,14 +70,14 @@ var voteUnlinkCmd = &cobra.Command{
 		}
 
 		issueFlag, _ := cmd.Flags().GetString("issue")
-		issueID, err := model.ParseID(issueFlag)
+		issueID, err := issueArg(issueFlag)
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
 		if err := db.UnlinkProposalIssue(conn, proposalID, issueID); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("link not found"), output.ErrNotFound)
+			if e := notFound(err, "link"); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("unlinking proposal from issue: %w", err), output.ErrGeneral)
 		}

@@ -20,40 +20,24 @@ test_za_stats() {
   # ZA3: Total > 0 (we have issues from previous sections).
   local TOTAL
   TOTAL=$(echo "$CMD_STDOUT" | jq '.data.total' 2>/dev/null)
-  if [ "$TOTAL" -gt 0 ]; then
-    check "ZA" "ZA3_total" "PASS"
-  else
-    check "ZA" "ZA3_total" "FAIL" "expected total > 0, got $TOTAL"
-  fi
+  check_cond "ZA" "ZA3_total" "expected total > 0, got $TOTAL" [ "$TOTAL" -gt 0 ]
 
   # ZA4: root_issues + sub_issues = total.
   local ROOT SUB
   ROOT=$(echo "$CMD_STDOUT" | jq '.data.root_issues' 2>/dev/null)
   SUB=$(echo "$CMD_STDOUT" | jq '.data.sub_issues' 2>/dev/null)
   local SUM=$((ROOT + SUB))
-  if [ "$SUM" -eq "$TOTAL" ]; then
-    check "ZA" "ZA4_sum" "PASS"
-  else
-    check "ZA" "ZA4_sum" "FAIL" "root ($ROOT) + sub ($SUB) = $SUM, expected $TOTAL"
-  fi
+  check_cond "ZA" "ZA4_sum" "root ($ROOT) + sub ($SUB) = $SUM, expected $TOTAL" [ "$SUM" -eq "$TOTAL" ]
 
   # ZA5: by_status has at least one entry.
   local STATUS_KEYS
   STATUS_KEYS=$(echo "$CMD_STDOUT" | jq '.data.by_status | length' 2>/dev/null)
-  if [ "$STATUS_KEYS" -gt 0 ]; then
-    check "ZA" "ZA5_status" "PASS"
-  else
-    check "ZA" "ZA5_status" "FAIL" "by_status has no entries"
-  fi
+  check_cond "ZA" "ZA5_status" "by_status has no entries" [ "$STATUS_KEYS" -gt 0 ]
 
   # ZA6: by_priority has at least one entry.
   local PRIO_KEYS
   PRIO_KEYS=$(echo "$CMD_STDOUT" | jq '.data.by_priority | length' 2>/dev/null)
-  if [ "$PRIO_KEYS" -gt 0 ]; then
-    check "ZA" "ZA6_priority" "PASS"
-  else
-    check "ZA" "ZA6_priority" "FAIL" "by_priority has no entries"
-  fi
+  check_cond "ZA" "ZA6_priority" "by_priority has no entries" [ "$PRIO_KEYS" -gt 0 ]
 
   # ZA7: Human mode output works.
   run stats
@@ -67,7 +51,7 @@ test_za_stats() {
 
   # ZA9: Empty database — stats shows zeros.
   local EMPTY_DIR
-  EMPTY_DIR=$(mktemp -d)
+  EMPTY_DIR=$(qa_mktemp_d)
   run_env "$EMPTY_DIR" init --json
   assert_exit "ZA" "ZA9_init" 0
   run_env "$EMPTY_DIR" stats --json

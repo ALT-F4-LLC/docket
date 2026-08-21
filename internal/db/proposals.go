@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -27,6 +28,24 @@ type CastVoteResult struct {
 
 // CreateProposal inserts a new proposal and returns its ID.
 func CreateProposal(db *sql.DB, p *model.Proposal) (int, error) {
+	return CreateProposalIdempotent(db, p, "")
+}
+
+// CreateProposalIdempotent is CreateProposal with an optional idempotency key.
+// A repeat call with the same key returns the original proposal id and inserts
+// nothing. Unlike the plain path this runs in a transaction, so the insert and
+// the key record commit together.
+func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey string) (int, error) {
+	if idempotencyKey != "" {
+		existingID, found, err := LookupIdempotencyKey(db, ScopeVoteCreate, idempotencyKey)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			return existingID, nil
+		}
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	domainTagsJSON, err := json.Marshal(p.DomainTags)
@@ -39,9 +58,16 @@ func CreateProposal(db *sql.DB, p *model.Proposal) (int, error) {
 		return 0, fmt.Errorf("marshaling files_changed: %w", err)
 	}
 
-	res, err := db.Exec(
-		`INSERT INTO proposals (description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(
+		`INSERT INTO proposals (project_id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectOrDefault(p.ProjectID),
 		p.Description,
 		p.Rationale,
 		string(domainTagsJSON),
@@ -65,8 +91,19 @@ func CreateProposal(db *sql.DB, p *model.Proposal) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("getting last insert id: %w", err)
 	}
+	id := int(id64)
 
-	return int(id64), nil
+	if idempotencyKey != "" {
+		if err := RecordIdempotencyKeyTx(tx, ScopeVoteCreate, idempotencyKey, id); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return id, nil
 }
 
 // GetProposal returns a proposal by ID, or ErrNotFound if it does not exist.
@@ -86,11 +123,16 @@ func GetProposal(db *sql.DB, id int) (*model.Proposal, error) {
 }
 
 // ListProposals returns proposals with optional filters. It returns the matching
-// proposals and the total count (before limit).
-func ListProposals(db *sql.DB, status string, criticality string, domainTag string, limit int) ([]*model.Proposal, int, error) {
+// proposals and the total count (before limit). A non-zero projectID scopes the
+// list to one project (v12); zero lists every project.
+func ListProposals(db *sql.DB, projectID int, status string, criticality string, domainTag string, limit int) ([]*model.Proposal, int, error) {
 	var whereClauses []string
 	var args []any
 
+	if projectID != 0 {
+		whereClauses = append(whereClauses, "project_id = ?")
+		args = append(args, projectID)
+	}
 	if status != "" {
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, status)
@@ -128,18 +170,15 @@ func ListProposals(db *sql.DB, status string, criticality string, domainTag stri
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing proposals: %w", err)
 	}
-	defer rows.Close()
-
-	var proposals []*model.Proposal
-	for rows.Next() {
-		p, err := scanProposalFrom(rows)
+	proposals, err := scanRows(rows, "proposal rows", func(r *sql.Rows) (*model.Proposal, error) {
+		p, err := scanProposalFrom(r)
 		if err != nil {
-			return nil, 0, fmt.Errorf("scanning proposal row: %w", err)
+			return nil, fmt.Errorf("scanning proposal row: %w", err)
 		}
-		proposals = append(proposals, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterating proposal rows: %w", err)
+		return p, nil
+	})
+	if err != nil {
+		return nil, 0, err
 	}
 
 	return proposals, total, nil
@@ -204,9 +243,14 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 		findingsJSONStr = string(b)
 	}
 
+	metadataStr, err := marshalVoteMetadata(v.Metadata)
+	if err != nil {
+		return nil, err
+	}
+
 	res, err := tx.Exec(
-		`INSERT INTO votes (proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO votes (proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, metadata, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.ProposalID,
 		v.VoterName,
 		v.VoterRole,
@@ -216,6 +260,7 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 		v.Findings,
 		findingsJSONStr,
 		v.Summary,
+		metadataStr,
 		now,
 	)
 	if err != nil {
@@ -231,6 +276,32 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 		return nil, fmt.Errorf("getting vote id: %w", err)
 	}
 	v.ID = int(voteID)
+
+	// The seat's spend report (DKT-95), in the cast's own transaction: the
+	// vote and its usage land together or not at all. Units are written in
+	// sorted order so identical casts produce identical row ids — the same
+	// determinism rule the step ledger's writer follows.
+	if len(v.Usage) > 0 {
+		for _, unit := range SortedUnits(v.Usage) {
+			if err := ValidateUnitName(unit); err != nil {
+				return nil, fmt.Errorf("vote usage: %w", err)
+			}
+			quantity := v.Usage[unit]
+			if math.IsNaN(quantity) || math.IsInf(quantity, 0) || quantity < 0 {
+				return nil, fmt.Errorf(
+					"vote usage: %q must be a finite non-negative number, got %g",
+					unit, quantity)
+			}
+			// Source is written EXPLICITLY (v17, DKT-115): a cast-time row is
+			// the seat's own report, and relying on the column default here
+			// would leave the writer silent about the one distinction the
+			// column preserves against the back-fill's reconstruction.
+			if err := InsertVoteUsageTx(
+				tx, voteID, unit, quantity, UsageSourceReported, model.NowMS()); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	createdAtTime, err := time.Parse(time.RFC3339, now)
 	if err != nil {
@@ -319,24 +390,21 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 // GetProposalVotes returns all votes for a proposal, ordered by creation time.
 func GetProposalVotes(db *sql.DB, proposalID int) ([]*model.Vote, error) {
 	rows, err := db.Query(
-		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, created_at
+		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, metadata, created_at
 		 FROM votes WHERE proposal_id = ? ORDER BY created_at ASC`, proposalID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying votes: %w", err)
 	}
-	defer rows.Close()
-
-	var votes []*model.Vote
-	for rows.Next() {
-		v, err := scanVoteFrom(rows)
+	votes, err := scanRows(rows, "vote rows", func(r *sql.Rows) (*model.Vote, error) {
+		v, err := scanVoteFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning vote row: %w", err)
 		}
-		votes = append(votes, v)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating vote rows: %w", err)
+		return v, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return votes, nil
@@ -388,16 +456,7 @@ func UnlinkProposalIssue(db *sql.DB, proposalID, issueID int) error {
 	if err != nil {
 		return fmt.Errorf("unlinking proposal from issue: %w", err)
 	}
-
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-
-	return nil
+	return requireAffected(res)
 }
 
 // GetProposalIssues returns the issue IDs linked to a proposal.
@@ -409,18 +468,15 @@ func GetProposalIssues(db *sql.DB, proposalID int) ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying proposal issues: %w", err)
 	}
-	defer rows.Close()
-
-	var ids []int
-	for rows.Next() {
+	ids, err := scanRows(rows, "proposal issue rows", func(r *sql.Rows) (int, error) {
 		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scanning issue id: %w", err)
+		if err := r.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scanning issue id: %w", err)
 		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating proposal issue rows: %w", err)
+		return id, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return ids, nil
@@ -440,18 +496,15 @@ func GetIssueProposals(db *sql.DB, issueID int) ([]model.Proposal, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying issue proposals: %w", err)
 	}
-	defer rows.Close()
-
-	var proposals []model.Proposal
-	for rows.Next() {
-		p, err := scanProposalFrom(rows)
+	proposals, err := scanRows(rows, "issue proposal rows", func(r *sql.Rows) (model.Proposal, error) {
+		p, err := scanProposalFrom(r)
 		if err != nil {
-			return nil, fmt.Errorf("scanning proposal row: %w", err)
+			return model.Proposal{}, fmt.Errorf("scanning proposal row: %w", err)
 		}
-		proposals = append(proposals, *p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating issue proposal rows: %w", err)
+		return *p, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return proposals, nil
@@ -501,6 +554,55 @@ func CommitProposal(db *sql.DB, id int, outcome string, escalationReason string)
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
+	return nil
+}
+
+// CloseProposal retires an OPEN proposal without a tally (DKT-114).
+//
+// The case it exists for: a gate's underlying decision was made another way —
+// an operator authorized the guarded action directly — and the proposal the
+// panel would have decided has no votes and no future. Before this verb such a
+// proposal sat `open` forever, misreporting a settled question as a pending
+// one.
+//
+// Only `open` closes. Every other status is the record of a decision, and a
+// close that rewrote one would be exactly the overwrite the immutable-record
+// rule forbids. The reason lands in `final_outcome`, so the row itself says
+// how the question ended.
+func CloseProposal(db *sql.DB, id int, reason string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var status string
+	err = tx.QueryRow("SELECT status FROM proposals WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("loading proposal: %w", err)
+	}
+
+	if model.ProposalStatus(status) != model.ProposalStatusOpen {
+		return fmt.Errorf(
+			"%w: proposal %s is %s; only an open proposal can be closed",
+			ErrConflict, model.FormatProposalID(id), status)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = tx.Exec(
+		"UPDATE proposals SET status = ?, final_outcome = ?, updated_at = ? WHERE id = ?",
+		string(model.ProposalStatusClosed), reason, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("closing proposal: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
 	return nil
 }
 
@@ -561,16 +663,51 @@ func scanProposalFrom(s scanner) (*model.Proposal, error) {
 	return &p, nil
 }
 
+// VoteMetadataMaxBytes caps the encoded size of a vote's opaque KV bag, in
+// the shape ArtifactMaxBytes uses: the limit lives beside the column it
+// protects, so every writer of `votes.metadata` crosses it — `vote cast`,
+// and `import` through InsertVoteWithID — rather than only the one command
+// that happens to parse a flag. The value matches the 16 KiB a step's own
+// metadata bag gets; it is duplicated rather than imported because
+// internal/engine already imports this package.
+const VoteMetadataMaxBytes = 16 << 10
+
+// marshalVoteMetadata encodes a vote's opaque KV bag for the
+// `votes.metadata` TEXT column.
+//
+// This package NEVER READS A KEY out of the bag — it only round-trips the
+// whole object, exactly as db.usage.go's `source` column and
+// internal/engine's step metadata do. A nil or empty map stores NULL rather
+// than `{}` or `""`, so a vote nobody enriched reads back exactly as it did
+// before this column existed (the never-mutate rule the v10-v12 migrations
+// already follow for their own added columns).
+func marshalVoteMetadata(m map[string]any) (any, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling vote metadata: %w", err)
+	}
+	if len(b) > VoteMetadataMaxBytes {
+		return nil, fmt.Errorf(
+			"vote metadata is %d bytes, over the %d-byte cap; record the detail in the findings instead",
+			len(b), VoteMetadataMaxBytes)
+	}
+	return string(b), nil
+}
+
 // scanVoteFrom scans a single vote from any scanner (*sql.Row or *sql.Rows).
 func scanVoteFrom(s scanner) (*model.Vote, error) {
 	var v model.Vote
 	var findingsJSONRaw sql.NullString
+	var metadataRaw sql.NullString
 	var createdAt string
 
 	err := s.Scan(
 		&v.ID, &v.ProposalID, &v.VoterName, &v.VoterRole,
 		&v.Verdict, &v.Confidence, &v.DomainRelevance, &v.Findings,
-		&findingsJSONRaw, &v.Summary, &createdAt,
+		&findingsJSONRaw, &v.Summary, &metadataRaw, &createdAt,
 	)
 	if err != nil {
 		return nil, err
@@ -584,6 +721,30 @@ func scanVoteFrom(s scanner) (*model.Vote, error) {
 		v.FindingsJSON = &f
 	}
 
+	// A metadata cell that does not decode NEVER FAILS THE READ: the column is
+	// opaque, rows may predate any writer that validated them, and a read verb
+	// that refused because one vote held odd bytes would fail `vote show`,
+	// `vote list` and `vote result` for the whole proposal. This is
+	// db.MetadataRollup's tolerance (rollups.go), and marshalVoteMetadata plus
+	// its cap is the write end that keeps the tolerance from becoming the norm.
+	//
+	// Tolerated is not the same as absent, though, so the undecodable cell sets
+	// MetadataUnreadable: a seat whose claim was corrupted, truncated, or
+	// rewritten in place reads differently from a seat that claimed nothing.
+	//
+	// Numbers inside the bag come back as float64, the whole-object round trip
+	// through encoding/json this repo already gives a step's metadata: a value
+	// above 2^53 is not exact on the way back. Quantities that must be exact
+	// belong in a column, not in an opaque claim.
+	if metadataRaw.Valid {
+		var bag map[string]any
+		if err := json.Unmarshal([]byte(metadataRaw.String), &bag); err == nil {
+			v.Metadata = bag
+		} else {
+			v.MetadataUnreadable = true
+		}
+	}
+
 	t, err := time.Parse(time.RFC3339, createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("parsing created_at: %w", err)
@@ -595,80 +756,77 @@ func scanVoteFrom(s scanner) (*model.Vote, error) {
 
 // ListAllProposals returns every proposal row ordered by id ASC, for a full
 // export.
-func ListAllProposals(db *sql.DB) ([]*model.Proposal, error) {
+func ListAllProposals(db *sql.DB, projectID int) ([]*model.Proposal, error) {
+	where, args := projectFilter(projectID, "WHERE")
 	rows, err := db.Query(
 		`SELECT id, description, rationale, domain_tags, files_changed, criticality,
 		        status, final_outcome, escalation_reason, required_voters, threshold,
 		        weighted_score, created_by, created_at, updated_at
-		 FROM proposals ORDER BY id ASC`,
+		 FROM proposals `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all proposals: %w", err)
 	}
-	defer rows.Close()
-
-	var proposals []*model.Proposal
-	for rows.Next() {
-		p, err := scanProposalFrom(rows)
+	proposals, err := scanRows(rows, "proposal rows", func(r *sql.Rows) (*model.Proposal, error) {
+		p, err := scanProposalFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning proposal row: %w", err)
 		}
-		proposals = append(proposals, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating proposal rows: %w", err)
+		return p, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return proposals, nil
 }
 
 // ListAllVotes returns every vote row ordered by id ASC, for a full export.
-func ListAllVotes(db *sql.DB) ([]*model.Vote, error) {
+func ListAllVotes(db *sql.DB, projectID int) ([]*model.Vote, error) {
+	where, args := projectFilterVia(projectID, `proposal_id IN (SELECT id FROM proposals WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence,
-		        domain_relevance, findings, findings_json, summary, created_at
-		 FROM votes ORDER BY id ASC`,
+		        domain_relevance, findings, findings_json, summary, metadata, created_at
+		 FROM votes `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all votes: %w", err)
 	}
-	defer rows.Close()
-
-	var votes []*model.Vote
-	for rows.Next() {
-		v, err := scanVoteFrom(rows)
+	votes, err := scanRows(rows, "vote rows", func(r *sql.Rows) (*model.Vote, error) {
+		v, err := scanVoteFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning vote row: %w", err)
 		}
-		votes = append(votes, v)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating vote rows: %w", err)
+		return v, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return votes, nil
 }
 
 // ListAllProposalIssues returns every proposal_issues row ordered by
 // (proposal_id, issue_id), for a full export.
-func ListAllProposalIssues(db *sql.DB) ([]model.ProposalIssueLink, error) {
+func ListAllProposalIssues(db *sql.DB, projectID int) ([]model.ProposalIssueLink, error) {
+	where, args := projectFilterVia(projectID, `proposal_id IN (SELECT id FROM proposals WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT proposal_id, issue_id
-		 FROM proposal_issues ORDER BY proposal_id ASC, issue_id ASC`,
+		 FROM proposal_issues `+where+` ORDER BY proposal_id ASC, issue_id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all proposal_issues: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]model.ProposalIssueLink, 0)
-	for rows.Next() {
+	out, err := scanRows(rows, "proposal_issue rows", func(r *sql.Rows) (model.ProposalIssueLink, error) {
 		var l model.ProposalIssueLink
-		if err := rows.Scan(&l.ProposalID, &l.IssueID); err != nil {
-			return nil, fmt.Errorf("scanning proposal_issue row: %w", err)
+		if err := r.Scan(&l.ProposalID, &l.IssueID); err != nil {
+			return model.ProposalIssueLink{}, fmt.Errorf("scanning proposal_issue row: %w", err)
 		}
-		out = append(out, l)
+		return l, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating proposal_issue rows: %w", err)
+	if out == nil {
+		out = make([]model.ProposalIssueLink, 0)
 	}
 	return out, nil
 }
@@ -698,11 +856,11 @@ func InsertProposalWithID(tx *sql.Tx, p *model.Proposal) (bool, error) {
 
 	res, err := tx.Exec(
 		`INSERT OR IGNORE INTO proposals
-		 (id, description, rationale, domain_tags, files_changed, criticality, status,
+		 (id, project_id, description, rationale, domain_tags, files_changed, criticality, status,
 		  final_outcome, escalation_reason, required_voters, threshold, weighted_score,
 		  created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.Description, p.Rationale, string(domainTagsJSON), string(filesChangedJSON),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, projectOrDefault(p.ProjectID), p.Description, p.Rationale, string(domainTagsJSON), string(filesChangedJSON),
 		string(p.Criticality), string(p.Status), p.FinalOutcome, escalationReason,
 		p.RequiredVoters, p.Threshold, weightedScore, p.CreatedBy,
 		p.CreatedAt.UTC().Format(time.RFC3339), p.UpdatedAt.UTC().Format(time.RFC3339),
@@ -716,8 +874,9 @@ func InsertProposalWithID(tx *sql.Tx, p *model.Proposal) (bool, error) {
 
 // InsertVoteWithID inserts a vote row with a caller-supplied ID, skipping if the
 // ID already exists. Must be called within an existing transaction. Returns true
-// if inserted. findings_json is JSON-encoded (NULL when absent) identically to
-// CastVote.
+// if inserted. findings_json and metadata are JSON-encoded (NULL when absent)
+// identically to CastVote, so an export/import round trip carries a vote's
+// provenance claim exactly as it carries its findings.
 func InsertVoteWithID(tx *sql.Tx, v *model.Vote) (bool, error) {
 	var findingsJSONStr any
 	if v.FindingsJSON != nil {
@@ -728,13 +887,18 @@ func InsertVoteWithID(tx *sql.Tx, v *model.Vote) (bool, error) {
 		findingsJSONStr = string(b)
 	}
 
+	metadataStr, err := marshalVoteMetadata(v.Metadata)
+	if err != nil {
+		return false, err
+	}
+
 	res, err := tx.Exec(
 		`INSERT OR IGNORE INTO votes
 		 (id, proposal_id, voter_name, voter_role, verdict, confidence,
-		  domain_relevance, findings, findings_json, summary, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  domain_relevance, findings, findings_json, summary, metadata, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.ID, v.ProposalID, v.VoterName, v.VoterRole, string(v.Verdict), v.Confidence,
-		v.DomainRelevance, v.Findings, findingsJSONStr, v.Summary,
+		v.DomainRelevance, v.Findings, findingsJSONStr, v.Summary, metadataStr,
 		v.CreatedAt.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
@@ -756,4 +920,102 @@ func InsertProposalIssueLink(tx *sql.Tx, proposalID, issueID int) (bool, error) 
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// ProposalStatusesTx reads many proposals' statuses in ONE query, inside a
+// caller's transaction.
+//
+// It exists for the reader that holds the single pooled connection and needs a
+// handful of these at once: internal/db caps the pool at one connection, so a
+// pool read from inside an open transaction deadlocks permanently rather than
+// failing, and a per-proposal GetProposal loop from such a reader is the shape
+// that produces it.
+//
+// Status ONLY. A report that wanted the whole row would be asking for a
+// different function; narrowing it here keeps this from becoming a second
+// GetProposal that drifts from the first.
+func ProposalStatusesTx(tx *sql.Tx, ids []int) (map[int]model.ProposalStatus, error) {
+	out := make(map[int]model.ProposalStatus, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	// The placeholder list is built from the COUNT of ids, never from their
+	// values, and every id is a bound parameter — so the interpolation carries
+	// no injection surface even though the ids reach it from a caller.
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	rows, err := tx.Query(
+		`SELECT id, status FROM proposals WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading proposal statuses: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id     int
+			status string
+		)
+		if err := rows.Scan(&id, &status); err != nil {
+			return nil, fmt.Errorf("reading a proposal status: %w", err)
+		}
+		out[id] = model.ProposalStatus(status)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading proposal statuses: %w", err)
+	}
+	return out, nil
+}
+
+// CloseOpenProposalsTx closes every OPEN proposal among `ids`, inside a
+// caller's transaction, and reports how many it closed (DKT-262).
+//
+// It exists because closing a stranded proposal is not an operator act — it is
+// the tail of a transition that already happened. `run abandon` ends the run
+// that opened them; the ack of a reap answers the question its proposal asked.
+// Those transitions are transactional, so the close has to be able to ride
+// inside them: a close committed separately can be lost while the transition
+// stands, which puts the row back in the state this exists to prevent.
+//
+// ONLY `open` ROWS MOVE, exactly as CloseProposal insists. Every other status
+// is the record of a decision, and a bulk close that rewrote one would be the
+// overwrite the immutable-record rule forbids — which matters more here than in
+// the single-id case, because a caller passing a set has not looked at each one.
+//
+// `reason` lands in `final_outcome`, so the row itself says how the question
+// ended. It should name the TRANSITION, not the verdict: these proposals were
+// never decided, and a reason that read like a decision would be a worse lie
+// than the stale `open` was.
+func CloseOpenProposalsTx(tx *sql.Tx, ids []int, reason string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	// Built from the COUNT of ids, never their values; every id is bound.
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := []any{
+		string(model.ProposalStatusClosed), reason,
+		time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, string(model.ProposalStatusOpen))
+
+	res, err := tx.Exec(
+		`UPDATE proposals SET status = ?, final_outcome = ?, updated_at = ?
+		  WHERE id IN (`+placeholders+`) AND status = ?`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("closing stranded proposals: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("closing stranded proposals: %w", err)
+	}
+	return int(n), nil
 }

@@ -1,18 +1,12 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
-
-	"golang.org/x/term"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -21,7 +15,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
 
@@ -115,25 +108,7 @@ var planCmd = &cobra.Command{
 	Use:   "plan",
 	Short: "Show execution plan with phased grouping",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runPlan(cmd, args, w)
-			})
-		}
-		return runPlan(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runPlan)
 	},
 }
 
@@ -166,6 +141,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	// Fetch all non-done issues.
 	issues, _, err := db.ListIssues(conn, db.ListOptions{
+		ProjectID:   getProjectID(cmd),
 		IncludeDone: false,
 		Limit:       0,
 	})
@@ -398,7 +374,7 @@ func sortDeps(deps []string) {
 
 func init() {
 	planCmd.Flags().String("root", "", "Scope to a parent issue and its descendants")
-	planCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (repeatable; default: backlog, todo, in-progress)")
+	planCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (repeatable; default: every non-done status)")
 	planCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	planCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
 	planCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")

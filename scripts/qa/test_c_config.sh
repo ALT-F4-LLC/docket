@@ -9,6 +9,9 @@ test_c_config() {
 
   run config --json
   assert_exit "C" "C2" 0
-  assert_json "C" "C2" ".data.schema_version" "1"
+  # schema_version tracks db.currentSchemaVersion — assert it is a positive
+  # integer rather than a literal, so schema bumps don't break this check.
+  # (It was pinned to "1" and silently stale from v2 onward.)
+  assert_json "C" "C2" '(.data.schema_version | type == "number" and . >= 1)' "true"
   assert_json "C" "C2" ".data.issue_prefix" "DKT"
 }

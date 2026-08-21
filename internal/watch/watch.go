@@ -12,12 +12,16 @@ import (
 
 // Options configures the watch loop behavior.
 type Options struct {
-	Interval  time.Duration
-	JSONMode  bool
-	QuietMode bool
-	IsTTY     bool
-	Stdout    io.Writer
-	Stderr    io.Writer
+	Interval time.Duration
+	JSONMode bool
+	// JSONVersion selects the envelope shape when JSONMode is true. The zero
+	// value (JSONNone) is normalized to JSONV1 for a JSON-mode watch, so a
+	// caller that sets only JSONMode keeps emitting the v1 envelope.
+	JSONVersion output.JSONVersion
+	QuietMode   bool
+	IsTTY       bool
+	Stdout      io.Writer
+	Stderr      io.Writer
 }
 
 // RunWatch executes fn repeatedly on the given interval until ctx is cancelled.
@@ -33,14 +37,17 @@ func RunWatch(ctx context.Context, opts Options, fn func(ctx context.Context, w 
 	var consecutiveErrors int
 	const maxConsecutiveErrors = 3
 
+	jsonVersion := output.NormalizeJSONVersion(opts.JSONMode, opts.JSONVersion)
+
 	for cycle := 0; ; cycle++ {
 		buf.Reset()
 
 		w := &output.Writer{
-			JSONMode:  opts.JSONMode,
-			QuietMode: opts.QuietMode,
-			Stdout:    &buf,
-			Stderr:    opts.Stderr,
+			JSONMode:    opts.JSONMode,
+			JSONVersion: jsonVersion,
+			QuietMode:   opts.QuietMode,
+			Stdout:      &buf,
+			Stderr:      opts.Stderr,
 		}
 
 		if err := fn(ctx, w); err != nil {

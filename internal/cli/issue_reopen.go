@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -19,29 +18,38 @@ var reopenCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
-		issue, err := db.GetIssue(conn, id)
+		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+			return err
 		}
 
 		if issue.Status != model.StatusDone {
 			if w.JSONMode {
-				w.Success(issue, "")
+				w.Success(withIssueVersion(issue), "")
 			} else {
 				w.Info("Issue %s is not closed", model.FormatID(id))
 			}
 			return nil
 		}
 
-		if err := db.UpdateIssue(conn, id, map[string]interface{}{"status": "backlog"}, config.DefaultAuthor()); err != nil {
+		ifVersion, err := ifVersionOf(cmd)
+		if err != nil {
+			return err
+		}
+
+		// Reopening clears any resolution alongside the status: the issue is
+		// back on the board, so "the machine abandoned this" is no longer the
+		// current fact about it (DKT-245).
+		fields := map[string]interface{}{"status": "backlog", "resolution": ""}
+		if err := db.UpdateIssueCAS(conn, id, fields, config.DefaultAuthor(), ifVersion); err != nil {
+			if e := casError(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
+				return e
+			}
 			return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
 		}
 
@@ -50,12 +58,17 @@ var reopenCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(issue, fmt.Sprintf("Reopened %s: %s", model.FormatID(id), issue.Title))
+		if err := hydrateIssueAssociations(conn, issue); err != nil {
+			return err
+		}
+
+		w.Success(withIssueVersion(issue), fmt.Sprintf("Reopened %s: %s", model.FormatID(id), issue.Title))
 
 		return nil
 	},
 }
 
 func init() {
+	addIfVersionFlag(reopenCmd)
 	issueCmd.AddCommand(reopenCmd)
 }

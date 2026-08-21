@@ -1,23 +1,17 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 type docShowResult struct {
@@ -85,25 +79,7 @@ var docShowCmd = &cobra.Command{
 	Short: "Show document details",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runDocShow(cmd, args, w)
-			})
-		}
-		return runDocShow(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runDocShow)
 	},
 }
 
@@ -122,8 +98,8 @@ func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	doc, err := db.GetDoc(conn, id)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return cmdErr(fmt.Errorf("doc %s not found", args[0]), output.ErrNotFound)
+		if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
+			return e
 		}
 		return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
 	}
@@ -169,14 +145,13 @@ func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 func runDocShowRevision(conn *sql.DB, w *output.Writer, idArg string, id, rev int) error {
 	revision, err := db.GetDocRevision(conn, id, rev)
 	if err != nil {
-		switch {
-		case errors.Is(err, db.ErrValidation):
+		if errors.Is(err, db.ErrValidation) {
 			return cmdErr(err, output.ErrValidation)
-		case errors.Is(err, db.ErrNotFound):
-			return cmdErr(fmt.Errorf("doc %s revision %d not found", idArg, rev), output.ErrNotFound)
-		default:
-			return cmdErr(fmt.Errorf("fetching revision: %w", err), output.ErrGeneral)
 		}
+		if e := notFound(err, fmt.Sprintf("doc %s revision %d", idArg, rev)); e != nil {
+			return e
+		}
+		return cmdErr(fmt.Errorf("fetching revision: %w", err), output.ErrGeneral)
 	}
 
 	var message string

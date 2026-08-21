@@ -1,0 +1,18 @@
+# CI-only routing-sweep fixture — see README.md in this directory.
+#
+# The catch-all: matches any issue that carries none of the six trigger
+# labels above, on any kind (no `kind` clause — see match.go:48: an absent
+# list already matches every kind, including one added after this file was
+# written). Lowest precedence, so it excludes every label the other six
+# match on.
+
+[pipeline]
+name        = "ci-standard-change"
+version     = 1
+description = "Routing-sweep fixture: catch-all lane for issues with none of the other six trigger labels."
+
+[match]
+unless_labels = [
+  "ci-urgent", "ci-security-review", "ci-breaking-change",
+  "ci-infra", "ci-experimental", "ci-docs-only",
+]

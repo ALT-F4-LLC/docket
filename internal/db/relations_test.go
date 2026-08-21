@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // mustCreateIssue creates a minimal issue via the production CreateIssue path
@@ -18,9 +19,7 @@ func mustCreateIssue(t *testing.T, d *sql.DB, title string) int {
 		Priority: model.PriorityNone,
 		Kind:     model.IssueKindTask,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("creating issue %q: %v", title, err)
-	}
+	testsupport.Must(t, err, "creating issue %q: %v", title, err)
 	return id
 }
 
@@ -33,17 +32,14 @@ func mustCreateRelation(t *testing.T, d *sql.DB, source, target int, rt model.Re
 		TargetIssueID: target,
 		RelationType:  rt,
 	})
-	if err != nil {
-		t.Fatalf("creating relation %d->%d (%s): %v", source, target, rt, err)
-	}
+	testsupport.Must(t, err, "creating relation %d->%d (%s): %v", source, target, rt, err)
 	return id
 }
 
 func TestCreateRelation(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
@@ -53,9 +49,7 @@ func TestCreateRelation(t *testing.T) {
 		TargetIssueID: b,
 		RelationType:  model.RelationBlocks,
 	})
-	if err != nil {
-		t.Fatalf("CreateRelation: %v", err)
-	}
+	testsupport.Must(t, err, "CreateRelation: %v", err)
 	if id <= 0 {
 		t.Errorf("expected positive ID, got %d", id)
 	}
@@ -66,9 +60,7 @@ func TestCreateRelation(t *testing.T) {
 	err = d.QueryRow(
 		`SELECT source_issue_id, target_issue_id, relation_type FROM issue_relations WHERE id = ?`, id,
 	).Scan(&sourceID, &targetID, &relType)
-	if err != nil {
-		t.Fatalf("querying relation row: %v", err)
-	}
+	testsupport.Must(t, err, "querying relation row: %v", err)
 	if sourceID != a {
 		t.Errorf("source_issue_id = %d, want %d", sourceID, a)
 	}
@@ -82,13 +74,12 @@ func TestCreateRelation(t *testing.T) {
 
 func TestCreateRelationSelfReferential(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 
-	_, err := CreateRelation(d, &model.Relation{
+	_, err = CreateRelation(d, &model.Relation{
 		SourceIssueID: a,
 		TargetIssueID: a,
 		RelationType:  model.RelationBlocks,
@@ -100,16 +91,15 @@ func TestCreateRelationSelfReferential(t *testing.T) {
 
 func TestCreateRelationDuplicate(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
 
 	mustCreateRelation(t, d, a, b, model.RelationBlocks)
 
-	_, err := CreateRelation(d, &model.Relation{
+	_, err = CreateRelation(d, &model.Relation{
 		SourceIssueID: a,
 		TargetIssueID: b,
 		RelationType:  model.RelationBlocks,
@@ -121,16 +111,15 @@ func TestCreateRelationDuplicate(t *testing.T) {
 
 func TestCreateRelationInverseDuplicate(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
 
 	mustCreateRelation(t, d, a, b, model.RelationBlocks)
 
-	_, err := CreateRelation(d, &model.Relation{
+	_, err = CreateRelation(d, &model.Relation{
 		SourceIssueID: b,
 		TargetIssueID: a,
 		RelationType:  model.RelationBlocks,
@@ -142,16 +131,15 @@ func TestCreateRelationInverseDuplicate(t *testing.T) {
 
 func TestCreateRelationDependsOnInverseDuplicate(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
 
 	mustCreateRelation(t, d, a, b, model.RelationDependsOn)
 
-	_, err := CreateRelation(d, &model.Relation{
+	_, err = CreateRelation(d, &model.Relation{
 		SourceIssueID: b,
 		TargetIssueID: a,
 		RelationType:  model.RelationDependsOn,
@@ -163,16 +151,15 @@ func TestCreateRelationDependsOnInverseDuplicate(t *testing.T) {
 
 func TestCreateRelationRelatesToBothDirections(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
 
 	mustCreateRelation(t, d, a, b, model.RelationRelatesTo)
 
-	_, err := CreateRelation(d, &model.Relation{
+	_, err = CreateRelation(d, &model.Relation{
 		SourceIssueID: b,
 		TargetIssueID: a,
 		RelationType:  model.RelationRelatesTo,
@@ -184,9 +171,8 @@ func TestCreateRelationRelatesToBothDirections(t *testing.T) {
 
 func TestCreateRelationDifferentTypesSamePair(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
@@ -199,9 +185,7 @@ func TestCreateRelationDifferentTypesSamePair(t *testing.T) {
 		TargetIssueID: b,
 		RelationType:  model.RelationRelatesTo,
 	})
-	if err != nil {
-		t.Fatalf("expected success for different type on same pair, got %v", err)
-	}
+	testsupport.Must(t, err, "expected success for different type on same pair, got %v", err)
 	if id <= 0 {
 		t.Errorf("expected positive ID, got %d", id)
 	}
@@ -209,14 +193,13 @@ func TestCreateRelationDifferentTypesSamePair(t *testing.T) {
 
 func TestCreateRelationIssueNotFound(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 
 	// Target does not exist.
-	_, err := CreateRelation(d, &model.Relation{
+	_, err = CreateRelation(d, &model.Relation{
 		SourceIssueID: a,
 		TargetIssueID: 9999,
 		RelationType:  model.RelationBlocks,
@@ -293,9 +276,8 @@ func TestCycleDetection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := mustOpen(t)
-			if err := Initialize(d); err != nil {
-				t.Fatalf("Initialize: %v", err)
-			}
+			err := Initialize(d)
+			testsupport.Must(t, err, "Initialize: %v", err)
 
 			// Create issues for all unique node names.
 			nodeNames := map[string]bool{}
@@ -317,7 +299,7 @@ func TestCycleDetection(t *testing.T) {
 			}
 
 			// Attempt the new relation.
-			_, err := CreateRelation(d, &model.Relation{
+			_, err = CreateRelation(d, &model.Relation{
 				SourceIssueID: ids[tt.attempt.source],
 				TargetIssueID: ids[tt.attempt.target],
 				RelationType:  model.RelationBlocks,
@@ -347,9 +329,8 @@ func TestCycleDetectionDependsOn(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := mustOpen(t)
-			if err := Initialize(d); err != nil {
-				t.Fatalf("Initialize: %v", err)
-			}
+			err := Initialize(d)
+			testsupport.Must(t, err, "Initialize: %v", err)
 
 			// Create chain of issues: 0 -> 1 -> 2 -> ... -> (chain-1)
 			ids := make([]int, tt.chain)
@@ -363,7 +344,7 @@ func TestCycleDetectionDependsOn(t *testing.T) {
 			}
 
 			// Attempt to close the cycle: last -> first.
-			_, err := CreateRelation(d, &model.Relation{
+			_, err = CreateRelation(d, &model.Relation{
 				SourceIssueID: ids[tt.chain-1],
 				TargetIssueID: ids[0],
 				RelationType:  model.RelationDependsOn,
@@ -382,18 +363,16 @@ func TestCycleDetectionDependsOn(t *testing.T) {
 
 func TestDeleteRelation(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
 
 	mustCreateRelation(t, d, a, b, model.RelationBlocks)
 
-	if err := DeleteRelation(d, a, b, string(model.RelationBlocks)); err != nil {
-		t.Fatalf("DeleteRelation: %v", err)
-	}
+	err = DeleteRelation(d, a, b, string(model.RelationBlocks))
+	testsupport.Must(t, err, "DeleteRelation: %v", err)
 
 	// Verify it is gone.
 	var count int
@@ -409,11 +388,10 @@ func TestDeleteRelation(t *testing.T) {
 
 func TestDeleteRelationNotFound(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
-	err := DeleteRelation(d, 999, 888, string(model.RelationBlocks))
+	err = DeleteRelation(d, 999, 888, string(model.RelationBlocks))
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -421,9 +399,8 @@ func TestDeleteRelationNotFound(t *testing.T) {
 
 func TestGetIssueRelations(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
@@ -438,9 +415,7 @@ func TestGetIssueRelations(t *testing.T) {
 	mustCreateRelation(t, d, a, dd, model.RelationRelatesTo)
 
 	relations, err := GetIssueRelations(d, a)
-	if err != nil {
-		t.Fatalf("GetIssueRelations: %v", err)
-	}
+	testsupport.Must(t, err, "GetIssueRelations: %v", err)
 
 	if len(relations) != 3 {
 		t.Fatalf("expected 3 relations, got %d", len(relations))
@@ -477,16 +452,13 @@ func TestGetIssueRelations(t *testing.T) {
 
 func TestGetIssueRelationsEmpty(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "lonely issue")
 
 	relations, err := GetIssueRelations(d, a)
-	if err != nil {
-		t.Fatalf("GetIssueRelations: %v", err)
-	}
+	testsupport.Must(t, err, "GetIssueRelations: %v", err)
 	if len(relations) != 0 {
 		t.Errorf("expected 0 relations, got %d", len(relations))
 	}
@@ -494,9 +466,8 @@ func TestGetIssueRelationsEmpty(t *testing.T) {
 
 func TestCreateRelationRecordsActivity(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
@@ -528,18 +499,16 @@ func TestCreateRelationRecordsActivity(t *testing.T) {
 
 func TestDeleteRelationRecordsActivity(t *testing.T) {
 	d := mustOpen(t)
-	if err := Initialize(d); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(d)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	a := mustCreateIssue(t, d, "issue A")
 	b := mustCreateIssue(t, d, "issue B")
 
 	mustCreateRelation(t, d, a, b, model.RelationBlocks)
 
-	if err := DeleteRelation(d, a, b, string(model.RelationBlocks)); err != nil {
-		t.Fatalf("DeleteRelation: %v", err)
-	}
+	err = DeleteRelation(d, a, b, string(model.RelationBlocks))
+	testsupport.Must(t, err, "DeleteRelation: %v", err)
 
 	// Check relation_removed activity on issue A (source).
 	var countA int
@@ -561,5 +530,75 @@ func TestDeleteRelationRecordsActivity(t *testing.T) {
 	}
 	if countB != 1 {
 		t.Errorf("expected 1 relation_removed activity on issue B, got %d", countB)
+	}
+}
+
+// TestGetAllRelationsIsTotallyOrdered is DKT-330.
+//
+// `ORDER BY created_at ASC` with no tiebreak, over a column written at RFC3339
+// SECOND resolution, left relations created inside one second with no defined
+// relative order — so `docket export` run twice against an unchanged database
+// could emit the array two different ways and a manifest diff would carry
+// noise that is not a change.
+//
+// Every relation here is created in the same second, which is the case the old
+// query could not order. The assertion is that the order is INSERTION order
+// and that repeating the read reproduces it exactly.
+func TestGetAllRelationsIsTotallyOrdered(t *testing.T) {
+	d := mustOpen(t)
+	testsupport.Must(t, Initialize(d), "Initialize")
+
+	issues := make([]int, 0, 8)
+	for i := range 8 {
+		issues = append(issues, mustCreateIssue(t, d, "issue "+string(rune('a'+i))))
+	}
+	// A chain, so every relation is a distinct pair and none trips the
+	// duplicate or inverse-duplicate guards.
+	want := make([]int, 0, 7)
+	for i := range 7 {
+		want = append(want, mustCreateRelation(t, d, issues[i], issues[i+1], model.RelationBlocks))
+	}
+
+	for round := range 8 {
+		got, err := GetAllRelations(d, 0)
+		testsupport.Must(t, err, "GetAllRelations: %v", err)
+		if len(got) != len(want) {
+			t.Fatalf("round %d: %d relations, want %d", round, len(got), len(want))
+		}
+		for i, id := range want {
+			if got[i].ID != id {
+				t.Fatalf("round %d, position %d: relation %d, want %d — the "+
+					"export order must be the same on every read of an "+
+					"unchanged database", round, i, got[i].ID, id)
+			}
+		}
+	}
+}
+
+// TestGetIssueRelationsIsTotallyOrdered covers the other two readers of the
+// same table, which carried the identical untiebroken sort.
+func TestGetIssueRelationsIsTotallyOrdered(t *testing.T) {
+	d := mustOpen(t)
+	testsupport.Must(t, Initialize(d), "Initialize")
+
+	hub := mustCreateIssue(t, d, "hub")
+	var want []int
+	for i := range 6 {
+		other := mustCreateIssue(t, d, "spoke "+string(rune('a'+i)))
+		want = append(want, mustCreateRelation(t, d, hub, other, model.RelationBlocks))
+	}
+
+	for round := range 4 {
+		got, err := GetIssueRelations(d, hub)
+		testsupport.Must(t, err, "GetIssueRelations: %v", err)
+		if len(got) != len(want) {
+			t.Fatalf("round %d: %d relations, want %d", round, len(got), len(want))
+		}
+		for i, id := range want {
+			if got[i].ID != id {
+				t.Fatalf("round %d, position %d: relation %d, want %d",
+					round, i, got[i].ID, id)
+			}
+		}
 	}
 }

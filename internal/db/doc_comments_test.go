@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestCreateDocComment(t *testing.T) {
@@ -17,17 +18,13 @@ func TestCreateDocComment(t *testing.T) {
 		Author: "reviewer",
 	}
 	id, err := CreateDocComment(db, c)
-	if err != nil {
-		t.Fatalf("CreateDocComment: %v", err)
-	}
+	testsupport.Must(t, err, "CreateDocComment: %v", err)
 	if id <= 0 {
 		t.Fatalf("returned id = %d, want > 0", id)
 	}
 
 	got, err := GetDocComment(db, id)
-	if err != nil {
-		t.Fatalf("GetDocComment: %v", err)
-	}
+	testsupport.Must(t, err, "GetDocComment: %v", err)
 	if got.DocID != docID {
 		t.Errorf("DocID = %d, want %d", got.DocID, docID)
 	}
@@ -63,9 +60,7 @@ func TestListDocComments(t *testing.T) {
 	}
 
 	got, err := ListDocComments(db, docID)
-	if err != nil {
-		t.Fatalf("ListDocComments: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocComments: %v", err)
 	if len(got) != 3 {
 		t.Fatalf("len(got) = %d, want 3", len(got))
 	}
@@ -85,6 +80,24 @@ func TestListDocComments_DocNotFound(t *testing.T) {
 	}
 }
 
+// TestListDocComments_EmptyIsNotNil pins ListDocComments' zero-result
+// contract: a doc that exists but carries no comments returns a non-nil
+// empty slice, not nil — distinct from the doc-not-found case above, which
+// returns ErrNotFound and never reaches this path.
+func TestListDocComments_EmptyIsNotNil(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	docID := mustCreateDoc(t, db, "d", "tdd", "draft", "body")
+
+	got, err := ListDocComments(db, docID)
+	testsupport.Must(t, err, "ListDocComments: %v", err)
+	if got == nil {
+		t.Fatalf("ListDocComments returned nil, want a non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("len(got) = %d, want 0", len(got))
+	}
+}
+
 func TestGetDocComment_NotFound(t *testing.T) {
 	db := mustInitAndMigrate(t)
 	_, err := GetDocComment(db, 999)
@@ -101,9 +114,8 @@ func TestCreateDocComment_TouchesDocUpdatedAt(t *testing.T) {
 	// Sleep is sufficient: RFC3339 has 1-second resolution. Use a body update
 	// path instead to deterministically tick the timestamp.
 	newBody := "v2"
-	if _, err := UpdateDoc(db, docID, DocUpdate{Body: &newBody, Author: "x"}); err != nil {
-		t.Fatalf("UpdateDoc: %v", err)
-	}
+	_, err := UpdateDoc(db, docID, DocUpdate{Body: &newBody, Author: "x"})
+	testsupport.Must(t, err, "UpdateDoc: %v", err)
 
 	if _, err := CreateDocComment(db, &model.DocComment{
 		DocID: docID, Body: "c", Author: "u",
@@ -122,36 +134,27 @@ func TestInsertDocCommentWithID_RoundTrip(t *testing.T) {
 	docID := mustCreateDoc(t, db, "d", "tdd", "draft", "b")
 
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
 
 	c := &model.DocComment{ID: 77, DocID: docID, Body: "imported", Author: "ops"}
 	inserted, err := InsertDocCommentWithID(tx, c)
-	if err != nil {
-		t.Fatalf("InsertDocCommentWithID: %v", err)
-	}
+	testsupport.Must(t, err, "InsertDocCommentWithID: %v", err)
 	if !inserted {
 		t.Error("inserted = false, want true")
 	}
 
 	// Second call with same ID — skipped.
 	inserted2, err := InsertDocCommentWithID(tx, c)
-	if err != nil {
-		t.Fatalf("InsertDocCommentWithID 2: %v", err)
-	}
+	testsupport.Must(t, err, "InsertDocCommentWithID 2: %v", err)
 	if inserted2 {
 		t.Error("inserted2 = true, want false")
 	}
 
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	got, err := GetDocComment(db, 77)
-	if err != nil {
-		t.Fatalf("GetDocComment(77): %v", err)
-	}
+	testsupport.Must(t, err, "GetDocComment(77): %v", err)
 	if got.Body != "imported" {
 		t.Errorf("Body = %q, want imported", got.Body)
 	}

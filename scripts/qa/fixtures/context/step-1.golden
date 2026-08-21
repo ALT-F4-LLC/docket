@@ -1,0 +1,39 @@
+{
+  "inputs": [],
+  "issue": {
+    "body_snapshot": "the golden request body",
+    "id": "DKT-1",
+    "kind": "task",
+    "labels": [],
+    "scope": [],
+    "title": "golden subject"
+  },
+  "loop_entry": null,
+  "pins": [
+    {
+      "path": "schema:aggregate@1",
+      "sha256": "1e0a0be3939417d203bef7e26a18f36f9dbaad6ed8b9e7b583a0d86fac8358b1"
+    },
+    {
+      "path": "schema:findings@1",
+      "sha256": "d72bc7ab64252d06e5c3ee2a6e8462768294a44d18ca73159dc9a1c800a95c0a"
+    },
+    {
+      "path": "workflow:standard-change@1",
+      "sha256": "99fb14ea90982cd209d0d2ca0648077f0ed131db8a1a048d83b2cf6683f20ac2"
+    }
+  ],
+  "step": {
+    "attempt": 0,
+    "class": "write",
+    "executor": "implement",
+    "expected_cost": 1.5,
+    "instance": "implement@0",
+    "issue": "DKT-1",
+    "kind": "executor",
+    "lease_ttl_s": 900,
+    "run": "RUN-1",
+    "status": "ready",
+    "step": "STEP-1"
+  }
+}

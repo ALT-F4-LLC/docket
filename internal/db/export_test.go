@@ -7,15 +7,15 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // --- DB layer tests ---
 
 func TestListAllIssues(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create issues with various statuses including done.
 	statuses := []model.Status{model.StatusBacklog, model.StatusTodo, model.StatusInProgress, model.StatusDone}
@@ -27,18 +27,14 @@ func TestListAllIssues(t *testing.T) {
 			Kind:     model.IssueKindTask,
 		}
 		id, err := CreateIssue(db, issue, nil, nil)
-		if err != nil {
-			t.Fatalf("CreateIssue %d: %v", i, err)
-		}
+		testsupport.Must(t, err, "CreateIssue %d: %v", i, err)
 		if id <= 0 {
 			t.Fatalf("expected positive id, got %d", id)
 		}
 	}
 
-	issues, err := ListAllIssues(db)
-	if err != nil {
-		t.Fatalf("ListAllIssues: %v", err)
-	}
+	issues, err := ListAllIssues(db, 0)
+	testsupport.Must(t, err, "ListAllIssues: %v", err)
 	if len(issues) != 4 {
 		t.Errorf("expected 4 issues, got %d", len(issues))
 	}
@@ -58,23 +54,18 @@ func TestListAllIssues(t *testing.T) {
 
 func TestListAllComments(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create two issues.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 1: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 1: %v", err)
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusTodo, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 2: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 2: %v", err)
 
 	// Create comments on both issues.
 	for _, c := range []*model.Comment{
@@ -82,15 +73,12 @@ func TestListAllComments(t *testing.T) {
 		{IssueID: id2, Body: "comment B", Author: "bob"},
 		{IssueID: id1, Body: "comment C", Author: "alice"},
 	} {
-		if _, err := CreateComment(db, c); err != nil {
-			t.Fatalf("CreateComment: %v", err)
-		}
+		_, err := CreateComment(db, c)
+		testsupport.Must(t, err, "CreateComment: %v", err)
 	}
 
-	comments, err := ListAllComments(db)
-	if err != nil {
-		t.Fatalf("ListAllComments: %v", err)
-	}
+	comments, err := ListAllComments(db, 0)
+	testsupport.Must(t, err, "ListAllComments: %v", err)
 	if len(comments) != 3 {
 		t.Errorf("expected 3 comments, got %d", len(comments))
 	}
@@ -106,9 +94,8 @@ func TestListAllComments(t *testing.T) {
 
 func TestGetAllRelations(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create 3 issues.
 	ids := make([]int, 3)
@@ -116,9 +103,7 @@ func TestGetAllRelations(t *testing.T) {
 		id, err := CreateIssue(db, &model.Issue{
 			Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 		}, nil, nil)
-		if err != nil {
-			t.Fatalf("CreateIssue %d: %v", i, err)
-		}
+		testsupport.Must(t, err, "CreateIssue %d: %v", i, err)
 		ids[i] = id
 	}
 
@@ -128,15 +113,12 @@ func TestGetAllRelations(t *testing.T) {
 		{SourceIssueID: ids[1], TargetIssueID: ids[2], RelationType: model.RelationRelatesTo},
 	}
 	for _, r := range rels {
-		if _, err := CreateRelation(db, r); err != nil {
-			t.Fatalf("CreateRelation: %v", err)
-		}
+		_, err := CreateRelation(db, r)
+		testsupport.Must(t, err, "CreateRelation: %v", err)
 	}
 
-	allRels, err := GetAllRelations(db)
-	if err != nil {
-		t.Fatalf("GetAllRelations: %v", err)
-	}
+	allRels, err := GetAllRelations(db, 0)
+	testsupport.Must(t, err, "GetAllRelations: %v", err)
 	if len(allRels) != 2 {
 		t.Errorf("expected 2 relations, got %d", len(allRels))
 	}
@@ -144,9 +126,8 @@ func TestGetAllRelations(t *testing.T) {
 
 func TestListAllLabelsRaw(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create labels via issues.
 	if _, err := CreateIssue(db, &model.Issue{
@@ -155,10 +136,8 @@ func TestListAllLabelsRaw(t *testing.T) {
 		t.Fatalf("CreateIssue: %v", err)
 	}
 
-	labels, err := ListAllLabelsRaw(db)
-	if err != nil {
-		t.Fatalf("ListAllLabelsRaw: %v", err)
-	}
+	labels, err := ListAllLabelsRaw(db, 0)
+	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
 	if len(labels) != 3 {
 		t.Errorf("expected 3 labels, got %d", len(labels))
 	}
@@ -173,29 +152,22 @@ func TestListAllLabelsRaw(t *testing.T) {
 
 func TestListAllIssueLabelMappings(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create two issues with labels.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, []string{"bug", "urgent"}, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 1: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 1: %v", err)
 
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusTodo, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, []string{"bug"}, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 2: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 2: %v", err)
 
-	mappings, err := ListAllIssueLabelMappings(db)
-	if err != nil {
-		t.Fatalf("ListAllIssueLabelMappings: %v", err)
-	}
+	mappings, err := ListAllIssueLabelMappings(db, 0)
+	testsupport.Must(t, err, "ListAllIssueLabelMappings: %v", err)
 
 	// Issue 1 has 2 labels, issue 2 has 1 label = 3 mappings total.
 	if len(mappings) != 3 {
@@ -214,15 +186,12 @@ func TestListAllIssueLabelMappings(t *testing.T) {
 
 func TestCountIssues(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Empty DB should have 0 issues.
-	count, err := CountIssues(db)
-	if err != nil {
-		t.Fatalf("CountIssues: %v", err)
-	}
+	count, err := CountIssues(db, 0)
+	testsupport.Must(t, err, "CountIssues: %v", err)
 	if count != 0 {
 		t.Errorf("expected 0 issues, got %d", count)
 	}
@@ -236,10 +205,8 @@ func TestCountIssues(t *testing.T) {
 		}
 	}
 
-	count, err = CountIssues(db)
-	if err != nil {
-		t.Fatalf("CountIssues: %v", err)
-	}
+	count, err = CountIssues(db, 0)
+	testsupport.Must(t, err, "CountIssues: %v", err)
 	if count != 5 {
 		t.Errorf("expected 5 issues, got %d", count)
 	}
@@ -247,27 +214,21 @@ func TestCountIssues(t *testing.T) {
 
 func TestClearAllData(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Populate all tables.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, []string{"bug"}, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 1: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 1: %v", err)
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusTodo, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 2: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 2: %v", err)
 
-	if _, err := CreateComment(db, &model.Comment{IssueID: id1, Body: "test"}); err != nil {
-		t.Fatalf("CreateComment: %v", err)
-	}
+	_, err = CreateComment(db, &model.Comment{IssueID: id1, Body: "test"})
+	testsupport.Must(t, err, "CreateComment: %v", err)
 	if _, err := CreateRelation(db, &model.Relation{
 		SourceIssueID: id1, TargetIssueID: id2, RelationType: model.RelationBlocks,
 	}); err != nil {
@@ -275,9 +236,8 @@ func TestClearAllData(t *testing.T) {
 	}
 
 	// Clear everything.
-	if err := ClearAllData(db); err != nil {
-		t.Fatalf("ClearAllData: %v", err)
-	}
+	err = ClearAllData(db)
+	testsupport.Must(t, err, "ClearAllData: %v", err)
 
 	// Verify all tables are empty.
 	tables := map[string]string{
@@ -291,9 +251,8 @@ func TestClearAllData(t *testing.T) {
 	}
 	for name, query := range tables {
 		var count int
-		if err := db.QueryRow(query).Scan(&count); err != nil {
-			t.Fatalf("counting %s: %v", name, err)
-		}
+		err := db.QueryRow(query).Scan(&count)
+		testsupport.Must(t, err, "counting %s: %v", name, err)
 		if count != 0 {
 			t.Errorf("expected 0 rows in %s after ClearAllData, got %d", name, count)
 		}
@@ -302,9 +261,8 @@ func TestClearAllData(t *testing.T) {
 
 func TestInsertIssueWithID(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	issue := &model.Issue{
@@ -320,21 +278,15 @@ func TestInsertIssueWithID(t *testing.T) {
 	}
 
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	if _, err := InsertIssueWithID(tx, issue); err != nil {
-		t.Fatalf("InsertIssueWithID: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
+	_, err = InsertIssueWithID(tx, issue)
+	testsupport.Must(t, err, "InsertIssueWithID: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	// Verify retrievable.
 	got, err := GetIssue(db, 42)
-	if err != nil {
-		t.Fatalf("GetIssue: %v", err)
-	}
+	testsupport.Must(t, err, "GetIssue: %v", err)
 	if got.Title != "specific ID issue" {
 		t.Errorf("expected title %q, got %q", "specific ID issue", got.Title)
 	}
@@ -348,17 +300,14 @@ func TestInsertIssueWithID(t *testing.T) {
 
 func TestInsertCommentWithID(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create an issue first (FK dependency).
 	issueID, err := CreateIssue(db, &model.Issue{
 		Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue: %v", err)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	comment := &model.Comment{
@@ -370,21 +319,15 @@ func TestInsertCommentWithID(t *testing.T) {
 	}
 
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	if _, err := InsertCommentWithID(tx, comment); err != nil {
-		t.Fatalf("InsertCommentWithID: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
+	_, err = InsertCommentWithID(tx, comment)
+	testsupport.Must(t, err, "InsertCommentWithID: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	// Verify retrievable.
 	got, err := GetComment(db, 99)
-	if err != nil {
-		t.Fatalf("GetComment: %v", err)
-	}
+	testsupport.Must(t, err, "GetComment: %v", err)
 	if got.Body != "specific ID comment" {
 		t.Errorf("expected body %q, got %q", "specific ID comment", got.Body)
 	}
@@ -395,23 +338,18 @@ func TestInsertCommentWithID(t *testing.T) {
 
 func TestInsertRelationWithID(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create two issues.
 	id1, err := CreateIssue(db, &model.Issue{
 		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 1: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 1: %v", err)
 	id2, err := CreateIssue(db, &model.Issue{
 		Title: "issue 2", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue 2: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue 2: %v", err)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	rel := &model.Relation{
@@ -423,21 +361,15 @@ func TestInsertRelationWithID(t *testing.T) {
 	}
 
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	if _, err := InsertRelationWithID(tx, rel); err != nil {
-		t.Fatalf("InsertRelationWithID: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
+	_, err = InsertRelationWithID(tx, rel)
+	testsupport.Must(t, err, "InsertRelationWithID: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	// Verify retrievable via GetAllRelations.
-	allRels, err := GetAllRelations(db)
-	if err != nil {
-		t.Fatalf("GetAllRelations: %v", err)
-	}
+	allRels, err := GetAllRelations(db, 0)
+	testsupport.Must(t, err, "GetAllRelations: %v", err)
 	if len(allRels) != 1 {
 		t.Fatalf("expected 1 relation, got %d", len(allRels))
 	}
@@ -451,9 +383,8 @@ func TestInsertRelationWithID(t *testing.T) {
 
 func TestInsertLabelWithID(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	label := &model.Label{
 		ID:    55,
@@ -462,21 +393,15 @@ func TestInsertLabelWithID(t *testing.T) {
 	}
 
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	if _, err := InsertLabelWithID(tx, label); err != nil {
-		t.Fatalf("InsertLabelWithID: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
+	_, err = InsertLabelWithID(tx, label)
+	testsupport.Must(t, err, "InsertLabelWithID: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	// Verify retrievable.
-	labels, err := ListAllLabelsRaw(db)
-	if err != nil {
-		t.Fatalf("ListAllLabelsRaw: %v", err)
-	}
+	labels, err := ListAllLabelsRaw(db, 0)
+	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
 	if len(labels) != 1 {
 		t.Fatalf("expected 1 label, got %d", len(labels))
 	}
@@ -493,37 +418,29 @@ func TestInsertLabelWithID(t *testing.T) {
 
 func TestInsertIssueLabelMapping(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Create an issue and a label with specific IDs.
 	now := time.Now().UTC().Truncate(time.Second)
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
 	if _, err := InsertIssueWithID(tx, &model.Issue{
 		ID: 10, Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone,
 		Kind: model.IssueKindTask, CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
-	if _, err := InsertLabelWithID(tx, &model.Label{ID: 20, Name: "test-label"}); err != nil {
-		t.Fatalf("InsertLabelWithID: %v", err)
-	}
-	if _, err := InsertIssueLabelMapping(tx, 10, 20); err != nil {
-		t.Fatalf("InsertIssueLabelMapping: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	_, err = InsertLabelWithID(tx, &model.Label{ID: 20, Name: "test-label"})
+	testsupport.Must(t, err, "InsertLabelWithID: %v", err)
+	_, err = InsertIssueLabelMapping(tx, 10, 20)
+	testsupport.Must(t, err, "InsertIssueLabelMapping: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	// Verify.
-	mappings, err := ListAllIssueLabelMappings(db)
-	if err != nil {
-		t.Fatalf("ListAllIssueLabelMappings: %v", err)
-	}
+	mappings, err := ListAllIssueLabelMappings(db, 0)
+	testsupport.Must(t, err, "ListAllIssueLabelMappings: %v", err)
 	if len(mappings) != 1 {
 		t.Fatalf("expected 1 mapping, got %d", len(mappings))
 	}
@@ -537,12 +454,10 @@ func TestInsertIssueLabelMapping(t *testing.T) {
 func TestExportImportRoundTrip(t *testing.T) {
 	// Phase 1: Create a populated database.
 	srcDB := mustOpen(t)
-	if err := Initialize(srcDB); err != nil {
-		t.Fatalf("Initialize src: %v", err)
-	}
-	if err := Migrate(srcDB); err != nil {
-		t.Fatalf("Migrate src: %v", err)
-	}
+	err := Initialize(srcDB)
+	testsupport.Must(t, err, "Initialize src: %v", err)
+	err = Migrate(srcDB)
+	testsupport.Must(t, err, "Migrate src: %v", err)
 
 	// Create a parent issue.
 	parentID, err := CreateIssue(srcDB, &model.Issue{
@@ -553,9 +468,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Kind:        model.IssueKindEpic,
 		Assignee:    "alice",
 	}, []string{"epic", "v1"}, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue parent: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue parent: %v", err)
 
 	// Create child issues under the parent.
 	child1ID, err := CreateIssue(srcDB, &model.Issue{
@@ -564,13 +477,10 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Priority: model.PriorityMedium,
 		Kind:     model.IssueKindTask,
 	}, []string{"backend"}, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue child1: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue child1: %v", err)
 	// Set parent.
-	if err := UpdateIssue(srcDB, child1ID, map[string]interface{}{"parent_id": parentID}, "test"); err != nil {
-		t.Fatalf("UpdateIssue child1 parent: %v", err)
-	}
+	err = UpdateIssue(srcDB, child1ID, map[string]interface{}{"parent_id": parentID}, "test")
+	testsupport.Must(t, err, "UpdateIssue child1 parent: %v", err)
 
 	child2ID, err := CreateIssue(srcDB, &model.Issue{
 		Title:    "child task 2",
@@ -578,12 +488,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Priority: model.PriorityLow,
 		Kind:     model.IssueKindBug,
 	}, []string{"frontend"}, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue child2: %v", err)
-	}
-	if err := UpdateIssue(srcDB, child2ID, map[string]interface{}{"parent_id": parentID}, "test"); err != nil {
-		t.Fatalf("UpdateIssue child2 parent: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue child2: %v", err)
+	err = UpdateIssue(srcDB, child2ID, map[string]interface{}{"parent_id": parentID}, "test")
+	testsupport.Must(t, err, "UpdateIssue child2 parent: %v", err)
 
 	// Standalone issue.
 	standaloneID, err := CreateIssue(srcDB, &model.Issue{
@@ -592,9 +499,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Priority: model.PriorityNone,
 		Kind:     model.IssueKindFeature,
 	}, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue standalone: %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue standalone: %v", err)
 
 	// Create comments.
 	for _, c := range []*model.Comment{
@@ -602,9 +507,8 @@ func TestExportImportRoundTrip(t *testing.T) {
 		{IssueID: child1ID, Body: "need to investigate", Author: "bob"},
 		{IssueID: child2ID, Body: "fixed the bug", Author: "alice"},
 	} {
-		if _, err := CreateComment(srcDB, c); err != nil {
-			t.Fatalf("CreateComment: %v", err)
-		}
+		_, err := CreateComment(srcDB, c)
+		testsupport.Must(t, err, "CreateComment: %v", err)
 	}
 
 	// Create relations.
@@ -618,21 +522,16 @@ func TestExportImportRoundTrip(t *testing.T) {
 	doc1ID, err := CreateDoc(srcDB, &model.Doc{
 		Type: "tdd", Status: "draft", Title: "design doc", Body: "initial body", Author: "alice",
 	})
-	if err != nil {
-		t.Fatalf("CreateDoc 1: %v", err)
-	}
+	testsupport.Must(t, err, "CreateDoc 1: %v", err)
 	// Append a revision by editing the body.
 	newBody := "revised body"
-	if _, err := UpdateDoc(srcDB, doc1ID, DocUpdate{Body: &newBody, Author: "bob"}); err != nil {
-		t.Fatalf("UpdateDoc 1: %v", err)
-	}
+	_, err = UpdateDoc(srcDB, doc1ID, DocUpdate{Body: &newBody, Author: "bob"})
+	testsupport.Must(t, err, "UpdateDoc 1: %v", err)
 
 	doc2ID, err := CreateDoc(srcDB, &model.Doc{
 		Type: "adr", Status: "accepted", Title: "decision record", Body: "the decision", Author: "carol",
 	})
-	if err != nil {
-		t.Fatalf("CreateDoc 2: %v", err)
-	}
+	testsupport.Must(t, err, "CreateDoc 2: %v", err)
 
 	// Comments on docs.
 	for _, c := range []*model.DocComment{
@@ -640,15 +539,13 @@ func TestExportImportRoundTrip(t *testing.T) {
 		{DocID: doc1ID, Body: "one nit", Author: "carol"},
 		{DocID: doc2ID, Body: "approved", Author: "alice"},
 	} {
-		if _, err := CreateDocComment(srcDB, c); err != nil {
-			t.Fatalf("CreateDocComment: %v", err)
-		}
+		_, err := CreateDocComment(srcDB, c)
+		testsupport.Must(t, err, "CreateDocComment: %v", err)
 	}
 
 	// Link a doc to an issue.
-	if err := LinkDocIssue(srcDB, doc1ID, parentID); err != nil {
-		t.Fatalf("LinkDocIssue: %v", err)
-	}
+	err = LinkDocIssue(srcDB, doc1ID, parentID)
+	testsupport.Must(t, err, "LinkDocIssue: %v", err)
 
 	// Create a proposal with a vote and issue/doc links.
 	proposalID, err := CreateProposal(srcDB, &model.Proposal{
@@ -662,9 +559,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		DomainTags:     []string{"backend"},
 		FilesChanged:   []string{"main.go"},
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 	if _, err := CastVote(srcDB, &model.Vote{
 		ProposalID:      proposalID,
 		VoterName:       "@senior-engineer",
@@ -677,35 +572,28 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CastVote: %v", err)
 	}
-	if err := LinkProposalIssue(srcDB, proposalID, standaloneID); err != nil {
-		t.Fatalf("LinkProposalIssue: %v", err)
-	}
-	if err := LinkProposalDoc(srcDB, proposalID, doc2ID); err != nil {
-		t.Fatalf("LinkProposalDoc: %v", err)
-	}
+	err = LinkProposalIssue(srcDB, proposalID, standaloneID)
+	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
+	err = LinkProposalDoc(srcDB, proposalID, doc2ID)
+	testsupport.Must(t, err, "LinkProposalDoc: %v", err)
 
 	// Phase 2: Export from source DB.
 	srcExport := exportDB(t, srcDB)
 
 	// Phase 3: Marshal to JSON.
 	jsonBytes, err := json.Marshal(srcExport)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
+	testsupport.Must(t, err, "json.Marshal: %v", err)
 
 	// Phase 4: Create fresh DB, unmarshal, and import.
 	dstDB := mustOpen(t)
-	if err := Initialize(dstDB); err != nil {
-		t.Fatalf("Initialize dst: %v", err)
-	}
-	if err := Migrate(dstDB); err != nil {
-		t.Fatalf("Migrate dst: %v", err)
-	}
+	err = Initialize(dstDB)
+	testsupport.Must(t, err, "Initialize dst: %v", err)
+	err = Migrate(dstDB)
+	testsupport.Must(t, err, "Migrate dst: %v", err)
 
 	var importData model.ExportData
-	if err := json.Unmarshal(jsonBytes, &importData); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	err = json.Unmarshal(jsonBytes, &importData)
+	testsupport.Must(t, err, "json.Unmarshal: %v", err)
 
 	importAll(t, dstDB, &importData)
 
@@ -717,13 +605,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 	dstExport.ExportedAt = "normalized"
 
 	srcJSON, err := json.Marshal(srcExport)
-	if err != nil {
-		t.Fatalf("marshal src: %v", err)
-	}
+	testsupport.Must(t, err, "marshal src: %v", err)
 	dstJSON, err := json.Marshal(dstExport)
-	if err != nil {
-		t.Fatalf("marshal dst: %v", err)
-	}
+	testsupport.Must(t, err, "marshal dst: %v", err)
 
 	if string(srcJSON) != string(dstJSON) {
 		t.Errorf("round-trip mismatch:\n  src: %s\n  dst: %s", string(srcJSON), string(dstJSON))
@@ -734,12 +618,10 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 func TestImportToEmptyDB(t *testing.T) {
 	srcDB := mustOpen(t)
-	if err := Initialize(srcDB); err != nil {
-		t.Fatalf("Initialize src: %v", err)
-	}
-	if err := Migrate(srcDB); err != nil {
-		t.Fatalf("Migrate src: %v", err)
-	}
+	err := Initialize(srcDB)
+	testsupport.Must(t, err, "Initialize src: %v", err)
+	err = Migrate(srcDB)
+	testsupport.Must(t, err, "Migrate src: %v", err)
 
 	// Populate source.
 	if _, err := CreateIssue(srcDB, &model.Issue{
@@ -750,39 +632,30 @@ func TestImportToEmptyDB(t *testing.T) {
 
 	srcExport := exportDB(t, srcDB)
 	jsonBytes, err := json.Marshal(srcExport)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
+	testsupport.Must(t, err, "json.Marshal: %v", err)
 
 	// Import into empty DB.
 	dstDB := mustOpen(t)
-	if err := Initialize(dstDB); err != nil {
-		t.Fatalf("Initialize dst: %v", err)
-	}
-	if err := Migrate(dstDB); err != nil {
-		t.Fatalf("Migrate dst: %v", err)
-	}
+	err = Initialize(dstDB)
+	testsupport.Must(t, err, "Initialize dst: %v", err)
+	err = Migrate(dstDB)
+	testsupport.Must(t, err, "Migrate dst: %v", err)
 
 	var importData model.ExportData
-	if err := json.Unmarshal(jsonBytes, &importData); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	err = json.Unmarshal(jsonBytes, &importData)
+	testsupport.Must(t, err, "json.Unmarshal: %v", err)
 
 	importAll(t, dstDB, &importData)
 
 	// Verify data was imported.
-	count, err := CountIssues(dstDB)
-	if err != nil {
-		t.Fatalf("CountIssues: %v", err)
-	}
+	count, err := CountIssues(dstDB, 0)
+	testsupport.Must(t, err, "CountIssues: %v", err)
 	if count != 1 {
 		t.Errorf("expected 1 issue after import, got %d", count)
 	}
 
-	labels, err := ListAllLabelsRaw(dstDB)
-	if err != nil {
-		t.Fatalf("ListAllLabelsRaw: %v", err)
-	}
+	labels, err := ListAllLabelsRaw(dstDB, 0)
+	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
 	if len(labels) != 1 {
 		t.Errorf("expected 1 label after import, got %d", len(labels))
 	}
@@ -790,20 +663,16 @@ func TestImportToEmptyDB(t *testing.T) {
 
 func TestImportMergeSkipsDuplicates(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	now := time.Now().UTC().Truncate(time.Second)
 
 	// Pre-populate with some data.
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	if _, err := InsertLabelWithID(tx, &model.Label{ID: 1, Name: "existing-label"}); err != nil {
-		t.Fatalf("InsertLabelWithID: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
+	_, err = InsertLabelWithID(tx, &model.Label{ID: 1, Name: "existing-label"})
+	testsupport.Must(t, err, "InsertLabelWithID: %v", err)
 	if _, err := InsertIssueWithID(tx, &model.Issue{
 		ID: 1, Title: "existing issue", Status: model.StatusBacklog,
 		Priority: model.PriorityNone, Kind: model.IssueKindTask,
@@ -811,12 +680,10 @@ func TestImportMergeSkipsDuplicates(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertIssueWithID: %v", err)
 	}
-	if _, err := InsertIssueLabelMapping(tx, 1, 1); err != nil {
-		t.Fatalf("InsertIssueLabelMapping: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	_, err = InsertIssueLabelMapping(tx, 1, 1)
+	testsupport.Must(t, err, "InsertIssueLabelMapping: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	// Build import data with a duplicate issue (ID 1) and a new one (ID 2).
 	importData := &model.ExportData{
@@ -845,28 +712,22 @@ func TestImportMergeSkipsDuplicates(t *testing.T) {
 	importAll(t, db, importData)
 
 	// Should have 2 issues now (existing + new).
-	count, err := CountIssues(db)
-	if err != nil {
-		t.Fatalf("CountIssues: %v", err)
-	}
+	count, err := CountIssues(db, 0)
+	testsupport.Must(t, err, "CountIssues: %v", err)
 	if count != 2 {
 		t.Errorf("expected 2 issues after merge, got %d", count)
 	}
 
 	// Should have 2 labels.
-	labels, err := ListAllLabelsRaw(db)
-	if err != nil {
-		t.Fatalf("ListAllLabelsRaw: %v", err)
-	}
+	labels, err := ListAllLabelsRaw(db, 0)
+	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
 	if len(labels) != 2 {
 		t.Errorf("expected 2 labels after merge, got %d", len(labels))
 	}
 
 	// Should have 2 mappings.
-	mappings, err := ListAllIssueLabelMappings(db)
-	if err != nil {
-		t.Fatalf("ListAllIssueLabelMappings: %v", err)
-	}
+	mappings, err := ListAllIssueLabelMappings(db, 0)
+	testsupport.Must(t, err, "ListAllIssueLabelMappings: %v", err)
 	if len(mappings) != 2 {
 		t.Errorf("expected 2 mappings after merge, got %d", len(mappings))
 	}
@@ -874,9 +735,8 @@ func TestImportMergeSkipsDuplicates(t *testing.T) {
 
 func TestImportReplaceClears(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	now := time.Now().UTC().Truncate(time.Second)
 
@@ -888,9 +748,8 @@ func TestImportReplaceClears(t *testing.T) {
 	}
 
 	// Clear all data (simulating --replace).
-	if err := ClearAllData(db); err != nil {
-		t.Fatalf("ClearAllData: %v", err)
-	}
+	err = ClearAllData(db)
+	testsupport.Must(t, err, "ClearAllData: %v", err)
 
 	// Import new data.
 	importData := &model.ExportData{
@@ -914,10 +773,8 @@ func TestImportReplaceClears(t *testing.T) {
 	importAll(t, db, importData)
 
 	// Verify only the imported data exists.
-	issues, err := ListAllIssues(db)
-	if err != nil {
-		t.Fatalf("ListAllIssues: %v", err)
-	}
+	issues, err := ListAllIssues(db, 0)
+	testsupport.Must(t, err, "ListAllIssues: %v", err)
 	if len(issues) != 1 {
 		t.Fatalf("expected 1 issue after replace, got %d", len(issues))
 	}
@@ -928,10 +785,8 @@ func TestImportReplaceClears(t *testing.T) {
 		t.Errorf("expected title %q, got %q", "replacement issue", issues[0].Title)
 	}
 
-	labels, err := ListAllLabelsRaw(db)
-	if err != nil {
-		t.Fatalf("ListAllLabelsRaw: %v", err)
-	}
+	labels, err := ListAllLabelsRaw(db, 0)
+	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
 	if len(labels) != 1 {
 		t.Fatalf("expected 1 label after replace, got %d", len(labels))
 	}
@@ -946,66 +801,36 @@ func TestImportReplaceClears(t *testing.T) {
 func exportDB(t *testing.T, db *sql.DB) *model.ExportData {
 	t.Helper()
 
-	issues, err := ListAllIssues(db)
-	if err != nil {
-		t.Fatalf("ListAllIssues: %v", err)
-	}
-	comments, err := ListAllComments(db)
-	if err != nil {
-		t.Fatalf("ListAllComments: %v", err)
-	}
-	relations, err := GetAllRelations(db)
-	if err != nil {
-		t.Fatalf("GetAllRelations: %v", err)
-	}
-	labels, err := ListAllLabelsRaw(db)
-	if err != nil {
-		t.Fatalf("ListAllLabelsRaw: %v", err)
-	}
-	mappings, err := ListAllIssueLabelMappings(db)
-	if err != nil {
-		t.Fatalf("ListAllIssueLabelMappings: %v", err)
-	}
-	fileMappings, err := ListAllIssueFileMappings(db)
-	if err != nil {
-		t.Fatalf("ListAllIssueFileMappings: %v", err)
-	}
-	docs, err := ListAllDocs(db)
-	if err != nil {
-		t.Fatalf("ListAllDocs: %v", err)
-	}
-	docRevisions, err := ListAllDocRevisions(db)
-	if err != nil {
-		t.Fatalf("ListAllDocRevisions: %v", err)
-	}
-	docComments, err := ListAllDocComments(db)
-	if err != nil {
-		t.Fatalf("ListAllDocComments: %v", err)
-	}
-	docIssueLinks, err := ListAllDocIssueLinks(db)
-	if err != nil {
-		t.Fatalf("ListAllDocIssueLinks: %v", err)
-	}
-	proposalDocs, err := ListAllProposalDocs(db)
-	if err != nil {
-		t.Fatalf("ListAllProposalDocs: %v", err)
-	}
-	proposals, err := ListAllProposals(db)
-	if err != nil {
-		t.Fatalf("ListAllProposals: %v", err)
-	}
-	votes, err := ListAllVotes(db)
-	if err != nil {
-		t.Fatalf("ListAllVotes: %v", err)
-	}
-	proposalIssues, err := ListAllProposalIssues(db)
-	if err != nil {
-		t.Fatalf("ListAllProposalIssues: %v", err)
-	}
-	activityLog, err := ListAllActivity(db)
-	if err != nil {
-		t.Fatalf("ListAllActivity: %v", err)
-	}
+	issues, err := ListAllIssues(db, 0)
+	testsupport.Must(t, err, "ListAllIssues: %v", err)
+	comments, err := ListAllComments(db, 0)
+	testsupport.Must(t, err, "ListAllComments: %v", err)
+	relations, err := GetAllRelations(db, 0)
+	testsupport.Must(t, err, "GetAllRelations: %v", err)
+	labels, err := ListAllLabelsRaw(db, 0)
+	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
+	mappings, err := ListAllIssueLabelMappings(db, 0)
+	testsupport.Must(t, err, "ListAllIssueLabelMappings: %v", err)
+	fileMappings, err := ListAllIssueFileMappings(db, 0)
+	testsupport.Must(t, err, "ListAllIssueFileMappings: %v", err)
+	docs, err := ListAllDocs(db, 0)
+	testsupport.Must(t, err, "ListAllDocs: %v", err)
+	docRevisions, err := ListAllDocRevisions(db, 0)
+	testsupport.Must(t, err, "ListAllDocRevisions: %v", err)
+	docComments, err := ListAllDocComments(db, 0)
+	testsupport.Must(t, err, "ListAllDocComments: %v", err)
+	docIssueLinks, err := ListAllDocIssueLinks(db, 0)
+	testsupport.Must(t, err, "ListAllDocIssueLinks: %v", err)
+	proposalDocs, err := ListAllProposalDocs(db, 0)
+	testsupport.Must(t, err, "ListAllProposalDocs: %v", err)
+	proposals, err := ListAllProposals(db, 0)
+	testsupport.Must(t, err, "ListAllProposals: %v", err)
+	votes, err := ListAllVotes(db, 0)
+	testsupport.Must(t, err, "ListAllVotes: %v", err)
+	proposalIssues, err := ListAllProposalIssues(db, 0)
+	testsupport.Must(t, err, "ListAllProposalIssues: %v", err)
+	activityLog, err := ListAllActivity(db, 0)
+	testsupport.Must(t, err, "ListAllActivity: %v", err)
 
 	// Ensure nil slices become empty for JSON consistency.
 	if issues == nil {
@@ -1071,16 +896,13 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 	t.Helper()
 
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
 	defer tx.Rollback()
 
 	// 1. Labels first (no FK deps).
 	for _, label := range data.Labels {
-		if _, err := InsertLabelWithID(tx, label); err != nil {
-			t.Fatalf("InsertLabelWithID %q: %v", label.Name, err)
-		}
+		_, err := InsertLabelWithID(tx, label)
+		testsupport.Must(t, err, "InsertLabelWithID %q: %v", label.Name, err)
 	}
 
 	// 2. Issues without parent_id, then update parent_id.
@@ -1099,103 +921,88 @@ func importAll(t *testing.T, db *sql.DB, data *model.ExportData) {
 		issue.ParentID = origParentID
 	}
 	for issueID, pid := range parentIDs {
-		if _, err := tx.Exec(`UPDATE issues SET parent_id = ? WHERE id = ?`, *pid, issueID); err != nil {
-			t.Fatalf("setting parent_id for %d: %v", issueID, err)
-		}
+		_, err := tx.Exec(`UPDATE issues SET parent_id = ? WHERE id = ?`, *pid, issueID)
+		testsupport.Must(t, err, "setting parent_id for %d: %v", issueID, err)
 	}
 
 	// 3. Issue-label mappings.
 	for _, m := range data.IssueLabelMappings {
-		if _, err := InsertIssueLabelMapping(tx, m.IssueID, m.LabelID); err != nil {
-			t.Fatalf("InsertIssueLabelMapping (%d, %d): %v", m.IssueID, m.LabelID, err)
-		}
+		_, err := InsertIssueLabelMapping(tx, m.IssueID, m.LabelID)
+		testsupport.Must(t, err, "InsertIssueLabelMapping (%d, %d): %v", m.IssueID, m.LabelID, err)
 	}
 
 	// 4. Issue-file mappings.
 	for _, m := range data.IssueFileMappings {
-		if _, err := InsertIssueFileMapping(tx, m.IssueID, m.FilePath); err != nil {
-			t.Fatalf("InsertIssueFileMapping (issue=%d, file=%q): %v", m.IssueID, m.FilePath, err)
-		}
+		_, err := InsertIssueFileMapping(tx, m.IssueID, m.FilePath)
+		testsupport.Must(t, err, "InsertIssueFileMapping (issue=%d, file=%q): %v", m.IssueID, m.FilePath, err)
 	}
 
 	// 5. Comments.
 	for _, comment := range data.Comments {
-		if _, err := InsertCommentWithID(tx, comment); err != nil {
-			t.Fatalf("InsertCommentWithID %d: %v", comment.ID, err)
-		}
+		_, err := InsertCommentWithID(tx, comment)
+		testsupport.Must(t, err, "InsertCommentWithID %d: %v", comment.ID, err)
 	}
 
 	// 6. Relations.
 	for i := range data.Relations {
-		if _, err := InsertRelationWithID(tx, &data.Relations[i]); err != nil {
-			t.Fatalf("InsertRelationWithID %d: %v", data.Relations[i].ID, err)
-		}
+		_, err := InsertRelationWithID(tx, &data.Relations[i])
+		testsupport.Must(t, err, "InsertRelationWithID %d: %v", data.Relations[i].ID, err)
 	}
 
 	// 7. Activity log.
 	for _, a := range data.ActivityLog {
-		if _, err := InsertActivityWithID(tx, a); err != nil {
-			t.Fatalf("InsertActivityWithID %d: %v", a.ID, err)
-		}
+		_, err := InsertActivityWithID(tx, a)
+		testsupport.Must(t, err, "InsertActivityWithID %d: %v", a.ID, err)
 	}
 
 	// 8. Proposals.
 	for _, p := range data.Proposals {
-		if _, err := InsertProposalWithID(tx, p); err != nil {
-			t.Fatalf("InsertProposalWithID %d: %v", p.ID, err)
-		}
+		_, err := InsertProposalWithID(tx, p)
+		testsupport.Must(t, err, "InsertProposalWithID %d: %v", p.ID, err)
 	}
 
 	// 9. Votes.
 	for _, v := range data.Votes {
-		if _, err := InsertVoteWithID(tx, v); err != nil {
-			t.Fatalf("InsertVoteWithID %d: %v", v.ID, err)
-		}
+		_, err := InsertVoteWithID(tx, v)
+		testsupport.Must(t, err, "InsertVoteWithID %d: %v", v.ID, err)
 	}
 
 	// 10. Proposal-issue links.
 	for _, l := range data.ProposalIssues {
-		if _, err := InsertProposalIssueLink(tx, l.ProposalID, l.IssueID); err != nil {
-			t.Fatalf("InsertProposalIssueLink (%d,%d): %v", l.ProposalID, l.IssueID, err)
-		}
+		_, err := InsertProposalIssueLink(tx, l.ProposalID, l.IssueID)
+		testsupport.Must(t, err, "InsertProposalIssueLink (%d,%d): %v", l.ProposalID, l.IssueID, err)
 	}
 
 	// 11. Docs.
 	for _, doc := range data.Docs {
-		if _, err := InsertDocWithID(tx, doc); err != nil {
-			t.Fatalf("InsertDocWithID %d: %v", doc.ID, err)
-		}
+		_, err := InsertDocWithID(tx, doc)
+		testsupport.Must(t, err, "InsertDocWithID %d: %v", doc.ID, err)
 	}
 
 	// 12. Doc revisions.
 	for _, rev := range data.DocRevisions {
-		if _, err := InsertDocRevisionWithID(tx, rev); err != nil {
-			t.Fatalf("InsertDocRevisionWithID %d: %v", rev.ID, err)
-		}
+		_, err := InsertDocRevisionWithID(tx, rev)
+		testsupport.Must(t, err, "InsertDocRevisionWithID %d: %v", rev.ID, err)
 	}
 
 	// 13. Doc comments.
 	for _, c := range data.DocComments {
-		if _, err := InsertDocCommentWithID(tx, c); err != nil {
-			t.Fatalf("InsertDocCommentWithID %d: %v", c.ID, err)
-		}
+		_, err := InsertDocCommentWithID(tx, c)
+		testsupport.Must(t, err, "InsertDocCommentWithID %d: %v", c.ID, err)
 	}
 
 	// 14. Doc-issue links.
 	for _, l := range data.DocIssueLinks {
-		if _, err := InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt); err != nil {
-			t.Fatalf("InsertDocIssueLink (%d,%d): %v", l.DocID, l.IssueID, err)
-		}
+		_, err := InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt)
+		testsupport.Must(t, err, "InsertDocIssueLink (%d,%d): %v", l.DocID, l.IssueID, err)
 	}
 
 	// 15. Proposal-doc links.
 	for _, l := range data.ProposalDocs {
-		if _, err := InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt); err != nil {
-			t.Fatalf("InsertProposalDocLink (%d,%d): %v", l.ProposalID, l.DocID, err)
-		}
+		_, err := InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt)
+		testsupport.Must(t, err, "InsertProposalDocLink (%d,%d): %v", l.ProposalID, l.DocID, err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 }

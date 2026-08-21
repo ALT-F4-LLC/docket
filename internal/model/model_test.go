@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestFormatID(t *testing.T) {
@@ -325,9 +327,7 @@ func TestIssueJSONRoundTrip(t *testing.T) {
 	}
 
 	data, err := json.Marshal(issue)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	// Verify JSON contains prefixed ID
 	var raw map[string]any
@@ -371,9 +371,7 @@ func TestIssueJSONNoParent(t *testing.T) {
 	}
 
 	data, err := json.Marshal(issue)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
@@ -395,9 +393,7 @@ func TestIssue_MarshalJSON_DocsEmptyIsArray(t *testing.T) {
 	}
 
 	data, err := json.Marshal(issue)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -414,9 +410,7 @@ func TestIssue_MarshalJSON_DocsEmptyIsArray(t *testing.T) {
 	hydrated := issue
 	hydrated.Docs = []DocRef{{ID: 3, Type: "tdd", Status: "approved", Title: "T"}}
 	data2, err := json.Marshal(hydrated)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 	var raw2 map[string]json.RawMessage
 	if err := json.Unmarshal(data2, &raw2); err != nil {
 		t.Fatalf("Unmarshal into map error: %v", err)
@@ -455,9 +449,7 @@ func TestCommentJSONRoundTrip(t *testing.T) {
 	}
 
 	data, err := json.Marshal(comment)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
@@ -486,9 +478,7 @@ func TestIssueRef_MarshalJSON(t *testing.T) {
 	}
 
 	data, err := json.Marshal(ref)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	want := `{"id":"DKT-12","kind":"feature","title":"Wire up CLI","status":"in-progress"}`
 	if string(data) != want {
@@ -505,6 +495,99 @@ func TestIssueRef_MarshalJSON(t *testing.T) {
 	for _, excluded := range []string{"description", "assignee", "labels", "files", "docs", "created_at"} {
 		if _, present := raw[excluded]; present {
 			t.Errorf("IssueRef JSON must not include %q", excluded)
+		}
+	}
+}
+
+// TestParseIDAcceptsAnyProjectPrefix is DKT-72's round-trip obligation.
+//
+// `issue list --project` prints other projects' ids, and the very next command
+// has to be able to take one back. Refusing `AMS-2` while accepting `DKT-2` and
+// bare `2` for the same issue is the display prefix leaking into identity —
+// which the prefix's own contract forbids: the NUMBER is the store-wide
+// identity, and a reference must not stop resolving because a display setting
+// changed.
+func TestParseIDAcceptsAnyProjectPrefix(t *testing.T) {
+	for _, input := range []string{
+		"AMS-2",  // another project's prefix
+		"ams-2",  // case-insensitive, like every other form
+		"VOR-42", // the prefix the docs use as the example
+		"DKT-2",  // the constant, which has always parsed
+		"2",      // bare, which has always parsed
+	} {
+		if _, err := ParseID(input); err != nil {
+			t.Errorf("ParseID(%q) failed: %v — the number is the identity and "+
+				"the prefix is display only", input, err)
+		}
+	}
+
+	// The value survives the prefix: every spelling above names the same issue.
+	for _, input := range []string{"AMS-2", "DKT-2", "2"} {
+		id, err := ParseID(input)
+		if err != nil || id != 2 {
+			t.Errorf("ParseID(%q) = %d, %v; want 2", input, id, err)
+		}
+	}
+}
+
+// TestParseIDHonorsTheInstalledPrefixRoster is DKT-110: cutting ANY
+// letters-shaped prefix made every hyphenated uppercase term an id — `ANSI-16`
+// and `ZZZ-16` both resolved issue 16, so a citation gate validated
+// non-citations. With the store's roster installed, a supplied prefix must be
+// one some project actually holds; DKT- and the display prefix always cut.
+// Uninstalled (nil), the permissive DKT-72 behavior above stands — that is the
+// library-caller fallback, exactly as an unwired display prefix keeps `DKT`.
+func TestParseIDHonorsTheInstalledPrefixRoster(t *testing.T) {
+	SetKnownProjectPrefixes([]string{"AMS", "hrn"})
+	t.Cleanup(func() { knownProjectPrefixes = nil })
+
+	// Registered prefixes cut, case-insensitively, DKT and bare included.
+	for _, input := range []string{"AMS-2", "ams-2", "HRN-2", "DKT-2", "2"} {
+		id, err := ParseID(input)
+		if err != nil || id != 2 {
+			t.Errorf("ParseID(%q) = %d, %v; want 2 — the roster holds this prefix",
+				input, id, err)
+		}
+	}
+
+	// A prefix no project holds is refused, not discarded: the caller stated
+	// an expectation the store cannot honor.
+	for _, input := range []string{"ANSI-16", "ZZZ-16", "RFC-3339", "SHA-256"} {
+		if _, err := ParseID(input); err == nil {
+			t.Errorf("ParseID(%q) succeeded; no project holds that prefix, so "+
+				"the reference must refuse rather than resolve by digits alone",
+				input)
+		}
+	}
+
+	// An installed-but-empty roster is authoritative too: only the display
+	// prefix and DKT- cut.
+	SetKnownProjectPrefixes(nil)
+	if _, err := ParseID("AMS-2"); err == nil {
+		t.Error("ParseID(\"AMS-2\") succeeded under an empty roster")
+	}
+	if id, err := ParseID("DKT-2"); err != nil || id != 2 {
+		t.Errorf("ParseID(\"DKT-2\") = %d, %v under an empty roster; DKT always parses", id, err)
+	}
+}
+
+// TestParseIDStillRefusesReservedPrefixes is the guard that makes the widening
+// safe: DOC, RUN, and STEP name OTHER ENTITIES, and accepting them here would
+// make `docket issue show RUN-3` silently show issue 3 — the ambiguity
+// ValidateProjectPrefix refuses at the setter, reintroduced at the parser.
+func TestParseIDStillRefusesReservedPrefixes(t *testing.T) {
+	for _, input := range []string{"DOC-7", "RUN-3", "STEP-12", "doc-7", "run-3"} {
+		if _, err := ParseID(input); err == nil {
+			t.Errorf("ParseID(%q) succeeded; that reference names another "+
+				"entity and must not resolve to an issue", input)
+		}
+	}
+
+	// A non-prefix garbage string is still garbage, not a silently-stripped id.
+	for _, input := range []string{"12-34", "-5", "A1-2", "--3"} {
+		if _, err := ParseID(input); err == nil {
+			t.Errorf("ParseID(%q) succeeded; only a LETTERS-only prefix is "+
+				"stripped", input)
 		}
 	}
 }

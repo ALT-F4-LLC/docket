@@ -48,11 +48,7 @@ test_z_graph() {
   # Should NOT include G_A (upstream of B).
   local HAS_A_DOWN
   HAS_A_DOWN=$(echo "$CMD_STDOUT" | jq "[.data.nodes[] | select(.id == \"DKT-$G_A\")] | length" 2>/dev/null)
-  if [ "$HAS_A_DOWN" -eq 0 ]; then
-    check "Z" "Z5_no_upstream" "PASS"
-  else
-    check "Z" "Z5_no_upstream" "FAIL" "upstream issue should not appear with --direction down"
-  fi
+  check_cond "Z" "Z5_no_upstream" "upstream issue should not appear with --direction down" [ "$HAS_A_DOWN" -eq 0 ]
 
   # Z6: Direction=up — only shows upstream (A blocks B).
   run issue graph "DKT-$G_B" --json --direction up
@@ -60,11 +56,7 @@ test_z_graph() {
   # Should NOT include G_C (downstream of B).
   local HAS_C_UP
   HAS_C_UP=$(echo "$CMD_STDOUT" | jq "[.data.nodes[] | select(.id == \"DKT-$G_C\")] | length" 2>/dev/null)
-  if [ "$HAS_C_UP" -eq 0 ]; then
-    check "Z" "Z6_no_downstream" "PASS"
-  else
-    check "Z" "Z6_no_downstream" "FAIL" "downstream issue should not appear with --direction up"
-  fi
+  check_cond "Z" "Z6_no_downstream" "downstream issue should not appear with --direction up" [ "$HAS_C_UP" -eq 0 ]
 
   # Z7: Depth limit — depth=1 from B should show A and C but not traverse further.
   run issue graph "DKT-$G_B" --json --depth 1
@@ -112,11 +104,7 @@ test_z_graph() {
   assert_json_array_min "Z" "Z15_nodes" ".data.nodes" 1
   local EDGE_COUNT
   EDGE_COUNT=$(echo "$CMD_STDOUT" | jq '.data.edges | length' 2>/dev/null)
-  if [ "$EDGE_COUNT" -eq 0 ]; then
-    check "Z" "Z15_no_edges" "PASS"
-  else
-    check "Z" "Z15_no_edges" "FAIL" "isolated issue should have 0 edges, got $EDGE_COUNT"
-  fi
+  check_cond "Z" "Z15_no_edges" "isolated issue should have 0 edges, got $EDGE_COUNT" [ "$EDGE_COUNT" -eq 0 ]
 
   # Z16: DKT- prefix accepted in argument.
   run issue graph "DKT-$G_B" --json

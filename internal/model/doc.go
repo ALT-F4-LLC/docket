@@ -3,8 +3,6 @@ package model
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -20,31 +18,16 @@ func FormatDocID(id int) string {
 // ParseDocID accepts both "DOC-5" and "5" and returns the numeric ID.
 // The prefix check is case-insensitive.
 func ParseDocID(input string) (int, error) {
-	s := strings.TrimSpace(input)
-	if s == "" {
-		return 0, fmt.Errorf("empty doc ID")
-	}
-
-	prefix := DocIDPrefix + "-"
-	if strings.HasPrefix(strings.ToUpper(s), prefix) {
-		s = s[len(prefix):]
-	}
-
-	id, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid doc ID %q: %w", input, err)
-	}
-	if id <= 0 {
-		return 0, fmt.Errorf("invalid doc ID %q: must be positive", input)
-	}
-
-	return id, nil
+	return parseEntityID(input, "doc", DocIDPrefix+"-")
 }
 
 // Doc represents a tracked design document (TDD, ADR, PRD, etc.). `Type` and
 // `Status` are free-form per TDD §5.4 — no enum validation at the model layer.
 type Doc struct {
-	ID        int
+	ID int
+	// ProjectID is the v12 tenancy dimension; zero normalizes to the default
+	// project on write. Never part of the frozen v1 wire format.
+	ProjectID int
 	Type      string
 	Status    string
 	Title     string

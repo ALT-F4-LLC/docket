@@ -2,22 +2,30 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // mustInitAndMigrate initializes a fresh in-memory DB and runs migrations.
 func mustInitAndMigrate(t *testing.T) *sql.DB {
 	t.Helper()
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate: %v", err)
 	return db
 }
 
@@ -25,30 +33,24 @@ func mustInitAndMigrate(t *testing.T) *sql.DB {
 
 func TestMigrateV1ToV2CreatesProposalTables(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	// Before migration, schema is at v1.
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
+	testsupport.Must(t, err, "SchemaVersion: %v", err)
 	if v != 1 {
 		t.Fatalf("schema_version = %d before migration, want 1", v)
 	}
 
 	// Run migration.
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate: %v", err)
 
 	// Migrate advances all the way to head; this test verifies v1→v2 in
 	// particular, but Migrate is contractually all-or-head.
 	v, err = SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
+	testsupport.Must(t, err, "SchemaVersion: %v", err)
 	if v != currentSchemaVersion {
 		t.Fatalf("schema_version = %d after migration, want %d", v, currentSchemaVersion)
 	}
@@ -91,17 +93,13 @@ func TestCreateAndGetProposal(t *testing.T) {
 	}
 
 	id, err := CreateProposal(db, p)
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 	if id <= 0 {
 		t.Fatalf("expected positive id, got %d", id)
 	}
 
 	got, err := GetProposal(db, id)
-	if err != nil {
-		t.Fatalf("GetProposal: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposal: %v", err)
 
 	if got.ID != id {
 		t.Errorf("ID = %d, want %d", got.ID, id)
@@ -168,16 +166,12 @@ func TestListProposals(t *testing.T) {
 			RequiredVoters: 1,
 			Threshold:      0.67,
 		})
-		if err != nil {
-			t.Fatalf("CreateProposal(%q): %v", pp.desc, err)
-		}
+		testsupport.Must(t, err, "CreateProposal(%q): %v", pp.desc, err)
 	}
 
 	// List all (no filters).
-	list, total, err := ListProposals(db, "", "", "", 0)
-	if err != nil {
-		t.Fatalf("ListProposals (all): %v", err)
-	}
+	list, total, err := ListProposals(db, 0, "", "", "", 0)
+	testsupport.Must(t, err, "ListProposals (all): %v", err)
 	if total != 3 {
 		t.Errorf("total = %d, want 3", total)
 	}
@@ -186,10 +180,8 @@ func TestListProposals(t *testing.T) {
 	}
 
 	// Filter by status.
-	list, total, err = ListProposals(db, "open", "", "", 0)
-	if err != nil {
-		t.Fatalf("ListProposals (open): %v", err)
-	}
+	list, total, err = ListProposals(db, 0, "open", "", "", 0)
+	testsupport.Must(t, err, "ListProposals (open): %v", err)
 	if total != 2 {
 		t.Errorf("total open = %d, want 2", total)
 	}
@@ -198,19 +190,18 @@ func TestListProposals(t *testing.T) {
 	}
 
 	// Filter by criticality.
-	list, total, err = ListProposals(db, "", "high", "", 0)
-	if err != nil {
-		t.Fatalf("ListProposals (high): %v", err)
-	}
+	list, total, err = ListProposals(db, 0, "", "high", "", 0)
+	testsupport.Must(t, err, "ListProposals (high): %v", err)
 	if total != 1 {
 		t.Errorf("total high = %d, want 1", total)
 	}
+	if len(list) != 1 || list[0].Description != "Open high" {
+		t.Errorf("list high = %+v, want [Open high]", list)
+	}
 
 	// Limit.
-	list, _, err = ListProposals(db, "", "", "", 1)
-	if err != nil {
-		t.Fatalf("ListProposals (limit 1): %v", err)
-	}
+	list, _, err = ListProposals(db, 0, "", "", "", 1)
+	testsupport.Must(t, err, "ListProposals (limit 1): %v", err)
 	if len(list) != 1 {
 		t.Errorf("len with limit = %d, want 1", len(list))
 	}
@@ -228,9 +219,7 @@ func TestCastVoteHappyPath(t *testing.T) {
 		RequiredVoters: 3,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	result, err := CastVote(db, &model.Vote{
 		ProposalID:      id,
@@ -241,9 +230,7 @@ func TestCastVoteHappyPath(t *testing.T) {
 		DomainRelevance: 0.8,
 		Findings:        "Looks good",
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
 	if result.Vote.ID <= 0 {
 		t.Errorf("vote ID = %d, want > 0", result.Vote.ID)
@@ -277,9 +264,7 @@ func TestCastVoteAutoFinalizationApproved(t *testing.T) {
 		RequiredVoters: 2,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Vote 1: approve with high confidence.
 	_, err = CastVote(db, &model.Vote{
@@ -289,9 +274,7 @@ func TestCastVoteAutoFinalizationApproved(t *testing.T) {
 		Confidence:      0.9,
 		DomainRelevance: 0.8,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 1: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 1: %v", err)
 
 	// Vote 2 (quorum): approve.
 	result, err := CastVote(db, &model.Vote{
@@ -301,9 +284,7 @@ func TestCastVoteAutoFinalizationApproved(t *testing.T) {
 		Confidence:      0.8,
 		DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 2: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 2: %v", err)
 
 	if !result.QuorumReached {
 		t.Error("expected quorum_reached = true")
@@ -325,9 +306,7 @@ func TestCastVoteAutoFinalizationApproved(t *testing.T) {
 
 	// Verify proposal persisted as approved.
 	p, err := GetProposal(db, id)
-	if err != nil {
-		t.Fatalf("GetProposal: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposal: %v", err)
 	if p.Status != model.ProposalStatusApproved {
 		t.Errorf("persisted status = %q, want %q", p.Status, model.ProposalStatusApproved)
 	}
@@ -346,9 +325,7 @@ func TestCastVoteAutoFinalizationRejected(t *testing.T) {
 		RequiredVoters: 2,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Vote 1: reject.
 	_, err = CastVote(db, &model.Vote{
@@ -358,9 +335,7 @@ func TestCastVoteAutoFinalizationRejected(t *testing.T) {
 		Confidence:      0.9,
 		DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 1: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 1: %v", err)
 
 	// Vote 2: reject (quorum).
 	result, err := CastVote(db, &model.Vote{
@@ -370,9 +345,7 @@ func TestCastVoteAutoFinalizationRejected(t *testing.T) {
 		Confidence:      0.8,
 		DomainRelevance: 0.8,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 2: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 2: %v", err)
 
 	if result.ProposalStatus != model.ProposalStatusRejected {
 		t.Errorf("status = %q, want %q", result.ProposalStatus, model.ProposalStatusRejected)
@@ -392,36 +365,28 @@ func TestCastVoteMixedVerdictWeightedScore(t *testing.T) {
 		RequiredVoters: 3,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Vote 1: approve, conf=0.9, rel=1.0 -> weight=0.9, weighted=0.9
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 1.0,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 1: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 1: %v", err)
 
 	// Vote 2: reject, conf=0.8, rel=0.5 -> weight=0.4, weighted=0.0
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-2",
 		Verdict: model.VerdictReject, Confidence: 0.8, DomainRelevance: 0.5,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 2: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 2: %v", err)
 
 	// Vote 3: approve, conf=0.7, rel=0.6 -> weight=0.42, weighted=0.42
 	result, err := CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-3",
 		Verdict: model.VerdictApprove, Confidence: 0.7, DomainRelevance: 0.6,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 3: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 3: %v", err)
 
 	// Expected score = (0.9 + 0 + 0.42) / (0.9 + 0.4 + 0.42) = 1.32 / 1.72 ≈ 0.7674
 	if result.WeightedScore == nil {
@@ -450,26 +415,20 @@ func TestCastVoteAllZeroWeightsRejected(t *testing.T) {
 		RequiredVoters: 2,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Both voters have 0 confidence or 0 domain_relevance.
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.0, DomainRelevance: 0.5,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 1: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 1: %v", err)
 
 	result, err := CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-2",
 		Verdict: model.VerdictApprove, Confidence: 0.5, DomainRelevance: 0.0,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 2: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 2: %v", err)
 
 	if result.ProposalStatus != model.ProposalStatusRejected {
 		t.Errorf("status = %q, want %q (all-zero weights)", result.ProposalStatus, model.ProposalStatusRejected)
@@ -491,17 +450,13 @@ func TestCastVoteDuplicateVoterRejected(t *testing.T) {
 		RequiredVoters: 3,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
 	// Same voter again.
 	_, err = CastVote(db, &model.Vote{
@@ -525,18 +480,14 @@ func TestCastVoteOnFinalizedProposalRejected(t *testing.T) {
 		RequiredVoters: 1,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Single vote finalizes.
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
 	// Try voting on finalized proposal.
 	_, err = CastVote(db, &model.Vote{
@@ -574,9 +525,7 @@ func TestGetProposalVotes(t *testing.T) {
 		RequiredVoters: 3,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	for _, name := range []string{"alice", "bob"} {
 		_, err := CastVote(db, &model.Vote{
@@ -584,15 +533,11 @@ func TestGetProposalVotes(t *testing.T) {
 			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8,
 			Findings: "ok from " + name,
 		})
-		if err != nil {
-			t.Fatalf("CastVote(%s): %v", name, err)
-		}
+		testsupport.Must(t, err, "CastVote(%s): %v", name, err)
 	}
 
 	votes, err := GetProposalVotes(db, id)
-	if err != nil {
-		t.Fatalf("GetProposalVotes: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
 	if len(votes) != 2 {
 		t.Fatalf("len(votes) = %d, want 2", len(votes))
 	}
@@ -618,9 +563,7 @@ func createTestIssueForProposal(t *testing.T, conn *sql.DB, title string) int {
 		Kind:     model.IssueKindTask,
 	}
 	id, err := CreateIssue(conn, issue, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue(%q): %v", title, err)
-	}
+	testsupport.Must(t, err, "CreateIssue(%q): %v", title, err)
 	return id
 }
 
@@ -631,24 +574,18 @@ func TestLinkAndGetProposalIssues(t *testing.T) {
 		Description: "Link test", Criticality: model.CriticalityMedium,
 		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	iid1 := createTestIssueForProposal(t, db, "issue-1")
 	iid2 := createTestIssueForProposal(t, db, "issue-2")
 
-	if err := LinkProposalIssue(db, pid, iid1); err != nil {
-		t.Fatalf("LinkProposalIssue 1: %v", err)
-	}
-	if err := LinkProposalIssue(db, pid, iid2); err != nil {
-		t.Fatalf("LinkProposalIssue 2: %v", err)
-	}
+	err = LinkProposalIssue(db, pid, iid1)
+	testsupport.Must(t, err, "LinkProposalIssue 1: %v", err)
+	err = LinkProposalIssue(db, pid, iid2)
+	testsupport.Must(t, err, "LinkProposalIssue 2: %v", err)
 
 	ids, err := GetProposalIssues(db, pid)
-	if err != nil {
-		t.Fatalf("GetProposalIssues: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposalIssues: %v", err)
 	if len(ids) != 2 {
 		t.Fatalf("len(ids) = %d, want 2", len(ids))
 	}
@@ -667,11 +604,10 @@ func TestLinkProposalIssueDuplicate(t *testing.T) {
 	})
 	iid := createTestIssueForProposal(t, db, "issue-dup")
 
-	if err := LinkProposalIssue(db, pid, iid); err != nil {
-		t.Fatalf("LinkProposalIssue: %v", err)
-	}
-
 	err := LinkProposalIssue(db, pid, iid)
+	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
+
+	err = LinkProposalIssue(db, pid, iid)
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("expected ErrConflict for duplicate link, got %v", err)
 	}
@@ -711,18 +647,14 @@ func TestUnlinkProposalIssue(t *testing.T) {
 	})
 	iid := createTestIssueForProposal(t, db, "issue-unlink")
 
-	if err := LinkProposalIssue(db, pid, iid); err != nil {
-		t.Fatalf("LinkProposalIssue: %v", err)
-	}
+	err := LinkProposalIssue(db, pid, iid)
+	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
 
-	if err := UnlinkProposalIssue(db, pid, iid); err != nil {
-		t.Fatalf("UnlinkProposalIssue: %v", err)
-	}
+	err = UnlinkProposalIssue(db, pid, iid)
+	testsupport.Must(t, err, "UnlinkProposalIssue: %v", err)
 
 	ids, err := GetProposalIssues(db, pid)
-	if err != nil {
-		t.Fatalf("GetProposalIssues: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposalIssues: %v", err)
 	if len(ids) != 0 {
 		t.Errorf("expected 0 linked issues after unlink, got %d", len(ids))
 	}
@@ -758,14 +690,10 @@ func TestCreateAndGetProposalWithV3Fields(t *testing.T) {
 	}
 
 	id, err := CreateProposal(db, p)
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	got, err := GetProposal(db, id)
-	if err != nil {
-		t.Fatalf("GetProposal: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposal: %v", err)
 
 	if got.Rationale != "Schema gaps identified in v2" {
 		t.Errorf("Rationale = %q, want %q", got.Rationale, "Schema gaps identified in v2")
@@ -797,30 +725,23 @@ func TestCommitProposalHappyPath(t *testing.T) {
 		RequiredVoters: 1,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Single approve vote to finalize as approved.
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
 	// Commit the approved proposal.
 	outcome := "Changes applied to main branch."
-	if err := CommitProposal(db, id, outcome, ""); err != nil {
-		t.Fatalf("CommitProposal: %v", err)
-	}
+	err = CommitProposal(db, id, outcome, "")
+	testsupport.Must(t, err, "CommitProposal: %v", err)
 
 	// Verify persisted state.
 	p, err := GetProposal(db, id)
-	if err != nil {
-		t.Fatalf("GetProposal: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposal: %v", err)
 	if p.Status != model.ProposalStatusCommitted {
 		t.Errorf("Status = %q, want 'committed'", p.Status)
 	}
@@ -871,9 +792,7 @@ func TestCommitProposalRejectedRejected(t *testing.T) {
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictReject, Confidence: 0.9, DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
 	err = CommitProposal(db, id, "outcome", "")
 	if !errors.Is(err, ErrConflict) {
@@ -896,13 +815,10 @@ func TestCommitProposalAlreadyCommitted(t *testing.T) {
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
-	if err := CommitProposal(db, id, "first commit", ""); err != nil {
-		t.Fatalf("CommitProposal: %v", err)
-	}
+	err = CommitProposal(db, id, "first commit", "")
+	testsupport.Must(t, err, "CommitProposal: %v", err)
 
 	// Second commit should fail.
 	err = CommitProposal(db, id, "second commit", "")
@@ -921,27 +837,20 @@ func TestCommitProposalWithEscalationReason(t *testing.T) {
 		RequiredVoters: 1,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
 	reason := "Quorum not reached after 3 rounds"
-	if err := CommitProposal(db, id, "Committed with escalation", reason); err != nil {
-		t.Fatalf("CommitProposal: %v", err)
-	}
+	err = CommitProposal(db, id, "Committed with escalation", reason)
+	testsupport.Must(t, err, "CommitProposal: %v", err)
 
 	p, err := GetProposal(db, id)
-	if err != nil {
-		t.Fatalf("GetProposal: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposal: %v", err)
 	if p.EscalationReason == nil || *p.EscalationReason != reason {
 		t.Errorf("EscalationReason = %v, want %q", p.EscalationReason, reason)
 	}
@@ -962,27 +871,20 @@ func TestCommitProposalPreservesExistingEscalationReason(t *testing.T) {
 		Threshold:        0.67,
 		EscalationReason: &original,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	_, err = CastVote(db, &model.Vote{
 		ProposalID: id, VoterName: "voter-1",
 		Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9,
 	})
-	if err != nil {
-		t.Fatalf("CastVote: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote: %v", err)
 
 	// Commit with empty escalation reason — should preserve the original.
-	if err := CommitProposal(db, id, "Done", ""); err != nil {
-		t.Fatalf("CommitProposal: %v", err)
-	}
+	err = CommitProposal(db, id, "Done", "")
+	testsupport.Must(t, err, "CommitProposal: %v", err)
 
 	p, err := GetProposal(db, id)
-	if err != nil {
-		t.Fatalf("GetProposal: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposal: %v", err)
 	if p.EscalationReason == nil || *p.EscalationReason != original {
 		t.Errorf("EscalationReason = %v, want %q (preserved from create)", p.EscalationReason, original)
 	}
@@ -1000,9 +902,7 @@ func TestCastVoteApproveWithConcernsQuorumMath(t *testing.T) {
 		RequiredVoters: 2,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Vote 1: approve-with-concerns, conf=0.8, rel=0.9 -> weight=0.72, verdict_weight=1.0
 	_, err = CastVote(db, &model.Vote{
@@ -1019,9 +919,7 @@ func TestCastVoteApproveWithConcernsQuorumMath(t *testing.T) {
 		},
 		Summary: "Sound with concerns",
 	})
-	if err != nil {
-		t.Fatalf("CastVote 1: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 1: %v", err)
 
 	// Vote 2: approve, conf=0.9, rel=1.0 -> weight=0.9, verdict_weight=1.0
 	result, err := CastVote(db, &model.Vote{
@@ -1031,9 +929,7 @@ func TestCastVoteApproveWithConcernsQuorumMath(t *testing.T) {
 		Confidence:      0.9,
 		DomainRelevance: 1.0,
 	})
-	if err != nil {
-		t.Fatalf("CastVote 2: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote 2: %v", err)
 
 	if !result.QuorumReached {
 		t.Error("expected quorum_reached = true")
@@ -1060,9 +956,7 @@ func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
 		RequiredVoters: 3,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
 
 	// Vote with structured findings.
 	findings := &model.Findings{
@@ -1081,9 +975,7 @@ func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
 		FindingsJSON:    findings,
 		Summary:         "Has concerns but approves",
 	})
-	if err != nil {
-		t.Fatalf("CastVote with findings: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote with findings: %v", err)
 
 	// Vote without structured findings.
 	_, err = CastVote(db, &model.Vote{
@@ -1094,14 +986,10 @@ func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
 		DomainRelevance: 0.8,
 		Findings:        "Just text",
 	})
-	if err != nil {
-		t.Fatalf("CastVote without findings: %v", err)
-	}
+	testsupport.Must(t, err, "CastVote without findings: %v", err)
 
 	votes, err := GetProposalVotes(db, id)
-	if err != nil {
-		t.Fatalf("GetProposalVotes: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
 	if len(votes) != 2 {
 		t.Fatalf("expected 2 votes, got %d", len(votes))
 	}
@@ -1151,9 +1039,7 @@ func TestListProposalsDomainTagFilter(t *testing.T) {
 		RequiredVoters: 1,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal 1: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal 1: %v", err)
 
 	_, err = CreateProposal(db, &model.Proposal{
 		Description:    "Security-only proposal",
@@ -1163,9 +1049,7 @@ func TestListProposalsDomainTagFilter(t *testing.T) {
 		RequiredVoters: 1,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal 2: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal 2: %v", err)
 
 	_, err = CreateProposal(db, &model.Proposal{
 		Description:    "No tags proposal",
@@ -1175,15 +1059,11 @@ func TestListProposalsDomainTagFilter(t *testing.T) {
 		RequiredVoters: 1,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal 3: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal 3: %v", err)
 
 	// Filter by "security" - should match 2 proposals.
-	list, total, err := ListProposals(db, "", "", "security", 0)
-	if err != nil {
-		t.Fatalf("ListProposals(security): %v", err)
-	}
+	list, total, err := ListProposals(db, 0, "", "", "security", 0)
+	testsupport.Must(t, err, "ListProposals(security): %v", err)
 	if total != 2 {
 		t.Errorf("total for 'security' = %d, want 2", total)
 	}
@@ -1192,21 +1072,23 @@ func TestListProposalsDomainTagFilter(t *testing.T) {
 	}
 
 	// Filter by "architecture" - should match 1 proposal.
-	list, total, err = ListProposals(db, "", "", "architecture", 0)
-	if err != nil {
-		t.Fatalf("ListProposals(architecture): %v", err)
-	}
+	list, total, err = ListProposals(db, 0, "", "", "architecture", 0)
+	testsupport.Must(t, err, "ListProposals(architecture): %v", err)
 	if total != 1 {
 		t.Errorf("total for 'architecture' = %d, want 1", total)
 	}
+	if len(list) != 1 || list[0].Description != "Architecture proposal" {
+		t.Errorf("list for 'architecture' = %+v, want [Architecture proposal]", list)
+	}
 
 	// Filter by nonexistent tag - should match 0.
-	list, total, err = ListProposals(db, "", "", "nonexistent", 0)
-	if err != nil {
-		t.Fatalf("ListProposals(nonexistent): %v", err)
-	}
+	list, total, err = ListProposals(db, 0, "", "", "nonexistent", 0)
+	testsupport.Must(t, err, "ListProposals(nonexistent): %v", err)
 	if total != 0 {
 		t.Errorf("total for 'nonexistent' = %d, want 0", total)
+	}
+	if len(list) != 0 {
+		t.Errorf("list for 'nonexistent' = %+v, want empty", list)
 	}
 
 	// Verify exact match (not substring): "api-security" should NOT match "security".
@@ -1218,17 +1100,24 @@ func TestListProposalsDomainTagFilter(t *testing.T) {
 		RequiredVoters: 1,
 		Threshold:      0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal 4: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal 4: %v", err)
 
-	list, total, err = ListProposals(db, "", "", "security", 0)
-	if err != nil {
-		t.Fatalf("ListProposals(security) after api-security: %v", err)
-	}
+	list, total, err = ListProposals(db, 0, "", "", "security", 0)
+	testsupport.Must(t, err, "ListProposals(security) after api-security: %v", err)
 	// Should still be 2 -- json_each() does exact match, not substring.
 	if total != 2 {
 		t.Errorf("total for 'security' after api-security = %d, want 2 (exact match)", total)
+	}
+	// Pair the exclusion with a cardinality check: an exclusion-only loop
+	// passes vacuously if the query starts returning zero rows, which is
+	// exactly the list/total divergence this test exists to catch.
+	if len(list) != 2 {
+		t.Errorf("len for 'security' after api-security = %d, want 2", len(list))
+	}
+	for _, p := range list {
+		if p.Description == "API security proposal" {
+			t.Errorf("list for 'security' after api-security includes %q, want exact-match only", p.Description)
+		}
 	}
 }
 
@@ -1236,30 +1125,22 @@ func TestListProposalsDomainTagFilter(t *testing.T) {
 
 func TestMigrateV2ToV3Columns(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	// Apply only v1->v2 migration first.
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	if err := migrateV1ToV2(tx); err != nil {
-		t.Fatalf("migrateV1ToV2: %v", err)
-	}
-	if _, err := tx.Exec(`UPDATE meta SET value = '2' WHERE key = 'schema_version'`); err != nil {
-		t.Fatalf("updating version to 2: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = migrateV1ToV2(tx)
+	testsupport.Must(t, err, "migrateV1ToV2: %v", err)
+	_, err = tx.Exec(`UPDATE meta SET value = '2' WHERE key = 'schema_version'`)
+	testsupport.Must(t, err, "updating version to 2: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	// Verify we're at v2.
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
+	testsupport.Must(t, err, "SchemaVersion: %v", err)
 	if v != 2 {
 		t.Fatalf("schema_version = %d, want 2", v)
 	}
@@ -1271,9 +1152,7 @@ func TestMigrateV2ToV3Columns(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		"Pre-migration proposal", "medium", "open", 3, 0.67, "test", now, now,
 	)
-	if err != nil {
-		t.Fatalf("Insert v2 proposal: %v", err)
-	}
+	testsupport.Must(t, err, "Insert v2 proposal: %v", err)
 
 	// Insert a v2-style vote.
 	_, err = db.Exec(
@@ -1281,30 +1160,23 @@ func TestMigrateV2ToV3Columns(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		1, "voter-1", "security", "approve", 0.9, 0.8, "Looks good", now,
 	)
-	if err != nil {
-		t.Fatalf("Insert v2 vote: %v", err)
-	}
+	testsupport.Must(t, err, "Insert v2 vote: %v", err)
 
 	// Now run Migrate() which should apply v2->v3.
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate v2->v3: %v", err)
-	}
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate v2->v3: %v", err)
 
 	// Verify version is now at head (Migrate advances v2 to the current
 	// schema version, applying v3 and any later migrations in sequence).
 	v, err = SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion after migration: %v", err)
-	}
+	testsupport.Must(t, err, "SchemaVersion after migration: %v", err)
 	if v != currentSchemaVersion {
 		t.Fatalf("schema_version = %d after migration, want %d", v, currentSchemaVersion)
 	}
 
 	// Verify existing proposal has correct defaults for new columns.
 	p, err := GetProposal(db, 1)
-	if err != nil {
-		t.Fatalf("GetProposal after migration: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposal after migration: %v", err)
 	if p.Rationale != "" {
 		t.Errorf("Rationale = %q, want empty default", p.Rationale)
 	}
@@ -1323,9 +1195,7 @@ func TestMigrateV2ToV3Columns(t *testing.T) {
 
 	// Verify existing vote has correct defaults for new columns.
 	votes, err := GetProposalVotes(db, 1)
-	if err != nil {
-		t.Fatalf("GetProposalVotes after migration: %v", err)
-	}
+	testsupport.Must(t, err, "GetProposalVotes after migration: %v", err)
 	if len(votes) != 1 {
 		t.Fatalf("expected 1 vote, got %d", len(votes))
 	}
@@ -1351,9 +1221,7 @@ func TestGetIssueProposalsZero(t *testing.T) {
 	iid := createTestIssueForProposal(t, db, "no-proposals")
 
 	proposals, err := GetIssueProposals(db, iid)
-	if err != nil {
-		t.Fatalf("GetIssueProposals: %v", err)
-	}
+	testsupport.Must(t, err, "GetIssueProposals: %v", err)
 	if len(proposals) != 0 {
 		t.Errorf("len(proposals) = %d, want 0", len(proposals))
 	}
@@ -1367,17 +1235,12 @@ func TestGetIssueProposalsOne(t *testing.T) {
 		Description: "Solo proposal", Criticality: model.CriticalityMedium,
 		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
-	if err := LinkProposalIssue(db, pid, iid); err != nil {
-		t.Fatalf("LinkProposalIssue: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	err = LinkProposalIssue(db, pid, iid)
+	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
 
 	proposals, err := GetIssueProposals(db, iid)
-	if err != nil {
-		t.Fatalf("GetIssueProposals: %v", err)
-	}
+	testsupport.Must(t, err, "GetIssueProposals: %v", err)
 	if len(proposals) != 1 {
 		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
 	}
@@ -1409,33 +1272,25 @@ func TestGetIssueProposalsManyMixedStatusDeterministicOrder(t *testing.T) {
 			Description: "Proposal " + string(rune('A'+i)), Criticality: model.CriticalityMedium,
 			Status: st, RequiredVoters: 1, Threshold: 0.67,
 		})
-		if err != nil {
-			t.Fatalf("CreateProposal %d: %v", i, err)
-		}
+		testsupport.Must(t, err, "CreateProposal %d: %v", i, err)
 		want = append(want, pid)
 	}
 
 	for i := len(want) - 1; i >= 0; i-- {
-		if err := LinkProposalIssue(db, want[i], iid); err != nil {
-			t.Fatalf("LinkProposalIssue %d: %v", want[i], err)
-		}
+		err := LinkProposalIssue(db, want[i], iid)
+		testsupport.Must(t, err, "LinkProposalIssue %d: %v", want[i], err)
 	}
 
 	otherIssuePID, err := CreateProposal(db, &model.Proposal{
 		Description: "Other", Criticality: model.CriticalityMedium,
 		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.67,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal other: %v", err)
-	}
-	if err := LinkProposalIssue(db, otherIssuePID, other); err != nil {
-		t.Fatalf("LinkProposalIssue other: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal other: %v", err)
+	err = LinkProposalIssue(db, otherIssuePID, other)
+	testsupport.Must(t, err, "LinkProposalIssue other: %v", err)
 
 	proposals, err := GetIssueProposals(db, iid)
-	if err != nil {
-		t.Fatalf("GetIssueProposals: %v", err)
-	}
+	testsupport.Must(t, err, "GetIssueProposals: %v", err)
 	for _, p := range proposals {
 		if p.ID == otherIssuePID {
 			t.Errorf("proposal linked only to another issue must not appear in results, got %v", p.ID)
@@ -1452,4 +1307,432 @@ func TestGetIssueProposalsManyMixedStatusDeterministicOrder(t *testing.T) {
 			t.Errorf("proposals[%d].Status = %q, want %q", i, p.Status, statuses[i])
 		}
 	}
+}
+
+// --- Vote metadata (the casting seat's own opaque claim) ---
+
+// TestCastVoteRecordsMetadata pins the round trip DKT-71 asks for: the bag a
+// seat asserts about itself survives CastVote and reads back WHOLE through
+// GetProposalVotes — nested values and numbers included, since map to JSON to
+// map is where fidelity is actually at risk — while a seat that asserted
+// nothing reads back as an absent bag rather than an empty object or a copy
+// of its neighbour's.
+func TestCastVoteRecordsMetadata(t *testing.T) {
+	conn := mustInitAndMigrate(t)
+
+	proposalID, err := CreateProposal(conn, &model.Proposal{
+		Description:    "cast metadata regression",
+		RequiredVoters: 2,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	claimed := map[string]any{
+		"resolved":  map[string]any{"engine": "sonnet-5", "effort": "high"},
+		"attempt":   float64(2),
+		"delegated": true,
+	}
+	_, err = CastVote(conn, &model.Vote{
+		ProposalID:      proposalID,
+		VoterName:       "judge-security",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Metadata:        claimed,
+	})
+	testsupport.Must(t, err, "casting vote with metadata: %v", err)
+
+	_, err = CastVote(conn, &model.Vote{
+		ProposalID:      proposalID,
+		VoterName:       "judge-correctness",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+	})
+	testsupport.Must(t, err, "casting vote without metadata: %v", err)
+
+	byVoter := votesByVoter(t, conn, proposalID)
+
+	got := mustVote(t, byVoter, "judge-security").Metadata
+	if !reflect.DeepEqual(got, claimed) {
+		t.Errorf("judge-security metadata = %#v, want %#v", got, claimed)
+	}
+	if unclaimed := mustVote(t, byVoter, "judge-correctness").Metadata; unclaimed != nil {
+		t.Errorf("judge-correctness metadata = %#v, want nil (asserted nothing)", unclaimed)
+	}
+}
+
+// TestCastVoteMetadataDoesNotAffectTally is the control that the bag is inert:
+// nothing in the tally may read it. Two otherwise-identical two-seat proposals
+// — one where every vote carries a claim, one where none does — reach the same
+// outcome AND the outcome each is expected to reach, so a tally that silently
+// stopped running cannot pass as invariance.
+func TestCastVoteMetadataDoesNotAffectTally(t *testing.T) {
+	conn := mustInitAndMigrate(t)
+
+	run := func(withMetadata bool) (model.ProposalStatus, float64) {
+		t.Helper()
+		proposalID, err := CreateProposal(conn, &model.Proposal{
+			Description:    fmt.Sprintf("tally regression, metadata=%v", withMetadata),
+			RequiredVoters: 2,
+			Threshold:      0.5,
+			Status:         model.ProposalStatusOpen,
+		})
+		testsupport.Must(t, err, "CreateProposal: %v", err)
+
+		for i, voter := range []string{"seat-a", "seat-b"} {
+			v := &model.Vote{
+				ProposalID:      proposalID,
+				VoterName:       voter,
+				Verdict:         model.VerdictApprove,
+				Confidence:      0.9,
+				DomainRelevance: 0.8,
+			}
+			if withMetadata {
+				v.Metadata = map[string]any{"seat": fmt.Sprintf("s-%d", i)}
+			}
+			_, err := CastVote(conn, v)
+			testsupport.Must(t, err, "CastVote: %v", err)
+		}
+
+		p, err := GetProposal(conn, proposalID)
+		testsupport.Must(t, err, "GetProposal: %v", err)
+		if p.WeightedScore == nil {
+			t.Fatalf("proposal has no weighted score after quorum (metadata=%v) — "+
+				"the tally never ran, so this test would prove nothing", withMetadata)
+		}
+		return p.Status, *p.WeightedScore
+	}
+
+	statusPlain, scorePlain := run(false)
+	statusMeta, scoreMeta := run(true)
+
+	// The value both branches must agree ON, not merely agree about: two
+	// unanimous approvals over a 0.5 threshold.
+	if statusPlain != model.ProposalStatusApproved || scorePlain != 1.0 {
+		t.Fatalf("plain proposal = (%s, %v), want (approved, 1) — the fixture no "+
+			"longer reaches the outcome this test compares against",
+			statusPlain, scorePlain)
+	}
+	if statusPlain != statusMeta || scorePlain != scoreMeta {
+		t.Errorf("tally diverged by metadata presence: plain=(%s,%v) metadata=(%s,%v)",
+			statusPlain, scorePlain, statusMeta, scoreMeta)
+	}
+}
+
+// TestVoteMetadataReadMarksAnUndecodableCell pins BOTH halves of the read-side
+// rule the column's opacity requires. A cell that does not decode never fails
+// the read — one odd cell must not break `vote show`, `vote list` and
+// `vote result` for the whole proposal — but it does not read as a seat that
+// claimed nothing either: unreadable is its own state, so a corrupted or
+// rewritten claim is visible to whoever reads the vote back.
+func TestVoteMetadataReadMarksAnUndecodableCell(t *testing.T) {
+	conn := mustInitAndMigrate(t)
+
+	proposalID, err := CreateProposal(conn, &model.Proposal{
+		Description:    "tolerant read",
+		RequiredVoters: 4,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	for _, voter := range []string{"seat-empty", "seat-garbage", "seat-silent"} {
+		_, err := CastVote(conn, &model.Vote{
+			ProposalID:      proposalID,
+			VoterName:       voter,
+			Verdict:         model.VerdictApprove,
+			Confidence:      0.9,
+			DomainRelevance: 0.8,
+			Findings:        "kept",
+		})
+		testsupport.Must(t, err, "CastVote: %v", err)
+	}
+
+	// Cells no writer of ours would produce: a store predating the write-side
+	// gate, or bytes some other tool put there. seat-silent's cell is left
+	// exactly as CastVote wrote it — NULL — and is the control that separates
+	// "claimed nothing" from "claim unreadable".
+	mustExec(t, conn, `UPDATE votes SET metadata = '' WHERE voter_name = 'seat-empty'`)
+	mustExec(t, conn, `UPDATE votes SET metadata = 'not json' WHERE voter_name = 'seat-garbage'`)
+
+	byVoter := votesByVoter(t, conn, proposalID)
+	for _, voter := range []string{"seat-empty", "seat-garbage"} {
+		v := mustVote(t, byVoter, voter)
+		if v.Metadata != nil {
+			t.Errorf("%s metadata = %#v, want nil (undecodable)", voter, v.Metadata)
+		}
+		if !v.MetadataUnreadable {
+			t.Errorf("%s reads as a seat that claimed nothing; an undecodable cell "+
+				"must be distinguishable from an absent one", voter)
+		}
+		if v.Findings != "kept" {
+			t.Errorf("%s findings = %q, want %q — the rest of the row must still read",
+				voter, v.Findings, "kept")
+		}
+	}
+
+	silent := mustVote(t, byVoter, "seat-silent")
+	if silent.Metadata != nil || silent.MetadataUnreadable {
+		t.Errorf("seat-silent = (%#v, unreadable=%v), want (nil, false) — a seat that "+
+			"claimed nothing must not be reported as damaged",
+			silent.Metadata, silent.MetadataUnreadable)
+	}
+}
+
+// TestVoteMetadataStoresNullForAnEmptyBag asserts the persisted form directly,
+// in SQL, rather than through the decoder that maps SQL NULL and a stored
+// `null` onto the same Go nil. The invariant is that a vote nobody enriched is
+// byte-identical in the column to a vote written before the column existed;
+// only typeof() can see the difference the read path erases.
+func TestVoteMetadataStoresNullForAnEmptyBag(t *testing.T) {
+	conn := mustInitAndMigrate(t)
+
+	proposalID, err := CreateProposal(conn, &model.Proposal{
+		Description:    "persisted form",
+		RequiredVoters: 4,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	bags := map[string]map[string]any{
+		"seat-silent": nil,
+		"seat-empty":  {},
+		"seat-claim":  {"resolved": "yes"},
+	}
+	for _, voter := range []string{"seat-silent", "seat-empty", "seat-claim"} {
+		_, err := CastVote(conn, &model.Vote{
+			ProposalID:      proposalID,
+			VoterName:       voter,
+			Verdict:         model.VerdictApprove,
+			Confidence:      0.9,
+			DomainRelevance: 0.8,
+			Metadata:        bags[voter],
+		})
+		testsupport.Must(t, err, "CastVote: %v", err)
+	}
+
+	wantType := map[string]string{
+		"seat-silent": "null",
+		"seat-empty":  "null",
+		"seat-claim":  "text",
+	}
+	for voter, want := range wantType {
+		var got string
+		err := conn.QueryRow(
+			`SELECT typeof(metadata) FROM votes WHERE proposal_id = ? AND voter_name = ?`,
+			proposalID, voter).Scan(&got)
+		testsupport.Must(t, err, "reading typeof(metadata) for %s: %v", voter, err)
+		if got != want {
+			t.Errorf("%s stored typeof(metadata) = %q, want %q", voter, got, want)
+		}
+	}
+}
+
+// TestVoteMetadataCapAppliesToEveryWriter puts the size limit at the column
+// rather than at one command's flag: the import path reaches votes through
+// InsertVoteWithID and is held to the same refusal `vote cast` gets.
+func TestVoteMetadataCapAppliesToEveryWriter(t *testing.T) {
+	conn := mustInitAndMigrate(t)
+
+	proposalID, err := CreateProposal(conn, &model.Proposal{
+		Description:    "cap at the seam",
+		RequiredVoters: 2,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	oversized := blobBagOfEncodedSize(t, VoteMetadataMaxBytes+1)
+
+	if _, err := CastVote(conn, &model.Vote{
+		ProposalID:      proposalID,
+		VoterName:       "seat-a",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Metadata:        oversized,
+	}); err == nil {
+		t.Error("CastVote accepted an over-cap metadata bag")
+	}
+
+	// The refusal must leave NOTHING behind. The marshal runs before the INSERT
+	// today, so this holds — but it holds positionally, and a marshal moved
+	// below the INSERT would leave a half-written vote with every other
+	// assertion in this file still green.
+	if got := votesByVoter(t, conn, proposalID); len(got) != 0 {
+		t.Errorf("a refused cast left %d vote(s) in the store: %v", len(got), got)
+	}
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := InsertVoteWithID(tx, &model.Vote{
+		ID:              1,
+		ProposalID:      proposalID,
+		VoterName:       "seat-imported",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Metadata:        oversized,
+		CreatedAt:       time.Now(),
+	}); err == nil {
+		t.Error("InsertVoteWithID accepted an over-cap metadata bag — the import " +
+			"path writes an unbounded column")
+	}
+
+	var inserted int
+	err = tx.QueryRow(
+		`SELECT COUNT(*) FROM votes WHERE voter_name = 'seat-imported'`).Scan(&inserted)
+	testsupport.Must(t, err, "counting imported votes: %v", err)
+	if inserted != 0 {
+		t.Errorf("a refused import wrote %d vote row(s)", inserted)
+	}
+}
+
+// TestVoteMetadataCapIsExactAtTheBoundary pins the constant's magnitude from
+// the ACCEPTING side as well as the refusing one. Without an at-cap accept
+// nothing distinguishes `>` from `>=`, and a cap silently one byte tighter
+// than it says would pass every other test in this file.
+func TestVoteMetadataCapIsExactAtTheBoundary(t *testing.T) {
+	conn := mustInitAndMigrate(t)
+
+	proposalID, err := CreateProposal(conn, &model.Proposal{
+		Description:    "cap boundary",
+		RequiredVoters: 3,
+		Threshold:      0.5,
+		Status:         model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	atCap := blobBagOfEncodedSize(t, VoteMetadataMaxBytes)
+	if _, err := CastVote(conn, &model.Vote{
+		ProposalID:      proposalID,
+		VoterName:       "seat-at-cap",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Metadata:        atCap,
+	}); err != nil {
+		t.Errorf("CastVote refused a bag of exactly %d bytes: %v", VoteMetadataMaxBytes, err)
+	}
+
+	overCap := blobBagOfEncodedSize(t, VoteMetadataMaxBytes+1)
+	if _, err := CastVote(conn, &model.Vote{
+		ProposalID:      proposalID,
+		VoterName:       "seat-over-cap",
+		Verdict:         model.VerdictApprove,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Metadata:        overCap,
+	}); err == nil {
+		t.Errorf("CastVote accepted a bag of %d bytes, one over the cap", VoteMetadataMaxBytes+1)
+	}
+}
+
+// blobBagOfEncodedSize builds a one-key bag whose ENCODED size is exactly n
+// bytes — the quantity the column measures. Sizing the filler by hand is how
+// the previous fixture came to be eleven bytes over a cap it described as one
+// over; the encoder is asked instead, and the result is verified.
+func blobBagOfEncodedSize(t *testing.T, n int) map[string]any {
+	t.Helper()
+	const key = "blob"
+	overhead := len(`{"":""}`) + len(key)
+	if n < overhead {
+		t.Fatalf("cannot build a %d-byte bag: the empty shape is already %d", n, overhead)
+	}
+	bag := map[string]any{key: strings.Repeat("x", n-overhead)}
+	encoded, err := json.Marshal(bag)
+	testsupport.Must(t, err, "encoding the fixture bag: %v", err)
+	if len(encoded) != n {
+		t.Fatalf("fixture encodes to %d bytes, want %d", len(encoded), n)
+	}
+	return bag
+}
+
+// TestVoteMetadataPathReadsNoKey is the mechanical form of the promise two
+// accepted risks rest on: core stores the bag whole and reads no key out of
+// it, so a seat's self-asserted claim can never reach a decision. Stated in
+// prose it is a precondition nothing enforces; parsed out of the source it
+// fails the build on the day someone special-cases a key name.
+//
+// It parses rather than greps, so a key hidden in a switch, a map literal, or
+// a comparison is caught the same as one in an if. Its limit is the same as
+// TestMetadataRollupReadsNoKey's, whose shape it borrows: it covers the
+// functions named below, not every line that could ever touch a vote.
+func TestVoteMetadataPathReadsNoKey(t *testing.T) {
+	src, err := os.ReadFile("proposals.go")
+	testsupport.Must(t, err, "reading the vote source: %v", err)
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proposals.go", src, 0)
+	testsupport.Must(t, err, "parsing the vote source: %v", err)
+
+	guarded := map[string]bool{
+		"marshalVoteMetadata": true,
+		"scanVoteFrom":        true,
+	}
+
+	var offenders []string
+	seen := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || !guarded[fn.Name.Name] {
+			return true
+		}
+		seen[fn.Name.Name] = true
+		ast.Inspect(fn.Body, func(inner ast.Node) bool {
+			lit, ok := inner.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			// SQL and error text are the two legitimate literal classes here:
+			// one names columns this schema defines, the other is a sentence.
+			// Neither can be a metadata key.
+			value := lit.Value
+			if strings.Contains(value, "SELECT") || strings.Contains(value, " ") {
+				return true
+			}
+			offenders = append(offenders, fn.Name.Name+": "+value)
+			return true
+		})
+		return false
+	})
+
+	for name := range guarded {
+		if !seen[name] {
+			t.Fatalf("%s is no longer in proposals.go; this check is silently "+
+				"guarding nothing", name)
+		}
+	}
+	if len(offenders) > 0 {
+		t.Errorf("the vote metadata path contains bare string literals %v; a key-name "+
+			"special case here would make a seat's own claim load-bearing", offenders)
+	}
+}
+
+// votesByVoter reads a proposal's votes keyed by voter name.
+func votesByVoter(t *testing.T, conn *sql.DB, proposalID int) map[string]*model.Vote {
+	t.Helper()
+	votes, err := GetProposalVotes(conn, proposalID)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	byVoter := make(map[string]*model.Vote, len(votes))
+	for _, v := range votes {
+		byVoter[v.VoterName] = v
+	}
+	return byVoter
+}
+
+// mustVote fails BY NAME when a voter is absent, rather than panicking on a
+// nil dereference in the assertion that follows.
+func mustVote(t *testing.T, byVoter map[string]*model.Vote, voter string) *model.Vote {
+	t.Helper()
+	v, ok := byVoter[voter]
+	if !ok {
+		t.Fatalf("no vote read back for %q (read %d votes)", voter, len(byVoter))
+	}
+	return v
 }

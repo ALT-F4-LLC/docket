@@ -30,11 +30,7 @@ test_v_label() {
   assert_exit "V" "V4" 0
   local HAS_COLOR
   HAS_COLOR=$(echo "$CMD_STDOUT" | jq '[.data[] | select(.name == "critical" and .color == "#ff0000")] | length' 2>/dev/null)
-  if [ "$HAS_COLOR" -ge 1 ]; then
-    check "V" "V4_color" "PASS"
-  else
-    check "V" "V4_color" "FAIL" "expected label 'critical' with color '#ff0000'"
-  fi
+  check_cond "V" "V4_color" "expected label 'critical' with color '#ff0000'" [ "$HAS_COLOR" -ge 1 ]
 
   # V5: label add human mode output
   run issue label add "$LABEL_ISSUE_ID" "docs"
@@ -60,11 +56,7 @@ test_v_label() {
   # Verify "docs" is no longer in the returned labels
   local DOCS_REMAINING
   DOCS_REMAINING=$(echo "$CMD_STDOUT" | jq '[.data[] | select(.name == "docs")] | length' 2>/dev/null)
-  if [ "$DOCS_REMAINING" -eq 0 ]; then
-    check "V" "V9_removed" "PASS"
-  else
-    check "V" "V9_removed" "FAIL" "label 'docs' still present after rm"
-  fi
+  check_cond "V" "V9_removed" "label 'docs' still present after rm" [ "$DOCS_REMAINING" -eq 0 ]
 
   # V10: label rm non-existent label -> exit 2
   run issue label rm "$LABEL_ISSUE_ID" "nonexistent" --json
@@ -77,11 +69,7 @@ test_v_label() {
   assert_exit "V" "V11_pre" 0
   local DOCS_EXISTS
   DOCS_EXISTS=$(echo "$CMD_STDOUT" | jq '[.data[] | select(.name == "docs")] | length' 2>/dev/null)
-  if [ "$DOCS_EXISTS" -ge 1 ]; then
-    check "V" "V11_exists" "PASS"
-  else
-    check "V" "V11_exists" "FAIL" "label 'docs' should still exist after rm from issue"
-  fi
+  check_cond "V" "V11_exists" "label 'docs' should still exist after rm from issue" [ "$DOCS_EXISTS" -ge 1 ]
   run issue label rm "$LABEL_ISSUE_ID" "docs" --json
   assert_exit "V" "V11" 3
 
@@ -144,18 +132,10 @@ test_v_label() {
   assert_exit "V" "V20" 0
   local LABEL_ADDED_COUNT
   LABEL_ADDED_COUNT=$(echo "$CMD_STDOUT" | jq '[.data.activity[] | select(.field_changed == "label_added")] | length' 2>/dev/null)
-  if [ "$LABEL_ADDED_COUNT" -ge 1 ]; then
-    check "V" "V20_added" "PASS"
-  else
-    check "V" "V20_added" "FAIL" "expected >= 1 label_added activity entries, got $LABEL_ADDED_COUNT"
-  fi
+  check_cond "V" "V20_added" "expected >= 1 label_added activity entries, got $LABEL_ADDED_COUNT" [ "$LABEL_ADDED_COUNT" -ge 1 ]
   local LABEL_REMOVED_COUNT
   LABEL_REMOVED_COUNT=$(echo "$CMD_STDOUT" | jq '[.data.activity[] | select(.field_changed == "label_removed")] | length' 2>/dev/null)
-  if [ "$LABEL_REMOVED_COUNT" -ge 1 ]; then
-    check "V" "V20_removed" "PASS"
-  else
-    check "V" "V20_removed" "FAIL" "expected >= 1 label_removed activity entries, got $LABEL_REMOVED_COUNT"
-  fi
+  check_cond "V" "V20_removed" "expected >= 1 label_removed activity entries, got $LABEL_REMOVED_COUNT" [ "$LABEL_REMOVED_COUNT" -ge 1 ]
 
   # V21: label list after deletions shows updated counts
   # "disposable" was deleted in V15; verify it no longer appears
@@ -163,11 +143,7 @@ test_v_label() {
   assert_exit "V" "V21" 0
   local DISPOSABLE_COUNT
   DISPOSABLE_COUNT=$(echo "$CMD_STDOUT" | jq '[.data[] | select(.name == "disposable")] | length' 2>/dev/null)
-  if [ "$DISPOSABLE_COUNT" -eq 0 ]; then
-    check "V" "V21_gone" "PASS"
-  else
-    check "V" "V21_gone" "FAIL" "label 'disposable' still appears after delete"
-  fi
+  check_cond "V" "V21_gone" "label 'disposable' still appears after delete" [ "$DISPOSABLE_COUNT" -eq 0 ]
 
   # V22: label add with conflicting --color on existing label should fail
   # "critical" already exists with color "#ff0000" from V4

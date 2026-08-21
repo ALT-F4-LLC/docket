@@ -47,11 +47,7 @@ test_y_plan() {
   # Y3: Plan has multiple phases (at least 3 due to A->B->C chain).
   local NUM_PHASES
   NUM_PHASES=$(echo "$CMD_STDOUT" | jq '.data.total_phases' 2>/dev/null)
-  if [ "$NUM_PHASES" -ge 3 ]; then
-    check "Y" "Y3_phases" "PASS"
-  else
-    check "Y" "Y3_phases" "FAIL" "expected >= 3 phases, got $NUM_PHASES"
-  fi
+  check_cond "Y" "Y3_phases" "expected >= 3 phases, got $NUM_PHASES" [ "$NUM_PHASES" -ge 3 ]
 
   # Y4: Phase 1 contains the independent issue and Plan_A (both have no blockers).
   local PHASE1_IDS
@@ -72,11 +68,7 @@ test_y_plan() {
   # Y6: Max parallelism is at least 2 (Phase 1 has A + independent).
   local MAX_PAR
   MAX_PAR=$(echo "$CMD_STDOUT" | jq '.data.max_parallelism' 2>/dev/null)
-  if [ "$MAX_PAR" -ge 2 ]; then
-    check "Y" "Y6_maxpar" "PASS"
-  else
-    check "Y" "Y6_maxpar" "FAIL" "expected max_parallelism >= 2, got $MAX_PAR"
-  fi
+  check_cond "Y" "Y6_maxpar" "expected max_parallelism >= 2, got $MAX_PAR" [ "$MAX_PAR" -ge 2 ]
 
   # Y7: Human mode output contains "Execution Plan" and "Summary".
   run plan
@@ -124,19 +116,11 @@ test_y_plan() {
   # The independent issue and other plan issues should NOT be in the scoped plan.
   local HAS_IND
   HAS_IND=$(echo "$CMD_STDOUT" | jq "[.data.phases[].issues[] | select(.id == \"DKT-$PLAN_IND\")] | length" 2>/dev/null)
-  if [ "$HAS_IND" -eq 0 ]; then
-    check "Y" "Y11_scoped" "PASS"
-  else
-    check "Y" "Y11_scoped" "FAIL" "independent issue should not appear when scoping to root $PLAN_ROOT"
-  fi
+  check_cond "Y" "Y11_scoped" "independent issue should not appear when scoping to root $PLAN_ROOT" [ "$HAS_IND" -eq 0 ]
   # Children should be present in the scoped plan.
   local HAS_RC1
   HAS_RC1=$(echo "$CMD_STDOUT" | jq "[.data.phases[].issues[] | select(.id == \"DKT-$PLAN_RC1\")] | length" 2>/dev/null)
-  if [ "$HAS_RC1" -ge 1 ]; then
-    check "Y" "Y11_child1" "PASS"
-  else
-    check "Y" "Y11_child1" "FAIL" "child DKT-$PLAN_RC1 should appear in root-scoped plan"
-  fi
+  check_cond "Y" "Y11_child1" "child DKT-$PLAN_RC1 should appear in root-scoped plan" [ "$HAS_RC1" -ge 1 ]
 
   # Y12: Invalid root ID format (exit 3).
   run plan --json --root "abc"
@@ -151,11 +135,7 @@ test_y_plan() {
   assert_exit "Y" "Y13" 0
   local EMPTY_TOTAL
   EMPTY_TOTAL=$(echo "$CMD_STDOUT" | jq '.data.total_issues' 2>/dev/null)
-  if [ "$EMPTY_TOTAL" -eq 0 ]; then
-    check "Y" "Y13_empty" "PASS"
-  else
-    check "Y" "Y13_empty" "FAIL" "expected 0 issues when all are done, got $EMPTY_TOTAL"
-  fi
+  check_cond "Y" "Y13_empty" "expected 0 issues when all are done, got $EMPTY_TOTAL" [ "$EMPTY_TOTAL" -eq 0 ]
 
   # Reopen for other tests.
   run issue reopen "$PLAN_A" --json

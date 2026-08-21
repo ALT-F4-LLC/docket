@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -45,6 +43,12 @@ const (
 	ProposalStatusApproved  ProposalStatus = "approved"
 	ProposalStatusRejected  ProposalStatus = "rejected"
 	ProposalStatusCommitted ProposalStatus = "committed"
+	// ProposalStatusClosed marks an open proposal retired WITHOUT a tally
+	// (DKT-114): its underlying decision was made another way — an operator
+	// resolving a gate out-of-band — and leaving it open forever misreported a
+	// settled question as a pending one. Closed is terminal and is never a
+	// verdict: no vote was counted.
+	ProposalStatusClosed ProposalStatus = "closed"
 )
 
 var validProposalStatuses = []ProposalStatus{
@@ -52,6 +56,7 @@ var validProposalStatuses = []ProposalStatus{
 	ProposalStatusApproved,
 	ProposalStatusRejected,
 	ProposalStatusCommitted,
+	ProposalStatusClosed,
 }
 
 // ValidateProposalStatus returns an error if s is not a recognized proposal status.
@@ -93,24 +98,7 @@ func FormatProposalID(id int) string {
 // ParseProposalID accepts both "DKT-V5" and "5" and returns the numeric ID.
 // The prefix check is case-insensitive.
 func ParseProposalID(input string) (int, error) {
-	s := strings.TrimSpace(input)
-	if s == "" {
-		return 0, fmt.Errorf("empty proposal ID")
-	}
-
-	if strings.HasPrefix(strings.ToUpper(s), strings.ToUpper(ProposalIDPrefix)) {
-		s = s[len(ProposalIDPrefix):]
-	}
-
-	id, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid proposal ID %q: %w", input, err)
-	}
-	if id <= 0 {
-		return 0, fmt.Errorf("invalid proposal ID %q: must be positive", input)
-	}
-
-	return id, nil
+	return parseEntityID(input, "proposal", ProposalIDPrefix)
 }
 
 // Findings represents structured review findings.
@@ -122,7 +110,10 @@ type Findings struct {
 
 // Proposal represents a consensus proposal for PBFT-inspired voting.
 type Proposal struct {
-	ID               int
+	ID int
+	// ProjectID is the v12 tenancy dimension; zero normalizes to the default
+	// project on write. Never part of the frozen v1 wire format.
+	ProjectID        int
 	Description      string
 	Criticality      Criticality
 	Status           ProposalStatus
@@ -265,40 +256,65 @@ type Vote struct {
 	Findings        string
 	FindingsJSON    *Findings
 	Summary         string
-	CreatedAt       time.Time
+	// Metadata is the casting seat's own opaque KV bag — e.g. which model and
+	// effort level cast the vote (DKT-71). Core never reads a key inside it,
+	// exactly like a step's metadata (docs/tdd/completion-metadata.md): it is
+	// a claim the seat makes about itself, not a fact core verifies.
+	Metadata map[string]any
+	// MetadataUnreadable is set by the read path when the stored bag exists
+	// but does not decode. It keeps "this seat claimed nothing" and "this
+	// seat's claim can no longer be read" from collapsing into the same
+	// nil Metadata: a read still succeeds (one odd cell must not fail a
+	// whole proposal's read verbs), but it says which of the two it saw.
+	MetadataUnreadable bool
+	// Usage is the seat's own spend report, unit -> quantity (DKT-95) — the
+	// one spend usage_ledger cannot key (a vote step's attempt is permanently
+	// 0, so two seats collide). Written to `vote_usage` in the cast's own
+	// transaction; units are opaque strings under usage_ledger's discipline
+	// (finite, non-negative), and like Metadata it is a claim the seat makes,
+	// not a fact core verifies. Write-side only: reads go through the
+	// run-level rollup.
+	Usage     map[string]float64
+	CreatedAt time.Time
 }
 
 // voteJSON is the JSON wire format for Vote.
 type voteJSON struct {
-	ID              int       `json:"id"`
-	ProposalID      string    `json:"proposal_id,omitempty"`
-	VoterName       string    `json:"voter_name"`
-	VoterRole       string    `json:"voter_role"`
-	Verdict         string    `json:"verdict"`
-	Confidence      float64   `json:"confidence"`
-	DomainRelevance float64   `json:"domain_relevance"`
-	EffectiveWeight float64   `json:"effective_weight"`
-	Findings        string    `json:"findings"`
-	FindingsJSON    *Findings `json:"findings_json"`
-	Summary         string    `json:"summary"`
-	CreatedAt       string    `json:"created_at"`
+	ID              int            `json:"id"`
+	ProposalID      string         `json:"proposal_id,omitempty"`
+	VoterName       string         `json:"voter_name"`
+	VoterRole       string         `json:"voter_role"`
+	Verdict         string         `json:"verdict"`
+	Confidence      float64        `json:"confidence"`
+	DomainRelevance float64        `json:"domain_relevance"`
+	EffectiveWeight float64        `json:"effective_weight"`
+	Findings        string         `json:"findings"`
+	FindingsJSON    *Findings      `json:"findings_json"`
+	Summary         string         `json:"summary"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	// A vote whose stored bag would not decode. Omitted for every ordinary
+	// vote, so the wire form of a store with no odd cells is unchanged.
+	MetadataUnreadable bool   `json:"metadata_unreadable,omitempty"`
+	CreatedAt          string `json:"created_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Vote.
 func (v Vote) MarshalJSON() ([]byte, error) {
 	j := voteJSON{
-		ID:              v.ID,
-		ProposalID:      FormatProposalID(v.ProposalID),
-		VoterName:       v.VoterName,
-		VoterRole:       v.VoterRole,
-		Verdict:         string(v.Verdict),
-		Confidence:      v.Confidence,
-		DomainRelevance: v.DomainRelevance,
-		EffectiveWeight: v.Confidence * v.DomainRelevance,
-		Findings:        v.Findings,
-		FindingsJSON:    v.FindingsJSON,
-		Summary:         v.Summary,
-		CreatedAt:       v.CreatedAt.UTC().Format(time.RFC3339),
+		ID:                 v.ID,
+		ProposalID:         FormatProposalID(v.ProposalID),
+		VoterName:          v.VoterName,
+		VoterRole:          v.VoterRole,
+		Verdict:            string(v.Verdict),
+		Confidence:         v.Confidence,
+		DomainRelevance:    v.DomainRelevance,
+		EffectiveWeight:    v.Confidence * v.DomainRelevance,
+		Findings:           v.Findings,
+		FindingsJSON:       v.FindingsJSON,
+		Summary:            v.Summary,
+		Metadata:           v.Metadata,
+		MetadataUnreadable: v.MetadataUnreadable,
+		CreatedAt:          v.CreatedAt.UTC().Format(time.RFC3339),
 	}
 
 	return json.Marshal(j)
@@ -334,6 +350,8 @@ func (v *Vote) UnmarshalJSON(data []byte) error {
 	v.Findings = j.Findings
 	v.FindingsJSON = j.FindingsJSON
 	v.Summary = j.Summary
+	v.Metadata = j.Metadata
+	v.MetadataUnreadable = j.MetadataUnreadable
 
 	createdAt, err := time.Parse(time.RFC3339, j.CreatedAt)
 	if err != nil {

@@ -195,7 +195,7 @@ func renderColorCard(issue *model.Issue, colWidth, contentWidth int, opts BoardO
 	body := strings.Join(lines, "\n")
 
 	cardStyle := lipgloss.NewStyle().
-		Width(colWidth - 2). // account for outer spacing
+		Width(colWidth-2). // account for outer spacing
 		Padding(0, 1).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorFromName(issue.Status.Color()))

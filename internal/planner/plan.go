@@ -156,6 +156,31 @@ func FindReady(dag *DAG, statuses []string) []*model.Issue {
 	statusSet := filter.ToStringSet(statuses)
 
 	// Build set of issues that have children (non-leaf).
+	//
+	// THE CONTAINER GUARD, AND WHY ROUTABLE EPICS DO NOT BREAK IT.
+	//
+	// It excludes an issue because OTHER issues name it as their parent —
+	// never because of its own kind. `epic` appears nowhere in this function,
+	// and nothing here reads Issue.Kind. So the set it computes is identical
+	// whether or not any workflow's `[match]` lists `epic`:
+	//
+	//   - an epic WITH sub-issues is excluded, as it was before epics routed —
+	//     it is a container, and its children are the work;
+	//   - a CHILDLESS epic is ready, which is the same answer this function
+	//     already gave a childless task. A kind with no children is a leaf,
+	//     and treating it otherwise would make an epic the one kind that can
+	//     never appear in `next` no matter how it is used.
+	//
+	// The precondition epics-never-routing was supplying was NOT this guard's
+	// correctness. It is scoped to the `docket next` READ path: FindReady has
+	// exactly one non-test caller (internal/cli/next.go), and ACTIVATION does
+	// not use it — the engine takes only BuildDAG and TopoSort from this
+	// package (internal/engine/activate.go:795), for cycle linting. Making
+	// epics bindable therefore changed which issues can ACTIVATE; it did not
+	// reach this code at all.
+	//
+	// Verified end-to-end: an epic issue binds standard-change and activates,
+	// and both epic shapes are covered by TestFindReadyHandlesRoutableEpics.
 	parents := make(map[int]struct{})
 	for _, node := range dag.Nodes {
 		if node.Issue.ParentID != nil {
@@ -203,7 +228,20 @@ func FindReady(dag *DAG, statuses []string) []*model.Issue {
 // --- helpers ---
 
 // priorityRank returns a numeric rank for sorting: lower rank = higher priority.
-func priorityRank(p model.Priority) int {
+//
+// It is PriorityRank's unexported spelling, kept so the call sites in this file
+// read as they always have. There is one ranking, not two.
+func priorityRank(p model.Priority) int { return PriorityRank(p) }
+
+// PriorityRank returns a numeric rank for sorting: lower rank = higher
+// priority.
+//
+// It is exported for the engine's step-readiness ordering, which is "priority
+// then age" over the STEP's issue (engine-spec §2; TDD §6.3). The engine reuses
+// this function rather than defining its own so `next --run` and `next` cannot
+// disagree about what "higher priority" means — a second definition would drift
+// the first time a priority level was added or reordered.
+func PriorityRank(p model.Priority) int {
 	switch p {
 	case model.PriorityCritical:
 		return 0

@@ -1,0 +1,11 @@
+{
+  "why": "a payload that is not an array fails at the root, and the path is the bare payload",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {"type": "object"}
+  },
+  "document": {"risk": "low"},
+  "valid": false,
+  "message_contains": "payload: got object, want array"
+}

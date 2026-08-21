@@ -1,0 +1,82 @@
+# parallel-check — prepare, check in parallel, summarize, verify.
+#
+# The general shape for work that fans out: one step prepares, several run
+# concurrently over the same input, one folds their results together, and one
+# verifies the outcome against the issue's acceptance criteria.
+#
+# The `fanout` list holds opaque executor hints — one sibling step is created
+# per entry, so the four below become four parallel instances of `check`.
+# Change the list and you change how wide the fanout is; the engine never
+# interprets what the entries mean.
+#
+# You do not register this file. Activation auto-registers everything under
+# .docket/config/, so the next step is to start a run:
+#     docket run start --issue DKT-1 && docket run activate RUN-1
+#
+# Editing it after a run has registered it needs a version bump below: a
+# registered name@version is frozen so a run that pinned it can reproduce.
+
+[pipeline]
+name        = "parallel-check"
+version     = 2
+description = "Prepare, run checks in parallel, summarize them, then verify."
+
+[match]
+kind = ["task", "feature"]
+
+[limits]
+prepare = { max = 1, lease_ttl = "45m" }
+                              # one `prepare` step at a time across the repo;
+                              #   a class with no entry is unlimited
+
+[[step]]
+name     = "prepare"
+after    = []
+executor = "prepare"
+class    = "prepare"          # the concurrency-accounting key for [limits]
+emits    = "prepared"
+expected_cost = 1.0
+
+[[step]]
+name   = "check"
+after  = ["prepare"]
+fanout = ["completeness", "consistency", "clarity"]
+                              # three parallel siblings, one per hint
+emits  = "check-report"
+inputs = ["prepare.prepared"]
+min_siblings = 2              # the join needs two of the three to finish
+expected_cost = 0.5           # per expanded sibling
+
+[[step]]
+name     = "summarize"
+after    = ["check"]
+executor = "summarize"
+emits    = "summary"
+inputs   = ["check.*"]        # every sibling's artifact, in expansion order
+expected_cost = 0.5
+
+[[step]]
+name     = "verify"
+after    = ["summarize"]
+executor = "verify"
+emits    = "verification"
+inputs   = ["issue.body", "summarize.summary"]
+gates    = [{ name = "acceptance", source = "fence:acceptance", pre = true }]
+                              # a pre-gate runs at claim, and its results land
+                              #   in the context bundle the worker receives
+on_fail  = "fix-loop"
+expected_cost = 0.5
+
+[[step]]
+name       = "fix"
+executor   = "fix"
+emits      = "fix-summary"
+inputs     = ["verify.verification"]
+loop       = true             # instantiated per fix-loop entry: this is what a
+                              #   `fix-loop` routing above actually creates —
+                              #   without a `loop = true` step the routing
+                              #   would supersede work and replace it with
+                              #   nothing
+after_loop = "check"          # after the fix, the parallel checks, the
+                              #   summary, and the verification all run again
+expected_cost = 1.0

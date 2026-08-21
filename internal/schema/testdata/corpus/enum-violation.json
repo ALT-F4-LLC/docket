@@ -1,0 +1,21 @@
+{
+  "why": "§4.8 C3's own example: the refusal names the element, the property, the value given, and the values accepted",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "risk": {
+          "type": "string",
+          "enum": ["info", "low", "medium", "high", "blocker"],
+          "ordered_enum": true
+        }
+      },
+      "required": ["risk"]
+    }
+  },
+  "document": [{"risk": "low"}, {"risk": "urgent"}],
+  "valid": false,
+  "message_contains": "payload[1].risk: value \"urgent\" is not one of [\"info\",\"low\",\"medium\",\"high\",\"blocker\"]"
+}

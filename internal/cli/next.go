@@ -1,13 +1,7 @@
 package cli
 
 import (
-	"context"
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
-
-	"golang.org/x/term"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/filter"
@@ -15,42 +9,53 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
 
 type nextResult struct {
 	Issues []*model.Issue `json:"issues"`
 	Total  int            `json:"total"`
+	// readyTotal is the size of the ready set BEFORE --limit truncated it, and
+	// limit the effective limit. Both are unexported so the v1 payload is
+	// untouched: v1's Total is len(Issues) — a post-limit count that cannot
+	// distinguish "exactly N ready" from "N returned, many more dropped".
+	// That is the silent drop the v2 envelope exists to close.
+	readyTotal int
+	limit      int
+}
+
+// nextResult implements output.Collection for the v2 envelope, reporting the
+// honest pre-limit total rather than v1's len(Issues).
+func (r nextResult) CollectionItems() any { return issueListPayload{issues: r.Issues} }
+func (r nextResult) CollectionTotal() int { return r.readyTotal }
+func (r nextResult) CollectionTruncated() bool {
+	return output.IsTruncated(r.limit, r.readyTotal, len(r.Issues))
 }
 
 var nextCmd = &cobra.Command{
 	Use:   "next",
 	Short: "Show work-ready issues",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runNext(cmd, args, w)
-			})
-		}
-		return runNext(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runNext)
 	},
 }
 
+// runNext dispatches between the two modes of `next` (TDD §6.3.1).
+//
+// `docket next` WITHOUT --run is the existing issue-mode verb, BYTE-IDENTICAL:
+// runNextIssues below is the pre-phase-3 body, MOVED and not edited, so the
+// diff on that code is a pure relocation a reviewer can verify at a glance.
+// That is a code-structure requirement rather than an intention — it is what
+// makes QA section X (test_x_next.sh) pass untouched, which is the strongest
+// available evidence that behavior did not move.
 func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
+	if runRef, _ := cmd.Flags().GetString("run"); runRef != "" {
+		return runNextSteps(cmd, runRef, w)
+	}
+	return runNextIssues(cmd, args, w)
+}
+
+func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
 
 	statuses, _ := cmd.Flags().GetStringSlice("status")
@@ -58,6 +63,10 @@ func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	types, _ := cmd.Flags().GetStringSlice("type")
 	limit, _ := cmd.Flags().GetInt("limit")
+
+	if err := validateLimit(cmd, limit); err != nil {
+		return err
+	}
 
 	// Validate filter enum values.
 	for _, s := range statuses {
@@ -78,6 +87,7 @@ func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	// Fetch all non-done issues for DAG construction.
 	allIssues, _, err := db.ListIssues(conn, db.ListOptions{
+		ProjectID:   getProjectID(cmd),
 		IncludeDone: false,
 		Limit:       0, // no limit — need all for DAG
 	})
@@ -104,6 +114,10 @@ func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// Apply additional filters (priority, label, type) on the ready set.
 	ready = filterReady(ready, priorities, labels, types)
 
+	// Capture the true size of the ready set before truncating, so the v2
+	// envelope can report it and flag the drop.
+	readyTotal := len(ready)
+
 	// Apply limit.
 	if limit > 0 && len(ready) > limit {
 		ready = ready[:limit]
@@ -113,16 +127,38 @@ func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
-	result := nextResult{Issues: ready, Total: len(ready)}
+	// FindReady/filterReady return a nil slice when nothing is ready, and
+	// nextResult has no custom MarshalJSON (unlike issueListPayload) — a nil
+	// `ready` would serialize `.data.issues` as JSON null instead of `[]`.
+	if ready == nil {
+		ready = []*model.Issue{}
+	}
+
+	// Total stays len(ready) — the v1 field is frozen. The honest pre-limit
+	// count rides in readyTotal and surfaces only under --json=v2.
+	result := nextResult{Issues: ready, Total: len(ready), readyTotal: readyTotal, limit: limit}
 
 	var message string
 	if !w.JSONMode {
 		message = render.RenderTable(ready, false)
+		// Name the OTHER mode. Bare `next` is the issue-mode verb and its
+		// output is frozen, but a conductor who wanted a run's ready STEPS
+		// reads this issue list as a broken ready-set rather than as a
+		// different question answered correctly.
+		//
+		// A hint on the human channel only: the JSON payload is a wire format
+		// and must not grow prose. Errors are wrong here too — bare `next` is
+		// a supported verb with its own QA section, not a mistake.
+		message += nextModeHint
 	}
 	w.Success(result, message)
 
 	return nil
 }
+
+// nextModeHint disambiguates the two modes of `next` for a human reader.
+const nextModeHint = "\nShowing work-ready ISSUES. " +
+	"For a run's ready steps, use `docket next --run RUN-N`.\n"
 
 // filterReady applies priority, label, and type filters to a slice of ready issues.
 func filterReady(issues []*model.Issue, priorities, labels, types []string) []*model.Issue {
@@ -160,5 +196,9 @@ func init() {
 	nextCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	nextCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")
 	nextCmd.Flags().Int("limit", 10, "Maximum number of results")
+	// --run switches `next` into STEP mode (TDD §6.3.1). Without it the verb
+	// is exactly what it was: a workflow-free repo never passes this flag and
+	// never leaves the issue-mode path.
+	nextCmd.Flags().String("run", "", "Show ready STEPS of this run instead of ready issues")
 	rootCmd.AddCommand(nextCmd)
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestSplitByFileCollisionEmpty(t *testing.T) {
@@ -129,9 +130,7 @@ func TestGeneratePlanFilterByPriority(t *testing.T) {
 	dag := BuildDAG(issues, nil)
 
 	plan, err := GeneratePlan(dag, PlanFilters{Priorities: []string{"high"}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if plan.TotalIssues != 1 {
 		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
 	}
@@ -148,9 +147,7 @@ func TestGeneratePlanFilterByType(t *testing.T) {
 	dag := BuildDAG(issues, nil)
 
 	plan, err := GeneratePlan(dag, PlanFilters{Types: []string{"bug"}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if plan.TotalIssues != 1 {
 		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
 	}
@@ -167,9 +164,7 @@ func TestGeneratePlanFilterByAssignee(t *testing.T) {
 	dag := BuildDAG(issues, nil)
 
 	plan, err := GeneratePlan(dag, PlanFilters{Assignee: "alice"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if plan.TotalIssues != 1 {
 		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
 	}
@@ -189,9 +184,7 @@ func TestGeneratePlanFiltersAndCompose(t *testing.T) {
 	dag := BuildDAG(issues, nil)
 
 	plan, err := GeneratePlan(dag, PlanFilters{Priorities: []string{"high"}, Types: []string{"bug"}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if plan.TotalIssues != 1 {
 		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
 	}
@@ -210,9 +203,7 @@ func TestGeneratePlanLevelsNoCollisions(t *testing.T) {
 	dag := BuildDAG(issues, nil)
 
 	plan, err := GeneratePlan(dag, PlanFilters{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if plan.TotalPhases != 1 {
 		t.Fatalf("expected 1 phase, got %d", plan.TotalPhases)
 	}
@@ -235,9 +226,7 @@ func TestGeneratePlanLevelsFileCollisionSplit(t *testing.T) {
 	dag := BuildDAG(issues, nil)
 
 	plan, err := GeneratePlan(dag, PlanFilters{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if plan.TotalPhases != 2 {
 		t.Fatalf("expected 2 phases (file collision split), got %d", plan.TotalPhases)
 	}
@@ -265,9 +254,7 @@ func TestGeneratePlanLevelsAcrossDependency(t *testing.T) {
 	dag := BuildDAG(issues, relations)
 
 	plan, err := GeneratePlan(dag, PlanFilters{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "unexpected error: %v", err)
 	if plan.TotalPhases != 2 {
 		t.Fatalf("expected 2 phases, got %d", plan.TotalPhases)
 	}
@@ -301,5 +288,97 @@ func TestSplitByFileCollisionNoFilesNeverCollide(t *testing.T) {
 	// Phase 2: issue 4 (deferred due to shared.go).
 	if len(result[1]) != 1 || result[1][0].ID != 4 {
 		t.Errorf("phase 2: expected issue 4, got %v", result[1])
+	}
+}
+
+// TestFindReadyHandlesRoutableEpics is AC-2.
+//
+// Before RUN-2 no workflow's `[match].kind` listed `epic`, so an epic could
+// never bind a workflow. Epics were then made routable, and the concern raised
+// was that the container guard in FindReady had been relying on epics never
+// getting that far.
+//
+// It had not. The guard keys on OTHER issues' ParentID and never reads
+// Issue.Kind, so both epic shapes get the same answer their non-epic
+// equivalents always got. Asserting the two shapes side by side is what makes
+// that concrete: if someone later adds a kind test to the guard, the childless
+// case fails immediately.
+func TestFindReadyHandlesRoutableEpics(t *testing.T) {
+	parentID := 1
+
+	tests := []struct {
+		name   string
+		issues []*model.Issue
+		want   []int
+	}{
+		{
+			name: "epic WITH sub-issues is excluded as a container",
+			issues: []*model.Issue{
+				{ID: 1, Kind: model.IssueKindEpic, Status: model.StatusTodo},
+				{ID: 2, Kind: model.IssueKindTask, Status: model.StatusTodo, ParentID: &parentID},
+			},
+			want: []int{2},
+		},
+		{
+			name: "CHILDLESS epic is ready, exactly like a childless task",
+			issues: []*model.Issue{
+				{ID: 1, Kind: model.IssueKindEpic, Status: model.StatusTodo},
+			},
+			want: []int{1},
+		},
+		{
+			name: "a childless TASK is ready — the control for the case above",
+			issues: []*model.Issue{
+				{ID: 1, Kind: model.IssueKindTask, Status: model.StatusTodo},
+			},
+			want: []int{1},
+		},
+		{
+			name: "a parent TASK is excluded too — the guard is about children, not kind",
+			issues: []*model.Issue{
+				{ID: 1, Kind: model.IssueKindTask, Status: model.StatusTodo},
+				{ID: 2, Kind: model.IssueKindTask, Status: model.StatusTodo, ParentID: &parentID},
+			},
+			want: []int{2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ready := FindReady(BuildDAG(tt.issues, nil), nil)
+
+			got := make([]int, 0, len(ready))
+			for _, issue := range ready {
+				got = append(got, issue.ID)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("FindReady returned %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("FindReady returned %v, want %v", got, tt.want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestFindReadyIgnoresIssueKind states the guard's invariant directly: the
+// ready set is a function of structure and status, never of kind. Every kind
+// in the closed set, childless and in an allowed status, is ready.
+//
+// This is the assertion that would catch a future "epics are special" branch
+// added to FindReady without the author realising `next` is a read path that
+// activation does not share.
+func TestFindReadyIgnoresIssueKind(t *testing.T) {
+	for _, kind := range model.ValidIssueKinds() {
+		t.Run(string(kind), func(t *testing.T) {
+			issues := []*model.Issue{{ID: 1, Kind: kind, Status: model.StatusTodo}}
+			if ready := FindReady(BuildDAG(issues, nil), nil); len(ready) != 1 {
+				t.Errorf("a childless %s issue is not work-ready; FindReady "+
+					"must not discriminate on kind", kind)
+			}
+		})
 	}
 }

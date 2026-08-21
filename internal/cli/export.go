@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
@@ -43,301 +42,38 @@ var exportCmd = &cobra.Command{
 		}
 
 		// Fetch all data.
-		issues, err := db.ListAllIssues(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching issues: %w", err), output.ErrGeneral)
+		data := model.ExportData{
+			Version:    1,
+			ExportedAt: time.Now().UTC().Format(time.RFC3339),
 		}
-
-		comments, err := db.ListAllComments(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-		}
-
-		relations, err := db.GetAllRelations(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-		}
-
-		allLabels, err := db.ListAllLabelsRaw(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
-		}
-
-		mappings, err := db.ListAllIssueLabelMappings(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching label mappings: %w", err), output.ErrGeneral)
-		}
-
-		fileMappings, err := db.ListAllIssueFileMappings(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching file mappings: %w", err), output.ErrGeneral)
-		}
-
-		activityLog, err := db.ListAllActivity(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching activity log: %w", err), output.ErrGeneral)
-		}
-
-		docs, err := db.ListAllDocs(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching docs: %w", err), output.ErrGeneral)
-		}
-
-		docRevisions, err := db.ListAllDocRevisions(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching doc revisions: %w", err), output.ErrGeneral)
-		}
-
-		docComments, err := db.ListAllDocComments(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching doc comments: %w", err), output.ErrGeneral)
-		}
-
-		docIssueLinks, err := db.ListAllDocIssueLinks(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching doc-issue links: %w", err), output.ErrGeneral)
-		}
-
-		proposalDocs, err := db.ListAllProposalDocs(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching proposal-doc links: %w", err), output.ErrGeneral)
-		}
-
-		proposals, err := db.ListAllProposals(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching proposals: %w", err), output.ErrGeneral)
-		}
-
-		votes, err := db.ListAllVotes(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
-		}
-
-		proposalIssues, err := db.ListAllProposalIssues(conn)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching proposal-issue links: %w", err), output.ErrGeneral)
+		// Scoped to THIS project (v12): an export is one project's tracker,
+		// not the whole shared store.
+		for _, c := range exportCollections {
+			if err := c.fetch(conn, getProjectID(cmd), &data); err != nil {
+				return cmdErr(fmt.Errorf("fetching %s: %w", c.name, err), output.ErrGeneral)
+			}
 		}
 
 		// Apply filters if provided.
 		if len(statuses) > 0 || len(labels) > 0 {
-			issues = filterIssues(issues, statuses, labels)
-
-			// Build set of filtered issue IDs.
-			issueIDs := make(map[int]bool, len(issues))
-			for _, issue := range issues {
-				issueIDs[issue.ID] = true
-			}
-
-			// Filter comments to only those belonging to filtered issues.
-			filtered := make([]*model.Comment, 0, len(comments))
-			for _, c := range comments {
-				if issueIDs[c.IssueID] {
-					filtered = append(filtered, c)
-				}
-			}
-			comments = filtered
-
-			// Filter relations to only those where both sides are in the filtered set.
-			filteredRels := make([]model.Relation, 0, len(relations))
-			for _, r := range relations {
-				if issueIDs[r.SourceIssueID] && issueIDs[r.TargetIssueID] {
-					filteredRels = append(filteredRels, r)
-				}
-			}
-			relations = filteredRels
-
-			// Filter label mappings to only those for filtered issues.
-			filteredMappings := make([]model.IssueLabelMapping, 0, len(mappings))
-			for _, m := range mappings {
-				if issueIDs[m.IssueID] {
-					filteredMappings = append(filteredMappings, m)
-				}
-			}
-			mappings = filteredMappings
-
-			// Filter file mappings to only those for filtered issues.
-			filteredFileMappings := make([]model.IssueFileMapping, 0, len(fileMappings))
-			for _, m := range fileMappings {
-				if issueIDs[m.IssueID] {
-					filteredFileMappings = append(filteredFileMappings, m)
-				}
-			}
-			fileMappings = filteredFileMappings
-
-			// Filter activity log to only entries for filtered issues.
-			filteredActivity := make([]*model.Activity, 0, len(activityLog))
-			for _, a := range activityLog {
-				if issueIDs[a.IssueID] {
-					filteredActivity = append(filteredActivity, a)
-				}
-			}
-			activityLog = filteredActivity
-
-			// Filter doc-issue links to only those whose issue survives the filter.
-			filteredDocIssueLinks := make([]model.DocIssueLink, 0, len(docIssueLinks))
-			for _, l := range docIssueLinks {
-				if issueIDs[l.IssueID] {
-					filteredDocIssueLinks = append(filteredDocIssueLinks, l)
-				}
-			}
-			docIssueLinks = filteredDocIssueLinks
-
-			// Filter proposal-issue links to only those whose issue survives the filter.
-			filteredProposalIssues := make([]model.ProposalIssueLink, 0, len(proposalIssues))
-			for _, l := range proposalIssues {
-				if issueIDs[l.IssueID] {
-					filteredProposalIssues = append(filteredProposalIssues, l)
-				}
-			}
-			proposalIssues = filteredProposalIssues
-
-			survivingDocIDs := make(map[int]bool, len(docIssueLinks))
-			for _, l := range docIssueLinks {
-				survivingDocIDs[l.DocID] = true
-			}
-			filteredDocs := make([]*model.Doc, 0, len(docs))
-			for _, d := range docs {
-				if survivingDocIDs[d.ID] {
-					filteredDocs = append(filteredDocs, d)
-				}
-			}
-			docs = filteredDocs
-
-			filteredDocRevisions := make([]*model.DocRevision, 0, len(docRevisions))
-			for _, r := range docRevisions {
-				if survivingDocIDs[r.DocID] {
-					filteredDocRevisions = append(filteredDocRevisions, r)
-				}
-			}
-			docRevisions = filteredDocRevisions
-
-			filteredDocComments := make([]*model.DocComment, 0, len(docComments))
-			for _, c := range docComments {
-				if survivingDocIDs[c.DocID] {
-					filteredDocComments = append(filteredDocComments, c)
-				}
-			}
-			docComments = filteredDocComments
-
-			survivingProposalIDs := make(map[int]bool, len(proposalIssues))
-			for _, l := range proposalIssues {
-				survivingProposalIDs[l.ProposalID] = true
-			}
-			filteredProposals := make([]*model.Proposal, 0, len(proposals))
-			for _, p := range proposals {
-				if survivingProposalIDs[p.ID] {
-					filteredProposals = append(filteredProposals, p)
-				}
-			}
-			proposals = filteredProposals
-
-			filteredVotes := make([]*model.Vote, 0, len(votes))
-			for _, v := range votes {
-				if survivingProposalIDs[v.ProposalID] {
-					filteredVotes = append(filteredVotes, v)
-				}
-			}
-			votes = filteredVotes
-
-			filteredProposalDocs := make([]model.ProposalDocLink, 0, len(proposalDocs))
-			for _, l := range proposalDocs {
-				if survivingProposalIDs[l.ProposalID] && survivingDocIDs[l.DocID] {
-					filteredProposalDocs = append(filteredProposalDocs, l)
-				}
-			}
-			proposalDocs = filteredProposalDocs
-
-			// Filter labels to only those referenced by remaining mappings.
-			usedLabelIDs := make(map[int]bool)
-			for _, m := range mappings {
-				usedLabelIDs[m.LabelID] = true
-			}
-			filteredLabels := make([]*model.Label, 0, len(allLabels))
-			for _, l := range allLabels {
-				if usedLabelIDs[l.ID] {
-					filteredLabels = append(filteredLabels, l)
-				}
-			}
-			allLabels = filteredLabels
-		}
-
-		// Build export data.
-		data := model.ExportData{
-			Version:            1,
-			ExportedAt:         time.Now().UTC().Format(time.RFC3339),
-			Issues:             issues,
-			Comments:           comments,
-			Relations:          relations,
-			Labels:             allLabels,
-			IssueLabelMappings: mappings,
-			IssueFileMappings:  fileMappings,
-			ActivityLog:        activityLog,
-			Docs:               docs,
-			DocRevisions:       docRevisions,
-			DocComments:        docComments,
-			DocIssueLinks:      docIssueLinks,
-			Proposals:          proposals,
-			Votes:              votes,
-			ProposalIssues:     proposalIssues,
-			ProposalDocs:       proposalDocs,
+			filterExportData(&data, statuses, labels)
 		}
 
 		// Ensure nil slices become empty arrays in JSON.
-		if data.Issues == nil {
-			data.Issues = []*model.Issue{}
-		}
-		if data.Comments == nil {
-			data.Comments = []*model.Comment{}
-		}
-		if data.Relations == nil {
-			data.Relations = []model.Relation{}
-		}
-		if data.Labels == nil {
-			data.Labels = []*model.Label{}
-		}
-		if data.IssueLabelMappings == nil {
-			data.IssueLabelMappings = []model.IssueLabelMapping{}
-		}
-		if data.IssueFileMappings == nil {
-			data.IssueFileMappings = []model.IssueFileMapping{}
-		}
-		if data.ActivityLog == nil {
-			data.ActivityLog = []*model.Activity{}
-		}
-		if data.Docs == nil {
-			data.Docs = []*model.Doc{}
-		}
-		if data.DocRevisions == nil {
-			data.DocRevisions = []*model.DocRevision{}
-		}
-		if data.DocComments == nil {
-			data.DocComments = []*model.DocComment{}
-		}
-		if data.DocIssueLinks == nil {
-			data.DocIssueLinks = []model.DocIssueLink{}
-		}
-		if data.Proposals == nil {
-			data.Proposals = []*model.Proposal{}
-		}
-		if data.Votes == nil {
-			data.Votes = []*model.Vote{}
-		}
-		if data.ProposalIssues == nil {
-			data.ProposalIssues = []model.ProposalIssueLink{}
-		}
-		if data.ProposalDocs == nil {
-			data.ProposalDocs = []model.ProposalDocLink{}
+		for _, c := range exportCollections {
+			c.normalize(&data)
 		}
 
 		// Generate output based on format.
 		var raw string
+		var err error
 		switch format {
 		case "json":
 			raw, err = renderExportJSON(data)
 		case "csv":
-			raw, err = renderExportCSV(issues)
+			raw, err = renderExportCSV(data.Issues)
 		case "markdown":
-			raw, err = renderExportMarkdown(issues, comments)
+			raw, err = renderExportMarkdown(data.Issues, data.Comments)
 		}
 		if err != nil {
 			return cmdErr(fmt.Errorf("rendering export: %w", err), output.ErrGeneral)
@@ -363,6 +99,162 @@ func init() {
 	exportCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (repeatable)")
 	exportCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (OR, repeatable)")
 	rootCmd.AddCommand(exportCmd)
+}
+
+// filterExportData narrows an already-fetched export document to the issues
+// matching the given status and label filters, and to whatever else is still
+// reachable once those issues are gone.
+//
+// Unlike fetching, normalizing, and restoring, this stays written out
+// collection by collection, because no two collections reach the surviving set
+// the same way: comments and activity follow their issue, relations need BOTH
+// endpoints to survive, docs survive by having a surviving link rather than by
+// any field of their own, revisions and doc comments follow the docs that
+// survived that way, votes follow proposals which themselves survived by link,
+// and labels survive only if a surviving mapping still points at them. The
+// order matters too — each of the last few steps reads a set the step above it
+// just narrowed. A table of predicates would have to encode that dependency
+// anyway, and would hide it while doing so.
+func filterExportData(data *model.ExportData, statuses, labels []string) {
+	data.Issues = filterIssues(data.Issues, statuses, labels)
+
+	// Build set of filtered issue IDs.
+	issueIDs := make(map[int]bool, len(data.Issues))
+	for _, issue := range data.Issues {
+		issueIDs[issue.ID] = true
+	}
+
+	// Filter comments to only those belonging to filtered issues.
+	filtered := make([]*model.Comment, 0, len(data.Comments))
+	for _, c := range data.Comments {
+		if issueIDs[c.IssueID] {
+			filtered = append(filtered, c)
+		}
+	}
+	data.Comments = filtered
+
+	// Filter relations to only those where both sides are in the filtered set.
+	filteredRels := make([]model.Relation, 0, len(data.Relations))
+	for _, r := range data.Relations {
+		if issueIDs[r.SourceIssueID] && issueIDs[r.TargetIssueID] {
+			filteredRels = append(filteredRels, r)
+		}
+	}
+	data.Relations = filteredRels
+
+	// Filter label mappings to only those for filtered issues.
+	filteredMappings := make([]model.IssueLabelMapping, 0, len(data.IssueLabelMappings))
+	for _, m := range data.IssueLabelMappings {
+		if issueIDs[m.IssueID] {
+			filteredMappings = append(filteredMappings, m)
+		}
+	}
+	data.IssueLabelMappings = filteredMappings
+
+	// Filter file mappings to only those for filtered issues.
+	filteredFileMappings := make([]model.IssueFileMapping, 0, len(data.IssueFileMappings))
+	for _, m := range data.IssueFileMappings {
+		if issueIDs[m.IssueID] {
+			filteredFileMappings = append(filteredFileMappings, m)
+		}
+	}
+	data.IssueFileMappings = filteredFileMappings
+
+	// Filter activity log to only entries for filtered issues.
+	filteredActivity := make([]*model.Activity, 0, len(data.ActivityLog))
+	for _, a := range data.ActivityLog {
+		if issueIDs[a.IssueID] {
+			filteredActivity = append(filteredActivity, a)
+		}
+	}
+	data.ActivityLog = filteredActivity
+
+	// Filter doc-issue links to only those whose issue survives the filter.
+	filteredDocIssueLinks := make([]model.DocIssueLink, 0, len(data.DocIssueLinks))
+	for _, l := range data.DocIssueLinks {
+		if issueIDs[l.IssueID] {
+			filteredDocIssueLinks = append(filteredDocIssueLinks, l)
+		}
+	}
+	data.DocIssueLinks = filteredDocIssueLinks
+
+	// Filter proposal-issue links to only those whose issue survives the filter.
+	filteredProposalIssues := make([]model.ProposalIssueLink, 0, len(data.ProposalIssues))
+	for _, l := range data.ProposalIssues {
+		if issueIDs[l.IssueID] {
+			filteredProposalIssues = append(filteredProposalIssues, l)
+		}
+	}
+	data.ProposalIssues = filteredProposalIssues
+
+	survivingDocIDs := make(map[int]bool, len(data.DocIssueLinks))
+	for _, l := range data.DocIssueLinks {
+		survivingDocIDs[l.DocID] = true
+	}
+	filteredDocs := make([]*model.Doc, 0, len(data.Docs))
+	for _, d := range data.Docs {
+		if survivingDocIDs[d.ID] {
+			filteredDocs = append(filteredDocs, d)
+		}
+	}
+	data.Docs = filteredDocs
+
+	filteredDocRevisions := make([]*model.DocRevision, 0, len(data.DocRevisions))
+	for _, r := range data.DocRevisions {
+		if survivingDocIDs[r.DocID] {
+			filteredDocRevisions = append(filteredDocRevisions, r)
+		}
+	}
+	data.DocRevisions = filteredDocRevisions
+
+	filteredDocComments := make([]*model.DocComment, 0, len(data.DocComments))
+	for _, c := range data.DocComments {
+		if survivingDocIDs[c.DocID] {
+			filteredDocComments = append(filteredDocComments, c)
+		}
+	}
+	data.DocComments = filteredDocComments
+
+	survivingProposalIDs := make(map[int]bool, len(data.ProposalIssues))
+	for _, l := range data.ProposalIssues {
+		survivingProposalIDs[l.ProposalID] = true
+	}
+	filteredProposals := make([]*model.Proposal, 0, len(data.Proposals))
+	for _, p := range data.Proposals {
+		if survivingProposalIDs[p.ID] {
+			filteredProposals = append(filteredProposals, p)
+		}
+	}
+	data.Proposals = filteredProposals
+
+	filteredVotes := make([]*model.Vote, 0, len(data.Votes))
+	for _, v := range data.Votes {
+		if survivingProposalIDs[v.ProposalID] {
+			filteredVotes = append(filteredVotes, v)
+		}
+	}
+	data.Votes = filteredVotes
+
+	filteredProposalDocs := make([]model.ProposalDocLink, 0, len(data.ProposalDocs))
+	for _, l := range data.ProposalDocs {
+		if survivingProposalIDs[l.ProposalID] && survivingDocIDs[l.DocID] {
+			filteredProposalDocs = append(filteredProposalDocs, l)
+		}
+	}
+	data.ProposalDocs = filteredProposalDocs
+
+	// Filter labels to only those referenced by remaining mappings.
+	usedLabelIDs := make(map[int]bool)
+	for _, m := range data.IssueLabelMappings {
+		usedLabelIDs[m.LabelID] = true
+	}
+	filteredLabels := make([]*model.Label, 0, len(data.Labels))
+	for _, l := range data.Labels {
+		if usedLabelIDs[l.ID] {
+			filteredLabels = append(filteredLabels, l)
+		}
+	}
+	data.Labels = filteredLabels
 }
 
 // filterIssues returns issues matching the given status and label filters.

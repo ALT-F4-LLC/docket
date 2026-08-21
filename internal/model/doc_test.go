@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestFormatDocID(t *testing.T) {
@@ -76,9 +78,7 @@ func TestDocRef_MarshalJSON(t *testing.T) {
 	}
 
 	data, err := json.Marshal(ref)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	want := `{"id":"DOC-3","type":"tdd","title":"Docket Doc CLI","status":"approved"}`
 	if string(data) != want {
@@ -117,9 +117,7 @@ func TestDocJSONRoundTrip(t *testing.T) {
 	}
 
 	data, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -165,9 +163,7 @@ func TestDocJSONFreeFormTypeAndStatus(t *testing.T) {
 	}
 
 	data, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var doc2 Doc
 	if err := json.Unmarshal(data, &doc2); err != nil {
@@ -191,9 +187,7 @@ func TestDocRevisionJSONRoundTrip(t *testing.T) {
 	}
 
 	data, err := json.Marshal(rev)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -235,9 +229,7 @@ func TestDocCommentJSONRoundTrip(t *testing.T) {
 	}
 
 	data, err := json.Marshal(comment)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -265,9 +257,7 @@ func TestDocCommentJSONRoundTrip(t *testing.T) {
 func TestDocIssueLinkJSON(t *testing.T) {
 	link := DocIssueLink{DocID: 42, IssueID: 12, CreatedAt: "2026-05-26T16:00:00Z"}
 	data, err := json.Marshal(link)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -295,9 +285,7 @@ func TestDocIssueLinkJSON(t *testing.T) {
 func TestProposalDocLinkJSON(t *testing.T) {
 	link := ProposalDocLink{ProposalID: 3, DocID: 42, CreatedAt: "2026-05-26T16:00:00Z"}
 	data, err := json.Marshal(link)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {

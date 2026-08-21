@@ -8,14 +8,14 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func writeTempFile(t *testing.T, size int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "body.txt")
-	if err := os.WriteFile(path, []byte(strings.Repeat("a", size)), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	err := os.WriteFile(path, []byte(strings.Repeat("a", size)), 0o600)
+	testsupport.Must(t, err, "WriteFile: %v", err)
 	return path
 }
 
@@ -23,9 +23,7 @@ func TestLoadDocBodyPathWithinCap(t *testing.T) {
 	path := writeTempFile(t, maxDocBodySize)
 
 	body, err := loadDocBody("@" + path)
-	if err != nil {
-		t.Fatalf("loadDocBody: unexpected error: %v", err)
-	}
+	testsupport.Must(t, err, "loadDocBody: unexpected error: %v", err)
 	if len(body) != maxDocBodySize {
 		t.Fatalf("loadDocBody: got %d bytes, want %d", len(body), maxDocBodySize)
 	}

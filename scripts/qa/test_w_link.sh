@@ -102,11 +102,7 @@ test_w_link() {
   assert_exit "W" "W16" 0
   local HAS_BLOCKED_BY
   HAS_BLOCKED_BY=$(echo "$CMD_STDOUT" | jq '[.data[] | select(.relation_type == "blocked_by")] | length' 2>/dev/null)
-  if [ "$HAS_BLOCKED_BY" -ge 1 ]; then
-    check "W" "W16_inverse" "PASS"
-  else
-    check "W" "W16_inverse" "FAIL" "expected 'blocked_by' in links for target issue"
-  fi
+  check_cond "W" "W16_inverse" "expected 'blocked_by' in links for target issue" [ "$HAS_BLOCKED_BY" -ge 1 ]
 
   # W17: Human mode shows "blocks"
   run issue link list "$LINK_SRC"
@@ -121,7 +117,9 @@ test_w_link() {
   run issue link list "$ISOLATED_ID" --json
   assert_exit "W" "W18" 0
   assert_json "W" "W18_ok" ".ok" "true"
-  assert_json "W" "W18_msg" ".message" "No relations found for DKT-$ISOLATED_ID"
+  # The empty-state message carries a second "Add one with: ..." hint line;
+  # assert on the first line so the hint text can evolve independently.
+  assert_json "W" "W18_msg" '(.message | split("\n")[0])' "No relations found for DKT-$ISOLATED_ID"
 
   # W18b: Links for non-existent issue returns exit 2
   run issue link list 9999 --json
@@ -150,20 +148,12 @@ test_w_link() {
   assert_exit "W" "W22" 0
   local REL_ADDED
   REL_ADDED=$(echo "$CMD_STDOUT" | jq '[.data.activity[] | select(.field_changed == "relation_added")] | length' 2>/dev/null)
-  if [ "$REL_ADDED" -ge 1 ]; then
-    check "W" "W22_activity" "PASS"
-  else
-    check "W" "W22_activity" "FAIL" "expected relation_added activity on source issue"
-  fi
+  check_cond "W" "W22_activity" "expected relation_added activity on source issue" [ "$REL_ADDED" -ge 1 ]
 
   # W23: Relations visible in show command
   run issue show "$LINK_SRC" --json
   assert_exit "W" "W23" 0
   local REL_COUNT
   REL_COUNT=$(echo "$CMD_STDOUT" | jq '.data.relations | length' 2>/dev/null)
-  if [ "$REL_COUNT" -ge 1 ]; then
-    check "W" "W23_show" "PASS"
-  else
-    check "W" "W23_show" "FAIL" "expected relations in show output"
-  fi
+  check_cond "W" "W23_show" "expected relations in show output" [ "$REL_COUNT" -ge 1 ]
 }

@@ -54,11 +54,15 @@ printf "=== Docket QA Test Suite ===\n\n"
 
 if [ -z "$DOCKET" ]; then
   printf "Building docket...\n"
-  if ! go build -o /tmp/docket-qa-bin ./cmd/docket; then
+  # Under TMPDIR, not a hardcoded /tmp: a TMPDIR-confined environment denies
+  # writes to /tmp, and this is the suite's FIRST write — the whole run aborts
+  # here rather than failing one check. Same reason as qa_mktemp in helpers.sh.
+  QA_BIN="${TMPDIR:-/tmp}/docket-qa-bin"
+  if ! go build -o "$QA_BIN" ./cmd/docket; then
     printf "FATAL: build failed\n"
     exit 1
   fi
-  DOCKET="/tmp/docket-qa-bin"
+  DOCKET="$QA_BIN"
   printf "Built: %s\n\n" "$DOCKET"
 else
   printf "Using binary: %s\n\n" "$DOCKET"
@@ -67,6 +71,12 @@ fi
 # Verify jq is available.
 if ! command -v jq &>/dev/null; then
   printf "FATAL: jq is required but not found in PATH\n"
+  exit 1
+fi
+
+# Section ZE inspects the schema of the v4 fixture directly.
+if ! command -v sqlite3 &>/dev/null; then
+  printf "FATAL: sqlite3 is required but not found in PATH\n"
   exit 1
 fi
 
@@ -104,6 +114,19 @@ SECTIONS=(
   ZA:test_za_stats
   ZB:test_zb_board
   ZC:test_zc_export_import
+  ZD:test_zd_jsonv2
+  ZE:test_ze_cas_migration
+  ZF:test_zf_claims
+  ZG:test_zg_workflow
+  ZH:test_zh_stranger
+  ZI:test_zi_budget
+  ZJ:test_zj_dispatch
+  ZK:test_zk_zerotouch
+  ZL:test_zl_tail
+  ZM:test_zm_metadata
+  ZN:test_zn_packet
+  ZO:test_zo_backfill
+  ZP:test_zp_fail_metadata
 )
 
 REACHED_TARGET=false
@@ -145,6 +168,63 @@ done
 if [ -n "$SECTION" ] && [ "$SECTION" != "A" ] && [ "$REACHED_TARGET" = false ]; then
   printf "FATAL: unknown section '%s'\n" "$SECTION"
   exit 1
+fi
+
+# --- Standing gates ----------------------------------------------------------
+#
+# The genericity rule (docs/design/genericity.md, CLAUDE.md's PR bar) runs on
+# every push rather than depending on a reviewer's memory — the same discipline
+# as the --token-flag guard test (docs/tdd/engine-spine.md §9). It scans core
+# surface only, and is skipped when a single section was requested, since it is
+# a whole-repo check rather than a section's.
+#
+# copy-verify, render-verify, and the CI-wiring gate-baseref-regression /
+# gate-coverage-check run here for the same reason: each is a whole-repo,
+# diff-independent check, not a section's.
+#
+# ONE BLOCK SHAPE, defined once as `run_gate` in qa/helpers.sh. This
+# section used to hold five copies of the same twelve lines, which had already
+# drifted in three dimensions — the failure anchor, the temp-file idiom, and
+# whether the output file honored TMPDIR at all. That drift was not cosmetic:
+# it is what made a real render-verify failure report a benign `no test` line
+# as its reason. Anything that varies legitimately between gates is a
+# PARAMETER below, so a sixth gate cannot reintroduce the same divergence.
+
+if [ -z "$SECTION" ]; then
+  # The failure anchor is per-gate because the gates genuinely print failures
+  # differently; everything else about the block is shared.
+  run_gate "GEN" "GEN_core_surface" "Genericity gate" \
+    "genericity.sh" '^FAIL'
+
+  # copy-verify and render-verify (design-qa's gates) are also whole-repo,
+  # diff-independent checks — same shape as genericity, so they run here too
+  # rather than depending on a ui-change run to exercise them: neither needs
+  # run/step identity or a specific workflow step, and both already run
+  # standalone.
+  #
+  # copy-verify's own diagnostics are the indented lines that follow the
+  # offending grep hit; its trailing `copy-verify FAILED.` banner is a summary
+  # that names nothing. The anchor targets the diagnostics so the report says
+  # WHICH discipline broke, not merely that the gate failed.
+  run_gate "CV" "CV_copy_discipline" "copy-verify gate" \
+    "copy-verify.sh" 'blame the reader|placeholder|differs from|MISSING'
+
+  # render-verify prints benign `  no test ...` observations BEFORE any
+  # `  MISSING`, so its anchor must name the failure marker rather than "the
+  # first indented line that is not ok" — the extraction that reported the
+  # wrong file and the wrong reason.
+  run_gate "RV" "RV_render_coverage" "render-verify gate" \
+    "render-verify.sh" 'MISSING|raw ANSI escape'
+
+  # gate-baseref-regression and gate-coverage-check pin the CI wiring
+  # itself (findings C1/C2/C5 and C3): the former runs the base-ref mode of
+  # secret-scan.sh/self-hygiene.sh through their real entry points, the
+  # latter checks ci.yaml's GATE COVERAGE block against the actual directory.
+  run_gate "BR" "BR_baseref_mode" "gate-baseref-regression" \
+    "gate-baseref-regression.sh" 'FAIL'
+
+  run_gate "GC" "GC_ci_coverage_block" "gate-coverage-check" \
+    "gate-coverage-check.sh" 'FAIL'
 fi
 
 # --- Report ------------------------------------------------------------------

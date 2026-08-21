@@ -1,0 +1,20 @@
+{
+  "why": "the shape §4.2 pins: an array of objects, one property declaring an ordered enum",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "risk": {
+          "type": "string",
+          "enum": ["info", "low", "medium", "high", "blocker"],
+          "ordered_enum": true
+        }
+      },
+      "required": ["risk"]
+    }
+  },
+  "document": [{"risk": "low"}, {"risk": "blocker"}],
+  "valid": true
+}

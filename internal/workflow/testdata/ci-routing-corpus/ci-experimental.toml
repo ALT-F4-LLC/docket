@@ -1,0 +1,12 @@
+# CI-only routing-sweep fixture — see README.md in this directory.
+#
+# Yields to ci-urgent, ci-security-review, ci-breaking-change, and ci-infra.
+
+[pipeline]
+name        = "ci-experimental-change"
+version     = 1
+description = "Routing-sweep fixture: fifth-precedence lane, triggered by ci-experimental."
+
+[match]
+labels_any    = ["ci-experimental"]
+unless_labels = ["ci-urgent", "ci-security-review", "ci-breaking-change", "ci-infra"]

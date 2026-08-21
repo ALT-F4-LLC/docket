@@ -15,18 +15,41 @@ import (
 type Writer struct {
 	JSONMode  bool
 	QuietMode bool
-	Stdout    io.Writer
-	Stderr    io.Writer
+	// JSONVersion selects the envelope shape when JSONMode is true. The zero
+	// value (JSONNone) is treated as JSONV1 so a Writer built by older code —
+	// or in a test — keeps emitting exactly the v1 envelope.
+	JSONVersion JSONVersion
+	Stdout      io.Writer
+	Stderr      io.Writer
 }
 
 // New creates a Writer configured by the given mode flags.
 // Data output goes to os.Stdout; diagnostics go to os.Stderr.
 func New(jsonMode, quietMode bool) *Writer {
+	return NewWithVersion(NormalizeJSONVersion(jsonMode, JSONNone), quietMode)
+}
+
+// NormalizeJSONVersion resolves the version a caller gets when it may declare
+// only the legacy jsonMode bool, an explicit version, or (like RunWatch) both:
+// JSONNone becomes JSONV1 whenever jsonMode is set, and any version already
+// given passes through unchanged. New keys off it so a caller that mixes the
+// bool with an explicit version can never see the two disagree.
+func NormalizeJSONVersion(jsonMode bool, version JSONVersion) JSONVersion {
+	if jsonMode && version == JSONNone {
+		return JSONV1
+	}
+	return version
+}
+
+// NewWithVersion creates a Writer for an explicit JSON envelope version.
+// JSONNone selects human-readable output.
+func NewWithVersion(version JSONVersion, quietMode bool) *Writer {
 	return &Writer{
-		JSONMode:  jsonMode,
-		QuietMode: quietMode,
-		Stdout:    os.Stdout,
-		Stderr:    os.Stderr,
+		JSONMode:    version != JSONNone,
+		QuietMode:   quietMode,
+		JSONVersion: version,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
 	}
 }
 
@@ -35,7 +58,11 @@ func New(jsonMode, quietMode bool) *Writer {
 // Stdout.
 func (w *Writer) Success(data any, message string) {
 	if w.JSONMode {
-		writeJSONSuccess(w.Stdout, data, message)
+		if w.JSONVersion == JSONV2 {
+			writeJSONSuccessV2(w.Stdout, data, message)
+		} else {
+			writeJSONSuccess(w.Stdout, data, message)
+		}
 		return
 	}
 	writeHumanSuccess(w.Stdout, message)

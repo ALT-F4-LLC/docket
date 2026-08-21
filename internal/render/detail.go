@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	humanize "github.com/dustin/go-humanize"
 
@@ -12,11 +13,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// RenderDetail renders a full issue detail view including metadata, description,
+// RenderDetail renders a full issue detail view including metadata, the run
+// disposition (when a run abandoned its work on the issue), description,
 // sub-issues, relations, linked proposals, comments, and recent activity.
-func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, linkedProposals []model.Proposal, comments []*model.Comment, activity []model.Activity) string {
+//
+// disposition is nil on every issue no run ever abandoned, which is nearly all
+// of them; the section then does not appear at all.
+func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, linkedProposals []model.Proposal, comments []*model.Comment, activity []model.Activity, disposition *model.IssueRunDisposition) string {
 	if !ColorsEnabled() {
-		return renderPlainDetail(issue, subIssues, relations, linkedProposals, comments, activity)
+		return renderPlainDetail(issue, subIssues, relations, linkedProposals, comments, activity, disposition)
 	}
 
 	var sections []string
@@ -26,6 +31,17 @@ func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []mode
 
 	// Metadata
 	sections = append(sections, renderMetadata(issue))
+
+	// The run disposition, ABOVE the description and everything under it
+	// (DKT-404). A reader who stops at the top of this view is exactly the
+	// reader who misreads a frozen `todo` or `review` as still-pending work,
+	// so the fact that a run gave up on the issue sits with the metadata that
+	// frames it — not below a description, a sub-issue tree and a comment
+	// thread, where the trail comment the abandon already dropped was being
+	// missed.
+	if disposition != nil {
+		sections = append(sections, renderRunDisposition(disposition))
+	}
 
 	// Files
 	if len(issue.Files) > 0 {
@@ -81,11 +97,24 @@ func renderHeader(issue *model.Issue) string {
 		Foreground(ColorFromName(issue.Priority.Color())).
 		Bold(true)
 
+	// The detail view keeps the real status AND the resolution, side by side.
+	// The listing's status column has room for one, so there the resolution
+	// wins; here nothing has to be dropped, and an operator triaging an
+	// abandoned issue needs both — what the run left it at, and that the run
+	// gave up on it (DKT-245).
+	status := statusStyle.Render(statusLabel(issue.Status))
+	if issue.Resolution != "" {
+		resolutionStyle := lipgloss.NewStyle().
+			Foreground(ColorFromName("red")).
+			Bold(true)
+		status += "  " + resolutionStyle.Render("⊘ "+issue.Resolution)
+	}
+
 	return fmt.Sprintf("%s %s  %s\n%s  %s",
 		kindStyle.Render(issue.Kind.Icon()),
 		idStyle.Render(model.FormatID(issue.ID)),
 		titleStyle.Render(issue.Title),
-		statusStyle.Render(statusLabel(issue.Status)),
+		status,
 		priorityStyle.Render(fmt.Sprintf("%s %s", issue.Priority.Icon(), string(issue.Priority))),
 	)
 }
@@ -113,6 +142,64 @@ func renderMetadata(issue *model.Issue) string {
 	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Created:"), humanize.Time(issue.CreatedAt)))
 	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Updated:"), humanize.Time(issue.UpdatedAt)))
 
+	return strings.Join(lines, "\n")
+}
+
+// RunDispositionHeading is the section title both detail renderers use, and the
+// string a reader (or a test) looks for to decide whether a run ever stopped
+// working an issue.
+const RunDispositionHeading = "Run disposition"
+
+// runDispositionHeadline is the one-line ruling: what happened, which run
+// decided it, which step's routing carried it when one did, and when.
+//
+// The DATE, not a relative time, and not the issue's `updated_at`: the point of
+// the line is provenance a reader can carry to `run report RUN-14` or `events
+// list`, and "3 weeks ago" is not a key into either. It is also stable output,
+// which humanize.Time is not.
+func runDispositionHeadline(d *model.IssueRunDisposition) string {
+	headline := fmt.Sprintf("work %s in %s", d.Disposition, model.FormatRunID(d.RunID))
+	// `run abandon --issue` is an operator acting from OUTSIDE the graph, and
+	// no step decided it. Naming one would be a fabrication, so the clause is
+	// simply absent.
+	if d.By != "" {
+		headline += " by " + d.By
+	}
+	return fmt.Sprintf("%s (%s)", headline,
+		time.UnixMilli(d.AtMS).UTC().Format(time.DateOnly))
+}
+
+// runDispositionReasonLines is the recorded ruling, VERBATIM and unabridged,
+// one output line per input line.
+//
+// Not truncated: this is the whole reason the section exists. `issue show` is
+// the surface a reader lands on when they want to know why an issue stopped,
+// and a head that cut an operator's ruling mid-sentence would send them back to
+// `events list` — the exact trip DKT-404 is closing.
+func runDispositionReasonLines(reason string) []string {
+	reason = strings.TrimRight(reason, "\n")
+	if strings.TrimSpace(reason) == "" {
+		return nil
+	}
+	return strings.Split(reason, "\n")
+}
+
+func renderRunDisposition(d *model.IssueRunDisposition) string {
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	markerStyle := lipgloss.NewStyle().Foreground(ColorFromName("red")).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	lines := []string{
+		sectionStyle.Render(RunDispositionHeading),
+		"  " + markerStyle.Render("⊘ "+runDispositionHeadline(d)),
+	}
+	for i, line := range runDispositionReasonLines(d.Reason) {
+		if i == 0 {
+			lines = append(lines, "    "+dimStyle.Render("reason: ")+line)
+			continue
+		}
+		lines = append(lines, "    "+line)
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -230,7 +317,7 @@ func formatSubIssueNode(issue *model.Issue) string {
 	kindStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Kind.Color()))
 
 	return fmt.Sprintf("%s %s %s %s %s",
-		statusStyle.Render(statusLabel(issue.Status)),
+		statusStyle.Render(issueStatusLabel(issue)),
 		priorityStyle.Render(issue.Priority.Icon()),
 		kindStyle.Render(issue.Kind.Icon()),
 		model.FormatID(issue.ID),
@@ -321,12 +408,26 @@ func RenderCommentList(comments []*model.Comment) string {
 	return renderComments(comments)
 }
 
-func renderComments(comments []*model.Comment) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
-	authorStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+// commentStyles holds the lipgloss styles shared by every rendered comment
+// section (issue comments and doc comments alike).
+type commentStyles struct {
+	author lipgloss.Style
+	time   lipgloss.Style
+}
 
-	header := sectionStyle.Render("Comments")
+// commentSectionHeader returns the styled "Comments" header and the styles
+// used to render each entry beneath it.
+func commentSectionHeader() (string, commentStyles) {
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	styles := commentStyles{
+		author: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
+		time:   lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	}
+	return sectionStyle.Render("Comments"), styles
+}
+
+func renderComments(comments []*model.Comment) string {
+	header, styles := commentSectionHeader()
 
 	var parts []string
 	for _, c := range comments {
@@ -336,8 +437,8 @@ func renderComments(comments []*model.Comment) string {
 		}
 
 		commentHeader := fmt.Sprintf("%s  %s",
-			authorStyle.Render(c.AuthorOrAnonymous()),
-			timeStyle.Render(humanize.Time(c.CreatedAt)),
+			styles.author.Render(c.AuthorOrAnonymous()),
+			styles.time.Render(humanize.Time(c.CreatedAt)),
 		)
 
 		parts = append(parts, commentHeader+"\n"+body)
@@ -395,12 +496,21 @@ func renderActivity(activity []model.Activity) string {
 }
 
 // renderPlainDetail renders a detail view without any color or styling.
-func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, linkedProposals []model.Proposal, comments []*model.Comment, activity []model.Activity) string {
+func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations []model.Relation, linkedProposals []model.Proposal, comments []*model.Comment, activity []model.Activity, disposition *model.IssueRunDisposition) string {
 	var b strings.Builder
 
 	// Header
 	fmt.Fprintf(&b, "%s %s  %s\n", issue.Kind.Icon(), model.FormatID(issue.ID), issue.Title)
-	fmt.Fprintf(&b, "%s  %s %s\n", statusLabel(issue.Status), issue.Priority.Icon(), string(issue.Priority))
+	// The resolution rides beside the status HERE TOO (DKT-245 said `issue
+	// show` prints both; only the styled renderer did). NO_COLOR is what every
+	// piped reader gets — CI, an agent's `docket issue show` — so the surface
+	// that dropped the "⊘ abandoned" marker was the one read by the readers
+	// DKT-404 caught misreading these issues as pending.
+	status := statusLabel(issue.Status)
+	if issue.Resolution != "" {
+		status += "  ⊘ " + issue.Resolution
+	}
+	fmt.Fprintf(&b, "%s  %s %s\n", status, issue.Priority.Icon(), string(issue.Priority))
 
 	// Metadata
 	b.WriteString("\n")
@@ -416,6 +526,19 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	}
 	fmt.Fprintf(&b, "Created: %s\n", humanize.Time(issue.CreatedAt))
 	fmt.Fprintf(&b, "Updated: %s\n", humanize.Time(issue.UpdatedAt))
+
+	// Run disposition (DKT-404), in the same place the styled view puts it.
+	if disposition != nil {
+		fmt.Fprintf(&b, "\n%s\n", RunDispositionHeading)
+		fmt.Fprintf(&b, "  %s\n", runDispositionHeadline(disposition))
+		for i, line := range runDispositionReasonLines(disposition.Reason) {
+			if i == 0 {
+				fmt.Fprintf(&b, "    reason: %s\n", line)
+				continue
+			}
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+	}
 
 	// Files
 	if len(issue.Files) > 0 {

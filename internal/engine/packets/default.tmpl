@@ -1,0 +1,56 @@
+== STEP {{.Step.Step}} {{.Step.Instance}}
+run:    {{.Step.Run}}
+issue:  {{.Issue.ID}}  {{.Issue.Title}}
+kind:   {{.Step.Kind}}
+{{- if .Step.Executor}}
+target: {{.Step.Executor}}
+{{- end}}
+{{- if .Issue.Scope}}
+scope:  {{range $i, $g := .Issue.Scope}}{{if $i}}, {{end}}{{$g}}{{end}}
+{{- end}}
+attempt: {{.Step.Attempt}}
+{{- if .TargetSHA}}
+target_sha: {{.TargetSHA}}
+{{- end}}
+{{- if .TargetWorktree}}
+target_worktree: {{.TargetWorktree}}
+{{- end}}
+
+== REQUEST
+{{.Issue.BodySnapshot}}
+{{range .Files}}
+== FILE {{.Path}}  {{.SHA256}}
+{{.Body}}
+{{- end}}
+{{range .Inputs}}
+== INPUT {{.Kind}}{{if .ProducerStep}} from {{.ProducerStep}}{{end}}
+{{.Body}}
+{{- if .Payload}}
+== INPUT PAYLOAD {{.Kind}}{{if .ProducerStep}} from {{.ProducerStep}}{{end}}
+{{.Payload}}
+{{- end}}
+{{- end}}
+{{- if .Resolution}}
+
+== RESOLUTION {{.Resolution.Routing}}
+{{- if .Resolution.Note}}
+{{.Resolution.Note}}
+{{- else}}
+(no note was recorded with this routing)
+{{- end}}
+{{- end}}
+{{if .Pins}}
+== PINNED
+{{- range .Pins}}
+{{.Path}}  {{.SHA256}}
+{{- end}}
+{{end}}
+== OUTPUT
+{{- if .Emits}}
+Record an artifact of kind: {{.Emits}}
+{{- else}}
+This step records no artifact.
+{{- end}}
+{{- if .PayloadSchema}}
+Its payload must satisfy the schema: {{.PayloadSchema}}
+{{- end}}

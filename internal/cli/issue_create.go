@@ -31,7 +31,7 @@ var createCmd = &cobra.Command{
 		fileFlag, _ := cmd.Flags().GetStringSlice("file")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		parent, _ := cmd.Flags().GetString("parent")
-		jsonMode, _ := cmd.Flags().GetBool("json")
+		jsonMode, _ := jsonModeOf(cmd)
 
 		// If JSON mode and no title, return validation error.
 		if jsonMode && title == "" {
@@ -152,24 +152,19 @@ var createCmd = &cobra.Command{
 			return cmdErr(err, output.ErrValidation)
 		}
 
-		// Handle parent ID.
+		// Handle parent ID. The parent must exist AND live in the project this
+		// issue is being created in (DKT-22) — resolveParentIssue enforces both.
 		var parentID *int
 		if parent != "" {
-			pid, err := model.ParseID(parent)
+			parentIssue, err := resolveParentIssue(conn, parent, getProjectID(cmd))
 			if err != nil {
-				return cmdErr(fmt.Errorf("invalid parent ID: %w", err), output.ErrValidation)
+				return err
 			}
-			// Verify parent exists.
-			if _, err := db.GetIssue(conn, pid); err != nil {
-				if errors.Is(err, db.ErrNotFound) {
-					return cmdErr(fmt.Errorf("parent issue %s not found", parent), output.ErrNotFound)
-				}
-				return cmdErr(fmt.Errorf("checking parent issue: %w", err), output.ErrGeneral)
-			}
-			parentID = &pid
+			parentID = &parentIssue.ID
 		}
 
 		issue := model.Issue{
+			ProjectID:   getProjectID(cmd),
 			ParentID:    parentID,
 			Title:       title,
 			Description: description,
@@ -179,9 +174,22 @@ var createCmd = &cobra.Command{
 			Assignee:    assignee,
 		}
 
-		id, err := db.CreateIssue(conn, &issue, labelFlag, fileFlag)
+		idempotencyKey, err := idempotencyKeyOf(cmd)
+		if err != nil {
+			return err
+		}
+
+		id, err := db.CreateIssueIdempotent(conn, &issue, labelFlag, fileFlag, idempotencyKey)
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
+		}
+
+		// Scope is written after the insert rather than through CreateIssue,
+		// so the create path an unmodified `issue create` takes is unchanged:
+		// a repo that never declares a scope executes exactly the v6 code and
+		// leaves scope_globs NULL (§3 phase-2 dormancy).
+		if err := applyScope(cmd, conn, id); err != nil {
+			return err
 		}
 
 		// Refetch to get full object with timestamps.
@@ -190,7 +198,12 @@ var createCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching created issue: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(created, fmt.Sprintf("Created %s: %s", model.FormatID(id), created.Title))
+		// Echo back what was actually linked, not a bare issues row (DKT-240).
+		if err := hydrateIssueAssociations(conn, created); err != nil {
+			return err
+		}
+
+		w.Success(withIssueVersion(created), fmt.Sprintf("Created %s: %s", model.FormatID(id), created.Title))
 
 		return nil
 	},
@@ -206,5 +219,7 @@ func init() {
 	createCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable)")
 	createCmd.Flags().StringP("assignee", "a", "", "Issue assignee")
 	createCmd.Flags().String("parent", "", "Parent issue ID")
+	addScopeFlag(createCmd)
+	addIdempotencyKeyFlag(createCmd)
 	issueCmd.AddCommand(createCmd)
 }

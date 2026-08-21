@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
@@ -20,6 +21,18 @@ var initCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		cfg := getCfg(cmd)
+
+		// --local opts out of the shared store: it creates (or adopts) a
+		// repo-resident `.docket` in the current directory, the pre-global
+		// layout. Resolution prefers an existing local store over the global
+		// one, so subsequent commands find it without any flag.
+		if local, _ := cmd.Flags().GetBool("local"); local {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return cmdErr(fmt.Errorf("resolving the working directory: %w", err), output.ErrGeneral)
+			}
+			cfg = config.LocalAt(cwd)
+		}
 
 		exists, err := cfg.Exists()
 		if err != nil {
@@ -99,12 +112,19 @@ var initCmd = &cobra.Command{
 		}, successMsg)
 
 		w.Info("Database created at %s", cfg.DBPath)
-		w.Info("Consider adding .docket/ to your .gitignore")
+		switch cfg.Source {
+		case config.SourceGlobal:
+			w.Info("This is the shared per-user store; every project resolves here unless a repo-local .docket or DOCKET_PATH says otherwise")
+		default:
+			w.Info("Consider adding .docket/ to your .gitignore")
+		}
 
 		return nil
 	},
 }
 
 func init() {
+	initCmd.Flags().Bool("local", false,
+		"Create a repo-local .docket store in the current directory instead of the shared ~/.docket store")
 	rootCmd.AddCommand(initCmd)
 }

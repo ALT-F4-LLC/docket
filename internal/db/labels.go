@@ -16,10 +16,10 @@ var ErrNotAttached = errors.New("label not attached")
 // an existing label already has.
 var ErrLabelColorConflict = errors.New("label color conflict")
 
-// GetLabelByName retrieves a label by its unique name, including the count of
-// issues currently attached to it. Returns ErrNotFound if no label with that
-// name exists.
-func GetLabelByName(db *sql.DB, name string) (*model.LabelWithCount, error) {
+// GetLabelByName retrieves a label by name WITHIN ONE PROJECT, including the
+// count of issues currently attached to it. Returns ErrNotFound if no label
+// with that name exists in the project.
+func GetLabelByName(db *sql.DB, projectID int, name string) (*model.LabelWithCount, error) {
 	var lc model.LabelWithCount
 	var color sql.NullString
 
@@ -27,8 +27,8 @@ func GetLabelByName(db *sql.DB, name string) (*model.LabelWithCount, error) {
 		`SELECT l.id, l.name, l.color, COUNT(il.issue_id) AS issue_count
 		 FROM labels l
 		 LEFT JOIN issue_labels il ON il.label_id = l.id
-		 WHERE l.name = ?
-		 GROUP BY l.id`, name,
+		 WHERE l.project_id = ? AND l.name = ?
+		 GROUP BY l.id`, projectOrDefault(projectID), name,
 	).Scan(&lc.ID, &lc.Name, &color, &lc.IssueCount)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -41,33 +41,37 @@ func GetLabelByName(db *sql.DB, name string) (*model.LabelWithCount, error) {
 	return &lc, nil
 }
 
-// ListAllLabels returns every label along with the count of issues using it,
-// sorted alphabetically by name.
-func ListAllLabels(db *sql.DB) ([]*model.LabelWithCount, error) {
+// ListAllLabels returns a project's labels along with the count of issues
+// using each, sorted alphabetically by name. A zero projectID lists every
+// project's labels.
+func ListAllLabels(db *sql.DB, projectID int) ([]*model.LabelWithCount, error) {
+	where, args := "", []any{}
+	if projectID != 0 {
+		where = "WHERE l.project_id = ?"
+		args = append(args, projectID)
+	}
 	rows, err := db.Query(
 		`SELECT l.id, l.name, l.color, COUNT(il.issue_id) AS issue_count
 		 FROM labels l
 		 LEFT JOIN issue_labels il ON il.label_id = l.id
+		 `+where+`
 		 GROUP BY l.id
-		 ORDER BY l.name`,
+		 ORDER BY l.name`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying labels: %w", err)
 	}
-	defer rows.Close()
-
-	var labels []*model.LabelWithCount
-	for rows.Next() {
+	labels, err := scanRows(rows, "label rows", func(r *sql.Rows) (*model.LabelWithCount, error) {
 		var lc model.LabelWithCount
 		var color sql.NullString
-		if err := rows.Scan(&lc.ID, &lc.Name, &color, &lc.IssueCount); err != nil {
+		if err := r.Scan(&lc.ID, &lc.Name, &color, &lc.IssueCount); err != nil {
 			return nil, fmt.Errorf("scanning label: %w", err)
 		}
 		lc.Color = color.String
-		labels = append(labels, &lc)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating label rows: %w", err)
+		return &lc, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return labels, nil
@@ -75,27 +79,25 @@ func ListAllLabels(db *sql.DB) ([]*model.LabelWithCount, error) {
 
 // ListAllLabelsRaw returns every label as a model.Label object (without issue
 // counts), sorted alphabetically by name.
-func ListAllLabelsRaw(db *sql.DB) ([]*model.Label, error) {
+func ListAllLabelsRaw(db *sql.DB, projectID int) ([]*model.Label, error) {
+	where, args := projectFilter(projectID, "WHERE")
 	rows, err := db.Query(
-		`SELECT id, name, color FROM labels ORDER BY name`,
+		`SELECT id, name, color FROM labels `+where+` ORDER BY name`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all labels: %w", err)
 	}
-	defer rows.Close()
-
-	var labels []*model.Label
-	for rows.Next() {
+	labels, err := scanRows(rows, "label rows", func(r *sql.Rows) (*model.Label, error) {
 		var l model.Label
 		var color sql.NullString
-		if err := rows.Scan(&l.ID, &l.Name, &color); err != nil {
+		if err := r.Scan(&l.ID, &l.Name, &color); err != nil {
 			return nil, fmt.Errorf("scanning label: %w", err)
 		}
 		l.Color = color.String
-		labels = append(labels, &l)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating label rows: %w", err)
+		return &l, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return labels, nil
@@ -103,25 +105,23 @@ func ListAllLabelsRaw(db *sql.DB) ([]*model.Label, error) {
 
 // ListAllIssueLabelMappings returns all (issue_id, label_id) pairs from the
 // issue_labels table.
-func ListAllIssueLabelMappings(db *sql.DB) ([]model.IssueLabelMapping, error) {
+func ListAllIssueLabelMappings(db *sql.DB, projectID int) ([]model.IssueLabelMapping, error) {
+	where, args := projectFilterVia(projectID, `issue_id IN (SELECT id FROM issues WHERE project_id = ?)`)
 	rows, err := db.Query(
-		`SELECT issue_id, label_id FROM issue_labels ORDER BY issue_id, label_id`,
+		`SELECT issue_id, label_id FROM issue_labels `+where+` ORDER BY issue_id, label_id`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying issue-label mappings: %w", err)
 	}
-	defer rows.Close()
-
-	var mappings []model.IssueLabelMapping
-	for rows.Next() {
+	mappings, err := scanRows(rows, "issue-label mappings", func(r *sql.Rows) (model.IssueLabelMapping, error) {
 		var m model.IssueLabelMapping
-		if err := rows.Scan(&m.IssueID, &m.LabelID); err != nil {
-			return nil, fmt.Errorf("scanning issue-label mapping: %w", err)
+		if err := r.Scan(&m.IssueID, &m.LabelID); err != nil {
+			return m, fmt.Errorf("scanning issue-label mapping: %w", err)
 		}
-		mappings = append(mappings, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating issue-label mappings: %w", err)
+		return m, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return mappings, nil
@@ -136,8 +136,9 @@ func InsertLabelWithID(tx *sql.Tx, label *model.Label) (bool, error) {
 		colorVal = label.Color
 	}
 	res, err := tx.Exec(
-		`INSERT OR IGNORE INTO labels (id, name, color) VALUES (?, ?, ?)`,
+		`INSERT OR IGNORE INTO labels (id, project_id, name, color) VALUES (?, ?, ?, ?)`,
 		label.ID,
+		projectOrDefault(label.ProjectID),
 		label.Name,
 		colorVal,
 	)
@@ -178,20 +179,16 @@ func DeleteLabel(db *sql.DB, labelID int, name, author string) ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying attached issues: %w", err)
 	}
-	defer rows.Close()
-
-	var issueIDs []int
-	for rows.Next() {
+	issueIDs, err := scanRows(rows, "issue ids", func(r *sql.Rows) (int, error) {
 		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scanning issue id: %w", err)
+		if err := r.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scanning issue id: %w", err)
 		}
-		issueIDs = append(issueIDs, id)
+		return id, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating issue ids: %w", err)
-	}
-	rows.Close()
 
 	// Record activity for each affected issue before CASCADE deletes the links.
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -234,27 +231,32 @@ func AddLabelsToIssue(db *sql.DB, issueID int, labelNames []string, color string
 	}
 	defer tx.Rollback()
 
-	// Verify the issue exists.
-	var exists bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)`, issueID).Scan(&exists); err != nil {
-		return fmt.Errorf("checking issue existence: %w", err)
-	}
-	if !exists {
+	// Verify the issue exists, and learn its project: labels are a
+	// per-project namespace, and the ISSUE's project — not any ambient one —
+	// is where its labels live.
+	var issueProject int
+	err = tx.QueryRow(`SELECT project_id FROM issues WHERE id = ?`, issueID).Scan(&issueProject)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("checking issue existence: %w", err)
 	}
 
 	var anyAdded bool
 	for _, labelName := range labelNames {
-		// Find or create the label.
+		// Find or create the label, in the issue's project.
 		var labelID int
 		var existingColor sql.NullString
-		err = tx.QueryRow(`SELECT id, color FROM labels WHERE name = ?`, labelName).Scan(&labelID, &existingColor)
+		err = tx.QueryRow(`SELECT id, color FROM labels WHERE project_id = ? AND name = ?`,
+			issueProject, labelName).Scan(&labelID, &existingColor)
 		if errors.Is(err, sql.ErrNoRows) {
 			var colorVal any
 			if color != "" {
 				colorVal = color
 			}
-			res, err := tx.Exec(`INSERT INTO labels (name, color) VALUES (?, ?)`, labelName, colorVal)
+			res, err := tx.Exec(`INSERT INTO labels (project_id, name, color) VALUES (?, ?, ?)`,
+				issueProject, labelName, colorVal)
 			if err != nil {
 				return fmt.Errorf("inserting label: %w", err)
 			}
@@ -324,19 +326,22 @@ func RemoveLabelsFromIssue(db *sql.DB, issueID int, labelNames []string, author 
 	}
 	defer tx.Rollback()
 
-	// Verify the issue exists.
-	var exists bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)`, issueID).Scan(&exists); err != nil {
-		return fmt.Errorf("checking issue existence: %w", err)
-	}
-	if !exists {
+	// Verify the issue exists, and learn its project — the namespace its
+	// labels resolve in.
+	var issueProject int
+	err = tx.QueryRow(`SELECT project_id FROM issues WHERE id = ?`, issueID).Scan(&issueProject)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("checking issue existence: %w", err)
 	}
 
 	for _, labelName := range labelNames {
-		// Find the label.
+		// Find the label, in the issue's project.
 		var labelID int
-		err = tx.QueryRow(`SELECT id FROM labels WHERE name = ?`, labelName).Scan(&labelID)
+		err = tx.QueryRow(`SELECT id FROM labels WHERE project_id = ? AND name = ?`,
+			issueProject, labelName).Scan(&labelID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
@@ -388,20 +393,17 @@ func GetIssueLabelObjects(db *sql.DB, issueID int) ([]*model.Label, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying issue labels: %w", err)
 	}
-	defer rows.Close()
-
-	var labels []*model.Label
-	for rows.Next() {
+	labels, err := scanRows(rows, "label rows", func(r *sql.Rows) (*model.Label, error) {
 		var l model.Label
 		var color sql.NullString
-		if err := rows.Scan(&l.ID, &l.Name, &color); err != nil {
+		if err := r.Scan(&l.ID, &l.Name, &color); err != nil {
 			return nil, fmt.Errorf("scanning label: %w", err)
 		}
 		l.Color = color.String
-		labels = append(labels, &l)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating label rows: %w", err)
+		return &l, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return labels, nil

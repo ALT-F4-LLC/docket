@@ -40,6 +40,9 @@ test_u_comments() {
   run issue comment list "$NO_COMMENT_ID" --json
   assert_exit "U" "U7" 0
   assert_json "U" "U7_empty" ".data | length" "0"
+  # length == 0 alone would also accept `null` — pin the shape too, not just
+  # the count, so a nil-slice regression is caught.
+  assert_json "U" "U7_type" ".data | type" "array"
 
   # U8: show command includes real comments from DB
   run issue show 1 --json

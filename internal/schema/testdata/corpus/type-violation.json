@@ -1,0 +1,14 @@
+{
+  "why": "a declared type is enforced, and the path names the element rather than the payload",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {"count": {"type": "integer"}}
+    }
+  },
+  "document": [{"count": "seven"}],
+  "valid": false,
+  "message_contains": "payload[0].count:"
+}

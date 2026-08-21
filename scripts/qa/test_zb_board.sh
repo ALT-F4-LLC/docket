@@ -15,11 +15,7 @@ test_zb_board() {
   # ZB3: Exactly 5 columns (one per status).
   local COL_COUNT
   COL_COUNT=$(echo "$CMD_STDOUT" | jq '.data.columns | length' 2>/dev/null)
-  if [ "$COL_COUNT" -eq 5 ]; then
-    check "ZB" "ZB3_count" "PASS"
-  else
-    check "ZB" "ZB3_count" "FAIL" "expected 5 columns, got $COL_COUNT"
-  fi
+  check_cond "ZB" "ZB3_count" "expected 5 columns, got $COL_COUNT" [ "$COL_COUNT" -eq 5 ]
 
   # ZB4: Each column has status, count, and issues fields.
   assert_json_all "ZB" "ZB4_status" ".data.columns" '.status != null'
@@ -36,20 +32,12 @@ test_zb_board() {
   # ZB6: At least one column has issues (from prior test sections).
   local TOTAL_ISSUES
   TOTAL_ISSUES=$(echo "$CMD_STDOUT" | jq '[.data.columns[].count] | add' 2>/dev/null)
-  if [ "$TOTAL_ISSUES" -gt 0 ]; then
-    check "ZB" "ZB6_nonempty" "PASS"
-  else
-    check "ZB" "ZB6_nonempty" "FAIL" "expected at least one issue on the board, got 0"
-  fi
+  check_cond "ZB" "ZB6_nonempty" "expected at least one issue on the board, got 0" [ "$TOTAL_ISSUES" -gt 0 ]
 
   # ZB7: Each column's count matches its issues array length.
   local MISMATCHED
   MISMATCHED=$(echo "$CMD_STDOUT" | jq '[.data.columns[] | select(.count != (.issues | length))] | length' 2>/dev/null)
-  if [ "$MISMATCHED" -eq 0 ]; then
-    check "ZB" "ZB7_consistency" "PASS"
-  else
-    check "ZB" "ZB7_consistency" "FAIL" "$MISMATCHED columns have count/issues mismatch"
-  fi
+  check_cond "ZB" "ZB7_consistency" "$MISMATCHED columns have count/issues mismatch" [ "$MISMATCHED" -eq 0 ]
 
   # ZB8: Default mode excludes sub-issues (only root issues shown).
   # Save the default (rolled-up) total for comparison with --expand.
@@ -61,11 +49,7 @@ test_zb_board() {
   assert_json "ZB" "ZB9_ok" ".ok" "true"
   local EXPAND_TOTAL
   EXPAND_TOTAL=$(echo "$CMD_STDOUT" | jq '[.data.columns[].count] | add' 2>/dev/null)
-  if [ "$EXPAND_TOTAL" -ge "$DEFAULT_TOTAL" ]; then
-    check "ZB" "ZB9_expand" "PASS"
-  else
-    check "ZB" "ZB9_expand" "FAIL" "expanded total ($EXPAND_TOTAL) < default total ($DEFAULT_TOTAL)"
-  fi
+  check_cond "ZB" "ZB9_expand" "expanded total ($EXPAND_TOTAL) < default total ($DEFAULT_TOTAL)" [ "$EXPAND_TOTAL" -ge "$DEFAULT_TOTAL" ]
 
   # ZB10: Human mode runs without error.
   run board
