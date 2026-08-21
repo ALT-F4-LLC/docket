@@ -426,6 +426,37 @@ after_loop = "a"
 	}
 }
 
+// TestL4ExceptsIssueLatestInputs: `issue.latest.<kind>` names no producer
+// step, so L4 has no predecessor to require — resolving to nothing is a legal
+// answer for the form. The consumer here is deliberately NOT a loop step,
+// because loop steps are excepted from L4 wholesale and would mask a reading
+// of `issue.latest` as a step name (DKT-492).
+func TestL4ExceptsIssueLatestInputs(t *testing.T) {
+	def, err := Parse([]byte(`
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+after = []
+executor = "x"
+emits = "doc"
+[[step]]
+name = "b"
+after = ["a"]
+executor = "x"
+emits = "findings"
+inputs = ["issue.latest.doc"]
+`))
+	testsupport.Must(t, err, "Parse: %v", err)
+	if err := Validate(def); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if err := Lint(def); err != nil {
+		t.Fatalf("`issue.latest.<kind>` must not be ordered by the ordinary topology: %v", err)
+	}
+}
+
 // TestPlannerReuseIsUnmodified is the binding repo fact, asserted structurally:
 // the lints go through planner.BuildDAG and planner.TopoSort rather than a
 // second Kahn implementation. A future edit that inlines a topological sort

@@ -682,6 +682,16 @@ func resolveInputs(
 			continue
 		}
 
+		// `issue.latest.<kind>` (DKT-492): the issue's latest recorded round
+		// of this kind, whoever produced it. Engine-produced like the issue
+		// forms — no producer step is named, so it resolves here rather than
+		// through resolveDeclaredInput's named-producer rule.
+		if kind, ok := workflow.LatestKind(declared); ok {
+			matched := resolveLatestOfKind(artifacts, producers, step, kind)
+			out = append(out, artifactInputs(matched, producers)...)
+			continue
+		}
+
 		matched, err := resolveDeclaredInput(artifacts, producers, def, step, declared)
 		if err != nil {
 			return nil, err
@@ -731,6 +741,10 @@ func ResolveInputArtifacts(
 		if declared == inputIssueBody || declared == inputIssueDiff {
 			continue
 		}
+		if kind, ok := workflow.LatestKind(declared); ok {
+			out = append(out, resolveLatestOfKind(artifacts, producers, step, kind)...)
+			continue
+		}
 		matched, err := resolveDeclaredInput(artifacts, producers, def, step, declared)
 		if err != nil {
 			return nil, err
@@ -774,6 +788,65 @@ func resolveDeclaredInput(
 	matched = latestPerProducer(matched)
 	sortArtifacts(matched, producers)
 	return matched, nil
+}
+
+// resolveLatestOfKind is `issue.latest.<kind>` (DKT-492): the issue's latest
+// recorded ROUND of artifacts of one kind, whoever produced them — §7.4's
+// ordinal-scoped rule with the producer name erased, exactly as `issue.diff`'s
+// D3 already resolves a kind rather than a step.
+//
+// It exists because a loop BODY cannot reach the live version of the thing it
+// iterates through any named input. A revise step's substrate IS its artifact:
+// round k must read round k-1's revision, which its own step name produced.
+// Both mechanisms that keep after-loop consumers current are structurally
+// closed to the body — loopProducerRedirect and previousRoundInputs fire only
+// inside `after_loop`'s downstream set, which a `loop = true` step can never
+// join (V10/V18: it declares no `after`, and the set is the `after` closure of
+// the `after_loop` target) — while its declared `<author>.<kind>` input falls
+// back per §7.4 to the ordinal-0 draft forever. RUN-39 measured the cost:
+// `revise@2`'s packet carried the round-0 author draft while every finding
+// beside it cited the round-1 revision, so revising the document the packet
+// supplied would have discarded the round it was entered to build on.
+//
+// The fix could NOT be a blanket redirect for the body's stale input:
+// `fix`'s `implement.change-summary` is the SAME declaration shape — a loop
+// body naming a one-shot upstream producer of its own emitted kind — and §7.4
+// pins that input to `implement@0` on purpose (a change-summary is an account
+// of work whose substrate is the TREE; handing `fix` its own prior account as
+// if it were `implement`'s is DKT-12's deliberately excluded case). Whether a
+// body's emitted kind is its substrate or its report is the author's
+// knowledge, not the engine's — so it is declared, per input, by this form.
+//
+// Resolution: recorded artifacts of the kind (recordedProducer, §2 as amended
+// by DKT-375), this issue, any producer — then ordinalScoped, latestPerProducer,
+// and §6.7's within-input order, the same pipeline every declared input rides.
+//
+// THE CONSUMER'S OWN ARTIFACTS ARE NOT CANDIDATES. At claim the exclusion is
+// vacuous — a just-claimed step has recorded nothing — and that vacuousness is
+// the point: a packet re-rendered after the step completed must not grow the
+// step's own output as an "input" it never saw, which is what "latest at or
+// below my ordinal" would otherwise do the moment the step's emit landed.
+func resolveLatestOfKind(
+	artifacts []*db.Artifact, producers map[int]*db.Step, step *db.Step, kind string,
+) []*db.Artifact {
+	var matched []*db.Artifact
+	for _, a := range artifacts {
+		if a.Kind != kind || a.StepID == step.ID {
+			continue
+		}
+		producer := producers[a.StepID]
+		if producer == nil || producer.IssueID != step.IssueID {
+			continue
+		}
+		if !recordedProducer(producer.Status) {
+			continue
+		}
+		matched = append(matched, a)
+	}
+	matched, _ = ordinalScoped(matched, producers, step.Ordinal)
+	matched = latestPerProducer(matched)
+	sortArtifacts(matched, producers)
+	return matched
 }
 
 // latestPerProducer collapses superseded emits: when ONE producer instance
@@ -848,6 +921,21 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 //     name, because that is the only thing the two producers share: `fix`
 //     does not know it is standing in for `implement`, it only knows it
 //     `emits = "change-summary"` too.
+//
+// A LOOP BODY'S OWN INPUTS THEREFORE NEVER REDIRECT, doubly so (DKT-492).
+// Condition 1 excludes the body by construction — a `loop = true` step cannot
+// declare `after` (V10/V18), and `afterLoopDownstream` is the `after` closure
+// of the `after_loop` target, so the body is never in the set — and condition
+// 4 independently excludes it, because at the moment the body's inputs resolve
+// no loop-body artifact exists at its own ordinal yet (the body runs FIRST at
+// each new ordinal; the artifact condition 4 would match is the one it is
+// about to produce). The rule is per DECLARED ENTRY and identical whatever the
+// entry count: `review`'s six lane inputs each redirect on re-entry because
+// `review` re-runs downstream of `after_loop` after the body emitted, while
+// `revise`'s one `author.doc` never does because `revise` IS the body — the
+// single- vs multi-entry shape has nothing to do with it. A body that needs
+// the live round of its own emitted kind declares `issue.latest.<kind>`
+// (resolveLatestOfKind) instead of naming a producer.
 //
 // nil means no redirect applies; the caller keeps ordinalScoped's answer.
 func loopProducerRedirect(

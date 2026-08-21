@@ -726,6 +726,68 @@ packet = ["checklists/{executor}.md"]
 `,
 		wants: []string{`"a"`, "packet", "{executor}"},
 	},
+	{
+		// V11's `issue.latest.<kind>` half (DKT-492): the kind must be one
+		// some step produces — an issue can hold artifacts of no other kind,
+		// so anything else resolves to nothing on every run and is a typo to
+		// refuse now.
+		rule: "V11", name: "issue.latest naming a kind no step produces",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "doc"
+[[step]]
+name = "b"
+after = ["a"]
+executor = "y"
+emits = "findings"
+inputs = ["issue.latest.dco"]
+`,
+		wants: []string{`"b"`, "`inputs`", `"issue.latest.dco"`, "no step in this workflow produces"},
+	},
+	{
+		// And its shape half: the form takes ONE kind, never `*` — "the
+		// latest artifact of every kind" answers no question a consumer can
+		// ask.
+		rule: "V11", name: "issue.latest with a wildcard kind",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "doc"
+[[step]]
+name = "b"
+after = ["a"]
+executor = "y"
+emits = "findings"
+inputs = ["issue.latest.*"]
+`,
+		wants: []string{`"b"`, "`inputs`", `"issue.latest.*"`, "issue.latest.<kind>"},
+	},
+	{
+		// V34 (DKT-492): `issue.latest` and everything under it are reserved
+		// — the engine-served latest-of-kind form is resolved before any step
+		// lookup, so a step under that name could never be addressed as an
+		// input.
+		rule: "V34", name: "a step name may not claim the reserved issue.latest namespace",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "issue.latest"
+executor = "x"
+emits = "k"
+`,
+		wants: []string{`"issue.latest"`, "reserved"},
+	},
 }
 
 // closedRiskSchema is riskSchema with `additionalProperties: false` — the exact

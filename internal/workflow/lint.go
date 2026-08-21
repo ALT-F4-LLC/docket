@@ -236,6 +236,16 @@ func lintInputOrdering(def *Definition, g *stepGraph) error {
 			if input == "issue.body" || input == "issue.diff" {
 				continue
 			}
+			// `issue.latest.<kind>` names no producer step: it resolves over
+			// whatever the issue has recorded by the consumer's ordinal,
+			// falling back per §7.4 — resolving to nothing is a legal answer,
+			// so there is no "artifact that does not exist yet" for L4 to
+			// guard against. Without this skip the shape below would read
+			// `issue.latest` as a step name and refuse every non-loop
+			// consumer of the form.
+			if _, ok := LatestKind(input); ok {
+				continue
+			}
 			m := inputShape.FindStringSubmatch(input)
 			if m == nil {
 				continue // V11 already rejected it.

@@ -27,7 +27,7 @@ var RuleIDs = []string{
 	"V20", "V21", "V21a", "V21b", "V21c", "V21d",
 	"V22", "V23", "V24", "V25", "V25a", "V26",
 	"V27", "V28", "V29", "V30", "V31",
-	"V32", "V33",
+	"V32", "V33", "V34",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -209,6 +209,22 @@ func validateSteps(def *Definition) error {
 						"`<step>%s` when an `aggregate` step's `hold_spread` trips, "+
 						"and two rows cannot claim one identity",
 					step.Name, HeldSuffix, HeldSuffix),
+			}
+		}
+		// V34: the `issue.latest` name and everything under it are RESERVED
+		// (DKT-492) — V27's reasoning applied to the input namespace:
+		// `issue.latest.<kind>` is the engine-served latest-of-kind input
+		// form, resolved before any step lookup, so a step under that name
+		// could never be addressed as an input — the reserved form would
+		// shadow it silently on every consumer.
+		if step.Name == "issue.latest" || strings.HasPrefix(step.Name, InputIssueLatestPrefix) {
+			return &Error{
+				Rule: "V34", Step: step.Name, Field: "name",
+				Message: fmt.Sprintf(
+					"step name %q is reserved: `issue.latest.<kind>` is the "+
+						"engine-served latest-of-kind input form, and a step under "+
+						"that name could never be addressed as an input",
+					step.Name),
 			}
 		}
 		if _, dup := byName[step.Name]; dup {
@@ -602,6 +618,30 @@ func producedKind(step *Step) (kind string, produces bool) {
 // `issue.body`, or `issue.diff`.
 var inputShape = regexp.MustCompile(`^([A-Za-z0-9_.-]+)\.([A-Za-z0-9_-]+|\*)$`)
 
+// InputIssueLatestPrefix is the `issue.latest.<kind>` engine form's prefix
+// (DKT-492): the issue's latest recorded round of artifacts of one kind,
+// whoever produced them. Exported because the engine's resolver consumes the
+// same form the validator admits.
+const InputIssueLatestPrefix = "issue.latest."
+
+// latestKindShape is the `<kind>` half of `issue.latest.<kind>` — inputShape's
+// kind grammar, deliberately without the `*` alternative: "the latest artifact
+// of every kind" answers no question a consumer can ask, and admitting it
+// would make one input's resolution span the whole artifact table.
+var latestKindShape = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// LatestKind reports whether a declared input is the `issue.latest.<kind>`
+// form, returning its kind half. ONE parser for the form, shared by V11, L4,
+// and the engine's resolver — PayloadShape's reasoning applied again: two
+// readings of one grammar in two packages are exactly how they would drift.
+func LatestKind(input string) (kind string, ok bool) {
+	rest, found := strings.CutPrefix(input, InputIssueLatestPrefix)
+	if !found || !latestKindShape.MatchString(rest) {
+		return "", false
+	}
+	return rest, true
+}
+
 // PayloadShape matches §11.1's `schema@ver`.
 //
 // It is EXPORTED and shared rather than restated, because `docket schema
@@ -655,12 +695,47 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 			continue
 		}
 
+		// `issue.latest.<kind>` (DKT-492) is engine-produced like the issue
+		// forms: it resolves to the issue's latest recorded round of that
+		// kind, whoever produced it, so it names no producer step. It exists
+		// for the input the named forms cannot express — a loop BODY reading
+		// the live version of the thing it iterates: the body is structurally
+		// outside `after_loop`'s downstream set (V10/V18: it cannot declare
+		// `after`), so the loop-producer redirect never rebinds its inputs,
+		// and a declared `<author>.<kind>` falls back per §7.4 to the
+		// ordinal-0 draft forever. The kind must be one some step produces:
+		// an issue can hold artifacts of no other kind, so anything else is a
+		// typo caught now rather than an input resolving to nothing on every
+		// run — the same produced-kind table `<step>.<kind>` is held to.
+		if input == "issue.latest" || strings.HasPrefix(input, InputIssueLatestPrefix) {
+			kind, ok := LatestKind(input)
+			if !ok {
+				return &Error{
+					Rule: "V11", Step: step.Name, Field: "inputs",
+					Message: fmt.Sprintf(
+						"step %q: `inputs` entry %q must be `issue.latest.<kind>`, "+
+							"with a kind of letters, digits, `_` or `-`",
+						step.Name, input),
+				}
+			}
+			if !anyStepProduces(byName, kind) {
+				return &Error{
+					Rule: "V11", Step: step.Name, Field: "inputs",
+					Message: fmt.Sprintf(
+						"step %q: `inputs` entry %q names kind %q, which no step in "+
+							"this workflow produces",
+						step.Name, input, kind),
+				}
+			}
+			continue
+		}
+
 		m := inputShape.FindStringSubmatch(input)
 		if m == nil {
 			return &Error{
 				Rule: "V11", Step: step.Name, Field: "inputs",
 				Message: fmt.Sprintf(
-					"step %q: `inputs` entry %q must be `<step>.<kind>`, `<step>.*`, `issue.body`, or `issue.diff`",
+					"step %q: `inputs` entry %q must be `<step>.<kind>`, `<step>.*`, `issue.body`, `issue.diff`, or `issue.latest.<kind>`",
 					step.Name, input),
 			}
 		}
@@ -709,6 +784,18 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 		}
 	}
 	return nil
+}
+
+// anyStepProduces reports whether any step of the workflow produces artifacts
+// of this kind — the produced-kind table validateInputs holds `<step>.<kind>`
+// to, read across every producer for the `issue.latest.<kind>` form.
+func anyStepProduces(byName map[string]*Step, kind string) bool {
+	for _, step := range byName {
+		if produced, produces := producedKind(step); produces && produced == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // thresholdRoutings are the §11.2 non-step routings.
