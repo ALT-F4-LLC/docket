@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/ALT-F4-LLC/docket/internal/render"
 )

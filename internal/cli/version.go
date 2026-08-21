@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/ALT-F4-LLC/docket/internal/render"
 

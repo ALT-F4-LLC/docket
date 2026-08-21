@@ -4,7 +4,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/glamour"
+	"charm.land/glamour/v2"
 )
 
 // ColorsEnabled returns whether terminal colors should be used.

@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/lipgloss/table"
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
@@ -423,7 +425,7 @@ func TestRenderTable_ColoredPathRendersIssueID(t *testing.T) {
 	// RenderTable's colored path must use the plain top-left border corner
 	// (renderColorChildTable(issues, false)), not the tree-connector corner
 	// (withConnector=true) used by the grouped-table section header.
-	firstLine := strings.SplitN(got, "\n", 2)[0]
+	firstLine := ansi.Strip(strings.SplitN(got, "\n", 2)[0])
 	if !strings.HasPrefix(firstLine, "┌") {
 		t.Errorf("expected plain top-left border corner '┌' (withConnector=false), got first line:\n%s", firstLine)
 	}

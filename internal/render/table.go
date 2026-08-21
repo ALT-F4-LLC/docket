@@ -2,15 +2,16 @@ package render
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
 	humanize "github.com/dustin/go-humanize"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/lipgloss/table"
-	"github.com/charmbracelet/lipgloss/tree"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
+	"charm.land/lipgloss/v2/tree"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -27,7 +28,7 @@ func StyledText(text string, style lipgloss.Style) string {
 }
 
 // ColorFromName maps model color name strings to lipgloss colors.
-func ColorFromName(name string) lipgloss.Color {
+func ColorFromName(name string) color.Color {
 	switch name {
 	case "red":
 		return lipgloss.Color("9")

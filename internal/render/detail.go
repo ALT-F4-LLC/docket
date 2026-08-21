@@ -7,8 +7,8 @@ import (
 
 	humanize "github.com/dustin/go-humanize"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/lipgloss/tree"
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/tree"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
