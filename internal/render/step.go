@@ -57,6 +57,13 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 
 	fmt.Fprintf(&b, "%s  %s\n", row.Step, row.Instance)
 	fmt.Fprintf(&b, "  status:    %s\n", row.Status)
+	// blocked names WHY a pending step is not ready (DKT-470): without it, a
+	// step waiting on its next predecessor and a step whose interposed
+	// routing was already decided against it forever both render the same
+	// bare `pending`, and only reading the event log told the two apart.
+	if row.BlockedReason != "" {
+		fmt.Fprintf(&b, "  blocked:   %s\n", row.BlockedReason)
+	}
 	fmt.Fprintf(&b, "  issue:     %s\n", row.Issue)
 	fmt.Fprintf(&b, "  run:       %s\n", row.Run)
 	fmt.Fprintf(&b, "  kind:      %s\n", row.Kind)

@@ -629,6 +629,18 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	label := stepLabel(id)
 	e := engine.NewEngine()
+
+	// DKT-470: override-pass records a generic "pass" and never evaluates the
+	// step's threshold, so an interposed step it names is skipped no matter
+	// what the (unevaluated) payload would have decided. Named BEFORE the
+	// resolution commits, so the warning is the blast radius the operator is
+	// approving rather than a report of damage already done.
+	if as == engine.ResolveOverridePass {
+		for _, warning := range engine.OverridePassSkipsInterposedTargets(conn, id) {
+			w.Warn("%s", warning)
+		}
+	}
+
 	if err := e.ResolveStep(conn, id, as, note, model.NowMS()); err != nil {
 		return stepErr(err, label)
 	}

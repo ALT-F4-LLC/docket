@@ -1359,6 +1359,50 @@ func (s *Scheduler) BudgetHoldReason() string {
 		len(withheld), s.budget.headroom(), strings.Join(parts, ", "), suffix)
 }
 
+// UnroutedHoldReason names PENDING steps CondUnrouted holds back, "" when none
+// are (DKT-470's second fix).
+//
+// Unlike LoopHoldReason/BudgetHoldReason it is not accumulated while the
+// offer is built — CondUnrouted is a fact about a step's OWN threshold
+// routing, not a narrowing the offer's admission passes apply — so it is
+// computed by asking every pending step directly rather than reading a map
+// side effect wrote. Scoped to CondUnrouted alone, deliberately: it is the
+// one interposition clause that names a TERMINAL fact (the routing that would
+// have named this step already happened and recorded something else) rather
+// than an ordinary "not yet" — CondPredecessors and CondGateOpen resolve
+// themselves as the run progresses, and paging an operator about every
+// step waiting on an unfinished predecessor would turn most quiet polls into
+// false alarms.
+func (s *Scheduler) UnroutedHoldReason() string {
+	var withheld []string
+	for _, step := range s.steps {
+		if step.Status != db.StepPending {
+			continue
+		}
+		if ok, cond := s.Ready(step); !ok && cond == CondUnrouted {
+			withheld = append(withheld, step.Instance)
+		}
+	}
+	if len(withheld) == 0 {
+		return ""
+	}
+	sort.Strings(withheld)
+	shown := withheld
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	suffix := ""
+	if len(withheld) > len(shown) {
+		suffix = fmt.Sprintf(" and %d more", len(withheld)-len(shown))
+	}
+	return fmt.Sprintf(
+		"%d step(s) will never become ready as-is: %s%s — no threshold routed "+
+			"to them and the predecessor that would have already recorded a "+
+			"different routing; `docket step resolve` the predecessor's "+
+			"routing or the step itself",
+		len(withheld), strings.Join(shown, ", "), suffix)
+}
+
 // claimablePass is one greedy admission scan — ClaimablePrefix's original
 // body, with the fixed-point's evictions excluded up front so a row evicted
 // for a missing predecessor neither occupies a slot nor grants a scope.

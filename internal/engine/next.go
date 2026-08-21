@@ -62,6 +62,18 @@ type ReadySteps struct {
 	// a run reporting 9 pending, cannot tell a budget wall from a graph that
 	// has run dry — and the second reading makes it stop polling.
 	BudgetHeldReason string
+	// UnroutedReason names PENDING steps CondUnrouted holds back — an
+	// interposed threshold target whose routing predecessor already decided,
+	// terminally, against naming it (DKT-470). Unlike the three holds above,
+	// this one is never resolved by anything ELSE finishing: the routing that
+	// would have named this step already happened and recorded a different
+	// routing, so the step is not "not yet" ready, it is never going to be
+	// without an operator's own intervention (`step resolve` on it, or on the
+	// routing predecessor before it records). Scoped to CondUnrouted alone —
+	// not CondPredecessors or CondGateOpen, both ordinary "not yet" waits that
+	// resolve themselves as the run progresses and would turn every ordinary
+	// empty offer into a false alarm.
+	UnroutedReason string
 }
 
 // NextSteps computes a run's ready steps, reaping expired leases on the way.
@@ -258,6 +270,7 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// distinction this branch exists to make.
 	loopHeld := sched.LoopHoldReason()
 	budgetHeld := sched.BudgetHoldReason()
+	unroutedHeld := sched.UnroutedHoldReason()
 	if voteRouted || actionRouted {
 		fresh, err := readySnapshot(conn, runID, defs, nowMS)
 		if err != nil {
@@ -269,9 +282,10 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		}
 		// The re-derived snapshot's own loop and budget holds ride back with
 		// it — the first pass's are stale for the same reason its rows were
-		// (DKT-61, DKT-242).
+		// (DKT-61, DKT-242, DKT-470).
 		loopHeld = fresh.LoopHoldReason()
 		budgetHeld = fresh.BudgetHoldReason()
+		unroutedHeld = fresh.UnroutedHoldReason()
 	}
 
 	// §6.3's closing paragraph: the refusal reports `CondHeadroom`, and `next`
@@ -284,6 +298,7 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		HeldReason:       ReapHoldReason(sched.UnacknowledgedReaps()),
 		LoopHeldReason:   loopHeld,
 		BudgetHeldReason: budgetHeld,
+		UnroutedReason:   unroutedHeld,
 	}, nil
 }
 
@@ -518,6 +533,7 @@ func StepRowFor(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow,
 		return model.StepRow{}, err
 	}
 	row.Status = EffectiveStatus(sched, step)
+	row.BlockedReason = BlockedReason(sched, step)
 	return row, nil
 }
 
@@ -530,13 +546,18 @@ type StepListEntry struct {
 	// Run names the row's run. A run-scoped listing repeats one value, but an
 	// issue-scoped one spans runs, and without it two rounds of the same
 	// instance are indistinguishable (DKT-244).
-	Run          string  `json:"run"`
-	Instance     string  `json:"instance"`
-	Issue        string  `json:"issue"`
-	Kind         string  `json:"kind"`
-	Status       string  `json:"status"`
-	Attempt      int     `json:"attempt"`
-	ExpectedCost float64 `json:"expected_cost"`
+	Run      string `json:"run"`
+	Instance string `json:"instance"`
+	Issue    string `json:"issue"`
+	Kind     string `json:"kind"`
+	Status   string `json:"status"`
+	// BlockedReason is StepRow's field of the same name (DKT-470), on the
+	// inventory row too: `step list` is where an operator scanning a whole
+	// run for a stall notices one `pending` row sitting among steps that have
+	// long since finished.
+	BlockedReason string  `json:"blocked_reason,omitempty"`
+	Attempt       int     `json:"attempt"`
+	ExpectedCost  float64 `json:"expected_cost"`
 }
 
 // RunStepList answers `docket step list --run RUN-N`: every step of one run,
@@ -570,14 +591,15 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	out := make([]StepListEntry, 0, len(steps))
 	for _, step := range steps {
 		out = append(out, StepListEntry{
-			Step:         model.FormatStepID(step.ID),
-			Run:          model.FormatRunID(runID),
-			Instance:     step.Instance,
-			Issue:        model.FormatID(step.IssueID),
-			Kind:         step.Kind,
-			Status:       EffectiveStatus(sched, step),
-			Attempt:      step.Attempt,
-			ExpectedCost: step.ExpectedCost,
+			Step:          model.FormatStepID(step.ID),
+			Run:           model.FormatRunID(runID),
+			Instance:      step.Instance,
+			Issue:         model.FormatID(step.IssueID),
+			Kind:          step.Kind,
+			Status:        EffectiveStatus(sched, step),
+			BlockedReason: BlockedReason(sched, step),
+			Attempt:       step.Attempt,
+			ExpectedCost:  step.ExpectedCost,
 		})
 	}
 	return out, nil
@@ -683,6 +705,36 @@ func EffectiveStatus(sched *Scheduler, step *db.Step) string {
 		}
 	}
 	return db.StepPending
+}
+
+// BlockedReason names WHY a step is not `ready`, "" for any step EffectiveStatus
+// does not render `pending` (DKT-470's second fix).
+//
+// EffectiveStatus already asks the §6.3 predicate and keeps only the bool;
+// this asks the same question over the same snapshot and keeps the
+// ReadyCondition instead — the two cannot disagree because they walk the
+// identical branches. Without it, an operator staring at `step show` on a
+// step whose interposed routing had already been decided AGAINST it (its
+// threshold's routing step recorded a different routing, permanently) saw
+// the same bare `pending` a step one predecessor away from ready shows, with
+// no way to tell "not yet" from "not ever" short of reading the event log.
+func BlockedReason(sched *Scheduler, step *db.Step) string {
+	if sched == nil {
+		return ""
+	}
+	if sched.Expired(step) {
+		if ok, cond := sched.readyIfPending(step); !ok {
+			return string(cond)
+		}
+		return ""
+	}
+	if step.Status != db.StepPending {
+		return ""
+	}
+	if ok, cond := sched.Ready(step); !ok {
+		return string(cond)
+	}
+	return ""
 }
 
 // readyIfPending answers the predicate as though the step were already reaped —

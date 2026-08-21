@@ -154,6 +154,14 @@ type StepRow struct {
 	// carried ahead of its readiness (db.StepStaged): every row this offer
 	// scheduled at a lower stage must complete before this one is claimable.
 	Status string `json:"status"`
+	// BlockedReason names the §6.3 clause holding a `pending` step back from
+	// `ready`, "" for any other status (DKT-470). It is what `step show`/`step
+	// list` were missing for a step whose stall has no future event that
+	// resolves it — an interposed step named by a threshold that already
+	// routed elsewhere reads as ordinary `pending` forever, indistinguishable
+	// from a step whose predecessor merely has not finished yet, unless
+	// something says which clause is holding it and why.
+	BlockedReason string `json:"blocked_reason,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`

@@ -113,6 +113,15 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 		w.Info("%s", ready.BudgetHeldReason)
 	}
 
+	// The unrouted-interposition hold (DKT-470), on stderr for the same
+	// reason and with the same payload guarantee: an empty `{"steps":[]}`
+	// against a run whose named steps will NEVER become ready as-is reads
+	// identically to a run that is simply between predecessors, and only one
+	// of those two resolves itself if the caller just waits and polls again.
+	if ready.UnroutedReason != "" {
+		w.Info("%s", ready.UnroutedReason)
+	}
+
 	result := nextStepsResult{
 		Steps: ready.Steps, Total: len(ready.Steps),
 		readyTotal: ready.Total, limit: limit,

@@ -58,9 +58,14 @@ const (
 	ResolveSkip = "skip"
 	// ResolveAbandonIssue abandons the issue within this run.
 	ResolveAbandonIssue = "abandon-issue"
-	// ResolveOverridePass passes the step as though its gates and thresholds
-	// had allowed it — the operator taking responsibility for a decision the
-	// engine would not make.
+	// ResolveOverridePass passes the step as though its gates had allowed it —
+	// the operator taking responsibility for a decision the engine would not
+	// make. It records the GENERIC RoutingPass and does NOT evaluate the
+	// step's threshold (DKT-470): a threshold that would have interposed
+	// another step over the accepted payload is not consulted, and that
+	// interposed step is skipped unconditionally. OverridePassSkipsInterposedTargets
+	// names the steps this will skip, for a caller to warn with before this
+	// commits.
 	ResolveOverridePass = "override-pass"
 	// ResolveFixRound authorizes ONE more fix loop for the issue and enters
 	// it, minting a fresh fix+review round (DKT-237).
@@ -564,6 +569,53 @@ func (e *Engine) ResolveStep(
 		return e.ResumeSaga(conn, step.ID, nowMS)
 	}
 	return nil
+}
+
+// OverridePassSkipsInterposedTargets names the interposed step(s) an
+// `override-pass` on stepID will never route to (DKT-470).
+//
+// ResolveOverridePass always records the GENERIC RoutingPass, whatever the
+// step's threshold would have decided over the accepted payload — it does not
+// evaluate the threshold at all. For a step with no threshold, or a threshold
+// with no step-name routing target, that generic pass IS the right answer and
+// there is nothing to warn about. For a step whose threshold interposes
+// another step (§11.2's "route to a step name"), it is a silent bypass: the
+// interposed step is unconditionally skipped as soon as this resolution
+// commits (reconcile.go's skipUnroutedTargets), REGARDLESS of whether the
+// threshold's condition was actually met. RUN-36/VPL-153 hit exactly this —
+// override-pass on an aggregate whose accepted payload had 17 findings
+// `>= high`, against a threshold that would have routed to `security-vote` on
+// that condition, instead silently skipped the vote with no warning that this
+// is what override-pass does.
+//
+// It answers a question about the step's DEFINITION, which the resolution it
+// precedes does not change, so it is independent of ResolveStep and safe to
+// call and print before that call commits anything — the operator sees the
+// blast radius of what they are about to approve.
+func OverridePassSkipsInterposedTargets(conn *sql.DB, stepID int) []string {
+	step, err := db.GetStep(conn, stepID)
+	if err != nil {
+		return nil
+	}
+	defs, err := StepDefinitions(conn, step.RunID)
+	if err != nil {
+		return nil
+	}
+	spec := workflow.StepByName(defs[step.WorkflowID], step.StepName)
+	if spec == nil {
+		return nil
+	}
+	targets := workflow.ThresholdTargets(spec.Threshold)
+	if len(targets) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"override-pass on %s records a generic %q routing and does not "+
+			"evaluate its threshold — interposed step(s) %s will NOT be "+
+			"routed to as a result, whatever the (unevaluated) payload would "+
+			"have decided; resolve them directly if their condition should "+
+			"still apply",
+		step.Instance, RoutingPass, strings.Join(targets, ", "))}
 }
 
 // FailStep is `step fail` — the explicit-failure counterpart to `complete`.
