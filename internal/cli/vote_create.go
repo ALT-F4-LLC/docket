@@ -32,7 +32,7 @@ var voteCreateCmd = &cobra.Command{
 		domainTagsRaw, _ := cmd.Flags().GetString("domain-tags")
 		filesChangedRaw, _ := cmd.Flags().GetString("files-changed")
 		escalationReason, _ := cmd.Flags().GetString("escalation-reason")
-		jsonMode, _ := cmd.Flags().GetBool("json")
+		jsonMode, _ := jsonModeOf(cmd)
 
 		// Default created-by to git user.name.
 		if createdBy == "" {
@@ -196,6 +196,7 @@ var voteCreateCmd = &cobra.Command{
 		}
 
 		proposal := model.Proposal{
+			ProjectID:        getProjectID(cmd),
 			Description:      description,
 			Rationale:        rationale,
 			Criticality:      model.Criticality(criticality),
@@ -208,7 +209,12 @@ var voteCreateCmd = &cobra.Command{
 			EscalationReason: escalationReasonPtr,
 		}
 
-		id, err := db.CreateProposal(conn, &proposal)
+		idempotencyKey, err := idempotencyKeyOf(cmd)
+		if err != nil {
+			return err
+		}
+
+		id, err := db.CreateProposalIdempotent(conn, &proposal, idempotencyKey)
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating proposal: %w", err), output.ErrGeneral)
 		}
@@ -235,5 +241,6 @@ func init() {
 	voteCreateCmd.Flags().String("domain-tags", "", "Comma-separated domain tags (e.g. cli,database,api)")
 	voteCreateCmd.Flags().String("files-changed", "", "Comma-separated file paths affected by this proposal")
 	voteCreateCmd.Flags().String("escalation-reason", "", "Reason for escalation (if applicable)")
+	addIdempotencyKeyFlag(voteCreateCmd)
 	voteCmd.AddCommand(voteCreateCmd)
 }

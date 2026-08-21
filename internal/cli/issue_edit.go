@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,17 +21,16 @@ var editCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
-		// Verify issue exists.
-		if _, err := db.GetIssue(conn, id); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+		// Verify issue exists. The row is kept: reparenting compares projects
+		// issue-to-issue, so the edited issue's own home is needed below.
+		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
+		if err != nil {
+			return err
 		}
 
 		updates := make(map[string]interface{})
@@ -98,18 +96,15 @@ var editCmd = &cobra.Command{
 			if strings.EqualFold(parent, "0") || strings.EqualFold(parent, "none") {
 				updates["parent_id"] = nil
 			} else {
-				newParentID, err := model.ParseID(parent)
+				// The parent must exist AND share the edited issue's project
+				// (DKT-22) — issue-to-issue, never against the invoking cwd.
+				parentIssue, err := resolveParentIssue(conn, parent, issue.ProjectID)
 				if err != nil {
-					return cmdErr(fmt.Errorf("invalid parent ID: %w", err), output.ErrValidation)
+					return err
 				}
+				newParentID := parentIssue.ID
 				if newParentID == id {
 					return cmdErr(fmt.Errorf("cannot set parent to self"), output.ErrValidation)
-				}
-				if _, err := db.GetIssue(conn, newParentID); err != nil {
-					if errors.Is(err, db.ErrNotFound) {
-						return cmdErr(fmt.Errorf("parent issue %s not found", parent), output.ErrNotFound)
-					}
-					return cmdErr(fmt.Errorf("checking parent issue: %w", err), output.ErrGeneral)
 				}
 				isCycle, err := db.IsDescendant(conn, id, newParentID)
 				if err != nil {
@@ -122,34 +117,53 @@ var editCmd = &cobra.Command{
 			}
 		}
 
-		if len(updates) == 0 && !filesChanged {
+		// `--scope` counts as a change. Without this the early return below
+		// would report "No changes specified" for a scope-only edit and, in
+		// JSON mode, emit the issue unchanged — after having written the
+		// scope. Scope lives on its own column and never enters `updates`,
+		// so it has to be counted here explicitly.
+		scopeChanged := cmd.Flags().Changed(scopeFlag)
+		if err := applyScope(cmd, conn, id); err != nil {
+			return err
+		}
+
+		if len(updates) == 0 && !filesChanged && !scopeChanged {
 			if w.JSONMode {
 				issue, err := db.GetIssue(conn, id)
 				if err != nil {
 					return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 				}
-				w.Success(issue, "")
+				w.Success(withIssueVersion(issue), "")
 			} else {
 				w.Info("No changes specified")
 			}
 			return nil
 		}
 
-		if len(updates) > 0 {
-			if err := db.UpdateIssue(conn, id, updates, config.DefaultAuthor()); err != nil {
-				if errors.Is(err, db.ErrNotFound) {
-					return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
+		ifVersion, err := ifVersionOf(cmd)
+		if err != nil {
+			return err
+		}
+
+		if len(updates) > 0 || ifVersion != nil {
+			if err := db.UpdateIssueCAS(conn, id, updates, config.DefaultAuthor(), ifVersion); err != nil {
+				if e := casError(err, fmt.Sprintf("issue %s", args[0])); e != nil {
+					return e
 				}
 				return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
 			}
 		}
 
-		issue, err := db.GetIssue(conn, id)
+		updated, err := db.GetIssue(conn, id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}
 
-		w.Success(issue, fmt.Sprintf("Updated %s: %s", model.FormatID(id), issue.Title))
+		if err := hydrateIssueAssociations(conn, updated); err != nil {
+			return err
+		}
+
+		w.Success(withIssueVersion(updated), fmt.Sprintf("Updated %s: %s", model.FormatID(id), updated.Title))
 
 		return nil
 	},
@@ -164,5 +178,7 @@ func init() {
 	editCmd.Flags().StringP("assignee", "a", "", "Issue assignee")
 	editCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable, replaces existing)")
 	editCmd.Flags().String("parent", "", "Parent issue ID (use \"0\" or \"none\" to make root)")
+	addScopeFlag(editCmd)
+	addIfVersionFlag(editCmd)
 	issueCmd.AddCommand(editCmd)
 }

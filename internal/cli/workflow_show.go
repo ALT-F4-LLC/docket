@@ -1,0 +1,172 @@
+package cli
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
+	"github.com/spf13/cobra"
+)
+
+var workflowShowCmd = &cobra.Command{
+	Use:   "show <name>[@<version>]",
+	Short: "Show a registered workflow definition",
+	Long: `Show a registered workflow.
+
+Omitting @version selects the highest registered version. --source emits the
+stored TOML verbatim, which is the exact bytes that were registered and hashed.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runWorkflowShow(cmd, args, getWriter(cmd))
+	},
+}
+
+func runWorkflowShow(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	name, version, err := model.ParseWorkflowRef(args[0])
+	if err != nil {
+		return cmdErr(err, output.ErrValidation)
+	}
+
+	wf, err := db.GetWorkflow(conn, getProjectID(cmd), name, version)
+	if err != nil {
+		return workflowErr(describeMissingWorkflow(err, args[0]))
+	}
+
+	source, _ := cmd.Flags().GetBool("source")
+	if source {
+		// The stored TOML, verbatim. In JSON mode it rides in the envelope as
+		// a string so the output stays a single parseable document; in human
+		// mode it is printed as-is, which is what makes
+		// `docket workflow show X --source > X.toml` round-trip.
+		if w.JSONMode {
+			w.Success(map[string]string{"name": wf.Name, "source": wf.Body}, "")
+			return nil
+		}
+		w.Success(nil, strings.TrimRight(wf.Body, "\n"))
+		return nil
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = renderWorkflowShow(wf)
+	}
+	w.Success(wf, message)
+	return nil
+}
+
+// describeMissingWorkflow turns the storage sentinel into an operator-facing
+// message naming what was asked for.
+func describeMissingWorkflow(err error, ref string) error {
+	if err == db.ErrWorkflowNotFound {
+		return fmt.Errorf("%w: %s is not registered", db.ErrWorkflowNotFound, ref)
+	}
+	return err
+}
+
+func renderWorkflowShow(wf *model.Workflow) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", wf.Ref())
+	if wf.Description != "" {
+		fmt.Fprintf(&b, "%s\n", wf.Description)
+	}
+	fmt.Fprintf(&b, "sha256: %s\n", wf.SourceSHA256)
+	if wf.SourcePath != "" {
+		fmt.Fprintf(&b, "source: %s\n", wf.SourcePath)
+	}
+	// A retired version renders as retired. Without this the summary of a
+	// version that can no longer bind is indistinguishable from one that can.
+	if wf.Deprecated() {
+		fmt.Fprintf(&b, "status: DEPRECATED — retired from binding, still "+
+			"readable and still resolved by runs that pinned it\n")
+	}
+
+	// The parsed form is what activation reads, so the human view renders it
+	// rather than re-reading the TOML — what is shown is what would run.
+	def, err := workflow.FromCanonical([]byte(wf.Parsed))
+	if err != nil {
+		return strings.TrimRight(b.String(), "\n")
+	}
+
+	// The `[match]` clause — the binding rule. It was absent from this summary
+	// while the AC asking to "see what an old version actually froze" was
+	// nominally satisfied by --source alone; a reader comparing two versions
+	// cares most about what each one BINDS.
+	if m := renderMatch(def.Match); m != "" {
+		fmt.Fprintf(&b, "\nmatch:\n%s", m)
+	}
+
+	fmt.Fprintf(&b, "\nsteps (%d):\n", len(def.Steps))
+	for _, step := range def.Steps {
+		fmt.Fprintf(&b, "  %-20s %s", step.Name, describeStepClass(step))
+		if len(step.After) > 0 {
+			fmt.Fprintf(&b, "  after=[%s]", strings.Join(step.After, ", "))
+		}
+		if step.Loop {
+			b.WriteString("  loop")
+		}
+		b.WriteString("\n")
+		// Gates decide whether a step's work is accepted, so a definition
+		// summary that omitted them would hide the checks it imposes.
+		for _, gate := range step.Gates {
+			fmt.Fprintf(&b, "      gate %s", gate.Name)
+			if gate.Source != "" {
+				fmt.Fprintf(&b, "  source=%s", gate.Source)
+			}
+			b.WriteString("\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderMatch renders a `[match]` clause's four terms, omitting the absent
+// ones. An entirely absent clause matches every issue, and says so.
+func renderMatch(m *workflow.Match) string {
+	if m == nil {
+		return "  (absent — matches every issue)\n"
+	}
+	var b strings.Builder
+	for _, term := range []struct {
+		name   string
+		values []string
+	}{
+		{"kind", m.Kind},
+		{"labels_any", m.LabelsAny},
+		{"labels_all", m.LabelsAll},
+		{"unless_labels", m.UnlessLabels},
+	} {
+		if len(term.values) > 0 {
+			fmt.Fprintf(&b, "  %-14s [%s]\n", term.name, strings.Join(term.values, ", "))
+		}
+	}
+	if b.Len() == 0 {
+		return "  (absent — matches every issue)\n"
+	}
+	return b.String()
+}
+
+// describeStepClass renders which of the four §11.1 alternatives a step
+// declares, with its opaque hint. The hint is echoed, never interpreted.
+func describeStepClass(step *workflow.Step) string {
+	switch step.StepClass() {
+	case workflow.ClassExecutor:
+		return "executor=" + step.Executor
+	case workflow.ClassAction:
+		return "action=" + step.Action
+	case workflow.ClassType:
+		return "type=" + step.Type
+	case workflow.ClassFanout:
+		return fmt.Sprintf("fanout=[%s]", strings.Join(step.Fanout, ", "))
+	default:
+		return ""
+	}
+}
+
+func init() {
+	workflowShowCmd.Flags().Bool("source", false, "Emit the stored TOML verbatim")
+	workflowCmd.AddCommand(workflowShowCmd)
+}

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,13 +34,13 @@ var docCommentAddCmd = &cobra.Command{
 
 		doc, err := db.GetDoc(conn, id)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("doc %s not found", args[0]), output.ErrNotFound)
+			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
 		}
 
-		jsonMode, _ := cmd.Flags().GetBool("json")
+		jsonMode, _ := jsonModeOf(cmd)
 		body, _ := cmd.Flags().GetString("message")
 
 		if !cmd.Flags().Changed("message") {
@@ -111,10 +110,15 @@ var docCommentAddCmd = &cobra.Command{
 			Author: author,
 		}
 
-		commentID, err := db.CreateDocComment(conn, &comment)
+		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("doc %s not found", args[0]), output.ErrNotFound)
+			return err
+		}
+
+		commentID, err := db.CreateDocCommentIdempotent(conn, &comment, idempotencyKey)
+		if err != nil {
+			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
 		}
@@ -132,6 +136,7 @@ var docCommentAddCmd = &cobra.Command{
 
 func init() {
 	docCommentAddCmd.Flags().StringP("message", "m", "", "Comment body")
+	addIdempotencyKeyFlag(docCommentAddCmd)
 	docCommentCmd.AddCommand(docCommentAddCmd)
 	docCmd.AddCommand(docCommentCmd)
 }

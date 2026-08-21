@@ -42,14 +42,7 @@ func UnlinkDocIssue(db *sql.DB, docID, issueID int) error {
 	if err != nil {
 		return fmt.Errorf("unlinking doc from issue: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return requireAffected(res)
 }
 
 // GetDocIssues returns issue IDs linked to a doc, ordered by issue_id ASC.
@@ -181,14 +174,7 @@ func UnlinkProposalDoc(db *sql.DB, proposalID, docID int) error {
 	if err != nil {
 		return fmt.Errorf("unlinking proposal from doc: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return requireAffected(res)
 }
 
 // GetProposalDocs returns doc IDs linked to a proposal, ordered by doc_id ASC.
@@ -239,52 +225,54 @@ func InsertProposalDocLink(tx *sql.Tx, proposalID, docID int, createdAt string) 
 
 // ListAllDocIssueLinks returns every doc_issue_links row ordered by (doc_id,
 // issue_id), for a full export.
-func ListAllDocIssueLinks(db *sql.DB) ([]model.DocIssueLink, error) {
+func ListAllDocIssueLinks(db *sql.DB, projectID int) ([]model.DocIssueLink, error) {
+	where, args := projectFilterVia(projectID, `doc_id IN (SELECT id FROM docs WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT doc_id, issue_id, created_at
-		 FROM doc_issue_links ORDER BY doc_id ASC, issue_id ASC`,
+		 FROM doc_issue_links `+where+` ORDER BY doc_id ASC, issue_id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all doc_issue_links: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]model.DocIssueLink, 0)
-	for rows.Next() {
+	out, err := scanRows(rows, "doc_issue_link rows", func(r *sql.Rows) (model.DocIssueLink, error) {
 		var l model.DocIssueLink
-		if err := rows.Scan(&l.DocID, &l.IssueID, &l.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scanning doc_issue_link row: %w", err)
+		if err := r.Scan(&l.DocID, &l.IssueID, &l.CreatedAt); err != nil {
+			return model.DocIssueLink{}, fmt.Errorf("scanning doc_issue_link row: %w", err)
 		}
-		out = append(out, l)
+		return l, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating doc_issue_link rows: %w", err)
+	if out == nil {
+		out = make([]model.DocIssueLink, 0)
 	}
 	return out, nil
 }
 
 // ListAllProposalDocs returns every proposal_docs row ordered by (proposal_id,
 // doc_id), for a full export.
-func ListAllProposalDocs(db *sql.DB) ([]model.ProposalDocLink, error) {
+func ListAllProposalDocs(db *sql.DB, projectID int) ([]model.ProposalDocLink, error) {
+	where, args := projectFilterVia(projectID, `proposal_id IN (SELECT id FROM proposals WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT proposal_id, doc_id, created_at
-		 FROM proposal_docs ORDER BY proposal_id ASC, doc_id ASC`,
+		 FROM proposal_docs `+where+` ORDER BY proposal_id ASC, doc_id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all proposal_docs: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]model.ProposalDocLink, 0)
-	for rows.Next() {
+	out, err := scanRows(rows, "proposal_doc rows", func(r *sql.Rows) (model.ProposalDocLink, error) {
 		var l model.ProposalDocLink
-		if err := rows.Scan(&l.ProposalID, &l.DocID, &l.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scanning proposal_doc row: %w", err)
+		if err := r.Scan(&l.ProposalID, &l.DocID, &l.CreatedAt); err != nil {
+			return model.ProposalDocLink{}, fmt.Errorf("scanning proposal_doc row: %w", err)
 		}
-		out = append(out, l)
+		return l, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating proposal_doc rows: %w", err)
+	if out == nil {
+		out = make([]model.ProposalDocLink, 0)
 	}
 	return out, nil
 }
@@ -329,20 +317,13 @@ func queryLinkIDs(db *sql.DB, query string, arg int) ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying link ids: %w", err)
 	}
-	defer rows.Close()
-
-	var out []int
-	for rows.Next() {
+	return scanRows(rows, "link id rows", func(r *sql.Rows) (int, error) {
 		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scanning link id: %w", err)
+		if err := r.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scanning link id: %w", err)
 		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating link id rows: %w", err)
-	}
-	return out, nil
+		return id, nil
+	})
 }
 
 func isUniqueOrPKConflict(err error) bool {

@@ -50,11 +50,7 @@ test_t_comment() {
   assert_exit "T" "T8" 0
   local COMMENT_ACTIVITY
   COMMENT_ACTIVITY=$(echo "$CMD_STDOUT" | jq '[.data.activity[] | select(.field_changed == "comment_added")] | length' 2>/dev/null)
-  if [ "$COMMENT_ACTIVITY" -ge 3 ]; then
-    check "T" "T8_activity" "PASS"
-  else
-    check "T" "T8_activity" "FAIL" "expected >= 3 comment_added entries, got $COMMENT_ACTIVITY"
-  fi
+  check_cond "T" "T8_activity" "expected >= 3 comment_added entries, got $COMMENT_ACTIVITY" [ "$COMMENT_ACTIVITY" -ge 3 ]
 
   # T9: DKT-prefix accepted as issue ID
   run issue comment add DKT-1 --json -m "prefix test"

@@ -65,6 +65,23 @@ func statusLabel(s model.Status) string {
 	return s.Icon() + " " + string(s)
 }
 
+// issueStatusLabel is statusLabel for a whole issue, so a resolution that
+// contradicts the status wins the cell.
+//
+// An issue the machine abandoned keeps whatever status it had reached —
+// `abandon-issue` deliberately does not force one, to leave the operator their
+// triage decision — and for an issue whose fix step had completed that status
+// is `done`. Rendering "✔ done" for work a review reproduced as NOT fixing
+// anything is the tracker asserting the opposite of what happened (DKT-245),
+// so the resolution is what the column reports. The status itself is not lost:
+// `issue show` prints both.
+func issueStatusLabel(issue *model.Issue) string {
+	if issue.Resolution == model.ResolutionAbandoned {
+		return "⊘ abandoned"
+	}
+	return statusLabel(issue.Status)
+}
+
 // EmptyState renders a styled empty-state message with an optional contextual hint.
 // When colors are enabled the message is rendered in dim gray and the hint is italic.
 // When quiet is true the hint is suppressed.
@@ -101,68 +118,13 @@ func RenderTable(issues []*model.Issue, treeMode bool) string {
 		return renderPlainTable(issues)
 	}
 
-	headers := []string{"ID", "Status", "Priority", "Type", "Title", "Assignee", "Updated"}
-
-	rows := make([][]string, 0, len(issues))
-	for _, issue := range issues {
-		rows = append(rows, issueToRow(issue))
-	}
-
-	// Build color lookup for styling
-	type rowColors struct {
-		statusColor   string
-		priorityColor string
-		kindColor     string
-	}
-	colorMap := make([]rowColors, len(issues))
-	for i, issue := range issues {
-		colorMap[i] = rowColors{
-			statusColor:   issue.Status.Color(),
-			priorityColor: issue.Priority.Color(),
-			kindColor:     issue.Kind.Color(),
-		}
-	}
-
-	t := table.New().
-		Border(lipgloss.NormalBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("8"))).
-		Headers(headers...).
-		Rows(rows...).
-		StyleFunc(func(row, col int) lipgloss.Style {
-			s := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1)
-
-			if row == table.HeaderRow {
-				return s.Bold(true).Foreground(lipgloss.Color("15"))
-			}
-
-			if row < 0 || row >= len(colorMap) {
-				return s
-			}
-
-			rc := colorMap[row]
-			switch col {
-			case 0: // ID
-				return s.Foreground(lipgloss.Color("15"))
-			case 1: // Status
-				return s.Foreground(ColorFromName(rc.statusColor))
-			case 2: // Priority
-				return s.Foreground(ColorFromName(rc.priorityColor))
-			case 3: // Type
-				return s.Foreground(ColorFromName(rc.kindColor))
-			case 4: // Title
-				return s.Bold(true)
-			default:
-				return s
-			}
-		})
-
-	return t.Render()
+	return renderColorChildTable(issues, false)
 }
 
 func issueToRow(issue *model.Issue) []string {
 	return []string{
 		model.FormatID(issue.ID),
-		statusLabel(issue.Status),
+		issueStatusLabel(issue),
 		fmt.Sprintf("%s %s", issue.Priority.Icon(), string(issue.Priority)),
 		fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)),
 		truncate(issue.Title, maxTitleWidth),
@@ -181,7 +143,7 @@ func renderPlainTable(issues []*model.Issue) string {
 	for _, issue := range issues {
 		fmt.Fprintf(&b, "%-10s %-16s %-18s %-12s %-40s %-15s %s\n",
 			model.FormatID(issue.ID),
-			statusLabel(issue.Status),
+			issueStatusLabel(issue),
 			fmt.Sprintf("%s %s", issue.Priority.Icon(), string(issue.Priority)),
 			fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)),
 			truncate(issue.Title, maxTitleWidth),
@@ -204,22 +166,7 @@ func RenderTreeList(issues []*model.Issue) string {
 		return renderPlainTree(issues)
 	}
 
-	// Group children by parent.
-	children := make(map[int][]*model.Issue)
-	var roots []*model.Issue
-
-	for _, issue := range issues {
-		if issue.ParentID == nil {
-			roots = append(roots, issue)
-		} else {
-			children[*issue.ParentID] = append(children[*issue.ParentID], issue)
-		}
-	}
-
-	// If no roots found (all issues have parents not in the set), treat all as roots.
-	if len(roots) == 0 {
-		roots = issues
-	}
+	roots, children := groupIssuesByParent(issues)
 
 	t := tree.New().Root("Issues")
 
@@ -236,7 +183,7 @@ func formatTreeNode(issue *model.Issue) string {
 	if !ColorsEnabled() {
 		return fmt.Sprintf("%s %s %s %s %s",
 			model.FormatID(issue.ID),
-			statusLabel(issue.Status),
+			issueStatusLabel(issue),
 			issue.Priority.Icon(),
 			fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)),
 			truncate(issue.Title, maxTitleWidth),
@@ -251,7 +198,7 @@ func formatTreeNode(issue *model.Issue) string {
 
 	return fmt.Sprintf("%s %s %s %s %s",
 		idStyle.Render(model.FormatID(issue.ID)),
-		statusStyle.Render(statusLabel(issue.Status)),
+		statusStyle.Render(issueStatusLabel(issue)),
 		priorityStyle.Render(issue.Priority.Icon()),
 		kindStyle.Render(fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind))),
 		titleStyle.Render(truncate(issue.Title, maxTitleWidth)),
@@ -266,8 +213,13 @@ func addTreeChildren(node *tree.Tree, parentID int, children map[int][]*model.Is
 	}
 }
 
-func renderPlainTree(issues []*model.Issue) string {
-	// Index issues by ID and group children by parent.
+// groupIssuesByParent partitions issues into root issues (those with no
+// parent) and a lookup of children keyed by parent ID. It does not check
+// whether a child's parent is present in issues; an issue whose parent is
+// outside the set is filed under that parent ID and only surfaces if every
+// issue lacks a root, when the empty-roots fallback below treats all issues
+// as roots.
+func groupIssuesByParent(issues []*model.Issue) ([]*model.Issue, map[int][]*model.Issue) {
 	children := make(map[int][]*model.Issue)
 	var roots []*model.Issue
 
@@ -283,6 +235,12 @@ func renderPlainTree(issues []*model.Issue) string {
 		roots = issues
 	}
 
+	return roots, children
+}
+
+func renderPlainTree(issues []*model.Issue) string {
+	roots, children := groupIssuesByParent(issues)
+
 	var b strings.Builder
 	for _, root := range roots {
 		renderPlainTreeNode(&b, root, children, 0)
@@ -295,7 +253,7 @@ func renderPlainTreeNode(b *strings.Builder, issue *model.Issue, children map[in
 	fmt.Fprintf(b, "%s%s %s %s %s %s\n",
 		indent,
 		model.FormatID(issue.ID),
-		statusLabel(issue.Status),
+		issueStatusLabel(issue),
 		issue.Priority.Icon(),
 		fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)),
 		truncate(issue.Title, maxTitleWidth),
@@ -743,7 +701,7 @@ func renderPlainSection(b *strings.Builder, title string, issues []*model.Issue)
 	for _, issue := range issues {
 		fmt.Fprintf(b, "│ %-9s %-17s %-17s %-13s %-39s %-14s %s │\n",
 			model.FormatID(issue.ID),
-			statusLabel(issue.Status),
+			issueStatusLabel(issue),
 			fmt.Sprintf("%s %s", issue.Priority.Icon(), string(issue.Priority)),
 			fmt.Sprintf("%s %s", issue.Kind.Icon(), string(issue.Kind)),
 			truncate(issue.Title, maxTitleWidth-1),

@@ -1,0 +1,15 @@
+{
+  "why": "a missing required property is reported against the ELEMENT, which is the object that lacks it",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {"risk": {"type": "string"}},
+      "required": ["risk"]
+    }
+  },
+  "document": [{"tier": "one"}],
+  "valid": false,
+  "message_contains": "payload[0]:"
+}

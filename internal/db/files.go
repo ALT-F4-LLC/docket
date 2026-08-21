@@ -103,17 +103,17 @@ func GetIssueFiles(db *sql.DB, issueID int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying issue files: %w", err)
 	}
-	defer rows.Close()
+	return scanRows(rows, "issue files", scanFilePath)
+}
 
-	var files []string
-	for rows.Next() {
-		var fp string
-		if err := rows.Scan(&fp); err != nil {
-			return nil, fmt.Errorf("scanning file path: %w", err)
-		}
-		files = append(files, fp)
+// scanFilePath scans a single file_path column. Shared by GetIssueFiles and
+// queryFilePaths (*sql.DB and *sql.Tx read the same shape).
+func scanFilePath(r *sql.Rows) (string, error) {
+	var fp string
+	if err := r.Scan(&fp); err != nil {
+		return "", fmt.Errorf("scanning file path: %w", err)
 	}
-	return files, rows.Err()
+	return fp, nil
 }
 
 // SetIssueFiles replaces all files for an issue (delete existing, insert new).
@@ -206,25 +206,23 @@ func HydrateFiles(db *sql.DB, issues []*model.Issue) error {
 
 // ListAllIssueFileMappings returns all rows from issue_files as
 // IssueFileMapping structs. This is needed by the export command.
-func ListAllIssueFileMappings(db *sql.DB) ([]model.IssueFileMapping, error) {
+func ListAllIssueFileMappings(db *sql.DB, projectID int) ([]model.IssueFileMapping, error) {
+	where, args := projectFilterVia(projectID, `issue_id IN (SELECT id FROM issues WHERE project_id = ?)`)
 	rows, err := db.Query(
-		`SELECT issue_id, file_path FROM issue_files ORDER BY issue_id, file_path`,
+		`SELECT issue_id, file_path FROM issue_files `+where+` ORDER BY issue_id, file_path`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying issue-file mappings: %w", err)
 	}
-	defer rows.Close()
-
-	var mappings []model.IssueFileMapping
-	for rows.Next() {
+	mappings, err := scanRows(rows, "issue-file mappings", func(r *sql.Rows) (model.IssueFileMapping, error) {
 		var m model.IssueFileMapping
-		if err := rows.Scan(&m.IssueID, &m.FilePath); err != nil {
-			return nil, fmt.Errorf("scanning issue-file mapping: %w", err)
+		if err := r.Scan(&m.IssueID, &m.FilePath); err != nil {
+			return model.IssueFileMapping{}, fmt.Errorf("scanning issue-file mapping: %w", err)
 		}
-		mappings = append(mappings, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating issue-file mappings: %w", err)
+		return m, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return mappings, nil
@@ -239,18 +237,9 @@ func queryFilePaths(tx *sql.Tx, issueID int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying existing files: %w", err)
 	}
-	defer rows.Close()
-
-	var files []string
-	for rows.Next() {
-		var fp string
-		if err := rows.Scan(&fp); err != nil {
-			return nil, fmt.Errorf("scanning file path: %w", err)
-		}
-		files = append(files, fp)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating file rows: %w", err)
+	files, err := scanRows(rows, "file rows", scanFilePath)
+	if err != nil {
+		return nil, err
 	}
 	return files, nil
 }

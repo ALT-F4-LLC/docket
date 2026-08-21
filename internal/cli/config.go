@@ -1,13 +1,8 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
-
-	"golang.org/x/term"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -15,7 +10,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
 
@@ -26,6 +20,9 @@ type configInfo struct {
 	IssuePrefix   string `json:"issue_prefix"`
 	DocketPathEnv string `json:"docket_path_env"`
 	DocketPathSet bool   `json:"docket_path_set"`
+	StoreSource   string `json:"store_source"`
+	ExecRoot      string `json:"exec_root"`
+	Identity      string `json:"identity"`
 }
 
 var configCmd = &cobra.Command{
@@ -33,25 +30,7 @@ var configCmd = &cobra.Command{
 	Short:       "Display docket configuration",
 	Annotations: map[string]string{"skipDB": "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runConfig(cmd, args, w)
-			})
-		}
-		return runConfig(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runConfig)
 	},
 }
 
@@ -72,9 +51,12 @@ func runConfig(cmd *cobra.Command, args []string, w *output.Writer) error {
 			DBPath:        cfg.DBPath,
 			DBSizeBytes:   0,
 			SchemaVersion: 0,
-			IssuePrefix:   model.IDPrefix,
+			IssuePrefix:   model.DisplayPrefix(),
 			DocketPathEnv: docketPathEnv,
 			DocketPathSet: cfg.EnvVarSet,
+			StoreSource:   string(cfg.Source),
+			ExecRoot:      cfg.ExecRoot,
+			Identity:      cfg.Identity,
 		}
 
 		w.Success(info, formatConfigHuman(info, true))
@@ -103,9 +85,12 @@ func runConfig(cmd *cobra.Command, args []string, w *output.Writer) error {
 		DBPath:        cfg.DBPath,
 		DBSizeBytes:   dbSize,
 		SchemaVersion: schemaVersion,
-		IssuePrefix:   model.IDPrefix,
+		IssuePrefix:   model.DisplayPrefix(),
 		DocketPathEnv: docketPathEnv,
 		DocketPathSet: cfg.EnvVarSet,
+		StoreSource:   string(cfg.Source),
+		ExecRoot:      cfg.ExecRoot,
+		Identity:      cfg.Identity,
 	}
 
 	w.Success(info, formatConfigHuman(info, false))
@@ -166,6 +151,9 @@ func formatConfigHuman(info configInfo, notFound bool) string {
 	}
 
 	lines += fmt.Sprintf("  %s   %s\n", keyStyle.Render("Issue prefix:"), valStyle.Render(info.IssuePrefix))
+	lines += fmt.Sprintf("  %s   %s\n", keyStyle.Render("Store source:"), valStyle.Render(info.StoreSource))
+	lines += fmt.Sprintf("  %s      %s\n", keyStyle.Render("Exec root:"), valStyle.Render(info.ExecRoot))
+	lines += fmt.Sprintf("  %s       %s\n", keyStyle.Render("Project:"), valStyle.Render(info.Identity))
 
 	envVal := formatEnvValue(info.DocketPathEnv)
 	lines += fmt.Sprintf("  %s    %s", keyStyle.Render("DOCKET_PATH:"), valStyle.Render(envVal))
@@ -185,6 +173,9 @@ func formatConfigPlain(info configInfo, notFound bool) string {
 		lines += fmt.Sprintf("Schema version:  %d\n", info.SchemaVersion)
 	}
 	lines += fmt.Sprintf("Issue prefix:    %s\n", info.IssuePrefix)
+	lines += fmt.Sprintf("Store source:    %s\n", info.StoreSource)
+	lines += fmt.Sprintf("Exec root:       %s\n", info.ExecRoot)
+	lines += fmt.Sprintf("Project:         %s\n", info.Identity)
 	lines += fmt.Sprintf("DOCKET_PATH:     %s", formatEnvValue(info.DocketPathEnv))
 
 	return lines

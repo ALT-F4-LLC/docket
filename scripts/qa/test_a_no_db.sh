@@ -4,7 +4,7 @@
 test_a_no_db() {
   printf "Section A: No-DB Commands"
   local NO_DB_DIR
-  NO_DB_DIR=$(mktemp -d)
+  NO_DB_DIR=$(qa_mktemp_d)
   mkdir -p "$NO_DB_DIR"
 
   run_env "$NO_DB_DIR" version

@@ -1,0 +1,10 @@
+{
+  "why": "an empty payload satisfies an array schema; T4's empty-set convention is a THRESHOLD rule, never a validation refusal",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {"type": "object", "required": ["risk"]}
+  },
+  "document": [],
+  "valid": true
+}

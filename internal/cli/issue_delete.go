@@ -30,6 +30,17 @@ var deleteCmd = &cobra.Command{
 		force, _ := cmd.Flags().GetBool("force")
 		orphan, _ := cmd.Flags().GetBool("orphan")
 
+		// `--yes` is `--force` under the name a scripted caller reaches for
+		// first (DKT-72). It is an ALIAS rather than a third behavior on
+		// purpose: the prompt it answers is a three-way choice — cascade,
+		// orphan, or cancel — and a flag that meant "yes" without saying to
+		// WHAT would have to pick one of them silently. `--force` already
+		// names the choice, so `--yes` simply spells it the way the muscle
+		// memory does.
+		if yes, _ := cmd.Flags().GetBool("yes"); yes {
+			force = true
+		}
+
 		if force && orphan {
 			return cmdErr(fmt.Errorf("--force and --orphan are mutually exclusive"), output.ErrValidation)
 		}
@@ -41,8 +52,8 @@ var deleteCmd = &cobra.Command{
 
 		issue, err := db.GetIssue(conn, id)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
+			if e := notFound(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 		}
@@ -135,6 +146,8 @@ func doOrphanDelete(w *output.Writer, conn *sql.DB, id int, title string, subCou
 
 func init() {
 	deleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation and cascade-delete all sub-issues")
+	deleteCmd.Flags().BoolP("yes", "y", false,
+		"Alias for --force: answer the sub-issue confirmation non-interactively")
 	deleteCmd.Flags().Bool("orphan", false, "Remove parent reference from sub-issues (make them root issues)")
 	issueCmd.AddCommand(deleteCmd)
 }

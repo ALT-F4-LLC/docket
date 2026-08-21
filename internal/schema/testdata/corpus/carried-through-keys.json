@@ -1,0 +1,15 @@
+{
+  "why": "§7.2 G3: an element's other keys are carried through, so a schema that permits them is the ordinary case",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {"risk": {"type": "string", "enum": ["low", "high"], "ordered_enum": true}},
+      "required": ["risk"],
+      "additionalProperties": true
+    }
+  },
+  "document": [{"risk": "high", "ticket": "AB-12", "members": ["low", "high"]}],
+  "valid": true
+}

@@ -32,20 +32,12 @@ test_zc_export_import() {
   # ZC3: Export JSON has version = 1.
   local VERSION
   VERSION=$(echo "$CMD_STDOUT" | jq '.version' 2>/dev/null)
-  if [ "$VERSION" = "1" ]; then
-    check "ZC" "ZC3_version" "PASS"
-  else
-    check "ZC" "ZC3_version" "FAIL" "expected version 1, got $VERSION"
-  fi
+  check_cond "ZC" "ZC3_version" "expected version 1, got $VERSION" [ "$VERSION" = "1" ]
 
   # ZC4: Export JSON has non-empty issues array.
   local ISSUE_COUNT
   ISSUE_COUNT=$(echo "$CMD_STDOUT" | jq '.issues | length' 2>/dev/null)
-  if [ "$ISSUE_COUNT" -gt 0 ]; then
-    check "ZC" "ZC4_issues" "PASS"
-  else
-    check "ZC" "ZC4_issues" "FAIL" "expected issues array to be non-empty"
-  fi
+  check_cond "ZC" "ZC4_issues" "expected issues array to be non-empty" [ "$ISSUE_COUNT" -gt 0 ]
 
   # Save JSON export for later import tests.
   local EXPORT_JSON="$CMD_STDOUT"
@@ -62,7 +54,7 @@ test_zc_export_import() {
 
   # ZC7: Export to file with --file flag.
   local EXPORT_FILE
-  EXPORT_FILE=$(mktemp)
+  EXPORT_FILE=$(qa_mktemp)
   run export -f "$EXPORT_FILE"
   assert_exit "ZC" "ZC7" 0
   # Verify file was written and contains valid JSON.
@@ -83,19 +75,11 @@ test_zc_export_import() {
   local DONE_COUNT
   DONE_COUNT=$(echo "$CMD_STDOUT" | jq '.issues | length' 2>/dev/null)
   # Filtered count should be <= total count.
-  if [ "$DONE_COUNT" -le "$ISSUE_COUNT" ]; then
-    check "ZC" "ZC8_filter" "PASS"
-  else
-    check "ZC" "ZC8_filter" "FAIL" "filtered count ($DONE_COUNT) > total count ($ISSUE_COUNT)"
-  fi
+  check_cond "ZC" "ZC8_filter" "filtered count ($DONE_COUNT) > total count ($ISSUE_COUNT)" [ "$DONE_COUNT" -le "$ISSUE_COUNT" ]
   # All filtered issues should have status "done".
   local BAD_STATUS
   BAD_STATUS=$(echo "$CMD_STDOUT" | jq '[.issues[] | select(.status != "done")] | length' 2>/dev/null)
-  if [ "$BAD_STATUS" = "0" ]; then
-    check "ZC" "ZC8_status" "PASS"
-  else
-    check "ZC" "ZC8_status" "FAIL" "$BAD_STATUS issues with non-done status in filtered export"
-  fi
+  check_cond "ZC" "ZC8_status" "$BAD_STATUS issues with non-done status in filtered export" [ "$BAD_STATUS" = "0" ]
 
   # ZC9: Invalid format flag returns error.
   run export -o xml
@@ -107,12 +91,12 @@ test_zc_export_import() {
 
   # Write the saved JSON export to a temp file for import tests.
   local IMPORT_FILE
-  IMPORT_FILE=$(mktemp)
+  IMPORT_FILE=$(qa_mktemp)
   echo "$EXPORT_JSON" > "$IMPORT_FILE"
 
   # ZC10: Import into empty DB succeeds (round-trip).
   local IMPORT_DIR
-  IMPORT_DIR=$(mktemp -d)
+  IMPORT_DIR=$(qa_mktemp_d)
   run_env "$IMPORT_DIR" init --json
   assert_exit "ZC" "ZC10_init" 0
   run_env "$IMPORT_DIR" import --json "$IMPORT_FILE"
@@ -122,27 +106,19 @@ test_zc_export_import() {
   # Imported count should be > 0.
   local IMPORTED
   IMPORTED=$(echo "$CMD_STDOUT" | jq '.data.imported' 2>/dev/null)
-  if [ "$IMPORTED" -gt 0 ]; then
-    check "ZC" "ZC10_count" "PASS"
-  else
-    check "ZC" "ZC10_count" "FAIL" "expected imported > 0, got $IMPORTED"
-  fi
+  check_cond "ZC" "ZC10_count" "expected imported > 0, got $IMPORTED" [ "$IMPORTED" -gt 0 ]
 
   # ZC11: Verify round-trip — exported issue count matches imported DB.
   run_env "$IMPORT_DIR" stats --json
   assert_exit "ZC" "ZC11" 0
   local RT_TOTAL
   RT_TOTAL=$(echo "$CMD_STDOUT" | jq '.data.total' 2>/dev/null)
-  if [ "$RT_TOTAL" = "$ISSUE_COUNT" ]; then
-    check "ZC" "ZC11_roundtrip" "PASS"
-  else
-    check "ZC" "ZC11_roundtrip" "FAIL" "round-trip total $RT_TOTAL != original $ISSUE_COUNT"
-  fi
+  check_cond "ZC" "ZC11_roundtrip" "round-trip total $RT_TOTAL != original $ISSUE_COUNT" [ "$RT_TOTAL" = "$ISSUE_COUNT" ]
   rm -rf "$IMPORT_DIR"
 
   # ZC12: Import into non-empty DB without flags fails.
   local NONEMPTY_DIR
-  NONEMPTY_DIR=$(mktemp -d)
+  NONEMPTY_DIR=$(qa_mktemp_d)
   run_env "$NONEMPTY_DIR" init --json
   assert_exit "ZC" "ZC12_init" 0
   run_env "$NONEMPTY_DIR" issue create --json -t "Blocker issue"
@@ -153,7 +129,7 @@ test_zc_export_import() {
 
   # ZC13: Import with --merge flag succeeds on non-empty DB.
   local MERGE_DIR
-  MERGE_DIR=$(mktemp -d)
+  MERGE_DIR=$(qa_mktemp_d)
   run_env "$MERGE_DIR" init --json
   assert_exit "ZC" "ZC13_init" 0
   run_env "$MERGE_DIR" issue create --json -t "Pre-existing issue"
@@ -164,14 +140,21 @@ test_zc_export_import() {
   assert_json_exists "ZC" "ZC13_imported" ".data.imported"
   rm -rf "$MERGE_DIR"
 
-  # ZC14: Import with --replace --json flag succeeds (skips interactive prompt).
+  # ZC14: Import with --replace --json --yes flag succeeds.
   local REPLACE_DIR
-  REPLACE_DIR=$(mktemp -d)
+  REPLACE_DIR=$(qa_mktemp_d)
   run_env "$REPLACE_DIR" init --json
   assert_exit "ZC" "ZC14_init" 0
   run_env "$REPLACE_DIR" issue create --json -t "Will be replaced"
   assert_exit "ZC" "ZC14_create" 0
+
+  # ZC14a: --replace --json without --yes is refused (DKT-15): --json must
+  # never double as consent for a destructive replace.
   run_env "$REPLACE_DIR" import --json --replace "$IMPORT_FILE"
+  assert_exit "ZC" "ZC14a" 3
+  assert_json "ZC" "ZC14a_code" ".code" "VALIDATION_ERROR"
+
+  run_env "$REPLACE_DIR" import --json --replace --yes "$IMPORT_FILE"
   assert_exit "ZC" "ZC14" 0
   assert_json "ZC" "ZC14_ok" ".ok" "true"
   # After replace, issue count should match the export, not include the pre-existing one.
@@ -179,16 +162,12 @@ test_zc_export_import() {
   assert_exit "ZC" "ZC14_stats" 0
   local REPLACE_TOTAL
   REPLACE_TOTAL=$(echo "$CMD_STDOUT" | jq '.data.total' 2>/dev/null)
-  if [ "$REPLACE_TOTAL" = "$ISSUE_COUNT" ]; then
-    check "ZC" "ZC14_replaced" "PASS"
-  else
-    check "ZC" "ZC14_replaced" "FAIL" "after replace, total $REPLACE_TOTAL != export $ISSUE_COUNT"
-  fi
+  check_cond "ZC" "ZC14_replaced" "after replace, total $REPLACE_TOTAL != export $ISSUE_COUNT" [ "$REPLACE_TOTAL" = "$ISSUE_COUNT" ]
   rm -rf "$REPLACE_DIR"
 
   # ZC15: --merge and --replace together fails.
   local CONFLICT_DIR
-  CONFLICT_DIR=$(mktemp -d)
+  CONFLICT_DIR=$(qa_mktemp_d)
   run_env "$CONFLICT_DIR" init --json
   assert_exit "ZC" "ZC15_init" 0
   run_env "$CONFLICT_DIR" import --json --merge --replace "$IMPORT_FILE"
@@ -197,10 +176,10 @@ test_zc_export_import() {
 
   # ZC16: Import with invalid JSON fails.
   local BAD_FILE
-  BAD_FILE=$(mktemp)
+  BAD_FILE=$(qa_mktemp)
   echo "this is not json" > "$BAD_FILE"
   local BAD_DIR
-  BAD_DIR=$(mktemp -d)
+  BAD_DIR=$(qa_mktemp_d)
   run_env "$BAD_DIR" init --json
   assert_exit "ZC" "ZC16_init" 0
   run_env "$BAD_DIR" import --json "$BAD_FILE"
@@ -214,7 +193,7 @@ test_zc_export_import() {
 
   # ZC18: Export CSV to file works.
   local CSV_FILE
-  CSV_FILE=$(mktemp)
+  CSV_FILE=$(qa_mktemp)
   run export -o csv -f "$CSV_FILE"
   assert_exit "ZC" "ZC18" 0
   if [ -s "$CSV_FILE" ]; then
@@ -234,11 +213,7 @@ test_zc_export_import() {
   local LABEL_ISSUE_COUNT
   LABEL_ISSUE_COUNT=$(echo "$CMD_STDOUT" | jq '.issues | length' 2>/dev/null)
   # Filtered count should be <= total unfiltered count.
-  if [ "$LABEL_ISSUE_COUNT" -le "$ISSUE_COUNT" ]; then
-    check "ZC" "ZC19_filter" "PASS"
-  else
-    check "ZC" "ZC19_filter" "FAIL" "label-filtered count ($LABEL_ISSUE_COUNT) > total ($ISSUE_COUNT)"
-  fi
+  check_cond "ZC" "ZC19_filter" "label-filtered count ($LABEL_ISSUE_COUNT) > total ($ISSUE_COUNT)" [ "$LABEL_ISSUE_COUNT" -le "$ISSUE_COUNT" ]
 
   # ZC20: Import with non-existent file fails.
   run import --json /tmp/docket-qa-nonexistent-file.json

@@ -4,14 +4,14 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func mustOpen(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(:memory:) failed: %v", err)
-	}
+	testsupport.Must(t, err, "Open(:memory:) failed: %v", err)
 	t.Cleanup(func() { db.Close() })
 	return db
 }
@@ -20,9 +20,8 @@ func TestOpenSetsWALMode(t *testing.T) {
 	db := mustOpen(t)
 
 	var mode string
-	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
-		t.Fatalf("querying journal_mode: %v", err)
-	}
+	err := db.QueryRow("PRAGMA journal_mode").Scan(&mode)
+	testsupport.Must(t, err, "querying journal_mode: %v", err)
 	// In-memory databases may report "memory" instead of "wal" since WAL
 	// requires a file. Accept both.
 	if mode != "wal" && mode != "memory" {
@@ -34,9 +33,8 @@ func TestOpenSetsForeignKeys(t *testing.T) {
 	db := mustOpen(t)
 
 	var fk int
-	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
-		t.Fatalf("querying foreign_keys: %v", err)
-	}
+	err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk)
+	testsupport.Must(t, err, "querying foreign_keys: %v", err)
 	if fk != 1 {
 		t.Errorf("foreign_keys = %d, want 1", fk)
 	}
@@ -46,9 +44,8 @@ func TestOpenSetsBusyTimeout(t *testing.T) {
 	db := mustOpen(t)
 
 	var timeout int
-	if err := db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
-		t.Fatalf("querying busy_timeout: %v", err)
-	}
+	err := db.QueryRow("PRAGMA busy_timeout").Scan(&timeout)
+	testsupport.Must(t, err, "querying busy_timeout: %v", err)
 	if timeout != 5000 {
 		t.Errorf("busy_timeout = %d, want 5000", timeout)
 	}
@@ -57,9 +54,8 @@ func TestOpenSetsBusyTimeout(t *testing.T) {
 func TestInitializeCreatesAllTables(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	tables := []string{
 		"meta", "issues", "comments", "labels",
@@ -80,14 +76,11 @@ func TestInitializeCreatesAllTables(t *testing.T) {
 func TestInitializeSetsSchemaVersion(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion failed: %v", err)
-	}
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
 	if v != 1 {
 		t.Errorf("schema_version = %d, want 1", v)
 	}
@@ -96,17 +89,13 @@ func TestInitializeSetsSchemaVersion(t *testing.T) {
 func TestInitializeIsIdempotent(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("first Initialize failed: %v", err)
-	}
-	if err := Initialize(db); err != nil {
-		t.Fatalf("second Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "first Initialize failed: %v", err)
+	err = Initialize(db)
+	testsupport.Must(t, err, "second Initialize failed: %v", err)
 
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion failed: %v", err)
-	}
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
 	if v != 1 {
 		t.Errorf("schema_version = %d after double init, want 1", v)
 	}
@@ -115,14 +104,13 @@ func TestInitializeIsIdempotent(t *testing.T) {
 func TestForeignKeyEnforcement(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Try to insert a comment referencing a non-existent issue.
-	_, err := db.Exec(
+	_, err = db.Exec(
 		"INSERT INTO comments (issue_id, body, created_at) VALUES (999, 'test', ?)",
 		now,
 	)
@@ -134,9 +122,8 @@ func TestForeignKeyEnforcement(t *testing.T) {
 func TestCascadeDeleteIssueRemovesComments(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -145,9 +132,7 @@ func TestCascadeDeleteIssueRemovesComments(t *testing.T) {
 		"INSERT INTO issues (title, status, priority, kind, created_at, updated_at) VALUES ('test', 'backlog', 'none', 'task', ?, ?)",
 		now, now,
 	)
-	if err != nil {
-		t.Fatalf("inserting issue: %v", err)
-	}
+	testsupport.Must(t, err, "inserting issue: %v", err)
 	issueID, _ := res.LastInsertId()
 
 	// Insert a comment on that issue.
@@ -155,20 +140,16 @@ func TestCascadeDeleteIssueRemovesComments(t *testing.T) {
 		"INSERT INTO comments (issue_id, body, created_at) VALUES (?, 'a comment', ?)",
 		issueID, now,
 	)
-	if err != nil {
-		t.Fatalf("inserting comment: %v", err)
-	}
+	testsupport.Must(t, err, "inserting comment: %v", err)
 
 	// Delete the issue.
-	if _, err := db.Exec("DELETE FROM issues WHERE id = ?", issueID); err != nil {
-		t.Fatalf("deleting issue: %v", err)
-	}
+	_, err = db.Exec("DELETE FROM issues WHERE id = ?", issueID)
+	testsupport.Must(t, err, "deleting issue: %v", err)
 
 	// Comment should be gone.
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM comments WHERE issue_id = ?", issueID).Scan(&count); err != nil {
-		t.Fatalf("counting comments: %v", err)
-	}
+	err = db.QueryRow("SELECT COUNT(*) FROM comments WHERE issue_id = ?", issueID).Scan(&count)
+	testsupport.Must(t, err, "counting comments: %v", err)
 	if count != 0 {
 		t.Errorf("expected 0 comments after cascade delete, got %d", count)
 	}
@@ -177,25 +158,20 @@ func TestCascadeDeleteIssueRemovesComments(t *testing.T) {
 func TestMigrateNoOpAtLatestVersion(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate failed: %v", err)
-	}
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate failed: %v", err)
 
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion failed: %v", err)
-	}
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
 	if v != currentSchemaVersion {
 		t.Errorf("schema_version = %d after Migrate, want %d", v, currentSchemaVersion)
 	}
 
-	if err := Migrate(db); err != nil {
-		t.Fatalf("second Migrate failed: %v", err)
-	}
+	err = Migrate(db)
+	testsupport.Must(t, err, "second Migrate failed: %v", err)
 }
 
 // docV4Tables lists the five tables that v3→v4 must create.
@@ -221,19 +197,15 @@ func assertTableExists(t *testing.T, db *sql.DB, name string) {
 func TestMigrateV3ToV4_CleanDB(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate failed: %v", err)
 
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion failed: %v", err)
-	}
-	if v != 4 {
-		t.Errorf("schema_version = %d, want 4", v)
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
+	if v != currentSchemaVersion {
+		t.Errorf("schema_version = %d, want %d (currentSchemaVersion)", v, currentSchemaVersion)
 	}
 
 	for _, tbl := range docV4Tables {
@@ -244,58 +216,45 @@ func TestMigrateV3ToV4_CleanDB(t *testing.T) {
 func TestMigrateV3ToV4_FromExistingV3DB(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Bring DB up to v3 explicitly, then stamp schema_version=3 so Migrate's
 	// next invocation will only run v3→v4 (simulates a real upgrade path).
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin failed: %v", err)
-	}
-	if err := migrateV1ToV2(tx); err != nil {
-		t.Fatalf("migrateV1ToV2 failed: %v", err)
-	}
-	if err := migrateV2ToV3(tx); err != nil {
-		t.Fatalf("migrateV2ToV3 failed: %v", err)
-	}
-	if _, err := tx.Exec(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`); err != nil {
-		t.Fatalf("stamping v3 failed: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit failed: %v", err)
-	}
+	testsupport.Must(t, err, "Begin failed: %v", err)
+	err = migrateV1ToV2(tx)
+	testsupport.Must(t, err, "migrateV1ToV2 failed: %v", err)
+	err = migrateV2ToV3(tx)
+	testsupport.Must(t, err, "migrateV2ToV3 failed: %v", err)
+	_, err = tx.Exec(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`)
+	testsupport.Must(t, err, "stamping v3 failed: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit failed: %v", err)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := db.Exec(
 		"INSERT INTO issues (title, status, priority, kind, created_at, updated_at) VALUES ('preexisting', 'backlog', 'none', 'task', ?, ?)",
 		now, now,
 	)
-	if err != nil {
-		t.Fatalf("inserting pre-v4 issue failed: %v", err)
-	}
+	testsupport.Must(t, err, "inserting pre-v4 issue failed: %v", err)
 	preID, _ := res.LastInsertId()
 
-	if err := Migrate(db); err != nil {
-		t.Fatalf("v3→v4 Migrate failed: %v", err)
-	}
+	err = Migrate(db)
+	testsupport.Must(t, err, "v3→v4 Migrate failed: %v", err)
 
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion failed: %v", err)
-	}
-	if v != 4 {
-		t.Errorf("schema_version = %d after v3→v4 Migrate, want 4", v)
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
+	if v != currentSchemaVersion {
+		t.Errorf("schema_version = %d after Migrate, want %d (currentSchemaVersion)", v, currentSchemaVersion)
 	}
 	for _, tbl := range docV4Tables {
 		assertTableExists(t, db, tbl)
 	}
 
 	var title string
-	if err := db.QueryRow("SELECT title FROM issues WHERE id = ?", preID).Scan(&title); err != nil {
-		t.Fatalf("pre-existing issue row lost after migrate: %v", err)
-	}
+	err = db.QueryRow("SELECT title FROM issues WHERE id = ?", preID).Scan(&title)
+	testsupport.Must(t, err, "pre-existing issue row lost after migrate: %v", err)
 	if title != "preexisting" {
 		t.Errorf("pre-existing issue title = %q, want %q", title, "preexisting")
 	}
@@ -304,22 +263,17 @@ func TestMigrateV3ToV4_FromExistingV3DB(t *testing.T) {
 func TestMigrateV3ToV4_Idempotent(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("first Migrate failed: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("second Migrate failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
+	err = Migrate(db)
+	testsupport.Must(t, err, "first Migrate failed: %v", err)
+	err = Migrate(db)
+	testsupport.Must(t, err, "second Migrate failed: %v", err)
 
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion failed: %v", err)
-	}
-	if v != 4 {
-		t.Errorf("schema_version = %d after two Migrates, want 4", v)
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
+	if v != currentSchemaVersion {
+		t.Errorf("schema_version = %d after two Migrates, want %d (currentSchemaVersion)", v, currentSchemaVersion)
 	}
 	for _, tbl := range docV4Tables {
 		assertTableExists(t, db, tbl)
@@ -329,28 +283,21 @@ func TestMigrateV3ToV4_Idempotent(t *testing.T) {
 func TestMigrateV3ToV4_BuggyStampDefensive(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	// Bring DB through v2 and v3 (proposals must exist so the v2 defensive
 	// guard does not also fire), but skip v4 DDL and forge schema_version=4.
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin failed: %v", err)
-	}
-	if err := migrateV1ToV2(tx); err != nil {
-		t.Fatalf("migrateV1ToV2 failed: %v", err)
-	}
-	if err := migrateV2ToV3(tx); err != nil {
-		t.Fatalf("migrateV2ToV3 failed: %v", err)
-	}
-	if _, err := tx.Exec(`UPDATE meta SET value = '4' WHERE key = 'schema_version'`); err != nil {
-		t.Fatalf("buggy v4 stamp failed: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit failed: %v", err)
-	}
+	testsupport.Must(t, err, "Begin failed: %v", err)
+	err = migrateV1ToV2(tx)
+	testsupport.Must(t, err, "migrateV1ToV2 failed: %v", err)
+	err = migrateV2ToV3(tx)
+	testsupport.Must(t, err, "migrateV2ToV3 failed: %v", err)
+	_, err = tx.Exec(`UPDATE meta SET value = '4' WHERE key = 'schema_version'`)
+	testsupport.Must(t, err, "buggy v4 stamp failed: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit failed: %v", err)
 
 	var hasDocs bool
 	if err := db.QueryRow(
@@ -362,20 +309,17 @@ func TestMigrateV3ToV4_BuggyStampDefensive(t *testing.T) {
 		t.Fatal("precondition violated: docs table exists before defensive Migrate")
 	}
 
-	if err := Migrate(db); err != nil {
-		t.Fatalf("defensive Migrate failed: %v", err)
-	}
+	err = Migrate(db)
+	testsupport.Must(t, err, "defensive Migrate failed: %v", err)
 
 	for _, tbl := range docV4Tables {
 		assertTableExists(t, db, tbl)
 	}
 
 	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion failed: %v", err)
-	}
-	if v != 4 {
-		t.Errorf("schema_version = %d after defensive Migrate, want 4", v)
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
+	if v != currentSchemaVersion {
+		t.Errorf("schema_version = %d after defensive Migrate, want %d (currentSchemaVersion)", v, currentSchemaVersion)
 	}
 }
 
@@ -391,9 +335,8 @@ func TestDB_PinnedToSingleConnection(t *testing.T) {
 func TestIssueRelationsUniqueConstraint(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -403,19 +346,15 @@ func TestIssueRelationsUniqueConstraint(t *testing.T) {
 			"INSERT INTO issues (title, status, priority, kind, created_at, updated_at) VALUES (?, 'backlog', 'none', 'task', ?, ?)",
 			"issue", now, now,
 		)
-		if err != nil {
-			t.Fatalf("inserting issue %d: %v", i, err)
-		}
+		testsupport.Must(t, err, "inserting issue %d: %v", i, err)
 	}
 
 	// Insert a relation.
-	_, err := db.Exec(
+	_, err = db.Exec(
 		"INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at) VALUES (1, 2, 'blocks', ?)",
 		now,
 	)
-	if err != nil {
-		t.Fatalf("inserting relation: %v", err)
-	}
+	testsupport.Must(t, err, "inserting relation: %v", err)
 
 	// Duplicate should fail.
 	_, err = db.Exec(
@@ -430,9 +369,8 @@ func TestIssueRelationsUniqueConstraint(t *testing.T) {
 func TestParentIDSetNullOnDelete(t *testing.T) {
 	db := mustOpen(t)
 
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize failed: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -441,9 +379,7 @@ func TestParentIDSetNullOnDelete(t *testing.T) {
 		"INSERT INTO issues (title, status, priority, kind, created_at, updated_at) VALUES ('parent', 'backlog', 'none', 'task', ?, ?)",
 		now, now,
 	)
-	if err != nil {
-		t.Fatalf("inserting parent: %v", err)
-	}
+	testsupport.Must(t, err, "inserting parent: %v", err)
 	parentID, _ := res.LastInsertId()
 
 	// Create child issue with parent_id.
@@ -451,21 +387,17 @@ func TestParentIDSetNullOnDelete(t *testing.T) {
 		"INSERT INTO issues (parent_id, title, status, priority, kind, created_at, updated_at) VALUES (?, 'child', 'backlog', 'none', 'task', ?, ?)",
 		parentID, now, now,
 	)
-	if err != nil {
-		t.Fatalf("inserting child: %v", err)
-	}
+	testsupport.Must(t, err, "inserting child: %v", err)
 	childID, _ := res.LastInsertId()
 
 	// Delete the parent.
-	if _, err := db.Exec("DELETE FROM issues WHERE id = ?", parentID); err != nil {
-		t.Fatalf("deleting parent: %v", err)
-	}
+	_, err = db.Exec("DELETE FROM issues WHERE id = ?", parentID)
+	testsupport.Must(t, err, "deleting parent: %v", err)
 
 	// Child should still exist with NULL parent_id.
 	var parentIDVal sql.NullInt64
-	if err := db.QueryRow("SELECT parent_id FROM issues WHERE id = ?", childID).Scan(&parentIDVal); err != nil {
-		t.Fatalf("querying child: %v", err)
-	}
+	err = db.QueryRow("SELECT parent_id FROM issues WHERE id = ?", childID).Scan(&parentIDVal)
+	testsupport.Must(t, err, "querying child: %v", err)
 	if parentIDVal.Valid {
 		t.Errorf("expected NULL parent_id after parent delete, got %d", parentIDVal.Int64)
 	}

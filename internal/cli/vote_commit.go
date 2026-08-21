@@ -38,8 +38,8 @@ var voteCommitCmd = &cobra.Command{
 
 		err = db.CommitProposal(conn, proposalID, outcome, escalationReason)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("proposal %s not found", model.FormatProposalID(proposalID)), output.ErrNotFound)
+			if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
+				return e
 			}
 			if errors.Is(err, db.ErrConflict) {
 				return cmdErr(err, output.ErrConflict)

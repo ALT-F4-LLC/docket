@@ -8,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +19,10 @@ func nextCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 	cmd.Flags().StringSlice("label", nil, "")
 	cmd.Flags().StringSlice("type", nil, "")
 	cmd.Flags().Int("limit", limit, "")
+	// --run is the phase-3 mode switch (TDD §6.3.1). It is registered here so
+	// runNext's dispatch resolves; every issue-mode test leaves it UNSET, which
+	// is exactly the state a workflow-free repo is always in.
+	cmd.Flags().String("run", "", "")
 	return cmd
 }
 
@@ -41,9 +46,8 @@ func runNextJSON(t *testing.T, conn *sql.DB, limit int) nextJSON {
 	t.Helper()
 	cmd := nextCmdWithDB(conn, limit)
 	w, buf := bufWriter(true)
-	if err := runNext(cmd, nil, w); err != nil {
-		t.Fatalf("runNext: %v", err)
-	}
+	err := runNext(cmd, nil, w)
+	testsupport.Must(t, err, "runNext: %v", err)
 	var nj nextJSON
 	if err := json.Unmarshal(buf.Bytes(), &nj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
@@ -93,18 +97,16 @@ func TestNextJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 
 	cmd := nextCmdWithDB(conn, 10)
 	w, buf := bufWriter(true)
-	if err := runNext(cmd, nil, w); err != nil {
-		t.Fatalf("runNext: %v", err)
-	}
+	err := runNext(cmd, nil, w)
+	testsupport.Must(t, err, "runNext: %v", err)
 
 	var env struct {
 		Data struct {
 			Issues []map[string]json.RawMessage `json:"issues"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err = json.Unmarshal(buf.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if len(env.Data.Issues) != 1 {
 		t.Fatalf("issues = %d, want 1", len(env.Data.Issues))
 	}
@@ -112,6 +114,33 @@ func TestNextJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 		if got := string(env.Data.Issues[0][key]); got != "[]" {
 			t.Errorf("%s = %s, want []", key, got)
 		}
+	}
+}
+
+// TestNextJSON_NoReadyIssuesIsAnEmptyArray pins the same "[] never null"
+// contract as TestNextJSON_FilesAndDocsEmptyAreArrays, one level up: FindReady
+// and filterReady return a nil slice when nothing is ready (planner/plan.go's
+// `var ready []*model.Issue`), and nextResult has no custom MarshalJSON like
+// issueListPayload does — an unguarded nil would serialize `.data.issues` as
+// JSON null, breaking any consumer iterating it.
+func TestNextJSON_NoReadyIssuesIsAnEmptyArray(t *testing.T) {
+	conn := newTestDB(t)
+	createIssue(t, conn, "already done", model.StatusDone, model.PriorityHigh)
+
+	cmd := nextCmdWithDB(conn, 10)
+	w, buf := bufWriter(true)
+	err := runNext(cmd, nil, w)
+	testsupport.Must(t, err, "runNext: %v", err)
+
+	var env struct {
+		Data struct {
+			Issues json.RawMessage `json:"issues"`
+		} `json:"data"`
+	}
+	err = json.Unmarshal(buf.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
+	if got := string(env.Data.Issues); got != "[]" {
+		t.Errorf("issues = %s, want []", got)
 	}
 }
 
@@ -128,6 +157,18 @@ func TestNextHumanTableUnchanged(t *testing.T) {
 	createIssue(t, without, "Alpha", model.StatusTodo, model.PriorityHigh)
 	createIssue(t, without, "Beta", model.StatusTodo, model.PriorityMedium)
 
+	// THE CLOCK IS PINNED (E-7). The table renders `updated_at` as a RELATIVE
+	// time (`humanize.Time`, render/table.go), and the two databases are built
+	// a few milliseconds apart — so a run that straddles a second boundary
+	// rendered "now" for one and "1 second ago" for the other, failing on a
+	// difference this test is not about.
+	//
+	// Both sides are stamped to the same instant, which makes the comparison
+	// measure what it claims to: whether linked docs and files change the
+	// table.
+	pinTimestamps(t, withContext)
+	pinTimestamps(t, without)
+
 	gotWith := runNextHuman(t, withContext)
 	gotWithout := runNextHuman(t, without)
 
@@ -139,13 +180,29 @@ func TestNextHumanTableUnchanged(t *testing.T) {
 	}
 }
 
+// pinTimestamps stamps every issue in a test database to one fixed instant, so
+// a renderer that formats times RELATIVE to now produces identical output no
+// matter when the test runs or how long it took to get here.
+//
+// The instant is a literal rather than a time.Now() offset: two databases
+// pinned to "an hour ago" computed a few milliseconds apart are still two
+// different instants, which is the flake this exists to remove.
+func pinTimestamps(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	const pinned = "2026-01-01T00:00:00Z"
+	if _, err := conn.Exec(
+		`UPDATE issues SET created_at = ?, updated_at = ?`, pinned, pinned,
+	); err != nil {
+		t.Fatalf("pinning timestamps: %v", err)
+	}
+}
+
 func runNextHuman(t *testing.T, conn *sql.DB) string {
 	t.Helper()
 	cmd := nextCmdWithDB(conn, 10)
 	w, buf := bufWriter(false)
-	if err := runNext(cmd, nil, w); err != nil {
-		t.Fatalf("runNext: %v", err)
-	}
+	err := runNext(cmd, nil, w)
+	testsupport.Must(t, err, "runNext: %v", err)
 	return buf.String()
 }
 
@@ -173,9 +230,8 @@ func TestNext_HydratesPostLimitOnly(t *testing.T) {
 
 	cmd := nextCmdWithDB(conn, 1)
 	w, buf := bufWriter(true)
-	if err := runNext(cmd, nil, w); err != nil {
-		t.Fatalf("runNext: %v", err)
-	}
+	err := runNext(cmd, nil, w)
+	testsupport.Must(t, err, "runNext: %v", err)
 	if strings.Contains(buf.String(), "Second Doc") {
 		t.Errorf("beyond-limit issue's doc leaked into output:\n%s", buf.String())
 	}

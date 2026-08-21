@@ -8,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func linkProposalDoc(t *testing.T, conn *sql.DB, proposalID, docID int) {
@@ -27,9 +28,8 @@ func TestVoteShowJSON_LinkedDocsArrayShapeAndOrder(t *testing.T) {
 
 	cmd := cmdWithDB(conn)
 	w, buf := bufWriter(true)
-	if err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w); err != nil {
-		t.Fatalf("runVoteShow: %v", err)
-	}
+	err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w)
+	testsupport.Must(t, err, "runVoteShow: %v", err)
 
 	var env struct {
 		Data struct {
@@ -57,18 +57,15 @@ func TestVoteShowJSON_LinkedDocsEmptyIsArray(t *testing.T) {
 
 	cmd := cmdWithDB(conn)
 	w, buf := bufWriter(true)
-	if err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w); err != nil {
-		t.Fatalf("runVoteShow: %v", err)
-	}
+	err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w)
+	testsupport.Must(t, err, "runVoteShow: %v", err)
 
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
+	err = json.Unmarshal(buf.Bytes(), &raw)
+	testsupport.Must(t, err, "unmarshal envelope: %v", err)
 	var data map[string]json.RawMessage
-	if err := json.Unmarshal(raw["data"], &data); err != nil {
-		t.Fatalf("unmarshal data: %v", err)
-	}
+	err = json.Unmarshal(raw["data"], &data)
+	testsupport.Must(t, err, "unmarshal data: %v", err)
 	docsRaw, ok := data["linked_docs"]
 	if !ok {
 		t.Fatalf("linked_docs key absent:\n%s", buf.String())
@@ -87,9 +84,8 @@ func TestVoteShow_RendersLinkedDocsSection(t *testing.T) {
 
 	cmd := cmdWithDB(conn)
 	w, buf := bufWriter(false)
-	if err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w); err != nil {
-		t.Fatalf("runVoteShow: %v", err)
-	}
+	err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w)
+	testsupport.Must(t, err, "runVoteShow: %v", err)
 
 	out := buf.String()
 	if !strings.Contains(out, "Linked Docs") {
@@ -119,9 +115,8 @@ func TestVoteShow_OmitsLinkedDocsWhenEmpty(t *testing.T) {
 
 			cmd := cmdWithDB(conn)
 			w, buf := bufWriter(false)
-			if err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w); err != nil {
-				t.Fatalf("runVoteShow: %v", err)
-			}
+			err := runVoteShow(cmd, []string{model.FormatProposalID(pid)}, w)
+			testsupport.Must(t, err, "runVoteShow: %v", err)
 			if strings.Contains(buf.String(), "Linked Docs") {
 				t.Errorf("empty proposal should omit Linked Docs section:\n%s", buf.String())
 			}

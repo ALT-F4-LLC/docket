@@ -36,17 +36,14 @@ var labelAddCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
-		issue, err := db.GetIssue(conn, id)
+		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+			return err
 		}
 
 		color, _ := cmd.Flags().GetString("color")
@@ -60,8 +57,8 @@ var labelAddCmd = &cobra.Command{
 		}
 
 		if err := db.AddLabelsToIssue(conn, id, labelNames, color, author); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
+			if e := notFound(err, fmt.Sprintf("issue %s", args[0])); e != nil {
+				return e
 			}
 			if errors.Is(err, db.ErrLabelColorConflict) {
 				return cmdErr(fmt.Errorf("label already exists with a different color"), output.ErrValidation)
@@ -87,17 +84,14 @@ var labelRmCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
-		issue, err := db.GetIssue(conn, id)
+		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+			return err
 		}
 
 		author := config.DefaultAuthor()
@@ -110,8 +104,8 @@ var labelRmCmd = &cobra.Command{
 		}
 
 		if err := db.RemoveLabelsFromIssue(conn, id, labelNames, author); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue or label not found"), output.ErrNotFound)
+			if e := notFound(err, "issue or label"); e != nil {
+				return e
 			}
 			if errors.Is(err, db.ErrNotAttached) {
 				return cmdErr(fmt.Errorf("label is not attached to %s", model.FormatID(id)), output.ErrValidation)
@@ -137,7 +131,7 @@ var labelListCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		labels, err := db.ListAllLabels(conn)
+		labels, err := db.ListAllLabels(conn, getProjectID(cmd))
 		if err != nil {
 			return cmdErr(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
 		}
@@ -216,10 +210,10 @@ var labelDeleteCmd = &cobra.Command{
 		name := args[0]
 		force, _ := cmd.Flags().GetBool("force")
 
-		label, err := db.GetLabelByName(conn, name)
+		label, err := db.GetLabelByName(conn, getProjectID(cmd), name)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("label %q not found", name), output.ErrNotFound)
+			if e := notFound(err, fmt.Sprintf("label %q", name)); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("fetching label: %w", err), output.ErrGeneral)
 		}

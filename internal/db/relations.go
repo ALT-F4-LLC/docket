@@ -131,12 +131,8 @@ func DeleteRelation(db *sql.DB, sourceID, targetID int, relType string) error {
 		return fmt.Errorf("deleting relation: %w", err)
 	}
 
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
+	if err := requireAffected(res); err != nil {
+		return err
 	}
 
 	rt := model.RelationType(relType)
@@ -166,115 +162,101 @@ func IssueExists(db *sql.DB, issueID int) (bool, error) {
 }
 
 // GetIssueRelations returns all relations where the given issue is either the
-// source or the target, ordered by creation time ascending.
+// source or the target, in INSERTION order (`id`) — see GetAllRelations for
+// why that is the creation order rather than an approximation of it.
 func GetIssueRelations(db *sql.DB, issueID int) ([]model.Relation, error) {
 	rows, err := db.Query(
 		`SELECT id, source_issue_id, target_issue_id, relation_type, created_at
 		 FROM issue_relations
 		 WHERE source_issue_id = ? OR target_issue_id = ?
-		 ORDER BY created_at ASC`,
+		 ORDER BY id ASC`,
 		issueID, issueID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying relations: %w", err)
 	}
-	defer rows.Close()
-
-	var relations []model.Relation
-	for rows.Next() {
-		var r model.Relation
-		var relType string
-		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceIssueID, &r.TargetIssueID, &relType, &createdAt); err != nil {
-			return nil, fmt.Errorf("scanning relation row: %w", err)
-		}
-		r.RelationType = model.RelationType(relType)
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at: %w", err)
-		}
-		r.CreatedAt = t
-		relations = append(relations, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating relation rows: %w", err)
+	relations, err := scanRows(rows, "relation rows", scanRelationFrom)
+	if err != nil {
+		return nil, err
 	}
 
 	return relations, nil
 }
 
 // GetAllDirectionalRelations returns all relations where the relation type is
-// "blocks" or "depends_on", ordered by creation time ascending.
+// "blocks" or "depends_on", in INSERTION order (`id`) — see GetAllRelations.
 func GetAllDirectionalRelations(db *sql.DB) ([]model.Relation, error) {
 	rows, err := db.Query(
 		`SELECT id, source_issue_id, target_issue_id, relation_type, created_at
 		 FROM issue_relations
 		 WHERE relation_type IN (?, ?)
-		 ORDER BY created_at ASC`,
+		 ORDER BY id ASC`,
 		string(model.RelationBlocks), string(model.RelationDependsOn),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying directional relations: %w", err)
 	}
-	defer rows.Close()
-
-	var relations []model.Relation
-	for rows.Next() {
-		var r model.Relation
-		var relType string
-		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceIssueID, &r.TargetIssueID, &relType, &createdAt); err != nil {
-			return nil, fmt.Errorf("scanning relation row: %w", err)
-		}
-		r.RelationType = model.RelationType(relType)
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at: %w", err)
-		}
-		r.CreatedAt = t
-		relations = append(relations, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating relation rows: %w", err)
+	relations, err := scanRows(rows, "relation rows", scanRelationFrom)
+	if err != nil {
+		return nil, err
 	}
 
 	return relations, nil
 }
 
-// GetAllRelations returns every relation in the database, ordered by creation
-// time ascending.
-func GetAllRelations(db *sql.DB) ([]model.Relation, error) {
+// GetAllRelations returns every relation in the database, in INSERTION order
+// (`id`).
+//
+// It was `ORDER BY created_at ASC` with no tiebreak, and `created_at` here is
+// RFC3339 at SECOND resolution (see AddRelation). Relations created inside one
+// second therefore had NO defined relative order, so `docket export` run twice
+// against an unchanged database could emit the relations array in two
+// different orders and a manifest diff would carry noise that is not a change
+// (DKT-330).
+//
+// `id` is `INTEGER PRIMARY KEY AUTOINCREMENT`: strictly ascending, never
+// reused. Ordering by it is not an approximation of creation order, it IS
+// creation order, and it is total. Thirteen of the fifteen export-manifest
+// readers already order by a primary or natural key; this was the one with no
+// total order at all.
+//
+// Same defect class as DKT-378's on `comments`, reached through another
+// table — and the same remedy, for the same reason.
+func GetAllRelations(db *sql.DB, projectID int) ([]model.Relation, error) {
+	where, args := projectFilterVia(projectID, `source_issue_id IN (SELECT id FROM issues WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT id, source_issue_id, target_issue_id, relation_type, created_at
-		 FROM issue_relations
-		 ORDER BY created_at ASC`,
+		 FROM issue_relations `+where+`
+		 ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all relations: %w", err)
 	}
-	defer rows.Close()
-
-	var relations []model.Relation
-	for rows.Next() {
-		var r model.Relation
-		var relType string
-		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceIssueID, &r.TargetIssueID, &relType, &createdAt); err != nil {
-			return nil, fmt.Errorf("scanning relation row: %w", err)
-		}
-		r.RelationType = model.RelationType(relType)
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at: %w", err)
-		}
-		r.CreatedAt = t
-		relations = append(relations, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating relation rows: %w", err)
+	relations, err := scanRows(rows, "relation rows", scanRelationFrom)
+	if err != nil {
+		return nil, err
 	}
 
 	return relations, nil
+}
+
+// scanRelationFrom scans one issue_relations row. Shared by every relation
+// list query in this file — they differ only in their WHERE clause, never in
+// column shape.
+func scanRelationFrom(r *sql.Rows) (model.Relation, error) {
+	var rel model.Relation
+	var relType string
+	var createdAt string
+	if err := r.Scan(&rel.ID, &rel.SourceIssueID, &rel.TargetIssueID, &relType, &createdAt); err != nil {
+		return model.Relation{}, fmt.Errorf("scanning relation row: %w", err)
+	}
+	rel.RelationType = model.RelationType(relType)
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return model.Relation{}, fmt.Errorf("parsing created_at: %w", err)
+	}
+	rel.CreatedAt = t
+	return rel, nil
 }
 
 // InsertRelationWithID inserts a relation with a specific ID (not auto-increment),

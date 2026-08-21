@@ -2,5 +2,18 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "The JSON Schema validator is a BEHAVIOR-BEARING dependency: a patch bump can change a validation verdict, which changes whether a worker's `complete` is refused. That is a behavior change arriving through a dependency PR nobody reads as a behavior change (docs/tdd/payloads-thresholds.md §4.1). Hold it for a week and label it so the bump is reviewed against internal/schema/testdata/corpus — TestCorpus is the gate — rather than auto-merged.",
+      "matchPackageNames": [
+        "github.com/santhosh-tekuri/jsonschema/v6"
+      ],
+      "minimumReleaseAge": "7 days",
+      "automerge": false,
+      "addLabels": [
+        "review-against-the-schema-corpus"
+      ]
+    }
   ]
 }

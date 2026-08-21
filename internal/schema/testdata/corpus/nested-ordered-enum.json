@@ -1,0 +1,21 @@
+{
+  "why": "O5: a nested ordered_enum is legal and validates; it is simply not indexed, since no predicate can name it",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "risk": {"type": "string", "enum": ["low", "high"], "ordered_enum": true},
+        "detail": {
+          "type": "object",
+          "properties": {
+            "tier": {"type": "string", "enum": ["one", "two", "three"], "ordered_enum": true}
+          }
+        }
+      }
+    }
+  },
+  "document": [{"risk": "low", "detail": {"tier": "two"}}],
+  "valid": true
+}

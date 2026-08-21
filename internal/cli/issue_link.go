@@ -42,9 +42,9 @@ var linkAddCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		sourceID, err := model.ParseID(args[0])
+		sourceID, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
 		relType, err := model.ParseRelationType(args[1])
@@ -65,8 +65,8 @@ var linkAddCmd = &cobra.Command{
 
 		relID, err := db.CreateRelation(conn, rel)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue not found"), output.ErrNotFound)
+			if e := notFound(err, "issue"); e != nil {
+				return e
 			}
 			if errors.Is(err, db.ErrSelfRelation) {
 				return cmdErr(fmt.Errorf("cannot link an issue to itself"), output.ErrValidation)
@@ -96,9 +96,9 @@ var linkRemoveCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		sourceID, err := model.ParseID(args[0])
+		sourceID, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
 		relType, err := model.ParseRelationType(args[1])
@@ -112,8 +112,8 @@ var linkRemoveCmd = &cobra.Command{
 		}
 
 		if err := db.DeleteRelation(conn, sourceID, targetID, string(relType)); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("relation not found"), output.ErrNotFound)
+			if e := notFound(err, "relation"); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("deleting relation: %w", err), output.ErrGeneral)
 		}
@@ -138,9 +138,9 @@ var linkListCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
 		exists, err := db.IssueExists(conn, id)

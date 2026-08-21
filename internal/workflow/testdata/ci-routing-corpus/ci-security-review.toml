@@ -1,0 +1,12 @@
+# CI-only routing-sweep fixture — see README.md in this directory.
+#
+# Yields only to ci-urgent.
+
+[pipeline]
+name        = "ci-security-review"
+version     = 1
+description = "Routing-sweep fixture: second-precedence lane, triggered by ci-security-review."
+
+[match]
+labels_any    = ["ci-security-review"]
+unless_labels = ["ci-urgent"]

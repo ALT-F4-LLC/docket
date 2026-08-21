@@ -1,0 +1,16 @@
+{
+  "why": "the hazard V30's probe exists to catch at register time: a closed item schema refuses the aggregate's own output keys",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {"risk": {"type": "string", "enum": ["low", "high"], "ordered_enum": true}},
+      "required": ["risk"],
+      "additionalProperties": false
+    }
+  },
+  "document": [{"risk": "high", "members": ["low", "high"], "held": true}],
+  "valid": false,
+  "message_contains": "payload[0]:"
+}

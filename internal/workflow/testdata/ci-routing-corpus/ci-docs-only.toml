@@ -1,0 +1,15 @@
+# CI-only routing-sweep fixture — see README.md in this directory.
+#
+# Yields to every higher lane above; outranks only the catch-all (ci-standard).
+
+[pipeline]
+name        = "ci-docs-only-change"
+version     = 1
+description = "Routing-sweep fixture: sixth-precedence lane, triggered by ci-docs-only."
+
+[match]
+labels_any    = ["ci-docs-only"]
+unless_labels = [
+  "ci-urgent", "ci-security-review", "ci-breaking-change",
+  "ci-infra", "ci-experimental",
+]

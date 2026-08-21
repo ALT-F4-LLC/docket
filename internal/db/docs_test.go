@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // mustCreateDoc creates a doc with sensible defaults and returns the new ID.
@@ -19,9 +20,7 @@ func mustCreateDoc(t *testing.T, db *sql.DB, title, typ, status, body string) in
 		Body:   body,
 		Author: "tester",
 	})
-	if err != nil {
-		t.Fatalf("CreateDoc(%q): %v", title, err)
-	}
+	testsupport.Must(t, err, "CreateDoc(%q): %v", title, err)
 	return id
 }
 
@@ -33,9 +32,7 @@ func TestCreateDoc_InsertsRevision1(t *testing.T) {
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "body v1")
 
 	revs, err := ListDocRevisions(db, id)
-	if err != nil {
-		t.Fatalf("ListDocRevisions: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocRevisions: %v", err)
 	if len(revs) != 1 {
 		t.Fatalf("len(revs) = %d, want 1", len(revs))
 	}
@@ -63,9 +60,7 @@ func TestCreateDoc_ParityWithDocBody(t *testing.T) {
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "hello\n")
 
 	d, err := GetDoc(db, id)
-	if err != nil {
-		t.Fatalf("GetDoc: %v", err)
-	}
+	testsupport.Must(t, err, "GetDoc: %v", err)
 	revs, _ := ListDocRevisions(db, id)
 	if d.Body != revs[0].Body {
 		t.Errorf("doc.Body = %q, rev.Body = %q (must match)", d.Body, revs[0].Body)
@@ -77,9 +72,7 @@ func TestCreateDoc_ParityWithDocBody(t *testing.T) {
 func updateBody(t *testing.T, db *sql.DB, id int, body string) int {
 	t.Helper()
 	rev, err := UpdateDoc(db, id, DocUpdate{Body: &body, Author: "editor"})
-	if err != nil {
-		t.Fatalf("UpdateDoc body: %v", err)
-	}
+	testsupport.Must(t, err, "UpdateDoc body: %v", err)
 	return rev
 }
 
@@ -106,9 +99,7 @@ func TestUpdateDoc_AppendsRevisionOnStatusChange(t *testing.T) {
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
 	newStatus := "approved"
 	rev, err := UpdateDoc(db, id, DocUpdate{Status: &newStatus, Author: "voter"})
-	if err != nil {
-		t.Fatalf("UpdateDoc status: %v", err)
-	}
+	testsupport.Must(t, err, "UpdateDoc status: %v", err)
 	if rev != 2 {
 		t.Fatalf("rev = %d, want 2", rev)
 	}
@@ -127,9 +118,7 @@ func TestUpdateDoc_AppendsRevisionOnTitleChange(t *testing.T) {
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
 	newTitle := "second title"
 	rev, err := UpdateDoc(db, id, DocUpdate{Title: &newTitle, Author: "editor"})
-	if err != nil {
-		t.Fatalf("UpdateDoc title: %v", err)
-	}
+	testsupport.Must(t, err, "UpdateDoc title: %v", err)
 	if rev != 2 {
 		t.Fatalf("rev = %d, want 2", rev)
 	}
@@ -144,9 +133,7 @@ func TestUpdateDoc_AppendsRevisionOnTypeChange(t *testing.T) {
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
 	newType := "adr"
 	rev, err := UpdateDoc(db, id, DocUpdate{Type: &newType, Author: "editor"})
-	if err != nil {
-		t.Fatalf("UpdateDoc type: %v", err)
-	}
+	testsupport.Must(t, err, "UpdateDoc type: %v", err)
 	if rev != 2 {
 		t.Fatalf("rev = %d, want 2", rev)
 	}
@@ -166,9 +153,7 @@ func TestUpdateDoc_CombinedChangeKind(t *testing.T) {
 		Body:   &newBody,
 		Author: "voter",
 	})
-	if err != nil {
-		t.Fatalf("UpdateDoc combined: %v", err)
-	}
+	testsupport.Must(t, err, "UpdateDoc combined: %v", err)
 	if rev != 2 {
 		t.Fatalf("rev = %d, want 2", rev)
 	}
@@ -189,9 +174,7 @@ func TestUpdateDoc_NoRevisionOnNoOpEdit(t *testing.T) {
 	// Trailing-newline-only change; TrimRight equality treats this as no-op.
 	bodyWithExtraNL := "v1\n\n\n"
 	rev, err := UpdateDoc(db, id, DocUpdate{Body: &bodyWithExtraNL, Author: "editor"})
-	if err != nil {
-		t.Fatalf("UpdateDoc no-op: %v", err)
-	}
+	testsupport.Must(t, err, "UpdateDoc no-op: %v", err)
 	if rev != 0 {
 		t.Fatalf("rev = %d, want 0 (no-op)", rev)
 	}
@@ -209,9 +192,7 @@ func TestUpdateDoc_BodyEqualityAfterTrimRight(t *testing.T) {
 	for _, c := range candidates {
 		c := c
 		rev, err := UpdateDoc(db, id, DocUpdate{Body: &c, Author: "editor"})
-		if err != nil {
-			t.Fatalf("UpdateDoc(%q): %v", c, err)
-		}
+		testsupport.Must(t, err, "UpdateDoc(%q): %v", c, err)
 		if rev != 0 {
 			t.Errorf("UpdateDoc(%q): rev=%d, want 0", c, rev)
 		}
@@ -227,9 +208,8 @@ func TestUpdateDoc_BodyParity(t *testing.T) {
 	db := mustInitAndMigrate(t)
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
 	newBody := "v2 — different"
-	if _, err := UpdateDoc(db, id, DocUpdate{Body: &newBody, Author: "editor"}); err != nil {
-		t.Fatalf("UpdateDoc: %v", err)
-	}
+	_, err := UpdateDoc(db, id, DocUpdate{Body: &newBody, Author: "editor"})
+	testsupport.Must(t, err, "UpdateDoc: %v", err)
 
 	d, _ := GetDoc(db, id)
 	revs, _ := ListDocRevisions(db, id)
@@ -265,23 +245,19 @@ func TestListDocsWithCounts_NoNPlusOne(t *testing.T) {
 
 	// Assert the exact query the function uses produces a single-pass plan.
 	rows, err := db.Query("EXPLAIN QUERY PLAN " + listDocsWithCountsBaseSQL + " GROUP BY d.id")
-	if err != nil {
-		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
-	}
+	testsupport.Must(t, err, "EXPLAIN QUERY PLAN: %v", err)
 	defer rows.Close()
 
 	var plan []string
 	for rows.Next() {
 		var selectID, order, from int
 		var detail string
-		if err := rows.Scan(&selectID, &order, &from, &detail); err != nil {
-			t.Fatalf("scan plan row: %v", err)
-		}
+		err := rows.Scan(&selectID, &order, &from, &detail)
+		testsupport.Must(t, err, "scan plan row: %v", err)
 		plan = append(plan, detail)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("EXPLAIN rows.Err: %v", err)
-	}
+	err = rows.Err()
+	testsupport.Must(t, err, "EXPLAIN rows.Err: %v", err)
 	if len(plan) == 0 {
 		t.Fatalf("EXPLAIN QUERY PLAN returned no rows")
 	}
@@ -311,9 +287,7 @@ func TestListDocsWithCounts_NoNPlusOne(t *testing.T) {
 
 	// Behavioural check: the call returns the right counts for each doc.
 	summaries, total, err := ListDocsWithCounts(db, DocListOptions{Sort: "id", SortDir: "asc"})
-	if err != nil {
-		t.Fatalf("ListDocsWithCounts: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocsWithCounts: %v", err)
 	if total != 5 {
 		t.Errorf("total = %d, want 5", total)
 	}
@@ -337,9 +311,7 @@ func TestListDocsWithCounts_FilterByType(t *testing.T) {
 	mustCreateDoc(t, db, "c", "tdd", "draft", "x")
 
 	summaries, total, err := ListDocsWithCounts(db, DocListOptions{Types: []string{"tdd"}})
-	if err != nil {
-		t.Fatalf("ListDocsWithCounts: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocsWithCounts: %v", err)
 	if total != 2 {
 		t.Errorf("total = %d, want 2", total)
 	}
@@ -360,9 +332,7 @@ func TestListDocsWithCounts_FilterByStatus(t *testing.T) {
 	mustCreateDoc(t, db, "c", "tdd", "draft", "x")
 
 	summaries, total, err := ListDocsWithCounts(db, DocListOptions{Statuses: []string{"approved"}})
-	if err != nil {
-		t.Fatalf("ListDocsWithCounts: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocsWithCounts: %v", err)
 	if total != 1 {
 		t.Errorf("total = %d, want 1", total)
 	}
@@ -382,9 +352,7 @@ func TestListDocs_OffsetWithoutLimitSkipsRows(t *testing.T) {
 	}
 
 	docs, total, err := ListDocs(db, DocListOptions{Sort: "id", SortDir: "asc", Offset: 2})
-	if err != nil {
-		t.Fatalf("ListDocs: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocs: %v", err)
 	if total != 6 {
 		t.Errorf("total = %d, want 6", total)
 	}
@@ -407,9 +375,7 @@ func TestListDocsWithCounts_OffsetWithoutLimitSkipsRows(t *testing.T) {
 	}
 
 	summaries, total, err := ListDocsWithCounts(db, DocListOptions{Sort: "id", SortDir: "asc", Offset: 2})
-	if err != nil {
-		t.Fatalf("ListDocsWithCounts: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocsWithCounts: %v", err)
 	if total != 6 {
 		t.Errorf("total = %d, want 6", total)
 	}
@@ -433,9 +399,7 @@ func TestGetDocRevision(t *testing.T) {
 	updateBody(t, db, id, "v3")
 
 	r, err := GetDocRevision(db, id, 2)
-	if err != nil {
-		t.Fatalf("GetDocRevision rev=2: %v", err)
-	}
+	testsupport.Must(t, err, "GetDocRevision rev=2: %v", err)
 	if r.RevisionNumber != 2 {
 		t.Errorf("RevisionNumber = %d, want 2", r.RevisionNumber)
 	}
@@ -445,9 +409,7 @@ func TestGetDocRevision(t *testing.T) {
 
 	// rev == 0 returns the current revision.
 	r0, err := GetDocRevision(db, id, 0)
-	if err != nil {
-		t.Fatalf("GetDocRevision rev=0: %v", err)
-	}
+	testsupport.Must(t, err, "GetDocRevision rev=0: %v", err)
 	if r0.RevisionNumber != 3 {
 		t.Errorf("rev=0 RevisionNumber = %d, want 3 (current)", r0.RevisionNumber)
 	}
@@ -487,14 +449,12 @@ func TestDeleteDoc_CascadesRevisions(t *testing.T) {
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
 	updateBody(t, db, id, "v2")
 
-	if err := DeleteDoc(db, id, true); err != nil {
-		t.Fatalf("DeleteDoc: %v", err)
-	}
+	err := DeleteDoc(db, id, true)
+	testsupport.Must(t, err, "DeleteDoc: %v", err)
 
 	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM doc_revisions WHERE doc_id = ?", id).Scan(&n); err != nil {
-		t.Fatalf("count revisions: %v", err)
-	}
+	err = db.QueryRow("SELECT COUNT(*) FROM doc_revisions WHERE doc_id = ?", id).Scan(&n)
+	testsupport.Must(t, err, "count revisions: %v", err)
 	if n != 0 {
 		t.Errorf("revisions remaining = %d, want 0", n)
 	}
@@ -505,17 +465,14 @@ func TestDeleteDoc_CascadesLinks(t *testing.T) {
 	docID := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
 	issueID := createTestIssue(t, db, "an issue", model.StatusTodo, model.PriorityMedium)
 
-	if err := LinkDocIssue(db, docID, issueID); err != nil {
-		t.Fatalf("LinkDocIssue: %v", err)
-	}
-	if err := DeleteDoc(db, docID, true); err != nil {
-		t.Fatalf("DeleteDoc cascade: %v", err)
-	}
+	err := LinkDocIssue(db, docID, issueID)
+	testsupport.Must(t, err, "LinkDocIssue: %v", err)
+	err = DeleteDoc(db, docID, true)
+	testsupport.Must(t, err, "DeleteDoc cascade: %v", err)
 
 	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM doc_issue_links WHERE doc_id = ?", docID).Scan(&n); err != nil {
-		t.Fatalf("count links: %v", err)
-	}
+	err = db.QueryRow("SELECT COUNT(*) FROM doc_issue_links WHERE doc_id = ?", docID).Scan(&n)
+	testsupport.Must(t, err, "count links: %v", err)
 	if n != 0 {
 		t.Errorf("links remaining = %d, want 0", n)
 	}
@@ -526,10 +483,9 @@ func TestDeleteDoc_NoCascade_BlocksOnLinks(t *testing.T) {
 	docID := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
 	issueID := createTestIssue(t, db, "an issue", model.StatusTodo, model.PriorityMedium)
 
-	if err := LinkDocIssue(db, docID, issueID); err != nil {
-		t.Fatalf("LinkDocIssue: %v", err)
-	}
-	err := DeleteDoc(db, docID, false)
+	err := LinkDocIssue(db, docID, issueID)
+	testsupport.Must(t, err, "LinkDocIssue: %v", err)
+	err = DeleteDoc(db, docID, false)
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("err = %v, want ErrConflict", err)
 	}
@@ -553,35 +509,26 @@ func TestDeleteDoc_NotFound(t *testing.T) {
 func TestInsertDocWithID_RoundTrip(t *testing.T) {
 	db := mustInitAndMigrate(t)
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
 
 	d := &model.Doc{ID: 42, Type: "tdd", Status: "draft", Title: "imported", Body: "x", Author: "operator"}
 	inserted, err := InsertDocWithID(tx, d)
-	if err != nil {
-		t.Fatalf("InsertDocWithID: %v", err)
-	}
+	testsupport.Must(t, err, "InsertDocWithID: %v", err)
 	if !inserted {
 		t.Error("first call: inserted = false, want true")
 	}
 	// Second call with same ID: skipped.
 	inserted2, err := InsertDocWithID(tx, d)
-	if err != nil {
-		t.Fatalf("InsertDocWithID 2: %v", err)
-	}
+	testsupport.Must(t, err, "InsertDocWithID 2: %v", err)
 	if inserted2 {
 		t.Error("second call: inserted = true, want false")
 	}
 
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	got, err := GetDoc(db, 42)
-	if err != nil {
-		t.Fatalf("GetDoc(42): %v", err)
-	}
+	testsupport.Must(t, err, "GetDoc(42): %v", err)
 	if got.Title != "imported" {
 		t.Errorf("Title = %q, want imported", got.Title)
 	}
@@ -591,13 +538,10 @@ func TestInsertDocRevisionWithID_RoundTrip(t *testing.T) {
 	db := mustInitAndMigrate(t)
 
 	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
+	testsupport.Must(t, err, "Begin: %v", err)
 	d := &model.Doc{ID: 1, Type: "tdd", Status: "draft", Title: "t", Body: "b", Author: "a"}
-	if _, err := InsertDocWithID(tx, d); err != nil {
-		t.Fatalf("InsertDocWithID: %v", err)
-	}
+	_, err = InsertDocWithID(tx, d)
+	testsupport.Must(t, err, "InsertDocWithID: %v", err)
 	r := &model.DocRevision{
 		ID:             10,
 		DocID:          1,
@@ -607,15 +551,12 @@ func TestInsertDocRevisionWithID_RoundTrip(t *testing.T) {
 		Author:         "a",
 	}
 	inserted, err := InsertDocRevisionWithID(tx, r)
-	if err != nil {
-		t.Fatalf("InsertDocRevisionWithID: %v", err)
-	}
+	testsupport.Must(t, err, "InsertDocRevisionWithID: %v", err)
 	if !inserted {
 		t.Error("inserted = false, want true")
 	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 
 	revs, _ := ListDocRevisions(db, 1)
 	if len(revs) != 1 || revs[0].ID != 10 {
@@ -634,27 +575,20 @@ func TestClearAllData_DropsProposalsAndDocs(t *testing.T) {
 		Description: "p", Criticality: model.CriticalityHigh,
 		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.5,
 	})
-	if err != nil {
-		t.Fatalf("CreateProposal: %v", err)
-	}
-	if err := LinkProposalIssue(db, pID, issueID); err != nil {
-		t.Fatalf("LinkProposalIssue: %v", err)
-	}
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	err = LinkProposalIssue(db, pID, issueID)
+	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
 
 	docID := mustCreateDoc(t, db, "d", "tdd", "draft", "body")
-	if _, err := CreateDocComment(db, &model.DocComment{DocID: docID, Body: "c", Author: "a"}); err != nil {
-		t.Fatalf("CreateDocComment: %v", err)
-	}
-	if err := LinkDocIssue(db, docID, issueID); err != nil {
-		t.Fatalf("LinkDocIssue: %v", err)
-	}
-	if err := LinkProposalDoc(db, pID, docID); err != nil {
-		t.Fatalf("LinkProposalDoc: %v", err)
-	}
+	_, err = CreateDocComment(db, &model.DocComment{DocID: docID, Body: "c", Author: "a"})
+	testsupport.Must(t, err, "CreateDocComment: %v", err)
+	err = LinkDocIssue(db, docID, issueID)
+	testsupport.Must(t, err, "LinkDocIssue: %v", err)
+	err = LinkProposalDoc(db, pID, docID)
+	testsupport.Must(t, err, "LinkProposalDoc: %v", err)
 
-	if err := ClearAllData(db); err != nil {
-		t.Fatalf("ClearAllData: %v", err)
-	}
+	err = ClearAllData(db)
+	testsupport.Must(t, err, "ClearAllData: %v", err)
 
 	tables := []string{
 		"docs", "doc_revisions", "doc_comments", "doc_issue_links", "proposal_docs",
@@ -689,17 +623,13 @@ func TestUpdateDoc_CombinedChangeKind_AllFields(t *testing.T) {
 		Body:   &newBody,
 		Author: "editor",
 	})
-	if err != nil {
-		t.Fatalf("UpdateDoc all-fields combined: %v", err)
-	}
+	testsupport.Must(t, err, "UpdateDoc all-fields combined: %v", err)
 	if rev != 2 {
 		t.Fatalf("rev = %d, want 2", rev)
 	}
 
 	revs, err := ListDocRevisions(db, id)
-	if err != nil {
-		t.Fatalf("ListDocRevisions: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocRevisions: %v", err)
 	if len(revs) != 2 {
 		t.Fatalf("len(revs) = %d, want 2", len(revs))
 	}
@@ -718,14 +648,11 @@ func TestDeleteDoc_NoCascade_DeletesRevisionsAndComments(t *testing.T) {
 
 	updateBody(t, db, id, "v2")
 	newStatus := "approved"
-	if _, err := UpdateDoc(db, id, DocUpdate{Status: &newStatus, Author: "editor"}); err != nil {
-		t.Fatalf("UpdateDoc status: %v", err)
-	}
+	_, err := UpdateDoc(db, id, DocUpdate{Status: &newStatus, Author: "editor"})
+	testsupport.Must(t, err, "UpdateDoc status: %v", err)
 
 	revsBefore, err := ListDocRevisions(db, id)
-	if err != nil {
-		t.Fatalf("ListDocRevisions: %v", err)
-	}
+	testsupport.Must(t, err, "ListDocRevisions: %v", err)
 	if len(revsBefore) < 3 {
 		t.Fatalf("expected >=3 revisions before delete, got %d", len(revsBefore))
 	}
@@ -752,26 +679,23 @@ func TestDeleteDoc_NoCascade_DeletesRevisionsAndComments(t *testing.T) {
 		t.Fatalf("precondition: external link count = %d, want 0", nLinks)
 	}
 
-	if err := DeleteDoc(db, id, false); err != nil {
-		t.Fatalf("DeleteDoc(cascade=false) with no external links: %v", err)
-	}
+	err = DeleteDoc(db, id, false)
+	testsupport.Must(t, err, "DeleteDoc(cascade=false) with no external links: %v", err)
 
 	if _, err := GetDoc(db, id); !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetDoc after delete: err = %v, want ErrNotFound", err)
 	}
 
 	var nRevs int
-	if err := db.QueryRow("SELECT COUNT(*) FROM doc_revisions WHERE doc_id = ?", id).Scan(&nRevs); err != nil {
-		t.Fatalf("count revisions: %v", err)
-	}
+	err = db.QueryRow("SELECT COUNT(*) FROM doc_revisions WHERE doc_id = ?", id).Scan(&nRevs)
+	testsupport.Must(t, err, "count revisions: %v", err)
 	if nRevs != 0 {
 		t.Errorf("revisions remaining = %d, want 0", nRevs)
 	}
 
 	var nComments int
-	if err := db.QueryRow("SELECT COUNT(*) FROM doc_comments WHERE doc_id = ?", id).Scan(&nComments); err != nil {
-		t.Fatalf("count comments: %v", err)
-	}
+	err = db.QueryRow("SELECT COUNT(*) FROM doc_comments WHERE doc_id = ?", id).Scan(&nComments)
+	testsupport.Must(t, err, "count comments: %v", err)
 	if nComments != 0 {
 		t.Errorf("comments remaining = %d, want 0", nComments)
 	}

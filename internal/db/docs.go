@@ -38,13 +38,14 @@ func docBodyEqual(a, b string) bool {
 // and ListDocsWithCounts. Mirrors ListOptions/issues but with the doc-table
 // columns.
 type DocListOptions struct {
-	Types    []string
-	Statuses []string
-	Author   string
-	Sort     string
-	SortDir  string
-	Limit    int
-	Offset   int
+	ProjectID int // scope to one project (v12); 0 = every project
+	Types     []string
+	Statuses  []string
+	Author    string
+	Sort      string
+	SortDir   string
+	Limit     int
+	Offset    int
 }
 
 // validDocSortFields restricts which columns may appear in ORDER BY.
@@ -71,17 +72,28 @@ type DocSummary struct {
 // Type, Status, Title, Body, and Author set; CreatedAt/UpdatedAt are
 // stamped by this function.
 func CreateDoc(db *sql.DB, doc *model.Doc) (int, error) {
-	tx, err := db.Begin()
+	return CreateDocIdempotent(db, doc, "")
+}
+
+// CreateDocIdempotent is CreateDoc with an optional idempotency key. A repeat
+// call with the same key returns the original doc id and inserts nothing; the
+// key is recorded in the same transaction as the insert.
+func CreateDocIdempotent(db *sql.DB, doc *model.Doc, idempotencyKey string) (int, error) {
+	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeDocCreate, idempotencyKey)
 	if err != nil {
-		return 0, fmt.Errorf("beginning transaction: %w", err)
+		return 0, err
+	}
+	if hit {
+		return existingID, nil
 	}
 	defer tx.Rollback()
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	res, err := tx.Exec(
-		`INSERT INTO docs (type, status, title, body, author, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO docs (project_id, type, status, title, body, author, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectOrDefault(doc.ProjectID),
 		doc.Type, doc.Status, doc.Title, doc.Body, doc.Author, now, now,
 	)
 	if err != nil {
@@ -96,6 +108,12 @@ func CreateDoc(db *sql.DB, doc *model.Doc) (int, error) {
 
 	if _, err := appendDocRevision(tx, id, doc.Body, docChangeKindCreate, doc.Author, now); err != nil {
 		return 0, err
+	}
+
+	if idempotencyKey != "" {
+		if err := RecordIdempotencyKeyTx(tx, ScopeDocCreate, idempotencyKey, id); err != nil {
+			return 0, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -164,18 +182,15 @@ func ListDocs(db *sql.DB, opts DocListOptions) ([]*model.Doc, int, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing docs: %w", err)
 	}
-	defer rows.Close()
-
-	var docs []*model.Doc
-	for rows.Next() {
-		d, err := scanDocFrom(rows)
+	docs, err := scanRows(rows, "doc rows", func(r *sql.Rows) (*model.Doc, error) {
+		d, err := scanDocFrom(r)
 		if err != nil {
-			return nil, 0, fmt.Errorf("scanning doc row: %w", err)
+			return nil, fmt.Errorf("scanning doc row: %w", err)
 		}
-		docs = append(docs, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterating doc rows: %w", err)
+		return d, nil
+	})
+	if err != nil {
+		return nil, 0, err
 	}
 
 	return docs, total, nil
@@ -236,21 +251,18 @@ func ListDocsWithCounts(db *sql.DB, opts DocListOptions) ([]*DocSummary, int, er
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing docs with counts: %w", err)
 	}
-	defer rows.Close()
-
-	var out []*DocSummary
-	for rows.Next() {
+	out, err := scanRows(rows, "doc summary rows", func(r *sql.Rows) (*DocSummary, error) {
 		var (
 			d              model.Doc
 			author         sql.NullString
 			createdAt, upd string
 			revsCount, cur int
 		)
-		if err := rows.Scan(
+		if err := r.Scan(
 			&d.ID, &d.Type, &d.Status, &d.Title, &d.Body, &author,
 			&createdAt, &upd, &revsCount, &cur,
 		); err != nil {
-			return nil, 0, fmt.Errorf("scanning doc summary: %w", err)
+			return nil, fmt.Errorf("scanning doc summary: %w", err)
 		}
 		d.Author = author.String
 		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
@@ -259,14 +271,14 @@ func ListDocsWithCounts(db *sql.DB, opts DocListOptions) ([]*DocSummary, int, er
 		if t, err := time.Parse(time.RFC3339, upd); err == nil {
 			d.UpdatedAt = t
 		}
-		out = append(out, &DocSummary{
+		return &DocSummary{
 			Doc:             &d,
 			RevisionsCount:  revsCount,
 			CurrentRevision: cur,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterating doc summary rows: %w", err)
+		}, nil
+	})
+	if err != nil {
+		return nil, 0, err
 	}
 
 	return out, total, nil
@@ -431,20 +443,13 @@ func ListDocRevisions(db *sql.DB, docID int) ([]*model.DocRevision, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying doc revisions: %w", err)
 	}
-	defer rows.Close()
-
-	var out []*model.DocRevision
-	for rows.Next() {
-		r, err := scanDocRevisionFrom(rows)
+	return scanRows(rows, "doc revision rows", func(r *sql.Rows) (*model.DocRevision, error) {
+		rev, err := scanDocRevisionFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning doc revision row: %w", err)
 		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating doc revision rows: %w", err)
-	}
-	return out, nil
+		return rev, nil
+	})
 }
 
 // DeleteDoc removes the doc with the given ID. When cascade is true, FK
@@ -475,14 +480,7 @@ func DeleteDoc(db *sql.DB, id int, cascade bool) error {
 	if err != nil {
 		return fmt.Errorf("deleting doc: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return requireAffected(res)
 }
 
 // InsertDocWithID inserts a doc row with a caller-supplied ID, skipping if the
@@ -490,9 +488,9 @@ func DeleteDoc(db *sql.DB, id int, cascade bool) error {
 // Must be called within an existing transaction. Returns true if inserted.
 func InsertDocWithID(tx *sql.Tx, doc *model.Doc) (bool, error) {
 	res, err := tx.Exec(
-		`INSERT OR IGNORE INTO docs (id, type, status, title, body, author, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		doc.ID, doc.Type, doc.Status, doc.Title, doc.Body, doc.Author,
+		`INSERT OR IGNORE INTO docs (id, project_id, type, status, title, body, author, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		doc.ID, projectOrDefault(doc.ProjectID), doc.Type, doc.Status, doc.Title, doc.Body, doc.Author,
 		doc.CreatedAt.UTC().Format(time.RFC3339),
 		doc.UpdatedAt.UTC().Format(time.RFC3339),
 	)
@@ -521,52 +519,48 @@ func InsertDocRevisionWithID(tx *sql.Tx, r *model.DocRevision) (bool, error) {
 }
 
 // ListAllDocs returns every doc row ordered by id ASC, for a full export.
-func ListAllDocs(db *sql.DB) ([]*model.Doc, error) {
+func ListAllDocs(db *sql.DB, projectID int) ([]*model.Doc, error) {
+	where, args := projectFilter(projectID, "WHERE")
 	rows, err := db.Query(
 		`SELECT id, type, status, title, body, author, created_at, updated_at
-		 FROM docs ORDER BY id ASC`,
+		 FROM docs `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all docs: %w", err)
 	}
-	defer rows.Close()
-
-	var docs []*model.Doc
-	for rows.Next() {
-		d, err := scanDocFrom(rows)
+	docs, err := scanRows(rows, "doc rows", func(r *sql.Rows) (*model.Doc, error) {
+		d, err := scanDocFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning doc row: %w", err)
 		}
-		docs = append(docs, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating doc rows: %w", err)
+		return d, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return docs, nil
 }
 
 // ListAllDocRevisions returns every doc_revisions row ordered by id ASC, for a
 // full export.
-func ListAllDocRevisions(db *sql.DB) ([]*model.DocRevision, error) {
+func ListAllDocRevisions(db *sql.DB, projectID int) ([]*model.DocRevision, error) {
+	where, args := projectFilterVia(projectID, `doc_id IN (SELECT id FROM docs WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT id, doc_id, revision_number, body, change_kind, author, created_at
-		 FROM doc_revisions ORDER BY id ASC`,
+		 FROM doc_revisions `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all doc revisions: %w", err)
 	}
-	defer rows.Close()
-
-	var revs []*model.DocRevision
-	for rows.Next() {
-		r, err := scanDocRevisionFrom(rows)
+	revs, err := scanRows(rows, "doc revision rows", func(r *sql.Rows) (*model.DocRevision, error) {
+		rev, err := scanDocRevisionFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning doc revision row: %w", err)
 		}
-		revs = append(revs, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating doc revision rows: %w", err)
+		return rev, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return revs, nil
 }
@@ -675,6 +669,11 @@ func scanDocRevisionFrom(s scanner) (*model.DocRevision, error) {
 func buildDocWhere(opts DocListOptions, tablePrefix string) (string, []any, error) {
 	var clauses []string
 	var args []any
+
+	if opts.ProjectID != 0 {
+		clauses = append(clauses, tablePrefix+"project_id = ?")
+		args = append(args, opts.ProjectID)
+	}
 
 	if len(opts.Types) > 0 {
 		placeholders := makePlaceholders(len(opts.Types))

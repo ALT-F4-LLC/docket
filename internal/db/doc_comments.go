@@ -13,9 +13,19 @@ import (
 // existence check and insert run in a single transaction. Returns
 // ErrNotFound if the doc does not exist.
 func CreateDocComment(db *sql.DB, c *model.DocComment) (int, error) {
-	tx, err := db.Begin()
+	return CreateDocCommentIdempotent(db, c, "")
+}
+
+// CreateDocCommentIdempotent is CreateDocComment with an optional idempotency
+// key. A repeat call with the same key returns the original comment id and
+// inserts nothing; the key is recorded in the same transaction as the insert.
+func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey string) (int, error) {
+	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeDocComment, idempotencyKey)
 	if err != nil {
-		return 0, fmt.Errorf("beginning transaction: %w", err)
+		return 0, err
+	}
+	if hit {
+		return existingID, nil
 	}
 	defer tx.Rollback()
 
@@ -47,6 +57,12 @@ func CreateDocComment(db *sql.DB, c *model.DocComment) (int, error) {
 		return 0, fmt.Errorf("getting last insert id: %w", err)
 	}
 
+	if idempotencyKey != "" {
+		if err := RecordIdempotencyKeyTx(tx, ScopeDocComment, idempotencyKey, int(id64)); err != nil {
+			return 0, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
@@ -73,18 +89,18 @@ func ListDocComments(db *sql.DB, docID int) ([]*model.DocComment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying doc comments: %w", err)
 	}
-	defer rows.Close()
-
-	out := make([]*model.DocComment, 0)
-	for rows.Next() {
-		c, err := scanDocCommentFrom(rows)
+	out, err := scanRows(rows, "doc comment rows", func(r *sql.Rows) (*model.DocComment, error) {
+		c, err := scanDocCommentFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning doc comment row: %w", err)
 		}
-		out = append(out, c)
+		return c, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating doc comment rows: %w", err)
+	if out == nil {
+		out = make([]*model.DocComment, 0)
 	}
 	return out, nil
 }
@@ -124,26 +140,24 @@ func InsertDocCommentWithID(tx *sql.Tx, c *model.DocComment) (bool, error) {
 
 // ListAllDocComments returns every doc_comments row ordered by id ASC, for a
 // full export.
-func ListAllDocComments(db *sql.DB) ([]*model.DocComment, error) {
+func ListAllDocComments(db *sql.DB, projectID int) ([]*model.DocComment, error) {
+	where, args := projectFilterVia(projectID, `doc_id IN (SELECT id FROM docs WHERE project_id = ?)`)
 	rows, err := db.Query(
 		`SELECT id, doc_id, body, author, created_at
-		 FROM doc_comments ORDER BY id ASC`,
+		 FROM doc_comments `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all doc comments: %w", err)
 	}
-	defer rows.Close()
-
-	var comments []*model.DocComment
-	for rows.Next() {
-		c, err := scanDocCommentFrom(rows)
+	comments, err := scanRows(rows, "doc comment rows", func(r *sql.Rows) (*model.DocComment, error) {
+		c, err := scanDocCommentFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("scanning doc comment row: %w", err)
 		}
-		comments = append(comments, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating doc comment rows: %w", err)
+		return c, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return comments, nil
 }

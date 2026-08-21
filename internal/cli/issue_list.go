@@ -1,25 +1,33 @@
 package cli
 
 import (
-	"context"
+	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 type listResult struct {
 	Issues []*model.Issue `json:"issues"`
 	Total  int            `json:"total"`
+	// limit is the effective --limit, retained (unexported, so v1 output is
+	// untouched) to compute truncation for the v2 envelope.
+	limit int
+}
+
+// listResult implements output.Collection for the v2 envelope. Total comes
+// from a COUNT(*) that ignores LIMIT, so it is already the true pre-limit
+// count and truncation is directly computable.
+func (r listResult) CollectionItems() any { return issueListPayload{issues: r.Issues} }
+func (r listResult) CollectionTotal() int { return r.Total }
+func (r listResult) CollectionTruncated() bool {
+	return output.IsTruncated(r.limit, r.Total, len(r.Issues))
 }
 
 var listCmd = &cobra.Command{
@@ -27,25 +35,7 @@ var listCmd = &cobra.Command{
 	Short:   "List issues",
 	Aliases: []string{"ls"},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runIssueList(cmd, args, w)
-			})
-		}
-		return runIssueList(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runIssueList)
 	},
 }
 
@@ -63,6 +53,21 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	sortFlag, _ := cmd.Flags().GetString("sort")
 	limit, _ := cmd.Flags().GetInt("limit")
 	all, _ := cmd.Flags().GetBool("all")
+	runRef, _ := cmd.Flags().GetString("run")
+	projectRef, _ := cmd.Flags().GetString("project")
+
+	if err := validateLimit(cmd, limit); err != nil {
+		return err
+	}
+
+	// Refused before either scope is resolved: --project moves the process-wide
+	// display prefix, and a conflict discovered after that has already changed
+	// how the failing command's neighbours would render.
+	if runRef != "" && projectRef != "" {
+		return cmdErr(fmt.Errorf(
+			"--run and --project cannot be combined: a run belongs to one "+
+				"project and --run already lists it"), output.ErrValidation)
+	}
 
 	// Validate filter enum values.
 	for _, s := range statuses {
@@ -81,7 +86,72 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
+	// `--project` scopes the listing to a NAMED project instead of the one the
+	// working directory resolves to (DKT-72). Under a machine-global store
+	// that is the flag three separate sessions reached for unprompted, and
+	// without it reading another project's issues means changing directory
+	// into it — which for a project you only want to LOOK at is a strange
+	// price, and impossible for one whose checkout is not on this machine.
+	projectID := getProjectID(cmd)
+	if projectRef != "" {
+		project, err := resolveProjectRef(conn, projectRef)
+		if err != nil {
+			return err
+		}
+		projectID = project.ID
+		// Ids render in the NAMED project's voice, not the caller's: a listing
+		// of another project's issues under this project's prefix is the same
+		// defect DKT-67 fixed in the event feed, and for the same reason — the
+		// prefix is the only thing on the row that says whose issue it is.
+		model.SetDisplayPrefix(project.Prefix)
+	}
+
+	// `--run` scopes the listing to ONE RUN'S ROSTER (DKT-405): the issues that
+	// run's activation bound. It is the spelling a conductor reaches for first
+	// — `docket issue list --run RUN-14` — and before this it answered `unknown
+	// flag: --run`, leaving `run status --json` as the only surface carrying a
+	// roster at all, which is a JSON document to be parsed rather than a
+	// listing to be read.
+	runID := 0
+	if runRef != "" {
+		id, err := model.ParseRunID(runRef)
+		if err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+		run, err := db.GetRun(conn, id)
+		if errors.Is(err, db.ErrRunNotFound) {
+			return cmdErr(fmt.Errorf("run %s not found", model.FormatRunID(id)),
+				output.ErrNotFound)
+		}
+		if err != nil {
+			return cmdErr(fmt.Errorf("reading run: %w", err), output.ErrGeneral)
+		}
+		runID = run.ID
+		// The RUN's project, in the run's own voice — the `--project` rule
+		// (DKT-67/DKT-72) applied to a scope the caller named indirectly. A
+		// roster listed under the working directory's prefix would be labelled
+		// with a project that does not own the issues, and under a machine-global
+		// store the run being read is routinely another project's.
+		if run.ProjectID != 0 && run.ProjectID != projectID {
+			project, err := db.GetProject(conn, run.ProjectID)
+			if err != nil {
+				return cmdErr(fmt.Errorf("reading the run's project: %w", err),
+					output.ErrGeneral)
+			}
+			projectID = project.ID
+			model.SetDisplayPrefix(project.Prefix)
+		}
+		// A ROSTER IS A CLOSED SET, so `--run` shows all of it. The default
+		// listing hides done issues, and a post-mortem roster — the case this
+		// flag exists for — is mostly done issues; hiding them would answer the
+		// question "which issues did RUN-14 carry" with "the ones it did not
+		// finish", which is a different question and a misleading answer.
+		all = true
+	}
+
 	opts := db.ListOptions{
+		ProjectID:   projectID,
+		RunID:       runID,
 		Statuses:    statuses,
 		Priorities:  priorities,
 		Labels:      labels,
@@ -119,7 +189,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
-	result := listResult{Issues: issues, Total: total}
+	result := listResult{Issues: issues, Total: total, limit: limit}
 
 	// Fetch parent issues and sub-issue progress for the grouped display.
 	// Only needed for human-readable output (JSON stays flat).
@@ -195,15 +265,57 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	var message string
 	if !w.JSONMode {
-		if treeMode {
+		switch {
+		case len(issues) == 0:
+			message = emptyListState(conn, opts, all)
+		case treeMode:
 			message = render.RenderTable(issues, true)
-		} else {
+		default:
 			message = render.RenderGroupedTable(issues, parentMap, progress)
 		}
 	}
 	w.Success(result, message)
 
 	return nil
+}
+
+// emptyListState answers the question an empty listing actually raises.
+//
+// The blanket "No issues found. Create one with: docket issue create" is a
+// claim about the store, and on a project with dozens of done issues it is a
+// false one: the default listing hides done, so the only thing proven is that
+// nothing is OPEN. Read as store damage, it cost a --all round trip to
+// disprove (DKT-246). When done issues are being hidden, say so and name the
+// flag that shows them.
+func emptyListState(conn *sql.DB, opts db.ListOptions, all bool) string {
+	// A roster that came back empty is a fact about the RUN, not about the
+	// store, and "create one with: docket issue create" is advice for a
+	// different situation entirely (DKT-405).
+	if opts.RunID != 0 {
+		return render.EmptyState(
+			fmt.Sprintf("%s has no issues bound to it.",
+				model.FormatRunID(opts.RunID)),
+			"Attach one with: docket run issue add", false)
+	}
+	if !all {
+		withDone := opts
+		withDone.IncludeDone = true
+		withDone.Limit = 1
+		if _, total, err := db.ListIssues(conn, withDone); err == nil && total > 0 {
+			return render.EmptyState(
+				fmt.Sprintf("No open issues found (%s hidden).", pluralIssues(total)),
+				"Include them with: docket issue list --all",
+				false)
+		}
+	}
+	return render.EmptyState("No issues found.", "Create one with: docket issue create", false)
+}
+
+func pluralIssues(n int) string {
+	if n == 1 {
+		return "1 done issue"
+	}
+	return fmt.Sprintf("%d done issues", n)
 }
 
 func init() {
@@ -216,6 +328,14 @@ func init() {
 	listCmd.Flags().Bool("roots", false, "Only show root issues (no parent)")
 	listCmd.Flags().Bool("tree", false, "Display as indented hierarchy")
 	listCmd.Flags().String("sort", "", "Sort by field:direction (e.g. priority:asc)")
+	listCmd.Flags().String(
+		"project", "",
+		"List another project's issues, by prefix (FLX), name, identity path, "+
+			"or row id (default: the project this directory belongs to)")
+	listCmd.Flags().String(
+		"run", "",
+		"List the issues bound to a run, by ref (RUN-14) — the run's whole "+
+			"roster, done ones included")
 	listCmd.Flags().Int("limit", 50, "Maximum number of results")
 	listCmd.Flags().Bool("all", false, "Include done issues")
 	issueCmd.AddCommand(listCmd)

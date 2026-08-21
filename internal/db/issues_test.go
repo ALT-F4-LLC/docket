@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // createTestIssue is a helper that creates an issue with the given status and
@@ -19,9 +20,7 @@ func createTestIssue(t *testing.T, conn *sql.DB, title string, status model.Stat
 		Kind:     model.IssueKindTask,
 	}
 	id, err := CreateIssue(conn, issue, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue(%q): %v", title, err)
-	}
+	testsupport.Must(t, err, "CreateIssue(%q): %v", title, err)
 	// Small sleep to ensure distinct created_at timestamps for tiebreaking.
 	time.Sleep(time.Millisecond)
 	return id
@@ -29,9 +28,8 @@ func createTestIssue(t *testing.T, conn *sql.DB, title string, status model.Stat
 
 func TestListIssuesDefaultSortOrder(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	// Create issues in an order that is intentionally NOT the expected output
 	// order, so the test can verify the sort is actually applied.
@@ -54,9 +52,7 @@ func TestListIssuesDefaultSortOrder(t *testing.T) {
 
 	// Default sort: no Sort field set.
 	issues, total, err := ListIssues(db, ListOptions{IncludeDone: false})
-	if err != nil {
-		t.Fatalf("ListIssues: %v", err)
-	}
+	testsupport.Must(t, err, "ListIssues: %v", err)
 	if total != 6 {
 		t.Fatalf("total = %d, want 6", total)
 	}
@@ -78,11 +74,30 @@ func TestListIssuesDefaultSortOrder(t *testing.T) {
 	}
 }
 
+// TestListIssuesEmptyIsNotNil pins ListIssues' zero-result contract: an
+// empty database returns a non-nil empty slice, not nil.
+func TestListIssuesEmptyIsNotNil(t *testing.T) {
+	db := mustOpen(t)
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
+
+	issues, total, err := ListIssues(db, ListOptions{})
+	testsupport.Must(t, err, "ListIssues: %v", err)
+	if total != 0 {
+		t.Fatalf("total = %d, want 0", total)
+	}
+	if issues == nil {
+		t.Fatalf("ListIssues returned nil, want a non-nil empty slice")
+	}
+	if len(issues) != 0 {
+		t.Fatalf("len(issues) = %d, want 0", len(issues))
+	}
+}
+
 func TestListIssuesDefaultSortCreatedAtTiebreaker(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	// Insert two issues with the same status and priority but explicit timestamps
 	// so we can verify the created_at DESC tiebreaker. CreateIssue uses
@@ -95,15 +110,12 @@ func TestListIssuesDefaultSortCreatedAtTiebreaker(t *testing.T) {
 		Kind:     model.IssueKindTask,
 	}
 	olderID, err := CreateIssue(db, older, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue(older): %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue(older): %v", err)
 
 	// Manually update the created_at of the "older" issue to be clearly in the past.
 	pastTime := now.Add(-10 * time.Second).Format(time.RFC3339)
-	if _, err := db.Exec("UPDATE issues SET created_at = ? WHERE id = ?", pastTime, olderID); err != nil {
-		t.Fatalf("updating created_at: %v", err)
-	}
+	_, err = db.Exec("UPDATE issues SET created_at = ? WHERE id = ?", pastTime, olderID)
+	testsupport.Must(t, err, "updating created_at: %v", err)
 
 	newer := &model.Issue{
 		Title:    "newer",
@@ -112,14 +124,10 @@ func TestListIssuesDefaultSortCreatedAtTiebreaker(t *testing.T) {
 		Kind:     model.IssueKindTask,
 	}
 	newerID, err := CreateIssue(db, newer, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue(newer): %v", err)
-	}
+	testsupport.Must(t, err, "CreateIssue(newer): %v", err)
 
 	issues, _, err := ListIssues(db, ListOptions{})
-	if err != nil {
-		t.Fatalf("ListIssues: %v", err)
-	}
+	testsupport.Must(t, err, "ListIssues: %v", err)
 	if len(issues) != 2 {
 		t.Fatalf("len = %d, want 2", len(issues))
 	}
@@ -131,9 +139,8 @@ func TestListIssuesDefaultSortCreatedAtTiebreaker(t *testing.T) {
 
 func TestListIssuesExplicitSortOverridesDefault(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	createTestIssue(t, db, "ip-low", model.StatusInProgress, model.PriorityLow)
 	createTestIssue(t, db, "todo-crit", model.StatusTodo, model.PriorityCritical)
@@ -144,9 +151,7 @@ func TestListIssuesExplicitSortOverridesDefault(t *testing.T) {
 		Sort:    "priority",
 		SortDir: "asc",
 	})
-	if err != nil {
-		t.Fatalf("ListIssues: %v", err)
-	}
+	testsupport.Must(t, err, "ListIssues: %v", err)
 	if len(issues) != 2 {
 		t.Fatalf("len = %d, want 2", len(issues))
 	}
@@ -162,9 +167,8 @@ func TestListIssuesExplicitSortOverridesDefault(t *testing.T) {
 
 func TestListIssuesDefaultSortWithDoneStatus(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	createTestIssue(t, db, "done-high", model.StatusDone, model.PriorityHigh)
 	todoMed := createTestIssue(t, db, "todo-med", model.StatusTodo, model.PriorityMedium)
@@ -172,9 +176,7 @@ func TestListIssuesDefaultSortWithDoneStatus(t *testing.T) {
 
 	// With IncludeDone, done issues should sort last.
 	issues, _, err := ListIssues(db, ListOptions{IncludeDone: true})
-	if err != nil {
-		t.Fatalf("ListIssues: %v", err)
-	}
+	testsupport.Must(t, err, "ListIssues: %v", err)
 	if len(issues) != 3 {
 		t.Fatalf("len = %d, want 3", len(issues))
 	}
@@ -201,18 +203,15 @@ func createTestIssueWithParent(t *testing.T, conn *sql.DB, title string, status 
 		ParentID: &parentID,
 	}
 	id, err := CreateIssue(conn, issue, nil, nil)
-	if err != nil {
-		t.Fatalf("CreateIssue(%q): %v", title, err)
-	}
+	testsupport.Must(t, err, "CreateIssue(%q): %v", title, err)
 	time.Sleep(time.Millisecond)
 	return id
 }
 
 func TestListIssues_ParentFetchingPattern(t *testing.T) {
 	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
 
 	// Create a parent issue that is in-progress (will be excluded by a "todo" filter).
 	parentID := createTestIssue(t, db, "parent-epic", model.StatusInProgress, model.PriorityHigh)
@@ -226,9 +225,7 @@ func TestListIssues_ParentFetchingPattern(t *testing.T) {
 	issues, total, err := ListIssues(db, ListOptions{
 		Statuses: []string{string(model.StatusTodo)},
 	})
-	if err != nil {
-		t.Fatalf("ListIssues: %v", err)
-	}
+	testsupport.Must(t, err, "ListIssues: %v", err)
 	if total != 3 {
 		t.Fatalf("total = %d, want 3", total)
 	}
@@ -262,9 +259,7 @@ func TestListIssues_ParentFetchingPattern(t *testing.T) {
 	// Now fetch the parent via GetIssuesByIDs -- this is the pattern used by
 	// the CLI to get parent headers for children whose parents were excluded by filters.
 	parentMap, err := GetIssuesByIDs(db, []int{parentID})
-	if err != nil {
-		t.Fatalf("GetIssuesByIDs: %v", err)
-	}
+	testsupport.Must(t, err, "GetIssuesByIDs: %v", err)
 	if len(parentMap) != 1 {
 		t.Fatalf("parentMap length = %d, want 1", len(parentMap))
 	}

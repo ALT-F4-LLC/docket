@@ -2,8 +2,11 @@ package model
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestValidateCriticality(t *testing.T) {
@@ -19,13 +22,13 @@ func TestValidateCriticality(t *testing.T) {
 }
 
 func TestValidateProposalStatus(t *testing.T) {
-	valid := []ProposalStatus{ProposalStatusOpen, ProposalStatusApproved, ProposalStatusRejected, ProposalStatusCommitted}
+	valid := []ProposalStatus{ProposalStatusOpen, ProposalStatusApproved, ProposalStatusRejected, ProposalStatusCommitted, ProposalStatusClosed}
 	for _, s := range valid {
 		if err := ValidateProposalStatus(s); err != nil {
 			t.Errorf("ValidateProposalStatus(%q) unexpected error: %v", s, err)
 		}
 	}
-	invalid := []ProposalStatus{"invalid", "done", "closed"}
+	invalid := []ProposalStatus{"invalid", "done", "cancelled"}
 	for _, s := range invalid {
 		if err := ValidateProposalStatus(s); err == nil {
 			t.Errorf("ValidateProposalStatus(%q) expected error, got nil", s)
@@ -125,9 +128,7 @@ func TestProposalJSONRoundTrip(t *testing.T) {
 	}
 
 	data, err := json.Marshal(p)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	// Verify JSON wire format.
 	var raw map[string]any
@@ -191,9 +192,7 @@ func TestProposalJSONNilWeightedScore(t *testing.T) {
 	}
 
 	data, err := json.Marshal(p)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
@@ -207,6 +206,54 @@ func TestProposalJSONNilWeightedScore(t *testing.T) {
 	}
 	if p2.WeightedScore != nil {
 		t.Errorf("Unmarshaled WeightedScore = %v, want nil", p2.WeightedScore)
+	}
+}
+
+// TestVoteJSONCarriesMetadata pins the wire form of a vote's opaque claim:
+// `vote show --json` and the export manifest carry the bag only because this
+// struct serialises it, so the key's presence, its content and its ABSENCE
+// when unset are behaviour, not incidental struct tagging.
+func TestVoteJSONCarriesMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 20, 10, 5, 0, 0, time.UTC)
+	bag := map[string]any{
+		"resolved": map[string]any{"engine": "sonnet-5", "effort": "high"},
+		"attempt":  float64(2),
+	}
+	v := Vote{
+		ID:         1,
+		ProposalID: 3,
+		VoterName:  "security-reviewer",
+		Verdict:    VerdictApprove,
+		Metadata:   bag,
+		CreatedAt:  now,
+	}
+
+	data, err := json.Marshal(v)
+	testsupport.Must(t, err, "Marshal error: %v", err)
+
+	var raw map[string]any
+	testsupport.Must(t, json.Unmarshal(data, &raw), "Unmarshal to raw: %v", err)
+	if !reflect.DeepEqual(raw["metadata"], bag) {
+		t.Errorf("JSON metadata = %#v, want %#v", raw["metadata"], bag)
+	}
+
+	var v2 Vote
+	if err := json.Unmarshal(data, &v2); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+	if !reflect.DeepEqual(v2.Metadata, bag) {
+		t.Errorf("Unmarshaled Metadata = %#v, want %#v", v2.Metadata, bag)
+	}
+
+	// A vote that asserted nothing carries no key at all, so an importer sees
+	// an absent bag rather than an empty object.
+	v.Metadata = nil
+	data, err = json.Marshal(v)
+	testsupport.Must(t, err, "Marshal error: %v", err)
+	raw = nil
+	testsupport.Must(t, json.Unmarshal(data, &raw), "Unmarshal to raw: %v", err)
+	if _, present := raw["metadata"]; present {
+		t.Errorf("JSON carries a metadata key for a vote that set none: %s", data)
 	}
 }
 
@@ -225,9 +272,7 @@ func TestVoteJSONRoundTrip(t *testing.T) {
 	}
 
 	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
@@ -300,9 +345,7 @@ func TestFindingsJSONRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data, err := json.Marshal(tt.findings)
-			if err != nil {
-				t.Fatalf("Marshal error: %v", err)
-			}
+			testsupport.Must(t, err, "Marshal error: %v", err)
 
 			var got Findings
 			if err := json.Unmarshal(data, &got); err != nil {
@@ -326,9 +369,7 @@ func TestFindingsJSONNilPointer(t *testing.T) {
 	}
 
 	data, err := json.Marshal(wrapper{F: nil})
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
@@ -362,9 +403,7 @@ func TestProposalJSONRoundTripWithV3Fields(t *testing.T) {
 	}
 
 	data, err := json.Marshal(p)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	// Verify wire format contains new fields.
 	var raw map[string]any
@@ -431,9 +470,7 @@ func TestProposalJSONEmptyV3Fields(t *testing.T) {
 	}
 
 	data, err := json.Marshal(p)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
@@ -488,9 +525,7 @@ func TestVoteJSONEffectiveWeight(t *testing.T) {
 			}
 
 			data, err := json.Marshal(v)
-			if err != nil {
-				t.Fatalf("Marshal error: %v", err)
-			}
+			testsupport.Must(t, err, "Marshal error: %v", err)
 
 			var raw map[string]any
 			json.Unmarshal(data, &raw)
@@ -531,9 +566,7 @@ func TestVoteJSONWithFindingsJSON(t *testing.T) {
 	}
 
 	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
+	testsupport.Must(t, err, "Marshal error: %v", err)
 
 	var raw map[string]any
 	json.Unmarshal(data, &raw)

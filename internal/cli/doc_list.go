@@ -1,25 +1,29 @@
 package cli
 
 import (
-	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 type docListResult struct {
 	Docs  []*model.Doc `json:"docs"`
 	Total int          `json:"total"`
+	// limit is the effective --limit, retained unexported for v2 truncation.
+	limit int
+}
+
+// docListResult implements output.Collection for the v2 envelope. Total is a
+// pre-LIMIT count, so truncation is directly computable.
+func (r docListResult) CollectionItems() any { return r.Docs }
+func (r docListResult) CollectionTotal() int { return r.Total }
+func (r docListResult) CollectionTruncated() bool {
+	return output.IsTruncated(r.limit, r.Total, len(r.Docs))
 }
 
 var docListCmd = &cobra.Command{
@@ -27,25 +31,7 @@ var docListCmd = &cobra.Command{
 	Short:   "List documents",
 	Aliases: []string{"ls"},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runDocList(cmd, args, w)
-			})
-		}
-		return runDocList(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runDocList)
 	},
 }
 
@@ -58,11 +44,16 @@ func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	sortFlag, _ := cmd.Flags().GetString("sort")
 	limit, _ := cmd.Flags().GetInt("limit")
 
+	if err := validateLimit(cmd, limit); err != nil {
+		return err
+	}
+
 	opts := db.DocListOptions{
-		Types:    types,
-		Statuses: statuses,
-		Author:   author,
-		Limit:    limit,
+		ProjectID: getProjectID(cmd),
+		Types:     types,
+		Statuses:  statuses,
+		Author:    author,
+		Limit:     limit,
 	}
 
 	if sortFlag != "" {
@@ -83,7 +74,7 @@ func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		docs = append(docs, s.Doc)
 	}
 
-	result := docListResult{Docs: docs, Total: total}
+	result := docListResult{Docs: docs, Total: total, limit: limit}
 
 	var message string
 	if !w.JSONMode {

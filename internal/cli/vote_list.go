@@ -1,25 +1,29 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 type voteListResult struct {
 	Proposals []*model.Proposal `json:"proposals"`
 	Total     int               `json:"total"`
+	// limit is the effective --limit, retained unexported for v2 truncation.
+	limit int
+}
+
+// voteListResult implements output.Collection for the v2 envelope. Total is a
+// pre-LIMIT count, so truncation is directly computable.
+func (r voteListResult) CollectionItems() any { return r.Proposals }
+func (r voteListResult) CollectionTotal() int { return r.Total }
+func (r voteListResult) CollectionTruncated() bool {
+	return output.IsTruncated(r.limit, r.Total, len(r.Proposals))
 }
 
 var voteListCmd = &cobra.Command{
@@ -27,25 +31,7 @@ var voteListCmd = &cobra.Command{
 	Short:   "List proposals",
 	Aliases: []string{"ls"},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		watchMode, _ := cmd.Flags().GetBool("watch")
-		if watchMode {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			jsonMode, _ := cmd.Flags().GetBool("json")
-			quietMode, _ := cmd.Flags().GetBool("quiet")
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			return watch.RunWatch(ctx, watch.Options{
-				Interval:  interval,
-				JSONMode:  jsonMode,
-				QuietMode: quietMode,
-				IsTTY:     term.IsTerminal(int(os.Stdout.Fd())),
-				Stdout:    os.Stdout,
-				Stderr:    os.Stderr,
-			}, func(ctx context.Context, w *output.Writer) error {
-				return runVoteList(cmd, args, w)
-			})
-		}
-		return runVoteList(cmd, args, getWriter(cmd))
+		return watchable(cmd, args, runVoteList)
 	},
 }
 
@@ -58,6 +44,10 @@ func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	domainTag, _ := cmd.Flags().GetString("domain-tag")
 	all, _ := cmd.Flags().GetBool("all")
 	limit, _ := cmd.Flags().GetInt("limit")
+
+	if err := validateLimit(cmd, limit); err != nil {
+		return err
+	}
 
 	// Validate filter enum values.
 	if status != "" {
@@ -80,7 +70,7 @@ func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		status = ""
 	}
 
-	proposals, total, err := db.ListProposals(conn, status, criticality, domainTag, limit)
+	proposals, total, err := db.ListProposals(conn, getProjectID(cmd), status, criticality, domainTag, limit)
 	if err != nil {
 		return cmdErr(fmt.Errorf("listing proposals: %w", err), output.ErrGeneral)
 	}
@@ -89,7 +79,7 @@ func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		proposals = []*model.Proposal{}
 	}
 
-	result := voteListResult{Proposals: proposals, Total: total}
+	result := voteListResult{Proposals: proposals, Total: total, limit: limit}
 
 	var message string
 	if !w.JSONMode {

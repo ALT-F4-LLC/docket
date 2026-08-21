@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -19,25 +20,42 @@ var safeIdentifier = regexp.MustCompile(`^[a-z_]+$`)
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("not found")
 
-// scanner abstracts *sql.Row and *sql.Rows for scanning a single row.
-type scanner interface {
-	Scan(dest ...any) error
+// requireAffected turns an Exec result into ErrNotFound when it touched no
+// rows — the shape every unconditional DELETE/UPDATE-by-id verb in this
+// package shares: the statement itself cannot distinguish "no such row" from
+// "matched and changed nothing", so the row count is the only signal.
+func requireAffected(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListOptions holds filtering, sorting, and pagination options for ListIssues.
 type ListOptions struct {
-	Statuses    []string // filter by status (multiple = OR)
-	Priorities  []string // filter by priority (multiple = OR)
-	Labels      []string // filter by label name (multiple = AND)
-	Types       []string // filter by kind (multiple = OR)
-	Assignee    string   // filter by assignee
-	ParentID    *int     // filter by parent issue ID
-	RootsOnly   bool     // only issues with no parent
-	IncludeDone bool     // include done status (default: exclude)
-	Sort        string   // field name
-	SortDir     string   // "asc" or "desc"
-	Limit       int      // max results
-	Offset      int      // for pagination
+	ProjectID  int      // scope to one project (v12); 0 = every project
+	Statuses   []string // filter by status (multiple = OR)
+	Priorities []string // filter by priority (multiple = OR)
+	Labels     []string // filter by label name (multiple = AND)
+	Types      []string // filter by kind (multiple = OR)
+	Assignee   string   // filter by assignee
+	ParentID   *int     // filter by parent issue ID
+	RootsOnly  bool     // only issues with no parent
+	// RunID scopes the listing to one run's ROSTER — the issues bound to it in
+	// `run_issues` (DKT-405); 0 = every issue. It is the same membership
+	// ListRunIssues reads, expressed as a filter so it composes with the other
+	// filters, the sort, and the pre-limit COUNT rather than being intersected
+	// afterwards in the caller.
+	RunID       int
+	IncludeDone bool   // include done status (default: exclude)
+	Sort        string // field name
+	SortDir     string // "asc" or "desc"
+	Limit       int    // max results
+	Offset      int    // for pagination
 }
 
 // validSortFields is the set of columns allowed for sorting.
@@ -63,12 +81,39 @@ var validUpdateFields = map[string]bool{
 	"kind":        true,
 	"assignee":    true,
 	"parent_id":   true,
+	// `resolution` is writable so `issue reopen` can CLEAR it. An issue put
+	// back on the board is one the operator has taken back off the machine's
+	// hands, and leaving "abandoned" on it would be the mirror of the defect
+	// that introduced the column — a stale terminal fact outliving the
+	// decision that replaced it (DKT-245).
+	"resolution": true,
 }
 
 // CreateIssue inserts a new issue and returns its ID. Labels are created
 // (find-or-create) and linked to the issue within the same transaction.
 // Files are attached to the issue if provided.
 func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string) (int, error) {
+	return CreateIssueIdempotent(db, issue, labels, files, "")
+}
+
+// CreateIssueIdempotent is CreateIssue with an optional idempotency key.
+//
+// When idempotencyKey is non-empty and was already used for this scope, the
+// original issue's id is returned and nothing is inserted — a retried create
+// after a dropped response must succeed, not fail. The key record and the
+// insert commit in the SAME transaction, so a crash between them cannot
+// orphan either.
+func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, files []string, idempotencyKey string) (int, error) {
+	if idempotencyKey != "" {
+		existingID, found, err := LookupIdempotencyKey(db, ScopeIssueCreate, idempotencyKey)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			return existingID, nil
+		}
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	tx, err := db.Begin()
@@ -77,9 +122,11 @@ func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string
 	}
 	defer tx.Rollback()
 
+	projectID := projectOrDefault(issue.ProjectID)
 	res, err := tx.Exec(
-		`INSERT INTO issues (parent_id, title, description, status, priority, kind, assignee, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO issues (project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID,
 		nilIfZeroPtr(issue.ParentID),
 		issue.Title,
 		issue.Description,
@@ -100,9 +147,9 @@ func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string
 	}
 	id := int(id64)
 
-	// Attach labels.
+	// Attach labels, in the issue's own project.
 	for _, name := range labels {
-		labelID, err := findOrCreateLabel(tx, name)
+		labelID, err := findOrCreateLabel(tx, projectID, name)
 		if err != nil {
 			return 0, fmt.Errorf("processing label %q: %w", name, err)
 		}
@@ -138,6 +185,14 @@ func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string
 		}
 	}
 
+	// Same transaction as the insert: a crash between the two would otherwise
+	// leave a created issue whose key is unrecorded, so the retry duplicates.
+	if idempotencyKey != "" {
+		if err := RecordIdempotencyKeyTx(tx, ScopeIssueCreate, idempotencyKey, id); err != nil {
+			return 0, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
@@ -145,11 +200,70 @@ func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string
 	return id, nil
 }
 
+// issueColumns is the column list every issue SELECT uses, in the exact order
+// scanIssueFrom scans them. It exists as one constant so a column added here
+// cannot drift from the scanner — the v6 lease columns are appended at the end
+// for exactly that reason.
+//
+// issueColumnsQualified is the same list for queries that alias issues as `i`.
+const (
+	issueColumns = `id, parent_id, title, description, status, priority, kind, assignee,
+	                created_at, updated_at, version, owner, token_hash, expires_ms, attempt,
+	                scope_globs, project_id, resolution`
+
+	issueColumnsQualified = `i.id, i.parent_id, i.title, i.description, i.status, i.priority, i.kind, i.assignee,
+	                         i.created_at, i.updated_at, i.version, i.owner, i.token_hash, i.expires_ms, i.attempt,
+	                         i.scope_globs, i.project_id, i.resolution`
+)
+
+// IssueResolutionAbandoned is the resolution the `abandon-issue` routing and
+// `run abandon --issue` write: the machine stopped working this issue and did
+// not finish it. It is model.ResolutionAbandoned rather than a second literal,
+// so the value the engine writes and the value the renderer tests for cannot
+// drift apart.
+const IssueResolutionAbandoned = model.ResolutionAbandoned
+
+// SetIssueResolutionTx records how a routing left an issue.
+//
+// It touches ONLY `resolution`. `abandon-issue` is deliberate about not
+// forcing the issue's status — the run stopping work is a statement about the
+// run, and closing the issue here would take the operator's triage decision
+// away — so the resolution is an additional fact beside the status, never a
+// replacement for it (DKT-245). `updated_at` moves because the row changed;
+// `version` does not, because this is the machine recording an outcome rather
+// than a CAS-guarded edit competing with a caller's read.
+func SetIssueResolutionTx(tx *sql.Tx, issueID int, resolution string) error {
+	if _, err := tx.Exec(
+		`UPDATE issues SET resolution = ?, updated_at = ? WHERE id = ?`,
+		resolution, time.Now().UTC().Format(time.RFC3339), issueID,
+	); err != nil {
+		return fmt.Errorf("recording the resolution of issue %d: %w", issueID, err)
+	}
+	return nil
+}
+
+// IssueProjectID returns the project an issue is homed in, or ErrNotFound.
+//
+// It exists for validations that need the project WITHOUT the issue's whole
+// row: attaching issues to runs checks a whole set before writing anything
+// (DKT-21), and loading each candidate's labels and lease state to read one
+// column would make that loop's cost proportional to data it discards.
+func IssueProjectID(db *sql.DB, issueID int) (int, error) {
+	var projectID int
+	err := db.QueryRow(`SELECT project_id FROM issues WHERE id = ?`, issueID).Scan(&projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading issue %d's project: %w", issueID, err)
+	}
+	return projectID, nil
+}
+
 // GetIssue retrieves an issue by ID.
 func GetIssue(db *sql.DB, id int) (*model.Issue, error) {
 	row := db.QueryRow(
-		`SELECT id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at
-		 FROM issues WHERE id = ?`, id,
+		`SELECT `+issueColumns+` FROM issues WHERE id = ?`, id,
 	)
 	return scanIssue(row)
 }
@@ -169,7 +283,7 @@ func GetIssuesByIDs(db *sql.DB, ids []int) (map[int]*model.Issue, error) {
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at
+		`SELECT `+issueColumns+`
 		 FROM issues WHERE id IN (%s)`, placeholders,
 	)
 
@@ -177,18 +291,9 @@ func GetIssuesByIDs(db *sql.DB, ids []int) (map[int]*model.Issue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying issues by IDs: %w", err)
 	}
-	defer rows.Close()
-
-	issues := make([]*model.Issue, 0, len(ids))
-	for rows.Next() {
-		issue, err := scanIssueRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		issues = append(issues, issue)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating issue rows: %w", err)
+	issues, err := scanRows(rows, "issue rows", scanIssueRow)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := HydrateLabels(db, issues); err != nil {
@@ -231,6 +336,11 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 		whereClauses = append(whereClauses, "i.status != 'done'")
 	}
 
+	if opts.ProjectID != 0 {
+		whereClauses = append(whereClauses, "i.project_id = ?")
+		args = append(args, opts.ProjectID)
+	}
+
 	if len(opts.Statuses) > 0 {
 		placeholders := makePlaceholders(len(opts.Statuses))
 		whereClauses = append(whereClauses, fmt.Sprintf("i.status IN (%s)", placeholders))
@@ -267,6 +377,15 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 
 	if opts.RootsOnly {
 		whereClauses = append(whereClauses, "i.parent_id IS NULL")
+	}
+
+	// The run roster (DKT-405). A subquery rather than a join: `run_issues`
+	// holds at most one row per (run, issue), but the labels join above can
+	// already multiply rows, and an EXISTS-shaped filter cannot add to that.
+	if opts.RunID != 0 {
+		whereClauses = append(whereClauses,
+			"i.id IN (SELECT issue_id FROM run_issues WHERE run_id = ?)")
+		args = append(args, opts.RunID)
 	}
 
 	// Labels filter: AND logic — issue must have ALL specified labels.
@@ -342,7 +461,7 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 
 	// Main query.
 	mainQuery := fmt.Sprintf(
-		`SELECT i.id, i.parent_id, i.title, i.description, i.status, i.priority, i.kind, i.assignee, i.created_at, i.updated_at
+		`SELECT `+issueColumnsQualified+`
 		 FROM issues i %s %s %s %s %s`,
 		joinClause, whereSQL, groupBySQL, havingSQL, orderBySQL,
 	)
@@ -363,18 +482,12 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("querying issues: %w", err)
 	}
-	defer rows.Close()
-
-	issues := make([]*model.Issue, 0)
-	for rows.Next() {
-		issue, err := scanIssueRow(rows)
-		if err != nil {
-			return nil, 0, err
-		}
-		issues = append(issues, issue)
+	issues, err := scanRows(rows, "issue rows", scanIssueRow)
+	if err != nil {
+		return nil, 0, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterating issue rows: %w", err)
+	if issues == nil {
+		issues = make([]*model.Issue, 0)
 	}
 
 	// Hydrate labels for all returned issues to avoid N+1 queries in callers.
@@ -397,8 +510,54 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 // for validating field values (e.g. ensuring status/priority/kind are valid enums)
 // before calling this function.
 func UpdateIssue(db *sql.DB, id int, updates map[string]interface{}, changedBy string) error {
+	return UpdateIssueCAS(db, id, updates, changedBy, nil)
+}
+
+// UpdateIssueCAS is UpdateIssue with an optional optimistic-concurrency
+// precondition. When ifVersion is non-nil the update applies only if the
+// issue's current version matches, and returns ErrVersionConflict otherwise.
+// The version is bumped either way, so concurrent CAS writers are detected
+// even when this caller did not supply a precondition.
+func UpdateIssueCAS(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int) error {
+	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, nil)
+}
+
+// UpdateIssueCASLease is UpdateIssueCAS for a verb that ends a lease: when the
+// issue carries a LIVE lease, the caller must hold it (token) and the lease is
+// cleared as part of the same transaction — the issue-level analog of a step's
+// token retiring when its artifact records (engine-spec.md §2).
+//
+// When no live lease exists the token is ignored entirely and behavior is
+// exactly UpdateIssueCAS's. That is the dormancy guarantee: an unclaimed issue
+// is outside the lease mechanism, so a repo that never claims sees no change on
+// any verb (engine-spec.md §9 item 8).
+func UpdateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int, token string) error {
+	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, &token)
+}
+
+// updateIssueCASLease is the shared implementation. A nil token means the verb
+// is not lease-mediated and no lease check runs at all.
+func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int, token *string) error {
 	if len(updates) == 0 {
-		return nil
+		// Still enforce the precondition: `--if-version` on a no-op edit must
+		// not silently succeed against a row that moved underneath the caller.
+		if ifVersion == nil {
+			return nil
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("beginning transaction: %w", err)
+		}
+		defer tx.Rollback()
+		if err := CheckAndBumpVersion(tx, "issues", id, ifVersion); err != nil {
+			return err
+		}
+		if token != nil {
+			if err := AuthorizeLeaseMutation(tx, id, *token, model.NowMS()); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
 	}
 
 	tx, err := db.Begin()
@@ -406,6 +565,21 @@ func UpdateIssue(db *sql.DB, id int, updates map[string]interface{}, changedBy s
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	// CAS first: a version mismatch must abort before any field is written.
+	if err := CheckAndBumpVersion(tx, "issues", id, ifVersion); err != nil {
+		return err
+	}
+
+	// Then the lease: a non-holder must be refused before any field is
+	// written, so a refusal never leaves a partial mutation behind. The whole
+	// check and mutation share this transaction, so they commit or roll back
+	// together.
+	if token != nil {
+		if err := AuthorizeLeaseMutation(tx, id, *token, model.NowMS()); err != nil {
+			return err
+		}
+	}
 
 	// Fetch old values for activity logging.
 	oldIssue, err := getIssueTx(tx, id)
@@ -445,12 +619,8 @@ func UpdateIssue(db *sql.DB, id int, updates map[string]interface{}, changedBy s
 		return fmt.Errorf("updating issue: %w", err)
 	}
 
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
+	if err := requireAffected(res); err != nil {
+		return err
 	}
 
 	// Record activity for each changed field.
@@ -470,7 +640,7 @@ func UpdateIssue(db *sql.DB, id int, updates map[string]interface{}, changedBy s
 // getIssueTx retrieves an issue by ID within a transaction.
 func getIssueTx(tx *sql.Tx, id int) (*model.Issue, error) {
 	row := tx.QueryRow(
-		`SELECT id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at
+		`SELECT `+issueColumns+`
 		 FROM issues WHERE id = ?`, id,
 	)
 	issue, err := scanIssueFrom(row)
@@ -515,38 +685,19 @@ func DeleteIssue(db *sql.DB, id int) error {
 	if err != nil {
 		return fmt.Errorf("deleting issue: %w", err)
 	}
-
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-
-	return nil
+	return requireAffected(res)
 }
 
 // GetSubIssues returns all direct children of an issue.
 func GetSubIssues(db *sql.DB, parentID int) ([]*model.Issue, error) {
 	rows, err := db.Query(
-		`SELECT id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at
+		`SELECT `+issueColumns+`
 		 FROM issues WHERE parent_id = ? ORDER BY created_at ASC`, parentID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying sub-issues: %w", err)
 	}
-	defer rows.Close()
-
-	var issues []*model.Issue
-	for rows.Next() {
-		issue, err := scanIssueRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		issues = append(issues, issue)
-	}
-	return issues, rows.Err()
+	return scanRows(rows, "sub-issues", scanIssueRow)
 }
 
 // GetSubIssueTree returns the full recursive tree of all descendants under an issue.
@@ -557,24 +708,14 @@ func GetSubIssueTree(db *sql.DB, parentID int) ([]*model.Issue, error) {
 			UNION ALL
 			SELECT i.id FROM issues i JOIN tree t ON i.parent_id = t.id
 		)
-		SELECT i.id, i.parent_id, i.title, i.description, i.status, i.priority, i.kind, i.assignee, i.created_at, i.updated_at
+		SELECT `+issueColumnsQualified+`
 		FROM issues i JOIN tree t ON i.id = t.id
 		ORDER BY i.created_at ASC`, parentID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying sub-issue tree: %w", err)
 	}
-	defer rows.Close()
-
-	var issues []*model.Issue
-	for rows.Next() {
-		issue, err := scanIssueRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		issues = append(issues, issue)
-	}
-	return issues, rows.Err()
+	return scanRows(rows, "sub-issue tree", scanIssueRow)
 }
 
 // GetSubIssueProgress returns (done, total) counts for all descendants of an issue.
@@ -672,17 +813,15 @@ func OrphanSubIssues(db *sql.DB, parentID int, author string) error {
 	if err != nil {
 		return fmt.Errorf("querying children: %w", err)
 	}
-	defer rows.Close()
-	var childIDs []int
-	for rows.Next() {
+	childIDs, err := scanRows(rows, "children", func(r *sql.Rows) (int, error) {
 		var id int
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scanning child id: %w", err)
+		if err := r.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scanning child id: %w", err)
 		}
-		childIDs = append(childIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterating children: %w", err)
+		return id, nil
+	})
+	if err != nil {
+		return err
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -749,14 +888,46 @@ func scanIssueFrom(s scanner) (*model.Issue, error) {
 	var parentID sql.NullInt64
 	var description, assignee sql.NullString
 	var createdAt, updatedAt string
+	var owner, tokenHash sql.NullString
+	var expiresMS sql.NullInt64
+	var attempt int
+	var scopeGlobs sql.NullString
 
 	err := s.Scan(
 		&i.ID, &parentID, &i.Title, &description,
 		&i.Status, &i.Priority, &i.Kind, &assignee,
-		&createdAt, &updatedAt,
+		&createdAt, &updatedAt, &i.Version,
+		&owner, &tokenHash, &expiresMS, &attempt,
+		&scopeGlobs, &i.ProjectID, &i.Resolution,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	// The declared scope rides on every issue read (DKT-55). NULL stays a nil
+	// pointer — "no scope declared" — while a stored array, `[]` included,
+	// parses into a non-nil slice.
+	if scopeGlobs.Valid && scopeGlobs.String != "" {
+		globs := []string{}
+		if err := json.Unmarshal([]byte(scopeGlobs.String), &globs); err != nil {
+			return nil, fmt.Errorf(
+				"issue %d: stored scope_globs is not a JSON array: %w", i.ID, err)
+		}
+		i.Scope = &globs
+	}
+
+	// The lease is attached only when one is actually held. An unclaimed issue
+	// carries a nil Lease, so nothing about its rendering changes at any JSON
+	// version — the dormancy guarantee at the read path (engine-spec.md §9
+	// item 8). Liveness is NOT computed here: it is derived per read from
+	// ExpiresMS at marshal time, and nothing on this path writes.
+	if owner.Valid && owner.String != "" {
+		i.Lease = &model.Lease{
+			Owner:     owner.String,
+			TokenHash: tokenHash.String,
+			ExpiresMS: expiresMS.Int64,
+			Attempt:   attempt,
+		}
 	}
 
 	if parentID.Valid {
@@ -803,11 +974,15 @@ func scanIssueRow(rows *sql.Rows) (*model.Issue, error) {
 	return issue, nil
 }
 
-// findOrCreateLabel looks up a label by name, creating it if it doesn't exist,
-// and returns the label ID.
-func findOrCreateLabel(tx *sql.Tx, name string) (int, error) {
+// findOrCreateLabel looks up a label by name WITHIN ONE PROJECT, creating it
+// if it doesn't exist, and returns the label ID. Label names are a per-project
+// namespace (v12): two projects' `bug` labels are different rows.
+func findOrCreateLabel(tx *sql.Tx, projectID int, name string) (int, error) {
+	projectID = projectOrDefault(projectID)
 	var id int
-	err := tx.QueryRow("SELECT id FROM labels WHERE name = ?", name).Scan(&id)
+	err := tx.QueryRow(
+		"SELECT id FROM labels WHERE project_id = ? AND name = ?",
+		projectID, name).Scan(&id)
 	if err == nil {
 		return id, nil
 	}
@@ -815,7 +990,8 @@ func findOrCreateLabel(tx *sql.Tx, name string) (int, error) {
 		return 0, fmt.Errorf("querying label: %w", err)
 	}
 
-	res, err := tx.Exec("INSERT INTO labels (name) VALUES (?)", name)
+	res, err := tx.Exec(
+		"INSERT INTO labels (project_id, name) VALUES (?, ?)", projectID, name)
 	if err != nil {
 		return 0, fmt.Errorf("inserting label: %w", err)
 	}
@@ -853,41 +1029,29 @@ func GetIssueLabels(db *sql.DB, issueID int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying labels: %w", err)
 	}
-	defer rows.Close()
-
-	var labels []string
-	for rows.Next() {
+	return scanRows(rows, "labels", func(r *sql.Rows) (string, error) {
 		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("scanning label: %w", err)
+		if err := r.Scan(&name); err != nil {
+			return "", fmt.Errorf("scanning label: %w", err)
 		}
-		labels = append(labels, name)
-	}
-	return labels, rows.Err()
+		return name, nil
+	})
 }
 
 // ListAllIssues returns every issue in the database, including done issues,
 // with no filters, sorting, or pagination. Labels are hydrated on all results.
-func ListAllIssues(db *sql.DB) ([]*model.Issue, error) {
+func ListAllIssues(db *sql.DB, projectID int) ([]*model.Issue, error) {
+	where, args := projectFilter(projectID, "WHERE")
 	rows, err := db.Query(
-		`SELECT id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at
-		 FROM issues ORDER BY id ASC`,
+		`SELECT `+issueColumns+`
+		 FROM issues `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying all issues: %w", err)
 	}
-	defer rows.Close()
-
-	var issues []*model.Issue
-	for rows.Next() {
-		issue, err := scanIssueRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		issues = append(issues, issue)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating issue rows: %w", err)
+	issues, err := scanRows(rows, "issue rows", scanIssueRow)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := HydrateLabels(db, issues); err != nil {
@@ -901,27 +1065,58 @@ func ListAllIssues(db *sql.DB) ([]*model.Issue, error) {
 	return issues, nil
 }
 
-// CountIssues returns the total number of issues in the database.
-func CountIssues(db *sql.DB) (int, error) {
+// projectFilter renders the optional per-project predicate the count queries
+// share. A zero projectID means every project — the pre-v12 reading.
+func projectFilter(projectID int, prefix string) (string, []any) {
+	if projectID == 0 {
+		return "", nil
+	}
+	return prefix + " project_id = ?", []any{projectID}
+}
+
+// projectFilterVia is projectFilter for a table with no project_id column of
+// its own: it scopes through a foreign key instead, via a subquery clause
+// like "issue_id IN (SELECT id FROM issues WHERE project_id = ?)". Every one
+// of its callers (the full-export listers across activity.go, comments.go,
+// doc_comments.go, docs.go, doc_links.go, files.go, labels.go, proposals.go,
+// and relations.go) needs this as the query's OWN WHERE clause rather than an
+// "AND" onto an existing one, so unlike projectFilter it takes no prefix.
+func projectFilterVia(projectID int, clause string) (string, []any) {
+	if projectID == 0 {
+		return "", nil
+	}
+	return "WHERE " + clause, []any{projectID}
+}
+
+// CountIssues returns the number of issues, scoped to a project when
+// projectID is non-zero.
+func CountIssues(db *sql.DB, projectID int) (int, error) {
+	where, args := projectFilter(projectID, "WHERE")
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&count); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issues `+where, args...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("counting issues: %w", err)
 	}
 	return count, nil
 }
 
-// CountRootIssues returns the number of issues with no parent.
-func CountRootIssues(db *sql.DB) (int, error) {
+// CountRootIssues returns the number of issues with no parent, scoped to a
+// project when projectID is non-zero.
+func CountRootIssues(db *sql.DB, projectID int) (int, error) {
+	where, args := projectFilter(projectID, "AND")
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM issues WHERE parent_id IS NULL`).Scan(&count); err != nil {
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM issues WHERE parent_id IS NULL `+where, args...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("counting root issues: %w", err)
 	}
 	return count, nil
 }
 
 // countByColumn returns a map of value -> count for the given column grouped by that column.
-func countByColumn(db *sql.DB, column string) (map[string]int, error) {
-	rows, err := db.Query(fmt.Sprintf(`SELECT %s, COUNT(*) FROM issues GROUP BY %s`, column, column))
+func countByColumn(db *sql.DB, projectID int, column string) (map[string]int, error) {
+	where, args := projectFilter(projectID, "WHERE")
+	rows, err := db.Query(
+		fmt.Sprintf(`SELECT %s, COUNT(*) FROM issues %s GROUP BY %s`, column, where, column),
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("counting by %s: %w", column, err)
 	}
@@ -939,14 +1134,16 @@ func countByColumn(db *sql.DB, column string) (map[string]int, error) {
 	return result, rows.Err()
 }
 
-// CountByStatus returns a map of status -> count for all issues.
-func CountByStatus(db *sql.DB) (map[string]int, error) {
-	return countByColumn(db, "status")
+// CountByStatus returns a map of status -> count, scoped to a project when
+// projectID is non-zero.
+func CountByStatus(db *sql.DB, projectID int) (map[string]int, error) {
+	return countByColumn(db, projectID, "status")
 }
 
-// CountByPriority returns a map of priority -> count for all issues.
-func CountByPriority(db *sql.DB) (map[string]int, error) {
-	return countByColumn(db, "priority")
+// CountByPriority returns a map of priority -> count, scoped to a project when
+// projectID is non-zero.
+func CountByPriority(db *sql.DB, projectID int) (map[string]int, error) {
+	return countByColumn(db, projectID, "priority")
 }
 
 // ClearAllData deletes all data from every persistent table within a single
@@ -1004,14 +1201,123 @@ func ClearAllDataTx(tx *sql.Tx) error {
 	return nil
 }
 
+// ClearProjectDataTx is ClearAllDataTx scoped to ONE project (v12): the same
+// tracker tables, children before parents, but only the rows reachable from
+// this project's roots. Under the shared store, "replace everything" scoped
+// any wider would delete projects the operator was not looking at.
+func ClearProjectDataTx(tx *sql.Tx, projectID int) error {
+	projectID = projectOrDefault(projectID)
+
+	// Children keyed through issues.
+	issueChildren := []string{
+		"doc_issue_links", "proposal_issues",
+		"activity_log", "issue_files", "issue_labels", "comments",
+	}
+	issueCols := map[string]string{
+		"doc_issue_links": "issue_id", "proposal_issues": "issue_id",
+		"activity_log": "issue_id", "issue_files": "issue_id",
+		"issue_labels": "issue_id", "comments": "issue_id",
+	}
+	for _, table := range issueChildren {
+		if _, err := tx.Exec(
+			`DELETE FROM `+table+` WHERE `+issueCols[table]+` IN
+			   (SELECT id FROM issues WHERE project_id = ?)`, projectID); err != nil {
+			return fmt.Errorf("clearing %s: %w", table, err)
+		}
+	}
+	// Relations touch two issues; either end in the project removes the row —
+	// a cross-project relation cannot survive one side's replacement.
+	if _, err := tx.Exec(
+		`DELETE FROM issue_relations WHERE
+		   source_issue_id IN (SELECT id FROM issues WHERE project_id = ?) OR
+		   target_issue_id IN (SELECT id FROM issues WHERE project_id = ?)`,
+		projectID, projectID); err != nil {
+		return fmt.Errorf("clearing issue_relations: %w", err)
+	}
+
+	// Children keyed through docs and proposals.
+	for table, parent := range map[string]string{
+		"doc_comments":  "doc_id IN (SELECT id FROM docs WHERE project_id = ?)",
+		"doc_revisions": "doc_id IN (SELECT id FROM docs WHERE project_id = ?)",
+		"proposal_docs": "doc_id IN (SELECT id FROM docs WHERE project_id = ?)",
+		"votes":         "proposal_id IN (SELECT id FROM proposals WHERE project_id = ?)",
+	} {
+		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE `+parent, projectID); err != nil {
+			return fmt.Errorf("clearing %s: %w", table, err)
+		}
+	}
+
+	// The roots.
+	for _, table := range []string{"docs", "proposals", "issues", "labels"} {
+		if _, err := tx.Exec(
+			`DELETE FROM `+table+` WHERE project_id = ?`, projectID); err != nil {
+			return fmt.Errorf("clearing %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// InsertGapIssueTx materializes a backlog issue from a recorded gap artifact
+// (DKT-72), inside the completion saga's transaction, and relates it to the
+// issue whose step recorded the gap.
+//
+// One transaction with the artifact, because the pair is the whole point: a
+// gap that recorded an artifact but no issue is residue nothing re-reads —
+// the failure mode this replaces — and an issue without its artifact is a
+// claim with no record behind it. `relates_to` rather than a directional
+// relation: a gap is out-of-scope BY DEFINITION, so it must not block the
+// issue that surfaced it.
+func InsertGapIssueTx(tx *sql.Tx, projectID int, title, description string, relatedIssueID int) (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := tx.Exec(
+		`INSERT INTO issues (project_id, title, description, status, priority, kind, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectOrDefault(projectID), title, description,
+		string(model.StatusBacklog), string(model.PriorityNone), string(model.IssueKindTask),
+		now, now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("materializing a gap issue: %w", err)
+	}
+	id64, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("materializing a gap issue: %w", err)
+	}
+	id := int(id64)
+
+	if _, err := tx.Exec(
+		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
+		 VALUES (?, ?, ?, ?)`,
+		id, relatedIssueID, string(model.RelationRelatesTo), now,
+	); err != nil {
+		return 0, fmt.Errorf("relating gap issue %d to %d: %w", id, relatedIssueID, err)
+	}
+	return id, nil
+}
+
 // InsertIssueWithID inserts an issue with a specific ID (not auto-increment),
 // skipping if the ID already exists. Returns true if the row was inserted.
 // Must be called within an existing transaction.
 func InsertIssueWithID(tx *sql.Tx, issue *model.Issue) (bool, error) {
+	// The declared scope round-trips (DKT-55): export carries `scope` for
+	// issues that declared one, so import must restore it — writing the other
+	// nine fields and dropping this one would be a silent export/import skew.
+	// A nil Scope stores SQL NULL, preserving the declared/undeclared
+	// distinction across the round trip.
+	var scopeGlobs any
+	if issue.Scope != nil {
+		encoded, err := json.Marshal(*issue.Scope)
+		if err != nil {
+			return false, fmt.Errorf("serializing scope for issue %d: %w", issue.ID, err)
+		}
+		scopeGlobs = string(encoded)
+	}
+
 	res, err := tx.Exec(
-		`INSERT OR IGNORE INTO issues (id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO issues (id, project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, scope_globs)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		issue.ID,
+		projectOrDefault(issue.ProjectID),
 		nilIfZeroPtr(issue.ParentID),
 		issue.Title,
 		issue.Description,
@@ -1021,6 +1327,7 @@ func InsertIssueWithID(tx *sql.Tx, issue *model.Issue) (bool, error) {
 		issue.Assignee,
 		issue.CreatedAt.UTC().Format(time.RFC3339),
 		issue.UpdatedAt.UTC().Format(time.RFC3339),
+		scopeGlobs,
 	)
 	if err != nil {
 		return false, fmt.Errorf("inserting issue with id %d: %w", issue.ID, err)

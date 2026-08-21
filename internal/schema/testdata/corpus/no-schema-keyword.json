@@ -1,0 +1,14 @@
+{
+  "why": "§4.1 mitigation 2: a document with no $schema is read as 2020-12, where dependentRequired asserts rather than being an unknown annotation",
+  "schema": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {"risk": {"type": "string"}, "tier": {"type": "string"}},
+      "dependentRequired": {"risk": ["tier"]}
+    }
+  },
+  "document": [{"risk": "low"}],
+  "valid": false,
+  "message_contains": "payload[0]:"
+}

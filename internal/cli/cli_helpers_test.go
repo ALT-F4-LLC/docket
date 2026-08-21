@@ -9,22 +9,19 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(:memory:): %v", err)
-	}
+	testsupport.Must(t, err, "Open(:memory:): %v", err)
 	t.Cleanup(func() { conn.Close() })
-	if err := db.Initialize(conn); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := db.Migrate(conn); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	err = db.Initialize(conn)
+	testsupport.Must(t, err, "Initialize: %v", err)
+	err = db.Migrate(conn)
+	testsupport.Must(t, err, "Migrate: %v", err)
 	return conn
 }
 

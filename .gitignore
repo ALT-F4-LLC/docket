@@ -1,3 +1,9 @@
-/.docket
+/.docket/issues.db
+/.docket/issues.db-shm
+/.docket/issues.db-wal
+/.docket/tree.lock
 /bin
 /docket
+scripts/qa/fixtures/*.db-shm
+scripts/qa/fixtures/*.db-wal
+.docket/*.db

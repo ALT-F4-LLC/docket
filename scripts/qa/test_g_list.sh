@@ -66,21 +66,13 @@ test_g_list() {
   assert_exit "G" "G14_default" 0
   local G14_HAS_DONE
   G14_HAS_DONE=$(echo "$CMD_STDOUT" | jq "[.data.issues[] | select(.id == \"DKT-$G14_ID\")] | length" 2>/dev/null)
-  if [ "$G14_HAS_DONE" -eq 0 ]; then
-    check "G" "G14_excluded" "PASS"
-  else
-    check "G" "G14_excluded" "FAIL" "done issue DKT-$G14_ID should not appear without --all"
-  fi
+  check_cond "G" "G14_excluded" "done issue DKT-$G14_ID should not appear without --all" [ "$G14_HAS_DONE" -eq 0 ]
   # With --all, the done issue should appear.
   run issue list --json --all
   assert_exit "G" "G14_all" 0
   local G14_HAS_ALL
   G14_HAS_ALL=$(echo "$CMD_STDOUT" | jq "[.data.issues[] | select(.id == \"DKT-$G14_ID\")] | length" 2>/dev/null)
-  if [ "$G14_HAS_ALL" -ge 1 ]; then
-    check "G" "G14_included" "PASS"
-  else
-    check "G" "G14_included" "FAIL" "done issue DKT-$G14_ID should appear with --all"
-  fi
+  check_cond "G" "G14_included" "done issue DKT-$G14_ID should appear with --all" [ "$G14_HAS_ALL" -ge 1 ]
   # Reopen to avoid polluting later sections.
   run issue reopen "$G14_ID" --json
 

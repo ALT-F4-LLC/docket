@@ -21,7 +21,7 @@ func TestRenderDetail_PlainLinkedDocsAfterFilesBeforeDescription(t *testing.T) {
 	issue.Files = []string{"internal/db/doc_links.go"}
 	issue.Description = "the description"
 
-	out := RenderDetail(issue, nil, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil, nil)
 
 	if !strings.Contains(out, "\nLinked Docs\n") {
 		t.Fatalf("missing Linked Docs header:\n%s", out)
@@ -44,7 +44,7 @@ func TestRenderDetail_PlainLinkedDocsAligned(t *testing.T) {
 		{ID: 100, Type: "ux", Status: "draft", Title: "Beta"},
 	})
 
-	out := RenderDetail(issue, nil, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil, nil)
 
 	wantLines := []string{
 		"  > DOC-3     tdd   approved   Alpha",
@@ -60,7 +60,7 @@ func TestRenderDetail_PlainLinkedDocsAligned(t *testing.T) {
 func TestRenderDetail_PlainOmitsLinkedDocsWhenEmpty(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	issue := issueWithDocs(nil)
-	out := RenderDetail(issue, nil, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil, nil)
 	if strings.Contains(out, "Linked Docs") {
 		t.Errorf("empty docs should omit section:\n%s", out)
 	}
@@ -72,7 +72,7 @@ func TestRenderDetail_StyledLinkedDocsUsesArrowGlyph(t *testing.T) {
 		{ID: 3, Type: "tdd", Status: "approved", Title: "Docket Doc CLI"},
 	})
 
-	out := RenderDetail(issue, nil, nil, nil, nil, nil)
+	out := RenderDetail(issue, nil, nil, nil, nil, nil, nil)
 
 	if !strings.Contains(out, "Linked Docs") {
 		t.Fatalf("missing Linked Docs header:\n%s", out)
@@ -87,5 +87,67 @@ func TestRenderDetail_StyledLinkedDocsUsesArrowGlyph(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("styled output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestRenderDetail_PlainCarriesTheResolution closes half of DKT-245 that only
+// the styled renderer had.
+//
+// DKT-245's own comment says `issue show` prints the status AND the
+// resolution; renderPlainDetail printed only the status. NO_COLOR is what
+// every piped reader sees — CI, and an agent shelling out to `docket issue
+// show` — so the one surface that dropped the marker was the one read by the
+// readers DKT-404 caught misreading abandoned issues as pending.
+func TestRenderDetail_PlainCarriesTheResolution(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	issue := makeTestIssue(1, "Issue", model.StatusReview, model.PriorityHigh,
+		model.IssueKindFeature, nil)
+	issue.Resolution = model.ResolutionAbandoned
+
+	out := RenderDetail(issue, nil, nil, nil, nil, nil, nil)
+
+	if !strings.Contains(out, model.ResolutionAbandoned) {
+		t.Errorf("plain detail drops the resolution; the row reads as an "+
+			"ordinary issue in review:\n%s", out)
+	}
+	// The STATUS is still there. The two are one fact each and the detail view
+	// has room for both — dropping either is what sends a reader to the wrong
+	// conclusion.
+	if !strings.Contains(out, string(model.StatusReview)) {
+		t.Errorf("plain detail drops the status:\n%s", out)
+	}
+}
+
+// TestRenderDetail_RunDispositionIsAboveTheDescription is DKT-404's placement
+// argument: a reader who stops at the top of this view is exactly the reader
+// who misreads a frozen status, so the ruling sits with the metadata that
+// frames it rather than below a description and a comment thread.
+func TestRenderDetail_RunDispositionIsAboveTheDescription(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh,
+		model.IssueKindFeature, nil)
+	issue.Description = "the description"
+
+	out := RenderDetail(issue, nil, nil, nil, nil, nil, &model.IssueRunDisposition{
+		RunID: 14, Disposition: "abandoned", By: "implement@0",
+		Reason: "pin drift\nre-planned as HRN-300", AtMS: 1755000000000,
+	})
+
+	want := []string{
+		RunDispositionHeading,
+		"work abandoned in RUN-14 by implement@0 (2025-08-12)",
+		"reason: pin drift",
+		// The ruling VERBATIM: a second line is a second line, not a "…".
+		"re-planned as HRN-300",
+	}
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("plain detail missing %q:\n%s", w, out)
+		}
+	}
+	if disposition, desc := strings.Index(out, RunDispositionHeading),
+		strings.Index(out, "Description"); disposition > desc {
+		t.Errorf("the run disposition renders below the description "+
+			"(%d > %d):\n%s", disposition, desc, out)
 	}
 }

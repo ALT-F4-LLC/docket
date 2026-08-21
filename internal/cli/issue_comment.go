@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,21 +27,18 @@ var commentAddCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
 		// Verify issue exists.
-		issue, err := db.GetIssue(conn, id)
+		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+			return err
 		}
 
-		jsonMode, _ := cmd.Flags().GetBool("json")
+		jsonMode, _ := jsonModeOf(cmd)
 		body, _ := cmd.Flags().GetString("message")
 
 		// Resolve message body: flag > stdin pipe > editor.
@@ -117,10 +113,15 @@ var commentAddCmd = &cobra.Command{
 			Author:  author,
 		}
 
-		commentID, err := db.CreateComment(conn, &comment)
+		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
+			return err
+		}
+
+		commentID, err := db.CreateCommentIdempotent(conn, &comment, idempotencyKey)
+		if err != nil {
+			if e := notFound(err, fmt.Sprintf("issue %s", args[0])); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
 		}
@@ -138,6 +139,7 @@ var commentAddCmd = &cobra.Command{
 
 func init() {
 	commentAddCmd.Flags().StringP("message", "m", "", "Comment body")
+	addIdempotencyKeyFlag(commentAddCmd)
 	commentCmd.AddCommand(commentAddCmd)
 	issueCmd.AddCommand(commentCmd)
 }

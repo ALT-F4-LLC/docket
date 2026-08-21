@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestWriteJSONSuccess(t *testing.T) {
@@ -14,9 +15,8 @@ func TestWriteJSONSuccess(t *testing.T) {
 	writeJSONSuccess(&buf, map[string]string{"key": "val"}, "it worked")
 
 	var env successEnvelope
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err := json.Unmarshal(buf.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if !env.OK {
 		t.Error("ok = false, want true")
 	}
@@ -37,9 +37,8 @@ func TestWriteJSONSuccessOmitsEmptyMessage(t *testing.T) {
 	writeJSONSuccess(&buf, "data", "")
 
 	var raw map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err := json.Unmarshal(buf.Bytes(), &raw)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if _, exists := raw["message"]; exists {
 		t.Error("expected message to be omitted when empty")
 	}
@@ -50,9 +49,8 @@ func TestWriteJSONError(t *testing.T) {
 	writeJSONError(&buf, errors.New("something broke"), ErrNotFound)
 
 	var env errorEnvelope
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err := json.Unmarshal(buf.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if env.OK {
 		t.Error("ok = true, want false")
 	}
@@ -76,9 +74,8 @@ func TestWriterErrorJSON(t *testing.T) {
 		t.Error("expected JSON error on stdout")
 	}
 	var env errorEnvelope
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err := json.Unmarshal(stdout.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if env.OK {
 		t.Error("ok = true, want false")
 	}
@@ -286,9 +283,8 @@ func TestWriterSuccessJSONMode(t *testing.T) {
 	w.Success(map[string]string{"key": "val"}, "it worked")
 
 	var env successEnvelope
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err := json.Unmarshal(stdout.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if !env.OK {
 		t.Error("ok = false, want true")
 	}
@@ -309,9 +305,8 @@ func TestWriterSuccessJSONModeUnchangedByNoColor(t *testing.T) {
 	w.Success(map[string]string{"key": "val"}, "it worked")
 
 	var env successEnvelope
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err := json.Unmarshal(stdout.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if !env.OK {
 		t.Error("ok = false, want true")
 	}
@@ -332,9 +327,8 @@ func TestWriterErrorJSONModeUnchangedByNoColor(t *testing.T) {
 	}
 
 	var env errorEnvelope
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	err := json.Unmarshal(stdout.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
 	if env.OK {
 		t.Error("ok = true, want false")
 	}

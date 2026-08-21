@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -25,8 +24,8 @@ var docEditCmd = &cobra.Command{
 		}
 
 		if _, err := db.GetDoc(conn, id); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("doc %s not found", model.FormatDocID(id)), output.ErrNotFound)
+			if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
 		}
@@ -72,8 +71,8 @@ var docEditCmd = &cobra.Command{
 
 		rev, err := db.UpdateDoc(conn, id, upd)
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("doc %s not found", model.FormatDocID(id)), output.ErrNotFound)
+			if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
+				return e
 			}
 			return cmdErr(fmt.Errorf("updating doc: %w", err), output.ErrGeneral)
 		}

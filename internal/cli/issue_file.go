@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -28,17 +27,14 @@ var fileAddCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
-		issue, err := db.GetIssue(conn, id)
+		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+			return err
 		}
 
 		filePaths := args[1:]
@@ -64,17 +60,14 @@ var fileRemoveCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
-		issue, err := db.GetIssue(conn, id)
+		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
 		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+			return err
 		}
 
 		filePaths := args[1:]
@@ -100,16 +93,13 @@ var fileListCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		id, err := model.ParseID(args[0])
+		id, err := issueArg(args[0])
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+			return err
 		}
 
-		if _, err := db.GetIssue(conn, id); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return cmdErr(fmt.Errorf("issue %s not found", args[0]), output.ErrNotFound)
-			}
-			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
+		if _, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0])); err != nil {
+			return err
 		}
 
 		files, err := db.GetIssueFiles(conn, id)

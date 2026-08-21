@@ -405,6 +405,66 @@ func TestRenderGroupedTable_PlainHeaderFormat(t *testing.T) {
 	}
 }
 
+func TestRenderTable_ColoredPathRendersIssueID(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+
+	issues := []*model.Issue{
+		makeTestIssue(1, "Colored Table Task", model.StatusTodo, model.PriorityHigh, model.IssueKindTask, nil),
+	}
+
+	got := RenderTable(issues, false)
+
+	if !strings.Contains(got, "DKT-1") {
+		t.Errorf("expected DKT-1 in colored table output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Colored Table Task") {
+		t.Errorf("expected issue title in colored table output, got:\n%s", got)
+	}
+	// RenderTable's colored path must use the plain top-left border corner
+	// (renderColorChildTable(issues, false)), not the tree-connector corner
+	// (withConnector=true) used by the grouped-table section header.
+	firstLine := strings.SplitN(got, "\n", 2)[0]
+	if !strings.HasPrefix(firstLine, "┌") {
+		t.Errorf("expected plain top-left border corner '┌' (withConnector=false), got first line:\n%s", firstLine)
+	}
+}
+
+func TestRenderTreeList_ColoredPathRendersHierarchy(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+
+	parent := makeTestIssue(1, "Tree Parent", model.StatusInProgress, model.PriorityHigh, model.IssueKindEpic, nil)
+	child := makeTestIssue(2, "Tree Child", model.StatusTodo, model.PriorityMedium, model.IssueKindTask, intPtr(1))
+
+	got := RenderTreeList([]*model.Issue{parent, child})
+
+	if !strings.Contains(got, "DKT-1") || !strings.Contains(got, "Tree Parent") {
+		t.Errorf("expected parent in tree output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "DKT-2") || !strings.Contains(got, "Tree Child") {
+		t.Errorf("expected child in tree output, got:\n%s", got)
+	}
+}
+
+func TestGroupIssuesByParent_AllOrphansFallBackToRoots(t *testing.T) {
+	// Every issue has a parent outside the set, so none is a natural root.
+	// groupIssuesByParent's fallback must treat all issues as roots rather
+	// than returning an empty root list.
+	issue1 := makeTestIssue(1, "Orphan 1", model.StatusTodo, model.PriorityHigh, model.IssueKindTask, intPtr(99))
+	issue2 := makeTestIssue(2, "Orphan 2", model.StatusTodo, model.PriorityMedium, model.IssueKindTask, intPtr(99))
+
+	roots, children := groupIssuesByParent([]*model.Issue{issue1, issue2})
+
+	if len(roots) != 2 {
+		t.Fatalf("expected fallback to treat both orphans as roots, got %d roots: %v", len(roots), roots)
+	}
+	if roots[0] != issue1 || roots[1] != issue2 {
+		t.Errorf("expected roots to be exactly the input issues in order, got: %v", roots)
+	}
+	if len(children) != 1 || len(children[99]) != 2 {
+		t.Errorf("expected children map to still key orphans under parent 99, got: %v", children)
+	}
+}
+
 func TestRenderGroupedTable_MixedParentNotInIssuesOrMap(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 

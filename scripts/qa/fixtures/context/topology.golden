@@ -1,0 +1,10 @@
+implement@0|executor|pending|implement|write
+review@0#0|executor|pending|judge-correctness|judge-correctness
+review@0#1|executor|pending|judge-architecture|judge-architecture
+review@0#2|executor|pending|judge-simplicity|judge-simplicity
+review@0#3|executor|pending|judge-testing|judge-testing
+synthesize@0|executor|pending|synthesize-findings|synthesize-findings
+reconcile@0|action|pending||
+verify@0|executor|pending|verify-ac|verify-ac
+commit-gate@0|human|pending||
+commit@0|executor|pending|commit-author|commit-author
