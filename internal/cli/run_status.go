@@ -135,7 +135,12 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 	if err != nil {
 		return runErr(err)
 	}
-	steps, err := db.StepStatusCounts(conn, runID)
+	// EFFECTIVE counts (§6.2), exactly as this verb's contract states — the
+	// same computation `step show`/`step list` render, so the rollup and a
+	// step read taken at the same moment cannot disagree (DKT-468). The raw
+	// GROUP BY this replaced counted a lapsed-lease claim as `claimed` while
+	// `step show` reported the same step `ready`.
+	steps, err := engine.EffectiveStatusCounts(conn, runID, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}

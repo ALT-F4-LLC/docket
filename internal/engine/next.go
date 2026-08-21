@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -207,7 +208,8 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// Nothing is scheduled and no daemon watches: the lifecycle advances when
 	// somebody asks what is ready, which is the same laziness the saga's resume
 	// uses.
-	opened, voteRouted, err := e.driveVoteSteps(conn, defs, ready, sched.holdTally, nowMS)
+	opened, voteRouted, err := e.driveVoteSteps(
+		conn, defs, pendingVoteSteps(sched), ready, sched.holdTally, nowMS)
 	if err != nil {
 		return nil, err
 	}
@@ -316,12 +318,26 @@ func (e *Engine) driveActionSteps(conn *sql.DB, ready []*db.Step, nowMS int64) (
 	return routed, nil
 }
 
-// driveVoteSteps advances every ready vote step through §8.1's lifecycle.
+// driveVoteSteps advances vote steps through §8.1's lifecycle.
 //
 // Phase 2 opens a proposal for a step that has none; phase 4 reads the outcome
 // once the proposal leaves `open`; phase 5 routes on it. A step whose proposal
 // is still open is left alone — that is phase 3, waiting on voters, and nothing
 // in core casts for them (§8.4: "No auto-casting").
+//
+// THE TWO HALVES FOLLOW DIFFERENT SETS (DKT-468). Phase 2 follows the OFFER:
+// a ballot opens when the step's turn has come, so it runs only for steps in
+// `ready`. Phases 4 and 5 run for EVERY pending vote step of the snapshot —
+// `candidates` — whether or not the admission clauses would offer it right
+// now. Routing a decided tally spawns nothing and spends nothing, so the
+// clauses that guard executor work (scope, class headroom incl. reap holds,
+// budget) have no business deferring it — AwaitingDecision states the same
+// principle for gates. Gating phases 4/5 on full readiness let a quorum
+// reached mid-wave sit unrouted for as long as any admission clause happened
+// to fail at each driving opportunity: `step show` reported the children
+// `pending` and the holding aggregate `gated` across a whole dispatch-close
+// cycle while `vote show` already showed the proposals decided — and a run
+// whose budget breached after the casts could never route them at all.
 //
 // It returns the proposal id now standing against each vote step's (issue,
 // instance) — not instance alone (DKT-65), since a materialized held-cluster
@@ -339,12 +355,16 @@ func (e *Engine) driveActionSteps(conn *sql.DB, ready []*db.Step, nowMS int64) (
 // its id. Only routing does, since it moves the step off `ready` for real
 // and can un-defer an aggregate that readies a step this call never saw.
 func (e *Engine) driveVoteSteps(
-	conn *sql.DB, defs map[int]*workflow.Definition, ready []*db.Step,
+	conn *sql.DB, defs map[int]*workflow.Definition, candidates, ready []*db.Step,
 	tally holdTally, nowMS int64,
 ) (map[voteStepKey]int, bool, error) {
+	openable := make(map[int]bool, len(ready))
+	for _, step := range ready {
+		openable[step.ID] = true
+	}
 	opened := map[voteStepKey]int{}
 	routed := false
-	for _, step := range ready {
+	for _, step := range candidates {
 		if step.Kind != workflow.TypeVote {
 			continue
 		}
@@ -359,6 +379,12 @@ func (e *Engine) driveVoteSteps(
 			return nil, false, err
 		}
 		if proposalID == 0 {
+			// Phase 2 follows the offer: a step the admission clauses are not
+			// offering has not had its turn, and opening its ballot early
+			// would seat a panel on a question the scheduler has not asked.
+			if !openable[step.ID] {
+				continue
+			}
 			// Phase 2, exactly once: the idempotency key makes a concurrent
 			// second invocation return the same proposal rather than open a
 			// second one.
@@ -408,6 +434,27 @@ func (e *Engine) driveVoteSteps(
 		}
 	}
 	return opened, routed, nil
+}
+
+// pendingVoteSteps is driveVoteSteps' phase-4/5 candidate set: every vote step
+// of the snapshot still `pending`, whatever the admission clauses say about it
+// (DKT-468 — see driveVoteSteps' own comment for why the set is wider than the
+// offer).
+//
+// Empty when the run is not active: pause means pause, and widening the sweep
+// past the offer must not start routing decided tallies on a run an operator
+// parked — the same R1 every driving opportunity respected before.
+func pendingVoteSteps(sched *Scheduler) []*db.Step {
+	if sched.Run() == nil || sched.Run().Status != model.RunActive {
+		return nil
+	}
+	var out []*db.Step
+	for _, step := range sched.Steps() {
+		if step.Kind == workflow.TypeVote && step.Status == db.StepPending {
+			out = append(out, step)
+		}
+	}
+	return out
 }
 
 // stepRow renders one step into §11.4's `next row` shape.
@@ -565,6 +612,49 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 			}
 		}
 	}
+	return out, nil
+}
+
+// EffectiveStatusCounts rolls one run's steps up by EFFECTIVE status (§6.2),
+// for `run status` — the same status LoadStepView and RunStepList report, so
+// the rollup can never contradict `step show`/`step list` (DKT-468).
+//
+// It exists because the rollup used to GROUP BY the raw column while the
+// verb's own contract said "this verb computes effective status": a claimed
+// step whose lease had lapsed counted as `claimed` here and read as `ready`
+// in `step show`, and an operator holding both outputs at the same moment had
+// no way to tell which surface was lying. Neither was — they answered
+// different questions — but two answers to "what is this step's status" is
+// exactly the divergence the effective-status discipline exists to prevent.
+// READ-ONLY, like every §6.2 computation: the transaction is always rolled
+// back and no reap runs.
+func EffectiveStatusCounts(conn *sql.DB, runID int, nowMS int64) ([]model.StatusCount, error) {
+	defs, err := StepDefinitions(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"counting %s's step statuses: %w", model.FormatRunID(runID), err)
+	}
+	defer tx.Rollback()
+
+	sched, err := LoadScheduler(tx, runID, defs, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int)
+	for _, step := range sched.Steps() {
+		counts[EffectiveStatus(sched, step)]++
+	}
+	out := make([]model.StatusCount, 0, len(counts))
+	for status, count := range counts {
+		out = append(out, model.StatusCount{Status: status, Count: count})
+	}
+	// The same stable order db.StepStatusCounts renders, so the only change a
+	// consumer sees is the statuses being effective.
+	sort.Slice(out, func(i, j int) bool { return out[i].Status < out[j].Status })
 	return out, nil
 }
 

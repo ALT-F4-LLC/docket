@@ -175,7 +175,8 @@ func (e *Engine) OpenDispatch(
 	// previews, and their lifecycles belong to the `step record` that readies
 	// them mid-wave, not to this open.
 	preSteps = readyOnly(preRows, preSteps)
-	if _, _, err := e.driveVoteSteps(conn, defs, preSteps, preSched.holdTally, nowMS); err != nil {
+	if _, _, err := e.driveVoteSteps(
+		conn, defs, pendingVoteSteps(preSched), preSteps, preSched.holdTally, nowMS); err != nil {
 		return nil, err
 	}
 	if _, err := e.driveActionSteps(conn, preSteps, nowMS); err != nil {

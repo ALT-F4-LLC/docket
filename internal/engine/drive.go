@@ -61,7 +61,8 @@ func (e *Engine) DriveRunLifecycles(conn *sql.DB, runID int, nowMS int64) error 
 				ready = append(ready, step)
 			}
 		}
-		_, voteRouted, err := e.driveVoteSteps(conn, defs, ready, sched.holdTally, nowMS)
+		_, voteRouted, err := e.driveVoteSteps(
+			conn, defs, pendingVoteSteps(sched), ready, sched.holdTally, nowMS)
 		if err != nil {
 			return err
 		}
