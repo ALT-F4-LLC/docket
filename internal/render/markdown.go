@@ -36,5 +36,7 @@ func RenderMarkdown(content string) (string, error) {
 		return content, err
 	}
 
-	return strings.TrimSpace(rendered), nil
+	// glamour pads every line out to its wrap width; strip that padding so a
+	// rendered comment body carries no trailing whitespace.
+	return trimTrailingSpace(strings.TrimSpace(rendered)), nil
 }

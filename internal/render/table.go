@@ -60,6 +60,49 @@ func truncate(s string, maxLen int) string {
 	return string(runes[:maxLen-3]) + "..."
 }
 
+// indentBlock prefixes every line of text with indent and strips trailing
+// whitespace from each line. Multi-line values (vote summaries, findings,
+// comment bodies) must go through this rather than being emitted whole, so a
+// single long line never leaves padding behind on its neighbours.
+func indentBlock(indent, text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, " \t")
+		if line == "" {
+			lines[i] = ""
+			continue
+		}
+		lines[i] = indent + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// styleBlock is indentBlock with style applied one line at a time. Handing a
+// multi-line string to a single lipgloss Render pads every line out to the
+// width of the widest one, which turns one long line in a vote summary into
+// thousands of trailing spaces on every other line.
+func styleBlock(style lipgloss.Style, indent, text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, " \t")
+		if line == "" {
+			lines[i] = ""
+			continue
+		}
+		lines[i] = style.Render(line)
+	}
+	return indentBlock(indent, strings.Join(lines, "\n"))
+}
+
+// trimTrailingSpace strips trailing spaces and tabs from every line of s.
+func trimTrailingSpace(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // statusLabel returns a status string with icon, e.g. "✔ done".
 func statusLabel(s model.Status) string {
 	return s.Icon() + " " + string(s)

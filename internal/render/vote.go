@@ -305,11 +305,13 @@ func renderVoteList(votes []*model.Vote) string {
 		if v.FindingsJSON != nil {
 			line += renderStructuredFindings(v.FindingsJSON)
 		} else if v.Findings != "" {
-			line += "\n    " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(truncate(v.Findings, 80))
+			findingsStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+			line += "\n" + styleBlock(findingsStyle, "    ", truncate(v.Findings, 80))
 		}
 
 		if v.Summary != "" {
-			line += "\n    " + lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("8")).Render(v.Summary)
+			summaryStyle := lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("8"))
+			line += "\n" + styleBlock(summaryStyle, "    ", v.Summary)
 		}
 
 		lines = append(lines, line)
@@ -325,13 +327,13 @@ func renderStructuredFindings(f *model.Findings) string {
 	suggestionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	for _, b := range f.Blockers {
-		parts = append(parts, "    "+blockerStyle.Render("BLOCKER: "+b))
+		parts = append(parts, styleBlock(blockerStyle, "    ", "BLOCKER: "+b))
 	}
 	for _, c := range f.Concerns {
-		parts = append(parts, "    "+concernStyle.Render("CONCERN: "+c))
+		parts = append(parts, styleBlock(concernStyle, "    ", "CONCERN: "+c))
 	}
 	for _, s := range f.Suggestions {
-		parts = append(parts, "    "+suggestionStyle.Render("SUGGESTION: "+s))
+		parts = append(parts, styleBlock(suggestionStyle, "    ", "SUGGESTION: "+s))
 	}
 
 	if len(parts) == 0 {
@@ -413,19 +415,19 @@ func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, li
 			)
 			if v.FindingsJSON != nil {
 				for _, bl := range v.FindingsJSON.Blockers {
-					fmt.Fprintf(&b, "    BLOCKER: %s\n", bl)
+					fmt.Fprintf(&b, "%s\n", indentBlock("    ", "BLOCKER: "+bl))
 				}
 				for _, c := range v.FindingsJSON.Concerns {
-					fmt.Fprintf(&b, "    CONCERN: %s\n", c)
+					fmt.Fprintf(&b, "%s\n", indentBlock("    ", "CONCERN: "+c))
 				}
 				for _, s := range v.FindingsJSON.Suggestions {
-					fmt.Fprintf(&b, "    SUGGESTION: %s\n", s)
+					fmt.Fprintf(&b, "%s\n", indentBlock("    ", "SUGGESTION: "+s))
 				}
 			} else if v.Findings != "" {
-				fmt.Fprintf(&b, "    %s\n", truncate(v.Findings, 80))
+				fmt.Fprintf(&b, "%s\n", indentBlock("    ", truncate(v.Findings, 80)))
 			}
 			if v.Summary != "" {
-				fmt.Fprintf(&b, "    %s\n", v.Summary)
+				fmt.Fprintf(&b, "%s\n", indentBlock("    ", v.Summary))
 			}
 		}
 	}
