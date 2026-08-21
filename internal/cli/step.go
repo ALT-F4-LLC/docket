@@ -742,7 +742,10 @@ var stepShowCmd = &cobra.Command{
 
 READ-ONLY. The status shown is EFFECTIVE — computed at read — so a step whose
 lease has lapsed reads as pending even though the row still carries the stale
-owner. This verb WRITES NOTHING, including no reap.
+owner. That window is labeled: such a step carries lease_expired: true until
+next/claim actually reaps it, because verbs that read the raw row (run repin's
+mid-flight check) still count the unreaped claim. This verb WRITES NOTHING,
+including no reap.
 
 A single id emits the same row object it always has, unchanged. Two or more
 ids emit a JSON array of that same shape under data — batch reads are a
@@ -1244,7 +1247,9 @@ enumerate a run; this verb is the supported way (DKT-54).
 
 Status is EFFECTIVE (§6.2), computed at read exactly as ` + "`step show`" + `
 computes it: a lapsed lease reads as pending, a pending step whose
-predicate holds reads as ready. Nothing is written, including no reap.`,
+predicate holds reads as ready — and a lapsed-but-unreaped claim is labeled
+lease_expired: true, since run repin still counts it as mid-flight until
+next/claim reaps it. Nothing is written, including no reap.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runStepList)

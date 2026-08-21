@@ -534,6 +534,11 @@ func StepRowFor(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow,
 	}
 	row.Status = EffectiveStatus(sched, step)
 	row.BlockedReason = BlockedReason(sched, step)
+	// The DKT-489 label, from the SAME predicate `next`/`claim` reap on — so
+	// the flag marks exactly the rows whose rendered status is the reap's
+	// future answer while the stored claim, which `run repin`'s quiescence
+	// guard counts as mid-flight, has not been reaped yet.
+	row.LeaseExpired = sched.Expired(step)
 	return row, nil
 }
 
@@ -555,9 +560,14 @@ type StepListEntry struct {
 	// inventory row too: `step list` is where an operator scanning a whole
 	// run for a stall notices one `pending` row sitting among steps that have
 	// long since finished.
-	BlockedReason string  `json:"blocked_reason,omitempty"`
-	Attempt       int     `json:"attempt"`
-	ExpectedCost  float64 `json:"expected_cost"`
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	// LeaseExpired is StepRow's field of the same name (DKT-489), on the
+	// inventory row too: `step list` is where a caller reconciling this
+	// listing against a `run repin` CONFLICT sees WHICH `ready` rows still
+	// carry an unreaped claim the repin is refusing over.
+	LeaseExpired bool    `json:"lease_expired,omitempty"`
+	Attempt      int     `json:"attempt"`
+	ExpectedCost float64 `json:"expected_cost"`
 }
 
 // RunStepList answers `docket step list --run RUN-N`: every step of one run,
@@ -598,6 +608,7 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 			Kind:          step.Kind,
 			Status:        EffectiveStatus(sched, step),
 			BlockedReason: BlockedReason(sched, step),
+			LeaseExpired:  sched.Expired(step),
 			Attempt:       step.Attempt,
 			ExpectedCost:  step.ExpectedCost,
 		})

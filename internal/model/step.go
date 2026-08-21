@@ -162,6 +162,20 @@ type StepRow struct {
 	// from a step whose predecessor merely has not finished yet, unless
 	// something says which clause is holding it and why.
 	BlockedReason string `json:"blocked_reason,omitempty"`
+	// LeaseExpired marks the EXPIRED-BUT-UNREAPED window (DKT-489): the stored
+	// row is still `claimed` — nothing has reaped it — but its lease lapsed (or
+	// `max_step_duration` passed), so `Status` above already renders the reap's
+	// answer (`ready`/`pending`, §6.2) while `run repin` still counts the claim
+	// as mid-flight, exactly as its quiescence guard must (the executor that
+	// claimed under the current pins may still be writing until the reap
+	// actually lands). Both surfaces are right — `claim` on such a step reaps
+	// lazily and SUCCEEDS, so `ready` is honest about claimability, and the
+	// repin refusal is honest about provenance — but until this field a caller
+	// holding both answers ("ready" here, CONFLICT from repin) had no way to
+	// see the window that reconciles them. `omitempty`, so every row outside
+	// the window serializes exactly as before; offer rows (`next`, `dispatch
+	// open`) never carry it because the offer path reaps for real first.
+	LeaseExpired bool `json:"lease_expired,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`

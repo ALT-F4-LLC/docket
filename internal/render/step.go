@@ -90,6 +90,15 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 		fmt.Fprintf(&b, "  owner:     %s\n", owner)
 		fmt.Fprintf(&b, "  expires:   %d\n", expiresMS)
 	}
+	// The expired-but-unreaped window (DKT-489): the status above already
+	// renders the reap's answer, but the stored claim has not been reaped, and
+	// verbs that read the raw row — `run repin`'s quiescence guard — still
+	// count it as mid-flight. Named here so an operator holding a `ready` and
+	// a repin CONFLICT at the same instant can see both are right.
+	if row.LeaseExpired {
+		fmt.Fprintf(&b, "  lease:     expired, not yet reaped — next/claim will "+
+			"reap it; run repin still counts the claim as mid-flight\n")
+	}
 	if routing != "" {
 		fmt.Fprintf(&b, "  routing:   %s\n", routing)
 	}
