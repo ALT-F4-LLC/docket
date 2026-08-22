@@ -759,6 +759,19 @@ func TestStaleLineageHoldIsInert(t *testing.T) {
 		`UPDATE run_issues SET loop_count = 1 WHERE run_id = 1 AND issue_id = 1`,
 	)
 	testsupport.Must(t, err, "advancing the loop count: %v", err)
+	// ...and mint the successor instance the entry would have re-instantiated
+	// (`reconcile` is downstream of `after_loop = "review"`). Staleness means
+	// A LATER INSTANCE REPLACED THIS WORK (DKT-540), not merely that the
+	// counter moved: a bare counter bump with no successor is the state a
+	// bounded/refused entry leaves, and that lineage is LIVE by design.
+	_, err = conn.Exec(
+		`INSERT INTO steps (run_id, issue_id, workflow_id, step_name, ordinal,
+		                    instance, kind, status, created_at_ms, updated_at_ms)
+		 SELECT run_id, issue_id, workflow_id, step_name, 1,
+		        'reconcile@1', kind, 'pending', created_at_ms, updated_at_ms
+		   FROM steps WHERE id = ?`, stepID,
+	)
+	testsupport.Must(t, err, "minting the successor instance: %v", err)
 
 	err = e.ResumeSaga(conn, stepID, nowMS)
 	testsupport.Must(t, err, "resume: %v", err)

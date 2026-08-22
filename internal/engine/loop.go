@@ -852,14 +852,52 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 // `fix@1` has started must not re-route the issue on stale ordinal-0 findings —
 // it would enter a second loop for a question ordinal 1 has already moved past,
 // and with `max_fix_loops = 2` it would burn the budget for a loop nobody asked
-// for. The ordinal comparison is the whole guard, and
+// for. The ordinal comparison is the necessary half of the guard, and
 // TestStaleLineageRoutingIsInert is its test.
+//
+// BUT THE COUNTER ALONE OVER-REACHES (DKT-540). A loop entry replaces only the
+// `after_loop` downstream set and the loop bodies; a step OUTSIDE that set —
+// a branch parallel to the loop, or `implement` upstream of it — keeps its
+// existing instance as the issue's CURRENT one, at an ordinal the counter has
+// moved past. Reading `ordinal < loop_count` as "superseded" declared exactly
+// those steps stale: RUN-41's `verify@0` routed `pass` after its issue's
+// review chain had looped once, the routing was recorded and then applied
+// nothing — no `step-skipped` for its interposed `verify-tribunal@0`, no issue
+// completion — and the gate sat `pending` until an operator resolved it by
+// hand. So staleness additionally requires what "a later loop entry replaced
+// the work it is part of" literally means: a later instance of the SAME step
+// exists. The sweep's own invariant (ensureSupersededHaveSuccessors) guarantees
+// one for every step a loop entry actually superseded, so the two readings
+// agree wherever the sweep reached — and disagree only where it never did,
+// which is precisely where the routing must stay live.
 func StaleLineage(tx *sql.Tx, step *db.Step) (bool, error) {
 	ri, err := db.GetRunIssueTx(tx, step.RunID, step.IssueID)
 	if err != nil {
 		return false, err
 	}
-	return step.Ordinal < ri.LoopCount, nil
+	if step.Ordinal >= ri.LoopCount {
+		return false, nil
+	}
+
+	// A materialized held step maps back to its routing step before the
+	// lookup, the same mapping the sweep uses (H17): its name is not in the
+	// definition, so expansion never writes one at a later ordinal — its
+	// successor IS its routing step's later instance.
+	name := step.StepName
+	if routing, ok := workflow.RoutingStepNameOf(name); ok {
+		name = routing
+	}
+
+	var successors int
+	err = tx.QueryRow(
+		`SELECT COUNT(*) FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal > ?`,
+		step.RunID, step.IssueID, name, step.Ordinal,
+	).Scan(&successors)
+	if err != nil {
+		return false, fmt.Errorf("reading later instances of %s: %w", step.Instance, err)
+	}
+	return successors > 0, nil
 }
 
 // HighestOrdinals returns, per step NAME, the highest ordinal that has an
