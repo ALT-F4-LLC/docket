@@ -171,7 +171,8 @@ If you need to debug terminal-specific behavior, set `DOCKET_TUI_DEBUG_LOG=/tmp/
 | `y` | Copy the focused issue ID to the clipboard |
 | `h` / `l` | Switch board column or detail region |
 | `u` | Go to parent issue or back |
-| `ctrl+u` / `ctrl+d` | Half-page scroll in detail |
+| `ctrl+u` / `ctrl+d` | Move half a page in the focused region |
+| `gg` / `G` | Move to the first or last item in the focused region |
 | `r` | Refresh current view |
 | `p` | Pause or resume auto-refresh |
 | `?` | Toggle help |

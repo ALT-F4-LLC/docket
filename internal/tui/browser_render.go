@@ -228,7 +228,7 @@ func (m browserModel) renderHelp() string {
 		"enter    expand detail or open selected sub-issue",
 		"y        copy focused issue ID",
 		"u        go to parent / back",
-		"ctrl+u/d half-page in focused detail region",
+		"ctrl+u/d half-page · gg/G first/last in focused region",
 		"esc      collapse expanded detail, then back out",
 		"r        refresh current view",
 		"p        pause/resume auto-refresh",
@@ -284,6 +284,17 @@ func (m browserModel) availableContentHeight() int {
 	return max(m.height-uiLineCount(m.renderHeader())-uiLineCount(m.renderFooter()), 1)
 }
 
+func (m browserModel) browseVisibleRows() int {
+	height := m.availableContentHeight()
+	if _, _, stacked := m.paneWidths(); stacked {
+		height, _ = stackedPaneHeights(height)
+	}
+	if m.view == viewBoard {
+		return max(height-6, 1)
+	}
+	return max(height-3, 1)
+}
+
 func stackedPaneHeights(contentHeight int) (browseHeight, detailHeight int) {
 	if contentHeight < minimumStackedContentHeight {
 		return max(contentHeight, 1), 0
@@ -323,7 +334,7 @@ func (m browserModel) maxDetailScroll(visibleLines int) int {
 
 func (m browserModel) detailContentHeights() (bodyHeight, subIssueHeight int) {
 	_, detailHeight := m.detailPaneDimensions()
-	return m.detailContentHeightsForHeight(max(detailHeight-4, 1))
+	return m.detailContentHeightsForHeight(max(detailHeight-3, 1))
 }
 
 func (m browserModel) detailContentHeightsForHeight(height int) (bodyHeight, subIssueHeight int) {

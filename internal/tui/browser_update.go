@@ -177,6 +177,20 @@ func (m browserModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if key == "g" {
+		if !m.pendingG {
+			m.pendingG = true
+			return m, nil
+		}
+		m.pendingG = false
+		key = "home"
+	} else {
+		m.pendingG = false
+		if key == "G" {
+			key = "end"
+		}
+	}
+
 	switch key {
 	case "?":
 		m.showHelp = true
@@ -253,6 +267,14 @@ func (m browserModel) handleBrowseKey(key string) (tea.Model, tea.Cmd) {
 			changed = m.moveListSelection(1)
 		case "k", "up":
 			changed = m.moveListSelection(-1)
+		case "ctrl+d":
+			changed = m.moveListSelection(max(m.browseVisibleRows()/2, 1))
+		case "ctrl+u":
+			changed = m.moveListSelection(-max(m.browseVisibleRows()/2, 1))
+		case "home":
+			changed = m.moveListSelection(-m.listIndex)
+		case "end":
+			changed = m.moveListSelection(len(m.listData.Issues) - 1 - m.listIndex)
 		case "s":
 			if !m.cycleListSortField(1) {
 				return m, nil
@@ -279,6 +301,16 @@ func (m browserModel) handleBrowseKey(key string) (tea.Model, tea.Cmd) {
 			changed = m.moveBoardRow(1)
 		case "k", "up":
 			changed = m.moveBoardRow(-1)
+		case "ctrl+d":
+			changed = m.moveBoardRow(max(m.browseVisibleRows()/2, 1))
+		case "ctrl+u":
+			changed = m.moveBoardRow(-max(m.browseVisibleRows()/2, 1))
+		case "home":
+			changed = m.moveBoardRow(-m.boardRowIdx)
+		case "end":
+			if len(m.boardColumns) > 0 {
+				changed = m.moveBoardRow(len(m.boardColumns[m.boardColumnIdx].Issues) - 1 - m.boardRowIdx)
+			}
 		case "o":
 			return m, m.enterSelectedIssueHierarchy()
 		case "h", "left":
@@ -306,7 +338,8 @@ func (m browserModel) handleBrowseKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m browserModel) handleDetailKey(key string) (tea.Model, tea.Cmd) {
-	bodyVisibleLines, subIssueVisibleRows := m.detailContentHeights()
+	bodyVisibleLines, subIssueRegionHeight := m.detailContentHeights()
+	subIssueVisibleRows := max(subIssueRegionHeight-1, 1)
 	maxScroll := max(m.maxDetailScroll(bodyVisibleLines), 0)
 
 	switch key {

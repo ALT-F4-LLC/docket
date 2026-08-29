@@ -114,6 +114,7 @@ type browserModel struct {
 	focus          paneFocus
 	showHelp       bool
 	detailExpanded bool
+	pendingG       bool
 
 	loading       bool
 	loadingDetail bool

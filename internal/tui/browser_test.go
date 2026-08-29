@@ -1126,7 +1126,7 @@ func TestListBrowseKeyTogglesSortDirectionAndReloads(t *testing.T) {
 func TestHelpOverlayViewRendersKeyboardReference(t *testing.T) {
 	m := browserModel{width: 100, height: 20, showHelp: true}
 	rendered := m.View()
-	for _, fragment := range []string{"docket tui", "s        cycle list sort field", "S        toggle list sort direction", "y        copy focused issue ID", "ctrl+u/d half-page", "This preview is read-only."} {
+	for _, fragment := range []string{"docket tui", "s        cycle list sort field", "S        toggle list sort direction", "y        copy focused issue ID", "ctrl+u/d half-page · gg/G first/last in focused region", "This preview is read-only."} {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("rendered help missing %q: %q", fragment, rendered)
 		}
@@ -1839,39 +1839,162 @@ func TestEscClosesExpandedBeforeGoingBack(t *testing.T) {
 	}
 }
 
+func TestVimNavigationMovesListSelection(t *testing.T) {
+	issues := testIssues(1, 20, model.StatusTodo)
+	m := browserModel{
+		width:           200,
+		height:          20,
+		view:            viewList,
+		focus:           focusBrowse,
+		listData:        app.IssueListData{Issues: issues},
+		listIndex:       10,
+		selectedIssueID: issues[10].ID,
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	afterDown := updated.(browserModel)
+	if afterDown.listIndex != 17 {
+		t.Fatalf("ctrl+d listIndex = %d, want 17", afterDown.listIndex)
+	}
+
+	updated, _ = afterDown.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	afterUp := updated.(browserModel)
+	if afterUp.listIndex != 10 {
+		t.Fatalf("ctrl+u listIndex = %d, want 10", afterUp.listIndex)
+	}
+
+	updated, _ = afterUp.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	afterEnd := updated.(browserModel)
+	if afterEnd.listIndex != len(issues)-1 {
+		t.Fatalf("G listIndex = %d, want %d", afterEnd.listIndex, len(issues)-1)
+	}
+
+	updated, _ = afterEnd.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	updated, _ = updated.(browserModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	afterStart := updated.(browserModel)
+	if afterStart.listIndex != 0 {
+		t.Fatalf("gg listIndex = %d, want 0", afterStart.listIndex)
+	}
+
+	afterStart.listIndex = 10
+	afterStart.selectedIssueID = issues[10].ID
+	updated, _ = afterStart.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	updated, _ = updated.(browserModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, _ = updated.(browserModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	afterCancelledSequence := updated.(browserModel)
+	if afterCancelledSequence.listIndex != 11 {
+		t.Fatalf("g,j,g listIndex = %d, want 11", afterCancelledSequence.listIndex)
+	}
+}
+
+func TestVimNavigationMovesWithinCurrentBoardColumn(t *testing.T) {
+	issues := testIssues(1, 20, model.StatusTodo)
+	m := browserModel{
+		width:           200,
+		height:          20,
+		view:            viewBoard,
+		focus:           focusBrowse,
+		boardColumns:    []boardColumn{{Status: model.StatusTodo, Issues: issues}, {Status: model.StatusReview, Issues: testIssues(21, 3, model.StatusReview)}},
+		boardColumnIdx:  0,
+		boardRowIdx:     10,
+		selectedIssueID: issues[10].ID,
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	afterDown := updated.(browserModel)
+	if afterDown.boardColumnIdx != 0 || afterDown.boardRowIdx != 16 {
+		t.Fatalf("ctrl+d board position = %d/%d, want 0/16", afterDown.boardColumnIdx, afterDown.boardRowIdx)
+	}
+
+	updated, _ = afterDown.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	afterUp := updated.(browserModel)
+	if afterUp.boardColumnIdx != 0 || afterUp.boardRowIdx != 10 {
+		t.Fatalf("ctrl+u board position = %d/%d, want 0/10", afterUp.boardColumnIdx, afterUp.boardRowIdx)
+	}
+
+	updated, _ = afterUp.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	afterEnd := updated.(browserModel)
+	if afterEnd.boardColumnIdx != 0 || afterEnd.boardRowIdx != len(issues)-1 {
+		t.Fatalf("G board position = %d/%d, want 0/%d", afterEnd.boardColumnIdx, afterEnd.boardRowIdx, len(issues)-1)
+	}
+
+	updated, _ = afterEnd.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	updated, _ = updated.(browserModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	afterStart := updated.(browserModel)
+	if afterStart.boardColumnIdx != 0 || afterStart.boardRowIdx != 0 {
+		t.Fatalf("gg board position = %d/%d, want 0/0", afterStart.boardColumnIdx, afterStart.boardRowIdx)
+	}
+}
+
 func TestCtrlDAndCtrlUPageFocusedDetailRegion(t *testing.T) {
 	issue := testIssue(1, model.StatusTodo)
-	issue.Description = strings.Repeat("line\n", 80)
-	childA := testIssue(2, model.StatusTodo)
-	childB := testIssue(3, model.StatusTodo)
-	childC := testIssue(4, model.StatusTodo)
-	childD := testIssue(5, model.StatusTodo)
-	m := testDetailModel(issue, childA, childB, childC, childD)
+	issue.Description = strings.Repeat("line\n\n", 80)
+	bodyModel := testDetailModel(issue)
+	bodyModel.height = 29
+	_, detailHeight := bodyModel.detailPaneDimensions()
+	visibleBodyRows := max(detailHeight-3, 1)
 
-	updated, _ := m.handleDetailKey("ctrl+d")
+	updated, _ := bodyModel.handleDetailKey("ctrl+d")
 	afterPageDown := updated.(browserModel)
-	if afterPageDown.detailScroll <= 0 {
-		t.Fatalf("detailScroll = %d, want > 0", afterPageDown.detailScroll)
+	if afterPageDown.detailScroll != visibleBodyRows/2 {
+		t.Fatalf("detailScroll = %d, want %d", afterPageDown.detailScroll, visibleBodyRows/2)
 	}
 
 	updated, _ = afterPageDown.handleDetailKey("ctrl+u")
 	afterPageUp := updated.(browserModel)
-	if afterPageUp.detailScroll >= afterPageDown.detailScroll {
-		t.Fatalf("detailScroll = %d, want < %d", afterPageUp.detailScroll, afterPageDown.detailScroll)
+	if afterPageUp.detailScroll != 0 {
+		t.Fatalf("detailScroll = %d, want 0", afterPageUp.detailScroll)
 	}
 
-	updated, _ = afterPageUp.handleDetailKey("l")
-	afterFocus := updated.(browserModel)
-	updated, _ = afterFocus.handleDetailKey("ctrl+d")
+	m := testDetailModel(issue, testIssues(2, 3, model.StatusTodo)...)
+	m.detailFocus = detailFocusSubIssues
+	updated, _ = m.handleDetailKey("ctrl+d")
 	afterSubPageDown := updated.(browserModel)
-	if afterSubPageDown.detailSubIndex <= 0 {
-		t.Fatalf("detailSubIndex = %d, want > 0", afterSubPageDown.detailSubIndex)
+	if afterSubPageDown.detailSubIndex != 1 {
+		t.Fatalf("detailSubIndex = %d, want 1", afterSubPageDown.detailSubIndex)
 	}
 
 	updated, _ = afterSubPageDown.handleDetailKey("ctrl+u")
 	afterSubPageUp := updated.(browserModel)
-	if afterSubPageUp.detailSubIndex >= afterSubPageDown.detailSubIndex {
-		t.Fatalf("detailSubIndex = %d, want < %d", afterSubPageUp.detailSubIndex, afterSubPageDown.detailSubIndex)
+	if afterSubPageUp.detailSubIndex != 0 {
+		t.Fatalf("detailSubIndex = %d, want 0", afterSubPageUp.detailSubIndex)
+	}
+}
+
+func TestVimNavigationMovesFocusedDetailRegionToBoundary(t *testing.T) {
+	issue := testIssue(1, model.StatusTodo)
+	issue.Description = strings.Repeat("line\n\n", 80)
+	bodyModel := testDetailModel(issue)
+	_, detailHeight := bodyModel.detailPaneDimensions()
+	visibleBodyRows := max(detailHeight-3, 1)
+
+	updated, _ := bodyModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	afterBodyEnd := updated.(browserModel)
+	if afterBodyEnd.detailScroll != afterBodyEnd.maxDetailScroll(visibleBodyRows) {
+		t.Fatalf("G detailScroll = %d, want end", afterBodyEnd.detailScroll)
+	}
+
+	updated, _ = afterBodyEnd.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	updated, _ = updated.(browserModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	afterBodyStart := updated.(browserModel)
+	if afterBodyStart.detailScroll != 0 {
+		t.Fatalf("gg detailScroll = %d, want 0", afterBodyStart.detailScroll)
+	}
+
+	subIssues := testIssues(2, 5, model.StatusTodo)
+	subIssueModel := testDetailModel(issue, subIssues...)
+	subIssueModel.detailFocus = detailFocusSubIssues
+	updated, _ = subIssueModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	afterSubIssueEnd := updated.(browserModel)
+	if afterSubIssueEnd.detailSubIndex != len(subIssues)-1 {
+		t.Fatalf("G detailSubIndex = %d, want %d", afterSubIssueEnd.detailSubIndex, len(subIssues)-1)
+	}
+
+	updated, _ = afterSubIssueEnd.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	updated, _ = updated.(browserModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	afterSubIssueStart := updated.(browserModel)
+	if afterSubIssueStart.detailSubIndex != 0 {
+		t.Fatalf("gg detailSubIndex = %d, want 0", afterSubIssueStart.detailSubIndex)
 	}
 }
 
