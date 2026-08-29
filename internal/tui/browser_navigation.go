@@ -116,7 +116,7 @@ func (m *browserModel) reconcileListSelection() {
 		m.selectedIssueID = 0
 		m.listIndex = 0
 		m.detailIssueID = 0
-		m.detailScroll = 0
+		m.resetDetailNavigationToBrowseSelection()
 		debugEventf("selection_reconciled", "view=list selected_issue_id=0")
 		return
 	}
@@ -145,7 +145,7 @@ func (m *browserModel) reconcileBoardSelection() {
 		m.boardColumnIdx = 0
 		m.boardRowIdx = 0
 		m.detailIssueID = 0
-		m.detailScroll = 0
+		m.resetDetailNavigationToBrowseSelection()
 		debugEventf("selection_reconciled", "view=board selected_issue_id=0")
 		return
 	}

@@ -312,11 +312,12 @@ func TestReconcileListSelectionKeepsMatchAndFallsBack(t *testing.T) {
 
 	empty := browserModel{
 		selectedIssueID: 5,
+		detailTargetID:  5,
 		detailIssueID:   5,
 		detailScroll:    3,
 	}
 	empty.reconcileListSelection()
-	if empty.selectedIssueID != 0 || empty.listIndex != 0 || empty.detailIssueID != 0 || empty.detailScroll != 0 {
+	if empty.selectedIssueID != 0 || empty.listIndex != 0 || empty.detailTargetID != 0 || empty.detailIssueID != 0 || empty.detailScroll != 0 {
 		t.Fatalf("empty reconcile = %#v", empty)
 	}
 }
@@ -350,9 +351,9 @@ func TestReconcileBoardSelectionKeepsMatchAndClearsEmptyState(t *testing.T) {
 		t.Fatalf("matched selection = %d/%d/%d, want 1/0/6", matched.boardColumnIdx, matched.boardRowIdx, matched.selectedIssueID)
 	}
 
-	empty := browserModel{selectedIssueID: 5, detailIssueID: 5, detailScroll: 2}
+	empty := browserModel{selectedIssueID: 5, detailTargetID: 5, detailIssueID: 5, detailScroll: 2}
 	empty.reconcileBoardSelection()
-	if empty.selectedIssueID != 0 || empty.boardColumnIdx != 0 || empty.boardRowIdx != 0 || empty.detailIssueID != 0 || empty.detailScroll != 0 {
+	if empty.selectedIssueID != 0 || empty.boardColumnIdx != 0 || empty.boardRowIdx != 0 || empty.detailTargetID != 0 || empty.detailIssueID != 0 || empty.detailScroll != 0 {
 		t.Fatalf("empty reconcile = %#v", empty)
 	}
 }
