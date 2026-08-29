@@ -32,7 +32,7 @@ func TestRenderUIHeaderBarIncludesContext(t *testing.T) {
 }
 
 func TestRenderUIFooterBarWrapsInsteadOfTruncatingWhenDetailFocused(t *testing.T) {
-	rendered := RenderUIFooterBar(false, true, false, RefreshStatus{Enabled: true, Interval: 5 * time.Second, LastSuccess: time.Date(2026, 3, 28, 12, 34, 56, 0, time.UTC)}, 90)
+	rendered := RenderUIFooterBar(FooterState{DetailFocused: true, RefreshStatus: RefreshStatus{Enabled: true, Interval: 5 * time.Second, LastSuccess: time.Date(2026, 3, 28, 12, 34, 56, 0, time.UTC)}, Width: 90})
 	if !strings.Contains(rendered, "\n") {
 		t.Fatalf("expected wrapped footer when detail is focused at narrow widths, got %q", rendered)
 	}
@@ -251,14 +251,14 @@ func TestRenderUITextHelpersPreserveText(t *testing.T) {
 }
 
 func TestRenderUIFooterBarHandlesRefreshStates(t *testing.T) {
-	notLoaded := RenderUIFooterBar(false, false, true, RefreshStatus{Enabled: true, Interval: 5 * time.Second}, 90)
+	notLoaded := RenderUIFooterBar(FooterState{BrowseFocused: true, RefreshStatus: RefreshStatus{Enabled: true, Interval: 5 * time.Second}, Width: 90})
 	for _, fragment := range []string{"1 list", "refresh auto 5s not loaded"} {
 		if !strings.Contains(notLoaded, fragment) {
 			t.Fatalf("expected board footer to include %q, got %q", fragment, notLoaded)
 		}
 	}
 
-	expanded := RenderUIFooterBar(true, false, false, RefreshStatus{Enabled: false, Interval: 5 * time.Second, LastSuccess: time.Date(2026, 3, 28, 12, 34, 56, 0, time.UTC)}, 180)
+	expanded := RenderUIFooterBar(FooterState{DetailExpanded: true, RefreshStatus: RefreshStatus{Enabled: false, Interval: 5 * time.Second, LastSuccess: time.Date(2026, 3, 28, 12, 34, 56, 0, time.UTC)}, Width: 180})
 	for _, fragment := range []string{"refresh paused 5s 12:34:56", "p resume"} {
 		if !strings.Contains(expanded, fragment) {
 			t.Fatalf("footer missing %q: %q", fragment, expanded)
@@ -266,8 +266,20 @@ func TestRenderUIFooterBarHandlesRefreshStates(t *testing.T) {
 	}
 }
 
+func TestRenderUIFooterBarShowsCopyNotice(t *testing.T) {
+	rendered := RenderUIFooterBar(FooterState{BrowseFocused: true, RefreshStatus: RefreshStatus{Enabled: true, Interval: 5 * time.Second}, Notice: "Copy requested: DKT-42", Width: 120})
+	for _, fragment := range []string{"Copy requested: DKT-42", "y copy ID"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("rendered footer missing %q: %q", fragment, rendered)
+		}
+	}
+	if count := strings.Count(rendered, "y copy ID"); count != 1 {
+		t.Fatalf("copy hint count = %d, want 1: %q", count, rendered)
+	}
+}
+
 func TestRenderUIListFooterBarIncludesSortHints(t *testing.T) {
-	rendered := RenderUIListFooterBar(false, false, true, RefreshStatus{Enabled: true, Interval: 5 * time.Second}, 160)
+	rendered := RenderUIFooterBar(FooterState{ListView: true, BrowseFocused: true, RefreshStatus: RefreshStatus{Enabled: true, Interval: 5 * time.Second}, Width: 160})
 	for _, fragment := range []string{"2 board", "s sort-field", "S sort-dir", "refresh auto 5s not loaded"} {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("expected list footer to include %q: %q", fragment, rendered)
@@ -276,7 +288,7 @@ func TestRenderUIListFooterBarIncludesSortHints(t *testing.T) {
 }
 
 func TestRenderUIListFooterBarWrapsInsteadOfTruncatingAtNarrowWidths(t *testing.T) {
-	rendered := RenderUIListFooterBar(false, false, true, RefreshStatus{Enabled: true, Interval: 5 * time.Second}, 78)
+	rendered := RenderUIFooterBar(FooterState{ListView: true, BrowseFocused: true, RefreshStatus: RefreshStatus{Enabled: true, Interval: 5 * time.Second}, Width: 78})
 	if !strings.Contains(rendered, "\n") {
 		t.Fatalf("expected wrapped footer at narrow widths, got %q", rendered)
 	}

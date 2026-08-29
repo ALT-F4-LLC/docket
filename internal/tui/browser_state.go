@@ -92,6 +92,16 @@ type refreshTickMsg struct {
 	tickID int
 }
 
+type issueCopiedMsg struct {
+	noticeID int
+	issueID  int
+	err      error
+}
+
+type copyNoticeExpiredMsg struct {
+	noticeID int
+}
+
 type browserModel struct {
 	conn        *sql.DB
 	projectID   int
@@ -132,6 +142,8 @@ type browserModel struct {
 	viewRequestID      int
 	detailRequestID    int
 	refreshTickID      int
+	copyNotice         string
+	copyNoticeID       int
 }
 
 func NewBrowser(conn *sql.DB, docketDir string, projectIDs ...int) tea.Model {
@@ -164,6 +176,16 @@ func (m browserModel) currentDetailTargetID() int {
 		return m.detailTargetID
 	}
 	return m.selectedIssueID
+}
+
+func (m browserModel) focusedIssueID() int {
+	if m.focus == focusBrowse && !m.detailExpanded {
+		return m.selectedIssueID
+	}
+	if m.detailFocus == detailFocusSubIssues && len(m.detailData.SubIssues) > 0 {
+		return m.detailData.SubIssues[clamp(m.detailSubIndex, 0, len(m.detailData.SubIssues)-1)].ID
+	}
+	return m.currentDetailTargetID()
 }
 
 func (m browserModel) selectedIssue() *model.Issue {

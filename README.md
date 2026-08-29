@@ -168,6 +168,7 @@ If you need to debug terminal-specific behavior, set `DOCKET_TUI_DEBUG_LOG=/tmp/
 | `o` | Drill into the selected epic |
 | `tab` | Switch between browse and detail panes |
 | `enter` | Expand detail or open the selected sub-issue |
+| `y` | Copy the focused issue ID to the clipboard |
 | `h` / `l` | Switch board column or detail region |
 | `u` | Go to parent issue or back |
 | `ctrl+u` / `ctrl+d` | Half-page scroll in detail |

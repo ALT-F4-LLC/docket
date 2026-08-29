@@ -41,10 +41,16 @@ func (m browserModel) renderHeader() string {
 }
 
 func (m browserModel) renderFooter() string {
-	if m.view == viewList {
-		return render.RenderUIListFooterBar(m.detailExpanded, m.focus == focusDetail, m.focus == focusBrowse && !m.detailExpanded, m.refreshStatusValue(), m.width)
+	state := render.FooterState{
+		ListView:       m.view == viewList,
+		DetailExpanded: m.detailExpanded,
+		DetailFocused:  m.focus == focusDetail,
+		BrowseFocused:  m.focus == focusBrowse && !m.detailExpanded,
+		RefreshStatus:  m.refreshStatusValue(),
+		Notice:         m.copyNotice,
+		Width:          m.width,
 	}
-	return render.RenderUIFooterBar(m.detailExpanded, m.focus == focusDetail, m.focus == focusBrowse && !m.detailExpanded, m.refreshStatusValue(), m.width)
+	return render.RenderUIFooterBar(state)
 }
 
 func (m browserModel) renderContent(contentHeight int) string {
@@ -220,6 +226,7 @@ func (m browserModel) renderHelp() string {
 		"h / l    switch board column or detail region",
 		"tab      switch browse/detail pane",
 		"enter    expand detail or open selected sub-issue",
+		"y        copy focused issue ID",
 		"u        go to parent / back",
 		"ctrl+u/d half-page in focused detail region",
 		"esc      collapse expanded detail, then back out",

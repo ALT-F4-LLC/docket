@@ -2,6 +2,7 @@ package tui
 
 import (
 	"database/sql"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -84,6 +85,90 @@ func testDetailModel(issue *model.Issue, subIssues ...*model.Issue) browserModel
 			Issue:     issue,
 			SubIssues: subIssues,
 		},
+	}
+}
+
+func TestFocusedIssueID(t *testing.T) {
+	parent := testIssue(10, model.StatusTodo)
+	child := testIssue(11, model.StatusTodo)
+
+	tests := []struct {
+		name  string
+		model browserModel
+		want  int
+	}{
+		{
+			name:  "browse selection",
+			model: browserModel{focus: focusBrowse, selectedIssueID: parent.ID},
+			want:  parent.ID,
+		},
+		{
+			name:  "detail body",
+			model: browserModel{focus: focusDetail, selectedIssueID: parent.ID, detailTargetID: child.ID, detailFocus: detailFocusBody},
+			want:  child.ID,
+		},
+		{
+			name: "detail sub-issue",
+			model: browserModel{
+				focus:           focusDetail,
+				selectedIssueID: parent.ID,
+				detailTargetID:  parent.ID,
+				detailFocus:     detailFocusSubIssues,
+				detailData:      app.IssueDetailData{Issue: parent, SubIssues: []*model.Issue{child}},
+			},
+			want: child.ID,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.model.focusedIssueID(); got != tt.want {
+				t.Fatalf("focusedIssueID() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestYSendsFocusedIssueIDAndShowsTruthfulFeedback(t *testing.T) {
+	t.Setenv("TMUX", "1")
+
+	originalStderr := os.Stderr
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writePipe
+	t.Cleanup(func() { os.Stderr = originalStderr })
+
+	m := browserModel{focus: focusBrowse, selectedIssueID: 42, copyNoticeID: 3}
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	afterKey := updated.(browserModel)
+	if cmd == nil || afterKey.copyNoticeID != 4 {
+		t.Fatalf("y command = %v, notice ID = %d", cmd, afterKey.copyNoticeID)
+	}
+
+	msg := cmd()
+	os.Stderr = originalStderr
+	if err := writePipe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPipe.Close()
+	if got, want := string(sequence), "\x1b]52;c;REtULTQy\a"; got != want {
+		t.Fatalf("clipboard sequence = %q, want %q", got, want)
+	}
+
+	updated, expiryCmd := afterKey.Update(msg)
+	afterCopy := updated.(browserModel)
+	if afterCopy.copyNotice != "Copy requested: DKT-42" || expiryCmd == nil {
+		t.Fatalf("copy notice = %q, expiry command = %v", afterCopy.copyNotice, expiryCmd)
+	}
+	updated, _ = afterCopy.Update(copyNoticeExpiredMsg{noticeID: 4})
+	if notice := updated.(browserModel).copyNotice; notice != "" {
+		t.Fatalf("expired copy notice = %q", notice)
 	}
 }
 
@@ -1041,7 +1126,7 @@ func TestListBrowseKeyTogglesSortDirectionAndReloads(t *testing.T) {
 func TestHelpOverlayViewRendersKeyboardReference(t *testing.T) {
 	m := browserModel{width: 100, height: 20, showHelp: true}
 	rendered := m.View()
-	for _, fragment := range []string{"docket tui", "s        cycle list sort field", "S        toggle list sort direction", "ctrl+u/d half-page", "This preview is read-only."} {
+	for _, fragment := range []string{"docket tui", "s        cycle list sort field", "S        toggle list sort direction", "y        copy focused issue ID", "ctrl+u/d half-page", "This preview is read-only."} {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("rendered help missing %q: %q", fragment, rendered)
 		}

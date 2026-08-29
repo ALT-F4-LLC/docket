@@ -1,9 +1,14 @@
 package tui
 
 import (
+	"fmt"
+	"os"
 	"time"
 
+	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
 func (m browserModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -21,6 +26,24 @@ func (m browserModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDetailLoaded(msg)
 	case refreshTickMsg:
 		return m.updateRefreshTick(msg)
+	case issueCopiedMsg:
+		if msg.noticeID != m.copyNoticeID {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.copyNotice = "Copy failed: " + msg.err.Error()
+		} else {
+			m.copyNotice = "Copy requested: " + model.FormatID(msg.issueID)
+		}
+		noticeID := msg.noticeID
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return copyNoticeExpiredMsg{noticeID: noticeID}
+		})
+	case copyNoticeExpiredMsg:
+		if msg.noticeID == m.copyNoticeID {
+			m.copyNotice = ""
+		}
+		return m, nil
 	case tea.KeyMsg:
 		debugLogf("key: %q view=%s focus=%s selected=%d expanded=%t", msg.String(), m.view, m.focus, m.selectedIssueID, m.detailExpanded)
 		if isTerminalProbe(msg.String()) {
@@ -118,6 +141,16 @@ func (m browserModel) updateDetailLoaded(msg detailLoadedMsg) (tea.Model, tea.Cm
 	return m, nil
 }
 
+func copyIssueIDCmd(issueID, noticeID int) tea.Cmd {
+	return func() tea.Msg {
+		_, err := osc52.New(model.FormatID(issueID)).WriteTo(os.Stderr)
+		if err != nil {
+			err = fmt.Errorf("write clipboard sequence: %w", err)
+		}
+		return issueCopiedMsg{noticeID: noticeID, issueID: issueID, err: err}
+	}
+}
+
 func (m browserModel) updateRefreshTick(msg refreshTickMsg) (tea.Model, tea.Cmd) {
 	if msg.tickID != m.refreshTickID {
 		debugEventf("stale_response_ignored", "kind=refresh_tick tick_id=%d current_tick_id=%d", msg.tickID, m.refreshTickID)
@@ -150,6 +183,13 @@ func (m browserModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		return m, m.beginViewLoad()
+	case "y":
+		issueID := m.focusedIssueID()
+		if issueID == 0 {
+			return m, nil
+		}
+		m.copyNoticeID++
+		return m, copyIssueIDCmd(issueID, m.copyNoticeID)
 	case "p":
 		m.refreshPolicy.Enabled = !m.refreshPolicy.Enabled
 		debugEventf("auto_refresh_toggled", "enabled=%t interval=%s", m.refreshPolicy.Enabled, m.refreshPolicy.Interval)

@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +27,16 @@ type RefreshStatus struct {
 	LastSuccess time.Time
 	LastError   string
 	Interval    time.Duration
+}
+
+type FooterState struct {
+	ListView       bool
+	DetailExpanded bool
+	DetailFocused  bool
+	BrowseFocused  bool
+	RefreshStatus  RefreshStatus
+	Notice         string
+	Width          int
 }
 
 func ConfigureUIOutput() {
@@ -83,33 +94,33 @@ func RenderUIHeaderBar(projectName, viewName string, refreshStatus RefreshStatus
 	return lipgloss.NewStyle().Width(width).Padding(0, 1).Render(line)
 }
 
-func RenderUIFooterBar(detailExpanded, detailFocused, browseFocused bool, refreshStatus RefreshStatus, width int) string {
+func RenderUIFooterBar(state FooterState) string {
 	hints := []string{"1 list", "2 board", "j/k move", "tab pane", "enter detail", "r refresh", "p pause", "? help", "q quit"}
-	if detailExpanded {
-		hints = []string{"h/l region", "j/k move", "enter open/zoom", "u parent", "esc collapse/back", "ctrl+u/d page", refreshToggleHint(refreshStatus.Enabled), "q quit"}
-	} else if detailFocused {
-		hints = []string{"h/l region", "j/k move", "enter open/zoom", "u parent", "esc back", "ctrl+u/d page", refreshToggleHint(refreshStatus.Enabled), "q quit"}
-	} else if browseFocused {
-		hints = []string{"1 list", "j/k move", "J/K detail", "o drill-down", "tab pane", "enter detail", "r refresh", refreshToggleHint(refreshStatus.Enabled), "q quit"}
+	if state.ListView {
+		hints = []string{"1 list", "2 board", "j/k move", "s sort-field", "S sort-dir", "tab pane", "enter detail", "r refresh", refreshToggleHint(state.RefreshStatus.Enabled), "q quit"}
+	}
+	if state.DetailExpanded {
+		hints = []string{"h/l region", "j/k move", "enter open/zoom", "u parent", "esc collapse/back", "ctrl+u/d page", refreshToggleHint(state.RefreshStatus.Enabled), "q quit"}
+	} else if state.DetailFocused {
+		hints = []string{"h/l region", "j/k move", "enter open/zoom", "u parent", "esc back", "ctrl+u/d page", refreshToggleHint(state.RefreshStatus.Enabled), "q quit"}
+	} else if state.BrowseFocused && state.ListView {
+		hints = []string{"2 board", "j/k move", "s sort-field", "S sort-dir", "J/K detail", "o drill-down", "tab pane", "enter detail", "r refresh", refreshToggleHint(state.RefreshStatus.Enabled), "q quit"}
+	} else if state.BrowseFocused {
+		hints = []string{"1 list", "j/k move", "J/K detail", "o drill-down", "tab pane", "enter detail", "r refresh", refreshToggleHint(state.RefreshStatus.Enabled), "q quit"}
 	}
 
-	return renderUIFooterContent(formatFooterRefreshStatus(refreshStatus), hints, width)
+	return renderUIFooterContent(footerStatus(state.RefreshStatus, state.Notice), hints, state.Width)
 }
 
-func RenderUIListFooterBar(detailExpanded, detailFocused, browseFocused bool, refreshStatus RefreshStatus, width int) string {
-	hints := []string{"1 list", "2 board", "j/k move", "s sort-field", "S sort-dir", "tab pane", "enter detail", "r refresh", refreshToggleHint(refreshStatus.Enabled), "q quit"}
-	if detailExpanded {
-		hints = []string{"h/l region", "j/k move", "enter open/zoom", "u parent", "esc collapse/back", "ctrl+u/d page", refreshToggleHint(refreshStatus.Enabled), "q quit"}
-	} else if detailFocused {
-		hints = []string{"h/l region", "j/k move", "enter open/zoom", "u parent", "esc back", "ctrl+u/d page", refreshToggleHint(refreshStatus.Enabled), "q quit"}
-	} else if browseFocused {
-		hints = []string{"2 board", "j/k move", "s sort-field", "S sort-dir", "J/K detail", "o drill-down", "tab pane", "enter detail", "r refresh", refreshToggleHint(refreshStatus.Enabled), "q quit"}
+func footerStatus(refreshStatus RefreshStatus, notice string) string {
+	if notice != "" {
+		return notice
 	}
-
-	return renderUIFooterContent(formatFooterRefreshStatus(refreshStatus), hints, width)
+	return formatFooterRefreshStatus(refreshStatus)
 }
 
 func renderUIFooterContent(refresh string, hints []string, width int) string {
+	hints = slices.Insert(hints, len(hints)-1, "y copy ID")
 	innerWidth := uiMax(width-2, 1)
 	content := wrapUIFooterContent(refresh, hints, innerWidth)
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Width(width).Padding(0, 1).Render(
