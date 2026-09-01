@@ -2,7 +2,7 @@ module github.com/ALT-F4-LLC/docket
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.27.1
 
 require (
 	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260722204433-a335d3bf0144
