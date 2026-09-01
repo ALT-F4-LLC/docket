@@ -285,6 +285,38 @@ func (e *Engine) DecideStepValue(
 func (e *Engine) ResolveStep(
 	conn *sql.DB, stepID int, as, note string, nowMS int64,
 ) error {
+	return e.resolveStep(conn, stepID, as, note, false, false, nowMS)
+}
+
+// ResolveStepBatch is `step resolve --as override-pass --batch` (DKT-546): the
+// resolution plus one run-scoped grant per failed completion gate, so later
+// steps in the SAME run failing the same gate with the same failure signature
+// (gate name + exit + reason) auto-pass at routing instead of re-asking the
+// operator. The grant dies with the run — a new run re-asks.
+func (e *Engine) ResolveStepBatch(
+	conn *sql.DB, stepID int, as, note string, nowMS int64,
+) error {
+	return e.resolveStep(conn, stepID, as, note, true, false, nowMS)
+}
+
+// ResolveStepDropInterposed is `step resolve --as override-pass
+// --drop-interposed [--batch]` (DKT-861): the same resolution, under the
+// operator's EXPLICIT acknowledgment that the generic pass skips the step(s)
+// the threshold interposes. Without the acknowledgment, resolveStep refuses
+// override-pass on such a step BEFORE anything commits — the DKT-470 warning
+// used to arrive beside a mutation already decided, which an operator promised
+// the interposed gate would still run could only regret, not act on (RUN-61's
+// verify-tribunal, skipped under the operator who had chosen override-pass
+// precisely to reach it).
+func (e *Engine) ResolveStepDropInterposed(
+	conn *sql.DB, stepID int, as, note string, batch bool, nowMS int64,
+) error {
+	return e.resolveStep(conn, stepID, as, note, batch, true, nowMS)
+}
+
+func (e *Engine) resolveStep(
+	conn *sql.DB, stepID int, as, note string, batch, dropInterposed bool, nowMS int64,
+) error {
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -295,6 +327,28 @@ func (e *Engine) ResolveStep(
 
 	if !contains(resolveValues, as) {
 		return validationErr("--as must be one of %v, got %q", resolveValues, as)
+	}
+
+	// --batch WIDENS what one authorization covers — one grant auto-passing N
+	// future failures is a trust-boundary change — so it rides only the verb
+	// whose ruling it extends. A batch `skip` or `abandon-issue` has no
+	// coherent meaning: those decide THIS step, not the failure's signature.
+	if batch && as != ResolveOverridePass {
+		return validationErr(
+			"--batch extends an override-pass ruling to later identical gate "+
+				"failures in this run, so it requires --as %s, got %q",
+			ResolveOverridePass, as)
+	}
+
+	// --drop-interposed WAIVES a refusal only override-pass can trigger
+	// (DKT-861): on any other resolution it acknowledges a consequence that
+	// cannot occur, so it is refused the way --batch is rather than accepted
+	// as though it had covered something.
+	if dropInterposed && as != ResolveOverridePass {
+		return validationErr(
+			"--drop-interposed acknowledges that an override-pass skips the "+
+				"step(s) its threshold interposes, so it requires --as %s, got %q",
+			ResolveOverridePass, as)
 	}
 
 	// R11: `resolve` on a step that is not `waiting-human` is
@@ -350,6 +404,53 @@ func (e *Engine) ResolveStep(
 			step.Instance, step.Instance, step.Instance)
 	}
 
+	// The SAME refusal, one shape over — and the one the guard above MISSED
+	// (DKT-726). That guard is scoped to `step.Materialized`: an engine-minted
+	// `reconcile-held@N#M` cluster whose tally failed. A plain
+	// workflow-declared `type="vote"` step — `security-vote@8`, not minted by
+	// anything — carries its OWN tribunal proposal, and when that proposal was
+	// already tallied the guard did not see it. Retry fell through to the
+	// generic path below, reset the attempt budget and the lease, returned the
+	// step to `pending`, and the next `next` re-read the SAME proposal: the
+	// idempotency key is (run, issue, instance), so no second ballot is opened
+	// and no cast changes. `routeVoteStep` re-announced the identical verdict
+	// and routed to the identical place. Observed on RUN-51 STEP-2433,
+	// security-vote@8 / DKT-V256 rejected 3/3, which cost a full
+	// run-pause/run-resume cycle to land exactly where it started.
+	//
+	// The condition is the PROPOSAL being decided, not the step being parked:
+	// an APPROVED tally is just as sticky as a rejected one, and retrying over
+	// it re-reads the same pass. Only an `open` proposal — nothing decided yet,
+	// nothing to re-read — leaves retry meaning something, and R11's exception
+	// exists precisely so a resolution stays offered there.
+	//
+	// The remedy list differs from the held cluster's because the question is
+	// not one an operator can simply answer: a workflow vote step's verdict is
+	// the panel's. `fix-round` is the verb that was actually wanted on RUN-51 —
+	// it authorizes another round of WORK on the reported problem and mints a
+	// fresh vote at a new ordinal, which opens a NEW proposal because the
+	// instance changed.
+	if as == ResolveRetry && step.Kind == workflow.TypeVote {
+		outcome, err := ReadStepVoteOutcome(conn, step)
+		if err != nil {
+			return err
+		}
+		if outcome != nil && outcome.Verdict != "" {
+			return validationErr(
+				"step %s cannot be retried: its proposal %s is already %s, and "+
+					"retry resets the retry budget, which is not what is "+
+					"blocking it — the decision is sticky, so the same tally "+
+					"would be read again and the step would route to the same "+
+					"place. Use --as %s to authorize another round of work on "+
+					"the problem (a fresh vote, on a new proposal), --as %s to "+
+					"accept the step as passing, --as %s to route it skipped, "+
+					"or --as %s to drop the issue from this run",
+				step.Instance, model.FormatProposalID(outcome.ProposalID),
+				outcome.Status, ResolveFixRound, ResolveOverridePass,
+				ResolveSkip, ResolveAbandonIssue)
+		}
+	}
+
 	if as == ResolveRetry {
 		rejected, heldInstance, err := parkedByRejectedHold(conn, step)
 		if err != nil {
@@ -401,6 +502,28 @@ func (e *Engine) ResolveStep(
 	}
 	spec := workflow.StepByName(defs[step.WorkflowID], step.StepName)
 
+	// DKT-861: the DKT-470 warning arrived beside a mutation already decided —
+	// an operator promised the interposed gate would still run had no move
+	// left but regret (RUN-61's verify-tribunal went `skipped` and the run
+	// rolled to `done` under the operator who chose override-pass precisely to
+	// reach that gate). The consequence is now a REFUSAL ahead of the
+	// transaction: override-pass on a step whose threshold interposes other
+	// step(s) proceeds only under the explicit --drop-interposed
+	// acknowledgment, and nothing commits until the operator has read the
+	// exact sentence the warning used to print after the fact. The detection
+	// is the same spec + ThresholdTargets read skipUnroutedTargets makes when
+	// this resolution commits, so the refusal and the skip cannot disagree. A
+	// step with no interposed targets resolves exactly as before, no flag
+	// required.
+	if as == ResolveOverridePass && !dropInterposed {
+		if warning := overridePassInterposedWarning(step.Instance, spec); warning != "" {
+			return validationErr(
+				"%s. Refusing without --drop-interposed, the explicit "+
+					"acknowledgment that skipping them is intended (DKT-861)",
+				warning)
+		}
+	}
+
 	// `rerun-gates` needs gates to re-run (DKT-259). A step that declares none
 	// would rewind to `recorded`, find nothing to measure, and route again on
 	// the same evidence — an expensive no-op that looks like it did something.
@@ -413,6 +536,27 @@ func (e *Engine) ResolveStep(
 					"it to routing and decide on the same evidence. If the "+
 					"step's own output is what needs redoing, that is --as %s",
 				step.Instance, ResolveRerunGates, ResolveRetry)
+		}
+	}
+
+	// The grant's source rows, read BEFORE the transaction for the same
+	// pooled-connection reason as routingStepOf above. A park with no failed
+	// completion gate — a rejected hold, a quorum that never arrived, a
+	// gap-only completion — has no signature to grant from, and refusing is
+	// honest where recording a grant that can never match would look like it
+	// did something.
+	var grantRows []db.GateResultRow
+	if batch {
+		rows, err := db.GateResultsForStep(conn, step.ID)
+		if err != nil {
+			return err
+		}
+		grantRows = failingCompletionRows(rows)
+		if len(grantRows) == 0 {
+			return validationErr(
+				"step %s has no failed completion gate to grant from; --batch "+
+					"records the parked step's failing gate signature(s), and "+
+					"this park was not caused by one", step.Instance)
 		}
 	}
 
@@ -474,7 +618,11 @@ func (e *Engine) ResolveStep(
 		// AUTHORIZED (DKT-340). The operator has read whatever park stands
 		// and asked for the round; the non-convergence refusal must not fire
 		// against the very verb that park names as its way out.
-		outcome, err := EnterLoopAuthorized(tx, step, defs[step.WorkflowID], nowMS)
+		// The note rides into the round it authorizes (DKT-725): stamped onto
+		// the new instances' routing records, it renders in their packets as
+		// `== RESOLUTION` — the only channel that reaches a NEW round, since
+		// comments never render and `body_snapshot` froze at activation.
+		outcome, err := EnterLoopAuthorized(tx, step, defs[step.WorkflowID], note, nowMS)
 		if err != nil {
 			return err
 		}
@@ -526,6 +674,30 @@ func (e *Engine) ResolveStep(
 		Instance: step.Instance, IssueID: step.IssueID, Data: as,
 	}); err != nil {
 		return err
+	}
+	// The grants and the resolution are ONE transaction (the DKT-237 loop-grant
+	// discipline): a ruling recorded without its resolution would cover
+	// failures the operator never overrode, and a resolution without its
+	// grants would silently drop the ruling's reach. One grant per failed
+	// gate, each event-logged, so the feed shows exactly what authority was
+	// minted and the grant rows carry the shared justification (`--note`).
+	if batch {
+		for _, r := range grantRows {
+			grantID, err := db.InsertGateOverrideGrantTx(tx, db.GateOverrideGrant{
+				RunID: step.RunID, OriginStepID: step.ID, Gate: r.Gate,
+				Exit: r.Exit, Reason: r.Reason, Note: note, CreatedAtMS: nowMS,
+			})
+			if err != nil {
+				return err
+			}
+			if err := recordEvent(tx, eventRecord{
+				Kind: EventGateOverrideGranted, RunID: step.RunID,
+				Instance: step.Instance, IssueID: step.IssueID,
+				Data: fmt.Sprintf("%s#%d", r.Gate, grantID),
+			}); err != nil {
+				return err
+			}
+		}
 	}
 	// An `override-pass` on a held cluster IS the approve-computed answer — it
 	// records `done` with a `pass` routing, which is exactly what heldDecision
@@ -602,20 +774,36 @@ func OverridePassSkipsInterposedTargets(conn *sql.DB, stepID int) []string {
 		return nil
 	}
 	spec := workflow.StepByName(defs[step.WorkflowID], step.StepName)
+	if warning := overridePassInterposedWarning(step.Instance, spec); warning != "" {
+		return []string{warning}
+	}
+	return nil
+}
+
+// overridePassInterposedWarning is the DKT-470 sentence, computed ONCE for
+// both surfaces that present it: the advisory warning
+// (OverridePassSkipsInterposedTargets, printed beside an acknowledged
+// resolution) and resolveStep's pre-transaction refusal (DKT-861). The
+// detection is the same spec + workflow.ThresholdTargets read the reconcile's
+// skipUnroutedTargets makes when the resolution commits — one logic path, so
+// what is warned about and what is skipped cannot drift. Empty when there is
+// nothing to warn about: a nil spec (a materialized step, whose minted name
+// the definition never declares) or a threshold with no step-name routing.
+func overridePassInterposedWarning(instance string, spec *workflow.Step) string {
 	if spec == nil {
-		return nil
+		return ""
 	}
 	targets := workflow.ThresholdTargets(spec.Threshold)
 	if len(targets) == 0 {
-		return nil
+		return ""
 	}
-	return []string{fmt.Sprintf(
+	return fmt.Sprintf(
 		"override-pass on %s records a generic %q routing and does not "+
 			"evaluate its threshold — interposed step(s) %s will NOT be "+
 			"routed to as a result, whatever the (unevaluated) payload would "+
 			"have decided; resolve them directly if their condition should "+
 			"still apply",
-		step.Instance, RoutingPass, strings.Join(targets, ", "))}
+		instance, RoutingPass, strings.Join(targets, ", "))
 }
 
 // FailStep is `step fail` — the explicit-failure counterpart to `complete`.

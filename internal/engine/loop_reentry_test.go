@@ -17,7 +17,7 @@ func exhaustTheLoop(t *testing.T, conn *sql.DB, e *Engine) {
 	t.Helper()
 	for k := range 3 {
 		driveToVerify(t, conn, e, k)
-		claimAndComplete(t, conn, e, fmt.Sprintf("verify@%d", k), "report", unmetPayload)
+		claimAndComplete(t, conn, e, fmt.Sprintf("verify@%d", k), roundReport(k), unmetPayload)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestFixRoundGrantsOneRoundOnly(t *testing.T) {
 	// Round 3 runs and fails again. The bound — now 2 declared + 1 granted —
 	// is exhausted again, so it parks again rather than looping on.
 	driveToVerify(t, conn, e, 3)
-	claimAndComplete(t, conn, e, "verify@3", "report", unmetPayload)
+	claimAndComplete(t, conn, e, "verify@3", roundReport(3), unmetPayload)
 
 	if stepExists(t, conn, "fix@4") {
 		t.Error("fix@4 exists; one grant must buy exactly one round")

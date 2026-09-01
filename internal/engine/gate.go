@@ -60,6 +60,19 @@ type StepContext struct {
 	// every gate spawned in the shared checkout unconditionally, so a gate's
 	// evidence could describe a HEAD the step under review never touched.
 	WorkRoot string
+	// Base is the sha of the step's base commit — the commit WorkRoot was
+	// created from — exported to the child as DOCKET_GATE_BASE (DKT-992) so a
+	// gate can scan exactly the step's committed range (base..HEAD of the
+	// tree it runs in). The saga fills it, for worktree-recorded steps only,
+	// with the same fork-point resolution the diff stage uses (runDiffBase /
+	// worktreeForkPoint); it stays "" — the var unset — for a shared-checkout
+	// step and on the pre-claim path, where no committed range belongs to the
+	// step being gated. Empty means unset, never an invented value: executors
+	// commit before `step record`, so a gate that falls back to scanning the
+	// working tree scans nothing, and before this field it had no way to
+	// learn the range and guessed (`git diff HEAD~1`, wrong for multi-commit
+	// steps) or measured the clean tree (always empty).
+	Base string
 }
 
 // GateResult is one gate's outcome, in §11.4's `gate result` shape.

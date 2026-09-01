@@ -191,6 +191,39 @@ func TestGetWorkflowSelectsHighestVersion(t *testing.T) {
 	}
 }
 
+// TestGetWorkflowSkipsDeprecatedVersions (DKT-616): the unversioned lookup is
+// what `workflow show NAME` displays, and it must name the version a new run
+// would bind — so a deprecated top version is skipped, an explicit @version
+// still reaches it, and a name with nothing left to bind is not found.
+func TestGetWorkflowSkipsDeprecatedVersions(t *testing.T) {
+	db := mustMigrated(t)
+
+	for _, v := range []int{1, 2} {
+		_, _, err := InsertWorkflow(db, testWorkflow("w", v, "body"+string(rune('a'+v))), int64(v))
+		testsupport.Must(t, err, "registering v%d: %v", v, err)
+	}
+	_, err := DeprecateWorkflow(db, 1, "w", 2, 1000)
+	testsupport.Must(t, err, "deprecating w@2: %v", err)
+
+	got, err := GetWorkflow(db, 1, "w", 0)
+	testsupport.Must(t, err, "GetWorkflow: %v", err)
+	if got.Version != 1 {
+		t.Errorf("unversioned lookup returned v%d with v2 deprecated, want v1", got.Version)
+	}
+
+	exact, err := GetWorkflow(db, 1, "w", 2)
+	testsupport.Must(t, err, "GetWorkflow(v2): %v", err)
+	if !exact.Deprecated() {
+		t.Errorf("explicit lookup of the deprecated v2 returned a row not marked deprecated: %+v", exact)
+	}
+
+	_, err = DeprecateWorkflow(db, 1, "w", 1, 1000)
+	testsupport.Must(t, err, "deprecating w@1: %v", err)
+	if _, err := GetWorkflow(db, 1, "w", 0); !errors.Is(err, ErrWorkflowNotFound) {
+		t.Errorf("unversioned lookup with every version deprecated returned %v, want ErrWorkflowNotFound", err)
+	}
+}
+
 func TestGetWorkflowNotFound(t *testing.T) {
 	db := mustMigrated(t)
 
@@ -264,6 +297,36 @@ func TestListWorkflowsOrdersDeterministically(t *testing.T) {
 		if items[i].Ref() != ref {
 			t.Errorf("item %d is %s, want %s", i, items[i].Ref(), ref)
 		}
+	}
+}
+
+// TestListWorkflowsExcludeDeprecatedDropsRetiredVersionsFromRowsAndTotal:
+// ExcludeDeprecated is a WHERE clause, not a post-filter, so the total a
+// caller sees is already the visible population's — the same guarantee
+// --orphans gives its own filtered total.
+func TestListWorkflowsExcludeDeprecatedDropsRetiredVersionsFromRowsAndTotal(t *testing.T) {
+	db := mustMigrated(t)
+
+	_, _, err := InsertWorkflow(db, testWorkflow("w", 1, "a"), 1)
+	testsupport.Must(t, err, "w@1: %v", err)
+	_, _, err = InsertWorkflow(db, testWorkflow("w", 2, "b"), 2)
+	testsupport.Must(t, err, "w@2: %v", err)
+	_, err = DeprecateWorkflow(db, 1, "w", 1, 1000)
+	testsupport.Must(t, err, "deprecating w@1: %v", err)
+
+	items, total, err := ListWorkflows(db, WorkflowListOptions{ExcludeDeprecated: true})
+	testsupport.Must(t, err, "ListWorkflows: %v", err)
+	if total != 1 || len(items) != 1 || items[0].Ref() != "w@2" {
+		t.Errorf("ExcludeDeprecated returned %d/%d items %+v, want only w@2",
+			len(items), total, items)
+	}
+
+	// The zero value keeps every existing caller's behavior: both versions.
+	items, total, err = ListWorkflows(db, WorkflowListOptions{})
+	testsupport.Must(t, err, "ListWorkflows: %v", err)
+	if total != 2 || len(items) != 2 {
+		t.Errorf("the zero value filtered rows it was never asked to: %d/%d %+v",
+			len(items), total, items)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,6 +106,57 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 		if err := validateAggregateSchema(step, registered); err != nil {
 			return withWorkflow(err, def.Pipeline.Name)
 		}
+		if err := validatePassFloorSchema(step, registered); err != nil {
+			return withWorkflow(err, def.Pipeline.Name)
+		}
+	}
+	return nil
+}
+
+// validatePassFloorSchema is V37a (DKT-870): a declared `pass_floor` must be
+// answerable by the step's pinned schema — the field declared and ordered, and
+// `at` a value of that order. It is V28a's discipline applied to the exit bar:
+// a floor is a POSITION in the declared order, a value with no position has no
+// floor to name, and the question is asked at register time rather than at the
+// end of a run, on the routing whose `pass` the floor exists to gate. V37 has
+// already required `field` and `at` to be non-empty and `payload` to be
+// declared; this is the half only the schema can answer.
+func validatePassFloorSchema(step *Step, registered *Registered) error {
+	if step.PassFloor == nil {
+		return nil
+	}
+	declared, ok := registered.Field(step.PassFloor.Field)
+	if !ok {
+		return &Error{
+			Rule: "V37a", Step: step.Name, Field: "pass_floor",
+			Message: fmt.Sprintf(
+				"step %q: `pass_floor.field` names %q, which %s does not "+
+					"declare. Declared fields: %s",
+				step.Name, step.PassFloor.Field, registered.Ref(),
+				describeFields(registered)),
+		}
+	}
+	if !declared.Ordered {
+		return &Error{
+			Rule: "V37a", Step: step.Name, Field: "pass_floor",
+			Message: fmt.Sprintf(
+				"step %q: `pass_floor.field` names %q, but %s declares no "+
+					"`ordered_enum` on it; an exit bar is a position in a "+
+					"declared order, and core does not invent one",
+				step.Name, step.PassFloor.Field, registered.Ref()),
+		}
+	}
+	if !slices.Contains(declared.Enum, step.PassFloor.At) {
+		return &Error{
+			Rule: "V37a", Step: step.Name, Field: "pass_floor",
+			Message: fmt.Sprintf(
+				"step %q: `pass_floor.at` names %q, which is not in the order "+
+					"%s declares for %q (%s); an exit bar is a position in the "+
+					"declared order, and core does not guess one for an unknown "+
+					"value",
+				step.Name, step.PassFloor.At, registered.Ref(),
+				step.PassFloor.Field, quotedList(declared.Enum)),
+		}
 	}
 	return nil
 }
@@ -146,6 +198,28 @@ func validateAggregateSchema(step *Step, registered *Registered) error {
 					"`ordered_enum` on it. Median, max, and min are defined ONLY "+
 					"over a declared order, so this step could never compute",
 				step.Name, field, registered.Ref()),
+		}
+	}
+
+	// V28a: `route_at`, when declared, must name a value of the field's
+	// declared order — the routing floor is a POSITION in that order, and a
+	// value with no position has no floor to name (G4's discipline, asked at
+	// register time rather than hours into a run). V28 has already required it
+	// to be a non-empty string; this is the half only the schema can answer,
+	// which is why it lives here beside V29 rather than in the pure-bytes
+	// param check.
+	if routeAt, ok := step.Params["route_at"].(string); ok && routeAt != "" {
+		if !slices.Contains(declared.Enum, routeAt) {
+			return &Error{
+				Rule: "V28a", Step: step.Name, Field: "params",
+				Message: fmt.Sprintf(
+					"step %q: `params.route_at` names %q, which is not in the "+
+						"order %s declares for %q (%s); a routing floor is a "+
+						"position in the declared order, and core does not guess "+
+						"one for an unknown value",
+					step.Name, routeAt, registered.Ref(), field,
+					quotedList(declared.Enum)),
+			}
 		}
 	}
 

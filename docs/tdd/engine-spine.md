@@ -287,7 +287,7 @@ offending field. Every row is a test case (§4.6). The table is the phase's cont
 | V19 | `max_attempts` ≥ 1; `max_fix_loops` ≥ 0; `expected_cost` ≥ 0 | §11.1 |
 | V20 | `threshold` keys ∈ {`fix-loop`, `waiting-human`, `pass`} ∪ step names in this workflow | §11.2 |
 | V21 | `threshold` predicate parses as `agg(field op literal)`, `agg ∈ {any, all, count>=n}`, `op ∈ {==, !=, >=, >, <=, <}` | §11.2 |
-| V22 | `when` parses as a predicate over `kind`/`labels` only | §11.1 `when`; engine-core §4 "conditions (predicates over issue kind/labels only)" |
+| V22 | `when` parses as a predicate over `kind`/`labels` only, its clauses joined by `and` throughout or `or` throughout — a mix of the two is refused (DKT-548). A clause is `<kind\|labels> <==\|!=\|contains> <value>` or the set form `labels contains-any (a, b, c)`, whose list must be non-empty, comma-separated, and free of whitespace inside its values; `contains-any` is `labels`-only (DKT-550). The set operator is equivalently spelled `contains_any` and its list equivalently delimited `[a, b, c]`, with the delimiters required to pair (DKT-1000) | §11.1 `when`; engine-core §4 "conditions (predicates over issue kind/labels only)" |
 | V23 | `class` defaults to the `executor` value when unset | §11.1 `class`: "default = executor value" |
 | V24 | `[limits]` values: `max` ≥ 1, `lease_ttl`/`max_step_duration` parse as durations | §11.1 `[limits]` |
 | V25 | `payload` matches `name@version` shape (**shape only** at S3 — §6.14) | §11.1 `payload` |
@@ -407,7 +407,7 @@ one classification feeds the lint, expansion, and the engine's readiness latch
 | Verb | Flags | Effect |
 |---|---|---|
 | `docket workflow register <file.toml>` | `--json[=v2]` | parse + validate + lint; insert `name@version`; idempotent on identical bytes; `CONFLICT` on differing bytes at an existing `name@version` |
-| `docket workflow list` | `--name`, `--limit`, `--json[=v2]` | registered workflows; a `Collection` (reliability-delta §4.1) so v2 renders `{items,total,truncated}` |
+| `docket workflow list` | `--name`, `--limit`, `--orphans`, `--json[=v2]` | registered workflows; a `Collection` (reliability-delta §4.1) so v2 renders `{items,total,truncated}`; `--orphans` narrows to registrations whose NAME no file in any instance-config root declares any more (DKT-609), stamping each row with an `origin` verdict and refusing outright when there is no root to scan |
 | `docket workflow show <name>[@<version>]` | `--source`, `--json[=v2]` | the parsed definition; `@version` omitted ⇒ highest registered; `--source` emits the stored TOML verbatim |
 | `docket workflow init` | `--template NAME`, `--dir PATH`, `--force` | writes template files into `.docket/config/` (default), refusing to overwrite without `--force` |
 
@@ -612,6 +612,60 @@ mid-run edit immunity; freezing the scheduler would ignore a correction that exi
 precisely to prevent a collision. Both are stated so neither is "fixed" into the
 other later.
 
+**No AUTOMATIC path refreshes the snapshot** (DKT-741). It is written once, at
+activation stage 4, and nothing rewrites it for the life of the run — not a claim, not
+a fix-round, not a re-instantiation, and not an `issue edit`. So the consumers that
+read it — the packet's `context.issue.scope` (§6.6) and the recorded `issue.diff`
+scope (§6.7.1 D1) — cannot drift apart from each other or from what the run was
+activated on. Re-snapshotting at claim time instead would break exactly that: two
+steps of one run would render two different declared scopes and record their diffs
+over two different path sets, and a packet would stop being reproducible from the
+ledger. `docket issue edit --scope` therefore reaches the live column and nothing
+else, which is correct and is also a trap:
+
+| what the operator wants | what `issue edit --scope` does |
+|---|---|
+| stop a collision the scheduler is about to allow | works, immediately — R4 reads live |
+| widen an authorized scope so a live step's packet says so | **does nothing**; the packet renders the frozen snapshot |
+
+The second row has **two** dispositions, and which one is right depends on whether the
+run's premise changed or one declaration was corrected.
+
+**Where the premise changed**, take the issue out of the run and re-plan it —
+`docket run abandon RUN-N --issue DKT-M --reason "scope widened"`, then plan it into a
+new run, whose activation snapshots the widened scope afresh. It is expensive on
+purpose: a mid-run scope widen can invalidate the premise every step of that issue
+already executed under, and re-planning is what re-establishes it.
+
+**Where the premise is intact**, `docket run refresh-scope RUN-N --issue DKT-M
+--reason R` copies `issues.scope_globs` into that one run-issue's snapshot and
+rewrites nothing else in it (DKT-869, `RefreshIssueScopeInRun`). DKT-741 had ruled out
+any refresh verb; RUN-52 (VPL-434) then charged twice for that ruling on an intact
+premise — the panel rejected work as out of scope, the operator agreed and widened it,
+the already-minted `fix@2` step still rendered the old scope, and the issue was
+abandoned mid-loop. The freeze keeps its default and gains an explicit exception whose
+four properties are what keep it from being a hole in §9 item 5:
+
+1. **It carries no scope of its own.** There is no `--scope` on it; `issue create|edit
+   --scope` stays the sole writer of the column it copies, so the refresh cannot make
+   real a scope that was not declared through the one gate widening has always had. A
+   refresh with no widen behind it is **refused** (CONFLICT), not silently no-op'd.
+2. **No step straddles it.** It refuses while any of the issue's steps is `claimed`,
+   `running`, or `gated`, and while a dispatch is open — the repin quiescence rule
+   (DKT-408) applied to the other frozen premise. `pending` and `waiting-human` are the
+   refreshable states.
+3. **It rewrites no history.** Terminal steps keep their artifacts and the scope their
+   diffs were computed over; only the remaining steps' renders move.
+4. **The discontinuity is in the ledger.** One `issue-scope-refreshed` event (actor
+   `human`) carries the old scope, the new scope, the instances reached, and the
+   operator's reason — so two steps of one run declaring two different scopes is a
+   dated, attributable fact rather than drift a reader must infer.
+
+`issue edit --scope` **warns**, naming the run, the frozen scope, the count of live
+steps, and **both** verbs, whenever the edit changes the scope of an issue that still
+has non-terminal steps in a non-terminal run (`ScopeEditFrozenForActiveRuns`). It
+reports rather than refuses, because the write is real for the scheduling half.
+
 ## 5.2 Run status and the minimal subset
 
 engine-core §1.1: `planning → active ⇄ waiting-human → done | abandoned`. All five
@@ -792,6 +846,14 @@ including `unless_labels` beating `labels_any`; absent clauses matching anything
 **Go unit tests** (`internal/engine/activate_test.go`):
 - exactly-one-match: zero matches and two matches each `VALIDATION_ERROR`, each
   naming the issue **and** every candidate workflow (asserted by substring).
+- **orphan annotation** (DKT-609, `internal/engine/dkt609_test.go`): each named
+  candidate whose NAME no file in any instance-config root declares any more is
+  marked `(no source on disk — orphaned registration, deprecation candidate)`,
+  and the refusal carries the remedy. It DECORATES the candidate set and never
+  changes it — an orphaned registration still binds, because a registration is
+  a row and not a file. With no root to scan the verdict is `unchecked` and the
+  message is byte-identical to the pre-DKT-609 one: "nothing was checked" must
+  never render as "nothing is orphaned".
 - **bind-to-highest** (§11.1 as amended 2026-08-05, DKT-40): the candidate set is
   the **highest registered version of each name**, so exactly-one-match applies
   across NAMES. `TestBindingUsesHighestVersionOfEachName` is DKT-8's M2a wedge as

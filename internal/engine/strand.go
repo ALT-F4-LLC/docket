@@ -39,7 +39,15 @@ import (
 // A conductor that does not use it loses nothing it had: its proposal simply is
 // not auto-closed, exactly as today.
 func ReapAckProposalKey(runID int, seq int64) string {
-	return "reap-ack:" + strconv.Itoa(runID) + ":" + strconv.FormatInt(seq, 10)
+	return reapAckRunPrefix(runID) + strconv.FormatInt(seq, 10)
+}
+
+// reapAckRunPrefix is the key family of ONE RUN's reap-ack ballots — the part
+// of the key above that does not vary per reap. It exists so the report's
+// vote-usage attribution (DKT-584) and the writer above cannot spell the key
+// differently, exactly as voteIdempotencyPrefix guards its own family.
+func reapAckRunPrefix(runID int) string {
+	return "reap-ack:" + strconv.Itoa(runID) + ":"
 }
 
 // closeRunProposalsTx closes every OPEN proposal this run's vote steps opened,

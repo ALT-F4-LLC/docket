@@ -27,6 +27,20 @@ const unmetPayload = `[{"status":"unmet"}]`
 // metPayload routes `verify` to `pass`: no threshold matches.
 const metPayload = `[{"status":"met"}]`
 
+// roundReport is ONE ROUND'S verdict body, naming the ordinal that produced it.
+//
+// It exists for DKT-589 the way driveFixtureRound exists for DKT-340: a routing
+// step that records the BYTE-IDENTICAL artifact at two consecutive ordinals now
+// parks the loop, so a fixture reusing one constant `"report"` across rounds
+// parks at the first repeat and never reaches the bound, the sweep, or the
+// input binding those tests are actually about. A real round's report differs
+// from the last one's whenever the round found anything new; these do too. A
+// test whose SUBJECT is the identical-verdict park uses one constant
+// deliberately — see dkt589_test.go.
+func roundReport(ordinal int) string {
+	return fmt.Sprintf("the report of round %d", ordinal)
+}
+
 // ---------------------------------------------------------------------------
 // §11.3 identity: instance rendering
 // ---------------------------------------------------------------------------
@@ -128,7 +142,7 @@ func TestLoopsAreBoundedByConstruction(t *testing.T) {
 	// Loop 1 and loop 2, both legal at max_fix_loops = 2.
 	for k := range 2 {
 		driveToVerify(t, conn, e, k)
-		claimAndComplete(t, conn, e, fmt.Sprintf("verify@%d", k), "report", unmetPayload)
+		claimAndComplete(t, conn, e, fmt.Sprintf("verify@%d", k), roundReport(k), unmetPayload)
 
 		if got := loopCount(t, conn, run.ID, issue); got != k+1 {
 			t.Fatalf("loop_count = %d after loop %d, want %d", got, k+1, k+1)
@@ -140,7 +154,7 @@ func TestLoopsAreBoundedByConstruction(t *testing.T) {
 
 	// The third attempt: routing fires, and the bound converts it.
 	driveToVerify(t, conn, e, 2)
-	claimAndComplete(t, conn, e, "verify@2", "report", unmetPayload)
+	claimAndComplete(t, conn, e, "verify@2", roundReport(2), unmetPayload)
 
 	if stepExists(t, conn, "fix@3") {
 		t.Error("fix@3 exists; max_fix_loops = 2 must make a third entry impossible")
@@ -422,10 +436,11 @@ func TestOrdinalScopedInputBindingFallsBackPerInput(t *testing.T) {
 	// Enter loop 1, then run ordinal 1 as far as `reconcile@1` so both inputs
 	// have candidates and they sit at different ordinals.
 	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
+	claimAndComplete(t, conn, e, "verify@0", roundReport(0), unmetPayload)
 	// Ordinal 1 is driven by hand here rather than through driveToVerify, so
 	// the stub tree is moved by hand too — otherwise round 1 changes nothing
-	// and DKT-340's guard correctly refuses to mint `fix@2`.
+	// and DKT-340's guard correctly refuses to mint `fix@2`. Each verify
+	// records its own report for DKT-589's sibling guard, for the same reason.
 	driveFixtureRound(t, 1)
 	claimAndComplete(t, conn, e, "fix@1", "the fix summary", "")
 	completeReviewFanout(t, conn, e, 1)
@@ -434,7 +449,7 @@ func TestOrdinalScopedInputBindingFallsBackPerInput(t *testing.T) {
 
 	// A second loop entry, so there is a `fix@2` whose inputs we can inspect
 	// with ordinal-1 and ordinal-0 candidates both present.
-	claimAndComplete(t, conn, e, "verify@1", "report", unmetPayload)
+	claimAndComplete(t, conn, e, "verify@1", roundReport(1), unmetPayload)
 
 	inputs := contextInputs(t, conn, run.ID, "fix@2")
 
@@ -879,7 +894,7 @@ func contextInputs(t *testing.T, conn *sql.DB, runID int, instance string) []Con
 
 	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
 	testsupport.Must(t, err, "ListRunArtifactsTx: %v", err)
-	inputs, err := resolveInputs(tx, sched, step, spec, ri.BodySnapshot, artifacts)
+	inputs, err := resolveInputs(tx, sched, step, spec, ri.BodySnapshot, artifacts, nil)
 	testsupport.Must(t, err, "resolveInputs(%s): %v", instance, err)
 	return inputs
 }

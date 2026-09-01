@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -36,6 +37,13 @@ lease reap — so polling it cannot advance a run.
 It works on a run in ANY status. A ` + "`planning`" + ` run reports zeros; an abandoned
 one reports the trail up to abandonment. A report that refused on a
 non-terminal run would be useless during exactly the run you want to inspect.
+
+STEP METADATA IS REPORTED TWICE, on purpose. ` + "`Metadata`" + ` rolls every key up
+to its distinct values with counts — a run-level answer — and ` + "`Step metadata`" + `
+prints each step's whole bag beside the status that step ended in. Grouping by
+key is what discards which values two keys took TOGETHER on one step, so a bag
+whose keys are a request and its resolution is readable only in the second
+section. Core reads no key in either.
 
 THE BUDGET NUMBERS ARE BARE. There is no currency and no unit: what they count
 is the workflow's business. The report publishes the cap, where the cap came
@@ -205,6 +213,14 @@ func writeBudgetLines(b *strings.Builder, budget engine.RunBudgetReport, line fu
 	if budget.BreachReason != "" {
 		line("Breach:", exec.Render(budget.BreachReason))
 	}
+	// DKT-584: on a run whose panels cast, the budget section itself says the
+	// seats' measured spend is excluded from the numbers above and where it
+	// went instead — the silent omission is the bug. The note is core's own
+	// constant (engine.VoteUsageExcludedNote), not stored text, so it is not
+	// escaped: escaping it would quote a constant.
+	if budget.VoteUsageNote != "" {
+		line("Vote usage:", budget.VoteUsageNote)
+	}
 }
 
 // writeReportSections emits R3 through R7. Shared for the same reason
@@ -218,6 +234,13 @@ func writeReportSections(
 		dispositions[d.Issue] = d
 	}
 	stepLabel := stepLabeler(r.Attempts)
+
+	// DKT-594's two pin sections, ahead of the step rollup because both are
+	// statements about the AGREEMENT everything below ran under. A reader who
+	// takes a finding out of this document needs to know the corpus moved
+	// before they read the finding, not after.
+	writePinnedWorkflows(r.PinnedWorkflows, header, line)
+	writePinEpochs(r.PinEpochs, r.Attempts, stepLabel, header, line)
 
 	if len(r.Steps) > 0 {
 		header("Steps")
@@ -236,7 +259,7 @@ func writeReportSections(
 		if len(retried) > 0 {
 			header("Attempts")
 			for _, a := range retried {
-				line(stepLabel(a), fmt.Sprintf("%d", a.Attempts))
+				line(stepLabel(a)+":", fmt.Sprintf("%d", a.Attempts))
 			}
 		}
 
@@ -289,7 +312,7 @@ func writeReportSections(
 				if resolved := stepResolution(a, dispositions); resolved != "" {
 					detail += " — " + resolved
 				}
-				line(stepLabel(a), detail)
+				line(stepLabel(a)+":", detail)
 			}
 		}
 	}
@@ -347,6 +370,11 @@ func writeReportSections(
 	}
 
 	writeMetadataRollup(r.Metadata, "Metadata", header, line)
+	// The bags THE ROLLUP JUST COLLAPSED, one step per line (DKT-868) —
+	// immediately below the rollup for the same reason "Step usage" sits below
+	// the budget's per-unit totals: the rollup is the headline and this is the
+	// detail behind it.
+	writeStepMetadata(r.Attempts, stepLabel, header, line)
 	// The casts' own claims (DKT-71): the one spend the usage ledger cannot
 	// attribute, rolled up the same opaque way.
 	writeMetadataRollup(r.VoteMetadata, "Vote metadata", header, line)
@@ -372,8 +400,30 @@ func writeReportSections(
 				detail += fmt.Sprintf(
 					" — %d reported NOTHING, so their spend is missing from this "+
 						"run's totals, not zero", c.Silent())
+				// The seating path(s) of the missing seats, ON the coverage
+				// line (DKT-733): "which seat path fails to report" is the
+				// diagnosis question, and the count alone could not answer it.
+				// The paths are core's closed vocabulary, not escaped.
+				if paths := silentSeatPathCounts(r.SilentVoteSeats); paths != "" {
+					detail += " (" + paths + ")"
+				}
 			}
 			line("Coverage:", detail)
+			// The identity behind the count, one aimable line per seat: the
+			// proposal is what `vote backfill-usage` takes. Voter and role are
+			// stored, caster-supplied text on its way to a terminal (R11).
+			for _, s := range r.SilentVoteSeats {
+				who := exec.Render(s.Voter)
+				if s.Role != "" {
+					who += " as " + exec.Render(s.Role)
+				}
+				line("Silent:", fmt.Sprintf("%s seat %s  (%s)", s.Proposal, who, s.Path))
+			}
+			if len(r.SilentVoteSeats) > 0 {
+				line("Backfill:",
+					"`docket vote backfill-usage <proposal>` records these "+
+						"seats' spend after the fact")
+			}
 		}
 	}
 
@@ -389,6 +439,30 @@ func writeReportSections(
 				exec.Render(u.Unit), u.Quantity, exec.Render(u.Source)))
 		}
 	}
+}
+
+// silentSeatPathCounts renders the silent seats' seating paths with counts —
+// `conversational-gate: 8, vote-step: 4` — for the coverage line (DKT-733).
+// Sorted by path name: a total order, so two renders of one run are
+// byte-identical (R9). Empty when there is nothing to attribute.
+func silentSeatPathCounts(seats []engine.SilentVoteSeat) string {
+	if len(seats) == 0 {
+		return ""
+	}
+	counts := make(map[string]int, 2)
+	for _, s := range seats {
+		counts[s.Path]++
+	}
+	paths := make([]string, 0, len(counts))
+	for p := range counts {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	parts := make([]string, 0, len(paths))
+	for _, p := range paths {
+		parts = append(parts, fmt.Sprintf("%s: %d", p, counts[p]))
+	}
+	return "silent by seating path — " + strings.Join(parts, ", ")
 }
 
 // stepLabeler decides how a step-attempt line NAMES its step (DKT-405).
@@ -413,8 +487,14 @@ func writeReportSections(
 // are stored text on their way to a terminal and must go through exec.Render
 // (R11), and `"HRN-300 verify@2":` keeps the label reading as one name where
 // `"HRN-300" "verify@2":` reads as two columns that happen to be adjacent.
+//
+// It returns the NAME WITHOUT the trailing colon, and the two sections that
+// print it as a key add one. DKT-594's epoch section lists several of these
+// inside one line's value, where a colon per name would read as a broken
+// key-value pair — and a labeler that could only produce keys would have forced
+// that section to re-derive the naming rule and be free to disagree with it.
 func stepLabeler(attempts []engine.StepAttempt) func(engine.StepAttempt) string {
-	bare := func(a engine.StepAttempt) string { return exec.Render(a.Instance) + ":" }
+	bare := func(a engine.StepAttempt) string { return exec.Render(a.Instance) }
 
 	issues := make(map[string]struct{}, 2)
 	for _, a := range attempts {
@@ -431,7 +511,112 @@ func stepLabeler(attempts []engine.StepAttempt) func(engine.StepAttempt) string 
 		if a.Issue == "" {
 			return bare(a)
 		}
-		return exec.Render(a.Issue+" "+a.Instance) + ":"
+		return exec.Render(a.Issue + " " + a.Instance)
+	}
+}
+
+// writePinnedWorkflows is DKT-594's staleness section: per pinned workflow, how
+// far the registry has moved past the version this run is expanded from.
+//
+// IT PRINTS THE UP-TO-DATE ROWS TOO. The section exists because every analyst
+// on RUN-32 went to git to find out whether the pinned `ui-change@8` was
+// current before trusting a finding from the run — and "the report did not
+// mention it" is not an answer to that question, it is the same absence that
+// sent them to git. A line saying `current` is the answer; a missing line is
+// indistinguishable from a report that never looked.
+func writePinnedWorkflows(
+	rows []engine.PinnedWorkflowStaleness,
+	header func(title string), line func(k, v string),
+) {
+	if len(rows) == 0 {
+		return
+	}
+	header("Pinned workflows")
+	for _, w := range rows {
+		// The name is a workflow author's opaque string on its way to a
+		// terminal, so both refs go through the escaper (R11).
+		current := exec.Render(fmt.Sprintf("%s@%d", w.Name, w.CurrentVersion))
+		var detail string
+		switch {
+		case w.CurrentVersion == 0:
+			// Every version of the name is retired, or the name is gone from
+			// this project's registry. Not "current" — there is nothing to be
+			// current WITH, and a run pinning a name nothing can bind any more
+			// is a fact a reader must not have to infer from a silence.
+			detail = "0 behind — no registered version of this name still binds"
+		case w.Behind == 0 && w.CurrentVersion != w.PinnedVersion:
+			// The pinned version sits ABOVE the binding head: its own version,
+			// or every version over it, was retired after this run froze.
+			detail = "0 behind — the highest version that still binds is " + current
+		case w.Behind == 0:
+			detail = "current"
+		default:
+			detail = fmt.Sprintf("%d version(s) behind — current is %s",
+				w.Behind, current)
+		}
+		line(exec.Render(w.Ref)+":", detail)
+	}
+}
+
+// writePinEpochs is DKT-594's second section: the run's pin-agreement timeline,
+// and which steps' recorded work ran under each agreement.
+//
+// PRESENT ONLY ON A RUN THAT REPINNED — the engine leaves PinEpochs empty
+// otherwise, and a run whose agreement never moved needs no reconciliation: the
+// `pins` table already states the bytes every one of its steps read.
+//
+// The steps ride on the epoch's own line rather than as a `pin_epoch` column on
+// every step line. The question this answers is "which side of the repin was
+// this step on", which is a partition, and a partition is read by looking at
+// the two groups — RUN-39's post-mortem was reconstructing exactly this
+// grouping by hand from event seqs and step ids. `--json` carries the inverse
+// (each attempt's own `pin_epoch`) for a consumer joining the other way.
+func writePinEpochs(
+	epochs []engine.PinEpoch, attempts []engine.StepAttempt,
+	stepLabel func(engine.StepAttempt) string,
+	header func(title string), line func(k, v string),
+) {
+	if len(epochs) < 2 {
+		return
+	}
+	header("Pin epochs")
+
+	ran := make(map[int][]string, len(epochs))
+	for _, a := range attempts {
+		if a.PinEpoch > 0 {
+			ran[a.PinEpoch] = append(ran[a.PinEpoch], stepLabel(a))
+		}
+	}
+
+	for _, e := range epochs {
+		detail := fmt.Sprintf("%s at seq %d", e.Origin, e.FromSeq)
+		if e.FromSeq == 0 {
+			// The activation event was pruned away. Saying "at seq 0" would
+			// name a sequence number that never existed.
+			detail = e.Origin
+		}
+		for _, c := range e.Changes {
+			switch {
+			case c.Dropped:
+				detail += fmt.Sprintf(" — %s %s dropped (was %s)",
+					c.Kind, exec.Render(c.Ref), shortSHA(c.OldSHA256))
+			default:
+				detail += fmt.Sprintf(" — %s %s %s->%s",
+					c.Kind, exec.Render(c.Ref),
+					shortSHA(c.OldSHA256), shortSHA(c.NewSHA256))
+			}
+		}
+		if e.Reason != "" {
+			detail += " — " + exec.Render(reasonHead(e.Reason, 72))
+		}
+		line(fmt.Sprintf("Epoch %d:", e.Epoch), detail)
+		// A step list per epoch, and NOTHING when an epoch ran no step. An
+		// empty list would read as "these steps ran and produced nothing";
+		// the absence says the agreement governed no recorded work, which is
+		// the ordinary shape of a repin performed to unwedge a run.
+		if steps := ran[e.Epoch]; len(steps) > 0 {
+			line(fmt.Sprintf("  ran under %d:", e.Epoch), strings.Join(steps, ", "))
+		}
 	}
 }
 
@@ -515,6 +700,75 @@ func writeMetadataRollup(
 	}
 }
 
+// writeStepMetadata is DKT-868's section: each step's whole bag on ONE LINE,
+// beside the status that step ended in.
+//
+// WHY A SECOND SECTION RATHER THAN A RESHAPED FIRST ONE. The rollup above
+// answers a run-level question — which values did this key take, and how often
+// — and is the right shape for it. What it cannot answer is which values two
+// keys took TOGETHER on one step, because grouping by key is exactly what
+// discards the pairing. RUN-51's rollup published a key whose partner key never
+// showed the value it resolved to: a real mismatch, on one step, that the
+// document could not name. Recovering it meant `docket step show` per step, and
+// the audit that found this ran ~90 of them across 19 runs. Deleting the rollup
+// to fix that would trade a run-level answer for a per-step one; both questions
+// are real, so the document carries both.
+//
+// THE STATUS RIDES ON THE LINE because the bag's completeness depends on it. A
+// dispatcher's `step claim --metadata` (DKT-592) lands before the work runs, and
+// a step that then failed or was reaped carries only that half — so a bag with
+// a request and no resolution is a FINDING on a failed step and a defect on a
+// done one, and a line that did not say which invited the wrong reading. In the
+// rollup those two rows were indistinguishable, which is why drift concentrated
+// in failures read as no drift at all.
+//
+// NO KEY IS NAMED HERE (docs/design/genericity.md, R7). The section prints
+// whatever keys a bag holds, sorted, and never compares two of them: `a=1, b=2`
+// on one line is all core does, and what that pair MEANS is the workflow
+// author's business.
+func writeStepMetadata(
+	attempts []engine.StepAttempt, stepLabel func(engine.StepAttempt) string,
+	header func(title string), line func(k, v string),
+) {
+	var rows []engine.StepAttempt
+	for _, a := range attempts {
+		if len(a.Metadata) > 0 || a.MetadataUnreadable {
+			rows = append(rows, a)
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	header("Step metadata")
+	for _, a := range rows {
+		detail := a.Status
+		if a.MetadataUnreadable {
+			// Said out loud rather than skipped. An absent bag reads as "the
+			// dispatcher recorded nothing", which is the comfortable claim and
+			// the wrong one — the row exists and its bytes do not decode.
+			line(stepLabel(a)+":", detail+" — metadata is stored but does not "+
+				"decode as an object; `docket step show` has the raw bytes")
+			continue
+		}
+		// Sorted keys, so two renders of one run are byte-identical (R9) — a
+		// bare map range would emit a different document per invocation.
+		keys := make([]string, 0, len(a.Metadata))
+		for k := range a.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			// Both halves are a workflow author's opaque strings on their way to
+			// a TERMINAL (R11), and the value goes through db's own renderer so
+			// this section and the rollup above spell one value identically.
+			parts = append(parts, fmt.Sprintf("%s=%s",
+				exec.Render(k), exec.Render(db.RenderMetadataValue(a.Metadata[k]))))
+		}
+		line(stepLabel(a)+":", detail+" — "+strings.Join(parts, ", "))
+	}
+}
+
 func writeVerdicts(
 	counts []db.VerdictCount, title string,
 	header func(title string), line func(k, v string),
@@ -559,7 +813,35 @@ func writeVerdicts(
 				summary += fmt.Sprintf(" — %d of %d ran a stub", c.Stub, total)
 			}
 		}
-		line(exec.Render(c.Name)+":", summary)
+		// THE PRE MARKER RIDES ON THE NAME (DKT-862), because a pre-gate's
+		// numbers are not the same KIND of fact as a blocking gate's: §11.1
+		// runs it at claim as an input to the step, and PG4 keeps it out of the
+		// saga's verdict, so `fail 1` here did not route anything. This section
+		// rendered the two identically, and on RUN-61 a conductor reading it
+		// nearly reported a fix round as burned on an advisory failure.
+		//
+		// `[pre]` is `step show`'s spelling, off the same `pre` column, so an
+		// operator moving between the two surfaces reads one marker and not
+		// two vocabularies for one fact.
+		name := exec.Render(c.Name)
+		// The four verdicts partition, so their sum is the row count `Pre`
+		// overlaps — INCLUDING `skipped`, which pre-gates record whenever the
+		// tree could not be bound and which is therefore the most common
+		// pre-gate row of all.
+		if total := c.Pass + c.Fail + c.Unmatched + c.Skipped; c.Pre > 0 {
+			if c.Pre >= total {
+				name += " [pre]"
+			} else {
+				// A name that ran BOTH ways in one run — the same gate declared
+				// `pre` by one workflow and blocking by another — cannot take
+				// the marker without claiming the whole tally was advisory. The
+				// ratio says which part was.
+				summary += fmt.Sprintf(
+					" — %d of %d ran as a pre-gate (advisory, routed nothing)",
+					c.Pre, total)
+			}
+		}
+		line(name+":", summary)
 	}
 }
 

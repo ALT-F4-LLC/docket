@@ -125,6 +125,26 @@ type Engine struct {
 	// warning it did not disprove, which is the opposite direction from
 	// IsAncestorFn's own fail-open and deliberately so.
 	TreeMatchFn func(execRoot, sha string) (match, known bool)
+	// ObjectExistsFn reports whether `sha` resolves as a COMMIT OBJECT from
+	// execRoot at all — `git cat-file -e <sha>^{commit}` — and whether that
+	// question could be answered (DKT-742). A field for DiffFn's reason: the
+	// real one shells out to git.
+	//
+	// It exists because IsAncestorFn's `known = false` conflates two states
+	// that read very differently to a packet consumer: "git could not answer"
+	// (git absent, not a repository — nothing to warn about) and "the object
+	// is not in the shared store at all" (a separate-clone worktree whose
+	// objects never reached the shared store, or a pruned+GC'd one). RUN-52's
+	// DKT-V253 was the second: all three vote seats ran `git cat-file -t` on
+	// the packet's target, found no object anywhere, and burned an
+	// investigation each — while the engine, which had asked git about that
+	// exact sha at dispatch open, had silently skipped it as unanswerable.
+	//
+	// staleTargets consults it only where ancestry was UNANSWERABLE, and only
+	// a definitive `exists = false, known = true` produces a warning — so the
+	// "absence of evidence is not staleness" posture holds for every state
+	// where git genuinely could not answer.
+	ObjectExistsFn func(execRoot, sha string) (exists, known bool)
 }
 
 // NewEngine builds the S5 engine: the REAL gate runner, the REAL action runner,
@@ -149,12 +169,13 @@ type Engine struct {
 func NewEngine() *Engine {
 	paths := repoPathsFrom(resolvePaths())
 	return &Engine{
-		Gates:        NewExecRunner(paths),
-		Actions:      NewActionRunner(paths),
-		DiffFn:       GitDiff,
-		HeadFn:       sharedCheckoutHead,
-		IsAncestorFn: gitAncestorOfHead,
-		TreeMatchFn:  gitTreeMatchesHead,
+		Gates:          NewExecRunner(paths),
+		Actions:        NewActionRunner(paths),
+		DiffFn:         GitDiff,
+		HeadFn:         sharedCheckoutHead,
+		IsAncestorFn:   gitAncestorOfHead,
+		TreeMatchFn:    gitTreeMatchesHead,
+		ObjectExistsFn: gitCommitResolvable,
 	}
 }
 
@@ -738,10 +759,15 @@ func (e *Engine) runGateStage(
 	}
 	// The step's RECORDED worktree rides along (DKT-9), the same resolution
 	// the diff stage applies: a completion gate measures the tree the work
-	// happened in, not the shared checkout the saga was resumed from.
+	// happened in, not the shared checkout the saga was resumed from. So does
+	// the worktree's base commit (DKT-992), resolved per gate rather than once
+	// per step because the saga advances stage by stage and may resume from a
+	// different invocation — and the fork point never moves for the worktree's
+	// lifetime, so every gate of one step resolves the same sha.
 	sc := StepContext{
 		Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
 		Scope: scope, WorkRoot: step.WorkRoot,
+		Base: gateBaseSHA(conn, step.RunID, step.WorkRoot),
 	}
 
 	rows, err := runGate(e.Gates, spec, sc)
@@ -910,6 +936,39 @@ func (e *Engine) runRoutingStage(
 		}
 	}
 
+	// THE HAND-BACK COMPARISON (DKT-588), for a LOOP BODY at ordinal > 0: the
+	// commit this completion is about to hand back (the `head` of the round
+	// record above) against the hand-back the SAME loop body recorded at its
+	// newest earlier ordinal. Identical shas mean the round moved nothing —
+	// RUN-34's fix@2 handed back the unchanged HEAD 64d3336b3d71 and a full
+	// 5-judge + synthesize + verify round (~2.9 budget units) still ran over
+	// the zero-byte delta, because DKT-340's non-convergence guard fires only
+	// at the NEXT loop's entry, after the wasted round has already been paid
+	// for. The comparison is scoped to this step's OWN records rather than
+	// latestIssueDiffHead's issue-wide newest, because another producer
+	// (`implement` at ordinal 0, a downstream committer) may have written the
+	// issue's newest head, and the question here is whether THIS body moved
+	// the tree since ITS last round.
+	//
+	// Read here on the pooled connection, before the transaction opens, for
+	// loadHoldTally's reason exactly: inside the transaction it would deadlock
+	// against the one-connection pool rather than fail.
+	//
+	// THE MEASUREMENT MUST BE REAL, failing in roundMovedNothing's direction:
+	// an unresolvable head on either side ("" — HeadFn could not name a
+	// commit, or the prior round recorded none) is not evidence of an
+	// unchanged tree, so every degenerate case answers "changed" and the round
+	// proceeds. Parking a run on a broken head resolution would turn a diff
+	// setup problem into a stalled run, a worse failure than the wasted round
+	// this exists to prevent.
+	unchangedHandBack := ""
+	if spec.Loop && step.Ordinal > 0 {
+		if head := handBackHead(diffPayload); head != "" &&
+			head == priorRoundHandBack(conn, step) {
+			unchangedHandBack = head
+		}
+	}
+
 	// §5: the order the threshold evaluates under, and the validator an action's
 	// output is checked against, both come from the schema the run PINNED. They
 	// are resolved ONCE here and threaded into both consumers, so a step cannot
@@ -987,6 +1046,7 @@ func (e *Engine) runRoutingStage(
 	var (
 		routing string
 		reason  string
+		cover   *batchCover
 	)
 	switch {
 	case gapOnly:
@@ -1027,7 +1087,27 @@ func (e *Engine) runRoutingStage(
 		// A failed gate routes per `on_fail`, not through the threshold: the
 		// threshold asks a question about a RESULT, and a step whose gate
 		// failed has no result to ask about.
+		//
+		// UNLESS a run-scoped batch override grant covers EVERY failed gate's
+		// signature (DKT-546): the operator already ruled this exact failure
+		// environmental for this run, and re-parking it would re-ask a settled
+		// question. The pass it records is the same generic RoutingPass the
+		// operator's own override-pass records, attributed to the grant(s) in
+		// the routing record and in its own event — never silently. A cover
+		// blocked by an interposed threshold target parks as usual, with the
+		// block named as the reason.
 		routing = spec.EffectiveOnFail()
+		if cover, err = batchOverrideCover(conn, step, spec); err != nil {
+			return err
+		}
+		switch {
+		case cover == nil:
+		case cover.blocked != "":
+			reason = cover.blocked
+			cover = nil
+		default:
+			routing, reason = RoutingPass, cover.reason()
+		}
 	case action != nil && action.Failed:
 		// B3: a builtin's bad params or an unorderable value, and a trusted
 		// command's non-zero exit or unmatched name, are STEP failures routed
@@ -1084,14 +1164,23 @@ func (e *Engine) runRoutingStage(
 		return err
 	}
 
+	// The action's artifact and per-attempt records land FIRST, before any
+	// routing effect in this transaction — H4's "one transaction, or a crash
+	// leaves a held payload with nobody able to resolve it" for the holding
+	// path, and, for the routing path, what makes the CURRENT round visible to
+	// the loop-entry evidence reads (DKT-870): an action step's artifact used
+	// to land after applyFixLoop, so routingVerdictUnchanged (DKT-589) and the
+	// flat-volume signal read an action-routed round's evidence one round
+	// late — an executor's artifact is recorded at `complete`, stages earlier,
+	// and the two step classes must measure alike.
+	if action != nil {
+		if err := recordActionResult(tx, step, action, nowMS); err != nil {
+			return err
+		}
+	}
+
 	if holding {
 		if !stale {
-			// The artifact and the per-attempt records land FIRST, in this same
-			// transaction, so H4's "one transaction, or a crash leaves a held
-			// payload with nobody able to resolve it" holds exactly.
-			if err := recordActionResult(tx, step, action, nowMS); err != nil {
-				return err
-			}
 			return enterHeld(tx, step, action.Held, tally, nowMS)
 		}
 		// H20: a STALE-LINEAGE hold is inert exactly as a stale-lineage routing
@@ -1105,6 +1194,70 @@ func (e *Engine) runRoutingStage(
 	}
 
 	status := statusForRouting(routing)
+
+	// AN UNCHANGED HAND-BACK PARKS THE ROUND AT ITS SOURCE (DKT-588), before
+	// the review chain downstream spends anything. The park lands on the loop
+	// body's OWN row — the gap-only and measured-nothing parks above are the
+	// precedent, and "waiting-human stops the lineage at its source" is their
+	// exact reasoning — because the downstream chain this ordinal instantiated
+	// at loop entry already waits on this body: readiness withholds the
+	// `after_loop` closure from every offer while its same-ordinal loop body
+	// is non-terminal (blockingLoopBodyAbsent, DKT-48/DKT-61), and the run
+	// rollup parks the run with the step. Nothing is superseded, deliberately:
+	// `superseded` is terminal, so sweeping the chain would let the issue
+	// COMPLETE without its judges ever running the moment an operator resolved
+	// the park, and would leave `--as override-pass` — the way out the reason
+	// names — releasing a round with nothing left in it to run.
+	//
+	// Only a routing that would have handed the round downstream is overridden
+	// — `pass`, the status-table row that makes the chain claimable. A failed
+	// gate's `on_fail` and a threshold's own routing already decided something
+	// about this completion and are left alone.
+	if !stale && routing == RoutingPass && unchangedHandBack != "" {
+		routing = workflow.OnFailWaitingHuman
+		reason = fmt.Sprintf(
+			"round %d of %s handed back the same commit %.12s its previous "+
+				"round recorded: the loop body changed nothing, so the review "+
+				"chain would read the identical tree and reach the identical "+
+				"verdict; `docket step resolve --as override-pass` runs the "+
+				"chain anyway, `--as retry` redoes the round",
+			step.Ordinal, model.FormatID(step.IssueID), unchangedHandBack)
+		status = statusForRouting(routing)
+	}
+
+	// A PASS THAT WOULD LEAVE DECLARED-FLOOR WORK STANDING PARKS INSTEAD
+	// (DKT-870). RUN-58's reconcile routed `pass` with all 16 clusters open —
+	// six at the order's high position, none held, none operator-resolved —
+	// and the loop exited clean: the threshold had read the field its author
+	// pointed it at, and nothing read the evidence recorded beside it. When
+	// the step declares a `pass_floor`, the pass is measured against the
+	// step's OWN recorded payload under the same pinned order the threshold
+	// evaluates under, and a pass with standing floor-or-above elements
+	// becomes `waiting-human` — see passFloorStanding for the exemptions and
+	// the fail-toward-pass discipline.
+	//
+	// The override takes the unchanged-hand-back park's exact shape and
+	// placement, for its reasons: only a `pass` — the one routing that hands
+	// the issue onward as settled — is overridden, a failed gate's `on_fail`
+	// and a threshold's own `fix-loop` already decided something and are left
+	// alone, and the park lands before applyFixLoop so a parked pass never
+	// touches the loop counter. `--as override-pass` (below) is the recorded
+	// operator exit; `--as fix-round` buys a round instead.
+	if !stale && routing == RoutingPass && spec.PassFloor != nil {
+		if floor := passFloorStanding(spec.PassFloor, payloads, order); floor.Standing > 0 {
+			routing = workflow.OnFailWaitingHuman
+			reason = fmt.Sprintf(
+				"%d element(s) of %s's recorded payload sit at or above the "+
+					"declared pass_floor (%s >= %s), none held and none "+
+					"operator-resolved, so a `pass` would exit with that work "+
+					"still standing; `docket step resolve --as override-pass` "+
+					"exits anyway, `--as fix-round` authorizes another round "+
+					"instead",
+				floor.Standing, step.Instance, spec.PassFloor.Field,
+				spec.PassFloor.At)
+			status = statusForRouting(routing)
+		}
+	}
 
 	// A `fix-loop` routing from a LIVE lineage is the loop entry (§11.3). It
 	// runs before the step's own status is written so its outcome — entered, or
@@ -1120,12 +1273,6 @@ func (e *Engine) runRoutingStage(
 		if outcome != nil {
 			reason = outcome.Reason
 			status = statusForRouting(routing)
-		}
-	}
-
-	if action != nil {
-		if err := recordActionResult(tx, step, action, nowMS); err != nil {
-			return err
 		}
 	}
 
@@ -1151,6 +1298,24 @@ func (e *Engine) runRoutingStage(
 		Instance: step.Instance, IssueID: step.IssueID, Data: routing, AtMS: nowMS,
 	}); err != nil {
 		return err
+	}
+	// A batch-covered pass spends operator authority, so it is attributed like
+	// the resolution it stands in for (DKT-546): the covering grants' counters
+	// move and the feed records which grants decided this step — in this same
+	// transaction, and BEFORE the stale guard, because §7.3 (3) records a stale
+	// lineage's routing for the ledger too, and an override the ledger carries
+	// must name its authority either way.
+	if cover != nil {
+		if err := db.CoverGateOverrideGrantsTx(tx, cover.grantIDs); err != nil {
+			return err
+		}
+		if err := recordEvent(tx, eventRecord{
+			Kind: EventStepBatchOverridden, RunID: step.RunID,
+			Instance: step.Instance, IssueID: step.IssueID,
+			Data: cover.eventData(), AtMS: nowMS,
+		}); err != nil {
+			return err
+		}
 	}
 
 	// ---- The inert guard (§7.3 (3), §11.3 (2)). ---------------------------
@@ -1263,21 +1428,7 @@ func gateVerdict(conn *sql.DB, stepID int) (string, []string, error) {
 // verdictOverRows reduces a step's recorded rows to a routing verdict, and
 // names the gates that measured nothing.
 func verdictOverRows(rows []db.GateResultRow) (string, []string) {
-	// Ordinals carry flaky re-runs (§5.6 F3): every attempt is its own row, and
-	// F4 makes the LAST attempt's verdict the one that routes. So the decision
-	// is made per (gate, ordinal-max), never over every row — otherwise a gate
-	// that failed twice and passed on the third try would route as a failure,
-	// which is exactly what declaring it flaky was meant to prevent.
-	last := make(map[string]db.GateResultRow)
-	for _, r := range rows {
-		if r.Pre {
-			continue // PG4
-		}
-		prev, seen := last[r.Gate]
-		if !seen || r.Ordinal >= prev.Ordinal {
-			last[r.Gate] = r
-		}
-	}
+	last := lastGateAttempts(rows)
 
 	verdict := VerdictPass
 	var unmeasured []string
@@ -1293,6 +1444,90 @@ func verdictOverRows(rows []db.GateResultRow) (string, []string) {
 	// run over the same rows — map range order is not.
 	sort.Strings(unmeasured)
 	return verdict, unmeasured
+}
+
+// lastGateAttempts reduces a step's recorded rows to the one attempt per gate
+// that ROUTES.
+//
+// Ordinals carry flaky re-runs (§5.6 F3): every attempt is its own row, and F4
+// makes the LAST attempt's verdict the one that routes. So the decision is made
+// per (gate, ordinal-max), never over every row — otherwise a gate that failed
+// twice and passed on the third try would route as a failure, which is exactly
+// what declaring it flaky was meant to prevent. Pre-gate rows are excluded per
+// PG4: they are inputs to the step, not judgments of it.
+//
+// It is shared by the routing verdict and by FailedGates so the gates a caller
+// REPORTS are, by construction, the rows the saga ROUTED on. Two reductions
+// over the same table is how a report comes to contradict the routing beside
+// it — which is the class of defect DKT-982 is.
+func lastGateAttempts(rows []db.GateResultRow) map[string]db.GateResultRow {
+	last := make(map[string]db.GateResultRow)
+	for _, r := range rows {
+		if r.Pre {
+			continue // PG4
+		}
+		prev, seen := last[r.Gate]
+		if !seen || r.Ordinal >= prev.Ordinal {
+			last[r.Gate] = r
+		}
+	}
+	return last
+}
+
+// FailedGate is one completion gate whose routing attempt did not pass, in the
+// shape a caller needs to SAY SO: the name, the verdict word, and the exit code
+// the process left behind.
+//
+// Exit is a pointer for db.GateResultRow's reason exactly — an `unmatched` gate
+// never ran, and rendering `exit 0` for a process that does not exist reads as
+// a pass (T11).
+type FailedGate struct {
+	Gate    string `json:"gate"`
+	Verdict string `json:"verdict"`
+	Exit    *int   `json:"exit"`
+	// Reason explains an `unmatched` verdict or a timeout, verbatim from the
+	// recorded row.
+	Reason string `json:"reason,omitempty"`
+}
+
+// FailedGates returns the completion gates that did not pass, sorted by name.
+//
+// It is the READ SIDE of the routing decision (DKT-982): a step whose gate
+// failed parks, and until this existed the verb that parked it could name
+// nothing — `step record` printed a success-shaped line with no gate on it, and
+// the executor reading that line reported the run green. The engine knew at
+// print time; it had no accessor to say it with.
+//
+// Empty means every completion gate passed, or none ran.
+func FailedGates(conn *sql.DB, stepID int) ([]FailedGate, error) {
+	rows, err := db.GateResultsForStep(conn, stepID)
+	if err != nil {
+		return nil, err
+	}
+	return failedGatesOverRows(rows), nil
+}
+
+// failedGatesOverRows is FailedGates over rows already read — pure, so a test
+// can weigh the reduction without a store.
+func failedGatesOverRows(rows []db.GateResultRow) []FailedGate {
+	last := lastGateAttempts(rows)
+
+	failed := make([]FailedGate, 0, len(last))
+	for _, r := range last {
+		// Not-pass, in the same sense verdictOverRows uses: `fail`, `unmatched`,
+		// and `skipped` all route as a failure, and a report that named only the
+		// first would be silent about the two the routing acted on.
+		if r.Verdict == db.GateVerdictPass {
+			continue
+		}
+		failed = append(failed, FailedGate{
+			Gate: r.Gate, Verdict: r.Verdict, Exit: r.Exit, Reason: r.Reason,
+		})
+	}
+	// Sorted for verdictOverRows' reason: the sentence a step parks with must be
+	// the same on every run over the same rows, and map range order is not.
+	sort.Slice(failed, func(i, j int) bool { return failed[i].Gate < failed[j].Gate })
+	return failed
 }
 
 // runGate invokes the runner and normalizes its output to rows.
@@ -1408,7 +1643,7 @@ func recordGateEvents(
 		// announced a minute later landed in the feed stamped a minute before
 		// the event preceding it, and the two events closing one gate disagreed
 		// about when the gate happened.
-		data, err := gateEventData(gate, r.Verdict, r.Exit)
+		data, err := gateEventData(gate, r.Verdict, r.Exit, r.Pre, r.StubEntry)
 		if err != nil {
 			return err
 		}
@@ -1431,8 +1666,8 @@ func recordGateEvents(
 	// The verdict is the LAST row's: attempts are recorded in order and a flaky
 	// re-run supersedes the attempt before it, so the final row is the outcome
 	// the saga itself routes on.
-	verdict, exit := gateOutcome(rows)
-	data, err := gateEventData(gate, verdict, exit)
+	verdict, exit, pre, stub := gateOutcome(rows)
+	data, err := gateEventData(gate, verdict, exit, pre, stub)
 	if err != nil {
 		return err
 	}
@@ -1443,13 +1678,20 @@ func recordGateEvents(
 }
 
 // gateOutcome reduces a gate's attempts to the one that counts: the LAST,
-// because a re-run supersedes the attempt before it.
-func gateOutcome(rows []GateResultRow) (verdict string, exit *int) {
+// because a re-run supersedes the attempt before it. `pre` and `stub` ride
+// along from the same row: every attempt of one gate is produced by one
+// phase, so the last row's markers are the gate's.
+//
+// `stub` reads StubEntry — the matched trust entry's own `stub` declaration
+// (DKT-265) — not the legacy S3-migration `Stub` field. StubEntry is what
+// `gate_results` (`step gates --json`) and `run report` already render as
+// `stub`, and DKT-983 asks this event to say what those surfaces already say.
+func gateOutcome(rows []GateResultRow) (verdict string, exit *int, pre, stub bool) {
 	if len(rows) == 0 {
-		return "", nil
+		return "", nil, false, false
 	}
 	last := rows[len(rows)-1]
-	return last.Verdict, last.Exit
+	return last.Verdict, last.Exit, last.Pre, last.StubEntry
 }
 
 // gateEventData renders a gate event's payload: the gate name in `detail`,
@@ -1458,13 +1700,47 @@ func gateOutcome(rows []GateResultRow) (verdict string, exit *int) {
 // A missing exit stays ABSENT rather than rendering as 0 — an unmatched gate
 // never ran, and `exit=0` on a gate that was refused execution would read as a
 // pass.
-func gateEventData(gate, verdict string, exit *int) (string, error) {
+//
+// `pre` MARKS THE VERDICTS THAT ROUTED NOTHING (DKT-862). A §11.1 pre-gate runs
+// at claim as an input to the step, and PG4 keeps its result out of the saga's
+// verdict — so `gate-recorded ... verdict=fail` on a pre-gate was reporting a
+// failure that never blocked anything, in bytes identical to one that did. On
+// RUN-61 three such rows appeared in the feed beside the `step-routed` that
+// contradicted them, and nothing on the line said which was which.
+//
+// It rides as its OWN KEY rather than as an adjective on the verdict, for two
+// reasons. `verdict` is a closed vocabulary a program reads, and "fail
+// (advisory)" is not in it. And the human line comes from eventDetail, which
+// renders `data` as sorted `key=value` pairs and INTERPRETS NOTHING — a
+// renderer that special-cased this pair would be the first key core's event
+// feed had an opinion about.
+//
+// It is ABSENT on a blocking gate rather than `pre=false`, so the marker's
+// presence is the whole signal and the overwhelmingly common line does not
+// grow a column that always says the same thing.
+//
+// `stub` MARKS A GATE WHOSE PASS WAS NEVER MEASURED (DKT-983). A stub-trusted
+// command's pass is already marked stub:true in the trust store, in
+// `gate_results` rows (`step gates --json`), and in `run report` — but until
+// this, the event stream carried none of it, so `gate-recorded ... verdict=pass`
+// for a stub was byte-identical to a real measurement. It is ABSENT rather
+// than `stub=false` for the same reason `pre` is: the marker's presence is the
+// whole signal. The caller passes StubEntry (the trust entry's own `stub`
+// declaration), never the legacy S3-migration `Stub` field — StubEntry is
+// what every other stub-aware surface already reads.
+func gateEventData(gate, verdict string, exit *int, pre, stub bool) (string, error) {
 	fields := map[string]any{"detail": gate}
 	if verdict != "" {
 		fields["verdict"] = verdict
 	}
 	if exit != nil {
 		fields["exit"] = *exit
+	}
+	if pre {
+		fields["pre"] = true
+	}
+	if stub {
+		fields["stub"] = true
 	}
 	out, err := json.Marshal(fields)
 	if err != nil {
@@ -2042,6 +2318,39 @@ func runDiffBase(conn *sql.DB, runID int, dir, execRoot string) string {
 	return sharedCheckoutHead(execRoot)
 }
 
+// gateBaseSHA resolves the base commit a completion gate's child is told
+// about via DOCKET_GATE_BASE (DKT-992): for a worktree-recorded step, the
+// worktree's fork point — the commit the worktree was created from, the SAME
+// resolution the diff stage's runDiffBase applies to `dir` — so a gate can
+// scan exactly the committed range the recorded issue.diff describes, instead
+// of guessing (`git diff HEAD~1`, wrong for multi-commit steps) or scanning
+// the working tree an executor already committed to (always clean, so
+// RUN-66's secret-scan passed 8/8 write steps having scanned zero lines).
+//
+// "" — the var UNSET — everywhere a step's committed range is not knowable,
+// and deliberately NOT runDiffBase's pinned-commit fallback:
+//
+//   - a shared-checkout step ("" or workRoot == the run's exec root) has no
+//     fork point, and the pinned run commit is not this STEP's base — sibling
+//     issues' work lands between it and the step's own commits, so exporting
+//     it would attribute their range to this step. The acceptance choice here
+//     is UNSET for non-worktree steps, not "equal to HEAD": a live HEAD read
+//     is a value docket cannot vouch for as a range endpoint, and absence is
+//     the honest encoding (the same convention as DOCKET_SCOPE).
+//   - a worktree whose fork point cannot be resolved exports nothing rather
+//     than a guess; a range-shaped gate finding the var absent over a clean
+//     tree fails closed, which is the correct direction for a control.
+func gateBaseSHA(conn *sql.DB, runID int, workRoot string) string {
+	if workRoot == "" {
+		return ""
+	}
+	execRoot := runExecRoot(conn, runID)
+	if workRoot == execRoot {
+		return ""
+	}
+	return worktreeForkPoint(workRoot, execRoot)
+}
+
 // worktreeForkPoint resolves the merge-base of a worktree's HEAD and the
 // shared checkout's — DKT-42's base for worktree-recorded steps. "" when
 // either side cannot be resolved, which sends runDiffBase to its pinned
@@ -2135,6 +2444,47 @@ func gitAncestorOfHead(execRoot, sha string) (ancestor, known bool) {
 		gitDirArgs(execRoot, "merge-base", "--is-ancestor", sha, "HEAD")...).Run()
 	if err == nil {
 		return true, true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, true
+	}
+	return false, false
+}
+
+// gitCommitResolvable is ObjectExistsFn's real implementation (DKT-742): does
+// this sha resolve as a commit object from execRoot at all? It is exactly the
+// probe a packet consumer runs by hand — `git cat-file -e <sha>^{commit}` —
+// asked once at dispatch time instead of once per seat mid-wave.
+//
+// The three-valued mapping needs TWO probes, because cat-file's peel form
+// exits 128 for both "no such object" and "not a repository" — one a
+// definitive absence worth warning on, the other an unanswerable question
+// that must stay silent:
+//
+//   - `cat-file -e <sha>^{commit}` exit 0: the object exists and peels to a
+//     commit — (true, true).
+//   - otherwise `cat-file -e <sha>` (no peel) exit 1: git ran, looked, and
+//     found NO OBJECT — a definitive (false, true). Exit 0 here means the
+//     object exists but is not a commit, which is equally definitive: a
+//     recorded target sha naming a blob or tree does not resolve for any
+//     consumer either.
+//   - anything else — git absent, not a repository — (false, false), which no
+//     caller may treat as absence.
+func gitCommitResolvable(execRoot, sha string) (exists, known bool) {
+	if execRoot == "" || sha == "" {
+		return false, false
+	}
+	if exec.Command("git",
+		gitDirArgs(execRoot, "cat-file", "-e", sha+"^{commit}")...).Run() == nil {
+		return true, true
+	}
+	err := exec.Command("git",
+		gitDirArgs(execRoot, "cat-file", "-e", sha)...).Run()
+	if err == nil {
+		// Present but not peelable to a commit: definitively unresolvable as
+		// the commit the packet records.
+		return false, true
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -2402,13 +2752,53 @@ func latestIssueDiffHead(conn *sql.DB, runID, issueID int) string {
 		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
 		  ORDER BY a.id DESC LIMIT 1`,
 		runID, issueID, ArtifactKindIssueDiff).Scan(&payload)
-	if err != nil || payload.String == "" {
+	if err != nil {
+		return ""
+	}
+	return handBackHead(payload.String)
+}
+
+// priorRoundHandBack is the hand-back head THIS step's own name recorded at
+// its newest earlier ordinal — the sha the same loop body handed back last
+// round — or "" when it never recorded one (DKT-588).
+//
+// BELOW, not AT, the step's ordinal, for newestIssueDiffUpTo's exact reason:
+// the engine suppresses a byte-identical or empty re-record (DKT-258/DKT-259),
+// so a round may leave no artifact of its own, and the newest earlier record
+// is still the last commit this body actually handed back. Excluding the
+// step's OWN ordinal is what keeps a re-completion at the same ordinal — an
+// operator `--as retry` — from comparing against its own first record.
+//
+// Filtered to the step's NAME, unlike latestIssueDiffHead's issue-wide read:
+// the issue's newest head may belong to a different producer entirely, and
+// this comparison is only meaningful between two hand-backs of the same body.
+func priorRoundHandBack(conn *sql.DB, step *db.Step) string {
+	var payload sql.NullString
+	err := conn.QueryRow(
+		`SELECT a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
+		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ?
+		    AND s.ordinal < ? AND a.kind = ?
+		  ORDER BY a.id DESC LIMIT 1`,
+		step.RunID, step.IssueID, step.StepName, step.Ordinal,
+		ArtifactKindIssueDiff).Scan(&payload)
+	if err != nil {
+		return ""
+	}
+	return handBackHead(payload.String)
+}
+
+// handBackHead decodes the `head` out of a round record payload —
+// appendRoundDelta's `{"head": "..."}` — "" when the payload carries none or
+// cannot be read. "" is the degenerate answer every consumer must treat as
+// "no measurement", never as a comparable value.
+func handBackHead(payload string) string {
+	if payload == "" {
 		return ""
 	}
 	var record struct {
 		Head string `json:"head"`
 	}
-	if json.Unmarshal([]byte(payload.String), &record) != nil {
+	if json.Unmarshal([]byte(payload), &record) != nil {
 		return ""
 	}
 	return record.Head

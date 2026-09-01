@@ -294,3 +294,181 @@ func linesContain(lines []string, needle string) bool {
 	}
 	return false
 }
+
+// DKT-733 — RUN-51's coverage line said 12 of 57 seats reported nothing and
+// named neither the seats nor the seating paths, so the gap could not be
+// diagnosed or back-filled from the report.
+
+// silentSeatsRunReport is the RUN-51 shape, minimally: casts on both seating
+// paths, some of them silent.
+func silentSeatsRunReport() *engine.RunReport {
+	return &engine.RunReport{
+		Run:               &model.Run{ID: 51, Status: model.RunDone},
+		VoteUsageCoverage: db.VoteUsageCoverage{Casts: 5, Reported: 2},
+		SilentVoteSeats: []engine.SilentVoteSeat{
+			{Proposal: "DKT-V218", Voter: "sec-arch", Role: "judge",
+				Path: engine.SeatPathConversationalGate},
+			{Proposal: "DKT-V219", Voter: "sec-crypto",
+				Path: engine.SeatPathConversationalGate},
+			{Proposal: "DKT-V220", Voter: "verify-seat", Role: "verifier",
+				Path: engine.SeatPathVoteStep},
+		},
+	}
+}
+
+// TestCoverageLineNamesSilentSeatPaths is DKT-733's AC3: the coverage line
+// itself names the seating path(s) of the missing seats, with counts.
+func TestCoverageLineNamesSilentSeatPaths(t *testing.T) {
+	lines := sectionLines(t, renderPlainRunReport(silentSeatsRunReport()), "Vote usage")
+
+	var coverage string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "Coverage:") {
+			coverage = l
+		}
+	}
+	if coverage == "" {
+		t.Fatalf("no coverage line rendered:\n%v", lines)
+	}
+	if !strings.Contains(coverage, "3 reported NOTHING") {
+		t.Errorf("the coverage line lost its silent count:\n  %s", coverage)
+	}
+	if !strings.Contains(coverage, "conversational-gate: 2, vote-step: 1") {
+		t.Errorf("the coverage line does not name the seating paths of the "+
+			"missing seats:\n  %s", coverage)
+	}
+}
+
+// TestSilentSeatsAreEnumeratedWithABackfillPointer is DKT-733's AC1 rendered:
+// each silent seat is one line naming its proposal (the backfill verb's
+// argument), its voter, and its path — and the verb itself is named once.
+func TestSilentSeatsAreEnumeratedWithABackfillPointer(t *testing.T) {
+	lines := sectionLines(t, renderPlainRunReport(silentSeatsRunReport()), "Vote usage")
+
+	for _, needle := range []string{
+		`DKT-V218 seat "sec-arch" as "judge"  (conversational-gate)`,
+		`DKT-V219 seat "sec-crypto"  (conversational-gate)`,
+		`DKT-V220 seat "verify-seat" as "verifier"  (vote-step)`,
+		"vote backfill-usage",
+	} {
+		if !linesContain(lines, needle) {
+			t.Errorf("the Vote usage section never says %q:\n%v", needle, lines)
+		}
+	}
+}
+
+// TestFullyReportedRunListsNoSilentSeats: a run whose every seat reported
+// renders the coverage line alone — no Silent rows, no backfill pointer.
+func TestFullyReportedRunListsNoSilentSeats(t *testing.T) {
+	r := silentSeatsRunReport()
+	r.VoteUsageCoverage = db.VoteUsageCoverage{Casts: 5, Reported: 5}
+	r.SilentVoteSeats = nil
+
+	lines := sectionLines(t, renderPlainRunReport(r), "Vote usage")
+	if !linesContain(lines, "5 of 5 seat(s) reported spend") {
+		t.Fatalf("no coverage line on a fully-reported run:\n%v", lines)
+	}
+	for _, forbidden := range []string{"Silent:", "Backfill:", "NOTHING"} {
+		if linesContain(lines, forbidden) {
+			t.Errorf("a fully-reported run still renders %q:\n%v", forbidden, lines)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DKT-862 — the Gates tally distinguishes a pre-gate from a blocking one
+// ---------------------------------------------------------------------------
+
+// The section rendered `ac-commands: pass 0, fail 1` whether the failure
+// BLOCKED the step or was an advisory input to it. A `pre = true` gate never
+// routes — §11.1 runs it at claim, PG4 keeps it out of the saga's verdict — so
+// on RUN-61 three of them failed and every step routed on its executor's own
+// verdict anyway. Only `step show` carried the marker, and a conductor reading
+// this document nearly reported a fix round as burned on a gate artifact.
+
+// mixedGateReport is RUN-61's shape: one advisory gate, one blocking gate, and
+// one name that ran BOTH ways across the run's workflows.
+func mixedGateReport() *engine.RunReport {
+	return &engine.RunReport{
+		Run: &model.Run{ID: 61, Status: model.RunDone},
+		Gates: []db.VerdictCount{
+			// The pre-gate RUN-61 kept failing: every row advisory.
+			{Name: "ac-commands", Fail: 1, Pre: 1},
+			// A blocking gate that failed identically — the row whose bytes
+			// were indistinguishable from the one above.
+			{Name: "build", Pass: 2, Fail: 1},
+			// One name, both declarations: `design-qa` declares render-verify
+			// `pre`, another workflow gates on it.
+			{Name: "render-verify", Pass: 1, Fail: 1, Pre: 1},
+		},
+	}
+}
+
+// TestPreGateTallyCarriesTheMarker is DKT-862's AC1.
+//
+// The marker sits OUTSIDE the rendered name's quotes: `exec.Render` escapes a
+// stored string, and the marker is core's own word about it — quoting it would
+// claim a workflow author had written it.
+func TestPreGateTallyCarriesTheMarker(t *testing.T) {
+	lines := sectionLines(t, renderPlainRunReport(mixedGateReport()), "Gates")
+
+	if !linesContain(lines, `"ac-commands" [pre]: pass 0, fail 1`) {
+		t.Errorf("the advisory gate's tally carries no [pre] marker, so it "+
+			"reads as a gate that blocked the step:\n%v", lines)
+	}
+}
+
+// TestBlockingGateTallyIsUnmarked is the other half of AC1, and the half that
+// makes the marker mean something: a gate that DID route must not carry it.
+func TestBlockingGateTallyIsUnmarked(t *testing.T) {
+	lines := sectionLines(t, renderPlainRunReport(mixedGateReport()), "Gates")
+
+	for _, l := range lines {
+		if strings.Contains(l, `"build"`) && strings.Contains(l, "[pre]") {
+			t.Errorf("a blocking gate's tally carries the advisory marker:\n  %s", l)
+		}
+	}
+	if !linesContain(lines, `"build":`) || !linesContain(lines, "pass 2, fail 1") {
+		t.Errorf("the blocking gate's line changed:\n%v", lines)
+	}
+}
+
+// TestSplitGateNameReportsTheRatioRatherThanTheMarker: one gate name declared
+// `pre` by one workflow and blocking by another cannot take the marker without
+// claiming the whole tally was advisory, so the ratio says which part was.
+func TestSplitGateNameReportsTheRatioRatherThanTheMarker(t *testing.T) {
+	lines := sectionLines(t, renderPlainRunReport(mixedGateReport()), "Gates")
+
+	for _, l := range lines {
+		if !strings.Contains(l, `"render-verify"`) {
+			continue
+		}
+		if strings.Contains(l, "[pre]") {
+			t.Errorf("a name that also ran as a blocking gate takes the "+
+				"whole-tally marker:\n  %s", l)
+		}
+		if !strings.Contains(l, "1 of 2 ran as a pre-gate") {
+			t.Errorf("a split gate name says nothing about which rows "+
+				"routed:\n  %s", l)
+		}
+		return
+	}
+	t.Fatalf("render-verify is not in the Gates section at all:\n%v", lines)
+}
+
+// TestActionsTallyIsUnaffected: `action_results` has no `pre` column, and the
+// shared rollup body must render actions exactly as before rather than growing
+// a marker off an honest zero.
+func TestActionsTallyIsUnaffected(t *testing.T) {
+	r := mixedGateReport()
+	r.Actions = []db.VerdictCount{{Name: "reconcile", Pass: 1}}
+
+	lines := sectionLines(t, renderPlainRunReport(r), "Actions")
+	if !linesContain(lines, `"reconcile":   pass 1, fail 0`) {
+		t.Errorf("the Actions section changed:\n%v", lines)
+	}
+	if linesContain(lines, "[pre]") || linesContain(lines, "pre-gate") {
+		t.Errorf("an action tally grew a pre marker off a column its table "+
+			"does not have:\n%v", lines)
+	}
+}

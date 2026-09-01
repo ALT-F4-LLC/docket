@@ -62,6 +62,15 @@ type Gate struct {
 	Pre    bool   `json:"pre"`
 }
 
+// PassFloor is a step's `pass_floor = { field, at }` table (DKT-870): the
+// author's exit bar on a `pass` routing. Both values are OPAQUE TOKENS — a
+// payload property name and a value of that property's declared order — read
+// by position exactly as `route_at`'s value is, and by nothing else.
+type PassFloor struct {
+	Field string `toml:"field" json:"field"`
+	At    string `toml:"at" json:"at"`
+}
+
 // Step is one §11.1 `[[step]]`, carrying every row of that table.
 type Step struct {
 	Name        string            `toml:"name" json:"name"`
@@ -80,17 +89,108 @@ type Step struct {
 	Params      map[string]any    `toml:"params" json:"params,omitempty"`
 	MinSiblings *int              `toml:"min_siblings" json:"min_siblings,omitempty"`
 	Threshold   map[string]string `toml:"threshold" json:"threshold,omitempty"`
-	OnFail      string            `toml:"on_fail" json:"on_fail,omitempty"`
-	Loop        bool              `toml:"loop" json:"loop"`
-	AfterLoop   string            `toml:"after_loop" json:"after_loop,omitempty"`
-	MaxAttempts *int              `toml:"max_attempts" json:"max_attempts,omitempty"`
+	// PassFloor refuses a `pass` routing that would exit with declared-floor
+	// work still standing (DKT-870): when this step's routing resolves to
+	// `pass` but its recorded payload holds an element whose `field` value
+	// sits AT OR ABOVE `at`'s position in the step's pinned schema order —
+	// and that element is neither `held` nor `operator_resolved` — the step
+	// parks `waiting-human` instead of exiting.
+	//
+	// It exists because a threshold reads whatever field its author chose,
+	// and a routing step's self-reported disposition can contradict its own
+	// recorded evidence: RUN-58's reconcile routed `pass` and the loop exited
+	// with all 16 clusters open, SIX at the order's high position, none held
+	// and none operator-resolved — "converged" in the ledger meaning
+	// "dispositioned". The floor is the author's declaration of the exit bar,
+	// exactly as `route_at` is the author's declaration of the routing floor:
+	// `field` and `at` are opaque tokens compared only by position in the
+	// declared order (genericity.md), so core still holds no opinion about
+	// severities.
+	//
+	// `held` and `operator_resolved` elements are exempt because both already
+	// carry a decision channel: a held cluster gates the step for an operator,
+	// and a resolved one records the operator's acceptance. The park names
+	// `--as override-pass` (exit as recorded) and `--as fix-round` (buy a
+	// round instead) as the ways out. Requires `payload` (V37) — without a
+	// pinned order there is no position to compare — and the floor's own
+	// coherence against that schema is V37a's, at register time.
+	PassFloor *PassFloor `toml:"pass_floor" json:"pass_floor,omitempty"`
+	OnFail    string     `toml:"on_fail" json:"on_fail,omitempty"`
+	Loop      bool       `toml:"loop" json:"loop"`
+	AfterLoop string     `toml:"after_loop" json:"after_loop,omitempty"`
+	// Serves scopes a `loop = true` body to the steps whose `fix-loop`
+	// routings it answers (§11.3 cluster scoping, DKT-544): on a `fix-loop`
+	// routed by a step named here, this body instantiates and its
+	// `after_loop` root joins the sweep/re-instantiation set; on one routed
+	// by any other step, this body is not part of the entry at all.
+	//
+	// OMITTED MEANS SERVES EVERY TRIGGER — the backward-compatible reading.
+	// A workflow with no `serves` anywhere therefore has exactly one loop
+	// cluster spanning every body and every `after_loop` root, which is
+	// §11.3's original single-construct behavior, byte for byte.
+	//
+	// Valid only on `loop = true` steps (V35); every entry must name a step
+	// that can actually route `fix-loop` (V35), and every step that can must
+	// be served by at least one body (V17c).
+	Serves      []string `toml:"serves" json:"serves,omitempty"`
+	MaxAttempts *int     `toml:"max_attempts" json:"max_attempts,omitempty"`
 	// MaxFixLoops bounds EVERY `fix-loop` routing on the issue -- threshold,
-	// rejected vote, or rejected human gate alike (see engine.EnterLoop). The
-	// only way past it is a tracked operator grant (`fix-round`), never a skip.
-	MaxFixLoops  *int           `toml:"max_fix_loops" json:"max_fix_loops,omitempty"`
-	ExpectedCost *float64       `toml:"expected_cost" json:"expected_cost,omitempty"`
-	When         string         `toml:"when" json:"when,omitempty"`
-	Metadata     map[string]any `toml:"metadata" json:"metadata,omitempty"`
+	// gate-failure or attempt-exhaustion `on_fail`, rejected vote, rejected
+	// human gate, and quorum miss alike (see engine.EnterLoop; DKT-587). It is
+	// ONE workflow-wide bound over ONE issue-level counter: whichever
+	// non-cluster step declares it, every routing source moves the same
+	// counter, so the bound cannot depend on which step happened to route.
+	//
+	// HOW THE COUNT IS COMPUTED (§11.3 (1)): each admitted entry increments
+	// the issue's counter FIRST and the new value is that entry's 1-indexed
+	// loop ordinal; an entry whose new count EXCEEDS the bound is refused --
+	// the counter is put back, nothing is instantiated, and the routing step
+	// parks `waiting-human`. `max_fix_loops = N` therefore admits exactly N
+	// loop entries (ordinals 1..N) and refuses the N+1th, from any mix of
+	// routing sources. Zero or absent means unbounded.
+	//
+	// Declared on a `serves`-scoped loop body it is instead that CLUSTER's
+	// round bound (§11.3 cluster scoping): it bounds entries triggered by the
+	// steps the body serves — counted as the distinct ordinals holding the
+	// cluster's scoped bodies, checked INDEPENDENTLY of and ADDITIVELY under
+	// the issue-level ceiling, which stays whatever a non-cluster step
+	// declares. A cluster bound never raises or lowers the issue-level one;
+	// each refuses on its own arithmetic, and both admit exactly their
+	// declared number of rounds.
+	//
+	// The only way past either bound is a tracked operator grant — `docket
+	// step resolve --as fix-round` (DKT-237) — never a skip. Each grant
+	// records `loop_grants + 1` on the issue's run row and enters the round in
+	// the same transaction: the effective issue-level bound becomes declared +
+	// grants, and the authorized entry also skips the cluster bound and the
+	// non-convergence refusal, because the operator who granted it has
+	// answered the question those refusals ask. A third completed ordinal
+	// under `max_fix_loops = 2` is therefore the signature of a recorded
+	// grant, not of the counter differing by entry path.
+	MaxFixLoops *int `toml:"max_fix_loops" json:"max_fix_loops,omitempty"`
+	// MaxStalledRounds parks a `fix-loop` entry when this step — a routing
+	// step, i.e. one that can route `fix-loop` — has recorded that many
+	// CONSECUTIVE rounds without its routed payload's element count ever
+	// falling below the smallest count any earlier round recorded (DKT-870).
+	//
+	// It is the author's declaration of the non-convergence signal the corpus
+	// already reads by hand: a fix loop that is converging shrinks the standing
+	// set it routes each round, and one whose volume stays flat is churning.
+	// RUN-51 held 8-12 clusters across TEN rounds (~271k + ~251k output tokens
+	// spent on the last two alone) and RUN-50 held 7-10 across six; both ended
+	// only by operator action, because nothing engine-visible read the plateau.
+	// The count is of PAYLOAD ELEMENTS — packaging vocabulary, like `held` —
+	// so core never learns what a cluster or a severity is.
+	//
+	// The refusal takes the non-convergence park's exact shape (engine.EnterLoop,
+	// DKT-340/DKT-589): nothing superseded, nothing instantiated, the counter
+	// restored, `waiting-human` naming `--as fix-round` as the way out, and an
+	// authorized entry skips it. Zero or absent means the check never fires —
+	// the same opt-in reading `hold_spread = 0` has.
+	MaxStalledRounds *int           `toml:"max_stalled_rounds" json:"max_stalled_rounds,omitempty"`
+	ExpectedCost     *float64       `toml:"expected_cost" json:"expected_cost,omitempty"`
+	When             string         `toml:"when" json:"when,omitempty"`
+	Metadata         map[string]any `toml:"metadata" json:"metadata,omitempty"`
 	// HoldsTree reports whether this step OCCUPIES its issue's scope while it
 	// runs — the question scope exclusion (R4) is actually asking.
 	//

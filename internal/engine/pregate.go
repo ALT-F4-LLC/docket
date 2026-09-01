@@ -102,11 +102,11 @@ func resolvedTargetFor(
 	if spec == nil || len(spec.Inputs) == 0 {
 		return "", "", nil
 	}
-	issue, err := contextIssue(tx, step.RunID, step.IssueID)
+	issue, linked, err := contextIssue(tx, step.RunID, step.IssueID)
 	if err != nil {
 		return "", "", err
 	}
-	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts)
+	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts, linked)
 	if err != nil {
 		return "", "", err
 	}

@@ -90,6 +90,16 @@ type Context struct {
 	// makes easy. Read from `steps.routing`, which holds the CURRENT routing
 	// record for this step alone.
 	//
+	// TWO WRITERS PUT A RULING HERE, and together they are the ONLY reliable
+	// operator-steering channels into a packet (DKT-725): `step resolve --as
+	// retry|rerun-gates -m` leaves the note on the SAME row it re-executes,
+	// and `step resolve --as fix-round -m` stamps it onto the NEW round's
+	// instantiated rows (stampEntryRouting), because the parked row it was
+	// issued against is superseded and renders nothing again. Issue COMMENTS
+	// are not a context source at all — §6.6's five-source rule, by design —
+	// and a mid-run `description` edit never renders either, because
+	// `body_snapshot` froze at activation (§9 item 5).
+	//
 	// nil when the step carries no routing record, so a first-round packet is
 	// byte-identical to what it always was.
 	Resolution *ContextResolution `json:"resolution,omitempty"`
@@ -240,7 +250,9 @@ func AssembleContext(
 	}
 
 	// Sources 2 and 3: the snapshots. NOTHING below reads the `issues` table.
-	issue, err := contextIssue(tx, step.RunID, step.IssueID)
+	// `linked` is the activation-pinned cross-issue artifact ids (DKT-547),
+	// carried in the issue snapshot and read back with it.
+	issue, linked, err := contextIssue(tx, step.RunID, step.IssueID)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +269,7 @@ func AssembleContext(
 			return nil, err
 		}
 	}
-	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts)
+	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts, linked)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +417,13 @@ func resolveTarget(inputs []ContextInput) (sha, worktree string) {
 // `id` is the run_issues key — the one field that is not snapshot-derived, and
 // it cannot drift because an issue's id never changes. Every other field comes
 // from `issue_snapshot`, which activation froze (§5.1.1).
-func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
+//
+// The second return is the snapshot's `linked` pin set (DKT-547): declared
+// `issue.linked.<relation>.<kind>` suffix -> artifact ids, as activation
+// resolved and froze them. It rides the same read because it lives in the same
+// column; it is not a member of the wire-shape ContextIssue, because §11.4's
+// consumers read artifacts through `inputs`, never through `issue`.
+func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, map[string][]int, error) {
 	var (
 		body     sql.NullString
 		snapshot sql.NullString
@@ -415,11 +433,11 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
 		  WHERE run_id = ? AND issue_id = ?`, runID, issueID,
 	).Scan(&body, &snapshot)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("issue %s is not in run %s",
+		return nil, nil, fmt.Errorf("issue %s is not in run %s",
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading the issue snapshot: %w", err)
+		return nil, nil, fmt.Errorf("reading the issue snapshot: %w", err)
 	}
 
 	out := &ContextIssue{
@@ -429,15 +447,17 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
 		Scope:        []string{},
 	}
 
+	var linked map[string][]int
 	if snapshot.String != "" {
 		var frozen struct {
-			Title  string   `json:"title"`
-			Kind   string   `json:"kind"`
-			Labels []string `json:"labels"`
-			Scope  []string `json:"scope"`
+			Title  string           `json:"title"`
+			Kind   string           `json:"kind"`
+			Labels []string         `json:"labels"`
+			Scope  []string         `json:"scope"`
+			Linked map[string][]int `json:"linked"`
 		}
 		if err := json.Unmarshal([]byte(snapshot.String), &frozen); err != nil {
-			return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
+			return nil, nil, fmt.Errorf("reading the issue snapshot for %s: %w",
 				model.FormatID(issueID), err)
 		}
 		out.Title, out.Kind = frozen.Title, frozen.Kind
@@ -447,8 +467,9 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
 		if frozen.Scope != nil {
 			out.Scope = frozen.Scope
 		}
+		linked = frozen.Linked
 	}
-	return out, nil
+	return out, linked, nil
 }
 
 // contextPins reads the pin LIST — paths and hashes. It never opens a pinned
@@ -632,9 +653,11 @@ func loopEntryOf(step *db.Step) *LoopEntry {
 // says so for fanout joins. "Ordered by artifact id" is trivially satisfiable
 // by accident when insertion order happens to match, so the ordering here is
 // applied explicitly and a test shuffles insertion order to prove it.
+// `linked` is the issue snapshot's activation-pinned cross-issue artifact ids
+// (DKT-547), consulted only for `issue.linked.<relation>.<kind>` entries.
 func resolveInputs(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
-	bodySnapshot string, artifacts []*db.Artifact,
+	bodySnapshot string, artifacts []*db.Artifact, linked map[string][]int,
 ) ([]ContextInput, error) {
 	if len(spec.Inputs) == 0 {
 		return []ContextInput{}, nil
@@ -667,6 +690,22 @@ func resolveInputs(
 			continue
 		}
 
+		// `issue.linked.<relation>.<kind>` (DKT-547): an artifact recorded
+		// under ANOTHER issue, resolved through this issue's relations and
+		// pinned by artifact id at activation — assembly only reads the
+		// pinned rows back, never the live cross-issue question (§6.6).
+		// Checked BEFORE the producer-addressed forms below: the whole
+		// declaration is an engine namespace, and `splitInput` would
+		// otherwise read `issue.linked.<relation>` as a producer step name.
+		if _, _, ok := workflow.LinkedInput(declared); ok {
+			resolved, err := resolveLinkedPinned(tx, step, linked, declared)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, resolved...)
+			continue
+		}
+
 		// `<step>.gate-results` (DKT-77): the producer's RECORDED gate
 		// results, addressable as an input. Before this form existed, no
 		// syntax exposed what the engine had already recorded — so every
@@ -675,6 +714,22 @@ func resolveInputs(
 		// results were sitting in the ledger.
 		if stepName, kind, ok := splitInput(declared); ok && kind == inputGateResults {
 			resolved, err := resolveGateResults(tx, sched, step, stepName)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, resolved...)
+			continue
+		}
+
+		// `<step>.vote-record` (DKT-545): the named vote step's RECORDED
+		// proposal — tally outcome, casts, and rationales — addressable as an
+		// input. The gate-results reasoning applied to the vote machinery:
+		// before this form existed, what a panel actually said reached no
+		// downstream step, so a revise loop entered on concerns had to shell
+		// out to `docket vote show` to learn what to revise.
+		if stepName, kind, ok := splitInput(declared); ok &&
+			kind == workflow.VoteRecordKind {
+			resolved, err := resolveVoteRecords(tx, sched, step, stepName)
 			if err != nil {
 				return nil, err
 			}
@@ -736,6 +791,11 @@ func ResolveInputArtifacts(
 	}
 	def := sched.defs[step.WorkflowID]
 
+	// The activation-pinned cross-issue ids (DKT-547), read lazily: only a
+	// definition declaring the form pays the snapshot read.
+	var linked map[string][]int
+	linkedLoaded := false
+
 	var out []*db.Artifact
 	for _, declared := range spec.Inputs {
 		if declared == inputIssueBody || declared == inputIssueDiff {
@@ -743,6 +803,21 @@ func ResolveInputArtifacts(
 		}
 		if kind, ok := workflow.LatestKind(declared); ok {
 			out = append(out, resolveLatestOfKind(artifacts, producers, step, kind)...)
+			continue
+		}
+		if _, _, ok := workflow.LinkedInput(declared); ok {
+			if !linkedLoaded {
+				_, linked, err = contextIssue(tx, step.RunID, step.IssueID)
+				if err != nil {
+					return nil, err
+				}
+				linkedLoaded = true
+			}
+			matched, err := linkedArtifacts(tx, step, linked, declared)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, matched...)
 			continue
 		}
 		matched, err := resolveDeclaredInput(artifacts, producers, def, step, declared)
@@ -920,7 +995,24 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 //     KIND at exactly this ordinal — the redirect matches by kind, not by
 //     name, because that is the only thing the two producers share: `fix`
 //     does not know it is standing in for `implement`, it only knows it
-//     `emits = "change-summary"` too.
+//     `emits = "change-summary"` too;
+//  5. the DEFINITION names exactly ONE loop body the kind match could mean —
+//     one `loop = true` step that emits the kind AND whose own `after_loop`
+//     chain (the closure of its declared re-entry root) contains the
+//     consuming step. Kind is all conditions 1–4 look at, so when SEVERAL
+//     bodies of the kind re-enter this consumer the match cannot tell which
+//     body stands in for which named producer, and it must not guess: it
+//     refuses, and ordinalScoped's answer stands — the named step's own
+//     earlier artifact, or nothing at all for a step that never ran. RUN-39
+//     measured the guess (DKT-591): spec-doc's review declared six per-lane
+//     `<author>.doc` inputs, one revise body per lane all emitting `doc`,
+//     and the one body that ran satisfied every entry's kind scan — five
+//     SKIPPED authors' inputs each resolved to a step none of them named,
+//     six byte-identical copies per judge. The per-body `after_loop` chain
+//     is what keeps DKT-544's serves-scoped clusters redirecting: two
+//     same-kind bodies whose clusters re-enter DISJOINT chains (`prd-fix`
+//     at `prd-gate`, `design-fix` at `design-gate`) are unambiguous for any
+//     one consumer, because only one body's chain contains it.
 //
 // A LOOP BODY'S OWN INPUTS THEREFORE NEVER REDIRECT, doubly so (DKT-492).
 // Condition 1 excludes the body by construction — a `loop = true` step cannot
@@ -955,6 +1047,32 @@ func loopProducerRedirect(
 		return nil
 	}
 
+	// Condition 5: resolve WHICH body the kind match could mean from the
+	// definition alone. Run state cannot answer this — the body that happened
+	// to record at this ordinal is exactly the wrong oracle when several
+	// bodies share the kind and only one ran (DKT-591) — so the candidate set
+	// is definitional: bodies of the kind whose own `after_loop` chain
+	// contains this consumer. Anything but exactly one candidate is a refusal.
+	var body *workflow.Step
+	for _, s := range def.Steps {
+		if !s.Loop || s.AfterLoop == "" {
+			continue
+		}
+		if kind != "*" && workflow.ArtifactKind(s) != kind {
+			continue
+		}
+		if !downstreamClosure(def, []string{s.AfterLoop})[step.StepName] {
+			continue
+		}
+		if body != nil {
+			return nil
+		}
+		body = s
+	}
+	if body == nil {
+		return nil
+	}
+
 	var out []*db.Artifact
 	for _, a := range artifacts {
 		if kind != "*" && a.Kind != kind {
@@ -967,8 +1085,7 @@ func loopProducerRedirect(
 		if !recordedProducer(producer.Status) || producer.Ordinal != step.Ordinal {
 			continue
 		}
-		body := workflow.StepByName(def, producer.StepName)
-		if body == nil || !body.Loop {
+		if producer.StepName != body.Name {
 			continue
 		}
 		out = append(out, a)

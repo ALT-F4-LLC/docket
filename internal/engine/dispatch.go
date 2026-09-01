@@ -84,6 +84,14 @@ type StaleTarget struct {
 	TargetSHA  string `json:"target_sha"`
 	SharedHead string `json:"shared_head"`
 	Reason     string `json:"reason"`
+	// Absent distinguishes DKT-742's harder case machine-readably: the
+	// recorded target does not resolve as a commit object from the shared
+	// checkout AT ALL (`git cat-file -e <sha>^{commit}` fails), as opposed to
+	// resolving but sitting off HEAD's history. A consumer planning a wave
+	// reads it as "no seat can reconstruct this tree", not merely "confirm
+	// the tree before reviewing". `omitempty` keeps every divergence-shaped
+	// advisory byte-identical to what it always was.
+	Absent bool `json:"absent,omitempty"`
 }
 
 // FormatDispatchID renders a dispatch's display identity.
@@ -883,8 +891,36 @@ func consumesIssueDiff(spec *workflow.Step) bool {
 // that is provably not an ancestor of the shared HEAD is stale — the
 // conductor integrated something other than the recorded commit, so a packet
 // rendered from it reviews a tree the branch no longer carries. An
-// unanswerable question (missing git, GC'd object, no ancestry seam) warns
-// about nothing: absence of evidence is not staleness.
+// unanswerable question (missing git, no ancestry seam) warns about nothing:
+// absence of evidence is not staleness.
+//
+// AN ABSENT OBJECT IS EVIDENCE, NOT ABSENCE OF IT (DKT-742). IsAncestorFn's
+// `known = false` covers both "git could not answer" and "the object is not
+// in the shared store at all", and skipping both silently was exactly
+// backwards for the second: a target that cannot even be resolved is the
+// WORST state a packet can render from, not the safest. RUN-52's DKT-V253
+// dispatched a three-seat vote whose packet named a sha `git cat-file -t`
+// found in no checkout — each seat discovered that independently, mid-wave,
+// with no warning having fired. So an unanswerable ancestry now asks the
+// narrower question the seats asked (ObjectExistsFn, `git cat-file -e
+// <sha>^{commit}`): a DEFINITIVE "no such object" warns with its own reason;
+// anything short of definitive stays silent exactly as before. The recorded
+// sha itself is never rewritten — the round record is the producer's frozen
+// evidence, and DKT-725/DKT-741 both settled that a recorded reference is
+// surfaced when it goes bad, not silently re-derived.
+//
+// AN ADJUDICATED WARNING DOES NOT RE-FIRE (DKT-742's companion half). An
+// operator who investigated a warning and ruled it acceptable records a
+// run-scoped waiver for the (step instance, target sha) pair — the
+// gate_override_grants shape (DKT-546) applied to this advisory — and rows
+// matching a waiver are dropped from the answer. The signature is the pair
+// alone: the same pair re-fires nothing however often HEAD moves, while a
+// different sha on the same row (RUN-52's DISPATCH-301, target rotated to
+// 7e072f54) or the same sha on an unnamed row is a fresh question and still
+// warns. The filter is READ-ONLY because this judge serves `dispatch verify`,
+// which writes nothing by contract; the audit trail is the waiver's own
+// `stale-target-waived` event at recording time. A waiver read that fails
+// leaves every warning standing — the safe direction for an advisory.
 //
 // ANCESTRY ALONE IS NOT THE TEST (DKT-424). The sanctioned integration flow
 // cherry-picks an isolated worktree's commit onto the shared branch, which
@@ -926,11 +962,29 @@ func (e *Engine) staleTargets(
 	if sharedHead == "" {
 		return nil
 	}
+	// The run's standing waivers (DKT-742), loaded lazily: only a judge about
+	// to warn pays the read, and a failed read waives nothing.
+	var waivers []db.StaleTargetWaiver
+	waiversLoaded := false
+	waived := func(instance, sha string) bool {
+		if !waiversLoaded {
+			waivers, _ = db.StaleTargetWaiversForRun(conn, runID)
+			waiversLoaded = true
+		}
+		for _, w := range waivers {
+			if waiverCovers(w, instance, sha) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// One verdict per SHA, not per row: a review fanout's siblings all render
 	// from the same recorded target, and the git questions are identical.
 	type verdict struct {
 		ancestor, known      bool
 		treeMatch, treeKnown bool
+		absent               bool
 	}
 	cache := make(map[string]verdict, len(candidates))
 	var out []StaleTarget
@@ -941,24 +995,54 @@ func (e *Engine) staleTargets(
 			if v.known && !v.ancestor && e.TreeMatchFn != nil {
 				v.treeMatch, v.treeKnown = e.TreeMatchFn(execRoot, c.sha)
 			}
+			if !v.known && e.ObjectExistsFn != nil {
+				// DKT-742: the ancestry question was unanswerable — ask the
+				// narrower one a packet consumer will ask anyway. Only a
+				// definitive "no such object" accuses; every genuinely
+				// unanswerable state stays silent.
+				exists, existsKnown := e.ObjectExistsFn(execRoot, c.sha)
+				v.absent = existsKnown && !exists
+			}
 			cache[c.sha] = v
 		}
-		if !v.known || v.ancestor {
+		if v.known && v.ancestor {
 			continue
 		}
-		if v.treeKnown && v.treeMatch {
+		if !v.known && !v.absent {
+			continue
+		}
+		if v.known && v.treeKnown && v.treeMatch {
 			// DKT-424: the sha was rewritten (cherry-pick integration), the
 			// tree was not. The branch carries exactly what the packet
 			// renders on the paths this work touched — nothing to warn about.
 			continue
 		}
+		if waived(c.instance, c.sha) {
+			// DKT-742: this exact (step, target) pair was adjudicated by an
+			// operator; the standing ruling is engine-visible now.
+			continue
+		}
+		reason := staleTargetReason(c.sha, sharedHead, v.treeKnown)
+		if v.absent {
+			reason = staleTargetAbsentReason(c.sha, sharedHead)
+		}
 		out = append(out, StaleTarget{
 			Instance: c.instance, Issue: c.issue,
 			TargetSHA: c.sha, SharedHead: sharedHead,
-			Reason: staleTargetReason(c.sha, sharedHead, v.treeKnown),
+			Reason: reason, Absent: v.absent,
 		})
 	}
 	return out
+}
+
+// waiverCovers reports whether one waiver covers one would-be warning: the
+// SAME step instance, and a target sha the waiver's recorded sha is a
+// case-insensitive prefix of (>= 7 hex chars, enforced at the verb). Prefix
+// rather than equality because the advisory the operator copies the sha from
+// renders it at 12 characters; case-insensitive because git itself is.
+func waiverCovers(w db.StaleTargetWaiver, instance, sha string) bool {
+	return w.StepInstance == instance &&
+		strings.HasPrefix(strings.ToLower(sha), strings.ToLower(w.TargetSHA))
 }
 
 // staleTargetReason renders the advisory's sentence, in the two shapes the
@@ -986,11 +1070,38 @@ func staleTargetReason(sha, sharedHead string, treeChecked bool) string {
 			"divergence; if integration did diverge, a packet rendered from " +
 			"this sha reviews a tree the branch no longer carries"
 	}
-	return evidence +
-		". A claim does not re-derive the target from HEAD: the packet renders " +
-		"from whichever recorded diff artifact resolves at claim time, so this " +
-		"row stays on this sha unless an upstream step records a newer diff for " +
-		"the issue first"
+	return evidence + staleTargetClaimSemantics
+}
+
+// staleTargetClaimSemantics is DKT-415's claim-time tail, shared by every
+// advisory shape: the decision the warning informs is "is dispatching through
+// this safe", and that turns on what a claim will actually render.
+const staleTargetClaimSemantics = ". A claim does not re-derive the target " +
+	"from HEAD: the packet renders from whichever recorded diff artifact " +
+	"resolves at claim time, so this row stays on this sha unless an upstream " +
+	"step records a newer diff for the issue first"
+
+// staleTargetAbsentReason renders DKT-742's advisory shape: the recorded
+// target does not resolve as a commit object from the shared checkout at all.
+//
+// It is a THIRD sentence rather than a variant of staleTargetReason's two,
+// because the conductor's next move differs again: a divergence is compared,
+// an unanswered tree is hand-checked, but an absent object can be NEITHER —
+// no seat can `git cat-file` or `git archive` this sha from the shared
+// checkout, so the packet's target is unusable as recorded and the work needs
+// its integrated successor (or the change-summary artifact) judged instead,
+// which is exactly the workaround RUN-52's three vote seats each re-derived
+// alone.
+func staleTargetAbsentReason(sha, sharedHead string) string {
+	return fmt.Sprintf(
+		"the recorded target sha %.12s does not resolve as a commit from the "+
+			"shared checkout at all (`git cat-file -e %.12s^{commit}` fails "+
+			"against HEAD %.12s's checkout) — the producing worktree's commit "+
+			"never reached the shared object store, or was pruned after "+
+			"integration removed its worktree and branch. No consumer can "+
+			"reconstruct this tree from the shared checkout; judge the step's "+
+			"integrated successor or its recorded change-summary instead",
+		sha, sha, sharedHead) + staleTargetClaimSemantics
 }
 
 // noOpenDispatchErr maps the storage sentinel onto the taxonomy once.

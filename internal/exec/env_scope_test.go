@@ -56,3 +56,34 @@ func TestBuildEnvOmitsScopeWhenUndeclared(t *testing.T) {
 		t.Error("DOCKET_ISSUE is set with no issue in the policy")
 	}
 }
+
+// DOCKET_GATE_BASE (DKT-992): a gate learns the step's base commit, so a
+// range-shaped check can scan exactly the step's committed change
+// (base..HEAD of the tree it runs in) instead of guessing `HEAD~1` or
+// scanning a working tree the executor already committed to.
+
+func TestBuildEnvCarriesGateBase(t *testing.T) {
+	const base = "3f786850e387550fdab836ed7e6dc881de23001b"
+	env, err := BuildEnv(EnvPolicy{Gate: "secret-scan", Repo: "/repo", Base: base})
+	if err != nil {
+		t.Fatalf("BuildEnv: %v", err)
+	}
+	if got, ok := envValue(env, "DOCKET_GATE_BASE"); !ok || got != base {
+		t.Errorf("DOCKET_GATE_BASE = %q, %v; want the step's base commit %q",
+			got, ok, base)
+	}
+}
+
+// TestBuildEnvOmitsGateBaseWhenUnknown: absence — not emptiness — is the
+// encoding, exactly as for DOCKET_SCOPE. An empty sha is not a commit, and a
+// gate finding the var absent over a clean tree is meant to fail closed
+// rather than build a broken range from "".
+func TestBuildEnvOmitsGateBaseWhenUnknown(t *testing.T) {
+	env, err := BuildEnv(EnvPolicy{Gate: "secret-scan", Repo: "/repo"})
+	if err != nil {
+		t.Fatalf("BuildEnv: %v", err)
+	}
+	if _, ok := envValue(env, "DOCKET_GATE_BASE"); ok {
+		t.Error("DOCKET_GATE_BASE is set for a step with no known base commit")
+	}
+}

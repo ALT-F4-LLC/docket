@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 23
+const currentSchemaVersion = 25
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -192,6 +192,8 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	21: migrateV20ToV21,
 	22: migrateV21ToV22,
 	23: migrateV22ToV23,
+	24: migrateV23ToV24,
+	25: migrateV24ToV25,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2195,6 +2197,107 @@ func migrateV22ToV23(tx *sql.Tx) error {
 	return nil
 }
 
+// v24Sentinels is the table the v24 DDL creates, probed by the rewind guard in
+// the TABLE form v7 and v8 use. TestRewindGuardProbesEveryV24Sentinel derives
+// the list from the DDL, so an added table cannot ship without its sentinel.
+var v24Sentinels = []string{
+	"gate_override_grants",
+}
+
+// v24DDL is the run-scoped batch gate-override grant (DKT-546): one operator
+// ruling that a gate's failure signature is environmental, covering later
+// steps of the SAME run that fail the same gate with the same exit and reason.
+//
+// It is a TABLE rather than a `run_issues` column (the v20 loop-grant shape)
+// because a grant is keyed by (run, gate, signature), not by (run, issue) —
+// one ruling covers every issue's steps in the run, which is the toil DKT-546
+// measured. `exit` is nullable for gate_results' own reason: an `unmatched`
+// gate never ran, and NULL is the honest encoding of "no process existed" —
+// a NULL signature matches only NULL, never exit 0.
+//
+// `covered_steps` counts the steps the grant auto-passed, bumped in the same
+// transaction as each auto-pass, so the ledger shows one tracked grant
+// covering N steps rather than N unattributed passes.
+const v24DDL = `
+CREATE TABLE IF NOT EXISTS gate_override_grants (
+	id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	run_id         INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+	origin_step_id INTEGER NOT NULL REFERENCES steps(id) ON DELETE CASCADE,
+	gate           TEXT    NOT NULL,
+	exit           INTEGER,
+	reason         TEXT    NOT NULL DEFAULT '',
+	note           TEXT    NOT NULL DEFAULT '',
+	covered_steps  INTEGER NOT NULL DEFAULT 0,
+	created_at_ms  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gate_override_grants_run
+	ON gate_override_grants(run_id);
+`
+
+// migrateV23ToV24 creates the batch gate-override grant table (DKT-546).
+//
+// Additive and dormant: it creates one new table and touches no existing one,
+// so a run that never records a grant reads byte-identically to v23. There is
+// nothing to back-fill — no operator has granted a batch override before the
+// verb for granting one existed.
+func migrateV23ToV24(tx *sql.Tx) error {
+	if _, err := tx.Exec(v24DDL); err != nil {
+		return fmt.Errorf("migrating v23 to v24: %w", err)
+	}
+	return nil
+}
+
+// v25Sentinels is the table the v25 DDL creates, probed by the rewind guard in
+// the TABLE form v24 uses. TestRewindGuardProbesEveryV25Sentinel derives the
+// list from the DDL, so an added table cannot ship without its sentinel.
+var v25Sentinels = []string{
+	"stale_target_waivers",
+}
+
+// v25DDL is the run-scoped stale-target waiver (DKT-742): one operator ruling
+// that a specific (step instance, target sha) stale-target warning has been
+// adjudicated, so dispatch open/verify stop re-firing it unchanged. RUN-52 saw
+// the identical warning fire four times across DISPATCH-295/297/301, each
+// firing costing an investigation, and the operator's standing waiver lived
+// only in session memory where the engine could not see it.
+//
+// It is a TABLE beside gate_override_grants rather than a column because the
+// two are the same shape — a standing adjudication matched by signature,
+// run-scoped by the run_id foreign key, dead with its run. The signature here
+// is (step_instance, target_sha): a different sha on the same row, or the same
+// sha on a different row, is a different question and still warns.
+//
+// `target_sha` may be an unambiguous PREFIX of the recorded sha (>= 7 hex
+// chars), because the warning an operator copies it from renders the sha at 12
+// characters; matching is case-insensitive prefix.
+const v25DDL = `
+CREATE TABLE IF NOT EXISTS stale_target_waivers (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	run_id        INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+	step_instance TEXT    NOT NULL,
+	target_sha    TEXT    NOT NULL,
+	note          TEXT    NOT NULL DEFAULT '',
+	created_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_stale_target_waivers_run
+	ON stale_target_waivers(run_id);
+`
+
+// migrateV24ToV25 creates the stale-target waiver table (DKT-742).
+//
+// Additive and dormant, exactly as v24 was: it creates one new table and
+// touches no existing one, so a run that never records a waiver reads
+// byte-identically to v24. There is nothing to back-fill — no operator has
+// waived a stale-target warning before the verb for waiving one existed.
+func migrateV24ToV25(tx *sql.Tx) error {
+	if _, err := tx.Exec(v25DDL); err != nil {
+		return fmt.Errorf("migrating v24 to v25: %w", err)
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -2707,6 +2810,42 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 22
+				break
+			}
+		}
+	}
+
+	// The v24 guard, back in the TABLE form v7 and v8 use and for their reason:
+	// v24 adds a table and no columns, so a database stamped 24 by a binary
+	// built mid-change carries every v23 sentinel and the grants table never
+	// arrives. The v24 migration is CREATE TABLE IF NOT EXISTS throughout, so
+	// re-running it against such a store is safe.
+	if version >= 24 {
+		for _, table := range v24Sentinels {
+			exists, err := tableExists(db, table)
+			if err != nil {
+				break
+			}
+			if !exists {
+				version = 23
+				break
+			}
+		}
+	}
+
+	// The v25 guard, same TABLE form as v24 and for its reason: v25 adds a
+	// table and no columns, so a database stamped 25 by a binary built
+	// mid-change carries every v24 sentinel and the waiver table never
+	// arrives. The v25 migration is CREATE TABLE IF NOT EXISTS throughout, so
+	// re-running it against such a store is safe.
+	if version >= 25 {
+		for _, table := range v25Sentinels {
+			exists, err := tableExists(db, table)
+			if err != nil {
+				break
+			}
+			if !exists {
+				version = 24
 				break
 			}
 		}

@@ -167,17 +167,47 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// the one transition that rewrites the evidence other records are
 		// checked against while leaving no trace of the value it replaced.
 		"run-repinned",
+
+		// The batch gate-override kinds (DKT-546) — TWO, each the
+		// spawn-admitted argument again: a park stepped past on standing
+		// authority. `gate-override-granted` is the authority being minted
+		// (one operator ruling per failed gate), `step-batch-overridden` is
+		// it being spent — without the second, an auto-applied override would
+		// be indistinguishable in the feed from an engine-computed pass.
+		"gate-override-granted",
+		"step-batch-overridden",
+
+		// The stale-target waiver kind (DKT-742) — ONE, the granted half of
+		// the DKT-546 argument alone: an operator minting standing authority
+		// over a repeating advisory. No "spent" counterpart, because applying
+		// a waiver changes no step's state — the advisory is recomputed by
+		// verbs that write nothing.
+		"stale-target-waived",
+
+		// The scope-refresh kind (DKT-869) — ONE, on the `run-repinned`
+		// argument in its other column: this is the second and last transition
+		// that moves a frozen premise while a run is live. Without it, two
+		// steps of one run rendering two different declared scopes would be
+		// indistinguishable in the record from the snapshot drift the freeze
+		// exists to prevent — the discontinuity has to be dated and
+		// attributable for `run refresh-scope` to be an exception rather than
+		// a hole. No "spent" counterpart: the refreshed snapshot IS the new
+		// premise, and every later render reads it the way every render always
+		// read the frozen one.
+		"issue-scope-refreshed",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 43 {
+	if len(eventKinds) != 47 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
-			"DKT-236's spawn carve-out, DKT-294's live-status mirror, and "+
-			"DKT-408's repin kind enumerate 43 (see DKT-21)",
+			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
+			"DKT-408's repin kind, DKT-546's batch-override pair, "+
+			"DKT-742's stale-target waiver kind, and DKT-869's scope-refresh "+
+			"kind enumerate 47 (see DKT-21)",
 			len(eventKinds))
 	}
 }

@@ -106,7 +106,9 @@ func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
 	for _, step := range admitted {
 		entries = append(entries, offerEntry{step: step})
 		member[step.ID] = true
-		cost += step.ExpectedCost
+		// reservableCost: a vote step's declared cost is already in the floor
+		// at materialization (DKT-584), so the closure must not re-reserve it.
+		cost += reservableCost(step)
 	}
 
 	// ---- Phase A: membership, to a fixed point. ---------------------------
@@ -164,7 +166,7 @@ func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
 					continue
 				}
 				member[cand.ID] = true
-				cost += cand.ExpectedCost
+				cost += reservableCost(cand)
 				entries = append(entries, offerEntry{step: cand, staged: true})
 				changed = true
 			}

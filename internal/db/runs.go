@@ -444,6 +444,34 @@ func BindRunIssueTx(tx *sql.Tx, ri *RunIssue) error {
 	return nil
 }
 
+// SetRunIssueSnapshotTx rewrites ONE run-issue's `issue_snapshot` blob and
+// nothing else (DKT-869).
+//
+// It is deliberately narrower than BindRunIssueTx, which writes the binding and
+// all three snapshot columns together because activation produces them as one
+// fact. The scope refresh is not that fact: it re-reads exactly one field of an
+// already-frozen snapshot and must leave `workflow_id`, `body_snapshot`, and
+// `body_sha256` untouched — a refresh that re-bound the workflow, or rewrote
+// the description snapshot from the live issue, would smuggle §9 item 5's
+// mid-run edit immunity out through a verb that says it is about scope.
+//
+// A miss is a caller error rather than a no-op: the row was read moments ago
+// inside this same transaction, so zero rows affected means the membership the
+// decision was made on no longer stands.
+func SetRunIssueSnapshotTx(tx *sql.Tx, runID, issueID int, snapshot string) error {
+	res, err := tx.Exec(
+		`UPDATE run_issues SET issue_snapshot = ? WHERE run_id = ? AND issue_id = ?`,
+		snapshot, runID, issueID,
+	)
+	if err != nil {
+		return fmt.Errorf("rewriting issue %d's snapshot: %w", issueID, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("issue %d is no longer part of run %d", issueID, runID)
+	}
+	return nil
+}
+
 // MarkExpandedTx stamps an issue as expanded — stage 6's record that this
 // issue's phase is done, so re-activation (RA1) skips it.
 func MarkExpandedTx(tx *sql.Tx, runID, issueID int, nowMS int64) error {

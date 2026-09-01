@@ -30,6 +30,15 @@ const HeldSuffix = "-held"
 // shadow it — which V11a refuses at register.
 const GateResultsKind = "gate-results"
 
+// VoteRecordKind is the reserved `<step>.vote-record` input suffix (DKT-545):
+// the named vote step's RECORDED proposal — tally outcome, casts, and
+// rationales — engine-served from the existing proposal machinery.
+// GateResultsKind's reasoning applied to the vote record: a definition may not
+// emit an artifact of this kind (V11b), and the input form resolves only
+// against `type="vote"` steps — any other step opens no proposal, so the
+// input could never resolve to anything on any run (V11).
+const VoteRecordKind = "vote-record"
+
 // HeldStepName renders the materialized step's name for a routing step.
 func HeldStepName(step string) string { return step + HeldSuffix }
 

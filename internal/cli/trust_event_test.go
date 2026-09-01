@@ -173,6 +173,11 @@ func TestTrustAddEventCarriesEveryFlag(t *testing.T) {
 		// reader unable to tell "not a stub" from "this docket does not record
 		// stubs".
 		"stub": false,
+		// EMPTY, and asserted rather than skipped, same reasoning: an add that
+		// recorded no stub rationale (DKT-607) must show an empty reason, not a
+		// missing key a reader cannot tell from "this docket does not record
+		// reasons".
+		"stub_reason": "",
 	}
 	want["kind"] = engine.EventTrustAdded
 
@@ -588,6 +593,99 @@ func TestTrustAddStubEventSaysTheAssuranceIsHollow(t *testing.T) {
 	}
 }
 
+// TestTrustAddRefusesWhenTheCwdCannotBeResolved is DKT-595's CLI half: inside a
+// repo, a grant whose working directory cannot be read is REFUSED, with nothing
+// written to either file.
+//
+// This reverses the recorder's original call — degrade cwd to "" and write the
+// event anyway — because the 2026-08-19 batch showed what the degraded shape is
+// worth: privilege widened and a ledger that could not say by whom or from
+// where. The refusal rides the same OnChange-hook abort as a failed event
+// write, so the store mutation does not land either.
+//
+// The failure arrives through the `getwd` seam rather than by deleting the
+// process's cwd, because the real thing is not portably reproducible: on
+// darwin, getcwd answers from the kernel's name cache even after the directory
+// is unlinked, so the deleted-cwd version of this test asserts nothing there.
+func TestTrustAddRefusesWhenTheCwdCannotBeResolved(t *testing.T) {
+	_, cfg := trustRepo(t)
+	stubGetwdFailure(t)
+
+	runErr := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
+	if runErr == nil {
+		t.Fatal("the add succeeded with an unresolvable cwd; an unattributable grant must be refused")
+	}
+	// The failure reads as the unrecorded-change one (CmdError does not
+	// unwrap, so the taxonomy code and the message are the assertable surface,
+	// the same surface a caller sees).
+	if !strings.Contains(runErr.Error(), "not recorded") {
+		t.Errorf("the refusal does not say the change went unrecorded: %v", runErr)
+	}
+	if code := errorCodeOf(t, runErr); code != output.ErrGeneral {
+		t.Errorf("the refusal is %s, want GENERAL_ERROR — the argv was fine, and a VALIDATION code would send the operator to fix it: %v", code, runErr)
+	}
+
+	// NOTHING LANDED: not the entry, not the event. The refusal runs inside
+	// trust.Add's hook, ahead of the store write, exactly like a failed record.
+	if entries := trustEntries(t); len(entries) != 0 {
+		t.Errorf("the grant landed anyway: %+v", entries)
+	}
+	if events := trustEvents(t, cfg); len(events) != 0 {
+		t.Errorf("a refused grant left %d event(s): %+v", len(events), events)
+	}
+}
+
+// TestTrustRmRefusesWhenTheCwdCannotBeResolved: the same refusal on the other
+// verb. A revocation is an attributable act for the same reason a grant is, and
+// a refusal that guarded only the add would leave half the trail degradable.
+func TestTrustRmRefusesWhenTheCwdCannotBeResolved(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
+	testsupport.Must(t, err, "trust add: %v", err)
+
+	stubGetwdFailure(t)
+	runErr := runTrustVerb(t, cfg, newTrustRmCmd(), "checks")
+	if runErr == nil {
+		t.Fatal("the removal succeeded with an unresolvable cwd; an unattributable revocation must be refused")
+	}
+	if entries := trustEntries(t); len(entries) != 1 {
+		t.Errorf("the refused removal changed the store: %+v", entries)
+	}
+	if events := trustEvents(t, cfg); len(events) != 1 {
+		t.Errorf("got %d events, want only the original add — a refused removal records nothing", len(events))
+	}
+}
+
+// TestTrustAddOutsideARepoWorksWithAnUnreadableCwd pins the refusal's SCOPE:
+// outside a repo there is no event log, the recorder warns-and-continues
+// (§3.5), and an unreadable cwd changes none of that — the recorder never
+// reaches cwd resolution on that path. DKT-595 hardens the trail where one
+// exists; it does not make managing the user-level store require one.
+func TestTrustAddOutsideARepoWorksWithAnUnreadableCwd(t *testing.T) {
+	_, cfg := trustNoRepo(t)
+	stubGetwdFailure(t)
+
+	runErr := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
+	testsupport.Must(t, runErr, "trust add outside a repo must still work with an unreadable cwd: %v", runErr)
+	if entries := trustEntries(t); len(entries) != 1 {
+		t.Fatalf("the entry was not written; got %+v", entries)
+	}
+}
+
+// stubGetwdFailure makes the recorder's cwd resolution fail for one test, the
+// way a deleted or unsearchable working directory would, restoring os.Getwd
+// afterwards. See the `getwd` seam's comment for why the real failure cannot be
+// staged portably.
+func stubGetwdFailure(t *testing.T) {
+	t.Helper()
+	saved := getwd
+	getwd = func() (string, error) {
+		return "", errors.New("getwd: no such file or directory")
+	}
+	t.Cleanup(func() { getwd = saved })
+}
+
 // TestReAddFlippingStubConflicts: `stub` joins the conflict set.
 //
 // A silent flip in either direction is the failure. Turning it OFF converts
@@ -612,5 +710,80 @@ func TestReAddFlippingStubConflicts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stub") {
 		t.Errorf("the conflict does not name `stub`: %v", err)
+	}
+}
+
+// TestStubReasonTravelsWithTheGrant is DKT-607: a stub's WHY — and the issue
+// tracking its removal — is recorded once at add time and then reaches every
+// surface the stub itself reaches: the store, the grant event, and (proven in
+// the engine package) the activation gate preflight. Before this, the decision
+// that a gate stays a stub lived only in tribunal transcripts.
+func TestStubReasonTravelsWithTheGrant(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	reason := "no scanner selected yet; removal tracked by DKT-607"
+	err := runTrustVerb(t, cfg, newTrustAddCmd(),
+		"secret-scan", "--stub", "--stub-reason", reason, "--", "/usr/bin/true")
+	testsupport.Must(t, err, "trust add --stub --stub-reason: %v", err)
+
+	events := trustEvents(t, cfg)
+	if len(events) != 1 {
+		t.Fatalf("got %d trust events, want the one add", len(events))
+	}
+	if events[0]["stub_reason"] != reason {
+		t.Errorf("the event's stub_reason = %#v, want %q — the trail must carry "+
+			"the documented decision, not only the hollowness", events[0]["stub_reason"], reason)
+	}
+
+	entries := trustEntries(t)
+	if len(entries) != 1 || entries[0].StubReason != reason {
+		t.Errorf("the stored entry does not carry the reason; got %+v", entries)
+	}
+}
+
+// TestStubReasonRequiresStub: a reason describes a stub, so supplying one on a
+// real check is a contradiction and is refused as VALIDATION — one of the two
+// flags is a mistake, and guessing which would either hide a hollow check or
+// hollow a real one.
+func TestStubReasonRequiresStub(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(),
+		"secret-scan", "--stub-reason", "tracked by DKT-607", "--", "/usr/bin/true")
+	if err == nil {
+		t.Fatal("--stub-reason without --stub succeeded; a reason on a non-stub entry is a contradiction")
+	}
+	if code := errorCodeOf(t, err); code != output.ErrValidation {
+		t.Errorf("the refusal is %s, want VALIDATION: %v", code, err)
+	}
+	if entries := trustEntries(t); len(entries) != 0 {
+		t.Errorf("the refused add landed anyway: %+v", entries)
+	}
+	if events := trustEvents(t, cfg); len(events) != 0 {
+		t.Errorf("a refused add left %d event(s)", len(events))
+	}
+}
+
+// TestReAddChangingStubReasonConflicts: the reason joins the conflict set. It
+// IS the documented decision, and a re-add that silently rewrote or erased it
+// would swap one decision for another with the store showing only that
+// something of that name was re-approved.
+func TestReAddChangingStubReasonConflicts(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(),
+		"scan", "--stub", "--stub-reason", "tracked by DKT-607", "--", "make", "test")
+	testsupport.Must(t, err, "trust add: %v", err)
+
+	err = runTrustVerb(t, cfg, newTrustAddCmd(),
+		"scan", "--stub", "--", "make", "test")
+	if err == nil {
+		t.Fatal("re-adding without the reason succeeded; erasing the documented decision must conflict")
+	}
+	if code := errorCodeOf(t, err); code != output.ErrConflict {
+		t.Errorf("the refusal is %v, want %v", code, output.ErrConflict)
+	}
+	if !strings.Contains(err.Error(), "stub_reason") {
+		t.Errorf("the conflict does not name `stub_reason`: %v", err)
 	}
 }

@@ -187,9 +187,16 @@ func reapOneTx(
 // the assertion, recorded with `--reason`, that the holder is gone. It is not
 // an eviction primitive a bystander reaches casually — a forced reap of a
 // LIVE worker has exactly the risks a lease expiry has, which is why every
-// consequence is the expiry reap's own: same event kind (`lease-reaped`, with
-// `data.forced` and the reason distinguishing it), same write-class headroom
-// hold, same return of the step to the pool.
+// SCHEDULING consequence is the expiry reap's own: same event kind
+// (`lease-reaped`, with `data.forced` and the reason distinguishing it), same
+// write-class headroom hold, same return of the step to the pool.
+//
+// The one deliberate divergence is the ATTEMPT BUDGET (DKT-585): a reap
+// carrying `data.forced` does not count the reaped attempt against
+// `max_attempts`, because the verb's premise is that the holder died before
+// an executor could fail — see the exemption below, and
+// db.ExemptStepAttemptFromBudgetTx for why it is a +1 nudge of the base and
+// never a touch of `attempt` itself.
 func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 	if reason == "" {
 		return validationErr(
@@ -240,6 +247,22 @@ func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 		return fmt.Errorf("recording the forced reap: %w", err)
 	}
 	if err := reapOneTx(tx, sched, step.RunID, target, string(data), nowMS); err != nil {
+		return err
+	}
+	// A forced reap does not consume the attempt budget (DKT-585). The claim
+	// already spent an `attempt` when it was minted — the counter increments at
+	// claim, and ReapStepTx rightly leaves it alone — but the SPEND is a relay's
+	// assertion that the holder died, not a measurement that an executor
+	// failed, so the exhaustion math (`attempt - attempt_base` against
+	// `max_attempts`, the `step fail` branch) must not count it.
+	//
+	// This lives HERE and not in reapOneTx, per ReapStepTx's own mechanism/
+	// classification split: the shared reap is mechanism, and the two callers
+	// classify differently. An ordinary TTL expiry may still be an executor
+	// that went unresponsive under its own load — a judgment the expiry path
+	// keeps charging for, unchanged — while the forced path carries an explicit
+	// assertion (`data.forced`, `--reason`) that no executor ever got to work.
+	if err := db.ExemptStepAttemptFromBudgetTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

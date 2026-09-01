@@ -44,6 +44,46 @@ func ParseRelationType(input string) (RelationType, error) {
 	return normalized, nil
 }
 
+// RelationDirectionTokens lists every token ParseRelationDirection accepts, in
+// its canonical underscored form — the four relation types and their inverse
+// display names. It exists so a consumer refusing a token can name the whole
+// vocabulary rather than restate it (DKT-547).
+func RelationDirectionTokens() []string {
+	out := make([]string, 0, 2*len(validRelationTypes))
+	for _, rt := range validRelationTypes {
+		out = append(out, string(rt))
+		if inv := rt.Inverse(); inv != string(rt) {
+			out = append(out, inv)
+		}
+	}
+	return out
+}
+
+// ParseRelationDirection resolves a relation token that may name EITHER
+// direction of a relation: a canonical type ("depends_on") or an inverse
+// display name ("dependency_of", "blocked_by", "duplicate_of"). It returns the
+// canonical type and whether the token named the inverse direction — for
+// "depends_on" the subject is the relation's SOURCE, for "dependency_of" its
+// TARGET (DKT-547: the `issue.linked.<relation>.<kind>` input form addresses
+// linked issues by exactly these tokens).
+//
+// Hyphenated spellings normalize like ParseRelationType's ("depends-on",
+// "blocked-by"). The symmetric "relates_to" is its own inverse and parses as
+// the canonical direction; its consumers treat both directions alike.
+func ParseRelationDirection(input string) (rt RelationType, inverse bool, err error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(input), "-", "_")
+	if rt, err := ParseRelationType(normalized); err == nil {
+		return rt, false, nil
+	}
+	for _, rt := range validRelationTypes {
+		if rt.Inverse() == normalized {
+			return rt, true, nil
+		}
+	}
+	return "", false, fmt.Errorf(
+		"invalid relation %q: must be one of %v", input, RelationDirectionTokens())
+}
+
 // Inverse returns the display name for the inverse direction of a relation.
 // For example, "blocks" returns "blocked_by" and "depends_on" returns "dependency_of".
 // Symmetric relations ("relates_to") return themselves.

@@ -561,6 +561,33 @@ It is deliberately NOT the pre-existing `gate_results.stub`, which marks a row
 migrated from an S3 `gate_trail` — that is a fact about which era produced the
 row, and one column carrying both would answer neither question.
 
+### AMENDMENT (DKT-607) — a stub records its reason
+
+A stub entry may carry `stub_reason`, set by `docket trust add --stub
+--stub-reason "<why; tracking issue>"`. It records the DECISION behind the
+placeholder: why no real check exists yet and which issue tracks replacing it
+(e.g. `"no scanner selected yet; removal tracked by DKT-607"`).
+
+**The problem it solves.** DKT-265 made hollow green visible; it did not make it
+EXPLAINED. Two tribunal seats on DKT-V196 independently rediscovered the same
+corpus stubs (`secret-scan`, `sdet-abuse`) because the decision that they remain
+stubs lived only in tribunal transcripts. The project's stub-gate policy
+requires every stub to have a removal-tracking issue; this field is where that
+reference becomes discoverable from the surfaces an operator actually reads.
+
+**Where it surfaces.** The activation gate preflight prints it under the stub's
+own line (and carries it as `stub_reason` in the JSON row); a stub with NO
+recorded reason gets a remedy line naming `--stub-reason`. `trust list` renders
+it inside the `stub(no-real-check: …)` marker, and it rides §3.6's event beside
+`stub`.
+
+**Constraints.** It only makes sense alongside `stub = true`: a reason on a
+non-stub entry is refused at parse and at add, the closed direction. It is
+OPTIONAL on a stub — every pre-DKT-607 stub entry has none and keeps loading
+with an empty reason. Changing or erasing it on a re-add is a `CONFLICT`, since
+the reason is the documented decision and a silent rewrite would swap one
+decision for another under a re-approval.
+
 ## 3.6 Trust changes are event-logged (T9)
 
 `trust add` and `trust rm` write a **`trust-added` / `trust-removed` event** into
@@ -897,6 +924,36 @@ the next environment variable anyone invents.
 | `CI` | `1` | the near-universal convention for "non-interactive"; it makes tools skip prompts and progress spinners without docket having to know each tool |
 | `DOCKET_GATE` | the gate name | so a check can behave differently under docket if its author wants; opaque to core |
 | `DOCKET_REPO` | the repo root | the same value as `Dir`, for tools that need it in an env |
+| `DOCKET_GATE_BASE` | the step's base commit sha, **worktree-recorded completion gates only** | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
+
+**`DOCKET_GATE_BASE` — the step's committed range** *(DKT-992)*. Executors
+commit **before** `step record`, so at gate time a worktree-recorded step's
+tree is clean: a working-tree-only scan measures zero lines however large the
+change (RUN-66's secret-scan passed 8/8 write steps that way), and a gate
+guessing `git diff HEAD~1` is wrong for every multi-commit step. The engine
+already knows the step's base — the worktree's **fork point**, the same
+resolution the diff stage's `runDiffBase` applies — so completion gates of a
+`--worktree`-recorded step export it:
+
+- **Worktree-recorded step**: `DOCKET_GATE_BASE` names the commit the worktree
+  was created from. `git diff $DOCKET_GATE_BASE..HEAD` in the gate's own cwd
+  (the worktree, per DKT-9) is exactly the step's committed change — the same
+  range the recorded `issue.diff` describes.
+- **Non-worktree step**: the variable is **unset** — that is the documented
+  pick between the two admissible encodings (unset, or equal to `HEAD`). The
+  shared checkout has no fork point, the run's pinned commit is not this
+  step's base (sibling work lands between them, DKT-42's over-attribution),
+  and a live `HEAD` read is a value docket cannot vouch for as a range
+  endpoint. Absence — never an invented sha — is the encoding, the same
+  convention as `DOCKET_SCOPE`.
+- The variable is also unset when the fork point cannot be resolved, and on
+  the pre-claim path (a pre-gate measures the tree under review, not a
+  recorded completion; after integration sweeps a worktree, no honest base
+  survives to export).
+- **Fail closed on absence**: a range-shaped gate that finds the variable
+  absent while the tree is clean has nothing it can honestly scan, and should
+  fail rather than pass having measured nothing — "we couldn't check, so
+  carry on" is what makes a control decorative (N3).
 
 **Excluded, by name, in addition to being absent from the allowlist:**
 

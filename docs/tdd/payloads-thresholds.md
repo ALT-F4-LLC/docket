@@ -863,6 +863,7 @@ unchanged.
 | `method` | `median` \| `max` \| `min` | yes | the reduction |
 | `hold_spread` | integer ≥ 0, default 0 | no | hold when spread **≥** this; `0` never holds |
 | `output` | string | yes (already V11's, §4.3.1) | the produced artifact kind |
+| `route_at` | string, a value of `field`'s declared order | no | routing floor *(amended 2026-08-23, DKT-593 — see the amendment below)*: a cluster whose reduced value's position is **≥** its position is emitted to the output payload; the rest go to the record. Absent ⇒ every cluster emits, byte-for-byte the pre-`route_at` output |
 
 New register-time rules, each a `VALIDATION_ERROR` naming workflow, step, and
 param, each a test case:
@@ -870,7 +871,8 @@ param, each a test case:
 | # | Rule | Argument |
 |---|---|---|
 | V27 | a step's `name` may not end in **`-held`**, and `action` may not name a builtin other than `aggregate` | the first reserves the materialized identity (§7.7) so a definition cannot collide with one; the second turns "my trusted `aggregate` command never runs" into a register-time sentence |
-| V28 | `action = "aggregate"` requires `field`, `method ∈ {median,max,min}`, `output`; `hold_spread` an integer ≥ 0 if present; **no other keys** | the discipline every V-rule follows. A typo'd `method = "medain"` is otherwise discovered hours into a run, on a step whose inputs are already spent |
+| V28 | `action = "aggregate"` requires `field`, `method ∈ {median,max,min}`, `output`; `hold_spread` an integer ≥ 0 if present; `route_at` a non-empty string if present *(DKT-593)*; **no other keys** | the discipline every V-rule follows. A typo'd `method = "medain"` is otherwise discovered hours into a run, on a step whose inputs are already spent |
+| V28a | `route_at`, when declared, must name a value of `params.field`'s declared order *(DKT-593)* | the floor is a **position** in that order, and a value with no position has no floor to name — G4's discipline asked at register time. Schema-aware, so it lives in `ValidateSchemas` beside V29 rather than in the pure-bytes V28 |
 | V29 | an `aggregate` step must declare `payload = name@version`, and that schema must declare `params.field` as **`ordered_enum`** | median, max, and min are all defined **only** over an order. An aggregate without a declared order is a step that can never compute, and §11.2's own restriction is the same restriction |
 | V30 | the declared schema must **accept an aggregate-shaped document**: a synthetic probe built from the schema's own declared enum values (§7.6) is validated against it at register time | the output must satisfy *both* the instance schema and `aggregate@1` (§7.6). An instance schema with `"additionalProperties": false` makes that conjunction unsatisfiable — and the failure would otherwise land at the end of a review fan-out, hours in. The probe is deterministic and invents nothing: every value in it comes from the schema being checked, and it carries the aggregate output keys (`members`, `held`) plus one carried-through extra key so the conjunction it tests is the real one (review F3) |
 
@@ -880,6 +882,34 @@ order from the schema of the step the aggregate reads its input from. That is
 magic (nothing in the grammar says an action reads its predecessor's payload),
 it is unstable under `inputs` edits, and it hides the one declaration an
 author most needs to see.
+
+### AMENDMENT (DKT-593) — `route_at`: a routing floor
+
+RUN-43 spent 71.6% of its output tokens on fix rounds that closed roughly as
+many clusters as they opened, because every reconciled cluster — whatever its
+reduced value — entered the loop, and `contracts/fix.md` rightly forbids the
+FIXER from filtering ("the reconciled set is the work"). The missing piece was
+never the fixer's to add: which clusters are worth a round is a ROUTING
+question, and routing is core's.
+
+`route_at = "<value>"` names a floor in `field`'s declared order. Like every
+value the builtin touches it is an **opaque token compared only by position**
+(§4.3 I3) — a severity floor for a severity order, a ripeness floor for a
+ripeness order, and core cannot tell the difference.
+
+| # | Clause |
+|---|---|
+| R1 | A cluster whose **reduced value's** position is **≥** the floor's position is emitted to the output payload — the wire the threshold evaluates and every downstream `inputs` reader consumes. The comparison is over the reduced value, exactly as the threshold's would be: a cluster whose members reach `high` but whose median is `low` is a `low` cluster to both |
+| R2 | A cluster below the floor goes **to the record**: fully reduced — value, members, demotion trail — into the aggregate's own `action_results` row (`output` column, the audit channel every attempt already writes), and counted in the artifact body. It never enters the artifact payload, so the threshold and the loop never see it. Routed, not erased: the input artifacts remain immutable and addressable, and the reduction's trail is attributed in the row |
+| R3 | A **held cluster is never routed below the floor.** Its computed value is exactly the value the hold refuses to trust — the members disagree, and the operator resolving it may accept a different value (`--value`) — so routing it out by that value would spend the decision the hold exists to ask. It is emitted, it gates the step (§7.7), and the floor's opinion waits for the operator's |
+| R4 | `Held` indices address the **emitted** payload — the payload the artifact records and `<step>-held@k#i` resolves against (H2a) — which coincides with input positions whenever nothing was routed below |
+| R5 | **Absent ⇒ byte-for-byte today's output.** No key, no floor, nothing recorded, G2's identity property untouched — the same no-cliff discipline `hold_spread = 0` follows |
+| R6 | Every cluster below the floor is legal: the emitted payload is then the **empty array**, a valid `aggregate@1` document over which any threshold predicate finds nothing — the round is simply not entered |
+| R7 | Validation is split as V28/V28a: presence and type are pure bytes (V28); membership in the declared order needs the schema and lives in `ValidateSchemas` (V28a). At run time — a definition can arrive through a restored database — the same two refusals fire in `ParseAggregateParams` and `Aggregate` respectively, the second naming the value per G4 |
+
+This is **core routing, not fixer filtering**: the set the fixer receives has
+already been routed, so `contracts/fix.md`'s prohibition stands unchanged —
+there is nothing left in the reconciled set to filter.
 
 ## 7.2 The input shape: what a "cluster" is
 

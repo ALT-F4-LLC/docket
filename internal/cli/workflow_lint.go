@@ -74,6 +74,21 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 	// edited file at a frozen name@version is the retro-loop's observed trap —
 	// the definition validates, then the next activation refuses the whole run
 	// — so lint surfaces it while the author is still looking at the file.
+	//
+	// THIS IS ALREADY DKT-590's CHECK, FROM THE FILE'S SIDE, and it is why lint
+	// gains nothing from the source-drift verdict `workflow show` and
+	// `run activate` now report. Those two start from a REGISTERED ROW and read
+	// the path the row recorded; lint starts from bytes the caller handed it
+	// and looks up the row those bytes declare. When the file passed here IS
+	// the file a row recorded, the comparison below is the same comparison on
+	// the same two hashes, refusing where the others refuse. When it is not —
+	// the DKT-590 population, where the file has moved on to version 8 while
+	// version 4 stays registered — lint resolves @8, finds a free slot, and
+	// correctly reports `new`: nothing about @8 is wrong, and @4's stale
+	// provenance is a fact about a row this invocation was never asked about.
+	// Reporting it here would fire on every ordinary version bump, since a
+	// bumped file always leaves the superseded version's recorded path holding
+	// different bytes.
 	sum := workflow.SHA256(src)
 	registration := "new"
 	existing, err := db.GetWorkflow(conn, getProjectID(cmd), def.Pipeline.Name, def.Pipeline.Version)

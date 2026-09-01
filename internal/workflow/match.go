@@ -67,9 +67,20 @@ func (m *Match) Matches(s Subject) bool {
 //
 // An empty `when` holds: a step that declares no condition is unconditional.
 // The grammar is §11.1's, validated at register time by V22 and re-parsed here
-// against the SAME regexp, so a predicate that registered cannot fail to
-// evaluate. Conjuncts are joined by `and` — the only connective (splitWhen) —
-// and every one must hold.
+// against the SAME regexps — whenShape for a clause, whenConnective for the
+// joins — so a predicate that registered cannot fail to evaluate.
+//
+// Clauses are joined by `and` (every one must hold) or by `or` (at least one
+// must), never both in one predicate: V22 refuses a mix, because the grammar
+// has no parentheses and therefore no way to say which reading of `a and b or c`
+// the author meant (DKT-548). A mixed predicate reaching here predates the
+// current grammar, and it evaluates FALSE for the same reason an unparseable
+// clause does.
+//
+// "any of these labels" is a CLAUSE, not a connective: `labels contains-any
+// (a, b)` (DKT-550), equivalently `labels contains_any [a, b]` (DKT-1000).
+// That is what lets "kind X and any of these labels" stay a single
+// homogeneous-`and` predicate instead of needing the mix V22 refuses.
 //
 // A false `when` does not omit the step: expansion creates it with status
 // `skipped` (§5.3.1), which is what keeps a downstream `after` resolvable and
@@ -78,7 +89,22 @@ func WhenHolds(when string, s Subject) bool {
 	if strings.TrimSpace(when) == "" {
 		return true
 	}
-	for _, clause := range splitWhen(when) {
+
+	clauses, connective, mixed := splitWhen(when)
+	if mixed {
+		return false
+	}
+
+	if connective == WhenOr {
+		for _, clause := range clauses {
+			if whenClauseHolds(clause, s) {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, clause := range clauses {
 		if !whenClauseHolds(clause, s) {
 			return false
 		}
@@ -86,9 +112,12 @@ func WhenHolds(when string, s Subject) bool {
 	return true
 }
 
-// whenClauseHolds evaluates one `<kind|labels> <==|!=|contains> <value>`
-// clause. An unparseable clause is FALSE rather than an error: V22 rejected it
-// at register time, so reaching this branch means a stored definition predates
+// whenClauseHolds evaluates one clause — either
+// `<kind|labels> <==|!=|contains> <value>` or the set form
+// `labels contains-any (a, b, c)` / `labels contains_any [a, b, c]`.
+//
+// An unparseable clause is FALSE rather than an error: V22 rejected it at
+// register time, so reaching this branch means a stored definition predates
 // the current grammar, and skipping the step is the conservative reading —
 // creating it ready would run work whose condition nobody could evaluate.
 func whenClauseHolds(clause string, s Subject) bool {
@@ -96,7 +125,24 @@ func whenClauseHolds(clause string, s Subject) bool {
 	if m == nil {
 		return false
 	}
-	field, op, value := m[1], m[2], unquote(m[3])
+
+	// The set form — the same intersection test the workflow-level `labels_any`
+	// [match] clause runs (Matches), so the spellings of "any of these labels"
+	// cannot answer a subject differently.
+	//
+	// whenShape gives the list body two capture groups because RE2 cannot
+	// backreference a delimiter: m[3] is the `(…)` body, m[4] the `[…]` one,
+	// and exactly one of them is non-empty whenever m[1] matched — the grammar
+	// admits no empty list, so "non-empty" is the whole test.
+	if m[1] != "" {
+		body := m[3]
+		if body == "" {
+			body = m[4]
+		}
+		return intersects(whenList(body), s.Labels)
+	}
+
+	field, op, value := m[5], m[6], unquote(m[7])
 
 	switch field {
 	case "kind":
@@ -121,6 +167,21 @@ func whenClauseHolds(clause string, s Subject) bool {
 		}
 	}
 	return false
+}
+
+// whenList splits the body of a `contains-any (…)` / `contains_any […]` list
+// into its values.
+//
+// whenShape has already established the shape — at least one element, elements
+// free of whitespace, parens and commas — so this only has to cut on the
+// separator and unquote, exactly as the one-value form does.
+func whenList(body string) []string {
+	parts := strings.Split(body, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, unquote(p))
+	}
+	return out
 }
 
 // unquote strips the optional quotes around a predicate literal, so

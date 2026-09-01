@@ -592,6 +592,75 @@ the counters are authoritative only for claims that ended after v23. The wire
 fields are `omitempty`, so every row with no counted outcome serializes
 byte-identically to v22's rendering.
 
+### AMENDMENT — the span extends to v24 (DKT-546, 2026-08-22)
+
+**What changed.** v24 adds ONE table, `gate_override_grants`: one operator
+ruling that a gate's failure signature — gate name + exit code + reason
+classification — is environmental for the remainder of ONE run. A grant is
+minted by `step resolve --as override-pass --batch` (one row per failed
+completion gate of the parked step, in the resolution's own transaction), and
+spent by the routing stage: a later step of the same run whose EVERY failing
+gate matches a grant routes the same generic `pass` the operator's own
+override-pass records, instead of parking. `covered_steps` counts the spends,
+bumped in the routing transaction; both edges are event-logged
+(`gate-override-granted` / `step-batch-overridden`, attributed human /
+threshold), so the feed walks from every auto-pass back to the person. The
+grant dies with its run — the `run_id` FK is the whole scope rule, and a new
+run re-asks. A cover blocked by an interposed threshold target (DKT-470's
+shape) parks as before, with the block named.
+
+**What it fixes.** Refit mining of 25 runs / 34 issues found the dominant
+operator toil is environmental gate parks — build failed 30/46 recorded
+verdicts, tests 26/45, self-hygiene 18/34 — virtually every one
+operator-overridden as a sandbox artifact, not a code defect, and each park
+resolved individually: in RUN-42 the operator's own resolution was
+"override-pass each as it parks", the same ruling re-made per step. No
+mechanism let one ruling cover subsequent identical failures in the same run.
+
+**Why the ratified arithmetic is untouched.** Like v11–v23, v24 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v7/v8 form, since v24 adds no column). It
+BACK-FILLS NOTHING — no operator granted a batch override before the verb for
+granting one existed — and it is dormant: a run that never records a grant
+reads byte-identically to v23 on every verb.
+
+### AMENDMENT — the span extends to v25 (DKT-742, 2026-08-25)
+
+**What changed.** v25 adds ONE table, `stale_target_waivers`: one operator
+ruling that a specific stale-target warning — one (step instance, target sha)
+pair — has been adjudicated for the remainder of ONE run. A waiver is minted
+by `dispatch waive-target` (one row per named step instance, all for one
+target sha, in one transaction, each row event-logged as
+`stale-target-waived`, attributed human), and consulted READ-ONLY by the
+DKT-193/424/451 advisory judge at `dispatch open`/`verify` and at held
+resolutions: a would-be warning whose (instance, target) pair matches a
+waiver — the sha compared as a case-insensitive prefix of at least 7 hex
+characters, because the advisory renders it at 12 — is dropped from the
+answer. There is deliberately no "spent" counter and no per-application event:
+the advisory is recomputed by `dispatch verify`, which writes nothing by
+contract, and a suppressed warning changes no step's state. The waiver dies
+with its run — the `run_id` FK is the whole scope rule, and a new run
+re-warns.
+
+**What it fixes.** The stale-target advisory had no memory: RUN-52 fired the
+IDENTICAL adjudicated warning four times across DISPATCH-295/297/301 (the
+shared HEAD moves at every integration, so the pair recurs under a different
+rendered reason each time), each firing costing an investigation and the
+first an operator gate, until the operator issued a standing waiver that
+lived only in session memory — where the engine could not see it. A different
+target sha on the same row, or the same sha on an unnamed row, is a different
+question and still warns, which is what keeps a new divergence from riding an
+old ruling.
+
+**Why the ratified arithmetic is untouched.** Like v11–v24, v25 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v24 form, since v25 adds no column). It BACK-FILLS
+NOTHING — no operator waived a stale-target warning before the verb for
+waiving one existed — and it is dormant: a run that never records a waiver
+reads byte-identically to v24 on every verb.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

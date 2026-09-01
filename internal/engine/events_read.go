@@ -110,6 +110,17 @@ type EventQuery struct {
 	// view, because a scoped feed that hid it would be an audit trail with a
 	// blind spot; one that names another repository belongs to that
 	// repository's trail, not to this one's. See eventFilter.
+	//
+	// IT IS IGNORED WHEN RunID IS SET (DKT-583). A run belongs to exactly ONE
+	// project, so `--run` is ALREADY a project scope — a narrower one. Anding
+	// the invoking project's scope onto it cannot select a meaningful subset:
+	// it either changes nothing (the run is this project's) or empties the page
+	// entirely (the run is a neighbor's), and the second case answered
+	// `{"ok":true,"events":null,"total":0}` for a run with hundreds of events.
+	// A successful empty feed is the WORST available answer — a consumer
+	// polling it waits forever on a run it can see in `run report`, which
+	// resolves a run's project independent of the cwd. `--run` now does the
+	// same, which is the disposition DKT-583 prefers.
 	ProjectID int
 }
 
@@ -251,7 +262,13 @@ func eventFilter(q EventQuery) (string, []any) {
 		where += ` AND e.run_id = ?`
 		args = append(args, q.RunID)
 	}
-	if q.ProjectID != 0 {
+	// THE PROJECT SCOPE IS DROPPED UNDER `--run` (DKT-583). A run has exactly
+	// one project, so the run clause above is already that project's scope and
+	// anding a second one on top can only turn a neighbouring project's feed
+	// into an empty page that reports success. `run report`, `step show`, and
+	// `step artifact` all answer for a run outside the invoking project; the
+	// event feed now agrees with them instead of contradicting them silently.
+	if q.ProjectID != 0 && q.RunID == 0 {
 		// Three-way attribution, per the field comment: the run's project,
 		// else the issue's, else store-level. The cursor contract survives
 		// scoping — seq stays monotonic, and a filtered-out neighbor is an
@@ -449,6 +466,14 @@ var eventActors = map[string]Actor{
 	EventStepSuperseded: ActorThreshold,
 	EventStepSkipped:    ActorThreshold,
 	EventStepHeld:       ActorThreshold,
+	// The batch override being SPENT (DKT-546) is `threshold` on
+	// `dispatch-abandoned`'s argument: the kind is attributed to the automatic
+	// path, because that is the one an auditor cannot otherwise see. The
+	// operator's decision is already in the feed as its own `human` kind
+	// (`gate-override-granted`, below); this one records the routing stage
+	// COMPUTING that a standing grant covers this step's failure, and
+	// `data` carries the grant id(s) so the audit walks back to the person.
+	EventStepBatchOverridden: ActorThreshold,
 
 	// Operator verbs, and the harness relaying them.
 	EventRunStarted:       ActorHuman,
@@ -499,6 +524,28 @@ var eventActors = map[string]Actor{
 	// it. The recorded agreement moves only because a person ran `run repin`
 	// with a reason, which is precisely what `human` means in this table.
 	EventRunRepinned: ActorHuman,
+
+	// The batch override being MINTED (DKT-546): nothing in the engine grants
+	// itself standing authority over a gate — a grant exists only because a
+	// person ran `step resolve --as override-pass --batch`, and the event's
+	// purpose is to anchor every later `step-batch-overridden` to that verb.
+	EventGateOverrideGranted: ActorHuman,
+
+	// The stale-target waiver being minted (DKT-742): nothing in the engine
+	// waives its own advisory — a waiver exists only because a person ran
+	// `dispatch waive-target`, and unlike the batch override there is no
+	// "spent" counterpart kind, because applying a waiver changes no step's
+	// state (the advisory is a recomputed read, served by a verb that writes
+	// nothing).
+	EventStaleTargetWaived: ActorHuman,
+
+	// The scope refresh (DKT-869): nothing in the engine re-snapshots a bound
+	// issue — activation writes the blob once and every automatic path,
+	// re-activation included, leaves it alone. It moves only because a person
+	// widened the scope through `issue edit --scope` and then ran `run
+	// refresh-scope` naming the run it should reach, which is precisely what
+	// `human` means in this table.
+	EventIssueScopeRefreshed: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,

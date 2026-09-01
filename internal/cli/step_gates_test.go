@@ -289,6 +289,77 @@ func TestSkippedIsAVisibleRollupColumn(t *testing.T) {
 	}
 }
 
+// TestGateRollupCountsPreGateRows is DKT-862's rollup half.
+//
+// `run report`'s Gates tally rendered `ac-commands: pass 0, fail 1` whether the
+// failure BLOCKED the step or was advisory. A `pre = true` gate never routes,
+// so the two are different facts and the section had no way to tell them apart:
+// the rollup counted four verdicts and nothing about WHEN the row was produced.
+//
+// `Pre` counts ROWS and OVERLAPS the verdict columns, exactly as `Stub` does —
+// it describes the phase that produced the row, not what the row decided.
+func TestGateRollupCountsPreGateRows(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedRunForNext(t, conn)
+
+	exitZero, exitTwo := 0, 2
+	rows := []db.GateResultRow{
+		// RUN-61's shape: a pre-gate that failed and routed nothing.
+		{RunID: runID, StepID: 1, Gate: "ac-commands", Ordinal: 0, Exit: &exitTwo,
+			Verdict: db.GateVerdictFail, Pre: true, CreatedAtMS: model.NowMS()},
+		// A blocking gate that failed identically.
+		{RunID: runID, StepID: 1, Gate: "build", Ordinal: 0, Exit: &exitTwo,
+			Verdict: db.GateVerdictFail, CreatedAtMS: model.NowMS()},
+		// One NAME, both declarations — the case the tally cannot mark whole.
+		{RunID: runID, StepID: 1, Gate: "render-verify", Ordinal: 0, Exit: &exitZero,
+			Verdict: db.GateVerdictPass, Pre: true, CreatedAtMS: model.NowMS()},
+		{RunID: runID, StepID: 1, Gate: "render-verify", Ordinal: 1, Exit: &exitTwo,
+			Verdict: db.GateVerdictFail, CreatedAtMS: model.NowMS()},
+	}
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	for _, r := range rows {
+		testsupport.Must(t, db.InsertGateResultTx(tx, r), "InsertGateResultTx: %v", err)
+	}
+	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
+
+	counts, err := db.GateRollup(conn, runID)
+	testsupport.Must(t, err, "GateRollup: %v", err)
+
+	byName := map[string]db.VerdictCount{}
+	for _, c := range counts {
+		byName[c.Name] = c
+	}
+	if got := byName["ac-commands"]; got.Pre != 1 || got.Fail != 1 {
+		t.Errorf("ac-commands rolled up as pre %d fail %d, want pre 1 fail 1 — "+
+			"an advisory failure must be countable as one", got.Pre, got.Fail)
+	}
+	// The marker must not spread: a blocking gate that failed the same way is
+	// the row the report has to keep distinguishable.
+	if got := byName["build"]; got.Pre != 0 {
+		t.Errorf("build rolled up as pre %d, want 0", got.Pre)
+	}
+	if got := byName["render-verify"]; got.Pre != 1 || got.Pass+got.Fail != 2 {
+		t.Errorf("render-verify rolled up as pre %d over %d rows, want pre 1 "+
+			"of 2 — the tally must be able to say which half was advisory",
+			got.Pre, got.Pass+got.Fail)
+	}
+
+	// Actions have no `pre` column, and the shared rollup body must return an
+	// honest zero for them rather than failing on a column that table lacks —
+	// the same asymmetry `stub_entry` already has.
+	actions, err := db.ActionRollup(conn, runID)
+	if err != nil {
+		t.Fatalf("ActionRollup failed after the gate rollup gained a pre "+
+			"column: %v", err)
+	}
+	for _, a := range actions {
+		if a.Pre != 0 {
+			t.Errorf("action %q rolled up as pre %d, want 0", a.Name, a.Pre)
+		}
+	}
+}
+
 // TestVoteUsageCoverageMakesSilenceVisible is DKT-257.
 //
 // The vote_usage ledger has existed since v14 and held ZERO rows for an entire
@@ -348,6 +419,43 @@ func TestVoteUsageCoverageIsZeroWithNoCasts(t *testing.T) {
 	testsupport.Must(t, err, "VoteUsageCoverageFor: %v", err)
 	if got.Casts != 0 || got.Reported != 0 {
 		t.Errorf("coverage = %+v on a run with no casts, want zeroes", got)
+	}
+}
+
+// TestSilentVoteSeatsAreNamed is DKT-733: the coverage count said 12 of 57
+// seats reported nothing and nothing anywhere said WHICH twelve, so the
+// backfill verb built to close the gap could not be aimed. The enumeration
+// goes through the SAME membership builder as the count it explains.
+func TestSilentVoteSeatsAreNamed(t *testing.T) {
+	conn := newTestDB(t)
+
+	proposalID, err := db.CreateProposalIdempotent(conn, &model.Proposal{
+		Description: "verify the change", Status: model.ProposalStatusOpen,
+		Criticality: model.CriticalityMedium, RequiredVoters: 2, Threshold: 0.67,
+	}, "vote-step:1:1:verify-tribunal@0")
+	testsupport.Must(t, err, "creating the proposal: %v", err)
+
+	castSeat(t, conn, proposalID, "tribunal-architecture") // stays silent
+	loud := castSeat(t, conn, proposalID, "tribunal-security")
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	testsupport.Must(t, db.InsertVoteUsageTx(tx, loud, "output_tokens", 39500, "", model.NowMS()),
+		"InsertVoteUsageTx: %v", err)
+	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
+
+	got, err := db.SilentVoteSeatsFor(conn, db.ScopeVoteCreate, "vote-step:1:")
+	testsupport.Must(t, err, "SilentVoteSeatsFor: %v", err)
+
+	if len(got) != 1 {
+		t.Fatalf("silent seats = %+v, want exactly the one quiet cast", got)
+	}
+	if got[0].ProposalID != proposalID || got[0].Voter != "tribunal-architecture" {
+		t.Errorf("silent seat = %+v, want tribunal-architecture on proposal %d",
+			got[0], proposalID)
+	}
+	if got[0].Role != "judge" {
+		t.Errorf("silent seat role = %q, want the cast's recorded role", got[0].Role)
 	}
 }
 

@@ -29,6 +29,10 @@ func staleFixture(t *testing.T, conn *sql.DB, e *Engine) {
 	// left to shell out to whatever checkout the test process happens to sit
 	// in: these cases are about the ancestry verdict alone.
 	e.TreeMatchFn = func(string, string) (match, known bool) { return false, false }
+	// Existence unanswerable by default, for the tree probe's exact reason:
+	// these cases are about the ancestry verdict alone, and the DKT-742
+	// absence probe accuses only on a DEFINITIVE "no such object".
+	e.ObjectExistsFn = func(string, string) (exists, known bool) { return false, false }
 	implementID := stepIDByInstance(t, conn, "implement@0")
 	claim, err := ClaimStep(conn, implementID, ClaimOptions{Owner: "w", NowMS: nowMS})
 	testsupport.Must(t, err, "claim implement: %v", err)
@@ -111,8 +115,10 @@ func TestDispatchStaysQuietWhenTargetIsAncestor(t *testing.T) {
 	}
 }
 
-// The unanswerable case must not warn: git absent, a GC'd object, a tree that
-// is not a repository. Absence of evidence is not staleness.
+// The unanswerable case must not warn: git absent, a tree that is not a
+// repository. Absence of evidence is not staleness — but only while it stays
+// ABSENCE of evidence: a definitive "no such object" is evidence, and the
+// DKT-742 cases below prove it warns.
 func TestDispatchStaysQuietWhenAncestryUnknown(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)

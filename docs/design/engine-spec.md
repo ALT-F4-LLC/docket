@@ -192,9 +192,9 @@ engine verb, though not a guard predicate.)
 (`threshold = { "fix-loop" = "any(severity >= high)" }` works because *the user's
 schema* declared the order — core never knows what a severity is). Aggregations beyond
 comparison are **action steps**. One is builtin and generic: `action = "aggregate"`
-with `params = { field, method = median|max|min, hold_spread, output }` computes over
-any ordered-enum payload field — median, spread-hold, and a recorded demotion trail
-work for severities, priorities, or tiers alike. Cluster membership arrives in the
+with `params = { field, method = median|max|min, hold_spread, output, route_at }`
+computes over any ordered-enum payload field — median, spread-hold, and a recorded
+demotion trail work for severities, priorities, or tiers alike. Cluster membership arrives in the
 payload itself: each element is one cluster, whose `field` value is either a scalar
 (a one-member cluster — the identity case) or an array of the cluster's member
 values; the builtin's input payload is the concatenated payloads of the step's
@@ -205,7 +205,15 @@ that cluster's payload index (`<step>-held@k#i`), together gating the routing st
 *(amended 2026-08-07, DKT-15: one step for the whole hold made approve/reject binary
 over the set, so an operator who wanted two clusters escalated and two accepted could
 not say so)*. The routing step waits for every one of them and routes once: per
-`on_fail` if any was rejected, otherwise through the threshold. The
+`on_fail` if any was rejected, otherwise through the threshold. An optional
+`route_at = "<value>"` names a routing floor in the field's declared order: only
+clusters whose reduced value's position is at or above it are emitted to the output
+payload — what the threshold evaluates and downstream `inputs` read — while the rest
+are recorded, fully reduced, on the aggregate's own `action_results` row and never
+enter the loop; a held cluster is never routed below the floor (the operator's
+decision, not the untrusted computed value, decides it), an unknown `route_at` value
+is a register-time refusal naming it, and with `route_at` absent the output is
+byte-for-byte what it always was *(amended 2026-08-23, DKT-593)*. The
 aggregate's output payload — per-cluster value, members, held flag, `demoted_from`,
 `operator_resolved` — validates against the shipped `aggregate@1` schema, and
 `operator_resolved` is set per cluster, on the approved ones only. The
@@ -411,6 +419,24 @@ registered. `--restore` reverses a retirement. There is deliberately **no
 delete verb**: old versions stay registered, which is what keeps lineage
 readable.
 
+A registry is **per project** (`UNIQUE(project_id, name, version)`), and
+`workflow register`, `workflow deprecate`, and `schema register` therefore
+accept `--project <ref>` and `--all-projects` *(amended 2026-08-24 — DKT-615)*.
+Without either flag each verb writes to the project the working directory
+resolves to, unchanged, and emits the row it always emitted. With either flag it
+emits a **per-project report** instead — one outcome per target
+(`registered` / `unchanged` / `deprecated` / `restored` / `already-binding` /
+`already-deprecated` / `conflict` / `not-registered` / `invalid`) — and each
+project's own idempotency and conflict rules are decided *there*: a CONFLICT in
+one project neither cancels nor hides another's registration, and the sweep
+runs to the end. The process exits with the failures' shared code when they
+agree and GENERAL_ERROR when they do not, having already written the report.
+`workflow register`'s **environment validation runs per target**, because
+`vote_rule` and `payload` references resolve against the registry of the project
+being written to — the same bytes can be valid in one project and name a schema
+that does not exist in the next, and storing them there anyway would defer a
+guaranteed activation failure. Register schemas store-wide first.
+
 `[limits]` — optional map of executor *class* → `{ max = N, lease_ttl = "45m" }` (bare
 int = shorthand for `max`). When a run pins multiple workflows, the most restrictive
 limit per class wins; unset values fall back to `docket config` defaults. Classes also
@@ -433,18 +459,21 @@ is exactly `"write" = { max = 1, lease_ttl = "45m", max_step_duration = "2h" }`.
 | `payload` | `schema@ver`, optional | payload validated at `complete`; threshold fields check against it at register time; required on `action = "aggregate"` steps *(amended 2026-08-03, DKT-25)* |
 | `voters`, `vote_rule` | [executor hints], proposal-config name | required on `type="vote"` steps — who casts, which existing Docket threshold config tallies |
 | `after` | [step names], **required** except the first step and `loop = true` steps (whose ordering comes from loop entry, §11.3) | intra-workflow predecessors; `[]` = root (implicit topology was a footgun) |
-| `inputs` | [`"<step>.<kind>"` \| `"<step>.*"` \| `"issue.body"` \| `"issue.diff"`] | artifacts inlined into the context bundle, in order. `issue.diff` = the engine-computed VCS diff for the issue's scope, snapshotted and fingerprinted when its producing step completed (git in v1 — the one declared VCS coupling, §7) |
+| `inputs` | [`"<step>.<kind>"` \| `"<step>.*"` \| `"<step>.vote-record"` \| `"issue.body"` \| `"issue.diff"` \| `"issue.linked.<relation>.<kind>"`] | artifacts inlined into the context bundle, in order. `issue.diff` = the engine-computed VCS diff for the issue's scope, snapshotted and fingerprinted when its producing step completed (git in v1 — the one declared VCS coupling, §7). `<step>.vote-record` = the named `type="vote"` step's recorded proposal — tally outcome, weighted score, and every cast with its rationale — engine-served from the existing vote machinery; the named step must be a vote step, and the `vote-record` kind is reserved from `emits` *(amended 2026-08-22, DKT-545)*. `issue.linked.<relation>.<kind>` = a CROSS-ISSUE input: the latest recorded artifact of `<kind>` held by each issue this issue is linked to by `<relation>` (a relation type or its inverse form — `depends_on`, `dependency_of`, `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicate_of`), resolved and pinned by artifact id at activation inside the fat transaction; activation fails loudly when the relation is missing or no linked issue holds the kind, so the binding is enforced rather than an issue-body citation. V11's produced-kind table deliberately does not apply — the producer is another issue's run — and the `issue.linked` name is reserved from step names as `issue.latest` is *(amended 2026-08-22, DKT-547)* |
 | `gates` | [trusted gate names \| `{name, source="fence:<tag>", pre=bool}`] | `pre = true` gates run at claim with results included in the context bundle (measure-then-judge steps); the rest run in order inside `complete` (§2, §4) |
 | `params` | opaque KV table | arguments to `action` steps (e.g. the builtin `aggregate`) |
 | `min_siblings` | int, default = all | fanout join quorum (§2 Fanout joins); the default is the plain join — quorum semantics (the `on_fail` routing at join) apply only when declared below the sibling count *(clarified 2026-08-03)* |
-| `threshold` | table: routing → predicate (11.2) | routing computed over the step's recorded payloads |
+| `threshold` | table: routing → predicate (11.2) | routing computed over the step's recorded payloads; on `type="vote"` steps, over the tally's cast set after an APPROVED tally (11.2) *(amended 2026-08-22, DKT-545)* |
+| `pass_floor` | `{ field, at }`, optional; requires `payload`, and `at` must be a value of `field`'s declared order (V37/V37a) | exit bar on a `pass` routing: when the routing resolves to `pass` but the step's recorded payload holds an element whose `field` value sits at or above `at`'s position — and the element is neither `held` nor `operator_resolved` — the step parks `waiting-human` instead of exiting, naming `--as override-pass` and `--as fix-round` as the ways out. Both values are opaque tokens compared only by position, `route_at`'s discipline; declared nowhere, nothing changes *(amended 2026-08-26, DKT-870: RUN-58's reconcile routed `pass` with all 16 clusters open, six at the order's high position — "converged" in the ledger meaning "dispositioned")* |
 | `on_fail` | `"fix-loop"` \| `"waiting-human"` \| `"skip"` \| `"abandon-issue"`; default `"waiting-human"` | routing for gate failure / attempts exhausted; `type="human"` steps must declare it explicitly and `"waiting-human"` is invalid there — reject routes per `on_fail` (§2's reject-routing rule; amended 2026-08-03) |
 | `loop` | bool, default false | marks loop-body steps (11.3) |
 | `after_loop` | step name | re-entry target after a loop body completes |
+| `serves` | [step names], only on `loop = true` steps | scopes the body to the named steps' `fix-loop` routings — its loop CLUSTER (11.3); omitted = serves every trigger. Entries must name steps that can route `fix-loop`, and every step that can must be served by at least one body *(amended 2026-08-22, DKT-544)* |
 | `max_attempts` | int, default engine config | per-instance retry budget |
-| `max_fix_loops` | int, default engine config | loop-entry budget per issue |
+| `max_fix_loops` | int, default engine config | loop-entry budget per issue — ONE counter over EVERY `fix-loop` routing source (threshold, `on_fail`, rejected vote/human gate, quorum miss), read off whichever non-cluster step declares it. Each admitted entry post-increments the counter to its own 1-indexed ordinal; an entry whose new count exceeds the bound is refused with the counter restored, so `= N` admits exactly N entries and parks the N+1th `waiting-human`. Only a `fix-round` grant (one per resolution, effective bound = declared + grants) admits more *(amended 2026-08-23, DKT-587)*. On a `serves`-scoped loop body it is instead that CLUSTER's round budget, checked independently under the issue-level ceiling — it never raises or lowers it *(amended 2026-08-22, DKT-544)* |
+| `max_stalled_rounds` | int ≥ 0, default 0 (never fires); only on a step that can route `fix-loop` and records an artifact (V38) | non-convergence tolerance over THIS step's routed volume: a `fix-loop` entry after that many consecutive measured rounds in which the element count of the step's recorded payload never fell below the smallest count any earlier round recorded is refused in the non-convergence park's exact shape — counter restored, nothing instantiated, `waiting-human` naming `--as fix-round` as the way out, an authorized entry waived. "No improvement" means no new strict minimum, so volumes oscillating around a floor still park while a genuinely shrinking set never does *(amended 2026-08-26, DKT-870: RUN-51 held 8-12 clusters flat across TEN rounds and RUN-50 7-10 across six, both ended only by operator action — the plateau was the corpus's own non-convergence signal and nothing in the engine read it)* |
 | `expected_cost` | number ≥ 0, default 0 | budget-floor contribution per claim (§2) |
-| `when` | predicate over issue `kind`/`labels` | step is `skipped` when false |
+| `when` | predicate over issue `kind`/`labels` — clauses `<kind\|labels> <==\|!=\|contains> <value>` or `labels contains-any (a, b, c)` / `labels contains_any [a, b, c]`, joined by `and` throughout or by `or` throughout | step is `skipped` when false. `or` holds when at least one clause does; a predicate MIXING `and` and `or` is a VALIDATION_ERROR (V22), because the grammar has no parentheses and therefore no reading of `a and b or c` to prefer — the mixed case is expressed as two steps, which is what the disjunction removed the need for in the common case *(amended 2026-08-22, DKT-548)*. `labels contains-any (…)` is the step-level spelling of the `labels_any` [match] clause and holds when the list intersects the issue's labels — a CLAUSE, not a connective, so "kind X and any of these labels" is one homogeneous-`and` predicate rather than a mix V22 would refuse. The list needs at least one element and its values carry no whitespace *(amended 2026-08-22, DKT-550)*. The operator is spelled `contains-any` or `contains_any` and its list is delimited by `(…)` or `[…]`; all four combinations are the same clause, and the delimiters must pair — `[a, b)` is a VALIDATION_ERROR. Both spellings were admitted rather than one because `contains-any (…)` is what registered definitions carry and `contains_any [a, b]` is how a list is written everywhere else in a workflow TOML, so refusing either would make an author's first correct guess an error *(amended 2026-09-01, DKT-1000)* |
 | `metadata` | opaque KV table | recorded on the step; delivered in the context bundle |
 
 ### 11.2 Threshold predicates
@@ -468,6 +497,23 @@ where `agg ∈ {any, all, count>=n}` over the payload array,
 whose registered schema declares `ordered_enum` (§2). Fields and literals are
 validated against the registered schema at `workflow register` time. Example
 (standard-change): `threshold = { "fix-loop" = "any(severity >= high)" }`.
+
+**Vote-step thresholds** *(amended 2026-08-22, DKT-545)*: on a `type="vote"` step,
+`threshold` is evaluated over the proposal's recorded **casts** — one element per
+cast, addressable fields `vote` / `verdict` (aliases for the cast's verdict) and
+`voter` — and only after an **APPROVED** tally. A rejected tally routes per
+`on_fail`, exactly as before; a manually committed proposal (an operator setting
+the final outcome by hand) skips the threshold. The routing vocabulary is
+restricted to `"fix-loop"` / `"waiting-human"` / `"pass"` — step-name
+interposition is not available on vote steps — and operators to equality, because
+casts have no registered schema and ordered comparisons are defined only over
+`ordered_enum` fields (all register-time rules: V36). First match routes, no
+match ⇒ `"pass"`, and a step declaring no threshold behaves exactly as it always
+did. Example (an investigation read-gate):
+`threshold = { "fix-loop" = "count>=2(vote == approve-with-concerns)" }` sends an
+approved-but-concerned tally into the same revise loop a rejection enters,
+instead of the concerns evaporating; the loop body reads what the panel said
+through `inputs = ["<step>.vote-record"]` (§11.1).
 
 ### 11.3 Loop semantics (normative)
 
@@ -497,6 +543,24 @@ Predecessor satisfaction and issue completion resolve per step name over instanc
 the highest existing ordinal ≤ the consumer's (mirroring input binding);
 re-instantiation never spans steps outside the `after_loop` chain. *(Clarified
 2026-08-03, S3 stage review.)*
+
+**Cluster scoping** *(amended 2026-08-22, DKT-544)*: a `loop = true` body may declare
+`serves = [step names]`, scoping it to the named steps' `fix-loop` routings. The
+TRIGGERING step — the one whose routing resolved to `fix-loop` — selects its
+cluster: clauses (2)–(4) then apply to the serving bodies and to the downstream
+chains of THOSE bodies' `after_loop` roots only (a body or `after_loop` declarer
+without `serves` serves every trigger, so a workflow declaring no `serves` anywhere
+has exactly one cluster and the original behavior, unchanged). The loop counter,
+its ordinal sequence, the `max_fix_loops` ceiling read off non-cluster steps, the
+non-convergence refusal, and `fix-round` grants all stay issue-level across every
+cluster. A `max_fix_loops` declared on a `serves`-scoped body additionally bounds
+that cluster's own rounds — counted as the distinct ordinals holding its scoped
+bodies' instances (bodies serving several triggers are counted wherever they ran) —
+and its refusal takes the ceiling's exact shape, waived once by the same
+`fix-round` resolution. The `loop-entered` event data names the trigger alongside
+the ordinal. Register-time rules: `serves` is valid only on `loop = true` steps,
+every entry must name a step of the workflow that can route `fix-loop` (V35), and
+every step that can route `fix-loop` must be served by at least one body (V17c).
 
 Engine-enforced numbers live core-side, never in opaque pins: per-class lease TTLs and
 concurrency (`[limits]` / `docket config`), attempt caps (step fields / config

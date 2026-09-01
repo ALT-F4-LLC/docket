@@ -122,6 +122,16 @@ type EnvPolicy struct {
 	// that declared no scope gives the check no narrower answer than the tree,
 	// and inventing one would be docket deciding what the issue touches.
 	Scope []string
+	// Base is the sha of the step's base commit, exported as DOCKET_GATE_BASE
+	// (DKT-992) so a gate can scan exactly the step's committed range
+	// (base..HEAD of the tree it runs in) instead of guessing at `HEAD~1` or
+	// scanning only the working tree — which, for a worktree-recorded step
+	// whose executor committed before `step record`, is clean and scans
+	// nothing. It is set only for worktree-recorded steps, to the worktree's
+	// fork point; empty means unset, and a range-shaped gate that finds the
+	// var absent over a clean tree should fail closed rather than pass having
+	// measured nothing.
+	Base string
 }
 
 // BuildEnv constructs the child environment (§5.3).
@@ -168,6 +178,12 @@ func BuildEnv(p EnvPolicy) ([]string, error) {
 	// shell matched in the first place.
 	if len(p.Scope) > 0 {
 		env = append(env, "DOCKET_SCOPE="+strings.Join(p.Scope, "\n"))
+	}
+	// Absent — not empty — when no base is known (DKT-992): an empty sha is
+	// not a commit, and a gate given one would build a broken git range. The
+	// gate's own fail-closed check keys on absence.
+	if p.Base != "" {
+		env = append(env, "DOCKET_GATE_BASE="+p.Base)
 	}
 
 	// The network half, reached ONLY by a gate whose trust entry

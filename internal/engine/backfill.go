@@ -174,13 +174,35 @@ type SkippedRow struct {
 	Unit     string `json:"unit"`
 }
 
+// UnclaimedTarget names one back-filled step that NO WORKER EVER CLAIMED, so
+// the advisory can be rendered by the caller and read by a JSON consumer
+// (DKT-993).
+//
+// `Status` is on the row because it is the whole diagnostic: `pending` says the
+// row landed on a step that has not run YET, `superseded` says it landed on one
+// the loop swept before it ever could, and `skipped`/`failed-routed` say it
+// landed on one that was terminated unrun. An operator reading "STEP-3146
+// (design-qa@1) is pending" knows immediately that the relay's journal
+// mis-joined; a bare step id does not carry that.
+type UnclaimedTarget struct {
+	Step     string `json:"step"`
+	Instance string `json:"instance"`
+	Status   string `json:"status"`
+}
+
 // BackfillOutcome is what the back-fill did: rows written, steps touched, the
-// source they carry, and every row skipped as already recorded.
+// source they carry, every row skipped as already recorded, and every target
+// that was never claimed.
 type BackfillOutcome struct {
 	Written int          `json:"written"`
 	Steps   int          `json:"steps"`
 	Source  string       `json:"source"`
 	Skipped []SkippedRow `json:"skipped,omitempty"`
+	// Unclaimed names the targets no worker ever held. The rows for them ARE
+	// written — see BackfillUsage — so this is an advisory, not a refusal, and
+	// it is on the payload because `Warn` is suppressed in JSON mode and a
+	// conductor runs with `--json`.
+	Unclaimed []UnclaimedTarget `json:"unclaimed,omitempty"`
 }
 
 // BackfillUsage records usage for steps whose claimant could not report it.
@@ -205,6 +227,39 @@ type BackfillOutcome struct {
 // back-fill falling through that default would label a relay's reconstruction
 // as the claimant's own report and destroy the distinction the column exists
 // to preserve.
+//
+// A TARGET NO WORKER EVER CLAIMED IS RECORDED AND REPORTED, never refused
+// (DKT-993). Harness RUN-66's conductor back-filled a wave journal whose join
+// heuristic had misattributed probe-agent tokens, and the rows landed on
+// STEP-3146 (`design-qa@1`, `pending`, never claimed) and on a superseded step
+// with no refusal, no warning, and no diagnostic — so `run report` showed spend
+// on steps that never ran and nothing in the store said where it came from.
+//
+// THE CONTRACT IS WARN-AND-RECORD, and the choice is deliberate. Trusting the
+// relay stays the default: core cannot know that a step which never claimed did
+// not cost anything — a pre-gate runs at claim time, a spawn can burn tokens
+// before the claim lands, and core enumerating which steps are ALLOWED to have
+// cost would be core holding an opinion about how a relay measures its own
+// work, the same opinion `--source` and `unit` exist to avoid holding. What was
+// wrong was the SILENCE. So the rows land, the ledger stays the relay's to
+// write, and every unclaimed target is named on the outcome for the caller to
+// warn about.
+//
+// "NEVER CLAIMED" IS `attempt == 0`, the same predicate D2's own exemption uses
+// (missingUsage, D5's second half): `attempt` counts claims and nothing else —
+// it is not bumped on failure, and `step resolve --as retry` moves
+// `attempt_base` rather than zeroing it — so a zero attempt is exactly "no
+// worker ever held this step", for every status at once. It is one field
+// already on the row rather than an event scan, and it cannot disagree with the
+// discrepancy probe that reads it three lines away.
+//
+// It covers the SUPERSEDED case the same evidence names, and covers it
+// correctly. The loop's supersede sweep takes `pending` instances only, so a
+// swept step is a never-claimed step and warns here by the same clause; a
+// `fix-loop` resolution supersedes a step that HAD claimed and HAD spent, and
+// that one does not warn — its usage is real, and back-filling it is D2's own
+// documented resolution. Warning on status alone would have fired on the
+// legitimate path and stayed quiet on neither.
 func (e *Engine) BackfillUsage(
 	conn *sql.DB, runID int, rows []BackfillRow, source string,
 	onDuplicate string, nowMS int64,
@@ -227,8 +282,9 @@ func (e *Engine) BackfillUsage(
 	}
 
 	var (
-		written int
-		skipped []SkippedRow
+		written   int
+		skipped   []SkippedRow
+		unclaimed []UnclaimedTarget
 	)
 
 	tx, err := conn.Begin()
@@ -258,6 +314,18 @@ func (e *Engine) BackfillUsage(
 				model.FormatRunID(runID))
 		}
 		steps[r.Step] = step
+
+		// DKT-993. Collected in the SAME first-seen pass so the advisory is
+		// one entry per step rather than one per row, and in ROW ORDER so two
+		// identical batches produce identical output — the same
+		// golden-stability discipline the discrepancy list sorts for.
+		if step.Attempt == 0 {
+			unclaimed = append(unclaimed, UnclaimedTarget{
+				Step:     model.FormatStepID(step.ID),
+				Instance: step.Instance,
+				Status:   step.Status,
+			})
+		}
 	}
 
 	for _, r := range rows {
@@ -321,5 +389,6 @@ func (e *Engine) BackfillUsage(
 	}
 	return &BackfillOutcome{
 		Written: written, Steps: len(steps), Source: source, Skipped: skipped,
+		Unclaimed: unclaimed,
 	}, nil
 }

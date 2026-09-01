@@ -39,7 +39,41 @@ It REFUSES rather than proceeding when the transition could be straddled:
     terminal — nothing remains for the new agreement to govern, so a repin
     could only rewrite completed steps' history
   - when a pinned ref no longer resolves at all (NOT_FOUND: there are no
-    current bytes to adopt; restore the file instead)
+    current bytes to adopt), UNLESS you retire it with --drop/--drop-unresolvable
+    and no non-terminal step reads it — see below
+
+DELETED REFS: --drop and --drop-unresolvable. A corpus commit that DELETES a
+contract leaves a pin with no bytes to adopt, and refusing the whole set for it
+wedges a run that may have no step left which would ever open that file.
+
+  --drop REF              retire this one ref (repeatable)
+  --drop-unresolvable     retire every currently drifted file pin that no
+                          longer resolves and that no pending step reads
+
+Retiring means: the pin row is removed, so verify-pins stops reporting it and
+the remaining steps proceed; a ` + "`run-repinned`" + ` event is recorded for it with a
+NULL new_sha256 and ` + "`dropped: true`" + `, so the old sha — the agreement the
+completed steps worked under — stays in the trail exactly as an ordinary repin
+leaves it. Completed steps' rows, artifacts, and events are untouched here too.
+
+It is opt-in, never automatic: a NOT_FOUND ref that a NON-TERMINAL step's packet
+closure still reaches refuses either way, naming the steps that read it, because
+dropping it would only move the wedge to render time. --drop-unresolvable does
+not touch refs that resolve to DIFFERENT bytes — those are the ordinary repin —
+and neither flag applies to workflow or schema pins, which name registered
+objects no packet closure can call unread.
+
+NEWLY-REQUIRED REFS: the adopted bytes bring their own closure. A corpus edit
+can make an adopted contract include a fragment the run never snapshotted;
+adopting the contract without the fragment would report success while every
+step reading it becomes unrenderable (its packet refuses on the unpinned ref).
+So a repin that adopts changed bytes also walks the packet closure those bytes
+reach and PINS every file ref the run does not already hold, at its current
+disk bytes, in the same transaction — each addition recorded as its own
+` + "`run-repinned`" + ` event with a null old_sha256 and ` + "`added: true`" + `, naming what
+requires it. A newly-required ref with no bytes on disk refuses the whole
+repin up front, naming the ref and its readers: restore the file, or abandon
+the run and re-plan.
 
 --reason is required. A repin moves the agreement every packet is verified
 against, and a trail that shows the hashes changing without saying why is a
@@ -65,7 +99,12 @@ func runRunRepin(cmd *cobra.Command, ref string, w *output.Writer) error {
 			output.ErrValidation)
 	}
 
-	outcome, err := engine.RepinRun(conn, runID, reason, model.NowMS())
+	drop, _ := cmd.Flags().GetStringArray("drop")
+	dropUnresolvable, _ := cmd.Flags().GetBool("drop-unresolvable")
+
+	outcome, err := engine.RepinRunWith(conn, runID, engine.RepinOptions{
+		Reason: reason, Drop: drop, DropUnresolvable: dropUnresolvable,
+	}, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}
@@ -79,15 +118,29 @@ func runRunRepin(cmd *cobra.Command, ref string, w *output.Writer) error {
 }
 
 func renderRepinOutcome(o *engine.RepinOutcome) string {
-	if len(o.Repinned) == 0 {
+	if len(o.Repinned) == 0 && len(o.Dropped) == 0 && len(o.Added) == 0 {
 		return fmt.Sprintf("%s: every pin already matches disk; nothing to repin", o.Run)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Repinned %d pin(s) for %s (%d already matched):\n",
-		len(o.Repinned), o.Run, o.Unchanged)
+	fmt.Fprintf(&b, "Repinned %d pin(s) for %s (%d added, %d dropped, %d already matched):\n",
+		len(o.Repinned), o.Run, len(o.Added), len(o.Dropped), o.Unchanged)
 	for _, c := range o.Repinned {
 		fmt.Fprintf(&b, "  %-9s %-40s %s -> %s\n",
 			c.Kind, c.Ref, shortSHA(c.OldSHA256), shortSHA(c.NewSHA256))
+	}
+	// An added ref renders with the arrow pointing FROM nothing, the mirror of
+	// the drop below: the run held no bytes for it before, and the adopted
+	// bytes are why it holds these now.
+	for _, c := range o.Added {
+		fmt.Fprintf(&b, "  %-9s %-40s (unpinned) -> %s (added: newly required "+
+			"by the adopted bytes)\n", c.Kind, c.Ref, shortSHA(c.NewSHA256))
+	}
+	// A dropped ref renders with the arrow pointing at nothing on purpose: the
+	// operator asked what happened to a pin, and "gone" is the answer, in the
+	// same column the new hash would have been.
+	for _, c := range o.Dropped {
+		fmt.Fprintf(&b, "  %-9s %-40s %s -> (dropped: no longer resolves, unread "+
+			"by pending steps)\n", c.Kind, c.Ref, shortSHA(c.OldSHA256))
 	}
 	b.WriteString(
 		"Completed steps keep their original pins as history (see the run-repinned events).")
@@ -97,5 +150,11 @@ func renderRepinOutcome(o *engine.RepinOutcome) string {
 func init() {
 	runRepinCmd.Flags().String("reason", "",
 		"Why the recorded agreement is moving (required)")
+	runRepinCmd.Flags().StringArray("drop", nil,
+		"Retire this pinned ref, which no longer resolves and no pending step "+
+			"reads (repeatable)")
+	runRepinCmd.Flags().Bool("drop-unresolvable", false,
+		"Retire every drifted file pin that no longer resolves and no pending "+
+			"step reads")
 	runCmd.AddCommand(runRepinCmd)
 }

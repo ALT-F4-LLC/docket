@@ -762,6 +762,47 @@ func ResetStepRetryBudgetTx(tx *sql.Tx, id int, nowMS int64) error {
 	return nil
 }
 
+// ExemptStepAttemptFromBudgetTx exempts ONE spent attempt from a step's retry
+// budget — the forced reap's classification (DKT-585) — by moving
+// `attempt_base` forward by exactly one. Exhaustion compares
+// `attempt - attempt_base` against `max_attempts`, so from here on the budget
+// reads one fewer spent: the attempt still happened, it just does not count
+// against the declared allowance.
+//
+// It is a NUDGE, not ResetStepRetryBudgetTx's reset. A forced reap asserts
+// that ONE claim's holder is gone — a relay declaring a dead spawn is not an
+// executor failure (RUN-30 STEP-755: a wave stopped by an accidental
+// interrupt consumed the step's last attempt, leaving it one interrupt from
+// `waiting-human` on a healthy charter) — and the exemption must be as narrow
+// as the assertion: this one attempt, nothing else. `attempt_base = attempt`
+// here would also forgive every EARLIER genuinely-failed attempt, silently
+// granting a full fresh budget on a verb that never claimed to be a retry.
+//
+// `attempt` ITSELF IS UNTOUCHED, for exactly ResetStepRetryBudgetTx's reason
+// (DKT-86, DKT-90): it is the usage ledger's key half (`UNIQUE(step_id,
+// attempt, unit)`), and the dead attempt's usage stays back-fillable against
+// its own attempt number after this runs — RUN-30's dead attempt had real
+// measured usage back-filled, and decrementing the counter would have made
+// that row collide with the successor's, the RUN-13 STEP-132 failure mode
+// ReleaseStepLeaseTx documents.
+//
+// The `attempt_base < attempt` guard keeps the base at or below the counter.
+// Without it, reaching this twice for one claim — or on a row whose base has
+// already caught up — would push the base PAST the counter, and
+// `attempt - attempt_base` would go negative: budget minted out of nothing.
+func ExemptStepAttemptFromBudgetTx(tx *sql.Tx, id int, nowMS int64) error {
+	_, err := tx.Exec(
+		`UPDATE steps SET attempt_base = attempt_base + 1, updated_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE id = ? AND attempt_base < attempt`,
+		nowMS, id,
+	)
+	if err != nil {
+		return fmt.Errorf("exempting the reaped attempt from the retry budget: %w", err)
+	}
+	return nil
+}
+
 // Artifact is one `artifacts` row: what a step produced.
 type Artifact struct {
 	ID     int
@@ -858,6 +899,21 @@ func ListRunArtifactsTx(tx *sql.Tx, runID int) ([]*Artifact, error) {
 // with no producing step is not this step's output.
 func ListStepArtifacts(db *sql.DB, stepID int) ([]*Artifact, error) {
 	return scanArtifacts(db.Query(artifactSelect+` WHERE step_id = ? ORDER BY id`, stepID))
+}
+
+// GetArtifactTx reads ONE artifact by id, inside a transaction — the reader
+// for an id pinned at activation (DKT-547's `issue.linked` form), where the
+// row may belong to another run entirely and the run-scoped listing above
+// cannot reach it. ErrNotFound when no such row exists.
+func GetArtifactTx(tx *sql.Tx, id int) (*Artifact, error) {
+	out, err := scanArtifacts(tx.Query(artifactSelect+` WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, ErrNotFound
+	}
+	return out[0], nil
 }
 
 func scanArtifacts(rows *sql.Rows, err error) ([]*Artifact, error) {

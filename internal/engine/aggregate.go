@@ -14,9 +14,9 @@ import (
 // engine-spec §2, verbatim, is the specification:
 //
 //	One is builtin and generic: `action = "aggregate"` with
-//	`params = { field, method = median|max|min, hold_spread, output }` computes
-//	over any ordered-enum payload field — median, spread-hold, and a recorded
-//	demotion trail work for severities, priorities, or tiers alike.
+//	`params = { field, method = median|max|min, hold_spread, output, route_at }`
+//	computes over any ordered-enum payload field — median, spread-hold, and a
+//	recorded demotion trail work for severities, priorities, or tiers alike.
 //
 // EVERY VALUE HERE IS COMPARED BY ITS POSITION IN THE USER'S DECLARED ORDER AND
 // BY NOTHING ELSE. `field` is a key to look up; the values under it are opaque
@@ -29,7 +29,7 @@ import (
 // what makes §9 item 5's determinism a property of the function rather than of
 // the environment it ran in.
 
-// Aggregate params, as §7.1's table names them. Core reads exactly these four
+// Aggregate params, as §7.1's table names them. Core reads exactly these five
 // keys of the opaque bag and V28 refuses any other, so "the engine ignored my
 // param" is a register-time sentence rather than a run-time mystery.
 const (
@@ -37,6 +37,13 @@ const (
 	ParamMethod     = "method"
 	ParamHoldSpread = "hold_spread"
 	ParamOutput     = "output"
+	// ParamRouteAt is the routing floor (DKT-593): a value of the field's
+	// declared order. Clusters whose reduced value sits at or above its
+	// position are emitted to the step's output payload — the wire the
+	// threshold and the loop read — and the rest go to the record. Like every
+	// other value here it is an OPAQUE TOKEN compared only by position: core
+	// does not know it is a severity, only where the author put it.
+	ParamRouteAt = "route_at"
 )
 
 // The three reductions of §7.3. There are exactly three because §2 names
@@ -89,19 +96,36 @@ type AggregateParams struct {
 	Method     string
 	HoldSpread int
 	Output     string
+	// RouteAt is the routing floor, or "" when the step declares none — the
+	// absent case, in which Aggregate emits every cluster exactly as it always
+	// has.
+	RouteAt string
 }
 
 // AggregateOutcome is one aggregation's result.
 type AggregateOutcome struct {
-	// Payload is the output payload, one element per input element (§7.6).
+	// Payload is the output payload, one element per emitted cluster (§7.6).
+	// Without `route_at` that is one element per input element; with it, only
+	// the clusters whose reduced value's position reached the floor.
 	Payload []map[string]any
-	// Held indexes the elements whose spread tripped `hold_spread`. It is a
-	// list rather than a count because §7.7's materialization has to be able to
-	// say WHICH clusters are open, and a count cannot.
+	// Held indexes the PAYLOAD elements whose spread tripped `hold_spread`. It
+	// is a list rather than a count because §7.7's materialization has to be
+	// able to say WHICH clusters are open, and a count cannot. The indices are
+	// positions in Payload — the payload the artifact records and held
+	// resolution re-reads (H2a) — which coincide with input positions whenever
+	// `route_at` is absent.
 	Held []int
+	// Recorded holds the clusters `route_at` routed below the floor (DKT-593):
+	// fully reduced — value, members, demotion trail — but destined for the
+	// record rather than the loop output. The caller writes them into the
+	// action's own audit row; they never enter the artifact payload, so the
+	// threshold and every downstream `inputs` reader see only the emitted set.
+	// Nil whenever `route_at` is absent, which is what keeps the absent case
+	// byte-identical to the pre-`route_at` builtin.
+	Recorded []map[string]any
 }
 
-// ParseAggregateParams reads §7.1's four keys out of the opaque bag.
+// ParseAggregateParams reads §7.1's five keys out of the opaque bag.
 //
 // It is the ONE place core reads inside `params`, and it reads exactly the keys
 // §2 names. The same rules run at register time (V28) so a typo'd
@@ -154,19 +178,35 @@ func ParseAggregateParams(params map[string]any) (AggregateParams, error) {
 			ParamHoldSpread, hold)
 	}
 
+	// `route_at` is optional; present, it must be a non-empty string. WHETHER
+	// the value has a position is the declared order's question and is asked in
+	// Aggregate, where the resolver is — the same split V28/V28a make at
+	// register time.
+	routeAt, err := stringParam(params, ParamRouteAt)
+	if err != nil {
+		return out, err
+	}
+	if _, present := params[ParamRouteAt]; present && routeAt == "" {
+		return out, fmt.Errorf("`params.%s` must be a non-empty string naming "+
+			"a value of `params.%s`'s declared order", ParamRouteAt, ParamField)
+	}
+
 	// V28's "no other keys". An unread key is a declaration the author believes
 	// is doing something; saying so at register time is the whole discipline.
 	for key := range params {
 		switch key {
-		case ParamField, ParamMethod, ParamHoldSpread, ParamOutput:
+		case ParamField, ParamMethod, ParamHoldSpread, ParamOutput, ParamRouteAt:
 			continue
 		}
 		return out, fmt.Errorf("`params.%s` is not a parameter of `aggregate`; "+
 			"it takes exactly %v", key,
-			[]string{ParamField, ParamMethod, ParamHoldSpread, ParamOutput})
+			[]string{ParamField, ParamMethod, ParamHoldSpread, ParamOutput, ParamRouteAt})
 	}
 
-	out = AggregateParams{Field: field, Method: method, HoldSpread: hold, Output: output}
+	out = AggregateParams{
+		Field: field, Method: method, HoldSpread: hold, Output: output,
+		RouteAt: routeAt,
+	}
 	return out, nil
 }
 
@@ -194,6 +234,24 @@ func Aggregate(
 			"field %q declares no `ordered_enum` in this step's pinned payload "+
 				"schema; median, max, and min are defined only over a declared order",
 			params.Field)
+	}
+
+	// `route_at` resolves to a POSITION, once, before any cluster is read. A
+	// value the declared order does not name is a step failure naming it —
+	// V28a makes this unreachable through `workflow register`, and it is
+	// reachable from a restored database, where it follows G4's discipline: no
+	// position, no guess. -1 means no floor; every cluster is emitted.
+	routeFloor := -1
+	if params.RouteAt != "" {
+		pos, ok := order.Position(params.Field, params.RouteAt)
+		if !ok {
+			return nil, fmt.Errorf(
+				"`params.%s`: the value %q is not in the order this step's "+
+					"pinned schema declares for %q, so it has no position; core "+
+					"does not guess a routing floor for an unknown value",
+				ParamRouteAt, params.RouteAt, params.Field)
+		}
+		routeFloor = pos
 	}
 
 	out := &AggregateOutcome{Payload: make([]map[string]any, 0, len(payloads))}
@@ -249,9 +307,32 @@ func Aggregate(
 			result[KeyDemotedFrom] = members[top.at]
 		}
 
+		// `route_at` (DKT-593): a cluster whose reduced value's position is
+		// below the floor goes to the RECORD, not the loop output. The routing
+		// is CORE's, over its own computed positions — the same comparison the
+		// threshold would make — which is what keeps a downstream fixer's "the
+		// reconciled set is the work" contract intact: the set it receives has
+		// already been routed, so it has nothing to filter.
+		//
+		// A HELD cluster is never routed below the floor. Its computed value is
+		// exactly the value the hold refuses to trust — the spread says the
+		// members disagree, and an operator resolving the hold may accept a
+		// different value entirely — so routing it out by that value would
+		// spend the decision the hold exists to ask. It is emitted, it gates
+		// the step as every held cluster does, and the floor's opinion waits
+		// for the operator's.
+		if routeFloor >= 0 && !held && taken.rank < routeFloor {
+			out.Recorded = append(out.Recorded, result)
+			continue
+		}
+
 		out.Payload = append(out.Payload, result)
 		if held {
-			out.Held = append(out.Held, i)
+			// The index is the element's position in the EMITTED payload — the
+			// payload the artifact records and H2a's `<step>-held@k#i` suffix
+			// addresses — which is `i` exactly whenever no cluster was routed
+			// below the floor.
+			out.Held = append(out.Held, len(out.Payload)-1)
 		}
 	}
 
@@ -419,13 +500,18 @@ func stringParam(params map[string]any, key string) (string, error) {
 
 // AggregateBody renders the human half of the artifact an aggregate produces.
 //
-// It names counts and nothing else: how many clusters were reduced and how many
-// are open. A body that summarized the VALUES would be core narrating an
-// instance's meaning back to its operator.
-func aggregateBody(step string, clusters, held int) string {
+// It names counts and nothing else: how many clusters were reduced, how many
+// are open, and how many the routing floor sent to the record. A body that
+// summarized the VALUES would be core narrating an instance's meaning back to
+// its operator.
+func aggregateBody(step string, clusters, held, recorded int) string {
 	body := fmt.Sprintf("aggregate on %s: %d cluster(s) reduced", step, clusters)
 	if held > 0 {
 		body += fmt.Sprintf(", %d held for an operator decision", held)
+	}
+	if recorded > 0 {
+		body += fmt.Sprintf(
+			", %d below the `route_at` floor, recorded and not routed", recorded)
 	}
 	return body
 }

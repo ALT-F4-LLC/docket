@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -16,8 +17,18 @@ var workflowShowCmd = &cobra.Command{
 	Short: "Show a registered workflow definition",
 	Long: `Show a registered workflow.
 
-Omitting @version selects the highest registered version. --source emits the
-stored TOML verbatim, which is the exact bytes that were registered and hashed.`,
+Omitting @version selects the highest registered version that is NOT
+deprecated — the same version a new run would bind. Deprecated versions are
+skipped; name them explicitly (name@version) to show one. A name whose every
+version is deprecated is reported as not found. --source emits the stored TOML
+verbatim, which is the exact bytes that were registered and hashed.
+
+The summary reports a SOURCE STATUS: whether the file at the recorded
+source_path still hashes to source_sha256 (matches), holds different bytes
+(drifted), cannot be read at all (unreadable), or names nothing this invocation
+can resolve — no path recorded, or a relative one (unchecked). Drift is reported,
+never repaired: a registered name@version is frozen, and registering an edited
+file is the install path's job.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowShow(cmd, args, getWriter(cmd))
@@ -51,6 +62,14 @@ func runWorkflowShow(cmd *cobra.Command, args []string, w *output.Writer) error 
 		return nil
 	}
 
+	// DKT-590: the two provenance columns, checked against each other instead
+	// of merely printed. `source_path` and `source_sha256` were reported side
+	// by side while the file at that path had been a different definition for
+	// four versions, and nothing in this output said so. The verdict rides on
+	// the row itself (populated nowhere else), so it reaches the JSON envelope
+	// and the human summary from one place.
+	wf.SourceStatus = engine.CheckWorkflowSource(wf.SourcePath, wf.SourceSHA256)
+
 	var message string
 	if !w.JSONMode {
 		message = renderWorkflowShow(wf)
@@ -77,6 +96,13 @@ func renderWorkflowShow(wf *model.Workflow) string {
 	fmt.Fprintf(&b, "sha256: %s\n", wf.SourceSHA256)
 	if wf.SourcePath != "" {
 		fmt.Fprintf(&b, "source: %s\n", wf.SourcePath)
+	}
+	// The verdict prints on its own line, ALWAYS when it was computed — a
+	// clean match included. "Nothing was said" and "the bytes still match" are
+	// different facts, and the whole defect this closes is a reader who could
+	// not tell them apart (DKT-590).
+	if wf.SourceStatus != nil {
+		fmt.Fprintf(&b, "source status: %s\n", engine.DescribeWorkflowSource(wf.SourceStatus))
 	}
 	// A retired version renders as retired. Without this the summary of a
 	// version that can no longer bind is indistinguishable from one that can.

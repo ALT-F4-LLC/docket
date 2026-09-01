@@ -718,7 +718,8 @@ func TestUnresolvedHoldIsSweptByALoopEntry(t *testing.T) {
 	testsupport.Must(t, err, "StepDefinitionsTx: %v", err)
 	routing, err := db.GetStepTx(tx, routingID)
 	testsupport.Must(t, err, "GetStepTx: %v", err)
-	swept, err := supersedeSweep(tx, routing, defs[routing.WorkflowID], 1, nowMS)
+	swept, err := supersedeSweep(tx, routing,
+		afterLoopDownstreamFor(defs[routing.WorkflowID], routing.StepName), 1, nowMS)
 	testsupport.Must(t, err, "supersedeSweep: %v", err)
 	if !contains(swept, "reconcile-held@0#0") {
 		t.Errorf("the sweep did not reach the materialized step: %v.\n\n"+

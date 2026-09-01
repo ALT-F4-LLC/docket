@@ -43,6 +43,18 @@ func newRunActivateCmd() *cobra.Command {
 Nothing executes. No gate, no action, no command runs during activation; files
 are read only to pin them by content hash.
 
+Every workflow bound HERE is checked against its own registered source_path: if
+the file at that path no longer hashes to the registered source_sha256, the
+activation REFUSES and names both hashes, because the run would otherwise bind
+and pin bytes that are not the ones at the path an operator reads. Nothing is
+re-registered to fix it — that is the install path's job. Three cases warn
+rather than refuse: a source that cannot be READ at all (the registered bytes
+still reproduce; only their provenance is gone), drift under a binding INHERITED
+from an earlier activation (a mid-run edit is deliberately a non-event for a run
+already under way), and drift while registration.auto is FALSE, where binding
+what is registered rather than what the corpus now says is the whole point of
+the setting.
+
 Instance config is scanned from EVERY configured root, in order. With the shared
 store that is ~/.docket/config/ first, then this checkout's .docket/config/ if it
 has one; with DOCKET_PATH or a repo-local store it is that store's config/ alone.
@@ -111,6 +123,13 @@ type activateResult struct {
 	// where every issue declared its scope carries no key at all rather than an
 	// empty one.
 	ScopeWarnings []engine.ScopeWarning `json:"scope_warnings,omitempty"`
+	// SourceWarnings is DKT-590's array: bound workflows whose registered
+	// source file could not be verified against `source_sha256`. Drift on a
+	// binding this activation MADE refuses instead, so what reaches this key
+	// is an unreadable source, drift under a binding inherited from an earlier
+	// activation, or drift while `registration.auto` is false. `omitempty`, so
+	// the ordinary run whose sources all verify carries no key at all.
+	SourceWarnings []engine.SourceWarning `json:"source_warnings,omitempty"`
 	// Fences is §7.7 S2's array: the same data the human report renders,
 	// carrying the RAW stored command bytes — encoding/json escapes controls
 	// by contract and the consumer is a program, so quoting on top would
@@ -208,6 +227,15 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.IssueID)
 	}
 
+	// DKT-590: a bound workflow whose recorded source could not be verified.
+	// On the warning channel because the refusing case never gets here —
+	// activation returns a CONFLICT for drift under a binding it just made —
+	// so what reaches this loop is provenance that no longer resolves, or an
+	// edit RA2 deliberately keeps out of a run already under way.
+	for _, warning := range result.SourceWarnings {
+		w.Warn("workflow %s: %s", warning.Workflow, warning.Reason)
+	}
+
 	// §7.7 S1: every harvested fenced command, verbatim, with its trust status
 	// — so an operator sees `unmatched` commands BEFORE the run rather than
 	// after. It renders through the escaping renderer (T18): the bytes are
@@ -241,6 +269,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		FencesHarvested:   result.FencesHarvested,
 		ContextWarnings:   result.ContextWarnings,
 		ScopeWarnings:     result.ScopeWarnings,
+		SourceWarnings:    result.SourceWarnings,
 		Fences:            result.Fences,
 		GatePreflight:     result.GatePreflight,
 		HoldPolicy:        result.HoldPolicy,

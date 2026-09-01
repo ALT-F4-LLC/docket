@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -133,6 +134,23 @@ func warnStaleTargets(w *output.Writer, stale []engine.StaleTarget) {
 	}
 }
 
+// warnUnclaimedTargets renders DKT-993's advisory, one line per back-filled
+// step no worker ever claimed.
+//
+// The rows ARE recorded — the engine's contract is warn-and-record, not refuse
+// — so the line says so explicitly. A conductor that reads "recorded" and meant
+// it can move on; one that did not now has the step id its journal mis-joined
+// onto, which is the whole gap RUN-66 left: the bad rows landed in silence and
+// surfaced only as unexplained spend in `run report`.
+func warnUnclaimedTargets(w *output.Writer, unclaimed []engine.UnclaimedTarget) {
+	for _, u := range unclaimed {
+		w.Warn("%s (%s) is %s and was never claimed — no worker ever held it, "+
+			"so it reported nothing to reconstruct. The row is recorded; check "+
+			"the journal that produced it before trusting the spend",
+			u.Step, exec.Render(u.Instance), u.Status)
+	}
+}
+
 // warnPinDrift renders DKT-408's advisory, one line per unsound pin, plus the
 // recovery verb — steps reading these refs will refuse at claim/render, and
 // the conductor should learn that before spending a wave, not from it.
@@ -207,24 +225,7 @@ func runDispatchVerify(cmd *cobra.Command, w *output.Writer) error {
 		return runErr(err)
 	}
 	if mismatch != nil {
-		// The differing BYTES, both sides, escaped on their way to a terminal:
-		// a manifest row carries an executor hint and a metadata bag, which are
-		// workflow-author strings and therefore untrusted text (gates-trust
-		// §5.7 R11).
-		//
-		// The per-row summary rides ABOVE the refusal (DKT-243). The refusal
-		// itself still names the first offending row and shows its bytes —
-		// unchanged — but a dispatch where several steps moved mid-flight used
-		// to report one of them and hide the rest, costing a manual per-step
-		// confirm round before a `close` that reconciles the same state
-		// without complaint.
-		return cmdErr(fmt.Errorf(
-			"%s does not match its current rendering (manifest row %d)\n%s"+
-				"  stored:     %s\n"+
-				"  recomputed: %s",
-			result.Dispatch, mismatch.Position, renderRowVerdicts(result.Rows),
-			renderRowOrAbsent(mismatch.Stored), renderRowOrAbsent(mismatch.Computed)),
-			output.ErrConflict)
+		return mismatchConflict("", result, mismatch)
 	}
 
 	warnStaleTargets(w, result.StaleTargets)
@@ -236,6 +237,35 @@ func runDispatchVerify(cmd *cobra.Command, w *output.Writer) error {
 	}
 	w.Success(result, message)
 	return nil
+}
+
+// mismatchConflict is P9's refusal, rendered once for both the verbs that can
+// raise it (`dispatch verify` and `dispatch close --backfill-from`).
+//
+// The differing BYTES, both sides, escaped on their way to a terminal: a
+// manifest row carries an executor hint and a metadata bag, which are
+// workflow-author strings and therefore untrusted text (gates-trust §5.7 R11).
+//
+// The per-row summary rides ABOVE the refusal (DKT-243). The refusal itself
+// still names the first offending row and shows its bytes — unchanged — but a
+// dispatch where several steps moved mid-flight used to report one of them and
+// hide the rest, costing a manual per-step confirm round before a `close` that
+// reconciles the same state without complaint.
+//
+// `prefix` is empty for `dispatch verify`, so that verb's refusal is
+// byte-identical to what it has always printed; the reconcile path passes its
+// stage name (DKT-580) so an operator learns WHICH of three stages refused
+// without the diagnostic itself being reworded.
+func mismatchConflict(
+	prefix string, result *engine.VerifyResult, mismatch *engine.RowMismatch,
+) error {
+	return cmdErr(fmt.Errorf(
+		"%s%s does not match its current rendering (manifest row %d)\n%s"+
+			"  stored:     %s\n"+
+			"  recomputed: %s",
+		prefix, result.Dispatch, mismatch.Position, renderRowVerdicts(result.Rows),
+		renderRowOrAbsent(mismatch.Stored), renderRowOrAbsent(mismatch.Computed)),
+		output.ErrConflict)
 }
 
 // renderRowVerdicts is DKT-243's per-row block: every stored row that is not
@@ -335,7 +365,27 @@ needed a dispatch that was not open. Without the flag, closing a manifest that
 is not open is still a conflict.
 
 The acceptance clears the discrepancy for next and dispatch open, not only for
-the dispatch row — those two verbs refuse on exactly the same conditions.`,
+the dispatch row — those two verbs refuse on exactly the same conditions.
+
+--backfill-from PATH closes a wave in ONE invocation: it back-fills the usage in
+PATH, verifies the manifest, and closes it, refusing at whichever stage fails
+with that stage named. PATH is the same JSON array ` + "`backfill-usage --from-json`" + `
+reads — [{"step","unit","quantity"}, ...] — and "-" reads stdin.
+
+  docket dispatch close --run RUN-44 --backfill-from usage.json
+
+It is exactly the three verbs, in the one order they can run in, calling the
+same engine functions they call. Each stage is all-or-nothing on its own: a
+failed back-fill runs no verify and no close, a failed verify runs no close, and
+nothing is ever half-closed. --source and --on-duplicate mean what they mean on
+` + "`backfill-usage`" + ` and apply to the back-fill stage, as does its
+never-claimed-target warning: a conductor that traded three invocations for one
+loses no advisory.
+
+An open dispatch is REQUIRED with --backfill-from, because the verify stage
+needs a manifest to compare. --accept-missing-usage still applies, to the close
+stage; the standalone verbs are unchanged and remain the way to run the stages
+one at a time.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchClose(cmd, getWriter(cmd))
 	},
@@ -350,6 +400,14 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 	}
 	accept, _ := cmd.Flags().GetBool("accept-missing-usage")
 
+	// DKT-580: with `--backfill-from` this verb is the whole wave-close
+	// pipeline. Without it, every line below is what it has always been —
+	// criterion 2 is that the plain close did not change, so the reconcile is a
+	// branch taken on the flag rather than a rewrite of the default path.
+	if from, _ := cmd.Flags().GetString("backfill-from"); from != "" {
+		return runDispatchReconcile(cmd, w, runID, from, accept)
+	}
+
 	outcome, err := engine.NewEngine().CloseDispatch(conn, runID, accept, model.NowMS())
 	if err != nil {
 		return runErr(err)
@@ -361,6 +419,104 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 	}
 	w.Success(outcome, message)
 	return nil
+}
+
+// runDispatchReconcile is `dispatch close --backfill-from` (DKT-580): one
+// invocation for back-fill, verify, and close.
+//
+// The conductor's wave close was four typed commands with a temp file between
+// two of them, repeated once per wave. Nothing in it is a decision — the order
+// is forced and the arguments are the same run — so every retype was a chance
+// to point at the wrong journal or skip the verify, and a skipped verify is how
+// a manifest closes over a ready set that moved underneath it.
+func runDispatchReconcile(
+	cmd *cobra.Command, w *output.Writer, runID int, from string, accept bool,
+) error {
+	rows, err := reconcileRows(cmd, from)
+	if err != nil {
+		return err
+	}
+	source, _ := cmd.Flags().GetString("source")
+	onDuplicate, _ := cmd.Flags().GetString("on-duplicate")
+
+	outcome, err := engine.NewEngine().ReconcileDispatch(
+		getDB(cmd), runID, rows, source, onDuplicate, accept, model.NowMS())
+	if err != nil {
+		return reconcileErr(err)
+	}
+
+	// The same advisories the standalone verbs emit, from the same stages: a
+	// conductor that switched to one invocation must not lose a warning it
+	// would have seen across three.
+	for _, sk := range outcome.Backfill.Skipped {
+		w.Warn("skipped %s (%s) attempt %d: %q usage already recorded",
+			sk.Step, exec.Render(sk.Instance), sk.Attempt, sk.Unit)
+	}
+	warnUnclaimedTargets(w, outcome.Backfill.Unclaimed)
+	warnStaleTargets(w, outcome.Verify.StaleTargets)
+
+	var message string
+	if !w.JSONMode {
+		message = renderReconcileOutcome(outcome)
+	}
+	w.Success(outcome, message)
+	return nil
+}
+
+// reconcileErr maps a staged failure onto the taxonomy.
+//
+// A verify-stage MISMATCH is the one refusal whose diagnostic cannot be
+// rebuilt from the error text — P9's evidence is the differing bytes and
+// DKT-243's verdict block, both carried on the result — so it is rendered
+// through the same function `dispatch verify` renders it with, with the stage
+// named in front. Every other stage failure keeps its own message and its own
+// exit code: StageError unwraps to the stage's error, so runErr's lookup finds
+// the code the standalone verb would have exited with.
+func reconcileErr(err error) error {
+	var stage *engine.StageError
+	if errors.As(err, &stage) && stage.Mismatch != nil {
+		return mismatchConflict(
+			stage.Stage+" stage: ", stage.Verify, stage.Mismatch)
+	}
+	return runErr(err)
+}
+
+// reconcileRows reads `--backfill-from`.
+//
+// It is `backfill-usage --from-json`'s reader, deliberately: the file a
+// conductor pipes into one verb is the file it pipes into the other, and a
+// second parser would be a second set of rules for the same bytes.
+//
+// A DIRECTORY IS REFUSED BY NAME. DKT-580 describes the flag as taking "a wave
+// transcript dir or usage json", and core cannot read the former: a transcript
+// tree is the harness's own format, and core inventing a reader for it would be
+// core holding an opinion about how a relay records its spend — the same
+// opinion `--source` and `unit` exist to avoid holding. The refusal names the
+// tool that turns one into the other rather than failing as an unreadable file.
+func reconcileRows(cmd *cobra.Command, path string) ([]engine.BackfillRow, error) {
+	if path != "-" {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return nil, cmdErr(fmt.Errorf(
+				"--backfill-from %s is a directory; core reads usage rows, not "+
+					"transcript trees. Pass the usage JSON a journal tool "+
+					`(wave-usage) produces — a JSON array of `+
+					`{"step","unit","quantity"} — or "-" to pipe it on stdin`,
+				path), output.ErrValidation)
+		}
+	}
+	return backfillRowsFromJSON(cmd, path)
+}
+
+// renderReconcileOutcome is the human view: one line per stage, in the order
+// they ran, each reusing the wording its standalone verb prints.
+func renderReconcileOutcome(o *engine.ReconcileOutcome) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Back-filled %d usage row(s) across %d step(s) as %q\n",
+		o.Backfill.Written, o.Backfill.Steps, o.Backfill.Source)
+	fmt.Fprintf(&b, "%s verified: the manifest matches the current ready set (%s)\n",
+		o.Verify.Dispatch, verdictTally(o.Verify.Rows))
+	b.WriteString(renderCloseOutcome(o.Close))
+	return b.String()
 }
 
 // ---- backfill-usage --------------------------------------------------------
@@ -399,6 +555,16 @@ skipped. Cross-wave duplicates are structural — a gate probed in wave N and
 seated in wave N+1 emits usage in both journals — and refusing the batch for
 them meant hand-filtering rows before every re-run (DKT-241).
 
+A step NO WORKER EVER CLAIMED is back-filled anyway, and WARNED ABOUT by name
+and status on stderr — plus an ` + "`unclaimed`" + ` array in ` + "`--json`" + `. Trusting the
+relay stays the default: core cannot know that a step which never claimed cost
+nothing, so it records the row. What it will not do is stay silent. A wave
+journal whose join heuristic mis-attributes a claimant's usage lands it on a
+` + "`pending`" + ` or swept-` + "`superseded`" + ` step, and ` + "`run report`" + ` then shows spend
+on work that never ran with nothing to say where it came from. The warning names
+the step so the journal that produced the row can be checked; a step that ran
+and simply could not report — the case this verb exists for — never triggers it.
+
 ` + "`docket run report`" + ` lists what is already recorded, per step, under
 ` + "`step_usage`" + `: that is the verb to check before re-running.
 
@@ -420,6 +586,12 @@ type backfillOutcome struct {
 	// Skipped names the rows --on-duplicate=skip passed over. `omitempty`, so
 	// the default refusing mode's payload is unchanged.
 	Skipped []engine.SkippedRow `json:"skipped,omitempty"`
+	// Unclaimed names the target steps no worker ever claimed (DKT-993). It
+	// rides the payload because `Warn` is silent in JSON mode and a conductor
+	// runs with `--json`: an advisory only a human could see is the same
+	// silence this field exists to end. `omitempty`, so an ordinary back-fill's
+	// payload is byte-identical to what it was.
+	Unclaimed []engine.UnclaimedTarget `json:"unclaimed,omitempty"`
 }
 
 func runDispatchBackfillUsage(cmd *cobra.Command, w *output.Writer) error {
@@ -449,10 +621,12 @@ func runDispatchBackfillUsage(cmd *cobra.Command, w *output.Writer) error {
 		w.Warn("skipped %s (%s) attempt %d: %q usage already recorded",
 			sk.Step, exec.Render(sk.Instance), sk.Attempt, sk.Unit)
 	}
+	warnUnclaimedTargets(w, result.Unclaimed)
 
 	outcome := &backfillOutcome{
 		Run: model.FormatRunID(runID), Rows: result.Written,
 		Steps: result.Steps, Source: result.Source, Skipped: result.Skipped,
+		Unclaimed: result.Unclaimed,
 	}
 
 	var message string
@@ -616,6 +790,77 @@ func renderCloseOutcome(o *engine.CloseOutcome) string {
 	return b.String()
 }
 
+// ---- waive-target ----------------------------------------------------------
+
+var dispatchWaiveTargetCmd = &cobra.Command{
+	Use:   "waive-target",
+	Short: "Stop an adjudicated stale-target warning from re-firing",
+	Long: `Record that a stale-target warning was investigated and ruled acceptable.
+
+The stale-target advisory (` + "`dispatch open`/`verify`" + `) re-computes on every
+invocation and, without this verb, has no memory: a warning an operator already
+investigated re-fires unchanged at every subsequent open and verify of the same
+(step, target) pair, costing an investigation each time.
+
+A waiver names one target sha and one or more step instances — exactly the
+strings the warning itself printed:
+
+  docket dispatch waive-target --run RUN-52 --target 12f5006a \
+      --step "review@1#0" --step "review@1#1" \
+      --note "fix integrated as b68bf23; divergence is the later format pass"
+
+The sha may be the 12-character prefix the warning renders (7 hex characters
+minimum); matching is case-insensitive prefix against the recorded target.
+
+THE WARNING MACHINERY STILL RUNS. A waiver suppresses only the exact pair it
+names: the same step warning about a DIFFERENT sha, or the same sha on a step
+no waiver names, warns exactly as before — a new divergence never rides an old
+ruling. Waivers are RUN-SCOPED and die with their run; each one is recorded as
+a ` + "`stale-target-waived`" + ` event, so the feed shows what standing precedent was
+minted and why.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runDispatchWaiveTarget(cmd, getWriter(cmd))
+	},
+}
+
+// waiveTargetOutcome is what the verb reports: the run and the waivers minted.
+type waiveTargetOutcome struct {
+	Run     string                `json:"run"`
+	Waivers []engine.WaivedTarget `json:"waivers"`
+}
+
+func runDispatchWaiveTarget(cmd *cobra.Command, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	runID, err := dispatchRunID(cmd)
+	if err != nil {
+		return err
+	}
+	steps, _ := cmd.Flags().GetStringSlice("step")
+	target, _ := cmd.Flags().GetString("target")
+	note, _ := cmd.Flags().GetString("note")
+
+	waivers, err := engine.NewEngine().WaiveStaleTargets(
+		conn, runID, steps, target, note, model.NowMS())
+	if err != nil {
+		return runErr(err)
+	}
+
+	outcome := &waiveTargetOutcome{Run: model.FormatRunID(runID), Waivers: waivers}
+	var message string
+	if !w.JSONMode {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Waived the stale-target warning for %.12s on %d step(s):",
+			target, len(waivers))
+		for _, wv := range waivers {
+			fmt.Fprintf(&b, "\n  %s (waiver %d)", wv.Instance, wv.ID)
+		}
+		message = b.String()
+	}
+	w.Success(outcome, message)
+	return nil
+}
+
 // ---- shared flags ----------------------------------------------------------
 
 // dispatchRunID resolves the `--run` every dispatch verb requires.
@@ -649,7 +894,7 @@ func ackSeqs(cmd *cobra.Command) ([]int64, error) {
 func init() {
 	for _, c := range []*cobra.Command{
 		dispatchOpenCmd, dispatchVerifyCmd, dispatchCloseCmd, dispatchAbandonCmd,
-		dispatchBackfillUsageCmd,
+		dispatchBackfillUsageCmd, dispatchWaiveTargetCmd,
 	} {
 		c.Flags().String("run", "", "The run whose dispatch this is (required)")
 		_ = c.MarkFlagRequired("run")
@@ -664,6 +909,20 @@ func init() {
 
 	dispatchCloseCmd.Flags().Bool("accept-missing-usage", false,
 		"Close despite missing-usage discrepancies, recording the acceptance")
+
+	// DKT-580's one-verb wave close. `--source` and `--on-duplicate` are the
+	// SAME flags `backfill-usage` declares, with the same defaults, because
+	// they configure the same stage; they are inert without `--backfill-from`.
+	dispatchCloseCmd.Flags().String("backfill-from", "",
+		`Back-fill this JSON array of {"step","unit","quantity"}, verify, `+
+			`then close, in one invocation; "-" reads stdin`)
+	dispatchCloseCmd.Flags().String("on-duplicate", "refuse",
+		"With --backfill-from: what to do with a row whose (step, attempt, "+
+			"unit) is already recorded: refuse the batch, or skip that row "+
+			"and report it")
+	dispatchCloseCmd.Flags().String("source", "",
+		"With --backfill-from: who measured it; recorded on every row "+
+			"(default \"backfilled\")")
 
 	dispatchAbandonCmd.Flags().String("reason", "",
 		"Why the manifest is being given up on; recorded in the event")
@@ -684,7 +943,19 @@ func init() {
 	dispatchBackfillUsageCmd.Flags().String("source", "",
 		"Who measured it; recorded on every row (default \"backfilled\")")
 
+	// DKT-742's waiver: the step instances and target sha exactly as the
+	// stale-target warning printed them.
+	dispatchWaiveTargetCmd.Flags().StringSlice("step", nil,
+		"Step instance the warning named, e.g. \"review@1#0\" (repeatable)")
+	dispatchWaiveTargetCmd.Flags().String("target", "",
+		"The warned target sha — full, or the >=7-char prefix the warning renders")
+	dispatchWaiveTargetCmd.Flags().String("note", "",
+		"Why the warning is adjudicated acceptable; recorded on every waiver")
+	_ = dispatchWaiveTargetCmd.MarkFlagRequired("step")
+	_ = dispatchWaiveTargetCmd.MarkFlagRequired("target")
+
 	dispatchCmd.AddCommand(dispatchOpenCmd, dispatchVerifyCmd,
-		dispatchCloseCmd, dispatchAbandonCmd, dispatchBackfillUsageCmd)
+		dispatchCloseCmd, dispatchAbandonCmd, dispatchBackfillUsageCmd,
+		dispatchWaiveTargetCmd)
 	rootCmd.AddCommand(dispatchCmd)
 }

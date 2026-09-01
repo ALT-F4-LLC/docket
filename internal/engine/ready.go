@@ -1444,7 +1444,7 @@ func (s *Scheduler) claimablePass(sorted []*db.Step, evicted map[int]bool) []*db
 			admitted[step.Class]++
 		}
 		s.grantScope(step, granted)
-		admittedCost += step.ExpectedCost
+		admittedCost += reservableCost(step)
 		out = append(out, step)
 	}
 	return out
@@ -1528,7 +1528,10 @@ func (s *Scheduler) offerBudget(step *db.Step, admittedCost float64) bool {
 	if s.budget.unlimited() {
 		return true
 	}
-	return s.budget.spend()+admittedCost+step.ExpectedCost <= s.budget.cap
+	// reservableCost, not ExpectedCost: a vote step's declared cost is already
+	// in the floor at materialization (DKT-584), so the offer must not reserve
+	// it a second time.
+	return s.budget.spend()+admittedCost+reservableCost(step) <= s.budget.cap
 }
 
 func (s *Scheduler) priorityOf(step *db.Step) int {

@@ -292,6 +292,43 @@ func TestParseRelationType(t *testing.T) {
 	}
 }
 
+// TestParseRelationDirection pins the two-directional vocabulary DKT-547's
+// `issue.linked.<relation>.<kind>` input form addresses: canonical tokens read
+// a relation from its source, inverse tokens from its target, and both
+// spellings normalize hyphens like ParseRelationType.
+func TestParseRelationDirection(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    RelationType
+		inverse bool
+		wantErr bool
+	}{
+		{"blocks", RelationBlocks, false, false},
+		{"blocked_by", RelationBlocks, true, false},
+		{"blocked-by", RelationBlocks, true, false},
+		{"depends_on", RelationDependsOn, false, false},
+		{"dependency_of", RelationDependsOn, true, false},
+		{"dependency-of", RelationDependsOn, true, false},
+		{"relates_to", RelationRelatesTo, false, false},
+		{"duplicates", RelationDuplicates, false, false},
+		{"duplicate_of", RelationDuplicates, true, false},
+		{"specified_by", "", false, true},
+		{"", "", false, true},
+	}
+	for _, tt := range tests {
+		got, inverse, err := ParseRelationDirection(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ParseRelationDirection(%q) error = %v, wantErr %v",
+				tt.input, err, tt.wantErr)
+			continue
+		}
+		if got != tt.want || inverse != tt.inverse {
+			t.Errorf("ParseRelationDirection(%q) = (%q, %v), want (%q, %v)",
+				tt.input, got, inverse, tt.want, tt.inverse)
+		}
+	}
+}
+
 func TestRelationTypeInverse(t *testing.T) {
 	tests := []struct {
 		rt   RelationType

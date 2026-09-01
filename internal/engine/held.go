@@ -45,6 +45,11 @@ import (
 type holdTally struct {
 	rule   string
 	voters []string
+	// cost is `vote.hold.cost` (DKT-584): the declared expected_cost a hold
+	// minted as `vote` carries, so the panel the engine convenes is visible to
+	// the budget floor the way a declared vote step's cost is. 0 — the default
+	// — mints exactly the prior row.
+	cost float64
 }
 
 // configured reports whether held steps are minted as vote steps.
@@ -66,7 +71,14 @@ func loadHoldTally(conn *sql.DB, runID int) (holdTally, error) {
 	if err != nil {
 		return holdTally{}, err
 	}
-	return holdTally{rule: rule.Value, voters: db.SplitNameList(voters.Value)}, nil
+	cost, err := db.GetConfig(conn, projectID, db.KeyVoteHoldCost)
+	if err != nil {
+		return holdTally{}, err
+	}
+	return holdTally{
+		rule: rule.Value, voters: db.SplitNameList(voters.Value),
+		cost: parseHoldCost(cost.Value),
+	}, nil
 }
 
 // loadHoldTallyTx is loadHoldTally inside a caller's transaction, for the
@@ -81,7 +93,39 @@ func loadHoldTallyTx(tx *sql.Tx, projectID int) (holdTally, error) {
 	if err != nil {
 		return holdTally{}, err
 	}
-	return holdTally{rule: rule.Value, voters: db.SplitNameList(voters.Value)}, nil
+	cost, err := db.GetConfigTx(tx, projectID, db.KeyVoteHoldCost)
+	if err != nil {
+		return holdTally{}, err
+	}
+	return holdTally{
+		rule: rule.Value, voters: db.SplitNameList(voters.Value),
+		cost: parseHoldCost(cost.Value),
+	}, nil
+}
+
+// parseHoldCost reads `vote.hold.cost`'s stored value. `config set` validated
+// it as a non-negative number on the way in, so a malformed value can only be
+// a hand-edited store — tolerated as 0 rather than failing the saga that is
+// materializing a hold, the same tolerance configuredBudgetDefault keeps for
+// `budget.default`.
+func parseHoldCost(value string) float64 {
+	var cost float64
+	if _, err := fmt.Sscanf(value, "%g", &cost); err != nil || cost < 0 {
+		return 0
+	}
+	return cost
+}
+
+// heldStepCost is the expected_cost a materialized held step is minted with:
+// the configured `vote.hold.cost` when the hold convenes a PANEL (kind
+// `vote`), and 0 when one operator decides (kind `human`) — an operator's
+// decision is not a panel's spend, and charging the floor for it would make
+// the configured number mean two different things.
+func (t holdTally) heldStepCost() float64 {
+	if t.configured() {
+		return t.cost
+	}
+	return 0
 }
 
 // heldStepKind is the kind a materialized held step is MINTED as.
@@ -208,6 +252,10 @@ func materializeHeldCluster(
 		// approve/reject still apply once a failed tally parks it.
 		Kind:   tally.heldStepKind(),
 		Status: db.StepPending,
+		// DKT-584: a hold minted as a VOTE step carries the configured
+		// `vote.hold.cost` so the panel is visible to the budget floor at
+		// materialization; a `human` hold stays at 0, the prior row exactly.
+		ExpectedCost: tally.heldStepCost(),
 		// H4: the flag that tells a reader a declared question from a
 		// computed one.
 		Materialized: true,
@@ -725,7 +773,11 @@ func resolveHeldPayload(
 			stillHeld++
 		}
 	}
-	body = aggregateBody(routingStep.Instance, len(elements), stillHeld)
+	// The recorded count is 0 on purpose: this body is regenerated from the
+	// RESOLVED PAYLOAD, and `route_at`'s below-floor clusters were never in
+	// it — they live in the aggregate's own `action_results` row, which this
+	// supersession does not touch.
+	body = aggregateBody(routingStep.Instance, len(elements), stillHeld, 0)
 	if operatorResolved > 0 {
 		body += fmt.Sprintf(", %d operator-resolved", operatorResolved)
 	}

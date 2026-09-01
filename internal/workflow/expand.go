@@ -97,32 +97,61 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 //
 // Two sets of steps instantiate at ordinal k, and only these two:
 //
-//   - clause (3): `loop = true` steps, which ordinary expansion excludes
-//     ("excluded from ordinary expansion ... instantiate at ordinal k");
-//   - clause (4): the `after_loop` step AND ITS DOWNSTREAM CHAIN
+//   - clause (3): the SERVING `loop = true` steps, supplied as `bodies` —
+//     the triggering step's cluster (LoopBodiesFor), which is every body when
+//     no `serves` is declared anywhere;
+//   - clause (4): the cluster's `after_loop` roots AND THEIR DOWNSTREAM CHAIN
 //     ("`after_loop` and its downstream chain re-instantiate at ordinal k"),
 //     supplied as `downstream` because the chain is a property of the
 //     definition's shape that the caller already computed for the sweep.
 //
+// Both sets are the CALLER's, computed for the entry's triggering step, so
+// the instantiation and the supersede sweep read one answer to "what does
+// this cluster re-run" rather than two that can drift.
+//
 // EVERYTHING ELSE IS LEFT AT ITS EXISTING ORDINAL. `implement` is upstream of
 // `after_loop`: it does not re-run, its artifact is not reproduced, and §7.4's
 // per-input fallback exists precisely so a step at ordinal k can still bind it.
+// A body OUTSIDE the triggering cluster is likewise left alone — its rounds are
+// its own triggers' to mint (§11.3 cluster scoping, DKT-544).
 //
 // Sharing Expand's per-step body is the point. The status/class/fanout/metadata
 // rules are applied by one function for both ordinals, so ordinal 1's topology
 // cannot drift from ordinal 0's — a second implementation of "one row per hint,
 // in declared order" is exactly how it would.
-func ExpandOrdinal(def *Definition, s Subject, ordinal int, downstream map[string]bool) []StepInstance {
+func ExpandOrdinal(
+	def *Definition, s Subject, ordinal int, bodies, downstream map[string]bool,
+) []StepInstance {
 	out := make([]StepInstance, 0, len(def.Steps))
 
 	for _, step := range def.Steps {
 		// Clause (3) or clause (4); a step in neither set does not re-instantiate.
-		if !step.Loop && !downstream[step.Name] {
+		if !(step.Loop && bodies[step.Name]) && !downstream[step.Name] {
 			continue
 		}
 		out = append(out, expandStep(step, s, ordinal)...)
 	}
 
+	return out
+}
+
+// ServesTrigger reports whether a step's loop-cluster declaration covers a
+// triggering step name. An empty `serves` covers EVERY trigger — the
+// backward-compatible reading under which a workflow with no `serves`
+// anywhere has one cluster spanning every body and root (§11.3).
+func ServesTrigger(step *Step, trigger string) bool {
+	return len(step.Serves) == 0 || slices.Contains(step.Serves, trigger)
+}
+
+// LoopBodiesFor is the set of `loop = true` step names serving one trigger —
+// §11.3 clause (3) scoped to the step whose routing entered the loop.
+func LoopBodiesFor(def *Definition, trigger string) map[string]bool {
+	out := make(map[string]bool)
+	for _, step := range def.Steps {
+		if step.Loop && ServesTrigger(step, trigger) {
+			out[step.Name] = true
+		}
+	}
 	return out
 }
 

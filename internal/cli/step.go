@@ -117,7 +117,19 @@ Human and vote steps are NOT claimable: they are gates, not work. A claim
 against one is refused naming its class.
 
 With --render, the assembled work packet is returned instead of the bundle, in
-the same atomic call.`,
+the same atomic call.
+
+With --metadata, an opaque KV bag is merged onto the step's own IN THE SAME
+COMMIT as the claim. Facts a dispatcher already knows when it hands the step
+out belong here rather than at completion: a step that fails or crashes never
+completes, and a bag deferred to completion is a bag those steps never record.
+
+With --cost-multiplier, this claim accrues the step's declared expected_cost
+scaled by the given factor, and the run's budget cap is checked against the
+scaled cost before the claim commits. It is the dispatcher's declaration that
+it resolved the step to a variant priced differently from what the definition
+guessed — an escalated retry costs what it costs, at the cap, the moment it is
+claimed.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
@@ -145,31 +157,52 @@ the same atomic call.`,
 			ttlMS = ttl.Milliseconds()
 		}
 
+		metadata, _ := cmd.Flags().GetString("metadata")
+
+		// DKT-867: the dispatcher's variant scaling. `Changed` distinguishes an
+		// explicit value from the unset default, so an explicit 0 — a free
+		// claim, which would erase an accrual the workflow author declared —
+		// is refusable rather than indistinguishable from "not passed".
+		var costMultiplier float64
+		if cmd.Flags().Changed("cost-multiplier") {
+			costMultiplier, _ = cmd.Flags().GetFloat64("cost-multiplier")
+			if costMultiplier <= 0 {
+				return cmdErr(fmt.Errorf(
+					"--cost-multiplier must be positive, got %g", costMultiplier),
+					output.ErrValidation)
+			}
+		}
+
 		label := stepLabel(id)
-		// The gate-bearing claim: a step's `pre = true` gates run HERE, at
-		// claim, with their results in the returned bundle (§11.1, §7.6). A
-		// step with no pre-gates takes the identical single-transaction path.
-		result, err := engine.NewEngine().ClaimStepWithGates(conn, id, engine.ClaimOptions{
-			Owner: owner, TTLOverride: ttlMS, NowMS: model.NowMS(),
-		})
-		if err != nil {
-			return stepErr(err, label)
+		claimOpts := engine.ClaimOptions{
+			Owner: owner, TTLOverride: ttlMS, Metadata: metadata,
+			CostMultiplier: costMultiplier, NowMS: model.NowMS(),
 		}
 
 		render, _ := cmd.Flags().GetBool("render")
-		templatePath, _ := cmd.Flags().GetString("template")
 		if render {
 			// `claim --render` returns the packet instead of the bundle, in the
-			// same call (§6.11). The claim has already committed, so this is a
-			// pure formatting step over what it returned.
+			// same call (§6.11) — and the render is part of the claim SAGA
+			// (DKT-804): a packet that cannot render refuses BEFORE the lease
+			// is taken, so a validation failure leaves the step claimable
+			// rather than stranding it claimed with no token issued.
+			templatePath, _ := cmd.Flags().GetString("template")
 			executor, _ := cmd.Flags().GetString("executor")
-			packet, err := engine.RenderStepAs(conn, id, templatePath, executor, model.NowMS())
+			result, packet, err := engine.NewEngine().ClaimStepRendered(
+				conn, id, claimOpts, templatePath, executor)
 			if err != nil {
 				return stepErr(err, label)
 			}
 			return emitClaim(w, result, packet)
 		}
 
+		// The gate-bearing claim: a step's `pre = true` gates run HERE, at
+		// claim, with their results in the returned bundle (§11.1, §7.6). A
+		// step with no pre-gates takes the identical single-transaction path.
+		result, err := engine.NewEngine().ClaimStepWithGates(conn, id, claimOpts)
+		if err != nil {
+			return stepErr(err, label)
+		}
 		return emitClaim(w, result, nil)
 	},
 }
@@ -263,11 +296,16 @@ can, and this verb is the channel for what it observed.
 
 TOKEN-FREE, like approve and resolve: the authority is repository access plus
 the recorded assertion (--reason, required) that the holder is dead. Every
-consequence is the expiry reap's own — the same lease-reaped event (with
-data.forced and the reason), the same write-class headroom hold awaiting
+scheduling consequence is the expiry reap's own — the same lease-reaped event
+(with data.forced and the reason), the same write-class headroom hold awaiting
 --ack-reap, the same return of the step to the pool. Reaping a holder that is
 in fact alive carries exactly the risks a lease expiry does; assert liveness,
-do not assume it.`,
+do not assume it.
+
+Unlike an expiry, a forced reap does not consume the step's attempt budget: a
+holder asserted dead is not an executor that failed, so the reaped attempt
+does not count against max_attempts. The attempt number itself stands, and the
+dead attempt's usage remains back-fillable against it.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
@@ -344,6 +382,14 @@ whitespace, each number finite and >= 0. The units are OPAQUE — docket never
 interprets, converts, or routes on them. They sum per unit in ` + "`run report`" + `, and
 the one named by ` + "`docket config budget.unit`" + `, if any, is the one the run's cap
 counts.
+
+A GATE THAT FAILED IS NAMED ON STDOUT. The gates run inside this verb, so when
+one of them does not pass, the line printed here is the only report the caller
+gets: ` + "`gate self-hygiene failed (exit 2); STEP-N parked waiting-human`" + `, with
+the failure glyph rather than the success checkmark. --json carries the same
+rows as ` + "`failed_gates`" + ` beside the step, and the envelope stays a success
+envelope — the RECORDING succeeded; its subject did not. A record whose gates
+all passed prints the one-line success it always has.
 
 --gap-file (repeatable) records an out-of-scope problem the work surfaced: an
 auxiliary artifact of kind ` + "`gap`" + ` beside the step's declared emit, plus a
@@ -426,13 +472,111 @@ open.`,
 			}
 		}
 
-		verb := "Completed"
-		if len(gapIssues) > 0 {
-			verb = fmt.Sprintf("Completed, gaps filed as %s:",
-				strings.Join(gapIssues, ", "))
-		}
-		return emitStepState(w, conn, id, verb)
+		return emitRecordState(w, conn, id, gapIssues)
 	},
+}
+
+// emitRecordState prints what a completion actually did.
+//
+// A GATE THAT FAILED IS NAMED ON STDOUT (DKT-982). The completion gates ran
+// synchronously inside the saga, and where one of them did not pass, this line
+// is the only thing the executor that recorded ever reads. It used to be
+// `✔ Completed STEP-N (waiting-human)` — no gate, no verdict, and a success
+// glyph on a parked step — so RUN-63's executor answered "Record succeeded"
+// over a real cargo-fmt failure and reported the whole wave green; the
+// conductor found the park later, from engine reads it should not have needed.
+//
+// A record whose gates all passed prints exactly the line it always has.
+func emitRecordState(
+	w *output.Writer, conn *sql.DB, id int, gapIssues []string,
+) error {
+	failed, err := engine.FailedGates(conn, id)
+	if err != nil {
+		return stepErr(err, stepLabel(id))
+	}
+	if len(failed) > 0 {
+		return emitRecordGateFailure(w, conn, id, failed, gapIssues)
+	}
+
+	verb := "Completed"
+	if len(gapIssues) > 0 {
+		verb = fmt.Sprintf("Completed, gaps filed as %s:",
+			strings.Join(gapIssues, ", "))
+	}
+	return emitStepState(w, conn, id, verb)
+}
+
+// emitRecordGateFailure prints a completion whose gates did not all pass.
+//
+// The line names every failed gate and its exit code, says what became of the
+// step, and points at the verb that holds the captured output — and it goes out
+// through Writer.Outcome, so the checkmark that made this a silent failure is
+// not on it. The JSON envelope stays a success envelope (the RECORDING
+// succeeded) and grows `failed_gates` beside the row, the same way DKT-414's
+// advisory rides beside it: a machine consumer gets the same fact as the human
+// one instead of having to run `step gates` to learn it.
+func emitRecordGateFailure(
+	w *output.Writer, conn *sql.DB, id int,
+	failed []engine.FailedGate, gapIssues []string,
+) error {
+	view, err := engine.LoadStepView(conn, id, model.NowMS())
+	if err != nil {
+		return stepErr(err, stepLabel(id))
+	}
+
+	step := view.Row.Step
+	noun := "gate"
+	if len(failed) > 1 {
+		noun = "gates"
+	}
+	clauses := make([]string, 0, len(failed))
+	for _, g := range failed {
+		clauses = append(clauses, failedGateClause(g))
+	}
+
+	message := fmt.Sprintf("%s %s; %s", noun, strings.Join(clauses, ", "),
+		recordedStepClause(step, view.Row.Status))
+	if len(gapIssues) > 0 {
+		message += fmt.Sprintf("; gaps filed as %s", strings.Join(gapIssues, ", "))
+	}
+	message += fmt.Sprintf(" — `docket step gates %s` has the captured output", step)
+
+	w.Outcome(recordedStepPayload{StepRow: view.Row, FailedGates: failed}, message)
+	return nil
+}
+
+// recordedStepPayload is `step record`'s JSON shape when a gate did not pass:
+// the row every completion has always emitted, plus the gates that failed. The
+// embedded StepRow marshals inline, so this is additive — a consumer reading
+// the row's fields reads them unchanged.
+type recordedStepPayload struct {
+	model.StepRow
+	FailedGates []engine.FailedGate `json:"failed_gates"`
+}
+
+// failedGateClause renders one failed gate: `self-hygiene failed (exit 2)`.
+//
+// A gate that never ran says so instead of borrowing an exit code it does not
+// have — `unmatched (no exit)`, never `exit 0`, which reads as a pass (T11).
+func failedGateClause(g engine.FailedGate) string {
+	verdict := g.Verdict
+	if verdict == db.GateVerdictFail {
+		verdict = "failed"
+	}
+	if g.Exit == nil {
+		return fmt.Sprintf("%s %s (no exit)", g.Gate, verdict)
+	}
+	return fmt.Sprintf("%s %s (exit %d)", g.Gate, verdict, *g.Exit)
+}
+
+// recordedStepClause says what became of the step. A park is named as one:
+// "waiting-human" is the status, and "parked" is what it MEANS to the executor
+// reading the line, which is the half that was missing.
+func recordedStepClause(step, status string) string {
+	if status == db.StepWaitingHuman {
+		return fmt.Sprintf("%s parked waiting-human", step)
+	}
+	return fmt.Sprintf("%s recorded (%s)", step, status)
 }
 
 var stepFailCmd = &cobra.Command{
@@ -572,7 +716,40 @@ var stepResolveCmd = &cobra.Command{
                  fix+review round. Distinct from retry: retry re-runs the
                  check that reported the problem, this schedules another round
                  of work ON the problem (DKT-237)
-  override-pass  pass the step as though its gates had allowed it
+  override-pass  pass the step as though its gates had allowed it. With
+                 --batch, ALSO record one run-scoped grant per failed gate
+                 (gate name + exit + reason — the failure signature), so later
+                 steps in THIS run failing the same gate with the same
+                 signature auto-pass at routing instead of parking (DKT-546).
+                 The gates still run and a failure with a different signature
+                 still parks; every auto-pass is event-logged against its
+                 grant, and the grant dies with the run — a new run re-asks
+
+OVERRIDE-PASS NEVER EVALUATES THE STEP'S THRESHOLD (DKT-470): it records a
+generic ` + "`pass`" + `, so a step the threshold interposes is skipped unconditionally,
+whatever the (unevaluated) payload would have decided. On a step with such
+interposed step(s) the resolution is therefore REFUSED before anything commits
+unless ` + "`--drop-interposed`" + ` acknowledges the skip (DKT-861); resolve the
+interposed step(s) directly if their condition should still apply. A step
+whose threshold interposes nothing resolves without the flag, exactly as
+always.
+
+--batch IS A STANDING AUTHORIZATION, NOT A ONE-STEP ONE. It covers every later
+step of the run whose same gate fails the same way — INCLUDING STEPS THAT DO
+NOT EXIST WHEN YOU GRANT IT, because a fix round mints new steps inside the
+same run (DKT-734). Granting on a parked ` + "`fix@7`" + ` therefore covers ` + "`fix@8`" + ` and
+` + "`fix@9`" + ` if later rounds fail the same gate the same way. Read the reach before
+granting: one ruling can auto-pass N steps, and it will not re-ask.
+
+What it does NOT do is make the gate advisory. Every round still runs it, and
+a round that fails with a DIFFERENT exit or reason parks for a fresh decision
+no matter how many rounds the grant has already covered.
+
+To audit what one grant actually spent: ` + "`docket events list`" + ` shows the ruling
+once as ` + "`gate-override-granted`" + ` with ` + "`detail=GATE#ID`" + `, and each application as
+` + "`step-batch-overridden`" + ` with ` + "`detail=ID`" + ` on the step it passed. Same id both
+sides — N ` + "`step-batch-overridden`" + ` events against ONE ` + "`gate-override-granted`" + ` is
+one authorization spent N times, not N authorizations.
 
 ` + "`retry`" + ` resets the STEP's attempt budget. That is a different counter from
 the issue-level attempt trail, which is monotonic and never reset. It also
@@ -605,7 +782,24 @@ never arrives.
 A HELD CLUSTER parked by a vote that did not pass is answered with
 ` + "`step approve`" + ` / ` + "`step reject`" + ` instead; ` + "`retry`" + ` refuses there for the
 same reason it refuses on a rejected hold, because the same tally would be read
-again.`,
+again.
+
+A ` + "`type=\"vote\"`" + ` step whose OWN proposal has been decided — approved or
+rejected — refuses ` + "`retry`" + ` for that same reason. The proposal is keyed to
+the step instance, so returning the step to the pool re-reads the identical
+tally and routes to the identical place; no second ballot opens and no cast
+changes. Reach for ` + "`fix-round`" + `, which authorizes another round of work on
+the reported problem and mints a fresh vote at a new ordinal — a NEW proposal —
+or for ` + "`override-pass`" + `, ` + "`skip`" + `, or ` + "`abandon-issue`" + `. ` + "`retry`" + `
+stays available on a vote whose proposal is still open, which is the case R11's
+exception exists for: a quorum that never arrives.
+
+THE -m NOTE IS THE STEERING CHANNEL. A note on ` + "`retry`" + ` or ` + "`rerun-gates`" + `
+renders in the same step's next packet as its == RESOLUTION section; a note on
+` + "`fix-round`" + ` is stamped onto every step the new round mints, so the remedy
+you authorized the round for renders in each of its packets. Steering left as
+an issue comment NEVER reaches a packet, and a mid-run description edit does
+not either — packets read the description snapshot frozen at activation.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepResolve(cmd, args, getWriter(cmd))
@@ -626,22 +820,36 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 			output.ErrValidation)
 	}
 	note, _ := cmd.Flags().GetString("note")
+	batch, _ := cmd.Flags().GetBool("batch")
+	dropInterposed, _ := cmd.Flags().GetBool("drop-interposed")
 
 	label := stepLabel(id)
 	e := engine.NewEngine()
 
-	// DKT-470: override-pass records a generic "pass" and never evaluates the
-	// step's threshold, so an interposed step it names is skipped no matter
-	// what the (unevaluated) payload would have decided. Named BEFORE the
-	// resolution commits, so the warning is the blast radius the operator is
-	// approving rather than a report of damage already done.
-	if as == engine.ResolveOverridePass {
+	// DKT-470/DKT-861: override-pass records a generic "pass" and never
+	// evaluates the step's threshold, so an interposed step it names is
+	// skipped no matter what the (unevaluated) payload would have decided.
+	// Without --drop-interposed the ENGINE refuses such a resolution before
+	// anything commits, carrying this same sentence; with it, the warning is
+	// still printed BEFORE the resolution commits, so it names the blast
+	// radius the operator acknowledged rather than reporting damage already
+	// done.
+	if as == engine.ResolveOverridePass && dropInterposed {
 		for _, warning := range engine.OverridePassSkipsInterposedTargets(conn, id) {
 			w.Warn("%s", warning)
 		}
 	}
 
-	if err := e.ResolveStep(conn, id, as, note, model.NowMS()); err != nil {
+	resolve := e.ResolveStep
+	if batch {
+		resolve = e.ResolveStepBatch
+	}
+	if dropInterposed {
+		resolve = func(conn *sql.DB, stepID int, as, note string, nowMS int64) error {
+			return e.ResolveStepDropInterposed(conn, stepID, as, note, batch, nowMS)
+		}
+	}
+	if err := resolve(conn, id, as, note, model.NowMS()); err != nil {
 		return stepErr(err, label)
 	}
 
@@ -864,6 +1072,16 @@ var stepRenderCmd = &cobra.Command{
 	Use:   "render STEP-N",
 	Short: "Render a step's context bundle into a work packet",
 	Long: `Render a step's context bundle through a template.
+
+THE PACKET DRAWS FROM EXACTLY THESE SURFACES: the step row and its pinned
+workflow definition, the issue's description and title/kind/labels/scope AS
+SNAPSHOTTED AT ACTIVATION, the recorded input artifacts the step declares, the
+pin list, the step's declared packet files, and the step's own routing record
+(rendered as == RESOLUTION). Issue COMMENTS are never rendered, and a mid-run
+edit to the issue's description never renders either — the packet reads the
+activation-time snapshot. To steer a step's next execution, put the words in
+` + "`step resolve ... -m`" + `: a retry note renders on the same step, and a
+fix-round note renders in every packet of the round it authorizes.
 
 Without --template the shipped default is used; it ships in the binary, so it
 cannot drift. With --template F, if the run PINNED that path, the file's bytes
@@ -1162,6 +1380,14 @@ func init() {
 	stepClaimCmd.Flags().String("executor", "",
 		"Resolved executor hint for --render's {executor} substitution "+
 			"(default: the step's declared hint)")
+	stepClaimCmd.Flags().String("metadata", "",
+		"Opaque metadata JSON, merged onto the step's own IN THE CLAIM: what "+
+			"the dispatcher knows now, recorded before the work can fail")
+	stepClaimCmd.Flags().Float64("cost-multiplier", 0,
+		"Scale this claim's budget accrual: the step's declared expected_cost "+
+			"times this, checked at the cap and recorded with the claim — for a "+
+			"dispatcher that resolved the step to a pricier (or cheaper) variant "+
+			"than the definition priced (default: 1, the declared cost verbatim)")
 
 	stepCompleteCmd.Flags().String("artifact-file", "", "File holding the artifact body (required)")
 	stepCompleteCmd.Flags().String("payload-file", "", "File holding the JSON payload")
@@ -1183,8 +1409,20 @@ func init() {
 	stepRejectCmd.Flags().String("note", "", "Why the gate was rejected")
 
 	stepResolveCmd.Flags().String("as", "",
-		"retry | skip | abandon-issue | override-pass | fix-round")
+		"retry | rerun-gates | skip | abandon-issue | override-pass | fix-round")
 	stepResolveCmd.Flags().String("note", "", "Why the step was resolved this way")
+	stepResolveCmd.Flags().Bool("batch", false,
+		"With --as override-pass: also record one run-scoped grant per failed "+
+			"gate, so later steps in THIS run failing the same gate with the "+
+			"same exit and reason auto-pass instead of parking (DKT-546) — "+
+			"including steps later fix rounds mint, which do not exist when "+
+			"you grant it (DKT-734)")
+	stepResolveCmd.Flags().Bool("drop-interposed", false,
+		"With --as override-pass on a step whose threshold interposes other "+
+			"step(s): acknowledge that the generic pass skips them without "+
+			"evaluating the threshold (DKT-861). Without it such a resolution "+
+			"is refused before anything commits; a step with no interposed "+
+			"step(s) never needs it")
 
 	stepContextCmd.Flags().Bool("meta", false, "Report per-section byte counts alongside the bundle")
 	stepRenderCmd.Flags().String("template", "", "Template file; defaults to the shipped one")
