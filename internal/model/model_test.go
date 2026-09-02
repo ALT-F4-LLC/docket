@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -276,10 +277,15 @@ func TestParseRelationType(t *testing.T) {
 		{"depends-on", RelationDependsOn, false},
 		{"relates_to", RelationRelatesTo, false},
 		{"relates-to", RelationRelatesTo, false},
-		{"related_to", RelationRelatesTo, false},
-		{"related-to", RelationRelatesTo, false},
 		{"duplicates", RelationDuplicates, false},
 		{"invalid", "", true},
+		// DKT-1077: "related_to" is a CLI typo courtesy
+		// (cli.parseRelationTypeArg), NOT a model-level alias — this parser
+		// also decodes the JSON wire format and backs the workflow
+		// `issue.linked.<relation>` vocabulary, both of which are exactly the
+		// canonical token set.
+		{"related_to", "", true},
+		{"related-to", "", true},
 	}
 
 	for _, tt := range tests {
@@ -316,6 +322,12 @@ func TestParseRelationDirection(t *testing.T) {
 		{"duplicate_of", RelationDuplicates, true, false},
 		{"specified_by", "", false, true},
 		{"", "", false, true},
+		// DKT-1077: the vocabulary this parser accepts must stay the one
+		// RelationDirectionTokens() names and docs/design/engine-spec.md
+		// enumerates, so a workflow's `issue.linked.related_to.<kind>` is
+		// refused rather than silently resolving to relates_to.
+		{"related_to", "", false, true},
+		{"related-to", "", false, true},
 	}
 	for _, tt := range tests {
 		got, inverse, err := ParseRelationDirection(tt.input)
@@ -327,6 +339,38 @@ func TestParseRelationDirection(t *testing.T) {
 		if got != tt.want || inverse != tt.inverse {
 			t.Errorf("ParseRelationDirection(%q) = (%q, %v), want (%q, %v)",
 				tt.input, got, inverse, tt.want, tt.inverse)
+		}
+	}
+}
+
+// TestRelationUnmarshalJSONVocabulary pins the JSON wire format's relation
+// vocabulary (DKT-1077): Relation.UnmarshalJSON decodes exactly what
+// MarshalJSON emits — the canonical types in either spelling — and refuses a
+// near-miss like "related_to", whose tolerance is a CLI-argument courtesy that
+// must not reach an exported/imported database or any other producer's JSON.
+func TestRelationUnmarshalJSONVocabulary(t *testing.T) {
+	const shell = `{"id":1,"source_issue_id":"DKT-1","target_issue_id":"DKT-2",` +
+		`"relation_type":%q,"created_at":"2026-09-02T00:00:00Z"}`
+	tests := []struct {
+		token   string
+		want    RelationType
+		wantErr bool
+	}{
+		{"relates_to", RelationRelatesTo, false},
+		{"relates-to", RelationRelatesTo, false},
+		{"depends_on", RelationDependsOn, false},
+		{"related_to", "", true},
+		{"related-to", "", true},
+	}
+	for _, tt := range tests {
+		var rel Relation
+		err := json.Unmarshal([]byte(fmt.Sprintf(shell, tt.token)), &rel)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("Unmarshal relation_type %q error = %v, wantErr %v", tt.token, err, tt.wantErr)
+			continue
+		}
+		if err == nil && rel.RelationType != tt.want {
+			t.Errorf("Unmarshal relation_type %q = %q, want %q", tt.token, rel.RelationType, tt.want)
 		}
 	}
 }
