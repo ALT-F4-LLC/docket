@@ -767,6 +767,25 @@ was. Re-executing to fix a gate is expensive AND destructive — the second run
 diffs a tree that already contains the change, so the diff comes back empty and
 replaces the real one.
 
+--worktree C (with --as override-pass or rerun-gates) RE-PINS the step's
+recorded issue.diff to checkout C before resolving (DKT-1034). NONE of the
+resolutions re-record the diff on their own — rerun-gates leaves the artifact
+as it found it, retry records nothing over a tree that already contains the
+change, override-pass records a pass — so after an out-of-band patch (a
+conductor commit on top of the executor's in its worktree, then integrated)
+every downstream review packet still renders the PRE-PATCH commit: RUN-67's
+judges re-found a lint defect the branch no longer had, and a full fix round
+ran to report that nothing needed fixing. With --worktree the diff and its
+target sha are recomputed from C exactly as ` + "`step record --worktree C`" + `
+computes them, recorded as a NEW issue.diff artifact that supersedes the
+step's previous one (the original stays readable in the chain, under
+` + "`step artifacts`" + `), and event-logged as ` + "`issue-diff-repinned`" + ` with both shas.
+Packets bind to a step's newest emit, so ` + "`dispatch open`" + ` and ` + "`step render`" + `
+show the patched tree from then on. With rerun-gates the gates re-run in C as
+well. A checkout whose commits are already on the shared branch has no fork
+point left to diff from and is refused rather than pinned as an empty diff;
+re-pin from the checkout that still carries the patch as its own commits.
+
 A step parked because its held clusters were REJECTED cannot be retried, and
 ` + "`retry`" + ` refuses there rather than silently re-parking it. The rejection is
 sticky: re-running the aggregate re-reads the same rejected decision and routes
@@ -823,6 +842,17 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 	batch, _ := cmd.Flags().GetBool("batch")
 	dropInterposed, _ := cmd.Flags().GetBool("drop-interposed")
 
+	// --worktree names the checkout the patched tree stands in (DKT-1034),
+	// normalized to absolute for `step record --worktree`'s reason: the path
+	// persists on the step and the round record, and a later invocation from
+	// another cwd must still resolve it.
+	worktree, _ := cmd.Flags().GetString("worktree")
+	if worktree != "" {
+		if worktree, err = filepath.Abs(worktree); err != nil {
+			return cmdErr(fmt.Errorf("resolving --worktree: %w", err), output.ErrValidation)
+		}
+	}
+
 	label := stepLabel(id)
 	e := engine.NewEngine()
 
@@ -840,16 +870,11 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
-	resolve := e.ResolveStep
-	if batch {
-		resolve = e.ResolveStepBatch
-	}
-	if dropInterposed {
-		resolve = func(conn *sql.DB, stepID int, as, note string, nowMS int64) error {
-			return e.ResolveStepDropInterposed(conn, stepID, as, note, batch, nowMS)
-		}
-	}
-	if err := resolve(conn, id, as, note, model.NowMS()); err != nil {
+	outcome, err := e.ResolveStepWith(conn, id, engine.ResolveOptions{
+		As: as, Note: note, Batch: batch, DropInterposed: dropInterposed,
+		Worktree: worktree, NowMS: model.NowMS(),
+	})
+	if err != nil {
 		return stepErr(err, label)
 	}
 
@@ -858,8 +883,11 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// whose packets render from a recorded target sha the shared checkout's
 	// HEAD no longer carries. Advisory only — the resolution above already
 	// committed — and nil for every non-materialized step.
-	return emitStepStateAdvised(w, conn, id, "Resolved",
-		e.HeldResolutionStaleTargets(conn, id, model.NowMS()))
+	//
+	// DKT-1034: a re-pin the resolution performed rides beside the row too —
+	// it is the fact this invocation established that the row does not carry.
+	return emitResolvedState(w, conn, id, "Resolved",
+		e.HeldResolutionStaleTargets(conn, id, model.NowMS()), outcome.Repin)
 }
 
 var stepAnnotateCmd = &cobra.Command{
@@ -1341,13 +1369,17 @@ func emitStepState(w *output.Writer, conn *sql.DB, id int, verb string) error {
 }
 
 // resolvedStepPayload is the resolution verbs' JSON shape when the resolution
-// un-blocked steps whose packets render from a diverged recorded target
-// (DKT-414). The embedded StepRow marshals inline, so the shape is the row
-// every resolution has always emitted plus `stale_targets` — the same field,
-// carrying the same rows, `dispatch open` rides the advisory on (DKT-193).
+// established something the row does not carry: it un-blocked steps whose
+// packets render from a diverged recorded target (DKT-414), or it re-pinned
+// the step's issue.diff (DKT-1034). The embedded StepRow marshals inline, so
+// the shape is the row every resolution has always emitted plus
+// `stale_targets` — the same field, carrying the same rows, `dispatch open`
+// rides the advisory on (DKT-193) — and/or `issue_diff_repin`. Each is
+// `omitempty`, so a resolution that established neither emits exactly the row.
 type resolvedStepPayload struct {
 	model.StepRow
-	StaleTargets []engine.StaleTarget `json:"stale_targets"`
+	StaleTargets []engine.StaleTarget   `json:"stale_targets,omitempty"`
+	Repin        *engine.IssueDiffRepin `json:"issue_diff_repin,omitempty"`
 }
 
 // emitStepStateAdvised is emitStepState carrying DKT-414's stale-target
@@ -1358,18 +1390,53 @@ type resolvedStepPayload struct {
 func emitStepStateAdvised(
 	w *output.Writer, conn *sql.DB, id int, verb string, stale []engine.StaleTarget,
 ) error {
+	return emitResolvedState(w, conn, id, verb, stale, nil)
+}
+
+// emitResolvedState is emitStepStateAdvised carrying, in addition, the
+// issue.diff re-pin a resolution performed (DKT-1034). The re-pin is a FACT,
+// not an advisory: it is stated on the success line in human mode and rides
+// the envelope as `issue_diff_repin` in JSON mode. nil for every resolution
+// that did not re-pin, which emits exactly the bytes it always has.
+func emitResolvedState(
+	w *output.Writer, conn *sql.DB, id int, verb string,
+	stale []engine.StaleTarget, repin *engine.IssueDiffRepin,
+) error {
 	view, err := engine.LoadStepView(conn, id, model.NowMS())
 	if err != nil {
 		return stepErr(err, stepLabel(id))
 	}
 	message := fmt.Sprintf("%s %s (%s)", verb, view.Row.Step, view.Row.Status)
-	if len(stale) == 0 {
+	if repin != nil {
+		message += "; " + repinClause(repin)
+	}
+	if len(stale) == 0 && repin == nil {
 		w.Success(view.Row, message)
 		return nil
 	}
 	warnStaleTargets(w, stale)
-	w.Success(resolvedStepPayload{StepRow: view.Row, StaleTargets: stale}, message)
+	w.Success(resolvedStepPayload{StepRow: view.Row, StaleTargets: stale, Repin: repin}, message)
 	return nil
+}
+
+// repinClause renders what a re-pin did, for the success line: the two shas
+// at the 12 characters every advisory here prints, and the artifact chain so
+// the original is findable under `step artifacts`.
+func repinClause(r *engine.IssueDiffRepin) string {
+	if r.Unchanged {
+		return fmt.Sprintf("issue.diff already describes %s at %.12s, nothing re-pinned",
+			r.Worktree, r.ToSHA)
+	}
+	from := "(no recorded diff)"
+	if r.FromSHA != "" {
+		from = fmt.Sprintf("%.12s", r.FromSHA)
+	}
+	clause := fmt.Sprintf("issue.diff re-pinned %s -> %.12s from %s (%s",
+		from, r.ToSHA, r.Worktree, r.Artifact)
+	if r.Supersedes != "" {
+		clause += " supersedes " + r.Supersedes
+	}
+	return clause + ")"
 }
 
 func init() {
@@ -1423,6 +1490,13 @@ func init() {
 			"evaluating the threshold (DKT-861). Without it such a resolution "+
 			"is refused before anything commits; a step with no interposed "+
 			"step(s) never needs it")
+	stepResolveCmd.Flags().String("worktree", "",
+		"With --as override-pass or rerun-gates: re-pin the step's recorded "+
+			"issue.diff and target sha to this checkout's tree before "+
+			"resolving, as a new artifact superseding the previous one, so "+
+			"downstream review packets render an out-of-band patch instead of "+
+			"the pre-patch commit (DKT-1034). With rerun-gates the gates re-run "+
+			"there too")
 
 	stepContextCmd.Flags().Bool("meta", false, "Report per-section byte counts alongside the bundle")
 	stepRenderCmd.Flags().String("template", "", "Template file; defaults to the shipped one")

@@ -280,12 +280,41 @@ func (e *Engine) DecideStepValue(
 	return tx.Commit()
 }
 
+// ResolveOptions are `step resolve`'s inputs — the CompleteOptions/ClaimOptions
+// shape, adopted here when the third positional variant arrived (DKT-1034): a
+// fourth dimension on `(as, note, batch, dropInterposed)` is how call sites end
+// up passing the wrong bool.
+type ResolveOptions struct {
+	// As is `--as`: one of resolveValues.
+	As string
+	// Note is `-m`/`--note`, the steering channel (DKT-247/DKT-725).
+	Note string
+	// Batch is `--batch` (DKT-546); override-pass only.
+	Batch bool
+	// DropInterposed is `--drop-interposed` (DKT-861); override-pass only.
+	DropInterposed bool
+	// Worktree is `--worktree` (DKT-1034): RE-PIN the step's recorded
+	// `issue.diff` to this checkout's tree before resolving — see
+	// IssueDiffRepin. override-pass and rerun-gates only.
+	Worktree string
+	NowMS    int64
+}
+
+// ResolveOutcome is what a resolution reports beyond its error: the facts the
+// verb established that the step row does not carry.
+type ResolveOutcome struct {
+	// Repin is the issue.diff re-pin `--worktree` performed, nil without the
+	// flag.
+	Repin *IssueDiffRepin `json:"issue_diff_repin,omitempty"`
+}
+
 // ResolveStep is `step resolve --as retry|skip|abandon-issue|override-pass` —
 // §6.10's `waiting-human` resolutions.
 func (e *Engine) ResolveStep(
 	conn *sql.DB, stepID int, as, note string, nowMS int64,
 ) error {
-	return e.resolveStep(conn, stepID, as, note, false, false, nowMS)
+	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{As: as, Note: note, NowMS: nowMS})
+	return err
 }
 
 // ResolveStepBatch is `step resolve --as override-pass --batch` (DKT-546): the
@@ -296,7 +325,10 @@ func (e *Engine) ResolveStep(
 func (e *Engine) ResolveStepBatch(
 	conn *sql.DB, stepID int, as, note string, nowMS int64,
 ) error {
-	return e.resolveStep(conn, stepID, as, note, true, false, nowMS)
+	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
+		As: as, Note: note, Batch: true, NowMS: nowMS,
+	})
+	return err
 }
 
 // ResolveStepDropInterposed is `step resolve --as override-pass
@@ -311,12 +343,31 @@ func (e *Engine) ResolveStepBatch(
 func (e *Engine) ResolveStepDropInterposed(
 	conn *sql.DB, stepID int, as, note string, batch bool, nowMS int64,
 ) error {
-	return e.resolveStep(conn, stepID, as, note, batch, true, nowMS)
+	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
+		As: as, Note: note, Batch: batch, DropInterposed: true, NowMS: nowMS,
+	})
+	return err
+}
+
+// ResolveStepWith is every `step resolve` shape at once, and the one that
+// reports an outcome: the three positional variants above are thin wrappers so
+// their call sites read as they always have.
+func (e *Engine) ResolveStepWith(
+	conn *sql.DB, stepID int, opts ResolveOptions,
+) (*ResolveOutcome, error) {
+	out := &ResolveOutcome{}
+	if err := e.resolveStep(conn, stepID, opts, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (e *Engine) resolveStep(
-	conn *sql.DB, stepID int, as, note string, batch, dropInterposed bool, nowMS int64,
+	conn *sql.DB, stepID int, opts ResolveOptions, out *ResolveOutcome,
 ) error {
+	as, note, nowMS := opts.As, opts.Note, opts.NowMS
+	batch, dropInterposed := opts.Batch, opts.DropInterposed
+
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -349,6 +400,24 @@ func (e *Engine) resolveStep(
 			"--drop-interposed acknowledges that an override-pass skips the "+
 				"step(s) its threshold interposes, so it requires --as %s, got %q",
 			ResolveOverridePass, as)
+	}
+
+	// --worktree RE-PINS the step's recorded issue.diff before resolving
+	// (DKT-1034), and it rides only the two resolutions that keep the step's
+	// own record as the reviewed object: override-pass accepts the work as it
+	// stands and rerun-gates re-measures it. `retry` re-executes and records
+	// its own diff; `skip` and `abandon-issue` take the work OUT of the run;
+	// `fix-round` mints a new round whose body records the round's own — a
+	// re-pin under any of those would revise a record nothing downstream
+	// reads, so it is refused the way --batch is rather than accepted as
+	// though it had bound something.
+	if opts.Worktree != "" && as != ResolveOverridePass && as != ResolveRerunGates {
+		return validationErr(
+			"--worktree re-pins the step's recorded issue.diff to a patched "+
+				"checkout, which only --as %s or --as %s keep as the reviewed "+
+				"object (retry records its own diff; skip, abandon-issue, and "+
+				"fix-round leave nothing downstream reading this one), got %q",
+			ResolveOverridePass, ResolveRerunGates, as)
 	}
 
 	// R11: `resolve` on a step that is not `waiting-human` is
@@ -560,6 +629,20 @@ func (e *Engine) resolveStep(
 		}
 	}
 
+	// THE RE-PIN IS COMPUTED HERE, LAST BEFORE THE TRANSACTION (DKT-1034): it
+	// is a git subprocess, which §6 keeps outside every transaction, and it is
+	// the most expensive refusal in this function, so every cheaper one above
+	// gets its say first. The artifact it produces lands INSIDE the
+	// resolution's transaction below — a re-pin without its resolution would
+	// move the reviewed object under a step still parked, and a resolution
+	// without its re-pin is exactly RUN-67.
+	var repin *IssueDiffRepin
+	if opts.Worktree != "" {
+		if repin, err = e.prepareIssueDiffRepin(conn, step, spec, opts.Worktree); err != nil {
+			return err
+		}
+	}
+
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("beginning the resolution: %w", err)
@@ -664,6 +747,19 @@ func (e *Engine) resolveStep(
 			return err
 		}
 		routing, status = "", db.StepGated
+	}
+
+	// The re-pin lands BEFORE the routing record and the resolution event, so
+	// the trail reads in the order the facts occurred: the reviewed object
+	// moved, and THEN the step was resolved over it. For rerun-gates the saga
+	// resumed below re-runs the gates in the re-pointed worktree and its
+	// routing stage recomputes a diff that is byte-identical to the one just
+	// recorded, which the DKT-258 guard then declines to record twice.
+	if repin != nil {
+		if err := applyIssueDiffRepin(tx, step, repin, as, nowMS); err != nil {
+			return err
+		}
+		out.Repin = repin
 	}
 
 	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {

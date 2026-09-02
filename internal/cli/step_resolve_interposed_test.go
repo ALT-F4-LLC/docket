@@ -117,6 +117,7 @@ func resolveCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd.Flags().String("note", "", "")
 	cmd.Flags().Bool("batch", false, "")
 	cmd.Flags().Bool("drop-interposed", false, "")
+	cmd.Flags().String("worktree", "", "")
 	return cmd
 }
 

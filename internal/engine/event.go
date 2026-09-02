@@ -287,6 +287,24 @@ const (
 	// reaches, and the operator's reason, so the discontinuity is dated and
 	// attributable rather than inferred.
 	EventIssueScopeRefreshed = "issue-scope-refreshed"
+
+	// A step's recorded `issue.diff` being RE-PINNED to another tree
+	// (DKT-1034): `step resolve --worktree` recomputed the diff and its target
+	// sha from a checkout an operator patched out of band, and recorded the
+	// result as a new artifact superseding the step's previous one.
+	//
+	// It earns its place on the `run-repinned` argument, one column over
+	// again: the round record is the frozen premise every downstream review
+	// packet renders its target from, and DKT-725/DKT-741 settled that a
+	// recorded reference is never silently re-derived. This is the one verb
+	// that moves it on purpose, so the trail must date and attribute the move
+	// — it carries the STALE sha and the RE-PINNED sha, the checkout measured,
+	// and both artifact ids, so a reader comparing a review packet against
+	// the commit the executor actually recorded can see where the two parted.
+	// Without it, RUN-67's review round judging fe5db34e while the branch
+	// carried e642afb would be indistinguishable in the record from a packet
+	// that rendered correctly.
+	EventIssueDiffRepinned = "issue-diff-repinned"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -322,6 +340,7 @@ var eventKinds = map[string]bool{
 	EventGateOverrideGranted: true, EventStepBatchOverridden: true,
 	EventStaleTargetWaived:   true,
 	EventIssueScopeRefreshed: true,
+	EventIssueDiffRepinned:   true,
 }
 
 // recordEvent writes one event in the caller's transaction.

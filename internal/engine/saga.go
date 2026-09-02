@@ -870,47 +870,10 @@ func (e *Engine) runRoutingStage(
 		// pinned at the moment the change existed, byte-identical for every
 		// sibling. D2 still excludes action/human/vote steps: they change no
 		// tree either.
-		scope, err := snapshotScope(conn, step.RunID, step.IssueID)
+		var err error
+		diffBody, diffPayload, err = e.computeIssueDiff(conn, step)
 		if err != nil {
 			return err
-		}
-		if e.DiffFn != nil {
-			// The tree that gets diffed is the step's RECORDED worktree when
-			// one was declared, else the invoking checkout's root — never the
-			// bare process cwd (G7): a saga resumed from another directory, or
-			// a conductor recording an executor's work, must capture the tree
-			// the work touched.
-			execRoot := runExecRoot(conn, step.RunID)
-			dir := step.WorkRoot
-			if dir == "" {
-				dir = execRoot
-			}
-			// DKT-11 / DKT-20 / DKT-42: for a worktree, the base is its FORK
-			// POINT; for the shared checkout, the run's PINNED starting
-			// commit — see runDiffBase's doc for why.
-			base := runDiffBase(conn, step.RunID, dir, execRoot)
-			diffBody, err = e.DiffFn(dir, base, scope)
-			if err != nil {
-				return fmt.Errorf("computing the diff for %s: %w", step.Instance, err)
-			}
-			if base == "" && dir != execRoot {
-				// An empty base is ordinarily the correct default (dir IS
-				// the checkout, diff it against its own HEAD) — but here dir is
-				// a DIFFERENT tree than execRoot, i.e. a worktree was recorded
-				// and the cross-checkout base this diff needed could not be
-				// resolved. Silently falling back to dir's own HEAD reproduces
-				// the exact empty-diff symptom this issue exists to end, with
-				// no way for a reader of the artifact to tell the difference
-				// from "nothing changed". Say so in the artifact itself, since
-				// that is the one place every downstream consumer already
-				// looks (git-show fallback, RUN-8).
-				diffBody = "# issue.diff: could not resolve the run's pinned " +
-					"base commit; this diff compares " + dir + " against its " +
-					"own HEAD instead, which may be empty or incomplete\n" + diffBody
-			}
-			// DKT-106: record the tree's HEAD beside the diff and, on a loop
-			// re-entry, append this ROUND's delta to the cumulative body.
-			diffPayload = e.appendRoundDelta(conn, step, dir, execRoot, &diffBody)
 		}
 		wantsDiff = true
 
@@ -1381,6 +1344,68 @@ func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// computeIssueDiff is the diff half of the routing stage: the `issue.diff`
+// body and round-record payload for step's tree as it stands NOW, computed
+// exactly as a completion records it. It runs a git subprocess, so it belongs
+// OUTSIDE every transaction (§6) — the caller inserts the artifact inside its
+// own.
+//
+// It is ONE implementation on purpose (DKT-1034). The operator re-pin
+// (`step resolve --worktree`, human.go) exists to recompute the recorded diff
+// and target sha from a patched checkout "exactly as `step record --worktree`
+// does", and a second copy of the base resolution, the annotation, and the
+// round record is exactly how the two would come to disagree about what the
+// same tree contains.
+//
+// The tree that gets diffed is the step's RECORDED worktree when one was
+// declared, else the invoking checkout's root — never the bare process cwd
+// (G7): a saga resumed from another directory, or a conductor recording an
+// executor's work, must capture the tree the work touched. The re-pin passes a
+// step whose WorkRoot is the checkout being pinned.
+//
+// With no DiffFn wired there is nothing to measure: both halves come back
+// empty and the caller records that as the truthful first answer.
+func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload string, err error) {
+	scope, err := snapshotScope(conn, step.RunID, step.IssueID)
+	if err != nil {
+		return "", "", err
+	}
+	if e.DiffFn == nil {
+		return "", "", nil
+	}
+	execRoot := runExecRoot(conn, step.RunID)
+	dir := step.WorkRoot
+	if dir == "" {
+		dir = execRoot
+	}
+	// DKT-11 / DKT-20 / DKT-42: for a worktree, the base is its FORK POINT;
+	// for the shared checkout, the run's PINNED starting commit — see
+	// runDiffBase's doc for why.
+	base := runDiffBase(conn, step.RunID, dir, execRoot)
+	body, err = e.DiffFn(dir, base, scope)
+	if err != nil {
+		return "", "", fmt.Errorf("computing the diff for %s: %w", step.Instance, err)
+	}
+	if base == "" && dir != execRoot {
+		// An empty base is ordinarily the correct default (dir IS the
+		// checkout, diff it against its own HEAD) — but here dir is a
+		// DIFFERENT tree than execRoot, i.e. a worktree was recorded and the
+		// cross-checkout base this diff needed could not be resolved. Silently
+		// falling back to dir's own HEAD reproduces the exact empty-diff
+		// symptom this issue exists to end, with no way for a reader of the
+		// artifact to tell the difference from "nothing changed". Say so in
+		// the artifact itself, since that is the one place every downstream
+		// consumer already looks (git-show fallback, RUN-8).
+		body = "# issue.diff: could not resolve the run's pinned " +
+			"base commit; this diff compares " + dir + " against its " +
+			"own HEAD instead, which may be empty or incomplete\n" + body
+	}
+	// DKT-106: record the tree's HEAD beside the diff and, on a loop
+	// re-entry, append this ROUND's delta to the cumulative body.
+	payload = e.appendRoundDelta(conn, step, dir, execRoot, &body)
+	return body, payload, nil
 }
 
 // isExecutorStep reports whether a step's completion recomputes the issue diff

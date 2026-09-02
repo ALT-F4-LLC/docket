@@ -546,6 +546,15 @@ var eventActors = map[string]Actor{
 	// refresh-scope` naming the run it should reach, which is precisely what
 	// `human` means in this table.
 	EventIssueScopeRefreshed: ActorHuman,
+
+	// The issue.diff re-pin (DKT-1034): nothing in the engine re-records a
+	// step's diff after the fact — the routing stage records it once at
+	// completion and every resolution leaves it standing (rerun-gates by
+	// contract, retry by DKT-259's guard, override-pass by recording a pass).
+	// It moves only because a person ran `step resolve --worktree` naming
+	// the checkout the patched tree stands in, which is precisely what
+	// `human` means in this table.
+	EventIssueDiffRepinned: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,

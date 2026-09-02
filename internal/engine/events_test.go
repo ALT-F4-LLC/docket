@@ -195,19 +195,29 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// premise, and every later render reads it the way every render always
 		// read the frozen one.
 		"issue-scope-refreshed",
+
+		// The issue.diff re-pin kind (DKT-1034) — ONE, the `run-repinned`
+		// argument in its third column: the round record a step recorded is
+		// the frozen premise every downstream review packet renders its
+		// target from, and `step resolve --worktree` is the one verb that
+		// moves it on purpose. It carries the stale sha and the re-pinned
+		// sha, so a packet that judged the wrong commit is distinguishable
+		// in the record from one that rendered correctly.
+		"issue-diff-repinned",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 47 {
+	if len(eventKinds) != 48 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
 			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
 			"DKT-408's repin kind, DKT-546's batch-override pair, "+
-			"DKT-742's stale-target waiver kind, and DKT-869's scope-refresh "+
-			"kind enumerate 47 (see DKT-21)",
+			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
+			"kind, and DKT-1034's issue.diff re-pin kind enumerate 48 "+
+			"(see DKT-21)",
 			len(eventKinds))
 	}
 }
