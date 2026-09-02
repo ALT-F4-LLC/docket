@@ -276,6 +276,8 @@ func TestParseRelationType(t *testing.T) {
 		{"depends-on", RelationDependsOn, false},
 		{"relates_to", RelationRelatesTo, false},
 		{"relates-to", RelationRelatesTo, false},
+		{"related_to", RelationRelatesTo, false},
+		{"related-to", RelationRelatesTo, false},
 		{"duplicates", RelationDuplicates, false},
 		{"invalid", "", true},
 	}

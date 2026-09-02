@@ -35,9 +35,15 @@ func ValidateRelationType(rt RelationType) error {
 }
 
 // ParseRelationType accepts both hyphenated ("depends-on") and underscored ("depends_on")
-// forms and returns the canonical underscored RelationType.
+// forms and returns the canonical underscored RelationType. "related_to" /
+// "related-to" is accepted as an alias of "relates_to": the natural
+// mis-typing of the canonical name, and the normalized form the error message
+// already surfaces (DKT-1073).
 func ParseRelationType(input string) (RelationType, error) {
 	normalized := RelationType(strings.ReplaceAll(strings.TrimSpace(input), "-", "_"))
+	if normalized == "related_to" {
+		normalized = RelationRelatesTo
+	}
 	if err := ValidateRelationType(normalized); err != nil {
 		return "", err
 	}
