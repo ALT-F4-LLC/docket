@@ -13,27 +13,47 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// listResult is `issue list`'s payload. `Issues` holds SUMMARY rows
+// (issueRowsPayload) by default and the full issue shape (issueListPayload)
+// under `--with-body`, which is why it is typed `any`: the two shapes differ,
+// and the default one is what keeps a filtered listing small enough to read
+// (DKT-1053; see issue_row.go). Both payloads marshal the v1 array and
+// implement output.Versioned, so the v2 envelope reaches each row's version
+// either way.
 type listResult struct {
-	Issues []*model.Issue `json:"issues"`
-	Total  int            `json:"total"`
+	Issues any `json:"issues"`
+	Total  int `json:"total"`
 	// limit is the effective --limit, retained (unexported, so v1 output is
 	// untouched) to compute truncation for the v2 envelope.
 	limit int
+	// count is the number of rows in Issues, kept alongside because Issues is
+	// `any`.
+	count int
 }
 
 // listResult implements output.Collection for the v2 envelope. Total comes
 // from a COUNT(*) that ignores LIMIT, so it is already the true pre-limit
 // count and truncation is directly computable.
-func (r listResult) CollectionItems() any { return issueListPayload{issues: r.Issues} }
+func (r listResult) CollectionItems() any { return r.Issues }
 func (r listResult) CollectionTotal() int { return r.Total }
 func (r listResult) CollectionTruncated() bool {
-	return output.IsTruncated(r.limit, r.Total, len(r.Issues))
+	return output.IsTruncated(r.limit, r.Total, r.count)
 }
 
 var listCmd = &cobra.Command{
 	Use:     "list",
 	Short:   "List issues",
 	Aliases: []string{"ls"},
+	Long: `List issues as summary rows.
+
+Under --json each row carries every issue field except description — id
+(and its alias issue), parent_id, title, status, priority, kind, assignee,
+labels, files, docs, created_at, updated_at, and scope and resolution when
+set — plus description_bytes, the length of the description it does not
+carry. A listing is for picking; read the issue you picked with
+docket issue show. Pass --with-body to have every row carry its full
+description instead. next, plan and board emit the same rows and take the
+same flag.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueList)
 	},
@@ -55,6 +75,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	all, _ := cmd.Flags().GetBool("all")
 	runRef, _ := cmd.Flags().GetString("run")
 	projectRef, _ := cmd.Flags().GetString("project")
+	withBody, _ := cmd.Flags().GetBool("with-body")
 
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
@@ -189,7 +210,12 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
-	result := listResult{Issues: issues, Total: total, limit: limit}
+	result := listResult{
+		Issues: issuesPayload(issues, withBody),
+		Total:  total,
+		limit:  limit,
+		count:  len(issues),
+	}
 
 	// Fetch parent issues and sub-issue progress for the grouped display.
 	// Only needed for human-readable output (JSON stays flat).
@@ -338,5 +364,6 @@ func init() {
 			"roster, done ones included")
 	listCmd.Flags().Int("limit", 50, "Maximum number of results")
 	listCmd.Flags().Bool("all", false, "Include done issues")
+	listCmd.Flags().Bool("with-body", false, withBodyHelp)
 	issueCmd.AddCommand(listCmd)
 }

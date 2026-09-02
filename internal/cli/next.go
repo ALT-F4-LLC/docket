@@ -12,9 +12,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// nextResult is `next`'s issue-mode payload. `Issues` is typed `any` for the
+// same reason listResult's is: summary rows (issueRowsPayload) by default,
+// the full issue shape (issueListPayload) under `--with-body` (DKT-1053; see
+// issue_row.go).
 type nextResult struct {
-	Issues []*model.Issue `json:"issues"`
-	Total  int            `json:"total"`
+	Issues any `json:"issues"`
+	Total  int `json:"total"`
 	// readyTotal is the size of the ready set BEFORE --limit truncated it, and
 	// limit the effective limit. Both are unexported so the v1 payload is
 	// untouched: v1's Total is len(Issues) — a post-limit count that cannot
@@ -22,14 +26,17 @@ type nextResult struct {
 	// That is the silent drop the v2 envelope exists to close.
 	readyTotal int
 	limit      int
+	// count is the number of rows in Issues, kept alongside because Issues is
+	// `any`.
+	count int
 }
 
 // nextResult implements output.Collection for the v2 envelope, reporting the
 // honest pre-limit total rather than v1's len(Issues).
-func (r nextResult) CollectionItems() any { return issueListPayload{issues: r.Issues} }
+func (r nextResult) CollectionItems() any { return r.Issues }
 func (r nextResult) CollectionTotal() int { return r.readyTotal }
 func (r nextResult) CollectionTruncated() bool {
-	return output.IsTruncated(r.limit, r.readyTotal, len(r.Issues))
+	return output.IsTruncated(r.limit, r.readyTotal, r.count)
 }
 
 var nextCmd = &cobra.Command{
@@ -63,6 +70,7 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	types, _ := cmd.Flags().GetStringSlice("type")
 	limit, _ := cmd.Flags().GetInt("limit")
+	withBody, _ := cmd.Flags().GetBool("with-body")
 
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
@@ -127,16 +135,22 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
-	// FindReady/filterReady return a nil slice when nothing is ready, and
-	// nextResult has no custom MarshalJSON (unlike issueListPayload) — a nil
-	// `ready` would serialize `.data.issues` as JSON null instead of `[]`.
+	// FindReady/filterReady return a nil slice when nothing is ready. Both row
+	// payloads marshal a nil slice as `[]`, but the human table is handed
+	// `ready` directly, so it is normalized here once for every consumer.
 	if ready == nil {
 		ready = []*model.Issue{}
 	}
 
 	// Total stays len(ready) — the v1 field is frozen. The honest pre-limit
 	// count rides in readyTotal and surfaces only under --json=v2.
-	result := nextResult{Issues: ready, Total: len(ready), readyTotal: readyTotal, limit: limit}
+	result := nextResult{
+		Issues:     issuesPayload(ready, withBody),
+		Total:      len(ready),
+		readyTotal: readyTotal,
+		limit:      limit,
+		count:      len(ready),
+	}
 
 	var message string
 	if !w.JSONMode {
@@ -200,5 +214,6 @@ func init() {
 	// is exactly what it was: a workflow-free repo never passes this flag and
 	// never leaves the issue-mode path.
 	nextCmd.Flags().String("run", "", "Show ready STEPS of this run instead of ready issues")
+	nextCmd.Flags().Bool("with-body", false, withBodyHelp)
 	rootCmd.AddCommand(nextCmd)
 }

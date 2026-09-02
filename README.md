@@ -218,6 +218,8 @@ docket plan --json --root DKT-3
 docket issue list --json -s todo -s in-progress -p high
 ```
 
+Listings — `issue list`, `next`, `plan`, and `board` — emit summary rows under `--json`: every issue field except `description`, plus `description_bytes`. Read one issue's full description with `issue show`, or pass `--with-body` to include every description in the listing.
+
 </details>
 
 <details>
