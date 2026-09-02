@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -452,7 +454,18 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		if err != nil {
 			return err
 		}
-		issueID, err := db.InsertGapIssueTx(tx, gapProject, gapTitle(gap), string(gap), step.IssueID)
+		// The gap's own leading header block ranks the issue it materializes
+		// (DKT-1082). The body is stored VERBATIM either way — the header is
+		// read, never stripped, so the artifact and the issue keep saying the
+		// same thing.
+		attrs := parseGapHeader(gap)
+		issueID, err := db.InsertGapIssueTx(tx, gapProject, db.GapIssue{
+			Title:       gapTitle(gap),
+			Description: string(gap),
+			Priority:    attrs.Priority,
+			Kind:        attrs.Kind,
+			Labels:      attrs.Labels,
+		}, step.IssueID)
 		if err != nil {
 			return err
 		}
@@ -530,6 +543,110 @@ func gapTitle(gap []byte) string {
 		return line
 	}
 	return "gap"
+}
+
+// gapAttrs is what a gap body's leading header block declared about the issue
+// it materializes. A zero value means "declared nothing", and the insert
+// applies its own defaults — priority `none`, kind `task`, no labels.
+type gapAttrs struct {
+	Priority model.Priority
+	Kind     model.IssueKind
+	Labels   []string
+}
+
+// gapHeaderLine matches one `Key: value` line of a gap's leading header block.
+// The key is a SINGLE token — a header block is a block, not prose that
+// happens to contain a colon.
+var gapHeaderLine = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)$`)
+
+// severityPriority maps a review severity onto the backlog priority a drained
+// cluster must land at (DKT-1082). Below `medium` a finding sits under every
+// gate by design, so it ranks `none` and the map simply has no entry.
+var severityPriority = map[string]model.Priority{
+	"blocker": model.PriorityCritical,
+	"high":    model.PriorityHigh,
+	"medium":  model.PriorityMedium,
+}
+
+// parseGapHeader reads the OPTIONAL header block a gap body may carry
+// immediately after its title line: consecutive `Key: value` lines, ending at
+// the first line that is not one (a blank line included).
+//
+// It exists because drain-highs filed every high-severity cluster it drained
+// at priority `none`, where no priority-ordered planning pass would ever look
+// (DKT-1082) — while the severity was already written into the body the step
+// handed over. Reading it is MECHANICAL: a key, a value, and a closed set of
+// recognized keys. Docket still never interprets what the gap SAYS; it reads
+// only what the gap DECLARES about itself, in a shape the writer chose.
+//
+// Unrecognized keys are skipped without ending the block, so the `Home:` line
+// the drain-highs contract already puts on line two composes with a
+// `Severity:` line on line three. An unrecognized VALUE for a recognized key
+// is ignored the same way — a typo'd severity must not cost a worker its
+// completion, and the insert's default is the honest answer for "nothing
+// legible was declared".
+//
+// The body is never modified: callers store it verbatim.
+func parseGapHeader(gap []byte) gapAttrs {
+	var attrs gapAttrs
+	var sawTitle bool
+	var severity model.Priority
+
+	for _, line := range strings.Split(string(gap), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !sawTitle {
+			// The title is the first non-empty line — the same line gapTitle
+			// takes — and the header block starts immediately after it.
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			sawTitle = true
+			continue
+		}
+		match := gapHeaderLine.FindStringSubmatch(line)
+		if match == nil {
+			break
+		}
+		key := strings.ToLower(match[1])
+		value := strings.TrimSpace(match[2])
+		switch key {
+		case "severity":
+			severity = severityPriority[strings.ToLower(value)]
+		case "priority":
+			if p := model.Priority(strings.ToLower(value)); model.ValidatePriority(p) == nil {
+				attrs.Priority = p
+			}
+		case "kind":
+			if k := model.IssueKind(strings.ToLower(value)); model.ValidateIssueKind(k) == nil {
+				attrs.Kind = k
+			}
+		case "labels":
+			attrs.Labels = parseGapLabels(value, attrs.Labels)
+		}
+	}
+
+	// An explicit `Priority:` wins over a mapped `Severity:`: the specific
+	// statement beats the derived one, whichever order the two lines appear in.
+	if attrs.Priority == "" {
+		attrs.Priority = severity
+	}
+	return attrs
+}
+
+// parseGapLabels appends the comma-separated label names in value to seen,
+// trimming each, dropping empties, and de-duplicating case-sensitively (label
+// names are a per-project namespace and `bug` is not `Bug`). Capped, because a
+// header line is a declaration and not a bulk import.
+func parseGapLabels(value string, seen []string) []string {
+	const maxGapLabels = 16
+	for _, name := range strings.Split(value, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" || slices.Contains(seen, name) || len(seen) >= maxGapLabels {
+			continue
+		}
+		seen = append(seen, name)
+	}
+	return seen
 }
 
 // gapOnlyCompletion reports whether a step's recorded product is gap

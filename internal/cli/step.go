@@ -395,7 +395,23 @@ all passed prints the one-line success it always has.
 auxiliary artifact of kind ` + "`gap`" + ` beside the step's declared emit, plus a
 backlog issue related to the step's own — same transaction, so the residue
 cannot evaporate. No workflow declaration is needed; the channel is always
-open.`,
+open.
+
+A GAP FILE MAY RANK THE ISSUE IT FILES. Its first line is the issue title;
+immediately after it, consecutive ` + "`Key: value`" + ` lines are read as a header
+block, ending at the first line that is not one (a blank line included). The
+body is stored verbatim either way — the header is read, never stripped.
+
+  Severity: blocker|high|medium|low       priority critical|high|medium|none
+  Priority: critical|high|medium|low|none wins over Severity when both appear
+  Kind:     bug|feature|task|epic|chore   defaults to task
+  Labels:   a, b, c                       comma-separated, at most 16
+
+Unrecognized keys are skipped WITHOUT ending the block, so a convention line
+like ` + "`Home: THIS repository`" + ` on line two composes with a ` + "`Severity:`" + ` line
+on line three. An unrecognized value for a recognized key is ignored rather
+than refused. A gap file with no header block files exactly what it always
+did: priority none, kind task, no labels.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w, conn, id, token, err := tokenedStep(cmd, args)
