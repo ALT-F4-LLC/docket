@@ -15,18 +15,23 @@ import (
 // The context bundle — engine-spec §11.4's `context`, and the determinism
 // engine-core §8 and §9 item 5 require of it.
 //
-// ASSEMBLY IS PURE AND SNAPSHOT-PINNED. It reads, and may read, exactly five
-// sources (TDD §6.6):
+// ASSEMBLY IS PURE AND SNAPSHOT-PINNED. It reads, and may read, exactly six
+// sources (TDD §6.6, plus DKT-1079's sixth):
 //
 //  1. the step row and its definition, from the PINNED workflow's `parsed`
 //  2. `run_issues.body_snapshot`   — never the live issue body
 //  3. `run_issues.issue_snapshot`  — title/kind/labels/scope as of activation
 //  4. recorded `artifacts` bodies, resolved per §6.7's input rule
 //  5. `pins` rows (path + hash) — the LIST, not the file contents
+//  6. `run_notes` rows — the standing statements `run note add` recorded
+//     against the run, every one, in insertion order
 //
 // It never reads the working tree, never re-reads a file a pin names, and reads
 // NO LIVE ISSUE FIELD AT ALL: `id` is the run_issues key and every other member
-// of §11.4's `context.issue` comes from a snapshot column.
+// of §11.4's `context.issue` comes from a snapshot column. The sixth source is
+// in the artifact category, not the issue one: a note is RECORDED RUN STATE,
+// written once by a verb and event-logged, exactly as an artifact is written
+// once at completion — never a live field an `issue edit` can move.
 //
 // The scheduler's live read of `issues.scope_globs` (§6.3 R4) is NOT context
 // assembly and is deliberately outside this file. Two different questions
@@ -103,6 +108,24 @@ type Context struct {
 	// nil when the step carries no routing record, so a first-round packet is
 	// byte-identical to what it always was.
 	Resolution *ContextResolution `json:"resolution,omitempty"`
+	// Notes are the run's standing statements (DKT-1079): every `run note
+	// add` recorded against THIS RUN, in insertion order, whichever issue or
+	// step the bundle is for.
+	//
+	// It is the one steering channel that is run-wide rather than
+	// step-scoped. `Resolution` reaches the step a ruling was issued against
+	// (and the round it authorizes), which is right for a ruling about one
+	// step's work and useless for a fact about the whole run — RUN-70's
+	// conductor learned BEFORE DISPATCH that a required gate fails on clean
+	// HEAD, got the operator's disposition, filed the tracking issue, and had
+	// nowhere to put any of it that a packet reads: issue comments are an
+	// audit surface (§6.6's source rule, by design), the body froze at
+	// activation, and no step had a routing record yet. The executor
+	// re-derived the failure and filed a duplicate.
+	//
+	// omitempty, so a run with no notes renders every bundle byte-identically
+	// to what it always was.
+	Notes []RunNote `json:"notes,omitempty"`
 }
 
 // ContextResolution is the routing that sent a step back, and its note.
@@ -304,6 +327,14 @@ func AssembleContext(
 		return nil, err
 	}
 
+	// Source 6: the run's notes (DKT-1079), read in the same transaction as
+	// everything else so a claimant sees the notes that stood at the moment
+	// its token was minted.
+	notes, err := contextNotes(tx, step.RunID)
+	if err != nil {
+		return nil, err
+	}
+
 	metadata, err := decodeMetadata(step.Metadata)
 	if err != nil {
 		return nil, err
@@ -320,8 +351,28 @@ func AssembleContext(
 		Step: row, Issue: *issue, Inputs: inputs, Pins: pins,
 		LoopEntry: loopEntryOf(step), Metadata: metadata,
 		TargetSHA: sha, TargetWorktree: worktree,
-		Resolution: resolution,
+		Resolution: resolution, Notes: notes,
 	}, nil
+}
+
+// contextNotes reads the run's notes into the bundle's shape (DKT-1079).
+//
+// nil, not an empty slice, when the run has none: `omitempty` elides either,
+// but a nil keeps the in-memory bundle a test compares field-by-field equal to
+// one assembled before the field existed.
+func contextNotes(tx *sql.Tx, runID int) ([]RunNote, error) {
+	rows, err := db.ListRunNotesTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	out := make([]RunNote, 0, len(rows))
+	for _, n := range rows {
+		out = append(out, RunNote{ID: n.ID, Text: n.Text, RecordedAtMS: n.CreatedAtMS})
+	}
+	return out, nil
 }
 
 // attachGateOutcomes fills a resolution's failing-gate list (DKT-261).
@@ -1521,7 +1572,12 @@ type ContextMeta struct {
 	InputsBytes   int `json:"inputs_bytes"`
 	PinsBytes     int `json:"pins_bytes"`
 	MetadataBytes int `json:"metadata_bytes"`
-	TotalBytes    int `json:"total_bytes"`
+	// NotesBytes is the run notes' share (DKT-1079). Counted, because a note
+	// rides EVERY packet of the run: a cap computed without it would let a
+	// bundle exceed its declared limit by exactly the words a dispatcher
+	// added to all of them.
+	NotesBytes int `json:"notes_bytes"`
+	TotalBytes int `json:"total_bytes"`
 	// TemplatePinned reports whether the template a render would use is pinned.
 	// An UNPINNED template is reported so the reproducibility gap is visible
 	// rather than assumed (§6.11.1) — a packet rendered through an unpinned
@@ -1552,6 +1608,10 @@ func (c *Context) Meta() ContextMeta {
 	for k, v := range c.Metadata {
 		meta.MetadataBytes += len(k) + len(fmt.Sprint(v))
 	}
-	meta.TotalBytes = meta.IssueBytes + meta.InputsBytes + meta.PinsBytes + meta.MetadataBytes
+	for _, n := range c.Notes {
+		meta.NotesBytes += len(n.Text)
+	}
+	meta.TotalBytes = meta.IssueBytes + meta.InputsBytes + meta.PinsBytes +
+		meta.MetadataBytes + meta.NotesBytes
 	return meta
 }

@@ -204,20 +204,30 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// sha, so a packet that judged the wrong commit is distinguishable
 		// in the record from one that rendered correctly.
 		"issue-diff-repinned",
+
+		// The run-note kind (DKT-1079) — ONE, the `run-repinned` argument
+		// in its fourth column: a note is the third thing that changes what
+		// a live run's packets say (beside a repin and a scope refresh), and
+		// two renders of one step that differ by a `== RUN NOTE` section
+		// must be distinguishable in the record from the drift the snapshot
+		// discipline exists to prevent. No "spent" counterpart: rendering a
+		// note changes no step's state, and every later render reads it the
+		// way every render reads the frozen body.
+		"run-note-added",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 48 {
+	if len(eventKinds) != 49 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
 			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
 			"DKT-408's repin kind, DKT-546's batch-override pair, "+
 			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
-			"kind, and DKT-1034's issue.diff re-pin kind enumerate 48 "+
-			"(see DKT-21)",
+			"kind, DKT-1034's issue.diff re-pin kind, and DKT-1079's "+
+			"run-note kind enumerate 49 (see DKT-21)",
 			len(eventKinds))
 	}
 }

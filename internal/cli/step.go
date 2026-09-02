@@ -1106,10 +1106,11 @@ var stepContextCmd = &cobra.Command{
 	Long: `Re-emit a step's context bundle. No token required.
 
 The bundle is assembled from the run's PINNED and SNAPSHOTTED state only: the
-issue as it read at activation, the recorded input artifacts, and the pin list.
-It never reads the live issue, never reads the working tree, and never opens a
-pinned file. Two calls at the same run state are byte-identical, whatever has
-been edited in between.
+issue as it read at activation, the recorded input artifacts, the pin list,
+and the run's recorded notes (` + "`notes`" + `, absent when the run has none — see
+` + "`docket run note`" + `). It never reads the live issue, never reads the working
+tree, and never opens a pinned file. Two calls at the same run state are
+byte-identical, whatever has been edited in between.
 
 --meta reports per-section byte counts alongside the bundle, and says whether
 the template a render would use is pinned.`,
@@ -1154,12 +1155,16 @@ var stepRenderCmd = &cobra.Command{
 THE PACKET DRAWS FROM EXACTLY THESE SURFACES: the step row and its pinned
 workflow definition, the issue's description and title/kind/labels/scope AS
 SNAPSHOTTED AT ACTIVATION, the recorded input artifacts the step declares, the
-pin list, the step's declared packet files, and the step's own routing record
-(rendered as == RESOLUTION). Issue COMMENTS are never rendered, and a mid-run
-edit to the issue's description never renders either — the packet reads the
-activation-time snapshot. To steer a step's next execution, put the words in
-` + "`step resolve ... -m`" + `: a retry note renders on the same step, and a
-fix-round note renders in every packet of the round it authorizes.
+pin list, the run's recorded notes (rendered as == RUN NOTE N, right after
+== REQUEST), the step's declared packet files, and the step's own routing
+record (rendered as == RESOLUTION). Issue COMMENTS are never rendered, and a
+mid-run edit to the issue's description never renders either — the packet
+reads the activation-time snapshot. To steer a step's next execution, put the
+words in ` + "`step resolve ... -m`" + `: a retry note renders on the same step, and
+a fix-round note renders in every packet of the round it authorizes. To tell
+EVERY worker of the run something — a gate known to fail on clean HEAD, the
+issue tracking it, the disposition already given — put it in
+` + "`docket run note add RUN-N`" + `; it renders in every packet from then on.
 
 Without --template the shipped default is used; it ships in the binary, so it
 cannot drift. With --template F, if the run PINNED that path, the file's bytes

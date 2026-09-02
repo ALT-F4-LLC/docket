@@ -29,9 +29,11 @@ import (
 // to put words they need a worker to read (DKT-725). A packet is the context
 // bundle (§6.6's five sources: the pinned step definition, the issue's
 // ACTIVATION-FROZEN body_snapshot and issue_snapshot, recorded input
-// artifacts, and the pin list) plus the step's declared packet files and the
-// step's OWN routing record, rendered as `== RESOLUTION`. Two consequences
-// operators repeatedly discover the hard way:
+// artifacts, and the pin list — plus DKT-1079's sixth, the run's recorded
+// notes, rendered as `== RUN NOTE N` beside the request) plus the step's
+// declared packet files and the step's OWN routing record, rendered as
+// `== RESOLUTION`. Two consequences operators repeatedly discover the hard
+// way:
 //
 //   - issue COMMENTS never render. They are an audit surface, not a context
 //     source, and no template can reach them.
@@ -44,10 +46,14 @@ import (
 //     the issue out of the run and re-planning it, and `issue edit --scope`
 //     says so when it lands on an issue with live steps in a live run.
 //
-// The sanctioned steering channel is the resolve note: `step resolve --as
-// retry|rerun-gates -m` renders on the same step's re-execution, and `--as
-// fix-round -m` is stamped onto the new round's rows (stampEntryRouting) so
-// the authorization's remedy reaches the round it paid for.
+// The sanctioned steering channels are two. Per step, the resolve note: `step
+// resolve --as retry|rerun-gates -m` renders on the same step's re-execution,
+// and `--as fix-round -m` is stamped onto the new round's rows
+// (stampEntryRouting) so the authorization's remedy reaches the round it paid
+// for. Per run, the run note (DKT-1079): `run note add RUN-N` renders in every
+// packet of the run from that moment on, for a fact about the run rather than
+// about one step — a gate known to fail on clean HEAD, the issue tracking it,
+// the disposition already given — so no worker rediscovers it per step.
 
 // defaultPacket is the shipped template. It lives under internal/ because the
 // Vorpal build's include list requires embeds there — the same constraint the

@@ -661,6 +661,40 @@ NOTHING — no operator waived a stale-target warning before the verb for
 waiving one existed — and it is dormant: a run that never records a waiver
 reads byte-identically to v24 on every verb.
 
+### AMENDMENT — the span extends to v26 (DKT-1079, 2026-09-02)
+
+**What changed.** v26 adds ONE table, `run_notes`: a standing statement
+whoever drives a run records ONCE against it, and every packet the run
+renders from then on carries — for every step of every issue, verbatim, as a
+`== RUN NOTE N` section directly after `== REQUEST`, and in `step context` as
+`context.notes`. A note is minted by `run note add` (one row, event-logged as
+`run-note-added` carrying the text, attributed human) and read by context
+assembly as its sixth source, in the claim's own transaction beside the other
+five. It is append-only — no edit, no delete — because a packet is the record
+of what a worker was told, and two renders of one step that disagreed about
+that with nothing in the ledger between them would be exactly the drift the
+snapshot discipline exists to prevent; a changed ruling is a second note. The
+note dies with its run — the `run_id` FK is the whole scope rule.
+
+**What it fixes.** A packet's every writable source was step-scoped. RUN-70's
+conductor gate-probed before dispatch, found `tests` failing on clean HEAD,
+got the operator's disposition ("file issue, override-pass"), filed DKT-1075
+— and had nowhere to put any of it that a packet reads: issue comments are an
+audit surface (§6.6), the body froze at activation, and no step had a routing
+record for `step resolve -m` to reach. The executor stashed, re-ran the
+suite, re-derived the failure, and filed DKT-1076, a duplicate the conductor
+then spent three more calls closing.
+
+**Why the ratified arithmetic is untouched.** Like v11–v25, v26 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v24/v25 form, since v26 adds no column). It
+BACK-FILLS NOTHING — no dispatcher recorded a note before the verb for
+recording one existed — and it is dormant: a run that never records a note
+reads byte-identically to v25 on every verb, every bundle, and every packet
+(`notes` is `omitempty`, and the template's section renders only over a
+non-empty list).
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

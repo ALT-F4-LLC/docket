@@ -555,6 +555,13 @@ var eventActors = map[string]Actor{
 	// the checkout the patched tree stands in, which is precisely what
 	// `human` means in this table.
 	EventIssueDiffRepinned: ActorHuman,
+
+	// The run note (DKT-1079): nothing in the engine writes a note — the
+	// packet's other sources are frozen at activation or recorded by the
+	// steps themselves, and a note exists only because a person (or the
+	// dispatcher relaying one) ran `run note add` naming the run it should
+	// reach, which is precisely what `human` means in this table.
+	EventRunNoteAdded: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,

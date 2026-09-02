@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 25
+const currentSchemaVersion = 26
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -194,6 +194,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	23: migrateV22ToV23,
 	24: migrateV23ToV24,
 	25: migrateV24ToV25,
+	26: migrateV25ToV26,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2298,6 +2299,53 @@ func migrateV24ToV25(tx *sql.Tx) error {
 	return nil
 }
 
+// v26Sentinels is the table the v26 DDL creates, probed by the rewind guard in
+// the TABLE form v24 and v25 use. TestRewindGuardProbesEveryV26Sentinel derives
+// the list from the DDL, so an added table cannot ship without its sentinel.
+var v26Sentinels = []string{
+	"run_notes",
+}
+
+// v26DDL is the run-scoped note (DKT-1079): a standing statement whoever
+// drives a run records ONCE, and every packet the run renders from then on
+// carries — the channel a dispatcher had no way to reach a worker through.
+// RUN-70's conductor learned before dispatch that a required gate fails on
+// clean HEAD, got an operator disposition, and filed a tracking issue; nothing
+// it could write reached the executor's packet (issue comments are an audit
+// surface, never a context source, and the issue body froze at activation), so
+// the executor re-derived the failure and filed a duplicate.
+//
+// It is a TABLE beside gate_override_grants and stale_target_waivers rather
+// than a column because it is the same shape — standing operator context,
+// run-scoped by the run_id foreign key, dead with its run. A note is
+// append-only: there is no edit and no delete, because a packet that rendered
+// a note and a packet that did not must be distinguishable in the record.
+const v26DDL = `
+CREATE TABLE IF NOT EXISTS run_notes (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	run_id        INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+	text          TEXT    NOT NULL,
+	created_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_notes_run
+	ON run_notes(run_id);
+`
+
+// migrateV25ToV26 creates the run-note table (DKT-1079).
+//
+// Additive and dormant, exactly as v24 and v25 were: it creates one new table
+// and touches no existing one, so a run that never records a note reads
+// byte-identically to v25 — every context bundle and every packet. There is
+// nothing to back-fill: no dispatcher recorded a note before the verb for
+// recording one existed.
+func migrateV25ToV26(tx *sql.Tx) error {
+	if _, err := tx.Exec(v26DDL); err != nil {
+		return fmt.Errorf("migrating v25 to v26: %w", err)
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -2846,6 +2894,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 24
+				break
+			}
+		}
+	}
+
+	// The v26 guard, same TABLE form as v24 and v25 and for their reason: v26
+	// adds a table and no columns, so a database stamped 26 by a binary built
+	// mid-change carries every v25 sentinel and the note table never arrives.
+	// The v26 migration is CREATE TABLE IF NOT EXISTS throughout, so re-running
+	// it against such a store is safe.
+	if version >= 26 {
+		for _, table := range v26Sentinels {
+			exists, err := tableExists(db, table)
+			if err != nil {
+				break
+			}
+			if !exists {
+				version = 25
 				break
 			}
 		}

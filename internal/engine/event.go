@@ -305,6 +305,19 @@ const (
 	// carried e642afb would be indistinguishable in the record from a packet
 	// that rendered correctly.
 	EventIssueDiffRepinned = "issue-diff-repinned"
+
+	// A run note being recorded (DKT-1079): `run note add` put a standing
+	// statement into every packet the run renders from that moment on.
+	//
+	// It earns its place on the `run-repinned` argument, in yet another
+	// column: a note is the third thing that changes what a step's packet
+	// says while the run is live, beside a repin and a scope refresh. Two
+	// renders of one step that differ by a `== RUN NOTE` section would
+	// otherwise be indistinguishable in the record from the packet drift the
+	// snapshot discipline exists to prevent. It carries the note's id and its
+	// text verbatim, as `step-annotated` carries its annotation, so what
+	// every later worker was told survives in the feed itself.
+	EventRunNoteAdded = "run-note-added"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -341,6 +354,7 @@ var eventKinds = map[string]bool{
 	EventStaleTargetWaived:   true,
 	EventIssueScopeRefreshed: true,
 	EventIssueDiffRepinned:   true,
+	EventRunNoteAdded:        true,
 }
 
 // recordEvent writes one event in the caller's transaction.

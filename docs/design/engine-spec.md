@@ -52,6 +52,11 @@ docket dispatch open|close|verify|abandon --run RUN-N
                                                 # batch manifest (TTL'd, one open per run,
                                                 #   CAS); next refuses while open or
                                                 #   discrepancies exist; abandon unsticks
+docket run      note add|list RUN-N             # a standing statement recorded once
+                                                #   against the run, rendered as
+                                                #   `== RUN NOTE N` in EVERY packet the
+                                                #   run renders from then on and carried
+                                                #   by `context.notes` (DKT-1079)
 docket step     claim STEP-N                    # atomic; mints a capability token and
                                                 #   returns token + the step CONTEXT bundle
 docket step     heartbeat|complete|fail         # token via DOCKET_TOKEN env or stdin
@@ -176,6 +181,22 @@ or a pinned instance template file. Packet *layout* is thereby core mechanics wh
 *content* stays instance data; no harness needs a formatting script. (The reference
 instance's harness hands the packet to an LLM as its prompt; core neither knows nor
 cares.)
+
+**Run notes.** `docket run note add RUN-N --text "…"` (or `--file F`, `-` for stdin)
+records a standing statement against a run — once — and every packet the run
+renders from then on carries it verbatim as a `== RUN NOTE N` section directly
+after `== REQUEST`, for every step of every issue; `step context` carries it as
+`context.notes`, so a contract can name it. It is the one steering channel that is
+run-wide: `step resolve -m` reaches the step it rules on (and the round it
+authorizes), which is right for a ruling about one step's work and useless for a
+fact about the whole run — a required gate known to fail on clean HEAD, the issue
+tracking it, and the disposition already given, which a dispatcher learns before
+the first dispatch and which every worker otherwise rediscovers and re-files
+(DKT-1079). Issue comments remain an audit surface and never render. Notes are
+append-only (a changed ruling is a second note, rendered after the first), capped
+at 16 KiB because each rides every packet, refused on a terminal run, and each is
+recorded as a `run-note-added` event carrying its text, attributed human.
+`docket run note list RUN-N` reads them back in render order.
 
 **Guards.** `docket guard spawn|record|stop|gate` are deterministic allow/deny
 predicates over engine state for harness enforcement points (exit 0 allow / exit 2
@@ -575,7 +596,8 @@ next row        { step, instance, issue, run, executor, class, attempt,
 claim response  { step, token, lease_expires_ms, context }
 context         { step: <next row>, issue: {id, title, body_snapshot, kind, labels,
                   scope}, inputs: [{artifact, kind, producer_step, body, payload?}],
-                  pins: [{path, sha256}], loop_entry, metadata, pre_gates? }
+                  pins: [{path, sha256}], loop_entry, metadata, pre_gates?,
+                  notes?: [{id, text, recorded_at_ms}] }   # notes: DKT-1079
 dispatch        { dispatch, run, opened_seq, rows: [<next row>…] }   # verify = byte-equality on rows
 complete args   --artifact-file F  [--payload-file F]  [--usage '{"unit":n,…}']
                 [--metadata '{…}']   (token via DOCKET_TOKEN env or stdin — §4)
@@ -594,6 +616,11 @@ DKT-15)*. `pre_gates?` is an array of §11.4-shaped gate results for the step's
 a verdict is `unmatched` or timed out, null on ordinary pass/fail *(added
 2026-08-03, DKT-19 / DKT-20)*.
 
+`notes?` is the run's recorded notes (`docket run note add`, DKT-1079) in insertion
+order, present only when the run has at least one, so every bundle of a run without
+notes is byte-identical to before the member existed. `run note list RUN-N` and
+`run note add`'s answer carry the same `{id, text, recorded_at_ms}` shape.
+
 `docket step context STEP-N` re-emits `context` read-only (no token required; local
 inspection). `--meta` on it reports per-section byte counts — the closure-size record
-(engine-core §8).
+(engine-core §8) — `notes_bytes` among them, since a note rides every packet.
