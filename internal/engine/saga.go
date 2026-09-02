@@ -112,6 +112,22 @@ type Engine struct {
 	// `known = false` means every consumer stays silent — an unanswerable
 	// question is not evidence of staleness.
 	IsAncestorFn func(execRoot, sha string) (ancestor, known bool)
+	// PatchContainedFn reports whether execRoot's HEAD carries `sha`'s PATCH —
+	// whether some commit on HEAD's side of their merge base is patch-id
+	// equivalent to each commit on `sha`'s side (DKT-1033) — and whether that
+	// question could be answered at all. A field for DiffFn's reason: the real
+	// one shells out to git.
+	//
+	// It is the FIRST question a disproved ancestry opens, ahead of
+	// TreeMatchFn, because it asks about the work rather than the tip: a
+	// sibling issue's integration or a conductor's follow-up patch on the same
+	// file moves HEAD's tree without touching this patch, and RUN-67 warned on
+	// all nine review rows for exactly that. Like TreeMatchFn it may only
+	// ACQUIT a sha ancestry already disproved; unlike TreeMatchFn, a
+	// definitive `contained = false` is the ONE measurement that lets the
+	// advisory call an integration diverged, because it is the one that
+	// actually measured the patch.
+	PatchContainedFn func(execRoot, sha string) (contained, known bool)
 	// TreeMatchFn reports whether execRoot's HEAD still carries `sha`'s TREE
 	// on the paths `sha`'s work touched — or, where that question has no
 	// evidence to answer with, whether the two carry the same root tree
@@ -124,6 +140,11 @@ type Engine struct {
 	// exactly as it stood — a probe that cannot answer must not silence a
 	// warning it did not disprove, which is the opposite direction from
 	// IsAncestorFn's own fail-open and deliberately so.
+	//
+	// Since DKT-1033 it is PatchContainedFn's FALLBACK: a tree comparison
+	// reads any later commit on the same paths as a difference, so its
+	// `match = false` is no longer allowed to word the advisory as a
+	// divergence — only as content that could not be matched.
 	TreeMatchFn func(execRoot, sha string) (match, known bool)
 	// ObjectExistsFn reports whether `sha` resolves as a COMMIT OBJECT from
 	// execRoot at all — `git cat-file -e <sha>^{commit}` — and whether that
@@ -169,13 +190,14 @@ type Engine struct {
 func NewEngine() *Engine {
 	paths := repoPathsFrom(resolvePaths())
 	return &Engine{
-		Gates:          NewExecRunner(paths),
-		Actions:        NewActionRunner(paths),
-		DiffFn:         GitDiff,
-		HeadFn:         sharedCheckoutHead,
-		IsAncestorFn:   gitAncestorOfHead,
-		TreeMatchFn:    gitTreeMatchesHead,
-		ObjectExistsFn: gitCommitResolvable,
+		Gates:            NewExecRunner(paths),
+		Actions:          NewActionRunner(paths),
+		DiffFn:           GitDiff,
+		HeadFn:           sharedCheckoutHead,
+		IsAncestorFn:     gitAncestorOfHead,
+		PatchContainedFn: gitPatchContainedInHead,
+		TreeMatchFn:      gitTreeMatchesHead,
+		ObjectExistsFn:   gitCommitResolvable,
 	}
 }
 
@@ -2493,6 +2515,165 @@ func gitCommitResolvable(execRoot, sha string) (exists, known bool) {
 	return false, false
 }
 
+// gitPatchContainedInHead is PatchContainedFn's real implementation (DKT-1033):
+// does the shared checkout's HEAD carry the PATCH this target recorded — is
+// every commit on the target's side of their merge base patch-id equivalent to
+// some commit on HEAD's side?
+//
+// THE DEFECT IT CLOSES. DKT-424's tree comparison asked whether HEAD's TREE
+// still equalled the target's on the paths the work touched. That is the wrong
+// question about a moving branch tip: a sibling issue integrated into the same
+// file, or a conductor's follow-up patch to the same test, changes HEAD's tree
+// on those paths while leaving this work's every hunk intact — and RUN-67
+// warned "integration diverged" on all nine review rows of a run whose three
+// integrations were plain `git cherry-pick -x`, two of them into
+// non-overlapping regions of one Makefile. Tree equality is a statement about
+// the tip; the question worth asking is a statement about the work, which is
+// what patch-id equivalence measures.
+//
+// TWO PROBES, THE SECOND REFINING THE FIRST.
+//
+//   - `git cherry HEAD <sha>` (probe one) marks every commit in HEAD..<sha>
+//     with `-` when <sha>..HEAD carries a commit of the same patch-id, `+`
+//     otherwise. All `-` is the common case and answers in one subprocess.
+//     Its patch-id hashes three lines of context around each hunk, so a
+//     clean cherry-pick lands as `+` whenever a sibling's change sits within
+//     those three lines — the same false positive one commit closer, which
+//     is why a `+` is not yet a verdict.
+//   - Zero-context patch-ids (probe two): `git log -p -U0 | git patch-id
+//     --stable` over each side, compared as sets. Hunk headers carry no
+//     hashed line numbers and -U0 emits no context, so the identity is the
+//     removed and added lines alone, per path — a neighbour's edit cannot
+//     perturb it, and a hunk edited during conflict resolution cannot match
+//     it. A squashed integration is covered by the target line's combined
+//     diff as one more candidate.
+//
+// WHY NOT THE `(cherry picked from commit <sha>)` TRAILER. `-x` writes it on a
+// conflicted pick exactly as on a clean one, so its presence proves the pick
+// happened and nothing about what the resolution kept; the case this must
+// still catch — a hunk edited during conflict resolution — carries the
+// trailer. Patch-id equivalence answers both and needs no cooperation from
+// the integrator's flags.
+//
+// Three-valued like the other probes. `known = false` — git absent, an
+// unresolvable object, nothing off HEAD to test, or a target whose commits
+// carry no patch content at all (an empty commit, DKT-451's shape) — hands the
+// question to TreeMatchFn. `contained = false` with `known = true` is the one
+// verdict in this family that measured the work itself, and the only one the
+// advisory may word as a divergence.
+func gitPatchContainedInHead(execRoot, sha string) (contained, known bool) {
+	if execRoot == "" || sha == "" {
+		return false, false
+	}
+	out, err := exec.Command("git",
+		gitDirArgs(execRoot, "cherry", "HEAD", sha)...).Output()
+	if err != nil {
+		return false, false
+	}
+	tested, upstream := false, true
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "- "):
+			tested = true
+		case strings.HasPrefix(line, "+ "):
+			tested = true
+			upstream = false
+		}
+	}
+	if !tested {
+		// Nothing in HEAD..sha to test: the target is on HEAD's history after
+		// all (ancestry answers that, not this), or its line is merges only.
+		return false, false
+	}
+	if upstream {
+		return true, true
+	}
+
+	want, ok := gitZeroContextPatchIDs(execRoot, "HEAD.."+sha)
+	if !ok || len(want) == 0 {
+		return false, false // no patch content on the target's side to match
+	}
+	have, ok := gitZeroContextPatchIDs(execRoot, sha+"..HEAD")
+	if !ok {
+		return false, false
+	}
+	carried := make(map[string]bool, len(have))
+	for _, id := range have {
+		carried[id] = true
+	}
+	missing := false
+	for _, id := range want {
+		if !carried[id] {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return true, true
+	}
+	// A squashed integration: the target line's whole diff, landed as one
+	// commit, matches no single commit of the line but does match the range.
+	if squash, ok := gitZeroContextRangePatchID(execRoot, sha); ok && carried[squash] {
+		return true, true
+	}
+	return false, true
+}
+
+// gitZeroContextPatchIDs lists the zero-context patch-id of every non-merge
+// commit in a range, as `git patch-id --stable` prints them: one id per commit
+// that carries patch content, none for a commit that does not.
+//
+// The text is an identity, so everything that could make it read differently
+// on the two sides is pinned: renames off (gitPathsTouchedSince's reason),
+// colour off, inter-hunk fusing off (a config that fuses close hunks would
+// pull a neighbour's lines back in as context), and --format keeps `commit
+// <sha>` as each entry's first line — the boundary patch-id splits on —
+// without the message body a default format prints between it and the diff.
+func gitZeroContextPatchIDs(execRoot, rangeSpec string) (ids []string, ok bool) {
+	out, err := exec.Command("git", gitDirArgs(execRoot,
+		"log", "--no-color", "--format=commit %H", "-p", "-U0",
+		"--inter-hunk-context=0", "--no-merges", "--no-renames", rangeSpec)...).Output()
+	if err != nil {
+		return nil, false
+	}
+	return gitPatchIDsOf(execRoot, out)
+}
+
+// gitZeroContextRangePatchID is the patch-id of the target line's combined
+// diff — `git diff HEAD...<sha>`, everything since the merge base as one
+// patch — which is what a squashed integration commits.
+func gitZeroContextRangePatchID(execRoot, sha string) (id string, ok bool) {
+	out, err := exec.Command("git", gitDirArgs(execRoot,
+		"diff", "--no-color", "--no-ext-diff", "--no-renames", "-U0",
+		"--inter-hunk-context=0", "HEAD..."+sha)...).Output()
+	if err != nil {
+		return "", false
+	}
+	ids, ok := gitPatchIDsOf(execRoot, out)
+	if !ok || len(ids) != 1 {
+		return "", false
+	}
+	return ids[0], true
+}
+
+// gitPatchIDsOf feeds patch text through `git patch-id --stable` and returns
+// the ids it prints, in order. --stable makes an id independent of the order
+// files appear in, so two renderings of one change cannot disagree on it.
+func gitPatchIDsOf(execRoot string, patch []byte) (ids []string, ok bool) {
+	cmd := exec.Command("git", gitDirArgs(execRoot, "patch-id", "--stable")...)
+	cmd.Stdin = bytes.NewReader(patch)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if id, _, _ := strings.Cut(line, " "); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, true
+}
+
 // treeMatchBatch caps how many pathspecs ride on one `git diff` argv, so a
 // commit touching thousands of files cannot overflow the platform's argument
 // limit. The comparison is split across batches and every batch must come back
@@ -2502,6 +2683,14 @@ const treeMatchBatch = 256
 // gitTreeMatchesHead is TreeMatchFn's real implementation (DKT-424): does the
 // shared checkout's HEAD still carry the tree this target recorded, on the
 // paths the target's own work touched?
+//
+// SINCE DKT-1033 IT IS THE FALLBACK, NOT THE VERDICT. A tree comparison on a
+// moving branch tip reads any later commit on the same paths — a sibling
+// issue's integration, a conductor's follow-up patch — as a difference, so its
+// `match = false` says nothing about this work. staleTargets asks
+// gitPatchContainedInHead first and words this probe's negative as content
+// that could not be matched, never as a divergence; its `match = true` still
+// acquits, because a tree identical on the work's own paths carries the work.
 //
 // THE DEFECT IT CLOSES. The sanctioned integration flow — an executor commits
 // in an isolated worktree, a conductor `git cherry-pick`s that commit onto the

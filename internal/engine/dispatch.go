@@ -935,11 +935,27 @@ func consumesIssueDiff(spec *workflow.Step) bool {
 // warned, and the conductor spent ~50s proving by hand what the probe now
 // establishes (DKT-451).
 //
-// The tree probe may only ACQUIT. Unanswerable (no TreeMatchFn wired, git
-// absent, unrelated histories with differing trees, an empty touched-path set
-// whose commits' root trees also differ) leaves DKT-193's verdict exactly as it
-// stood, and the reason then says the tree question went unanswered rather than
-// claiming a difference nothing measured.
+// THE PATCH IS THE THING MEASURED, NOT THE TIP (DKT-1033). A tree comparison
+// on a moving branch tip reads any later commit on the same paths as a
+// difference: RUN-67 warned "integration diverged" on all nine review rows of
+// a run whose three integrations were plain `git cherry-pick -x` — two into
+// non-overlapping regions of one Makefile, one followed by a conductor patch
+// to the same test file — with every hunk byte-identical on HEAD. So a
+// disproved ancestry now asks about the PATCH first: does HEAD's side of the
+// merge base carry a patch-id equivalent of each commit on the target's side
+// (PatchContainedFn — `git cherry`, refined by a zero-context patch-id
+// comparison)? The tree probe speaks after it, and only where the patch probe
+// did not already acquit.
+//
+// Both probes may only ACQUIT, and the reason names which one accused. Only a
+// patch probe that ran and found the patch missing may say "diverged", because
+// only it measured the work; a tree difference the patch probe could not check
+// is worded as content that could not be matched, which is all it measured;
+// and the unanswerable states (no probe wired, git absent, unrelated histories
+// with differing trees, an empty touched-path set whose commits' root trees
+// also differ) leave DKT-193's verdict exactly as it stood, with a reason that
+// says the question went unanswered rather than claiming a difference nothing
+// measured.
 //
 // THE REASON NAMES THE CLAIM-TIME SEMANTICS (DKT-415), because the decision the
 // warning exists to inform is "is dispatching through this safe". Claim
@@ -982,9 +998,10 @@ func (e *Engine) staleTargets(
 	// One verdict per SHA, not per row: a review fanout's siblings all render
 	// from the same recorded target, and the git questions are identical.
 	type verdict struct {
-		ancestor, known      bool
-		treeMatch, treeKnown bool
-		absent               bool
+		ancestor, known       bool
+		contained, patchKnown bool
+		treeMatch, treeKnown  bool
+		absent                bool
 	}
 	cache := make(map[string]verdict, len(candidates))
 	var out []StaleTarget
@@ -992,7 +1009,17 @@ func (e *Engine) staleTargets(
 		v, seen := cache[c.sha]
 		if !seen {
 			v.ancestor, v.known = e.IsAncestorFn(execRoot, c.sha)
-			if v.known && !v.ancestor && e.TreeMatchFn != nil {
+			if v.known && !v.ancestor && e.PatchContainedFn != nil {
+				// DKT-1033: the patch question first — it is the one about
+				// the work rather than the tip.
+				v.contained, v.patchKnown = e.PatchContainedFn(execRoot, c.sha)
+			}
+			if v.known && !v.ancestor && !(v.patchKnown && v.contained) &&
+				e.TreeMatchFn != nil {
+				// The tree probe is acquittal-only, so it is worth asking
+				// wherever the patch probe did not already acquit: a squash
+				// that folded several issues into one commit carries this
+				// work's content on its paths without carrying its patch-id.
 				v.treeMatch, v.treeKnown = e.TreeMatchFn(execRoot, c.sha)
 			}
 			if !v.known && e.ObjectExistsFn != nil {
@@ -1011,10 +1038,11 @@ func (e *Engine) staleTargets(
 		if !v.known && !v.absent {
 			continue
 		}
-		if v.known && v.treeKnown && v.treeMatch {
-			// DKT-424: the sha was rewritten (cherry-pick integration), the
-			// tree was not. The branch carries exactly what the packet
-			// renders on the paths this work touched — nothing to warn about.
+		if v.known && ((v.patchKnown && v.contained) || (v.treeKnown && v.treeMatch)) {
+			// DKT-424, DKT-1033: the sha was rewritten (cherry-pick
+			// integration), the work was not. The branch carries this
+			// target's patch, or exactly what the packet renders on the paths
+			// the work touched — nothing to warn about.
 			continue
 		}
 		if waived(c.instance, c.sha) {
@@ -1022,7 +1050,14 @@ func (e *Engine) staleTargets(
 			// operator; the standing ruling is engine-visible now.
 			continue
 		}
-		reason := staleTargetReason(c.sha, sharedHead, v.treeKnown)
+		evidence := staleUndetermined
+		switch {
+		case v.patchKnown:
+			evidence = stalePatchMissing
+		case v.treeKnown:
+			evidence = staleTreeUnmatched
+		}
+		reason := staleTargetReason(c.sha, sharedHead, evidence)
 		if v.absent {
 			reason = staleTargetAbsentReason(c.sha, sharedHead)
 		}
@@ -1045,32 +1080,62 @@ func waiverCovers(w db.StaleTargetWaiver, instance, sha string) bool {
 		strings.HasPrefix(strings.ToLower(sha), strings.ToLower(w.TargetSHA))
 }
 
-// staleTargetReason renders the advisory's sentence, in the two shapes the
-// evidence actually supports (DKT-424).
+// staleEvidence names which probe produced the advisory's second half, so the
+// sentence claims exactly what was measured and no more (DKT-424, DKT-1033).
+type staleEvidence int
+
+const (
+	// staleUndetermined: neither the patch question nor the tree question
+	// could be answered. The ancestry fact stands alone.
+	staleUndetermined staleEvidence = iota
+	// staleTreeUnmatched: the patch question could not be asked; the tree
+	// probe ran and HEAD's content on the paths the work touched did not
+	// match the target's. A later commit on the same paths reads exactly this
+	// way, so it is not a divergence claim.
+	staleTreeUnmatched
+	// stalePatchMissing: the patch probe ran and no commit on HEAD's side of
+	// the merge base carries this work's patch. The one shape that measured
+	// the work itself, and the only one the advisory may call a divergence.
+	stalePatchMissing
+)
+
+// staleTargetReason renders the advisory's sentence, in the three shapes the
+// evidence actually supports (DKT-424, DKT-1033).
 //
-// `treeChecked` is the difference between "the branch's content differs from
-// the packet's, measured" and "the sha diverged and the content question could
-// not be asked". The conductor's next move differs between them — the first is
-// a divergence to look at, the second is a probe to repair or a tree to
-// hand-check — so the string may not blur the two.
-func staleTargetReason(sha, sharedHead string, treeChecked bool) string {
-	evidence := fmt.Sprintf(
+// The conductor's next move differs between them — a missing patch is a
+// divergence to look at, an unmatched tree is content to hand-check against
+// whatever landed on those paths since, an unanswered question is a probe to
+// repair — so the string may not blur them, and in particular may not say
+// "diverged" for anything but the patch measurement: RUN-67 read that word on
+// nine rows whose patches were all intact.
+func staleTargetReason(sha, sharedHead string, evidence staleEvidence) string {
+	sentence := fmt.Sprintf(
 		"the recorded target sha %.12s is not an ancestor of the shared "+
 			"checkout's HEAD %.12s", sha, sharedHead)
-	if treeChecked {
-		evidence += ", and its tree still differs from that HEAD on the paths " +
-			"the work touched — integration diverged from the recorded commit " +
-			"rather than merely rewriting its sha, so a packet rendered from it " +
-			"reviews a tree the branch no longer carries"
-	} else {
-		evidence += ", and whether HEAD still carries its tree could not be " +
-			"determined (git could not answer, or the two share no comparable " +
-			"history) — a cherry-picked integration mints a new sha for " +
-			"identical content, so confirm the tree before reading this as a " +
-			"divergence; if integration did diverge, a packet rendered from " +
-			"this sha reviews a tree the branch no longer carries"
+	switch evidence {
+	case stalePatchMissing:
+		sentence += ", and no commit on the shared branch since their merge " +
+			"base carries its patch (`git cherry` and a zero-context patch-id " +
+			"comparison both ran against HEAD) — integration diverged from the " +
+			"recorded commit rather than merely rewriting its sha, or never " +
+			"landed it, so a packet rendered from it reviews a change the " +
+			"branch does not carry"
+	case staleTreeUnmatched:
+		sentence += ", and whether HEAD carries its patch could not be tested " +
+			"(patch-id equivalence had nothing to compare), while HEAD's " +
+			"content could not be matched to its tree on the paths the work " +
+			"touched — a later commit on those same paths reads exactly this " +
+			"way, so this is not evidence that integration changed the work; " +
+			"confirm the content by hand before acting on this row"
+	default:
+		sentence += ", and whether HEAD still carries its patch or its tree " +
+			"could not be determined (git could not answer, or the two share " +
+			"no comparable history) — a cherry-picked integration mints a new " +
+			"sha for identical content, so confirm the content by hand before " +
+			"acting on this row; if integration never landed it, a packet " +
+			"rendered from this sha reviews a change the branch does not carry"
 	}
-	return evidence + staleTargetClaimSemantics
+	return sentence + staleTargetClaimSemantics
 }
 
 // staleTargetClaimSemantics is DKT-415's claim-time tail, shared by every
