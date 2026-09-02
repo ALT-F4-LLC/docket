@@ -13,52 +13,11 @@ on:
       - "*"
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - run: |
-          go_directive=$(sed -n 's/^go \([0-9.]*\)$/go\1/p' go.mod)
-          toolchain=$(sed -n 's/^toolchain \(go[0-9.]*\)$/\1/p' go.mod)
-          if [ -z "$go_directive" ] && [ -z "$toolchain" ]; then
-            echo "could not read a version from go.mod; refusing to pass" >&2
-            exit 1
-          fi
-          actual=$(go version)
-          for want in $toolchain $go_directive; do
-            case "$actual" in
-              *"$want "*|*"$want") echo "toolchain ok: $want"; exit 0 ;;
-            esac
-          done
-          echo "toolchain mismatch: go.mod names ${toolchain:-none}/${go_directive:-none}, got:" >&2
-          echo "$actual" >&2
-          exit 1
-
-      - run: go build ./...
-
-      - run: go test ./...
-        env:
-          DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
-
-  qa:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - run: ./scripts/qa.sh
-
-  repo-gates:
+  # gates runs first: secret-scan and self-hygiene are diff-only checks
+  # (no build, no test binary), done in seconds, so a leaked credential or a
+  # stale doc fails the run before build-shell/build spend minutes producing
+  # a binary from code that's already going to be rejected.
+  gates:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -95,7 +54,7 @@ jobs:
           # valid diff would, never less, so it cannot narrow what gets swept.
           if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             widened=$(git rev-list --max-parents=0 HEAD | tail -1)
-            echo "repo-gates: base ref '$base' is unreadable (likely a force-push over it); widening to the root commit $widened instead of refusing" >&2
+            echo "gates: base ref '$base' is unreadable (likely a force-push over it); widening to the root commit $widened instead of refusing" >&2
             base="$widened"
           fi
 
@@ -107,7 +66,11 @@ jobs:
       - name: self-hygiene
         run: ./scripts/qa/self-hygiene.sh "${{ steps.base.outputs.sha }}"
 
+  # go build/go test run as part of language.NewGo's build in the vorpal
+  # pipeline (build-shell/build below) — no separate job repeats them here.
   build-shell:
+    needs:
+      - gates
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -180,10 +143,32 @@ jobs:
           name: docket-dist-${{ env.ARCH }}-${{ env.OS }}
           path: ${{ env.ARCHIVE_NAME }}
 
+  # Runs the actual vorpal-built artifact (downloaded from build's
+  # docket-dist-* upload) rather than a throwaway `go build` binary, so this
+  # is a real test of what ships.
+  e2e:
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: docket-dist-x86_64-linux
+          path: dist
+
+      - run: |
+          tar -xzf dist/docket-x86_64-linux.tar.gz -C dist
+          chmod +x dist/docket
+          echo "DOCKET_BIN=$(pwd)/dist/docket" >> "$GITHUB_ENV"
+
+      - run: ./scripts/qa.sh "$DOCKET_BIN"
+
   release:
     if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
     needs:
-      - build
+      - e2e
     permissions:
       attestations: write
       contents: write

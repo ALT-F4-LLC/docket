@@ -50,7 +50,7 @@
 # merge-base for an ordinary PR (A is an ancestor of B), so this only widens
 # if the checked-out ref diverges from the PR's own history — which is
 # exactly what a stale `base.sha` on a rebased base branch would do (see
-# ci.yaml's `repo-gates` job comment for the caller-side half of this same
+# ci.yaml's `gates` job comment for the caller-side half of this same
 # limit). INFERRED risk, not reproduced against a real GitHub Actions run.
 
 set -euo pipefail
