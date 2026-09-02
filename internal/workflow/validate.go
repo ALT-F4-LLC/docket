@@ -29,7 +29,7 @@ var RuleIDs = []string{
 	"V20", "V21", "V21a", "V21b", "V21c", "V21d",
 	"V22", "V23", "V24", "V25", "V25a", "V26",
 	"V27", "V28", "V28a", "V29", "V30", "V31",
-	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38",
+	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -385,6 +385,43 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 				Rule: "V9", Step: step.Name, Field: "after",
 				Message: fmt.Sprintf(
 					"step %q: `after` names %q, which is not a step in this workflow",
+					step.Name, pred),
+			}
+		}
+	}
+
+	// V39: every `after_fired` entry names a step in this workflow (DKT-1085)
+	// — V9 for the second predecessor list, and for the same reason: a name
+	// the definition never declares can never end `skipped`, so the successor
+	// would run unconditionally, which is the exact defect the key exists to
+	// end.
+	for _, pred := range step.AfterFired {
+		if _, ok := byName[pred]; !ok {
+			return &Error{
+				Rule: "V39", Step: step.Name, Field: "after_fired",
+				Message: fmt.Sprintf(
+					"step %q: `after_fired` names %q, which is not a step in this workflow",
+					step.Name, pred),
+			}
+		}
+	}
+
+	// V39a: every `after_fired` entry also appears in `after`. `after_fired`
+	// asks whether a predecessor FIRED, and the answer exists only once that
+	// predecessor is terminal — which is exactly what an `after` edge waits
+	// for (R3). An entry `after` did not name would let the step become ready
+	// while the gate was still open, run, and be too late to skip. A
+	// `loop = true` step declares no `after` (V18) and so no `after_fired`
+	// either: its ordering comes from loop entry.
+	for _, pred := range step.AfterFired {
+		if !slices.Contains(step.After, pred) {
+			return &Error{
+				Rule: "V39a", Step: step.Name, Field: "after_fired",
+				Message: fmt.Sprintf(
+					"step %q: `after_fired` names %q, which is not in its `after`; "+
+						"an `after_fired` predecessor must also be an `after` "+
+						"predecessor, so the step waits for it to resolve before "+
+						"asking whether it fired",
 					step.Name, pred),
 			}
 		}

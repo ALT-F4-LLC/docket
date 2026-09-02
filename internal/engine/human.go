@@ -274,7 +274,9 @@ func (e *Engine) DecideStepValue(
 	}); err != nil {
 		return err
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(
+		tx, step, defs[step.WorkflowID], spec, routing, nowMS,
+	); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -815,7 +817,9 @@ func (e *Engine) resolveStep(
 			return err
 		}
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(
+		tx, step, defs[step.WorkflowID], spec, routing, nowMS,
+	); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1080,7 +1084,9 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 		failureNote(step.Instance, note, attempt, max), nowMS); err != nil {
 		return err
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(
+		tx, step, defs[step.WorkflowID], spec, routing, nowMS,
+	); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -218,6 +218,85 @@ executor = "x"
 		wants: []string{`"b"`, "`after`", `"ghost"`, "not a step in this workflow"},
 	},
 	{
+		rule: "V39", name: "after_fired names an unknown step",
+		src:   twoStepPipeline("after = [\"a\"]\nafter_fired = [\"ghost\"]\nexecutor = \"y\"\nemits = \"k\"\n"),
+		wants: []string{`"b"`, "`after_fired`", `"ghost"`, "not a step in this workflow"},
+	},
+	{
+		rule: "V39a", name: "after_fired names a step not in after",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "gate"
+after = ["a"]
+type = "human"
+on_fail = "skip"
+[[step]]
+name = "b"
+after = ["a"]
+after_fired = ["gate"]
+executor = "y"
+emits = "k"
+`,
+		wants: []string{`"b"`, "`after_fired`", `"gate"`, "not in its `after`"},
+	},
+	{
+		rule: "V39a", name: "after_fired on a loop step, which has no after",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "check"
+after = ["a"]
+executor = "y"
+emits = "report"
+threshold = { "fix-loop" = "any(status == unmet)" }
+[[step]]
+name = "fix"
+executor = "z"
+emits = "k"
+loop = true
+after_loop = "a"
+after_fired = ["check"]
+`,
+		wants: []string{`"fix"`, "`after_fired`", `"check"`, "not in its `after`"},
+	},
+	{
+		rule: "V39", name: "after_fired beside after registers clean",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "reconcile"
+executor = "x"
+emits = "report"
+threshold = { "security-vote" = "any(status == blocked)" }
+[[step]]
+name = "security-vote"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+[[step]]
+name = "drain-highs"
+after = ["security-vote"]
+after_fired = ["security-vote"]
+executor = "y"
+emits = "k"
+`,
+	},
+	{
 		rule: "V10", name: "loop step declaring an empty after",
 		src:   twoStepPipeline("after = []\nloop = true\nexecutor = \"y\"\nemits = \"k\"\nafter_loop = \"a\"\n"),
 		wants: []string{`"b"`, "`after`", "loop entry"},

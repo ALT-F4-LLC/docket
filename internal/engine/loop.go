@@ -1384,6 +1384,20 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 		if err := skipUnroutedTargets(tx, step, spec, routing, nowMS); err != nil {
 			return err
 		}
+		// ...and the `after_fired` cascade behind those targets, and behind a
+		// `skip` routing this miss just recorded (DKT-1085), for the same
+		// reason: nothing else on this path would run it. Mirrored into the
+		// snapshot exactly as the routed step is below, so this call's
+		// readiness pass cannot offer a row the transaction just skipped.
+		cascade, err := propagateAfterFiredSkips(tx, step.RunID, step.IssueID, def, nowMS)
+		if err != nil {
+			return err
+		}
+		for _, row := range cascade {
+			if loaded := sched.stepByID[row.ID]; loaded != nil {
+				loaded.Status = db.StepSkipped
+			}
+		}
 
 		// Reflect it in the loaded snapshot, so this call's readiness pass sees
 		// the routed step rather than the row it read a moment ago — the same

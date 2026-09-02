@@ -579,7 +579,7 @@ func routeVoteStep(
 	}); err != nil {
 		return err
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
 		return err
 	}
 	return tx.Commit()

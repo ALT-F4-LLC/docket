@@ -715,12 +715,22 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 // has instances, and the fallback applies only where re-instantiation did not
 // reach.
 func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.Step {
-	if at := s.instancesOf(step.IssueID, predName, step.Ordinal); len(at) > 0 {
+	return predecessorInstancesIn(s.steps, step, predName)
+}
+
+// predecessorInstancesIn is predecessorInstances over an explicit step set, so
+// the `after_fired` cascade (after_fired.go) — which runs inside a routing
+// transaction with no Scheduler loaded — resolves a predecessor by the SAME
+// ordinal rule R3 uses. Two readings of "which instances of g does S wait on"
+// would disagree at the first loop that re-instantiated one of them and not
+// the other.
+func predecessorInstancesIn(steps []*db.Step, step *db.Step, predName string) []*db.Step {
+	if at := instancesAt(steps, step.IssueID, predName, step.Ordinal); len(at) > 0 {
 		return at
 	}
 
 	best := -1
-	for _, other := range s.steps {
+	for _, other := range steps {
 		if other.IssueID != step.IssueID || other.StepName != predName {
 			continue
 		}
@@ -731,7 +741,7 @@ func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.S
 	if best < 0 {
 		return nil
 	}
-	return s.instancesOf(step.IssueID, predName, best)
+	return instancesAt(steps, step.IssueID, predName, best)
 }
 
 // routedTo is R3's interposition clause (DKT-38): for a step some `threshold`
@@ -908,8 +918,14 @@ func (s *Scheduler) quorumMet(predName string, def *workflow.Definition, sibling
 // instancesOf returns every instance of a named step for one issue at an
 // ordinal — the fanout siblings when there are any, or the single instance.
 func (s *Scheduler) instancesOf(issueID int, name string, ordinal int) []*db.Step {
+	return instancesAt(s.steps, issueID, name, ordinal)
+}
+
+// instancesAt is instancesOf over an explicit step set — see
+// predecessorInstancesIn for why the rule is shared rather than copied.
+func instancesAt(steps []*db.Step, issueID int, name string, ordinal int) []*db.Step {
 	var out []*db.Step
-	for _, step := range s.steps {
+	for _, step := range steps {
 		if step.IssueID == issueID && step.StepName == name && step.Ordinal == ordinal {
 			out = append(out, step)
 		}

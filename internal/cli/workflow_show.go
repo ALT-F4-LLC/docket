@@ -134,6 +134,9 @@ func renderWorkflowShow(wf *model.Workflow) string {
 		if len(step.After) > 0 {
 			fmt.Fprintf(&b, "  after=[%s]", strings.Join(step.After, ", "))
 		}
+		if len(step.AfterFired) > 0 {
+			fmt.Fprintf(&b, "  after_fired=[%s]", strings.Join(step.AfterFired, ", "))
+		}
 		if step.Loop {
 			b.WriteString("  loop")
 		}

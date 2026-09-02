@@ -259,6 +259,15 @@ func ListRunStepsTx(tx *sql.Tx, runID int) ([]*Step, error) {
 	return scanSteps(tx.Query(stepFullSelect+` WHERE run_id = ? ORDER BY issue_id, id`, runID))
 }
 
+// ListIssueStepsTx reads every step of ONE issue in a run, inside a
+// transaction — the `after_fired` cascade's reader (DKT-1085), which must see
+// the rows the open routing transaction just terminalized and needs no other
+// issue's steps to answer its question.
+func ListIssueStepsTx(tx *sql.Tx, runID, issueID int) ([]*Step, error) {
+	return scanSteps(tx.Query(
+		stepFullSelect+` WHERE run_id = ? AND issue_id = ? ORDER BY id`, runID, issueID))
+}
+
 // ListActiveRunSteps reads the steps of every non-terminal run — `guard stop`'s
 // reader (§6.12) and the scope-conflict check's, since a claimed step in ANOTHER
 // active run excludes just as surely as one in this run.

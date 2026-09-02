@@ -1437,7 +1437,9 @@ func (e *Engine) runRoutingStage(
 	}
 
 	// The issue mirror and the run rollup, in the same transaction.
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(
+		tx, step, defs[step.WorkflowID], spec, routing, nowMS,
+	); err != nil {
 		return err
 	}
 

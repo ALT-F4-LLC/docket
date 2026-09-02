@@ -89,6 +89,27 @@ type Step struct {
 	Params      map[string]any    `toml:"params" json:"params,omitempty"`
 	MinSiblings *int              `toml:"min_siblings" json:"min_siblings,omitempty"`
 	Threshold   map[string]string `toml:"threshold" json:"threshold,omitempty"`
+	// AfterFired names predecessors this step runs ONLY IF THEY FIRED
+	// (DKT-1085). When every instance of a named step ends `skipped` — an
+	// interposed gate its threshold routed elsewhere (§11.2), a false `when`,
+	// an `on_fail = "skip"` routing, an operator's `--as skip` — this step is
+	// terminalized `skipped` in the SAME transaction, and the skip cascades
+	// through every step declaring `after_fired` on it in turn.
+	//
+	// It is a SECOND predecessor list beside `after`, never a replacement:
+	// `after` keeps its exact meaning (done OR skipped releases the join, J1),
+	// and every entry here must also appear in `after` (V39a), so R3 already
+	// orders the step behind the gate and "did it fire?" is settled before the
+	// step could ever be ready. The corpus case: a `drain-highs` executor that
+	// should run after `security-vote` APPROVED a round, and not on a round
+	// where reconcile never routed to the vote at all. `when` cannot say it —
+	// it reads issue kind and labels only (V22) — and `threshold` cannot: a
+	// second step-name routing beside the vote would fire first and skip it.
+	//
+	// `omitempty`, so the pinned form of every definition that never declares
+	// it is byte-identical to what it was — an idempotent re-register must not
+	// read as a CONFLICT (canonical.go).
+	AfterFired []string `toml:"after_fired" json:"after_fired,omitempty"`
 	// PassFloor refuses a `pass` routing that would exit with declared-floor
 	// work still standing (DKT-870): when this step's routing resolves to
 	// `pass` but its recorded payload holds an element whose `field` value

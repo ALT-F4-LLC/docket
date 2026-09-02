@@ -246,15 +246,16 @@ func (e *Engine) parkInterruptedGate(
 	// alone, and this was the one park with nothing downstream left to call it.
 	// The run had the same hole, staying `active` with a parked step in it.
 	//
-	// `spec` is nil, which is exactly right here rather than a shortcut:
-	// skipUnroutedTargets is threshold-target bookkeeping and an interrupted
-	// gate decided no threshold. The completion check inside is false by
-	// construction — the step this call is about is `waiting-human`, which is
-	// not terminal.
+	// `spec` and `def` are nil, which is exactly right here rather than a
+	// shortcut: skipUnroutedTargets is threshold-target bookkeeping and an
+	// interrupted gate decided no threshold, and the `after_fired` cascade
+	// follows a skip this park does not perform. The completion check inside
+	// is false by construction — the step this call is about is
+	// `waiting-human`, which is not terminal.
 	//
 	// This is NOT the saga advancing; see below.
 	if err := reconcileIssueAndRun(
-		tx, step, nil, workflow.OnFailWaitingHuman, nowMS,
+		tx, step, nil, nil, workflow.OnFailWaitingHuman, nowMS,
 	); err != nil {
 		return err
 	}

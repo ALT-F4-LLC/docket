@@ -1677,6 +1677,16 @@ func expandIssue(
 		}
 	}
 
+	// A step whose `after_fired` predecessor was just CREATED `skipped` by its
+	// `when` is created skipped with it (DKT-1085), in the same fat
+	// transaction: expansion is the one skip no routing transaction follows,
+	// so the cascade every routing runs (reconcileIssueAndRun) runs here too.
+	if _, err := propagateAfterFiredSkips(
+		tx, run.ID, issue.ID, bound.definition, nowMS,
+	); err != nil {
+		return 0, nil, err
+	}
+
 	return len(rows), warnings, nil
 }
 

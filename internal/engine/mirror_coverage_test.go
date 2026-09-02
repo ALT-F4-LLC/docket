@@ -164,7 +164,7 @@ on_fail = "waiting-human"
 
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
-	testsupport.Must(t, reconcileIssueAndRun(tx, step, nil, workflow.OnFailWaitingHuman, nowMS),
+	testsupport.Must(t, reconcileIssueAndRun(tx, step, nil, nil, workflow.OnFailWaitingHuman, nowMS),
 		"reconcile: %v", err)
 	testsupport.Must(t, tx.Commit(), "Commit")
 
