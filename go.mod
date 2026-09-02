@@ -7,7 +7,7 @@ toolchain go1.26.6
 require (
 	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260722204433-a335d3bf0144
 	github.com/BurntSushi/toml v1.6.0
-	github.com/charmbracelet/glamour v1.0.0
+	github.com/charmbracelet/glamour/v2 v2.0.1
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/dustin/go-humanize v1.0.1
