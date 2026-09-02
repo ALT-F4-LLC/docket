@@ -114,6 +114,35 @@ func resolvedTargetFor(
 	return sha, worktree, nil
 }
 
+// stepTargetRef is resolvedTargetFor for a reader holding ONLY the step —
+// `step show` (DKT-1056). It loads the artifact snapshot itself, because this
+// caller answers about one step rather than iterating a manifest.
+//
+// THE GUARD IS THE POINT. A step whose definition does not declare `issue.diff`
+// can carry no round record, so it pays for no input resolution at all and
+// reports nothing: `step show` is a conductor's most-repeated read, and making
+// every one of them resolve a whole input set to learn "no target" would tax
+// the common case for the rare one. The same predicate the dispatch verbs'
+// stale-target collector uses (staleTargetCandidates), for the same reason.
+//
+// It returns the empty pair — never a fabricated one — for a step with no
+// resolvable round record. A vote panel seats itself on what this says; a
+// plausible-looking sha invented here would seat judges on the wrong tree,
+// which is worse than seating them on their own HEAD, because it is silent.
+func stepTargetRef(
+	tx *sql.Tx, sched *Scheduler, step *db.Step,
+) (sha, worktree string, err error) {
+	spec := materializedSpec(sched.defs[step.WorkflowID], step, sched.holdTally)
+	if spec == nil || !consumesIssueDiff(spec) {
+		return "", "", nil
+	}
+	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
+	if err != nil {
+		return "", "", err
+	}
+	return resolvedTargetFor(tx, sched, step, spec, artifacts)
+}
+
 // runPreGates executes the step's pre-gates, one at a time, each result
 // committing in its own small transaction.
 //

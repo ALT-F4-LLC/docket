@@ -785,6 +785,21 @@ type StepView struct {
 	// give — that verb reports what the STEP produced, and a hold produces
 	// nothing; the payload sits on the routing step's artifact.
 	HeldCluster *HeldClusterLink
+	// TargetSHA and TargetWorktree are the SAME resolved target ref the step's
+	// context bundle carries (Context.TargetSHA / TargetWorktree, DKT-24),
+	// answered without assembling the bundle (DKT-1056).
+	//
+	// A vote panel is seated from this read: the wave asks `step show` for the
+	// gate's row first and probes the (up to 1MiB) bundle only when the row
+	// names a target, so a target the bundle knows and this view does not is a
+	// panel reading its own HEAD instead of the judged tree.
+	//
+	// BOTH ARE EMPTY, NEVER APPROXIMATE, when the step's inputs resolve no
+	// `issue.diff` round record. There is no fallback to the shared HEAD here
+	// and there must not be one — the caller can tell "no target" from "this
+	// target" only if absence is reported as absence.
+	TargetSHA      string
+	TargetWorktree string
 }
 
 // LoadStepView reads one step at its effective status. IT WRITES NOTHING — not
@@ -846,11 +861,22 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		return nil, err
 	}
 
+	// Resolved in the SAME transaction, for the same one-connection reason —
+	// and from the same snapshot the two reads above used, so the target this
+	// view reports is the target a bundle assembled at this instant would
+	// carry (DKT-1056).
+	targetSHA, targetWorktree, err := stepTargetRef(tx, sched, fresh)
+	if err != nil {
+		return nil, err
+	}
+
 	view := &StepView{
 		Step: fresh, Row: row,
 		Routing: fresh.Routing, SagaStage: fresh.SagaStage,
-		Gates:       gates,
-		HeldCluster: heldCluster,
+		Gates:          gates,
+		HeldCluster:    heldCluster,
+		TargetSHA:      targetSHA,
+		TargetWorktree: targetWorktree,
 	}
 	if lease := fresh.Lease(); lease.Live(nowMS) {
 		view.Owner, view.ExpiresMS = lease.Owner, lease.ExpiresMS

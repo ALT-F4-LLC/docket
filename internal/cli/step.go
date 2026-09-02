@@ -926,27 +926,61 @@ record, under its holder's token.`,
 	},
 }
 
-// heldClusterPayload is `step show`'s shape for a materialized held step: the
-// row it always emitted, plus the cluster linkage.
+// stepDetailPayload is `step show`'s shape for a step that has something to
+// say beyond its row: a materialized held step's cluster linkage (DKT-239),
+// and the resolved target ref of a step that consumes `issue.diff` (DKT-1056).
 //
-// The embedded StepRow marshals inline, and `held_cluster` is `omitempty`, so
-// EVERY STEP THAT IS NOT A HELD ROW EMITS EXACTLY THE BYTES IT ALWAYS DID —
+// The embedded StepRow marshals inline and every added field is `omitempty`,
+// so EVERY STEP WITH NOTHING TO ADD EMITS EXACTLY THE BYTES IT ALWAYS DID —
 // the verb's own promise that "a single id emits the same row object it always
-// has, unchanged" holds for all of them. The only steps whose shape moves are
-// the ones DKT-239 is about, where the previous shape named neither the
-// cluster nor the artifact carrying it.
-type heldClusterPayload struct {
+// has, unchanged" holds for all of them.
+//
+// `target_sha` and `target_worktree` are spelled exactly as the context bundle
+// spells them (engine.Context), because they ARE the bundle's fields: a reader
+// that seats a panel from this row and then re-reads the bundle must not have
+// to translate between two names for one fact.
+type stepDetailPayload struct {
 	model.StepRow
 	HeldCluster *engine.HeldClusterLink `json:"held_cluster,omitempty"`
+	// A step whose inputs resolve no `issue.diff` round record emits NEITHER
+	// key. The wave's pre-check reads their presence as "there is a judged
+	// tree, spend a probe on the bundle"; emitting an empty string, or a
+	// stand-in sha, would send it to read a tree nobody recorded.
+	TargetSHA      string `json:"target_sha,omitempty"`
+	TargetWorktree string `json:"target_worktree,omitempty"`
 }
 
 // stepShowPayload wraps a view only when there is something to add, so the
 // unchanged case does not even pay for a wrapper type on the wire.
 func stepShowPayload(view *engine.StepView) any {
-	if view.HeldCluster == nil {
+	if view.HeldCluster == nil && view.TargetSHA == "" && view.TargetWorktree == "" {
 		return view.Row
 	}
-	return heldClusterPayload{StepRow: view.Row, HeldCluster: view.HeldCluster}
+	return stepDetailPayload{
+		StepRow:        view.Row,
+		HeldCluster:    view.HeldCluster,
+		TargetSHA:      view.TargetSHA,
+		TargetWorktree: view.TargetWorktree,
+	}
+}
+
+// renderStepTarget is the human half: which tree this step's work is about.
+//
+// Printed only when there is one, for the same reason the JSON keys are
+// omitted — a line reading "Target: (none)" on every step that consumes no
+// diff is noise on the majority of reads.
+func renderStepTarget(view *engine.StepView) string {
+	if view.TargetSHA == "" && view.TargetWorktree == "" {
+		return ""
+	}
+	out := "\nTarget (the tree under review):\n"
+	if view.TargetSHA != "" {
+		out += fmt.Sprintf("  sha:      %s\n", view.TargetSHA)
+	}
+	if view.TargetWorktree != "" {
+		out += fmt.Sprintf("  worktree: %s\n", view.TargetWorktree)
+	}
+	return out
 }
 
 // renderHeldCluster is the human half: where the question came from.
@@ -986,60 +1020,76 @@ including no reap.
 A single id emits the same row object it always has, unchanged. Two or more
 ids emit a JSON array of that same shape under data — batch reads are a
 conductor's most common shape, and a single-id restriction taxes every loop
-iteration.`,
+iteration.
+
+A step whose declared inputs resolve an ` + "`issue.diff`" + ` round record also carries
+target_sha and target_worktree — the SAME pair its context bundle carries, so
+a caller seating a review or a vote panel learns which tree is under review
+without reading the whole bundle. Both keys are ABSENT on a step with no such
+record; neither is ever approximated from the shared HEAD.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
+		return runStepShow(cmd, args, getWriter(cmd))
+	},
+}
 
-		if len(args) == 1 {
-			id, err := stepArg(args[0])
-			if err != nil {
-				return err
-			}
-			view, err := engine.LoadStepView(conn, id, model.NowMS())
-			if err != nil {
-				return stepErr(err, stepLabel(id))
-			}
+// runStepShow is `step show`'s body, with the writer injected so tests read
+// the envelope rather than process stdout.
+func runStepShow(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
 
-			var message string
-			if !w.JSONMode {
-				message = render.RenderStepDetail(
-					view.Row, view.Routing, view.SagaStage, view.Owner, view.ExpiresMS) +
-					render.RenderStepGateSummary(view.Row.Step, gateRows(view.Gates)) +
-					renderHeldCluster(view.HeldCluster)
-			}
-			w.Success(stepShowPayload(view), message)
-			return nil
+	if len(args) == 1 {
+		id, err := stepArg(args[0])
+		if err != nil {
+			return err
 		}
-
-		rows := make([]any, 0, len(args))
-		var messages []string
-		for _, arg := range args {
-			id, err := stepArg(arg)
-			if err != nil {
-				return err
-			}
-			view, err := engine.LoadStepView(conn, id, model.NowMS())
-			if err != nil {
-				return stepErr(err, stepLabel(id))
-			}
-			rows = append(rows, stepShowPayload(view))
-			if !w.JSONMode {
-				messages = append(messages, render.RenderStepDetail(
-					view.Row, view.Routing, view.SagaStage, view.Owner, view.ExpiresMS)+
-					render.RenderStepGateSummary(view.Row.Step, gateRows(view.Gates))+
-					renderHeldCluster(view.HeldCluster))
-			}
+		view, err := engine.LoadStepView(conn, id, model.NowMS())
+		if err != nil {
+			return stepErr(err, stepLabel(id))
 		}
 
 		var message string
 		if !w.JSONMode {
-			message = strings.Join(messages, "\n\n")
+			message = stepShowMessage(view)
 		}
-		w.Success(rows, message)
+		w.Success(stepShowPayload(view), message)
 		return nil
-	},
+	}
+
+	rows := make([]any, 0, len(args))
+	var messages []string
+	for _, arg := range args {
+		id, err := stepArg(arg)
+		if err != nil {
+			return err
+		}
+		view, err := engine.LoadStepView(conn, id, model.NowMS())
+		if err != nil {
+			return stepErr(err, stepLabel(id))
+		}
+		rows = append(rows, stepShowPayload(view))
+		if !w.JSONMode {
+			messages = append(messages, stepShowMessage(view))
+		}
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = strings.Join(messages, "\n\n")
+	}
+	w.Success(rows, message)
+	return nil
+}
+
+// stepShowMessage renders one step's human block, identically for the single
+// and the batch form — they rendered the same four pieces in two places, and
+// the target section is the fifth.
+func stepShowMessage(view *engine.StepView) string {
+	return render.RenderStepDetail(
+		view.Row, view.Routing, view.SagaStage, view.Owner, view.ExpiresMS) +
+		render.RenderStepGateSummary(view.Row.Step, gateRows(view.Gates)) +
+		renderHeldCluster(view.HeldCluster) +
+		renderStepTarget(view)
 }
 
 // stepContextResult is `step context`'s payload. `--meta` rides as a SIBLING
