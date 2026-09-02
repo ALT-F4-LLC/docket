@@ -499,26 +499,41 @@ func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
 }
 
 // previousRoundInputs binds the PREVIOUS round's artifacts of a loop
-// re-entry step's own emitted kind (DKT-63): review@k reads review@(k-1)'s
-// fanout findings and the reconciled set beside the fix's change-summary,
-// so a re-review judge reads the critique it must answer rather than the
-// loop body's summary of it. RUN-5's re-review judges had only the fix
-// step's own account — the author's summary of the critique of the author's
-// work — and could not tell an answered ask from an ask answered as the fix
-// characterised it, nor compute finding volume across rounds from one side
-// of the exchange.
+// re-entry step's own emitted kind, from the step's OWN LINEAGE (DKT-63,
+// narrowed by DKT-1055): review@k reads review@(k-1)'s fanout findings and
+// the reconciled set beside the fix's change-summary, so a re-review judge
+// reads the critique it must answer rather than the loop body's summary of
+// it. RUN-5's re-review judges had only the fix step's own account — the
+// author's summary of the critique of the author's work — and could not tell
+// an answered ask from an ask answered as the fix characterised it, nor
+// compute finding volume across rounds from one side of the exchange.
 //
 // The rule is structural, read from the pinned definition
 // (loopReentryEmitter): the step is at ordinal > 0, inside the loop closure
 // (the same merged set blockingLoopBodyAbsent consults), and emits a kind —
-// then every DONE same-issue producer at ordinal k-1 contributes its newest
-// artifact of that kind (latestPerProducer, f6b28cc's binding rule), in
-// §6.7's within-input order (sortArtifacts) — the same collapse and the same
-// order every declared input resolves under. "Its own emitted kind" is what
-// keeps this generic: the critique a step answers is definitionally the kind
-// it produces, and core never reads what the kind means. nil when the step
-// is not a re-entry — ordinal 0, an unlooped definition, or a kindless step
-// — so every other packet is byte-identical.
+// then every DONE same-issue producer at ordinal k-1 IN THE STEP'S LINEAGE
+// (previousRoundLineage) contributes its newest artifact of that kind
+// (latestPerProducer, f6b28cc's binding rule), in §6.7's within-input order
+// (sortArtifacts) — the same collapse and the same order every declared
+// input resolves under. "Its own emitted kind" is what keeps this generic:
+// the critique a step answers is definitionally the kind it produces, and
+// core never reads what the kind means. nil when the step is not a re-entry
+// — ordinal 0, an unlooped definition, or a kindless step — so every other
+// packet is byte-identical.
+//
+// THE LINEAGE IS NOT EVERY PRODUCER OF THE KIND. DKT-63's first cut matched
+// on kind alone, and in every change workflow `review`, `synthesize`, and
+// `reconcile` all emit `findings` — so synthesize@k received review@(k-1)'s
+// whole raw fanout beside synthesize@(k-1) and reconcile@(k-1), on top of
+// its declared `review.*` (already ordinal-scoped to round k). A
+// security-change round-2 synthesis carried a 263KB packet — four raw judge
+// payloads from the round before, whose digest it was ALSO carrying as
+// reconcile@(k-1)'s aggregate — and spent 2.13M cache-read tokens on it. The
+// previous round a step answers is the prior round of ITS OWN lineage: the
+// same step name (review's own lineage IS the fanout, which is how DKT-63's
+// re-review behaviour survives without a special case) plus the standing set
+// the round's fix acted on. Nothing about this is scopeable from the
+// definition's `inputs`, because the pass is engine-side.
 //
 // `artifacts` is the caller's already-loaded snapshot (AssembleContext loads
 // it once for this and the declared-input pass together).
@@ -528,6 +543,7 @@ func previousRoundInputs(
 	if !loopReentryEmitter(sched, step, spec) {
 		return nil
 	}
+	lineage := previousRoundLineage(sched.defs[step.WorkflowID], step.StepName, spec.Emits)
 
 	var matched []*db.Artifact
 	for _, a := range artifacts {
@@ -536,7 +552,7 @@ func previousRoundInputs(
 			p.Ordinal != step.Ordinal-1 || !recordedProducer(p.Status) {
 			continue
 		}
-		if a.Kind != spec.Emits {
+		if a.Kind != spec.Emits || !lineage[p.StepName] {
 			continue
 		}
 		matched = append(matched, a)
@@ -544,6 +560,54 @@ func previousRoundInputs(
 	matched = latestPerProducer(matched)
 	sortArtifacts(matched, sched.stepByID)
 	return artifactInputs(matched, sched.stepByID)
+}
+
+// previousRoundLineage is the set of step NAMES whose previous-round
+// artifacts of `kind` a re-entry step `name` reads (DKT-1055): the step's own
+// name, plus the STANDING-SET producers — the steps each `loop = true` body
+// whose `after_loop` chain contains `name` declares as `<step>.<kind>` inputs
+// of this kind, when the named step is itself inside that body's chain.
+//
+// The body's declared inputs are the definition's own statement of what the
+// round was entered to act on: `fix` reads `reconcile.findings`, so the
+// reconciled set is, by construction, the standing set that round k's
+// re-review and re-synthesis annotate against — and the definition says so
+// without core learning what a finding or a reconciliation is. The chain
+// restriction keeps "previous round" honest: only a step that re-runs each
+// round has a round to be previous, and a one-shot upstream producer the body
+// also reads (`implement.change-summary`) is bound by §7.4's per-input
+// fallback, not by this pass. Kind is compared per declaration, so a body's
+// `<step>.gate-results` or `<step>.vote-record` never admits that step's
+// artifacts of some other kind.
+//
+// Read per body rather than over the merged closure so a serves-scoped
+// cluster (DKT-544) contributes only its own standing set: a body whose chain
+// does not contain the consumer has nothing to say about what it answers.
+func previousRoundLineage(def *workflow.Definition, name, kind string) map[string]bool {
+	lineage := map[string]bool{name: true}
+	if def == nil {
+		return lineage
+	}
+	for _, body := range def.Steps {
+		if !body.Loop || body.AfterLoop == "" {
+			continue
+		}
+		chain := downstreamClosure(def, []string{body.AfterLoop})
+		if !chain[name] {
+			continue
+		}
+		for _, declared := range body.Inputs {
+			producer, declaredKind, ok := splitInput(declared)
+			if !ok || !chain[producer] {
+				continue
+			}
+			if declaredKind != "*" && declaredKind != kind {
+				continue
+			}
+			lineage[producer] = true
+		}
+	}
+	return lineage
 }
 
 // artifactInputs renders artifact rows into the §11.4 bundle's input shape —
