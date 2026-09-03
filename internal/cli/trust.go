@@ -196,11 +196,46 @@ type trustEntryView struct {
 type trustListResult struct {
 	Entries []trustEntryView `json:"entries"`
 	Total   int              `json:"total"`
+	// actionNames marks entry names declared `action = "<name>"` by some
+	// workflow (DKT-1283 AC5) — everything else classifies "gate". It rides
+	// out-of-band rather than as a field on trustEntryView so v1's frozen shape
+	// carries no trace of it — only CollectionItems, which v1 never consults,
+	// reads it.
+	actionNames map[string]bool
 }
 
-func (r trustListResult) CollectionItems() any      { return r.Entries }
+func (r trustListResult) CollectionItems() any {
+	return trustEntryViewsV2{views: r.Entries, actionNames: r.actionNames}
+}
 func (r trustListResult) CollectionTotal() int      { return r.Total }
 func (r trustListResult) CollectionTruncated() bool { return false }
+
+// trustEntryViewV2 is trustEntryView plus its class (DKT-1283 AC5), the same
+// v1/v2 split versioned.go's payload wrappers use: the v1 struct is untouched,
+// and a second shape carries the field v2 alone reports.
+type trustEntryViewV2 struct {
+	trustEntryView
+	Class string `json:"class"`
+}
+
+// trustEntryViewsV2 implements output.Versioned so `trust list --json=v2`'s
+// items carry `class` without trustEntryView itself gaining the field.
+type trustEntryViewsV2 struct {
+	views       []trustEntryView
+	actionNames map[string]bool
+}
+
+func (p trustEntryViewsV2) VersionedPayload() any {
+	out := make([]trustEntryViewV2, len(p.views))
+	for i, v := range p.views {
+		class := "gate"
+		if p.actionNames[v.Name] {
+			class = "action"
+		}
+		out[i] = trustEntryViewV2{trustEntryView: v, Class: class}
+	}
+	return out
+}
 
 type trustRmResult struct {
 	Name    string `json:"name"`
@@ -373,7 +408,13 @@ func runTrustList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	w.Success(trustListResult{Entries: views, Total: len(views)},
+	// The classification is best-effort and only ever consulted under
+	// --json=v2 (CollectionItems, which v1 never calls) — a scan failure here
+	// must not turn `trust list` from a file read into a command that can fail
+	// on an unrelated corpus problem. Every name simply reads "gate".
+	actionNames, _ := engine.ActionNames()
+
+	w.Success(trustListResult{Entries: views, Total: len(views), actionNames: actionNames},
 		fmt.Sprintf("%d trusted command(s)", len(views)))
 	return nil
 }
