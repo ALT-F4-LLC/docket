@@ -86,13 +86,26 @@ func TestCheckDoctorInstallDriftSkipsWithoutSource(t *testing.T) {
 	}
 }
 
-func TestCheckDoctorInstallDriftMatchesIdenticalTrees(t *testing.T) {
+// doctorInstallFixture seeds a matching config/bin pair on both sides —
+// source at <source>/src/user/docket/{config,bin} (the dotfiles-shaped
+// checkout --source names) and install at ~/.docket/{config,bin} — so a test
+// can then perturb one side without every OTHER check in the pair failing on
+// a whole tree missing.
+func doctorInstallFixture(t *testing.T) (source string) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeFile(t, home, ".docket/config/workflows/foo.toml", "same\n")
+	writeFile(t, home, ".docket/bin/tool.sh", "same\n")
 
-	source := t.TempDir()
-	writeFile(t, source, "config/workflows/foo.toml", "same\n")
+	source = t.TempDir()
+	writeFile(t, source, "src/user/docket/config/workflows/foo.toml", "same\n")
+	writeFile(t, source, "src/user/docket/bin/tool.sh", "same\n")
+	return source
+}
+
+func TestCheckDoctorInstallDriftMatchesIdenticalTrees(t *testing.T) {
+	source := doctorInstallFixture(t)
 
 	c := checkDoctorInstallDrift(source)
 	if c.Verdict != DoctorOK {
@@ -101,12 +114,8 @@ func TestCheckDoctorInstallDriftMatchesIdenticalTrees(t *testing.T) {
 }
 
 func TestCheckDoctorInstallDriftReportsAChangedFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeFile(t, home, ".docket/config/workflows/foo.toml", "installed\n")
-
-	source := t.TempDir()
-	writeFile(t, source, "config/workflows/foo.toml", "source\n")
+	source := doctorInstallFixture(t)
+	writeFile(t, source, "src/user/docket/config/workflows/foo.toml", "changed\n")
 
 	c := checkDoctorInstallDrift(source)
 	if c.Verdict != DoctorDrift {
@@ -117,13 +126,9 @@ func TestCheckDoctorInstallDriftReportsAChangedFile(t *testing.T) {
 	}
 }
 
-func TestCheckDoctorInstallDriftReportsAMissingFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	// Nothing installed under ~/.docket/bin.
-
-	source := t.TempDir()
-	writeFile(t, source, "bin/tool.sh", "#!/bin/sh\n")
+func TestCheckDoctorInstallDriftReportsAFileOnlyOnOneSide(t *testing.T) {
+	source := doctorInstallFixture(t)
+	writeFile(t, source, "src/user/docket/bin/extra.sh", "#!/bin/sh\n")
 
 	c := checkDoctorInstallDrift(source)
 	if c.Verdict != DoctorDrift {
@@ -131,26 +136,37 @@ func TestCheckDoctorInstallDriftReportsAMissingFile(t *testing.T) {
 	}
 }
 
+// TestCheckDoctorInstallDriftReportsAWholeTreeMissing is check 3's other FAIL
+// case: --source naming a checkout whose config or bin tree does not exist at
+// all is a FAIL, not disregarded — there is nothing to compare, which is a
+// different fact from an empty placeholder holding no file.
+func TestCheckDoctorInstallDriftReportsAWholeTreeMissing(t *testing.T) {
+	source := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	// Neither src/user/docket/config nor .../bin exists under source.
+
+	c := checkDoctorInstallDrift(source)
+	if c.Verdict != DoctorFail {
+		t.Errorf("verdict = %s, want FAIL when the whole tree is missing", c.Verdict)
+	}
+}
+
 // TestCheckDoctorInstallDriftDisregardsOneSidedEmptyDir is AC1's own
 // vocabulary: a directory present on one side only, holding no file anywhere
 // under it, is named but never counted as drift.
 func TestCheckDoctorInstallDriftDisregardsOneSidedEmptyDir(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeFile(t, home, ".docket/config/workflows/foo.toml", "same\n")
-
-	source := t.TempDir()
-	writeFile(t, source, "config/workflows/foo.toml", "same\n")
-	// An empty bin/ directory on the source side only — no file under it.
-	testsupport.Must(t,
-		os.MkdirAll(filepath.Join(source, "bin"), 0o755), "mkdir bin: %v", nil)
+	source := doctorInstallFixture(t)
+	// An empty subdirectory on the source side only — no file under it.
+	testsupport.Must(t, os.MkdirAll(
+		filepath.Join(source, "src", "user", "docket", "config", "empty-extra"), 0o755),
+		"mkdir empty-extra: %v", nil)
 
 	c := checkDoctorInstallDrift(source)
 	if c.Verdict != DoctorOK {
 		t.Errorf("verdict = %s, want OK — an empty one-sided directory is not drift: %s",
 			c.Verdict, c.Detail)
 	}
-	if !strings.Contains(c.Detail, "bin") {
+	if !strings.Contains(c.Detail, "config") {
 		t.Errorf("detail %q does not name the disregarded directory", c.Detail)
 	}
 }
@@ -196,15 +212,20 @@ func TestCheckDoctorLinkFarmFailsOnADanglingSymlink(t *testing.T) {
 		"symlink: %v", nil)
 
 	c := checkDoctorLinkFarm(cwd)
-	if c.Verdict != DoctorFail {
-		t.Errorf("verdict = %s, want FAIL on a dangling symlink", c.Verdict)
+	if c.Verdict != DoctorDrift {
+		t.Errorf("verdict = %s, want DRIFT on a symlink under .docket/config", c.Verdict)
 	}
 	if !strings.Contains(c.Detail, "dangling") {
-		t.Errorf("detail %q does not name the dangling entry", c.Detail)
+		t.Errorf("detail %q does not name the entry", c.Detail)
 	}
 }
 
-func TestCheckDoctorLinkFarmOKOnALiveSymlink(t *testing.T) {
+// TestCheckDoctorLinkFarmDriftsOnALiveSymlinkToo is the reference's own
+// reading: a symlink under .docket/config is debris from the retired
+// link-farm model whether or not it still resolves — a repo that has one at
+// all is running the old model, and only its DANGLING-ness is a coincidence
+// of what happens to still be on disk.
+func TestCheckDoctorLinkFarmDriftsOnALiveSymlinkToo(t *testing.T) {
 	cwd := t.TempDir()
 	configDir := filepath.Join(cwd, ".docket", "config")
 	testsupport.Must(t, os.MkdirAll(configDir, 0o755), "mkdir: %v", nil)
@@ -214,8 +235,24 @@ func TestCheckDoctorLinkFarmOKOnALiveSymlink(t *testing.T) {
 		os.Symlink(target, filepath.Join(configDir, "live")), "symlink: %v", nil)
 
 	c := checkDoctorLinkFarm(cwd)
+	if c.Verdict != DoctorDrift {
+		t.Errorf("verdict = %s, want DRIFT — a live symlink is still link-farm debris: %s",
+			c.Verdict, c.Detail)
+	}
+}
+
+func TestCheckDoctorLinkFarmOKWithOnlyRealFiles(t *testing.T) {
+	cwd := t.TempDir()
+	configDir := filepath.Join(cwd, ".docket", "config")
+	testsupport.Must(t, os.MkdirAll(configDir, 0o755), "mkdir: %v", nil)
+	testsupport.Must(t,
+		os.WriteFile(filepath.Join(configDir, "own.toml"), []byte("x"), 0o644),
+		"writing: %v", nil)
+
+	c := checkDoctorLinkFarm(cwd)
 	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK — the symlink resolves: %s", c.Verdict, c.Detail)
+		t.Errorf("verdict = %s, want OK — a real file is the repo's own addition: %s",
+			c.Verdict, c.Detail)
 	}
 }
 
@@ -223,26 +260,58 @@ func TestCheckDoctorLinkFarmOKOnALiveSymlink(t *testing.T) {
 // checkDoctorStragglers — check 6
 // ---------------------------------------------------------------------------
 
-// TestCheckDoctorStragglersReportsAScratchWorktreeButNeverFails is AC3's own
-// check-level half: a detached worktree under a scratch (temp) path is named
-// in the detail, and the verdict is ALWAYS OK — a report, never a verdict.
-func TestCheckDoctorStragglersReportsAScratchWorktreeButNeverFails(t *testing.T) {
-	repo := probeRepo(t)
-
+// scratchWorktree adds a detached worktree at a path that is scratch-shaped
+// BY CONSTRUCTION (a literal "scratchpad" component) rather than by relying
+// on os.TempDir()'s resolution, which varies by machine and would make this
+// test pass or fail depending on where it happens to run.
+func scratchWorktree(t *testing.T, repo string) string {
+	t.Helper()
 	head := strings.TrimSpace(gitOutput(t, repo, "rev-parse", "HEAD"))
-	scratch, err := os.MkdirTemp("", "docket-pregate-")
-	testsupport.Must(t, err, "MkdirTemp: %v", err)
-	testsupport.Must(t, os.Remove(scratch), "removing the reserved dir: %v", err)
-	t.Cleanup(func() { os.RemoveAll(scratch) })
+	scratch := filepath.Join(t.TempDir(), "scratchpad", "worktree")
 	runGit(t, repo, "worktree", "add", "--detach", scratch, head)
 	t.Cleanup(func() { runGit(t, repo, "worktree", "remove", "--force", scratch) })
+	return scratch
+}
+
+// TestCheckDoctorStragglersWarnsAndNamesAScratchWorktree is AC3's own
+// check-level half: a detached worktree under a scratch-shaped path is named
+// in the detail, and the verdict is WARN — never FAIL, since it is a report.
+func TestCheckDoctorStragglersWarnsAndNamesAScratchWorktree(t *testing.T) {
+	repo := probeRepo(t)
+	scratch := scratchWorktree(t, repo)
 
 	c := checkDoctorStragglers(repo)
-	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK always — stragglers are a report, not a verdict", c.Verdict)
+	if c.Verdict != DoctorWarn {
+		t.Errorf("verdict = %s, want WARN — a report, never FAIL", c.Verdict)
 	}
-	if !strings.Contains(c.Detail, doctorCanonicalPath(scratch)) && !strings.Contains(c.Detail, scratch) {
+	if !strings.Contains(c.Detail, scratch) {
 		t.Errorf("detail %q does not name the scratch worktree %s", c.Detail, scratch)
+	}
+}
+
+// TestIsScratchShapedPath pins the three patterns directly, independent of
+// any git or filesystem fixture.
+func TestIsScratchShapedPath(t *testing.T) {
+	yes := []string{
+		"/tmp/claude-501/foo",
+		"/private/tmp/claude-501/foo",
+		"/Users/op/work/scratchpad/worktree",
+		"/Users/op/scratchpad",
+	}
+	no := []string{
+		"/Users/op/work/repo",
+		"/var/folders/xx/T/docket-pregate-123",
+		"/tmp/other-1234",
+	}
+	for _, p := range yes {
+		if !isScratchShapedPath(p) {
+			t.Errorf("isScratchShapedPath(%q) = false, want true", p)
+		}
+	}
+	for _, p := range no {
+		if isScratchShapedPath(p) {
+			t.Errorf("isScratchShapedPath(%q) = true, want false", p)
+		}
 	}
 }
 
@@ -336,18 +405,11 @@ func TestDoctorNoRunSkipsPinsAndReportsUnclean(t *testing.T) {
 func TestDoctorStragglersNeverMoveClean(t *testing.T) {
 	repo, conn := doctorFixture(t)
 	run, _ := activatedRun(t, conn)
+	scratchWorktree(t, repo)
 
-	head := strings.TrimSpace(gitOutput(t, repo, "rev-parse", "HEAD"))
-	scratch, err := os.MkdirTemp("", "docket-pregate-")
-	testsupport.Must(t, err, "MkdirTemp: %v", err)
-	testsupport.Must(t, os.Remove(scratch), "removing the reserved dir: %v", err)
-	t.Cleanup(func() { os.RemoveAll(scratch) })
-	runGit(t, repo, "worktree", "add", "--detach", scratch, head)
-	t.Cleanup(func() { runGit(t, repo, "worktree", "remove", "--force", scratch) })
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	source := t.TempDir()
+	// A genuinely matching install-drift source, so every OTHER check is
+	// OK and the straggler is the only irregularity in the report.
+	source := doctorInstallFixture(t)
 
 	report := Doctor(conn, DoctorOptions{
 		Cwd: repo, DBPath: filepath.Join(repo, "issues.db"),

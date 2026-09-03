@@ -9,10 +9,9 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
-
-	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
 
 // `docket doctor` — DKT-1285.
@@ -93,24 +92,27 @@ func Doctor(conn *sql.DB, opts DoctorOptions) *DoctorReport {
 	return report
 }
 
-// doctorDisposition is AC2 and AC3: `clean` is true only when every check but
-// `stragglers` reports OK, and a SKIP counts as not-clean the same as a
-// failure — a caller that asked "is this seat sound" and got back "one check
-// never ran" has not been told sound.
+// doctorDisposition is AC2 and AC3, matching attach-probe.js's own reading
+// exactly: a check may WARN without moving `clean` — WARN is a fact worth
+// surfacing, not a failure — but a SKIP does, the same as a FAIL or a DRIFT.
+// `stragglers` is excluded outright (AC3): a report, never a verdict.
 func doctorDisposition(checks []DoctorCheck) (clean, skipped bool) {
-	clean = true
+	ranClean := true
 	for _, c := range checks {
 		if c.Check == doctorCheckStragglers {
 			continue
 		}
-		if c.Verdict == DoctorSkip {
+		switch c.Verdict {
+		case DoctorSkip:
 			skipped = true
-		}
-		if c.Verdict != DoctorOK {
-			clean = false
+		case DoctorOK, DoctorWarn:
+			// Clean-compatible: OK is soundness itself, and WARN is a
+			// caveat the reader is told about rather than a fault.
+		default: // FAIL, DRIFT
+			ranClean = false
 		}
 	}
-	return clean, skipped
+	return ranClean && !skipped, skipped
 }
 
 // checkDoctorSeat is check 1: cwd is the git toplevel.
@@ -159,13 +161,18 @@ func checkDoctorStore(dbPath string) DoctorCheck {
 // checkDoctorInstallDrift is check 3: the shared config root and bin match
 // --source's tree.
 //
-// The shared roots are ~/.docket/config and ~/.docket/bin — the corpus every
-// project on the machine draws from (see config.Config.InstanceConfigDirs) —
-// compared against the SAME two names under --source, byte for byte. A
-// directory present on one side only, and holding no file anywhere under it,
-// is DISREGARDED as drift and NAMED in the detail instead: there are no bytes
-// on either side to disagree about, and reporting it as DRIFT would flag an
-// empty placeholder the same as a real divergence.
+// --source names a dotfiles-shaped checkout root; the two trees it ships are
+// at src/user/docket/config and src/user/docket/bin, the same subpath the
+// corpus this ports from (attach-probe.js) compares. The shared roots are
+// ~/.docket/config and ~/.docket/bin — the corpus every project on the
+// machine draws from (see config.Config.InstanceConfigDirs) — compared byte
+// for byte. A directory present on one side only, and holding no file
+// anywhere under it, is DISREGARDED as drift and NAMED in the detail instead:
+// there are no bytes on either side to disagree about, and reporting it as
+// DRIFT would flag an empty placeholder the same as a real divergence. A
+// TREE MISSING ENTIRELY ON EITHER SIDE is FAIL, not disregarded: an absent
+// config or bin directory is not a placeholder, it is nothing installed (or
+// nothing shipped) to compare at all.
 func checkDoctorInstallDrift(sourceRoot string) DoctorCheck {
 	const check = "install-drift"
 	if sourceRoot == "" {
@@ -179,16 +186,30 @@ func checkDoctorInstallDrift(sourceRoot string) DoctorCheck {
 	}
 	sharedRoot := filepath.Join(home, ".docket")
 
-	var drifted, disregarded []string
+	var drifted, disregarded, missing []string
 	for _, sub := range []string{"config", "bin"} {
-		d, empty, err := diffDoctorTree(filepath.Join(sourceRoot, sub), filepath.Join(sharedRoot, sub), sub)
-		if err != nil {
-			return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: err.Error()}
+		srcDir := filepath.Join(sourceRoot, "src", "user", "docket", sub)
+		installDir := filepath.Join(sharedRoot, sub)
+
+		switch {
+		case !doctorDirExists(srcDir):
+			missing = append(missing, srcDir+" (source)")
+		case !doctorDirExists(installDir):
+			missing = append(missing, installDir+" (install)")
+		default:
+			d, empty, err := diffDoctorTree(srcDir, installDir, sub)
+			if err != nil {
+				return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: err.Error()}
+			}
+			drifted = append(drifted, d...)
+			disregarded = append(disregarded, empty...)
 		}
-		drifted = append(drifted, d...)
-		disregarded = append(disregarded, empty...)
 	}
 
+	if len(missing) > 0 {
+		return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: fmt.Sprintf(
+			"missing entirely, nothing to compare: %v", missing)}
+	}
 	if len(drifted) > 0 {
 		return DoctorCheck{Check: check, Verdict: DoctorDrift, Detail: fmt.Sprintf(
 			"%d file(s) differ from %s: %v", len(drifted), sourceRoot, drifted)}
@@ -201,18 +222,22 @@ func checkDoctorInstallDrift(sourceRoot string) DoctorCheck {
 }
 
 // diffDoctorTree compares two directories' regular files by content, labeling
-// every reported path with sub (e.g. "config/workflows/foo.toml").
+// every reported path with sub (e.g. "config/workflows/foo.toml"). Both roots
+// are already known to exist (checkDoctorInstallDrift's own FAIL branch
+// handles the case where one is missing entirely) — this only compares what
+// is under them.
 //
-// It returns the drifted (differing or one-sided non-empty) paths and,
-// separately, sub itself when the two sides disagree on existence but neither
-// holds a single file — the "disregard and name" case checkDoctorInstallDrift
-// documents.
+// It returns the drifted (differing, or present on one side only) file paths
+// and, separately, any SUBDIRECTORY present on one side only that holds no
+// file anywhere under it — the "disregard and name" case
+// checkDoctorInstallDrift documents, matching `diff -rq`'s own "Only in ..."
+// reporting at any depth rather than only at the two roots themselves.
 func diffDoctorTree(a, b, sub string) (drifted, disregarded []string, err error) {
-	filesA, err := doctorTreeFiles(a)
+	filesA, dirsA, err := doctorTreeWalk(a)
 	if err != nil {
 		return nil, nil, err
 	}
-	filesB, err := doctorTreeFiles(b)
+	filesB, dirsB, err := doctorTreeWalk(b)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -231,26 +256,52 @@ func diffDoctorTree(a, b, sub string) (drifted, disregarded []string, err error)
 	}
 	sort.Strings(drifted)
 
-	if len(filesA) == 0 && len(filesB) == 0 && doctorDirExists(a) != doctorDirExists(b) {
-		disregarded = append(disregarded, sub)
+	holdsAFile := func(files map[string]string, dir string) bool {
+		prefix := dir + string(filepath.Separator)
+		for rel := range files {
+			if strings.HasPrefix(rel, prefix) {
+				return true
+			}
+		}
+		return false
 	}
+	for dir := range dirsA {
+		if !dirsB[dir] && !holdsAFile(filesA, dir) {
+			disregarded = append(disregarded, filepath.Join(sub, dir))
+		}
+	}
+	for dir := range dirsB {
+		if !dirsA[dir] && !holdsAFile(filesB, dir) {
+			disregarded = append(disregarded, filepath.Join(sub, dir))
+		}
+	}
+	sort.Strings(disregarded)
 	return drifted, disregarded, nil
 }
 
-// doctorTreeFiles walks root and returns every regular file's path (relative
-// to root) mapped to its sha256. A root that does not exist, or is not a
-// directory, reports an empty tree rather than an error: "not installed here"
-// is a fact the diff already reads from the map being empty.
-func doctorTreeFiles(root string) (map[string]string, error) {
-	out := map[string]string{}
-	if !doctorDirExists(root) {
-		return out, nil
-	}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// doctorTreeWalk walks root and returns every regular file's path (relative
+// to root) mapped to its sha256, and every subdirectory's relative path (root
+// itself excluded — its own existence is checkDoctorInstallDrift's concern,
+// not diffDoctorTree's).
+func doctorTreeWalk(root string) (files map[string]string, dirs map[string]bool, err error) {
+	files = map[string]string{}
+	dirs = map[string]bool{}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
+		if path == root {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		if d.IsDir() {
+			dirs[rel] = true
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
 			// Symlinks are check 5's concern (link-farm debris), not a byte
 			// comparison here — walking through one could also escape root.
 			return nil
@@ -259,18 +310,14 @@ func doctorTreeFiles(root string) (map[string]string, error) {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
 		sum := sha256.Sum256(data)
-		out[rel] = hex.EncodeToString(sum[:])
+		files[rel] = hex.EncodeToString(sum[:])
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("walking %s: %w", root, err)
+		return nil, nil, fmt.Errorf("walking %s: %w", root, err)
 	}
-	return out, nil
+	return files, dirs, nil
 }
 
 func doctorDirExists(path string) bool {
@@ -311,9 +358,14 @@ func checkDoctorPins(conn *sql.DB, runID int) DoctorCheck {
 	}
 }
 
-// checkDoctorLinkFarm is check 5: dangling symlinks under
-// <cwd>/.docket/config — the "link-farm debris" a repo-local instance-config
-// tree can accumulate once whatever it pointed at moves or is removed.
+// checkDoctorLinkFarm is check 5: symlinks under <cwd>/.docket/config — the
+// "link-farm debris" a retired install model left behind.
+//
+// A symlink there at all is the debris, whether or not it still resolves:
+// that model put symlinks under a repo's own instance-config tree, and a
+// present one is evidence of it whatever its current target is. Real files
+// under the same directory are the repo's own additions and are not this
+// check's concern.
 func checkDoctorLinkFarm(cwd string) DoctorCheck {
 	const check = "link-farm"
 	root := filepath.Join(cwd, ".docket", "config")
@@ -322,7 +374,7 @@ func checkDoctorLinkFarm(cwd string) DoctorCheck {
 			Detail: root + " does not exist; nothing to check"}
 	}
 
-	var dangling []string
+	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -330,25 +382,23 @@ func checkDoctorLinkFarm(cwd string) DoctorCheck {
 		if d.Type()&fs.ModeSymlink == 0 {
 			return nil
 		}
-		if _, statErr := os.Stat(path); statErr != nil {
-			rel, relErr := filepath.Rel(root, path)
-			if relErr != nil {
-				rel = path
-			}
-			dangling = append(dangling, rel)
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
 		}
+		found = append(found, rel)
 		return nil
 	})
 	if err != nil {
 		return DoctorCheck{Check: check, Verdict: DoctorFail,
 			Detail: fmt.Sprintf("walking %s: %v", root, err)}
 	}
-	if len(dangling) > 0 {
-		sort.Strings(dangling)
-		return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: fmt.Sprintf(
-			"%d dangling symlink(s) under %s: %v", len(dangling), root, dangling)}
+	if len(found) > 0 {
+		sort.Strings(found)
+		return DoctorCheck{Check: check, Verdict: DoctorDrift, Detail: fmt.Sprintf(
+			"%d symlink(s) under %s from the retired link-farm model: %v", len(found), root, found)}
 	}
-	return DoctorCheck{Check: check, Verdict: DoctorOK, Detail: "no dangling symlinks"}
+	return DoctorCheck{Check: check, Verdict: DoctorOK, Detail: "no symlinks under " + root}
 }
 
 func doctorIsSymlink(path string) bool {
@@ -356,15 +406,28 @@ func doctorIsSymlink(path string) bool {
 	return err == nil && info.Mode()&os.ModeSymlink != 0
 }
 
+// isScratchShapedPath reports whether path is homed under a scratch
+// directory a session's own worktree can be left behind in — the same rule
+// attach-probe.js's stragglers check uses: a `/scratchpad` path component, or
+// a path rooted at /tmp/claude- or /private/tmp/claude- (a Claude session's
+// own temp root — macOS resolves /tmp through /private).
+func isScratchShapedPath(path string) bool {
+	if strings.HasPrefix(path, "/tmp/claude-") || strings.HasPrefix(path, "/private/tmp/claude-") {
+		return true
+	}
+	return slices.Contains(strings.Split(path, string(filepath.Separator)), "scratchpad")
+}
+
 // checkDoctorStragglers is check 6: detached worktrees homed under a
-// scratch-shaped path — the temp directory pre-gate reconstruction uses
-// (pregate_scratch.go's `os.MkdirTemp("", "docket-pregate-")`) — left behind
-// by a `release()` that never ran (a crash, a killed process).
+// scratch-shaped path — left behind by a session (or a pre-gate
+// reconstruction, pregate_scratch.go) that never cleaned up after itself (a
+// crash, a killed process).
 //
-// AC3: THIS IS A REPORT, NEVER A VERDICT — it always reads OK, and
-// doctorDisposition excludes it from `clean` on top of that, so a straggler
-// can never itself block an attach. It exists to be SEEN, not acted on by this
-// verb: reclaiming one is `git worktree prune`'s job, and doctor is read-only.
+// AC3: THIS IS A REPORT, NEVER A VERDICT that blocks — it reads OK or WARN
+// only, never FAIL, and doctorDisposition excludes it from `clean` on top of
+// that, so a straggler can never itself block an attach. It exists to be
+// SEEN, not acted on by this verb: reclaiming one is `git worktree prune`'s
+// job (or the owning session's own close sweep), and doctor is read-only.
 func checkDoctorStragglers(cwd string) DoctorCheck {
 	out, err := osexec.Command("git", gitDirArgs(cwd, "worktree", "list", "--porcelain")...).Output()
 	if err != nil {
@@ -372,12 +435,11 @@ func checkDoctorStragglers(cwd string) DoctorCheck {
 			Detail: "not inside a git repository; nothing to report"}
 	}
 
-	tmp := doctorCanonicalPath(os.TempDir())
 	var strays []string
 	var path string
 	var detached bool
 	flush := func() {
-		if path != "" && detached && exec.Under(tmp, doctorCanonicalPath(path)) {
+		if path != "" && detached && isScratchShapedPath(path) {
 			strays = append(strays, path)
 		}
 		path, detached = "", false
@@ -399,7 +461,7 @@ func checkDoctorStragglers(cwd string) DoctorCheck {
 			Detail: "no detached worktrees under a scratch path"}
 	}
 	sort.Strings(strays)
-	return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorOK, Detail: fmt.Sprintf(
+	return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorWarn, Detail: fmt.Sprintf(
 		"%d detached worktree(s) under a scratch path (report only): %v", len(strays), strays)}
 }
 

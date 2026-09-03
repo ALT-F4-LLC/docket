@@ -34,9 +34,11 @@ var doctorCmd = &cobra.Command{
 	Long: `Answer the six checks a conductor clears by hand before the first
 dispatch of an attach, in one call instead of six read-only agents: (1) cwd is
 the git toplevel; (2) the store opens read-write from this seat; (3) the
-shared config root and bin match --source's tree; (4) ` + "`run verify-pins`" + ` for
---run, or SKIP without it; (5) symlinks under ` + "`<cwd>/.docket/config`" + `; (6) a
-report of detached worktrees homed under a scratch-shaped path.
+shared config root and bin (` + "`~/.docket/config`" + `, ` + "`~/.docket/bin`" + `) match
+--source's ` + "`src/user/docket/{config,bin}`" + `; (4) ` + "`run verify-pins`" + ` for --run, or
+SKIP without it; (5) symlinks under ` + "`<cwd>/.docket/config`" + ` — debris from the
+retired link-farm model, whether or not they still resolve; (6) a report of
+detached worktrees homed under a scratch-shaped path.
 
 READ-ONLY, and it WRITES NOTHING — no lease reap, no re-pin, no migration
 beyond what any read verb performs.
@@ -110,6 +112,7 @@ func renderDoctor(r doctorResultJSON) string {
 func init() {
 	doctorCmd.Flags().String("run", "", "Run to verify pins for (default: pins SKIPs)")
 	doctorCmd.Flags().String("source", "",
-		"Source tree root to compare the shared config/bin install against (default: install-drift SKIPs)")
+		"Dotfiles-shaped checkout root — src/user/docket/{config,bin} compared "+
+			"against ~/.docket/{config,bin} (default: install-drift SKIPs)")
 	rootCmd.AddCommand(doctorCmd)
 }
