@@ -562,6 +562,22 @@ func claimStepWithGates(
 		return nil, err
 	}
 
+	// The claim's input snapshot is recorded HERE as well as in transaction B
+	// (DKT-1054). From this commit on the step reads as handed out
+	// (recordedClaim), and a read-back replays its recorded bindings — so a
+	// `step context` or `step show` that lands while the pre-gates run must
+	// find the bindings this claim resolved, not an empty set standing in for
+	// a snapshot not yet taken. B assembles the bundle the worker actually
+	// receives and re-records over these; the two differ only if another
+	// step of the run completed while the pre-gates ran.
+	provisional, err := AssembleContext(tx, sched, fresh, ttls)
+	if err != nil {
+		return nil, err
+	}
+	if err := recordStepInputs(tx, fresh.ID, provisional.Inputs); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing the claim: %w", err)
 	}
@@ -656,7 +672,16 @@ func claimStepWithGates(
 // inputs (`issue.body`, and an `issue.diff` with no artifact) have no artifact
 // row to bind and are skipped — there is nothing to record but the fact they
 // were empty, which the bundle already says.
+//
+// The step's earlier bindings are cleared first (DKT-1054): the record is the
+// snapshot of THIS claim, and a retried or re-claimed step's read-back
+// (AssembleRecordedContext) must replay what this attempt was handed, not the
+// union of every attempt's bindings. Same transaction as the claim, so a
+// reader never sees the row between the two.
 func recordStepInputs(tx *sql.Tx, stepID int, inputs []ContextInput) error {
+	if err := db.ClearStepInputsTx(tx, stepID); err != nil {
+		return err
+	}
 	for position, in := range inputs {
 		artifactID, ok := artifactIDOf(in.Artifact)
 		if !ok {
@@ -708,7 +733,30 @@ func unclaimableReason(kind string) string {
 // `next`/`claim`, and this is neither: a read verb that reaped would make
 // "I only looked at it" untrue, and would let a `--meta` query change an
 // attempt counter.
+//
+// A step that has been handed out reads back the bundle its claim recorded
+// (AssembleRecordedContext, DKT-1054): the inputs, and the target ref lifted
+// from them, are the ones the worker was given, however far the run has moved
+// since. A step not yet handed out — or back at `pending` for a retry — reads
+// live, as the claim that will hand it out would assemble it (recordedClaim).
+// ReadLiveContext asks the live question of any step.
 func ReadContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
+	return readContext(conn, stepID, nowMS, false)
+}
+
+// ReadLiveContext is ReadContext resolved over the run's artifacts AS THEY
+// STAND, whether or not the step has been handed out — `step context --live`.
+//
+// It answers a different question from ReadContext on a claimed step: not
+// "what did this step see" but "what would a claim made now hand over" — the
+// preview an operator wants before authorizing a retry, and the one reading
+// every consumer had before DKT-1054, kept reachable by name rather than
+// removed.
+func ReadLiveContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
+	return readContext(conn, stepID, nowMS, true)
+}
+
+func readContext(conn *sql.DB, stepID int, nowMS int64, live bool) (*Context, error) {
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -744,6 +792,9 @@ func ReadContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
 			"step %s not found", model.FormatStepID(stepID))
 	}
 
+	if !live && recordedClaim(fresh) {
+		return AssembleRecordedContext(tx, sched, fresh, ttls)
+	}
 	return AssembleContext(tx, sched, fresh, ttls)
 }
 

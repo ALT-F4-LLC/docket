@@ -21,7 +21,10 @@ import (
 //  1. the step row and its definition, from the PINNED workflow's `parsed`
 //  2. `run_issues.body_snapshot`   — never the live issue body
 //  3. `run_issues.issue_snapshot`  — title/kind/labels/scope as of activation
-//  4. recorded `artifacts` bodies, resolved per §6.7's input rule
+//  4. recorded `artifacts` bodies, resolved per §6.7's input rule — over the
+//     run's table at claim, and over the bindings THAT CLAIM RECORDED
+//     (`step_inputs`) on every read-back of a handed-out step, so the run
+//     moving on cannot re-bind what a step already saw (DKT-1054)
 //  5. `pins` rows (path + hash) — the LIST, not the file contents
 //  6. `run_notes` rows — the standing statements `run note add` recorded
 //     against the run, every one, in insertion order
@@ -248,13 +251,97 @@ const (
 	ArtifactKindIssueDiff = "issue.diff"
 )
 
-// AssembleContext builds one step's context bundle inside tx.
+// AssembleContext builds one step's context bundle inside tx, resolving its
+// inputs over the run's artifacts AS THEY STAND — the claim-time assembly.
 //
 // It takes a transaction because `step claim` mints the token and assembles the
 // bundle in ONE transaction — "one atomic mediation: an unclaimed executor has
 // nothing, a claimed one has everything" (engine-core §8).
+//
+// It is the right assembly for a step that has not been handed out: what it
+// returns is what a claim made now would hand over. For a step that HAS been
+// handed out, the answer to "what did this step see" is AssembleRecordedContext.
 func AssembleContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+) (*Context, error) {
+	return assembleContext(tx, sched, step, ttls, liveArtifacts)
+}
+
+// AssembleRecordedContext builds a step's context bundle over the artifacts its
+// claim RECORDED as its inputs (`step_inputs`), instead of the run's current
+// artifact table (DKT-1054).
+//
+// Resolution (§6.7) is a function of run state at assembly time, and run state
+// keeps moving after a step is handed out: the fixture's `fix@1` declares
+// `reconcile.findings`, binds `reconcile@0` at claim (the round that routed
+// it), and then `review@1`, `synthesize@1`, and `reconcile@1` all complete AT
+// ITS OWN ORDINAL. Re-resolving live after that binds `reconcile@1` — an
+// artifact produced by reviewing fix@1's own diff — and reports it as the input
+// fix@1 read. RUN-64's STEP-2992 read exactly that way (and STEP-2974,
+// STEP-3002, and the RUN-53/56/61 passes before it), while `step_inputs` for
+// the same row held ARTIFACT-2709 (`reconcile@0`) the whole time, written by
+// the claim and read by nothing. The same drift moved `issue.diff` — and with
+// it `target_sha` — onto a record superseded after the step ran (a re-pin,
+// DKT-1034, revises a producer's diff in place at the same ordinal).
+//
+// THE RESOLVERS ARE NOT DUPLICATED. This runs the identical assembly over a
+// different artifact set — the recorded rows — so the declared-position order,
+// the engine-produced forms (`issue.body` from the snapshot, an empty
+// `issue.diff`, `gate-results` from the ledger), the prior-round pass, the
+// dedupe, and the target lift are the same code the claim ran. Every recorded
+// artifact was selected by exactly the rule that re-selects it here, and no
+// artifact recorded after the claim is a candidate, so the result is the
+// claim-time bundle: byte-identical inputs, however far the run has moved.
+//
+// Two forms are ledger reads rather than artifact reads and stay so:
+// `<step>.gate-results` and `<step>.vote-record` resolve the producer INSTANCE
+// by the same ordinal rule and serve its recorded rows, which are append-only
+// per instance. A self-declared `<self>.gate-results` therefore carries the
+// step's completion-side gate rows on a read-back that were not yet recorded
+// at claim; that is the one engine-produced input whose read-back can grow.
+func AssembleRecordedContext(
+	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+) (*Context, error) {
+	return assembleContext(tx, sched, step, ttls, recordedArtifacts)
+}
+
+// artifactSource loads the artifact set one assembly resolves over.
+type artifactSource func(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error)
+
+// liveArtifacts is the run's whole artifact table — the claim's view.
+func liveArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
+	return db.ListRunArtifactsTx(tx, step.RunID)
+}
+
+// recordedArtifacts is the set the step's claim recorded — the read-back's view.
+func recordedArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
+	return db.ListStepInputArtifactsTx(tx, step.ID)
+}
+
+// recordedClaim reports whether a step's context is the one a claim recorded —
+// the rule by which a read verb picks AssembleRecordedContext over
+// AssembleContext (DKT-1054).
+//
+// A step has a recorded snapshot from the claim that handed it out, and keeps
+// it through everything that attempt becomes: `claimed`, `running`, `gated`,
+// `done`, a gate park, a supersession by `resolve --as fix-round` — all of
+// them are that attempt, and "what did this step see" has one answer for all
+// of them. `attempt` counts claims for the step's whole life (it is never
+// reset), so `attempt > 0` is "was ever handed out".
+//
+// A step back at `pending` is the exception, and it is deliberate: a lapsed
+// lease reaped, or `resolve --as retry`, returns the row to the pool with its
+// old bindings still in the table, and the next claim will record new ones.
+// Until it does, the honest answer to a read is the live one — what THAT claim
+// will hand over — not the bindings of an attempt that is over. A step never
+// claimed (`attempt == 0`: every `action`, `human`, and `vote` step, and every
+// executor step still waiting) has no snapshot, so it reads live too.
+func recordedClaim(step *db.Step) bool {
+	return step.Attempt > 0 && step.Status != db.StepPending
+}
+
+func assembleContext(
+	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig, source artifactSource,
 ) (*Context, error) {
 	def := sched.defs[step.WorkflowID]
 	if def == nil {
@@ -280,14 +367,15 @@ func AssembleContext(
 		return nil, err
 	}
 
-	// Source 4: the resolved input artifacts. The run's artifact rows are
-	// loaded ONCE and shared with the prior-round pass below — both read the
-	// same snapshot, and the table's bodies scale with the run's whole
-	// recorded output, so a second load doubled exactly the cost this path
-	// pays most of.
+	// Source 4: the resolved input artifacts. The artifact rows are loaded
+	// ONCE — from the run's table for a claim, from the claim's recorded
+	// bindings for a read-back (the source) — and shared with the prior-round
+	// pass below: both read the same snapshot, and the table's bodies scale
+	// with the run's whole recorded output, so a second load doubled exactly
+	// the cost this path pays most of.
 	var artifacts []*db.Artifact
 	if len(spec.Inputs) > 0 || loopReentryEmitter(sched, step, spec) {
-		artifacts, err = db.ListRunArtifactsTx(tx, step.RunID)
+		artifacts, err = source(tx, step)
 		if err != nil {
 			return nil, err
 		}

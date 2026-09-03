@@ -1178,6 +1178,21 @@ same property at the CLI level.
 
 `claim --render` returns the assembled packet instead, atomically (§2).
 
+**A read-back replays what the claim recorded** (DKT-1054). Source 4 is resolved
+over run state, and run state keeps moving after a step is handed out: the
+fixture's `fix@1` binds `reconcile@0` at claim, then `review@1`, `synthesize@1`,
+and `reconcile@1` complete at fix@1's own ordinal, and a live re-resolution binds
+`reconcile@1` — an artifact produced by reviewing fix@1's diff. The claim writes
+the bindings it handed over to `step_inputs` (§6.1) in its own transaction, and
+`step context`, `step render`, and `step show`'s target ref read a claimed step
+(`attempt > 0`, not back at `pending`) over exactly that set, through the same
+resolver, so the read-back is the claim-time bundle however far the run has moved.
+A re-claim (a reaped lease, `resolve --as retry`) records its own bindings in place
+of the last attempt's. A step not yet handed out — every `action`, `human`, and
+`vote` step, and an executor step still `pending` — reads live, since the claim
+that will hand it out is what a read of it previews; `step context --live` asks
+that question of any step.
+
 ## 6.7 Input resolution
 
 §2, verbatim: "Downstream `inputs` resolve over siblings that RECORDED their work

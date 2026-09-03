@@ -1125,42 +1125,61 @@ The bundle is assembled from the run's PINNED and SNAPSHOTTED state only: the
 issue as it read at activation, the recorded input artifacts, the pin list,
 and the run's recorded notes (` + "`notes`" + `, absent when the run has none — see
 ` + "`docket run note`" + `). It never reads the live issue, never reads the working
-tree, and never opens a pinned file. Two calls at the same run state are
-byte-identical, whatever has been edited in between.
+tree, and never opens a pinned file.
+
+For a step that has been claimed, ` + "`inputs`" + ` — and the ` + "`target_sha`" + ` /
+` + "`target_worktree`" + ` lifted from them — are the bindings its claim RECORDED:
+the artifacts the worker was actually handed, replayed however far the run
+has moved since. Later rounds completing at the step's own ordinal, or a
+re-pin of a producer's diff, never re-bind a claimed step's bundle. A step
+not yet claimed, or back at pending for a retry, resolves against the run's
+current artifacts — what the claim that hands it out would assemble.
+
+--live resolves against the run's current artifacts for ANY step: not "what
+did this step see" but "what would a claim made now hand over".
 
 --meta reports per-section byte counts alongside the bundle, and says whether
 the template a render would use is pinned.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		id, err := stepArg(args[0])
-		if err != nil {
-			return err
-		}
-		bundle, err := engine.ReadContext(conn, id, model.NowMS())
-		if err != nil {
-			return stepErr(err, stepLabel(id))
-		}
-
-		result := stepContextResult{Context: bundle}
-		if withMeta, _ := cmd.Flags().GetBool("meta"); withMeta {
-			meta := bundle.Meta()
-			// The default template ships in the binary, so it is always pinned;
-			// a --template path is reported by `step render`.
-			meta.TemplatePinned = true
-			result.Meta = &meta
-		}
-
-		var message string
-		if !w.JSONMode {
-			message = fmt.Sprintf("Context for %s: %d input(s), %d pin(s)",
-				bundle.Step.Step, len(bundle.Inputs), len(bundle.Pins))
-		}
-		w.Success(result, message)
-		return nil
+		return runStepContext(cmd, args, getWriter(cmd))
 	},
+}
+
+// runStepContext is `step context`'s body, taking its writer the way
+// runStepShow does so a test can read the envelope back.
+func runStepContext(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	id, err := stepArg(args[0])
+	if err != nil {
+		return err
+	}
+	read := engine.ReadContext
+	if live, _ := cmd.Flags().GetBool("live"); live {
+		read = engine.ReadLiveContext
+	}
+	bundle, err := read(conn, id, model.NowMS())
+	if err != nil {
+		return stepErr(err, stepLabel(id))
+	}
+
+	result := stepContextResult{Context: bundle}
+	if withMeta, _ := cmd.Flags().GetBool("meta"); withMeta {
+		meta := bundle.Meta()
+		// The default template ships in the binary, so it is always pinned;
+		// a --template path is reported by `step render`.
+		meta.TemplatePinned = true
+		result.Meta = &meta
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = fmt.Sprintf("Context for %s: %d input(s), %d pin(s)",
+			bundle.Step.Step, len(bundle.Inputs), len(bundle.Pins))
+	}
+	w.Success(result, message)
+	return nil
 }
 
 var stepRenderCmd = &cobra.Command{
@@ -1570,6 +1589,8 @@ func init() {
 			"there too")
 
 	stepContextCmd.Flags().Bool("meta", false, "Report per-section byte counts alongside the bundle")
+	stepContextCmd.Flags().Bool("live", false,
+		"Resolve inputs against the run's current artifacts, not the bindings the step's claim recorded")
 	stepRenderCmd.Flags().String("template", "", "Template file; defaults to the shipped one")
 	stepRenderCmd.Flags().String("executor", "",
 		"Resolved executor hint for {executor} substitution "+

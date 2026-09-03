@@ -961,7 +961,7 @@ func scanArtifacts(rows *sql.Rows, err error) ([]*Artifact, error) {
 // time, and run state moves: a later ordinal's artifact would re-resolve the
 // same input differently. Storing what was actually handed over is what makes
 // the ledger answer "what did this step see" rather than "what would it see
-// now".
+// now" — and ListStepInputArtifactsTx is how a read-back asks it (DKT-1054).
 func InsertStepInputTx(tx *sql.Tx, stepID, position, artifactID int) error {
 	_, err := tx.Exec(
 		`INSERT OR REPLACE INTO step_inputs (step_id, position, artifact_id)
@@ -972,6 +972,41 @@ func InsertStepInputTx(tx *sql.Tx, stepID, position, artifactID int) error {
 		return fmt.Errorf("recording step input: %w", err)
 	}
 	return nil
+}
+
+// ClearStepInputsTx drops a step's recorded input bindings, so a re-claim can
+// record the bindings of the attempt that is about to run in their place
+// (DKT-1054).
+//
+// The table's key is (step, position, artifact), so without this a retried
+// step's second claim would ADD its bindings beside the first attempt's rather
+// than replace them, and a read-back would see the union of two attempts —
+// neither of which any executor saw. The step's snapshot is the snapshot of
+// its CURRENT attempt; a lapsed or retried attempt's bindings are history the
+// event log keeps, not a second answer to "what did this step see".
+func ClearStepInputsTx(tx *sql.Tx, stepID int) error {
+	if _, err := tx.Exec(`DELETE FROM step_inputs WHERE step_id = ?`, stepID); err != nil {
+		return fmt.Errorf("clearing step inputs: %w", err)
+	}
+	return nil
+}
+
+// ListStepInputArtifactsTx reads the artifacts a step's claim RECORDED as its
+// inputs (InsertStepInputTx), ordered by id like every other artifact reader —
+// the snapshot `step context` replays for a step that has been handed out
+// (DKT-1054).
+//
+// It is the artifact rows themselves, not the (position, artifact) pairs,
+// because the reader re-runs §6.7's resolution over exactly this set: the
+// declared-position order, the engine-produced forms that bind no artifact
+// (`issue.body`, an empty `issue.diff`, `gate-results`), and the within-input
+// sort all come from the same code the claim ran, so a replayed bundle has
+// the claim-time bundle's shape by construction rather than by a second
+// rendering of it. Empty for a step whose claim bound no artifact at all.
+func ListStepInputArtifactsTx(tx *sql.Tx, stepID int) ([]*Artifact, error) {
+	return scanArtifacts(tx.Query(
+		artifactSelect+` WHERE id IN (SELECT artifact_id FROM step_inputs WHERE step_id = ?)
+		 ORDER BY id`, stepID))
 }
 
 // nullableInt maps 0 to SQL NULL, for optional foreign keys.

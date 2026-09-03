@@ -129,6 +129,12 @@ func resolvedTargetFor(
 // resolvable round record. A vote panel seats itself on what this says; a
 // plausible-looking sha invented here would seat judges on the wrong tree,
 // which is worse than seating them on their own HEAD, because it is silent.
+//
+// A step that has been handed out resolves over the artifacts its claim
+// recorded, exactly as its bundle does (recordedClaim, DKT-1054): the pair
+// `step show` reports is the pair `step context` carries, on every step, or
+// the two verbs would disagree about a completed step's target the moment a
+// later round — or a re-pin of its producer's diff — recorded a newer one.
 func stepTargetRef(
 	tx *sql.Tx, sched *Scheduler, step *db.Step,
 ) (sha, worktree string, err error) {
@@ -136,7 +142,11 @@ func stepTargetRef(
 	if spec == nil || !consumesIssueDiff(spec) {
 		return "", "", nil
 	}
-	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
+	source := liveArtifacts
+	if recordedClaim(step) {
+		source = recordedArtifacts
+	}
+	artifacts, err := source(tx, step)
 	if err != nil {
 		return "", "", err
 	}
