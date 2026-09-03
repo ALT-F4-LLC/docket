@@ -37,7 +37,9 @@ func newRunActivateCmd() *cobra.Command {
   5. Harvest   the fenced command blocks whose tag a bound workflow declares,
                verbatim and hashed. Blocks with an undeclared tag are ignored.
   6. Expand    the first phase's steps — those whose issues have no unsatisfied
-               dependencies. Later phases expand as their predecessors finish.
+               dependencies. Later phases expand as their predecessors finish:
+               an issue expands once every issue it depends_on within the run
+               is done, whatever state the run's OTHER issues are in.
   7. Promote   the issues from backlog to todo, and the run to active.
 
 Nothing executes. No gate, no action, no command runs during activation; files
@@ -64,7 +66,10 @@ refuses the activation and names both paths.
 
 Re-activating an active run expands newly-unblocked phases only and INHERITS
 the original pin set — a workflow re-registered or a pinned file edited since
-activation does not reach a run already under way.
+activation does not reach a run already under way. Whatever an activation leaves
+unexpanded is named, with the predecessor(s) still holding it and their status,
+in the summary line and in the JSON envelope's ` + "`blocked_issues`" + ` — so
+"0 issue(s) expanded" is never the whole report.
 
 The JSON envelope carries the run's expected cost as TWO distinct fields:
 ` + "`expected_cost_total`" + ` is every step the run holds, including ones a
@@ -165,6 +170,12 @@ type activateResult struct {
 	// with the exact workflow@version, so a `--dry-run` (or a real activation)
 	// answers WHAT was bound rather than leaving `issues_bound` as a bare count.
 	BoundIssues []engine.BoundIssue `json:"bound_issues,omitempty"`
+	// BlockedIssues is DKT-1180's roster: every bound issue this activation
+	// left unexpanded, with the in-run predecessors still holding it and their
+	// status. `omitempty`, so a run whose every issue is expanded carries no
+	// key; when `issues_expanded` is 0 on a re-activation, this is the field
+	// that says why. Carried on both a dry run and a real activation.
+	BlockedIssues []engine.BlockedIssue `json:"blocked_issues,omitempty"`
 	// DryRun marks a computed-and-discarded activation, so a consumer cannot
 	// mistake it for a real one.
 	DryRun bool `json:"dry_run,omitempty"`
@@ -278,6 +289,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		DryRun:            result.DryRun,
 		PromotedIssues:    result.PromotedIssues,
 		BoundIssues:       result.BoundIssues,
+		BlockedIssues:     result.BlockedIssues,
 		Reason:            reason,
 	}
 	if result.DryRun {
@@ -331,6 +343,22 @@ func renderActivation(r activateResult) string {
 	if len(r.PromotedIssues) > 0 {
 		parts = append(parts, fmt.Sprintf("promoted %s",
 			strings.Join(r.PromotedIssues, ", ")))
+	}
+	// What did NOT expand, and what holds it (DKT-1180): "0 issue(s) expanded"
+	// on a re-activation is an answer only when the line beside it says which
+	// predecessor is still short of `done`.
+	if len(r.BlockedIssues) > 0 {
+		roster := make([]string, 0, len(r.BlockedIssues))
+		for _, b := range r.BlockedIssues {
+			holders := make([]string, 0, len(b.BlockedBy))
+			for _, p := range b.BlockedBy {
+				holders = append(holders, fmt.Sprintf("%s %s", p.IssueID, p.Status))
+			}
+			roster = append(roster, fmt.Sprintf("%s waits on %s",
+				b.IssueID, strings.Join(holders, ", ")))
+		}
+		parts = append(parts, fmt.Sprintf("%d issue(s) still blocked (%s)",
+			len(r.BlockedIssues), strings.Join(roster, "; ")))
 	}
 
 	msg := fmt.Sprintf("%s %s: %s", verb, r.Run.Ref(), strings.Join(parts, ", "))

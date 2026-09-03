@@ -86,6 +86,15 @@ type ActivateResult struct {
 	// `IssuesBound`'s count was missing — an operator approving a `--dry-run`
 	// needs to know WHAT was bound, not just how many.
 	BoundIssues []BoundIssue
+	// BlockedIssues names, by display id, every bound issue this activation
+	// left UNEXPANDED, each with the in-run depends_on predecessors still
+	// holding it and their status as this activation leaves it (DKT-1180: a
+	// re-activation that expanded nothing carried no field saying why, and the
+	// cause — a predecessor check gating on issues the blocked one had no edge
+	// into — took a source audit to find). Populated identically on a dry run
+	// and a real activation. Nil when every bound issue is expanded, so the
+	// ordinary run carries no key at all rather than an empty one.
+	BlockedIssues []BlockedIssue
 	// Reactivation reports whether this was a re-activation of an already
 	// `active` run, so the verb can say "expanded 2 new phases" rather than
 	// implying a first activation.
@@ -233,6 +242,25 @@ type ScopeWarning struct {
 type BoundIssue struct {
 	IssueID  string `json:"issue"`
 	Workflow string `json:"workflow"`
+}
+
+// BlockedIssue is one bound issue an activation did not expand, and why: the
+// in-run depends_on predecessors that are not yet `done` (DKT-1180). It always
+// carries at least one — an issue with no unsatisfied predecessor expands.
+type BlockedIssue struct {
+	IssueID   string          `json:"issue"`
+	BlockedBy []BlockingIssue `json:"blocked_by"`
+}
+
+// BlockingIssue is one unsatisfied predecessor: its display id and the status
+// keeping it unsatisfied — anything but `done`, the one status that releases
+// a successor. Note that `abandon-issue` is not a status: the routing leaves
+// the issue at `todo` with `resolution = abandoned`, so a `todo` predecessor
+// here may be one the run has already given up on, and the successor will
+// then expand only once an operator closes or re-plans it.
+type BlockingIssue struct {
+	IssueID string `json:"issue"`
+	Status  string `json:"status"`
 }
 
 // Activate is the fat transaction (engine-core §3.2, engine-spec §2; TDD §5.3).
@@ -680,7 +708,7 @@ func activateTx(
 	// relations — reused directly, no adaptation needed at this level, since
 	// the graph is already over issue IDs. A cycle is a VALIDATION_ERROR with
 	// the existing CycleError rendering, which already formats DKT-N.
-	levels, err := lintWorkDAG(tx, issues)
+	dag, err := lintWorkDAG(tx, issues)
 	if err != nil {
 		return nil, err
 	}
@@ -832,7 +860,12 @@ func activateTx(
 	}
 
 	// ---- Stages 4-6, per issue. --------------------------------------------
-	expandable := expandableIssues(levels, issues)
+	expandable := expandableIssues(dag)
+	// blocked collects what stage 6 leaves unexpanded, for the roster built
+	// AFTER the loop — after, so a predecessor stage 7 promotes in this same
+	// pass is named at the status this activation commits, not the one it
+	// found.
+	var blocked []*db.RunIssue
 
 	for _, ri := range runIssues {
 		issue := issues[ri.IssueID]
@@ -893,7 +926,11 @@ func activateTx(
 		// expand when their predecessors complete (phase 3's §6.7).
 		// `expanded_at_ms` records which issues have been expanded, so
 		// expansion is idempotent and re-entrant.
-		if ri.Expanded() || !expandable[ri.IssueID] {
+		if ri.Expanded() {
+			continue
+		}
+		if !expandable[ri.IssueID] {
+			blocked = append(blocked, ri)
 			continue
 		}
 
@@ -924,7 +961,31 @@ func activateTx(
 				return nil, err
 			}
 			result.PromotedIssues = append(result.PromotedIssues, model.FormatID(issue.ID))
+			// The in-memory row follows the write, so the blocked roster below
+			// — which reads this very pointer through the DAG — reports the
+			// promoted status rather than the one activation found.
+			issue.Status = model.StatusTodo
 		}
+	}
+
+	// The blocked roster (DKT-1180): every bound issue this activation left
+	// UNEXPANDED, with the in-run predecessors still holding it. Without it, a
+	// re-activation that expands nothing is indistinguishable from one that
+	// had nothing to expand — RUN-76's operator could only report
+	// `issues_expanded: 0` and guess at the cause. Computed identically on a
+	// dry run and a real activation, from the same edges stage 6 decided on.
+	for _, ri := range blocked {
+		predecessors := unsatisfiedPredecessors(dag, ri.IssueID)
+		if len(predecessors) == 0 {
+			continue // unreachable: an issue with none is expandable
+		}
+		entry := BlockedIssue{IssueID: model.FormatID(ri.IssueID)}
+		for _, p := range predecessors {
+			entry.BlockedBy = append(entry.BlockedBy, BlockingIssue{
+				IssueID: model.FormatID(p.ID), Status: string(p.Status),
+			})
+		}
+		result.BlockedIssues = append(result.BlockedIssues, entry)
 	}
 
 	// The run-wide expected-cost sum, read after expansion and inside the
@@ -1400,9 +1461,12 @@ func treeHolder(def *workflow.Definition) *workflow.Step {
 }
 
 // lintWorkDAG is stage 2: planner.BuildDAG + TopoSort over the run's issues and
-// their depends_on relations, REUSED directly. The returned levels are what
-// stage 6 reads to decide which issues are phase 1.
-func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
+// their depends_on relations, REUSED directly.
+//
+// It returns the DAG itself rather than the topological levels: the levels
+// prove acyclicity and nothing more, while stage 6 needs each issue's OWN
+// predecessor edges (DKT-1180 — see expandableIssues).
+func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) (*planner.DAG, error) {
 	list := make([]*model.Issue, 0, len(issues))
 	for _, issue := range issues {
 		list = append(list, issue)
@@ -1414,8 +1478,8 @@ func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
 		return nil, err
 	}
 
-	levels, err := planner.TopoSort(planner.BuildDAG(list, relations))
-	if err != nil {
+	dag := planner.BuildDAG(list, relations)
+	if _, err := planner.TopoSort(dag); err != nil {
 		var cycle *planner.CycleError
 		if errors.As(err, &cycle) {
 			// The existing rendering already formats DKT-N, which is the right
@@ -1425,53 +1489,54 @@ func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
 		}
 		return nil, fmt.Errorf("linting the work graph: %w", err)
 	}
-	return levels, nil
+	return dag, nil
 }
 
-// expandableIssues reports which of the run's issues are "phase 1" — those
-// whose depends_on predecessors are all satisfied at activation.
+// expandableIssues reports which of the run's issues may expand NOW — those
+// whose depends_on predecessors are all satisfied (engine-spine §6.3 R2: "the
+// issue's `depends_on` predecessors are satisfied").
 //
 // An issue is expandable when every predecessor either is not in the run (an
-// external dependency the run does not schedule) or is already `done`. Level 0
-// of the topological sort is the base case; later levels expand when their
-// predecessors complete, which is phase 3's §6.7.
-func expandableIssues(levels [][]int, issues map[int]*model.Issue) map[int]bool {
-	out := make(map[int]bool, len(issues))
-	if len(levels) == 0 {
-		return out
-	}
-	for _, id := range levels[0] {
-		out[id] = true
-	}
-
-	// A later-level issue whose predecessors are all `done` is expandable too:
-	// a run activated over a graph whose first phase was already finished by
-	// hand should schedule the second, not stall.
-	for level := 1; level < len(levels); level++ {
-		for _, id := range levels[level] {
-			if issuePredecessorsSatisfied(id, levels, level, issues) {
-				out[id] = true
-			}
-		}
+// external dependency the run does not schedule; BuildDAG drops those edges)
+// or is already `done`. An issue with no in-run predecessor is phase 1; a
+// later phase expands at the re-activation after its predecessors complete
+// (phase 3's §6.7), and a run activated over a graph whose first phase was
+// already finished by hand schedules the second rather than stalling.
+//
+// The predecessor set is the issue's OWN reverse edges and nothing else
+// (DKT-1180). The earlier reading — every issue in every earlier topological
+// level, "deliberately conservative" — gated a phase on issues it had no edge
+// into: RUN-76's seven-issue chain sat behind a `done` root and an UNRELATED
+// phase-1 sibling that `abandon-issue` had left at `todo` (by design — the
+// routing stops the run's work on an issue and does not close it), so every
+// re-activation expanded nothing, reported nothing, and the run was stuck.
+// planner.FindReady reads the same graph the same way this now does.
+func expandableIssues(dag *planner.DAG) map[int]bool {
+	out := make(map[int]bool, len(dag.Nodes))
+	for id := range dag.Nodes {
+		out[id] = len(unsatisfiedPredecessors(dag, id)) == 0
 	}
 	return out
 }
 
-// issuePredecessorsSatisfied reports whether every earlier-level issue this one
-// could depend on is `done`. It is deliberately conservative: it treats the
-// whole prefix of the topological order as the predecessor set, so an issue
-// expands early only when the phases before it are genuinely complete.
-func issuePredecessorsSatisfied(
-	_ int, levels [][]int, level int, issues map[int]*model.Issue,
-) bool {
-	for earlier := 0; earlier < level; earlier++ {
-		for _, id := range levels[earlier] {
-			if issue, ok := issues[id]; ok && issue.Status != model.StatusDone {
-				return false
-			}
-		}
+// unsatisfiedPredecessors lists the in-run issues still holding one issue's
+// phase back: its direct blockers whose status is not `done`, in ascending id
+// order so a report over them is stable.
+func unsatisfiedPredecessors(dag *planner.DAG, id int) []*model.Issue {
+	node, ok := dag.Nodes[id]
+	if !ok {
+		return nil
 	}
-	return true
+	var out []*model.Issue
+	for blockerID := range node.Reverse {
+		blocker, ok := dag.Nodes[blockerID]
+		if !ok || blocker.Issue.Status == model.StatusDone {
+			continue
+		}
+		out = append(out, blocker.Issue)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // issueSnapshot is stage 4's §5.1.1 half: the canonical JSON of

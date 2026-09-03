@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -381,6 +382,68 @@ func TestRunActivateHelpDocumentsCostFields(t *testing.T) {
 		if !strings.Contains(long, field) {
 			t.Errorf("--help text does not document `%s`", field)
 		}
+	}
+}
+
+// TestRunActivateNamesBlockedIssues is DKT-1180's boundary: an activation
+// that leaves an issue unexpanded says so on the summary line, naming the
+// predecessor holding it, and carries the same roster as `blocked_issues` in
+// the JSON envelope — so `issues_expanded: 0` is never the whole report. The
+// --help text names the field, as DKT-517's cost fields set the precedent.
+func TestRunActivateNamesBlockedIssues(t *testing.T) {
+	conn := newTestDB(t)
+	runID, rootID := seedRun(t, conn)
+	nextID, err := db.CreateIssue(conn, &model.Issue{
+		Title: "waits on the root", Description: "a body",
+		Status: model.StatusBacklog, Priority: model.PriorityNone,
+		Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "creating the successor: %v", err)
+	_, err = conn.Exec(
+		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
+		 VALUES (?, ?, 'depends_on', '2026-08-02T00:00:00Z')`, nextID, rootID)
+	testsupport.Must(t, err, "seeding relation: %v", err)
+	err = db.AddRunIssue(conn, runID, nextID)
+	testsupport.Must(t, err, "adding the successor to the run: %v", err)
+
+	// Human mode on a dry run, so the JSON pass below sees the same first
+	// activation rather than a re-activation.
+	w, buf := bufWriter(false)
+	err = runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+	testsupport.Must(t, err, "run activate --dry-run: %v", err)
+	want := "1 issue(s) still blocked (" + model.FormatID(nextID) +
+		" waits on " + model.FormatID(rootID) + " todo)"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("summary line %q does not carry %q", buf.String(), want)
+	}
+
+	w, buf = bufWriter(true)
+	err = runActivateWithWriter(t, conn, w, model.FormatRunID(runID))
+	testsupport.Must(t, err, "run activate: %v", err)
+	var envelope struct {
+		Data struct {
+			IssuesExpanded int                   `json:"issues_expanded"`
+			BlockedIssues  []engine.BlockedIssue `json:"blocked_issues"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+	}
+	if envelope.Data.IssuesExpanded != 1 {
+		t.Errorf("expanded %d, want 1 (the root alone)", envelope.Data.IssuesExpanded)
+	}
+	wantRoster := []engine.BlockedIssue{{
+		IssueID: model.FormatID(nextID),
+		BlockedBy: []engine.BlockingIssue{{
+			IssueID: model.FormatID(rootID), Status: string(model.StatusTodo),
+		}},
+	}}
+	if got := envelope.Data.BlockedIssues; !reflect.DeepEqual(got, wantRoster) {
+		t.Errorf("blocked_issues = %+v, want %+v", got, wantRoster)
+	}
+
+	if long := newRunActivateCmd().Long; !strings.Contains(long, "blocked_issues") {
+		t.Error("--help text does not document `blocked_issues`")
 	}
 }
 
