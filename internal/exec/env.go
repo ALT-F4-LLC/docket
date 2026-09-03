@@ -117,6 +117,32 @@ type EnvPolicy struct {
 	// (DKT-63). Opaque to core; a check that wants per-issue behavior finally
 	// has the identity to key it on.
 	Issue string
+	// Step is the rendered identity of the step the gate is running for —
+	// `STEP-N` — exported as DOCKET_STEP (DKT-1186).
+	//
+	// It is what makes a gate's own inputs REACHABLE. DOCKET_ISSUE names the
+	// issue, and an issue's chain has many steps, so a gate needing an
+	// artifact an earlier step produced had to re-derive its own identity:
+	// `docket step list --issue $DOCKET_ISSUE`, then pick the row by a
+	// hardcoded instance-name convention, then read that row's JSON shape.
+	// Every one of those three couplings is to something the engine is free
+	// to change — instance naming, listing order, wire shape — and the
+	// workaround broke silently when any of them moved.
+	//
+	// With the step's own reference in hand the lookup is one verb against a
+	// stable identity: `docket step context $DOCKET_STEP` re-emits the
+	// bundle whose `inputs` ARE the artifacts the step was handed, and
+	// `docket step artifacts $DOCKET_STEP` lists what it produced. Neither
+	// needs a token — both are read-only — so this exports NO new authority:
+	// the step reference is an identifier the gate could already reconstruct,
+	// made cheap and correct instead of conventional and fragile.
+	//
+	// Empty means unset, the same encoding as Scope and Base: a gate spawned
+	// for no step (a bare runner in a test, a future caller with no step in
+	// hand) must see the variable ABSENT rather than a `STEP-0` that names
+	// nothing, because a lookup against an invented id fails confusingly
+	// where an absent variable fails honestly.
+	Step string
 	// Scope is the issue's declared scope globs, exported newline-joined as
 	// DOCKET_SCOPE (DKT-63) so a diff-shaped check can evaluate the change it
 	// is gating instead of the whole dirty tree. Empty means unset: an issue
@@ -220,6 +246,11 @@ func BuildEnv(p EnvPolicy) ([]string, error) {
 	}
 	if p.Issue != "" {
 		env = append(env, "DOCKET_ISSUE="+p.Issue)
+	}
+	// Absent — not empty — when no step is known (DKT-1186): `STEP-0` names no
+	// step, and a gate handed one would query for a row that does not exist.
+	if p.Step != "" {
+		env = append(env, "DOCKET_STEP="+p.Step)
 	}
 	// Newline-joined rather than JSON: the consumer is a shell check reading
 	// its own environment, and `while IFS= read -r glob` over lines needs no

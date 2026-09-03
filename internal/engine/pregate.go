@@ -222,7 +222,12 @@ func runPreGates(
 		}
 		sc := StepContext{
 			Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
-			Scope: scope, WorkRoot: workRoot,
+			// The step's own id (DKT-1186), the same export the saga's gates
+			// get: a pre-gate runs BEFORE the claim hands over the bundle, so
+			// the child's only route to the step's declared inputs is asking
+			// the engine for them by reference.
+			StepID: step.ID,
+			Scope:  scope, WorkRoot: workRoot,
 			// Empty unless the tree was RECONSTRUCTED (DKT-1166). A gate
 			// measuring a tree that stays on disk keeps its persistent linter
 			// caches; one measuring a tree docket is about to delete gets

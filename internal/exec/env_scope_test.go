@@ -87,3 +87,35 @@ func TestBuildEnvOmitsGateBaseWhenUnknown(t *testing.T) {
 		t.Error("DOCKET_GATE_BASE is set for a step with no known base commit")
 	}
 }
+
+// DOCKET_STEP (DKT-1186): a gate learns WHICH STEP it is running for, so it can
+// ask the engine for its own inputs — `docket step context $DOCKET_STEP` —
+// instead of re-deriving its identity from DOCKET_ISSUE plus an instance-name
+// convention, which is what a gate needing an earlier step's artifact had to do.
+
+func TestBuildEnvCarriesStepRef(t *testing.T) {
+	env, err := BuildEnv(EnvPolicy{
+		Gate: "ac-commands", Repo: "/repo", Issue: "DKT-7", Step: "STEP-2939",
+	})
+	if err != nil {
+		t.Fatalf("BuildEnv: %v", err)
+	}
+	if got, ok := envValue(env, "DOCKET_STEP"); !ok || got != "STEP-2939" {
+		t.Errorf("DOCKET_STEP = %q, %v; want the gated step's ref %q",
+			got, ok, "STEP-2939")
+	}
+}
+
+// TestBuildEnvOmitsStepWhenUnknown: absence, not emptiness and never a
+// well-formed id that names no row. A gate handed `STEP-0` would query the
+// engine and get NOT_FOUND from inside its own tooling; a gate that finds the
+// variable absent knows the engine had no step to name.
+func TestBuildEnvOmitsStepWhenUnknown(t *testing.T) {
+	env, err := BuildEnv(EnvPolicy{Gate: "ac-commands", Repo: "/repo"})
+	if err != nil {
+		t.Fatalf("BuildEnv: %v", err)
+	}
+	if got, ok := envValue(env, "DOCKET_STEP"); ok {
+		t.Errorf("DOCKET_STEP = %q for a policy naming no step; want it unset", got)
+	}
+}

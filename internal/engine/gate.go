@@ -46,6 +46,22 @@ type StepContext struct {
 	Instance string
 	RunID    int
 	IssueID  int
+	// StepID is the step's numeric id, exported to the child as DOCKET_STEP —
+	// rendered `STEP-N` — so a gate can look up its OWN inputs (DKT-1186).
+	//
+	// Instance is the step's `name@k#i` identity, which is what a human reads
+	// and what a workflow declares; it is not what the read verbs take.
+	// `docket step context` and `docket step artifacts` both take `STEP-N`, so
+	// a gate holding only DOCKET_ISSUE had to list the issue's steps and pick
+	// itself out by an instance-name convention before it could ask the engine
+	// anything. The numeric id is carried rather than the rendered string
+	// because every other id in this struct is numeric and the rendering
+	// belongs at the one place that builds the environment.
+	//
+	// Zero means unknown, and the variable is then UNSET in the child rather
+	// than set to `STEP-0`: absence is the same encoding Scope and Base use,
+	// and an id that names no row is worse than no id at all.
+	StepID int
 	// Scope is the issue's SNAPSHOTTED scope globs (DKT-63), exported to the
 	// child as DOCKET_SCOPE so a diff-shaped gate can evaluate the change it
 	// is gating rather than the whole dirty tree. Per-step gates over a

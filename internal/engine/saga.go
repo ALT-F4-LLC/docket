@@ -905,7 +905,12 @@ func (e *Engine) runGateStage(
 	// lifetime, so every gate of one step resolves the same sha.
 	sc := StepContext{
 		Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
-		Scope: scope, WorkRoot: step.WorkRoot,
+		// The step's own id rides along (DKT-1186), exported as DOCKET_STEP:
+		// a completion gate that needs an artifact an earlier step of this
+		// issue produced asks `docket step context STEP-N` for its recorded
+		// inputs, rather than re-deriving which step it is from the issue.
+		StepID: step.ID,
+		Scope:  scope, WorkRoot: step.WorkRoot,
 		Base: gateBaseSHA(conn, step.RunID, step.WorkRoot),
 	}
 
@@ -2121,7 +2126,16 @@ func (e *Engine) runAction(
 		Validate: declaredPayloadValidator(conn, step, spec),
 		Context:  actionContext(conn, step, nowMS),
 	}
-	sc := StepContext{Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID}
+	// The step's id rides here too (DKT-1186) so every StepContext core builds
+	// names the step it describes. It does NOT reach an action child as
+	// DOCKET_STEP: an action's environment is deliberately the allowlist plus
+	// DOCKET_REPO and nothing else (gates-trust A4), and an action needs no
+	// reach-back — §11.4's context object is handed to it on stdin, inputs and
+	// all, which is precisely what a gate lacked and had to go asking for.
+	sc := StepContext{
+		Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
+		StepID: step.ID,
+	}
 
 	result, err := e.Actions.Run(context.Background(), a, sc)
 	if err != nil {

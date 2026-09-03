@@ -925,6 +925,7 @@ the next environment variable anyone invents.
 | `DOCKET_GATE` | the gate name | so a check can behave differently under docket if its author wants; opaque to core |
 | `DOCKET_REPO` | the repo root | the same value as `Dir`, for tools that need it in an env |
 | `DOCKET_GATE_BASE` | the step's base commit sha, **worktree-recorded completion gates only** | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
+| `DOCKET_STEP` | the step's reference, `STEP-N` | so a gate can ask the engine for its **own inputs** — the identity `docket step context` and `docket step artifacts` take — instead of re-deriving which step it is from `DOCKET_ISSUE` plus an instance-name convention; see below *(added 2026-09-03, DKT-1186)* |
 | `GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` | a scratch directory deleted with the tree, **gates measuring a reconstruction only** | both tools cache issues by package content while storing the absolute path each was found at, and re-open that path to find the `//nolint` that suppresses it. A reconstruction outlives neither, so its entries must not either — see §7.6's DKT-1166 amendment *(added 2026-09-03, DKT-1166)* |
 
 **`DOCKET_GATE_BASE` — the step's committed range** *(DKT-992)*. Executors
@@ -955,6 +956,39 @@ resolution the diff stage's `runDiffBase` applies — so completion gates of a
   absent while the tree is clean has nothing it can honestly scan, and should
   fail rather than pass having measured nothing — "we couldn't check, so
   carry on" is what makes a control decorative (N3).
+
+**`DOCKET_STEP` — the gate's own identity** *(DKT-1186)*. A gate frequently
+needs an **artifact an earlier step of the same issue produced** — a threat
+model feeding an abuse-case check, a synthesis feeding a verifier. Nothing in
+the child environment named the step, so the only route was to rebuild the
+gate's identity from outside the engine: `docket step list --issue
+$DOCKET_ISSUE`, pick the row by a **hardcoded instance-name convention**, parse
+that listing's JSON shape, then `docket step artifacts` on the result. That is
+three couplings to things the engine is free to change — instance naming,
+listing order, wire shape — and each one breaks silently when it moves. It was
+observed in the wild (RUN-80's activation gate, `agentic-services` commit
+`897c0a7`) and flagged as a precedent not to set.
+
+- **Value**: the step's rendered reference, `STEP-N` — precisely the argument
+  `docket step context STEP-N` and `docket step artifacts STEP-N` take. The
+  bundle's `inputs` **are** the artifacts the step was handed, so
+  `docket step context $DOCKET_STEP` answers "what were my inputs" in one verb
+  against a stable identity, and `docket step artifact ARTIFACT-N` fetches a
+  body from there.
+- **Set on both paths**: completion gates (the saga) and pre-gates (the
+  pre-claim path) alike. The pre-claim path is where it matters most — a
+  pre-gate runs *before* the claim hands the bundle over, so asking the engine
+  by reference is its only route to the chain's artifacts.
+- **No new authority.** Both verbs are read-only and take no token, and the
+  reference is an identifier the child could already reconstruct by hand. This
+  makes the lookup cheap and correct rather than conventional and fragile; it
+  does not widen what a gate may do. `DOCKET_PATH` and `DOCKET_TOKEN` remain
+  excluded, unchanged.
+- **Unset, never `STEP-0`**: a gate spawned with no step in hand (a bare runner,
+  a future caller) sees the variable **absent**. A well-formed id that resolves
+  to nothing fails inside the gate's own tooling with a misleading message,
+  where absence is a condition the gate can test — the same encoding
+  `DOCKET_SCOPE` and `DOCKET_GATE_BASE` use.
 
 **Excluded, by name, in addition to being absent from the allowlist:**
 

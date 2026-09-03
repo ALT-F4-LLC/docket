@@ -286,7 +286,14 @@ func (r *ExecRunner) spawnMatched(
 	env, err := exec.BuildEnv(exec.EnvPolicy{
 		Gate: g.Name, Repo: r.RepoRoot, Network: entry.Network,
 		Issue: model.FormatID(sc.IssueID), Scope: sc.Scope,
-		Base: sc.Base, CacheRoot: sc.CacheRoot,
+		// DKT-1186: the step's own reference, so the gate can ask the engine
+		// for its inputs (`docket step context $DOCKET_STEP`) instead of
+		// rediscovering which step it is from the issue plus a convention.
+		// Rendered here and nowhere else, and only when a step is actually in
+		// hand — a zero id would render `STEP-0`, which names no row.
+		Step:      stepRef(sc.StepID),
+		Base:      sc.Base,
+		CacheRoot: sc.CacheRoot,
 	})
 	if err != nil {
 		return GateExecution{}, err
@@ -409,6 +416,22 @@ func (r *ExecRunner) spawnMatched(
 	}
 
 	return out, nil
+}
+
+// stepRef renders a step id for the child environment, or "" when there is no
+// step to name (DKT-1186).
+//
+// The guard is the point: model.FormatStepID(0) is a perfectly well-formed
+// `STEP-0` that resolves to nothing, and handing a gate an identifier that
+// looks valid and answers NOT_FOUND is strictly worse than handing it nothing
+// — the first fails inside the gate's own tooling with a misleading message,
+// the second is a condition the gate can test for. Absence is the encoding
+// DOCKET_SCOPE and DOCKET_GATE_BASE already use for "docket does not know".
+func stepRef(stepID int) string {
+	if stepID <= 0 {
+		return ""
+	}
+	return model.FormatStepID(stepID)
 }
 
 // networkAwareReason annotates a FAILING gate that declared a network
