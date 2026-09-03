@@ -223,6 +223,13 @@ func runPreGates(
 		sc := StepContext{
 			Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
 			Scope: scope, WorkRoot: workRoot,
+			// Empty unless the tree was RECONSTRUCTED (DKT-1166). A gate
+			// measuring a tree that stays on disk keeps its persistent linter
+			// caches; one measuring a tree docket is about to delete gets
+			// caches docket deletes with it, so no cached issue can outlive
+			// the path it names and be replayed with its `//nolint` lookup
+			// pointing at a file that is gone.
+			CacheRoot: scratch.Cache,
 		}
 
 		var rows []GateResultRow

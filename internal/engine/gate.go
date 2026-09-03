@@ -73,6 +73,17 @@ type StepContext struct {
 	// learn the range and guessed (`git diff HEAD~1`, wrong for multi-commit
 	// steps) or measured the clean tree (always empty).
 	Base string
+	// CacheRoot is a scratch directory the caller destroys together with the
+	// tree in WorkRoot, or "" when the tree outlives the spawn (DKT-1166).
+	//
+	// Only the pre-claim path fills it, and only when it RECONSTRUCTED the
+	// tree under review: a reconstruction is deleted within the minute, and a
+	// linter result cache keyed by package content but carrying absolute
+	// source paths outlives it, so a later run over the same content re-opens
+	// a path that is gone, finds no `//nolint` there, and re-emits an issue
+	// the source suppressed. exec.EnvPolicy.CacheRoot documents the mechanism
+	// and names the variables it redirects.
+	CacheRoot string
 }
 
 // GateResult is one gate's outcome, in §11.4's `gate result` shape.

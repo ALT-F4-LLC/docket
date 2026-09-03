@@ -925,6 +925,7 @@ the next environment variable anyone invents.
 | `DOCKET_GATE` | the gate name | so a check can behave differently under docket if its author wants; opaque to core |
 | `DOCKET_REPO` | the repo root | the same value as `Dir`, for tools that need it in an env |
 | `DOCKET_GATE_BASE` | the step's base commit sha, **worktree-recorded completion gates only** | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
+| `GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` | a scratch directory deleted with the tree, **gates measuring a reconstruction only** | both tools cache issues by package content while storing the absolute path each was found at, and re-open that path to find the `//nolint` that suppresses it. A reconstruction outlives neither, so its entries must not either — see §7.6's DKT-1166 amendment *(added 2026-09-03, DKT-1166)* |
 
 **`DOCKET_GATE_BASE` — the step's committed range** *(DKT-992)*. Executors
 commit **before** `step record`, so at gate time a worktree-recorded step's
@@ -1361,6 +1362,46 @@ RUN-29 STEP-746 record `skipped` and silently pass-route.
 PG4 is unchanged and still applies: a PRE-gate that could not bind its tree is
 data for the step's worker, not a park. Parking on it would be the engine
 judging a step by an input it handed the step itself.
+
+### AMENDMENT (DKT-1166) — a throwaway tree gets throwaway linter caches
+
+DKT-254 gave a pre-gate the right tree. It did not give it a cache that dies
+with that tree, and a class of tool needs exactly that.
+
+**The mechanism.** golangci-lint and staticcheck cache each reported issue
+keyed by **package content**, storing the **absolute path** the issue was found
+at, and re-open that path afterwards to look for the `//nolint` (or
+`//lint:ignore`) comment that would suppress it. A reconstruction is deleted
+within the minute; the content hash is not. So one reconstruction's entries are
+replayed in the next, the suppression lookup re-opens a file that is gone, and
+an already-suppressed issue is re-emitted as live.
+
+**Observed**: harness RUN-64/STEP-2939 recorded `ac-commands: fail, exit 2` over
+a clean tree. Build and tests exited 0; `make lint` reported one forbidigo issue
+at `../docket-pregate-4091742512/…/timelinecompare_test.go` — a directory an
+earlier reconstruction had already removed — with golangci-lint warning it could
+not read that file, while the source carried `//nolint:forbidigo` on the line
+above and the same sha linted in place reported `0 issues.`
+
+**The cwd was never the problem.** DKT-254 already binds the reconstruction and
+`gate_exec.go` already spawns in it, which is why the reported path was
+*relative to* the current reconstruction. The carrier is the cache, and it
+poisons in both directions: the operator's own persistent cache also receives
+entries naming a `docket-pregate-*` path docket is about to delete.
+
+**The rule.** A gate that measures a tree docket will delete gets its
+path-carrying result caches inside a scratch root docket deletes with that tree
+(`GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` — §5.3). A gate over a tree that
+stays on disk keeps its shared caches: re-analysis is a real cost, and it is
+only worth paying where the tree is genuinely throwaway. The Go **build** cache
+is deliberately untouched — what makes an entry dangerous here is a stored
+source path the tool re-opens to decide suppression, and relocating `GOCACHE`
+would rebuild the standard library on every reconstruction for no such benefit.
+
+A cache root that cannot be created **fails the reconstruction**, which records
+`skipped`, on the same reasoning as the rest of this section: a measurement that
+can report a suppressed issue as live is measuring the wrong thing, and that is
+the defect, while measuring nothing is a gap.
 
 ### 7.6.1 Ordering and the claim restructure
 

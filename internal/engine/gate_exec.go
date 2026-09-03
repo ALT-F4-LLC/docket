@@ -286,7 +286,7 @@ func (r *ExecRunner) spawnMatched(
 	env, err := exec.BuildEnv(exec.EnvPolicy{
 		Gate: g.Name, Repo: r.RepoRoot, Network: entry.Network,
 		Issue: model.FormatID(sc.IssueID), Scope: sc.Scope,
-		Base: sc.Base,
+		Base: sc.Base, CacheRoot: sc.CacheRoot,
 	})
 	if err != nil {
 		return GateExecution{}, err
