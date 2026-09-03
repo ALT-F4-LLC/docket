@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 26
+const currentSchemaVersion = 27
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -195,6 +195,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	24: migrateV23ToV24,
 	25: migrateV24ToV25,
 	26: migrateV25ToV26,
+	27: migrateV26ToV27,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -561,6 +562,7 @@ CREATE TABLE IF NOT EXISTS steps (
 	attempt        INTEGER NOT NULL DEFAULT 0,
 	failed_attempts INTEGER NOT NULL DEFAULT 0,
 	reaped_claims  INTEGER NOT NULL DEFAULT 0,
+	last_claim_end TEXT    NOT NULL DEFAULT '',
 	max_attempts   INTEGER,
 	expected_cost  REAL    NOT NULL DEFAULT 0,
 	owner          TEXT,
@@ -2346,6 +2348,67 @@ func migrateV25ToV26(tx *sql.Tx) error {
 	return nil
 }
 
+// v27AddedColumns is v27's whole schema change: one column on `steps` —
+// `last_claim_end`, the END REASON of the most recent claim to leave this
+// step, alongside the counters v23 already keeps (DKT-1279).
+//
+// `failed_attempts` and `reaped_claims` answer "how many claims of each kind
+// has this step ever had", which is the wrong question when they disagree:
+// RUN-80 DISPATCH-400 reaped ten leases after a session was killed mid-wave,
+// the steps re-dispatched at `attempt` incremented, and wave.js/policy's
+// on_failure escalation read that as "failed once" and routed all ten a tier
+// up — the row said nothing about THIS re-offer following a reap rather than
+// a `step fail`. A mixed history (one failure, then a reap, or the reverse)
+// makes the aggregate counters ambiguous about which ending is the one this
+// offer follows; a router needs the LAST one, not a tally.
+//
+// So the row states it directly: `last_claim_end` is overwritten by whichever
+// of MarkStepAttemptFailedTx / MarkStepClaimReapedTx runs most recently,
+// holding exactly `'failed'` or `'reaped'` — never a derived value, the same
+// discipline v23's counters use. Empty for a step never claimed and for a
+// step whose only claims recorded (there is nothing to attribute a "prior
+// end" to).
+var v27AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "last_claim_end",
+		`ALTER TABLE steps ADD COLUMN last_claim_end TEXT NOT NULL DEFAULT ''`},
+}
+
+// v27ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v21 through v23 use and for the same reason: v27 adds no table and no
+// index, so a database stamped 27 by a binary built mid-change carries every
+// v26 sentinel and the claim-end column never arrives.
+var v27ColumnSentinels = []struct{ table, column string }{
+	{"steps", "last_claim_end"},
+}
+
+// migrateV26ToV27 adds the last-claim-end column (DKT-1279).
+//
+// It BACK-FILLS NOTHING, for v23's own reason: the event log holds
+// `step-failed` and `lease-reaped` rows a value could be derived from, but
+// events are prunable and a back-fill would assert more than the store can
+// promise. An empty string on a pre-v27 claim means "no recorded ending",
+// the same never-captured honesty v23's zero counters use — the column is
+// authoritative only for claims that end after v27.
+//
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration
+// probes first and stays re-runnable, the same shape v10 through v23 use.
+func migrateV26ToV27(tx *sql.Tx) error {
+	for _, col := range v27AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v26 to v27: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v26 to v27: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -2912,6 +2975,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 25
+				break
+			}
+		}
+	}
+
+	// The v27 guard, back in the COLUMN form v21 through v23 use and for
+	// their reason: v27 adds a column and no table, so a database stamped 27
+	// by a binary built mid-change carries every v26 sentinel and the
+	// claim-end column never arrives.
+	if version >= 27 {
+		for _, col := range v27ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v27 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 26
 				break
 			}
 		}

@@ -55,6 +55,18 @@ const (
 	StepStaged = "staged"
 )
 
+// Claim-end reasons: the value `last_claim_end` holds (v27, DKT-1279). Each
+// names how the MOST RECENT claim to leave a step ended — `ClaimEndFailed`
+// for an explicit `step fail`, `ClaimEndReaped` for a lease expiry,
+// `max_step_duration`, or a forced `step reap`, the same split
+// FailedAttempts/ReapedClaims already count. A claim that RECORDED writes
+// neither, so the column keeps whatever it held before — that step is
+// terminal and `last_claim_end` is never read again.
+const (
+	ClaimEndFailed = "failed"
+	ClaimEndReaped = "reaped"
+)
+
 // StepTerminal reports whether a status ends a step's life. A terminal step is
 // never re-offered by `next`, never claimable, and never reaped.
 func StepTerminal(status string) bool {
@@ -157,18 +169,28 @@ type Step struct {
 	// (the migration back-fills nothing — see migrateV22ToV23).
 	FailedAttempts int
 	ReapedClaims   int
-	MaxAttempts    *int
-	ExpectedCost   float64
-	Owner          string
-	TokenHash      string
-	ExpiresMS      int64
-	StartedMS      *int64
-	ActivityMS     *int64
-	SagaStage      string
-	GateTrail      string
-	Routing        string
-	Metadata       string
-	ContextBytes   int
+	// LastClaimEnd is the END REASON of the most recent claim to leave this
+	// step (v27, DKT-1279): ClaimEndFailed or ClaimEndReaped, overwritten by
+	// whichever of MarkStepAttemptFailedTx / MarkStepClaimReapedTx ran last.
+	// FailedAttempts and ReapedClaims answer "how many of each has this step
+	// EVER had"; a router deciding how to treat THIS re-offer needs the LAST
+	// one, not a tally — the two disagree the moment a step has both a
+	// failure and a reap in its history, in either order. "" means no claim
+	// has ended in either way (never claimed, every claim recorded, or
+	// pre-v27 history — see migrateV26ToV27).
+	LastClaimEnd string
+	MaxAttempts  *int
+	ExpectedCost float64
+	Owner        string
+	TokenHash    string
+	ExpiresMS    int64
+	StartedMS    *int64
+	ActivityMS   *int64
+	SagaStage    string
+	GateTrail    string
+	Routing      string
+	Metadata     string
+	ContextBytes int
 	// Materialized reports a step the ENGINE minted rather than one the pinned
 	// definition declares — the `<step>-held` human step a tripped `hold_spread`
 	// creates (payloads-thresholds §7.7 H4). Its spec is synthesized from the
@@ -210,7 +232,7 @@ func (s *Step) InSaga() bool { return s.SagaStage != "" }
 const stepFullSelect = `
 SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, instance,
        kind, executor, class, status, attempt, attempt_base, failed_attempts,
-       reaped_claims, max_attempts, expected_cost,
+       reaped_claims, last_claim_end, max_attempts, expected_cost,
        owner, token_hash, expires_ms, started_ms, activity_ms, saga_stage,
        gate_trail, routing, metadata, context_bytes, materialized, usage_recorded,
        created_at_ms, updated_at_ms, row_version, work_root
@@ -317,7 +339,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.ID, &step.RunID, &step.IssueID, &step.WorkflowID, &step.StepName,
 		&step.Ordinal, &sibling, &step.Instance, &step.Kind, &executor, &class,
 		&step.Status, &step.Attempt, &step.AttemptBase, &step.FailedAttempts,
-		&step.ReapedClaims, &maxAtt, &step.ExpectedCost,
+		&step.ReapedClaims, &step.LastClaimEnd, &maxAtt, &step.ExpectedCost,
 		&owner, &tokenHash, &expires, &started, &activity, &saga,
 		&gateTrail, &routing, &metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
@@ -707,10 +729,11 @@ func ReleaseStepLeaseTx(tx *sql.Tx, id int, nowMS int64) error {
 // CAS-guarded readers must see.
 func MarkStepAttemptFailedTx(tx *sql.Tx, id int, nowMS int64) error {
 	_, err := tx.Exec(
-		`UPDATE steps SET failed_attempts = failed_attempts + 1, updated_at_ms = ?,
+		`UPDATE steps SET failed_attempts = failed_attempts + 1,
+		        last_claim_end = ?, updated_at_ms = ?,
 		        row_version = row_version + 1
 		  WHERE id = ?`,
-		nowMS, id,
+		ClaimEndFailed, nowMS, id,
 	)
 	if err != nil {
 		return fmt.Errorf("counting the failed attempt: %w", err)
@@ -730,10 +753,11 @@ func MarkStepAttemptFailedTx(tx *sql.Tx, id int, nowMS int64) error {
 // to the pool shares ReapStepTx's row reset but never this counter.
 func MarkStepClaimReapedTx(tx *sql.Tx, id int, nowMS int64) error {
 	_, err := tx.Exec(
-		`UPDATE steps SET reaped_claims = reaped_claims + 1, updated_at_ms = ?,
+		`UPDATE steps SET reaped_claims = reaped_claims + 1,
+		        last_claim_end = ?, updated_at_ms = ?,
 		        row_version = row_version + 1
 		  WHERE id = ?`,
-		nowMS, id,
+		ClaimEndReaped, nowMS, id,
 	)
 	if err != nil {
 		return fmt.Errorf("counting the reaped claim: %w", err)

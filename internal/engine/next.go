@@ -525,10 +525,15 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		// — which also counts claims that were merely reaped.
 		FailedAttempts: step.FailedAttempts,
 		ReapedClaims:   step.ReapedClaims,
-		ExpectedCost:   step.ExpectedCost,
-		LeaseTTLS:      int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
-		Status:         db.StepReady,
-		Metadata:       metadata,
+		// The last claim's own ending (DKT-1279), beside the tally above: a
+		// router deciding how to treat THIS re-offer needs to know whether
+		// the attempt it follows was reaped or failed, not how many of each
+		// this step has ever had.
+		PriorAttemptEnd: step.LastClaimEnd,
+		ExpectedCost:    step.ExpectedCost,
+		LeaseTTLS:       int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
+		Status:          db.StepReady,
+		Metadata:        metadata,
 	}, nil
 }
 
@@ -580,9 +585,13 @@ type StepListEntry struct {
 	// scanning a run asks "why is this step on attempt 3", and the breakdown
 	// is the answer — how many of those claims failed outright vs were reaped
 	// with nothing measured.
-	FailedAttempts int     `json:"failed_attempts,omitempty"`
-	ReapedClaims   int     `json:"reaped_claims,omitempty"`
-	ExpectedCost   float64 `json:"expected_cost"`
+	FailedAttempts int `json:"failed_attempts,omitempty"`
+	ReapedClaims   int `json:"reaped_claims,omitempty"`
+	// PriorAttemptEnd is StepRow's field of the same name (DKT-1279), on the
+	// inventory row too: how the step's MOST RECENT claim ended, "reaped" or
+	// "failed", never a tally the breakdown above already gives.
+	PriorAttemptEnd string  `json:"prior_attempt_end,omitempty"`
+	ExpectedCost    float64 `json:"expected_cost"`
 }
 
 // RunStepList answers `docket step list --run RUN-N`: every step of one run,
@@ -616,18 +625,19 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	out := make([]StepListEntry, 0, len(steps))
 	for _, step := range steps {
 		out = append(out, StepListEntry{
-			Step:           model.FormatStepID(step.ID),
-			Run:            model.FormatRunID(runID),
-			Instance:       step.Instance,
-			Issue:          model.FormatID(step.IssueID),
-			Kind:           step.Kind,
-			Status:         EffectiveStatus(sched, step),
-			BlockedReason:  BlockedReason(sched, step),
-			LeaseExpired:   sched.Expired(step),
-			Attempt:        step.Attempt,
-			FailedAttempts: step.FailedAttempts,
-			ReapedClaims:   step.ReapedClaims,
-			ExpectedCost:   step.ExpectedCost,
+			Step:            model.FormatStepID(step.ID),
+			Run:             model.FormatRunID(runID),
+			Instance:        step.Instance,
+			Issue:           model.FormatID(step.IssueID),
+			Kind:            step.Kind,
+			Status:          EffectiveStatus(sched, step),
+			BlockedReason:   BlockedReason(sched, step),
+			LeaseExpired:    sched.Expired(step),
+			Attempt:         step.Attempt,
+			FailedAttempts:  step.FailedAttempts,
+			ReapedClaims:    step.ReapedClaims,
+			PriorAttemptEnd: step.LastClaimEnd,
+			ExpectedCost:    step.ExpectedCost,
 		})
 	}
 	return out, nil
@@ -650,7 +660,7 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 		return nil, err
 	}
 	issue := model.FormatID(issueID)
-	var out []StepListEntry
+	out := make([]StepListEntry, 0)
 	for _, runID := range runIDs {
 		rows, err := RunStepList(conn, runID, nowMS)
 		if err != nil {

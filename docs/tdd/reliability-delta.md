@@ -695,6 +695,46 @@ reads byte-identically to v25 on every verb, every bundle, and every packet
 (`notes` is `omitempty`, and the template's section renders only over a
 non-empty list).
 
+### AMENDMENT — the span extends to v27 (DKT-1279, 2026-09-03)
+
+**What changed.** v27 adds ONE column on `steps`, `last_claim_end TEXT NOT
+NULL DEFAULT ''`: the END REASON of the MOST RECENT claim to leave this step,
+`'failed'` or `'reaped'` (`db.ClaimEndFailed` / `db.ClaimEndReaped`),
+overwritten by whichever of `MarkStepAttemptFailedTx` / `MarkStepClaimReapedTx`
+ran last — the same two write sites v23's counters already use, now also
+stamping this column. It rides the wire as `prior_attempt_end` on
+`model.StepRow` (`next --run`, `dispatch open`, `step show`, `claim`'s
+`context.step`) and on `StepListEntry` (`step list`), beside
+`failed_attempts`/`reaped_claims`, `omitempty` on both.
+
+**What it fixes.** v23's counters answer "how many of each has this step EVER
+had", and that is the wrong question the moment a step's history mixes both:
+RUN-80 DISPATCH-400 was killed mid-wave by a session usage limit, the engine
+reaped ten leases, the steps re-dispatched at `attempt` incremented, and
+wave.js/policy's `on_failure` escalation read that as "failed once" and
+routed all ten a tier up to opus/xhigh — a reap is a liveness event, not a
+quality verdict, and no field on the row named which ending THIS re-offer
+followed. A router does not want a tally; it wants the answer to "was the
+attempt I am about to hop past a measured failure or a silence", and the
+existing breakdown cannot give that answer once a step has failed once and
+been reaped once, in either order — both readings are consistent with
+`failed_attempts=1, reaped_claims=1`.
+
+**Why the ratified arithmetic is untouched.** Like v11–v26, v27 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable,
+and a rewind guard that probes the COLUMN (the v21–v23 form, since v27 adds no
+table). It BACK-FILLS NOTHING, for v23's own reason: the event log holds
+`step-failed` and `lease-reaped` rows a value could be derived from, but
+events are prunable and a back-fill would assert more than the store can
+promise. An empty string on a pre-v27 claim means "no recorded ending", the
+same never-captured honesty v23's zero counters use, and the wire fields are
+`omitempty`, so every row with no claim yet ended serializes byte-identically
+to v26's rendering. The in-memory snapshot `reapOneTx` reflects mid-transaction
+now carries the same field alongside the counter it already bumps, so W3's
+same-call offer (the reap and its own re-offer, one answer) carries the
+ending it just recorded rather than requiring a second read.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

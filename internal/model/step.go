@@ -122,9 +122,24 @@ type StepRow struct {
 	// (zero on a pre-v23 claim means "no recorded breakdown", not "nothing
 	// happened"). Both sample at the same moment Attempt does. `omitempty`,
 	// so a row with no counted outcome serializes exactly as before.
-	FailedAttempts int     `json:"failed_attempts,omitempty"`
-	ReapedClaims   int     `json:"reaped_claims,omitempty"`
-	ExpectedCost   float64 `json:"expected_cost"`
+	FailedAttempts int `json:"failed_attempts,omitempty"`
+	ReapedClaims   int `json:"reaped_claims,omitempty"`
+	// PriorAttemptEnd names how the MOST RECENT claim to leave this step
+	// ended — "reaped" or "failed" — so a re-offer of a reaped-then-re-run
+	// step says so directly, instead of leaving a router to infer it from
+	// FailedAttempts/ReapedClaims, which answer "how many of each ever" and
+	// go ambiguous the moment a step's history mixes both (DKT-1279).
+	//
+	// RUN-80 DISPATCH-400 is the motivating incident: ten leases were reaped
+	// after a session was killed mid-wave, the steps re-dispatched at
+	// `attempt` incremented, and an on_failure escalation policy read that as
+	// "failed once" and routed all ten a tier up — a reap is a liveness
+	// event, not a quality verdict, and nothing on the row said which one had
+	// happened. `omitempty`, so a step that has never had a claim end this
+	// way — never claimed, or every claim so far recorded — serializes
+	// exactly as before.
+	PriorAttemptEnd string  `json:"prior_attempt_end,omitempty"`
+	ExpectedCost    float64 `json:"expected_cost"`
 	// LeaseTTLS is SECONDS, per §11.4's `_s` suffix. Resolved from the
 	// workflow's [limits] for the step's class, then `lease.ttl.<class>`, then
 	// `lease.ttl.default`.

@@ -162,12 +162,15 @@ func reapOneTx(
 
 		// Reflect the reap in the loaded snapshot, so the readiness pass sees
 		// the step it just freed rather than the row it read a moment ago —
-		// the counter too, so the offer this same call renders carries the
-		// reap it performed.
+		// the counter too, and the last-claim-end this same call's offer
+		// renders (DKT-1279): W3 offers the reaped step in the SAME answer
+		// that performed the reap, and that row must say "reaped" without a
+		// second read of the row this transaction just wrote.
 		step.Status = db.StepPending
 		step.Owner, step.TokenHash, step.ExpiresMS = "", "", 0
 		step.StartedMS = nil
 		step.ReapedClaims++
+		step.LastClaimEnd = db.ClaimEndReaped
 	}
 	return nil
 }
