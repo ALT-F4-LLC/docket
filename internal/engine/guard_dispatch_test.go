@@ -318,6 +318,63 @@ func TestGuardSpawnW4AndW6(t *testing.T) {
 	}
 }
 
+// TestGuardSpawnActiveDeniesTheOlderRunWithAHold is DKT-1287 AC1: with two
+// active runs where only the older would deny, `guard spawn --active` denies,
+// naming the older run — not `runs[0]` alone, which is what
+// docket-spawn-guard-hook.sh resolved before this existed, leaving a second
+// concurrent run's reap hold unasked.
+func TestGuardSpawnActiveDeniesTheOlderRunWithAHold(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(writeLimitedSrc), "serialized.toml")
+
+	olderIssue := createIssue(t, conn, "older", "body", "task", nil)
+	older := startRun(t, conn, olderIssue)
+	_, err := activate(conn, older.ID)
+	testsupport.Must(t, err, "activate the older run: %v", err)
+
+	newerIssue := createIssue(t, conn, "newer", "body", "task", nil)
+	newer := startRun(t, conn, newerIssue)
+	_, err = activate(conn, newer.ID)
+	testsupport.Must(t, err, "activate the newer run: %v", err)
+
+	// Only the OLDER run holds an unacknowledged write reap.
+	reapOneWriter(t, conn, older.ID)
+
+	verdict, err := GuardSpawnActive(conn, 0, nowMS)
+	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
+	if verdict.Allowed {
+		t.Fatal("AC1: an unacknowledged reap on the older run did not deny --active")
+	}
+	if !strings.Contains(verdict.Reason, model.FormatRunID(older.ID)) {
+		t.Errorf("the denial %q does not name the older run %s",
+			verdict.Reason, model.FormatRunID(older.ID))
+	}
+	if strings.Contains(verdict.Reason, model.FormatRunID(newer.ID)) {
+		t.Errorf("the denial %q wrongly names the newer, unheld run %s",
+			verdict.Reason, model.FormatRunID(newer.ID))
+	}
+}
+
+// TestGuardSpawnActiveAllowsWhenNoActiveRunHoldsAReap is --active's ordinary
+// case: two active runs, neither holding a reap, allow.
+func TestGuardSpawnActiveAllowsWhenNoActiveRunHoldsAReap(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(writeLimitedSrc), "serialized.toml")
+
+	for _, name := range []string{"first", "second"} {
+		issue := createIssue(t, conn, name, "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate %s: %v", name, err)
+	}
+
+	verdict, err := GuardSpawnActive(conn, 0, nowMS)
+	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
+	if !verdict.Allowed {
+		t.Errorf("two unheld active runs were denied: %s", verdict.Reason)
+	}
+}
+
 // TestGuardSpawnAckIsIdempotentAndUnforgeable is W8 and W9 through this verb's
 // entry point.
 //

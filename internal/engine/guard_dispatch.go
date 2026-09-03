@@ -480,6 +480,45 @@ func spawnReapVerdict(
 	}, nil
 }
 
+// GuardSpawnActive answers `docket guard spawn --active`: may every active run
+// in the project accept a spawn right now?
+//
+// DKT-1287: docket-spawn-guard-hook.sh resolved `run status --active` and
+// asked `guard spawn` about `runs[0]` alone, so with two concurrent active
+// runs the OLDER run's reap half went unasked — a hold on it would not have
+// denied the hook at all. This answers G5(b), the reap half, over EVERY
+// non-terminal run in the project (guardRunScope's own scope), denying if ANY
+// would deny and naming which.
+//
+// IT ANSWERS ONLY THE REAP HALF. G5(a)'s row comparison is a fact about ONE
+// run's open dispatch and ONE proposed batch — there is no reading of "these
+// rows against every active run" that means anything, and a relay spawning
+// against a specific run's manifest already has that run's id to pass via
+// `--run`. `--ack-reap` and `--deciding-vote` are the same kind of per-run act
+// and stay on the `--run` path for the same reason.
+//
+// Runs are checked in guardRunScope's own oldest-first order, so the FIRST
+// denial found names the OLDEST run that would deny.
+func GuardSpawnActive(conn *sql.DB, projectID int, nowMS int64) (*GuardVerdict, error) {
+	runIDs, err := guardRunScope(conn, 0, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range runIDs {
+		verdict, err := spawnReapVerdict(conn, id, 0, nowMS)
+		if err != nil {
+			return nil, err
+		}
+		if !verdict.Allowed {
+			return &GuardVerdict{
+				Allowed: false,
+				Reason:  fmt.Sprintf("%s: %s", model.FormatRunID(id), verdict.Reason),
+			}, nil
+		}
+	}
+	return &GuardVerdict{Allowed: true}, nil
+}
+
 // openReapHold reads a run's unacknowledged reaps in its own rolled-back
 // transaction, so the caller holds none while it decides.
 func openReapHold(conn *sql.DB, runID int) ([]db.ReapAck, error) {

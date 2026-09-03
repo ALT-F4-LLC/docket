@@ -140,7 +140,7 @@ mutated scheduling state would make a hook's mere presence change a run.`,
 }
 
 var guardSpawnCmd = &cobra.Command{
-	Use:   "spawn --run RUN-N [--rows FILE] [--ack-reap SEQ] [--deciding-vote PROPOSAL-N]",
+	Use:   "spawn (--run RUN-N | --active) [--rows FILE] [--ack-reap SEQ] [--deciding-vote PROPOSAL-N]",
 	Short: "Allow when the proposed batch matches and no reap is unacknowledged",
 	Long: `Allow (exit 0) when BOTH hold: the proposed rows byte-match the open
 dispatch, and no write-class reap is unacknowledged. Deny (exit 2) otherwise.
@@ -150,6 +150,13 @@ no open dispatch and no --rows, the row half is vacuously satisfied and the reap
 half still answers — so a relay that batches its own way still gets the check.
 With --rows and no open dispatch it is a denial: the relay believes it is
 spawning a batch the engine never issued.
+
+--active (DKT-1287) checks EVERY active run of the current project instead of
+one: it answers the reap half alone, over each non-terminal run in turn, oldest
+first, and denies on the first that would, naming it. It exists because a hook
+resolving "the active run" as ` + "`runs[0]`" + ` from ` + "`run status --active`" + ` leaves a second
+concurrent run's reap hold unasked; --rows, --ack-reap and --deciding-vote are
+each an act about ONE run's manifest or ledger and stay on the --run path.
 
 --ack-reap SEQ (repeatable) acknowledges a reaped write-class lease by the seq of
 its lease-reaped event, and is processed BEFORE the predicate — so one command
@@ -174,6 +181,11 @@ It writes nothing except that acknowledgment and, when the carve-out is used,
 that audit event.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		active, _ := cmd.Flags().GetBool("active")
+		if active {
+			return runGuardSpawnActive(cmd)
+		}
+
 		runID, err := requiredRunFlag(cmd)
 		if err != nil {
 			return err
@@ -202,6 +214,41 @@ that audit event.`,
 		}
 		return emitGuard(cmd, verdict)
 	},
+}
+
+// runGuardSpawnActive is `guard spawn --active` (DKT-1287). --run, --rows,
+// --ack-reap and --deciding-vote are each an act about ONE run's manifest or
+// ledger, and --active answers a different question — every active run's reap
+// half at once — so it refuses to guess which run they meant instead of
+// silently narrowing back to one.
+func runGuardSpawnActive(cmd *cobra.Command) error {
+	if ref, _ := cmd.Flags().GetString("run"); ref != "" {
+		return cmdErr(fmt.Errorf(
+			"--active and --run are mutually exclusive: --active already means "+
+				"every active run"), output.ErrValidation)
+	}
+	if path, _ := cmd.Flags().GetString("rows"); path != "" {
+		return cmdErr(fmt.Errorf(
+			"--active does not take --rows: a proposed batch is one run's "+
+				"manifest, so name that run with --run instead"), output.ErrValidation)
+	}
+	if seqs, _ := cmd.Flags().GetInt64Slice("ack-reap"); len(seqs) > 0 {
+		return cmdErr(fmt.Errorf(
+			"--active does not take --ack-reap: an acknowledgment is one run's "+
+				"ledger entry, so name that run with --run instead"), output.ErrValidation)
+	}
+	if ref, _ := cmd.Flags().GetString("deciding-vote"); ref != "" {
+		return cmdErr(fmt.Errorf(
+			"--active does not take --deciding-vote: the carve-out is admitted "+
+				"onto one run's spawn, so name that run with --run instead"),
+			output.ErrValidation)
+	}
+
+	verdict, err := engine.GuardSpawnActive(getDB(cmd), guardProjectScope(cmd), model.NowMS())
+	if err != nil {
+		return runErr(err)
+	}
+	return emitGuard(cmd, verdict)
 }
 
 // decidingVoteFlag resolves `--deciding-vote` (DKT-236). Absent is 0, meaning
@@ -320,17 +367,22 @@ func init() {
 
 	// Every store-wide-read guard gets the same opt-out of project scoping,
 	// spelled the same as `events list`'s flag so one vocabulary covers both.
-	for _, c := range []*cobra.Command{guardStopCmd, guardGateCmd, guardRecordCmd} {
+	for _, c := range []*cobra.Command{guardStopCmd, guardGateCmd, guardRecordCmd, guardSpawnCmd} {
 		c.Flags().Bool("all-projects", false,
 			"Answer over every project's runs, not just the current project's")
 	}
 
-	// `record`'s --run is OPTIONAL (G4) and `spawn`'s is required, so they are
-	// registered separately rather than in a shared loop — a loop would hide
-	// exactly the difference that matters.
+	// `record`'s --run is OPTIONAL (G4) and `spawn`'s is required unless
+	// --active is given (DKT-1287), so they are registered separately rather
+	// than in a shared loop — a loop would hide exactly the difference that
+	// matters.
 	guardRecordCmd.Flags().String(
 		"run", "", "The run to check (default: every non-terminal run)")
-	guardSpawnCmd.Flags().String("run", "", "The run whose batch is being spawned (required)")
+	guardSpawnCmd.Flags().String(
+		"run", "", "The run whose batch is being spawned (required unless --active)")
+	guardSpawnCmd.Flags().Bool("active", false,
+		"Check the reap half over every active run of the project, denying on "+
+			"the first (oldest) that would deny; mutually exclusive with --run")
 	guardSpawnCmd.Flags().String(
 		"rows", "", "File holding the JSON array of rows about to be spawned (- for stdin)")
 	guardSpawnCmd.Flags().String("deciding-vote", "",

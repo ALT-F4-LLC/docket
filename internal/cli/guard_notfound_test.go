@@ -77,6 +77,7 @@ func TestGuardNotFoundExitsZero(t *testing.T) {
 		{"guard", "record"},
 		{"guard", "gate", "--step", "some-gate"},
 		{"guard", "spawn", "--run", "RUN-1"},
+		{"guard", "spawn", "--active"},
 	}
 
 	for _, argv := range guardVerbs {
@@ -158,6 +159,42 @@ func TestGuardNotFoundExitsZero(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestGuardSpawnActiveFlagValidation is DKT-1287: `--active` is mutually
+// exclusive with `--run`, `--rows`, `--ack-reap` and `--deciding-vote`, since
+// each of those names an act about ONE run and `--active` answers over every
+// active run at once.
+func TestGuardSpawnActiveFlagValidation(t *testing.T) {
+	bin := buildDocketBinary(t)
+	repo := t.TempDir()
+	if _, stderr, code := runDocket(t, bin, repo, "init"); code != 0 {
+		t.Fatalf("init failed: %s", stderr)
+	}
+
+	rowsFile := filepath.Join(repo, "rows.json")
+	if err := os.WriteFile(rowsFile, []byte("[]"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", rowsFile, err)
+	}
+
+	cases := [][]string{
+		{"guard", "spawn", "--active", "--run", "RUN-1"},
+		{"guard", "spawn", "--active", "--rows", rowsFile},
+		{"guard", "spawn", "--active", "--ack-reap", "1"},
+		{"guard", "spawn", "--active", "--deciding-vote", "PROPOSAL-1"},
+	}
+	for _, argv := range cases {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			_, stderr, code := runDocket(t, bin, repo, argv...)
+			if code != 3 {
+				t.Errorf("exit = %d, want 3 VALIDATION_ERROR\nstderr: %s", code, stderr)
+			}
+			if !strings.Contains(stderr, "mutually exclusive") &&
+				!strings.Contains(stderr, "instead") {
+				t.Errorf("stderr = %q, want it to explain the conflict", stderr)
+			}
+		})
+	}
 }
 
 // buildDocketBinary compiles the CLI once for the exit-code tests.
