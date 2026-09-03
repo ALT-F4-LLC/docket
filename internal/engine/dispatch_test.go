@@ -1358,7 +1358,7 @@ func TestCloseRefusesPerDiscrepancy(t *testing.T) {
 	claimInstance(t, conn, instance, nowMS)
 	past := nowMS + graceMS(t, conn) + 1
 
-	_, err := NewEngine().CloseDispatch(conn, runID, false, past)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, "", past)
 	if err == nil {
 		t.Fatal("close succeeded with a claimed-but-unrecorded step")
 	}
@@ -1390,11 +1390,11 @@ func TestCloseAcceptMissingUsageRecordsTheAcceptance(t *testing.T) {
 	instance := manifest.Rows[0].Instance
 	finishWithoutUsage(t, conn, instance)
 
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, nowMS); err == nil {
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", nowMS); err == nil {
 		t.Fatal("premise: close must refuse over a missing-usage discrepancy")
 	}
 
-	outcome, err := NewEngine().CloseDispatch(conn, runID, true, nowMS)
+	outcome, err := NewEngine().CloseDispatch(conn, runID, true, "", nowMS)
 	testsupport.Must(t, err, "close --accept-missing-usage: %v", err)
 	if outcome.Reason != db.CloseReasonAcceptedMissingUsage {
 		t.Errorf("close_reason = %q, want %q",
@@ -1436,7 +1436,7 @@ func TestAcceptMissingUsageDoesNotAcceptD1(t *testing.T) {
 	claimInstance(t, conn, manifest.Rows[0].Instance, nowMS)
 	past := nowMS + graceMS(t, conn) + 1
 
-	_, err := NewEngine().CloseDispatch(conn, runID, true, past)
+	_, err := NewEngine().CloseDispatch(conn, runID, true, "", past)
 	if err == nil {
 		t.Fatal("--accept-missing-usage closed over a claimed-but-unrecorded " +
 			"step; P20 forbids it, or a relay closes over work still running")
@@ -1459,7 +1459,7 @@ func TestAbandonIsUnconditional(t *testing.T) {
 	past := nowMS + graceMS(t, conn) + 1
 
 	// The premise: a discrepancy exists and `close` refuses.
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, past); err == nil {
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", past); err == nil {
 		t.Fatal("premise: close must refuse here")
 	}
 
@@ -1496,7 +1496,7 @@ func TestCloseRacingAbandonReportsWhy(t *testing.T) {
 	// The abandon wins; the close arrives second.
 	abandon(t, conn, runID, nowMS)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, false, nowMS)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, "", nowMS)
 	if err == nil {
 		t.Fatal("close succeeded against an abandoned dispatch")
 	}

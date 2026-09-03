@@ -1429,6 +1429,12 @@ type CloseOutcome struct {
 	// stderr carried would be gone by the time anyone audited. It names ids
 	// because instances repeat across issues (DKT-315).
 	Accepted []string `json:"accepted,omitempty"`
+	// Integration is DKT-1284's verdict: every write-class step's recorded
+	// commit was found integrated into the shared branch ("verified", with
+	// the checked shas), or the operator named a reason to skip asking
+	// ("skipped"). It is never nil — a close that reached this far always
+	// ran one of the two.
+	Integration *IntegrationCheck `json:"integration,omitempty"`
 }
 
 // CloseDispatch is P18, P19, P20, and P22.
@@ -1452,12 +1458,32 @@ type CloseOutcome struct {
 // the same event against the run, and reports what it accepted. Without the
 // flag the refusal is unchanged: closing a manifest that is not open is still
 // a conflict, because there is nothing to close.
+//
+// DKT-1284: BEFORE ANY OF THAT, it verifies every write-class step's own
+// recorded commit reached the shared branch (dispatch_integration.go) —
+// ancestor first, patch-equivalent (`git cherry`) when a cherry-pick minted a
+// new sha for identical content, refusing CONFLICT with the unintegrated list
+// otherwise. skipIntegrationReason, when non-empty, is the operator's
+// override: the check does not run at all, and the reason rides on the close
+// event instead (§3.6's "record the override, don't silently honor it"
+// pattern this codebase already applies to trust changes).
 func (e *Engine) CloseDispatch(
-	conn *sql.DB, runID int, acceptMissingUsage bool, nowMS int64,
+	conn *sql.DB, runID int, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
 ) (*CloseOutcome, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
+	}
+
+	integration, unintegrated, err := e.integrationVerdict(conn, runID, defs, skipIntegrationReason, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	if len(unintegrated) > 0 {
+		return nil, conflictErr(
+			"%s cannot close: %d write-class step commit(s) are not integrated "+
+				"into the shared branch: %s",
+			model.FormatRunID(runID), len(unintegrated), UnintegratedReason(unintegrated))
 	}
 
 	tx, err := conn.Begin()
@@ -1527,7 +1553,7 @@ func (e *Engine) CloseDispatch(
 					"accept", model.FormatRunID(runID))
 		}
 		data, err := json.Marshal(map[string]any{
-			"accepted": instances, "reason": reason,
+			"accepted": instances, "reason": reason, "integration": integration,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("recording the acceptance: %w", err)
@@ -1542,15 +1568,16 @@ func (e *Engine) CloseDispatch(
 		}
 		return &CloseOutcome{
 			Run: model.FormatRunID(runID), Status: db.DispatchClosed,
-			Reason: reason, Accepted: instances,
+			Reason: reason, Accepted: instances, Integration: integration,
 		}, nil
 	}
 
 	// P19: the accepted step list rides in the EVENT's data, which is what
 	// "records the acceptance" means. An acceptance visible only in a terminal
-	// scrollback is not a record.
+	// scrollback is not a record. AC3: `integration` rides beside it — verified
+	// with its checked shas, or skipped with the operator's reason.
 	moved, err := closeDispatchTx(tx, open.ID, runID, db.DispatchClosed, reason,
-		EventDispatchClosed, map[string]any{"accepted": instances},
+		EventDispatchClosed, map[string]any{"accepted": instances, "integration": integration},
 		"recording the close", nowMS)
 	if err != nil {
 		return nil, err
@@ -1568,6 +1595,7 @@ func (e *Engine) CloseDispatch(
 	return &CloseOutcome{
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
 		Status: db.DispatchClosed, Reason: reason, Accepted: instances,
+		Integration: integration,
 	}, nil
 }
 

@@ -520,7 +520,7 @@ func TestBackfillLeavesOtherStepsRefusing(t *testing.T) {
 
 	implID := stepIDByInstance(t, conn, "implement@0")
 	completeWithoutUsage(t, conn, e, implID)
-	_, err := e.CloseDispatch(conn, runID, true, nowMS)
+	_, err := e.CloseDispatch(conn, runID, true, "", nowMS)
 	testsupport.Must(t, err, "close: %v", err)
 
 	// Back-fill implement, then complete ANOTHER step without usage. The run

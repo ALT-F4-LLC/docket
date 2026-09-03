@@ -91,7 +91,7 @@ func TestRun30PauseSurvivesStepRecordAndDispatchClose(t *testing.T) {
 	// stages may move the run row.
 	_, err = e.ReconcileDispatch(conn, run.ID, []BackfillRow{
 		{Step: implID, Unit: "tokens", Quantity: 48211},
-	}, "wave-journal:wf-30", "", false, nowMS+3)
+	}, "wave-journal:wf-30", "", false, "", nowMS+3)
 	testsupport.Must(t, err, "reconciling the dispatch: %v", err)
 	if status, _ := dispatchStatus(t, conn, run.ID); status != db.DispatchClosed {
 		t.Fatalf("premise: dispatch is %s after the reconcile, want %s",

@@ -385,7 +385,14 @@ loses no advisory.
 An open dispatch is REQUIRED with --backfill-from, because the verify stage
 needs a manifest to compare. --accept-missing-usage still applies, to the close
 stage; the standalone verbs are unchanged and remain the way to run the stages
-one at a time.`,
+one at a time.
+
+BEFORE ANY OF THAT, close verifies every write-class step's own recorded
+commit reached the shared branch — an ancestor of HEAD, or patch-equivalent
+(a cherry-pick minted a new sha for identical content). An unintegrated
+commit refuses CONFLICT naming the step, its sha, and its worktree.
+--skip-integration-check REASON overrides it: the check does not run, and
+REASON is recorded on the close event.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchClose(cmd, getWriter(cmd))
 	},
@@ -399,16 +406,17 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 		return err
 	}
 	accept, _ := cmd.Flags().GetBool("accept-missing-usage")
+	skipIntegration, _ := cmd.Flags().GetString("skip-integration-check")
 
 	// DKT-580: with `--backfill-from` this verb is the whole wave-close
 	// pipeline. Without it, every line below is what it has always been —
 	// criterion 2 is that the plain close did not change, so the reconcile is a
 	// branch taken on the flag rather than a rewrite of the default path.
 	if from, _ := cmd.Flags().GetString("backfill-from"); from != "" {
-		return runDispatchReconcile(cmd, w, runID, from, accept)
+		return runDispatchReconcile(cmd, w, runID, from, accept, skipIntegration)
 	}
 
-	outcome, err := engine.NewEngine().CloseDispatch(conn, runID, accept, model.NowMS())
+	outcome, err := engine.NewEngine().CloseDispatch(conn, runID, accept, skipIntegration, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}
@@ -430,7 +438,7 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 // to point at the wrong journal or skip the verify, and a skipped verify is how
 // a manifest closes over a ready set that moved underneath it.
 func runDispatchReconcile(
-	cmd *cobra.Command, w *output.Writer, runID int, from string, accept bool,
+	cmd *cobra.Command, w *output.Writer, runID int, from string, accept bool, skipIntegration string,
 ) error {
 	rows, err := reconcileRows(cmd, from)
 	if err != nil {
@@ -440,7 +448,7 @@ func runDispatchReconcile(
 	onDuplicate, _ := cmd.Flags().GetString("on-duplicate")
 
 	outcome, err := engine.NewEngine().ReconcileDispatch(
-		getDB(cmd), runID, rows, source, onDuplicate, accept, model.NowMS())
+		getDB(cmd), runID, rows, source, onDuplicate, accept, skipIntegration, model.NowMS())
 	if err != nil {
 		return reconcileErr(err)
 	}
@@ -787,6 +795,15 @@ func renderCloseOutcome(o *engine.CloseOutcome) string {
 	for _, instance := range o.Accepted {
 		fmt.Fprintf(&b, "\n  accepted missing usage: %s", exec.Render(instance))
 	}
+	if o.Integration != nil {
+		switch o.Integration.Status {
+		case "skipped":
+			fmt.Fprintf(&b, "\n  integration check skipped: %s", exec.Render(o.Integration.Reason))
+		default:
+			fmt.Fprintf(&b, "\n  integration verified: %d write-class commit(s) reached the shared branch",
+				len(o.Integration.Checked))
+		}
+	}
 	return b.String()
 }
 
@@ -909,6 +926,9 @@ func init() {
 
 	dispatchCloseCmd.Flags().Bool("accept-missing-usage", false,
 		"Close despite missing-usage discrepancies, recording the acceptance")
+	dispatchCloseCmd.Flags().String("skip-integration-check", "",
+		"Close without verifying every write-class step's commit reached the "+
+			"shared branch, recording this reason")
 
 	// DKT-580's one-verb wave close. `--source` and `--on-duplicate` are the
 	// SAME flags `backfill-usage` declares, with the same defaults, because

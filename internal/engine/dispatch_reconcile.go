@@ -112,7 +112,7 @@ type ReconcileOutcome struct {
 // harder.
 func (e *Engine) ReconcileDispatch(
 	conn *sql.DB, runID int, rows []BackfillRow, source string,
-	onDuplicate string, acceptMissingUsage bool, nowMS int64,
+	onDuplicate string, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
 ) (*ReconcileOutcome, error) {
 	out := &ReconcileOutcome{Run: model.FormatRunID(runID)}
 
@@ -151,7 +151,7 @@ func (e *Engine) ReconcileDispatch(
 	out.Verify = verify
 
 	// ---- stage 3: close -----------------------------------------------------
-	closed, err := e.CloseDispatch(conn, runID, acceptMissingUsage, nowMS)
+	closed, err := e.CloseDispatch(conn, runID, acceptMissingUsage, skipIntegrationReason, nowMS)
 	if err != nil {
 		return out, &StageError{Stage: StageClose, Err: err}
 	}
