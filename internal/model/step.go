@@ -70,6 +70,26 @@ type StepRow struct {
 	//
 	// The entries are OPAQUE (§11.1): core counts them and never interprets one.
 	Voters []string `json:"voters,omitempty"`
+	// Model, Effort, and Variant are resolved from the run's pinned
+	// policy.toml (DKT-1282), present ONLY on an executor-class row (Executor
+	// set): the seat's standing [executors] variant, walked forward through
+	// [variants].escalate_to by this row's attempt (and, for a listed round
+	// executor, its round ordinal), redirected around any
+	// [security]-forbidden model, and clamped to [security].ceiling on a
+	// sensitive row — see internal/engine/policy_resolve.go.
+	//
+	// Absent — never present, never empty strings — when the run pins no
+	// policy.toml, when the row is not an executor row, or when nothing has
+	// resolved it yet, which is D1's dormancy applied here: a caller reading
+	// `next --run` before this feature existed sees byte-identical rows.
+	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Variant string `json:"variant,omitempty"`
+	// VoterAssignments carries the SAME resolution per voter, present ONLY on
+	// a vote step (Voters set) — a voter has no attempt or round to walk, so
+	// each resolves to its declared standing variant (see
+	// (*policyDoc).ResolveSeat). Order matches Voters.
+	VoterAssignments []VoterAssignment `json:"voter_assignments,omitempty"`
 	// Proposal is the display id of the proposal this vote step opened, once
 	// one has been opened. It is absent before that — a vote step whose
 	// proposal has not been created yet has no ballot to point at, and an
@@ -224,4 +244,13 @@ type StepRow struct {
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// VoterAssignment is one vote step voter's resolved {model, effort, variant}
+// (DKT-1282), riding on StepRow.VoterAssignments.
+type VoterAssignment struct {
+	Voter   string `json:"voter"`
+	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Variant string `json:"variant,omitempty"`
 }

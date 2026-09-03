@@ -290,6 +290,18 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		unroutedHeld = fresh.UnroutedHoldReason()
 	}
 
+	// ---- DKT-1282: resolve executor/voter rows against the run's pinned
+	// policy.toml. AFTER the commit and the possible re-derivation above, so
+	// this reads the FINAL row set — a row the re-derivation added or dropped
+	// must not be resolved against, or left un-resolved from, a stale pass.
+	policy, err := policyForRun(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveRowPolicy(policy, rows); err != nil {
+		return nil, err
+	}
+
 	// §6.3's closing paragraph: the refusal reports `CondHeadroom`, and `next`
 	// ADDITIONALLY names the unacknowledged reaps, because a headroom denial
 	// with nothing running is otherwise baffling. The rows come from the same
