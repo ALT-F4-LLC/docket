@@ -41,6 +41,30 @@ type Match struct {
 	LabelsAny    []string `toml:"labels_any" json:"labels_any,omitempty"`
 	LabelsAll    []string `toml:"labels_all" json:"labels_all,omitempty"`
 	UnlessLabels []string `toml:"unless_labels" json:"unless_labels,omitempty"`
+	// DomainPaths declares the path globs this workflow's domain OCCUPIES —
+	// "work under these paths is this pipeline's business" (DKT-1182).
+	//
+	// IT IS ADVISORY AND BINDS NOTHING. `Matches` does not read it, and no
+	// amount of scope agreement makes a workflow bind an issue whose labels do
+	// not select it: routing stays keyed on `kind` and labels exactly as §11.1
+	// specifies. The one consumer is activation's binding lint
+	// (engine.lintDomainScopeMismatch), which reports an issue whose declared
+	// scope lies ENTIRELY inside this domain while its labels bound it
+	// somewhere else — the exactly-one-WRONG-match case that the exactly-one
+	// rule structurally cannot see, since a mis-labelled issue matches its
+	// wrong workflow exactly once and activation has nothing to refuse.
+	//
+	// The measured case: an issue scoped entirely to a TUI test file carried
+	// `qa` and not `ui`, so it bound the label-less baseline pipeline instead of
+	// the UI one and silently lost that pipeline's judge fanout and render
+	// gates. Nothing in the binding rule could have noticed; the only check was
+	// a conductor diffing every issue's labels against its scope by hand.
+	//
+	// Declaring it is optional and a workflow that omits it is linted against
+	// nothing — the field is dormant until a corpus author states a domain, and
+	// `omitempty` keeps the canonical form of every definition that never
+	// declares one byte-identical to what it always was.
+	DomainPaths []string `toml:"domain_paths" json:"domain_paths,omitempty"`
 }
 
 // Limit is one `[limits]` entry: an executor class's concurrency and timing

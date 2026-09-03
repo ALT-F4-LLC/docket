@@ -109,6 +109,143 @@ func TestMatchMatrix(t *testing.T) {
 	}
 }
 
+// TestLabelGapFor covers DKT-1182's grammar half: what a subject would have to
+// be labelled for a `[match]` to admit it, and when no labelling could.
+//
+// The `reachable=false` rows are the ones that keep the binding lint quiet where
+// it should be. A kind the workflow does not list is not a mis-label, and an
+// `unless_labels` entry that fires is the author saying "not this one" about
+// this very issue — advising an operator to defeat either would be advice to
+// break a decision somebody made on purpose.
+func TestLabelGapFor(t *testing.T) {
+	subject := Subject{Kind: "bug", Labels: []string{"qa"}}
+
+	cases := []struct {
+		name          string
+		match         *Match
+		subj          Subject
+		wantReachable bool
+		wantAll       []string
+		wantAny       []string
+	}{
+		{"absent match has no gap", nil, subject, true, nil, nil},
+		{"already matching has no gap",
+			&Match{LabelsAny: []string{"qa", "ui"}}, subject, true, nil, nil},
+
+		// The HRN-1118 shape: one `labels_any` entry short.
+		{"labels_any missing entirely",
+			&Match{LabelsAny: []string{"ui"}}, subject, true, nil, []string{"ui"}},
+		{"labels_any reports every alternative",
+			&Match{LabelsAny: []string{"ui", "frontend"}}, subject, true,
+			nil, []string{"ui", "frontend"}},
+
+		{"labels_all reports only what is missing",
+			&Match{LabelsAll: []string{"qa", "ui", "reviewed"}}, subject, true,
+			[]string{"ui", "reviewed"}, nil},
+		{"both clauses report separately",
+			&Match{LabelsAll: []string{"ui"}, LabelsAny: []string{"frontend"}},
+			subject, true, []string{"ui"}, []string{"frontend"}},
+
+		// Unreachable: no label could close these.
+		{"kind excludes",
+			&Match{Kind: []string{"chore"}, LabelsAny: []string{"ui"}},
+			subject, false, nil, nil},
+		{"unless_labels fires",
+			&Match{LabelsAny: []string{"ui"}, UnlessLabels: []string{"qa"}},
+			subject, false, nil, nil},
+		{"kind admits, gap stands",
+			&Match{Kind: []string{"bug"}, LabelsAny: []string{"ui"}},
+			subject, true, nil, []string{"ui"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gap, reachable := tc.match.LabelGapFor(tc.subj)
+			if reachable != tc.wantReachable {
+				t.Fatalf("reachable = %v, want %v", reachable, tc.wantReachable)
+			}
+			if !slices.Equal(gap.MissingAll, tc.wantAll) {
+				t.Errorf("MissingAll = %v, want %v", gap.MissingAll, tc.wantAll)
+			}
+			if !slices.Equal(gap.MissingAny, tc.wantAny) {
+				t.Errorf("MissingAny = %v, want %v", gap.MissingAny, tc.wantAny)
+			}
+			// Empty() and Matches() must agree on a reachable subject: a gap of
+			// nothing is exactly the state that already binds. Disagreement
+			// would make the lint either silent on real mis-bindings or noisy
+			// about issues that bound correctly.
+			if reachable && gap.Empty() != tc.match.Matches(tc.subj) {
+				t.Errorf("gap.Empty() = %v but Matches() = %v",
+					gap.Empty(), tc.match.Matches(tc.subj))
+			}
+		})
+	}
+}
+
+// TestDomainPathsParseAndBindNothing pins both halves of the advisory field: it
+// decodes under `[match]` (strict decoding would refuse an unknown key), and it
+// changes no binding — the same subject binds the same way with the paths there
+// and with them absent.
+func TestDomainPathsParseAndBindNothing(t *testing.T) {
+	const src = `
+[pipeline]
+name = "ui-ish"
+version = 1
+[match]
+labels_any = ["ui"]
+domain_paths = ["internal/tui/**", "web/"]
+[[step]]
+name = "implement"
+executor = "worker"
+emits = "change-summary"
+after = []
+`
+	def, err := Parse([]byte(src))
+	testsupport.Must(t, err, "parsing a definition with domain_paths: %v", err)
+	if err := Validate(def); err != nil {
+		t.Fatalf("validating: %v", err)
+	}
+
+	want := []string{"internal/tui/**", "web/"}
+	if !slices.Equal(def.Match.DomainPaths, want) {
+		t.Errorf("domain_paths = %v, want %v", def.Match.DomainPaths, want)
+	}
+
+	// Binding is unchanged: the paths select nothing.
+	inDomainWrongLabel := Subject{Kind: "bug", Labels: []string{"qa"}}
+	if def.Match.Matches(inDomainWrongLabel) {
+		t.Error("domain_paths admitted an issue its labels_any excludes — " +
+			"the field must bind nothing")
+	}
+	if !def.Match.Matches(Subject{Kind: "bug", Labels: []string{"ui"}}) {
+		t.Error("domain_paths changed what the label clause admits")
+	}
+
+	// And it round-trips through the canonical form runs actually read.
+	canonical, err := Canonical(def)
+	testsupport.Must(t, err, "canonicalizing: %v", err)
+	restored, err := FromCanonical(canonical)
+	testsupport.Must(t, err, "restoring: %v", err)
+	if !slices.Equal(restored.Match.DomainPaths, want) {
+		t.Errorf("domain_paths after round trip = %v, want %v",
+			restored.Match.DomainPaths, want)
+	}
+}
+
+// TestCanonicalFormUnchangedWithoutDomainPaths is the dormancy assertion: a
+// definition that declares no domain must serialize byte-identically to what it
+// always did, or every already-registered workflow would look like a CONFLICT on
+// an idempotent re-register.
+func TestCanonicalFormUnchangedWithoutDomainPaths(t *testing.T) {
+	def := mustParseFixture(t)
+	canonical, err := Canonical(def)
+	testsupport.Must(t, err, "canonicalizing the fixture: %v", err)
+	if strings.Contains(string(canonical), "domain_paths") {
+		t.Errorf("canonical form of a domain-less definition mentions "+
+			"domain_paths: %s", canonical)
+	}
+}
+
 // TestFixtureMatchBinding pins the committed fixture's own [match] clause
 // against the kinds it declares and the labels it excludes, so an edit to the
 // fixture that changes what it binds is caught here.

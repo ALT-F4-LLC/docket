@@ -52,6 +52,68 @@ func globsIntersect(a, b string) bool {
 	return strings.HasPrefix(pa, pb) || strings.HasPrefix(pb, pa)
 }
 
+// ScopeWithinDomain reports whether EVERY glob of a scope lies inside a
+// workflow's declared `[match] domain_paths` (DKT-1182).
+//
+// It is deliberately NOT ScopesIntersect, in two ways:
+//
+//   - It is DIRECTIONAL. "This issue's work belongs to that domain" is a
+//     containment question, and intersection answers a different one:
+//     `internal/**` intersects `internal/tui/**` while saying nothing about
+//     whether the issue is TUI work.
+//   - It errs toward SILENCE, where ScopesIntersect errs toward reporting. The
+//     costs are reversed: a missed exclusion corrupts a working tree, while a
+//     spurious binding warning trains an operator to skim past the ones that
+//     are real. So EVERY glob must be inside — an issue scoped half to a
+//     domain and half elsewhere is genuinely cross-cutting, and which pipeline
+//     should own it is a judgment this lint has no basis to make.
+//
+// An empty scope or an empty domain is never inside anything: "no scope
+// declared" is lintUnscopedHolders' subject, and a workflow that declares no
+// domain has opted out of this lint entirely.
+func ScopeWithinDomain(scope, domain []string) bool {
+	if len(scope) == 0 || len(domain) == 0 {
+		return false
+	}
+	for _, s := range scope {
+		inside := false
+		for _, d := range domain {
+			if globWithin(s, d) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return false
+		}
+	}
+	return true
+}
+
+// globWithin reports whether every path `inner` can match lies under `outer`.
+//
+// Both are reduced to their literal prefixes, as everywhere else scope is
+// compared, and then the test is prefix containment AT A PATH BOUNDARY:
+// `internal/tui/` contains `internal/tui/screens/x.go` and does NOT contain
+// `internal/tuix/x.go`, which a bare strings.HasPrefix would have accepted.
+//
+// A domain whose literal prefix is EMPTY — `**/*_test.go`, or a bare `**` —
+// contains everything and is therefore refused rather than honored. Under the
+// silence-preferring rule above, a domain that matches every issue in the run
+// would make the lint fire on all of them and mean nothing; an author who wants
+// that is better served by naming the directories.
+func globWithin(inner, outer string) bool {
+	in, out := literalPrefix(inner), literalPrefix(outer)
+	if out == "" {
+		return false
+	}
+	out = strings.TrimSuffix(out, "/")
+	if in == out {
+		return true
+	}
+	return strings.HasPrefix(in, out+"/")
+}
+
 // literalPrefix returns the leading portion of a glob that contains no wildcard
 // metacharacter — the longest path fragment every match is guaranteed to begin
 // with.

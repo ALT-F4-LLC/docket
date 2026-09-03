@@ -214,8 +214,13 @@ func describeStepCost(step *workflow.Step) string {
 	return out
 }
 
-// renderMatch renders a `[match]` clause's four terms, omitting the absent
-// ones. An entirely absent clause matches every issue, and says so.
+// renderMatch renders a `[match]` clause's four binding terms plus its advisory
+// `domain_paths`, omitting the absent ones. An entirely absent clause matches
+// every issue, and says so.
+//
+// `domain_paths` is rendered last because it binds nothing (DKT-1182): it is
+// read only by activation's label-vs-scope lint, and printing it among the terms
+// that decide the binding would suggest it decides something.
 func renderMatch(m *workflow.Match) string {
 	if m == nil {
 		return "  (absent — matches every issue)\n"
@@ -234,8 +239,15 @@ func renderMatch(m *workflow.Match) string {
 			fmt.Fprintf(&b, "  %-14s [%s]\n", term.name, strings.Join(term.values, ", "))
 		}
 	}
+	// A table that declares ONLY `domain_paths` still matches every issue, and
+	// must say so: the advisory term narrows nothing, and a reader who saw paths
+	// alone under `[match]` would conclude the opposite.
 	if b.Len() == 0 {
-		return "  (absent — matches every issue)\n"
+		b.WriteString("  (no binding terms — matches every issue)\n")
+	}
+	if len(m.DomainPaths) > 0 {
+		fmt.Fprintf(&b, "  %-14s [%s]  (advisory: lints scope, binds nothing)\n",
+			"domain_paths", strings.Join(m.DomainPaths, ", "))
 	}
 	return b.String()
 }

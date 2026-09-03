@@ -63,6 +63,68 @@ func (m *Match) Matches(s Subject) bool {
 	return true
 }
 
+// LabelGap is what a subject would have to GAIN for a `[match]` to admit it:
+// the `labels_all` entries it lacks, and the whole `labels_any` list when it
+// holds none of them ("any one of these"). Both are reported separately because
+// the remedies differ — every entry of MissingAll must be added, one entry of
+// MissingAny is enough — and an operator acting on the warning needs to know
+// which.
+type LabelGap struct {
+	MissingAll []string
+	MissingAny []string
+}
+
+// Empty reports whether the subject already satisfies both label clauses.
+func (g LabelGap) Empty() bool {
+	return len(g.MissingAll) == 0 && len(g.MissingAny) == 0
+}
+
+// LabelGapFor reports the LABELS-ONLY distance between a subject and this
+// `[match]`: what the issue would have to be labelled to bind here.
+//
+// `reachable` is false when no labelling could ever close the distance, and the
+// two ways that happens are the two the caller must not report:
+//
+//   - the `kind` clause excludes the subject — a workflow that binds only
+//     `bug`s is not a workflow a `chore` was mis-labelled out of, and adding a
+//     label would not change that;
+//   - `unless_labels` intersects — the author wrote "not this one" ABOUT this
+//     issue, and an exclusion that fires is a decision, not an omission.
+//
+// A nil `[match]` admits everything (Matches), so its gap is empty and
+// reachable: there is nothing to add. A subject that already matches likewise
+// gets an empty gap — callers distinguish "matches" from "one label short" by
+// asking whether the gap is Empty, not by re-running Matches.
+//
+// It is DKT-1182's half of the binding lint that must live in this package:
+// the gap is a question about `[match]`'s grammar, and answering it in the
+// engine would be a second reading of the same four clauses — precisely the
+// drift the routing sweep's comment warns about, where a hand-rolled copy of
+// this predicate silently omitted `labels_all`.
+func (m *Match) LabelGapFor(s Subject) (LabelGap, bool) {
+	if m == nil {
+		return LabelGap{}, true
+	}
+
+	if len(m.Kind) > 0 && !slices.Contains(m.Kind, s.Kind) {
+		return LabelGap{}, false
+	}
+	if len(m.UnlessLabels) > 0 && intersects(m.UnlessLabels, s.Labels) {
+		return LabelGap{}, false
+	}
+
+	var gap LabelGap
+	for _, want := range m.LabelsAll {
+		if !slices.Contains(s.Labels, want) {
+			gap.MissingAll = append(gap.MissingAll, want)
+		}
+	}
+	if len(m.LabelsAny) > 0 && !intersects(m.LabelsAny, s.Labels) {
+		gap.MissingAny = append(gap.MissingAny, m.LabelsAny...)
+	}
+	return gap, true
+}
+
 // WhenHolds evaluates a step's `when` predicate against an issue.
 //
 // An empty `when` holds: a step that declares no condition is unconditional.

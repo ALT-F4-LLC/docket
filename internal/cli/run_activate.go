@@ -57,6 +57,17 @@ already under way), and drift while registration.auto is FALSE, where binding
 what is registered rather than what the corpus now says is the whole point of
 the setting.
 
+Binding follows LABELS, and scope is paths, so the two can disagree. When an
+issue's declared scope lies entirely inside another registered workflow's
+` + "`[match] domain_paths`" + ` and the only thing keeping it out of that workflow
+is a label it lacks, the activation WARNS and names both workflows — on stderr
+in human mode, in the JSON envelope's ` + "`binding_warnings`" + `. Exactly one
+workflow still had to match, and it did; this is the exactly-one-WRONG-match
+case that count cannot see. The binding stands: fix the issue's labels and
+re-activate if the paths are right, or ignore the line if the cross-domain
+binding was deliberate. A workflow that declares no ` + "`domain_paths`" + ` is
+linted against nothing.
+
 Instance config is scanned from EVERY configured root, in order. With the shared
 store that is ~/.docket/config/ first, then this checkout's .docket/config/ if it
 has one; with DOCKET_PATH or a repo-local store it is that store's config/ alone.
@@ -128,6 +139,13 @@ type activateResult struct {
 	// where every issue declared its scope carries no key at all rather than an
 	// empty one.
 	ScopeWarnings []engine.ScopeWarning `json:"scope_warnings,omitempty"`
+	// BindingWarnings is DKT-1182's array: issues whose declared scope lies
+	// entirely inside another workflow's declared `[match] domain_paths` while
+	// their labels bound them somewhere else — the exactly-one-WRONG-match case
+	// the binding rule cannot refuse. Advisory: the binding stands. `omitempty`,
+	// so a run whose labels and scopes agree — and every run in a corpus that
+	// declares no domains at all — carries no key rather than an empty one.
+	BindingWarnings []engine.BindingWarning `json:"binding_warnings,omitempty"`
 	// SourceWarnings is DKT-590's array: bound workflows whose registered
 	// source file could not be verified against `source_sha256`. Drift on a
 	// binding this activation MADE refuses instead, so what reaches this key
@@ -238,6 +256,18 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.IssueID)
 	}
 
+	// The label-vs-scope lint (DKT-1182), same channel again. It names the
+	// remedy the same way: the binding follows the LABELS, so an operator who
+	// agrees with the warning fixes the issue's labels and re-activates, and one
+	// who does not is looking at a deliberate cross-domain binding and can
+	// ignore the line.
+	for _, warning := range result.BindingWarnings {
+		w.Warn("%s %s; if it belongs to %s, add the label(s) with "+
+			"`docket issue edit %s --label LABEL` and re-activate",
+			warning.IssueID, warning.Reason, warning.DomainWorkflow,
+			warning.IssueID)
+	}
+
 	// DKT-590: a bound workflow whose recorded source could not be verified.
 	// On the warning channel because the refusing case never gets here —
 	// activation returns a CONFLICT for drift under a binding it just made —
@@ -280,6 +310,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		FencesHarvested:   result.FencesHarvested,
 		ContextWarnings:   result.ContextWarnings,
 		ScopeWarnings:     result.ScopeWarnings,
+		BindingWarnings:   result.BindingWarnings,
 		SourceWarnings:    result.SourceWarnings,
 		Fences:            result.Fences,
 		GatePreflight:     result.GatePreflight,

@@ -128,6 +128,20 @@ type ActivateResult struct {
 	// and proceeds, and the verb picks the channel — stderr in human mode, an
 	// array in JSON.
 	ScopeWarnings []ScopeWarning
+	// BindingWarnings names every issue that bound one workflow while its
+	// declared scope lies entirely inside ANOTHER registered workflow's declared
+	// `[match] domain_paths`, and lacks only the labels that other workflow
+	// requires (lintDomainScopeMismatch, DKT-1182).
+	//
+	// It is the exactly-one-WRONG-match signal. Activation refuses zero matches
+	// and refuses several, but a mis-labelled issue matches its wrong workflow
+	// exactly once, which is the one shape the binding rule cannot see — so it
+	// bound, ran, and lost the other pipeline's gates with no output saying so.
+	//
+	// It travels here for ContextWarnings' reason and takes the same stance:
+	// binding on the labels the operator applied is legal and sometimes
+	// deliberate, so this reports and proceeds, and the verb picks the channel.
+	BindingWarnings []BindingWarning
 	// Registered is what auto-registration acted on, in registration order —
 	// schemas first, then workflows (docs/tdd/runs-dispatch.md §9.7 F20/F21).
 	//
@@ -230,6 +244,31 @@ type ScopeWarning struct {
 	IssueID  string `json:"issue"`
 	Workflow string `json:"workflow"`
 	Reason   string `json:"reason"`
+}
+
+// BindingWarning is one issue whose LABELS and whose SCOPE disagree about which
+// pipeline owns it: it bound `BoundWorkflow` on its labels, while every path it
+// declares lies inside `DomainWorkflow`'s declared domain and the only thing
+// keeping it out of that workflow is `MissingLabels` (DKT-1182).
+type BindingWarning struct {
+	IssueID string `json:"issue"`
+	// BoundWorkflow is what activation actually bound, as `name@version` —
+	// named because it is the pipeline that will really run, and an operator
+	// reading only the domain half would not know what they are getting.
+	BoundWorkflow string `json:"bound_workflow"`
+	// DomainWorkflow is the workflow whose `domain_paths` contain the issue's
+	// scope, as `name@version` — the pipeline the paths say should own it.
+	DomainWorkflow string `json:"domain_workflow"`
+	// Scope is the issue's declared scope, verbatim and in declared order, so
+	// the warning carries the evidence rather than asking the reader to go find
+	// what the issue claims to touch.
+	Scope []string `json:"scope"`
+	// MissingLabels names what would move the binding: every `labels_all` entry
+	// the issue lacks, plus the `labels_any` list when it holds none of it.
+	// Never empty — an issue missing nothing already bound the other workflow,
+	// or hit the exactly-one-match refusal.
+	MissingLabels []string `json:"missing_labels"`
+	Reason        string   `json:"reason"`
 }
 
 // BoundIssue names one issue this activation bound, by display id, and the
@@ -701,6 +740,23 @@ func activateTx(
 		return nil, err
 	}
 	result.ScopeWarnings = append(result.ScopeWarnings, unresolvable...)
+
+	// The label-vs-scope lint (DKT-1182): an issue whose scope says one pipeline
+	// owns it while its labels bound it to another. Binding refuses zero matches
+	// and refuses several; exactly one WRONG match is the shape it structurally
+	// cannot see, and this is the signal that sees it.
+	//
+	// It runs over every bound issue, inherited bindings included, for the
+	// reason the unscoped-holder lint does: the mismatch belongs to the plan,
+	// not to the expansion. It reports and never refuses — the labels an
+	// operator applied are the routing decision, and this only says the paths
+	// disagree with it.
+	bindingWarnings, err := lintDomainScopeMismatch(
+		tx, runIssues, issues, bindings, definitions)
+	if err != nil {
+		return nil, err
+	}
+	result.BindingWarnings = bindingWarnings
 
 	// ---- Stage 2: lint the work DAG. ---------------------------------------
 	//
@@ -1423,6 +1479,146 @@ func lintUnresolvableScopes(
 		})
 	}
 	return out, nil
+}
+
+// lintDomainScopeMismatch reports every issue whose LABELS bound it to one
+// workflow while its declared SCOPE lies entirely inside another registered
+// workflow's declared `[match] domain_paths` (DKT-1182).
+//
+// THE GAP IT CLOSES. Binding requires EXACTLY ONE match and refuses zero or
+// several — but it cannot refuse exactly one WRONG match, because a mis-labelled
+// issue matches its wrong workflow exactly once and there is nothing anomalous
+// for the count to catch. The measured case: an issue scoped entirely to a TUI
+// test file carried `qa` and not `ui`, bound the label-less baseline pipeline
+// instead of the UI one, and silently ran without that pipeline's judge fanout
+// and render/copy gates. Routing is keyed on hand-applied labels while scope is
+// path-derived, so the two can disagree, and until this lint the only thing that
+// noticed was a conductor diffing labels against scope by hand, every batch.
+//
+// IT IS ADVISORY AND CHANGES NO BINDING. The issue stays bound where its labels
+// put it; `domain_paths` never participates in `[match]` evaluation. Making
+// paths ROUTE — scope-derived routing as a first-class rule — is a different and
+// much larger change, deliberately not made here: this reports a disagreement
+// and leaves the decision with the operator, who may legitimately have meant it.
+//
+// THE FOUR CONDITIONS, and why each one is needed to keep the warning worth
+// reading:
+//
+//  1. The issue declares a scope, and EVERY glob of it is inside the other
+//     workflow's domain (ScopeWithinDomain). A partially-overlapping scope is
+//     cross-cutting work, and which pipeline should own it is a judgment this
+//     lint has no basis to make.
+//  2. The other workflow declares a domain at all. The field is dormant until a
+//     corpus author states one, so a corpus that declares none is linted
+//     against nothing and behaves exactly as before.
+//  3. The issue is only a LABEL short of that workflow (workflow.LabelGapFor):
+//     its `kind` is admitted and no `unless_labels` entry fires. A kind
+//     mismatch is not a labelling slip, and an exclusion that fires is the
+//     author saying "not this one" about this very issue — reporting either
+//     would be advice to break a decision somebody made on purpose.
+//  4. It is not the workflow the issue already bound. An issue bound to the
+//     workflow whose domain it sits in is the case working correctly.
+//
+// The candidate set is bindableDefinitions — the same highest-version,
+// non-retired set binding itself evaluated — so the lint can never name a
+// workflow the issue could not have bound even with the labels fixed.
+func lintDomainScopeMismatch(
+	tx *sql.Tx, runIssues []*db.RunIssue, issues map[int]*model.Issue,
+	bindings map[int]*boundDefinition, definitions []*boundDefinition,
+) ([]BindingWarning, error) {
+	candidates := bindableDefinitions(definitions)
+	// Nothing in the corpus states a domain: the lint is dormant, and the read
+	// of every issue's scope below is not worth doing to learn that.
+	domainDeclared := false
+	for _, d := range candidates {
+		if d.definition.Match != nil && len(d.definition.Match.DomainPaths) > 0 {
+			domainDeclared = true
+			break
+		}
+	}
+	if !domainDeclared {
+		return nil, nil
+	}
+
+	var out []BindingWarning
+	for _, ri := range runIssues {
+		bound := bindings[ri.IssueID]
+		issue := issues[ri.IssueID]
+		if bound == nil || issue == nil {
+			continue
+		}
+
+		// Read LIVE, for lintUnscopedHolders' reason: the question is what this
+		// issue declares NOW, so an operator who fixed the scope (or the labels)
+		// after a first activation is not warned about the state they fixed.
+		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		if err != nil {
+			return nil, fmt.Errorf("reading scope for %s: %w",
+				model.FormatID(ri.IssueID), err)
+		}
+		if raw == "" {
+			continue // No scope declared; lintUnscopedHolders owns that case.
+		}
+		var globs []string
+		if err := json.Unmarshal([]byte(raw), &globs); err != nil || len(globs) == 0 {
+			continue
+		}
+
+		subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
+		for _, cand := range candidates {
+			if cand == bound || cand.definition.Match == nil {
+				continue
+			}
+			if !ScopeWithinDomain(globs, cand.definition.Match.DomainPaths) {
+				continue
+			}
+			gap, reachable := cand.definition.Match.LabelGapFor(subject)
+			if !reachable || gap.Empty() {
+				continue
+			}
+
+			out = append(out, BindingWarning{
+				IssueID:        model.FormatID(ri.IssueID),
+				BoundWorkflow:  bound.workflow.Ref(),
+				DomainWorkflow: cand.workflow.Ref(),
+				Scope:          globs,
+				MissingLabels:  missingLabelList(gap),
+				Reason: fmt.Sprintf(
+					"bound %s on its labels, but its declared scope lies entirely "+
+						"inside %s's domain (%s) and it %s",
+					bound.workflow.Ref(), cand.workflow.Ref(),
+					strings.Join(cand.definition.Match.DomainPaths, ", "),
+					describeLabelGap(gap)),
+			})
+		}
+	}
+	return out, nil
+}
+
+// missingLabelList flattens a label gap into the flat array the JSON field
+// carries — `labels_all` misses first, then the `labels_any` alternatives, each
+// in the order the workflow declared them.
+func missingLabelList(gap workflow.LabelGap) []string {
+	out := make([]string, 0, len(gap.MissingAll)+len(gap.MissingAny))
+	out = append(out, gap.MissingAll...)
+	out = append(out, gap.MissingAny...)
+	return out
+}
+
+// describeLabelGap renders a gap as the clause an operator has to act on. The
+// two halves are phrased differently because the remedies are: every
+// `labels_all` entry must be added, and any ONE `labels_any` entry is enough.
+func describeLabelGap(gap workflow.LabelGap) string {
+	var parts []string
+	if len(gap.MissingAll) > 0 {
+		parts = append(parts, fmt.Sprintf("lacks the required label(s) [%s]",
+			strings.Join(gap.MissingAll, ", ")))
+	}
+	if len(gap.MissingAny) > 0 {
+		parts = append(parts, fmt.Sprintf("carries none of [%s]",
+			strings.Join(gap.MissingAny, ", ")))
+	}
+	return strings.Join(parts, " and ")
 }
 
 // scopeAnchorExists reports whether one scope entry has an ANCHOR under root:

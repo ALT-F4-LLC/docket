@@ -458,6 +458,25 @@ being written to — the same bytes can be valid in one project and name a schem
 that does not exist in the next, and storing them there anyway would defer a
 guaranteed activation failure. Register schemas store-wide first.
 
+`[match]` also accepts `domain_paths = [..]`, a list of path globs naming the paths
+this pipeline's domain occupies *(amended 2026-09-03 — DKT-1182)*. **It binds nothing.**
+It is not evaluated by the match predicate and no scope agreement can make a workflow
+bind an issue its labels do not select; routing stays keyed on `kind` and labels. Its
+sole consumer is an activation **lint**: an issue whose declared scope
+(`issues.scope_globs`) lies *entirely* inside some other bindable workflow's
+`domain_paths`, while lacking only the labels that workflow's `[match]` requires, is
+named in the activation report (`binding_warnings` in the JSON envelope, a stderr line
+in human mode) alongside both workflows and the missing labels. This is the
+**exactly-one-WRONG-match** case: exactly-one-match refuses zero and refuses several,
+but a mis-labelled issue matches its wrong workflow exactly once, so the count has
+nothing to catch — HRN-1118 was scoped entirely to a TUI test file, carried `qa` and
+not `ui`, bound the label-less baseline and silently lost the UI pipeline's judge
+fanout and render gates. The lint **warns and never refuses** (a cross-domain binding
+may be deliberate), stays quiet unless *every* scope glob is inside the domain, and
+stays quiet where no labelling could have bound the other workflow anyway — a `kind`
+it does not list, or an `unless_labels` entry that fires. A workflow that declares no
+`domain_paths` is linted against nothing.
+
 `[limits]` — optional map of executor *class* → `{ max = N, lease_ttl = "45m" }` (bare
 int = shorthand for `max`). When a run pins multiple workflows, the most restrictive
 limit per class wins; unset values fall back to `docket config` defaults. Classes also
