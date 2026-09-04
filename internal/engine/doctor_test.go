@@ -171,6 +171,33 @@ func TestCheckDoctorInstallDriftDisregardsOneSidedEmptyDir(t *testing.T) {
 	}
 }
 
+// TestCheckDoctorInstallDriftFollowsASymlinkedInstallRoot is DKT-1305: an
+// install activated from a content-addressed store leaves ~/.docket/config and
+// ~/.docket/bin as symlinks into it, and the whole corpus read as drift while
+// every file was byte-identical.
+func TestCheckDoctorInstallDriftFollowsASymlinkedInstallRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store := t.TempDir()
+	writeFile(t, store, "config/workflows/foo.toml", "same\n")
+	writeFile(t, store, "bin/tool.sh", "same\n")
+	testsupport.Must(t, os.MkdirAll(filepath.Join(home, ".docket"), 0o755), "mkdir: %v", nil)
+	for _, sub := range []string{"config", "bin"} {
+		err := os.Symlink(filepath.Join(store, sub), filepath.Join(home, ".docket", sub))
+		testsupport.Must(t, err, "symlinking %s: %v", sub, err)
+	}
+
+	source := t.TempDir()
+	writeFile(t, source, "src/user/docket/config/workflows/foo.toml", "same\n")
+	writeFile(t, source, "src/user/docket/bin/tool.sh", "same\n")
+
+	c := checkDoctorInstallDrift(source)
+	if c.Verdict != DoctorOK {
+		t.Errorf("verdict = %s, want OK — the install root is a symlink, not drift: %s",
+			c.Verdict, c.Detail)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // checkDoctorPins — check 4
 // ---------------------------------------------------------------------------

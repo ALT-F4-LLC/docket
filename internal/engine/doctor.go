@@ -284,6 +284,11 @@ func diffDoctorTree(a, b, sub string) (drifted, disregarded []string, err error)
 // itself excluded — its own existence is checkDoctorInstallDrift's concern,
 // not diffDoctorTree's).
 func doctorTreeWalk(root string) (files map[string]string, dirs map[string]bool, err error) {
+	// An install activated from a content-addressed store leaves
+	// ~/.docket/{config,bin} as symlinks into it, and WalkDir lstats its own
+	// root: unresolved, such a root walks nothing at all and every source file
+	// reads as drift.
+	root = doctorCanonicalPath(root)
 	files = map[string]string{}
 	dirs = map[string]bool{}
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
