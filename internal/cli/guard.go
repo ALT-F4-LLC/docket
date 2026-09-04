@@ -155,8 +155,9 @@ spawning a batch the engine never issued.
 one: it answers the reap half alone, over each non-terminal run in turn, oldest
 first, and denies on the first that would, naming it. It exists because a hook
 resolving "the active run" as ` + "`runs[0]`" + ` from ` + "`run status --active`" + ` leaves a second
-concurrent run's reap hold unasked; --rows, --ack-reap and --deciding-vote are
-each an act about ONE run's manifest or ledger and stay on the --run path.
+concurrent run's reap hold unasked; --rows and --ack-reap are each an act about
+ONE run's manifest or ledger and stay on the --run path, while --deciding-vote
+resolves its run from the proposal and rides along.
 
 --ack-reap SEQ (repeatable) acknowledges a reaped write-class lease by the seq of
 its lease-reaped event, and is processed BEFORE the predicate — so one command
@@ -176,6 +177,11 @@ is a different fact about a different actor, and no vote makes it acceptable.
 Every use is event-logged as spawn-admitted with the proposal and the hold it
 was admitted over, because a spawn let past a hold must not read like a spawn
 nothing was holding.
+
+With --active the proposal names the run itself: the carve-out admits the hold
+of every active run holding a step for one of the proposal's linked issues
+(` + "`vote link`" + `), and a run the proposal does not serve denies as it would without
+the flag, saying so.
 
 It writes nothing except that acknowledgment and, when the carve-out is used,
 that audit event.`,
@@ -216,11 +222,11 @@ that audit event.`,
 	},
 }
 
-// runGuardSpawnActive is `guard spawn --active` (DKT-1287). --run, --rows,
-// --ack-reap and --deciding-vote are each an act about ONE run's manifest or
-// ledger, and --active answers a different question — every active run's reap
-// half at once — so it refuses to guess which run they meant instead of
-// silently narrowing back to one.
+// runGuardSpawnActive is `guard spawn --active` (DKT-1287). --run, --rows and
+// --ack-reap are each an act about ONE run's manifest or ledger, and --active
+// answers a different question — every active run's reap half at once — so it
+// refuses to guess which run they meant instead of silently narrowing back to
+// one. --deciding-vote needs no guess: the proposal resolves its own run.
 func runGuardSpawnActive(cmd *cobra.Command) error {
 	if ref, _ := cmd.Flags().GetString("run"); ref != "" {
 		return cmdErr(fmt.Errorf(
@@ -237,14 +243,13 @@ func runGuardSpawnActive(cmd *cobra.Command) error {
 			"--active does not take --ack-reap: an acknowledgment is one run's "+
 				"ledger entry, so name that run with --run instead"), output.ErrValidation)
 	}
-	if ref, _ := cmd.Flags().GetString("deciding-vote"); ref != "" {
-		return cmdErr(fmt.Errorf(
-			"--active does not take --deciding-vote: the carve-out is admitted "+
-				"onto one run's spawn, so name that run with --run instead"),
-			output.ErrValidation)
+	decidingVote, err := decidingVoteFlag(cmd)
+	if err != nil {
+		return err
 	}
 
-	verdict, err := engine.GuardSpawnActive(getDB(cmd), guardProjectScope(cmd), model.NowMS())
+	verdict, err := engine.GuardSpawnActive(
+		getDB(cmd), guardProjectScope(cmd), decidingVote, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}
