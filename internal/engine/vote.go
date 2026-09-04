@@ -45,6 +45,10 @@ type VoteOutcome struct {
 	// Score is the weighted score the existing tally computed, when there is
 	// one.
 	Score *float64
+	// Required is the proposal's `required_voters` — the denominator a ballot
+	// count is read against (DKT-895). Carried because the proposal read below
+	// already has it; nothing recomputes quorum from it.
+	Required int
 }
 
 // voteStepKey identifies one run's vote step uniquely across every issue it
@@ -250,7 +254,35 @@ func ReadVoteOutcome(conn *sql.DB, step *db.Step, spec *workflow.Step) (*VoteOut
 	if spec.Type != workflow.TypeVote {
 		return nil, nil
 	}
+	return readVoteProposalOutcome(conn, step)
+}
 
+// ReadStepVoteOutcome is ReadVoteOutcome asked of the STEP ROW rather than the
+// pinned spec: the same single read, keyed off `step.Kind`.
+//
+// It exists for callers that have a step and no spec, and must not grow a
+// second read of proposals to compensate (DKT-726). `step resolve` is the
+// motivating one — a resolution is offered on a vote step whatever its status
+// (R11), so the refusal it needs to compute has to be decidable before the
+// pinned definition is even loaded, and for a MATERIALIZED step the definition
+// never declares the minted name at all, so `workflow.StepByName` returns nil
+// there and the spec-keyed reader could never be called.
+//
+// The MINTED KIND is the authority for what a step is — the same fact the
+// `resolvable` test and the parked-vote refusal above it already key off. A
+// step whose kind is not `vote` has no proposal by construction, and reports
+// nothing.
+func ReadStepVoteOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) {
+	if step.Kind != workflow.TypeVote {
+		return nil, nil
+	}
+	return readVoteProposalOutcome(conn, step)
+}
+
+// readVoteProposalOutcome is the one read both entry points share: resolve the
+// step's proposal through its idempotency key and observe the status the tally
+// already wrote.
+func readVoteProposalOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) {
 	proposalID, err := findVoteProposal(conn, step)
 	if err != nil || proposalID == 0 {
 		return nil, err
@@ -265,6 +297,7 @@ func ReadVoteOutcome(conn *sql.DB, step *db.Step, spec *workflow.Step) (*VoteOut
 		ProposalID: proposalID,
 		Status:     proposal.Status,
 		Score:      proposal.WeightedScore,
+		Required:   proposal.RequiredVoters,
 	}
 	switch proposal.Status {
 	case model.ProposalStatusApproved, model.ProposalStatusCommitted:
@@ -369,6 +402,41 @@ func recordVoteEvent(
 	return tx.Commit()
 }
 
+// voteTallyDetail renders the `vote-tallied` event's detail: the proposal, the
+// status, the WEIGHTED SCORE, and the BALLOT COUNT, each labelled.
+//
+// DKT-895: the detail used to read `DKT-V289 approved (1)`, where `1` was the
+// weighted score printed bare. On RUN-62 a three-ballot unanimous
+// approve-with-concerns scored 1.00 and rendered as `(1)` — indistinguishable
+// from "one ballot", so a reader watching the feed saw a panel that had lost
+// two of its three seats and could only disprove it with `docket vote show`.
+// Two numbers with one pair of parentheses between them is the whole defect:
+// the fix labels both and prints the score the way every other surface does
+// (`%.2f`, matching `vote show`'s "Weighted score" line, so the two agree
+// digit for digit).
+//
+// The ballot count is the ONE extra read, taken here at tally time rather than
+// on VoteOutcome, so the per-invocation outcome read (readVoteProposalOutcome,
+// which every dispatch does for every vote step) does not grow a second query
+// to serve an event detail written once — DKT-726's rule about that reader.
+// `RequiredVoters` is free: the proposal that read already loaded carries it.
+func voteTallyDetail(conn *sql.DB, outcome *VoteOutcome) (string, error) {
+	score := "none"
+	if outcome.Score != nil {
+		score = strconv.FormatFloat(*outcome.Score, 'f', 2, 64)
+	}
+
+	votes, err := db.GetProposalVotes(conn, outcome.ProposalID)
+	if err != nil {
+		return "", fmt.Errorf("reading the casts of %s for its tally event: %w",
+			model.FormatProposalID(outcome.ProposalID), err)
+	}
+
+	return fmt.Sprintf("%s %s score=%s ballots=%d/%d",
+		model.FormatProposalID(outcome.ProposalID), outcome.Status,
+		score, len(votes), outcome.Required), nil
+}
+
 // routeVoteStep is §8.1 phase 5: the ordinary routing transaction, over the
 // verdict the tally produced.
 //
@@ -376,6 +444,11 @@ func recordVoteEvent(
 // approve/reject): `pass` ⇒ the step is done and successors become ready;
 // `fail` ⇒ routed per the step's EFFECTIVE on_fail — identically to a human
 // gate's reject.
+//
+// DKT-545 adds one clause between the two: an APPROVED tally on a step that
+// declares a `threshold` is evaluated over the recorded casts before it
+// routes pass — see evaluateVoteThreshold. A step declaring none behaves
+// exactly as the paragraph above describes, byte for byte.
 //
 // On a DECLARED vote step that on_fail should not be `waiting-human`, for the
 // reason V13 states about human gates: parking would make the step wait on the
@@ -395,8 +468,27 @@ func routeVoteStep(
 	outcome *VoteOutcome, nowMS int64,
 ) error {
 	routing := RoutingPass
-	if outcome.Verdict == VerdictFail {
+	concernReason := ""
+	switch {
+	case outcome.Verdict == VerdictFail:
 		routing = spec.EffectiveOnFail()
+	case outcome.Status == model.ProposalStatusApproved && len(spec.Threshold) > 0:
+		// DKT-545: an APPROVED tally with a declared `threshold` is asked one
+		// more question — over the CAST SET, not the tally: an approval built
+		// on approve-with-concerns casts can route into the same revise loop
+		// a rejection does, instead of the concerns evaporating. No threshold
+		// declared (every pre-existing workflow) means no evaluation and the
+		// exact prior behavior; a COMMITTED proposal skips it too, because
+		// §8.4's manual commit is an operator setting the final outcome by
+		// hand. Evaluated OUTSIDE the transaction below, like every other
+		// pooled read in this function.
+		result, err := evaluateVoteThreshold(conn, step, spec, outcome.ProposalID)
+		if err != nil {
+			return err
+		}
+		if result.Routing != RoutingPass {
+			routing, concernReason = result.Routing, result.Reason
+		}
 	}
 
 	// A MATERIALIZED held step that PASSED resolves its cluster's payload in
@@ -421,13 +513,11 @@ func routeVoteStep(
 
 	// The tally is announced before the routing commits, carrying the score the
 	// EXISTING computation produced — this stage reads it, never recomputes it.
-	score := "no score"
-	if outcome.Score != nil {
-		score = strconv.FormatFloat(*outcome.Score, 'f', -1, 64)
+	detail, err := voteTallyDetail(conn, outcome)
+	if err != nil {
+		return err
 	}
-	if err := recordVoteEvent(conn, EventVoteTallied, step,
-		fmt.Sprintf("%s %s (%s)", model.FormatProposalID(outcome.ProposalID),
-			outcome.Status, score), nowMS); err != nil {
+	if err := recordVoteEvent(conn, EventVoteTallied, step, detail, nowMS); err != nil {
 		return err
 	}
 
@@ -444,6 +534,12 @@ func routeVoteStep(
 	// with a reproduced blocker, routed `fix-loop`, and the issue closed done
 	// with no fix step ever created.
 	reason := string(outcome.Status)
+	if concernReason != "" {
+		// The concern routing's record names the matched predicate (or the T3
+		// park's cause), because "approved" alone would read as a pass to
+		// anyone auditing why the step did not route pass.
+		reason = concernReason
+	}
 	var loop *LoopOutcome
 	routing, loop, err = applyFixLoop(tx, step, def, routing, nowMS)
 	if err != nil {
@@ -483,7 +579,7 @@ func routeVoteStep(
 	}); err != nil {
 		return err
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
 		return err
 	}
 	return tx.Commit()

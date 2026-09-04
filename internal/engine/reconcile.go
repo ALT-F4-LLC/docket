@@ -38,11 +38,23 @@ import (
 // reconcileIssueAndRun updates the issue and the run after a step routes,
 // INSIDE the caller's routing transaction. `spec` is the routed step's pinned
 // spec (nil when the caller has none), consulted for its threshold's
-// interposed targets and nothing else.
-func reconcileIssueAndRun(tx *sql.Tx, step *db.Step, spec *workflow.Step, routing string, nowMS int64) error {
+// interposed targets and nothing else; `def` is the issue's pinned definition
+// (nil likewise), consulted for the `after_fired` cascade and nothing else.
+func reconcileIssueAndRun(
+	tx *sql.Tx, step *db.Step, def *workflow.Definition, spec *workflow.Step,
+	routing string, nowMS int64,
+) error {
 	// BEFORE the completion check: an unrouted gate left `pending` is exactly
 	// what issueStepsComplete must not still be counting (DKT-38).
 	if err := skipUnroutedTargets(tx, step, spec, routing, nowMS); err != nil {
+		return err
+	}
+	// And the `after_fired` cascade behind whatever this transaction skipped
+	// (DKT-1085) — the gate above, an `on_fail = "skip"` routing, an operator's
+	// `--as skip` — for the same reason and in the same place: a successor left
+	// `pending` is exactly what the completion check must not still count, and
+	// "skipped in the same transaction as the gate" is the whole contract.
+	if _, err := propagateAfterFiredSkips(tx, step.RunID, step.IssueID, def, nowMS); err != nil {
 		return err
 	}
 

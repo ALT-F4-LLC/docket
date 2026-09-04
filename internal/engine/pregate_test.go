@@ -400,6 +400,169 @@ func TestUnmatchedPreGateKeepsBothItsEvents(t *testing.T) {
 	}
 }
 
+// TestPreGateEventsMarkTheVerdictThatRoutedNothing is DKT-862's events half.
+//
+// `gate-recorded ... detail=ac-commands exit=2 verdict=fail` said the same
+// thing whether the failure BLOCKED the step or was an advisory input to it —
+// and a pre-gate never routes: §11.1 runs it at claim, PG4 keeps it out of the
+// saga's verdict. On RUN-61 three pre-gate failures sat in the feed beside the
+// `step-routed pass` that contradicted them, and a conductor nearly reported a
+// fix round as burned on one.
+//
+// The assertion is on the STORED PAYLOAD, because that is what both readers
+// see: `events list` renders `data` as sorted key=value pairs and interprets
+// nothing, and `--json` hands the object straight to a program.
+func TestPreGateEventsMarkTheVerdictThatRoutedNothing(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	repoRoot := t.TempDir()
+
+	// A pre-gate that matches and FAILS — RUN-61's shape. `/usr/bin/false`
+	// exits 1, so the row is a `fail` that routed nothing.
+	argv := []string{"/usr/bin/false"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot),
+	})
+	e.Gates = runner
+
+	stepID := advanceToVerify(t, conn, e)
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: "w", NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "an advisory pre-gate failure must not refuse the claim: %v", err)
+
+	data := gateRecordedData(t, conn, stepID, "ac-commands")
+	if data["verdict"] != VerdictFail {
+		t.Fatalf("the pre-gate's gate-recorded verdict = %v, want %q — this "+
+			"case is about a FAILING advisory gate", data["verdict"], VerdictFail)
+	}
+	if data["pre"] != true {
+		t.Errorf("gate-recorded for a pre-gate carries pre = %v, want true; "+
+			"payload %v renders as a blocking failure in `events list`",
+			data["pre"], data)
+	}
+
+	// The marker is not bought by dropping what was already there (DKT-63).
+	if data["detail"] != "ac-commands" {
+		t.Errorf("the gate name left `detail`: %v", data)
+	}
+
+	// AND a BLOCKING gate stays unmarked. `implement@0`'s gates run through
+	// advanceToVerify's pass-through runner and route the step for real, so
+	// their absence of a `pre` key is what makes the pre-gate's presence mean
+	// something rather than being a field every gate event carries.
+	implementID := stepIDByInstance(t, conn, "implement@0")
+	for _, blocking := range []string{"build", "tests"} {
+		// gateRecordedData FATALS on a missing event, which is what keeps this
+		// half from passing vacuously: a payload that carries no `pre` key
+		// because it was never written proves nothing.
+		if _, ok := gateRecordedData(t, conn, implementID, blocking)["pre"]; ok {
+			t.Errorf("gate-recorded for the blocking gate %q carries a pre "+
+				"marker; only a gate that routed nothing may be marked", blocking)
+		}
+	}
+}
+
+// TestGateRecordedEventCarriesStubMarker is DKT-983: a stub-trusted command's
+// pass is already marked stub:true in the trust store, in `gate_results` rows
+// (`step gates --json`), and in `run report` — but the `gate-recorded` EVENT
+// carried none of it, so a stub pass was byte-identical to a real measurement
+// on the event stream. RUN-63 / vorpal.git seq 13052 is this exactly:
+// `gate-recorded ... detail=ac-commands exit=0 pre=true verdict=pass` beside a
+// `step gates --json` that showed `stub=true` for the same record.
+//
+// The assertion is on the STORED PAYLOAD, exactly as
+// TestPreGateEventsMarkTheVerdictThatRoutedNothing's is, because that is what
+// both readers see: `events list` renders `data` as sorted key=value pairs,
+// and `--json` hands the object straight to a program.
+func TestGateRecordedEventCarriesStubMarker(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	repoRoot := t.TempDir()
+
+	// A trust entry that declares `stub = true` (DKT-265): the command that
+	// runs is a placeholder, not the check its name implies.
+	argv := []string{"/usr/bin/true"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Stub: true,
+	})
+	e.Gates = runner
+
+	stepID := advanceToVerify(t, conn, e)
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: "w", NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	// The row already carries it (this is not new — it is the baseline the
+	// event is being brought up to).
+	rows, err := db.GateResultsForStep(conn, stepID)
+	testsupport.Must(t, err, "GateResultsForStep: %v", err)
+	if len(rows) != 1 || !rows[0].StubEntry {
+		t.Fatalf("recorded rows = %+v, want exactly one stub-marked row", rows)
+	}
+
+	data := gateRecordedData(t, conn, stepID, "ac-commands")
+	if data["stub"] != true {
+		t.Errorf("gate-recorded for a stub-trusted gate carries stub = %v, "+
+			"want true; payload %v is indistinguishable from a real measurement "+
+			"on the event stream", data["stub"], data)
+	}
+	// The marker is not bought by dropping what was already there (DKT-63).
+	if data["verdict"] != VerdictPass {
+		t.Errorf("verdict = %v, want %q — the stub marker must not change the "+
+			"outcome it decorates", data["verdict"], VerdictPass)
+	}
+	if data["detail"] != "ac-commands" {
+		t.Errorf("the gate name left `detail`: %v", data)
+	}
+
+	// AND a NON-stub gate stays unmarked: implement@0's gates run through
+	// advanceToVerify's pass-through runner, whose stub marker is a different
+	// field entirely (the legacy S3-migration `Stub`, never set by any live
+	// path) — so their `gate-recorded` events must carry no `stub` key.
+	implementID := stepIDByInstance(t, conn, "implement@0")
+	for _, blocking := range []string{"build", "tests"} {
+		if _, ok := gateRecordedData(t, conn, implementID, blocking)["stub"]; ok {
+			t.Errorf("gate-recorded for the non-stub gate %q carries a stub "+
+				"marker; only a gate whose trust entry declared `stub` may be "+
+				"marked", blocking)
+		}
+	}
+}
+
+// gateRecordedData reads the `gate-recorded` payload for one step's gate, and
+// fails the test when there is none.
+func gateRecordedData(
+	t *testing.T, conn *sql.DB, stepID int, gate string,
+) map[string]any {
+	t.Helper()
+	rows, err := conn.Query(
+		`SELECT data FROM events WHERE step_id = ? AND kind = ? ORDER BY seq`,
+		stepID, EventGateRecorded)
+	testsupport.Must(t, err, "reading gate-recorded events: %v", err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		testsupport.Must(t, rows.Scan(&raw), "scanning a gate-recorded event: %v", nil)
+		var fields map[string]any
+		testsupport.Must(t, json.Unmarshal([]byte(raw), &fields),
+			"the gate event payload is not an object: %v", nil)
+		if fields["detail"] == gate {
+			return fields
+		}
+	}
+	t.Fatalf("no gate-recorded event for gate %q on step %d", gate, stepID)
+	return nil
+}
+
 // advanceToVerify drives the fixture's run until `verify@0` — the step that
 // declares the `ac-commands` pre-gate — is claimable, and returns its id.
 //

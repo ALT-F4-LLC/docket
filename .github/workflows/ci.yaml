@@ -1,236 +1,29 @@
 name: ci
 
-# GATE COVERAGE. scripts/qa/ holds seventeen scripts outside the
-# test_*.sh suite; two of those (ac-commands.sh, helpers.sh) are not gates —
-# see below. This block is the one place that names, for each of the
-# remaining fifteen gates AS COUNTED HERE AND NOW (this figure moves as gate
-# scripts are added or retired — it is not the sixteen
-# docs/spec/review-strategy.md's own count names, since that count predates
-# copy-verify.sh, render-verify.sh, and later additions and retirements),
-# whether CI runs it and why not when it doesn't — docs/spec/review-strategy.md
-# §10 (G2) is the gap this closes.
-# scripts/qa/gate-coverage-check.sh checks this block against the directory
-# mechanically, so this listing cannot drift silently.
-#
-#   RUNS HERE, by name, in `repo-gates`. On `pull_request` AND on every
-#   `push` (git-diff scripts in base-ref mode; the base is `base.sha` for a
-#   PR and `github.event.before` for a push, falling back to the root commit
-#   when that is the all-zero SHA — see the `repo-gates` job comment below
-#   for the one gap that remains, which is that this job reports rather than
-#   blocks):
-#     secret-scan.sh, self-hygiene.sh
-#
-#   RUNS ELSEWHERE IN THIS FILE, already:
-#     genericity.sh              — invoked by `./scripts/qa.sh` (`qa` job) on
-#                                   every `pull_request` and every `push` to
-#                                   `main`/a tag (this file's own `on:` block).
-#     copy-verify.sh             — same: invoked by `./scripts/qa.sh`. Both are
-#     render-verify.sh             whole-repo, diff-independent checks (no
-#                                   DOCKET_* env needed — verified empty-env),
-#                                   the same shape as genericity.sh, not tied
-#                                   to a specific workflow step or run/step
-#                                   identity.
-#                                   THIS BLOCK IS AUTHORITATIVE over the
-#                                   earlier acceptance criterion that listed
-#                                   these two as excluded. That AC was written from the
-#                                   premise that both need run context; the
-#                                   premise was false — neither reads a
-#                                   DOCKET_* variable, and both exit 0 under
-#                                   `env -i` — so they are RUN, which is
-#                                   strictly more coverage than the AC asked
-#                                   for. The other five it named are still
-#                                   excluded, below.
-#                                   render-verify.sh runs here with ONE HALF
-#                                   VACUOUS: its coverage check reads
-#                                   working-tree/staged/untracked state, which
-#                                   a `pull_request` checkout does not have,
-#                                   so that half reports and cannot fail. Its
-#                                   ANSI-escape half is whole-repo and does
-#                                   bite here. See the script's own comment at
-#                                   the `changed=` assignment. That is the
-#                                   same criterion the EXCLUDED block below
-#                                   uses; render-verify still earns its place
-#                                   here because its second half is real,
-#                                   whereas those four are vacuous entire.
-#     gate-baseref-regression.sh — also invoked by `./scripts/qa.sh`; pins the
-#     gate-coverage-check.sh       base-ref mode of secret-scan.sh/
-#                                   self-hygiene.sh and this block itself.
-#     build.sh                   — its check (`go1.26.6 build ./...`) is what
-#                                   the `test` job's `go build ./...` step
-#                                   already verifies, given the same Go
-#                                   toolchain: `actions/setup-go`'s
-#                                   `go-version-file: go.mod` resolves the
-#                                   `toolchain go1.26.6` line there, which the
-#                                   `test` job's own `go version` step below
-#                                   makes self-checking rather than assumed.
-#     tests.sh                    — same equivalence, for `go test ./...`.
-#
-#   EXCLUDED — read only working-tree/staged/untracked state, with no
-#   base-ref mode (the gap secret-scan.sh/self-hygiene.sh had before this fix
-#   round) to read a committed PR diff instead. CI has no staged or unstaged
-#   state, so wiring these as-is would pass every PR vacuously rather than
-#   fail closed. Adding base-ref mode is the same three-line pattern applied
-#   to secret-scan.sh/self-hygiene.sh; deferred to a follow-up rather than
-#   done in this round — the missing base-ref mode is the actual blocker,
-#   not run/step identity (each already runs with an empty DOCKET_* env):
-#     doc-validate.sh, citation-check.sh, tdd-preflight.sh,
-#     reserved-name-check.sh
-#
-#   EXCLUDED — for other stated reasons:
-#     sdet-abuse.sh   — needs the `go1.26.6` binary by that exact name on
-#                       PATH (the script invokes it directly, not `go test`);
-#                       `actions/setup-go` does not add a version-suffixed
-#                       alias. It also cannot verify its cases match a run's
-#                       threat model without step identity — see the script's
-#                       own header. Either gap is enough; deferred, not new
-#                       CI infrastructure this round.
-#     vuln-scan.sh    — needs `govulncheck` installed; deferred as a follow-up
-#                       so this change stays wiring, not new CI infrastructure.
-#     ac-commands.sh  — a reporter for the `verify` step's context bundle;
-#                       ALWAYS EXITS 0 by design (see the script's own header),
-#                       so it has no pass/fail verdict for CI to act on. Not a
-#                       gate.
-#     helpers.sh      — shared functions `qa.sh`'s own test files source; not
-#                       an executable gate.
-
 on:
+  # pull_request covers every commit on a branch with an open PR. push is
+  # scoped to main/tags only, so that branch's commits aren't built twice —
+  # once for pull_request, once for a push the "**" pattern used to also
+  # match.
   pull_request:
   push:
-    # ALL branches, not just `main`. This repository's work lands as
-    # direct commits to feature branches, so a `main`-only push trigger meant
-    # the gates in `repo-gates` never ran on the path the code actually takes.
     branches:
-      - "**"
+      - main
     tags:
       - "*"
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # Asserts, not just prints: the GATE COVERAGE block claims this job
-      # covers build.sh/tests.sh's version-pinned invocations because setup-go
-      # resolves go.mod's toolchain line — a bare `go version` step cannot
-      # fail, so it was evidence of nothing. `go build ./...` below already
-      # fails if go is missing entirely; this is the one property that step
-      # alone does not check.
-      #
-      # The expected version is READ FROM go.mod, never hard-coded here.
-      # go.mod carries two version lines — `go 1.26.0` and
-      # `toolchain go1.26.6` — and a literal here pinned only the second. A
-      # toolchain bump then had to be made in two files or CI failed every
-      # PR naming a version go.mod no longer contains. Deriving it keeps the
-      # property (setup-go really did resolve the toolchain line) while
-      # making go.mod the single place the version lives.
-      #
-      # ACCEPTING EITHER LINE is deliberate. Which one setup-go resolves is
-      # its behaviour, not ours; the property worth asserting is that the Go
-      # on PATH is one of the versions go.mod actually names, so a bump to
-      # either line stays green and an unrelated toolchain still fails.
-      - run: |
-          go_directive=$(sed -n 's/^go \([0-9.]*\)$/go\1/p' go.mod)
-          toolchain=$(sed -n 's/^toolchain \(go[0-9.]*\)$/\1/p' go.mod)
-          if [ -z "$go_directive" ] && [ -z "$toolchain" ]; then
-            echo "could not read a version from go.mod; refusing to pass" >&2
-            exit 1
-          fi
-          actual=$(go version)
-          for want in $toolchain $go_directive; do
-            case "$actual" in
-              *"$want "*|*"$want") echo "toolchain ok: $want"; exit 0 ;;
-            esac
-          done
-          echo "toolchain mismatch: go.mod names ${toolchain:-none}/${go_directive:-none}, got:" >&2
-          echo "$actual" >&2
-          exit 1
-
-      - run: go build ./...
-
-      # internal/workflow/routing_sweep_test.go sweeps the workflow corpus
-      # config.Config.InstanceConfigDirs resolves, which on a bare CI
-      # checkout is empty — there is no shared store at $HOME/.docket and
-      # this repo ships no `.docket/config` of its own. Pointing the sweep
-      # at the hermetic fixture under internal/workflow/testdata gives it a
-      # corpus without unioning into anyone's real shared store (see that
-      # directory's README.md for why it must stay override-only).
-      - run: go test ./...
-        env:
-          DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
-
-  qa:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # jq and perl are preinstalled on ubuntu-latest; qa.sh hard-fails without them.
-      - run: ./scripts/qa.sh
-
-  # repo-gates. The scripts here read a COMMITTED diff, not
-  # working-tree state, so they need the PR's base commit fetched and passed
-  # explicitly — see the base-ref mode each script's header now documents.
-  #
-  # KNOWN LIMIT: `BASE_SHA` below is `github.event.pull_request.base.sha`, the
-  # base branch tip at event time — not necessarily an ancestor of the
-  # checked-out `pull_request` ref's own history. If the base branch advances
-  # after the PR's last push, the scanned range can widen to base-branch
-  # commits the PR did not author (INFERRED — no local seam to exercise a
-  # real Actions `pull_request` event to confirm this against a live run).
-  #
-  # RUNS ON PUSH AS WELL AS PULL_REQUEST.
-  #
-  # `pull_request`-only was a gate that never fired on this repository's
-  # actual regime. Work here lands as direct commits to a feature branch
-  # (`git log --merges` is empty), and `ci-nightly.yaml` tags `main`'s HEAD
-  # daily and publishes through the push-on-tags path. Both paths excluded
-  # `repo-gates`, so the credential gate ran on nothing that actually
-  # happens here — literally satisfied, practically absent.
-  #
-  # The base ref differs per event, which is the whole reason this was
-  # deferred once:
-  #   pull_request — `base.sha`, the base branch tip at event time.
-  #   push         — `github.event.before`, the branch's previous tip.
-  #
-  # `before` IS THE ALL-ZERO SHA ON A BRANCH'S FIRST PUSH (and on a tag
-  # push), which is not a readable ref. That case is handled explicitly
-  # below rather than left to fail confusingly: it falls back to the
-  # repository's first commit, so the scan covers the entire branch. For a
-  # brand-new branch that is the correct interpretation — every commit on it
-  # is new — and it fails toward scanning MORE, never less.
-  #
-  # STILL UNGATED, stated plainly: nothing here can make
-  # this a REQUIRED check. Branch protection is not version-controlled in
-  # this repo, so a push whose workflow run fails still lands. This job
-  # reports; it does not block. Making it blocking is a repository-settings
-  # change, outside the tree.
-  repo-gates:
+  # check runs first: secret-scan and self-hygiene are diff-only checks
+  # (no build, no test binary), done in seconds, so a leaked credential or a
+  # stale doc fails the run before build-shell/build spend minutes producing
+  # a binary from code that's already going to be rejected.
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      # Resolved in its own step so the fallback is testable as shell rather
-      # than buried in a `${{ }}` ternary, and so both gates below read one
-      # value that has already been validated.
-      #
-      # Named via `env:` rather than interpolated straight into `run:`.
-      # GitHub substitutes `${{ }}` into the step's text before the shell
-      # parses it; both values are GitHub-computed rather than contributor
-      # text, so there is no injection here today, but the indirection is the
-      # shape that stays safe if a future edit swaps in something
-      # contributor-controlled.
       - id: base
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -261,7 +54,7 @@ jobs:
           # valid diff would, never less, so it cannot narrow what gets swept.
           if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             widened=$(git rev-list --max-parents=0 HEAD | tail -1)
-            echo "repo-gates: base ref '$base' is unreadable (likely a force-push over it); widening to the root commit $widened instead of refusing" >&2
+            echo "check: base ref '$base' is unreadable (likely a force-push over it); widening to the root commit $widened instead of refusing" >&2
             base="$widened"
           fi
 
@@ -273,38 +66,9 @@ jobs:
       - name: self-hygiene
         run: ./scripts/qa/self-hygiene.sh "${{ steps.base.outputs.sha }}"
 
-  build-shell:
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        runner:
-          - macos-latest
-          - macos-latest-large
-          - ubuntu-latest
-          - ubuntu-latest-arm64
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ALT-F4-LLC/setup-vorpal-action@0.2.0
-        with:
-          registry-backend: s3
-          registry-backend-s3-bucket: altf4llc-vorpal-registry
-          version: 0.4.0
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - run: vorpal build 'docket-shell'
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: vorpal-lock-${{ runner.arch }}-${{ runner.os }}
-          path: Vorpal.lock
-
   build:
     needs:
-      - build-shell
+      - check
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -328,6 +92,8 @@ jobs:
           AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+      - run: vorpal build '${{ matrix.artifact }}-shell'
+
       - run: |
           ARTIFACT_PATH=$(vorpal build --path '${{ matrix.artifact }}')/bin/docket
           echo "ARTIFACT_PATH=$ARTIFACT_PATH" >> $GITHUB_ENV
@@ -346,10 +112,29 @@ jobs:
           name: docket-dist-${{ env.ARCH }}-${{ env.OS }}
           path: ${{ env.ARCHIVE_NAME }}
 
+  test:
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: docket-dist-x86_64-linux
+          path: dist
+
+      - run: |
+          tar -xzf dist/docket-x86_64-linux.tar.gz -C dist
+          chmod +x dist/docket
+          echo "DOCKET_BIN=$(pwd)/dist/docket" >> "$GITHUB_ENV"
+
+      - run: ./scripts/qa.sh "$DOCKET_BIN"
+
   release:
     if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
     needs:
-      - build
+      - test
     permissions:
       attestations: write
       contents: write

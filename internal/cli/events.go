@@ -62,10 +62,17 @@ transition's own opaque payload, carried verbatim.
 Without --run the feed is repo-wide, which is the only place events that belong
 to no run — trust grants — are visible.
 
+--run names ONE run and is answered wherever that run lives: a run in another
+project returns that run's events rather than an empty page, matching
+` + "`run report`" + ` and ` + "`step show`" + `. A run that does not exist is refused.
+
 --tail N returns the NEWEST N events instead of the oldest N, for the
 mid-incident question "what just happened". They still arrive oldest-first, so
 the last seq is still the cursor to store. --tail and --since are mutually
 exclusive: one jumps to the end of the feed, the other walks it forward.
+
+With --follow, --tail N is the STARTING CURSOR: the stream opens with the newest
+N and then follows live, instead of replaying the whole retained history first.
 
 Human mode escapes stored strings on their way to the terminal; --json carries
 the raw bytes, because the consumer there is a program.`,
@@ -100,6 +107,13 @@ var _ output.Collection = eventsListResult{}
 // eventsProjectScope resolves the feed's project scope (v12): the invoking
 // project by default, the whole store under --all-projects. Store-level
 // events — trust changes — appear either way; see EventQuery.ProjectID.
+//
+// IT IS NOT THE WHOLE STORY UNDER `--run` (DKT-583). ListEvents IGNORES this
+// scope when the query names a run, because a run belongs to one project and
+// the run filter is therefore already the narrower scope — scoping again could
+// only answer a neighbour's run with a successful EMPTY feed. The decision
+// lives in the engine so `--follow`, which shares this helper, cannot drift
+// away from `list`.
 func eventsProjectScope(cmd *cobra.Command) int {
 	if all, _ := cmd.Flags().GetBool("all-projects"); all {
 		return 0
@@ -114,6 +128,32 @@ func (p eventsListPayload) MarshalJSON() ([]byte, error) {
 		return []byte("[]"), nil
 	}
 	return json.Marshal(p.events)
+}
+
+// eventsTailFlag reads and validates `--tail` for BOTH entry points.
+//
+// It is shared rather than duplicated because `--follow` starts its stream at
+// the tail (DKT-752): if the two paths validated the flag separately, one of
+// them would eventually accept a combination the other refuses, and the pair
+// that matters most — `--tail` with `--since` — is precisely the one whose
+// meaning is undefined.
+func eventsTailFlag(cmd *cobra.Command) (int, error) {
+	tail, _ := cmd.Flags().GetInt("tail")
+	if tail < 0 {
+		return 0, cmdErr(
+			fmt.Errorf("--tail must not be negative: %d", tail), output.ErrValidation)
+	}
+	// `--tail` answers "what just happened" and `--since` answers "what have I
+	// not seen". Combining them reads as a cursor but silently skips whatever
+	// falls between the cursor and the tail window, so it is refused rather
+	// than served with a plausible-looking short page.
+	if tail > 0 && cmd.Flags().Changed("since") {
+		return 0, cmdErr(
+			fmt.Errorf("--tail and --since are mutually exclusive: "+
+				"--since walks the feed forward, --tail jumps to its end"),
+			output.ErrValidation)
+	}
+	return tail, nil
 }
 
 func runEventsList(cmd *cobra.Command, w *output.Writer) error {
@@ -132,20 +172,9 @@ func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 		limit = eventsDefaultLimit
 	}
 
-	tail, _ := cmd.Flags().GetInt("tail")
-	if tail < 0 {
-		return cmdErr(
-			fmt.Errorf("--tail must not be negative: %d", tail), output.ErrValidation)
-	}
-	// `--tail` answers "what just happened" and `--since` answers "what have I
-	// not seen". Combining them reads as a cursor but silently skips whatever
-	// falls between the cursor and the tail window, so it is refused rather
-	// than served with a plausible-looking short page.
-	if tail > 0 && cmd.Flags().Changed("since") {
-		return cmdErr(
-			fmt.Errorf("--tail and --since are mutually exclusive: "+
-				"--since walks the feed forward, --tail jumps to its end"),
-			output.ErrValidation)
+	tail, err := eventsTailFlag(cmd)
+	if err != nil {
+		return err
 	}
 
 	runRef, _ := cmd.Flags().GetString("run")
@@ -288,7 +317,8 @@ func eventDetail(data json.RawMessage) string {
 func init() {
 	eventsListCmd.Flags().Int64(
 		"since", 0, "Return events with seq strictly greater than this cursor")
-	eventsListCmd.Flags().String("run", "", "Filter to one run (RUN-N)")
+	eventsListCmd.Flags().String(
+		"run", "", "Filter to one run (RUN-N), in whichever project owns it")
 	eventsListCmd.Flags().Bool(
 		"all-projects", false,
 		"Show every project's events instead of this project's (store-level events show either way)")
@@ -296,7 +326,9 @@ func init() {
 	// have I not seen", which to reach the END of a long feed means paging
 	// through all of it first. The rows still arrive oldest-first.
 	eventsListCmd.Flags().Int(
-		"tail", 0, "Return the newest N events (still oldest-first); excludes --since")
+		"tail", 0,
+		"Return the newest N events (still oldest-first); with --follow, start the stream "+
+			"there; excludes --since")
 	eventsListCmd.Flags().Int(
 		"limit", 0, fmt.Sprintf("Maximum events to return (default %d)", eventsDefaultLimit))
 

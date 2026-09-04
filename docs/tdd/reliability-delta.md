@@ -592,6 +592,149 @@ the counters are authoritative only for claims that ended after v23. The wire
 fields are `omitempty`, so every row with no counted outcome serializes
 byte-identically to v22's rendering.
 
+### AMENDMENT — the span extends to v24 (DKT-546, 2026-08-22)
+
+**What changed.** v24 adds ONE table, `gate_override_grants`: one operator
+ruling that a gate's failure signature — gate name + exit code + reason
+classification — is environmental for the remainder of ONE run. A grant is
+minted by `step resolve --as override-pass --batch` (one row per failed
+completion gate of the parked step, in the resolution's own transaction), and
+spent by the routing stage: a later step of the same run whose EVERY failing
+gate matches a grant routes the same generic `pass` the operator's own
+override-pass records, instead of parking. `covered_steps` counts the spends,
+bumped in the routing transaction; both edges are event-logged
+(`gate-override-granted` / `step-batch-overridden`, attributed human /
+threshold), so the feed walks from every auto-pass back to the person. The
+grant dies with its run — the `run_id` FK is the whole scope rule, and a new
+run re-asks. A cover blocked by an interposed threshold target (DKT-470's
+shape) parks as before, with the block named.
+
+**What it fixes.** Refit mining of 25 runs / 34 issues found the dominant
+operator toil is environmental gate parks — build failed 30/46 recorded
+verdicts, tests 26/45, self-hygiene 18/34 — virtually every one
+operator-overridden as a sandbox artifact, not a code defect, and each park
+resolved individually: in RUN-42 the operator's own resolution was
+"override-pass each as it parks", the same ruling re-made per step. No
+mechanism let one ruling cover subsequent identical failures in the same run.
+
+**Why the ratified arithmetic is untouched.** Like v11–v23, v24 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v7/v8 form, since v24 adds no column). It
+BACK-FILLS NOTHING — no operator granted a batch override before the verb for
+granting one existed — and it is dormant: a run that never records a grant
+reads byte-identically to v23 on every verb.
+
+### AMENDMENT — the span extends to v25 (DKT-742, 2026-08-25)
+
+**What changed.** v25 adds ONE table, `stale_target_waivers`: one operator
+ruling that a specific stale-target warning — one (step instance, target sha)
+pair — has been adjudicated for the remainder of ONE run. A waiver is minted
+by `dispatch waive-target` (one row per named step instance, all for one
+target sha, in one transaction, each row event-logged as
+`stale-target-waived`, attributed human), and consulted READ-ONLY by the
+DKT-193/424/451 advisory judge at `dispatch open`/`verify` and at held
+resolutions: a would-be warning whose (instance, target) pair matches a
+waiver — the sha compared as a case-insensitive prefix of at least 7 hex
+characters, because the advisory renders it at 12 — is dropped from the
+answer. There is deliberately no "spent" counter and no per-application event:
+the advisory is recomputed by `dispatch verify`, which writes nothing by
+contract, and a suppressed warning changes no step's state. The waiver dies
+with its run — the `run_id` FK is the whole scope rule, and a new run
+re-warns.
+
+**What it fixes.** The stale-target advisory had no memory: RUN-52 fired the
+IDENTICAL adjudicated warning four times across DISPATCH-295/297/301 (the
+shared HEAD moves at every integration, so the pair recurs under a different
+rendered reason each time), each firing costing an investigation and the
+first an operator gate, until the operator issued a standing waiver that
+lived only in session memory — where the engine could not see it. A different
+target sha on the same row, or the same sha on an unnamed row, is a different
+question and still warns, which is what keeps a new divergence from riding an
+old ruling.
+
+**Why the ratified arithmetic is untouched.** Like v11–v24, v25 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v24 form, since v25 adds no column). It BACK-FILLS
+NOTHING — no operator waived a stale-target warning before the verb for
+waiving one existed — and it is dormant: a run that never records a waiver
+reads byte-identically to v24 on every verb.
+
+### AMENDMENT — the span extends to v26 (DKT-1079, 2026-09-02)
+
+**What changed.** v26 adds ONE table, `run_notes`: a standing statement
+whoever drives a run records ONCE against it, and every packet the run
+renders from then on carries — for every step of every issue, verbatim, as a
+`== RUN NOTE N` section directly after `== REQUEST`, and in `step context` as
+`context.notes`. A note is minted by `run note add` (one row, event-logged as
+`run-note-added` carrying the text, attributed human) and read by context
+assembly as its sixth source, in the claim's own transaction beside the other
+five. It is append-only — no edit, no delete — because a packet is the record
+of what a worker was told, and two renders of one step that disagreed about
+that with nothing in the ledger between them would be exactly the drift the
+snapshot discipline exists to prevent; a changed ruling is a second note. The
+note dies with its run — the `run_id` FK is the whole scope rule.
+
+**What it fixes.** A packet's every writable source was step-scoped. RUN-70's
+conductor gate-probed before dispatch, found `tests` failing on clean HEAD,
+got the operator's disposition ("file issue, override-pass"), filed DKT-1075
+— and had nowhere to put any of it that a packet reads: issue comments are an
+audit surface (§6.6), the body froze at activation, and no step had a routing
+record for `step resolve -m` to reach. The executor stashed, re-ran the
+suite, re-derived the failure, and filed DKT-1076, a duplicate the conductor
+then spent three more calls closing.
+
+**Why the ratified arithmetic is untouched.** Like v11–v25, v26 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v24/v25 form, since v26 adds no column). It
+BACK-FILLS NOTHING — no dispatcher recorded a note before the verb for
+recording one existed — and it is dormant: a run that never records a note
+reads byte-identically to v25 on every verb, every bundle, and every packet
+(`notes` is `omitempty`, and the template's section renders only over a
+non-empty list).
+
+### AMENDMENT — the span extends to v27 (DKT-1279, 2026-09-03)
+
+**What changed.** v27 adds ONE column on `steps`, `last_claim_end TEXT NOT
+NULL DEFAULT ''`: the END REASON of the MOST RECENT claim to leave this step,
+`'failed'` or `'reaped'` (`db.ClaimEndFailed` / `db.ClaimEndReaped`),
+overwritten by whichever of `MarkStepAttemptFailedTx` / `MarkStepClaimReapedTx`
+ran last — the same two write sites v23's counters already use, now also
+stamping this column. It rides the wire as `prior_attempt_end` on
+`model.StepRow` (`next --run`, `dispatch open`, `step show`, `claim`'s
+`context.step`) and on `StepListEntry` (`step list`), beside
+`failed_attempts`/`reaped_claims`, `omitempty` on both.
+
+**What it fixes.** v23's counters answer "how many of each has this step EVER
+had", and that is the wrong question the moment a step's history mixes both:
+RUN-80 DISPATCH-400 was killed mid-wave by a session usage limit, the engine
+reaped ten leases, the steps re-dispatched at `attempt` incremented, and
+wave.js/policy's `on_failure` escalation read that as "failed once" and
+routed all ten a tier up to opus/xhigh — a reap is a liveness event, not a
+quality verdict, and no field on the row named which ending THIS re-offer
+followed. A router does not want a tally; it wants the answer to "was the
+attempt I am about to hop past a measured failure or a silence", and the
+existing breakdown cannot give that answer once a step has failed once and
+been reaped once, in either order — both readings are consistent with
+`failed_attempts=1, reaped_claims=1`.
+
+**Why the ratified arithmetic is untouched.** Like v11–v26, v27 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable,
+and a rewind guard that probes the COLUMN (the v21–v23 form, since v27 adds no
+table). It BACK-FILLS NOTHING, for v23's own reason: the event log holds
+`step-failed` and `lease-reaped` rows a value could be derived from, but
+events are prunable and a back-fill would assert more than the store can
+promise. An empty string on a pre-v27 claim means "no recorded ending", the
+same never-captured honesty v23's zero counters use, and the wire fields are
+`omitempty`, so every row with no claim yet ended serializes byte-identically
+to v26's rendering. The in-memory snapshot `reapOneTx` reflects mid-transaction
+now carries the same field alongside the counter it already bumps, so W3's
+same-call offer (the reap and its own re-offer, one answer) carries the
+ending it just recorded rather than requiring a second read.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

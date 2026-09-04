@@ -69,7 +69,28 @@ type RunBudgetReport struct {
 	UsageCap   float64 `json:"usage_cap,omitempty"`
 	UsageUnit  string  `json:"usage_budget_unit,omitempty"`
 	UsageSpend float64 `json:"usage_spend,omitempty"`
+
+	// VoteUsageNote states, on any run whose panels cast, that the seats'
+	// measured spend (the report's `vote_usage` section) is EXCLUDED from
+	// `reported` and `spend` — and why (DKT-584).
+	//
+	// It is a note rather than a fold because `Reported` must remain exactly
+	// the rows enforcement's own snapshot sums (the step usage_ledger): the
+	// report publishing a "reported" no decision was made against is the
+	// two-sources-of-truth failure RunFloorTx's export exists to prevent. The
+	// seats' DECLARED cost reaches the budget through the floor instead — a
+	// vote step's expected_cost accrues at materialization — so the panel is
+	// not invisible; its measured spend is simply accounted in its own
+	// section, and this line says so instead of leaving the omission silent.
+	VoteUsageNote string `json:"vote_usage_note,omitempty"`
 }
+
+// VoteUsageExcludedNote is VoteUsageNote's one value, a constant so the JSON
+// document and the rendered report cannot say it differently.
+const VoteUsageExcludedNote = "vote_usage is excluded from reported and spend: " +
+	"those sum the step usage_ledger the cap enforcement reads, and seat casts " +
+	"land in the separate vote_usage ledger; a vote step's declared " +
+	"expected_cost accrues to the floor instead"
 
 // RunReport is the whole document — R1 through R7, in that order.
 type RunReport struct {
@@ -81,6 +102,28 @@ type RunReport struct {
 	WallClockMS int64 `json:"wall_clock_ms,omitempty"`
 
 	Budget RunBudgetReport `json:"budget"`
+
+	// PinnedWorkflows is DKT-594's first half: per pinned workflow, how many
+	// registered versions the corpus has advanced since this run froze.
+	//
+	// It rides in the report rather than in `verify-pins` because the question
+	// is not about DRIFT. A pinned `ui-change@8` whose file is byte-identical to
+	// what the registry holds is perfectly sound and can still be five versions
+	// behind, and `verify-pins` — which compares hashes at one ref — is right to
+	// call it `ok`. What a post-mortem reader needs before trusting a finding is
+	// the other number, and until this section it existed in no read verb: every
+	// analyst on RUN-32 recovered it from git by hand.
+	PinnedWorkflows []PinnedWorkflowStaleness `json:"pinned_workflows,omitempty"`
+
+	// PinEpochs is DKT-594's second half: the run's pin-agreement timeline,
+	// PRESENT ONLY ON A RUN THAT REPINNED.
+	//
+	// A run whose agreement never moved has one epoch, every step ran under it,
+	// and the `pins` table already says what it was — so the section is absent
+	// and each step's `pin_epoch` is absent with it, rather than a column of 1s
+	// on every report in the store. Where it IS present it is what RUN-39's
+	// analysts assembled by hand from event seqs and step ids.
+	PinEpochs []PinEpoch `json:"pin_epochs,omitempty"`
 
 	// Steps is R3: the count by EFFECTIVE status, computed at read.
 	Steps []model.StatusCount `json:"steps,omitempty"`
@@ -157,6 +200,17 @@ type RunReport struct {
 	// like a zero.
 	VoteUsageCoverage db.VoteUsageCoverage `json:"vote_usage_coverage"`
 
+	// SilentVoteSeats is the identity behind VoteUsageCoverage.Silent
+	// (DKT-733): each cast that reported no spend — which seat, on which
+	// proposal, seated via which path. The count alone told an operator that
+	// seats went silent on a run and nothing said WHICH, so `vote
+	// backfill-usage` — the verb that exists to close exactly this gap
+	// (DKT-115) — could not be aimed without spelunking proposals by hand.
+	//
+	// `omitempty`: a run whose every seat reported carries no key, because the
+	// coverage line already says so and an empty list would restate it.
+	SilentVoteSeats []SilentVoteSeat `json:"silent_vote_seats,omitempty"`
+
 	// StepUsage is the ledger row by row — which step, which attempt, which
 	// unit, how much, and who measured it. Budget.Reported is the same rows
 	// summed per unit; this is the detail behind that headline.
@@ -222,6 +276,56 @@ type StepAttempt struct {
 	// never opened — which is exactly the never-convened case the reader needs
 	// to tell apart.
 	Vote string `json:"vote,omitempty"`
+	// PinEpoch is WHICH PIN AGREEMENT this step's recorded work ran under
+	// (DKT-594), indexing RunReport.PinEpochs.
+	//
+	// Absent unless the run actually repinned, and absent on a step that has not
+	// run — see PinEpochs and stepReportsAnEpoch. On a run whose agreement moved
+	// mid-flight it is the field that says which bytes a completed step
+	// consumed: `pins` holds only the CURRENT agreement, completed steps' rows
+	// are never rewritten, and correlating the two was the hand-join RUN-39's
+	// post-mortem performed against event seqs (5375/5376 vs STEP-1350/1353).
+	PinEpoch int `json:"pin_epoch,omitempty"`
+
+	// Metadata is THIS STEP'S WHOLE BAG, verbatim (DKT-868) — the detail behind
+	// RunReport.Metadata exactly as StepUsage is the detail behind
+	// Budget.Reported.
+	//
+	// The rollup answers "which values did this key take, and how often". It
+	// cannot answer "which values did two keys take TOGETHER on one step",
+	// because grouping by key is precisely what discards the pairing. Any bag
+	// whose keys are a REQUEST and its RESOLUTION — the shape the corpus
+	// actually writes — is therefore unaggregatable from the report: RUN-51's
+	// rollup showed one key with no `low` value and its partner with one, a
+	// mismatch on exactly one step that no reader could name. Recovering it
+	// meant `step show` per step, and the audit that motivated this ran ~90 of
+	// them across 19 runs.
+	//
+	// It rides on the ATTEMPT ROW rather than in a section of its own so the
+	// bag arrives already joined to the four facts that make it interpretable:
+	// effective status, routing, attempt count and issue. That is what closes
+	// the other half of the gap — a step that FAILED or was reaped carries only
+	// what its dispatcher recorded at claim (`step claim --metadata`, DKT-592),
+	// and in a rollup that half-bag is indistinguishable from a completed
+	// step's, so drift concentrated in failures reads as no drift at all.
+	//
+	// CORE READS NO KEY HERE, as everywhere (docs/design/genericity.md, R7). It
+	// publishes the bag; what a pair of keys MEANS — a tier, a variant, a desk
+	// — stays the workflow author's business, and the consumer does the
+	// comparison core must not learn how to make.
+	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// MetadataUnreadable marks a step whose stored bag exists but does not
+	// decode, so an absent `metadata` is never silently read as "the dispatcher
+	// recorded nothing" — the exact ambiguity DKT-868 is about. It mirrors
+	// model.Vote's field of the same name and the same purpose.
+	//
+	// The bag is NOT re-validated here: a read verb that refused because one
+	// row held odd bytes would be useless during exactly the run an operator
+	// wants to inspect (R10), which is why db.MetadataRollup skips such a row
+	// too. This row says so out loud rather than skipping silently, because a
+	// per-step row IS the row — there are no other rows to carry the fact.
+	MetadataUnreadable bool `json:"metadata_unreadable,omitempty"`
 }
 
 // DispositionAbandoned is the one issue-level terminal ruling core records as
@@ -339,18 +443,42 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
 		return nil, err
 	}
+	// DKT-584: the vote-step key family alone missed every panel the run's
+	// machinery convened OUTSIDE a vote step — reap-ack ballots, and the
+	// conversational gates (activation panels and the like) whose only link to
+	// the run is that their text names it. Their casts appeared in NO run
+	// section at all. The extra ids widen the usage rollup and its coverage
+	// line to those proposals; the vote-step sections above are unchanged.
+	extraProposalIDs, err := conversationalRunProposalIDs(conn, runID)
+	if err != nil {
+		return nil, err
+	}
 	if report.VoteUsage, err = db.VoteUsageRollup(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+		extraProposalIDs...); err != nil {
 		return nil, err
 	}
 	if report.VoteUsageCoverage, err = db.VoteUsageCoverageFor(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+		extraProposalIDs...); err != nil {
+		return nil, err
+	}
+	if report.SilentVoteSeats, err = silentVoteSeats(
+		conn, runID, extraProposalIDs); err != nil {
 		return nil, err
 	}
 	if report.StepUsage, err = db.UsageByStep(conn, runID); err != nil {
 		return nil, err
 	}
 	if report.Artifacts, err = artifactIndex(conn, runID); err != nil {
+		return nil, err
+	}
+	// DKT-594's staleness diff: the run's workflow pins against the registry's
+	// current head. Up here with the other pool reads for the reason stated
+	// above — it needs no snapshot, and reading it from inside the transaction
+	// below would deadlock the one-connection pool.
+	if report.PinnedWorkflows, err = pinnedWorkflowStaleness(
+		conn, run.ProjectID, runID); err != nil {
 		return nil, err
 	}
 
@@ -412,6 +540,11 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if err := annotateVoteOutcomes(tx, runID, sched, attempts); err != nil {
 		return nil, err
 	}
+	// DKT-594: which agreement each step's recorded work ran under, in the SAME
+	// snapshot as the statuses that decide whether a step ran at all.
+	if report.PinEpochs, err = annotatePinEpochs(tx, runID, attempts); err != nil {
+		return nil, err
+	}
 	report.Steps, report.Attempts = counts, attempts
 
 	// The issue-level rulings, read in the SAME snapshot as the steps they
@@ -443,6 +576,12 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		Spend:        spend,
 		BurnRate:     burnRate(floor, report.WallClockMS),
 		BreachReason: facts.BreachReason,
+	}
+	// The exclusion is stated whenever there is anything to exclude: a cast
+	// happened, whether or not its seat reported spend (DKT-584). A run with
+	// no panels carries no note — there is nothing being left out.
+	if report.VoteUsageCoverage.Casts > 0 || len(report.VoteUsage) > 0 {
+		report.Budget.VoteUsageNote = VoteUsageExcludedNote
 	}
 
 	// The transaction is rolled back by the deferred call and never committed:
@@ -506,6 +645,20 @@ func effectiveStepFacts(sched *Scheduler) ([]model.StatusCount, []StepAttempt) {
 		}
 		if step.IssueID != 0 {
 			row.Issue = model.FormatID(step.IssueID)
+		}
+		// DKT-868: the step's own bag rides with its status.
+		//
+		// TOLERANT, NOT SILENT. A stored bag that does not decode leaves
+		// `Metadata` nil and sets the flag beside it — the R10 tolerance
+		// db.MetadataRollup already applies to the same column (a read verb must
+		// not refuse because one row holds odd bytes), without the rollup's
+		// freedom to drop the row and let the other rows carry the answer.
+		//
+		// The decode names no key: it hands over whatever object was stored.
+		if bag, err := decodeMetadata(step.Metadata); err != nil {
+			row.MetadataUnreadable = true
+		} else {
+			row.Metadata = bag
 		}
 		attempts = append(attempts, row)
 	}
@@ -767,6 +920,120 @@ func artifactIndex(conn *sql.DB, runID int) ([]ArtifactIndexEntry, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Artifact < out[j].Artifact })
 	return out, nil
+}
+
+// The two seating paths a run's vote seats are minted through (DKT-733).
+// These are the values SilentVoteSeat.Path carries, and they are core's own
+// closed vocabulary — derived from HOW the proposal joined the run's
+// membership, never from anything a caster asserted.
+const (
+	// SeatPathVoteStep: the proposal is keyed under the run's vote-step
+	// family (voteIdempotencyPrefix) — an engine-minted `type = "vote"` step
+	// row, whose panel is seated in-wave.
+	SeatPathVoteStep = "vote-step"
+	// SeatPathConversationalGate: everything the run's machinery convened
+	// OUTSIDE a vote step — a reap-ack ballot keyed under
+	// ReapAckProposalKey's family, or a proposal whose text names the run (an
+	// activation panel opened with `vote create`). These panels are seated
+	// conductor-side.
+	SeatPathConversationalGate = "conversational-gate"
+)
+
+// SilentVoteSeat is one cast that reported no spend, with the seating path
+// that minted its proposal (DKT-733). The proposal id is the argument `vote
+// backfill-usage` takes, so each row is an aimable backfill, not just a name.
+type SilentVoteSeat struct {
+	Proposal string `json:"proposal"`
+	Voter    string `json:"voter"`
+	Role     string `json:"role,omitempty"`
+	Path     string `json:"path"`
+}
+
+// silentVoteSeats enumerates the casts the coverage line counts as silent and
+// labels each with its seating path. The rows come through the SAME
+// membership the coverage count uses; the label is resolved HERE because only
+// the engine owns the key-family spellings: a proposal in the run's vote-step
+// family is a vote-step seat, and anything else in the membership — reap-ack
+// keyed or run-named — is a conversational gate (the extraIDs' two halves,
+// per conversationalRunProposalIDs).
+func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat, error) {
+	rows, err := db.SilentVoteSeatsFor(
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID), extraIDs...)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+
+	keyed, err := db.LookupIdempotencyKeys(
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	if err != nil {
+		return nil, err
+	}
+	voteStep := make(map[int]bool, len(keyed))
+	for _, id := range keyed {
+		voteStep[id] = true
+	}
+
+	out := make([]SilentVoteSeat, 0, len(rows))
+	for _, r := range rows {
+		path := SeatPathConversationalGate
+		if voteStep[r.ProposalID] {
+			path = SeatPathVoteStep
+		}
+		out = append(out, SilentVoteSeat{
+			Proposal: model.FormatProposalID(r.ProposalID),
+			Voter:    r.Voter,
+			Role:     r.Role,
+			Path:     path,
+		})
+	}
+	return out, nil
+}
+
+// conversationalRunProposalIDs resolves the run's CONVERSATIONAL-GATE
+// proposals — the ballots the run's machinery convened outside any vote step
+// (DKT-584), whose casts otherwise appear in no run section at all:
+//
+//   - reap-ack ballots, keyed under ReapAckProposalKey's family — positively
+//     attributed through the same idempotency table the vote-step family uses;
+//   - proposals that NAME the run in their description or rationale (an
+//     activation panel opened with `vote create` carries no key and no step,
+//     and its text is its only link to the run it gates).
+//
+// Vote-step proposals are deliberately NOT re-resolved here: the rollups
+// already select their key family by prefix, and the membership test is a set
+// test, so an overlap would be harmless but a second spelling of that family
+// would not.
+func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
+	keyed, err := db.LookupIdempotencyKeys(
+		conn, db.ScopeVoteCreate, reapAckRunPrefix(runID))
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool, len(keyed))
+	ids := make([]int, 0, len(keyed))
+	for _, id := range keyed {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	named, err := db.ProposalIDsNaming(conn, model.FormatRunID(runID))
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range named {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	// A TOTAL order (R9): the ids feed a parameterized IN whose bound values
+	// participate in query text equality for no engine, but a deterministic
+	// argument list keeps two reports byte-identical in any future trace.
+	sort.Ints(ids)
+	return ids, nil
 }
 
 // configuredBudgetDefault reads `budget.default` for R6's source derivation.

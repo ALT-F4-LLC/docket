@@ -3,6 +3,7 @@ package exec
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -116,12 +117,96 @@ type EnvPolicy struct {
 	// (DKT-63). Opaque to core; a check that wants per-issue behavior finally
 	// has the identity to key it on.
 	Issue string
+	// Step is the rendered identity of the step the gate is running for —
+	// `STEP-N` — exported as DOCKET_STEP (DKT-1186).
+	//
+	// It is what makes a gate's own inputs REACHABLE. DOCKET_ISSUE names the
+	// issue, and an issue's chain has many steps, so a gate needing an
+	// artifact an earlier step produced had to re-derive its own identity:
+	// `docket step list --issue $DOCKET_ISSUE`, then pick the row by a
+	// hardcoded instance-name convention, then read that row's JSON shape.
+	// Every one of those three couplings is to something the engine is free
+	// to change — instance naming, listing order, wire shape — and the
+	// workaround broke silently when any of them moved.
+	//
+	// With the step's own reference in hand the lookup is one verb against a
+	// stable identity: `docket step context $DOCKET_STEP` re-emits the
+	// bundle whose `inputs` ARE the artifacts the step was handed, and
+	// `docket step artifacts $DOCKET_STEP` lists what it produced. Neither
+	// needs a token — both are read-only — so this exports NO new authority:
+	// the step reference is an identifier the gate could already reconstruct,
+	// made cheap and correct instead of conventional and fragile.
+	//
+	// Empty means unset, the same encoding as Scope and Base: a gate spawned
+	// for no step (a bare runner in a test, a future caller with no step in
+	// hand) must see the variable ABSENT rather than a `STEP-0` that names
+	// nothing, because a lookup against an invented id fails confusingly
+	// where an absent variable fails honestly.
+	Step string
 	// Scope is the issue's declared scope globs, exported newline-joined as
 	// DOCKET_SCOPE (DKT-63) so a diff-shaped check can evaluate the change it
 	// is gating instead of the whole dirty tree. Empty means unset: an issue
 	// that declared no scope gives the check no narrower answer than the tree,
 	// and inventing one would be docket deciding what the issue touches.
 	Scope []string
+	// Base is the sha of the step's base commit, exported as DOCKET_GATE_BASE
+	// (DKT-992) so a gate can scan exactly the step's committed range
+	// (base..HEAD of the tree it runs in) instead of guessing at `HEAD~1` or
+	// scanning only the working tree — which, for a worktree-recorded step
+	// whose executor committed before `step record`, is clean and scans
+	// nothing. It is set only for worktree-recorded steps, to the worktree's
+	// fork point; empty means unset, and a range-shaped gate that finds the
+	// var absent over a clean tree should fail closed rather than pass having
+	// measured nothing.
+	Base string
+	// CacheRoot is a directory that lives and dies with the tree the gate is
+	// about to measure, or "" when the tree outlives the spawn (DKT-1166).
+	//
+	// It exists for ONE class of tool: a linter whose result cache is keyed by
+	// package CONTENT and stores, alongside each cached issue, the ABSOLUTE
+	// PATH the issue was found at. golangci-lint and staticcheck both do this,
+	// and both re-open that path afterwards to look for the `//nolint` (or
+	// `//lint:ignore`) comment that would suppress the issue.
+	//
+	// The content hash survives a tree being deleted; the path does not. So a
+	// gate measuring a THROWAWAY tree — the pre-gate reconstruction of a sha
+	// whose worktree was swept — writes cache entries naming a directory that
+	// is removed minutes later, and a later run over the same package content
+	// replays them, fails to re-open the file, finds no `//nolint`, and
+	// reports an already-suppressed line as live. Observed on harness
+	// RUN-64/STEP-2939: `make lint` reported one forbidigo issue at
+	// `../docket-pregate-4091742512/...`, a path that no longer existed, while
+	// the same sha linted in place reported none.
+	//
+	// Pointing those caches inside a directory the engine deletes WITH the
+	// tree removes the carrier in both directions: no entry can outlive the
+	// reconstruction that produced it, and the operator's own persistent cache
+	// never receives an entry naming a path docket is about to delete. The
+	// cost is re-analysis (local, no network) on the gates that run in a
+	// reconstruction, which is the rare path — a gate measuring a tree that
+	// stays on disk passes "" and keeps its shared cache.
+	//
+	// It deliberately does NOT relocate the Go build cache: what makes a cache
+	// entry dangerous here is a stored source path a tool re-opens to decide
+	// suppression, GOCACHE does no such re-opening, and moving it would make
+	// every reconstruction rebuild the standard library.
+	CacheRoot string
+}
+
+// ephemeralCaches names the child variables CacheRoot redirects, and the
+// subdirectory each is given under it.
+//
+// SEPARATE SUBDIRECTORIES, not one shared root: two tools with two on-disk
+// cache layouts, and handing both the same directory invites one to read the
+// other's files.
+//
+// The list is short because it is EVIDENCE-DRIVEN rather than speculative: a
+// tool belongs here when its cache is known to persist absolute source paths
+// that it re-opens later to decide whether an issue is suppressed. Both of
+// these do; a tool that does not would gain nothing and lose its cache.
+var ephemeralCaches = []struct{ Name, Subdir string }{
+	{"GOLANGCI_LINT_CACHE", "golangci-lint"},
+	{"STATICCHECK_CACHE", "staticcheck"},
 }
 
 // BuildEnv constructs the child environment (§5.3).
@@ -162,12 +247,23 @@ func BuildEnv(p EnvPolicy) ([]string, error) {
 	if p.Issue != "" {
 		env = append(env, "DOCKET_ISSUE="+p.Issue)
 	}
+	// Absent — not empty — when no step is known (DKT-1186): `STEP-0` names no
+	// step, and a gate handed one would query for a row that does not exist.
+	if p.Step != "" {
+		env = append(env, "DOCKET_STEP="+p.Step)
+	}
 	// Newline-joined rather than JSON: the consumer is a shell check reading
 	// its own environment, and `while IFS= read -r glob` over lines needs no
 	// parser. A glob cannot contain a newline — the scope verbs store globs a
 	// shell matched in the first place.
 	if len(p.Scope) > 0 {
 		env = append(env, "DOCKET_SCOPE="+strings.Join(p.Scope, "\n"))
+	}
+	// Absent — not empty — when no base is known (DKT-992): an empty sha is
+	// not a commit, and a gate given one would build a broken git range. The
+	// gate's own fail-closed check keys on absence.
+	if p.Base != "" {
+		env = append(env, "DOCKET_GATE_BASE="+p.Base)
 	}
 
 	// The network half, reached ONLY by a gate whose trust entry
@@ -184,6 +280,26 @@ func BuildEnv(p EnvPolicy) ([]string, error) {
 		// reachability up front and fail with a useful message instead of
 		// whatever its underlying tool prints on a DNS error.
 		env = append(env, "DOCKET_GATE_NETWORK="+strings.Join(p.Network, ","))
+	}
+
+	// The ephemeral caches (DKT-1166), set LAST so they win over anything the
+	// forwarding above could have supplied. They are absent from the child
+	// entirely when no CacheRoot was given, so a gate over a durable tree sees
+	// exactly the environment it saw before and keeps its shared cache.
+	//
+	// The directories are created here rather than left to the tools: both
+	// create their own, but a cache root that cannot be created is a fact the
+	// spawn should refuse on — a tool that silently falls back to its default
+	// location would put the stale-path carrier straight back.
+	if p.CacheRoot != "" {
+		for _, c := range ephemeralCaches {
+			dir := filepath.Join(p.CacheRoot, c.Subdir)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return nil, fmt.Errorf(
+					"preparing the gate's ephemeral %s: %w", c.Name, err)
+			}
+			env = append(env, c.Name+"="+dir)
+		}
 	}
 
 	// THE BELT-AND-BRACES CHECK (T5). The allowlist above already excludes

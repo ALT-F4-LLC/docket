@@ -40,7 +40,41 @@ type ClaimOptions struct {
 	// TTLOverride is an explicit `--ttl`. Zero means resolve from the
 	// workflow's [limits] then config, per §6.4's precedence.
 	TTLOverride int64
-	NowMS       int64
+	// Metadata is `--metadata`, the opaque KV bag the DISPATCHER knows at
+	// claim time, merged onto the step's own in the claim's own transaction
+	// (docs/tdd/completion-metadata.md §1.7, DKT-592).
+	//
+	// It exists because the facts a dispatcher knows when it hands a step out
+	// are exactly the facts a step that never completes would otherwise never
+	// record. Deferring them to `complete` means the steps that failed or
+	// crashed — the ones an operator most wants to characterize — are the only
+	// steps with no bag at all, and a rollup over those keys goes blind at
+	// precisely the rows that motivated it.
+	//
+	// Core reads no key here, as everywhere: the bag is stored and never
+	// interpreted.
+	Metadata string
+	// CostMultiplier is `--cost-multiplier`: the DISPATCHER's declaration that
+	// this claim will cost this many times the step's declared `expected_cost`
+	// (DKT-867). Zero means unset — the claim accrues the declared cost,
+	// byte-for-byte the pre-DKT-867 behavior.
+	//
+	// It exists because `expected_cost` is variant-blind: the definition
+	// declares one number per step template, and the party that resolves a
+	// step to an executor variant — routing an escalated retry to something
+	// far pricier — is the dispatcher, at claim time. The multiplier is that
+	// resolution priced in the cap's own currency, declared by the only party
+	// in a position to know it. Core stores, sums, and reserves the number and
+	// never interprets it (genericity.md): what varied and by how much is the
+	// dispatcher's business, exactly as `--usage`'s units are the claimant's.
+	//
+	// The scaled cost participates in the SAME facts the declared cost always
+	// has: it is checked against the cap in the claim's own transaction and
+	// recorded in the claim's `step-claimed` event, so each attempt of a step
+	// accrues what ITS claim declared — an escalated re-claim accrues more
+	// than the cheap first attempt did (B9's re-accrual, made variant-aware).
+	CostMultiplier float64
+	NowMS          int64
 }
 
 // ClaimStep takes a lease on a step and returns the token AND the context
@@ -94,6 +128,67 @@ func (e *Engine) ClaimStepWithGates(
 	return claimStepWithGates(conn, stepID, opts, e)
 }
 
+// ClaimStepRendered is ClaimStepWithGates for `step claim --render`: the claim
+// and the packet render as ONE saga (DKT-804).
+//
+// The render used to run strictly AFTER the claim's commit, and a render-time
+// refusal — an unpinned packet file, a template that does not parse — landed on
+// a step already `claimed` with no token ever delivered. RUN-56 stranded eight
+// steps this way in one dispatch: the lease was held, every recovery verb
+// requires the token nobody received, and the only exits were the full TTL or
+// an operator-gated `step reap`.
+//
+// So the render is VALIDATED FIRST, pre-claim, on the same rule §1.7 places the
+// metadata-bag validation before `Begin()`: a refusal must write NOTHING —
+// no lease, no attempt, no event — and leave the step exactly as claimable as
+// it was. The render cannot simply move inside the claim's transaction, because
+// it reads through the connection while the claim's transaction would hold the
+// pool's single connection (the same deadlock loadTTLConfig's placement
+// avoids).
+//
+// The AUTHORITATIVE render then runs post-claim, so the returned packet reports
+// the step as its claimant will see it — `context.step` claimed, this claim's
+// `attempt`, the merged metadata bag. Every failure the preflight can catch is
+// deterministic over the run's pins and the template's bytes, so a post-claim
+// refusal requires the filesystem to change between two reads milliseconds
+// apart; that residual race keeps today's disposition — the error surfaces and
+// the lease stands — because rolling the claim back is not a rollback at all:
+// the claim is COMMITTED, and the `step-claimed` event it wrote is the budget
+// floor's accrual (§4.3, a SUM over those events), so un-taking the lease means
+// un-writing a ledger entry the log is append-only about. What the refusal does
+// instead is tell its caller how to end the lease NOW — `step reap` is the
+// relay's channel for exactly this (DKT-83, DKT-820) — so the cost is one verb
+// rather than the full TTL. Every deterministic failure still refuses before
+// anything is written.
+func (e *Engine) ClaimStepRendered(
+	conn *sql.DB, stepID int, opts ClaimOptions, templatePath, executor string,
+) (*ClaimResult, *RenderResult, error) {
+	if _, err := RenderStepAs(conn, stepID, templatePath, executor, opts.NowMS); err != nil {
+		return nil, nil, err
+	}
+
+	result, err := claimStepWithGates(conn, stepID, opts, e)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	packet, err := RenderStepAs(conn, stepID, templatePath, executor, opts.NowMS)
+	if err != nil {
+		// The one refusal that can still leave a lease standing, and the
+		// caller is the only party who can act on it: the token went nowhere,
+		// so every token-bearing verb is closed to it, and the relay that
+		// spawned this claim is exactly the party `step reap` is the channel
+		// for (DKT-83). Naming the remedy here is what saves it the TTL —
+		// DKT-820's RUN-59 executors had the verb and did not know it applied.
+		return nil, nil, fmt.Errorf(
+			"%w; the lease is held and no token was issued — run "+
+				"`docket step reap %s --reason ...` to return the step to the "+
+				"pool without waiting out the lease",
+			err, model.FormatStepID(stepID))
+	}
+	return result, packet, nil
+}
+
 func claimStepWithGates(
 	conn *sql.DB, stepID int, opts ClaimOptions, e *Engine,
 ) (*ClaimResult, error) {
@@ -102,6 +197,32 @@ func claimStepWithGates(
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return nil, err
+	}
+
+	// ---- The claim bag's validation, PRE-TRANSACTION (§1.7). ---------------
+	//
+	// The cap and the shape check sit here, before `conn.Begin()`, for the
+	// reason §6.9 places `complete`'s there: a refusal writes NOTHING and
+	// leaves `row_version` where it was. On this path that property has an
+	// extra edge — the transaction below performs the LAZY REAP, so a
+	// validation that ran after `Begin()` would let a malformed bag consume an
+	// attempt on its way to being refused.
+	//
+	// Same order as stage zero's, and for C5's reason: an operator debugging
+	// one input must not get a different message depending on which check
+	// happened to run first.
+	if err := validateClaimMetadataSize(opts.Metadata); err != nil {
+		return nil, err
+	}
+	if _, err := DecodeMetadataBag(opts.Metadata, "metadata"); err != nil {
+		return nil, err
+	}
+	// The multiplier's validation sits with the bag's, for the same reason: a
+	// refusal must write nothing, and this path's transaction performs the
+	// lazy reap, so a malformed input validated any later would consume an
+	// attempt on its way to being refused (DKT-867).
+	if err := validateCostMultiplier(opts.CostMultiplier); err != nil {
 		return nil, err
 	}
 
@@ -189,13 +310,36 @@ func claimStepWithGates(
 			fresh.Instance, fresh.Kind, unclaimableReason(fresh.Kind))
 	}
 
+	// ---- The claim's EFFECTIVE cost (DKT-867). ------------------------------
+	//
+	// What this claim will accrue: the step's reservable cost, scaled by the
+	// dispatcher's `--cost-multiplier` when one was declared. The offer (R7)
+	// necessarily reserved the DECLARED cost — `next` cannot know which
+	// variant a dispatcher will resolve a step to — so the claim, which is the
+	// engine's resolve moment, is where the actual cost becomes knowable and
+	// is therefore where it is enforced and accrued.
+	claimCost := reservableCost(fresh)
+	if opts.CostMultiplier > 0 {
+		claimCost = fresh.ExpectedCost * opts.CostMultiplier
+	}
+
 	// ---- R8: claim enforces readiness ITSELF. -------------------------------
 	//
 	// It does not trust that the caller ran `next`. A dispatcher racing a scope
 	// conflict would otherwise claim a step `next` would never have offered —
 	// and the refusal names WHICH condition failed, so a stalled dispatcher can
 	// diagnose itself instead of retrying blind.
-	if ready, cond := sched.Ready(fresh); !ready {
+	ready, cond := sched.Ready(fresh)
+	if !ready && cond == CondBudget && sched.budgetAdmits(fresh, claimCost) {
+		// The DECLARED cost would cross the cap but the cost this claim
+		// actually accrues does not — a dispatcher routing to a CHEAPER
+		// variant (`--cost-multiplier` under 1). Budget is the LAST clause of
+		// §6.3's conjunction, so CondBudget means every other condition held,
+		// and admitting on the real cost is the same arithmetic the refusal
+		// below runs, answered with the honest number (DKT-867).
+		ready, cond = true, ""
+	}
+	if !ready {
 		// ---- B14/B15/B20: the budget refusal is not an ordinary one. --------
 		//
 		// R7 IS the claim-time check — the same arithmetic over the same
@@ -215,7 +359,7 @@ func claimStepWithGates(
 		// rolling that back because a later clause refused would make the reap
 		// depend on which step happened to be claimed next.
 		if cond == CondBudget {
-			refusal := enforceBudgetTx(tx, sched, fresh, opts.NowMS)
+			refusal := enforceBudgetTx(tx, sched, fresh, claimCost, opts.NowMS)
 			if err := tx.Commit(); err != nil {
 				return nil, fmt.Errorf("committing the budget pause: %w", err)
 			}
@@ -233,6 +377,22 @@ func claimStepWithGates(
 		}
 		return nil, conflictErr(
 			"step %s is not ready to claim: %s", fresh.Instance, cond)
+	}
+
+	// ---- The ESCALATED claim's own budget check (DKT-867). ------------------
+	//
+	// Readiness above admitted the DECLARED cost; a dispatcher that declared a
+	// multiplier above 1 is about to accrue more than that, and the cap must
+	// see the real number BEFORE the accrual commits — this is precisely the
+	// hop DKT-867 observed sailing past the cap: an escalated fix attempt
+	// priced at the cap as though it were the cheap variant. Same arithmetic,
+	// same snapshot, same pause-and-refuse contract as the CondBudget branch.
+	if opts.CostMultiplier > 0 && !sched.budgetAdmits(fresh, claimCost) {
+		refusal := enforceBudgetTx(tx, sched, fresh, claimCost, opts.NowMS)
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("committing the budget pause: %w", err)
+		}
+		return nil, refusal
 	}
 
 	// The TTL is resolved from the ALREADY-LOADED config (read before the
@@ -258,10 +418,56 @@ func claimStepWithGates(
 	if err := db.SetStepStatusTx(tx, fresh.ID, db.StepClaimed, opts.NowMS, opts.NowMS); err != nil {
 		return nil, err
 	}
-	if err := recordEvent(tx, eventRecord{
+
+	// ---- The dispatcher's bag lands WITH THE CLAIM (§1.7, DKT-592). --------
+	//
+	// In transaction A, with the CAS that awarded the claim, and before the
+	// event that records the claim happened — the same ordering stage zero
+	// uses for the completion bag, and for the same reason: the step's own row
+	// reaches its final shape for this transition before the transition is
+	// recorded as having occurred. A crash between them rolls back both.
+	//
+	// This is what makes the bag survive every non-completing end. The reap
+	// (`ReapStepTx`) and the failure paths write status, lease and counters
+	// and never touch `metadata`, so a step that crashes after this commit
+	// still carries what the dispatcher knew when it handed the step out.
+	//
+	// It MERGES rather than assigns, on the same last-write-wins-per-key rule
+	// as every other writer of this column: a definition-side bag survives, a
+	// re-claim overlays the previous attempt's, and the completion bag later
+	// overlays this one. `mergeMetadata` cannot fail on caller input here —
+	// the shape was decoded before the transaction opened — so the only error
+	// left is a serialization one.
+	if opts.Metadata != "" {
+		merged, err := mergeMetadata(fresh.Metadata, opts.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.SetStepMetadataTx(tx, fresh.ID, merged, opts.NowMS); err != nil {
+			return nil, err
+		}
+		// The snapshot carries the merge forward so THIS claim's own context
+		// bundle reports the bag it just recorded: a worker reading
+		// `context.metadata` sees what it was dispatched with, not the state
+		// before its own claim.
+		fresh.Metadata = merged
+	}
+
+	// The claim event IS the accrual (§4.3), so a claim whose dispatcher
+	// declared a variant scaling records the SCALED cost on the event itself
+	// (DKT-867): RunFloorTx sums `data.expected_cost` when present and the
+	// step row's declaration otherwise. The resulting number is recorded
+	// rather than the multiplier, so the ledger entry is self-contained — what
+	// this claim accrued does not change if the step row is ever different.
+	// An unscaled claim writes exactly the event it always has.
+	claimEvent := eventRecord{
 		Kind: EventStepClaimed, RunID: fresh.RunID,
 		Instance: fresh.Instance, IssueID: fresh.IssueID,
-	}); err != nil {
+	}
+	if opts.CostMultiplier > 0 {
+		claimEvent.Data = fmt.Sprintf(`{"expected_cost":%g}`, claimCost)
+	}
+	if err := recordEvent(tx, claimEvent); err != nil {
 		return nil, err
 	}
 
@@ -353,6 +559,22 @@ func claimStepWithGates(
 	// alone renders both as the empty string.
 	preTargetSHA, preWorkRoot, err := preGateTarget(tx, sched, fresh, spec)
 	if err != nil {
+		return nil, err
+	}
+
+	// The claim's input snapshot is recorded HERE as well as in transaction B
+	// (DKT-1054). From this commit on the step reads as handed out
+	// (recordedClaim), and a read-back replays its recorded bindings — so a
+	// `step context` or `step show` that lands while the pre-gates run must
+	// find the bindings this claim resolved, not an empty set standing in for
+	// a snapshot not yet taken. B assembles the bundle the worker actually
+	// receives and re-records over these; the two differ only if another
+	// step of the run completed while the pre-gates ran.
+	provisional, err := AssembleContext(tx, sched, fresh, ttls)
+	if err != nil {
+		return nil, err
+	}
+	if err := recordStepInputs(tx, fresh.ID, provisional.Inputs); err != nil {
 		return nil, err
 	}
 
@@ -450,7 +672,16 @@ func claimStepWithGates(
 // inputs (`issue.body`, and an `issue.diff` with no artifact) have no artifact
 // row to bind and are skipped — there is nothing to record but the fact they
 // were empty, which the bundle already says.
+//
+// The step's earlier bindings are cleared first (DKT-1054): the record is the
+// snapshot of THIS claim, and a retried or re-claimed step's read-back
+// (AssembleRecordedContext) must replay what this attempt was handed, not the
+// union of every attempt's bindings. Same transaction as the claim, so a
+// reader never sees the row between the two.
 func recordStepInputs(tx *sql.Tx, stepID int, inputs []ContextInput) error {
+	if err := db.ClearStepInputsTx(tx, stepID); err != nil {
+		return err
+	}
 	for position, in := range inputs {
 		artifactID, ok := artifactIDOf(in.Artifact)
 		if !ok {
@@ -502,7 +733,30 @@ func unclaimableReason(kind string) string {
 // `next`/`claim`, and this is neither: a read verb that reaped would make
 // "I only looked at it" untrue, and would let a `--meta` query change an
 // attempt counter.
+//
+// A step that has been handed out reads back the bundle its claim recorded
+// (AssembleRecordedContext, DKT-1054): the inputs, and the target ref lifted
+// from them, are the ones the worker was given, however far the run has moved
+// since. A step not yet handed out — or back at `pending` for a retry — reads
+// live, as the claim that will hand it out would assemble it (recordedClaim).
+// ReadLiveContext asks the live question of any step.
 func ReadContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
+	return readContext(conn, stepID, nowMS, false)
+}
+
+// ReadLiveContext is ReadContext resolved over the run's artifacts AS THEY
+// STAND, whether or not the step has been handed out — `step context --live`.
+//
+// It answers a different question from ReadContext on a claimed step: not
+// "what did this step see" but "what would a claim made now hand over" — the
+// preview an operator wants before authorizing a retry, and the one reading
+// every consumer had before DKT-1054, kept reachable by name rather than
+// removed.
+func ReadLiveContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
+	return readContext(conn, stepID, nowMS, true)
+}
+
+func readContext(conn *sql.DB, stepID int, nowMS int64, live bool) (*Context, error) {
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -538,6 +792,9 @@ func ReadContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
 			"step %s not found", model.FormatStepID(stepID))
 	}
 
+	if !live && recordedClaim(fresh) {
+		return AssembleRecordedContext(tx, sched, fresh, ttls)
+	}
 	return AssembleContext(tx, sched, fresh, ttls)
 }
 
@@ -579,6 +836,21 @@ type StepView struct {
 	// give — that verb reports what the STEP produced, and a hold produces
 	// nothing; the payload sits on the routing step's artifact.
 	HeldCluster *HeldClusterLink
+	// TargetSHA and TargetWorktree are the SAME resolved target ref the step's
+	// context bundle carries (Context.TargetSHA / TargetWorktree, DKT-24),
+	// answered without assembling the bundle (DKT-1056).
+	//
+	// A vote panel is seated from this read: the wave asks `step show` for the
+	// gate's row first and probes the (up to 1MiB) bundle only when the row
+	// names a target, so a target the bundle knows and this view does not is a
+	// panel reading its own HEAD instead of the judged tree.
+	//
+	// BOTH ARE EMPTY, NEVER APPROXIMATE, when the step's inputs resolve no
+	// `issue.diff` round record. There is no fallback to the shared HEAD here
+	// and there must not be one — the caller can tell "no target" from "this
+	// target" only if absence is reported as absence.
+	TargetSHA      string
+	TargetWorktree string
 }
 
 // LoadStepView reads one step at its effective status. IT WRITES NOTHING — not
@@ -640,11 +912,22 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		return nil, err
 	}
 
+	// Resolved in the SAME transaction, for the same one-connection reason —
+	// and from the same snapshot the two reads above used, so the target this
+	// view reports is the target a bundle assembled at this instant would
+	// carry (DKT-1056).
+	targetSHA, targetWorktree, err := stepTargetRef(tx, sched, fresh)
+	if err != nil {
+		return nil, err
+	}
+
 	view := &StepView{
 		Step: fresh, Row: row,
 		Routing: fresh.Routing, SagaStage: fresh.SagaStage,
-		Gates:       gates,
-		HeldCluster: heldCluster,
+		Gates:          gates,
+		HeldCluster:    heldCluster,
+		TargetSHA:      targetSHA,
+		TargetWorktree: targetWorktree,
 	}
 	if lease := fresh.Lease(); lease.Live(nowMS) {
 		view.Owner, view.ExpiresMS = lease.Owner, lease.ExpiresMS

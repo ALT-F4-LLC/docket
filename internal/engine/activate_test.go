@@ -2247,6 +2247,55 @@ func TestBindingAgreesWithWorkflowShowResolution(t *testing.T) {
 			t.Errorf("superseded docs-review@%d is no longer resolvable: %v", v, err)
 		}
 	}
+
+	// DKT-616: deprecating the TOP version is the one case where the two
+	// resolutions used to diverge — binding retired @3 and fell back to @2,
+	// while show still displayed @3. Both must now land on @2, and the
+	// deprecated @3 must remain reachable by explicit @version.
+	_, err = db.DeprecateWorkflow(conn, 1, "docs-review", 3, nowMS)
+	testsupport.Must(t, err, "deprecating docs-review@3: %v", err)
+
+	shown, err = db.GetWorkflow(conn, 1, "docs-review", 0)
+	testsupport.Must(t, err, "resolving docs-review after deprecating @3: %v", err)
+	if shown.Version != 2 {
+		t.Errorf("`workflow show docs-review` resolves to @%d after deprecating @3, want @2", shown.Version)
+	}
+
+	definitions, err = loadDefinitions(conn, 1)
+	testsupport.Must(t, err, "reloading definitions: %v", err)
+	bound = nil
+	for _, d := range bindableDefinitions(definitions) {
+		if d.workflow.Name == "docs-review" {
+			bound = d
+		}
+	}
+	if bound == nil {
+		t.Fatal("binding kept no candidate for docs-review after deprecating @3")
+	}
+	if bound.workflow.Ref() != shown.Ref() {
+		t.Errorf("with @3 deprecated, binding resolves docs-review to %s but `workflow show` resolves it to %s; "+
+			"§11.1 requires they agree", bound.workflow.Ref(), shown.Ref())
+	}
+	if _, err := db.GetWorkflow(conn, 1, "docs-review", 3); err != nil {
+		t.Errorf("deprecated docs-review@3 is no longer resolvable by explicit version: %v", err)
+	}
+
+	// Retiring EVERY version removes the name from binding; show agrees by
+	// reporting not-found rather than surfacing a retired row.
+	for _, v := range []int{1, 2} {
+		_, err := db.DeprecateWorkflow(conn, 1, "docs-review", v, nowMS)
+		testsupport.Must(t, err, "deprecating docs-review@%d: %v", v, err)
+	}
+	if _, err := db.GetWorkflow(conn, 1, "docs-review", 0); !errors.Is(err, db.ErrWorkflowNotFound) {
+		t.Errorf("with every version deprecated, `workflow show docs-review` returned %v, want ErrWorkflowNotFound", err)
+	}
+	definitions, err = loadDefinitions(conn, 1)
+	testsupport.Must(t, err, "reloading definitions: %v", err)
+	for _, d := range bindableDefinitions(definitions) {
+		if d.workflow.Name == "docs-review" {
+			t.Errorf("with every version deprecated, binding still kept %s", d.workflow.Ref())
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2395,7 +2444,7 @@ func TestRenamePlusBumpRefusesActivation(t *testing.T) {
 		t.Fatal("activation succeeded on an issue two workflow NAMES match " +
 			"after a rename-plus-bump; today's binding refuses this")
 	}
-	assertRenamePlusBumpWedge(t, err, issue)
+	assertRenamePlusBumpWedge(t, err, issue, wedgeCandidatesOrphaned)
 
 	// Scoped to this run: the earlier activation that registered gone@1 wrote
 	// its own steps, pins and binding on this same connection.
@@ -2412,14 +2461,22 @@ func TestRenamePlusBumpRefusesActivation(t *testing.T) {
 }
 
 // assertRenamePlusBumpWedge asserts that err is the exact rename-plus-bump
-// wedge refusal: CodeValidation, naming the issue and the candidates
-// "gone@1, gone-renamed@2" (name-ascending, per loadDefinitions' sort at
+// wedge refusal: CodeValidation, naming the issue and rendering its candidates
+// as `wantCandidates` (name-ascending, per loadDefinitions' sort at
 // activate.go:610-615). Shared by TestRenamePlusBumpRefusesActivation and
 // TestTombstoneRetiresAWedgedName's setup, so the tombstone test's
 // precondition is pinned as precisely as the refusal it retires — a zero-match
 // refusal or an unrelated error would satisfy a bare "err != nil" check just
 // as readily, and would leave the tombstone test's premise silently wrong.
-func assertRenamePlusBumpWedge(t *testing.T, err error, issue int) {
+//
+// The candidate rendering is a PARAMETER since DKT-609, because the two call
+// sites arrange the same refusal over different repository states and the
+// refusal now says so: one deletes gone.toml from a real config root (so
+// "gone" is an orphaned registration and is annotated), the other registers
+// both names directly with no config root to scan (so nothing was checked and
+// nothing is annotated). Hard-coding one string would have made the other call
+// site pass on an assertion it did not mean.
+func assertRenamePlusBumpWedge(t *testing.T, err error, issue int, wantCandidates string) {
 	t.Helper()
 	if code, _ := CodeOf(err); code != CodeValidation {
 		t.Errorf("error code = %q, want %q", code, CodeValidation)
@@ -2429,14 +2486,21 @@ func assertRenamePlusBumpWedge(t *testing.T, err error, issue int) {
 	if !strings.Contains(msg, model.FormatID(issue)) {
 		t.Errorf("error does not name the issue: %s", msg)
 	}
-	// Name-ascending, matching loadDefinitions' sort: "gone" before
-	// "gone-renamed".
-	const wantCandidates = "gone@1, gone-renamed@2"
 	if !strings.Contains(msg, wantCandidates) {
 		t.Errorf("error does not name the candidates as %q: %s", wantCandidates, msg)
 	}
 	assertMultiMatchBranch(t, err)
 }
+
+// wedgeCandidatesUnchecked is the candidate rendering when NO instance-config
+// root exists to scan: bare refs, name-ascending, exactly as before DKT-609.
+// "Nothing was checked" must never render as "nothing is orphaned".
+const wedgeCandidatesUnchecked = "gone@1, gone-renamed@2"
+
+// wedgeCandidatesOrphaned is the same refusal after a real rename in a real
+// config root: the stranded registration is annotated and its live replacement
+// is not, which is the whole of DKT-609's second acceptance criterion.
+const wedgeCandidatesOrphaned = "gone@1" + orphanAnnotation + ", gone-renamed@2"
 
 // multiMatchDiscriminator is the ONLY text distinguishing bindIssue's two
 // refusal branches (activate.go:762-767 versus :756-761).
@@ -2509,7 +2573,7 @@ func TestTombstoneRetiresAWedgedName(t *testing.T) {
 		t.Fatal("setup: expected the rename-plus-bump wedge to refuse before " +
 			"the tombstone is registered")
 	}
-	assertRenamePlusBumpWedge(t, err, wedged)
+	assertRenamePlusBumpWedge(t, err, wedged, wedgeCandidatesUnchecked)
 
 	// The tombstone: re-register "gone" at a HIGHER version with a [match]
 	// that admits NOTHING, by construction rather than by picking an issue

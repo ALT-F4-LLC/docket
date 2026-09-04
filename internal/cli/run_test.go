@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -384,6 +385,68 @@ func TestRunActivateHelpDocumentsCostFields(t *testing.T) {
 	}
 }
 
+// TestRunActivateNamesBlockedIssues is DKT-1180's boundary: an activation
+// that leaves an issue unexpanded says so on the summary line, naming the
+// predecessor holding it, and carries the same roster as `blocked_issues` in
+// the JSON envelope — so `issues_expanded: 0` is never the whole report. The
+// --help text names the field, as DKT-517's cost fields set the precedent.
+func TestRunActivateNamesBlockedIssues(t *testing.T) {
+	conn := newTestDB(t)
+	runID, rootID := seedRun(t, conn)
+	nextID, err := db.CreateIssue(conn, &model.Issue{
+		Title: "waits on the root", Description: "a body",
+		Status: model.StatusBacklog, Priority: model.PriorityNone,
+		Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "creating the successor: %v", err)
+	_, err = conn.Exec(
+		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
+		 VALUES (?, ?, 'depends_on', '2026-08-02T00:00:00Z')`, nextID, rootID)
+	testsupport.Must(t, err, "seeding relation: %v", err)
+	err = db.AddRunIssue(conn, runID, nextID)
+	testsupport.Must(t, err, "adding the successor to the run: %v", err)
+
+	// Human mode on a dry run, so the JSON pass below sees the same first
+	// activation rather than a re-activation.
+	w, buf := bufWriter(false)
+	err = runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+	testsupport.Must(t, err, "run activate --dry-run: %v", err)
+	want := "1 issue(s) still blocked (" + model.FormatID(nextID) +
+		" waits on " + model.FormatID(rootID) + " todo)"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("summary line %q does not carry %q", buf.String(), want)
+	}
+
+	w, buf = bufWriter(true)
+	err = runActivateWithWriter(t, conn, w, model.FormatRunID(runID))
+	testsupport.Must(t, err, "run activate: %v", err)
+	var envelope struct {
+		Data struct {
+			IssuesExpanded int                   `json:"issues_expanded"`
+			BlockedIssues  []engine.BlockedIssue `json:"blocked_issues"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+	}
+	if envelope.Data.IssuesExpanded != 1 {
+		t.Errorf("expanded %d, want 1 (the root alone)", envelope.Data.IssuesExpanded)
+	}
+	wantRoster := []engine.BlockedIssue{{
+		IssueID: model.FormatID(nextID),
+		BlockedBy: []engine.BlockingIssue{{
+			IssueID: model.FormatID(rootID), Status: string(model.StatusTodo),
+		}},
+	}}
+	if got := envelope.Data.BlockedIssues; !reflect.DeepEqual(got, wantRoster) {
+		t.Errorf("blocked_issues = %+v, want %+v", got, wantRoster)
+	}
+
+	if long := newRunActivateCmd().Long; !strings.Contains(long, "blocked_issues") {
+		t.Error("--help text does not document `blocked_issues`")
+	}
+}
+
 // runActivateViaCLI drives a FRESH `run activate` command, built through the
 // SAME newRunActivateCmd factory the package's registered runActivateCmd
 // uses, through cobra's own arg parsing — the way a shell invocation would:
@@ -565,6 +628,161 @@ func TestRunActivateCarriesScopeWarnings(t *testing.T) {
 		if strings.Contains(buf.String(), "scope_warnings") {
 			t.Errorf("payload carries scope_warnings for a run whose issue "+
 				"declared its scope: %s", buf.String())
+		}
+	})
+}
+
+// baselineWorkflow and domainWorkflow are DKT-1182's routing pair, in the shape
+// the corpus actually has: a baseline selected by NO positive label that
+// declares no domain, and a pipeline selected by one label that declares the
+// paths its domain occupies. An issue labelled `ui` binds the second and only
+// the second; anything else falls into the first.
+const baselineWorkflow = `
+[pipeline]
+name = "baseline-run"
+version = 1
+[match]
+kind = ["task"]
+unless_labels = ["ui"]
+[[step]]
+name = "first"
+after = []
+executor = "someone"
+emits = "result"
+`
+
+const domainWorkflow = `
+[pipeline]
+name = "ui-run"
+version = 1
+[match]
+kind = ["task"]
+labels_any = ["ui"]
+domain_paths = ["internal/tui/**"]
+[[step]]
+name = "first"
+after = []
+executor = "someone"
+emits = "result"
+`
+
+// TestRunActivateCarriesBindingWarnings is DKT-1182 at the CLI boundary: the
+// exactly-one-WRONG-match signal must reach BOTH channels — the JSON envelope a
+// conductor parses and the stderr line an operator reads — and a run whose
+// labels and scope agree must carry no key at all.
+//
+// The dry run is the case the issue was filed about: it is where a conductor
+// decides whether to commit a run, and by the time a real activation could
+// report a mis-binding the binding is already made.
+func TestRunActivateCarriesBindingWarnings(t *testing.T) {
+	// seedMisbound builds the HRN-1118 shape: an issue scoped entirely inside
+	// `ui-run`'s declared domain, labelled for neither pipeline, so it binds the
+	// label-less `unit-run` baseline exactly once.
+	seedMisbound := func(t *testing.T, conn *sql.DB, labels []string) (runID, issueID int) {
+		t.Helper()
+		registerForRun(t, conn, baselineWorkflow)
+		registerForRun(t, conn, domainWorkflow)
+
+		id, err := db.CreateIssue(conn, &model.Issue{
+			Title: "flaky conversation screen test", Description: "a body",
+			Status: model.StatusBacklog, Priority: model.PriorityNone,
+			Kind: model.IssueKindTask,
+		}, labels, nil)
+		testsupport.Must(t, err, "creating issue: %v", err)
+		err = db.SetIssueScopeGlobs(conn, id,
+			`["internal/tui/screens/conversation_test.go"]`)
+		testsupport.Must(t, err, "setting scope: %v", err)
+
+		run, err := db.InsertRun(conn, 1, "", 0, model.NowMS())
+		testsupport.Must(t, err, "starting run: %v", err)
+		err = db.AddRunIssue(conn, run.ID, id)
+		testsupport.Must(t, err, "adding issue to run: %v", err)
+		return run.ID, id
+	}
+
+	t.Run("the dry run's JSON payload carries the array", func(t *testing.T) {
+		conn := newTestDB(t)
+		runID, issueID := seedMisbound(t, conn, []string{"qa"})
+
+		w, buf := bufWriter(true)
+
+		err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+		testsupport.Must(t, err, "run activate --dry-run: %v", err)
+
+		var envelope struct {
+			Data struct {
+				DryRun          bool `json:"dry_run"`
+				BindingWarnings []struct {
+					Issue          string   `json:"issue"`
+					BoundWorkflow  string   `json:"bound_workflow"`
+					DomainWorkflow string   `json:"domain_workflow"`
+					Scope          []string `json:"scope"`
+					MissingLabels  []string `json:"missing_labels"`
+					Reason         string   `json:"reason"`
+				} `json:"binding_warnings"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+			t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+		}
+		if !envelope.Data.DryRun {
+			t.Fatal("envelope does not report dry_run")
+		}
+		if len(envelope.Data.BindingWarnings) != 1 {
+			t.Fatalf("binding_warnings holds %d entries, want 1: %s",
+				len(envelope.Data.BindingWarnings), buf.String())
+		}
+		got := envelope.Data.BindingWarnings[0]
+		if got.Issue != model.FormatID(issueID) {
+			t.Errorf("binding_warnings[0].issue = %q, want %q",
+				got.Issue, model.FormatID(issueID))
+		}
+		if got.BoundWorkflow != "baseline-run@1" {
+			t.Errorf("bound_workflow = %q, want baseline-run@1", got.BoundWorkflow)
+		}
+		if got.DomainWorkflow != "ui-run@1" {
+			t.Errorf("domain_workflow = %q, want ui-run@1", got.DomainWorkflow)
+		}
+		if len(got.MissingLabels) != 1 || got.MissingLabels[0] != "ui" {
+			t.Errorf("missing_labels = %v, want [ui]", got.MissingLabels)
+		}
+		if len(got.Scope) != 1 || got.Reason == "" {
+			t.Errorf("binding_warnings[0] = %+v, want the scope and a reason", got)
+		}
+	})
+
+	t.Run("human mode writes it to stderr", func(t *testing.T) {
+		conn := newTestDB(t)
+		runID, issueID := seedMisbound(t, conn, []string{"qa"})
+
+		stderr := &bytes.Buffer{}
+		w := &output.Writer{Stdout: &bytes.Buffer{}, Stderr: stderr}
+
+		err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+		testsupport.Must(t, err, "run activate --dry-run: %v", err)
+
+		out := stderr.String()
+		// The issue, and BOTH workflows: what will run, and what the paths say
+		// should. A line naming only one of them leaves the reader to guess.
+		for _, want := range []string{model.FormatID(issueID), "baseline-run@1", "ui-run@1"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("stderr does not name %q: %q", want, out)
+			}
+		}
+	})
+
+	t.Run("a correctly labelled issue carries no key", func(t *testing.T) {
+		conn := newTestDB(t)
+		runID, _ := seedMisbound(t, conn, []string{"ui"})
+
+		w, buf := bufWriter(true)
+
+		err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+		testsupport.Must(t, err, "run activate --dry-run: %v", err)
+
+		if strings.Contains(buf.String(), "binding_warnings") {
+			t.Errorf("payload carries binding_warnings for an issue labelled for "+
+				"the workflow whose domain it sits in: %s", buf.String())
 		}
 	})
 }

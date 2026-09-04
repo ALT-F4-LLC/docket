@@ -24,7 +24,7 @@ type ActionSpec struct {
 	Name string
 	// Params is the opaque KV bag, verbatim. CORE NEVER READS A KEY INSIDE IT
 	// for a non-builtin action (§6.2) — a trusted command's params are its
-	// author's business. The builtin reads exactly the four keys §2 names for
+	// author's business. The builtin reads exactly the five keys §2 names for
 	// it, and V28 refuses any other.
 	Params map[string]any
 	// Output is `params.output`: the artifact kind this step produces (§4.3.1).

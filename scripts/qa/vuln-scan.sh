@@ -19,6 +19,16 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
+# govulncheck shells out to a binary named `go`, and this toolchain ships the
+# compiler only as go1.26.6 (the name build.sh and tests.sh call). Without a
+# `go` on PATH it reports "no go.mod file", which reads as a repo defect and is
+# not one. A scratch shim named `go` that execs go1.26.6 is placed first on
+# PATH for this gate only.
+shim="$(mktemp -d "${TMPDIR:-/tmp}/vuln-scan-go.XXXXXX")"
+trap 'rm -rf "$shim"' EXIT
+printf '#!/bin/sh\nexec go1.26.6 "$@"\n' > "$shim/go"
+chmod +x "$shim/go"
+export PATH="$shim:$PATH"
 echo "=== vuln-scan: govulncheck ./... ==="
 
 # govulncheck is not vendored. UNAVAILABLE IS A FAILURE, NOT A PASS: the whole

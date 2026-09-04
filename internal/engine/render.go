@@ -24,6 +24,36 @@ import (
 // artifacts each delimited and labeled in DECLARED order, the pinned-file list
 // with hashes, and the output instruction — and it names NO instance concept.
 // The genericity gate checks its bytes like any other core surface.
+//
+// WHAT A PACKET DRAWS FROM — the exhaustive list, for anyone deciding where
+// to put words they need a worker to read (DKT-725). A packet is the context
+// bundle (§6.6's five sources: the pinned step definition, the issue's
+// ACTIVATION-FROZEN body_snapshot and issue_snapshot, recorded input
+// artifacts, and the pin list — plus DKT-1079's sixth, the run's recorded
+// notes, rendered as `== RUN NOTE N` beside the request) plus the step's
+// declared packet files and the step's OWN routing record, rendered as
+// `== RESOLUTION`. Two consequences operators repeatedly discover the hard
+// way:
+//
+//   - issue COMMENTS never render. They are an audit surface, not a context
+//     source, and no template can reach them.
+//   - a mid-run `description` edit never renders. The packet reads
+//     `body_snapshot`, frozen at activation — §9 item 5's edit immunity.
+//   - a mid-run `--scope` edit never renders either, and for the same reason:
+//     the brief's `scope:` line reads `issue_snapshot`, and so does the scope
+//     the step's `issue.diff` is recorded over (DKT-741). There is no verb
+//     that refreshes it; an authorized mid-run widen is made real by taking
+//     the issue out of the run and re-planning it, and `issue edit --scope`
+//     says so when it lands on an issue with live steps in a live run.
+//
+// The sanctioned steering channels are two. Per step, the resolve note: `step
+// resolve --as retry|rerun-gates -m` renders on the same step's re-execution,
+// and `--as fix-round -m` is stamped onto the new round's rows
+// (stampEntryRouting) so the authorization's remedy reaches the round it paid
+// for. Per run, the run note (DKT-1079): `run note add RUN-N` renders in every
+// packet of the run from that moment on, for a fact about the run rather than
+// about one step — a gate known to fail on clean HEAD, the issue tracking it,
+// the disposition already given — so no worker rediscovers it per step.
 
 // defaultPacket is the shipped template. It lives under internal/ because the
 // Vorpal build's include list requires embeds there — the same constraint the
@@ -85,10 +115,15 @@ func RenderStep(
 // to the declared hint alone, so a label-resolved executor could never
 // receive its own contract: the corpus shipped per-resolved-hint files that
 // no packet could ever name. The resolved hint arrives here, at render time,
-// which is where substitution ALREADY re-derives — activation pinned the
-// whole config tree, so the resolved contract verifies against its pin like
-// any other entry, and a hint whose contract does not exist refuses loudly
-// naming the exact path.
+// which is where substitution ALREADY re-derives — and the resolved contract
+// verifies against its pin like any other entry, while a hint whose contract
+// does not exist refuses loudly naming the exact path. Since DKT-581,
+// activation pins the packet CLOSURE rather than the whole config tree —
+// entries substituted with the declared executor and fanout hints — so a
+// resolved hint outside the workflow's own declarations resolves only if the
+// corpus declares it somewhere in the bound definition (the shipped corpus
+// declares label-resolved executors as `when`-gated steps, which the closure
+// covers) or the operator pinned its contract with `--pin`.
 //
 // An empty executor is the declared behavior, unchanged. The override also
 // lands on the rendered step row's `executor`, so the packet's `target:`

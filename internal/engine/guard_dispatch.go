@@ -274,17 +274,8 @@ func (e *Engine) GuardSpawn(
 func decidingVoteCarveOut(
 	conn *sql.DB, proposalID int, hold string,
 ) (*GuardVerdict, error) {
-	proposal, err := db.GetProposal(conn, proposalID)
-	if err != nil {
-		return nil, notFoundErr(err,
-			"proposal %s not found; --deciding-vote must name the OPEN proposal "+
-				"this batch exists to decide", model.FormatProposalID(proposalID))
-	}
-	if proposal.Status != model.ProposalStatusOpen {
-		return nil, conflictErr(
-			"proposal %s is %s, not open; --deciding-vote admits a panel that is "+
-				"deciding a live question, and a decided one authorizes nothing",
-			model.FormatProposalID(proposalID), proposal.Status)
+	if err := requireDecidingVote(conn, proposalID); err != nil {
+		return nil, err
 	}
 	return &GuardVerdict{
 		Allowed: true,
@@ -293,6 +284,50 @@ func decidingVoteCarveOut(
 				"that exists to decide it",
 			model.FormatProposalID(proposalID), hold),
 	}, nil
+}
+
+// requireDecidingVote is the carve-out's first two clauses — the proposal
+// EXISTS and is OPEN — on their own, so the `--active` path can hold a claimed
+// vote to them even when it admits nothing (the run it names is not served).
+func requireDecidingVote(conn *sql.DB, proposalID int) error {
+	proposal, err := db.GetProposal(conn, proposalID)
+	if err != nil {
+		return notFoundErr(err,
+			"proposal %s not found; --deciding-vote must name the OPEN proposal "+
+				"this batch exists to decide", model.FormatProposalID(proposalID))
+	}
+	if proposal.Status != model.ProposalStatusOpen {
+		return conflictErr(
+			"proposal %s is %s, not open; --deciding-vote admits a panel that is "+
+				"deciding a live question, and a decided one authorizes nothing",
+			model.FormatProposalID(proposalID), proposal.Status)
+	}
+	return nil
+}
+
+// decidingVoteRuns resolves the runs a proposal SERVES: every run holding a
+// step for one of its linked issues.
+//
+// A proposal is linked to issues, never to runs, and an issue's steps are where
+// a run enters the picture — the same edge `step list --issue` walks. The set
+// is not scoped to a project or to live runs; the caller intersects it with the
+// runs it is answering over, which already are.
+func decidingVoteRuns(conn *sql.DB, proposalID int) (map[int]bool, error) {
+	issueIDs, err := db.GetProposalIssues(conn, proposalID)
+	if err != nil {
+		return nil, err
+	}
+	served := make(map[int]bool)
+	for _, issueID := range issueIDs {
+		runIDs, err := db.IssueStepRuns(conn, issueID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range runIDs {
+			served[id] = true
+		}
+	}
+	return served, nil
 }
 
 // applyAcks writes A7's CAS in its own transaction.
@@ -470,14 +505,107 @@ func spawnReapVerdict(
 		}
 		return verdict, nil
 	}
-	// The refusal NAMES the carve-out, so an operator reading it can copy the
-	// next command out of it — the same discoverability rule the ack advice
-	// follows.
-	return &GuardVerdict{
-		Allowed: false,
-		Reason: hold + "; a panel spawned to DECIDE this hold passes " +
-			"--deciding-vote PROPOSAL-N",
-	}, nil
+	return &GuardVerdict{Allowed: false, Reason: reapHoldDenial(hold)}, nil
+}
+
+// reapHoldDenial renders the refusal both spawn paths share. It NAMES the
+// carve-out, so an operator reading it can copy the next command out of it —
+// the same discoverability rule the ack advice follows.
+func reapHoldDenial(hold string) string {
+	return hold + "; a panel spawned to DECIDE this hold passes " +
+		"--deciding-vote PROPOSAL-N"
+}
+
+// GuardSpawnActive answers `docket guard spawn --active`: may every active run
+// in the project accept a spawn right now?
+//
+// DKT-1287: docket-spawn-guard-hook.sh resolved `run status --active` and
+// asked `guard spawn` about `runs[0]` alone, so with two concurrent active
+// runs the OLDER run's reap half went unasked — a hold on it would not have
+// denied the hook at all. This answers G5(b), the reap half, over EVERY
+// non-terminal run in the project (guardRunScope's own scope), denying if ANY
+// would deny and naming which.
+//
+// IT ANSWERS ONLY THE REAP HALF. G5(a)'s row comparison is a fact about ONE
+// run's open dispatch and ONE proposed batch — there is no reading of "these
+// rows against every active run" that means anything, and a relay spawning
+// against a specific run's manifest already has that run's id to pass via
+// `--run`. `--ack-reap` is the same kind of per-run act and stays on the
+// `--run` path for the same reason.
+//
+// `--deciding-vote` IS NOT: the proposal names its own run. A proposal is
+// linked to issues, and an issue's steps name the runs it serves
+// (decidingVoteRuns), so the carve-out admits the hold of every served run
+// and a run the proposal does not serve denies exactly as it would without
+// the flag. Without this a hook launching a panel had to ask twice — `--active`
+// first, then `--run RUN-N --deciding-vote` with the run parsed off the denial.
+//
+// Runs are checked in guardRunScope's own oldest-first order, so the FIRST
+// denial found names the OLDEST run that would deny.
+func GuardSpawnActive(
+	conn *sql.DB, projectID, decidingVote int, nowMS int64,
+) (*GuardVerdict, error) {
+	runIDs, err := guardRunScope(conn, 0, projectID)
+	if err != nil {
+		return nil, err
+	}
+	var served map[int]bool
+	if decidingVote > 0 {
+		if served, err = decidingVoteRuns(conn, decidingVote); err != nil {
+			return nil, err
+		}
+	}
+
+	// A carve-out is RECORDED ONLY ONCE EVERY RUN HAS PASSED. The audit event
+	// says a spawn was admitted past a hold, and a later run's denial means no
+	// spawn happens at all — written per run, the event would claim an
+	// admission the verdict then withheld.
+	type carveOut struct {
+		runID        int
+		hold, reason string
+	}
+	var admitted []carveOut
+	for _, id := range runIDs {
+		open, err := openReapHold(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		if len(open) == 0 {
+			continue
+		}
+		hold := ReapHoldReason(open)
+		run := model.FormatRunID(id)
+		if decidingVote == 0 {
+			return &GuardVerdict{Allowed: false, Reason: run + ": " + reapHoldDenial(hold)}, nil
+		}
+		if !served[id] {
+			// The vote was claimed against this hold, so it is held to the
+			// carve-out's own clauses before the denial says why it did not
+			// apply: an id nobody created should read as that, not as a
+			// proposal serving the wrong run.
+			if err := requireDecidingVote(conn, decidingVote); err != nil {
+				return nil, err
+			}
+			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
+				"%s: %s; --deciding-vote %s does not apply: it is linked to no "+
+					"issue with a step on %s",
+				run, hold, model.FormatProposalID(decidingVote), run)}, nil
+		}
+		verdict, err := decidingVoteCarveOut(conn, decidingVote, hold)
+		if err != nil {
+			return nil, err
+		}
+		admitted = append(admitted, carveOut{id, hold, run + ": " + verdict.Reason})
+	}
+
+	reasons := make([]string, 0, len(admitted))
+	for _, c := range admitted {
+		if err := recordGuardCarveOut(conn, c.runID, decidingVote, c.hold, nowMS); err != nil {
+			return nil, err
+		}
+		reasons = append(reasons, c.reason)
+	}
+	return &GuardVerdict{Allowed: true, Reason: strings.Join(reasons, "; ")}, nil
 }
 
 // openReapHold reads a run's unacknowledged reaps in its own rolled-back

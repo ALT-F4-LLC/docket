@@ -140,6 +140,17 @@ const (
 	// whichever pipeline held, so who answers it is a project-level policy.
 	KeyVoteHoldRule   = "vote.hold.rule"
 	KeyVoteHoldVoters = "vote.hold.voters"
+	// KeyVoteHoldCost is the declared `expected_cost` a MATERIALIZED HELD vote
+	// step is minted with (DKT-584). An engine-minted held ballot has no
+	// `[[step]]` table to declare a cost in, so it carried 0 by construction —
+	// and since a vote step's declared cost accrues to the budget floor at
+	// materialization, that made every held panel invisible to the floor.
+	//
+	// Default "0", which is EXACTLY the prior behavior: a held ballot accrues
+	// nothing until an instance states what its panels cost. It applies only
+	// when a hold is minted as `vote` (both vote.hold.* keys set); a hold
+	// minted `human` is one operator's decision, not a panel's spend.
+	KeyVoteHoldCost = "vote.hold.cost"
 
 	// KeyAutoRegister toggles §9's auto-registration: whether `run activate`
 	// registers a workflow/schema it finds in an instance-config root
@@ -407,6 +418,14 @@ var engineConfigSpecs = []ConfigSpec{
 		Default: "",
 		Doc: "Comma-separated voters on a materialized held step. Empty (the " +
 			"default) mints held steps as `human` for one operator to decide",
+	},
+	{
+		Key:     KeyVoteHoldCost,
+		Kind:    KindNonNegativeNumber,
+		Default: "0",
+		Doc: "Declared expected_cost a materialized held VOTE step is minted " +
+			"with, accrued to the run's budget floor at materialization. 0 " +
+			"(the default) accrues nothing, the prior behavior",
 	},
 	{
 		Key:     KeyAutoRegister,

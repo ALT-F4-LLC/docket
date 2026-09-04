@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -185,6 +186,245 @@ func newestIssueDiffUpTo(tx *sql.Tx, step *db.Step, ordinal int) (hash, body str
 	return hash, body, nil
 }
 
+// routingVerdictUnchanged reports whether the step whose routing is about to
+// enter the loop recorded the IDENTICAL artifact at its own previous ordinal
+// (DKT-589).
+//
+// It is roundMovedNothing's sibling, measuring the other end of the same
+// round. roundMovedNothing asks whether the loop BODY moved any bytes; this
+// asks whether the ROUTING STEP reached any new conclusion. RUN-31 is the case
+// the first one cannot see: verify@0 reported AC2 and AC5 unmet, fix@1
+// committed an 82,742-byte diff, verify@1 reported AC2 and AC5 unmet with AC9
+// newly regressed, fix@2 committed 2,571 bytes, and verify@2 came back
+// BYTE-IDENTICAL to verify@1. Both rounds moved real bytes, so DKT-340's
+// byte-based guard correctly stayed silent — and 342,490 output tokens, 45.8%
+// of the run, closed zero acceptance criteria. RUN-34 is the same shape with
+// four byte-identical ac-reports.
+//
+// WHAT IS COMPARED IS THE WHOLE ARTIFACT, AS BYTES. The reference corpus's
+// verify emits `ac-report` and the issue describes the symptom as "the same
+// criterion ids at the same statuses" — but "criterion", "id" and "status" are
+// the workflow author's vocabulary, not core's, exactly as `severity` and
+// `finding` are (genericity.md, and roundMovedNothing's own reasoning). Core
+// reads the kind the step's OWN `emits`/`params.output` declares —
+// workflow.ArtifactKind, the same resolution `complete` used to record it and
+// input resolution uses to bind it — and compares the recorded sha256, which
+// covers body AND payload. No JSON is parsed and no kind is hardcoded: a
+// workflow whose gate emits `qa-verdict` or `lint-report` gets the identical
+// check for free, and one whose payload shape nobody here has seen cannot
+// break it.
+//
+// IT FAILS TOWARD ENTERING THE ROUND, roundMovedNothing's direction and for its
+// reason. Ordinal 0 has no previous round of its own; a step class that records
+// no artifact at all (`type = "human"`, `type = "vote"` — ArtifactKind "") has
+// nothing to compare, which is what keeps a rejected gate, a lost tally and an
+// exhausted attempt budget out of this check entirely; and an artifact with no
+// bytes in either channel is an absent measurement, never a matching one.
+//
+// The CURRENT side is read AT this step's exact ordinal, not "at or below" it
+// the way newestIssueDiffUpTo reads the body's diff. The suppression that makes
+// "up to" necessary there is `issue.diff`-only (DKT-258/DKT-259) — a declared
+// emit always records — so "at or below" would here mean something quite
+// different and quite wrong: a routing step that recorded NOTHING at this
+// ordinal (an exhausted budget, a rejected gate materialized on another row)
+// would read its own previous round's artifact on both sides and park on a
+// comparison of one row with itself. The PRIOR side keeps priorRoundHandBack's
+// "newest strictly below" so a cluster whose routing step skipped an ordinal
+// still compares against the last verdict it actually reached.
+func routingVerdictUnchanged(
+	tx *sql.Tx, step *db.Step, def *workflow.Definition, trigger string,
+) (bool, int, error) {
+	if step.Ordinal < 1 {
+		return false, 0, nil
+	}
+	spec := workflow.StepByName(def, trigger)
+	if spec == nil {
+		return false, 0, nil
+	}
+	kind := workflow.ArtifactKind(spec)
+	if kind == "" {
+		return false, 0, nil
+	}
+	now, _, err := newestStepEmit(tx, step, trigger, kind, step.Ordinal, step.Ordinal)
+	if err != nil || now == "" {
+		return false, 0, err
+	}
+	before, priorOrdinal, err := newestStepEmit(tx, step, trigger, kind, 0, step.Ordinal-1)
+	if err != nil || before == "" {
+		return false, 0, err
+	}
+	return now == before, priorOrdinal, nil
+}
+
+// newestStepEmit is the fingerprint of the newest artifact of one KIND recorded
+// by one STEP NAME's rows within an ordinal range, AND the ordinal it was
+// recorded at — "" when that step recorded none there, and "" when the one it
+// recorded carries no bytes at all.
+//
+// The ordinal comes back because the caller's park names it to the operator: a
+// range read must report where it landed, not where the caller assumed it
+// would.
+//
+// Scoped by (run, issue, step name, kind), which is priorRoundHandBack's shape
+// rather than newestIssueDiffUpTo's: the issue-wide read is right for
+// `issue.diff`, which is one cumulative fact about the tree whoever produced
+// it, and wrong here, where the question is whether ONE step reached the same
+// conclusion twice. Another producer's artifact of the same kind — the
+// fixture's `synthesize` and `reconcile` both emit `findings` — says nothing
+// about that.
+//
+// Newest-first by artifact id, matching every other "the latest artifact wins"
+// read in the engine: a re-claimed step completing a second time records again,
+// and the last record is the verdict that stands.
+//
+// AN ARTIFACT WITH NO BYTES IS NOT A MEASUREMENT. Two empty records agree with
+// each other trivially — not because the step reached the same conclusion, but
+// because it recorded no conclusion at all — and parking a loop on that is
+// roundMovedNothing's degenerate-diff failure in a new place.
+func newestStepEmit(
+	tx *sql.Tx, step *db.Step, name, kind string, lo, hi int,
+) (string, int, error) {
+	if hi < lo || hi < 0 {
+		return "", 0, nil
+	}
+	var hash, body string
+	var payload sql.NullString
+	var ordinal int
+	err := tx.QueryRow(
+		`SELECT a.sha256, a.body, a.payload, s.ordinal FROM artifacts a
+		   JOIN steps s ON s.id = a.step_id
+		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ? AND a.kind = ?
+		    AND s.ordinal >= ? AND s.ordinal <= ?
+		  ORDER BY a.id DESC LIMIT 1`,
+		step.RunID, step.IssueID, name, kind, lo, hi,
+	).Scan(&hash, &body, &payload, &ordinal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("reading %s's %s from %q at ordinals %d-%d: %w",
+			model.FormatID(step.IssueID), kind, name, lo, hi, err)
+	}
+	if strings.TrimSpace(body) == "" && strings.TrimSpace(payload.String) == "" {
+		return "", 0, nil
+	}
+	return hash, ordinal, nil
+}
+
+// stalledVolume is what volumeStalled reports when the trigger's routed volume
+// has plateaued: how many consecutive measured rounds ran without improvement,
+// what the newest round routed, the best (smallest) volume any round achieved,
+// and the declared tolerance — the four numbers the park's clause names.
+type stalledVolume struct {
+	rounds, current, best, bound int
+}
+
+// volumeStalled reports whether the triggering step's routed volume has gone
+// `max_stalled_rounds` consecutive measured rounds without EVER falling below
+// the smallest volume any earlier round recorded (DKT-870), or nil when it has
+// not — including every case where the check is not in force or cannot measure.
+//
+// THE MEASUREMENT IS A COUNT OF PAYLOAD ELEMENTS, per round: for each ordinal,
+// the newest artifact of the trigger's own declared kind, its payload parsed by
+// the same shape rule the threshold's read uses (parsePayload), its length
+// taken and nothing else read. That is the engine-visible rendering of the
+// corpus's "standing-cluster volume" — one element per cluster is exactly what
+// the routed payload is (§7.6) — reached without core learning what a cluster
+// is. The read is scoped (run, issue, step name, kind) for newestStepEmit's
+// reason: another producer's payload of the same kind says nothing about what
+// THIS trigger keeps routing.
+//
+// "WITHOUT IMPROVEMENT" MEANS NO NEW STRICT MINIMUM, not endpoint-to-endpoint
+// decrease. RUN-51's volumes (8, 12, 10, 10, 7, 10, 7, 11, 10, ~8) decrease
+// between plenty of ADJACENT rounds while never trending anywhere, so a
+// consecutive-pairs reading would stay silent for exactly the run this exists
+// for; and a tie with the best round is not progress — RUN-51's round 6
+// re-achieving round 4's seven clusters was two rounds at the same wall. A
+// genuinely converging loop sets a new minimum every round or two and never
+// accumulates `bound` consecutive non-improving measurements.
+//
+// IT FAILS TOWARD ENTERING THE ROUND, its siblings' direction for their
+// reason: no declared bound, no declared kind, a round with no recorded
+// artifact, a payload with no bytes, and unparseable bytes are all absent
+// measurements, never flat ones — a guard must not act on absence of evidence.
+func volumeStalled(
+	tx *sql.Tx, step *db.Step, def *workflow.Definition, trigger string,
+) (*stalledVolume, error) {
+	spec := workflow.StepByName(def, trigger)
+	if spec == nil || spec.MaxStalledRounds == nil || *spec.MaxStalledRounds <= 0 {
+		return nil, nil
+	}
+	kind := workflow.ArtifactKind(spec)
+	if kind == "" {
+		return nil, nil
+	}
+
+	// The newest payload per ordinal, up to the round that just completed.
+	// Ordered by artifact id so a later row overwrites an earlier one in the
+	// map — the same "latest artifact wins" read as everywhere else.
+	rows, err := tx.Query(
+		`SELECT s.ordinal, a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
+		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ? AND a.kind = ?
+		    AND s.ordinal <= ?
+		  ORDER BY a.id`,
+		step.RunID, step.IssueID, trigger, kind, step.Ordinal)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s's routed volumes: %w",
+			model.FormatID(step.IssueID), err)
+	}
+	defer rows.Close()
+
+	byOrdinal := make(map[int]string)
+	var ordinals []int
+	for rows.Next() {
+		var (
+			ordinal int
+			payload sql.NullString
+		)
+		if err := rows.Scan(&ordinal, &payload); err != nil {
+			return nil, fmt.Errorf("reading a routed volume: %w", err)
+		}
+		if _, seen := byOrdinal[ordinal]; !seen {
+			ordinals = append(ordinals, ordinal)
+		}
+		byOrdinal[ordinal] = payload.String
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading the routed volumes: %w", err)
+	}
+	sort.Ints(ordinals)
+
+	// Walk the measured rounds in order, tracking the best volume and how many
+	// measurements have arrived since a round last IMPROVED on it. The first
+	// measurement is the baseline, not an improvement streak of its own, so
+	// the signal needs at least bound+1 measured rounds before it can fire.
+	out := &stalledVolume{best: -1, bound: *spec.MaxStalledRounds}
+	for _, ordinal := range ordinals {
+		raw := byOrdinal[ordinal]
+		if strings.TrimSpace(raw) == "" {
+			// No bytes is not a measurement (newestStepEmit's rule): counting
+			// it as volume zero would let a round that recorded nothing read
+			// as total convergence, or a run of them read as a plateau.
+			continue
+		}
+		payloads, perr := parsePayload([]byte(raw))
+		if perr != nil {
+			continue // Unparseable bytes measure nothing either.
+		}
+		volume := len(payloads)
+		if out.best < 0 || volume < out.best {
+			out.best, out.rounds = volume, 0
+		} else {
+			out.rounds++
+		}
+		out.current = volume
+	}
+	if out.best < 0 || out.rounds < out.bound {
+		return nil, nil
+	}
+	return out, nil
+}
+
 // EnterLoop performs a `fix-loop` routing, inside the caller's routing
 // transaction.
 //
@@ -193,16 +433,19 @@ func newestIssueDiffUpTo(tx *sql.Tx, step *db.Step, ordinal int) (hash, body str
 // transaction with the step update that triggered it, because a partial loop
 // entry — a counter raised with no bodies instantiated, or bodies instantiated
 // twice — is not a state any later pass can repair without guessing.
-// The routing STEP's own spec is deliberately not a parameter: nothing about a
-// loop entry depends on which step routed. The counter is the issue's, the
-// bound is the workflow's, the sweep set is `after_loop`'s downstream, and the
-// instantiation is the definition's — so a `fix-loop` from `verify` and one
-// from `reconcile` must produce identical effects. Taking the spec would invite
-// a future reader to make one of those depend on it.
+//
+// WHICH step routed decides WHICH CLUSTER enters (§11.3 cluster scoping,
+// DKT-544): the serving `loop = true` bodies, their `after_loop` roots'
+// downstream, and any per-cluster round bound are all read for the TRIGGERING
+// step's name — a `fix-loop` from `verify` and one from `reconcile` produce
+// identical effects exactly when the same bodies serve both, which is always
+// true in a workflow that declares no `serves`. The counter stays the ISSUE's
+// either way: every cluster's entries share one ordinal sequence and one
+// global ceiling.
 func EnterLoop(
 	tx *sql.Tx, step *db.Step, def *workflow.Definition, nowMS int64,
 ) (*LoopOutcome, error) {
-	return enterLoop(tx, step, def, false, nowMS)
+	return enterLoop(tx, step, def, false, "", nowMS)
 }
 
 // EnterLoopAuthorized is EnterLoop under an EXPLICIT operator authorization —
@@ -217,15 +460,39 @@ func EnterLoop(
 // The BOUND is not waived here, because it does not need to be: a grant raises
 // the effective maximum, so the same resolution already gets past it through
 // LoopGrantsTx. Only the convergence check has no such counter to move.
+//
+// `note` is the resolution's `-m` text — the operator's steering for the round
+// they just paid for (DKT-725). It is stamped onto the round's freshly
+// instantiated rows as their entering routing record, which is the ONE channel
+// that reliably reaches a new round's rendered packet: issue comments are not
+// a context source at all (§6.6's five-source rule), and a mid-run
+// `description` edit never renders either, because `body_snapshot` is frozen
+// at activation (§9 item 5's mid-run edit immunity). Before this stamp, the
+// note died on the SUPERSEDED park's row — RUN-51's fix@9 rendered zero bytes
+// of the judge-converged remedy the operator recorded when authorizing it.
 func EnterLoopAuthorized(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, nowMS int64,
+	tx *sql.Tx, step *db.Step, def *workflow.Definition, note string, nowMS int64,
 ) (*LoopOutcome, error) {
-	return enterLoop(tx, step, def, true, nowMS)
+	return enterLoop(tx, step, def, true, note, nowMS)
 }
 
 func enterLoop(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, authorized bool, nowMS int64,
+	tx *sql.Tx, step *db.Step, def *workflow.Definition, authorized bool,
+	note string, nowMS int64,
 ) (*LoopOutcome, error) {
+	// The TRIGGER is the routing step's name, and it selects the cluster
+	// (§11.3 cluster scoping): the serving bodies, the scoped sweep set, and
+	// the per-cluster bound are all read for it. A materialized `<step>-held`
+	// name maps back to its routing step first (H17), because the definition
+	// declares clusters over its own names and a held row routes on its
+	// routing step's behalf.
+	trigger := step.StepName
+	if routing, ok := workflow.RoutingStepNameOf(trigger); ok {
+		trigger = routing
+	}
+	bodies := workflow.LoopBodiesFor(def, trigger)
+	downstream := afterLoopDownstreamFor(def, trigger)
+
 	// ---- Clause (1): the issue's counter, and the bound. -------------------
 	//
 	// The increment happens FIRST and its result is what decides the bound, so
@@ -297,6 +564,40 @@ func enterLoop(
 		}, nil
 	}
 
+	// THE CLUSTER'S OWN BOUND (§11.3 cluster scoping, DKT-544). A
+	// `max_fix_loops` declared on a `serves`-scoped body bounds ITS cluster's
+	// rounds, under the issue-level ceiling above — several independent
+	// quality gates can then carry different retry budgets without sharing
+	// one. Rounds are counted from the rows the entries themselves wrote:
+	// each entry instantiates its serving bodies at a fresh ordinal, so the
+	// distinct ordinals holding this cluster's scoped bodies ARE its entries,
+	// and no second counter can drift from the instances it is counting.
+	//
+	// The refusal takes the bound's exact shape — nothing superseded, nothing
+	// instantiated, counter restored, `waiting-human` naming `fix-round` as
+	// the way out — and an AUTHORIZED entry skips it the way it skips
+	// non-convergence: the operator who just granted the round has answered
+	// the question this bound asks.
+	if clusterMax := clusterMaxFixLoops(def, trigger); clusterMax > 0 && !authorized {
+		rounds, err := clusterRoundsUsed(tx, step, scopedClusterBodies(def, trigger))
+		if err != nil {
+			return nil, err
+		}
+		if rounds+1 > clusterMax {
+			if err := restoreLoopCount(tx, step, count); err != nil {
+				return nil, err
+			}
+			reason := fmt.Sprintf(
+				"loop round %d for %q would exceed its cluster's max_fix_loops = %d "+
+					"on %s; `docket step resolve --as fix-round` authorizes one more round",
+				rounds+1, trigger, clusterMax, model.FormatID(step.IssueID))
+			return &LoopOutcome{
+				Entered: false, Ordinal: count - 1,
+				Routing: workflow.OnFailWaitingHuman, Reason: reason,
+			}, nil
+		}
+	}
+
 	// NON-CONVERGENCE (DKT-340). A round that changed nothing in the issue's
 	// scope cannot have changed what any check measures, so the next round is
 	// handed the identical tree and reaches the identical verdict. The loop is
@@ -315,19 +616,93 @@ func enterLoop(
 	// budget raise was needed to survive the churn. Core cannot know that an
 	// acceptance criterion is unmeetable; it can see that a round moved no
 	// bytes the run is scoped to, which is enough to stop and ask.
+	//
+	// THE SECOND SIGNAL (DKT-589) is the same refusal read from the other end
+	// of the round. A round that moved bytes can still change nothing that
+	// MATTERS: RUN-31's fix@1 committed 82,742 bytes and fix@2 committed 2,571
+	// more, and verify@2's ac-report came back byte-identical to verify@1's —
+	// so roundMovedNothing correctly saw movement and stayed silent while
+	// 342,490 output tokens, 45.8% of the run, closed zero acceptance
+	// criteria. When the ROUTING step's own recorded verdict is unchanged, the
+	// next round is being asked to fix the same thing on the same evidence.
+	//
+	// The two signals are OR'd into ONE refusal deliberately: one shape
+	// (nothing superseded, nothing instantiated, counter restored), one reason
+	// family, one `--as fix-round` way out, one `authorized` waiver. A second,
+	// differently-shaped park would be a second thing for an operator to learn
+	// and a second place for the escape hatch to be forgotten. Only the CLAUSE
+	// naming what did not change differs, because that is the one thing the
+	// operator reading the park needs to tell them apart.
 	stalled, err := roundMovedNothing(tx, step, count)
 	if err != nil {
 		return nil, err
+	}
+	clause := ""
+	if stalled {
+		clause = fmt.Sprintf(
+			"round %d changed nothing in %s's scope, so another round reads the "+
+				"same tree and reaches the same verdict",
+			count-1, model.FormatID(step.IssueID))
+	} else {
+		// The PRIOR ORDINAL the comparison actually matched is what the reason
+		// names, not `step.Ordinal - 1`: the prior side is the newest verdict
+		// STRICTLY BELOW this ordinal, and a cluster whose routing step sat out
+		// an ordinal would otherwise be told about a round it never ran.
+		repeated, priorOrdinal, err := routingVerdictUnchanged(tx, step, def, trigger)
+		if err != nil {
+			return nil, err
+		}
+		if repeated {
+			stalled = true
+			clause = fmt.Sprintf(
+				"%q recorded the identical verdict at ordinals %d and %d on %s, "+
+					"so another round is handed the same verdict the last one "+
+					"already failed to change",
+				trigger, priorOrdinal, step.Ordinal, model.FormatID(step.IssueID))
+		}
+	}
+	// THE THIRD SIGNAL (DKT-870) is the one the first two cannot see: rounds
+	// that each move real bytes and each reach a byte-distinct verdict, while
+	// the SIZE of the standing set the trigger routes never improves. RUN-51
+	// held 8-12 clusters flat across TEN rounds — rounds 8 and 9 alone spent
+	// ~271k and ~251k output tokens after the run's own ruling that the defect
+	// was structural — and RUN-50 held 7-10 across six; both ended only by
+	// operator action, because DKT-340 saw moving trees and DKT-589 saw
+	// changing verdicts, and nothing read the plateau. The measurement is the
+	// element COUNT of the trigger's own routed payload per round — packaging
+	// arithmetic, like `held`'s index list — so core still knows nothing about
+	// clusters or severities; the tolerance is the author's `max_stalled_rounds`
+	// (V38), zero or absent meaning the signal never fires.
+	//
+	// It joins the SAME refusal, deliberately: one shape, one reason family,
+	// one `--as fix-round` way out, one `authorized` waiver — the exact
+	// argument the two signals above make for each other. Only the clause
+	// differs, naming the flat volume, because that is what the operator
+	// reading the park needs.
+	if !stalled {
+		flat, err := volumeStalled(tx, step, def, trigger)
+		if err != nil {
+			return nil, err
+		}
+		if flat != nil {
+			stalled = true
+			clause = fmt.Sprintf(
+				"%q has routed %d element(s) after %d consecutive round(s) in "+
+					"which the volume never fell below its best of %d "+
+					"(max_stalled_rounds = %d) on %s, so the loop is holding "+
+					"its standing volume flat rather than converging",
+				trigger, flat.current, flat.rounds, flat.best, flat.bound,
+				model.FormatID(step.IssueID))
+		}
 	}
 	if stalled && !authorized {
 		if err := restoreLoopCount(tx, step, count); err != nil {
 			return nil, err
 		}
 		reason := fmt.Sprintf(
-			"loop %d would repeat: round %d changed nothing in %s's scope, so "+
-				"another round reads the same tree and reaches the same verdict; "+
+			"loop %d would repeat: %s; "+
 				"`docket step resolve --as fix-round` authorizes one anyway",
-			count, count-1, model.FormatID(step.IssueID))
+			count, clause)
 		return &LoopOutcome{
 			Entered: false, Ordinal: count - 1,
 			Routing: workflow.OnFailWaitingHuman, Reason: reason,
@@ -338,8 +713,8 @@ func enterLoop(
 		Entered: true, Ordinal: count, Routing: workflow.OnFailFixLoop,
 	}
 
-	// ---- Clause (2): the supersede sweep. ----------------------------------
-	superseded, err := supersedeSweep(tx, step, def, count, nowMS)
+	// ---- Clause (2): the supersede sweep, over THIS cluster's set. ---------
+	superseded, err := supersedeSweep(tx, step, downstream, count, nowMS)
 	if err != nil {
 		return nil, err
 	}
@@ -347,11 +722,11 @@ func enterLoop(
 
 	// ---- Clauses (3) and (4): instantiate at the new ordinal. --------------
 	//
-	// The loop BODIES (clause 3) and the re-instantiated `after_loop` chain
-	// (clause 4) are one expansion at ordinal `count`, not two: they are the
-	// same set of rows written by the same rules, and separating them would
+	// The serving loop BODIES (clause 3) and the re-instantiated `after_loop`
+	// chain (clause 4) are one expansion at ordinal `count`, not two: they are
+	// the same set of rows written by the same rules, and separating them would
 	// invite two writers disagreeing about which steps belong to ordinal k.
-	instantiated, err := instantiateOrdinal(tx, step, def, count, nowMS)
+	instantiated, err := instantiateOrdinal(tx, step, def, bodies, downstream, count, nowMS)
 	if err != nil {
 		return nil, err
 	}
@@ -375,10 +750,25 @@ func enterLoop(
 	}
 	out.Instantiated = append(out.Instantiated, repaired...)
 
+	// An AUTHORIZED entry's note is the operator's steering for the round, and
+	// this stamp is what carries it into the round's packets (DKT-725) — see
+	// EnterLoopAuthorized. Only an operator's `fix-round` note is stamped: an
+	// automatic entry's reason is machine diagnostics, and stamping it would
+	// change every looping packet for no ruling anyone issued.
+	if authorized && note != "" {
+		if err := stampEntryRouting(tx, step, out.Instantiated, note, nowMS); err != nil {
+			return nil, err
+		}
+	}
+
+	// The event names the TRIGGER alongside the ordinal, because with cluster
+	// scoping the trigger is what decided which bodies ran — a ledger reader
+	// asking "whose rounds were these" should not have to re-derive it from
+	// the instance column.
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventLoopEntered, RunID: step.RunID,
 		Instance: step.Instance, IssueID: step.IssueID,
-		Data: fmt.Sprintf(`{"ordinal":%d}`, count), AtMS: nowMS,
+		Data: fmt.Sprintf(`{"ordinal":%d,"trigger":%q}`, count, trigger), AtMS: nowMS,
 	}); err != nil {
 		return nil, err
 	}
@@ -394,9 +784,17 @@ func enterLoop(
 // loop must be bounded by the same number — a per-step reading would let the
 // bound depend on which step happened to route, which is not a bound at all.
 //
+// A `serves`-scoped loop body's declaration is NOT this bound: it is that
+// CLUSTER's round budget (clusterMaxFixLoops), so it is skipped here — the
+// global ceiling stays whatever a non-cluster step declares, exactly as it
+// would read without the clusters.
+//
 // Zero means unbounded, which is what a definition declaring nothing means.
 func maxFixLoops(def *workflow.Definition) int {
 	for _, step := range def.Steps {
+		if step.Loop && len(step.Serves) > 0 {
+			continue
+		}
 		if step.MaxFixLoops != nil && *step.MaxFixLoops > 0 {
 			return *step.MaxFixLoops
 		}
@@ -404,12 +802,89 @@ func maxFixLoops(def *workflow.Definition) int {
 	return 0
 }
 
-// supersedeSweep is §7.3, exactly.
+// scopedClusterBodies is the set of `serves`-SCOPED loop bodies serving one
+// trigger — LoopBodiesFor minus the serve-everything bodies. It is the set the
+// per-cluster bound is declared on and counted over: an unscoped body
+// instantiates on EVERY cluster's entries, so counting its ordinals would
+// charge one cluster for another's rounds.
+func scopedClusterBodies(def *workflow.Definition, trigger string) []string {
+	var out []string
+	for _, step := range def.Steps {
+		if step.Loop && len(step.Serves) > 0 && workflow.ServesTrigger(step, trigger) {
+			out = append(out, step.Name)
+		}
+	}
+	return out
+}
+
+// clusterMaxFixLoops reads the per-cluster round bound for one trigger: the
+// smallest positive `max_fix_loops` declared on a `serves`-scoped body serving
+// it (§11.3 cluster scoping, DKT-544). Zero means the cluster declares no
+// bound of its own and only the issue-level ceiling applies.
 //
-// On loop entry at ordinal k-1 -> k: every instance of the `after_loop`
-// downstream set, at ordinal < k, that is NOT YET CLAIMED becomes `superseded`
-// and is event-logged. Claimed, running, and gated instances are LEFT ALONE to
-// finish; their eventual routing is made inert by StaleLineage.
+// The SMALLEST when several bodies declare one, for the same reason a bound
+// read off "whichever step routed" is not a bound: the cluster's budget must
+// not depend on declaration order, and the conservative merge is the only
+// deterministic one an author can reason about.
+func clusterMaxFixLoops(def *workflow.Definition, trigger string) int {
+	out := 0
+	for _, step := range def.Steps {
+		if !step.Loop || len(step.Serves) == 0 || !workflow.ServesTrigger(step, trigger) {
+			continue
+		}
+		if step.MaxFixLoops == nil || *step.MaxFixLoops <= 0 {
+			continue
+		}
+		if out == 0 || *step.MaxFixLoops < out {
+			out = *step.MaxFixLoops
+		}
+	}
+	return out
+}
+
+// clusterRoundsUsed counts the rounds a cluster has already run for one issue:
+// the distinct ordinals at which any of its scoped bodies has an instance.
+// Every entry instantiates its serving bodies at the entry's fresh ordinal and
+// bodies instantiate nowhere else — never at ordinal 0 — so the instances ARE
+// the entry record, and a count read from them cannot drift from what actually
+// ran the way a separate counter could. A bounded refusal wrote no body rows,
+// so refusals are correctly not counted as rounds.
+//
+// Bodies SHARED between clusters (one `serves` list naming several triggers)
+// are counted wherever they ran: a shared body's round is a real round of every
+// cluster it serves, which is the conservative reading of a budget.
+func clusterRoundsUsed(tx *sql.Tx, step *db.Step, bodies []string) (int, error) {
+	if len(bodies) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.Repeat("?,", len(bodies))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := []any{step.RunID, step.IssueID}
+	for _, name := range bodies {
+		args = append(args, name)
+	}
+	var rounds int
+	err := tx.QueryRow(
+		`SELECT COUNT(DISTINCT ordinal) FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name IN (`+placeholders+`)`,
+		args...).Scan(&rounds)
+	if err != nil {
+		return 0, fmt.Errorf("counting %s's cluster rounds: %w",
+			model.FormatID(step.IssueID), err)
+	}
+	return rounds, nil
+}
+
+// supersedeSweep is §7.3, exactly, over the TRIGGERING CLUSTER's set.
+//
+// On loop entry at ordinal k-1 -> k: every instance of the entering cluster's
+// `after_loop` downstream set (`downstream`, computed by the caller for the
+// triggering step), at ordinal < k, that is NOT YET CLAIMED becomes
+// `superseded` and is event-logged. Claimed, running, and gated instances are
+// LEFT ALONE to finish; their eventual routing is made inert by StaleLineage.
+// Instances OUTSIDE the cluster's set are not candidates at all — another
+// cluster's chain keeps its current instances, exactly as a branch parallel to
+// the loop always has (DKT-540).
 //
 // The status table (§7.7) is the specification and is worth stating as one:
 //
@@ -433,9 +908,8 @@ func maxFixLoops(def *workflow.Definition) int {
 // an operator was asked. The sweep is therefore written as an explicit
 // unclaimed-and-pending test rather than as a negation.
 func supersedeSweep(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, ordinal int, nowMS int64,
+	tx *sql.Tx, step *db.Step, downstream map[string]bool, ordinal int, nowMS int64,
 ) ([]string, error) {
-	downstream := afterLoopDownstream(def)
 	if len(downstream) == 0 {
 		return nil, nil
 	}
@@ -527,12 +1001,20 @@ func supersedeSweep(
 	return out, nil
 }
 
-// afterLoopDownstream computes §7.3 (1)'s set: the `after_loop` step and every
-// step transitively `after` it.
+// afterLoopDownstream computes §7.3 (1)'s MERGED set: every `after_loop` root
+// and every step transitively `after` one — the union over every cluster.
 //
 // The traversal is over the DEFINITION, not over expanded rows, because the set
 // is a property of the workflow's shape and must be the same on every entry —
 // including one where a downstream step has no instance yet.
+//
+// This merged closure stays the reading of every consumer that asks "is this
+// step part of what ANY loop re-runs" — the scheduler's ordering predicates
+// (stage.go), the loop-producer input redirect (context.go) — because for them
+// a per-cluster answer would have to be re-derived per candidate trigger with
+// no trigger in hand. Loop ENTRY itself uses afterLoopDownstreamFor: the entry
+// knows its trigger, and sweeping or re-instantiating another cluster's chain
+// is exactly what cluster scoping exists to stop (DKT-544).
 func afterLoopDownstream(def *workflow.Definition) map[string]bool {
 	var roots []string
 	for _, step := range def.Steps {
@@ -540,6 +1022,26 @@ func afterLoopDownstream(def *workflow.Definition) map[string]bool {
 			roots = append(roots, step.AfterLoop)
 		}
 	}
+	return downstreamClosure(def, roots)
+}
+
+// afterLoopDownstreamFor is afterLoopDownstream scoped to one triggering step:
+// the closure over only the `after_loop` roots declared by steps SERVING that
+// trigger (§11.3 cluster scoping). With no `serves` declared anywhere, every
+// declarer serves every trigger and this is afterLoopDownstream exactly.
+func afterLoopDownstreamFor(def *workflow.Definition, trigger string) map[string]bool {
+	var roots []string
+	for _, step := range def.Steps {
+		if step.AfterLoop != "" && workflow.ServesTrigger(step, trigger) {
+			roots = append(roots, step.AfterLoop)
+		}
+	}
+	return downstreamClosure(def, roots)
+}
+
+// downstreamClosure is the shared walk under both root sets: the roots plus
+// every step transitively `after` one.
+func downstreamClosure(def *workflow.Definition, roots []string) map[string]bool {
 	if len(roots) == 0 {
 		return nil
 	}
@@ -573,18 +1075,21 @@ func afterLoopDownstream(def *workflow.Definition) map[string]bool {
 	return set
 }
 
-// instantiateOrdinal writes the rows clauses (3) and (4) call for: the loop
-// bodies and the re-instantiated `after_loop` chain, all at ordinal k.
+// instantiateOrdinal writes the rows clauses (3) and (4) call for: the
+// triggering cluster's loop bodies and its re-instantiated `after_loop`
+// chain, all at ordinal k. `bodies` and `downstream` are the caller's — the
+// same trigger-scoped sets the sweep and the bound already read, so one
+// entry's four effects cannot disagree about which cluster it is.
 //
 // Steps NOT in either set are not re-instantiated. `implement` is the example
 // worth holding onto: it is upstream of `after_loop`, it never re-runs, and its
 // artifact stays bound at ordinal 0 — which is exactly why §7.4's fallback is
-// per-input rather than per-step.
+// per-input rather than per-step. Another cluster's bodies and chain are
+// likewise untouched: their rounds are their own triggers' to mint.
 func instantiateOrdinal(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, ordinal int, nowMS int64,
+	tx *sql.Tx, step *db.Step, def *workflow.Definition,
+	bodies, downstream map[string]bool, ordinal int, nowMS int64,
 ) ([]string, error) {
-	downstream := afterLoopDownstream(def)
-
 	// The issue's subject, for `when` predicates — read from the SNAPSHOT, so a
 	// re-instantiation at ordinal k evaluates the same predicate against the
 	// same facts activation froze. Reading the live issue here would make a
@@ -595,12 +1100,13 @@ func instantiateOrdinal(
 		return nil, err
 	}
 
-	// Clause (3) instantiates `loop = true` steps; clause (4) re-instantiates
-	// the `after_loop` chain. workflow.ExpandOrdinal applies both rules and
-	// nothing else, so the ordering and the fanout indices are the same pure
-	// function ordinary expansion uses (§5.3.1) — a second implementation here
-	// is how ordinal 1's topology would drift from ordinal 0's.
-	rows := workflow.ExpandOrdinal(def, subject, ordinal, downstream)
+	// Clause (3) instantiates the serving `loop = true` steps; clause (4)
+	// re-instantiates the cluster's `after_loop` chain. workflow.ExpandOrdinal
+	// applies both rules and nothing else, so the ordering and the fanout
+	// indices are the same pure function ordinary expansion uses (§5.3.1) — a
+	// second implementation here is how ordinal 1's topology would drift from
+	// ordinal 0's.
+	rows := workflow.ExpandOrdinal(def, subject, ordinal, bodies, downstream)
 
 	return writeInstances(tx, step, rows, nowMS)
 }
@@ -611,6 +1117,55 @@ func instantiateOrdinal(
 // below writes rows the same way from a different expansion, and a step row
 // created by two writers with two ideas of which columns matter is how an
 // instance ends up missing the `skipped` event or its metadata.
+// stampEntryRouting writes an authorized entry's note onto the round's freshly
+// instantiated PENDING rows as their entering routing record,
+// `fix-loop: <note>` (DKT-725).
+//
+// The record lands on each new row's OWN `steps.routing` column, so two
+// standing rules carry it the rest of the way with no new machinery:
+// resolutionOf renders it as the packet's `== RESOLUTION` section (DKT-247's
+// own-row scoping intact — the note was recorded FOR these rows, at their
+// minting), and loopEntryOf reports it as the bundle's `loop_entry.routing`,
+// which finally matches §11.3's "the routing that entered it".
+//
+// A `pending` row carrying a routing record is the DKT-247 retry shape
+// exactly — human.go returns a ruled-on step to `pending` with its note in
+// `routing` — so no reader learns a new state here: readiness reads routing
+// off `done` predecessors only, QuorumMisses requires a completed join, and
+// the row's own completion overwrites the stamp with its real verdict at
+// routing time, exactly as a retry's does.
+//
+// `skipped` rows are left alone: their `when` predicate said this issue never
+// runs them, and a steering note on a step that will never render is a lie in
+// the ledger. Every row in `instances` was written by THIS transaction's
+// expansion, so reading them back inside it is consistent by construction.
+func stampEntryRouting(
+	tx *sql.Tx, step *db.Step, instances []string, note string, nowMS int64,
+) error {
+	record := routingRecord(workflow.OnFailFixLoop, note)
+	for _, instance := range instances {
+		var (
+			id     int
+			status string
+		)
+		err := tx.QueryRow(
+			`SELECT id, status FROM steps
+			  WHERE run_id = ? AND issue_id = ? AND instance = ?`,
+			step.RunID, step.IssueID, instance,
+		).Scan(&id, &status)
+		if err != nil {
+			return fmt.Errorf("stamping the fix-round note on %s: %w", instance, err)
+		}
+		if status != db.StepPending {
+			continue
+		}
+		if err := db.SetStepRoutingTx(tx, id, record, db.StepPending, nowMS); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func writeInstances(
 	tx *sql.Tx, step *db.Step, rows []workflow.StepInstance, nowMS int64,
 ) ([]string, error) {
@@ -828,6 +1383,20 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 		// readiness latch and never terminalize anywhere else.
 		if err := skipUnroutedTargets(tx, step, spec, routing, nowMS); err != nil {
 			return err
+		}
+		// ...and the `after_fired` cascade behind those targets, and behind a
+		// `skip` routing this miss just recorded (DKT-1085), for the same
+		// reason: nothing else on this path would run it. Mirrored into the
+		// snapshot exactly as the routed step is below, so this call's
+		// readiness pass cannot offer a row the transaction just skipped.
+		cascade, err := propagateAfterFiredSkips(tx, step.RunID, step.IssueID, def, nowMS)
+		if err != nil {
+			return err
+		}
+		for _, row := range cascade {
+			if loaded := sched.stepByID[row.ID]; loaded != nil {
+				loaded.Status = db.StepSkipped
+			}
 		}
 
 		// Reflect it in the loaded snapshot, so this call's readiness pass sees

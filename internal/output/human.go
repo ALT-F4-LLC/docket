@@ -29,6 +29,30 @@ func writeHumanSuccess(w io.Writer, message string) {
 	}
 }
 
+// writeHumanOutcome writes a human-readable adverse outcome to w: the same
+// line writeHumanSuccess would write, with the failure glyph in place of the
+// checkmark.
+//
+// It is NOT writeHumanError: there is no "Error:" label and nothing goes to
+// stderr, because the command did not fail — its subject did. The glyph is the
+// whole of the difference, and the message must therefore say what happened on
+// its own, since a NO_COLOR terminal gets no glyph at all.
+func writeHumanOutcome(w io.Writer, message string) {
+	if message == "" {
+		return
+	}
+	if strings.Contains(message, "\n") {
+		fmt.Fprintln(w, message)
+		return
+	}
+	if render.ColorsEnabled() {
+		icon := lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true).Render("\u2718")
+		fmt.Fprintf(w, "%s %s\n", icon, message)
+	} else {
+		fmt.Fprintln(w, message)
+	}
+}
+
 // writeHumanError writes a human-readable error message to w.
 func writeHumanError(w io.Writer, err error) {
 	if render.ColorsEnabled() {

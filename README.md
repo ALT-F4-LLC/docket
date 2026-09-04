@@ -40,26 +40,7 @@ DOCKET_INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/A
 
 ### Agent Skill Setup
 
-If you're working with Docket through an AI coding agent, also install the companion skill so the agent has the full CLI workflow and command reference available without re-deriving usage from `--help` output. Copy this repo's [`skills/docket/SKILL.md`](skills/docket/SKILL.md) into your agent's skill directory:
-
-| Harness | Project-scoped | User-scoped |
-|---------|-----------------|-------------|
-| Claude Code | `.claude/skills/docket/SKILL.md` | `~/.claude/skills/docket/SKILL.md` |
-| Codex | `.agents/skills/docket/SKILL.md` | `~/.agents/skills/docket/SKILL.md` |
-| Opencode | `.opencode/skills/docket/SKILL.md` | `~/.config/opencode/skills/docket/SKILL.md` |
-
-```bash
-# Claude Code (project-scoped)
-mkdir -p .claude/skills/docket && cp skills/docket/SKILL.md .claude/skills/docket/SKILL.md
-
-# Codex (project-scoped)
-mkdir -p .agents/skills/docket && cp skills/docket/SKILL.md .agents/skills/docket/SKILL.md
-
-# Opencode (project-scoped)
-mkdir -p .opencode/skills/docket && cp skills/docket/SKILL.md .opencode/skills/docket/SKILL.md
-```
-
-See [Drop-in Skill](#drop-in-skill) for what the skill teaches.
+If you're working with Docket through an AI coding agent, also install the companion skill so the agent has the full CLI workflow and command reference available without re-deriving usage from `--help` output. The skill is maintained in [ALT-F4-LLC/dotfiles.vorpal](https://github.com/ALT-F4-LLC/dotfiles.vorpal) at `src/user/claude_code/skills/docket/`; copy that directory into your agent's skill directory (e.g. `.claude/skills/docket/` project-scoped, or `~/.claude/skills/docket/` user-scoped for Claude Code).
 
 ### From Source
 
@@ -142,7 +123,7 @@ Any agent that can run shell commands works with Docket. Point it at `docket nex
 
 ### Drop-in Skill
 
-[`skills/docket/SKILL.md`](skills/docket/SKILL.md) is a thorough reference teaching the full Docket CLI workflow and command/flag reference in one file, so your agent doesn't need to re-derive usage from `--help` output. See [Agent Skill Setup](#agent-skill-setup) in the Installation section above for where to drop it in for Claude Code, Codex, and Opencode.
+A companion skill teaching the full Docket CLI workflow and command/flag reference is maintained in [ALT-F4-LLC/dotfiles.vorpal](https://github.com/ALT-F4-LLC/dotfiles.vorpal) at `src/user/claude_code/skills/docket/`, so your agent doesn't need to re-derive usage from `--help` output. See [Agent Skill Setup](#agent-skill-setup) in the Installation section above.
 
 <details>
 <summary>Verbose JSON examples</summary>
@@ -236,6 +217,8 @@ docket plan --json --root DKT-3
 ```bash
 docket issue list --json -s todo -s in-progress -p high
 ```
+
+Listings — `issue list`, `next`, `plan`, and `board` — emit summary rows under `--json`: every issue field except `description`, plus `description_bytes`. Read one issue's full description with `issue show`, or pass `--with-body` to include every description in the listing.
 
 </details>
 

@@ -18,6 +18,11 @@ target_worktree: {{.TargetWorktree}}
 
 == REQUEST
 {{.Issue.BodySnapshot}}
+{{- range .Notes}}
+
+== RUN NOTE {{.ID}}
+{{.Text}}
+{{- end}}
 {{range .Files}}
 == FILE {{.Path}}  {{.SHA256}}
 {{.Body}}

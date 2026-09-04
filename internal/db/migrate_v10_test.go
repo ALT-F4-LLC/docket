@@ -92,28 +92,30 @@ func TestMigrateToV10(t *testing.T) {
 // GAPS, because a missing entry turns Migrate's loop into a runtime error on a
 // user's database rather than a build-time failure on ours.
 func TestSchemaSpanIsComplete(t *testing.T) {
-	// The span now ends at v23. v11 through v23 are AMENDMENTS, not stages —
+	// The span now ends at v27. v11 through v27 are AMENDMENTS, not stages —
 	// workflow retirement (DKT-21), the projects dimension (operator request,
 	// 2026-08-09), vote provenance (DKT-71), per-seat vote spend (DKT-95),
 	// artifact revisions (DKT-70), the retry-budget base (DKT-86/DKT-90),
 	// vote-usage provenance (DKT-115), issue resolution (DKT-245), the
 	// measured-usage cap (DKT-238), operator loop grants (DKT-237), the
-	// hollow-assurance marker (DKT-265), the pause origin (DKT-305), and the
-	// attempt-outcome breakdown (DKT-490) — each recorded in
+	// hollow-assurance marker (DKT-265), the pause origin (DKT-305), the
+	// attempt-outcome breakdown (DKT-490), the batch gate-override grant
+	// (DKT-546), the stale-target waiver (DKT-742), the run note (DKT-1079),
+	// and the prior-claim-end marker (DKT-1279) — each recorded in
 	// docs/tdd/reliability-delta.md §2 under its own heading, with the reason
-	// it needed a version and the argument that it leaves the ratified v5-v10
-	// arithmetic untouched.
+	// it needed a version and the argument that it leaves the ratified
+	// v5-v10 arithmetic untouched.
 	//
 	// The tripwire itself is UNCHANGED IN PURPOSE. It still fails the next
 	// author who reaches for a version without filing an amendment first —
 	// this test firing is exactly how v11 through v23 came to be documented
 	// rather than discovered afterwards. Raising the number without editing
 	// that section is the move it exists to stop.
-	if currentSchemaVersion != 23 {
-		t.Errorf("currentSchemaVersion = %d, want 23 — the span of "+
-			"docs/tdd/reliability-delta.md §2 ends at v23 (the attempt-outcome "+
-			"breakdown). Moving past 23 needs an amendment against "+
-			"that section, per docs/design/amendments.md", currentSchemaVersion)
+	if currentSchemaVersion != 27 {
+		t.Errorf("currentSchemaVersion = %d, want 27 — the span of "+
+			"docs/tdd/reliability-delta.md §2 ends at v27 (the prior-claim-end "+
+			"marker). Moving past 27 needs an amendment against that section, "+
+			"per docs/design/amendments.md", currentSchemaVersion)
 	}
 
 	for v := 2; v <= currentSchemaVersion; v++ {

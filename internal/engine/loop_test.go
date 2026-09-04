@@ -3,6 +3,9 @@ package engine
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -26,6 +29,20 @@ const unmetPayload = `[{"status":"unmet"}]`
 
 // metPayload routes `verify` to `pass`: no threshold matches.
 const metPayload = `[{"status":"met"}]`
+
+// roundReport is ONE ROUND'S verdict body, naming the ordinal that produced it.
+//
+// It exists for DKT-589 the way driveFixtureRound exists for DKT-340: a routing
+// step that records the BYTE-IDENTICAL artifact at two consecutive ordinals now
+// parks the loop, so a fixture reusing one constant `"report"` across rounds
+// parks at the first repeat and never reaches the bound, the sweep, or the
+// input binding those tests are actually about. A real round's report differs
+// from the last one's whenever the round found anything new; these do too. A
+// test whose SUBJECT is the identical-verdict park uses one constant
+// deliberately — see dkt589_test.go.
+func roundReport(ordinal int) string {
+	return fmt.Sprintf("the report of round %d", ordinal)
+}
 
 // ---------------------------------------------------------------------------
 // §11.3 identity: instance rendering
@@ -128,7 +145,7 @@ func TestLoopsAreBoundedByConstruction(t *testing.T) {
 	// Loop 1 and loop 2, both legal at max_fix_loops = 2.
 	for k := range 2 {
 		driveToVerify(t, conn, e, k)
-		claimAndComplete(t, conn, e, fmt.Sprintf("verify@%d", k), "report", unmetPayload)
+		claimAndComplete(t, conn, e, fmt.Sprintf("verify@%d", k), roundReport(k), unmetPayload)
 
 		if got := loopCount(t, conn, run.ID, issue); got != k+1 {
 			t.Fatalf("loop_count = %d after loop %d, want %d", got, k+1, k+1)
@@ -140,7 +157,7 @@ func TestLoopsAreBoundedByConstruction(t *testing.T) {
 
 	// The third attempt: routing fires, and the bound converts it.
 	driveToVerify(t, conn, e, 2)
-	claimAndComplete(t, conn, e, "verify@2", "report", unmetPayload)
+	claimAndComplete(t, conn, e, "verify@2", roundReport(2), unmetPayload)
 
 	if stepExists(t, conn, "fix@3") {
 		t.Error("fix@3 exists; max_fix_loops = 2 must make a third entry impossible")
@@ -422,10 +439,11 @@ func TestOrdinalScopedInputBindingFallsBackPerInput(t *testing.T) {
 	// Enter loop 1, then run ordinal 1 as far as `reconcile@1` so both inputs
 	// have candidates and they sit at different ordinals.
 	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
+	claimAndComplete(t, conn, e, "verify@0", roundReport(0), unmetPayload)
 	// Ordinal 1 is driven by hand here rather than through driveToVerify, so
 	// the stub tree is moved by hand too — otherwise round 1 changes nothing
-	// and DKT-340's guard correctly refuses to mint `fix@2`.
+	// and DKT-340's guard correctly refuses to mint `fix@2`. Each verify
+	// records its own report for DKT-589's sibling guard, for the same reason.
 	driveFixtureRound(t, 1)
 	claimAndComplete(t, conn, e, "fix@1", "the fix summary", "")
 	completeReviewFanout(t, conn, e, 1)
@@ -434,7 +452,7 @@ func TestOrdinalScopedInputBindingFallsBackPerInput(t *testing.T) {
 
 	// A second loop entry, so there is a `fix@2` whose inputs we can inspect
 	// with ordinal-1 and ordinal-0 candidates both present.
-	claimAndComplete(t, conn, e, "verify@1", "report", unmetPayload)
+	claimAndComplete(t, conn, e, "verify@1", roundReport(1), unmetPayload)
 
 	inputs := contextInputs(t, conn, run.ID, "fix@2")
 
@@ -879,7 +897,7 @@ func contextInputs(t *testing.T, conn *sql.DB, runID int, instance string) []Con
 
 	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
 	testsupport.Must(t, err, "ListRunArtifactsTx: %v", err)
-	inputs, err := resolveInputs(tx, sched, step, spec, ri.BodySnapshot, artifacts)
+	inputs, err := resolveInputs(tx, sched, step, spec, ri.BodySnapshot, artifacts, nil)
 	testsupport.Must(t, err, "resolveInputs(%s): %v", instance, err)
 	return inputs
 }
@@ -1018,6 +1036,13 @@ func TestReReviewRoundCarriesThePreviousRoundsFindings(t *testing.T) {
 		t.Errorf("review@1#0 does not carry reconcile@0's reconciled set: %v",
 			producerList(bundle.Inputs))
 	}
+	// And nothing of the kind from OUTSIDE review's lineage (DKT-1055): the
+	// synthesis between the fanout and the reconciled set is neither review's
+	// own prior round nor the standing set the fix acted on.
+	if _, ok := byProducer["synthesize@0"]; ok {
+		t.Errorf("review@1#0 carries synthesize@0's findings — the previous-round "+
+			"pass matched on kind rather than lineage: %v", producerList(bundle.Inputs))
+	}
 	// The declared inputs are untouched: the fix's own account still binds.
 	if _, ok := byProducer["fix@1"]; !ok {
 		t.Errorf("review@1#0 lost its declared change-summary from fix@1: %v",
@@ -1031,6 +1056,122 @@ func TestReReviewRoundCarriesThePreviousRoundsFindings(t *testing.T) {
 		if strings.HasPrefix(in.ProducerStep, "review@") {
 			t.Errorf("review@0#0 binds a review artifact (%s) at ordinal 0 — "+
 				"there is no previous round to carry", in.ProducerStep)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DKT-1055: a re-entry round reads its own lineage, not every producer of
+// its kind
+// ---------------------------------------------------------------------------
+
+// TestReSynthesisRoundCarriesItsOwnLineageOnly pins DKT-1055: the previous-
+// round pass binds the prior round of the step's OWN lineage — its own name
+// at ordinal k-1 plus the standing set the loop body acted on — never every
+// same-issue producer of its emitted kind. `review`, `synthesize`, and
+// `reconcile` all emit `findings`, so the kind-only match handed synthesize@1
+// review@0's whole raw fanout beside synthesize@0 and reconcile@0, on top of
+// its declared `review.*` (already scoped to round 1): a security-change
+// round-2 synthesis carried a 263KB packet holding four raw judge payloads
+// whose digest it was also carrying as reconcile's aggregate.
+func TestReSynthesisRoundCarriesItsOwnLineageOnly(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	e := testEngine()
+
+	driveToVerify(t, conn, e, 0)
+	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
+	claimAndComplete(t, conn, e, "fix@1", "the fix summary", "")
+	completeReviewFanout(t, conn, e, 1)
+
+	bundle, err := ReadContext(conn, stepIDByInstance(t, conn, "synthesize@1"), nowMS)
+	testsupport.Must(t, err, "ReadContext(synthesize@1): %v", err)
+
+	byProducer := map[string]ContextInput{}
+	for _, in := range bundle.Inputs {
+		byProducer[in.ProducerStep] = in
+	}
+
+	// The declared `review.*` still binds the CURRENT round's fanout.
+	for i := range 4 {
+		judge := fmt.Sprintf("review@1#%d", i)
+		if _, ok := byProducer[judge]; !ok {
+			t.Errorf("synthesize@1 lost its declared %s input: %v",
+				judge, producerList(bundle.Inputs))
+		}
+	}
+	// Its own lineage from the round before: the prior synthesis, and the
+	// reconciled set it was digested into — what fix@1 read and acted on.
+	for _, prior := range []string{"synthesize@0", "reconcile@0"} {
+		in, ok := byProducer[prior]
+		if !ok {
+			t.Errorf("synthesize@1 does not carry %s's findings — the previous "+
+				"round of its own lineage: %v", prior, producerList(bundle.Inputs))
+			continue
+		}
+		if in.Kind != "findings" {
+			t.Errorf("%s's prior-round input has kind %q, want findings", prior, in.Kind)
+		}
+	}
+	// And NOT the previous round's raw judge fanout: reconcile@0's aggregate
+	// is the digest of it, and a match on kind alone is what carried it.
+	for i := range 4 {
+		judge := fmt.Sprintf("review@0#%d", i)
+		if _, ok := byProducer[judge]; ok {
+			t.Errorf("synthesize@1 carries %s's raw findings from the round before "+
+				"— the previous-round pass matched on kind, not lineage: %v",
+				judge, producerList(bundle.Inputs))
+		}
+	}
+	if len(bundle.Inputs) != 6 {
+		t.Errorf("synthesize@1 carries %d inputs, want 6 (review@1's four judges, "+
+			"synthesize@0, reconcile@0): %v", len(bundle.Inputs), producerList(bundle.Inputs))
+	}
+}
+
+// TestPreviousRoundLineageIsOwnNamePlusTheStandingSet pins the definitional
+// half of DKT-1055 against the fixtures directly: a re-entry step's lineage
+// is its own name plus the in-chain producers the serving loop body reads of
+// the step's kind — and a serves-scoped body whose chain does not contain the
+// step contributes nothing to it (DKT-544).
+func TestPreviousRoundLineageIsOwnNamePlusTheStandingSet(t *testing.T) {
+	src, err := os.ReadFile(fixturePath)
+	testsupport.Must(t, err, "reading fixture: %v", err)
+	standard, err := workflow.Parse(src)
+	testsupport.Must(t, err, "parsing fixture: %v", err)
+	clusters, err := workflow.Parse([]byte(clusterSrc))
+	testsupport.Must(t, err, "parsing the cluster fixture: %v", err)
+
+	for _, tc := range []struct {
+		def  *workflow.Definition
+		step string
+		kind string
+		want []string
+	}{
+		// Own name plus the reconciled set `fix` reads: never the raw fanout
+		// for `synthesize`, never the synthesis for `review`, and never
+		// `implement`, which is outside the chain and of another kind.
+		{standard, "review", "findings", []string{"reconcile", "review"}},
+		{standard, "synthesize", "findings", []string{"reconcile", "synthesize"}},
+		{standard, "verify", "ac-report", []string{"verify"}},
+		{standard, "commit", "commit-record", []string{"commit"}},
+		// Cluster A's gate: `prd-fix`'s `draft.doc` is outside its chain, and
+		// cluster B's body never contains the gate at all.
+		{clusters, "prd-gate", "findings", []string{"prd-gate"}},
+		{clusters, "design-gate", "report", []string{"design-gate"}},
+		// A step outside every chain has only itself; loopReentryEmitter is
+		// what keeps the pass from firing there in the first place.
+		{standard, "implement", "change-summary", []string{"implement"}},
+	} {
+		got := previousRoundLineage(tc.def, tc.step, tc.kind)
+		names := make([]string, 0, len(got))
+		for name := range got {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		if !slices.Equal(names, tc.want) {
+			t.Errorf("previousRoundLineage(%s, %s, %s) = %v, want %v",
+				tc.def.Pipeline.Name, tc.step, tc.kind, names, tc.want)
 		}
 	}
 }

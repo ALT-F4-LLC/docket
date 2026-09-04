@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -95,7 +96,7 @@ const packetFrontmatterFence = "---"
 // entry living in the shared root resolves identically from any cwd, including a
 // linked worktree that carries no `.docket/` of its own.
 func resolvePacketFiles(
-	pins map[string]string, roots []string, entries []string,
+	runRef string, pins map[string]string, roots []string, entries []string,
 ) ([]PacketFile, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -113,7 +114,7 @@ func resolvePacketFiles(
 		}
 		seen[ref] = true
 
-		body, hash, err := readPinnedPacketFile(pins, roots, ref)
+		body, hash, err := readPinnedPacketFile(runRef, pins, roots, ref)
 		if err != nil {
 			return nil, err
 		}
@@ -155,8 +156,13 @@ func resolvePacketFiles(
 // unpinned one means the file was not in the config directory when the run
 // activated — reading the live tree would break the byte-identical property
 // outright. Refusing is the only answer consistent with §8's Properties clause.
+//
+// That row's MESSAGE then splits by whether the ref resolves on disk (DKT-818):
+// a ref nothing ever wrote needs writing, while one sitting under a config root
+// needs a run whose pin set includes it. Same code, same refusal — a true
+// sentence about which of the two it is.
 func readPinnedPacketFile(
-	pins map[string]string, roots []string, ref string,
+	runRef string, pins map[string]string, roots []string, ref string,
 ) (body, hash string, err error) {
 	candidates := make([]string, 0, len(roots))
 	for _, root := range roots {
@@ -178,10 +184,31 @@ func readPinnedPacketFile(
 		}
 	}
 	if !pinned {
+		// THE REFUSAL NAMES THE CAUSE IT ACTUALLY HAS (DKT-818). "Not pinned"
+		// has two causes with two different remedies, and the message used to
+		// state only one of them: "add it under an instance-config root and
+		// start a new run". On RUN-59 both unpinned fragments were ALREADY
+		// under `~/.docket/config/fragments/` — a repin had adopted contract
+		// bytes that reached them — so the conductor went looking for a missing
+		// file, found it present, and had to re-derive the real cause. The pin
+		// set was frozen at activation; the filesystem was never the problem.
+		// So the ladder branches HERE, where both facts are in hand: the ref is
+		// unpinned, and this walk already knows every path it could resolve to.
+		for _, full := range candidates {
+			if _, serr := os.Stat(full); serr != nil {
+				continue
+			}
+			return "", "", validationErr(
+				"packet file %q is not in %s's pin set, which froze at activation; "+
+					"the file is on disk at %s, but a run reads only what it "+
+					"snapshotted, so its presence cannot admit it here — start a new "+
+					"run to pin it, or see `docket run repin --help`",
+				ref, pinSetOwner(runRef), full)
+		}
 		return "", "", validationErr(
-			"packet file %q is not pinned by this run; a packet reads only files the "+
-				"run snapshotted at activation, so add it under an instance-config "+
-				"root and start a new run", ref)
+			"packet file %q is not in %s's pin set, which froze at activation, and "+
+				"resolves under no instance-config root; add it under one and start "+
+				"a new run to pin it", ref, pinSetOwner(runRef))
 	}
 
 	// FIRST ROOT THAT HOLDS IT WINS, and the hash check below then applies to
@@ -399,5 +426,17 @@ func stepPacketFiles(
 		return nil, err
 	}
 
-	return resolvePacketFiles(packetPinsForRun(pins), instanceConfigRoots(), entries)
+	return resolvePacketFiles(
+		model.FormatRunID(step.RunID), packetPinsForRun(pins),
+		instanceConfigRoots(), entries)
+}
+
+// pinSetOwner names the run a refusal is about. A resolution that carries no
+// run — a direct call in a unit test, or any future seam holding only a pin
+// map — gets the deictic form, so the sentence reads correctly either way.
+func pinSetOwner(runRef string) string {
+	if runRef == "" {
+		return "this run"
+	}
+	return runRef
 }

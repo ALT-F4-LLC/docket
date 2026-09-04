@@ -454,12 +454,21 @@ func TestDispatchOpenNamesPinDrift(t *testing.T) {
 	testsupport.Must(t, os.MkdirAll(filepath.Join(configRoot, "contracts"), 0o755), "mkdir")
 	testsupport.Must(t, os.WriteFile(
 		filepath.Join(configRoot, "contracts", "x.md"), []byte("OLD\n"), 0o644), "write")
+	// The workflow DECLARES the contract, so it is in DKT-581's pin closure —
+	// an undeclared file would (correctly) no longer be pinned at all.
+	testsupport.Must(t, os.MkdirAll(filepath.Join(configRoot, "workflows"), 0o755), "mkdir")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(configRoot, "workflows", "auto-dev.toml"),
+		[]byte(autoWorkflowSrc+"packet = [\"contracts/x.md\"]\n"), 0o644), "write")
 	t.Setenv("DOCKET_PATH", store)
 
 	conn := mustDB(t)
-	// Activation scans the config root and pins contracts/x.md itself — the
-	// same path a real run's pin takes.
-	run, _ := activatedRun(t, conn)
+	// Activation scans the config root, registers the workflow, and pins
+	// contracts/x.md itself — the same path a real run's pin takes.
+	issue := createIssue(t, conn, "drift subject", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
 	report, err := VerifyPins(conn, run.ID)
 	testsupport.Must(t, err, "VerifyPins: %v", err)
 	if !report.Sound() {

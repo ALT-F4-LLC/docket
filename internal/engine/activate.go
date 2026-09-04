@@ -86,6 +86,15 @@ type ActivateResult struct {
 	// `IssuesBound`'s count was missing — an operator approving a `--dry-run`
 	// needs to know WHAT was bound, not just how many.
 	BoundIssues []BoundIssue
+	// BlockedIssues names, by display id, every bound issue this activation
+	// left UNEXPANDED, each with the in-run depends_on predecessors still
+	// holding it and their status as this activation leaves it (DKT-1180: a
+	// re-activation that expanded nothing carried no field saying why, and the
+	// cause — a predecessor check gating on issues the blocked one had no edge
+	// into — took a source audit to find). Populated identically on a dry run
+	// and a real activation. Nil when every bound issue is expanded, so the
+	// ordinary run carries no key at all rather than an empty one.
+	BlockedIssues []BlockedIssue
 	// Reactivation reports whether this was a re-activation of an already
 	// `active` run, so the verb can say "expanded 2 new phases" rather than
 	// implying a first activation.
@@ -97,6 +106,20 @@ type ActivateResult struct {
 	// the row in JSON mode. Returning them rather than printing them here
 	// keeps the engine free of an output dependency it has no other use for.
 	ContextWarnings []ContextWarning
+	// SourceWarnings names every BOUND workflow whose registered source file
+	// could not be verified against `source_sha256` — and that activation did
+	// not refuse over (DKT-590). Drift on a binding this activation MADE is a
+	// refusal, so it appears here only in the three cases refusing would be
+	// wrong: an unreadable source (the registered bytes still reproduce; only
+	// their provenance is gone), drift under a binding inherited from an
+	// earlier activation (RA2 keeps a mid-run edit a non-event), and drift
+	// under `registration.auto = false`, where a registry lagging the corpus is
+	// the operator's own standing decision.
+	//
+	// It travels here for ContextWarnings' reason and takes the same stance:
+	// the engine holds no output dependency, and the verb picks the channel —
+	// stderr in human mode, an array in JSON.
+	SourceWarnings []SourceWarning
 	// ScopeWarnings names every issue that declared no scope at all while
 	// binding a workflow whose steps occupy the tree (lintUnscopedHolders).
 	//
@@ -105,6 +128,20 @@ type ActivateResult struct {
 	// and proceeds, and the verb picks the channel — stderr in human mode, an
 	// array in JSON.
 	ScopeWarnings []ScopeWarning
+	// BindingWarnings names every issue that bound one workflow while its
+	// declared scope lies entirely inside ANOTHER registered workflow's declared
+	// `[match] domain_paths`, and lacks only the labels that other workflow
+	// requires (lintDomainScopeMismatch, DKT-1182).
+	//
+	// It is the exactly-one-WRONG-match signal. Activation refuses zero matches
+	// and refuses several, but a mis-labelled issue matches its wrong workflow
+	// exactly once, which is the one shape the binding rule cannot see — so it
+	// bound, ran, and lost the other pipeline's gates with no output saying so.
+	//
+	// It travels here for ContextWarnings' reason and takes the same stance:
+	// binding on the labels the operator applied is legal and sometimes
+	// deliberate, so this reports and proceeds, and the verb picks the channel.
+	BindingWarnings []BindingWarning
 	// Registered is what auto-registration acted on, in registration order —
 	// schemas first, then workflows (docs/tdd/runs-dispatch.md §9.7 F20/F21).
 	//
@@ -113,9 +150,11 @@ type ActivateResult struct {
 	// VISIBLE IN THE OUTPUT rather than merely true underneath it.
 	Registered []Registration
 	// PinsFromConfig counts the files under `.docket/config/` that were pinned
-	// rather than registered (F4). They are counted, not listed: a fragment tree
-	// can hold hundreds of files and none of them is a decision an operator
-	// needs to read before approving.
+	// rather than registered (F4) — since DKT-581, only the PACKET CLOSURE the
+	// bound workflows reach (packet entries, their `packet_includes`, and
+	// policy.toml), not every file the scan walked. They are counted, not
+	// listed: a closure can hold dozens of files and none of them is a
+	// decision an operator needs to read before approving.
 	PinsFromConfig int
 
 	// Fences is the §7.7 trust report: every harvested fenced command and
@@ -207,6 +246,31 @@ type ScopeWarning struct {
 	Reason   string `json:"reason"`
 }
 
+// BindingWarning is one issue whose LABELS and whose SCOPE disagree about which
+// pipeline owns it: it bound `BoundWorkflow` on its labels, while every path it
+// declares lies inside `DomainWorkflow`'s declared domain and the only thing
+// keeping it out of that workflow is `MissingLabels` (DKT-1182).
+type BindingWarning struct {
+	IssueID string `json:"issue"`
+	// BoundWorkflow is what activation actually bound, as `name@version` —
+	// named because it is the pipeline that will really run, and an operator
+	// reading only the domain half would not know what they are getting.
+	BoundWorkflow string `json:"bound_workflow"`
+	// DomainWorkflow is the workflow whose `domain_paths` contain the issue's
+	// scope, as `name@version` — the pipeline the paths say should own it.
+	DomainWorkflow string `json:"domain_workflow"`
+	// Scope is the issue's declared scope, verbatim and in declared order, so
+	// the warning carries the evidence rather than asking the reader to go find
+	// what the issue claims to touch.
+	Scope []string `json:"scope"`
+	// MissingLabels names what would move the binding: every `labels_all` entry
+	// the issue lacks, plus the `labels_any` list when it holds none of it.
+	// Never empty — an issue missing nothing already bound the other workflow,
+	// or hit the exactly-one-match refusal.
+	MissingLabels []string `json:"missing_labels"`
+	Reason        string   `json:"reason"`
+}
+
 // BoundIssue names one issue this activation bound, by display id, and the
 // exact workflow@version it bound to (DKT-94: `issues_bound` reported a count
 // with no roster, and the only place bound-issue identity appeared at all was
@@ -217,6 +281,25 @@ type ScopeWarning struct {
 type BoundIssue struct {
 	IssueID  string `json:"issue"`
 	Workflow string `json:"workflow"`
+}
+
+// BlockedIssue is one bound issue an activation did not expand, and why: the
+// in-run depends_on predecessors that are not yet `done` (DKT-1180). It always
+// carries at least one — an issue with no unsatisfied predecessor expands.
+type BlockedIssue struct {
+	IssueID   string          `json:"issue"`
+	BlockedBy []BlockingIssue `json:"blocked_by"`
+}
+
+// BlockingIssue is one unsatisfied predecessor: its display id and the status
+// keeping it unsatisfied — anything but `done`, the one status that releases
+// a successor. Note that `abandon-issue` is not a status: the routing leaves
+// the issue at `todo` with `resolution = abandoned`, so a `todo` predecessor
+// here may be one the run has already given up on, and the successor will
+// then expand only once an operator closes or re-plans it.
+type BlockingIssue struct {
+	IssueID string `json:"issue"`
+	Status  string `json:"status"`
 }
 
 // Activate is the fat transaction (engine-core §3.2, engine-spec §2; TDD §5.3).
@@ -499,19 +582,24 @@ func activateTx(
 	// hit F9's collision refusal on a run that was working fine, and the fix
 	// would be to revert their edit. Inheriting makes the edit a non-event —
 	// exactly as a re-registered workflow is already a non-event (RA2).
-	if !reactivation && scan != nil {
-		// registration.auto (default true) gates ONLY this half. An operator
-		// who turns it off is declining silent version adoption, not the
-		// corpus itself — the pinned half below has no version to adopt, so it
-		// keeps running regardless: a project with registration off still
-		// needs the corpus's contracts/fragments/policy.toml to render a
-		// step's `packet`, and the only alternative would be hand-supplying
-		// every one of them via `--pin`.
-		autoRegister, err := db.AutoRegisterEnabledTx(tx, run.ProjectID)
-		if err != nil {
-			return nil, err
-		}
+	// registration.auto (default true) gates ONLY the registering half below. An
+	// operator who turns it off is declining silent version adoption, not the
+	// corpus itself — the pinned half has no version to adopt, so it keeps
+	// running regardless: a project with registration off still needs the
+	// corpus's contracts/fragments/policy.toml to render a step's `packet`, and
+	// the only alternative would be hand-supplying every one of them via
+	// `--pin`.
+	//
+	// It is read HERE, ahead of the scan's own branch, because stage 1's source
+	// check needs the same answer: with adoption declined, a registry that lags
+	// the corpus is the operator's own standing decision rather than an
+	// unexplained divergence, and the two dispositions differ (DKT-590).
+	autoRegister, err := db.AutoRegisterEnabledTx(tx, run.ProjectID)
+	if err != nil {
+		return nil, err
+	}
 
+	if !reactivation && scan != nil {
 		if autoRegister {
 			registered, err := registerScanTx(tx, run.ProjectID, scan, opts.NowMS)
 			if err != nil {
@@ -533,11 +621,10 @@ func activateTx(
 			}
 		}
 
-		// F4: the pinned half. These join the pin set below rather than being
-		// written here, so auto-pinned and `--pin` files travel one code path
-		// and RA2's inheritance covers both.
-		filePins = append(filePins, scan.pins...)
-		result.PinsFromConfig = len(scan.pins)
+		// F4's pinned half moved to stage 3 (DKT-581): the scan's pins join
+		// the pin set FILTERED to the packet closure the bound workflows
+		// reach, and the bindings that define that closure do not exist until
+		// stage 1 has run.
 	}
 
 	runIssues, err := db.ListRunIssuesTx(tx, runID)
@@ -560,7 +647,30 @@ func activateTx(
 	// issue already bound keeps its binding — re-binding would let a workflow
 	// registered mid-run capture an issue the operator already approved into a
 	// different pipeline.
+	// DKT-609's half of binding: the scan this activation already performed,
+	// read back as "which registered NAMES still have a definition on disk".
+	//
+	// It is built from the SAME scan registration uses, so the two cannot
+	// disagree about what a root holds, and it is LAZY — nothing reads a file
+	// unless a refusal below actually names candidates. A re-activation does
+	// not re-scan config (F15), but the scan itself was computed regardless,
+	// so an inherited-binding run annotates from exactly the same facts.
+	//
+	// Laziness is why it sits here rather than beside the scan outside the
+	// transaction: eager would re-read and re-parse every workflow in the
+	// corpus on EVERY activation to answer a question almost none of them ask.
+	// The reads it does perform happen on a refusal path, in a transaction
+	// that is about to roll back and write nothing — the same latitude §6
+	// gives activation's other reads, spent only where an operator is already
+	// receiving an error.
+	origins := newWorkflowOriginIndex(scan)
+
 	bindings := make(map[int]*boundDefinition, len(runIssues))
+	// inherited marks the bindings a PRIOR activation made, which this one is
+	// only re-reading. DKT-590's source check disposes of the two differently —
+	// RA2 says an edit must not reach a run already under way — so the
+	// distinction the loop already knows is recorded rather than re-derived.
+	inherited := make(map[int]bool, len(runIssues))
 	for _, ri := range runIssues {
 		issue := issues[ri.IssueID]
 		if ri.WorkflowID != nil {
@@ -571,14 +681,30 @@ func activateTx(
 					model.FormatID(ri.IssueID), *ri.WorkflowID)
 			}
 			bindings[ri.IssueID] = bound
+			inherited[ri.IssueID] = true
 			continue
 		}
-		bound, err := bindIssue(issue, definitions)
+		bound, err := bindIssue(issue, definitions, origins)
 		if err != nil {
 			return nil, err
 		}
 		bindings[ri.IssueID] = bound
 	}
+
+	// Binding's INTEGRITY half (DKT-590): does each bound workflow's own
+	// recorded `source_path` still hold the bytes it was registered with?
+	//
+	// It runs HERE — after binding, before anything is pinned or expanded —
+	// because binding is what selects the definitions whose provenance matters,
+	// and because a refusal is worth more before the transaction has computed a
+	// topology than after. A dry run reaches it on this same path and refuses
+	// identically: `--dry-run` is the real activation rolled back, so what it
+	// reports is what a real one would do.
+	sourceWarnings, err := checkBoundSources(runIssues, bindings, inherited, autoRegister)
+	if err != nil {
+		return nil, err
+	}
+	result.SourceWarnings = sourceWarnings
 
 	// Binding's lint half: an issue that holds the tree while declaring nothing
 	// about what it touches.
@@ -615,13 +741,30 @@ func activateTx(
 	}
 	result.ScopeWarnings = append(result.ScopeWarnings, unresolvable...)
 
+	// The label-vs-scope lint (DKT-1182): an issue whose scope says one pipeline
+	// owns it while its labels bound it to another. Binding refuses zero matches
+	// and refuses several; exactly one WRONG match is the shape it structurally
+	// cannot see, and this is the signal that sees it.
+	//
+	// It runs over every bound issue, inherited bindings included, for the
+	// reason the unscoped-holder lint does: the mismatch belongs to the plan,
+	// not to the expansion. It reports and never refuses — the labels an
+	// operator applied are the routing decision, and this only says the paths
+	// disagree with it.
+	bindingWarnings, err := lintDomainScopeMismatch(
+		tx, runIssues, issues, bindings, definitions)
+	if err != nil {
+		return nil, err
+	}
+	result.BindingWarnings = bindingWarnings
+
 	// ---- Stage 2: lint the work DAG. ---------------------------------------
 	//
 	// planner.BuildDAG + TopoSort over the run's issues and their depends_on
 	// relations — reused directly, no adaptation needed at this level, since
 	// the graph is already over issue IDs. A cycle is a VALIDATION_ERROR with
 	// the existing CycleError rendering, which already formats DKT-N.
-	levels, err := lintWorkDAG(tx, issues)
+	dag, err := lintWorkDAG(tx, issues)
 	if err != nil {
 		return nil, err
 	}
@@ -639,6 +782,33 @@ func activateTx(
 	pinned := make(map[string]struct{}, len(existingPins))
 	for _, p := range existingPins {
 		pinned[p.Kind+"\x00"+p.Ref] = struct{}{}
+	}
+
+	// DKT-581: the config scan's pins join the set filtered to the PACKET
+	// CLOSURE the bound workflows reach — each step's `packet` entries with
+	// `{executor}` substituted the way expansion substitutes it, the files
+	// those entries' `packet_includes` declare (transitively), and
+	// `policy.toml` — rather than every file the scan walked. A corpus edit
+	// to a contract no bound step references is then a non-event for this
+	// run's `verify-pins`, which is the whole remedy: 7 of 18 terminal runs
+	// in the measured week were abandoned over drift in files they never
+	// read. `--pin` files are the operator's explicit additions and are
+	// never filtered.
+	//
+	// On a RE-ACTIVATION the closure is recomputed only to cover an issue
+	// added since activation that bound a workflow whose files the original
+	// set never pinned (RA3) — refs an earlier activation recorded are
+	// dropped first, so RA2's inheritance is untouched: an edited pinned
+	// file stays at its original hash, and an inherited ref keeps resolving
+	// as present-with-unknown-size in the declared-packet index below.
+	if scan != nil {
+		closure := packetClosurePins(scan, runIssues, bindings)
+		if reactivation {
+			closure = withoutAlreadyPinned(closure, existingPins, scan.roots)
+		} else {
+			result.PinsFromConfig = len(closure)
+		}
+		filePins = append(filePins, closure...)
 	}
 
 	pins := make([]db.Pin, 0, len(bindings)+len(filePins))
@@ -746,7 +916,12 @@ func activateTx(
 	}
 
 	// ---- Stages 4-6, per issue. --------------------------------------------
-	expandable := expandableIssues(levels, issues)
+	expandable := expandableIssues(dag)
+	// blocked collects what stage 6 leaves unexpanded, for the roster built
+	// AFTER the loop — after, so a predecessor stage 7 promotes in this same
+	// pass is named at the status this activation commits, not the one it
+	// found.
+	var blocked []*db.RunIssue
 
 	for _, ri := range runIssues {
 		issue := issues[ri.IssueID]
@@ -761,7 +936,18 @@ func activateTx(
 		// re-activation would defeat the immunity for every issue already
 		// under way.
 		if ri.BodySnapshot == "" && ri.IssueSnapshot == "" {
-			snapshot, err := issueSnapshot(tx, issue)
+			// The cross-issue bindings (DKT-547): every `issue.linked.
+			// <relation>.<kind>` input the bound workflow declares is resolved
+			// NOW — linked issue(s) by relation, then each one's latest
+			// recorded artifact of the kind — and pinned into the snapshot by
+			// artifact id. A missing relation or artifact refuses the whole
+			// activation, loudly, inside the fat transaction: the binding is
+			// enforced here or it is an issue-body citation nothing checks.
+			linked, err := resolveLinkedInputs(tx, issue, bound.definition)
+			if err != nil {
+				return nil, err
+			}
+			snapshot, err := issueSnapshot(tx, issue, linked)
 			if err != nil {
 				return nil, err
 			}
@@ -796,7 +982,11 @@ func activateTx(
 		// expand when their predecessors complete (phase 3's §6.7).
 		// `expanded_at_ms` records which issues have been expanded, so
 		// expansion is idempotent and re-entrant.
-		if ri.Expanded() || !expandable[ri.IssueID] {
+		if ri.Expanded() {
+			continue
+		}
+		if !expandable[ri.IssueID] {
+			blocked = append(blocked, ri)
 			continue
 		}
 
@@ -827,7 +1017,31 @@ func activateTx(
 				return nil, err
 			}
 			result.PromotedIssues = append(result.PromotedIssues, model.FormatID(issue.ID))
+			// The in-memory row follows the write, so the blocked roster below
+			// — which reads this very pointer through the DAG — reports the
+			// promoted status rather than the one activation found.
+			issue.Status = model.StatusTodo
 		}
+	}
+
+	// The blocked roster (DKT-1180): every bound issue this activation left
+	// UNEXPANDED, with the in-run predecessors still holding it. Without it, a
+	// re-activation that expands nothing is indistinguishable from one that
+	// had nothing to expand — RUN-76's operator could only report
+	// `issues_expanded: 0` and guess at the cause. Computed identically on a
+	// dry run and a real activation, from the same edges stage 6 decided on.
+	for _, ri := range blocked {
+		predecessors := unsatisfiedPredecessors(dag, ri.IssueID)
+		if len(predecessors) == 0 {
+			continue // unreachable: an issue with none is expandable
+		}
+		entry := BlockedIssue{IssueID: model.FormatID(ri.IssueID)}
+		for _, p := range predecessors {
+			entry.BlockedBy = append(entry.BlockedBy, BlockingIssue{
+				IssueID: model.FormatID(p.ID), Status: string(p.Status),
+			})
+		}
+		result.BlockedIssues = append(result.BlockedIssues, entry)
 	}
 
 	// The run-wide expected-cost sum, read after expansion and inside the
@@ -986,9 +1200,12 @@ func definitionByID(definitions []*boundDefinition, id int) *boundDefinition {
 // bumped name matched, and exactly-one-match refused (the M2a toy run).
 //
 // The resolution deliberately MIRRORS `workflow show NAME` without `@version`
-// (db.GetWorkflow's `ORDER BY version DESC LIMIT 1`). Binding and show
-// disagreeing about what "the" workflow of a name is was the defect; one
-// helper's worth of agreement is asserted directly by
+// (db.GetWorkflow's `deprecated_at_ms IS NULL ... ORDER BY version DESC LIMIT
+// 1`). Binding and show disagreeing about what "the" workflow of a name is
+// was the defect — twice: first two versions of one name both binding while
+// show picked one, then (DKT-616) show resolving a deprecated top version that
+// binding had already retired. One helper's worth of agreement, including the
+// deprecated-top-version case, is asserted directly by
 // TestBindingAgreesWithWorkflowShowResolution.
 //
 // Exactly-one-match therefore applies across NAMES, which is what makes its
@@ -1046,7 +1263,16 @@ func bindableDefinitions(definitions []*boundDefinition) []*boundDefinition {
 // The candidates NAMED are the bindable ones, not every registered row: an
 // error that listed superseded versions would send an operator to edit a
 // definition that could not have bound the issue anyway.
-func bindIssue(issue *model.Issue, definitions []*boundDefinition) (*boundDefinition, error) {
+//
+// `origins` decorates that candidate set and NEVER CHANGES IT (DKT-609). An
+// orphaned registration still binds — a registration is a row, not a file —
+// so it is still a candidate and still causes the ambiguity; what the
+// annotation adds is which of the named candidates has nothing behind it on
+// disk. It may be nil, and every verdict then reads `unchecked`, which is the
+// pre-DKT-609 message exactly.
+func bindIssue(
+	issue *model.Issue, definitions []*boundDefinition, origins *WorkflowOriginIndex,
+) (*boundDefinition, error) {
 	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
 	candidates := bindableDefinitions(definitions)
 
@@ -1081,25 +1307,51 @@ func bindIssue(issue *model.Issue, definitions []*boundDefinition) (*boundDefini
 		}
 		return nil, validationErr(
 			"issue %s (kind %s, labels [%s]) matches no registered workflow; "+
-				"candidates considered: %s",
+				"candidates considered: %s%s",
 			model.FormatID(issue.ID), issue.Kind, strings.Join(issue.Labels, " "),
-			refList(candidates))
+			refList(candidates, origins), orphanHint(candidates, origins))
 	default:
 		return nil, validationErr(
 			"issue %s matches %d workflows, and exactly one must match; "+
-				"candidates: %s",
-			model.FormatID(issue.ID), len(matched), refList(matched))
+				"candidates: %s%s",
+			model.FormatID(issue.ID), len(matched), refList(matched, origins),
+			orphanHint(matched, origins))
 	}
 }
 
 // refList renders candidate workflows as `name@version`, in the stable order
-// loadDefinitions established.
-func refList(definitions []*boundDefinition) string {
+// loadDefinitions established, ANNOTATING each one whose name no longer has a
+// definition in any instance-config root (DKT-609).
+//
+// The annotation rides HERE rather than in a parallel renderer so both binding
+// refusals carry it from one place: a rename strands a name, and the refusal
+// that names the stranded registration alongside its replacement is the exact
+// moment the distinction is worth money.
+func refList(definitions []*boundDefinition, origins *WorkflowOriginIndex) string {
 	refs := make([]string, 0, len(definitions))
 	for _, d := range definitions {
-		refs = append(refs, d.workflow.Ref())
+		ref := d.workflow.Ref()
+		if origins.Orphaned(d.workflow.Name) {
+			ref += orphanAnnotation
+		}
+		refs = append(refs, ref)
 	}
 	return strings.Join(refs, ", ")
+}
+
+// orphanHint returns the remedy sentence when at least one named candidate is
+// orphaned, and the empty string otherwise.
+//
+// It is conditional because a refusal between two live definitions is an
+// authoring problem — narrow a `[match]` — and appending a paragraph about
+// deprecation to that one would be advice for a state the repo is not in.
+func orphanHint(definitions []*boundDefinition, origins *WorkflowOriginIndex) string {
+	for _, d := range definitions {
+		if origins.Orphaned(d.workflow.Name) {
+			return orphanRefusalHint
+		}
+	}
+	return ""
 }
 
 // lintUnscopedHolders reports every issue that declares NO SCOPE while binding a
@@ -1229,6 +1481,146 @@ func lintUnresolvableScopes(
 	return out, nil
 }
 
+// lintDomainScopeMismatch reports every issue whose LABELS bound it to one
+// workflow while its declared SCOPE lies entirely inside another registered
+// workflow's declared `[match] domain_paths` (DKT-1182).
+//
+// THE GAP IT CLOSES. Binding requires EXACTLY ONE match and refuses zero or
+// several — but it cannot refuse exactly one WRONG match, because a mis-labelled
+// issue matches its wrong workflow exactly once and there is nothing anomalous
+// for the count to catch. The measured case: an issue scoped entirely to a TUI
+// test file carried `qa` and not `ui`, bound the label-less baseline pipeline
+// instead of the UI one, and silently ran without that pipeline's judge fanout
+// and render/copy gates. Routing is keyed on hand-applied labels while scope is
+// path-derived, so the two can disagree, and until this lint the only thing that
+// noticed was a conductor diffing labels against scope by hand, every batch.
+//
+// IT IS ADVISORY AND CHANGES NO BINDING. The issue stays bound where its labels
+// put it; `domain_paths` never participates in `[match]` evaluation. Making
+// paths ROUTE — scope-derived routing as a first-class rule — is a different and
+// much larger change, deliberately not made here: this reports a disagreement
+// and leaves the decision with the operator, who may legitimately have meant it.
+//
+// THE FOUR CONDITIONS, and why each one is needed to keep the warning worth
+// reading:
+//
+//  1. The issue declares a scope, and EVERY glob of it is inside the other
+//     workflow's domain (ScopeWithinDomain). A partially-overlapping scope is
+//     cross-cutting work, and which pipeline should own it is a judgment this
+//     lint has no basis to make.
+//  2. The other workflow declares a domain at all. The field is dormant until a
+//     corpus author states one, so a corpus that declares none is linted
+//     against nothing and behaves exactly as before.
+//  3. The issue is only a LABEL short of that workflow (workflow.LabelGapFor):
+//     its `kind` is admitted and no `unless_labels` entry fires. A kind
+//     mismatch is not a labelling slip, and an exclusion that fires is the
+//     author saying "not this one" about this very issue — reporting either
+//     would be advice to break a decision somebody made on purpose.
+//  4. It is not the workflow the issue already bound. An issue bound to the
+//     workflow whose domain it sits in is the case working correctly.
+//
+// The candidate set is bindableDefinitions — the same highest-version,
+// non-retired set binding itself evaluated — so the lint can never name a
+// workflow the issue could not have bound even with the labels fixed.
+func lintDomainScopeMismatch(
+	tx *sql.Tx, runIssues []*db.RunIssue, issues map[int]*model.Issue,
+	bindings map[int]*boundDefinition, definitions []*boundDefinition,
+) ([]BindingWarning, error) {
+	candidates := bindableDefinitions(definitions)
+	// Nothing in the corpus states a domain: the lint is dormant, and the read
+	// of every issue's scope below is not worth doing to learn that.
+	domainDeclared := false
+	for _, d := range candidates {
+		if d.definition.Match != nil && len(d.definition.Match.DomainPaths) > 0 {
+			domainDeclared = true
+			break
+		}
+	}
+	if !domainDeclared {
+		return nil, nil
+	}
+
+	var out []BindingWarning
+	for _, ri := range runIssues {
+		bound := bindings[ri.IssueID]
+		issue := issues[ri.IssueID]
+		if bound == nil || issue == nil {
+			continue
+		}
+
+		// Read LIVE, for lintUnscopedHolders' reason: the question is what this
+		// issue declares NOW, so an operator who fixed the scope (or the labels)
+		// after a first activation is not warned about the state they fixed.
+		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		if err != nil {
+			return nil, fmt.Errorf("reading scope for %s: %w",
+				model.FormatID(ri.IssueID), err)
+		}
+		if raw == "" {
+			continue // No scope declared; lintUnscopedHolders owns that case.
+		}
+		var globs []string
+		if err := json.Unmarshal([]byte(raw), &globs); err != nil || len(globs) == 0 {
+			continue
+		}
+
+		subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
+		for _, cand := range candidates {
+			if cand == bound || cand.definition.Match == nil {
+				continue
+			}
+			if !ScopeWithinDomain(globs, cand.definition.Match.DomainPaths) {
+				continue
+			}
+			gap, reachable := cand.definition.Match.LabelGapFor(subject)
+			if !reachable || gap.Empty() {
+				continue
+			}
+
+			out = append(out, BindingWarning{
+				IssueID:        model.FormatID(ri.IssueID),
+				BoundWorkflow:  bound.workflow.Ref(),
+				DomainWorkflow: cand.workflow.Ref(),
+				Scope:          globs,
+				MissingLabels:  missingLabelList(gap),
+				Reason: fmt.Sprintf(
+					"bound %s on its labels, but its declared scope lies entirely "+
+						"inside %s's domain (%s) and it %s",
+					bound.workflow.Ref(), cand.workflow.Ref(),
+					strings.Join(cand.definition.Match.DomainPaths, ", "),
+					describeLabelGap(gap)),
+			})
+		}
+	}
+	return out, nil
+}
+
+// missingLabelList flattens a label gap into the flat array the JSON field
+// carries — `labels_all` misses first, then the `labels_any` alternatives, each
+// in the order the workflow declared them.
+func missingLabelList(gap workflow.LabelGap) []string {
+	out := make([]string, 0, len(gap.MissingAll)+len(gap.MissingAny))
+	out = append(out, gap.MissingAll...)
+	out = append(out, gap.MissingAny...)
+	return out
+}
+
+// describeLabelGap renders a gap as the clause an operator has to act on. The
+// two halves are phrased differently because the remedies are: every
+// `labels_all` entry must be added, and any ONE `labels_any` entry is enough.
+func describeLabelGap(gap workflow.LabelGap) string {
+	var parts []string
+	if len(gap.MissingAll) > 0 {
+		parts = append(parts, fmt.Sprintf("lacks the required label(s) [%s]",
+			strings.Join(gap.MissingAll, ", ")))
+	}
+	if len(gap.MissingAny) > 0 {
+		parts = append(parts, fmt.Sprintf("carries none of [%s]",
+			strings.Join(gap.MissingAny, ", ")))
+	}
+	return strings.Join(parts, " and ")
+}
+
 // scopeAnchorExists reports whether one scope entry has an ANCHOR under root:
 // its literal prefix — the part before the first glob metacharacter — exists,
 // or that prefix's parent directory does.
@@ -1265,9 +1657,12 @@ func treeHolder(def *workflow.Definition) *workflow.Step {
 }
 
 // lintWorkDAG is stage 2: planner.BuildDAG + TopoSort over the run's issues and
-// their depends_on relations, REUSED directly. The returned levels are what
-// stage 6 reads to decide which issues are phase 1.
-func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
+// their depends_on relations, REUSED directly.
+//
+// It returns the DAG itself rather than the topological levels: the levels
+// prove acyclicity and nothing more, while stage 6 needs each issue's OWN
+// predecessor edges (DKT-1180 — see expandableIssues).
+func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) (*planner.DAG, error) {
 	list := make([]*model.Issue, 0, len(issues))
 	for _, issue := range issues {
 		list = append(list, issue)
@@ -1279,8 +1674,8 @@ func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
 		return nil, err
 	}
 
-	levels, err := planner.TopoSort(planner.BuildDAG(list, relations))
-	if err != nil {
+	dag := planner.BuildDAG(list, relations)
+	if _, err := planner.TopoSort(dag); err != nil {
 		var cycle *planner.CycleError
 		if errors.As(err, &cycle) {
 			// The existing rendering already formats DKT-N, which is the right
@@ -1290,53 +1685,54 @@ func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
 		}
 		return nil, fmt.Errorf("linting the work graph: %w", err)
 	}
-	return levels, nil
+	return dag, nil
 }
 
-// expandableIssues reports which of the run's issues are "phase 1" — those
-// whose depends_on predecessors are all satisfied at activation.
+// expandableIssues reports which of the run's issues may expand NOW — those
+// whose depends_on predecessors are all satisfied (engine-spine §6.3 R2: "the
+// issue's `depends_on` predecessors are satisfied").
 //
 // An issue is expandable when every predecessor either is not in the run (an
-// external dependency the run does not schedule) or is already `done`. Level 0
-// of the topological sort is the base case; later levels expand when their
-// predecessors complete, which is phase 3's §6.7.
-func expandableIssues(levels [][]int, issues map[int]*model.Issue) map[int]bool {
-	out := make(map[int]bool, len(issues))
-	if len(levels) == 0 {
-		return out
-	}
-	for _, id := range levels[0] {
-		out[id] = true
-	}
-
-	// A later-level issue whose predecessors are all `done` is expandable too:
-	// a run activated over a graph whose first phase was already finished by
-	// hand should schedule the second, not stall.
-	for level := 1; level < len(levels); level++ {
-		for _, id := range levels[level] {
-			if issuePredecessorsSatisfied(id, levels, level, issues) {
-				out[id] = true
-			}
-		}
+// external dependency the run does not schedule; BuildDAG drops those edges)
+// or is already `done`. An issue with no in-run predecessor is phase 1; a
+// later phase expands at the re-activation after its predecessors complete
+// (phase 3's §6.7), and a run activated over a graph whose first phase was
+// already finished by hand schedules the second rather than stalling.
+//
+// The predecessor set is the issue's OWN reverse edges and nothing else
+// (DKT-1180). The earlier reading — every issue in every earlier topological
+// level, "deliberately conservative" — gated a phase on issues it had no edge
+// into: RUN-76's seven-issue chain sat behind a `done` root and an UNRELATED
+// phase-1 sibling that `abandon-issue` had left at `todo` (by design — the
+// routing stops the run's work on an issue and does not close it), so every
+// re-activation expanded nothing, reported nothing, and the run was stuck.
+// planner.FindReady reads the same graph the same way this now does.
+func expandableIssues(dag *planner.DAG) map[int]bool {
+	out := make(map[int]bool, len(dag.Nodes))
+	for id := range dag.Nodes {
+		out[id] = len(unsatisfiedPredecessors(dag, id)) == 0
 	}
 	return out
 }
 
-// issuePredecessorsSatisfied reports whether every earlier-level issue this one
-// could depend on is `done`. It is deliberately conservative: it treats the
-// whole prefix of the topological order as the predecessor set, so an issue
-// expands early only when the phases before it are genuinely complete.
-func issuePredecessorsSatisfied(
-	_ int, levels [][]int, level int, issues map[int]*model.Issue,
-) bool {
-	for earlier := 0; earlier < level; earlier++ {
-		for _, id := range levels[earlier] {
-			if issue, ok := issues[id]; ok && issue.Status != model.StatusDone {
-				return false
-			}
-		}
+// unsatisfiedPredecessors lists the in-run issues still holding one issue's
+// phase back: its direct blockers whose status is not `done`, in ascending id
+// order so a report over them is stable.
+func unsatisfiedPredecessors(dag *planner.DAG, id int) []*model.Issue {
+	node, ok := dag.Nodes[id]
+	if !ok {
+		return nil
 	}
-	return true
+	var out []*model.Issue
+	for blockerID := range node.Reverse {
+		blocker, ok := dag.Nodes[blockerID]
+		if !ok || blocker.Issue.Status == model.StatusDone {
+			continue
+		}
+		out = append(out, blocker.Issue)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // issueSnapshot is stage 4's §5.1.1 half: the canonical JSON of
@@ -1362,7 +1758,32 @@ func issuePredecessorsSatisfied(
 // requires that answer frozen. Reading live for the bundle would break mid-run
 // edit immunity; freezing the scheduler would ignore a correction that exists
 // precisely to prevent a collision.
-func issueSnapshot(tx *sql.Tx, issue *model.Issue) (string, error) {
+// `linked` is the activation-resolved cross-issue pin set (DKT-547): declared
+// `issue.linked.<relation>.<kind>` suffix -> pinned artifact ids. It rides the
+// snapshot because it IS a snapshot — the answer to a question about live
+// state, frozen at activation — and because the snapshot's lifecycle is
+// exactly the pin's: written once at binding, never rewritten at
+// re-activation, read only by context assembly. `omitempty` keeps every
+// snapshot without the form byte-identical to what it always was, which is
+// what the golden bundles require.
+// issueSnapshotFields is the snapshot blob's shape, declared ONCE (DKT-869).
+//
+// Field ORDER is the canonical JSON's key order — encoding/json emits struct
+// fields by declaration — so this declaration is the format, not a convenience
+// view of it. It is a named type rather than an anonymous struct literal
+// because the scope refresh (scope_refresh.go) re-encodes an existing snapshot
+// through the SAME type: two independent literals would drift the moment
+// §11.4's issue shape grew a field, and a refresh that dropped a key
+// activation had written would silently truncate a live run's snapshot.
+type issueSnapshotFields struct {
+	Title  string           `json:"title"`
+	Kind   string           `json:"kind"`
+	Labels []string         `json:"labels"`
+	Scope  []string         `json:"scope"`
+	Linked map[string][]int `json:"linked,omitempty"`
+}
+
+func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (string, error) {
 	scopeJSON, err := db.IssueScopeGlobsTx(tx, issue.ID)
 	if err != nil {
 		return "", fmt.Errorf("reading scope for %s: %w", model.FormatID(issue.ID), err)
@@ -1382,16 +1803,12 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue) (string, error) {
 		labels = []string{}
 	}
 
-	snapshot := struct {
-		Title  string   `json:"title"`
-		Kind   string   `json:"kind"`
-		Labels []string `json:"labels"`
-		Scope  []string `json:"scope"`
-	}{
+	snapshot := issueSnapshotFields{
 		Title:  issue.Title,
 		Kind:   string(issue.Kind),
 		Labels: labels,
 		Scope:  scope,
+		Linked: linked,
 	}
 
 	out, err := json.Marshal(snapshot)
@@ -1519,6 +1936,16 @@ func expandIssue(
 				return 0, nil, err
 			}
 		}
+	}
+
+	// A step whose `after_fired` predecessor was just CREATED `skipped` by its
+	// `when` is created skipped with it (DKT-1085), in the same fat
+	// transaction: expansion is the one skip no routing transaction follows,
+	// so the cascade every routing runs (reconcileIssueAndRun) runs here too.
+	if _, err := propagateAfterFiredSkips(
+		tx, run.ID, issue.ID, bound.definition, nowMS,
+	); err != nil {
+		return 0, nil, err
 	}
 
 	return len(rows), warnings, nil

@@ -208,24 +208,30 @@ func TestAutoRegistrationWrongOrderFails(t *testing.T) {
 // F4-F6 — what is registered, what is pinned, what is skipped
 // ---------------------------------------------------------------------------
 
-// TestAutoRegistrationPinsWhatItDoesNotUnderstand is F4, F5, and F6 together.
+// TestAutoRegistrationPinsWhatItDoesNotUnderstand is F4, F5, and F6 together,
+// under DKT-581's closure rule.
 //
-// Only the two registries are REGISTERED. Everything else under
-// `.docket/config/` is PINNED — which is exactly what §2 says core does with
-// instance files it does not understand: "arbitrary operator-supplied file pins
-// … which is how the reference instance pins its contracts, fragments, and
-// policy WITHOUT CORE KNOWING WHAT THEY ARE".
+// Only the two registries are REGISTERED. What else gets PINNED is the packet
+// CLOSURE the bound workflows reach — each step's `packet` entries, the files
+// their `packet_includes` frontmatter declares, and `policy.toml` — which is
+// still exactly §2's stance ("core pins the instance's contracts, fragments,
+// and policy WITHOUT KNOWING WHAT THEY ARE"), narrowed to what the run can
+// actually read. A config file NOTHING reaches is not pinned at all, so a
+// corpus edit to it cannot drift this run's pins.
 func TestAutoRegistrationPinsWhatItDoesNotUnderstand(t *testing.T) {
 	conn, configDir := configRepo(t)
-	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml",
+		autoWorkflowSrc+"packet = [\"contracts/api.md\"]\n")
 	writeConfigFile(t, configDir, "policy.toml", "spawn = \"whatever the instance means\"\n")
 	// F5: the pinned directories are scanned RECURSIVELY — a fragment three
-	// levels deep is just a file to hash.
+	// levels deep is just a file to hash, reachable here through the
+	// contract's own `packet_includes`.
 	writeConfigFile(t, configDir, "fragments/a/b/deep.md", "a fragment\n")
-	writeConfigFile(t, configDir, "contracts/api.md", "a contract\n")
+	writeConfigFile(t, configDir, "contracts/api.md",
+		"---\npacket_includes:\n  - fragments/a/b/deep.md\n---\na contract\n")
 	// F6: a non-matching extension inside a REGISTRY directory is skipped
-	// silently there and pinned like any other file. A refusal would make a
-	// README a run-blocker.
+	// silently there. A refusal would make a README a run-blocker — and since
+	// nothing references it, DKT-581 leaves it unpinned too.
 	writeConfigFile(t, configDir, "workflows/README.md", "how to edit these\n")
 
 	issue := createIssue(t, conn, "pinned", "body", "task", nil)
@@ -238,25 +244,32 @@ func TestAutoRegistrationPinsWhatItDoesNotUnderstand(t *testing.T) {
 		t.Fatalf("registered %d files, want only the workflow: %+v",
 			len(result.Registered), result.Registered)
 	}
-	// The four non-registry files: policy.toml, the deep fragment, the
-	// contract, and the README.
-	if result.PinsFromConfig != 4 {
-		t.Errorf("pinned %d config files, want 4 (policy, fragment, contract, README)",
+	// The closure: policy.toml, the declared contract, and the fragment its
+	// `packet_includes` reaches. NOT the README nothing references.
+	if result.PinsFromConfig != 3 {
+		t.Errorf("pinned %d config files, want 3 (policy, contract, included fragment)",
 			result.PinsFromConfig)
 	}
 
 	// The pins are RECORDED, so `context.pins` can serve them and a run can say
 	// what it reproduced against.
 	pins := pinsByKind(t, conn, run.ID, db.PinKindFile)
-	var sawFragment bool
+	var sawFragment, sawREADME bool
 	for _, p := range pins {
 		if strings.HasSuffix(p.Ref, filepath.Join("fragments", "a", "b", "deep.md")) {
 			sawFragment = true
 		}
+		if strings.HasSuffix(p.Ref, "README.md") {
+			sawREADME = true
+		}
 	}
 	if !sawFragment {
-		t.Error("F5: a fragment three levels deep was not pinned; the pinned " +
-			"directories are scanned recursively")
+		t.Error("F5: a fragment three levels deep was not pinned; the closure " +
+			"walks `packet_includes` into recursively-scanned directories")
+	}
+	if sawREADME {
+		t.Error("DKT-581: a config file nothing references was pinned; a corpus " +
+			"edit to it would drift this run's pins for no reason")
 	}
 }
 
@@ -618,7 +631,10 @@ func TestAutoRegisterDisabledDoesNotAdoptANewVersion(t *testing.T) {
 // leave it needing every one of them hand-supplied via --pin.
 func TestAutoRegisterDisabledStillPinsTheConfigDirectory(t *testing.T) {
 	conn, configDir := configRepo(t)
-	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+	// The bound workflow DECLARES the contract, so it is in DKT-581's pin
+	// closure — the pinning this test proves survives the toggle.
+	src := autoWorkflowSrc + "packet = [\"contracts/note.md\"]\n"
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml", src)
 	writeConfigFile(t, configDir, "contracts/note.md", "a pinned fragment, not a registry file")
 
 	err := db.SetConfig(conn, 0, db.KeyAutoRegister, "false")
@@ -627,7 +643,7 @@ func TestAutoRegisterDisabledStillPinsTheConfigDirectory(t *testing.T) {
 	// With registration off, an operator registers by hand — the same path
 	// `workflow register` runs, exactly as F7 requires auto-registration
 	// itself to.
-	registerSource(t, conn, []byte(autoWorkflowSrc), "auto-dev.toml")
+	registerSource(t, conn, []byte(src), "auto-dev.toml")
 
 	issue := createIssue(t, conn, "pin check", "body", "task", nil)
 	run := startRun(t, conn, issue)

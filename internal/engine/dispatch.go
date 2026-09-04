@@ -84,6 +84,14 @@ type StaleTarget struct {
 	TargetSHA  string `json:"target_sha"`
 	SharedHead string `json:"shared_head"`
 	Reason     string `json:"reason"`
+	// Absent distinguishes DKT-742's harder case machine-readably: the
+	// recorded target does not resolve as a commit object from the shared
+	// checkout AT ALL (`git cat-file -e <sha>^{commit}` fails), as opposed to
+	// resolving but sitting off HEAD's history. A consumer planning a wave
+	// reads it as "no seat can reconstruct this tree", not merely "confirm
+	// the tree before reviewing". `omitempty` keeps every divergence-shaped
+	// advisory byte-identical to what it always was.
+	Absent bool `json:"absent,omitempty"`
 }
 
 // FormatDispatchID renders a dispatch's display identity.
@@ -883,8 +891,36 @@ func consumesIssueDiff(spec *workflow.Step) bool {
 // that is provably not an ancestor of the shared HEAD is stale — the
 // conductor integrated something other than the recorded commit, so a packet
 // rendered from it reviews a tree the branch no longer carries. An
-// unanswerable question (missing git, GC'd object, no ancestry seam) warns
-// about nothing: absence of evidence is not staleness.
+// unanswerable question (missing git, no ancestry seam) warns about nothing:
+// absence of evidence is not staleness.
+//
+// AN ABSENT OBJECT IS EVIDENCE, NOT ABSENCE OF IT (DKT-742). IsAncestorFn's
+// `known = false` covers both "git could not answer" and "the object is not
+// in the shared store at all", and skipping both silently was exactly
+// backwards for the second: a target that cannot even be resolved is the
+// WORST state a packet can render from, not the safest. RUN-52's DKT-V253
+// dispatched a three-seat vote whose packet named a sha `git cat-file -t`
+// found in no checkout — each seat discovered that independently, mid-wave,
+// with no warning having fired. So an unanswerable ancestry now asks the
+// narrower question the seats asked (ObjectExistsFn, `git cat-file -e
+// <sha>^{commit}`): a DEFINITIVE "no such object" warns with its own reason;
+// anything short of definitive stays silent exactly as before. The recorded
+// sha itself is never rewritten — the round record is the producer's frozen
+// evidence, and DKT-725/DKT-741 both settled that a recorded reference is
+// surfaced when it goes bad, not silently re-derived.
+//
+// AN ADJUDICATED WARNING DOES NOT RE-FIRE (DKT-742's companion half). An
+// operator who investigated a warning and ruled it acceptable records a
+// run-scoped waiver for the (step instance, target sha) pair — the
+// gate_override_grants shape (DKT-546) applied to this advisory — and rows
+// matching a waiver are dropped from the answer. The signature is the pair
+// alone: the same pair re-fires nothing however often HEAD moves, while a
+// different sha on the same row (RUN-52's DISPATCH-301, target rotated to
+// 7e072f54) or the same sha on an unnamed row is a fresh question and still
+// warns. The filter is READ-ONLY because this judge serves `dispatch verify`,
+// which writes nothing by contract; the audit trail is the waiver's own
+// `stale-target-waived` event at recording time. A waiver read that fails
+// leaves every warning standing — the safe direction for an advisory.
 //
 // ANCESTRY ALONE IS NOT THE TEST (DKT-424). The sanctioned integration flow
 // cherry-picks an isolated worktree's commit onto the shared branch, which
@@ -899,11 +935,27 @@ func consumesIssueDiff(spec *workflow.Step) bool {
 // warned, and the conductor spent ~50s proving by hand what the probe now
 // establishes (DKT-451).
 //
-// The tree probe may only ACQUIT. Unanswerable (no TreeMatchFn wired, git
-// absent, unrelated histories with differing trees, an empty touched-path set
-// whose commits' root trees also differ) leaves DKT-193's verdict exactly as it
-// stood, and the reason then says the tree question went unanswered rather than
-// claiming a difference nothing measured.
+// THE PATCH IS THE THING MEASURED, NOT THE TIP (DKT-1033). A tree comparison
+// on a moving branch tip reads any later commit on the same paths as a
+// difference: RUN-67 warned "integration diverged" on all nine review rows of
+// a run whose three integrations were plain `git cherry-pick -x` — two into
+// non-overlapping regions of one Makefile, one followed by a conductor patch
+// to the same test file — with every hunk byte-identical on HEAD. So a
+// disproved ancestry now asks about the PATCH first: does HEAD's side of the
+// merge base carry a patch-id equivalent of each commit on the target's side
+// (PatchContainedFn — `git cherry`, refined by a zero-context patch-id
+// comparison)? The tree probe speaks after it, and only where the patch probe
+// did not already acquit.
+//
+// Both probes may only ACQUIT, and the reason names which one accused. Only a
+// patch probe that ran and found the patch missing may say "diverged", because
+// only it measured the work; a tree difference the patch probe could not check
+// is worded as content that could not be matched, which is all it measured;
+// and the unanswerable states (no probe wired, git absent, unrelated histories
+// with differing trees, an empty touched-path set whose commits' root trees
+// also differ) leave DKT-193's verdict exactly as it stood, with a reason that
+// says the question went unanswered rather than claiming a difference nothing
+// measured.
 //
 // THE REASON NAMES THE CLAIM-TIME SEMANTICS (DKT-415), because the decision the
 // warning exists to inform is "is dispatching through this safe". Claim
@@ -926,11 +978,30 @@ func (e *Engine) staleTargets(
 	if sharedHead == "" {
 		return nil
 	}
+	// The run's standing waivers (DKT-742), loaded lazily: only a judge about
+	// to warn pays the read, and a failed read waives nothing.
+	var waivers []db.StaleTargetWaiver
+	waiversLoaded := false
+	waived := func(instance, sha string) bool {
+		if !waiversLoaded {
+			waivers, _ = db.StaleTargetWaiversForRun(conn, runID)
+			waiversLoaded = true
+		}
+		for _, w := range waivers {
+			if waiverCovers(w, instance, sha) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// One verdict per SHA, not per row: a review fanout's siblings all render
 	// from the same recorded target, and the git questions are identical.
 	type verdict struct {
-		ancestor, known      bool
-		treeMatch, treeKnown bool
+		ancestor, known       bool
+		contained, patchKnown bool
+		treeMatch, treeKnown  bool
+		absent                bool
 	}
 	cache := make(map[string]verdict, len(candidates))
 	var out []StaleTarget
@@ -938,59 +1009,164 @@ func (e *Engine) staleTargets(
 		v, seen := cache[c.sha]
 		if !seen {
 			v.ancestor, v.known = e.IsAncestorFn(execRoot, c.sha)
-			if v.known && !v.ancestor && e.TreeMatchFn != nil {
+			if v.known && !v.ancestor && e.PatchContainedFn != nil {
+				// DKT-1033: the patch question first — it is the one about
+				// the work rather than the tip.
+				v.contained, v.patchKnown = e.PatchContainedFn(execRoot, c.sha)
+			}
+			if v.known && !v.ancestor && !(v.patchKnown && v.contained) &&
+				e.TreeMatchFn != nil {
+				// The tree probe is acquittal-only, so it is worth asking
+				// wherever the patch probe did not already acquit: a squash
+				// that folded several issues into one commit carries this
+				// work's content on its paths without carrying its patch-id.
 				v.treeMatch, v.treeKnown = e.TreeMatchFn(execRoot, c.sha)
+			}
+			if !v.known && e.ObjectExistsFn != nil {
+				// DKT-742: the ancestry question was unanswerable — ask the
+				// narrower one a packet consumer will ask anyway. Only a
+				// definitive "no such object" accuses; every genuinely
+				// unanswerable state stays silent.
+				exists, existsKnown := e.ObjectExistsFn(execRoot, c.sha)
+				v.absent = existsKnown && !exists
 			}
 			cache[c.sha] = v
 		}
-		if !v.known || v.ancestor {
+		if v.known && v.ancestor {
 			continue
 		}
-		if v.treeKnown && v.treeMatch {
-			// DKT-424: the sha was rewritten (cherry-pick integration), the
-			// tree was not. The branch carries exactly what the packet
-			// renders on the paths this work touched — nothing to warn about.
+		if !v.known && !v.absent {
 			continue
+		}
+		if v.known && ((v.patchKnown && v.contained) || (v.treeKnown && v.treeMatch)) {
+			// DKT-424, DKT-1033: the sha was rewritten (cherry-pick
+			// integration), the work was not. The branch carries this
+			// target's patch, or exactly what the packet renders on the paths
+			// the work touched — nothing to warn about.
+			continue
+		}
+		if waived(c.instance, c.sha) {
+			// DKT-742: this exact (step, target) pair was adjudicated by an
+			// operator; the standing ruling is engine-visible now.
+			continue
+		}
+		evidence := staleUndetermined
+		switch {
+		case v.patchKnown:
+			evidence = stalePatchMissing
+		case v.treeKnown:
+			evidence = staleTreeUnmatched
+		}
+		reason := staleTargetReason(c.sha, sharedHead, evidence)
+		if v.absent {
+			reason = staleTargetAbsentReason(c.sha, sharedHead)
 		}
 		out = append(out, StaleTarget{
 			Instance: c.instance, Issue: c.issue,
 			TargetSHA: c.sha, SharedHead: sharedHead,
-			Reason: staleTargetReason(c.sha, sharedHead, v.treeKnown),
+			Reason: reason, Absent: v.absent,
 		})
 	}
 	return out
 }
 
-// staleTargetReason renders the advisory's sentence, in the two shapes the
-// evidence actually supports (DKT-424).
+// waiverCovers reports whether one waiver covers one would-be warning: the
+// SAME step instance, and a target sha the waiver's recorded sha is a
+// case-insensitive prefix of (>= 7 hex chars, enforced at the verb). Prefix
+// rather than equality because the advisory the operator copies the sha from
+// renders it at 12 characters; case-insensitive because git itself is.
+func waiverCovers(w db.StaleTargetWaiver, instance, sha string) bool {
+	return w.StepInstance == instance &&
+		strings.HasPrefix(strings.ToLower(sha), strings.ToLower(w.TargetSHA))
+}
+
+// staleEvidence names which probe produced the advisory's second half, so the
+// sentence claims exactly what was measured and no more (DKT-424, DKT-1033).
+type staleEvidence int
+
+const (
+	// staleUndetermined: neither the patch question nor the tree question
+	// could be answered. The ancestry fact stands alone.
+	staleUndetermined staleEvidence = iota
+	// staleTreeUnmatched: the patch question could not be asked; the tree
+	// probe ran and HEAD's content on the paths the work touched did not
+	// match the target's. A later commit on the same paths reads exactly this
+	// way, so it is not a divergence claim.
+	staleTreeUnmatched
+	// stalePatchMissing: the patch probe ran and no commit on HEAD's side of
+	// the merge base carries this work's patch. The one shape that measured
+	// the work itself, and the only one the advisory may call a divergence.
+	stalePatchMissing
+)
+
+// staleTargetReason renders the advisory's sentence, in the three shapes the
+// evidence actually supports (DKT-424, DKT-1033).
 //
-// `treeChecked` is the difference between "the branch's content differs from
-// the packet's, measured" and "the sha diverged and the content question could
-// not be asked". The conductor's next move differs between them — the first is
-// a divergence to look at, the second is a probe to repair or a tree to
-// hand-check — so the string may not blur the two.
-func staleTargetReason(sha, sharedHead string, treeChecked bool) string {
-	evidence := fmt.Sprintf(
+// The conductor's next move differs between them — a missing patch is a
+// divergence to look at, an unmatched tree is content to hand-check against
+// whatever landed on those paths since, an unanswered question is a probe to
+// repair — so the string may not blur them, and in particular may not say
+// "diverged" for anything but the patch measurement: RUN-67 read that word on
+// nine rows whose patches were all intact.
+func staleTargetReason(sha, sharedHead string, evidence staleEvidence) string {
+	sentence := fmt.Sprintf(
 		"the recorded target sha %.12s is not an ancestor of the shared "+
 			"checkout's HEAD %.12s", sha, sharedHead)
-	if treeChecked {
-		evidence += ", and its tree still differs from that HEAD on the paths " +
-			"the work touched — integration diverged from the recorded commit " +
-			"rather than merely rewriting its sha, so a packet rendered from it " +
-			"reviews a tree the branch no longer carries"
-	} else {
-		evidence += ", and whether HEAD still carries its tree could not be " +
-			"determined (git could not answer, or the two share no comparable " +
-			"history) — a cherry-picked integration mints a new sha for " +
-			"identical content, so confirm the tree before reading this as a " +
-			"divergence; if integration did diverge, a packet rendered from " +
-			"this sha reviews a tree the branch no longer carries"
+	switch evidence {
+	case stalePatchMissing:
+		sentence += ", and no commit on the shared branch since their merge " +
+			"base carries its patch (`git cherry` and a zero-context patch-id " +
+			"comparison both ran against HEAD) — integration diverged from the " +
+			"recorded commit rather than merely rewriting its sha, or never " +
+			"landed it, so a packet rendered from it reviews a change the " +
+			"branch does not carry"
+	case staleTreeUnmatched:
+		sentence += ", and whether HEAD carries its patch could not be tested " +
+			"(patch-id equivalence had nothing to compare), while HEAD's " +
+			"content could not be matched to its tree on the paths the work " +
+			"touched — a later commit on those same paths reads exactly this " +
+			"way, so this is not evidence that integration changed the work; " +
+			"confirm the content by hand before acting on this row"
+	default:
+		sentence += ", and whether HEAD still carries its patch or its tree " +
+			"could not be determined (git could not answer, or the two share " +
+			"no comparable history) — a cherry-picked integration mints a new " +
+			"sha for identical content, so confirm the content by hand before " +
+			"acting on this row; if integration never landed it, a packet " +
+			"rendered from this sha reviews a change the branch does not carry"
 	}
-	return evidence +
-		". A claim does not re-derive the target from HEAD: the packet renders " +
-		"from whichever recorded diff artifact resolves at claim time, so this " +
-		"row stays on this sha unless an upstream step records a newer diff for " +
-		"the issue first"
+	return sentence + staleTargetClaimSemantics
+}
+
+// staleTargetClaimSemantics is DKT-415's claim-time tail, shared by every
+// advisory shape: the decision the warning informs is "is dispatching through
+// this safe", and that turns on what a claim will actually render.
+const staleTargetClaimSemantics = ". A claim does not re-derive the target " +
+	"from HEAD: the packet renders from whichever recorded diff artifact " +
+	"resolves at claim time, so this row stays on this sha unless an upstream " +
+	"step records a newer diff for the issue first"
+
+// staleTargetAbsentReason renders DKT-742's advisory shape: the recorded
+// target does not resolve as a commit object from the shared checkout at all.
+//
+// It is a THIRD sentence rather than a variant of staleTargetReason's two,
+// because the conductor's next move differs again: a divergence is compared,
+// an unanswered tree is hand-checked, but an absent object can be NEITHER —
+// no seat can `git cat-file` or `git archive` this sha from the shared
+// checkout, so the packet's target is unusable as recorded and the work needs
+// its integrated successor (or the change-summary artifact) judged instead,
+// which is exactly the workaround RUN-52's three vote seats each re-derived
+// alone.
+func staleTargetAbsentReason(sha, sharedHead string) string {
+	return fmt.Sprintf(
+		"the recorded target sha %.12s does not resolve as a commit from the "+
+			"shared checkout at all (`git cat-file -e %.12s^{commit}` fails "+
+			"against HEAD %.12s's checkout) — the producing worktree's commit "+
+			"never reached the shared object store, or was pruned after "+
+			"integration removed its worktree and branch. No consumer can "+
+			"reconstruct this tree from the shared checkout; judge the step's "+
+			"integrated successor or its recorded change-summary instead",
+		sha, sha, sharedHead) + staleTargetClaimSemantics
 }
 
 // noOpenDispatchErr maps the storage sentinel onto the taxonomy once.
@@ -1253,6 +1429,12 @@ type CloseOutcome struct {
 	// stderr carried would be gone by the time anyone audited. It names ids
 	// because instances repeat across issues (DKT-315).
 	Accepted []string `json:"accepted,omitempty"`
+	// Integration is DKT-1284's verdict: every write-class step's recorded
+	// commit was found integrated into the shared branch ("verified", with
+	// the checked shas), or the operator named a reason to skip asking
+	// ("skipped"). It is never nil — a close that reached this far always
+	// ran one of the two.
+	Integration *IntegrationCheck `json:"integration,omitempty"`
 }
 
 // CloseDispatch is P18, P19, P20, and P22.
@@ -1276,12 +1458,32 @@ type CloseOutcome struct {
 // the same event against the run, and reports what it accepted. Without the
 // flag the refusal is unchanged: closing a manifest that is not open is still
 // a conflict, because there is nothing to close.
+//
+// DKT-1284: BEFORE ANY OF THAT, it verifies every write-class step's own
+// recorded commit reached the shared branch (dispatch_integration.go) —
+// ancestor first, patch-equivalent (`git cherry`) when a cherry-pick minted a
+// new sha for identical content, refusing CONFLICT with the unintegrated list
+// otherwise. skipIntegrationReason, when non-empty, is the operator's
+// override: the check does not run at all, and the reason rides on the close
+// event instead (§3.6's "record the override, don't silently honor it"
+// pattern this codebase already applies to trust changes).
 func (e *Engine) CloseDispatch(
-	conn *sql.DB, runID int, acceptMissingUsage bool, nowMS int64,
+	conn *sql.DB, runID int, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
 ) (*CloseOutcome, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
+	}
+
+	integration, unintegrated, err := e.integrationVerdict(conn, runID, defs, skipIntegrationReason, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	if len(unintegrated) > 0 {
+		return nil, conflictErr(
+			"%s cannot close: %d write-class step commit(s) are not integrated "+
+				"into the shared branch: %s",
+			model.FormatRunID(runID), len(unintegrated), UnintegratedReason(unintegrated))
 	}
 
 	tx, err := conn.Begin()
@@ -1351,7 +1553,7 @@ func (e *Engine) CloseDispatch(
 					"accept", model.FormatRunID(runID))
 		}
 		data, err := json.Marshal(map[string]any{
-			"accepted": instances, "reason": reason,
+			"accepted": instances, "reason": reason, "integration": integration,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("recording the acceptance: %w", err)
@@ -1366,15 +1568,16 @@ func (e *Engine) CloseDispatch(
 		}
 		return &CloseOutcome{
 			Run: model.FormatRunID(runID), Status: db.DispatchClosed,
-			Reason: reason, Accepted: instances,
+			Reason: reason, Accepted: instances, Integration: integration,
 		}, nil
 	}
 
 	// P19: the accepted step list rides in the EVENT's data, which is what
 	// "records the acceptance" means. An acceptance visible only in a terminal
-	// scrollback is not a record.
+	// scrollback is not a record. AC3: `integration` rides beside it — verified
+	// with its checked shas, or skipped with the operator's reason.
 	moved, err := closeDispatchTx(tx, open.ID, runID, db.DispatchClosed, reason,
-		EventDispatchClosed, map[string]any{"accepted": instances},
+		EventDispatchClosed, map[string]any{"accepted": instances, "integration": integration},
 		"recording the close", nowMS)
 	if err != nil {
 		return nil, err
@@ -1392,6 +1595,7 @@ func (e *Engine) CloseDispatch(
 	return &CloseOutcome{
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
 		Status: db.DispatchClosed, Reason: reason, Accepted: instances,
+		Integration: integration,
 	}, nil
 }
 

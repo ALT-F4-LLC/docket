@@ -246,6 +246,78 @@ const (
 	// it was admitted over), which are exactly the three facts an auditor
 	// asking "why was this allowed?" needs.
 	EventSpawnAdmitted = "spawn-admitted"
+
+	// The batch gate-override kinds (DKT-546).
+	//
+	// Both earn their place on §9 item 2's argument in the `spawn-admitted`
+	// form: each records a park being STEPPED PAST on standing authority.
+	// `gate-override-granted` is the authority being minted — one operator
+	// ruling that a gate's failure signature is environmental for the rest of
+	// the run — and it carries `gate#grantid` so the grant row the feed names
+	// is findable. `step-batch-overridden` is the authority being SPENT: a
+	// step whose failed gates were auto-passed under that ruling, carrying the
+	// covering grant id(s). Without the second kind an auto-applied override
+	// would be indistinguishable in the feed from an engine-computed pass —
+	// the one case where "no event" and "the gates passed" say the same thing
+	// while meaning opposite things.
+	EventGateOverrideGranted = "gate-override-granted"
+	EventStepBatchOverridden = "step-batch-overridden"
+
+	// The stale-target waiver being minted (DKT-742) — the same §9 item 2
+	// argument as `gate-override-granted`: a warning that stops appearing is
+	// otherwise indistinguishable in the record from a warning that stopped
+	// being true, and this kind is what says an operator ruled rather than
+	// git relented. It carries `targetsha#waiverid` so the waiver row the
+	// feed names is findable. The waiver being SPENT records no event,
+	// deliberately: the advisory is recomputed by `dispatch verify`, which
+	// writes nothing by contract, and an advisory suppressed is not a
+	// transition — no step changes status because a warning stayed quiet.
+	EventStaleTargetWaived = "stale-target-waived"
+
+	// The activation snapshot's scope being REFRESHED mid-run (DKT-869).
+	//
+	// It earns its place on the `run-repinned` argument, one column over: this
+	// is the only other transition that moves a frozen premise while a run is
+	// live. Every packet an issue's remaining steps render, and every diff they
+	// record, read `run_issues.issue_snapshot`; without this kind a reader of
+	// the ledger comparing two steps of one run would see two different
+	// declared scopes with nothing between them explaining the difference —
+	// which is exactly the drift the freeze exists to prevent, reintroduced
+	// silently. It carries `from`, `to`, the step instances the refresh
+	// reaches, and the operator's reason, so the discontinuity is dated and
+	// attributable rather than inferred.
+	EventIssueScopeRefreshed = "issue-scope-refreshed"
+
+	// A step's recorded `issue.diff` being RE-PINNED to another tree
+	// (DKT-1034): `step resolve --worktree` recomputed the diff and its target
+	// sha from a checkout an operator patched out of band, and recorded the
+	// result as a new artifact superseding the step's previous one.
+	//
+	// It earns its place on the `run-repinned` argument, one column over
+	// again: the round record is the frozen premise every downstream review
+	// packet renders its target from, and DKT-725/DKT-741 settled that a
+	// recorded reference is never silently re-derived. This is the one verb
+	// that moves it on purpose, so the trail must date and attribute the move
+	// — it carries the STALE sha and the RE-PINNED sha, the checkout measured,
+	// and both artifact ids, so a reader comparing a review packet against
+	// the commit the executor actually recorded can see where the two parted.
+	// Without it, RUN-67's review round judging fe5db34e while the branch
+	// carried e642afb would be indistinguishable in the record from a packet
+	// that rendered correctly.
+	EventIssueDiffRepinned = "issue-diff-repinned"
+
+	// A run note being recorded (DKT-1079): `run note add` put a standing
+	// statement into every packet the run renders from that moment on.
+	//
+	// It earns its place on the `run-repinned` argument, in yet another
+	// column: a note is the third thing that changes what a step's packet
+	// says while the run is live, beside a repin and a scope refresh. Two
+	// renders of one step that differ by a `== RUN NOTE` section would
+	// otherwise be indistinguishable in the record from the packet drift the
+	// snapshot discipline exists to prevent. It carries the note's id and its
+	// text verbatim, as `step-annotated` carries its annotation, so what
+	// every later worker was told survives in the feed itself.
+	EventRunNoteAdded = "run-note-added"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -274,10 +346,15 @@ var eventKinds = map[string]bool{
 	EventDispatchOpened: true, EventDispatchClosed: true,
 	EventDispatchAbandoned: true, EventReapAcknowledged: true,
 	EventEventsPruned: true, EventRunBudgetSet: true,
-	EventStepAnnotated:     true,
-	EventProjectRegistered: true,
-	EventRunRepinned:       true,
-	EventSpawnAdmitted:     true,
+	EventStepAnnotated:       true,
+	EventProjectRegistered:   true,
+	EventRunRepinned:         true,
+	EventSpawnAdmitted:       true,
+	EventGateOverrideGranted: true, EventStepBatchOverridden: true,
+	EventStaleTargetWaived:   true,
+	EventIssueScopeRefreshed: true,
+	EventIssueDiffRepinned:   true,
+	EventRunNoteAdded:        true,
 }
 
 // recordEvent writes one event in the caller's transaction.
@@ -576,6 +653,12 @@ type TrustGrant struct {
 	// entry being added, without saying it points at `/usr/bin/true`, records
 	// the name of an assurance rather than the assurance.
 	Stub bool
+	// StubReason is the operator's recorded why-and-what-tracks-it for a stub
+	// (DKT-607). It rides in the event so the grant's trail carries the
+	// documented decision, not only the fact of hollowness; empty when the
+	// grant recorded none (every pre-DKT-607 stub) and always empty on a
+	// non-stub grant.
+	StubReason string
 	// Actor is WHO ran the verb — the git identity, falling back to the OS
 	// username (DKT-263). It is A CLAIM, NOT A VERIFIED FACT: `git config
 	// user.name` is whatever the invoking environment says it is, and nothing
@@ -583,6 +666,14 @@ type TrustGrant struct {
 	// and it is worth having anyway — before this field, recovering by-whom
 	// meant bracketing runs against wall-clock, which the retro had to do
 	// twice.
+	//
+	// IT IS REQUIRED (DKT-595): RecordTrustEvent refuses an empty one. The
+	// literal "unknown" — the resolver's last fallback when neither a git
+	// identity nor an OS user exists — DOES count as supplied: it is the
+	// resolver's honest report of an anonymous environment, the same value
+	// every other authored row carries there. What is refused is the empty
+	// string, which no resolver produces and which can only mean the writer
+	// never filled the field.
 	Actor string
 	// Cwd is where the verb ran from.
 	//
@@ -592,6 +683,10 @@ type TrustGrant struct {
 	// separates them. Same reasoning as ProjectRegistration's Cwd/Identity
 	// pair — the case worth attributing is the one where the person is not the
 	// distinguishing fact.
+	//
+	// IT IS REQUIRED (DKT-595), same as Actor: RecordTrustEvent refuses an
+	// empty one, and a caller whose working directory cannot be read must
+	// refuse the whole trust change rather than degrade the field.
 	Cwd string
 }
 
@@ -617,7 +712,26 @@ type TrustGrant struct {
 // is a classification; these two are the person's own account of themselves,
 // which is an identity. A grant is the one act in the system that widens what
 // may execute, so its trail should not require a join against a clock.
+//
+// BOTH ARE MANDATORY, AND THE REFUSAL LIVES HERE (DKT-595). The 2026-08-19
+// batch — 43 unattributed trust events, twelve of which widened network
+// egress — came from a writer that supplied neither field, and the ledger
+// could not say whether that writer was an older binary or a non-interactive
+// path. That ambiguity is unrepairable after the fact, so it is closed at the
+// door: this function, the single entry point through which a trust event
+// reaches the table, refuses a grant whose Actor or Cwd is empty, BEFORE
+// anything is written. Guarding here rather than only at the CLI call site is
+// what makes the property hold for a future non-CLI writer too.
 func RecordTrustEvent(conn *sql.DB, kind string, grant TrustGrant, atMS int64) error {
+	// THE UNATTRIBUTED-GRANT REFUSAL (DKT-595), ahead of the marshal so a
+	// refused event leaves no differently-shaped payload behind — the write
+	// below still emits every key unconditionally or does not happen at all.
+	if grant.Actor == "" || grant.Cwd == "" {
+		return fmt.Errorf(
+			"refusing to record an unattributed %s event (actor=%q cwd=%q): a trust change must say who made it and from where, and a writer that cannot supply both must not write one",
+			kind, grant.Actor, grant.Cwd)
+	}
+
 	// EVERY KEY IS WRITTEN, including the false ones and the empty ones. A
 	// payload that omitted `tree` when false and `network` when empty would be
 	// byte-identical to one from a writer that never had the field, so a reader
@@ -640,11 +754,15 @@ func RecordTrustEvent(conn *sql.DB, kind string, grant TrustGrant, atMS int64) e
 		"network":     network,
 		"timeout":     grant.Timeout,
 		"stub":        grant.Stub,
-		// Written unconditionally, empty string and all, for the same reason
-		// the false flags above are: an omitted key is byte-identical to one
-		// from a writer that never had the field, so a reader could not tell an
-		// UNRESOLVABLE actor from a build that did not record actors. The first
-		// is a fact about that grant; the second is a fact about the binary.
+		"stub_reason": grant.StubReason,
+		// Written unconditionally like every other key — the key set stays
+		// exact in both directions — and, since the DKT-595 guard above,
+		// guaranteed NON-EMPTY. The empty string was once accepted here as
+		// "the field was unresolvable", but the 2026-08-19 batch showed what
+		// that buys in practice: an empty value cannot be told apart from a
+		// writer that never tried, so it distinguished nothing. Emptiness now
+		// refuses before the write; a key that is present is a value that
+		// attributes.
 		"actor": grant.Actor,
 		"cwd":   grant.Cwd,
 	})

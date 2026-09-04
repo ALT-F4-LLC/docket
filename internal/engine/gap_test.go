@@ -99,6 +99,202 @@ func TestGapRecordsArtifactAndIssue(t *testing.T) {
 	}
 }
 
+// TestGapHeaderRanksTheFiledIssue is DKT-1082: drain-highs filed every
+// high-severity cluster it drained at priority `none`, unranked and unlabelled
+// — invisible to every priority-ordered planning pass, while the severity was
+// already written into the body the step handed over. A gap body's leading
+// header block now ranks the issue it materializes, and the body still records
+// verbatim.
+func TestGapHeaderRanksTheFiledIssue(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	e := testEngine()
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	// The shape drain-highs writes: title, the `Home:` convention line the
+	// contract already puts on line two, then the severity.
+	body := "The retry loop swallows the cancel\n" +
+		"Home: THIS repository\n" +
+		"Severity: high\n" +
+		"Labels: review-drain, reliability\n" +
+		"Kind: bug\n" +
+		"\n" +
+		"Cluster SYN-1, round 1.\n"
+
+	var gapIssues []string
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token:     claim.Token,
+		Artifact:  []byte("the change summary"),
+		Gaps:      [][]byte{[]byte(body)},
+		GapIssues: &gapIssues,
+		NowMS:     nowMS,
+	})
+	testsupport.Must(t, err, "complete with a ranked gap: %v", err)
+
+	if len(gapIssues) != 1 {
+		t.Fatalf("gap issues = %v, want exactly one ref", gapIssues)
+	}
+	gapID, err := model.ParseID(gapIssues[0])
+	testsupport.Must(t, err, "parsing %s: %v", gapIssues[0], err)
+
+	issue, err := db.GetIssue(conn, gapID)
+	testsupport.Must(t, err, "reading the gap issue: %v", err)
+	if issue.Priority != model.PriorityHigh {
+		t.Errorf("gap issue priority = %q, want %q — a drained high that lands "+
+			"unranked is invisible to priority-ordered planning",
+			issue.Priority, model.PriorityHigh)
+	}
+	if issue.Kind != model.IssueKindBug {
+		t.Errorf("gap issue kind = %q, want %q", issue.Kind, model.IssueKindBug)
+	}
+	if issue.Title != "The retry loop swallows the cancel" {
+		t.Errorf("gap issue title = %q; the header must not displace the title",
+			issue.Title)
+	}
+	// The body is stored VERBATIM: the header is read, never stripped, so the
+	// artifact and the issue keep saying the same thing.
+	if issue.Description != body {
+		t.Errorf("gap issue body = %q, want the gap verbatim %q",
+			issue.Description, body)
+	}
+
+	labels, err := db.GetIssueLabels(conn, gapID)
+	testsupport.Must(t, err, "reading labels: %v", err)
+	for _, want := range []string{"reliability", "review-drain"} {
+		if !slices.Contains(labels, want) {
+			t.Errorf("gap issue labels = %v, missing %q", labels, want)
+		}
+	}
+}
+
+// TestGapWithoutHeaderMaterializesAsBefore pins the other half of DKT-1082:
+// the header block is OPTIONAL, and a gap that declares nothing files exactly
+// the row it always filed.
+func TestGapWithoutHeaderMaterializesAsBefore(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	e := testEngine()
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	var gapIssues []string
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token:    claim.Token,
+		Artifact: []byte("the change summary"),
+		Gaps: [][]byte{[]byte(
+			"# The helper is duplicated in three packages\n\nSeverity: high\n")},
+		GapIssues: &gapIssues,
+		NowMS:     nowMS,
+	})
+	testsupport.Must(t, err, "complete with a headerless gap: %v", err)
+
+	if len(gapIssues) != 1 {
+		t.Fatalf("gap issues = %v, want exactly one ref", gapIssues)
+	}
+	gapID, err := model.ParseID(gapIssues[0])
+	testsupport.Must(t, err, "parsing %s: %v", gapIssues[0], err)
+
+	issue, err := db.GetIssue(conn, gapID)
+	testsupport.Must(t, err, "reading the gap issue: %v", err)
+	// The blank line after the title ENDS the header block: a `Severity:` line
+	// in the prose below is body, not a declaration.
+	if issue.Priority != model.PriorityNone {
+		t.Errorf("gap issue priority = %q, want %q — a gap that declared no "+
+			"header must materialize exactly as before", issue.Priority, model.PriorityNone)
+	}
+	if issue.Kind != model.IssueKindTask {
+		t.Errorf("gap issue kind = %q, want %q", issue.Kind, model.IssueKindTask)
+	}
+	labels, err := db.GetIssueLabels(conn, gapID)
+	testsupport.Must(t, err, "reading labels: %v", err)
+	if len(labels) != 0 {
+		t.Errorf("gap issue labels = %v, want none", labels)
+	}
+}
+
+// TestParseGapHeader covers the mapping table and the block's boundaries
+// directly, where the round trip through a completion cannot reach every case.
+func TestParseGapHeader(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		priority model.Priority
+		kind     model.IssueKind
+		labels   []string
+	}{
+		{
+			name:     "blocker maps to critical",
+			body:     "title\nSeverity: blocker\n",
+			priority: model.PriorityCritical,
+		},
+		{
+			name:     "medium maps to medium",
+			body:     "title\nSeverity: MEDIUM\n",
+			priority: model.PriorityMedium,
+		},
+		{
+			name: "low sits below every gate and ranks none",
+			body: "title\nSeverity: low\n",
+		},
+		{
+			name: "an unknown severity is ignored, not refused",
+			body: "title\nSeverity: spicy\n",
+		},
+		{
+			name:     "an explicit priority wins over the mapped severity",
+			body:     "title\nSeverity: high\nPriority: low\n",
+			priority: model.PriorityLow,
+		},
+		{
+			name:     "and wins in either order",
+			body:     "title\nPriority: low\nSeverity: high\n",
+			priority: model.PriorityLow,
+		},
+		{
+			name: "prose ends the block",
+			body: "title\nFound while implementing.\nSeverity: high\n",
+		},
+		{
+			name:     "an unknown key does not end the block",
+			body:     "title\nHome: THIS repository\nSeverity: high\n",
+			priority: model.PriorityHigh,
+		},
+		{
+			name:   "labels split, trim and dedupe",
+			body:   "title\nLabels: a , b,, a ,c\n",
+			labels: []string{"a", "b", "c"},
+		},
+		{
+			name: "an unknown kind is ignored",
+			body: "title\nKind: catastrophe\n",
+		},
+		{
+			name: "a header before the title is body, not a declaration",
+			body: "Severity: high\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseGapHeader([]byte(tc.body))
+			if got.Priority != tc.priority {
+				t.Errorf("priority = %q, want %q", got.Priority, tc.priority)
+			}
+			if got.Kind != tc.kind {
+				t.Errorf("kind = %q, want %q", got.Kind, tc.kind)
+			}
+			if !slices.Equal(got.Labels, tc.labels) {
+				t.Errorf("labels = %v, want %v", got.Labels, tc.labels)
+			}
+		})
+	}
+}
+
 // TestGapOnlyCompletionParksForTheOperator is DKT-25: a completion whose only
 // product is gap artifacts must not feed the issue's remaining pipeline. The
 // measured failure: an unimplementable step recorded gap-only, its gates ran

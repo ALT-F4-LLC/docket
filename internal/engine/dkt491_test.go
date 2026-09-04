@@ -194,14 +194,14 @@ func TestReReviewPacketInlinesTheRevisedDocOnce(t *testing.T) {
 	}
 
 	// And every input the step legitimately carries, still there and still
-	// once: the doc, the issue body, and the previous round's four findings
-	// sets (two judges, the synthesis, the reconciliation).
+	// once: the doc, the issue body, and the previous round's three findings
+	// sets from review's own lineage (two judges, the reconciliation the body
+	// acted on — the synthesis between them is neither, DKT-1055).
 	want := []string{
 		"== INPUT doc from revise-a@1",
 		"== INPUT issue.body",
 		"== INPUT findings from review@0#0",
 		"== INPUT findings from review@0#1",
-		"== INPUT findings from synthesize@0",
 		"== INPUT findings from reconcile@0",
 	}
 	headers := inputHeaders(packet.Packet)
@@ -246,9 +246,10 @@ func TestReReviewBundleBindsTheRevisedDocOnce(t *testing.T) {
 	if len(docs) != 1 {
 		t.Errorf("the bundle binds %d doc inputs, want 1: %v", len(docs), docs)
 	}
-	if len(bundle.Inputs) != 6 {
-		t.Errorf("the bundle carries %d inputs, want 6 (the doc, the issue "+
-			"body, and the previous round's four findings sets)",
+	if len(bundle.Inputs) != 5 {
+		t.Errorf("the bundle carries %d inputs, want 5 (the doc, the issue "+
+			"body, and the previous round's three findings sets from review's "+
+			"own lineage — two judges and the reconciliation, DKT-1055)",
 			len(bundle.Inputs))
 	}
 }

@@ -38,6 +38,7 @@
   ],
   "step": {
     "attempt": 0,
+    "blocked_reason": "an `after` predecessor is not done",
     "class": "verify-ac",
     "executor": "verify-ac",
     "expected_cost": 0.5,
