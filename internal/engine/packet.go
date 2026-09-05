@@ -103,17 +103,7 @@ func resolvePacketFiles(
 	}
 
 	var out []PacketFile
-	seen := make(map[string]bool, len(entries))
-
-	// add resolves one file and appends it, returning the includes it declares.
-	// A file already inlined returns no includes, which is what makes the
-	// de-duplication also terminate the one-level walk on a diamond.
-	add := func(ref string) ([]string, error) {
-		if seen[ref] {
-			return nil, nil
-		}
-		seen[ref] = true
-
+	err := walkPacketFiles(entries, func(ref string) ([]string, error) {
 		body, hash, err := readPinnedPacketFile(runRef, pins, roots, ref)
 		if err != nil {
 			return nil, err
@@ -124,22 +114,40 @@ func resolvePacketFiles(
 		}
 		out = append(out, PacketFile{Path: ref, SHA256: hash, Body: stripped})
 		return includes, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// walkPacketFiles shares the renderer's ordered, one-level traversal with
+// activation's byte accounting. A ref visited as an include is also skipped
+// if it appears later as a direct entry, so its children stay excluded.
+func walkPacketFiles(entries []string, visit func(string) ([]string, error)) error {
+	seen := make(map[string]bool, len(entries))
+	add := func(ref string) ([]string, error) {
+		if seen[ref] {
+			return nil, nil
+		}
+		seen[ref] = true
+		return visit(ref)
 	}
 
 	for _, entry := range entries {
 		includes, err := add(entry)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// ONE LEVEL, AND NO FURTHER: an include's own declared includes are
 		// parsed (so a malformed one still refuses) and then discarded.
 		for _, include := range includes {
 			if _, err := add(include); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	return out, nil
+	return nil
 }
 
 // readPinnedPacketFile is §1.2's ladder for one file.

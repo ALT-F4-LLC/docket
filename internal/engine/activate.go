@@ -844,11 +844,12 @@ func activateTx(
 	// an entry that IS pinned contributes its bytes to the closure so the caps
 	// bind on the real figure.
 	//
-	// Sizes come from the scan that already hashed the file, so no pinned file
-	// is opened twice. A pin inherited from an earlier activation (RA2) carries
-	// no in-memory size, so it is looked up as present-with-unknown-size: the
-	// entry resolves rather than being refused, which keeps re-activation from
-	// rejecting a run that was legal when it started.
+	// Sizes come from the scan that already hashed the file. Include metadata
+	// is read once per file for accounting. A pin inherited from an earlier
+	// activation (RA2) carries no in-memory size, so it is looked up as
+	// present-with-unknown-size: the entry resolves rather than being refused,
+	// which keeps re-activation from rejecting a run that was legal when it
+	// started.
 	// Keyed by the path DECLARED in a workflow — relative to the config
 	// directory — while a pin's ref is the path the scan walked. The two are
 	// mapped here, once, so the comparison below is a plain lookup and the
@@ -891,6 +892,7 @@ func activateTx(
 			indexPin(p.Ref, p.Bytes)
 		}
 	}
+	packetBytes := packetContextSizer(packetPins, configRoots)
 
 	for _, p := range pins {
 		if _, ok := pinned[p.Kind+"\x00"+p.Ref]; ok {
@@ -991,7 +993,7 @@ func activateTx(
 		}
 
 		created, warnings, err := expandIssue(
-			tx, run, ri, issue, bound, caps, packetPins, opts.NowMS)
+			tx, run, ri, issue, bound, caps, packetPins, packetBytes, opts.NowMS)
 		if err != nil {
 			return nil, err
 		}
@@ -1863,6 +1865,7 @@ func expandIssue(
 	bound *boundDefinition,
 	caps contextLimits,
 	packetPins map[string]int,
+	packetBytes func([]string) int,
 	nowMS int64,
 ) (int, []ContextWarning, error) {
 	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
@@ -1890,8 +1893,7 @@ func expandIssue(
 			}
 		}
 
-		size := workflow.ContextSize(ri.BodySnapshot, ri.IssueSnapshot, inst,
-			func(path string) int { return packetPins[path] })
+		size := workflow.ContextSize(ri.BodySnapshot, ri.IssueSnapshot, inst, packetBytes)
 
 		// The error cap refuses the whole activation. The transaction is fat,
 		// so this leaves nothing behind — which is the correct outcome for a

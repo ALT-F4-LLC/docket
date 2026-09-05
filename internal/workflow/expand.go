@@ -346,18 +346,18 @@ func RoutingPredecessors(def *Definition, name string) []string {
 // right thing to measure here: engine-core §8 puts the check "at expansion
 // time — the fix is a pipeline/contract change, visible before spend", and the
 // body snapshot is the part an oversized issue makes oversized.
-// packetBytes reports the size of one declared packet file, or 0 when the run
-// pinned no such path. It is a function rather than a map so activation can
-// answer from whatever it already holds without building an index per step.
+// packetBytes reports the size of the declared packet files and their rendered
+// includes, counting each ref once. Activation supplies the resolver's file
+// selection rules and pinned byte counts without coupling expansion to disk.
 func ContextSize(
-	bodySnapshot, issueSnapshot string, inst StepInstance, packetBytes func(string) int,
+	bodySnapshot, issueSnapshot string, inst StepInstance, packetBytes func([]string) int,
 ) int {
 	n := len(bodySnapshot) + len(issueSnapshot) + len(inst.Instance)
 	for k, v := range inst.Metadata {
 		n += len(k) + len(fmt.Sprint(v))
 	}
 
-	// The declared packet files count toward the closure (§1.5).
+	// The declared packet files and their includes count toward the closure (§1.5).
 	//
 	// THIS IS NOT OPTIONAL BOOKKEEPING. engine-core §8 records closure size on
 	// the step as the honest cost figure, and §11.1's caps refuse an oversized
@@ -371,9 +371,7 @@ func ContextSize(
 	// refusal is activation's (a declared entry must be pinned), and a size
 	// helper that also enforced existence would put one rule in two places.
 	if packetBytes != nil {
-		for _, entry := range inst.Packet {
-			n += len(entry) + packetBytes(entry)
-		}
+		n += packetBytes(inst.Packet)
 	}
 	return n
 }
