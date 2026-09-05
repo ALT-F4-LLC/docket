@@ -209,19 +209,29 @@ func TestSupersedeSweepStatusTable(t *testing.T) {
 			activatedRun(t, conn)
 			e := testEngine()
 
-			// The chain runs FIRST, then `commit-gate@0` is forced to the status
-			// under test. The order matters for the `waiting-human` row: a
-			// parked step rolls the RUN up to `waiting-human` (§6.8), and R1
-			// then refuses every claim — so forcing the status before driving
-			// the chain would fail on the setup rather than on the sweep.
+			// The chain runs FIRST, then verify@0 is CLAIMED, and only then is
+			// `commit-gate@0` forced to the status under test. The order matters
+			// for the `waiting-human` row: a parked step holds its whole issue
+			// (R2b) — and, once nothing unparked is left, rolls the RUN up to
+			// `waiting-human` (§6.8) so R1 refuses too — so forcing the status
+			// before the claim would fail on the setup rather than on the
+			// sweep. The completion does not re-check readiness; the sweep it
+			// triggers is what the row is about.
 			driveToVerify(t, conn, e, 0)
+			verifyID := stepIDByInstance(t, conn, "verify@0")
+			claim, err := ClaimStep(conn, verifyID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+			testsupport.Must(t, err, "claim verify@0: %v", err)
 
 			// `commit-gate` is downstream of `after_loop = "review"` and is
 			// unclaimed at ordinal 0 — the sweep's natural subject.
 			execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = ?`,
 				tc.status, "commit-gate@0")
 
-			claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
+			err = e.CompleteStep(conn, verifyID, CompleteOptions{
+				Token: claim.Token, Artifact: []byte("report"),
+				Payload: []byte(unmetPayload), NowMS: nowMS,
+			})
+			testsupport.Must(t, err, "complete verify@0: %v", err)
 
 			got := stepStatus(t, conn, "commit-gate@0")
 			if tc.superseded {

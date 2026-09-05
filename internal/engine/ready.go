@@ -29,6 +29,15 @@ const (
 	CondRunActive ReadyCondition = "run is not active"
 	// CondIssueDeps is R2: the issue's depends_on predecessors are satisfied.
 	CondIssueDeps ReadyCondition = "the issue's dependencies are not satisfied"
+	// CondIssueParked is R2b: no step of the issue is parked `waiting-human`.
+	// A park is the ISSUE's — the operator is being asked about that issue,
+	// and nothing else on it moves until they rule — and only the issue's:
+	// the run stays `active` and every other issue's rows keep scheduling
+	// (reconcileRun parks the run only once no unparked work remains).
+	// RUN-90 measured the run-level alternative: eleven parks, each a single
+	// issue's verify, each stopping all 45 issues — 1372 of 1656 dispatched
+	// rows never launched.
+	CondIssueParked ReadyCondition = "the issue is parked on an operator decision"
 	// CondPredecessors is R3: intra-workflow `after` predecessors are done,
 	// and a fanned-out predecessor is joined.
 	CondPredecessors ReadyCondition = "an `after` predecessor is not done"
@@ -182,6 +191,11 @@ type issueFacts struct {
 	priority   model.Priority
 	scopeGlobs []string
 	depsOK     bool
+	// parked is R2b's fact: some step of this issue is `waiting-human`.
+	// Read off the same step snapshot the rest of the predicate answers
+	// against, never re-queried, so a park and the rows it holds are one
+	// consistent view.
+	parked bool
 }
 
 // LoadScheduler reads everything the predicate needs, once, inside tx.
@@ -227,6 +241,17 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 				model.FormatID(ri.IssueID), err)
 		}
 		labels[ri.IssueID] = ls
+	}
+
+	// R2b's fact, from the snapshot already loaded: an issue with a step
+	// parked `waiting-human` holds every other row of that issue.
+	for _, step := range steps {
+		if step.Status != db.StepWaitingHuman {
+			continue
+		}
+		if f, ok := facts[step.IssueID]; ok {
+			f.parked = true
+		}
 	}
 
 	// Every foreign holder's scope, eagerly: an unknown scope must not read as
@@ -542,6 +567,13 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 	// R2: the issue's depends_on predecessors are satisfied.
 	if facts != nil && !facts.depsOK {
 		return false, CondIssueDeps
+	}
+
+	// R2b: the issue is not parked on an operator decision (see the
+	// condition's own comment). Checked before scope and headroom for the
+	// same reason R1 leads: "the issue is parked" explains a whole lane.
+	if facts != nil && facts.parked {
+		return false, CondIssueParked
 	}
 
 	// R3: intra-workflow `after` predecessors are done.

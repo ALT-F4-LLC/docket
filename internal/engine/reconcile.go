@@ -556,9 +556,22 @@ func abandonIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 }
 
 // reconcileRun rolls the run up: `done` when every step is terminal,
-// `waiting-human` when any step is parked on a decision.
+// `waiting-human` when a park on a decision is all that is left.
 //
-// The ORDER of the two checks matters. A run with one parked step and every
+// A PARK IS THE ISSUE'S, NOT THE RUN'S. A step parked `waiting-human` holds
+// its own issue (R2b, ready.go) and nothing else: while any other issue still
+// has unfinished steps the run stays `active` and keeps offering them. The
+// run reads `waiting-human` only once every unfinished step belongs to a
+// parked issue — the moment there is genuinely nothing a claimant could take.
+// Before this, one step's park rolled up to the run and R1 refused every
+// claim: RUN-90 parked eleven times, each on a single issue's verify, and
+// 1372 of its 1656 dispatched rows never launched. Unexpanded issues are
+// deliberately NOT counted as unparked work: an issue expands when its
+// predecessors complete, so one still unexpanded is waiting on unfinished
+// work that this count already covers, or on a parked issue, and neither is
+// a row anyone could claim.
+//
+// The ORDER of the checks matters. A run with one parked step and every
 // other step finished is NOT done — it is waiting — so the park is checked
 // first. Checking `done` first would let a run whose last unfinished step is
 // parked read as complete, which is the failure mode §6.12's `guard stop`
@@ -567,16 +580,27 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 	var (
 		parked     int
 		unfinished int
+		// unparkedWork is the unfinished steps of issues holding no parked
+		// step: exactly the rows R2b still admits while a park stands.
+		unparkedWork int
 	)
 	err := tx.QueryRow(
 		`SELECT
 		   SUM(CASE WHEN status = ? THEN 1 ELSE 0 END),
-		   SUM(CASE WHEN status NOT IN (?, ?, ?, ?) THEN 1 ELSE 0 END)
+		   SUM(CASE WHEN status NOT IN (?, ?, ?, ?) THEN 1 ELSE 0 END),
+		   COALESCE(SUM(CASE WHEN status NOT IN (?, ?, ?, ?, ?)
+		                      AND issue_id NOT IN (
+		                        SELECT issue_id FROM steps
+		                         WHERE run_id = ? AND status = ?)
+		                     THEN 1 ELSE 0 END), 0)
 		 FROM steps WHERE run_id = ?`,
 		db.StepWaitingHuman,
 		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		db.StepWaitingHuman,
+		runID, db.StepWaitingHuman,
 		runID,
-	).Scan(&parked, &unfinished)
+	).Scan(&parked, &unfinished, &unparkedWork)
 	if err != nil {
 		return fmt.Errorf("rolling up run %s: %w", model.FormatRunID(runID), err)
 	}
@@ -594,7 +618,7 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 	}
 
 	switch {
-	case parked > 0:
+	case parked > 0 && unparkedWork == 0:
 		return setRunStatusTx(tx, runID, model.RunWaitingHuman, EventRunPaused, nowMS)
 	case unfinished == 0 && unexpanded == 0:
 		// A run-level park does NOT hold this branch, and the guard below is
@@ -606,9 +630,11 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 		// is that no FURTHER work starts, which R1 and the guard below deliver.
 		return setRunStatusTx(tx, runID, model.RunDone, EventRunDone, nowMS)
 	default:
-		// Still working. A run previously parked and now unblocked returns to
-		// `active` — otherwise resolving the park would leave the run in
-		// `waiting-human` forever and R1 would refuse every remaining step.
+		// Still working — including a run whose parked steps sit beside other
+		// issues' unfinished work, which lands here rather than above. A run
+		// previously parked and now unblocked returns to `active` — otherwise
+		// resolving the park would leave the run in `waiting-human` forever
+		// and R1 would refuse every remaining step.
 		//
 		// EXCEPT when the park was decided at the RUN LEVEL rather than by a
 		// step. `parked` above counts STEPS, and a run-level pause parks none:

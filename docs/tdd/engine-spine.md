@@ -1015,6 +1015,7 @@ engine-core §5 and §1.3, as a conjunction. A step is ready iff **all** hold:
 |---|---|---|
 | R1 | the run is `active` | §1.3; §2 scheduling |
 | R2 | the issue's `depends_on` predecessors are satisfied | §1.3 "its issue's dependencies are satisfied" |
+| R2b | no step of the issue is parked `waiting-human` — a park holds its own issue only; the run stays `active` while any other issue has unfinished steps, and rolls up to `waiting-human` once no unparked work remains (`reconcileRun`, reconcile.go) | RUN-90: eleven single-issue parks each stopped all 45 issues |
 | R3 | its intra-workflow predecessors (`after`) are **done** — and for a fanned-out predecessor, **joined** (§7.4) | §1.3; §2 fanout joins |
 | R4 | its scope conflicts with no `claimed`/`running` step (glob intersection) | §1.3; §5 mutual exclusion |
 | R5 | per-class concurrency headroom exists | §2 "concurrency headroom per executor-hint class" |
