@@ -14,9 +14,10 @@ on:
 
 jobs:
   # check runs first: secret-scan and self-hygiene are diff-only checks
-  # (no build, no test binary), done in seconds, so a leaked credential or a
-  # stale doc fails the run before build-shell/build spend minutes producing
-  # a binary from code that's already going to be rejected.
+  # (no build, no test binary), done in seconds, so a leaked credential fails
+  # the run before build-shell/build spend minutes producing a binary from
+  # code that's already going to be rejected, and a CLI surface change is
+  # named in the log for the reviewer.
   check:
     runs-on: ubuntu-latest
     steps:

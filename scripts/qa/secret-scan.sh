@@ -40,10 +40,10 @@
 # "was a credential EVER ADDED in this range?", which is historical: a
 # credential added in one commit and removed in the next is still a leak —
 # it is in the reflog, in any fetched copy, and in GitHub's API. Only a
-# per-commit walk sees it. self-hygiene asks whether the change AS IT WILL
-# LAND keeps SKILL.md in step with internal/cli, which is a question about
-# the end state; see that script's header for why a per-commit walk would
-# make it fail on correct work.
+# per-commit walk sees it. self-hygiene asks which files the change AS IT
+# WILL LAND touches under internal/cli, which is a question about the end
+# state; see that script's header for why a per-commit walk would report a
+# surface change the step does not make.
 #
 # KNOWN LIMIT: base-ref mode diffs against the passed ref directly rather than
 # an explicit `git merge-base`. `git log A..B` already anchors at the
