@@ -49,13 +49,26 @@ type UnintegratedStep struct {
 	How string `json:"how"`
 }
 
-// CheckedIntegration is one write-class step's commit and how it was found
-// integrated — the audit trail a run report reads (AC3).
+// CheckedIntegration is one write-class step's commit and how this close
+// accepted it — the audit trail a run report reads (AC3), and the record a
+// LATER close of the same run trusts (DKT-1787).
 type CheckedIntegration struct {
 	Step     string `json:"step"`
 	Instance string `json:"instance"`
 	SHA      string `json:"sha"`
-	How      string `json:"how"`
+	// How is "ancestor" or "patch-equivalent" when this pass asked git,
+	// "skipped" when this close's --skip-integration-check reason vouched for
+	// the commit instead — or, with Prior set, the verdict the prior close
+	// recorded, carried forward unchanged.
+	How string `json:"how"`
+	// Prior names the earlier close of this run that accepted this sha —
+	// "DISPATCH-N", or "run" for an acceptance recorded with no manifest open
+	// — present only when this pass honored that record rather than asking
+	// git again. A writer sha that a conflicting cherry-pick was resolved by
+	// hand is NEVER an ancestor and never patch-equivalent, so without this
+	// every close after the one that accepted it would refuse on it again
+	// (RUN-90, four steps, every close for the rest of the run).
+	Prior string `json:"prior,omitempty"`
 }
 
 // IntegrationCheck is what a close's verification did, riding on CloseOutcome
@@ -67,19 +80,31 @@ type IntegrationCheck struct {
 	// Reason is the operator's stated reason for skipping, present only when
 	// Status is "skipped".
 	Reason string `json:"reason,omitempty"`
-	// Checked names every sha this pass actually asked git about — present
-	// only when Status is "verified" (a skipped check asked git nothing).
+	// Checked names every write-class commit this close accepted and how:
+	// asked of git this pass, honored from a prior close, or vouched for by
+	// this close's skip reason. A skipped close asks git nothing, but still
+	// records what its reason covered — that record is what lets the next
+	// close honor it (integrationCandidatesTx).
 	Checked []CheckedIntegration `json:"checked,omitempty"`
 }
 
-// integrationCandidate is one write-class step's own recorded commit.
+// integrationCandidate is one write-class step's own recorded commit. prior is
+// the acceptance an earlier close of the run recorded for exactly this sha,
+// or nil when git has to be asked.
 type integrationCandidate struct {
 	step, instance, sha, worktree string
+	prior                         *CheckedIntegration
 }
 
 // integrationCandidatesTx collects one candidate per TERMINAL write-class
 // step of the run that recorded a commit — each step's own MOST RECENT
-// `issue.diff` artifact (highest artifact id when a retry re-recorded one).
+// `issue.diff` artifact (highest artifact id when a retry re-recorded one) —
+// and marks each one an earlier close of this run already accepted.
+//
+// The prior record is the `dispatch-closed` event's own `integration.checked`
+// list (what a close writes, verified or skipped), keyed by step AND sha: a
+// step that re-recorded a new head after the close that accepted its old one
+// is asked of git again.
 //
 // It runs inside the caller's transaction; the git questions run only after
 // it ends (§6: no subprocess inside one) — the same split
@@ -97,6 +122,10 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 		if prev, ok := own[a.StepID]; !ok || a.ID > prev.ID {
 			own[a.StepID] = a
 		}
+	}
+	accepted, err := priorIntegrationsTx(tx, runID)
+	if err != nil {
+		return nil, err
 	}
 
 	var out []integrationCandidate
@@ -118,12 +147,54 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 			// resolved to a head at all). Nothing to check is not a finding.
 			continue
 		}
+		id := model.FormatStepID(step.ID)
 		out = append(out, integrationCandidate{
-			step: model.FormatStepID(step.ID), instance: step.Instance,
+			step: id, instance: step.Instance,
 			sha: record.Head, worktree: record.Worktree,
+			prior: accepted[id+"@"+record.Head],
 		})
 	}
 	return out, nil
+}
+
+// priorIntegrationsTx reads every acceptance the run's earlier closes
+// recorded, keyed "STEP-N@sha", each carrying the close that recorded it and
+// its verdict. Events are read oldest first, so the newest acceptance of a
+// sha wins; a close older than this record (no `integration` key) contributes
+// nothing.
+func priorIntegrationsTx(tx *sql.Tx, runID int) (map[string]*CheckedIntegration, error) {
+	rows, err := tx.Query(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq`,
+		runID, EventDispatchClosed)
+	if err != nil {
+		return nil, fmt.Errorf("reading prior closes: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]*CheckedIntegration{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("reading prior closes: %w", err)
+		}
+		var data struct {
+			Dispatch    string            `json:"dispatch"`
+			Integration *IntegrationCheck `json:"integration"`
+		}
+		if json.Unmarshal([]byte(raw), &data) != nil || data.Integration == nil {
+			continue
+		}
+		close := data.Dispatch
+		if close == "" {
+			close = "run"
+		}
+		for _, c := range data.Integration.Checked {
+			out[c.Step+"@"+c.SHA] = &CheckedIntegration{
+				Step: c.Step, Instance: c.Instance, SHA: c.SHA, How: c.How, Prior: close,
+			}
+		}
+	}
+	return out, rows.Err()
 }
 
 // checkIntegration runs the git questions OUTSIDE any transaction: ancestry
@@ -150,6 +221,13 @@ func (e *Engine) checkIntegration(
 	cache := make(map[string]verdict, len(candidates))
 
 	for _, c := range candidates {
+		if c.prior != nil {
+			// An earlier close of this run accepted exactly this sha; its
+			// record is the authority, not a fresh git question the sha may
+			// no longer be able to answer (a hand-resolved cherry-pick).
+			checked = append(checked, *c.prior)
+			continue
+		}
 		v, seen := cache[c.sha]
 		if !seen {
 			if ancestor, known := e.IsAncestorFn(execRoot, c.sha); known && ancestor {
@@ -180,10 +258,10 @@ func (e *Engine) checkIntegration(
 }
 
 // integrationVerdict is DKT-1284's whole gate, run once per close attempt:
-// skip it outright when the operator named a reason, else collect this run's
-// write-class candidates in a short READ-ONLY transaction (never committed,
-// mirroring verifyDispatchTx) and judge them against the shared checkout
-// after it ends.
+// collect this run's write-class candidates in a short READ-ONLY transaction
+// (never committed, mirroring verifyDispatchTx), then either record them all
+// as vouched for when the operator named a skip reason, or judge them against
+// the shared checkout after the transaction ends.
 //
 // It returns EITHER a verdict to attach to a successful close (Status
 // "verified" or "skipped") OR a non-empty unintegrated list for the caller to
@@ -192,10 +270,6 @@ func (e *Engine) checkIntegration(
 func (e *Engine) integrationVerdict(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, skipReason string, nowMS int64,
 ) (*IntegrationCheck, []UnintegratedStep, error) {
-	if skipReason != "" {
-		return &IntegrationCheck{Status: "skipped", Reason: skipReason}, nil, nil
-	}
-
 	// Read BEFORE the transaction opens: runExecRoot is its own pool read
 	// (db.GetRun), and the pool is capped at one connection, so a call to it
 	// from inside the transaction below would deadlock rather than fail.
@@ -216,6 +290,25 @@ func (e *Engine) integrationVerdict(
 	tx.Rollback()
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if skipReason != "" {
+		// Git is asked nothing. What the reason vouched for is still written,
+		// per candidate, so the next close honors it instead of refusing on a
+		// commit the operator already ruled integrated (AC2: the record a
+		// later close trusts is the engine's, written here or by a verified
+		// close, never free-form step metadata).
+		skipped := &IntegrationCheck{Status: "skipped", Reason: skipReason}
+		for _, c := range candidates {
+			if c.prior != nil {
+				skipped.Checked = append(skipped.Checked, *c.prior)
+				continue
+			}
+			skipped.Checked = append(skipped.Checked, CheckedIntegration{
+				Step: c.step, Instance: c.instance, SHA: c.sha, How: "skipped",
+			})
+		}
+		return skipped, nil, nil
 	}
 
 	checked, unintegrated := e.checkIntegration(execRoot, candidates)

@@ -163,8 +163,11 @@ func TestCloseSkipIntegrationCheckRecordsTheReason(t *testing.T) {
 	if outcome.Integration.Reason != "verified by hand, ops incident 88" {
 		t.Errorf("Integration.Reason = %q, want the operator's reason", outcome.Integration.Reason)
 	}
-	if len(outcome.Integration.Checked) != 0 {
-		t.Errorf("a skipped check must ask git nothing, got %+v", outcome.Integration.Checked)
+	// A skipped check asks git nothing, but records what the reason vouched
+	// for — the record a later close of this run honors (DKT-1787).
+	if len(outcome.Integration.Checked) != 1 || outcome.Integration.Checked[0].How != "skipped" ||
+		outcome.Integration.Checked[0].SHA != "5ca1ab1e04" {
+		t.Errorf("Checked = %+v, want the one candidate recorded as skipped", outcome.Integration.Checked)
 	}
 
 	// AC3: the close EVENT carries it too, not only the returned struct.
@@ -190,6 +193,145 @@ func TestCloseSkipIntegrationCheckRecordsTheReason(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no dispatch-closed event was recorded")
+	}
+}
+
+// twoWriteStepsWorkflowSrc is writeClassWorkflowSrc with a second write-class
+// step after the first, so a commit can land BETWEEN two closes of one run.
+const twoWriteStepsWorkflowSrc = `
+[pipeline]
+name = "prior-integration-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "implement"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = []
+
+[[step]]
+name = "amend"
+executor = "w"
+class = "write"
+emits = "amendment"
+after = ["implement"]
+`
+
+// priorIntegrationFixture activates one issue against twoWriteStepsWorkflowSrc
+// and completes implement@0 with the writer sha `first`. The engine's HeadFn
+// reads *head, so the caller can move it before completing amend@0.
+func priorIntegrationFixture(t *testing.T, first string) (*sql.DB, *Engine, int, *string) {
+	t.Helper()
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(twoWriteStepsWorkflowSrc), "prior-integration-fixture.toml")
+	issue := createIssue(t, conn, "prior integration fixture", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	head := first
+	e := testEngine()
+	e.HeadFn = func(string) string { return head }
+	completeWriteStep(t, conn, e, "implement@0", "/worktrees/wf-implement")
+	return conn, e, run.ID, &head
+}
+
+// completeWriteStep claims and completes one write-class step from a worktree.
+func completeWriteStep(t *testing.T, conn *sql.DB, e *Engine, instance, worktree string) {
+	t.Helper()
+	stepID := stepIDByInstance(t, conn, instance)
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim %s: %v", instance, err)
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the summary"), WorkDir: worktree, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete %s: %v", instance, err)
+}
+
+// TestDispatchCloseHonorsPriorIntegration is DKT-1787 (RUN-90's shape): a
+// write-class commit a prior close accepted — here as patch-equivalent, the
+// way a hand-resolved cherry-pick reads at the moment it is verified — is not
+// re-asked of git by a later close, where it would fail both probes; and a
+// commit recorded AFTER that close is still asked, and still refused.
+func TestDispatchCloseHonorsPriorIntegration(t *testing.T) {
+	conn, e, runID, head := priorIntegrationFixture(t, "154e3be7ed65")
+	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
+	e.PatchContainedFn = func(_, sha string) (bool, bool) { return sha == "154e3be7ed65", true }
+	first := openDispatch(t, conn, runID, 0, nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS)
+	testsupport.Must(t, err, "first close: %v", err)
+	if outcome.Integration.Status != "verified" || len(outcome.Integration.Checked) != 1 {
+		t.Fatalf("first close Integration = %+v, want one verified row", outcome.Integration)
+	}
+
+	// Between the closes: the hand-resolved integration lands (git can no
+	// longer match the writer sha), and a second write step records a new
+	// commit the prior close never saw.
+	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, true }
+	*head = "d0e9747b8acd"
+	completeWriteStep(t, conn, e, "amend@0", "/worktrees/wf-amend")
+	second := openDispatch(t, conn, runID, 0, nowMS+1)
+
+	_, err = e.CloseDispatch(conn, runID, true, "", nowMS+1)
+	if err == nil {
+		t.Fatal("want a refusal over amend@0's unintegrated commit")
+	}
+	if !strings.Contains(err.Error(), "d0e9747b8acd") {
+		t.Errorf("refusal %q does not name amend@0's sha", err.Error())
+	}
+	if strings.Contains(err.Error(), "154e3be7ed65") {
+		t.Errorf("refusal %q re-flags implement@0's commit, which %s already accepted",
+			err.Error(), first.Dispatch)
+	}
+
+	// Integrate the second commit; the close accepts both — one honored from
+	// the prior close, one asked of git — and says which was which.
+	e.PatchContainedFn = func(_, sha string) (bool, bool) { return sha == "d0e9747b8acd", true }
+	outcome, err = e.CloseDispatch(conn, runID, true, "", nowMS+1)
+	testsupport.Must(t, err, "second close: %v", err)
+	if outcome.Dispatch != second.Dispatch {
+		t.Errorf("closed %s, want %s", outcome.Dispatch, second.Dispatch)
+	}
+	rows := map[string]CheckedIntegration{}
+	for _, c := range outcome.Integration.Checked {
+		rows[c.SHA] = c
+	}
+	if got := rows["154e3be7ed65"]; got.Prior != first.Dispatch || got.How != "patch-equivalent" {
+		t.Errorf("implement@0's row = %+v, want How patch-equivalent honored from %s",
+			got, first.Dispatch)
+	}
+	if got := rows["d0e9747b8acd"]; got.Prior != "" || got.How != "patch-equivalent" {
+		t.Errorf("amend@0's row = %+v, want a fresh patch-equivalent verdict", got)
+	}
+}
+
+// TestDispatchCloseHonorsASkippedPriorClose: --skip-integration-check's record
+// carries the same authority for the next close as a verified one, and the
+// honored row says the acceptance was a skip, not a git verdict.
+func TestDispatchCloseHonorsASkippedPriorClose(t *testing.T) {
+	conn, e, runID, _ := priorIntegrationFixture(t, "5ca1ab1e04")
+	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
+	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, true }
+	first := openDispatch(t, conn, runID, 0, nowMS)
+	_, err := e.CloseDispatch(conn, runID, true, "hand-integrated per operator ruling", nowMS)
+	testsupport.Must(t, err, "skipped close: %v", err)
+
+	openDispatch(t, conn, runID, 0, nowMS+1)
+	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS+1)
+	testsupport.Must(t, err, "close after a skipped close: %v", err)
+	if outcome.Integration.Status != "verified" || len(outcome.Integration.Checked) != 1 {
+		t.Fatalf("Integration = %+v, want verified with the one honored row", outcome.Integration)
+	}
+	got := outcome.Integration.Checked[0]
+	if got.How != "skipped" || got.Prior != first.Dispatch {
+		t.Errorf("honored row = %+v, want How skipped from %s", got, first.Dispatch)
 	}
 }
 
