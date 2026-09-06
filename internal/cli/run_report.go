@@ -431,12 +431,26 @@ func writeReportSections(
 	// rows per unit; this is what answers "which STEPS already have usage" —
 	// the question a back-fill's duplicate refusal raises and that no read
 	// verb could answer.
-	if len(r.StepUsage) > 0 {
+	if len(r.StepUsage) > 0 || len(r.MissingUsage) > 0 {
 		header("Step usage")
 		for _, u := range r.StepUsage {
 			line(u.Step+":", fmt.Sprintf("%s attempt %d  %s %g  (%s)",
 				exec.Render(u.Instance), u.Attempt,
 				exec.Render(u.Unit), u.Quantity, exec.Render(u.Source)))
+		}
+		// The steps still owing, asked without D2's grace (D7) — the vote
+		// section's Coverage/Silent shape, for the same reason: a run's last
+		// wave has no later close to refuse over an unbilled step, so the
+		// report is where its silence has to show before the run is called
+		// done. Instances are stored text on their way to a terminal (R11).
+		if n := len(r.MissingUsage); n > 0 {
+			line("Coverage:", fmt.Sprintf(
+				"%d claimed step(s) reported NOTHING, so their spend is missing "+
+					"from this run's totals, not zero — `dispatch backfill-usage` "+
+					"before the run is called done", n))
+			for _, d := range r.MissingUsage {
+				line("Silent:", fmt.Sprintf("%s %s", d.Step, exec.Render(d.Instance)))
+			}
 		}
 	}
 }

@@ -79,8 +79,10 @@ func TestBackfillRetiresTheD2Wedge(t *testing.T) {
 	_, err := e.AbandonDispatch(conn, runID, "clearing the manifest", nowMS)
 	testsupport.Must(t, err, "dispatch abandon: %v", err)
 
-	// D2 stands: the step ran and reported nothing, and nobody has accepted it.
-	_, err = e.NextSteps(conn, runID, 0, nowMS)
+	// D2 stands once the grace lapses (D7): the step ran and reported nothing,
+	// and nobody has accepted it.
+	past := nowMS + graceMS(t, conn) + 1
+	_, err = e.NextSteps(conn, runID, 0, past)
 	if err == nil {
 		t.Fatal("`next` answered despite a missing-usage discrepancy; this " +
 			"test's premise is that it refuses")

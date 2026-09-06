@@ -59,8 +59,10 @@ func TestRanWithoutReportingIsStillADiscrepancy(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
+	// Probed past the grace: recorded less than `dispatch.grace` ago the step
+	// is usage PENDING (D7), and this test is about one that stayed unbilled.
 	var found bool
-	for _, d := range discrepanciesAt(t, conn, runID, nowMS) {
+	for _, d := range discrepanciesAt(t, conn, runID, nowMS+1000+graceMS(t, conn)+1) {
 		if d.Kind == DiscrepancyMissingUsage {
 			found = true
 		}
@@ -88,7 +90,8 @@ func TestDiscrepancyRefusalNamesStepIDs(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
-	_, err := NewEngine().NextSteps(conn, runID, 0, nowMS)
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	_, err := NewEngine().NextSteps(conn, runID, 0, past)
 	if err == nil {
 		t.Fatal("premise: `next` must refuse over the discrepancy")
 	}
@@ -116,8 +119,9 @@ func TestOpenDispatchRefusesWhatNextRefuses(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
-	_, nextErr := NewEngine().NextSteps(conn, runID, 0, nowMS)
-	_, openErr := NewEngine().OpenDispatch(conn, runID, 0, nil, nowMS)
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	_, nextErr := NewEngine().NextSteps(conn, runID, 0, past)
+	_, openErr := NewEngine().OpenDispatch(conn, runID, 0, nil, past)
 
 	if nextErr == nil {
 		t.Fatal("premise: `next` must refuse")
@@ -177,7 +181,8 @@ func TestAcceptMissingUsageNeedsNoOpenDispatch(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
-	if _, err := e.NextSteps(conn, runID, 0, nowMS); err == nil {
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	if _, err := e.NextSteps(conn, runID, 0, past); err == nil {
 		t.Fatal("premise: the run must be refusing")
 	}
 

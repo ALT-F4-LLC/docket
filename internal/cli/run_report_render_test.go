@@ -472,3 +472,28 @@ func TestActionsTallyIsUnaffected(t *testing.T) {
 			"does not have:\n%v", lines)
 	}
 }
+
+// TestStepUsageCoverageNamesSilentSteps is D7's rendering: the steps the
+// report lists as still owing usage appear under "Step usage" as Coverage and
+// Silent lines, the vote section's shape, so the done-report check can read
+// them the way it reads silent seats.
+func TestStepUsageCoverageNamesSilentSteps(t *testing.T) {
+	r := &engine.RunReport{
+		Run: &model.Run{ID: 90, Status: model.RunActive},
+		MissingUsage: []engine.Discrepancy{
+			{Kind: engine.DiscrepancyMissingUsage, Step: "STEP-4305", Instance: "verify@0"},
+			{Kind: engine.DiscrepancyMissingUsage, Step: "STEP-4316", Instance: "verify@0"},
+		},
+	}
+	lines := sectionLines(t, renderPlainRunReport(r), "Step usage")
+	if len(lines) == 0 {
+		t.Fatal("no Step usage section rendered for a run with unbilled steps")
+	}
+	for _, want := range []string{
+		"2 claimed step(s) reported NOTHING", `STEP-4305 "verify@0"`, `STEP-4316 "verify@0"`,
+	} {
+		if !linesContain(lines, want) {
+			t.Errorf("Step usage section lacks %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+	}
+}

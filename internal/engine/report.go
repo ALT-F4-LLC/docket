@@ -223,6 +223,17 @@ type RunReport struct {
 	// all, and conductors hand-filtered batches by trial and error across
 	// three sessions. `omitempty`, so a run whose ledger is empty is unchanged.
 	StepUsage []db.StepUsageRow `json:"step_usage,omitempty"`
+
+	// MissingUsage is D2 asked WITHOUT its grace (D7): every claimed step that
+	// reached a terminal status and has no ledger row, however recently.
+	// `next` and `dispatch close` give such a step `dispatch.grace` to be
+	// back-filled, so a relay that launches its usage join beside the close
+	// rather than ahead of it is never refused for the lag — and a run's last
+	// wave has no later close to refuse at all. This is where that wave's
+	// silence shows: the done report reads it the way it reads
+	// `silent_vote_seats`, and both must be empty before a run is called
+	// finished. `omitempty`: a fully billed run carries no key.
+	MissingUsage []Discrepancy `json:"missing_usage,omitempty"`
 }
 
 // ActorCount is one row of E21's rollup: a cause, and how many of the run's
@@ -503,6 +514,18 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	}
 
 	report.WallClockMS = wallClockMS(run, nowMS)
+
+	// D7's ungraced question, in the same snapshot as the statuses that say
+	// which steps ran: what is still owing NOW, the freshly recorded included.
+	ungraced, err := discrepanciesGracedTx(tx, sched, runID, nowMS, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range ungraced {
+		if d.Kind == DiscrepancyMissingUsage {
+			report.MissingUsage = append(report.MissingUsage, d)
+		}
+	}
 
 	cap, floor, reportedInUnit, spend, _, unit := sched.Budget()
 	// AN UNLIMITED RUN'S SNAPSHOT DELIBERATELY QUERIED NOTHING (D1), so the

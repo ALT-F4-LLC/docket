@@ -1189,8 +1189,8 @@ const (
 	// activity is older than `dispatch.grace`.
 	DiscrepancyClaimedUnrecorded DiscrepancyKind = "claimed-but-unrecorded"
 	// DiscrepancyMissingUsage is D2: a step that reached a terminal status after
-	// the run's activation with zero `usage_ledger` rows, IN A RUN THAT HAS EVER
-	// OPENED A DISPATCH.
+	// the run's activation, more than `dispatch.grace` ago (D7), with zero
+	// `usage_ledger` rows, IN A RUN THAT HAS EVER OPENED A DISPATCH.
 	DiscrepancyMissingUsage DiscrepancyKind = "usage-rows-missing"
 )
 
@@ -1218,6 +1218,22 @@ type Discrepancy struct {
 // a list that led with the acceptance flag would invite closing over work that
 // is still running.
 func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Discrepancy, error) {
+	return discrepanciesGracedTx(tx, sched, runID, nowMS, true)
+}
+
+// discrepanciesGracedTx is discrepanciesTx with D2's grace (D7) switchable.
+//
+// The probe `next`, `dispatch open` and a plain `dispatch close` run is the
+// GRACED one: a step recorded less than `dispatch.grace` ago is usage PENDING,
+// not missing. Two callers ask the UNGRACED question — everything still owing,
+// however young. `dispatch close --accept-missing-usage`, because an
+// acceptance that skipped the young steps would resurface them as a refusal
+// minutes after the operator settled the run; and the run report, because a
+// report exists to say what is owed now, and a run's last wave has no later
+// close at which the grace would lapse into a refusal.
+func discrepanciesGracedTx(
+	tx *sql.Tx, sched *Scheduler, runID int, nowMS int64, usageGrace bool,
+) ([]Discrepancy, error) {
 	grace, err := db.DispatchGraceTx(tx, sched.run.ProjectID)
 	if err != nil {
 		return nil, err
@@ -1300,6 +1316,18 @@ func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Di
 
 	for _, step := range sched.Steps() {
 		if !missingUsage(step, activatedMS) {
+			continue
+		}
+		// D7: USAGE PENDING. A step recorded less than `dispatch.grace` ago is
+		// not yet a discrepancy. The relay measures a wave's spend from agent
+		// transcripts after the wave returns, and a probe that refused the
+		// instant a step recorded put that join ahead of every close — on
+		// RUN-90, 21 joins of about 2.5 minutes each, serial with the close.
+		// Within the window the relay back-fills beside the close instead of
+		// ahead of it; past it, an unbilled step is unreconciled exactly as
+		// before, and the same `dispatch.grace` that judges a silent claim
+		// judges a silent record.
+		if usageGrace && nowMS-step.UpdatedAtMS < grace.Milliseconds() {
 			continue
 		}
 		out = append(out, Discrepancy{
@@ -1507,7 +1535,10 @@ func (e *Engine) CloseDispatch(
 	if err != nil {
 		return nil, err
 	}
-	found, err := discrepanciesTx(tx, sched, runID, nowMS)
+	// The acceptance asks UNGRACED (D7): the flag settles every step still
+	// owing usage, the freshly recorded ones included, so the run does not
+	// resurface them as a refusal once their grace lapses.
+	found, err := discrepanciesGracedTx(tx, sched, runID, nowMS, !acceptMissingUsage)
 	if err != nil {
 		return nil, err
 	}

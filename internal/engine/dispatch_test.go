@@ -1146,7 +1146,8 @@ func TestDiscrepancyD2RequiresDispatchHistory(t *testing.T) {
 	openDispatch(t, conn, runID, 0, nowMS)
 	abandon(t, conn, runID, nowMS)
 
-	ds := discrepanciesAt(t, conn, runID, nowMS)
+	// Past the grace: within it the step is usage PENDING (D7), not missing.
+	ds := discrepanciesAt(t, conn, runID, nowMS+1000+graceMS(t, conn)+1)
 	var found bool
 	for _, d := range ds {
 		if d.Kind == DiscrepancyMissingUsage {
@@ -1390,7 +1391,8 @@ func TestCloseAcceptMissingUsageRecordsTheAcceptance(t *testing.T) {
 	instance := manifest.Rows[0].Instance
 	finishWithoutUsage(t, conn, instance)
 
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", nowMS); err == nil {
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", past); err == nil {
 		t.Fatal("premise: close must refuse over a missing-usage discrepancy")
 	}
 

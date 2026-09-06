@@ -858,7 +858,7 @@ engine-core §5 names exactly two classes; both are **computed, never stored**
 | # | Discrepancy | Definition | Resolution |
 |---|---|---|---|
 | D1 | **Claimed but unrecorded past grace** | a step in `claimed`/`running` whose `activity_ms` is older than `dispatch.grace` (§4.11, default 15m) | **lease expiry clears it** — §2 verbatim. The step's TTL lapses, `next` reaps it, and the discrepancy dissolves. `dispatch close` names the expiry time so an operator knows how long to wait |
-| D2 | **Usage rows missing** | a step that reached a terminal status **after** the run's activation, on a v10 binary, with zero `usage_ledger` rows, **in a run that has ever opened a dispatch** (a `dispatch-opened` event exists — usage completeness is a RELAY contract; a run no relay ever drove has nobody owing usage) | `dispatch close --accept-missing-usage`, which records the acceptance (P19) |
+| D2 | **Usage rows missing** | a step that reached a terminal status **after** the run's activation and **more than `dispatch.grace` ago** (D7), on a v10 binary, with zero `usage_ledger` rows, **in a run that has ever opened a dispatch** (a `dispatch-opened` event exists — usage completeness is a RELAY contract; a run no relay ever drove has nobody owing usage) | `dispatch close --accept-missing-usage`, which records the acceptance (P19) |
 
 | # | Clause |
 |---|---|
@@ -866,6 +866,7 @@ engine-core §5 names exactly two classes; both are **computed, never stored**
 | D4 | **`expected_cost = 0` steps still require usage rows under D2.** The floor and the ledger are independent mechanisms; a free step that reported nothing is still a step whose usage the relay did not record |
 | D5 | **Action and human steps are exempt from D2.** No worker claims them (they are engine-run or operator-resolved), so there is nobody to have reported usage. Including them would make every fixture run permanently un-closable |
 | D6 | A run with no open dispatch is still probed for discrepancies by `next` (P25). Discrepancies are a property of the *run*, not of the manifest — a relay that never opened a dispatch can still leave a claimed step unrecorded |
+| D7 | **A freshly recorded step is usage PENDING, not missing.** D2 fires only once a terminal step's `updated_at_ms` is older than `dispatch.grace` — the window D1 already gives a silent claim. The relay measures a wave's spend from agent transcripts after the wave returns, and a probe that refused the instant a step recorded put that join on the critical path of every close (RUN-90: 21 joins of about 2.5 minutes, serial with the close). Two readers ask WITHOUT the grace: `dispatch close --accept-missing-usage` settles the pending steps too, so they cannot resurface as a refusal after the operator settled the run; and `run report` lists pending and missing alike under `missing_usage`, because a run's last wave has no later close at which the grace would lapse into a refusal |
 
 **D6 is the clause that makes this stage change `next`'s behavior for repos
 that never touch dispatches**, and it deserves its dormancy statement: with no

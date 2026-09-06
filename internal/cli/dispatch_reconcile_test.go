@@ -77,12 +77,15 @@ func TestDispatchCloseBackfillFromRunsAllThreeStages(t *testing.T) {
 	runRef := model.FormatRunID(runID)
 	stepID := waveWithUnreportedUsage(t, conn, runID)
 
-	// The premise: the flagless close REFUSES here. Without that, the
-	// back-fill stage running would be unobservable.
-	bare := dispatchCloseCmdWithDB(conn, runRef)
-	wBare, _ := bufWriter(true)
-	if err := runDispatchClose(bare, wBare); err == nil {
-		t.Fatal("premise: a plain close must refuse over the missing usage")
+	// The premise: the step is OWING usage. A flagless close no longer
+	// refuses over a step recorded seconds ago (D7 gives it `dispatch.grace`),
+	// so the run report's ungraced view is what makes the back-fill stage
+	// observable: listed before, gone after.
+	before, err := engine.LoadRunReport(conn, runID, model.NowMS())
+	testsupport.Must(t, err, "run report before the reconcile: %v", err)
+	if len(before.MissingUsage) != 1 || before.MissingUsage[0].Step != model.FormatStepID(stepID) {
+		t.Fatalf("premise: missing_usage = %v, want exactly %s",
+			before.MissingUsage, model.FormatStepID(stepID))
 	}
 
 	path := usageJSON(t, fmt.Sprintf(
@@ -96,7 +99,7 @@ func TestDispatchCloseBackfillFromRunsAllThreeStages(t *testing.T) {
 		"setting --source: %v", nil)
 
 	w, buf := bufWriter(true)
-	err := runDispatchClose(cmd, w)
+	err = runDispatchClose(cmd, w)
 	testsupport.Must(t, err, "dispatch close --backfill-from: %v", err)
 
 	var env struct {
@@ -114,6 +117,11 @@ func TestDispatchCloseBackfillFromRunsAllThreeStages(t *testing.T) {
 	}
 	if env.Data.Verify == nil || env.Data.Verify.Dispatch == "" {
 		t.Errorf("the payload's verify stage names no dispatch:\n%s", buf.String())
+	}
+	after, err := engine.LoadRunReport(conn, runID, model.NowMS())
+	testsupport.Must(t, err, "run report after the reconcile: %v", err)
+	if len(after.MissingUsage) != 0 {
+		t.Errorf("missing_usage = %v after the reconcile, want none", after.MissingUsage)
 	}
 	if env.Data.Close == nil || env.Data.Close.Status == "" {
 		t.Fatalf("the payload's close stage is %+v:\n%s", env.Data.Close, buf.String())

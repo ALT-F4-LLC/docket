@@ -28,11 +28,16 @@ func TestReconcileRunsAllThreeStages(t *testing.T) {
 	implID := stepIDByInstance(t, conn, "implement@0")
 	completeWithoutUsage(t, conn, e, implID)
 
-	// The premise: without the back-fill this close REFUSES. If it did not,
-	// the test below would prove nothing about the back-fill stage running.
-	if _, err := e.CloseDispatch(conn, runID, false, "", nowMS); err == nil {
-		t.Fatal("premise: `close` must refuse over the missing usage that " +
-			"the back-fill stage exists to record")
+	// The premise: without the back-fill the step is OWING. A plain close no
+	// longer refuses over a freshly recorded step (D7 gives it
+	// `dispatch.grace`), so the ungraced view is where the debt shows; past
+	// the grace the close would refuse as it always did.
+	if _, err := e.CloseDispatch(conn, runID, false, "", nowMS+graceMS(t, conn)+1); err == nil {
+		t.Fatal("premise: `close` must refuse past the grace over the missing " +
+			"usage that the back-fill stage exists to record")
+	}
+	if ds := discrepanciesAt(t, conn, runID, nowMS+graceMS(t, conn)+1); !containsKind(ds, DiscrepancyMissingUsage) {
+		t.Fatalf("premise: the completed step must be owing usage, got %v", ds)
 	}
 
 	out, err := e.ReconcileDispatch(conn, runID, []BackfillRow{

@@ -346,13 +346,20 @@ There are exactly two discrepancy classes, both computed and never stored:
                            and the discrepancy dissolves on its own.
 
   usage-rows-missing       a step that was CLAIMED, finished after the run was
-                           activated, and recorded no usage, in a run that has
-                           ever opened a dispatch. A step nobody ever claimed
-                           owes nothing and is never one of these, whatever
-                           terminal status it carries. Its resolutions are
-                           backfill-usage, which records what the relay
-                           measured, and --accept-missing-usage, which settles
-                           the question without answering it.
+                           activated and more than ` + "`dispatch.grace`" + ` ago,
+                           and recorded no usage, in a run that has ever opened
+                           a dispatch. A step recorded more recently is usage
+                           PENDING, not missing: the relay's transcript join may
+                           land beside the close rather than ahead of it. A step
+                           nobody ever claimed owes nothing and is never one of
+                           these, whatever terminal status it carries. Its
+                           resolutions are backfill-usage, which records what
+                           the relay measured, and --accept-missing-usage, which
+                           settles the question without answering it — for
+                           every step still owing, the pending ones included.
+                           ` + "`run report`" + ` lists pending and missing alike
+                           under missing_usage, so a run's last wave, which no
+                           later close probes, is still visible.
 
 --accept-missing-usage does not accept the other class. Claimed-but-unrecorded
 has its own resolution, and a flag that accepted both would let a relay close
