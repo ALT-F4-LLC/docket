@@ -108,9 +108,27 @@ func (e *Engine) prepareIssueDiffRepin(
 
 	to := handBackHead(payload)
 	if to == "" {
-		// A tree with no resolvable HEAD has no commit to bind the target
-		// to, and a re-pin that moved the body while leaving the packets'
-		// `target_sha` on the stale commit would be RUN-67 with a better diff.
+		// The record names no head for two distinct reasons, and the refusal
+		// has to name the right one (the standard stated above). A checkout
+		// whose HEAD resolves but still stands at its base has COMMITTED
+		// NOTHING — the round record drops that head on purpose (DKT-1374), so
+		// no target points at the pre-patch tree — and the fix is a commit
+		// there, not a repository diagnosis. Only a HEAD that cannot be
+		// resolved at all is the "is it a git checkout?" case.
+		//
+		// Either way the re-pin refuses: a re-pin that moved the body while
+		// leaving the packets' `target_sha` on the stale commit would be
+		// RUN-67 with a better diff.
+		if e.HeadFn != nil {
+			if head := e.HeadFn(worktree); head != "" {
+				return nil, validationErr(
+					"%s has committed nothing: its HEAD %.12s is still the commit "+
+						"it was forked from, so there is no commit to bind %s's "+
+						"target to; commit the patch there, or re-pin from a "+
+						"checkout that carries it as its own commits",
+					worktree, head, step.Instance)
+			}
+		}
 		return nil, validationErr(
 			"could not resolve the HEAD commit of %s, so there is no sha to "+
 				"re-pin %s's target to; is it a git checkout?",

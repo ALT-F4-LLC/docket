@@ -421,6 +421,13 @@ func TestWorktreeRepinRefusals(t *testing.T) {
 	w := diffRepinFixture(t, conn, e, run.ID)
 	conductorPatch(t, w)
 
+	// A checkout forked from the integrated tip that carries the conductor's
+	// patch as UNCOMMITTED bytes: its HEAD resolves, and it is still its fork
+	// point (DKT-1650). The branch name must not collide with the executor's.
+	uncommitted := filepath.Join(t.TempDir(), "uncommitted")
+	gitRun(t, w.execRoot, "worktree", "add", "-q", uncommitted)
+	writeFile(t, uncommitted, "internal/work.txt", "the executor's change\nlint fixed\nand more\n")
+
 	cases := []struct {
 		name     string
 		opts     ResolveOptions
@@ -450,6 +457,12 @@ func TestWorktreeRepinRefusals(t *testing.T) {
 			opts:     ResolveOptions{As: ResolveOverridePass, Worktree: t.TempDir()},
 			wantText: "could not resolve the HEAD commit",
 			why:      "a tree with no commit has no sha to bind the target to",
+		},
+		{
+			name:     "a checkout at its fork point carrying uncommitted changes",
+			opts:     ResolveOptions{As: ResolveOverridePass, Worktree: uncommitted},
+			wantText: "has committed nothing",
+			why:      "its HEAD resolves fine; the patch is uncommitted, and the refusal must say so rather than send the operator to diagnose a repository problem",
 		},
 		{
 			name:     "the shared checkout, already integrated",
