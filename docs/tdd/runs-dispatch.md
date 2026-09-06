@@ -435,7 +435,7 @@ Implemented clause by clause below.
 
 | # | Clause |
 |---|---|
-| B1 | The cap is `runs.budget` when non-zero, else `docket config budget.default` when non-zero, else **unlimited** |
+| B1 | The cap is `runs.budget` **as written at `run start`**. `run start` writes `docket config budget.default` only when `--budget` is **omitted**; an explicit `--budget 0` is stored as `0`, which is unlimited (B2). Enforcement never consults the config default itself — the resolution happens once, at the write |
 | B2 | `0` means unlimited at both levels — the flag's documented meaning since S3 (`internal/cli/run_start.go`), unchanged |
 | B3 | The cap is resolved **once per invocation** and read from the run row, which was written at `run start`. It is not re-read from config mid-run: a config change must not silently re-cap a live run, for the same reason a re-registered workflow does not reach one (RA2, engine-spine §5.4) |
 | B4 | A negative `--budget` is already `VALIDATION_ERROR` at S3. No change |
