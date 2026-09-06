@@ -188,6 +188,11 @@ func RenderStepAs(
 		return nil, err
 	}
 
+	required, err := payloadRequiredKeys(conn, step.RunID, spec.Payload)
+	if err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	data := packetData{
 		Context: bundle,
@@ -198,7 +203,7 @@ func RenderStepAs(
 		// stating the contract is what lets a worker satisfy it before the
 		// engine can check it.
 		PayloadSchema:   spec.Payload,
-		PayloadRequired: payloadRequiredKeys(conn, step.RunID, spec.Payload),
+		PayloadRequired: required,
 	}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("rendering the packet for %s: %w", step.Instance, err)
@@ -218,15 +223,25 @@ func RenderStepAs(
 // the bytes has a problem `step complete` reports precisely, and withholding
 // the whole packet over it would replace one diagnosable failure with a worker
 // that never started.
-func payloadRequiredKeys(conn *sql.DB, runID int, ref string) []string {
+//
+// Only pinnedSchema's VALIDATION refusals degrade that way — the ref is not
+// pinned, the pinned schema is no longer registered, its bytes drifted or no
+// longer compile. Every other error is the store failing to answer, which the
+// two sibling pin reads above already propagate; a packet rendered over an
+// unreadable pin set would carry a contract line missing for a reason nothing
+// reports.
+func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) {
 	if ref == "" {
-		return nil
+		return nil, nil
 	}
 	registered, err := pinnedSchema(conn, runID, ref)
 	if err != nil {
-		return nil
+		if code, ok := CodeOf(err); ok && code == CodeValidation {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return registered.RequiredProperties()
+	return registered.RequiredProperties(), nil
 }
 
 // templateSource resolves the template's bytes, VERIFYING A PINNED PATH against
