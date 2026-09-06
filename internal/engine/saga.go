@@ -1528,7 +1528,7 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	}
 	// DKT-106: record the tree's HEAD beside the diff and, on a loop
 	// re-entry, append this ROUND's delta to the cumulative body.
-	payload = e.appendRoundDelta(conn, step, dir, execRoot, &body)
+	payload = e.appendRoundDelta(conn, step, dir, execRoot, base, &body)
 	return body, payload, nil
 }
 
@@ -3033,7 +3033,28 @@ func sharedCheckoutHead(execRoot string) string {
 // The payload it returns is "" whenever HEAD cannot be resolved, and every
 // failure inside is silent-by-design for GitDiff's own reason: the record is
 // evidence, and "nothing" is a truthful answer where a tree has no commit.
-func (e *Engine) appendRoundDelta(conn *sql.DB, step *db.Step, dir, execRoot string, diffBody *string) string {
+//
+// A WORKTREE whose HEAD still stands at `base` is exactly that case, and
+// DKT-1374 is what recording it anyway cost. An executor whose `git commit` was
+// refused hands back a tree still at the commit it was forked from; the record
+// named that sha, and every downstream judge's `target_sha` then pointed at a
+// tree PREDATING the work, indistinguishable from a correct target
+// (RUN-82/DOT-1269/STEP-3846 reviewed the pre-fix bytes and read both
+// acceptance criteria as violated against a change that satisfied them). The
+// hand-back has no commit to name, so the record names none, and a judge
+// reading an absent target evaluates the rendered `issue.diff` — which carries
+// the uncommitted work — instead of reconstructing a stale tree. `worktree`
+// still rides along: the bytes are reachable there.
+//
+// Scoped to a DISTINCT worktree because that is the case where `base` is the
+// tree's own fork point (runDiffBase, DKT-42) and equality therefore means "no
+// commit here". For the shared checkout the base is the run's pin, or — when
+// that is unresolvable — a live read of the very HEAD this compares against,
+// which would suppress every shared-checkout target on a coincidence of
+// resolution rather than a fact about the tree.
+func (e *Engine) appendRoundDelta(
+	conn *sql.DB, step *db.Step, dir, execRoot, base string, diffBody *string,
+) string {
 	record := map[string]string{}
 
 	// The DECLARED worktree rides in the payload beside the head (DKT-24):
@@ -3049,6 +3070,9 @@ func (e *Engine) appendRoundDelta(conn *sql.DB, step *db.Step, dir, execRoot str
 	var head string
 	if e.HeadFn != nil {
 		head = e.HeadFn(dir)
+	}
+	if dir != execRoot && head == base {
+		head = ""
 	}
 	if head != "" {
 		record["head"] = head
