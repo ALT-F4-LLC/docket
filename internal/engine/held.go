@@ -648,6 +648,17 @@ type heldResolution struct {
 	Note    string
 	Value   string
 	Field   string
+	// Mirrors are the OTHER fields the routing step's threshold evaluates
+	// (DKT-1548). A correction that lands only on the aggregated field is a
+	// correction the routing never reads: RUN-90's threshold compared
+	// `open_severity`, the producer's copy of the same maximum, and routed a
+	// fix round the operator had declined against the value they replaced.
+	//
+	// Each one is rewritten only where it currently HOLDS the value the
+	// correction replaced — the test that identifies it as a copy of the
+	// corrected field rather than an independent fact. Core still holds no
+	// opinion about what any of these fields mean.
+	Mirrors []string
 }
 
 // applies reports whether this decision's content lands on payload element i.
@@ -737,10 +748,14 @@ func resolveHeldPayload(
 		// parsed out of the note: refusing to infer a value from prose was
 		// always right, and it argued for a STRUCTURED field, not for no field.
 		if res.Value != "" && res.Field != "" {
-			if prior, ok := element[res.Field]; ok && prior != any(res.Value) {
+			prior, hadPrior := element[res.Field]
+			if hadPrior && prior != any(res.Value) {
 				element[KeyOperatorSetFrom] = prior
 			}
 			element[res.Field] = res.Value
+			if hadPrior {
+				correctMirrors(element, res, prior)
+			}
 		}
 	}
 	if !resolved {
@@ -789,6 +804,45 @@ func resolveHeldPayload(
 		Supersedes: &priorID,
 	}, nowMS)
 	return err
+}
+
+// correctMirrors carries an operator's correction onto the threshold fields
+// that were COPIES of the value it replaced (DKT-1548).
+//
+// The predicate is deliberately narrow: a threshold field is rewritten only
+// when it currently equals `replaced`, the computed value the correction
+// displaced. That equality is the whole evidence that the field mirrors the
+// aggregated one, and it is evidence core can actually check — where "which
+// keys did the producer derive" is a question no payload answers. A threshold
+// field carrying anything else is an independent fact about the cluster, and a
+// correction of the severity is not a correction of it.
+func correctMirrors(element map[string]any, res heldResolution, replaced any) {
+	for _, field := range res.Mirrors {
+		if current, ok := element[field]; ok && current == replaced {
+			element[field] = res.Value
+		}
+	}
+}
+
+// thresholdMirrorFields lists the fields a step's threshold predicates compare,
+// excluding the aggregated field the correction already lands on.
+//
+// An unparseable predicate contributes nothing rather than failing the
+// decision: EvaluateThreshold reports that refusal with its own message at the
+// moment it routes, and a correction must not become the verb that discovers a
+// malformed threshold.
+func thresholdMirrorFields(threshold map[string]string, field string) []string {
+	var out []string
+	seen := map[string]bool{field: true}
+	for _, routing := range ThresholdOrder(threshold) {
+		pred, err := workflow.ParsePredicate(threshold[routing])
+		if err != nil || seen[pred.Field] {
+			continue
+		}
+		seen[pred.Field] = true
+		out = append(out, pred.Field)
+	}
+	return out
 }
 
 // routingStepOf returns the step a materialized `<step>-held@k` belongs to.
@@ -843,11 +897,11 @@ func (e *Engine) decideMaterializedStep(
 		res.Element = element
 	}
 	if value != "" {
-		field, err := heldValueField(conn, routingStep, value)
+		field, mirrors, err := heldValueField(conn, routingStep, value)
 		if err != nil {
 			return err
 		}
-		res.Field = field
+		res.Field, res.Mirrors = field, mirrors
 	}
 
 	// H16: approve/reject on a materialized step whose routing step is NOT in
@@ -934,30 +988,33 @@ func (e *Engine) decideMaterializedStep(
 }
 
 // heldValueField validates an operator's corrected value (DKT-42) and returns
-// the payload field it lands on: the routing step's declared `params.field`,
-// checked for membership in the pinned schema's declared enum.
+// the payload field it lands on — the routing step's declared `params.field`,
+// checked for membership in the pinned schema's declared enum — together with
+// the other fields that step's threshold evaluates (DKT-1548).
 //
 // Every refusal here is a VALIDATION_ERROR while the operator is still typing
 // the decision — never a payload that fails downstream. The membership set is
 // the AUTHOR'S: docket learns which values exist from the schema the run
 // pinned and holds no opinion about what any of them means.
-func heldValueField(conn *sql.DB, routingStep *db.Step, value string) (string, error) {
+func heldValueField(
+	conn *sql.DB, routingStep *db.Step, value string,
+) (string, []string, error) {
 	defs, err := StepDefinitions(conn, routingStep.RunID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// The ROUTING step is a declared aggregate, never a materialized one, so
 	// the tally cannot reach this spec — passed zero rather than loaded, and
 	// said here so the omission reads as a fact instead of a shortcut.
 	spec := stepSpec(defs, routingStep, holdTally{})
 	if spec == nil {
-		return "", validationErr(
+		return "", nil, validationErr(
 			"step %s has no pinned definition; --value has nothing to set",
 			routingStep.Instance)
 	}
 	field, _ := spec.Params["field"].(string)
 	if field == "" || spec.Payload == "" {
-		return "", validationErr(
+		return "", nil, validationErr(
 			"step %s declares no aggregated field with a payload schema; "+
 				"--value applies to a hold produced by an aggregate step",
 			routingStep.Instance)
@@ -965,15 +1022,15 @@ func heldValueField(conn *sql.DB, routingStep *db.Step, value string) (string, e
 
 	registered, err := pinnedSchema(conn, routingStep.RunID, spec.Payload)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// Membership is answered WHERE THE VALUES LIVE (internal/schema), so the
 	// engine never reads a declared enum's values — the same discipline that
 	// keeps ordering behind Position.
 	if err := registered.ValidateMember(field, value); err != nil {
-		return "", validationErr("%v", err)
+		return "", nil, validationErr("%v", err)
 	}
-	return field, nil
+	return field, thresholdMirrorFields(spec.Threshold, field), nil
 }
 
 // heldRejectRouting is what a REJECTED materialized step records for itself.
