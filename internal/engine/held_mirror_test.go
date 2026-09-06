@@ -144,9 +144,22 @@ func TestCorrectedValueReachesEveryThresholdField(t *testing.T) {
 	if got, _ := resolved[KeyOperatorSetFrom].(string); got != "blocker" {
 		t.Errorf("operator_set_from = %q, want the computed value it replaced", got)
 	}
+	// Comma-ok on both assertions: an absent or mistyped key is the defect this
+	// check exists to report, and a bare assertion would panic there, aborting
+	// the whole engine test binary instead of failing this one test.
+	raw, ok := resolved[KeyOperatorSetMirrors].([]any)
+	if !ok {
+		t.Fatalf("operator_set_mirrors = %v, want the list [open_severity] — the keys "+
+			"core wrote on the author's behalf are recorded beside the decision "+
+			"that caused it, not left to be inferred", resolved[KeyOperatorSetMirrors])
+	}
 	var mirrors []string
-	for _, name := range resolved[KeyOperatorSetMirrors].([]any) {
-		mirrors = append(mirrors, name.(string))
+	for _, entry := range raw {
+		name, ok := entry.(string)
+		if !ok {
+			t.Fatalf("operator_set_mirrors entry = %v (%T), want a string field name", entry, entry)
+		}
+		mirrors = append(mirrors, name)
 	}
 	if !slices.Equal(mirrors, []string{"open_severity"}) {
 		t.Errorf("operator_set_mirrors = %v, want [open_severity] — the keys core "+
