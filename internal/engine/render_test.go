@@ -304,6 +304,44 @@ func TestRenderIsDeterministicAtFixedState(t *testing.T) {
 	}
 }
 
+// TestPacketStatesThePayloadContract pins that a step declaring a `payload`
+// schema renders the keys that payload must carry, so a worker can satisfy the
+// contract without fetching the schema separately. Naming the schema and its
+// hash told a worker only which document to go and read.
+func TestPacketStatesThePayloadContract(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "reconcile@0")
+
+	result, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+
+	// `findings@1`, the fixture's declared schema, requires `severity`.
+	for _, want := range []string{"required", "severity"} {
+		if !strings.Contains(result.Packet, want) {
+			t.Errorf("the packet does not state the payload contract (%q missing):\n%s",
+				want, result.Packet)
+		}
+	}
+}
+
+// TestPacketOmitsTheContractWhenNoPayloadIsDeclared keeps the addition dormant
+// for a step with no `payload`: nothing new appears, so a definition that
+// declares none renders exactly as before.
+func TestPacketOmitsTheContractWhenNoPayloadIsDeclared(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	result, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+
+	if strings.Contains(result.Packet, "required properties") {
+		t.Errorf("a step declaring no payload rendered a payload contract:\n%s",
+			result.Packet)
+	}
+}
+
 // TestAttemptNumberingPreAndPostClaim pins DKT-64's reconciliation: `attempt`
 // is ONE monotonic, 0-based, spent-count column, and every surface — the
 // ready-steps row `next --run` reads, the rendered packet header, and a

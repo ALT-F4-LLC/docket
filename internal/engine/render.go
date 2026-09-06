@@ -72,6 +72,14 @@ type packetData struct {
 	// PayloadSchema is `payload`'s `schema@ver`, or "" — carried so the packet
 	// can state the contract even though the SCHEMA REGISTER is S5's.
 	PayloadSchema string
+	// PayloadRequired is the keys that schema declares required of a payload
+	// element, read from the bytes the run PINNED.
+	//
+	// The ref alone told a worker only which document to go and read, and the
+	// cost was measured: workers fetched the schema by hand, and the ones that
+	// did not failed their first record on a missing key. The keys are the part
+	// a worker acts on, so they travel with the ref.
+	PayloadRequired []string
 	// Files are the step's declared packet files, resolved in declared order
 	// with each entry followed by its own declared includes (§1.4).
 	//
@@ -189,7 +197,8 @@ func RenderStepAs(
 		// VALIDATING against it: the schema register lands at S5, and the packet
 		// stating the contract is what lets a worker satisfy it before the
 		// engine can check it.
-		PayloadSchema: spec.Payload,
+		PayloadSchema:   spec.Payload,
+		PayloadRequired: payloadRequiredKeys(conn, step.RunID, spec.Payload),
 	}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("rendering the packet for %s: %w", step.Instance, err)
@@ -198,6 +207,26 @@ func RenderStepAs(
 	return &RenderResult{
 		Packet: buf.String(), Template: name, TemplatePinned: pinned,
 	}, nil
+}
+
+// payloadRequiredKeys reads the required properties out of the schema bytes the
+// run PINNED — the same resolution `step complete` validates against, so the
+// packet cannot state a contract the engine will not enforce.
+//
+// A ref that does not resolve yields no keys rather than a refusal. Rendering a
+// packet is how a worker learns what to do; a run whose pin set cannot produce
+// the bytes has a problem `step complete` reports precisely, and withholding
+// the whole packet over it would replace one diagnosable failure with a worker
+// that never started.
+func payloadRequiredKeys(conn *sql.DB, runID int, ref string) []string {
+	if ref == "" {
+		return nil
+	}
+	registered, err := pinnedSchema(conn, runID, ref)
+	if err != nil {
+		return nil
+	}
+	return registered.RequiredProperties()
 }
 
 // templateSource resolves the template's bytes, VERIFYING A PINNED PATH against

@@ -213,6 +213,37 @@ func deriveFields(doc any) (map[string]Field, []string) {
 	return fields, names
 }
 
+// deriveRequired reads the `required` list of the subschema a payload ELEMENT
+// is written at: an array document's item schema, or the root of any other
+// document.
+//
+// Unlike deriveFields it does not sort: `required` carries no order that means
+// anything, and preserving the author's is what makes the rendered list read
+// like the document they wrote.
+func deriveRequired(doc any) []string {
+	root, ok := doc.(map[string]any)
+	if !ok {
+		return nil
+	}
+	element := root
+	if items, ok := root["items"].(map[string]any); ok {
+		element = items
+	}
+	list, ok := element["required"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		// The metaschema has already refused a non-string entry by the time
+		// Compile reaches here, so this only unwraps the JSON type.
+		if name, ok := item.(string); ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // stringEnum returns a declared `enum` as strings, or nil when it is absent or
 // not entirely strings. An enum of numbers is a perfectly good enum; it just
 // cannot carry an ORDER, since the annotation's contract is a declared sequence
