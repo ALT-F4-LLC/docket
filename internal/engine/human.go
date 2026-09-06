@@ -436,6 +436,35 @@ func (e *Engine) resolveStep(
 			step.Instance, step.Status, db.StepWaitingHuman)
 	}
 
+	// A resolution that REOPENS WORK is refused under a terminal run. `retry`
+	// returns the step to `pending` and `fix-round` mints a fresh pending
+	// round; both leave the run holding a claimable step, and a `done` or
+	// `abandoned` run never returns to `active`: RA5 makes re-activation a
+	// CONFLICT, `run resume` accepts only `waiting-human`, and the rollup
+	// (setRunStatusTx) declines to revive a terminal run on the premise that
+	// no verb creates that state. RUN-93 STEP-6010 showed what accepting it
+	// looks like: the retry succeeded, the step sat `pending` with
+	// blocked_reason "run is not active", and no verb could reach it short of
+	// editing the database. The refusal names the run so the operator learns
+	// the conflict is the run's, not the step's. R11 lets a vote step be
+	// resolved at ANY status, which is the door a terminal run's skipped vote
+	// walked through.
+	if as == ResolveRetry || as == ResolveFixRound {
+		run, err := db.GetRun(conn, step.RunID)
+		if err != nil {
+			return err
+		}
+		if run.Status.Terminal() {
+			return conflictErr(
+				"step %s cannot be resolved --as %s: its run %s is %s, and a "+
+					"%s run holds no claimable work — nothing returns it to "+
+					"active (run resume applies to a waiting-human run; "+
+					"re-activation refuses a terminal one). Plan the step's "+
+					"issue into a new run instead",
+				step.Instance, as, run.Ref(), run.Status, run.Status)
+		}
+	}
+
 	// `retry` CANNOT move a step parked by a REJECTED HOLD, so it is
 	// refused rather than accepted as a silent no-op.
 	//
