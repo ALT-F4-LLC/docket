@@ -86,6 +86,21 @@ const (
 	KeyOperatorSetMirrors = "operator_set_mirrors"
 )
 
+// coreOwnedKeys are the output keys ONLY core writes: aggregate@1's four and
+// the three hold resolution adds. G3's carry-through skips them, so a key of
+// this name in an emitted element is always core's own statement — a reader
+// such as clusterTop can trust `demoted_from`'s presence to mean "this
+// reduction demoted", which is what D2 promises of the emitted object.
+//
+// RUN-90's incident showed the cost of not excluding them: a producer key
+// literally named `demoted_from` rode through verbatim under `max` (which
+// never demotes), clusterTop read it as the cluster's top, the mirror equality
+// failed, and the fix round the operator had declined ran anyway.
+var coreOwnedKeys = map[string]bool{
+	KeyMembers: true, KeyHeld: true, KeyDemotedFrom: true, KeyOperatorResolved: true,
+	KeyOperatorNote: true, KeyOperatorSetFrom: true, KeyOperatorSetMirrors: true,
+}
+
 // aggregateSchema compiles the shipped `aggregate@1` document, once.
 //
 // It is compiled from the EMBEDDED bytes rather than read from the registry.
@@ -295,9 +310,13 @@ func Aggregate(
 		// (DKT-1548): an operator's corrected value is carried onto the other
 		// fields this step's own threshold compares, and correctMirrors names
 		// each one it rewrote in `operator_set_mirrors`.
+		//
+		// The core-owned names are the one exclusion (DKT-1680): a producer
+		// value under `demoted_from` or its siblings would read downstream as
+		// core's own trail, and nothing after this point can tell who wrote it.
 		result := make(map[string]any, len(element)+4)
 		for key, value := range element {
-			if key == params.Field {
+			if key == params.Field || coreOwnedKeys[key] {
 				continue
 			}
 			result[key] = value

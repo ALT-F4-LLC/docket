@@ -847,6 +847,11 @@ func correctMirrors(element map[string]any, res heldResolution, top any) {
 // clusterTop is the value of the cluster's highest-positioned member: the one
 // `demoted_from` records when the reduction took a lower position, and the
 // computed value itself when it did not.
+//
+// Presence of the key is the whole test, which is sound only because Aggregate
+// never carries a producer's `demoted_from` through (coreOwnedKeys): the key in
+// a recorded element is core's own write or absent. Reading it any other way
+// re-opens RUN-90 under `max` (DKT-1680).
 func clusterTop(element map[string]any, computed any) any {
 	if demoted, ok := element[KeyDemotedFrom]; ok {
 		return demoted

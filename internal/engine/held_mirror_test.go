@@ -96,8 +96,14 @@ const mirrorPayload = `[
 ]`
 
 // driveMirrorReconcile registers the schema and definition, activates a run,
-// and drives the aggregate to its hold.
+// and drives the aggregate over mirrorPayload to its hold.
 func driveMirrorReconcile(t *testing.T, conn *sql.DB, e *Engine) {
+	t.Helper()
+	driveMirrorReconcileOver(t, conn, e, mirrorPayload)
+}
+
+// driveMirrorReconcileOver is driveMirrorReconcile over a caller's payload.
+func driveMirrorReconcileOver(t *testing.T, conn *sql.DB, e *Engine, payload string) {
 	t.Helper()
 	registerSchemaFixture(t, conn, "mirror-findings", 1, mirrorSchemaSrc)
 	registerSource(t, conn, []byte(mirrorWorkflowSrc), "mirror-change.toml")
@@ -106,7 +112,7 @@ func driveMirrorReconcile(t *testing.T, conn *sql.DB, e *Engine) {
 	_, err := activate(conn, run.ID)
 	testsupport.Must(t, err, "activate: %v", err)
 
-	claimAndComplete(t, conn, e, "synthesize@0", "synthesized", mirrorPayload)
+	claimAndComplete(t, conn, e, "synthesize@0", "synthesized", payload)
 	driveAction(t, conn, e, "reconcile@0")
 }
 
@@ -173,6 +179,43 @@ func TestCorrectedValueRoutesTheHighArm(t *testing.T) {
 	}
 	if hasEventKind(t, conn, routing.ID, EventLoopEntered) {
 		t.Error("the corrected cluster entered the fix loop")
+	}
+}
+
+// TestProducerDemotedFromDoesNotSteerCorrection is DKT-1680: RUN-90's shape
+// under `max` with a producer key literally named `demoted_from`. `max` never
+// demotes, so the key can only be the producer's — and it must neither survive
+// into the emitted element nor steer clusterTop, or the mirror equality fails
+// and the declined fix round runs anyway.
+func TestProducerDemotedFromDoesNotSteerCorrection(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	driveMirrorReconcileOver(t, conn, e, `[
+	  {"id":"AGT-1223-C1","severity":["blocker","low"],"open_severity":"blocker","demoted_from":"medium"}
+	]`)
+
+	reconcileID := stepIDByInstance(t, conn, "reconcile@0")
+	emitted := artifactPayloads(t, conn, reconcileID)[0][0]
+	if got, present := emitted[KeyDemotedFrom]; present {
+		t.Errorf("emitted demoted_from = %v under max, want the key absent — a "+
+			"producer's value under a core-owned name reads downstream as core's "+
+			"own demotion trail", got)
+	}
+
+	held := heldStep(t, conn, "reconcile-held@0#0")
+	err := e.DecideStepValue(conn, held.ID, true, "no fix round", "high", nowMS)
+	testsupport.Must(t, err, "approving with --value: %v", err)
+
+	elements := artifactPayloads(t, conn, reconcileID)
+	resolved := elements[len(elements)-1][0]
+	if got, _ := resolved["open_severity"].(string); got != "high" {
+		t.Errorf("open_severity = %q, want %q — the mirror equality was keyed "+
+			"on the producer's demoted_from instead of the cluster's real top", got, "high")
+	}
+	routing := heldStep(t, conn, "reconcile@0")
+	if routing.Routing != "drain-highs" {
+		t.Errorf("reconcile@0 routed %q, want %q — RUN-90 resurrected by a "+
+			"producer-supplied demoted_from", routing.Routing, "drain-highs")
 	}
 }
 

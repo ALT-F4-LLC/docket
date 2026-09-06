@@ -927,7 +927,7 @@ is the *judged* half, performed by a synthesizing worker; reconciliation is the
 |---|---|
 | G1 | `field` holding an **array** ⇒ the members are its elements, in payload order (order does not affect any result; §7.3 sorts by position) |
 | G2 | `field` holding a **scalar** ⇒ a one-member cluster. The median/max/min of one value is that value, the spread is 0, nothing is held, and nothing is demoted |
-| G3 | Every **other key of the element is carried through verbatim** into the output element. Core does not read them (genericity), and dropping them would strip an instance's own identifiers from the very payload a downstream step consumes |
+| G3 | Every **other key of the element is carried through verbatim** into the output element, **except the core-owned names** (`members`, `held`, `demoted_from`, `operator_resolved`, `operator_note`, `operator_set_from`, `operator_set_mirrors`), which are dropped so that a key of that name in the output is always core's own write. Core does not read the rest (genericity), and dropping them would strip an instance's own identifiers from the very payload a downstream step consumes |
 | G4 | A member value **not present** in the declared order (§4.3 I4) is a step failure with a reason naming the value and the field. **Not** sorted, not ignored |
 | G5 | An **empty** members array is a step failure naming the element index — an empty cluster has no median, and inventing one (null? the lowest?) is exactly the kind of guess this stage exists to refuse |
 
