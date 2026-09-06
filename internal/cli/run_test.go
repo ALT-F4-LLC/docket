@@ -67,9 +67,29 @@ func runStartCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().String("request-file", "", "")
 	cmd.Flags().Float64("budget", 0, "")
+	cmd.Flags().Float64("usage-budget", 0, "")
 	cmd.Flags().StringSlice("issue", nil, "")
 	addIdempotencyKeyFlag(cmd)
 	return cmd
+}
+
+// runStartUsageBudget starts a run with the given flags set and returns the
+// MEASURED cap the run row stored.
+func runStartUsageBudget(t *testing.T, conn *sql.DB, set map[string]string) float64 {
+	t.Helper()
+
+	cmd := runStartCmdWithDB(conn)
+	for flag, value := range set {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatalf("setting --%s: %v", flag, err)
+		}
+	}
+	w, _ := bufWriter(true)
+	testsupport.Must(t, runRunStart(cmd, w), "run start: %v", nil)
+
+	run, err := db.GetRun(conn, 1)
+	testsupport.Must(t, err, "reading run: %v", err)
+	return run.UsageBudget
 }
 
 // runActivateWithWriter drives runRunActivate against a FACTORY-built
@@ -238,6 +258,32 @@ func TestRunStartOmittedBudgetInheritsConfigDefault(t *testing.T) {
 	if budget != 12 || source != string(engine.BudgetFromConfig) {
 		t.Errorf("budget = %g, source = %q, want 12 and %q",
 			budget, source, engine.BudgetFromConfig)
+	}
+}
+
+// TestRunStartExplicitZeroUsageBudgetIsUnlimited is the MEASURED twin of
+// TestRunStartExplicitZeroBudgetIsUnlimited: `--usage-budget 0` is documented
+// as unlimited, so an explicit 0 must override a non-zero
+// `budget.usage.default` rather than fall through to it.
+func TestRunStartExplicitZeroUsageBudgetIsUnlimited(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyUsageBudgetDefault, "12"),
+		"setting budget.usage.default: %v", nil)
+
+	if got := runStartUsageBudget(t, conn, map[string]string{"usage-budget": "0"}); got != 0 {
+		t.Errorf("usage budget = %g, want 0 (an explicit 0 is unlimited)", got)
+	}
+}
+
+// TestRunStartOmittedUsageBudgetInheritsConfigDefault is the other half:
+// without the flag the run still takes `budget.usage.default`.
+func TestRunStartOmittedUsageBudgetInheritsConfigDefault(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyUsageBudgetDefault, "12"),
+		"setting budget.usage.default: %v", nil)
+
+	if got := runStartUsageBudget(t, conn, nil); got != 12 {
+		t.Errorf("usage budget = %g, want 12 from budget.usage.default", got)
 	}
 }
 

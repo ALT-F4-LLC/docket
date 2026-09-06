@@ -126,10 +126,12 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 		budget = fallback
 	}
 
-	// The MEASURED cap resolves the same way and is pinned the same way
-	// (DKT-238). Two flags because the two caps count different things: one
-	// bounds how much work a run schedules, the other bounds what that work
-	// actually consumed, and a run reasonably wants both.
+	// The MEASURED cap resolves the same way — on flag PRESENCE, so an
+	// explicit `--usage-budget 0` is unlimited and only an omitted flag reads
+	// `budget.usage.default` — and is pinned the same way (DKT-238). Two flags
+	// because the two caps count different things: one bounds how much work a
+	// run schedules, the other bounds what that work actually consumed, and a
+	// run reasonably wants both.
 	usageBudget, _ := cmd.Flags().GetFloat64("usage-budget")
 	if usageBudget < 0 {
 		return cmdErr(
@@ -137,7 +139,7 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 				usageBudget),
 			output.ErrValidation)
 	}
-	if usageBudget == 0 {
+	if !cmd.Flags().Changed("usage-budget") {
 		entry, err := db.GetConfig(conn, getProjectID(cmd), db.KeyUsageBudgetDefault)
 		if err != nil {
 			return cmdErr(fmt.Errorf("reading %s: %w", db.KeyUsageBudgetDefault, err),
