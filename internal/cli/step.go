@@ -1124,8 +1124,10 @@ var stepContextCmd = &cobra.Command{
 The bundle is assembled from the run's PINNED and SNAPSHOTTED state only: the
 issue as it read at activation, the recorded input artifacts, the pin list,
 and the run's recorded notes (` + "`notes`" + `, absent when the run has none — see
-` + "`docket run note`" + `). It never reads the live issue, never reads the working
-tree, and never opens a pinned file.
+` + "`docket run note`" + `). It never reads the live issue and never reads the working
+tree. The one pinned file it opens is the run's policy.toml, to resolve the
+model/effort/variant routing onto a ` + "`step`" + ` the run can still offer; a run
+that pins none carries no routing fields.
 
 For a step that has been claimed, ` + "`inputs`" + ` — and the ` + "`target_sha`" + ` /
 ` + "`target_worktree`" + ` lifted from them — are the bindings its claim RECORDED:

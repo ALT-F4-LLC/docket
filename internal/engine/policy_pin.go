@@ -30,6 +30,13 @@ func policyForRun(conn *sql.DB, runID int) (*policyDoc, error) {
 	if err != nil {
 		return nil, err
 	}
+	return policyFromPins(runID, pins)
+}
+
+// policyFromPins is policyForRun over an already-read pin list: nil when the
+// list pins no policy.toml, the parsed document otherwise, and the read
+// error verbatim when the pinned file cannot be read.
+func policyFromPins(runID int, pins []db.Pin) (*policyDoc, error) {
 	pinned := packetPinsForRun(pins)
 	if _, ok := pinned[policyPinRef]; !ok {
 		return nil, nil
@@ -41,6 +48,32 @@ func policyForRun(conn *sql.DB, runID int) (*policyDoc, error) {
 		return nil, err
 	}
 	return parsePolicy([]byte(body))
+}
+
+// runPolicy is a scheduler's handle on its run's pinned policy.toml: the pin
+// list captured with the rest of the snapshot, the file read and parsed on
+// the first row that needs routing, and memoized — document and error alike
+// — for the snapshot's lifetime.
+//
+// Lazy on purpose. LoadScheduler backs verbs that render no rows (`run
+// report`, `step list`, the guards, the record paths), and a pinned
+// policy.toml that cannot be read — drifted on disk since activation — must
+// refuse the verbs that would route rows against it, not every verb that
+// loads the run.
+type runPolicy struct {
+	runID  int
+	pins   []db.Pin
+	loaded bool
+	doc    *policyDoc
+	err    error
+}
+
+func (p *runPolicy) load() (*policyDoc, error) {
+	if !p.loaded {
+		p.loaded = true
+		p.doc, p.err = policyFromPins(p.runID, p.pins)
+	}
+	return p.doc, p.err
 }
 
 // ResolveSeats resolves each named seat against the run's pinned policy.toml,
@@ -96,42 +129,43 @@ func ResolveSeats(conn *sql.DB, runID int, seats, labels []string) ([]model.Vote
 	return out, nil
 }
 
-// resolveRowPolicy fills Model/Effort/Variant (executor rows) and
-// VoterAssignments (vote rows) on every row policy can resolve, in place.
+// resolveRowRouting fills Model/Effort/Variant (an executor row) or
+// VoterAssignments (a vote row) from policy, in place. A nil policy — the
+// run pins none — leaves the row untouched, and so does a row that is
+// neither: a human step, an action step, a `type` step. wave.js's resolve()
+// only ever ran on executor rows and resolveSeat() only on vote rows, and
+// this mirrors that exactly.
 //
-// A row that is neither — a human step, an action step, a `type` step — is
-// untouched: wave.js's resolve() only ever ran on executor rows and
-// resolveSeat() only on vote rows, and this mirrors that exactly (DKT-1282
-// AC1/AC3).
-func resolveRowPolicy(policy *policyDoc, rows []model.StepRow) error {
+// The one caller is stepRow, so every rendered row — `next --run`, a
+// dispatch manifest and its verify recomputation, `step show`, a context
+// bundle's `step` — resolves through this one path and the byte-equality
+// those verbs hold each other to survives.
+func resolveRowRouting(policy *policyDoc, row *model.StepRow) error {
 	if policy == nil {
 		return nil
 	}
-	for i := range rows {
-		row := &rows[i]
-		switch {
-		case row.Executor != "":
-			assignment, err := policy.ResolveExecutor(row.Executor, row.Attempt, row.Instance, row.Labels)
+	switch {
+	case row.Executor != "":
+		assignment, err := policy.ResolveExecutor(row.Executor, row.Attempt, row.Instance, row.Labels)
+		if err != nil {
+			return validationErr(
+				"resolving %s@%s from the run's pinned policy.toml: %v", row.Step, row.Instance, err)
+		}
+		row.Model, row.Effort, row.Variant = assignment.Model, assignment.Effort, assignment.Variant
+	case len(row.Voters) > 0:
+		assignments := make([]model.VoterAssignment, 0, len(row.Voters))
+		for _, voter := range row.Voters {
+			assignment, err := policy.ResolveSeat(voter, row.Labels)
 			if err != nil {
 				return validationErr(
-					"resolving %s@%s from the run's pinned policy.toml: %v", row.Step, row.Instance, err)
+					"resolving %s@%s voter %q from the run's pinned policy.toml: %v",
+					row.Step, row.Instance, voter, err)
 			}
-			row.Model, row.Effort, row.Variant = assignment.Model, assignment.Effort, assignment.Variant
-		case len(row.Voters) > 0:
-			assignments := make([]model.VoterAssignment, 0, len(row.Voters))
-			for _, voter := range row.Voters {
-				assignment, err := policy.ResolveSeat(voter, row.Labels)
-				if err != nil {
-					return validationErr(
-						"resolving %s@%s voter %q from the run's pinned policy.toml: %v",
-						row.Step, row.Instance, voter, err)
-				}
-				assignments = append(assignments, model.VoterAssignment{
-					Voter: voter, Model: assignment.Model, Effort: assignment.Effort, Variant: assignment.Variant,
-				})
-			}
-			row.VoterAssignments = assignments
+			assignments = append(assignments, model.VoterAssignment{
+				Voter: voter, Model: assignment.Model, Effort: assignment.Effort, Variant: assignment.Variant,
+			})
 		}
+		row.VoterAssignments = assignments
 	}
 	return nil
 }

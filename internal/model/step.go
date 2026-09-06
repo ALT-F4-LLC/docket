@@ -71,24 +71,32 @@ type StepRow struct {
 	// The entries are OPAQUE (§11.1): core counts them and never interprets one.
 	Voters []string `json:"voters,omitempty"`
 	// Model, Effort, and Variant are resolved from the run's pinned
-	// policy.toml (DKT-1282), present ONLY on an executor-class row (Executor
-	// set): the seat's standing [executors] variant, walked forward through
-	// [variants].escalate_to by this row's attempt (and, for a listed round
-	// executor, its round ordinal), redirected around any
-	// [security]-forbidden model, and clamped to [security].ceiling on a
-	// sensitive row — see internal/engine/policy_resolve.go.
+	// policy.toml, present on an executor-class row (Executor set) the run
+	// can still offer — `pending` in the table, whether it renders `ready`,
+	// `staged`, or blocked — wherever the row is rendered: `next --run`, a
+	// dispatch manifest, `dispatch verify`'s recomputation, `step show`, and
+	// a context bundle's `step`. The value is the seat's standing [executors]
+	// variant, walked forward through [variants].escalate_to by this row's
+	// attempt (and, for a listed round executor, its round ordinal),
+	// redirected around any [security]-forbidden model, and clamped to
+	// [security].ceiling on a sensitive row — see
+	// internal/engine/policy_resolve.go.
 	//
 	// Absent — never present, never empty strings — when the run pins no
-	// policy.toml, when the row is not an executor row, or when nothing has
-	// resolved it yet, which is D1's dormancy applied here: a caller reading
-	// `next --run` before this feature existed sees byte-identical rows.
+	// policy.toml, when the row is not an executor row, or once the step has
+	// been handed out: the walk is keyed by the attempt an OFFER carries, and
+	// a claimed, running, or finished step's attempt already counts the claim
+	// that took it, so resolving it again would report one hop above what was
+	// actually spawned. The routing a claim ran under is in its claim
+	// metadata. A caller reading a row before this feature existed sees
+	// byte-identical rows.
 	Model   string `json:"model,omitempty"`
 	Effort  string `json:"effort,omitempty"`
 	Variant string `json:"variant,omitempty"`
-	// VoterAssignments carries the SAME resolution per voter, present ONLY on
-	// a vote step (Voters set) — a voter has no attempt or round to walk, so
-	// each resolves to its declared standing variant (see
-	// (*policyDoc).ResolveSeat). Order matches Voters.
+	// VoterAssignments carries the SAME resolution per voter, present on a
+	// vote step (Voters set) under the same offer rule — a voter has no
+	// attempt or round to walk, so each resolves to its declared standing
+	// variant (see (*policyDoc).ResolveSeat). Order matches Voters.
 	VoterAssignments []VoterAssignment `json:"voter_assignments,omitempty"`
 	// Proposal is the display id of the proposal this vote step opened, once
 	// one has been opened. It is absent before that — a vote step whose

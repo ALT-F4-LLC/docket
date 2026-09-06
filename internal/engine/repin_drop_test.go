@@ -58,7 +58,7 @@ func dropRun(t *testing.T) (conn *sql.DB, configDir string, runID int) {
 	writeConfigFile(t, configDir, "workflows/drop-dev.toml", dropWorkflowSrc)
 	writeConfigFile(t, configDir, "contracts/implement.md", "the implement contract\n")
 	writeConfigFile(t, configDir, "contracts/review.md", "the review contract\n")
-	writeConfigFile(t, configDir, "policy.toml", "opaque = \"instance policy\"\n")
+	writeConfigFile(t, configDir, "policy.toml", repinFixturePolicyTOML)
 
 	issue := createIssue(t, conn, "drop subject", "a body", "task", nil)
 	run := startRun(t, conn, issue)

@@ -290,18 +290,6 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		unroutedHeld = fresh.UnroutedHoldReason()
 	}
 
-	// ---- DKT-1282: resolve executor/voter rows against the run's pinned
-	// policy.toml. AFTER the commit and the possible re-derivation above, so
-	// this reads the FINAL row set — a row the re-derivation added or dropped
-	// must not be resolved against, or left un-resolved from, a stale pass.
-	policy, err := policyForRun(conn, runID)
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveRowPolicy(policy, rows); err != nil {
-		return nil, err
-	}
-
 	// §6.3's closing paragraph: the refusal reports `CondHeadroom`, and `next`
 	// ADDITIONALLY names the unacknowledged reaps, because a headroom denial
 	// with nothing running is otherwise baffling. The rows come from the same
@@ -513,7 +501,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		}
 	}
 
-	return model.StepRow{
+	row := model.StepRow{
 		Step:     model.FormatStepID(step.ID),
 		Instance: step.Instance,
 		Issue:    model.FormatID(step.IssueID),
@@ -546,7 +534,27 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		LeaseTTLS:       int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
 		Status:          db.StepReady,
 		Metadata:        metadata,
-	}, nil
+	}
+
+	// Routing — model/effort/variant on an executor row, voter_assignments on
+	// a vote row — rides on a row the run can still OFFER, and only there.
+	// The escalation walk is keyed by the attempt an offer carries (prior
+	// claims), and a claim bumps the step's attempt as it takes it, so
+	// resolving a claimed, running, or finished step here would report one
+	// hop above what was actually spawned; the routing a claim ran under is
+	// in its claim metadata. A terminal run offers nothing, so its rows never
+	// open the pinned file — a done run stays readable after the corpus its
+	// policy.toml was pinned from has moved on.
+	if step.Status == db.StepPending && !sched.run.Status.Terminal() {
+		policy, err := sched.policy.load()
+		if err != nil {
+			return model.StepRow{}, err
+		}
+		if err := resolveRowRouting(policy, &row); err != nil {
+			return model.StepRow{}, err
+		}
+	}
+	return row, nil
 }
 
 // StepRowFor renders one step's `next row` at its EFFECTIVE status, for the

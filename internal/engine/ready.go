@@ -137,6 +137,11 @@ type Scheduler struct {
 	// of the world. It counts UNACKNOWLEDGED reaps per class, and it is nil on
 	// the dormant path — a run with nothing reaped never allocates it (D3).
 	reapHold map[string]int
+	// policy is the run's pinned policy.toml, read lazily by the first
+	// rendered row that needs routing (stepRow) and never by readiness
+	// itself: which model a row routes to is a rendering fact, not a
+	// scheduling one.
+	policy *runPolicy
 	// openReaps are the rows behind reapHold, kept so the REFUSAL can name the
 	// same reaps the predicate counted. A headroom denial with nothing running
 	// is baffling unless the message names why (§6.3).
@@ -310,6 +315,14 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		return nil, err
 	}
 
+	// The pin LIST only, in the same transaction as the rest of the snapshot.
+	// The policy file behind its policy.toml entry is opened only when a
+	// rendered row asks for routing (runPolicy).
+	pins, err := db.ListPinsTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+
 	limits, limitSources := mergeLimits(defs)
 	s := &Scheduler{
 		run: run, steps: steps, foreign: foreign, issues: facts,
@@ -324,6 +337,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		openReaps:     openReaps,
 		holdTally:     tally,
 		voteProposals: proposals,
+		policy:        &runPolicy{runID: runID, pins: pins},
 	}
 	for _, step := range steps {
 		s.stepByID[step.ID] = step

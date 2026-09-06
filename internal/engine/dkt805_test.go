@@ -50,7 +50,7 @@ func TestRepinPinsTheAdoptedBytesNewlyRequiredRefs(t *testing.T) {
 	conn, configDir := configRepo(t)
 	writeConfigFile(t, configDir, "workflows/dkt805-dev.toml", dkt805WorkflowSrc)
 	writeConfigFile(t, configDir, "contracts/implement.md", "the implement contract\n")
-	writeConfigFile(t, configDir, "policy.toml", "opaque = \"instance policy\"\n")
+	writeConfigFile(t, configDir, "policy.toml", repinFixturePolicyTOML)
 
 	issue := createIssue(t, conn, "closure subject", "a body", "task", nil)
 	run := startRun(t, conn, issue)
@@ -155,7 +155,7 @@ func TestRepinRefusesWhenANewlyRequiredRefHasNoBytes(t *testing.T) {
 	writeConfigFile(t, configDir, "workflows/dkt805-dev.toml", dkt805WorkflowSrc)
 	contractB0 := "the implement contract\n"
 	writeConfigFile(t, configDir, "contracts/implement.md", contractB0)
-	writeConfigFile(t, configDir, "policy.toml", "opaque = \"instance policy\"\n")
+	writeConfigFile(t, configDir, "policy.toml", repinFixturePolicyTOML)
 
 	issue := createIssue(t, conn, "closure subject", "a body", "task", nil)
 	run := startRun(t, conn, issue)
