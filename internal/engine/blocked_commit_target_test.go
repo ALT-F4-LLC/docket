@@ -165,6 +165,81 @@ func TestUnpinnedSharedCheckoutKeepsTheLiveHead(t *testing.T) {
 	}
 }
 
+// TestBlockedCommitAtFixRoundReentry is the rule at a loop re-entry: round 0
+// committed and was integrated, round 1's fix landed UNCOMMITTED in a fresh
+// worktree forked from the integrated head. The head is dropped — the fork
+// point names the pre-fix tree — and the re-review packet must still carry
+// the round-delta section, computed from that fork point, with the fix in it.
+func TestBlockedCommitAtFixRoundReentry(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	shared := gitRepo(t)
+	pinned := gitRun(t, shared, "rev-parse", "HEAD")
+
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "blocked fix round", "body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "blocked fix-round run", 0, nowMS,
+		db.RunContext{ExecRoot: shared, CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue: %v", err)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	e.DiffFn = GitDiff
+	e.HeadFn = sharedCheckoutHead
+
+	// Round 0: committed in its own worktree, driven to the loop re-entry,
+	// and integrated onto the shared branch.
+	w0 := filepath.Join(t.TempDir(), "round-0")
+	gitRun(t, shared, "worktree", "add", "-q", w0)
+	writeFile(t, w0, "internal/feature.txt", "ROUND 0\n")
+	gitRun(t, w0, "add", "-A")
+	gitRun(t, w0, "commit", "-qm", "round 0")
+	driveIssueToReentryAt(t, conn, e, issue, w0)
+	gitRun(t, shared, "merge", "-q", "--ff-only", gitRun(t, w0, "rev-parse", "HEAD"))
+	fork := gitRun(t, shared, "rev-parse", "HEAD")
+
+	// Round 1: a fresh worktree forked from the integrated head; the fix
+	// lands, the commit does not.
+	w1 := filepath.Join(t.TempDir(), "round-1")
+	gitRun(t, shared, "worktree", "add", "-q", w1)
+	writeFile(t, w1, "internal/fix.txt", "ROUND 1 BLOCKED FIX\n")
+	completeStepAt(t, conn, e, issue, "fix@1", w1)
+
+	review, err := ClaimStep(conn, stepIDIn(t, conn, issue, "review@1#0"),
+		ClaimOptions{Owner: "judge", NowMS: nowMS})
+	testsupport.Must(t, err, "claim review@1#0: %v", err)
+	if review.Context.TargetSHA != "" {
+		t.Errorf("target_sha = %q, want none — the worktree stands at its fork "+
+			"point %.12s, the PRE-fix tree", review.Context.TargetSHA, fork)
+	}
+
+	rendered, err := RenderStep(conn, stepIDIn(t, conn, issue, "review@1#1"), "", nowMS)
+	testsupport.Must(t, err, "RenderStep(review@1#1): %v", err)
+	if strings.Contains(rendered.Packet, "target_sha: "+fork) {
+		t.Errorf("the packet names the fork point as the target:\n%s", rendered.Packet)
+	}
+	_, delta, found := strings.Cut(rendered.Packet, "round delta: changes since")
+	if !found {
+		t.Fatalf("review@1#1's packet carries no round-delta section:\n%s", rendered.Packet)
+	}
+	if !strings.HasPrefix(delta, " "+fork[:12]) {
+		t.Errorf("round delta is not computed from the fork point %.12s:\n%s", fork, delta)
+	}
+	if !strings.Contains(delta, "ROUND 1 BLOCKED FIX") {
+		t.Errorf("the round delta carries no diff of the blocked fix:\n%s", delta)
+	}
+	if strings.Contains(delta, "ROUND 0") {
+		t.Errorf("the round delta re-attributes round 0's integrated work:\n%s", delta)
+	}
+	if base := issueRoundBase(t, conn, run.ID, issue); base != fork {
+		t.Errorf("round_base = %.12s, want the fork point %.12s", base, fork)
+	}
+}
+
 // TestCommittedHandBackKeepsTheTargetSHA is the control the rule must not
 // disturb: the same fixture with the commit made names that commit.
 func TestCommittedHandBackKeepsTheTargetSHA(t *testing.T) {

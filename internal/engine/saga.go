@@ -3058,6 +3058,17 @@ func sharedCheckoutHead(execRoot string) string {
 // base from a live read of the very HEAD this compares against, so equality
 // there is a coincidence of resolution, and dropping the head on it would
 // suppress every shared-checkout target of such a run.
+//
+// At a loop re-entry (ordinal > 0) the same refused commit drops the head and
+// KEEPS the round delta. The delta's base never came from the head:
+// roundDeltaBase resolves it from the worktree's fork point and the previous
+// round's record, and DiffFn reads the working tree, uncommitted work
+// included. So a blocked fix round's packet carries no target sha, the
+// cumulative `issue.diff`, and the marked round-delta trailer computed from
+// the fork point — the unscoped view of the round's own work that the
+// re-review's judge-testing lens reads. The one shape with no delta is the
+// pre-existing one: no earlier round recorded a head (`prev == ""`), blocked
+// or not.
 func (e *Engine) appendRoundDelta(
 	conn *sql.DB, step *db.Step, dir, execRoot, base string, liveBase bool, diffBody *string,
 ) string {
@@ -3077,34 +3088,38 @@ func (e *Engine) appendRoundDelta(
 	if e.HeadFn != nil {
 		head = e.HeadFn(dir)
 	}
-	if head == base && !liveBase {
+	// A blocked commit: the tree still stands at the fixed base it was forked
+	// from, so there is no commit to name. The round delta below does not
+	// depend on the head and is still appended.
+	blocked := head == base && !liveBase
+	if blocked {
 		head = ""
 	}
 	if head != "" {
 		record["head"] = head
-		if step.Ordinal > 0 {
-			prev := latestIssueDiffHead(conn, step.RunID, step.IssueID)
-			if prev != "" && prev != head {
-				// DKT-171/DKT-409: `prev` predates whatever integration landed
-				// on the shared branch between rounds. A fresh worktree forked
-				// AFTER that integration inherits it in prev..HEAD — sibling
-				// issues' cherry-picked commits rendered as this issue's own
-				// round work. The base therefore advances to the worktree's
-				// fork point whenever prev is not strictly ahead of it —
-				// verbatim integration puts prev behind the fork, a cherry-
-				// pick integration leaves it on a superseded line beside it —
-				// so fork..HEAD is exactly "this round's work alone".
-				base := roundDeltaBase(dir, execRoot, prev)
-				delta, err := e.DiffFn(dir, base, nil)
-				if err == nil {
-					record["round_base"] = base
-					if delta == "" {
-						delta = "# (no tree change this round)\n"
-					}
-					*diffBody += fmt.Sprintf(
-						"\n# === round delta: changes since %.12s — this round's work alone, unscoped ===\n",
-						base) + delta
+	}
+	if (head != "" || blocked) && step.Ordinal > 0 {
+		prev := latestIssueDiffHead(conn, step.RunID, step.IssueID)
+		if prev != "" && prev != head {
+			// DKT-171/DKT-409: `prev` predates whatever integration landed
+			// on the shared branch between rounds. A fresh worktree forked
+			// AFTER that integration inherits it in prev..HEAD — sibling
+			// issues' cherry-picked commits rendered as this issue's own
+			// round work. The base therefore advances to the worktree's
+			// fork point whenever prev is not strictly ahead of it —
+			// verbatim integration puts prev behind the fork, a cherry-
+			// pick integration leaves it on a superseded line beside it —
+			// so fork..HEAD is exactly "this round's work alone".
+			base := roundDeltaBase(dir, execRoot, prev)
+			delta, err := e.DiffFn(dir, base, nil)
+			if err == nil {
+				record["round_base"] = base
+				if delta == "" {
+					delta = "# (no tree change this round)\n"
 				}
+				*diffBody += fmt.Sprintf(
+					"\n# === round delta: changes since %.12s — this round's work alone, unscoped ===\n",
+					base) + delta
 			}
 		}
 	}
