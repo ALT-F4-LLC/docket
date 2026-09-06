@@ -1507,7 +1507,7 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	// DKT-11 / DKT-20 / DKT-42: for a worktree, the base is its FORK POINT;
 	// for the shared checkout, the run's PINNED starting commit — see
 	// runDiffBase's doc for why.
-	base := runDiffBase(conn, step.RunID, dir, execRoot)
+	base, liveBase := runDiffBase(conn, step.RunID, dir, execRoot)
 	body, err = e.DiffFn(dir, base, scope)
 	if err != nil {
 		return "", "", fmt.Errorf("computing the diff for %s: %w", step.Instance, err)
@@ -1528,7 +1528,7 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	}
 	// DKT-106: record the tree's HEAD beside the diff and, on a loop
 	// re-entry, append this ROUND's delta to the cumulative body.
-	payload = e.appendRoundDelta(conn, step, dir, execRoot, base, &body)
+	payload = e.appendRoundDelta(conn, step, dir, execRoot, base, liveBase, &body)
 	return body, payload, nil
 }
 
@@ -2479,23 +2479,25 @@ func runExecRoot(conn *sql.DB, runID int) string {
 //
 // A run started before commit_sha was recorded, or outside a checkout, falls
 // back to sharedCheckoutHead's live read of the run's exec root — the prior
-// fix's behavior — preserved for that case only.
+// fix's behavior — preserved for that case only. `live` reports that
+// fallback, because it is the one base a tree's HEAD equals by construction
+// rather than by having committed nothing (appendRoundDelta).
 //
 // `execRoot` is the run's already-resolved exec root (runExecRoot): the
 // caller resolved it to default `dir`, and passing it in keeps this compare
 // and that defaulting reading ONE value rather than two resolutions that
 // could disagree.
-func runDiffBase(conn *sql.DB, runID int, dir, execRoot string) string {
+func runDiffBase(conn *sql.DB, runID int, dir, execRoot string) (base string, live bool) {
 	if dir != "" && dir != execRoot {
 		if fork := worktreeForkPoint(dir, execRoot); fork != "" {
-			return fork
+			return fork, false
 		}
 	}
 	run, err := db.GetRun(conn, runID)
 	if err == nil && run.CommitSHA != "" {
-		return run.CommitSHA
+		return run.CommitSHA, false
 	}
-	return sharedCheckoutHead(execRoot)
+	return sharedCheckoutHead(execRoot), true
 }
 
 // gateBaseSHA resolves the base commit a completion gate's child is told
@@ -3046,14 +3048,18 @@ func sharedCheckoutHead(execRoot string) string {
 // the uncommitted work — instead of reconstructing a stale tree. `worktree`
 // still rides along: the bytes are reachable there.
 //
-// Scoped to a DISTINCT worktree because that is the case where `base` is the
-// tree's own fork point (runDiffBase, DKT-42) and equality therefore means "no
-// commit here". For the shared checkout the base is the run's pin, or — when
-// that is unresolvable — a live read of the very HEAD this compares against,
-// which would suppress every shared-checkout target on a coincidence of
-// resolution rather than a fact about the tree.
+// The rule binds wherever `base` is a FIXED commit that predates the step's
+// work: a worktree's fork point (runDiffBase, DKT-42), or the run's pinned
+// start commit for a step recorded in the shared checkout without a worktree
+// (DKT-1649 — the same refused commit in the shared checkout handed judges the
+// pinned sha, the pre-work tree, on every run since runs began pinning). In
+// both, HEAD still equal to base is a fact about the tree: nothing was
+// committed. The one exclusion is `liveBase`: a run with no pin resolves its
+// base from a live read of the very HEAD this compares against, so equality
+// there is a coincidence of resolution, and dropping the head on it would
+// suppress every shared-checkout target of such a run.
 func (e *Engine) appendRoundDelta(
-	conn *sql.DB, step *db.Step, dir, execRoot, base string, diffBody *string,
+	conn *sql.DB, step *db.Step, dir, execRoot, base string, liveBase bool, diffBody *string,
 ) string {
 	record := map[string]string{}
 
@@ -3071,7 +3077,7 @@ func (e *Engine) appendRoundDelta(
 	if e.HeadFn != nil {
 		head = e.HeadFn(dir)
 	}
-	if dir != execRoot && head == base {
+	if head == base && !liveBase {
 		head = ""
 	}
 	if head != "" {
