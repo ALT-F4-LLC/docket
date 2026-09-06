@@ -175,6 +175,94 @@ func TestRunStartStoresBudget(t *testing.T) {
 	}
 }
 
+// runStartBudgetSource starts a run through `run start` with the given flags,
+// then reads back what `docket run budget RUN-N --json` reports — the read
+// path an operator uses, with no `run budget --set` in between.
+func runStartBudgetSource(t *testing.T, conn *sql.DB, set map[string]string) (float64, string) {
+	t.Helper()
+
+	cmd := runStartCmdWithDB(conn)
+	for flag, value := range set {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatalf("setting --%s: %v", flag, err)
+		}
+	}
+	w, _ := bufWriter(true)
+	testsupport.Must(t, runRunStart(cmd, w), "run start: %v", nil)
+
+	readCmd := cmdWithDB(conn)
+	readCmd.Flags().Float64("set", 0, "")
+	readCmd.Flags().String("reason", "", "")
+	addIfVersionFlag(readCmd)
+	readW, readBuf := bufWriter(true)
+	err := runRunBudget(readCmd, model.FormatRunID(1), readW)
+	testsupport.Must(t, err, "run budget: %v", err)
+
+	var envelope struct {
+		Data struct {
+			Budget float64 `json:"budget"`
+			Source string  `json:"source"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(readBuf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", readBuf.String(), err)
+	}
+	return envelope.Data.Budget, envelope.Data.Source
+}
+
+// TestRunStartExplicitZeroBudgetIsUnlimited pins DKT-1539: `--budget 0` is
+// documented as unlimited, so an EXPLICIT 0 must override a non-zero
+// `budget.default` rather than fall through to it. Before the fix the zero was
+// indistinguishable from an omitted flag and the run recorded the config
+// default instead.
+func TestRunStartExplicitZeroBudgetIsUnlimited(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyBudgetDefault, "12"),
+		"setting budget.default: %v", nil)
+
+	budget, source := runStartBudgetSource(t, conn, map[string]string{"budget": "0"})
+	if budget != 0 || source != string(engine.BudgetUnlimited) {
+		t.Errorf("budget = %g, source = %q, want 0 and %q",
+			budget, source, engine.BudgetUnlimited)
+	}
+}
+
+// TestRunStartOmittedBudgetInheritsConfigDefault is the other half of the same
+// rule: without the flag the run still takes `budget.default`.
+func TestRunStartOmittedBudgetInheritsConfigDefault(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyBudgetDefault, "12"),
+		"setting budget.default: %v", nil)
+
+	budget, source := runStartBudgetSource(t, conn, nil)
+	if budget != 12 || source != string(engine.BudgetFromConfig) {
+		t.Errorf("budget = %g, source = %q, want 12 and %q",
+			budget, source, engine.BudgetFromConfig)
+	}
+}
+
+// TestBudgetZeroIsDocumentedAsUnlimited keeps the two help surfaces an
+// operator reads before typing `--budget 0` saying what the flag now does:
+// 0 is unlimited, and an explicit 0 beats `budget.default`.
+func TestBudgetZeroIsDocumentedAsUnlimited(t *testing.T) {
+	budgetFlag := runStartCmd.Flags().Lookup("budget")
+	if budgetFlag == nil {
+		t.Fatal("run start has no --budget flag")
+	}
+	for _, want := range []string{"0 means unlimited", "overrides `budget.default`"} {
+		if !strings.Contains(budgetFlag.Usage, want) {
+			t.Errorf("--budget usage %q does not mention %q", budgetFlag.Usage, want)
+		}
+	}
+	if !strings.Contains(runStartCmd.Long, "0 means unlimited") {
+		t.Error("`run start --help` no longer documents 0 as unlimited")
+	}
+	if !strings.Contains(configSetCmd.Long, "budget.default") ||
+		!strings.Contains(configSetCmd.Long, "0 is unlimited") {
+		t.Error("`config set --help` no longer documents budget.default's 0 as unlimited")
+	}
+}
+
 // TestRunStartIdempotencyKeyReplaysOriginal covers DKT-416's acceptance
 // criterion: repeating `run start` with the same --idempotency-key returns
 // the original run rather than creating a duplicate — the same

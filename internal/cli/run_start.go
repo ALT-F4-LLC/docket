@@ -25,7 +25,9 @@ step exists until ` + "`docket run activate`" + `.
 --budget is ENFORCED. The run pauses at ` + "`waiting-human`" + ` with a budget-breach
 reason when the claim that would cross the cap arrives — and the quantity it
 compares is max(reported usage, declared-cost floor), so a claimant that
-reports nothing cannot spend past the cap. 0 means unlimited.
+reports nothing cannot spend past the cap. 0 means unlimited, and an explicit
+` + "`--budget 0`" + ` overrides ` + "`budget.default`" + ` — omitting the flag is what
+inherits that default.
 
 The cap is read from the run row for the life of the run: a ` + "`budget.default`" + `
 set after ` + "`run start`" + ` does not re-cap a run already started. ` + "`docket run report`" + `
@@ -104,7 +106,12 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 	// what the row stores. That is what makes B3 true — the cap a claim enforces
 	// is read from the run row and from nowhere else, so a config change after
 	// `run start` cannot silently re-cap a live run.
-	if budget == 0 {
+	//
+	// OMITTED is `Changed`, not zero (DKT-1539). `--budget 0` is documented as
+	// unlimited, and reading the default whenever the number is 0 made that
+	// impossible to say on a project with a non-zero default: the explicit
+	// unlimited silently became the default's cap.
+	if !cmd.Flags().Changed("budget") {
 		entry, err := db.GetConfig(conn, getProjectID(cmd), db.KeyBudgetDefault)
 		if err != nil {
 			return cmdErr(fmt.Errorf("reading %s: %w", db.KeyBudgetDefault, err),
@@ -184,7 +191,7 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 
 func init() {
 	runStartCmd.Flags().String("request-file", "", "File holding the run's request text")
-	runStartCmd.Flags().Float64("budget", 0, "Per-run budget cap, in the unit `budget.unit` names (see `docket run budget --help`); 0 means unlimited")
+	runStartCmd.Flags().Float64("budget", 0, "Per-run budget cap, in the unit `budget.unit` names (see `docket run budget --help`); 0 means unlimited, and an explicit 0 overrides `budget.default`. Omit the flag to inherit that default")
 	runStartCmd.Flags().Float64("usage-budget", 0,
 		"Per-run cap over MEASURED usage of the unit `budget.usage.unit` names; "+
 			"0 means unlimited. Separate from --budget, which counts declared "+
