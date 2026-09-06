@@ -32,6 +32,61 @@ type ClaimResult struct {
 	// reliability-delta §6.3: a claim is a mutation and advances the version.
 	Attempt    int `json:"-"`
 	RowVersion int `json:"-"`
+
+	// ReMinted marks a response that re-keyed the caller's OWN standing lease
+	// rather than taking a new one (DKT-1564). Nothing about the claim changed
+	// — same attempt, same accrual, same recorded bundle — but the caller asked
+	// twice, and the honest answer says which of the two it got.
+	ReMinted bool `json:"-"`
+}
+
+// IncompleteClaimError is a claim whose LEASE COMMITTED and whose remaining
+// work then failed (DKT-1564).
+//
+// Everything after transaction A — the pre-gate phase, the context transaction,
+// the authoritative render — runs as the winning claimant, on a lease that is
+// already durable and already accrued. A bare error from there hands the caller
+// a refusal while the engine holds a lease in the caller's name: the token was
+// never issued, so `complete`, `fail`, `heartbeat` and `release` are all closed
+// to it, and the step sits until its TTL or an operator-gated reap. RUN-90 lost
+// two steps and two ack-reap panels to exactly that.
+//
+// So the token travels WITH the failure. The caller is the claimant, it can end
+// the lease it now provably holds, and the failure is still reported — the two
+// facts are both true and neither is worth suppressing.
+//
+// It is raised ONLY where the committed lease is still the caller's. A claim
+// lost during the pre-gate phase (the refresh guard matching zero rows) reports
+// an ordinary CONFLICT: that token is dead, and offering it would be a lie.
+type IncompleteClaimError struct {
+	// Result is the claim as transaction A committed it. Context carries the
+	// bundle that transaction recorded, which is what the step's inputs are
+	// bound to; it lacks only what the failed stage would have added.
+	Result *ClaimResult
+	Err    error
+}
+
+func (e *IncompleteClaimError) Error() string {
+	// The named verbs are the TOKEN-BEARING ones, deliberately. `step reap` is
+	// token-free (DKT-83) and was never what a token-holding claimant needed;
+	// naming it here would tell a stranded executor something false about the
+	// capability it is being handed.
+	return fmt.Sprintf(
+		"%s: the lease is held and the claim is yours — the token in this "+
+			"response authorizes `docket step fail`, `docket step complete` and "+
+			"`docket step heartbeat`: %v",
+		e.Result.Step, e.Err)
+}
+
+func (e *IncompleteClaimError) Unwrap() error { return e.Err }
+
+// incompleteClaim wraps a post-commit failure, preserving a nil error as nil so
+// callers can pass through the success path unchanged.
+func incompleteClaim(result *ClaimResult, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &IncompleteClaimError{Result: result, Err: err}
 }
 
 // ClaimOptions are `step claim`'s inputs beyond the step itself.
@@ -98,7 +153,11 @@ type ClaimOptions struct {
 // property (engine-core §5):
 //
 //   - The MUTUAL-EXCLUSION guarantee is unchanged. Exactly one claimant wins,
-//     and it wins in transaction A, on the same CAS. Losers still get CONFLICT.
+//     and it wins in transaction A, on the same CAS. Losers still get CONFLICT
+//     — except a caller presenting the OWNER THAT ALREADY HOLDS the live lease,
+//     which is not a second claimant but the holder asking again, and is
+//     answered by re-minting its token (DKT-1564, reMintOwnClaim). One lease
+//     still carries one live capability, one attempt, and one accrual.
 //   - The "token and context in one response" guarantee is unchanged. The
 //     CALLER still receives both in one response, which is what engine-core §8
 //     is about — what the caller observes.
@@ -151,15 +210,14 @@ func (e *Engine) ClaimStepWithGates(
 // `attempt`, the merged metadata bag. Every failure the preflight can catch is
 // deterministic over the run's pins and the template's bytes, so a post-claim
 // refusal requires the filesystem to change between two reads milliseconds
-// apart; that residual race keeps today's disposition — the error surfaces and
-// the lease stands — because rolling the claim back is not a rollback at all:
-// the claim is COMMITTED, and the `step-claimed` event it wrote is the budget
-// floor's accrual (§4.3, a SUM over those events), so un-taking the lease means
-// un-writing a ledger entry the log is append-only about. What the refusal does
-// instead is tell its caller how to end the lease NOW — `step reap` is the
-// relay's channel for exactly this (DKT-83, DKT-820) — so the cost is one verb
-// rather than the full TTL. Every deterministic failure still refuses before
-// anything is written.
+// apart. That residual race does not roll the claim back — the claim is
+// COMMITTED, and the `step-claimed` event it wrote is the budget floor's accrual
+// (§4.3, a SUM over those events), so un-taking the lease means un-writing a
+// ledger entry the log is append-only about. It raises IncompleteClaimError
+// instead (DKT-1564): the token goes back to the claimant with the failure, so
+// ending the lease costs it one of its own verbs rather than the full TTL or an
+// operator-gated reap. Every deterministic failure still refuses before anything
+// is written.
 func (e *Engine) ClaimStepRendered(
 	conn *sql.DB, stepID int, opts ClaimOptions, templatePath, executor string,
 ) (*ClaimResult, *RenderResult, error) {
@@ -174,17 +232,12 @@ func (e *Engine) ClaimStepRendered(
 
 	packet, err := RenderStepAs(conn, stepID, templatePath, executor, opts.NowMS)
 	if err != nil {
-		// The one refusal that can still leave a lease standing, and the
-		// caller is the only party who can act on it: the token went nowhere,
-		// so every token-bearing verb is closed to it, and the relay that
-		// spawned this claim is exactly the party `step reap` is the channel
-		// for (DKT-83). Naming the remedy here is what saves it the TTL —
-		// DKT-820's RUN-59 executors had the verb and did not know it applied.
-		return nil, nil, fmt.Errorf(
-			"%w; the lease is held and no token was issued — run "+
-				"`docket step reap %s --reason ...` to return the step to the "+
-				"pool without waiting out the lease",
-			err, model.FormatStepID(stepID))
+		// The one refusal that can still leave a lease standing — and the
+		// claim it stands on is this caller's, so the token goes back with it
+		// (DKT-1564). The remedy is no longer an operator-gated `step reap`
+		// nobody can authorize from here: the claimant holds the capability
+		// and can end its own lease with any token-bearing verb.
+		return nil, nil, incompleteClaim(result, err)
 	}
 	return result, packet, nil
 }
@@ -308,6 +361,25 @@ func claimStepWithGates(
 		return nil, conflictErr(
 			"step %s is a %s step and is not claimable: it is %s",
 			fresh.Instance, fresh.Kind, unclaimableReason(fresh.Kind))
+	}
+
+	// ---- The SAME CLAIMANT's re-claim: a re-mint, not a refusal (DKT-1564). -
+	//
+	// A live lease held under the caller's OWN owner string is the caller's own
+	// claim, and the only reason to ask for it again is that the token never
+	// arrived — the claim committed and the process that made it died before
+	// reading the response. The refusal below is right for a bystander and
+	// wrong here: it sends the rightful claimant to wait out the TTL or to buy
+	// an operator-gated reap, for a lease the engine agrees is its own.
+	//
+	// So the token is re-minted onto the standing lease and everything else is
+	// left exactly as the original claim wrote it — no attempt, no accrual, no
+	// re-run of the pre-gates whose recorded results the bundle already
+	// carries. The bundle is the RECORDED one for the same reason `step
+	// context` reads it back: this claim was already handed out, and its
+	// bindings are the ones the step is bound to.
+	if reMint, err := reMintOwnClaim(tx, sched, fresh, ttls, opts); reMint != nil || err != nil {
+		return reMint, err
 	}
 
 	// ---- The claim's EFFECTIVE cost (DKT-867). ------------------------------
@@ -578,8 +650,27 @@ func claimStepWithGates(
 		return nil, err
 	}
 
+	var provisionalVersion int
+	if err := tx.QueryRow(
+		`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&provisionalVersion); err != nil {
+		return nil, fmt.Errorf("reading step version: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing the claim: %w", err)
+	}
+
+	// THE CLAIM IS NOW THE CALLER'S, whatever happens next (DKT-1564). Every
+	// failure below is wrapped so the token committed above reaches the party
+	// the lease names, rather than dying with the error and leaving a lease no
+	// verb can end.
+	committed := &ClaimResult{
+		Step:           model.FormatStepID(fresh.ID),
+		Token:          token,
+		LeaseExpiresMS: lease.ExpiresMS,
+		Context:        provisional,
+		Attempt:        lease.Attempt,
+		RowVersion:     provisionalVersion,
 	}
 
 	// ---- PHASE 2: pre-gates, OUTSIDE any transaction. ----------------------
@@ -590,13 +681,14 @@ func claimStepWithGates(
 	preResults, err := runPreGates(
 		conn, e, fresh, preGates, preTargetSHA, preWorkRoot, opts.NowMS)
 	if err != nil {
-		return nil, err
+		return nil, incompleteClaim(committed, err)
 	}
 
 	// ---- PHASE 3: transaction B. -------------------------------------------
 	txB, err := conn.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("beginning the claim's context transaction: %w", err)
+		return nil, incompleteClaim(committed, fmt.Errorf(
+			"beginning the claim's context transaction: %w", err))
 	}
 	defer txB.Rollback()
 
@@ -619,17 +711,23 @@ func claimStepWithGates(
 	//
 	// LR4: the single-winner property is untouched. This guard can only FAIL,
 	// never award a claim.
+	committed.Context.PreGates = preResults
+
 	refreshed, err := db.RefreshClaimLeaseTx(
 		txB, fresh.ID, lease.TokenHash, ttlMS, opts.NowMS)
 	if err != nil {
-		return nil, err
+		return nil, incompleteClaim(committed, err)
 	}
 	if !refreshed {
+		// NOT an incomplete claim: the lease this token authorized is gone, so
+		// handing the token over would offer a capability that no longer
+		// exists (DKT-1564). The ordinary CONFLICT is the honest answer.
 		return nil, conflictErr(
 			"step %s: the claim was lost while its pre-gates ran; another attempt holds it now",
 			fresh.Instance)
 	}
 	fresh.ExpiresMS = refreshed2ExpiresMS(opts.NowMS, ttlMS)
+	committed.LeaseExpiresMS = fresh.ExpiresMS
 
 	// LR3: NO NEW EVENT. The refresh is part of the claim, and the claim
 	// already emitted `step-claimed` in transaction A. A second lifecycle event
@@ -638,24 +736,25 @@ func claimStepWithGates(
 
 	bundle, err := AssembleContext(txB, sched, fresh, ttls)
 	if err != nil {
-		return nil, err
+		return nil, incompleteClaim(committed, err)
 	}
 	// §7.6.3 / amendment A5: the results ride in the bundle, present only when
 	// the step declares pre-gates.
 	bundle.PreGates = preResults
 
 	if err := recordStepInputs(txB, fresh.ID, bundle.Inputs); err != nil {
-		return nil, err
+		return nil, incompleteClaim(committed, err)
 	}
 
 	var rowVersion int
 	if err := txB.QueryRow(
 		`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&rowVersion); err != nil {
-		return nil, fmt.Errorf("reading step version: %w", err)
+		return nil, incompleteClaim(committed, fmt.Errorf("reading step version: %w", err))
 	}
 
 	if err := txB.Commit(); err != nil {
-		return nil, fmt.Errorf("committing the claim's context: %w", err)
+		return nil, incompleteClaim(committed, fmt.Errorf(
+			"committing the claim's context: %w", err))
 	}
 
 	return &ClaimResult{
@@ -666,6 +765,96 @@ func claimStepWithGates(
 		Attempt:        lease.Attempt,
 		RowVersion:     rowVersion,
 	}, nil
+}
+
+// reMintOwnClaim answers a re-claim by the owner that already holds the step's
+// LIVE lease, and reports nil/nil when the caller is anyone else (DKT-1564).
+//
+// It commits the caller's transaction, because the re-mint is the whole of the
+// answer: there is no claim to take, no readiness to enforce (the step is
+// already handed out, to this caller), and no cost to accrue.
+//
+// The pre-gate results are read back from the rows the original claim recorded
+// rather than re-measured. Re-running them would spawn subprocesses against a
+// tree the claimant has been working in since, so the second answer would not
+// describe the same subject the first one did.
+func reMintOwnClaim(
+	tx *sql.Tx, sched *Scheduler, fresh *db.Step, ttls ttlConfig, opts ClaimOptions,
+) (*ClaimResult, error) {
+	if opts.Owner == "" || fresh.Owner != opts.Owner || !fresh.Lease().Live(opts.NowMS) {
+		return nil, nil
+	}
+
+	token, err := db.ReMintStepTokenTx(tx, fresh.ID, opts.Owner, opts.NowMS)
+	if err != nil {
+		return nil, err
+	}
+
+	bundle, err := AssembleRecordedContext(tx, sched, fresh, ttls)
+	if err != nil {
+		return nil, err
+	}
+	preGates, err := recordedPreGates(tx, fresh.ID)
+	if err != nil {
+		return nil, err
+	}
+	bundle.PreGates = preGates
+
+	var rowVersion int
+	if err := tx.QueryRow(
+		`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&rowVersion); err != nil {
+		return nil, fmt.Errorf("reading step version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing the re-minted token: %w", err)
+	}
+
+	return &ClaimResult{
+		Step:           model.FormatStepID(fresh.ID),
+		Token:          token,
+		LeaseExpiresMS: fresh.ExpiresMS,
+		Context:        bundle,
+		Attempt:        fresh.Attempt,
+		RowVersion:     rowVersion,
+		ReMinted:       true,
+	}, nil
+}
+
+// recordedPreGates replays the pre-gate results a claim already recorded, LAST
+// attempt per gate — the same rule attachGateOutcomes applies to the saga's
+// gates, for the same reason: a gate re-run after a resume did not fail twice.
+func recordedPreGates(tx *sql.Tx, stepID int) ([]PreGateResult, error) {
+	rows, err := db.GateResultsForStepTx(tx, stepID)
+	if err != nil {
+		return nil, err
+	}
+	last := make(map[string]db.GateResultRow)
+	order := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if !r.Pre {
+			continue
+		}
+		prev, seen := last[r.Gate]
+		if !seen {
+			order = append(order, r.Gate)
+		}
+		if !seen || r.Ordinal >= prev.Ordinal {
+			last[r.Gate] = r
+		}
+	}
+	if len(order) == 0 {
+		return nil, nil
+	}
+	out := make([]PreGateResult, 0, len(order))
+	for _, gate := range order {
+		r := last[gate]
+		out = append(out, PreGateResult{
+			Gate: r.Gate, Argv: r.Argv, Exit: r.Exit, DurationMS: r.DurationMS,
+			Output: r.Output, Truncated: r.Truncated, Verdict: r.Verdict,
+			Reason: r.Reason,
+		})
+	}
+	return out, nil
 }
 
 // recordStepInputs materializes the resolved input bindings. Engine-produced

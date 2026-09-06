@@ -116,6 +116,15 @@ so a stalled dispatcher can diagnose itself.
 Human and vote steps are NOT claimable: they are gates, not work. A claim
 against one is refused naming its class.
 
+Re-claiming a step you already hold RE-MINTS its token instead of refusing: a
+live lease under your own --owner is your own claim, and asking twice means the
+first token never reached you. The response carries ` + "`re_minted`" + `, and
+nothing else about the claim changes — same attempt, same accrual.
+
+Once the lease commits, this command exits 0 even if a later stage fails: the
+response carries the token plus ` + "`claim_error`" + `, so the claimant can end
+or complete the lease it provably holds rather than wait out the TTL.
+
 With --render, the assembled work packet is returned instead of the bundle, in
 the same atomic call.
 
@@ -191,7 +200,7 @@ claimed.`,
 			result, packet, err := engine.NewEngine().ClaimStepRendered(
 				conn, id, claimOpts, templatePath, executor)
 			if err != nil {
-				return stepErr(err, label)
+				return emitIncompleteClaim(w, err, label)
 			}
 			return emitClaim(w, result, packet)
 		}
@@ -201,10 +210,29 @@ claimed.`,
 		// step with no pre-gates takes the identical single-transaction path.
 		result, err := engine.NewEngine().ClaimStepWithGates(conn, id, claimOpts)
 		if err != nil {
-			return stepErr(err, label)
+			return emitIncompleteClaim(w, err, label)
 		}
 		return emitClaim(w, result, nil)
 	},
+}
+
+// emitIncompleteClaim delivers the TOKEN of a claim whose lease committed and
+// whose later stage failed, and reports the failure beside it (DKT-1564).
+//
+// The exit status is a SUCCESS, and deliberately: a wave executor that reads a
+// non-zero exit stops without recording, which is precisely how RUN-90 stranded
+// two leases whose tokens were sitting in the response. The command genuinely
+// did what it was asked — the step is claimed and the caller holds the
+// capability — so the JSON envelope is the claim's, exactly as a clean claim
+// writes it, and the failure travels in the message and in `claim_error`.
+//
+// Any other failure is the refusal it always was.
+func emitIncompleteClaim(w *output.Writer, err error, label string) error {
+	var incomplete *engine.IncompleteClaimError
+	if !errors.As(err, &incomplete) {
+		return stepErr(err, label)
+	}
+	return emitClaimOutcome(w, incomplete.Result, nil, incomplete)
 }
 
 // claimStepResponse is §11.4's `claim response`, VERBATIM:
@@ -220,6 +248,16 @@ type claimStepResponse struct {
 	Context        *engine.Context `json:"context,omitempty"`
 	// Packet replaces Context under --render.
 	Packet string `json:"packet,omitempty"`
+	// ClaimError reports a stage that failed AFTER the lease committed
+	// (DKT-1564). Its presence is the machine-readable form of "you hold this
+	// claim and it is not fully assembled": the token above is live, and the
+	// claimant is expected to end or complete the lease itself rather than
+	// proceed as though the claim were clean.
+	ClaimError string `json:"claim_error,omitempty"`
+	// ReMinted marks a response that re-keyed a lease the caller already held,
+	// rather than taking a new one (DKT-1564). Absent on an ordinary claim, so
+	// a clean claim's envelope is unchanged.
+	ReMinted bool `json:"re_minted,omitempty"`
 
 	attempt    int
 	rowVersion int
@@ -233,6 +271,8 @@ type claimStepResponseV2 struct {
 	LeaseExpiresMS int64           `json:"lease_expires_ms"`
 	Context        *engine.Context `json:"context,omitempty"`
 	Packet         string          `json:"packet,omitempty"`
+	ClaimError     string          `json:"claim_error,omitempty"`
+	ReMinted       bool            `json:"re_minted,omitempty"`
 	Attempt        int             `json:"attempt"`
 	Version        int             `json:"version"`
 }
@@ -240,14 +280,26 @@ type claimStepResponseV2 struct {
 func (c claimStepResponse) VersionedPayload() any {
 	return claimStepResponseV2{
 		Step: c.Step, Token: c.Token, LeaseExpiresMS: c.LeaseExpiresMS,
-		Context: c.Context, Packet: c.Packet,
-		Attempt: c.attempt, Version: c.rowVersion,
+		Context: c.Context, Packet: c.Packet, ClaimError: c.ClaimError,
+		ReMinted: c.ReMinted,
+		Attempt:  c.attempt, Version: c.rowVersion,
 	}
 }
 
 var _ output.Versioned = claimStepResponse{}
 
 func emitClaim(w *output.Writer, result *engine.ClaimResult, packet *engine.RenderResult) error {
+	return emitClaimOutcome(w, result, packet, nil)
+}
+
+// emitClaimOutcome writes the claim response. `claimErr` is non-nil only for a
+// claim whose lease committed and whose later stage failed: the envelope stays
+// the success one — the caller holds the lease and must be able to act on it —
+// and the failure rides in `claim_error` and in the human line's glyph.
+func emitClaimOutcome(
+	w *output.Writer, result *engine.ClaimResult,
+	packet *engine.RenderResult, claimErr error,
+) error {
 	resp := claimStepResponse{
 		Step: result.Step, Token: result.Token,
 		LeaseExpiresMS: result.LeaseExpiresMS,
@@ -258,9 +310,32 @@ func emitClaim(w *output.Writer, result *engine.ClaimResult, packet *engine.Rend
 		resp.Packet = packet.Packet
 		resp.Context = nil
 	}
+	if claimErr != nil {
+		resp.ClaimError = claimErr.Error()
+	}
+	resp.ReMinted = result.ReMinted
+
+	verb := "Claimed"
+	if result.ReMinted {
+		// Naming the re-mint is the point: the caller asked to claim and was
+		// handed a token for a lease it ALREADY held, so a reader must not take
+		// this for a fresh attempt.
+		verb = "Re-minted the token for your standing claim on"
+	}
+	message := fmt.Sprintf("%s %s until %s (attempt %d)",
+		verb, result.Step,
+		time.UnixMilli(result.LeaseExpiresMS).UTC().Format(time.RFC3339),
+		result.Attempt)
+	if claimErr != nil {
+		message += "; the claim did not finish assembling: " + claimErr.Error()
+	}
 
 	if w.JSONMode {
-		w.Success(resp, "")
+		if claimErr != nil {
+			w.Outcome(resp, message)
+		} else {
+			w.Success(resp, "")
+		}
 		return nil
 	}
 
@@ -268,10 +343,11 @@ func emitClaim(w *output.Writer, result *engine.ClaimResult, packet *engine.Rend
 	// terminal transcript or a CI log is a live capability. It goes on its own
 	// line, usable interactively but not copied along with a status line — the
 	// same discipline `issue claim` established.
-	w.Success(nil, fmt.Sprintf("Claimed %s until %s (attempt %d)",
-		result.Step,
-		time.UnixMilli(result.LeaseExpiresMS).UTC().Format(time.RFC3339),
-		result.Attempt))
+	if claimErr != nil {
+		w.Outcome(nil, message)
+	} else {
+		w.Success(nil, message)
+	}
 	fmt.Fprintln(w.Stdout, result.Token)
 	if packet != nil {
 		fmt.Fprintln(w.Stdout)

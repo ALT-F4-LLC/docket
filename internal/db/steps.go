@@ -440,6 +440,54 @@ func RefreshClaimLeaseTx(
 	return n > 0, nil
 }
 
+// ReMintStepTokenTx replaces the token on a LIVE lease held by `owner`, leaving
+// every other fact of the claim alone (DKT-1564).
+//
+// It exists for the executor whose own claim committed and then lost its token
+// — the process exited before the response reached it. The lease is genuinely
+// that executor's, but a token is returned exactly once, so without this the
+// only exits are the full TTL and an operator-gated reap.
+//
+// IT IS NOT A CLAIM. `attempt`, `started_ms` and the claim's event are
+// untouched: nothing about the scheduling facts changed, and the budget floor
+// sums `step-claimed` events, so a second one would bill the run twice for one
+// claim. The guard is the OWNER plus lease liveness — the two conditions that
+// make the claim the caller's — so it can only ever re-key a lease the caller
+// already holds, never award one.
+//
+// The previous token stops authorizing, which is the point: one lease carries
+// one live capability, and the stranded one is by definition unreachable.
+func ReMintStepTokenTx(
+	tx *sql.Tx, id int, owner string, nowMS int64,
+) (token string, err error) {
+	token, hash, err := model.MintToken()
+	if err != nil {
+		return "", err
+	}
+	// `token_hash IS NOT NULL` is redundant against the owner check TODAY —
+	// retirement and release clear owner, hash and expiry in one statement
+	// (clearLeaseTx) — and is written anyway, because this function's whole
+	// contract is "re-key a lease that already has a live key". A future caller
+	// that cleared only the hash would otherwise get a lease MINTED here, which
+	// is the one thing a re-mint must never do.
+	res, err := tx.Exec(
+		`UPDATE steps SET token_hash = ?, activity_ms = ?, updated_at_ms = ?,
+		                  row_version = row_version + 1
+		  WHERE id = ? AND owner = ? AND expires_ms > ? AND token_hash IS NOT NULL`,
+		hash, nowMS, nowMS, id, owner, nowMS)
+	if err != nil {
+		return "", fmt.Errorf("re-minting the claim token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("re-minting the claim token: %w", err)
+	}
+	if n == 0 {
+		return "", ErrLeaseHeld
+	}
+	return token, nil
+}
+
 // ClaimStep is the standalone claim, for tests and for any caller that needs
 // only the lease. `step claim` uses ClaimStepTx.
 func ClaimStep(db *sql.DB, id int, owner string, ttlMS, nowMS int64) (string, *model.Lease, error) {

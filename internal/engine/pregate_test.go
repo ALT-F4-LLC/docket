@@ -170,6 +170,11 @@ func TestPreGateResultsAreExcludedFromTheSagaVerdict(t *testing.T) {
 //
 // Exclusion is decided in transaction A and only there. N goroutines claim one
 // step with pre-gates; exactly one wins.
+//
+// The claimants carry DISTINCT owner strings, because that is what distinct
+// claimants are: a same-owner re-claim of a live lease is the caller's own
+// standing claim and re-mints its token rather than competing for it
+// (DKT-1564). TestSameOwnerClaimantsShareOneLease covers that case.
 func TestClaimRemainsSingleWinnerAcrossThePreGatePhase(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -197,7 +202,7 @@ func TestClaimRemainsSingleWinnerAcrossThePreGatePhase(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-				Owner: "w", NowMS: nowMS,
+				Owner: "w" + strconv.Itoa(i), NowMS: nowMS,
 			})
 			if err == nil {
 				mu.Lock()
