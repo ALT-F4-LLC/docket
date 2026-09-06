@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -649,15 +650,16 @@ type heldResolution struct {
 	Value   string
 	Field   string
 	// Mirrors are the OTHER fields the routing step's threshold evaluates
-	// (DKT-1548). A correction that lands only on the aggregated field is a
-	// correction the routing never reads: RUN-90's threshold compared
-	// `open_severity`, the producer's copy of the same maximum, and routed a
-	// fix round the operator had declined against the value they replaced.
+	// (DKT-1548), less any whose own declared order refuses the value. A
+	// correction that lands only on the aggregated field is a correction the
+	// routing never reads: RUN-90's threshold compared `open_severity`, the
+	// producer's copy of the same maximum, and routed a fix round the operator
+	// had declined against the value they replaced.
 	//
-	// Each one is rewritten only where it currently HOLDS the value the
-	// correction replaced — the test that identifies it as a copy of the
-	// corrected field rather than an independent fact. Core still holds no
-	// opinion about what any of these fields mean.
+	// Each one is rewritten only where it currently HOLDS the cluster's top
+	// member — the test that identifies it as a copy of the corrected field
+	// rather than an independent fact. Core still holds no opinion about what
+	// any of these fields mean.
 	Mirrors []string
 }
 
@@ -754,7 +756,7 @@ func resolveHeldPayload(
 			}
 			element[res.Field] = res.Value
 			if hadPrior {
-				correctMirrors(element, res, prior)
+				correctMirrors(element, res, clusterTop(element, prior))
 			}
 		}
 	}
@@ -807,21 +809,49 @@ func resolveHeldPayload(
 }
 
 // correctMirrors carries an operator's correction onto the threshold fields
-// that were COPIES of the value it replaced (DKT-1548).
+// that were COPIES of the cluster's TOP member (DKT-1548), and names them in
+// the resolved element so the rewrite is auditable rather than invisible.
 //
 // The predicate is deliberately narrow: a threshold field is rewritten only
-// when it currently equals `replaced`, the computed value the correction
-// displaced. That equality is the whole evidence that the field mirrors the
-// aggregated one, and it is evidence core can actually check — where "which
-// keys did the producer derive" is a question no payload answers. A threshold
-// field carrying anything else is an independent fact about the cluster, and a
-// correction of the severity is not a correction of it.
-func correctMirrors(element map[string]any, res heldResolution, replaced any) {
+// when it currently equals `top`. That equality is the whole evidence that the
+// field mirrors the aggregated one, and it is evidence core can actually check
+// — where "which keys did the producer derive" is a question no payload
+// answers. A threshold field carrying anything else is an independent fact
+// about the cluster, and a correction of the severity is not a correction of
+// it.
+//
+// TOP rather than the computed value the correction replaced, because the two
+// differ exactly when the reduction DEMOTED. A derived field tracks the
+// cluster's worst member — `open_severity` is declared as the maximum among
+// open members — so under `median` or `min` a mirror reads the top while the
+// computed value reads lower, and keying on the computed value both missed the
+// mirror there and rewrote a field that merely coincided with a demoted value.
+// Under `max` nothing demotes and the two are the same value.
+func correctMirrors(element map[string]any, res heldResolution, top any) {
+	var corrected []string
 	for _, field := range res.Mirrors {
-		if current, ok := element[field]; ok && current == replaced {
+		if current, ok := element[field]; ok && current == top {
 			element[field] = res.Value
+			corrected = append(corrected, field)
 		}
 	}
+	// Absent — omitted from the object, never an empty list — when the
+	// correction moved no mirror, the same trail discipline `demoted_from`
+	// follows. Core writes keys of the author's here, so which ones it wrote
+	// belongs in the record beside the decision that caused them.
+	if len(corrected) > 0 {
+		element[KeyOperatorSetMirrors] = corrected
+	}
+}
+
+// clusterTop is the value of the cluster's highest-positioned member: the one
+// `demoted_from` records when the reduction took a lower position, and the
+// computed value itself when it did not.
+func clusterTop(element map[string]any, computed any) any {
+	if demoted, ok := element[KeyDemotedFrom]; ok {
+		return demoted
+	}
+	return computed
 }
 
 // thresholdMirrorFields lists the fields a step's threshold predicates compare,
@@ -1030,7 +1060,19 @@ func heldValueField(
 	if err := registered.ValidateMember(field, value); err != nil {
 		return "", nil, validationErr("%v", err)
 	}
-	return field, thresholdMirrorFields(spec.Threshold, field), nil
+	// A mirror must accept the value in ITS OWN declared order. Membership is
+	// per-field by construction, so the aggregated field's guarantee says
+	// nothing about a threshold field declaring a different vocabulary — and
+	// writing an outsider there persists a payload whose own threshold cannot
+	// be evaluated, parking the step this decision was made to resolve.
+	//
+	// A rejecting field is skipped rather than refused: it is not a mirror at
+	// all, and a correction of the aggregated field is not a correction of it.
+	mirrors := thresholdMirrorFields(spec.Threshold, field)
+	mirrors = slices.DeleteFunc(mirrors, func(mirror string) bool {
+		return registered.ValidateMember(mirror, value) != nil
+	})
+	return field, mirrors, nil
 }
 
 // heldRejectRouting is what a REJECTED materialized step records for itself.

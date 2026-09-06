@@ -78,6 +78,12 @@ const (
 	// replaced (DKT-42), mirroring `demoted_from`'s trail discipline: the
 	// value that was not taken stays readable beside the one that was.
 	KeyOperatorSetFrom = "operator_set_from"
+	// KeyOperatorSetMirrors names the OTHER threshold fields a correction was
+	// carried onto (DKT-1548). Those keys are the author's, not core's, so the
+	// one occasion core writes them is recorded beside the decision that caused
+	// it — a reader of the resolved element can see which facts the operator's
+	// value displaced instead of having to infer it from value equality.
+	KeyOperatorSetMirrors = "operator_set_mirrors"
 )
 
 // aggregateSchema compiles the shipped `aggregate@1` document, once.
@@ -284,6 +290,11 @@ func Aggregate(
 		// G3: every OTHER key of the element is carried through verbatim. Core
 		// does not read them, and dropping them would strip an instance's own
 		// identifiers from the very payload a downstream step consumes.
+		//
+		// AGGREGATION never writes one. Hold resolution is the single exception
+		// (DKT-1548): an operator's corrected value is carried onto the other
+		// fields this step's own threshold compares, and correctMirrors names
+		// each one it rewrote in `operator_set_mirrors`.
 		result := make(map[string]any, len(element)+4)
 		for key, value := range element {
 			if key == params.Field {

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"slices"
 	"strings"
 	"testing"
 
@@ -137,6 +138,15 @@ func TestCorrectedValueReachesEveryThresholdField(t *testing.T) {
 	if got, _ := resolved[KeyOperatorSetFrom].(string); got != "blocker" {
 		t.Errorf("operator_set_from = %q, want the computed value it replaced", got)
 	}
+	var mirrors []string
+	for _, name := range resolved[KeyOperatorSetMirrors].([]any) {
+		mirrors = append(mirrors, name.(string))
+	}
+	if !slices.Equal(mirrors, []string{"open_severity"}) {
+		t.Errorf("operator_set_mirrors = %v, want [open_severity] — the keys core "+
+			"wrote on the author's behalf are recorded beside the decision that "+
+			"caused it, not left to be inferred", mirrors)
+	}
 }
 
 // TestCorrectedValueRoutesTheHighArm is the mutant the issue names: re-running
@@ -166,10 +176,11 @@ func TestCorrectedValueRoutesTheHighArm(t *testing.T) {
 	}
 }
 
-// TestUncorrectedHoldStillRoutesTheBlockerArm is the falsification: without a
-// `--value` the mirror is untouched and the blocker arm still routes. A fix
-// that rewrote the mirror unconditionally would pass the two tests above and
-// break this one.
+// TestUncorrectedHoldStillRoutesTheBlockerArm characterizes the no-correction
+// path: an approve without `--value` never enters the mirror code at all, so
+// the mirror stays as the producer wrote it and the blocker arm still routes.
+// The unconditional-rewrite mutant is killed by
+// TestCorrectionLeavesAnUnrelatedThresholdFieldAlone, not by this test.
 func TestUncorrectedHoldStillRoutesTheBlockerArm(t *testing.T) {
 	conn := mustDB(t)
 	e := testEngine()
@@ -225,6 +236,11 @@ func TestCorrectionLeavesAnUnrelatedThresholdFieldAlone(t *testing.T) {
 			"value the correction replaced, so it is a different fact and the "+
 			"correction has no opinion about it", got, "medium")
 	}
+	if _, ok := resolved[KeyOperatorSetMirrors]; ok {
+		t.Errorf("operator_set_mirrors = %v, want the key absent — no mirror was "+
+			"rewritten, and an empty list would claim a rewrite happened",
+			resolved[KeyOperatorSetMirrors])
+	}
 }
 
 // TestParkedHeldVoteCorrectionRoutesTheHighArm is RUN-90 END TO END, on the
@@ -264,5 +280,345 @@ func TestParkedHeldVoteCorrectionRoutesTheHighArm(t *testing.T) {
 		t.Errorf("reconcile@0 routed %q, want %q — the conductor presented this "+
 			"option as `no fix round; reconcile routes drain-highs`, reading the "+
 			"threshold against the corrected value", routing.Routing, "drain-highs")
+	}
+}
+
+// medianMirrorWorkflowSrc is mirrorWorkflowSrc reduced by `median` instead of
+// `max`, so the cluster's computed value and its top member differ.
+const medianMirrorWorkflowSrc = `
+[pipeline]
+name = "median-mirror-change"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "synthesize"
+after = []
+executor = "synthesize-findings"
+emits = "findings"
+inputs = ["issue.body"]
+
+[[step]]
+name = "reconcile"
+after = ["synthesize"]
+action = "aggregate"
+params = { field = "severity", method = "median", hold_spread = 3, output = "findings" }
+inputs = ["synthesize.findings"]
+payload = "mirror-findings@1"
+threshold = { "fix-loop" = "any(open_severity >= blocker)", "drain-highs" = "any(open_severity >= high)" }
+max_fix_loops = 2
+
+[[step]]
+name = "fix"
+executor = "fix"
+emits = "findings"
+loop = true
+inputs = ["reconcile.findings"]
+after_loop = "synthesize"
+
+[[step]]
+name = "drain-highs"
+after = ["reconcile"]
+executor = "drain-highs"
+emits = "findings"
+inputs = ["reconcile.findings"]
+`
+
+// TestCorrectedValueRoutesTheHighArmUnderMedian is DKT-1548 under a REDUCING
+// method. `median` over {blocker, low} computes `low` while the producer's
+// max-derived `open_severity` reads `blocker`, so a rewrite keyed on the
+// computed value the correction replaced never fires and the reported incident
+// survives. The cluster's top member is what such a mirror tracks.
+func TestCorrectedValueRoutesTheHighArmUnderMedian(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	registerSchemaFixture(t, conn, "mirror-findings", 1, mirrorSchemaSrc)
+	registerSource(t, conn, []byte(medianMirrorWorkflowSrc), "median-mirror-change.toml")
+	issue := createIssue(t, conn, "correct the severity", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	claimAndComplete(t, conn, e, "synthesize@0", "synthesized", mirrorPayload)
+	driveAction(t, conn, e, "reconcile@0")
+
+	held := heldStep(t, conn, "reconcile-held@0#0")
+	err = e.DecideStepValue(conn, held.ID, true, "no fix round", "high", nowMS)
+	testsupport.Must(t, err, "approving with --value: %v", err)
+
+	elements := artifactPayloads(t, conn, stepIDByInstance(t, conn, "reconcile@0"))
+	resolved := elements[len(elements)-1][0]
+	if got, _ := resolved["open_severity"].(string); got != "high" {
+		t.Errorf("open_severity = %q, want %q — the mirror tracks the cluster's "+
+			"top member, which the correction displaced just as it displaced the "+
+			"computed value", got, "high")
+	}
+
+	routing := heldStep(t, conn, "reconcile@0")
+	if routing.Routing != "drain-highs" {
+		t.Errorf("reconcile@0 routed %q, want %q — RUN-90's symptom under a "+
+			"reducing method", routing.Routing, "drain-highs")
+	}
+}
+
+// minMirrorWorkflowSrc reduces by `min` and thresholds on `lowest_open`, a
+// producer field whose declared meaning is the LOWEST open member.
+const minMirrorWorkflowSrc = `
+[pipeline]
+name = "min-mirror-change"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "synthesize"
+after = []
+executor = "synthesize-findings"
+emits = "findings"
+inputs = ["issue.body"]
+
+[[step]]
+name = "reconcile"
+after = ["synthesize"]
+action = "aggregate"
+params = { field = "severity", method = "min", hold_spread = 3, output = "findings" }
+inputs = ["synthesize.findings"]
+payload = "min-mirror-findings@1"
+threshold = { "drain-lows" = "any(lowest_open >= high)" }
+max_fix_loops = 2
+
+[[step]]
+name = "drain-lows"
+after = ["reconcile"]
+executor = "drain-highs"
+emits = "findings"
+inputs = ["reconcile.findings"]
+`
+
+const minMirrorSchemaSrc = `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "min-mirror-findings@1",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "severity": {
+        "type": "string",
+        "enum": ["info", "low", "medium", "high", "blocker"],
+        "ordered_enum": true
+      },
+      "lowest_open": {
+        "type": "string",
+        "enum": ["info", "low", "medium", "high", "blocker"],
+        "ordered_enum": true
+      }
+    },
+    "required": ["severity"],
+    "additionalProperties": true
+  }
+}`
+
+// TestCorrectionLeavesACoincidentallyEqualFieldAlone is the false-positive
+// guard. Under `min` the computed value coincides with an independent producer
+// fact — the lowest open member — and sharing a value is not being a copy. Only
+// a field holding the value the CLUSTER's top member carried is treated as a
+// mirror of the corrected field.
+func TestCorrectionLeavesACoincidentallyEqualFieldAlone(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	registerSchemaFixture(t, conn, "min-mirror-findings", 1, minMirrorSchemaSrc)
+	registerSource(t, conn, []byte(minMirrorWorkflowSrc), "min-mirror-change.toml")
+	issue := createIssue(t, conn, "correct the severity", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	// `min` over {blocker, low} computes `low`; `lowest_open` reads `low` too,
+	// meaning something else entirely.
+	const coincident = `[
+	  {"id":"C-1","severity":["blocker","low"],"lowest_open":"low"}
+	]`
+	claimAndComplete(t, conn, e, "synthesize@0", "synthesized", coincident)
+	driveAction(t, conn, e, "reconcile@0")
+
+	held := heldStep(t, conn, "reconcile-held@0#0")
+	err = e.DecideStepValue(conn, held.ID, true, "call it high", "high", nowMS)
+	testsupport.Must(t, err, "approving with --value: %v", err)
+
+	elements := artifactPayloads(t, conn, stepIDByInstance(t, conn, "reconcile@0"))
+	resolved := elements[len(elements)-1][0]
+	if got, _ := resolved["lowest_open"].(string); got != "low" {
+		t.Errorf("lowest_open = %q, want %q untouched — it coincided with the "+
+			"computed value while carrying an independent fact, and a correction "+
+			"of the severity is not a correction of it", got, "low")
+	}
+}
+
+// crossEnumWorkflowSrc thresholds on `confidence`, a field over a DIFFERENT
+// declared order than the aggregated `severity`.
+const crossEnumWorkflowSrc = `
+[pipeline]
+name = "cross-enum-change"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "synthesize"
+after = []
+executor = "synthesize-findings"
+emits = "findings"
+inputs = ["issue.body"]
+
+[[step]]
+name = "reconcile"
+after = ["synthesize"]
+action = "aggregate"
+params = { field = "severity", method = "max", hold_spread = 3, output = "findings" }
+inputs = ["synthesize.findings"]
+payload = "cross-enum-findings@1"
+threshold = { "fix-loop" = "any(confidence >= certain)", "drain-highs" = "any(severity >= high)" }
+max_fix_loops = 2
+
+[[step]]
+name = "fix"
+executor = "fix"
+emits = "findings"
+loop = true
+inputs = ["reconcile.findings"]
+after_loop = "synthesize"
+
+[[step]]
+name = "drain-highs"
+after = ["reconcile"]
+executor = "drain-highs"
+emits = "findings"
+inputs = ["reconcile.findings"]
+`
+
+const crossEnumSchemaSrc = `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cross-enum-findings@1",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "severity": {
+        "type": "string",
+        "enum": ["info", "low", "medium", "high", "blocker"],
+        "ordered_enum": true
+      },
+      "confidence": {
+        "type": "string",
+        "enum": ["low", "blocker", "firm", "certain"],
+        "ordered_enum": true
+      }
+    },
+    "required": ["severity"],
+    "additionalProperties": true
+  }
+}`
+
+// TestCorrectionSkipsAThresholdFieldThatRejectsTheValue is the enum guard. A
+// threshold field declaring its own vocabulary cannot receive a value that
+// vocabulary does not contain: writing one would persist a schema-invalid
+// payload and park the very routing step the approve was made to resolve.
+func TestCorrectionSkipsAThresholdFieldThatRejectsTheValue(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	registerSchemaFixture(t, conn, "cross-enum-findings", 1, crossEnumSchemaSrc)
+	registerSource(t, conn, []byte(crossEnumWorkflowSrc), "cross-enum-change.toml")
+	issue := createIssue(t, conn, "correct the severity", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	// `confidence` reads `blocker`, the value the correction displaces on
+	// `severity` — the coincidence that reaches the rewrite at all — while its
+	// own declared order stops short of `high`.
+	const crossEnum = `[
+	  {"id":"C-1","severity":["blocker","low"],"confidence":"blocker"}
+	]`
+	claimAndComplete(t, conn, e, "synthesize@0", "synthesized", crossEnum)
+	driveAction(t, conn, e, "reconcile@0")
+
+	held := heldStep(t, conn, "reconcile-held@0#0")
+	err = e.DecideStepValue(conn, held.ID, true, "call it high", "high", nowMS)
+	testsupport.Must(t, err, "approving with --value: %v", err)
+
+	elements := artifactPayloads(t, conn, stepIDByInstance(t, conn, "reconcile@0"))
+	resolved := elements[len(elements)-1][0]
+	if got, _ := resolved["confidence"].(string); got != "blocker" {
+		t.Errorf("confidence = %q, want %q untouched — `high` is not a value its "+
+			"declared order contains, and writing it there persists a payload the "+
+			"threshold cannot evaluate", got, "blocker")
+	}
+
+	routing := heldStep(t, conn, "reconcile@0")
+	if strings.HasPrefix(routing.Routing, workflow.OnFailWaitingHuman) {
+		t.Fatalf("reconcile@0 routed %q — the approve parked the step it was "+
+			"made to resolve", routing.Routing)
+	}
+	if routing.Routing != "drain-highs" {
+		t.Errorf("reconcile@0 routed %q, want %q", routing.Routing, "drain-highs")
+	}
+}
+
+// TestThresholdMirrorFieldsCollectsEachComparedFieldOnce pins the helper's own
+// contract, which the end-to-end fixtures above exercise only one field at a
+// time: every distinct compared field, in threshold order, without the
+// aggregated field the correction already lands on, and without failing a
+// decision over a predicate the threshold's own evaluation will report.
+func TestThresholdMirrorFieldsCollectsEachComparedFieldOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		threshold map[string]string
+		field     string
+		want      []string
+	}{
+		{
+			name: "distinct fields in threshold order",
+			threshold: map[string]string{
+				"fix-loop":    "any(open_severity >= blocker)",
+				"drain-highs": "any(worst_open >= high)",
+			},
+			field: "severity",
+			want:  []string{"open_severity", "worst_open"},
+		},
+		{
+			name: "a field compared by two arms is collected once",
+			threshold: map[string]string{
+				"fix-loop":    "any(open_severity >= blocker)",
+				"drain-highs": "any(open_severity >= high)",
+			},
+			field: "severity",
+			want:  []string{"open_severity"},
+		},
+		{
+			name: "the aggregated field is excluded",
+			threshold: map[string]string{
+				"fix-loop":    "any(severity >= blocker)",
+				"drain-highs": "any(open_severity >= high)",
+			},
+			field: "severity",
+			want:  []string{"open_severity"},
+		},
+		{
+			name:      "an unparseable predicate contributes nothing",
+			threshold: map[string]string{"fix-loop": "not a predicate"},
+			field:     "severity",
+			want:      nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := thresholdMirrorFields(tc.threshold, tc.field)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("thresholdMirrorFields = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
