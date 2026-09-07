@@ -1348,6 +1348,31 @@ func TestDiscrepancyD5ExemptsActionAndHumanSteps(t *testing.T) {
 // §5.6 — close and abandon
 // ---------------------------------------------------------------------------
 
+// claimPastGraceWithLiveLease arranges the ONE state in which a close still
+// reports D1: a step claimed long enough ago to be past `dispatch.grace` whose
+// lease has NOT lapsed. It claims with a TTL of twice the grace and returns the
+// instant to close at, one millisecond past the grace.
+//
+// A claim at the default TTL cannot produce this state, because core's default
+// `lease.ttl.default` equals `dispatch.grace`: the lease lapses exactly as the
+// grace does, and close reaps it before probing.
+func claimPastGraceWithLiveLease(
+	t *testing.T, conn *sql.DB, instance string,
+) (at int64) {
+	t.Helper()
+	grace := graceMS(t, conn)
+	claim, err := ClaimStep(conn, stepIDByInstance(t, conn, instance),
+		ClaimOptions{Owner: "worker", TTLOverride: 2 * grace, NowMS: nowMS})
+	testsupport.Must(t, err, "claim %s: %v", instance, err)
+
+	at = nowMS + grace + 1
+	if claim.LeaseExpiresMS <= at {
+		t.Fatalf("premise: the lease must still be live at %d, expires at %d",
+			at, claim.LeaseExpiresMS)
+	}
+	return at
+}
+
 // TestCloseRefusesPerDiscrepancy is P18: `dispatch close` refuses while a
 // discrepancy exists, ENUMERATING each with its resolution.
 func TestCloseRefusesPerDiscrepancy(t *testing.T) {
@@ -1356,20 +1381,81 @@ func TestCloseRefusesPerDiscrepancy(t *testing.T) {
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
 
 	instance := manifest.Rows[0].Instance
-	claimInstance(t, conn, instance, nowMS)
-	past := nowMS + graceMS(t, conn) + 1
+	past := claimPastGraceWithLiveLease(t, conn, instance)
 
 	_, err := NewEngine().CloseDispatch(conn, runID, false, "", past)
 	if err == nil {
-		t.Fatal("close succeeded with a claimed-but-unrecorded step")
+		t.Fatal("close succeeded with a claimed-but-unrecorded step on a LIVE lease")
 	}
 	if code, ok := CodeOf(err); !ok || code != CodeConflict {
 		t.Errorf("the refusal has code %q, want CONFLICT", code)
 	}
-	for _, want := range []string{instance, string(DiscrepancyClaimedUnrecorded), "lease expiry"} {
+	// The resolution must name the exits an operator can actually take under
+	// the open dispatch this close is trying to reconcile. `next` is not one of
+	// them: it refuses P24 while the dispatch is open, and its refusal rolls
+	// back the very reap it just performed.
+	for _, want := range []string{
+		instance, string(DiscrepancyClaimedUnrecorded), "step reap", "dispatch abandon",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal %q does not name %q", err, want)
 		}
+	}
+}
+
+// TestCloseReapsLapsedLeasesBeforeProbing is the close half of P5's lazy reap:
+// a claimed step whose lease has LAPSED is reaped by the close itself, not
+// reported back as a discrepancy whose named resolution the close blocks.
+//
+// It asserts the reap's full consequences rather than the bare success,
+// because a close that merely stopped refusing — by exempting expired leases
+// from D1, say — would leave the run's rows stored `claimed` forever, which is
+// exactly the RUN-91 state (ten claimed steps, zero `lease-reaped` events)
+// this change exists to prevent.
+//
+// The fixture is the bounded-class workflow so the `reap_acks` row is in play:
+// close must reap IDENTICALLY to `next` and `dispatch open`, headroom hold
+// included, or a manifest can disagree with the `next` that follows it.
+func TestCloseReapsLapsedLeasesBeforeProbing(t *testing.T) {
+	conn := mustDB(t)
+	runID := serializedRun(t, conn)
+	manifest := openDispatch(t, conn, runID, 0, nowMS)
+
+	instance := manifest.Rows[0].Instance
+	claim := claimInstance(t, conn, instance, nowMS)
+
+	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", past); err != nil {
+		t.Fatalf("close refused over a LAPSED lease (%v); the reap that clears "+
+			"the discrepancy is close's own, and `next` cannot perform it while "+
+			"this dispatch is open", err)
+	}
+
+	stepID := stepIDByInstance(t, conn, instance)
+	var status, owner string
+	var expires int64
+	err := conn.QueryRow(
+		`SELECT status, COALESCE(owner, ''), COALESCE(expires_ms, 0)
+		 FROM steps WHERE id = ?`, stepID).Scan(&status, &owner, &expires)
+	testsupport.Must(t, err, "reading the reaped step: %v", err)
+	if status != string(db.StepPending) {
+		t.Errorf("status = %q after the close, want %q", status, db.StepPending)
+	}
+	if owner != "" || expires != 0 {
+		t.Errorf("the lease survived the close: owner %q, expires %d", owner, expires)
+	}
+
+	if n := eventKindCount(t, conn, runID, EventLeaseReaped); n != 1 {
+		t.Errorf("%d lease-reaped events, want 1 — the reap must be logged the "+
+			"same way `next` logs it", n)
+	}
+	acks := openReapsOf(t, conn, runID)
+	if len(acks) != 1 {
+		t.Fatalf("%d unacknowledged reaps after close reaped a bounded-class "+
+			"step, want 1", len(acks))
+	}
+	if acks[0].StepID != stepID {
+		t.Errorf("the ack row names step %d, want %d", acks[0].StepID, stepID)
 	}
 }
 
@@ -1435,8 +1521,7 @@ func TestAcceptMissingUsageDoesNotAcceptD1(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
-	claimInstance(t, conn, manifest.Rows[0].Instance, nowMS)
-	past := nowMS + graceMS(t, conn) + 1
+	past := claimPastGraceWithLiveLease(t, conn, manifest.Rows[0].Instance)
 
 	_, err := NewEngine().CloseDispatch(conn, runID, true, "", past)
 	if err == nil {
@@ -1457,8 +1542,7 @@ func TestAbandonIsUnconditional(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
-	claimInstance(t, conn, manifest.Rows[0].Instance, nowMS)
-	past := nowMS + graceMS(t, conn) + 1
+	past := claimPastGraceWithLiveLease(t, conn, manifest.Rows[0].Instance)
 
 	// The premise: a discrepancy exists and `close` refuses.
 	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", past); err == nil {

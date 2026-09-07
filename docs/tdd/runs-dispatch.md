@@ -772,7 +772,7 @@ behalf would mint a token nobody holds.
 | P2 | The response is §11.4's shape verbatim: `{ dispatch, run, opened_seq, rows: [<next row>…] }` |
 | P3 | Each row is stored as its **canonical JSON bytes** plus their sha256. Canonical means the same marshaling the wire uses, so a stored row and a fetched row are byte-identical by construction rather than by a re-serialization that could differ in key order |
 | P4 | `--limit` applies, with the same ordering-then-slicing rule as `next` (§6.3), so a relay can open a manifest for the batch size it can actually spawn |
-| P5 | `dispatch open` **performs the same lazy reap `next` does** before computing. It is a scheduling verb offering a batch; offering a stale step that a reap would have freed would make the manifest wrong the moment it was written |
+| P5 | `dispatch open` **performs the same lazy reap `next` does** before computing. It is a scheduling verb offering a batch; offering a stale step that a reap would have freed would make the manifest wrong the moment it was written. `dispatch close` performs it too, before its own discrepancy probe (§5.6 P18): it is the mutating scheduling verb that reconciles that same manifest, and `next` cannot reap on its behalf while the dispatch is open — it reaps, refuses P24, and the refusal rolls the reap back |
 | P6 | Opening while a dispatch is already open is `CONFLICT` (exit 4), naming the open dispatch's id and its expiry — C1, enforced by `idx_dispatches_one_open` rather than by a check-then-insert |
 
 **`opened_seq` is the event seq at open time**, and it is the manifest's place
@@ -822,7 +822,7 @@ scope, and §2 assigns it to `next` alone.
 
 | # | Clause |
 |---|---|
-| P18 | `dispatch close --run RUN-N` closes the open dispatch **only if no discrepancy exists** (§5.8). With one, it refuses `CONFLICT`, enumerating each discrepancy and its resolution |
+| P18 | `dispatch close --run RUN-N` closes the open dispatch **only if no discrepancy exists** (§5.8), **after performing P5's lazy reap in the same transaction**. With one, it refuses `CONFLICT`, enumerating each discrepancy and its resolution. The reap comes first for the reason it does in `next`: default `lease.ttl.default` equals `dispatch.grace`, so without it the ordinary lapsed lease is reported as a D1 whose stated resolution this close is the only verb able to perform |
 | P19 | `close --accept-missing-usage` closes despite missing-usage discrepancies **and records the acceptance** — `close_reason = 'accepted-missing-usage'` plus the accepted step list in the event's `data`. §2 names this flag verbatim |
 | P20 | `--accept-missing-usage` does **not** accept the other discrepancy class. Claimed-but-unrecorded past grace has its own resolution (lease expiry), and a flag that accepted both would let a relay close over work that is still running |
 | P21 | `dispatch abandon --run RUN-N [--reason …]` closes it unconditionally — "explicit `dispatch abandon` for a crashed relay". No discrepancy blocks it: the whole point is that the relay is gone and cannot resolve anything |
@@ -857,7 +857,7 @@ engine-core §5 names exactly two classes; both are **computed, never stored**
 
 | # | Discrepancy | Definition | Resolution |
 |---|---|---|---|
-| D1 | **Claimed but unrecorded past grace** | a step in `claimed`/`running` whose `activity_ms` is older than `dispatch.grace` (§4.11, default 15m) | **lease expiry clears it** — §2 verbatim. The step's TTL lapses, `next` reaps it, and the discrepancy dissolves. `dispatch close` names the expiry time so an operator knows how long to wait |
+| D1 | **Claimed but unrecorded past grace** | a step in `claimed`/`running` whose `activity_ms` is older than `dispatch.grace` (§4.11, default 15m) | **lease expiry clears it** — §2 verbatim. The step's TTL lapses and the discrepancy dissolves. Every scheduling verb — `next`, `dispatch open`, `dispatch close` (P5) — reaps a lapsed lease *before* it probes, so a step reported here still holds a **live** lease past the grace. The refusal names the expiry time so an operator knows how long to wait, and names the two ways not to: `docket step reap STEP-N --reason …` once the holder is established dead, or `dispatch abandon` to give the manifest up |
 | D2 | **Usage rows missing** | a step that reached a terminal status **after** the run's activation and **more than `dispatch.grace` ago** (D7), on a v10 binary, with zero `usage_ledger` rows, **in a run that has ever opened a dispatch** (a `dispatch-opened` event exists — usage completeness is a RELAY contract; a run no relay ever drove has nobody owing usage) | `dispatch close --accept-missing-usage`, which records the acceptance (P19) |
 
 | # | Clause |

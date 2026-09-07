@@ -342,8 +342,16 @@ There are exactly two discrepancy classes, both computed and never stored:
 
   claimed-but-unrecorded   a step claimed or running whose activity is older
                            than ` + "`dispatch.grace`" + `. Its resolution is LEASE
-                           EXPIRY: the lease lapses, ` + "`next`" + ` reaps the step,
-                           and the discrepancy dissolves on its own.
+                           EXPIRY: the lease lapses and the discrepancy
+                           dissolves on its own. close reaps a lapsed lease
+                           itself, before it probes, so a step reported here
+                           still holds a LIVE lease past the grace. Wait for it
+                           to lapse and re-run close, or
+                           ` + "`docket step reap STEP-N --reason ...`" + ` once the
+                           holder is established dead, or ` + "`dispatch abandon`" + `
+                           to give the manifest up. ` + "`next`" + ` is not a way out
+                           here: it refuses while this dispatch is open and
+                           rolls its own reap back with the refusal.
 
   usage-rows-missing       a step that was CLAIMED, finished after the run was
                            activated and more than ` + "`dispatch.grace`" + ` ago,

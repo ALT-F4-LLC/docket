@@ -1244,9 +1244,23 @@ func discrepanciesGracedTx(
 	// ---- D1: claimed but unrecorded past grace. ---------------------------
 	//
 	// The resolution is LEASE EXPIRY, verbatim from §2 ("lease expiry clears
-	// claimed-but-unrecorded"): the step's TTL lapses, `next` reaps it, and the
-	// discrepancy dissolves on its own. The message names the expiry TIME so an
-	// operator knows how long to wait rather than being told to wait.
+	// claimed-but-unrecorded"): the step's TTL lapses, the next scheduling verb
+	// reaps it, and the discrepancy dissolves on its own. The message names the
+	// expiry TIME so an operator knows how long to wait rather than being told
+	// to wait.
+	//
+	// The message does not name `next` as THE reaper. Every scheduling verb —
+	// `next`, `dispatch open`, `dispatch close` — reaps a lapsed lease before
+	// reaching this probe, so a lease any of them reports is still live, and
+	// `next` in particular cannot be the way out of a D1 raised by a close: it
+	// refuses P24 while that dispatch is open and rolls its own reap back with
+	// the refusal.
+	//
+	// The claim is scoped to those three verbs rather than stated flatly,
+	// because `run report` (report.go) also calls this probe and does NOT reap:
+	// it is a read verb whose transaction rolls back unconditionally. A flat
+	// "this lease is live" would be false there, on exactly the lapsed lease a
+	// report is most likely to be run over.
 	//
 	// D1 IS SCOPED TO AN ACTIVE RUN, for the same reason the reap it names is
 	// (Scheduler.Expired). This clause and that reap are one mechanism
@@ -1284,8 +1298,13 @@ func discrepanciesGracedTx(
 			Kind: DiscrepancyClaimedUnrecorded,
 			Step: model.FormatStepID(step.ID), Instance: step.Instance,
 			Resolution: fmt.Sprintf(
-				"lease expiry clears it: the lease lapses at %d, after which `next` "+
-					"reaps the step and the discrepancy dissolves", step.ExpiresMS),
+				"lease expiry clears it: the lease lapses at %d, and `next`, "+
+					"`dispatch open` and `dispatch close` each reap a lapsed lease "+
+					"before probing, so a lease one of them reports is still live — "+
+					"wait for it to lapse and re-run, or `docket step reap %s "+
+					"--reason ...` once the holder is established dead, or "+
+					"`dispatch abandon` to give the manifest up",
+				step.ExpiresMS, model.FormatStepID(step.ID)),
 		})
 	}
 
@@ -1535,6 +1554,30 @@ func (e *Engine) CloseDispatch(
 	if err != nil {
 		return nil, err
 	}
+
+	// P5's reap, before the probe, for the reason `next` and `dispatch open`
+	// run it there: the reap is what clears D1, and a close that probed first
+	// would report a lapsed lease as a discrepancy whose only stated resolution
+	// this very close performs.
+	//
+	// THIS IS A SPEC READING AND IT IS RECORDED AS ONE. engine-spec §6 confines
+	// lazy reaping to `next`/`claim`, and §5.2 P5 already extends it to
+	// `dispatch open`. `dispatch close` is read here as the same kind of verb:
+	// a MUTATING scheduling verb reconciling the same manifest against the same
+	// rows, not a read. The alternative reading — close probes stored status
+	// without reaping — makes D1 unresolvable in the state close exists for: on
+	// RUN-91 ten steps sat stored `claimed` with lapsed leases and zero
+	// `lease-reaped` events, because `next` reaps and then refuses P24 on the
+	// open dispatch, and that refusal rolls its own reap back (next.go).
+	//
+	// It is the SHARED helper, not a second loop, so a close cannot reap
+	// differently from the verbs that follow it: same lease reset, same
+	// `reaped_claims` bump, same `lease-reaped` event, same `reap_acks` hold
+	// for a bounded class.
+	if _, err := reapExpiredTx(tx, sched, runID, nowMS); err != nil {
+		return nil, err
+	}
+
 	// The acceptance asks UNGRACED (D7): the flag settles every step still
 	// owing usage, the freshly recorded ones included, so the run does not
 	// resurface them as a refusal once their grace lapses.
