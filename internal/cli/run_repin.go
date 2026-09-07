@@ -35,10 +35,11 @@ It REFUSES rather than proceeding when the transition could be straddled:
   - while any step is claimed (an executor mid-flight holds a packet rendered
     under the old agreement). A LAPSED LEASE STILL COUNTS until something
     reaps it — the holder may be writing right up to the reap — so the
-    refusal lists those steps separately: ` + "`docket dispatch close`" + `
+    refusal lists those steps separately: ` + "`docket dispatch close --run RUN-N`" + `
     (or ` + "`docket next --run RUN-N`" + ` with no dispatch open) reaps them, and
     ` + "`docket step reap STEP-N --reason R`" + ` clears one whose holder you have
-    established is dead
+    established is dead. On a waiting-human run only ` + "`step reap`" + ` clears a
+    lapsed claim; the other two reap once the run is active again
   - while a dispatch is open (its manifest was offered under the current pins)
   - on a run that is done, abandoned, or planning, or whose steps are all
     terminal — nothing remains for the new agreement to govern, so a repin

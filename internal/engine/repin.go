@@ -616,20 +616,24 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 		return fmt.Errorf("collecting %s's claimed steps: %w", runRef, err)
 	}
 	// The lease half of Scheduler.Expired, inlined: this guard has no workflow
-	// definitions in hand, and LoadScheduler requires them. The run-active
-	// scoping is Expired's too — on a `waiting-human` run a lapsed lease is not
-	// reapable, so naming a reap verb there would send the operator at a verb
-	// that refuses. The `max_step_duration` half needs the limits only the
-	// scheduler merges and is deliberately omitted: a step past that bound but
-	// holding a live lease is listed as live, which understates what a reap
-	// would clear but never misdirects.
+	// definitions in hand, and LoadScheduler requires them. Expired's run-active
+	// scoping is NOT mirrored, because it answers a different question — whether
+	// a reap will fire — while this partition answers whether the lease has
+	// lapsed. The two diverge on a `waiting-human` run, which repinStatusGuard
+	// admits: `next` and `dispatch close` reap through Expired and so clear
+	// nothing there, but ForceReapStep gates only on `--reason` and the step's
+	// status, so `docket step reap` does clear it. The verbs are therefore
+	// scoped to the run status; the partition is not. The `max_step_duration`
+	// half needs the limits only the scheduler merges and is deliberately
+	// omitted: a step past that bound but holding a live lease is listed as
+	// live, which understates what a reap would clear but never misdirects.
 	var live, lapsed []string
 	for _, step := range steps {
 		if step.Status != db.StepClaimed {
 			continue
 		}
 		lease := step.Lease()
-		if run.Status == model.RunActive && lease.Held() && !lease.Live(nowMS) {
+		if lease.Held() && !lease.Live(nowMS) {
 			lapsed = append(lapsed, step.Instance)
 			continue
 		}
@@ -647,13 +651,21 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 				strings.Join(live, ", "))
 		}
 		if len(lapsed) > 0 {
+			reapers := fmt.Sprintf(
+				"`docket dispatch close --run %s` (or `docket next --run %s` with "+
+					"no dispatch open) reaps them, and ", runRef, runRef)
+			if run.Status != model.RunActive {
+				reapers = fmt.Sprintf(
+					"`docket next --run %s` and `docket dispatch close --run %s` "+
+						"reap nothing while %s is %s, so they clear these only once "+
+						"it is %s; ",
+					runRef, runRef, runRef, run.Status, model.RunActive)
+			}
 			msg += fmt.Sprintf(
 				" — %s: their leases have lapsed but nothing has reaped them yet, "+
-					"so the claims still count; `docket dispatch close` (or "+
-					"`docket next --run %s` with no dispatch open) reaps them, and "+
-					"`docket step reap STEP-N --reason R` clears one whose holder "+
-					"you have established is dead",
-				strings.Join(lapsed, ", "), runRef)
+					"so the claims still count; %s`docket step reap STEP-N --reason R` "+
+					"clears one whose holder you have established is dead",
+				strings.Join(lapsed, ", "), reapers)
 		}
 		return conflictErr("%s", msg)
 	}
