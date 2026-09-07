@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -176,5 +177,57 @@ func TestRepinProceedsOnceAnExpiredClaimIsReaped(t *testing.T) {
 	testsupport.Must(t, err, "repin after the reap: %v", err)
 	if len(outcome.Repinned) != 1 {
 		t.Errorf("repinned %d pin(s) after the reap, want 1", len(outcome.Repinned))
+	}
+}
+
+// TestLapsedClaimIsUnlabeledOnAPausedRun pins the label's ONE exception to the
+// pairing above. `Scheduler.Expired` is suspended off an active run (ready.go),
+// and a run parks with its siblings still claimed, so a `waiting-human` run can
+// hold a lapsed-but-unreaped claim on which `step show` renders plain `claimed`
+// with no label — while `run repin`, since DKT-1791, does name the lapse there.
+// The asymmetry is deliberate: the label promises the reap `next`/`claim` will
+// perform, and neither reaps anything while the run is parked, so labeling the
+// row would state a reap nobody is going to do. Making the label a bare
+// lease-liveness read instead of an `Expired` read breaks this case.
+func TestLapsedClaimIsUnlabeledOnAPausedRun(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root := t.TempDir()
+
+	pinAFile(t, conn, run.ID, root, "contracts/dkt1826.md", "OLD\n")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(root, "contracts/dkt1826.md"), []byte("NEW\n"), 0o644), "rewrite")
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim := claimInstance(t, conn, "implement@0", nowMS)
+	execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
+		string(model.RunWaitingHuman), run.ID)
+	late := claim.LeaseExpiresMS + 1
+
+	view, err := LoadStepView(conn, stepID, late)
+	testsupport.Must(t, err, "LoadStepView on a paused run: %v", err)
+	if view.Row.LeaseExpired {
+		t.Errorf("a lapsed claim on a paused run is labeled lease_expired; no " +
+			"`next` or `claim` will reap it while the run is parked")
+	}
+	if view.Row.Status != db.StepClaimed {
+		t.Errorf("paused-run lapsed claim renders status=%q, want %q",
+			view.Row.Status, db.StepClaimed)
+	}
+	raw, err := json.Marshal(view.Row)
+	testsupport.Must(t, err, "marshal: %v", err)
+	if strings.Contains(string(raw), "lease_expired") {
+		t.Errorf("paused-run step show JSON %s carries lease_expired", raw)
+	}
+
+	// The other half of the pairing, and what makes the silence an exception
+	// rather than agreement: repin does name the lapse on this same row.
+	_, err = repinRunIn(conn, run.ID, "install", late, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under a lapsed claim on a paused run")
+	}
+	if !strings.Contains(err.Error(), "leases have lapsed") {
+		t.Errorf("paused-run repin refusal %q does not name the lapse the step "+
+			"surface is silent about", err)
 	}
 }

@@ -248,6 +248,16 @@ type StepRow struct {
 	// see the window that reconciles them. `omitempty`, so every row outside
 	// the window serializes exactly as before; offer rows (`next`, `dispatch
 	// open`) never carry it because the offer path reaps for real first.
+	//
+	// THE PAIRING HAS ONE EXCEPTION: a run that is not `active`. The field is
+	// `Scheduler.Expired`, and that predicate is suspended off an active run
+	// (ready.go), so on a `waiting-human` run holding a lapsed-but-unreaped
+	// claim — the ordinary mid-wave human hold — this field stays unset while
+	// `run repin` does name the lapse (DKT-1791). Deliberate, not a drift: the
+	// label promises the reap `next`/`claim` will perform, and neither reaps
+	// anything while the run is parked. `Status` stays `claimed` there for the
+	// same reason, and the `expires_ms` a caller already has still shows the
+	// lapse; `step reap` is the verb that clears such a claim.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
