@@ -74,7 +74,8 @@ func (s *Scheduler) writeClassOf(class string) bool {
 // It is one function rather than three similar loops because the scheduling
 // verbs reaping differently is a bug with no symptom until a manifest disagrees
 // with the `next` that follows it. §5.2 P5 requires `dispatch open` to perform
-// "the same lazy reap `next` does", and sharing the code is how that stays true.
+// "the same lazy reap `next` does" and `dispatch close` to perform it too,
+// before its own discrepancy probe; sharing the code is how that stays true.
 //
 // A17: `reaped_seq` is the seq of the `lease-reaped` event written by THIS reap,
 // read back with `last_insert_rowid()` in the same transaction — so the ack row
