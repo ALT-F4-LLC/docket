@@ -1249,18 +1249,28 @@ func discrepanciesGracedTx(
 	// expiry TIME so an operator knows how long to wait rather than being told
 	// to wait.
 	//
-	// The message does not name `next` as THE reaper. Every scheduling verb —
-	// `next`, `dispatch open`, `dispatch close` — reaps a lapsed lease before
-	// reaching this probe, so a lease any of them reports is still live, and
-	// `next` in particular cannot be the way out of a D1 raised by a close: it
-	// refuses P24 while that dispatch is open and rolls its own reap back with
-	// the refusal.
+	// THE ADVICE BRANCHES ON THE LEASE'S ACTUAL STATE, because the exits differ
+	// and only one set is ever right. Under a LIVE lease past the grace there is
+	// nothing to reap, so the operator waits, establishes the holder dead and
+	// runs `step reap`, or gives the manifest up with `dispatch abandon`. Under
+	// a LAPSED lease every one of those is wrong — waiting is a no-op, the reap
+	// an unnecessary escalation, the abandon destructive — and the correct act
+	// is the cheap one: run a scheduling verb and let it reap.
 	//
-	// The claim is scoped to those three verbs rather than stated flatly,
-	// because `run report` (report.go) also calls this probe and does NOT reap:
-	// it is a read verb whose transaction rolls back unconditionally. A flat
-	// "this lease is live" would be false there, on exactly the lapsed lease a
-	// report is most likely to be run over.
+	// The branch asks `Lease.Live`, which is the predicate `Scheduler.Expired`
+	// reaps on. Restating the comparison would let the advice and the reap drift
+	// apart at the boundary instant, promising a reap that would not happen.
+	//
+	// The branch is not vestigial: `next`, `dispatch open` and `dispatch close`
+	// each reap a lapsed lease before reaching this probe, so from them only the
+	// live branch can render. `guard record` (guard_dispatch.go, G13) and
+	// `run report` (report.go) do NOT reap — the guard surfaces this string
+	// verbatim as its denial reason, on exactly the lapsed lease default
+	// `lease.ttl.default` = `dispatch.grace` makes ordinary.
+	//
+	// The live branch does not name `next` as THE reaper either: `next` cannot
+	// be the way out of a D1 raised by a close, since it refuses P24 while that
+	// dispatch is open and rolls its own reap back with the refusal.
 	//
 	// D1 IS SCOPED TO AN ACTIVE RUN, for the same reason the reap it names is
 	// (Scheduler.Expired). This clause and that reap are one mechanism
@@ -1294,17 +1304,25 @@ func discrepanciesGracedTx(
 		if nowMS-activity < grace.Milliseconds() {
 			continue
 		}
-		out = append(out, Discrepancy{
-			Kind: DiscrepancyClaimedUnrecorded,
-			Step: model.FormatStepID(step.ID), Instance: step.Instance,
-			Resolution: fmt.Sprintf(
+		resolution := fmt.Sprintf(
+			"lease expiry clears it: the lease lapsed at %d and the next "+
+				"scheduling verb — `next`, `dispatch open` or `dispatch close` — "+
+				"reaps it before probing, which dissolves this discrepancy",
+			step.ExpiresMS)
+		if step.Lease().Live(nowMS) {
+			resolution = fmt.Sprintf(
 				"lease expiry clears it: the lease lapses at %d, and `next`, "+
 					"`dispatch open` and `dispatch close` each reap a lapsed lease "+
 					"before probing, so a lease one of them reports is still live — "+
 					"wait for it to lapse and re-run, or `docket step reap %s "+
 					"--reason ...` once the holder is established dead, or "+
 					"`dispatch abandon` to give the manifest up",
-				step.ExpiresMS, model.FormatStepID(step.ID)),
+				step.ExpiresMS, model.FormatStepID(step.ID))
+		}
+		out = append(out, Discrepancy{
+			Kind: DiscrepancyClaimedUnrecorded,
+			Step: model.FormatStepID(step.ID), Instance: step.Instance,
+			Resolution: resolution,
 		})
 	}
 
