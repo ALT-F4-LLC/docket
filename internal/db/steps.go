@@ -273,10 +273,13 @@ func IssueStepRuns(db *sql.DB, issueID int) ([]int, error) {
 	})
 }
 
-// ListRunStepsTx is ListRunSteps inside a transaction — the readiness
-// predicate's reader, which must see one consistent snapshot of the run because
-// R3 (predecessors done) and R4 (scope non-overlap) are questions about the
-// same set of rows at the same instant.
+// ListRunStepsTx is ListRunSteps inside a transaction — the reader for the
+// transaction-side questions asked about a whole run, which must see one
+// consistent snapshot of it. The readiness predicate asks R3 (predecessors
+// done) and R4 (scope non-overlap), which are questions about the same set of
+// rows at the same instant; repinQuiescenceGuard asks whether any step could
+// straddle a moving agreement, which is the same instant's question about the
+// same rows.
 func ListRunStepsTx(tx *sql.Tx, runID int) ([]*Step, error) {
 	return scanSteps(tx.Query(stepFullSelect+` WHERE run_id = ? ORDER BY issue_id, id`, runID))
 }
