@@ -99,11 +99,17 @@ func TestRunRepinDropFlagsReachTheEngine(t *testing.T) {
 }
 
 // TestRunRepinHelpDocumentsTheDisposition: the Long text is where the refusal
-// semantics are stated, and DKT-582 changed them — NOT_FOUND is now refused
-// UNLESS the ref is unread and covered by a flag.
+// semantics are stated — NOT_FOUND is refused UNLESS the ref is unread and
+// covered by a flag, and a claimed step is cleared by the three reaping forms
+// the engine's refusal names. The help is a second, independent copy of that
+// verb list, so it is pinned against the same invocable forms the engine tests
+// pin; otherwise the two copies drift and the help names a form nobody can run.
 func TestRunRepinHelpDocumentsTheDisposition(t *testing.T) {
 	for _, want := range []string{
 		"--drop REF", "--drop-unresolvable", "UNLESS", "NULL new_sha256",
+		"docket dispatch close --run RUN-N",
+		"docket step reap STEP-N --reason R",
+		"waiting-human run only",
 	} {
 		if !strings.Contains(runRepinCmd.Long, want) {
 			t.Errorf("`run repin --help` does not mention %q", want)
