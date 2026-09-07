@@ -67,11 +67,11 @@ func (s *Scheduler) writeClassOf(class string) bool {
 	return ok && limit.Max > 0
 }
 
-// reapExpiredTx is `next`'s and `dispatch open`'s SHARED reap: the lease write,
-// the `lease-reaped` event, and — A16 — the `reap_acks` row, ALL IN THE CALLER'S
-// TRANSACTION.
+// reapExpiredTx is the SHARED reap of `next`, `dispatch open` and
+// `dispatch close`: the lease write, the `lease-reaped` event, and — A16 —
+// the `reap_acks` row, ALL IN THE CALLER'S TRANSACTION.
 //
-// It is one function rather than two similar loops because the two scheduling
+// It is one function rather than three similar loops because the scheduling
 // verbs reaping differently is a bug with no symptom until a manifest disagrees
 // with the `next` that follows it. §5.2 P5 requires `dispatch open` to perform
 // "the same lazy reap `next` does", and sharing the code is how that stays true.
