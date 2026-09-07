@@ -136,11 +136,11 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// OUTCOME: the reap bumps `reaped_claims` (DKT-490), so the row itself says
 	// this spent attempt was a silence, not a failure.
 	//
-	// Stage 6 moved the body into reapExpiredTx, SHARED WITH `dispatch open`
-	// and `dispatch close`, because §5.2 P5 requires those verbs to perform
-	// "the same lazy reap `next` does" — and scheduling verbs reaping
-	// differently is a bug with no symptom until a manifest disagrees with the
-	// `next` that follows it. The shared body also writes §6.4's `reap_acks` row.
+	// Stage 6 moved the body into reapExpiredTx, SHARED WITH `dispatch open`,
+	// because §5.2 P5 requires that verb to perform "the same lazy reap `next`
+	// does" — and two scheduling verbs reaping differently is a bug with no
+	// symptom until a manifest disagrees with the `next` that follows it. The
+	// shared body also writes §6.4's `reap_acks` row.
 	//
 	// IT RUNS BEFORE THE REFUSAL, and that ordering is required by D1's own
 	// stated resolution rather than being a convenience. §5.8 D1 says the way
