@@ -398,7 +398,7 @@ func repinRunOptsIn(
 	if err := repinStatusGuard(fresh); err != nil {
 		return nil, err
 	}
-	if err := repinQuiescenceGuard(tx, runID, fresh.Ref()); err != nil {
+	if err := repinQuiescenceGuard(tx, fresh, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -605,31 +605,57 @@ func repinStatusGuard(run *model.Run) error {
 
 // repinQuiescenceGuard is the transaction-side half of the provenance rule: the
 // agreement may move only when no step could consume both sides of it.
-func repinQuiescenceGuard(tx *sql.Tx, runID int, runRef string) error {
+func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
+	runID, runRef := run.ID, run.Ref()
 	// In-flight executors first, because theirs is the sharper refusal: a
 	// claimed step's packet was rendered under the old agreement, and its later
 	// renders and its completion would land under the new one — the exact
 	// straddle that would falsify its provenance the moment it recorded.
-	rows, err := tx.Query(
-		`SELECT instance FROM steps WHERE run_id = ? AND status = ? ORDER BY id`,
-		runID, db.StepClaimed)
+	steps, err := db.ListRunStepsTx(tx, runID)
 	if err != nil {
 		return fmt.Errorf("collecting %s's claimed steps: %w", runRef, err)
 	}
-	claimed, err := scanTxRows(rows, func(r *sql.Rows) (string, error) {
-		var s string
-		return s, r.Scan(&s)
-	})
-	if err != nil {
-		return err
+	// The lease half of Scheduler.Expired, inlined: this guard has no workflow
+	// definitions in hand, and LoadScheduler requires them. The run-active
+	// scoping is Expired's too — on a `waiting-human` run a lapsed lease is not
+	// reapable, so naming a reap verb there would send the operator at a verb
+	// that refuses. The `max_step_duration` half needs the limits only the
+	// scheduler merges and is deliberately omitted: a step past that bound but
+	// holding a live lease is listed as live, which understates what a reap
+	// would clear but never misdirects.
+	var live, lapsed []string
+	for _, step := range steps {
+		if step.Status != db.StepClaimed {
+			continue
+		}
+		lease := step.Lease()
+		if run.Status == model.RunActive && lease.Held() && !lease.Live(nowMS) {
+			lapsed = append(lapsed, step.Instance)
+			continue
+		}
+		live = append(live, step.Instance)
 	}
-	if len(claimed) > 0 {
-		return conflictErr(
-			"%d step(s) of %s are claimed and mid-flight (%s); a repin under a "+
-				"live claim would change what the executor's packet means "+
-				"mid-execution — wait for them to record or for their leases "+
-				"to be reaped, then retry",
-			len(claimed), runRef, strings.Join(claimed, ", "))
+	if len(live)+len(lapsed) > 0 {
+		msg := fmt.Sprintf(
+			"%d step(s) of %s are claimed and mid-flight; a repin under a live "+
+				"claim would change what the executor's packet means mid-execution",
+			len(live)+len(lapsed), runRef)
+		if len(live) > 0 {
+			msg += fmt.Sprintf(
+				" — %s still hold live leases; wait for them to record or for "+
+					"their leases to lapse, then retry",
+				strings.Join(live, ", "))
+		}
+		if len(lapsed) > 0 {
+			msg += fmt.Sprintf(
+				" — %s: their leases have lapsed but nothing has reaped them yet, "+
+					"so the claims still count; `docket dispatch close` (or "+
+					"`docket next --run %s` with no dispatch open) reaps them, and "+
+					"`docket step reap STEP-N --reason R` clears one whose holder "+
+					"you have established is dead",
+				strings.Join(lapsed, ", "), runRef)
+		}
+		return conflictErr("%s", msg)
 	}
 
 	// A manifest is a frozen copy of one `next` answer. Repinning under an open

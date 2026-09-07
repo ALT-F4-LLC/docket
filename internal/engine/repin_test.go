@@ -541,3 +541,67 @@ func TestPinDriftNamesOnlyUnsoundPins(t *testing.T) {
 		t.Error("a sound run renders a drift notice")
 	}
 }
+
+// TestRepinRefusalNamesTheVerbsThatReapALapsedClaim: the guard still refuses on
+// a lapsed-but-unreaped claim (DKT-489's semantics), but the refusal that told
+// an operator to "wait for their leases to be reaped" named no verb that
+// performs the reap, so a run whose every claim had lapsed read as permanently
+// wedged. The lapsed rows are now listed under their own sentence naming
+// `dispatch close`, `next`, and `step reap`.
+func TestRepinRefusalNamesTheVerbsThatReapALapsedClaim(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root := t.TempDir()
+
+	pinAFile(t, conn, run.ID, root, "contracts/lapsed.md", "OLD\n")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(root, "contracts/lapsed.md"), []byte("NEW\n"), 0o644), "rewrite")
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	// While the lease is live the operator is told to wait, and nothing
+	// suggests a reap is available — there is nothing to reap yet.
+	_, err = repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under a live claim")
+	}
+	if !strings.Contains(err.Error(), "claimed and mid-flight") {
+		t.Errorf("live-claim refusal %q lost its mid-flight wording", err)
+	}
+	for _, unwanted := range []string{"leases have lapsed", "step reap"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("live-claim refusal %q offers %q; there is nothing to reap",
+				err, unwanted)
+		}
+	}
+
+	// Past expiry the claim is lapsed-but-unreaped: still refused, but now the
+	// refusal names the step under its own heading and the verbs that clear it.
+	late := claim.LeaseExpiresMS + 1
+	_, err = repinRunIn(conn, run.ID, "install", late, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under a lapsed-but-unreaped claim")
+	}
+	if code, ok := CodeOf(err); !ok || code != CodeConflict {
+		t.Errorf("error code = %v, want CONFLICT: %v", code, err)
+	}
+	for _, want := range []string{
+		"implement@0",
+		"leases have lapsed",
+		"`docket dispatch close`",
+		"`docket next --run " + run.Ref() + "`",
+		"`docket step reap STEP-N --reason R`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("lapsed-claim refusal %q does not name %q", err, want)
+		}
+	}
+	// The point of the sentence is that every verb it names is invocable as
+	// written — a refusal that sends the operator at a flag no verb has is the
+	// same wedge in a new costume. `dispatch close` takes no arguments.
+	if strings.Contains(err.Error(), "dispatch close --run") {
+		t.Errorf("refusal %q gives `dispatch close` a --run flag it does not have", err)
+	}
+}
