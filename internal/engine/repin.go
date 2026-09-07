@@ -615,8 +615,9 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 	if err != nil {
 		return fmt.Errorf("collecting %s's claimed steps: %w", runRef, err)
 	}
-	// The lease half of Scheduler.Expired, inlined: this guard has no workflow
-	// definitions in hand, and LoadScheduler requires them. Expired's run-active
+	// The lease half of Scheduler.Expired, shared through leaseLapsed: this
+	// guard has no workflow definitions in hand, and LoadScheduler requires
+	// them, so it calls the predicate rather than the method. Expired's run-active
 	// scoping is NOT mirrored, because it answers a different question — whether
 	// a reap will fire — while this partition answers whether the lease has
 	// lapsed. The two diverge on a `waiting-human` run, which repinStatusGuard
@@ -632,8 +633,7 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 		if step.Status != db.StepClaimed {
 			continue
 		}
-		lease := step.Lease()
-		if lease.Held() && !lease.Live(nowMS) {
+		if leaseLapsed(step, nowMS) {
 			lapsed = append(lapsed, step.Instance)
 			continue
 		}

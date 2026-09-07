@@ -1162,8 +1162,7 @@ func (s *Scheduler) Expired(step *db.Step) bool {
 		return false
 	}
 
-	lease := step.Lease()
-	if lease.Held() && !lease.Live(s.nowMS) {
+	if leaseLapsed(step, s.nowMS) {
 		return true
 	}
 
@@ -1180,6 +1179,15 @@ func (s *Scheduler) Expired(step *db.Step) bool {
 		return false
 	}
 	return s.nowMS-*step.StartedMS >= max.Milliseconds()
+}
+
+// leaseLapsed is the lease half of Expired, shared with run repin's quiescence
+// guard, which has no workflow definitions in hand and so cannot build a
+// Scheduler. A grace window or clock-source change belongs here, where every
+// surface that speaks about a lapsed lease reads it.
+func leaseLapsed(step *db.Step, nowMS int64) bool {
+	lease := step.Lease()
+	return lease.Held() && !lease.Live(nowMS)
 }
 
 // SortSteps orders a ready set by PRIORITY THEN AGE (§2: "Ordering: priority
