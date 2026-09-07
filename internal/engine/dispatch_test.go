@@ -1512,6 +1512,69 @@ func TestCloseAcceptMissingUsageRecordsTheAcceptance(t *testing.T) {
 	}
 }
 
+// TestCloseNoOpenDispatchReapsLapsedLease pins the reap as UNCONDITIONAL: the
+// no-open-dispatch acceptance path reaps exactly as the open-manifest path
+// does.
+//
+// That path is the RUN-14 shape — an active run, the dispatch gone, the
+// operator reaching for `close --accept-missing-usage`. If the run also holds
+// a step stored `claimed` on a lapsed lease, the acceptance succeeds only
+// because the reap runs first; a close that reaped only when a manifest was
+// open would refuse D1 here, which is the same deadlock the reap exists to
+// remove, in the one state where no dispatch is even open.
+//
+// The reap's CONSEQUENCES are asserted, not the bare acceptance: a close that
+// merely stopped refusing would leave the row stored `claimed` forever.
+func TestCloseNoOpenDispatchReapsLapsedLease(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+
+	// Open and abandon: the run has dispatch history — which is what makes an
+	// unreported step a D2 discrepancy at all — and no dispatch is open.
+	openDispatch(t, conn, runID, 0, nowMS)
+	abandon(t, conn, runID, nowMS)
+
+	// The step whose lease lapses. The DEFAULT TTL is what makes this the real
+	// shape: core's `lease.ttl.default` equals `dispatch.grace`, so a claim left
+	// alone lapses exactly as the grace does.
+	claim := claimInstance(t, conn, "implement@0", nowMS)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	// A second step, terminal with no ledger rows: the missing usage the
+	// acceptance is for. Without it there is nothing to accept and the no-open
+	// path refuses on its own terms.
+	finishWithoutUsage(t, conn, "review@0#0")
+
+	at := claim.LeaseExpiresMS + graceMS(t, conn) + 1
+	outcome, err := NewEngine().CloseDispatch(conn, runID, true, "", at)
+	testsupport.Must(t, err, "close --accept-missing-usage with no dispatch open "+
+		"refused over a LAPSED lease (%v); the reap that clears the discrepancy "+
+		"is this close's own, and no other verb can perform it here", err)
+	if outcome.Reason != db.CloseReasonAcceptedMissingUsage {
+		t.Errorf("close_reason = %q, want %q",
+			outcome.Reason, db.CloseReasonAcceptedMissingUsage)
+	}
+
+	var status, owner string
+	var expires int64
+	err = conn.QueryRow(
+		`SELECT status, COALESCE(owner, ''), COALESCE(expires_ms, 0)
+		 FROM steps WHERE id = ?`, stepID).Scan(&status, &owner, &expires)
+	testsupport.Must(t, err, "reading the reaped step: %v", err)
+	if status != string(db.StepPending) {
+		t.Errorf("status = %q after the close, want %q — the acceptance path "+
+			"must reap, not merely close", status, db.StepPending)
+	}
+	if owner != "" || expires != 0 {
+		t.Errorf("the lease survived the close: owner %q, expires %d", owner, expires)
+	}
+
+	if n := eventKindCount(t, conn, runID, EventLeaseReaped); n != 1 {
+		t.Errorf("%d lease-reaped events, want 1 — a close with no manifest open "+
+			"must log its reap the same way `next` logs it", n)
+	}
+}
+
 // TestAcceptMissingUsageDoesNotAcceptD1 is P20: the flag accepts exactly ONE
 // class.
 //
