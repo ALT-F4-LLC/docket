@@ -54,9 +54,12 @@ var guardStopCmd = &cobra.Command{
 claimed, running, or gated. Deny (exit 2) otherwise, naming what is still
 working.
 
-A step parked in waiting-human does NOT block a stop: the guard asks whether
-the machine is done working, and a run waiting on a person is not something a
-stop interferes with.
+A step parked in waiting-human does NOT block a stop, and neither does a
+PENDING step of a run that is itself waiting-human (paused): the guard asks
+whether the machine is done working, and a run waiting on a person is not
+something a stop interferes with. A claimed or running step still blocks even
+while its run is paused, since ` + "`run pause`" + ` honors in-flight
+completes rather than killing them.
 
 A vote step whose proposal is still OPEN does not block either, and neither
 does work waiting behind it: its panel decides out-of-session, and yielding

@@ -55,13 +55,18 @@ type GuardVerdict struct {
 //     proposal leaves a dispatchable step, which blocks again until `next`
 //     routes it. The same reading covers a `gated` routing step whose every
 //     unresolved held cluster is such a vote.
-//   - A `pending` step waiting only on its predecessors does not block on its
-//     own: whatever it waits on either blocks in its place or is exempt for a
-//     reason that covers the whole chain. Any other unreadiness — headroom, a
-//     paused run, a budget stop, an unacknowledged reap — still blocks, since
-//     those name work or acknowledgment the session owes before stopping.
-//     (A held cluster awaiting ONE OPERATOR still denies: the materialized
-//     human step is pending and ready, per H11's decided semantics.)
+//   - A `pending` step waiting only on its predecessors, or waiting because
+//     the RUN ITSELF is `waiting-human` (paused), does not block on its own
+//     (DKT-1845): a paused run is the run-level version of the same
+//     wait-on-a-person exemption a `waiting-human` STEP already gets, and a
+//     step that never started is not work a stop interferes with. Any other
+//     unreadiness — headroom, a budget stop, an unacknowledged reap — still
+//     blocks, since those name work or acknowledgment the session owes before
+//     stopping. (A held cluster awaiting ONE OPERATOR still denies: the
+//     materialized human step is pending and ready, per H11's decided
+//     semantics. A `claimed`/`running` step still denies even while its run
+//     is paused — `run pause` honors in-flight completes rather than killing
+//     them, so the machine may still have a live worker to interrupt.)
 //
 // projectID scopes the question to one project's runs; 0 answers over every
 // project — the same contract as RunListOptions.ProjectID. Scoping exists
@@ -192,7 +197,8 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 			}
 			ready, cond := sched.Ready(step)
 			blocked = ready ||
-				(cond != CondPredecessors && cond != CondIssueDeps)
+				(cond != CondPredecessors && cond != CondIssueDeps &&
+					cond != CondRunActive)
 		}
 		if blocked {
 			out = append(out, step.Instance+" ("+step.Status+")")
