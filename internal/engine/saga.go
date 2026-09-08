@@ -168,6 +168,13 @@ type Engine struct {
 	// "absence of evidence is not staleness" posture holds for every state
 	// where git genuinely could not answer.
 	ObjectExistsFn func(execRoot, sha string) (exists, known bool)
+	// CommitPatchFn renders ONE commit's own patch — `sha` against its parent,
+	// read from execRoot and scoped like every `issue.diff` — for the verified
+	// integration annotation (annotate_integration.go), which re-records a
+	// step's diff from the commit the shared branch carries rather than from
+	// a working tree. A field for DiffFn's reason: the real one shells out to
+	// git, and a test injects a body. nil records an empty body.
+	CommitPatchFn func(execRoot, sha string, scope []string) (string, error)
 }
 
 // NewEngine builds the S5 engine: the REAL gate runner, the REAL action runner,
@@ -200,6 +207,7 @@ func NewEngine() *Engine {
 		PatchContainedFn: gitPatchContainedInHead,
 		TreeMatchFn:      gitTreeMatchesHead,
 		ObjectExistsFn:   gitCommitResolvable,
+		CommitPatchFn:    GitCommitPatch,
 	}
 }
 
@@ -2412,6 +2420,93 @@ func outOfScopeDiff(dir, base string, outside []string) string {
 			"\n# === out-of-scope hunks truncated at the cap; the file list above is complete ===\n"
 	}
 	return body
+}
+
+// GitCommitPatch is CommitPatchFn's real implementation: one commit's own
+// patch, `git diff-tree -p` of sha against its parent (`--root` so a root
+// commit renders too), pathspec'd to the issue's scope the way GitDiff is, and
+// carrying GitDiff's own out-of-scope disclosure: the paths the commit touched
+// outside the declared scope are named and their hunks follow under the same
+// marked heading, so a resolution that reached beyond the scope cannot hide
+// behind it. Untracked files do not exist in a commit, so there is no
+// untracked half. A merge commit renders no patch under `diff-tree -p` and
+// records an empty body — the annotation's contract names one ordinary commit.
+func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
+	body, err := commitDiff(execRoot, sha, scope)
+	if err != nil {
+		return "", err
+	}
+	outside := commitOutOfScopeNames(execRoot, sha, scope)
+	if len(outside) == 0 {
+		return body, nil
+	}
+	var b strings.Builder
+	b.WriteString(body)
+	fmt.Fprintf(&b, "# issue.diff: %d changed file(s) fall outside this "+
+		"issue's declared scope and are excluded from the diff above:\n", len(outside))
+	for _, path := range outside {
+		fmt.Fprintf(&b, "#   %s\n", path)
+	}
+	b.WriteString(
+		"# === outside declared scope: their hunks follow (DKT-86) ===\n" +
+			"# A file the change touched must not hide behind a narrow scope —\n" +
+			"# read them as evidence, not as this issue's own claim.\n")
+	extra, err := commitDiff(execRoot, sha, outside)
+	if err != nil {
+		extra = ""
+	}
+	if len(extra) > outOfScopeDiffCap {
+		extra = extra[:outOfScopeDiffCap] +
+			"\n# === out-of-scope hunks truncated at the cap; the file list above is complete ===\n"
+	}
+	b.WriteString(extra)
+	return b.String(), nil
+}
+
+// commitDiff is one pathspec'd `git diff-tree -p` of a commit against its
+// parent. An empty pathspec renders the whole commit, for rawDiff's reason.
+func commitDiff(execRoot, sha string, paths []string) (string, error) {
+	args := gitDirArgs(execRoot, "diff-tree", "-p", "--no-commit-id", "--root", sha, "--")
+	if len(paths) == 0 {
+		args = args[:len(args)-1]
+	} else {
+		args = append(args, paths...)
+	}
+	out, err := exec.Command("git", args...).Output()
+	return string(out), err
+}
+
+// commitOutOfScopeNames lists the paths a commit touched that its issue's
+// scope excludes — outOfScopeNames's question asked of a commit rather than a
+// working tree. Failures name nothing: the disclosure is best-effort
+// enrichment of a record, never a reason to refuse one.
+func commitOutOfScopeNames(execRoot, sha string, scope []string) []string {
+	if len(scope) == 0 {
+		return nil
+	}
+	out, err := exec.Command("git", gitDirArgs(execRoot,
+		"diff-tree", "--name-only", "--no-commit-id", "-r", "--root", sha)...).Output()
+	if err != nil {
+		return nil
+	}
+	in, err := exec.Command("git", append(gitDirArgs(execRoot,
+		"diff-tree", "--name-only", "--no-commit-id", "-r", "--root", sha, "--"), scope...)...).Output()
+	if err != nil {
+		return nil
+	}
+	inScope := map[string]bool{}
+	for _, p := range strings.Split(strings.TrimSpace(string(in)), "\n") {
+		if p != "" {
+			inScope[p] = true
+		}
+	}
+	var outside []string
+	for _, p := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if p != "" && !inScope[p] {
+			outside = append(outside, p)
+		}
+	}
+	return outside
 }
 
 // rawDiff runs one pathspec'd `git diff` against base — the tracked half both

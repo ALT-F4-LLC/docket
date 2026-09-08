@@ -57,9 +57,12 @@ type CheckedIntegration struct {
 	Instance string `json:"instance"`
 	SHA      string `json:"sha"`
 	// How is "ancestor" or "patch-equivalent" when this pass asked git,
-	// "skipped" when this close's --skip-integration-check reason vouched for
-	// the commit instead — or, with Prior set, the verdict the prior close
-	// recorded, carried forward unchanged.
+	// "resolved" when the recorded head is one `step annotate
+	// --integrated-sha` verified and re-recorded (annotate_integration.go) and
+	// git confirmed its ancestry again here, "skipped" when this close's
+	// --skip-integration-check reason vouched for the commit instead — or,
+	// with Prior set, the verdict the prior close recorded, carried forward
+	// unchanged.
 	How string `json:"how"`
 	// Prior names the earlier close of this run that accepted this sha —
 	// "DISPATCH-N", or "run" for an acceptance recorded with no manifest open
@@ -94,6 +97,11 @@ type IntegrationCheck struct {
 type integrationCandidate struct {
 	step, instance, sha, worktree string
 	prior                         *CheckedIntegration
+	// resolved marks a record the verified integration annotation wrote
+	// (`resolved_from` in its payload): the sha names the commit the shared
+	// branch carries for work whose original commit it could not have matched.
+	// The check still asks git; the marker only names the verdict.
+	resolved bool
 }
 
 // integrationCandidatesTx collects one candidate per TERMINAL write-class
@@ -138,8 +146,9 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 			continue
 		}
 		var record struct {
-			Head     string `json:"head"`
-			Worktree string `json:"worktree"`
+			Head         string `json:"head"`
+			Worktree     string `json:"worktree"`
+			ResolvedFrom string `json:"resolved_from"`
 		}
 		if json.Unmarshal([]byte(a.Payload), &record) != nil || record.Head == "" {
 			// No commit recorded — the step's work produced nothing to
@@ -151,7 +160,8 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 		out = append(out, integrationCandidate{
 			step: id, instance: step.Instance,
 			sha: record.Head, worktree: record.Worktree,
-			prior: accepted[id+"@"+record.Head],
+			prior:    accepted[id+"@"+record.Head],
+			resolved: record.ResolvedFrom != "",
 		})
 	}
 	return out, nil
@@ -244,8 +254,16 @@ func (e *Engine) checkIntegration(
 			cache[c.sha] = v
 		}
 		if v.ok {
+			how := v.how
+			if c.resolved && how == "ancestor" {
+				// The annotation already verified this ancestry once; the
+				// verdict names how the head came to be the branch's, so a
+				// reader of the close can tell a resolved commit from one the
+				// executor's own worktree landed verbatim.
+				how = "resolved"
+			}
 			checked = append(checked, CheckedIntegration{
-				Step: c.step, Instance: c.instance, SHA: c.sha, How: v.how,
+				Step: c.step, Instance: c.instance, SHA: c.sha, How: how,
 			})
 		} else {
 			unintegrated = append(unintegrated, UnintegratedStep{

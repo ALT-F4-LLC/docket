@@ -983,20 +983,28 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 }
 
 var stepAnnotateCmd = &cobra.Command{
-	Use:   "annotate STEP-N --metadata JSON",
-	Short: "Merge opaque metadata onto a finished step's record",
+	Use:   "annotate STEP-N [--metadata JSON] [--integrated-sha SHA]",
+	Short: "Record facts about a finished step: opaque metadata, or a verified integration",
 	Long: `Annotate a finished step with facts that became true after it recorded.
 
-The bag is opaque KV, merged onto the step's own metadata with the same
+--metadata is opaque KV, merged onto the step's own metadata with the same
 shallow, last-write-wins rule and the same 16KiB cap
 ` + "`step complete --metadata`" + ` uses. The merge is event-logged with the
 annotation verbatim, so what was added survives a later annotation
-overwriting the same key.
+overwriting the same key. The engine interprets no key inside it.
 
-The motivating case is integration: a relay that rebases or cherry-picks a
-recorded commit mints a NEW commit id, and every record citing the original
-is unreachable from any ref once the worktree is swept. Annotating the step
-with the durable id keeps the run record re-checkable after the fact.
+--integrated-sha names the commit the SHARED BRANCH now carries for a
+write-class step whose landed content diverged from its recorded commit — a
+cherry-pick whose conflict was resolved by hand, an operator-ruled patch on
+top of a gate failure. The engine VERIFIES the sha is an ancestor of the
+shared checkout's HEAD and refuses otherwise; then it re-records the step's
+` + "`issue.diff`" + ` from that commit's own patch (superseding the stale record,
+the way ` + "`step resolve --worktree`" + ` re-pins one), so every downstream
+packet binds to the resolved tree and ` + "`dispatch close`" + ` accepts the step
+with a ` + "`resolved`" + ` verdict instead of needing --skip-integration-check.
+It also sets ` + "`integrated_sha`" + ` in the step's metadata. The sha must be
+the full 40-hex id of ONE ordinary commit whose patch is the step's landed
+work; a merge commit records an empty diff. Both flags may be given together.
 
 A step that has not finished refuses: a live step's metadata lands with its
 record, under its holder's token.`,
@@ -1010,11 +1018,22 @@ record, under its holder's token.`,
 			return err
 		}
 		metadata, _ := cmd.Flags().GetString("metadata")
+		sha, _ := cmd.Flags().GetString("integrated-sha")
 
-		if _, err := engine.AnnotateStep(conn, id, metadata, model.NowMS()); err != nil {
+		if sha == "" {
+			if _, err := engine.AnnotateStep(conn, id, metadata, model.NowMS()); err != nil {
+				return stepErr(err, stepLabel(id))
+			}
+			return emitStepState(w, conn, id, "Annotated")
+		}
+		ann, err := engine.NewEngine().AnnotateIntegration(conn, id, sha, metadata, model.NowMS())
+		if err != nil {
 			return stepErr(err, stepLabel(id))
 		}
-		return emitStepState(w, conn, id, "Annotated")
+		// The re-record is a FACT the row does not carry, reported the way a
+		// resolution reports its re-pin: on the success line and as
+		// `issue_diff_repin` in the envelope.
+		return emitResolvedState(w, conn, id, "Annotated", nil, ann.Repin)
 	},
 }
 
@@ -1686,7 +1705,10 @@ func init() {
 			"(combine with --run to stay inside one run)")
 
 	stepAnnotateCmd.Flags().String("metadata", "",
-		"Opaque metadata JSON, merged onto the finished step's own (required)")
+		"Opaque metadata JSON, merged onto the finished step's own (required unless --integrated-sha is given)")
+	stepAnnotateCmd.Flags().String("integrated-sha", "",
+		"Full commit id the shared branch carries for this write-class step's landed work; "+
+			"verified as an ancestor of the shared HEAD, then the step's issue.diff is re-recorded from it")
 
 	for _, sub := range []*cobra.Command{
 		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
