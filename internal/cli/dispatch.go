@@ -113,6 +113,17 @@ func runDispatchOpen(cmd *cobra.Command, w *output.Writer) error {
 		w.Warn("%s", manifest.BudgetHeld)
 	}
 
+	// The open's own reaps and the hold they leave, the way `next` reports
+	// its reaps — on stderr for a human, and in the envelope (`reaped`,
+	// `reap_hold`) for the relay about to compose a launch `guard spawn`
+	// would otherwise deny on exactly this hold.
+	for _, instance := range manifest.Reaped {
+		w.Warn("reaped an expired lease on %s; it is ready again", instance)
+	}
+	if manifest.ReapHold != "" {
+		w.Warn("%s", manifest.ReapHold)
+	}
+
 	var message string
 	if !w.JSONMode {
 		message = renderManifest(manifest)

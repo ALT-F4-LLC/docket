@@ -70,6 +70,23 @@ type Manifest struct {
 	// conductor must get to decide before the wave, not discover it from
 	// exit codes inside one.
 	PinDrift []PinVerdict `json:"pin_drift,omitempty"`
+	// Reaped names the step instances whose leases THIS open reaped — the
+	// same fact `next` reports in ReadySteps.Reaped, on the wire because a
+	// relay that only ever opens dispatches never calls `next`. OpenedSeq is
+	// the boundary for reaps the relay has not yet seen; a reap the open
+	// itself performs lands AFTER that boundary, and --ack-reap applied to the
+	// same open cannot cover it. Without this a relay learned of its own
+	// open's reap only when `guard spawn --active` denied the launch it had
+	// just composed (RUN-95: two of four launches, about nine minutes each to
+	// convene the panel, join its usage, and relaunch).
+	Reaped []string `json:"reaped,omitempty"`
+	// ReapHold is A11's guidance for every unacknowledged bounded-class reap
+	// still holding this run's headroom once the open committed — the reaps
+	// above included — with each seq and the flag that clears it. It is the
+	// text `guard spawn` will deny the next launch with, handed to the relay
+	// BEFORE it composes that launch, so the panel or the acknowledgment can
+	// come first. Empty whenever nothing is held.
+	ReapHold string `json:"reap_hold,omitempty"`
 }
 
 // StaleTarget names one manifest row whose packet will render from a recorded
@@ -217,8 +234,11 @@ func (e *Engine) OpenDispatch(
 	}
 
 	// P5's reap, and with it §6.4's ack rows — the same helper `next` uses, so
-	// the two scheduling verbs cannot reap differently.
-	if _, err := reapExpiredTx(tx, sched, runID, nowMS); err != nil {
+	// the two scheduling verbs cannot reap differently. What it reaped rides
+	// out on the manifest (Manifest.Reaped): the acks above were applied
+	// before this reap, so nothing the caller passed can have covered it.
+	reaped, err := reapExpiredTx(tx, sched, runID, nowMS)
+	if err != nil {
 		return nil, err
 	}
 	if err := resolveQuorumMisses(tx, sched, nowMS); err != nil {
@@ -322,6 +342,11 @@ func (e *Engine) OpenDispatch(
 		StaleTargets: e.staleTargets(conn, runID, candidates),
 		BudgetHeld:   budgetHeld,
 		PinDrift:     pinDriftAdvisory(conn, runID),
+		Reaped:       reaped,
+		// The snapshot's open reaps include the ones this open just performed
+		// (reapOneTx reflects each into the hold), so the text names exactly
+		// what `guard spawn` will hold the next launch on.
+		ReapHold: ReapHoldReason(sched.UnacknowledgedReaps()),
 	}, nil
 }
 
