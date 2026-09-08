@@ -65,6 +65,75 @@ func TestFreshlyRecordedStepIsUsagePending(t *testing.T) {
 	}
 }
 
+// TestUsageGraceIsMeasuredFromTheWaveEnd: the clock is the run's NEWEST
+// executor record, not each step's own. A step recorded early in a long wave
+// is pending for as long as the wave's last record is inside the grace, and
+// becomes missing only once that last record is past it — so a long wave
+// closes with its early steps' usage still landing, and a wave nobody billed
+// still refuses once the grace has lapsed for all of it.
+func TestUsageGraceIsMeasuredFromTheWaveEnd(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	runID := dispatchRun(t, conn)
+	manifest := openDispatch(t, conn, runID, 0, nowMS)
+	if len(manifest.Rows) < 2 {
+		t.Fatalf("premise: the manifest offers %d row(s), need 2", len(manifest.Rows))
+	}
+	early, late := manifest.Rows[0].Instance, manifest.Rows[1].Instance
+	grace := graceMS(t, conn)
+
+	// The early step records at nowMS+1000 (finishWithoutUsage's stamp); the
+	// wave runs on for two graces before its last step records.
+	finishWithoutUsage(t, conn, early)
+	lastRecord := nowMS + 1000 + 2*grace
+	execSQL(t, conn,
+		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
+		db.StepDone, lastRecord, stepIDByInstance(t, conn, late))
+
+	// Per-step measurement would have called the early step missing here: it
+	// recorded two graces ago. Measured from the wave's end it is pending.
+	inside := lastRecord + grace - 1
+	if ds := discrepanciesAt(t, conn, runID, inside); containsKind(ds, DiscrepancyMissingUsage) {
+		t.Errorf("inside the grace of the wave's LAST record, an early step is a %s "+
+			"discrepancy (%v); D7 measures from the wave end, not the step's own record",
+			DiscrepancyMissingUsage, ds)
+	}
+	outcome, err := e.CloseDispatch(conn, runID, false, "", inside)
+	testsupport.Must(t, err, "a plain close inside the wave-end grace refused: %v", err)
+	if outcome.Reason != db.CloseReasonReconciled {
+		t.Errorf("close_reason = %q, want %q", outcome.Reason, db.CloseReasonReconciled)
+	}
+
+	// Once the last record is past the grace, every unbilled step is missing —
+	// the early one included, whatever its own age.
+	past := lastRecord + grace
+	ds := discrepanciesAt(t, conn, runID, past)
+	var missing []string
+	for _, d := range ds {
+		if d.Kind == DiscrepancyMissingUsage {
+			missing = append(missing, d.Instance)
+		}
+	}
+	for _, want := range []string{early, late} {
+		if !contains(missing, want) {
+			t.Errorf("past the wave-end grace, %s is not a missing-usage discrepancy "+
+				"(%v); D7 defers D2, it does not retire it", want, ds)
+		}
+	}
+
+	// A back-fill of the LATE step does not move the clock backward onto the
+	// early one: the clock ranges over every terminal executor record, billed
+	// or not, so landing one row cannot flip its siblings to missing mid-join.
+	_, err = e.BackfillUsage(conn, runID, []BackfillRow{
+		{Step: stepIDByInstance(t, conn, late), Unit: "tokens", Quantity: 10},
+	}, "", "", inside)
+	testsupport.Must(t, err, "backfill-usage of the late step: %v", err)
+	if ds := discrepanciesAt(t, conn, runID, inside); containsKind(ds, DiscrepancyMissingUsage) {
+		t.Errorf("billing the wave's last step flipped an earlier unbilled step to "+
+			"missing inside the grace (%v)", ds)
+	}
+}
+
 // TestAcceptMissingUsageSettlesPendingStepsToo: the acceptance flag asks
 // WITHOUT the grace. An acceptance that skipped the young steps would
 // resurface them as a refusal minutes after the operator settled the run.

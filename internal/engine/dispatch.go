@@ -1376,20 +1376,36 @@ func discrepanciesGracedTx(
 		activatedMS = *a
 	}
 
+	// D7: USAGE PENDING. The relay measures a wave's spend from agent
+	// transcripts after the wave returns, and a probe that refused the
+	// instant a step recorded put that join ahead of every close — on
+	// RUN-90, 21 joins of about 2.5 minutes each, serial with the close.
+	// Within the window the relay back-fills beside the close instead of
+	// ahead of it; past it, an unbilled step is unreconciled exactly as
+	// before, and the same `dispatch.grace` that judges a silent claim
+	// judges a silent record.
+	//
+	// THE CLOCK IS THE WAVE'S LAST RECORD, NOT EACH STEP'S OWN. The join
+	// cannot start before the wave returns, and a wave returns when its LAST
+	// step records — so a step that recorded early in a long wave was never
+	// late to bill; it was waiting on the same return every other step was.
+	// Measured per step, every wave longer than the grace refused its close on
+	// the early steps no matter when it returned (RUN-95: an 89-minute and a
+	// 287-minute wave, 86 refusals on the second, the join forced onto the
+	// close's critical path both times), and the only exits were to raise the
+	// grace — which is also D1's silent-claim window — or to accept the usage
+	// as missing minutes before it landed. So the grace is measured from the
+	// newest record among the run's terminal executor steps, billed or not:
+	// ranging over the unbilled alone would move the clock BACKWARD as each
+	// back-fill landed and flip the rest to missing mid-join. D1 keeps its
+	// per-step measurement; a silent claim is one step's own silence.
+	waveEndMS := latestExecutorRecordMS(sched, activatedMS)
+
 	for _, step := range sched.Steps() {
 		if !missingUsage(step, activatedMS) {
 			continue
 		}
-		// D7: USAGE PENDING. A step recorded less than `dispatch.grace` ago is
-		// not yet a discrepancy. The relay measures a wave's spend from agent
-		// transcripts after the wave returns, and a probe that refused the
-		// instant a step recorded put that join ahead of every close — on
-		// RUN-90, 21 joins of about 2.5 minutes each, serial with the close.
-		// Within the window the relay back-fills beside the close instead of
-		// ahead of it; past it, an unbilled step is unreconciled exactly as
-		// before, and the same `dispatch.grace` that judges a silent claim
-		// judges a silent record.
-		if usageGrace && nowMS-step.UpdatedAtMS < grace.Milliseconds() {
+		if usageGrace && nowMS-waveEndMS < grace.Milliseconds() {
 			continue
 		}
 		out = append(out, Discrepancy{
@@ -1411,6 +1427,32 @@ func discrepanciesGracedTx(
 		return out[i].Instance < out[j].Instance
 	})
 	return out, nil
+}
+
+// latestExecutorRecordMS is D7's clock: the newest `updated_at_ms` among the
+// run's terminal executor steps that a worker held and that recorded after
+// activation — the same population missingUsage judges, whether or not each
+// has billed. It is the instant the run's most recent wave returned, as far as
+// the rows can tell, and 0 when no such step exists (D7 then defers nothing,
+// because there is nothing to defer).
+func latestExecutorRecordMS(sched *Scheduler, activatedMS int64) int64 {
+	var latest int64
+	for _, step := range sched.Steps() {
+		if !db.StepTerminal(step.Status) || step.Attempt == 0 {
+			continue
+		}
+		switch step.Kind {
+		case workflow.ClassAction, workflow.TypeHuman, workflow.TypeVote:
+			continue
+		}
+		if activatedMS == 0 || step.UpdatedAtMS < activatedMS {
+			continue
+		}
+		if step.UpdatedAtMS > latest {
+			latest = step.UpdatedAtMS
+		}
+	}
+	return latest
 }
 
 // missingUsage is D2's predicate over one step, with D3, D4, and D5 each as a

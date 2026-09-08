@@ -392,7 +392,8 @@ var engineConfigSpecs = []ConfigSpec{
 		Kind:    KindDuration,
 		Default: "15m",
 		Doc: "How long a claimed step may go unrecorded before it counts as a " +
-			"dispatch discrepancy",
+			"dispatch discrepancy, and how long after a run's newest step record " +
+			"its unbilled steps stay usage-pending rather than missing",
 	},
 	{
 		Key:     KeyEventsRetain,
