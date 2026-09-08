@@ -54,6 +54,12 @@ var guardStopCmd = &cobra.Command{
 claimed, running, or gated. Deny (exit 2) otherwise, naming what is still
 working.
 
+A run nothing has ever happened to does NOT block: one that was activated but
+never dispatched, with no step ever out of pending. Its ready steps have not
+been handed to anything, so there is nothing for a stop to interrupt. The
+exemption ends at the first ` + "`dispatch open`" + `, or the first step to
+leave pending by any other route.
+
 A step parked in waiting-human does NOT block a stop, and neither does a
 PENDING step of a run that is itself waiting-human (paused): the guard asks
 whether the machine is done working, and a run waiting on a person is not
