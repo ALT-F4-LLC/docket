@@ -17,18 +17,38 @@
 # accepts an optional base-ref argument: with one, "added" means an added line
 # in ANY commit between the base and HEAD (a credential added then removed
 # inside the same PR still trips this, deliberately — see collect() below);
-# without one, behavior is unchanged from the working-tree scan the
-# `implement`/`fix` gates use.
+# without either a base-ref argument or DOCKET_GATE_BASE, behavior is
+# unchanged from the working-tree scan the `implement`/`fix` gates use.
+#
+# THREE WAYS TO NAME THE CHANGE SET, in precedence order:
+#
+#   1. An explicit base-ref argument (CI). A checked-out pull request is a
+#      clean tree; the change under review is the range of COMMITS between the
+#      PR's base and its head, walked patch by patch (see collect() below).
+#   2. DOCKET_GATE_BASE (the engine). Executors commit before `step record`,
+#      so a completion gate on a worktree-recorded step also runs on a clean
+#      tree; the engine exports the step's fork point (internal/engine/gate.go,
+#      `Base`) and the range is `$DOCKET_GATE_BASE`..HEAD in the gate's own
+#      cwd. Before this mode the working-tree scan below ran on that clean
+#      tree and reported "no added lines to scan" for every step — a security
+#      gate passing precisely because it inspected nothing.
+#   3. The working-tree scan (an author by hand, before committing, and the
+#      `implement`/`fix` gates): staged, unstaged, and untracked lines
+#      together.
 #
 # CALLED WITH NO ARGUMENT vs. CALLED WITH AN EMPTY ONE are different things,
 # and `${1:-}` cannot tell them apart — both read as "". A CI caller that
 # passes an interpolated GitHub Actions expression (ci.yaml) means "scan this
-# committed diff"; if that expression ever resolves empty (a workflow trigger
+# committed range"; if that expression ever resolves empty (a workflow trigger
 # with no PR base — merge_group, workflow_dispatch, a future widening of
 # `on:`), silently falling back to the working-tree scan would pass a clean CI
 # checkout having inspected nothing. So the check below is on `$#`, the
 # argument COUNT, not the value: one argument, even an empty one, commits to
-# CI mode and fails closed rather than downgrading to legacy mode.
+# base-ref mode and fails closed rather than downgrading to the working-tree
+# scan. DOCKET_GATE_BASE follows the same rule: the engine leaves it UNSET
+# when it has no base (a shared-checkout step, the pre-claim path), never
+# empty, so a set-but-empty value is a caller defect and fails closed the same
+# way. An unset DOCKET_GATE_BASE still falls back to the working-tree scan.
 #
 # THE CHANGE-SET DEFINITION DIFFERS FROM self-hygiene.sh's, DELIBERATELY
 # (AC2). This gate walks each commit's own patch
@@ -67,6 +87,14 @@ if [ "$#" -gt 0 ]; then
     echo "secret-scan FAILED: a base-ref argument was passed but empty; refusing" >&2
     echo "to fall back to the working-tree scan, which would pass a clean CI" >&2
     echo "checkout having scanned nothing." >&2
+    exit 1
+  fi
+elif [ -n "${DOCKET_GATE_BASE+set}" ]; then
+  BASE_REF="$DOCKET_GATE_BASE"
+  if [ -z "$BASE_REF" ]; then
+    echo "secret-scan FAILED: DOCKET_GATE_BASE is set but empty; refusing to fall" >&2
+    echo "back to the working-tree scan, which would pass a committed worktree" >&2
+    echo "having scanned nothing." >&2
     exit 1
   fi
 else
