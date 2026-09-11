@@ -1331,10 +1331,14 @@ func discrepanciesGracedTx(
 			continue
 		}
 		resolution := fmt.Sprintf(
-			"lease expiry clears it: the lease lapsed at %d and the next "+
-				"scheduling verb — `next`, `dispatch open` or `dispatch close` — "+
-				"reaps it before probing, which dissolves this discrepancy",
-			step.ExpiresMS)
+			"lease expiry clears it: the lease lapsed at %d and `next` reaps "+
+				"it before probing, which dissolves this discrepancy — "+
+				"`dispatch open` reaps it too but also opens a manifest, a "+
+				"side effect `next` does not have; if a usage-rows-missing "+
+				"discrepancy co-occurs on this run then `next` refuses as "+
+				"well, and `docket step reap %s --reason ...` is the verb "+
+				"that clears this one directly",
+			step.ExpiresMS, model.FormatStepID(step.ID))
 		if step.Lease().Live(nowMS) {
 			resolution = fmt.Sprintf(
 				"lease expiry clears it: the lease lapses at %d, and `next`, "+

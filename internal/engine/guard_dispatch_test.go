@@ -74,9 +74,11 @@ func TestGuardRecordDeniesAnOpenDispatch(t *testing.T) {
 // It also pins the two D1 advice branches through the one caller that can show
 // them apart. G13 makes the guard the only D1 renderer that does NOT reap, so a
 // lease already past its expiry survives to be reported here — and the exits
-// that fit a live lease ("wait for it to lapse", `step reap`, `dispatch
-// abandon`) are all wrong on it, while the cheap correct act, letting the next
-// scheduling verb reap it, is the one they leave out.
+// that fit a live lease ("wait for it to lapse", `dispatch abandon`) are wrong
+// on it, while the cheap correct act, letting `next` reap it, is the one they
+// leave out. `step reap` carries over to the lapsed branch for one reason: a
+// co-occurring D2 makes `next` refuse too, and then it is the only verb that
+// clears the discrepancy directly.
 func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
@@ -109,6 +111,11 @@ func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 			"past; the guard does not reap, so it can report a LAPSED lease",
 			verdict.Reason)
 	}
+	// The lapsed branch must name the verbs that actually dissolve it. `next` is
+	// the one that reaps and dissolves with no side effect; `step reap` is the
+	// fallback that clears a compound D1+D2 state, where `next` refuses too. The
+	// backticks matter: bare "next" also occurs as ordinary English.
+	assertLapsedExits(t, verdict.Reason)
 
 	// The branch shares the REAP's boundary. `Scheduler.Expired` reaps on
 	// `Lease.Live`, which is `expires_ms > now`, so at the expiry instant
@@ -125,6 +132,7 @@ func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 		t.Errorf("at the expiry instant the reap already fires, but the denial %q "+
 			"still offers the live-lease exits", verdict.Reason)
 	}
+	assertLapsedExits(t, verdict.Reason)
 
 	// The live-lease branch, on the same probe: a lease whose TTL outlasts the
 	// grace is still held when D1 fires, and there the live-lease exits are the
@@ -148,6 +156,26 @@ func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 		if !strings.Contains(verdict.Reason, want) {
 			t.Errorf("the live-lease denial %q does not offer %q", verdict.Reason, want)
 		}
+	}
+}
+
+// assertLapsedExits pins the exits D1 offers on a LAPSED lease.
+//
+// `next` reaps the lapsed lease and dissolves the discrepancy on its own, and
+// `step reap` clears the compound D1+D2 state directly — the one case where
+// `next` refuses as well. `dispatch close` is NOT an exit here: with no open
+// dispatch it refuses outright unless `--accept-missing-usage` is passed, so
+// naming it sends the operator into an error rather than out of the refusal.
+func assertLapsedExits(t *testing.T, reason string) {
+	t.Helper()
+	for _, want := range []string{"`next`", "step reap"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the lapsed-lease denial %q does not offer %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "dispatch close") {
+		t.Errorf("the lapsed-lease denial %q offers `dispatch close`, which "+
+			"refuses in this state instead of dissolving the discrepancy", reason)
 	}
 }
 
