@@ -598,6 +598,7 @@ type StepListEntry struct {
 	// inventory row too: `step list` is where a caller reconciling this
 	// listing against a `run repin` CONFLICT sees WHICH `ready` rows still
 	// carry an unreaped claim the repin is refusing over.
+	// On a waiting-human run, Scheduler.Expired is false, so this field stays unset.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
 	Attempt      int  `json:"attempt"`
 	// FailedAttempts / ReapedClaims are StepRow's fields of the same name
