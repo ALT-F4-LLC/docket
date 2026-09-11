@@ -256,8 +256,8 @@ type StepRow struct {
 	// `run repin` does name the lapse (DKT-1791). Deliberate, not a drift: the
 	// label promises the reap `next`/`claim` will perform, and neither reaps
 	// anything while the run is parked. `Status` stays `claimed` there for the
-	// same reason, and the `expires_ms` a caller already has still shows the
-	// lapse; `step reap` is the verb that clears such a claim.
+	// same reason, and `step show`'s rendered `expires:` line shows the lapse
+	// on a paused run; `step reap` is the verb that clears such a claim.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
