@@ -108,6 +108,7 @@ func TestRunRepinHelpDocumentsTheDisposition(t *testing.T) {
 	for _, want := range []string{
 		"--drop REF", "--drop-unresolvable", "UNLESS", "NULL new_sha256",
 		"docket dispatch close --run RUN-N",
+		"docket next --run RUN-N",
 		"docket step reap STEP-N --reason R",
 		"waiting-human run only",
 	} {
