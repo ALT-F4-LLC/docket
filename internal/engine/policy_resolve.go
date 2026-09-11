@@ -100,8 +100,12 @@ func (p *policyDoc) ResolveExecutor(hint string, attempt int, instance string, l
 
 	// Post-walk fable-gate check: a walk that moved off `standing` and landed
 	// on a fable variant is redirected once more unless one of
-	// [escalation].fable_gates exempts this row.
+	// [escalation].fable_gates exempts this row. A row whose standing variant
+	// is already fable is exempt outright: the gate keeps opus/sonnet rows off
+	// Fable, and a row the policy seats on Fable was admitted by its own
+	// [executors] row, so its escalate_to climb stays within Fable.
 	if variant != standing && p.Variants[variant].Model == "fable" &&
+		p.Variants[standing].Model != "fable" &&
 		!p.fableEligible(hint, attempt, standing, labels) {
 		if fb, ok := p.Escalation.Fallback[variant]; ok {
 			if _, ok := p.Variants[fb]; ok {

@@ -374,6 +374,86 @@ func TestEscalationWalkNeverRevisitsAnAbandonedVariant(t *testing.T) {
 	}
 }
 
+// fableChainPolicy is a separate fixture for the within-Fable climb that
+// dotfiles' policy.toml@29 introduced: fable-low carries an escalate_to to
+// fable-medium, so a fable-standing row now walks. It is kept apart from
+// escalationWalkPolicy, which is pinned to the JS TABLE and whose
+// fable-standing rows must not move.
+const fableChainPolicy = `
+[policy]
+version = 29
+
+[variants]
+fable-low = { model = "fable", effort = "low", escalate_to = "fable-medium" }
+fable-medium = { model = "fable", effort = "medium" }
+fable-xhigh = { model = "fable", effort = "xhigh" }
+opus-high = { model = "opus", effort = "high", escalate_to = "fable-high" }
+opus-medium = { model = "opus", effort = "medium", escalate_to = "fable-medium" }
+opus-max = { model = "opus", effort = "max" }
+fable-high = { model = "fable", effort = "high" }
+
+[executors]
+prd-author = { variant = "fable-low" }
+investigate = { variant = "fable-low" }
+judge-simplicity = { variant = "opus-medium" }
+
+[security]
+ceiling = "opus-max"
+labels = ["security-change"]
+never = ["fable"]
+nodes = []
+reason = "..."
+
+[escalation]
+on_failure = "one-hop"
+on_round = "one-hop"
+round_executors = []
+fable_gates = [
+  "failed-top-opus-round",
+  "investigator-class",
+  "novel-architecture",
+]
+
+[escalation.fallback]
+fable-high = "opus-high"
+fable-medium = "opus-high"
+fable-xhigh = "opus-max"
+`
+
+// TestEscalationWalkFableStandingRowClimbsWithinFable: the post-walk fable
+// gate exists to keep an opus/sonnet row off Fable unless a fable_gate admits
+// it. A row the policy already seats on Fable was admitted by its own
+// [executors] row, so its escalate_to climb lands where the chain says, not
+// at [escalation.fallback]. Before this fence, prd-author standing at
+// fable-low walked one hop to fable-medium and was redirected to opus-high
+// while investigate (investigator-class) climbed as intended.
+func TestEscalationWalkFableStandingRowClimbsWithinFable(t *testing.T) {
+	doc, err := parsePolicy([]byte(fableChainPolicy))
+	if err != nil {
+		t.Fatalf("parsing the fable-chain fixture: %v", err)
+	}
+	for _, hint := range []string{"prd-author", "investigate"} {
+		if got := variantAt(t, doc, hint, 0, nil); got != "fable-low" {
+			t.Errorf("%s attempt:0 = %q, want its standing variant fable-low", hint, got)
+		}
+		if got := variantAt(t, doc, hint, 1, nil); got != "fable-medium" {
+			t.Errorf("%s attempt:1 = %q, want fable-medium (one hop within Fable)", hint, got)
+		}
+		if got := variantAt(t, doc, hint, 2, nil); got != "fable-medium" {
+			t.Errorf("%s attempt:2 = %q, want fable-medium (top of chain absorbs hops)", hint, got)
+		}
+	}
+	// A non-fable standing row without a fable_gate exemption is still gated.
+	if got := variantAt(t, doc, "judge-simplicity", 1, nil); got != "opus-high" {
+		t.Errorf("judge-simplicity attempt:1 = %q, want opus-high (gate still redirects opus-standing rows)", got)
+	}
+	// A security-labeled fable-standing row is clamped to the ceiling before
+	// the walk, so its standing is no longer fable and it never reaches Fable.
+	if got := modelAt(t, doc, "prd-author", 1, []string{"security-change"}); got == "fable" {
+		t.Errorf("prd-author (security-change) attempt:1 resolved to fable")
+	}
+}
+
 func fmtRoundInstance(executor string, round int) string {
 	return executor + "@" + strconv.Itoa(round)
 }
