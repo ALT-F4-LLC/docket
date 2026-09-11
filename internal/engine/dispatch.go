@@ -233,8 +233,9 @@ func (e *Engine) OpenDispatch(
 		return nil, err
 	}
 
-	// P5's reap, and with it §6.4's ack rows — the same helper `next` uses, so
-	// the two scheduling verbs cannot reap differently. What it reaped rides
+	// P5's reap, and with it §6.4's ack rows — the same helper `next`,
+	// `dispatch open`, and `dispatch close` use, so the three scheduling
+	// verbs cannot reap differently. What it reaped rides
 	// out on the manifest (Manifest.Reaped): the acks above were applied
 	// before this reap, so nothing the caller passed can have covered it.
 	reaped, err := reapExpiredTx(tx, sched, runID, nowMS)
