@@ -111,11 +111,21 @@ func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 			"past; the guard does not reap, so it can report a LAPSED lease",
 			verdict.Reason)
 	}
+	// The rendered expiry comes from the STORED row, not from this test's own
+	// `nowMS + grace` arithmetic: the message interpolates `step.ExpiresMS`, so
+	// recomputing it here would let the assertion agree with a message that had
+	// stopped reporting the lease at all.
+	var stepExpiresMS int64
+	err = conn.QueryRow(
+		`SELECT expires_ms FROM steps WHERE run_id = ? AND instance = 'implement@0'`,
+		runID).Scan(&stepExpiresMS)
+	testsupport.Must(t, err, "reading the claimed step's expires_ms: %v", err)
+
 	// The lapsed branch must name the verbs that actually dissolve it. `next` is
 	// the one that reaps and dissolves with no side effect; `step reap` is the
 	// fallback that clears a compound D1+D2 state, where `next` refuses too. The
 	// backticks matter: bare "next" also occurs as ordinary English.
-	assertLapsedExits(t, verdict.Reason)
+	assertLapsedExits(t, verdict.Reason, stepExpiresMS)
 
 	// The branch shares the REAP's boundary. `Scheduler.Expired` reaps on
 	// `Lease.Live`, which is `expires_ms > now`, so at the expiry instant
@@ -132,7 +142,7 @@ func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 		t.Errorf("at the expiry instant the reap already fires, but the denial %q "+
 			"still offers the live-lease exits", verdict.Reason)
 	}
-	assertLapsedExits(t, verdict.Reason)
+	assertLapsedExits(t, verdict.Reason, stepExpiresMS)
 
 	// The live-lease branch, on the same probe: a lease whose TTL outlasts the
 	// grace is still held when D1 fires, and there the live-lease exits are the
@@ -166,9 +176,20 @@ func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 // `next` refuses as well. `dispatch close` is NOT an exit here: with no open
 // dispatch it refuses outright unless `--accept-missing-usage` is passed, so
 // naming it sends the operator into an error rather than out of the refusal.
-func assertLapsedExits(t *testing.T, reason string) {
+//
+// It also pins the message's CONTENT, not only its keywords: the expiry it
+// renders and the sentence saying what `next` does with it. `expiresMS` is the
+// claimed step's stored `expires_ms`, which is what the message interpolates,
+// and it is asserted joined to "lapsed at" rather than alone — a bare
+// epoch-millisecond number could match some other field, while the phrase can
+// only come from the lapsed branch's own Sprintf.
+func assertLapsedExits(t *testing.T, reason string, expiresMS int64) {
 	t.Helper()
-	for _, want := range []string{"`next`", "step reap"} {
+	for _, want := range []string{
+		"`next`", "step reap",
+		fmt.Sprintf("lapsed at %d", expiresMS),
+		"reaps it before probing",
+	} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("the lapsed-lease denial %q does not offer %q", reason, want)
 		}
