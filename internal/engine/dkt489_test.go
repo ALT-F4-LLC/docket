@@ -183,12 +183,12 @@ func TestRepinProceedsOnceAnExpiredClaimIsReaped(t *testing.T) {
 // TestLapsedClaimIsUnlabeledOnAPausedRun pins the label's ONE exception to the
 // pairing above. `Scheduler.Expired` is suspended off an active run (ready.go),
 // and a run parks with its siblings still claimed, so a `waiting-human` run can
-// hold a lapsed-but-unreaped claim on which `step show` renders plain `claimed`
-// with no label — while `run repin`, since DKT-1791, does name the lapse there.
-// The asymmetry is deliberate: the label promises the reap `next`/`claim` will
-// perform, and neither reaps anything while the run is parked, so labeling the
-// row would state a reap nobody is going to do. Making the label a bare
-// lease-liveness read instead of an `Expired` read breaks this case.
+// hold a lapsed-but-unreaped claim on which both `step show` and `step list --run`
+// render plain `claimed` with no label — while `run repin`, since DKT-1791, does
+// name the lapse there. The asymmetry is deliberate: the label promises the reap
+// `next`/`claim` will perform, and neither reaps anything while the run is parked,
+// so labeling the row would state a reap nobody is going to do. Making the label a
+// bare lease-liveness read instead of an `Expired` read breaks this case.
 func TestLapsedClaimIsUnlabeledOnAPausedRun(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
@@ -218,6 +218,13 @@ func TestLapsedClaimIsUnlabeledOnAPausedRun(t *testing.T) {
 	testsupport.Must(t, err, "marshal: %v", err)
 	if strings.Contains(string(raw), "lease_expired") {
 		t.Errorf("paused-run step show JSON %s carries lease_expired", raw)
+	}
+
+	rows, err := RunStepList(conn, run.ID, late)
+	testsupport.Must(t, err, "RunStepList on a paused run: %v", err)
+	if row := stepListRowOf(t, rows, "implement@0"); row.LeaseExpired || row.Status != db.StepClaimed {
+		t.Errorf("paused-run step list renders status=%q lease_expired=%v, want %q/false",
+			row.Status, row.LeaseExpired, db.StepClaimed)
 	}
 
 	// The other half of the pairing, and what makes the silence an exception
