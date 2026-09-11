@@ -231,3 +231,59 @@ func TestLapsedClaimIsUnlabeledOnAPausedRun(t *testing.T) {
 			"surface is silent about", err)
 	}
 }
+
+// TestStepViewLeaseFieldsAgreeOnAPausedRun pins the view's other two lease
+// reads to the label's run-status scoping above. Off an active run the
+// effective status still renders `claimed` with no label, so Owner and
+// ExpiresMS name the stored lease too; on an active run the effective status
+// reads the lapsed lease as gone, and so do the fields. Suppressing them on
+// lease liveness alone left `step show` printing `claimed`, unlabeled, with no
+// owner on a parked run — three reads of one row, one disagreeing with the
+// other two.
+func TestStepViewLeaseFieldsAgreeOnAPausedRun(t *testing.T) {
+	t.Run("paused run reports the lapsed lease", func(t *testing.T) {
+		conn := mustDB(t)
+		run, _ := activatedRun(t, conn)
+		stepID := stepIDByInstance(t, conn, "implement@0")
+		claim := claimInstance(t, conn, "implement@0", nowMS)
+		execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
+			string(model.RunWaitingHuman), run.ID)
+		late := claim.LeaseExpiresMS + 1
+
+		view, err := LoadStepView(conn, stepID, late)
+		testsupport.Must(t, err, "LoadStepView on a paused run: %v", err)
+		if view.Row.Status != db.StepClaimed || view.Row.LeaseExpired {
+			t.Fatalf("paused-run lapsed claim renders status=%q lease_expired=%v, "+
+				"want %q/false", view.Row.Status, view.Row.LeaseExpired, db.StepClaimed)
+		}
+		if view.Owner != "worker" {
+			t.Errorf("owner = %q on a paused run's lapsed claim, want %q: the row "+
+				"renders `claimed` and unlabeled, so the lease it counts must be named",
+				view.Owner, "worker")
+		}
+		if view.ExpiresMS != claim.LeaseExpiresMS {
+			t.Errorf("expires_ms = %d on a paused run's lapsed claim, want the "+
+				"stored %d", view.ExpiresMS, claim.LeaseExpiresMS)
+		}
+	})
+
+	t.Run("active run reads the lapsed lease as gone", func(t *testing.T) {
+		conn := mustDB(t)
+		activatedRun(t, conn)
+		stepID := stepIDByInstance(t, conn, "implement@0")
+		claim := claimInstance(t, conn, "implement@0", nowMS)
+		late := claim.LeaseExpiresMS + 1
+
+		view, err := LoadStepView(conn, stepID, late)
+		testsupport.Must(t, err, "LoadStepView on an active run: %v", err)
+		if view.Row.Status != db.StepReady || !view.Row.LeaseExpired {
+			t.Fatalf("active-run lapsed claim renders status=%q lease_expired=%v, "+
+				"want %q/true", view.Row.Status, view.Row.LeaseExpired, db.StepReady)
+		}
+		if view.Owner != "" || view.ExpiresMS != 0 {
+			t.Errorf("active-run lapsed claim reports owner=%q expires_ms=%d, want "+
+				"neither: the effective status reads the lease as gone",
+				view.Owner, view.ExpiresMS)
+		}
+	})
+}

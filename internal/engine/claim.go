@@ -1003,10 +1003,16 @@ type StepView struct {
 	// needs no lease to advance (§6.8).
 	Routing   string
 	SagaStage string
-	// Owner and ExpiresMS describe a LIVE lease only. A lapsed one reports
-	// neither, matching the v6 `lease` object's rule that a field which is not
-	// a fact does not appear — and matching the effective status, which already
-	// reads the lapsed lease as gone.
+	// Owner and ExpiresMS are the stored lease's facts, reported whenever the
+	// effective status still counts that lease: always for a LIVE lease, and
+	// for a LAPSED one only while the run is not active. Scheduler.Expired —
+	// the clause EffectiveStatus and Row.LeaseExpired both read — is suspended
+	// off an active run, so a lapsed-but-unreaped claim on a `waiting-human`
+	// run still renders `claimed` there, and this view names its owner and
+	// expiry to match. On an ACTIVE run the effective status reads the lapsed
+	// lease as gone, and so do these fields: neither is reported, matching the
+	// v6 `lease` object's rule that a field which is not a fact does not
+	// appear.
 	Owner     string
 	ExpiresMS int64
 	// Gates are the step's recorded gate results, in insertion order (DKT-63).
@@ -1118,7 +1124,16 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		TargetSHA:      targetSHA,
 		TargetWorktree: targetWorktree,
 	}
-	if lease := fresh.Lease(); lease.Live(nowMS) {
+	// Reported on a live lease always, and on a lapsed one whenever the run is
+	// not active: that is Scheduler.Expired's own run-status clause, under
+	// which EffectiveStatus still renders the stored `claimed` and
+	// Row.LeaseExpired stays unset, so the three lease reads on this view agree
+	// (see StepView.Owner). Read from the run status directly rather than
+	// through Expired, whose other clauses (max_step_duration, the stored
+	// status) decide reap eligibility, not whether the stored lease is a fact.
+	lease := fresh.Lease()
+	runActive := sched.Run() != nil && sched.Run().Status == model.RunActive
+	if lease.Live(nowMS) || (leaseLapsed(fresh, nowMS) && !runActive) {
 		view.Owner, view.ExpiresMS = lease.Owner, lease.ExpiresMS
 	}
 	return view, nil
