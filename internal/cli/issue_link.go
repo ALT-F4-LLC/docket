@@ -29,6 +29,21 @@ type unlinkResult struct {
 	RelationType  string `json:"relation_type"`
 }
 
+// parseRelationTypeArg parses the <relation> argument typed at `link add` /
+// `link remove`. It is model.ParseRelationType plus one CLI-only courtesy:
+// "related_to" / "related-to" — the natural mis-typing of "relates_to", and the
+// normalized form the refusal message already echoes back — resolves to the
+// canonical type (DKT-1073). The tolerance stops at the command line on
+// purpose: the JSON wire format (model.Relation.UnmarshalJSON) and the workflow
+// `issue.linked.<relation>.<kind>` vocabulary enumerated in
+// docs/design/engine-spec.md stay exactly the canonical token set (DKT-1077).
+func parseRelationTypeArg(arg string) (model.RelationType, error) {
+	if strings.ReplaceAll(strings.TrimSpace(arg), "-", "_") == "related_to" {
+		return model.RelationRelatesTo, nil
+	}
+	return model.ParseRelationType(arg)
+}
+
 var linkCmd = &cobra.Command{
 	Use:   "link",
 	Short: "Manage issue relations",
@@ -47,7 +62,7 @@ var linkAddCmd = &cobra.Command{
 			return err
 		}
 
-		relType, err := model.ParseRelationType(args[1])
+		relType, err := parseRelationTypeArg(args[1])
 		if err != nil {
 			return cmdErr(fmt.Errorf("%w", err), output.ErrValidation)
 		}
@@ -101,7 +116,7 @@ var linkRemoveCmd = &cobra.Command{
 			return err
 		}
 
-		relType, err := model.ParseRelationType(args[1])
+		relType, err := parseRelationTypeArg(args[1])
 		if err != nil {
 			return cmdErr(fmt.Errorf("%w", err), output.ErrValidation)
 		}

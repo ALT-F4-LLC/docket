@@ -106,9 +106,29 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 	return id, nil
 }
 
+// proposalQuerier is the read surface GetProposal/GetProposalVotes need,
+// satisfied by *sql.DB and *sql.Tx alike — one query text for both callers, so
+// the pooled and the in-transaction reads cannot drift.
+type proposalQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
 // GetProposal returns a proposal by ID, or ErrNotFound if it does not exist.
 func GetProposal(db *sql.DB, id int) (*model.Proposal, error) {
-	row := db.QueryRow(
+	return getProposal(db, id)
+}
+
+// GetProposalTx is GetProposal inside a CALLER'S transaction — the engine's
+// context assembly resolves `<step>.vote-record` inputs (DKT-545) in the claim
+// transaction, and reading through the pool there would see a different
+// snapshot than the bundle it is assembling.
+func GetProposalTx(tx *sql.Tx, id int) (*model.Proposal, error) {
+	return getProposal(tx, id)
+}
+
+func getProposal(q proposalQuerier, id int) (*model.Proposal, error) {
+	row := q.QueryRow(
 		`SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at
 		 FROM proposals WHERE id = ?`, id,
 	)
@@ -389,7 +409,17 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 
 // GetProposalVotes returns all votes for a proposal, ordered by creation time.
 func GetProposalVotes(db *sql.DB, proposalID int) ([]*model.Vote, error) {
-	rows, err := db.Query(
+	return getProposalVotes(db, proposalID)
+}
+
+// GetProposalVotesTx is GetProposalVotes inside a CALLER'S transaction — see
+// GetProposalTx for why the vote-record input resolution needs one.
+func GetProposalVotesTx(tx *sql.Tx, proposalID int) ([]*model.Vote, error) {
+	return getProposalVotes(tx, proposalID)
+}
+
+func getProposalVotes(q proposalQuerier, proposalID int) ([]*model.Vote, error) {
+	rows, err := q.Query(
 		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, metadata, created_at
 		 FROM votes WHERE proposal_id = ? ORDER BY created_at ASC`, proposalID,
 	)

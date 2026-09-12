@@ -82,6 +82,12 @@ func TestIssueStepListSpansRuns(t *testing.T) {
 	if len(empty) != 0 {
 		t.Errorf("a stepless issue listed %d rows", len(empty))
 	}
+	// DKT-1280: a nil slice here marshals as `"steps": null`, forcing every
+	// consumer of `step list --issue --json` to guard with `or []`.
+	if empty == nil {
+		t.Error("IssueStepList(stepless issue) returned nil, want a non-nil " +
+			"empty slice so the JSON carries \"steps\": [] rather than null")
+	}
 }
 
 // TestRunStepListNamesItsRun keeps the run-scoped listing honest about the

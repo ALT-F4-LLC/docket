@@ -26,7 +26,22 @@ needs no temporary file.
 Registering the same bytes at an existing name@version again is a success and
 changes nothing. Registering DIFFERENT bytes at an existing name@version is a
 CONFLICT: a registered name@version is frozen, so that a run which pinned it
-cannot have the definition swapped underneath it.`,
+cannot have the definition swapped underneath it.
+
+A registry is PER PROJECT. By default the definition lands in the project the
+working directory resolves to; --project registers it into one other project,
+and --all-projects registers it into every project in the store. Both report
+each project's own outcome, and each project's idempotency and conflict rules
+are decided there — a conflict in one project neither cancels nor hides another
+project's registration.
+
+VALIDATION IS PER TARGET, not once for the invocation. A definition's
+'vote_rule' and 'payload' references resolve against the registry of the project
+being written to, so the SAME bytes can be valid in one project and reference a
+schema that does not exist in the next. The project that cannot resolve them is
+refused there and reported as invalid; the rest still register. Register the
+schemas first — 'docket schema register <ref> <file> --all-projects' — when
+sweeping a corpus into a store that has not seen it.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowRegister(cmd, args, getWriter(cmd))
@@ -47,22 +62,21 @@ func runWorkflowRegister(cmd *cobra.Command, args []string, w *output.Writer) er
 		return workflowErr(err)
 	}
 
-	// V26 (gates-trust §8.2): every `vote_rule` names a REGISTERED threshold
-	// configuration. It runs here rather than inside workflow.Validate because
-	// it is the one rule that asks a question about the environment rather than
-	// about the bytes, and Validate stays pure.
-	if err := workflow.ValidateVoteRules(def, voteRuleResolver{conn, getProjectID(cmd)}); err != nil {
-		return workflowErr(err)
+	// The GRAMMAR is decided before the targets are: a definition that does not
+	// parse is wrong everywhere, and telling an operator which of thirteen
+	// projects rejected a typo would be noise. Everything past this point is
+	// environment, and environment is per project.
+	targets, fannedOut, err := resolveRegistryTargets(cmd, conn)
+	if err != nil {
+		return err
+	}
+	if fannedOut {
+		return registerWorkflowAcrossProjects(cmd, w, conn, def, src, path, targets)
 	}
 
-	// V21a-V21d and V25a (§4.9): threshold fields and literals cross-validated
-	// against the REGISTERED schema, per §11.2's "validated against the
-	// registered schema at `workflow register` time".
-	//
-	// The order — Validate, then vote rules, then schemas — is deliberate: an
-	// author sees GRAMMAR errors before ENVIRONMENT errors, so a definition with
-	// a typo in a step name is not first told that a schema is missing.
-	if err := workflow.ValidateSchemas(def, schemaResolver{conn, getProjectID(cmd)}); err != nil {
+	// V26 (gates-trust §8.2) and V21a-V21d/V25a (§4.9): vote rules and schemas,
+	// resolved against THIS project's registry. See validateWorkflowEnvironment.
+	if err := validateWorkflowEnvironment(conn, def, getProjectID(cmd)); err != nil {
 		return workflowErr(err)
 	}
 
@@ -71,25 +85,8 @@ func runWorkflowRegister(cmd *cobra.Command, args []string, w *output.Writer) er
 		return cmdErr(err, output.ErrGeneral)
 	}
 
-	// source_path is provenance only — it records where the bytes came from
-	// and is never re-read. stdin has no path to record.
-	sourcePath := path
-	if path == "-" {
-		sourcePath = ""
-	}
-
-	wf := &model.Workflow{
-		ProjectID:    getProjectID(cmd),
-		Name:         def.Pipeline.Name,
-		Version:      def.Pipeline.Version,
-		Description:  def.Pipeline.Description,
-		SourcePath:   sourcePath,
-		SourceSHA256: workflow.SHA256(src),
-		Body:         string(src),
-		Parsed:       string(parsed),
-	}
-
-	stored, created, err := db.InsertWorkflow(conn, wf, model.NowMS())
+	stored, created, err := db.InsertWorkflow(
+		conn, workflowRow(def, src, path, parsed, getProjectID(cmd)), model.NowMS())
 	if err != nil {
 		return workflowErr(err)
 	}
@@ -100,6 +97,105 @@ func runWorkflowRegister(cmd *cobra.Command, args []string, w *output.Writer) er
 	}
 	w.Success(stored, message)
 	return nil
+}
+
+// workflowRow builds the row to insert. Shared by the single-project path and
+// the fan-out so the two can never store different columns for the same bytes.
+func workflowRow(
+	def *workflow.Definition, src []byte, path string, parsed []byte, projectID int,
+) *model.Workflow {
+	// source_path is provenance only — it records where the bytes came from
+	// and is never re-read. stdin has no path to record.
+	sourcePath := path
+	if path == "-" {
+		sourcePath = ""
+	}
+	return &model.Workflow{
+		ProjectID:    projectID,
+		Name:         def.Pipeline.Name,
+		Version:      def.Pipeline.Version,
+		Description:  def.Pipeline.Description,
+		SourcePath:   sourcePath,
+		SourceSHA256: workflow.SHA256(src),
+		Body:         string(src),
+		Parsed:       string(parsed),
+	}
+}
+
+// validateWorkflowEnvironment runs the two checks that ask a question about a
+// PROJECT rather than about the bytes.
+//
+// V26 (gates-trust §8.2): every `vote_rule` names a REGISTERED threshold
+// configuration. V21a-V21d and V25a (§4.9): threshold fields and literals
+// cross-validated against the REGISTERED schema, per §11.2's "validated against
+// the registered schema at `workflow register` time". Both run here rather than
+// inside workflow.Validate, which stays pure and holds no database handle.
+//
+// The order — Validate, then vote rules, then schemas — is deliberate: an
+// author sees GRAMMAR errors before ENVIRONMENT errors, so a definition with a
+// typo in a step name is not first told that a schema is missing.
+//
+// Both resolve against a project's own registry, which is why the fan-out runs
+// them once per target instead of once per invocation: a `payload` reference
+// that resolves in the invoking project may name nothing in the next one, and
+// registering there anyway would store a definition guaranteed to fail at
+// activation — the exact failure this validation exists to move forward in time.
+func validateWorkflowEnvironment(
+	conn *sql.DB, def *workflow.Definition, projectID int,
+) error {
+	if err := workflow.ValidateVoteRules(def, voteRuleResolver{conn, projectID}); err != nil {
+		return err
+	}
+	return workflow.ValidateSchemas(def, schemaResolver{conn, projectID})
+}
+
+// registerWorkflowAcrossProjects is the --project / --all-projects path.
+//
+// The bytes are canonicalized ONCE — that is a pure function of the definition
+// and cannot differ per project — and then each target gets its own validation
+// and its own insert. A failure is recorded and the loop continues: the whole
+// point of the flag is that one command covers a store, and stopping at the
+// first conflict would leave the operator to work out by hand which projects
+// the sweep had reached.
+func registerWorkflowAcrossProjects(
+	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	def *workflow.Definition, src []byte, path string, targets []*model.Project,
+) error {
+	parsed, err := workflow.Canonical(def)
+	if err != nil {
+		return cmdErr(err, output.ErrGeneral)
+	}
+
+	report := &registryFanoutReport{
+		Operation: "workflow register",
+		Subject:   fmt.Sprintf("%s@%d", def.Pipeline.Name, def.Pipeline.Version),
+		Scope:     fanoutScope(cmd),
+	}
+
+	for _, target := range targets {
+		if err := validateWorkflowEnvironment(conn, def, target.ID); err != nil {
+			report.Results = append(report.Results,
+				registryFailureResult(target, err, workflowErr))
+			continue
+		}
+
+		stored, created, err := db.InsertWorkflow(
+			conn, workflowRow(def, src, path, parsed, target.ID), model.NowMS())
+		if err != nil {
+			report.Results = append(report.Results,
+				registryFailureResult(target, err, workflowErr))
+			continue
+		}
+
+		outcome := outcomeUnchanged
+		if created {
+			outcome = outcomeRegistered
+		}
+		report.Results = append(report.Results,
+			registrySuccessResult(target, outcome, stored.Ref()))
+	}
+
+	return finishRegistryFanout(w, report)
 }
 
 // readWorkflowSource reads the definition bytes from a file or, for "-", from
@@ -129,6 +225,7 @@ func readWorkflowSource(cmd *cobra.Command, path string) ([]byte, error) {
 }
 
 func init() {
+	addRegistryTargetFlags(workflowRegisterCmd, "Register")
 	workflowCmd.AddCommand(workflowRegisterCmd)
 }
 

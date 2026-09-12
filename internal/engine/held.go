@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -45,6 +46,11 @@ import (
 type holdTally struct {
 	rule   string
 	voters []string
+	// cost is `vote.hold.cost` (DKT-584): the declared expected_cost a hold
+	// minted as `vote` carries, so the panel the engine convenes is visible to
+	// the budget floor the way a declared vote step's cost is. 0 — the default
+	// — mints exactly the prior row.
+	cost float64
 }
 
 // configured reports whether held steps are minted as vote steps.
@@ -66,7 +72,14 @@ func loadHoldTally(conn *sql.DB, runID int) (holdTally, error) {
 	if err != nil {
 		return holdTally{}, err
 	}
-	return holdTally{rule: rule.Value, voters: db.SplitNameList(voters.Value)}, nil
+	cost, err := db.GetConfig(conn, projectID, db.KeyVoteHoldCost)
+	if err != nil {
+		return holdTally{}, err
+	}
+	return holdTally{
+		rule: rule.Value, voters: db.SplitNameList(voters.Value),
+		cost: parseHoldCost(cost.Value),
+	}, nil
 }
 
 // loadHoldTallyTx is loadHoldTally inside a caller's transaction, for the
@@ -81,7 +94,39 @@ func loadHoldTallyTx(tx *sql.Tx, projectID int) (holdTally, error) {
 	if err != nil {
 		return holdTally{}, err
 	}
-	return holdTally{rule: rule.Value, voters: db.SplitNameList(voters.Value)}, nil
+	cost, err := db.GetConfigTx(tx, projectID, db.KeyVoteHoldCost)
+	if err != nil {
+		return holdTally{}, err
+	}
+	return holdTally{
+		rule: rule.Value, voters: db.SplitNameList(voters.Value),
+		cost: parseHoldCost(cost.Value),
+	}, nil
+}
+
+// parseHoldCost reads `vote.hold.cost`'s stored value. `config set` validated
+// it as a non-negative number on the way in, so a malformed value can only be
+// a hand-edited store — tolerated as 0 rather than failing the saga that is
+// materializing a hold, the same tolerance configuredBudgetDefault keeps for
+// `budget.default`.
+func parseHoldCost(value string) float64 {
+	var cost float64
+	if _, err := fmt.Sscanf(value, "%g", &cost); err != nil || cost < 0 {
+		return 0
+	}
+	return cost
+}
+
+// heldStepCost is the expected_cost a materialized held step is minted with:
+// the configured `vote.hold.cost` when the hold convenes a PANEL (kind
+// `vote`), and 0 when one operator decides (kind `human`) — an operator's
+// decision is not a panel's spend, and charging the floor for it would make
+// the configured number mean two different things.
+func (t holdTally) heldStepCost() float64 {
+	if t.configured() {
+		return t.cost
+	}
+	return 0
 }
 
 // heldStepKind is the kind a materialized held step is MINTED as.
@@ -208,6 +253,10 @@ func materializeHeldCluster(
 		// approve/reject still apply once a failed tally parks it.
 		Kind:   tally.heldStepKind(),
 		Status: db.StepPending,
+		// DKT-584: a hold minted as a VOTE step carries the configured
+		// `vote.hold.cost` so the panel is visible to the budget floor at
+		// materialization; a `human` hold stays at 0, the prior row exactly.
+		ExpectedCost: tally.heldStepCost(),
 		// H4: the flag that tells a reader a declared question from a
 		// computed one.
 		Materialized: true,
@@ -600,6 +649,18 @@ type heldResolution struct {
 	Note    string
 	Value   string
 	Field   string
+	// Mirrors are the OTHER fields the routing step's threshold evaluates
+	// (DKT-1548), less any whose own declared order refuses the value. A
+	// correction that lands only on the aggregated field is a correction the
+	// routing never reads: RUN-90's threshold compared `open_severity`, the
+	// producer's copy of the same maximum, and routed a fix round the operator
+	// had declined against the value they replaced.
+	//
+	// Each one is rewritten only where it currently HOLDS the cluster's top
+	// member — the test that identifies it as a copy of the corrected field
+	// rather than an independent fact. Core still holds no opinion about what
+	// any of these fields mean.
+	Mirrors []string
 }
 
 // applies reports whether this decision's content lands on payload element i.
@@ -689,10 +750,14 @@ func resolveHeldPayload(
 		// parsed out of the note: refusing to infer a value from prose was
 		// always right, and it argued for a STRUCTURED field, not for no field.
 		if res.Value != "" && res.Field != "" {
-			if prior, ok := element[res.Field]; ok && prior != any(res.Value) {
+			prior, hadPrior := element[res.Field]
+			if hadPrior && prior != any(res.Value) {
 				element[KeyOperatorSetFrom] = prior
 			}
 			element[res.Field] = res.Value
+			if hadPrior {
+				correctMirrors(element, res, clusterTop(element, prior))
+			}
 		}
 	}
 	if !resolved {
@@ -725,7 +790,11 @@ func resolveHeldPayload(
 			stillHeld++
 		}
 	}
-	body = aggregateBody(routingStep.Instance, len(elements), stillHeld)
+	// The recorded count is 0 on purpose: this body is regenerated from the
+	// RESOLVED PAYLOAD, and `route_at`'s below-floor clusters were never in
+	// it — they live in the aggregate's own `action_results` row, which this
+	// supersession does not touch.
+	body = aggregateBody(routingStep.Instance, len(elements), stillHeld, 0)
 	if operatorResolved > 0 {
 		body += fmt.Sprintf(", %d operator-resolved", operatorResolved)
 	}
@@ -737,6 +806,78 @@ func resolveHeldPayload(
 		Supersedes: &priorID,
 	}, nowMS)
 	return err
+}
+
+// correctMirrors carries an operator's correction onto the threshold fields
+// that were COPIES of the cluster's TOP member (DKT-1548), and names them in
+// the resolved element so the rewrite is auditable rather than invisible.
+//
+// The predicate is deliberately narrow: a threshold field is rewritten only
+// when it currently equals `top`. That equality is the whole evidence that the
+// field mirrors the aggregated one, and it is evidence core can actually check
+// — where "which keys did the producer derive" is a question no payload
+// answers. A threshold field carrying anything else is an independent fact
+// about the cluster, and a correction of the severity is not a correction of
+// it.
+//
+// TOP rather than the computed value the correction replaced, because the two
+// differ exactly when the reduction DEMOTED. A derived field tracks the
+// cluster's worst member — `open_severity` is declared as the maximum among
+// open members — so under `median` or `min` a mirror reads the top while the
+// computed value reads lower, and keying on the computed value both missed the
+// mirror there and rewrote a field that merely coincided with a demoted value.
+// Under `max` nothing demotes and the two are the same value.
+func correctMirrors(element map[string]any, res heldResolution, top any) {
+	var corrected []string
+	for _, field := range res.Mirrors {
+		if current, ok := element[field]; ok && current == top {
+			element[field] = res.Value
+			corrected = append(corrected, field)
+		}
+	}
+	// Absent — omitted from the object, never an empty list — when the
+	// correction moved no mirror, the same trail discipline `demoted_from`
+	// follows. Core writes keys of the author's here, so which ones it wrote
+	// belongs in the record beside the decision that caused them.
+	if len(corrected) > 0 {
+		element[KeyOperatorSetMirrors] = corrected
+	}
+}
+
+// clusterTop is the value of the cluster's highest-positioned member: the one
+// `demoted_from` records when the reduction took a lower position, and the
+// computed value itself when it did not.
+//
+// Presence of the key is the whole test, which is sound only because Aggregate
+// never carries a producer's `demoted_from` through (coreOwnedKeys): the key in
+// a recorded element is core's own write or absent. Reading it any other way
+// re-opens RUN-90 under `max` (DKT-1680).
+func clusterTop(element map[string]any, computed any) any {
+	if demoted, ok := element[KeyDemotedFrom]; ok {
+		return demoted
+	}
+	return computed
+}
+
+// thresholdMirrorFields lists the fields a step's threshold predicates compare,
+// excluding the aggregated field the correction already lands on.
+//
+// An unparseable predicate contributes nothing rather than failing the
+// decision: EvaluateThreshold reports that refusal with its own message at the
+// moment it routes, and a correction must not become the verb that discovers a
+// malformed threshold.
+func thresholdMirrorFields(threshold map[string]string, field string) []string {
+	var out []string
+	seen := map[string]bool{field: true}
+	for _, routing := range ThresholdOrder(threshold) {
+		pred, err := workflow.ParsePredicate(threshold[routing])
+		if err != nil || seen[pred.Field] {
+			continue
+		}
+		seen[pred.Field] = true
+		out = append(out, pred.Field)
+	}
+	return out
 }
 
 // routingStepOf returns the step a materialized `<step>-held@k` belongs to.
@@ -791,11 +932,11 @@ func (e *Engine) decideMaterializedStep(
 		res.Element = element
 	}
 	if value != "" {
-		field, err := heldValueField(conn, routingStep, value)
+		field, mirrors, err := heldValueField(conn, routingStep, value)
 		if err != nil {
 			return err
 		}
-		res.Field = field
+		res.Field, res.Mirrors = field, mirrors
 	}
 
 	// H16: approve/reject on a materialized step whose routing step is NOT in
@@ -882,30 +1023,33 @@ func (e *Engine) decideMaterializedStep(
 }
 
 // heldValueField validates an operator's corrected value (DKT-42) and returns
-// the payload field it lands on: the routing step's declared `params.field`,
-// checked for membership in the pinned schema's declared enum.
+// the payload field it lands on — the routing step's declared `params.field`,
+// checked for membership in the pinned schema's declared enum — together with
+// the other fields that step's threshold evaluates (DKT-1548).
 //
 // Every refusal here is a VALIDATION_ERROR while the operator is still typing
 // the decision — never a payload that fails downstream. The membership set is
 // the AUTHOR'S: docket learns which values exist from the schema the run
 // pinned and holds no opinion about what any of them means.
-func heldValueField(conn *sql.DB, routingStep *db.Step, value string) (string, error) {
+func heldValueField(
+	conn *sql.DB, routingStep *db.Step, value string,
+) (string, []string, error) {
 	defs, err := StepDefinitions(conn, routingStep.RunID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// The ROUTING step is a declared aggregate, never a materialized one, so
 	// the tally cannot reach this spec — passed zero rather than loaded, and
 	// said here so the omission reads as a fact instead of a shortcut.
 	spec := stepSpec(defs, routingStep, holdTally{})
 	if spec == nil {
-		return "", validationErr(
+		return "", nil, validationErr(
 			"step %s has no pinned definition; --value has nothing to set",
 			routingStep.Instance)
 	}
 	field, _ := spec.Params["field"].(string)
 	if field == "" || spec.Payload == "" {
-		return "", validationErr(
+		return "", nil, validationErr(
 			"step %s declares no aggregated field with a payload schema; "+
 				"--value applies to a hold produced by an aggregate step",
 			routingStep.Instance)
@@ -913,15 +1057,27 @@ func heldValueField(conn *sql.DB, routingStep *db.Step, value string) (string, e
 
 	registered, err := pinnedSchema(conn, routingStep.RunID, spec.Payload)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// Membership is answered WHERE THE VALUES LIVE (internal/schema), so the
 	// engine never reads a declared enum's values — the same discipline that
 	// keeps ordering behind Position.
 	if err := registered.ValidateMember(field, value); err != nil {
-		return "", validationErr("%v", err)
+		return "", nil, validationErr("%v", err)
 	}
-	return field, nil
+	// A mirror must accept the value in ITS OWN declared order. Membership is
+	// per-field by construction, so the aggregated field's guarantee says
+	// nothing about a threshold field declaring a different vocabulary — and
+	// writing an outsider there persists a payload whose own threshold cannot
+	// be evaluated, parking the step this decision was made to resolve.
+	//
+	// A rejecting field is skipped rather than refused: it is not a mirror at
+	// all, and a correction of the aggregated field is not a correction of it.
+	mirrors := thresholdMirrorFields(spec.Threshold, field)
+	mirrors = slices.DeleteFunc(mirrors, func(mirror string) bool {
+		return registered.ValidateMember(mirror, value) != nil
+	})
+	return field, mirrors, nil
 }
 
 // heldRejectRouting is what a REJECTED materialized step records for itself.

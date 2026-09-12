@@ -34,9 +34,9 @@ var BuiltinActions = []string{ActionAggregate}
 // operator's command under a name core intends to take.
 var ReservedActions = []string{ActionAggregate}
 
-// AggregateParamKeys are the four keys §7.1's table declares, in its own order.
+// AggregateParamKeys are the five keys §7.1's table declares, in its own order.
 // V28's "no other keys" is checked against exactly this list.
-var AggregateParamKeys = []string{"field", "method", "hold_spread", "output"}
+var AggregateParamKeys = []string{"field", "method", "hold_spread", "output", "route_at"}
 
 // AggregateMethods is the closed reduction vocabulary, in §2's order.
 var AggregateMethods = []string{"median", "max", "min"}
@@ -104,7 +104,8 @@ func validateAggregateInputs(step *Step) error {
 }
 
 // validateAggregateParams is V28: `aggregate` requires `field`, `method`, and
-// `output`; `hold_spread` is an integer >= 0 when present; and NO OTHER KEYS.
+// `output`; `hold_spread` is an integer >= 0 when present; `route_at` is a
+// non-empty string when present; and NO OTHER KEYS.
 //
 // The discipline is every V-rule's. A typo'd `method = "medain"` is otherwise
 // discovered hours into a run, on a step whose inputs are already spent — and an
@@ -146,7 +147,7 @@ func validateAggregateParams(step *Step) error {
 	}
 
 	// `output` is already V11's — an action step must declare it — and is
-	// restated here so an `aggregate` step's four params are checked as one
+	// restated here so an `aggregate` step's params are checked as one
 	// table rather than two halves an author has to assemble.
 	if out, _ := step.Params["output"].(string); out == "" {
 		return fail("params",
@@ -158,6 +159,19 @@ func validateAggregateParams(step *Step) error {
 		if !ok || hold < 0 {
 			return fail("params",
 				"`params.hold_spread` must be an integer >= 0, got %v", raw)
+		}
+	}
+
+	// `route_at` is optional; when present it must be a non-empty string. WHICH
+	// strings it may name is the declared order's business, and the order lives
+	// in the step's registered schema — so the membership check is V28a's, in
+	// ValidateSchemas, beside V29's order check. This clause is pure bytes and
+	// stays here with V27, V28, and V31.
+	if raw, present := step.Params["route_at"]; present {
+		if s, ok := raw.(string); !ok || s == "" {
+			return fail("params",
+				"`params.route_at` must be a non-empty string naming a value of "+
+					"`params.field`'s declared order, got %v", raw)
 		}
 	}
 	return nil

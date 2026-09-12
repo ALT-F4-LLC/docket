@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
@@ -265,35 +268,45 @@ func TestNextStepModeHumanStepCarriesNoExecutor(t *testing.T) {
 	}
 }
 
-// TestNextStepModeTruncationContract pins the v2 truncation contract: the
-// pre-limit total rides in the envelope so a limited call cannot silently drop
-// work (reliability-delta §4.2).
-func TestNextStepModeTruncationContract(t *testing.T) {
-	conn := newTestDB(t)
+// activatedRunOverIssues seeds `count` independent task issues into one
+// activated run, so `next --run` sees `count` independent root steps ready at
+// once.
+func activatedRunOverIssues(t *testing.T, conn *sql.DB, count int) int {
+	t.Helper()
 
-	// Two issues, so two independent root steps are ready at once.
 	registerForRun(t, conn, runWorkflow)
-	var issueIDs []int
-	for _, title := range []string{"one", "two"} {
-		id, err := db.CreateIssue(conn, &model.Issue{
-			Title: title, Description: "body", Status: model.StatusBacklog,
-			Priority: model.PriorityNone, Kind: model.IssueKindTask,
-		}, nil, nil)
-		testsupport.Must(t, err, "creating issue: %v", err)
-		issueIDs = append(issueIDs, id)
-	}
 	run, err := db.InsertRun(conn, 1, "", 0, model.NowMS())
 	testsupport.Must(t, err, "starting run: %v", err)
-	for _, id := range issueIDs {
-		err := db.AddRunIssue(conn, run.ID, id)
+	for i := range count {
+		id, err := db.CreateIssue(conn, &model.Issue{
+			Title: fmt.Sprintf("issue %d", i), Description: "body",
+			Status: model.StatusBacklog, Priority: model.PriorityNone,
+			Kind: model.IssueKindTask,
+		}, nil, nil)
+		testsupport.Must(t, err, "creating issue: %v", err)
+		err = db.AddRunIssue(conn, run.ID, id)
 		testsupport.Must(t, err, "adding issue: %v", err)
 	}
 	if _, err := engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: model.NowMS()}); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
+	return run.ID
+}
 
-	cmd := nextCmdWithDB(conn, 1)
-	err = cmd.Flags().Set("run", model.FormatRunID(run.ID))
+// stepCollection is the v2 collection body `next --run` emits: a Collection
+// reshapes to data.{items,total,truncated}, the uniform envelope every list
+// verb carries.
+type stepCollection struct {
+	Items     []map[string]any `json:"items"`
+	Total     int              `json:"total"`
+	Truncated bool             `json:"truncated"`
+}
+
+// stepModeEnvelope drives `next --run` under v2 and decodes that body.
+func stepModeEnvelope(t *testing.T, cmd *cobra.Command, runID int) stepCollection {
+	t.Helper()
+
+	err := cmd.Flags().Set("run", model.FormatRunID(runID))
 	testsupport.Must(t, err, "setting --run: %v", err)
 	w := &output.Writer{
 		JSONMode: true, JSONVersion: output.JSONV2,
@@ -303,29 +316,70 @@ func TestNextStepModeTruncationContract(t *testing.T) {
 	err = runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 
-	// Under v2 a Collection reshapes to data.{items,total,truncated} — the
-	// uniform envelope every list verb emits.
 	var envelope struct {
-		Data struct {
-			Items     []map[string]any `json:"items"`
-			Total     int              `json:"total"`
-			Truncated bool             `json:"truncated"`
-		} `json:"data"`
+		Data stepCollection `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
+	return envelope.Data
+}
 
-	if len(envelope.Data.Items) != 1 {
-		t.Errorf("returned %d steps under --limit 1", len(envelope.Data.Items))
+// TestNextStepModeTruncationContract pins the v2 truncation contract: the
+// pre-limit total rides in the envelope so a limited call cannot silently drop
+// work (reliability-delta §4.2). The limit is set EXPLICITLY — since DKT-564
+// step mode ignores the issue-mode default, so a cut only happens when the
+// caller asked for one.
+func TestNextStepModeTruncationContract(t *testing.T) {
+	conn := newTestDB(t)
+
+	// Two issues, so two independent root steps are ready at once.
+	runID := activatedRunOverIssues(t, conn, 2)
+
+	cmd := nextCmdWithDB(conn, 10)
+	err := cmd.Flags().Set("limit", "1")
+	testsupport.Must(t, err, "setting --limit: %v", err)
+	data := stepModeEnvelope(t, cmd, runID)
+
+	if len(data.Items) != 1 {
+		t.Errorf("returned %d steps under --limit 1", len(data.Items))
 	}
-	if envelope.Data.Total != 2 {
+	if data.Total != 2 {
 		t.Errorf("total = %d, want the PRE-LIMIT 2 — a post-limit count cannot "+
 			"distinguish 'exactly one ready' from 'one returned, more dropped'",
-			envelope.Data.Total)
+			data.Total)
 	}
-	if !envelope.Data.Truncated {
+	if !data.Truncated {
 		t.Error("truncated = false with 2 ready and --limit 1")
+	}
+}
+
+// TestNextStepModeIgnoresDefaultLimit is DKT-564: step mode's answer IS a
+// dispatch manifest, dispatched verbatim, so the issue-mode DEFAULT of 10 must
+// not cut it — a conductor who never typed --limit would strand every step
+// past the tenth un-dispatched, with nothing in v1 JSON to reveal the drop.
+func TestNextStepModeIgnoresDefaultLimit(t *testing.T) {
+	conn := newTestDB(t)
+
+	// More ready steps than the default limit of 10.
+	const issues = 14
+	runID := activatedRunOverIssues(t, conn, issues)
+
+	// The default limit is in force on the flag and untouched by the caller,
+	// exactly as `docket next --run RUN-N` leaves it.
+	cmd := nextCmdWithDB(conn, 10)
+	data := stepModeEnvelope(t, cmd, runID)
+
+	if data.Total != issues {
+		t.Fatalf("total = %d, want %d ready root steps", data.Total, issues)
+	}
+	if len(data.Items) != issues {
+		t.Errorf("returned %d of %d ready steps with no --limit passed; the "+
+			"issue-mode default must not truncate a dispatch manifest",
+			len(data.Items), issues)
+	}
+	if data.Truncated {
+		t.Error("truncated = true with no --limit passed")
 	}
 }
 

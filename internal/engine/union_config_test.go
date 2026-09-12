@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,18 @@ func unionRepo(t *testing.T) (conn *sql.DB, shared, repo string) {
 	t.Chdir(work)
 
 	return conn, filepath.Join(home, ".docket", "config"), filepath.Join(work, ".docket", "config")
+}
+
+// packetWorkflow renders autoWorkflowSrc with the given `packet` entries on
+// its one step. Since DKT-581 activation pins only the packet CLOSURE the
+// bound workflows reach, a union test whose subject is a pinned contract must
+// have the workflow actually declare it — exactly as a real corpus does.
+func packetWorkflow(entries ...string) string {
+	quoted := make([]string, len(entries))
+	for i, e := range entries {
+		quoted[i] = fmt.Sprintf("%q", e)
+	}
+	return autoWorkflowSrc + "packet = [" + strings.Join(quoted, ", ") + "]\n"
 }
 
 // canonical resolves a path the way the scan does, so an assertion compares the
@@ -158,7 +171,8 @@ func TestUnionRegistersDisjointRootsSchemasFirst(t *testing.T) {
 // the file.
 func TestUnionPinsBothRoots(t *testing.T) {
 	conn, shared, repo := unionRepo(t)
-	writeConfigFile(t, shared, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, shared, "workflows/auto-dev.toml",
+		packetWorkflow("contracts/house-style.md", "contracts/project.md"))
 	writeConfigFile(t, shared, "contracts/house-style.md", "the corpus's contract\n")
 	writeConfigFile(t, repo, "contracts/project.md", "this repo's contract\n")
 
@@ -190,8 +204,9 @@ func TestUnionPinsBothRoots(t *testing.T) {
 // pin would double-count the same bytes against the closure caps.
 func TestUnionIdenticalDuplicateIsANoOp(t *testing.T) {
 	conn, shared, repo := unionRepo(t)
-	writeConfigFile(t, shared, "workflows/auto-dev.toml", autoWorkflowSrc)
-	writeConfigFile(t, repo, "workflows/auto-dev.toml", autoWorkflowSrc)
+	vendored := packetWorkflow("contracts/fix.md")
+	writeConfigFile(t, shared, "workflows/auto-dev.toml", vendored)
+	writeConfigFile(t, repo, "workflows/auto-dev.toml", vendored)
 	writeConfigFile(t, shared, "contracts/fix.md", "identical\n")
 	writeConfigFile(t, repo, "contracts/fix.md", "identical\n")
 
@@ -302,8 +317,9 @@ func TestSharedRootSymlinkScansLikeARealDirectory(t *testing.T) {
 	conn, shared, _ := unionRepo(t)
 
 	// The real corpus, somewhere else entirely, with ONE link pointing at it.
+	src := packetWorkflow("contracts/fix.md")
 	real := filepath.Join(t.TempDir(), "corpus", "config")
-	writeConfigFile(t, real, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, real, "workflows/auto-dev.toml", src)
 	writeConfigFile(t, real, "contracts/fix.md", "a contract\n")
 
 	err := os.MkdirAll(filepath.Dir(shared), 0o755)
@@ -321,7 +337,7 @@ func TestSharedRootSymlinkScansLikeARealDirectory(t *testing.T) {
 		t.Fatalf("registered %d files through the link, want 1: %+v",
 			len(result.Registered), result.Registered)
 	}
-	if got, want := result.Registered[0].SHA256, workflow.SHA256([]byte(autoWorkflowSrc)); got != want {
+	if got, want := result.Registered[0].SHA256, workflow.SHA256([]byte(src)); got != want {
 		t.Errorf("registered sha256 %s through the link, want %s — the same bytes a "+
 			"real root registers", got, want)
 	}
@@ -381,7 +397,7 @@ func TestDanglingConfigRootSymlinkRefuses(t *testing.T) {
 // own duplicate and turn a legal install into a self-conflict.
 func TestOneDirectoryReachedTwiceIsOneRoot(t *testing.T) {
 	conn, shared, repo := unionRepo(t)
-	writeConfigFile(t, repo, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, repo, "workflows/auto-dev.toml", packetWorkflow("contracts/fix.md"))
 	writeConfigFile(t, repo, "contracts/fix.md", "a contract\n")
 
 	err := os.MkdirAll(filepath.Dir(shared), 0o755)
@@ -448,7 +464,7 @@ func TestPacketResolutionPrefersTheFirstRoot(t *testing.T) {
 	pins := testPinSet(t, first, "checklists/a.md")
 	pins["checklists/a.md"] = pins[filepath.Join(first, "checklists/a.md")]
 
-	files, err := resolvePacketFiles(pins, []string{first, second},
+	files, err := resolvePacketFiles("RUN-1", pins, []string{first, second},
 		[]string{"checklists/a.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 	if len(files) != 1 || strings.TrimSpace(files[0].Body) != "FROM THE SHARED ROOT" {
@@ -467,7 +483,7 @@ func TestPacketResolutionFallsThroughToALaterRoot(t *testing.T) {
 	pins := testPinSet(t, second, "checklists/a.md")
 	pins["checklists/a.md"] = pins[filepath.Join(second, "checklists/a.md")]
 
-	files, err := resolvePacketFiles(pins, []string{first, second},
+	files, err := resolvePacketFiles("RUN-1", pins, []string{first, second},
 		[]string{"checklists/a.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 	if len(files) != 1 || strings.TrimSpace(files[0].Body) != "ONLY IN THE SECOND ROOT" {
@@ -490,7 +506,7 @@ func TestSharedRootPacketResolvesFromALinkedWorktree(t *testing.T) {
 	}
 
 	conn, shared, _ := unionRepo(t)
-	writeConfigFile(t, shared, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, shared, "workflows/auto-dev.toml", packetWorkflow("contracts/fix.md"))
 	writeConfigFile(t, shared, "contracts/fix.md", "the corpus's contract\n")
 
 	// The main checkout is the cwd unionRepo chdir'd into.
@@ -520,7 +536,8 @@ func TestSharedRootPacketResolvesFromALinkedWorktree(t *testing.T) {
 	}
 
 	files, err := resolvePacketFiles(
-		packetPinsForRun(pins), instanceConfigRoots(), []string{"contracts/fix.md"})
+		"RUN-1", packetPinsForRun(pins), instanceConfigRoots(),
+		[]string{"contracts/fix.md"})
 	testsupport.Must(t, err, "a packet file in the shared root did not resolve from a "+
 		"linked worktree — the failure that stranded a claimed step: %v", err)
 
@@ -534,7 +551,7 @@ func TestSharedRootPacketResolvesFromALinkedWorktree(t *testing.T) {
 // it in the list.
 func TestRepoRootPacketStillResolves(t *testing.T) {
 	conn, shared, repo := unionRepo(t)
-	writeConfigFile(t, shared, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, shared, "workflows/auto-dev.toml", packetWorkflow("contracts/project.md"))
 	writeConfigFile(t, repo, "contracts/project.md", "this repo's contract\n")
 
 	issue := createIssue(t, conn, "repo packet", "body", "task", nil)
@@ -546,7 +563,8 @@ func TestRepoRootPacketStillResolves(t *testing.T) {
 	testsupport.Must(t, err, "listing pins: %v", err)
 
 	files, err := resolvePacketFiles(
-		packetPinsForRun(pins), instanceConfigRoots(), []string{"contracts/project.md"})
+		"RUN-1", packetPinsForRun(pins), instanceConfigRoots(),
+		[]string{"contracts/project.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 	if len(files) != 1 || strings.TrimSpace(files[0].Body) != "this repo's contract" {
 		t.Errorf("resolved %+v, want the repository's own contract", files)

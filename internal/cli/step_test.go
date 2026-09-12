@@ -2,12 +2,17 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // The §6.9 refusal matrix AT THE CLI BOUNDARY.
@@ -259,5 +264,250 @@ func TestStepRecordIsCompleteAlias(t *testing.T) {
 	if found != stepCompleteCmd {
 		t.Errorf("`docket step record` resolved to %p, want the same command "+
 			"object as `docket step complete` (%p)", found, stepCompleteCmd)
+	}
+}
+
+// DKT-982 — `step record`'s stdout when a completion gate failed.
+//
+// The saga runs the completion gates synchronously and parks the step when one
+// fails, and the line the recording verb printed was `✔ Completed STEP-N
+// (waiting-human)`: no gate, no verdict, a success glyph on a park. RUN-63's
+// executor read that line, answered "Record succeeded", and reported the wave
+// green over a real cargo-fmt failure. These drive emitRecordState — the whole
+// of what the RunE does after the saga returns — over recorded gate rows.
+
+// recordFixture activates a run and returns the connection and the executor
+// step every case here records against.
+func recordFixture(t *testing.T, conn *sql.DB) int {
+	t.Helper()
+	activatedRunForNext(t, conn)
+	var id int
+	err := conn.QueryRow(`SELECT id FROM steps WHERE instance = 'first@0'`).Scan(&id)
+	testsupport.Must(t, err, "finding the executor step: %v", err)
+	return id
+}
+
+// seedGateRows records gate results against a step and sets the status the
+// routing would have left it in — the state the printer reads.
+func seedGateRows(
+	t *testing.T, conn *sql.DB, stepID int, status string, rows ...db.GateResultRow,
+) {
+	t.Helper()
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	defer func() { _ = tx.Rollback() }()
+	for _, r := range rows {
+		r.RunID, r.StepID, r.CreatedAtMS = step.RunID, stepID, model.NowMS()
+		testsupport.Must(t, db.InsertGateResultTx(tx, r), "inserting a gate row: %v", err)
+	}
+	testsupport.Must(t,
+		db.SetStepStatusTx(tx, stepID, status, model.NowMS(), model.NowMS()),
+		"setting the step status: %v", err)
+	testsupport.Must(t, tx.Commit(), "commit: %v", err)
+}
+
+// colorfulTerminal makes render.ColorsEnabled() true, which is the condition
+// under which a glyph is printed at all — the RUN-63 terminal's condition. The
+// variable must be genuinely ABSENT: ColorsEnabled uses LookupEnv, so
+// NO_COLOR="" would still disable colors.
+func colorfulTerminal(t *testing.T) {
+	t.Helper()
+	if prev, ok := os.LookupEnv("NO_COLOR"); ok {
+		testsupport.Must(t, os.Unsetenv("NO_COLOR"), "unsetting NO_COLOR: %v", nil)
+		t.Cleanup(func() { _ = os.Setenv("NO_COLOR", prev) })
+	}
+	t.Setenv("TERM", "xterm-256color")
+	if !render.ColorsEnabled() {
+		t.Fatal("premise: colors are disabled, so neither glyph would be printed")
+	}
+}
+
+// TestStepRecordNamesTheFailedGateAndItsExit is acceptance criteria 1 and 2:
+// the failed gate's NAME and EXIT CODE are on stdout, and the park is not
+// wearing a checkmark.
+func TestStepRecordNamesTheFailedGateAndItsExit(t *testing.T) {
+	colorfulTerminal(t)
+
+	conn := newTestDB(t)
+	stepID := recordFixture(t, conn)
+	exit := 2
+	seedGateRows(t, conn, stepID, db.StepWaitingHuman,
+		db.GateResultRow{Gate: "build", Verdict: db.GateVerdictPass, Exit: intPtr(0)},
+		db.GateResultRow{Gate: "tests", Verdict: db.GateVerdictPass, Exit: intPtr(0)},
+		db.GateResultRow{Gate: "self-hygiene", Verdict: db.GateVerdictFail, Exit: &exit})
+
+	w, buf := bufWriter(false)
+	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+
+	out := buf.String()
+	for _, want := range []string{
+		"self-hygiene failed (exit 2)",
+		"parked waiting-human",
+		model.FormatStepID(stepID),
+		"✘",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want it to carry %q", out, want)
+		}
+	}
+	if strings.Contains(out, "✔") {
+		t.Errorf("stdout = %q — the park is behind a success glyph, which is the "+
+			"misread DKT-982 was filed for", out)
+	}
+	// The gates that PASSED are not on the line: three of them named at every
+	// record is how the one that matters gets skimmed past.
+	if strings.Contains(out, "build") || strings.Contains(out, "tests") {
+		t.Errorf("stdout = %q, want only the gate that failed", out)
+	}
+}
+
+// TestStepRecordNamesEveryFailedGate covers the plural case and the gate that
+// never ran: `unmatched` has no exit code, and printing `exit 0` for a process
+// that did not exist would read as a pass (T11).
+func TestStepRecordNamesEveryFailedGate(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	conn := newTestDB(t)
+	stepID := recordFixture(t, conn)
+	exit := 1
+	seedGateRows(t, conn, stepID, db.StepWaitingHuman,
+		db.GateResultRow{Gate: "secret-scan", Verdict: db.GateVerdictUnmatched,
+			Reason: "no trust entry matched"},
+		db.GateResultRow{Gate: "build", Verdict: db.GateVerdictFail, Exit: &exit})
+
+	w, buf := bufWriter(false)
+	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+
+	out := buf.String()
+	want := "gates build failed (exit 1), secret-scan unmatched (no exit); " +
+		model.FormatStepID(stepID) + " parked waiting-human — `docket step gates " +
+		model.FormatStepID(stepID) + "` has the captured output\n"
+	if out != want {
+		t.Errorf("stdout  = %q\nwant      %q", out, want)
+	}
+}
+
+// TestStepRecordJSONCarriesTheFailedGates is the machine channel: the envelope
+// stays a SUCCESS envelope — the recording did succeed — and the failed gates
+// ride beside the step row, so a --json consumer learns the same fact without a
+// second command.
+func TestStepRecordJSONCarriesTheFailedGates(t *testing.T) {
+	conn := newTestDB(t)
+	stepID := recordFixture(t, conn)
+	exit := 2
+	seedGateRows(t, conn, stepID, db.StepWaitingHuman,
+		db.GateResultRow{Gate: "self-hygiene", Verdict: db.GateVerdictFail, Exit: &exit})
+
+	w, buf := bufWriter(true)
+	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Step        string              `json:"step"`
+			Status      string              `json:"status"`
+			FailedGates []engine.FailedGate `json:"failed_gates"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &envelope), "unmarshal: %v", nil)
+
+	if !envelope.OK {
+		t.Error("ok = false; the recording succeeded — its subject did not")
+	}
+	if envelope.Data.Step != model.FormatStepID(stepID) {
+		t.Errorf("data.step = %q, want the row the completion has always emitted",
+			envelope.Data.Step)
+	}
+	if envelope.Data.Status != db.StepWaitingHuman {
+		t.Errorf("data.status = %q, want %q", envelope.Data.Status, db.StepWaitingHuman)
+	}
+	if len(envelope.Data.FailedGates) != 1 {
+		t.Fatalf("data.failed_gates = %v, want the one gate that failed",
+			envelope.Data.FailedGates)
+	}
+	got := envelope.Data.FailedGates[0]
+	if got.Gate != "self-hygiene" || got.Exit == nil || *got.Exit != 2 {
+		t.Errorf("data.failed_gates[0] = %+v, want self-hygiene at exit 2", got)
+	}
+	if !strings.Contains(envelope.Message, "self-hygiene failed (exit 2)") {
+		t.Errorf("message = %q, want the failed gate named", envelope.Message)
+	}
+}
+
+// TestStepRecordKeepsItsSuccessLineWhenGatesPass is acceptance criterion 3: a
+// clean record is byte-for-byte the line it has always printed, checkmark
+// included. Everything above is a NEW branch, and this is the assertion that
+// keeps it one.
+func TestStepRecordKeepsItsSuccessLineWhenGatesPass(t *testing.T) {
+	colorfulTerminal(t)
+
+	conn := newTestDB(t)
+	stepID := recordFixture(t, conn)
+	seedGateRows(t, conn, stepID, db.StepDone,
+		db.GateResultRow{Gate: "build", Verdict: db.GateVerdictPass, Exit: intPtr(0)},
+		// A PRE-gate that failed is an input to the step, not a judgment of it
+		// (PG4) — it routed nothing, so it must not turn a clean record into a
+		// reported failure.
+		db.GateResultRow{Gate: "pre-scan", Verdict: db.GateVerdictFail,
+			Exit: intPtr(3), Pre: true})
+
+	w, buf := bufWriter(false)
+	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+
+	want := "✔ Completed " + model.FormatStepID(stepID) + " (done)\n"
+	if buf.String() != want {
+		t.Errorf("stdout = %q, want %q", buf.String(), want)
+	}
+}
+
+func intPtr(n int) *int { return &n }
+
+// TestStepClaimCommandWritesTheMetadataFlag drives the REAL `step claim` RunE
+// over its REAL flag set and reads the step back out of the store (DKT-592).
+//
+// It exists because this is the exact join DKT-68 lost: a flag that parses, an
+// option field that is documented as merged, and nothing in between reading
+// it. Everything either side is pinned in internal/engine, so a RunE that
+// looked up a flag name nobody registers — or registered one nobody reads —
+// would drop every dispatcher's bag with the whole engine suite green.
+//
+// The flag set comes from `stepClaimCmd` itself rather than being re-declared
+// here, so the registration is part of what is under test.
+func TestStepClaimCommandWritesTheMetadataFlag(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	_, err := engine.Activate(conn, runID, engine.ActivateOptions{NowMS: model.NowMS()})
+	testsupport.Must(t, err, "activate: %v", err)
+
+	var stepID int
+	err = conn.QueryRow(
+		`SELECT id FROM steps WHERE run_id = ? AND step_name = 'first'`, runID,
+	).Scan(&stepID)
+	testsupport.Must(t, err, "reading the claimable step: %v", err)
+
+	cmd := cmdWithDB(conn)
+	cmd.Flags().AddFlagSet(stepClaimCmd.Flags())
+	// AddFlagSet shares the flag VALUES with the package-level command, so the
+	// two set here are put back before any later test reads them.
+	t.Cleanup(func() {
+		_ = stepClaimCmd.Flags().Set("owner", "")
+		_ = stepClaimCmd.Flags().Set("metadata", "")
+	})
+	testsupport.Must(t, cmd.Flags().Set("owner", "worker"), "setting --owner: %v", err)
+	testsupport.Must(t, cmd.Flags().Set("metadata", `{"tier_requested":"a"}`),
+		"setting --metadata: %v", err)
+
+	err = stepClaimCmd.RunE(cmd, []string{model.FormatStepID(stepID)})
+	testsupport.Must(t, err, "step claim --metadata: %v", err)
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if !strings.Contains(step.Metadata, `"tier_requested":"a"`) {
+		t.Errorf("metadata = %q, want the claim's bag — the flag was parsed and dropped",
+			step.Metadata)
 	}
 }

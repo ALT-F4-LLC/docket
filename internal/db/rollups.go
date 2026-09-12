@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -40,11 +41,27 @@ type VerdictCount struct {
 	// is an honest zero and not a missing feature: an action's `builtin` column
 	// already says whether core computed it.
 	Stub int `json:"stub"`
+	// Pre counts rows recorded by the PRE-GATE phase (DKT-862). Like Stub it
+	// counts ROWS and overlaps the four verdict columns rather than
+	// partitioning with them, because it describes WHEN the row was produced,
+	// not what it decided.
+	//
+	// It matters because a pre-gate NEVER ROUTES: §11.1 runs it at claim, with
+	// its results carried into the step's context bundle, and PG4 excludes it
+	// from the saga's verdict. Without this count `ac-commands: pass 0, fail 1`
+	// read identically whether the failure blocked the step or was an advisory
+	// input to it — RUN-61 had three such rows and a conductor nearly reported
+	// a fix round as burned on one of them.
+	//
+	// It reads the SAME `pre` column `step show`'s `[pre]` marker reads, so the
+	// two surfaces cannot disagree about which gates were advisory. It is zero
+	// for actions, which have no pre phase.
+	Pre int `json:"pre"`
 }
 
 // GateRollup counts a run's gate results per gate name (R4).
 func GateRollup(db *sql.DB, runID int) ([]VerdictCount, error) {
-	return verdictRollup(db, `gate_results`, `gate`, `stub_entry`, runID)
+	return verdictRollup(db, `gate_results`, `gate`, `stub_entry`, `pre`, runID)
 }
 
 // ActionRollup is the same rollup over `action_results` (R5).
@@ -60,10 +77,11 @@ func GateRollup(db *sql.DB, runID int) ([]VerdictCount, error) {
 // shape — the alternative, omitting the column for one of the two seams, is
 // how the two definitions of "what outcomes exist" start to drift.
 func ActionRollup(db *sql.DB, runID int) ([]VerdictCount, error) {
-	// The empty stub column is the shape's one asymmetry, and it is a fact
-	// about the tables rather than an omission: only a GATE runs a
-	// trust-authorized command that an operator could have declared a stub.
-	return verdictRollup(db, `action_results`, `action`, ``, runID)
+	// The empty stub and pre columns are the shape's one asymmetry, and they
+	// are a fact about the tables rather than an omission: only a GATE runs a
+	// trust-authorized command that an operator could have declared a stub, and
+	// only a gate has a pre phase.
+	return verdictRollup(db, `action_results`, `action`, ``, ``, runID)
 }
 
 // verdictRollup is the shared body. The table and column names are INTERNAL
@@ -71,14 +89,19 @@ func ActionRollup(db *sql.DB, runID int) ([]VerdictCount, error) {
 // carries no injection surface — and the query is parameterized on everything
 // that does come from outside.
 func verdictRollup(
-	db *sql.DB, table, subject, stubColumn string, runID int,
+	db *sql.DB, table, subject, stubColumn, preColumn string, runID int,
 ) ([]VerdictCount, error) {
 	// A table with no stub column selects the literal 0 rather than being
 	// given a second query. One query means one definition of "pass" for both
-	// seams, which is the property the shared body exists to hold.
-	stubSum := `0`
+	// seams, which is the property the shared body exists to hold. `pre` is
+	// absent from `action_results` for the same reason and takes the same
+	// treatment.
+	stubSum, preSum := `0`, `0`
 	if stubColumn != "" {
 		stubSum = fmt.Sprintf("SUM(CASE WHEN %s = 1 THEN 1 ELSE 0 END)", stubColumn)
+	}
+	if preColumn != "" {
+		preSum = fmt.Sprintf("SUM(CASE WHEN %s = 1 THEN 1 ELSE 0 END)", preColumn)
 	}
 	rows, err := db.Query(fmt.Sprintf(
 		`SELECT %[2]s,
@@ -86,9 +109,10 @@ func verdictRollup(
 		        SUM(CASE WHEN verdict = 'fail' THEN 1 ELSE 0 END),
 		        SUM(CASE WHEN verdict = 'unmatched' THEN 1 ELSE 0 END),
 		        SUM(CASE WHEN verdict = 'skipped'   THEN 1 ELSE 0 END),
-		        %[3]s
+		        %[3]s,
+		        %[4]s
 		   FROM %[1]s WHERE run_id = ? GROUP BY %[2]s ORDER BY %[2]s`,
-		table, subject, stubSum), runID)
+		table, subject, stubSum, preSum), runID)
 	if err != nil {
 		return nil, fmt.Errorf("rolling up %s for %s: %w",
 			table, model.FormatRunID(runID), err)
@@ -99,6 +123,7 @@ func verdictRollup(
 			var v VerdictCount
 			if err := r.Scan(
 				&v.Name, &v.Pass, &v.Fail, &v.Unmatched, &v.Skipped, &v.Stub,
+				&v.Pre,
 			); err != nil {
 				return VerdictCount{}, fmt.Errorf("reading a %s rollup row: %w", table, err)
 			}
@@ -262,14 +287,18 @@ func VoteMetadataRollup(db *sql.DB, scope, prefix string) ([]MetadataKeyRollup, 
 // The proposals are selected by the same caller-supplied idempotency scope
 // and prefix VoteMetadataRollup reads by, and units stay opaque: summed and
 // counted, never interpreted.
-func VoteUsageRollup(db *sql.DB, scope, prefix string) ([]UnitTotal, error) {
+//
+// extraIDs widens the selection to proposals the caller attributed to the run
+// some OTHER way than the vote-step key family (DKT-584): reap-ack ballots and
+// conversational-gate proposals that name the run in their text. Membership is
+// a set test per vote row, so an id also matched by the prefix counts once.
+func VoteUsageRollup(db *sql.DB, scope, prefix string, extraIDs ...int) ([]UnitTotal, error) {
+	clause, args := proposalMembership(scope, prefix, extraIDs)
 	rows, err := db.Query(
 		`SELECT vu.unit, SUM(vu.quantity), COUNT(*) FROM vote_usage vu
 		  JOIN votes v ON v.id = vu.vote_id
-		 WHERE v.proposal_id IN (
-		       SELECT entity_id FROM idempotency_keys
-		        WHERE scope = ? AND key LIKE ? ESCAPE '\')
-		 GROUP BY vu.unit ORDER BY vu.unit`, scope, escapeLike(prefix)+"%")
+		 WHERE `+clause+`
+		 GROUP BY vu.unit ORDER BY vu.unit`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("rolling up vote usage: %w", err)
 	}
@@ -281,6 +310,96 @@ func VoteUsageRollup(db *sql.DB, scope, prefix string) ([]UnitTotal, error) {
 			}
 			return u, nil
 		})
+}
+
+// proposalMembership builds the WHERE fragment that selects a run's vote
+// casts: the idempotency-key family, plus any explicitly attributed proposal
+// ids. One builder for both vote_usage readers, so the rollup and its
+// coverage line cannot disagree about which casts belong to the run.
+//
+// The placeholder list is built from the COUNT of ids, never their values,
+// and every id is bound — the discipline ProposalStatusesTx states.
+func proposalMembership(scope, prefix string, extraIDs []int) (string, []any) {
+	clause := `v.proposal_id IN (
+	       SELECT entity_id FROM idempotency_keys
+	        WHERE scope = ? AND key LIKE ? ESCAPE '\')`
+	args := []any{scope, escapeLike(prefix) + "%"}
+	if len(extraIDs) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(extraIDs)), ",")
+		clause = "(" + clause + ` OR v.proposal_id IN (` + placeholders + `))`
+		for _, id := range extraIDs {
+			args = append(args, id)
+		}
+	}
+	return clause, args
+}
+
+// ProposalIDsNaming returns the ids of proposals whose description or
+// rationale names `token` as a whole word, ordered by id (DKT-584).
+//
+// It exists for the conversational-gate ballots a conductor opens with `vote
+// create` — an activation panel, say — which carry no idempotency key and no
+// step, and whose ONLY link to the run they gate is that their text names it
+// ("activation panel for RUN-40"). The LIKE narrows candidates in SQL; the
+// word-boundary check runs in Go because LIKE '%RUN-4%' would also match
+// RUN-40, and a run must never inherit another run's panels.
+func ProposalIDsNaming(db *sql.DB, token string) ([]int, error) {
+	if token == "" {
+		return nil, nil
+	}
+	pattern := "%" + escapeLike(token) + "%"
+	rows, err := db.Query(
+		`SELECT id, description, rationale FROM proposals
+		  WHERE description LIKE ? ESCAPE '\' OR rationale LIKE ? ESCAPE '\'
+		  ORDER BY id`, pattern, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("finding proposals naming %q: %w", token, err)
+	}
+	defer rows.Close()
+
+	var out []int
+	for rows.Next() {
+		var (
+			id                     int
+			description, rationale string
+		)
+		if err := rows.Scan(&id, &description, &rationale); err != nil {
+			return nil, fmt.Errorf("reading a proposal naming %q: %w", token, err)
+		}
+		if namesToken(description, token) || namesToken(rationale, token) {
+			out = append(out, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("finding proposals naming %q: %w", token, err)
+	}
+	return out, nil
+}
+
+// namesToken reports whether text contains token as a whole word: not
+// preceded by an ASCII letter or digit, and not followed by a digit — so
+// "RUN-4" never matches inside "RUN-40" or "XRUN-4", while "(RUN-4)" and
+// "RUN-4," match.
+func namesToken(text, token string) bool {
+	for from := 0; ; {
+		at := strings.Index(text[from:], token)
+		if at < 0 {
+			return false
+		}
+		start := from + at
+		end := start + len(token)
+		beforeOK := start == 0 || !isWordByte(text[start-1])
+		afterOK := end == len(text) || !(text[end] >= '0' && text[end] <= '9')
+		if beforeOK && afterOK {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+// isWordByte is namesToken's boundary alphabet: ASCII letters and digits.
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // rollupMetadataRows is the one counting loop both rollups share: raw bags in,
@@ -306,7 +425,7 @@ func rollupMetadataRows(rows *sql.Rows) ([]MetadataKeyRollup, error) {
 			if counts[key] == nil {
 				counts[key] = make(map[string]int)
 			}
-			counts[key][renderMetadataValue(value)]++
+			counts[key][RenderMetadataValue(value)]++
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -339,13 +458,19 @@ type MetadataValueCount struct {
 	Count int    `json:"count"`
 }
 
-// renderMetadataValue turns one opaque metadata value into the string the
+// RenderMetadataValue turns one opaque metadata value into the string the
 // rollup groups by.
 //
 // A non-string value is rendered as its JSON, which keeps `1` and `"1"`
 // DISTINCT — they are different values in the bag, and merging them would be
 // the rollup deciding they mean the same thing.
-func renderMetadataValue(v any) string {
+//
+// EXPORTED for DKT-868's per-step section, which renders the same column in the
+// same document: the rollup spells a value one way and a report that spelled the
+// per-step copy another would show a reader `1` in one section and `"1"` in the
+// next and invite them to conclude the two came from different bags. One
+// definition, so the two cannot disagree.
+func RenderMetadataValue(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
@@ -398,7 +523,11 @@ func (c VoteUsageCoverage) Silent() int { return c.Casts - c.Reported }
 // number. What it can do is stop the silence from looking like a zero, which is
 // this: a run whose seats all reported reads `12/12`, and one whose seats
 // reported nothing reads `0/12` instead of an absent section.
-func VoteUsageCoverageFor(db *sql.DB, scope, prefix string) (VoteUsageCoverage, error) {
+// extraIDs widens the count to explicitly attributed proposals exactly as
+// VoteUsageRollup's does (DKT-584), through the same membership builder — so
+// a cast counted in the rollup is always counted in its coverage line.
+func VoteUsageCoverageFor(db *sql.DB, scope, prefix string, extraIDs ...int) (VoteUsageCoverage, error) {
+	clause, args := proposalMembership(scope, prefix, extraIDs)
 	var out VoteUsageCoverage
 	err := db.QueryRow(
 		// COALESCE, because SUM over ZERO ROWS is NULL in SQLite and a run with
@@ -411,12 +540,53 @@ func VoteUsageCoverageFor(db *sql.DB, scope, prefix string) (VoteUsageCoverage, 
 		              SELECT 1 FROM vote_usage vu WHERE vu.vote_id = v.id
 		            ) THEN 1 ELSE 0 END), 0)
 		   FROM votes v
-		  WHERE v.proposal_id IN (
-		        SELECT entity_id FROM idempotency_keys
-		         WHERE scope = ? AND key LIKE ? ESCAPE '\')`,
-		scope, escapeLike(prefix)+"%").Scan(&out.Casts, &out.Reported)
+		  WHERE `+clause,
+		args...).Scan(&out.Casts, &out.Reported)
 	if err != nil {
 		return VoteUsageCoverage{}, fmt.Errorf("counting vote usage coverage: %w", err)
 	}
 	return out, nil
+}
+
+// SilentVoteSeatRow is one cast VoteUsageCoverageFor counts as silent: which
+// seat, on which proposal, reported no spend at all (DKT-733).
+//
+// The coverage COUNT told an operator that 12 of 57 seats went silent and
+// nothing anywhere said WHICH twelve — so the backfill verb that exists
+// precisely to close the gap (`vote backfill-usage`, DKT-115) could not be
+// aimed. This row is the identity behind the count.
+//
+// The seating path is deliberately NOT here: this package selects by an
+// opaque scope and prefix and cannot know which key family or run-naming rule
+// minted a proposal. The engine, which owns those spellings, labels each row
+// (engine.SilentVoteSeat).
+type SilentVoteSeatRow struct {
+	ProposalID int
+	Voter      string
+	Role       string
+}
+
+// SilentVoteSeatsFor enumerates the casts VoteUsageCoverageFor counts as
+// silent, through the SAME membership builder — so the list and the count it
+// explains cannot disagree about which casts belong to the run. Ordered by
+// (proposal, voter): a total key, per R9.
+func SilentVoteSeatsFor(db *sql.DB, scope, prefix string, extraIDs ...int) ([]SilentVoteSeatRow, error) {
+	clause, args := proposalMembership(scope, prefix, extraIDs)
+	rows, err := db.Query(
+		`SELECT v.proposal_id, v.voter_name, v.voter_role
+		   FROM votes v
+		  WHERE `+clause+`
+		    AND NOT EXISTS(SELECT 1 FROM vote_usage vu WHERE vu.vote_id = v.id)
+		  ORDER BY v.proposal_id, v.voter_name`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing silent vote seats: %w", err)
+	}
+	return scanRows(rows, "silent vote seats",
+		func(r *sql.Rows) (SilentVoteSeatRow, error) {
+			var row SilentVoteSeatRow
+			if err := r.Scan(&row.ProposalID, &row.Voter, &row.Role); err != nil {
+				return row, err
+			}
+			return row, nil
+		})
 }

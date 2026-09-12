@@ -38,7 +38,12 @@ func followTrustEvent(t *testing.T, conn *sql.DB, name string) {
 	sum := sha256.Sum256([]byte(name))
 	err := engine.RecordTrustEvent(
 		conn, engine.EventTrustAdded,
-		engine.TrustGrant{Name: name, ArgvSHA256: fmt.Sprintf("%x", sum), Repo: "repo"},
+		// Actor and Cwd are REQUIRED (DKT-595) — the writer refuses an
+		// unattributed grant — so even this plumbing fixture supplies them.
+		engine.TrustGrant{
+			Name: name, ArgvSHA256: fmt.Sprintf("%x", sum), Repo: "repo",
+			Actor: "tester", Cwd: "/repo",
+		},
 		time.Now().UnixMilli())
 	if err != nil {
 		t.Fatalf("RecordTrustEvent(%q): %v", name, err)
@@ -231,6 +236,138 @@ func TestFollowCursorNeverRepeatsOrSkips(t *testing.T) {
 			t.Errorf("seq %d was printed %d times: the follow REPEATED an event",
 				e.Seq, printed[e.Seq])
 		}
+	}
+}
+
+// TestFollowTailStartsAtTheNewestN is DKT-752: `--follow --tail N` opens at the
+// newest N and then follows, instead of replaying the whole retained history.
+//
+// THE ASSERTION IS ON THE HISTORICAL HALF, not on the total. A follow that
+// printed the newest 3 and then the live rows is right; a follow that printed
+// all 30 first and then the live rows is the bug, and both end with the same
+// live events on stdout. So the test pins WHICH events preceded the live ones:
+// at most N of them, and specifically the last N seqs in the store when the
+// follow opened.
+func TestFollowTailStartsAtTheNewestN(t *testing.T) {
+	conn := newTestDB(t)
+
+	// A history comfortably larger than the tail, so "the newest N" and
+	// "everything" are different answers.
+	const history = 30
+	for i := 0; i < history; i++ {
+		followTrustEvent(t, conn, fmt.Sprintf("old-%d", i))
+	}
+	before, err := engine.ListEvents(conn, engine.EventQuery{})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	if len(before.Events) != history {
+		t.Fatalf("fixture wrote %d events, want %d", len(before.Events), history)
+	}
+	const tail = 3
+	newest := make([]int64, 0, tail)
+	for _, e := range before.Events[history-tail:] {
+		newest = append(newest, e.Seq)
+	}
+	oldest := before.Events[0].Seq
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.query.Tail = tail
+
+	done := make(chan error, 1)
+	go func() { done <- followEvents(ctx, opts) }()
+
+	// The opening page must land before the live rows are written, or a slow
+	// first cycle could tail a feed that already contains them and the
+	// historical half would be unidentifiable.
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= tail })
+	opened := followSeqs(t, stdout.String())
+
+	// Then it FOLLOWS: rows written after the tail still arrive.
+	const live = 2
+	for i := 0; i < live; i++ {
+		followTrustEvent(t, conn, fmt.Sprintf("live-%d", i))
+	}
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= tail+live })
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled follow returned an error")
+
+	seqs := followSeqs(t, stdout.String())
+	if len(seqs) < tail+live {
+		t.Fatalf("the follow printed %v, want the newest %d then %d live events",
+			seqs, tail, live)
+	}
+
+	// The acceptance criterion: AT MOST N historical events, and they are the
+	// newest N.
+	historical := seqs[:len(seqs)-live]
+	if len(historical) != tail {
+		t.Errorf("the follow printed %d historical events before the live ones, want at most %d"+
+			" (--tail was ignored and the full history replayed): %v",
+			len(historical), tail, historical)
+	}
+	for i := range newest {
+		if i >= len(historical) || historical[i] != newest[i] {
+			t.Fatalf("the follow opened on %v, want the newest %d seqs %v",
+				historical, tail, newest)
+		}
+	}
+	for _, seq := range seqs {
+		if seq == oldest {
+			t.Errorf("the follow printed seq %d, the OLDEST retained event: "+
+				"--tail did not move the starting cursor", oldest)
+		}
+	}
+
+	// The opening page itself was the tail, not a first slice of the history.
+	if len(opened) > tail {
+		t.Errorf("the opening cycle printed %d events, want at most --tail=%d: %v",
+			len(opened), tail, opened)
+	}
+
+	// Nothing is printed twice: the tail is a STARTING CURSOR, so the cycle
+	// after it reads with --since rather than re-selecting the same newest N.
+	seen := make(map[int64]bool, len(seqs))
+	for _, seq := range seqs {
+		if seen[seq] {
+			t.Errorf("seq %d was printed twice; --tail was applied to more than the first cycle",
+				seq)
+		}
+		seen[seq] = true
+	}
+}
+
+// TestFollowTailOnAnEmptyFeedStillFollows is the boundary the tail's
+// "first cycle only" rule turns on: an opening tailed read over an EMPTY store
+// returns nothing, so the cursor never advances — and the follow must still
+// print what is written next rather than sitting on a spent tail forever.
+func TestFollowTailOnAnEmptyFeedStillFollows(t *testing.T) {
+	conn := newTestDB(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.query.Tail = 5
+
+	done := make(chan error, 1)
+	go func() { done <- followEvents(ctx, opts) }()
+
+	const live = 3
+	for i := 0; i < live; i++ {
+		followTrustEvent(t, conn, fmt.Sprintf("after-%d", i))
+	}
+
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= live })
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled follow returned an error")
+
+	if seqs := followSeqs(t, stdout.String()); len(seqs) != live {
+		t.Fatalf("a tailed follow over an initially empty feed printed %v, want %d events",
+			seqs, live)
 	}
 }
 

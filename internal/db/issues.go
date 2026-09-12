@@ -1291,6 +1291,22 @@ func ClearProjectDataTx(tx *sql.Tx, projectID int) error {
 	return nil
 }
 
+// GapIssue is the shape one recorded gap materializes into: the mechanically
+// derived title and the verbatim body, plus whatever ranking the gap's own
+// header block declared.
+//
+// Priority and Kind carry the CALLER's decision, not a parse: an empty
+// Priority means "the gap declared none" and lands `none`, an empty Kind lands
+// `task`. Both defaults are applied here, once, so a caller that declares
+// nothing gets exactly the row this insert always wrote (DKT-1082).
+type GapIssue struct {
+	Title       string
+	Description string
+	Priority    model.Priority
+	Kind        model.IssueKind
+	Labels      []string
+}
+
 // InsertGapIssueTx materializes a backlog issue from a recorded gap artifact
 // (DKT-72), inside the completion saga's transaction, and relates it to the
 // issue whose step recorded the gap.
@@ -1301,13 +1317,29 @@ func ClearProjectDataTx(tx *sql.Tx, projectID int) error {
 // claim with no record behind it. `relates_to` rather than a directional
 // relation: a gap is out-of-scope BY DEFINITION, so it must not block the
 // issue that surfaced it.
-func InsertGapIssueTx(tx *sql.Tx, projectID int, title, description string, relatedIssueID int) (int, error) {
+//
+// The ranking rides in the same transaction as the row it ranks (DKT-1082):
+// a drained high-severity cluster that landed `priority none` was invisible to
+// every priority-ordered planning pass, which is the same "residue nothing
+// re-reads" failure one layer up.
+func InsertGapIssueTx(tx *sql.Tx, projectID int, gap GapIssue, relatedIssueID int) (int, error) {
+	projectID = projectOrDefault(projectID)
+
+	priority := gap.Priority
+	if priority == "" {
+		priority = model.PriorityNone
+	}
+	kind := gap.Kind
+	if kind == "" {
+		kind = model.IssueKindTask
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.Exec(
 		`INSERT INTO issues (project_id, title, description, status, priority, kind, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		projectOrDefault(projectID), title, description,
-		string(model.StatusBacklog), string(model.PriorityNone), string(model.IssueKindTask),
+		projectID, gap.Title, gap.Description,
+		string(model.StatusBacklog), string(priority), string(kind),
 		now, now,
 	)
 	if err != nil {
@@ -1318,6 +1350,21 @@ func InsertGapIssueTx(tx *sql.Tx, projectID int, title, description string, rela
 		return 0, fmt.Errorf("materializing a gap issue: %w", err)
 	}
 	id := int(id64)
+
+	// Labels are a per-project namespace, and the gap issue's own project is
+	// the one they live in — the same rule `issue label add` follows.
+	for _, name := range gap.Labels {
+		labelID, err := findOrCreateLabel(tx, projectID, name)
+		if err != nil {
+			return 0, fmt.Errorf("labelling gap issue %d: %w", id, err)
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)`,
+			id, labelID,
+		); err != nil {
+			return 0, fmt.Errorf("labelling gap issue %d: %w", id, err)
+		}
+	}
 
 	if _, err := tx.Exec(
 		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)

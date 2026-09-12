@@ -102,16 +102,55 @@ func resolvedTargetFor(
 	if spec == nil || len(spec.Inputs) == 0 {
 		return "", "", nil
 	}
-	issue, err := contextIssue(tx, step.RunID, step.IssueID)
+	issue, linked, err := contextIssue(tx, step.RunID, step.IssueID)
 	if err != nil {
 		return "", "", err
 	}
-	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts)
+	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts, linked)
 	if err != nil {
 		return "", "", err
 	}
 	sha, worktree = resolveTarget(inputs)
 	return sha, worktree, nil
+}
+
+// stepTargetRef is resolvedTargetFor for a reader holding ONLY the step —
+// `step show` (DKT-1056). It loads the artifact snapshot itself, because this
+// caller answers about one step rather than iterating a manifest.
+//
+// THE GUARD IS THE POINT. A step whose definition does not declare `issue.diff`
+// can carry no round record, so it pays for no input resolution at all and
+// reports nothing: `step show` is a conductor's most-repeated read, and making
+// every one of them resolve a whole input set to learn "no target" would tax
+// the common case for the rare one. The same predicate the dispatch verbs'
+// stale-target collector uses (staleTargetCandidates), for the same reason.
+//
+// It returns the empty pair — never a fabricated one — for a step with no
+// resolvable round record. A vote panel seats itself on what this says; a
+// plausible-looking sha invented here would seat judges on the wrong tree,
+// which is worse than seating them on their own HEAD, because it is silent.
+//
+// A step that has been handed out resolves over the artifacts its claim
+// recorded, exactly as its bundle does (recordedClaim, DKT-1054): the pair
+// `step show` reports is the pair `step context` carries, on every step, or
+// the two verbs would disagree about a completed step's target the moment a
+// later round — or a re-pin of its producer's diff — recorded a newer one.
+func stepTargetRef(
+	tx *sql.Tx, sched *Scheduler, step *db.Step,
+) (sha, worktree string, err error) {
+	spec := materializedSpec(sched.defs[step.WorkflowID], step, sched.holdTally)
+	if spec == nil || !consumesIssueDiff(spec) {
+		return "", "", nil
+	}
+	source := liveArtifacts
+	if recordedClaim(step) {
+		source = recordedArtifacts
+	}
+	artifacts, err := source(tx, step)
+	if err != nil {
+		return "", "", err
+	}
+	return resolvedTargetFor(tx, sched, step, spec, artifacts)
 }
 
 // runPreGates executes the step's pre-gates, one at a time, each result
@@ -183,7 +222,19 @@ func runPreGates(
 		}
 		sc := StepContext{
 			Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
-			Scope: scope, WorkRoot: workRoot,
+			// The step's own id (DKT-1186), the same export the saga's gates
+			// get: a pre-gate runs BEFORE the claim hands over the bundle, so
+			// the child's only route to the step's declared inputs is asking
+			// the engine for them by reference.
+			StepID: step.ID,
+			Scope:  scope, WorkRoot: workRoot,
+			// Empty unless the tree was RECONSTRUCTED (DKT-1166). A gate
+			// measuring a tree that stays on disk keeps its persistent linter
+			// caches; one measuring a tree docket is about to delete gets
+			// caches docket deletes with it, so no cached issue can outlive
+			// the path it names and be replayed with its `//nolint` lookup
+			// pointing at a file that is gone.
+			CacheRoot: scratch.Cache,
 		}
 
 		var rows []GateResultRow

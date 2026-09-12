@@ -70,6 +70,34 @@ type StepRow struct {
 	//
 	// The entries are OPAQUE (§11.1): core counts them and never interprets one.
 	Voters []string `json:"voters,omitempty"`
+	// Model, Effort, and Variant are resolved from the run's pinned
+	// policy.toml, present on an executor-class row (Executor set) the run
+	// can still offer — `pending` in the table, whether it renders `ready`,
+	// `staged`, or blocked — wherever the row is rendered: `next --run`, a
+	// dispatch manifest, `dispatch verify`'s recomputation, `step show`, and
+	// a context bundle's `step`. The value is the seat's standing [executors]
+	// variant, walked forward through [variants].escalate_to by this row's
+	// attempt (and, for a listed round executor, its round ordinal),
+	// redirected around any [security]-forbidden model, and clamped to
+	// [security].ceiling on a sensitive row — see
+	// internal/engine/policy_resolve.go.
+	//
+	// Absent — never present, never empty strings — when the run pins no
+	// policy.toml, when the row is not an executor row, or once the step has
+	// been handed out: the walk is keyed by the attempt an OFFER carries, and
+	// a claimed, running, or finished step's attempt already counts the claim
+	// that took it, so resolving it again would report one hop above what was
+	// actually spawned. The routing a claim ran under is in its claim
+	// metadata. A caller reading a row before this feature existed sees
+	// byte-identical rows.
+	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Variant string `json:"variant,omitempty"`
+	// VoterAssignments carries the SAME resolution per voter, present on a
+	// vote step (Voters set) under the same offer rule — a voter has no
+	// attempt or round to walk, so each resolves to its declared standing
+	// variant (see (*policyDoc).ResolveSeat). Order matches Voters.
+	VoterAssignments []VoterAssignment `json:"voter_assignments,omitempty"`
 	// Proposal is the display id of the proposal this vote step opened, once
 	// one has been opened. It is absent before that — a vote step whose
 	// proposal has not been created yet has no ballot to point at, and an
@@ -122,9 +150,24 @@ type StepRow struct {
 	// (zero on a pre-v23 claim means "no recorded breakdown", not "nothing
 	// happened"). Both sample at the same moment Attempt does. `omitempty`,
 	// so a row with no counted outcome serializes exactly as before.
-	FailedAttempts int     `json:"failed_attempts,omitempty"`
-	ReapedClaims   int     `json:"reaped_claims,omitempty"`
-	ExpectedCost   float64 `json:"expected_cost"`
+	FailedAttempts int `json:"failed_attempts,omitempty"`
+	ReapedClaims   int `json:"reaped_claims,omitempty"`
+	// PriorAttemptEnd names how the MOST RECENT claim to leave this step
+	// ended — "reaped" or "failed" — so a re-offer of a reaped-then-re-run
+	// step says so directly, instead of leaving a router to infer it from
+	// FailedAttempts/ReapedClaims, which answer "how many of each ever" and
+	// go ambiguous the moment a step's history mixes both (DKT-1279).
+	//
+	// RUN-80 DISPATCH-400 is the motivating incident: ten leases were reaped
+	// after a session was killed mid-wave, the steps re-dispatched at
+	// `attempt` incremented, and an on_failure escalation policy read that as
+	// "failed once" and routed all ten a tier up — a reap is a liveness
+	// event, not a quality verdict, and nothing on the row said which one had
+	// happened. `omitempty`, so a step that has never had a claim end this
+	// way — never claimed, or every claim so far recorded — serializes
+	// exactly as before.
+	PriorAttemptEnd string  `json:"prior_attempt_end,omitempty"`
+	ExpectedCost    float64 `json:"expected_cost"`
 	// LeaseTTLS is SECONDS, per §11.4's `_s` suffix. Resolved from the
 	// workflow's [limits] for the step's class, then `lease.ttl.<class>`, then
 	// `lease.ttl.default`.
@@ -205,8 +248,27 @@ type StepRow struct {
 	// see the window that reconciles them. `omitempty`, so every row outside
 	// the window serializes exactly as before; offer rows (`next`, `dispatch
 	// open`) never carry it because the offer path reaps for real first.
+	//
+	// THE PAIRING HAS ONE EXCEPTION: a run that is not `active`. The field is
+	// `Scheduler.Expired`, and that predicate is suspended off an active run
+	// (ready.go), so on a `waiting-human` run holding a lapsed-but-unreaped
+	// claim — the ordinary mid-wave human hold — this field stays unset while
+	// `run repin` does name the lapse (DKT-1791). Deliberate, not a drift: the
+	// label promises the reap `next`/`claim` will perform, and neither reaps
+	// anything while the run is parked. `Status` stays `claimed` there for the
+	// same reason, and `step show`'s rendered `expires:` line shows the lapse
+	// on a paused run; `step reap` is the verb that clears such a claim.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// VoterAssignment is one vote step voter's resolved {model, effort, variant}
+// (DKT-1282), riding on StepRow.VoterAssignments.
+type VoterAssignment struct {
+	Voter   string `json:"voter"`
+	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Variant string `json:"variant,omitempty"`
 }

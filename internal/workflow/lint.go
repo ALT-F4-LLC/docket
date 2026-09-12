@@ -246,6 +246,13 @@ func lintInputOrdering(def *Definition, g *stepGraph) error {
 			if _, ok := LatestKind(input); ok {
 				continue
 			}
+			// `issue.linked.<relation>.<kind>` (DKT-547) likewise names no
+			// producer step: its artifact was recorded under ANOTHER issue and
+			// pinned at activation, so it exists before any step of this
+			// workflow runs — there is no ordering for L4 to enforce.
+			if _, _, ok := LinkedInput(input); ok {
+				continue
+			}
 			m := inputShape.FindStringSubmatch(input)
 			if m == nil {
 				continue // V11 already rejected it.

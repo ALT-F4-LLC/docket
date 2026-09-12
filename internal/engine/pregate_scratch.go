@@ -40,6 +40,22 @@ type scratchTree struct {
 	// Dir is the reconstructed checkout, or "" when reconstruction was not
 	// attempted or did not succeed.
 	Dir string
+	// Cache is a scratch cache root that lives exactly as long as Dir, handed
+	// to the gate's children as their linter result caches (DKT-1166).
+	//
+	// It is a SIBLING of the reconstruction, never a directory inside it: the
+	// tree is the subject under measurement, and a cache written into it would
+	// show up in `git status`, in a linter's own file walk, and in any gate
+	// that hashes the tree.
+	//
+	// WHY IT EXISTS AT ALL. A result cache keyed by package content but
+	// carrying absolute source paths outlives the tree it was written from.
+	// Reconstructions are deleted within the minute, so entries written from
+	// one poison every later run over the same content — the linter re-opens a
+	// path that is gone, cannot find the `//nolint` comment there, and
+	// re-emits an issue the source suppressed (harness RUN-64/STEP-2939).
+	// Scoping the cache to the tree's own lifetime removes the carrier.
+	Cache string
 	// parent is the checkout whose object database holds the sha, and the one
 	// that must be told to forget the worktree on removal. `git worktree
 	// remove` run from anywhere else does not know about it.
@@ -91,7 +107,19 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 		os.RemoveAll(dir)
 		return scratchTree{}
 	}
-	return scratchTree{Dir: dir, parent: parent}
+
+	// The tree-lifetime cache root (DKT-1166). Its failure is treated exactly
+	// like the worktree's: no reconstruction, and the caller records `skipped`.
+	// That is the same trade this file already makes everywhere else — a
+	// measurement taken without it can report a suppressed issue as live, and
+	// this file's whole doctrine is that measuring the WRONG thing is the
+	// defect while measuring nothing is merely a gap.
+	cache, err := os.MkdirTemp("", "docket-pregate-cache-")
+	if err != nil {
+		(scratchTree{Dir: dir, parent: parent}).release()
+		return scratchTree{}
+	}
+	return scratchTree{Dir: dir, Cache: cache, parent: parent}
 }
 
 // release removes the scratch tree and its administrative record.
@@ -109,6 +137,13 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 // to report a housekeeping problem. `git worktree prune` reclaims anything left
 // behind.
 func (s scratchTree) release() {
+	// The cache root goes whatever else happens, and BEFORE the early return:
+	// it is a sibling of the tree, so a scratchTree that never got a Dir can
+	// still be holding one, and a cache left behind is the exact carrier this
+	// mechanism exists to destroy (DKT-1166).
+	if s.Cache != "" {
+		_ = os.RemoveAll(s.Cache)
+	}
 	if s.Dir == "" {
 		return
 	}

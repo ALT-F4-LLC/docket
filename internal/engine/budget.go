@@ -3,9 +3,11 @@ package engine
 import (
 	"database/sql"
 	"fmt"
+	"math"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // BUDGETS — engine-core §7, implemented clause by clause (TDD §4).
@@ -270,11 +272,27 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 	}
 }
 
-// RunFloorTx is §4.3, the whole of it:
+// RunFloorTx is §4.3, plus DKT-584's vote-step accrual:
 //
-//	SELECT COALESCE(SUM(s.expected_cost), 0)
-//	  FROM events e JOIN steps s ON s.id = e.step_id
-//	 WHERE e.run_id = ? AND e.kind = 'step-claimed'
+//	  SELECT COALESCE(SUM(s.expected_cost), 0)
+//	    FROM events e JOIN steps s ON s.id = e.step_id
+//	   WHERE e.run_id = ? AND e.kind = 'step-claimed'
+//	+ SELECT COALESCE(SUM(expected_cost), 0)
+//	    FROM steps WHERE run_id = ? AND kind = 'vote'
+//
+// THE SECOND SUM IS DKT-584. A vote step is unclaimable by construction
+// (§6.15), so it can never write the `step-claimed` event the first sum counts
+// — which made a declared `expected_cost` on a `type="vote"` step inert: the
+// author stated what the panel would cost and the floor could not see it
+// (RUN-34 ran 40.6% of its output tokens through seats the budget never saw).
+// A vote step therefore accrues AT MATERIALIZATION — the step row's existence
+// is the engine-owned fact, written at expansion (or when the engine mints a
+// held ballot), exactly as the claim event is for executor work. It accrues
+// once per row: a loop's next ordinal is a new row and re-accrues (B10's
+// analogue), and a materialized held ballot accrues the configured
+// `vote.hold.cost`. The reservation side is adjusted to match — see
+// reservableCost: a vote step's cost is already IN the floor, so R7 and the
+// offer must not reserve it a second time.
 //
 // Every clause of §4.3's table falls out of this query rather than needing its
 // own code:
@@ -293,25 +311,111 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 //   - B5, the value accrued is the STEP ROW's `expected_cost`, materialized at
 //     expansion from the pinned definition and never re-read from the live
 //     `workflows` table. A run pins its definitions; its floor is computed from
-//     what it pinned.
+//     what it pinned. DKT-867 adds ONE exception, per claim rather than per
+//     step: a claim whose dispatcher declared a variant-scaled cost (`step
+//     claim --cost-multiplier`) accrues the scaled cost its own `step-claimed`
+//     event carries in `data.expected_cost`, and the step row's declaration is
+//     only the fallback. The event is still the engine-owned fact — the scaled
+//     number was committed WITH the claim, in the same append-only log the
+//     floor has always summed — so replay, audit, and the no-lost-update
+//     property (C4) are untouched. Events of non-terminal runs are unprunable
+//     (§3), so enforcement can never lose a live run's scaled accruals.
 //
 // It is exported because `run report` computes the same number from outside this
 // package and the two must not be able to disagree — a report that recomputed
 // the floor its own way would be a second source of truth for the number a
 // breach is attributed to.
 func RunFloorTx(tx *sql.Tx, runID int) (float64, error) {
+	// The `json_valid` guard follows events_read.go's discipline: SQLite's
+	// `json_extract` ABORTS on malformed input rather than returning NULL, and
+	// a hand-edited event row must degrade to the step's declared cost, not
+	// take the whole budget check down. A pre-DKT-867 claim event's data
+	// carries no `expected_cost` key, so it extracts NULL, falls through to
+	// `s.expected_cost`, and historical floors are byte-for-byte what they
+	// were.
 	var floor float64
 	err := tx.QueryRow(
-		`SELECT COALESCE(SUM(s.expected_cost), 0)
-		   FROM events e JOIN steps s ON s.id = e.step_id
-		  WHERE e.run_id = ? AND e.kind = ?`,
-		runID, EventStepClaimed,
+		`SELECT COALESCE((SELECT SUM(COALESCE(
+		           CASE WHEN json_valid(e.data)
+		                THEN json_extract(e.data, '$.expected_cost') END,
+		           s.expected_cost))
+		           FROM events e JOIN steps s ON s.id = e.step_id
+		          WHERE e.run_id = ? AND e.kind = ?), 0)
+		      + COALESCE((SELECT SUM(expected_cost)
+		           FROM steps WHERE run_id = ? AND kind = ?), 0)`,
+		runID, EventStepClaimed, runID, workflow.TypeVote,
 	).Scan(&floor)
 	if err != nil {
 		return 0, fmt.Errorf("computing the floor for %s: %w",
 			model.FormatRunID(runID), err)
 	}
 	return floor, nil
+}
+
+// reservableCost is the cost a budget check may RESERVE for one step — the
+// number `spend() + cost <= cap` adds on top of the snapshot.
+//
+// A vote step's declared cost is already in the floor the moment its row
+// exists (RunFloorTx's second sum, DKT-584), so reserving it again at R7 or in
+// the offer would count the same declaration twice and refuse a claimable
+// batch a correct arithmetic admits. Every other step's cost accrues at claim,
+// so it is reserved here exactly as before.
+func reservableCost(step *db.Step) float64 {
+	if step.Kind == workflow.TypeVote {
+		return 0
+	}
+	return step.ExpectedCost
+}
+
+// VARIANT-AWARE DECLARED COST — DKT-867, the disposition.
+//
+// The defect: `expected_cost` is declared once per step template, so a fix
+// step that a dispatcher escalated to a far pricier executor variant accrued
+// exactly what its cheap sibling did (RUN-60 STEP-2752 vs STEP-2769: a 22.51M-
+// token escalated attempt and a 1.83M ordinary one priced identically), and
+// `budget.spend` sat at the floor in every measured run — escalation hops were
+// invisible in the cap's own currency.
+//
+// Of DKT-867's two named remedies, the ledger-reading one is NOT taken here,
+// for two reasons the code already states: (1) its safe form ALREADY EXISTS —
+// DKT-238's measured dimension (`--usage-budget` + `budget.usage.unit`) is cap
+// enforcement over the reported ledger, kept as a SEPARATE cap precisely
+// because declared units and token counts are incommensurable (see
+// budgetSnapshot.usageCap: `max()` over 280 declared units and hundreds of
+// millions of tokens only ever answers the second); (2) making the token
+// ledger the DECLARED cap's currency would require core to own a
+// token-to-cap-unit conversion per variant — a pricing table keyed by model
+// names, which the genericity rule (docs/design/genericity.md) forbids
+// outright and which redesigns the whole ledger for a defect that is narrower
+// than that.
+//
+// What IS taken is the variant-aware declared cost, placed where genericity
+// allows it: the party that RESOLVES a step to a variant is the dispatcher, at
+// claim time, so the dispatcher declares the scaling (`step claim
+// --cost-multiplier`) and core does with the number exactly what it does with
+// every other declared cost — records it as an engine-owned fact (in the
+// claim's own `step-claimed` event, same transaction, same append-only log),
+// sums it (RunFloorTx), and reserves it at the cap (budgetAdmits /
+// enforceBudgetTx). Core never learns what a variant is; it learns that THIS
+// claim costs N times what the definition guessed, from the one party in a
+// position to know. An escalated hop is therefore priced at the cap the
+// moment it is claimed, and the measured dimension remains the backstop for
+// spend no declaration predicted.
+
+// validateCostMultiplier refuses a `--cost-multiplier` that is not a positive
+// finite number. Zero means UNSET (the flag was never passed) and is valid; an
+// explicit zero is refused at the CLI, because a free escalated claim would
+// let a dispatcher erase an accrual the workflow author declared — the same
+// direction B13 forbids for reported usage.
+func validateCostMultiplier(m float64) error {
+	if m == 0 {
+		return nil
+	}
+	if math.IsNaN(m) || math.IsInf(m, 0) || m < 0 {
+		return validationErr(
+			"--cost-multiplier must be a positive finite number, got %g", m)
+	}
+	return nil
 }
 
 // `--usage` — recorded, capped, opaque (§4.9).
@@ -392,6 +496,24 @@ func cacheRunFloorTx(tx *sql.Tx, runID int) error {
 // and budget is the most local of all: it is the only clause whose answer
 // depends on the specific step's cost.
 func (s *Scheduler) budgetHeadroom(step *db.Step) bool {
+	// The cost reserved is reservableCost, not ExpectedCost: a vote step's
+	// declared cost already sits in the floor (DKT-584), and reserving it here
+	// too would refuse the step for its own accrual.
+	//
+	// R7 reserves the DECLARED cost by construction: the offer cannot know
+	// which variant a dispatcher will resolve the step to, so the claim path
+	// re-checks with the dispatcher-declared scaled cost via budgetAdmits
+	// (DKT-867).
+	return s.budgetAdmits(step, reservableCost(step))
+}
+
+// budgetAdmits is budgetHeadroom with the cost made explicit — the claim
+// path's entry point (DKT-867). The offer reserves a step's DECLARED cost
+// (budgetHeadroom above); a claim that arrives with a dispatcher-declared
+// variant scaling re-runs the same arithmetic over the same snapshot with the
+// cost that will actually accrue, so an escalated claim is priced at the cap
+// as what it is rather than as what the definition guessed.
+func (s *Scheduler) budgetAdmits(step *db.Step, cost float64) bool {
 	// BOTH dimensions must admit (DKT-238). They are independent caps over
 	// different quantities, so neither can vouch for the other, and a step
 	// passes only when it crosses neither.
@@ -399,13 +521,13 @@ func (s *Scheduler) budgetHeadroom(step *db.Step) bool {
 		if s.budgetHolds == nil {
 			s.budgetHolds = make(map[string]float64)
 		}
-		s.budgetHolds[step.Instance] = step.ExpectedCost
+		s.budgetHolds[step.Instance] = cost
 		return false
 	}
 	if s.budget.unlimited() {
 		return true
 	}
-	if s.budget.admits(step.ExpectedCost) {
+	if s.budget.admits(cost) {
 		return true
 	}
 	// Record the withholding so the offer can SAY it (DKT-242). Denying a step
@@ -415,7 +537,7 @@ func (s *Scheduler) budgetHeadroom(step *db.Step) bool {
 	if s.budgetHolds == nil {
 		s.budgetHolds = make(map[string]float64)
 	}
-	s.budgetHolds[step.Instance] = step.ExpectedCost
+	s.budgetHolds[step.Instance] = cost
 	return false
 }
 
@@ -486,8 +608,14 @@ func UsageBudgetBreachReason(spend, cap float64, unit, instance string) string {
 // the flip and returns the error. That ordering is deliberate: the pause and the
 // refusal are one fact, and a refusal that rolled back its own pause would leave
 // a run that refuses every claim while reporting itself active.
-func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *db.Step, nowMS int64) error {
-	if sched.budgetHeadroom(step) {
+//
+// `cost` is the amount THIS claim would accrue — the step's reservable cost on
+// an ordinary claim, or the dispatcher-declared scaled cost when the claim
+// carries a `--cost-multiplier` (DKT-867). It is a parameter rather than
+// re-derived from the step because the step row cannot know which variant the
+// dispatcher resolved.
+func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *db.Step, cost float64, nowMS int64) error {
+	if sched.budgetAdmits(step, cost) {
 		return nil
 	}
 

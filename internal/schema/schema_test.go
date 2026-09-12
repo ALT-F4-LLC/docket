@@ -207,3 +207,52 @@ func TestTheAnnotationConstrainsNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestRequiredPropertiesAreReadFromTheDocument is what lets a packet state the
+// payload contract without a worker fetching the schema: the keys a payload
+// element must carry, in the author's declared order.
+func TestRequiredPropertiesAreReadFromTheDocument(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "array of objects reads the item schema",
+			body: `{"type": "array", "items": {"type": "object",
+  "properties": {"title": {"type": "string"}, "severity": {"type": "string"}},
+  "required": ["title", "severity"]}}`,
+			want: []string{"title", "severity"},
+		},
+		{
+			name: "object document reads the root",
+			body: `{"type": "object",
+  "properties": {"id": {"type": "string"}, "status": {"type": "string"}},
+  "required": ["id", "status"]}`,
+			want: []string{"id", "status"},
+		},
+		{
+			name: "no required clause yields none",
+			body: `{"type": "array", "items": {"type": "object",
+  "properties": {"note": {"type": "string"}}}}`,
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, err := Compile("req", 1, []byte(tc.body))
+			testsupport.Must(t, err, "compiling: %v", err)
+
+			got := reg.RequiredProperties()
+			if len(got) != len(tc.want) {
+				t.Fatalf("RequiredProperties() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("RequiredProperties() = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}

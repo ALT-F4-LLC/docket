@@ -29,8 +29,12 @@ type AddRequest struct {
 	// Stub declares the argv a placeholder rather than the check its name
 	// implies (DKT-265). It changes no execution behavior; it travels with the
 	// verdict so a hollow pass reads as hollow.
-	Stub    bool
-	Timeout string
+	Stub bool
+	// StubReason says why the entry is a stub and which issue tracks replacing
+	// it (DKT-607). Only meaningful alongside Stub; an add that supplies a
+	// reason without the declaration is refused.
+	StubReason string
+	Timeout    string
 	// Network is the host list this command must reach. It declares
 	// a requirement; it grants nothing.
 	Network []string
@@ -230,6 +234,12 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 	if len(req.Argv) == 0 {
 		return Entry{}, nil, fmt.Errorf("%w: a trust entry needs a command; pass it after `--`", ErrParse)
 	}
+	// The same contradiction parse refuses in a hand-edited file (DKT-607),
+	// refused at the door: a reason describes a stub, and an add carrying one
+	// without the declaration meant one of the two flags is a mistake.
+	if req.StubReason != "" && !req.Stub {
+		return Entry{}, nil, fmt.Errorf("%w: --stub-reason describes a stub entry; pass --stub with it or drop the reason", ErrParse)
+	}
 
 	e := Entry{
 		Name:       req.Name,
@@ -241,6 +251,7 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 		Tree:       req.Tree,
 		Flaky:      req.Flaky,
 		Stub:       req.Stub,
+		StubReason: req.StubReason,
 		Timeout:    req.Timeout,
 		Network:    req.Network,
 		AddedAtMS:  req.NowMS,
@@ -345,6 +356,13 @@ func entryChanges(existing, proposed Entry) []string {
 		if f.old != f.new {
 			changes = append(changes, fmt.Sprintf("%s %t to %t", f.name, f.old, f.new))
 		}
+	}
+	// `stub_reason` joins for the same reason `stub` did: the reason is the
+	// documented decision (DKT-607) — why this assurance is hollow and which
+	// issue tracks fixing it — and a re-add that silently rewrote or erased it
+	// would swap one documented decision for another with no trace.
+	if existing.StubReason != proposed.StubReason {
+		changes = append(changes, fmt.Sprintf("stub_reason %q to %q", existing.StubReason, proposed.StubReason))
 	}
 	if !slices.Equal(existing.Network, proposed.Network) {
 		// Order-sensitive, because the stored list is what an operator reads and

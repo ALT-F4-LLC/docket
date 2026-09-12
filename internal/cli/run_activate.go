@@ -37,11 +37,36 @@ func newRunActivateCmd() *cobra.Command {
   5. Harvest   the fenced command blocks whose tag a bound workflow declares,
                verbatim and hashed. Blocks with an undeclared tag are ignored.
   6. Expand    the first phase's steps — those whose issues have no unsatisfied
-               dependencies. Later phases expand as their predecessors finish.
+               dependencies. Later phases expand as their predecessors finish:
+               an issue expands once every issue it depends_on within the run
+               is done, whatever state the run's OTHER issues are in.
   7. Promote   the issues from backlog to todo, and the run to active.
 
 Nothing executes. No gate, no action, no command runs during activation; files
 are read only to pin them by content hash.
+
+Every workflow bound HERE is checked against its own registered source_path: if
+the file at that path no longer hashes to the registered source_sha256, the
+activation REFUSES and names both hashes, because the run would otherwise bind
+and pin bytes that are not the ones at the path an operator reads. Nothing is
+re-registered to fix it — that is the install path's job. Three cases warn
+rather than refuse: a source that cannot be READ at all (the registered bytes
+still reproduce; only their provenance is gone), drift under a binding INHERITED
+from an earlier activation (a mid-run edit is deliberately a non-event for a run
+already under way), and drift while registration.auto is FALSE, where binding
+what is registered rather than what the corpus now says is the whole point of
+the setting.
+
+Binding follows LABELS, and scope is paths, so the two can disagree. When an
+issue's declared scope lies entirely inside another registered workflow's
+` + "`[match] domain_paths`" + ` and the only thing keeping it out of that workflow
+is a label it lacks, the activation WARNS and names both workflows — on stderr
+in human mode, in the JSON envelope's ` + "`binding_warnings`" + `. Exactly one
+workflow still had to match, and it did; this is the exactly-one-WRONG-match
+case that count cannot see. The binding stands: fix the issue's labels and
+re-activate if the paths are right, or ignore the line if the cross-domain
+binding was deliberate. A workflow that declares no ` + "`domain_paths`" + ` is
+linted against nothing.
 
 Instance config is scanned from EVERY configured root, in order. With the shared
 store that is ~/.docket/config/ first, then this checkout's .docket/config/ if it
@@ -52,7 +77,10 @@ refuses the activation and names both paths.
 
 Re-activating an active run expands newly-unblocked phases only and INHERITS
 the original pin set — a workflow re-registered or a pinned file edited since
-activation does not reach a run already under way.
+activation does not reach a run already under way. Whatever an activation leaves
+unexpanded is named, with the predecessor(s) still holding it and their status,
+in the summary line and in the JSON envelope's ` + "`blocked_issues`" + ` — so
+"0 issue(s) expanded" is never the whole report.
 
 The JSON envelope carries the run's expected cost as TWO distinct fields:
 ` + "`expected_cost_total`" + ` is every step the run holds, including ones a
@@ -111,6 +139,20 @@ type activateResult struct {
 	// where every issue declared its scope carries no key at all rather than an
 	// empty one.
 	ScopeWarnings []engine.ScopeWarning `json:"scope_warnings,omitempty"`
+	// BindingWarnings is DKT-1182's array: issues whose declared scope lies
+	// entirely inside another workflow's declared `[match] domain_paths` while
+	// their labels bound them somewhere else — the exactly-one-WRONG-match case
+	// the binding rule cannot refuse. Advisory: the binding stands. `omitempty`,
+	// so a run whose labels and scopes agree — and every run in a corpus that
+	// declares no domains at all — carries no key rather than an empty one.
+	BindingWarnings []engine.BindingWarning `json:"binding_warnings,omitempty"`
+	// SourceWarnings is DKT-590's array: bound workflows whose registered
+	// source file could not be verified against `source_sha256`. Drift on a
+	// binding this activation MADE refuses instead, so what reaches this key
+	// is an unreadable source, drift under a binding inherited from an earlier
+	// activation, or drift while `registration.auto` is false. `omitempty`, so
+	// the ordinary run whose sources all verify carries no key at all.
+	SourceWarnings []engine.SourceWarning `json:"source_warnings,omitempty"`
 	// Fences is §7.7 S2's array: the same data the human report renders,
 	// carrying the RAW stored command bytes — encoding/json escapes controls
 	// by contract and the consumer is a program, so quoting on top would
@@ -146,6 +188,12 @@ type activateResult struct {
 	// with the exact workflow@version, so a `--dry-run` (or a real activation)
 	// answers WHAT was bound rather than leaving `issues_bound` as a bare count.
 	BoundIssues []engine.BoundIssue `json:"bound_issues,omitempty"`
+	// BlockedIssues is DKT-1180's roster: every bound issue this activation
+	// left unexpanded, with the in-run predecessors still holding it and their
+	// status. `omitempty`, so a run whose every issue is expanded carries no
+	// key; when `issues_expanded` is 0 on a re-activation, this is the field
+	// that says why. Carried on both a dry run and a real activation.
+	BlockedIssues []engine.BlockedIssue `json:"blocked_issues,omitempty"`
 	// DryRun marks a computed-and-discarded activation, so a consumer cannot
 	// mistake it for a real one.
 	DryRun bool `json:"dry_run,omitempty"`
@@ -208,6 +256,27 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.IssueID)
 	}
 
+	// The label-vs-scope lint (DKT-1182), same channel again. It names the
+	// remedy the same way: the binding follows the LABELS, so an operator who
+	// agrees with the warning fixes the issue's labels and re-activates, and one
+	// who does not is looking at a deliberate cross-domain binding and can
+	// ignore the line.
+	for _, warning := range result.BindingWarnings {
+		w.Warn("%s %s; if it belongs to %s, add the label(s) with "+
+			"`docket issue edit %s --label LABEL` and re-activate",
+			warning.IssueID, warning.Reason, warning.DomainWorkflow,
+			warning.IssueID)
+	}
+
+	// DKT-590: a bound workflow whose recorded source could not be verified.
+	// On the warning channel because the refusing case never gets here —
+	// activation returns a CONFLICT for drift under a binding it just made —
+	// so what reaches this loop is provenance that no longer resolves, or an
+	// edit RA2 deliberately keeps out of a run already under way.
+	for _, warning := range result.SourceWarnings {
+		w.Warn("workflow %s: %s", warning.Workflow, warning.Reason)
+	}
+
 	// §7.7 S1: every harvested fenced command, verbatim, with its trust status
 	// — so an operator sees `unmatched` commands BEFORE the run rather than
 	// after. It renders through the escaping renderer (T18): the bytes are
@@ -241,6 +310,8 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		FencesHarvested:   result.FencesHarvested,
 		ContextWarnings:   result.ContextWarnings,
 		ScopeWarnings:     result.ScopeWarnings,
+		BindingWarnings:   result.BindingWarnings,
+		SourceWarnings:    result.SourceWarnings,
 		Fences:            result.Fences,
 		GatePreflight:     result.GatePreflight,
 		HoldPolicy:        result.HoldPolicy,
@@ -249,6 +320,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		DryRun:            result.DryRun,
 		PromotedIssues:    result.PromotedIssues,
 		BoundIssues:       result.BoundIssues,
+		BlockedIssues:     result.BlockedIssues,
 		Reason:            reason,
 	}
 	if result.DryRun {
@@ -302,6 +374,22 @@ func renderActivation(r activateResult) string {
 	if len(r.PromotedIssues) > 0 {
 		parts = append(parts, fmt.Sprintf("promoted %s",
 			strings.Join(r.PromotedIssues, ", ")))
+	}
+	// What did NOT expand, and what holds it (DKT-1180): "0 issue(s) expanded"
+	// on a re-activation is an answer only when the line beside it says which
+	// predecessor is still short of `done`.
+	if len(r.BlockedIssues) > 0 {
+		roster := make([]string, 0, len(r.BlockedIssues))
+		for _, b := range r.BlockedIssues {
+			holders := make([]string, 0, len(b.BlockedBy))
+			for _, p := range b.BlockedBy {
+				holders = append(holders, fmt.Sprintf("%s %s", p.IssueID, p.Status))
+			}
+			roster = append(roster, fmt.Sprintf("%s waits on %s",
+				b.IssueID, strings.Join(holders, ", ")))
+		}
+		parts = append(parts, fmt.Sprintf("%d issue(s) still blocked (%s)",
+			len(r.BlockedIssues), strings.Join(roster, "; ")))
 	}
 
 	msg := fmt.Sprintf("%s %s: %s", verb, r.Run.Ref(), strings.Join(parts, ", "))

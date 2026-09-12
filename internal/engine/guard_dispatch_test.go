@@ -70,18 +70,30 @@ func TestGuardRecordDeniesAnOpenDispatch(t *testing.T) {
 //
 // D6 is why: discrepancies are a property of the RUN, not of the manifest — a
 // relay that never opened a dispatch can still leave a claimed step unrecorded.
+//
+// It also pins the two D1 advice branches through the one caller that can show
+// them apart. G13 makes the guard the only D1 renderer that does NOT reap, so a
+// lease already past its expiry survives to be reported here — and the exits
+// that fit a live lease ("wait for it to lapse", `dispatch abandon`) are wrong
+// on it, while the cheap correct act, letting `next` reap it, is the one they
+// leave out. `step reap` carries over to the lapsed branch for one reason: a
+// co-occurring D2 makes `next` refuse too, and then it is the only verb that
+// clears the discrepancy directly.
 func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
 
-	claim := claimInstance(t, conn, "implement@0", nowMS)
-	_ = claim
+	grace := dispatchGraceMS(t, conn)
+	claimInstance(t, conn, "implement@0", nowMS)
 
 	// Past `dispatch.grace` with no record: D1, claimed-but-unrecorded. The
 	// clock is ADVANCED rather than slept, following the repo's TTL discipline —
 	// the refusal under test is "the clock says this lapsed", which needs no
 	// actual waiting and would flake on a loaded runner if it did.
-	at := nowMS + dispatchGraceMS(t, conn) + 1
+	//
+	// Default `lease.ttl.default` equals `dispatch.grace`, so this instant is
+	// past the lease's expiry too: the ORDINARY lapsed-lease state.
+	at := nowMS + grace + 1
 
 	verdict, err := GuardRecord(conn, runID, 0, at)
 	testsupport.Must(t, err, "GuardRecord: %v", err)
@@ -93,6 +105,98 @@ func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 	// documentation lookup rather than an operator's act.
 	if !strings.Contains(verdict.Reason, "lease expiry") {
 		t.Errorf("the denial %q does not name D1's resolution", verdict.Reason)
+	}
+	if strings.Contains(verdict.Reason, "wait for it to lapse") {
+		t.Errorf("the denial %q tells the operator to wait for an expiry already "+
+			"past; the guard does not reap, so it can report a LAPSED lease",
+			verdict.Reason)
+	}
+	// The rendered expiry comes from the STORED row, not from this test's own
+	// `nowMS + grace` arithmetic: the message interpolates `step.ExpiresMS`, so
+	// recomputing it here would let the assertion agree with a message that had
+	// stopped reporting the lease at all.
+	var stepExpiresMS int64
+	err = conn.QueryRow(
+		`SELECT expires_ms FROM steps WHERE run_id = ? AND instance = 'implement@0'`,
+		runID).Scan(&stepExpiresMS)
+	testsupport.Must(t, err, "reading the claimed step's expires_ms: %v", err)
+
+	// The lapsed branch must name the verbs that actually dissolve it. `next` is
+	// the one that reaps and dissolves with no side effect; `step reap` is the
+	// fallback that clears a compound D1+D2 state, where `next` refuses too. The
+	// backticks matter: bare "next" also occurs as ordinary English.
+	assertLapsedExits(t, verdict.Reason, stepExpiresMS)
+
+	// The branch shares the REAP's boundary. `Scheduler.Expired` reaps on
+	// `Lease.Live`, which is `expires_ms > now`, so at the expiry instant
+	// exactly the lease is already gone and the live-lease exits would promise a
+	// wait for a lapse that has happened. Default `lease.ttl.default` equals
+	// `dispatch.grace`, so `nowMS + grace` is both D1's own boundary and that
+	// instant — the one place a `>=` here would read differently from the reap.
+	verdict, err = GuardRecord(conn, runID, 0, nowMS+grace)
+	testsupport.Must(t, err, "GuardRecord: %v", err)
+	if verdict.Allowed {
+		t.Fatal("at exactly the grace boundary the claimed-but-unrecorded step was allowed")
+	}
+	if strings.Contains(verdict.Reason, "wait for it to lapse") {
+		t.Errorf("at the expiry instant the reap already fires, but the denial %q "+
+			"still offers the live-lease exits", verdict.Reason)
+	}
+	assertLapsedExits(t, verdict.Reason, stepExpiresMS)
+
+	// The live-lease branch, on the same probe: a lease whose TTL outlasts the
+	// grace is still held when D1 fires, and there the live-lease exits are the
+	// correct ones.
+	second := dispatchRun(t, conn)
+	var stepID int
+	err = conn.QueryRow(
+		`SELECT id FROM steps WHERE run_id = ? AND instance = 'implement@0'`,
+		second).Scan(&stepID)
+	testsupport.Must(t, err, "finding the second run's step: %v", err)
+	_, err = ClaimStep(conn, stepID,
+		ClaimOptions{Owner: "worker", TTLOverride: 4 * grace, NowMS: nowMS})
+	testsupport.Must(t, err, "claiming with a long TTL: %v", err)
+
+	verdict, err = GuardRecord(conn, second, 0, at)
+	testsupport.Must(t, err, "GuardRecord: %v", err)
+	if verdict.Allowed {
+		t.Fatal("a claimed-but-unrecorded step under a live lease was allowed to record")
+	}
+	for _, want := range []string{"wait for it to lapse", "step reap", "dispatch abandon"} {
+		if !strings.Contains(verdict.Reason, want) {
+			t.Errorf("the live-lease denial %q does not offer %q", verdict.Reason, want)
+		}
+	}
+}
+
+// assertLapsedExits pins the exits D1 offers on a LAPSED lease.
+//
+// `next` reaps the lapsed lease and dissolves the discrepancy on its own, and
+// `step reap` clears the compound D1+D2 state directly — the one case where
+// `next` refuses as well. `dispatch close` is NOT an exit here: with no open
+// dispatch it refuses outright unless `--accept-missing-usage` is passed, so
+// naming it sends the operator into an error rather than out of the refusal.
+//
+// It also pins the message's CONTENT, not only its keywords: the expiry it
+// renders and the sentence saying what `next` does with it. `expiresMS` is the
+// claimed step's stored `expires_ms`, which is what the message interpolates,
+// and it is asserted joined to "lapsed at" rather than alone — a bare
+// epoch-millisecond number could match some other field, while the phrase can
+// only come from the lapsed branch's own Sprintf.
+func assertLapsedExits(t *testing.T, reason string, expiresMS int64) {
+	t.Helper()
+	for _, want := range []string{
+		"`next`", "step reap",
+		fmt.Sprintf("lapsed at %d", expiresMS),
+		"reaps it before probing",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the lapsed-lease denial %q does not offer %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "dispatch close") {
+		t.Errorf("the lapsed-lease denial %q offers `dispatch close`, which "+
+			"refuses in this state instead of dissolving the discrepancy", reason)
 	}
 }
 
@@ -315,6 +419,63 @@ func TestGuardSpawnW4AndW6(t *testing.T) {
 	if !contains(instancesIn(answer), "one@0") {
 		t.Errorf("W7: write-class work did not resume after the ack (%v)",
 			instancesIn(answer))
+	}
+}
+
+// TestGuardSpawnActiveDeniesTheOlderRunWithAHold is DKT-1287 AC1: with two
+// active runs where only the older would deny, `guard spawn --active` denies,
+// naming the older run — not `runs[0]` alone, which is what
+// docket-spawn-guard-hook.sh resolved before this existed, leaving a second
+// concurrent run's reap hold unasked.
+func TestGuardSpawnActiveDeniesTheOlderRunWithAHold(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(writeLimitedSrc), "serialized.toml")
+
+	olderIssue := createIssue(t, conn, "older", "body", "task", nil)
+	older := startRun(t, conn, olderIssue)
+	_, err := activate(conn, older.ID)
+	testsupport.Must(t, err, "activate the older run: %v", err)
+
+	newerIssue := createIssue(t, conn, "newer", "body", "task", nil)
+	newer := startRun(t, conn, newerIssue)
+	_, err = activate(conn, newer.ID)
+	testsupport.Must(t, err, "activate the newer run: %v", err)
+
+	// Only the OLDER run holds an unacknowledged write reap.
+	reapOneWriter(t, conn, older.ID)
+
+	verdict, err := GuardSpawnActive(conn, 0, 0, nowMS)
+	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
+	if verdict.Allowed {
+		t.Fatal("AC1: an unacknowledged reap on the older run did not deny --active")
+	}
+	if !strings.Contains(verdict.Reason, model.FormatRunID(older.ID)) {
+		t.Errorf("the denial %q does not name the older run %s",
+			verdict.Reason, model.FormatRunID(older.ID))
+	}
+	if strings.Contains(verdict.Reason, model.FormatRunID(newer.ID)) {
+		t.Errorf("the denial %q wrongly names the newer, unheld run %s",
+			verdict.Reason, model.FormatRunID(newer.ID))
+	}
+}
+
+// TestGuardSpawnActiveAllowsWhenNoActiveRunHoldsAReap is --active's ordinary
+// case: two active runs, neither holding a reap, allow.
+func TestGuardSpawnActiveAllowsWhenNoActiveRunHoldsAReap(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(writeLimitedSrc), "serialized.toml")
+
+	for _, name := range []string{"first", "second"} {
+		issue := createIssue(t, conn, name, "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate %s: %v", name, err)
+	}
+
+	verdict, err := GuardSpawnActive(conn, 0, 0, nowMS)
+	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
+	if !verdict.Allowed {
+		t.Errorf("two unheld active runs were denied: %s", verdict.Reason)
 	}
 }
 

@@ -153,25 +153,61 @@ if run_scan secret-scan.sh "$BASE" >/dev/null 2>&1; then
   fail "secret-scan.sh \$BASE missed a credential added then removed within the PR (C5)"
 fi
 
-# --- self-hygiene: an internal/cli change with no matching SKILL.md update
-# in the same committed diff must fail, in base-ref mode too. ---------------
+# --- self-hygiene: a committed non-test internal/cli change must be SEEN and
+# NAMED in base-ref mode — exit 0, with the file in the report. The CLI
+# reference lives outside this repository, so there is no co-change to
+# demand; the gate's whole value is that the surface change is stated. -------
 
 mkdir -p "$WORK/repo/internal/cli"
 echo "package cli" > "$WORK/repo/internal/cli/root.go"
 git -C "$WORK/repo" add -A
-git -C "$WORK/repo" commit -q -m "cli surface change, no SKILL.md update"
+git -C "$WORK/repo" commit -q -m "cli surface change"
+CLI_HEAD=$(git -C "$WORK/repo" rev-parse HEAD)
 
-if run_scan self-hygiene.sh "$BASE" >/dev/null 2>&1; then
-  fail "self-hygiene.sh \$BASE passed an internal/cli change with no SKILL.md update"
+H1_OUT="$WORK/h1-hygiene.out"
+if ! run_scan self-hygiene.sh "$BASE" >"$H1_OUT" 2>&1; then
+  fail "self-hygiene.sh \$BASE failed on a committed internal/cli change: $(cat "$H1_OUT")"
+elif ! grep -q "internal/cli/root.go" "$H1_OUT"; then
+  fail "self-hygiene.sh \$BASE did not name the internal/cli file it saw: $(cat "$H1_OUT")"
 fi
 
-mkdir -p "$WORK/repo/skills/docket"
-echo "# SKILL" > "$WORK/repo/skills/docket/SKILL.md"
-git -C "$WORK/repo" add -A
-git -C "$WORK/repo" commit -q -m "update SKILL.md"
+# --- engine mode: DOCKET_GATE_BASE names the same range when no argument is
+# passed. The engine runs this gate on a clean, committed worktree, where the
+# working-tree scan finds nothing — so without this mode every step reported
+# "no changes" whatever the CLI surface did. ---------------------------------
 
-if ! run_scan self-hygiene.sh "$BASE" >/dev/null 2>&1; then
-  fail "self-hygiene.sh \$BASE failed once SKILL.md was updated in the same PR"
+H2_OUT="$WORK/h2-hygiene.out"
+if ! DOCKET_GATE_BASE="$BASE" run_scan self-hygiene.sh >"$H2_OUT" 2>&1; then
+  fail "self-hygiene.sh under DOCKET_GATE_BASE failed on a committed internal/cli change: $(cat "$H2_OUT")"
+elif ! grep -q "internal/cli/root.go" "$H2_OUT"; then
+  fail "self-hygiene.sh under DOCKET_GATE_BASE did not see the committed internal/cli change: $(cat "$H2_OUT")"
+fi
+
+# A set-but-empty DOCKET_GATE_BASE is a caller defect (the engine leaves the
+# variable unset when it has no base) and must fail closed like C1.
+H3_OUT="$WORK/h3-hygiene.out"
+if DOCKET_GATE_BASE="" run_scan self-hygiene.sh >"$H3_OUT" 2>&1; then
+  fail "self-hygiene.sh with an empty DOCKET_GATE_BASE exited 0; must fail closed"
+elif ! grep -q "refusing" "$H3_OUT"; then
+  fail "self-hygiene.sh with an empty DOCKET_GATE_BASE failed for the wrong reason: $(cat "$H3_OUT")"
+fi
+
+# An explicit argument outranks DOCKET_GATE_BASE: HEAD as the base names an
+# empty range even though the env var would name the internal/cli change.
+H4_OUT="$WORK/h4-hygiene.out"
+if ! DOCKET_GATE_BASE="$BASE" run_scan self-hygiene.sh "$CLI_HEAD" >"$H4_OUT" 2>&1; then
+  fail "self-hygiene.sh with an explicit base over DOCKET_GATE_BASE failed: $(cat "$H4_OUT")"
+elif ! grep -q "no changes" "$H4_OUT"; then
+  fail "self-hygiene.sh let DOCKET_GATE_BASE override an explicit base-ref argument: $(cat "$H4_OUT")"
+fi
+
+# DOCKET_SCOPE still narrows the engine-mode change set: a scope that excludes
+# internal/cli reports no changes within scope.
+H5_OUT="$WORK/h5-hygiene.out"
+if ! DOCKET_GATE_BASE="$BASE" DOCKET_SCOPE="docs/**" run_scan self-hygiene.sh >"$H5_OUT" 2>&1; then
+  fail "self-hygiene.sh under DOCKET_GATE_BASE with a non-matching DOCKET_SCOPE failed: $(cat "$H5_OUT")"
+elif ! grep -q "declared scope" "$H5_OUT"; then
+  fail "self-hygiene.sh did not apply DOCKET_SCOPE in engine mode: $(cat "$H5_OUT")"
 fi
 
 # --- K7: a credential landed in the BASE commit itself — before the range

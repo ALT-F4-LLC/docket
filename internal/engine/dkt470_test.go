@@ -111,10 +111,11 @@ func TestOverridePassSkipsInterposedTargetsEmptyWithoutAThreshold(t *testing.T) 
 }
 
 // TestOverridePassStillBypassesTheThreshold pins CURRENT behavior after the
-// fix: override-pass records a generic `pass` and the interposed vote is
-// still skipped — the fix is the warning (above), not a threshold
-// evaluation. If a future change teaches override-pass to evaluate the
-// threshold instead, this test is the one to revisit.
+// fix: an ACKNOWLEDGED override-pass (DKT-861's --drop-interposed) records a
+// generic `pass` and the interposed vote is still skipped — the fix is the
+// warning (above) and the pre-mutation refusal (dkt861_test.go), not a
+// threshold evaluation. If a future change teaches override-pass to evaluate
+// the threshold instead, this test is the one to revisit.
 func TestOverridePassStillBypassesTheThreshold(t *testing.T) {
 	conn := mustDB(t)
 	e := testEngine()
@@ -126,7 +127,8 @@ func TestOverridePassStillBypassesTheThreshold(t *testing.T) {
 
 	stepID := parkVerifyWaitingHuman(t, conn, e)
 
-	testsupport.Must(t, e.ResolveStep(conn, stepID, ResolveOverridePass, "accepted", nowMS),
+	testsupport.Must(t, e.ResolveStepDropInterposed(
+		conn, stepID, ResolveOverridePass, "accepted", false, nowMS),
 		"override-pass: %v", nil)
 
 	if got := stepRouting(t, conn, "verify@0"); got != RoutingPass {
@@ -157,7 +159,8 @@ func TestUnroutedVoteAfterRetryReportsBlockedReason(t *testing.T) {
 	testsupport.Must(t, err, "activate: %v", err)
 
 	stepID := parkVerifyWaitingHuman(t, conn, e)
-	testsupport.Must(t, e.ResolveStep(conn, stepID, ResolveOverridePass, "accepted", nowMS),
+	testsupport.Must(t, e.ResolveStepDropInterposed(
+		conn, stepID, ResolveOverridePass, "accepted", false, nowMS),
 		"override-pass: %v", nil)
 	if got := stepStatus(t, conn, "tribunal@0"); got != db.StepSkipped {
 		t.Fatalf("premise: tribunal@0 = %q, want %q", got, db.StepSkipped)

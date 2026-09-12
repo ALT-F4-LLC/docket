@@ -218,6 +218,85 @@ executor = "x"
 		wants: []string{`"b"`, "`after`", `"ghost"`, "not a step in this workflow"},
 	},
 	{
+		rule: "V39", name: "after_fired names an unknown step",
+		src:   twoStepPipeline("after = [\"a\"]\nafter_fired = [\"ghost\"]\nexecutor = \"y\"\nemits = \"k\"\n"),
+		wants: []string{`"b"`, "`after_fired`", `"ghost"`, "not a step in this workflow"},
+	},
+	{
+		rule: "V39a", name: "after_fired names a step not in after",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "gate"
+after = ["a"]
+type = "human"
+on_fail = "skip"
+[[step]]
+name = "b"
+after = ["a"]
+after_fired = ["gate"]
+executor = "y"
+emits = "k"
+`,
+		wants: []string{`"b"`, "`after_fired`", `"gate"`, "not in its `after`"},
+	},
+	{
+		rule: "V39a", name: "after_fired on a loop step, which has no after",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "check"
+after = ["a"]
+executor = "y"
+emits = "report"
+threshold = { "fix-loop" = "any(status == unmet)" }
+[[step]]
+name = "fix"
+executor = "z"
+emits = "k"
+loop = true
+after_loop = "a"
+after_fired = ["check"]
+`,
+		wants: []string{`"fix"`, "`after_fired`", `"check"`, "not in its `after`"},
+	},
+	{
+		rule: "V39", name: "after_fired beside after registers clean",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "reconcile"
+executor = "x"
+emits = "report"
+threshold = { "security-vote" = "any(status == blocked)" }
+[[step]]
+name = "security-vote"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+[[step]]
+name = "drain-highs"
+after = ["security-vote"]
+after_fired = ["security-vote"]
+executor = "y"
+emits = "k"
+`,
+	},
+	{
 		rule: "V10", name: "loop step declaring an empty after",
 		src:   twoStepPipeline("after = []\nloop = true\nexecutor = \"y\"\nemits = \"k\"\nafter_loop = \"a\"\n"),
 		wants: []string{`"b"`, "`after`", "loop entry"},
@@ -240,6 +319,57 @@ emits = "k"
 inputs = ["a.findings"]
 `,
 		wants: []string{`"b"`, "`inputs`", `"a.findings"`, "change-summary"},
+	},
+	{
+		// V11's vote-record clause (DKT-545): `<step>.vote-record` resolves
+		// only against `type="vote"` steps — any other step opens no proposal,
+		// so the input could never resolve to anything on any run.
+		rule: "V11", name: "vote-record input naming a non-vote step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "b"
+after = ["a"]
+executor = "y"
+emits = "j"
+inputs = ["a.vote-record"]
+`,
+		wants: []string{`"b"`, "`inputs`", `"a.vote-record"`, "vote"},
+	},
+	{
+		// V11a (DKT-77): `gate-results` is a reserved kind — the engine-served
+		// input form would shadow an artifact of that kind.
+		rule: "V11a", name: "a step may not emit the reserved gate-results kind",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "gate-results"
+`,
+		wants: []string{`"a"`, `"gate-results"`, "reserved"},
+	},
+	{
+		// V11b (DKT-545): `vote-record` is reserved for the same reason.
+		rule: "V11b", name: "a step may not emit the reserved vote-record kind",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "vote-record"
+`,
+		wants: []string{`"a"`, `"vote-record"`, "reserved"},
 	},
 	{
 		rule: "V12", name: "on_fail outside the closed vocabulary",
@@ -389,9 +519,60 @@ on_fail = "fix-loop"
 		wants: []string{`"a"`, "fix-loop", "loop = true"},
 	},
 	{
+		// V17c is V17b scoped per trigger (DKT-544): once every body declares
+		// `serves`, a fix-loop-capable step named by none of them has no body
+		// to instantiate — the same silent no-op, reintroduced per cluster.
+		rule: "V17c", name: "fix-loop trigger no scoped body serves",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+on_fail = "fix-loop"
+[[step]]
+name = "b"
+after = ["a"]
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+[[step]]
+name = "fix"
+executor = "y"
+emits = "k"
+loop = true
+serves = ["b"]
+after_loop = "b"
+`,
+		wants: []string{`"a"`, "fix-loop", "serves"},
+	},
+	{
 		rule: "V18", name: "loop step with after",
 		src:   twoStepPipeline("after = [\"a\"]\nloop = true\nexecutor = \"y\"\nemits = \"k\"\nafter_loop = \"a\"\n"),
 		wants: []string{`"b"`, "loop entry"},
+	},
+	{
+		// V35 (DKT-544): `serves` is a loop-cluster declaration and only a
+		// `loop = true` body has fix-loop routings to serve.
+		rule: "V35", name: "serves on a non-loop step",
+		src:   twoStepPipeline("after = [\"a\"]\nexecutor = \"y\"\nemits = \"k\"\nserves = [\"a\"]\n"),
+		wants: []string{`"b"`, "`serves`", "loop = true"},
+	},
+	{
+		rule: "V35", name: "serves naming an unknown step",
+		src: twoStepPipeline("loop = true\nexecutor = \"y\"\nemits = \"k\"\n" +
+			"serves = [\"ghost\"]\nafter_loop = \"a\"\n"),
+		wants: []string{`"b"`, "`serves`", `"ghost"`},
+	},
+	{
+		// A serves entry naming a step that never routes `fix-loop` declares a
+		// cluster that can never be entered — a misdeclaration, not a choice.
+		rule: "V35", name: "serves naming a step that never routes fix-loop",
+		src: twoStepPipeline("loop = true\nexecutor = \"y\"\nemits = \"k\"\n" +
+			"serves = [\"a\"]\nafter_loop = \"a\"\n"),
+		wants: []string{`"b"`, "`serves`", `"a"`, "fix-loop"},
 	},
 	{
 		rule: "V19", name: "max_attempts below one",
@@ -453,6 +634,24 @@ emits = "k"
 when = "assignee == someone"
 `,
 		wants: []string{`"a"`, "`when`", "`kind`", "`labels`"},
+	},
+	{
+		rule: "V22", name: "when mixes and with or",
+		// The grammar has `or` (DKT-548) but no parentheses, so `a and b or c`
+		// has two readings and V22 refuses to pick one. The message must name
+		// both connectives — an author who reads only "invalid `when`" will
+		// re-check the clause spellings, which are fine.
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+when = "kind == bug and labels contains security or labels contains security-load-bearing"
+`,
+		wants: []string{`"a"`, "`when`", "`and`", "`or`"},
 	},
 	{
 		rule: "V23", name: "class defaults to the executor value",
@@ -629,6 +828,69 @@ params = { field = "risk", method = "medain", output = "k" }
 		wants:   []string{`"a"`, "params.method", "medain", `"median"`},
 	},
 	{
+		rule: "V28", name: "aggregate with a route_at that is not a string",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "up"
+executor = "x"
+emits = "f"
+[[step]]
+name = "a"
+after = ["up"]
+action = "aggregate"
+inputs = ["up.f"]
+payload = "risk-report@1"
+params = { field = "risk", method = "median", output = "k", route_at = 3 }
+`,
+		schemas: registeredRisk(),
+		wants:   []string{`"a"`, "params.route_at", "non-empty string"},
+	},
+	{
+		rule: "V28a", name: "route_at naming a value outside the declared order",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "up"
+executor = "x"
+emits = "f"
+[[step]]
+name = "a"
+after = ["up"]
+action = "aggregate"
+inputs = ["up.f"]
+payload = "risk-report@1"
+params = { field = "risk", method = "median", output = "k", route_at = "urgent" }
+`,
+		schemas: registeredRisk(),
+		wants: []string{`"a"`, "params.route_at", "urgent", "risk-report@1",
+			`"low"`, `"medium"`, `"high"`},
+	},
+	{
+		rule: "V28a", name: "route_at naming a declared value registers clean",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "up"
+executor = "x"
+emits = "f"
+[[step]]
+name = "a"
+after = ["up"]
+action = "aggregate"
+inputs = ["up.f"]
+payload = "risk-report@1"
+params = { field = "risk", method = "median", output = "k", route_at = "high" }
+`,
+		schemas: registeredRisk(),
+	},
+	{
 		rule: "V29", name: "aggregate over a field with no declared order",
 		src: `
 [pipeline]
@@ -787,6 +1049,294 @@ executor = "x"
 emits = "k"
 `,
 		wants: []string{`"issue.latest"`, "reserved"},
+	},
+	{
+		// V11's `issue.linked.<relation>.<kind>` shape half (DKT-547): the
+		// form takes a relation token and ONE kind — a wildcard answers no
+		// question a cross-issue consumer can ask.
+		rule: "V11", name: "issue.linked with a wildcard kind",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+inputs = ["issue.linked.depends_on.*"]
+`,
+		wants: []string{`"a"`, "`inputs`", `"issue.linked.depends_on.*"`,
+			"issue.linked.<relation>.<kind>"},
+	},
+	{
+		// And its vocabulary half: the relation token must be a relation type
+		// or an inverse form — "specified_by" is not in the model's closed
+		// vocabulary, so declaring it would bind nothing on every activation.
+		rule: "V11", name: "issue.linked naming an unknown relation",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+inputs = ["issue.linked.specified_by.ux-spec"]
+`,
+		wants: []string{`"a"`, "`inputs`", `"specified_by"`, "not a relation type"},
+	},
+	{
+		// And its reserved-kind half: `gate-results` and `vote-record` are
+		// engine-reserved from every `emits` (V11a/V11b), so no linked issue
+		// could ever hold an artifact of them.
+		rule: "V11", name: "issue.linked naming an engine-reserved kind",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+inputs = ["issue.linked.depends_on.gate-results"]
+`,
+		wants: []string{`"a"`, "`inputs`", `"gate-results"`, "engine-reserved"},
+	},
+	{
+		// V34 (DKT-547): `issue.linked` and everything under it are reserved
+		// step names — V34's issue.latest reasoning for the cross-issue form.
+		rule: "V34", name: "a step name may not claim the reserved issue.linked namespace",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "issue.linked.depends_on"
+executor = "x"
+emits = "k"
+`,
+		wants: []string{`"issue.linked.depends_on"`, "reserved"},
+	},
+	{
+		// V36 (DKT-545): a vote step's threshold routes over the CAST SET,
+		// and step-name interposition is the saga's machinery — a step-name
+		// key would record a routing nothing downstream consumes.
+		rule: "V36", name: "vote threshold routing to a step name",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "seed"
+executor = "x"
+emits = "k"
+[[step]]
+name = "gate"
+after = ["seed"]
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+threshold = { "seed" = "any(vote == approve-with-concerns)" }
+`,
+		wants: []string{`"gate"`, "`threshold`", `"seed"`, "fix-loop"},
+	},
+	{
+		// V36: casts have no registered schema, so an ordered comparison
+		// would be a guaranteed T3 park on every evaluation.
+		rule: "V36", name: "vote threshold with an ordered operator",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "seed"
+executor = "x"
+emits = "k"
+[[step]]
+name = "gate"
+after = ["seed"]
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+threshold = { "waiting-human" = "any(vote >= approve)" }
+`,
+		wants: []string{`"gate"`, "`threshold`", ">=", "ordered"},
+	},
+	{
+		// V36: the field vocabulary is the cast's — anything else would
+		// silently never match, V22's kind/labels reasoning over casts.
+		rule: "V36", name: "vote threshold addressing a non-cast field",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "seed"
+executor = "x"
+emits = "k"
+[[step]]
+name = "gate"
+after = ["seed"]
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+threshold = { "pass" = "any(severity == high)" }
+`,
+		wants: []string{`"gate"`, "`threshold`", `"severity"`, "cast"},
+	},
+	{
+		// V37 (DKT-870): a floor with half a declaration positions nothing.
+		rule: "V37", name: "pass_floor missing its at value",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+pass_floor = { field = "risk" }
+`,
+		wants: []string{`"a"`, "pass_floor", "`field`", "`at`"},
+	},
+	{
+		// V37: without a pinned schema there is no order to position against,
+		// so the floor would be permanently inert — a misdeclaration.
+		rule: "V37", name: "pass_floor without a declared payload",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+pass_floor = { field = "risk", at = "high" }
+`,
+		wants: []string{`"a"`, "pass_floor", "payload"},
+	},
+	{
+		// V37a (DKT-870): the exit bar is a position in the declared order,
+		// V28a's discipline applied to `pass_floor.at`.
+		rule: "V37a", name: "pass_floor at outside the declared order",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+pass_floor = { field = "risk", at = "urgent" }
+`,
+		schemas: registeredRisk(),
+		wants: []string{`"a"`, "pass_floor", "urgent", "risk-report@1",
+			`"low"`, `"medium"`, `"high"`},
+	},
+	{
+		rule: "V37a", name: "pass_floor over a field with no declared order",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+pass_floor = { field = "stage", at = "final" }
+`,
+		schemas: registeredRisk(),
+		wants:   []string{`"a"`, "pass_floor", "stage", "ordered_enum"},
+	},
+	{
+		rule: "V37a", name: "pass_floor naming a declared value registers clean",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+pass_floor = { field = "risk", at = "high" }
+`,
+		schemas: registeredRisk(),
+	},
+	{
+		// V38 (DKT-870): the stall bound fires at THIS step's own loop entry,
+		// so a step that never routes `fix-loop` declares a bound that can
+		// never fire — V17/V35's inert-declaration discipline.
+		rule: "V38", name: "max_stalled_rounds on a step that never routes fix-loop",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+max_stalled_rounds = 3
+`,
+		wants: []string{`"a"`, "max_stalled_rounds", "fix-loop"},
+	},
+	{
+		// V38's other half: a `type` step records no artifact, so there is no
+		// payload whose per-round volume the bound could count.
+		rule: "V38", name: "max_stalled_rounds on a type step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "gate"
+after = ["a"]
+type = "human"
+on_fail = "fix-loop"
+max_stalled_rounds = 2
+[[step]]
+name = "fix"
+executor = "y"
+emits = "k"
+loop = true
+after_loop = "a"
+`,
+		wants: []string{`"gate"`, "max_stalled_rounds", "artifact"},
+	},
+	{
+		rule: "V38", name: "max_stalled_rounds on a routing step registers clean",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "check"
+after = ["a"]
+executor = "y"
+emits = "report"
+threshold = { "fix-loop" = "any(status == unmet)" }
+max_stalled_rounds = 3
+[[step]]
+name = "fix"
+executor = "z"
+emits = "k"
+loop = true
+after_loop = "a"
+`,
 	},
 }
 
@@ -1369,6 +1919,71 @@ func TestReservedActionsAreAllImplemented(t *testing.T) {
 	}
 }
 
+// TestLinkedInputRelaxesTheProducedKindTable is DKT-547's lint half, both
+// directions at once. V11 holds every same-run form to the produced-kind table
+// — `issue.latest.<kind>` requires SOME step of the workflow to produce the
+// kind — and the cross-issue form is exactly the case where that requirement
+// must NOT apply: the producer is another issue's workflow, so no step here
+// produces `ux-spec` and the declaration is still registrable. L4's
+// predecessor rule likewise does not apply — the artifact was recorded before
+// this run existed — so the form is legal on a ROOT step, which is where a
+// design-qa step consuming a spec actually sits.
+func TestLinkedInputRelaxesTheProducedKindTable(t *testing.T) {
+	const src = `
+[pipeline]
+name = "ui-change-mini"
+version = 1
+[[step]]
+name = "design-qa"
+after = []
+executor = "qa"
+emits = "qa-report"
+inputs = ["issue.body", "issue.linked.depends_on.ux-spec"]
+[[step]]
+name = "judge-design"
+after = ["design-qa"]
+executor = "judge"
+emits = "verdict"
+inputs = ["design-qa.qa-report", "issue.linked.depends-on.ux-spec"]
+`
+	def, err := Load([]byte(src))
+	testsupport.Must(t, err, "loading: %v", err)
+	if err := Validate(def); err != nil {
+		t.Fatalf("Validate rejects the issue.linked form: %v", err)
+	}
+	if err := Lint(def); err != nil {
+		t.Fatalf("Lint rejects the issue.linked form: %v", err)
+	}
+}
+
+// TestLinkedInputParser pins LinkedInput's grammar: one parser for the form,
+// shared by V11, L4, and the engine's activation-time resolver.
+func TestLinkedInputParser(t *testing.T) {
+	cases := []struct {
+		input          string
+		relation, kind string
+		ok             bool
+	}{
+		{"issue.linked.depends_on.ux-spec", "depends_on", "ux-spec", true},
+		{"issue.linked.depends-on.ux-spec", "depends-on", "ux-spec", true},
+		{"issue.linked.blocked_by.doc", "blocked_by", "doc", true},
+		{"issue.linked.depends_on.*", "", "", false},
+		{"issue.linked.depends_on", "", "", false},
+		{"issue.linked.depends_on.", "", "", false},
+		{"issue.linked..doc", "", "", false},
+		{"issue.linked.depends_on.a.b", "", "", false},
+		{"issue.latest.doc", "", "", false},
+		{"other.doc", "", "", false},
+	}
+	for _, tc := range cases {
+		relation, kind, ok := LinkedInput(tc.input)
+		if relation != tc.relation || kind != tc.kind || ok != tc.ok {
+			t.Errorf("LinkedInput(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.input, relation, kind, ok, tc.relation, tc.kind, tc.ok)
+		}
+	}
+}
+
 // TestReRegisteringAnS3FileIsRefused is §4.9.3's honest consequence, stated
 // rather than hidden.
 //
@@ -1483,5 +2098,256 @@ func TestV26KeepsTheOriginalRemedyForAGenuinelyNewRule(t *testing.T) {
 	}
 	if !strings.Contains(msg, "vote.rule.brand-new.threshold") {
 		t.Errorf("the refusal does not name the key to set:\n%s", msg)
+	}
+}
+
+// TestVoteThresholdAndVoteRecordRegister (DKT-545) is the positive half of
+// V36/V11's vote clauses: a vote step routing its concerned approvals into the
+// fix loop, with a downstream consumer reading the panel's record, is exactly
+// the declaration this grammar exists to admit.
+func TestVoteThresholdAndVoteRecordRegister(t *testing.T) {
+	src := `
+[pipeline]
+name = "concern-loop"
+version = 1
+[[step]]
+name = "seed"
+after = []
+executor = "x"
+emits = "findings"
+[[step]]
+name = "gate"
+after = ["seed"]
+type = "vote"
+voters = ["a", "b", "c"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+threshold = { "fix-loop" = "count>=2(vote == approve-with-concerns)" }
+[[step]]
+name = "fix"
+executor = "x"
+emits = "findings"
+loop = true
+after_loop = "gate"
+inputs = ["gate.vote-record"]
+[[step]]
+name = "report"
+after = ["gate"]
+executor = "y"
+emits = "record"
+inputs = ["gate.vote-record"]
+`
+	if _, err := Load([]byte(src)); err != nil {
+		t.Fatalf("a concern-routing vote workflow failed to register: %v", err)
+	}
+}
+
+// TestV22ConnectiveGrammar pins the shape V22 admits after DKT-548: clauses
+// joined by `and` throughout or by `or` throughout, and nothing else.
+//
+// It goes through Load — the real register path — rather than calling
+// validateWhen, because the point of the rule is what an operator's TOML is
+// allowed to say. The rejection rows assert the RULE ID too: a mixed predicate
+// refused as V22 tells the author which grammar bit them; refused as a parse
+// error it would not.
+func TestV22ConnectiveGrammar(t *testing.T) {
+	cases := []struct {
+		name    string
+		when    string
+		wantErr bool
+	}{
+		{name: "single clause", when: "kind == bug"},
+		{name: "and throughout", when: "kind == bug and labels contains backend"},
+		{
+			name: "three ands",
+			when: "kind == bug and labels contains backend and labels != docs-only",
+		},
+		// The motivating case: DKT-548's two byte-identical author lanes existed
+		// only because this string could not be written.
+		{
+			name: "or throughout",
+			when: "labels contains security-load-bearing or labels contains security",
+		},
+		{
+			name: "three ors over both fields",
+			when: "kind == bug or kind == chore or labels contains security",
+		},
+		{name: "quoted values across a disjunction", when: `kind == "bug" or labels == "urgent"`},
+		{name: "extra whitespace around the connective", when: "kind == bug  or   labels contains x"},
+
+		// `contains-any` (DKT-550): a set-membership CLAUSE, so it registers
+		// alone, beside an ordinary `and` clause, and beside an `or` one.
+		{name: "contains-any alone", when: "labels contains-any (security-change, security)"},
+		{name: "contains-any single element", when: "labels contains-any (security)"},
+		{name: "contains-any three elements", when: "labels contains-any (a, b, c)"},
+		{name: "contains-any without inner spaces", when: "labels contains-any(a,b)"},
+		{name: "contains-any with generous whitespace", when: "labels contains-any   (  a ,  b  )"},
+		{name: "contains-any quoted elements", when: `labels contains-any ("a", "b")`},
+		// DKT-550's motivating predicate, as ONE homogeneous-`and` clause list.
+		{
+			name: "contains-any beside an and clause",
+			when: "kind == doc:tdd and labels contains-any (security-change, security)",
+		},
+		{
+			name: "contains-any beside an or clause",
+			when: "labels contains-any (a, b) or kind == bug",
+		},
+
+		// `contains_any [...]` (DKT-1000): the same clause under the underscore
+		// spelling and the bracketed list. Both are accepted alongside the
+		// registered `contains-any (…)` form, and the spelling and the
+		// delimiter are independent — all four combinations register.
+		{name: "contains_any bracketed", when: "labels contains_any [security-change, security]"},
+		{name: "contains_any single element", when: "labels contains_any [security]"},
+		{name: "contains_any three elements", when: "labels contains_any [a, b, c]"},
+		{name: "contains_any without inner spaces", when: "labels contains_any[a,b]"},
+		{name: "contains_any with generous whitespace", when: "labels contains_any   [  a ,  b  ]"},
+		{name: "contains_any quoted elements", when: `labels contains_any ["a", "b"]`},
+		{name: "contains_any with parens", when: "labels contains_any (a, b)"},
+		{name: "contains-any with brackets", when: "labels contains-any [a, b]"},
+		// DKT-1000's motivating predicate, verbatim.
+		{
+			name: "contains_any beside an and clause",
+			when: "labels contains doc:tdd and labels contains_any " +
+				"[security-change, security-load-bearing, security]",
+		},
+		{
+			name: "contains_any beside an or clause",
+			when: "labels contains_any [a, b] or kind == bug",
+		},
+
+		// The delimiters must PAIR. RE2 has no backreference, so the two
+		// spellings are two branches — a mismatched pair that registered would
+		// mean the closing delimiter is decoration.
+		{name: "contains_any bracket opened, paren closed", when: "labels contains_any [a, b)", wantErr: true},
+		{name: "contains_any paren opened, bracket closed", when: "labels contains_any (a, b]", wantErr: true},
+		// The bracketed form inherits every list-shape refusal of the paren one.
+		{name: "contains_any empty list", when: "labels contains_any []", wantErr: true},
+		{name: "contains_any unclosed list", when: "labels contains_any [a, b", wantErr: true},
+		{name: "contains_any unopened list", when: "labels contains_any a, b]", wantErr: true},
+		{name: "contains_any bare value, no brackets", when: "labels contains_any a", wantErr: true},
+		{name: "contains_any trailing comma", when: "labels contains_any [a, b,]", wantErr: true},
+		{name: "contains_any leading comma", when: "labels contains_any [, a]", wantErr: true},
+		{name: "contains_any doubled comma", when: "labels contains_any [a,, b]", wantErr: true},
+		{name: "contains_any nested brackets", when: "labels contains_any [a, [b]]", wantErr: true},
+		{name: "contains_any element with whitespace", when: "labels contains_any [a b]", wantErr: true},
+		// `contains_any` is labels-only, exactly as `contains-any` is: a scalar
+		// has no set form, and the field vocabulary is still kind/labels only.
+		{name: "contains_any over kind", when: "kind contains_any [bug, task]", wantErr: true},
+		{name: "contains_any over a field outside the grammar",
+			when: "assignee contains_any [a, b]", wantErr: true},
+		// A near-miss spelling is not the operator. It must be refused rather
+		// than falling through to `labels contains "_anyx"`-style readings.
+		{name: "contains_anyx is not the operator", when: "labels contains_anyx [a, b]", wantErr: true},
+		{name: "containsany is not the operator", when: "labels containsany [a, b]", wantErr: true},
+
+		// Malformed list syntax. Each is refused as V22 rather than admitted
+		// and read as something else — an unclosed or empty list that
+		// registered would evaluate false forever and silently skip the lane.
+		{name: "contains-any empty list", when: "labels contains-any ()", wantErr: true},
+		{name: "contains-any unclosed list", when: "labels contains-any (a, b", wantErr: true},
+		{name: "contains-any unopened list", when: "labels contains-any a, b)", wantErr: true},
+		{name: "contains-any bare value, no parens", when: "labels contains-any a", wantErr: true},
+		{name: "contains-any trailing comma", when: "labels contains-any (a, b,)", wantErr: true},
+		{name: "contains-any leading comma", when: "labels contains-any (, a)", wantErr: true},
+		{name: "contains-any doubled comma", when: "labels contains-any (a,, b)", wantErr: true},
+		{name: "contains-any nested parens", when: "labels contains-any (a, (b))", wantErr: true},
+		// `kind` is one value, so it has no set form — membership over it is
+		// `==`, and admitting `kind contains-any` would invite a list read
+		// against a scalar.
+		{name: "contains-any over kind", when: "kind contains-any (bug, task)", wantErr: true},
+		{name: "contains-any over a field outside the grammar",
+			when: "assignee contains-any (a, b)", wantErr: true},
+
+		{name: "and then or", when: "kind == bug and labels contains a or labels contains b", wantErr: true},
+		{name: "or then and", when: "labels contains a or labels contains b and kind == bug", wantErr: true},
+		{name: "or over a field outside the grammar", when: "kind == bug or assignee == someone", wantErr: true},
+		{name: "dangling connective", when: "kind == bug or", wantErr: true},
+		{name: "doubled connective", when: "kind == bug or or labels contains a", wantErr: true},
+		// A literal that merely CONTAINS a connective is not a split point: the
+		// connective is a whitespace-delimited token, so this stays one clause
+		// and validates.
+		{name: "label whose name embeds a connective", when: "labels contains and-then"},
+		{name: "value that is a bare connective is a clause, not a separator", when: "labels contains or"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := fmt.Sprintf(
+				"\n[pipeline]\nname = \"w\"\nversion = 1\n"+
+					"[[step]]\nname = \"a\"\nexecutor = \"x\"\nemits = \"k\"\nwhen = %q\n",
+				tc.when)
+
+			_, err := Load([]byte(src))
+			if !tc.wantErr {
+				testsupport.Must(t, err, "when = %q should register: %v", tc.when, err)
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("when = %q registered; V22 must refuse it", tc.when)
+			}
+			we, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("when = %q: error is %T, want *workflow.Error: %v", tc.when, err, err)
+			}
+			if we.Rule != "V22" {
+				t.Errorf("when = %q refused as %s, want V22: %v", tc.when, we.Rule, err)
+			}
+		})
+	}
+}
+
+// TestV22AndWhenHoldsShareOneGrammar is the single-regex discipline as an
+// assertion: every predicate V22 admits must be evaluable, and the evaluator
+// must not accept a spelling the validator refuses.
+//
+// The direction that matters is the second one. A predicate that evaluates but
+// cannot register is merely unreachable; one that registers but evaluates as
+// something else routes work through a lane nobody wrote — which is exactly
+// what a second spelling of the connective grammar would eventually produce.
+func TestV22AndWhenHoldsShareOneGrammar(t *testing.T) {
+	subject := Subject{Kind: "bug", Labels: []string{"security"}}
+
+	for _, when := range []string{
+		"kind == bug",
+		"kind == bug and labels contains security",
+		"labels contains security-load-bearing or labels contains security",
+		"kind == task or labels contains security",
+		"labels contains and-then",
+		"labels contains-any (security-change, security)",
+		"kind == doc:tdd and labels contains-any (security-change, security)",
+		"labels contains-any (a, b) or kind == bug",
+		"labels contains_any [security-change, security-load-bearing, security]",
+		"labels contains doc:tdd and labels contains_any [security-change, security]",
+		"labels contains_any [a, b] or kind == bug",
+		`labels contains_any ["a", "b"]`,
+	} {
+		src := fmt.Sprintf(
+			"\n[pipeline]\nname = \"w\"\nversion = 1\n"+
+				"[[step]]\nname = \"a\"\nexecutor = \"x\"\nemits = \"k\"\nwhen = %q\n", when)
+		if _, err := Load([]byte(src)); err != nil {
+			t.Errorf("V22 refused %q, which WhenHolds evaluates: %v", when, err)
+			continue
+		}
+		// Evaluability, not the value: every clause parses, so no clause falls
+		// through whenClauseHolds's unparseable branch.
+		clauses, _, mixed := splitWhen(when)
+		if mixed {
+			t.Errorf("%q registered but splitWhen calls it mixed", when)
+		}
+		for _, clause := range clauses {
+			if !whenShape.MatchString(clause) {
+				t.Errorf("%q registered but clause %q does not match whenShape", when, clause)
+			}
+		}
+		_ = WhenHolds(when, subject)
+	}
+
+	// The other direction: a mix evaluates FALSE and never registers, so the two
+	// halves agree that it is not a predicate.
+	const mixed = "kind == bug and labels contains security or labels contains x"
+	if WhenHolds(mixed, subject) {
+		t.Errorf("WhenHolds(%q) = true; a mixed predicate V22 refuses must not hold", mixed)
 	}
 }

@@ -148,9 +148,10 @@ func TestGatePreflightDeduplicatesAcrossDeclarationSites(t *testing.T) {
 func TestGatePreflightReportsAStubbedEntry(t *testing.T) {
 	repoRoot := t.TempDir()
 	argv := []string{"/usr/bin/true"}
+	reason := "no scanner selected yet; removal tracked by DKT-607"
 	load := sandboxTrust(t, trust.Entry{
 		Name: "secret-scan", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
-		Global: true, Stub: true,
+		Global: true, Stub: true, StubReason: reason,
 	})
 
 	rows, err := BuildGatePreflight(
@@ -166,6 +167,48 @@ func TestGatePreflightReportsAStubbedEntry(t *testing.T) {
 		t.Error("a stubbed entry is not reported as a stub; the preflight would " +
 			"read green for a gate that measures nothing")
 	}
+	// DKT-607: the recorded decision rides the row, so an operator (or a
+	// tribunal seat) reading the preflight sees why the stub exists and which
+	// issue tracks removing it, without opening the trust store or a transcript.
+	if got.StubReason != reason {
+		t.Errorf("StubReason = %q, want %q", got.StubReason, reason)
+	}
+}
+
+// TestRenderGatePreflightShowsTheStubReason (DKT-607): a stub WITH a recorded
+// reason prints it — the documented decision is discoverable from the
+// preflight itself — and a stub WITHOUT one gets the remedy line, because an
+// unexplained stub is indistinguishable from a placeholder somebody forgot.
+func TestRenderGatePreflightShowsTheStubReason(t *testing.T) {
+	t.Run("a recorded reason is printed", func(t *testing.T) {
+		var buf strings.Builder
+		RenderGatePreflight(&buf, []GatePreflight{
+			{Gate: "secret-scan", Matched: true, Entry: "secret-scan", Stub: true,
+				StubReason: "no scanner selected yet; removal tracked by DKT-607"},
+		})
+		out := buf.String()
+		for _, needle := range []string{"STUB", "secret-scan", "DKT-607"} {
+			if !strings.Contains(out, needle) {
+				t.Errorf("the stub note does not mention %q:\n%s", needle, out)
+			}
+		}
+		if strings.Contains(out, "--stub-reason") {
+			t.Errorf("a fully-explained stub still prints the record-a-reason remedy:\n%s", out)
+		}
+	})
+
+	t.Run("an unexplained stub names the remedy", func(t *testing.T) {
+		var buf strings.Builder
+		RenderGatePreflight(&buf, []GatePreflight{
+			{Gate: "sdet-abuse", Matched: true, Entry: "sdet-abuse", Stub: true},
+		})
+		out := buf.String()
+		for _, needle := range []string{"sdet-abuse", "--stub-reason"} {
+			if !strings.Contains(out, needle) {
+				t.Errorf("the unexplained-stub note does not mention %q:\n%s", needle, out)
+			}
+		}
+	})
 }
 
 // TestRenderGatePreflightIsSilentWhenEveryGateResolves.

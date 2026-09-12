@@ -172,7 +172,7 @@ func TestPacketIncludesAreOneLevelDeep(t *testing.T) {
 		"---\npacket_includes:\n  - fragments/deeper.md\n---\nMIDDLE\n")
 	writeFixture(t, root, "fragments/deeper.md", "DEEPEST\n")
 
-	files, err := resolvePacketFiles(testPinSet(t, root,
+	files, err := resolvePacketFiles("RUN-1", testPinSet(t, root,
 		"checklists/proofing.md", "fragments/house-style.md", "fragments/deeper.md"),
 		[]string{root}, []string{"checklists/proofing.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
@@ -198,7 +198,7 @@ func TestPacketIncludesDedupe(t *testing.T) {
 		"---\npacket_includes:\n  - fragments/shared.md\n---\nB\n")
 	writeFixture(t, root, "fragments/shared.md", "SHARED\n")
 
-	files, err := resolvePacketFiles(testPinSet(t, root,
+	files, err := resolvePacketFiles("RUN-1", testPinSet(t, root,
 		"checklists/a.md", "checklists/b.md", "fragments/shared.md"),
 		[]string{root}, []string{"checklists/a.md", "checklists/b.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
@@ -234,7 +234,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 		root := t.TempDir()
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 		files, err := resolvePacketFiles(
-			testPinSet(t, root, "checklists/a.md"), []string{root}, []string{"checklists/a.md"})
+			"RUN-1", testPinSet(t, root, "checklists/a.md"),
+			[]string{root}, []string{"checklists/a.md"})
 		testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 		if len(files) != 1 || strings.TrimSpace(files[0].Body) != "BODY" {
 			t.Errorf("files = %+v, want the file's bytes inlined", files)
@@ -252,7 +253,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 
 		writeFixture(t, root, "checklists/a.md", "EDITED\n")
 
-		_, err := resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		_, err := resolvePacketFiles(
+			"RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("an edited file resolved, want CONFLICT")
 		}
@@ -271,7 +273,7 @@ func TestPacketResolutionLadder(t *testing.T) {
 		err := os.Remove(filepath.Join(root, "checklists/a.md"))
 		testsupport.Must(t, err, "removing the fixture: %v", err)
 
-		_, err = resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		_, err = resolvePacketFiles("RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		if code, _ := CodeOf(err); code != CodeNotFound {
 			t.Errorf("code = %q (err %v), want %q", code, err, CodeNotFound)
 		}
@@ -281,7 +283,9 @@ func TestPacketResolutionLadder(t *testing.T) {
 		root := t.TempDir()
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 
-		_, err := resolvePacketFiles(map[string]string{}, []string{root}, []string{"checklists/a.md"})
+		_, err := resolvePacketFiles(
+			"RUN-1", map[string]string{}, []string{root},
+			[]string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("an unpinned file was read, want a refusal")
 		}
@@ -296,7 +300,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 			"---\npacket_includes:\n  - fragments/missing.md\n---\nA\n")
 
 		_, err := resolvePacketFiles(
-			testPinSet(t, root, "checklists/a.md"), []string{root}, []string{"checklists/a.md"})
+			"RUN-1", testPinSet(t, root, "checklists/a.md"),
+			[]string{root}, []string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("a dangling include was skipped — that is DKT-70's failure signature")
 		}
@@ -316,7 +321,8 @@ func TestPacketResolutionIsDeterministic(t *testing.T) {
 
 	var first string
 	for i := 0; i < 16; i++ {
-		files, err := resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		files, err := resolvePacketFiles(
+			"RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 		var b strings.Builder
 		for _, f := range files {

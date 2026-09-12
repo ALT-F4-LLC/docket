@@ -136,11 +136,11 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// OUTCOME: the reap bumps `reaped_claims` (DKT-490), so the row itself says
 	// this spent attempt was a silence, not a failure.
 	//
-	// Stage 6 moved the body into reapExpiredTx, SHARED WITH `dispatch open`,
-	// because §5.2 P5 requires that verb to perform "the same lazy reap `next`
-	// does" — and two scheduling verbs reaping differently is a bug with no
-	// symptom until a manifest disagrees with the `next` that follows it. The
-	// shared body also writes §6.4's `reap_acks` row.
+	// Stage 6 moved the body into reapExpiredTx, SHARED WITH `dispatch open`
+	// and `dispatch close`, because §5.2 P5 requires those verbs to perform
+	// "the same lazy reap `next` does" — and scheduling verbs reaping
+	// differently is a bug with no symptom until a manifest disagrees with the
+	// `next` that follows it. The shared body also writes §6.4's `reap_acks` row.
 	//
 	// IT RUNS BEFORE THE REFUSAL, and that ordering is required by D1's own
 	// stated resolution rather than being a convenience. §5.8 D1 says the way
@@ -501,7 +501,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		}
 	}
 
-	return model.StepRow{
+	row := model.StepRow{
 		Step:     model.FormatStepID(step.ID),
 		Instance: step.Instance,
 		Issue:    model.FormatID(step.IssueID),
@@ -525,11 +525,36 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		// — which also counts claims that were merely reaped.
 		FailedAttempts: step.FailedAttempts,
 		ReapedClaims:   step.ReapedClaims,
-		ExpectedCost:   step.ExpectedCost,
-		LeaseTTLS:      int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
-		Status:         db.StepReady,
-		Metadata:       metadata,
-	}, nil
+		// The last claim's own ending (DKT-1279), beside the tally above: a
+		// router deciding how to treat THIS re-offer needs to know whether
+		// the attempt it follows was reaped or failed, not how many of each
+		// this step has ever had.
+		PriorAttemptEnd: step.LastClaimEnd,
+		ExpectedCost:    step.ExpectedCost,
+		LeaseTTLS:       int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
+		Status:          db.StepReady,
+		Metadata:        metadata,
+	}
+
+	// Routing — model/effort/variant on an executor row, voter_assignments on
+	// a vote row — rides on a row the run can still OFFER, and only there.
+	// The escalation walk is keyed by the attempt an offer carries (prior
+	// claims), and a claim bumps the step's attempt as it takes it, so
+	// resolving a claimed, running, or finished step here would report one
+	// hop above what was actually spawned; the routing a claim ran under is
+	// in its claim metadata. A terminal run offers nothing, so its rows never
+	// open the pinned file — a done run stays readable after the corpus its
+	// policy.toml was pinned from has moved on.
+	if step.Status == db.StepPending && !sched.run.Status.Terminal() {
+		policy, err := sched.policy.load()
+		if err != nil {
+			return model.StepRow{}, err
+		}
+		if err := resolveRowRouting(policy, &row); err != nil {
+			return model.StepRow{}, err
+		}
+	}
+	return row, nil
 }
 
 // StepRowFor renders one step's `next row` at its EFFECTIVE status, for the
@@ -573,6 +598,7 @@ type StepListEntry struct {
 	// inventory row too: `step list` is where a caller reconciling this
 	// listing against a `run repin` CONFLICT sees WHICH `ready` rows still
 	// carry an unreaped claim the repin is refusing over.
+	// On a waiting-human run, Scheduler.Expired is false, so this field stays unset.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
 	Attempt      int  `json:"attempt"`
 	// FailedAttempts / ReapedClaims are StepRow's fields of the same name
@@ -580,9 +606,13 @@ type StepListEntry struct {
 	// scanning a run asks "why is this step on attempt 3", and the breakdown
 	// is the answer — how many of those claims failed outright vs were reaped
 	// with nothing measured.
-	FailedAttempts int     `json:"failed_attempts,omitempty"`
-	ReapedClaims   int     `json:"reaped_claims,omitempty"`
-	ExpectedCost   float64 `json:"expected_cost"`
+	FailedAttempts int `json:"failed_attempts,omitempty"`
+	ReapedClaims   int `json:"reaped_claims,omitempty"`
+	// PriorAttemptEnd is StepRow's field of the same name (DKT-1279), on the
+	// inventory row too: how the step's MOST RECENT claim ended, "reaped" or
+	// "failed", never a tally the breakdown above already gives.
+	PriorAttemptEnd string  `json:"prior_attempt_end,omitempty"`
+	ExpectedCost    float64 `json:"expected_cost"`
 }
 
 // RunStepList answers `docket step list --run RUN-N`: every step of one run,
@@ -616,18 +646,19 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	out := make([]StepListEntry, 0, len(steps))
 	for _, step := range steps {
 		out = append(out, StepListEntry{
-			Step:           model.FormatStepID(step.ID),
-			Run:            model.FormatRunID(runID),
-			Instance:       step.Instance,
-			Issue:          model.FormatID(step.IssueID),
-			Kind:           step.Kind,
-			Status:         EffectiveStatus(sched, step),
-			BlockedReason:  BlockedReason(sched, step),
-			LeaseExpired:   sched.Expired(step),
-			Attempt:        step.Attempt,
-			FailedAttempts: step.FailedAttempts,
-			ReapedClaims:   step.ReapedClaims,
-			ExpectedCost:   step.ExpectedCost,
+			Step:            model.FormatStepID(step.ID),
+			Run:             model.FormatRunID(runID),
+			Instance:        step.Instance,
+			Issue:           model.FormatID(step.IssueID),
+			Kind:            step.Kind,
+			Status:          EffectiveStatus(sched, step),
+			BlockedReason:   BlockedReason(sched, step),
+			LeaseExpired:    sched.Expired(step),
+			Attempt:         step.Attempt,
+			FailedAttempts:  step.FailedAttempts,
+			ReapedClaims:    step.ReapedClaims,
+			PriorAttemptEnd: step.LastClaimEnd,
+			ExpectedCost:    step.ExpectedCost,
 		})
 	}
 	return out, nil
@@ -650,7 +681,7 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 		return nil, err
 	}
 	issue := model.FormatID(issueID)
-	var out []StepListEntry
+	out := make([]StepListEntry, 0)
 	for _, runID := range runIDs {
 		rows, err := RunStepList(conn, runID, nowMS)
 		if err != nil {

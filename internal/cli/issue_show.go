@@ -283,7 +283,17 @@ Under --json the issue's id is served under BOTH keys: .data.id, the
 original spelling, and .data.issue, the noun every other verb keys its
 primary entity by (run status -> run, step show -> step, dispatch open ->
 dispatch). They always hold the same value, on --json and --json=v2 alike,
-and issue list rows carry the same pair.`,
+and issue list rows carry the same pair.
+
+data IS FLAT. .data.issue is a STRING, the issue id (e.g. "AGT-311") — it
+is NOT a nested issue object, and there is no .data.issue.title or
+.data.issue.labels to reach into. The issue's own fields sit top-level in
+the SAME object beside id and issue: title, description, status, priority,
+kind, assignee, labels, files, docs, created_at, updated_at, sub_issues,
+relations, linked_proposals, comments, activity, and — only when the issue
+has one — scope, resolution, run_disposition. A parse that expects a
+nested object under .data.issue and calls a field getter on what it finds
+is calling that getter on the id string.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueShow)

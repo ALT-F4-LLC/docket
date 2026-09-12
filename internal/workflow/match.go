@@ -63,13 +63,86 @@ func (m *Match) Matches(s Subject) bool {
 	return true
 }
 
+// LabelGap is what a subject would have to GAIN for a `[match]` to admit it:
+// the `labels_all` entries it lacks, and the whole `labels_any` list when it
+// holds none of them ("any one of these"). Both are reported separately because
+// the remedies differ — every entry of MissingAll must be added, one entry of
+// MissingAny is enough — and an operator acting on the warning needs to know
+// which.
+type LabelGap struct {
+	MissingAll []string
+	MissingAny []string
+}
+
+// Empty reports whether the subject already satisfies both label clauses.
+func (g LabelGap) Empty() bool {
+	return len(g.MissingAll) == 0 && len(g.MissingAny) == 0
+}
+
+// LabelGapFor reports the LABELS-ONLY distance between a subject and this
+// `[match]`: what the issue would have to be labelled to bind here.
+//
+// `reachable` is false when no labelling could ever close the distance, and the
+// two ways that happens are the two the caller must not report:
+//
+//   - the `kind` clause excludes the subject — a workflow that binds only
+//     `bug`s is not a workflow a `chore` was mis-labelled out of, and adding a
+//     label would not change that;
+//   - `unless_labels` intersects — the author wrote "not this one" ABOUT this
+//     issue, and an exclusion that fires is a decision, not an omission.
+//
+// A nil `[match]` admits everything (Matches), so its gap is empty and
+// reachable: there is nothing to add. A subject that already matches likewise
+// gets an empty gap — callers distinguish "matches" from "one label short" by
+// asking whether the gap is Empty, not by re-running Matches.
+//
+// It is DKT-1182's half of the binding lint that must live in this package:
+// the gap is a question about `[match]`'s grammar, and answering it in the
+// engine would be a second reading of the same four clauses — precisely the
+// drift the routing sweep's comment warns about, where a hand-rolled copy of
+// this predicate silently omitted `labels_all`.
+func (m *Match) LabelGapFor(s Subject) (LabelGap, bool) {
+	if m == nil {
+		return LabelGap{}, true
+	}
+
+	if len(m.Kind) > 0 && !slices.Contains(m.Kind, s.Kind) {
+		return LabelGap{}, false
+	}
+	if len(m.UnlessLabels) > 0 && intersects(m.UnlessLabels, s.Labels) {
+		return LabelGap{}, false
+	}
+
+	var gap LabelGap
+	for _, want := range m.LabelsAll {
+		if !slices.Contains(s.Labels, want) {
+			gap.MissingAll = append(gap.MissingAll, want)
+		}
+	}
+	if len(m.LabelsAny) > 0 && !intersects(m.LabelsAny, s.Labels) {
+		gap.MissingAny = append(gap.MissingAny, m.LabelsAny...)
+	}
+	return gap, true
+}
+
 // WhenHolds evaluates a step's `when` predicate against an issue.
 //
 // An empty `when` holds: a step that declares no condition is unconditional.
 // The grammar is §11.1's, validated at register time by V22 and re-parsed here
-// against the SAME regexp, so a predicate that registered cannot fail to
-// evaluate. Conjuncts are joined by `and` — the only connective (splitWhen) —
-// and every one must hold.
+// against the SAME regexps — whenShape for a clause, whenConnective for the
+// joins — so a predicate that registered cannot fail to evaluate.
+//
+// Clauses are joined by `and` (every one must hold) or by `or` (at least one
+// must), never both in one predicate: V22 refuses a mix, because the grammar
+// has no parentheses and therefore no way to say which reading of `a and b or c`
+// the author meant (DKT-548). A mixed predicate reaching here predates the
+// current grammar, and it evaluates FALSE for the same reason an unparseable
+// clause does.
+//
+// "any of these labels" is a CLAUSE, not a connective: `labels contains-any
+// (a, b)` (DKT-550), equivalently `labels contains_any [a, b]` (DKT-1000).
+// That is what lets "kind X and any of these labels" stay a single
+// homogeneous-`and` predicate instead of needing the mix V22 refuses.
 //
 // A false `when` does not omit the step: expansion creates it with status
 // `skipped` (§5.3.1), which is what keeps a downstream `after` resolvable and
@@ -78,7 +151,22 @@ func WhenHolds(when string, s Subject) bool {
 	if strings.TrimSpace(when) == "" {
 		return true
 	}
-	for _, clause := range splitWhen(when) {
+
+	clauses, connective, mixed := splitWhen(when)
+	if mixed {
+		return false
+	}
+
+	if connective == WhenOr {
+		for _, clause := range clauses {
+			if whenClauseHolds(clause, s) {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, clause := range clauses {
 		if !whenClauseHolds(clause, s) {
 			return false
 		}
@@ -86,9 +174,12 @@ func WhenHolds(when string, s Subject) bool {
 	return true
 }
 
-// whenClauseHolds evaluates one `<kind|labels> <==|!=|contains> <value>`
-// clause. An unparseable clause is FALSE rather than an error: V22 rejected it
-// at register time, so reaching this branch means a stored definition predates
+// whenClauseHolds evaluates one clause — either
+// `<kind|labels> <==|!=|contains> <value>` or the set form
+// `labels contains-any (a, b, c)` / `labels contains_any [a, b, c]`.
+//
+// An unparseable clause is FALSE rather than an error: V22 rejected it at
+// register time, so reaching this branch means a stored definition predates
 // the current grammar, and skipping the step is the conservative reading —
 // creating it ready would run work whose condition nobody could evaluate.
 func whenClauseHolds(clause string, s Subject) bool {
@@ -96,7 +187,24 @@ func whenClauseHolds(clause string, s Subject) bool {
 	if m == nil {
 		return false
 	}
-	field, op, value := m[1], m[2], unquote(m[3])
+
+	// The set form — the same intersection test the workflow-level `labels_any`
+	// [match] clause runs (Matches), so the spellings of "any of these labels"
+	// cannot answer a subject differently.
+	//
+	// whenShape gives the list body two capture groups because RE2 cannot
+	// backreference a delimiter: m[3] is the `(…)` body, m[4] the `[…]` one,
+	// and exactly one of them is non-empty whenever m[1] matched — the grammar
+	// admits no empty list, so "non-empty" is the whole test.
+	if m[1] != "" {
+		body := m[3]
+		if body == "" {
+			body = m[4]
+		}
+		return intersects(whenList(body), s.Labels)
+	}
+
+	field, op, value := m[5], m[6], unquote(m[7])
 
 	switch field {
 	case "kind":
@@ -121,6 +229,21 @@ func whenClauseHolds(clause string, s Subject) bool {
 		}
 	}
 	return false
+}
+
+// whenList splits the body of a `contains-any (…)` / `contains_any […]` list
+// into its values.
+//
+// whenShape has already established the shape — at least one element, elements
+// free of whitespace, parens and commas — so this only has to cut on the
+// separator and unquote, exactly as the one-value form does.
+func whenList(body string) []string {
+	parts := strings.Split(body, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, unquote(p))
+	}
+	return out
 }
 
 // unquote strips the optional quotes around a predicate literal, so

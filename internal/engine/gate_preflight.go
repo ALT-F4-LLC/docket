@@ -56,6 +56,12 @@ type GatePreflight struct {
 	// check — an operator reading a green preflight should not have to open the
 	// trust store to learn which they have.
 	Stub bool `json:"stub,omitempty"`
+	// StubReason is the resolving entry's recorded reason for being a stub —
+	// why the decision was made and which issue tracks replacing it (DKT-607).
+	// It rides here so the documented decision is discoverable from the
+	// preflight itself, not only from a tribunal transcript or the trust file.
+	// Empty when the entry recorded none, which the renderer calls out.
+	StubReason string `json:"stub_reason,omitempty"`
 	// Reason explains an unmatched gate, verbatim from the matcher, so the
 	// preflight and the mid-run diagnostic say the same thing.
 	Reason string `json:"reason,omitempty"`
@@ -128,7 +134,8 @@ func BuildGatePreflight(
 			if m.Matched {
 				row.Matched = true
 				if m.Entry != nil {
-					row.Entry, row.Stub = m.Entry.Name, m.Entry.Stub
+					row.Entry, row.Stub, row.StubReason =
+						m.Entry.Name, m.Entry.Stub, m.Entry.StubReason
 				}
 			} else {
 				row.Reason = m.Reason
@@ -191,9 +198,27 @@ func RenderGatePreflight(w interface{ Write([]byte) (int, error) }, rows []GateP
 		fmt.Fprintf(w,
 			"\nnote: %d declared gate(s) resolve to a STUB entry and will measure nothing:\n",
 			len(stubs))
+		// A stub WITH a recorded reason is a documented decision, printed where
+		// the stub itself is printed (DKT-607) — the decision must be
+		// discoverable here, not only in a tribunal transcript. One WITHOUT a
+		// reason gets the remedy line below, because a stub nobody can explain
+		// from this output is indistinguishable from a placeholder somebody
+		// forgot.
+		unexplained := false
 		for _, r := range stubs {
 			fmt.Fprintf(w, "  %s  (entry %s)\n",
 				exec.Render(r.Gate), exec.Render(r.Entry))
+			if r.StubReason != "" {
+				fmt.Fprintf(w, "      stub reason: %s\n", exec.Render(r.StubReason))
+			} else {
+				unexplained = true
+			}
+		}
+		if unexplained {
+			fmt.Fprintf(w,
+				"  A stub without a recorded reason: say why and what tracks fixing it with "+
+					"`docket trust rm <name>` then `docket trust add <name> -- <argv> --stub "+
+					"--stub-reason \"<why; tracking issue>\"`.\n")
 		}
 	}
 }

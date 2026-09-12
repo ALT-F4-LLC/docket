@@ -84,6 +84,14 @@ func validateEntry(e Entry, idx int, path string) error {
 		return fmt.Errorf("%w: %s in %s sets both global = true and repo = %q; an entry binds to one repo or to all, never both", ErrParse, where, path, e.Repo)
 	}
 
+	// A stub_reason on a non-stub entry is contradictory (DKT-607). Refusing is
+	// the closed direction, same as global+repo above: honoring the reason
+	// would imply the entry is a stub the flag denies, and dropping it would
+	// silently discard a key the operator wrote.
+	if e.StubReason != "" && !e.Stub {
+		return fmt.Errorf("%w: %s in %s has a stub_reason but stub is not true; a reason describes a stub, so set stub = true or remove stub_reason", ErrParse, where, path)
+	}
+
 	// The stored hash must describe the stored argv. This catches a corrupted
 	// or hand-edited file (M3): an operator who edits `argv` without recomputing
 	// the hash gets a refusal rather than an entry whose two halves disagree.

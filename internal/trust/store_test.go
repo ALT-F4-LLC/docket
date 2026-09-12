@@ -390,6 +390,21 @@ repo = "/src/example"
 			wantErr: "empty argv",
 		},
 		{
+			// DKT-607: a stub_reason on a non-stub entry is contradictory.
+			// Refusing is the closed direction: honoring the reason would imply
+			// the entry is a stub the flag denies, and dropping it would
+			// silently discard a key the operator wrote.
+			name: "stub_reason without stub",
+			content: `version = 1
+[[entry]]
+name = "secret-scan"
+argv = ["/usr/bin/true"]
+repo = "/src/example"
+stub_reason = "tracked by DKT-607"
+`,
+			wantErr: "stub_reason",
+		},
+		{
 			// A hand-edited argv whose stored hash no longer describes it is
 			// refused rather than obeyed: the two halves disagree, and
 			// guessing which one the operator meant is guessing at what to run.
@@ -446,13 +461,20 @@ name = "fmt"
 argv = ["gofmt", "-l", "."]
 global = true
 prefix = true
+
+[[entry]]
+name = "secret-scan"
+argv = ["/usr/bin/true"]
+global = true
+stub = true
+stub_reason = "no scanner selected yet; removal tracked by DKT-607"
 `
 	writeStoreFile(t, path, content, storeFileMode)
 
 	st, err := loadAt(path)
 	testsupport.Must(t, err, "a well-formed store must load: %v", err)
-	if len(st.Entries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(st.Entries))
+	if len(st.Entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(st.Entries))
 	}
 
 	first := st.Entries[0]
@@ -462,6 +484,30 @@ prefix = true
 	second := st.Entries[1]
 	if !second.Global || !second.Prefix || second.Repo != "" {
 		t.Errorf("global entry did not round-trip: %+v", second)
+	}
+	third := st.Entries[2]
+	if !third.Stub || third.StubReason != "no scanner selected yet; removal tracked by DKT-607" {
+		t.Errorf("stub entry did not round-trip its reason (DKT-607): %+v", third)
+	}
+}
+
+// TestStubEntryWithoutAReasonStillLoads pins DKT-607's back-compat: every
+// pre-DKT-607 stub entry has no stub_reason, and such a file keeps loading with
+// an empty reason — the field is optional on a stub, mandatory-absent off one.
+func TestStubEntryWithoutAReasonStillLoads(t *testing.T) {
+	path := sandbox(t)
+	writeStoreFile(t, path, `version = 1
+[[entry]]
+name = "secret-scan"
+argv = ["/usr/bin/true"]
+global = true
+stub = true
+`, storeFileMode)
+
+	st, err := loadAt(path)
+	testsupport.Must(t, err, "a reasonless stub entry must keep loading: %v", err)
+	if len(st.Entries) != 1 || !st.Entries[0].Stub || st.Entries[0].StubReason != "" {
+		t.Errorf("got %+v, want one stub entry with an empty reason", st.Entries)
 	}
 }
 

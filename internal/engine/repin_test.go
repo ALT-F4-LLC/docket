@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -454,12 +455,21 @@ func TestDispatchOpenNamesPinDrift(t *testing.T) {
 	testsupport.Must(t, os.MkdirAll(filepath.Join(configRoot, "contracts"), 0o755), "mkdir")
 	testsupport.Must(t, os.WriteFile(
 		filepath.Join(configRoot, "contracts", "x.md"), []byte("OLD\n"), 0o644), "write")
+	// The workflow DECLARES the contract, so it is in DKT-581's pin closure —
+	// an undeclared file would (correctly) no longer be pinned at all.
+	testsupport.Must(t, os.MkdirAll(filepath.Join(configRoot, "workflows"), 0o755), "mkdir")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(configRoot, "workflows", "auto-dev.toml"),
+		[]byte(autoWorkflowSrc+"packet = [\"contracts/x.md\"]\n"), 0o644), "write")
 	t.Setenv("DOCKET_PATH", store)
 
 	conn := mustDB(t)
-	// Activation scans the config root and pins contracts/x.md itself — the
-	// same path a real run's pin takes.
-	run, _ := activatedRun(t, conn)
+	// Activation scans the config root, registers the workflow, and pins
+	// contracts/x.md itself — the same path a real run's pin takes.
+	issue := createIssue(t, conn, "drift subject", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
 	report, err := VerifyPins(conn, run.ID)
 	testsupport.Must(t, err, "VerifyPins: %v", err)
 	if !report.Sound() {
@@ -530,5 +540,163 @@ func TestPinDriftNamesOnlyUnsoundPins(t *testing.T) {
 	}
 	if PinDriftNotice(nil, "RUN-1") != "" {
 		t.Error("a sound run renders a drift notice")
+	}
+}
+
+// TestRepinRefusalNamesTheVerbsThatReapALapsedClaim: the guard still refuses on
+// a lapsed-but-unreaped claim (DKT-489's semantics), but the refusal that told
+// an operator to "wait for their leases to be reaped" named no verb that
+// performs the reap, so a run whose every claim had lapsed read as permanently
+// wedged. The lapsed rows are now listed under their own sentence naming
+// `dispatch close`, `next`, and `step reap`.
+func TestRepinRefusalNamesTheVerbsThatReapALapsedClaim(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root := t.TempDir()
+
+	pinAFile(t, conn, run.ID, root, "contracts/lapsed.md", "OLD\n")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(root, "contracts/lapsed.md"), []byte("NEW\n"), 0o644), "rewrite")
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	// While the lease is live the operator is told to wait, and nothing
+	// suggests a reap is available — there is nothing to reap yet.
+	_, err = repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under a live claim")
+	}
+	if !strings.Contains(err.Error(), "claimed and mid-flight") {
+		t.Errorf("live-claim refusal %q lost its mid-flight wording", err)
+	}
+	for _, unwanted := range []string{"leases have lapsed", "step reap"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("live-claim refusal %q offers %q; there is nothing to reap",
+				err, unwanted)
+		}
+	}
+
+	// Past expiry the claim is lapsed-but-unreaped: still refused, but now the
+	// refusal names the step under its own heading and the verbs that clear it.
+	late := claim.LeaseExpiresMS + 1
+	_, err = repinRunIn(conn, run.ID, "install", late, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under a lapsed-but-unreaped claim")
+	}
+	if code, ok := CodeOf(err); !ok || code != CodeConflict {
+		t.Errorf("error code = %v, want CONFLICT: %v", code, err)
+	}
+	// The point of the sentence is that every verb it names is invocable as
+	// written — a refusal that sends the operator at a form the CLI rejects is
+	// the same wedge in a new costume. `dispatch close` marks --run required
+	// (internal/cli/dispatch.go's init over dispatchCloseCmd), so the flag has
+	// to be there.
+	for _, want := range []string{
+		"implement@0",
+		"leases have lapsed",
+		"`docket dispatch close --run " + run.Ref() + "`",
+		"`docket next --run " + run.Ref() + "`",
+		"`docket step reap STEP-N --reason R`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("lapsed-claim refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestRepinRefusalNamesStepReapOnAPausedRun: repinStatusGuard admits
+// `waiting-human` as well as `active`, and a run parks with its siblings still
+// claimed, so a lapsed lease on a paused run reaches this guard. `step reap`
+// has no run-status gate (ForceReapStep checks only --reason and the step's
+// status), so it clears that claim there; `next` and `dispatch close` reap
+// through Scheduler.Expired, which returns false off-active. The refusal has to
+// tell those apart rather than call the lapsed lease live, and it must not
+// offer the two verbs as if they would clear the claim now.
+func TestRepinRefusalNamesStepReapOnAPausedRun(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root := t.TempDir()
+
+	pinAFile(t, conn, run.ID, root, "contracts/paused.md", "OLD\n")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(root, "contracts/paused.md"), []byte("NEW\n"), 0o644), "rewrite")
+
+	claim := claimInstance(t, conn, "implement@0", nowMS)
+	execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
+		string(model.RunWaitingHuman), run.ID)
+
+	_, err := repinRunIn(conn, run.ID, "install", claim.LeaseExpiresMS+1, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under a lapsed claim on a paused run")
+	}
+	if code, ok := CodeOf(err); !ok || code != CodeConflict {
+		t.Errorf("error code = %v, want CONFLICT: %v", code, err)
+	}
+	if strings.Contains(err.Error(), "still hold live leases") {
+		t.Errorf("paused-run refusal %q calls a lapsed lease live", err)
+	}
+	for _, want := range []string{
+		"implement@0",
+		"leases have lapsed",
+		"`docket step reap STEP-N --reason R`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("paused-run refusal %q does not name %q", err, want)
+		}
+	}
+	// `next` and `dispatch close` reap nothing while the run is parked, so
+	// offering them as available would be the same misdirection in the other
+	// direction.
+	if !strings.Contains(err.Error(), "reap nothing while "+run.Ref()+" is waiting-human") {
+		t.Errorf("paused-run refusal %q does not say the run-scoped reapers are "+
+			"inert while the run is parked", err)
+	}
+}
+
+// TestRepinRefusalSortsEachClaimUnderItsOwnHeading: review fans out, so one run
+// can hold several claims whose leases lapse at different times. A single-claim
+// assertion cannot tell which sentence an instance landed under — both sentences
+// carry unconditional literals — so the mixed state is what pins the routing.
+func TestRepinRefusalSortsEachClaimUnderItsOwnHeading(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root := t.TempDir()
+
+	pinAFile(t, conn, run.ID, root, "contracts/mixed.md", "OLD\n")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(root, "contracts/mixed.md"), []byte("NEW\n"), 0o644), "rewrite")
+
+	lapsedClaim := claimInstance(t, conn, "implement@0", nowMS)
+	at := lapsedClaim.LeaseExpiresMS + 1
+	// `synthesize@0` is not ready behind a claimed `implement@0`, so its claimed
+	// row is written directly: what this guard reads is the stored status and
+	// the lease, and driving the real claim would need the predecessor done.
+	execSQL(t, conn,
+		`UPDATE steps SET status = 'claimed', owner = 'worker2',
+		   token_hash = 'x', expires_ms = ? WHERE run_id = ? AND instance = ?`,
+		at+600_000, run.ID, "synthesize@0")
+
+	_, err := repinRunIn(conn, run.ID, "install", at, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under two claims")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "2 step(s)") {
+		t.Errorf("refusal %q does not count both claims", err)
+	}
+	// Each sentence names its instances and then its verdict, so the sentences
+	// are the spans between the two verdict phrases.
+	liveAt := strings.Index(msg, "still hold live leases")
+	lapsedAt := strings.Index(msg, "leases have lapsed")
+	if liveAt < 0 || lapsedAt < 0 || liveAt > lapsedAt {
+		t.Fatalf("refusal %q does not render both sentences in order", err)
+	}
+	if got := strings.Index(msg, "synthesize@0"); got < 0 || got > liveAt {
+		t.Errorf("refusal %q does not list the live claim under the live heading", err)
+	}
+	if got := strings.Index(msg, "implement@0"); got < liveAt || got > lapsedAt {
+		t.Errorf("refusal %q does not list the lapsed claim under the lapsed heading", err)
 	}
 }

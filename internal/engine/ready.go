@@ -29,6 +29,15 @@ const (
 	CondRunActive ReadyCondition = "run is not active"
 	// CondIssueDeps is R2: the issue's depends_on predecessors are satisfied.
 	CondIssueDeps ReadyCondition = "the issue's dependencies are not satisfied"
+	// CondIssueParked is R2b: no step of the issue is parked `waiting-human`.
+	// A park is the ISSUE's — the operator is being asked about that issue,
+	// and nothing else on it moves until they rule — and only the issue's:
+	// the run stays `active` and every other issue's rows keep scheduling
+	// (reconcileRun parks the run only once no unparked work remains).
+	// RUN-90 measured the run-level alternative: eleven parks, each a single
+	// issue's verify, each stopping all 45 issues — 1372 of 1656 dispatched
+	// rows never launched.
+	CondIssueParked ReadyCondition = "the issue is parked on an operator decision"
 	// CondPredecessors is R3: intra-workflow `after` predecessors are done,
 	// and a fanned-out predecessor is joined.
 	CondPredecessors ReadyCondition = "an `after` predecessor is not done"
@@ -128,6 +137,11 @@ type Scheduler struct {
 	// of the world. It counts UNACKNOWLEDGED reaps per class, and it is nil on
 	// the dormant path — a run with nothing reaped never allocates it (D3).
 	reapHold map[string]int
+	// policy is the run's pinned policy.toml, read lazily by the first
+	// rendered row that needs routing (stepRow) and never by readiness
+	// itself: which model a row routes to is a rendering fact, not a
+	// scheduling one.
+	policy *runPolicy
 	// openReaps are the rows behind reapHold, kept so the REFUSAL can name the
 	// same reaps the predicate counted. A headroom denial with nothing running
 	// is baffling unless the message names why (§6.3).
@@ -182,6 +196,11 @@ type issueFacts struct {
 	priority   model.Priority
 	scopeGlobs []string
 	depsOK     bool
+	// parked is R2b's fact: some step of this issue is `waiting-human`.
+	// Read off the same step snapshot the rest of the predicate answers
+	// against, never re-queried, so a park and the rows it holds are one
+	// consistent view.
+	parked bool
 }
 
 // LoadScheduler reads everything the predicate needs, once, inside tx.
@@ -227,6 +246,17 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 				model.FormatID(ri.IssueID), err)
 		}
 		labels[ri.IssueID] = ls
+	}
+
+	// R2b's fact, from the snapshot already loaded: an issue with a step
+	// parked `waiting-human` holds every other row of that issue.
+	for _, step := range steps {
+		if step.Status != db.StepWaitingHuman {
+			continue
+		}
+		if f, ok := facts[step.IssueID]; ok {
+			f.parked = true
+		}
 	}
 
 	// Every foreign holder's scope, eagerly: an unknown scope must not read as
@@ -285,6 +315,14 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		return nil, err
 	}
 
+	// The pin LIST only, in the same transaction as the rest of the snapshot.
+	// The policy file behind its policy.toml entry is opened only when a
+	// rendered row asks for routing (runPolicy).
+	pins, err := db.ListPinsTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+
 	limits, limitSources := mergeLimits(defs)
 	s := &Scheduler{
 		run: run, steps: steps, foreign: foreign, issues: facts,
@@ -299,6 +337,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		openReaps:     openReaps,
 		holdTally:     tally,
 		voteProposals: proposals,
+		policy:        &runPolicy{runID: runID, pins: pins},
 	}
 	for _, step := range steps {
 		s.stepByID[step.ID] = step
@@ -544,6 +583,13 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 		return false, CondIssueDeps
 	}
 
+	// R2b: the issue is not parked on an operator decision (see the
+	// condition's own comment). Checked before scope and headroom for the
+	// same reason R1 leads: "the issue is parked" explains a whole lane.
+	if facts != nil && facts.parked {
+		return false, CondIssueParked
+	}
+
 	// R3: intra-workflow `after` predecessors are done.
 	if !s.predecessorsDone(step) {
 		return false, CondPredecessors
@@ -715,12 +761,22 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 // has instances, and the fallback applies only where re-instantiation did not
 // reach.
 func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.Step {
-	if at := s.instancesOf(step.IssueID, predName, step.Ordinal); len(at) > 0 {
+	return predecessorInstancesIn(s.steps, step, predName)
+}
+
+// predecessorInstancesIn is predecessorInstances over an explicit step set, so
+// the `after_fired` cascade (after_fired.go) — which runs inside a routing
+// transaction with no Scheduler loaded — resolves a predecessor by the SAME
+// ordinal rule R3 uses. Two readings of "which instances of g does S wait on"
+// would disagree at the first loop that re-instantiated one of them and not
+// the other.
+func predecessorInstancesIn(steps []*db.Step, step *db.Step, predName string) []*db.Step {
+	if at := instancesAt(steps, step.IssueID, predName, step.Ordinal); len(at) > 0 {
 		return at
 	}
 
 	best := -1
-	for _, other := range s.steps {
+	for _, other := range steps {
 		if other.IssueID != step.IssueID || other.StepName != predName {
 			continue
 		}
@@ -731,7 +787,7 @@ func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.S
 	if best < 0 {
 		return nil
 	}
-	return s.instancesOf(step.IssueID, predName, best)
+	return instancesAt(steps, step.IssueID, predName, best)
 }
 
 // routedTo is R3's interposition clause (DKT-38): for a step some `threshold`
@@ -908,8 +964,14 @@ func (s *Scheduler) quorumMet(predName string, def *workflow.Definition, sibling
 // instancesOf returns every instance of a named step for one issue at an
 // ordinal — the fanout siblings when there are any, or the single instance.
 func (s *Scheduler) instancesOf(issueID int, name string, ordinal int) []*db.Step {
+	return instancesAt(s.steps, issueID, name, ordinal)
+}
+
+// instancesAt is instancesOf over an explicit step set — see
+// predecessorInstancesIn for why the rule is shared rather than copied.
+func instancesAt(steps []*db.Step, issueID int, name string, ordinal int) []*db.Step {
 	var out []*db.Step
-	for _, step := range s.steps {
+	for _, step := range steps {
 		if step.IssueID == issueID && step.StepName == name && step.Ordinal == ordinal {
 			out = append(out, step)
 		}
@@ -1100,8 +1162,7 @@ func (s *Scheduler) Expired(step *db.Step) bool {
 		return false
 	}
 
-	lease := step.Lease()
-	if lease.Held() && !lease.Live(s.nowMS) {
+	if leaseLapsed(step, s.nowMS) {
 		return true
 	}
 
@@ -1118,6 +1179,15 @@ func (s *Scheduler) Expired(step *db.Step) bool {
 		return false
 	}
 	return s.nowMS-*step.StartedMS >= max.Milliseconds()
+}
+
+// leaseLapsed is the lease half of Expired, shared with run repin's quiescence
+// guard, which has no workflow definitions in hand and so cannot build a
+// Scheduler. A grace window or clock-source change belongs here, where every
+// surface that speaks about a lapsed lease reads it.
+func leaseLapsed(step *db.Step, nowMS int64) bool {
+	lease := step.Lease()
+	return lease.Held() && !lease.Live(nowMS)
 }
 
 // SortSteps orders a ready set by PRIORITY THEN AGE (§2: "Ordering: priority
@@ -1444,7 +1514,7 @@ func (s *Scheduler) claimablePass(sorted []*db.Step, evicted map[int]bool) []*db
 			admitted[step.Class]++
 		}
 		s.grantScope(step, granted)
-		admittedCost += step.ExpectedCost
+		admittedCost += reservableCost(step)
 		out = append(out, step)
 	}
 	return out
@@ -1528,7 +1598,10 @@ func (s *Scheduler) offerBudget(step *db.Step, admittedCost float64) bool {
 	if s.budget.unlimited() {
 		return true
 	}
-	return s.budget.spend()+admittedCost+step.ExpectedCost <= s.budget.cap
+	// reservableCost, not ExpectedCost: a vote step's declared cost is already
+	// in the floor at materialization (DKT-584), so the offer must not reserve
+	// it a second time.
+	return s.budget.spend()+admittedCost+reservableCost(step) <= s.budget.cap
 }
 
 func (s *Scheduler) priorityOf(step *db.Step) int {

@@ -27,8 +27,17 @@ Each pin gets one verdict:
             refuses (exit 4), so the run is already blocked on it
   missing   the run depends on the ref and it no longer resolves at all
 
-Exit 4 if any pin changed, exit 2 if any is missing and none changed, 0 when
-every pin is sound.
+THEN THE PIN SET IS CHECKED FOR CLOSURE (DKT-821). Every pin matching disk does
+not make a pin set healthy: the pinned bytes themselves reference files, and a
+reference the run never pinned makes every step whose packet resolves it
+unclaimable. Those are reported separately, as ` + "`references`" + `:
+
+  unpinned-reference  a pinned file's packet_includes (or a pending step's
+                      packet entry) names a ref this run does not pin — the
+                      claim refuses (exit 3) whether or not the file is there
+
+Exit 4 if any pin changed, exit 2 if any is missing and none changed, exit 3 if
+the pins are all sound but the pin set is not closed, 0 when both halves pass.
 
 WHY THIS VERB EXISTS. The verbs that check pins each check only the pins THEY
 read: step render verifies its template and its own step's packet files, and a
@@ -66,10 +75,27 @@ func runRunVerifyPins(cmd *cobra.Command, ref string, w *output.Writer) error {
 		remedy := fmt.Sprintf("; restore the file(s), or `docket run repin %s "+
 			"--reason ...` adopts current disk bytes for the remaining steps "+
 			"(DKT-408)", report.Run)
-		if report.Changed == 0 {
+		switch {
+		case report.Changed > 0:
+			// Drift wins the disposition: it is the half a repin can fix, and
+			// its remedy is the one to try first.
+		case report.Missing > 0:
 			code = output.ErrNotFound
 			// A missing ref has no current bytes to adopt; repin would refuse.
 			remedy = "; restore the file(s) or abandon the run"
+		default:
+			// ONLY THE CLOSURE IS OPEN. Nothing drifted, so there is nothing on
+			// disk to restore and repin has no changed bytes to adopt — it
+			// would report a clean no-op on exactly this run. The pin set froze
+			// without the ref, and only a new activation pins one. The code is
+			// the one the blocked claims themselves return, which is this
+			// verb's rule: a caller that handles the refusal handles the
+			// prediction of it.
+			code = output.ErrValidation
+			remedy = "; the pin set froze without the ref(s), so the step(s) " +
+				"reading them refuse at claim (VALIDATION_ERROR) — start a new " +
+				"run to pin them, or take the reference back out of the " +
+				"referencing file"
 		}
 		return cmdErr(fmt.Errorf("%s: %s%s",
 			report.Run, engine.PinReportReason(report), remedy), code)
@@ -85,7 +111,11 @@ func runRunVerifyPins(cmd *cobra.Command, ref string, w *output.Writer) error {
 
 func renderPinReport(r *engine.PinReport) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d pin(s), all sound", r.Run, len(r.Pins))
+	// BOTH HALVES ARE STATED on success, because a reader who was told only
+	// "all sound" cannot tell whether the closure was checked at all — which is
+	// precisely the false confidence DKT-821 was.
+	fmt.Fprintf(&b, "%s: %d pin(s), all sound; every ref they reference is pinned",
+		r.Run, len(r.Pins))
 	return b.String()
 }
 

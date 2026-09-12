@@ -716,6 +716,12 @@ SQL
   fi
 
   # `run status` renders the rollup and WRITES NOTHING.
+  #
+  # Nine `pending`, not ten: `implement@0` has no `after` predecessor, ample
+  # budget headroom (cap 25 against its 1.5 declared cost), and no other R1-R7
+  # clause holds it back, so it reads `ready` the instant the run activates —
+  # the correct effective status, per EffectiveStatusCounts. The rollup counts
+  # by EFFECTIVE status, so a leaf step's readiness moves it out of `pending`.
   local RUN_STATE_BEFORE RUN_STATE_AFTER
   RUN_STATE_BEFORE=$(sqlite3 "$ZG_DB" \
     "SELECT group_concat(id||status||row_version||updated_at_ms) FROM runs;")
@@ -723,7 +729,7 @@ SQL
   assert_exit "ZG" "ZG9_status_exit" 0
   assert_json "ZG" "ZG9_status_issues" ".data.issues" "2"
   assert_json "ZG" "ZG9_status_step_rollup" \
-    '.data.steps | map(select(.status == "pending")) | .[0].count' "10"
+    '.data.steps | map(select(.status == "pending")) | .[0].count' "9"
   RUN_STATE_AFTER=$(sqlite3 "$ZG_DB" \
     "SELECT group_concat(id||status||row_version||updated_at_ms) FROM runs;")
   check_cond "ZG" "ZG9_status_writes_nothing" "`run status` mutated the run row" [ "$RUN_STATE_BEFORE" = "$RUN_STATE_AFTER" ]
@@ -3385,7 +3391,13 @@ TOML
   # coverage of their own. This is what a future retire verb must break
   # LOUDLY, matching the Go side's literal `wantCandidates` in
   # TestRenamePlusBumpRefusesActivation.
-  assert_stdout_contains "ZG" "ZG32_names_joined" "zg-gone@1, zg-gone-renamed@2"
+  #
+  # zg-gone@1 carries the orphan annotation (orphanAnnotation,
+  # internal/engine/orphan_registration.go): its source file is the one ZG31
+  # deleted above, so the candidate list names it as an orphaned registration,
+  # same as the Go side's `wedgeCandidatesOrphaned`.
+  assert_stdout_contains "ZG" "ZG32_names_joined" \
+    "zg-gone@1 (no source on disk — orphaned registration, deprecation candidate), zg-gone-renamed@2"
   # The BRANCH DISCRIMINATOR. The joined candidate list above is
   # rendered by refList in BOTH refusal branches and in the same order, so it
   # does not distinguish them. This literal is the only text that does; a

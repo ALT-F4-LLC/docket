@@ -127,13 +127,32 @@ func runAggregate(a ActionSpec, sc StepContext) ActionResult {
 		return fail("step %s: %v", sc.Instance, err)
 	}
 
+	// `route_at`'s below-floor clusters go to the RECORD (DKT-593): the
+	// builtin's own `action_results` row, where every attempt's trace already
+	// lives. They are fully reduced — value, members, demotion trail — and
+	// they are deliberately NOT in the artifact payload, so the threshold and
+	// every downstream `inputs` reader see only the emitted set. History is
+	// attributed; the loop is not fed.
+	recorded := ""
+	if len(outcome.Recorded) > 0 {
+		encoded, err := json.Marshal(outcome.Recorded)
+		if err != nil {
+			return fail("step %s: encoding the below-floor clusters: %v",
+				sc.Instance, err)
+		}
+		recorded = string(encoded)
+	}
+
 	return ActionResult{
-		Kind:    params.Output,
-		Body:    aggregateBody(sc.Instance, len(outcome.Payload), len(outcome.Held)),
+		Kind: params.Output,
+		Body: aggregateBody(sc.Instance,
+			len(outcome.Payload)+len(outcome.Recorded),
+			len(outcome.Held), len(outcome.Recorded)),
 		Payload: string(payload),
 		Held:    outcome.Held,
 		Results: []ActionResultRow{{
 			Action: a.Name, Verdict: db.ActionVerdictPass, Builtin: true,
+			Output: recorded,
 		}},
 	}
 }
