@@ -72,7 +72,9 @@ uses, plus the proposal reads a vote gate's seat roster needs.
                  without a tally (` + "`closed`" + `) reads as "open": no vote decided it
   tally          {weighted_score, threshold}, absent without a proposal
   seats          every DECLARED voter, whether they have cast, and their
-                 verdict once they have — absent on a human gate
+                 verdict once they have — absent on a human gate; while a
+                 SEALED proposal is still open the verdict is withheld and
+                 only ` + "`cast`" + ` is reported (vote.rule.<name>.sealed)
   missing_seats  the voters in ` + "`seats`" + ` who have not cast — always present as
                  (possibly empty) once a proposal exists
   target         {sha, worktree} the gate judges, absent when the step's
