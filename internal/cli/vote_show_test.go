@@ -253,8 +253,11 @@ func TestVoteShowJSON_SealedProposalWithholdsCastsUntilFinalized(t *testing.T) {
 	castSealedSeat(t, conn, pid, "seat-a")
 	data, votes := voteShowData(t, conn, pid)
 
+	// Errorf, not Fatalf: the leak checks below are the criterion, and they
+	// must still run (and fail for the leak) on a tree that has no `sealed`
+	// key at all.
 	if string(data["status"]) != `"open"` || string(data["sealed"]) != `true` {
-		t.Fatalf("after one cast: status=%s sealed=%s, want open and true",
+		t.Errorf("after one cast: status=%s sealed=%s, want open and true",
 			data["status"], data["sealed"])
 	}
 	if len(votes) != 1 || votes[0]["voter_name"] != "seat-a" {
