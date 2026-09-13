@@ -106,18 +106,25 @@ const (
 	KeyEventsRetain = "events.retain"
 
 	// KeyVoteRulePrefix is the named-threshold-configuration namespace:
-	// vote.rule.<name>.threshold and vote.rule.<name>.criticality
-	// (gates-trust §8.3).
+	// vote.rule.<name>.threshold, vote.rule.<name>.criticality and
+	// vote.rule.<name>.sealed (gates-trust §8.3).
 	//
 	// A workflow's `type="vote"` step names a rule rather than passing flags,
 	// because a step cannot pass flags. The <name> is an OPAQUE string exactly
 	// as lease.ttl.<class>'s class is, and this reuses the config machinery
 	// rather than adding a table: a rule "exists" iff its `.threshold` is set.
 	KeyVoteRulePrefix = "vote.rule."
-	// KeyVoteRuleThresholdSuffix and KeyVoteRuleCriticalitySuffix complete a
-	// rule's two keys.
+	// KeyVoteRuleThresholdSuffix, KeyVoteRuleCriticalitySuffix and
+	// KeyVoteRuleSealedSuffix complete a rule's three keys.
+	//
+	// `.sealed` is opt-in and defaults to false: a sealed rule opens proposals
+	// whose casts the read verbs withhold (verdict, weights, findings, summary)
+	// until the tally closes the proposal, so a seat reading the ballot cannot
+	// anchor on a sibling's verdict. It is a RENDERING rule only — the tally
+	// and the one-cast-per-voter constraint never consult it.
 	KeyVoteRuleThresholdSuffix   = ".threshold"
 	KeyVoteRuleCriticalitySuffix = ".criticality"
+	KeyVoteRuleSealedSuffix      = ".sealed"
 
 	// KeyVoteHoldRule and KeyVoteHoldVoters configure how a MATERIALIZED HELD
 	// step is decided: by one operator (the default) or by a tally.
@@ -474,9 +481,9 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 		}, nil
 	}
 
-	// vote.rule.<name>.threshold / .criticality (gates-trust §8.3), matched
-	// dynamically for the same reason the per-class TTL is: <name> is an
-	// opaque string, so the set of valid keys is open by design.
+	// vote.rule.<name>.threshold / .criticality / .sealed (gates-trust §8.3),
+	// matched dynamically for the same reason the per-class TTL is: <name> is
+	// an opaque string, so the set of valid keys is open by design.
 	if rest, ok := strings.CutPrefix(key, KeyVoteRulePrefix); ok {
 		if name, found := strings.CutSuffix(rest, KeyVoteRuleThresholdSuffix); found && name != "" {
 			return ConfigSpec{
@@ -493,6 +500,16 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 				Doc:     fmt.Sprintf("Criticality for vote rule %q", name),
 			}, nil
 		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleSealedSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether proposals opened under vote rule %q "+
+					"withhold their casts from the read verbs until the tally "+
+					"closes them; false (the default) renders every cast as it lands", name),
+			}, nil
+		}
 	}
 
 	return ConfigSpec{}, fmt.Errorf("%w: %q (known keys: %s)",
@@ -501,7 +518,7 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 
 // KnownConfigKeys lists the fixed keys, plus the open-ended patterns.
 func KnownConfigKeys() []string {
-	keys := make([]string, 0, len(engineConfigSpecs)+3)
+	keys := make([]string, 0, len(engineConfigSpecs)+4)
 	for _, spec := range engineConfigSpecs {
 		keys = append(keys, spec.Key)
 	}
@@ -509,6 +526,7 @@ func KnownConfigKeys() []string {
 		KeyLeaseTTLPrefix+"<class>",
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleThresholdSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleCriticalitySuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleSealedSuffix,
 	)
 	return keys
 }
@@ -614,14 +632,19 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 	return nil
 }
 
-// VoteRuleThresholdKey and VoteRuleCriticalityKey build a rule's two keys, so
-// the string concatenation lives in one place rather than at every reader.
+// VoteRuleThresholdKey, VoteRuleCriticalityKey and VoteRuleSealedKey build a
+// rule's three keys, so the string concatenation lives in one place rather
+// than at every reader.
 func VoteRuleThresholdKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleThresholdSuffix
 }
 
 func VoteRuleCriticalityKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleCriticalitySuffix
+}
+
+func VoteRuleSealedKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleSealedSuffix
 }
 
 // VoteRuleExists reports whether a rule is registered.

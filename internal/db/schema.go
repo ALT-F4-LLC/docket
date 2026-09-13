@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 27
+const currentSchemaVersion = 28
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -196,6 +196,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	25: migrateV24ToV25,
 	26: migrateV25ToV26,
 	27: migrateV26ToV27,
+	28: migrateV27ToV28,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2409,6 +2410,56 @@ func migrateV26ToV27(tx *sql.Tx) error {
 	return nil
 }
 
+// v28AddedColumns is v28's whole schema change: one column on `proposals` —
+// `sealed`, the rendering rule a proposal was opened under (DKT-2447).
+//
+// A sealed proposal withholds its casts from the read verbs (`vote show`,
+// `vote result`, `gate status`) while it is still open, so a seat reading the
+// ballot before casting cannot anchor on a sibling's verdict. The flag is
+// stored ON THE PROPOSAL at open rather than re-resolved from the vote rule at
+// read time, because a rule can be edited or removed after a proposal opens
+// and a ballot's rendering rule must not change under the seats mid-vote.
+//
+// It is a rendering rule ONLY: the tally, the quorum and the one-cast-per-voter
+// constraint never read it, and the rows stay readable through export and
+// direct store access. Zero is every pre-v28 proposal's value and the exact
+// prior behavior — every cast renders as it lands.
+var v28AddedColumns = []struct{ table, column, ddl string }{
+	{"proposals", "sealed",
+		`ALTER TABLE proposals ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0`},
+}
+
+// v28ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 uses and for the same reason: v28 adds no table and no index, so a
+// database stamped 28 by a binary built mid-change carries every v27 sentinel
+// and the sealed column never arrives.
+var v28ColumnSentinels = []struct{ table, column string }{
+	{"proposals", "sealed"},
+}
+
+// migrateV27ToV28 adds the sealed column (DKT-2447).
+//
+// It BACK-FILLS NOTHING: no proposal that opened before the rule existed was
+// opened sealed, and zero says exactly that. `ALTER TABLE ADD COLUMN` is not
+// idempotent in SQLite, so the migration probes first and stays re-runnable,
+// the same shape v10 through v27 use.
+func migrateV27ToV28(tx *sql.Tx) error {
+	for _, col := range v28AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v27 to v28: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v27 to v28: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -2993,6 +3044,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 26
+				break
+			}
+		}
+	}
+
+	// The v28 guard, in the same COLUMN form as v27 and for its reason: v28
+	// adds a column and no table, so a database stamped 28 by a binary built
+	// mid-change carries every v27 sentinel and the sealed column never
+	// arrives.
+	if version >= 28 {
+		for _, col := range v28ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v28 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 27
 				break
 			}
 		}

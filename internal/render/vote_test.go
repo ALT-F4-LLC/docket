@@ -154,3 +154,70 @@ func TestRenderProposalDetail_OmitsLinkedDocsWhenEmpty(t *testing.T) {
 		})
 	}
 }
+
+// sealedTestProposal is a two-seat proposal opened sealed (DKT-2447).
+func sealedTestProposal(status model.ProposalStatus) *model.Proposal {
+	p := makeTestProposal(1, "Sealed ballot")
+	p.RequiredVoters = 2
+	p.Sealed = true
+	p.Status = status
+	return p
+}
+
+// sealedRenderCases run one renderer over the same sealed proposal in both
+// themes, open and then closed, and check what each state may show.
+func sealedRenderCases(t *testing.T, render func(*model.Proposal, []*model.Vote) string) {
+	t.Helper()
+	vote := makeTestVote("the summary of seat-a")
+	vote.FindingsJSON = &model.Findings{Concerns: []string{"a concern from seat-a"}}
+	votes := []*model.Vote{vote}
+
+	for _, tc := range []struct {
+		name    string
+		noColor bool
+	}{
+		{"styled", false},
+		{"plain", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noColor {
+				t.Setenv("NO_COLOR", "1")
+			} else {
+				t.Setenv("TERM", "xterm-256color")
+			}
+
+			open := render(sealedTestProposal(model.ProposalStatusOpen), votes)
+			for _, want := range []string{"seat-a", "1/2", "sealed"} {
+				if !strings.Contains(open, want) {
+					t.Errorf("sealed-open rendering lacks %q:\n%s", want, open)
+				}
+			}
+			for _, leaked := range []string{string(model.VerdictApprove), "0.90", "0.80", "0.72",
+				"the summary of seat-a", "a concern from seat-a"} {
+				if strings.Contains(open, leaked) {
+					t.Errorf("sealed-open rendering leaks %q:\n%s", leaked, open)
+				}
+			}
+
+			closed := render(sealedTestProposal(model.ProposalStatusApproved), votes)
+			for _, want := range []string{"seat-a", string(model.VerdictApprove), "0.90"} {
+				if !strings.Contains(closed, want) {
+					t.Errorf("closed sealed rendering lacks %q:\n%s", want, closed)
+				}
+			}
+		})
+	}
+}
+
+// A sealed proposal's detail view withholds every cast to a name and a count
+// while open, and renders everything once the tally closes it (DKT-2447).
+func TestRenderProposalDetail_SealedOpenRendersNamesOnly(t *testing.T) {
+	sealedRenderCases(t, func(p *model.Proposal, votes []*model.Vote) string {
+		return RenderProposalDetail(p, votes, nil, nil)
+	})
+}
+
+// The same rule on the result view: no breakdown table while sealed and open.
+func TestRenderVoteResult_SealedOpenRendersNamesOnly(t *testing.T) {
+	sealedRenderCases(t, RenderVoteResult)
+}

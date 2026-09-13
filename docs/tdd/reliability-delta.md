@@ -735,6 +735,41 @@ now carries the same field alongside the counter it already bumps, so W3's
 same-call offer (the reap and its own re-offer, one answer) carries the
 ending it just recorded rather than requiring a second read.
 
+### AMENDMENT — the span extends to v28 (DKT-2447, 2026-09-13)
+
+**What changed.** v28 adds ONE column on `proposals`, `sealed INTEGER NOT NULL
+DEFAULT 0`: the RENDERING RULE the proposal was opened under. A proposal
+opened under a vote rule with `vote.rule.<name>.sealed = true` (resolved in
+`resolveVoteRule`, stored by `OpenVoteProposal`), or by `vote create --sealed`,
+carries `1`. While such a proposal is still `open`, `vote show`, `vote result`
+and `gate status` withhold every cast's verdict, confidence, relevance,
+weight, findings and summary and render only who has cast and how many casts
+are in; once the status leaves `open`, everything renders. It rides the wire
+as `sealed` on the proposal object (`vote show`, `vote result`, `vote list`,
+`vote create`, export/import), and the withheld casts ride as
+`{voter_name, created_at}` entries in the same `votes` array.
+
+**What it fixes.** Every open proposal rendered every recorded cast in full,
+so a seat that read the proposal after a sibling had cast saw the sibling's
+verdict and reasoning before casting its own — the public-board channel for
+anchoring and collusion that Anthropic's "Patterns and problems in emerging
+multiagent systems" names (DOC-130 candidate 1). Sealing is OPT-IN per rule,
+so every pre-existing rule and every pre-existing workflow renders exactly as
+before.
+
+**Why the ratified arithmetic is untouched.** Like v11–v27, v28 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable,
+and a rewind guard that probes the COLUMN (the v27 form, since v28 adds no
+table). It BACK-FILLS NOTHING: no proposal that opened before the rule
+existed was opened sealed, and `0` says exactly that. The flag is stored on
+the proposal rather than re-resolved from the rule at read time so an edit
+to the rule cannot change what a live ballot renders under the seats
+mid-vote. Sealing is a NORM-LEVEL SHIELD, not a security boundary: the tally
+(`db.CastVote`) and the one-cast-per-voter constraint never read the column,
+and the vote rows stay readable through `export`, `ListAllVotes` and direct
+store access — gates-trust §8.3 records the same caveat beside the key.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

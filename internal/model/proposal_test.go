@@ -634,3 +634,58 @@ func TestVoteJSONBackwardCompatV2(t *testing.T) {
 		t.Errorf("VoterName = %q", v.VoterName)
 	}
 }
+
+// DKT-2447: `sealed` rides the proposal's wire format both ways, SealedOpen
+// is true only while a sealed proposal is still open, and a SealedCast puts
+// nothing but the voter's name and cast time on the wire.
+func TestProposalSealedWireAndPredicate(t *testing.T) {
+	now := time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)
+	p := Proposal{
+		ID: 7, Description: "sealed", Criticality: CriticalityMedium,
+		Status: ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+		Sealed: true, CreatedAt: now, UpdatedAt: now,
+	}
+	data, err := json.Marshal(p)
+	testsupport.Must(t, err, "Marshal: %v", err)
+	var raw map[string]any
+	testsupport.Must(t, json.Unmarshal(data, &raw), "Unmarshal raw: %v", err)
+	if raw["sealed"] != true {
+		t.Errorf("JSON sealed = %v, want true", raw["sealed"])
+	}
+	var back Proposal
+	testsupport.Must(t, json.Unmarshal(data, &back), "Unmarshal: %v", err)
+	if !back.Sealed {
+		t.Error("sealed did not survive the round trip")
+	}
+
+	for _, tc := range []struct {
+		sealed bool
+		status ProposalStatus
+		want   bool
+	}{
+		{true, ProposalStatusOpen, true},
+		{true, ProposalStatusApproved, false},
+		{true, ProposalStatusRejected, false},
+		{true, ProposalStatusClosed, false},
+		{false, ProposalStatusOpen, false},
+	} {
+		q := Proposal{Sealed: tc.sealed, Status: tc.status}
+		if got := q.SealedOpen(); got != tc.want {
+			t.Errorf("SealedOpen(sealed=%v, %s) = %v, want %v", tc.sealed, tc.status, got, tc.want)
+		}
+	}
+
+	casts := SealedCasts([]*Vote{{
+		VoterName: "seat-a", VoterRole: "reviewer", Verdict: VerdictReject,
+		Confidence: 0.9, DomainRelevance: 0.8, Summary: "why", CreatedAt: now,
+	}})
+	data, err = json.Marshal(casts)
+	testsupport.Must(t, err, "Marshal casts: %v", err)
+	want := `[{"voter_name":"seat-a","created_at":"2026-09-13T10:00:00Z"}]`
+	if string(data) != want {
+		t.Errorf("SealedCasts wire = %s, want %s", data, want)
+	}
+	if empty, _ := json.Marshal(SealedCasts(nil)); string(empty) != "[]" {
+		t.Errorf("SealedCasts(nil) wire = %s, want []", empty)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
@@ -223,5 +224,55 @@ func TestGateStatusClosedProposalReadsOpen(t *testing.T) {
 
 	if status.Outcome != GateOutcomeOpen {
 		t.Errorf("outcome = %q, want open for a closed, untallied proposal", status.Outcome)
+	}
+}
+
+// TestGateStatusSealedOpenWithholdsSeatVerdicts is DKT-2447 on the third read
+// surface: while a sealed proposal is open, every seat still reports whether
+// it has CAST — the fact a dispatcher waits on — but no verdict, so a seat
+// probing the gate before casting cannot anchor on a sibling. The tally
+// closes the ballot and the verdicts arrive with it.
+func TestGateStatusSealedOpenWithholdsSeatVerdicts(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedVoteGateRun(t, conn)
+	err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "sealing the rule: %v", err)
+	e := testEngine()
+
+	proposalID := openGateProposal(t, conn, e, runID)
+	castSeat(t, conn, proposalID, "alice", model.VerdictReject, "")
+
+	gateID := stepIDByInstance(t, conn, "gate@0")
+	status, err := GateStatus(conn, gateID, nowMS)
+	testsupport.Must(t, err, "GateStatus: %v", err)
+
+	if status.Outcome != GateOutcomeOpen {
+		t.Fatalf("outcome = %q, want open at 1/3", status.Outcome)
+	}
+	for _, seat := range status.Seats {
+		if seat.Voter == "alice" && !seat.Cast {
+			t.Error("alice's cast is not reported on the sealed-open gate")
+		}
+		if seat.Verdict != "" {
+			t.Errorf("sealed-open gate reports %s's verdict %q", seat.Voter, seat.Verdict)
+		}
+	}
+	if len(status.MissingSeats) != 2 {
+		t.Errorf("missing_seats = %v, want [bob carol]", status.MissingSeats)
+	}
+
+	castSeat(t, conn, proposalID, "bob", model.VerdictApprove, "")
+	castSeat(t, conn, proposalID, "carol", model.VerdictApprove, "")
+	status, err = GateStatus(conn, gateID, nowMS)
+	testsupport.Must(t, err, "GateStatus after the tally: %v", err)
+	if status.Outcome != GateOutcomeApproved {
+		t.Fatalf("outcome = %q, want approved", status.Outcome)
+	}
+	verdicts := map[string]string{}
+	for _, seat := range status.Seats {
+		verdicts[seat.Voter] = seat.Verdict
+	}
+	if verdicts["alice"] != string(model.VerdictReject) || verdicts["bob"] != string(model.VerdictApprove) {
+		t.Errorf("closed sealed gate verdicts = %v, want every cast's verdict", verdicts)
 	}
 }

@@ -447,3 +447,67 @@ func assertNoTallyArithmeticInVotePath(t *testing.T) {
 		}
 	}
 }
+
+// TestVoteRuleSealedIsResolvedAndStoredAtOpen is DKT-2447: `.sealed` is the
+// rule's third, opt-in dimension. It defaults to false, it resolves beside the
+// threshold, and OpenVoteProposal STORES it on the proposal — so a rule
+// edited after the ballot opened cannot change what a live vote renders.
+func TestVoteRuleSealedIsResolvedAndStoredAtOpen(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.6", "")
+
+	rule, err := resolveVoteRule(conn, 1, "majority")
+	testsupport.Must(t, err, "resolveVoteRule: %v", err)
+	if rule.Sealed {
+		t.Error("a rule with no `.sealed` set resolved sealed; the default is false")
+	}
+
+	err = db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "setting the rule's sealed flag: %v", err)
+	rule, err = resolveVoteRule(conn, 1, "majority")
+	testsupport.Must(t, err, "resolveVoteRule: %v", err)
+	if !rule.Sealed {
+		t.Fatal("`.sealed = true` did not resolve sealed")
+	}
+
+	step, spec := seedVoteStep(t, conn)
+	proposalID, err := OpenVoteProposal(conn, step, spec, nowMS)
+	testsupport.Must(t, err, "OpenVoteProposal: %v", err)
+	proposal, err := db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if !proposal.Sealed || !proposal.SealedOpen() {
+		t.Errorf("proposal opened under a sealed rule reads sealed=%v open=%v, want both true",
+			proposal.Sealed, proposal.SealedOpen())
+	}
+
+	// The flag is a copy taken at open: unsetting the rule afterwards leaves
+	// the live ballot sealed.
+	err = db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "false")
+	testsupport.Must(t, err, "unsetting the rule's sealed flag: %v", err)
+	proposal, err = db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if !proposal.Sealed {
+		t.Error("editing the rule after open changed the proposal's sealed flag")
+	}
+}
+
+// TestVoteRuleSealedConfigValidation: a non-boolean is refused where the
+// operator can see it, at `set` time, in the same way the threshold's range is.
+func TestVoteRuleSealedConfigValidation(t *testing.T) {
+	conn := mustDB(t)
+	for _, tc := range []struct {
+		value   string
+		wantErr bool
+	}{
+		{"true", false}, {"false", false}, {"1", false}, {"0", false},
+		{"yes", true}, {"sealed", true}, {"", true},
+	} {
+		err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("r"), tc.value)
+		if tc.wantErr && err == nil {
+			t.Errorf("SetConfig(.sealed, %q) succeeded, want a refusal", tc.value)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("SetConfig(.sealed, %q): %v", tc.value, err)
+		}
+	}
+}

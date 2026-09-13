@@ -1634,6 +1634,7 @@ registry (SKILL.md's engine-configuration table), not a new table:
 |---|---|---|
 | `vote.rule.<name>.threshold` | float in (0,1] | the approval threshold this rule tallies at |
 | `vote.rule.<name>.criticality` | `low\|medium\|high\|critical` | the proposal's criticality |
+| `vote.rule.<name>.sealed` | bool, default `false` | whether proposals opened under this rule withhold their casts from the read verbs until the tally closes them (DKT-2447, below) |
 
 `<name>` is an opaque string, exactly as `lease.ttl.<class>`'s class is. A rule
 "exists" iff `vote.rule.<name>.threshold` is set. This reuses the config
@@ -1643,6 +1644,36 @@ machinery, its `VALIDATION_ERROR`-on-unknown-key behavior, and its
 **`required_voters` comes from `len(voters)`, not from the config**, because
 §11.1 puts the voter list on the step. A rule is about *how strictly to tally*;
 the step is about *who casts*.
+
+**Sealed ballots (DKT-2447).** Every proposal used to render every recorded
+cast — verdict, confidence, relevance, weight, findings, summary — while it
+was still open, so a seat that read the proposal after a sibling had cast saw
+the sibling's verdict and reasoning before casting its own: the public-board
+channel for anchoring and collusion. `vote.rule.<name>.sealed = true` closes
+that channel for the proposals a rule opens. The flag is resolved beside the
+threshold in `resolveVoteRule` and **stored on the proposal at open** (v28's
+`proposals.sealed`, reliability-delta §2), so an edit to the rule cannot
+change what a live ballot renders under the seats mid-vote; `vote create
+--sealed` is the same flag for a conversational proposal.
+
+While a sealed proposal is `open`, `vote show`, `vote result` and `gate
+status` render only **who has cast and how many casts are in**: the human
+views list voter names under a `sealed` note, the JSON `votes` array carries
+`{voter_name, created_at}` entries and no verdict, confidence, relevance,
+weight, findings or summary keys, and `gate status` reports each seat's
+`cast` without its `verdict`. `vote list` already rendered only the count.
+The moment the status leaves `open` — a tally, a `vote commit`, a `vote
+close` — everything renders, and the `vote-record` context artifact a
+downstream step consumes is composed only after the vote step routes, so it
+never carries an open ballot's casts.
+
+Sealing is a **norm-level shield, not a security boundary.** It changes what
+the read verbs *render* and nothing else: `db.CastVote`, its weighted score,
+its quorum and the one-cast-per-voter constraint never read the flag, and the
+vote rows stay exactly as readable as before through `docket export`,
+`ListAllVotes`, and direct store access with `sqlite3`. A seat that wants to
+read a sibling's cast can; the shield removes the default path that handed
+it to every seat that merely looked at the proposal it was asked to judge.
 
 ## 8.4 What is NOT in scope here
 

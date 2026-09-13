@@ -185,9 +185,14 @@ func RenderProposalDetail(proposal *model.Proposal, votes []*model.Vote, linkedI
 		sections = append(sections, renderLinkedDocs(linkedDocs))
 	}
 
-	// Votes
+	// Votes — withheld to names and a count while the ballot is sealed and
+	// still open (DKT-2447), in full otherwise.
 	if len(votes) > 0 {
-		sections = append(sections, renderVoteList(votes))
+		if proposal.SealedOpen() {
+			sections = append(sections, renderSealedVotes(proposal, votes))
+		} else {
+			sections = append(sections, renderVoteList(votes))
+		}
 	}
 
 	return strings.Join(sections, "\n\n")
@@ -235,6 +240,9 @@ func renderProposalMetadata(proposal *model.Proposal) string {
 	}
 	if proposal.EscalationReason != nil {
 		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Escalation reason:"), *proposal.EscalationReason))
+	}
+	if proposal.Sealed {
+		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Sealed:"), sealedNote(proposal)))
 	}
 
 	if proposal.Rationale != "" {
@@ -367,6 +375,9 @@ func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, li
 	if proposal.EscalationReason != nil {
 		fmt.Fprintf(&b, "Escalation reason: %s\n", *proposal.EscalationReason)
 	}
+	if proposal.Sealed {
+		fmt.Fprintf(&b, "Sealed: %s\n", sealedNote(proposal))
+	}
 	if proposal.Rationale != "" {
 		fmt.Fprintf(&b, "Rationale: %s\n", proposal.Rationale)
 	}
@@ -400,8 +411,11 @@ func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, li
 		}
 	}
 
-	// Votes
-	if len(votes) > 0 {
+	// Votes — withheld to names and a count while the ballot is sealed and
+	// still open (DKT-2447), in full otherwise.
+	if len(votes) > 0 && proposal.SealedOpen() {
+		fmt.Fprintf(&b, "\n%s\n", renderPlainSealedVotes(proposal, votes))
+	} else if len(votes) > 0 {
 		b.WriteString("\nVotes\n")
 		for _, v := range votes {
 			effectiveWeight := v.Confidence * v.DomainRelevance
@@ -449,9 +463,14 @@ func RenderVoteResult(proposal *model.Proposal, votes []*model.Vote) string {
 	// Score summary
 	sections = append(sections, renderScoreSummary(proposal))
 
-	// Vote breakdown table
+	// Vote breakdown table — names and a count only while the ballot is
+	// sealed and still open (DKT-2447).
 	if len(votes) > 0 {
-		sections = append(sections, renderVoteBreakdownTable(votes))
+		if proposal.SealedOpen() {
+			sections = append(sections, renderSealedVotes(proposal, votes))
+		} else {
+			sections = append(sections, renderVoteBreakdownTable(votes))
+		}
 	}
 
 	return strings.Join(sections, "\n\n")
@@ -556,8 +575,11 @@ func renderPlainVoteResult(proposal *model.Proposal, votes []*model.Vote) string
 	}
 	fmt.Fprintf(&b, "Weighted score: %s  Threshold: %.0f%%\n", scoreStr, proposal.Threshold*100)
 
-	// Vote breakdown
-	if len(votes) > 0 {
+	// Vote breakdown — names and a count only while the ballot is sealed and
+	// still open (DKT-2447).
+	if len(votes) > 0 && proposal.SealedOpen() {
+		fmt.Fprintf(&b, "\n%s\n", renderPlainSealedVotes(proposal, votes))
+	} else if len(votes) > 0 {
 		b.WriteString("\nVote Breakdown\n")
 		fmt.Fprintf(&b, "%-20s %-15s %-22s %-12s %-12s %s\n",
 			"Voter", "Role", "Verdict", "Confidence", "Relevance", "Weight")
@@ -577,4 +599,45 @@ func renderPlainVoteResult(proposal *model.Proposal, votes []*model.Vote) string
 	}
 
 	return b.String()
+}
+
+// sealedNote is the metadata line's text for a proposal opened sealed
+// (DKT-2447): while the ballot is still open it says what the reader is not
+// being shown and when they will be; once closed it records only that the
+// ballot was sealed, which is an audit fact and no longer a withholding.
+func sealedNote(proposal *model.Proposal) string {
+	if proposal.SealedOpen() {
+		return "yes (casts render once the tally closes the proposal)"
+	}
+	return "yes"
+}
+
+// sealedVotesLines is the body both sealed renderers share: the cast count
+// against the seats required, then one line per voter who has cast — and
+// nothing of what they cast. Names are the one thing a sibling seat may see,
+// because "who has cast" is what a dispatcher needs to know a ballot is
+// still waiting on someone.
+func sealedVotesLines(proposal *model.Proposal, votes []*model.Vote) (count string, names []string) {
+	count = fmt.Sprintf("%d/%d cast", len(votes), proposal.RequiredVoters)
+	for _, v := range votes {
+		names = append(names, "  "+v.VoterName)
+	}
+	return count, names
+}
+
+// renderSealedVotes is the styled Votes section of a SealedOpen proposal.
+func renderSealedVotes(proposal *model.Proposal, votes []*model.Vote) string {
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	noteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	count, names := sealedVotesLines(proposal, votes)
+	header := sectionStyle.Render("Votes") + "  " +
+		noteStyle.Render("sealed · "+count+" · casts render once the tally closes")
+	return header + "\n" + strings.Join(names, "\n")
+}
+
+// renderPlainSealedVotes is renderSealedVotes for the no-color renderer.
+func renderPlainSealedVotes(proposal *model.Proposal, votes []*model.Vote) string {
+	count, names := sealedVotesLines(proposal, votes)
+	return "Votes (sealed, " + count + "; casts render once the tally closes)\n" +
+		strings.Join(names, "\n")
 }

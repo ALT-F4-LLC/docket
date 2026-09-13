@@ -105,6 +105,7 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 	// a vote step nobody has opened a ballot on still reports every declared
 	// seat as missing, rather than an empty roster that reads as no vote at all.
 	cast := map[string]*model.Vote{}
+	sealedOpen := false
 	if view.Row.Proposal == "" {
 		result.Outcome = GateOutcomeOpen
 	} else {
@@ -121,6 +122,7 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 		}
 		result.Outcome = voteGateOutcome(proposal.Status)
 		result.Tally = &GateTally{WeightedScore: proposal.WeightedScore, Threshold: proposal.Threshold}
+		sealedOpen = proposal.SealedOpen()
 
 		votes, err := db.GetProposalVotes(conn, proposalID)
 		if err != nil {
@@ -133,12 +135,20 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 
 	// §11.1: voter entries are OPAQUE — this counts and matches them by name
 	// and never interprets one.
+	//
+	// A seat's verdict is withheld while the proposal is sealed and still
+	// open (DKT-2447): `cast` still says who has voted, which is what a
+	// dispatcher waits on, and the verdict arrives with the tally. Same
+	// predicate `vote show` and `vote result` use, so the three read surfaces
+	// cannot disagree about when a ballot is secret.
 	result.Seats = make([]GateSeat, 0, len(view.Row.Voters))
 	for _, voter := range view.Row.Voters {
 		seat := GateSeat{Voter: voter}
 		if v, ok := cast[voter]; ok {
 			seat.Cast = true
-			seat.Verdict = string(v.Verdict)
+			if !sealedOpen {
+				seat.Verdict = string(v.Verdict)
+			}
 		} else {
 			result.MissingSeats = append(result.MissingSeats, voter)
 		}

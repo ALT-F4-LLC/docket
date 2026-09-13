@@ -210,6 +210,7 @@ func OpenVoteProposal(
 		Rationale:   fmt.Sprintf("workflow vote step %s", step.Instance),
 		Criticality: rule.Criticality,
 		Threshold:   rule.Threshold,
+		Sealed:      rule.Sealed,
 		// §8.2: required_voters is len(voters), NOT a config value. A rule is
 		// about HOW STRICTLY TO TALLY; the step is about WHO CASTS, and §11.1
 		// puts the voter list on the step.
@@ -348,6 +349,11 @@ func IsVoteStepProposal(conn *sql.DB, proposalID int) (bool, error) {
 type voteRule struct {
 	Threshold   float64
 	Criticality model.Criticality
+	// Sealed is the rule's opt-in rendering dimension (DKT-2447): a proposal
+	// opened under a sealed rule withholds its casts from the read verbs until
+	// the tally closes it. Resolved here and STORED on the proposal at open,
+	// so a rule edited mid-vote cannot change a live ballot's rendering.
+	Sealed bool
 }
 
 // resolveVoteRule reads a named rule from the engine-config registry.
@@ -378,9 +384,20 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
 	}
 
+	sealedEntry, err := db.GetConfig(conn, projectID, db.VoteRuleSealedKey(name))
+	if err != nil {
+		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
+	}
+	sealed, err := strconv.ParseBool(sealedEntry.Value)
+	if err != nil {
+		return voteRule{}, fmt.Errorf(
+			"vote rule %q has a malformed sealed flag %q: %w", name, sealedEntry.Value, err)
+	}
+
 	return voteRule{
 		Threshold:   threshold,
 		Criticality: model.Criticality(criticalityEntry.Value),
+		Sealed:      sealed,
 	}, nil
 }
 

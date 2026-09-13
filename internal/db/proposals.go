@@ -65,8 +65,8 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 	defer tx.Rollback()
 
 	res, err := tx.Exec(
-		`INSERT INTO proposals (project_id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO proposals (project_id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed, created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		projectOrDefault(p.ProjectID),
 		p.Description,
 		p.Rationale,
@@ -79,6 +79,7 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 		p.RequiredVoters,
 		p.Threshold,
 		p.WeightedScore,
+		p.Sealed,
 		p.CreatedBy,
 		now,
 		now,
@@ -129,7 +130,7 @@ func GetProposalTx(tx *sql.Tx, id int) (*model.Proposal, error) {
 
 func getProposal(q proposalQuerier, id int) (*model.Proposal, error) {
 	row := q.QueryRow(
-		`SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at
+		`SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed, created_by, created_at, updated_at
 		 FROM proposals WHERE id = ?`, id,
 	)
 	p, err := scanProposalFrom(row)
@@ -179,7 +180,7 @@ func ListProposals(db *sql.DB, projectID int, status string, criticality string,
 	}
 
 	// Get rows.
-	query := "SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at FROM proposals " + where + " ORDER BY created_at ASC"
+	query := "SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed, created_by, created_at, updated_at FROM proposals " + where + " ORDER BY created_at ASC"
 	queryArgs := append([]any{}, args...)
 	if limit > 0 {
 		query += " LIMIT ?"
@@ -516,7 +517,7 @@ func GetProposalIssues(db *sql.DB, proposalID int) ([]int, error) {
 // proposal id ascending. It is the reverse edge of GetProposalIssues.
 func GetIssueProposals(db *sql.DB, issueID int) ([]model.Proposal, error) {
 	rows, err := db.Query(
-		`SELECT p.id, p.description, p.rationale, p.domain_tags, p.files_changed, p.criticality, p.status, p.final_outcome, p.escalation_reason, p.required_voters, p.threshold, p.weighted_score, p.created_by, p.created_at, p.updated_at
+		`SELECT p.id, p.description, p.rationale, p.domain_tags, p.files_changed, p.criticality, p.status, p.final_outcome, p.escalation_reason, p.required_voters, p.threshold, p.weighted_score, p.sealed, p.created_by, p.created_at, p.updated_at
 		 FROM proposals p
 		 JOIN proposal_issues pi ON pi.proposal_id = p.id
 		 WHERE pi.issue_id = ?
@@ -650,7 +651,7 @@ func scanProposalFrom(s scanner) (*model.Proposal, error) {
 	err := s.Scan(
 		&p.ID, &p.Description, &p.Rationale, &domainTagsRaw, &filesChangedRaw,
 		&p.Criticality, &p.Status, &p.FinalOutcome, &escalationReason,
-		&p.RequiredVoters, &p.Threshold, &weightedScore, &createdBy,
+		&p.RequiredVoters, &p.Threshold, &weightedScore, &p.Sealed, &createdBy,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -791,7 +792,7 @@ func ListAllProposals(db *sql.DB, projectID int) ([]*model.Proposal, error) {
 	rows, err := db.Query(
 		`SELECT id, description, rationale, domain_tags, files_changed, criticality,
 		        status, final_outcome, escalation_reason, required_voters, threshold,
-		        weighted_score, created_by, created_at, updated_at
+		        weighted_score, sealed, created_by, created_at, updated_at
 		 FROM proposals `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
@@ -887,12 +888,12 @@ func InsertProposalWithID(tx *sql.Tx, p *model.Proposal) (bool, error) {
 	res, err := tx.Exec(
 		`INSERT OR IGNORE INTO proposals
 		 (id, project_id, description, rationale, domain_tags, files_changed, criticality, status,
-		  final_outcome, escalation_reason, required_voters, threshold, weighted_score,
+		  final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed,
 		  created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, projectOrDefault(p.ProjectID), p.Description, p.Rationale, string(domainTagsJSON), string(filesChangedJSON),
 		string(p.Criticality), string(p.Status), p.FinalOutcome, escalationReason,
-		p.RequiredVoters, p.Threshold, weightedScore, p.CreatedBy,
+		p.RequiredVoters, p.Threshold, weightedScore, p.Sealed, p.CreatedBy,
 		p.CreatedAt.UTC().Format(time.RFC3339), p.UpdatedAt.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
