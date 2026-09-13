@@ -832,7 +832,7 @@ requirement rather than drift:
 |---|---|---|
 | M-a | **`ActionResult` gains `Held []int` and `Results []ActionResultRow`** | §2 requires the held-cluster outcome and §6.3 requires per-attempt records; a seam that could only return a payload could express neither |
 | M-b | **The routing stage gains a `held` branch** and the saga a `held` stage (§7.7) | §2's "materializes a `type=human` step … gating the routing step" is a *deferral* of routing, and a routing stage that always routes cannot defer |
-| M-c | **`DecideStep` gains a materialized-step branch** (§7.7) | `approve`/`reject` on a materialized step resumes another step's saga, which the S3 path had no reason to do |
+| M-c | **`DecideStepWith` gains a materialized-step branch** (§7.7) | `approve`/`reject` on a materialized step resumes another step's saga, which the S3 path had no reason to do |
 | M-d | **Stage 0 gains schema validation** (§4.8) and `EvaluateThreshold` gains a resolver parameter (§5) | both are this stage's subject |
 
 Recorded as a **note on DKT-5** (§11 A7), not as a spec amendment: no

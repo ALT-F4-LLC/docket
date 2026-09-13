@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
@@ -384,18 +385,49 @@ does not count against max_attempts. The attempt number itself stands, and the
 dead attempt's usage remains back-fillable against it.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
-		id, err := stepArg(args[0])
-		if err != nil {
-			return err
-		}
-		reason, _ := cmd.Flags().GetString("reason")
-		if err := engine.ForceReapStep(conn, id, reason, model.NowMS()); err != nil {
-			return stepErr(err, stepLabel(id))
-		}
-		return emitStepState(w, conn, id, "Reaped")
+		return runStepReap(cmd, args, getWriter(cmd))
 	},
+}
+
+func runStepReap(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+	id, err := stepArg(args[0])
+	if err != nil {
+		return err
+	}
+	reason, _ := cmd.Flags().GetString("reason")
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+	if err := engine.ForceReapStepWith(conn, id, engine.ForceReapOptions{
+		Reason: reason, By: by, NowMS: model.NowMS(),
+	}); err != nil {
+		return stepErr(err, stepLabel(id))
+	}
+	return emitStepState(w, conn, id, "Reaped")
+}
+
+// rulingBy resolves who is ruling and from where, for the four step verbs that
+// record an operator's decision — approve, reject, resolve, reap (DKT-2450).
+//
+// Same two fields, same resolvers, and same refusal as a trust event's
+// (DKT-263/DKT-595). The actor never resolves empty: git identity, then the OS
+// username, then the literal "unknown", which is the resolver's honest report
+// of an anonymous environment. A cwd that cannot be read REFUSES THE RULING
+// rather than degrading the field: the ruling can be retried from a readable
+// directory, and the attribution can never be backfilled. Both are resolved
+// HERE, at the call site, never inside the engine, for the reason
+// engine.RecordTrustEvent gives.
+func rulingBy() (engine.Attribution, error) {
+	cwd, err := getwd()
+	if err != nil {
+		return engine.Attribution{}, cmdErr(fmt.Errorf(
+			"the working directory could not be resolved (%w); a ruling must "+
+				"record where it was made from, so run it again from a readable "+
+				"directory", err), output.ErrGeneral)
+	}
+	return engine.Attribution{Actor: config.DefaultAuthor(), Cwd: cwd}, nil
 }
 
 var stepHeartbeatCmd = &cobra.Command{
@@ -773,9 +805,16 @@ func runDecide(cmd *cobra.Command, args []string, approve bool, w *output.Writer
 		value, _ = cmd.Flags().GetString("value")
 	}
 
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+
 	label := stepLabel(id)
 	e := engine.NewEngine()
-	if err := e.DecideStepValue(conn, id, approve, note, value, model.NowMS()); err != nil {
+	if err := e.DecideStepWith(conn, id, engine.DecideOptions{
+		Approve: approve, Note: note, Value: value, By: by, NowMS: model.NowMS(),
+	}); err != nil {
 		return stepErr(err, label)
 	}
 
@@ -945,6 +984,11 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+
 	label := stepLabel(id)
 	e := engine.NewEngine()
 
@@ -964,7 +1008,7 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	outcome, err := e.ResolveStepWith(conn, id, engine.ResolveOptions{
 		As: as, Note: note, Batch: batch, DropInterposed: dropInterposed,
-		Worktree: worktree, NowMS: model.NowMS(),
+		Worktree: worktree, By: by, NowMS: model.NowMS(),
 	})
 	if err != nil {
 		return stepErr(err, label)

@@ -1286,6 +1286,22 @@ checkable, and it stops being an argument and becomes a script.
   person must now decide". `data.reason` distinguishes `budget` from an
   operator's `run pause`, so the trail is unambiguous without a new kind.
 
+**AMENDMENT (DKT-2450): the four step rulings record WHO.** `step-approved`,
+`step-rejected`, `step-resolved`, and a `lease-reaped` written by `step reap`
+(`data.forced`) carry `actor` and `cwd` — the same two claim-level fields
+`trust-added`/`trust-removed` carry (gates-trust §3.6, DKT-263), resolved at the
+CLI call site, written unconditionally, and refused empty at the engine seam
+(DKT-595). The `human` class says a person, or a harness relaying one, did this;
+the two fields say which one and from where, which is the boundary item 2
+exposes and the one a class alone cannot audit. The rest of each payload is
+unchanged (`detail` for the note or the resolution, `note`/`value` for a
+corrected hold, `forced`/`reason` for a reap). `lease-reaped` stays `next` in
+this table — it maps kinds, not occurrences — and `data.actor` is what
+distinguishes a forced reap's author from an expiry, which has none. `run
+report` carries the last attributed ruling per step (`attempts[].ruling`) and
+renders it beside the routing, listing an approved or override-passed step
+under "How steps ended" for that reason alone.
+
 ### 8.8 Event kinds added by this stage
 
 The closed set gains **three**:

@@ -372,6 +372,9 @@ verbs):
 
 Both refuse a non-`human` step with `VALIDATION_ERROR` (§6.9 R10) and both are
 token-free (§6.10): a human gate is resolved by an operator, who never claimed it.
+What the event records instead is who (DKT-2450): `step-approved`,
+`step-rejected`, `step-resolved`, and a forced `lease-reaped` carry `actor` and
+`cwd` beside the note, exactly as trust events do — see runs-dispatch §8.7.
 
 ### 4.3.3 Register-time DAG lints
 

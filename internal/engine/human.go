@@ -118,22 +118,44 @@ var resolveValues = []string{
 	ResolveFixRound, ResolveRerunGates,
 }
 
-// DecideStep is `step approve` and `step reject` — §6.10's human-gate verbs.
+// DecideOptions are `step approve` and `step reject`'s inputs — the
+// ResolveOptions shape, adopted when the ruling gained its attribution
+// (DKT-2450): a fifth positional on `(approve, note, value, nowMS)` is how call
+// sites end up passing the wrong string.
+type DecideOptions struct {
+	// Approve is the verb: true for `approve`, false for `reject`.
+	Approve bool
+	// Note is `--note`.
+	Note string
+	// Value is `--value` (DKT-42): an operator's corrected value for a held
+	// cluster's aggregated field, validated against the pinned schema's
+	// declared enum and applied only on approve of a materialized held step.
+	// Every other decision passes "".
+	Value string
+	// By is who is ruling and from where. REQUIRED: an empty field refuses the
+	// decision before anything is written (see Attribution).
+	By    Attribution
+	NowMS int64
+}
+
+// DecideStepWith is `step approve` and `step reject` — §6.10's human-gate
+// verbs.
 //
 // NO TOKEN. A human gate is not claimed, so there is no lease to authorize
 // against; the authority is the operator's access to the repository, which is
-// the same authority `issue close` has always relied on.
-func (e *Engine) DecideStep(conn *sql.DB, stepID int, approve bool, note string, nowMS int64) error {
-	return e.DecideStepValue(conn, stepID, approve, note, "", nowMS)
-}
+// the same authority `issue close` has always relied on. What the record
+// carries instead is WHO ruled and from where (DKT-2450) — the same two
+// claim-level fields a trust grant carries, on the event.
+func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) error {
+	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
+	verb := "step approve"
+	if !approve {
+		verb = "step reject"
+	}
+	if err := opts.By.require(verb); err != nil {
+		return err
+	}
 
-// DecideStepValue is DecideStep carrying `--value` (DKT-42): an operator's
-// corrected value for a held cluster's aggregated field, validated against the
-// pinned schema's declared enum and applied only on approve of a materialized
-// held step. Every other decision passes "" and is DecideStep unchanged.
-func (e *Engine) DecideStepValue(
-	conn *sql.DB, stepID int, approve bool, note, value string, nowMS int64,
-) error {
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -168,7 +190,7 @@ func (e *Engine) DecideStepValue(
 				step.Instance, step.Status, db.StepWaitingHuman,
 				step.Instance, strings.Join(resolveValues, "|"))
 		}
-		return e.decideMaterializedStep(conn, step, approve, note, value, nowMS)
+		return e.decideMaterializedStep(conn, step, opts)
 	}
 
 	// R10: approve/reject on a non-`human` step is VALIDATION_ERROR. The
@@ -202,7 +224,7 @@ func (e *Engine) DecideStepValue(
 	// approving a declared gate finishes that gate, and approving a held
 	// cluster un-defers the aggregate step's routing.
 	if step.Materialized {
-		return e.decideMaterializedStep(conn, step, approve, note, value, nowMS)
+		return e.decideMaterializedStep(conn, step, opts)
 	}
 
 	// `--value` is a held-cluster correction: it sets the aggregated field of
@@ -268,9 +290,14 @@ func (e *Engine) DecideStepValue(
 	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
 		return err
 	}
+	// The note as before, plus who decided (DKT-2450).
+	decided, err := rulingData(opts.By, noteField(note))
+	if err != nil {
+		return err
+	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: event, RunID: step.RunID,
-		Instance: step.Instance, IssueID: step.IssueID, Data: note,
+		Instance: step.Instance, IssueID: step.IssueID, Data: decided,
 	}); err != nil {
 		return err
 	}
@@ -299,7 +326,10 @@ type ResolveOptions struct {
 	// `issue.diff` to this checkout's tree before resolving — see
 	// IssueDiffRepin. override-pass and rerun-gates only.
 	Worktree string
-	NowMS    int64
+	// By is who is ruling and from where. REQUIRED: an empty field refuses the
+	// resolution before anything is written (see Attribution).
+	By    Attribution
+	NowMS int64
 }
 
 // ResolveOutcome is what a resolution reports beyond its error: the facts the
@@ -310,50 +340,21 @@ type ResolveOutcome struct {
 	Repin *IssueDiffRepin `json:"issue_diff_repin,omitempty"`
 }
 
-// ResolveStep is `step resolve --as retry|skip|abandon-issue|override-pass` —
-// §6.10's `waiting-human` resolutions.
-func (e *Engine) ResolveStep(
-	conn *sql.DB, stepID int, as, note string, nowMS int64,
-) error {
-	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{As: as, Note: note, NowMS: nowMS})
-	return err
-}
-
-// ResolveStepBatch is `step resolve --as override-pass --batch` (DKT-546): the
-// resolution plus one run-scoped grant per failed completion gate, so later
-// steps in the SAME run failing the same gate with the same failure signature
-// (gate name + exit + reason) auto-pass at routing instead of re-asking the
-// operator. The grant dies with the run — a new run re-asks.
-func (e *Engine) ResolveStepBatch(
-	conn *sql.DB, stepID int, as, note string, nowMS int64,
-) error {
-	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
-		As: as, Note: note, Batch: true, NowMS: nowMS,
-	})
-	return err
-}
-
-// ResolveStepDropInterposed is `step resolve --as override-pass
-// --drop-interposed [--batch]` (DKT-861): the same resolution, under the
-// operator's EXPLICIT acknowledgment that the generic pass skips the step(s)
-// the threshold interposes. Without the acknowledgment, resolveStep refuses
-// override-pass on such a step BEFORE anything commits — the DKT-470 warning
-// used to arrive beside a mutation already decided, which an operator promised
-// the interposed gate would still run could only regret, not act on (RUN-61's
-// verify-tribunal, skipped under the operator who had chosen override-pass
-// precisely to reach it).
-func (e *Engine) ResolveStepDropInterposed(
-	conn *sql.DB, stepID int, as, note string, batch bool, nowMS int64,
-) error {
-	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
-		As: as, Note: note, Batch: batch, DropInterposed: true, NowMS: nowMS,
-	})
-	return err
-}
-
-// ResolveStepWith is every `step resolve` shape at once, and the one that
-// reports an outcome: the three positional variants above are thin wrappers so
-// their call sites read as they always have.
+// ResolveStepWith is every `step resolve` shape — §6.10's `waiting-human`
+// resolutions, `--batch` (DKT-546), `--drop-interposed` (DKT-861), and
+// `--worktree` (DKT-1034) — and reports the outcome the step row does not
+// carry.
+//
+// `--batch` is the resolution plus one run-scoped grant per failed completion
+// gate, so later steps in the SAME run failing the same gate with the same
+// failure signature (gate name + exit + reason) auto-pass at routing instead of
+// re-asking the operator; the grant dies with the run. `--drop-interposed` is
+// the operator's EXPLICIT acknowledgment that override-pass's generic pass
+// skips the step(s) the threshold interposes; without it, resolveStep refuses
+// such an override-pass BEFORE anything commits, because the DKT-470 warning
+// used to arrive beside a mutation already decided (RUN-61's verify-tribunal,
+// skipped under the operator who had chosen override-pass precisely to reach
+// it).
 func (e *Engine) ResolveStepWith(
 	conn *sql.DB, stepID int, opts ResolveOptions,
 ) (*ResolveOutcome, error) {
@@ -369,6 +370,10 @@ func (e *Engine) resolveStep(
 ) error {
 	as, note, nowMS := opts.As, opts.Note, opts.NowMS
 	batch, dropInterposed := opts.Batch, opts.DropInterposed
+
+	if err := opts.By.require("step resolve"); err != nil {
+		return err
+	}
 
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
@@ -796,9 +801,14 @@ func (e *Engine) resolveStep(
 	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
 		return err
 	}
+	// The resolution as before, plus who ruled (DKT-2450).
+	resolved, err := rulingData(opts.By, map[string]any{"detail": as})
+	if err != nil {
+		return err
+	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventStepResolved, RunID: step.RunID,
-		Instance: step.Instance, IssueID: step.IssueID, Data: as,
+		Instance: step.Instance, IssueID: step.IssueID, Data: resolved,
 	}); err != nil {
 		return err
 	}
@@ -890,7 +900,7 @@ func (e *Engine) resolveStep(
 // is what override-pass does.
 //
 // It answers a question about the step's DEFINITION, which the resolution it
-// precedes does not change, so it is independent of ResolveStep and safe to
+// precedes does not change, so it is independent of ResolveStepWith and safe to
 // call and print before that call commits anything — the operator sees the
 // blast radius of what they are about to approve.
 func OverridePassSkipsInterposedTargets(conn *sql.DB, stepID int) []string {

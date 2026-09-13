@@ -188,7 +188,7 @@ type Engine struct {
 //
 // docs/tdd/payloads-thresholds.md §6.4 records honestly the four places more
 // moves — the seam's return shape (M-a), the routing stage's `held` branch
-// (M-b), DecideStep's materialized branch (M-c), and stage 0's schema
+// (M-b), DecideStepWith's materialized branch (M-c), and stage 0's schema
 // validation with the threshold's resolver (M-d). None deviates from an
 // engine-spec line, so the note is not an amendment.
 //

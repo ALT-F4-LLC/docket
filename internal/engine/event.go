@@ -784,6 +784,68 @@ func RecordTrustEvent(conn *sql.DB, kind string, grant TrustGrant, atMS int64) e
 	return tx.Commit()
 }
 
+// Attribution is WHO ran an operator verb and from WHERE — the two claim-level
+// fields a trust event carries (DKT-263/DKT-595), on a step ruling (DKT-2450).
+//
+// `step approve`, `step reject`, `step resolve` and `step reap` are the four
+// `human` kinds (events_read's attribution table) an auditor most needs a name
+// on: each is a person, or a harness relaying one, deciding what the engine
+// would not. Every one of them recorded only a note, so a ruling a harness
+// relayed was indistinguishable in the feed from one a person typed, and the
+// run report could list rulings without attributing them — while trust events
+// already said who and from where, and reap acks said `acked_by`.
+//
+// Neither field is authenticated, and neither claims to be: Actor is the git
+// identity the invoking environment reports (config.DefaultAuthor — git
+// user.name, then the OS username, then the literal "unknown"), and Cwd is
+// the directory the verb ran from, the disambiguator between two concurrent
+// sessions that share one identity. Both are resolved at the CLI call site,
+// never inside the engine, for the reason RecordTrustEvent gives: the engine
+// has no business shelling out to `git config`.
+type Attribution struct {
+	Actor string
+	Cwd   string
+}
+
+// require refuses an attribution with either field empty, BEFORE anything is
+// written — DKT-595's rule, held at the engine seam rather than only at the
+// CLI so that it holds for every writer. The literal "unknown" counts as
+// supplied; only the empty string, which no resolver produces, is refused.
+func (a Attribution) require(verb string) error {
+	if a.Actor == "" || a.Cwd == "" {
+		return fmt.Errorf(
+			"refusing to record an unattributed %s (actor=%q cwd=%q): a ruling must say who made it and from where, and a writer that cannot supply both must not write one",
+			verb, a.Actor, a.Cwd)
+	}
+	return nil
+}
+
+// rulingData renders a ruling event's payload: the verb's own fields plus the
+// attribution, as the JSON object eventData merges through with its keys
+// intact. `actor` and `cwd` are written unconditionally, like every trust
+// event key, and after require they are never empty.
+func rulingData(by Attribution, fields map[string]any) (string, error) {
+	fields["actor"] = by.Actor
+	fields["cwd"] = by.Cwd
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return "", fmt.Errorf("encoding the ruling: %w", err)
+	}
+	return string(out), nil
+}
+
+// noteField is the `detail` key a ruling's bare-string payload has always
+// carried, present only when there is a note — exactly as eventData wrapped
+// the bare string — so the key set a reader sees gains the attribution and
+// nothing else.
+func noteField(note string) map[string]any {
+	fields := map[string]any{}
+	if strings.TrimSpace(note) != "" {
+		fields["detail"] = note
+	}
+	return fields
+}
+
 // ProjectRegistration is what a `project-registered` event records (DKT-61):
 // where the invocation ran, what that resolved to, and which verb did it.
 //

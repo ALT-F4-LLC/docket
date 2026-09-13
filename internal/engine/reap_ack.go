@@ -102,14 +102,14 @@ func reapExpiredTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]stri
 
 // reapOneTx reaps ONE step: the row reset, the event, and — for a bounded
 // class — the acknowledgment hold, in the caller's transaction. It is shared
-// by the lazy expiry reap above and by ForceReapStep (DKT-83), so a forced
+// by the lazy expiry reap above and by ForceReapStepWith (DKT-83), so a forced
 // reap cannot drift from an expiry's consequences: same event kind, same
 // headroom hold, same snapshot reflection.
 //
 // `data` rides in the `lease-reaped` event when non-empty; the expiry path
-// passes none, and the forced path records who-said-so and why — which is how
-// a reader distinguishes them, the same data.reason discipline that separates
-// a budget pause from an operator's.
+// passes none, and the forced path records who-said-so (`actor`/`cwd`,
+// DKT-2450) and why — which is how a reader distinguishes them, the same
+// data.reason discipline that separates a budget pause from an operator's.
 func reapOneTx(
 	tx *sql.Tx, sched *Scheduler, runID int, step *db.Step, data string, nowMS int64,
 ) error {
@@ -176,8 +176,18 @@ func reapOneTx(
 	return nil
 }
 
-// ForceReapStep is `docket step reap` (DKT-83): an operator or relay that has
-// ESTABLISHED an executor is dead clears its claim now, instead of waiting
+// ForceReapOptions are `step reap`'s inputs.
+type ForceReapOptions struct {
+	// Reason is `--reason`, REQUIRED: the assertion that the holder is gone.
+	Reason string
+	// By is who asserted it and from where. REQUIRED: an empty field refuses
+	// the reap before anything is written (see Attribution).
+	By    Attribution
+	NowMS int64
+}
+
+// ForceReapStepWith is `docket step reap` (DKT-83): an operator or relay that
+// has ESTABLISHED an executor is dead clears its claim now, instead of waiting
 // out the full lease TTL.
 //
 // Liveness was TTL-only, and the TTL cannot be sized right in both
@@ -201,11 +211,17 @@ func reapOneTx(
 // an executor could fail — see the exemption below, and
 // db.ExemptStepAttemptFromBudgetTx for why it is a +1 nudge of the base and
 // never a touch of `attempt` itself.
-func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
+func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
+	reason, nowMS := opts.Reason, opts.NowMS
 	if reason == "" {
 		return validationErr(
 			"--reason is required: a forced reap asserts the holder is gone, " +
 				"and somebody will ask on whose word")
+	}
+	// ...and the answer is recorded (DKT-2450), not left for the asker to
+	// reconstruct from wall-clock.
+	if err := opts.By.require("step reap"); err != nil {
+		return err
 	}
 
 	step, err := db.GetStep(conn, stepID)
@@ -246,11 +262,11 @@ func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 		}
 	}
 
-	data, err := json.Marshal(map[string]any{"forced": true, "reason": reason})
+	data, err := rulingData(opts.By, map[string]any{"forced": true, "reason": reason})
 	if err != nil {
 		return fmt.Errorf("recording the forced reap: %w", err)
 	}
-	if err := reapOneTx(tx, sched, step.RunID, target, string(data), nowMS); err != nil {
+	if err := reapOneTx(tx, sched, step.RunID, target, data, nowMS); err != nil {
 		return err
 	}
 	// A forced reap does not consume the attempt budget (DKT-585). The claim

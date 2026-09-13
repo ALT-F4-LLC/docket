@@ -96,6 +96,56 @@ func TestParkTextIsNotTheFinalWord(t *testing.T) {
 	}
 }
 
+// TestRulingsAreAttributedInTheRenderedReport is DKT-2450's rendered half:
+// a step an operator ruled on says who and from where beside its routing —
+// and an approve, whose `pass` routing the "How steps ended" filter would
+// otherwise hide, is listed for exactly that reason.
+func TestRulingsAreAttributedInTheRenderedReport(t *testing.T) {
+	r := abandonedRunReport()
+	r.Issues = nil
+	r.Attempts = []engine.StepAttempt{
+		{
+			Step: "STEP-1", Instance: "commit-gate@0", Issue: "HRN-301",
+			Status: db.StepDone, Attempts: 0, Routing: "pass: looks right",
+			Ruling: &engine.StepRuling{
+				Event: engine.EventStepApproved, Actor: "Ada Relay", Cwd: "/work/session-b",
+			},
+		},
+		{
+			Step: "STEP-2", Instance: "implement@0", Issue: "HRN-301",
+			Status: db.StepDone, Attempts: 2, Routing: "pass",
+			Ruling: &engine.StepRuling{
+				Event: engine.EventLeaseReaped, Actor: "wave-relay", Cwd: "/work/session-a",
+			},
+		},
+		{
+			// Nobody ruled on this one, and it passed: it stays out of the
+			// section as it always has.
+			Step: "STEP-3", Instance: "verify@0", Issue: "HRN-301",
+			Status: db.StepDone, Attempts: 1, Routing: "pass",
+		},
+	}
+	out := renderPlainRunReport(r)
+
+	lines := map[string]string{}
+	for _, l := range strings.Split(out, "\n") {
+		for _, instance := range []string{"commit-gate@0", "implement@0", "verify@0"} {
+			if strings.Contains(l, instance) {
+				lines[instance] = l
+			}
+		}
+	}
+	if !strings.Contains(lines["commit-gate@0"], `approved by "Ada Relay" from "/work/session-b"`) {
+		t.Errorf("the approved gate is not attributed:\n%s", out)
+	}
+	if !strings.Contains(lines["implement@0"], `reaped by "wave-relay" from "/work/session-a"`) {
+		t.Errorf("the forced reap is not attributed, or reads as a decision on the work:\n%s", out)
+	}
+	if lines["verify@0"] != "" {
+		t.Errorf("a passed step nobody ruled on is listed under \"How steps ended\":\n  %s", lines["verify@0"])
+	}
+}
+
 // TestResolvedStepIsNotAnnotatedTwice is the falsifier for the annotation.
 //
 // The `abandon-issue` ROUTING path already writes the disposition onto every

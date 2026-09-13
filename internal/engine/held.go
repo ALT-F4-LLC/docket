@@ -908,8 +908,9 @@ func routingStepOf(conn *sql.DB, held *db.Step) (*db.Step, error) {
 // Both verbs are TOKEN-FREE (H15), per §2: a human gate is resolved by an
 // operator who never claimed it.
 func (e *Engine) decideMaterializedStep(
-	conn *sql.DB, held *db.Step, approve bool, note, value string, nowMS int64,
+	conn *sql.DB, held *db.Step, opts DecideOptions,
 ) error {
+	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
 	routingStep, err := routingStepOf(conn, held)
 	if err != nil {
 		return err
@@ -993,14 +994,14 @@ func (e *Engine) decideMaterializedStep(
 	}
 	// A corrected value rides in the event beside the note, so the feed's
 	// account of the decision carries what was decided, not only that a
-	// decision happened.
-	data := note
+	// decision happened — and who decided it (DKT-2450).
+	fields := noteField(note)
 	if value != "" {
-		encoded, err := json.Marshal(map[string]string{"note": note, "value": value})
-		if err != nil {
-			return fmt.Errorf("recording the held decision: %w", err)
-		}
-		data = string(encoded)
+		fields = map[string]any{"note": note, "value": value}
+	}
+	data, err := rulingData(opts.By, fields)
+	if err != nil {
+		return fmt.Errorf("recording the held decision: %w", err)
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: event, RunID: held.RunID,

@@ -23,6 +23,10 @@ import (
 // the boundary is one no script can branch on, and that degradation is
 // invisible to a test that only checks the engine returned an error.
 
+// mappingBy is the attribution the mapping cases below rule under; the
+// refusal being mapped fires after it, so its value never matters.
+var mappingBy = engine.Attribution{Actor: "tester", Cwd: "/repo"}
+
 // TestStepErrMapping walks the refusal matrix's sentinel errors through
 // stepErr and asserts each lands on its specified code.
 //
@@ -106,7 +110,9 @@ func TestStepErrMapsEngineCodes(t *testing.T) {
 			name: "R10 approve a non-human step",
 			call: func() error {
 				e := engine.NewEngine()
-				return e.DecideStep(conn, 1, true, "", model.NowMS())
+				return e.DecideStepWith(conn, 1, engine.DecideOptions{
+					Approve: true, By: mappingBy, NowMS: model.NowMS(),
+				})
 			},
 			want: output.ErrValidation, row: "R10",
 		},
@@ -114,7 +120,10 @@ func TestStepErrMapsEngineCodes(t *testing.T) {
 			name: "R11 resolve an unparked step",
 			call: func() error {
 				e := engine.NewEngine()
-				return e.ResolveStep(conn, 1, engine.ResolveSkip, "", model.NowMS())
+				_, err := e.ResolveStepWith(conn, 1, engine.ResolveOptions{
+					As: engine.ResolveSkip, By: mappingBy, NowMS: model.NowMS(),
+				})
+				return err
 			},
 			want: output.ErrValidation, row: "R11",
 		},

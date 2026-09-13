@@ -285,7 +285,11 @@ func writeReportSections(
 			// decided. An approved tribunal that an operator then resolved is
 			// the same readability problem as a rejected one, and the count
 			// section shows neither.
-			if nonPass || a.Vote != "" {
+			// ...and any row an operator RULED on (DKT-2450). An approve or an
+			// override-pass routes `pass`, which the filter above hides, and a
+			// person deciding what the engine would not is exactly what a
+			// reader is here to understand.
+			if nonPass || a.Vote != "" || a.Ruling != nil {
 				ended = append(ended, a)
 			}
 		}
@@ -311,6 +315,13 @@ func writeReportSections(
 				// resolved gates were "never resolved" and re-asked both.
 				if resolved := stepResolution(a, dispositions); resolved != "" {
 					detail += " — " + resolved
+				}
+				// ...AND WHO RULED (DKT-2450). The routing says what was
+				// decided; a harness relaying an operator and the operator
+				// typing it look identical there, and only the event's
+				// attribution tells them apart.
+				if a.Ruling != nil {
+					detail += " — " + rulingClause(a.Ruling)
 				}
 				line(stepLabel(a)+":", detail)
 			}
@@ -677,6 +688,26 @@ func stepResolution(
 		out += fmt.Sprintf(" (%s)", exec.Render(reasonHead(d.Reason, 72)))
 	}
 	return out
+}
+
+// rulingClause renders who ruled on a step and from where (DKT-2450):
+// `approved by "Erik Reinert" from "/repo"`. The verb comes from the event
+// kind, so a forced reap reads as one and not as a decision on the work.
+func rulingClause(r *engine.StepRuling) string {
+	var verb string
+	switch r.Event {
+	case engine.EventStepApproved:
+		verb = "approved"
+	case engine.EventStepRejected:
+		verb = "rejected"
+	case engine.EventStepResolved:
+		verb = "resolved"
+	case engine.EventLeaseReaped:
+		verb = "reaped"
+	default:
+		verb = r.Event
+	}
+	return fmt.Sprintf("%s by %s from %s", verb, exec.Render(r.Actor), exec.Render(r.Cwd))
 }
 
 // reasonHead trims a recorded ruling to one readable clause, marking the trim

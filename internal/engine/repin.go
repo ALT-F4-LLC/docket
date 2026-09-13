@@ -622,7 +622,7 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 	// a reap will fire — while this partition answers whether the lease has
 	// lapsed. The two diverge on a `waiting-human` run, which repinStatusGuard
 	// admits: `next` and `dispatch close` reap through Expired and so clear
-	// nothing there, but ForceReapStep gates only on `--reason` and the step's
+	// nothing there, but ForceReapStepWith gates only on `--reason` and the step's
 	// status, so `docket step reap` does clear it. The verbs are therefore
 	// scoped to the run status; the partition is not. The `max_step_duration`
 	// half needs the limits only the scheduler merges and is deliberately

@@ -236,6 +236,18 @@ type RunReport struct {
 	MissingUsage []Discrepancy `json:"missing_usage,omitempty"`
 }
 
+// StepRuling is one operator ruling on a step and its attribution (DKT-2450):
+// the event kind that recorded it, and the claim-level actor and cwd the verb
+// resolved at its call site — see Attribution.
+type StepRuling struct {
+	// Event is the ruling's kind: `step-approved`, `step-rejected`,
+	// `step-resolved`, or `lease-reaped` for a `step reap`. An expiry reap
+	// shares that kind but is the scheduler's act and never appears here.
+	Event string `json:"event"`
+	Actor string `json:"actor"`
+	Cwd   string `json:"cwd"`
+}
+
 // ActorCount is one row of E21's rollup: a cause, and how many of the run's
 // transitions it accounts for.
 //
@@ -287,6 +299,12 @@ type StepAttempt struct {
 	// never opened — which is exactly the never-convened case the reader needs
 	// to tell apart.
 	Vote string `json:"vote,omitempty"`
+	// Ruling is the LAST operator ruling recorded on this step — an approve,
+	// a reject, a resolve, or a forced reap — and who made it, from where
+	// (DKT-2450). `Routing` says what was decided; this says by whom. Absent
+	// on a step nobody ruled on, and on one whose last ruling predates
+	// attribution.
+	Ruling *StepRuling `json:"ruling,omitempty"`
 	// PinEpoch is WHICH PIN AGREEMENT this step's recorded work ran under
 	// (DKT-594), indexing RunReport.PinEpochs.
 	//
@@ -566,6 +584,10 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// DKT-594: which agreement each step's recorded work ran under, in the SAME
 	// snapshot as the statuses that decide whether a step ran at all.
 	if report.PinEpochs, err = annotatePinEpochs(tx, runID, attempts); err != nil {
+		return nil, err
+	}
+	// DKT-2450: who ruled on each step, in the same snapshot.
+	if err := annotateStepRulings(tx, runID, attempts); err != nil {
 		return nil, err
 	}
 	report.Steps, report.Attempts = counts, attempts
@@ -1074,6 +1096,68 @@ func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 		return 0, nil
 	}
 	return value, nil
+}
+
+// annotateStepRulings fills each step's `Ruling` with the last operator ruling
+// recorded on it (DKT-2450) — read through the transaction, in one query for
+// the whole run, for annotateVoteOutcomes' two reasons.
+//
+// LAST RULING WINS, as for issue dispositions: a step reaped by a relay and
+// later resolved by an operator is annotated with the resolution. A forced
+// reap counts; an expiry reap shares its kind but is the scheduler's act and
+// carries no actor, so `data.forced` is what admits a `lease-reaped` row. A
+// ruling recorded before attribution existed carries neither field and
+// annotates nothing — an earlier attributed ruling is not promoted over it,
+// because it is not the last word.
+func annotateStepRulings(tx *sql.Tx, runID int, attempts []StepAttempt) error {
+	rows, err := tx.Query(
+		`SELECT step_id, kind, data FROM events
+		  WHERE run_id = ? AND step_id IS NOT NULL AND kind IN (?, ?, ?, ?)
+		  ORDER BY seq`,
+		runID, EventStepApproved, EventStepRejected, EventStepResolved, EventLeaseReaped)
+	if err != nil {
+		return fmt.Errorf("reading the run's rulings: %w", err)
+	}
+	defer rows.Close()
+
+	rulings := make(map[string]*StepRuling)
+	for rows.Next() {
+		var (
+			stepID int
+			kind   string
+			data   string
+		)
+		if err := rows.Scan(&stepID, &kind, &data); err != nil {
+			return fmt.Errorf("reading a ruling: %w", err)
+		}
+		var payload struct {
+			Forced bool   `json:"forced"`
+			Actor  string `json:"actor"`
+			Cwd    string `json:"cwd"`
+		}
+		// Core's own payload, and a malformed one is not worth failing a read
+		// verb over (R10): it costs this step's annotation and nothing else.
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			continue
+		}
+		if kind == EventLeaseReaped && !payload.Forced {
+			continue
+		}
+		step := model.FormatStepID(stepID)
+		if payload.Actor == "" && payload.Cwd == "" {
+			delete(rulings, step)
+			continue
+		}
+		rulings[step] = &StepRuling{Event: kind, Actor: payload.Actor, Cwd: payload.Cwd}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading the run's rulings: %w", err)
+	}
+
+	for i := range attempts {
+		attempts[i].Ruling = rulings[attempts[i].Step]
+	}
+	return nil
 }
 
 // annotateVoteOutcomes fills each vote step's `Vote` with its proposal and how
