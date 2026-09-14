@@ -213,7 +213,7 @@ engine verb, though not a guard predicate.)
 (`threshold = { "fix-loop" = "any(severity >= high)" }` works because *the user's
 schema* declared the order — core never knows what a severity is). Aggregations beyond
 comparison are **action steps**. One is builtin and generic: `action = "aggregate"`
-with `params = { field, method = median|max|min, hold_spread, output, route_at }`
+with `params = { field, method = median|max|min, hold_spread, output, route_at, source_field }`
 computes over any ordered-enum payload field — median, spread-hold, and a recorded
 demotion trail work for severities, priorities, or tiers alike. Cluster membership arrives in the
 payload itself: each element is one cluster, whose `field` value is either a scalar
@@ -234,7 +234,15 @@ are recorded, fully reduced, on the aggregate's own `action_results` row and nev
 enter the loop; a held cluster is never routed below the floor (the operator's
 decision, not the untrusted computed value, decides it), an unknown `route_at` value
 is a register-time refusal naming it, and with `route_at` absent the output is
-byte-for-byte what it always was *(amended 2026-08-23, DKT-593)*. The
+byte-for-byte what it always was *(amended 2026-08-23, DKT-593)*. An optional
+`source_field = "<name>"` names a property of each input element holding an
+array of opaque source labels (a workflow's own step-ref convention, say);
+core neither validates its contents nor reduces by it — G3's verbatim
+carry-through already moves whatever key it names into the output payload
+unchanged — the param exists solely so the run report can group a round's
+clusters by that key without core hardcoding one corpus's field name, the same
+reason `route_at` takes its floor as a value rather than assuming a field
+*(amended 2026-09-13, DKT-2462)*. The
 aggregate's output payload — per-cluster value, members, held flag, `demoted_from`,
 `operator_resolved` — validates against the shipped `aggregate@1` schema, and
 `operator_resolved` is set per cluster, on the approved ones only. The

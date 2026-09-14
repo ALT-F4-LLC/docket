@@ -552,3 +552,120 @@ func TestComplementarityOfCountsTheRecordedSplit(t *testing.T) {
 		t.Errorf("distribution = %+v, want %+v", dist, want)
 	}
 }
+
+// sourceFieldFixture is the committed fixture with one line added to
+// `reconcile`'s params: `source_field = "member_sources"`. Read from disk
+// rather than duplicated by hand, so a change to the fixture's topology
+// cannot silently drift this variant out of sync with it.
+func sourceFieldFixture(t *testing.T) []byte {
+	t.Helper()
+	src, err := os.ReadFile(fixturePath)
+	testsupport.Must(t, err, "reading fixture: %v", err)
+	old := `params = { field = "severity", method = "median", hold_spread = 2, output = "findings" }`
+	replacement := `params = { field = "severity", method = "median", hold_spread = 2, output = "findings", source_field = "member_sources" }`
+	out := strings.Replace(string(src), old, replacement, 1)
+	if out == string(src) {
+		t.Fatalf("fixture no longer contains reconcile's expected params line; "+
+			"update sourceFieldFixture to match:\n%s", src)
+	}
+	return []byte(out)
+}
+
+// sourcePayload has one cluster whose `member_sources` names a single review
+// seat (unique to that seat's executor) and one whose `member_sources` names
+// two DIFFERENT seats (corroborated across two executors) — the exact shape
+// DKT-2462's acceptance criteria names. The fixture's four review seats each
+// declare a distinct `fanout` hint (judge-correctness, judge-architecture,
+// judge-simplicity, judge-testing), so `review@0#0` and `review@0#1` resolve
+// to two different executors, and the test can tell "unique" from
+// "corroborated" apart by more than count alone.
+const sourcePayload = `[
+  {"id":"C-1","severity":"low","member_ids":["a-1"],"member_sources":["review@0#0"]},
+  {"id":"C-2","severity":["medium","high"],"member_ids":["a-2","b-1"],"member_sources":["review@0#0","review@0#1"]}
+]`
+
+// TestRunReportGroupsClustersBySourceField is DKT-2462: once an `aggregate`
+// step declares `source_field`, the run report groups the round's clusters by
+// each distinct value that field names and resolves it to the producing
+// step's executor hint — grouping by an opaque, workflow-named key rather
+// than a literal `member_sources` core would have to know about (the same
+// discipline `route_at` keeps by taking its floor as a value, not assuming a
+// field name).
+func TestRunReportGroupsClustersBySourceField(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerSource(t, conn, sourceFieldFixture(t), fixturePath)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	driveToReconcile(t, conn, e, sourcePayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.SourceAttribution) != 2 {
+		t.Fatalf("source_attribution = %+v, want one row per distinct source",
+			report.SourceAttribution)
+	}
+
+	byInstance := make(map[string]ClusterSourceAttribution, len(report.SourceAttribution))
+	for _, row := range report.SourceAttribution {
+		byInstance[row.Source] = row
+	}
+
+	unique, ok := byInstance["review@0#0"]
+	if !ok {
+		t.Fatalf("no row for review@0#0: %+v", report.SourceAttribution)
+	}
+	if unique.Clusters != 2 {
+		t.Errorf("review@0#0 clusters = %d, want 2 (it fed both C-1 and C-2)",
+			unique.Clusters)
+	}
+	if unique.Executor != "judge-correctness" {
+		t.Errorf("review@0#0 executor = %q, want judge-correctness (fanout[0])",
+			unique.Executor)
+	}
+
+	corroborating, ok := byInstance["review@0#1"]
+	if !ok {
+		t.Fatalf("no row for review@0#1: %+v", report.SourceAttribution)
+	}
+	if corroborating.Clusters != 1 {
+		t.Errorf("review@0#1 clusters = %d, want 1 (only C-2)", corroborating.Clusters)
+	}
+	if corroborating.Executor != "judge-architecture" {
+		t.Errorf("review@0#1 executor = %q, want judge-architecture (fanout[1])",
+			corroborating.Executor)
+	}
+
+	// C-2 names both sources: that is what makes it CORROBORATED in the
+	// executor-attribution sense — two different executors' review seats
+	// contributed to the same cluster, not one seat's finding merged with
+	// itself.
+	if unique.Instance != "reconcile@0" || corroborating.Instance != "reconcile@0" {
+		t.Errorf("instance = %q / %q, want reconcile@0 on both rows",
+			unique.Instance, corroborating.Instance)
+	}
+}
+
+// TestRunReportOmitsSourceAttributionWithoutTheParam is the absent case:
+// `source_field` undeclared (the committed fixture's `reconcile`, unmodified)
+// produces no section at all, matching Recorded's absent-`route_at`
+// convention rather than an empty-but-present list.
+func TestRunReportOmitsSourceAttributionWithoutTheParam(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.SourceAttribution) != 0 {
+		t.Errorf("source_attribution = %+v, want none: reconcile declares no source_field",
+			report.SourceAttribution)
+	}
+}

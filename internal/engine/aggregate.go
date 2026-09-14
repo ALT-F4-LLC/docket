@@ -44,6 +44,16 @@ const (
 	// other value here it is an OPAQUE TOKEN compared only by position: core
 	// does not know it is a severity, only where the author put it.
 	ParamRouteAt = "route_at"
+	// ParamSourceField names a property of each input element holding an
+	// array of opaque source labels (DKT-2462) — a step ref such as
+	// `review@0#0` naming the artifact a member came from. Core reads this key
+	// ONLY to know which OTHER key to read: G3 already carries an array under
+	// any such name through to Aggregate's output untouched, so this param
+	// adds no reduction behavior of its own. It exists so the run report can
+	// group clusters by producing executor without core hardcoding a
+	// corpus-owned name like `member_sources` — the same reason `route_at`
+	// takes its floor as a value rather than assuming a field name.
+	ParamSourceField = "source_field"
 )
 
 // The three reductions of §7.3. There are exactly three because §2 names
@@ -121,6 +131,12 @@ type AggregateParams struct {
 	// absent case, in which Aggregate emits every cluster exactly as it always
 	// has.
 	RouteAt string
+	// SourceField is the property name the run report groups clusters by, or
+	// "" when the step declares none. Aggregate itself never reads it — G3's
+	// verbatim carry-through already moves whatever key this names — it rides
+	// on AggregateParams purely so complementarityRollup can find it without
+	// re-parsing the step's raw params.
+	SourceField string
 }
 
 // AggregateOutcome is one aggregation's result.
@@ -212,21 +228,34 @@ func ParseAggregateParams(params map[string]any) (AggregateParams, error) {
 			"a value of `params.%s`'s declared order", ParamRouteAt, ParamField)
 	}
 
+	// `source_field` is optional; present, it must be a non-empty string. Core
+	// never validates that the name exists on any element — it is read back,
+	// per element, only by the report (R10: a read verb does not refuse a run
+	// over one odd payload).
+	sourceField, err := stringParam(params, ParamSourceField)
+	if err != nil {
+		return out, err
+	}
+	if _, present := params[ParamSourceField]; present && sourceField == "" {
+		return out, fmt.Errorf("`params.%s` must be a non-empty string naming "+
+			"a property of each input element", ParamSourceField)
+	}
+
 	// V28's "no other keys". An unread key is a declaration the author believes
 	// is doing something; saying so at register time is the whole discipline.
 	for key := range params {
 		switch key {
-		case ParamField, ParamMethod, ParamHoldSpread, ParamOutput, ParamRouteAt:
+		case ParamField, ParamMethod, ParamHoldSpread, ParamOutput, ParamRouteAt, ParamSourceField:
 			continue
 		}
 		return out, fmt.Errorf("`params.%s` is not a parameter of `aggregate`; "+
 			"it takes exactly %v", key,
-			[]string{ParamField, ParamMethod, ParamHoldSpread, ParamOutput, ParamRouteAt})
+			[]string{ParamField, ParamMethod, ParamHoldSpread, ParamOutput, ParamRouteAt, ParamSourceField})
 	}
 
 	out = AggregateParams{
 		Field: field, Method: method, HoldSpread: hold, Output: output,
-		RouteAt: routeAt,
+		RouteAt: routeAt, SourceField: sourceField,
 	}
 	return out, nil
 }

@@ -864,6 +864,7 @@ unchanged.
 | `hold_spread` | integer ≥ 0, default 0 | no | hold when spread **≥** this; `0` never holds |
 | `output` | string | yes (already V11's, §4.3.1) | the produced artifact kind |
 | `route_at` | string, a value of `field`'s declared order | no | routing floor *(amended 2026-08-23, DKT-593 — see the amendment below)*: a cluster whose reduced value's position is **≥** its position is emitted to the output payload; the rest go to the record. Absent ⇒ every cluster emits, byte-for-byte the pre-`route_at` output |
+| `source_field` | string, a property name | no | *(amended 2026-09-13, DKT-2462 — see the amendment below)*: names a property of each input element holding an array of opaque source labels. Core neither validates nor reduces by it; the run report groups clusters by it. Absent ⇒ no such grouping in the report |
 
 New register-time rules, each a `VALIDATION_ERROR` naming workflow, step, and
 param, each a test case:
@@ -871,7 +872,7 @@ param, each a test case:
 | # | Rule | Argument |
 |---|---|---|
 | V27 | a step's `name` may not end in **`-held`**, and `action` may not name a builtin other than `aggregate` | the first reserves the materialized identity (§7.7) so a definition cannot collide with one; the second turns "my trusted `aggregate` command never runs" into a register-time sentence |
-| V28 | `action = "aggregate"` requires `field`, `method ∈ {median,max,min}`, `output`; `hold_spread` an integer ≥ 0 if present; `route_at` a non-empty string if present *(DKT-593)*; **no other keys** | the discipline every V-rule follows. A typo'd `method = "medain"` is otherwise discovered hours into a run, on a step whose inputs are already spent |
+| V28 | `action = "aggregate"` requires `field`, `method ∈ {median,max,min}`, `output`; `hold_spread` an integer ≥ 0 if present; `route_at` a non-empty string if present *(DKT-593)*; `source_field` a non-empty string if present *(DKT-2462)*; **no other keys** | the discipline every V-rule follows. A typo'd `method = "medain"` is otherwise discovered hours into a run, on a step whose inputs are already spent |
 | V28a | `route_at`, when declared, must name a value of `params.field`'s declared order *(DKT-593)* | the floor is a **position** in that order, and a value with no position has no floor to name — G4's discipline asked at register time. Schema-aware, so it lives in `ValidateSchemas` beside V29 rather than in the pure-bytes V28 |
 | V29 | an `aggregate` step must declare `payload = name@version`, and that schema must declare `params.field` as **`ordered_enum`** | median, max, and min are all defined **only** over an order. An aggregate without a declared order is a step that can never compute, and §11.2's own restriction is the same restriction |
 | V30 | the declared schema must **accept an aggregate-shaped document**: a synthetic probe built from the schema's own declared enum values (§7.6) is validated against it at register time | the output must satisfy *both* the instance schema and `aggregate@1` (§7.6). An instance schema with `"additionalProperties": false` makes that conjunction unsatisfiable — and the failure would otherwise land at the end of a review fan-out, hours in. The probe is deterministic and invents nothing: every value in it comes from the schema being checked, and it carries the aggregate output keys (`members`, `held`) plus one carried-through extra key so the conjunction it tests is the real one (review F3) |
@@ -910,6 +911,29 @@ ripeness order, and core cannot tell the difference.
 This is **core routing, not fixer filtering**: the set the fixer receives has
 already been routed, so `contracts/fix.md`'s prohibition stands unchanged —
 there is nothing left in the reconciled set to filter.
+
+### AMENDMENT (DKT-2462) — `source_field`: reporting attribution without a domain vocabulary
+
+DKT-2452 gave the run report a per-`aggregate`-step count of unique versus
+corroborated clusters (§7.6's `members`). It could not attribute a cluster to
+the **executor** that produced a member: `members` is core's own reduced
+record, with no per-member origin, and core must not resolve one by opening a
+judge worker's own artifact payload — that is payload interpretation
+(genericity, §1.1.1), and a finding's own `id` is unique only within its
+producing worker's payload, so two workers can emit the same id and an id
+alone cannot disambiguate.
+
+`source_field = "<name>"` names a property of each input element holding an
+array of opaque source labels — a workflow's own convention for a
+member's producing step ref, say. Core reads the NAME to know which other key
+to read; it never assumes the name `member_sources` or any other domain word.
+G3 already carries that array through to the output element verbatim, so
+`Aggregate` itself needs no change for the value to survive reduction — the
+param exists solely so `docket run report` can group a round's clusters by
+that key and resolve each value to the step instance (and its declared
+executor hint) that produced it, without core hardcoding one corpus's field
+name. Absent `source_field`, the report's grouping section is omitted
+entirely, matching `route_at`'s absent-parameter convention.
 
 ## 7.2 The input shape: what a "cluster" is
 

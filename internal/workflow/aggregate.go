@@ -34,9 +34,9 @@ var BuiltinActions = []string{ActionAggregate}
 // operator's command under a name core intends to take.
 var ReservedActions = []string{ActionAggregate}
 
-// AggregateParamKeys are the five keys §7.1's table declares, in its own order.
-// V28's "no other keys" is checked against exactly this list.
-var AggregateParamKeys = []string{"field", "method", "hold_spread", "output", "route_at"}
+// AggregateParamKeys are the six keys §7.1's table declares, in its own
+// order. V28's "no other keys" is checked against exactly this list.
+var AggregateParamKeys = []string{"field", "method", "hold_spread", "output", "route_at", "source_field"}
 
 // AggregateMethods is the closed reduction vocabulary, in §2's order.
 var AggregateMethods = []string{"median", "max", "min"}
@@ -104,8 +104,8 @@ func validateAggregateInputs(step *Step) error {
 }
 
 // validateAggregateParams is V28: `aggregate` requires `field`, `method`, and
-// `output`; `hold_spread` is an integer >= 0 when present; `route_at` is a
-// non-empty string when present; and NO OTHER KEYS.
+// `output`; `hold_spread` is an integer >= 0 when present; `route_at` and
+// `source_field` are non-empty strings when present; and NO OTHER KEYS.
 //
 // The discipline is every V-rule's. A typo'd `method = "medain"` is otherwise
 // discovered hours into a run, on a step whose inputs are already spent — and an
@@ -172,6 +172,18 @@ func validateAggregateParams(step *Step) error {
 			return fail("params",
 				"`params.route_at` must be a non-empty string naming a value of "+
 					"`params.field`'s declared order, got %v", raw)
+		}
+	}
+
+	// `source_field` is optional; when present it must be a non-empty string.
+	// Unlike `route_at` it names no value of a declared order — it names a
+	// PROPERTY, read back per-element by the run report (DKT-2462) — so there
+	// is no V28a-style order-membership check for ValidateSchemas to make.
+	if raw, present := step.Params["source_field"]; present {
+		if s, ok := raw.(string); !ok || s == "" {
+			return fail("params",
+				"`params.source_field` must be a non-empty string naming a "+
+					"property of each input element, got %v", raw)
 		}
 	}
 	return nil

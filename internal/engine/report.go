@@ -186,6 +186,19 @@ type RunReport struct {
 	// field it aggregates.
 	Complementarity []ClusterComplementarity `json:"complementarity,omitempty"`
 
+	// SourceAttribution is DKT-2462: per `aggregate` step that declares
+	// `source_field`, one row per DISTINCT value that field's arrays name
+	// across the round's clusters — the step ref that produced a member — with
+	// how many clusters that source contributed to and, when the ref resolves
+	// to a step in this run, the executor hint that step declared.
+	//
+	// It reads `params.source_field` (aggregate.go's ParamSourceField), never
+	// a corpus-owned name such as `member_sources`: core groups by whatever
+	// key the workflow names, the same way `route_at` takes its floor as an
+	// opaque value rather than assuming a field. Absent the param, this is
+	// nil, matching Recorded's absent-parameter convention.
+	SourceAttribution []ClusterSourceAttribution `json:"source_attribution,omitempty"`
+
 	// Metadata is R7, the genericity line at its thinnest: keys to distinct
 	// values with counts, verbatim and uninterpreted.
 	Metadata []db.MetadataKeyRollup `json:"metadata,omitempty"`
@@ -479,6 +492,27 @@ type ClusterComplementarity struct {
 	PayloadUnreadable bool `json:"payload_unreadable,omitempty"`
 }
 
+// ClusterSourceAttribution is DKT-2462's row, one per distinct source-field
+// value seen across one `aggregate` step's round.
+type ClusterSourceAttribution struct {
+	Step     string `json:"step"`
+	Instance string `json:"instance"`
+	Issue    string `json:"issue"`
+	// Source is the opaque value itself — a step ref such as `review@0#0` in
+	// this corpus's convention, but core treats it as a string it groups,
+	// never as content it parses.
+	Source string `json:"source"`
+	// Executor is the hint the named step declared, when Source resolves to a
+	// step instance in this run. Empty when it does not resolve — a source
+	// naming a step outside this run, or a value that is not a step ref at
+	// all — kept rather than dropped (R10), since an unresolved source is
+	// still a fact about the round.
+	Executor string `json:"executor,omitempty"`
+	// Clusters is how many of the round's clusters this source contributed a
+	// member to.
+	Clusters int `json:"clusters"`
+}
+
 // LoadRunReport builds the document. IT WRITES NOTHING.
 func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	run, err := db.GetRun(conn, runID)
@@ -565,6 +599,9 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		return nil, err
 	}
 	if report.Complementarity, err = complementarityRollup(conn, runID, defs); err != nil {
+		return nil, err
+	}
+	if report.SourceAttribution, err = sourceAttributionRollup(conn, runID, defs); err != nil {
 		return nil, err
 	}
 	// DKT-594's staleness diff: the run's workflow pins against the registry's
@@ -1179,6 +1216,148 @@ func producerInputCount(
 		}
 	}
 	return total, nil
+}
+
+// sourceAttributionRollup is DKT-2462: one ClusterSourceAttribution row per
+// distinct value an `aggregate` step's declared `source_field` names across
+// its round's clusters, counted over the same emitted+recorded union
+// complementarityRollup reads (a `route_at` split, DKT-593, must not make a
+// below-floor cluster's sources invisible to this report either).
+func sourceAttributionRollup(
+	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
+) ([]ClusterSourceAttribution, error) {
+	steps, err := db.ListRunSteps(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	var executors map[string]string // lazily built: most runs declare no source_field
+	var out []ClusterSourceAttribution
+	for _, s := range steps {
+		def := defs[s.WorkflowID]
+		if def == nil {
+			continue
+		}
+		spec := workflow.StepByName(def, s.StepName)
+		if spec == nil || spec.Action != workflow.ActionAggregate {
+			continue
+		}
+		params, err := ParseAggregateParams(spec.Params)
+		if err != nil {
+			continue // same restored-database allowance as complementarityRollup
+		}
+		if params.SourceField == "" {
+			continue
+		}
+
+		emitted, ok, err := latestAggregatePayload(conn, s.ID, params.Output)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		var recorded []map[string]any
+		if emitted != nil {
+			recorded, err = recordedBelowFloor(conn, s.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		counts := sourceCounts(params.SourceField, emitted, recorded)
+		if len(counts) == 0 {
+			continue
+		}
+		if executors == nil {
+			executors, err = runStepExecutorsByInstance(conn, runID)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		sources := make([]string, 0, len(counts))
+		for source := range counts {
+			sources = append(sources, source)
+		}
+		sort.Strings(sources)
+		for _, source := range sources {
+			out = append(out, ClusterSourceAttribution{
+				Step: s.StepName, Instance: s.Instance, Issue: model.FormatID(s.IssueID),
+				Source: source, Executor: executors[source], Clusters: counts[source],
+			})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Instance != out[j].Instance {
+			return out[i].Instance < out[j].Instance
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out, nil
+}
+
+// sourceCounts tallies, over the union of a round's emitted and below-floor
+// clusters, how many clusters each distinct value of `field` names — a
+// cluster whose array under `field` repeats one value (the same source
+// merged with itself within one cluster) counts that source once, not twice,
+// since the question this answers is "how many clusters did this source
+// contribute to", not "how many members trace to it".
+//
+// A cluster with no readable array under `field` contributes nothing, the
+// same skip-the-row discipline complementarityOf uses for an unreadable
+// `members`.
+func sourceCounts(field string, sets ...[]map[string]any) map[string]int {
+	counts := make(map[string]int)
+	for _, set := range sets {
+		for _, cluster := range set {
+			raw, ok := cluster[field].([]any)
+			if !ok {
+				continue
+			}
+			seen := make(map[string]bool, len(raw))
+			for _, v := range raw {
+				source, ok := v.(string)
+				if !ok || source == "" || seen[source] {
+					continue
+				}
+				seen[source] = true
+				counts[source]++
+			}
+		}
+	}
+	return counts
+}
+
+// runStepExecutorsByInstance maps a run's step instances to their declared
+// executor hint, for resolving a source_field value (a step ref) back to WHO
+// produced it. A step with no hint (an action step, or one with neither
+// `executor` nor `fanout`) maps to "", which callers read as unresolved —
+// ClusterSourceAttribution's `omitempty` never claims an executor core does
+// not know.
+func runStepExecutorsByInstance(conn *sql.DB, runID int) (map[string]string, error) {
+	out := make(map[string]string)
+	rows, err := conn.Query(
+		`SELECT instance, executor FROM steps WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading step executors: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			instance string
+			executor sql.NullString
+		)
+		if err := rows.Scan(&instance, &executor); err != nil {
+			return nil, fmt.Errorf("reading a step executor: %w", err)
+		}
+		out[instance] = executor.String
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading step executors: %w", err)
+	}
+	return out, nil
 }
 
 // artifactIndex is R6: what was produced, never the bodies.
