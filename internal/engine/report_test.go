@@ -452,3 +452,103 @@ func TestRunReportRollsUpVoteUsage(t *testing.T) {
 		t.Errorf("tokens rollup = %+v, want 300 across 2 seat reports", tokens)
 	}
 }
+
+// complementarityPayload has one UNIQUE cluster (a scalar severity, one
+// member) and one CORROBORATED cluster (two members) — the exact shape
+// DKT-2452's acceptance criteria names, and low enough on the ladder that
+// neither reaches the fixture's `hold_spread = 2`, so `reconcile` routes
+// straight through with no vote panel to drive first.
+const complementarityPayload = `[
+  {"id":"C-1","severity":"low","member_ids":["a-1"]},
+  {"id":"C-2","severity":["medium","high"],"member_ids":["a-2","b-1"]}
+]`
+
+// TestRunReportRollsUpComplementarity is DKT-2452: the run report gains a
+// section computing, per `aggregate` step, unique versus corroborated
+// cluster counts from `members`' length and the judge-artifact count that fed
+// the round, from `step_inputs` on the producer step (`synthesize`).
+//
+// It reads `members`, not the payload's own `member_ids` — see
+// ClusterComplementarity's doc comment for why: `members` is engine-owned and
+// generic, `member_ids` is the workflow author's own linkage key, and the two
+// agree in length wherever both exist.
+func TestRunReportRollsUpComplementarity(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.Complementarity) != 1 {
+		t.Fatalf("complementarity = %+v, want exactly one aggregate step's row",
+			report.Complementarity)
+	}
+	row := report.Complementarity[0]
+	if row.Instance != "reconcile@0" {
+		t.Errorf("instance = %q, want reconcile@0", row.Instance)
+	}
+	if row.Unique != 1 || row.Corroborated != 1 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/1: %+v",
+			row.Unique, row.Corroborated, row)
+	}
+	wantDist := []MemberCount{{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}}
+	if !reflect.DeepEqual(row.ByMemberCount, wantDist) {
+		t.Errorf("by_member_count = %+v, want %+v", row.ByMemberCount, wantDist)
+	}
+	// The fixture's `synthesize@0` binds `review.*`, fanned out to 4 judges
+	// (§7.5's example): that is the round's judge-artifact count, read off
+	// `step_inputs` at synthesize's own claim rather than off reconcile, which
+	// is never claimed and so never gets step_inputs of its own.
+	if row.InputArtifacts != 4 {
+		t.Errorf("input_artifacts = %d, want 4 (the fixture's 4 review seats)",
+			row.InputArtifacts)
+	}
+	if row.PayloadUnreadable {
+		t.Error("payload_unreadable is set on a well-formed round")
+	}
+}
+
+// TestRunReportOmitsComplementarityBeforeAnyRound is the absent case: an
+// aggregate step that has not yet completed contributes no row, never a
+// zeroed one — the same "absence is not a fact" discipline as
+// TestReportOnAPlanningRunIsAllZeros.
+func TestRunReportOmitsComplementarityBeforeAnyRound(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.Complementarity) != 0 {
+		t.Errorf("complementarity = %+v, want none before reconcile runs",
+			report.Complementarity)
+	}
+}
+
+// TestComplementarityOfCountsTheRecordedSplit unit-tests the pure counter
+// directly, over a below-floor set the way `route_at` (DKT-593) produces
+// one: fully reduced clusters that never reach the step's own artifact
+// payload. TestBuiltinRouteAtSplitsTheOutputFromTheRecord already pins that
+// the builtin routes them into the action's own row; this pins that once
+// read back, they count exactly as an emitted cluster of the same member
+// count would.
+func TestComplementarityOfCountsTheRecordedSplit(t *testing.T) {
+	emitted := []map[string]any{
+		{"id": "B", "severity": "blocker", KeyMembers: []any{"blocker"}},
+	}
+	recorded := []map[string]any{
+		{"id": "A", "severity": "low", KeyMembers: []any{"low", "low"}},
+	}
+
+	unique, corroborated, dist := complementarityOf(emitted, recorded)
+	if unique != 1 || corroborated != 1 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/1 across both sets",
+			unique, corroborated)
+	}
+	want := []MemberCount{{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}}
+	if !reflect.DeepEqual(dist, want) {
+		t.Errorf("distribution = %+v, want %+v", dist, want)
+	}
+}

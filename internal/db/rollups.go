@@ -312,6 +312,51 @@ func VoteUsageRollup(db *sql.DB, scope, prefix string, extraIDs ...int) ([]UnitT
 		})
 }
 
+// StepInputCount counts the artifacts recorded as `stepID`'s inputs at its
+// most recent claim (`step_inputs`, DKT-1054). It is the one generic way to
+// answer "how many upstream artifacts fed this step": the table holds only
+// the LATEST attempt's bindings, and a step never claimed (an action step)
+// has no rows at all.
+func StepInputCount(db *sql.DB, stepID int) (int, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM step_inputs WHERE step_id = ?`, stepID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("counting step inputs for %s: %w",
+			model.FormatStepID(stepID), err)
+	}
+	return n, nil
+}
+
+// ActionOutputsFor reads the `output` column of a step's PASSING rows for one
+// action name, ordered by ordinal.
+//
+// This is deliberately NOT ActionTrail: that rollup's Output is blank on any
+// passing row (its output channel exists for diagnosis, and a pass carries no
+// diagnosis worth the read), and even on a failing row it is tail-truncated
+// for display. The `aggregate` builtin's `route_at` split (DKT-593) records
+// its below-floor clusters as a PASSING row's own output — a fact to compute
+// from, not a diagnostic — so a reader of that fact needs the untruncated
+// column directly.
+func ActionOutputsFor(db *sql.DB, stepID int, action string) ([]string, error) {
+	rows, err := db.Query(
+		`SELECT output FROM action_results
+		  WHERE step_id = ? AND action = ? AND verdict = ?
+		  ORDER BY ordinal`, stepID, action, ActionVerdictPass)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s outputs for %s: %w",
+			action, model.FormatStepID(stepID), err)
+	}
+	return scanRows(rows, fmt.Sprintf("%s outputs for %s", action, model.FormatStepID(stepID)),
+		func(r *sql.Rows) (string, error) {
+			var output sql.NullString
+			if err := r.Scan(&output); err != nil {
+				return "", err
+			}
+			return output.String, nil
+		})
+}
+
 // proposalMembership builds the WHERE fragment that selects a run's vote
 // casts: the idempotency-key family, plus any explicitly attributed proposal
 // ids. One builder for both vote_usage readers, so the rollup and its

@@ -166,6 +166,26 @@ type RunReport struct {
 	// away for anyone who wants them.
 	Artifacts []ArtifactIndexEntry `json:"artifacts,omitempty"`
 
+	// Complementarity is DKT-2452: per `aggregate` step, how many of its
+	// clusters are UNIQUE (one member) versus CORROBORATED (more than one),
+	// the distribution of member counts across clusters, and how many
+	// upstream artifacts fed the round that produced them. It is the number
+	// Anthropic's fanout-width case for multi-agent review depends on ("only
+	// 12 vulnerabilities in common") and that this run document had no way to
+	// show: `aggregate` has always written `members` on every cluster, and
+	// nothing before this read it back.
+	//
+	// It reads `members` (engine-owned, §7.6), never the author's own
+	// `member_ids` linkage key: `members`' length already equals
+	// `member_ids`'s wherever both exist (findings-cluster@3 declares them in
+	// the same arrival order), and `members` is ALSO defined on a
+	// carried-forward standing finding, which has a scalar `severity` and no
+	// `member_ids` at all. Reading the author's key here would make core's
+	// generic rollup depend on one workflow's own vocabulary; reading
+	// `members` keeps it something every `aggregate` step answers, whatever
+	// field it aggregates.
+	Complementarity []ClusterComplementarity `json:"complementarity,omitempty"`
+
 	// Metadata is R7, the genericity line at its thinnest: keys to distinct
 	// values with counts, verbatim and uninterpreted.
 	Metadata []db.MetadataKeyRollup `json:"metadata,omitempty"`
@@ -417,6 +437,48 @@ type ArtifactIndexEntry struct {
 	Supersedes string `json:"supersedes,omitempty"`
 }
 
+// MemberCount is one point of ClusterComplementarity's distribution: how many
+// clusters this round reduced from exactly this many members.
+type MemberCount struct {
+	Members  int `json:"members"`
+	Clusters int `json:"clusters"`
+}
+
+// ClusterComplementarity is DKT-2452's row, one per `aggregate` step instance.
+type ClusterComplementarity struct {
+	Step     string `json:"step"`
+	Instance string `json:"instance"`
+	Issue    string `json:"issue"`
+	// Unique counts clusters with exactly one member: the field's declared
+	// order had one voice on that value, corroborated by nothing.
+	Unique int `json:"unique"`
+	// Corroborated counts clusters with more than one member: the SAME
+	// measurement Anthropic's fanout-width case made ("only 12 vulnerabilities
+	// in common") — how much of the round agreed rather than merely occurred.
+	Corroborated int `json:"corroborated"`
+	// ByMemberCount is Unique and Corroborated's own detail, ordered by
+	// member count ascending (a total key, R9): every cluster this round
+	// reduced, grouped by how many members it had.
+	ByMemberCount []MemberCount `json:"by_member_count,omitempty"`
+	// InputArtifacts is how many artifacts fed the step whose output this
+	// round reduced — `step_inputs` on that PRODUCER step, not on the
+	// aggregate step itself (an action step is never claimed and so never
+	// gets a `step_inputs` row of its own, per DKT-1054). Summed over every
+	// run step sharing the producer's declared name, so a fanned-out producer
+	// (`review@0#0..3`) counts every sibling's artifact once. Zero when the
+	// producer step cannot be resolved — an aggregate step with no
+	// `<step>.<kind>` input, which V3/V29 already make unregisterable, but a
+	// restored database is not required to have run today's validation.
+	InputArtifacts int `json:"input_artifacts"`
+	// PayloadUnreadable marks a step whose aggregate output does not decode
+	// as the array of objects §7.6 promises, so an absent row is never read
+	// as "this round produced nothing" (the same discipline MetadataUnreadable
+	// states). The bag is not re-validated here (R10): a read verb that
+	// refused over one odd artifact would be useless during exactly the run
+	// an operator wants to inspect.
+	PayloadUnreadable bool `json:"payload_unreadable,omitempty"`
+}
+
 // LoadRunReport builds the document. IT WRITES NOTHING.
 func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	run, err := db.GetRun(conn, runID)
@@ -500,6 +562,9 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		return nil, err
 	}
 	if report.Artifacts, err = artifactIndex(conn, runID); err != nil {
+		return nil, err
+	}
+	if report.Complementarity, err = complementarityRollup(conn, runID, defs); err != nil {
 		return nil, err
 	}
 	// DKT-594's staleness diff: the run's workflow pins against the registry's
@@ -903,6 +968,217 @@ func abandonNote(routing string) string {
 		return ""
 	}
 	return strings.TrimSpace(note)
+}
+
+// complementarityRollup is DKT-2452: one ClusterComplementarity row per
+// `aggregate` step instance in the run.
+//
+// It walks every step rather than every artifact because the question is
+// "what did THIS ROUND of clustering produce", and an aggregate step that
+// hit route_at (DKT-593) or a hold resolution (H13) leaves that answer split
+// across more than one place: the step's own newest artifact (superseded
+// ones excluded — a resolution records a NEW artifact of the same kind
+// rather than editing the old one) and, when route_at routed clusters below
+// its floor, the builtin's own action_results row.
+func complementarityRollup(
+	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
+) ([]ClusterComplementarity, error) {
+	steps, err := db.ListRunSteps(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	byName := make(map[string][]*db.Step, len(steps))
+	for _, s := range steps {
+		byName[s.StepName] = append(byName[s.StepName], s)
+	}
+
+	var out []ClusterComplementarity
+	for _, s := range steps {
+		// A materialized held/vote step (H5) has no entry in the pinned
+		// definition; StepByName returns nil for it, and it is never itself
+		// an aggregate step — the hold it carries is the RESOLUTION of one.
+		def := defs[s.WorkflowID]
+		if def == nil {
+			continue
+		}
+		spec := workflow.StepByName(def, s.StepName)
+		if spec == nil || spec.Action != workflow.ActionAggregate {
+			continue
+		}
+		params, err := ParseAggregateParams(spec.Params)
+		if err != nil {
+			// V28/V28a already refuse this at register time; a row that
+			// still fails here belongs to a database restored from
+			// elsewhere. Not this report's failure to surface (R10) — the
+			// row is simply omitted, exactly as an aggregate step with no
+			// clusters yet would be.
+			continue
+		}
+
+		row := ClusterComplementarity{
+			Step: s.StepName, Instance: s.Instance, Issue: model.FormatID(s.IssueID),
+		}
+
+		emitted, ok, err := latestAggregatePayload(conn, s.ID, params.Output)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// Never claimed a cluster yet — an aggregate step with no
+			// completed round. An absent row, not a zeroed one (R10's
+			// "reads as nothing happened" trap MetadataUnreadable also
+			// guards against).
+			continue
+		}
+		var recorded []map[string]any
+		if emitted != nil {
+			recorded, err = recordedBelowFloor(conn, s.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if emitted == nil {
+			row.PayloadUnreadable = true
+		} else {
+			row.Unique, row.Corroborated, row.ByMemberCount =
+				complementarityOf(emitted, recorded)
+		}
+
+		row.InputArtifacts, err = producerInputCount(conn, spec, s.IssueID, byName)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, row)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Instance < out[j].Instance })
+	return out, nil
+}
+
+// latestAggregatePayload reads an aggregate step's NEWEST artifact of the
+// step's declared output kind and decodes its payload. ok is false when the
+// step has produced no such artifact yet; the payload itself is nil (as
+// opposed to a non-nil empty slice) when the newest artifact's payload does
+// not decode as an array of objects.
+func latestAggregatePayload(
+	conn *sql.DB, stepID int, kind string,
+) (payload []map[string]any, ok bool, err error) {
+	artifacts, err := db.ListStepArtifacts(conn, stepID)
+	if err != nil {
+		return nil, false, err
+	}
+	var newest *db.Artifact
+	for _, a := range artifacts {
+		if a.Kind == kind {
+			newest = a
+		}
+	}
+	if newest == nil {
+		return nil, false, nil
+	}
+	if json.Unmarshal([]byte(newest.Payload), &payload) != nil {
+		return nil, true, nil
+	}
+	return payload, true, nil
+}
+
+// recordedBelowFloor reads the below-floor clusters a `route_at` split routed
+// into the builtin's own action_results row (DKT-593), decoded the same way
+// as the emitted payload. Absent route_at, or absent any below-floor
+// cluster, the row's output is empty and this returns nil, nil.
+func recordedBelowFloor(conn *sql.DB, stepID int) ([]map[string]any, error) {
+	outputs, err := db.ActionOutputsFor(conn, stepID, workflow.ActionAggregate)
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
+	for _, o := range outputs {
+		if o == "" {
+			continue
+		}
+		var clusters []map[string]any
+		if json.Unmarshal([]byte(o), &clusters) != nil {
+			continue
+		}
+		out = append(out, clusters...)
+	}
+	return out, nil
+}
+
+// complementarityOf is the pure count: unique (one member) versus
+// corroborated (more than one) clusters, and the full distribution, over the
+// union of a round's emitted and below-floor clusters.
+//
+// It reads `members` (KeyMembers, §7.6) — the engine's own record of a
+// cluster's inputs — never the payload's other keys. A cluster with no
+// readable `members` array (a malformed record; `aggregate` always writes
+// one) contributes to neither count nor the distribution, the same
+// skip-the-row discipline `db.MetadataRollup` uses for an unreadable bag.
+func complementarityOf(sets ...[]map[string]any) (unique, corroborated int, dist []MemberCount) {
+	counts := make(map[int]int)
+	for _, set := range sets {
+		for _, cluster := range set {
+			raw, ok := cluster[KeyMembers].([]any)
+			if !ok {
+				continue
+			}
+			n := len(raw)
+			if n == 1 {
+				unique++
+			} else if n > 1 {
+				corroborated++
+			}
+			counts[n]++
+		}
+	}
+	members := make([]int, 0, len(counts))
+	for n := range counts {
+		members = append(members, n)
+	}
+	sort.Ints(members)
+	for _, n := range members {
+		dist = append(dist, MemberCount{Members: n, Clusters: counts[n]})
+	}
+	return unique, corroborated, dist
+}
+
+// producerInputCount answers "how many artifacts fed the round that produced
+// this aggregate step's clusters" — `step_inputs` on the PRODUCER step named
+// by the aggregate step's own `inputs` (never on the aggregate step itself:
+// an action step is never claimed, so it never gets step_inputs of its own,
+// DKT-1054). Summed over every run step sharing the producer's declared
+// name and the aggregate step's issue, so a fanned-out producer counts every
+// sibling once and a multi-issue run does not cross lanes.
+//
+// Zero when no input resolves to a producer name — an aggregate step with no
+// `<step>.<kind>` input, which V3/V29 already refuse at register time for a
+// freshly validated workflow, but a restored database is not guaranteed to
+// have passed today's validation.
+func producerInputCount(
+	conn *sql.DB, spec *workflow.Step, issueID int, byName map[string][]*db.Step,
+) (int, error) {
+	seen := make(map[string]bool)
+	total := 0
+	for _, declared := range spec.Inputs {
+		stepName, _, ok := splitInput(declared)
+		if !ok || seen[stepName] {
+			continue
+		}
+		seen[stepName] = true
+		for _, producer := range byName[stepName] {
+			if producer.IssueID != issueID {
+				continue
+			}
+			n, err := db.StepInputCount(conn, producer.ID)
+			if err != nil {
+				return 0, err
+			}
+			total += n
+		}
+	}
+	return total, nil
 }
 
 // artifactIndex is R6: what was produced, never the bodies.
