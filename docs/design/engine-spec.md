@@ -45,6 +45,10 @@ docket workflow init [--template NAME]          # scaffold instance config from 
                                                 #   optional templates (zero-authoring start)
 
 docket run start --request-file … ; activate; conduct; pause|resume|abandon; status; report
+docket report executors [--since RUN-N|DATE] [--all-projects]
+                                                # cross-run ledger per executor hint and
+                                                #   voter name; read-only, operator-facing,
+                                                #   never consulted by next (DKT-2453)
 docket run budget RUN-N --set N                 # raise/lower a live cap (CAS,
                                                 #   event-logged — DKT-29, stage 7)
 docket next     --run RUN-N --json              # step-level ready set (engine-core §5)

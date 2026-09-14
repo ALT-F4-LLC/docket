@@ -292,6 +292,13 @@ Listings — `issue list`, `next`, `plan`, and `board` — emit summary rows und
 | `docket plan` | Compute a phased execution plan from the dependency graph (filterable by `--status`/`-s`, `--label`/`-l`, `--priority`/`-p`, `--type`/`-T`, `--assignee`/`-a`) |
 | `docket board` | Kanban board view in the terminal |
 
+### Report Commands
+
+| Command | Description |
+|---------|-------------|
+| `docket run report RUN-N` | Roll up one run's budget, steps, gates, actions, artifacts, findings, and metadata |
+| `docket report executors` | Group fix-loop routings, override-pass rulings, reaps, and cluster corroboration per executor hint and voter name across runs (`--since RUN-N` or a date, `--all-projects`); read-only, never consulted by `next` |
+
 ### Top-Level Commands
 
 | Command | Description |

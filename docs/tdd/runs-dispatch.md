@@ -688,6 +688,35 @@ the vote-usage rollups read, withheld for a SealedOpen proposal exactly as every
 other read verb withholds it (DKT-2447). This is `step_inputs`' provenance
 question (DKT-1054) asked of a cast: what did this finding rely on.
 
+**AMENDMENT (DKT-2453): `report executors`, the cross-run ledger.** Every
+rollup above is per run, and a retro re-routing policy seats had no track
+record to read short of joining a dozen run reports by hand — the store is the
+only place that spans runs and sessions, and nothing in it persisted the join.
+`docket report executors [--since RUN-N|DATE] [--all-projects]` computes it at
+read, over this project's runs (the whole store with `--all-projects`; `--since`
+takes a run id floor or a creation-instant floor), grouped by the two identities
+that recur across runs: **per executor hint** (`steps.executor`) — runs, steps,
+`fix-loop` routings, `override-pass` resolutions, reaps and forced reaps, and
+over every `aggregate` round declaring `source_field` (DKT-2462) the clusters
+its steps contributed to, unique (one `members`) versus corroborated (more)
+versus held — and **per voter name** (`votes.voter_name`) — runs, casts, casts by
+verdict, and how many of the vote steps it cast on routed `fix-loop`, were
+resolved `override-pass`, or were materialized held-cluster ballots; a
+SealedOpen proposal is withheld as everywhere. Rows order by name (R9); the
+verb opens no transaction and writes nothing (R8, `TestExecutorLedgerWritesNothing`).
+**Operator-facing only, and never an input to routing**: `next` does not
+consult it, no engine decision reads it, and nothing in it reaches a seat —
+fed back into a panel a track record becomes an incentive to agree with the
+majority, the conformity failure the record exists to catch; which seats a
+policy routes stays the operator's decision, made outside the store. The
+ruling columns — `reaps`, `forced_reaps`, `override_passes` — read the event
+log, since only the event says which reap a relay forced and which resolution
+an operator chose (`steps.reaped_claims` back-fills nothing before v23 and
+would put a forced count above its own total); a ruling `events prune` removed
+leaves all three together. A source label that resolves to no step of its run
+has no hint to group under and is left out, matching the run report's
+unresolved-source convention.
+
 **R7 is the genericity line at its thinnest, so it is specified exactly.** The
 rollup groups by key and by value, both as opaque strings, and reports counts.
 It does not know that the reference instance puts a model tier there; it

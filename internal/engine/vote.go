@@ -164,21 +164,31 @@ func loadVoteProposalsTx(tx *sql.Tx, runID int, steps []*db.Step) (map[voteStepK
 
 	out := make(map[voteStepKey]int, len(keyed))
 	for key, id := range keyed {
-		suffix, ok := strings.CutPrefix(key, prefix)
-		if !ok {
-			continue
+		if k, ok := parseVoteStepKey(prefix, key); ok {
+			out[k] = id
 		}
-		issuePart, instance, ok := strings.Cut(suffix, ":")
-		if !ok {
-			continue
-		}
-		issueID, err := strconv.Atoi(issuePart)
-		if err != nil {
-			continue
-		}
-		out[voteStepKey{Issue: model.FormatID(issueID), Instance: instance}] = id
 	}
 	return out, nil
+}
+
+// parseVoteStepKey recovers the (issue, instance) half of a vote-step
+// idempotency key under one run's prefix — the inverse of voteIdempotencyKey,
+// kept beside the bulk reader so the two readers of the family cannot parse
+// it differently. The second return is false for a key of another shape.
+func parseVoteStepKey(prefix, key string) (voteStepKey, bool) {
+	suffix, ok := strings.CutPrefix(key, prefix)
+	if !ok {
+		return voteStepKey{}, false
+	}
+	issuePart, instance, ok := strings.Cut(suffix, ":")
+	if !ok {
+		return voteStepKey{}, false
+	}
+	issueID, err := strconv.Atoi(issuePart)
+	if err != nil {
+		return voteStepKey{}, false
+	}
+	return voteStepKey{Issue: model.FormatID(issueID), Instance: instance}, true
 }
 
 // OpenVoteProposal is §8.1 phase 2: the first engine invocation that observes a
