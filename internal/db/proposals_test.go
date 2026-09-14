@@ -913,9 +913,9 @@ func TestCastVoteApproveWithConcernsQuorumMath(t *testing.T) {
 		Confidence:      0.8,
 		DomainRelevance: 0.9,
 		FindingsJSON: &model.Findings{
-			Blockers:    []string{},
-			Concerns:    []string{"hardcoded paths"},
-			Suggestions: []string{},
+			Blockers:    []model.Finding{},
+			Concerns:    []model.Finding{{Text: "hardcoded paths"}},
+			Suggestions: []model.Finding{},
 		},
 		Summary: "Sound with concerns",
 	})
@@ -960,9 +960,9 @@ func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
 
 	// Vote with structured findings.
 	findings := &model.Findings{
-		Blockers:    []string{"critical issue"},
-		Concerns:    []string{"concern A", "concern B"},
-		Suggestions: []string{"suggestion 1"},
+		Blockers:    []model.Finding{{Text: "critical issue"}},
+		Concerns:    []model.Finding{{Text: "concern A"}, {Text: "concern B"}},
+		Suggestions: []model.Finding{{Text: "suggestion 1"}},
 	}
 	_, err = CastVote(db, &model.Vote{
 		ProposalID:      id,
@@ -999,7 +999,7 @@ func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
 	if v1.FindingsJSON == nil {
 		t.Fatal("vote 1 FindingsJSON is nil")
 	}
-	if len(v1.FindingsJSON.Blockers) != 1 || v1.FindingsJSON.Blockers[0] != "critical issue" {
+	if len(v1.FindingsJSON.Blockers) != 1 || v1.FindingsJSON.Blockers[0].Text != "critical issue" {
 		t.Errorf("vote 1 Blockers = %v", v1.FindingsJSON.Blockers)
 	}
 	if len(v1.FindingsJSON.Concerns) != 2 {

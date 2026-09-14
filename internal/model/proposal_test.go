@@ -323,17 +323,17 @@ func TestFindingsJSONRoundTrip(t *testing.T) {
 		{
 			name: "populated",
 			findings: Findings{
-				Blockers:    []string{"critical security issue"},
-				Concerns:    []string{"performance concern", "naming convention"},
-				Suggestions: []string{"add logging"},
+				Blockers:    []Finding{{Text: "critical security issue"}},
+				Concerns:    []Finding{{Text: "performance concern"}, {Text: "naming convention"}},
+				Suggestions: []Finding{{Text: "add logging"}},
 			},
 		},
 		{
 			name: "empty arrays",
 			findings: Findings{
-				Blockers:    []string{},
-				Concerns:    []string{},
-				Suggestions: []string{},
+				Blockers:    []Finding{},
+				Concerns:    []Finding{},
+				Suggestions: []Finding{},
 			},
 		},
 		{
@@ -547,9 +547,9 @@ func TestVoteJSONEffectiveWeight(t *testing.T) {
 func TestVoteJSONWithFindingsJSON(t *testing.T) {
 	now := time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC)
 	findings := &Findings{
-		Blockers:    []string{},
-		Concerns:    []string{"hardcoded paths"},
-		Suggestions: []string{"add guard clause"},
+		Blockers:    []Finding{},
+		Concerns:    []Finding{{Text: "hardcoded paths"}},
+		Suggestions: []Finding{{Text: "add guard clause"}},
 	}
 	v := Vote{
 		ID:              1,
@@ -598,7 +598,7 @@ func TestVoteJSONWithFindingsJSON(t *testing.T) {
 	if v2.FindingsJSON == nil {
 		t.Fatal("Unmarshaled FindingsJSON is nil")
 	}
-	if len(v2.FindingsJSON.Concerns) != 1 || v2.FindingsJSON.Concerns[0] != "hardcoded paths" {
+	if len(v2.FindingsJSON.Concerns) != 1 || v2.FindingsJSON.Concerns[0].Text != "hardcoded paths" {
 		t.Errorf("Unmarshaled FindingsJSON.Concerns = %v", v2.FindingsJSON.Concerns)
 	}
 	if v2.Summary != v.Summary {
@@ -687,5 +687,45 @@ func TestProposalSealedWireAndPredicate(t *testing.T) {
 	}
 	if empty, _ := json.Marshal(SealedCasts(nil)); string(empty) != "[]" {
 		t.Errorf("SealedCasts(nil) wire = %s, want []", empty)
+	}
+}
+
+// TestFindingWireFormIsPolymorphic pins DKT-2451's compatibility promise: an
+// entry with no evidence encodes as the bare string it always was — so every
+// stored findings_json row and every consumer reads byte-identically — and
+// only an entry carrying evidence takes the object form. Decoding accepts
+// both, and refuses anything else by name.
+func TestFindingWireFormIsPolymorphic(t *testing.T) {
+	legacy := `{"blockers":["critical"],"concerns":[],"suggestions":["add logging"]}`
+	var f Findings
+	testsupport.Must(t, json.Unmarshal([]byte(legacy), &f), "decoding the legacy form")
+	if len(f.Blockers) != 1 || f.Blockers[0].Text != "critical" || f.Blockers[0].Evidence != nil {
+		t.Errorf("legacy blocker decoded as %+v", f.Blockers)
+	}
+	out, err := json.Marshal(f)
+	testsupport.Must(t, err, "Marshal: %v", err)
+	if string(out) != legacy {
+		t.Errorf("a findings document with no evidence re-encoded as\n%s\nwant the bytes it was decoded from\n%s", out, legacy)
+	}
+
+	cited := `{"blockers":[{"text":"reproduced","evidence":["artifact:ARTIFACT-3","gate:build"]}],"concerns":["asserted"],"suggestions":[]}`
+	var g Findings
+	testsupport.Must(t, json.Unmarshal([]byte(cited), &g), "decoding the object form")
+	if got := g.Blockers[0]; got.Text != "reproduced" || len(got.Evidence) != 2 || got.Evidence[1] != "gate:build" {
+		t.Errorf("cited blocker decoded as %+v", got)
+	}
+	if got := g.Concerns[0]; got.Text != "asserted" || got.Evidence != nil {
+		t.Errorf("a bare string beside an object decoded as %+v", got)
+	}
+	out, err = json.Marshal(g)
+	testsupport.Must(t, err, "Marshal: %v", err)
+	if string(out) != cited {
+		t.Errorf("the cited document re-encoded as\n%s\nwant\n%s", out, cited)
+	}
+
+	for _, bad := range []string{`{"blockers":[7]}`, `{"blockers":[["x"]]}`, `{"blockers":[null]}`} {
+		if err := json.Unmarshal([]byte(bad), &f); err == nil {
+			t.Errorf("%s decoded without error; an entry is a string or an object", bad)
+		}
 	}
 }

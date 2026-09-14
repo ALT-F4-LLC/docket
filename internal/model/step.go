@@ -14,6 +14,20 @@ func FormatStepID(id int) string {
 	return fmt.Sprintf("%s-%d", StepIDPrefix, id)
 }
 
+// ArtifactIDPrefix is the prefix artifact IDs render with, kept apart from the
+// step and run prefixes for the same reason StepIDPrefix is.
+const ArtifactIDPrefix = "ARTIFACT"
+
+// FormatArtifactID renders an artifact's display identity.
+func FormatArtifactID(id int) string {
+	return fmt.Sprintf("%s-%d", ArtifactIDPrefix, id)
+}
+
+// ParseArtifactID accepts `ARTIFACT-3` or a bare `3`, mirroring ParseStepID.
+func ParseArtifactID(s string) (int, error) {
+	return parseRefID(s, ArtifactIDPrefix, "artifact")
+}
+
 // ParseStepID accepts `STEP-3` or a bare `3`, mirroring ParseID and ParseRunID
 // so an operator's muscle memory carries across all three entities.
 func ParseStepID(s string) (int, error) {

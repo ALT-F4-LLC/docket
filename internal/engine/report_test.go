@@ -669,3 +669,83 @@ func TestRunReportOmitsSourceAttributionWithoutTheParam(t *testing.T) {
 			report.SourceAttribution)
 	}
 }
+
+// TestReportRendersEvidenceLessFindingsAsUnsupported is DKT-2451's report
+// half: every structured finding a panel recorded rides in the document with
+// the evidence it cited, and an entry that cited nothing is marked
+// unsupported out loud rather than left as a row with an absent list.
+func TestReportRendersEvidenceLessFindingsAsUnsupported(t *testing.T) {
+	conn := mustDB(t)
+	runID, proposalID, artifactID := evidenceRun(t, conn)
+	ref := "artifact:" + model.FormatArtifactID(artifactID)
+
+	findings := &model.Findings{
+		Blockers: []model.Finding{{Text: "the test fails on main", Evidence: []string{ref}}},
+		Concerns: []model.Finding{{Text: "naming could be tighter"}},
+	}
+	err := ValidateCastEvidence(conn, proposalID, findings)
+	testsupport.Must(t, err, "ValidateCastEvidence: %v", err)
+	_, err = db.CastVote(conn, &model.Vote{
+		ProposalID: proposalID, VoterName: "alice", VoterRole: "reviewer",
+		Verdict: model.VerdictReject, Confidence: 0.9, DomainRelevance: 0.8,
+		FindingsJSON: findings,
+	})
+	testsupport.Must(t, err, "CastVote: %v", err)
+
+	report, err := LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Findings) != 2 {
+		t.Fatalf("the report carries %d findings, want 2: %s",
+			len(report.Findings), mustJSON(t, report.Findings))
+	}
+	supported, unsupported := report.Findings[0], report.Findings[1]
+	if supported.Kind != FindingBlocker || supported.Unsupported ||
+		len(supported.Evidence) != 1 || supported.Evidence[0] != ref {
+		t.Errorf("the cited finding rendered as %s", mustJSON(t, supported))
+	}
+	if unsupported.Kind != FindingConcern || !unsupported.Unsupported || len(unsupported.Evidence) != 0 {
+		t.Errorf("the evidence-less finding rendered as %s, want unsupported", mustJSON(t, unsupported))
+	}
+	for _, row := range report.Findings {
+		if row.Proposal != model.FormatProposalID(proposalID) || row.Voter != "alice" || row.Role != "reviewer" {
+			t.Errorf("finding row misattributed: %s", mustJSON(t, row))
+		}
+	}
+}
+
+// TestReportWithholdsFindingsWhileTheBallotIsSealed: a SealedOpen proposal's
+// casts are withheld here exactly as in `vote show` (DKT-2447), and appear
+// once the tally closes the ballot.
+func TestReportWithholdsFindingsWhileTheBallotIsSealed(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedVoteGateRun(t, conn)
+	err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "sealing the rule: %v", err)
+	proposalID := openGateProposal(t, conn, testEngine(), runID)
+
+	cast := func(seat string) {
+		t.Helper()
+		_, err := db.CastVote(conn, &model.Vote{
+			ProposalID: proposalID, VoterName: seat, Verdict: model.VerdictApprove,
+			Confidence: 0.9, DomainRelevance: 0.8,
+			FindingsJSON: &model.Findings{Concerns: []model.Finding{{Text: "from " + seat}}},
+		})
+		testsupport.Must(t, err, "CastVote(%s): %v", seat, err)
+	}
+	cast("alice")
+	report, err := LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Findings) != 0 {
+		t.Fatalf("a sealed, still-open ballot leaked %d finding(s) into the report",
+			len(report.Findings))
+	}
+
+	cast("bob")
+	cast("carol")
+	report, err = LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport after the tally: %v", err)
+	if len(report.Findings) != 3 {
+		t.Errorf("after the tally closed the ballot the report carries %d finding(s), want 3",
+			len(report.Findings))
+	}
+}

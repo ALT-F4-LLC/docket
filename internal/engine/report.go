@@ -244,6 +244,25 @@ type RunReport struct {
 	// coverage line already says so and an empty list would restate it.
 	SilentVoteSeats []SilentVoteSeat `json:"silent_vote_seats,omitempty"`
 
+	// Findings is DKT-2451: every structured finding the run's panels
+	// recorded, one row per entry, with the evidence it cited — or the
+	// statement that it cited none.
+	//
+	// It exists because the record could not tell an ASSERTED finding from a
+	// REPRODUCED one: `step_inputs` says what a judge step was served, and
+	// nothing said what a cast relied on. A cast may now cite
+	// `artifact:ARTIFACT-N` and `gate:<name>` references the engine resolved
+	// against this run when the cast recorded (ValidateCastEvidence), and this
+	// section is where the two kinds of finding become distinguishable: an
+	// entry with no citation carries `unsupported`, set out loud rather than
+	// left to be inferred from an absent list.
+	//
+	// Casts on a proposal that is SealedOpen (DKT-2447) are withheld here as
+	// they are in every other read verb; they appear once the tally closes.
+	// `omitempty`: a run whose panels recorded no structured findings carries
+	// no key.
+	Findings []CastFinding `json:"findings,omitempty"`
+
 	// StepUsage is the ledger row by row — which step, which attempt, which
 	// unit, how much, and who measured it. Budget.Reported is the same rows
 	// summed per unit; this is the detail behind that headline.
@@ -267,6 +286,32 @@ type RunReport struct {
 	// `silent_vote_seats`, and both must be empty before a run is called
 	// finished. `omitempty`: a fully billed run carries no key.
 	MissingUsage []Discrepancy `json:"missing_usage,omitempty"`
+}
+
+// The three lists a structured finding can come from — CastFinding.Kind's
+// closed vocabulary, core's own and never stored text.
+const (
+	FindingBlocker    = "blocker"
+	FindingConcern    = "concern"
+	FindingSuggestion = "suggestion"
+)
+
+// CastFinding is one entry of one cast's structured findings on one of the
+// run's proposals (DKT-2451), with the evidence it cited.
+type CastFinding struct {
+	Proposal string `json:"proposal"`
+	Voter    string `json:"voter"`
+	Role     string `json:"role,omitempty"`
+	// Kind is which list the entry came from: blocker, concern, or suggestion.
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+	// Evidence is the references the engine resolved when the cast recorded,
+	// in the caster's order and canonical spelling.
+	Evidence []string `json:"evidence,omitempty"`
+	// Unsupported marks an entry that cited nothing. A flag rather than the
+	// absence of Evidence, so a consumer never reads an omitted key as "not
+	// applicable" — the same discipline VoteUsageCoverage states for silence.
+	Unsupported bool `json:"unsupported,omitempty"`
 }
 
 // StepRuling is one operator ruling on a step and its attribution (DKT-2450):
@@ -590,6 +635,9 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	}
 	if report.SilentVoteSeats, err = silentVoteSeats(
 		conn, runID, extraProposalIDs); err != nil {
+		return nil, err
+	}
+	if report.Findings, err = castFindings(conn, runID, extraProposalIDs); err != nil {
 		return nil, err
 	}
 	if report.StepUsage, err = db.UsageByStep(conn, runID); err != nil {
@@ -1485,6 +1533,88 @@ func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat,
 			Role:     r.Role,
 			Path:     path,
 		})
+	}
+	return out, nil
+}
+
+// castFindings is DKT-2451's section: every structured finding recorded on
+// the run's proposals — the vote-step family plus the conversational gates
+// the usage rollups already attribute (extraIDs) — one row per entry.
+//
+// A pool read, taken with the other rollups BEFORE the report's snapshot
+// transaction opens (the one-connection rule LoadRunReport states). Proposals
+// ascend by id and casts by voter name within one, and entries keep their
+// findings' own order (blockers, concerns, suggestions, each as cast): a total
+// key, per R9, since a voter casts once per proposal.
+//
+// A SealedOpen proposal contributes nothing: the ballot is still secret, and
+// this verb must not be the one read surface that leaks what a seat found
+// before the tally closes. Its rows appear once the status leaves `open`.
+func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error) {
+	keyed, err := db.LookupIdempotencyKeys(
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool, len(keyed)+len(extraIDs))
+	ids := make([]int, 0, len(keyed)+len(extraIDs))
+	for _, id := range keyed {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range extraIDs {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+
+	var out []CastFinding
+	for _, id := range ids {
+		proposal, err := db.GetProposal(conn, id)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s for its findings: %w",
+				model.FormatProposalID(id), err)
+		}
+		if proposal.SealedOpen() {
+			continue
+		}
+		votes, err := db.GetProposalVotes(conn, id)
+		if err != nil {
+			return nil, fmt.Errorf("reading the casts of %s for their findings: %w",
+				model.FormatProposalID(id), err)
+		}
+		sort.SliceStable(votes, func(i, j int) bool {
+			return votes[i].VoterName < votes[j].VoterName
+		})
+		for _, v := range votes {
+			if v.FindingsJSON == nil {
+				continue
+			}
+			for _, list := range []struct {
+				kind    string
+				entries []model.Finding
+			}{
+				{FindingBlocker, v.FindingsJSON.Blockers},
+				{FindingConcern, v.FindingsJSON.Concerns},
+				{FindingSuggestion, v.FindingsJSON.Suggestions},
+			} {
+				for _, entry := range list.entries {
+					out = append(out, CastFinding{
+						Proposal:    model.FormatProposalID(id),
+						Voter:       v.VoterName,
+						Role:        v.VoterRole,
+						Kind:        list.kind,
+						Text:        entry.Text,
+						Evidence:    entry.Evidence,
+						Unsupported: len(entry.Evidence) == 0,
+					})
+				}
+			}
+		}
 	}
 	return out, nil
 }

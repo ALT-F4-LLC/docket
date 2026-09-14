@@ -207,7 +207,7 @@ func castSealedSeat(t *testing.T, conn *sql.DB, pid int, voter string) {
 		Confidence:      0.9,
 		DomainRelevance: 0.8,
 		Summary:         "the summary of " + voter,
-		FindingsJSON:    &model.Findings{Concerns: []string{"a concern from " + voter}},
+		FindingsJSON:    &model.Findings{Concerns: []model.Finding{{Text: "a concern from " + voter}}},
 	})
 	testsupport.Must(t, err, "CastVote(%s): %v", voter, err)
 }

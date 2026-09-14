@@ -169,7 +169,7 @@ func sealedTestProposal(status model.ProposalStatus) *model.Proposal {
 func sealedRenderCases(t *testing.T, render func(*model.Proposal, []*model.Vote) string) {
 	t.Helper()
 	vote := makeTestVote("the summary of seat-a")
-	vote.FindingsJSON = &model.Findings{Concerns: []string{"a concern from seat-a"}}
+	vote.FindingsJSON = &model.Findings{Concerns: []model.Finding{{Text: "a concern from seat-a"}}}
 	votes := []*model.Vote{vote}
 
 	for _, tc := range []struct {

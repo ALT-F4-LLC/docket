@@ -547,3 +547,52 @@ func TestStepUsageCoverageNamesSilentSteps(t *testing.T) {
 		}
 	}
 }
+
+// TestFindingsRenderEvidenceOrUnsupported is DKT-2451's rendered half: a
+// finding that cited evidence prints its references, and one that cited
+// nothing says `unsupported` on its own line rather than merely lacking a
+// suffix a reader could miss.
+func TestFindingsRenderEvidenceOrUnsupported(t *testing.T) {
+	r := abandonedRunReport()
+	r.Issues = nil
+	r.Findings = []engine.CastFinding{
+		{
+			Proposal: "DKT-V7", Voter: "seat-security", Role: "reviewer",
+			Kind: engine.FindingBlocker, Text: "the fixture leaks the key",
+			Evidence: []string{"artifact:ARTIFACT-3", "gate:secret-scan"},
+		},
+		{
+			Proposal: "DKT-V7", Voter: "seat-security", Role: "reviewer",
+			Kind: engine.FindingConcern, Text: "naming drifts from the module's",
+			Unsupported: true,
+		},
+	}
+	out := renderPlainRunReport(r)
+
+	if !strings.Contains(out, "Findings") {
+		t.Fatalf("the report has no findings section:\n%s", out)
+	}
+	var cited, bare string
+	for _, l := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(l, "leaks the key"):
+			cited = l
+		case strings.Contains(l, "naming drifts"):
+			bare = l
+		}
+	}
+	if cited == "" || bare == "" {
+		t.Fatalf("a finding is missing from the report:\n%s", out)
+	}
+	for _, needle := range []string{"DKT-V7", "seat-security", "reviewer", "blocker", "artifact:ARTIFACT-3", "gate:secret-scan"} {
+		if !strings.Contains(cited, needle) {
+			t.Errorf("the cited finding's line %q never says %q", cited, needle)
+		}
+	}
+	if strings.Contains(cited, "unsupported") {
+		t.Errorf("the cited finding reads as unsupported: %q", cited)
+	}
+	if !strings.Contains(bare, "unsupported") || !strings.Contains(bare, "concern") {
+		t.Errorf("the evidence-less finding does not read as unsupported: %q", bare)
+	}
+}

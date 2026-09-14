@@ -663,6 +663,31 @@ discipline, and the plain-text fallback without inventing any of them.
 | R6 | **artifacts** | the index: id, kind, producer instance, sha256, bytes — never the bodies | `artifacts` |
 | R7 | **metadata** | rollup of step `metadata` keys → distinct values with counts, **verbatim and uninterpreted** | `steps.metadata` |
 
+**AMENDMENT (DKT-2451): findings cite their evidence, and the report says
+which did not.** Each entry of a cast's structured findings (`findings_json`:
+blockers, concerns, suggestions) may carry an `evidence` list of references —
+`artifact:ARTIFACT-N`, an artifact the run holds, or `gate:<name>`, a gate
+result the run recorded in any step. `vote cast` resolves every reference
+against the run the proposal was opened for BEFORE the cast records (a cast has
+no amend path), through the two key families the engine mints — a vote step's
+or a reap acknowledgment's — and refuses by name a reference that resolves
+against nothing, names an artifact of another run, or rides on a proposal bound
+to no run (a ballot whose only link to a run is that its text names it carries
+no evidence: that attribution is a rollup heuristic, not a record's gate).
+Artifact references are canonicalized to `ARTIFACT-N` on the way in. Core
+checks that a reference RESOLVES and never opens what it points at to judge the
+finding — that would be payload interpretation. The wire form is polymorphic on
+purpose: an entry with no evidence encodes as the bare string it always was, so
+every stored row, export, and `<step>.vote-record` packet body reads
+byte-identically to before; only an entry carrying evidence encodes as
+`{"text", "evidence"}`, which a revise step consuming the vote-record sees
+for exactly those entries. The report gains a **findings** section (`findings`,
+one row per entry: proposal, voter, role, kind, text, evidence, and
+`unsupported: true` where nothing was cited), over the same proposal membership
+the vote-usage rollups read, withheld for a SealedOpen proposal exactly as every
+other read verb withholds it (DKT-2447). This is `step_inputs`' provenance
+question (DKT-1054) asked of a cast: what did this finding rely on.
+
 **R7 is the genericity line at its thinnest, so it is specified exactly.** The
 rollup groups by key and by value, both as opaque strings, and reports counts.
 It does not know that the reference instance puts a model tier there; it

@@ -328,6 +328,17 @@ func renderVoteList(votes []*model.Vote) string {
 	return header + "\n" + strings.Join(lines, "\n")
 }
 
+// findingLine renders one structured finding: its label and text, and the
+// evidence it cited when it cited any (DKT-2451). An entry with no evidence
+// renders exactly as it did before the field existed.
+func findingLine(label string, f model.Finding) string {
+	line := label + f.Text
+	if len(f.Evidence) > 0 {
+		line += "  [evidence: " + strings.Join(f.Evidence, ", ") + "]"
+	}
+	return line
+}
+
 func renderStructuredFindings(f *model.Findings) string {
 	var parts []string
 	blockerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("red"))
@@ -335,13 +346,13 @@ func renderStructuredFindings(f *model.Findings) string {
 	suggestionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	for _, b := range f.Blockers {
-		parts = append(parts, styleBlock(blockerStyle, "    ", "BLOCKER: "+b))
+		parts = append(parts, styleBlock(blockerStyle, "    ", findingLine("BLOCKER: ", b)))
 	}
 	for _, c := range f.Concerns {
-		parts = append(parts, styleBlock(concernStyle, "    ", "CONCERN: "+c))
+		parts = append(parts, styleBlock(concernStyle, "    ", findingLine("CONCERN: ", c)))
 	}
 	for _, s := range f.Suggestions {
-		parts = append(parts, styleBlock(suggestionStyle, "    ", "SUGGESTION: "+s))
+		parts = append(parts, styleBlock(suggestionStyle, "    ", findingLine("SUGGESTION: ", s)))
 	}
 
 	if len(parts) == 0 {
@@ -429,13 +440,13 @@ func renderPlainProposalDetail(proposal *model.Proposal, votes []*model.Vote, li
 			)
 			if v.FindingsJSON != nil {
 				for _, bl := range v.FindingsJSON.Blockers {
-					fmt.Fprintf(&b, "%s\n", indentBlock("    ", "BLOCKER: "+bl))
+					fmt.Fprintf(&b, "%s\n", indentBlock("    ", findingLine("BLOCKER: ", bl)))
 				}
 				for _, c := range v.FindingsJSON.Concerns {
-					fmt.Fprintf(&b, "%s\n", indentBlock("    ", "CONCERN: "+c))
+					fmt.Fprintf(&b, "%s\n", indentBlock("    ", findingLine("CONCERN: ", c)))
 				}
 				for _, s := range v.FindingsJSON.Suggestions {
-					fmt.Fprintf(&b, "%s\n", indentBlock("    ", "SUGGESTION: "+s))
+					fmt.Fprintf(&b, "%s\n", indentBlock("    ", findingLine("SUGGESTION: ", s)))
 				}
 			} else if v.Findings != "" {
 				fmt.Fprintf(&b, "%s\n", indentBlock("    ", truncate(v.Findings, 80)))

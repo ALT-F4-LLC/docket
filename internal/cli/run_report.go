@@ -438,6 +438,8 @@ func writeReportSections(
 		}
 	}
 
+	writeFindings(r.Findings, header, line)
+
 	// The ledger row by row (DKT-241). The budget section above sums the same
 	// rows per unit; this is what answers "which STEPS already have usage" —
 	// the question a back-fill's duplicate refusal raises and that no read
@@ -463,6 +465,44 @@ func writeReportSections(
 				line("Silent:", fmt.Sprintf("%s %s", d.Step, exec.Render(d.Instance)))
 			}
 		}
+	}
+}
+
+// writeFindings is DKT-2451's section: each structured finding a panel
+// recorded, with the evidence it cited or the word `unsupported` where it
+// cited none.
+//
+// The unsupported marker is printed IN the line rather than left as an absent
+// suffix, for the reason the coverage line prints its silent seats: an entry
+// that cites nothing and an entry whose citations were dropped by a renderer
+// would otherwise read identically, and the whole point of the section is
+// that a reader can tell a reproduced finding from an asserted one. Text,
+// voter, role, and every reference are stored, caster-supplied strings on
+// their way to a terminal (R11); the kind is core's own vocabulary and is not
+// escaped.
+func writeFindings(
+	findings []engine.CastFinding, header func(title string), line func(k, v string),
+) {
+	if len(findings) == 0 {
+		return
+	}
+	header("Findings")
+	for _, f := range findings {
+		who := exec.Render(f.Voter)
+		if f.Role != "" {
+			who += " as " + exec.Render(f.Role)
+		}
+		detail := f.Kind + ": " + exec.Render(f.Text)
+		if f.Unsupported {
+			detail += " — unsupported: no evidence cited"
+		} else {
+			refs := make([]string, 0, len(f.Evidence))
+			for _, ref := range f.Evidence {
+				refs = append(refs, exec.Render(ref))
+			}
+			detail += " — evidence " + strings.Join(refs, ", ")
+		}
+		line(f.Proposal+" "+who+":", detail)
 	}
 }
 

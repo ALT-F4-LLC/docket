@@ -581,6 +581,18 @@ approved-but-concerned tally into the same revise loop a rejection enters,
 instead of the concerns evaporating; the loop body reads what the panel said
 through `inputs = ["<step>.vote-record"]` (§11.1).
 
+**Evidence on findings** *(amended 2026-09-14, DKT-2451)*: an entry of a cast's
+structured findings may cite `artifact:ARTIFACT-N` (an artifact the run holds)
+or `gate:<name>` (a gate result the run recorded). `vote cast` resolves every
+reference against the run the proposal was opened for before the cast records
+and refuses an unresolvable one by name; core checks that a reference resolves
+and never reads what it points at. `run report` lists every recorded finding
+with its evidence and marks an entry that cited nothing `unsupported`, so an
+asserted finding and a reproduced one are distinguishable in the record. An
+entry with no evidence keeps its bare-string wire form, so nothing that reads
+`findings_json` or the vote-record packet changes shape until a cast cites
+something.
+
 ### 11.3 Loop semantics (normative)
 
 Step instances are identified `name@k#i` — `k` = loop ordinal (0 at initial

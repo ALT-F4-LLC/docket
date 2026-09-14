@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -103,9 +104,69 @@ func ParseProposalID(input string) (int, error) {
 
 // Findings represents structured review findings.
 type Findings struct {
-	Blockers    []string `json:"blockers"`
-	Concerns    []string `json:"concerns"`
-	Suggestions []string `json:"suggestions"`
+	Blockers    []Finding `json:"blockers"`
+	Concerns    []Finding `json:"concerns"`
+	Suggestions []Finding `json:"suggestions"`
+}
+
+// Finding is one entry of a findings list: what a seat found, and the evidence
+// it rests on (DKT-2451).
+//
+// Evidence is a list of references the engine VALIDATED against the run when
+// the cast was recorded — `artifact:ARTIFACT-N` names an artifact that run
+// holds, `gate:<name>` a gate result it recorded — so a finding that cites its
+// evidence is distinguishable in the record from one that asserts. An entry
+// with no evidence is legal; the run report renders it as unsupported rather
+// than leaving the two indistinguishable. Core checks that a reference
+// RESOLVES and never reads what it points at to judge the finding.
+//
+// THE WIRE FORM IS POLYMORPHIC, on purpose. An entry with no evidence encodes
+// as the bare string it always was, so every stored `findings_json` row, every
+// export, and every consumer of the vote-record packet reads byte-identically
+// to before the field existed; only an entry carrying evidence encodes as
+// `{"text": ..., "evidence": [...]}`. Decoding accepts both forms.
+type Finding struct {
+	Text     string
+	Evidence []string
+}
+
+// findingJSON is the object form of Finding's wire shape.
+type findingJSON struct {
+	Text     string   `json:"text"`
+	Evidence []string `json:"evidence,omitempty"`
+}
+
+// MarshalJSON emits the bare string for an entry with no evidence and the
+// object form otherwise.
+func (f Finding) MarshalJSON() ([]byte, error) {
+	if len(f.Evidence) == 0 {
+		return json.Marshal(f.Text)
+	}
+	return json.Marshal(findingJSON(f))
+}
+
+// UnmarshalJSON accepts either wire form. Anything else — a number, an array,
+// null — is refused by name, so a malformed findings document fails at the
+// flag rather than storing an empty entry in silence.
+func (f *Finding) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	switch {
+	case bytes.HasPrefix(trimmed, []byte(`"`)):
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return err
+		}
+		*f = Finding{Text: text}
+		return nil
+	case bytes.HasPrefix(trimmed, []byte(`{`)):
+		var obj findingJSON
+		if err := json.Unmarshal(trimmed, &obj); err != nil {
+			return err
+		}
+		*f = Finding(obj)
+		return nil
+	}
+	return fmt.Errorf("a finding is a string or an object with text and evidence, got %s", trimmed)
 }
 
 // Proposal represents a consensus proposal for PBFT-inspired voting.
