@@ -318,6 +318,15 @@ const (
 	// text verbatim, as `step-annotated` carries its annotation, so what
 	// every later worker was told survives in the feed itself.
 	EventRunNoteAdded = "run-note-added"
+
+	// The conductor capability's mint (DKT-2465). `conductor-seated` records
+	// that a run's conductor capability was minted or re-minted by `run
+	// conduct` — the one token-free route to the capability the seven operator
+	// verbs require, so the feed must name who took the seat and from where.
+	// A first activation's mint needs no kind of its own: `run-activated`
+	// already records that transition, and the capability is one of its
+	// effects.
+	EventConductorSeated = "conductor-seated"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -348,6 +357,7 @@ var eventKinds = map[string]bool{
 	EventEventsPruned: true, EventRunBudgetSet: true,
 	EventStepAnnotated:       true,
 	EventProjectRegistered:   true,
+	EventConductorSeated:     true,
 	EventRunRepinned:         true,
 	EventSpawnAdmitted:       true,
 	EventGateOverrideGranted: true, EventStepBatchOverridden: true,

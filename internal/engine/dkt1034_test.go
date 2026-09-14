@@ -182,7 +182,7 @@ func TestOverridePassWorktreeRepinsTheReviewedObject(t *testing.T) {
 
 	patch := conductorPatch(t, w)
 
-	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{
+	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{Token: testConductorToken,
 		As: ResolveOverridePass, Worktree: w.worktree, Note: "conductor patch ruled",
 		By: testBy, NowMS: nowMS + 1,
 	})
@@ -337,7 +337,7 @@ func TestRerunGatesWorktreeRepinsAndMeasuresThere(t *testing.T) {
 
 	w.gates.fail = false
 	spawnsBefore := len(w.gates.measured())
-	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{
+	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{Token: testConductorToken,
 		As: ResolveRerunGates, Worktree: patched, By: testBy, NowMS: nowMS + 1,
 	})
 	testsupport.Must(t, err, "resolve --as rerun-gates --worktree: %v", err)
@@ -391,7 +391,7 @@ func TestWorktreeRepinUnchangedRecordsNothing(t *testing.T) {
 	e := testEngine()
 	w := diffRepinFixture(t, conn, e, run.ID)
 
-	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{
+	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{Token: testConductorToken,
 		As: ResolveOverridePass, Worktree: w.worktree, By: testBy, NowMS: nowMS + 1,
 	})
 	testsupport.Must(t, err, "resolve: %v", err)
@@ -436,37 +436,37 @@ func TestWorktreeRepinRefusals(t *testing.T) {
 	}{
 		{
 			name:     "retry",
-			opts:     ResolveOptions{As: ResolveRetry, Worktree: w.worktree},
+			opts:     ResolveOptions{Token: testConductorToken, As: ResolveRetry, Worktree: w.worktree},
 			wantText: ResolveOverridePass,
 			why:      "retry re-executes and records its own diff; the flag rides only the resolutions that keep this record",
 		},
 		{
 			name:     "skip",
-			opts:     ResolveOptions{As: ResolveSkip, Worktree: w.worktree},
+			opts:     ResolveOptions{Token: testConductorToken, As: ResolveSkip, Worktree: w.worktree},
 			wantText: ResolveRerunGates,
 			why:      "a skipped step's record is read by nothing downstream",
 		},
 		{
 			name:     "a path that is not there",
-			opts:     ResolveOptions{As: ResolveOverridePass, Worktree: filepath.Join(t.TempDir(), "gone")},
+			opts:     ResolveOptions{Token: testConductorToken, As: ResolveOverridePass, Worktree: filepath.Join(t.TempDir(), "gone")},
 			wantText: "not a directory",
 			why:      "GitDiff swallows a missing checkout as an empty diff, which would refuse for the wrong reason",
 		},
 		{
 			name:     "a directory that is not a checkout",
-			opts:     ResolveOptions{As: ResolveOverridePass, Worktree: t.TempDir()},
+			opts:     ResolveOptions{Token: testConductorToken, As: ResolveOverridePass, Worktree: t.TempDir()},
 			wantText: "could not resolve the HEAD commit",
 			why:      "a tree with no commit has no sha to bind the target to",
 		},
 		{
 			name:     "a checkout at its fork point carrying uncommitted changes",
-			opts:     ResolveOptions{As: ResolveOverridePass, Worktree: uncommitted},
+			opts:     ResolveOptions{Token: testConductorToken, As: ResolveOverridePass, Worktree: uncommitted},
 			wantText: "has committed nothing",
 			why:      "its HEAD resolves fine; the patch is uncommitted, and the refusal must say so rather than send the operator to diagnose a repository problem",
 		},
 		{
 			name:     "the shared checkout, already integrated",
-			opts:     ResolveOptions{As: ResolveOverridePass, Worktree: w.execRoot},
+			opts:     ResolveOptions{Token: testConductorToken, As: ResolveOverridePass, Worktree: w.execRoot},
 			wantText: "is empty",
 			why:      "its diff against its own HEAD is empty, and DKT-259 forbids replacing a recorded change with nothing",
 		},
@@ -545,7 +545,7 @@ func TestWorktreeRepinRefusesAStepWithNoRecordOfItsOwn(t *testing.T) {
 	}
 
 	checkout := gitRepo(t)
-	_, err = e.ResolveStepWith(conn, reviewID, ResolveOptions{
+	_, err = e.ResolveStepWith(conn, reviewID, ResolveOptions{Token: testConductorToken,
 		As: ResolveOverridePass, Worktree: checkout, By: testBy, NowMS: nowMS + 1,
 	})
 	if err == nil {

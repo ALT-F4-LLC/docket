@@ -134,18 +134,24 @@ type DecideOptions struct {
 	Value string
 	// By is who is ruling and from where. REQUIRED: an empty field refuses the
 	// decision before anything is written (see Attribution).
-	By    Attribution
+	By Attribution
+	// Token is the run's conductor capability (DKT-2465, conductor.go). It is
+	// REQUIRED on a bound run and ignored on an unbound one; the empty string
+	// authorizes nothing.
+	Token string
 	NowMS int64
 }
 
 // DecideStepWith is `step approve` and `step reject` — §6.10's human-gate
 // verbs.
 //
-// NO TOKEN. A human gate is not claimed, so there is no lease to authorize
-// against; the authority is the operator's access to the repository, which is
-// the same authority `issue close` has always relied on. What the record
-// carries instead is WHO ruled and from where (DKT-2450) — the same two
-// claim-level fields a trust grant carries, on the event.
+// NO LEASE TOKEN: a human gate is never claimed, so there is no lease to
+// authorize against. What the verb requires instead is the RUN's conductor
+// capability (DKT-2465, conductor.go) — the authority used to be repository
+// access alone, which under a harness every executor shares, so an executor
+// could approve the very gate its own commit is guarded on. The record
+// carries WHO ruled and from where (DKT-2450) — the same two claim-level
+// fields a trust grant carries, on the event.
 func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) error {
 	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
 	verb := "step approve"
@@ -161,6 +167,11 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return err
+	}
+	// Before any branch, and before the status is inspected: a caller without
+	// the capability learns that the step exists and nothing else.
+	if err := authorizeConductor(conn, step.RunID, opts.Token, verb); err != nil {
 		return err
 	}
 
@@ -328,7 +339,10 @@ type ResolveOptions struct {
 	Worktree string
 	// By is who is ruling and from where. REQUIRED: an empty field refuses the
 	// resolution before anything is written (see Attribution).
-	By    Attribution
+	By Attribution
+	// Token is the run's conductor capability (DKT-2465, conductor.go):
+	// required on a bound run, ignored on an unbound one.
+	Token string
 	NowMS int64
 }
 
@@ -380,6 +394,11 @@ func (e *Engine) resolveStep(
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return err
+	}
+	// The conductor capability, before the flags are even validated: a caller
+	// without it learns that the step exists and nothing else (DKT-2465).
+	if err := authorizeConductor(conn, step.RunID, opts.Token, "step resolve"); err != nil {
 		return err
 	}
 

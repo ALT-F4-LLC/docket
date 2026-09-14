@@ -115,8 +115,7 @@ func parkedRepinRun(t *testing.T, conn *sql.DB) *repinRun {
 	testsupport.Must(t, err, "starting run: %v", err)
 	r.runID = run.ID
 	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issueID), "adding issue to run: %v", nil)
-	_, err = engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: now})
-	testsupport.Must(t, err, "activate: %v", err)
+	activateHolding(t, conn, run.ID, now)
 	for instance, id := range map[string]*int{"implement@0": &r.implementID, "review@0": &r.reviewID} {
 		err := conn.QueryRow(`SELECT id FROM steps WHERE instance = ?`, instance).Scan(id)
 		testsupport.Must(t, err, "finding %s: %v", instance, err)

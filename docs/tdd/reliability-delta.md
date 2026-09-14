@@ -770,6 +770,51 @@ mid-vote. Sealing is a NORM-LEVEL SHIELD, not a security boundary: the tally
 and the vote rows stay readable through `export`, `ListAllVotes` and direct
 store access — gates-trust §8.3 records the same caveat beside the key.
 
+### AMENDMENT — the span extends to v29 (DKT-2465, 2026-09-14)
+
+**What changed.** v29 adds ONE column on `runs`, `conductor_token_hash TEXT`
+(nullable, no default): the SHA-256 of the run's CONDUCTOR CAPABILITY. A run's
+first activation mints a 256-bit token with `model.MintToken`, stores the hash
+and returns the token exactly once (`conductor_token` in the activate
+envelope, its own line in human mode); `docket run conduct RUN-N` re-mints it,
+retiring any standing one, and records a `conductor-seated` event carrying
+`actor`, `cwd` and `rotated`. The seven operator verbs — `step approve`,
+`step reject`, `step resolve`, `step reap`, `run pause`, `run resume`,
+`run abandon` (with or without `--issue`) — require the token on a bound run,
+read from `DOCKET_TOKEN` or stdin exactly as a lease token is: none supplied
+is the R1 `VALIDATION_ERROR`, a wrong one the R3 `AUTH_ERROR`, both checked
+after the step or run is found and before its status is inspected or anything
+is written.
+
+**What it fixes.** The seven verbs were token-free by design — "the authority
+is repository access" — and under a harness every executor a wave spawns
+shares the operator's checkout, filesystem and environment, so repository
+access resolved to "any executor": an executor could approve the very
+`commit-gate` its own `git commit` is guarded on, reject a sibling's gate,
+resolve a parked step, or park or end the run it was working in, and the
+engine had no field on which to tell a conductor's ruling from an executor's
+(DKT-2450's `actor`/`cwd` are self-reported audit fields, not authorization).
+The only guard was a harness hook covering one verb for one harness's
+callers.
+
+**Why the ratified arithmetic is untouched.** Like v11–v28, v29 is an
+amendment, not a stage: one additive nullable column, a `hasColumn`-probed
+`ALTER` so the migration is idempotent and re-runnable, and a rewind guard
+that probes the COLUMN (the v27/v28 form, since v29 adds no table). It
+BACK-FILLS NOTHING, and it cannot: a capability is returned once to whoever
+minted it, and a migration has nobody to return one to. `NULL` therefore
+means UNBOUND, and an unbound run — every run activated before v29 and not
+since conducted — stays open to the seven verbs exactly as before: the check
+binds the moment a capability exists, the same posture as a guard reached
+with no engine (allow, not deny). Every run this binary activates is bound at
+birth. The mechanism is TAMPER-EVIDENT rather than tamper-proof, and that is
+recorded beside it: `run conduct` is necessarily token-free (nothing
+authenticates a caller, and a run whose conductor died must not be
+un-pausable forever), so a caller that takes the seat retires the standing
+token — the displaced conductor's next ruling refuses `AUTH_ERROR` and the
+`conductor-seated` event names the taker. A harness that keys its callers
+keeps executors off that one verb; the engine keeps them off the other seven.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

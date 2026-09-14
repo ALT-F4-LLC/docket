@@ -1262,6 +1262,7 @@ func TestRunLifecycleTransitions(t *testing.T) {
 	w, _ := bufWriter(true)
 	err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID))
 	testsupport.Must(t, err, "activate: %v", err)
+	seatConductor(t, conn, runID)
 
 	pause := runMoveCmdWithDB(conn, "pause")
 	err = pause.Flags().Set("reason", "operator review")

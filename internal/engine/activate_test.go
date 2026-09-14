@@ -123,7 +123,17 @@ func startRun(t *testing.T, conn *sql.DB, issueIDs ...int) *model.Run {
 
 // activate runs the fat transaction with the fixed timestamp.
 func activate(conn *sql.DB, runID int, pins ...string) (*ActivateResult, error) {
-	return Activate(conn, runID, ActivateOptions{FilePins: pins, NowMS: nowMS})
+	result, err := Activate(conn, runID, ActivateOptions{FilePins: pins, NowMS: nowMS})
+	if err != nil {
+		return nil, err
+	}
+	// The suite's fixed conductor holds every fixture run (DKT-2465): a test
+	// calling a ruling's `With` form directly presents testConductorToken. A
+	// test about the capability itself activates through Activate.
+	if err := seatTestConductor(conn, runID); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // countRows is the "nothing was written" probe the atomicity assertions use.

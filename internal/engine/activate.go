@@ -95,6 +95,11 @@ type ActivateResult struct {
 	// and a real activation. Nil when every bound issue is expanded, so the
 	// ordinary run carries no key at all rather than an empty one.
 	BlockedIssues []BlockedIssue
+	// ConductorToken is the run's conductor capability, minted by a FIRST
+	// activation and returned here and nowhere else (DKT-2465): only its hash
+	// is stored. Empty on a re-activation, a dry run, and a run conducted
+	// before it activated (the seat's holder already has the token).
+	ConductorToken string
 	// Reactivation reports whether this was a re-activation of an already
 	// `active` run, so the verb can say "expanded 2 new phases" rather than
 	// implying a first activation.
@@ -1059,6 +1064,19 @@ func activateTx(
 	// ---- Stage 7: flip the run. --------------------------------------------
 	if err := setRunActiveTx(tx, runID, reactivation, opts.NowMS); err != nil {
 		return nil, err
+	}
+	// The conductor capability, minted with the run's birth and returned
+	// exactly once (DKT-2465, conductor.go). A re-activation mints nothing —
+	// the conductor holds the token this run was born with, and rotating it
+	// under an expansion would lock that session out — and neither does a dry
+	// run, whose transaction is about to roll back. A run conducted while
+	// still planning keeps the capability its conductor already holds.
+	if !reactivation && !opts.DryRun {
+		token, err := mintConductorTx(tx, runID)
+		if err != nil {
+			return nil, err
+		}
+		result.ConductorToken = token
 	}
 	activatedData := ""
 	if opts.Reason != "" {

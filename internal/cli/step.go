@@ -371,9 +371,15 @@ makes a dead holder's claim block its row for the same hours. The engine cannot
 probe a process it did not start — but the relay that spawned the executor
 can, and this verb is the channel for what it observed.
 
-TOKEN-FREE, like approve and resolve: the authority is repository access plus
-the recorded assertion (--reason, required) that the holder is dead. Every
-scheduling consequence is the expiry reap's own — the same lease-reaped event
+No LEASE token — the holder's own token is exactly what a reap cannot require.
+Like approve, reject and resolve, the verb requires the RUN'S CONDUCTOR
+CAPABILITY instead (see ` + "`docket run conduct --help`" + `): the relay that
+spawned the executor holds it, the executor being reaped never did, and a
+sibling cannot clear a claim it merely wants out of its way. Supply it via
+DOCKET_TOKEN or stdin; a run activated before the capability existed asks for
+none. The authority for the reap itself is the recorded assertion (--reason,
+required) that the holder is dead. Every scheduling consequence is the expiry
+reap's own — the same lease-reaped event
 (with data.forced and the reason), the same write-class headroom hold awaiting
 --ack-reap, the same return of the step to the pool. Reaping a holder that is
 in fact alive carries exactly the risks a lease expiry does; assert liveness,
@@ -401,7 +407,8 @@ func runStepReap(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return err
 	}
 	if err := engine.ForceReapStepWith(conn, id, engine.ForceReapOptions{
-		Reason: reason, By: by, NowMS: model.NowMS(),
+		Reason: reason, By: by, Token: stepConductorToken(conn, id, os.Stdin),
+		NowMS: model.NowMS(),
 	}); err != nil {
 		return stepErr(err, stepLabel(id))
 	}
@@ -766,7 +773,12 @@ by tally, a vote that does not pass parks the cluster for an operator, and this
 is the verb that answers it. Until it parks, the vote owns the decision and
 approve is refused.
 
-No token: a gate is never claimed, so there is no lease to authorize against.
+No LEASE token: a gate is never claimed, so there is no lease to authorize
+against. The verb requires the RUN'S CONDUCTOR CAPABILITY instead — the token
+` + "`docket run activate`" + ` returned once, or ` + "`docket run conduct RUN-N`" + `
+re-mints — supplied via DOCKET_TOKEN or stdin, never argv. A caller without
+it is refused: a gate is the conductor's to answer, not any executor's. A run
+activated before the capability existed asks for none.
 Approving a step that is neither is a VALIDATION_ERROR.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -785,7 +797,9 @@ that parked its own rejections would wait on the resolution of the thing that
 just rejected.
 
 Rejecting a held cluster is the ESCALATING answer: the aggregate it gates routes
-per its own on_fail, and the cluster is recorded as unresolved.`,
+per its own on_fail, and the cluster is recorded as unresolved.
+
+Requires the run's conductor capability, exactly as approve does.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDecide(cmd, args, false, getWriter(cmd))
@@ -813,7 +827,8 @@ func runDecide(cmd *cobra.Command, args []string, approve bool, w *output.Writer
 	label := stepLabel(id)
 	e := engine.NewEngine()
 	if err := e.DecideStepWith(conn, id, engine.DecideOptions{
-		Approve: approve, Note: note, Value: value, By: by, NowMS: model.NowMS(),
+		Approve: approve, Note: note, Value: value, By: by,
+		Token: stepConductorToken(conn, id, os.Stdin), NowMS: model.NowMS(),
 	}); err != nil {
 		return stepErr(err, label)
 	}
@@ -855,6 +870,11 @@ var stepResolveCmd = &cobra.Command{
                  The gates still run and a failure with a different signature
                  still parks; every auto-pass is event-logged against its
                  grant, and the grant dies with the run — a new run re-asks
+
+Every resolution requires the run's CONDUCTOR CAPABILITY (see
+` + "`docket run conduct --help`" + `) via DOCKET_TOKEN or stdin: a parked step
+is the conductor's to move, not any executor's. A run activated before the
+capability existed asks for none.
 
 OVERRIDE-PASS NEVER EVALUATES THE STEP'S THRESHOLD (DKT-470): it records a
 generic ` + "`pass`" + `, so a step the threshold interposes is skipped unconditionally,
@@ -1008,7 +1028,8 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	outcome, err := e.ResolveStepWith(conn, id, engine.ResolveOptions{
 		As: as, Note: note, Batch: batch, DropInterposed: dropInterposed,
-		Worktree: worktree, By: by, NowMS: model.NowMS(),
+		Worktree: worktree, By: by, Token: stepConductorToken(conn, id, os.Stdin),
+		NowMS: model.NowMS(),
 	})
 	if err != nil {
 		return stepErr(err, label)

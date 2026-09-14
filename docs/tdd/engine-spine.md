@@ -370,11 +370,17 @@ verbs):
 | `docket step approve STEP-N [--note …]` | step → `done`, `step-approved` event; downstream `after` successors become ready by the ordinary §6.3 predicate. An approve records **no artifact** (§4.3.1: human steps produce none) |
 | `docket step reject STEP-N [--note …]` | step → routed per the step's **effective `on_fail`** — which V13/V13a guarantee is one of `fix-loop`, `skip`, `abandon-issue`, never `waiting-human`; `step-rejected` then `step-routed` events, in the one routing transaction of §6.8 stage N+1 |
 
-Both refuse a non-`human` step with `VALIDATION_ERROR` (§6.9 R10) and both are
-token-free (§6.10): a human gate is resolved by an operator, who never claimed it.
-What the event records instead is who (DKT-2450): `step-approved`,
-`step-rejected`, `step-resolved`, and a forced `lease-reaped` carry `actor` and
-`cwd` beside the note, exactly as trust events do — see runs-dispatch §8.7.
+Both refuse a non-`human` step with `VALIDATION_ERROR` (§6.9 R10) and neither
+takes a lease token (§6.10): a human gate is resolved by an operator, who never
+claimed it. Both — with `step resolve`, `step reap`, and the run lifecycle
+verbs — require the RUN'S CONDUCTOR CAPABILITY instead (DKT-2465,
+reliability-delta §2's v29 amendment): the token the run's first activation
+returned once, or `run conduct` re-minted, presented via `DOCKET_TOKEN`/stdin;
+none is the R1 `VALIDATION_ERROR`, a wrong one the R3 `AUTH_ERROR`, and a run
+activated before the capability existed asks for none. The event records who
+(DKT-2450): `step-approved`, `step-rejected`, `step-resolved`, and a forced
+`lease-reaped` carry `actor` and `cwd` beside the note, exactly as trust events
+do — see runs-dispatch §8.7.
 
 ### 4.3.3 Register-time DAG lints
 
@@ -1397,8 +1403,8 @@ recording a duplicate artifact.
 | `docket step heartbeat STEP-N` | yes | extends the lease; does not touch `attempt` |
 | `docket step complete STEP-N --artifact-file F [--payload-file F] [--usage '{…}'] [--metadata '{…}']` | yes (stage 0–1) | the saga |
 | `docket step fail STEP-N [--note …] [--metadata '{…}']` | yes | records the failure; routes per `on_fail` when attempts are exhausted (the counter is bumped by CLAIMS, not by `fail` — E-8) |
-| `docket step approve\|reject STEP-N [--note …]` | no | `type=human` gate steps **only** (§2) |
-| `docket step resolve STEP-N --as retry\|skip\|abandon-issue\|override-pass [--note …]` | no | `waiting-human` resolutions (§2); `retry` **resets attempts** |
+| `docket step approve\|reject STEP-N [--note …]` | conductor (DKT-2465) | `type=human` gate steps **only** (§2); no lease token, but the RUN's conductor capability — see §4.3.2 |
+| `docket step resolve STEP-N --as retry\|skip\|abandon-issue\|override-pass [--note …]` | conductor (DKT-2465) | `waiting-human` resolutions (§2); `retry` **resets attempts** |
 | `docket step show STEP-N` | no | read-only; effective status |
 | `docket step list (--run RUN-N \| --issue ISSUE-N)` | no | read-only; steps with id, run, instance, issue, kind, effective status, attempt, expected_cost (DKT-54: step ids are a store-wide sequence, so nothing else enumerates a run). `--issue` lists one issue's steps across every run holding one, since a re-activation mints a fresh round under a new run (DKT-244) |
 | `docket step context STEP-N [--meta]` | no | re-emits `context` read-only (§11.4) |

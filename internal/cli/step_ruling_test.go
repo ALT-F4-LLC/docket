@@ -114,8 +114,7 @@ on_fail = "waiting-human"
 	run, err := db.InsertRun(conn, 1, "", 0, model.NowMS())
 	testsupport.Must(t, err, "starting run: %v", err)
 	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issueID), "adding issue: %v", nil)
-	_, err = engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: model.NowMS()})
-	testsupport.Must(t, err, "activate: %v", err)
+	activateHolding(t, conn, run.ID, model.NowMS())
 
 	id := stepIDNamed(t, conn, "flaky@0")
 	claim, err := engine.ClaimStep(conn, id, engine.ClaimOptions{Owner: "w", NowMS: model.NowMS()})

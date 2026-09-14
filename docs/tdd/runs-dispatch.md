@@ -1271,7 +1271,7 @@ checkable, and it stops being an argument and becomes a script.
 | `next` | `step-ready`, `lease-reaped`, `join-completed`, `loop-entered`, `dispatch-abandoned` (TTL), `issue-promoted` |
 | `gate` | `gate-started`, `gate-recorded`, `gate-unmatched`, `gate-rerun`, `vote-opened`, `vote-tallied` |
 | `threshold` | `step-routed`, `step-failed`, `step-superseded`, `step-skipped`, `step-held` |
-| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-closed`, `dispatch-abandoned` (explicit) |
+| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-closed`, `dispatch-abandoned` (explicit), `conductor-seated` (DKT-2465) |
 
 **Two rows need their sentence:**
 
@@ -1321,6 +1321,17 @@ existing `lease-reaped` event already anchors. **This is a judgment and it is
 recorded as one**, so a reviewer can push back: the argument for adding it
 would be A3 (attributability), and the counter is that the ack is not a
 *transition of the run* — nothing about the run's state machine moves.
+
+**One later addition (DKT-2465): `conductor-seated`.** `run conduct` re-mints a
+run's conductor capability — the token `step approve`, `step reject`, `step
+resolve`, `step reap`, `run pause`, `run resume` and `run abandon` require —
+and it is the one token-free route to that authority, so the seat changing
+hands is a transition an auditor must be able to attribute. The event carries
+`actor`, `cwd` and `rotated` (whether a standing capability was retired). A
+first activation's mint needs no kind of its own: `run-activated` already
+records that transition and the capability is one of its effects. Each of the
+seven verbs refuses a caller without the capability BEFORE it writes, so no
+refusal leaves an event.
 
 ## 9. AUTO-REGISTRATION — §9 item 11's machinery
 

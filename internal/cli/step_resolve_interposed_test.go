@@ -87,8 +87,7 @@ func parkedResolveRun(t *testing.T, conn *sql.DB, src string) (stepID int) {
 	testsupport.Must(t, err, "starting run: %v", err)
 	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issueID),
 		"adding issue to run: %v", err)
-	_, err = engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: model.NowMS()})
-	testsupport.Must(t, err, "activate: %v", err)
+	activateHolding(t, conn, run.ID, model.NowMS())
 
 	err = conn.QueryRow(
 		`SELECT id FROM steps WHERE instance = 'verify@0'`).Scan(&stepID)

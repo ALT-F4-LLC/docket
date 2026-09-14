@@ -905,8 +905,9 @@ func routingStepOf(conn *sql.DB, held *db.Step) (*db.Step, error) {
 // decideMaterializedStep is §7.7.3 — M-c's branch, and the only place
 // `approve`/`reject` resolve ANOTHER step's saga.
 //
-// Both verbs are TOKEN-FREE (H15), per §2: a human gate is resolved by an
-// operator who never claimed it.
+// Neither verb takes a LEASE token (H15), per §2: a human gate is resolved by
+// an operator who never claimed it. Both require the run's conductor
+// capability, checked by DecideStepWith before this is reached (DKT-2465).
 func (e *Engine) decideMaterializedStep(
 	conn *sql.DB, held *db.Step, opts DecideOptions,
 ) error {

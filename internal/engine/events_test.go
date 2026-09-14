@@ -152,6 +152,13 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// against nine session transcripts.
 		"project-registered",
 
+		// The conductor seat kind (DKT-2465) — ONE. `run conduct` is the
+		// token-free route to the capability the seven operator verbs
+		// require, so the seat changing hands is a transition an auditor
+		// must be able to attribute; without it a rotation would be visible
+		// only as the standing conductor's next ruling refusing.
+		"conductor-seated",
+
 		// The spawn carve-out kind (DKT-236) — ONE. It records a hold being
 		// STEPPED PAST, which is the one case where "no event" and "nothing
 		// happened" say the same thing while meaning opposite things: a spawn
@@ -219,15 +226,16 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 49 {
+	if len(eventKinds) != 50 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
 			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
 			"DKT-408's repin kind, DKT-546's batch-override pair, "+
 			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
-			"kind, DKT-1034's issue.diff re-pin kind, and DKT-1079's "+
-			"run-note kind enumerate 49 (see DKT-21)",
+			"kind, DKT-1034's issue.diff re-pin kind, DKT-1079's "+
+			"run-note kind, and DKT-2465's conductor-seat kind enumerate 50 "+
+			"(see DKT-21)",
 			len(eventKinds))
 	}
 }

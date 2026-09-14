@@ -82,6 +82,13 @@ unexpanded is named, with the predecessor(s) still holding it and their status,
 in the summary line and in the JSON envelope's ` + "`blocked_issues`" + ` — so
 "0 issue(s) expanded" is never the whole report.
 
+A FIRST activation also mints the run's CONDUCTOR CAPABILITY and returns it
+exactly once — on its own line in human mode, as ` + "`conductor_token`" + ` in
+JSON. Every operator verb on the run (step approve/reject/resolve/reap, run
+pause/resume/abandon) requires it from then on, via DOCKET_TOKEN or stdin; a
+session that does not hold it takes the seat with ` + "`docket run conduct`" + `.
+A re-activation mints nothing and rotates nothing.
+
 The JSON envelope carries the run's expected cost as TWO distinct fields:
 ` + "`expected_cost_total`" + ` is every step the run holds, including ones a
 prior activation already created; ` + "`expected_cost_added`" + ` is only
@@ -210,6 +217,11 @@ type activateResult struct {
 	// was recorded rather than trusting an unechoed flag value (matching
 	// `run pause`/`run resume`/`run abandon`'s human-mode echo).
 	Reason string `json:"reason,omitempty"`
+	// ConductorToken is the run's conductor capability, present on a FIRST
+	// activation only (DKT-2465): the one time the token exists outside the
+	// hash the store keeps. A re-activation, a dry run, and a run conducted
+	// while planning carry no key rather than an empty one.
+	ConductorToken string `json:"conductor_token,omitempty"`
 }
 
 func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
@@ -322,6 +334,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		BoundIssues:       result.BoundIssues,
 		BlockedIssues:     result.BlockedIssues,
 		Reason:            reason,
+		ConductorToken:    result.ConductorToken,
 	}
 	if result.DryRun {
 		payload.ProjectedStatus = string(result.ProjectedStatus)
@@ -329,6 +342,13 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	w.Success(payload, renderActivation(payload))
+	// The conductor capability on its own line in human mode, never inside
+	// the summary (DKT-2465) — `step claim`'s discipline: a token echoed into
+	// a status line is copied along with it into transcripts and logs. JSON
+	// carries it as `conductor_token`.
+	if !w.JSONMode && result.ConductorToken != "" {
+		fmt.Fprintln(w.Stdout, result.ConductorToken)
+	}
 	return nil
 }
 

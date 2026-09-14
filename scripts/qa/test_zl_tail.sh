@@ -250,6 +250,8 @@ TOML
   assert_exit "ZL" "ZL3_start" 0
   run_env "$ZL_B" run activate RUN-1 --json
   assert_exit "ZL" "ZL3_activate" 0
+  local ZL_B_CTOK
+  ZL_B_CTOK=$(activation_token)
 
   run_env "$ZL_B" step claim STEP-1 --owner press --json
   assert_exit "ZL" "ZL3_claim_at_cap" 0
@@ -268,7 +270,7 @@ TOML
 
   # THE DEAD END S6 DOCUMENTED: resume alone does not help. Asserting it here
   # is what makes the next step a fix rather than a coincidence.
-  run_env "$ZL_B" run resume RUN-1 --json
+  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run resume RUN-1 --json
   assert_exit "ZL" "ZL3_resume" 0
   run_env "$ZL_B" step claim STEP-2 --owner checker --json
   assert_exit "ZL" "ZL3_resume_alone_insufficient" 4
@@ -296,7 +298,7 @@ TOML
   assert_json "ZL" "ZL3_status_untouched" '.data.run.status' "waiting-human"
 
   # So the operator resumes, DELIBERATELY, as the second of two acts.
-  run_env "$ZL_B" run resume RUN-1 --json
+  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run resume RUN-1 --json
   assert_exit "ZL" "ZL3_resume_after_raise" 0
 
   # AND THE CLAIM NOW COMMITS. This is B24, closed, through the CLI.
@@ -327,7 +329,7 @@ TOML
   fi
 
   # A TERMINAL run's cap is history (B-3).
-  run_env "$ZL_B" run abandon RUN-1 --reason "done rehearsing" --json
+  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run abandon RUN-1 --reason "done rehearsing" --json
   assert_exit "ZL" "ZL3_abandon" 0
   run_env "$ZL_B" run budget RUN-1 --set 50 --json
   assert_exit "ZL" "ZL3_terminal_refused" 4
@@ -452,7 +454,7 @@ TOML
   run_env "$ZL_R" issue create -t "A finished job" -d "for the archive" --json >/dev/null
   run_env "$ZL_R" run start --issue DKT-1 --json >/dev/null
   run_env "$ZL_R" run activate RUN-1 --json >/dev/null
-  run_env "$ZL_R" run abandon RUN-1 --reason "archived" --json >/dev/null
+  DOCKET_TOKEN="$(activation_token)" run_env "$ZL_R" run abandon RUN-1 --reason "archived" --json >/dev/null
 
   # THE DEFAULT IS 0, AND 0 RETAINS EVERYTHING. A retention key defaulting the
   # other way would make the first prune an operator ever typed delete their

@@ -103,6 +103,8 @@ func runErr(err error) error {
 			return cmdErr(err, output.ErrConflict)
 		case engine.CodeGone:
 			return cmdErr(err, output.ErrGone)
+		case engine.CodeAuth:
+			return cmdErr(err, output.ErrAuth)
 		}
 	}
 	switch {

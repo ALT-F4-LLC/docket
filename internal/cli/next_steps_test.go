@@ -21,9 +21,7 @@ import (
 func activatedRunForNext(t *testing.T, conn *sql.DB) int {
 	t.Helper()
 	runID, _ := seedRun(t, conn)
-	if _, err := engine.Activate(conn, runID, engine.ActivateOptions{NowMS: model.NowMS()}); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
+	activateHolding(t, conn, runID, model.NowMS())
 	return runID
 }
 

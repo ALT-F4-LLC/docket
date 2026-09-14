@@ -92,7 +92,7 @@ func TestMigrateToV10(t *testing.T) {
 // GAPS, because a missing entry turns Migrate's loop into a runtime error on a
 // user's database rather than a build-time failure on ours.
 func TestSchemaSpanIsComplete(t *testing.T) {
-	// The span now ends at v28. v11 through v28 are AMENDMENTS, not stages —
+	// The span now ends at v29. v11 through v29 are AMENDMENTS, not stages —
 	// workflow retirement (DKT-21), the projects dimension (operator request,
 	// 2026-08-09), vote provenance (DKT-71), per-seat vote spend (DKT-95),
 	// artifact revisions (DKT-70), the retry-budget base (DKT-86/DKT-90),
@@ -101,8 +101,9 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// hollow-assurance marker (DKT-265), the pause origin (DKT-305), the
 	// attempt-outcome breakdown (DKT-490), the batch gate-override grant
 	// (DKT-546), the stale-target waiver (DKT-742), the run note (DKT-1079),
-	// the prior-claim-end marker (DKT-1279), and the sealed-ballot flag
-	// (DKT-2447) — each recorded in docs/tdd/reliability-delta.md §2 under
+	// the prior-claim-end marker (DKT-1279), the sealed-ballot flag
+	// (DKT-2447), and the conductor capability (DKT-2465) — each recorded in
+	// docs/tdd/reliability-delta.md §2 under
 	// its own heading, with the reason it needed a version and the argument
 	// that it leaves the ratified v5-v10 arithmetic untouched.
 	//
@@ -111,11 +112,11 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// this test firing is exactly how v11 through v23 came to be documented
 	// rather than discovered afterwards. Raising the number without editing
 	// that section is the move it exists to stop.
-	if currentSchemaVersion != 28 {
-		t.Errorf("currentSchemaVersion = %d, want 28 — the span of "+
-			"docs/tdd/reliability-delta.md §2 ends at v28 (the sealed-ballot "+
-			"flag). Moving past 28 needs an amendment against that section, "+
-			"per docs/design/amendments.md", currentSchemaVersion)
+	if currentSchemaVersion != 29 {
+		t.Errorf("currentSchemaVersion = %d, want 29 — the span of "+
+			"docs/tdd/reliability-delta.md §2 ends at v29 (the conductor "+
+			"capability). Moving past 29 needs an amendment against that "+
+			"section, per docs/design/amendments.md", currentSchemaVersion)
 	}
 
 	for v := 2; v <= currentSchemaVersion; v++ {

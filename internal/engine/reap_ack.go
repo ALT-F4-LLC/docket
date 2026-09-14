@@ -182,7 +182,10 @@ type ForceReapOptions struct {
 	Reason string
 	// By is who asserted it and from where. REQUIRED: an empty field refuses
 	// the reap before anything is written (see Attribution).
-	By    Attribution
+	By Attribution
+	// Token is the run's conductor capability (DKT-2465, conductor.go):
+	// required on a bound run, ignored on an unbound one.
+	Token string
 	NowMS int64
 }
 
@@ -197,13 +200,18 @@ type ForceReapOptions struct {
 // start — the write-reap acknowledgment says so — but the RELAY that spawned
 // the executor can, and this verb is the channel for what it observed.
 //
-// TOKEN-FREE, like approve/resolve: the authority is repository access plus
-// the assertion, recorded with `--reason`, that the holder is gone. It is not
-// an eviction primitive a bystander reaches casually — a forced reap of a
-// LIVE worker has exactly the risks a lease expiry has, which is why every
-// SCHEDULING consequence is the expiry reap's own: same event kind
-// (`lease-reaped`, with `data.forced` and the reason distinguishing it), same
-// write-class headroom hold, same return of the step to the pool.
+// NO LEASE TOKEN — the holder's own token is exactly what a reap cannot
+// require, since the premise is that the holder is dead. What the verb
+// requires instead is the RUN's conductor capability (DKT-2465, conductor.go),
+// plus the assertion, recorded with `--reason`, that the holder is gone: the
+// relay that spawned the executor holds the capability, the executor it is
+// reaping never did, and a sibling executor cannot clear a claim it merely
+// wants out of its way. It is not an eviction primitive a bystander reaches
+// casually — a forced reap of a LIVE worker has exactly the risks a lease
+// expiry has, which is why every SCHEDULING consequence is the expiry reap's
+// own: same event kind (`lease-reaped`, with `data.forced` and the reason
+// distinguishing it), same write-class headroom hold, same return of the step
+// to the pool.
 //
 // The one deliberate divergence is the ATTEMPT BUDGET (DKT-585): a reap
 // carrying `data.forced` does not count the reaped attempt against
@@ -229,6 +237,11 @@ func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return err
+	}
+	// The conductor capability, before the lease is even inspected: a caller
+	// without it learns that the step exists and nothing else (DKT-2465).
+	if err := authorizeConductor(conn, step.RunID, opts.Token, "step reap"); err != nil {
 		return err
 	}
 	if step.Status != db.StepClaimed && step.Status != db.StepRunning {

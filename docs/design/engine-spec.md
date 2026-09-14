@@ -44,7 +44,7 @@ docket guard    spawn|record|stop|gate --step NAME [--input …]
 docket workflow init [--template NAME]          # scaffold instance config from shipped
                                                 #   optional templates (zero-authoring start)
 
-docket run start --request-file … ; activate; pause|resume|abandon; status; report
+docket run start --request-file … ; activate; conduct; pause|resume|abandon; status; report
 docket run budget RUN-N --set N                 # raise/lower a live cap (CAS,
                                                 #   event-logged — DKT-29, stage 7)
 docket next     --run RUN-N --json              # step-level ready set (engine-core §5)
@@ -315,6 +315,21 @@ anything — under a trust model fit for an OSS tool:
 - Trust entries default to **full-argv hashes**; prefix entries are explicit opt-in
   (`trust add --prefix`, with an over-authorization warning). Tokens pass via
   env/stdin, never argv; claim markers are 0600 in a per-user runtime dir.
+- **Conductor capability (DKT-2465).** The operator verbs — `step approve`,
+  `step reject`, `step resolve`, `step reap`, `run pause`, `run resume`, `run
+  abandon` — are not token-free. Each requires the run's *conductor capability*: a
+  256-bit token minted at the run's first activation (returned once, hash-only
+  storage on `runs.conductor_token_hash`), re-minted by `run conduct RUN-N`, and
+  presented via `DOCKET_TOKEN`/stdin like a lease token. "Repository access is the
+  authority" stopped holding once a harness gave every executor the operator's
+  checkout; the capability is what an executor is never handed, so the documented
+  path refuses it the way `step record` refuses an unclaimed worker. A run
+  activated before the capability existed stays open until it is conducted (the
+  guard-with-no-engine posture: nothing is required where nothing was minted). The
+  mechanism is tamper-evident, not tamper-proof: `run conduct` is deliberately
+  open to any caller, retires the standing token, and records who took the seat
+  (`conductor-seated`, with actor and cwd); a harness that keys its callers keeps
+  executors off that one verb.
 - **Conversational trust (zero-touch posture):** in this solution the session
   proposes, the human approves in-chat, and the session runs `trust add --yes` — the
   harness's own command-permission prompt is the human-confirmation backstop. The

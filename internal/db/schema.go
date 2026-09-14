@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 28
+const currentSchemaVersion = 29
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -197,6 +197,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	26: migrateV25ToV26,
 	27: migrateV26ToV27,
 	28: migrateV27ToV28,
+	29: migrateV28ToV29,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2460,6 +2461,61 @@ func migrateV27ToV28(tx *sql.Tx) error {
 	return nil
 }
 
+// v29AddedColumns is v29's whole schema change: one column on `runs` —
+// `conductor_token_hash`, the SHA-256 of the run's conductor capability
+// (DKT-2465).
+//
+// The seven operator verbs — `step approve`, `step reject`, `step resolve`,
+// `step reap`, `run pause`, `run resume`, `run abandon` — were token-free:
+// "the authority is repository access". Under a harness every executor shares
+// the operator's checkout and filesystem, so repository access resolved to
+// "any executor", and the engine had no field on which to tell a conductor's
+// ruling from an executor's. The capability is minted at the run's first
+// activation and re-minted by `run conduct`; only its hash is stored, the same
+// discipline the lease columns follow, so a copied database yields no live
+// capability.
+//
+// NULL means UNBOUND: a run activated before v29 and never conducted. The
+// verbs stay open on such a run exactly as before — the check binds the
+// moment a capability exists — which is what keeps a migrated store's runs
+// in flight byte-compatible. The column carries no default for that reason.
+var v29AddedColumns = []struct{ table, column, ddl string }{
+	{"runs", "conductor_token_hash",
+		`ALTER TABLE runs ADD COLUMN conductor_token_hash TEXT`},
+}
+
+// v29ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 and v28 use and for the same reason: v29 adds no table and no
+// index, so a database stamped 29 by a binary built mid-change carries every
+// v28 sentinel and the conductor column never arrives.
+var v29ColumnSentinels = []struct{ table, column string }{
+	{"runs", "conductor_token_hash"},
+}
+
+// migrateV28ToV29 adds the conductor capability column (DKT-2465).
+//
+// It BACK-FILLS NOTHING, and it cannot: a capability is returned once, to the
+// caller that minted it, and a migration has nobody to return one to. NULL is
+// every pre-v29 run's value and means the verbs behave as they always did on
+// it. `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration
+// probes first and stays re-runnable, the same shape v10 through v28 use.
+func migrateV28ToV29(tx *sql.Tx) error {
+	for _, col := range v29AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v28 to v29: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v28 to v29: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3062,6 +3118,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 27
+				break
+			}
+		}
+	}
+
+	// The v29 guard, in the same COLUMN form as v28 and for its reason: v29
+	// adds a column and no table, so a database stamped 29 by a binary built
+	// mid-change carries every v28 sentinel and the conductor column never
+	// arrives.
+	if version >= 29 {
+		for _, col := range v29ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v29 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 28
 				break
 			}
 		}

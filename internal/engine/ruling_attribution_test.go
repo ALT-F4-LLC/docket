@@ -127,7 +127,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		e := testEngine()
 		gateID := readyHumanGate(t, conn, e)
 
-		err := e.DecideStepWith(conn, gateID, DecideOptions{
+		err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
 			Approve: true, Note: "looks right", By: auditBy, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "approve: %v", err)
@@ -142,7 +142,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		e := testEngine()
 		gateID := readyHumanGate(t, conn, e)
 
-		err := e.DecideStepWith(conn, gateID, DecideOptions{
+		err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
 			Approve: false, Note: "not yet", By: auditBy, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "reject: %v", err)
@@ -163,7 +163,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		e := testEngine()
 		id := parkedExecutor(t, conn, e)
 
-		_, err := e.ResolveStepWith(conn, id, ResolveOptions{
+		_, err := e.ResolveStepWith(conn, id, ResolveOptions{Token: testConductorToken,
 			As: ResolveSkip, Note: "not needed", By: auditBy, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "resolve: %v", err)
@@ -179,7 +179,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		_, err := ClaimStep(conn, id, ClaimOptions{Owner: "doomed", NowMS: nowMS})
 		testsupport.Must(t, err, "claim: %v", err)
 
-		err = ForceReapStepWith(conn, id, ForceReapOptions{
+		err = ForceReapStepWith(conn, id, ForceReapOptions{Token: testConductorToken,
 			Reason: "spawn died at startup", By: auditBy, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "reap: %v", err)
@@ -197,7 +197,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		driveMirrorReconcile(t, conn, e)
 		held := heldStep(t, conn, "reconcile-held@0#0")
 
-		err := e.DecideStepWith(conn, held.ID, DecideOptions{
+		err := e.DecideStepWith(conn, held.ID, DecideOptions{Token: testConductorToken,
 			Approve: true, Note: "call it high", Value: "high", By: auditBy, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "approve --value: %v", err)
@@ -220,7 +220,7 @@ func TestUnattributedRulingIsRefused(t *testing.T) {
 		gateID := readyHumanGate(t, conn, e)
 		for _, by := range partial {
 			for _, approve := range []bool{true, false} {
-				err := e.DecideStepWith(conn, gateID, DecideOptions{
+				err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
 					Approve: approve, By: by, NowMS: nowMS,
 				})
 				if err == nil || !strings.Contains(err.Error(), "unattributed") {
@@ -241,7 +241,7 @@ func TestUnattributedRulingIsRefused(t *testing.T) {
 		e := testEngine()
 		id := parkedExecutor(t, conn, e)
 		for _, by := range partial {
-			_, err := e.ResolveStepWith(conn, id, ResolveOptions{As: ResolveSkip, By: by, NowMS: nowMS})
+			_, err := e.ResolveStepWith(conn, id, ResolveOptions{Token: testConductorToken, As: ResolveSkip, By: by, NowMS: nowMS})
 			if err == nil || !strings.Contains(err.Error(), "unattributed") {
 				t.Fatalf("resolve by %+v: err = %v, want the unattributed refusal", by, err)
 			}
@@ -258,7 +258,7 @@ func TestUnattributedRulingIsRefused(t *testing.T) {
 		_, err := ClaimStep(conn, id, ClaimOptions{Owner: "doomed", NowMS: nowMS})
 		testsupport.Must(t, err, "claim: %v", err)
 		for _, by := range partial {
-			err := ForceReapStepWith(conn, id, ForceReapOptions{Reason: "dead", By: by, NowMS: nowMS})
+			err := ForceReapStepWith(conn, id, ForceReapOptions{Token: testConductorToken, Reason: "dead", By: by, NowMS: nowMS})
 			if err == nil || !strings.Contains(err.Error(), "unattributed") {
 				t.Fatalf("reap by %+v: err = %v, want the unattributed refusal", by, err)
 			}
@@ -283,7 +283,7 @@ func TestRunReportAttributesRulings(t *testing.T) {
 	implementID := stepIDByInstance(t, conn, "implement@0")
 	_, err := ClaimStep(conn, implementID, ClaimOptions{Owner: "doomed", NowMS: nowMS})
 	testsupport.Must(t, err, "claim: %v", err)
-	err = ForceReapStepWith(conn, implementID, ForceReapOptions{
+	err = ForceReapStepWith(conn, implementID, ForceReapOptions{Token: testConductorToken,
 		Reason: "spawn died", By: relay, NowMS: nowMS,
 	})
 	testsupport.Must(t, err, "reap: %v", err)
@@ -291,7 +291,7 @@ func TestRunReportAttributesRulings(t *testing.T) {
 	// ...the work completes on a second attempt, and an operator approves the
 	// gate from another.
 	gateID := readyHumanGate(t, conn, e)
-	err = e.DecideStepWith(conn, gateID, DecideOptions{
+	err = e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
 		Approve: true, Note: "looks right", By: auditBy, NowMS: nowMS,
 	})
 	testsupport.Must(t, err, "approve: %v", err)
