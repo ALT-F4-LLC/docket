@@ -88,11 +88,12 @@ asks the store-wide question instead.`,
 }
 
 var guardGateCmd = &cobra.Command{
-	Use:   "gate --step NAME",
+	Use:   "gate --step NAME [--run RUN-N]",
 	Short: "Allow when a named gate has passed",
 	Long: `Allow (exit 0) when a PASSED ` + "`type=\"human\"`" + ` or ` + "`type=\"vote\"`" + ` step
-of the given name exists for an active run. Deny (exit 2) otherwise, saying
-whether the gate is undecided or absent.
+of the given name exists for the named run, or with no --run for any active run
+of the current project. Deny (exit 2) otherwise, saying whether the gate is
+undecided or absent.
 
 BOTH GATE KINDS ANSWER, so converting a gate from one person's approval to a
 vote does not silently stop every hook that checks it. "Passed" means the step
@@ -101,13 +102,29 @@ a vote gate. A step that reached done some other way did not receive one, and
 accepting it would let an override stand in for a decision nobody made. A vote
 still being cast reads as undecided and denies.
 
-The gate is looked up in the CURRENT PROJECT's active runs — an approval is a
-decision about one project's gate, and a same-named gate elsewhere in the
-store must not answer for it. --all-projects widens the search.`,
+WHICH RUNS ANSWER is the caller's choice. With --run RUN-N only that run's gate
+answers: an approval is a decision about one run's change, so another run's
+approval says nothing about it. Use this form when the caller knows its run —
+an executor's brief carries its step id, and ` + "`step show STEP-N`" + ` names the
+run. The named run is honored regardless of project; a run that does not exist
+is a NOT_FOUND error rather than a verdict; a run that has ended denies.
+
+Without --run the gate is looked up across EVERY active run of the CURRENT
+PROJECT, and the first approved one answers. That reading is cross-run: one
+run's approval opens the gate for every caller in the project until that run
+finishes, including a caller working under a second run whose own gate is
+still undecided. It exists for callers with no run context, such as an operator
+session's hook; a hook that has a run should pass it. An approval is a decision
+about one project's gate, so a same-named gate elsewhere in the store never
+answers; --all-projects widens the search to the whole store.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		stepName, _ := cmd.Flags().GetString("step")
-		verdict, err := engine.GuardGate(getDB(cmd), stepName, guardProjectScope(cmd))
+		runID, err := optionalRunFlag(cmd)
+		if err != nil {
+			return err
+		}
+		verdict, err := engine.GuardGate(getDB(cmd), stepName, runID, guardProjectScope(cmd))
 		if err != nil {
 			return runErr(err)
 		}
@@ -299,7 +316,8 @@ func guardProjectScope(cmd *cobra.Command) int {
 	return getProjectID(cmd)
 }
 
-// optionalRunFlag resolves `guard record`'s OPTIONAL `--run` (G4).
+// optionalRunFlag resolves the OPTIONAL `--run` of `guard record` (G4) and
+// `guard gate`.
 //
 // An absent flag is run 0, meaning "every non-terminal run" — matching `guard
 // stop`'s all-active-runs shape. A present but malformed one is a
@@ -386,10 +404,12 @@ func init() {
 			"Answer over every project's runs, not just the current project's")
 	}
 
-	// `record`'s --run is OPTIONAL (G4) and `spawn`'s is required unless
-	// --active is given (DKT-1287), so they are registered separately rather
-	// than in a shared loop — a loop would hide exactly the difference that
-	// matters.
+	// `gate`'s and `record`'s --run are OPTIONAL (G4) and `spawn`'s is
+	// required unless --active is given (DKT-1287), so they are registered
+	// separately rather than in a shared loop — a loop would hide exactly the
+	// difference that matters.
+	guardGateCmd.Flags().String(
+		"run", "", "Answer for this run's gate alone (default: every active run of the project)")
 	guardRecordCmd.Flags().String(
 		"run", "", "The run to check (default: every non-terminal run)")
 	guardSpawnCmd.Flags().String(

@@ -1509,7 +1509,7 @@ engine state: **exit 0 allow / exit 2 deny with reason** (§2).
 | Guard | Allows when |
 |---|---|
 | `docket guard stop` | no pending work outside `waiting-human` — i.e. no step in `pending`/`ready`/`claimed`/`running`/`gated` for any active run |
-| `docket guard gate --step NAME` | an **approved** `type=human` step of that name exists for the active run |
+| `docket guard gate --step NAME [--run RUN-N]` | an **approved** `type=human` or `type=vote` step of that name exists — in the named run, or with no `--run` in **any** active run of the project |
 
 Exit 2 collides numerically with `NOT_FOUND`'s exit 2, and that is **intentional and
 specified**: §2 defines the guard contract as "exit 0/2 + reason", independent of
@@ -1518,6 +1518,21 @@ not a CLI verb whose caller maps a code. The reason goes to stderr in human mode
 into the JSON envelope's `error` under `--json`. This is recorded here because a
 reviewer will otherwise read it as a taxonomy violation; it is the spec's own
 contract, quoted.
+
+**`gate`'s scope is the caller's choice, and the two forms ask different
+questions.** `--run RUN-N` asks about ONE run's gate: an approval is a decision
+about one run's change, so another run's approval says nothing about it. That is
+the form for a caller that knows its run — an executor's brief carries its step id,
+and `step show` resolves the run from it. The named run is honored regardless of
+project, a run that does not exist is `NOT_FOUND` rather than a verdict, and a run
+that has ended denies. Without `--run` the guard answers over **every** active run
+of the project and the first approved gate of that name allows. That reading is
+cross-run by construction: one run's approval opens the gate for every caller in
+the project until that run finishes, a second run's undecided gate included. It
+exists for callers with no run context — an operator session's commit hook cannot
+know which run a git write belongs to — and a hook that has a run should scope.
+Both gate kinds answer in both forms: a tallied vote approval is a decision as much
+as a human approval is.
 
 `guard spawn|record` are **not** here — §10 assigns them to stage 6.
 

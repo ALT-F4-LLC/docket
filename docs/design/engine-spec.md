@@ -202,10 +202,12 @@ recorded as a `run-note-added` event carrying its text, attributed human.
 predicates over engine state for harness enforcement points (exit 0 allow / exit 2
 deny with reason): `spawn` — proposed rows byte-match the open dispatch and no
 unacknowledged write reaps; `record` — no unreconciled dispatch; `stop` — no pending
-work outside `waiting-human`; `gate --step NAME` — an approved `type=human` step of
-that name exists for the active run (the reference instance's commit hook shims
-`guard gate --step commit-gate`). Any harness's hook mechanism wires these as
-one-liners; the logic lives here. (`step heartbeat` serves the heartbeat hook — an
+work outside `waiting-human`; `gate --step NAME [--run RUN-N]` — an approved
+`type=human` or `type=vote` step of that name exists in the named run, or with no
+`--run` in any active run of the project (the reference instance's commit hook shims
+`guard gate --step commit-gate`; the unscoped form lets one run's approval answer
+for every caller in the project, so a hook that knows its run should pass it). Any
+harness's hook mechanism wires these as one-liners; the logic lives here. (`step heartbeat` serves the heartbeat hook — an
 engine verb, though not a guard predicate.)
 
 **Payloads and thresholds.** `schema register` accepts JSON Schema plus an
