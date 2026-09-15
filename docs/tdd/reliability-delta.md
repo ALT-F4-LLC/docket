@@ -922,6 +922,34 @@ not a stage: one additive column with a default, a `hasColumn`-probed `ALTER` so
 the migration is idempotent and re-runnable, and a rewind guard that probes the
 COLUMN (the v27–v30 form, since v31 adds no table and no index).
 
+### AMENDMENT — the span extends to v32 (DKT-1898, 2026-09-15)
+
+**What changed.** v32 adds ONE column to one table, `steps.park_reason`
+(`TEXT NOT NULL DEFAULT ''`): the engine's text for why a step could not be
+decided. It is a column of its own rather than more of `routing` because the
+two are different facts with different authors and different lifetimes.
+`routing` holds the LATEST decision and its author's note, and `step resolve`
+overwrites it with the resolution — which erased the park's reason at the
+moment it was answered. `park_reason` is written only where a step parks, so
+the question survives its own answer instead of being overwritten by it.
+
+**What it fixes.** A parked step's reason lived only in `routing`, so
+resolving the park destroyed the record of why it had parked in the first
+place. A reader auditing a resolved step could see the resolution but not the
+question it answered.
+
+**Blank means never parked, and nothing else.** The default is the empty
+string, and the migration back-fills nothing: no step predating this column
+has a park reason to recover. The blank is inert rather than load-bearing —
+nothing refuses on it — so a step that never parked reads as never parked,
+which it is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v31, v32 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v31 form, since v32 adds no
+table and no index).
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay
