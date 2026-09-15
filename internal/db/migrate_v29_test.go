@@ -69,8 +69,9 @@ func TestV29RewindGuardConvergesAStampedStore(t *testing.T) {
 	if exists, _ := hasColumnDB(db, "runs", "conductor_token_hash"); exists {
 		t.Fatal("the fixture did not remove the column it is testing the recovery of")
 	}
-	if v, _ := SchemaVersion(db); v != 29 {
-		t.Fatalf("stamp = %d after the drop, want it left at 29", v)
+	if v, _ := SchemaVersion(db); v != currentSchemaVersion {
+		t.Fatalf("stamp = %d after the drop, want it left at %d",
+			v, currentSchemaVersion)
 	}
 
 	if err := Migrate(db); err != nil {

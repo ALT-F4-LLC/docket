@@ -17,7 +17,8 @@ import (
 // parks resolved one at a time: the same "sandbox artifact, not a code defect"
 // ruling re-made for every step of a run. `step resolve --as override-pass
 // --batch` records that ruling ONCE, as one grant per failed gate (gate name +
-// exit + reason — the failure signature), and the routing stage consults the
+// exit + reason + content fingerprint — the failure signature, DKT-1796), and
+// the routing stage consults the
 // run's grants before parking a later step whose failure carries the same
 // signature.
 //
@@ -69,10 +70,27 @@ func failingCompletionRows(rows []db.GateResultRow) []db.GateResultRow {
 }
 
 // grantMatches reports whether one grant covers one failing row: same gate,
-// same exit, same reason classification. NULL exit matches only NULL — an
-// `unmatched` gate never ran, and "no process existed" is not exit 0.
+// same exit, same reason classification, same content fingerprint. NULL exit
+// matches only NULL — an `unmatched` gate never ran, and "no process existed"
+// is not exit 0.
+//
+// THE FINGERPRINT IS WHAT KEEPS THIS FROM BEING A WAIVER BY GATE NAME
+// (DKT-1796). `Reason` is set only for a timeout or a refusal, so without it an
+// ordinary failure's signature is (gate, exit, empty) and a real regression in
+// any package rode the same ruling as the sandbox artifact the operator read.
+//
+// An EMPTY fingerprint on the GRANT matches nothing, including a row that also
+// carries none: a grant minted before v30 recorded no content, so it can vouch
+// for none, and reading a blank as a wildcard would preserve the gate-wide
+// waiver for exactly the runs in flight across the upgrade. A recorded row is
+// never blank — a gate that printed nothing hashes the empty capture — so this
+// refusal reaches pre-v30 grants and nothing else, and an `unmatched` park
+// stays coverable exactly as v24 intended.
 func grantMatches(g db.GateOverrideGrant, r db.GateResultRow) bool {
 	if g.Gate != r.Gate || g.Reason != r.Reason {
+		return false
+	}
+	if g.Fingerprint == "" || g.Fingerprint != r.Fingerprint {
 		return false
 	}
 	if (g.Exit == nil) != (r.Exit == nil) {
@@ -86,7 +104,11 @@ func grantMatches(g db.GateOverrideGrant, r db.GateResultRow) bool {
 // not be auto-applied.
 type batchCover struct {
 	grantIDs []int
-	gates    []string
+	// fingerprints are the covering grants' signatures, abbreviated, in
+	// grantIDs order — what the ledger names so an auditor can tell WHICH
+	// failure each spend of the authority covered (DKT-1796).
+	fingerprints []string
+	gates        []string
 	// blocked, when non-empty, is the park reason for a cover that matched but
 	// must not auto-apply: the step's threshold interposes another step, and an
 	// auto-applied override-pass would silently skip it — the DKT-470 defect,
@@ -103,9 +125,19 @@ func (c *batchCover) reason() string {
 		strings.Join(c.gates, ", "), joinGrantIDs(c.grantIDs))
 }
 
-// eventData is the `step-batch-overridden` payload: the covering grant id(s).
+// eventData is the `step-batch-overridden` payload: the covering grant id(s),
+// then the failure signature they were spent on (DKT-1796).
+//
+// The fingerprint rides as a ` fp=` suffix rather than as another comma field,
+// so the leading id list a reader already splits on `,` is byte-identical to
+// what it was: the auditor question the suffix answers — WHICH failure did this
+// authority cover — must not cost the ledger its existing shape.
 func (c *batchCover) eventData() string {
-	return joinGrantIDs(c.grantIDs)
+	data := joinGrantIDs(c.grantIDs)
+	if len(c.fingerprints) > 0 {
+		data += " fp=" + strings.Join(c.fingerprints, ",")
+	}
+	return data
 }
 
 func joinGrantIDs(ids []int) string {
@@ -153,6 +185,8 @@ func batchOverrideCover(
 				if !seen[g.ID] {
 					seen[g.ID] = true
 					cover.grantIDs = append(cover.grantIDs, g.ID)
+					cover.fingerprints = append(
+						cover.fingerprints, shortFingerprint(g.Fingerprint))
 				}
 				break
 			}

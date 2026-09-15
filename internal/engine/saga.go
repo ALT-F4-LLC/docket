@@ -1762,6 +1762,14 @@ func recordGateRows(
 			Ordinal: base + i, Argv: r.Argv, Exit: r.Exit,
 			DurationMS: r.DurationMS, Output: r.Output, Truncated: r.Truncated,
 			Verdict: r.Verdict, Pre: r.Pre, Reason: r.Reason,
+			// DKT-1796: the content half of the failure signature, computed
+			// here because this is the single write path for a gate row, so
+			// every recorded row carries one and no caller can record a row
+			// that skipped it. A gate that printed nothing — an `unmatched`
+			// row, whose process never existed — hashes the empty capture
+			// rather than recording a blank, so an EMPTY fingerprint on a row
+			// means exactly one thing: it predates v30.
+			Fingerprint: GateFingerprint(r.Output),
 			Stub:        r.Stub,
 			StubEntry:   r.StubEntry,
 			CreatedAtMS: nowMS,

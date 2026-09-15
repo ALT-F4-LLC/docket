@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 29
+const currentSchemaVersion = 30
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -198,6 +198,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	27: migrateV26ToV27,
 	28: migrateV27ToV28,
 	29: migrateV28ToV29,
+	30: migrateV29ToV30,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2516,6 +2517,70 @@ func migrateV28ToV29(tx *sql.Tx) error {
 	return nil
 }
 
+// v30AddedColumns is v30's whole schema change: `fingerprint` on
+// `gate_results` and on `gate_override_grants` — the CONTENT half of a gate
+// failure's signature (DKT-1796).
+//
+// v24 keyed a grant on (gate, exit, reason), and `reason` is set only for a
+// timeout or a refusal, so an ordinary failing gate's signature is
+// (gate, exit, empty): after one clean reproduction every later step of the
+// run failing that gate with that exit auto-passed at routing with nobody
+// reading its output. That is a waiver by GATE NAME, which is broader than the
+// failure the operator ruled on and is the gap three DKT-V417 seats converged
+// on independently. The column carries a SHA-256 over the normalized capture
+// (engine.GateFingerprint), so the grant covers the failure CONTENT the
+// operator read.
+//
+// Both columns are TEXT NOT NULL DEFAULT '' and empty means PRE-v30 and
+// nothing else: a row recorded at v30 or later always carries a fingerprint,
+// since a gate that printed nothing hashes the empty capture. On the grant
+// side the blank is fail-closed — a pre-v30 grant vouches for no content, so
+// `grantMatches` refuses it rather than letting a blank stand for "any".
+var v30AddedColumns = []struct{ table, column, ddl string }{
+	{"gate_results", "fingerprint",
+		`ALTER TABLE gate_results ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`},
+	{"gate_override_grants", "fingerprint",
+		`ALTER TABLE gate_override_grants ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`},
+}
+
+// v30ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 through v29 use and for the same reason: v30 adds no table and no
+// index, so a database stamped 30 by a binary built mid-change carries every
+// v29 sentinel and one or both fingerprint columns never arrive.
+var v30ColumnSentinels = []struct{ table, column string }{
+	{"gate_results", "fingerprint"},
+	{"gate_override_grants", "fingerprint"},
+}
+
+// migrateV29ToV30 adds the failure-content fingerprint columns (DKT-1796).
+//
+// It BACK-FILLS NOTHING, and the empty string is the only defensible value for
+// an existing row: the fingerprint is a function of a NORMALIZATION this binary
+// defines, and stamping old rows with today's rules would assert that a capture
+// recorded under an earlier engine was fingerprinted when it was not. On a
+// `gate_results` row the blank is inert — nothing reads a historical row's
+// fingerprint. On a `gate_override_grants` row it is load-bearing: the grant
+// stops matching anything, so a run mid-flight across the upgrade re-asks the
+// operator instead of spending an authority whose content nobody can name.
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration probes
+// first and stays re-runnable, the same shape v10 through v29 use.
+func migrateV29ToV30(tx *sql.Tx) error {
+	for _, col := range v30AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v29 to v30: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v29 to v30: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3136,6 +3201,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 28
+				break
+			}
+		}
+	}
+
+	// The v30 guard, in the same COLUMN form as v29 and for its reason: v30
+	// adds two columns and no table, so a database stamped 30 by a binary
+	// built mid-change carries every v29 sentinel and a fingerprint column
+	// never arrives.
+	if version >= 30 {
+		for _, col := range v30ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v30 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 29
 				break
 			}
 		}

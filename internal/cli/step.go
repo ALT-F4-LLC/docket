@@ -893,12 +893,16 @@ same run (DKT-734). Granting on a parked ` + "`fix@7`" + ` therefore covers ` + 
 granting: one ruling can auto-pass N steps, and it will not re-ask.
 
 What it does NOT do is make the gate advisory. Every round still runs it, and
-a round that fails with a DIFFERENT exit or reason parks for a fresh decision
-no matter how many rounds the grant has already covered.
+a round that fails with a DIFFERENT exit, reason or OUTPUT parks for a fresh
+decision no matter how many rounds the grant has already covered. The output
+is compared as a fingerprint — a hash of the capture with durations,
+timestamps, paths and colour codes normalized away — so a grant covers the
+failure the operator read, not every failure of that gate. ` + "`step gates --json`" + `
+reports each row's ` + "`fingerprint`" + `.
 
 To audit what one grant actually spent: ` + "`docket events list`" + ` shows the ruling
-once as ` + "`gate-override-granted`" + ` with ` + "`detail=GATE#ID`" + `, and each application as
-` + "`step-batch-overridden`" + ` with ` + "`detail=ID`" + ` on the step it passed. Same id both
+once as ` + "`gate-override-granted`" + ` with ` + "`detail=GATE#ID fp=SIG`" + `, and each application
+as ` + "`step-batch-overridden`" + ` with ` + "`detail=ID fp=SIG`" + ` on the step it passed. Same id both
 sides — N ` + "`step-batch-overridden`" + ` events against ONE ` + "`gate-override-granted`" + ` is
 one authorization spent N times, not N authorizations.
 

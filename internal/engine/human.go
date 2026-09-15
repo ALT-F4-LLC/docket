@@ -839,9 +839,14 @@ func (e *Engine) resolveStep(
 	// minted and the grant rows carry the shared justification (`--note`).
 	if batch {
 		for _, r := range grantRows {
+			// The fingerprint is COPIED off the parked step's own failing row
+			// (DKT-1796) rather than recomputed: the ruling must bind to the
+			// content the operator read before resolving, not to a later
+			// re-run's.
 			grantID, err := db.InsertGateOverrideGrantTx(tx, db.GateOverrideGrant{
 				RunID: step.RunID, OriginStepID: step.ID, Gate: r.Gate,
-				Exit: r.Exit, Reason: r.Reason, Note: note, CreatedAtMS: nowMS,
+				Exit: r.Exit, Reason: r.Reason, Fingerprint: r.Fingerprint,
+				Note: note, CreatedAtMS: nowMS,
 			})
 			if err != nil {
 				return err
@@ -849,7 +854,8 @@ func (e *Engine) resolveStep(
 			if err := recordEvent(tx, eventRecord{
 				Kind: EventGateOverrideGranted, RunID: step.RunID,
 				Instance: step.Instance, IssueID: step.IssueID,
-				Data: fmt.Sprintf("%s#%d", r.Gate, grantID),
+				Data: fmt.Sprintf("%s#%d fp=%s",
+					r.Gate, grantID, shortFingerprint(r.Fingerprint)),
 			}); err != nil {
 				return err
 			}

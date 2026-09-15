@@ -7,8 +7,8 @@ import (
 
 // GateOverrideGrant is one operator ruling that a gate's failure signature is
 // environmental for the remainder of ONE run (DKT-546): later steps of the
-// same run whose SAME gate fails with the SAME exit and reason auto-pass at
-// routing instead of re-asking the operator.
+// same run whose SAME gate fails with the SAME exit, reason and content
+// fingerprint auto-pass at routing instead of re-asking the operator.
 //
 // Exit is a POINTER for gate_results' own reason: an `unmatched` gate never
 // ran, so it has no exit code, and NULL must match only NULL — "no process
@@ -37,7 +37,18 @@ type GateOverrideGrant struct {
 	OriginStepID int
 	Gate         string
 	Exit         *int
-	Reason       string
+	Reason string
+	// Fingerprint is the origin row's `gate_results.fingerprint`, COPIED at
+	// mint and never recomputed (DKT-1796): the ruling binds to the content the
+	// operator read, not to whatever a later re-run happens to print.
+	//
+	// EMPTY MATCHES NOTHING, deliberately. A grant minted before v30 recorded
+	// no content, so it can vouch for none; treating a blank as a wildcard
+	// would preserve the gate-wide waiver for exactly the runs that were in
+	// flight across the upgrade. Only a pre-v30 grant is ever blank — a row
+	// recorded at v30 or later always carries a fingerprint, the empty
+	// capture's included.
+	Fingerprint  string
 	Note         string
 	CoveredSteps int
 	CreatedAtMS  int64
@@ -56,10 +67,11 @@ func InsertGateOverrideGrantTx(tx *sql.Tx, g GateOverrideGrant) (int, error) {
 	}
 	res, err := tx.Exec(
 		`INSERT INTO gate_override_grants
-		   (run_id, origin_step_id, gate, exit, reason, note, covered_steps,
-		    created_at_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
-		g.RunID, g.OriginStepID, g.Gate, exit, g.Reason, g.Note, g.CreatedAtMS)
+		   (run_id, origin_step_id, gate, exit, reason, fingerprint, note,
+		    covered_steps, created_at_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+		g.RunID, g.OriginStepID, g.Gate, exit, g.Reason, g.Fingerprint, g.Note,
+		g.CreatedAtMS)
 	if err != nil {
 		return 0, fmt.Errorf("recording the gate override grant: %w", err)
 	}
@@ -74,8 +86,8 @@ func InsertGateOverrideGrantTx(tx *sql.Tx, g GateOverrideGrant) (int, error) {
 // insertion order.
 func GateOverrideGrantsForRun(conn *sql.DB, runID int) ([]GateOverrideGrant, error) {
 	rows, err := conn.Query(
-		`SELECT id, run_id, origin_step_id, gate, exit, reason, note,
-		        covered_steps, created_at_ms
+		`SELECT id, run_id, origin_step_id, gate, exit, reason, fingerprint,
+		        note, covered_steps, created_at_ms
 		   FROM gate_override_grants WHERE run_id = ? ORDER BY id`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading gate override grants: %w", err)
@@ -88,7 +100,7 @@ func GateOverrideGrantsForRun(conn *sql.DB, runID int) ([]GateOverrideGrant, err
 			)
 			if err := r.Scan(
 				&g.ID, &g.RunID, &g.OriginStepID, &g.Gate, &exit, &g.Reason,
-				&g.Note, &g.CoveredSteps, &g.CreatedAtMS,
+				&g.Fingerprint, &g.Note, &g.CoveredSteps, &g.CreatedAtMS,
 			); err != nil {
 				return GateOverrideGrant{}, fmt.Errorf(
 					"reading a gate override grant: %w", err)

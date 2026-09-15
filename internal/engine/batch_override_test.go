@@ -90,19 +90,34 @@ executor = "finish"
 emits = "record"
 `
 
-// exitGates is a GateRunner whose failure EXIT CODE is settable, so a test can
-// produce two failures of the same gate with different signatures.
+// exitGates is a GateRunner whose failure EXIT CODE and OUTPUT are settable,
+// so a test can produce two failures of the same gate with the same signature
+// or with different ones. Since DKT-1796 the output is part of the signature:
+// a failure with no output names no failure and matches no grant, so the
+// default failure text below is what makes two failures IDENTICAL.
 type exitGates struct {
-	mu   sync.Mutex
-	fail bool
-	exit int
+	mu     sync.Mutex
+	fail   bool
+	exit   int
+	output string
 }
+
+// environmentalFailure is the capture both the granted failure and the
+// failures it covers print: one unchanged sandbox artifact, seen repeatedly.
+const environmentalFailure = "clang: error: unable to spawn process " +
+	"(Operation not permitted)\n"
 
 func (g *exitGates) Run(_ context.Context, spec GateSpec, _ StepContext) (GateResult, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.fail {
-		return GateResult{Gate: spec.Name, Exit: g.exit, Verdict: VerdictFail}, nil
+		out := g.output
+		if out == "" {
+			out = environmentalFailure
+		}
+		return GateResult{
+			Gate: spec.Name, Exit: g.exit, Verdict: VerdictFail, Output: out,
+		}, nil
 	}
 	return GateResult{Gate: spec.Name, Exit: 0, Verdict: VerdictPass}, nil
 }
@@ -495,9 +510,11 @@ func TestBatchGrantCoversLaterFixLoopRoundsSteps(t *testing.T) {
 		t.Fatalf("grants = %d, want 1", len(grants))
 	}
 	grantID := grants[0].ID
-	// The minting event carries `gate#grantid`, so the feed's ruling names the
-	// grant row every later application will cite.
-	if want := fmt.Sprintf("build#%d", grantID); granted[0] != want {
+	// The minting event carries `gate#grantid fp=<signature>`, so the feed's
+	// ruling names the grant row every later application will cite AND the
+	// failure content that authority is bound to (DKT-1796).
+	if want := fmt.Sprintf("build#%d fp=%s",
+		grantID, shortFingerprint(grants[0].Fingerprint)); granted[0] != want {
 		t.Errorf("%s data = %q, want %q — the ruling must name its grant row",
 			EventGateOverrideGranted, granted[0], want)
 	}
@@ -552,7 +569,9 @@ func TestBatchGrantCoversLaterFixLoopRoundsSteps(t *testing.T) {
 	// feed distinguishes "authorized three times" from "one authorization
 	// spent three times".
 	spent := eventDetailsOfKind(t, conn, runID, EventStepBatchOverridden)
-	want := []string{strconv.Itoa(grantID), strconv.Itoa(grantID)}
+	spentData := fmt.Sprintf("%d fp=%s",
+		grantID, shortFingerprint(grants[0].Fingerprint))
+	want := []string{spentData, spentData}
 	if len(spent) != len(want) {
 		t.Fatalf("%s events = %d, want %d — one per covered step",
 			EventStepBatchOverridden, len(spent), len(want))

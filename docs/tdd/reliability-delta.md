@@ -596,7 +596,8 @@ byte-identically to v22's rendering.
 
 **What changed.** v24 adds ONE table, `gate_override_grants`: one operator
 ruling that a gate's failure signature — gate name + exit code + reason
-classification — is environmental for the remainder of ONE run. A grant is
+classification, and since v30 the content fingerprint — is environmental for
+the remainder of ONE run. A grant is
 minted by `step resolve --as override-pass --batch` (one row per failed
 completion gate of the parked step, in the resolution's own transaction), and
 spent by the routing stage: a later step of the same run whose EVERY failing
@@ -814,6 +815,79 @@ un-pausable forever), so a caller that takes the seat retires the standing
 token — the displaced conductor's next ruling refuses `AUTH_ERROR` and the
 `conductor-seated` event names the taker. A harness that keys its callers
 keeps executors off that one verb; the engine keeps them off the other seven.
+
+### AMENDMENT — the span extends to v30 (DKT-1796, 2026-09-15)
+
+**What changed.** v30 adds ONE column to each of two tables,
+`gate_results.fingerprint` and `gate_override_grants.fingerprint`
+(`TEXT NOT NULL DEFAULT ''`): the CONTENT half of a gate failure's signature.
+**The batch override grant signature is now (gate, exit, reason,
+fingerprint)** — `grantMatches` compares all four, and a grant carrying an
+EMPTY fingerprint matches nothing at all. Empty means pre-v30 and nothing
+else — a row recorded at v30 or later always carries a value, since a gate
+that printed nothing hashes the empty capture — so that refusal reaches
+grants minted before the column existed and leaves an `unmatched` park, whose
+process never ran and whose capture is empty by nature, coverable exactly as
+v24 intended. Every recorded
+`gate_results` row carries a fingerprint, computed at record time in
+`recordGateRows` (the single write path) and exposed as `fingerprint` by
+`docket step gates STEP-N --json`. A `--batch` grant COPIES the fingerprint off
+the parked step's own failing row rather than recomputing it, so the ruling
+binds to the content the operator read. Both ledger edges name the signature:
+`gate-override-granted` carries `<gate>#<grant id> fp=<12 hex>` and
+`step-batch-overridden` carries `<grant ids> fp=<12 hex per grant>`, the
+fingerprint appended after a space so the id list each payload already carried
+is byte-identical to what a reader splitting on `#` or `,` saw before.
+
+**The normalization rules**, applied in this order before the SHA-256, and
+nothing else:
+
+1. ANSI CSI and OSC escape sequences are removed.
+2. Carriage returns are dropped and trailing spaces and tabs are stripped from
+   each line, so CRLF and a progress redraw hash as their plain form.
+3. RFC3339-ish timestamps and bare `HH:MM:SS(.fff)` clock times become
+   `<time>`.
+4. Absolute POSIX paths become `<path>/` plus their LAST TWO segments, so a
+   scratch root or worktree prefix drops out while the file that failed still
+   names itself.
+5. Go-style durations (`0.31s`, `12ms`, `2m30.1s`, `1h2m3s`) become `<dur>`.
+6. Leading and trailing blank lines are removed.
+
+Line ORDER is preserved, and no line is sorted, deduplicated or dropped: a
+different failure set is a different signature. Test names, assertion text,
+file names and line numbers all survive normalization by design.
+UNDER-normalizing is the safe direction — surviving text can only make two
+failures look DIFFERENT, which parks a step for a human, whereas stripped text
+makes two failures look the SAME, which is the waiver this amendment removes.
+
+**What it fixes.** v24 keyed the grant on (gate, exit, reason), and
+`internal/exec` sets `reason` only for a timeout or a refusal, so an ordinary
+failing gate's signature was (gate, exit, empty). After one clean reproduction
+every later step in the run failing that gate with that exit auto-passed at
+routing with nobody reading its output — a waiver by GATE NAME, broader than
+the failure the operator ruled on. Three DKT-V417 tribunal seats converged on
+it independently: a genuine regression a worker introduces in `internal/app` or
+`internal/tui` surfaced as the same "gate failed" and rode the same standing
+ruling, so the tests gate carried near-zero regression signal for the rest of
+the run. A grant now covers the failure the operator actually read.
+
+**Known limit.** The fingerprint narrows the authority; it does not
+authenticate the content. A worker authors the code whose gate output it is, so
+output crafted to normalize to a granted failure's form would match — the
+control's answer to that is detective, not preventive: the covered row's full
+capture stays stored, and both ledger edges name the signature spent.
+
+**Why the ratified arithmetic is untouched.** Like v11–v29, v30 is an
+amendment, not a stage: two additive columns with a default, `hasColumn`-probed
+`ALTER`s so the migration is idempotent and re-runnable, and a rewind guard
+that probes the COLUMNS (the v27–v29 form, since v30 adds no table). It
+BACK-FILLS NOTHING — the fingerprint is a function of a normalization this
+binary defines, and stamping a capture recorded under an earlier engine with
+today's rules would assert an identity nothing computed. On a `gate_results`
+row the blank is inert; on a `gate_override_grants` row it is load-bearing and
+fail-closed: the grant stops matching, so a run mid-flight across the upgrade
+re-asks the operator instead of spending an authority whose content nobody can
+name.
 
 ### 2.1 The never-mutate rule
 
