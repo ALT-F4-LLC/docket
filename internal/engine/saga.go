@@ -1343,8 +1343,31 @@ func (e *Engine) runRoutingStage(
 	// answers for it (§7.7.3): non-terminal, so nothing downstream is released;
 	// not parked, so the lane and the run stay live. applyTriageOutcome writes
 	// the terminal status when the tally lands.
+	// A PANEL ANSWERS ONCE PER ORDINAL. Its proposal is keyed
+	// `(run, issue, instance)`, so a second failure at the same ordinal — after
+	// the panel ruled `retry` and the retried attempt failed again — would find
+	// the CLOSED proposal rather than open a second one, and suspending for a
+	// panel that has already ruled wedges the step with nothing left to resolve
+	// it. That case parks for an operator instead, naming the ruling that is
+	// already spent.
 	if !stale && spec.OnFailTarget() != "" && routing == spec.OnFailTarget() {
-		status = db.StepGated
+		spent, err := panelSpent(tx, step, spec.OnFailTarget())
+		if err != nil {
+			return err
+		}
+		if spent {
+			routing = workflow.OnFailWaitingHuman
+			reason = fmt.Sprintf(
+				"%s failed again after %s already ruled on this ordinal; the "+
+					"panel answers once per ordinal, so this failure is an "+
+					"operator's: `docket step resolve --as retry` re-runs it, "+
+					"`--as fix-round` buys a round, `--as abandon-issue` ends it",
+				step.Instance, spec.OnFailTarget())
+		}
+		status = statusForRouting(routing)
+		if !spent {
+			status = db.StepGated
+		}
 	}
 
 	// AN UNCHANGED HAND-BACK PARKS THE ROUND AT ITS SOURCE (DKT-588), before

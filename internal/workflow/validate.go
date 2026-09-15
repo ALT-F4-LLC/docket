@@ -602,6 +602,26 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 	// answer the question the routing asks and the failed step would suspend
 	// forever.
 	if target := step.OnFailTarget(); target != "" {
+		// Only an EXECUTOR step may route to a panel. The suspension the
+		// routing depends on is written by the executor's own gate-failure path
+		// (routeStep); every other failure source — a human gate's reject, a
+		// rejected tally, a quorum miss, a failed action — reaches
+		// statusForRouting by a path that would terminalize the step `done`
+		// while naming the panel, which releases its successors as though it
+		// had passed. Refusing the declaration is the honest bound: the issue
+		// asks for an executor failure, and a rule the engine cannot honor
+		// everywhere must not be declarable everywhere.
+		if step.StepClass() != ClassExecutor {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: only an `executor` step may route `on_fail` to the "+
+						"vote step %q — a triage panel decides what a FAILED "+
+						"EXECUTOR's gate results mean, and no other step class "+
+						"suspends for one",
+					step.Name, target),
+			}
+		}
 		named, ok := byName[target]
 		if !ok {
 			return &Error{

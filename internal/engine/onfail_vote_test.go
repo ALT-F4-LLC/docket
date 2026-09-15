@@ -107,6 +107,59 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 		}
 	})
 
+	// A PASSING executor never routes to the panel, so the panel must be
+	// terminalized rather than left pending: it is interposed exactly as a
+	// threshold target is, and an un-skipped one blocks the issue forever.
+	t.Run("a passing step skips the panel", func(t *testing.T) {
+		conn := mustDB(t)
+		registerVoteRule(t, conn, "majority", "0.5", "")
+		src := strings.Replace(triageSrc, "APPROVED", "retry", 1)
+		src = strings.Replace(src, "REJECTED", "abandon-issue", 1)
+		registerSource(t, conn, []byte(src), "triage-lane.toml")
+
+		issue := createIssue(t, conn, "passes", "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		e := testEngine() // PassThroughRunner: every gate passes.
+		claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+		testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
+			"driving after the passing record: %v", err)
+
+		if got := stepStatus(t, conn, "triage@0"); got != db.StepSkipped {
+			t.Errorf("triage@0 status = %q, want %q — a panel nobody routed to "+
+				"must be terminalized, or it blocks the issue forever",
+				got, db.StepSkipped)
+		}
+	})
+
+	// A panel rules ONCE per ordinal: its proposal is closed after the tally, so
+	// a retried step that fails again must park for an operator rather than
+	// suspend for a panel that can no longer answer.
+	t.Run("a second failure after the panel ruled parks", func(t *testing.T) {
+		conn, _, e := triageRun(t, "retry", "abandon-issue")
+		castTriage(t, conn, e, model.VerdictApprove)
+		if got := stepStatus(t, conn, "implement@0"); got != db.StepPending {
+			t.Fatalf("implement@0 status = %q after the retry ruling, want %q",
+				got, db.StepPending)
+		}
+
+		// The retried attempt fails on the same gates, at the same ordinal.
+		claimAndComplete(t, conn, e, "implement@0", "the second candidate", "")
+
+		step := mustStep(t, conn, "implement@0")
+		if step.Status != db.StepWaitingHuman {
+			t.Errorf("implement@0 status = %q after failing again, want %q — "+
+				"suspending for a panel that already ruled leaves the step with "+
+				"nothing able to resolve it", step.Status, db.StepWaitingHuman)
+		}
+		if !routingIs(step.Routing, workflow.OnFailWaitingHuman) {
+			t.Errorf("implement@0 routing = %q, want %q",
+				step.Routing, workflow.OnFailWaitingHuman)
+		}
+	})
+
 	// AC3: every mapped outcome produces its declared routing on the failed
 	// step. The two verdicts are the vote's whole vocabulary, so the four
 	// routings are driven across two workflows.
@@ -173,8 +226,9 @@ func triageRun(t *testing.T, approved, rejected string) (*sql.DB, *model.Run, *E
 	e := testEngine()
 	e.Gates = failingGates{}
 	claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
-	testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
-		"driving after the failed record: %v", err)
+	if err := e.DriveRunLifecycles(conn, run.ID, nowMS); err != nil {
+		t.Fatalf("driving after the failed record: %v", err)
+	}
 	return conn, run, e
 }
 
@@ -194,8 +248,9 @@ func castTriage(t *testing.T, conn *sql.DB, e *Engine, verdict model.Verdict) {
 		})
 		testsupport.Must(t, err, "CastVote(%s): %v", seat, err)
 	}
-	testsupport.Must(t, e.DriveVoteProposal(conn, proposalID, nowMS),
-		"driving the tally: %v", err)
+	if err := e.DriveVoteProposal(conn, proposalID, nowMS); err != nil {
+		t.Fatalf("driving the tally: %v", err)
+	}
 }
 
 func mustStep(t *testing.T, conn *sql.DB, instance string) *db.Step {

@@ -408,6 +408,33 @@ after = ["a"]
 		wants: []string{`"a"`, "`on_fail`", `"b"`, "not a `type=\"vote\"` step"},
 	},
 	{
+		rule: "V40", name: "only an executor step may route to a panel",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "gate"
+type = "human"
+on_fail = "panel"
+after = ["a"]
+[[step]]
+name = "panel"
+type = "vote"
+voters = ["v"]
+vote_rule = "standard"
+on_fail = "abandon-issue"
+after = ["gate"]
+[step.on_fail_routes]
+approved = "retry"
+`,
+		wants: []string{`"gate"`, "`on_fail`", `"panel"`, "only an `executor` step"},
+	},
+	{
 		rule: "V40a", name: "on_fail_routes keyed outside the tally vocabulary",
 		src: `
 [pipeline]

@@ -129,7 +129,7 @@ func skipUnroutedTargets(
 	if spec == nil {
 		return nil
 	}
-	targets := workflow.ThresholdTargets(spec.Threshold)
+	targets := workflow.InterposedTargets(spec)
 	if len(targets) == 0 {
 		return nil
 	}

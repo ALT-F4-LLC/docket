@@ -69,6 +69,37 @@ func triageRouter(conn *sql.DB, panel *db.Step, def *workflow.Definition) (*db.S
 	return nil, nil
 }
 
+// panelSpent reports whether the triage panel at this step's ordinal has
+// already reached a terminal state — i.e. it has ruled once and its proposal is
+// closed, so it cannot answer a second failure at the same ordinal.
+//
+// A panel with no row yet is NOT spent: expansion may not have reached it, and
+// the ordinary suspension is correct.
+func panelSpent(tx *sql.Tx, step *db.Step, panel string) (bool, error) {
+	rows, err := tx.Query(
+		`SELECT status FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?`,
+		step.RunID, step.IssueID, panel, step.Ordinal)
+	if err != nil {
+		return false, fmt.Errorf("reading the panel %s for %s: %w",
+			panel, step.Instance, err)
+	}
+	defer rows.Close()
+
+	spent := false
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			return false, fmt.Errorf("reading the panel %s for %s: %w",
+				panel, step.Instance, err)
+		}
+		if db.StepTerminal(status) {
+			spent = true
+		}
+	}
+	return spent, rows.Err()
+}
+
 // triageEvidence renders the failure a panel is being asked about: which step
 // failed, which gates failed and with what exit, and what they printed.
 //

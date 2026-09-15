@@ -322,20 +322,33 @@ func ThresholdTargets(threshold map[string]string) []string {
 	return out
 }
 
-// RoutingPredecessors returns the names of the steps whose `threshold` or
-// `on_fail` routes to `name`, in declaration order — the steps whose recorded
-// routing decides whether the interposed gate `name` ever becomes ready. Empty
-// for a step nothing names, which is what makes ordinary steps invisible to the
-// readiness latch.
+// InterposedTargets returns every step this one can interpose as a conditional
+// gate: its `threshold` step-name routings, plus the triage panel its `on_fail`
+// names (DKT-1901). Sorted, and free of duplicates when both name the same step.
 //
-// A triage panel (DKT-1901) is the `on_fail` half: it is interposed exactly as
-// a threshold target is, and for the same reason — a step that did NOT fail
-// never routes to it, so the panel must not open on that lane.
+// It is ONE function because the two are one concept — a successor that runs
+// only if this step's routing selects it — and every reader must agree about
+// the set. A reader seeing only the threshold half opens or skips the wrong
+// gates: the readiness latch would hold a panel nobody can route to, and
+// skipUnroutedTargets would leave a panel `pending` on the passing lane, which
+// blocks the issue forever.
+func InterposedTargets(step *Step) []string {
+	out := ThresholdTargets(step.Threshold)
+	if panel := step.OnFailTarget(); panel != "" && !slices.Contains(out, panel) {
+		out = append(out, panel)
+		slices.Sort(out)
+	}
+	return out
+}
+
+// RoutingPredecessors returns the names of the steps that can interpose `name`,
+// in declaration order — the steps whose recorded routing decides whether the
+// interposed gate `name` ever becomes ready. Empty for a step nothing names,
+// which is what makes ordinary steps invisible to the readiness latch.
 func RoutingPredecessors(def *Definition, name string) []string {
 	var out []string
 	for _, step := range def.Steps {
-		if slices.Contains(ThresholdTargets(step.Threshold), name) ||
-			step.OnFailTarget() == name {
+		if slices.Contains(InterposedTargets(step), name) {
 			out = append(out, step.Name)
 		}
 	}
