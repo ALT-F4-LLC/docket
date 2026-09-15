@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -155,6 +156,58 @@ loop = true
 after_loop = "gate"
 `
 
+// gatedSrc is one gated executor step that parks on its gate's verdict, so the
+// three gate classes can be driven end to end through the real routing stage.
+const gatedSrc = `
+[pipeline]
+name = "park-class-gated"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "work"
+after = []
+executor = "w"
+emits = "out"
+gates = ["build"]
+on_fail = "waiting-human"
+`
+
+// thresholdSrc parks on its own declared threshold rather than on a gate, so
+// `threshold-routed` is produced by the routing it names.
+const thresholdSrc = `
+[pipeline]
+name = "park-class-threshold"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "work"
+after = []
+executor = "w"
+emits = "findings"
+payload = "findings@1"
+threshold = { "waiting-human" = "any(severity >= blocker)" }
+`
+
+// verdictGates returns one fixed verdict for every gate, so a test can name the
+// recorded row's verdict word — which is the fact the classifier reads.
+type verdictGates struct{ verdict string }
+
+func (g verdictGates) Run(
+	_ context.Context, spec GateSpec, _ StepContext,
+) (GateResult, error) {
+	exit := 0
+	if g.verdict != VerdictPass {
+		exit = 1
+	}
+	return GateResult{Gate: spec.Name, Exit: exit, Verdict: g.verdict}, nil
+}
+
 // activateSrc registers one TOML fixture and activates a run over it.
 func activateSrc(t *testing.T, conn *sql.DB, src, path string) int {
 	t.Helper()
@@ -190,6 +243,75 @@ func TestParkClassIsDerivedFromEngineFacts(t *testing.T) {
 			e.FailStep(conn, stepID, claim.Token, "gave up", "", nowMS), "fail: %v", err)
 
 		assertParkClass(t, conn, park{runID, stepID}, db.ParkClassAttemptsExhausted)
+	})
+
+	// The three gate classes, end to end through the real routing stage. All
+	// three route identically — per `on_fail` — and reduce to a not-pass
+	// verdict; the recorded row's verdict WORD is what tells them apart.
+	for _, tc := range []struct {
+		verdict string
+		want    db.ParkClass
+	}{
+		{VerdictFail, db.ParkClassGateFailed},
+		{VerdictUnmatched, db.ParkClassGateUnmatched},
+		{VerdictSkipped, db.ParkClassGateSkipped},
+	} {
+		t.Run(string(tc.want), func(t *testing.T) {
+			conn := mustDB(t)
+			runID := activateSrc(t, conn, gatedSrc, "gated-"+tc.verdict+".toml")
+			e := testEngine()
+			e.Gates = verdictGates{verdict: tc.verdict}
+
+			stepID := stepIDByInstance(t, conn, "work@0")
+			claim, err := ClaimStep(conn, stepID,
+				ClaimOptions{Owner: "w", NowMS: nowMS})
+			testsupport.Must(t, err, "claim: %v", err)
+			testsupport.Must(t, e.CompleteStep(conn, stepID, CompleteOptions{
+				Token: claim.Token, Artifact: []byte("the work"), NowMS: nowMS,
+			}), "complete: %v", nil)
+
+			assertParkClass(t, conn, park{runID, stepID}, tc.want)
+		})
+	}
+
+	t.Run(string(db.ParkClassThresholdRouted), func(t *testing.T) {
+		conn := mustDB(t)
+		registerFixtureSchema(t, conn)
+		runID := activateSrc(t, conn, thresholdSrc, "threshold.toml")
+		e := testEngine()
+
+		stepID := stepIDByInstance(t, conn, "work@0")
+		claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+		testsupport.Must(t, err, "claim: %v", err)
+		testsupport.Must(t, e.CompleteStep(conn, stepID, CompleteOptions{
+			Token:    claim.Token,
+			Artifact: []byte("the findings"),
+			Payload:  []byte(`[{"severity":"blocker"}]`),
+			NowMS:    nowMS,
+		}), "complete: %v", nil)
+
+		assertParkClass(t, conn, park{runID, stepID}, db.ParkClassThresholdRouted)
+	})
+
+	// A rejected hold parks the ROUTING step, never the materialized one: the
+	// held step ends `done` on both answers (H14) because it recorded a
+	// decision, and the consequence lands on the step whose routing was
+	// deferred. The class is read from that decision, not from the note.
+	t.Run(string(db.ParkClassHeldRejected), func(t *testing.T) {
+		conn := mustDB(t)
+		run, _ := activatedRun(t, conn)
+		e := testEngine()
+
+		driveToReconcile(t, conn, e, clusteredPayload)
+
+		heldID := stepIDByInstance(t, conn, "reconcile-held@0#0")
+		testsupport.Must(t,
+			e.DecideStepValue(conn, heldID, false, "not a real cluster", "", nowMS),
+			"rejecting the held cluster: %v", nil)
+
+		assertParkClass(t, conn,
+			park{run.ID, stepIDByInstance(t, conn, "reconcile@0")},
+			db.ParkClassHeldRejected)
 	})
 
 	t.Run(string(db.ParkClassGapOnly), func(t *testing.T) {
@@ -275,81 +397,47 @@ func TestParkClassIsDerivedFromEngineFacts(t *testing.T) {
 	})
 }
 
-// TestGateParkClassesComeFromTheGateRows pins the three gate classes at the
-// reduction that separates them.
+// TestUnmatchedGateIsReportedApartFromAFailure pins the fact the gate classes
+// are derived from, at the reduction that produces it.
 //
-// A gate that RAN and failed, a gate whose trust entry did not match, and a
-// gate skipped because the tree could not be bound all route the same way —
-// `on_fail` — and all reduce to VerdictFail. What tells them apart is the
-// recorded row's own verdict word, which is why verdictOverRows reports the
-// skipped names and the unmatched flag beside the verdict rather than leaving
-// the caller to re-reduce the same table.
-//
-// This is the seam the saga's switch reads. The end-to-end park is covered by
-// TestParkClassIsDerivedFromEngineFacts; what needs pinning here is that the
-// three inputs produce three distinguishable answers over identical routing.
-func TestGateParkClassesComeFromTheGateRows(t *testing.T) {
+// `unmatched` is not-pass, so it already folded into VerdictFail and routed
+// identically — and that identity is exactly why a caller could not tell "the
+// gate ran and failed" from "the gate could not be invoked". verdictOverRows
+// reports the distinction beside the verdict so the classifier reads one
+// reduction rather than re-reducing the same table, which is how a report comes
+// to contradict the routing beside it (DKT-982).
+func TestUnmatchedGateIsReportedApartFromAFailure(t *testing.T) {
 	exit := 1
 	cases := []struct {
 		name          string
 		rows          []db.GateResultRow
-		wantSkipped   bool
 		wantUnmatched bool
-		wantClass     db.ParkClass
 	}{{
-		name: string(db.ParkClassGateFailed),
+		name: "a gate that ran and failed",
 		rows: []db.GateResultRow{
 			{Gate: "tests", Ordinal: 0, Verdict: db.GateVerdictFail, Exit: &exit},
 		},
-		wantClass: db.ParkClassGateFailed,
 	}, {
-		name: string(db.ParkClassGateUnmatched),
+		name: "a gate whose entry did not match",
 		rows: []db.GateResultRow{
 			{Gate: "build", Ordinal: 0, Verdict: db.GateVerdictUnmatched},
 		},
 		wantUnmatched: true,
-		wantClass:     db.ParkClassGateUnmatched,
-	}, {
-		name: string(db.ParkClassGateSkipped),
-		rows: []db.GateResultRow{
-			{Gate: "coverage", Ordinal: 0, Verdict: db.GateVerdictSkipped},
-		},
-		wantSkipped: true,
-		wantClass:   db.ParkClassGateSkipped,
 	}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			verdict, unmeasured, unmatched := verdictOverRows(tc.rows)
+			verdict, _, unmatched := verdictOverRows(tc.rows)
 
-			// All three are not-pass; the routing they produce is identical.
+			// The routing they produce is identical; only the flag differs.
 			if verdict != VerdictFail {
-				t.Fatalf("verdict = %q, want %q — every case here is a not-pass",
+				t.Fatalf("verdict = %q, want %q — both cases are a not-pass",
 					verdict, VerdictFail)
 			}
-			if got := len(unmeasured) > 0; got != tc.wantSkipped {
-				t.Errorf("skipped-gates reported = %v, want %v", got, tc.wantSkipped)
-			}
 			if unmatched != tc.wantUnmatched {
-				t.Errorf("unmatched = %v, want %v", unmatched, tc.wantUnmatched)
-			}
-
-			// The saga's own precedence over those facts: a gate that could not
-			// RUN outranks one that ran and failed, because the operator's next
-			// move differs — restore the entry or rebind the tree, versus read
-			// the failure. Mirrors saga.go's switch, which decides `skipped`
-			// before the fail case and `unmatched` inside it.
-			var class db.ParkClass
-			switch {
-			case len(unmeasured) > 0:
-				class = db.ParkClassGateSkipped
-			case unmatched:
-				class = db.ParkClassGateUnmatched
-			default:
-				class = db.ParkClassGateFailed
-			}
-			if class != tc.wantClass {
-				t.Errorf("park class = %q, want %q", class, tc.wantClass)
+				t.Errorf("unmatched = %v, want %v — a gate that never ran must "+
+					"not reach the operator wearing a failed gate's word",
+					unmatched, tc.wantUnmatched)
 			}
 		})
 	}
