@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -437,6 +438,58 @@ func stepPacketFiles(
 	return resolvePacketFiles(
 		model.FormatRunID(step.RunID), packetPinsForRun(pins),
 		instanceConfigRoots(), entries)
+}
+
+// issueAttachmentFiles resolves a step's `issue.files` input (DKT-44) to the
+// bytes of every path its issue attaches, for rendering beside the declared
+// packet files.
+//
+// A step that does not declare the form reads nothing: the attachments are an
+// input like any other, and an issue's file list is not automatically every
+// step's business.
+//
+// THE READ IS AGAINST THE RUN'S EXEC ROOT, never the invoking process's cwd.
+// An attached path is relative to the project checkout the issue's work happens
+// in, and the claim that needs these bytes typically runs from a linked
+// worktree that does not have them — which is the whole defect: HRN-23's three
+// attachments were untracked, so they existed in the shared checkout and
+// nowhere else, and an isolated executor had no sanctioned way to reach them.
+// `runExecRoot` is the same resolution the diff stage already uses for exactly
+// this reason.
+//
+// AN UNREADABLE PATH REFUSES. Rendering the packet without it would hand the
+// step a document that silently lacks an input the workflow declared, and the
+// executor's only evidence would be an absence — the failure mode this form
+// exists to end. The refusal is a VALIDATION_ERROR naming the path, and
+// because `step claim --render` renders as a PRE-CLAIM preflight, it costs no
+// lease: the step stays exactly as claimable as it was.
+func issueAttachmentFiles(
+	conn *sql.DB, step *db.Step, spec *workflow.Step,
+) ([]PacketFile, error) {
+	if spec == nil || !slices.Contains(spec.Inputs, workflow.InputIssueFiles) {
+		return nil, nil
+	}
+
+	paths, err := db.GetIssueFiles(conn, step.IssueID)
+	if err != nil {
+		return nil, err
+	}
+
+	root := runExecRoot(conn, step.RunID)
+	out := make([]PacketFile, 0, len(paths))
+	for _, path := range paths {
+		body, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			return nil, validationErr(
+				"issue %s attaches %q, which `issue.files` could not read from "+
+					"the run's checkout %s: %v",
+				model.FormatID(step.IssueID), path, root, err)
+		}
+		out = append(out, PacketFile{
+			Path: path, SHA256: sha256Hex(body), Body: string(body),
+		})
+	}
+	return out, nil
 }
 
 // pinSetOwner names the run a refusal is about. A resolution that carries no

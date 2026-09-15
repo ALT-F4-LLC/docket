@@ -819,6 +819,18 @@ func producedKind(step *Step) (kind string, produces bool) {
 // `issue.body`, or `issue.diff`.
 var inputShape = regexp.MustCompile(`^([A-Za-z0-9_.-]+)\.([A-Za-z0-9_-]+|\*)$`)
 
+// InputIssueFiles is the `issue.files` engine form (DKT-44): the issue's
+// attached paths, read from the run's project checkout and carried into the
+// packet as `== FILE` sections. Exported because the engine's renderer consumes
+// the same form the validator admits.
+//
+// It is the one engine form whose resolution READS THE FILESYSTEM. The others
+// answer from run state alone, which is why they are snapshot-pinned; an
+// attachment is a path, and a path's contents live where the project keeps
+// them. The issue that forced the form attached three UNTRACKED files, so
+// resolving through anything but a live read would have missed them entirely.
+const InputIssueFiles = "issue.files"
+
 // InputIssueLatestPrefix is the `issue.latest.<kind>` engine form's prefix
 // (DKT-492): the issue's latest recorded round of artifacts of one kind,
 // whoever produced them. Exported because the engine's resolver consumes the
@@ -929,7 +941,7 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 	}
 
 	for _, input := range step.Inputs {
-		if input == "issue.body" || input == "issue.diff" {
+		if input == "issue.body" || input == "issue.diff" || input == InputIssueFiles {
 			continue
 		}
 
@@ -1014,13 +1026,29 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 			continue
 		}
 
+		// `issue.` is an ENGINE NAMESPACE, not a step name: V34 reserves it,
+		// so no workflow can declare a step there and every entry under it is
+		// either one of the engine-produced forms above or a misspelling of
+		// one. Routed to the vocabulary message rather than the producer
+		// lookup below, which would otherwise answer `issue.attachments` with
+		// "names step \"issue\", which is not a step in this workflow" — true,
+		// and useless to an author who has to guess the real spelling from it.
+		if input == "issue" || strings.HasPrefix(input, "issue.") {
+			return &Error{
+				Rule: "V11", Step: step.Name, Field: "inputs",
+				Message: fmt.Sprintf(
+					"step %q: `inputs` entry %q is not an engine-produced input form; must be `issue.body`, `issue.diff`, `%s`, `issue.latest.<kind>`, or `issue.linked.<relation>.<kind>`",
+					step.Name, input, InputIssueFiles),
+			}
+		}
+
 		m := inputShape.FindStringSubmatch(input)
 		if m == nil {
 			return &Error{
 				Rule: "V11", Step: step.Name, Field: "inputs",
 				Message: fmt.Sprintf(
-					"step %q: `inputs` entry %q must be `<step>.<kind>`, `<step>.*`, `issue.body`, `issue.diff`, `issue.latest.<kind>`, or `issue.linked.<relation>.<kind>`",
-					step.Name, input),
+					"step %q: `inputs` entry %q must be `<step>.<kind>`, `<step>.*`, `issue.body`, `issue.diff`, `%s`, `issue.latest.<kind>`, or `issue.linked.<relation>.<kind>`",
+					step.Name, input, InputIssueFiles),
 			}
 		}
 		producerName, kind := m[1], m[2]

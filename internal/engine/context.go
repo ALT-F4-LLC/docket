@@ -891,6 +891,13 @@ func resolveInputs(
 			}
 			out = append(out, input)
 			continue
+		case workflow.InputIssueFiles:
+			// `issue.files` (DKT-44) resolves to no ContextInput: an
+			// attachment is a FILE, and the packet already has a section for
+			// files. The renderer reads it there, so the bundle stays what
+			// §6.6 says it is — run state, no filesystem — and the form is
+			// skipped here only so it never reaches the producer lookup below.
+			continue
 		}
 
 		// `issue.linked.<relation>.<kind>` (DKT-547): an artifact recorded
@@ -1001,7 +1008,8 @@ func ResolveInputArtifacts(
 
 	var out []*db.Artifact
 	for _, declared := range spec.Inputs {
-		if declared == inputIssueBody || declared == inputIssueDiff {
+		if declared == inputIssueBody || declared == inputIssueDiff ||
+			declared == workflow.InputIssueFiles {
 			continue
 		}
 		if kind, ok := workflow.LatestKind(declared); ok {

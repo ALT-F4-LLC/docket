@@ -188,6 +188,16 @@ func RenderStepAs(
 		return nil, err
 	}
 
+	// The issue's attachments, for a step that declared `issue.files` (DKT-44).
+	// They land AFTER the declared entries because the contract and fragments
+	// are what a worker reads first; the attachments are the material that
+	// contract is applied to.
+	attached, err := issueAttachmentFiles(conn, step, spec)
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, attached...)
+
 	required, err := payloadRequiredKeys(conn, step.RunID, spec.Payload)
 	if err != nil {
 		return nil, err

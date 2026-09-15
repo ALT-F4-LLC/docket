@@ -313,6 +313,47 @@ delimiters carrying its path and hash. `== PINNED` **stays** — it is still the
 honest list of what the run pinned, and now the files that were inlined are
 also legible as content rather than only as pointers.
 
+#### 1.4.1 `issue.files` — an issue's attachments reach the same section (DKT-44)
+
+`issue.files` is an `inputs` entry, declared beside the other engine-produced
+forms:
+
+| form | resolves to |
+|---|---|
+| `issue.body` | the issue's activation-frozen body snapshot |
+| `issue.diff` | the computed VCS diff recorded for the issue |
+| `issue.files` | **the bytes of every path the issue attaches** |
+| `issue.latest.<kind>` | the issue's latest recorded artifact of one kind |
+| `issue.linked.<relation>.<kind>` | an artifact recorded under a linked issue |
+
+A step declaring it receives each attached path as its own
+
+```
+== FILE <path>  <sha256>
+<the file's content>
+```
+
+section — the same section §1.4's declared `packet` entries render into,
+appended after them, because the contract and fragments are what a worker reads
+before the material the contract applies to.
+
+It is the one input form whose resolution **reads the filesystem**. The others
+answer from run state, which is why they are snapshot-pinned; an attachment is a
+path, and a path's contents live where the project keeps them. The read is
+against the **run's recorded exec root** — the project checkout the issue's
+paths are relative to — never the invoking process's cwd, because the claim that
+needs the bytes typically runs from a linked worktree that does not have them.
+That is the defect the form closes: the attachments that forced it were
+untracked, so they existed in the shared checkout and nowhere else, and an
+isolated executor told its inputs arrive in the packet had no sanctioned way to
+reach them.
+
+An attached path the engine cannot read **refuses** with a `VALIDATION_ERROR`
+naming the path, rather than rendering a packet that silently omits a declared
+input. Since `step claim --render` renders as a pre-claim preflight (§1.2's
+refuse-rather-than-drift discipline, applied on the claim path), that refusal
+costs no lease.
+
 ### 1.5 Closure size: counted where the spec says to count it
 
 engine-core §8 records closure size on the step, and §11.1's caps make an

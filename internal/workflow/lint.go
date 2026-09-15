@@ -233,7 +233,7 @@ func lintInputOrdering(def *Definition, g *stepGraph) error {
 		ancestors := ancestorsOf(g, step.Name)
 
 		for _, input := range step.Inputs {
-			if input == "issue.body" || input == "issue.diff" {
+			if input == "issue.body" || input == "issue.diff" || input == InputIssueFiles {
 				continue
 			}
 			// `issue.latest.<kind>` names no producer step: it resolves over
