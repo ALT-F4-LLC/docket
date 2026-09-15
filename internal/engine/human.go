@@ -1142,6 +1142,15 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	}
 	status := statusForRouting(routing)
 
+	// An exhausted step whose `on_fail` names a triage panel suspends for it,
+	// exactly as a gate failure does (DKT-1901) — both reach statusForRouting,
+	// whose step-name default would otherwise record this failure as `done`.
+	routing, note, status, err = suspendForPanel(
+		tx, step, spec, routing, note, status, nowMS)
+	if err != nil {
+		return err
+	}
+
 	if err := db.RetireStepTokenTx(tx, step.ID); err != nil {
 		return err
 	}

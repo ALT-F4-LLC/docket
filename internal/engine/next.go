@@ -419,7 +419,14 @@ func (e *Engine) driveVoteSteps(
 		if err != nil {
 			return nil, false, err
 		}
-		if outcome == nil || outcome.Verdict == "" {
+		// A CLOSED proposal carries no verdict but is not still open: it was
+		// retired without a tally. For an ordinary vote step that is the same
+		// no-op it always was, but a panel some step is SUSPENDED behind must
+		// still be routed (DKT-1901) — the suspension may not outlive the panel,
+		// or the step waits on a question nobody can answer.
+		closedWithoutTally := outcome != nil &&
+			outcome.Status == model.ProposalStatusClosed
+		if outcome == nil || (outcome.Verdict == "" && !closedWithoutTally) {
 			continue
 		}
 		if err := routeVoteStep(conn, step, defs[step.WorkflowID], spec, outcome, nowMS); err != nil {

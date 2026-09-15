@@ -506,9 +506,49 @@ func routeVoteStep(
 	conn *sql.DB, step *db.Step, def *workflow.Definition, spec *workflow.Step,
 	outcome *VoteOutcome, nowMS int64,
 ) error {
+	// The step this panel was asked about, if any (DKT-1901). Read BEFORE the
+	// transaction opens, for the reason every other pooled read here is: inside
+	// it the pooled connection would deadlock rather than fail.
+	triaged, err := triageRouter(conn, step, def)
+	if err != nil {
+		return err
+	}
+
+	// A proposal retired WITHOUT a tally routes nothing on its own: no verdict
+	// was reached, so the vote step keeps waiting exactly as it always has. The
+	// one thing it must do is release a step suspended behind it, which is the
+	// only reason this function is reached for a closed proposal at all.
+	if outcome.Verdict == "" {
+		if triaged == nil {
+			return nil
+		}
+		tx, err := conn.Begin()
+		if err != nil {
+			return fmt.Errorf("parking the step %s triaged: %w", step.Instance, err)
+		}
+		defer tx.Rollback()
+		if err := parkUntriaged(tx, step, triaged, outcome, nowMS); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
 	routing := RoutingPass
 	concernReason := ""
 	switch {
+	case triaged != nil && triageDecided(outcome):
+		// A TRIAGE PANEL THAT REACHED A VERDICT IS DONE, whichever way it
+		// voted (DKT-1901). A rejection is not this step's own failure — it is
+		// the answer it was convened to give, and `on_fail_routes` applies it
+		// below. Routing the panel per its `on_fail` here would park the panel
+		// on the question it just answered, and R2b would then hold every step
+		// of the issue behind it: the triage lane would park exactly what it
+		// exists to keep moving.
+		//
+		// The panel's own `on_fail` is reached only through the case below,
+		// where the tally produced NO verdict and the mapping has nothing to
+		// apply. That is the backstop the spec documents.
+		routing = RoutingPass
 	case outcome.Verdict == VerdictFail:
 		routing = spec.EffectiveOnFail()
 	case outcome.Status == model.ProposalStatusApproved && len(spec.Threshold) > 0:
@@ -548,14 +588,6 @@ func routeVoteStep(
 		if routingStep, err = routingStepOf(conn, step); err != nil {
 			return err
 		}
-	}
-
-	// The step this panel was asked about, if any (DKT-1901). Read BEFORE the
-	// transaction opens, for the reason every other pooled read here is: inside
-	// it the pooled connection would deadlock rather than fail.
-	triaged, err := triageRouter(conn, step, def)
-	if err != nil {
-		return err
 	}
 
 	// The tally is announced before the routing commits, carrying the score the
@@ -643,10 +675,18 @@ func routeVoteStep(
 	// tally — because there the panel could not agree and the step's disposition
 	// is still an open question. It stays suspended, and this vote step's own
 	// `on_fail`, which V13a requires it to declare, is the human backstop.
-	if triaged != nil && triageDecided(outcome) {
-		if err := applyTriageOutcome(
-			tx, step, spec, def, triaged, triageVerdict(outcome), nowMS,
-		); err != nil {
+	if triaged != nil {
+		if triageDecided(outcome) {
+			if err := applyTriageOutcome(
+				tx, step, spec, def, triaged, triageVerdict(outcome), nowMS,
+			); err != nil {
+				return err
+			}
+		} else if err := parkUntriaged(tx, step, triaged, outcome, nowMS); err != nil {
+			// A verdict outside the mapping's vocabulary — an operator's manual
+			// commit (§8.4). The panel reached an outcome the mapping has no key
+			// for, so the suspension returns to a person rather than guessing
+			// which of two keys was meant.
 			return err
 		}
 	}

@@ -69,6 +69,56 @@ func triageRouter(conn *sql.DB, panel *db.Step, def *workflow.Definition) (*db.S
 	return nil, nil
 }
 
+// suspendForPanel turns a routing that names a triage panel into the SUSPENSION
+// the panel needs, and is THE ONE place that decision is made (DKT-1901).
+//
+// Both failure paths call it — a failed completion gate (routeStep) and an
+// exhausted attempt budget (FailStep) — because both reach statusForRouting,
+// whose step-name default is `done`. A `done` executor naming a panel is the
+// unsoundness this whole design exists to avoid: it releases the step's
+// ordinary successors as though the work had passed, and leaves the panel with
+// no suspended row to rule on.
+//
+// `gated` is the suspension: the status the step already carries out of the
+// gate stage, and exactly the shape a HELD routing step wears while a
+// materialized gate answers for it (§7.7.3). Non-terminal, so nothing
+// downstream is released; not parked, so neither R2b nor the run rollup holds
+// the lane while the panel sits.
+//
+// A PANEL ANSWERS ONCE PER ORDINAL. Its proposal is keyed
+// `(run, issue, instance)`, so a second failure at the same ordinal — after the
+// panel ruled `retry` and the retried attempt failed again — would find the
+// CLOSED proposal rather than open a second one, and suspending for a panel
+// that has already ruled leaves the step with nothing able to resolve it. That
+// case parks for an operator instead, naming the ruling already spent.
+//
+// A routing that does not name the panel is returned untouched, so the ordinary
+// paths are byte-identical to what they were.
+func suspendForPanel(
+	tx *sql.Tx, step *db.Step, spec *workflow.Step,
+	routing, reason, status string, nowMS int64,
+) (string, string, string, error) {
+	panel := spec.OnFailTarget()
+	if panel == "" || routing != panel {
+		return routing, reason, status, nil
+	}
+
+	spent, err := panelSpent(tx, step, panel)
+	if err != nil {
+		return "", "", "", err
+	}
+	if !spent {
+		return routing, reason, db.StepGated, nil
+	}
+
+	return workflow.OnFailWaitingHuman, fmt.Sprintf(
+		"%s failed again after %s already ruled on this ordinal; the panel "+
+			"answers once per ordinal, so this failure is an operator's: "+
+			"`docket step resolve --as retry` re-runs it, `--as fix-round` buys "+
+			"a round, `--as abandon-issue` ends it",
+		step.Instance, panel), db.StepWaitingHuman, nil
+}
+
 // panelSpent reports whether the triage panel at this step's ordinal has
 // already reached a terminal state — i.e. it has ruled once and its proposal is
 // closed, so it cannot answer a second failure at the same ordinal.
@@ -126,8 +176,18 @@ func triageEvidence(conn *sql.DB, panel *db.Step) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s failed its completion gates and routed here for triage.\n",
-		router.Instance)
+	fmt.Fprintf(&b, "%s failed and routed here for triage.\n", router.Instance)
+
+	// A step that exhausted its attempt budget records no gate rows at all, so
+	// the heading is written only when there is something under it — an empty
+	// "Gate results:" reads as "the gates passed", which is the opposite of why
+	// this panel was convened.
+	if len(rows) == 0 {
+		b.WriteString("\nNo gate results were recorded: the step exhausted its " +
+			"attempt budget before its completion gates ran.\n")
+		return b.String(), nil
+	}
+
 	b.WriteString("\nGate results:\n")
 	for _, row := range rows {
 		exit := "none"
@@ -242,6 +302,27 @@ func applyTriageFixRound(
 	}
 	return db.SetStepRoutingTx(tx, router.ID,
 		workflow.OnFailFixLoop, note, db.StepSuperseded, nowMS)
+}
+
+// parkUntriaged parks a suspended step whose panel closed without reaching a
+// verdict (DKT-1901) — a quorum miss, a proposal retired without a tally, or an
+// operator's manual commit outside the mapping's vocabulary.
+//
+// It is what makes the documented backstop real. The suspension is only safe
+// while a panel can still answer: once the panel's proposal is closed, a step
+// left `gated` has nothing able to resolve it, because the operator's verbs act
+// on a park. So the question returns to a person, carrying the panel's outcome
+// so the operator knows a panel was asked and what it managed to say.
+func parkUntriaged(
+	tx *sql.Tx, panel, router *db.Step, outcome *VoteOutcome, nowMS int64,
+) error {
+	reason := fmt.Sprintf(
+		"%s closed %s without reaching a verdict, so nothing decided what "+
+			"%s's failure means; `docket step resolve --as retry` re-runs it, "+
+			"`--as fix-round` buys a round, `--as abandon-issue` ends it",
+		panel.Instance, outcome.Status, router.Instance)
+	return db.SetStepRoutingTx(tx, router.ID,
+		workflow.OnFailWaitingHuman, reason, db.StepWaitingHuman, nowMS)
 }
 
 // triageVerdict maps a tally's outcome onto the mapping's key vocabulary.

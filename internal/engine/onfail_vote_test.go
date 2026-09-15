@@ -160,6 +160,74 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 		}
 	})
 
+	// An EXHAUSTED attempt budget is the other failure source `on_fail` governs,
+	// and it reaches statusForRouting by its own path: without the same
+	// suspension it would record `done` while naming the panel, releasing the
+	// step's successors as though the work had passed.
+	t.Run("an exhausted step suspends for the panel", func(t *testing.T) {
+		conn := mustDB(t)
+		registerVoteRule(t, conn, "majority", "0.5", "")
+		src := strings.Replace(triageSrc, "APPROVED", "retry", 1)
+		src = strings.Replace(src, "REJECTED", "abandon-issue", 1)
+		src = strings.Replace(src, `gates = ["build"]`,
+			`gates = ["build"]`+"\n"+`max_attempts = 1`, 1)
+		registerSource(t, conn, []byte(src), "triage-lane.toml")
+
+		issue := createIssue(t, conn, "exhausts", "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+		e := testEngine()
+
+		// `max_attempts = 1` on the fixture makes the FIRST failure the
+		// exhausting one, which is the routing path under test.
+		stepID := stepIDByInstance(t, conn, "implement@0")
+		claim, err := ClaimStep(conn, stepID, ClaimOptions{
+			Owner: "worker", NowMS: nowMS})
+		testsupport.Must(t, err, "claiming implement@0: %v", err)
+		testsupport.Must(t, e.FailStep(conn, stepID, claim.Token,
+			"the work did not finish", "", nowMS),
+			"failing implement@0: %v", err)
+
+		step := mustStep(t, conn, "implement@0")
+		if step.Status == db.StepDone {
+			t.Fatal("implement@0 recorded `done` naming the panel: its successors " +
+				"are released as though the work had passed")
+		}
+		if step.Status != db.StepGated || !routingIs(step.Routing, "triage") {
+			t.Errorf("implement@0 = %q routing %q, want %q routing %q",
+				step.Status, step.Routing, db.StepGated, "triage")
+		}
+	})
+
+	// A tally that reaches NO verdict decided nothing, so the suspension must
+	// not outlive it: the step returns to an operator, which is the backstop
+	// the spec documents.
+	t.Run("a panel that reaches no verdict parks the step", func(t *testing.T) {
+		conn, _, e := triageRun(t, "retry", "abandon-issue")
+		panel := mustStep(t, conn, "triage@0")
+		proposalID, err := findVoteProposal(conn, panel)
+		testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+
+		// One seat of two casts: the proposal closes without reaching quorum.
+		_, err = db.CastVote(conn, &model.Vote{
+			ProposalID: proposalID, VoterName: "seat-a",
+			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8,
+		})
+		testsupport.Must(t, err, "CastVote(seat-a): %v", err)
+		testsupport.Must(t, db.CloseProposal(conn, proposalID, "quorum not reached"),
+			"closing the proposal without a tally: %v", err)
+		testsupport.Must(t, e.DriveVoteProposal(conn, proposalID, nowMS),
+			"driving the closed proposal: %v", err)
+
+		step := mustStep(t, conn, "implement@0")
+		if step.Status != db.StepWaitingHuman {
+			t.Errorf("implement@0 status = %q, want %q — a step left suspended "+
+				"behind a closed panel has nothing able to resolve it",
+				step.Status, db.StepWaitingHuman)
+		}
+	})
+
 	// AC3: every mapped outcome produces its declared routing on the failed
 	// step. The two verdicts are the vote's whole vocabulary, so the four
 	// routings are driven across two workflows.
@@ -170,6 +238,10 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 		rejected string
 		want     string
 		status   string
+		// parksRun is true only where the mapping's own value is
+		// `waiting-human` — the panel deliberately handing the step to an
+		// operator, which parks the run exactly as any other park does.
+		parksRun bool
 	}{
 		{
 			name: "an approving panel retries the step", verdict: model.VerdictApprove,
@@ -191,10 +263,11 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 			verdict:  model.VerdictReject,
 			approved: "retry", rejected: "waiting-human",
 			want: workflow.OnFailWaitingHuman, status: db.StepWaitingHuman,
+			parksRun: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			conn, _, e := triageRun(t, tc.approved, tc.rejected)
+			conn, run, e := triageRun(t, tc.approved, tc.rejected)
 			castTriage(t, conn, e, tc.verdict)
 
 			step := mustStep(t, conn, "implement@0")
@@ -203,6 +276,22 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 			}
 			if step.Status != tc.status {
 				t.Errorf("implement@0 status = %q, want %q", step.Status, tc.status)
+			}
+
+			// A PANEL THAT ANSWERED IS DONE. Its own `on_fail` is the backstop
+			// for a tally that reached NO verdict; firing it on a rejection the
+			// mapping already consumed would park the panel, and R2b would then
+			// hold the whole issue behind a question that was answered.
+			panel := mustStep(t, conn, "triage@0")
+			if panel.Status != db.StepDone {
+				t.Errorf("triage@0 status = %q, want %q — the panel reached a "+
+					"verdict and the mapping applied it", panel.Status, db.StepDone)
+			}
+			parked := runStatusOf(t, conn, run.ID) == string(model.RunWaitingHuman)
+			if parked != tc.parksRun {
+				t.Errorf("run parked = %v, want %v — a panel's verdict parks the "+
+					"run only where the mapping itself says `waiting-human`",
+					parked, tc.parksRun)
 			}
 		})
 	}
