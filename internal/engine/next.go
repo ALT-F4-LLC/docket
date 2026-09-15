@@ -424,8 +424,13 @@ func (e *Engine) driveVoteSteps(
 		// no-op it always was, but a panel some step is SUSPENDED behind must
 		// still be routed (DKT-1901) — the suspension may not outlive the panel,
 		// or the step waits on a question nobody can answer.
+		// Narrowed to TRIAGING panels by their declared mapping (V40c requires
+		// one on any panel a step routes to), so every other workflow's closed
+		// proposal stays the no-op it has always been rather than re-routing on
+		// every `next`.
 		closedWithoutTally := outcome != nil &&
-			outcome.Status == model.ProposalStatusClosed
+			outcome.Status == model.ProposalStatusClosed &&
+			len(spec.OnFailRoutes) > 0
 		if outcome == nil || (outcome.Verdict == "" && !closedWithoutTally) {
 			continue
 		}

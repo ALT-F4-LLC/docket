@@ -44,11 +44,17 @@ approved = "APPROVED"
 rejected = "REJECTED"
 
 [[step]]
+name = "review"
+after = ["implement"]
+executor = "y"
+emits = "verdict"
+
+[[step]]
 name = "fix"
 executor = "x"
 emits = "findings"
 loop = true
-after_loop = "triage"
+after_loop = "review"
 `
 
 // failingGates fails every completion gate, which is the condition that sends
@@ -226,6 +232,54 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 				"behind a closed panel has nothing able to resolve it",
 				step.Status, db.StepWaitingHuman)
 		}
+		if got := stepStatus(t, conn, "triage@0"); !db.StepTerminal(got) {
+			t.Errorf("triage@0 status = %q, want a terminal status — a panel "+
+				"that closed without ruling holds its own successors", got)
+		}
+	})
+
+	// THE PANEL'S OWN `on_fail` IS THE BACKSTOP, and this is where it is read:
+	// the panel could not rule, so its declared routing disposes of the step it
+	// was asked about. `waiting-human` (the case above) is the default; a panel
+	// declaring something else must actually get it.
+	t.Run("the panel's own on_fail disposes of the step", func(t *testing.T) {
+		conn := mustDB(t)
+		registerVoteRule(t, conn, "majority", "0.5", "")
+		src := strings.Replace(triageSrc, "APPROVED", "retry", 1)
+		src = strings.Replace(src, "REJECTED", "abandon-issue", 1)
+		src = strings.Replace(src, `on_fail = "waiting-human"`,
+			`on_fail = "abandon-issue"`, 1)
+		registerSource(t, conn, []byte(src), "triage-lane.toml")
+
+		issue := createIssue(t, conn, "no-quorum", "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		e := testEngine()
+		e.Gates = failingGates{}
+		claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+		testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
+			"driving after the failed record: %v", err)
+
+		panel := mustStep(t, conn, "triage@0")
+		proposalID, err := findVoteProposal(conn, panel)
+		testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+		testsupport.Must(t, db.CloseProposal(conn, proposalID, "no quorum"),
+			"closing the proposal: %v", err)
+		testsupport.Must(t, e.DriveVoteProposal(conn, proposalID, nowMS),
+			"driving the closed proposal: %v", err)
+
+		step := mustStep(t, conn, "implement@0")
+		if step.Status != db.StepFailedRouted {
+			t.Errorf("implement@0 status = %q, want %q — the panel declared "+
+				"`on_fail = \"abandon-issue\"`, which is the backstop the spec "+
+				"names", step.Status, db.StepFailedRouted)
+		}
+		if got := stepStatus(t, conn, "review@0"); !db.StepTerminal(got) {
+			t.Errorf("review@0 status = %q, want a terminal status — the "+
+				"abandonment cascade did not run", got)
+		}
 	})
 
 	// AC3: every mapped outcome produces its declared routing on the failed
@@ -292,6 +346,17 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 				t.Errorf("run parked = %v, want %v — a panel's verdict parks the "+
 					"run only where the mapping itself says `waiting-human`",
 					parked, tc.parksRun)
+			}
+
+			// THE ISSUE-LEVEL EFFECT, not just the step's row. `abandon-issue`
+			// runs a cascade over the issue's remaining steps; a routing written
+			// without it would read as abandoned while the issue kept
+			// scheduling work.
+			if tc.want == workflow.OnFailAbandonIssue {
+				if got := stepStatus(t, conn, "review@0"); !db.StepTerminal(got) {
+					t.Errorf("review@0 status = %q after the issue was abandoned, "+
+						"want a terminal status — the cascade did not run", got)
+				}
 			}
 		})
 	}

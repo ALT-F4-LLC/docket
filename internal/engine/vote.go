@@ -524,10 +524,11 @@ func routeVoteStep(
 		}
 		tx, err := conn.Begin()
 		if err != nil {
-			return fmt.Errorf("parking the step %s triaged: %w", step.Instance, err)
+			return fmt.Errorf("releasing the step %s triaged: %w", step.Instance, err)
 		}
 		defer tx.Rollback()
-		if err := parkUntriaged(tx, step, triaged, outcome, nowMS); err != nil {
+		if err := releaseUntriaged(
+			tx, step, triaged, spec, def, outcome, nowMS); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -682,11 +683,12 @@ func routeVoteStep(
 			); err != nil {
 				return err
 			}
-		} else if err := parkUntriaged(tx, step, triaged, outcome, nowMS); err != nil {
+		} else if err := releaseUntriaged(
+			tx, step, triaged, spec, def, outcome, nowMS); err != nil {
 			// A verdict outside the mapping's vocabulary — an operator's manual
 			// commit (§8.4). The panel reached an outcome the mapping has no key
-			// for, so the suspension returns to a person rather than guessing
-			// which of two keys was meant.
+			// for, so its own `on_fail` disposes of the step rather than this
+			// guessing which of two keys was meant.
 			return err
 		}
 	}

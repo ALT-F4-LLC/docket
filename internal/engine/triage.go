@@ -232,22 +232,68 @@ func applyTriageOutcome(
 	}
 
 	note := fmt.Sprintf("%s ruled %s by %s", panel.Instance, routing, verdict)
+	return applyTriageRouting(tx, def, router, routing, note, nowMS)
+}
+
+// applyTriageRouting performs one triage routing on the step that was triaged,
+// and then RECONCILES THE ISSUE AND RUN FOR THAT STEP.
+//
+// The reconcile is not optional bookkeeping. `docket step resolve --as` ends
+// with the same call for the step it resolves (human.go), and the issue-level
+// effects live there, not in the routing write: `abandon-issue` runs
+// abandonIssue's cascade over the issue's remaining steps, every routing sweeps
+// the triaged step's own interposed targets and the `after_fired` successors
+// behind them, and the run rollup runs. Writing the routing row alone would
+// record `abandon-issue` on one step while the issue kept scheduling work —
+// the panel's decision visible in the ledger and absent from the run.
+//
+// The panel's own reconcile does not cover this: it runs for the PANEL's row
+// with the panel's routing, and the two steps have different successors and
+// different issue-level consequences.
+func applyTriageRouting(
+	tx *sql.Tx, def *workflow.Definition, router *db.Step,
+	routing, note string, nowMS int64,
+) error {
+	applied := routing
 	switch routing {
 	case workflow.TriageWaitingHuman:
-		// The panel declined to decide. The step becomes an ORDINARY park, which
-		// is where it would have gone without a panel at all — the operator now
-		// has the panel's rationale beside the gate rows.
-		return db.SetStepRoutingTx(tx, router.ID,
-			workflow.OnFailWaitingHuman, note, db.StepWaitingHuman, nowMS)
+		// The panel declined to decide, or could not. The step becomes an
+		// ORDINARY park, which is where it would have gone without a panel at
+		// all — the operator now has the panel's rationale beside the gate rows.
+		applied = workflow.OnFailWaitingHuman
+		if err := db.SetStepRoutingTx(tx, router.ID,
+			applied, note, db.StepWaitingHuman, nowMS); err != nil {
+			return err
+		}
 	case workflow.TriageAbandonIssue:
-		return db.SetStepRoutingTx(tx, router.ID,
-			workflow.OnFailAbandonIssue, note, db.StepFailedRouted, nowMS)
+		applied = workflow.OnFailAbandonIssue
+		if err := db.SetStepRoutingTx(tx, router.ID,
+			applied, note, db.StepFailedRouted, nowMS); err != nil {
+			return err
+		}
 	case workflow.TriageRetry:
-		return applyTriageRetry(tx, router, note, nowMS)
-	case workflow.TriageFixRound:
-		return applyTriageFixRound(tx, router, def, note, nowMS)
+		// A retry returns the step to `pending`: the issue is not settled and
+		// there is nothing to sweep, so the reconcile below only refreshes the
+		// mirror and the rollup.
+		applied = ResolveRetry
+		if err := applyTriageRetry(tx, router, note, nowMS); err != nil {
+			return err
+		}
+	case workflow.TriageFixRound, workflow.OnFailFixLoop:
+		// `fix-round` (a panel's mapping) and `fix-loop` (a panel's own
+		// `on_fail`) are the same act here: the failed step's work is redone in
+		// a new round. Both enter an AUTHORIZED round, because in both cases a
+		// panel was convened over the failure and the round is its answer.
+		applied = workflow.OnFailFixLoop
+		if err := applyTriageFixRound(tx, router, def, note, nowMS); err != nil {
+			return err
+		}
+	default:
+		return nil
 	}
-	return nil
+
+	return reconcileIssueAndRun(
+		tx, router, def, workflow.StepByName(def, router.StepName), applied, nowMS)
 }
 
 // applyTriageRetry is `--as retry` for a panel: the budget resets, the lease is
@@ -304,25 +350,45 @@ func applyTriageFixRound(
 		workflow.OnFailFixLoop, note, db.StepSuperseded, nowMS)
 }
 
-// parkUntriaged parks a suspended step whose panel closed without reaching a
-// verdict (DKT-1901) — a quorum miss, a proposal retired without a tally, or an
-// operator's manual commit outside the mapping's vocabulary.
+// releaseUntriaged disposes of a suspended step whose panel closed WITHOUT
+// reaching a verdict the mapping is keyed on (DKT-1901) — a quorum miss, a
+// proposal retired without a tally, or an operator's manual commit.
 //
-// It is what makes the documented backstop real. The suspension is only safe
-// while a panel can still answer: once the panel's proposal is closed, a step
-// left `gated` has nothing able to resolve it, because the operator's verbs act
-// on a park. So the question returns to a person, carrying the panel's outcome
-// so the operator knows a panel was asked and what it managed to say.
-func parkUntriaged(
-	tx *sql.Tx, panel, router *db.Step, outcome *VoteOutcome, nowMS int64,
+// THE PANEL'S OWN `on_fail` GOVERNS HERE, and this is the only place it is
+// read for a triaging panel. That is what makes it the backstop: V13a already
+// requires every vote step to declare it, and on a panel it answers "what
+// happens to the step I was asked about when I cannot answer". The default is
+// `waiting-human`, which parks the step for an operator — where it would have
+// gone without a panel at all.
+//
+// The suspension may not simply persist. Once the proposal is closed a step
+// left `gated` has nothing able to resolve it: the operator's resolution verbs
+// act on a park, and no later tally will arrive. So the panel's closure always
+// disposes of the step one way or another.
+//
+// The panel's own row is terminalized `skipped`: it was convened, it closed
+// without ruling, and leaving it non-terminal would hold its own successors.
+func releaseUntriaged(
+	tx *sql.Tx, panel, router *db.Step, spec *workflow.Step,
+	def *workflow.Definition, outcome *VoteOutcome, nowMS int64,
 ) error {
-	reason := fmt.Sprintf(
-		"%s closed %s without reaching a verdict, so nothing decided what "+
-			"%s's failure means; `docket step resolve --as retry` re-runs it, "+
-			"`--as fix-round` buys a round, `--as abandon-issue` ends it",
-		panel.Instance, outcome.Status, router.Instance)
-	return db.SetStepRoutingTx(tx, router.ID,
-		workflow.OnFailWaitingHuman, reason, db.StepWaitingHuman, nowMS)
+	routing := spec.EffectiveOnFail()
+	note := fmt.Sprintf(
+		"%s closed %s without reaching a verdict, so its own `on_fail` (%s) "+
+			"disposes of %s",
+		panel.Instance, outcome.Status, routing, router.Instance)
+
+	if err := applyTriageRouting(tx, def, router, routing, note, nowMS); err != nil {
+		return err
+	}
+	if err := db.SetStepRoutingTx(tx, panel.ID, workflow.OnFailSkip, note,
+		db.StepSkipped, nowMS); err != nil {
+		return err
+	}
+	return recordEvent(tx, eventRecord{
+		Kind: EventStepSkipped, RunID: panel.RunID, Instance: panel.Instance,
+		IssueID: panel.IssueID, Data: note, AtMS: nowMS,
+	})
 }
 
 // triageVerdict maps a tally's outcome onto the mapping's key vocabulary.

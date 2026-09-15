@@ -1619,6 +1619,25 @@ func anyBodyServes(def *Definition, trigger string) bool {
 // mistake worth naming at register, and one declared on a non-vote step is a
 // misunderstanding of what the field is for.
 func validateOnFailRoutes(def *Definition, step *Step) error {
+	// V40c's companion: a triaging panel's OWN `on_fail` disposes of the step it
+	// was asked about when the tally reaches no verdict, so `skip` is refused
+	// there. Skipping is a statement about the panel's own work being
+	// unnecessary; applied to a failed executor it would route the failure away
+	// as though the step had never needed to run.
+	if step.Type == TypeVote && step.OnFail == OnFailSkip &&
+		len(routedToPanel(def, step.Name)) > 0 {
+		return &Error{
+			Rule: "V40c", Step: step.Name, Field: "on_fail",
+			Message: fmt.Sprintf(
+				"step %q: %s route their failures here, so this panel's `on_fail` "+
+					"disposes of a failed step when no verdict is reached — and "+
+					"%q would route that failure away as though the step had never "+
+					"needed to run; use %s",
+				step.Name, quotedList(routedToPanel(def, step.Name)), OnFailSkip,
+				quotedList([]string{OnFailWaitingHuman, OnFailFixLoop, OnFailAbandonIssue})),
+		}
+	}
+
 	if len(step.OnFailRoutes) == 0 {
 		// V40c: a panel some step routes to must say what its verdicts mean.
 		// Without the mapping a tally would decide nothing and the failed step
