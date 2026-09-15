@@ -1142,7 +1142,6 @@ func instantiateOrdinal(
 func stampEntryRouting(
 	tx *sql.Tx, step *db.Step, instances []string, note string, nowMS int64,
 ) error {
-	record := routingRecord(workflow.OnFailFixLoop, note)
 	for _, instance := range instances {
 		var (
 			id     int
@@ -1159,7 +1158,9 @@ func stampEntryRouting(
 		if status != db.StepPending {
 			continue
 		}
-		if err := db.SetStepRoutingTx(tx, id, record, db.StepPending, nowMS); err != nil {
+		if err := db.SetStepRoutingTx(
+			tx, id, workflow.OnFailFixLoop, note, db.StepPending, nowMS,
+		); err != nil {
 			return err
 		}
 	}
@@ -1365,7 +1366,7 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 		}
 
 		if err := db.SetStepRoutingTx(
-			tx, step.ID, routingRecord(routing, reason), statusForRouting(routing), nowMS,
+			tx, step.ID, routing, reason, statusForRouting(routing), nowMS,
 		); err != nil {
 			return err
 		}

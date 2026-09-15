@@ -189,6 +189,11 @@ type Step struct {
 	SagaStage    string
 	GateTrail    string
 	Routing      string
+	// ParkReason is the ENGINE's text for why this step could not be decided,
+	// written only where the step routes `waiting-human` and never rewritten by
+	// the resolution that answers it. Routing holds the LATEST decision; this
+	// holds the question.
+	ParkReason   string
 	Metadata     string
 	ContextBytes int
 	// Materialized reports a step the ENGINE minted rather than one the pinned
@@ -234,7 +239,7 @@ SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, ins
        kind, executor, class, status, attempt, attempt_base, failed_attempts,
        reaped_claims, last_claim_end, max_attempts, expected_cost,
        owner, token_hash, expires_ms, started_ms, activity_ms, saga_stage,
-       gate_trail, routing, metadata, context_bytes, materialized, usage_recorded,
+       gate_trail, routing, park_reason, metadata, context_bytes, materialized, usage_recorded,
        created_at_ms, updated_at_ms, row_version, work_root
   FROM steps`
 
@@ -344,7 +349,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.Status, &step.Attempt, &step.AttemptBase, &step.FailedAttempts,
 		&step.ReapedClaims, &step.LastClaimEnd, &maxAtt, &step.ExpectedCost,
 		&owner, &tokenHash, &expires, &started, &activity, &saga,
-		&gateTrail, &routing, &metadata, &ctxBytes, &mat, &usageRec,
+		&gateTrail, &routing, &step.ParkReason, &metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -655,16 +660,39 @@ func SetStepGateTrailTx(tx *sql.Tx, id int, trail string, nowMS int64) error {
 	return nil
 }
 
+// RoutingRecord is the stored routing string: the routing alone, or
+// `<routing>: <reason>` when a reason was given. It is exported because the
+// engine builds the same shape for the `step-routed` event and for the
+// cascade-abandon update, and a second spelling of it would let the readers
+// that split this string drift from the write that produces it.
+func RoutingRecord(routing, reason string) string {
+	if reason == "" {
+		return routing
+	}
+	return routing + ": " + reason
+}
+
 // SetStepRoutingTx records the routing a step resolved to, alongside its final
 // status. They are ONE statement because they are one fact — the step ended
 // this way, for this reason — and a status without its routing is a step whose
 // disposition cannot be explained.
-func SetStepRoutingTx(tx *sql.Tx, id int, routing, status string, nowMS int64) error {
+//
+// `reason` is the caller's explanation for that routing. It is appended to the
+// routing record, as it always was, AND it lands in `park_reason` when — and
+// only when — this write parks the step. That condition lives in the SQL rather
+// than at the eight call sites so no later caller can park a step without
+// recording why, and so a resolution, which writes a different status, cannot
+// overwrite the question it is answering (DKT-1898).
+func SetStepRoutingTx(
+	tx *sql.Tx, id int, routing, reason, status string, nowMS int64,
+) error {
 	_, err := tx.Exec(
 		`UPDATE steps SET routing = ?, status = ?, activity_ms = ?, updated_at_ms = ?,
+		        park_reason = CASE WHEN ? = ? THEN ? ELSE park_reason END,
 		        row_version = row_version + 1
 		  WHERE id = ?`,
-		nullable(routing), status, nowMS, nowMS, id,
+		nullable(RoutingRecord(routing, reason)), status, nowMS, nowMS,
+		status, StepWaitingHuman, reason, id,
 	)
 	if err != nil {
 		return fmt.Errorf("recording step routing: %w", err)

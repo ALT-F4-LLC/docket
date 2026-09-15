@@ -363,6 +363,17 @@ type StepAttempt struct {
 	// selected ...`. Empty for a step that has not been routed yet, which is
 	// itself the answer for a `pending` or `claimed` row.
 	Routing string `json:"routing,omitempty"`
+	// ParkReason is the ENGINE's text for why this step parked, kept apart
+	// from Routing so neither overwrites the other (DKT-1898).
+	//
+	// On a RESOLVED park, Routing is the resolution — its routing and the
+	// resolver's note — and this is still the question that park asked. Reading
+	// the two together is what the report could not do: 328 park events across
+	// the store, and the engine's own text survived on 3 of them.
+	//
+	// Empty on a step that never parked, and on one parked before the column
+	// existed.
+	ParkReason string `json:"park_reason,omitempty"`
 	// Vote is a vote step's proposal and how it tallied, `DKT-V38 rejected`.
 	//
 	// A vote step's `attempts` is permanently 0 — it is never claimed — so the
@@ -832,11 +843,12 @@ func effectiveStepFacts(sched *Scheduler) ([]model.StatusCount, []StepAttempt) {
 		status := EffectiveStatus(sched, step)
 		counts[status]++
 		row := StepAttempt{
-			Step:     model.FormatStepID(step.ID),
-			Instance: step.Instance,
-			Status:   status,
-			Attempts: step.Attempt,
-			Routing:  step.Routing,
+			Step:       model.FormatStepID(step.ID),
+			Instance:   step.Instance,
+			Status:     status,
+			Attempts:   step.Attempt,
+			Routing:    step.Routing,
+			ParkReason: step.ParkReason,
 		}
 		if step.IssueID != 0 {
 			row.Issue = model.FormatID(step.IssueID)

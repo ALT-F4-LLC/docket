@@ -578,7 +578,7 @@ func routeVoteStep(
 	status := statusForRouting(routing)
 
 	if err := db.SetStepRoutingTx(tx, step.ID,
-		routingRecord(routing, reason), status, nowMS); err != nil {
+		routing, reason, status, nowMS); err != nil {
 		return err
 	}
 	if routingStep != nil {
@@ -602,7 +602,7 @@ func routeVoteStep(
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
-		IssueID: step.IssueID, Data: routing, AtMS: nowMS,
+		IssueID: step.IssueID, Data: routingRecord(routing, reason), AtMS: nowMS,
 	}); err != nil {
 		return err
 	}

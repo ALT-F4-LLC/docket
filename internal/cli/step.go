@@ -1128,12 +1128,17 @@ type stepDetailPayload struct {
 	// stand-in sha, would send it to read a tree nobody recorded.
 	TargetSHA      string `json:"target_sha,omitempty"`
 	TargetWorktree string `json:"target_worktree,omitempty"`
+	// ParkReason is why the ENGINE parked this step, and it survives the
+	// resolution that answers it (DKT-1898) — `routing` by then carries the
+	// resolver's words, not the engine's.
+	ParkReason string `json:"park_reason,omitempty"`
 }
 
 // stepShowPayload wraps a view only when there is something to add, so the
 // unchanged case does not even pay for a wrapper type on the wire.
 func stepShowPayload(view *engine.StepView) any {
-	if view.HeldCluster == nil && view.TargetSHA == "" && view.TargetWorktree == "" {
+	if view.HeldCluster == nil && view.TargetSHA == "" &&
+		view.TargetWorktree == "" && view.ParkReason == "" {
 		return view.Row
 	}
 	return stepDetailPayload{
@@ -1141,6 +1146,7 @@ func stepShowPayload(view *engine.StepView) any {
 		HeldCluster:    view.HeldCluster,
 		TargetSHA:      view.TargetSHA,
 		TargetWorktree: view.TargetWorktree,
+		ParkReason:     view.ParkReason,
 	}
 }
 
@@ -1206,7 +1212,13 @@ A step whose declared inputs resolve an ` + "`issue.diff`" + ` round record also
 target_sha and target_worktree — the SAME pair its context bundle carries, so
 a caller seating a review or a vote panel learns which tree is under review
 without reading the whole bundle. Both keys are ABSENT on a step with no such
-record; neither is ever approximated from the shared HEAD.`,
+record; neither is ever approximated from the shared HEAD.
+
+A step that PARKED carries park_reason: the engine's own text for what it
+could not decide. It is not the same field as routing and it is not replaced
+by one — routing on a resolved park holds the resolver's routing and note,
+while park_reason still holds the question. Absent on a step that never
+parked, and on one parked before the field existed.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepShow(cmd, args, getWriter(cmd))

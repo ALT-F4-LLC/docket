@@ -298,7 +298,7 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	}
 	status := statusForRouting(routing)
 
-	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, nowMS); err != nil {
 		return err
 	}
 	// The note as before, plus who decided (DKT-2450).
@@ -817,7 +817,7 @@ func (e *Engine) resolveStep(
 		out.Repin = repin
 	}
 
-	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, nowMS); err != nil {
 		return err
 	}
 	// The resolution as before, plus who ruled (DKT-2450).
@@ -1132,7 +1132,7 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
-	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, nowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{

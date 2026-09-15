@@ -228,13 +228,14 @@ func (e *Engine) parkInterruptedGate(
 		return err
 	}
 	if err := db.SetStepRoutingTx(tx, step.ID,
-		routingRecord(workflow.OnFailWaitingHuman, reason),
+		workflow.OnFailWaitingHuman, reason,
 		db.StepWaitingHuman, nowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
-		IssueID: step.IssueID, Data: workflow.OnFailWaitingHuman, AtMS: nowMS,
+		IssueID: step.IssueID,
+		Data:    routingRecord(workflow.OnFailWaitingHuman, reason), AtMS: nowMS,
 	}); err != nil {
 		return err
 	}

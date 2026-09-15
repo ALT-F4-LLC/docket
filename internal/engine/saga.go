@@ -1405,12 +1405,15 @@ func (e *Engine) runRoutingStage(
 	// step for the ledger"). A superseded lineage's step still finished, still
 	// decided something, and the ledger still attributes it — what a stale
 	// lineage loses is its DOWNSTREAM EFFECT, not its history.
-	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, reason), status, nowMS); err != nil {
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, reason, status, nowMS); err != nil {
 		return err
 	}
+	// The event carries the reason alongside the routing (DKT-1898): a feed
+	// reading `waiting-human` alone says a step stopped and not what stopped it,
+	// which is the join every park post-mortem had to perform by hand.
 	if err := recordEvent(tx, eventRecord{
-		Kind: EventStepRouted, RunID: step.RunID,
-		Instance: step.Instance, IssueID: step.IssueID, Data: routing, AtMS: nowMS,
+		Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
+		IssueID: step.IssueID, Data: routingRecord(routing, reason), AtMS: nowMS,
 	}); err != nil {
 		return err
 	}
@@ -1569,13 +1572,11 @@ func statusForRouting(routing string) string {
 	return db.StepDone
 }
 
-// routingRecord stores the routing, with a T3 park's reason appended so an
-// operator resolving the step can see what could not be decided.
+// routingRecord is the stored routing string, for the readers that reconstruct
+// one rather than write it. Every WRITE goes through db.SetStepRoutingTx, which
+// glues the same two halves and records a park's reason separately.
 func routingRecord(routing, reason string) string {
-	if reason == "" {
-		return routing
-	}
-	return routing + ": " + reason
+	return db.RoutingRecord(routing, reason)
 }
 
 // gateVerdict reads the step's recorded results and reports the overall

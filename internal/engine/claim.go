@@ -1003,6 +1003,14 @@ type StepView struct {
 	// needs no lease to advance (§6.8).
 	Routing   string
 	SagaStage string
+	// ParkReason is the ENGINE's text for why this step parked, unchanged by
+	// the resolution that answers it (DKT-1898). Routing carries the LATEST
+	// decision and its author's note; on a resolved park those are the
+	// resolver's words, and this is still the engine's.
+	//
+	// Empty on a step that never parked, and on one parked before the column
+	// existed — that history was never captured and is not reconstructed here.
+	ParkReason string
 	// Owner and ExpiresMS are the stored lease's facts, reported whenever the
 	// effective status still counts that lease: always for a LIVE lease, and
 	// for a LAPSED one only while the run is not active. Scheduler.Expired —
@@ -1119,6 +1127,7 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 	view := &StepView{
 		Step: fresh, Row: row,
 		Routing: fresh.Routing, SagaStage: fresh.SagaStage,
+		ParkReason:     fresh.ParkReason,
 		Gates:          gates,
 		HeldCluster:    heldCluster,
 		TargetSHA:      targetSHA,

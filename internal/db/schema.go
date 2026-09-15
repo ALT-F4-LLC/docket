@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 31
+const currentSchemaVersion = 32
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -200,6 +200,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	29: migrateV28ToV29,
 	30: migrateV29ToV30,
 	31: migrateV30ToV31,
+	32: migrateV31ToV32,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -577,6 +578,7 @@ CREATE TABLE IF NOT EXISTS steps (
 	saga_stage     TEXT,
 	gate_trail     TEXT,
 	routing        TEXT,
+	park_reason    TEXT    NOT NULL DEFAULT '',
 	metadata       TEXT,
 	context_bytes  INTEGER,
 	created_at_ms  INTEGER NOT NULL,
@@ -2532,7 +2534,7 @@ func migrateV28ToV29(tx *sql.Tx) error {
 // (engine.GateFingerprint), so the grant covers the failure CONTENT the
 // operator read.
 //
-// Both columns are TEXT NOT NULL DEFAULT '' and empty means PRE-v30 and
+// Both columns are TEXT NOT NULL DEFAULT ” and empty means PRE-v30 and
 // nothing else: a row recorded at v30 or later always carries a fingerprint,
 // since a gate that printed nothing hashes the empty capture. On the grant
 // side the blank is fail-closed — a pre-v30 grant vouches for no content, so
@@ -2627,6 +2629,55 @@ func migrateV30ToV31(tx *sql.Tx) error {
 		}
 		if _, err := tx.Exec(col.ddl); err != nil {
 			return fmt.Errorf("migrating v30 to v31: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
+// v32AddedColumns is v32's whole schema change: `park_reason` on `steps` —
+// the ENGINE's text for why a step could not be decided (DKT-1898).
+//
+// It is a column of its own rather than more of `routing` because the two are
+// different facts with different authors and different lifetimes. `routing`
+// holds the LATEST decision and its author's note, and `step resolve`
+// overwrites it with the resolution — which erased the park's reason at the
+// moment it was answered. This column is written only where a step parks, so
+// the question survives its own answer.
+var v32AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "park_reason",
+		`ALTER TABLE steps ADD COLUMN park_reason TEXT NOT NULL DEFAULT ''`},
+}
+
+// v32ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 through v31 use and for the same reason: v32 adds no table and no
+// index, so a database stamped 32 by a binary built mid-change carries every
+// v31 sentinel and `park_reason` never arrives.
+var v32ColumnSentinels = []struct{ table, column string }{
+	{"steps", "park_reason"},
+}
+
+// migrateV31ToV32 adds the park reason column (DKT-1898).
+//
+// It BACK-FILLS NOTHING, and the empty string is the only defensible value for
+// every existing row: a pre-v32 park's reason was either overwritten by its
+// resolution or still glued into `routing`, and reconstructing it from there
+// would guess at which half of that string the engine wrote. Empty says "this
+// row predates the record", which is exactly true.
+//
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration probes
+// first and stays re-runnable, the same shape v10 through v31 use.
+func migrateV31ToV32(tx *sql.Tx) error {
+	for _, col := range v32AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v31 to v32: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v31 to v32: adding %s.%s: %w",
 				col.table, col.column, err)
 		}
 	}
@@ -3288,6 +3339,23 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 30
+				break
+			}
+		}
+	}
+
+	// The v32 guard, in the same COLUMN form as v31 and for its reason: v32
+	// adds one column and no table, so a database stamped 32 by a binary built
+	// mid-change carries every v31 sentinel and `park_reason` never arrives.
+	if version >= 32 {
+		for _, col := range v32ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v32 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 31
 				break
 			}
 		}

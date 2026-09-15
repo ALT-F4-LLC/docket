@@ -45,6 +45,13 @@ key is what discards which values two keys took TOGETHER on one step, so a bag
 whose keys are a request and its resolution is readable only in the second
 section. Core reads no key in either.
 
+A PARKED STEP'S ROUTING AND ITS PARK REASON ARE SEPARATE FIELDS, and neither
+overwrites the other. ` + "`routing`" + ` is the step's LATEST decision with its author's
+note — on a resolved park that is the resolver's — while ` + "`park_reason`" + ` is the
+engine's own text for what it could not decide. Reading why a step parked once
+meant reconstructing it from gate rows, artifact statuses and vote tallies,
+because the resolution had overwritten the only copy.
+
 THE BUDGET NUMBERS ARE BARE. There is no currency and no unit: what they count
 is the workflow's business. The report publishes the cap, where the cap came
 from, the declared-cost floor, reported usage per unit, max(reported, floor),
