@@ -9,6 +9,40 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
+// run30FixtureSrc is one write-class executor step followed by a HUMAN gate.
+// The gate keeps the run unfinished — the `parked == 0 && unfinished > 0`
+// rollup branch this test drives — while staying off the manifest entirely: a
+// human step never joins a staged closure (lookahead.go), because the wave has
+// no verb that answers an operator. That leaves the manifest holding exactly
+// the one step the test claims and records, so `dispatch verify` at reconcile
+// compares only a TERMINAL row and skips it (DKT-10), rather than reporting the
+// unrelated mismatch a paused run's emptied ready set produces for any
+// unrecorded row.
+const run30FixtureSrc = `
+[pipeline]
+name = "run30-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "implement"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = []
+
+[[step]]
+name = "sign_off"
+after = ["implement"]
+type = "human"
+on_fail = "skip"
+`
+
 // DKT-586 — RUN-30's spurious resume, pinned end to end.
 //
 // RUN-30's trail: seq 3053 an operator `run pause` (active -> waiting-human);
@@ -42,16 +76,22 @@ import (
 func TestRun30PauseSurvivesStepRecordAndDispatchClose(t *testing.T) {
 	conn := mustDB(t)
 	e := testEngine()
-	run, _ := activatedRun(t, conn)
 
-	// The wave: a manifest is open and its step is claimed — the state RUN-30
-	// was in when the operator typed the pause. Limit 1 so the manifest holds
-	// only the claimed step: RUN-30's wave had recorded every manifest row
-	// before the reconcile ran, and VerifyDispatch (correctly) reports a
-	// mismatch for a manifest whose UNRECORDED rows are absent from a paused
-	// run's ready set — R1 empties it — which is a different fact than the one
-	// this test pins.
-	openDispatch(t, conn, run.ID, 1, nowMS)
+	// A ONE-STEP workflow, so the whole offer is the single step this test
+	// claims: RUN-30's wave had recorded every manifest row before the
+	// reconcile ran, and VerifyDispatch (correctly) reports a mismatch for a
+	// manifest whose UNRECORDED rows are absent from a paused run's ready set —
+	// R1 empties it — which is a different fact than the one this test pins.
+	// `--limit` cannot produce that state since DKT-2070: the cut takes whole
+	// lanes, so any positive limit over a multi-step issue admits its whole
+	// chain, staged rows included.
+	registerSource(t, conn, []byte(run30FixtureSrc), "run30-fixture.toml")
+	issue := createIssue(t, conn, "run30 fixture", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	openDispatch(t, conn, run.ID, 0, nowMS)
 	implID := stepIDByInstance(t, conn, "implement@0")
 	claim, err := ClaimStep(conn, implID, ClaimOptions{Owner: "w", NowMS: nowMS})
 	testsupport.Must(t, err, "claim implement@0: %v", err)

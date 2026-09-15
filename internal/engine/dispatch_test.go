@@ -347,9 +347,16 @@ func TestManifestLimitSlicesAfterOrdering(t *testing.T) {
 	}
 	abandon(t, conn, runID, nowMS)
 
+	// DKT-2070: the cut's unit is the LANE, so `--limit 1` admits the first
+	// ordered issue's whole in-offer closure — smaller than one closure means
+	// the first closure whole — and never a second issue's rows.
 	limited := openDispatch(t, conn, runID, 1, nowMS)
-	if len(limited.Rows) != 1 {
-		t.Fatalf("--limit 1 produced %d rows", len(limited.Rows))
+	for _, r := range limited.Rows {
+		if r.Issue != full.Rows[0].Issue {
+			t.Fatalf("--limit 1 admitted a row for %s beside the first ordered "+
+				"issue %s — the cut must never start a lane it cannot finish",
+				r.Issue, full.Rows[0].Issue)
+		}
 	}
 	if limited.Rows[0].Issue != full.Rows[0].Issue {
 		t.Errorf("--limit 1 kept %s (%s); the ordered ready set starts with %s "+
@@ -685,12 +692,20 @@ func TestVerifyLimitedManifestKeepsTheFixerAndVerifies(t *testing.T) {
 			"closure (8 rows), got %d: %+v", len(unlimited.Steps), unlimited.Steps)
 	}
 
+	// DKT-2070 superseded DKT-38's row prefix with a LANE-complete cut: these
+	// eight rows are one issue's single in-offer closure, so a limit below it
+	// admits the closure whole rather than a stage-ordered prefix of it. The
+	// fixer still leads its judges, and the manifest reports the overrun.
 	limited := openDispatch(t, conn, run.ID, 2, nowMS)
-	if len(limited.Rows) != 2 ||
+	if len(limited.Rows) != 8 ||
 		limited.Rows[0].Instance != "fix@1" || limited.Rows[0].Stage != 0 ||
 		limited.Rows[1].Stage != 1 {
-		t.Fatalf("--limit 2 must keep the stage-order prefix — fix@1 at "+
-			"stage 0, one judge at stage 1 — got: %+v", limited.Rows)
+		t.Fatalf("--limit 2 must admit the single lane whole, fix@1 at stage 0 "+
+			"ahead of its judges — got: %+v", limited.Rows)
+	}
+	if limited.Total != 8 || limited.Truncated {
+		t.Errorf("limited manifest total=%d truncated=%v, want 8 and false — "+
+			"the whole ready set was admitted", limited.Total, limited.Truncated)
 	}
 
 	result, mismatch, err := NewEngine().VerifyDispatch(conn, run.ID, nowMS)

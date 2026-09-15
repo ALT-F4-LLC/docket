@@ -825,12 +825,46 @@ behalf would mint a token nobody holds.
 | P1 | `dispatch open --run RUN-N` computes the ready set **exactly as `next` does** — the same `LoadScheduler`, the same predicate, the same `SortSteps` — and records the resulting rows in order |
 | P2 | The response is §11.4's shape verbatim: `{ dispatch, run, opened_seq, rows: [<next row>…] }` |
 | P3 | Each row is stored as its **canonical JSON bytes** plus their sha256. Canonical means the same marshaling the wire uses, so a stored row and a fetched row are byte-identical by construction rather than by a re-serialization that could differ in key order |
-| P4 | `--limit` applies, with the same ordering-then-slicing rule as `next` (§6.3), so a relay can open a manifest for the batch size it can actually spawn |
+| P4 | `--limit` applies, with the same ordering-then-slicing rule as `next` (§6.3), and cuts **whole issues** rather than rows (§5.2.1), so a relay can open a manifest for the batch size it can actually spawn without splitting an issue's chain across dispatches |
 | P5 | `dispatch open` **performs the same lazy reap `next` does** before computing. It is a scheduling verb offering a batch; offering a stale step that a reap would have freed would make the manifest wrong the moment it was written. `dispatch close` performs it too, before its own discrepancy probe (§5.6 P18): it is the mutating scheduling verb that reconciles that same manifest, and `next` cannot reap on its behalf while the dispatch is open — it reaps, refuses P24, and the refusal rolls the reap back |
 | P6 | Opening while a dispatch is already open is `CONFLICT` (exit 4), naming the open dispatch's id and its expiry — C1, enforced by `idx_dispatches_one_open` rather than by a check-then-insert |
 
 **`opened_seq` is the event seq at open time**, and it is the manifest's place
 in the log. §6 uses it as the boundary for "reaps this relay has not yet seen".
+
+## 5.2.1 The lane-complete cut, and what the manifest says about it
+
+`readyRows` widens the claimable prefix to its staged closure and emits
+**stage-major** order: every issue's stage-*k* rows precede any issue's
+stage-*k+1* rows. A row-prefix cut over that order never separates a row from
+an in-offer predecessor, but it routinely separates a row from its own
+**dependents** — the deepest stages of every issue are the last rows, so a cap
+keeps each issue's shallow rows and drops its tail.
+
+Measured on RUN-95 (147 issues, 1436 steps, `--limit 240`): 84% of the chain
+rows of finished standard-change issues ran in a later wave than the one that
+readied them, a finished issue crossed three to five dispatches, and the median
+small change spent 22.7 h elapsed against 0.56 h of running.
+
+| # | Clause |
+|---|---|
+| P4a | The cut walks the stage-major entries and admits an issue's **entire in-offer closure** the first time one of its rows is reached |
+| P4b | It stops before an issue whose closure would carry the total past the limit, and **never splits an issue** |
+| P4c | When the first issue's closure alone exceeds the limit, that closure is admitted **whole** — half a chain is what the cut exists to prevent — and `truncated` reports the overrun |
+| P4d | `--limit 0` is unchanged: the whole offer |
+| P4e | Wire order stays **stage-major**: the result is a subsequence of the stage-major input, not a re-sort, so the runnable-prefix property still holds. The staged closure never crosses issues, so every survivor's in-offer predecessors survive with it |
+| P4f | Rows are hashed **after** the cut, so manifest hashing and `dispatch verify` are unchanged |
+| P4g | `next --run --limit N` shares `readyRows` and therefore admits exactly the step ids `dispatch open --limit N` does |
+
+The manifest reports the cut and the engine's own concurrency, both **beside**
+§11.4's shape rather than as row fields — a row is hashed and byte-compared at
+verify, and a live-derived fact would either freeze an open-time answer into
+`row_json` or need normalizing away:
+
+| # | Clause |
+|---|---|
+| P4h | `total` is the ready set's size **before** the cut, and `truncated` says whether the cut dropped anything. A relay reading only `rows` cannot tell a run whose remaining work fits from one the cap is metering out; RUN-95's conductor read a post-cut count as the whole offer twice against a 930-row ready set |
+| P4i | `limits` is the effective per-class `[limits] max` from the scheduler's **merged** limits, for every class the manifest's rows carry. A class with no declared max is **omitted** — unbounded is what the absence of a `[limits]` entry means, and a zero would read as no concurrency at all. Without it a relay inferred each class's concurrency from the largest same-stage count in the manifest, which a chain-deep manifest with few issues per stage under-certifies |
 
 ## 5.3 `dispatch verify`: byte-equality on rows
 

@@ -41,6 +41,21 @@ type Manifest struct {
 	// that a dispatch is open cannot tell whether waiting is a strategy.
 	ExpiresMS int64           `json:"expires_ms"`
 	Rows      []model.StepRow `json:"rows"`
+	// Total is the ready set's size BEFORE `--limit` cut it, and Truncated
+	// says whether the cut dropped anything. They ride BESIDE the §11.4 shape
+	// for StaleTargets' reason: a relay reading only `rows` cannot tell a run
+	// whose remaining work fits from one the cap is metering out, and RUN-95's
+	// conductor read a post-cut count as the run's whole offer twice against a
+	// 930-row ready set. Rows are untouched, so hashing and `dispatch verify`
+	// are unchanged.
+	Total     int  `json:"total"`
+	Truncated bool `json:"truncated"`
+	// Limits is the effective per-class `[limits] max` from the scheduler's
+	// merged limits, for every class present in the manifest's rows. Without
+	// it a relay inferred each class's concurrency from the largest same-stage
+	// count in the manifest, which a chain-deep manifest carrying few issues
+	// per stage under-certifies.
+	Limits map[string]int `json:"limits,omitempty"`
 	// StaleTargets rides BESIDE the §11.4 shape for ExpiresMS's reason: a
 	// conductor about to spend review budget on these rows needs the staleness
 	// named (DKT-193). Never a row field — rows are hashed at open and
@@ -253,7 +268,7 @@ func (e *Engine) OpenDispatch(
 		return nil, err
 	}
 
-	rows, _, rowSteps, err := readyRows(sched, ttls, limit)
+	rows, total, rowSteps, err := readyRows(sched, ttls, limit)
 	// Read off the SAME snapshot the rows came from, so the manifest cannot
 	// name a hold that a different pass decided (DKT-242).
 	budgetHeld := sched.BudgetHoldReason()
@@ -340,6 +355,9 @@ func (e *Engine) OpenDispatch(
 	return &Manifest{
 		Dispatch: FormatDispatchID(dispatchID), Run: model.FormatRunID(runID),
 		OpenedSeq: openedSeq, ExpiresMS: expiresMS, Rows: rows,
+		Total:        total,
+		Truncated:    len(rows) < total,
+		Limits:       rowClassLimits(sched, rows),
 		StaleTargets: e.staleTargets(conn, runID, candidates),
 		BudgetHeld:   budgetHeld,
 		PinDrift:     pinDriftAdvisory(conn, runID),
@@ -467,9 +485,7 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 	entries := sched.lookaheadOffer(ready)
 
 	total := len(entries)
-	if limit > 0 && len(entries) > limit {
-		entries = entries[:limit]
-	}
+	entries = laneCompleteCut(entries, limit)
 
 	rows := make([]model.StepRow, 0, len(entries))
 	steps := make([]*db.Step, 0, len(entries))
@@ -495,6 +511,78 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 	// belongs to the `step record` that readies it, not to the offer that
 	// previewed it.
 	return rows, total, steps, nil
+}
+
+// rowClassLimits is Manifest.Limits: the merged `[limits] max` for each class
+// the manifest's rows actually carry. A class with no declared max is omitted —
+// unbounded is what the absence of a `[limits]` entry means, and a zero would
+// read as "no concurrency at all".
+func rowClassLimits(sched *Scheduler, rows []model.StepRow) map[string]int {
+	out := make(map[string]int)
+	for _, r := range rows {
+		if r.Class == "" {
+			continue
+		}
+		if max := sched.Limit(r.Class).Max; max > 0 {
+			out[r.Class] = max
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// laneCompleteCut applies `--limit` by ISSUE rather than by row: it walks the
+// stage-major entries, admits an issue's whole in-offer closure the first time
+// one of its rows is reached, and stops before the issue whose closure would
+// carry the total past the limit. An issue is never split. When the first
+// issue's closure alone exceeds the limit it is admitted whole, because half a
+// chain is the shape this cut exists to prevent.
+//
+// The prefix cut it replaces never separated a row from an in-offer
+// predecessor, but it routinely separated a row from its own DEPENDENTS: the
+// stage-major order puts every issue's deepest stages last, so a cap kept each
+// issue's shallow rows and dropped its tail, and an issue's chain then spanned
+// three to five dispatches (RUN-95: 84% of chain rows ran in a later wave than
+// the one that readied them). Cutting whole lanes lets one wave run an issue
+// from implement to verify with no dispatch boundary inside it.
+//
+// Order is preserved: the result is a subsequence of the stage-major input, so
+// the runnable-prefix property still holds — the staged closure never crosses
+// issues (lookahead.go), so every survivor's predecessors survive with it.
+func laneCompleteCut(entries []offerEntry, limit int) []offerEntry {
+	if limit <= 0 || len(entries) <= limit {
+		return entries
+	}
+
+	closureSize := make(map[int]int, len(entries))
+	var order []int
+	for _, e := range entries {
+		issue := e.step.IssueID
+		if closureSize[issue] == 0 {
+			order = append(order, issue)
+		}
+		closureSize[issue]++
+	}
+
+	admitted := make(map[int]bool, len(order))
+	used := 0
+	for _, issue := range order {
+		if used > 0 && used+closureSize[issue] > limit {
+			break
+		}
+		admitted[issue] = true
+		used += closureSize[issue]
+	}
+
+	out := make([]offerEntry, 0, used)
+	for _, e := range entries {
+		if admitted[e.step.IssueID] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // readyOnly narrows readyRows' index-aligned steps to the rows rendered
