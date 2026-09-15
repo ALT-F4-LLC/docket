@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 30
+const currentSchemaVersion = 31
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -199,6 +199,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	28: migrateV27ToV28,
 	29: migrateV28ToV29,
 	30: migrateV29ToV30,
+	31: migrateV30ToV31,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2581,6 +2582,57 @@ func migrateV29ToV30(tx *sql.Tx) error {
 	return nil
 }
 
+// v31AddedColumns is v31's whole schema change: `extended_seq` on
+// `dispatches` — the append half of a manifest's place in the log (DKT-2071).
+//
+// `opened_seq` is a column here, and `dispatch extend` moves the manifest's
+// contents after that seq was taken. Recording the extend's own seq anywhere
+// BUT beside `opened_seq` leaves the two halves of one manifest's log position
+// in different stores: a reader holding the dispatch row can say when it was
+// opened but not whether it has since grown, and must join the event log to
+// find out.
+//
+// It is INTEGER NOT NULL DEFAULT 0, and zero means NEVER EXTENDED and nothing
+// else: an event seq is 1-based, so no real extend can write a zero. Each
+// extend OVERWRITES it, so the column names the latest append — the event log
+// keeps the full history, and a column accumulating extends would be a second,
+// worse copy of it.
+var v31AddedColumns = []struct{ table, column, ddl string }{
+	{"dispatches", "extended_seq",
+		`ALTER TABLE dispatches ADD COLUMN extended_seq INTEGER NOT NULL DEFAULT 0`},
+}
+
+// v31ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 through v30 use and for the same reason: v31 adds no table and no
+// index, so a database stamped 31 by a binary built mid-change carries every
+// v30 sentinel and `extended_seq` never arrives.
+var v31ColumnSentinels = []struct{ table, column string }{
+	{"dispatches", "extended_seq"},
+}
+
+// migrateV30ToV31 adds the manifest's extend cursor (DKT-2071).
+//
+// It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
+// no manifest that predates the verb for extending one has been extended.
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration probes
+// first and stays re-runnable, the same shape v10 through v30 use.
+func migrateV30ToV31(tx *sql.Tx) error {
+	for _, col := range v31AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v30 to v31: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v30 to v31: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3219,6 +3271,23 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 29
+				break
+			}
+		}
+	}
+
+	// The v31 guard, in the same COLUMN form as v30 and for its reason: v31
+	// adds one column and no table, so a database stamped 31 by a binary built
+	// mid-change carries every v30 sentinel and `extended_seq` never arrives.
+	if version >= 31 {
+		for _, col := range v31ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v31 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 30
 				break
 			}
 		}

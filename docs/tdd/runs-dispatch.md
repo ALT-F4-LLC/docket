@@ -1027,6 +1027,19 @@ dispatch, the appended count, the new expiry, and `extended_seq`: the log
 position the appended rows were computed at, the same fact `opened_seq` records
 for the open.
 
+**`extended_seq` is a column on `dispatches`, beside `opened_seq`** (v31). The
+two are one manifest's place in the log — where it started, and where it last
+grew — and splitting them across stores would leave a reader holding the
+dispatch row able to say when the manifest opened but not whether it has since
+been extended, which is a join against the event log to answer. It is INTEGER
+NOT NULL DEFAULT 0, and zero means NEVER EXTENDED: an event seq is 1-based, so
+no append can write one. Each extend OVERWRITES it, including an extend that
+appended nothing — an empty extend still happened — so the column names the
+LATEST append and the event log keeps the history. The expiry and the seq move
+in one CAS on `(id, status='open')`, because they describe one append: a
+manifest that had demonstrably grown but could not say when is the state this
+column exists to prevent.
+
 **Invariants.**
 
 - **Rows are byte-hashed at append.** An appended row's bytes come from the same
@@ -1046,6 +1059,26 @@ for the open.
 - **An expired manifest is refused rather than extended**, since extending one
   would push a lapsed manifest's expiry back out and resurrect a batch the TTL
   had already given up on.
+- **The extend reports the reap hold it creates** (`reap_hold`, beside
+  `reaped`), exactly as `dispatch open` does. The shared reap is unconditional,
+  and reaping a BOUNDED class leaves an unacknowledged `reap_acks` row that
+  denies the next `guard spawn --active` (§6, A11). A relay that extended and
+  then spawned would meet that denial with no warning from the verb that made
+  the hold — and the engine's own advice names `dispatch open --ack-reap`, a
+  verb the relay cannot reach without the dispatch boundary this verb exists to
+  avoid. `guard spawn --ack-reap SEQ` clears it in place; `dispatch extend`
+  takes no `--ack-reap` of its own, since acknowledging is the spawning relay's
+  act and it already has a verb for it.
+
+**What the extension deliberately omits: the DKT-193 stale-target advisory.**
+`dispatch open` collects `staleTargetCandidates` over its ready rows and returns
+`StaleTargets`; an extension returns none, and `BudgetHeld` and `PinDrift` with
+it. These are advisories a conductor reads when deciding whether to spend a wave
+on a batch, and an extend is not that decision — the wave is already running and
+its budget was weighed at the open. The same rows are re-examined at the next
+`dispatch verify` and the next open, so the omission costs timeliness, never
+detection. A relay must not read a silent extension as a clean bill on the
+appended rows' targets.
 
 **`guard spawn --rows` accepts a subset.** The guard compared a proposed batch
 against the stored manifest as WHOLE-BATCH POSITIONAL EQUALITY — same length,
@@ -1292,8 +1325,8 @@ becomes durable.
 
 | # | Clause |
 |---|---|
-| G5 | `docket guard spawn --run RUN-N [--rows FILE] [--ack-reap SEQ]…` allows iff **both**: (a) the proposed rows byte-match the open dispatch, and (b) no unacknowledged write reaps exist |
-| G6 | Proposed rows arrive via `--rows FILE` (or `-` for stdin) as the JSON array a relay is about to spawn. Byte-matching is `dispatch verify`'s comparison (P7) against the *stored manifest*, position by position |
+| G5 | `docket guard spawn --run RUN-N [--rows FILE] [--ack-reap SEQ]…` allows iff **both**: (a) every proposed row byte-matches *some* row of the open dispatch, and (b) no unacknowledged write reaps exist |
+| G6 | Proposed rows arrive via `--rows FILE` (or `-` for stdin) as the JSON array a relay is about to spawn. Byte-matching is **membership**, not positional equality: each proposed row's canonical sha256 must be one the stored manifest carries, and each stored row may be spawned **once** per batch, so a duplicate is a denial. It was whole-batch and position-by-position until `dispatch extend` (§5.10, DKT-2071) let the manifest grow mid-wave: the relay then launches the *appended suffix* alone, a batch every row of which the engine offered, which the length check denied before comparing a byte. The property defended is unchanged and still byte-exact — a relay may spawn only rows the engine issued |
 | G7 | **With no open dispatch and no `--rows`, (a) is vacuously satisfied.** A harness that does not use dispatch manifests still gets (b) — the reap check — which is the half §2 assigns to this verb by name. Requiring a manifest would make the reap-ack mechanism unavailable to any relay that batches differently |
 | G8 | **With `--rows` and no open dispatch, it is a denial**, not a vacuous pass: the relay believes it is spawning a batch the engine never issued |
 | G9 | Denial for (b) enumerates each unacknowledged seq and names `--ack-reap` (A11) |
@@ -1416,7 +1449,7 @@ checkable, and it stops being an argument and becomes a script.
 | `next` | `step-ready`, `lease-reaped`, `join-completed`, `loop-entered`, `dispatch-abandoned` (TTL), `issue-promoted` |
 | `gate` | `gate-started`, `gate-recorded`, `gate-unmatched`, `gate-rerun`, `vote-opened`, `vote-tallied` |
 | `threshold` | `step-routed`, `step-failed`, `step-superseded`, `step-skipped`, `step-held` |
-| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-closed`, `dispatch-abandoned` (explicit), `conductor-seated` (DKT-2465) |
+| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-extended` (DKT-2071), `dispatch-closed`, `dispatch-abandoned` (explicit), `conductor-seated` (DKT-2465) |
 
 **Two rows need their sentence:**
 
@@ -1466,6 +1499,14 @@ existing `lease-reaped` event already anchors. **This is a judgment and it is
 recorded as one**, so a reviewer can push back: the argument for adding it
 would be A3 (attributability), and the counter is that the ack is not a
 *transition of the run* — nothing about the run's state machine moves.
+
+**A later addition (DKT-2071): `dispatch-extended`.** §5.10's append is a
+fourth transition of the same manifest — it grows, its expiry moves, and its
+`extended_seq` advances — so it takes a kind for the reason the other three
+have one: an operator reading the log must be able to tell a manifest that was
+opened once from one that has since been extended, and `dispatch verify`'s
+answer changes with it. Its actor is `human` beside `dispatch-opened`, since
+the verb is the relay's, not the engine's.
 
 **One later addition (DKT-2465): `conductor-seated`.** `run conduct` re-mints a
 run's conductor capability — the token `step approve`, `step reject`, `step

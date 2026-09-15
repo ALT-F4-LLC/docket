@@ -234,8 +234,15 @@ func runDispatchExtend(cmd *cobra.Command, w *output.Writer) error {
 		return runErr(err)
 	}
 
+	// The extend's own reaps and the hold they leave, on the two channels
+	// `dispatch open` uses and for the same reader: the relay about to spawn
+	// the rows this call just appended, which `guard spawn` would otherwise
+	// deny on exactly this hold with no warning from the verb that made it.
 	for _, instance := range extension.Reaped {
 		w.Warn("reaped an expired lease on %s; it is ready again", instance)
+	}
+	if extension.ReapHold != "" {
+		w.Warn("%s", extension.ReapHold)
 	}
 
 	var message string

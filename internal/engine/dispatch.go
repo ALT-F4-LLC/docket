@@ -390,6 +390,15 @@ type Extension struct {
 	// Reaped names the step instances whose leases this extend reaped, the
 	// same channel OpenDispatch reports its own reaps on.
 	Reaped []string `json:"reaped,omitempty"`
+	// ReapHold is A11's guidance for the hold THIS EXTEND left behind, carried
+	// for OpenDispatch.ReapHold's reason: an extend runs the same shared reap,
+	// and reaping a BOUNDED class inserts an unacknowledged `reap_acks` row
+	// that denies the next `guard spawn --active`. A relay that extends and
+	// then launches the appended rows would meet that denial with no warning
+	// from the verb that created it, and the engine's own advice names
+	// `dispatch open --ack-reap` — a verb this relay cannot reach without the
+	// dispatch boundary the extend exists to avoid.
+	ReapHold string `json:"reap_hold,omitempty"`
 }
 
 // ExtendDispatch appends rows the engine minted or readied since the open to
@@ -505,21 +514,26 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 	// the manifest must outlive the work it now carries, and the rows already
 	// stored were budgeted for at open.
 	expiresMS := open.ExpiresMS + stagedLeaseSumMS(appended)
-	if expiresMS != open.ExpiresMS {
-		moved, err := db.ExtendDispatchExpiryTx(tx, open.ID, expiresMS)
-		if err != nil {
-			return nil, err
-		}
-		if !moved {
-			return nil, conflictErr(
-				"%s stopped being open while it was being extended",
-				FormatDispatchID(open.ID))
-		}
-	}
 
 	extendedSeq, err := lastEventSeqTx(tx)
 	if err != nil {
 		return nil, err
+	}
+
+	// The CAS runs on EVERY extend, including the one that appended nothing:
+	// `extended_seq` is the manifest's own record that it was extended and at
+	// what log position, and an empty extend is still an extend that a reader
+	// holding the dispatch row must be able to see. Only the expiry is
+	// conditional on the append, and it is conditional by arithmetic —
+	// stagedLeaseSumMS of no rows is zero.
+	moved, err := db.ExtendDispatchTx(tx, open.ID, expiresMS, extendedSeq)
+	if err != nil {
+		return nil, err
+	}
+	if !moved {
+		return nil, conflictErr(
+			"%s stopped being open while it was being extended",
+			FormatDispatchID(open.ID))
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventDispatchExtended, RunID: runID, AtMS: nowMS,
@@ -536,7 +550,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 	return &Extension{
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
 		ExtendedSeq: extendedSeq, ExpiresMS: expiresMS, Rows: appended,
-		Reaped: reaped,
+		Reaped: reaped, ReapHold: ReapHoldReason(sched.UnacknowledgedReaps()),
 	}, nil
 }
 

@@ -387,6 +387,33 @@ func TestGuardSpawnRowsAcceptsAppendedSuffix(t *testing.T) {
 		t.Error("an altered row rode in on a subset match; membership must " +
 			"still be byte-exact")
 	}
+	// That row's STEP is unchanged, so the manifest has a counterpart to print
+	// and the denial shows both sides' bytes.
+	if !strings.Contains(verdict.Reason, x.Rows[0].Step) {
+		t.Errorf("the denial %q does not show the manifest's own row for %s — a "+
+			"refusal shows the differing bytes, not a report that two rows differ",
+			verdict.Reason, x.Rows[0].Step)
+	}
+
+	// A proposed row naming a step the manifest NEVER carried has no
+	// counterpart, and the denial must say so rather than printing an unrelated
+	// row beside it. Only a row whose STEP is absent reaches that branch: the
+	// altered row above keeps its step and so takes the has-counterpart path.
+	orphan := make([]model.StepRow, 1)
+	orphan[0] = x.Rows[0]
+	orphan[0].Step = model.FormatStepID(999999)
+	unknown, err := json.Marshal(orphan)
+	testsupport.Must(t, err, "marshaling: %v", err)
+	verdict, err = e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: unknown, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if verdict.Allowed {
+		t.Fatal("a row naming a step absent from the manifest was allowed")
+	}
+	if !strings.Contains(verdict.Reason, "no row for "+orphan[0].Step) {
+		t.Errorf("the denial %q does not name the missing counterpart; a relay "+
+			"reading it cannot tell a row whose BYTES drifted from one the "+
+			"manifest never offered at all", verdict.Reason)
+	}
 
 	// A duplicate of one offered row is a denial too: the manifest offers each
 	// row once, and a batch that spawned one row twice would double-launch it.

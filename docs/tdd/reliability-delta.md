@@ -889,6 +889,39 @@ fail-closed: the grant stops matching, so a run mid-flight across the upgrade
 re-asks the operator instead of spending an authority whose content nobody can
 name.
 
+### AMENDMENT — the span extends to v31 (DKT-2071, 2026-09-15)
+
+**What changed.** v31 adds ONE column to one table, `dispatches.extended_seq`
+(`INTEGER NOT NULL DEFAULT 0`): the event seq of a manifest's latest
+`dispatch extend` (docs/tdd/runs-dispatch.md §5.10). `opened_seq` has always
+been a column here, and it records where a manifest started; `extended_seq`
+records where it last grew. The two are read together off one row, and
+`ExtendDispatchTx` writes the new expiry and the new seq in the SAME CAS on
+`(id, status='open')`, because they describe one append — a manifest grown past
+the wall clock it was budgeted for, or one that has demonstrably grown and
+cannot say when, are both states the pair exists to prevent. The column is
+overwritten on every extend, including one that appended nothing: an empty
+extend still happened, and the event log keeps the full history of appends that
+a column accumulating them would only duplicate.
+
+**What it fixes.** `dispatch extend` recorded its seq only on the
+`dispatch-extended` event's data and the response envelope. A reader holding the
+`dispatches` row could say when the manifest opened but not whether it had since
+been extended, and had to join the event log to find out — which makes the
+manifest row an incomplete statement of its own state, and leaves the two halves
+of one manifest's log position in two different stores.
+
+**Zero means never extended, and nothing else.** An event seq is 1-based, so no
+real append can write a zero, and the migration back-fills nothing: no manifest
+predating the verb for extending one has been extended. The blank is inert
+rather than load-bearing — nothing refuses on it — so a run mid-flight across
+the upgrade reads its open manifest as un-extended, which it is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v30, v31 is an amendment,
+not a stage: one additive column with a default, a `hasColumn`-probed `ALTER` so
+the migration is idempotent and re-runnable, and a rewind guard that probes the
+COLUMN (the v27–v30 form, since v31 adds no table and no index).
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

@@ -12,7 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// `dispatch extend` — DKT-2071's append (docs/tdd/runs-dispatch.md §5.11).
+// `dispatch extend` — DKT-2071's append (docs/tdd/runs-dispatch.md §5.10).
 //
 // A fix round is minted at the RECORD TIME of the step whose routing chose
 // `fix-loop`, never at `next`, so before this verb every loop round started in
@@ -49,6 +49,18 @@ func openDispatchExpiry(t *testing.T, conn *sql.DB, runID int) int64 {
 	open, err := db.OpenDispatchTx(tx, runID)
 	testsupport.Must(t, err, "OpenDispatchTx: %v", err)
 	return open.ExpiresMS
+}
+
+// openDispatchSeqs reads the open manifest's two log cursors as STORED, which
+// is AC2's subject: `extended_seq` beside `opened_seq` on one durable row.
+func openDispatchSeqs(t *testing.T, conn *sql.DB, runID int) (opened, extended int64) {
+	t.Helper()
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	open, err := db.OpenDispatchTx(tx, runID)
+	testsupport.Must(t, err, "OpenDispatchTx: %v", err)
+	return open.OpenedSeq, open.ExtendedSeq
 }
 
 // extendEventData reads the newest event of one kind for a run.
@@ -184,9 +196,203 @@ func TestDispatchExtendAppendsAMintedFixRound(t *testing.T) {
 			"position the appended rows were computed at",
 			EventDispatchExtended, got, want)
 	}
-	if x.ExtendedSeq <= 0 {
-		t.Errorf("extended_seq = %d, want the event cursor beside opened_seq (%d)",
-			x.ExtendedSeq, opened.OpenedSeq)
+	// AC2's third clause: `extended_seq` is RECORDED BESIDE `opened_seq` — on
+	// the same durable `dispatches` row, not only on the wire and in the log.
+	storedOpened, storedExtended := openDispatchSeqs(t, conn, run.ID)
+	if storedExtended != x.ExtendedSeq {
+		t.Errorf("the dispatches row stores extended_seq %d, want %d — the seq "+
+			"must live beside opened_seq, so a reader holding the manifest row "+
+			"can tell an extended manifest from an untouched one without "+
+			"joining the event log", storedExtended, x.ExtendedSeq)
+	}
+	if storedOpened != opened.OpenedSeq {
+		t.Errorf("opened_seq moved to %d, want %d unchanged — an extend appends "+
+			"to a manifest, it does not re-open one", storedOpened, opened.OpenedSeq)
+	}
+
+	// The oracle is the OPEN's seq, not the extend's own computation: an
+	// implementation that wrote back whatever it had just read would satisfy an
+	// equality against itself. The append happens strictly after the open, and
+	// the events between them (the record that minted fix@1) guarantee the
+	// inequality is strict.
+	if x.ExtendedSeq <= opened.OpenedSeq {
+		t.Errorf("extended_seq = %d, want strictly greater than opened_seq %d — "+
+			"the append is a later position in the same log", x.ExtendedSeq,
+			opened.OpenedSeq)
+	}
+}
+
+// TestDispatchExtendRecordsTheLatestSeqOnEachExtend pins `extended_seq`'s
+// contract as the LATEST append rather than the first: the column is overwritten
+// on every extend, including one that appends nothing. An empty extend still
+// happened, and a reader holding the manifest row must be able to see it.
+func TestDispatchExtendRecordsTheLatestSeqOnEachExtend(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	driveToVerify(t, conn, e, 0)
+	opened := openDispatch(t, conn, run.ID, 0, nowMS)
+
+	// Before any extend, the column is the never-extended zero.
+	if _, extended := openDispatchSeqs(t, conn, run.ID); extended != 0 {
+		t.Errorf("extended_seq = %d on a freshly opened manifest, want 0 — an "+
+			"event seq is 1-based, so zero is the only value that can mean "+
+			"never extended", extended)
+	}
+
+	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
+	first := extendDispatch(t, conn, run.ID, nowMS)
+	if len(first.Rows) == 0 {
+		t.Fatal("the first extend appended nothing; the test's premise is broken")
+	}
+	_, afterFirst := openDispatchSeqs(t, conn, run.ID)
+	if afterFirst != first.ExtendedSeq || afterFirst <= opened.OpenedSeq {
+		t.Fatalf("extended_seq = %d after the first extend, want %d and greater "+
+			"than opened_seq %d", afterFirst, first.ExtendedSeq, opened.OpenedSeq)
+	}
+
+	second := extendDispatch(t, conn, run.ID, nowMS)
+	if len(second.Rows) != 0 {
+		t.Fatalf("the second extend appended %v, want none — the premise is an "+
+			"EMPTY extend", instancesOf(second.Rows))
+	}
+	_, afterSecond := openDispatchSeqs(t, conn, run.ID)
+	if afterSecond != second.ExtendedSeq {
+		t.Errorf("the dispatches row stores extended_seq %d after the second "+
+			"extend, want %d — every extend overwrites the cursor",
+			afterSecond, second.ExtendedSeq)
+	}
+	if afterSecond <= afterFirst {
+		t.Errorf("extended_seq = %d after a second extend, want greater than the "+
+			"first extend's %d — the first extend's own event moved the log on, "+
+			"so a column holding the FIRST append would fail here",
+			afterSecond, afterFirst)
+	}
+}
+
+// TestDispatchExtendRefusesAnExpiredManifest is §5.10's expiry invariant:
+// extending a lapsed manifest would push its expiry back out and resurrect a
+// batch the TTL had already given up on, which is the wedge `dispatch abandon`
+// exists to avoid. Its mutant — dropping the refusal — extends one instead.
+func TestDispatchExtendRefusesAnExpiredManifest(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	driveToVerify(t, conn, e, 0)
+	opened := openDispatch(t, conn, run.ID, 0, nowMS)
+	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
+
+	// One millisecond past the manifest's own TTL: Expired is `now >= expires`.
+	past := opened.ExpiresMS + 1
+	_, err := NewEngine().ExtendDispatch(conn, run.ID, past)
+	if err == nil {
+		t.Fatal("extend succeeded on an EXPIRED manifest, want a refusal — " +
+			"extending one pushes a lapsed expiry back out and resurrects a " +
+			"batch the TTL gave up on")
+	}
+	if !strings.Contains(err.Error(), "cannot be extended") {
+		t.Errorf("extend refused with %q, want the expired-manifest refusal", err)
+	}
+
+	// The refusal is total: nothing was appended and the expiry did not move.
+	if got := openDispatchExpiry(t, conn, run.ID); got != opened.ExpiresMS {
+		t.Errorf("expires_ms = %d after a refused extend, want %d unchanged",
+			got, opened.ExpiresMS)
+	}
+	if _, extended := openDispatchSeqs(t, conn, run.ID); extended != 0 {
+		t.Errorf("extended_seq = %d after a refused extend, want 0 — a refusal "+
+			"rolls back, it does not half-record an append", extended)
+	}
+	if n := eventKindCount(t, conn, run.ID, EventDispatchExtended); n != 0 {
+		t.Errorf("%d %s events after a refused extend, want 0",
+			n, EventDispatchExtended)
+	}
+}
+
+// TestDispatchExtendReapsLapsedLeasesAndReportsTheHold is the extend half of
+// P5's lazy reap, and A11's hold on top of it. `ExtendDispatch` runs the SAME
+// shared reap every scheduling verb runs, so a lapsed lease is freed by the
+// extend itself — and on a BOUNDED class that reap leaves an unacknowledged
+// `reap_acks` row which denies the next `guard spawn --active`.
+//
+// The fixture is the bounded-class workflow for exactly that reason: a relay
+// that extends and then spawns meets the denial, and the verb that created the
+// hold is the one that must name it. Without ReapHold on the response the
+// engine's own advice points at `dispatch open --ack-reap`, a verb this relay
+// cannot reach without the dispatch boundary the extend exists to avoid.
+func TestDispatchExtendReapsLapsedLeasesAndReportsTheHold(t *testing.T) {
+	conn := mustDB(t)
+	runID := serializedRun(t, conn)
+	manifest := openDispatch(t, conn, runID, 0, nowMS)
+
+	// The manifest was budgeted at the DEFAULT TTL. Shortening the lease before
+	// the claim puts the lapse well inside that expiry, which is the state the
+	// reap must be reached in: core ships `lease.ttl.default` equal to
+	// `dispatch.grace`, so a claim at the default lapses exactly AT the
+	// one-stage manifest's expiry and the expired-manifest refusal would fire
+	// before the reap ran.
+	err := db.SetConfig(conn, 0, db.KeyLeaseTTLDefault, "1m")
+	testsupport.Must(t, err, "setting the default lease TTL: %v", err)
+
+	instance := manifest.Rows[0].Instance
+	claim := claimInstance(t, conn, instance, nowMS)
+
+	lapsed := claim.LeaseExpiresMS + graceMS(t, conn) + 1
+	if lapsed >= manifest.ExpiresMS {
+		t.Fatalf("the lapse at %d is not inside the manifest expiring at %d; "+
+			"the test's premise is broken", lapsed, manifest.ExpiresMS)
+	}
+
+	x := extendDispatch(t, conn, runID, lapsed)
+
+	var reaped bool
+	for _, got := range x.Reaped {
+		if got == instance {
+			reaped = true
+		}
+	}
+	if !reaped {
+		t.Errorf("extend reported reaped %v, want %s — the shared reap is not "+
+			"optional for an appending verb either: offering a row a reap would "+
+			"have freed makes the manifest wrong as it is written",
+			x.Reaped, instance)
+	}
+	if n := eventKindCount(t, conn, runID, EventLeaseReaped); n != 1 {
+		t.Errorf("%d lease-reaped events, want 1 — the extend's reap must be "+
+			"logged the way `next` and `dispatch open` log theirs", n)
+	}
+
+	stepID := stepIDByInstance(t, conn, instance)
+	var status, owner string
+	err = conn.QueryRow(
+		`SELECT status, COALESCE(owner, '') FROM steps WHERE id = ?`,
+		stepID).Scan(&status, &owner)
+	testsupport.Must(t, err, "reading the reaped step: %v", err)
+	if status != string(db.StepPending) || owner != "" {
+		t.Errorf("the reaped step is %q owned by %q, want %q and unowned",
+			status, owner, db.StepPending)
+	}
+
+	// The hold the reap left, and the response that names it.
+	acks := openReapsOf(t, conn, runID)
+	if len(acks) != 1 {
+		t.Fatalf("%d unacknowledged reaps after an extend reaped a bounded-class "+
+			"step, want 1 — this is the hold the response must report", len(acks))
+	}
+	if x.ReapHold == "" {
+		t.Fatal("the extend left an unacknowledged bounded-class reap and " +
+			"reported no reap_hold; the next `guard spawn --active` denies on " +
+			"it, and the verb that made the hold is the one that must name it")
+	}
+	if !strings.Contains(x.ReapHold, instance) {
+		t.Errorf("reap_hold %q does not name the held instance %s",
+			x.ReapHold, instance)
+	}
+	if !strings.Contains(x.ReapHold, "--ack-reap") {
+		t.Errorf("reap_hold %q does not name --ack-reap, the way out of it",
+			x.ReapHold)
 	}
 }
 

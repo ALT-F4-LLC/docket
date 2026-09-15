@@ -58,7 +58,15 @@ type Dispatch struct {
 	Status string
 	// OpenedSeq is the event seq at open time — the manifest's place in the log,
 	// and §6's boundary for "reaps this relay has not yet seen" (P2).
-	OpenedSeq   int64
+	OpenedSeq int64
+	// ExtendedSeq is the event seq of the manifest's LATEST `dispatch extend`,
+	// beside OpenedSeq because the two are one manifest's place in the log:
+	// where it started, and where it last grew (DKT-2071). Zero means never
+	// extended — an event seq is 1-based, so no append can write one.
+	//
+	// The latest, not every one: the event log keeps the full history of
+	// appends, and a column accumulating them would be a second, worse copy.
+	ExtendedSeq int64
 	ExpiresMS   int64
 	ClosedAtMS  *int64
 	CloseReason string
@@ -136,18 +144,24 @@ func InsertDispatchRowTx(tx *sql.Tx, dispatchID int, row DispatchRow) error {
 	return nil
 }
 
-// ExtendDispatchExpiryTx pushes an open manifest's expiry out, as a CAS on
-// (id, status='open').
+// ExtendDispatchTx records an append on an open manifest — its new expiry and
+// the event seq it happened at — as a CAS on (id, status='open').
+//
+// Both fields move together because they describe ONE append: an extend that
+// wrote the seq without the expiry would name a manifest grown past the wall
+// clock it was budgeted for, and one that wrote the expiry without the seq is
+// the state DKT-2071's AC2 refuses — a manifest that has demonstrably grown and
+// cannot say when.
 //
 // The CAS is the same exclusion CloseDispatchTx relies on: a close or a TTL
 // abandon racing an extend matches zero rows and the extend learns it lost
-// rather than writing an expiry onto a manifest that is no longer open.
-func ExtendDispatchExpiryTx(tx *sql.Tx, id int, expiresMS int64) (bool, error) {
+// rather than writing onto a manifest that is no longer open.
+func ExtendDispatchTx(tx *sql.Tx, id int, expiresMS, extendedSeq int64) (bool, error) {
 	res, err := tx.Exec(
 		`UPDATE dispatches
-		    SET expires_ms = ?, row_version = row_version + 1
+		    SET expires_ms = ?, extended_seq = ?, row_version = row_version + 1
 		  WHERE id = ? AND status = ?`,
-		expiresMS, id, DispatchOpen,
+		expiresMS, extendedSeq, id, DispatchOpen,
 	)
 	if err != nil {
 		return false, fmt.Errorf("extending dispatch %d: %w", id, err)
@@ -165,8 +179,8 @@ func ExtendDispatchExpiryTx(tx *sql.Tx, id int, expiresMS int64) (bool, error) {
 // one definition of "open": the status the partial index keys on.
 func OpenDispatchTx(tx *sql.Tx, runID int) (*Dispatch, error) {
 	return scanDispatch(tx.QueryRow(
-		`SELECT id, run_id, status, opened_seq, expires_ms, closed_at_ms,
-		        close_reason, created_at_ms, row_version
+		`SELECT id, run_id, status, opened_seq, extended_seq, expires_ms,
+		        closed_at_ms, close_reason, created_at_ms, row_version
 		   FROM dispatches WHERE run_id = ? AND status = ?`,
 		runID, DispatchOpen))
 }
@@ -175,8 +189,8 @@ func OpenDispatchTx(tx *sql.Tx, runID int) (*Dispatch, error) {
 // closing verb makes after its CAS to report what actually happened.
 func GetDispatchTx(tx *sql.Tx, id int) (*Dispatch, error) {
 	return scanDispatch(tx.QueryRow(
-		`SELECT id, run_id, status, opened_seq, expires_ms, closed_at_ms,
-		        close_reason, created_at_ms, row_version
+		`SELECT id, run_id, status, opened_seq, extended_seq, expires_ms,
+		        closed_at_ms, close_reason, created_at_ms, row_version
 		   FROM dispatches WHERE id = ?`, id))
 }
 
@@ -186,8 +200,8 @@ func scanDispatch(row *sql.Row) (*Dispatch, error) {
 		closed sql.NullInt64
 		reason sql.NullString
 	)
-	err := row.Scan(&d.ID, &d.RunID, &d.Status, &d.OpenedSeq, &d.ExpiresMS,
-		&closed, &reason, &d.CreatedAtMS, &d.RowVersion)
+	err := row.Scan(&d.ID, &d.RunID, &d.Status, &d.OpenedSeq, &d.ExtendedSeq,
+		&d.ExpiresMS, &closed, &reason, &d.CreatedAtMS, &d.RowVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoOpenDispatch
 	}
