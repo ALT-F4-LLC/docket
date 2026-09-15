@@ -153,6 +153,36 @@ override-pass, note recorded); `approve|reject` belongs to `type=human` gate ste
 only, and a human gate's reject routing may not itself be `waiting-human`
 (register-time VALIDATION_ERROR).
 
+**Park class.** Every park records `park_class` beside `park_reason`: the reason
+is prose for the person the park escalates to, the class is the closed enum a
+conductor or panel routes on. It is assigned inside the routing transaction from
+that decision's own facts — a gate row's verdict word, a tally, an
+`EnterLoop` outcome — and never by reading the reason text, so rewording a
+message cannot move a row between classes. `SetStepRoutingTx` writes both halves
+in one statement, under the same condition, and REFUSES a park that names no
+class; a resolution, which writes a different status, overwrites neither.
+A blank class means the row parked before the column existed.
+
+| value | produced by |
+|---|---|
+| `gate-failed` | a completion gate ran and did not pass — the routing stage's failed-verdict branch |
+| `gate-unmatched` | a gate named no trust entry, so it never ran: the same branch when a recorded row's verdict is `unmatched`, and the gate-resolution path that parks on an unmatched entry outright |
+| `gate-skipped` | a gate measured nothing because the judged commit could not be bound — the routing stage's unmeasured branch, decided before the failed-verdict one |
+| `threshold-routed` | a declared `threshold` evaluated to a park, at the routing stage and at a vote step's approved-with-concerns evaluation |
+| `loop-bound` | a `fix-loop` entry refused because the ordinal would exceed `max_fix_loops` plus grants — every `applyFixLoop` caller, from `EnterLoop`'s refusal rather than its wording |
+| `vote-rejected` | a vote step tallied to a rejection |
+| `held-rejected` | an operator rejected a held cluster; the consequence lands on the ROUTING step, never the materialized one, which ends `done` either way |
+| `gap-only` | a completion whose only recorded artifacts were gaps, decided before any gate verdict |
+| `unchanged-handback` | a loop round handed back the commit its previous round recorded, so the review chain would re-read one tree |
+| `pass-floor` | a `pass` would have exited with declared `pass_floor` work still standing |
+| `action-failed` | an action step's computation could not run — bad params, an unorderable value, an unmatched command name, or a non-zero exit |
+| `attempts-exhausted` | the step spent its `max_attempts` budget |
+| `join-missed` | a join completed below `min_siblings` |
+
+`paused` is not among them: it is a RUN status, never written to `steps.status`,
+so a paused run removes its steps from the scheduler through their run rather
+than by parking them, and no routing transaction produces it.
+
 **Scheduling.** `next` computes readiness (engine-core §5): dependencies,
 predecessors, scope non-overlap, run active, concurrency headroom per executor-hint
 class (a generic knob; the reference instance's config sets its write class to 1 —

@@ -67,6 +67,54 @@ const (
 	ClaimEndReaped = "reaped"
 )
 
+// ParkClass is the closed vocabulary of WHY a step parked (DKT-1900), the
+// routable half of the fact `park_reason` states in prose.
+//
+// It is a named type rather than a bare string so a caller cannot hand
+// SetStepRoutingTx an ad-hoc word, and so the compiler lists every producer
+// when a value is added. Each value below names ONE routing decision; no value
+// is derived by reading a reason string, and none is inferred at read time.
+type ParkClass string
+
+// The park classes. Each is produced by exactly one routing decision, named in
+// docs/design/engine-spec.md beside it.
+//
+// `paused` is deliberately ABSENT. It is a RUN status and is never written to
+// `steps.status` (see StepOffScheduler's note), so no routing transaction can
+// assign it and a constant for it would be a value with no producer.
+const (
+	// ParkClassGateFailed: a completion gate RAN and did not pass.
+	ParkClassGateFailed ParkClass = "gate-failed"
+	// ParkClassGateUnmatched: a gate named no trust entry, so it never ran.
+	ParkClassGateUnmatched ParkClass = "gate-unmatched"
+	// ParkClassGateSkipped: a gate was skipped because the judged commit could
+	// not be bound, so it measured nothing.
+	ParkClassGateSkipped ParkClass = "gate-skipped"
+	// ParkClassThresholdRouted: a declared threshold evaluated to a park.
+	ParkClassThresholdRouted ParkClass = "threshold-routed"
+	// ParkClassLoopBound: a fix loop was refused because `max_fix_loops` is
+	// spent — LoopOutcome.Entered is false, never the bound's wording.
+	ParkClassLoopBound ParkClass = "loop-bound"
+	// ParkClassVoteRejected: a vote tallied to a rejection.
+	ParkClassVoteRejected ParkClass = "vote-rejected"
+	// ParkClassHeldRejected: an operator rejected a held cluster, and the
+	// ROUTING step takes the consequence.
+	ParkClassHeldRejected ParkClass = "held-rejected"
+	// ParkClassGapOnly: a completion whose only artifacts were gaps.
+	ParkClassGapOnly ParkClass = "gap-only"
+	// ParkClassUnchangedHandBack: a loop round handed back the commit its
+	// previous round recorded, so the review chain would re-read one tree.
+	ParkClassUnchangedHandBack ParkClass = "unchanged-handback"
+	// ParkClassPassFloor: a `pass` would have left declared-floor work standing.
+	ParkClassPassFloor ParkClass = "pass-floor"
+	// ParkClassActionFailed: an action step's computation could not run.
+	ParkClassActionFailed ParkClass = "action-failed"
+	// ParkClassAttemptsExhausted: the step spent its attempt budget.
+	ParkClassAttemptsExhausted ParkClass = "attempts-exhausted"
+	// ParkClassJoinMissed: a join completed below `min_siblings`.
+	ParkClassJoinMissed ParkClass = "join-missed"
+)
+
 // StepTerminal reports whether a status ends a step's life. A terminal step is
 // never re-offered by `next`, never claimable, and never reaped.
 func StepTerminal(status string) bool {
@@ -193,7 +241,13 @@ type Step struct {
 	// written only where the step routes `waiting-human` and never rewritten by
 	// the resolution that answers it. Routing holds the LATEST decision; this
 	// holds the question.
-	ParkReason   string
+	ParkReason string
+	// ParkClass is the CLOSED-ENUM form of the same question ParkReason answers
+	// in prose (DKT-1900), written by the same statement and under the same
+	// condition. A conductor routing a parked row reads this; ParkReason is what
+	// it shows the person it escalates to. "" on any row that is not parked, and
+	// on parked rows that predate the column.
+	ParkClass    ParkClass
 	Metadata     string
 	ContextBytes int
 	// Materialized reports a step the ENGINE minted rather than one the pinned
@@ -239,7 +293,7 @@ SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, ins
        kind, executor, class, status, attempt, attempt_base, failed_attempts,
        reaped_claims, last_claim_end, max_attempts, expected_cost,
        owner, token_hash, expires_ms, started_ms, activity_ms, saga_stage,
-       gate_trail, routing, park_reason, metadata, context_bytes, materialized, usage_recorded,
+       gate_trail, routing, park_reason, park_class, metadata, context_bytes, materialized, usage_recorded,
        created_at_ms, updated_at_ms, row_version, work_root
   FROM steps`
 
@@ -337,6 +391,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		saga      sql.NullString
 		gateTrail sql.NullString
 		routing   sql.NullString
+		parkClass string
 		metadata  sql.NullString
 		ctxBytes  sql.NullInt64
 		mat       sql.NullInt64
@@ -349,7 +404,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.Status, &step.Attempt, &step.AttemptBase, &step.FailedAttempts,
 		&step.ReapedClaims, &step.LastClaimEnd, &maxAtt, &step.ExpectedCost,
 		&owner, &tokenHash, &expires, &started, &activity, &saga,
-		&gateTrail, &routing, &step.ParkReason, &metadata, &ctxBytes, &mat, &usageRec,
+		&gateTrail, &routing, &step.ParkReason, &parkClass, &metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -375,6 +430,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		v := activity.Int64
 		step.ActivityMS = &v
 	}
+	step.ParkClass = ParkClass(parkClass)
 	step.Executor, step.Class = executor.String, class.String
 	step.Owner, step.TokenHash, step.ExpiresMS = owner.String, tokenHash.String, expires.Int64
 	step.SagaStage, step.GateTrail, step.Routing = saga.String, gateTrail.String, routing.String
@@ -683,16 +739,35 @@ func RoutingRecord(routing, reason string) string {
 // than at the eight call sites so no later caller can park a step without
 // recording why, and so a resolution, which writes a different status, cannot
 // overwrite the question it is answering (DKT-1898).
+//
+// `class` is that same park's ROUTABLE form (DKT-1900), written by the same
+// statement under the same condition, so the two halves of one fact cannot
+// disagree and no reader has to parse the prose to classify a row. The caller
+// derives it from the facts its routing decision already holds — a gate row's
+// verdict, a tally, LoopOutcome.Entered — never from `reason`.
+//
+// A park with no class is REFUSED rather than stored. The column would
+// otherwise fill with empty strings at whichever park site a later change
+// forgot, and a classifier reading "" cannot tell an unclassified park from one
+// that predates the column. The guard is the only runtime check here because it
+// is the only one the invariant cannot get from a type: `class` being a
+// ParkClass stops a wrong WORD, and this stops a missing one.
 func SetStepRoutingTx(
-	tx *sql.Tx, id int, routing, reason, status string, nowMS int64,
+	tx *sql.Tx, id int, routing, reason, status string, class ParkClass, nowMS int64,
 ) error {
+	if status == StepWaitingHuman && class == "" {
+		return fmt.Errorf(
+			"recording step routing: parking step %d without a park class", id)
+	}
 	_, err := tx.Exec(
 		`UPDATE steps SET routing = ?, status = ?, activity_ms = ?, updated_at_ms = ?,
 		        park_reason = CASE WHEN ? = ? THEN ? ELSE park_reason END,
+		        park_class = CASE WHEN ? = ? THEN ? ELSE park_class END,
 		        row_version = row_version + 1
 		  WHERE id = ?`,
 		nullable(RoutingRecord(routing, reason)), status, nowMS, nowMS,
-		status, StepWaitingHuman, reason, id,
+		status, StepWaitingHuman, reason,
+		status, StepWaitingHuman, string(class), id,
 	)
 	if err != nil {
 		return fmt.Errorf("recording step routing: %w", err)

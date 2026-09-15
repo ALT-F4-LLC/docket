@@ -149,7 +149,7 @@ func TestPreGateResultsAreExcludedFromTheSagaVerdict(t *testing.T) {
 	err = tx.Commit()
 	testsupport.Must(t, err, "Commit: %v", err)
 
-	verdict, unmeasured, err := gateVerdict(conn, stepID)
+	verdict, unmeasured, _, err := gateVerdict(conn, stepID)
 	testsupport.Must(t, err, "gateVerdict: %v", err)
 	if verdict != VerdictPass {
 		t.Errorf("gateVerdict = %q with only a failing PRE-gate recorded, want %q — "+
@@ -850,7 +850,7 @@ func TestSkippedGateParksRatherThanRoutingOnFail(t *testing.T) {
 		{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped},
 		{Gate: "tests", Ordinal: 0, Verdict: db.GateVerdictPass},
 	}
-	verdict, unmeasured := verdictOverRows(rows)
+	verdict, unmeasured, _ := verdictOverRows(rows)
 
 	// The verdict is unchanged: "we couldn't check, so carry on" is what makes
 	// a control decorative, and a skipped gate is still not a pass.
@@ -875,7 +875,7 @@ func TestMeasuredFailureIsNotReportedAsUnmeasured(t *testing.T) {
 		db.GateVerdictFail, db.GateVerdictUnmatched, db.GateVerdictPass,
 	} {
 		t.Run(verdict, func(t *testing.T) {
-			_, unmeasured := verdictOverRows([]db.GateResultRow{
+			_, unmeasured, _ := verdictOverRows([]db.GateResultRow{
 				{Gate: "tests", Ordinal: 0, Verdict: verdict},
 			})
 			if len(unmeasured) != 0 {
@@ -892,7 +892,7 @@ func TestMeasuredFailureIsNotReportedAsUnmeasured(t *testing.T) {
 // not bind its tree on attempt 0 and measured it fine on attempt 1 has been
 // measured, and parking it would strand a step whose evidence exists.
 func TestFlakyReRunClearsAnEarlierSkip(t *testing.T) {
-	verdict, unmeasured := verdictOverRows([]db.GateResultRow{
+	verdict, unmeasured, _ := verdictOverRows([]db.GateResultRow{
 		{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped},
 		{Gate: "ac-commands", Ordinal: 1, Verdict: db.GateVerdictPass},
 	})

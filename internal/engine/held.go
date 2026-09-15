@@ -981,7 +981,7 @@ func (e *Engine) decideMaterializedStep(
 	// matter, because approval was inferred from the caller rather than read
 	// back.
 	if err := db.SetStepRoutingTx(
-		tx, held.ID, routing, note, db.StepDone, nowMS); err != nil {
+		tx, held.ID, routing, note, db.StepDone, "", nowMS); err != nil {
 		return err
 	}
 	if approve {

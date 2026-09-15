@@ -1011,6 +1011,10 @@ type StepView struct {
 	// Empty on a step that never parked, and on one parked before the column
 	// existed — that history was never captured and is not reconstructed here.
 	ParkReason string
+	// ParkClass is that park's ROUTABLE form (DKT-1900): the closed-enum value
+	// a conductor or panel decides on, where ParkReason is the prose it shows
+	// the person it escalates to. Empty exactly where ParkReason is.
+	ParkClass db.ParkClass
 	// Owner and ExpiresMS are the stored lease's facts, reported whenever the
 	// effective status still counts that lease: always for a LIVE lease, and
 	// for a LAPSED one only while the run is not active. Scheduler.Expired —
@@ -1128,6 +1132,7 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		Step: fresh, Row: row,
 		Routing: fresh.Routing, SagaStage: fresh.SagaStage,
 		ParkReason:     fresh.ParkReason,
+		ParkClass:      fresh.ParkClass,
 		Gates:          gates,
 		HeldCluster:    heldCluster,
 		TargetSHA:      targetSHA,

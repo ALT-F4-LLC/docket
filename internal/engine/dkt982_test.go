@@ -142,7 +142,7 @@ func TestFailedGatesReportsWhatTheRoutingDecidedOn(t *testing.T) {
 
 	// The invariant: the printer's rows and the router's verdict come from one
 	// reduction, so they cannot disagree.
-	verdict, _ := verdictOverRows(rows)
+	verdict, _, _ := verdictOverRows(rows)
 	if (verdict == VerdictFail) != (len(failed) > 0) {
 		t.Errorf("verdict = %q with %d failed gates — the report and the routing "+
 			"disagree about the same rows", verdict, len(failed))

@@ -100,6 +100,21 @@ func applyFixLoop(
 	return outcome.Routing, outcome, nil
 }
 
+// loopBoundClass classifies the park a REFUSED loop entry produces (DKT-1900),
+// and reports whether the outcome parked at all.
+//
+// The fact it reads is LoopOutcome.Entered — EnterLoop's own answer about the
+// ordinal and the pinned `max_fix_loops` — never outcome.Reason. Every caller
+// of applyFixLoop that can park routes through here, so the bound's wording
+// stays free to change without moving a classification: a park that is bounded
+// is bounded because no round was minted, not because a sentence says so.
+func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
+	if outcome == nil || outcome.Entered {
+		return "", false
+	}
+	return db.ParkClassLoopBound, true
+}
+
 // roundMovedNothing reports whether the round BELOW the one about to be entered
 // left the issue's scope byte-identical to the round below that (DKT-340).
 //
@@ -1159,7 +1174,7 @@ func stampEntryRouting(
 			continue
 		}
 		if err := db.SetStepRoutingTx(
-			tx, id, workflow.OnFailFixLoop, note, db.StepPending, nowMS,
+			tx, id, workflow.OnFailFixLoop, note, db.StepPending, "", nowMS,
 		); err != nil {
 			return err
 		}
@@ -1365,8 +1380,16 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 			reason += "; " + loop.Reason
 		}
 
+		// The miss is this park's cause; a spent bound is a narrower one that
+		// supersedes it, because the operator's remedy differs — a join below
+		// quorum needs the siblings, a bounded loop needs authorization.
+		class := db.ParkClassJoinMissed
+		if bound, ok := loopBoundClass(loop); ok {
+			class = bound
+		}
+
 		if err := db.SetStepRoutingTx(
-			tx, step.ID, routing, reason, statusForRouting(routing), nowMS,
+			tx, step.ID, routing, reason, statusForRouting(routing), class, nowMS,
 		); err != nil {
 			return err
 		}

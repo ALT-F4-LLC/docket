@@ -304,7 +304,11 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	}
 	status := statusForRouting(routing)
 
-	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, nowMS); err != nil {
+	// V13 forbids a human gate's `on_fail` from being `waiting-human`, so the
+	// only way this write parks is a rejection whose fix loop was refused.
+	class, _ := loopBoundClass(loop)
+
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, class, nowMS); err != nil {
 		return err
 	}
 	// The note as before, plus who decided (DKT-2450) and under what authority
@@ -830,7 +834,9 @@ func (e *Engine) resolveStep(
 		out.Repin = repin
 	}
 
-	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, nowMS); err != nil {
+	// A resolution ANSWERS a park; every `--as` above leaves a non-parked status,
+	// so this write never sets a class and never clears the one it is answering.
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, "", nowMS); err != nil {
 		return err
 	}
 	// The resolution as before, plus who ruled (DKT-2450).
@@ -1145,7 +1151,13 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
-	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, nowMS); err != nil {
+	// The budget is what ended this step; a refused loop entry is the narrower
+	// cause when the exhaustion's `on_fail` tried to buy a round and could not.
+	class := db.ParkClassAttemptsExhausted
+	if bound, ok := loopBoundClass(loop); ok {
+		class = bound
+	}
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, class, nowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{

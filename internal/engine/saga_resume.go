@@ -229,7 +229,7 @@ func (e *Engine) parkInterruptedGate(
 	}
 	if err := db.SetStepRoutingTx(tx, step.ID,
 		workflow.OnFailWaitingHuman, reason,
-		db.StepWaitingHuman, nowMS); err != nil {
+		db.StepWaitingHuman, db.ParkClassGateUnmatched, nowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{

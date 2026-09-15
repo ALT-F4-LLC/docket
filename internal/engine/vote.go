@@ -560,6 +560,14 @@ func routeVoteStep(
 	// with nothing downstream to consume it: RUN-25's security-vote rejected
 	// with a reproduced blocker, routed `fix-loop`, and the issue closed done
 	// with no fix step ever created.
+	// The class follows the SAME branch that chose the routing above, read from
+	// the tally and the threshold result rather than from the text either wrote:
+	// a failed verdict is a rejection, and an approved tally that a declared
+	// threshold routed away from `pass` is a threshold park.
+	class := db.ParkClassVoteRejected
+	if outcome.Verdict != VerdictFail && concernReason != "" {
+		class = db.ParkClassThresholdRouted
+	}
 	reason := string(outcome.Status)
 	if concernReason != "" {
 		// The concern routing's record names the matched predicate (or the T3
@@ -575,10 +583,13 @@ func routeVoteStep(
 	if loop != nil && loop.Reason != "" {
 		reason = loop.Reason
 	}
+	if bound, ok := loopBoundClass(loop); ok {
+		class = bound
+	}
 	status := statusForRouting(routing)
 
 	if err := db.SetStepRoutingTx(tx, step.ID,
-		routing, reason, status, nowMS); err != nil {
+		routing, reason, status, class, nowMS); err != nil {
 		return err
 	}
 	if routingStep != nil {

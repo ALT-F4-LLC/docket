@@ -611,8 +611,15 @@ type StepListEntry struct {
 	// PriorAttemptEnd is StepRow's field of the same name (DKT-1279), on the
 	// inventory row too: how the step's MOST RECENT claim ended, "reaped" or
 	// "failed", never a tally the breakdown above already gives.
-	PriorAttemptEnd string  `json:"prior_attempt_end,omitempty"`
-	ExpectedCost    float64 `json:"expected_cost"`
+	PriorAttemptEnd string `json:"prior_attempt_end,omitempty"`
+	// ParkClass is why a `waiting-human` row parked, as a closed enum
+	// (DKT-1900). It belongs on the INVENTORY row because `step list` is where
+	// a conductor scanning a run for parked work decides which parks it can
+	// route itself and which need a panel — a question the reason sentence
+	// beside it cannot be asked programmatically. Empty on every row that is
+	// not parked.
+	ParkClass    db.ParkClass `json:"park_class,omitempty"`
+	ExpectedCost float64      `json:"expected_cost"`
 }
 
 // RunStepList answers `docket step list --run RUN-N`: every step of one run,
@@ -658,6 +665,7 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 			FailedAttempts:  step.FailedAttempts,
 			ReapedClaims:    step.ReapedClaims,
 			PriorAttemptEnd: step.LastClaimEnd,
+			ParkClass:       step.ParkClass,
 			ExpectedCost:    step.ExpectedCost,
 		})
 	}

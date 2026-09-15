@@ -1187,13 +1187,16 @@ type stepDetailPayload struct {
 	// resolution that answers it (DKT-1898) — `routing` by then carries the
 	// resolver's words, not the engine's.
 	ParkReason string `json:"park_reason,omitempty"`
+	// ParkClass is the same park in the closed vocabulary a conductor routes on
+	// (DKT-1900); ParkReason beside it is what a person reads.
+	ParkClass db.ParkClass `json:"park_class,omitempty"`
 }
 
 // stepShowPayload wraps a view only when there is something to add, so the
 // unchanged case does not even pay for a wrapper type on the wire.
 func stepShowPayload(view *engine.StepView) any {
 	if view.HeldCluster == nil && view.TargetSHA == "" &&
-		view.TargetWorktree == "" && view.ParkReason == "" {
+		view.TargetWorktree == "" && view.ParkReason == "" && view.ParkClass == "" {
 		return view.Row
 	}
 	return stepDetailPayload{
@@ -1202,6 +1205,7 @@ func stepShowPayload(view *engine.StepView) any {
 		TargetSHA:      view.TargetSHA,
 		TargetWorktree: view.TargetWorktree,
 		ParkReason:     view.ParkReason,
+		ParkClass:      view.ParkClass,
 	}
 }
 

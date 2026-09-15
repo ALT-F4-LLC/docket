@@ -1117,7 +1117,7 @@ func (e *Engine) runRoutingStage(
 		return err
 	}
 
-	verdict, unmeasured, err := gateVerdict(conn, step.ID)
+	verdict, unmeasured, unmatched, err := gateVerdict(conn, step.ID)
 	if err != nil {
 		return err
 	}
@@ -1158,9 +1158,15 @@ func (e *Engine) runRoutingStage(
 	holding := action != nil && !action.Failed && len(action.Held) > 0 &&
 		verdict != VerdictFail
 
+	// The park class rides with the routing and the reason through this whole
+	// switch (DKT-1900), assigned in the same branch that decides them and from
+	// the same facts — the gate rows, the tally, the threshold result. It is
+	// meaningful only where the branch parks; a branch that routes anywhere else
+	// leaves it empty and SetStepRoutingTx ignores it.
 	var (
 		routing string
 		reason  string
+		class   db.ParkClass
 		cover   *batchCover
 	)
 	switch {
@@ -1171,6 +1177,7 @@ func (e *Engine) runRoutingStage(
 		// spawn a fix step exactly as unimplementable as this one was.
 		routing = workflow.OnFailWaitingHuman
 		reason = "the step recorded only gap artifacts; operator disposes"
+		class = db.ParkClassGapOnly
 	case len(unmeasured) > 0:
 		// A GATE THAT MEASURED NOTHING PARKS (DKT-254). It is decided before
 		// the fail case because `skipped` is not-pass and would otherwise be
@@ -1198,6 +1205,7 @@ func (e *Engine) runRoutingStage(
 			"gate(s) %s measured nothing — the tree under review could not be "+
 				"bound, so no verdict about the change was reached; operator disposes",
 			strings.Join(unmeasured, ", "))
+		class = db.ParkClassGateSkipped
 	case verdict == VerdictFail:
 		// A failed gate routes per `on_fail`, not through the threshold: the
 		// threshold asks a question about a RESULT, and a step whose gate
@@ -1212,6 +1220,15 @@ func (e *Engine) runRoutingStage(
 		// blocked by an interposed threshold target parks as usual, with the
 		// block named as the reason.
 		routing = spec.EffectiveOnFail()
+		// A gate that could not be INVOKED is classed apart from one that ran
+		// and failed, even though both route the same way: the operator's next
+		// move is to restore a trust entry, not to read gate output. An
+		// override the run's operator already granted does not change WHY the
+		// step parked, so a blocked cover keeps the gate's own class.
+		class = db.ParkClassGateFailed
+		if unmatched {
+			class = db.ParkClassGateUnmatched
+		}
 		if cover, err = batchOverrideCover(conn, step, spec); err != nil {
 			return err
 		}
@@ -1228,7 +1245,8 @@ func (e *Engine) runRoutingStage(
 		// command's non-zero exit or unmatched name, are STEP failures routed
 		// per the step's effective `on_fail` — never engine errors that abort
 		// the saga. A workflow authoring mistake must not wedge a run.
-		routing, reason = spec.EffectiveOnFail(), action.Reason
+		routing, reason, class = spec.EffectiveOnFail(), action.Reason,
+			db.ParkClassActionFailed
 	case holding:
 		// Deferred. Decided inside the transaction, once the lineage is known.
 	default:
@@ -1245,6 +1263,7 @@ func (e *Engine) runRoutingStage(
 			if !approved {
 				routing = spec.EffectiveOnFail()
 				reason = "the held clusters were rejected by an operator"
+				class = db.ParkClassHeldRejected
 				break
 			}
 		}
@@ -1252,6 +1271,7 @@ func (e *Engine) runRoutingStage(
 		if err != nil {
 			return err
 		}
+		class = db.ParkClassThresholdRouted
 	}
 
 	// Who decides a hold, read BEFORE the transaction opens: it is a config
@@ -1306,6 +1326,7 @@ func (e *Engine) runRoutingStage(
 		if err != nil {
 			return err
 		}
+		class = db.ParkClassThresholdRouted
 	}
 
 	status := statusForRouting(routing)
@@ -1338,6 +1359,7 @@ func (e *Engine) runRoutingStage(
 				"chain anyway, `--as retry` redoes the round",
 			step.Ordinal, model.FormatID(step.IssueID), unchangedHandBack)
 		status = statusForRouting(routing)
+		class = db.ParkClassUnchangedHandBack
 	}
 
 	// A PASS THAT WOULD LEAVE DECLARED-FLOOR WORK STANDING PARKS INSTEAD
@@ -1371,6 +1393,7 @@ func (e *Engine) runRoutingStage(
 				floor.Standing, step.Instance, spec.PassFloor.Field,
 				spec.PassFloor.At)
 			status = statusForRouting(routing)
+			class = db.ParkClassPassFloor
 		}
 	}
 
@@ -1388,6 +1411,9 @@ func (e *Engine) runRoutingStage(
 		if outcome != nil {
 			reason = outcome.Reason
 			status = statusForRouting(routing)
+			if bound, ok := loopBoundClass(outcome); ok {
+				class = bound
+			}
 		}
 	}
 
@@ -1405,7 +1431,8 @@ func (e *Engine) runRoutingStage(
 	// step for the ledger"). A superseded lineage's step still finished, still
 	// decided something, and the ledger still attributes it — what a stale
 	// lineage loses is its DOWNSTREAM EFFECT, not its history.
-	if err := db.SetStepRoutingTx(tx, step.ID, routing, reason, status, nowMS); err != nil {
+	if err := db.SetStepRoutingTx(
+		tx, step.ID, routing, reason, status, class, nowMS); err != nil {
 		return err
 	}
 	// The event carries the reason alongside the routing (DKT-1898): a feed
@@ -1596,22 +1623,32 @@ func routingRecord(routing, reason string) string {
 // buys is that the CALLER can tell "measured and failed" from "measured
 // nothing" without re-reading the rows, which is what lets the two route
 // differently.
-func gateVerdict(conn *sql.DB, stepID int) (string, []string, error) {
+func gateVerdict(conn *sql.DB, stepID int) (string, []string, bool, error) {
 	rows, err := db.GateResultsForStep(conn, stepID)
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
-	verdict, unmeasured := verdictOverRows(rows)
-	return verdict, unmeasured, nil
+	verdict, unmeasured, unmatched := verdictOverRows(rows)
+	return verdict, unmeasured, unmatched, nil
 }
 
-// verdictOverRows reduces a step's recorded rows to a routing verdict, and
-// names the gates that measured nothing.
-func verdictOverRows(rows []db.GateResultRow) (string, []string) {
+// verdictOverRows reduces a step's recorded rows to a routing verdict, names
+// the gates that measured nothing, and reports whether any gate never ran at
+// all.
+//
+// The third answer exists for the park class (DKT-1900). `unmatched` is
+// not-pass, so it already folds into VerdictFail and routes identically — but a
+// gate whose trust entry did not match never executed, and telling an operator
+// that a gate "failed" when the truth is that it could not be invoked sends
+// them to read output that does not exist. It is reported as a flag rather than
+// a name list because nothing routes on WHICH entry was missing; the reason
+// text, built from the same rows, already names them.
+func verdictOverRows(rows []db.GateResultRow) (string, []string, bool) {
 	last := lastGateAttempts(rows)
 
 	verdict := VerdictPass
 	var unmeasured []string
+	unmatched := false
 	for _, r := range last {
 		if r.Verdict != db.GateVerdictPass {
 			verdict = VerdictFail
@@ -1619,11 +1656,14 @@ func verdictOverRows(rows []db.GateResultRow) (string, []string) {
 		if r.Verdict == db.GateVerdictSkipped {
 			unmeasured = append(unmeasured, r.Gate)
 		}
+		if r.Verdict == db.GateVerdictUnmatched {
+			unmatched = true
+		}
 	}
 	// Sorted so the reason a step parks with is the same sentence on every
 	// run over the same rows — map range order is not.
 	sort.Strings(unmeasured)
-	return verdict, unmeasured
+	return verdict, unmeasured, unmatched
 }
 
 // lastGateAttempts reduces a step's recorded rows to the one attempt per gate

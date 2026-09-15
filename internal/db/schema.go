@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 32
+const currentSchemaVersion = 33
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -201,6 +201,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	30: migrateV29ToV30,
 	31: migrateV30ToV31,
 	32: migrateV31ToV32,
+	33: migrateV32ToV33,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -579,6 +580,7 @@ CREATE TABLE IF NOT EXISTS steps (
 	gate_trail     TEXT,
 	routing        TEXT,
 	park_reason    TEXT    NOT NULL DEFAULT '',
+	park_class     TEXT    NOT NULL DEFAULT '',
 	metadata       TEXT,
 	context_bytes  INTEGER,
 	created_at_ms  INTEGER NOT NULL,
@@ -2684,6 +2686,55 @@ func migrateV31ToV32(tx *sql.Tx) error {
 	return nil
 }
 
+// v33AddedColumns is v33's whole schema change: `park_class` on `steps` — the
+// CLOSED-ENUM classification of why a step parked, beside v32's free text.
+//
+// `park_reason` explains a park to a person; it cannot be routed on. A
+// conductor or panel deciding what to do with a parked row must distinguish a
+// gate that failed on the work from a gate that could not run, a threshold
+// routing from a loop that hit its bound — and reconstructing that from the
+// reason sentence means parsing prose the engine is free to reword. This
+// column records the distinction as a value, assigned from the routing
+// transaction's own facts.
+var v33AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "park_class",
+		`ALTER TABLE steps ADD COLUMN park_class TEXT NOT NULL DEFAULT ''`},
+}
+
+// v33ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 through v32 use and for the same reason: v33 adds no table and no
+// index, so a database stamped 33 by a binary built mid-change carries every
+// v32 sentinel and `park_class` never arrives.
+var v33ColumnSentinels = []struct{ table, column string }{
+	{"steps", "park_class"},
+}
+
+// migrateV32ToV33 adds the park class column (DKT-1900).
+//
+// It BACK-FILLS NOTHING, and the empty string is the only defensible value for
+// every existing row: classifying a historical park would mean inferring the
+// class from the very free text this column exists to stop routing on. Empty
+// says "this row predates the classification", which is exactly true.
+//
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration probes
+// first and stays re-runnable, the same shape v10 through v32 use.
+func migrateV32ToV33(tx *sql.Tx) error {
+	for _, col := range v33AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v32 to v33: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v32 to v33: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3356,6 +3407,23 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 31
+				break
+			}
+		}
+	}
+
+	// The v33 guard, in the same COLUMN form as v32 and for its reason: v33
+	// adds one column and no table, so a database stamped 33 by a binary built
+	// mid-change carries every v32 sentinel and `park_class` never arrives.
+	if version >= 33 {
+		for _, col := range v33ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v33 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 32
 				break
 			}
 		}
