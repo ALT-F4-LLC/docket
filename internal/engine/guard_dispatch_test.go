@@ -337,6 +337,69 @@ func TestGuardSpawnDeniesAlteredRows(t *testing.T) {
 	}
 }
 
+// TestGuardSpawnRowsAcceptsAppendedSuffix is DKT-2071: `dispatch extend`
+// appends rows to an OPEN manifest mid-wave, and the relay then launches the
+// APPENDED SUFFIX alone — every row of which the engine offered. The guard used
+// to require the proposed batch to be the whole stored list, same length and
+// same order, so it denied that launch on length before comparing a byte.
+//
+// The property it defends is unchanged and still exact: a relay may spawn only
+// rows the engine issued, byte for byte. Membership is what expresses that; the
+// length equality was a stricter accident of the pre-extend world, in which the
+// manifest never grew.
+func TestGuardSpawnRowsAcceptsAppendedSuffix(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	driveToVerify(t, conn, e, 0)
+	opened := openDispatch(t, conn, run.ID, 0, nowMS)
+	if len(opened.Rows) == 0 {
+		t.Fatal("the opened manifest is empty; the test's premise is broken")
+	}
+	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
+
+	x := extendDispatch(t, conn, run.ID, nowMS)
+	if len(x.Rows) == 0 {
+		t.Fatal("the extend appended nothing; the test's premise is broken")
+	}
+
+	// The suffix alone: exactly what the relay launches after an extend.
+	suffix, err := json.Marshal(x.Rows)
+	testsupport.Must(t, err, "marshaling the appended rows: %v", err)
+	verdict, err := e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: suffix, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if !verdict.Allowed {
+		t.Errorf("the appended suffix was denied: %s — every one of those rows "+
+			"is a row this engine appended to the open manifest", verdict.Reason)
+	}
+
+	// And a row the manifest never carried is still a denial, so the relaxation
+	// did not turn the guard into a pass.
+	altered := make([]model.StepRow, len(x.Rows))
+	copy(altered, x.Rows)
+	altered[0].Instance = "not-what-was-offered@0"
+	forged, err := json.Marshal(altered)
+	testsupport.Must(t, err, "marshaling: %v", err)
+	verdict, err = e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: forged, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if verdict.Allowed {
+		t.Error("an altered row rode in on a subset match; membership must " +
+			"still be byte-exact")
+	}
+
+	// A duplicate of one offered row is a denial too: the manifest offers each
+	// row once, and a batch that spawned one row twice would double-launch it.
+	doubled, err := json.Marshal([]model.StepRow{x.Rows[0], x.Rows[0]})
+	testsupport.Must(t, err, "marshaling: %v", err)
+	verdict, err = e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: doubled, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if verdict.Allowed {
+		t.Error("a batch repeating one manifest row was allowed; each offered " +
+			"row may be spawned once")
+	}
+}
+
 // TestGuardSpawnDeniesRowsWithNoManifest is G8: `--rows` with no open dispatch
 // is a DENIAL, not a vacuous pass.
 //

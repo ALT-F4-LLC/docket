@@ -498,6 +498,7 @@ var eventActors = map[string]Actor{
 	EventConductorSeated:  ActorHuman,
 	EventDispatchOpened:   ActorHuman,
 	EventDispatchClosed:   ActorHuman,
+	EventDispatchExtended: ActorHuman,
 	EventReapAcknowledged: ActorHuman,
 	// The spawn carve-out is `human` for the same reason the ack is: nothing
 	// in the engine passes `--deciding-vote`. A person, or the relay acting

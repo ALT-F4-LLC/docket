@@ -121,8 +121,16 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// ATTRIBUTABLE — and on §9 item 2: releasing write headroom IS a
 		// transition (a successor becomes claimable that was not), and without
 		// this kind the release would appear in the feed as nothing at all.
+		//
+		// `dispatch-extended` (DKT-2071) is the fourth, on the same argument
+		// that separates the closing pair: an operator following the feed must
+		// see that the batch GREW mid-wave. Rows the engine minted after the
+		// open — a fix round, a held-cluster gate, a limit-cut tail — become
+		// spawnable under the manifest they were never opened with, and an
+		// append with no event would make those launches indistinguishable
+		// from the relay drift the manifest exists to detect.
 		"dispatch-opened", "dispatch-closed", "dispatch-abandoned",
-		"reap-acknowledged",
+		"dispatch-extended", "reap-acknowledged",
 
 		// Stage 7's two (docs/tdd/events-follow.md §6, §7.3).
 		//
@@ -226,7 +234,7 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 50 {
+	if len(eventKinds) != 51 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
@@ -234,8 +242,8 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			"DKT-408's repin kind, DKT-546's batch-override pair, "+
 			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
 			"kind, DKT-1034's issue.diff re-pin kind, DKT-1079's "+
-			"run-note kind, and DKT-2465's conductor-seat kind enumerate 50 "+
-			"(see DKT-21)",
+			"run-note kind, DKT-2465's conductor-seat kind, and DKT-2071's "+
+			"dispatch-extend kind enumerate 51 (see DKT-21)",
 			len(eventKinds))
 	}
 }

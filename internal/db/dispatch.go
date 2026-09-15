@@ -136,6 +136,29 @@ func InsertDispatchRowTx(tx *sql.Tx, dispatchID int, row DispatchRow) error {
 	return nil
 }
 
+// ExtendDispatchExpiryTx pushes an open manifest's expiry out, as a CAS on
+// (id, status='open').
+//
+// The CAS is the same exclusion CloseDispatchTx relies on: a close or a TTL
+// abandon racing an extend matches zero rows and the extend learns it lost
+// rather than writing an expiry onto a manifest that is no longer open.
+func ExtendDispatchExpiryTx(tx *sql.Tx, id int, expiresMS int64) (bool, error) {
+	res, err := tx.Exec(
+		`UPDATE dispatches
+		    SET expires_ms = ?, row_version = row_version + 1
+		  WHERE id = ? AND status = ?`,
+		expiresMS, id, DispatchOpen,
+	)
+	if err != nil {
+		return false, fmt.Errorf("extending dispatch %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("extending dispatch %d: %w", id, err)
+	}
+	return n > 0, nil
+}
+
 // OpenDispatchTx reads the run's open manifest, or ErrNoOpenDispatch.
 //
 // It is the probe P24 runs and the one D2 asks about, so it is ONE query with

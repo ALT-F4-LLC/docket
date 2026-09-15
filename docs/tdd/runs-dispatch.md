@@ -1002,6 +1002,63 @@ The QA section (§9.2, `ZJ`) executes it literally, both arms:
 following the repo's existing TTL-flake discipline; the Go test injects `nowMS`
 directly.
 
+## 5.10 `dispatch extend`: appending mid-wave rows to the open manifest
+
+`docket dispatch extend --run RUN-N` appends the steps that became ready since
+the open to the SAME open manifest.
+
+**Why the verb exists.** A fix round is minted at the RECORD TIME of the step
+whose routing chose `fix-loop`, never at `next`, so before this verb every loop
+round started in a later dispatch by construction. The same holds for a
+held-cluster gate, an `on_fail` route, and the chain tail a `--limit` cut left
+out: the row was ready, the manifest was frozen, and the relay paid a whole
+dispatch boundary — the remainder of its wave plus the bookkeeping — for work
+the engine had already readied. Measured on HRN-1102, the hop from a `fix-loop`
+routing to the fix round's claim took 12 hours with zero minutes of the issue's
+own work in it.
+
+**What it does.** It runs the shared reap (`reapExpiredTx`) exactly as every
+other scheduling verb does, runs `readyRows` unlimited, drops every step id
+already stored on the open manifest, and appends the rest at position max+1
+with the canonical bytes and sha256 `dispatch open` stores. The manifest's
+`expires_ms` grows by the APPENDED rows' `stagedLeaseSumMS` — the rows already
+stored were budgeted for at open — and a `dispatch-extended` event records the
+dispatch, the appended count, the new expiry, and `extended_seq`: the log
+position the appended rows were computed at, the same fact `opened_seq` records
+for the open.
+
+**Invariants.**
+
+- **Rows are byte-hashed at append.** An appended row's bytes come from the same
+  `canonicalRowBytes` an opened row's do, so `dispatch verify` and the spawn
+  guard cannot tell the two apart — which is the point.
+- **One open manifest, still.** This is an append, not a second dispatch. A
+  second concurrent dispatch per run was rejected: P24 exists so relay drift
+  stalls loudly, and two open manifests make `dispatch verify` and the spawn
+  guard's comparison ambiguous.
+- **`next` keeps refusing while a dispatch is open** (P24). Nothing about the
+  refusal changes; `next` returning rows outside the manifest was rejected for
+  removing exactly the signal that makes drift visible.
+- **Unlaunched appended rows stay `pending` at close, and are not a
+  discrepancy.** A manifest is not a lock (§5.1, P28) and an appended row is no
+  more of one than an opened row; the discrepancies of §5.8 are statements about
+  claims and usage, never about an offer nobody took.
+- **An expired manifest is refused rather than extended**, since extending one
+  would push a lapsed manifest's expiry back out and resurrect a batch the TTL
+  had already given up on.
+
+**`guard spawn --rows` accepts a subset.** The guard compared a proposed batch
+against the stored manifest as WHOLE-BATCH POSITIONAL EQUALITY — same length,
+same order. A relay launching the appended suffix alone was denied on length
+before a byte was compared, so the guard now requires every proposed row to
+byte-match SOME stored row, with a repeat inside one batch still a denial. The
+property it defends is unchanged and still exact: a relay may spawn only rows
+the engine issued, byte for byte, and each offered row once.
+
+**The relay's call points.** After a `fix-loop` routing — the round is minted at
+that record and is appendable immediately — and at a lane's last stage, where
+the chain tail a `--limit` cut or a held cluster readied is waiting.
+
 ---
 
 # 6. THE WRITE-REAP ACKNOWLEDGMENT — §9 item 10's deferred half

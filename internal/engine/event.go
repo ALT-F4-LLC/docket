@@ -155,6 +155,16 @@ const (
 	EventDispatchClosed    = "dispatch-closed"
 	EventDispatchAbandoned = "dispatch-abandoned"
 
+	// `dispatch-extended` is the append: rows the engine minted or readied
+	// while the manifest was open, added to it rather than waiting for the
+	// next open. It is its own kind for the reason `dispatch-closed` and
+	// `dispatch-abandoned` are separate — an operator reading the feed must
+	// see that the batch GREW, and against which stored manifest, without
+	// opening a row. It carries `dispatch`, `rows` (the appended count),
+	// `expires_ms`, and `extended_seq`: the log position the appended rows
+	// were computed at, the same fact `opened_seq` records for the open.
+	EventDispatchExtended = "dispatch-extended"
+
 	// The write-reap acknowledgment kind (§6.2).
 	//
 	// It earns its place on A3: "the ack must be ATTRIBUTABLE" is a requirement
@@ -353,7 +363,8 @@ var eventKinds = map[string]bool{
 	EventVoteOpened: true, EventVoteTallied: true,
 	EventStepHeld:       true,
 	EventDispatchOpened: true, EventDispatchClosed: true,
-	EventDispatchAbandoned: true, EventReapAcknowledged: true,
+	EventDispatchAbandoned: true, EventDispatchExtended: true,
+	EventReapAcknowledged: true,
 	EventEventsPruned: true, EventRunBudgetSet: true,
 	EventStepAnnotated:       true,
 	EventProjectRegistered:   true,

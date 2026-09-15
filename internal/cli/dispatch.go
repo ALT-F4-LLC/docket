@@ -197,6 +197,69 @@ func renderManifest(m *engine.Manifest) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// ---- extend ----------------------------------------------------------------
+
+var dispatchExtendCmd = &cobra.Command{
+	Use:   "extend",
+	Short: "Append newly ready steps to the run's open manifest",
+	Long: `Append the steps that became ready since the open to the SAME manifest.
+
+A fix round is minted when the step whose routing chose ` + "`fix-loop`" + ` RECORDS, not
+when a manifest opens — so without this verb every loop round, held-cluster
+gate, ` + "`on_fail`" + ` route, and limit-cut chain tail waited for the whole wave to
+return and a new dispatch to open.
+
+The appended rows are byte-hashed exactly as opened rows are, so
+` + "`dispatch verify`" + ` and ` + "`guard spawn --rows`" + ` treat them identically. There is still
+exactly ONE open manifest and ` + "`next --run`" + ` still refuses while it is open.
+
+Rows already on the manifest are dropped, so extending twice with nothing new
+appends nothing and succeeds. An appended row nobody launches stays pending and
+is not a discrepancy at close.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runDispatchExtend(cmd, getWriter(cmd))
+	},
+}
+
+func runDispatchExtend(cmd *cobra.Command, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	runID, err := dispatchRunID(cmd)
+	if err != nil {
+		return err
+	}
+
+	extension, err := engine.NewEngine().ExtendDispatch(conn, runID, model.NowMS())
+	if err != nil {
+		return runErr(err)
+	}
+
+	for _, instance := range extension.Reaped {
+		w.Warn("reaped an expired lease on %s; it is ready again", instance)
+	}
+
+	var message string
+	if !w.JSONMode {
+		message = renderExtension(extension)
+	}
+	w.Success(extension, message)
+	return nil
+}
+
+// renderExtension is the human view of an append: the count first, because
+// "appended 0 rows" is the ordinary answer a relay polls for and it should not
+// have to read an empty table to learn it.
+func renderExtension(x *engine.Extension) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s extended for %s at seq %d with %d row(s), now expiring at %d\n",
+		x.Dispatch, x.Run, x.ExtendedSeq, len(x.Rows), x.ExpiresMS)
+	if len(x.Rows) > 0 {
+		b.WriteString("\n")
+		b.WriteString(render.RenderStepRows(x.Rows))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // ---- verify ----------------------------------------------------------------
 
 var dispatchVerifyCmd = &cobra.Command{
@@ -936,8 +999,8 @@ func ackSeqs(cmd *cobra.Command) ([]int64, error) {
 
 func init() {
 	for _, c := range []*cobra.Command{
-		dispatchOpenCmd, dispatchVerifyCmd, dispatchCloseCmd, dispatchAbandonCmd,
-		dispatchBackfillUsageCmd, dispatchWaiveTargetCmd,
+		dispatchOpenCmd, dispatchExtendCmd, dispatchVerifyCmd, dispatchCloseCmd,
+		dispatchAbandonCmd, dispatchBackfillUsageCmd, dispatchWaiveTargetCmd,
 	} {
 		c.Flags().String("run", "", "The run whose dispatch this is (required)")
 		_ = c.MarkFlagRequired("run")
@@ -1000,7 +1063,7 @@ func init() {
 	_ = dispatchWaiveTargetCmd.MarkFlagRequired("step")
 	_ = dispatchWaiveTargetCmd.MarkFlagRequired("target")
 
-	dispatchCmd.AddCommand(dispatchOpenCmd, dispatchVerifyCmd,
+	dispatchCmd.AddCommand(dispatchOpenCmd, dispatchExtendCmd, dispatchVerifyCmd,
 		dispatchCloseCmd, dispatchAbandonCmd, dispatchBackfillUsageCmd,
 		dispatchWaiveTargetCmd)
 	rootCmd.AddCommand(dispatchCmd)

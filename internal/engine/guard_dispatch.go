@@ -390,33 +390,56 @@ func spawnRowsVerdict(
 			model.FormatRunID(runID), len(proposed), model.FormatRunID(runID))}, nil
 	}
 
-	// G6: byte-matching against the STORED manifest, position by position. The
-	// canonical bytes come from the SAME function the manifest was written
-	// with (§5.2 P3), so a match is a match by construction rather than by two
-	// marshalers agreeing. Unlike `dispatch verify` — which recomputes
-	// readiness and compares STAGELESS (DKT-19) — this guard asks whether a
-	// relay is spawning the offered rows VERBATIM, stage included, so any byte
-	// difference is a real drift.
-	if len(proposed) != len(stored) {
-		return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-			"the proposed batch has %d row(s) and the open dispatch has %d; "+
-				"spawn what the manifest offered, or reconcile it first",
-			len(proposed), len(stored))}, nil
+	// G6: byte-matching against the STORED manifest, EVERY PROPOSED ROW A
+	// STORED ROW. The canonical bytes come from the SAME function the manifest
+	// was written with (§5.2 P3), so a match is a match by construction rather
+	// than by two marshalers agreeing. Unlike `dispatch verify` — which
+	// recomputes readiness and compares STAGELESS (DKT-19) — this guard asks
+	// whether a relay is spawning OFFERED rows VERBATIM, stage included, so any
+	// byte difference is a real drift.
+	//
+	// MEMBERSHIP RATHER THAN WHOLE-BATCH POSITIONAL EQUALITY (DKT-2071). The
+	// comparison used to require the proposed batch to be the stored list,
+	// same length and same order. `dispatch extend` appends rows to an open
+	// manifest mid-wave, and the relay then launches the APPENDED SUFFIX — a
+	// batch every row of which the engine offered, which the old shape denied
+	// on length alone. The property the guard defends is unchanged and still
+	// exact: a relay may spawn only rows the engine issued, byte for byte. A
+	// duplicate is still a denial, so a stored row cannot be spawned twice
+	// inside one batch.
+	byHash := make(map[string]struct{}, len(stored))
+	byStep := make(map[string]string, len(stored))
+	for _, want := range stored {
+		byHash[want.RowSHA256] = struct{}{}
+		byStep[model.FormatStepID(want.StepID)] = want.RowJSON
 	}
-	for i, want := range stored {
-		raw, sum, err := canonicalRowBytes(proposed[i])
+	seen := make(map[string]struct{}, len(proposed))
+	for i, row := range proposed {
+		raw, sum, err := canonicalRowBytes(row)
 		if err != nil {
 			return nil, err
 		}
-		if sum != want.RowSHA256 {
-			// The DIFFERING BYTES, both sides — the same evidence-not-opinion
-			// discipline `dispatch verify`'s P9 refusal carries. A summary would
-			// be the engine's guess about which field moved.
+		if _, ok := byHash[sum]; !ok {
+			// The DIFFERING BYTES, BOTH SIDES where the manifest has a side to
+			// show — the same evidence-not-opinion discipline `dispatch
+			// verify`'s P9 refusal carries. A summary would be the engine's
+			// guess about which field moved. A proposed row naming a step the
+			// manifest never carried has no counterpart, and the denial says
+			// so rather than printing an unrelated row beside it.
+			manifest, ok := byStep[row.Step]
+			if !ok {
+				manifest = fmt.Sprintf("(no row for %s on the open dispatch)", row.Step)
+			}
 			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-				"proposed row %d does not byte-match the open dispatch\n"+
-					"  manifest: %s\n  proposed: %s",
-				i, want.RowJSON, raw)}, nil
+				"proposed row %d byte-matches no row of the open dispatch\n"+
+					"  manifest: %s\n  proposed: %s", i, manifest, raw)}, nil
 		}
+		if _, dup := seen[sum]; dup {
+			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
+				"proposed row %d repeats a row already in this batch — the "+
+					"manifest offers each row once\n  proposed: %s", i, raw)}, nil
+		}
+		seen[sum] = struct{}{}
 	}
 	return nil, nil
 }

@@ -369,6 +369,177 @@ func (e *Engine) OpenDispatch(
 	}, nil
 }
 
+// Extension is `dispatch extend`'s answer: the open manifest's identity and the
+// rows this call APPENDED, never the whole grown list.
+//
+// The appended rows alone are what the caller can act on — they are the batch
+// `guard spawn --rows` will admit as a subset of the stored manifest — and a
+// response carrying the grown manifest would invite a relay to re-spawn rows it
+// already launched.
+type Extension struct {
+	Dispatch string `json:"dispatch"`
+	Run      string `json:"run"`
+	// ExtendedSeq is the event seq the appended rows were computed at — the
+	// same fact `opened_seq` records for the open, read before this call's own
+	// event so it names the log position rather than the append.
+	ExtendedSeq int64 `json:"extended_seq"`
+	// ExpiresMS is the manifest's expiry AFTER the extension, grown by the
+	// appended rows' own staged lease sum.
+	ExpiresMS int64           `json:"expires_ms"`
+	Rows      []model.StepRow `json:"rows"`
+	// Reaped names the step instances whose leases this extend reaped, the
+	// same channel OpenDispatch reports its own reaps on.
+	Reaped []string `json:"reaped,omitempty"`
+}
+
+// ExtendDispatch appends rows the engine minted or readied since the open to
+// the run's OPEN manifest (DKT-2071).
+//
+// It exists because the manifest is frozen at open and a fix round is minted at
+// the RECORD TIME of the step whose routing chose `fix-loop` — never at `next`
+// — so every loop round started in a later dispatch by construction, and a
+// relay paid a whole dispatch boundary (the remainder of its wave plus the
+// bookkeeping) for a row the engine had already readied. The same applies to a
+// held-cluster gate, an `on_fail` route, and the chain tail a `--limit` cut.
+//
+// ONE OPEN MANIFEST, STILL. This is an APPEND to the manifest the relay is
+// already reconciling, not a second dispatch: P24's refusal of `next` and the
+// single-open index are both untouched, so relay drift still stalls loudly. The
+// appended rows are byte-hashed with the same canonicalRowBytes the open used,
+// so `dispatch verify` and the spawn guard compare them exactly as they compare
+// an opened row.
+//
+// IT DOES NOT DRIVE VOTE OR ACTION LIFECYCLES the way OpenDispatch does. The
+// `step record` that readies work mid-wave already drives them to quiescence
+// (DriveRunLifecycles), so a ready engine-run step cannot survive to this call;
+// driving again here would mean a second owner of the same lifecycle with no
+// caller that needs it.
+//
+// An EXPIRED manifest is refused rather than extended: extending one would push
+// a lapsed manifest's expiry back out and resurrect a batch the TTL had already
+// given up on, which is the wedge `dispatch abandon` exists to avoid.
+func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extension, error) {
+	defs, err := StepDefinitions(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+	ttls, err := loadTTLConfig(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("extending a dispatch: %w", err)
+	}
+	defer tx.Rollback()
+
+	open, err := db.OpenDispatchTx(tx, runID)
+	if err != nil {
+		return nil, noOpenDispatchErr(err, runID)
+	}
+	if open.Expired(nowMS) {
+		return nil, conflictErr(
+			"%s expired at %d and cannot be extended — close it, abandon it, or "+
+				"open a new manifest", FormatDispatchID(open.ID), open.ExpiresMS)
+	}
+
+	stored, err := db.ListDispatchRowsTx(tx, open.ID)
+	if err != nil {
+		return nil, err
+	}
+	onManifest := make(map[int]bool, len(stored))
+	nextPosition := 0
+	for _, row := range stored {
+		onManifest[row.StepID] = true
+		if row.Position >= nextPosition {
+			nextPosition = row.Position + 1
+		}
+	}
+
+	sched, err := LoadScheduler(tx, runID, defs, nowMS)
+	if err != nil {
+		return nil, err
+	}
+
+	// P5's reap, the shared one every scheduling verb runs: offering a row a
+	// reap would have freed makes the manifest wrong the moment it is written,
+	// and that is as true of an appended row as of an opened one.
+	reaped, err := reapExpiredTx(tx, sched, runID, nowMS)
+	if err != nil {
+		return nil, err
+	}
+
+	// UNLIMITED (limit 0): `--limit` is the OPEN's budget over a fresh batch.
+	// An extend offers what became ready since, and truncating it here would
+	// leave exactly the tail this verb exists to stop stranding.
+	rows, _, _, err := readyRows(sched, ttls, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	appended := make([]model.StepRow, 0, len(rows))
+	for _, row := range rows {
+		stepID, err := model.ParseStepID(row.Step)
+		if err != nil {
+			return nil, fmt.Errorf("rendering manifest row %s: %w", row.Instance, err)
+		}
+		if onManifest[stepID] {
+			continue
+		}
+		raw, sum, err := canonicalRowBytes(row)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.InsertDispatchRowTx(tx, open.ID, db.DispatchRow{
+			Position: nextPosition, StepID: stepID, Instance: row.Instance,
+			RowJSON: raw, RowSHA256: sum,
+		}); err != nil {
+			return nil, err
+		}
+		nextPosition++
+		appended = append(appended, row)
+	}
+
+	// The appended rows' OWN staged lease sum, added to the standing expiry:
+	// the manifest must outlive the work it now carries, and the rows already
+	// stored were budgeted for at open.
+	expiresMS := open.ExpiresMS + stagedLeaseSumMS(appended)
+	if expiresMS != open.ExpiresMS {
+		moved, err := db.ExtendDispatchExpiryTx(tx, open.ID, expiresMS)
+		if err != nil {
+			return nil, err
+		}
+		if !moved {
+			return nil, conflictErr(
+				"%s stopped being open while it was being extended",
+				FormatDispatchID(open.ID))
+		}
+	}
+
+	extendedSeq, err := lastEventSeqTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventDispatchExtended, RunID: runID, AtMS: nowMS,
+		Data: fmt.Sprintf(`{"dispatch":%q,"rows":%d,"expires_ms":%d,"extended_seq":%d}`,
+			FormatDispatchID(open.ID), len(appended), expiresMS, extendedSeq),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("extending a dispatch: %w", err)
+	}
+
+	return &Extension{
+		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
+		ExtendedSeq: extendedSeq, ExpiresMS: expiresMS, Rows: appended,
+		Reaped: reaped,
+	}, nil
+}
+
 // readySnapshot re-derives a run's scheduler snapshot from scratch — one
 // rolled-back transaction around LoadScheduler — for a caller that then
 // projects the ready set from it through the shared readyRows tail (the
