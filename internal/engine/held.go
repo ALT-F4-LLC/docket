@@ -1000,7 +1000,7 @@ func (e *Engine) decideMaterializedStep(
 	if value != "" {
 		fields = map[string]any{"note": note, "value": value}
 	}
-	data, err := rulingData(opts.By, fields)
+	data, err := rulingData(opts.By, opts.Under.addTo(fields))
 	if err != nil {
 		return fmt.Errorf("recording the held decision: %w", err)
 	}

@@ -35,6 +35,11 @@ type MoveRunOptions struct {
 	From []model.RunStatus
 	// Reason is `--reason`, required by the CLI on an abandon.
 	Reason string
+	// Under is the authority a PAUSE or an ABANDON is exercised under
+	// (DKT-1899), required on exactly those two. A RESUME carries none: it
+	// returns a run to work rather than disposing of anything, so there is no
+	// resolution for an authority to answer for.
+	Under Authority
 	// Token is the run's conductor capability (DKT-2465, conductor.go):
 	// required on a bound run, ignored on an unbound one.
 	Token string
@@ -85,6 +90,14 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 	kind, ok := lifecycleEvents[to]
 	if !ok {
 		return nil, nil, fmt.Errorf("no lifecycle event kind for a move to %s", to)
+	}
+	// A pause and an abandon are dispositions, and DKT-1899 requires each to
+	// say under what authority it was made. A resume is neither, and is
+	// deliberately exempt.
+	if kind == EventRunPaused || kind == EventRunAbandoned {
+		if err := opts.Under.require("run " + verb); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	tx, err := conn.Begin()
@@ -171,6 +184,11 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 	}
 	if len(worktrees) > 0 {
 		payload["worktrees"] = worktrees
+	}
+	// DKT-1899, on the two kinds that require it. A resume's payload is
+	// unchanged, so nothing reading it meets a key that means nothing there.
+	if opts.Under.Kind != "" {
+		opts.Under.addTo(payload)
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

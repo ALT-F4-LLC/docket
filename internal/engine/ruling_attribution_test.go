@@ -57,7 +57,9 @@ func assertAttributed(t *testing.T, data map[string]any, kind string, want map[s
 	// The instance key is eventData's own; every other key must be accounted
 	// for, or a reader diffing shapes sees a key nothing documents.
 	for key := range data {
-		if key == "instance" || key == "actor" || key == "cwd" {
+		// `instance` is eventData's own; `authority` rides on every ruling
+		// under DKT-1899 and is asserted by that criterion's own test.
+		if key == "instance" || key == "actor" || key == "cwd" || key == "authority" {
 			continue
 		}
 		if _, expected := want[key]; !expected {
@@ -128,7 +130,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		gateID := readyHumanGate(t, conn, e)
 
 		err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
-			Approve: true, Note: "looks right", By: auditBy, NowMS: nowMS,
+			Approve: true, Note: "looks right", By: auditBy, Under: testUnder, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "approve: %v", err)
 
@@ -143,7 +145,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		gateID := readyHumanGate(t, conn, e)
 
 		err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
-			Approve: false, Note: "not yet", By: auditBy, NowMS: nowMS,
+			Approve: false, Note: "not yet", By: auditBy, Under: testUnder, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "reject: %v", err)
 
@@ -164,7 +166,7 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		id := parkedExecutor(t, conn, e)
 
 		_, err := e.ResolveStepWith(conn, id, ResolveOptions{Token: testConductorToken,
-			As: ResolveSkip, Note: "not needed", By: auditBy, NowMS: nowMS,
+			As: ResolveSkip, Note: "not needed", By: auditBy, Under: testUnder, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "resolve: %v", err)
 
@@ -198,7 +200,8 @@ func TestRulingEventsCarryActorAndCwd(t *testing.T) {
 		held := heldStep(t, conn, "reconcile-held@0#0")
 
 		err := e.DecideStepWith(conn, held.ID, DecideOptions{Token: testConductorToken,
-			Approve: true, Note: "call it high", Value: "high", By: auditBy, NowMS: nowMS,
+			Approve: true, Note: "call it high", Value: "high", By: auditBy,
+			Under: testUnder, NowMS: nowMS,
 		})
 		testsupport.Must(t, err, "approve --value: %v", err)
 
@@ -292,7 +295,7 @@ func TestRunReportAttributesRulings(t *testing.T) {
 	// gate from another.
 	gateID := readyHumanGate(t, conn, e)
 	err = e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
-		Approve: true, Note: "looks right", By: auditBy, NowMS: nowMS,
+		Approve: true, Note: "looks right", By: auditBy, Under: testUnder, NowMS: nowMS,
 	})
 	testsupport.Must(t, err, "approve: %v", err)
 

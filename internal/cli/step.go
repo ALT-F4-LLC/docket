@@ -437,6 +437,50 @@ func rulingBy() (engine.Attribution, error) {
 	return engine.Attribution{Actor: config.DefaultAuthor(), Cwd: cwd}, nil
 }
 
+// authorityHelp is the paragraph every verb that records a resolution appends
+// to its help (DKT-1899). One text, five verbs: the three values mean the same
+// thing everywhere, and five hand-copies would drift.
+const authorityHelp = `
+--authority is REQUIRED and names what entitled this decision:
+
+  operator        a person decided, or a harness relayed that person's
+                  decision. Use it whenever a human's answer is what settled
+                  the question.
+  standing-grant  a recorded standing authorization already covered this
+                  class of decision — a run-wide ruling, say. --authority-ref
+                  is REQUIRED with it and names that authorization.
+  conductor       the conductor decided on its own reproduction, with no
+                  operator in the loop.
+
+--authority-ref is accepted ONLY with standing-grant, since the other two
+authorities have no authorization to name.
+
+There is no default. The three cases route differently under conductor policy,
+and a missing answer used to be indistinguishable from the commonest one.`
+
+// addAuthorityFlags registers `--authority` and `--authority-ref` on a verb
+// that records a resolution. Both are plain strings; the closed set is
+// enforced by engine.ParseAuthority, so one message serves every verb.
+func addAuthorityFlags(cmd *cobra.Command) {
+	cmd.Flags().String("authority", "",
+		"Under what authority: operator, standing-grant, or conductor (required)")
+	cmd.Flags().String("authority-ref", "",
+		"The standing authorization being applied (required with --authority standing-grant)")
+}
+
+// rulingAuthority parses the two flags into the value the engine records,
+// surfacing an invalid answer as a VALIDATION error to the caller rather than
+// as a refusal from inside a transaction.
+func rulingAuthority(cmd *cobra.Command) (engine.Authority, error) {
+	kind, _ := cmd.Flags().GetString("authority")
+	ref, _ := cmd.Flags().GetString("authority-ref")
+	under, err := engine.ParseAuthority(kind, ref)
+	if err != nil {
+		return engine.Authority{}, cmdErr(err, output.ErrValidation)
+	}
+	return under, nil
+}
+
 var stepHeartbeatCmd = &cobra.Command{
 	Use:   "heartbeat STEP-N",
 	Short: "Extend the lease on a claimed step",
@@ -823,11 +867,15 @@ func runDecide(cmd *cobra.Command, args []string, approve bool, w *output.Writer
 	if err != nil {
 		return err
 	}
+	under, err := rulingAuthority(cmd)
+	if err != nil {
+		return err
+	}
 
 	label := stepLabel(id)
 	e := engine.NewEngine()
 	if err := e.DecideStepWith(conn, id, engine.DecideOptions{
-		Approve: approve, Note: note, Value: value, By: by,
+		Approve: approve, Note: note, Value: value, By: by, Under: under,
 		Token: stepConductorToken(conn, id, os.Stdin), NowMS: model.NowMS(),
 	}); err != nil {
 		return stepErr(err, label)
@@ -1012,6 +1060,12 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Parsed BEFORE the interposed warning below, so a resolution refused for
+	// its authority prints no warning about a blast radius it never had.
+	under, err := rulingAuthority(cmd)
+	if err != nil {
+		return err
+	}
 
 	label := stepLabel(id)
 	e := engine.NewEngine()
@@ -1032,7 +1086,8 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	outcome, err := e.ResolveStepWith(conn, id, engine.ResolveOptions{
 		As: as, Note: note, Batch: batch, DropInterposed: dropInterposed,
-		Worktree: worktree, By: by, Token: stepConductorToken(conn, id, os.Stdin),
+		Worktree: worktree, By: by, Under: under,
+		Token: stepConductorToken(conn, id, os.Stdin),
 		NowMS: model.NowMS(),
 	})
 	if err != nil {
@@ -1765,6 +1820,14 @@ func init() {
 			"downstream review packets render an out-of-band patch instead of "+
 			"the pre-patch commit (DKT-1034). With rerun-gates the gates re-run "+
 			"there too")
+
+	// DKT-1899: the three verbs that record a resolution on a step.
+	addAuthorityFlags(stepApproveCmd)
+	addAuthorityFlags(stepRejectCmd)
+	addAuthorityFlags(stepResolveCmd)
+	stepApproveCmd.Long += authorityHelp
+	stepRejectCmd.Long += authorityHelp
+	stepResolveCmd.Long += authorityHelp
 
 	stepContextCmd.Flags().Bool("meta", false, "Report per-section byte counts alongside the bundle")
 	stepContextCmd.Flags().Bool("live", false,

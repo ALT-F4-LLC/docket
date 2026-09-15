@@ -184,7 +184,7 @@ func TestOverridePassWorktreeRepinsTheReviewedObject(t *testing.T) {
 
 	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{Token: testConductorToken,
 		As: ResolveOverridePass, Worktree: w.worktree, Note: "conductor patch ruled",
-		By: testBy, NowMS: nowMS + 1,
+		By: testBy, Under: testUnder, NowMS: nowMS + 1,
 	})
 	testsupport.Must(t, err, "resolve --as override-pass --worktree: %v", err)
 
@@ -338,7 +338,8 @@ func TestRerunGatesWorktreeRepinsAndMeasuresThere(t *testing.T) {
 	w.gates.fail = false
 	spawnsBefore := len(w.gates.measured())
 	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{Token: testConductorToken,
-		As: ResolveRerunGates, Worktree: patched, By: testBy, NowMS: nowMS + 1,
+		As: ResolveRerunGates, Worktree: patched, By: testBy, Under: testUnder,
+		NowMS: nowMS + 1,
 	})
 	testsupport.Must(t, err, "resolve --as rerun-gates --worktree: %v", err)
 
@@ -392,7 +393,8 @@ func TestWorktreeRepinUnchangedRecordsNothing(t *testing.T) {
 	w := diffRepinFixture(t, conn, e, run.ID)
 
 	out, err := e.ResolveStepWith(conn, w.implementID, ResolveOptions{Token: testConductorToken,
-		As: ResolveOverridePass, Worktree: w.worktree, By: testBy, NowMS: nowMS + 1,
+		As: ResolveOverridePass, Worktree: w.worktree, By: testBy, Under: testUnder,
+		NowMS: nowMS + 1,
 	})
 	testsupport.Must(t, err, "resolve: %v", err)
 	if out.Repin == nil || !out.Repin.Unchanged {
@@ -473,7 +475,7 @@ func TestWorktreeRepinRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.opts.By, tc.opts.NowMS = testBy, nowMS+1
+			tc.opts.By, tc.opts.Under, tc.opts.NowMS = testBy, testUnder, nowMS+1
 			_, err := e.ResolveStepWith(conn, w.implementID, tc.opts)
 			if err == nil {
 				t.Fatalf("the resolution succeeded; %s", tc.why)
@@ -546,7 +548,8 @@ func TestWorktreeRepinRefusesAStepWithNoRecordOfItsOwn(t *testing.T) {
 
 	checkout := gitRepo(t)
 	_, err = e.ResolveStepWith(conn, reviewID, ResolveOptions{Token: testConductorToken,
-		As: ResolveOverridePass, Worktree: checkout, By: testBy, NowMS: nowMS + 1,
+		As: ResolveOverridePass, Worktree: checkout, By: testBy, Under: testUnder,
+		NowMS: nowMS + 1,
 	})
 	if err == nil {
 		t.Fatal("a re-pin on a non-holding reader succeeded; it records no issue.diff of its own")

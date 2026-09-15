@@ -27,6 +27,11 @@ import (
 // refusal being mapped fires after it, so its value never matters.
 var mappingBy = engine.Attribution{Actor: "tester", Cwd: "/repo"}
 
+// mappingUnder is the authority those cases rule under, supplied for the same
+// reason and with as little consequence: the refusal being mapped fires after
+// it too.
+var mappingUnder = engine.Authority{Kind: engine.AuthorityOperator}
+
 // TestStepErrMapping walks the refusal matrix's sentinel errors through
 // stepErr and asserts each lands on its specified code.
 //
@@ -111,7 +116,7 @@ func TestStepErrMapsEngineCodes(t *testing.T) {
 			call: func() error {
 				e := engine.NewEngine()
 				return e.DecideStepWith(conn, 1, engine.DecideOptions{
-					Approve: true, By: mappingBy, NowMS: model.NowMS(),
+					Approve: true, By: mappingBy, Under: mappingUnder, NowMS: model.NowMS(),
 				})
 			},
 			want: output.ErrValidation, row: "R10",
@@ -121,7 +126,7 @@ func TestStepErrMapsEngineCodes(t *testing.T) {
 			call: func() error {
 				e := engine.NewEngine()
 				_, err := e.ResolveStepWith(conn, 1, engine.ResolveOptions{
-					As: engine.ResolveSkip, By: mappingBy, NowMS: model.NowMS(),
+					As: engine.ResolveSkip, By: mappingBy, Under: mappingUnder, NowMS: model.NowMS(),
 				})
 				return err
 			},

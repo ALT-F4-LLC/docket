@@ -155,6 +155,12 @@ type RunReport struct {
 	// this is the rollup that says whether they need to.
 	Actors []ActorCount `json:"actors,omitempty"`
 
+	// Authorities is DKT-1899: the run's resolutions counted by the authority
+	// they were made under. E21's Actors answers WHAT CAUSED a transition;
+	// this answers, for the human ones, WHAT ENTITLED it — the distinction the
+	// conductor policy routes on and that only a free-text note used to carry.
+	Authorities []AuthorityCount `json:"authorities,omitempty"`
+
 	Gates       []db.VerdictCount   `json:"gates,omitempty"`
 	GateTrail   []db.ResultTrailRow `json:"gate_trail,omitempty"`
 	Actions     []db.VerdictCount   `json:"actions,omitempty"`
@@ -324,6 +330,25 @@ type StepRuling struct {
 	Event string `json:"event"`
 	Actor string `json:"actor"`
 	Cwd   string `json:"cwd"`
+}
+
+// AuthorityCount is one row of DKT-1899's rollup: an authority, and how many
+// of the run's resolutions were made under it.
+//
+// The rollup answers the question the note could not: of this run's
+// resolutions, how many an operator decided, how many applied a standing
+// authorization, and how many the conductor made on its own reproduction. The
+// order is the three values' DECLARED order, not by count, for ActorCount's
+// R9 reason, and an authority with no resolutions is omitted rather than shown
+// as zero.
+//
+// Resolutions recorded BEFORE this field existed carry no authority and are
+// counted under none of the three: an uncountable resolution is exactly what
+// this replaces, and inventing a bucket for it would put the guess back in the
+// number.
+type AuthorityCount struct {
+	Authority string `json:"authority"`
+	Count     int    `json:"count"`
 }
 
 // ActorCount is one row of E21's rollup: a cause, and how many of the run's
@@ -767,6 +792,12 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		return nil, err
 	}
 	report.Actors = actors
+
+	// DKT-1899: the same rollup narrowed to the resolutions, in the same
+	// transaction for the same reason.
+	if report.Authorities, err = authorityRollupTx(tx, runID); err != nil {
+		return nil, err
+	}
 
 	usageCap, usageSpend, usageUnit, _ := sched.UsageBudget()
 
@@ -1693,6 +1724,61 @@ func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 		return 0, nil
 	}
 	return value, nil
+}
+
+// authorityRollupTx counts the run's resolutions by the authority each was
+// made under (DKT-1899) — every `step-resolved`, `step-approved`,
+// `step-rejected`, `run-paused` and `run-abandoned` the run recorded.
+//
+// EVERY RESOLUTION COUNTS, not only the last one per step, because the
+// question is how a run's decisions were authorized, and a step decided twice
+// was authorized twice. That is the opposite of annotateStepRulings' last-word
+// rule, which answers a different question about a different unit.
+//
+// A payload that does not parse, or that carries no authority, is SKIPPED: a
+// malformed row is not worth failing a read verb over (R10), and a resolution
+// recorded before the field existed is genuinely uncountable — reporting it
+// under a guessed authority would restore the ambiguity this ends.
+func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
+	rows, err := tx.Query(
+		`SELECT data FROM events WHERE run_id = ? AND kind IN (?, ?, ?, ?, ?)`,
+		runID, EventStepResolved, EventStepApproved, EventStepRejected,
+		EventRunPaused, EventRunAbandoned)
+	if err != nil {
+		return nil, fmt.Errorf("reading the run's resolutions: %w", err)
+	}
+	defer rows.Close()
+
+	counts := map[string]int{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("reading a resolution: %w", err)
+		}
+		var payload struct {
+			Authority string `json:"authority"`
+		}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			continue
+		}
+		if payload.Authority == "" {
+			continue
+		}
+		counts[payload.Authority]++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading the run's resolutions: %w", err)
+	}
+
+	var out []AuthorityCount
+	for _, authority := range []string{
+		AuthorityOperator, AuthorityStandingGrant, AuthorityConductor,
+	} {
+		if n := counts[authority]; n > 0 {
+			out = append(out, AuthorityCount{Authority: authority, Count: n})
+		}
+	}
+	return out, nil
 }
 
 // annotateStepRulings fills each step's `Ruling` with the last operator ruling

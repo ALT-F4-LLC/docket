@@ -131,6 +131,17 @@ func decideCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().String("note", "", "")
 	cmd.Flags().String("value", "", "")
+	withOperatorAuthority(cmd)
+	return cmd
+}
+
+// withOperatorAuthority registers the DKT-1899 flags and answers them
+// `operator`, the authority a suite standing in for a person asserts. A test
+// about the authority itself sets its own value, or registers the flags
+// without one.
+func withOperatorAuthority(cmd *cobra.Command) *cobra.Command {
+	addAuthorityFlags(cmd)
+	_ = cmd.Flags().Set("authority", engine.AuthorityOperator)
 	return cmd
 }
 

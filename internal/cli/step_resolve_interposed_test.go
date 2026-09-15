@@ -117,7 +117,7 @@ func resolveCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd.Flags().Bool("batch", false, "")
 	cmd.Flags().Bool("drop-interposed", false, "")
 	cmd.Flags().String("worktree", "", "")
-	return cmd
+	return withOperatorAuthority(cmd)
 }
 
 func stepStatusByInstance(t *testing.T, conn *sql.DB, instance string) string {

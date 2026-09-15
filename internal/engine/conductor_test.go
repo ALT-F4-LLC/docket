@@ -108,7 +108,7 @@ var conductorVerbs = []conductorVerb{
 		setup: func(t *testing.T, conn *sql.DB, e *Engine, _ *model.Run) int { return readyHumanGate(t, conn, e) },
 		call: func(conn *sql.DB, e *Engine, _ *model.Run, stepID int, token string) error {
 			return e.DecideStepWith(conn, stepID, DecideOptions{
-				Approve: true, By: auditBy, Token: token, NowMS: nowMS})
+				Approve: true, By: auditBy, Under: testUnder, Token: token, NowMS: nowMS})
 		},
 	},
 	{
@@ -116,7 +116,7 @@ var conductorVerbs = []conductorVerb{
 		setup: func(t *testing.T, conn *sql.DB, e *Engine, _ *model.Run) int { return readyHumanGate(t, conn, e) },
 		call: func(conn *sql.DB, e *Engine, _ *model.Run, stepID int, token string) error {
 			return e.DecideStepWith(conn, stepID, DecideOptions{
-				Approve: false, By: auditBy, Token: token, NowMS: nowMS})
+				Approve: false, By: auditBy, Under: testUnder, Token: token, NowMS: nowMS})
 		},
 	},
 	{
@@ -124,7 +124,7 @@ var conductorVerbs = []conductorVerb{
 		setup: func(t *testing.T, conn *sql.DB, _ *Engine, _ *model.Run) int { return parkedImplement(t, conn) },
 		call: func(conn *sql.DB, e *Engine, _ *model.Run, stepID int, token string) error {
 			_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
-				As: ResolveSkip, By: auditBy, Token: token, NowMS: nowMS})
+				As: ResolveSkip, By: auditBy, Under: testUnder, Token: token, NowMS: nowMS})
 			return err
 		},
 	},
@@ -147,7 +147,8 @@ var conductorVerbs = []conductorVerb{
 		call: func(conn *sql.DB, _ *Engine, run *model.Run, _ int, token string) error {
 			_, _, err := MoveRunWith(conn, MoveRunOptions{
 				RunID: run.ID, Verb: "pause", To: model.RunWaitingHuman,
-				From: []model.RunStatus{model.RunActive}, Token: token, NowMS: nowMS})
+				From:  []model.RunStatus{model.RunActive},
+				Under: testUnder, Token: token, NowMS: nowMS})
 			return err
 		},
 	},
@@ -171,7 +172,7 @@ var conductorVerbs = []conductorVerb{
 		call: func(conn *sql.DB, _ *Engine, run *model.Run, _ int, token string) error {
 			_, _, err := MoveRunWith(conn, MoveRunOptions{
 				RunID: run.ID, Verb: "abandon", To: model.RunAbandoned, From: abandonFrom,
-				Reason: "scope changed", Token: token, NowMS: nowMS})
+				Reason: "scope changed", Under: testUnder, Token: token, NowMS: nowMS})
 			return err
 		},
 	},
@@ -256,7 +257,8 @@ func TestConductRunRotatesTheCapability(t *testing.T) {
 	pause := func(token string) error {
 		_, _, err := MoveRunWith(conn, MoveRunOptions{
 			RunID: run.ID, Verb: "pause", To: model.RunWaitingHuman,
-			From: []model.RunStatus{model.RunActive}, Token: token, NowMS: nowMS})
+			From:  []model.RunStatus{model.RunActive},
+			Under: testUnder, Token: token, NowMS: nowMS})
 		return err
 	}
 	assertConductorCode(t, pause(first), CodeAuth, "run pause with the retired token")
@@ -303,7 +305,7 @@ func TestConductRunBindsAnUnboundRunAndRefusesATerminalOne(t *testing.T) {
 
 	_, _, err = MoveRunWith(conn, MoveRunOptions{
 		RunID: run.ID, Verb: "abandon", To: model.RunAbandoned, From: abandonFrom,
-		Reason: "done with it", Token: result.Token, NowMS: nowMS})
+		Reason: "done with it", Under: testUnder, Token: result.Token, NowMS: nowMS})
 	testsupport.Must(t, err, "abandon: %v", err)
 
 	_, err = ConductRun(conn, run.ID, ConductOptions{By: auditBy, NowMS: nowMS})

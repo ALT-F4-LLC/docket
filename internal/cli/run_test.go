@@ -122,7 +122,9 @@ func runMoveCmdWithDB(conn *sql.DB, name string) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Use = name
 	cmd.Flags().String("reason", "", "")
-	return cmd
+	// A resume registers no authority flags in production, but the helper
+	// serves all three verbs and an unread flag costs a resume nothing.
+	return withOperatorAuthority(cmd)
 }
 
 // seedRun registers the workflow, creates a task issue, and starts a run over

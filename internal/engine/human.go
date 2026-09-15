@@ -135,6 +135,9 @@ type DecideOptions struct {
 	// By is who is ruling and from where. REQUIRED: an empty field refuses the
 	// decision before anything is written (see Attribution).
 	By Attribution
+	// Under is the authority the decision is made under (DKT-1899). REQUIRED:
+	// the zero value refuses the decision before anything is written.
+	Under Authority
 	// Token is the run's conductor capability (DKT-2465, conductor.go). It is
 	// REQUIRED on a bound run and ignored on an unbound one; the empty string
 	// authorizes nothing.
@@ -159,6 +162,9 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 		verb = "step reject"
 	}
 	if err := opts.By.require(verb); err != nil {
+		return err
+	}
+	if err := opts.Under.require(verb); err != nil {
 		return err
 	}
 
@@ -301,8 +307,9 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, nowMS); err != nil {
 		return err
 	}
-	// The note as before, plus who decided (DKT-2450).
-	decided, err := rulingData(opts.By, noteField(note))
+	// The note as before, plus who decided (DKT-2450) and under what authority
+	// (DKT-1899).
+	decided, err := rulingData(opts.By, opts.Under.addTo(noteField(note)))
 	if err != nil {
 		return err
 	}
@@ -340,6 +347,9 @@ type ResolveOptions struct {
 	// By is who is ruling and from where. REQUIRED: an empty field refuses the
 	// resolution before anything is written (see Attribution).
 	By Attribution
+	// Under is the authority the resolution is made under (DKT-1899).
+	// REQUIRED: the zero value refuses it before anything is written.
+	Under Authority
 	// Token is the run's conductor capability (DKT-2465, conductor.go):
 	// required on a bound run, ignored on an unbound one.
 	Token string
@@ -386,6 +396,9 @@ func (e *Engine) resolveStep(
 	batch, dropInterposed := opts.Batch, opts.DropInterposed
 
 	if err := opts.By.require("step resolve"); err != nil {
+		return err
+	}
+	if err := opts.Under.require("step resolve"); err != nil {
 		return err
 	}
 
@@ -821,7 +834,7 @@ func (e *Engine) resolveStep(
 		return err
 	}
 	// The resolution as before, plus who ruled (DKT-2450).
-	resolved, err := rulingData(opts.By, map[string]any{"detail": as})
+	resolved, err := rulingData(opts.By, opts.Under.addTo(map[string]any{"detail": as}))
 	if err != nil {
 		return err
 	}

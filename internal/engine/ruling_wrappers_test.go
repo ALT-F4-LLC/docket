@@ -19,6 +19,12 @@ import (
 // testBy is the identity every wrapped test ruling carries.
 var testBy = Attribution{Actor: "tester", Cwd: "/repo"}
 
+// testUnder is the authority every wrapped ruling is made under (DKT-1899) —
+// `operator`, because that is what a suite standing in for a person asserts. A
+// test about the authority itself passes its own through the `With` form, the
+// way an attribution test does.
+var testUnder = Authority{Kind: AuthorityOperator}
+
 // testConductorToken is the capability every wrapped ruling presents
 // (DKT-2465). A run is bound at its first activation, so a fixture's run
 // refuses an unauthenticated ruling exactly as a real one does; the wrappers
@@ -59,7 +65,7 @@ func (e *Engine) DecideStepValue(
 		return err
 	}
 	return e.DecideStepWith(conn, stepID, DecideOptions{
-		Approve: approve, Note: note, Value: value, By: testBy,
+		Approve: approve, Note: note, Value: value, By: testBy, Under: testUnder,
 		Token: testConductorToken, NowMS: nowMS,
 	})
 }
@@ -71,7 +77,8 @@ func (e *Engine) ResolveStep(
 		return err
 	}
 	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
-		As: as, Note: note, By: testBy, Token: testConductorToken, NowMS: nowMS,
+		As: as, Note: note, By: testBy, Under: testUnder,
+		Token: testConductorToken, NowMS: nowMS,
 	})
 	return err
 }
@@ -83,7 +90,8 @@ func (e *Engine) ResolveStepBatch(
 		return err
 	}
 	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
-		As: as, Note: note, Batch: true, By: testBy, Token: testConductorToken, NowMS: nowMS,
+		As: as, Note: note, Batch: true, By: testBy, Under: testUnder,
+		Token: testConductorToken, NowMS: nowMS,
 	})
 	return err
 }
@@ -96,7 +104,7 @@ func (e *Engine) ResolveStepDropInterposed(
 	}
 	_, err := e.ResolveStepWith(conn, stepID, ResolveOptions{
 		As: as, Note: note, Batch: batch, DropInterposed: true, By: testBy,
-		Token: testConductorToken, NowMS: nowMS,
+		Under: testUnder, Token: testConductorToken, NowMS: nowMS,
 	})
 	return err
 }
@@ -121,9 +129,15 @@ func MoveRun(
 	if err := seatTestConductor(conn, runID); err != nil {
 		return nil, nil, err
 	}
+	// Only the two dispositions carry an authority (DKT-1899); a resume that
+	// supplied one would record a key production never writes there.
+	under := testUnder
+	if to == model.RunActive {
+		under = Authority{}
+	}
 	return MoveRunWith(conn, MoveRunOptions{
 		RunID: runID, Verb: verb, To: to, From: from, Reason: reason,
-		Token: testConductorToken, NowMS: nowMS,
+		Under: under, Token: testConductorToken, NowMS: nowMS,
 	})
 }
 

@@ -365,7 +365,7 @@ var eventKinds = map[string]bool{
 	EventDispatchOpened: true, EventDispatchClosed: true,
 	EventDispatchAbandoned: true, EventDispatchExtended: true,
 	EventReapAcknowledged: true,
-	EventEventsPruned: true, EventRunBudgetSet: true,
+	EventEventsPruned:     true, EventRunBudgetSet: true,
 	EventStepAnnotated:       true,
 	EventProjectRegistered:   true,
 	EventConductorSeated:     true,
@@ -839,6 +839,109 @@ func (a Attribution) require(verb string) error {
 			verb, a.Actor, a.Cwd)
 	}
 	return nil
+}
+
+// The three authorities a resolution can be made under (DKT-1899). The set is
+// CLOSED because the conductor policy distinguishes exactly these cases, and a
+// fourth spelling of one of them would make the rollup uncountable again.
+const (
+	// AuthorityOperator: a person decided, or a harness relayed that person's
+	// decision. The commonest case, and the one a default would have hidden.
+	AuthorityOperator = "operator"
+	// AuthorityStandingGrant: a recorded standing authorization was applied —
+	// a run-wide ruling covering this class of resolution. AuthorityRef names
+	// it, and is REQUIRED, because a standing authorization that cites nothing
+	// is the unattributable note this field replaces.
+	AuthorityStandingGrant = "standing-grant"
+	// AuthorityConductor: the conductor decided on its own reproduction, with
+	// no operator in the loop. Distinguishing this from an operator's decision
+	// is the whole reason the field exists: both used to read as a note.
+	AuthorityConductor = "conductor"
+)
+
+// Authority is UNDER WHAT AUTHORITY an operator verb was exercised (DKT-1899)
+// — the companion to Attribution's who and from where.
+//
+// Attribution answers "who ran this"; it cannot answer "were they entitled to,
+// and by what". Across 254 override-pass resolutions those were tellable only
+// from free text: 193 notes quoted an operator, 26 cited a standing
+// authorization, 35 referenced no operator at all — three cases the conductor
+// policy treats differently and no surface could count.
+//
+// It is a SEPARATE type from Attribution rather than two more fields on it,
+// because the two have different reaches. Attribution covers `step reap` and
+// `run conduct` as well, which assert no resolution authority; Authority
+// covers `run pause` and `run abandon`, which carry no attribution. Folding
+// them together would force every verb to satisfy both contracts.
+//
+// The zero value is the unanswered question, and require refuses it. Parsing
+// happens at the CLI (ParseAuthority), so an invalid value is a VALIDATION
+// error to the caller rather than a refusal from deep inside a transaction.
+type Authority struct {
+	// Kind is one of the three constants above.
+	Kind string
+	// Ref names the standing authorization, on AuthorityStandingGrant only.
+	Ref string
+}
+
+// ParseAuthority turns the two flag strings into an Authority, enforcing the
+// closed set and the standing-grant reference rule. It returns a validation
+// error, which the CLI surfaces as VALIDATION_ERROR.
+//
+// The empty kind is refused rather than defaulted: defaulting to `operator`
+// would record the commonest answer for every caller that never answered, and
+// an authority nobody asserted is exactly what this replaces.
+func ParseAuthority(kind, ref string) (Authority, error) {
+	switch kind {
+	case "":
+		return Authority{}, validationErr(
+			"--authority is required: one of %s, %s, %s — a resolution must say "+
+				"under what authority it was made, and defaulting the answer would "+
+				"record an authority nobody asserted",
+			AuthorityOperator, AuthorityStandingGrant, AuthorityConductor)
+	case AuthorityOperator, AuthorityConductor:
+		if ref != "" {
+			return Authority{}, validationErr(
+				"--authority-ref names the standing authorization being applied and "+
+					"belongs only to %s, not %s", AuthorityStandingGrant, kind)
+		}
+		return Authority{Kind: kind}, nil
+	case AuthorityStandingGrant:
+		if strings.TrimSpace(ref) == "" {
+			return Authority{}, validationErr(
+				"--authority-ref is required with --authority %s: a standing "+
+					"authorization that names nothing cannot be checked against the "+
+					"authorization it claims", AuthorityStandingGrant)
+		}
+		return Authority{Kind: kind, Ref: ref}, nil
+	default:
+		return Authority{}, validationErr(
+			"--authority %q is not one of %s, %s, %s", kind,
+			AuthorityOperator, AuthorityStandingGrant, AuthorityConductor)
+	}
+}
+
+// require refuses an unanswered authority at the engine seam, BEFORE anything
+// is written — Attribution.require's rule, held here so it binds every writer
+// rather than only the CLI that happens to parse flags.
+func (a Authority) require(verb string) error {
+	if a.Kind == "" {
+		return fmt.Errorf(
+			"refusing to record %s under no stated authority: a resolution must say whether an operator decided, a standing authorization was applied, or the conductor acted on its own reproduction",
+			verb)
+	}
+	return nil
+}
+
+// addTo writes the authority onto a ruling's field map. `authority_ref` is
+// present only where it means something — on a standing grant — so a reader
+// never meets an empty key it must decide how to interpret.
+func (a Authority) addTo(fields map[string]any) map[string]any {
+	fields["authority"] = a.Kind
+	if a.Ref != "" {
+		fields["authority_ref"] = a.Ref
+	}
+	return fields
 }
 
 // rulingData renders a ruling event's payload: the verb's own fields plus the
