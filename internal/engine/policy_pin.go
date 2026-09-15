@@ -146,7 +146,7 @@ func resolveRowRouting(policy *policyDoc, row *model.StepRow) error {
 	}
 	switch {
 	case row.Executor != "":
-		assignment, err := policy.ResolveExecutor(row.Executor, row.Attempt, row.Instance, row.Labels)
+		assignment, err := policy.ResolveExecutor(row.Executor, row.FailedAttempts, row.Instance, row.Labels)
 		if err != nil {
 			return validationErr(
 				"resolving %s@%s from the run's pinned policy.toml: %v", row.Step, row.Instance, err)

@@ -23,16 +23,18 @@ var roundOrdinal = regexp.MustCompile(`@(\d+)(?:#\d+)?$`)
 
 // ResolveExecutor resolves one executor row's {model, effort, variant} — a
 // port of wave.js's resolve(): the row's [executors] entry, walked forward
-// through [variants].escalate_to by (attempt + round) hops, redirected around
-// any [security]-forbidden model, and clamped to [security].ceiling on a
-// sensitive row.
+// through [variants].escalate_to by (recorded failures + round) hops,
+// redirected around any [security]-forbidden model, and clamped to
+// [security].ceiling on a sensitive row.
 //
-// attempt is the row's Attempt field verbatim — 0 on a step never claimed,
-// N after N prior claims, matching wave.js's row.attempt exactly (DKT-1282
-// AC2: "attempt N resolves to the ladder's Nth variant, never revisiting an
-// abandoned one" is this loop's forward-only walk). instance is the step's
-// instance name, for round parsing. labels is the issue's snapshotted labels.
-func (p *policyDoc) ResolveExecutor(hint string, attempt int, instance string, labels []string) (PolicyAssignment, error) {
+// The walk keys on RECORDED FAILURES — the row's FailedAttempts field, claims
+// that ended in an explicit `step fail` — plus the round hops. Reaped claims
+// do not advance the walk: a lease the reaper took back measured nothing, so
+// the re-run resolves to the tier it was reaped from. Spent claims
+// (the row's Attempt) are therefore NOT the hop key; a live claim and a reap
+// both leave the tier where it stands. instance is the step's instance name,
+// for round parsing. labels is the issue's snapshotted labels.
+func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance string, labels []string) (PolicyAssignment, error) {
 	found, ok := p.Executors[hint]
 	if !ok {
 		return PolicyAssignment{}, fmt.Errorf("executor hint %q has no [executors] row", hint)
@@ -62,10 +64,10 @@ func (p *policyDoc) ResolveExecutor(hint string, attempt int, instance string, l
 	}
 	standing := variant
 
-	if attempt < 0 {
-		attempt = 0
+	if failedAttempts < 0 {
+		failedAttempts = 0
 	}
-	hops := attempt + p.roundHops(hint, instance)
+	hops := failedAttempts + p.roundHops(hint, instance)
 
 	for range hops {
 		cur := p.Variants[variant]
@@ -106,7 +108,7 @@ func (p *policyDoc) ResolveExecutor(hint string, attempt int, instance string, l
 	// [executors] row, so its escalate_to climb stays within Fable.
 	if variant != standing && p.Variants[variant].Model == "fable" &&
 		p.Variants[standing].Model != "fable" &&
-		!p.fableEligible(hint, attempt, standing, labels) {
+		!p.fableEligible(hint, failedAttempts, standing, labels) {
 		if fb, ok := p.Escalation.Fallback[variant]; ok {
 			if _, ok := p.Variants[fb]; ok {
 				variant = fb
@@ -243,8 +245,10 @@ func (p *policyDoc) roundHops(hint, instance string) int {
 }
 
 // fableEligible is wave.js's fableEligible(): whether a row that walked onto
-// a Fable variant is exempt from the post-walk redirect back off it.
-func (p *policyDoc) fableEligible(hint string, attempt int, standing string, labels []string) bool {
+// a Fable variant is exempt from the post-walk redirect back off it. Its
+// "failed-top-opus-round" gate keys on recorded failures for the same reason
+// the walk does — a reaped claim is a liveness event, not a failed round.
+func (p *policyDoc) fableEligible(hint string, failedAttempts int, standing string, labels []string) bool {
 	for _, gate := range p.Escalation.FableGates {
 		switch gate {
 		case "investigator-class":
@@ -256,7 +260,7 @@ func (p *policyDoc) fableEligible(hint string, attempt int, standing string, lab
 				return true
 			}
 		case "failed-top-opus-round":
-			if spec, ok := p.Variants[standing]; ok && attempt > 0 &&
+			if spec, ok := p.Variants[standing]; ok && failedAttempts > 0 &&
 				spec.Model == "opus" && (spec.Effort == "xhigh" || spec.Effort == "max") {
 				return true
 			}
