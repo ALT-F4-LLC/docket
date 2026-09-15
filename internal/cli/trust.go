@@ -143,8 +143,21 @@ var trustRmCmd = newTrustRmCmd()
 
 func newTrustRmCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:         "rm <name>",
-		Short:       "Remove an approved command",
+		Use:   "rm <name>",
+		Short: "Remove an approved command",
+		Long: `Remove an approved command.
+
+The trust store is PUBLISHED FIRST, and the trust-removed event is recorded
+only after that publish succeeds. A revocation recorded ahead of the write
+could leave an entry that still authorizes execution while the event log said
+it had been revoked, so the log would claim less authority than the store
+grants.
+
+The order means two failures are possible and both name what happened. If the
+store cannot be published, nothing is removed and nothing is recorded. If the
+store is published and the event cannot be recorded, the entry IS removed and
+the command says so; the log then still shows the entry as trusted, which is
+the conservative direction.`,
 		Args:        cobra.ExactArgs(1),
 		Annotations: map[string]string{"skipDB": ""},
 		RunE:        runTrustRm,
@@ -436,15 +449,25 @@ func runTrustRm(cmd *cobra.Command, args []string) error {
 	}
 
 	// The record is written from INSIDE the removal, under the store lock and
-	// ahead of the write, with the entry as it stood — so it names the hash and
-	// flags of what actually went away rather than of whatever a pre-read
-	// lookup by name happened to find first.
+	// AFTER the store is published (DKT-2198), with the entry as it stood — so
+	// it names the hash and flags of what actually went away rather than of
+	// whatever a pre-read lookup by name happened to find first, and a publish
+	// that never lands leaves no revocation recorded against an entry that
+	// still authorizes execution.
 	recorder := &trustEventRecorder{cmd: cmd, kind: engine.EventTrustRemoved}
 
 	removed, err := trust.Remove(trust.RemoveRequest{
 		Name: name, RepoRoot: repoRoot, Global: global, OnChange: recorder.record,
 	})
 	if err != nil {
+		// A removal that was published before the record failed is a COMPLETED
+		// revocation with no trail. Reporting it as a plain store failure would
+		// tell the operator the opposite of what happened — that the entry is
+		// still trusted — and send them to re-run a removal that already took
+		// effect.
+		if removed {
+			return trustCmdError(fmt.Errorf("%q was removed from the trust store, but the change could not be recorded: %w", name, err))
+		}
 		return trustCmdError(err)
 	}
 	if !removed {
@@ -518,18 +541,23 @@ var getwd = os.Getwd
 var errTrustUnrecorded = errors.New("the trust change was not recorded")
 
 // trustEventRecorder writes the trust-added / trust-removed event, as the hook
-// trust.Add and trust.Remove run under their lock BEFORE writing the store
-// (§3.6).
+// trust.Add and trust.Remove run under their lock (§3.6): BEFORE the store is
+// written for an add, and AFTER it is published for a removal. Both orders
+// serve one invariant — the surviving partial failure must never let the trail
+// claim less authority than the store grants — which points opposite ways for
+// granting and revoking (see RemoveRequest.OnChange).
 //
 // MANDATORY INSIDE A REPO, NOT BEST-EFFORT. The record used to be written after
 // the store, with its error discarded, which meant a database that refused the
 // insert left a granted entry and no trace of the grant. An absent event is not
 // a neutral outcome: an auditor reads it as "no grant happened", so a trail that
 // can silently lose entries is worse than one that is known to be missing. Being
-// the hook is what fixes it — an error here aborts the change with nothing
-// written, and the only divergence that survives is a recorded change that then
-// failed to land, which is loud rather than silent and errs toward over-reporting
-// authority rather than under-reporting it.
+// the hook is what fixes it — on an ADD an error here aborts the grant with
+// nothing written, and the only divergence that survives is a recorded grant
+// that then failed to land, which is loud rather than silent and errs toward
+// over-reporting authority rather than under-reporting it. On a REMOVAL the
+// publish has already happened when this runs, so an error leaves a completed
+// revocation with no trail — also over-reporting, and the verb says so.
 //
 // MANDATORY INCLUDES ATTRIBUTED (DKT-595). An event that lands without its
 // actor and cwd is the 2026-08-19 shape — a ledger that shows privilege
@@ -601,7 +629,8 @@ func (r *trustEventRecorder) record(entry trust.Entry) error {
 	// from a readable directory — so between an unrecordable attribution and a
 	// retryable refusal, the refusal is the smaller loss. Inside a repo the
 	// record is already MANDATORY, and this failure aborts through the same
-	// hook, with nothing written to either file.
+	// hook — with nothing written to either file on an add, and with the
+	// removal already published on a rm, which the verb reports.
 	cwd, err := getwd()
 	if err != nil {
 		return fmt.Errorf("%w: the working directory could not be resolved (%w); a trust change must record where it was made from, so run it again from a readable directory", errTrustUnrecorded, err)
@@ -646,8 +675,9 @@ func trustCmdError(err error) error {
 	case errors.Is(err, sql.ErrNoRows):
 		return cmdErr(err, output.ErrNotFound)
 	case errors.Is(err, errTrustUnrecorded):
-		// The request was well-formed and the store is untouched; what failed is
-		// this repo's event log. GENERAL_ERROR rather than VALIDATION_ERROR so a
+		// The request was well-formed and what failed is this repo's event log:
+		// on an add the store is untouched, on a rm the removal has already
+		// landed and the message says so. GENERAL_ERROR rather than VALIDATION_ERROR so a
 		// caller does not retry with a "corrected" argv against a database that
 		// will refuse the next write too.
 		return cmdErr(err, output.ErrGeneral)

@@ -69,9 +69,25 @@ type RemoveRequest struct {
 	Name     string
 	RepoRoot string // the repo whose binding to remove; ignored when Global
 	Global   bool
-	// OnChange runs INSIDE the lock, after the entry to delete has been found
-	// and BEFORE the store is written, receiving the entry AS IT STOOD. Same
-	// contract and same reasoning as AddRequest.OnChange.
+	// OnChange runs INSIDE the lock, receiving the entry AS IT STOOD, but
+	// AFTER the store has been published — the opposite order from
+	// AddRequest.OnChange, and deliberately so (DKT-2198).
+	//
+	// WHY THE ORDER INVERTS FOR REMOVAL. Both hooks protect the same
+	// invariant: whichever half of the two-file change fails, the surviving
+	// state must never let the record claim LESS authority than the store
+	// grants. For an add, recording first satisfies it — what survives is a
+	// grant that failed to land, over-reporting authority. For a removal the
+	// same order satisfies the opposite: a revocation that was recorded and
+	// never happened, leaving an entry that still authorizes execution while
+	// the trail says it does not. So removal publishes first, and what can
+	// survive here is a removal that landed unrecorded — the trail still shows
+	// the entry as trusted, which is conservative rather than permissive.
+	//
+	// A non-nil error fails the removal, but the entry is ALREADY GONE by
+	// then; removeAt reports removed=true alongside the error so the caller
+	// can say so rather than describing a completed revocation as a store
+	// failure.
 	//
 	// It receives the entry rather than leaving the caller to look one up
 	// beforehand, because a caller's own pre-read cannot see the binding this
@@ -165,6 +181,10 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 // Returns false when no such entry existed, which callers render as a
 // NOT_FOUND rather than a failure — removing something absent is not an error
 // worth an exit code of its own.
+//
+// The bool and the error are INDEPENDENT. A true alongside a non-nil error
+// means the entry was published as removed and RemoveRequest.OnChange then
+// failed: the revocation happened, its record did not.
 func Remove(req RemoveRequest) (bool, error) {
 	path, err := StorePath()
 	if err != nil {
@@ -200,15 +220,16 @@ func removeAt(path string, req RemoveRequest) (bool, error) {
 		return false, nil
 	}
 
-	if req.OnChange != nil {
-		if err := req.OnChange(st.Entries[idx]); err != nil {
-			return false, err
-		}
-	}
-
+	removed := st.Entries[idx]
 	st.Entries = slices.Delete(st.Entries, idx, idx+1)
 	if err := writeStore(path, st); err != nil {
 		return false, err
+	}
+
+	if req.OnChange != nil {
+		if err := req.OnChange(removed); err != nil {
+			return true, err
+		}
 	}
 	return true, nil
 }
@@ -401,7 +422,10 @@ func writeStore(path string, st *Store) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".trust-*.toml")
 	if err != nil {
-		return fmt.Errorf("creating a temporary file in %s: %w", dir, err)
+		// The target store is named as well as the directory: every publish
+		// failure must identify WHICH store did not change, and the directory
+		// alone leaves an operator comparing a path they were never shown.
+		return fmt.Errorf("publishing the trust store %s: creating a temporary file in %s: %w", path, dir, err)
 	}
 	tmpPath := tmp.Name()
 	defer func() {

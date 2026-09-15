@@ -635,10 +635,12 @@ func TestTrustAddRefusesWhenTheCwdCannotBeResolved(t *testing.T) {
 	}
 }
 
-// TestTrustRmRefusesWhenTheCwdCannotBeResolved: the same refusal on the other
-// verb. A revocation is an attributable act for the same reason a grant is, and
-// a refusal that guarded only the add would leave half the trail degradable.
-func TestTrustRmRefusesWhenTheCwdCannotBeResolved(t *testing.T) {
+// TestTrustRmFailsLoudlyWhenTheCwdCannotBeResolved: an unattributable
+// revocation still fails the verb, but on this verb the store is published
+// BEFORE the record (DKT-2198), so the entry is already gone when attribution
+// fails. The requirement here is that the failure SAYS so — an operator told
+// only "not recorded" would re-run a removal that already took effect.
+func TestTrustRmFailsLoudlyWhenTheCwdCannotBeResolved(t *testing.T) {
 	_, cfg := trustRepo(t)
 
 	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
@@ -649,11 +651,20 @@ func TestTrustRmRefusesWhenTheCwdCannotBeResolved(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("the removal succeeded with an unresolvable cwd; an unattributable revocation must be refused")
 	}
-	if entries := trustEntries(t); len(entries) != 1 {
-		t.Errorf("the refused removal changed the store: %+v", entries)
+	if !strings.Contains(runErr.Error(), "was removed from the trust store") {
+		t.Errorf("the failure must say the entry WAS removed and only the record failed: %v", runErr)
 	}
+	if code := errorCodeOf(t, runErr); code != output.ErrGeneral {
+		t.Errorf("the failure is %s, want GENERAL_ERROR: %v", code, runErr)
+	}
+	if entries := trustEntries(t); len(entries) != 0 {
+		t.Errorf("the publish already landed, so the entry must be gone: %+v", entries)
+	}
+	// The trail keeps showing the entry as trusted, which OVER-reports
+	// authority. That is the safe direction: a reader is conservative, never
+	// permissively told a live grant is gone.
 	if events := trustEvents(t, cfg); len(events) != 1 {
-		t.Errorf("got %d events, want only the original add — a refused removal records nothing", len(events))
+		t.Errorf("got %d events, want only the original add: %+v", len(events), events)
 	}
 }
 
