@@ -1367,6 +1367,14 @@ step's inputs rather than of any gate:
 | sha reachable, tree gone | **Reconstruct** it — `git worktree add --detach` into a throwaway checkout, measure, release. Sweeping a checkout does not delete the object |
 | neither | `skipped`, spawning nothing, with a reason naming the sha or the swept path |
 
+**The lock timeout is the same case (DKT-91).** A `tree = true` gate whose
+working-tree mutex does not come free within its bound never spawns either, so
+it records `skipped` with a reason naming the wait — no exit code, no duration,
+no output — and parks as unmeasured rather than routing per `on_fail`. The
+cause differs from a swept worktree; the fact does not. `fail` there spent the
+token a genuinely failing build spends, and a fix loop entered on it would ask
+a worker to fix a tree the engine never opened.
+
 Reconstruction is what makes mode 2 a fixed bug rather than a documented park:
 parking every swept-worktree verify is honest and useless. It is NOT a
 best-effort fallback — if the sha cannot be checked out the gate skips, exactly

@@ -65,7 +65,8 @@ type treeLock struct {
 //
 // Blocking rather than failing fast is correct: the whole purpose is to make
 // the second gate WAIT for the first. Exceeding the bound is the caller's
-// signal to record verdict='fail' with a reason naming the wait.
+// signal to record verdict='skipped' with a reason naming the wait: no command
+// ran, so nothing about the tree was measured.
 func acquireTreeLock(path string, timeout time.Duration) (*treeLock, error) {
 	if path == "" {
 		return nil, fmt.Errorf(

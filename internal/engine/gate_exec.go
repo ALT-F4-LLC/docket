@@ -367,11 +367,15 @@ func (r *ExecRunner) spawnMatched(
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
 			// L4/L7: the serialization the gate requires cannot be provided, so
-			// it fails rather than running unserialized.
+			// it does not run unserialized. Nothing spawned and no tree was
+			// read, which is the vanished-worktree fact above wearing a
+			// different cause, so it takes the same shape (DKT-91): the ROW is
+			// `skipped` and routes as a gate that measured nothing, while the
+			// execution verdict stays fail so routing remains fail-closed.
 			return GateExecution{
 				Verdict: VerdictFail,
 				Results: []GateResultRow{{
-					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictFail,
+					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictSkipped,
 					Argv: match.Argv, Reason: lockErr.Error(),
 					TrustEntry: entry.Name,
 					StubEntry:  entry.Stub,
