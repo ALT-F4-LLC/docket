@@ -1331,6 +1331,22 @@ func (e *Engine) runRoutingStage(
 
 	status := statusForRouting(routing)
 
+	// A FAILURE ROUTED TO A TRIAGE PANEL SUSPENDS THIS STEP (DKT-1901). The
+	// panel decides what the failure means — retry, a fix round, abandonment, or
+	// an operator — so the step may not terminalize on its own: `done` would
+	// release its successors as though it had passed, and a `waiting-human` park
+	// would block the very panel meant to triage it (R2b holds every step of a
+	// parked issue, and the run rollup parks the run behind it).
+	//
+	// `gated` is the status it already carries out of the gate stage, which is
+	// exactly the shape a HELD routing step wears while a materialized gate
+	// answers for it (§7.7.3): non-terminal, so nothing downstream is released;
+	// not parked, so the lane and the run stay live. applyTriageOutcome writes
+	// the terminal status when the tally lands.
+	if !stale && spec.OnFailTarget() != "" && routing == spec.OnFailTarget() {
+		status = db.StepGated
+	}
+
 	// AN UNCHANGED HAND-BACK PARKS THE ROUND AT ITS SOURCE (DKT-588), before
 	// the review chain downstream spends anything. The park lands on the loop
 	// body's OWN row — the gap-only and measured-nothing parks above are the

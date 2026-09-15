@@ -719,7 +719,16 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 
 		// J1/J2: EVERY sibling must be terminal. `waiting-human` is not, so an
 		// operator's open question holds the join — which is the park.
+		//
+		// A sibling SUSPENDED ON THIS STEP is the one exception (DKT-1901): it
+		// routed its failure to this panel and is waiting for the panel's
+		// verdict, so requiring it to be terminal first would deadlock the pair.
+		// The exemption is keyed on the routing naming THIS step, so an ordinary
+		// successor still waits for the suspended step exactly as before.
 		for _, pred := range siblings {
+			if suspendedOnPanel(pred, step.StepName) {
+				continue
+			}
 			if !db.StepTerminal(pred.Status) {
 				return false
 			}
@@ -821,9 +830,26 @@ func (s *Scheduler) routedTo(step *db.Step) bool {
 			if pred.Status == db.StepDone && routingIs(pred.Routing, step.StepName) {
 				return true
 			}
+			// A triage panel's predecessor is SUSPENDED rather than done
+			// (DKT-1901): its failure is the question the panel exists to
+			// answer, so waiting for it to terminalize first would deadlock.
+			if suspendedOnPanel(pred, step.StepName) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// suspendedOnPanel reports whether a step failed and routed that failure to the
+// named triage panel, and is waiting for its verdict (DKT-1901).
+//
+// The status is `gated` — the non-terminal shape a held routing step wears —
+// and the routing names the panel. Both halves are required: `gated` alone is
+// an ordinary step mid-saga, and the routing alone would also match the step
+// after the panel's verdict terminalized it.
+func suspendedOnPanel(step *db.Step, panel string) bool {
+	return step.Status == db.StepGated && routingIs(step.Routing, panel)
 }
 
 // openInterposedGates returns the non-terminal interposed-gate instances that

@@ -214,10 +214,22 @@ func OpenVoteProposal(
 		return 0, err
 	}
 
+	// A TRIAGE PANEL OPENS WITH THE FAILURE IT IS ASKED ABOUT (DKT-1901). The
+	// question is "what should happen to this failed step", and a panel that
+	// cannot see the gate rows and the attempt's output is being asked to decide
+	// it blind — which is how the corpus's override-passes came to be rubber
+	// stamps. Empty for every other vote step, so their proposals are unchanged.
+	rationale := fmt.Sprintf("workflow vote step %s", step.Instance)
+	if evidence, err := triageEvidence(conn, step); err != nil {
+		return 0, err
+	} else if evidence != "" {
+		rationale += "\n\n" + evidence
+	}
+
 	proposal := &model.Proposal{
 		ProjectID:   projectID,
 		Description: fmt.Sprintf("%s (%s)", step.Instance, spec.Name),
-		Rationale:   fmt.Sprintf("workflow vote step %s", step.Instance),
+		Rationale:   rationale,
 		Criticality: rule.Criticality,
 		Threshold:   rule.Threshold,
 		Sealed:      rule.Sealed,
@@ -538,6 +550,14 @@ func routeVoteStep(
 		}
 	}
 
+	// The step this panel was asked about, if any (DKT-1901). Read BEFORE the
+	// transaction opens, for the reason every other pooled read here is: inside
+	// it the pooled connection would deadlock rather than fail.
+	triaged, err := triageRouter(conn, step, def)
+	if err != nil {
+		return err
+	}
+
 	// The tally is announced before the routing commits, carrying the score the
 	// EXISTING computation produced — this stage reads it, never recomputes it.
 	detail, err := voteTallyDetail(conn, outcome)
@@ -608,6 +628,25 @@ func routeVoteStep(
 			res.Element = element
 		}
 		if err := resolveHeldPayload(tx, routingStep, res, nowMS); err != nil {
+			return err
+		}
+	}
+	// THE PANEL'S VERDICT REACHES THE STEP IT TRIAGED (DKT-1901), in this same
+	// transaction: a verdict recorded without its consequence is the defect
+	// DKT-168 fixed for `fix-loop`, and it would leave the triaged step
+	// suspended with nothing left to resolve it.
+	//
+	// A REJECTION IS A DECISION and applies its mapped routing: the panel read
+	// the failure and declined to endorse the work, which is exactly one of the
+	// two verdicts the mapping is keyed on. What applies NOTHING is a tally that
+	// reached no verdict at all — a quorum miss, or a proposal retired without a
+	// tally — because there the panel could not agree and the step's disposition
+	// is still an open question. It stays suspended, and this vote step's own
+	// `on_fail`, which V13a requires it to declare, is the human backstop.
+	if triaged != nil && triageDecided(outcome) {
+		if err := applyTriageOutcome(
+			tx, step, spec, def, triaged, triageVerdict(outcome), nowMS,
+		); err != nil {
 			return err
 		}
 	}

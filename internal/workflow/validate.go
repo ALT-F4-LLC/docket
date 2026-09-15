@@ -700,7 +700,7 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 					step.Name, target),
 			}
 		}
-		if !canRouteFixLoop(named) {
+		if !canRouteFixLoop(def, named) {
 			return &Error{
 				Rule: "V35", Step: step.Name, Field: "serves",
 				Message: fmt.Sprintf(
@@ -719,7 +719,7 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 	// in none of their lists). An unserved trigger's loop entry would bump the
 	// counter and instantiate nothing — V17b's exact silent-no-op shape,
 	// reintroduced per cluster.
-	if hasLoopStep(def) && canRouteFixLoop(step) && !anyBodyServes(def, step.Name) {
+	if hasLoopStep(def) && canRouteFixLoop(def, step) && !anyBodyServes(def, step.Name) {
 		field := "on_fail"
 		if step.OnFail != OnFailFixLoop {
 			field = "threshold"
@@ -775,7 +775,7 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 	// is inert, and an inert declaration is a misdeclaration, not a choice
 	// (V17/V35's discipline).
 	if step.MaxStalledRounds != nil && *step.MaxStalledRounds > 0 {
-		if !canRouteFixLoop(step) {
+		if !canRouteFixLoop(def, step) {
 			return &Error{
 				Rule: "V38", Step: step.Name, Field: "max_stalled_rounds",
 				Message: fmt.Sprintf(
@@ -1556,15 +1556,27 @@ func hasLoopStep(def *Definition) bool {
 }
 
 // canRouteFixLoop reports whether a step has any routing that can resolve to
-// `fix-loop`: an explicit `on_fail`, or a `threshold` key. The DECLARED values
-// only — the `on_fail` default is `waiting-human`, so silence never routes
-// there.
-func canRouteFixLoop(step *Step) bool {
+// `fix-loop`: an explicit `on_fail`, a `threshold` key, or — since DKT-1901 —
+// an `on_fail` naming a triage panel whose mapping can answer `fix-round`,
+// which enters a round for THIS step. The DECLARED values only: the `on_fail`
+// default is `waiting-human`, so silence never routes there.
+func canRouteFixLoop(def *Definition, step *Step) bool {
 	if step.OnFail == OnFailFixLoop {
 		return true
 	}
-	_, ok := step.Threshold[OnFailFixLoop]
-	return ok
+	if _, ok := step.Threshold[OnFailFixLoop]; ok {
+		return true
+	}
+	panel := StepByName(def, step.OnFailTarget())
+	if panel == nil {
+		return false
+	}
+	for _, routing := range panel.OnFailRoutes {
+		if routing == TriageFixRound {
+			return true
+		}
+	}
+	return false
 }
 
 // anyBodyServes reports whether at least one `loop = true` step serves a

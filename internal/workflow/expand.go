@@ -322,15 +322,20 @@ func ThresholdTargets(threshold map[string]string) []string {
 	return out
 }
 
-// RoutingPredecessors returns the names of the steps whose `threshold` routes
-// to `name`, in declaration order — the steps whose recorded routing decides
-// whether the interposed gate `name` ever becomes ready. Empty for a step no
-// threshold names, which is what makes ordinary steps invisible to the
+// RoutingPredecessors returns the names of the steps whose `threshold` or
+// `on_fail` routes to `name`, in declaration order — the steps whose recorded
+// routing decides whether the interposed gate `name` ever becomes ready. Empty
+// for a step nothing names, which is what makes ordinary steps invisible to the
 // readiness latch.
+//
+// A triage panel (DKT-1901) is the `on_fail` half: it is interposed exactly as
+// a threshold target is, and for the same reason — a step that did NOT fail
+// never routes to it, so the panel must not open on that lane.
 func RoutingPredecessors(def *Definition, name string) []string {
 	var out []string
 	for _, step := range def.Steps {
-		if slices.Contains(ThresholdTargets(step.Threshold), name) {
+		if slices.Contains(ThresholdTargets(step.Threshold), name) ||
+			step.OnFailTarget() == name {
 			out = append(out, step.Name)
 		}
 	}
