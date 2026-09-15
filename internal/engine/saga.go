@@ -3202,7 +3202,10 @@ func (e *Engine) appendRoundDelta(
 		record["head"] = head
 	}
 	if (head != "" || blocked) && step.Ordinal > 0 {
-		prev := latestIssueDiffHead(conn, step.RunID, step.IssueID)
+		prev := lastReviewedIssueDiffHead(conn, step.RunID, step.IssueID)
+		if prev == "" {
+			prev = latestIssueDiffHead(conn, step.RunID, step.IssueID)
+		}
 		if prev != "" && prev != head {
 			// DKT-171/DKT-409: `prev` predates whatever integration landed
 			// on the shared branch between rounds. A fresh worktree forked
@@ -3247,6 +3250,45 @@ func latestIssueDiffHead(conn *sql.DB, runID, issueID int) string {
 		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
 		  ORDER BY a.id DESC LIMIT 1`,
 		runID, issueID, ArtifactKindIssueDiff).Scan(&payload)
+	if err != nil {
+		return ""
+	}
+	return handBackHead(payload.String)
+}
+
+// lastReviewedIssueDiffHead reads the `head` of the newest issue.diff a done
+// REVIEWING step of the issue was actually handed, "" when no such step has
+// recorded yet.
+//
+// The round delta starts here rather than at the newest recorded head because a
+// fix round that no review judged must stay INSIDE the next round's delta.
+// Diffing from the previous fix round's own commit hands the next panel only
+// what the latest round moved: RUN-14/HRN-27 put fix@1's +1258/-550 in the base
+// and rendered fix@2's 74 lines as the whole reviewed object, so the judges'
+// own delta clause scoped them to a change nobody had ever read.
+//
+// A REVIEWER is identified by what the ledger already records, not by a class or
+// step name: core attaches no meaning to those (lintUnscopedHolders says why),
+// and a filter keyed on one would be instance policy living in core. A step that
+// CONSUMED an issue.diff while recording none of its own is a reader of the tree
+// — appendRoundDelta's own caller records one for every step that holds it — so
+// the pair of facts is the class-agnostic form of "this head was judged".
+//
+// `done` only, unlike recordedProducer's done-or-superseded: a superseded
+// reviewer's verdict was discarded with its round, and a FAILED judge's claim
+// still bound its inputs, so admitting either would name a head no panel read —
+// which is the defect this closes, reproduced one status wider.
+func lastReviewedIssueDiffHead(conn *sql.DB, runID, issueID int) string {
+	var payload sql.NullString
+	err := conn.QueryRow(
+		`SELECT a.payload FROM step_inputs si
+		   JOIN artifacts a ON a.id = si.artifact_id
+		   JOIN steps s ON s.id = si.step_id
+		  WHERE s.run_id = ? AND s.issue_id = ? AND s.status = ? AND a.kind = ?
+		    AND NOT EXISTS (SELECT 1 FROM artifacts p
+		                     WHERE p.step_id = s.id AND p.kind = a.kind)
+		  ORDER BY a.id DESC LIMIT 1`,
+		runID, issueID, db.StepDone, ArtifactKindIssueDiff).Scan(&payload)
 	if err != nil {
 		return ""
 	}

@@ -1261,6 +1261,27 @@ This is what makes the fixture's `fix@1 → review@1` cycle correct: `review@1` 
 `issue.diff` to the artifact `fix@1` produced, not the one `implement@0` produced,
 because ordinal 1 beats ordinal 0 under D3 — without any rule specific to loops.
 
+**The round record.** At a loop re-entry the artifact also carries a small JSON
+payload: the hand-back `head`, the declared `worktree`, and `round_base` — the
+commit the packet's appended round-delta section diffs from, "this round's work
+alone". `round_base` derives from **the head of the newest `issue.diff` a done
+step CONSUMED without recording one of its own** — a step that read the tree
+rather than wrote it, which is a review — and not from the newest recorded head.
+The distinction matters only when a fix round goes unjudged, and then it decides
+whether anyone ever reads it: basing the delta on the previous fix round's own
+commit puts that round INSIDE the base, so the next panel is handed just what the
+latest round moved and its delta clause scopes it to a change no judge has seen.
+RUN-14/HRN-27 lost a whole +1258/-550 round that way, with the following round's
+74 lines rendered as the entire object under judgment. Reaching back to the last
+head a review actually judged keeps every unreviewed fix round inside the next
+reviewed delta. With no such consumer yet — a fix round minted before any review
+recorded — the base falls back to the newest recorded head, so the round still
+renders a delta.
+
+Reviewers are identified by that consumed-but-produced-nothing pair rather than by
+a class or step name, for §6.5's genericity reason: core attaches no meaning to
+class names, so a filter keyed on one would be instance policy living in core.
+
 ## 6.8 The complete saga
 
 §2, verbatim, is the specification:
