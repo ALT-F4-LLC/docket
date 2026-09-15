@@ -372,7 +372,10 @@ emits = "vote-record"
 		wants: []string{`"a"`, `"vote-record"`, "reserved"},
 	},
 	{
-		rule: "V12", name: "on_fail outside the closed vocabulary",
+		// V12 became V40 (DKT-1901): a value outside the closed vocabulary is
+		// read as the name of a triage panel, so an unresolvable one is refused
+		// by the rule that can name what it looked for.
+		rule: "V40", name: "on_fail naming no step in the workflow",
 		src: `
 [pipeline]
 name = "w"
@@ -383,7 +386,93 @@ executor = "x"
 emits = "k"
 on_fail = "retry-forever"
 `,
-		wants: []string{`"a"`, "`on_fail`", "retry-forever", "fix-loop"},
+		wants: []string{`"a"`, "`on_fail`", "retry-forever", "fix-loop", "names no step"},
+	},
+	{
+		rule: "V40", name: "on_fail naming a step that is not a vote step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+on_fail = "b"
+[[step]]
+name = "b"
+executor = "y"
+emits = "r"
+after = ["a"]
+`,
+		wants: []string{`"a"`, "`on_fail`", `"b"`, "not a `type=\"vote\"` step"},
+	},
+	{
+		rule: "V40a", name: "on_fail_routes keyed outside the tally vocabulary",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+on_fail = "panel"
+[[step]]
+name = "panel"
+type = "vote"
+voters = ["v"]
+vote_rule = "standard"
+on_fail = "abandon-issue"
+after = ["a"]
+[step.on_fail_routes]
+maybe = "retry"
+`,
+		wants: []string{`"panel"`, "`on_fail_routes`", "maybe", "approved"},
+	},
+	{
+		rule: "V40b", name: "on_fail_routes valued outside the triage vocabulary",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+on_fail = "panel"
+[[step]]
+name = "panel"
+type = "vote"
+voters = ["v"]
+vote_rule = "standard"
+on_fail = "abandon-issue"
+after = ["a"]
+[step.on_fail_routes]
+approved = "override-pass"
+`,
+		wants: []string{`"panel"`, "`on_fail_routes.approved`", "override-pass", "retry"},
+	},
+	{
+		rule: "V40c", name: "a panel routed to must declare what its verdicts mean",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+on_fail = "panel"
+[[step]]
+name = "panel"
+type = "vote"
+voters = ["v"]
+vote_rule = "standard"
+on_fail = "abandon-issue"
+after = ["a"]
+`,
+		wants: []string{`"panel"`, "`on_fail_routes`", `"a"`, "required"},
 	},
 	{
 		rule: "V13", name: "human step routing rejects to waiting-human",

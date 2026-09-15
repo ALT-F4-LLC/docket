@@ -25,11 +25,15 @@ import (
 // (§4.9.2). V27, V28, and V31 are decisions about bytes and stay here.
 var RuleIDs = []string{
 	"V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10",
-	"V11", "V11a", "V11b", "V12", "V13", "V13a", "V14", "V15", "V16", "V17", "V17b", "V17c", "V18", "V19",
+	// V12 was the `on_fail` closed-vocabulary rule. DKT-1901 reads a value
+	// outside that vocabulary as a triage panel's name, so the check it made is
+	// now V40's, which resolves the name against the definition.
+	"V11", "V11a", "V11b", "V13", "V13a", "V14", "V15", "V16", "V17", "V17b", "V17c", "V18", "V19",
 	"V20", "V21", "V21a", "V21b", "V21c", "V21d",
 	"V22", "V23", "V24", "V25", "V25a", "V26",
 	"V27", "V28", "V28a", "V29", "V30", "V31",
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
+	"V40", "V40a", "V40b", "V40c",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -444,15 +448,12 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		return err
 	}
 
-	// V12: on_fail in the closed vocabulary.
-	if step.OnFail != "" && !slices.Contains(onFailValues, step.OnFail) {
-		return &Error{
-			Rule: "V12", Step: step.Name, Field: "on_fail",
-			Message: fmt.Sprintf(
-				"step %q: `on_fail` must be one of %s, got %q",
-				step.Name, quotedList(onFailValues), step.OnFail),
-		}
-	}
+	// V12 was the closed-vocabulary check. Since DKT-1901 a value outside the
+	// vocabulary is read as a STEP NAME — the reading `threshold` already gives
+	// its routings — so the check that remains is V40's, which resolves the name
+	// against the definition and therefore cannot be made from one step alone.
+	// A typo'd verb reaches the author as V40's "names no `type=\"vote\"` step",
+	// which is the same refusal with the alternatives it can actually list.
 
 	// V14: voters and vote_rule required on type="vote", forbidden elsewhere.
 	//
@@ -592,6 +593,55 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 					step.Name),
 			}
 		}
+	}
+
+	// V40 (DKT-1901): an `on_fail` outside the closed vocabulary names a
+	// TRIAGE PANEL — a `type="vote"` step of this workflow that decides what a
+	// failure of this step means. The name must resolve, and it must resolve to
+	// a vote step: any other kind opens no proposal, so nothing would ever
+	// answer the question the routing asks and the failed step would suspend
+	// forever.
+	if target := step.OnFailTarget(); target != "" {
+		named, ok := byName[target]
+		if !ok {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail` must be one of %s or the name of a "+
+						"`type=\"vote\"` step, and %q is neither — it names no step "+
+						"in this workflow",
+					step.Name, quotedList(onFailValues), target),
+			}
+		}
+		if named.Type != TypeVote {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail` names %q, which is not a `type=\"vote\"` "+
+						"step — only a vote step opens a proposal, so nothing would "+
+						"decide what this step's failure means",
+					step.Name, target),
+			}
+		}
+		// The panel must be ordered behind the step it triages: the proposal
+		// carries that step's recorded failure evidence, which does not exist
+		// until it has run.
+		if !slices.Contains(named.After, step.Name) {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail` names the vote step %q, whose `after` does "+
+						"not include %q — a panel triaging this step's failure must "+
+						"be ordered behind it",
+					step.Name, target, step.Name),
+			}
+		}
+	}
+
+	// V40a/V40b/V40c: the triage mapping a vote step declares for the failures
+	// routed to it (DKT-1901).
+	if err := validateOnFailRoutes(def, step); err != nil {
+		return err
 	}
 
 	// V17b — V17's mirror (DKT-196, surfaced by DKT-168): a step that CAN
@@ -1527,6 +1577,110 @@ func anyBodyServes(def *Definition, trigger string) bool {
 		}
 	}
 	return false
+}
+
+// validateOnFailRoutes is V40a-V40c (DKT-1901): the triage mapping's keys, its
+// values, and the workflow conditions each value needs to be applicable.
+//
+// The mapping is declared on the PANEL, so it is validated here whether or not
+// any step currently routes to it — a mapping nobody reads is an authoring
+// mistake worth naming at register, and one declared on a non-vote step is a
+// misunderstanding of what the field is for.
+func validateOnFailRoutes(def *Definition, step *Step) error {
+	if len(step.OnFailRoutes) == 0 {
+		// V40c: a panel some step routes to must say what its verdicts mean.
+		// Without the mapping a tally would decide nothing and the failed step
+		// would suspend with no way out but an operator — which is the outcome
+		// the routing was declared to avoid.
+		if step.Type == TypeVote && len(routedToPanel(def, step.Name)) > 0 {
+			return &Error{
+				Rule: "V40c", Step: step.Name, Field: "on_fail_routes",
+				Message: fmt.Sprintf(
+					"step %q: %s route their failures here, so `on_fail_routes` is "+
+						"required — it declares what this panel's %s verdicts do to "+
+						"the failed step",
+					step.Name, quotedList(routedToPanel(def, step.Name)),
+					quotedList(voteOutcomeKeys)),
+			}
+		}
+		return nil
+	}
+
+	if step.Type != TypeVote {
+		return &Error{
+			Rule: "V40a", Step: step.Name, Field: "on_fail_routes",
+			Message: fmt.Sprintf(
+				"step %q: `on_fail_routes` is only valid on `type=\"vote\"` steps — "+
+					"it maps a tally's verdicts onto the step whose `on_fail` named "+
+					"this panel", step.Name),
+		}
+	}
+
+	for _, outcome := range sortedKeys(step.OnFailRoutes) {
+		if !slices.Contains(voteOutcomeKeys, outcome) {
+			return &Error{
+				Rule: "V40a", Step: step.Name, Field: "on_fail_routes",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail_routes` keys must be one of %s, got %q — a "+
+						"tally either reaches its threshold or does not",
+					step.Name, quotedList(voteOutcomeKeys), outcome),
+			}
+		}
+		routing := step.OnFailRoutes[outcome]
+		if !slices.Contains(triageRoutings, routing) {
+			return &Error{
+				Rule: "V40b", Step: step.Name, Field: "on_fail_routes",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail_routes.%s` must be one of %s, got %q",
+					step.Name, outcome, quotedList(triageRoutings), routing),
+			}
+		}
+		// V40b's applicability half: `fix-round` enters a loop round for the
+		// FAILED step, which requires a `loop = true` body serving it. Without
+		// one the round would supersede downstream work and instantiate nothing
+		// — V17b's silent no-op, reached through the panel instead of through
+		// `on_fail` — so it is refused at register rather than at the tally.
+		if routing == TriageFixRound {
+			for _, router := range routedToPanel(def, step.Name) {
+				if !hasLoopStep(def) || !anyBodyServes(def, router) {
+					return &Error{
+						Rule: "V40b", Step: step.Name, Field: "on_fail_routes",
+						Message: fmt.Sprintf(
+							"step %q: `on_fail_routes.%s = \"fix-round\"` buys a fix "+
+								"round for %q, but no `loop = true` step serves it — "+
+								"the round would supersede downstream work and "+
+								"instantiate nothing in its place",
+							step.Name, outcome, router),
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// routedToPanel names the steps whose `on_fail` routes to this vote step, in
+// declaration order — the failures the panel's mapping will decide.
+func routedToPanel(def *Definition, panel string) []string {
+	var out []string
+	for _, step := range def.Steps {
+		if step.OnFailTarget() == panel {
+			out = append(out, step.Name)
+		}
+	}
+	return out
+}
+
+// sortedKeys orders a mapping's keys so a refusal names the same key every run:
+// Go map iteration is randomized, and a validator that reported a different one
+// of two bad keys per invocation would be untestable.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // humanOnFailValues is the closed vocabulary minus waiting-human — the legal

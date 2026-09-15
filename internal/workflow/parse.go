@@ -12,6 +12,7 @@ package workflow
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -113,6 +114,27 @@ type Step struct {
 	Params      map[string]any    `toml:"params" json:"params,omitempty"`
 	MinSiblings *int              `toml:"min_siblings" json:"min_siblings,omitempty"`
 	Threshold   map[string]string `toml:"threshold" json:"threshold,omitempty"`
+	// OnFailRoutes is the triage mapping a vote step declares when some step's
+	// `on_fail` names it (DKT-1901): the routing each tally outcome applies to
+	// the FAILED step that routed here, keyed `approved`/`rejected`.
+	//
+	// It lives on the VOTE step, not beside the `on_fail` that names it, because
+	// the keys are the vote's own outcome vocabulary — one panel declares what
+	// its verdicts mean once, and every step routing to it inherits that meaning
+	// rather than restating it. A workflow whose panels mean different things
+	// declares different panels, which is the distinction the mapping is for.
+	//
+	// Values are the resolution vocabulary (`retry`, `fix-round`,
+	// `abandon-issue`, `waiting-human`), NOT the `on_fail` vocabulary: the
+	// outcome is applied to a step that already failed, so what the panel
+	// chooses among is what an operator resolving that park could have chosen.
+	// `waiting-human` is the panel declining to decide, which parks the failed
+	// step for an operator exactly as today's default does.
+	//
+	// The vote step's OWN `on_fail` remains the human backstop: a tally that
+	// fails or misses quorum decided nothing, routes the vote step per that
+	// `on_fail`, and leaves the failed step suspended for an operator (V40c).
+	OnFailRoutes map[string]string `toml:"on_fail_routes" json:"on_fail_routes,omitempty"`
 	// AfterFired names predecessors this step runs ONLY IF THEY FIRED
 	// (DKT-1085). When every instance of a named step ends `skipped` — an
 	// interposed gate its threshold routed elsewhere (§11.2), a false `when`,
@@ -348,6 +370,46 @@ const (
 // by the V13a error message.
 var onFailValues = []string{
 	OnFailFixLoop, OnFailWaitingHuman, OnFailSkip, OnFailAbandonIssue,
+}
+
+// OnFailTarget is the vote step a failure routes to, or "" when `on_fail` is
+// one of the closed vocabulary's own values (DKT-1901).
+//
+// The vocabulary stays closed and the step names sit OUTSIDE it, exactly as
+// `threshold` already reads: a routing that is not a known verb is a step name.
+// V40 makes the name resolve to a `type="vote"` step in the same workflow, so
+// every reader downstream of validation may treat a non-empty answer as one.
+func (s *Step) OnFailTarget() string {
+	if s.OnFail == "" || slices.Contains(onFailValues, s.OnFail) {
+		return ""
+	}
+	return s.OnFail
+}
+
+// The tally outcomes an `on_fail_routes` mapping may key on — the vote's own
+// verdict vocabulary, which is binary (§8.1): a proposal either reached its
+// threshold or it did not.
+const (
+	VoteOutcomeApproved = "approved"
+	VoteOutcomeRejected = "rejected"
+)
+
+// voteOutcomeKeys is that vocabulary in declaration order, for V40a.
+var voteOutcomeKeys = []string{VoteOutcomeApproved, VoteOutcomeRejected}
+
+// The routings an `on_fail_routes` value may name — the resolution vocabulary
+// an operator disposing of the same park chooses among, minus the ones that
+// would assert a verdict about work nobody re-read (`override-pass`, `skip`).
+const (
+	TriageRetry         = "retry"
+	TriageFixRound      = "fix-round"
+	TriageAbandonIssue  = OnFailAbandonIssue
+	TriageWaitingHuman  = OnFailWaitingHuman
+)
+
+// triageRoutings is that vocabulary in declaration order, for V40b.
+var triageRoutings = []string{
+	TriageRetry, TriageFixRound, TriageAbandonIssue, TriageWaitingHuman,
 }
 
 // The §11.1 `type` vocabulary.
