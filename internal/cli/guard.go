@@ -180,7 +180,7 @@ spawning a batch the engine never issued.
 --active (DKT-1287) checks EVERY active run of the current project instead of
 one: it answers the reap half alone, over each non-terminal run in turn, oldest
 first, and denies on the first that would, naming it. It exists because a hook
-resolving "the active run" as ` + "`runs[0]`" + ` from ` + "`run status --active`" + ` leaves a second
+resolving "the active run" as ` + "`runs[0]`" + ` from ` + "`run status`" + ` leaves a second
 concurrent run's reap hold unasked; --rows and --ack-reap are each an act about
 ONE run's manifest or ledger and stay on the --run path, while --deciding-vote
 resolves its run from the proposal and rides along.

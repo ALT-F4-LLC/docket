@@ -687,7 +687,7 @@ statuses exist at S3 because the step lifecycle routes into `waiting-human` and
 | `docket run activate RUN-N` | the fat transaction (§5.3) |
 | `docket run pause\|resume RUN-N [--reason R]` | `active ⇄ waiting-human`; pause blocks new claims, honors in-flight completes (engine-core §3.4) |
 | `docket run abandon RUN-N --reason R` | terminal; revokes live leases |
-| `docket run status [RUN-N] [--active]` | read-only; effective status computed at read |
+| `docket run status [RUN-N] [--all]` | read-only; effective status computed at read; the list hides done and abandoned runs unless `--all` |
 
 `--budget N` on `run start` is **accepted and stored** but enforces nothing until S6.
 Accepting it now means the S6 upgrade adds enforcement, not a flag — and a flag

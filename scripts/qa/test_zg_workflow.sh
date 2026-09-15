@@ -879,12 +879,16 @@ SQL
   assert_exit "ZG" "ZG10_resume_exit" 0
   assert_json "ZG" "ZG10_resumed" ".data.status" "active"
 
-  # `run status --active` excludes terminal runs; `planning` counts as active,
-  # since a run that exists but has not been activated is still live work.
-  run_env "$ZG_RUN" run status --active --json
+  # The bare `run status` list excludes terminal runs; `planning` counts as
+  # active, since a run that exists but has not been activated is still live
+  # work. `--all` is the way back to the full record.
+  run_env "$ZG_RUN" run status --json
   assert_exit "ZG" "ZG10_active_exit" 0
   assert_json_all "ZG" "ZG10_active_excludes_terminal" ".data.runs" \
     '.status != "done" and .status != "abandoned"'
+  run_env "$ZG_RUN" run status --all --json
+  assert_exit "ZG" "ZG10_all_exit" 0
+  assert_json_exists "ZG" "ZG10_all_runs" ".data.runs"
 
   # The v2 Collection envelope on the run list.
   run_env "$ZG_RUN" run status --json=v2

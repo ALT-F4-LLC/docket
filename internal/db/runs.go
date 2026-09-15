@@ -149,8 +149,9 @@ type RunListOptions struct {
 	// ProjectID scopes the list to one project (v12); 0 = every project.
 	ProjectID int
 	// ActiveOnly restricts the list to runs that are not terminal — the
-	// `--active` flag. `planning` counts as active: a run that exists but has
-	// not been activated is still live work an operator is mid-way through.
+	// `run status` default, lifted by `--all`. `planning` counts as active: a
+	// run that exists but has not been activated is still live work an
+	// operator is mid-way through.
 	ActiveOnly bool
 	Limit      int
 }

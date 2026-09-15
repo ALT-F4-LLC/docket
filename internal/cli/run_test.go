@@ -113,7 +113,7 @@ func runActivateWithWriter(t *testing.T, conn *sql.DB, w *output.Writer, args ..
 
 func runStatusCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd := cmdWithDB(conn)
-	cmd.Flags().Bool("active", false, "")
+	cmd.Flags().Bool("all", false, "")
 	cmd.Flags().Int("limit", 50, "")
 	return cmd
 }
@@ -1223,10 +1223,12 @@ func snapshotRunState(t *testing.T, conn *sql.DB) string {
 	return state
 }
 
-// TestRunStatusActiveExcludesTerminalRuns covers `--active`. `planning` counts
-// as active: a run that exists but has not been activated is still live work
-// an operator is mid-way through.
-func TestRunStatusActiveExcludesTerminalRuns(t *testing.T) {
+// TestRunStatusListDefaultsToNonTerminalRuns covers the bare list and `--all`.
+// The default hides terminal runs, since a list an operator opens to find work
+// should not bury the live runs under history; `--all` is the way back to the
+// full record. `planning` counts as live: a run that exists but has not been
+// activated is still work an operator is mid-way through.
+func TestRunStatusListDefaultsToNonTerminalRuns(t *testing.T) {
 	conn := newTestDB(t)
 
 	planning, err := db.InsertRun(conn, 1, "planning", 0, model.NowMS())
@@ -1236,20 +1238,50 @@ func TestRunStatusActiveExcludesTerminalRuns(t *testing.T) {
 	err = db.SetRunStatus(conn, done.ID, model.RunDone, "", model.NowMS())
 	testsupport.Must(t, err, "setting run done: %v", err)
 
-	cmd := runStatusCmdWithDB(conn)
-	err = cmd.Flags().Set("active", "true")
-	testsupport.Must(t, err, "setting --active: %v", err)
-	w, buf := bufWriter(true)
-	err = runRunStatus(cmd, nil, w)
-	testsupport.Must(t, err, "run status --active: %v", err)
+	t.Run("default excludes terminal runs", func(t *testing.T) {
+		cmd := runStatusCmdWithDB(conn)
+		w, buf := bufWriter(true)
+		err := runRunStatus(cmd, nil, w)
+		testsupport.Must(t, err, "run status: %v", err)
 
-	out := buf.String()
-	if !strings.Contains(out, planning.Ref()) {
-		t.Errorf("--active omitted the planning run %s: %s", planning.Ref(), out)
-	}
-	if strings.Contains(out, done.Ref()) {
-		t.Errorf("--active included the done run %s: %s", done.Ref(), out)
-	}
+		out := buf.String()
+		if !strings.Contains(out, planning.Ref()) {
+			t.Errorf("default list omitted the planning run %s: %s", planning.Ref(), out)
+		}
+		if strings.Contains(out, done.Ref()) {
+			t.Errorf("default list included the done run %s: %s", done.Ref(), out)
+		}
+	})
+
+	t.Run("--all includes terminal runs", func(t *testing.T) {
+		cmd := runStatusCmdWithDB(conn)
+		err := cmd.Flags().Set("all", "true")
+		testsupport.Must(t, err, "setting --all: %v", err)
+		w, buf := bufWriter(true)
+		err = runRunStatus(cmd, nil, w)
+		testsupport.Must(t, err, "run status --all: %v", err)
+
+		out := buf.String()
+		for _, run := range []*model.Run{planning, done} {
+			if !strings.Contains(out, run.Ref()) {
+				t.Errorf("--all omitted %s (%s): %s", run.Ref(), run.Status, out)
+			}
+		}
+	})
+
+	t.Run("--all rejects a single-run argument", func(t *testing.T) {
+		cmd := runStatusCmdWithDB(conn)
+		err := cmd.Flags().Set("all", "true")
+		testsupport.Must(t, err, "setting --all: %v", err)
+		w, _ := bufWriter(true)
+		err = runRunStatus(cmd, []string{planning.Ref()}, w)
+		if err == nil {
+			t.Fatal("run status --all RUN-N = nil, want a validation error")
+		}
+		if !strings.Contains(err.Error(), "--all") {
+			t.Errorf("error %q does not name the misapplied flag", err)
+		}
+	})
 }
 
 // TestRunLifecycleTransitions walks the §1.1 machine and asserts that an

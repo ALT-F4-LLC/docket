@@ -519,7 +519,7 @@ func reapHoldDenial(hold string) string {
 // GuardSpawnActive answers `docket guard spawn --active`: may every active run
 // in the project accept a spawn right now?
 //
-// DKT-1287: docket-spawn-guard-hook.sh resolved `run status --active` and
+// DKT-1287: docket-spawn-guard-hook.sh resolved the `run status` list and
 // asked `guard spawn` about `runs[0]` alone, so with two concurrent active
 // runs the OLDER run's reap half went unasked — a hold on it would not have
 // denied the hook at all. This answers G5(b), the reap half, over EVERY
