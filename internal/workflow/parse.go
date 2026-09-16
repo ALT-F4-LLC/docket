@@ -42,6 +42,19 @@ type Match struct {
 	LabelsAny    []string `toml:"labels_any" json:"labels_any,omitempty"`
 	LabelsAll    []string `toml:"labels_all" json:"labels_all,omitempty"`
 	UnlessLabels []string `toml:"unless_labels" json:"unless_labels,omitempty"`
+	// SizesAny binds on the issue's declared model.Size (schema v34): the
+	// issue's size must be one of this list, the same "any of these"
+	// semantics labels_any gives labels. It is the engine-side replacement
+	// for a workflow binding on the small/trivial LABEL convention — a
+	// small-change-shaped workflow declares `sizes_any = ["small"]` instead
+	// of `labels_any = ["small"]`, so routing reads first-class issue data
+	// rather than a label a workflow author chose for an unrelated reason.
+	//
+	// Declaring it is optional and a workflow that omits it binds on kind and
+	// labels exactly as it did before this clause existed — `omitempty` keeps
+	// the canonical form of every definition that never declares one
+	// byte-identical to what it always was.
+	SizesAny []string `toml:"sizes_any" json:"sizes_any,omitempty"`
 	// DomainPaths declares the path globs this workflow's domain OCCUPIES —
 	// "work under these paths is this pipeline's business" (DKT-1182).
 	//

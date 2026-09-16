@@ -145,6 +145,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	sizes, _ := cmd.Flags().GetStringSlice("size")
 	types, _ := cmd.Flags().GetStringSlice("type")
 	assignee, _ := cmd.Flags().GetString("assignee")
 	rootFlag, _ := cmd.Flags().GetString("root")
@@ -158,6 +159,11 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 	for _, p := range priorities {
 		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+	for _, sz := range sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
 	}
@@ -195,6 +201,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 		Statuses:   statuses,
 		Labels:     labels,
 		Priorities: priorities,
+		Sizes:      sizes,
 		Types:      types,
 		Assignee:   assignee,
 	}
@@ -406,6 +413,7 @@ func init() {
 	planCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (repeatable; default: every non-done status)")
 	planCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	planCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
+	planCmd.Flags().StringSlice("size", nil, "Filter by size (repeatable)")
 	planCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")
 	planCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	planCmd.Flags().Bool("with-body", false, withBodyHelp)

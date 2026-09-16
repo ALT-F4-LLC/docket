@@ -48,8 +48,8 @@ var listCmd = &cobra.Command{
 
 Under --json each row carries every issue field except description — id
 (and its alias issue), parent_id, title, status, priority, kind, assignee,
-labels, files, docs, created_at, updated_at, and scope and resolution when
-set — plus description_bytes, the length of the description it does not
+labels, files, docs, created_at, updated_at, and scope, resolution, and size
+when set — plus description_bytes, the length of the description it does not
 carry. A listing is for picking; read the issue you picked with
 docket issue show. Pass --with-body to have every row carry its full
 description instead. next, plan and board emit the same rows and take the
@@ -64,6 +64,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	sizes, _ := cmd.Flags().GetStringSlice("size")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	types, _ := cmd.Flags().GetStringSlice("type")
 	assignee, _ := cmd.Flags().GetString("assignee")
@@ -98,6 +99,11 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 	for _, p := range priorities {
 		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+	for _, sz := range sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
 	}
@@ -175,6 +181,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		RunID:       runID,
 		Statuses:    statuses,
 		Priorities:  priorities,
+		Sizes:       sizes,
 		Labels:      labels,
 		Types:       types,
 		Assignee:    assignee,
@@ -347,6 +354,7 @@ func pluralIssues(n int) string {
 func init() {
 	listCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (repeatable)")
 	listCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
+	listCmd.Flags().StringSlice("size", nil, "Filter by size (repeatable)")
 	listCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	listCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")
 	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")

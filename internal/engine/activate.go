@@ -1293,7 +1293,7 @@ func bindableDefinitions(definitions []*boundDefinition) []*boundDefinition {
 func bindIssue(
 	issue *model.Issue, definitions []*boundDefinition, origins *WorkflowOriginIndex,
 ) (*boundDefinition, error) {
-	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
+	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels, Size: string(issue.Size)}
 	candidates := bindableDefinitions(definitions)
 
 	var matched []*boundDefinition
@@ -1584,7 +1584,7 @@ func lintDomainScopeMismatch(
 			continue
 		}
 
-		subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
+		subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels, Size: string(issue.Size)}
 		for _, cand := range candidates {
 			if cand == bound || cand.definition.Match == nil {
 				continue
@@ -1886,7 +1886,7 @@ func expandIssue(
 	packetBytes func([]string) int,
 	nowMS int64,
 ) (int, []ContextWarning, error) {
-	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
+	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels, Size: string(issue.Size)}
 	rows := workflow.Expand(bound.definition, subject, 0)
 
 	var warnings []ContextWarning

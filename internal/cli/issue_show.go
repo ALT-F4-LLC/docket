@@ -80,6 +80,9 @@ type showResultJSON struct {
 	// abandoned one stops being indistinguishable from a finished one
 	// (DKT-245).
 	Resolution string `json:"resolution,omitempty"`
+	// Size reaches v1 WHEN SET, the same DKT-55 shape a third time: an issue
+	// with no declared size stays byte-identical to the pre-Size output.
+	Size string `json:"size,omitempty"`
 	// RunDisposition reaches v1 WHEN A RUN ABANDONED ITS WORK, the same DKT-55
 	// shape for the third time: an issue no run gave up on emits no key and
 	// keeps the frozen v1 output byte-identical, while an abandoned one stops
@@ -246,6 +249,7 @@ func (s showResult) marshalJSONStruct() (showResultJSON, error) {
 		Comments:        comments,
 		Activity:        activity,
 		Resolution:      i.Resolution,
+		Size:            string(i.Size),
 		RunDisposition:  runDispositionWire(s.RunDisposition),
 	}
 
@@ -291,7 +295,7 @@ is NOT a nested issue object, and there is no .data.issue.title or
 the SAME object beside id and issue: title, description, status, priority,
 kind, assignee, labels, files, docs, created_at, updated_at, sub_issues,
 relations, linked_proposals, comments, activity, and — only when the issue
-has one — scope, resolution, run_disposition. A parse that expects a
+has one — scope, resolution, size, run_disposition. A parse that expects a
 nested object under .data.issue and calls a field getter on what it finds
 is calling that getter on the id string.`,
 	Args: cobra.MinimumNArgs(1),

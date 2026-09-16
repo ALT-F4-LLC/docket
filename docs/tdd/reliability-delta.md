@@ -981,6 +981,41 @@ amendment, not a stage: one additive column with a default, a
 a rewind guard that probes the COLUMN (the v27–v32 form, since v33 adds no
 table and no index).
 
+### AMENDMENT — the span extends to v34 (operator request, 2026-09-16)
+
+**What changed.** v34 adds ONE column to one table, `issues.size`
+(`TEXT NOT NULL DEFAULT ''`): the operator's estimate of how much work an
+issue is, as a closed enum (`model.Size`: trivial, small, bounded,
+needs-design, unknown) rather than free-text labels. It replaces the
+`small`/`trivial` label convention as workflow-routing input — a `[match]`
+clause can now bind on `sizes_any` the same way it binds on `kind` and
+`labels_any` (see engine-spec.md §11.1) — while the labels themselves remain
+available for other purposes.
+
+**What it fixes.** Sizing existed only as an operator-applied labeling
+convention with no engine representation: an issue's size was two free-text
+label strings a workflow's `[match]` happened to read, undocumented anywhere
+in this repo, and indistinguishable from any other label an issue carried.
+This column makes sizing first-class, closed-enum issue data — set and read
+through `docket issue create|edit --size` the same way `--priority` already
+is — so a caller can ask an issue's size without inferring it from labels a
+workflow author chose for an unrelated reason.
+
+**Blank means no size declared, and nothing else.** The default is the empty
+string, and the migration back-fills nothing: an issue created before this
+column existed had no size declared under the label convention either, so
+blank is the correct reading of every existing row, not a guess. The blank is
+inert rather than load-bearing — nothing refuses on it, and a `[match]`
+clause with no `sizes_any` binds exactly as it did before this column
+existed — so an issue that never declares a size reads as unsized, which it
+is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v33, v34 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v33 form, since v34 adds no
+table and no index).
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

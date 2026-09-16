@@ -67,6 +67,7 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	sizes, _ := cmd.Flags().GetStringSlice("size")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	types, _ := cmd.Flags().GetStringSlice("type")
 	limit, _ := cmd.Flags().GetInt("limit")
@@ -84,6 +85,11 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 	for _, p := range priorities {
 		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+	for _, sz := range sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
 	}
@@ -119,8 +125,8 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 	ready := planner.FindReady(dag, readyStatuses)
 
-	// Apply additional filters (priority, label, type) on the ready set.
-	ready = filterReady(ready, priorities, labels, types)
+	// Apply additional filters (priority, size, label, type) on the ready set.
+	ready = filterReady(ready, priorities, sizes, labels, types)
 
 	// Capture the true size of the ready set before truncating, so the v2
 	// envelope can report it and flag the drop.
@@ -174,13 +180,15 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 const nextModeHint = "\nShowing work-ready ISSUES. " +
 	"For a run's ready steps, use `docket next --run RUN-N`.\n"
 
-// filterReady applies priority, label, and type filters to a slice of ready issues.
-func filterReady(issues []*model.Issue, priorities, labels, types []string) []*model.Issue {
-	if len(priorities) == 0 && len(labels) == 0 && len(types) == 0 {
+// filterReady applies priority, size, label, and type filters to a slice of
+// ready issues.
+func filterReady(issues []*model.Issue, priorities, sizes, labels, types []string) []*model.Issue {
+	if len(priorities) == 0 && len(sizes) == 0 && len(labels) == 0 && len(types) == 0 {
 		return issues
 	}
 
 	prioritySet := filter.ToStringSet(priorities)
+	sizeSet := filter.ToStringSet(sizes)
 	labelSet := filter.ToStringSet(labels)
 	typeSet := filter.ToStringSet(types)
 
@@ -188,6 +196,11 @@ func filterReady(issues []*model.Issue, priorities, labels, types []string) []*m
 	for _, issue := range issues {
 		if len(prioritySet) > 0 {
 			if _, ok := prioritySet[string(issue.Priority)]; !ok {
+				continue
+			}
+		}
+		if len(sizeSet) > 0 {
+			if _, ok := sizeSet[string(issue.Size)]; !ok {
 				continue
 			}
 		}
@@ -207,6 +220,7 @@ func filterReady(issues []*model.Issue, priorities, labels, types []string) []*m
 func init() {
 	nextCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (default: backlog,todo)")
 	nextCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
+	nextCmd.Flags().StringSlice("size", nil, "Filter by size (repeatable)")
 	nextCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	nextCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")
 	nextCmd.Flags().Int("limit", 10, "Maximum number of results (issue mode; with --run the full ready set is returned unless --limit is passed)")

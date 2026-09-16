@@ -33,6 +33,7 @@ type PlanFilters struct {
 	Statuses   []string
 	Labels     []string
 	Priorities []string
+	Sizes      []string
 	Types      []string
 	Assignee   string
 	RootID     *int
@@ -53,6 +54,7 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 	statusSet := filter.ToStringSet(filters.Statuses)
 	labelSet := filter.ToStringSet(filters.Labels)
 	prioritySet := filter.ToStringSet(filters.Priorities)
+	sizeSet := filter.ToStringSet(filters.Sizes)
 	typeSet := filter.ToStringSet(filters.Types)
 
 	levels, err := TopoSort(dag)
@@ -92,6 +94,13 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 			// Apply priority filter.
 			if len(prioritySet) > 0 {
 				if _, ok := prioritySet[string(issue.Priority)]; !ok {
+					continue
+				}
+			}
+
+			// Apply size filter.
+			if len(sizeSet) > 0 {
+				if _, ok := sizeSet[string(issue.Size)]; !ok {
 					continue
 				}
 			}

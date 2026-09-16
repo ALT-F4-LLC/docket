@@ -39,6 +39,7 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	sizes, _ := cmd.Flags().GetStringSlice("size")
 	assignee, _ := cmd.Flags().GetString("assignee")
 	expand, _ := cmd.Flags().GetBool("expand")
 	withBody, _ := cmd.Flags().GetBool("with-body")
@@ -49,10 +50,16 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 			return cmdErr(err, output.ErrValidation)
 		}
 	}
+	for _, sz := range sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
 
 	opts := db.ListOptions{
 		ProjectID:   getProjectID(cmd),
 		Priorities:  priorities,
+		Sizes:       sizes,
 		Labels:      labels,
 		Assignee:    assignee,
 		IncludeDone: true,
@@ -128,6 +135,7 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 func init() {
 	boardCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	boardCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
+	boardCmd.Flags().StringSlice("size", nil, "Filter by size (repeatable)")
 	boardCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	boardCmd.Flags().Bool("expand", false, "Show sub-issues individually instead of rolling up")
 	boardCmd.Flags().Bool("with-body", false, withBodyHelp)

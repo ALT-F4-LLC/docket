@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 33
+const currentSchemaVersion = 34
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS issues (
 	expires_ms  INTEGER,
 	attempt     INTEGER NOT NULL DEFAULT 0,
 	scope_globs TEXT,
-	resolution  TEXT NOT NULL DEFAULT ''
+	resolution  TEXT NOT NULL DEFAULT '',
+	size        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS comments (
@@ -202,6 +203,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	31: migrateV30ToV31,
 	32: migrateV31ToV32,
 	33: migrateV32ToV33,
+	34: migrateV33ToV34,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2735,6 +2737,52 @@ func migrateV32ToV33(tx *sql.Tx) error {
 	return nil
 }
 
+// v34AddedColumns is v34's whole schema change: one column on `issues` — the
+// operator's estimate of how much work an issue is, as a closed enum
+// (model.Size) rather than the small/trivial label convention it replaces
+// for workflow routing.
+//
+// The empty default makes every pre-v34 issue read as what it was: no size
+// declared, the same dormant reading `scope_globs` and `resolution` give a
+// row that predates them.
+var v34AddedColumns = []struct{ table, column, ddl string }{
+	{"issues", "size",
+		`ALTER TABLE issues ADD COLUMN size TEXT NOT NULL DEFAULT ''`},
+}
+
+// v34ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 through v33 use and for the same reason: v34 adds no table and no
+// index, so a database stamped 34 by a binary built mid-change carries every
+// v33 sentinel and `size` never arrives.
+var v34ColumnSentinels = []struct{ table, column string }{
+	{"issues", "size"},
+}
+
+// migrateV33ToV34 adds the issue size column.
+//
+// It BACK-FILLS NOTHING: an issue created before this column existed had no
+// size declared under the small/trivial label convention either, so the
+// empty string is the correct reading of every existing row, not a guess.
+//
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration
+// probes first and stays re-runnable, the same shape v10 through v33 use.
+func migrateV33ToV34(tx *sql.Tx) error {
+	for _, col := range v34AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v33 to v34: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v33 to v34: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3424,6 +3472,23 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 32
+				break
+			}
+		}
+	}
+
+	// The v34 guard, in the same COLUMN form as v33 and for its reason: v34
+	// adds one column and no table, so a database stamped 34 by a binary built
+	// mid-change carries every v33 sentinel and `size` never arrives.
+	if version >= 34 {
+		for _, col := range v34ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v34 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 33
 				break
 			}
 		}

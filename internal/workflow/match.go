@@ -8,14 +8,19 @@ import (
 )
 
 // Subject is the issue state a `[match]` clause and a `when` predicate are
-// evaluated against. It is deliberately NOT model.Issue: the two predicate
-// languages address `kind` and `labels` and nothing else (engine-spec §11.1;
-// engine-core §4, "conditions (predicates over issue kind/labels only)"), so
-// passing a whole issue would let a future clause reach a field the grammar
-// has no way to name.
+// evaluated against. It is deliberately NOT model.Issue: the predicate
+// languages address `kind`, `labels`, and (since schema v34) `size` and
+// nothing else, so passing a whole issue would let a future clause reach a
+// field the grammar has no way to name.
+//
+// Size is carried alongside Kind and Labels, not folded into Labels, because
+// it is a CLOSED enum with its own validation (model.ValidateSize) rather
+// than a free-text set — `sizes_any` reads it as one value to match against a
+// list, the same shape `kind` already has, not an intersection test.
 type Subject struct {
 	Kind   string
 	Labels []string
+	Size   string
 }
 
 // Matches reports whether an issue satisfies this workflow's `[match]` clause
@@ -28,11 +33,12 @@ type Subject struct {
 // issue and the candidate workflows" only means something if a match-less
 // workflow participates in the count.
 //
-// The four clauses, per §11.1 and TDD §5.3 stage 1:
+// The five clauses, per §11.1 and TDD §5.3 stage 1 (sizes_any since v34):
 //
 //   - `kind`          — the issue's kind is in the list; an absent list matches any
 //   - `labels_any`    — the lists intersect
 //   - `labels_all`    — the clause's labels are a subset of the issue's
+//   - `sizes_any`     — the issue's size is in the list; an absent list matches any
 //   - `unless_labels` — the lists are disjoint
 //
 // `unless_labels` is evaluated LAST and WINS, so an exclusion cannot be
@@ -40,7 +46,10 @@ type Subject struct {
 // must not bind a security-load-bearing issue merely because that issue also
 // carries a label the workflow includes — the exclusion is the author saying
 // "not this one", and an inclusion overriding it would silently route work
-// through a pipeline written to refuse it.
+// through a pipeline written to refuse it. `sizes_any` sits with `labels_any`
+// and `labels_all` in that ordering, before the exclusion, since it is
+// another INCLUSION clause: an issue whose size does not qualify is refused
+// here, the same as one whose labels do not, before unless_labels gets a say.
 func (m *Match) Matches(s Subject) bool {
 	if m == nil {
 		return true
@@ -53,6 +62,9 @@ func (m *Match) Matches(s Subject) bool {
 		return false
 	}
 	if len(m.LabelsAll) > 0 && !subset(m.LabelsAll, s.Labels) {
+		return false
+	}
+	if len(m.SizesAny) > 0 && !slices.Contains(m.SizesAny, s.Size) {
 		return false
 	}
 	// Last and wins.
@@ -83,11 +95,14 @@ func (g LabelGap) Empty() bool {
 // `[match]`: what the issue would have to be labelled to bind here.
 //
 // `reachable` is false when no labelling could ever close the distance, and the
-// two ways that happens are the two the caller must not report:
+// three ways that happens are the ones the caller must not report:
 //
 //   - the `kind` clause excludes the subject — a workflow that binds only
 //     `bug`s is not a workflow a `chore` was mis-labelled out of, and adding a
 //     label would not change that;
+//   - the `sizes_any` clause excludes the subject, for the same reason: a
+//     label cannot change an issue's declared size, so no labelling closes a
+//     size mismatch either;
 //   - `unless_labels` intersects — the author wrote "not this one" ABOUT this
 //     issue, and an exclusion that fires is a decision, not an omission.
 //
@@ -98,7 +113,7 @@ func (g LabelGap) Empty() bool {
 //
 // It is DKT-1182's half of the binding lint that must live in this package:
 // the gap is a question about `[match]`'s grammar, and answering it in the
-// engine would be a second reading of the same four clauses — precisely the
+// engine would be a second reading of the same clauses — precisely the
 // drift the routing sweep's comment warns about, where a hand-rolled copy of
 // this predicate silently omitted `labels_all`.
 func (m *Match) LabelGapFor(s Subject) (LabelGap, bool) {
@@ -107,6 +122,9 @@ func (m *Match) LabelGapFor(s Subject) (LabelGap, bool) {
 	}
 
 	if len(m.Kind) > 0 && !slices.Contains(m.Kind, s.Kind) {
+		return LabelGap{}, false
+	}
+	if len(m.SizesAny) > 0 && !slices.Contains(m.SizesAny, s.Size) {
 		return LabelGap{}, false
 	}
 	if len(m.UnlessLabels) > 0 && intersects(m.UnlessLabels, s.Labels) {

@@ -40,6 +40,7 @@ type ListOptions struct {
 	ProjectID  int      // scope to one project (v12); 0 = every project
 	Statuses   []string // filter by status (multiple = OR)
 	Priorities []string // filter by priority (multiple = OR)
+	Sizes      []string // filter by size (multiple = OR); "" never matches a row
 	Labels     []string // filter by label name (multiple = AND)
 	Types      []string // filter by kind (multiple = OR)
 	Assignee   string   // filter by assignee
@@ -66,6 +67,7 @@ var validSortFields = map[string]bool{
 	"title":      true,
 	"status":     true,
 	"priority":   true,
+	"size":       true,
 	"kind":       true,
 	"assignee":   true,
 	"created_at": true,
@@ -78,6 +80,7 @@ var validUpdateFields = map[string]bool{
 	"description": true,
 	"status":      true,
 	"priority":    true,
+	"size":        true,
 	"kind":        true,
 	"assignee":    true,
 	"parent_id":   true,
@@ -124,8 +127,8 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 
 	projectID := projectOrDefault(issue.ProjectID)
 	res, err := tx.Exec(
-		`INSERT INTO issues (project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO issues (project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, size)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		projectID,
 		nilIfZeroPtr(issue.ParentID),
 		issue.Title,
@@ -136,6 +139,7 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 		issue.Assignee,
 		now,
 		now,
+		string(issue.Size),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("inserting issue: %w", err)
@@ -209,11 +213,11 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 const (
 	issueColumns = `id, parent_id, title, description, status, priority, kind, assignee,
 	                created_at, updated_at, version, owner, token_hash, expires_ms, attempt,
-	                scope_globs, project_id, resolution`
+	                scope_globs, project_id, resolution, size`
 
 	issueColumnsQualified = `i.id, i.parent_id, i.title, i.description, i.status, i.priority, i.kind, i.assignee,
 	                         i.created_at, i.updated_at, i.version, i.owner, i.token_hash, i.expires_ms, i.attempt,
-	                         i.scope_globs, i.project_id, i.resolution`
+	                         i.scope_globs, i.project_id, i.resolution, i.size`
 )
 
 // IssueResolutionAbandoned is the resolution the `abandon-issue` routing and
@@ -354,6 +358,14 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 		whereClauses = append(whereClauses, fmt.Sprintf("i.priority IN (%s)", placeholders))
 		for _, p := range opts.Priorities {
 			args = append(args, p)
+		}
+	}
+
+	if len(opts.Sizes) > 0 {
+		placeholders := makePlaceholders(len(opts.Sizes))
+		whereClauses = append(whereClauses, fmt.Sprintf("i.size IN (%s)", placeholders))
+		for _, sz := range opts.Sizes {
+			args = append(args, sz)
 		}
 	}
 
@@ -698,6 +710,8 @@ func getFieldValue(issue *model.Issue, field string) string {
 		return string(issue.Status)
 	case "priority":
 		return string(issue.Priority)
+	case "size":
+		return string(issue.Size)
 	case "kind":
 		return string(issue.Kind)
 	case "assignee":
@@ -932,7 +946,7 @@ func scanIssueFrom(s scanner) (*model.Issue, error) {
 		&i.Status, &i.Priority, &i.Kind, &assignee,
 		&createdAt, &updatedAt, &i.Version,
 		&owner, &tokenHash, &expiresMS, &attempt,
-		&scopeGlobs, &i.ProjectID, &i.Resolution,
+		&scopeGlobs, &i.ProjectID, &i.Resolution, &i.Size,
 	)
 	if err != nil {
 		return nil, err
@@ -1180,6 +1194,12 @@ func CountByPriority(db *sql.DB, projectID int) (map[string]int, error) {
 	return countByColumn(db, projectID, "priority")
 }
 
+// CountBySize returns a map of size -> count, scoped to a project when
+// projectID is non-zero. The "" key counts issues with no size declared.
+func CountBySize(db *sql.DB, projectID int) (map[string]int, error) {
+	return countByColumn(db, projectID, "size")
+}
+
 // ClearAllData deletes all data from every persistent table within a single
 // transaction. The schema and meta table are preserved.
 //
@@ -1395,8 +1415,8 @@ func InsertIssueWithID(tx *sql.Tx, issue *model.Issue) (bool, error) {
 	}
 
 	res, err := tx.Exec(
-		`INSERT OR IGNORE INTO issues (id, project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, scope_globs)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO issues (id, project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, scope_globs, size)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		issue.ID,
 		projectOrDefault(issue.ProjectID),
 		nilIfZeroPtr(issue.ParentID),
@@ -1409,6 +1429,7 @@ func InsertIssueWithID(tx *sql.Tx, issue *model.Issue) (bool, error) {
 		issue.CreatedAt.UTC().Format(time.RFC3339),
 		issue.UpdatedAt.UTC().Format(time.RFC3339),
 		scopeGlobs,
+		string(issue.Size),
 	)
 	if err != nil {
 		return false, fmt.Errorf("inserting issue with id %d: %w", issue.ID, err)

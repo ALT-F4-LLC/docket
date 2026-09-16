@@ -97,6 +97,21 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 		updates["priority"] = priority
 	}
 
+	if cmd.Flags().Changed("size") {
+		size, _ := cmd.Flags().GetString("size")
+		// An explicit `--size ""` clears the declaration back to SizeNone,
+		// the dormant default — the same "changed and empty means clear"
+		// reading `--parent 0` and `--scope=` use elsewhere in this verb.
+		// ValidateSize refuses "" as a SETTABLE value, so it is skipped only
+		// for the clearing case; any other unrecognized value still refuses.
+		if size != "" {
+			if err := model.ValidateSize(model.Size(size)); err != nil {
+				return cmdErr(err, output.ErrValidation)
+			}
+		}
+		updates["size"] = size
+	}
+
 	if cmd.Flags().Changed("type") {
 		kind, _ := cmd.Flags().GetString("type")
 		if err := model.ValidateIssueKind(model.IssueKind(kind)); err != nil {
@@ -278,6 +293,7 @@ func init() {
 	editCmd.Flags().StringP("description", "d", "", "Issue description (use \"-\" for stdin)")
 	editCmd.Flags().StringP("status", "s", "", "Issue status")
 	editCmd.Flags().StringP("priority", "p", "", "Issue priority")
+	editCmd.Flags().String("size", "", "Issue size (trivial, small, bounded, needs-design, unknown; empty clears it)")
 	editCmd.Flags().StringP("type", "T", "", "Issue type")
 	editCmd.Flags().StringP("assignee", "a", "", "Issue assignee")
 	editCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable, replaces existing)")

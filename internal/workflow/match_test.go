@@ -182,6 +182,137 @@ func TestLabelGapFor(t *testing.T) {
 	}
 }
 
+// TestSizesAnyMatrix covers `sizes_any` (schema v34) the way TestMatchMatrix
+// covers the label clauses: it is an INCLUSION clause like labels_any, but
+// tested against Subject.Size rather than Subject.Labels, and combined with
+// unless_labels to confirm the exclusion still wins last.
+func TestSizesAnyMatrix(t *testing.T) {
+	subject := Subject{Kind: "bug", Labels: []string{"backend"}, Size: "small"}
+
+	cases := []struct {
+		name  string
+		match *Match
+		subj  Subject
+		want  bool
+	}{
+		{"sizes_any absent matches any", &Match{LabelsAny: []string{"backend"}}, subject, true},
+		{"sizes_any contains the size", &Match{SizesAny: []string{"small", "trivial"}}, subject, true},
+		{"sizes_any excludes the size", &Match{SizesAny: []string{"bounded", "needs-design"}}, subject, false},
+		{"sizes_any single match", &Match{SizesAny: []string{"small"}}, subject, true},
+		{"sizes_any on an unsized issue",
+			&Match{SizesAny: []string{"small"}}, Subject{Kind: "bug"}, false},
+
+		// unless_labels still wins last, over sizes_any exactly as it does
+		// over labels_any/labels_all/kind.
+		{"unless_labels beats sizes_any",
+			&Match{SizesAny: []string{"small"}, UnlessLabels: []string{"backend"}},
+			subject, false},
+
+		// Combined with a label clause: both must hold.
+		{"sizes_any and labels_any both hold",
+			&Match{SizesAny: []string{"small"}, LabelsAny: []string{"backend"}}, subject, true},
+		{"sizes_any holds, labels_any fails",
+			&Match{SizesAny: []string{"small"}, LabelsAny: []string{"frontend"}}, subject, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.match.Matches(tc.subj); got != tc.want {
+				t.Errorf("Matches(%+v) = %v, want %v", tc.subj, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLabelGapForSizesAnyIsUnreachable pins sizes_any into LabelGapFor's
+// unreachable set, beside kind and unless_labels: no LABEL a caller could add
+// changes an issue's declared size, so a size mismatch must report
+// reachable=false the same way a kind mismatch does, never a phantom label
+// gap the operator cannot actually close.
+func TestLabelGapForSizesAnyIsUnreachable(t *testing.T) {
+	subject := Subject{Kind: "bug", Labels: []string{"qa"}, Size: "small"}
+
+	gap, reachable := (&Match{
+		SizesAny: []string{"bounded"}, LabelsAny: []string{"ui"},
+	}).LabelGapFor(subject)
+	if reachable {
+		t.Fatalf("reachable = true for a sizes_any mismatch, want false "+
+			"(gap = %+v)", gap)
+	}
+
+	// A matching size leaves the gap exactly what the label clauses alone
+	// would report — sizes_any contributes nothing to MissingAll/MissingAny
+	// once it holds, since there is no label that could have closed it.
+	gap, reachable = (&Match{
+		SizesAny: []string{"small"}, LabelsAny: []string{"ui"},
+	}).LabelGapFor(subject)
+	if !reachable {
+		t.Fatal("reachable = false for a matching sizes_any clause")
+	}
+	if !slices.Equal(gap.MissingAny, []string{"ui"}) {
+		t.Errorf("MissingAny = %v, want [ui]", gap.MissingAny)
+	}
+}
+
+// TestSizesAnyParsesAndRoundTrips pins the grammar half: `sizes_any` decodes
+// under `[match]` (strict decoding would refuse an unknown key otherwise),
+// binds as documented, and survives the canonical round trip every
+// registered definition goes through.
+func TestSizesAnyParsesAndRoundTrips(t *testing.T) {
+	const src = `
+[pipeline]
+name = "small-ish"
+version = 1
+[match]
+sizes_any = ["small", "trivial"]
+[[step]]
+name = "implement"
+executor = "worker"
+emits = "change-summary"
+after = []
+`
+	def, err := Parse([]byte(src))
+	testsupport.Must(t, err, "parsing a definition with sizes_any: %v", err)
+	if err := Validate(def); err != nil {
+		t.Fatalf("validating: %v", err)
+	}
+
+	want := []string{"small", "trivial"}
+	if !slices.Equal(def.Match.SizesAny, want) {
+		t.Errorf("sizes_any = %v, want %v", def.Match.SizesAny, want)
+	}
+
+	if !def.Match.Matches(Subject{Size: "small"}) {
+		t.Error("sizes_any did not admit a size it lists")
+	}
+	if def.Match.Matches(Subject{Size: "bounded"}) {
+		t.Error("sizes_any admitted a size it does not list")
+	}
+
+	canonical, err := Canonical(def)
+	testsupport.Must(t, err, "canonicalizing: %v", err)
+	restored, err := FromCanonical(canonical)
+	testsupport.Must(t, err, "restoring: %v", err)
+	if !slices.Equal(restored.Match.SizesAny, want) {
+		t.Errorf("sizes_any after round trip = %v, want %v",
+			restored.Match.SizesAny, want)
+	}
+}
+
+// TestCanonicalFormUnchangedWithoutSizesAny is the dormancy assertion: a
+// definition that declares no sizes_any must serialize byte-identically to
+// what it always did, or every already-registered workflow would look like a
+// CONFLICT on an idempotent re-register.
+func TestCanonicalFormUnchangedWithoutSizesAny(t *testing.T) {
+	def := mustParseFixture(t)
+	canonical, err := Canonical(def)
+	testsupport.Must(t, err, "canonicalizing the fixture: %v", err)
+	if strings.Contains(string(canonical), "sizes_any") {
+		t.Errorf("canonical form of a sizes_any-less definition mentions "+
+			"sizes_any: %s", canonical)
+	}
+}
+
 // TestDomainPathsParseAndBindNothing pins both halves of the advisory field: it
 // decodes under `[match]` (strict decoding would refuse an unknown key), and it
 // changes no binding — the same subject binds the same way with the paths there
