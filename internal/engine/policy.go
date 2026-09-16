@@ -80,6 +80,13 @@ type policyDoc struct {
 	Executors  map[string]policyExecutor `toml:"executors"`
 	Security   policySecurity            `toml:"security"`
 	Escalation policyEscalation          `toml:"escalation"`
+	// Sizes is `[sizes]`: an issue size-label name (e.g. "trivial", "small")
+	// mapped to the [variants] row a row should STAND ON instead of its
+	// [executors] entry's own variant, when the issue carries that label.
+	// Optional — an omitted or empty table leaves every row's standing
+	// variant exactly as it resolved before this field existed, so a policy
+	// that never declares [sizes] is byte-for-byte unaffected.
+	Sizes map[string]string `toml:"sizes"`
 }
 
 // parsePolicy decodes policy.toml and applies wave.js's assertPolicyShape

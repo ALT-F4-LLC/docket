@@ -22,9 +22,10 @@ var investigatorClassExecutors = []string{"investigate", "research"}
 var roundOrdinal = regexp.MustCompile(`@(\d+)(?:#\d+)?$`)
 
 // ResolveExecutor resolves one executor row's {model, effort, variant} — a
-// port of wave.js's resolve(): the row's [executors] entry, walked forward
-// through [variants].escalate_to by (recorded failures + round) hops,
-// redirected around any [security]-forbidden model, and clamped to
+// port of wave.js's resolve(): the row's [executors] entry — or, when the
+// issue carries a label [sizes] maps, that mapped variant instead — walked
+// forward through [variants].escalate_to by (recorded failures + round)
+// hops, redirected around any [security]-forbidden model, and clamped to
 // [security].ceiling on a sensitive row.
 //
 // The walk keys on RECORDED FAILURES — the row's FailedAttempts field, claims
@@ -33,7 +34,9 @@ var roundOrdinal = regexp.MustCompile(`@(\d+)(?:#\d+)?$`)
 // the re-run resolves to the tier it was reaped from. Spent claims
 // (the row's Attempt) are therefore NOT the hop key; a live claim and a reap
 // both leave the tier where it stands. instance is the step's instance name,
-// for round parsing. labels is the issue's snapshotted labels.
+// for round parsing. labels is the issue's snapshotted labels — consulted
+// both for [sizes] (an issue-driven STARTING variant, before any hop) and,
+// as before, for [security].labels sensitivity.
 func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance string, labels []string) (PolicyAssignment, error) {
 	found, ok := p.Executors[hint]
 	if !ok {
@@ -44,6 +47,13 @@ func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance st
 	if _, ok := p.Variants[variant]; !ok {
 		return PolicyAssignment{}, fmt.Errorf(
 			"[executors].%s names variant %q, which has no [variants] row", hint, variant)
+	}
+	if sv, ok := p.sizeVariant(labels); ok {
+		if _, ok := p.Variants[sv]; !ok {
+			return PolicyAssignment{}, fmt.Errorf(
+				"[sizes] names variant %q, which has no [variants] row", sv)
+		}
+		variant = sv
 	}
 	never := append([]string(nil), found.Never...)
 
@@ -125,8 +135,9 @@ func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance st
 
 // ResolveSeat resolves one vote step's voter to {model, effort, variant} — a
 // port of wave.js's resolveSeat(): the seat's declared STANDING variant only
-// (a vote seat has no attempt or round to walk), clamped and redirected by
-// the same [security] rules ResolveExecutor applies.
+// (a vote seat has no attempt or round to walk) — or, when the issue carries
+// a label [sizes] maps, that mapped variant instead — clamped and redirected
+// by the same [security] rules ResolveExecutor applies.
 func (p *policyDoc) ResolveSeat(seat string, labels []string) (PolicyAssignment, error) {
 	found, ok := p.Executors[seat]
 	if !ok {
@@ -137,6 +148,13 @@ func (p *policyDoc) ResolveSeat(seat string, labels []string) (PolicyAssignment,
 	if _, ok := p.Variants[variant]; !ok {
 		return PolicyAssignment{}, fmt.Errorf(
 			"[executors].%s names variant %q, which has no [variants] row", seat, variant)
+	}
+	if sv, ok := p.sizeVariant(labels); ok {
+		if _, ok := p.Variants[sv]; !ok {
+			return PolicyAssignment{}, fmt.Errorf(
+				"[sizes] names variant %q, which has no [variants] row", sv)
+		}
+		variant = sv
 	}
 	never := append([]string(nil), found.Never...)
 
@@ -161,6 +179,31 @@ func (p *policyDoc) ResolveSeat(seat string, labels []string) (PolicyAssignment,
 		return PolicyAssignment{}, fmt.Errorf("resolving voter %q: %w", seat, err)
 	}
 	return PolicyAssignment{Model: spec.Model, Effort: spec.Effort, Variant: variant}, nil
+}
+
+// sizeVariant reports the [sizes]-mapped variant for the issue's labels, and
+// whether one applies at all. It is consulted BEFORE the [security] ceiling
+// clamp captures `standing` — a size-derived variant is a new starting point
+// for the walk, not an escalation hop, so it must land before `standing` is
+// read, and it is still subject to [security]'s ceiling/never afterward like
+// any other starting variant.
+//
+// An issue's Labels are stored and marshaled in DECLARED ORDER (model/
+// issue.go), not sorted, so an issue carrying two [sizes]-mapped labels
+// resolves the FIRST one in that order — deterministic on the same evidence
+// an operator or `issue show` already reads top-to-bottom, rather than an
+// arbitrary map-iteration pick or a second precedence table this grammar does
+// not otherwise need.
+func (p *policyDoc) sizeVariant(labels []string) (string, bool) {
+	if len(p.Sizes) == 0 {
+		return "", false
+	}
+	for _, l := range labels {
+		if v, ok := p.Sizes[l]; ok {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // isSensitive reports whether a row is subject to [security]'s ceiling and
