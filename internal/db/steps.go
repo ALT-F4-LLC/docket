@@ -113,6 +113,11 @@ const (
 	ParkClassAttemptsExhausted ParkClass = "attempts-exhausted"
 	// ParkClassJoinMissed: a join completed below `min_siblings`.
 	ParkClassJoinMissed ParkClass = "join-missed"
+	// ParkClassTriageUndecided: a triage panel (DKT-1901) closed without a
+	// usable verdict — declined, no quorum, or retired without a tally — so
+	// its `on_fail` fell back to `waiting-human`, the same outcome a step
+	// would have reached with no panel at all.
+	ParkClassTriageUndecided ParkClass = "triage-undecided"
 )
 
 // StepTerminal reports whether a status ends a step's life. A terminal step is

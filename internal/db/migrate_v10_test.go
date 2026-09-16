@@ -92,7 +92,7 @@ func TestMigrateToV10(t *testing.T) {
 // GAPS, because a missing entry turns Migrate's loop into a runtime error on a
 // user's database rather than a build-time failure on ours.
 func TestSchemaSpanIsComplete(t *testing.T) {
-	// The span now ends at v32. v11 through v32 are AMENDMENTS, not stages —
+	// The span now ends at v33. v11 through v33 are AMENDMENTS, not stages —
 	// workflow retirement (DKT-21), the projects dimension (operator request,
 	// 2026-08-09), vote provenance (DKT-71), per-seat vote spend (DKT-95),
 	// artifact revisions (DKT-70), the retry-budget base (DKT-86/DKT-90),
@@ -103,8 +103,8 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// (DKT-546), the stale-target waiver (DKT-742), the run note (DKT-1079),
 	// the prior-claim-end marker (DKT-1279), the sealed-ballot flag
 	// (DKT-2447), the conductor capability (DKT-2465), the gate failure
-	// fingerprint (DKT-1796), the manifest extend cursor (DKT-2071), and the
-	// park reason (DKT-1898) — each recorded in
+	// fingerprint (DKT-1796), the manifest extend cursor (DKT-2071), the
+	// park reason (DKT-1898), and the park class (DKT-1900) — each recorded in
 	// docs/tdd/reliability-delta.md §2 under
 	// its own heading, with the reason it needed a version and the argument
 	// that it leaves the ratified v5-v10 arithmetic untouched.
@@ -114,10 +114,10 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// this test firing is exactly how v11 through v23 came to be documented
 	// rather than discovered afterwards. Raising the number without editing
 	// that section is the move it exists to stop.
-	if currentSchemaVersion != 32 {
-		t.Errorf("currentSchemaVersion = %d, want 32 — the span of "+
-			"docs/tdd/reliability-delta.md §2 ends at v32 (the park reason). "+
-			"Moving past 32 needs an amendment against that "+
+	if currentSchemaVersion != 33 {
+		t.Errorf("currentSchemaVersion = %d, want 33 — the span of "+
+			"docs/tdd/reliability-delta.md §2 ends at v33 (the park class). "+
+			"Moving past 33 needs an amendment against that "+
 			"section, per docs/design/amendments.md", currentSchemaVersion)
 	}
 

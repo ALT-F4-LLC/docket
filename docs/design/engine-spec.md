@@ -179,6 +179,7 @@ A blank class means the row parked before the column existed.
 | `action-failed` | an action step's computation could not run — bad params, an unorderable value, an unmatched command name, or a non-zero exit |
 | `attempts-exhausted` | the step spent its `max_attempts` budget |
 | `join-missed` | a join completed below `min_siblings` |
+| `triage-undecided` | a triage panel (DKT-1901) closed without a usable verdict — declined, no quorum, or retired without a tally — falling back to the same `waiting-human` a step with no panel would have reached |
 
 `paused` is not among them: it is a RUN status, never written to `steps.status`,
 so a paused run removes its steps from the scheduler through their run rather

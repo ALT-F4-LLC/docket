@@ -950,6 +950,37 @@ amendment, not a stage: one additive column with a default, a
 a rewind guard that probes the COLUMN (the v27–v31 form, since v32 adds no
 table and no index).
 
+### AMENDMENT — the span extends to v33 (DKT-1900, 2026-09-15)
+
+**What changed.** v33 adds ONE column to one table, `steps.park_class`
+(`TEXT NOT NULL DEFAULT ''`): a closed-enum classification of why a step
+parked, beside v32's free-text `park_reason`. `park_reason` explains a park to
+a person; it cannot be routed on. A conductor or panel deciding what to do
+with a parked row must distinguish a gate that failed on the work from a gate
+that could not run, a threshold routing from a loop that hit its bound — and
+reconstructing that from the reason sentence means parsing prose the engine
+is free to reword. This column records the distinction as a value, assigned
+from the routing transaction's own facts and never inferred at read time.
+
+**What it fixes.** A parked step's cause lived only in `park_reason`'s prose,
+so anything routing on why a step parked had to pattern-match a sentence the
+engine could reword at any time. `park_class` gives that same fact a closed,
+compiler-checked vocabulary: `SetStepRoutingTx` writes both columns in one
+statement and refuses a park that names no class, so the two halves of one
+fact cannot disagree.
+
+**Blank means parked before the column existed, and nothing else.** The
+default is the empty string, and the migration back-fills nothing: no step
+predating this column has a class to recover. The blank is inert rather than
+load-bearing — nothing refuses on it for an existing row — so a step parked
+under the old code reads as unclassified, which it is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v32, v33 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v32 form, since v33 adds no
+table and no index).
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

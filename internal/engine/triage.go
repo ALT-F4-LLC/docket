@@ -262,13 +262,13 @@ func applyTriageRouting(
 		// all — the operator now has the panel's rationale beside the gate rows.
 		applied = workflow.OnFailWaitingHuman
 		if err := db.SetStepRoutingTx(tx, router.ID,
-			applied, note, db.StepWaitingHuman, nowMS); err != nil {
+			applied, note, db.StepWaitingHuman, db.ParkClassTriageUndecided, nowMS); err != nil {
 			return err
 		}
 	case workflow.TriageAbandonIssue:
 		applied = workflow.OnFailAbandonIssue
 		if err := db.SetStepRoutingTx(tx, router.ID,
-			applied, note, db.StepFailedRouted, nowMS); err != nil {
+			applied, note, db.StepFailedRouted, "", nowMS); err != nil {
 			return err
 		}
 	case workflow.TriageRetry:
@@ -317,7 +317,7 @@ func applyTriageRetry(tx *sql.Tx, router *db.Step, note string, nowMS int64) err
 		!errors.Is(err, db.ErrSagaStageMoved) {
 		return err
 	}
-	return db.SetStepRoutingTx(tx, router.ID, ResolveRetry, note, db.StepPending, nowMS)
+	return db.SetStepRoutingTx(tx, router.ID, ResolveRetry, note, db.StepPending, "", nowMS)
 }
 
 // applyTriageFixRound is `--as fix-round` for a panel: an AUTHORIZED loop entry
@@ -344,10 +344,10 @@ func applyTriageFixRound(
 		// own on_fail backstop is the way out.
 		return db.SetStepRoutingTx(tx, router.ID,
 			workflow.OnFailWaitingHuman, note+": "+outcome.Reason,
-			db.StepWaitingHuman, nowMS)
+			db.StepWaitingHuman, db.ParkClassLoopBound, nowMS)
 	}
 	return db.SetStepRoutingTx(tx, router.ID,
-		workflow.OnFailFixLoop, note, db.StepSuperseded, nowMS)
+		workflow.OnFailFixLoop, note, db.StepSuperseded, "", nowMS)
 }
 
 // releaseUntriaged disposes of a suspended step whose panel closed WITHOUT
@@ -382,7 +382,7 @@ func releaseUntriaged(
 		return err
 	}
 	if err := db.SetStepRoutingTx(tx, panel.ID, workflow.OnFailSkip, note,
-		db.StepSkipped, nowMS); err != nil {
+		db.StepSkipped, "", nowMS); err != nil {
 		return err
 	}
 	return recordEvent(tx, eventRecord{
