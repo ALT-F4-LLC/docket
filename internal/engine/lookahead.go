@@ -514,8 +514,9 @@ func (s *Scheduler) offerPredecessors(step *db.Step, stageOf map[int]int) []*db.
 			}
 		}
 	}
-	// An open interposed gate holding the step (DKT-168) is a predecessor for
-	// leveling purposes: the step's claim refuses until the gate resolves, so
+	// An open interposed gate holding the step (DKT-168, narrowed to vote and
+	// human targets by DKT-2076) is a predecessor for leveling purposes: the
+	// step's claim refuses until the gate resolves, so
 	// a stage that ran them side by side would spawn an executor only to have
 	// it refused — the exact boot-for-nothing the conditional mark exists to
 	// price, made structural here instead.

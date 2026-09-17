@@ -386,3 +386,34 @@ func TestRecordRunsAReadiedActionMidDispatch(t *testing.T) {
 		ClaimOptions{Owner: "worker", NowMS: nowMS})
 	testsupport.Must(t, err, "claim verify@0 mid-dispatch: %v", err)
 }
+
+// TestClosureLevelsExecutorTargetBesideDownstream is DKT-2076's staging half:
+// an open EXECUTOR threshold target is no longer a levelling predecessor, so
+// the routing step's ordinary downstream stages BESIDE it instead of one level
+// under it. On standard-change's shape that level was the cap-cut boundary on a
+// majority of measured runs, bought for an ordering nothing needed.
+func TestClosureLevelsExecutorTargetBesideDownstream(t *testing.T) {
+	conn := mustDB(t)
+	runID, _ := activateInterposed(t, conn, interposeExecutorSrc)
+
+	answer, err := testEngine().NextSteps(conn, runID, 0, nowMS)
+	testsupport.Must(t, err, "next: %v", err)
+
+	stages := map[string]int{}
+	for _, row := range answer.Steps {
+		stages[row.Instance] = row.Stage
+	}
+	drain, ok := stages["drain-highs@0"]
+	if !ok {
+		t.Fatalf("drain-highs@0 absent from the offer: %v", instancesIn(answer))
+	}
+	verify, ok := stages["verify@0"]
+	if !ok {
+		t.Fatalf("verify@0 absent from the offer: %v", instancesIn(answer))
+	}
+	if verify != drain {
+		t.Errorf("verify@0 staged at %d, drain-highs@0 at %d; want the same "+
+			"level — an executor target is not a levelling predecessor",
+			verify, drain)
+	}
+}

@@ -605,7 +605,9 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 	}
 
 	// R3's second interposition clause (DKT-168): an OPEN interposed gate on a
-	// predecessor holds that predecessor's ordinary downstream. Deadlock-free
+	// predecessor holds that predecessor's ordinary downstream — a gate being a
+	// vote or human target only (DKT-2076; see openInterposedGates).
+	// Deadlock-free
 	// by the routing's own bookkeeping: a routing that chose against the gate
 	// terminalizes it in the same transaction (skipUnroutedTargets), one that
 	// chose it leaves it pending exactly until it resolves, and a gate parked
@@ -859,6 +861,13 @@ func suspendedOnPanel(step *db.Step, panel string) bool {
 // instances resolve by predecessorInstances' ordinal rule, the same fallback
 // every other R3 read uses. A target with no instances holds nothing: there
 // is no gate to wait on.
+//
+// Only a vote or human target holds (DKT-2076). Those are DECISIONS the
+// downstream's own validity depends on: running past an undecided panel is
+// work the decision can invalidate. An interposed EXECUTOR target is ordinary
+// work the routing chose to add — the corpus's drain-highs — and no downstream
+// reads its output, so holding for it bought a dispatch level and no ordering
+// anything needed.
 func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
@@ -879,6 +888,9 @@ func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 				continue
 			}
 			for _, gate := range s.predecessorInstances(step, target) {
+				if gate.Kind != workflow.TypeVote && gate.Kind != workflow.TypeHuman {
+					continue
+				}
 				if !db.StepTerminal(gate.Status) {
 					out = append(out, gate)
 				}
