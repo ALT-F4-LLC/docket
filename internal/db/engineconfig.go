@@ -106,25 +106,34 @@ const (
 	KeyEventsRetain = "events.retain"
 
 	// KeyVoteRulePrefix is the named-threshold-configuration namespace:
-	// vote.rule.<name>.threshold, vote.rule.<name>.criticality and
-	// vote.rule.<name>.sealed (gates-trust §8.3).
+	// vote.rule.<name>.threshold, vote.rule.<name>.criticality,
+	// vote.rule.<name>.sealed and vote.rule.<name>.hold_on_dissent
+	// (gates-trust §8.3).
 	//
 	// A workflow's `type="vote"` step names a rule rather than passing flags,
 	// because a step cannot pass flags. The <name> is an OPAQUE string exactly
 	// as lease.ttl.<class>'s class is, and this reuses the config machinery
 	// rather than adding a table: a rule "exists" iff its `.threshold` is set.
 	KeyVoteRulePrefix = "vote.rule."
-	// KeyVoteRuleThresholdSuffix, KeyVoteRuleCriticalitySuffix and
-	// KeyVoteRuleSealedSuffix complete a rule's three keys.
+	// KeyVoteRuleThresholdSuffix, KeyVoteRuleCriticalitySuffix,
+	// KeyVoteRuleSealedSuffix and KeyVoteRuleHoldOnDissentSuffix complete a
+	// rule's four keys.
 	//
 	// `.sealed` is opt-in and defaults to false: a sealed rule opens proposals
 	// whose casts the read verbs withhold (verdict, weights, findings, summary)
 	// until the tally closes the proposal, so a seat reading the ballot cannot
 	// anchor on a sibling's verdict. It is a RENDERING rule only — the tally
 	// and the one-cast-per-voter constraint never consult it.
-	KeyVoteRuleThresholdSuffix   = ".threshold"
-	KeyVoteRuleCriticalitySuffix = ".criticality"
-	KeyVoteRuleSealedSuffix      = ".sealed"
+	//
+	// `.hold_on_dissent` is opt-in and defaults to false (DKT-2449): under a
+	// keyed rule an APPROVED tally that carries at least one `reject` parks
+	// the vote step for the operator instead of passing. The tally itself is
+	// untouched — the weighted mean is still db.CastVote's — and the park is
+	// strictly additive: it displaces a `pass` and never a fail route.
+	KeyVoteRuleThresholdSuffix     = ".threshold"
+	KeyVoteRuleCriticalitySuffix   = ".criticality"
+	KeyVoteRuleSealedSuffix        = ".sealed"
+	KeyVoteRuleHoldOnDissentSuffix = ".hold_on_dissent"
 
 	// KeyVoteRuleRosterSuffix and KeyVoteRuleWeightingSuffix are the rule's two
 	// IDENTITY dimensions (DKT-2448): who may cast, and what a cast is worth.
@@ -526,7 +535,8 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 		}, nil
 	}
 
-	// vote.rule.<name>.threshold / .criticality / .sealed (gates-trust §8.3),
+	// vote.rule.<name>.threshold / .criticality / .sealed / .hold_on_dissent
+	// (gates-trust §8.3),
 	// matched dynamically for the same reason the per-class TTL is: <name> is
 	// an opaque string, so the set of valid keys is open by design.
 	if rest, ok := strings.CutPrefix(key, KeyVoteRulePrefix); ok {
@@ -577,6 +587,16 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 					"REGISTERED BUT NOT YET ENFORCED — the tally does not read it", name),
 			}, nil
 		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleHoldOnDissentSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether an APPROVED tally under vote rule %q "+
+					"that carries at least one reject parks its step for the "+
+					"operator; false (the default) routes it as before", name),
+			}, nil
+		}
 	}
 
 	return ConfigSpec{}, fmt.Errorf("%w: %q (known keys: %s)",
@@ -585,7 +605,7 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 
 // KnownConfigKeys lists the fixed keys, plus the open-ended patterns.
 func KnownConfigKeys() []string {
-	keys := make([]string, 0, len(engineConfigSpecs)+6)
+	keys := make([]string, 0, len(engineConfigSpecs)+7)
 	for _, spec := range engineConfigSpecs {
 		keys = append(keys, spec.Key)
 	}
@@ -596,6 +616,7 @@ func KnownConfigKeys() []string {
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleSealedSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleRosterSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleWeightingSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleHoldOnDissentSuffix,
 	)
 	return keys
 }
@@ -734,8 +755,10 @@ func ValidateVoteWeighting(value string) error {
 		VoteWeightingDeclared, VoteWeightingEqual, value)
 }
 
-// These build a rule's keys, so the string concatenation lives in one place
-// rather than at every reader.
+// VoteRuleThresholdKey, VoteRuleCriticalityKey, VoteRuleSealedKey,
+// VoteRuleRosterKey, VoteRuleWeightingKey and VoteRuleHoldOnDissentKey build a
+// rule's six keys, so the string concatenation lives in one place rather than
+// at every reader.
 func VoteRuleThresholdKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleThresholdSuffix
 }
@@ -754,6 +777,10 @@ func VoteRuleRosterKey(rule string) string {
 
 func VoteRuleWeightingKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleWeightingSuffix
+}
+
+func VoteRuleHoldOnDissentKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleHoldOnDissentSuffix
 }
 
 // VoteRuleExists reports whether a rule is registered.

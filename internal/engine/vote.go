@@ -385,6 +385,13 @@ type voteRule struct {
 	// behavior exactly.
 	Roster    string
 	Weighting string
+	// HoldOnDissent is the rule's opt-in routing dimension (DKT-2449): an
+	// APPROVED tally carrying at least one `reject` parks its vote step for
+	// the operator rather than passing, with the dissenting seat named in the
+	// routing record. Unlike Sealed it is read at ROUTE time rather than
+	// stored on the proposal at open, so a key edited between the last cast
+	// and the routing invocation governs that routing.
+	HoldOnDissent bool
 }
 
 // resolveVoteRule reads a named rule from the engine-config registry.
@@ -445,12 +452,27 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 		return voteRule{}, fmt.Errorf("vote rule %q has a malformed weighting: %w", name, err)
 	}
 
+	holdEntry, err := db.GetConfig(conn, projectID, db.VoteRuleHoldOnDissentKey(name))
+	if err != nil {
+		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
+	}
+	// A malformed stored value fails loudly rather than reading as false: a
+	// silent false would fail OPEN with respect to the hold, passing a
+	// dissented approval the operator asked to see.
+	holdOnDissent, err := strconv.ParseBool(holdEntry.Value)
+	if err != nil {
+		return voteRule{}, fmt.Errorf(
+			"vote rule %q has a malformed hold_on_dissent flag %q: %w",
+			name, holdEntry.Value, err)
+	}
+
 	return voteRule{
-		Threshold:   threshold,
-		Criticality: model.Criticality(criticalityEntry.Value),
-		Sealed:      sealed,
-		Roster:      rosterEntry.Value,
-		Weighting:   weightingEntry.Value,
+		Threshold:     threshold,
+		Criticality:   model.Criticality(criticalityEntry.Value),
+		Sealed:        sealed,
+		Roster:        rosterEntry.Value,
+		Weighting:     weightingEntry.Value,
+		HoldOnDissent: holdOnDissent,
 	}, nil
 }
 
@@ -599,6 +621,30 @@ func routeVoteStep(
 		}
 		if result.Routing != RoutingPass {
 			routing, concernReason = result.Routing, result.Reason
+		}
+	}
+
+	// A LONE REJECT UNDER A KEYED RULE PARKS THE STEP (DKT-2449). The tally is
+	// a weighted mean and approve-with-concerns adds to it, so a dissenting
+	// seat's findings left no trace in routing once the score cleared the
+	// threshold.
+	//
+	// Placed AFTER the switch and guarded on `routing == RoutingPass`, which
+	// is what makes the park strictly ADDITIVE: it can only ever displace a
+	// pass. A triage panel (which the first arm passed) is excluded
+	// explicitly, because parking it on the question it just answered is what
+	// DKT-1901 forbids; a rejected tally keeps its `on_fail` because the
+	// second arm already moved `routing`; a `threshold` match keeps its own
+	// routing for the same reason; and a COMMITTED proposal is skipped by the
+	// approved-status test, as §8.4's manual commit is the operator's answer.
+	if routing == RoutingPass && outcome.Status == model.ProposalStatusApproved &&
+		!(triaged != nil && triageDecided(outcome)) {
+		dissentReason, err := dissentHold(conn, step, spec, outcome.ProposalID)
+		if err != nil {
+			return err
+		}
+		if dissentReason != "" {
+			routing, concernReason = workflow.OnFailWaitingHuman, dissentReason
 		}
 	}
 

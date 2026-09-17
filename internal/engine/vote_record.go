@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -84,6 +85,59 @@ func evaluateVoteThreshold(
 			result.Routing, spec.Threshold[result.Routing])
 	}
 	return result, nil
+}
+
+// dissentHold reports the routing reason for DKT-2449's park, or "" when the
+// step routes ordinarily.
+//
+// It answers one question the tally does not: did any seat REJECT. The tally
+// is a weighted mean, so two approvals outweigh one rejection and the
+// dissenting seat leaves no trace in routing — which is the defect the rule's
+// opt-in `.hold_on_dissent` closes.
+//
+// Both reads are pooled, so this is called from OUTSIDE routeVoteStep's
+// transaction, like every other read there.
+func dissentHold(
+	conn *sql.DB, step *db.Step, spec *workflow.Step, proposalID int,
+) (string, error) {
+	projectID, err := db.RunProjectID(conn, step.RunID)
+	if err != nil {
+		return "", err
+	}
+	// The rule resolves here rather than riding the proposal, so a rule
+	// REMOVED mid-ballot fails loudly at routing exactly as it does at open: a
+	// threshold nobody chose is not a threshold.
+	rule, err := resolveVoteRule(conn, projectID, spec.VoteRule)
+	if err != nil {
+		return "", err
+	}
+	if !rule.HoldOnDissent {
+		return "", nil
+	}
+
+	votes, err := db.GetProposalVotes(conn, proposalID)
+	if err != nil {
+		return "", fmt.Errorf(
+			"reading the casts of %s for its dissent hold: %w",
+			model.FormatProposalID(proposalID), err)
+	}
+	var dissenters []string
+	for _, v := range votes {
+		if v.Verdict == model.VerdictReject {
+			dissenters = append(dissenters, v.VoterName)
+		}
+	}
+	if len(dissenters) == 0 {
+		return "", nil
+	}
+	// Sorted so the record is the same whatever order the casts landed in.
+	sort.Strings(dissenters)
+
+	// The reason NAMES THE SEATS, because "approved" alone would read as a
+	// pass to anyone auditing why the step parked — the same courtesy the
+	// threshold routing extends.
+	return fmt.Sprintf("approved, and hold_on_dissent parked it on %s",
+		strings.Join(dissenters, ", ")), nil
 }
 
 // voteCastPayloads renders recorded casts as threshold payloads — one element
