@@ -15,6 +15,24 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
+// pinnedHashOf is the sha256 the fixture run recorded for `policy.toml` — the
+// oracle the printed bytes must hash to, read from the pin row rather than
+// recomputed from the same file the verb reads.
+func pinnedHashOf(t *testing.T, conn *sql.DB, runRef string) string {
+	t.Helper()
+	runID, err := model.ParseRunID(runRef)
+	testsupport.Must(t, err, "ParseRunID: %v", err)
+	pins, err := db.ListPins(conn, runID)
+	testsupport.Must(t, err, "ListPins: %v", err)
+	for _, p := range pins {
+		if p.Ref == "policy.toml" {
+			return p.SHA256
+		}
+	}
+	t.Fatal("the fixture run does not pin policy.toml")
+	return ""
+}
+
 func equalActivatedAt(a, b *int64) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -89,8 +107,16 @@ func TestPinShowPrintsPinnedContent(t *testing.T) {
 		if err := runPinShow(cmdWithDB(conn), runRef, "policy.toml", w); err != nil {
 			t.Fatalf("pin show refuses a pinned file: %v", err)
 		}
-		if got := buf.String(); !strings.Contains(got, pinShowPolicy) {
-			t.Errorf("output = %q, want the pinned policy bytes %q", got, pinShowPolicy)
+		// BYTE-EXACT, not merely containing: the verb's promise is that what it
+		// prints hashes to the pin, so a framing newline would break
+		// `docket pin show ... | shasum`.
+		if got := buf.String(); got != pinShowPolicy {
+			t.Errorf("output = %q, want exactly the pinned policy bytes %q",
+				got, pinShowPolicy)
+		}
+		if got := workflow.SHA256(buf.Bytes()); got != pinnedHashOf(t, conn, runRef) {
+			t.Errorf("printed bytes hash to %q, want the pin's %q",
+				got, pinnedHashOf(t, conn, runRef))
 		}
 	})
 
@@ -142,19 +168,7 @@ func TestPinShowRefusesDriftedBytes(t *testing.T) {
 	if !strings.Contains(err.Error(), "pin drift") {
 		t.Errorf("err = %q, want it to say \"pin drift\"", err.Error())
 	}
-	runID, perr := model.ParseRunID(runRef)
-	testsupport.Must(t, perr, "ParseRunID: %v", perr)
-	pins, lerr := db.ListPins(conn, runID)
-	testsupport.Must(t, lerr, "ListPins: %v", lerr)
-	var pinned string
-	for _, p := range pins {
-		if p.Ref == "policy.toml" {
-			pinned = p.SHA256
-		}
-	}
-	if pinned == "" {
-		t.Fatal("the fixture run does not pin policy.toml")
-	}
+	pinned := pinnedHashOf(t, conn, runRef)
 	if !strings.Contains(err.Error(), pinned) {
 		t.Errorf("err = %q, want the pinned hash %q", err.Error(), pinned)
 	}

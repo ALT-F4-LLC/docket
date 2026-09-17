@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -53,10 +55,16 @@ func runPinShow(cmd *cobra.Command, ref, path string, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	// The BODY IS THE ANSWER, so it is the message rather than a rendering of
-	// one: a caller pipes this into the check the contract asked for.
-	w.Success(pinShowPayload{Run: model.FormatRunID(runID), Path: path, Body: body},
-		body)
+	// THE BYTES GO OUT EXACTLY AS PINNED on the human path — written to Stdout
+	// directly rather than through Success, which decorates a message and
+	// appends a newline. The verb's whole promise is that what it prints hashes
+	// to the pin, so `docket pin show ... | shasum` has to agree with
+	// `docket run verify-pins`; a trailing byte of framing breaks that.
+	if !w.JSONMode {
+		fmt.Fprint(w.Stdout, body)
+		return nil
+	}
+	w.Success(pinShowPayload{Run: model.FormatRunID(runID), Path: path, Body: body}, "")
 	return nil
 }
 
