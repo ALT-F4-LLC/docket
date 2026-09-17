@@ -106,7 +106,9 @@ type Context struct {
 	// issued against is superseded and renders nothing again. Issue COMMENTS
 	// are not a context source at all — §6.6's five-source rule, by design —
 	// and a mid-run `description` edit never renders either, because
-	// `body_snapshot` froze at activation (§9 item 5).
+	// `body_snapshot` froze at activation (§9 item 5). `run refresh-body`
+	// (DKT-2291) is that freeze's one explicit exception, and it is a separate
+	// operator act rather than a consequence of the edit.
 	//
 	// nil when the step carries no routing record, so a first-round packet is
 	// byte-identical to what it always was.
@@ -264,7 +266,7 @@ const (
 func AssembleContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
 ) (*Context, error) {
-	return assembleContext(tx, sched, step, ttls, liveArtifacts)
+	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssueBody)
 }
 
 // AssembleRecordedContext builds a step's context bundle over the artifacts its
@@ -302,7 +304,7 @@ func AssembleContext(
 func AssembleRecordedContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
 ) (*Context, error) {
-	return assembleContext(tx, sched, step, ttls, recordedArtifacts)
+	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssueBody)
 }
 
 // artifactSource loads the artifact set one assembly resolves over.
@@ -316,6 +318,74 @@ func liveArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
 // recordedArtifacts is the set the step's claim recorded — the read-back's view.
 func recordedArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
 	return db.ListStepInputArtifactsTx(tx, step.ID)
+}
+
+// bodySource resolves the description an assembly renders, given the one the
+// run-issue row currently holds.
+//
+// It is the artifactSource seam applied to the other input a refresh can move
+// (DKT-2291). `body_snapshot` is a column rather than a per-step row, so
+// unlike `step_inputs` there is nothing a claim recorded to read back — and a
+// read-back that took the live column would report a body the step was never
+// given the moment `run refresh-body` ran.
+type bodySource func(tx *sql.Tx, step *db.Step, snapshot string) (string, error)
+
+// liveIssueBody is the column as it stands — the claim's view, and what every
+// assembly did before DKT-2291.
+func liveIssueBody(_ *sql.Tx, _ *db.Step, snapshot string) (string, error) {
+	return snapshot, nil
+}
+
+// recordedIssueBody is the body the step's claim was given, reconstructed from
+// the refresh ledger (DKT-2291).
+//
+// A refresh cannot run while any step is `claimed`, `running` or `gated`, so no
+// refresh ever falls between a step's claim and its record: every
+// `issue-body-refreshed` event is wholly before or wholly after the handout,
+// and the event's own `steps` list says which. A step the EARLIEST such later
+// refresh did not reach was handed out under the body that refresh superseded,
+// which is exactly its `from_body`.
+//
+// `created_at_ms` disambiguates the other way a step can be absent from that
+// list: an instance minted AFTER the refresh (a later fix round) never saw the
+// superseded body either, and reads the column like any fresh step.
+func recordedIssueBody(tx *sql.Tx, step *db.Step, snapshot string) (string, error) {
+	rows, err := tx.Query(
+		`SELECT data FROM events
+		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
+		  ORDER BY at_ms, seq`,
+		EventIssueBodyRefreshed, step.RunID, step.IssueID, step.CreatedAtMS)
+	if err != nil {
+		return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
+		}
+		var refresh struct {
+			FromBody string   `json:"from_body"`
+			Steps    []string `json:"steps"`
+		}
+		if err := json.Unmarshal([]byte(data), &refresh); err != nil {
+			return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
+		}
+		for _, reached := range refresh.Steps {
+			if reached == step.Instance {
+				// The refresh reached this step, so it and everything after it
+				// are part of what the step renders. Nothing earlier superseded
+				// the body it holds.
+				return snapshot, nil
+			}
+		}
+		return refresh.FromBody, nil
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
+	}
+	return snapshot, nil
 }
 
 // recordedClaim reports whether a step's context is the one a claim recorded —
@@ -341,7 +411,8 @@ func recordedClaim(step *db.Step) bool {
 }
 
 func assembleContext(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig, source artifactSource,
+	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+	source artifactSource, body bodySource,
 ) (*Context, error) {
 	def := sched.defs[step.WorkflowID]
 	if def == nil {
@@ -364,6 +435,13 @@ func assembleContext(
 	// carried in the issue snapshot and read back with it.
 	issue, linked, err := contextIssue(tx, step.RunID, step.IssueID)
 	if err != nil {
+		return nil, err
+	}
+	// Which description this assembly states (DKT-2291). It lands before the
+	// resolvers because `== REQUEST` and `== INPUT issue.body` both render this
+	// one field, so a read-back that corrected only one of them would reproduce
+	// the split packet the refresh exists to prevent.
+	if issue.BodySnapshot, err = body(tx, step, issue.BodySnapshot); err != nil {
 		return nil, err
 	}
 

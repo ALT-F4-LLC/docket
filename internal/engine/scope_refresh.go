@@ -63,7 +63,9 @@ import (
 // Everything the freeze protects that is NOT scope is untouched — title, kind,
 // labels, `linked`, and the description snapshot are re-encoded byte-for-byte
 // from what activation wrote. A mid-run relabel still cannot change how a step
-// routes, and a mid-run description edit still cannot reach a packet.
+// routes, and a mid-run description edit still cannot reach a packet through
+// THIS verb: the description has its own exception, on the same four
+// properties, in refresh_body.go (DKT-2291).
 
 // RefreshedScope reports what a refresh did, as the verb answers with it.
 type RefreshedScope struct {

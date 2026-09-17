@@ -298,6 +298,20 @@ const (
 	// attributable rather than inferred.
 	EventIssueScopeRefreshed = "issue-scope-refreshed"
 
+	// The activation snapshot's DESCRIPTION being refreshed mid-run (DKT-2291).
+	//
+	// It earns its place on the same argument as its scope twin, one column
+	// over again: `run_issues.body_snapshot` is the other half of the premise a
+	// packet states, and RUN-98/HRN-830 is what a run looks like when only one
+	// half can move. That packet rendered AC1's superseded wording under a
+	// `scope:` header already carrying the same operator ruling's other half —
+	// partial staleness, where the fresh half is positive evidence the ruling
+	// was applied. It carries the superseded and refreshed `body_sha256`, the
+	// body it superseded, the step instances the refresh reaches, and the
+	// operator's reason, so a reader comparing two steps of one run can date
+	// and attribute the discontinuity rather than infer it.
+	EventIssueBodyRefreshed = "issue-body-refreshed"
+
 	// A step's recorded `issue.diff` being RE-PINNED to another tree
 	// (DKT-1034): `step resolve --worktree` recomputed the diff and its target
 	// sha from a checkout an operator patched out of band, and recorded the
@@ -374,6 +388,7 @@ var eventKinds = map[string]bool{
 	EventGateOverrideGranted: true, EventStepBatchOverridden: true,
 	EventStaleTargetWaived:   true,
 	EventIssueScopeRefreshed: true,
+	EventIssueBodyRefreshed:  true,
 	EventIssueDiffRepinned:   true,
 	EventRunNoteAdded:        true,
 }
