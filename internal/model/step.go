@@ -304,6 +304,27 @@ type StepRow struct {
 	// same reason, and `step show`'s rendered `expires:` line shows the lapse
 	// on a paused run; `step reap` is the verb that clears such a claim.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
+	// LoopRoundsRun, LoopTriggerStep, and LoopLatestVerdict are the loop
+	// history a fix loop leaves behind when it exhausts its `max_fix_loops`
+	// budget: how many rounds actually ran against the cap, the instance whose
+	// verdict opened the loop, and the verdict the last round ended on.
+	//
+	// They exist because a loop-bound park says only that the budget ran out.
+	// The three facts a person or a router needs next — was the cap reached or
+	// did something else stop it, what started the loop, and was the last round
+	// still finding problems — were reconstructible only from the event log,
+	// which is prunable. The rounds count is derivable from the loop ordinal
+	// against the pinned cap; the other two are not derivable from anything on
+	// the row, so all three are persisted together rather than leaving a reader
+	// to compute one and guess two.
+	//
+	// They are written as ONE fact by db.SetStepLoopHistoryTx and read back
+	// together: a trigger without its verdict describes a loop nothing measured.
+	// `omitempty`, so every row outside a loop exhaustion — which is nearly all
+	// of them — serializes exactly as before.
+	LoopRoundsRun     int    `json:"loop_rounds_run,omitempty"`
+	LoopTriggerStep   string `json:"loop_trigger_step,omitempty"`
+	LoopLatestVerdict string `json:"loop_latest_verdict,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`

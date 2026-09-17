@@ -252,9 +252,20 @@ type Step struct {
 	// condition. A conductor routing a parked row reads this; ParkReason is what
 	// it shows the person it escalates to. "" on any row that is not parked, and
 	// on parked rows that predate the column.
-	ParkClass    ParkClass
-	Metadata     string
-	ContextBytes int
+	ParkClass ParkClass
+	// LoopRoundsRun, LoopTriggerStep, and LoopLatestVerdict are the loop
+	// history of a fix loop that exhausted its `max_fix_loops` budget (v35):
+	// the rounds that actually ran against the cap, the instance whose verdict
+	// opened the loop, and the verdict the last round ended on. ParkClass tells
+	// a router THAT the loop bound stopped this step; these tell it what the
+	// loop did before it stopped, which was otherwise reconstructible only from
+	// the prunable event log. Zero and "" on every row that never exhausted a
+	// loop, and on rows that predate the columns.
+	LoopRoundsRun     int
+	LoopTriggerStep   string
+	LoopLatestVerdict string
+	Metadata          string
+	ContextBytes      int
 	// Materialized reports a step the ENGINE minted rather than one the pinned
 	// definition declares — the `<step>-held` human step a tripped `hold_spread`
 	// creates (payloads-thresholds §7.7 H4). Its spec is synthesized from the
@@ -298,7 +309,9 @@ SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, ins
        kind, executor, class, status, attempt, attempt_base, failed_attempts,
        reaped_claims, last_claim_end, max_attempts, expected_cost,
        owner, token_hash, expires_ms, started_ms, activity_ms, saga_stage,
-       gate_trail, routing, park_reason, park_class, metadata, context_bytes, materialized, usage_recorded,
+       gate_trail, routing, park_reason, park_class,
+       loop_rounds_run, loop_trigger_step, loop_latest_verdict,
+       metadata, context_bytes, materialized, usage_recorded,
        created_at_ms, updated_at_ms, row_version, work_root
   FROM steps`
 
@@ -409,7 +422,9 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.Status, &step.Attempt, &step.AttemptBase, &step.FailedAttempts,
 		&step.ReapedClaims, &step.LastClaimEnd, &maxAtt, &step.ExpectedCost,
 		&owner, &tokenHash, &expires, &started, &activity, &saga,
-		&gateTrail, &routing, &step.ParkReason, &parkClass, &metadata, &ctxBytes, &mat, &usageRec,
+		&gateTrail, &routing, &step.ParkReason, &parkClass,
+		&step.LoopRoundsRun, &step.LoopTriggerStep, &step.LoopLatestVerdict,
+		&metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -776,6 +791,34 @@ func SetStepRoutingTx(
 	)
 	if err != nil {
 		return fmt.Errorf("recording step routing: %w", err)
+	}
+	return nil
+}
+
+// SetStepLoopHistoryTx records the three facts a fix loop leaves behind when it
+// exhausts `max_fix_loops`: the rounds that ran against the cap, the instance
+// whose verdict opened the loop, and the verdict the last round ended on.
+//
+// They are ONE statement because they are one fact — this loop ran this many
+// rounds from here and ended on this — and a trigger stored without its verdict
+// describes a loop nothing measured. The caller derives all three from the loop
+// state its exhaustion decision already holds.
+//
+// It follows SetStepMetadataTx's shape — same row_version bump, same
+// updated_at_ms — because this is a step-row mutation like any other and
+// CAS-guarded readers must see it move.
+func SetStepLoopHistoryTx(
+	tx *sql.Tx, id, roundsRun int, triggerStep, latestVerdict string, nowMS int64,
+) error {
+	_, err := tx.Exec(
+		`UPDATE steps SET loop_rounds_run = ?, loop_trigger_step = ?,
+		        loop_latest_verdict = ?, updated_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE id = ?`,
+		roundsRun, triggerStep, latestVerdict, nowMS, id,
+	)
+	if err != nil {
+		return fmt.Errorf("recording step loop history: %w", err)
 	}
 	return nil
 }

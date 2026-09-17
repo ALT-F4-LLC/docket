@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 34
+const currentSchemaVersion = 35
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -204,6 +204,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	32: migrateV31ToV32,
 	33: migrateV32ToV33,
 	34: migrateV33ToV34,
+	35: migrateV34ToV35,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -583,6 +584,9 @@ CREATE TABLE IF NOT EXISTS steps (
 	routing        TEXT,
 	park_reason    TEXT    NOT NULL DEFAULT '',
 	park_class     TEXT    NOT NULL DEFAULT '',
+	loop_rounds_run     INTEGER NOT NULL DEFAULT 0,
+	loop_trigger_step   TEXT    NOT NULL DEFAULT '',
+	loop_latest_verdict TEXT    NOT NULL DEFAULT '',
 	metadata       TEXT,
 	context_bytes  INTEGER,
 	created_at_ms  INTEGER NOT NULL,
@@ -2783,6 +2787,61 @@ func migrateV33ToV34(tx *sql.Tx) error {
 	return nil
 }
 
+// v35AddedColumns is v35's whole schema change: three columns on `steps`
+// carrying the loop history a fix-loop exhaustion leaves behind — the rounds
+// that ran against the cap, the instance whose verdict opened the loop, and the
+// verdict the last round ended on.
+//
+// They are three columns rather than one encoded string because a reader of a
+// loop-bound park asks each question separately, and the count is an integer a
+// router compares against the pinned cap. The zero defaults make every pre-v35
+// row read as what it is: a step that never exhausted a loop.
+var v35AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "loop_rounds_run",
+		`ALTER TABLE steps ADD COLUMN loop_rounds_run INTEGER NOT NULL DEFAULT 0`},
+	{"steps", "loop_trigger_step",
+		`ALTER TABLE steps ADD COLUMN loop_trigger_step TEXT NOT NULL DEFAULT ''`},
+	{"steps", "loop_latest_verdict",
+		`ALTER TABLE steps ADD COLUMN loop_latest_verdict TEXT NOT NULL DEFAULT ''`},
+}
+
+// v35ColumnSentinels are the columns the rewind guard probes, the same probe
+// kind v27 through v34 use and for the same reason: v35 adds no table and no
+// index, so a database stamped 35 by a binary built mid-change carries every
+// v34 sentinel and these three never arrive.
+var v35ColumnSentinels = []struct{ table, column string }{
+	{"steps", "loop_rounds_run"},
+	{"steps", "loop_trigger_step"},
+	{"steps", "loop_latest_verdict"},
+}
+
+// migrateV34ToV35 adds the loop-history columns.
+//
+// It BACK-FILLS NOTHING, and the zero values are the only defensible reading of
+// every existing row: reconstructing a historical loop's trigger and last
+// verdict would mean mining the event log, which is prunable, and a guessed
+// verdict is worse than an absent one. Zero and empty say "this row predates
+// the columns", which is exactly true.
+//
+// `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so the migration probes
+// first and stays re-runnable, the same shape v10 through v34 use.
+func migrateV34ToV35(tx *sql.Tx) error {
+	for _, col := range v35AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v34 to v35: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v34 to v35: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3489,6 +3548,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 33
+				break
+			}
+		}
+	}
+
+	// The v35 guard, in the same COLUMN form as v34 and for its reason: v35
+	// adds columns and no table, so a database stamped 35 by a binary built
+	// mid-change carries every v34 sentinel and the loop-history columns never
+	// arrive.
+	if version >= 35 {
+		for _, col := range v35ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v35 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 34
 				break
 			}
 		}
