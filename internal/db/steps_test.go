@@ -553,8 +553,14 @@ func TestReadyIsNeverPersisted(t *testing.T) {
 // It writes through the setter directly rather than through the exhaustion
 // routing transaction: the facts are storage here, and the call site inside
 // that transaction is a separate criterion.
+//
+// It also pins the row move the setter promises CAS-guarded readers: one
+// row_version bump and updated_at_ms set to the caller's nowMS.
 func TestLoopHistoryFactsRoundTrip(t *testing.T) {
 	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
 
 	tx, err := db.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
@@ -579,6 +585,14 @@ func TestLoopHistoryFactsRoundTrip(t *testing.T) {
 	}
 	if row.LoopLatestVerdict != "concerns" {
 		t.Errorf("LoopLatestVerdict = %q, want concerns", row.LoopLatestVerdict)
+	}
+
+	if step.RowVersion != before.RowVersion+1 {
+		t.Errorf("RowVersion = %d, want %d — CAS-guarded readers must see the row move",
+			step.RowVersion, before.RowVersion+1)
+	}
+	if step.UpdatedAtMS != 2000 {
+		t.Errorf("UpdatedAtMS = %d, want 2000 (the setter's nowMS)", step.UpdatedAtMS)
 	}
 }
 
