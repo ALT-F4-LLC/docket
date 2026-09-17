@@ -983,6 +983,14 @@ func (e *Engine) runRoutingStage(
 		diffBody    string
 		diffPayload string
 		wantsDiff   bool
+		// diffFacts is the reserved `diff.*` family's measurement (DKT-2063),
+		// non-nil exactly for a step that holds the tree. It is taken from the
+		// diff this completion COMPUTED, not from the artifact it records: the
+		// DKT-259 and byte-identical suppressions below drop a redundant row
+		// without changing what was measured, and a threshold asking "how big
+		// was this change" must not answer differently because an equal diff
+		// already existed.
+		diffFacts *DiffFacts
 	)
 	if isExecutorStep(step) && stepHoldsTree(spec) {
 		// D1 as amended by DKT-75: recomputed at the completion of every
@@ -1006,6 +1014,12 @@ func (e *Engine) runRoutingStage(
 			return err
 		}
 		wantsDiff = true
+
+		// An absent round record is `{0, 0, true}` rather than nil, so
+		// `any(diff.empty == false)` is DECIDED false for a step that recorded
+		// nothing instead of falling through to the unknown-field path.
+		measured := measureDiff(diffBody)
+		diffFacts = &measured
 
 		// DKT-259: AN EMPTY RE-RECORD DOES NOT REPLACE A RECORDED CHANGE.
 		//
@@ -1144,9 +1158,9 @@ func (e *Engine) runRoutingStage(
 	// transaction that decided the lineage was stale. It is pure, so calling it
 	// there costs nothing and races nothing.
 	evaluate := func() (string, string, error) {
-		result, err := EvaluateThreshold(
+		result, err := EvaluateThresholdOverDiff(
 			step.Instance, spec.Threshold, ThresholdOrder(spec.Threshold),
-			payloads, order)
+			payloads, order, diffFacts)
 		if err != nil {
 			return "", "", err
 		}
@@ -3561,6 +3575,46 @@ func diffRecordsNoChange(body string) bool {
 		return false
 	}
 	return true
+}
+
+// roundDeltaMarker opens the round-delta trailer appendRoundDelta appends at a
+// loop re-entry. Measuring past it would count this round's work twice — once
+// in the cumulative issue-range diff and again in the trailer — so the
+// measurement stops here.
+const roundDeltaMarker = "\n# === round delta:"
+
+// measureDiff derives the reserved `diff.*` facts from a computed diff body
+// (DKT-2063).
+//
+// It reads the CUMULATIVE issue-range portion, which is the object a review
+// stage is sized against and the one `implement` produced. The round delta that
+// follows it at a loop re-entry is the same bytes again under a second base;
+// sizing by the round's own work instead is a different, defensible question,
+// and it is not the one the issue asks.
+//
+// A file header (`+++ `/`--- `) is not a content line, and a `diff --git `
+// header is what identifies a file: the body is unified-diff text, which is all
+// the diff seam returns, so the counting is textual rather than `--numstat`.
+func measureDiff(body string) DiffFacts {
+	if cut := strings.Index(body, roundDeltaMarker); cut >= 0 {
+		body = body[:cut]
+	}
+
+	facts := DiffFacts{Empty: true}
+	files := map[string]struct{}{}
+	for _, line := range strings.Split(body, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			files[line] = struct{}{}
+		case strings.HasPrefix(line, "+++ "), strings.HasPrefix(line, "--- "):
+			// A file header, not content.
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, "-"):
+			facts.Lines++
+			facts.Empty = false
+		}
+	}
+	facts.Files = len(files)
+	return facts
 }
 
 // latestIssueDiffBody is the issue's newest recorded `issue.diff` body, or ""
