@@ -386,6 +386,40 @@ func checkPacketRef(ref, entry string) error {
 	return nil
 }
 
+// PinContent is the bytes a run pinned at one config-relative path (DKT-2026).
+//
+// A rendered packet names its pinned files by ref and sha256, so a contract
+// telling a worker to test something against `policy.toml` named a document the
+// worker had no sanctioned way to open: `policy resolve` answers with routing
+// derived from that file, not with its text. This is the read that closes the
+// gap, and it is deliberately the SAME LADDER the packet resolves entries
+// through — config-relative ref first, the legacy absolute form second — so the
+// bytes a reader gets here are the bytes a packet would have carried, never a
+// working-tree copy that happens to sit at the path.
+//
+// DRIFT REFUSES RATHER THAN PRINTS. The pin is the run's agreement about bytes;
+// printing an edited file under the pinned ref would hand a worker content the
+// run never agreed to, which is the same silent substitution the resolver
+// refuses at render. The refusal names both hashes, as `run verify-pins` does.
+//
+// It writes nothing: no lease, no lock, no event.
+func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
+	pins, err := db.ListPins(conn, runID)
+	if err != nil {
+		return "", err
+	}
+	body, _, err := readPinnedPacketFile(
+		model.FormatRunID(runID), packetPinsForRun(pins),
+		instanceConfigRoots(), ref)
+	if err != nil {
+		if code, ok := CodeOf(err); ok && code == CodeConflict {
+			return "", conflictErr("pin drift: %s", err.Error())
+		}
+		return "", err
+	}
+	return body, nil
+}
+
 // sha256Hex is workflow.SHA256, named locally so this file reads as one story.
 func sha256Hex(content []byte) string { return workflow.SHA256(content) }
 
