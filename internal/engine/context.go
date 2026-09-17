@@ -362,34 +362,28 @@ func recordedIssueBody(tx *sql.Tx, step *db.Step, snapshot string) (string, erro
 	if step.StartedMS == nil {
 		return snapshot, nil
 	}
-	rows, err := tx.Query(
+	var data string
+	err := tx.QueryRow(
 		`SELECT data FROM events
 		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
 		  ORDER BY at_ms, seq
 		  LIMIT 1`,
-		EventIssueBodyRefreshed, step.RunID, step.IssueID, *step.StartedMS)
+		EventIssueBodyRefreshed, step.RunID, step.IssueID, *step.StartedMS).Scan(&data)
+	if err == sql.ErrNoRows {
+		// No refresh followed this attempt's claim, so nothing superseded the
+		// body it was handed and the column still holds it.
+		return snapshot, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var data string
-		if err := rows.Scan(&data); err != nil {
-			return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
-		}
-		var refresh struct {
-			FromBody string `json:"from_body"`
-		}
-		if err := json.Unmarshal([]byte(data), &refresh); err != nil {
-			return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
-		}
-		return refresh.FromBody, nil
+	var refresh struct {
+		FromBody string `json:"from_body"`
 	}
-	if err := rows.Err(); err != nil {
+	if err := json.Unmarshal([]byte(data), &refresh); err != nil {
 		return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
 	}
-	return snapshot, nil
+	return refresh.FromBody, nil
 }
 
 // recordedClaim reports whether a step's context is the one a claim recorded —
