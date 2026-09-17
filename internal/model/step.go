@@ -236,6 +236,37 @@ type StepRow struct {
 	// it, `claim` remains the authority, and `omitempty` keeps every
 	// unconditional row's bytes exactly as before.
 	Conditional bool `json:"conditional,omitempty"`
+	// Bump says WHY a row sits at its stage rather than at the level its own
+	// dependencies require, on every row of an offer: BumpNone when nothing
+	// moved it, BumpHeadroom when its bounded class was already full in the
+	// stage it would otherwise have taken, BumpScope when another issue's
+	// tree-holding scope already occupied that stage and intersects this row's.
+	//
+	// The two carry different obligations for a reader that reschedules. A
+	// headroom bump is cohort packing against the offer's own shape: once a
+	// slot frees, nothing about the two rows conflicts. A scope bump is a
+	// writer conflict that must stay serialized however the cohort empties.
+	// Without this field the stage number is the only cross-issue fact a
+	// manifest carries, so a reader has to treat every pair the engine did not
+	// co-stage as conflicting and preserve an ordering that was never required.
+	//
+	// SET-RELATIVE like Stage and Conditional: core enforces nothing with it,
+	// its value depends on which other rows share the offer, and `dispatch
+	// verify` normalizes it away for that reason. Present on offer rows only;
+	// `omitempty` keeps every other rendering of a row byte-identical.
+	Bump string `json:"bump,omitempty"`
+	// BumpIssue is the display id of the issue whose held scope intersected
+	// this row's, present only on a BumpScope row — the conflict is between two
+	// named issues, and a reader that knows only "scope" still cannot tell
+	// which other row it must stay behind.
+	BumpIssue string `json:"bump_issue,omitempty"`
+	// Scope is the row's own issue's declared scope globs, carried so a reader
+	// can test intersection ITSELF for a pair the engine never co-staged.
+	// Bump answers only the pairs one offer placed in one cohort; two writers
+	// the engine placed in unrelated stages for unrelated reasons leave no
+	// trace a reader could test, and the globs are what make that testable
+	// without a second query per issue. Absent when the issue declares none.
+	Scope []string `json:"scope,omitempty"`
 	// Status is the EFFECTIVE status (§6.2) — `ready` when the §6.3 predicate
 	// holds, which is never a stored value — or `staged` on an offer row
 	// carried ahead of its readiness (db.StepStaged): every row this offer
@@ -277,6 +308,16 @@ type StepRow struct {
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
+
+// The values StepRow.Bump takes. A row carries exactly one of them.
+const (
+	// BumpNone: the row sits at the level its own dependencies required.
+	BumpNone = "none"
+	// BumpHeadroom: its bounded class was full in the earlier stage.
+	BumpHeadroom = "headroom"
+	// BumpScope: an intersecting issue scope held the earlier stage.
+	BumpScope = "scope"
+)
 
 // VoterAssignment is one vote step voter's resolved {model, effort, variant}
 // (DKT-1282), riding on StepRow.VoterAssignments.

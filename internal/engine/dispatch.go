@@ -681,6 +681,16 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 		}
 		row.Stage = e.stage
 		row.Conditional = e.conditional
+		// Phase C's recorded reason, plus the row's own scope globs: the two
+		// halves of what a reader needs to tell a serializing stage gap from a
+		// packing one, and to test a pair the offer never placed in one cohort.
+		// Both ride on the offer row rather than on stepRow, so every other
+		// rendering of a step's row keeps its bytes.
+		row.Bump = e.bump
+		if e.bump == model.BumpScope {
+			row.BumpIssue = model.FormatID(e.bumpIssue)
+		}
+		row.Scope = sched.foreignScope(e.step.IssueID)
 		if e.staged {
 			row.Status = db.StepStaged
 		}
@@ -1117,6 +1127,16 @@ func comparableVerifyBytes(stored, current model.StepRow) (string, string, error
 	// Conditional is Stage's sibling (DKT-26): a set-relative hint whose value
 	// legitimately changes as the hold-capable predecessor routes or retires.
 	stored.Conditional, current.Conditional = false, false
+	// Bump, BumpIssue and Scope are Stage's siblings for the same reason: a
+	// bump is a fact about which other rows shared a cohort at open, so a row
+	// whose cohort-mate has since recorded legitimately recomputes to `none`,
+	// and the issue scope the offer read moves with an authorized mid-run
+	// refresh. Reporting either as drift would call the batch working a
+	// conflict. The stored bytes keep the open-time answer; only this
+	// comparison looks past it.
+	stored.Bump, current.Bump = "", ""
+	stored.BumpIssue, current.BumpIssue = "", ""
+	stored.Scope, current.Scope = nil, nil
 	if stored.Status == db.StepStaged || current.Status == db.StepStaged {
 		stored.Status, current.Status = db.StepReady, db.StepReady
 		stored.Proposal, current.Proposal = "", ""

@@ -92,6 +92,13 @@ type offerEntry struct {
 	// conditional marks a staged row sitting downstream of a HOLD-CAPABLE
 	// in-offer predecessor (DKT-26) — see model.StepRow.Conditional.
 	conditional bool
+	// bump is why Phase C's packing moved this row past its dependency level,
+	// recorded at the bump site — model.BumpNone, BumpHeadroom, or BumpScope.
+	// See model.StepRow.Bump.
+	bump string
+	// bumpIssue is the issue whose held scope intersected, set only alongside
+	// model.BumpScope.
+	bumpIssue int
 }
 
 // lookaheadOffer widens one claimable cohort to its staged closure and levels
@@ -236,8 +243,20 @@ func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
 		if floor := s.dependencyFloor(e, entries, final); floor > k {
 			k = floor
 		}
+		e.bump = model.BumpNone
 		if e.staged {
-			for !s.cohortFits(e.step, k, classCount, scopeHeld) {
+			// A row can be refused by both rules on the way up. SCOPE WINS: a
+			// headroom refusal retires the moment a slot frees, while a scope
+			// conflict must stay serialized however the cohort empties, so the
+			// stronger obligation is the honest one to report.
+			for {
+				reason, issueID := s.cohortFits(e.step, k, classCount, scopeHeld)
+				if reason == "" {
+					break
+				}
+				if e.bump != model.BumpScope {
+					e.bump, e.bumpIssue = reason, issueID
+				}
 				k++
 			}
 		}
@@ -513,27 +532,40 @@ func (s *Scheduler) offerPredecessors(step *db.Step, stageOf map[int]int) []*db.
 // issue rides along, non-tree-holders are exempt — scopeConflict's own
 // exemptions, applied per stage). Deliberately no charge from occupancy
 // outside the offer; the file comment carries the reasoning.
+//
+// A refusal reports WHICH constraint refused — model.BumpHeadroom or
+// model.BumpScope, the latter with the issue whose held scope intersected — so
+// the caller records the reason at the bump site instead of re-deriving it
+// afterwards from a stage number that no longer says which rule produced it.
+// A fit answers "" and 0.
 func (s *Scheduler) cohortFits(
 	step *db.Step, k int, classCount map[int]map[string]int, scopeHeld map[int]map[int][]string,
-) bool {
+) (string, int) {
 	if limit, ok := s.limits[step.Class]; ok && limit.Max > 0 {
 		if classCount[k][step.Class] >= limit.Max {
-			return false
+			return model.BumpHeadroom, 0
 		}
 	}
 	if !s.holdsTree(step) {
-		return true
+		return "", 0
 	}
 	scope := s.foreignScope(step.IssueID)
 	if len(scope) == 0 {
-		return true
+		return "", 0
 	}
-	for issueID, held := range scopeHeld[k] {
-		if issueID != step.IssueID && ScopesIntersect(scope, held) {
-			return false
+	// Sorted, so a stage held by several intersecting issues names the same one
+	// every time: the recorded reason must not depend on map iteration order.
+	held := make([]int, 0, len(scopeHeld[k]))
+	for issueID := range scopeHeld[k] {
+		held = append(held, issueID)
+	}
+	sort.Ints(held)
+	for _, issueID := range held {
+		if issueID != step.IssueID && ScopesIntersect(scope, scopeHeld[k][issueID]) {
+			return model.BumpScope, issueID
 		}
 	}
-	return true
+	return "", 0
 }
 
 // chargeCohort records a placed row against its stage's cohort, so later
