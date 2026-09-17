@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // DKT-2063: a change track sized by the change `implement` actually recorded.
@@ -168,17 +170,121 @@ emits = "report"
 	})
 }
 
-// TestMeasureDiffCountsTheCumulativeDiffOnly pins the round-delta boundary: the
-// trailer repeats this round's work under a second base, and counting it would
-// double every loop round's size.
-func TestMeasureDiffCountsTheCumulativeDiffOnly(t *testing.T) {
-	body := diffBodyOf(3, 2) +
-		roundDeltaMarker + " changes since abc — this round's work alone, unscoped ===\n" +
-		diffBodyOf(3, 2)
+// TestMeasureDiffCountsTheInScopeCumulativeDiffOnly pins both trailer
+// boundaries: each repeats or adds hunks after the object a review reads, and
+// counting either would size this issue's change by bytes it does not claim.
+func TestMeasureDiffCountsTheInScopeCumulativeDiffOnly(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			// The loop re-entry trailer: the same work again under a second base.
+			name: "round delta",
+			body: diffBodyOf(3, 2) +
+				"\n" + roundDeltaMarker + " changes since abc — this round's work alone, unscoped ===\n" +
+				diffBodyOf(3, 2),
+		},
+		{
+			// The out-of-scope trailer: hunks disclosed as evidence and
+			// explicitly not claimed as this issue's change.
+			name: "out of scope",
+			body: diffBodyOf(3, 2) +
+				outOfScopeMarker + " their hunks follow (DKT-86) ===\n" +
+				diffBodyOf(9, 9),
+		},
+	}
 
-	got := measureDiff(body)
-	want := DiffFacts{Lines: 5, Files: 1}
-	if got != want {
-		t.Errorf("measureDiff = %+v, want %+v", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := DiffFacts{Lines: 5, Files: 1}
+			if got := measureDiff(tc.body); got != want {
+				t.Errorf("measureDiff = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// evalDiff evaluates one predicate against a measurement, through the exported
+// seam a routing step uses.
+func evalDiff(
+	t *testing.T, facts DiffFacts, predicate string,
+) (ThresholdResult, error) {
+	t.Helper()
+	threshold := map[string]string{workflow.OnFailFixLoop: predicate}
+	return EvaluateThresholdOverDiff(
+		"implement@0", threshold, ThresholdOrder(threshold), nil, nil, &facts)
+}
+
+// TestDiffFieldsEvaluateAgainstTheMeasurement covers the family's remaining
+// surface: `diff.files`, equality on a count, and the refusals a predicate that
+// cannot mean anything must produce instead of a silent non-match.
+func TestDiffFieldsEvaluateAgainstTheMeasurement(t *testing.T) {
+	facts := DiffFacts{Lines: 40, Files: 3}
+
+	matches := []struct {
+		predicate string
+		want      bool
+	}{
+		{"any(diff.files >= 2)", true},
+		{"any(diff.files > 3)", false},
+		{"all(diff.files == 3)", true},
+		{"any(diff.files != 3)", false},
+		{"any(diff.lines >= 40)", true},
+		{"any(diff.lines < 40)", false},
+		{"any(diff.empty == false)", true},
+		{"any(diff.empty == true)", false},
+		{"any(diff.empty != true)", true},
+	}
+	for _, tc := range matches {
+		result, err := evalDiff(t, facts, tc.predicate)
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", tc.predicate, err)
+			continue
+		}
+		routed := result.Routing == workflow.OnFailFixLoop
+		if routed != tc.want {
+			t.Errorf("%s over %+v routed %q, want matched=%v",
+				tc.predicate, facts, result.Routing, tc.want)
+		}
+		if result.Parked {
+			t.Errorf("%s parked; a diff.* comparison is over integers the "+
+				"engine measured and has no order to guess", tc.predicate)
+		}
+	}
+
+	// A literal that is not a count, and an order asked of a boolean, are
+	// DECLARATION errors: the engine knows the comparison perfectly and the
+	// author wrote something it cannot mean. Refusing names the predicate; a
+	// park would ask an operator to resolve a typo.
+	refusals := []string{
+		"any(diff.lines > twenty)",
+		"any(diff.files == none)",
+		"any(diff.empty == maybe)",
+		"any(diff.empty > 1)",
+	}
+	for _, predicate := range refusals {
+		if _, err := evalDiff(t, facts, predicate); err == nil {
+			t.Errorf("%s evaluated without error, want a refusal naming the "+
+				"predicate", predicate)
+		}
+	}
+}
+
+// TestDiffFieldsAreOrdinaryWithoutAMeasurement is AC3's structural half: on a
+// step that holds no tree there are no facts, and `diff.lines` is an unknown
+// payload field evaluated exactly as any other — which for an ordered operator
+// with no registered schema is T3's park, unchanged.
+func TestDiffFieldsAreOrdinaryWithoutAMeasurement(t *testing.T) {
+	threshold := map[string]string{workflow.OnFailFixLoop: "any(diff.lines > 20)"}
+	result, err := EvaluateThreshold(
+		"read@0", threshold, ThresholdOrder(threshold),
+		[]map[string]any{{"other": "value"}}, nil)
+	testsupport.Must(t, err, "EvaluateThreshold: %v", err)
+
+	if !result.Parked || result.Routing != workflow.OnFailWaitingHuman {
+		t.Errorf("routing = %q parked = %v, want the unchanged T3 park — with no "+
+			"measurement `diff.lines` is an ordinary undeclared field",
+			result.Routing, result.Parked)
 	}
 }

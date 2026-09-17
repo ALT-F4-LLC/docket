@@ -2459,7 +2459,7 @@ func GitDiff(dir, base string, scope []string) (string, error) {
 			fmt.Fprintf(&b, "#   %s\n", path)
 		}
 		b.WriteString(
-			"# === outside declared scope: their hunks follow (DKT-86) ===\n" +
+			outOfScopeMarker + " their hunks follow (DKT-86) ===\n" +
 				"# A file the change touched must not hide behind a narrow scope;\n" +
 				"# with a shared-checkout base these can also carry other issues'\n" +
 				"# work since the run began — read them as evidence, not as this\n" +
@@ -2521,7 +2521,7 @@ func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
 		fmt.Fprintf(&b, "#   %s\n", path)
 	}
 	b.WriteString(
-		"# === outside declared scope: their hunks follow (DKT-86) ===\n" +
+		outOfScopeMarker + " their hunks follow (DKT-86) ===\n" +
 			"# A file the change touched must not hide behind a narrow scope —\n" +
 			"# read them as evidence, not as this issue's own claim.\n")
 	extra, err := commitDiff(execRoot, sha, outside)
@@ -3289,7 +3289,7 @@ func (e *Engine) appendRoundDelta(
 					delta = "# (no tree change this round)\n"
 				}
 				*diffBody += fmt.Sprintf(
-					"\n# === round delta: changes since %.12s — this round's work alone, unscoped ===\n",
+					"\n"+roundDeltaMarker+" changes since %.12s — this round's work alone, unscoped ===\n",
 					base) + delta
 			}
 		}
@@ -3577,11 +3577,22 @@ func diffRecordsNoChange(body string) bool {
 	return true
 }
 
-// roundDeltaMarker opens the round-delta trailer appendRoundDelta appends at a
-// loop re-entry. Measuring past it would count this round's work twice — once
-// in the cumulative issue-range diff and again in the trailer — so the
-// measurement stops here.
-const roundDeltaMarker = "\n# === round delta:"
+// The two trailers a diff body can carry after its in-scope cumulative diff.
+// Both are real diff hunks under a marked heading, and measureDiff stops at
+// whichever comes first.
+const (
+	// roundDeltaMarker opens the trailer appendRoundDelta appends at a loop
+	// re-entry. Measuring past it would count this round's work twice — once in
+	// the cumulative diff and again in the trailer.
+	roundDeltaMarker = "# === round delta:"
+	// outOfScopeMarker opens the trailer GitDiff appends for files the change
+	// touched outside the issue's declared scope. Those hunks are disclosed as
+	// evidence and explicitly not claimed as this issue's own change, and on a
+	// shared-checkout cumulative base they can carry sibling issues' work — so
+	// sizing this issue's change by them would misroute on another issue's
+	// churn.
+	outOfScopeMarker = "# === outside declared scope:"
+)
 
 // measureDiff derives the reserved `diff.*` facts from a computed diff body
 // (DKT-2063).
@@ -3596,13 +3607,13 @@ const roundDeltaMarker = "\n# === round delta:"
 // header is what identifies a file: the body is unified-diff text, which is all
 // the diff seam returns, so the counting is textual rather than `--numstat`.
 func measureDiff(body string) DiffFacts {
-	if cut := strings.Index(body, roundDeltaMarker); cut >= 0 {
-		body = body[:cut]
-	}
-
 	facts := DiffFacts{Empty: true}
 	files := map[string]struct{}{}
 	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, roundDeltaMarker) ||
+			strings.HasPrefix(line, outOfScopeMarker) {
+			break
+		}
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
 			files[line] = struct{}{}
