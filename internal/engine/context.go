@@ -339,22 +339,35 @@ func liveIssueBody(_ *sql.Tx, _ *db.Step, snapshot string) (string, error) {
 // recordedIssueBody is the body the step's claim was given, reconstructed from
 // the refresh ledger (DKT-2291).
 //
-// A refresh cannot run while any step is `claimed`, `running` or `gated`, so no
-// refresh ever falls between a step's claim and its record: every
-// `issue-body-refreshed` event is wholly before or wholly after the handout,
-// and the event's own `steps` list says which. A step the EARLIEST such later
-// refresh did not reach was handed out under the body that refresh superseded,
-// which is exactly its `from_body`.
+// The anchor is the CURRENT ATTEMPT'S CLAIM, `started_ms`, not the step row's
+// `created_at_ms`. A refresh cannot run while any step is `claimed`, `running`
+// or `gated` (AC2), so no refresh falls between a claim and its record: the
+// EARLIEST refresh later than the claim is therefore the one that superseded
+// the body this attempt was handed, and its `from_body` is that body. No later
+// row can improve on that answer, and the event's `steps` list cannot supply it
+// — a step can appear in that list and still have been handed out before the
+// refresh (a `waiting-human` attempt that already recorded), or be absent from
+// it for two different reasons at once.
 //
-// `created_at_ms` disambiguates the other way a step can be absent from that
-// list: an instance minted AFTER the refresh (a later fix round) never saw the
-// superseded body either, and reads the column like any fresh step.
+// `started_ms` is stamped in the claim transaction and cleared only by the
+// paths that return a row to `pending` — reap, `resolve --as retry`, triage —
+// where recordedClaim is already false and no read reaches here. A nil anchor
+// therefore means a row with no claim to reconstruct (or pre-v16 history):
+// the live column is the only honest answer.
+//
+// RETENTION: the reconstruction reads an `issue-body-refreshed` row from the
+// events table, which `events prune` deletes for a terminal run. After such a
+// prune a pre-refresh step's read-back falls back to the live column.
 func recordedIssueBody(tx *sql.Tx, step *db.Step, snapshot string) (string, error) {
+	if step.StartedMS == nil {
+		return snapshot, nil
+	}
 	rows, err := tx.Query(
 		`SELECT data FROM events
 		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
-		  ORDER BY at_ms, seq`,
-		EventIssueBodyRefreshed, step.RunID, step.IssueID, step.CreatedAtMS)
+		  ORDER BY at_ms, seq
+		  LIMIT 1`,
+		EventIssueBodyRefreshed, step.RunID, step.IssueID, *step.StartedMS)
 	if err != nil {
 		return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
 	}
@@ -366,19 +379,10 @@ func recordedIssueBody(tx *sql.Tx, step *db.Step, snapshot string) (string, erro
 			return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
 		}
 		var refresh struct {
-			FromBody string   `json:"from_body"`
-			Steps    []string `json:"steps"`
+			FromBody string `json:"from_body"`
 		}
 		if err := json.Unmarshal([]byte(data), &refresh); err != nil {
 			return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
-		}
-		for _, reached := range refresh.Steps {
-			if reached == step.Instance {
-				// The refresh reached this step, so it and everything after it
-				// are part of what the step renders. Nothing earlier superseded
-				// the body it holds.
-				return snapshot, nil
-			}
 		}
 		return refresh.FromBody, nil
 	}

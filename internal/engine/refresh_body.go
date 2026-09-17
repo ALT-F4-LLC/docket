@@ -59,8 +59,11 @@ type RefreshedBody struct {
 	Run   string `json:"run"`
 	Issue string `json:"issue"`
 	// FromSHA256 and ToSHA256 name the superseded snapshot and the refreshed
-	// one. The shas rather than the bodies: a description runs to kilobytes,
-	// and the digest is what a reader compares.
+	// one. The shas rather than the bodies in THIS answer: a description runs
+	// to kilobytes, and the digest is what an operator reading the verb's
+	// output compares. The event is the other case — it carries the superseded
+	// text itself, because that text is the only record of what the steps the
+	// refresh did not reach were handed (see recordedIssueBody).
 	FromSHA256 string `json:"from_sha256"`
 	ToSHA256   string `json:"to_sha256"`
 	// Steps names the non-terminal instances the refresh reaches, in id order:

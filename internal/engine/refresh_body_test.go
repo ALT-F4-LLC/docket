@@ -85,6 +85,17 @@ func recordedBodyOf(t *testing.T, conn *sql.DB, stepID int) string {
 	return bundle.Issue.BodySnapshot
 }
 
+// recordClaim puts a step in the state a recorded attempt leaves behind: one
+// claim counted, a terminal status, and the `started_ms` that claim stamped.
+// The read-back is reconstructed against that stamp, so a fixture that sets
+// only `attempt` describes a step no claim ever handed out.
+func recordClaim(t *testing.T, conn *sql.DB, stepID int, claimedAtMS int64) {
+	t.Helper()
+	mustExec(t, conn,
+		`UPDATE steps SET status = ?, attempt = 1, started_ms = ? WHERE id = ?`,
+		db.StepDone, claimedAtMS, stepID)
+}
+
 func assertNoBodyRefreshEvent(t *testing.T, conn *sql.DB, runID int) {
 	t.Helper()
 	var n int
@@ -244,9 +255,9 @@ func TestRefreshBodyReachesRemainingStepsOnly(t *testing.T) {
 
 	// `attempt > 0` plus a terminal status is what makes the first step's
 	// read-back the RECORDED assembly (recordedClaim), which is the state AC3's
-	// first assertion is about.
-	mustExec(t, conn, `UPDATE steps SET status = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, doneID)
+	// first assertion is about. `started_ms` is the claim that assembly is
+	// reconstructed against, so the fixture stamps it as the claim would.
+	recordClaim(t, conn, doneID, nowMS)
 
 	recordedBefore := recordedBodyOf(t, conn, doneID)
 
@@ -283,6 +294,95 @@ func TestRefreshBodyReachesRemainingStepsOnly(t *testing.T) {
 				section.name, packet.Packet)
 		}
 	}
+}
+
+// TestRefreshBodyKeepsRecordedBodyAcrossLaterRefreshes extends AC3 past the
+// single-refresh case its named check exercises.
+//
+// A second refresh must not move what the first one's steps were handed. Each
+// case below is one way the answer can only come from the attempt's own claim:
+// a step the first refresh REACHED and a step it did not, a step parked at
+// `waiting-human` with its artifact already recorded, and a step whose row
+// predates a refresh its claim followed.
+func TestRefreshBodyKeepsRecordedBodyAcrossLaterRefreshes(t *testing.T) {
+	// setup activates the two-step fixture and returns the run and its steps.
+	setup := func(t *testing.T) (*sql.DB, int, int, int, int) {
+		t.Helper()
+		conn := mustDB(t)
+		registerSource(t, conn, []byte(bodyInputWorkflow), "bodies.toml")
+		issue := createIssue(t, conn, "amend me", "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+		return conn, run.ID, issue,
+			stepIDOf(t, conn, run.ID, issue, "first@0"),
+			stepIDOf(t, conn, run.ID, issue, "second@0")
+	}
+
+	refreshTo := func(t *testing.T, conn *sql.DB, runID, issue int, body string, atMS int64) {
+		t.Helper()
+		amend(t, conn, issue, body)
+		_, err := RefreshIssueBodyInRun(conn, runID, issue, "operator amended", atMS)
+		testsupport.Must(t, err, "refreshing: %v", err)
+	}
+
+	t.Run("a step claimed between two refreshes keeps the middle body", func(t *testing.T) {
+		conn, runID, issue, first, _ := setup(t)
+
+		// R1 reaches the still-pending step; the step is then claimed and
+		// recorded under the body R1 installed; R2 supersedes it afterwards.
+		v1 := "body v1"
+		refreshTo(t, conn, runID, issue, v1, nowMS+1)
+		recordClaim(t, conn, first, nowMS+2)
+		refreshTo(t, conn, runID, issue, "body v2", nowMS+3)
+
+		if got := recordedBodyOf(t, conn, first); got != v1 {
+			t.Errorf("recorded body = %q, want %q — the body its claim was handed", got, v1)
+		}
+	})
+
+	t.Run("a step claimed before any refresh keeps the original body", func(t *testing.T) {
+		conn, runID, issue, first, _ := setup(t)
+
+		recordClaim(t, conn, first, nowMS)
+		refreshTo(t, conn, runID, issue, "body v1", nowMS+1)
+		refreshTo(t, conn, runID, issue, "body v2", nowMS+2)
+
+		if got := recordedBodyOf(t, conn, first); got != "body" {
+			t.Errorf("recorded body = %q, want the activated body", got)
+		}
+	})
+
+	t.Run("a parked step that already recorded keeps its body", func(t *testing.T) {
+		conn, runID, issue, first, _ := setup(t)
+
+		// `waiting-human` is refreshable, so the refresh REACHES this step and
+		// names it in the event — but its artifact was recorded under the body
+		// its claim was handed, and that is what its read-back must state.
+		mustExec(t, conn,
+			`UPDATE steps SET status = ?, attempt = 1, started_ms = ? WHERE id = ?`,
+			db.StepWaitingHuman, nowMS, first)
+
+		refreshTo(t, conn, runID, issue, "body amended under the park", nowMS+1)
+
+		if got := recordedBodyOf(t, conn, first); got != "body" {
+			t.Errorf("recorded body = %q, want the body its claim was handed", got)
+		}
+	})
+
+	t.Run("a fix-round claim after a refresh reads the refreshed body", func(t *testing.T) {
+		conn, runID, issue, first, _ := setup(t)
+
+		// The step ROW predates the refresh; its current attempt does not. A
+		// read-back anchored on the row would hand it the superseded text.
+		amended := "body, as the operator amended it"
+		refreshTo(t, conn, runID, issue, amended, nowMS+1)
+		recordClaim(t, conn, first, nowMS+2)
+
+		if got := recordedBodyOf(t, conn, first); got != amended {
+			t.Errorf("recorded body = %q, want the live refreshed body %q", got, amended)
+		}
+	})
 }
 
 // TestRefreshBodyRecordsTheDiscontinuity is AC4: one event, in the same
