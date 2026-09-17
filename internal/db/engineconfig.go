@@ -126,6 +126,21 @@ const (
 	KeyVoteRuleCriticalitySuffix = ".criticality"
 	KeyVoteRuleSealedSuffix      = ".sealed"
 
+	// KeyVoteRuleRosterSuffix and KeyVoteRuleWeightingSuffix are the rule's two
+	// IDENTITY dimensions (DKT-2448): who may cast, and what a cast is worth.
+	//
+	// Both are OPT-IN and both default to the behavior a rule has always had —
+	// `open` counts a cast from any name, `declared` prices a cast at the
+	// confidence and domain relevance the caster stated. Core changes no
+	// existing ballot; an instance that wants a constrained panel says so.
+	//
+	// REGISTERED HERE, NOT YET ENFORCED. This is the key-registration seam
+	// only: the cast path does not match a roster and the tally does not read a
+	// weighting. Each key's Doc says so, so an operator who reads `roster =
+	// strict` back is not told a constraint is in force that is not.
+	KeyVoteRuleRosterSuffix    = ".roster"
+	KeyVoteRuleWeightingSuffix = ".weighting"
+
 	// KeyVoteHoldRule and KeyVoteHoldVoters configure how a MATERIALIZED HELD
 	// step is decided: by one operator (the default) or by a tally.
 	//
@@ -240,6 +255,36 @@ const (
 	// every other kind — a reader that needs the parsed bool calls ParseBool
 	// itself, the same way a reader of KindDuration calls ParseDuration.
 	KindBool
+	// KindVoteRoster is one of open|strict, a vote rule's roster dimension.
+	KindVoteRoster
+	// KindVoteWeighting is one of declared|equal, a vote rule's weighting
+	// dimension.
+	//
+	// It is a separate kind from KindVoteRoster rather than one shared
+	// "enum" kind because the two enumerate different vocabularies, and a
+	// single kind carrying its own value set would have to be a field on
+	// ConfigSpec — a second way to say what Kind already says.
+	KindVoteWeighting
+)
+
+// A vote rule's roster values: who a cast may be attributed to.
+//
+// `open` is the default and is the behavior every existing rule has: the
+// step's voter list is COUNTED, and a cast under any name fills a seat.
+// `strict` declares that only a name on the step's list may cast.
+const (
+	VoteRosterOpen   = "open"
+	VoteRosterStrict = "strict"
+)
+
+// A vote rule's weighting values: what one cast is worth in the tally.
+//
+// `declared` is the default and is the existing arithmetic — the caster's own
+// confidence times its own domain relevance. `equal` declares that every cast
+// counts the same, so a seat cannot price its own testimony.
+const (
+	VoteWeightingDeclared = "declared"
+	VoteWeightingEqual    = "equal"
 )
 
 // NameMaxBytes caps an opaque name stored in config or recorded in a ledger,
@@ -510,6 +555,28 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 					"closes them; false (the default) renders every cast as it lands", name),
 			}, nil
 		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleRosterSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindVoteRoster,
+				Default: VoteRosterOpen,
+				Doc: fmt.Sprintf("Who may cast on a proposal opened under vote rule "+
+					"%q: open (the default) counts a cast from any name, strict "+
+					"admits only a name on the step's voter list. REGISTERED BUT "+
+					"NOT YET ENFORCED — the cast path does not match a roster", name),
+			}, nil
+		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleWeightingSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindVoteWeighting,
+				Default: VoteWeightingDeclared,
+				Doc: fmt.Sprintf("What one cast is worth in vote rule %q's tally: "+
+					"declared (the default) is the caster's own confidence times "+
+					"its own domain relevance, equal counts every cast the same. "+
+					"REGISTERED BUT NOT YET ENFORCED — the tally does not read it", name),
+			}, nil
+		}
 	}
 
 	return ConfigSpec{}, fmt.Errorf("%w: %q (known keys: %s)",
@@ -518,7 +585,7 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 
 // KnownConfigKeys lists the fixed keys, plus the open-ended patterns.
 func KnownConfigKeys() []string {
-	keys := make([]string, 0, len(engineConfigSpecs)+4)
+	keys := make([]string, 0, len(engineConfigSpecs)+6)
 	for _, spec := range engineConfigSpecs {
 		keys = append(keys, spec.Key)
 	}
@@ -527,6 +594,8 @@ func KnownConfigKeys() []string {
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleThresholdSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleCriticalitySuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleSealedSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleRosterSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleWeightingSuffix,
 	)
 	return keys
 }
@@ -628,13 +697,45 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 			return fmt.Errorf(
 				"%s must be a boolean (true/false), got %q", spec.Key, value)
 		}
+	case KindVoteRoster:
+		if err := ValidateVoteRoster(value); err != nil {
+			return fmt.Errorf("%s: %w", spec.Key, err)
+		}
+	case KindVoteWeighting:
+		if err := ValidateVoteWeighting(value); err != nil {
+			return fmt.Errorf("%s: %w", spec.Key, err)
+		}
 	}
 	return nil
 }
 
-// VoteRuleThresholdKey, VoteRuleCriticalityKey and VoteRuleSealedKey build a
-// rule's three keys, so the string concatenation lives in one place rather
-// than at every reader.
+// ValidateVoteRoster and ValidateVoteWeighting are each dimension's value set,
+// stated once.
+//
+// They are exported because the engine calls them AGAIN at read time. Set-time
+// validation guards the CLI ingress only; a value that reached the store some
+// other way must not silently resolve to the permissive default, which is the
+// downgrade these keys exist to prevent.
+func ValidateVoteRoster(value string) error {
+	switch value {
+	case VoteRosterOpen, VoteRosterStrict:
+		return nil
+	}
+	return fmt.Errorf("roster must be %s or %s, got %q",
+		VoteRosterOpen, VoteRosterStrict, value)
+}
+
+func ValidateVoteWeighting(value string) error {
+	switch value {
+	case VoteWeightingDeclared, VoteWeightingEqual:
+		return nil
+	}
+	return fmt.Errorf("weighting must be %s or %s, got %q",
+		VoteWeightingDeclared, VoteWeightingEqual, value)
+}
+
+// These build a rule's keys, so the string concatenation lives in one place
+// rather than at every reader.
 func VoteRuleThresholdKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleThresholdSuffix
 }
@@ -645,6 +746,14 @@ func VoteRuleCriticalityKey(rule string) string {
 
 func VoteRuleSealedKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleSealedSuffix
+}
+
+func VoteRuleRosterKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleRosterSuffix
+}
+
+func VoteRuleWeightingKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleWeightingSuffix
 }
 
 // VoteRuleExists reports whether a rule is registered.

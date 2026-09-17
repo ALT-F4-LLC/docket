@@ -376,6 +376,15 @@ type voteRule struct {
 	// the tally closes it. Resolved here and STORED on the proposal at open,
 	// so a rule edited mid-vote cannot change a live ballot's rendering.
 	Sealed bool
+	// Roster and Weighting are the rule's identity dimensions (DKT-2448): who
+	// may cast, and what a cast is worth. Resolved here so the roster-enforcement
+	// and equal-weighting pieces have one place to read them from.
+	//
+	// CARRIED, NOT YET ACTED ON: nothing in this file or the cast path consults
+	// either value. Their defaults — open and declared — are the existing
+	// behavior exactly.
+	Roster    string
+	Weighting string
 }
 
 // resolveVoteRule reads a named rule from the engine-config registry.
@@ -416,10 +425,32 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 			"vote rule %q has a malformed sealed flag %q: %w", name, sealedEntry.Value, err)
 	}
 
+	rosterEntry, err := db.GetConfig(conn, projectID, db.VoteRuleRosterKey(name))
+	if err != nil {
+		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
+	}
+	// Re-checked at READ time, not only at set time: set-time validation guards
+	// the CLI ingress alone, and a stored value outside the set must fail here
+	// rather than fall back to the permissive default. The threshold and the
+	// sealed flag already fail closed the same way.
+	if err := db.ValidateVoteRoster(rosterEntry.Value); err != nil {
+		return voteRule{}, fmt.Errorf("vote rule %q has a malformed roster: %w", name, err)
+	}
+
+	weightingEntry, err := db.GetConfig(conn, projectID, db.VoteRuleWeightingKey(name))
+	if err != nil {
+		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
+	}
+	if err := db.ValidateVoteWeighting(weightingEntry.Value); err != nil {
+		return voteRule{}, fmt.Errorf("vote rule %q has a malformed weighting: %w", name, err)
+	}
+
 	return voteRule{
 		Threshold:   threshold,
 		Criticality: model.Criticality(criticalityEntry.Value),
 		Sealed:      sealed,
+		Roster:      rosterEntry.Value,
+		Weighting:   weightingEntry.Value,
 	}, nil
 }
 
