@@ -138,7 +138,7 @@ func TestDoImportRoundTripPreservesProposalsSubsystem(t *testing.T) {
 		Confidence:      0.9,
 		DomainRelevance: 0.8,
 		Summary:         "looks correct",
-		FindingsJSON:    &model.Findings{Blockers: nil, Concerns: []string{"one nit"}, Suggestions: []string{"rename x"}},
+		FindingsJSON:    &model.Findings{Blockers: nil, Concerns: []model.Finding{{Text: "one nit"}}, Suggestions: []model.Finding{{Text: "rename x"}}},
 		Metadata:        map[string]any{"resolved": map[string]any{"engine": "sonnet-5"}},
 	}); err != nil {
 		t.Fatalf("CastVote: %v", err)

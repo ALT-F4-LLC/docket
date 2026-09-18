@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -24,6 +25,10 @@ const (
 	PinChanged = "changed"
 	// PinMissing: the run depends on the ref and it is no longer there.
 	PinMissing = "missing"
+	// PinUnpinnedReference: not a verdict on a pin — there IS no pin. The
+	// pinned bytes reach a file this run never snapshotted, so every step whose
+	// packet resolves it refuses at claim (VALIDATION_ERROR).
+	PinUnpinnedReference = "unpinned-reference"
 )
 
 // PinVerdict is one pin, checked.
@@ -41,20 +46,56 @@ type PinVerdict struct {
 	Path string `json:"path,omitempty"`
 }
 
+// ReferenceVerdict is one ref the run's own pinned bytes reach that the run
+// does not pin (DKT-821).
+//
+// It is deliberately NOT a PinVerdict. A pin verdict answers "do these bytes
+// still match", and there are no pinned bytes here to match; conflating the two
+// would also hand every consumer of `Pins` — repin's dispositions, the
+// `run status` drift advisory — a row with no pinned hash to reason about.
+type ReferenceVerdict struct {
+	// Status is always PinUnpinnedReference; it is carried per row so a
+	// consumer branches on one field name across both lists.
+	Status string `json:"status"`
+	Ref    string `json:"ref"`
+	// IncludedBy is the closure file(s) whose `packet_includes` name the ref —
+	// the contract an operator actually edits. Empty when a step's own `packet`
+	// entry is what reaches it.
+	IncludedBy []string `json:"included_by,omitempty"`
+	// RequiredBy is the pending step(s) (and unexpanded phases) that can still
+	// open the ref — the claims that will refuse.
+	RequiredBy []string `json:"required_by"`
+	// Path is where the file sits on disk, when it does. Present-but-unpinned
+	// is the RUN-59 case and its remedy differs from absent-and-unpinned, the
+	// same distinction DKT-818 drew in the claim-time refusal.
+	Path string `json:"path,omitempty"`
+}
+
 // PinReport is `docket run verify-pins`.
 type PinReport struct {
 	Run string `json:"run"`
 	// Pins is every pin the run holds, in a total order (kind, then ref), so
 	// two checks of one unchanged run produce identical output.
 	Pins []PinVerdict `json:"pins"`
-	// Changed and Missing are the counts a caller branches on without
-	// re-walking Pins.
-	Changed int `json:"changed"`
-	Missing int `json:"missing"`
+	// References is the CLOSURE check, kept beside the per-pin check rather
+	// than mixed into it: a conductor reading this needs to know which of the
+	// two failed, because they have different remedies and only one of them is
+	// about the filesystem. Empty (never nil), in ref order.
+	References []ReferenceVerdict `json:"references"`
+	// Changed, Missing and Unpinned are the counts a caller branches on without
+	// re-walking the lists.
+	Changed  int `json:"changed"`
+	Missing  int `json:"missing"`
+	Unpinned int `json:"unpinned"`
 }
 
-// Sound reports whether every pin still matches.
-func (r *PinReport) Sound() bool { return r.Changed == 0 && r.Missing == 0 }
+// Sound reports whether every pin still matches AND the pin set is closed —
+// the two halves of "is this run's pin story healthy". A run can fail either
+// half alone: RUN-59 had all 30 pins matching disk and four judge steps that
+// could not be claimed.
+func (r *PinReport) Sound() bool {
+	return r.Changed == 0 && r.Missing == 0 && r.Unpinned == 0
+}
 
 // VerifyPins checks a run's WHOLE pin set against what those refs resolve to
 // now (DKT-297).
@@ -77,7 +118,49 @@ func (r *PinReport) Sound() bool { return r.Changed == 0 && r.Missing == 0 }
 // a bundle depend on the working tree. This verb is the deliberate opposite —
 // it asks about the tree, on purpose, and writes nothing.
 func VerifyPins(conn *sql.DB, runID int) (*PinReport, error) {
-	return verifyPinsIn(conn, runID, instanceConfigRoots())
+	return verifyPinsClosedIn(conn, runID, instanceConfigRoots())
+}
+
+// verifyPinsClosedIn is the whole-run answer: the per-pin check, plus the
+// CLOSURE check the per-pin check cannot see (DKT-821).
+//
+// Matching every pinned ref against disk is not the same question as "is this
+// run's pin story healthy", and RUN-59 is the run where the two answers
+// diverged. A repin had adopted contract bytes whose `packet_includes` reached
+// two fragments the run never pinned; every one of those 30 pins matched its
+// file exactly, `verify-pins` said exit 0, and minutes earlier four review
+// claims had already died on `packet file ... is not pinned by this run`. The
+// verb whose job is the whole-run question reported a structurally wedged run
+// as healthy, and a conductor used it as a pre-dispatch health check.
+//
+// So after checking the pins, resolve what those pinned bytes REFERENCE and
+// report anything the pin set does not hold. The walk is unpinnedClosureRefs,
+// shared verbatim with the additions repin computes when it adopts bytes
+// (DKT-805): one computation, so the verb that detects the hole and the verb
+// that closes it can never name different refs.
+func verifyPinsClosedIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
+	report, err := verifyPinsIn(conn, runID, roots)
+	if err != nil {
+		return nil, err
+	}
+	closure, err := pendingPacketClosure(conn, runID, roots)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range unpinnedClosureRefs(report.Pins, closure, roots) {
+		// A ref that is there and unreadable is still an unpinned reference —
+		// readability is the claim-time question, and this one is about the pin
+		// set. Naming the path is what lets a reader tell the two apart.
+		report.References = append(report.References, ReferenceVerdict{
+			Status:     PinUnpinnedReference,
+			Ref:        u.ref,
+			IncludedBy: u.includedBy,
+			RequiredBy: u.requiredBy,
+			Path:       u.path,
+		})
+		report.Unpinned++
+	}
+	return report, nil
 }
 
 // verifyPinsIn is VerifyPins over an explicit root list, which is the same
@@ -94,7 +177,12 @@ func verifyPinsIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
 		return nil, err
 	}
 
-	report := &PinReport{Run: model.FormatRunID(runID), Pins: []PinVerdict{}}
+	report := &PinReport{
+		Run: model.FormatRunID(runID),
+		// Both lists are empty rather than nil so `--json` emits arrays on a
+		// clean run — the same wire shape a consumer parses either way.
+		Pins: []PinVerdict{}, References: []ReferenceVerdict{},
+	}
 
 	for _, p := range pins {
 		v := PinVerdict{Kind: p.Kind, Ref: p.Ref, Pinned: p.SHA256}
@@ -225,6 +313,21 @@ func PinReportReason(r *PinReport) string {
 			out = append(out, fmt.Sprintf(
 				"%s %s is pinned at %s but does not resolve", v.Kind, v.Ref, v.Pinned))
 		}
+	}
+	// The closure clauses come after the per-pin ones and read differently on
+	// purpose: nothing drifted, so neither hash belongs here — what a reader
+	// needs is the file that wrote the reference and the ref it names.
+	for _, v := range r.References {
+		by := strings.Join(v.IncludedBy, ", ")
+		if by == "" {
+			by = strings.Join(v.RequiredBy, ", ")
+		}
+		where := "and no instance-config root holds it"
+		if v.Path != "" {
+			where = "though " + v.Path + " holds it"
+		}
+		out = append(out, fmt.Sprintf(
+			"%s references %s, which %s does not pin (%s)", by, v.Ref, r.Run, where))
 	}
 	return joinClauses(out)
 }

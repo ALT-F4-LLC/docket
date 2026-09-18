@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
 // RuleIDs is the register-time validation table, by ID, in documented order —
@@ -17,17 +19,21 @@ import (
 // (V13/V13a are one check and two author-facing errors; V21 is now one grammar
 // rule and four cross-validation rules).
 //
-// V21a-V21d, V25a, V29, and V30 are the SCHEMA-AWARE half and live in
-// ValidateSchemas rather than in Validate: they are the only rules that ask a
-// question about the environment, and Validate stays a pure function of bytes
+// V21a-V21d, V25a, V28a, V29, V30, and V37a are the SCHEMA-AWARE half and live
+// in ValidateSchemas rather than in Validate: they are the only rules that ask
+// a question about the environment, and Validate stays a pure function of bytes
 // (§4.9.2). V27, V28, and V31 are decisions about bytes and stay here.
 var RuleIDs = []string{
 	"V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10",
-	"V11", "V12", "V13", "V13a", "V14", "V15", "V16", "V17", "V17b", "V18", "V19",
+	// V12 was the `on_fail` closed-vocabulary rule. DKT-1901 reads a value
+	// outside that vocabulary as a triage panel's name, so the check it made is
+	// now V40's, which resolves the name against the definition.
+	"V11", "V11a", "V11b", "V13", "V13a", "V14", "V15", "V16", "V17", "V17b", "V17c", "V18", "V19",
 	"V20", "V21", "V21a", "V21b", "V21c", "V21d",
 	"V22", "V23", "V24", "V25", "V25a", "V26",
-	"V27", "V28", "V29", "V30", "V31",
-	"V32", "V33", "V34",
+	"V27", "V28", "V28a", "V29", "V30", "V31",
+	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
+	"V40", "V40a", "V40b", "V40c",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -227,6 +233,19 @@ func validateSteps(def *Definition) error {
 					step.Name),
 			}
 		}
+		// The same reservation for `issue.linked` (DKT-547): the
+		// cross-issue linked-artifact form is resolved before any step
+		// lookup, so a step under that name could never be addressed.
+		if step.Name == "issue.linked" || strings.HasPrefix(step.Name, InputIssueLinkedPrefix) {
+			return &Error{
+				Rule: "V34", Step: step.Name, Field: "name",
+				Message: fmt.Sprintf(
+					"step name %q is reserved: `issue.linked.<relation>.<kind>` is "+
+						"the engine-served cross-issue input form, and a step under "+
+						"that name could never be addressed as an input",
+					step.Name),
+			}
+		}
 		if _, dup := byName[step.Name]; dup {
 			return &Error{
 				Rule: "V4", Step: step.Name, Field: "name",
@@ -313,6 +332,22 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
+	// V11b: `vote-record` is a RESERVED kind (DKT-545) — V11a's reasoning for
+	// the vote step's record: `<step>.vote-record` resolves to the proposal
+	// the engine recorded for the named vote step, so a step emitting an
+	// artifact of that kind could never be addressed as an input.
+	if produced, _ := producedKind(step); produced == VoteRecordKind {
+		return &Error{
+			Rule: "V11b", Step: step.Name, Field: "emits",
+			Message: fmt.Sprintf(
+				"step %q produces kind %q, which is reserved: "+
+					"`<step>.%s` is the engine-served input form for a vote "+
+					"step's recorded proposal, and an artifact of that kind "+
+					"could never be addressed", step.Name, VoteRecordKind,
+				VoteRecordKind),
+		}
+	}
+
 	// V8: after required except on the first step and on loop = true steps.
 	// V10: `after = []` is legal and means root; a MISSING `after` on a
 	// non-exempt step is the error. The two are one check over hasAfter, and
@@ -359,6 +394,43 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
+	// V39: every `after_fired` entry names a step in this workflow (DKT-1085)
+	// — V9 for the second predecessor list, and for the same reason: a name
+	// the definition never declares can never end `skipped`, so the successor
+	// would run unconditionally, which is the exact defect the key exists to
+	// end.
+	for _, pred := range step.AfterFired {
+		if _, ok := byName[pred]; !ok {
+			return &Error{
+				Rule: "V39", Step: step.Name, Field: "after_fired",
+				Message: fmt.Sprintf(
+					"step %q: `after_fired` names %q, which is not a step in this workflow",
+					step.Name, pred),
+			}
+		}
+	}
+
+	// V39a: every `after_fired` entry also appears in `after`. `after_fired`
+	// asks whether a predecessor FIRED, and the answer exists only once that
+	// predecessor is terminal — which is exactly what an `after` edge waits
+	// for (R3). An entry `after` did not name would let the step become ready
+	// while the gate was still open, run, and be too late to skip. A
+	// `loop = true` step declares no `after` (V18) and so no `after_fired`
+	// either: its ordering comes from loop entry.
+	for _, pred := range step.AfterFired {
+		if !slices.Contains(step.After, pred) {
+			return &Error{
+				Rule: "V39a", Step: step.Name, Field: "after_fired",
+				Message: fmt.Sprintf(
+					"step %q: `after_fired` names %q, which is not in its `after`; "+
+						"an `after_fired` predecessor must also be an `after` "+
+						"predecessor, so the step waits for it to resolve before "+
+						"asking whether it fired",
+					step.Name, pred),
+			}
+		}
+	}
+
 	// V11: inputs shape, existence, and artifact-kind resolution.
 	if err := validateInputs(step, byName); err != nil {
 		return err
@@ -376,15 +448,12 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		return err
 	}
 
-	// V12: on_fail in the closed vocabulary.
-	if step.OnFail != "" && !slices.Contains(onFailValues, step.OnFail) {
-		return &Error{
-			Rule: "V12", Step: step.Name, Field: "on_fail",
-			Message: fmt.Sprintf(
-				"step %q: `on_fail` must be one of %s, got %q",
-				step.Name, quotedList(onFailValues), step.OnFail),
-		}
-	}
+	// V12 was the closed-vocabulary check. Since DKT-1901 a value outside the
+	// vocabulary is read as a STEP NAME — the reading `threshold` already gives
+	// its routings — so the check that remains is V40's, which resolves the name
+	// against the definition and therefore cannot be made from one step alone.
+	// A typo'd verb reaches the author as V40's "names no `type=\"vote\"` step",
+	// which is the same refusal with the alternatives it can actually list.
 
 	// V14: voters and vote_rule required on type="vote", forbidden elsewhere.
 	//
@@ -526,6 +595,80 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
+	// V40 (DKT-1901): an `on_fail` outside the closed vocabulary names a
+	// TRIAGE PANEL — a `type="vote"` step of this workflow that decides what a
+	// failure of this step means. The name must resolve, and it must resolve to
+	// a vote step: any other kind opens no proposal, so nothing would ever
+	// answer the question the routing asks and the failed step would suspend
+	// forever.
+	if target := step.OnFailTarget(); target != "" {
+		// Only an EXECUTOR step may route to a panel. The suspension the
+		// routing depends on is written by the executor's own gate-failure path
+		// (routeStep); every other failure source — a human gate's reject, a
+		// rejected tally, a quorum miss, a failed action — reaches
+		// statusForRouting by a path that would terminalize the step `done`
+		// while naming the panel, which releases its successors as though it
+		// had passed. Refusing the declaration is the honest bound: the issue
+		// asks for an executor failure, and a rule the engine cannot honor
+		// everywhere must not be declarable everywhere.
+		if step.StepClass() != ClassExecutor {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: only an `executor` step may route `on_fail` to the "+
+						"vote step %q — a triage panel decides what a FAILED "+
+						"EXECUTOR's gate results mean, and no other step class "+
+						"suspends for one",
+					step.Name, target),
+			}
+		}
+		named, ok := byName[target]
+		if !ok {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail` must be one of %s or the name of a "+
+						"`type=\"vote\"` step, and %q is neither — it names no step "+
+						"in this workflow",
+					step.Name, quotedList(onFailValues), target),
+			}
+		}
+		if named.Type != TypeVote {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail` names %q, which is not a `type=\"vote\"` "+
+						"step — only a vote step opens a proposal, so nothing would "+
+						"decide what this step's failure means",
+					step.Name, target),
+			}
+		}
+		// The panel must be ordered behind the step it triages: the proposal
+		// carries that step's recorded failure evidence, which does not exist
+		// until it has run.
+		if !slices.Contains(named.After, step.Name) {
+			return &Error{
+				Rule: "V40", Step: step.Name, Field: "on_fail",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail` names the vote step %q, whose `after` does "+
+						"not include %q — a panel triaging this step's failure must "+
+						"be ordered behind it",
+					step.Name, target, step.Name),
+			}
+		}
+	}
+
+	// V40a/V40b/V40c: the triage mapping a vote step declares for the failures
+	// routed to it (DKT-1901).
+	if err := validateOnFailRoutes(def, step); err != nil {
+		return err
+	}
+
+	// V41 (DKT-1902): `on_exhausted` says where a fix-loop exhaustion routes.
+	if err := validateOnExhausted(def, byName, step); err != nil {
+		return err
+	}
+
 	// V17b — V17's mirror (DKT-196, surfaced by DKT-168): a step that CAN
 	// route `fix-loop` requires a `loop = true` step to instantiate. Without
 	// one, every loop entry bumps the counter and supersedes the downstream,
@@ -550,6 +693,74 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
+	// V35: `serves` declares a loop CLUSTER (§11.3 cluster scoping, DKT-544)
+	// and every part of the declaration must be coherent at register time:
+	// only a `loop = true` body has fix-loop routings to serve, an entry must
+	// name a step of this workflow, and the named step must be able to route
+	// `fix-loop` at all — a body serving a step that never routes there is a
+	// cluster that can never be entered, which is a misdeclaration and not a
+	// choice.
+	if len(step.Serves) > 0 && !step.Loop {
+		return &Error{
+			Rule: "V35", Step: step.Name, Field: "serves",
+			Message: fmt.Sprintf(
+				"step %q: `serves` is only valid on `loop = true` steps — it names "+
+					"the steps whose `fix-loop` routings this loop body answers",
+				step.Name),
+		}
+	}
+	for _, target := range step.Serves {
+		if strings.TrimSpace(target) == "" {
+			return &Error{
+				Rule: "V35", Step: step.Name, Field: "serves",
+				Message: fmt.Sprintf("step %q: `serves` contains an empty entry", step.Name),
+			}
+		}
+		named, ok := byName[target]
+		if !ok {
+			return &Error{
+				Rule: "V35", Step: step.Name, Field: "serves",
+				Message: fmt.Sprintf(
+					"step %q: `serves` names %q, which is not a step in this workflow",
+					step.Name, target),
+			}
+		}
+		if !canRouteFixLoop(def, named) {
+			return &Error{
+				Rule: "V35", Step: step.Name, Field: "serves",
+				Message: fmt.Sprintf(
+					"step %q: `serves` names %q, which never routes `fix-loop` — "+
+						"neither its `on_fail` nor any `threshold` key routes there, "+
+						"so this loop body would serve a trigger that cannot fire",
+					step.Name, target),
+			}
+		}
+	}
+
+	// V17c — V17b scoped per trigger (DKT-544): once any body declares
+	// `serves`, a step that can route `fix-loop` must still be served by AT
+	// LEAST ONE `loop = true` body (a body with no `serves` serves every
+	// trigger, so this only bites when every body is scoped and one trigger is
+	// in none of their lists). An unserved trigger's loop entry would bump the
+	// counter and instantiate nothing — V17b's exact silent-no-op shape,
+	// reintroduced per cluster.
+	if hasLoopStep(def) && canRouteFixLoop(def, step) && !anyBodyServes(def, step.Name) {
+		field := "on_fail"
+		if step.OnFail != OnFailFixLoop {
+			field = "threshold"
+		}
+		return &Error{
+			Rule: "V17c", Step: step.Name, Field: field,
+			Message: fmt.Sprintf(
+				"step %q can route `fix-loop`, but no `loop = true` step serves it — "+
+					"every loop body's `serves` names other steps, so this trigger's "+
+					"loop entry would supersede downstream work and instantiate "+
+					"nothing in its place; add %q to a body's `serves` (or declare "+
+					"a body without `serves`, which serves every trigger)",
+				step.Name, step.Name),
+		}
+	}
+
 	// V19: max_attempts >= 1; max_fix_loops >= 0; expected_cost >= 0.
 	if step.MaxAttempts != nil && *step.MaxAttempts < 1 {
 		return &Error{
@@ -565,11 +776,76 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 				"step %q: `max_fix_loops` must be >= 0, got %d", step.Name, *step.MaxFixLoops),
 		}
 	}
+	if step.MaxStalledRounds != nil && *step.MaxStalledRounds < 0 {
+		return &Error{
+			Rule: "V19", Step: step.Name, Field: "max_stalled_rounds",
+			Message: fmt.Sprintf(
+				"step %q: `max_stalled_rounds` must be >= 0, got %d",
+				step.Name, *step.MaxStalledRounds),
+		}
+	}
 	if step.ExpectedCost != nil && *step.ExpectedCost < 0 {
 		return &Error{
 			Rule: "V19", Step: step.Name, Field: "expected_cost",
 			Message: fmt.Sprintf(
 				"step %q: `expected_cost` must be >= 0, got %v", step.Name, *step.ExpectedCost),
+		}
+	}
+
+	// V38: `max_stalled_rounds` is a non-convergence bound over THIS step's
+	// per-round routed volume (DKT-870), so it is coherent only on a step
+	// that (a) can actually route `fix-loop` — the check runs at loop entry,
+	// triggered by this step's own routing — and (b) records an artifact
+	// whose payload the volume can be counted from. Declared anywhere else it
+	// is inert, and an inert declaration is a misdeclaration, not a choice
+	// (V17/V35's discipline).
+	if step.MaxStalledRounds != nil && *step.MaxStalledRounds > 0 {
+		if !canRouteFixLoop(def, step) {
+			return &Error{
+				Rule: "V38", Step: step.Name, Field: "max_stalled_rounds",
+				Message: fmt.Sprintf(
+					"step %q: `max_stalled_rounds` bounds this step's own "+
+						"`fix-loop` rounds, but neither its `on_fail` nor any "+
+						"`threshold` key routes there, so the bound could never "+
+						"fire", step.Name),
+			}
+		}
+		if ArtifactKind(step) == "" {
+			return &Error{
+				Rule: "V38", Step: step.Name, Field: "max_stalled_rounds",
+				Message: fmt.Sprintf(
+					"step %q: `max_stalled_rounds` counts the elements of this "+
+						"step's recorded payload per round, and a `type` step "+
+						"records no artifact to count, so the bound could never "+
+						"fire", step.Name),
+			}
+		}
+	}
+
+	// V37: `pass_floor` compares a payload value's POSITION against the
+	// declared `at`'s (DKT-870), and a position exists only in the order a
+	// pinned `payload` schema declares — a floor with no schema can never
+	// position anything and is an inert declaration. Whether the field IS
+	// ordered and `at` IS in its order is V37a's, beside the schema (§4.9.1).
+	if step.PassFloor != nil {
+		if step.PassFloor.Field == "" || step.PassFloor.At == "" {
+			return &Error{
+				Rule: "V37", Step: step.Name, Field: "pass_floor",
+				Message: fmt.Sprintf(
+					"step %q: `pass_floor` requires both `field` (the payload "+
+						"property to compare) and `at` (a value of that "+
+						"property's declared order)", step.Name),
+			}
+		}
+		if step.Payload == "" {
+			return &Error{
+				Rule: "V37", Step: step.Name, Field: "pass_floor",
+				Message: fmt.Sprintf(
+					"step %q: `pass_floor` compares positions in a declared "+
+						"order, so the step must declare `payload = "+
+						"\"name@version\"` naming a schema that orders %q",
+					step.Name, step.PassFloor.Field),
+			}
 		}
 	}
 
@@ -618,6 +894,18 @@ func producedKind(step *Step) (kind string, produces bool) {
 // `issue.body`, or `issue.diff`.
 var inputShape = regexp.MustCompile(`^([A-Za-z0-9_.-]+)\.([A-Za-z0-9_-]+|\*)$`)
 
+// InputIssueFiles is the `issue.files` engine form (DKT-44): the issue's
+// attached paths, read from the run's project checkout and carried into the
+// packet as `== FILE` sections. Exported because the engine's renderer consumes
+// the same form the validator admits.
+//
+// It is the one engine form whose resolution READS THE FILESYSTEM. The others
+// answer from run state alone, which is why they are snapshot-pinned; an
+// attachment is a path, and a path's contents live where the project keeps
+// them. The issue that forced the form attached three UNTRACKED files, so
+// resolving through anything but a live read would have missed them entirely.
+const InputIssueFiles = "issue.files"
+
 // InputIssueLatestPrefix is the `issue.latest.<kind>` engine form's prefix
 // (DKT-492): the issue's latest recorded round of artifacts of one kind,
 // whoever produced them. Exported because the engine's resolver consumes the
@@ -640,6 +928,43 @@ func LatestKind(input string) (kind string, ok bool) {
 		return "", false
 	}
 	return rest, true
+}
+
+// InputIssueLinkedPrefix is the `issue.linked.<relation>.<kind>` engine form's
+// prefix (DKT-547): the latest recorded artifact of one kind held by the
+// issue(s) this issue is LINKED to by a relation, resolved and pinned at
+// activation. Exported because the engine's resolver consumes the same form
+// the validator admits.
+const InputIssueLinkedPrefix = "issue.linked."
+
+// linkedRelationShape is the `<relation>` half of the form — a relation token
+// (canonical or inverse, hyphenated or underscored); model.ParseRelationDirection
+// is the authority on which tokens mean anything, this only bounds the shape.
+var linkedRelationShape = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// LinkedInput reports whether a declared input is the
+// `issue.linked.<relation>.<kind>` form, returning its two halves. ONE parser
+// for the form, shared by V11, L4, and the engine's activation-time resolver —
+// LatestKind's reasoning again: two readings of one grammar in two packages
+// are exactly how they would drift.
+//
+// The split is on the FIRST dot after the prefix: relation tokens contain no
+// dot, and the kind half reuses latestKindShape (one kind, never `*` — the
+// wildcard answers no question a cross-issue consumer can ask).
+func LinkedInput(input string) (relation, kind string, ok bool) {
+	rest, found := strings.CutPrefix(input, InputIssueLinkedPrefix)
+	if !found {
+		return "", "", false
+	}
+	i := strings.Index(rest, ".")
+	if i <= 0 || i == len(rest)-1 {
+		return "", "", false
+	}
+	relation, kind = rest[:i], rest[i+1:]
+	if !linkedRelationShape.MatchString(relation) || !latestKindShape.MatchString(kind) {
+		return "", "", false
+	}
+	return relation, kind, true
 }
 
 // PayloadShape matches §11.1's `schema@ver`.
@@ -691,7 +1016,7 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 	}
 
 	for _, input := range step.Inputs {
-		if input == "issue.body" || input == "issue.diff" {
+		if input == "issue.body" || input == "issue.diff" || input == InputIssueFiles {
 			continue
 		}
 
@@ -730,13 +1055,75 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 			continue
 		}
 
+		// `issue.linked.<relation>.<kind>` (DKT-547) is engine-produced like
+		// the forms above, but its PRODUCER IS ANOTHER ISSUE'S RUN: activation
+		// resolves this issue's linked issue(s) by the relation, pins each
+		// one's latest recorded artifact of the kind, and fails loudly when
+		// the relation or the artifact is missing. V11's produced-kind table
+		// therefore deliberately does NOT apply — no step of THIS workflow
+		// need produce the kind, because none does; the binding it enforces
+		// elsewhere is enforced here by activation instead. What register CAN
+		// refuse it does: a malformed shape, a relation outside the
+		// vocabulary, and the two engine-reserved kinds, which no step
+		// anywhere may emit (V11a/V11b) and which the form could therefore
+		// never resolve.
+		if input == "issue.linked" || strings.HasPrefix(input, InputIssueLinkedPrefix) {
+			relation, kind, ok := LinkedInput(input)
+			if !ok {
+				return &Error{
+					Rule: "V11", Step: step.Name, Field: "inputs",
+					Message: fmt.Sprintf(
+						"step %q: `inputs` entry %q must be "+
+							"`issue.linked.<relation>.<kind>`, with a relation token "+
+							"and one kind of letters, digits, `_` or `-` (never `*`)",
+						step.Name, input),
+				}
+			}
+			if _, _, err := model.ParseRelationDirection(relation); err != nil {
+				return &Error{
+					Rule: "V11", Step: step.Name, Field: "inputs",
+					Message: fmt.Sprintf(
+						"step %q: `inputs` entry %q names relation %q, which is not "+
+							"a relation type; must be one of %v",
+						step.Name, input, relation, model.RelationDirectionTokens()),
+				}
+			}
+			if kind == GateResultsKind || kind == VoteRecordKind {
+				return &Error{
+					Rule: "V11", Step: step.Name, Field: "inputs",
+					Message: fmt.Sprintf(
+						"step %q: `inputs` entry %q names kind %q, which is "+
+							"engine-reserved — no step may emit it, so no linked "+
+							"issue could ever hold an artifact of it",
+						step.Name, input, kind),
+				}
+			}
+			continue
+		}
+
+		// `issue.` is an ENGINE NAMESPACE, not a step name: V34 reserves it,
+		// so no workflow can declare a step there and every entry under it is
+		// either one of the engine-produced forms above or a misspelling of
+		// one. Routed to the vocabulary message rather than the producer
+		// lookup below, which would otherwise answer `issue.attachments` with
+		// "names step \"issue\", which is not a step in this workflow" — true,
+		// and useless to an author who has to guess the real spelling from it.
+		if input == "issue" || strings.HasPrefix(input, "issue.") {
+			return &Error{
+				Rule: "V11", Step: step.Name, Field: "inputs",
+				Message: fmt.Sprintf(
+					"step %q: `inputs` entry %q is not an engine-produced input form; must be `issue.body`, `issue.diff`, `%s`, `issue.latest.<kind>`, or `issue.linked.<relation>.<kind>`",
+					step.Name, input, InputIssueFiles),
+			}
+		}
+
 		m := inputShape.FindStringSubmatch(input)
 		if m == nil {
 			return &Error{
 				Rule: "V11", Step: step.Name, Field: "inputs",
 				Message: fmt.Sprintf(
-					"step %q: `inputs` entry %q must be `<step>.<kind>`, `<step>.*`, `issue.body`, `issue.diff`, or `issue.latest.<kind>`",
-					step.Name, input),
+					"step %q: `inputs` entry %q must be `<step>.<kind>`, `<step>.*`, `issue.body`, `issue.diff`, `%s`, `issue.latest.<kind>`, or `issue.linked.<relation>.<kind>`",
+					step.Name, input, InputIssueFiles),
 			}
 		}
 		producerName, kind := m[1], m[2]
@@ -758,6 +1145,26 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 		// legal answer, not an authoring error, because gates can also arrive
 		// from a fence source the definition does not enumerate.
 		if kind == GateResultsKind {
+			continue
+		}
+
+		// `<step>.vote-record` (DKT-545) is ENGINE-PRODUCED like gate-results:
+		// it resolves to the proposal record the named vote step's tally left
+		// — outcome, casts, and rationales — so it needs the producer to exist
+		// and to BE a vote step. Any other step opens no proposal, so the
+		// input could never resolve to anything on any run: a typo caught now
+		// rather than an input silently absent forever.
+		if kind == VoteRecordKind {
+			if producer.Type != TypeVote {
+				return &Error{
+					Rule: "V11", Step: step.Name, Field: "inputs",
+					Message: fmt.Sprintf(
+						"step %q: `inputs` entry %q names step %q, which is not a "+
+							"`type=\"vote\"` step — `%s` resolves only against vote "+
+							"steps, whose tally leaves the record it serves",
+						step.Name, input, producerName, VoteRecordKind),
+				}
+			}
 			continue
 		}
 
@@ -801,6 +1208,28 @@ func anyStepProduces(byName map[string]*Step, kind string) bool {
 // thresholdRoutings are the §11.2 non-step routings.
 var thresholdRoutings = []string{OnFailFixLoop, OnFailWaitingHuman, "pass"}
 
+// VoteCastField* are the addressable fields of one CAST in a vote step's
+// threshold evaluation (DKT-545). The engine builds each cast's payload from
+// exactly these keys, so the vocabulary is engine-defined the same way `when`'s
+// kind/labels vocabulary is (V22) — a field outside it would silently never
+// match, which is why V36 refuses it at register instead.
+//
+// `vote` and `verdict` are ALIASES for the same value: the model's word is
+// `verdict` (model.Verdict, `vote cast --verdict`), and `vote` is the word a
+// threshold author reaches for (`count>=2(vote == approve-with-concerns)`).
+// Admitting both costs one map key; refusing one of them would refuse the
+// spelling half of authors would try first.
+const (
+	VoteCastFieldVote    = "vote"
+	VoteCastFieldVerdict = "verdict"
+	VoteCastFieldVoter   = "voter"
+)
+
+// VoteCastFields is the closed field vocabulary of a vote step's threshold
+// predicates — V36's authority, exported because the engine's cast-payload
+// builder must produce exactly these keys and no reader may drift from it.
+var VoteCastFields = []string{VoteCastFieldVote, VoteCastFieldVerdict, VoteCastFieldVoter}
+
 // predicateShape matches the §11.2 grammar `agg(field op literal)`.
 var predicateShape = regexp.MustCompile(
 	`^\s*(any|all|count>=\d+)\s*\(\s*([A-Za-z0-9_.-]+)\s*(==|!=|>=|>|<=|<)\s*(\S+?)\s*\)\s*$`)
@@ -843,6 +1272,68 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 					step.Name, step.Threshold[routing]),
 			}
 		}
+
+		// V36 (DKT-545): a `type="vote"` step's threshold is evaluated over
+		// the tally's CAST SET after an APPROVED tally, not over recorded
+		// payloads, and each constraint below refuses a declaration that
+		// could never route:
+		//
+		//   - the routing vocabulary is the three non-step routings only.
+		//     Step-name interposition is the saga's machinery (the same-
+		//     transaction skip of the unrouted gate, DKT-38's latch), and the
+		//     vote routing path has none of it — a step-name key would record
+		//     a routing nothing downstream consumes, RUN-25's exact shape.
+		//   - the field vocabulary is the cast's (VoteCastFields). Casts are
+		//     engine-produced like `when`'s kind/labels (V22), so any other
+		//     field would silently never match.
+		//   - ordered operators are refused. Casts have no registered schema,
+		//     and §11.2 defines ordered comparisons only over `ordered_enum`
+		//     fields — the comparison would be a guaranteed T3 park on every
+		//     evaluation, which is a misdeclaration and not a choice.
+		if step.Type == TypeVote {
+			if !slices.Contains(thresholdRoutings, routing) {
+				return &Error{
+					Rule: "V36", Step: step.Name, Field: "threshold",
+					Message: fmt.Sprintf(
+						"step %q: a `type=\"vote\"` step's `threshold` routing %q "+
+							"must be one of %s — step-name interposition is not "+
+							"available on vote steps",
+						step.Name, routing, quotedList(thresholdRoutings)),
+				}
+			}
+			pred, err := ParsePredicate(step.Threshold[routing])
+			if err != nil {
+				// Unreachable: V21's shape check above admits exactly what
+				// ParsePredicate parses. Kept so a grammar drift fails loudly.
+				return &Error{
+					Rule: "V36", Step: step.Name, Field: "threshold",
+					Message: fmt.Sprintf("step %q: %v", step.Name, err),
+				}
+			}
+			if pred.Ordered() {
+				return &Error{
+					Rule: "V36", Step: step.Name, Field: "threshold",
+					Message: fmt.Sprintf(
+						"step %q: `threshold` predicate %q uses the ordered "+
+							"operator %q, but a vote step's threshold evaluates "+
+							"over casts, which have no registered schema — "+
+							"ordered comparisons are defined only over "+
+							"`ordered_enum` fields (engine-spec §11.2); use == or !=",
+						step.Name, step.Threshold[routing], pred.Op),
+				}
+			}
+			if !slices.Contains(VoteCastFields, pred.Field) {
+				return &Error{
+					Rule: "V36", Step: step.Name, Field: "threshold",
+					Message: fmt.Sprintf(
+						"step %q: `threshold` predicate %q addresses field %q, "+
+							"but a vote step's threshold evaluates over the cast "+
+							"set, whose addressable fields are %s",
+						step.Name, step.Threshold[routing], pred.Field,
+						quotedList(VoteCastFields)),
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -851,17 +1342,90 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 // `kind` or `labels` only (engine-core §4: "conditions (predicates over issue
 // kind/labels only)"). Nothing else is addressable — a `when` over a status or
 // an assignee is a validation error, not a silently-false predicate.
+//
+// Two clause forms:
+//
+//   - `<kind|labels> <==|!=|contains> <value>` — one value
+//   - `labels contains-any (a, b, c)` — the lists intersect (DKT-550), also
+//     spelled `labels contains_any [a, b, c]` (DKT-1000)
+//
+// `contains-any` is the step-level spelling of the workflow-level `labels_any`
+// [match] clause, and it is evaluated by the same intersection test (Matches).
+// It exists so "kind X AND any of these labels" is ONE homogeneous-`and`
+// predicate: without it that need can only be written by mixing `and` with
+// `or`, which V22 refuses. A set-membership operator answers it without a
+// connective at all, so the homogeneity rule never enters into it.
+//
+// The operator has two spellings and the list has two delimiters — `contains-any`
+// or `contains_any`, `(…)` or `[…]` — and all four combinations mean the same
+// thing (DKT-1000). Accepting both is not decoration: `contains-any (…)` is what
+// already-registered definitions carry, and `contains_any [a, b]` is the
+// spelling authors reach for because it is how a list is written everywhere else
+// in a workflow TOML. Refusing either would make an operator's first correct
+// guess a validation error. The delimiters must PAIR — `(a, b]` matches neither
+// branch — because RE2 has no backreference to enforce it in one branch, so the
+// two spellings are written out as two.
+//
+// The list branch is FIRST in the alternation deliberately. Go's regexp is
+// leftmost-first, so ordering it after the one-value branch would let
+// `labels contains-any(a,b)` match as `labels contains "-any(a,b)"` — a clause
+// that registers and then quietly evaluates as something the author never
+// wrote.
+//
+// A list element may not contain whitespace, which is what keeps the new form
+// clear of whenConnective: that splitter runs over the whole predicate before
+// any clause is shape-checked, and it only separates on a connective with
+// whitespace on BOTH sides. A pathological `(a , and , b)` therefore splits
+// into two clauses that both fail this regex — V22 refuses it, and WhenHolds
+// reads it as false, because both go through the same splitter and the same
+// shape. Fail-closed, never divergent.
 var whenShape = regexp.MustCompile(
-	`^\s*(kind|labels)\s*(==|!=|contains)\s*(\S+)\s*$`)
+	`^\s*(?:` +
+		`(labels)\s*(contains-any|contains_any)\s*(?:` +
+		`\(\s*(` + whenListElements + `)\s*\)` +
+		`|\[\s*(` + whenListElements + `)\s*\]` +
+		`)` +
+		`|(kind|labels)\s*(==|!=|contains)\s*(\S+)` +
+		`)\s*$`)
+
+// whenListElements is a non-empty comma-separated list of whitespace-free
+// values, quoted or bare. It is spelled ONCE and shared by both delimiter
+// branches of whenShape so `(…)` and `[…]` cannot drift into accepting
+// different element vocabularies — a list that registers under one delimiter
+// and is refused under the other would make the two spellings different
+// grammars wearing the same name.
+//
+// Brackets are excluded from an element for the same reason parens are: an
+// element that could contain the closing delimiter would let `[a, b` match by
+// swallowing it.
+const whenListElements = `[^\s,()\[\]]+(?:\s*,\s*[^\s,()\[\]]+)*`
 
 func validateWhen(step *Step) error {
-	for _, clause := range splitWhen(step.When) {
+	clauses, _, mixed := splitWhen(step.When)
+	// A mixed predicate is refused BEFORE its clauses are shape-checked: the
+	// operator wrote something whose meaning depends on a precedence rule the
+	// grammar does not have, and reporting a clause typo first would tell them
+	// to fix the wrong thing.
+	if mixed {
+		return &Error{
+			Rule: "V22", Step: step.Name, Field: "when",
+			Message: fmt.Sprintf(
+				"step %q: `when` %q mixes `and` and `or`; a predicate must join its "+
+					"clauses with one connective throughout, because the grammar has "+
+					"no precedence rule and no parentheses to disambiguate the mix",
+				step.Name, strings.TrimSpace(step.When)),
+		}
+	}
+	for _, clause := range clauses {
 		if !whenShape.MatchString(clause) {
 			return &Error{
 				Rule: "V22", Step: step.Name, Field: "when",
 				Message: fmt.Sprintf(
 					"step %q: `when` clause %q must be a predicate over `kind` or `labels` only, "+
-						"as `<kind|labels> <==|!=|contains> <value>`",
+						"as `<kind|labels> <==|!=|contains> <value>` or "+
+						"`labels contains-any (a, b, c)` (equivalently "+
+						"`labels contains_any [a, b, c]`), with clauses joined by "+
+						"`and` throughout or `or` throughout",
 					step.Name, strings.TrimSpace(clause)),
 			}
 		}
@@ -869,17 +1433,55 @@ func validateWhen(step *Step) error {
 	return nil
 }
 
-// splitWhen breaks a `when` expression into its conjuncts. `and` is the only
-// connective: a disjunction over kind/labels is expressible as two steps, and
-// admitting one operator keeps the predicate language small enough to stay
-// obviously decidable.
-func splitWhen(expr string) []string {
-	parts := strings.Split(expr, " and ")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		out = append(out, strings.TrimSpace(p))
+// The two connectives of the §11.1 `when` grammar.
+const (
+	WhenAnd = "and"
+	WhenOr  = "or"
+)
+
+// whenConnective matches a connective token BETWEEN two clauses — whitespace on
+// both sides is part of the match, so a label or kind literal that merely
+// contains the letters (`labels contains and-then`) is not a separator. It is
+// the one place the connective vocabulary is spelled, for the same reason
+// whenShape is the one place the clause shape is: validate and evaluate must
+// split a predicate identically or a definition that registered could evaluate
+// as something else (predicate.go, on §11.2's single-regex discipline).
+var whenConnective = regexp.MustCompile(`\s+(and|or)\s+`)
+
+// splitWhen breaks a `when` expression into its clauses and reports which
+// connective joins them.
+//
+// `and` and `or` may each join any number of clauses, but a single predicate
+// must use ONE of them throughout — `mixed` is true otherwise, and V22 refuses
+// it (DKT-548). That is the whole of the precedence question: `a and b or c`
+// has two readings, the grammar has no parentheses to pick one, and picking a
+// default silently would route work through a lane the author did not write.
+// Requiring homogeneity costs an author one extra step in the rare mixed case
+// and costs nothing in the common one.
+//
+// A single-clause predicate reports WhenAnd: with nothing to join, the two
+// connectives agree, and `and` is the identity the old grammar already had.
+func splitWhen(expr string) (clauses []string, connective string, mixed bool) {
+	seps := whenConnective.FindAllStringSubmatchIndex(expr, -1)
+
+	clauses = make([]string, 0, len(seps)+1)
+	prev := 0
+	for _, sep := range seps {
+		clauses = append(clauses, strings.TrimSpace(expr[prev:sep[0]]))
+		switch conn := expr[sep[2]:sep[3]]; {
+		case connective == "":
+			connective = conn
+		case connective != conn:
+			mixed = true
+		}
+		prev = sep[1]
 	}
-	return out
+	clauses = append(clauses, strings.TrimSpace(expr[prev:]))
+
+	if connective == "" {
+		connective = WhenAnd
+	}
+	return clauses, connective, mixed
 }
 
 // validateLimits is V24: `max` >= 1 and the durations parse.
@@ -976,6 +1578,244 @@ func hasLoopStep(def *Definition) bool {
 		}
 	}
 	return false
+}
+
+// canRouteFixLoop reports whether a step has any routing that can resolve to
+// `fix-loop`: an explicit `on_fail`, a `threshold` key, or — since DKT-1901 —
+// an `on_fail` naming a triage panel whose mapping can answer `fix-round`,
+// which enters a round for THIS step. The DECLARED values only: the `on_fail`
+// default is `waiting-human`, so silence never routes there.
+func canRouteFixLoop(def *Definition, step *Step) bool {
+	if step.OnFail == OnFailFixLoop {
+		return true
+	}
+	if _, ok := step.Threshold[OnFailFixLoop]; ok {
+		return true
+	}
+	panel := StepByName(def, step.OnFailTarget())
+	if panel == nil {
+		return false
+	}
+	for _, routing := range panel.OnFailRoutes {
+		if routing == TriageFixRound {
+			return true
+		}
+	}
+	return false
+}
+
+// anyBodyServes reports whether at least one `loop = true` step serves a
+// trigger — V17c's question, asked with the same ServesTrigger reading the
+// engine's loop entry uses, so "who answers this trigger" has one definition.
+func anyBodyServes(def *Definition, trigger string) bool {
+	for _, step := range def.Steps {
+		if step.Loop && ServesTrigger(step, trigger) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateOnFailRoutes is V40a-V40c (DKT-1901): the triage mapping's keys, its
+// values, and the workflow conditions each value needs to be applicable.
+//
+// The mapping is declared on the PANEL, so it is validated here whether or not
+// any step currently routes to it — a mapping nobody reads is an authoring
+// mistake worth naming at register, and one declared on a non-vote step is a
+// misunderstanding of what the field is for.
+// validateOnExhausted is V41 (DKT-1902): `on_exhausted` declares where a
+// fix-loop exhaustion routes, so it is declarable only where an exhaustion can
+// happen — on a step that routes `fix-loop` under a declared bound — and its
+// value must be one the engine can carry out.
+//
+// The closed half is `waiting-human` and `abandon-issue`. A value outside it
+// names a step, which must resolve and must be a vote step (whose proposal
+// asks what to do about the exhausted loop) or an executor step (which does
+// something about it): those are the two classes an interposed target can be.
+// A step that opens no proposal and runs no work would leave the exhaustion
+// routed somewhere nothing answers, which is the unconditional park with an
+// extra row.
+//
+// The target must also be ordered behind the routing step, for V40's reason:
+// the exhaustion is the evidence the target acts on, and it does not exist
+// until the loop has run.
+func validateOnExhausted(def *Definition, byName map[string]*Step, step *Step) error {
+	if step.OnExhausted == "" {
+		return nil
+	}
+	if !canRouteFixLoop(def, step) {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` is only valid on a step that routes "+
+					"`fix-loop` — it says where that routing goes once the loop "+
+					"bound refuses another round, and this step never routes there",
+				step.Name),
+		}
+	}
+	if step.MaxFixLoops == nil || *step.MaxFixLoops <= 0 {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` requires a positive `max_fix_loops` on "+
+					"the same step — an unbounded loop never exhausts, so the "+
+					"routing declared here could never fire",
+				step.Name),
+		}
+	}
+
+	target := step.OnExhaustedTarget()
+	if target == "" {
+		return nil
+	}
+	named, ok := byName[target]
+	if !ok {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` must be one of %s or the name of a "+
+					"`type=\"vote\"` or executor step, and %q is neither — it "+
+					"names no step in this workflow",
+				step.Name, quotedList(onExhaustedValues), target),
+		}
+	}
+	if named.Type != TypeVote && named.StepClass() != ClassExecutor {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` names %q, which is neither a "+
+					"`type=\"vote\"` step nor an executor — only those decide or "+
+					"do something about an exhausted loop",
+				step.Name, target),
+		}
+	}
+	if !slices.Contains(named.After, step.Name) {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` names %q, whose `after` does not include "+
+					"%q — a step acting on this loop's exhaustion must be ordered "+
+					"behind it",
+				step.Name, target, step.Name),
+		}
+	}
+	return nil
+}
+
+func validateOnFailRoutes(def *Definition, step *Step) error {
+	// V40c's companion: a triaging panel's OWN `on_fail` disposes of the step it
+	// was asked about when the tally reaches no verdict, so `skip` is refused
+	// there. Skipping is a statement about the panel's own work being
+	// unnecessary; applied to a failed executor it would route the failure away
+	// as though the step had never needed to run.
+	if step.Type == TypeVote && step.OnFail == OnFailSkip &&
+		len(routedToPanel(def, step.Name)) > 0 {
+		return &Error{
+			Rule: "V40c", Step: step.Name, Field: "on_fail",
+			Message: fmt.Sprintf(
+				"step %q: %s route their failures here, so this panel's `on_fail` "+
+					"disposes of a failed step when no verdict is reached — and "+
+					"%q would route that failure away as though the step had never "+
+					"needed to run; use %s",
+				step.Name, quotedList(routedToPanel(def, step.Name)), OnFailSkip,
+				quotedList([]string{OnFailWaitingHuman, OnFailFixLoop, OnFailAbandonIssue})),
+		}
+	}
+
+	if len(step.OnFailRoutes) == 0 {
+		// V40c: a panel some step routes to must say what its verdicts mean.
+		// Without the mapping a tally would decide nothing and the failed step
+		// would suspend with no way out but an operator — which is the outcome
+		// the routing was declared to avoid.
+		if step.Type == TypeVote && len(routedToPanel(def, step.Name)) > 0 {
+			return &Error{
+				Rule: "V40c", Step: step.Name, Field: "on_fail_routes",
+				Message: fmt.Sprintf(
+					"step %q: %s route their failures here, so `on_fail_routes` is "+
+						"required — it declares what this panel's %s verdicts do to "+
+						"the failed step",
+					step.Name, quotedList(routedToPanel(def, step.Name)),
+					quotedList(voteOutcomeKeys)),
+			}
+		}
+		return nil
+	}
+
+	if step.Type != TypeVote {
+		return &Error{
+			Rule: "V40a", Step: step.Name, Field: "on_fail_routes",
+			Message: fmt.Sprintf(
+				"step %q: `on_fail_routes` is only valid on `type=\"vote\"` steps — "+
+					"it maps a tally's verdicts onto the step whose `on_fail` named "+
+					"this panel", step.Name),
+		}
+	}
+
+	for _, outcome := range sortedKeys(step.OnFailRoutes) {
+		if !slices.Contains(voteOutcomeKeys, outcome) {
+			return &Error{
+				Rule: "V40a", Step: step.Name, Field: "on_fail_routes",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail_routes` keys must be one of %s, got %q — a "+
+						"tally either reaches its threshold or does not",
+					step.Name, quotedList(voteOutcomeKeys), outcome),
+			}
+		}
+		routing := step.OnFailRoutes[outcome]
+		if !slices.Contains(triageRoutings, routing) {
+			return &Error{
+				Rule: "V40b", Step: step.Name, Field: "on_fail_routes",
+				Message: fmt.Sprintf(
+					"step %q: `on_fail_routes.%s` must be one of %s, got %q",
+					step.Name, outcome, quotedList(triageRoutings), routing),
+			}
+		}
+		// V40b's applicability half: `fix-round` enters a loop round for the
+		// FAILED step, which requires a `loop = true` body serving it. Without
+		// one the round would supersede downstream work and instantiate nothing
+		// — V17b's silent no-op, reached through the panel instead of through
+		// `on_fail` — so it is refused at register rather than at the tally.
+		if routing == TriageFixRound {
+			for _, router := range routedToPanel(def, step.Name) {
+				if !hasLoopStep(def) || !anyBodyServes(def, router) {
+					return &Error{
+						Rule: "V40b", Step: step.Name, Field: "on_fail_routes",
+						Message: fmt.Sprintf(
+							"step %q: `on_fail_routes.%s = \"fix-round\"` buys a fix "+
+								"round for %q, but no `loop = true` step serves it — "+
+								"the round would supersede downstream work and "+
+								"instantiate nothing in its place",
+							step.Name, outcome, router),
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// routedToPanel names the steps whose `on_fail` routes to this vote step, in
+// declaration order — the failures the panel's mapping will decide.
+func routedToPanel(def *Definition, panel string) []string {
+	var out []string
+	for _, step := range def.Steps {
+		if step.OnFailTarget() == panel {
+			out = append(out, step.Name)
+		}
+	}
+	return out
+}
+
+// sortedKeys orders a mapping's keys so a refusal names the same key every run:
+// Go map iteration is randomized, and a validator that reported a different one
+// of two bad keys per invocation would be untestable.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // humanOnFailValues is the closed vocabulary minus waiting-human — the legal

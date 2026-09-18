@@ -51,7 +51,8 @@ echo
 # gate that names a command the environment lacks records "unmatched" and
 # teaches the verifier nothing.
 run build go1.26.6 build ./...
-run tests go1.26.6 test ./...
+# Acceptance criteria worded with -count=1 must be settled by a fresh run, not a cached result.
+run tests go1.26.6 test -count=1 ./...
 
 echo "=== end ac-commands ==="
 exit "$worst"

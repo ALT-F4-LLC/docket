@@ -44,7 +44,14 @@ type GateResultRow struct {
 	// Reason explains an `unmatched` verdict or a timeout (§6.3, amendment A6).
 	// An unmatched verdict has four distinct causes needing four different
 	// remedies, and without this field they render identically to an operator.
-	Reason      string
+	Reason string
+	// Fingerprint is the SHA-256 of this row's capture with run-varying text
+	// removed (engine.GateFingerprint), computed at record time — the CONTENT
+	// half of the failure signature a batch override grant is keyed on
+	// (DKT-1796). A gate that printed nothing hashes the empty capture, so a
+	// row recorded at v30 or later always carries a value: EMPTY means the row
+	// predates v30 and nothing else.
+	Fingerprint string
 	CreatedAtMS int64
 }
 
@@ -92,11 +99,12 @@ func InsertGateResultTx(tx *sql.Tx, r GateResultRow) error {
 	_, err := tx.Exec(
 		`INSERT INTO gate_results
 		   (run_id, step_id, gate, ordinal, argv, exit, duration_ms, output,
-		    truncated, verdict, pre, stub, stub_entry, reason, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    truncated, verdict, pre, stub, stub_entry, reason, fingerprint,
+		    created_at_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.StepID, r.Gate, r.Ordinal, argv, exit, r.DurationMS, r.Output,
 		boolToInt(r.Truncated), r.Verdict, boolToInt(r.Pre), boolToInt(r.Stub),
-		boolToInt(r.StubEntry), reason, r.CreatedAtMS)
+		boolToInt(r.StubEntry), reason, r.Fingerprint, r.CreatedAtMS)
 	if err != nil {
 		return fmt.Errorf("recording the gate result: %w", err)
 	}
@@ -105,7 +113,8 @@ func InsertGateResultTx(tx *sql.Tx, r GateResultRow) error {
 
 const gateResultSelect = `
 SELECT id, run_id, step_id, gate, ordinal, argv, exit, duration_ms,
-       output, truncated, verdict, pre, stub, stub_entry, reason, created_at_ms
+       output, truncated, verdict, pre, stub, stub_entry, reason, fingerprint,
+       created_at_ms
   FROM gate_results`
 
 // GateResultsForStep returns every recorded result for a step, in insertion
@@ -202,7 +211,7 @@ func scanGateResults(rows *sql.Rows, err error) ([]GateResultRow, error) {
 			&row.ID, &row.RunID, &row.StepID, &row.Gate, &row.Ordinal, &argv, &exit,
 			&row.DurationMS, &row.Output, &truncated, &row.Verdict, &pre, &stub,
 			&stubEntry,
-			&reason, &row.CreatedAtMS,
+			&reason, &row.Fingerprint, &row.CreatedAtMS,
 		); err != nil {
 			return GateResultRow{}, fmt.Errorf("reading a gate result: %w", err)
 		}

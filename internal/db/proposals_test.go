@@ -913,9 +913,9 @@ func TestCastVoteApproveWithConcernsQuorumMath(t *testing.T) {
 		Confidence:      0.8,
 		DomainRelevance: 0.9,
 		FindingsJSON: &model.Findings{
-			Blockers:    []string{},
-			Concerns:    []string{"hardcoded paths"},
-			Suggestions: []string{},
+			Blockers:    []model.Finding{},
+			Concerns:    []model.Finding{{Text: "hardcoded paths"}},
+			Suggestions: []model.Finding{},
 		},
 		Summary: "Sound with concerns",
 	})
@@ -960,9 +960,9 @@ func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
 
 	// Vote with structured findings.
 	findings := &model.Findings{
-		Blockers:    []string{"critical issue"},
-		Concerns:    []string{"concern A", "concern B"},
-		Suggestions: []string{"suggestion 1"},
+		Blockers:    []model.Finding{{Text: "critical issue"}},
+		Concerns:    []model.Finding{{Text: "concern A"}, {Text: "concern B"}},
+		Suggestions: []model.Finding{{Text: "suggestion 1"}},
 	}
 	_, err = CastVote(db, &model.Vote{
 		ProposalID:      id,
@@ -999,7 +999,7 @@ func TestFindingsJSONRoundTripThroughDB(t *testing.T) {
 	if v1.FindingsJSON == nil {
 		t.Fatal("vote 1 FindingsJSON is nil")
 	}
-	if len(v1.FindingsJSON.Blockers) != 1 || v1.FindingsJSON.Blockers[0] != "critical issue" {
+	if len(v1.FindingsJSON.Blockers) != 1 || v1.FindingsJSON.Blockers[0].Text != "critical issue" {
 		t.Errorf("vote 1 Blockers = %v", v1.FindingsJSON.Blockers)
 	}
 	if len(v1.FindingsJSON.Concerns) != 2 {
@@ -1735,4 +1735,68 @@ func mustVote(t *testing.T, byVoter map[string]*model.Vote, voter string) *model
 		t.Fatalf("no vote read back for %q (read %d votes)", voter, len(byVoter))
 	}
 	return v
+}
+
+// TestProposalSealedRoundTrips is DKT-2447's storage half: the sealed flag a
+// proposal is opened with survives create, the read verbs' selects, and an
+// export/import round trip; and v28 gives every pre-existing row a false.
+func TestProposalSealedRoundTrips(t *testing.T) {
+	db := mustInitAndMigrate(t)
+
+	exists, err := hasColumnDB(db, "proposals", "sealed")
+	testsupport.Must(t, err, "probing proposals.sealed: %v", err)
+	if !exists {
+		t.Fatal("v28 did not add proposals.sealed")
+	}
+
+	sealedID, err := CreateProposal(db, &model.Proposal{
+		Description: "sealed", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5, Sealed: true,
+	})
+	testsupport.Must(t, err, "CreateProposal(sealed): %v", err)
+	plainID, err := CreateProposal(db, &model.Proposal{
+		Description: "plain", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+	})
+	testsupport.Must(t, err, "CreateProposal(plain): %v", err)
+
+	for _, tc := range []struct {
+		id   int
+		want bool
+	}{{sealedID, true}, {plainID, false}} {
+		p, err := GetProposal(db, tc.id)
+		testsupport.Must(t, err, "GetProposal(%d): %v", tc.id, err)
+		if p.Sealed != tc.want {
+			t.Errorf("GetProposal(%d).Sealed = %v, want %v", tc.id, p.Sealed, tc.want)
+		}
+	}
+
+	listed, _, err := ListProposals(db, 0, "", "", "", 0)
+	testsupport.Must(t, err, "ListProposals: %v", err)
+	sealedByID := map[int]bool{}
+	for _, p := range listed {
+		sealedByID[p.ID] = p.Sealed
+	}
+	if !sealedByID[sealedID] || sealedByID[plainID] {
+		t.Errorf("ListProposals sealed flags = %v", sealedByID)
+	}
+
+	// Export/import: the row lands with its flag, as a restored store must.
+	exported, err := GetProposal(db, sealedID)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	exported.ID = 99
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	inserted, err := InsertProposalWithID(tx, exported)
+	testsupport.Must(t, err, "InsertProposalWithID: %v", err)
+	if !inserted {
+		t.Fatal("InsertProposalWithID inserted nothing")
+	}
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+	imported, err := GetProposal(db, 99)
+	testsupport.Must(t, err, "GetProposal(imported): %v", err)
+	if !imported.Sealed {
+		t.Error("an imported sealed proposal read back unsealed")
+	}
 }

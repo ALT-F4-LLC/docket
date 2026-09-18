@@ -57,6 +57,76 @@ func TestEventsScopeToTheProject(t *testing.T) {
 	}
 }
 
+// TestRunFilterAnswersAcrossProjects is DKT-583.
+//
+// `events list --run RUN-N` from a neighbouring project's cwd returned
+// `{"ok":true,"events":null,"total":0}` for runs with hundreds of events: the
+// invoking project's scope was anded onto the run filter, and a run owned by
+// another project matched neither arm. Four analysts read that empty page as
+// "this run recorded nothing".
+//
+// A SUCCESSFUL EMPTY FEED IS THE FAILURE. The run clause is already a project
+// scope — narrower than any project's — so the second one can only subtract
+// rows it has no business subtracting.
+func TestRunFilterAnswersAcrossProjects(t *testing.T) {
+	conn := mustDB(t)
+
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := conn.Exec(q, args...); err != nil {
+			t.Fatalf("exec %s: %v", q, err)
+		}
+	}
+
+	exec(`INSERT INTO projects (id, identity, name) VALUES (2, '/repo/two', 'two')`)
+	exec(`INSERT INTO runs (id, project_id, request, status, budget, created_at_ms, updated_at_ms, row_version)
+		VALUES (10, 1, 'r', 'active', 0, 0, 0, 1)`)
+	exec(`INSERT INTO runs (id, project_id, request, status, budget, created_at_ms, updated_at_ms, row_version)
+		VALUES (20, 2, 'r', 'active', 0, 0, 0, 1)`)
+	exec(`INSERT INTO events (at_ms, kind, run_id, data) VALUES (1, 'run-activated', 10, '{}')`)
+	exec(`INSERT INTO events (at_ms, kind, run_id, data) VALUES (2, 'run-activated', 20, '{}')`)
+	exec(`INSERT INTO events (at_ms, kind, run_id, data) VALUES (3, 'step-claimed', 20, '{}')`)
+
+	// The verbatim bug: project 1's cwd, project 2's run.
+	foreign, err := ListEvents(conn, EventQuery{RunID: 20, ProjectID: 1})
+	testsupport.Must(t, err, "ListEvents(run 20 from project 1): %v", err)
+	if len(foreign.Events) != 2 || foreign.Total != 2 {
+		t.Fatalf("a run in another project answered %d events (total %d), want its 2 — "+
+			"a successful empty page is DKT-583's exact defect\n%+v",
+			len(foreign.Events), foreign.Total, foreign.Events)
+	}
+	for _, e := range foreign.Events {
+		if e.Run != "RUN-20" {
+			t.Errorf("the run filter leaked a neighbour's event: %+v", e)
+		}
+	}
+
+	// A run INSIDE the invoking project is unchanged.
+	local, err := ListEvents(conn, EventQuery{RunID: 10, ProjectID: 1})
+	testsupport.Must(t, err, "ListEvents(run 10 from project 1): %v", err)
+	if len(local.Events) != 1 || local.Total != 1 {
+		t.Errorf("the invoking project's own run answered %d events (total %d), want 1",
+			len(local.Events), local.Total)
+	}
+
+	// The unscoped (--all-projects) form still answers the same run.
+	all, err := ListEvents(conn, EventQuery{RunID: 20})
+	testsupport.Must(t, err, "ListEvents(run 20, all projects): %v", err)
+	if len(all.Events) != 2 {
+		t.Errorf("--all-projects --run answered %d events, want 2", len(all.Events))
+	}
+
+	// And a project-scoped feed with NO run filter is still scoped: dropping the
+	// predicate under --run must not drop it everywhere.
+	scoped, err := ListEvents(conn, EventQuery{ProjectID: 1})
+	testsupport.Must(t, err, "ListEvents(project 1): %v", err)
+	if len(scoped.Events) != 1 {
+		t.Errorf("the run-less project feed answered %d events, want only project 1's 1 — "+
+			"the scope predicate must survive for every query that names no run\n%+v",
+			len(scoped.Events), scoped.Events)
+	}
+}
+
 // TestScopedFeedSurvivesACorruptPayload guards DKT-68's filter against the one
 // way it could take the whole verb down.
 //

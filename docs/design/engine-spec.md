@@ -44,7 +44,11 @@ docket guard    spawn|record|stop|gate --step NAME [--input …]
 docket workflow init [--template NAME]          # scaffold instance config from shipped
                                                 #   optional templates (zero-authoring start)
 
-docket run start --request-file … ; activate; pause|resume|abandon; status; report
+docket run start --request-file … ; activate; conduct; pause|resume|abandon; status; report
+docket report executors [--since RUN-N|DATE] [--all-projects]
+                                                # cross-run ledger per executor hint and
+                                                #   voter name; read-only, operator-facing,
+                                                #   never consulted by next (DKT-2453)
 docket run budget RUN-N --set N                 # raise/lower a live cap (CAS,
                                                 #   event-logged — DKT-29, stage 7)
 docket next     --run RUN-N --json              # step-level ready set (engine-core §5)
@@ -52,6 +56,11 @@ docket dispatch open|close|verify|abandon --run RUN-N
                                                 # batch manifest (TTL'd, one open per run,
                                                 #   CAS); next refuses while open or
                                                 #   discrepancies exist; abandon unsticks
+docket run      note add|list RUN-N             # a standing statement recorded once
+                                                #   against the run, rendered as
+                                                #   `== RUN NOTE N` in EVERY packet the
+                                                #   run renders from then on and carried
+                                                #   by `context.notes` (DKT-1079)
 docket step     claim STEP-N                    # atomic; mints a capability token and
                                                 #   returns token + the step CONTEXT bundle
 docket step     heartbeat|complete|fail         # token via DOCKET_TOKEN env or stdin
@@ -78,7 +87,8 @@ surface differs:
 
 **Workflows.** Registered TOML in the generic grammar (§11.1): `[match]` predicates
 over kind/labels; steps with `executor` (opaque hint), `after`, `inputs`, `fanout`,
-`gates`, `threshold`, `on_fail` routing (closed vocabulary), loops with specified
+`gates`, `threshold`, `on_fail` routing (a closed vocabulary, or — on an
+`executor` step — the name of a `type="vote"` triage panel), loops with specified
 re-expansion rules (step identity per loop entry, threshold re-application, gate
 re-runs — the DSL's loop semantics are part of this spec, not implementation
 discretion), `max_attempts`, `expected_cost`, `metadata` passthrough. Validation runs
@@ -144,6 +154,37 @@ override-pass, note recorded); `approve|reject` belongs to `type=human` gate ste
 only, and a human gate's reject routing may not itself be `waiting-human`
 (register-time VALIDATION_ERROR).
 
+**Park class.** Every park records `park_class` beside `park_reason`: the reason
+is prose for the person the park escalates to, the class is the closed enum a
+conductor or panel routes on. It is assigned inside the routing transaction from
+that decision's own facts — a gate row's verdict word, a tally, an
+`EnterLoop` outcome — and never by reading the reason text, so rewording a
+message cannot move a row between classes. `SetStepRoutingTx` writes both halves
+in one statement, under the same condition, and REFUSES a park that names no
+class; a resolution, which writes a different status, overwrites neither.
+A blank class means the row parked before the column existed.
+
+| value | produced by |
+|---|---|
+| `gate-failed` | a completion gate ran and did not pass — the routing stage's failed-verdict branch |
+| `gate-unmatched` | a gate named no trust entry, so it never ran: the same branch when a recorded row's verdict is `unmatched`, and the gate-resolution path that parks on an unmatched entry outright |
+| `gate-skipped` | a gate measured nothing because the judged commit could not be bound — the routing stage's unmeasured branch, decided before the failed-verdict one |
+| `threshold-routed` | a declared `threshold` evaluated to a park, at the routing stage and at a vote step's approved-with-concerns evaluation |
+| `loop-bound` | a `fix-loop` entry refused because the ordinal would exceed `max_fix_loops` plus grants — every `applyFixLoop` caller, from `EnterLoop`'s refusal rather than its wording |
+| `vote-rejected` | a vote step tallied to a rejection |
+| `held-rejected` | an operator rejected a held cluster; the consequence lands on the ROUTING step, never the materialized one, which ends `done` either way |
+| `gap-only` | a completion whose only recorded artifacts were gaps, decided before any gate verdict |
+| `unchanged-handback` | a loop round handed back the commit its previous round recorded, so the review chain would re-read one tree |
+| `pass-floor` | a `pass` would have exited with declared `pass_floor` work still standing |
+| `action-failed` | an action step's computation could not run — bad params, an unorderable value, an unmatched command name, or a non-zero exit |
+| `attempts-exhausted` | the step spent its `max_attempts` budget |
+| `join-missed` | a join completed below `min_siblings` |
+| `triage-undecided` | a triage panel (DKT-1901) closed without a usable verdict — declined, no quorum, or retired without a tally — falling back to the same `waiting-human` a step with no panel would have reached |
+
+`paused` is not among them: it is a RUN status, never written to `steps.status`,
+so a paused run removes its steps from the scheduler through their run rather
+than by parking them, and no routing transaction produces it.
+
 **Scheduling.** `next` computes readiness (engine-core §5): dependencies,
 predecessors, scope non-overlap, run active, concurrency headroom per executor-hint
 class (a generic knob; the reference instance's config sets its write class to 1 —
@@ -177,14 +218,32 @@ or a pinned instance template file. Packet *layout* is thereby core mechanics wh
 instance's harness hands the packet to an LLM as its prompt; core neither knows nor
 cares.)
 
+**Run notes.** `docket run note add RUN-N --text "…"` (or `--file F`, `-` for stdin)
+records a standing statement against a run — once — and every packet the run
+renders from then on carries it verbatim as a `== RUN NOTE N` section directly
+after `== REQUEST`, for every step of every issue; `step context` carries it as
+`context.notes`, so a contract can name it. It is the one steering channel that is
+run-wide: `step resolve -m` reaches the step it rules on (and the round it
+authorizes), which is right for a ruling about one step's work and useless for a
+fact about the whole run — a required gate known to fail on clean HEAD, the issue
+tracking it, and the disposition already given, which a dispatcher learns before
+the first dispatch and which every worker otherwise rediscovers and re-files
+(DKT-1079). Issue comments remain an audit surface and never render. Notes are
+append-only (a changed ruling is a second note, rendered after the first), capped
+at 16 KiB because each rides every packet, refused on a terminal run, and each is
+recorded as a `run-note-added` event carrying its text, attributed human.
+`docket run note list RUN-N` reads them back in render order.
+
 **Guards.** `docket guard spawn|record|stop|gate` are deterministic allow/deny
 predicates over engine state for harness enforcement points (exit 0 allow / exit 2
 deny with reason): `spawn` — proposed rows byte-match the open dispatch and no
 unacknowledged write reaps; `record` — no unreconciled dispatch; `stop` — no pending
-work outside `waiting-human`; `gate --step NAME` — an approved `type=human` step of
-that name exists for the active run (the reference instance's commit hook shims
-`guard gate --step commit-gate`). Any harness's hook mechanism wires these as
-one-liners; the logic lives here. (`step heartbeat` serves the heartbeat hook — an
+work outside `waiting-human`; `gate --step NAME [--run RUN-N]` — an approved
+`type=human` or `type=vote` step of that name exists in the named run, or with no
+`--run` in any active run of the project (the reference instance's commit hook shims
+`guard gate --step commit-gate`; the unscoped form lets one run's approval answer
+for every caller in the project, so a hook that knows its run should pass it). Any
+harness's hook mechanism wires these as one-liners; the logic lives here. (`step heartbeat` serves the heartbeat hook — an
 engine verb, though not a guard predicate.)
 
 **Payloads and thresholds.** `schema register` accepts JSON Schema plus an
@@ -192,9 +251,9 @@ engine verb, though not a guard predicate.)
 (`threshold = { "fix-loop" = "any(severity >= high)" }` works because *the user's
 schema* declared the order — core never knows what a severity is). Aggregations beyond
 comparison are **action steps**. One is builtin and generic: `action = "aggregate"`
-with `params = { field, method = median|max|min, hold_spread, output }` computes over
-any ordered-enum payload field — median, spread-hold, and a recorded demotion trail
-work for severities, priorities, or tiers alike. Cluster membership arrives in the
+with `params = { field, method = median|max|min, hold_spread, output, route_at, source_field }`
+computes over any ordered-enum payload field — median, spread-hold, and a recorded
+demotion trail work for severities, priorities, or tiers alike. Cluster membership arrives in the
 payload itself: each element is one cluster, whose `field` value is either a scalar
 (a one-member cluster — the identity case) or an array of the cluster's member
 values; the builtin's input payload is the concatenated payloads of the step's
@@ -205,7 +264,23 @@ that cluster's payload index (`<step>-held@k#i`), together gating the routing st
 *(amended 2026-08-07, DKT-15: one step for the whole hold made approve/reject binary
 over the set, so an operator who wanted two clusters escalated and two accepted could
 not say so)*. The routing step waits for every one of them and routes once: per
-`on_fail` if any was rejected, otherwise through the threshold. The
+`on_fail` if any was rejected, otherwise through the threshold. An optional
+`route_at = "<value>"` names a routing floor in the field's declared order: only
+clusters whose reduced value's position is at or above it are emitted to the output
+payload — what the threshold evaluates and downstream `inputs` read — while the rest
+are recorded, fully reduced, on the aggregate's own `action_results` row and never
+enter the loop; a held cluster is never routed below the floor (the operator's
+decision, not the untrusted computed value, decides it), an unknown `route_at` value
+is a register-time refusal naming it, and with `route_at` absent the output is
+byte-for-byte what it always was *(amended 2026-08-23, DKT-593)*. An optional
+`source_field = "<name>"` names a property of each input element holding an
+array of opaque source labels (a workflow's own step-ref convention, say);
+core neither validates its contents nor reduces by it — G3's verbatim
+carry-through already moves whatever key it names into the output payload
+unchanged — the param exists solely so the run report can group a round's
+clusters by that key without core hardcoding one corpus's field name, the same
+reason `route_at` takes its floor as a value rather than assuming a field
+*(amended 2026-09-13, DKT-2462)*. The
 aggregate's output payload — per-cluster value, members, held flag, `demoted_from`,
 `operator_resolved` — validates against the shipped `aggregate@1` schema, and
 `operator_resolved` is set per cluster, on the approved ones only. The
@@ -278,6 +353,21 @@ anything — under a trust model fit for an OSS tool:
 - Trust entries default to **full-argv hashes**; prefix entries are explicit opt-in
   (`trust add --prefix`, with an over-authorization warning). Tokens pass via
   env/stdin, never argv; claim markers are 0600 in a per-user runtime dir.
+- **Conductor capability (DKT-2465).** The operator verbs — `step approve`,
+  `step reject`, `step resolve`, `step reap`, `run pause`, `run resume`, `run
+  abandon` — are not token-free. Each requires the run's *conductor capability*: a
+  256-bit token minted at the run's first activation (returned once, hash-only
+  storage on `runs.conductor_token_hash`), re-minted by `run conduct RUN-N`, and
+  presented via `DOCKET_TOKEN`/stdin like a lease token. "Repository access is the
+  authority" stopped holding once a harness gave every executor the operator's
+  checkout; the capability is what an executor is never handed, so the documented
+  path refuses it the way `step record` refuses an unclaimed worker. A run
+  activated before the capability existed stays open until it is conducted (the
+  guard-with-no-engine posture: nothing is required where nothing was minted). The
+  mechanism is tamper-evident, not tamper-proof: `run conduct` is deliberately
+  open to any caller, retires the standing token, and records who took the seat
+  (`conductor-seated`, with actor and cwd); a harness that keys its callers keeps
+  executors off that one verb.
 - **Conversational trust (zero-touch posture):** in this solution the session
   proposes, the human approves in-chat, and the session runs `trust add --yes` — the
   harness's own command-permission prompt is the human-confirmation backstop. The
@@ -411,6 +501,43 @@ registered. `--restore` reverses a retirement. There is deliberately **no
 delete verb**: old versions stay registered, which is what keeps lineage
 readable.
 
+A registry is **per project** (`UNIQUE(project_id, name, version)`), and
+`workflow register`, `workflow deprecate`, and `schema register` therefore
+accept `--project <ref>` and `--all-projects` *(amended 2026-08-24 — DKT-615)*.
+Without either flag each verb writes to the project the working directory
+resolves to, unchanged, and emits the row it always emitted. With either flag it
+emits a **per-project report** instead — one outcome per target
+(`registered` / `unchanged` / `deprecated` / `restored` / `already-binding` /
+`already-deprecated` / `conflict` / `not-registered` / `invalid`) — and each
+project's own idempotency and conflict rules are decided *there*: a CONFLICT in
+one project neither cancels nor hides another's registration, and the sweep
+runs to the end. The process exits with the failures' shared code when they
+agree and GENERAL_ERROR when they do not, having already written the report.
+`workflow register`'s **environment validation runs per target**, because
+`vote_rule` and `payload` references resolve against the registry of the project
+being written to — the same bytes can be valid in one project and name a schema
+that does not exist in the next, and storing them there anyway would defer a
+guaranteed activation failure. Register schemas store-wide first.
+
+`[match]` also accepts `domain_paths = [..]`, a list of path globs naming the paths
+this pipeline's domain occupies *(amended 2026-09-03 — DKT-1182)*. **It binds nothing.**
+It is not evaluated by the match predicate and no scope agreement can make a workflow
+bind an issue its labels do not select; routing stays keyed on `kind` and labels. Its
+sole consumer is an activation **lint**: an issue whose declared scope
+(`issues.scope_globs`) lies *entirely* inside some other bindable workflow's
+`domain_paths`, while lacking only the labels that workflow's `[match]` requires, is
+named in the activation report (`binding_warnings` in the JSON envelope, a stderr line
+in human mode) alongside both workflows and the missing labels. This is the
+**exactly-one-WRONG-match** case: exactly-one-match refuses zero and refuses several,
+but a mis-labelled issue matches its wrong workflow exactly once, so the count has
+nothing to catch — HRN-1118 was scoped entirely to a TUI test file, carried `qa` and
+not `ui`, bound the label-less baseline and silently lost the UI pipeline's judge
+fanout and render gates. The lint **warns and never refuses** (a cross-domain binding
+may be deliberate), stays quiet unless *every* scope glob is inside the domain, and
+stays quiet where no labelling could have bound the other workflow anyway — a `kind`
+it does not list, or an `unless_labels` entry that fires. A workflow that declares no
+`domain_paths` is linted against nothing.
+
 `[limits]` — optional map of executor *class* → `{ max = N, lease_ttl = "45m" }` (bare
 int = shorthand for `max`). When a run pins multiple workflows, the most restrictive
 limit per class wins; unset values fall back to `docket config` defaults. Classes also
@@ -433,18 +560,23 @@ is exactly `"write" = { max = 1, lease_ttl = "45m", max_step_duration = "2h" }`.
 | `payload` | `schema@ver`, optional | payload validated at `complete`; threshold fields check against it at register time; required on `action = "aggregate"` steps *(amended 2026-08-03, DKT-25)* |
 | `voters`, `vote_rule` | [executor hints], proposal-config name | required on `type="vote"` steps — who casts, which existing Docket threshold config tallies |
 | `after` | [step names], **required** except the first step and `loop = true` steps (whose ordering comes from loop entry, §11.3) | intra-workflow predecessors; `[]` = root (implicit topology was a footgun) |
-| `inputs` | [`"<step>.<kind>"` \| `"<step>.*"` \| `"issue.body"` \| `"issue.diff"`] | artifacts inlined into the context bundle, in order. `issue.diff` = the engine-computed VCS diff for the issue's scope, snapshotted and fingerprinted when its producing step completed (git in v1 — the one declared VCS coupling, §7) |
+| `after_fired` | [step names], optional; every entry must also appear in `after` | predecessors this step runs ONLY IF THEY FIRED: when every instance of a named step ends `skipped` — an interposed gate its threshold routed elsewhere (§11.2), a false `when`, an `on_fail = "skip"` routing, an operator's `--as skip` — this step is terminalized `skipped` in the same transaction, and the skip cascades through every step declaring `after_fired` on it in turn. Additive beside `after`, whose meaning is unchanged: `skipped` still releases an `after` join (J1), and a skipped `after_fired` step contributes no input (J3). The corpus case is a `drain-highs` executor that runs only on rounds `security-vote` actually decided *(added 2026-09-02, DKT-1085)* |
+| `inputs` | [`"<step>.<kind>"` \| `"<step>.*"` \| `"<step>.vote-record"` \| `"issue.body"` \| `"issue.diff"` \| `"issue.linked.<relation>.<kind>"`] | artifacts inlined into the context bundle, in order. `issue.diff` = the engine-computed VCS diff for the issue's scope, snapshotted and fingerprinted when its producing step completed (git in v1 — the one declared VCS coupling, §7). `<step>.vote-record` = the named `type="vote"` step's recorded proposal — tally outcome, weighted score, and every cast with its rationale — engine-served from the existing vote machinery; the named step must be a vote step, and the `vote-record` kind is reserved from `emits` *(amended 2026-08-22, DKT-545)*. `issue.linked.<relation>.<kind>` = a CROSS-ISSUE input: the latest recorded artifact of `<kind>` held by each issue this issue is linked to by `<relation>` (a relation type or its inverse form — `depends_on`, `dependency_of`, `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicate_of`), resolved and pinned by artifact id at activation inside the fat transaction; activation fails loudly when the relation is missing or no linked issue holds the kind, so the binding is enforced rather than an issue-body citation. V11's produced-kind table deliberately does not apply — the producer is another issue's run — and the `issue.linked` name is reserved from step names as `issue.latest` is *(amended 2026-08-22, DKT-547)* |
 | `gates` | [trusted gate names \| `{name, source="fence:<tag>", pre=bool}`] | `pre = true` gates run at claim with results included in the context bundle (measure-then-judge steps); the rest run in order inside `complete` (§2, §4) |
 | `params` | opaque KV table | arguments to `action` steps (e.g. the builtin `aggregate`) |
 | `min_siblings` | int, default = all | fanout join quorum (§2 Fanout joins); the default is the plain join — quorum semantics (the `on_fail` routing at join) apply only when declared below the sibling count *(clarified 2026-08-03)* |
-| `threshold` | table: routing → predicate (11.2) | routing computed over the step's recorded payloads |
-| `on_fail` | `"fix-loop"` \| `"waiting-human"` \| `"skip"` \| `"abandon-issue"`; default `"waiting-human"` | routing for gate failure / attempts exhausted; `type="human"` steps must declare it explicitly and `"waiting-human"` is invalid there — reject routes per `on_fail` (§2's reject-routing rule; amended 2026-08-03) |
+| `threshold` | table: routing → predicate (11.2) | routing computed over the step's recorded payloads; on `type="vote"` steps, over the tally's cast set after an APPROVED tally (11.2) *(amended 2026-08-22, DKT-545)* |
+| `pass_floor` | `{ field, at }`, optional; requires `payload`, and `at` must be a value of `field`'s declared order (V37/V37a) | exit bar on a `pass` routing: when the routing resolves to `pass` but the step's recorded payload holds an element whose `field` value sits at or above `at`'s position — and the element is neither `held` nor `operator_resolved` — the step parks `waiting-human` instead of exiting, naming `--as override-pass` and `--as fix-round` as the ways out. Both values are opaque tokens compared only by position, `route_at`'s discipline; declared nowhere, nothing changes *(amended 2026-08-26, DKT-870: RUN-58's reconcile routed `pass` with all 16 clusters open, six at the order's high position — "converged" in the ledger meaning "dispositioned")* |
+| `on_fail` | `"fix-loop"` \| `"waiting-human"` \| `"skip"` \| `"abandon-issue"` \| the name of a `type="vote"` step of this workflow (V40); default `"waiting-human"` | routing for gate failure / attempts exhausted; `type="human"` steps must declare it explicitly and `"waiting-human"` is invalid there — reject routes per `on_fail` (§2's reject-routing rule; amended 2026-08-03). A STEP NAME routes the failure to that TRIAGE PANEL instead of to an operator: the routing step must be an `executor` step, the named step must be `type="vote"`, and its `after` must include the routing step (V40). Only an executor may route this way because only its gate-failure path writes the suspension — every other failure source (a human gate's reject, a rejected tally, a quorum miss, a failed action) would terminalize the step `done` while naming the panel, releasing its successors as though it had passed. The failed step is then SUSPENDED — it keeps the non-terminal `gated` status, so nothing downstream is released and, unlike a `waiting-human` park, neither the issue (R2b) nor the run is held while the panel sits. The panel's proposal opens carrying the failure evidence: the failed step's instance and its `gate_results` rows with each gate's verdict, exit, and captured output. Its verdict is applied by `on_fail_routes` below *(added 2026-09-15, DKT-1901: a lane's first executor step has no review upstream, so `fix-loop` has nothing to route to and `waiting-human` was the only routing left — 190 of 328 parks on 2026-09-07 were an implement step failing its gates, 164 resolved `override-pass`)* |
+| `on_fail_routes` | table: `"approved"` \| `"rejected"` → `"retry"` \| `"fix-round"` \| `"abandon-issue"` \| `"waiting-human"`; only on `type="vote"` steps (V40a), required on a panel some `on_fail` names (V40c) | what a triage panel's tally does to the step that routed its failure here, applying the same transitions `docket step resolve --as` performs for an operator: `retry` resets the retry budget, releases the lease and returns the step to `pending`; `fix-round` grants an authorized loop round and supersedes the step (refused at register unless a `loop = true` body serves the routing step, V40b — a first-lane executor usually has none); `abandon-issue` routes the step `failed-routed`; `waiting-human` is the panel declining to decide, which converts the suspension into the ordinary park with the panel's rationale beside the gate rows. LIMITS: the keys are the vote's whole verdict vocabulary — a tally either reaches its threshold or does not — so ONE panel expresses at most two of the four routings; a workflow needing others declares another panel. A tally that reaches NO verdict the mapping is keyed on (a quorum miss, a proposal closed by `docket vote close`, an operator's manual commit) applies no mapped routing. THE PANEL'S OWN `on_fail` — which V13a already requires it to declare — then disposes of the suspended step, and that is the human backstop: `waiting-human` (the default) parks it for an operator, `abandon-issue` routes it `failed-routed` with the issue cascade, `fix-loop` buys an authorized round; `skip` is refused on a panel some step routes to (V40c), because routing a failed executor away is not a triage outcome. The panel's own row is then `skipped`. The suspension may not outlive the panel — the operator's resolution verbs act on a park, so a step left suspended behind a closed panel would have nothing able to resolve it — which is why the closure always disposes of it. On a tally that DID reach a verdict the panel routes `pass`, since a rejection is the answer it was convened to give rather than its own failure. Every mapped routing is followed by the same issue-and-run reconcile `docket step resolve --as` performs, so a panel's `abandon-issue` runs the same cascade an operator's does. A PANEL ANSWERS ONCE PER ORDINAL: its proposal is keyed `(run, issue, instance)`, so a step that failed, was ruled `retry`, and failed again at the same ordinal parks `waiting-human` naming the spent ruling rather than suspending for a panel that can no longer answer. A step whose routing did NOT select the panel — the ordinary passing lane — terminalizes it `skipped`, exactly as an unrouted threshold target is *(added 2026-09-15, DKT-1901)* |
 | `loop` | bool, default false | marks loop-body steps (11.3) |
 | `after_loop` | step name | re-entry target after a loop body completes |
+| `serves` | [step names], only on `loop = true` steps | scopes the body to the named steps' `fix-loop` routings — its loop CLUSTER (11.3); omitted = serves every trigger. Entries must name steps that can route `fix-loop`, and every step that can must be served by at least one body *(amended 2026-08-22, DKT-544)* |
 | `max_attempts` | int, default engine config | per-instance retry budget |
-| `max_fix_loops` | int, default engine config | loop-entry budget per issue |
+| `max_fix_loops` | int, default engine config | loop-entry budget per issue — ONE counter over EVERY `fix-loop` routing source (threshold, `on_fail`, rejected vote/human gate, quorum miss), read off whichever non-cluster step declares it. Each admitted entry post-increments the counter to its own 1-indexed ordinal; an entry whose new count exceeds the bound is refused with the counter restored, so `= N` admits exactly N entries and parks the N+1th `waiting-human`. Only a `fix-round` grant (one per resolution, effective bound = declared + grants) admits more *(amended 2026-08-23, DKT-587)*. On a `serves`-scoped loop body it is instead that CLUSTER's round budget, checked independently under the issue-level ceiling — it never raises or lowers it *(amended 2026-08-22, DKT-544)* |
+| `max_stalled_rounds` | int ≥ 0, default 0 (never fires); only on a step that can route `fix-loop` and records an artifact (V38) | non-convergence tolerance over THIS step's routed volume: a `fix-loop` entry after that many consecutive measured rounds in which the element count of the step's recorded payload never fell below the smallest count any earlier round recorded is refused in the non-convergence park's exact shape — counter restored, nothing instantiated, `waiting-human` naming `--as fix-round` as the way out, an authorized entry waived. "No improvement" means no new strict minimum, so volumes oscillating around a floor still park while a genuinely shrinking set never does *(amended 2026-08-26, DKT-870: RUN-51 held 8-12 clusters flat across TEN rounds and RUN-50 7-10 across six, both ended only by operator action — the plateau was the corpus's own non-convergence signal and nothing in the engine read it)* |
 | `expected_cost` | number ≥ 0, default 0 | budget-floor contribution per claim (§2) |
-| `when` | predicate over issue `kind`/`labels` | step is `skipped` when false |
+| `when` | predicate over issue `kind`/`labels` — clauses `<kind\|labels> <==\|!=\|contains> <value>` or `labels contains-any (a, b, c)` / `labels contains_any [a, b, c]`, joined by `and` throughout or by `or` throughout | step is `skipped` when false. `or` holds when at least one clause does; a predicate MIXING `and` and `or` is a VALIDATION_ERROR (V22), because the grammar has no parentheses and therefore no reading of `a and b or c` to prefer — the mixed case is expressed as two steps, which is what the disjunction removed the need for in the common case *(amended 2026-08-22, DKT-548)*. `labels contains-any (…)` is the step-level spelling of the `labels_any` [match] clause and holds when the list intersects the issue's labels — a CLAUSE, not a connective, so "kind X and any of these labels" is one homogeneous-`and` predicate rather than a mix V22 would refuse. The list needs at least one element and its values carry no whitespace *(amended 2026-08-22, DKT-550)*. The operator is spelled `contains-any` or `contains_any` and its list is delimited by `(…)` or `[…]`; all four combinations are the same clause, and the delimiters must pair — `[a, b)` is a VALIDATION_ERROR. Both spellings were admitted rather than one because `contains-any (…)` is what registered definitions carry and `contains_any [a, b]` is how a list is written everywhere else in a workflow TOML, so refusing either would make an author's first correct guess an error *(amended 2026-09-01, DKT-1000)* |
 | `metadata` | opaque KV table | recorded on the step; delivered in the context bundle |
 
 ### 11.2 Threshold predicates
@@ -468,6 +600,35 @@ where `agg ∈ {any, all, count>=n}` over the payload array,
 whose registered schema declares `ordered_enum` (§2). Fields and literals are
 validated against the registered schema at `workflow register` time. Example
 (standard-change): `threshold = { "fix-loop" = "any(severity >= high)" }`.
+
+**Vote-step thresholds** *(amended 2026-08-22, DKT-545)*: on a `type="vote"` step,
+`threshold` is evaluated over the proposal's recorded **casts** — one element per
+cast, addressable fields `vote` / `verdict` (aliases for the cast's verdict) and
+`voter` — and only after an **APPROVED** tally. A rejected tally routes per
+`on_fail`, exactly as before; a manually committed proposal (an operator setting
+the final outcome by hand) skips the threshold. The routing vocabulary is
+restricted to `"fix-loop"` / `"waiting-human"` / `"pass"` — step-name
+interposition is not available on vote steps — and operators to equality, because
+casts have no registered schema and ordered comparisons are defined only over
+`ordered_enum` fields (all register-time rules: V36). First match routes, no
+match ⇒ `"pass"`, and a step declaring no threshold behaves exactly as it always
+did. Example (an investigation read-gate):
+`threshold = { "fix-loop" = "count>=2(vote == approve-with-concerns)" }` sends an
+approved-but-concerned tally into the same revise loop a rejection enters,
+instead of the concerns evaporating; the loop body reads what the panel said
+through `inputs = ["<step>.vote-record"]` (§11.1).
+
+**Evidence on findings** *(amended 2026-09-14, DKT-2451)*: an entry of a cast's
+structured findings may cite `artifact:ARTIFACT-N` (an artifact the run holds)
+or `gate:<name>` (a gate result the run recorded). `vote cast` resolves every
+reference against the run the proposal was opened for before the cast records
+and refuses an unresolvable one by name; core checks that a reference resolves
+and never reads what it points at. `run report` lists every recorded finding
+with its evidence and marks an entry that cited nothing `unsupported`, so an
+asserted finding and a reproduced one are distinguishable in the record. An
+entry with no evidence keeps its bare-string wire form, so nothing that reads
+`findings_json` or the vote-record packet changes shape until a cast cites
+something.
 
 ### 11.3 Loop semantics (normative)
 
@@ -498,6 +659,24 @@ the highest existing ordinal ≤ the consumer's (mirroring input binding);
 re-instantiation never spans steps outside the `after_loop` chain. *(Clarified
 2026-08-03, S3 stage review.)*
 
+**Cluster scoping** *(amended 2026-08-22, DKT-544)*: a `loop = true` body may declare
+`serves = [step names]`, scoping it to the named steps' `fix-loop` routings. The
+TRIGGERING step — the one whose routing resolved to `fix-loop` — selects its
+cluster: clauses (2)–(4) then apply to the serving bodies and to the downstream
+chains of THOSE bodies' `after_loop` roots only (a body or `after_loop` declarer
+without `serves` serves every trigger, so a workflow declaring no `serves` anywhere
+has exactly one cluster and the original behavior, unchanged). The loop counter,
+its ordinal sequence, the `max_fix_loops` ceiling read off non-cluster steps, the
+non-convergence refusal, and `fix-round` grants all stay issue-level across every
+cluster. A `max_fix_loops` declared on a `serves`-scoped body additionally bounds
+that cluster's own rounds — counted as the distinct ordinals holding its scoped
+bodies' instances (bodies serving several triggers are counted wherever they ran) —
+and its refusal takes the ceiling's exact shape, waived once by the same
+`fix-round` resolution. The `loop-entered` event data names the trigger alongside
+the ordinal. Register-time rules: `serves` is valid only on `loop = true` steps,
+every entry must name a step of the workflow that can route `fix-loop` (V35), and
+every step that can route `fix-loop` must be served by at least one body (V17c).
+
 Engine-enforced numbers live core-side, never in opaque pins: per-class lease TTLs and
 concurrency (`[limits]` / `docket config`), attempt caps (step fields / config
 defaults), the per-run budget cap (`docket run start --budget N`, config default), and
@@ -511,7 +690,8 @@ next row        { step, instance, issue, run, executor, class, attempt,
 claim response  { step, token, lease_expires_ms, context }
 context         { step: <next row>, issue: {id, title, body_snapshot, kind, labels,
                   scope}, inputs: [{artifact, kind, producer_step, body, payload?}],
-                  pins: [{path, sha256}], loop_entry, metadata, pre_gates? }
+                  pins: [{path, sha256}], loop_entry, metadata, pre_gates?,
+                  notes?: [{id, text, recorded_at_ms}] }   # notes: DKT-1079
 dispatch        { dispatch, run, opened_seq, rows: [<next row>…] }   # verify = byte-equality on rows
 complete args   --artifact-file F  [--payload-file F]  [--usage '{"unit":n,…}']
                 [--metadata '{…}']   (token via DOCKET_TOKEN env or stdin — §4)
@@ -530,6 +710,11 @@ DKT-15)*. `pre_gates?` is an array of §11.4-shaped gate results for the step's
 a verdict is `unmatched` or timed out, null on ordinary pass/fail *(added
 2026-08-03, DKT-19 / DKT-20)*.
 
+`notes?` is the run's recorded notes (`docket run note add`, DKT-1079) in insertion
+order, present only when the run has at least one, so every bundle of a run without
+notes is byte-identical to before the member existed. `run note list RUN-N` and
+`run note add`'s answer carry the same `{id, text, recorded_at_ms}` shape.
+
 `docket step context STEP-N` re-emits `context` read-only (no token required; local
 inspection). `--meta` on it reports per-section byte counts — the closure-size record
-(engine-core §8).
+(engine-core §8) — `notes_bytes` among them, since a note rides every packet.

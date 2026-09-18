@@ -103,6 +103,14 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 	// verbs that read the raw row — `run repin`'s quiescence guard — still
 	// count it as mid-flight. Named here so an operator holding a `ready` and
 	// a repin CONFLICT at the same instant can see both are right.
+	//
+	// Off an active run the flag is unset and this line does not print, because
+	// `Scheduler.Expired` is suspended there: on a `waiting-human` run a lapsed
+	// claim reads as plain `claimed` with its past `expires` above, while `run
+	// repin` still names the lapse and points at `step reap`. The line's own
+	// text would be false on a parked run — no `next` or `claim` will reap it
+	// until the run is active again — so its absence is that suspension, not a
+	// missing label.
 	if row.LeaseExpired {
 		fmt.Fprintf(&b, "  lease:     expired, not yet reaped — next/claim will "+
 			"reap it; run repin still counts the claim as mid-flight\n")

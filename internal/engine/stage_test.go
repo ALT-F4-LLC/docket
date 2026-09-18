@@ -895,8 +895,12 @@ func TestLimitTruncationKeepsTheFixerBeforeItsJudges(t *testing.T) {
 	if answer.Total != 8 {
 		t.Errorf("total = %d, want the true pre-slice count 8", answer.Total)
 	}
-	if len(answer.Steps) != 2 {
-		t.Fatalf("offered %d rows under limit 2, want 2: %v",
+	// DKT-2070 made the cut LANE-complete: this offer is one issue's single
+	// in-offer closure, so a limit below it admits the closure whole rather
+	// than a two-row stage prefix. DKT-38's property is unchanged and is what
+	// the row assertions below still pin — the fixer leads, never the judges.
+	if len(answer.Steps) != 8 {
+		t.Fatalf("offered %d rows under limit 2, want the whole 8-row lane: %v",
 			len(answer.Steps), instancesIn(answer))
 	}
 	if answer.Steps[0].Instance != "fix@1" || answer.Steps[0].Stage != 0 {
@@ -1113,9 +1117,11 @@ func TestLimitSplittingTheOfferCutsFromTheJudgesEnd(t *testing.T) {
 			"the staged synthesize/reconcile/verify closure)", unlimited.Total)
 	}
 
-	// The old reproduction, under the new contract: a limit of 4 over the
-	// stage-ordered set keeps the fixer (stage 0) plus three judges (stage
-	// 1) — the fourth judge is what the cut drops, never the predecessor.
+	// The old reproduction, under DKT-2070's contract: the whole offer is one
+	// issue's in-offer closure, so a limit of 4 cannot start a lane it cannot
+	// finish and admits the closure whole. The original concern — the cut
+	// dropping the fixer and keeping its judges — is now impossible by
+	// construction rather than by the stage ordering alone.
 	limited, err := e.NextSteps(conn, run.ID, 4, nowMS)
 	testsupport.Must(t, err, "next (limit=4): %v", err)
 
@@ -1123,12 +1129,12 @@ func TestLimitSplittingTheOfferCutsFromTheJudgesEnd(t *testing.T) {
 		t.Errorf("Total = %d with limit=4, want the TRUE pre-limit count 8 "+
 			"(narrowing must not change what Total reports)", limited.Total)
 	}
-	if len(limited.Steps) != 4 || limited.Steps[0].Instance != "fix@1" ||
+	if len(limited.Steps) != 8 || limited.Steps[0].Instance != "fix@1" ||
 		limited.Steps[0].Stage != 0 {
-		t.Fatalf("limit=4 must keep the stage-order prefix — fix@1 first at "+
-			"stage 0, then three judges — got %v", instancesIn(limited))
+		t.Fatalf("limit=4 must admit the single lane whole with fix@1 first at "+
+			"stage 0 — got %v", instancesIn(limited))
 	}
-	for _, row := range limited.Steps[1:] {
+	for _, row := range limited.Steps[1:5] {
 		if !strings.HasPrefix(row.Instance, "review@1") || row.Stage != 1 {
 			t.Errorf("row %s (stage %d) under limit=4, want a review@1 judge "+
 				"at stage 1 behind the fixer", row.Instance, row.Stage)

@@ -75,6 +75,17 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
+	// DKT-564: the issue-mode DEFAULT limit does not apply in step mode. Here
+	// the answer IS a dispatch manifest — the conduct pipeline dispatches it
+	// verbatim — so a cut the caller never asked for strands the remaining
+	// steps un-dispatched, and a caller reading v1 JSON cannot even tell it
+	// happened. A run's ready set is bounded by the run, so returning all of
+	// it is the safe contract. An EXPLICIT --limit is still honoured: a caller
+	// who typed a cut asked for one, and the v2 envelope reports it as
+	// truncated.
+	if !cmd.Flags().Changed("limit") {
+		limit = 0 // 0 means no limit (readyRows)
+	}
 
 	ready, err := engine.NewEngine().NextSteps(conn, runID, limit, model.NowMS())
 	if err != nil {

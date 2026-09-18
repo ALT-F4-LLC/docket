@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -103,9 +104,69 @@ func ParseProposalID(input string) (int, error) {
 
 // Findings represents structured review findings.
 type Findings struct {
-	Blockers    []string `json:"blockers"`
-	Concerns    []string `json:"concerns"`
-	Suggestions []string `json:"suggestions"`
+	Blockers    []Finding `json:"blockers"`
+	Concerns    []Finding `json:"concerns"`
+	Suggestions []Finding `json:"suggestions"`
+}
+
+// Finding is one entry of a findings list: what a seat found, and the evidence
+// it rests on (DKT-2451).
+//
+// Evidence is a list of references the engine VALIDATED against the run when
+// the cast was recorded — `artifact:ARTIFACT-N` names an artifact that run
+// holds, `gate:<name>` a gate result it recorded — so a finding that cites its
+// evidence is distinguishable in the record from one that asserts. An entry
+// with no evidence is legal; the run report renders it as unsupported rather
+// than leaving the two indistinguishable. Core checks that a reference
+// RESOLVES and never reads what it points at to judge the finding.
+//
+// THE WIRE FORM IS POLYMORPHIC, on purpose. An entry with no evidence encodes
+// as the bare string it always was, so every stored `findings_json` row, every
+// export, and every consumer of the vote-record packet reads byte-identically
+// to before the field existed; only an entry carrying evidence encodes as
+// `{"text": ..., "evidence": [...]}`. Decoding accepts both forms.
+type Finding struct {
+	Text     string
+	Evidence []string
+}
+
+// findingJSON is the object form of Finding's wire shape.
+type findingJSON struct {
+	Text     string   `json:"text"`
+	Evidence []string `json:"evidence,omitempty"`
+}
+
+// MarshalJSON emits the bare string for an entry with no evidence and the
+// object form otherwise.
+func (f Finding) MarshalJSON() ([]byte, error) {
+	if len(f.Evidence) == 0 {
+		return json.Marshal(f.Text)
+	}
+	return json.Marshal(findingJSON(f))
+}
+
+// UnmarshalJSON accepts either wire form. Anything else — a number, an array,
+// null — is refused by name, so a malformed findings document fails at the
+// flag rather than storing an empty entry in silence.
+func (f *Finding) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	switch {
+	case bytes.HasPrefix(trimmed, []byte(`"`)):
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return err
+		}
+		*f = Finding{Text: text}
+		return nil
+	case bytes.HasPrefix(trimmed, []byte(`{`)):
+		var obj findingJSON
+		if err := json.Unmarshal(trimmed, &obj); err != nil {
+			return err
+		}
+		*f = Finding(obj)
+		return nil
+	}
+	return fmt.Errorf("a finding is a string or an object with text and evidence, got %s", trimmed)
 }
 
 // Proposal represents a consensus proposal for PBFT-inspired voting.
@@ -128,6 +189,22 @@ type Proposal struct {
 	FilesChanged     []string
 	FinalOutcome     string
 	EscalationReason *string
+	// Sealed is the rendering rule the proposal was opened under (DKT-2447):
+	// while it is still open, the read verbs withhold every cast's verdict,
+	// weights, findings and summary and render only who has cast. Once the
+	// status leaves `open`, everything renders. It is a norm-level shield,
+	// not a security boundary — the tally and the one-cast-per-voter rule
+	// never read it, and the rows stay readable through export and direct
+	// store access.
+	Sealed bool
+}
+
+// SealedOpen reports whether the proposal's casts are currently withheld: it
+// was opened sealed and no tally has closed it yet. THE one predicate every
+// read surface consults, so the surfaces cannot disagree about when a ballot
+// is still secret.
+func (p *Proposal) SealedOpen() bool {
+	return p.Sealed && p.Status == ProposalStatusOpen
 }
 
 // proposalJSON is the JSON wire format for Proposal.
@@ -144,6 +221,7 @@ type proposalJSON struct {
 	RequiredVoters   int      `json:"required_voters"`
 	Threshold        float64  `json:"threshold"`
 	WeightedScore    *float64 `json:"weighted_score"`
+	Sealed           bool     `json:"sealed"`
 	CreatedBy        string   `json:"created_by"`
 	CreatedAt        string   `json:"created_at"`
 	UpdatedAt        string   `json:"updated_at"`
@@ -173,6 +251,7 @@ func (p Proposal) MarshalJSON() ([]byte, error) {
 		RequiredVoters:   p.RequiredVoters,
 		Threshold:        p.Threshold,
 		WeightedScore:    p.WeightedScore,
+		Sealed:           p.Sealed,
 		CreatedBy:        p.CreatedBy,
 		CreatedAt:        p.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:        p.UpdatedAt.UTC().Format(time.RFC3339),
@@ -209,6 +288,7 @@ func (p *Proposal) UnmarshalJSON(data []byte) error {
 	p.RequiredVoters = j.RequiredVoters
 	p.Threshold = j.Threshold
 	p.WeightedScore = j.WeightedScore
+	p.Sealed = j.Sealed
 	p.CreatedBy = j.CreatedBy
 
 	p.Rationale = j.Rationale
@@ -360,4 +440,40 @@ func (v *Vote) UnmarshalJSON(data []byte) error {
 	v.CreatedAt = createdAt
 
 	return nil
+}
+
+// SealedCast is the projection of a Vote the read verbs emit while its
+// proposal is SealedOpen (DKT-2447): who cast and when, and nothing of what
+// they cast. It is its own type rather than a zeroed Vote so the wire form
+// carries NO verdict, confidence, relevance, weight, findings or summary keys
+// at all — an empty verdict string would still be a field a reader could
+// anchor on, and a schema-driven consumer would have to know it was blank on
+// purpose.
+type SealedCast struct {
+	VoterName string
+	CreatedAt time.Time
+}
+
+// sealedCastJSON is the JSON wire format for SealedCast.
+type sealedCastJSON struct {
+	VoterName string `json:"voter_name"`
+	CreatedAt string `json:"created_at"`
+}
+
+// MarshalJSON implements custom JSON serialization for SealedCast.
+func (c SealedCast) MarshalJSON() ([]byte, error) {
+	return json.Marshal(sealedCastJSON{
+		VoterName: c.VoterName,
+		CreatedAt: c.CreatedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// SealedCasts projects every vote onto its SealedCast, in the order given.
+// The result is never nil, so a JSON consumer always sees an array.
+func SealedCasts(votes []*Vote) []SealedCast {
+	out := make([]SealedCast, 0, len(votes))
+	for _, v := range votes {
+		out = append(out, SealedCast{VoterName: v.VoterName, CreatedAt: v.CreatedAt})
+	}
+	return out
 }

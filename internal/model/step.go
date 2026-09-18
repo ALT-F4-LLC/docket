@@ -14,6 +14,20 @@ func FormatStepID(id int) string {
 	return fmt.Sprintf("%s-%d", StepIDPrefix, id)
 }
 
+// ArtifactIDPrefix is the prefix artifact IDs render with, kept apart from the
+// step and run prefixes for the same reason StepIDPrefix is.
+const ArtifactIDPrefix = "ARTIFACT"
+
+// FormatArtifactID renders an artifact's display identity.
+func FormatArtifactID(id int) string {
+	return fmt.Sprintf("%s-%d", ArtifactIDPrefix, id)
+}
+
+// ParseArtifactID accepts `ARTIFACT-3` or a bare `3`, mirroring ParseStepID.
+func ParseArtifactID(s string) (int, error) {
+	return parseRefID(s, ArtifactIDPrefix, "artifact")
+}
+
 // ParseStepID accepts `STEP-3` or a bare `3`, mirroring ParseID and ParseRunID
 // so an operator's muscle memory carries across all three entities.
 func ParseStepID(s string) (int, error) {
@@ -70,6 +84,34 @@ type StepRow struct {
 	//
 	// The entries are OPAQUE (§11.1): core counts them and never interprets one.
 	Voters []string `json:"voters,omitempty"`
+	// Model, Effort, and Variant are resolved from the run's pinned
+	// policy.toml, present on an executor-class row (Executor set) the run
+	// can still offer — `pending` in the table, whether it renders `ready`,
+	// `staged`, or blocked — wherever the row is rendered: `next --run`, a
+	// dispatch manifest, `dispatch verify`'s recomputation, `step show`, and
+	// a context bundle's `step`. The value is the seat's standing [executors]
+	// variant, walked forward through [variants].escalate_to by this row's
+	// attempt (and, for a listed round executor, its round ordinal),
+	// redirected around any [security]-forbidden model, and clamped to
+	// [security].ceiling on a sensitive row — see
+	// internal/engine/policy_resolve.go.
+	//
+	// Absent — never present, never empty strings — when the run pins no
+	// policy.toml, when the row is not an executor row, or once the step has
+	// been handed out: the walk is keyed by the attempt an OFFER carries, and
+	// a claimed, running, or finished step's attempt already counts the claim
+	// that took it, so resolving it again would report one hop above what was
+	// actually spawned. The routing a claim ran under is in its claim
+	// metadata. A caller reading a row before this feature existed sees
+	// byte-identical rows.
+	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Variant string `json:"variant,omitempty"`
+	// VoterAssignments carries the SAME resolution per voter, present on a
+	// vote step (Voters set) under the same offer rule — a voter has no
+	// attempt or round to walk, so each resolves to its declared standing
+	// variant (see (*policyDoc).ResolveSeat). Order matches Voters.
+	VoterAssignments []VoterAssignment `json:"voter_assignments,omitempty"`
 	// Proposal is the display id of the proposal this vote step opened, once
 	// one has been opened. It is absent before that — a vote step whose
 	// proposal has not been created yet has no ballot to point at, and an
@@ -122,9 +164,24 @@ type StepRow struct {
 	// (zero on a pre-v23 claim means "no recorded breakdown", not "nothing
 	// happened"). Both sample at the same moment Attempt does. `omitempty`,
 	// so a row with no counted outcome serializes exactly as before.
-	FailedAttempts int     `json:"failed_attempts,omitempty"`
-	ReapedClaims   int     `json:"reaped_claims,omitempty"`
-	ExpectedCost   float64 `json:"expected_cost"`
+	FailedAttempts int `json:"failed_attempts,omitempty"`
+	ReapedClaims   int `json:"reaped_claims,omitempty"`
+	// PriorAttemptEnd names how the MOST RECENT claim to leave this step
+	// ended — "reaped" or "failed" — so a re-offer of a reaped-then-re-run
+	// step says so directly, instead of leaving a router to infer it from
+	// FailedAttempts/ReapedClaims, which answer "how many of each ever" and
+	// go ambiguous the moment a step's history mixes both (DKT-1279).
+	//
+	// RUN-80 DISPATCH-400 is the motivating incident: ten leases were reaped
+	// after a session was killed mid-wave, the steps re-dispatched at
+	// `attempt` incremented, and an on_failure escalation policy read that as
+	// "failed once" and routed all ten a tier up — a reap is a liveness
+	// event, not a quality verdict, and nothing on the row said which one had
+	// happened. `omitempty`, so a step that has never had a claim end this
+	// way — never claimed, or every claim so far recorded — serializes
+	// exactly as before.
+	PriorAttemptEnd string  `json:"prior_attempt_end,omitempty"`
+	ExpectedCost    float64 `json:"expected_cost"`
 	// LeaseTTLS is SECONDS, per §11.4's `_s` suffix. Resolved from the
 	// workflow's [limits] for the step's class, then `lease.ttl.<class>`, then
 	// `lease.ttl.default`.
@@ -179,6 +236,37 @@ type StepRow struct {
 	// it, `claim` remains the authority, and `omitempty` keeps every
 	// unconditional row's bytes exactly as before.
 	Conditional bool `json:"conditional,omitempty"`
+	// Bump says WHY a row sits at its stage rather than at the level its own
+	// dependencies require, on every row of an offer: BumpNone when nothing
+	// moved it, BumpHeadroom when its bounded class was already full in the
+	// stage it would otherwise have taken, BumpScope when another issue's
+	// tree-holding scope already occupied that stage and intersects this row's.
+	//
+	// The two carry different obligations for a reader that reschedules. A
+	// headroom bump is cohort packing against the offer's own shape: once a
+	// slot frees, nothing about the two rows conflicts. A scope bump is a
+	// writer conflict that must stay serialized however the cohort empties.
+	// Without this field the stage number is the only cross-issue fact a
+	// manifest carries, so a reader has to treat every pair the engine did not
+	// co-stage as conflicting and preserve an ordering that was never required.
+	//
+	// SET-RELATIVE like Stage and Conditional: core enforces nothing with it,
+	// its value depends on which other rows share the offer, and `dispatch
+	// verify` normalizes it away for that reason. Present on offer rows only;
+	// `omitempty` keeps every other rendering of a row byte-identical.
+	Bump string `json:"bump,omitempty"`
+	// BumpIssue is the display id of the issue whose held scope intersected
+	// this row's, present only on a BumpScope row — the conflict is between two
+	// named issues, and a reader that knows only "scope" still cannot tell
+	// which other row it must stay behind.
+	BumpIssue string `json:"bump_issue,omitempty"`
+	// Scope is the row's own issue's declared scope globs, carried so a reader
+	// can test intersection ITSELF for a pair the engine never co-staged.
+	// Bump answers only the pairs one offer placed in one cohort; two writers
+	// the engine placed in unrelated stages for unrelated reasons leave no
+	// trace a reader could test, and the globs are what make that testable
+	// without a second query per issue. Absent when the issue declares none.
+	Scope []string `json:"scope,omitempty"`
 	// Status is the EFFECTIVE status (§6.2) — `ready` when the §6.3 predicate
 	// holds, which is never a stored value — or `staged` on an offer row
 	// carried ahead of its readiness (db.StepStaged): every row this offer
@@ -205,8 +293,58 @@ type StepRow struct {
 	// see the window that reconciles them. `omitempty`, so every row outside
 	// the window serializes exactly as before; offer rows (`next`, `dispatch
 	// open`) never carry it because the offer path reaps for real first.
+	//
+	// THE PAIRING HAS ONE EXCEPTION: a run that is not `active`. The field is
+	// `Scheduler.Expired`, and that predicate is suspended off an active run
+	// (ready.go), so on a `waiting-human` run holding a lapsed-but-unreaped
+	// claim — the ordinary mid-wave human hold — this field stays unset while
+	// `run repin` does name the lapse (DKT-1791). Deliberate, not a drift: the
+	// label promises the reap `next`/`claim` will perform, and neither reaps
+	// anything while the run is parked. `Status` stays `claimed` there for the
+	// same reason, and `step show`'s rendered `expires:` line shows the lapse
+	// on a paused run; `step reap` is the verb that clears such a claim.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
+	// LoopRoundsRun, LoopTriggerStep, and LoopLatestVerdict are the loop
+	// history a fix loop leaves behind when it exhausts its `max_fix_loops`
+	// budget: how many rounds actually ran against the cap, the instance whose
+	// verdict opened the loop, and the verdict the last round ended on.
+	//
+	// They exist because a loop-bound park says only that the budget ran out.
+	// The three facts a person or a router needs next — was the cap reached or
+	// did something else stop it, what started the loop, and was the last round
+	// still finding problems — were reconstructible only from the event log,
+	// which is prunable. The rounds count is derivable from the loop ordinal
+	// against the pinned cap; the other two are not derivable from anything on
+	// the row, so all three are persisted together rather than leaving a reader
+	// to compute one and guess two.
+	//
+	// They are written as ONE fact by db.SetStepLoopHistoryTx and read back
+	// together: a trigger without its verdict describes a loop nothing measured.
+	// `omitempty`, so every row outside a loop exhaustion — which is nearly all
+	// of them — serializes exactly as before.
+	LoopRoundsRun     int    `json:"loop_rounds_run,omitempty"`
+	LoopTriggerStep   string `json:"loop_trigger_step,omitempty"`
+	LoopLatestVerdict string `json:"loop_latest_verdict,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// The values StepRow.Bump takes. A row carries exactly one of them.
+const (
+	// BumpNone: the row sits at the level its own dependencies required.
+	BumpNone = "none"
+	// BumpHeadroom: its bounded class was full in the earlier stage.
+	BumpHeadroom = "headroom"
+	// BumpScope: an intersecting issue scope held the earlier stage.
+	BumpScope = "scope"
+)
+
+// VoterAssignment is one vote step voter's resolved {model, effort, variant}
+// (DKT-1282), riding on StepRow.VoterAssignments.
+type VoterAssignment struct {
+	Voter   string `json:"voter"`
+	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Variant string `json:"variant,omitempty"`
 }

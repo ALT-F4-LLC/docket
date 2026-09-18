@@ -101,8 +101,12 @@ func enterLoopAt(t *testing.T, conn *sql.DB, e *Engine, ordinal int) {
 	} else {
 		claimAndComplete(t, conn, e, fmt.Sprintf("fix@%d", ordinal), "the fix summary", "")
 	}
-	claimAndComplete(t, conn, e,
-		fmt.Sprintf("assess@%d", ordinal), "the assessment", unmetPayload)
+	// And each round's assessment is its OWN, for DKT-589's sibling guard: a
+	// routing step that records the byte-identical verdict two ordinals running
+	// parks the loop, so a fixture that reuses one constant assessment would
+	// never reach the bound this file is about either.
+	claimAndComplete(t, conn, e, fmt.Sprintf("assess@%d", ordinal),
+		fmt.Sprintf("the assessment of round %d", ordinal), unmetPayload)
 }
 
 // ---------------------------------------------------------------------------

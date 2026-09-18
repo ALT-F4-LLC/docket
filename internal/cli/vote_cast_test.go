@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -404,4 +406,44 @@ func runVoteCastCapturingStderr(t *testing.T, conn *sql.DB, args ...string) (str
 	ctx := context.WithValue(context.Background(), dbKey, conn)
 	err := cmd.ExecuteContext(ctx)
 	return stderr.String(), err
+}
+
+// TestVoteCastRefusesEvidenceItCannotResolve is DKT-2451 at the CLI
+// boundary: a cast whose findings cite evidence on a proposal bound to no run
+// is refused as VALIDATION_ERROR naming the proposal, and nothing records —
+// while the same findings citing nothing land exactly as they always did.
+func TestVoteCastRefusesEvidenceItCannotResolve(t *testing.T) {
+	conn := newTestDB(t)
+	id, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "an operator's own ballot", Criticality: model.CriticalityLow,
+		Status: model.ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	ref := model.FormatProposalID(id)
+
+	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject",
+		"--confidence", "0.9", "--domain-relevance", "0.8",
+		"--findings-json", `{"blockers":[{"text":"reproduced","evidence":["artifact:ARTIFACT-1"]}]}`)
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation {
+		t.Fatalf("a cast citing evidence on an unbound proposal returned %v, want VALIDATION_ERROR", err)
+	}
+	if !strings.Contains(err.Error(), ref) {
+		t.Errorf("refusal %q does not name the proposal", err)
+	}
+	votes, err := db.GetProposalVotes(conn, id)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	if len(votes) != 0 {
+		t.Fatalf("the refused cast recorded anyway: %+v", votes)
+	}
+
+	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject",
+		"--confidence", "0.9", "--domain-relevance", "0.8",
+		"--findings-json", `{"blockers":["asserted, not reproduced"]}`)
+	testsupport.Must(t, err, "a cast citing nothing was refused: %v", err)
+	votes, err = db.GetProposalVotes(conn, id)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	if len(votes) != 1 || votes[0].FindingsJSON == nil || votes[0].FindingsJSON.Blockers[0].Text != "asserted, not reproduced" {
+		t.Errorf("the evidence-less cast did not record its findings: %+v", votes)
+	}
 }

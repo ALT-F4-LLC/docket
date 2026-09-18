@@ -106,7 +106,8 @@ const (
 	KeyEventsRetain = "events.retain"
 
 	// KeyVoteRulePrefix is the named-threshold-configuration namespace:
-	// vote.rule.<name>.threshold and vote.rule.<name>.criticality
+	// vote.rule.<name>.threshold, vote.rule.<name>.criticality,
+	// vote.rule.<name>.sealed and vote.rule.<name>.hold_on_dissent
 	// (gates-trust §8.3).
 	//
 	// A workflow's `type="vote"` step names a rule rather than passing flags,
@@ -114,10 +115,40 @@ const (
 	// as lease.ttl.<class>'s class is, and this reuses the config machinery
 	// rather than adding a table: a rule "exists" iff its `.threshold` is set.
 	KeyVoteRulePrefix = "vote.rule."
-	// KeyVoteRuleThresholdSuffix and KeyVoteRuleCriticalitySuffix complete a
-	// rule's two keys.
-	KeyVoteRuleThresholdSuffix   = ".threshold"
-	KeyVoteRuleCriticalitySuffix = ".criticality"
+	// KeyVoteRuleThresholdSuffix, KeyVoteRuleCriticalitySuffix,
+	// KeyVoteRuleSealedSuffix and KeyVoteRuleHoldOnDissentSuffix complete a
+	// rule's four keys.
+	//
+	// `.sealed` is opt-in and defaults to false: a sealed rule opens proposals
+	// whose casts the read verbs withhold (verdict, weights, findings, summary)
+	// until the tally closes the proposal, so a seat reading the ballot cannot
+	// anchor on a sibling's verdict. It is a RENDERING rule only — the tally
+	// and the one-cast-per-voter constraint never consult it.
+	//
+	// `.hold_on_dissent` is opt-in and defaults to false (DKT-2449): under a
+	// keyed rule an APPROVED tally that carries at least one `reject` parks
+	// the vote step for the operator instead of passing. The tally itself is
+	// untouched — the weighted mean is still db.CastVote's — and the park is
+	// strictly additive: it displaces a `pass` and never a fail route.
+	KeyVoteRuleThresholdSuffix     = ".threshold"
+	KeyVoteRuleCriticalitySuffix   = ".criticality"
+	KeyVoteRuleSealedSuffix        = ".sealed"
+	KeyVoteRuleHoldOnDissentSuffix = ".hold_on_dissent"
+
+	// KeyVoteRuleRosterSuffix and KeyVoteRuleWeightingSuffix are the rule's two
+	// IDENTITY dimensions (DKT-2448): who may cast, and what a cast is worth.
+	//
+	// Both are OPT-IN and both default to the behavior a rule has always had —
+	// `open` counts a cast from any name, `declared` prices a cast at the
+	// confidence and domain relevance the caster stated. Core changes no
+	// existing ballot; an instance that wants a constrained panel says so.
+	//
+	// REGISTERED HERE, NOT YET ENFORCED. This is the key-registration seam
+	// only: the cast path does not match a roster and the tally does not read a
+	// weighting. Each key's Doc says so, so an operator who reads `roster =
+	// strict` back is not told a constraint is in force that is not.
+	KeyVoteRuleRosterSuffix    = ".roster"
+	KeyVoteRuleWeightingSuffix = ".weighting"
 
 	// KeyVoteHoldRule and KeyVoteHoldVoters configure how a MATERIALIZED HELD
 	// step is decided: by one operator (the default) or by a tally.
@@ -140,6 +171,17 @@ const (
 	// whichever pipeline held, so who answers it is a project-level policy.
 	KeyVoteHoldRule   = "vote.hold.rule"
 	KeyVoteHoldVoters = "vote.hold.voters"
+	// KeyVoteHoldCost is the declared `expected_cost` a MATERIALIZED HELD vote
+	// step is minted with (DKT-584). An engine-minted held ballot has no
+	// `[[step]]` table to declare a cost in, so it carried 0 by construction —
+	// and since a vote step's declared cost accrues to the budget floor at
+	// materialization, that made every held panel invisible to the floor.
+	//
+	// Default "0", which is EXACTLY the prior behavior: a held ballot accrues
+	// nothing until an instance states what its panels cost. It applies only
+	// when a hold is minted as `vote` (both vote.hold.* keys set); a hold
+	// minted `human` is one operator's decision, not a panel's spend.
+	KeyVoteHoldCost = "vote.hold.cost"
 
 	// KeyAutoRegister toggles §9's auto-registration: whether `run activate`
 	// registers a workflow/schema it finds in an instance-config root
@@ -222,6 +264,36 @@ const (
 	// every other kind — a reader that needs the parsed bool calls ParseBool
 	// itself, the same way a reader of KindDuration calls ParseDuration.
 	KindBool
+	// KindVoteRoster is one of open|strict, a vote rule's roster dimension.
+	KindVoteRoster
+	// KindVoteWeighting is one of declared|equal, a vote rule's weighting
+	// dimension.
+	//
+	// It is a separate kind from KindVoteRoster rather than one shared
+	// "enum" kind because the two enumerate different vocabularies, and a
+	// single kind carrying its own value set would have to be a field on
+	// ConfigSpec — a second way to say what Kind already says.
+	KindVoteWeighting
+)
+
+// A vote rule's roster values: who a cast may be attributed to.
+//
+// `open` is the default and is the behavior every existing rule has: the
+// step's voter list is COUNTED, and a cast under any name fills a seat.
+// `strict` declares that only a name on the step's list may cast.
+const (
+	VoteRosterOpen   = "open"
+	VoteRosterStrict = "strict"
+)
+
+// A vote rule's weighting values: what one cast is worth in the tally.
+//
+// `declared` is the default and is the existing arithmetic — the caster's own
+// confidence times its own domain relevance. `equal` declares that every cast
+// counts the same, so a seat cannot price its own testimony.
+const (
+	VoteWeightingDeclared = "declared"
+	VoteWeightingEqual    = "equal"
 )
 
 // NameMaxBytes caps an opaque name stored in config or recorded in a ledger,
@@ -381,7 +453,8 @@ var engineConfigSpecs = []ConfigSpec{
 		Kind:    KindDuration,
 		Default: "15m",
 		Doc: "How long a claimed step may go unrecorded before it counts as a " +
-			"dispatch discrepancy",
+			"dispatch discrepancy, and how long after a run's newest step record " +
+			"its unbilled steps stay usage-pending rather than missing",
 	},
 	{
 		Key:     KeyEventsRetain,
@@ -407,6 +480,14 @@ var engineConfigSpecs = []ConfigSpec{
 		Default: "",
 		Doc: "Comma-separated voters on a materialized held step. Empty (the " +
 			"default) mints held steps as `human` for one operator to decide",
+	},
+	{
+		Key:     KeyVoteHoldCost,
+		Kind:    KindNonNegativeNumber,
+		Default: "0",
+		Doc: "Declared expected_cost a materialized held VOTE step is minted " +
+			"with, accrued to the run's budget floor at materialization. 0 " +
+			"(the default) accrues nothing, the prior behavior",
 	},
 	{
 		Key:     KeyAutoRegister,
@@ -454,9 +535,10 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 		}, nil
 	}
 
-	// vote.rule.<name>.threshold / .criticality (gates-trust §8.3), matched
-	// dynamically for the same reason the per-class TTL is: <name> is an
-	// opaque string, so the set of valid keys is open by design.
+	// vote.rule.<name>.threshold / .criticality / .sealed / .hold_on_dissent
+	// (gates-trust §8.3),
+	// matched dynamically for the same reason the per-class TTL is: <name> is
+	// an opaque string, so the set of valid keys is open by design.
 	if rest, ok := strings.CutPrefix(key, KeyVoteRulePrefix); ok {
 		if name, found := strings.CutSuffix(rest, KeyVoteRuleThresholdSuffix); found && name != "" {
 			return ConfigSpec{
@@ -473,6 +555,48 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 				Doc:     fmt.Sprintf("Criticality for vote rule %q", name),
 			}, nil
 		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleSealedSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether proposals opened under vote rule %q "+
+					"withhold their casts from the read verbs until the tally "+
+					"closes them; false (the default) renders every cast as it lands", name),
+			}, nil
+		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleRosterSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindVoteRoster,
+				Default: VoteRosterOpen,
+				Doc: fmt.Sprintf("Who may cast on a proposal opened under vote rule "+
+					"%q: open (the default) counts a cast from any name, strict "+
+					"admits only a name on the step's voter list. REGISTERED BUT "+
+					"NOT YET ENFORCED — the cast path does not match a roster", name),
+			}, nil
+		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleWeightingSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindVoteWeighting,
+				Default: VoteWeightingDeclared,
+				Doc: fmt.Sprintf("What one cast is worth in vote rule %q's tally: "+
+					"declared (the default) is the caster's own confidence times "+
+					"its own domain relevance, equal counts every cast the same. "+
+					"REGISTERED BUT NOT YET ENFORCED — the tally does not read it", name),
+			}, nil
+		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleHoldOnDissentSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether an APPROVED tally under vote rule %q "+
+					"that carries at least one reject parks its step for the "+
+					"operator; false (the default) routes it as before", name),
+			}, nil
+		}
 	}
 
 	return ConfigSpec{}, fmt.Errorf("%w: %q (known keys: %s)",
@@ -481,7 +605,7 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 
 // KnownConfigKeys lists the fixed keys, plus the open-ended patterns.
 func KnownConfigKeys() []string {
-	keys := make([]string, 0, len(engineConfigSpecs)+3)
+	keys := make([]string, 0, len(engineConfigSpecs)+7)
 	for _, spec := range engineConfigSpecs {
 		keys = append(keys, spec.Key)
 	}
@@ -489,6 +613,10 @@ func KnownConfigKeys() []string {
 		KeyLeaseTTLPrefix+"<class>",
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleThresholdSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleCriticalitySuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleSealedSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleRosterSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleWeightingSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleHoldOnDissentSuffix,
 	)
 	return keys
 }
@@ -590,18 +718,69 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 			return fmt.Errorf(
 				"%s must be a boolean (true/false), got %q", spec.Key, value)
 		}
+	case KindVoteRoster:
+		if err := ValidateVoteRoster(value); err != nil {
+			return fmt.Errorf("%s: %w", spec.Key, err)
+		}
+	case KindVoteWeighting:
+		if err := ValidateVoteWeighting(value); err != nil {
+			return fmt.Errorf("%s: %w", spec.Key, err)
+		}
 	}
 	return nil
 }
 
-// VoteRuleThresholdKey and VoteRuleCriticalityKey build a rule's two keys, so
-// the string concatenation lives in one place rather than at every reader.
+// ValidateVoteRoster and ValidateVoteWeighting are each dimension's value set,
+// stated once.
+//
+// They are exported because the engine calls them AGAIN at read time. Set-time
+// validation guards the CLI ingress only; a value that reached the store some
+// other way must not silently resolve to the permissive default, which is the
+// downgrade these keys exist to prevent.
+func ValidateVoteRoster(value string) error {
+	switch value {
+	case VoteRosterOpen, VoteRosterStrict:
+		return nil
+	}
+	return fmt.Errorf("roster must be %s or %s, got %q",
+		VoteRosterOpen, VoteRosterStrict, value)
+}
+
+func ValidateVoteWeighting(value string) error {
+	switch value {
+	case VoteWeightingDeclared, VoteWeightingEqual:
+		return nil
+	}
+	return fmt.Errorf("weighting must be %s or %s, got %q",
+		VoteWeightingDeclared, VoteWeightingEqual, value)
+}
+
+// VoteRuleThresholdKey, VoteRuleCriticalityKey, VoteRuleSealedKey,
+// VoteRuleRosterKey, VoteRuleWeightingKey and VoteRuleHoldOnDissentKey build a
+// rule's six keys, so the string concatenation lives in one place rather than
+// at every reader.
 func VoteRuleThresholdKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleThresholdSuffix
 }
 
 func VoteRuleCriticalityKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleCriticalitySuffix
+}
+
+func VoteRuleSealedKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleSealedSuffix
+}
+
+func VoteRuleRosterKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleRosterSuffix
+}
+
+func VoteRuleWeightingKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleWeightingSuffix
+}
+
+func VoteRuleHoldOnDissentKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleHoldOnDissentSuffix
 }
 
 // VoteRuleExists reports whether a rule is registered.

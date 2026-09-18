@@ -75,6 +75,10 @@ test_zh_stranger() {
 
   run_env "$ZH" run activate RUN-1
   assert_exit "ZH" "ZH4_activate" 0
+  # The sign-off ticket: human mode prints the conductor capability on its
+  # own line, the last line of stdout (DKT-2465).
+  local ZH_CTOK
+  ZH_CTOK=$(printf '%s' "$CMD_STDOUT" | tail -n 1)
 
   # The report goes to stderr in human mode.
   if printf '%s' "$CMD_STDERR" | grep -q "touch"; then
@@ -164,7 +168,7 @@ test_zh_stranger() {
   local ZH_APPROVE
   ZH_APPROVE=$(sqlite3 "$ZH/issues.db" \
     "SELECT id FROM steps WHERE instance='approve@0';")
-  run_env "$ZH" step approve "STEP-$ZH_APPROVE" --json
+  DOCKET_TOKEN="$ZH_CTOK" run_env "$ZH" step approve "STEP-$ZH_APPROVE" --json
   assert_exit "ZH" "ZH7_approve" 0
 
   # ---------------------------------------------------------------------------

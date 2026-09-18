@@ -32,6 +32,7 @@ var voteCreateCmd = &cobra.Command{
 		domainTagsRaw, _ := cmd.Flags().GetString("domain-tags")
 		filesChangedRaw, _ := cmd.Flags().GetString("files-changed")
 		escalationReason, _ := cmd.Flags().GetString("escalation-reason")
+		sealed, _ := cmd.Flags().GetBool("sealed")
 		jsonMode, _ := jsonModeOf(cmd)
 
 		// Default created-by to git user.name.
@@ -207,6 +208,7 @@ var voteCreateCmd = &cobra.Command{
 			DomainTags:       domainTags,
 			FilesChanged:     filesChanged,
 			EscalationReason: escalationReasonPtr,
+			Sealed:           sealed,
 		}
 
 		idempotencyKey, err := idempotencyKeyOf(cmd)
@@ -241,6 +243,10 @@ func init() {
 	voteCreateCmd.Flags().String("domain-tags", "", "Comma-separated domain tags (e.g. cli,database,api)")
 	voteCreateCmd.Flags().String("files-changed", "", "Comma-separated file paths affected by this proposal")
 	voteCreateCmd.Flags().String("escalation-reason", "", "Reason for escalation (if applicable)")
+	voteCreateCmd.Flags().Bool("sealed", false,
+		"Withhold each cast's verdict, weights, findings and summary from "+
+			"vote show/result until the tally closes the proposal; the same rule "+
+			"vote.rule.<name>.sealed applies to a workflow vote step")
 	addIdempotencyKeyFlag(voteCreateCmd)
 	voteCmd.AddCommand(voteCreateCmd)
 }

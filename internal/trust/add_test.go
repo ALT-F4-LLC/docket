@@ -261,19 +261,25 @@ func TestRemoveOnChangeSeesTheEntryItRemoves(t *testing.T) {
 			seen.Tree, seen.Network)
 	}
 
-	// The refusal path, same as add: the store keeps the entry.
+	// The refusal path is NOT the same as add (DKT-2198): the removal is
+	// published before the record, so a failing hook fails the verb over an
+	// entry that is already gone. TestTrustRemoveReportsAnUnrecordedRemoval
+	// pins that surviving shape and why it is the safe direction.
 	boom := errors.New("the record could not be written")
-	_, err = removeAt(path, RemoveRequest{
+	removedAnyway, err := removeAt(path, RemoveRequest{
 		Name: "checks", RepoRoot: repoA,
 		OnChange: func(Entry) error { return boom },
 	})
 	if !errors.Is(err, boom) {
 		t.Fatalf("the hook's error must fail the remove; got %v", err)
 	}
+	if !removedAnyway {
+		t.Error("the publish already landed, so the removal must be reported")
+	}
 	st, err := loadAt(path)
 	testsupport.Must(t, err, "loadAt: %v", err)
-	if len(st.Entries) != 1 {
-		t.Errorf("a refused remove must delete nothing; got %+v", st.Entries)
+	if len(st.Entries) != 0 {
+		t.Errorf("the published removal must have taken effect; got %+v", st.Entries)
 	}
 }
 

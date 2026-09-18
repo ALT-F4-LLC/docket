@@ -561,6 +561,33 @@ It is deliberately NOT the pre-existing `gate_results.stub`, which marks a row
 migrated from an S3 `gate_trail` — that is a fact about which era produced the
 row, and one column carrying both would answer neither question.
 
+### AMENDMENT (DKT-607) — a stub records its reason
+
+A stub entry may carry `stub_reason`, set by `docket trust add --stub
+--stub-reason "<why; tracking issue>"`. It records the DECISION behind the
+placeholder: why no real check exists yet and which issue tracks replacing it
+(e.g. `"no scanner selected yet; removal tracked by DKT-607"`).
+
+**The problem it solves.** DKT-265 made hollow green visible; it did not make it
+EXPLAINED. Two tribunal seats on DKT-V196 independently rediscovered the same
+corpus stubs (`secret-scan`, `sdet-abuse`) because the decision that they remain
+stubs lived only in tribunal transcripts. The project's stub-gate policy
+requires every stub to have a removal-tracking issue; this field is where that
+reference becomes discoverable from the surfaces an operator actually reads.
+
+**Where it surfaces.** The activation gate preflight prints it under the stub's
+own line (and carries it as `stub_reason` in the JSON row); a stub with NO
+recorded reason gets a remedy line naming `--stub-reason`. `trust list` renders
+it inside the `stub(no-real-check: …)` marker, and it rides §3.6's event beside
+`stub`.
+
+**Constraints.** It only makes sense alongside `stub = true`: a reason on a
+non-stub entry is refused at parse and at add, the closed direction. It is
+OPTIONAL on a stub — every pre-DKT-607 stub entry has none and keeps loading
+with an empty reason. Changing or erasing it on a re-add is a `CONFLICT`, since
+the reason is the documented decision and a silent rewrite would swap one
+decision for another under a re-approval.
+
 ## 3.6 Trust changes are event-logged (T9)
 
 `trust add` and `trust rm` write a **`trust-added` / `trust-removed` event** into
@@ -897,6 +924,71 @@ the next environment variable anyone invents.
 | `CI` | `1` | the near-universal convention for "non-interactive"; it makes tools skip prompts and progress spinners without docket having to know each tool |
 | `DOCKET_GATE` | the gate name | so a check can behave differently under docket if its author wants; opaque to core |
 | `DOCKET_REPO` | the repo root | the same value as `Dir`, for tools that need it in an env |
+| `DOCKET_GATE_BASE` | the step's base commit sha, **worktree-recorded completion gates only** | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
+| `DOCKET_STEP` | the step's reference, `STEP-N` | so a gate can ask the engine for its **own inputs** — the identity `docket step context` and `docket step artifacts` take — instead of re-deriving which step it is from `DOCKET_ISSUE` plus an instance-name convention; see below *(added 2026-09-03, DKT-1186)* |
+| `GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` | a scratch directory deleted with the tree, **gates measuring a reconstruction only** | both tools cache issues by package content while storing the absolute path each was found at, and re-open that path to find the `//nolint` that suppresses it. A reconstruction outlives neither, so its entries must not either — see §7.6's DKT-1166 amendment *(added 2026-09-03, DKT-1166)* |
+
+**`DOCKET_GATE_BASE` — the step's committed range** *(DKT-992)*. Executors
+commit **before** `step record`, so at gate time a worktree-recorded step's
+tree is clean: a working-tree-only scan measures zero lines however large the
+change (RUN-66's secret-scan passed 8/8 write steps that way), and a gate
+guessing `git diff HEAD~1` is wrong for every multi-commit step. The engine
+already knows the step's base — the worktree's **fork point**, the same
+resolution the diff stage's `runDiffBase` applies — so completion gates of a
+`--worktree`-recorded step export it:
+
+- **Worktree-recorded step**: `DOCKET_GATE_BASE` names the commit the worktree
+  was created from. `git diff $DOCKET_GATE_BASE..HEAD` in the gate's own cwd
+  (the worktree, per DKT-9) is exactly the step's committed change — the same
+  range the recorded `issue.diff` describes.
+- **Non-worktree step**: the variable is **unset** — that is the documented
+  pick between the two admissible encodings (unset, or equal to `HEAD`). The
+  shared checkout has no fork point, the run's pinned commit is not this
+  step's base (sibling work lands between them, DKT-42's over-attribution),
+  and a live `HEAD` read is a value docket cannot vouch for as a range
+  endpoint. Absence — never an invented sha — is the encoding, the same
+  convention as `DOCKET_SCOPE`.
+- The variable is also unset when the fork point cannot be resolved, and on
+  the pre-claim path (a pre-gate measures the tree under review, not a
+  recorded completion; after integration sweeps a worktree, no honest base
+  survives to export).
+- **Fail closed on absence**: a range-shaped gate that finds the variable
+  absent while the tree is clean has nothing it can honestly scan, and should
+  fail rather than pass having measured nothing — "we couldn't check, so
+  carry on" is what makes a control decorative (N3).
+
+**`DOCKET_STEP` — the gate's own identity** *(DKT-1186)*. A gate frequently
+needs an **artifact an earlier step of the same issue produced** — a threat
+model feeding an abuse-case check, a synthesis feeding a verifier. Nothing in
+the child environment named the step, so the only route was to rebuild the
+gate's identity from outside the engine: `docket step list --issue
+$DOCKET_ISSUE`, pick the row by a **hardcoded instance-name convention**, parse
+that listing's JSON shape, then `docket step artifacts` on the result. That is
+three couplings to things the engine is free to change — instance naming,
+listing order, wire shape — and each one breaks silently when it moves. It was
+observed in the wild (RUN-80's activation gate, `agentic-services` commit
+`897c0a7`) and flagged as a precedent not to set.
+
+- **Value**: the step's rendered reference, `STEP-N` — precisely the argument
+  `docket step context STEP-N` and `docket step artifacts STEP-N` take. The
+  bundle's `inputs` **are** the artifacts the step was handed, so
+  `docket step context $DOCKET_STEP` answers "what were my inputs" in one verb
+  against a stable identity, and `docket step artifact ARTIFACT-N` fetches a
+  body from there.
+- **Set on both paths**: completion gates (the saga) and pre-gates (the
+  pre-claim path) alike. The pre-claim path is where it matters most — a
+  pre-gate runs *before* the claim hands the bundle over, so asking the engine
+  by reference is its only route to the chain's artifacts.
+- **No new authority.** Both verbs are read-only and take no token, and the
+  reference is an identifier the child could already reconstruct by hand. This
+  makes the lookup cheap and correct rather than conventional and fragile; it
+  does not widen what a gate may do. `DOCKET_PATH` and `DOCKET_TOKEN` remain
+  excluded, unchanged.
+- **Unset, never `STEP-0`**: a gate spawned with no step in hand (a bare runner,
+  a future caller) sees the variable **absent**. A well-formed id that resolves
+  to nothing fails inside the gate's own tooling with a misleading message,
+  where absence is a condition the gate can test — the same encoding
+  `DOCKET_SCOPE` and `DOCKET_GATE_BASE` use.
 
 **Excluded, by name, in addition to being absent from the allowlist:**
 
@@ -1275,6 +1367,14 @@ step's inputs rather than of any gate:
 | sha reachable, tree gone | **Reconstruct** it — `git worktree add --detach` into a throwaway checkout, measure, release. Sweeping a checkout does not delete the object |
 | neither | `skipped`, spawning nothing, with a reason naming the sha or the swept path |
 
+**The lock timeout is the same case (DKT-91).** A `tree = true` gate whose
+working-tree mutex does not come free within its bound never spawns either, so
+it records `skipped` with a reason naming the wait — no exit code, no duration,
+no output — and parks as unmeasured rather than routing per `on_fail`. The
+cause differs from a swept worktree; the fact does not. `fail` there spent the
+token a genuinely failing build spends, and a fix loop entered on it would ask
+a worker to fix a tree the engine never opened.
+
 Reconstruction is what makes mode 2 a fixed bug rather than a documented park:
 parking every swept-worktree verify is honest and useless. It is NOT a
 best-effort fallback — if the sha cannot be checked out the gate skips, exactly
@@ -1304,6 +1404,46 @@ RUN-29 STEP-746 record `skipped` and silently pass-route.
 PG4 is unchanged and still applies: a PRE-gate that could not bind its tree is
 data for the step's worker, not a park. Parking on it would be the engine
 judging a step by an input it handed the step itself.
+
+### AMENDMENT (DKT-1166) — a throwaway tree gets throwaway linter caches
+
+DKT-254 gave a pre-gate the right tree. It did not give it a cache that dies
+with that tree, and a class of tool needs exactly that.
+
+**The mechanism.** golangci-lint and staticcheck cache each reported issue
+keyed by **package content**, storing the **absolute path** the issue was found
+at, and re-open that path afterwards to look for the `//nolint` (or
+`//lint:ignore`) comment that would suppress it. A reconstruction is deleted
+within the minute; the content hash is not. So one reconstruction's entries are
+replayed in the next, the suppression lookup re-opens a file that is gone, and
+an already-suppressed issue is re-emitted as live.
+
+**Observed**: harness RUN-64/STEP-2939 recorded `ac-commands: fail, exit 2` over
+a clean tree. Build and tests exited 0; `make lint` reported one forbidigo issue
+at `../docket-pregate-4091742512/…/timelinecompare_test.go` — a directory an
+earlier reconstruction had already removed — with golangci-lint warning it could
+not read that file, while the source carried `//nolint:forbidigo` on the line
+above and the same sha linted in place reported `0 issues.`
+
+**The cwd was never the problem.** DKT-254 already binds the reconstruction and
+`gate_exec.go` already spawns in it, which is why the reported path was
+*relative to* the current reconstruction. The carrier is the cache, and it
+poisons in both directions: the operator's own persistent cache also receives
+entries naming a `docket-pregate-*` path docket is about to delete.
+
+**The rule.** A gate that measures a tree docket will delete gets its
+path-carrying result caches inside a scratch root docket deletes with that tree
+(`GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` — §5.3). A gate over a tree that
+stays on disk keeps its shared caches: re-analysis is a real cost, and it is
+only worth paying where the tree is genuinely throwaway. The Go **build** cache
+is deliberately untouched — what makes an entry dangerous here is a stored
+source path the tool re-opens to decide suppression, and relocating `GOCACHE`
+would rebuild the standard library on every reconstruction for no such benefit.
+
+A cache root that cannot be created **fails the reconstruction**, which records
+`skipped`, on the same reasoning as the rest of this section: a measurement that
+can report a suppressed issue as live is measuring the wrong thing, and that is
+the defect, while measuring nothing is a gap.
 
 ### 7.6.1 Ordering and the claim restructure
 
@@ -1502,6 +1642,7 @@ registry (SKILL.md's engine-configuration table), not a new table:
 |---|---|---|
 | `vote.rule.<name>.threshold` | float in (0,1] | the approval threshold this rule tallies at |
 | `vote.rule.<name>.criticality` | `low\|medium\|high\|critical` | the proposal's criticality |
+| `vote.rule.<name>.sealed` | bool, default `false` | whether proposals opened under this rule withhold their casts from the read verbs until the tally closes them (DKT-2447, below) |
 
 `<name>` is an opaque string, exactly as `lease.ttl.<class>`'s class is. A rule
 "exists" iff `vote.rule.<name>.threshold` is set. This reuses the config
@@ -1511,6 +1652,36 @@ machinery, its `VALIDATION_ERROR`-on-unknown-key behavior, and its
 **`required_voters` comes from `len(voters)`, not from the config**, because
 §11.1 puts the voter list on the step. A rule is about *how strictly to tally*;
 the step is about *who casts*.
+
+**Sealed ballots (DKT-2447).** Every proposal used to render every recorded
+cast — verdict, confidence, relevance, weight, findings, summary — while it
+was still open, so a seat that read the proposal after a sibling had cast saw
+the sibling's verdict and reasoning before casting its own: the public-board
+channel for anchoring and collusion. `vote.rule.<name>.sealed = true` closes
+that channel for the proposals a rule opens. The flag is resolved beside the
+threshold in `resolveVoteRule` and **stored on the proposal at open** (v28's
+`proposals.sealed`, reliability-delta §2), so an edit to the rule cannot
+change what a live ballot renders under the seats mid-vote; `vote create
+--sealed` is the same flag for a conversational proposal.
+
+While a sealed proposal is `open`, `vote show`, `vote result` and `gate
+status` render only **who has cast and how many casts are in**: the human
+views list voter names under a `sealed` note, the JSON `votes` array carries
+`{voter_name, created_at}` entries and no verdict, confidence, relevance,
+weight, findings or summary keys, and `gate status` reports each seat's
+`cast` without its `verdict`. `vote list` already rendered only the count.
+The moment the status leaves `open` — a tally, a `vote commit`, a `vote
+close` — everything renders, and the `vote-record` context artifact a
+downstream step consumes is composed only after the vote step routes, so it
+never carries an open ballot's casts.
+
+Sealing is a **norm-level shield, not a security boundary.** It changes what
+the read verbs *render* and nothing else: `db.CastVote`, its weighted score,
+its quorum and the one-cast-per-voter constraint never read the flag, and the
+vote rows stay exactly as readable as before through `docket export`,
+`ListAllVotes`, and direct store access with `sqlite3`. A seat that wants to
+read a sibling's cast can; the shield removes the default path that handed
+it to every seat that merely looked at the proposal it was asked to judge.
 
 ## 8.4 What is NOT in scope here
 

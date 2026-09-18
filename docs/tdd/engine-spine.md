@@ -287,7 +287,7 @@ offending field. Every row is a test case (§4.6). The table is the phase's cont
 | V19 | `max_attempts` ≥ 1; `max_fix_loops` ≥ 0; `expected_cost` ≥ 0 | §11.1 |
 | V20 | `threshold` keys ∈ {`fix-loop`, `waiting-human`, `pass`} ∪ step names in this workflow | §11.2 |
 | V21 | `threshold` predicate parses as `agg(field op literal)`, `agg ∈ {any, all, count>=n}`, `op ∈ {==, !=, >=, >, <=, <}` | §11.2 |
-| V22 | `when` parses as a predicate over `kind`/`labels` only | §11.1 `when`; engine-core §4 "conditions (predicates over issue kind/labels only)" |
+| V22 | `when` parses as a predicate over `kind`/`labels` only, its clauses joined by `and` throughout or `or` throughout — a mix of the two is refused (DKT-548). A clause is `<kind\|labels> <==\|!=\|contains> <value>` or the set form `labels contains-any (a, b, c)`, whose list must be non-empty, comma-separated, and free of whitespace inside its values; `contains-any` is `labels`-only (DKT-550). The set operator is equivalently spelled `contains_any` and its list equivalently delimited `[a, b, c]`, with the delimiters required to pair (DKT-1000) | §11.1 `when`; engine-core §4 "conditions (predicates over issue kind/labels only)" |
 | V23 | `class` defaults to the `executor` value when unset | §11.1 `class`: "default = executor value" |
 | V24 | `[limits]` values: `max` ≥ 1, `lease_ttl`/`max_step_duration` parse as durations | §11.1 `[limits]` |
 | V25 | `payload` matches `name@version` shape (**shape only** at S3 — §6.14) | §11.1 `payload` |
@@ -370,8 +370,17 @@ verbs):
 | `docket step approve STEP-N [--note …]` | step → `done`, `step-approved` event; downstream `after` successors become ready by the ordinary §6.3 predicate. An approve records **no artifact** (§4.3.1: human steps produce none) |
 | `docket step reject STEP-N [--note …]` | step → routed per the step's **effective `on_fail`** — which V13/V13a guarantee is one of `fix-loop`, `skip`, `abandon-issue`, never `waiting-human`; `step-rejected` then `step-routed` events, in the one routing transaction of §6.8 stage N+1 |
 
-Both refuse a non-`human` step with `VALIDATION_ERROR` (§6.9 R10) and both are
-token-free (§6.10): a human gate is resolved by an operator, who never claimed it.
+Both refuse a non-`human` step with `VALIDATION_ERROR` (§6.9 R10) and neither
+takes a lease token (§6.10): a human gate is resolved by an operator, who never
+claimed it. Both — with `step resolve`, `step reap`, and the run lifecycle
+verbs — require the RUN'S CONDUCTOR CAPABILITY instead (DKT-2465,
+reliability-delta §2's v29 amendment): the token the run's first activation
+returned once, or `run conduct` re-minted, presented via `DOCKET_TOKEN`/stdin;
+none is the R1 `VALIDATION_ERROR`, a wrong one the R3 `AUTH_ERROR`, and a run
+activated before the capability existed asks for none. The event records who
+(DKT-2450): `step-approved`, `step-rejected`, `step-resolved`, and a forced
+`lease-reaped` carry `actor` and `cwd` beside the note, exactly as trust events
+do — see runs-dispatch §8.7.
 
 ### 4.3.3 Register-time DAG lints
 
@@ -407,7 +416,7 @@ one classification feeds the lint, expansion, and the engine's readiness latch
 | Verb | Flags | Effect |
 |---|---|---|
 | `docket workflow register <file.toml>` | `--json[=v2]` | parse + validate + lint; insert `name@version`; idempotent on identical bytes; `CONFLICT` on differing bytes at an existing `name@version` |
-| `docket workflow list` | `--name`, `--limit`, `--json[=v2]` | registered workflows; a `Collection` (reliability-delta §4.1) so v2 renders `{items,total,truncated}` |
+| `docket workflow list` | `--name`, `--limit`, `--orphans`, `--json[=v2]` | registered workflows; a `Collection` (reliability-delta §4.1) so v2 renders `{items,total,truncated}`; `--orphans` narrows to registrations whose NAME no file in any instance-config root declares any more (DKT-609), stamping each row with an `origin` verdict and refusing outright when there is no root to scan |
 | `docket workflow show <name>[@<version>]` | `--source`, `--json[=v2]` | the parsed definition; `@version` omitted ⇒ highest registered; `--source` emits the stored TOML verbatim |
 | `docket workflow init` | `--template NAME`, `--dir PATH`, `--force` | writes template files into `.docket/config/` (default), refusing to overwrite without `--force` |
 
@@ -612,6 +621,60 @@ mid-run edit immunity; freezing the scheduler would ignore a correction that exi
 precisely to prevent a collision. Both are stated so neither is "fixed" into the
 other later.
 
+**No AUTOMATIC path refreshes the snapshot** (DKT-741). It is written once, at
+activation stage 4, and nothing rewrites it for the life of the run — not a claim, not
+a fix-round, not a re-instantiation, and not an `issue edit`. So the consumers that
+read it — the packet's `context.issue.scope` (§6.6) and the recorded `issue.diff`
+scope (§6.7.1 D1) — cannot drift apart from each other or from what the run was
+activated on. Re-snapshotting at claim time instead would break exactly that: two
+steps of one run would render two different declared scopes and record their diffs
+over two different path sets, and a packet would stop being reproducible from the
+ledger. `docket issue edit --scope` therefore reaches the live column and nothing
+else, which is correct and is also a trap:
+
+| what the operator wants | what `issue edit --scope` does |
+|---|---|
+| stop a collision the scheduler is about to allow | works, immediately — R4 reads live |
+| widen an authorized scope so a live step's packet says so | **does nothing**; the packet renders the frozen snapshot |
+
+The second row has **two** dispositions, and which one is right depends on whether the
+run's premise changed or one declaration was corrected.
+
+**Where the premise changed**, take the issue out of the run and re-plan it —
+`docket run abandon RUN-N --issue DKT-M --reason "scope widened"`, then plan it into a
+new run, whose activation snapshots the widened scope afresh. It is expensive on
+purpose: a mid-run scope widen can invalidate the premise every step of that issue
+already executed under, and re-planning is what re-establishes it.
+
+**Where the premise is intact**, `docket run refresh-scope RUN-N --issue DKT-M
+--reason R` copies `issues.scope_globs` into that one run-issue's snapshot and
+rewrites nothing else in it (DKT-869, `RefreshIssueScopeInRun`). DKT-741 had ruled out
+any refresh verb; RUN-52 (VPL-434) then charged twice for that ruling on an intact
+premise — the panel rejected work as out of scope, the operator agreed and widened it,
+the already-minted `fix@2` step still rendered the old scope, and the issue was
+abandoned mid-loop. The freeze keeps its default and gains an explicit exception whose
+four properties are what keep it from being a hole in §9 item 5:
+
+1. **It carries no scope of its own.** There is no `--scope` on it; `issue create|edit
+   --scope` stays the sole writer of the column it copies, so the refresh cannot make
+   real a scope that was not declared through the one gate widening has always had. A
+   refresh with no widen behind it is **refused** (CONFLICT), not silently no-op'd.
+2. **No step straddles it.** It refuses while any of the issue's steps is `claimed`,
+   `running`, or `gated`, and while a dispatch is open — the repin quiescence rule
+   (DKT-408) applied to the other frozen premise. `pending` and `waiting-human` are the
+   refreshable states.
+3. **It rewrites no history.** Terminal steps keep their artifacts and the scope their
+   diffs were computed over; only the remaining steps' renders move.
+4. **The discontinuity is in the ledger.** One `issue-scope-refreshed` event (actor
+   `human`) carries the old scope, the new scope, the instances reached, and the
+   operator's reason — so two steps of one run declaring two different scopes is a
+   dated, attributable fact rather than drift a reader must infer.
+
+`issue edit --scope` **warns**, naming the run, the frozen scope, the count of live
+steps, and **both** verbs, whenever the edit changes the scope of an issue that still
+has non-terminal steps in a non-terminal run (`ScopeEditFrozenForActiveRuns`). It
+reports rather than refuses, because the write is real for the scheduling half.
+
 ## 5.2 Run status and the minimal subset
 
 engine-core §1.1: `planning → active ⇄ waiting-human → done | abandoned`. All five
@@ -624,7 +687,7 @@ statuses exist at S3 because the step lifecycle routes into `waiting-human` and
 | `docket run activate RUN-N` | the fat transaction (§5.3) |
 | `docket run pause\|resume RUN-N [--reason R]` | `active ⇄ waiting-human`; pause blocks new claims, honors in-flight completes (engine-core §3.4) |
 | `docket run abandon RUN-N --reason R` | terminal; revokes live leases |
-| `docket run status [RUN-N] [--active]` | read-only; effective status computed at read |
+| `docket run status [RUN-N] [--all]` | read-only; effective status computed at read; the list hides done and abandoned runs unless `--all` |
 
 `--budget N` on `run start` is **accepted and stored** but enforces nothing until S6.
 Accepting it now means the S6 upgrade adds enforcement, not a flag — and a flag
@@ -792,6 +855,14 @@ including `unless_labels` beating `labels_any`; absent clauses matching anything
 **Go unit tests** (`internal/engine/activate_test.go`):
 - exactly-one-match: zero matches and two matches each `VALIDATION_ERROR`, each
   naming the issue **and** every candidate workflow (asserted by substring).
+- **orphan annotation** (DKT-609, `internal/engine/dkt609_test.go`): each named
+  candidate whose NAME no file in any instance-config root declares any more is
+  marked `(no source on disk — orphaned registration, deprecation candidate)`,
+  and the refusal carries the remedy. It DECORATES the candidate set and never
+  changes it — an orphaned registration still binds, because a registration is
+  a row and not a file. With no root to scan the verdict is `unchecked` and the
+  message is byte-identical to the pre-DKT-609 one: "nothing was checked" must
+  never render as "nothing is orphaned".
 - **bind-to-highest** (§11.1 as amended 2026-08-05, DKT-40): the candidate set is
   the **highest registered version of each name**, so exactly-one-match applies
   across NAMES. `TestBindingUsesHighestVersionOfEachName` is DKT-8's M2a wedge as
@@ -953,6 +1024,7 @@ engine-core §5 and §1.3, as a conjunction. A step is ready iff **all** hold:
 |---|---|---|
 | R1 | the run is `active` | §1.3; §2 scheduling |
 | R2 | the issue's `depends_on` predecessors are satisfied | §1.3 "its issue's dependencies are satisfied" |
+| R2b | no step of the issue is parked `waiting-human` — a park holds its own issue only; the run stays `active` while any other issue has unfinished steps, and rolls up to `waiting-human` once no unparked work remains (`reconcileRun`, reconcile.go) | RUN-90: eleven single-issue parks each stopped all 45 issues |
 | R3 | its intra-workflow predecessors (`after`) are **done** — and for a fanned-out predecessor, **joined** (§7.4) | §1.3; §2 fanout joins |
 | R4 | its scope conflicts with no `claimed`/`running` step (glob intersection) | §1.3; §5 mutual exclusion |
 | R5 | per-class concurrency headroom exists | §2 "concurrency headroom per executor-hint class" |
@@ -1116,6 +1188,21 @@ same property at the CLI level.
 
 `claim --render` returns the assembled packet instead, atomically (§2).
 
+**A read-back replays what the claim recorded** (DKT-1054). Source 4 is resolved
+over run state, and run state keeps moving after a step is handed out: the
+fixture's `fix@1` binds `reconcile@0` at claim, then `review@1`, `synthesize@1`,
+and `reconcile@1` complete at fix@1's own ordinal, and a live re-resolution binds
+`reconcile@1` — an artifact produced by reviewing fix@1's diff. The claim writes
+the bindings it handed over to `step_inputs` (§6.1) in its own transaction, and
+`step context`, `step render`, and `step show`'s target ref read a claimed step
+(`attempt > 0`, not back at `pending`) over exactly that set, through the same
+resolver, so the read-back is the claim-time bundle however far the run has moved.
+A re-claim (a reaped lease, `resolve --as retry`) records its own bindings in place
+of the last attempt's. A step not yet handed out — every `action`, `human`, and
+`vote` step, and an executor step still `pending` — reads live, since the claim
+that will hand it out is what a read of it previews; `step context --live` asks
+that question of any step.
+
 ## 6.7 Input resolution
 
 §2, verbatim: "Downstream `inputs` resolve over siblings that RECORDED their work
@@ -1173,6 +1260,27 @@ executor completion, which is the same order as the gates already running there.
 This is what makes the fixture's `fix@1 → review@1` cycle correct: `review@1` resolves
 `issue.diff` to the artifact `fix@1` produced, not the one `implement@0` produced,
 because ordinal 1 beats ordinal 0 under D3 — without any rule specific to loops.
+
+**The round record.** At a loop re-entry the artifact also carries a small JSON
+payload: the hand-back `head`, the declared `worktree`, and `round_base` — the
+commit the packet's appended round-delta section diffs from, "this round's work
+alone". `round_base` derives from **the head of the newest `issue.diff` a done
+step CONSUMED without recording one of its own** — a step that read the tree
+rather than wrote it, which is a review — and not from the newest recorded head.
+The distinction matters only when a fix round goes unjudged, and then it decides
+whether anyone ever reads it: basing the delta on the previous fix round's own
+commit puts that round INSIDE the base, so the next panel is handed just what the
+latest round moved and its delta clause scopes it to a change no judge has seen.
+RUN-14/HRN-27 lost a whole +1258/-550 round that way, with the following round's
+74 lines rendered as the entire object under judgment. Reaching back to the last
+head a review actually judged keeps every unreviewed fix round inside the next
+reviewed delta. With no such consumer yet — a fix round minted before any review
+recorded — the base falls back to the newest recorded head, so the round still
+renders a delta.
+
+Reviewers are identified by that consumed-but-produced-nothing pair rather than by
+a class or step name, for §6.5's genericity reason: core attaches no meaning to
+class names, so a filter keyed on one would be instance policy living in core.
 
 ## 6.8 The complete saga
 
@@ -1316,8 +1424,8 @@ recording a duplicate artifact.
 | `docket step heartbeat STEP-N` | yes | extends the lease; does not touch `attempt` |
 | `docket step complete STEP-N --artifact-file F [--payload-file F] [--usage '{…}'] [--metadata '{…}']` | yes (stage 0–1) | the saga |
 | `docket step fail STEP-N [--note …] [--metadata '{…}']` | yes | records the failure; routes per `on_fail` when attempts are exhausted (the counter is bumped by CLAIMS, not by `fail` — E-8) |
-| `docket step approve\|reject STEP-N [--note …]` | no | `type=human` gate steps **only** (§2) |
-| `docket step resolve STEP-N --as retry\|skip\|abandon-issue\|override-pass [--note …]` | no | `waiting-human` resolutions (§2); `retry` **resets attempts** |
+| `docket step approve\|reject STEP-N [--note …]` | conductor (DKT-2465) | `type=human` gate steps **only** (§2); no lease token, but the RUN's conductor capability — see §4.3.2 |
+| `docket step resolve STEP-N --as retry\|skip\|abandon-issue\|override-pass [--note …]` | conductor (DKT-2465) | `waiting-human` resolutions (§2); `retry` **resets attempts** |
 | `docket step show STEP-N` | no | read-only; effective status |
 | `docket step list (--run RUN-N \| --issue ISSUE-N)` | no | read-only; steps with id, run, instance, issue, kind, effective status, attempt, expected_cost (DKT-54: step ids are a store-wide sequence, so nothing else enumerates a run). `--issue` lists one issue's steps across every run holding one, since a re-activation mints a fresh round under a new run (DKT-244) |
 | `docket step context STEP-N [--meta]` | no | re-emits `context` read-only (§11.4) |
@@ -1422,7 +1530,7 @@ engine state: **exit 0 allow / exit 2 deny with reason** (§2).
 | Guard | Allows when |
 |---|---|
 | `docket guard stop` | no pending work outside `waiting-human` — i.e. no step in `pending`/`ready`/`claimed`/`running`/`gated` for any active run |
-| `docket guard gate --step NAME` | an **approved** `type=human` step of that name exists for the active run |
+| `docket guard gate --step NAME [--run RUN-N]` | an **approved** `type=human` or `type=vote` step of that name exists — in the named run, or with no `--run` in **any** active run of the project |
 
 Exit 2 collides numerically with `NOT_FOUND`'s exit 2, and that is **intentional and
 specified**: §2 defines the guard contract as "exit 0/2 + reason", independent of
@@ -1431,6 +1539,21 @@ not a CLI verb whose caller maps a code. The reason goes to stderr in human mode
 into the JSON envelope's `error` under `--json`. This is recorded here because a
 reviewer will otherwise read it as a taxonomy violation; it is the spec's own
 contract, quoted.
+
+**`gate`'s scope is the caller's choice, and the two forms ask different
+questions.** `--run RUN-N` asks about ONE run's gate: an approval is a decision
+about one run's change, so another run's approval says nothing about it. That is
+the form for a caller that knows its run — an executor's brief carries its step id,
+and `step show` resolves the run from it. The named run is honored regardless of
+project, a run that does not exist is `NOT_FOUND` rather than a verdict, and a run
+that has ended denies. Without `--run` the guard answers over **every** active run
+of the project and the first approved gate of that name allows. That reading is
+cross-run by construction: one run's approval opens the gate for every caller in
+the project until that run finishes, a second run's undecided gate included. It
+exists for callers with no run context — an operator session's commit hook cannot
+know which run a git write belongs to — and a hook that has a run should scope.
+Both gate kinds answer in both forms: a tallied vote approval is a decision as much
+as a human approval is.
 
 `guard spawn|record` are **not** here — §10 assigns them to stage 6.
 

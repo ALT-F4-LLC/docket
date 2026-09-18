@@ -32,6 +32,7 @@
   ],
   "step": {
     "attempt": 0,
+    "blocked_reason": "an `after` predecessor is not done",
     "class": "judge-simplicity",
     "executor": "judge-simplicity",
     "expected_cost": 0.6,

@@ -716,6 +716,12 @@ SQL
   fi
 
   # `run status` renders the rollup and WRITES NOTHING.
+  #
+  # Nine `pending`, not ten: `implement@0` has no `after` predecessor, ample
+  # budget headroom (cap 25 against its 1.5 declared cost), and no other R1-R7
+  # clause holds it back, so it reads `ready` the instant the run activates —
+  # the correct effective status, per EffectiveStatusCounts. The rollup counts
+  # by EFFECTIVE status, so a leaf step's readiness moves it out of `pending`.
   local RUN_STATE_BEFORE RUN_STATE_AFTER
   RUN_STATE_BEFORE=$(sqlite3 "$ZG_DB" \
     "SELECT group_concat(id||status||row_version||updated_at_ms) FROM runs;")
@@ -723,7 +729,7 @@ SQL
   assert_exit "ZG" "ZG9_status_exit" 0
   assert_json "ZG" "ZG9_status_issues" ".data.issues" "2"
   assert_json "ZG" "ZG9_status_step_rollup" \
-    '.data.steps | map(select(.status == "pending")) | .[0].count' "10"
+    '.data.steps | map(select(.status == "pending")) | .[0].count' "9"
   RUN_STATE_AFTER=$(sqlite3 "$ZG_DB" \
     "SELECT group_concat(id||status||row_version||updated_at_ms) FROM runs;")
   check_cond "ZG" "ZG9_status_writes_nothing" "`run status` mutated the run row" [ "$RUN_STATE_BEFORE" = "$RUN_STATE_AFTER" ]
@@ -844,7 +850,11 @@ SQL
   assert_json "ZG" "ZG10_missing_run_code" ".code" "NOT_FOUND"
 
   # RA5: a terminal run refuses re-activation -> CONFLICT (4).
-  run_env "$ZG_RUN" run abandon RUN-2 --reason "superseded by ZG" --json
+  # The lifecycle verbs hold the run's conductor capability (DKT-2465).
+  local ZG_RUN1_TOKEN ZG_RUN2_TOKEN
+  ZG_RUN2_TOKEN=$(conductor_of "$ZG_RUN" RUN-2)
+  ZG_RUN1_TOKEN=$(conductor_of "$ZG_RUN" RUN-1)
+  DOCKET_TOKEN="$ZG_RUN2_TOKEN" run_env "$ZG_RUN" run abandon RUN-2 --reason "superseded by ZG" --json
   assert_exit "ZG" "ZG10_abandon_exit" 0
   assert_json "ZG" "ZG10_abandoned" ".data.status" "abandoned"
   run_env "$ZG_RUN" run activate RUN-2 --json
@@ -853,28 +863,32 @@ SQL
 
   # `run abandon` without --reason is refused: "abandoned" alone does not
   # answer the question somebody asks later.
-  run_env "$ZG_RUN" run abandon RUN-1 --json
+  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run abandon RUN-1 --json
   assert_exit "ZG" "ZG10_abandon_needs_reason" 3
 
   # pause / resume, and the refusal of an illegal transition. A no-op success
   # would let a harness believe it had quiesced a run that never was active.
-  run_env "$ZG_RUN" run pause RUN-1 --reason "operator review" --json
+  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run pause RUN-1 --reason "operator review" --json
   assert_exit "ZG" "ZG10_pause_exit" 0
   assert_json "ZG" "ZG10_paused" ".data.status" "waiting-human"
   assert_json "ZG" "ZG10_pause_reason" ".data.reason" "operator review"
-  run_env "$ZG_RUN" run pause RUN-1 --reason "again" --json
+  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run pause RUN-1 --reason "again" --json
   assert_exit "ZG" "ZG10_double_pause_exit" 4
   assert_json "ZG" "ZG10_double_pause_code" ".code" "CONFLICT"
-  run_env "$ZG_RUN" run resume RUN-1 --json
+  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run resume RUN-1 --json
   assert_exit "ZG" "ZG10_resume_exit" 0
   assert_json "ZG" "ZG10_resumed" ".data.status" "active"
 
-  # `run status --active` excludes terminal runs; `planning` counts as active,
-  # since a run that exists but has not been activated is still live work.
-  run_env "$ZG_RUN" run status --active --json
+  # The bare `run status` list excludes terminal runs; `planning` counts as
+  # active, since a run that exists but has not been activated is still live
+  # work. `--all` is the way back to the full record.
+  run_env "$ZG_RUN" run status --json
   assert_exit "ZG" "ZG10_active_exit" 0
   assert_json_all "ZG" "ZG10_active_excludes_terminal" ".data.runs" \
     '.status != "done" and .status != "abandoned"'
+  run_env "$ZG_RUN" run status --all --json
+  assert_exit "ZG" "ZG10_all_exit" 0
+  assert_json_exists "ZG" "ZG10_all_runs" ".data.runs"
 
   # The v2 Collection envelope on the run list.
   run_env "$ZG_RUN" run status --json=v2
@@ -1077,6 +1091,8 @@ TOML
   assert_exit "ZG" "ZG13_start" 0
   run_env "$ZG_S" run activate RUN-1 --json
   assert_exit "ZG" "ZG13_activate" 0
+  local ZG_S_TOKEN
+  ZG_S_TOKEN=$(activation_token)
 
   # THE GATES ARE REAL NOW (stage 4). The fixture's `implement` step declares
   # five named gates; each is trusted here to a WITNESS command that creates a
@@ -1340,15 +1356,17 @@ TOML
   assert_json "ZG" "ZG14_R8_code" ".code" "CONFLICT"
   assert_stdout_contains "ZG" "ZG14_R8_names_condition" "predecessor"
 
-  # R10: approve/reject on a NON-human step.
-  run_env "$ZG_S" step approve STEP-3 --json
+  # R10: approve/reject on a NON-human step. Under the conductor's token, so
+  # the refusal proven is the kind check and not a missing capability.
+  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step approve STEP-3 --json
   assert_exit "ZG" "ZG14_R10_exit" 3
   assert_json "ZG" "ZG14_R10_code" ".code" "VALIDATION_ERROR"
-  run_env "$ZG_S" step reject STEP-3 --json
+  assert_stdout_contains "ZG" "ZG14_R10_names_kind" "executor"
+  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step reject STEP-3 --json
   assert_exit "ZG" "ZG14_R10_reject_exit" 3
 
   # R11: resolve on a step that is not parked.
-  run_env "$ZG_S" step resolve STEP-3 --as skip --json
+  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step resolve STEP-3 --as skip --json
   assert_exit "ZG" "ZG14_R11_exit" 3
   assert_json "ZG" "ZG14_R11_code" ".code" "VALIDATION_ERROR"
 
@@ -1450,6 +1468,8 @@ TOML
   run_env "$ZG_K" issue create -t "killed" -d "body" --json >/dev/null
   run_env "$ZG_K" run start --issue DKT-1 --json >/dev/null
   run_env "$ZG_K" run activate RUN-1 --json >/dev/null
+  local ZG_K_CTOK
+  ZG_K_CTOK=$(activation_token)
 
   # A claimer with a short TTL, killed WITHOUT releasing.
   local ZG_K_OUT
@@ -1530,7 +1550,7 @@ TOML
     [ -z "$ZG_SID" ] && break
     ZG_KIND=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].kind')
     if [ "$ZG_KIND" = "human" ]; then
-      run_env "$ZG_K" step approve "$ZG_SID" --json
+      DOCKET_TOKEN="$ZG_K_CTOK" run_env "$ZG_K" step approve "$ZG_SID" --json
       continue
     fi
     run_env "$ZG_K" step claim "$ZG_SID" --owner survivor --json
@@ -1581,6 +1601,8 @@ TOML
   run_env "$ZG_G" issue create -t "gated" -d "body" --json >/dev/null
   run_env "$ZG_G" run start --issue DKT-1 --json >/dev/null
   run_env "$ZG_G" run activate RUN-1 --json >/dev/null
+  local ZG_G_TOKEN
+  ZG_G_TOKEN=$(activation_token)
 
   local ZG_G_SID ZG_G_KIND ZG_G_TOK ZG_G_ROUNDS=0
   while [ "$ZG_G_ROUNDS" -lt 20 ]; do
@@ -1609,7 +1631,7 @@ TOML
   assert_exit "ZG" "ZG17_gate_denies" 2
   assert_stderr_contains "ZG" "ZG17_gate_reason" "not approved"
 
-  run_env "$ZG_G" step approve "$ZG_G_SID" --json
+  DOCKET_TOKEN="$ZG_G_TOKEN" run_env "$ZG_G" step approve "$ZG_G_SID" --json
   assert_exit "ZG" "ZG17_approve" 0
 
   # AFTER the approve: allowed.
@@ -1819,6 +1841,8 @@ TOML
   # Step 1: activate; `next --run` offers implement@0; claim and complete it.
   run_env "$ZG_L" run activate RUN-1 --json
   assert_exit "ZG" "ZG20_activate" 0
+  local ZG_L_TOKEN
+  ZG_L_TOKEN=$(activation_token)
 
   printf 'the change summary\n' >"$ZG_TMP/artifact.txt"
   printf '[{"status":"unmet"}]\n' >"$ZG_TMP/unmet.json"
@@ -2006,7 +2030,7 @@ TOML
   run_env "$ZG_L" guard gate --step commit-gate
   assert_exit "ZG" "ZG20_guard_gate_denies" 2
 
-  run_env "$ZG_L" step approve "$ZG_L_GATE" --json
+  DOCKET_TOKEN="$ZG_L_TOKEN" run_env "$ZG_L" step approve "$ZG_L_GATE" --json
   assert_exit "ZG" "ZG20_approve" 0
 
   # ...and ALLOWS after it.
@@ -2891,7 +2915,7 @@ ZGCLUSTEOF
   # rather than parking, which is the half T3 used to make impossible.
   local ZG_A_HELDID
   ZG_A_HELDID=$(zg_step_id "$ZG_A" 'reconcile-held@0#0')
-  run_env "$ZG_A" step approve "$ZG_A_HELDID" --json
+  DOCKET_TOKEN="$(conductor_of "$ZG_A" RUN-1)" run_env "$ZG_A" step approve "$ZG_A_HELDID" --json
   assert_exit "ZG" "ZG28_approve" 0
 
   local ZG_A_RESOLVED
@@ -2990,7 +3014,9 @@ ZGNARROWEOF
     "SELECT COUNT(*) FROM artifacts a JOIN steps s ON s.id = a.step_id
       WHERE s.instance='reconcile@0';")
   ZG_C_HELDID=$(zg_step_id "$ZG_C" 'reconcile-held@0#0')
-  run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "not acceptable" --json
+  local ZG_C_TOKEN
+  ZG_C_TOKEN=$(conductor_of "$ZG_C" RUN-1)
+  DOCKET_TOKEN="$ZG_C_TOKEN" run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "not acceptable" --json
   assert_exit "ZG" "ZG28_reject" 0
 
   local ZG_C_AFTER
@@ -3024,7 +3050,7 @@ ZGNARROWEOF
   check_cond "ZG" "ZG28_rejected_step_is_done" "the rejected held step is '$ZG_C_HELDSTATE', want done" [ "$ZG_C_HELDSTATE" = "done" ]
 
   # H16: a second decision on a resolved hold is CONFLICT (exit 4).
-  run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "again" --json
+  DOCKET_TOKEN="$ZG_C_TOKEN" run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "again" --json
   assert_exit "ZG" "ZG28_double_decision_conflict" 4
   assert_json "ZG" "ZG28_double_decision_code" ".code" "CONFLICT"
 
@@ -3385,7 +3411,13 @@ TOML
   # coverage of their own. This is what a future retire verb must break
   # LOUDLY, matching the Go side's literal `wantCandidates` in
   # TestRenamePlusBumpRefusesActivation.
-  assert_stdout_contains "ZG" "ZG32_names_joined" "zg-gone@1, zg-gone-renamed@2"
+  #
+  # zg-gone@1 carries the orphan annotation (orphanAnnotation,
+  # internal/engine/orphan_registration.go): its source file is the one ZG31
+  # deleted above, so the candidate list names it as an orphaned registration,
+  # same as the Go side's `wedgeCandidatesOrphaned`.
+  assert_stdout_contains "ZG" "ZG32_names_joined" \
+    "zg-gone@1 (no source on disk — orphaned registration, deprecation candidate), zg-gone-renamed@2"
   # The BRANCH DISCRIMINATOR. The joined candidate list above is
   # rendered by refList in BOTH refusal branches and in the same order, so it
   # does not distinguish them. This literal is the only text that does; a

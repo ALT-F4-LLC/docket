@@ -435,13 +435,28 @@ func TestParseAggregateParams(t *testing.T) {
 		t.Errorf("params = %+v", params)
 	}
 
-	// `hold_spread` absent defaults to 0, which never holds.
+	// `hold_spread` absent defaults to 0, which never holds; `route_at` absent
+	// defaults to "", which never routes a cluster to the record.
 	params, err = ParseAggregateParams(map[string]any{
 		"field": "severity", "method": "max", "output": "findings",
 	})
 	testsupport.Must(t, err, "ParseAggregateParams without hold_spread: %v", err)
 	if params.HoldSpread != 0 {
 		t.Errorf("hold_spread defaulted to %d, want 0", params.HoldSpread)
+	}
+	if params.RouteAt != "" {
+		t.Errorf("route_at defaulted to %q, want the empty no-floor case", params.RouteAt)
+	}
+
+	// `route_at` present is carried through verbatim; whether the value has a
+	// position is Aggregate's question, where the resolver is.
+	params, err = ParseAggregateParams(map[string]any{
+		"field": "severity", "method": "median", "output": "findings",
+		"route_at": "high",
+	})
+	testsupport.Must(t, err, "ParseAggregateParams with route_at: %v", err)
+	if params.RouteAt != "high" {
+		t.Errorf("route_at = %q, want high", params.RouteAt)
 	}
 
 	bad := []struct {
@@ -459,6 +474,12 @@ func TestParseAggregateParams(t *testing.T) {
 		{"a key aggregate does not take",
 			map[string]any{"field": "s", "method": "median", "output": "k",
 				"grouping": "cluster"}, "grouping"},
+		{"route_at that is not a string",
+			map[string]any{"field": "s", "method": "median", "output": "k",
+				"route_at": 3}, "route_at"},
+		{"route_at that is empty",
+			map[string]any{"field": "s", "method": "median", "output": "k",
+				"route_at": ""}, "route_at"},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
@@ -614,4 +635,163 @@ func TestAggregateConservativeEndIsPerField(t *testing.T) {
 		t.Errorf("confidence median = %q, want guess; `confidence` declares no "+
 			"direction and must not inherit `severity`'s", got)
 	}
+}
+
+// routeAtParams is medianParams with a routing floor declared.
+func routeAtParams(method string, hold int, floor string) AggregateParams {
+	p := medianParams(method, hold)
+	p.RouteAt = floor
+	return p
+}
+
+// TestAggregateRouteAtFloor is DKT-593's boundary: a cluster whose REDUCED
+// value's position is >= the floor's is emitted to the loop output, and one
+// below it goes to the record. The comparison is over the reduced value — a
+// cluster whose members reach `high` but whose median is `low` is a `low`
+// cluster to the floor, exactly as it is to the threshold.
+func TestAggregateRouteAtFloor(t *testing.T) {
+	// Reduced values: low (below), medium (at), high (above), and a clustered
+	// element whose MEDIAN is low even though a member is high (below).
+	const raw = `[{"severity":"low","id":"A"},{"severity":"medium","id":"B"},` +
+		`{"severity":"high","id":"C"},{"severity":["info","low","high"],"id":"D"}]`
+
+	out, err := aggregateOver(t, raw,
+		routeAtParams(MethodMedian, 0, "medium"), severityOrder)
+	testsupport.Must(t, err, "Aggregate: %v", err)
+
+	emitted := make([]string, 0, len(out.Payload))
+	for _, element := range out.Payload {
+		emitted = append(emitted, element["id"].(string))
+	}
+	if len(emitted) != 2 || emitted[0] != "B" || emitted[1] != "C" {
+		t.Errorf("emitted %v, want [B C] — at and above the floor, in input order",
+			emitted)
+	}
+
+	recorded := make([]string, 0, len(out.Recorded))
+	for _, element := range out.Recorded {
+		recorded = append(recorded, element["id"].(string))
+	}
+	if len(recorded) != 2 || recorded[0] != "A" || recorded[1] != "D" {
+		t.Errorf("recorded %v, want [A D] — below the floor, in input order",
+			recorded)
+	}
+
+	// A recorded cluster is fully reduced: the value, the members, and the
+	// demotion trail all survive into the record — routing is not erasure.
+	d := out.Recorded[1]
+	if d["severity"] != "low" || d[KeyDemotedFrom] != "high" {
+		t.Errorf("the recorded cluster lost its reduction: severity = %v, "+
+			"demoted_from = %v", d["severity"], d[KeyDemotedFrom])
+	}
+}
+
+// TestAggregateRouteAtUnknownValueRefuses is G4's discipline applied to the
+// floor: a `route_at` value the declared order does not name has no position,
+// and core refuses naming it rather than guessing an end.
+//
+// V28a makes this unreachable through `workflow register`; it is reachable
+// from a database restored from elsewhere.
+func TestAggregateRouteAtUnknownValueRefuses(t *testing.T) {
+	_, err := aggregateOver(t, `[{"severity":"low"}]`,
+		routeAtParams(MethodMedian, 0, "urgent"), severityOrder)
+	if err == nil {
+		t.Fatal("an unknown route_at value was accepted; core guessed a floor")
+	}
+	for _, want := range []string{"route_at", "urgent", "severity"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestAggregateRouteAtAbsentIsANoOp is the backward-compatibility half of
+// DKT-593: with no `route_at`, the outcome is BYTE-FOR-BYTE the one the
+// builtin has always produced — nothing recorded, every cluster emitted at
+// its input position, and G2's identity property untouched.
+func TestAggregateRouteAtAbsentIsANoOp(t *testing.T) {
+	// Scalars and clusters, a hold, a demotion — every feature at once, so a
+	// floor leaking into the absent case has the widest surface to show on.
+	const raw = `[{"severity":"info","id":"A"},` +
+		`{"severity":["low","high"],"id":"B"},` +
+		`{"severity":["low","medium","high"],"id":"C"}]`
+
+	out, err := aggregateOver(t, raw, medianParams(MethodMedian, 2), severityOrder)
+	testsupport.Must(t, err, "Aggregate: %v", err)
+
+	if out.Recorded != nil {
+		t.Errorf("Recorded = %#v with no route_at declared; the record channel "+
+			"must not exist for a step that never opted in", out.Recorded)
+	}
+	if len(out.Payload) != 3 {
+		t.Fatalf("emitted %d elements, want one per input element", len(out.Payload))
+	}
+	for i, want := range []string{"A", "B", "C"} {
+		if got := out.Payload[i]["id"]; got != want {
+			t.Errorf("element %d is %v, want %s — input order preserved", i, got, want)
+		}
+	}
+	// Held indices are input indices when nothing was routed to the record.
+	if len(out.Held) != 2 || out.Held[0] != 1 || out.Held[1] != 2 {
+		t.Errorf("Held = %v, want [1 2] — the two spread-2 clusters at their "+
+			"input positions", out.Held)
+	}
+}
+
+// TestAggregateRouteAtNeverRoutesAHeldCluster pins the interaction: a held
+// cluster is emitted whatever its computed value, because that value is
+// exactly what the hold refuses to trust — the operator resolving the hold
+// may accept a different one. Held indices address the EMITTED payload, since
+// that is the payload the artifact records and `<step>-held@k#i` resolves
+// against (H2a).
+func TestAggregateRouteAtNeverRoutesAHeldCluster(t *testing.T) {
+	// Cluster 0 reduces to info, below the floor, not held -> recorded.
+	// Cluster 1 reduces to low (median of {low,high}), below the floor, but
+	// spread 2 trips the hold -> emitted and held, at EMITTED index 0.
+	const raw = `[{"severity":"info","id":"A"},` +
+		`{"severity":["low","high"],"id":"B"}]`
+
+	out, err := aggregateOver(t, raw,
+		routeAtParams(MethodMedian, 2, "high"), severityOrder)
+	testsupport.Must(t, err, "Aggregate: %v", err)
+
+	if len(out.Payload) != 1 || out.Payload[0]["id"] != "B" {
+		t.Fatalf("emitted %#v, want only the held cluster B", out.Payload)
+	}
+	if out.Payload[0][KeyHeld] != true {
+		t.Error("the emitted cluster is not marked held")
+	}
+	if len(out.Held) != 1 || out.Held[0] != 0 {
+		t.Errorf("Held = %v, want [0] — the held cluster's position in the "+
+			"EMITTED payload, which is the payload the artifact records", out.Held)
+	}
+	if len(out.Recorded) != 1 || out.Recorded[0]["id"] != "A" {
+		t.Errorf("recorded %#v, want only the unheld below-floor cluster A",
+			out.Recorded)
+	}
+}
+
+// TestAggregateRouteAtEmptyOutputStillSatisfiesTheShippedSchema covers the
+// every-cluster-below case: the emitted payload is the EMPTY ARRAY — a valid
+// `aggregate@1` document over which any threshold predicate finds nothing —
+// never null and never a failure.
+func TestAggregateRouteAtEmptyOutputStillSatisfiesTheShippedSchema(t *testing.T) {
+	out, err := aggregateOver(t, `[{"severity":"info"},{"severity":"low"}]`,
+		routeAtParams(MethodMedian, 0, "blocker"), severityOrder)
+	testsupport.Must(t, err, "Aggregate: %v", err)
+
+	if len(out.Payload) != 0 || len(out.Recorded) != 2 {
+		t.Fatalf("emitted %d, recorded %d; want 0 and 2",
+			len(out.Payload), len(out.Recorded))
+	}
+	encoded, err := json.Marshal(out.Payload)
+	testsupport.Must(t, err, "encoding: %v", err)
+	if string(encoded) != "[]" {
+		t.Errorf("the empty output encodes as %s, want []", encoded)
+	}
+	builtin, err := aggregateSchema()
+	testsupport.Must(t, err, "compiling the embedded document: %v", err)
+	err = builtin.ValidatePayload(encoded)
+	testsupport.Must(t, err, "an empty emitted payload does not satisfy the shipped "+
+		"schema: %v", err)
 }

@@ -11,6 +11,12 @@ metadata"). Tracker unit: **DKT-68**. Precedent: the M2a bind-to-highest patch
 Spec of record is engine-spec.md; deviations become DKT amendment issues per
 docs/design/amendments.md, never silent changes.
 
+**Amended 2026-08-23 (DKT-592): §1.7 adds the claim-side write.** A bag that
+lands only at completion is a bag that failed and crashed steps never record,
+so the dispatcher's half of a requested/resolved pair now lands AT CLAIM and
+only the worker-reported half stays at completion. §1.1–§1.5 are unchanged for
+the completion path; §2.D's "both are worker-reported" is corrected there.
+
 **The defect is not a missing feature; it is a missing assignment.** Every
 other part of the path already exists and is correct: the flag parses
 (`internal/cli/step.go:310`), the option field is declared and documented as
@@ -197,6 +203,78 @@ would lose exactly the diagnostic an operator wants. But that is DKT-69's call
 to make with its own acceptance criteria, and nothing here forecloses it: the
 merge function is indifferent, and the decision is one call site.
 
+### 1.7 The claim-side write (DKT-592) — amendment, 2026-08-23
+
+**The completion-time write is correct and incomplete.** A bag that lands only
+at `complete` is a bag that a step which never completes never records — and a
+step that failed or crashed is exactly the step whose dispatch facts an
+operator most wants. Two runs measured the hole: 76 of 119 steps carried the
+routing keys, then 55 of 83. The rollup this note exists to feed went blind at
+precisely the rows that motivate reading it.
+
+The rule, and it is a **split by who knows the fact, not by which verb is
+convenient**:
+
+- A fact the **dispatcher already knows when it hands the step out** is
+  recorded **at claim**. §2.D calls the motivating routing keys "both
+  *worker*-reported"; that was wrong about the requested half. What was asked
+  for is settled before the work starts — it is the dispatcher's own decision —
+  and holding it until the work comes back makes recording it conditional on
+  the work succeeding.
+- A fact **only the returning worker knows** stays at **completion**. The
+  resolved half is genuinely worker-reported: nothing before the work runs can
+  say what actually served it. It does **not** move to claim, and §1.1–§1.5 are
+  unchanged for it.
+
+`ClaimOptions.Metadata` (`--metadata` on `step claim`) is the channel.
+Mechanically it is the pieces this note already built, with no new ones:
+
+- **The same merge.** `mergeMetadata` over the step's stored bag,
+  last-write-wins per top-level key, shallow. A definition-side bag survives; a
+  re-claim overlays the dead attempt's; **the completion bag later overlays the
+  claim's**, which is what makes a normally-completing step carry both pairs.
+  The pure function §1.6 promised now has three callers and still knows nothing
+  about which verb called it.
+- **The same writer**, `db.SetStepMetadataTx`, in the claim's **transaction A**
+  — with the CAS that awarded the claim, after the status write and before the
+  `step-claimed` event, mirroring §1.3's ordering rationale: the row reaches
+  its final shape for the transition before the transition is recorded. A crash
+  between them rolls back both.
+- **The same cap and the same shape check**, `MetadataMaxBytes`, measured on
+  the raw input, **before `conn.Begin()`**. That placement carries more weight
+  here than on `complete` or `fail`: transaction A performs the lazy reap and
+  the CAS, so validation drifting inside it would put a malformed bag one
+  change away from consuming an attempt. Only the remedy text differs — a claim
+  has no artifact or payload channel of its own, so the message names its
+  completion's.
+
+**Survival is a property of what the other writers do not touch**, and it is
+worth stating as such rather than assuming it: `ReapStepTx`,
+`MarkStepAttemptFailedTx`, `MarkStepClaimReapedTx` and the status writers all
+leave `metadata` alone. So the claim's bag survives a failure, a reap, an
+abandonment, and the return to `pending` — with no cleanup path to audit.
+
+The claim's **own context bundle** reports the merged bag: the snapshot is
+updated in place before `AssembleContext` runs, so a worker reading
+`context.metadata` sees what it was dispatched with rather than the row's state
+before its own claim.
+
+**No schema change**, again (§1.4). `currentSchemaVersion` is untouched.
+
+**One spec deviation, unamended and named here rather than silently applied.**
+engine-spec.md §11.4 lists a `complete args` line and no `claim args` line, so
+`step claim --metadata` is surface the spec does not yet describe. Per
+docs/design/amendments.md the spec is not edited from here: this owes a DKT
+amendment issue proposing §11.4 gain
+
+```
+claim args      --owner NAME  [--ttl D]  [--metadata '{…}']
+```
+
+alongside the existing `complete args`. The engine behavior is additive and
+every existing claimant is byte-identical without the flag, which is why the
+implementation does not wait on the amendment — but the amendment is owed.
+
 ## 2. Alternatives considered
 
 **A. Separate `completion_metadata` column.** Rejected. It requires a v11
@@ -227,6 +305,13 @@ while costing a schema change and a wire-shape change. If a future need
 appears, `--metadata` bags can carry their own provenance keys opaquely, which
 is precisely what the KV bag is for. Filing it as a deferred question rather
 than building it is the §2 discipline.
+
+**Corrected by §1.7 (DKT-592):** "both are *worker*-reported" was wrong about
+the requested half — what was asked for is the DISPATCHER's own decision,
+settled before the work starts. The rejection of a provenance column stands
+(the bag still carries its own provenance keys opaquely, and no schema change
+was needed), but the sentence that justified it no longer describes the write
+path: the requested half now lands at claim, the resolved half at completion.
 
 **E. Refuse when the worker overwrites a definition key.** Rejected. It sounds
 protective and is actually core having an opinion about which keys matter. The
@@ -340,7 +425,41 @@ A new `scripts/qa/` section following the existing helper conventions
 5. Genericity: `grep` the section's own fixtures for the banned words → zero
    hits, since the gate scans tests too.
 
-### 4.5 Gates that must stay green
+### 4.5 Go — the claim-side write (§1.7)
+
+In `internal/engine/metadata_test.go`, beside the completion and fail suites,
+with the same neutral-key discipline: `tier_requested` / `desk_resolved` mirror
+the SHAPE of a routing pair — one fact known at dispatch, one known only on
+return — without naming any instance's vocabulary.
+
+- **The regression test:** claim with `--metadata`, assert `steps.metadata`
+  carries it with **no completion anywhere in the test**.
+- **The failure case, which is the whole point:** claim with a bag, `fail` with
+  no bag of its own → the claim's keys are still on the row.
+- **The crash case, which is not the failure case:** nobody calls `fail` at
+  all. The lease lapses, the next claim reaps it, and the bag survives the reap.
+- **Both pairs on a normal completion:** claim's two keys plus completion's two
+  keys, all four present — the completion merge must not clobber the claim's.
+- Definition-side bag present → merged, not clobbered; dispatcher's value wins
+  on a shared key.
+- No `--metadata` → definition bag byte-identical, no row_version bump.
+- The claim's own context bundle reports the merged bag.
+- A claimed-then-FAILED step's keys appear in the R7 rollup — the read surface
+  the defect was observed in, with no read-side change.
+- Refusals (invalid JSON, array, scalar, number, null) → `VALIDATION_ERROR`,
+  `row_version` unmoved, **status still `pending` and attempt still 0**, and
+  the step still claimable. The attempt assertion is the claim-specific half:
+  this transaction reaps and CASes, so "the refusal wrote nothing" has to mean
+  "it cost no attempt" too.
+- The cap's own test: inclusive boundary in both directions, both numbers in
+  the message plus this verb's remedy, measured on raw input.
+- **Source-position check**, `TestClaimValidatesMetadataBeforeTheTransactionOpens`:
+  the size and shape calls appear before `conn.Begin()` in
+  `claimStepWithGates`'s AST — the same argument
+  `TestFailValidatesMetadataBeforeTheTransactionOpens` makes, because a
+  rollback hides the difference from any runtime assertion.
+
+### 4.6 Gates that must stay green
 
 Full `scripts/qa.sh` plus `scripts/qa/genericity.sh`. `go build ./...` and
 `go test ./...`. No migration test changes, because there is no migration —

@@ -21,6 +21,12 @@ import (
 // terminal. They share one implementation because they differ only in the
 // status they move to, which status they will accept moving FROM, and whether
 // a reason is required.
+//
+// All three require the run's CONDUCTOR CAPABILITY on a bound run (DKT-2465):
+// the token `run activate` returned once, or `run conduct` re-mints, read via
+// DOCKET_TOKEN or stdin exactly as a lease token is. The verbs were token-free
+// — "repository access is the authority" — until a harness made every
+// executor a holder of that authority.
 
 var runPauseCmd = &cobra.Command{
 	Use:   "pause RUN-N",
@@ -28,7 +34,11 @@ var runPauseCmd = &cobra.Command{
 	Long: `Move an active run to waiting-human.
 
 A paused run blocks new claims and honors in-flight completes: work already
-under way finishes rather than being abandoned mid-step.`,
+under way finishes rather than being abandoned mid-step.
+
+Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
+via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
+for none.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return moveRun(cmd, args[0], runMove{
@@ -42,7 +52,12 @@ under way finishes rather than being abandoned mid-step.`,
 var runResumeCmd = &cobra.Command{
 	Use:   "resume RUN-N",
 	Short: "Return a parked run to active",
-	Args:  cobra.ExactArgs(1),
+	Long: `Return a parked run to active.
+
+Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
+via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
+for none.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return moveRun(cmd, args[0], runMove{
 			to:   model.RunActive,
@@ -65,7 +80,11 @@ or unimplementable issue that should not take the whole run down with it.
 
 --reason is required either way. Work that ended without completing is
 something somebody will ask about later, and "abandoned" alone does not
-answer the question.`,
+answer the question.
+
+Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
+via DOCKET_TOKEN or stdin, with or without --issue; a run activated before the
+capability existed asks for none.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if issueRef, _ := cmd.Flags().GetString("issue"); issueRef != "" {
@@ -100,8 +119,19 @@ func abandonIssueInRun(cmd *cobra.Command, runRef, issueRef string) error {
 			fmt.Errorf("--reason is required to abandon an issue's work"),
 			output.ErrValidation)
 	}
+	// `abandon` states its authority on BOTH paths (DKT-1899), so the flag
+	// cannot be evaded by narrowing the disposition to one issue. This path
+	// emits no `run-abandoned` — it disposes of an issue's steps, not the run
+	// — so the answer is validated and, today, recorded nowhere; see the
+	// change summary's known limits.
+	if _, err := rulingAuthority(cmd); err != nil {
+		return err
+	}
 
-	outcome, err := engine.AbandonIssueInRun(conn, runID, issueID, reason, model.NowMS())
+	outcome, err := engine.AbandonIssueInRunWith(conn, engine.AbandonIssueOptions{
+		RunID: runID, IssueID: issueID, Reason: reason,
+		Token: conductorToken(conn, runID, os.Stdin), NowMS: model.NowMS(),
+	})
 	if err != nil {
 		return runErr(err)
 	}
@@ -201,13 +231,26 @@ func moveRun(cmd *cobra.Command, ref string, move runMove, w *output.Writer) err
 			output.ErrValidation)
 	}
 
+	// DKT-1899, on the two dispositions only — a resume registers no authority
+	// flags, so asking for one here would refuse a verb that cannot answer.
+	var under engine.Authority
+	if move.to != model.RunActive {
+		var err error
+		if under, err = rulingAuthority(cmd); err != nil {
+			return err
+		}
+	}
+
 	// The transition, its refusal rules, and its EVENT live engine-side
 	// (DKT-86): the status write and the `run-paused` / `run-resumed` /
 	// `run-abandoned` event commit in one transaction, so the feed is a
 	// complete transition trail rather than one that goes silent exactly at
 	// the terminal step.
-	updated, worktrees, err := engine.MoveRun(
-		conn, runID, cmd.Name(), move.to, move.from, reason, model.NowMS())
+	updated, worktrees, err := engine.MoveRunWith(conn, engine.MoveRunOptions{
+		RunID: runID, Verb: cmd.Name(), To: move.to, From: move.from, Reason: reason,
+		Under: under,
+		Token: conductorToken(conn, runID, os.Stdin), NowMS: model.NowMS(),
+	})
 	if err != nil {
 		return runErr(err)
 	}
@@ -253,6 +296,13 @@ func init() {
 	runAbandonCmd.Flags().String("reason", "", "Why the run is being abandoned (required)")
 	runAbandonCmd.Flags().String("issue", "",
 		"Abandon only this issue's remaining steps; the run and its other issues continue")
+
+	// DKT-1899: pause and abandon dispose of work and say under what authority.
+	// Resume does neither and stays flag-free.
+	addAuthorityFlags(runPauseCmd)
+	addAuthorityFlags(runAbandonCmd)
+	runPauseCmd.Long += authorityHelp
+	runAbandonCmd.Long += authorityHelp
 
 	runCmd.AddCommand(runPauseCmd, runResumeCmd, runAbandonCmd)
 }

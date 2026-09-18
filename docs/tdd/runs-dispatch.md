@@ -435,7 +435,7 @@ Implemented clause by clause below.
 
 | # | Clause |
 |---|---|
-| B1 | The cap is `runs.budget` when non-zero, else `docket config budget.default` when non-zero, else **unlimited** |
+| B1 | The cap is `runs.budget` **as written at `run start`**. `run start` writes `docket config budget.default` only when `--budget` is **omitted**; an explicit `--budget 0` is stored as `0`, which is unlimited (B2). Enforcement never consults the config default itself — the resolution happens once, at the write |
 | B2 | `0` means unlimited at both levels — the flag's documented meaning since S3 (`internal/cli/run_start.go`), unchanged |
 | B3 | The cap is resolved **once per invocation** and read from the run row, which was written at `run start`. It is not re-read from config mid-run: a config change must not silently re-cap a live run, for the same reason a re-registered workflow does not reach one (RA2, engine-spine §5.4) |
 | B4 | A negative `--budget` is already `VALIDATION_ERROR` at S3. No change |
@@ -663,6 +663,60 @@ discipline, and the plain-text fallback without inventing any of them.
 | R6 | **artifacts** | the index: id, kind, producer instance, sha256, bytes — never the bodies | `artifacts` |
 | R7 | **metadata** | rollup of step `metadata` keys → distinct values with counts, **verbatim and uninterpreted** | `steps.metadata` |
 
+**AMENDMENT (DKT-2451): findings cite their evidence, and the report says
+which did not.** Each entry of a cast's structured findings (`findings_json`:
+blockers, concerns, suggestions) may carry an `evidence` list of references —
+`artifact:ARTIFACT-N`, an artifact the run holds, or `gate:<name>`, a gate
+result the run recorded in any step. `vote cast` resolves every reference
+against the run the proposal was opened for BEFORE the cast records (a cast has
+no amend path), through the two key families the engine mints — a vote step's
+or a reap acknowledgment's — and refuses by name a reference that resolves
+against nothing, names an artifact of another run, or rides on a proposal bound
+to no run (a ballot whose only link to a run is that its text names it carries
+no evidence: that attribution is a rollup heuristic, not a record's gate).
+Artifact references are canonicalized to `ARTIFACT-N` on the way in. Core
+checks that a reference RESOLVES and never opens what it points at to judge the
+finding — that would be payload interpretation. The wire form is polymorphic on
+purpose: an entry with no evidence encodes as the bare string it always was, so
+every stored row, export, and `<step>.vote-record` packet body reads
+byte-identically to before; only an entry carrying evidence encodes as
+`{"text", "evidence"}`, which a revise step consuming the vote-record sees
+for exactly those entries. The report gains a **findings** section (`findings`,
+one row per entry: proposal, voter, role, kind, text, evidence, and
+`unsupported: true` where nothing was cited), over the same proposal membership
+the vote-usage rollups read, withheld for a SealedOpen proposal exactly as every
+other read verb withholds it (DKT-2447). This is `step_inputs`' provenance
+question (DKT-1054) asked of a cast: what did this finding rely on.
+
+**AMENDMENT (DKT-2453): `report executors`, the cross-run ledger.** Every
+rollup above is per run, and a retro re-routing policy seats had no track
+record to read short of joining a dozen run reports by hand — the store is the
+only place that spans runs and sessions, and nothing in it persisted the join.
+`docket report executors [--since RUN-N|DATE] [--all-projects]` computes it at
+read, over this project's runs (the whole store with `--all-projects`; `--since`
+takes a run id floor or a creation-instant floor), grouped by the two identities
+that recur across runs: **per executor hint** (`steps.executor`) — runs, steps,
+`fix-loop` routings, `override-pass` resolutions, reaps and forced reaps, and
+over every `aggregate` round declaring `source_field` (DKT-2462) the clusters
+its steps contributed to, unique (one `members`) versus corroborated (more)
+versus held — and **per voter name** (`votes.voter_name`) — runs, casts, casts by
+verdict, and how many of the vote steps it cast on routed `fix-loop`, were
+resolved `override-pass`, or were materialized held-cluster ballots; a
+SealedOpen proposal is withheld as everywhere. Rows order by name (R9); the
+verb opens no transaction and writes nothing (R8, `TestExecutorLedgerWritesNothing`).
+**Operator-facing only, and never an input to routing**: `next` does not
+consult it, no engine decision reads it, and nothing in it reaches a seat —
+fed back into a panel a track record becomes an incentive to agree with the
+majority, the conformity failure the record exists to catch; which seats a
+policy routes stays the operator's decision, made outside the store. The
+ruling columns — `reaps`, `forced_reaps`, `override_passes` — read the event
+log, since only the event says which reap a relay forced and which resolution
+an operator chose (`steps.reaped_claims` back-fills nothing before v23 and
+would put a forced count above its own total); a ruling `events prune` removed
+leaves all three together. A source label that resolves to no step of its run
+has no hint to group under and is left out, matching the run report's
+unresolved-source convention.
+
 **R7 is the genericity line at its thinnest, so it is specified exactly.** The
 rollup groups by key and by value, both as opaque strings, and reports counts.
 It does not know that the reference instance puts a model tier there; it
@@ -683,7 +737,7 @@ the implementation contains no key-name literal.
 |---|---|---|
 | `budget.unit` | `""` | Which recorded usage unit the run cap counts. Empty (the default) means the cap rests on the declared-cost floor alone. |
 | `dispatch.ttl` | `"30m"` | How long a dispatch manifest stays open before `next` auto-abandons it. |
-| `dispatch.grace` | `"15m"` | How long a claimed step may go unrecorded before it counts as a dispatch discrepancy. |
+| `dispatch.grace` | `"15m"` | How long a claimed step may go unrecorded before it counts as a dispatch discrepancy, and how long after a run's newest step record its unbilled steps stay usage-pending rather than missing (D7). |
 
 `budget.default` **already exists** (`db.KeyBudgetDefault`, since S3) and gains
 enforcement, not a definition. The three above follow the existing
@@ -771,12 +825,46 @@ behalf would mint a token nobody holds.
 | P1 | `dispatch open --run RUN-N` computes the ready set **exactly as `next` does** — the same `LoadScheduler`, the same predicate, the same `SortSteps` — and records the resulting rows in order |
 | P2 | The response is §11.4's shape verbatim: `{ dispatch, run, opened_seq, rows: [<next row>…] }` |
 | P3 | Each row is stored as its **canonical JSON bytes** plus their sha256. Canonical means the same marshaling the wire uses, so a stored row and a fetched row are byte-identical by construction rather than by a re-serialization that could differ in key order |
-| P4 | `--limit` applies, with the same ordering-then-slicing rule as `next` (§6.3), so a relay can open a manifest for the batch size it can actually spawn |
-| P5 | `dispatch open` **performs the same lazy reap `next` does** before computing. It is a scheduling verb offering a batch; offering a stale step that a reap would have freed would make the manifest wrong the moment it was written |
+| P4 | `--limit` applies, with the same ordering-then-slicing rule as `next` (§6.3), and cuts **whole issues** rather than rows (§5.2.1), so a relay can open a manifest for the batch size it can actually spawn without splitting an issue's chain across dispatches |
+| P5 | `dispatch open` **performs the same lazy reap `next` does** before computing. It is a scheduling verb offering a batch; offering a stale step that a reap would have freed would make the manifest wrong the moment it was written. `dispatch close` performs it too, before its own discrepancy probe (§5.6 P18): it is the mutating scheduling verb that reconciles that same manifest, and `next` cannot reap on its behalf while the dispatch is open — it reaps, refuses P24, and the refusal rolls the reap back |
 | P6 | Opening while a dispatch is already open is `CONFLICT` (exit 4), naming the open dispatch's id and its expiry — C1, enforced by `idx_dispatches_one_open` rather than by a check-then-insert |
 
 **`opened_seq` is the event seq at open time**, and it is the manifest's place
 in the log. §6 uses it as the boundary for "reaps this relay has not yet seen".
+
+## 5.2.1 The lane-complete cut, and what the manifest says about it
+
+`readyRows` widens the claimable prefix to its staged closure and emits
+**stage-major** order: every issue's stage-*k* rows precede any issue's
+stage-*k+1* rows. A row-prefix cut over that order never separates a row from
+an in-offer predecessor, but it routinely separates a row from its own
+**dependents** — the deepest stages of every issue are the last rows, so a cap
+keeps each issue's shallow rows and drops its tail.
+
+Measured on RUN-95 (147 issues, 1436 steps, `--limit 240`): 84% of the chain
+rows of finished standard-change issues ran in a later wave than the one that
+readied them, a finished issue crossed three to five dispatches, and the median
+small change spent 22.7 h elapsed against 0.56 h of running.
+
+| # | Clause |
+|---|---|
+| P4a | The cut walks the stage-major entries and admits an issue's **entire in-offer closure** the first time one of its rows is reached |
+| P4b | It stops before an issue whose closure would carry the total past the limit, and **never splits an issue** |
+| P4c | When the first issue's closure alone exceeds the limit, that closure is admitted **whole** — half a chain is what the cut exists to prevent — and `truncated` reports the overrun |
+| P4d | `--limit 0` is unchanged: the whole offer |
+| P4e | Wire order stays **stage-major**: the result is a subsequence of the stage-major input, not a re-sort, so the runnable-prefix property still holds. The staged closure never crosses issues, so every survivor's in-offer predecessors survive with it |
+| P4f | Rows are hashed **after** the cut, so manifest hashing and `dispatch verify` are unchanged |
+| P4g | `next --run --limit N` shares `readyRows` and therefore admits exactly the step ids `dispatch open --limit N` does |
+
+The manifest reports the cut and the engine's own concurrency, both **beside**
+§11.4's shape rather than as row fields — a row is hashed and byte-compared at
+verify, and a live-derived fact would either freeze an open-time answer into
+`row_json` or need normalizing away:
+
+| # | Clause |
+|---|---|
+| P4h | `total` is the ready set's size **before** the cut, and `truncated` says whether the cut dropped anything. A relay reading only `rows` cannot tell a run whose remaining work fits from one the cap is metering out; RUN-95's conductor read a post-cut count as the whole offer twice against a 930-row ready set |
+| P4i | `limits` is the effective per-class `[limits] max` from the scheduler's **merged** limits, for every class the manifest's rows carry. A class with no declared max is **omitted** — unbounded is what the absence of a `[limits]` entry means, and a zero would read as no concurrency at all. Without it a relay inferred each class's concurrency from the largest same-stage count in the manifest, which a chain-deep manifest with few issues per stage under-certifies |
 
 ## 5.3 `dispatch verify`: byte-equality on rows
 
@@ -822,7 +910,7 @@ scope, and §2 assigns it to `next` alone.
 
 | # | Clause |
 |---|---|
-| P18 | `dispatch close --run RUN-N` closes the open dispatch **only if no discrepancy exists** (§5.8). With one, it refuses `CONFLICT`, enumerating each discrepancy and its resolution |
+| P18 | `dispatch close --run RUN-N` closes the open dispatch **only if no discrepancy exists** (§5.8), **after performing P5's lazy reap in the same transaction**. With one, it refuses `CONFLICT`, enumerating each discrepancy and its resolution. The reap comes first for the reason it does in `next`: default `lease.ttl.default` equals `dispatch.grace`, so without it the ordinary lapsed lease is reported as a D1 whose stated resolution this close is the only verb able to perform |
 | P19 | `close --accept-missing-usage` closes despite missing-usage discrepancies **and records the acceptance** — `close_reason = 'accepted-missing-usage'` plus the accepted step list in the event's `data`. §2 names this flag verbatim |
 | P20 | `--accept-missing-usage` does **not** accept the other discrepancy class. Claimed-but-unrecorded past grace has its own resolution (lease expiry), and a flag that accepted both would let a relay close over work that is still running |
 | P21 | `dispatch abandon --run RUN-N [--reason …]` closes it unconditionally — "explicit `dispatch abandon` for a crashed relay". No discrepancy blocks it: the whole point is that the relay is gone and cannot resolve anything |
@@ -857,8 +945,8 @@ engine-core §5 names exactly two classes; both are **computed, never stored**
 
 | # | Discrepancy | Definition | Resolution |
 |---|---|---|---|
-| D1 | **Claimed but unrecorded past grace** | a step in `claimed`/`running` whose `activity_ms` is older than `dispatch.grace` (§4.11, default 15m) | **lease expiry clears it** — §2 verbatim. The step's TTL lapses, `next` reaps it, and the discrepancy dissolves. `dispatch close` names the expiry time so an operator knows how long to wait |
-| D2 | **Usage rows missing** | a step that reached a terminal status **after** the run's activation, on a v10 binary, with zero `usage_ledger` rows, **in a run that has ever opened a dispatch** (a `dispatch-opened` event exists — usage completeness is a RELAY contract; a run no relay ever drove has nobody owing usage) | `dispatch close --accept-missing-usage`, which records the acceptance (P19) |
+| D1 | **Claimed but unrecorded past grace** | a step in `claimed`/`running` whose `activity_ms` is older than `dispatch.grace` (§4.11, default 15m) | **lease expiry clears it** — §2 verbatim. The step's TTL lapses and the discrepancy dissolves. The advice **branches on `expires_ms` against the answering instant**, because the two states take opposite exits. **Live lease:** the refusal names the expiry time so an operator knows how long to wait, and names the two ways not to: `docket step reap STEP-N --reason …` once the holder is established dead, or `dispatch abandon` to give the manifest up. **Lapsed lease:** the refusal says the next scheduling verb reaps it, and offers none of those three — waiting is a no-op, the reap an unnecessary escalation, the abandon destructive. Every scheduling verb — `next`, `dispatch open`, `dispatch close` (P5) — reaps a lapsed lease *before* it probes, so only the live branch can render from them; `guard record` (G13) and `run report` do **not** reap, and the guard surfaces this string verbatim on exactly the lapsed lease default `lease.ttl.default` = `dispatch.grace` makes ordinary |
+| D2 | **Usage rows missing** | a step that reached a terminal status **after** the run's activation, once the run's **newest** executor record is **more than `dispatch.grace` old** (D7), on a v10 binary, with zero `usage_ledger` rows, **in a run that has ever opened a dispatch** (a `dispatch-opened` event exists — usage completeness is a RELAY contract; a run no relay ever drove has nobody owing usage) | `dispatch close --accept-missing-usage`, which records the acceptance (P19) |
 
 | # | Clause |
 |---|---|
@@ -866,6 +954,7 @@ engine-core §5 names exactly two classes; both are **computed, never stored**
 | D4 | **`expected_cost = 0` steps still require usage rows under D2.** The floor and the ledger are independent mechanisms; a free step that reported nothing is still a step whose usage the relay did not record |
 | D5 | **Action and human steps are exempt from D2.** No worker claims them (they are engine-run or operator-resolved), so there is nobody to have reported usage. Including them would make every fixture run permanently un-closable |
 | D6 | A run with no open dispatch is still probed for discrepancies by `next` (P25). Discrepancies are a property of the *run*, not of the manifest — a relay that never opened a dispatch can still leave a claimed step unrecorded |
+| D7 | **A freshly recorded wave is usage PENDING, not missing.** D2 fires only once the **newest** `updated_at_ms` among the run's terminal executor steps (billed or not) is older than `dispatch.grace` — the window D1 already gives a silent claim. The relay measures a wave's spend from agent transcripts after the wave returns, and a probe that refused the instant a step recorded put that join on the critical path of every close (RUN-90: 21 joins of about 2.5 minutes, serial with the close). The clock is the wave's last record rather than each step's own because the join cannot start before the wave returns: measured per step, every wave longer than the grace refused its close on its early steps however recently it returned (RUN-95: 86 refusals on a 287-minute wave, the join forced ahead of the close), and ranging the clock over the unbilled steps alone would move it backward as each back-fill landed. D1 keeps its per-step measurement. Two readers ask WITHOUT the grace: `dispatch close --accept-missing-usage` settles the pending steps too, so they cannot resurface as a refusal after the operator settled the run; and `run report` lists pending and missing alike under `missing_usage`, because a run's last wave has no later close at which the grace would lapse into a refusal |
 
 **D6 is the clause that makes this stage change `next`'s behavior for repos
 that never touch dispatches**, and it deserves its dormancy statement: with no
@@ -912,6 +1001,96 @@ The QA section (§9.2, `ZJ`) executes it literally, both arms:
 `dispatch.ttl` to a small value via `docket config` and waits deterministically,
 following the repo's existing TTL-flake discipline; the Go test injects `nowMS`
 directly.
+
+## 5.10 `dispatch extend`: appending mid-wave rows to the open manifest
+
+`docket dispatch extend --run RUN-N` appends the steps that became ready since
+the open to the SAME open manifest.
+
+**Why the verb exists.** A fix round is minted at the RECORD TIME of the step
+whose routing chose `fix-loop`, never at `next`, so before this verb every loop
+round started in a later dispatch by construction. The same holds for a
+held-cluster gate, an `on_fail` route, and the chain tail a `--limit` cut left
+out: the row was ready, the manifest was frozen, and the relay paid a whole
+dispatch boundary — the remainder of its wave plus the bookkeeping — for work
+the engine had already readied. Measured on HRN-1102, the hop from a `fix-loop`
+routing to the fix round's claim took 12 hours with zero minutes of the issue's
+own work in it.
+
+**What it does.** It runs the shared reap (`reapExpiredTx`) exactly as every
+other scheduling verb does, runs `readyRows` unlimited, drops every step id
+already stored on the open manifest, and appends the rest at position max+1
+with the canonical bytes and sha256 `dispatch open` stores. The manifest's
+`expires_ms` grows by the APPENDED rows' `stagedLeaseSumMS` — the rows already
+stored were budgeted for at open — and a `dispatch-extended` event records the
+dispatch, the appended count, the new expiry, and `extended_seq`: the log
+position the appended rows were computed at, the same fact `opened_seq` records
+for the open.
+
+**`extended_seq` is a column on `dispatches`, beside `opened_seq`** (v31). The
+two are one manifest's place in the log — where it started, and where it last
+grew — and splitting them across stores would leave a reader holding the
+dispatch row able to say when the manifest opened but not whether it has since
+been extended, which is a join against the event log to answer. It is INTEGER
+NOT NULL DEFAULT 0, and zero means NEVER EXTENDED: an event seq is 1-based, so
+no append can write one. Each extend OVERWRITES it, including an extend that
+appended nothing — an empty extend still happened — so the column names the
+LATEST append and the event log keeps the history. The expiry and the seq move
+in one CAS on `(id, status='open')`, because they describe one append: a
+manifest that had demonstrably grown but could not say when is the state this
+column exists to prevent.
+
+**Invariants.**
+
+- **Rows are byte-hashed at append.** An appended row's bytes come from the same
+  `canonicalRowBytes` an opened row's do, so `dispatch verify` and the spawn
+  guard cannot tell the two apart — which is the point.
+- **One open manifest, still.** This is an append, not a second dispatch. A
+  second concurrent dispatch per run was rejected: P24 exists so relay drift
+  stalls loudly, and two open manifests make `dispatch verify` and the spawn
+  guard's comparison ambiguous.
+- **`next` keeps refusing while a dispatch is open** (P24). Nothing about the
+  refusal changes; `next` returning rows outside the manifest was rejected for
+  removing exactly the signal that makes drift visible.
+- **Unlaunched appended rows stay `pending` at close, and are not a
+  discrepancy.** A manifest is not a lock (§5.1, P28) and an appended row is no
+  more of one than an opened row; the discrepancies of §5.8 are statements about
+  claims and usage, never about an offer nobody took.
+- **An expired manifest is refused rather than extended**, since extending one
+  would push a lapsed manifest's expiry back out and resurrect a batch the TTL
+  had already given up on.
+- **The extend reports the reap hold it creates** (`reap_hold`, beside
+  `reaped`), exactly as `dispatch open` does. The shared reap is unconditional,
+  and reaping a BOUNDED class leaves an unacknowledged `reap_acks` row that
+  denies the next `guard spawn --active` (§6, A11). A relay that extended and
+  then spawned would meet that denial with no warning from the verb that made
+  the hold — and the engine's own advice names `dispatch open --ack-reap`, a
+  verb the relay cannot reach without the dispatch boundary this verb exists to
+  avoid. `guard spawn --ack-reap SEQ` clears it in place; `dispatch extend`
+  takes no `--ack-reap` of its own, since acknowledging is the spawning relay's
+  act and it already has a verb for it.
+
+**What the extension deliberately omits: the DKT-193 stale-target advisory.**
+`dispatch open` collects `staleTargetCandidates` over its ready rows and returns
+`StaleTargets`; an extension returns none, and `BudgetHeld` and `PinDrift` with
+it. These are advisories a conductor reads when deciding whether to spend a wave
+on a batch, and an extend is not that decision — the wave is already running and
+its budget was weighed at the open. The same rows are re-examined at the next
+`dispatch verify` and the next open, so the omission costs timeliness, never
+detection. A relay must not read a silent extension as a clean bill on the
+appended rows' targets.
+
+**`guard spawn --rows` accepts a subset.** The guard compared a proposed batch
+against the stored manifest as WHOLE-BATCH POSITIONAL EQUALITY — same length,
+same order. A relay launching the appended suffix alone was denied on length
+before a byte was compared, so the guard now requires every proposed row to
+byte-match SOME stored row, with a repeat inside one batch still a denial. The
+property it defends is unchanged and still exact: a relay may spawn only rows
+the engine issued, byte for byte, and each offered row once.
+
+**The relay's call points.** After a `fix-loop` routing — the round is minted at
+that record and is appendable immediately — and at a lane's last stage, where
+the chain tail a `--limit` cut or a held cluster readied is waiting.
 
 ---
 
@@ -1146,8 +1325,8 @@ becomes durable.
 
 | # | Clause |
 |---|---|
-| G5 | `docket guard spawn --run RUN-N [--rows FILE] [--ack-reap SEQ]…` allows iff **both**: (a) the proposed rows byte-match the open dispatch, and (b) no unacknowledged write reaps exist |
-| G6 | Proposed rows arrive via `--rows FILE` (or `-` for stdin) as the JSON array a relay is about to spawn. Byte-matching is `dispatch verify`'s comparison (P7) against the *stored manifest*, position by position |
+| G5 | `docket guard spawn --run RUN-N [--rows FILE] [--ack-reap SEQ]…` allows iff **both**: (a) every proposed row byte-matches *some* row of the open dispatch, and (b) no unacknowledged write reaps exist |
+| G6 | Proposed rows arrive via `--rows FILE` (or `-` for stdin) as the JSON array a relay is about to spawn. Byte-matching is **membership**, not positional equality: each proposed row's canonical sha256 must be one the stored manifest carries, and each stored row may be spawned **once** per batch, so a duplicate is a denial. It was whole-batch and position-by-position until `dispatch extend` (§5.10, DKT-2071) let the manifest grow mid-wave: the relay then launches the *appended suffix* alone, a batch every row of which the engine offered, which the length check denied before comparing a byte. The property defended is unchanged and still byte-exact — a relay may spawn only rows the engine issued |
 | G7 | **With no open dispatch and no `--rows`, (a) is vacuously satisfied.** A harness that does not use dispatch manifests still gets (b) — the reap check — which is the half §2 assigns to this verb by name. Requiring a manifest would make the reap-ack mechanism unavailable to any relay that batches differently |
 | G8 | **With `--rows` and no open dispatch, it is a denial**, not a vacuous pass: the relay believes it is spawning a batch the engine never issued |
 | G9 | Denial for (b) enumerates each unacknowledged seq and names `--ack-reap` (A11) |
@@ -1270,7 +1449,7 @@ checkable, and it stops being an argument and becomes a script.
 | `next` | `step-ready`, `lease-reaped`, `join-completed`, `loop-entered`, `dispatch-abandoned` (TTL), `issue-promoted` |
 | `gate` | `gate-started`, `gate-recorded`, `gate-unmatched`, `gate-rerun`, `vote-opened`, `vote-tallied` |
 | `threshold` | `step-routed`, `step-failed`, `step-superseded`, `step-skipped`, `step-held` |
-| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-closed`, `dispatch-abandoned` (explicit) |
+| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-extended` (DKT-2071), `dispatch-closed`, `dispatch-abandoned` (explicit), `conductor-seated` (DKT-2465) |
 
 **Two rows need their sentence:**
 
@@ -1284,6 +1463,22 @@ checkable, and it stops being an argument and becomes a script.
   even when the engine flips it, because the transition's *meaning* is "a
   person must now decide". `data.reason` distinguishes `budget` from an
   operator's `run pause`, so the trail is unambiguous without a new kind.
+
+**AMENDMENT (DKT-2450): the four step rulings record WHO.** `step-approved`,
+`step-rejected`, `step-resolved`, and a `lease-reaped` written by `step reap`
+(`data.forced`) carry `actor` and `cwd` — the same two claim-level fields
+`trust-added`/`trust-removed` carry (gates-trust §3.6, DKT-263), resolved at the
+CLI call site, written unconditionally, and refused empty at the engine seam
+(DKT-595). The `human` class says a person, or a harness relaying one, did this;
+the two fields say which one and from where, which is the boundary item 2
+exposes and the one a class alone cannot audit. The rest of each payload is
+unchanged (`detail` for the note or the resolution, `note`/`value` for a
+corrected hold, `forced`/`reason` for a reap). `lease-reaped` stays `next` in
+this table — it maps kinds, not occurrences — and `data.actor` is what
+distinguishes a forced reap's author from an expiry, which has none. `run
+report` carries the last attributed ruling per step (`attempts[].ruling`) and
+renders it beside the routing, listing an approved or override-passed step
+under "How steps ended" for that reason alone.
 
 ### 8.8 Event kinds added by this stage
 
@@ -1304,6 +1499,25 @@ existing `lease-reaped` event already anchors. **This is a judgment and it is
 recorded as one**, so a reviewer can push back: the argument for adding it
 would be A3 (attributability), and the counter is that the ack is not a
 *transition of the run* — nothing about the run's state machine moves.
+
+**A later addition (DKT-2071): `dispatch-extended`.** §5.10's append is a
+fourth transition of the same manifest — it grows, its expiry moves, and its
+`extended_seq` advances — so it takes a kind for the reason the other three
+have one: an operator reading the log must be able to tell a manifest that was
+opened once from one that has since been extended, and `dispatch verify`'s
+answer changes with it. Its actor is `human` beside `dispatch-opened`, since
+the verb is the relay's, not the engine's.
+
+**One later addition (DKT-2465): `conductor-seated`.** `run conduct` re-mints a
+run's conductor capability — the token `step approve`, `step reject`, `step
+resolve`, `step reap`, `run pause`, `run resume` and `run abandon` require —
+and it is the one token-free route to that authority, so the seat changing
+hands is a transition an auditor must be able to attribute. The event carries
+`actor`, `cwd` and `rotated` (whether a standing capability was retired). A
+first activation's mint needs no kind of its own: `run-activated` already
+records that transition and the capability is one of its effects. Each of the
+seven verbs refuses a caller without the capability BEFORE it writes, so no
+refusal leaves an event.
 
 ## 9. AUTO-REGISTRATION — §9 item 11's machinery
 

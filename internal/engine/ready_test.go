@@ -923,3 +923,113 @@ func TestMergeLimitsTakesTheTighterBound(t *testing.T) {
 		t.Errorf("cap source = %q, want %q", got, "bounded@2")
 	}
 }
+
+// interposeExecutorSrc is standard-change's shape (DKT-2076): the routing
+// step's threshold names an EXECUTOR target, and the routing step's ordinary
+// downstream does not read that target's output.
+const interposeExecutorSrc = `
+[pipeline]
+name = "interpose-executor"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "drain-highs" = "any(status == blocked)" }
+
+[[step]]
+name = "drain-highs"
+after = ["reconcile"]
+executor = "drain-highs"
+emits = "record"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// interposeVoteHoldSrc is the same shape with a VOTE target, the DKT-168 case
+// the restriction must leave untouched.
+const interposeVoteHoldSrc = `
+[pipeline]
+name = "interpose-vote-hold"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "tribunal" = "any(status == blocked)" }
+
+[[step]]
+name = "tribunal"
+after = ["reconcile"]
+type = "vote"
+voters = ["seat-a", "seat-b", "seat-c"]
+vote_rule = "majority"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// TestInterposedExecutorTargetDoesNotHoldDownstream is DKT-2076: R3's second
+// interposition clause holds a routing step's ordinary downstream only for
+// threshold targets of kind vote or human. An open EXECUTOR target runs beside
+// that downstream rather than ahead of it: nothing downstream reads its output,
+// so the extra level bought a dispatch round and no ordering guarantee.
+func TestInterposedExecutorTargetDoesNotHoldDownstream(t *testing.T) {
+	t.Run("executor target leaves the downstream ready", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeExecutorSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "drain-highs@0"); got != db.StepPending {
+			t.Fatalf("drain-highs@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if !ok {
+				t.Errorf("verify@0 held by %q while an open EXECUTOR target "+
+					"runs; its own predecessors are done and it reads nothing "+
+					"drain-highs emits", cond)
+			}
+		})
+	})
+
+	t.Run("vote target still holds the downstream", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeVoteHoldSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "tribunal@0"); got != db.StepPending {
+			t.Fatalf("tribunal@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("verify@0 ready=%v cond=%q behind an open VOTE gate, "+
+					"want CondGateOpen: DKT-168 is unchanged", ok, cond)
+			}
+		})
+	})
+}
