@@ -67,6 +67,11 @@ var readOnlyLeafVerbs = map[string]bool{
 	"board": true, "next": true, "plan": true, "stats": true, "export": true,
 	"steps": true, "version": true, "help": true, "completion": true,
 	"manifest": true,
+	// doctor is six read-only environment checks by its own contract, and it
+	// is exactly the verb an operator runs from a directory whose binding they
+	// are unsure of; minting a project row there answered the question by
+	// changing the answer.
+	"doctor": true,
 }
 
 // commandMayRegisterProject reports whether cmd is allowed to create a project

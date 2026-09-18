@@ -58,7 +58,7 @@ func TestReadVerbsNeverRegisterAProject(t *testing.T) {
 		"workflow list", "workflow show", "workflow lint",
 		"schema list", "schema show",
 		"project list", "trust list", "events list", "config get",
-		"dispatch verify",
+		"dispatch verify", "doctor",
 		"guard stop", "guard gate", "guard record", "guard spawn",
 		"board", "next", "plan", "stats", "export",
 	}
