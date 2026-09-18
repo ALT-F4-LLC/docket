@@ -12,6 +12,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/ALT-F4-LLC/docket/internal/db"
 )
 
 // `docket doctor` — DKT-1285.
@@ -22,12 +24,15 @@ import (
 // mandated. The probe lived in dotfiles as attach-probe.js, spending six
 // read-only agents per attach. Doctor is that probe, engine-native and
 // composed from what already exists: `run verify-pins` for pins, and five new
-// checks for the rest.
+// checks for the rest. A seventh, `project`, came later: doctor is the verb an
+// operator runs from a directory whose binding they are unsure of, and until
+// it joined the read-only leaf verbs it answered that question by binding the
+// directory. Now it reports the binding instead.
 //
 // READ-ONLY, AND IT WRITES NOTHING — no lease reap, no re-pin, no migration
 // beyond what any read verb performs. Every check below either shells out to
-// `git` (read commands only), reads the filesystem, or calls VerifyPins,
-// which is read-only by its own contract.
+// `git` (read commands only), reads the filesystem, reads one project row, or
+// calls VerifyPins, which is read-only by its own contract.
 
 // DoctorVerdict is one check's answer.
 type DoctorVerdict string
@@ -67,6 +72,15 @@ type DoctorOptions struct {
 	// DBPath is the store's database file — the same path the current seat
 	// already opened read-write to reach this verb, re-verified directly.
 	DBPath string
+	// ProjectID is the project the invocation resolved to, as the root hook
+	// decided it: a registered row's id, db.DefaultProjectID on a
+	// single-tenant store, or db.UnregisteredProjectID when Identity has no
+	// row. Doctor reports it and never changes it.
+	ProjectID int
+	// Identity is the invocation's project identity as config resolved it,
+	// or "" on a single-tenant store — named in the detail so an unbound
+	// report says which path has no project.
+	Identity string
 	// RunID is `--run`'s target, or 0 when absent — AC2's SKIP case.
 	RunID int
 	// SourceRoot is `--source PATH`, or "" when absent — install-drift's own
@@ -75,13 +89,14 @@ type DoctorOptions struct {
 	NowMS      int64
 }
 
-// Doctor runs all six checks and reports one row each, without
+// Doctor runs all seven checks and reports one row each, without
 // short-circuiting on an early failure (AC1): a conductor deciding whether to
 // attach needs every answer in one call, not the first one that went wrong.
 func Doctor(conn *sql.DB, opts DoctorOptions) *DoctorReport {
 	checks := []DoctorCheck{
 		checkDoctorSeat(opts.Cwd),
 		checkDoctorStore(opts.DBPath),
+		checkDoctorProject(conn, opts.ProjectID, opts.Identity),
 		checkDoctorInstallDrift(opts.SourceRoot),
 		checkDoctorPins(conn, opts.RunID),
 		checkDoctorLinkFarm(opts.Cwd),
@@ -118,7 +133,7 @@ func doctorDisposition(checks []DoctorCheck) (clean, skipped bool) {
 // checkDoctorSeat is check 1: cwd is the git toplevel.
 //
 // A conductor working from a subdirectory has every relative-path assumption
-// the rest of the six checks (and every other verb) make silently wrong, and
+// the rest of the checks (and every other verb) make silently wrong, and
 // the old probe caught this with a diff piped through `head -30` that reported
 // `head`'s exit code instead of the diff's — silently passing every time.
 func checkDoctorSeat(cwd string) DoctorCheck {
@@ -158,7 +173,43 @@ func checkDoctorStore(dbPath string) DoctorCheck {
 	return DoctorCheck{Check: check, Verdict: DoctorOK, Detail: dbPath + " opens read-write"}
 }
 
-// checkDoctorInstallDrift is check 3: the shared config root and bin match
+// checkDoctorProject is check 3: the cwd resolves to a registered project.
+//
+// The root hook resolved the project before this verb ran, and doctor is a
+// read-only leaf verb, so an identity with no row resolves to
+// db.UnregisteredProjectID rather than minting one. That is the case this
+// check exists to make visible: before doctor joined the read verbs, running
+// it from an unbound repository claimed the store's default row for that
+// repository and logged a project-registered event with verb doctor — the
+// operator asked "is this bound?" and the answer changed by being asked.
+//
+// Unbound is FAIL, not WARN: doctor's reader is a conductor about to
+// dispatch, and every ambient verb from an unbound cwd is refused or
+// registers on first write, so `clean` must not read true here. Bound is OK
+// and names the row. On a single-tenant store (Identity "") the default row
+// is the whole store, and the check reports that rather than "unbound".
+func checkDoctorProject(conn *sql.DB, projectID int, identity string) DoctorCheck {
+	const check = "project"
+	if projectID == db.UnregisteredProjectID {
+		return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: fmt.Sprintf(
+			"no project registered for %s; doctor does not register one — "+
+				"the first writing verb run here does", identity)}
+	}
+	p, err := db.GetProject(conn, db.DefaultProjectIDOr(projectID))
+	if err != nil {
+		return DoctorCheck{Check: check, Verdict: DoctorFail,
+			Detail: fmt.Sprintf("resolved project %d: %v", projectID, err)}
+	}
+	if identity == "" {
+		return DoctorCheck{Check: check, Verdict: DoctorOK, Detail: fmt.Sprintf(
+			"single-tenant store; the default project %s (%s, id %d) is the whole store",
+			p.Prefix, p.Name, p.ID)}
+	}
+	return DoctorCheck{Check: check, Verdict: DoctorOK, Detail: fmt.Sprintf(
+		"bound to project %s (%s, id %d) for %s", p.Prefix, p.Name, p.ID, identity)}
+}
+
+// checkDoctorInstallDrift is check 4: the shared config root and bin match
 // --source's tree.
 //
 // --source names a dotfiles-shaped checkout root; the two trees it ships are
@@ -307,7 +358,7 @@ func doctorTreeWalk(root string) (files map[string]string, dirs map[string]bool,
 			return nil
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
-			// Symlinks are check 5's concern (link-farm debris), not a byte
+			// Symlinks are check 6's concern (link-farm debris), not a byte
 			// comparison here — walking through one could also escape root.
 			return nil
 		}
@@ -330,12 +381,12 @@ func doctorDirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-// checkDoctorPins is check 4: `run verify-pins` for --run, unchanged.
+// checkDoctorPins is check 5: `run verify-pins` for --run, unchanged.
 //
 // Without --run there is no run to check pins for, and AC2 makes that
 // explicit: SKIP, which doctorDisposition then reads as not-clean — a
 // conductor who forgot --run is told so rather than shown a clean report that
-// silently checked five things instead of six.
+// silently checked six things instead of seven.
 func checkDoctorPins(conn *sql.DB, runID int) DoctorCheck {
 	const check = "pins"
 	if runID == 0 {
@@ -363,7 +414,7 @@ func checkDoctorPins(conn *sql.DB, runID int) DoctorCheck {
 	}
 }
 
-// checkDoctorLinkFarm is check 5: symlinks under <cwd>/.docket/config — the
+// checkDoctorLinkFarm is check 6: symlinks under <cwd>/.docket/config — the
 // "link-farm debris" a retired install model left behind.
 //
 // A symlink there at all is the debris, whether or not it still resolves:
@@ -423,7 +474,7 @@ func isScratchShapedPath(path string) bool {
 	return slices.Contains(strings.Split(path, string(filepath.Separator)), "scratchpad")
 }
 
-// checkDoctorStragglers is check 6: detached worktrees homed under a
+// checkDoctorStragglers is check 7: detached worktrees homed under a
 // scratch-shaped path — left behind by a session (or a pre-gate
 // reconstruction, pregate_scratch.go) that never cleaned up after itself (a
 // crash, a killed process).

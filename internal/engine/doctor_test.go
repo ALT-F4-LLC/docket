@@ -351,6 +351,84 @@ func TestCheckDoctorStragglersOKWithNone(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// checkDoctorProject — check 3
+// ---------------------------------------------------------------------------
+
+// TestCheckDoctorProjectFailsWhenUnbound is the case the check exists for: the
+// root hook resolved an anchored identity to the unregistered sentinel, and
+// doctor names the path that has no project instead of binding it.
+func TestCheckDoctorProjectFailsWhenUnbound(t *testing.T) {
+	_, conn := doctorFixture(t)
+	before := countRows(t, conn, "projects")
+
+	c := checkDoctorProject(conn, db.UnregisteredProjectID, "/repo/unbound")
+	if c.Verdict != DoctorFail {
+		t.Errorf("verdict = %s, want FAIL for an unregistered project", c.Verdict)
+	}
+	if !strings.Contains(c.Detail, "/repo/unbound") {
+		t.Errorf("detail %q does not name the unbound identity", c.Detail)
+	}
+	if got := countRows(t, conn, "projects"); got != before {
+		t.Errorf("projects: before %d, after %d; the check registered one", before, got)
+	}
+}
+
+// TestCheckDoctorProjectOKWhenBound names the row a registered identity
+// resolves to.
+func TestCheckDoctorProjectOKWhenBound(t *testing.T) {
+	_, conn := doctorFixture(t)
+	id, _, err := db.EnsureProjectCreated(conn, "/repo/bound", "bound", nowMS)
+	testsupport.Must(t, err, "registering a project: %v", err)
+	p, err := db.GetProject(conn, id)
+	testsupport.Must(t, err, "reading the project: %v", err)
+
+	c := checkDoctorProject(conn, id, "/repo/bound")
+	if c.Verdict != DoctorOK {
+		t.Errorf("verdict = %s, want OK for a registered project: %s", c.Verdict, c.Detail)
+	}
+	for _, want := range []string{p.Prefix, "bound", "/repo/bound"} {
+		if !strings.Contains(c.Detail, want) {
+			t.Errorf("detail %q does not name %q", c.Detail, want)
+		}
+	}
+}
+
+// TestCheckDoctorProjectOKOnASingleTenantStore: an empty identity is the
+// documented pre-v12 fallback, where the default row is the whole store; it
+// must read as bound, not as an unbound repository.
+func TestCheckDoctorProjectOKOnASingleTenantStore(t *testing.T) {
+	_, conn := doctorFixture(t)
+
+	c := checkDoctorProject(conn, db.DefaultProjectID, "")
+	if c.Verdict != DoctorOK {
+		t.Errorf("verdict = %s, want OK on a single-tenant store: %s", c.Verdict, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "single-tenant") {
+		t.Errorf("detail %q does not say the store is single-tenant", c.Detail)
+	}
+}
+
+// TestDoctorUnboundProjectMovesClean: unlike stragglers, an unbound cwd is a
+// verdict — a conductor about to dispatch from here must not read `clean`.
+func TestDoctorUnboundProjectMovesClean(t *testing.T) {
+	repo, conn := doctorFixture(t)
+	run, _ := activatedRun(t, conn)
+	source := doctorInstallFixture(t)
+
+	report := Doctor(conn, DoctorOptions{
+		Cwd: repo, DBPath: filepath.Join(repo, "issues.db"),
+		ProjectID: db.UnregisteredProjectID, Identity: repo,
+		RunID: run.ID, SourceRoot: source, NowMS: nowMS,
+	})
+	if report.Clean {
+		t.Errorf("clean = true with an unbound project: %+v", report.Checks)
+	}
+	if report.Skipped {
+		t.Errorf("skipped = true; unbound is a FAIL, not a SKIP: %+v", report.Checks)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Doctor — the composed report
 // ---------------------------------------------------------------------------
 
@@ -370,10 +448,10 @@ func doctorFixture(t *testing.T) (repo string, conn *sql.DB) {
 	return repo, conn
 }
 
-// TestDoctorRunsEverySixWithoutShortCircuiting is AC1: one row per check, all
-// six present, whatever the individual verdicts — including check 1 (seat)
-// failing, which does not stop the rest from running.
-func TestDoctorRunsEverySixWithoutShortCircuiting(t *testing.T) {
+// TestDoctorRunsEverySevenWithoutShortCircuiting is AC1: one row per check,
+// all seven present, whatever the individual verdicts — including check 1
+// (seat) failing, which does not stop the rest from running.
+func TestDoctorRunsEverySevenWithoutShortCircuiting(t *testing.T) {
 	repo, conn := doctorFixture(t)
 	sub := filepath.Join(repo, "internal")
 	testsupport.Must(t, os.MkdirAll(sub, 0o755), "mkdir: %v", nil)
@@ -382,7 +460,7 @@ func TestDoctorRunsEverySixWithoutShortCircuiting(t *testing.T) {
 		Cwd: sub, DBPath: filepath.Join(repo, "issues.db"), NowMS: nowMS,
 	})
 
-	want := []string{"seat", "store", "install-drift", "pins", "link-farm", "stragglers"}
+	want := []string{"seat", "store", "project", "install-drift", "pins", "link-farm", "stragglers"}
 	if len(report.Checks) != len(want) {
 		t.Fatalf("checks = %v, want %d rows", report.Checks, len(want))
 	}
@@ -464,14 +542,16 @@ func TestDoctorWritesNothing(t *testing.T) {
 	run, _ := activatedRun(t, conn)
 
 	before := countRows(t, conn, "runs") + countRows(t, conn, "steps") +
-		countRows(t, conn, "events") + countRows(t, conn, "reap_acks")
+		countRows(t, conn, "events") + countRows(t, conn, "reap_acks") +
+		countRows(t, conn, "projects")
 
 	Doctor(conn, DoctorOptions{
 		Cwd: repo, DBPath: filepath.Join(repo, "issues.db"), RunID: run.ID, NowMS: nowMS,
 	})
 
 	after := countRows(t, conn, "runs") + countRows(t, conn, "steps") +
-		countRows(t, conn, "events") + countRows(t, conn, "reap_acks")
+		countRows(t, conn, "events") + countRows(t, conn, "reap_acks") +
+		countRows(t, conn, "projects")
 	if before != after {
 		t.Errorf("row counts changed: before %d, after %d", before, after)
 	}
