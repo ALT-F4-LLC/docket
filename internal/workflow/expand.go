@@ -323,8 +323,9 @@ func ThresholdTargets(threshold map[string]string) []string {
 }
 
 // InterposedTargets returns every step this one can interpose as a conditional
-// gate: its `threshold` step-name routings, plus the triage panel its `on_fail`
-// names (DKT-1901). Sorted, and free of duplicates when both name the same step.
+// gate: its `threshold` step-name routings, the triage panel its `on_fail`
+// names (DKT-1901), and the step its `on_exhausted` names (DKT-1902). Sorted,
+// and free of duplicates when several name the same step.
 //
 // It is ONE function because the two are one concept — a successor that runs
 // only if this step's routing selects it — and every reader must agree about
@@ -334,10 +335,12 @@ func ThresholdTargets(threshold map[string]string) []string {
 // blocks the issue forever.
 func InterposedTargets(step *Step) []string {
 	out := ThresholdTargets(step.Threshold)
-	if panel := step.OnFailTarget(); panel != "" && !slices.Contains(out, panel) {
-		out = append(out, panel)
-		slices.Sort(out)
+	for _, target := range []string{step.OnFailTarget(), step.OnExhaustedTarget()} {
+		if target != "" && !slices.Contains(out, target) {
+			out = append(out, target)
+		}
 	}
+	slices.Sort(out)
 	return out
 }
 

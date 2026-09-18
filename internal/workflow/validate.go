@@ -664,6 +664,11 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		return err
 	}
 
+	// V41 (DKT-1902): `on_exhausted` says where a fix-loop exhaustion routes.
+	if err := validateOnExhausted(def, byName, step); err != nil {
+		return err
+	}
+
 	// V17b — V17's mirror (DKT-196, surfaced by DKT-168): a step that CAN
 	// route `fix-loop` requires a `loop = true` step to instantiate. Without
 	// one, every loop entry bumps the counter and supersedes the downstream,
@@ -1618,6 +1623,85 @@ func anyBodyServes(def *Definition, trigger string) bool {
 // any step currently routes to it — a mapping nobody reads is an authoring
 // mistake worth naming at register, and one declared on a non-vote step is a
 // misunderstanding of what the field is for.
+// validateOnExhausted is V41 (DKT-1902): `on_exhausted` declares where a
+// fix-loop exhaustion routes, so it is declarable only where an exhaustion can
+// happen — on a step that routes `fix-loop` under a declared bound — and its
+// value must be one the engine can carry out.
+//
+// The closed half is `waiting-human` and `abandon-issue`. A value outside it
+// names a step, which must resolve and must be a vote step (whose proposal
+// asks what to do about the exhausted loop) or an executor step (which does
+// something about it): those are the two classes an interposed target can be.
+// A step that opens no proposal and runs no work would leave the exhaustion
+// routed somewhere nothing answers, which is the unconditional park with an
+// extra row.
+//
+// The target must also be ordered behind the routing step, for V40's reason:
+// the exhaustion is the evidence the target acts on, and it does not exist
+// until the loop has run.
+func validateOnExhausted(def *Definition, byName map[string]*Step, step *Step) error {
+	if step.OnExhausted == "" {
+		return nil
+	}
+	if !canRouteFixLoop(def, step) {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` is only valid on a step that routes "+
+					"`fix-loop` — it says where that routing goes once the loop "+
+					"bound refuses another round, and this step never routes there",
+				step.Name),
+		}
+	}
+	if step.MaxFixLoops == nil || *step.MaxFixLoops <= 0 {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` requires a positive `max_fix_loops` on "+
+					"the same step — an unbounded loop never exhausts, so the "+
+					"routing declared here could never fire",
+				step.Name),
+		}
+	}
+
+	target := step.OnExhaustedTarget()
+	if target == "" {
+		return nil
+	}
+	named, ok := byName[target]
+	if !ok {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` must be one of %s or the name of a "+
+					"`type=\"vote\"` or executor step, and %q is neither — it "+
+					"names no step in this workflow",
+				step.Name, quotedList(onExhaustedValues), target),
+		}
+	}
+	if named.Type != TypeVote && named.StepClass() != ClassExecutor {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` names %q, which is neither a "+
+					"`type=\"vote\"` step nor an executor — only those decide or "+
+					"do something about an exhausted loop",
+				step.Name, target),
+		}
+	}
+	if !slices.Contains(named.After, step.Name) {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` names %q, whose `after` does not include "+
+					"%q — a step acting on this loop's exhaustion must be ordered "+
+					"behind it",
+				step.Name, target, step.Name),
+		}
+	}
+	return nil
+}
+
 func validateOnFailRoutes(def *Definition, step *Step) error {
 	// V40c's companion: a triaging panel's OWN `on_fail` disposes of the step it
 	// was asked about when the tally reaches no verdict, so `skip` is refused

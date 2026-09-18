@@ -248,6 +248,29 @@ type Step struct {
 	// under `max_fix_loops = 2` is therefore the signature of a recorded
 	// grant, not of the counter differing by entry path.
 	MaxFixLoops *int `toml:"max_fix_loops" json:"max_fix_loops,omitempty"`
+	// OnExhausted is where a `fix-loop` routing goes when the next ordinal
+	// would exceed the bound above (DKT-1902). `waiting-human` — the default,
+	// and what every workflow got before this key existed — parks for an
+	// operator; `abandon-issue` stops the run's work on the issue; a
+	// `type = "vote"` step name opens that panel's proposal, which is how an
+	// author declares a loop-extension vote under a hard ceiling; an executor
+	// step name runs that step, so the file-and-stop default can run
+	// machine-side.
+	//
+	// It is the exhaustion's routing, not a second bound: the arithmetic
+	// MaxFixLoops describes is unchanged, and this says only what happens once
+	// it refuses. The shared store's 36 exhaustions on 2026-09-07 were
+	// answered by an operator 34 different ways — another round 17 times, an
+	// override-pass 10, a skip 4 — which is the work a workflow could not
+	// declare while the park was unconditional.
+	//
+	// The step names sit OUTSIDE the closed vocabulary exactly as `on_fail`
+	// reads them (OnFailTarget), so a named step is an INTERPOSED TARGET
+	// (InterposedTargets): the readiness latch releases it on the recorded
+	// routing and the unrouted siblings skip, with no second projection.
+	// Declarable only where the exhaustion can actually happen — on a step
+	// that routes `fix-loop` and under a declared bound (V41).
+	OnExhausted string `toml:"on_exhausted" json:"on_exhausted,omitempty"`
 	// MaxStalledRounds parks a `fix-loop` entry when this step — a routing
 	// step, i.e. one that can route `fix-loop` — has recorded that many
 	// CONSECUTIVE rounds without its routed payload's element count ever
@@ -397,6 +420,35 @@ func (s *Step) OnFailTarget() string {
 		return ""
 	}
 	return s.OnFail
+}
+
+// onExhaustedValues is the closed half of the `on_exhausted` vocabulary, in
+// declaration order. It is `on_fail`'s minus `fix-loop` and `skip`: the loop
+// that just refused another round cannot answer its own exhaustion with one,
+// and a `skip` would drop the routing step's undecided verdict silently.
+var onExhaustedValues = []string{OnFailWaitingHuman, OnFailAbandonIssue}
+
+// EffectiveOnExhausted is where this step's fix-loop exhaustion routes —
+// `waiting-human` when the step declares nothing, which is the unconditional
+// park every workflow had before the key existed.
+func (s *Step) EffectiveOnExhausted() string {
+	if s.OnExhausted != "" {
+		return s.OnExhausted
+	}
+	return OnFailWaitingHuman
+}
+
+// OnExhaustedTarget is the step a fix-loop exhaustion routes to, or "" when
+// `on_exhausted` is one of the closed vocabulary's own values — OnFailTarget's
+// reading, for the same reason: a routing that is not a known verb is a step
+// name. V41 makes the name resolve to a vote or executor step of the same
+// workflow, so every reader downstream of validation may treat a non-empty
+// answer as one.
+func (s *Step) OnExhaustedTarget() string {
+	if s.OnExhausted == "" || slices.Contains(onExhaustedValues, s.OnExhausted) {
+		return ""
+	}
+	return s.OnExhausted
 }
 
 // The tally outcomes an `on_fail_routes` mapping may key on — the vote's own

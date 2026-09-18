@@ -112,7 +112,52 @@ func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 	if outcome == nil || outcome.Entered {
 		return "", false
 	}
+	// A refusal that ROUTED somewhere did not park, and a park class on a
+	// `done` row would describe a question nobody is being asked (DKT-1902).
+	// `waiting-human` is the only refusal that parks, whether it came from
+	// `on_exhausted` or from the default that predates the key.
+	if outcome.Routing != workflow.OnFailWaitingHuman {
+		return "", false
+	}
 	return db.ParkClassLoopBound, true
+}
+
+// exhausted is the refused loop entry's outcome: where the exhaustion routes,
+// and the loop history the routing transaction records (DKT-1902).
+//
+// THE ROUTING IS THE AUTHOR'S (`on_exhausted`, §11.3 (1)). Before this, every
+// exhaustion parked `waiting-human` and a workflow could say nothing about it —
+// in the shared store on 2026-09-07 an operator answered 36 of those parks by
+// hand, 17 by buying another round and one issue by round after round to
+// ordinal 10 against a cap of 3. A declared routing is how an author puts that
+// decision in the workflow: a vote step to ask for the extension under a hard
+// ceiling, an executor to file and stop machine-side, `abandon-issue` to stop.
+// Absent a declaration the answer is `waiting-human`, byte for byte what the
+// unconditional park did.
+//
+// THE HISTORY IS WRITTEN HERE because this is the only place that knows it.
+// The rounds against the cap, the instance whose verdict opened the loop, and
+// the verdict that round ended on are facts of the refusal, and a reader
+// downstream — a router reading the park, an operator, `step show` — could
+// otherwise reconstruct them only from the prunable event log. Written in the
+// SAME transaction as the routing decision, so no reader ever sees an
+// exhaustion whose history has not landed yet.
+func exhausted(
+	tx *sql.Tx, step *db.Step, def *workflow.Definition, trigger string,
+	ordinal, roundsRun int, reason string, nowMS int64,
+) (*LoopOutcome, error) {
+	routing := workflow.OnFailWaitingHuman
+	if spec := workflow.StepByName(def, trigger); spec != nil {
+		routing = spec.EffectiveOnExhausted()
+	}
+	if err := db.SetStepLoopHistoryTx(
+		tx, step.ID, roundsRun, step.Instance, workflow.OnFailFixLoop, nowMS,
+	); err != nil {
+		return nil, err
+	}
+	return &LoopOutcome{
+		Entered: false, Ordinal: ordinal, Routing: routing, Reason: reason,
+	}, nil
 }
 
 // roundMovedNothing reports whether the round BELOW the one about to be entered
@@ -573,10 +618,7 @@ func enterLoop(
 			"loop %d would exceed max_fix_loops = %d on %s; "+
 				"`docket step resolve --as fix-round` authorizes one more round",
 			count, max, model.FormatID(step.IssueID))
-		return &LoopOutcome{
-			Entered: false, Ordinal: count - 1,
-			Routing: workflow.OnFailWaitingHuman, Reason: reason,
-		}, nil
+		return exhausted(tx, step, def, trigger, count-1, count-1, reason, nowMS)
 	}
 
 	// THE CLUSTER'S OWN BOUND (§11.3 cluster scoping, DKT-544). A
@@ -606,10 +648,7 @@ func enterLoop(
 				"loop round %d for %q would exceed its cluster's max_fix_loops = %d "+
 					"on %s; `docket step resolve --as fix-round` authorizes one more round",
 				rounds+1, trigger, clusterMax, model.FormatID(step.IssueID))
-			return &LoopOutcome{
-				Entered: false, Ordinal: count - 1,
-				Routing: workflow.OnFailWaitingHuman, Reason: reason,
-			}, nil
+			return exhausted(tx, step, def, trigger, count-1, rounds, reason, nowMS)
 		}
 	}
 
