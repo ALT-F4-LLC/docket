@@ -216,11 +216,32 @@ func TestRenderUIDetailSubIssueRowIncludesIssueFields(t *testing.T) {
 	}
 }
 
-func TestConfigureUIOutputSetsDefaultGlamourStyle(t *testing.T) {
+func TestConfigureUIOutputAdaptsToLightBackgrounds(t *testing.T) {
+	profile, dark := lipgloss.ColorProfile(), lipgloss.HasDarkBackground()
+	t.Cleanup(func() {
+		lipgloss.SetColorProfile(profile)
+		lipgloss.SetHasDarkBackground(dark)
+	})
+	lipgloss.SetHasDarkBackground(false)
 	t.Setenv("GLAMOUR_STYLE", "")
-	configureUIOutputForTest(t)
-	if got := os.Getenv("GLAMOUR_STYLE"); got != "dark" {
-		t.Fatalf("GLAMOUR_STYLE = %q, want dark", got)
+
+	ConfigureUIOutput()
+
+	if lipgloss.HasDarkBackground() {
+		t.Fatal("ConfigureUIOutput overwrote the detected light background")
+	}
+	if got := os.Getenv("GLAMOUR_STYLE"); got != "" {
+		t.Fatalf("GLAMOUR_STYLE = %q, want empty so the neutral default is used", got)
+	}
+	if rendered := RenderUIPane("Title", "body", 28, 10, false); strings.Contains(rendered, "\x1b[1;30m") || strings.Contains(rendered, "\x1b[1;97m") {
+		t.Fatalf("pane title overrode the terminal foreground: %q", rendered)
+	}
+	markdown, err := RenderMarkdown("Body copy")
+	if err != nil {
+		t.Fatalf("RenderMarkdown: %v", err)
+	}
+	if strings.Contains(markdown, "38;5;234") || strings.Contains(markdown, "38;5;252") {
+		t.Fatalf("markdown body overrode the terminal foreground: %q", markdown)
 	}
 }
 

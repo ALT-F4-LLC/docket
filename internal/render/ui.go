@@ -2,7 +2,6 @@ package render
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -41,10 +40,6 @@ type FooterState struct {
 
 func ConfigureUIOutput() {
 	lipgloss.SetColorProfile(termenv.TrueColor)
-	lipgloss.SetHasDarkBackground(true)
-	if os.Getenv("GLAMOUR_STYLE") == "" {
-		_ = os.Setenv("GLAMOUR_STYLE", "dark")
-	}
 }
 
 func JoinUIVertical(parts ...string) string {
@@ -204,7 +199,7 @@ func RenderUIPane(title, content string, width, height int, focused bool) string
 		borderColor = lipgloss.Color("12")
 	}
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	titleStyle := lipgloss.NewStyle().Bold(true)
 	body := lipgloss.NewStyle().Width(uiMax(width-4, 1)).Height(uiMax(height-3, 1)).Render(content)
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -303,7 +298,7 @@ func uiKindLabel(kind model.IssueKind) string {
 }
 
 func RenderUIDetailSubIssuesHeader(doneCount, totalCount int, focused bool) string {
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	headerStyle := lipgloss.NewStyle().Bold(true)
 	if focused {
 		headerStyle = headerStyle.Foreground(lipgloss.Color("11"))
 	}

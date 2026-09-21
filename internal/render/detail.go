@@ -85,7 +85,7 @@ func RenderDetail(issue *model.Issue, subIssues []*model.Issue, relations []mode
 }
 
 func renderHeader(issue *model.Issue) string {
-	idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	idStyle := lipgloss.NewStyle().Bold(true)
 	titleStyle := lipgloss.NewStyle().Bold(true)
 	kindStyle := lipgloss.NewStyle().
 		Foreground(ColorFromName(issue.Kind.Color())).
@@ -185,7 +185,7 @@ func runDispositionReasonLines(reason string) []string {
 }
 
 func renderRunDisposition(d *model.IssueRunDisposition) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	markerStyle := lipgloss.NewStyle().Foreground(ColorFromName("red")).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
@@ -204,7 +204,7 @@ func renderRunDisposition(d *model.IssueRunDisposition) string {
 }
 
 func renderFiles(files []string) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	header := sectionStyle.Render("Files")
 
@@ -217,9 +217,9 @@ func renderFiles(files []string) string {
 }
 
 func renderDocRefs(docs []model.DocRef) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	idStyle := lipgloss.NewStyle()
 	header := sectionStyle.Render("Linked Docs")
 
 	var idWidth, typeWidth, statusWidth int
@@ -246,9 +246,9 @@ func renderDocRefs(docs []model.DocRef) string {
 }
 
 func renderLinkedProposals(proposals []model.Proposal) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	idStyle := lipgloss.NewStyle()
 	header := sectionStyle.Render("Linked Proposals")
 
 	var idWidth, statusWidth int
@@ -274,7 +274,7 @@ func renderLinkedProposals(proposals []model.Proposal) string {
 }
 
 func renderDescription(description string) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	header := sectionStyle.Render("Description")
 
 	rendered, err := RenderMarkdown(description)
@@ -286,7 +286,7 @@ func renderDescription(description string) string {
 }
 
 func renderSubIssues(subIssues []*model.Issue) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 
 	// Count done issues for progress summary.
 	doneCount := 0
@@ -357,7 +357,7 @@ func RelationArrow(rt model.RelationType, isSource bool) string {
 }
 
 func renderRelations(issueID int, relations []model.Relation) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	header := sectionStyle.Render("Relations")
 
 	var lines []string
@@ -418,7 +418,7 @@ type commentStyles struct {
 // commentSectionHeader returns the styled "Comments" header and the styles
 // used to render each entry beneath it.
 func commentSectionHeader() (string, commentStyles) {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	styles := commentStyles{
 		author: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
 		time:   lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
@@ -462,7 +462,7 @@ func activityIcon(a model.Activity) string {
 }
 
 func renderActivity(activity []model.Activity) string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	fieldStyle := lipgloss.NewStyle().Bold(true)
 	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
