@@ -16,6 +16,7 @@ import (
 )
 
 func TestIssueShow_RendersLinkedDocsSection(t *testing.T) {
+	unsetNoColor(t)
 	t.Setenv("TERM", "xterm-256color")
 	conn := newTestDB(t)
 	issueID := createIssue(t, conn, "issue with docs", model.StatusTodo, model.PriorityHigh)
@@ -159,6 +160,7 @@ func linkProposalIssue(t *testing.T, conn *sql.DB, proposalID, issueID int) {
 }
 
 func TestIssueShow_LinksLinkedProposals(t *testing.T) {
+	unsetNoColor(t)
 	t.Setenv("TERM", "xterm-256color")
 	conn := newTestDB(t)
 	issueID := createIssue(t, conn, "issue with proposals", model.StatusTodo, model.PriorityHigh)

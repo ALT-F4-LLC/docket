@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/styles"
 )
 
 // ColorsEnabled returns whether terminal colors should be used.
@@ -31,7 +32,19 @@ func RenderMarkdown(content string) (string, error) {
 		return content, nil
 	}
 
-	rendered, err := glamour.RenderWithEnvironmentConfig(content)
+	var rendered string
+	var err error
+	if os.Getenv("GLAMOUR_STYLE") != "" {
+		rendered, err = glamour.RenderWithEnvironmentConfig(content)
+	} else {
+		style := styles.DarkStyleConfig
+		style.Document.Color = nil
+		renderer, rendererErr := glamour.NewTermRenderer(glamour.WithStyles(style))
+		if rendererErr != nil {
+			return content, rendererErr
+		}
+		rendered, err = renderer.Render(content)
+	}
 	if err != nil {
 		return content, err
 	}

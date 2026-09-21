@@ -127,6 +127,7 @@ SECTIONS=(
   ZN:test_zn_packet
   ZO:test_zo_backfill
   ZP:test_zp_fail_metadata
+  ZQ:test_zd_ui
 )
 
 REACHED_TARGET=false
