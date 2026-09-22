@@ -370,6 +370,16 @@ pinned and hashed them.
 **This is the one place the fix reaches beyond render.** It is not scope creep;
 it is the difference between the caps meaning something and meaning nothing.
 
+**`issue.files` attachments are the exception: their bytes are not counted**,
+in `ContextSize` or against the §11.1 caps. The caps run when activation expands
+the steps, against byte counts activation has just pinned. The form does not
+pin attachments: §1.4.1 reads them live from the run's exec root when the
+packet renders, because the attachments that forced the form were untracked. At
+expansion there is nothing to measure, so attachments are deliberately
+uncapped rather than estimated. The cost: a step declaring `issue.files` can
+render a packet larger than its recorded closure size, and nothing refuses it.
+Each attachment's `== FILE` header carries its path and hash, not its size.
+
 ### 1.6 Registration and validation
 
 Two new validation rules. **The numbers are V32 and V33**: V29 and V30 are

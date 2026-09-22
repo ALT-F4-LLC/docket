@@ -370,6 +370,11 @@ func RoutingPredecessors(def *Definition, name string) []string {
 // packetBytes reports the size of the declared packet files and their rendered
 // includes, counting each ref once. Activation supplies the resolver's file
 // selection rules and pinned byte counts without coupling expansion to disk.
+//
+// Attachments a step reads through the `issue.files` entry in inst.Inputs are
+// deliberately NOT summed. They are read live when the packet renders, so
+// expansion has no bytes to count; docs/tdd/packet-composition.md §1.5 records
+// them as uncapped. Do not add them here.
 func ContextSize(
 	bodySnapshot, issueSnapshot string, inst StepInstance, packetBytes func([]string) int,
 ) int {
