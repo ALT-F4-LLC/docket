@@ -29,7 +29,7 @@ import (
 // what makes §9 item 5's determinism a property of the function rather than of
 // the environment it ran in.
 
-// Aggregate params, as §7.1's table names them. Core reads exactly these five
+// Aggregate params, as §7.1's table names them. Core reads exactly these six
 // keys of the opaque bag and V28 refuses any other, so "the engine ignored my
 // param" is a register-time sentence rather than a run-time mystery.
 const (
@@ -162,7 +162,9 @@ type AggregateOutcome struct {
 	Recorded []map[string]any
 }
 
-// ParseAggregateParams reads §7.1's five keys out of the opaque bag.
+// ParseAggregateParams reads §7.1's six keys out of the opaque bag: `field`,
+// `method`, `hold_spread`, `output`, `route_at` (the routing floor), and
+// `source_field` (the per-element source-labels key name).
 //
 // It is the ONE place core reads inside `params`, and it reads exactly the keys
 // §2 names. The same rules run at register time (V28) so a typo'd
