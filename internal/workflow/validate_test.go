@@ -1454,6 +1454,21 @@ loop = true
 after_loop = "a"
 `,
 	},
+	{
+		rule: "V42", name: "sizes_any entry outside the size vocabulary",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[match]
+sizes_any = ["Small"]
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+`,
+		wants: []string{"[match].sizes_any", "Small"},
+	},
 }
 
 // closedRiskSchema is riskSchema with `additionalProperties: false` — the exact
@@ -1584,6 +1599,73 @@ func TestV13AndV13aAreDistinct(t *testing.T) {
 	if strings.Contains(v13a, "may not route rejects") {
 		t.Error("V13a should not report V13's message for a field the author never wrote")
 	}
+}
+
+// TestValidateSizesAny is V42: `[match].sizes_any` entries must be values
+// model.ValidateSize accepts — the same vocabulary engine.parsePolicy holds
+// policy.toml's [sizes] keys to, so the two refusals cannot drift.
+// It is a companion to validationCases' V42 row (TestValidationTable and
+// TestValidationTableIsComplete already exercise the "Small" case and the
+// rule-ID bookkeeping); this test names the specific entries the issue calls
+// out and checks the valid case explicitly, rather than only registering
+// clean.
+func TestValidateSizesAny(t *testing.T) {
+	src := func(sizesAny string) string {
+		return fmt.Sprintf(`
+[pipeline]
+name = "w"
+version = 1
+[match]
+sizes_any = %s
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+`, sizesAny)
+	}
+
+	t.Run("invalid entry Small", func(t *testing.T) {
+		def, err := Parse([]byte(src(`["Small"]`)))
+		testsupport.Must(t, err, "parsing: %v", err)
+		err = Validate(def)
+		if err == nil {
+			t.Fatal("Validate returned nil for sizes_any = [\"Small\"], want an error")
+		}
+		we, ok := err.(*Error)
+		if !ok {
+			t.Fatalf("error is %T, want *workflow.Error: %v", err, err)
+		}
+		if we.Rule != "V42" {
+			t.Errorf("Rule = %q, want V42", we.Rule)
+		}
+		if !strings.Contains(we.Error(), "Small") {
+			t.Errorf("error %q does not mention the offending value %q", we.Error(), "Small")
+		}
+	})
+
+	t.Run("invalid entry empty string", func(t *testing.T) {
+		def, err := Parse([]byte(src(`[""]`)))
+		testsupport.Must(t, err, "parsing: %v", err)
+		err = Validate(def)
+		if err == nil {
+			t.Fatal("Validate returned nil for sizes_any = [\"\"], want an error")
+		}
+		we, ok := err.(*Error)
+		if !ok {
+			t.Fatalf("error is %T, want *workflow.Error: %v", err, err)
+		}
+		if we.Rule != "V42" {
+			t.Errorf("Rule = %q, want V42", we.Rule)
+		}
+	})
+
+	t.Run("valid entries small and trivial", func(t *testing.T) {
+		def, err := Parse([]byte(src(`["small", "trivial"]`)))
+		testsupport.Must(t, err, "parsing: %v", err)
+		if err := Validate(def); err != nil {
+			t.Errorf("Validate returned an error for a vocabulary-only sizes_any: %v", err)
+		}
+	})
 }
 
 // TestDefaults covers the §11.1 default column, asserted per field (§4.6).

@@ -34,6 +34,7 @@ var RuleIDs = []string{
 	"V27", "V28", "V28a", "V29", "V30", "V31",
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 	"V40", "V40a", "V40b", "V40c",
+	"V42",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -150,8 +151,36 @@ func Validate(def *Definition) error {
 	if err := validateLimits(def); err != nil {
 		return withWorkflow(err, name)
 	}
+	if err := validateMatch(def); err != nil {
+		return withWorkflow(err, name)
+	}
 
 	applyDefaults(def)
+	return nil
+}
+
+// validateMatch is V42: every `[match].sizes_any` entry must be a value
+// model.ValidateSize accepts.
+//
+// It is checked here rather than in match.go's Matches, because Matches is a
+// pure predicate evaluated at every activation and must not itself decide
+// what a legal size is — the same discipline V22's grammar keeps: a value
+// outside the vocabulary is an authoring error to catch at register, not a
+// clause that quietly never matches at run time. It is a DEFINITION-level
+// rule like V1 and V24 (no step is involved), so the error names the field
+// and not a step.
+func validateMatch(def *Definition) error {
+	if def.Match == nil {
+		return nil
+	}
+	for _, size := range def.Match.SizesAny {
+		if err := model.ValidateSize(model.Size(size)); err != nil {
+			return &Error{
+				Rule: "V42", Field: "match.sizes_any",
+				Message: fmt.Sprintf("[match].sizes_any: %v", err),
+			}
+		}
+	}
 	return nil
 }
 
