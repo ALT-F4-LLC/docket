@@ -311,7 +311,10 @@ would inflate the closure for no gain.
 The default template gains a section rendering each file's body between
 delimiters carrying its path and hash. `== PINNED` **stays** — it is still the
 honest list of what the run pinned, and now the files that were inlined are
-also legible as content rather than only as pointers.
+also legible as content rather than only as pointers. For a pin the section
+still lists only by path and hash, `docket pin show RUN-N PATH` prints the
+pinned bytes at that path, so a step can read text the packet names but does
+not inline.
 
 #### 1.4.1 `issue.files` — an issue's attachments reach the same section (DKT-44)
 
