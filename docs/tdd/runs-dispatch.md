@@ -461,6 +461,21 @@ reads it.
 | B6 | Default `0` (§11.1). A workflow that declares no costs has a floor of 0 forever and is therefore never budget-paused — which is D1's dormancy, arriving from the grammar's own default rather than from a special case |
 | B7 | A fanned-out step's `expected_cost` is **per expanded sibling** (the fixture says so verbatim: `expected_cost = 0.60 # per expanded sibling`). Four siblings claim four times and accrue four times. No division, no proration |
 
+### 4.2.1 `step claim --cost-multiplier`: the dispatcher's variant scaling
+
+`expected_cost` is variant-blind: the workflow definition declares one number
+per step template, but the party that resolves a step to a pricier or cheaper
+executor variant than the definition priced — for example, routing an
+escalated retry to a far pricier executor variant — is the **dispatcher**, at
+claim time, not the definition author. `--cost-multiplier` is the
+dispatcher's declaration of that resolution.
+
+| # | Clause |
+|---|---|
+| B7a | With `--cost-multiplier`, the claim accrues the step's `expected_cost` **times the given factor**. The scaled cost is checked against the run's budget cap inside the claim's own transaction (§4.4, same CAS as B15) and, if admitted, is recorded — as the scaled number itself, not the multiplier — on that claim's `step-claimed` event, so the event stays self-contained |
+| B7b | **Omitted, the claim accrues the declared `expected_cost` verbatim** — byte-for-byte the behavior before the flag existed. `cmd.Flags().Changed("cost-multiplier")` distinguishes "not passed" from an explicit value, so the unset default never scales anything |
+| B7c | The value must be a **positive finite number**. An explicit `0`, a negative, `NaN`, or `Inf` is refused with a validation error — an explicit `0` is refused rather than treated as "unset", because a free escalated claim would let a dispatcher erase an accrual the workflow author declared, the same direction B13 forbids for reported usage |
+
 ## 4.3 THE FLOOR: `SUM(expected_cost)` over claim events
 
 This is the load-bearing decision of the whole budget mechanism.
