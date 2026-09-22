@@ -189,10 +189,33 @@ func warnPinDrift(w *output.Writer, drift []engine.PinVerdict, runRef string) {
 // `next` answer it froze LOOK the same as well as being byte-identical — an
 // operator comparing the two by eye should not have to translate between two
 // table layouts.
+//
+// The truncation and class-limit lines are the human channel for the
+// envelope's `truncated`/`total` and `limits`: without them an operator reads
+// a cut manifest as the run's whole remaining offer and never sees the
+// engine's per-class concurrency. Classes print sorted so the line is
+// deterministic.
 func renderManifest(m *engine.Manifest) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s opened for %s at seq %d, expiring at %d\n\n",
+	fmt.Fprintf(&b, "%s opened for %s at seq %d, expiring at %d\n",
 		m.Dispatch, m.Run, m.OpenedSeq, m.ExpiresMS)
+	if m.Truncated {
+		fmt.Fprintf(&b, "%d of %d ready rows; the limit cut whole issues\n",
+			len(m.Rows), m.Total)
+	}
+	if len(m.Limits) > 0 {
+		classes := make([]string, 0, len(m.Limits))
+		for class := range m.Limits {
+			classes = append(classes, class)
+		}
+		sort.Strings(classes)
+		parts := make([]string, 0, len(classes))
+		for _, class := range classes {
+			parts = append(parts, fmt.Sprintf("%s=%d", class, m.Limits[class]))
+		}
+		fmt.Fprintf(&b, "class limits: %s\n", strings.Join(parts, " "))
+	}
+	b.WriteString("\n")
 	b.WriteString(render.RenderStepRows(m.Rows))
 	return strings.TrimRight(b.String(), "\n")
 }

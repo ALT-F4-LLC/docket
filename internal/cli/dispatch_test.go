@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -255,5 +257,161 @@ func TestBackfillUsageCLIQuietForAClaimedStep(t *testing.T) {
 	if _, ok := env.Data["unclaimed"]; ok {
 		t.Errorf("an ordinary back-fill's payload grew an `unclaimed` key:\n%s",
 			stdout.String())
+	}
+}
+
+// ---- truncation and class limits in the human render -----------------------
+
+// oneStepWorkflow gives each issue a single ready row, so N issues make an
+// N-row ready set and `--limit` cuts whole rows.
+const oneStepWorkflow = `
+[pipeline]
+name = "one-step"
+version = 1
+[match]
+kind = ["task"]
+[[step]]
+name = "only"
+after = []
+executor = "someone"
+emits = "result"
+`
+
+// twoClassWorkflow gives each issue two ready rows in two classes, each with a
+// declared max, so the manifest's Limits map carries both.
+const twoClassWorkflow = `
+[pipeline]
+name = "two-class"
+version = 1
+[match]
+kind = ["task"]
+[limits]
+beta = { max = 3 }
+alpha = { max = 1 }
+[[step]]
+name = "write"
+after = []
+executor = "someone"
+class = "alpha"
+emits = "result"
+[[step]]
+name = "review"
+after = []
+executor = "someone"
+class = "beta"
+emits = "result"
+`
+
+// openDispatchCLI activates a run over `issues` task issues bound to src and
+// opens it through runDispatchOpen with --limit, writing to w.
+func openDispatchCLI(t *testing.T, src string, issues, limit int, w *output.Writer) {
+	t.Helper()
+	conn := newTestDB(t)
+	registerForRun(t, conn, src)
+	run, err := db.InsertRun(conn, 1, "", 0, model.NowMS())
+	testsupport.Must(t, err, "starting run: %v", err)
+	for i := range issues {
+		id, err := db.CreateIssue(conn, &model.Issue{
+			Title: fmt.Sprintf("issue %d", i), Description: "a body",
+			Status: model.StatusBacklog, Priority: model.PriorityNone,
+			Kind: model.IssueKindTask,
+		}, nil, nil)
+		testsupport.Must(t, err, "creating issue: %v", err)
+		testsupport.Must(t, db.AddRunIssue(conn, run.ID, id), "adding issue: %v", nil)
+	}
+	_, err = engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: model.NowMS()})
+	testsupport.Must(t, err, "activate: %v", err)
+
+	cmd := dispatchCmdWithDB(conn, model.FormatRunID(run.ID))
+	testsupport.Must(t, cmd.Flags().Set("limit", fmt.Sprint(limit)),
+		"setting --limit: %v", nil)
+	testsupport.Must(t, runDispatchOpen(cmd, w), "dispatch open: %v", nil)
+}
+
+// TestDispatchOpenRendersTruncation: a two-row ready set opened with --limit 1
+// tells the human reader the manifest is a cut, not the run's whole offer.
+func TestDispatchOpenRendersTruncation(t *testing.T) {
+	w, buf := bufWriter(false)
+	openDispatchCLI(t, oneStepWorkflow, 2, 1, w)
+
+	const want = "1 of 2 ready rows; the limit cut whole issues"
+	if !strings.Contains(buf.String(), want+"\n") {
+		t.Errorf("human render lacks %q:\n%s", want, buf.String())
+	}
+}
+
+// TestDispatchOpenRendersClassLimits: every class's max prints on one line in
+// ascending class order, whatever order the map iterates in.
+func TestDispatchOpenRendersClassLimits(t *testing.T) {
+	w, buf := bufWriter(false)
+	openDispatchCLI(t, twoClassWorkflow, 1, 0, w)
+
+	const want = "class limits: alpha=1 beta=3"
+	var got string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.HasPrefix(line, "class limits:") {
+			got = line
+		}
+	}
+	if got != want {
+		t.Errorf("class-limit line = %q, want %q:\n%s", got, want, buf.String())
+	}
+}
+
+// TestDispatchOpenQuietWhenUncut: an uncut manifest with no declared limits
+// renders exactly as before — header, blank line, rows.
+func TestDispatchOpenQuietWhenUncut(t *testing.T) {
+	w, buf := bufWriter(false)
+	openDispatchCLI(t, oneStepWorkflow, 2, 0, w)
+
+	out := buf.String()
+	for _, unwanted := range []string{"ready rows;", "class limits:"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("uncut render carries %q:\n%s", unwanted, out)
+		}
+	}
+	if lines := strings.SplitN(out, "\n", 3); len(lines) < 3 || lines[1] != "" {
+		t.Errorf("header is not followed by a blank line:\n%s", out)
+	}
+}
+
+// TestDispatchOpenJSONEnvelopeUnchangedByRender: in --json=v2 the envelope
+// alone reaches stdout, carrying total, truncated, and limits, and neither
+// human line leaks into it.
+func TestDispatchOpenJSONEnvelopeUnchangedByRender(t *testing.T) {
+	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
+	openDispatchCLI(t, twoClassWorkflow, 2, 1, w)
+
+	raw := buf.String()
+	for _, unwanted := range []string{"ready rows;", "class limits:"} {
+		if strings.Contains(raw, unwanted) {
+			t.Errorf("JSON stdout carries the human line %q:\n%s", unwanted, raw)
+		}
+	}
+
+	var env struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Rows      []json.RawMessage `json:"rows"`
+			Total     int               `json:"total"`
+			Truncated bool              `json:"truncated"`
+			Limits    map[string]int    `json:"limits"`
+		} `json:"data"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+	if err := dec.Decode(&env); err != nil {
+		t.Fatalf("decoding the envelope: %v\n%s", err, raw)
+	}
+	if dec.More() {
+		t.Fatalf("stdout carries more than one JSON value:\n%s", raw)
+	}
+	if !env.OK || len(env.Data.Rows) != 2 || env.Data.Total != 4 || !env.Data.Truncated {
+		t.Errorf("envelope ok=%v rows=%d total=%d truncated=%v, want true, 2, 4, true:\n%s",
+			env.OK, len(env.Data.Rows), env.Data.Total, env.Data.Truncated, raw)
+	}
+	if len(env.Data.Limits) != 2 || env.Data.Limits["alpha"] != 1 ||
+		env.Data.Limits["beta"] != 3 {
+		t.Errorf("envelope limits = %v, want alpha=1 beta=3", env.Data.Limits)
 	}
 }
