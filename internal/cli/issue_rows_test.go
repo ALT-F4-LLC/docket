@@ -509,6 +509,185 @@ func TestBoardJSON_IsSummaryRows(t *testing.T) {
 	}
 }
 
+// rowSize reads the `size` key off a summary row, reporting whether the key
+// was present at all — the omitempty shape means "absent" and "empty string"
+// must be told apart, not just "absent or blank".
+func rowSize(t *testing.T, row map[string]json.RawMessage) (string, bool) {
+	t.Helper()
+	raw, ok := row["size"]
+	if !ok {
+		return "", false
+	}
+	var size string
+	if err := json.Unmarshal(raw, &size); err != nil {
+		t.Fatalf("size: %v", err)
+	}
+	return size, true
+}
+
+// assertRowSize checks a summary row's size key against model.Issue's own
+// omitempty shape: present and equal to want when sized, absent entirely when
+// not.
+func assertRowSize(t *testing.T, row map[string]json.RawMessage, id, want string) {
+	t.Helper()
+	got, ok := rowSize(t, row)
+	if want == "" {
+		if ok {
+			t.Errorf("row %s carries a size key = %q for an unsized issue; want no key", id, got)
+		}
+		return
+	}
+	if !ok {
+		t.Errorf("row %s has no size key; want %q", id, want)
+		return
+	}
+	if got != want {
+		t.Errorf("row %s size = %q, want %q", id, got, want)
+	}
+}
+
+// findRow locates the row for id in a list of summary rows.
+func findRow(t *testing.T, rows []map[string]json.RawMessage, id string) map[string]json.RawMessage {
+	t.Helper()
+	for _, row := range rows {
+		var rowID string
+		if err := json.Unmarshal(row["id"], &rowID); err != nil {
+			t.Fatalf("row id: %v", err)
+		}
+		if rowID == id {
+			return row
+		}
+	}
+	t.Fatalf("row %s not found among %d rows", id, len(rows))
+	return nil
+}
+
+// TestIssueSummaryRowsCarrySize checks that the summary rows `issue list`,
+// `next`, `plan` and `board` build carry `size` exactly the way `issue show`
+// does — present and equal to the stored value for a sized issue, absent
+// entirely (not null, not "") for an unsized one — in both --json and
+// --json=v2.
+func TestIssueSummaryRowsCarrySize(t *testing.T) {
+	conn := newTestDB(t)
+
+	sized, err := db.CreateIssue(conn, &model.Issue{
+		Title:    "sized issue",
+		Status:   model.StatusTodo,
+		Priority: model.PriorityHigh,
+		Kind:     model.IssueKindFeature,
+		Size:     model.SizeSmall,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue(sized): %v", err)
+
+	unsized, err := db.CreateIssue(conn, &model.Issue{
+		Title:    "unsized issue",
+		Status:   model.StatusTodo,
+		Priority: model.PriorityHigh,
+		Kind:     model.IssueKindFeature,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue(unsized): %v", err)
+
+	sizedID := model.FormatID(sized)
+	unsizedID := model.FormatID(unsized)
+
+	checkRows := func(t *testing.T, rows []map[string]json.RawMessage) {
+		t.Helper()
+		assertRowSize(t, findRow(t, rows, sizedID), sizedID, "small")
+		assertRowSize(t, findRow(t, rows, unsizedID), unsizedID, "")
+	}
+
+	for _, version := range []output.JSONVersion{output.JSONV1, output.JSONV2} {
+		t.Run(fmt.Sprintf("list/v%d", int(version)+1), func(t *testing.T) {
+			cmd := listCmdWithBody(conn, false)
+			setFlags(t, cmd, map[string]string{"type": "feature", "sort": "id:asc"})
+			w, buf := bufWriter(true)
+			w.JSONVersion = version
+			testsupport.Must(t, runIssueList(cmd, nil, w), "runIssueList: %v", nil)
+
+			var env struct {
+				Data struct {
+					Issues []map[string]json.RawMessage `json:"issues"`
+					Items  []map[string]json.RawMessage `json:"items"`
+				} `json:"data"`
+			}
+			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+			rows := env.Data.Issues
+			if version == output.JSONV2 {
+				rows = env.Data.Items
+			}
+			checkRows(t, rows)
+		})
+
+		t.Run(fmt.Sprintf("next/v%d", int(version)+1), func(t *testing.T) {
+			cmd := nextCmdWithDB(conn, 50)
+			setFlags(t, cmd, map[string]string{"type": "feature"})
+			w, buf := bufWriter(true)
+			w.JSONVersion = version
+			testsupport.Must(t, runNext(cmd, nil, w), "runNext: %v", nil)
+
+			var env struct {
+				Data struct {
+					Issues []map[string]json.RawMessage `json:"issues"`
+					Items  []map[string]json.RawMessage `json:"items"`
+				} `json:"data"`
+			}
+			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+			rows := env.Data.Issues
+			if version == output.JSONV2 {
+				rows = env.Data.Items
+			}
+			checkRows(t, rows)
+		})
+
+		t.Run(fmt.Sprintf("plan/v%d", int(version)+1), func(t *testing.T) {
+			cmd := planCmdWithDB(conn)
+			setFlags(t, cmd, map[string]string{"type": "feature"})
+			w, buf := bufWriter(true)
+			w.JSONVersion = version
+			testsupport.Must(t, runPlan(cmd, nil, w), "runPlan: %v", nil)
+
+			var env struct {
+				Data struct {
+					Phases []struct {
+						Issues []map[string]json.RawMessage `json:"issues"`
+					} `json:"phases"`
+				} `json:"data"`
+			}
+			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+			var rows []map[string]json.RawMessage
+			for _, phase := range env.Data.Phases {
+				rows = append(rows, phase.Issues...)
+			}
+			checkRows(t, rows)
+		})
+
+		t.Run(fmt.Sprintf("board/v%d", int(version)+1), func(t *testing.T) {
+			cmd := boardCmdWithDB(conn, false)
+			setFlags(t, cmd, map[string]string{"priority": "high"})
+			w, buf := bufWriter(true)
+			w.JSONVersion = version
+			testsupport.Must(t, runBoard(cmd, nil, w), "runBoard: %v", nil)
+
+			var env struct {
+				Data struct {
+					Columns []struct {
+						Status string                       `json:"status"`
+						Issues []map[string]json.RawMessage `json:"issues"`
+					} `json:"columns"`
+				} `json:"data"`
+			}
+			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+			var rows []map[string]json.RawMessage
+			for _, col := range env.Data.Columns {
+				if col.Status == string(model.StatusTodo) {
+					rows = col.Issues
+				}
+			}
+			checkRows(t, rows)
+		})
+	}
+}
+
 // TestIssueShowJSON_StillCarriesTheDescription is the other half of DKT-1053:
 // the description moved OUT of the listings on the promise that `issue show`
 // still has it. This test is what makes that promise checkable.

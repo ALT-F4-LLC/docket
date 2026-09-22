@@ -14,9 +14,9 @@ import (
 // It is the frozen v1 issue shape with exactly one substitution: `description`
 // is replaced by `description_bytes`. Every other key keeps its name, its
 // position and its conditionality — `issue` mirrors `id` (DKT-452), `scope`
-// appears when declared (DKT-55), `resolution` when set (DKT-245) — so a
-// consumer that selects any key other than `description` off a list row reads
-// exactly what it read before.
+// appears when declared (DKT-55), `resolution` when set, `size` when declared
+// — so a consumer that selects any key other than `description` off a list
+// row reads exactly what it read before.
 //
 // Before this every row carried its whole description, so a filtered listing
 // of a few dozen issues with real descriptions ran to tens of kilobytes —
@@ -45,6 +45,7 @@ type issueRow struct {
 	Docs             []model.DocRef `json:"docs"`
 	Scope            *[]string      `json:"scope,omitempty"`
 	Resolution       string         `json:"resolution,omitempty"`
+	Size             string         `json:"size,omitempty"`
 	CreatedAt        string         `json:"created_at"`
 	UpdatedAt        string         `json:"updated_at"`
 }
@@ -92,6 +93,7 @@ func summarizeIssue(i *model.Issue) issueRow {
 		Docs:             docs,
 		Scope:            i.Scope,
 		Resolution:       i.Resolution,
+		Size:             string(i.Size),
 		CreatedAt:        i.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:        i.UpdatedAt.UTC().Format(time.RFC3339),
 	}
