@@ -214,7 +214,7 @@ func describeStepCost(step *workflow.Step) string {
 	return out
 }
 
-// renderMatch renders a `[match]` clause's four binding terms plus its advisory
+// renderMatch renders a `[match]` clause's five binding terms plus its advisory
 // `domain_paths`, omitting the absent ones. An entirely absent clause matches
 // every issue, and says so.
 //
@@ -234,6 +234,7 @@ func renderMatch(m *workflow.Match) string {
 		{"labels_any", m.LabelsAny},
 		{"labels_all", m.LabelsAll},
 		{"unless_labels", m.UnlessLabels},
+		{"sizes_any", m.SizesAny},
 	} {
 		if len(term.values) > 0 {
 			fmt.Fprintf(&b, "  %-14s [%s]\n", term.name, strings.Join(term.values, ", "))
