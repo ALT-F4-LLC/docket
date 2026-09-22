@@ -1,6 +1,10 @@
 package engine
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/ALT-F4-LLC/docket/internal/model"
+)
 
 // TestResolveExecutorRefusesUnknownHint: a seat name absent from [executors]
 // is a hard refusal, matching wave.js's resolve() — no synthesized default.
@@ -202,5 +206,86 @@ gemini-tier = "start"
 	}
 	if got.Model == "gemini" {
 		t.Errorf("sensitive worker attempt:1 resolved to gemini; [security].never must have redirected it")
+	}
+}
+
+// TestFableEligibleDistinguishesReapedFromFailed pins the
+// "failed-top-opus-round" fable gate to RECORDED FAILURES, not spent claims.
+// Two rows share Attempt=1 and the same round instance; one claim was reaped,
+// the other failed. Only the failed row may stay on Fable.
+//
+// The fixture is self-contained because escalationWalkPolicy cannot reach the
+// gate here: its opus-xhigh seats are [security] nodes with never = ["fable"],
+// so the hop onto fable-xhigh is redirected mid-walk and the post-walk fable
+// check never runs. With FailedAttempts=0 the only hop comes from the round
+// ordinal, so worker is a round executor and runs at worker@2. opus-max is
+// reachable only through [escalation.fallback], so a row resolving to it
+// proves the walk landed on fable-xhigh and the gate sent it back.
+func TestFableEligibleDistinguishesReapedFromFailed(t *testing.T) {
+	const src = `
+[policy]
+version = 2
+
+[variants]
+opus-xhigh = { model = "opus", effort = "xhigh", escalate_to = "fable-xhigh" }
+fable-xhigh = { model = "fable", effort = "xhigh" }
+opus-max = { model = "opus", effort = "max" }
+
+[executors]
+worker = { variant = "opus-xhigh" }
+
+[escalation]
+on_round = "one-hop"
+round_executors = ["worker"]
+fable_gates = ["failed-top-opus-round"]
+
+[escalation.fallback]
+fable-xhigh = "opus-max"
+`
+	doc, err := parsePolicy([]byte(src))
+	if err != nil {
+		t.Fatalf("parsePolicy: %v", err)
+	}
+
+	cases := []struct {
+		name           string
+		failedAttempts int
+		reapedClaims   int
+		wantVariant    string
+		wantModel      string
+	}{
+		{"reaped claim stays off fable", 0, 1, "opus-max", "opus"},
+		{"failed claim moves onto fable", 1, 0, "fable-xhigh", "fable"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			row := &model.StepRow{
+				Step:           "STEP-1",
+				Instance:       "worker@2",
+				Executor:       "worker",
+				Attempt:        1,
+				FailedAttempts: tt.failedAttempts,
+				ReapedClaims:   tt.reapedClaims,
+			}
+			if err := resolveRowRouting(doc, row); err != nil {
+				t.Fatalf("resolveRowRouting: %v", err)
+			}
+			if row.Variant != tt.wantVariant || row.Model != tt.wantModel {
+				t.Errorf("row resolved to %s/%s, want %s/%s (attempt 1, failed %d, reaped %d)",
+					row.Model, row.Variant, tt.wantModel, tt.wantVariant,
+					tt.failedAttempts, tt.reapedClaims)
+			}
+
+			direct, err := doc.ResolveExecutor(row.Executor, row.FailedAttempts, row.Instance, row.Labels)
+			if err != nil {
+				t.Fatalf("ResolveExecutor: %v", err)
+			}
+			if row.Model != direct.Model || row.Effort != direct.Effort || row.Variant != direct.Variant {
+				t.Errorf("row routing %s/%s/%s disagrees with ResolveExecutor %s/%s/%s",
+					row.Model, row.Effort, row.Variant,
+					direct.Model, direct.Effort, direct.Variant)
+			}
+		})
 	}
 }
