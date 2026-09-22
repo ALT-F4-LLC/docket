@@ -90,20 +90,21 @@ type StepRow struct {
 	// `staged`, or blocked — wherever the row is rendered: `next --run`, a
 	// dispatch manifest, `dispatch verify`'s recomputation, `step show`, and
 	// a context bundle's `step`. The value is the seat's standing [executors]
-	// variant, walked forward through [variants].escalate_to by this row's
-	// attempt (and, for a listed round executor, its round ordinal),
-	// redirected around any [security]-forbidden model, and clamped to
-	// [security].ceiling on a sensitive row — see
+	// variant, walked forward through [variants].escalate_to once per
+	// recorded failure (FailedAttempts and, for a listed round executor,
+	// its round ordinal), redirected around any [security]-forbidden model, and
+	// clamped to [security].ceiling on a sensitive row — see
 	// internal/engine/policy_resolve.go.
 	//
 	// Absent — never present, never empty strings — when the run pins no
-	// policy.toml, when the row is not an executor row, or once the step has
-	// been handed out: the walk is keyed by the attempt an OFFER carries, and
-	// a claimed, running, or finished step's attempt already counts the claim
-	// that took it, so resolving it again would report one hop above what was
-	// actually spawned. The routing a claim ran under is in its claim
-	// metadata. A caller reading a row before this feature existed sees
-	// byte-identical rows.
+	// policy.toml, when the row is not an executor row, or
+	// once the step has been handed out to a claim: the walk is keyed by
+	// recorded failures, and a `step fail` recorded after the claim moves
+	// that key without the claim itself changing, so resolving a claimed,
+	// running, or finished step again could diverge from the tier it
+	// actually ran under. The routing a claim ran under is in its
+	// claim metadata. A caller reading a row before this feature existed
+	// sees byte-identical rows.
 	Model   string `json:"model,omitempty"`
 	Effort  string `json:"effort,omitempty"`
 	Variant string `json:"variant,omitempty"`
