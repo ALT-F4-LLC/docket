@@ -1,6 +1,6 @@
 # TDD: gates, the execution trust model, and the exec runner (stage 4)
 
-Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08
+Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15
 (docs/tdd/gates-trust-review.md, verdict SOUND WITH FIXES — F1–F5 folded in; see
 that file's response table for the per-finding
 mapping) · implements docs/design/engine-spec.md **§4 (whole)**
@@ -624,11 +624,31 @@ T9's residual auditable rather than invisible; and `events` gains two kinds,
 which extends the closed set (engine-spine §7.6) — §6.4 lists every event kind
 this stage adds, so §9 item 2's closed-set check keeps passing.
 
-Recording is **mandatory-or-fail** inside a repo (DKT-81): the event is written
-before the store, and a recording failure fails the verb with the store
-untouched, so the ledger and the allowlist cannot silently diverge. An
+Recording is **mandatory-or-fail** inside a repo (DKT-81). The event and the
+store are two writes, and one invariant fixes their order: whichever write
+fails, the surviving partial failure must never let the record claim **less**
+authority than the store grants. The invariant points opposite ways for
+granting and revoking:
+
+- **`trust add`** writes the event before the store. A recording failure fails
+  the verb with the store untouched; a store failure after the event leaves a
+  recorded grant that never landed, which over-reports authority.
+- **`trust rm`** publishes the store before it records the event. A publish
+  failure removes nothing and records nothing; a recording failure after a
+  successful publish fails the verb with the entry **already removed**, and the
+  verb says so. The record then still shows the entry as trusted, which
+  over-reports authority. Recording first would leave the reverse: a
+  revocation on record for an entry that still authorizes execution.
+
+Neither verb lets the ledger and the allowlist diverge silently. An
 **idempotent re-add emits no event** — an event proves a change, never mere
 repetition.
+
+**AMENDMENT (DKT-2198, 2026-09-15): removal publishes before it records.** The
+DKT-81 decision wrote the event before the store for both verbs. That order
+still governs `trust add`; for `trust rm` it could leave a recorded revocation
+over an entry the store still grants, so the removal verb takes the
+store-first order above.
 
 `trust list` and `trust rm` outside a repo work and write no event; the trust
 store is user-level and does not require a repo to manage. `add` and `rm`
