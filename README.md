@@ -48,7 +48,7 @@ Requires Go 1.26.0+ (toolchain go1.26.5).
 
 ```bash
 # Build the binary to ./bin/docket
-make build
+make bin
 ./bin/docket --help
 
 # Install to $GOPATH/bin
@@ -289,7 +289,7 @@ Listings — `issue list`, `next`, `plan`, and `board` — emit summary rows und
 | Command | Description |
 |---------|-------------|
 | `docket next` | Show work-ready issues (unblocked, sorted by priority) |
-| `docket plan` | Compute a phased execution plan from the dependency graph (filterable by `--status`/`-s`, `--label`/`-l`, `--priority`/`-p`, `--type`/`-T`, `--assignee`/`-a`) |
+| `docket plan` | Compute a phased execution plan from the dependency graph (filterable by `--status`/`-s`, `--label`/`-l`, `--priority`/`-p`, `--size`, `--type`/`-T`, `--assignee`/`-a`) |
 | `docket board` | Kanban board view in the terminal |
 
 ### Report Commands
@@ -452,7 +452,8 @@ scripts/
 ```bash
 git clone https://github.com/ALT-F4-LLC/docket.git
 cd docket
-make build          # Build to ./bin/docket
+make bin            # Build to ./bin/docket
+make build          # Run the compile gate (scripts/qa/build.sh)
 make test           # Run unit tests
 make lint           # Run staticcheck + go vet
 make clean          # Remove build artifacts
