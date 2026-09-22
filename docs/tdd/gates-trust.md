@@ -1663,6 +1663,7 @@ registry (SKILL.md's engine-configuration table), not a new table:
 | `vote.rule.<name>.threshold` | float in (0,1] | the approval threshold this rule tallies at |
 | `vote.rule.<name>.criticality` | `low\|medium\|high\|critical` | the proposal's criticality |
 | `vote.rule.<name>.sealed` | bool, default `false` | whether proposals opened under this rule withhold their casts from the read verbs until the tally closes them (DKT-2447, below) |
+| `vote.rule.<name>.hold_on_dissent` | bool, default `false` | whether an approved tally that carries at least one `reject` cast parks the vote step for the operator instead of passing |
 
 `<name>` is an opaque string, exactly as `lease.ttl.<class>`'s class is. A rule
 "exists" iff `vote.rule.<name>.threshold` is set. This reuses the config
@@ -1702,6 +1703,16 @@ vote rows stay exactly as readable as before through `docket export`,
 `ListAllVotes`, and direct store access with `sqlite3`. A seat that wants to
 read a sibling's cast can; the shield removes the default path that handed
 it to every seat that merely looked at the proposal it was asked to judge.
+
+**Holding on dissent.** A rule's tally is a weighted mean, so two approve
+casts outweigh one reject and a dissenting seat's verdict leaves no trace in
+routing once the score clears the threshold. `vote.rule.<name>.hold_on_dissent = true`
+closes that gap: when such a rule's proposal tallies approved but at least
+one cast's verdict is `reject`, the vote step parks `waiting-human` instead
+of passing, with a reason naming the dissenting seat's voter name (each one,
+sorted, when more than one seat dissented) — except a panel that is deciding
+the tally's own question, which keeps the routing that decision already gave
+it.
 
 ## 8.4 What is NOT in scope here
 
