@@ -553,6 +553,62 @@ func TestComplementarityOfCountsTheRecordedSplit(t *testing.T) {
 	}
 }
 
+// TestRecordedBelowFloorReadsOnlyTheLastPassingRow pins the retried-aggregate
+// case: two passing `aggregate` rows for one step (ordinals 0 and 1) with
+// different below-floor sets. Only the ordinal-1 set is the round the newest
+// artifact belongs to, so only it is read and counted.
+func TestRecordedBelowFloorReadsOnlyTheLastPassingRow(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+	step := mustStep(t, conn, "reconcile@0")
+
+	first := `[{"id":"OLD-1","members":["p","q","r"]},{"id":"OLD-2","members":["s"]}]`
+	last := `[{"id":"NEW-1","members":["x","y","z"]}]`
+
+	res, err := conn.Exec(`UPDATE action_results SET output = ?
+		 WHERE step_id = ? AND action = 'aggregate' AND ordinal = 0 AND verdict = ?`,
+		first, step.ID, db.ActionVerdictPass)
+	testsupport.Must(t, err, "updating ordinal 0: %v", err)
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("updated %d ordinal-0 aggregate rows, want 1", n)
+	}
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = db.InsertActionResultTx(tx, db.ActionResultRow{
+		RunID: step.RunID, StepID: step.ID, Action: "aggregate", Ordinal: 1,
+		Output: last, Verdict: db.ActionVerdictPass, Builtin: true,
+		CreatedAtMS: nowMS,
+	})
+	testsupport.Must(t, err, "inserting ordinal 1: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "commit: %v", err)
+
+	recorded, err := recordedBelowFloor(conn, step.ID)
+	testsupport.Must(t, err, "recordedBelowFloor: %v", err)
+	if len(recorded) != 1 || recorded[0]["id"] != "NEW-1" {
+		t.Errorf("recorded = %+v, want only the ordinal-1 set [NEW-1]", recorded)
+	}
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Complementarity) != 1 {
+		t.Fatalf("complementarity = %+v, want one row", report.Complementarity)
+	}
+	row := report.Complementarity[0]
+	// Emitted C-1 (1 member) and C-2 (2), plus NEW-1 (3) counted once.
+	if row.Unique != 1 || row.Corroborated != 2 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/2", row.Unique, row.Corroborated)
+	}
+	want := []MemberCount{
+		{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}, {Members: 3, Clusters: 1},
+	}
+	if !reflect.DeepEqual(row.ByMemberCount, want) {
+		t.Errorf("by_member_count = %+v, want %+v", row.ByMemberCount, want)
+	}
+}
+
 // sourceFieldFixture is the committed fixture with one line added to
 // `reconcile`'s params: `source_field = "member_sources"`. Read from disk
 // rather than duplicated by hand, so a change to the fixture's topology

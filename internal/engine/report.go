@@ -1216,23 +1216,24 @@ func latestAggregatePayload(
 // into the builtin's own action_results row (DKT-593), decoded the same way
 // as the emitted payload. Absent route_at, or absent any below-floor
 // cluster, the row's output is empty and this returns nil, nil.
+//
+// Only the highest-ordinal passing row counts, the same newest-record rule
+// latestAggregatePayload applies to the artifact: a retried step's earlier
+// rows describe rounds the newest artifact superseded.
 func recordedBelowFloor(conn *sql.DB, stepID int) ([]map[string]any, error) {
 	outputs, err := db.ActionOutputsFor(conn, stepID, workflow.ActionAggregate)
 	if err != nil {
 		return nil, err
 	}
-	var out []map[string]any
-	for _, o := range outputs {
-		if o == "" {
-			continue
-		}
-		var clusters []map[string]any
-		if json.Unmarshal([]byte(o), &clusters) != nil {
-			continue
-		}
-		out = append(out, clusters...)
+	// ActionOutputsFor orders by ordinal, unique per (step, action).
+	if len(outputs) == 0 || outputs[len(outputs)-1] == "" {
+		return nil, nil
 	}
-	return out, nil
+	var clusters []map[string]any
+	if json.Unmarshal([]byte(outputs[len(outputs)-1]), &clusters) != nil {
+		return nil, nil
+	}
+	return clusters, nil
 }
 
 // complementarityOf is the pure count: unique (one member) versus
