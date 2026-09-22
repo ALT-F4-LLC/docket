@@ -573,7 +573,7 @@ is exactly `"write" = { max = 1, lease_ttl = "45m", max_step_duration = "2h" }`.
 | `after_loop` | step name | re-entry target after a loop body completes |
 | `serves` | [step names], only on `loop = true` steps | scopes the body to the named steps' `fix-loop` routings — its loop CLUSTER (11.3); omitted = serves every trigger. Entries must name steps that can route `fix-loop`, and every step that can must be served by at least one body *(amended 2026-08-22, DKT-544)* |
 | `max_attempts` | int, default engine config | per-instance retry budget |
-| `max_fix_loops` | int, default engine config | loop-entry budget per issue — ONE counter over EVERY `fix-loop` routing source (threshold, `on_fail`, rejected vote/human gate, quorum miss), read off whichever non-cluster step declares it. Each admitted entry post-increments the counter to its own 1-indexed ordinal; an entry whose new count exceeds the bound is refused with the counter restored, so `= N` admits exactly N entries and parks the N+1th `waiting-human`. Only a `fix-round` grant (one per resolution, effective bound = declared + grants) admits more *(amended 2026-08-23, DKT-587)*. On a `serves`-scoped loop body it is instead that CLUSTER's round budget, checked independently under the issue-level ceiling — it never raises or lowers it *(amended 2026-08-22, DKT-544)* |
+| `max_fix_loops` | int, default engine config | loop-entry budget per issue — ONE counter over EVERY `fix-loop` routing source (threshold, `on_fail`, rejected vote/human gate, quorum miss), read off whichever non-cluster step declares it. Each admitted entry post-increments the counter to its own 1-indexed ordinal; an entry whose new count exceeds the bound is refused with the counter restored, so `= N` admits exactly N entries and routes the N+1th per the triggering step's `on_exhausted` (default `waiting-human`). Only a `fix-round` grant (one per resolution, effective bound = declared + grants) admits more *(amended 2026-08-23, DKT-587)*. On a `serves`-scoped loop body it is instead that CLUSTER's round budget, checked independently under the issue-level ceiling — it never raises or lowers it *(amended 2026-08-22, DKT-544)* |
 | `max_stalled_rounds` | int ≥ 0, default 0 (never fires); only on a step that can route `fix-loop` and records an artifact (V38) | non-convergence tolerance over THIS step's routed volume: a `fix-loop` entry after that many consecutive measured rounds in which the element count of the step's recorded payload never fell below the smallest count any earlier round recorded is refused in the non-convergence park's exact shape — counter restored, nothing instantiated, `waiting-human` naming `--as fix-round` as the way out, an authorized entry waived. "No improvement" means no new strict minimum, so volumes oscillating around a floor still park while a genuinely shrinking set never does *(amended 2026-08-26, DKT-870: RUN-51 held 8-12 clusters flat across TEN rounds and RUN-50 7-10 across six, both ended only by operator action — the plateau was the corpus's own non-convergence signal and nothing in the engine read it)* |
 | `expected_cost` | number ≥ 0, default 0 | budget-floor contribution per claim (§2) |
 | `when` | predicate over issue `kind`/`labels` — clauses `<kind\|labels> <==\|!=\|contains> <value>` or `labels contains-any (a, b, c)` / `labels contains_any [a, b, c]`, joined by `and` throughout or by `or` throughout | step is `skipped` when false. `or` holds when at least one clause does; a predicate MIXING `and` and `or` is a VALIDATION_ERROR (V22), because the grammar has no parentheses and therefore no reading of `a and b or c` to prefer — the mixed case is expressed as two steps, which is what the disjunction removed the need for in the common case *(amended 2026-08-22, DKT-548)*. `labels contains-any (…)` is the step-level spelling of the `labels_any` [match] clause and holds when the list intersects the issue's labels — a CLAUSE, not a connective, so "kind X and any of these labels" is one homogeneous-`and` predicate rather than a mix V22 would refuse. The list needs at least one element and its values carry no whitespace *(amended 2026-08-22, DKT-550)*. The operator is spelled `contains-any` or `contains_any` and its list is delimited by `(…)` or `[…]`; all four combinations are the same clause, and the delimiters must pair — `[a, b)` is a VALIDATION_ERROR. Both spellings were admitted rather than one because `contains-any (…)` is what registered definitions carry and `contains_any [a, b]` is how a list is written everywhere else in a workflow TOML, so refusing either would make an author's first correct guess an error *(amended 2026-09-01, DKT-1000)* |
@@ -634,14 +634,17 @@ something.
 
 Step instances are identified `name@k#i` — `k` = loop ordinal (0 at initial
 expansion), `#i` = fanout index (absent when not fanned out). When a routing resolves
-to `"fix-loop"`: (1) the issue's loop counter increments; exceeding `max_fix_loops`
-routes `waiting-human` instead — loops are bounded by construction. A round is also
+to `"fix-loop"`: (1) the issue's loop counter increments; an entry exceeding
+`max_fix_loops` (plus `fix-round` grants) routes per the triggering step's
+`on_exhausted` instead: `waiting-human` when undeclared (the default),
+`abandon-issue`, the name of a `type="vote"` step, or the name of an executor
+step — only `waiting-human` parks, and loops are bounded by construction. A round is also
 refused as NON-CONVERGENT when the round below it left the issue's scope
 byte-identical to the round below that (`issue.diff` fingerprints), because the next
-round would read the same tree and reach the same verdict; that refusal takes the same
-shape as the bound's (nothing superseded, nothing instantiated, counter restored,
-`waiting-human` naming `step resolve --as fix-round` as the way out) and is waived by
-that resolution. It never fires on a diff that records no content — an empty or
+round would read the same tree and reach the same verdict; that refusal always routes
+`waiting-human` regardless of `on_exhausted` (nothing superseded, nothing instantiated,
+counter restored, `waiting-human` naming `step resolve --as fix-round` as the way out)
+and is waived by that resolution. It never fires on a diff that records no content — an empty or
 unresolvable-base measurement is evidence the tree was not measured, not evidence that
 it did not move. (2) Not-yet-claimed
 instances downstream of `after_loop` (e.g. a pending `verify@0`) transition to the
