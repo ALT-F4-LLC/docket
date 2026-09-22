@@ -150,8 +150,10 @@ func TestVerifyDispatchMatchesRoutedManifest(t *testing.T) {
 
 // TestStepViewAndContextResolveAnOfferedRow: the read verbs render the same
 // routing on a step the run can still offer, and none once it is handed out
-// — the walk is keyed by the attempt an offer carries, and the claim bumped
-// it.
+// — the walk is keyed by recorded failures (FailedAttempts), which a claim
+// leaves alone but a later `step fail` moves, so the read verbs withhold
+// routing on status rather than re-resolving it; the claim's own metadata
+// records the tier it ran under.
 func TestStepViewAndContextResolveAnOfferedRow(t *testing.T) {
 	conn, runID := policyFixtureRun(t, policyFixtureTOML)
 

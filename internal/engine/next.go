@@ -550,13 +550,14 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 
 	// Routing — model/effort/variant on an executor row, voter_assignments on
 	// a vote row — rides on a row the run can still OFFER, and only there.
-	// The escalation walk is keyed by the attempt an offer carries (prior
-	// claims), and a claim bumps the step's attempt as it takes it, so
-	// resolving a claimed, running, or finished step here would report one
-	// hop above what was actually spawned; the routing a claim ran under is
-	// in its claim metadata. A terminal run offers nothing, so its rows never
-	// open the pinned file — a done run stays readable after the corpus its
-	// policy.toml was pinned from has moved on.
+	// The escalation walk is keyed by recorded failures (FailedAttempts,
+	// plus round hops for a listed round executor), and a `step fail`
+	// recorded after a claim moves that key without the claim itself
+	// changing, so resolving a claimed, running, or finished step here
+	// could diverge from the tier it actually ran under; the routing a
+	// claim ran under is in its claim metadata. A terminal run offers
+	// nothing, so its rows never open the pinned file — a done run stays
+	// readable after the corpus its policy.toml was pinned from has moved on.
 	if step.Status == db.StepPending && !sched.run.Status.Terminal() {
 		policy, err := sched.policy.load()
 		if err != nil {
