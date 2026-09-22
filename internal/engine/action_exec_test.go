@@ -568,6 +568,52 @@ func withTimeout(e trust.Entry, d string) trust.Entry {
 	return e
 }
 
+// TestActionTreeLockTimeoutReasonNamesTheTimeout: when a tree action's lock
+// wait exceeds its bound, the recorded reason names the timeout rather than
+// carrying the bare lock error, so a reader can tell "the lock wait timed out"
+// from any other action failure. No process spawned and no tree was read.
+func TestActionTreeLockTimeoutReasonNamesTheTimeout(t *testing.T) {
+	repo := t.TempDir()
+	docket := filepath.Join(repo, ".docket")
+	err := os.MkdirAll(docket, 0o755)
+	testsupport.Must(t, err, "creating .docket: %v", err)
+	outside := t.TempDir()
+	witness := filepath.Join(outside, "it-ran")
+	script := echoScript(t, outside, "tree.sh",
+		fmt.Sprintf("touch %q; echo '{\"payload\":[]}'", witness))
+
+	entry := trust.Entry{
+		Name: "tree-action", Argv: []string{script}, Repo: repo, Tree: true,
+	}
+
+	blocked := actionRunner(t, repo, withTimeout(entry, "10ms"))
+	blocked.LockPath = filepath.Join(docket, "tree.lock")
+
+	held, err := acquireTreeLock(filepath.Join(docket, "tree.lock"), 0)
+	testsupport.Must(t, err, "taking the tree lock: %v", err)
+	defer held.release()
+
+	result, err := blocked.Run(context.Background(),
+		actionSpec("tree-action"), StepContext{Instance: "reconcile@0"})
+	testsupport.Must(t, err, "Run: %v", err)
+	if !result.Failed {
+		t.Fatal("a tree action ran while the tree lock was held")
+	}
+	if len(result.Results) == 0 {
+		t.Fatal("no result row recorded for the timed-out action")
+	}
+	row := result.Results[0]
+	if !strings.HasPrefix(row.Reason, "tree lock not acquired: ") {
+		t.Errorf("reason = %q, want prefix %q", row.Reason, "tree lock not acquired: ")
+	}
+	if row.Verdict != db.ActionVerdictFail {
+		t.Errorf("verdict = %q, want %q", row.Verdict, db.ActionVerdictFail)
+	}
+	if _, statErr := os.Stat(witness); statErr == nil {
+		t.Fatal("THE COMMAND RAN unserialized despite the lock wait timing out")
+	}
+}
+
 // TestActionRunnerResolvesBuiltinFirst is B1: an action core computes is never
 // looked up in the trust store, so an entry cannot shadow a builtin and
 // removing one cannot disable it.

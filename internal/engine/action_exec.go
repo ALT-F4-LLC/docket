@@ -297,7 +297,7 @@ func (r *ExecActionRunner) spawnMatched(
 	if entry.Tree {
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
-			return r.failed(a, lockErr.Error(), match)
+			return r.failed(a, "tree lock not acquired: "+lockErr.Error(), match)
 		}
 		defer lock.release()
 	}
