@@ -7,6 +7,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
@@ -58,7 +59,7 @@ func TestReadVerbsNeverRegisterAProject(t *testing.T) {
 		"workflow list", "workflow show", "workflow lint",
 		"schema list", "schema show",
 		"project list", "trust list", "events list", "config get",
-		"dispatch verify", "doctor",
+		"dispatch verify", "doctor", "registry audit", "policy resolve",
 		"guard stop", "guard gate", "guard record", "guard spawn",
 		"board", "next", "plan", "stats", "export",
 	}
@@ -76,7 +77,7 @@ func TestReadVerbsNeverRegisterAProject(t *testing.T) {
 	writes := []string{
 		"issue create", "issue edit", "issue close", "issue delete",
 		"run start", "run activate",
-		"step claim", "step complete", "step approve",
+		"step claim", "step complete", "step approve", "step resolve",
 		"doc create", "vote cast", "workflow register", "schema register",
 		"project delete", "project set-prefix", "trust add", "config set",
 		"dispatch open", "dispatch close", "init", "import",
@@ -88,6 +89,53 @@ func TestReadVerbsNeverRegisterAProject(t *testing.T) {
 				path)
 		}
 	}
+}
+
+// TestAnchoredReadVerbsNeverRegister resolves read verbs from a git worktree
+// docket has never seen. The identity is anchored, so only the read
+// classification stands between the call and a new project row plus a
+// project-registered event. The default row is claimed first, so a
+// registration would add a row rather than quietly claim the placeholder.
+func TestAnchoredReadVerbsNeverRegister(t *testing.T) {
+	conn := newTestDB(t)
+	if _, err := db.EnsureProject(conn, "/src/first.git", "first.git", 1); err != nil {
+		t.Fatalf("claiming the default project: %v", err)
+	}
+	for _, path := range []string{"registry audit", "policy resolve"} {
+		// A distinct identity per verb, so one verb registering cannot make
+		// the next one's lookup succeed and mask or blur its own result.
+		cfg := &config.Config{
+			Identity: "/src/unbound-" + strings.ReplaceAll(path, " ", "-") + ".git",
+			Source:   config.SourceGlobal,
+			Anchored: true,
+		}
+		projectsBefore := projectCount(t, conn)
+		eventsBefore := registeredEventCount(t, conn)
+
+		id, err := resolveInvocationProject(commandAt(t, path), conn, cfg)
+		testsupport.Must(t, err, "resolving `docket %s`: %v", path, err)
+		if id != db.UnregisteredProjectID {
+			t.Errorf("`docket %s` resolved project %d, want the unregistered "+
+				"sentinel %d", path, id, db.UnregisteredProjectID)
+		}
+		if got := projectCount(t, conn); got != projectsBefore {
+			t.Errorf("`docket %s` created %d project row(s) from an unbound "+
+				"repository", path, got-projectsBefore)
+		}
+		if got := registeredEventCount(t, conn); got != eventsBefore {
+			t.Errorf("`docket %s` logged %d project-registered event(s)",
+				path, got-eventsBefore)
+		}
+	}
+}
+
+func registeredEventCount(t *testing.T, conn *sql.DB) int {
+	t.Helper()
+	var n int
+	err := conn.QueryRow(`SELECT COUNT(*) FROM events WHERE kind = ?`,
+		engine.EventProjectRegistered).Scan(&n)
+	testsupport.Must(t, err, "counting project-registered events: %v", err)
+	return n
 }
 
 // TestRunAddressedVerbsCarryNoAmbientProject is DKT-58's first ask, verbatim:
