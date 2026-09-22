@@ -408,8 +408,8 @@ func newVoteCastCmd() *cobra.Command {
 		"Read the review summary from PATH (alternative to --summary; use when "+
 			"stdin already feeds --findings)")
 	cmd.Flags().String("metadata", "",
-		"Opaque JSON object claiming what cast this vote — worked example in "+
-			"skills/docket/SKILL.md; unverified, visible to anyone who can list "+
+		"Opaque JSON object claiming what cast this vote — see the docket skill for a "+
+			"worked example; unverified, visible to anyone who can list "+
 			"processes, and then stored and exported verbatim, so treat it as public")
 	cmd.Flags().String("usage", "",
 		`This seat's own spend report: {"unit": n, ...}, recorded per seat in `+
