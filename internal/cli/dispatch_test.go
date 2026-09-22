@@ -415,3 +415,46 @@ func TestDispatchOpenJSONEnvelopeUnchangedByRender(t *testing.T) {
 		t.Errorf("envelope limits = %v, want alpha=1 beta=3", env.Data.Limits)
 	}
 }
+
+// TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits: bare --json (v1,
+// the version a bare flag actually parses to — NoOptDefVal gives it "v1", not
+// "v2") carries the same total/truncated/limits fields v2 does, decoded by
+// KEY rather than into a typed field: encoding/json folds field names
+// case-insensitively, so a struct field named Total would still populate from
+// a wire key of "Total" even after the `json:"total"` tag was dropped from
+// engine.Manifest, and the mutant this test exists to catch would survive.
+func TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits(t *testing.T) {
+	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV1
+	openDispatchCLI(t, twoClassWorkflow, 2, 1, w)
+
+	raw := buf.String()
+	var env struct {
+		OK   bool                       `json:"ok"`
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, raw)
+	}
+	if !env.OK {
+		t.Fatalf("envelope ok = false:\n%s", raw)
+	}
+
+	for _, field := range []struct {
+		key  string
+		want string
+	}{
+		{"total", "4"},
+		{"truncated", "true"},
+		{"limits", `{"alpha":1,"beta":3}`},
+	} {
+		got, ok := env.Data[field.key]
+		if !ok {
+			t.Errorf("envelope data lacks %q:\n%s", field.key, raw)
+			continue
+		}
+		if string(got) != field.want {
+			t.Errorf("envelope data[%q] = %s, want %s", field.key, got, field.want)
+		}
+	}
+}
