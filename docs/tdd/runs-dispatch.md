@@ -866,6 +866,51 @@ verify, and a live-derived fact would either freeze an open-time answer into
 | P4h | `total` is the ready set's size **before** the cut, and `truncated` says whether the cut dropped anything. A relay reading only `rows` cannot tell a run whose remaining work fits from one the cap is metering out; RUN-95's conductor read a post-cut count as the whole offer twice against a 930-row ready set |
 | P4i | `limits` is the effective per-class `[limits] max` from the scheduler's **merged** limits, for every class the manifest's rows carry. A class with no declared max is **omitted** — unbounded is what the absence of a `[limits]` entry means, and a zero would read as no concurrency at all. Without it a relay inferred each class's concurrency from the largest same-stage count in the manifest, which a chain-deep manifest with few issues per stage under-certifies |
 
+## 5.2.2 Staged-row fields: stage, bump, bump_issue, scope
+
+Stage numbers alone tell a relay *that* two rows are ordered, never *why*. A
+row bumped past its own dependency level for cohort packing may run alongside
+its stage-mate the instant a slot frees; a row bumped because another issue's
+scope already held that stage must stay serialized however the cohort empties.
+Without a reason attached to the number, a reader has to treat every
+non-co-staged pair as the stronger, serializing conflict.
+
+| Field | Wire | Carries |
+|---|---|---|
+| `stage` | `stage`, `omitempty` (0 = unstaged) | The row's start-order level within this offer — set-relative, not a priority (§5.2.1) |
+| `bump` | `bump` on every offer row (`next --run`/`dispatch open`), `omitempty` elsewhere | Why the row sits at its stage rather than at its own dependency level: `none`, `headroom`, or `scope` |
+| `bump_issue` | `bump_issue`, `omitempty` | Present only on a `scope` bump — the display id of the other issue whose held scope intersected this row's |
+| `scope` | `scope`, `omitempty` | The row's own issue's declared scope globs, so a reader can test intersection itself for a pair the engine never co-staged |
+
+**`bump` is never omitted on an offer row.** `none` is a real string, not the
+empty one `omitempty` drops, so every row `next --run` and `dispatch open`
+render carries `bump` explicitly — `none` included — and only other renderings
+of a step (`step show`, `step list`) omit the field. Bare `docket next`
+without `--run` renders neither field at all (P27): it never computes an
+offer, so there is no cohort for a bump to be relative to. `scope` is likewise
+set on every offer row, ready or staged, and absent only when the issue
+declares no globs.
+
+The three values:
+
+| Value | Meaning |
+|---|---|
+| `none` | The row sits at the level its own dependencies required — no bump |
+| `headroom` | Its bounded class was already full in the stage it would otherwise have taken (the readiness predicate's R5, `CondHeadroom`, engine-spine §6.3) |
+| `scope` | Another issue's tree-holding scope already occupied that stage and intersects this row's (the readiness predicate's R4, `CondScope`, engine-spine §6.3) |
+
+The scope carrier is **row-level**: `scope` is the offering issue's own
+`scope_globs`, read the same way R4 reads a holder's scope (`foreignScope`),
+not a manifest-level per-issue table. A relay wanting to test a pair the
+manifest never co-staged reads each row's own `scope` and intersects them
+itself.
+
+| # | Clause |
+|---|---|
+| P4j | A row refused by both rules on the way up records `scope`, never `headroom`: scope is the stronger, serializing obligation, and reporting the weaker one would be a false all-clear the moment the cohort's class slot frees |
+| P4k | The relay rule this pair exists to state: a `headroom` bump may launch as soon as a class slot frees — nothing about the two rows conflicts, claim time (R4/R5) remains the authority on whether either is actually claimable — while a `scope` bump must keep the manifest's stage order regardless of which slots are free |
+| P4l | `bump`, `bump_issue`, and `scope` are **offer-relative**, Stage's siblings for the same reason (§5.2.1): a bump is a fact about which other rows shared this offer's cohort, so `dispatch verify` (§5.3) normalizes all three away on both the stored and recomputed row before its byte comparison — a cohort-mate recording since open legitimately changes a row's recomputed bump to `none`, and that is the batch working, not drift `verify` should report |
+
 ## 5.3 `dispatch verify`: byte-equality on rows
 
 | # | Clause |
