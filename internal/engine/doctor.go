@@ -475,9 +475,13 @@ func isScratchShapedPath(path string) bool {
 }
 
 // checkDoctorStragglers is check 7: detached worktrees homed under a
-// scratch-shaped path — left behind by a session (or a pre-gate
-// reconstruction, pregate_scratch.go) that never cleaned up after itself (a
-// crash, a killed process).
+// scratch-shaped path — left behind by a session that never cleaned up after
+// itself (a crash, a killed process). A pre-gate reconstruction worktree
+// (pregate_scratch.go, os.MkdirTemp under os.TempDir with a docket-pregate-
+// prefix) is caught here too, but only when os.TempDir itself is
+// scratch-shaped (e.g. a session whose TMPDIR sits under /tmp/claude-); the
+// default macOS /var/folders/... temp root is not, so a pregate worktree left
+// there goes unreported by this check.
 //
 // AC3: THIS IS A REPORT, NEVER A VERDICT that blocks — it reads OK or WARN
 // only, never FAIL, and doctorDisposition excludes it from `clean` on top of
