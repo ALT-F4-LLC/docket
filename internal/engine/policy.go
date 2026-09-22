@@ -2,8 +2,12 @@ package engine
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
 // POLICY.TOML (DKT-1282) — the engine's own reading of the routing policy a
@@ -91,7 +95,10 @@ type policyDoc struct {
 
 // parsePolicy decodes policy.toml and applies wave.js's assertPolicyShape
 // gate: a version below the floor, or an empty [executors]/[variants], is a
-// hard refusal rather than a partial policy silently routing nothing.
+// hard refusal rather than a partial policy silently routing nothing. So is a
+// [sizes] key outside the issue size vocabulary, or a [sizes] entry naming a
+// variant with no [variants] row: the first routed `next` fails naming the
+// entry, instead of every row that later carries the size label.
 func parsePolicy(src []byte) (*policyDoc, error) {
 	var doc policyDoc
 	if _, err := toml.Decode(string(src), &doc); err != nil {
@@ -107,6 +114,17 @@ func parsePolicy(src []byte) (*policyDoc, error) {
 	}
 	if len(doc.Variants) == 0 {
 		return nil, fmt.Errorf("policy.toml: [variants] is empty")
+	}
+	for _, size := range slices.Sorted(maps.Keys(doc.Sizes)) {
+		if err := model.ValidateSize(model.Size(size)); err != nil {
+			return nil, fmt.Errorf("policy.toml: [sizes].%s: %w", size, err)
+		}
+		variant := doc.Sizes[size]
+		if _, ok := doc.Variants[variant]; !ok {
+			return nil, fmt.Errorf(
+				"policy.toml: [sizes].%s names variant %q, which has no [variants] row",
+				size, variant)
+		}
 	}
 	return &doc, nil
 }

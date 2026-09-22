@@ -7,9 +7,9 @@ import "testing"
 // ceiling/never clamp is covered by the same fixture as the plain walk:
 //
 //   - worker stands on "small" by default (no size label).
-//   - "trivial" maps to haiku-low, "large" maps to opus-high.
+//   - "trivial" maps to haiku-low, "needs-design" maps to opus-high.
 //   - opus-high is beyond [security].ceiling (sonnet-medium), so a sensitive
-//     row asking for "large" still clamps to the ceiling.
+//     row asking for "needs-design" still clamps to the ceiling.
 const sizePolicyTOML = `
 [policy]
 version = 2
@@ -24,7 +24,7 @@ worker = { variant = "sonnet-medium" }
 
 [sizes]
 trivial = "haiku-low"
-large = "opus-high"
+needs-design = "opus-high"
 
 [security]
 ceiling = "sonnet-medium"
@@ -68,9 +68,9 @@ func TestResolveExecutorFirstMatchingSizeLabelWins(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	// "large" appears first in the issue's declared label order, so it wins
+	// "needs-design" appears first in the issue's declared label order, so it wins
 	// over "trivial" even though "trivial" would otherwise sort earlier.
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"large", "trivial"})
+	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"needs-design", "trivial"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestResolveExecutorFirstMatchingSizeLabelWins(t *testing.T) {
 		t.Errorf("got %+v, want the first-declared label's opus-high", got)
 	}
 
-	reversed, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"trivial", "large"})
+	reversed, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"trivial", "needs-design"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestResolveExecutorSizeLabelStillClampsToSecurityCeiling(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"large", "sensitive"})
+	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"needs-design", "sensitive"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -104,22 +104,12 @@ func TestResolveExecutorSizeLabelStillClampsToSecurityCeiling(t *testing.T) {
 }
 
 func TestResolveExecutorRefusesUnknownSizeVariant(t *testing.T) {
-	const src = `
-[policy]
-version = 2
-
-[variants]
-tier-a = { model = "opus", effort = "high" }
-
-[executors]
-worker = { variant = "tier-a" }
-
-[sizes]
-trivial = "no-such-variant"
-`
-	doc, err := parsePolicy([]byte(src))
-	if err != nil {
-		t.Fatalf("parsePolicy: %v", err)
+	// parsePolicy now refuses this [sizes] entry, so the doc is built
+	// directly to keep the resolve-time guard covered.
+	doc := &policyDoc{
+		Variants:  map[string]policyVariant{"tier-a": {Model: "opus", Effort: "high"}},
+		Executors: map[string]policyExecutor{"worker": {Variant: "tier-a"}},
+		Sizes:     map[string]string{"trivial": "no-such-variant"},
 	}
 
 	if _, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"trivial"}); err == nil {
@@ -163,7 +153,7 @@ func TestResolveSeatSizeLabelStillClampsToSecurityCeiling(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveSeat("worker", []string{"large", "sensitive"})
+	got, err := doc.ResolveSeat("worker", []string{"needs-design", "sensitive"})
 	if err != nil {
 		t.Fatalf("ResolveSeat: %v", err)
 	}
