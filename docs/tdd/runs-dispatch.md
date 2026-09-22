@@ -850,7 +850,7 @@ small change spent 22.7 h elapsed against 0.56 h of running.
 |---|---|
 | P4a | The cut walks the stage-major entries and admits an issue's **entire in-offer closure** the first time one of its rows is reached |
 | P4b | It stops before an issue whose closure would carry the total past the limit, and **never splits an issue** |
-| P4c | When the first issue's closure alone exceeds the limit, that closure is admitted **whole** — half a chain is what the cut exists to prevent — and `truncated` reports the overrun |
+| P4c | When the first issue's closure alone exceeds the limit, that closure is admitted **whole** — half a chain is what the cut exists to prevent. The overrun is visible as the admitted row count (`len(rows)`) exceeding the caller's limit; `truncated` (P4h) reports only whether the cut dropped anything — false when that closure is the whole ready set, true when later issues were held back — so it cannot signal the overrun |
 | P4d | `--limit 0` is unchanged: the whole offer |
 | P4e | Wire order stays **stage-major**: the result is a subsequence of the stage-major input, not a re-sort, so the runnable-prefix property still holds. The staged closure never crosses issues, so every survivor's in-offer predecessors survive with it |
 | P4f | Rows are hashed **after** the cut, so manifest hashing and `dispatch verify` are unchanged |
