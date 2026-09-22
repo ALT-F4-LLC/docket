@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -91,6 +94,68 @@ func TestReportExecutorsOnAnEmptyStore(t *testing.T) {
 	var cmdError *CmdError
 	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation {
 		t.Errorf("a malformed --since returned %v, want VALIDATION_ERROR", err)
+	}
+}
+
+// TestReportExecutorsFromAnUnboundDirectoryFailsWithoutAllProjects: a cwd
+// whose identity resolves to db.UnregisteredProjectID (no registered docket
+// project) must refuse the project-scoped read rather than answer an empty
+// ledger as success — the failure scenario is an operator in the wrong
+// directory reading "no executors" instead of an error.
+func TestReportExecutorsFromAnUnboundDirectoryFailsWithoutAllProjects(t *testing.T) {
+	conn := newTestDB(t)
+	cmd := cmdWithDB(conn)
+	cmd.Flags().String("since", "", "")
+	cmd.Flags().Bool("all-projects", false, "")
+	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, db.UnregisteredProjectID))
+	w, buf := bufWriter(true)
+
+	err := runReportExecutors(cmd, w)
+
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation {
+		t.Fatalf("runReportExecutors from an unbound directory = %v, want a VALIDATION_ERROR CmdError", err)
+	}
+	cwd, _ := os.Getwd()
+	if !strings.Contains(cmdError.Error(), cwd) {
+		t.Errorf("refusal %q does not name the working directory %q", cmdError.Error(), cwd)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a refused read must emit no ledger, got %s", buf.String())
+	}
+}
+
+// TestReportExecutorsAllProjectsIgnoresAnUnboundInvokingDirectory: with
+// --all-projects, an unbound invoking directory must not block the read —
+// the scope is the whole store, so the invocation's own missing project
+// binding is irrelevant, and runs across every project still count.
+func TestReportExecutorsAllProjectsIgnoresAnUnboundInvokingDirectory(t *testing.T) {
+	conn := newTestDB(t)
+	projectID, err := db.EnsureProject(conn, "/src/here.git", "here.git", 1)
+	testsupport.Must(t, err, "registering the project: %v", err)
+	_, err = db.InsertRun(conn, projectID, "here", 0, 1)
+	testsupport.Must(t, err, "starting a run: %v", err)
+
+	cmd := cmdWithDB(conn)
+	cmd.Flags().String("since", "", "")
+	cmd.Flags().Bool("all-projects", false, "")
+	testsupport.Must(t, cmd.Flags().Set("all-projects", "true"), "setting --all-projects: %v", err)
+	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, db.UnregisteredProjectID))
+	w, buf := bufWriter(true)
+
+	err = runReportExecutors(cmd, w)
+	testsupport.Must(t, err, "report executors --all-projects: %v", err)
+
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Runs  int    `json:"runs"`
+			Scope string `json:"scope"`
+		} `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &envelope), "decoding: %s", buf.String())
+	if !envelope.OK || envelope.Data.Scope != "store" || envelope.Data.Runs != 1 {
+		t.Errorf("document = %s, want ok, store scope, 1 run", buf.String())
 	}
 }
 

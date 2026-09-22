@@ -2,11 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -77,7 +79,15 @@ func runReportExecutors(cmd *cobra.Command, w *output.Writer) error {
 	opts := engine.ExecutorLedgerOptions{SinceRun: sinceRun, SinceMS: sinceMS}
 	scope := "store"
 	if all, _ := cmd.Flags().GetBool("all-projects"); !all {
-		opts.ProjectID = getProjectID(cmd)
+		projectID := getProjectID(cmd)
+		if projectID == db.UnregisteredProjectID {
+			cwd, _ := os.Getwd()
+			return cmdErr(fmt.Errorf(
+				"%s has no docket project binding; run `docket report executors "+
+					"--all-projects`, or from inside the repository", cwd),
+				output.ErrValidation)
+		}
+		opts.ProjectID = projectID
 		scope = "project"
 	}
 
