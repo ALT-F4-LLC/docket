@@ -1036,6 +1036,16 @@ issue's; age is the step's `created_at_ms`, tie-broken by `id` so the order is t
 and reproducible. `sortIssues`'s existing `priorityRank` is reused for the priority
 half — same ranking, no second definition to drift.
 
+**R3 carries two interposition clauses** for §11.2's interposed gate. First, a step
+named as a `threshold` step-name target is latched until a routing predecessor's
+recorded routing names it; a routing that resolves elsewhere terminalizes it
+`skipped` (DKT-38). Second, a step's ordinary downstream is held by any of its
+`after` predecessors' threshold targets that is itself a `type=vote` or `type=human`
+gate and is still open (not yet terminal) — those are decisions the downstream's own
+validity depends on. An open interposed executor target (a step with no `type`) does
+**not** hold the downstream: it is ordinary work the routing chose to add, and no
+downstream reads its output.
+
 **`--limit`** applies after ordering, with the v2 truncation contract
 (reliability-delta §4.2/§5): `readyTotal` before slicing, `truncated` computed,
 negative limit `VALIDATION_ERROR` under v2. `next --run` is a *new* verb surface, so
