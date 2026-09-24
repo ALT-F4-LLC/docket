@@ -511,3 +511,32 @@ func TestVoteRuleSealedConfigValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestVoteRuleIgnoresLegacyRosterRow is DKT-2764: `vote.rule.<name>.roster`
+// and `.weighting` are retired, so a rule carries neither, and a legacy row
+// still in the store under the old key changes nothing — a vote step that
+// declares no `roster` routes as open even when the store says `strict`.
+//
+// The row is written straight into `meta` because SetConfig now refuses the
+// key; the store this test models is one written before the retirement.
+func TestVoteRuleIgnoresLegacyRosterRow(t *testing.T) {
+	conn := mustDB(t)
+	fx := seedPinnedVoteStep(t, conn, voteFixture(`executor = "worker"`, ``))
+	_, err := conn.Exec(
+		`INSERT INTO meta (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		"config.vote.rule.majority.roster", "strict")
+	testsupport.Must(t, err, "seeding the legacy row: %v", err)
+
+	rule, err := resolveVoteRule(conn, 1, "majority")
+	testsupport.Must(t, err, "resolveVoteRule: %v", err)
+	if rule.Threshold != 0.6 {
+		t.Errorf("threshold = %v, want 0.6; the legacy row must not disturb the rule", rule.Threshold)
+	}
+
+	_, err = castAs(conn, fx.proposalID, "mallory")
+	testsupport.Must(t, err, "an off-roster cast on a step declaring no roster was refused: %v", err)
+	if n := voteCount(t, conn, fx.proposalID); n != 1 {
+		t.Errorf("the cast left %d vote(s), want 1", n)
+	}
+}

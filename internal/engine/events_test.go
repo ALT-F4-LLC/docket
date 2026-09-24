@@ -211,6 +211,13 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// read the frozen one.
 		"issue-scope-refreshed",
 
+		// The body-refresh kind (DKT-2291) — ONE, the scope refresh's twin:
+		// `run_issues.body_snapshot` is the other half of the premise a
+		// packet states, and a refreshed half with no event is the same
+		// silent drift. It carries the superseded and refreshed body hashes
+		// and the operator's reason.
+		"issue-body-refreshed",
+
 		// The issue.diff re-pin kind (DKT-1034) — ONE, the `run-repinned`
 		// argument in its third column: the round record a step recorded is
 		// the frozen premise every downstream review packet renders its
@@ -229,21 +236,30 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// note changes no step's state, and every later render reads it the
 		// way every render reads the frozen body.
 		"run-note-added",
+
+		// The config-write kind (DKT-2766) — ONE, the `run-repinned`
+		// argument again: a vote rule's threshold is a premise every tally
+		// under it is judged against, and `config set` has no per-caller
+		// authorization, so a rewrite of it must be dated and attributed or
+		// two ballots approved under two thresholds are indistinguishable in
+		// the record. No run: a config write belongs to a project.
+		"config-changed",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 51 {
+	if len(eventKinds) != 53 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
 			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
 			"DKT-408's repin kind, DKT-546's batch-override pair, "+
 			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
-			"kind, DKT-1034's issue.diff re-pin kind, DKT-1079's "+
-			"run-note kind, DKT-2465's conductor-seat kind, and DKT-2071's "+
-			"dispatch-extend kind enumerate 51 (see DKT-21)",
+			"kind, DKT-2291's body-refresh kind, DKT-1034's issue.diff "+
+			"re-pin kind, DKT-1079's run-note kind, DKT-2465's "+
+			"conductor-seat kind, DKT-2071's dispatch-extend kind, and "+
+			"DKT-2766's config-changed kind enumerate 53 (see DKT-21)",
 			len(eventKinds))
 	}
 }

@@ -553,6 +553,14 @@ var eventActors = map[string]Actor{
 	// `human` means in this table.
 	EventIssueScopeRefreshed: ActorHuman,
 
+	// The body refresh (DKT-2291) is the scope refresh's twin and `human` for
+	// the same reason: activation snapshots the body once, every automatic
+	// path leaves it alone, and it moves only because a person ran the
+	// refresh verb naming the run it should reach. Registered here with the
+	// DKT-2541 work because the closed-set tests could not pass without it
+	// (DKT-2544 records the gap).
+	EventIssueBodyRefreshed: ActorHuman,
+
 	// The issue.diff re-pin (DKT-1034): nothing in the engine re-records a
 	// step's diff after the fact — the routing stage records it once at
 	// completion and every resolution leaves it standing (rerun-gates by
@@ -568,6 +576,12 @@ var eventActors = map[string]Actor{
 	// dispatcher relaying one) ran `run note add` naming the run it should
 	// reach, which is precisely what `human` means in this table.
 	EventRunNoteAdded: ActorHuman,
+
+	// The config write (DKT-2767): nothing in the engine sets a vote rule's
+	// keys — a value changes only because a person (or the harness relaying
+	// one) ran `config set`, and the event's `changed_by` names who, which
+	// is precisely what `human` means in this table.
+	EventConfigChanged: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,

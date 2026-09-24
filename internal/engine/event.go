@@ -351,6 +351,22 @@ const (
 	// already records that transition, and the capability is one of its
 	// effects.
 	EventConductorSeated = "conductor-seated"
+
+	// A security-load-bearing config key being WRITTEN (DKT-2766, DKT-2767).
+	// `docket config set` of any `vote.rule.<name>.*` key records one of
+	// these in the same transaction as the write, carrying the key, the
+	// scope, the prior and the new value, and who wrote it.
+	//
+	// It earns its place on the `run-repinned` argument in one more column:
+	// a vote rule's threshold is a premise every tally under it is judged
+	// against, and `config set` has no per-caller authorization — so a
+	// rewrite of that premise is a transition an auditor must be able to
+	// date and attribute, or a ballot approved at 0.5 is indistinguishable
+	// in the record from one approved at the 0.8 the rule declared last
+	// week. Detection where prevention is not built (operator decision,
+	// 2026-09-17). Like `project-registered` it has NO RUN: a config write
+	// belongs to a project, not to any run of it.
+	EventConfigChanged = "config-changed"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -391,6 +407,7 @@ var eventKinds = map[string]bool{
 	EventIssueBodyRefreshed:  true,
 	EventIssueDiffRepinned:   true,
 	EventRunNoteAdded:        true,
+	EventConfigChanged:       true,
 }
 
 // recordEvent writes one event in the caller's transaction.

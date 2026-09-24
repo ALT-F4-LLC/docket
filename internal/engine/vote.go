@@ -238,8 +238,10 @@ func OpenVoteProposal(
 		// puts the voter list on the step.
 		//
 		// The voter hints themselves are OPAQUE: core never interprets one,
-		// never validates it against anything, and never dispatches to one. It
-		// counts them.
+		// never dispatches to one, and by default never validates a cast
+		// against one — it counts them. A step that declares `roster =
+		// "strict"` opts into the one comparison the cast path then makes
+		// (vote_cast.go): the name on the cast must be one of these hints.
 		RequiredVoters: len(spec.Voters),
 		Status:         model.ProposalStatusOpen,
 		CreatedBy:      "docket",
@@ -376,15 +378,13 @@ type voteRule struct {
 	// the tally closes it. Resolved here and STORED on the proposal at open,
 	// so a rule edited mid-vote cannot change a live ballot's rendering.
 	Sealed bool
-	// Roster and Weighting are the rule's identity dimensions (DKT-2448): who
-	// may cast, and what a cast is worth. Resolved here so the roster-enforcement
-	// and equal-weighting pieces have one place to read them from.
+	// A rule carries NO roster and NO weighting (DKT-2764). Both once sat here
+	// as `vote.rule.<name>.roster` / `.weighting` config keys; they moved onto
+	// the vote step (`roster`, `weighting`, workflow/vote_policy.go) because a
+	// config key has no per-caller identity and a constrained seat could flip
+	// it before casting. A legacy row under either key is ignored by design —
+	// the step's declaration, pinned at activation, is the only authority.
 	//
-	// CARRIED, NOT YET ACTED ON: nothing in this file or the cast path consults
-	// either value. Their defaults — open and declared — are the existing
-	// behavior exactly.
-	Roster    string
-	Weighting string
 	// HoldOnDissent is the rule's opt-in routing dimension (DKT-2449): an
 	// APPROVED tally carrying at least one `reject` parks its vote step for
 	// the operator rather than passing, with the dissenting seat named in the
@@ -432,26 +432,6 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 			"vote rule %q has a malformed sealed flag %q: %w", name, sealedEntry.Value, err)
 	}
 
-	rosterEntry, err := db.GetConfig(conn, projectID, db.VoteRuleRosterKey(name))
-	if err != nil {
-		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
-	}
-	// Re-checked at READ time, not only at set time: set-time validation guards
-	// the CLI ingress alone, and a stored value outside the set must fail here
-	// rather than fall back to the permissive default. The threshold and the
-	// sealed flag already fail closed the same way.
-	if err := db.ValidateVoteRoster(rosterEntry.Value); err != nil {
-		return voteRule{}, fmt.Errorf("vote rule %q has a malformed roster: %w", name, err)
-	}
-
-	weightingEntry, err := db.GetConfig(conn, projectID, db.VoteRuleWeightingKey(name))
-	if err != nil {
-		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
-	}
-	if err := db.ValidateVoteWeighting(weightingEntry.Value); err != nil {
-		return voteRule{}, fmt.Errorf("vote rule %q has a malformed weighting: %w", name, err)
-	}
-
 	holdEntry, err := db.GetConfig(conn, projectID, db.VoteRuleHoldOnDissentKey(name))
 	if err != nil {
 		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
@@ -470,8 +450,6 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 		Threshold:     threshold,
 		Criticality:   model.Criticality(criticalityEntry.Value),
 		Sealed:        sealed,
-		Roster:        rosterEntry.Value,
-		Weighting:     weightingEntry.Value,
 		HoldOnDissent: holdOnDissent,
 	}, nil
 }
