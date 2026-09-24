@@ -1709,13 +1709,32 @@ will hit and the spec's silence made this TDD decide it.
 | # | Clause |
 |---|---|
 | F14 | C10: two activations scanning the same directory both register identical bytes; both succeed (F11); the second changes nothing |
-| F15 | Re-activation of an **already-active** run **inherits the original pin set** (RA2, engine-spine §5.4) and therefore **does not re-scan**. A config file edited mid-run does not reach a run already under way — F9's refusal cannot fire on re-activation, and a mid-run edit is simply invisible, exactly as a re-registered workflow is |
+| F15 | Re-activation of an **already-active** run **inherits the original pin set** (RA2, engine-spine §5.4) and therefore **does not re-scan** — except that a `policy.toml` the pin set never held joins it when config now carries one (below). An **already-pinned** config file edited mid-run does not reach a run already under way — F9's refusal cannot fire on re-activation, and that edit is simply invisible, exactly as a re-registered workflow is |
 | F16 | The scan runs **once per activation**, not once per issue |
 
 **F15 is important and easy to get wrong**: if re-activation re-scanned, an
 operator editing a workflow while a run expanded its second phase would hit
 F9's refusal on a run that was working fine, and the fix would be to revert
-their edit. Inheriting the pin set makes the edit a non-event.
+their edit. Inheriting the pin set makes the edit a non-event — except for
+`policy.toml`, below.
+
+**`policy.toml` is a case of RA3, not an exception to RA2.** RA3's closure
+recompute drops any ref the pin set already holds, matched by name, not
+content — so an inherited ref, including an already-pinned `policy.toml`
+that was since edited, keeps its original hash and RA2 is undisturbed for
+it. But `policy.toml` is the one ref every re-activation's closure always
+contains (`internal/engine/packet_closure.go`'s `packetClosureRefs` seeds it
+unconditionally), whether or not that re-activation binds a new issue. A run
+activated before its config carried a `policy.toml` therefore pins one the
+moment it is re-activated after the file appears — not only when adding an
+issue. From then on, `next --run` resolves executor and vote routing for
+every step still waiting — not yet claimed — against the run's pinned
+policy, read fresh at render time rather than snapshotted per issue
+(`internal/engine/next.go`'s `stepRow`, `internal/engine/policy_pin.go`'s
+`policyForRun`): a row on an issue the run already held before this
+re-activation resolves against the new policy too, not only a row on the
+issue that was just added. A step already claimed, running, or finished
+keeps the routing recorded on its claim; only a still-waiting row moves.
 
 ### 9.5 The trust posture is unchanged
 
