@@ -984,12 +984,21 @@ func (e *Engine) runRoutingStage(
 		diffPayload string
 		wantsDiff   bool
 		// diffFacts is the reserved `diff.*` family's measurement (DKT-2063),
-		// non-nil exactly for a step that holds the tree. It is taken from the
-		// diff this completion COMPUTED, not from the artifact it records: the
-		// DKT-259 and byte-identical suppressions below drop a redundant row
-		// without changing what was measured, and a threshold asking "how big
-		// was this change" must not answer differently because an equal diff
-		// already existed.
+		// non-nil exactly for a step that holds the tree. It describes the
+		// object review will read, which the two suppressions below reach by
+		// different routes:
+		//
+		//   - the byte-identical case measures the diff this completion
+		//     COMPUTED. The row is dropped because an equal one is already
+		//     recorded, so the computed body and the recorded body are the
+		//     same bytes and a threshold asking "how big was this change" gets
+		//     the same answer either way.
+		//   - the DKT-259 case measures the issue's LATEST RECORDED NON-EMPTY
+		//     `issue.diff`, not the empty body it computed (DKT-2548). The
+		//     empty re-record is dropped precisely because it is not evidence
+		//     the change vanished; measuring it anyway decided
+		//     `any(diff.empty == false)` false on an `--as retry` and skipped
+		//     review over the change the ledger still held.
 		diffFacts *DiffFacts
 	)
 	if isExecutorStep(step) && stepHoldsTree(spec) {
@@ -1041,9 +1050,16 @@ func (e *Engine) runRoutingStage(
 		// Read BEFORE the transaction opens, on the pooled connection, for the
 		// same reason loadHoldTally is: inside the transaction it would
 		// deadlock against the one-connection pool rather than fail.
-		if diffRecordsNoChange(diffBody) &&
-			issueHasRecordedChange(conn, step.RunID, step.IssueID) {
-			wantsDiff = false
+		//
+		// When the guard fires, the `diff.*` facts come from the recorded body
+		// it protects (DKT-2548): that body is what `issue.diff` resolves to
+		// and what a review would read, so routing sizes the same object.
+		if diffRecordsNoChange(diffBody) {
+			if recorded, ok := latestRecordedChange(conn, step.RunID, step.IssueID); ok {
+				wantsDiff = false
+				measured = measureDiff(recorded)
+				diffFacts = &measured
+			}
 		}
 
 		// AND A BYTE-IDENTICAL RE-RECORD IS NOT A SUPERSESSION. Nothing
@@ -3603,28 +3619,51 @@ const (
 // sizing by the round's own work instead is a different, defensible question,
 // and it is not the one the issue asks.
 //
-// A file header (`+++ `/`--- `) is not a content line, and a `diff --git `
-// header is what identifies a file: the body is unified-diff text, which is all
-// the diff seam returns, so the counting is textual rather than `--numstat`.
+// A `diff --git ` header is what identifies a file: the body is unified-diff
+// text, which is all the diff seam returns, so the counting is textual rather
+// than `--numstat`.
+//
+// A file header (`+++ `/`--- `) is not a content line, but ONLY where git
+// writes one: between a block's `diff --git ` line and its first `@@` hunk
+// header (DKT-2550). Inside a hunk the same prefixes are content — a removed
+// line whose text begins `-- ` or an added line beginning `++` — and the
+// unconditional match this replaced dropped them, under-sizing every change
+// that touched a SQL comment, a Markdown rule, or a C++ increment.
+//
+// `Empty` is diffRecordsNoChange's answer over the same in-scope portion, not
+// `Lines == 0` (DKT-2549). The ledger keeps a rename-, mode-, or binary-only
+// diff as a real change — it has non-comment lines — and a reviewer sees it,
+// so `any(diff.empty == false)` must route review over it too. Two readers of
+// one body agreeing on whether it holds a change is the invariant; which one
+// derives from the other is the implementation.
 func measureDiff(body string) DiffFacts {
-	facts := DiffFacts{Empty: true}
+	facts := DiffFacts{}
 	files := map[string]struct{}{}
+	var inScope strings.Builder
+	// inHeader is true from a `diff --git ` line to its block's first hunk,
+	// the only region where `+++ `/`--- ` are headers rather than content.
+	inHeader := false
 	for _, line := range strings.Split(body, "\n") {
 		if strings.HasPrefix(line, roundDeltaMarker) ||
 			strings.HasPrefix(line, outOfScopeMarker) {
 			break
 		}
+		inScope.WriteString(line)
+		inScope.WriteByte('\n')
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
 			files[line] = struct{}{}
-		case strings.HasPrefix(line, "+++ "), strings.HasPrefix(line, "--- "):
+			inHeader = true
+		case strings.HasPrefix(line, "@@"):
+			inHeader = false
+		case inHeader && (strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ")):
 			// A file header, not content.
 		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, "-"):
 			facts.Lines++
-			facts.Empty = false
 		}
 	}
 	facts.Files = len(files)
+	facts.Empty = diffRecordsNoChange(inScope.String())
 	return facts
 }
 
@@ -3650,6 +3689,13 @@ func latestIssueDiffBody(conn *sql.DB, runID, issueID int) string {
 
 // issueHasRecordedChange reports whether the issue already has an `issue.diff`
 // artifact that carries content.
+func issueHasRecordedChange(conn *sql.DB, runID, issueID int) bool {
+	_, ok := latestRecordedChange(conn, runID, issueID)
+	return ok
+}
+
+// latestRecordedChange is the issue's newest `issue.diff` artifact that carries
+// content, and whether one exists.
 //
 // It scans the issue's diffs newest-first and stops at the first one with
 // content, so the common case — the previous record was a real diff — costs one
@@ -3661,24 +3707,24 @@ func latestIssueDiffBody(conn *sql.DB, runID, issueID int) string {
 // direction for a guard that suppresses writes: refusing to record because a
 // query failed would lose a real diff over a transient error, while recording
 // an extra empty one is the pre-DKT-259 behavior and merely noisy.
-func issueHasRecordedChange(conn *sql.DB, runID, issueID int) bool {
+func latestRecordedChange(conn *sql.DB, runID, issueID int) (string, bool) {
 	rows, err := conn.Query(
 		`SELECT a.body FROM artifacts a JOIN steps s ON s.id = a.step_id
 		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
 		  ORDER BY a.id DESC LIMIT 50`,
 		runID, issueID, ArtifactKindIssueDiff)
 	if err != nil {
-		return false
+		return "", false
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var body string
 		if err := rows.Scan(&body); err != nil {
-			return false
+			return "", false
 		}
 		if !diffRecordsNoChange(body) {
-			return true
+			return body, true
 		}
 	}
-	return false
+	return "", false
 }

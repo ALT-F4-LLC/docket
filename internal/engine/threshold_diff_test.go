@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -200,6 +201,265 @@ func TestMeasureDiffCountsTheInScopeCumulativeDiffOnly(t *testing.T) {
 			want := DiffFacts{Lines: 5, Files: 1}
 			if got := measureDiff(tc.body); got != want {
 				t.Errorf("measureDiff = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// TestRetryMeasuresTheRecordedChange is DKT-2548: when the DKT-259 guard drops
+// an empty re-record because the issue already holds a non-empty `issue.diff`,
+// the `diff.*` facts routing evaluates are measured from THAT recorded body —
+// the object `issue.diff` resolves to and a review would read — not from the
+// empty body the retry computed. Measuring the computed body decided
+// `any(diff.empty == false)` false on every `--as retry` and skipped review
+// over a change the ledger still held.
+//
+// The two boundaries pin the rule's narrowness: a FIRST empty diff has no
+// recorded change to fall back to and still reads empty, and a real revision
+// is measured from itself, never from the older record.
+func TestRetryMeasuresTheRecordedChange(t *testing.T) {
+	// recorded is the change the issue already holds: 25 content lines, 1 file.
+	recorded := diffBodyOf(15, 10)
+
+	src := func(predicate string) string {
+		return fmt.Sprintf(`
+[pipeline]
+name = "diff-retry"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+executor = "implement"
+emits = "change-summary"
+threshold = { "review" = %q }
+
+[[step]]
+name = "review"
+after = ["implement"]
+executor = "review"
+emits = "findings"
+`, predicate)
+	}
+
+	recordDiff := func(t *testing.T, conn *sql.DB, runID int, body string) {
+		t.Helper()
+		// Resolved before the transaction opens: the pool holds one connection,
+		// and a query inside the transaction deadlocks against it.
+		stepID := stepIDByInstance(t, conn, "implement@0")
+		tx, err := conn.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		_, err = db.InsertArtifactTx(tx, db.Artifact{
+			RunID: runID, StepID: stepID, Kind: ArtifactKindIssueDiff, Body: body,
+		}, nowMS)
+		testsupport.Must(t, err, "InsertArtifactTx: %v", err)
+		testsupport.Must(t, tx.Commit(), "Commit: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		predicate string
+		// prior is what the issue already recorded; "" records nothing.
+		prior string
+		// computed is what this completion's diff came back as.
+		computed   string
+		wantReview bool
+		// wantRecords is the issue.diff artifact count after the completion.
+		wantRecords int
+	}{
+		{
+			name:      "an empty re-record reads the recorded change as non-empty",
+			predicate: "any(diff.empty == false)",
+			prior:     recorded, computed: "", wantReview: true, wantRecords: 1,
+		},
+		{
+			name:      "an empty re-record sizes lines from the recorded body",
+			predicate: "any(diff.lines == 25)",
+			prior:     recorded, computed: "", wantReview: true, wantRecords: 1,
+		},
+		{
+			name:      "an empty re-record sizes files from the recorded body",
+			predicate: "any(diff.files == 1)",
+			prior:     recorded, computed: "", wantReview: true, wantRecords: 1,
+		},
+		{
+			name:      "the empty computed body is not what routing measures",
+			predicate: "any(diff.lines == 0)",
+			prior:     recorded, computed: "", wantReview: false, wantRecords: 1,
+		},
+		{
+			// DKT-259's narrowness: no recorded change to protect, so a genuine
+			// "nothing changed" reads empty. No row is written either, and that
+			// is the byte-identical guard, not this one: with nothing recorded
+			// the newest body is "" and so is the computed one.
+			name:      "a first empty diff reads empty",
+			predicate: "any(diff.empty == false)",
+			prior:     "", computed: "", wantReview: false, wantRecords: 0,
+		},
+		{
+			// An ordinary revision: measured from the diff it computed.
+			name:      "a real revision is measured from itself",
+			predicate: "any(diff.lines == 3)",
+			prior:     recorded, computed: diffBodyOf(3, 0), wantReview: true, wantRecords: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			runID, _ := activateInterposed(t, conn, src(tc.predicate))
+			if tc.prior != "" {
+				recordDiff(t, conn, runID, tc.prior)
+			}
+			e := testEngine()
+			e.DiffFn = func(_, _ string, _ []string) (string, error) {
+				return tc.computed, nil
+			}
+
+			claimAndComplete(t, conn, e, "implement@0", "the change summary", "")
+
+			want := RoutingPass
+			if tc.wantReview {
+				want = "review"
+			}
+			if got := stepRouting(t, conn, "implement@0"); got != want {
+				t.Errorf("routing = %q, want %q for %s with prior %d-line record "+
+					"and computed %d-line diff", got, want, tc.predicate,
+					measureDiff(tc.prior).Lines, measureDiff(tc.computed).Lines)
+			}
+
+			var records int
+			err := conn.QueryRow(
+				`SELECT COUNT(*) FROM artifacts WHERE run_id = ? AND kind = ?`,
+				runID, ArtifactKindIssueDiff).Scan(&records)
+			testsupport.Must(t, err, "counting issue.diff artifacts: %v", err)
+			if records != tc.wantRecords {
+				t.Errorf("issue.diff artifacts = %d, want %d — the guard's "+
+					"record-or-drop decision must not change", records, tc.wantRecords)
+			}
+		})
+	}
+}
+
+// inScopePortion is the text measureDiff sizes: the cumulative diff before
+// either trailer marker. Spelled out here rather than exported from saga.go so
+// the agreement assertion below reads the body independently of the code it
+// checks.
+func inScopePortion(body string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, roundDeltaMarker) ||
+			strings.HasPrefix(line, outOfScopeMarker) {
+			break
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// TestMeasureDiffEmptyAgreesWithRecordedChange is DKT-2549: a body the ledger
+// keeps as a real change — one diffRecordsNoChange answers false for — reads
+// `diff.empty == false`, whatever its hunks look like. Rename-, mode-, and
+// binary-only diffs carry no `+`/`-` content line, and sizing `Empty` by those
+// lines alone recorded the change, showed it to a reviewer, and then skipped the
+// review keyed on `any(diff.empty == false)`.
+func TestMeasureDiffEmptyAgreesWithRecordedChange(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want DiffFacts
+	}{
+		{
+			name: "pure rename",
+			body: "diff --git a/old.go b/new.go\nsimilarity index 100%\n" +
+				"rename from old.go\nrename to new.go\n",
+			want: DiffFacts{Files: 1},
+		},
+		{
+			name: "binary change",
+			body: "diff --git a/x.bin b/x.bin\nindex 0123456..89abcde 100644\n" +
+				"Binary files a/x.bin and b/x.bin differ\n",
+			want: DiffFacts{Files: 1},
+		},
+		{
+			name: "mode-only change",
+			body: "diff --git a/x.sh b/x.sh\nold mode 100644\nnew mode 100755\n",
+			want: DiffFacts{Files: 1},
+		},
+		{
+			name: "content lines",
+			body: diffBodyOf(2, 1),
+			want: DiffFacts{Lines: 3, Files: 1},
+		},
+		{
+			name: "empty",
+			body: "",
+			want: DiffFacts{Empty: true},
+		},
+		{
+			name: "comment only",
+			body: "# warning\n",
+			want: DiffFacts{Empty: true},
+		},
+		{
+			// Hunks disclosed behind a trailer are not this issue's change, so
+			// a body that is ONLY a trailer measured nothing in scope.
+			name: "content behind a trailer only",
+			body: outOfScopeMarker + " their hunks follow (DKT-86) ===\n" + diffBodyOf(2, 0),
+			want: DiffFacts{Empty: true},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := measureDiff(tc.body)
+			if got != tc.want {
+				t.Errorf("measureDiff = %+v, want %+v", got, tc.want)
+			}
+			if ledger := diffRecordsNoChange(inScopePortion(tc.body)); got.Empty != ledger {
+				t.Errorf("measureDiff.Empty = %v but diffRecordsNoChange over the "+
+					"in-scope portion = %v — the two readers of one body disagree "+
+					"about whether it holds a change", got.Empty, ledger)
+			}
+		})
+	}
+}
+
+// TestMeasureDiffHeaderCollision is DKT-2550: `--- `/`+++ ` are file headers
+// only between a block's `diff --git ` line and its first `@@`. Inside a hunk
+// they are content — a removed `-- banner`, an added `++x` — and dropping them
+// under-sized every change that touched such a line.
+func TestMeasureDiffHeaderCollision(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want DiffFacts
+	}{
+		{
+			name: "hunk lines with header prefixes are content",
+			body: "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n" +
+				"-plain\n--- banner\n+++x\n+other\n",
+			want: DiffFacts{Lines: 4, Files: 1},
+		},
+		{
+			// The second block is `diff.noprefix` style for a new file, whose
+			// headers do not carry the `a/`/`b/` spellings a narrower match
+			// would key on.
+			name: "genuine headers are still excluded",
+			body: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-one\n+two\n" +
+				"diff --git a/f b/f\nnew file mode 100644\n--- /dev/null\n+++ f\n" +
+				"@@ -0,0 +1,2 @@\n+three\n+four\n",
+			want: DiffFacts{Lines: 4, Files: 2},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := measureDiff(tc.body); got != tc.want {
+				t.Errorf("measureDiff = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
