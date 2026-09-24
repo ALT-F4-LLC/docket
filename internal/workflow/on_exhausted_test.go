@@ -79,6 +79,54 @@ func TestOnExhaustedVocabulary(t *testing.T) {
 			t.Errorf("the refusal must carry a V-rule id, got %q", err)
 		}
 	})
+
+	// The remaining V41 refusals, each reached by one edit to the parsed
+	// definition and identified by its own message.
+	for _, tc := range []struct {
+		name, target string
+		edit         func(def *Definition)
+		want         string
+	}{
+		{
+			name: "rejects a step that cannot route fix-loop", target: OnFailWaitingHuman,
+			edit: func(def *Definition) { StepByName(def, "drain").OnExhausted = OnFailWaitingHuman },
+			want: "is only valid on a step that routes",
+		},
+		{
+			name: "rejects a missing max_fix_loops", target: OnFailWaitingHuman,
+			edit: func(def *Definition) { StepByName(def, "check").MaxFixLoops = nil },
+			want: "requires a positive `max_fix_loops`",
+		},
+		{
+			name: "rejects a step that is neither vote nor executor", target: "drain",
+			edit: func(def *Definition) {
+				drain := StepByName(def, "drain")
+				drain.Executor, drain.Type, drain.OnFail = "", TypeHuman, OnFailAbandonIssue
+			},
+			want: "neither a `type=\"vote\"` step nor an executor",
+		},
+		{
+			name: "rejects a step not ordered after the router", target: "drain",
+			edit: func(def *Definition) { StepByName(def, "drain").After = nil },
+			want: "whose `after` does not include",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def := parseOnExhausted(t, tc.target)
+			tc.edit(def)
+			err := Validate(def)
+			var werr *Error
+			if !asWorkflowError(err, &werr) {
+				t.Fatalf("want a *workflow.Error, got %v", err)
+			}
+			if werr.Rule != "V41" || werr.Field != "on_exhausted" {
+				t.Errorf("Rule, Field = %q, %q, want V41, on_exhausted (%v)", werr.Rule, werr.Field, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal must say %q, got %q", tc.want, err)
+			}
+		})
+	}
 }
 
 // interposedOnExhausted is the interposed target an accepted value implies: a
