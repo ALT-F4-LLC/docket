@@ -35,6 +35,7 @@ var RuleIDs = []string{
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 	"V40", "V40a", "V40b", "V40c", "V41",
 	"V42", "V43", "V44",
+	"V45", "V46",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -1345,6 +1346,16 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 			}
 		}
 
+		pred, err := ParsePredicate(step.Threshold[routing])
+		if err != nil {
+			// Unreachable: V21's shape check above admits exactly what
+			// ParsePredicate parses. Kept so a grammar drift fails loudly.
+			return &Error{
+				Rule: "V21", Step: step.Name, Field: "threshold",
+				Message: fmt.Sprintf("step %q: %v", step.Name, err),
+			}
+		}
+
 		// V36 (DKT-545): a `type="vote"` step's threshold is evaluated over
 		// the tally's CAST SET after an APPROVED tally, not over recorded
 		// payloads, and each constraint below refuses a declaration that
@@ -1373,15 +1384,6 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 						step.Name, routing, quotedList(thresholdRoutings)),
 				}
 			}
-			pred, err := ParsePredicate(step.Threshold[routing])
-			if err != nil {
-				// Unreachable: V21's shape check above admits exactly what
-				// ParsePredicate parses. Kept so a grammar drift fails loudly.
-				return &Error{
-					Rule: "V36", Step: step.Name, Field: "threshold",
-					Message: fmt.Sprintf("step %q: %v", step.Name, err),
-				}
-			}
 			if pred.Ordered() {
 				return &Error{
 					Rule: "V36", Step: step.Name, Field: "threshold",
@@ -1404,6 +1406,72 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 						step.Name, step.Threshold[routing], pred.Field,
 						quotedList(VoteCastFields)),
 				}
+			}
+		}
+
+		if err := validateDiffPredicate(step, pred); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateDiffPredicate is V45 and V46 (DKT-2518): the reserved `diff.*`
+// family is the engine's measurement of the change a step recorded, so a
+// predicate over it must be declared where a measurement exists and compare
+// against a literal the measurement can be compared to.
+//
+// Both are decisions about bytes and belong in Validate rather than beside the
+// schema rules: no schema declares these fields (that is what "reserved"
+// means), so a step with no `payload` — `implement`'s own shape — would
+// otherwise take the V21d skip and reach the engine with a predicate that can
+// never mean anything. The engine already refuses the same shapes at record
+// time (evaluateDiff); refusing here moves the refusal from a parked run to the
+// author's terminal.
+func validateDiffPredicate(step *Step, pred Predicate) error {
+	if !IsDiffField(pred.Field) {
+		return nil
+	}
+
+	// V45: the measurement exists exactly for a step that HOLDS THE TREE — an
+	// executor step that does not declare `holds_tree = false`. An action,
+	// type, or fanout step changes no tree and records no `issue.diff`, and a
+	// non-holding executor step records none either, so on any of them the
+	// facts are nil and the predicate is an undeclared field that silently
+	// never matches (V36's reasoning for casts, applied to the measurement).
+	// This keys on the engine's evaluation condition, not on a `class` value,
+	// because that condition is what decides whether facts exist.
+	holds := step.StepClass() == ClassExecutor &&
+		(step.HoldsTree == nil || *step.HoldsTree)
+	if !holds {
+		return &Error{
+			Rule: "V45", Step: step.Name, Field: "threshold",
+			Message: fmt.Sprintf(
+				"step %q: `threshold` predicate %q addresses reserved field %q, "+
+					"which is the engine's measurement of the change a step "+
+					"recorded — it is defined only on a tree-holding executor "+
+					"step (one that does not declare `holds_tree = false`); an "+
+					"action, type, fanout, or non-holding step records no "+
+					"`issue.diff` and the predicate would never match",
+				step.Name, pred.Source, pred.Field),
+		}
+	}
+
+	// V46: `diff.lines` and `diff.files` are counts, compared numerically, so
+	// an ordered comparison needs an integer to compare against. The engine
+	// knows the order perfectly here (21 > 20 needs no schema); a literal that
+	// is not a number is a declaration the comparison cannot evaluate.
+	if pred.Ordered() && pred.Field != DiffFieldEmpty {
+		if _, err := strconv.Atoi(pred.Literal); err != nil {
+			return &Error{
+				Rule: "V46", Step: step.Name, Field: "threshold",
+				Message: fmt.Sprintf(
+					"step %q: `threshold` predicate %q compares reserved field %q "+
+						"under the ordered operator %q against %q, which is not an "+
+						"integer — %s is a count the engine measured and orders "+
+						"numerically, so the literal must be one",
+					step.Name, pred.Source, pred.Field, pred.Op, pred.Literal,
+					pred.Field),
 			}
 		}
 	}

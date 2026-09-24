@@ -1749,6 +1749,203 @@ reviews = "a"
 `,
 		wants: []string{`"a"`, "`reviews`", `type="vote"`},
 	},
+	{
+		// V45 (DKT-2518): the reserved `diff.*` facts exist only for a step
+		// that holds the tree, and an executor step declaring
+		// `holds_tree = false` records no `issue.diff` to measure.
+		rule: "V45", name: "diff.* on an executor step that does not hold the tree",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+holds_tree = false
+threshold = { "fix-loop" = "any(diff.lines > 20)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		wants: []string{`"a"`, "diff.lines", "tree-holding"},
+	},
+	{
+		// V45's other shape: an action step changes no tree either.
+		rule: "V45", name: "diff.* on an action step",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "up"
+executor = "x"
+emits = "f"
+[[step]]
+name = "a"
+after = ["up"]
+action = "aggregate"
+inputs = ["up.f"]
+payload = "risk-report@1"
+params = { field = "risk", method = "median", output = "k" }
+threshold = { "fix-loop" = "any(diff.files >= 1)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		schemas: registeredRisk(),
+		wants:   []string{`"a"`, "diff.files", "tree-holding"},
+	},
+	{
+		// The shape the family exists for: `implement` declares no payload,
+		// holds the tree, and routes on the size of the change it recorded.
+		rule: "V45", name: "a well-formed diff.* predicate on a tree-holding executor step registers clean",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(diff.lines > 20)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+	},
+	{
+		// V46 (DKT-2518): `diff.lines` is a count, so an ordered comparison
+		// against a word is a declaration the engine cannot evaluate.
+		rule: "V46", name: "a non-numeric literal under an ordered operator on diff.lines",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(diff.lines > twenty)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		wants: []string{`"a"`, "twenty", ">"},
+	},
+	{
+		rule: "V46", name: "a non-numeric literal under an ordered operator on diff.files",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "all(diff.files <= many)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		wants: []string{`"a"`, "many", "<="},
+	},
+	{
+		// DKT-2551: the reserved family is by design never a payload field,
+		// so a payload-declaring step's `diff.*` predicate is not a V21a
+		// question — the schema cannot declare it and must not be asked to.
+		rule: "V21a", name: "diff.lines on a payload-declaring step is not a schema question",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+threshold = { "fix-loop" = "any(diff.lines > 20)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		schemas: registeredRisk(),
+	},
+	{
+		rule: "V21a", name: "diff.files on a payload-declaring step is not a schema question",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+threshold = { "fix-loop" = "any(diff.files >= 3)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		schemas: registeredRisk(),
+	},
+	{
+		rule: "V21a", name: "diff.empty on a payload-declaring step is not a schema question",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+threshold = { "fix-loop" = "any(diff.empty == true)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		schemas: registeredRisk(),
+	},
+	{
+		// The exemption is by exact name: a lookalike is an ordinary
+		// undeclared field, and V21a refuses it as it always did.
+		rule: "V21a", name: "a diff.* lookalike on a payload-declaring step is still undeclared",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+threshold = { "fix-loop" = "any(diff.bogus > 1)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		schemas: registeredRisk(),
+		wants:   []string{`"a"`, "diff.bogus", "risk-report@1", "does not declare"},
+	},
 }
 
 // closedRiskSchema is riskSchema with `additionalProperties: false` — the exact

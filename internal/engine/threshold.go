@@ -64,10 +64,15 @@ const RoutingPass = "pass"
 // know that 21 > 20. `diff.lines` and `diff.files` are counts the engine itself
 // computed, compared numerically, so there is no order to guess and nothing to
 // park on.
+//
+// The names are the workflow package's (DKT-2518, DKT-2551): the validator
+// decides at register time where a `diff.*` predicate may appear and what it
+// may compare against, and this package imports that one, so the vocabulary
+// lives there and is read here — one spelling, as VoteCastFields is.
 const (
-	DiffFieldLines = "diff.lines"
-	DiffFieldFiles = "diff.files"
-	DiffFieldEmpty = "diff.empty"
+	DiffFieldLines = workflow.DiffFieldLines
+	DiffFieldFiles = workflow.DiffFieldFiles
+	DiffFieldEmpty = workflow.DiffFieldEmpty
 )
 
 // DiffFacts is the engine's measurement of one step's recorded change, the

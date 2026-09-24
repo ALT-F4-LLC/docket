@@ -398,6 +398,18 @@ func validateStepThresholds(step *Step, registered *Registered) error {
 			}
 		}
 
+		// The reserved `diff.*` family is the engine's own measurement and is
+		// by design never a payload field (DKT-2551): no schema can declare
+		// it, so V21a would refuse it on every payload-declaring step and its
+		// message would tell the author to add `diff.lines` to a schema — the
+		// one thing the design forbids. Its placement and literal are V45 and
+		// V46's, decided in Validate; here it is simply not a schema question.
+		// The match is by exact name (IsDiffField), so `diff.bogus` stays an
+		// undeclared field V21a refuses.
+		if IsDiffField(predicate.Field) {
+			continue
+		}
+
 		field, declared := registered.Field(predicate.Field)
 		// V21a: the field exists as a top-level property of the item schema.
 		if !declared {
