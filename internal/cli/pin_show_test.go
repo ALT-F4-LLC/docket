@@ -2,6 +2,7 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,6 +118,40 @@ func TestPinShowPrintsPinnedContent(t *testing.T) {
 		if got := workflow.SHA256(buf.Bytes()); got != pinnedHashOf(t, conn, runRef) {
 			t.Errorf("printed bytes hash to %q, want the pin's %q",
 				got, pinnedHashOf(t, conn, runRef))
+		}
+	})
+
+	t.Run("--json wraps the pinned bytes with the run and path", func(t *testing.T) {
+		conn, _, runRef := pinShowFixture(t)
+
+		w, buf := bufWriter(true)
+		if err := runPinShow(cmdWithDB(conn), runRef, "policy.toml", w); err != nil {
+			t.Fatalf("pin show --json refuses a pinned file: %v", err)
+		}
+		// THE KEYS ARE SPELLED HERE, not borrowed from pinShowPayload: decoding
+		// into the production type would follow a renamed tag and pass.
+		var envelope struct {
+			OK   bool `json:"ok"`
+			Data struct {
+				Run  string `json:"run"`
+				Path string `json:"path"`
+				Body string `json:"body"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &envelope),
+			"decoding the envelope: %s", buf.String())
+		if !envelope.OK {
+			t.Fatalf("envelope is not ok: %s", buf.String())
+		}
+		if envelope.Data.Body != pinShowPolicy {
+			t.Errorf("data.body = %q, want exactly the pinned policy bytes %q",
+				envelope.Data.Body, pinShowPolicy)
+		}
+		if envelope.Data.Run != runRef {
+			t.Errorf("data.run = %q, want %q", envelope.Data.Run, runRef)
+		}
+		if envelope.Data.Path != "policy.toml" {
+			t.Errorf("data.path = %q, want %q", envelope.Data.Path, "policy.toml")
 		}
 	})
 
