@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // DKT-587: RUN-34 (security-load-bearing@10, max_fix_loops = 2) showed three
@@ -154,6 +156,27 @@ loop = true
 serves = ["check"]
 after_loop = "check"
 max_fix_loops = 2
+`
+
+// dkt587TwoClusterSrc adds a second, unbounded cluster beside
+// dkt587ClusterSrc's: `other` routes into its own `serves`-scoped body. A
+// round of `other` takes one of the issue's ordinals without adding to
+// `check`'s cluster, so the issue's count and the cluster's rounds diverge.
+const dkt587TwoClusterSrc = dkt587ClusterSrc + `
+[[step]]
+name = "other"
+after = []
+executor = "other"
+emits = "report"
+threshold = { "fix-loop" = "any(status == unmet)" }
+
+[[step]]
+name = "other-fix"
+executor = "fix"
+emits = "report"
+loop = true
+serves = ["other"]
+after_loop = "other"
 `
 
 func TestThresholdEntriesBoundAtExactlyMaxFixLoops(t *testing.T) {
@@ -312,42 +335,116 @@ func TestBothRoutingSourcesShareOneCounter(t *testing.T) {
 // `max_fix_loops` declared on a `serves`-scoped body — to the same answer:
 // bound 2 admits rounds 1 and 2 and refuses round 3, with no issue-level
 // ceiling in the workflow at all.
+//
+// The refusing row records the cluster's rounds, not the issue's count. The
+// two agree whenever every ordinal was this cluster's, so the second case
+// spends ordinal 1 on another cluster first: at the refusal the issue's count
+// is 3 and the cluster's rounds are 2.
 func TestClusterScopedBoundAdmitsExactlyItsRounds(t *testing.T) {
-	conn := mustDB(t)
-	runID, issue := activateInterposed(t, conn, dkt587ClusterSrc)
-	e := testEngine()
+	t.Run("alone", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn, dkt587ClusterSrc)
+		e := testEngine()
 
-	claimAndComplete(t, conn, e, "check@0", roundReport(0), unmetPayload)
-	if !stepExists(t, conn, "fix@1") {
-		t.Fatal("fix@1 was not instantiated by the cluster's first round")
-	}
+		claimAndComplete(t, conn, e, "check@0", roundReport(0), unmetPayload)
+		if !stepExists(t, conn, "fix@1") {
+			t.Fatal("fix@1 was not instantiated by the cluster's first round")
+		}
 
-	driveFixtureRound(t, 1)
-	claimAndComplete(t, conn, e, "fix@1", "the fix", "")
-	claimAndComplete(t, conn, e, "check@1", roundReport(1), unmetPayload)
-	if !stepExists(t, conn, "fix@2") {
-		t.Fatal("fix@2 was not instantiated by the cluster's second round")
-	}
-	if got := loopCount(t, conn, runID, issue); got != 2 {
-		t.Fatalf("loop_count = %d after two cluster rounds, want 2", got)
-	}
+		driveFixtureRound(t, 1)
+		claimAndComplete(t, conn, e, "fix@1", "the fix", "")
+		claimAndComplete(t, conn, e, "check@1", roundReport(1), unmetPayload)
+		if !stepExists(t, conn, "fix@2") {
+			t.Fatal("fix@2 was not instantiated by the cluster's second round")
+		}
+		if got := loopCount(t, conn, runID, issue); got != 2 {
+			t.Fatalf("loop_count = %d after two cluster rounds, want 2", got)
+		}
 
-	driveFixtureRound(t, 2)
-	claimAndComplete(t, conn, e, "fix@2", "the second fix", "")
-	claimAndComplete(t, conn, e, "check@2", roundReport(2), unmetPayload)
+		driveFixtureRound(t, 2)
+		claimAndComplete(t, conn, e, "fix@2", "the second fix", "")
+		claimAndComplete(t, conn, e, "check@2", roundReport(2), unmetPayload)
 
-	if stepExists(t, conn, "fix@3") {
-		t.Error("fix@3 exists; a cluster bound of 2 must refuse its third round")
+		if stepExists(t, conn, "fix@3") {
+			t.Error("fix@3 exists; a cluster bound of 2 must refuse its third round")
+		}
+		if got := stepStatus(t, conn, "check@2"); got != db.StepWaitingHuman {
+			t.Errorf("check@2 = %q after the cluster bound, want %q", got, db.StepWaitingHuman)
+		}
+		if got := loopCount(t, conn, runID, issue); got != 2 {
+			t.Errorf("loop_count = %d after the cluster refusal, want 2", got)
+		}
+		raw := stepRoutingRaw(t, conn, "check@2")
+		if !strings.Contains(raw, "cluster") || !strings.Contains(raw, "max_fix_loops = 2") {
+			t.Errorf("check@2 routing = %q, want it to name the cluster's bound of 2", raw)
+		}
+		assertClusterLoopHistory(t, conn, "check@2", 2)
+	})
+
+	t.Run("after another cluster's round", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn, dkt587TwoClusterSrc)
+		e := testEngine()
+
+		// Ordinal 1 goes to `other`'s cluster, whose round moves the tree and
+		// passes. Left unrun, ordinal 1 would read as a round that changed
+		// nothing, and the non-convergence guard would park check@0's entry.
+		claimAndComplete(t, conn, e, "other@0", roundReport(0), unmetPayload)
+		if !stepExists(t, conn, "other-fix@1") {
+			t.Fatal("other-fix@1 was not instantiated by the other cluster's round")
+		}
+		driveFixtureRound(t, 1)
+		claimAndComplete(t, conn, e, "other-fix@1", "the other fix", "")
+		claimAndComplete(t, conn, e, "other@1", roundReport(1), metPayload)
+
+		// `check`'s cluster runs its two rounds at ordinals 2 and 3.
+		claimAndComplete(t, conn, e, "check@0", roundReport(0), unmetPayload)
+		if !stepExists(t, conn, "fix@2") {
+			t.Fatal("fix@2 was not instantiated by the cluster's first round")
+		}
+		driveFixtureRound(t, 2)
+		claimAndComplete(t, conn, e, "fix@2", "the fix", "")
+		claimAndComplete(t, conn, e, "check@2", roundReport(2), unmetPayload)
+		if !stepExists(t, conn, "fix@3") {
+			t.Fatal("fix@3 was not instantiated by the cluster's second round")
+		}
+
+		driveFixtureRound(t, 3)
+		claimAndComplete(t, conn, e, "fix@3", "the second fix", "")
+		claimAndComplete(t, conn, e, "check@3", roundReport(3), unmetPayload)
+
+		if stepExists(t, conn, "fix@4") {
+			t.Error("fix@4 exists; a cluster bound of 2 must refuse its third round")
+		}
+		if got := stepStatus(t, conn, "check@3"); got != db.StepWaitingHuman {
+			t.Errorf("check@3 = %q after the cluster bound, want %q", got, db.StepWaitingHuman)
+		}
+		if got := loopCount(t, conn, runID, issue); got != 3 {
+			t.Errorf("loop_count = %d after the cluster refusal, want 3", got)
+		}
+		raw := stepRoutingRaw(t, conn, "check@3")
+		if !strings.Contains(raw, "cluster") || !strings.Contains(raw, "max_fix_loops = 2") {
+			t.Errorf("check@3 routing = %q, want it to name the cluster's bound of 2", raw)
+		}
+		assertClusterLoopHistory(t, conn, "check@3", 2)
+	})
+}
+
+// assertClusterLoopHistory pins the loop history a cluster-bound refusal
+// writes to the refusing step: the cluster's rounds, the refusing instance as
+// the trigger, and the fix-loop verdict.
+func assertClusterLoopHistory(t *testing.T, conn *sql.DB, instance string, rounds int) {
+	t.Helper()
+	step := mustStep(t, conn, instance)
+	if step.LoopRoundsRun != rounds {
+		t.Errorf("loop_rounds_run = %d, want %d", step.LoopRoundsRun, rounds)
 	}
-	if got := stepStatus(t, conn, "check@2"); got != db.StepWaitingHuman {
-		t.Errorf("check@2 = %q after the cluster bound, want %q", got, db.StepWaitingHuman)
+	if step.LoopTriggerStep != instance {
+		t.Errorf("loop_trigger_step = %q, want %q", step.LoopTriggerStep, instance)
 	}
-	if got := loopCount(t, conn, runID, issue); got != 2 {
-		t.Errorf("loop_count = %d after the cluster refusal, want 2", got)
-	}
-	raw := stepRoutingRaw(t, conn, "check@2")
-	if !strings.Contains(raw, "cluster") || !strings.Contains(raw, "max_fix_loops = 2") {
-		t.Errorf("check@2 routing = %q, want it to name the cluster's bound of 2", raw)
+	if step.LoopLatestVerdict != workflow.OnFailFixLoop {
+		t.Errorf("loop_latest_verdict = %q, want %q",
+			step.LoopLatestVerdict, workflow.OnFailFixLoop)
 	}
 }
 
