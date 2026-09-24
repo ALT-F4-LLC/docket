@@ -703,6 +703,84 @@ mechanical:
 package-level variable — the same purity discipline as §4.9.2, and what lets
 the table tests run without a database.
 
+### 5.1 The reserved `diff.*` family *(added 2026-09-24, DKT-2063, DKT-2518, DKT-2548–DKT-2551)*
+
+A write step's threshold can route on the SIZE of the change the step recorded,
+which no payload predicate can reach: `implement` emits a markdown
+change-summary with no payload at all, and the facts a change track wants —
+how big was the change, was there one — exist only in the ledger. Three
+reserved field names address them. They are the engine's own measurement, never
+a payload field, and no schema declares them.
+
+| Field | Value | Measured as |
+|---|---|---|
+| `diff.lines` | integer | added PLUS removed content lines |
+| `diff.files` | integer | files the diff touches (`diff --git` headers) |
+| `diff.empty` | boolean | whether the recorded body holds a change |
+
+**Evaluated at record time, over the step's recorded `issue.diff` round
+record.** The measurement is taken in the completion transaction of a
+tree-holding executor step, over the in-scope cumulative diff that completion
+recorded (the object a review is sized against; the round-delta and
+out-of-scope trailers are not counted, since neither is this issue's own
+change). Routing then applies the ordinary interposed-target semantics: the
+matched routing's step is released and the unrouted siblings skip in the same
+transaction, exactly as a payload predicate would route. The aggregation is NOT
+applied — `diff.lines` is one number for the step, not a column over a set, so
+`any(diff.lines > 20)` and `all(diff.lines > 20)` are the same assertion.
+`diff.lines` and `diff.files` compare numerically without an `ordered_enum`:
+T3 exists because core does not know whether `high` outranks `medium`; it does
+know that 21 > 20, so there is no order to guess and nothing to park on.
+
+Two measurement rules keep the facts honest about the object review reads:
+
+- `--- `/`+++ ` lines are file headers only between a block's `diff --git`
+  line and its first `@@` hunk header; inside a hunk they are content and
+  count toward `diff.lines` (DKT-2550).
+- `diff.empty` agrees with the ledger's own record-or-drop test
+  (`diffRecordsNoChange`) over the same in-scope portion, so a rename-, mode-,
+  or binary-only diff the ledger keeps as a real change reads
+  `diff.empty == false` even though it carries no `+`/`-` line (DKT-2549).
+- When an `--as retry` re-execution computes an empty diff and the DKT-259
+  guard drops the re-record because the issue already holds a non-empty
+  `issue.diff`, the facts are measured from THAT latest recorded non-empty
+  body — what `issue.diff` resolves to and a review would read — not from the
+  empty body the retry computed (DKT-2548).
+
+**The absent-record rule.** A tree-holding step whose completion recorded no
+change evaluates as `diff.empty == true`, `diff.lines == 0`, and
+`diff.files == 0` — a decided answer, not an unknown field. `any(diff.empty ==
+false)` is therefore DECIDED false for such a step and the review it keys is
+skipped (cascading through `after_fired`), rather than falling through to the
+no-such-field path. On a step that holds no tree there is no measurement, and
+`diff.lines` is an ordinary undeclared field evaluated exactly as any other.
+
+**Register-time lint** (DKT-2518), decided in `Validate` on bytes alone, because
+a step with no `payload` would otherwise take the V21d skip and reach the
+engine with a predicate that can never mean anything:
+
+1. **V45 — placement.** A `diff.*` predicate on a step that does not hold the
+   tree — an `action`, `type`, or `fanout` step, or an executor step declaring
+   `holds_tree = false` — is refused, naming the step and the tree-holding
+   requirement. The rule keys on the engine's evaluation condition (a
+   measurement exists exactly for a tree-holding executor step), not on a
+   `class` value: on any other step the facts are nil and the predicate would
+   silently never match.
+2. **V46 — literal.** A non-numeric literal under an ordered operator (`<`,
+   `<=`, `>`, `>=`) on `diff.lines` or `diff.files` is refused under its own
+   id, naming the literal and the operator: the counts are ordered
+   numerically, so the literal must be an integer.
+
+The engine still refuses the same shapes at record time (`evaluateDiff`); the
+lint moves the refusal from a parked run to the author's terminal. **V21a does
+not apply** to the three names (DKT-2551): on a payload-declaring step the
+cross-validation skips exactly `diff.lines`, `diff.files`, and `diff.empty` by
+name — a lookalike such as `diff.bogus` is an ordinary undeclared field V21a
+refuses — because the alternative told an author to add `diff.lines` to a
+payload schema, which the design forbids. The names are the workflow package's
+(`workflow.DiffFields`), read by the engine, so validator and evaluator share
+one spelling as they do for `VoteCastFields`.
+
 ## 6. The real `ActionRunner`
 
 `internal/engine/action.go`'s seam is honored: `NewEngine` swaps
