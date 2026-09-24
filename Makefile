@@ -14,7 +14,7 @@
 # the binary build is `make bin`.
 
 .PHONY: bin test lint vet install clean demo \
-        build tests self-hygiene doc-validate citation-check secret-scan \
+        build tests qa-test self-hygiene doc-validate citation-check secret-scan \
         vuln-scan sdet-abuse tdd-preflight reserved-name-check \
         render-verify copy-verify ac-commands
 
@@ -67,6 +67,8 @@ build:
 
 tests:
 	@bash $(QA)/tests.sh
+
+qa-test: tests
 
 self-hygiene:
 	@bash $(QA)/self-hygiene.sh
