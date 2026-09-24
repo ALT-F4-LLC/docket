@@ -753,12 +753,19 @@ func RoutingRecord(routing, reason string) string {
 // this way, for this reason — and a status without its routing is a step whose
 // disposition cannot be explained.
 //
-// `reason` is the caller's explanation for that routing. It is appended to the
-// routing record, as it always was, AND it lands in `park_reason` when — and
-// only when — this write parks the step. That condition lives in the SQL rather
-// than at the eight call sites so no later caller can park a step without
-// recording why, and so a resolution, which writes a different status, cannot
-// overwrite the question it is answering (DKT-1898).
+// `reason` is the explanation for that routing. It is appended to the routing
+// record, as it always was, AND it lands in `park_reason` when — and only when —
+// this write parks the step. That condition lives in the SQL rather than at the
+// call sites so no later caller can park a step without recording why, and so a
+// resolution, which writes a different status, cannot overwrite the question it
+// is answering (DKT-1898).
+//
+// `park_reason` is documented everywhere it is read as the ENGINE's own text,
+// so a caller may use this form only where `reason` IS the engine's — a gate
+// verdict, a tally, a loop bound's sentence. A site whose routing reason is a
+// person's words (a worker's `--note`, a reject note) parks through
+// SetStepRoutingWithParkReasonTx instead, which keeps those words in the
+// routing record and takes the engine's park text separately.
 //
 // `class` is that same park's ROUTABLE form (DKT-1900), written by the same
 // statement under the same condition, so the two halves of one fact cannot
@@ -775,6 +782,28 @@ func RoutingRecord(routing, reason string) string {
 func SetStepRoutingTx(
 	tx *sql.Tx, id int, routing, reason, status string, class ParkClass, nowMS int64,
 ) error {
+	return SetStepRoutingWithParkReasonTx(
+		tx, id, routing, reason, status, class, reason, nowMS)
+}
+
+// SetStepRoutingWithParkReasonTx is SetStepRoutingTx with the park's prose
+// supplied apart from the routing's reason.
+//
+// The two are one string at most park sites, because both are the engine's.
+// They come apart where the routing reason is a person's words: the
+// attempts-exhausted park routes on the failing worker's `--note`, and a
+// refused fix loop on a rejection routes on the operator's reject note. Those
+// words belong in the routing record and the event that carries the decision,
+// where they always were; `park_reason` is the engine's account of why the row
+// is waiting, and this form is how such a site says both without folding one
+// into the other.
+//
+// `parkReason` is written only when this write parks the step, under the same
+// condition as `class`, and is otherwise ignored.
+func SetStepRoutingWithParkReasonTx(
+	tx *sql.Tx, id int, routing, reason, status string, class ParkClass,
+	parkReason string, nowMS int64,
+) error {
 	if status == StepWaitingHuman && class == "" {
 		return fmt.Errorf(
 			"recording step routing: parking step %d without a park class", id)
@@ -786,7 +815,7 @@ func SetStepRoutingTx(
 		        row_version = row_version + 1
 		  WHERE id = ?`,
 		nullable(RoutingRecord(routing, reason)), status, nowMS, nowMS,
-		status, StepWaitingHuman, reason,
+		status, StepWaitingHuman, parkReason,
 		status, StepWaitingHuman, string(class), id,
 	)
 	if err != nil {

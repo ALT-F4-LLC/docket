@@ -122,11 +122,12 @@ on_fail = "waiting-human"
 // loopBoundSrc rejects through a human gate whose `on_fail` is `fix-loop` at a
 // bound of zero, so the entry is refused and the gate parks instead.
 //
-// The REJECTION CARRIES AN OPERATOR NOTE, and that is deliberate: human.go
-// composes the park's reason as `<note>; <bound reason>`, so the recorded text
-// is the operator's words followed by the engine's. A classifier that read the
-// reason would have to find the bound's phrasing inside a sentence an operator
-// controls; this one reads LoopOutcome.Entered and never sees the string.
+// The REJECTION CARRIES AN OPERATOR NOTE, and that is deliberate: the note
+// lands in the routing record as `waiting-human: <note>; <bound reason>`, so a
+// classifier that read the routing string would have to find the bound's
+// phrasing inside a sentence an operator controls; this one reads
+// LoopOutcome.Entered and never sees the string. The park's own reason is the
+// engine's, apart from the note (DKT-2529).
 const loopBoundSrc = `
 [pipeline]
 name = "park-class-loop-bound"
@@ -355,8 +356,9 @@ func TestParkClassIsDerivedFromEngineFacts(t *testing.T) {
 
 	// The mutant clause: the class comes from the ORDINAL against the pinned
 	// `max_fix_loops`, via LoopOutcome.Entered, not from the reason's wording.
-	// The operator note below is prepended to the bound's own sentence, so a
-	// classifier keyed on the reason text reads an operator-controlled string.
+	// The operator note below lands in the routing record ahead of the bound's
+	// own sentence, so a classifier keyed on that text reads an
+	// operator-controlled string.
 	t.Run(string(db.ParkClassLoopBound), func(t *testing.T) {
 		conn := mustDB(t)
 		runID := activateSrc(t, conn, loopBoundSrc, "loop-bound.toml")
@@ -381,9 +383,8 @@ func TestParkClassIsDerivedFromEngineFacts(t *testing.T) {
 
 		assertParkClass(t, conn, park{runID, gateID}, db.ParkClassLoopBound)
 
-		// The reason really does lead with the operator's words: a test that
-		// passed by matching the engine's phrasing would have to reach past
-		// them, and this pins that the two are not the same string.
+		// The reason is the engine's sentence about the bound, not the bare
+		// class word: this pins that the two are not the same string.
 		view, err := LoadStepView(conn, gateID, nowMS)
 		testsupport.Must(t, err, "LoadStepView: %v", err)
 		if view.ParkReason == "" {

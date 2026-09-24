@@ -305,10 +305,19 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	status := statusForRouting(routing)
 
 	// V13 forbids a human gate's `on_fail` from being `waiting-human`, so the
-	// only way this write parks is a rejection whose fix loop was refused.
-	class, _ := loopBoundClass(loop)
+	// only way this write parks is a rejection whose fix loop was refused —
+	// and that park's reason is the ENGINE's (DKT-2529). The operator's
+	// note stays in the routing record and on the step-rejected event; it is
+	// not the reason the row is waiting, the refused bound is.
+	class, bound := loopBoundClass(loop)
+	parkReason := ""
+	if bound {
+		parkReason = loopBoundParkReason(loop)
+	}
 
-	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, class, nowMS); err != nil {
+	if err := db.SetStepRoutingWithParkReasonTx(
+		tx, step.ID, routing, note, status, class, parkReason, nowMS,
+	); err != nil {
 		return err
 	}
 	// The note as before, plus who decided (DKT-2450) and under what authority
@@ -1142,14 +1151,35 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	}
 	status := statusForRouting(routing)
 
+	// The budget is what ended this step; a refused loop entry is the narrower
+	// cause when the exhaustion's `on_fail` tried to buy a round and could not.
+	//
+	// The park's reason is the ENGINE's account of that cause (DKT-2529),
+	// never the worker's `--note`: the note stays in the routing record, on
+	// the step-failed event, and in the trail comment, where it always was,
+	// and an empty note no longer leaves a parked row with nothing to say.
+	class := db.ParkClassAttemptsExhausted
+	parkReason := attemptsExhaustedParkReason(attempt, max)
+	if bound, ok := loopBoundClass(loop); ok {
+		class = bound
+		parkReason = loopBoundParkReason(loop)
+	}
+
 	// An exhausted step whose `on_fail` names a triage panel suspends for it,
 	// exactly as a gate failure does (DKT-1901) — both reach statusForRouting,
 	// whose step-name default would otherwise record this failure as `done`.
-	routing, note, status, err = suspendForPanel(
+	// A panel that has already ruled on this ordinal parks instead, and its
+	// sentence is the engine's: it names the cause more exactly than the
+	// budget does, so it becomes the park's reason under the budget's class.
+	panelRouting, panelReason, panelStatus, err := suspendForPanel(
 		tx, step, spec, routing, note, status, nowMS)
 	if err != nil {
 		return err
 	}
+	if panelRouting != routing {
+		parkReason = fmt.Sprintf("%s: %s", class, panelReason)
+	}
+	routing, note, status = panelRouting, panelReason, panelStatus
 
 	if err := db.RetireStepTokenTx(tx, step.ID); err != nil {
 		return err
@@ -1160,13 +1190,9 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
-	// The budget is what ended this step; a refused loop entry is the narrower
-	// cause when the exhaustion's `on_fail` tried to buy a round and could not.
-	class := db.ParkClassAttemptsExhausted
-	if bound, ok := loopBoundClass(loop); ok {
-		class = bound
-	}
-	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, class, nowMS); err != nil {
+	if err := db.SetStepRoutingWithParkReasonTx(
+		tx, step.ID, routing, note, status, class, parkReason, nowMS,
+	); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
@@ -1211,6 +1237,31 @@ func failureNote(instance, note string, attempt, max int) string {
 		b.WriteString(".")
 	}
 	return b.String()
+}
+
+// attemptsExhaustedParkReason is the engine's `park_reason` for a step that
+// spent its attempt budget (DKT-2529): the park class and the count that ended
+// it, `attempts-exhausted: <attempt> of <max>`.
+//
+// It carries no caller text. The worker's `--note` explains the LAST failure,
+// and it stays where that failure is recorded — the routing record, the
+// step-failed event, the trail comment — while this names why the row is
+// waiting: not one failure, but the budget. The park is reached only through
+// `exhausted`, which requires `max > 0`, so the denominator is always stated.
+func attemptsExhaustedParkReason(attempt, max int) string {
+	return fmt.Sprintf("%s: %d of %d", db.ParkClassAttemptsExhausted, attempt, max)
+}
+
+// loopBoundParkReason is the engine's `park_reason` for a step whose fix loop
+// was refused at its bound (DKT-2529): `fix-loop-exhausted: <bound reason>`.
+//
+// The bound reason is already the engine's — `exhausted` composes it from the
+// ordinal and the pinned `max_fix_loops`, naming the way out — so the prefix is
+// what turns a sentence about the loop into the reason the row parked. The
+// note the rejection or failure carried stays in the routing record and on
+// its own event; it is not folded in here.
+func loopBoundParkReason(loop *LoopOutcome) string {
+	return "fix-loop-exhausted: " + loop.Reason
 }
 
 // commit closes the transaction when the preceding step succeeded, so a branch
