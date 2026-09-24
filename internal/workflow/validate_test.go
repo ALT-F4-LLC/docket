@@ -501,6 +501,118 @@ after = ["a"]
 `,
 		wants: []string{`"panel"`, "`on_fail_routes`", `"a"`, "required"},
 	},
+	// V41: `on_exhausted` refuses five ways — one row per refusal,
+	// so a branch that stopped being checked fails its own row.
+	{
+		rule: "V41", name: "on_exhausted on a step that never routes fix-loop",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+on_exhausted = "waiting-human"
+`,
+		wants: []string{`"a"`, "`on_exhausted`", "never routes there"},
+	},
+	{
+		rule: "V41", name: "on_exhausted without a positive max_fix_loops",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "check"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+on_exhausted = "waiting-human"
+[[step]]
+name = "fix"
+executor = "y"
+emits = "k"
+loop = true
+after_loop = "check"
+`,
+		wants: []string{`"check"`, "`max_fix_loops`", "unbounded loop never exhausts"},
+	},
+	{
+		rule: "V41", name: "on_exhausted naming no step in the workflow",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "check"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+max_fix_loops = 2
+on_exhausted = "nobody"
+[[step]]
+name = "fix"
+executor = "y"
+emits = "k"
+loop = true
+after_loop = "check"
+`,
+		wants: []string{`"check"`, "`on_exhausted`", `"nobody"`, "names no step"},
+	},
+	{
+		rule: "V41", name: "on_exhausted naming a step that is neither vote nor executor",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "check"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+max_fix_loops = 2
+on_exhausted = "gate"
+[[step]]
+name = "fix"
+executor = "y"
+emits = "k"
+loop = true
+after_loop = "check"
+[[step]]
+name = "gate"
+type = "human"
+on_fail = "waiting-human"
+after = ["check"]
+`,
+		wants: []string{`"check"`, "`on_exhausted`", `"gate"`, "nor an executor"},
+	},
+	{
+		rule: "V41", name: "on_exhausted naming a step not ordered after it",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "check"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+max_fix_loops = 2
+on_exhausted = "drain"
+[[step]]
+name = "fix"
+executor = "y"
+emits = "k"
+loop = true
+after_loop = "check"
+[[step]]
+name = "drain"
+executor = "z"
+emits = "notes"
+`,
+		wants: []string{`"check"`, "`on_exhausted`", `"drain"`, "ordered behind it"},
+	},
 	{
 		rule: "V13", name: "human step routing rejects to waiting-human",
 		src: `
