@@ -272,3 +272,123 @@ func TestDispatchVerifyNormalizesBump(t *testing.T) {
 			"batch working as scheduled is not a conflict", result, mismatch)
 	}
 }
+
+// bumpDoubleWorkflowSrc refuses one staged row by BOTH rules on its way up,
+// once in each order. Run over two issues whose scopes intersect (`x/**`
+// admitted first, `x/a` second), `a` is the only row outside the write class,
+// and the first issue's placements go:
+//
+//   - `p` takes stage 1's write slot and `q` headroom-bumps to 2, so the second
+//     issue's `a` — scope-refused at 1 and 2 — lands at 3, holding `x/a` there
+//     with the write slot free.
+//   - `s`, leveled to 2 behind `p`, is refused for HEADROOM at 2 (`q`), then
+//     for SCOPE at 3 (`a`), and lands at 4.
+//   - `u`, leveled to 3 behind `q`, is refused for SCOPE at 3 (`a`), then for
+//     HEADROOM at 4 (`s`), and lands at 5.
+//
+// Headroom is tested before scope at each stage, which is why each refusal
+// above is the only one that stage reports.
+const bumpDoubleWorkflowSrc = `
+[pipeline]
+name = "bump-double-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "a"
+executor = "w"
+emits = "change-summary"
+after = []
+
+[[step]]
+name = "p"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = ["a"]
+
+[[step]]
+name = "q"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = ["a"]
+
+[[step]]
+name = "s"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = ["p"]
+
+[[step]]
+name = "u"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = ["q"]
+`
+
+// TestStagedRowsBumpScopeBeatsHeadroom: a row refused by both rules reports
+// `scope` whichever came first. A headroom refusal retires once a slot frees;
+// a scope conflict stays serialized however the cohort empties, so a relay
+// told `headroom` would treat a writer conflict as packing it may ignore.
+func TestStagedRowsBumpScopeBeatsHeadroom(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(bumpDoubleWorkflowSrc), "bump-double.toml")
+	first := createIssue(t, conn, "holds the tree", "a body", "task", nil)
+	second := createIssue(t, conn, "wants the tree", "a body", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, first, `["x/**"]`),
+		"declaring the first scope")
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, second, `["x/a"]`),
+		"declaring the second scope")
+	run := startRun(t, conn, first, second)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	answer, err := testEngine().NextSteps(conn, run.ID, 0, nowMS)
+	testsupport.Must(t, err, "next: %v", err)
+	got := offeredBumps(answer.Steps)
+	firstID, secondID := model.FormatID(first), model.FormatID(second)
+
+	// The two holders every double refusal below depends on: `q` keeps stage
+	// 2's write slot, and the second issue's `a` keeps `x/a` at stage 3.
+	if row := got[firstID+" q@0"]; row.stage != 2 || row.bump != model.BumpHeadroom {
+		t.Fatalf("premise: %s q@0 = %+v, want stage 2 bump %q", firstID, row,
+			model.BumpHeadroom)
+	}
+	if row := got[secondID+" a@0"]; row.stage != 3 || row.bump != model.BumpScope {
+		t.Fatalf("premise: %s a@0 = %+v, want stage 3 bump %q", secondID, row,
+			model.BumpScope)
+	}
+
+	for _, tc := range []struct {
+		name, instance string
+		stage          int
+	}{
+		// Scope at 3, then headroom at 4: a last-refusal-wins guard reports
+		// headroom.
+		{"scope then headroom", "u@0", 5},
+		// Headroom at 2, then scope at 3: a first-refusal-wins guard reports
+		// headroom.
+		{"headroom then scope", "s@0", 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := got[firstID+" "+tc.instance]
+			if row.bump != model.BumpScope {
+				t.Errorf("%s %s bump = %q, want %q — scope beats headroom "+
+					"whichever refused first", firstID, tc.instance, row.bump,
+					model.BumpScope)
+			}
+			if row.stage != tc.stage {
+				t.Errorf("%s %s stage = %d, want %d", firstID, tc.instance,
+					row.stage, tc.stage)
+			}
+		})
+	}
+}
