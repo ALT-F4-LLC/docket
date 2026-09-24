@@ -778,13 +778,15 @@ walks a map without sorting — which is the only realistic way this property br
 | Rule | Behavior |
 |---|---|
 | RA1 | re-activating an `active` run lints again and expands **only** issues with `expanded_at_ms IS NULL` whose predecessors are now satisfied |
-| RA2 | the pin set is **inherited, never recomputed** — a re-activation after a workflow re-register or a pinned file edit uses the original `pins` rows, unchanged |
+| RA2 | existing pins are **inherited, never recomputed** — a re-activation after a workflow re-register or a pinned file edit uses the original `pins` rows, unchanged. Re-activation can **add** a pin for a ref the set never held: a `policy.toml` the config now carries is pinned, and rows still waiting then resolve against it (runs-dispatch §9.4, F15) |
 | RA3 | new issues added to the run since activation are bound and snapshotted at re-activation, and pinned against the **already-pinned** workflow version if one exists for that name |
 | RA4 | refused while a dispatch is open — **vacuously true at S3** (dispatches are S6); the check is written as a seam that queries a not-yet-existing table via a helper returning `false`, so S6 adds a query, not a call site |
 | RA5 | re-activating a `done` or `abandoned` run is `CONFLICT` (exit 4) |
 
 RA2 is the reproducibility guarantee. If re-activation re-pinned, an in-flight run
 would silently adopt an edited workflow — precisely what engine-core §4 forbids.
+Adding a pin the set never held does not break that guarantee for anything already
+pinned, but it does change what waiting rows resolve against, so it is not a no-op.
 
 ## 5.5 Error taxonomy usage (phase 2)
 
