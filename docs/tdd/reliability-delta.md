@@ -1016,6 +1016,38 @@ amendment, not a stage: one additive column with a default, a
 a rewind guard that probes the COLUMN (the v27–v33 form, since v34 adds no
 table and no index).
 
+### AMENDMENT — the span extends to v35 (loop-history facts, 2026-09-23)
+
+**What changed.** v35 adds THREE columns to one table, all on `steps`:
+`loop_rounds_run` (`INTEGER NOT NULL DEFAULT 0`), `loop_trigger_step`
+(`TEXT NOT NULL DEFAULT ''`) and `loop_latest_verdict`
+(`TEXT NOT NULL DEFAULT ''`). Together they are the loop history a fix-loop
+exhaustion leaves on the refusing step: how many rounds ran against the cap,
+the instance whose verdict opened the loop, and the verdict the last round
+ended on. They are three columns rather than one encoded string because a
+reader of a loop-bound park asks each question separately, and the count is an
+integer a router compares against the pinned cap.
+
+**Why it needed a version.** Before v35 these facts existed only in the event
+log, and `events prune` deletes that log for a terminal run. A router reading
+the park, an operator, and `step show` could reconstruct the history only while
+the events survived, and could not reconstruct it at all afterwards. The loop
+refusal writes all three columns in the same transaction as its routing
+decision, so no reader sees an exhaustion whose history has not landed.
+
+**Zero and blank mean the step never exhausted a loop, and nothing else.** The
+defaults are zero and the empty string, and the migration back-fills nothing:
+recovering a historical loop's trigger and last verdict would mean mining a
+prunable event log, and a guessed verdict is worse than an absent one. Every
+pre-v35 row reads as a step that never exhausted a loop, which is what the
+columns can truthfully say about it.
+
+**Why the ratified arithmetic is untouched.** Like v11–v34, v35 is an
+amendment, not a stage: three additive columns with defaults, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMNS (the v27–v34 form, since v35 adds no
+table and no index). No v5–v10 column, table, or count changes.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

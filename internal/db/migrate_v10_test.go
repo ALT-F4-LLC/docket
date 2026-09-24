@@ -92,7 +92,7 @@ func TestMigrateToV10(t *testing.T) {
 // GAPS, because a missing entry turns Migrate's loop into a runtime error on a
 // user's database rather than a build-time failure on ours.
 func TestSchemaSpanIsComplete(t *testing.T) {
-	// The span now ends at v34. v11 through v34 are AMENDMENTS, not stages —
+	// The span now ends at v35. v11 through v35 are AMENDMENTS, not stages —
 	// workflow retirement (DKT-21), the projects dimension (operator request,
 	// 2026-08-09), vote provenance (DKT-71), per-seat vote spend (DKT-95),
 	// artifact revisions (DKT-70), the retry-budget base (DKT-86/DKT-90),
@@ -104,8 +104,9 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// the prior-claim-end marker (DKT-1279), the sealed-ballot flag
 	// (DKT-2447), the conductor capability (DKT-2465), the gate failure
 	// fingerprint (DKT-1796), the manifest extend cursor (DKT-2071), the
-	// park reason (DKT-1898), the park class (DKT-1900), and the issue size
-	// (operator request, 2026-09-16) — each recorded in
+	// park reason (DKT-1898), the park class (DKT-1900), the issue size
+	// (operator request, 2026-09-16), and the loop-history facts
+	// (DKT-2522) — each recorded in
 	// docs/tdd/reliability-delta.md §2 under
 	// its own heading, with the reason it needed a version and the argument
 	// that it leaves the ratified v5-v10 arithmetic untouched.
@@ -115,10 +116,10 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// this test firing is exactly how v11 through v23 came to be documented
 	// rather than discovered afterwards. Raising the number without editing
 	// that section is the move it exists to stop.
-	if currentSchemaVersion != 34 {
-		t.Errorf("currentSchemaVersion = %d, want 34 — the span of "+
-			"docs/tdd/reliability-delta.md §2 ends at v34 (the issue size). "+
-			"Moving past 34 needs an amendment against that "+
+	if currentSchemaVersion != 35 {
+		t.Errorf("currentSchemaVersion = %d, want 35 — the span of "+
+			"docs/tdd/reliability-delta.md §2 ends at v35 (the loop-history "+
+			"facts). Moving past 35 needs an amendment against that "+
 			"section, per docs/design/amendments.md", currentSchemaVersion)
 	}
 
