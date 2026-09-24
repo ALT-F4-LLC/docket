@@ -290,16 +290,21 @@ emits = "findings"
 			prior:     recorded, computed: "", wantReview: false, wantRecords: 1,
 		},
 		{
-			// DKT-259's narrowness: no recorded change to protect, so a genuine
-			// "nothing changed" reads empty. No row is written either, and that
-			// is the byte-identical guard, not this one: with nothing recorded
-			// the newest body is "" and so is the computed one. That collides
-			// with DKT-259's own stated intent that a first empty diff records;
-			// the count here pins the behavior as found so a fix to that guard
-			// shows up as this row changing, not as a silent drift.
-			name:      "a first empty diff reads empty",
+			// DKT-259's narrowness: no recorded change to protect, so the
+			// empty diff records and a genuine "nothing changed" reads empty.
+			// The byte-identical guard must not drop it either: with nothing
+			// recorded there is no record for it to be identical to.
+			name:      "a first empty diff still records and reads empty",
 			predicate: "any(diff.empty == false)",
-			prior:     "", computed: "", wantReview: false, wantRecords: 0,
+			prior:     "", computed: "", wantReview: false, wantRecords: 1,
+		},
+		{
+			// The byte-identical guard still applies once a record exists: a
+			// second empty diff over an empty record is not a revision.
+			name:      "an empty diff over an empty record is not re-recorded",
+			predicate: "any(diff.empty == false)",
+			prior:     "# issue.diff: nothing in scope\n", computed: "# issue.diff: nothing in scope\n",
+			wantReview: false, wantRecords: 1,
 		},
 		{
 			// An ordinary revision: measured from the diff it computed.

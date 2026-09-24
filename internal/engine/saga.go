@@ -1076,7 +1076,13 @@ func (e *Engine) runRoutingStage(
 		// change created a new way to produce it: RUN-15's reconcile recorded
 		// the same 79-byte sha three times and RUN-16 twice, and the artifact
 		// chain read as a sequence of revisions when nothing revised.
-		if latestIssueDiffBody(conn, step.RunID, step.IssueID) == diffBody {
+		//
+		// It needs a record to be identical TO. With none, the newest body
+		// reads "" and so does a first empty diff, and comparing the two
+		// strings alone suppressed exactly the record DKT-259 keeps: a
+		// genuine first "nothing changed".
+		if latest, ok := latestIssueDiffBody(conn, step.RunID, step.IssueID); ok &&
+			latest == diffBody {
 			wantsDiff = false
 		}
 	}
@@ -3667,14 +3673,15 @@ func measureDiff(body string) DiffFacts {
 	return facts
 }
 
-// latestIssueDiffBody is the issue's newest recorded `issue.diff` body, or ""
-// when it has none.
+// latestIssueDiffBody is the issue's newest recorded `issue.diff` body, and
+// whether one exists.
 //
-// It returns "" on a read failure too, which is indistinguishable from "no diff
-// yet" and is the right collapse: both mean "no reason to suppress", and a
+// It answers false on a read failure too, which is indistinguishable from "no
+// diff yet" and is the right collapse: both mean "no reason to suppress", and a
 // guard that suppresses writes must fail toward recording. An extra artifact is
-// noise; a lost one is evidence.
-func latestIssueDiffBody(conn *sql.DB, runID, issueID int) string {
+// noise; a lost one is evidence. The flag is separate from the body because an
+// EMPTY recorded body is a real record, and "" alone cannot say which it is.
+func latestIssueDiffBody(conn *sql.DB, runID, issueID int) (string, bool) {
 	var body string
 	err := conn.QueryRow(
 		`SELECT a.body FROM artifacts a JOIN steps s ON s.id = a.step_id
@@ -3682,9 +3689,9 @@ func latestIssueDiffBody(conn *sql.DB, runID, issueID int) string {
 		  ORDER BY a.id DESC LIMIT 1`,
 		runID, issueID, ArtifactKindIssueDiff).Scan(&body)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	return body
+	return body, true
 }
 
 // issueHasRecordedChange reports whether the issue already has an `issue.diff`
