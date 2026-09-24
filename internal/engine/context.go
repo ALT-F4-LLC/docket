@@ -350,10 +350,16 @@ func liveIssueBody(_ *sql.Tx, _ *db.Step, snapshot string) (string, error) {
 // it for two different reasons at once.
 //
 // `started_ms` is stamped in the claim transaction and cleared only by the
-// paths that return a row to `pending` — reap, `resolve --as retry`, triage —
-// where recordedClaim is already false and no read reaches here. A nil anchor
-// therefore means a row with no claim to reconstruct (or pre-v16 history):
-// the live column is the only honest answer.
+// paths that return a row to `pending` — reap, `resolve --as retry`, triage.
+// That clearing is not the absence of a claim: `attempt` is never reset, and
+// a reaped row can leave `pending` without a new claim — a fix-round's
+// supersede sweep moves it straight to `superseded`, touching neither
+// `attempt` nor `started_ms`. Such a row passes recordedClaim (`attempt > 0`,
+// status terminal) and reaches here with a nil anchor, so the live column is
+// a FALLBACK, not the body its last claim was handed — recordedArtifacts
+// still serves that reaped attempt's `step_inputs`, so the read-back can pair
+// one attempt's artifacts with a later body. A nil anchor means this path, or
+// pre-v16 history.
 //
 // RETENTION: the reconstruction reads an `issue-body-refreshed` row from the
 // events table, which `events prune` deletes for a terminal run. After such a
