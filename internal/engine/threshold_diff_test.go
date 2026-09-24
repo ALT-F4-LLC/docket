@@ -293,7 +293,10 @@ emits = "findings"
 			// DKT-259's narrowness: no recorded change to protect, so a genuine
 			// "nothing changed" reads empty. No row is written either, and that
 			// is the byte-identical guard, not this one: with nothing recorded
-			// the newest body is "" and so is the computed one.
+			// the newest body is "" and so is the computed one. That collides
+			// with DKT-259's own stated intent that a first empty diff records;
+			// the count here pins the behavior as found so a fix to that guard
+			// shows up as this row changing, not as a silent drift.
 			name:      "a first empty diff reads empty",
 			predicate: "any(diff.empty == false)",
 			prior:     "", computed: "", wantReview: false, wantRecords: 0,
