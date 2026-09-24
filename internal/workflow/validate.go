@@ -1434,14 +1434,17 @@ func validateDiffPredicate(step *Step, pred Predicate) error {
 	}
 
 	// V45: the measurement exists exactly for a step that HOLDS THE TREE — an
-	// executor step that does not declare `holds_tree = false`. An action,
-	// type, or fanout step changes no tree and records no `issue.diff`, and a
-	// non-holding executor step records none either, so on any of them the
-	// facts are nil and the predicate is an undeclared field that silently
-	// never matches (V36's reasoning for casts, applied to the measurement).
-	// This keys on the engine's evaluation condition, not on a `class` value,
-	// because that condition is what decides whether facts exist.
-	holds := step.StepClass() == ClassExecutor &&
+	// executor or fanout step that does not declare `holds_tree = false`. A
+	// fanout step expands to executor rows, and each sibling that holds the
+	// tree records and measures its `issue.diff` like any executor. An action
+	// or type step changes no tree and records no `issue.diff`, and a
+	// non-holding step records none either, so on any of them the facts are
+	// nil and the predicate is an undeclared field that silently never matches
+	// (V36's reasoning for casts, applied to the measurement). This keys on the
+	// engine's evaluation condition, not on a `class` value, because that
+	// condition is what decides whether facts exist.
+	class := step.StepClass()
+	holds := (class == ClassExecutor || class == ClassFanout) &&
 		(step.HoldsTree == nil || *step.HoldsTree)
 	if !holds {
 		return &Error{
@@ -1450,8 +1453,8 @@ func validateDiffPredicate(step *Step, pred Predicate) error {
 				"step %q: `threshold` predicate %q addresses reserved field %q, "+
 					"which is the engine's measurement of the change a step "+
 					"recorded — it is defined only on a tree-holding executor "+
-					"step (one that does not declare `holds_tree = false`); an "+
-					"action, type, fanout, or non-holding step records no "+
+					"or fanout step (one that does not declare `holds_tree = "+
+					"false`); an action, type, or non-holding step records no "+
 					"`issue.diff` and the predicate would never match",
 				step.Name, pred.Source, pred.Field),
 		}

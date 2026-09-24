@@ -720,7 +720,7 @@ a payload field, and no schema declares them.
 
 **Evaluated at record time, over the step's recorded `issue.diff` round
 record.** The measurement is taken in the completion transaction of a
-tree-holding executor step, over the in-scope cumulative diff that completion
+tree-holding executor step (a fanout sibling included), over the in-scope cumulative diff that completion
 recorded (the object a review is sized against; the round-delta and
 out-of-scope trailers are not counted, since neither is this issue's own
 change). Routing then applies the ordinary interposed-target semantics: the
@@ -762,12 +762,15 @@ a step with no `payload` would otherwise take the V21d skip and reach the
 engine with a predicate that can never mean anything:
 
 1. **V45 — placement.** A `diff.*` predicate on a step that does not hold the
-   tree — an `action`, `type`, or `fanout` step, or an executor step declaring
+   tree — an `action` or `type` step, or an executor or fanout step declaring
    `holds_tree = false` — is refused, naming the step and the tree-holding
    requirement. The rule keys on the engine's evaluation condition (a
-   measurement exists exactly for a tree-holding executor step), not on a
+   measurement exists exactly for a tree-holding executor row), not on a
    `class` value: on any other step the facts are nil and the predicate would
-   silently never match.
+   silently never match. A fanout step is admitted because it expands to
+   executor rows, and each tree-holding sibling measures and routes on the
+   change it recorded *(amended 2026-09-24: the first cut refused fanout
+   outright, stricter than the engine)*.
 2. **V46 — count literal.** A non-numeric literal under an ordered operator
    (`<`, `<=`, `>`, `>=`) on `diff.lines` or `diff.files` is refused under its
    own id, naming the literal and the operator: the counts are ordered

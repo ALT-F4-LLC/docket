@@ -351,6 +351,52 @@ emits = "findings"
 	}
 }
 
+// TestFanoutSiblingRoutesOnItsMeasuredDiff pins what V45 relies on to admit
+// `diff.*` on a fanout step: each sibling is an executor row that holds the
+// tree, so its completion measures the diff it recorded and its threshold
+// routes on that measurement rather than treating `diff.*` as an unknown field.
+func TestFanoutSiblingRoutesOnItsMeasuredDiff(t *testing.T) {
+	const src = `
+[pipeline]
+name = "diff-fanout"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+fanout = ["left", "right"]
+emits = "change-summary"
+threshold = { "waiting-human" = "any(diff.lines > 20)" }
+`
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"a large sibling diff routes", diffBodyOf(21, 0), workflow.OnFailWaitingHuman},
+		{"a small sibling diff passes", diffBodyOf(3, 0), RoutingPass},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			activateInterposed(t, conn, src)
+			e := testEngine()
+			e.DiffFn = func(_, _ string, _ []string) (string, error) {
+				return tc.body, nil
+			}
+
+			claimAndComplete(t, conn, e, "implement@0#0", "the change summary", "")
+
+			if got := stepRouting(t, conn, "implement@0#0"); got != tc.want {
+				t.Errorf("sibling routing = %q, want %q for a %d-line diff",
+					got, tc.want, measureDiff(tc.body).Lines)
+			}
+		})
+	}
+}
+
 // inScopePortion is the text measureDiff sizes: the cumulative diff before
 // either trailer marker. Spelled out here rather than exported from saga.go so
 // the agreement assertion below reads the body independently of the code it

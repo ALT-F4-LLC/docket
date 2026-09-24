@@ -608,7 +608,7 @@ validated against the registered schema at `workflow register` time. Example
 
 **Reserved `diff.*` fields** *(added 2026-09-24, DKT-2063/DKT-2518/DKT-2551)*: three
 field names address the engine's own measurement of the change a tree-holding
-executor step recorded, not its payload — `diff.lines` (added plus removed content
+executor or fanout step recorded, not its payload — `diff.lines` (added plus removed content
 lines), `diff.files` (files touched), and `diff.empty` (whether the recorded body
 holds a change). They are evaluated at record time over the step's in-scope
 `issue.diff` round record, the object a review reads; the aggregation is not

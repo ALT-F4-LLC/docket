@@ -1801,6 +1801,46 @@ loop = true
 		wants:   []string{`"a"`, "diff.files", "tree-holding"},
 	},
 	{
+		// A fanout step's siblings are executor rows and hold the tree by
+		// default, so each measures its own recorded change.
+		rule: "V45", name: "a diff.* predicate on a tree-holding fanout step registers clean",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+fanout = ["x", "y"]
+emits = "k"
+threshold = { "fix-loop" = "any(diff.lines > 20)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+	},
+	{
+		rule: "V45", name: "diff.* on a fanout step that does not hold the tree",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+fanout = ["x", "y"]
+emits = "k"
+holds_tree = false
+threshold = { "fix-loop" = "any(diff.empty == false)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		wants: []string{`"a"`, "diff.empty", "tree-holding"},
+	},
+	{
 		// The shape the family exists for: `implement` declares no payload,
 		// holds the tree, and routes on the size of the change it recorded.
 		rule: "V45", name: "a well-formed diff.* predicate on a tree-holding executor step registers clean",
