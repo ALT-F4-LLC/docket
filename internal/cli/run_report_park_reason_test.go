@@ -72,4 +72,42 @@ func TestRunReportKeepsRoutingAndResolutionApart(t *testing.T) {
 		t.Errorf("routing = %q, want the resolution's routing and note",
 			row.Routing)
 	}
+
+	// THE WIRE KEY, read without engine.StepAttempt. Decoding into the struct
+	// that encoded the report cannot catch a renamed tag — both sides move
+	// together — so the key a consumer reads is pinned here by its name.
+	var raw struct {
+		Data struct {
+			Attempts []map[string]any `json:"attempts"`
+		} `json:"data"`
+	}
+	err = json.Unmarshal(rbuf.Bytes(), &raw)
+	testsupport.Must(t, err, "decoding the report as raw JSON: %v\n%s", err, rbuf.String())
+	var rawRow map[string]any
+	for _, a := range raw.Data.Attempts {
+		if a["instance"] == "flaky@0" {
+			rawRow = a
+		}
+	}
+	if rawRow == nil {
+		t.Fatalf("the raw report carries no flaky@0 row:\n%s", rbuf.String())
+	}
+	if got, _ := rawRow["park_reason"].(string); got != parkReason {
+		t.Errorf("run report attempts[].park_reason = %q, want %q under that "+
+			"exact key", got, parkReason)
+	}
+
+	// `step show --json` carries the same key with the same text.
+	sw, sbuf := bufWriter(true)
+	err = runStepShow(cmdWithDB(conn), []string{model.FormatStepID(id)}, sw)
+	testsupport.Must(t, err, "step show: %v\n%s", err, sbuf.String())
+	var shown struct {
+		Data map[string]any `json:"data"`
+	}
+	err = json.Unmarshal(sbuf.Bytes(), &shown)
+	testsupport.Must(t, err, "decoding step show: %v\n%s", err, sbuf.String())
+	if got, _ := shown.Data["park_reason"].(string); got != parkReason {
+		t.Errorf("step show park_reason = %q, want %q under that exact key",
+			got, parkReason)
+	}
 }

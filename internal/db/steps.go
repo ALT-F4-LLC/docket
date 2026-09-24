@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -800,6 +801,13 @@ func SetStepRoutingTx(
 //
 // `parkReason` is written only when this write parks the step, under the same
 // condition as `class`, and is otherwise ignored.
+//
+// A park is NEVER stored with an empty reason: `step show` omits an empty
+// `park_reason`, so the row would read as a step that never parked. A blank
+// reason falls back to the class word — engine text, and true — rather than
+// being refused like a missing class, because the reason at some sites is a
+// gate's own output, and a gate that failed silently must still park its step
+// rather than fail the completion that recorded it.
 func SetStepRoutingWithParkReasonTx(
 	tx *sql.Tx, id int, routing, reason, status string, class ParkClass,
 	parkReason string, nowMS int64,
@@ -807,6 +815,9 @@ func SetStepRoutingWithParkReasonTx(
 	if status == StepWaitingHuman && class == "" {
 		return fmt.Errorf(
 			"recording step routing: parking step %d without a park class", id)
+	}
+	if strings.TrimSpace(parkReason) == "" {
+		parkReason = string(class)
 	}
 	_, err := tx.Exec(
 		`UPDATE steps SET routing = ?, status = ?, activity_ms = ?, updated_at_ms = ?,

@@ -127,7 +127,7 @@ on_fail = "waiting-human"
 // classifier that read the routing string would have to find the bound's
 // phrasing inside a sentence an operator controls; this one reads
 // LoopOutcome.Entered and never sees the string. The park's own reason is the
-// engine's, apart from the note (DKT-2529).
+// engine's, apart from the note.
 const loopBoundSrc = `
 [pipeline]
 name = "park-class-loop-bound"
