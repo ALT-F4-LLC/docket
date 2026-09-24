@@ -542,10 +542,15 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		// the attempt it follows was reaped or failed, not how many of each
 		// this step has ever had.
 		PriorAttemptEnd: step.LastClaimEnd,
-		ExpectedCost:    step.ExpectedCost,
-		LeaseTTLS:       int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
-		Status:          db.StepReady,
-		Metadata:        metadata,
+		// The loop history an exhausted fix loop left (model.StepRow's
+		// LoopRoundsRun), zero on every row outside one.
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+		ExpectedCost:      step.ExpectedCost,
+		LeaseTTLS:         int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
+		Status:            db.StepReady,
+		Metadata:          metadata,
 	}
 
 	// Routing — model/effort/variant on an executor row, voter_assignments on
