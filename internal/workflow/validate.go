@@ -34,7 +34,7 @@ var RuleIDs = []string{
 	"V27", "V28", "V28a", "V29", "V30", "V31",
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 	"V40", "V40a", "V40b", "V40c",
-	"V42",
+	"V42", "V43", "V44",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -519,6 +519,49 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 				Rule: "V14", Step: step.Name, Field: "vote_rule",
 				Message: fmt.Sprintf(
 					"step %q: `vote_rule` is only valid on `type=\"vote\"` steps", step.Name),
+			}
+		}
+	}
+
+	// V43 (DKT-2562): `roster`, `weighting` and `recuse` are a vote step's
+	// authorization switches, valid only on `type="vote"` and only at their
+	// declared values. They are checked beside V14 because they are the same
+	// kind of statement — what a vote step IS — and refused at register for
+	// V14's reason: a misspelled `roster = "strct"` that reached a run would
+	// either fail the cast path hours in or, worse, fall back to `open` and
+	// admit the very cast the author meant to exclude.
+	if err := validateVoteSwitches(step); err != nil {
+		return err
+	}
+
+	// V44 (DKT-2468): `reviews` names the step whose produced work this vote
+	// step judges — the declared link `recuse = "executor"` compares a caster
+	// against. Register-time validated with V26's discipline: a name absent
+	// from the workflow is refused here rather than discovered by a cast that
+	// then compares against nothing. It is only meaningful on a vote step,
+	// and a step reviewing itself declares no producer at all.
+	if step.Reviews != "" {
+		if step.Type != TypeVote {
+			return &Error{
+				Rule: "V44", Step: step.Name, Field: "reviews",
+				Message: fmt.Sprintf(
+					"step %q: `reviews` is only valid on `type=\"vote\"` steps", step.Name),
+			}
+		}
+		if step.Reviews == step.Name {
+			return &Error{
+				Rule: "V44", Step: step.Name, Field: "reviews",
+				Message: fmt.Sprintf(
+					"step %q: `reviews` names the vote step itself; it must name the "+
+						"step whose work this panel reviews", step.Name),
+			}
+		}
+		if _, ok := byName[step.Reviews]; !ok {
+			return &Error{
+				Rule: "V44", Step: step.Name, Field: "reviews",
+				Message: fmt.Sprintf(
+					"step %q: `reviews` names %q, which is not a step of this workflow",
+					step.Name, step.Reviews),
 			}
 		}
 	}

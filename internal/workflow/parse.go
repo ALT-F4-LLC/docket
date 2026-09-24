@@ -111,16 +111,40 @@ type PassFloor struct {
 
 // Step is one §11.1 `[[step]]`, carrying every row of that table.
 type Step struct {
-	Name        string            `toml:"name" json:"name"`
-	Executor    string            `toml:"executor" json:"executor,omitempty"`
-	Action      string            `toml:"action" json:"action,omitempty"`
-	Type        string            `toml:"type" json:"type,omitempty"`
-	Fanout      []string          `toml:"fanout" json:"fanout,omitempty"`
-	Class       string            `toml:"class" json:"class,omitempty"`
-	Emits       string            `toml:"emits" json:"emits,omitempty"`
-	Payload     string            `toml:"payload" json:"payload,omitempty"`
-	Voters      []string          `toml:"voters" json:"voters,omitempty"`
-	VoteRule    string            `toml:"vote_rule" json:"vote_rule,omitempty"`
+	Name     string   `toml:"name" json:"name"`
+	Executor string   `toml:"executor" json:"executor,omitempty"`
+	Action   string   `toml:"action" json:"action,omitempty"`
+	Type     string   `toml:"type" json:"type,omitempty"`
+	Fanout   []string `toml:"fanout" json:"fanout,omitempty"`
+	Class    string   `toml:"class" json:"class,omitempty"`
+	Emits    string   `toml:"emits" json:"emits,omitempty"`
+	Payload  string   `toml:"payload" json:"payload,omitempty"`
+	Voters   []string `toml:"voters" json:"voters,omitempty"`
+	VoteRule string   `toml:"vote_rule" json:"vote_rule,omitempty"`
+	// Reviews names the step whose produced work this vote step judges
+	// (DKT-2468). It is the declared link `recuse = "executor"` reads: the
+	// executor hint of the named step is the party that may not cast here.
+	// Register-time validated (V44) like `voters`/`vote_rule`: the name must
+	// be a step of this workflow and not the vote step itself. Unset means
+	// no declared producer, and a recusal with nothing to compare against is
+	// a no-op.
+	Reviews string `toml:"reviews" json:"reviews,omitempty"`
+	// Roster, Weighting and Recuse are a vote step's AUTHORIZATION switches
+	// (DKT-2562): who may cast, what a cast is worth, and who is excluded.
+	// They live on the step, pinned at activation with `voters`, rather than
+	// in engine config, because `docket config set` has no per-caller
+	// identity and a party constrained by a rule could otherwise rewrite the
+	// rule before casting (operator decision, 2026-09-23).
+	//
+	// Each is valid only on a `type = "vote"` step (V43). Each is `omitempty`
+	// and Validate writes no default into it, for the reason AfterFired
+	// states: the pinned form of every definition that never declares one
+	// must stay byte-identical, or an idempotent re-register reads as a
+	// CONFLICT. The defaults — open, declared, none — are the effective-value
+	// accessors below, and each is exactly today's behavior.
+	Roster      string            `toml:"roster" json:"roster,omitempty"`
+	Weighting   string            `toml:"weighting" json:"weighting,omitempty"`
+	Recuse      string            `toml:"recuse" json:"recuse,omitempty"`
 	After       []string          `toml:"after" json:"after"`
 	Inputs      []string          `toml:"inputs" json:"inputs,omitempty"`
 	Gates       []Gate            `toml:"-" json:"gates,omitempty"`
@@ -466,10 +490,10 @@ var voteOutcomeKeys = []string{VoteOutcomeApproved, VoteOutcomeRejected}
 // an operator disposing of the same park chooses among, minus the ones that
 // would assert a verdict about work nobody re-read (`override-pass`, `skip`).
 const (
-	TriageRetry         = "retry"
-	TriageFixRound      = "fix-round"
-	TriageAbandonIssue  = OnFailAbandonIssue
-	TriageWaitingHuman  = OnFailWaitingHuman
+	TriageRetry        = "retry"
+	TriageFixRound     = "fix-round"
+	TriageAbandonIssue = OnFailAbandonIssue
+	TriageWaitingHuman = OnFailWaitingHuman
 )
 
 // triageRoutings is that vocabulary in declaration order, for V40b.

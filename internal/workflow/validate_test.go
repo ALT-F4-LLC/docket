@@ -1469,6 +1469,174 @@ emits = "k"
 `,
 		wants: []string{"[match].sizes_any", "Small"},
 	},
+	// V43 (DKT-2562): the three authorization switches refuse a value outside
+	// their set, and refuse any placement on a non-vote step — one row per
+	// refusal, so a switch that stopped being checked fails its own row.
+	{
+		rule: "V43", name: "roster outside its set",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "v"
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "skip"
+roster = "closed"
+`,
+		wants: []string{`"v"`, "`roster`", `"open"`, `"strict"`, `"closed"`},
+	},
+	{
+		rule: "V43", name: "weighting outside its set",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "v"
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "skip"
+weighting = "uniform"
+`,
+		wants: []string{`"v"`, "`weighting`", `"declared"`, `"equal"`, `"uniform"`},
+	},
+	{
+		rule: "V43", name: "recuse outside its set",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "v"
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "skip"
+recuse = "author"
+`,
+		wants: []string{`"v"`, "`recuse`", `"none"`, `"executor"`, `"author"`},
+	},
+	{
+		rule: "V43", name: "roster on a non-vote step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+roster = "strict"
+`,
+		wants: []string{`"a"`, "`roster`", `type="vote"`},
+	},
+	{
+		rule: "V43", name: "weighting on a non-vote step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+weighting = "equal"
+`,
+		wants: []string{`"a"`, "`weighting`", `type="vote"`},
+	},
+	{
+		rule: "V43", name: "recuse on a non-vote step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+recuse = "executor"
+`,
+		wants: []string{`"a"`, "`recuse`", `type="vote"`},
+	},
+	{
+		rule: "V43", name: "declared switches on a vote step register clean",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "v"
+after = ["a"]
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "skip"
+roster = "strict"
+weighting = "equal"
+recuse = "executor"
+`,
+	},
+	// V44 (DKT-2468): `reviews` names a step of this workflow, other than the
+	// vote step itself, and only on a vote step.
+	{
+		rule: "V44", name: "reviews names a step not in the workflow",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "v"
+after = ["a"]
+type = "vote"
+voters = ["p", "q"]
+vote_rule = "majority"
+on_fail = "skip"
+reviews = "implement"
+`,
+		wants: []string{`"v"`, "`reviews`", `"implement"`, "not a step"},
+	},
+	{
+		rule: "V44", name: "reviews names the vote step itself",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "v"
+type = "vote"
+voters = ["p", "q"]
+vote_rule = "majority"
+on_fail = "skip"
+reviews = "v"
+`,
+		wants: []string{`"v"`, "`reviews`", "itself"},
+	},
+	{
+		rule: "V44", name: "reviews on a non-vote step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+reviews = "a"
+`,
+		wants: []string{`"a"`, "`reviews`", `type="vote"`},
+	},
 }
 
 // closedRiskSchema is riskSchema with `additionalProperties: false` — the exact
@@ -2548,4 +2716,143 @@ func TestV22AndWhenHoldsShareOneGrammar(t *testing.T) {
 	if WhenHolds(mixed, subject) {
 		t.Errorf("WhenHolds(%q) = true; a mixed predicate V22 refuses must not hold", mixed)
 	}
+}
+
+// TestVoteStepSwitchesParseToDefaults is DKT-2562 criterion 2: a vote step
+// declaring none of `roster`, `weighting` or `recuse` carries the defaults —
+// open, declared, none — through its effective-value accessors, while the
+// declared form round-trips verbatim through the canonical (pinned) JSON.
+//
+// The FIELDS stay empty when undeclared, by design: writing a default into the
+// struct would change the pinned bytes of every registered vote step and make
+// an idempotent re-register read as a CONFLICT (canonical.go). What activation
+// pins is therefore the author's declaration, and the default is applied by
+// the accessor every reader uses.
+func TestVoteStepSwitchesParseToDefaults(t *testing.T) {
+	def, err := Load([]byte(`
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+[[step]]
+name = "silent"
+after = ["a"]
+type = "vote"
+voters = ["p", "q"]
+vote_rule = "majority"
+on_fail = "skip"
+[[step]]
+name = "declared"
+after = ["a"]
+type = "vote"
+voters = ["p", "q"]
+vote_rule = "majority"
+on_fail = "skip"
+roster = "strict"
+weighting = "equal"
+recuse = "executor"
+reviews = "a"
+`))
+	testsupport.Must(t, err, "Load: %v", err)
+
+	silent := StepByName(def, "silent")
+	if silent.Roster != "" || silent.Weighting != "" || silent.Recuse != "" {
+		t.Errorf("undeclared switches were written into the struct (%q, %q, %q); "+
+			"the pinned form must stay byte-identical",
+			silent.Roster, silent.Weighting, silent.Recuse)
+	}
+	if got := silent.EffectiveRoster(); got != RosterOpen {
+		t.Errorf("undeclared roster = %q, want the %q default", got, RosterOpen)
+	}
+	if got := silent.EffectiveWeighting(); got != WeightingDeclared {
+		t.Errorf("undeclared weighting = %q, want the %q default", got, WeightingDeclared)
+	}
+	if got := silent.EffectiveRecuse(); got != RecuseNone {
+		t.Errorf("undeclared recuse = %q, want the %q default", got, RecuseNone)
+	}
+
+	// The declared form survives the pin: Canonical is what activation
+	// stores, FromCanonical is what every reader restores.
+	pinned, err := Canonical(def)
+	testsupport.Must(t, err, "Canonical: %v", err)
+	restored, err := FromCanonical(pinned)
+	testsupport.Must(t, err, "FromCanonical: %v", err)
+	declared := StepByName(restored, "declared")
+	if declared.EffectiveRoster() != RosterStrict ||
+		declared.EffectiveWeighting() != WeightingEqual ||
+		declared.EffectiveRecuse() != RecuseExecutor || declared.Reviews != "a" {
+		t.Errorf("declared switches did not round-trip through the pinned form: "+
+			"roster=%q weighting=%q recuse=%q reviews=%q",
+			declared.EffectiveRoster(), declared.EffectiveWeighting(),
+			declared.EffectiveRecuse(), declared.Reviews)
+	}
+	// And the silent step's pinned bytes carry none of the four keys.
+	for _, key := range []string{`"roster"`, `"weighting"`, `"recuse"`, `"reviews"`} {
+		if strings.Count(string(pinned), key) != 1 {
+			t.Errorf("pinned form mentions %s %d times, want once (the declared step only)",
+				key, strings.Count(string(pinned), key))
+		}
+	}
+}
+
+// TestWorkflowStepReviewsFieldValidated is DKT-2468: a valid `reviews` value
+// parses and resolves to the named step, and an unknown step name is refused
+// under V44 with the same register-time discipline `voters`/`vote_rule`
+// receive.
+func TestWorkflowStepReviewsFieldValidated(t *testing.T) {
+	src := func(reviews string) string {
+		return fmt.Sprintf(`
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "implement"
+executor = "worker"
+emits = "k"
+[[step]]
+name = "review"
+after = ["implement"]
+type = "vote"
+voters = ["p", "q"]
+vote_rule = "majority"
+on_fail = "skip"
+reviews = %q
+`, reviews)
+	}
+
+	t.Run("a valid reviews value parses and resolves", func(t *testing.T) {
+		def, err := Parse([]byte(src("implement")))
+		testsupport.Must(t, err, "Parse: %v", err)
+		testsupport.Must(t, Validate(def), "Validate: %v", err)
+		vote := StepByName(def, "review")
+		if vote.Reviews != "implement" {
+			t.Fatalf("reviews = %q, want %q", vote.Reviews, "implement")
+		}
+		if reviewed := StepByName(def, vote.Reviews); reviewed == nil || reviewed.Executor != "worker" {
+			t.Errorf("reviews did not resolve to the producing step: %+v", reviewed)
+		}
+	})
+
+	t.Run("an unknown step name is refused with the V-rule id", func(t *testing.T) {
+		def, err := Parse([]byte(src("nonexistent")))
+		testsupport.Must(t, err, "Parse: %v", err)
+		err = Validate(def)
+		if err == nil {
+			t.Fatal("Validate accepted a reviews value naming no step")
+		}
+		we, ok := err.(*Error)
+		if !ok {
+			t.Fatalf("error is %T, want *workflow.Error: %v", err, err)
+		}
+		if we.Rule != "V44" || we.Step != "review" || we.Field != "reviews" {
+			t.Errorf("refusal = rule %q step %q field %q, want V44/review/reviews",
+				we.Rule, we.Step, we.Field)
+		}
+		if !strings.Contains(we.Error(), `"nonexistent"`) {
+			t.Errorf("refusal %q does not name the unknown step", we.Error())
+		}
+	})
 }
