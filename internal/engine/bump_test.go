@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -271,6 +272,89 @@ func TestDispatchVerifyNormalizesBump(t *testing.T) {
 			"a bump is an open-time fact about the offer's own shape; the "+
 			"batch working as scheduled is not a conflict", result, mismatch)
 	}
+}
+
+// TestDispatchVerifyNormalizesScopeBump covers the scope half of the same
+// normalization, which the headroom fixture never reaches: there BumpIssue is
+// empty and Scope nil on both sides. Each case moves exactly one of the two
+// fields, so each normalization has a case that fails without it.
+func TestDispatchVerifyNormalizesScopeBump(t *testing.T) {
+	// open dispatches the two-issue scope fixture, where the second issue's
+	// `a@0` stores bump `scope` naming the first issue, which holds `x/**`.
+	open := func(t *testing.T) (conn *sql.DB, runID, first, second int, stored bumpRow) {
+		t.Helper()
+		conn = mustDB(t)
+		registerSource(t, conn, []byte(bumpScopeWorkflowSrc), "bump-scope.toml")
+		first = createIssue(t, conn, "holds the tree", "a body", "task", nil)
+		second = createIssue(t, conn, "wants the tree", "a body", "task", nil)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, first, `["x/**"]`),
+			"declaring the first scope")
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, second, `["x/a"]`),
+			"declaring the second scope")
+		run := startRun(t, conn, first, second)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		manifest := openDispatch(t, conn, run.ID, 0, nowMS)
+		stored = offeredBumps(manifest.Rows)[model.FormatID(second)+" a@0"]
+		if stored.bump != model.BumpScope || stored.issue != model.FormatID(first) {
+			t.Fatalf("premise: the second issue's a@0 opened as %+v, want bump "+
+				"%q naming %s — this test would pass vacuously", stored,
+				model.BumpScope, model.FormatID(first))
+		}
+		return conn, run.ID, first, second, stored
+	}
+
+	verify := func(t *testing.T, conn *sql.DB, runID int, what string) {
+		t.Helper()
+		result, mismatch, err := testEngine().VerifyDispatch(conn, runID, nowMS)
+		testsupport.Must(t, err, "verify after %s: %v", what, err)
+		if !result.Verified || mismatch != nil {
+			t.Errorf("verify reported drift after %s: %+v\n%+v\na bump and "+
+				"the scope it read are open-time facts; the batch working is not "+
+				"a conflict", what, result, mismatch)
+		}
+	}
+
+	t.Run("holder records", func(t *testing.T) {
+		conn, runID, first, second, _ := open(t)
+		e := testEngine()
+
+		// The holder's `a` records, and the second issue's `a` recomputes
+		// unbumped with no bump_issue while its scope stays untouched.
+		completeWithoutUsage(t, conn, e, stepIDIn(t, conn, first, "a@0"))
+		// `next` refuses while the dispatch is open, so read the recomputation
+		// verify compares against straight off the scheduler.
+		ttls, err := loadTTLConfig(conn, runID)
+		testsupport.Must(t, err, "loading ttls: %v", err)
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			computed, _, _, err := readyRows(sched, ttls, 0)
+			testsupport.Must(t, err, "recomputing: %v", err)
+			row := offeredBumps(computed)[model.FormatID(second)+" a@0"]
+			if row.bump != model.BumpNone || row.issue != "" {
+				t.Fatalf("premise: the second issue's a@0 recomputed as %+v, "+
+					"want bump %q with no bump_issue", row, model.BumpNone)
+			}
+		})
+
+		verify(t, conn, runID, "the holder recorded")
+	})
+
+	t.Run("scope refresh", func(t *testing.T) {
+		conn, runID, _, second, stored := open(t)
+
+		// `x/b` still intersects `x/**`, so the bump and its issue hold and
+		// only the row's scope moves.
+		const refreshed = "x/b"
+		if len(stored.scope) != 1 || stored.scope[0] == refreshed {
+			t.Fatalf("premise: the stored scope %v must be non-empty and differ "+
+				"from the refreshed [%s]", stored.scope, refreshed)
+		}
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, second, `["`+refreshed+`"]`),
+			"refreshing the second scope")
+
+		verify(t, conn, runID, "a mid-run scope refresh")
+	})
 }
 
 // bumpDoubleWorkflowSrc refuses one staged row by BOTH rules on its way up,
