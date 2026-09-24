@@ -1861,6 +1861,66 @@ loop = true
 		wants: []string{`"a"`, "many", "<="},
 	},
 	{
+		// V46 covers equality too: the engine parses a count literal as an
+		// integer before it looks at the operator.
+		rule: "V46", name: "a non-numeric literal under == on diff.files",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(diff.files == none)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		wants: []string{`"a"`, "none", "=="},
+	},
+	{
+		// V47: `diff.empty` is a boolean with no order.
+		rule: "V47", name: "an ordered operator on diff.empty",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(diff.empty > 1)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		wants: []string{`"a"`, "diff.empty", ">", "no order"},
+	},
+	{
+		rule: "V47", name: "a non-boolean literal on diff.empty",
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(diff.empty == maybe)" }
+[[step]]
+name = "fixer"
+executor = "x"
+emits = "k"
+loop = true
+`,
+		wants: []string{`"a"`, "diff.empty", "maybe", "boolean"},
+	},
+	{
 		// DKT-2551: the reserved family is by design never a payload field,
 		// so a payload-declaring step's `diff.*` predicate is not a V21a
 		// question — the schema cannot declare it and must not be asked to.

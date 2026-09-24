@@ -35,7 +35,7 @@ var RuleIDs = []string{
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 	"V40", "V40a", "V40b", "V40c", "V41",
 	"V42", "V43", "V44",
-	"V45", "V46",
+	"V45", "V46", "V47",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -1416,7 +1416,7 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 	return nil
 }
 
-// validateDiffPredicate is V45 and V46 (DKT-2518): the reserved `diff.*`
+// validateDiffPredicate is V45, V46, and V47 (DKT-2518): the reserved `diff.*`
 // family is the engine's measurement of the change a step recorded, so a
 // predicate over it must be declared where a measurement exists and compare
 // against a literal the measurement can be compared to.
@@ -1458,21 +1458,47 @@ func validateDiffPredicate(step *Step, pred Predicate) error {
 	}
 
 	// V46: `diff.lines` and `diff.files` are counts, compared numerically, so
-	// an ordered comparison needs an integer to compare against. The engine
-	// knows the order perfectly here (21 > 20 needs no schema); a literal that
-	// is not a number is a declaration the comparison cannot evaluate.
-	if pred.Ordered() && pred.Field != DiffFieldEmpty {
+	// every comparison needs an integer to compare against. The engine knows
+	// the order perfectly here (21 > 20 needs no schema); a literal that is not
+	// a number is a declaration the comparison cannot evaluate, under an
+	// ordered operator and under `==`/`!=` alike — the engine parses the
+	// literal as an integer before it looks at the operator.
+	if pred.Field != DiffFieldEmpty {
 		if _, err := strconv.Atoi(pred.Literal); err != nil {
 			return &Error{
 				Rule: "V46", Step: step.Name, Field: "threshold",
 				Message: fmt.Sprintf(
 					"step %q: `threshold` predicate %q compares reserved field %q "+
-						"under the ordered operator %q against %q, which is not an "+
-						"integer — %s is a count the engine measured and orders "+
+						"under the operator %q against %q, which is not an "+
+						"integer — %s is a count the engine measured and compares "+
 						"numerically, so the literal must be one",
 					step.Name, pred.Source, pred.Field, pred.Op, pred.Literal,
 					pred.Field),
 			}
+		}
+		return nil
+	}
+
+	// V47: `diff.empty` is a boolean. It has no order, and its literal must
+	// parse as one — the engine's own record-time refusals, moved to the
+	// author's terminal like V45 and V46.
+	if pred.Ordered() {
+		return &Error{
+			Rule: "V47", Step: step.Name, Field: "threshold",
+			Message: fmt.Sprintf(
+				"step %q: `threshold` predicate %q uses the ordered operator %q "+
+					"on reserved field %q, which is a boolean and has no order; "+
+					"use == or !=",
+				step.Name, pred.Source, pred.Op, pred.Field),
+		}
+	}
+	if _, err := strconv.ParseBool(pred.Literal); err != nil {
+		return &Error{
+			Rule: "V47", Step: step.Name, Field: "threshold",
+			Message: fmt.Sprintf(
+				"step %q: `threshold` predicate %q compares reserved field %q "+
+					"against %q, which is not a boolean — use true or false",
+				step.Name, pred.Source, pred.Field, pred.Literal),
 		}
 	}
 	return nil

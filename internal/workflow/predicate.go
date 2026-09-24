@@ -72,7 +72,7 @@ func (p Predicate) Ordered() bool {
 // like a payload field but never declared by a payload schema.
 //
 // The names live HERE rather than in the engine because the validator must
-// know them (V45, V46, and the V21a exemption) and internal/engine imports this
+// know them (V45-V47 and the V21a exemption) and internal/engine imports this
 // package, not the reverse — the same reason VoteCastFields is here. The engine
 // evaluates over them; this package decides at register time that a predicate
 // naming them can mean something.
