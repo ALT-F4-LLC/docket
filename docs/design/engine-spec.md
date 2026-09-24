@@ -559,6 +559,10 @@ is exactly `"write" = { max = 1, lease_ttl = "45m", max_step_duration = "2h" }`.
 | `emits` | artifact-kind string, required on executor steps | binds the step to its recorded artifact kind (`inputs` resolution; an instance contract may mirror it for its worker's benefit — the workflow is authoritative) |
 | `payload` | `schema@ver`, optional | payload validated at `complete`; threshold fields check against it at register time; required on `action = "aggregate"` steps *(amended 2026-08-03, DKT-25)* |
 | `voters`, `vote_rule` | [executor hints], proposal-config name | required on `type="vote"` steps — who casts, which existing Docket threshold config tallies |
+| `reviews` | step name, optional; unset by default; only on `type="vote"` steps (V44) | names the step whose produced work this vote step reviews — the declared link `recuse = "executor"` compares a caster against. Register-time validated like `voters`/`vote_rule`: a name that is not a step of this workflow, or the vote step's own name, is a `VALIDATION_ERROR` (V44). A vote step with no `reviews` set has no declared producer, so `recuse = "executor"` is a no-op there *(added 2026-09-23, DKT-2468)* |
+| `roster` | `"open"` \| `"strict"`, default `"open"`; only on `type="vote"` steps (V43) | who a cast may be attributed to: `open` counts the voter list and lets a cast under any name fill a seat (every pre-existing ballot); `strict` refuses `docket vote cast` from a `--voter` not among the step's pinned `voters` as a `VALIDATION_ERROR`, writing no vote. Declared here and pinned at activation rather than in engine config, because `config set` has no per-caller identity and a constrained seat could rewrite a config key before casting *(added 2026-09-23, DKT-2562, DKT-2511)* |
+| `weighting` | `"declared"` \| `"equal"`, default `"declared"`; only on `type="vote"` steps (V43) | what one cast is worth in the tally: `declared` prices it at the caster's own confidence × domain relevance (the existing arithmetic); `equal` counts every cast at 1.0 × 1.0 — the vote row still records the declared values, they price nothing. Same home as `roster`, for the same reason *(added 2026-09-23, DKT-2562, DKT-2512)* |
+| `recuse` | `"none"` \| `"executor"`, default `"none"`; only on `type="vote"` steps (V43) | who is excluded: `executor` refuses a cast whose `--voter` equals the executor hint of the step named by `reviews` — its scalar `executor`, or any sibling name of its `fanout` — as a `VALIDATION_ERROR` naming both steps, so the party whose work is on the ballot cannot judge it. With `reviews` unset there is nothing to compare against and the switch does nothing *(added 2026-09-23, DKT-2562, DKT-2525)* |
 | `after` | [step names], **required** except the first step and `loop = true` steps (whose ordering comes from loop entry, §11.3) | intra-workflow predecessors; `[]` = root (implicit topology was a footgun) |
 | `after_fired` | [step names], optional; every entry must also appear in `after` | predecessors this step runs ONLY IF THEY FIRED: when every instance of a named step ends `skipped` — an interposed gate its threshold routed elsewhere (§11.2), a false `when`, an `on_fail = "skip"` routing, an operator's `--as skip` — this step is terminalized `skipped` in the same transaction, and the skip cascades through every step declaring `after_fired` on it in turn. Additive beside `after`, whose meaning is unchanged: `skipped` still releases an `after` join (J1), and a skipped `after_fired` step contributes no input (J3). The corpus case is a `drain-highs` executor that runs only on rounds `security-vote` actually decided *(added 2026-09-02, DKT-1085)* |
 | `inputs` | [`"<step>.<kind>"` \| `"<step>.*"` \| `"<step>.vote-record"` \| `"issue.body"` \| `"issue.diff"` \| `"issue.linked.<relation>.<kind>"`] | artifacts inlined into the context bundle, in order. `issue.diff` = the engine-computed VCS diff for the issue's scope, snapshotted and fingerprinted when its producing step completed (git in v1 — the one declared VCS coupling, §7). `<step>.vote-record` = the named `type="vote"` step's recorded proposal — tally outcome, weighted score, and every cast with its rationale — engine-served from the existing vote machinery; the named step must be a vote step, and the `vote-record` kind is reserved from `emits` *(amended 2026-08-22, DKT-545)*. `issue.linked.<relation>.<kind>` = a CROSS-ISSUE input: the latest recorded artifact of `<kind>` held by each issue this issue is linked to by `<relation>` (a relation type or its inverse form — `depends_on`, `dependency_of`, `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicate_of`), resolved and pinned by artifact id at activation inside the fat transaction; activation fails loudly when the relation is missing or no linked issue holds the kind, so the binding is enforced rather than an issue-body citation. V11's produced-kind table deliberately does not apply — the producer is another issue's run — and the `issue.linked` name is reserved from step names as `issue.latest` is *(amended 2026-08-22, DKT-547)* |
@@ -617,6 +621,23 @@ did. Example (an investigation read-gate):
 approved-but-concerned tally into the same revise loop a rejection enters,
 instead of the concerns evaporating; the loop body reads what the panel said
 through `inputs = ["<step>.vote-record"]` (§11.1).
+
+**Who may cast, and at what weight** *(added 2026-09-23, DKT-2541)*: a
+`type="vote"` step's `roster`, `weighting` and `recuse` fields (§11.1) are its
+authorization switches, pinned at activation with `voters` and read by `docket
+vote cast` from the pinned definition — never from engine config, which has no
+per-caller identity and which the constrained party could rewrite before
+casting. `reviews` is the declared link recusal needs: it names the step whose
+produced work the panel judges, is register-time validated (V44: an unknown
+step name, or the vote step's own, is a `VALIDATION_ERROR`), and `recuse =
+"executor"` (default `none`) reads it to refuse a cast from that step's
+executor hint — its scalar `executor` or any sibling name of its `fanout`. A
+vote step with no `reviews` set makes `recuse = "executor"` a no-op, since there
+is no declared producer to compare against. Every switch defaults to the
+behavior every earlier ballot had, and a proposal no vote step opened (an
+operator's own, or a reap acknowledgment's) enforces none of them. The
+`vote.rule.<name>.roster` and `.weighting` config keys that once carried the
+first two are retired and refused by name (DKT-2764).
 
 **Evidence on findings** *(amended 2026-09-14, DKT-2451)*: an entry of a cast's
 structured findings may cite `artifact:ARTIFACT-N` (an artifact the run holds)

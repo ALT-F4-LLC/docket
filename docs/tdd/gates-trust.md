@@ -1674,6 +1674,44 @@ machinery, its `VALIDATION_ERROR`-on-unknown-key behavior, and its
 §11.1 puts the voter list on the step. A rule is about *how strictly to tally*;
 the step is about *who casts*.
 
+**Roster and weighting are declared on the vote step, not in config
+(DKT-2562, DKT-2764).** Who may cast and what a cast is worth are
+authorization decisions, and a config key carries none: `docket config set`
+has no per-caller identity, so a seat constrained by a rule could rewrite the
+rule before casting. The two switches therefore live in the vote step's
+`[[step]]` table — `roster = "open"` (the default) or `"strict"`, and
+`weighting = "declared"` (the default) or `"equal"` — and activation pins them
+with the workflow beside `voters`, where a live ballot cannot have them
+changed underneath it. They are **not engine-config keys**: the
+`vote.rule.<name>.roster` and `.weighting` keys that once registered them are
+retired, and `config set` refuses each by name pointing at the field that
+replaced it. Enforcement applies on **vote steps only**: `docket vote cast`
+resolves the proposal back to the pinned step and reads the switches there,
+so a proposal no vote step opened (an operator's own, a reap acknowledgment's,
+a materialized held cluster's minted panel) enforces neither.
+
+- `roster = "strict"` refuses a cast whose `--voter` is not one of the step's
+  pinned `voters` as a `VALIDATION_ERROR` naming the voter and the roster, and
+  writes no vote (DKT-2511). `open` is today's behavior: the list is counted
+  and a cast under any name fills a seat.
+- `weighting = "equal"` tallies every cast at 1.0 × 1.0 while each vote row
+  keeps the confidence and domain relevance the seat declared (DKT-2512);
+  `declared` is `db.CastVote`'s existing arithmetic, reached through the same
+  function with one flag.
+
+**Why this reverses the opaque-voter decision, and only for steps that opt
+in.** `internal/engine/vote.go`'s proposal construction records that "the
+voter hints themselves are OPAQUE: core never interprets one" — it counts
+them for `required_voters` and nothing more, and that stays true of every
+ballot by default. A step declaring `roster = "strict"` opts into the one
+comparison the cast path then makes: the name on the cast must be one of
+those hints. Core still never dispatches to a hint and never reads meaning
+into one; it compares two strings the author wrote. Making that comparison
+the default would have turned every registered ballot strict at once, and a
+threshold nobody chose is not a threshold — so the switch is opt-in, per
+step, and pinned. The recusal seam (`reviews`, `recuse = "executor"`) is the
+same shape and lives in engine-spec §11.1.
+
 **Sealed ballots (DKT-2447).** Every proposal used to render every recorded
 cast — verdict, confidence, relevance, weight, findings, summary — while it
 was still open, so a seat that read the proposal after a sibling had cast saw
