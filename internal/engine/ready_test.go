@@ -1033,3 +1033,79 @@ func TestInterposedExecutorTargetDoesNotHoldDownstream(t *testing.T) {
 		})
 	})
 }
+
+// interposedHumanDownstream appends a human gate as the routing step's second
+// ordinary downstream, beside `verify`, to either interposed shape above.
+const interposedHumanDownstream = `
+[[step]]
+name = "approve"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+`
+
+// TestAwaitingDecisionBehindOpenExecutorTarget is DKT-2076's mirror half:
+// AwaitingDecision reads the same openInterposedGates as Ready, so a human
+// gate behind an open EXECUTOR target is a decision whose turn has come, while
+// one behind an open VOTE target still waits (DKT-168). The vote case cannot
+// read the issue as not awaiting: the open vote target is itself awaiting.
+func TestAwaitingDecisionBehindOpenExecutorTarget(t *testing.T) {
+	t.Run("executor target leaves the gate awaiting decision", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn,
+			interposeExecutorSrc+interposedHumanDownstream)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "drain-highs@0"); got != db.StepPending {
+			t.Fatalf("drain-highs@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if !sched.AwaitingDecision(stepNamed(t, sched, "approve@0")) {
+				t.Errorf("approve@0 not awaiting decision while an open " +
+					"EXECUTOR target runs; it holds only for vote or human targets")
+			}
+			if !sched.IssueAwaitingDecision(issue) {
+				t.Errorf("issue %d not awaiting decision with approve@0's "+
+					"turn come", issue)
+			}
+		})
+	})
+
+	t.Run("vote target still holds the gate", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn,
+			interposeVoteHoldSrc+interposedHumanDownstream)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "tribunal@0"); got != db.StepPending {
+			t.Fatalf("tribunal@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if sched.AwaitingDecision(stepNamed(t, sched, "approve@0")) {
+				t.Errorf("approve@0 awaiting decision behind an open VOTE " +
+					"gate; DKT-168 is unchanged")
+			}
+			// The open vote is itself a decision whose turn has come, so the
+			// issue still reads awaiting; the hold shows as approve@0 being
+			// absent from what carries it.
+			var awaiting []string
+			for _, step := range sched.Steps() {
+				if step.IssueID == issue && sched.AwaitingDecision(step) {
+					awaiting = append(awaiting, step.Instance)
+				}
+			}
+			if !sched.IssueAwaitingDecision(issue) ||
+				len(awaiting) != 1 || awaiting[0] != "tribunal@0" {
+				t.Errorf("issue %d awaiting=%v on %v, want true on "+
+					"[tribunal@0] alone", issue,
+					sched.IssueAwaitingDecision(issue), awaiting)
+			}
+		})
+	})
+}

@@ -417,3 +417,39 @@ func TestClosureLevelsExecutorTargetBesideDownstream(t *testing.T) {
 			verify, drain)
 	}
 }
+
+// TestStageableFromIgnoresOpenExecutorTargetAbsentFromOffer is DKT-2076's
+// membership half: stageableFrom's gate-in-offer rule applies only to the
+// gates openInterposedGates returns, so an open EXECUTOR target the offer does
+// not carry leaves the routing step's downstream stageable, while an open VOTE
+// target absent from the offer still refuses it (DKT-168).
+func TestStageableFromIgnoresOpenExecutorTargetAbsentFromOffer(t *testing.T) {
+	for _, tc := range []struct {
+		name, src, target string
+		want              bool
+	}{
+		{"executor target", interposeExecutorSrc, "drain-highs@0", true},
+		{"vote target", interposeVoteHoldSrc, "tribunal@0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			runID, _ := activateInterposed(t, conn, tc.src)
+
+			claimAndComplete(t, conn, testEngine(), "reconcile@0",
+				"blocked finding", `[{"status":"blocked"}]`)
+			if got := stepStatus(t, conn, tc.target); got != db.StepPending {
+				t.Fatalf("%s = %q after being routed to, want pending",
+					tc.target, got)
+			}
+
+			loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+				verify := stepNamed(t, sched, "verify@0")
+				member := map[int]bool{verify.ID: true}
+				if got := sched.stageableFrom(verify, member); got != tc.want {
+					t.Errorf("stageableFrom(verify@0) = %v with %s open and "+
+						"absent from the offer, want %v", got, tc.target, tc.want)
+				}
+			})
+		})
+	}
+}
