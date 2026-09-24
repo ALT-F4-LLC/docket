@@ -32,9 +32,19 @@ run() {
   local label="$1"; shift
   echo "--- $label: $* ---"
   local status=0
+  # Keep the last 20 lines plus every failure-identifying line wherever it
+  # occurs, in original order, each once: a package that fails early in a long
+  # `go test ./...` run would otherwise lose its test names to a bare tail.
+  # `--- FAIL:` may be indented because go test nests subtest failures;
+  # `FAIL` and `panic:` are always printed at column 0. awk reads to EOF, so
+  # it never cuts the check short with SIGPIPE.
   # Capture PIPESTATUS[0] in the `||` itself: any intervening command would
-  # clobber it, and a bare $? here would be tail's status, not the check's.
-  "$@" 2>&1 | tail -20 || status=${PIPESTATUS[0]}
+  # clobber it, and a bare $? here would be awk's status, not the check's.
+  "$@" 2>&1 | awk '
+    { line[NR] = $0 }
+    /^[ \t]*--- FAIL:|^FAIL|^panic:/ { keep[NR] = 1 }
+    END { for (i = 1; i <= NR; i++) if ((i in keep) || i > NR - 20) print line[i] }
+  ' || status=${PIPESTATUS[0]}
   echo "[$label] exit $status"
   if [ "$status" -gt "$worst" ]; then
     worst=$status
