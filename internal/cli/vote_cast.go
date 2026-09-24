@@ -341,8 +341,17 @@ func newVoteCastCmd() *cobra.Command {
 				Usage:           usage,
 			}
 
-			result, err := db.CastVote(conn, vote)
+			// The engine's cast path (engine/vote_cast.go) reads the vote
+			// step's pinned `roster`, `weighting` and `recuse` before the
+			// existing tally runs: a name off a strict roster or the reviewed
+			// step's own executor is refused here as VALIDATION_ERROR with no
+			// vote written, and an equal-weighted step tallies every cast the
+			// same. An ad-hoc proposal enforces nothing and tallies as before.
+			result, err := engine.CastVote(conn, vote)
 			if err != nil {
+				if _, ok := engine.CodeOf(err); ok {
+					return runErr(err)
+				}
 				if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
 					return e
 				}

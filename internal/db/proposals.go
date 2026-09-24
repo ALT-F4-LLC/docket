@@ -208,7 +208,25 @@ func ListProposals(db *sql.DB, projectID int, status string, criticality string,
 // CastVote inserts a vote and auto-finalizes the proposal when quorum is reached.
 // Returns ErrNotFound if the proposal does not exist.
 // Returns ErrConflict if the voter already voted or the proposal is already finalized.
+//
+// The tally is the DECLARED one — each cast weighted by its own confidence
+// times its own domain relevance — which is what every caller before DKT-2512
+// got and what an ad-hoc proposal still gets. A vote step that declares
+// `weighting = "equal"` reaches the same function through CastVoteWeighted.
 func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
+	return CastVoteWeighted(db, v, false)
+}
+
+// CastVoteWeighted is CastVote with the tally's weighting chosen by the caller
+// (DKT-2512). With `equal` set, every cast weighs 1.0 × 1.0 in the score —
+// the vote ROW still keeps the confidence and domain relevance the caster
+// declared, in their existing columns, so what a seat claimed about its own
+// testimony is on record even where it does not price the tally.
+//
+// The flag is passed per cast rather than stored on the proposal because the
+// tally happens inside the quorum-reaching cast, and the value comes from the
+// vote step's PINNED definition, which cannot change under a live ballot.
+func CastVoteWeighted(db *sql.DB, v *model.Vote, equal bool) (*CastVoteResult, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
@@ -366,6 +384,11 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 				return nil, fmt.Errorf("scanning vote for score: %w", err)
 			}
 			weight := confidence * domainRelevance
+			if equal {
+				// Equal weighting: the declared values were scanned and sit
+				// on the row; they price nothing here.
+				weight = 1.0
+			}
 			totalWeight += weight
 			if model.Verdict(verdict) == model.VerdictApprove || model.Verdict(verdict) == model.VerdictApproveWithConcerns {
 				weightedSum += weight
