@@ -606,6 +606,24 @@ whose registered schema declares `ordered_enum` (§2). Fields and literals are
 validated against the registered schema at `workflow register` time. Example
 (standard-change): `threshold = { "fix-loop" = "any(severity >= high)" }`.
 
+**Reserved `diff.*` fields** *(added 2026-09-24, DKT-2063/DKT-2518/DKT-2551)*: three
+field names address the engine's own measurement of the change a tree-holding
+executor step recorded, not its payload — `diff.lines` (added plus removed content
+lines), `diff.files` (files touched), and `diff.empty` (whether the recorded body
+holds a change). They are evaluated at record time over the step's in-scope
+`issue.diff` round record, the object a review reads; the aggregation is not
+applied (one number per step), and the counts compare numerically without an
+`ordered_enum` because the engine measured them and knows their order. A step
+that recorded nothing evaluates as `diff.empty == true`, `diff.lines == 0`,
+`diff.files == 0` — decided, not unknown. No schema declares them, so V21a–V21c
+skip exactly these three names (a lookalike such as `diff.bogus` is still an
+undeclared field); register time instead refuses a `diff.*` predicate on a step
+that does not hold the tree (V45), a non-integer literal on `diff.lines` or
+`diff.files` (V46), and an ordered operator or non-boolean literal on
+`diff.empty` (V47). Measurement rules and rationale: payloads-thresholds TDD
+§5.1. Example (a change track): `threshold = { "review" = "any(diff.lines > 20)",
+"review-lite" = "all(diff.lines <= 20)" }`.
+
 **Vote-step thresholds** *(amended 2026-08-22, DKT-545)*: on a `type="vote"` step,
 `threshold` is evaluated over the proposal's recorded **casts** — one element per
 cast, addressable fields `vote` / `verdict` (aliases for the cast's verdict) and

@@ -745,7 +745,9 @@ Two measurement rules keep the facts honest about the object review reads:
   guard drops the re-record because the issue already holds a non-empty
   `issue.diff`, the facts are measured from THAT latest recorded non-empty
   body — what `issue.diff` resolves to and a review would read — not from the
-  empty body the retry computed (DKT-2548).
+  empty body the retry computed (DKT-2548). A FIRST empty diff, with no
+  record for the issue yet, still records: neither the DKT-259 guard nor the
+  byte-identical guard fires without an earlier record to protect or match.
 
 **The absent-record rule.** A tree-holding step whose completion recorded no
 change evaluates as `diff.empty == true`, `diff.lines == 0`, and
@@ -766,13 +768,19 @@ engine with a predicate that can never mean anything:
    measurement exists exactly for a tree-holding executor step), not on a
    `class` value: on any other step the facts are nil and the predicate would
    silently never match.
-2. **V46 — literal.** A non-numeric literal under an ordered operator (`<`,
-   `<=`, `>`, `>=`) on `diff.lines` or `diff.files` is refused under its own
-   id, naming the literal and the operator: the counts are ordered
-   numerically, so the literal must be an integer.
+2. **V46 — count literal.** A non-numeric literal under an ordered operator
+   (`<`, `<=`, `>`, `>=`) on `diff.lines` or `diff.files` is refused under its
+   own id, naming the literal and the operator: the counts are ordered
+   numerically, so the literal must be an integer. The same holds under `==`
+   and `!=` (`any(diff.files == none)`), since the engine parses a count
+   literal as an integer before it looks at the operator.
+3. **V47 — boolean.** `diff.empty` under an ordered operator (it has no order)
+   or compared against a literal that is not a boolean is refused, naming the
+   field and the operator or literal.
 
-The engine still refuses the same shapes at record time (`evaluateDiff`); the
-lint moves the refusal from a parked run to the author's terminal. **V21a does
+The engine still refuses every one of these shapes at record time
+(`evaluateDiff`); the lint moves each refusal from a parked run to the author's
+terminal, so a registered definition never reaches one. **V21a does
 not apply** to the three names (DKT-2551): on a payload-declaring step the
 cross-validation skips exactly `diff.lines`, `diff.files`, and `diff.empty` by
 name — a lookalike such as `diff.bogus` is an ordinary undeclared field V21a
