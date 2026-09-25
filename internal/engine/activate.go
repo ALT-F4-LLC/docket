@@ -328,19 +328,10 @@ type BlockingIssue struct {
 // and no pins. Pinning is never partial, because a partially-pinned run is a
 // run that cannot reproduce itself and cannot say so.
 func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, error) {
-	// The pin files are read BEFORE the transaction opens. Reading inside it
-	// would hold a write lock across arbitrary filesystem latency for data the
-	// transaction cannot influence — and a missing path is a refusal that
-	// wants to happen before anything is locked, not a rollback.
-	filePins, err := readFilePins(opts.FilePins)
-	if err != nil {
-		return nil, err
-	}
-
 	// AUTO-REGISTRATION'S SCAN (§9.2). It reads and hashes files, so it happens
-	// out here for readFilePins' reason: holding a write lock across arbitrary
-	// filesystem latency buys nothing, and a malformed file is a refusal that
-	// wants to happen before anything is locked.
+	// out here, before the transaction opens: holding a write lock across
+	// arbitrary filesystem latency buys nothing, and a malformed file is a
+	// refusal that wants to happen before anything is locked.
 	//
 	// F17 IS THE FIRST THING IT DOES — one `lstat` PER ROOT, and a root that is
 	// absent is skipped whole. That is what makes "a repo with no config
@@ -348,6 +339,21 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 	// an intention, and it is also what lets a repo carry no `.docket/` at all
 	// while still activating against the shared corpus.
 	scan, err := scanConfigDirs(resolvePaths().InstanceConfigDirs())
+	if err != nil {
+		return nil, err
+	}
+
+	// The pin files are read BEFORE the transaction opens for the scan's
+	// reason, and AFTER the scan because their refs are derived against the
+	// roots it resolved: a pin recorded against any other notion of
+	// a root would disagree with every reader. A missing path is a refusal
+	// that wants to happen before anything is locked, not a rollback. A nil
+	// scan (no root exists) means no ref can be config-relative.
+	var roots []string
+	if scan != nil {
+		roots = scan.roots
+	}
+	filePins, err := readFilePins(opts.FilePins, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -2025,14 +2031,28 @@ func intConfig(conn *sql.DB, projectID int, key string) (int, error) {
 }
 
 // readFilePins is stage 3's file half: read each `--pin PATH`, hash it, record
-// the path.
+// a ref every reader can resolve.
 //
 // A path that does not exist or is not a regular file is NOT_FOUND (exit 2),
 // raised BEFORE the transaction opens so a bad pin costs nothing and refuses
 // cleanly. Pinning is never partial: one bad path fails the whole set, because
 // a run pinned to some of what its operator named is a run that cannot
 // reproduce itself and cannot say which part is missing.
-func readFilePins(paths []string) ([]db.Pin, error) {
+//
+// THE REF IS NOT THE PATH AS GIVEN. Readers resolve a file pin two
+// ways — the config-relative ref at each instance-config root, then an
+// absolute path — and never relative to whatever cwd activation happened to
+// run in. So the recorded form is the one the readers will find:
+//
+//	under an instance-config root   the config-relative ref, from any cwd
+//	absolute, outside every root    the path as given; readers honor it
+//	relative, outside every root    VALIDATION_ERROR, nothing written
+//
+// The last row is the refusal the issue asked for: as recorded it could never
+// resolve, so `verify-pins` would report it missing from the first second and
+// every step reading it would refuse with CONFLICT. Naming the absolute form
+// tells the operator what to pass instead.
+func readFilePins(paths []string, roots []string) ([]db.Pin, error) {
 	out := make([]db.Pin, 0, len(paths))
 	for _, path := range paths {
 		info, err := os.Stat(path)
@@ -2050,8 +2070,23 @@ func readFilePins(paths []string) ([]db.Pin, error) {
 		if err != nil {
 			return nil, notFoundErr(err, "reading pin file %s: %v", path, err)
 		}
+
+		ref, ok := configRelativeRef(roots, path)
+		if !ok {
+			if !filepath.IsAbs(path) {
+				abs, aerr := filepath.Abs(path)
+				if aerr != nil {
+					abs = path
+				}
+				return nil, validationErr(
+					"pin path %s is relative and outside every instance-config root, "+
+						"so no reader could resolve it once recorded; pass %s, or a "+
+						"path under an instance-config root", path, abs)
+			}
+			ref = path
+		}
 		out = append(out, db.Pin{
-			Kind: db.PinKindFile, Ref: path, SHA256: workflow.SHA256(content),
+			Kind: db.PinKindFile, Ref: ref, SHA256: workflow.SHA256(content),
 		})
 	}
 	return out, nil

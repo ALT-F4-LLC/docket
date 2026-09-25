@@ -287,9 +287,18 @@ func templateSource(
 	if err != nil {
 		return "", "", false, err
 	}
+	// The pin is looked up by the ref activation RECORDED, not only by the
+	// path as typed: a template under an instance-config root is
+	// pinned by its config-relative ref, whatever cwd `--pin` named it from,
+	// and `--template` names it the same way. The verbatim form stays honored
+	// for a path outside every root and for a pre-v12 run.
+	wanted := map[string]bool{path: true}
+	if ref, ok := configRelativeRef(instanceConfigRoots(), path); ok {
+		wanted[ref] = true
+	}
 	var pinnedHash string
 	for _, p := range pins {
-		if p.Kind == db.PinKindFile && p.Ref == path {
+		if p.Kind == db.PinKindFile && wanted[p.Ref] {
 			pinnedHash = p.SHA256
 			break
 		}

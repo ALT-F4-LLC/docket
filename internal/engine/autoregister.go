@@ -701,7 +701,7 @@ func filePin(root, path string) (db.Pin, error) {
 		return db.Pin{}, validationErr("reading the pinned config file %s: %v", path, err)
 	}
 	ref := path
-	if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, ok := configRelativeRef([]string{root}, path); ok {
 		ref = rel
 	}
 	return db.Pin{
