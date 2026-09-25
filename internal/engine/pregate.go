@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -153,11 +154,33 @@ func stepTargetRef(
 	return resolvedTargetFor(tx, sched, step, spec, artifacts)
 }
 
+// claimPreGateBudget bounds the claim's whole pre-gate phase — reconstruction,
+// lock waits, and every gate's execution together (§7.6.2 PG5).
+//
+// WHY A BUDGET, AND WHY THIS ONE. `docket step claim` runs pre-gates
+// synchronously, and an executor runs the claim under a 120s tool timeout: a
+// claim that outlives it is backgrounded, its output never read, and the
+// lease it minted is left to a forced reap and an acknowledgment panel. Under
+// sixteen concurrent executors, gates bounded only by their entries' 5m
+// timeouts did exactly that thirty-six times in one session. The budget is
+// the documented bound the claim returns within; the sixty seconds leave the
+// rest of the executor's window for the claim's own two transactions, the
+// context assembly, and the packet render under load. A variable rather than
+// a constant so a test can shrink it; nothing else assigns it.
+var claimPreGateBudget = 60 * time.Second
+
 // runPreGates executes the step's pre-gates, one at a time, each result
 // committing in its own small transaction.
 //
 // It runs OUTSIDE any transaction — that is the whole reason the claim was
 // split into phases — and it returns the results for the context bundle.
+//
+// THE PHASE IS BOUNDED AS A WHOLE by claimPreGateBudget, taken from the
+// moment this function starts so the reconstruction below spends from the
+// same purse the gates do. Each gate's timeout is clamped to what remains;
+// a gate whose turn comes with nothing left records `skipped`. The claim
+// still succeeds either way (PG2/PG3) — the bound changes when the claim
+// returns, never whether it does.
 //
 // PG2/PG3: neither an unmatched pre-gate nor a FAILING one refuses the claim.
 // The result rides in the bundle and the step's worker sees that its
@@ -171,6 +194,7 @@ func runPreGates(
 	targetSHA, workRoot string, nowMS int64,
 ) ([]PreGateResult, error) {
 	out := make([]PreGateResult, 0, len(gates))
+	deadline := time.Now().Add(claimPreGateBudget)
 
 	// DKT-254: BIND THE TREE UNDER REVIEW, OR MEASURE NOTHING.
 	//
@@ -235,6 +259,7 @@ func runPreGates(
 			// the path it names and be replayed with its `//nolint` lookup
 			// pointing at a file that is gone.
 			CacheRoot: scratch.Cache,
+			Deadline:  deadline,
 		}
 
 		var rows []GateResultRow

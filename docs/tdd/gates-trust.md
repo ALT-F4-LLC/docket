@@ -1,6 +1,6 @@
 # TDD: gates, the execution trust model, and the exec runner (stage 4)
 
-Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout — 2026-09-25
+Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25
 (docs/tdd/gates-trust-review.md, verdict SOUND WITH FIXES — F1–F5 folded in; see
 that file's response table for the per-finding
 mapping) · implements docs/design/engine-spec.md **§4 (whole)**
@@ -1505,8 +1505,9 @@ Transaction A sets `expires_ms` when it wins the CAS. Phase 2 then runs
 **subprocesses** — each bounded by the gate's own timeout, which defaults to
 **5m** (§5.4 X5) and can be a per-entry override, and a step may declare several
 pre-gates that run one at a time. The wall time between the CAS and the response
-is therefore unbounded in principle and minutes in practice, and **all of it is
-deducted from a lease the caller has not yet received**. A pre-gate-heavy step
+was therefore unbounded in principle and minutes in practice (it is now capped
+by §7.6.2 PG5's 60s budget, which is still longer than a short TTL), and **all
+of it is deducted from a lease the caller has not yet received**. A pre-gate-heavy step
 hands its worker a mostly-spent lease; with a short configured TTL it can hand
 over an **already-expired** one, so the worker's first `step complete` fails on a
 lease it never had a chance to use, the step is reaped, and the pre-gates run
@@ -1542,9 +1543,12 @@ when the caller gets it.
 | PG2 | An **unmatched pre-gate does not execute**, records `verdict='unmatched'` with `pre = 1`, and **the claim still succeeds** — the result rides in the bundle as `unmatched`, and the step's worker sees that its measurement did not run. A pre-gate is a measurement whose *result* the step consumes; refusing the claim would make an untrusted command able to block work, which is a denial-of-service an issue author should not have. |
 | PG3 | A **failing** pre-gate (non-zero exit) likewise does not refuse the claim: the result is `fail` and rides in the bundle. §11.1 calls these "measure-then-judge steps" — the judging is the step's job, which is exactly why the failure is data rather than a refusal. |
 | PG4 | Pre-gate results are **excluded from the saga's gate verdict** (`gateVerdict` filters `pre = 1`). They are inputs to the step, not judgments of it. S3 already excludes `pre` gates from `completionGates` (saga.go:311–320); this is the read-side counterpart. |
+| PG5 | **The pre-gate phase is bounded as a whole** by a **60s budget** (`claimPreGateBudget`, pregate.go), taken from the start of phase 2 so reconstruction, any lock wait, and every gate's execution spend from one purse. Each gate's timeout is clamped to what remains — a flaky entry's re-runs included, through `exec.Spec.Deadline` — and a gate whose turn comes with nothing left records `verdict='skipped'` with `reason` naming the budget. A gate the clamp cuts off records its timeout as `fail`, with `reason` naming the budget beside the entry's own timeout so the row does not read as a changed entry. **The claim still succeeds** (PG2, PG3): the budget decides *when* `docket step claim` returns, never *whether*. The bound exists because an executor runs the claim under a **120s tool timeout**, and a claim that outlives it is backgrounded with its token unread and its lease left to a forced reap; sixty seconds leaves the rest of that window for transactions A and B, context assembly, and the packet render under load. |
 
 PG2 and PG3 together mean a pre-gate never blocks — a deliberate asymmetry with
-completion gates, and the reason is in §11.1's own parenthetical.
+completion gates, and the reason is in §11.1's own parenthetical. PG5 keeps
+that asymmetry: a slow pre-gate is cut short and reported, not turned into a
+refusal that a slow command could use to block work.
 
 ### 7.6.3 Where the results land in the bundle
 

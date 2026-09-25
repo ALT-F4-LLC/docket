@@ -1,6 +1,9 @@
 package engine
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // The gate seam (TDD §5.6). The rule it encodes:
 //
@@ -100,6 +103,15 @@ type StepContext struct {
 	// the source suppressed. exec.EnvPolicy.CacheRoot documents the mechanism
 	// and names the variables it redirects.
 	CacheRoot string
+	// Deadline is the wall-clock point past which this gate may not run, or
+	// zero when the entry's own timeout alone bounds it. Only the pre-claim
+	// path fills it, from claimPreGateBudget: the claim's pre-gate phase is
+	// bounded as a whole so `docket step claim` returns inside the executor's
+	// tool timeout, and each gate's timeout is clamped to what remains. A
+	// gate that finds nothing remaining records `skipped`; one the clamp cuts
+	// off records its timeout with a reason naming the budget beside the
+	// entry's own timeout, so a reader does not conclude the entry changed.
+	Deadline time.Time
 }
 
 // GateResult is one gate's outcome, in §11.4's `gate result` shape.

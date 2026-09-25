@@ -280,6 +280,36 @@ func (r *ExecRunner) spawnMatched(
 		}
 	}
 
+	// THE CLAIM'S PRE-GATE BUDGET (§7.6.2 PG5). On the pre-claim path the
+	// whole phase is bounded so the claim returns inside the executor's tool
+	// timeout: this gate gets what remains of the budget, or nothing. A
+	// budget already spent records `skipped` — nothing spawned, nothing
+	// measured, the same shape as a lock that never came free — and the
+	// claim still succeeds, because PG2/PG3 say a pre-gate never blocks work.
+	entryTimeout := timeout
+	if !sc.Deadline.IsZero() {
+		remaining := time.Until(sc.Deadline)
+		if remaining <= 0 {
+			return GateExecution{
+				Verdict: VerdictFail,
+				Results: []GateResultRow{{
+					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictSkipped,
+					Argv: match.Argv,
+					Reason: fmt.Sprintf(
+						"the claim's %s pre-gate budget was spent before this gate "+
+							"could run; nothing was measured", claimPreGateBudget),
+					TrustEntry: entry.Name,
+					StubEntry:  entry.Stub,
+					ArgvSHA256: trust.ArgvSHA256(match.Argv),
+					Prefix:     entry.Prefix,
+				}},
+			}, nil
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+
 	// The MATCHED entry's own declaration is what reaches the child,
 	// the same discipline §7.2 M1 applies to argv: the entry that authorized
 	// the command is the entry that configures it, so there is no window in
@@ -359,7 +389,10 @@ func (r *ExecRunner) spawnMatched(
 		}
 		dir = sc.WorkRoot
 	}
-	spec := exec.Spec{Argv: argv, Dir: dir, Env: env, Timeout: timeout}
+	// The deadline rides on the spec as well as clamping the timeout above:
+	// a flaky entry re-runs inside exec.RunAttempts, and each attempt must
+	// see what is left of the budget, not a fresh copy of the first clamp.
+	spec := exec.Spec{Argv: argv, Dir: dir, Env: env, Timeout: timeout, Deadline: sc.Deadline}
 
 	// L3: the lock is acquired IMMEDIATELY BEFORE the spawn and released
 	// IMMEDIATELY AFTER, outside every transaction and never held across a
@@ -409,6 +442,20 @@ func (r *ExecRunner) spawnMatched(
 		if exit == 0 && !a.Result.TimedOut {
 			verdict = VerdictPass
 		}
+		reason := networkAwareReason(a.Result.Reason, entry, verdict)
+		if a.Result.TimedOut && !sc.Deadline.IsZero() &&
+			a.Result.DurationMS < entryTimeout.Milliseconds() {
+			// The timeout the child hit was the budget's remainder, not the
+			// entry's own bound. Say so, or a reader of the row concludes the
+			// trust entry's timeout changed. Decided from the attempt's own
+			// duration rather than from the clamp above, because a lock wait
+			// or an earlier flaky attempt can spend the budget after that
+			// clamp was computed and exec.Run clamps again from the deadline.
+			reason = withScratchNote(reason, fmt.Sprintf(
+				"the claim's %s pre-gate budget bounded this gate below its "+
+					"entry's %s timeout, so the claim returns inside the "+
+					"executor's tool timeout", claimPreGateBudget, entryTimeout))
+		}
 		out.Results = append(out.Results, GateResultRow{
 			Gate:       g.Name,
 			Ordinal:    firstOrdinal + i,
@@ -418,7 +465,7 @@ func (r *ExecRunner) spawnMatched(
 			Output:     a.Result.Output,
 			Truncated:  a.Result.Truncated,
 			Verdict:    verdict,
-			Reason:     networkAwareReason(a.Result.Reason, entry, verdict),
+			Reason:     reason,
 			TrustEntry: entry.Name,
 			StubEntry:  entry.Stub,
 			ArgvSHA256: trust.ArgvSHA256(match.Argv),
