@@ -100,6 +100,37 @@ func TestProbeTrustSkipsActionEntries(t *testing.T) {
 	}
 }
 
+// TestProbeTrustExportsGateBase: a probed gate sees DOCKET_GATE_BASE set to
+// the probed HEAD, the same export the record-time runner gives a worktree
+// step. Every base-diff gate refuses without it, so a probe that left it unset
+// reported healthy gates as failed on clean HEAD; this gate fails exactly the
+// way those did — a non-zero exit on an unset or wrong base — and passes only
+// when the var names the sha the throwaway worktree was built from.
+func TestProbeTrustExportsGateBase(t *testing.T) {
+	repo := probeRepo(t)
+	head, err := probeHead(repo)
+	testsupport.Must(t, err, "resolving HEAD: %v", err)
+
+	entries := []trust.Entry{{
+		Name: "diff-scope",
+		Argv: []string{"/bin/sh", "-c", `test "$DOCKET_GATE_BASE" = "` + head + `"`},
+	}}
+
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 1 {
+		t.Fatalf("want one gate row, got %d", len(result.Gates))
+	}
+	g := result.Gates[0]
+	if g.Exit == nil || *g.Exit != 0 {
+		t.Errorf("DOCKET_GATE_BASE did not name the probed HEAD %s: %+v", head, g)
+	}
+	if !result.Passed {
+		t.Errorf("the probe must pass a base-diff gate on clean HEAD: %+v", result)
+	}
+}
+
 // TestProbeTrustEnforcesPerEntryTimeout is AC3: a hung gate reports a timeout
 // exit rather than hanging the verb.
 func TestProbeTrustEnforcesPerEntryTimeout(t *testing.T) {

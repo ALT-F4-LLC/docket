@@ -128,7 +128,7 @@ func ProbeTrust(
 		if ctx.Err() != nil {
 			break
 		}
-		result.Gates = append(result.Gates, runProbeGate(repoRoot, worktree.Dir, e))
+		result.Gates = append(result.Gates, runProbeGate(repoRoot, worktree.Dir, head, e))
 	}
 
 	for _, g := range result.Gates {
@@ -147,7 +147,18 @@ func ProbeTrust(
 // through the SAME spawn primitive gate_exec.go's spawnMatched uses, so a
 // probed gate runs exactly as it would at record time: resolved argv, the
 // allowlisted environment, the entry's own timeout and process-group kill.
-func runProbeGate(repoRoot, worktreeDir string, e trust.Entry) TrustProbeGate {
+//
+// `base` is the probed HEAD, exported as DOCKET_GATE_BASE. Every gate that
+// selects a committed footprint refuses without it, so a probe that left it
+// unset reported eight healthy base-diff gates as failed on clean HEAD and
+// every conductor re-derived the same fact by hand before a run. The value is
+// deliberately NOT gateBaseSHA's: that resolver leaves the var unset for a
+// shared-checkout step because a live HEAD is not a range endpoint docket can
+// vouch for as THAT STEP's base. The probe is the one case where HEAD is
+// exactly right — the throwaway worktree sits at the probed sha, nothing has
+// been committed on top of it, and an empty footprint is the answer a healthy
+// gate should give. A later refactor must not unify the two.
+func runProbeGate(repoRoot, worktreeDir, base string, e trust.Entry) TrustProbeGate {
 	row := TrustProbeGate{Name: e.Name, Stub: e.Stub}
 	if len(e.Argv) == 0 {
 		row.LogTail = "roster entry has no argv — nothing to run"
@@ -168,7 +179,9 @@ func runProbeGate(repoRoot, worktreeDir string, e trust.Entry) TrustProbeGate {
 	}
 	argv := append([]string{resolved}, e.Argv[1:]...)
 
-	env, err := dexec.BuildEnv(dexec.EnvPolicy{Gate: e.Name, Repo: repoRoot, Network: e.Network})
+	env, err := dexec.BuildEnv(dexec.EnvPolicy{
+		Gate: e.Name, Repo: repoRoot, Network: e.Network, Base: base,
+	})
 	if err != nil {
 		row.LogTail = err.Error()
 		return row
