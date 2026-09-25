@@ -365,7 +365,9 @@ one.
 ### Consolidating legacy per-repo stores
 
 Move an old repo-local database into the shared store with export/import —
-colliding ids are remapped automatically, nothing is dropped:
+ids colliding with another project's rows are remapped automatically, nothing
+is dropped. Merging a project's own export back with `--merge` skips the rows
+it already holds:
 
 ```bash
 DOCKET_PATH=/path/to/repo/.docket docket export -f repo.json
