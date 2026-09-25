@@ -547,10 +547,13 @@ failing on an unknown ref with the same error. `workflow list --project B`
 lists B's registry, with `--deprecated`, `--orphans`, and `--name` applying
 there; `workflow lint <file> --project B` resolves `vote_rule` and `payload`
 references in B and reports `new` / `unchanged` / CONFLICT against B's rows —
-the verdict `workflow register --project B` would reach. Neither takes
-`--all-projects`: each emits one project's payload, and the store-wide reading
-is `registry audit`'s. A project whose checkout is missing from this machine
-can therefore be read from any other, as it could already be written.
+the verdict `workflow register --project B` would reach. `workflow lint` also
+takes `--all-projects`, writing the per-project report `workflow register
+--all-projects` writes with each project's verdict as its outcome (`new` /
+`unchanged` / `conflict` / `invalid`); `workflow list` does not, since a
+store-wide registry reading is `registry audit`'s. A project whose checkout is
+missing from this machine can therefore be read from any other, as it could
+already be written.
 
 `[match]` also accepts `domain_paths = [..]`, a list of path globs naming the paths
 this pipeline's domain occupies *(amended 2026-09-03 — DKT-1182)*. **It binds nothing.**

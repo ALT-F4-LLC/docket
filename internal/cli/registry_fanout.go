@@ -52,8 +52,11 @@ import (
 // different things to an operator sweeping a corpus, and "already-deprecated"
 // is a refusal that means the work was already done.
 const (
-	outcomeRegistered        = "registered"
-	outcomeUnchanged         = "unchanged"
+	outcomeRegistered = "registered"
+	outcomeUnchanged  = "unchanged"
+	// outcomeNew is `workflow lint`'s verdict for a free slot: a register
+	// there would insert. Lint writes nothing, so it never says "registered".
+	outcomeNew               = "new"
 	outcomeDeprecated        = "deprecated"
 	outcomeRestored          = "restored"
 	outcomeAlreadyBinding    = "already-binding"
@@ -186,23 +189,32 @@ func resolveRegistryTargets(
 		return []*model.Project{target}, true, nil
 
 	case all:
-		projects, err := db.ListProjects(conn)
+		projects, err := allRegistryProjects(conn)
 		if err != nil {
-			return nil, false, cmdErr(fmt.Errorf("listing projects: %w", err),
-				output.ErrGeneral)
-		}
-		if len(projects) == 0 {
-			// Unreachable through the ordinary store — the default row is
-			// created at initialization — but a fan-out that silently reported
-			// zero targets would look like a success that wrote nothing.
-			return nil, false, cmdErr(fmt.Errorf(
-				"--all-projects found no projects in this store"), output.ErrNotFound)
+			return nil, false, err
 		}
 		return projects, true, nil
 
 	default:
 		return nil, false, nil
 	}
+}
+
+// allRegistryProjects is every project in the store, the --all-projects
+// target set shared by the writing verbs and `workflow lint`.
+func allRegistryProjects(conn *sql.DB) ([]*model.Project, error) {
+	projects, err := db.ListProjects(conn)
+	if err != nil {
+		return nil, cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
+	}
+	if len(projects) == 0 {
+		// Unreachable through the ordinary store — the default row is created
+		// at initialization — but a fan-out that silently reported zero
+		// targets would look like a success that did nothing.
+		return nil, cmdErr(fmt.Errorf(
+			"--all-projects found no projects in this store"), output.ErrNotFound)
+	}
+	return projects, nil
 }
 
 // fanoutScope names the scope a resolved target set represents.

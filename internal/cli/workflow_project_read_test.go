@@ -197,3 +197,77 @@ func TestWorkflowReadVerbsRefuseAnUnknownProject(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkflowLintAllProjectsReportsEachProjectsVerdict: one lint, every
+// project, each judged on its own registry — new, unchanged, conflict, and
+// invalid side by side — in the report shape `workflow register
+// --all-projects` writes, and nothing written anywhere.
+func TestWorkflowLintAllProjectsReportsEachProjectsVerdict(t *testing.T) {
+	conn := newTestDB(t)
+	one, two, three := threeProjects(t, conn)
+	four, err := db.EnsureProject(conn, "/repo/four.git", "four.git", model.NowMS())
+	testsupport.Must(t, err, "creating four.git: %v", err)
+
+	// findings@1 everywhere but four.git; reads@1 registered in two.git with
+	// these bytes and in three.git with different ones.
+	for _, id := range []int{one, two, three} {
+		_, _, err := db.InsertSchema(conn, &model.Schema{
+			ProjectID: id, Name: "findings", Version: 1,
+			SourceSHA256: "sha", Body: findingsSchema, Ordered: "{}",
+		}, model.NowMS())
+		testsupport.Must(t, err, "seeding findings@1 in project %d: %v", id, err)
+	}
+	w, _ := bufWriter(true)
+	testsupport.Must(t, runWorkflowRegister(fanoutCmd(conn, "two.git", false),
+		[]string{writeWorkflowFile(t, readsFindings)}, w), "registering reads@1 in two.git")
+	testsupport.Must(t, runWorkflowRegister(fanoutCmd(conn, "three.git", false),
+		[]string{writeWorkflowFile(t, readsFindings+"\n# other bytes\n")}, w),
+		"registering different reads@1 bytes in three.git")
+	before := countWorkflows(t, conn)
+
+	cmd := lintCmd(conn, "")
+	cmd.Flags().Bool("all-projects", true, "")
+	path := filepath.Join(t.TempDir(), "wf.toml")
+	testsupport.Must(t, os.WriteFile(path, []byte(readsFindings), 0o644), "writing the definition")
+	w, buf := bufWriter(true)
+	err = runWorkflowLint(cmd, []string{path}, w)
+	if err == nil {
+		t.Fatal("a lint with a conflict and an invalid project exited clean")
+	}
+	if got := reportedCodeOf(t, err); got != output.ErrGeneral {
+		t.Errorf("exit code = %q, want %q for mixed CONFLICT and VALIDATION_ERROR", got, output.ErrGeneral)
+	}
+	report := fanoutReportOf(t, buf.Bytes())
+	if report.Operation != "workflow lint" || report.Scope != scopeAllProjects {
+		t.Errorf("report header = %q / %q", report.Operation, report.Scope)
+	}
+
+	for _, tc := range []struct {
+		project int
+		outcome string
+		code    output.ErrorCode
+	}{
+		{one, outcomeNew, ""},
+		{two, outcomeUnchanged, ""},
+		{three, outcomeConflict, output.ErrConflict},
+		{four, outcomeInvalid, output.ErrValidation},
+	} {
+		got := outcomeIn(t, report, tc.project)
+		if got.Outcome != tc.outcome || got.Code != tc.code {
+			t.Errorf("project %d reported %+v, want %s / %q", tc.project, got, tc.outcome, tc.code)
+		}
+	}
+	if got := outcomeIn(t, report, three); !strings.Contains(got.Detail, "bump [pipeline].version to 2") {
+		t.Errorf("the conflict row does not carry lint's remedy: %+v", got)
+	}
+	if n := countWorkflows(t, conn); n != before {
+		t.Errorf("lint --all-projects changed the registry from %d to %d rows", before, n)
+	}
+
+	// --project and --all-projects together are refused by cobra's
+	// mutual exclusion on the real command.
+	root := workflowLintCmd
+	if root.Flags().Lookup("all-projects") == nil || root.Flags().Lookup("project") == nil {
+		t.Error("workflow lint does not declare both targeting flags")
+	}
+}

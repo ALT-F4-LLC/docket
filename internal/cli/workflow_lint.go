@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -37,7 +38,14 @@ directory resolves to; --project runs them against one other project's
 registry instead, so the verdict is the one 'docket workflow register
 --project <ref>' would reach there. It takes the same refs the writing verbs
 take (PREFIX, NAME, IDENTITY, or row id), so a project whose checkout is
-missing from this machine can still be linted against from any other.`,
+missing from this machine can still be linted against from any other.
+
+--all-projects lints against every project in the store and writes the
+per-project report 'workflow register --all-projects' writes, with each
+project's verdict as its outcome: new, unchanged, conflict, or invalid (a
+vote_rule or payload reference that does not resolve there). The grammar is
+checked once, before any project, since a definition that does not parse is
+wrong everywhere. The command exits non-zero when any project would refuse.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowLint(cmd, args, getWriter(cmd))
@@ -63,6 +71,20 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 		return err
 	}
 
+	// The SAME pipeline register runs, call for call, so the two cannot drift:
+	// grammar and step rules (workflow.Load) first, because a definition that
+	// does not parse is wrong in every project; then, per project, vote rules
+	// against the config registry (V26) and threshold fields and literals
+	// against the registered schemas (V21a-V21d, V25a).
+	def, err := loadWorkflowSource(src, path)
+	if err != nil {
+		return workflowErr(err)
+	}
+
+	if all, _ := cmd.Flags().GetBool("all-projects"); all {
+		return lintAcrossProjects(cmd, w, conn, def, src)
+	}
+
 	// ONE project for every question below. The vote-rule check, the schema
 	// check, and the registration probe must all consult the same registry,
 	// or the verdict would be a composite no single `register` could reach.
@@ -71,16 +93,37 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 		return err
 	}
 
-	// The SAME pipeline register runs, call for call, so the two cannot drift:
-	// grammar and step rules (workflow.Load), vote rules against the config
-	// registry (V26), threshold fields and literals against the registered
-	// schemas (V21a-V21d, V25a).
-	def, err := loadWorkflowSource(src, path)
+	registration, err := lintVerdict(conn, def, src, projectID)
 	if err != nil {
 		return workflowErr(err)
 	}
+
+	result := lintResult{
+		Name:         def.Pipeline.Name,
+		Version:      def.Pipeline.Version,
+		SHA256:       workflow.SHA256(src),
+		Registration: registration,
+	}
+	w.Success(result, fmt.Sprintf("%s@%d is valid (%s; nothing written)",
+		result.Name, result.Version, registration))
+	return nil
+}
+
+// lintConflictError is lint's CONFLICT: the message an author reads, unwrapping
+// to db.ErrWorkflowConflict so workflowErr and the fan-out classify it exactly
+// as a register conflict without changing the words.
+type lintConflictError struct{ msg string }
+
+func (e *lintConflictError) Error() string { return e.msg }
+func (e *lintConflictError) Unwrap() error { return db.ErrWorkflowConflict }
+
+// lintVerdict is one project's answer: the environment checks, then what a
+// real register there would do (`new` or `unchanged`), or the refusal.
+func lintVerdict(
+	conn *sql.DB, def *workflow.Definition, src []byte, projectID int,
+) (string, error) {
 	if err := validateWorkflowEnvironment(conn, def, projectID); err != nil {
-		return workflowErr(err)
+		return "", err
 	}
 
 	// The registry probe (read-only): would this register, and as what? An
@@ -103,39 +146,62 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 	// bumped file always leaves the superseded version's recorded path holding
 	// different bytes.
 	sum := workflow.SHA256(src)
-	registration := "new"
 	existing, err := db.GetWorkflow(conn, projectID, def.Pipeline.Name, def.Pipeline.Version)
 	switch {
 	case errors.Is(err, db.ErrWorkflowNotFound):
 		// Free slot; a register would insert.
+		return outcomeNew, nil
 	case err != nil:
-		return cmdErr(err, output.ErrGeneral)
+		return "", err
 	case existing.SourceSHA256 == sum:
-		registration = "unchanged"
+		return outcomeUnchanged, nil
 	default:
-		return cmdErr(fmt.Errorf(
+		return "", &lintConflictError{msg: fmt.Sprintf(
 			"%s@%d is registered with different bytes\n\n"+
 				"  registered  sha256:%s\n  this file   sha256:%s\n\n"+
 				"A registered name@version is frozen so that a run which pinned it "+
 				"can reproduce. To adopt these changes, bump [pipeline].version to "+
 				"%d and lint again",
 			def.Pipeline.Name, def.Pipeline.Version,
-			existing.SourceSHA256, sum, def.Pipeline.Version+1),
-			output.ErrConflict)
+			existing.SourceSHA256, sum, def.Pipeline.Version+1)}
 	}
+}
 
-	result := lintResult{
-		Name:         def.Pipeline.Name,
-		Version:      def.Pipeline.Version,
-		SHA256:       sum,
-		Registration: registration,
+// lintAcrossProjects is --all-projects: one verdict per project in the store,
+// in the per-project report `workflow register --all-projects` writes, so a
+// store-wide sweep can be planned from the same shape it will produce. Each
+// project is judged on its own and a refusal in one never hides another's
+// verdict; the process exits non-zero when any project would refuse.
+func lintAcrossProjects(
+	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	def *workflow.Definition, src []byte,
+) error {
+	targets, err := allRegistryProjects(conn)
+	if err != nil {
+		return err
 	}
-	w.Success(result, fmt.Sprintf("%s@%d is valid (%s; nothing written)",
-		result.Name, result.Version, registration))
-	return nil
+	report := &registryFanoutReport{
+		Operation: "workflow lint",
+		Subject:   fmt.Sprintf("%s@%d", def.Pipeline.Name, def.Pipeline.Version),
+		Scope:     scopeAllProjects,
+	}
+	for _, target := range targets {
+		registration, err := lintVerdict(conn, def, src, target.ID)
+		if err != nil {
+			report.Results = append(report.Results,
+				registryFailureResult(target, err, workflowErr))
+			continue
+		}
+		report.Results = append(report.Results,
+			registrySuccessResult(target, registration, report.Subject))
+	}
+	return finishRegistryFanout(w, report)
 }
 
 func init() {
 	addProjectReadFlag(workflowLintCmd, "Lint against the registry")
+	workflowLintCmd.Flags().Bool("all-projects", false,
+		"Lint against EVERY project's registry, reporting each project's own verdict")
+	workflowLintCmd.MarkFlagsMutuallyExclusive("project", "all-projects")
 	workflowCmd.AddCommand(workflowLintCmd)
 }
