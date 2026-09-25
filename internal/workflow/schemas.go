@@ -40,6 +40,16 @@ type SchemaResolver interface {
 // sentinel to return rather than a message this package has to pattern-match.
 var ErrNotRegistered = errors.New("schema not registered")
 
+// ErrRetired is what a SchemaResolver returns for a name@version that IS
+// registered but has been retired from service (`docket schema deprecate`).
+//
+// It is a separate sentinel from ErrNotRegistered because the remedies differ:
+// an absent schema is registered, a retired one is restored or the reference
+// is moved to a live version. The row still exists and still serves the runs
+// that pinned it; only NEW references are refused, which is what makes
+// retirement a registration-time filter rather than a retraction.
+var ErrRetired = errors.New("schema retired")
+
 // ValidateSchemas is §4.9.1's cross-validation table: the rules that compare a
 // definition against the schemas it names.
 //
@@ -368,6 +378,20 @@ func resolveStepSchema(step *Step, resolver SchemaResolver) (*Registered, error)
 			Message: fmt.Sprintf(
 				"step %q: `payload` names %q, which is not registered. "+
 					"Register it first: `docket schema register %s <file.json>`",
+				step.Name, step.Payload, step.Payload),
+		}
+	}
+	if errors.Is(err, ErrRetired) {
+		// A retired schema is still registered and still serves the runs
+		// that pinned it, so the refusal names the two ways forward rather
+		// than the register remedy: restore the version, or reference one
+		// that is still in service.
+		return nil, &Error{
+			Rule: "V25a", Step: step.Name, Field: "payload",
+			Message: fmt.Sprintf(
+				"step %q: `payload` names %q, which is registered but retired "+
+					"(deprecated) in this project. Reference a version still in "+
+					"service, or restore it: `docket schema deprecate %s --restore`",
 				step.Name, step.Payload, step.Payload),
 		}
 	}

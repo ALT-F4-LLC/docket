@@ -62,6 +62,10 @@ const (
 	outcomeNotFound          = "not-registered"
 	outcomeInvalid           = "invalid"
 	outcomeError             = "error"
+	// outcomeInUse is `schema deprecate`'s refusal: a workflow still in
+	// service in that project names the version as a payload. A word of its
+	// own because a sweep needs to tell "already done" from "blocked here".
+	outcomeInUse = "in-use"
 )
 
 // registryFanoutResult is one project's outcome.
@@ -118,6 +122,34 @@ func addRegistryTargetFlags(cmd *cobra.Command, action string) {
 	cmd.Flags().Bool("all-projects", false, fmt.Sprintf(
 		"%s in EVERY project in the store, reporting each project's own outcome", action))
 	cmd.MarkFlagsMutuallyExclusive("project", "all-projects")
+}
+
+// addProjectReadFlag declares --project alone on a registry-READING verb
+// (`workflow list`, `workflow lint`): one other project's registry to read
+// instead of the working directory's. No --all-projects, because these verbs
+// emit a single project's payload — a listing or one verdict — and a
+// store-wide reading is `registry audit`'s shape, not theirs.
+func addProjectReadFlag(cmd *cobra.Command, action string) {
+	cmd.Flags().String("project", "", fmt.Sprintf(
+		"%s in this project instead of the one the working directory resolves to "+
+			"(its PREFIX, NAME, IDENTITY, or row id)", action))
+}
+
+// resolveReadProject answers which ONE project a reading verb consults: the
+// --project ref when given, else the working directory's. The ref resolves
+// through resolveProjectRef, the same function the writing verbs use, so an
+// unknown ref fails with the same error here as there — and a project whose
+// checkout is missing from this machine can still be read by prefix.
+func resolveReadProject(cmd *cobra.Command, conn *sql.DB) (int, error) {
+	ref, _ := cmd.Flags().GetString("project")
+	if ref = strings.TrimSpace(ref); ref == "" {
+		return getProjectID(cmd), nil
+	}
+	target, err := resolveProjectRef(conn, ref)
+	if err != nil {
+		return 0, err
+	}
+	return target.ID, nil
 }
 
 // resolveRegistryTargets answers which projects this invocation writes to.
@@ -195,15 +227,19 @@ func registryFailureResult(
 
 	outcome := outcomeError
 	switch {
-	case errors.Is(err, db.ErrWorkflowAlreadyDeprecated):
+	case errors.Is(err, db.ErrWorkflowAlreadyDeprecated),
+		errors.Is(err, db.ErrSchemaAlreadyDeprecated):
 		// The ONE sentinel workflowErr does not classify, because the
 		// single-project path answers it before reaching that mapper. Retiring
 		// twice is a CONFLICT there (db.ErrWorkflowAlreadyDeprecated's own
 		// header: the second caller's "I am taking this out of service" is
 		// wrong), and it has to be a CONFLICT here too — a fan-out that
 		// downgraded it would make the same store answer differently depending
-		// on which flag was passed.
+		// on which flag was passed. The schema sentinel is the same refusal
+		// on the other registry.
 		outcome, code = outcomeAlreadyDeprecated, output.ErrConflict
+	case errors.Is(err, errSchemaInUse):
+		outcome, code = outcomeInUse, output.ErrConflict
 	case code == output.ErrConflict:
 		outcome = outcomeConflict
 	case code == output.ErrNotFound:

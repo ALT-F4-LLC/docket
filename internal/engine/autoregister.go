@@ -786,6 +786,14 @@ func (r txSchemaResolver) Schema(name string, version int) (*workflow.Registered
 	if err != nil {
 		return nil, err
 	}
+	// A retired version is refused for NEW references (v36), exactly as
+	// internal/cli's schemaResolver refuses it: F7's rule is that activation
+	// accepts nothing `workflow register` would refuse. A run that ALREADY
+	// pinned the version is untouched — pins resolve through GetSchemaTx at an
+	// explicit version, which never filters.
+	if row.Deprecated() {
+		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrRetired, name, version)
+	}
 	return schema.Compile(row.Name, row.Version, []byte(row.Body))
 }
 

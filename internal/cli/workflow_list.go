@@ -73,7 +73,17 @@ binding verdict on the version, so narrowing by one must not silently narrow
 by the other too.
 
 --deprecated includes retired versions (deprecated_at_ms set) in the plain
-listing; without it, only versions still eligible to bind are shown.`,
+listing; without it, only versions still eligible to bind are shown.
+
+A registry is PER PROJECT. By default this lists the project the working
+directory resolves to; --project lists one other project's registry instead,
+with --deprecated, --orphans, and --name applying there exactly as they do
+here. It takes the same refs the writing verbs take (PREFIX, NAME, IDENTITY, or
+row id), so a project whose checkout is missing from this machine can still be
+read from any other. The --orphans verdict is a filesystem fact about the NAME
+and does not change with the project: the instance-config roots are THIS
+invocation's, so a name another project registered from its own local config
+directory reads as orphaned here.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowList(cmd, args, getWriter(cmd))
 	},
@@ -87,6 +97,10 @@ func runWorkflowList(cmd *cobra.Command, args []string, w *output.Writer) error 
 	orphans, _ := cmd.Flags().GetBool("orphans")
 	deprecated, _ := cmd.Flags().GetBool("deprecated")
 	if err := validateLimit(cmd, limit); err != nil {
+		return err
+	}
+	projectID, err := resolveReadProject(cmd, conn)
+	if err != nil {
 		return err
 	}
 
@@ -108,7 +122,7 @@ func runWorkflowList(cmd *cobra.Command, args []string, w *output.Writer) error 
 	excludeDeprecated := !deprecated && !orphans
 
 	workflows, total, err := db.ListWorkflows(conn, db.WorkflowListOptions{
-		ProjectID:         getProjectID(cmd),
+		ProjectID:         projectID,
 		Name:              name,
 		Limit:             queryLimit,
 		ExcludeDeprecated: excludeDeprecated,
@@ -233,5 +247,6 @@ func init() {
 		"List only registrations whose name no file in any instance-config root declares")
 	workflowListCmd.Flags().Bool("deprecated", false,
 		"Include deprecated (retired) workflow versions in the listing")
+	addProjectReadFlag(workflowListCmd, "List the registry")
 	workflowCmd.AddCommand(workflowListCmd)
 }

@@ -236,8 +236,9 @@ type RegistryOrphan struct {
 	// Retired is true when EVERY version listed is already deprecated — the
 	// orphan an operator has finished with. It is reported rather than filtered
 	// out, for `workflow list --orphans`' reason: hiding an already-retired
-	// orphan would leave a cleanup pass unable to see its own work. Schemas
-	// carry no deprecation, so it is always false for them.
+	// orphan would leave a cleanup pass unable to see its own work. It reads
+	// `deprecated_at_ms` on both registries: `workflow deprecate` for one,
+	// `schema deprecate` (v36) for the other.
 	Retired bool `json:"retired"`
 }
 
@@ -356,7 +357,7 @@ func auditProject(
 		if s.Builtin {
 			continue
 		}
-		fold(byName, s.Name, s.Version, true)
+		fold(byName, s.Name, s.Version, !s.Deprecated())
 	}
 	out.Compared += classify(out, index, RegistrationKindSchema, byName)
 

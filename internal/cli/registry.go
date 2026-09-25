@@ -55,8 +55,12 @@ Two findings, per registered NAME rather than per version:
 
   orphaned  no file in any scanned root declares that name any more — the
             residue of a rename or a deletion, since registering a new name
-            never retires the old one. It still binds until it is deprecated
-            ('docket workflow deprecate <name>@<version>').
+            never retires the old one. A workflow still binds until it is
+            deprecated ('docket workflow deprecate <name>@<version>'), and a
+            schema still accepts new payload references until it is
+            ('docket schema deprecate <name>@<version>'). An orphan whose
+            every version is retired is still reported, marked retired: the
+            cleanup pass has to be able to see its own work.
 
 THE CORPUS IS SCANNED ONCE, not once per project: '~/.docket/config' is shared
 by every project in the store, so what "current" means is one answer. The roots
@@ -185,7 +189,8 @@ func renderRegistryAudit(audit *engine.RegistryAudit) string {
 	fmt.Fprintf(&b,
 		"%d of %d project(s) carry findings: %d name(s) behind, %d orphaned.\n"+
 			"A behind name is adopted by the next `docket run activate` in that "+
-			"project; an orphaned one is retired with `docket workflow deprecate`.",
+			"project; an orphaned one is retired with `docket workflow deprecate` "+
+			"or `docket schema deprecate`.",
 		dirty, len(audit.Projects), audit.BehindTotal, audit.OrphanedTotal)
 	return b.String()
 }

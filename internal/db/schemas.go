@@ -116,8 +116,12 @@ func InsertSchemaTx(
 }
 
 // GetSchema returns one registered schema visible to a project — its own
-// registration or a builtin. A version of 0 selects the HIGHEST registered
-// version, which is what `schema show NAME` without `@version` means.
+// registration or a builtin. A version of 0 selects the HIGHEST version still
+// IN SERVICE, which is what `schema show NAME` without `@version` means —
+// GetWorkflow's rule (v36 mirrors v11): a name whose every version is retired
+// resolves to ErrSchemaNotFound, while an explicit version still resolves a
+// retired row, because retired versions stay registered and reachable for the
+// runs that pinned them.
 func GetSchema(db *sql.DB, projectID int, name string, version int) (*model.Schema, error) {
 	projectID = projectOrDefault(projectID)
 	if version > 0 {
@@ -126,7 +130,8 @@ func GetSchema(db *sql.DB, projectID int, name string, version int) (*model.Sche
 			projectID, name, version))
 	}
 	return scanSchema(db.QueryRow(
-		schemaSelect+` WHERE `+schemaProjectPredicate+` AND name = ? ORDER BY version DESC LIMIT 1`,
+		schemaSelect+` WHERE `+schemaProjectPredicate+` AND name = ? AND deprecated_at_ms IS NULL
+		 ORDER BY version DESC LIMIT 1`,
 		projectID, name))
 }
 
@@ -144,6 +149,12 @@ type SchemaListOptions struct {
 	ProjectID int
 	Name      string
 	Limit     int
+	// ExcludeDeprecated drops retired versions (`deprecated_at_ms` set) from
+	// both the rows and the pre-limit total. Zero value is false so every
+	// existing caller — the registry audit, which asks what the registry
+	// HOLDS — keeps seeing every version; only `schema list`'s default opts
+	// this in.
+	ExcludeDeprecated bool
 }
 
 // ListSchemas returns registered schemas and the TRUE total before the limit —
@@ -159,6 +170,9 @@ func ListSchemas(db *sql.DB, opts SchemaListOptions) ([]*model.Schema, int, erro
 	if opts.Name != "" {
 		clauses = append(clauses, `name = ?`)
 		args = append(args, opts.Name)
+	}
+	if opts.ExcludeDeprecated {
+		clauses = append(clauses, `deprecated_at_ms IS NULL`)
 	}
 	where := ``
 	if len(clauses) > 0 {
@@ -194,7 +208,7 @@ func ListSchemas(db *sql.DB, opts SchemaListOptions) ([]*model.Schema, int, erro
 // cannot drift apart.
 const schemaSelect = `
 SELECT id, project_id, name, version, source_path, source_sha256, body, ordered, builtin,
-       created_at_ms, row_version
+       created_at_ms, row_version, deprecated_at_ms
   FROM schemas`
 
 // schemaProjectPredicate is the visibility rule every schema lookup shares:
@@ -213,13 +227,14 @@ func scanSchema(row rowScanner) (*model.Schema, error) {
 
 func scanSchemaRows(row rowScanner) (*model.Schema, error) {
 	var (
-		s          model.Schema
-		sourcePath sql.NullString
-		builtin    int
+		s            model.Schema
+		sourcePath   sql.NullString
+		builtin      int
+		deprecatedAt sql.NullInt64
 	)
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Name, &s.Version, &sourcePath, &s.SourceSHA256, &s.Body,
-		&s.Ordered, &builtin, &s.CreatedAtMS, &s.RowVersion,
+		&s.Ordered, &builtin, &s.CreatedAtMS, &s.RowVersion, &deprecatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -229,6 +244,8 @@ func scanSchemaRows(row rowScanner) (*model.Schema, error) {
 	}
 	s.SourcePath = sourcePath.String
 	s.Builtin = builtin != 0
+	// NULL means in service; 0 is the same fact in the model.
+	s.DeprecatedAtMS = deprecatedAt.Int64
 	return &s, nil
 }
 
@@ -240,4 +257,133 @@ func getSchemaTx(tx *sql.Tx, projectID int, name string, version int) (*model.Sc
 		return nil, ErrSchemaNotFound
 	}
 	return s, err
+}
+
+// Schema retirement sentinels (v36). They mirror the workflow ones, because the
+// two registries share the retirement contract and a caller mapping errors to
+// exit codes should not have to learn it twice.
+var (
+	// ErrSchemaAlreadyDeprecated means the version is already retired.
+	// Surfaced as CONFLICT (exit 4), for ErrWorkflowAlreadyDeprecated's
+	// reason: the second caller's "I am the one taking this out of service"
+	// is wrong, and the timestamp they would expect to see is not the one
+	// stored.
+	ErrSchemaAlreadyDeprecated = errors.New("schema version is already deprecated")
+
+	// ErrSchemaBuiltin means the version ships in the binary. It is refused
+	// rather than retired because a builtin row is visible to EVERY project
+	// through its flag, so retiring it in one project's registry would retire
+	// it for the whole store — and nothing an operator can register replaces
+	// what the binary seeds.
+	ErrSchemaBuiltin = errors.New("schema is builtin and cannot be deprecated")
+)
+
+// ownSchemaTx reads one schema row that THIS project registered, builtins
+// excluded. The retirement verbs use it in place of getSchemaTx because the
+// visibility predicate admits the builtin row from whichever project seeded
+// it, and a per-project retirement must never reach a row another project
+// owns.
+func ownSchemaTx(tx *sql.Tx, projectID int, name string, version int) (*model.Schema, error) {
+	s, err := scanSchemaRows(tx.QueryRow(
+		schemaSelect+` WHERE project_id = ? AND name = ? AND version = ?`,
+		projectID, name, version))
+	if errors.Is(err, sql.ErrNoRows) {
+		// The builtin is the one row the visibility predicate would have
+		// found here; name it rather than reporting it absent, so the operator
+		// learns WHY it cannot be retired instead of that it does not exist.
+		if b, berr := getSchemaTx(tx, projectID, name, version); berr == nil && b.Builtin {
+			return nil, ErrSchemaBuiltin
+		}
+		return nil, ErrSchemaNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The builtin sits on whichever project row seeded it, so the project that
+	// owns it by column is refused the same way as every other project.
+	if s.Builtin {
+		return nil, ErrSchemaBuiltin
+	}
+	return s, nil
+}
+
+// DeprecateSchema retires ONE registered schema version from service.
+//
+// It writes a timestamp and NOTHING ELSE, DeprecateWorkflow's contract applied
+// to the other registry: the row, its bytes, its ordered index, and its hash
+// are untouched, so `schema show name@n` still renders it, a run that pinned
+// it keeps validating payloads against it, and the lineage stays legible. The
+// only thing that changes is that a NEW `payload` reference to it is refused
+// at registration.
+//
+// There is deliberately no delete verb, for the workflow registry's reason.
+func DeprecateSchema(db *sql.DB, projectID int, name string, version int, nowMS int64) (*model.Schema, error) {
+	projectID = projectOrDefault(projectID)
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	s, err := ownSchemaTx(tx, projectID, name, version)
+	if err != nil {
+		return nil, err
+	}
+	if s.Deprecated() {
+		return nil, ErrSchemaAlreadyDeprecated
+	}
+
+	updated, err := setSchemaDeprecatedTx(tx, projectID, name, version, nowMS, "deprecating")
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing transaction: %w", err)
+	}
+	return updated, nil
+}
+
+// RestoreSchema clears a version's retirement, returning it to service. It is
+// idempotent, as RestoreWorkflow is: a version that was never retired comes
+// back unchanged.
+func RestoreSchema(db *sql.DB, projectID int, name string, version int) (*model.Schema, error) {
+	projectID = projectOrDefault(projectID)
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	s, err := ownSchemaTx(tx, projectID, name, version)
+	if err != nil {
+		return nil, err
+	}
+	if !s.Deprecated() {
+		return s, nil // already in service; idempotent
+	}
+
+	updated, err := setSchemaDeprecatedTx(tx, projectID, name, version, nil, "restoring")
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing transaction: %w", err)
+	}
+	return updated, nil
+}
+
+// setSchemaDeprecatedTx is the UPDATE-and-re-read skeleton DeprecateSchema and
+// RestoreSchema share, setWorkflowDeprecatedTx's shape: only the value written
+// (a timestamp or NULL) and the verb in a wrapped error differ.
+func setSchemaDeprecatedTx(
+	tx *sql.Tx, projectID int, name string, version int, deprecatedAtMS any, verb string,
+) (*model.Schema, error) {
+	if _, err := tx.Exec(
+		`UPDATE schemas SET deprecated_at_ms = ?, row_version = row_version + 1
+		  WHERE project_id = ? AND name = ? AND version = ?`,
+		deprecatedAtMS, projectID, name, version,
+	); err != nil {
+		return nil, fmt.Errorf("%s schema %s@%d: %w", verb, name, version, err)
+	}
+	return ownSchemaTx(tx, projectID, name, version)
 }

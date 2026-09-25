@@ -250,6 +250,13 @@ func (r schemaResolver) Schema(name string, version int) (*workflow.Registered, 
 	if err != nil {
 		return nil, err
 	}
+	// A retired version is refused for NEW references (v36). The row still
+	// resolves — GetSchema at an explicit version never filters — so this is
+	// the resolver's own verdict, not the store's, and the engine's
+	// txSchemaResolver makes the same one.
+	if row.Deprecated() {
+		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrRetired, name, version)
+	}
 	return schema.Compile(row.Name, row.Version, []byte(row.Body))
 }
 

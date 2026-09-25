@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 35
+const currentSchemaVersion = 36
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -205,6 +205,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	33: migrateV32ToV33,
 	34: migrateV33ToV34,
 	35: migrateV34ToV35,
+	36: migrateV35ToV36,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2842,6 +2843,57 @@ func migrateV34ToV35(tx *sql.Tx) error {
 	return nil
 }
 
+// v36AddedColumns is v36's whole schema change: one column on `schemas`
+// marking a registered version as retired, the schema half of what v11 gave
+// workflows.
+//
+// `deprecated_at_ms` defaults to NULL, and NULL means "in service" — so every
+// pre-v36 row keeps its exact current meaning without being rewritten, per the
+// never-mutate rule. A timestamp rather than a boolean, for v11's reason: WHEN
+// a version was retired is the audit question, and a flag cannot answer it.
+//
+// RETIREMENT IS NOT DELETION. A retired schema stays readable by explicit
+// `@version`, and a run that pinned it keeps validating payloads against it.
+// The column stops NEW references only: `workflow register`, `workflow lint`,
+// and activation's auto-registration refuse a `payload` that names a retired
+// version.
+var v36AddedColumns = []struct{ table, column, ddl string }{
+	{"schemas", "deprecated_at_ms",
+		`ALTER TABLE schemas ADD COLUMN deprecated_at_ms INTEGER`},
+}
+
+// v36ColumnSentinels are the columns the rewind guard probes, the v27–v35
+// form: v36 adds no table and no index, so a database stamped 36 by a binary
+// built mid-change carries every v35 sentinel and this column never arrives.
+var v36ColumnSentinels = []struct{ table, column string }{
+	{"schemas", "deprecated_at_ms"},
+}
+
+// migrateV35ToV36 adds the schema retirement marker.
+//
+// It BACK-FILLS NOTHING: no registered schema is retired by an upgrade.
+// Retirement is an operator act (`docket schema deprecate`), and a migration
+// that retired anything on its own would be deciding which payloads a project
+// may still declare. `ALTER TABLE ADD COLUMN` is not idempotent in SQLite, so
+// the migration probes first and stays re-runnable, the same shape v10 through
+// v35 use.
+func migrateV35ToV36(tx *sql.Tx) error {
+	for _, col := range v36AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v35 to v36: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v35 to v36: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3566,6 +3618,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 34
+				break
+			}
+		}
+	}
+
+	// The v36 guard, in the same COLUMN form as v35 and for its reason: v36
+	// adds one column and no table, so a database stamped 36 by a binary built
+	// mid-change carries every v35 sentinel and `schemas.deprecated_at_ms`
+	// never arrives.
+	if version >= 36 {
+		for _, col := range v36ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v36 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 35
 				break
 			}
 		}

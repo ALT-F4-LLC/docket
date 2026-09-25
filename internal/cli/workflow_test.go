@@ -44,6 +44,7 @@ func workflowListCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 	cmd.Flags().Int("limit", limit, "")
 	cmd.Flags().Bool("orphans", false, "")
 	cmd.Flags().Bool("deprecated", false, "")
+	cmd.Flags().String("project", "", "")
 	return cmd
 }
 

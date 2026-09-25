@@ -501,9 +501,30 @@ registered. `--restore` reverses a retirement. There is deliberately **no
 delete verb**: old versions stay registered, which is what keeps lineage
 readable.
 
+A registered schema version may likewise be retired with
+`docket schema deprecate <name>@<version>` *(amended 2026-09-24 — DKT-2792)*.
+The contract is the workflow one applied to the other registry: the row stays,
+`schema show` at an explicit `@version` still renders it, `--body` still emits
+the registered bytes, and a run that pinned it still validates its payloads
+against it. What retirement stops is **new references**: `workflow register`,
+`workflow lint`, and activation's auto-registration refuse a step whose
+`payload` names a retired version, naming the schema and the restore remedy.
+`schema list` hides retired versions unless `--deprecated` is passed, a bare
+`schema show NAME` resolves the highest version still in service, and
+`registry audit` reports an orphaned schema whose every version is retired as
+`retired: true`. Two refusals the workflow verb lacks: a schema that a workflow
+version **still in service** names as a payload is refused (`CONFLICT`, listing
+the referencing versions, no override — retire or re-version those workflows
+first), and the builtin schema shipped in the binary cannot be retired, since it
+is visible to every project through its flag. `--restore` reverses a
+retirement.
+
 A registry is **per project** (`UNIQUE(project_id, name, version)`), and
-`workflow register`, `workflow deprecate`, and `schema register` therefore
-accept `--project <ref>` and `--all-projects` *(amended 2026-08-24 — DKT-615)*.
+`workflow register`, `workflow deprecate`, `schema register`, and
+`schema deprecate` therefore
+accept `--project <ref>` and `--all-projects` *(amended 2026-08-24 — DKT-615;
+`schema deprecate` added 2026-09-24 — DKT-2792, reporting `in-use` as its own
+per-project outcome)*.
 Without either flag each verb writes to the project the working directory
 resolves to, unchanged, and emits the row it always emitted. With either flag it
 emits a **per-project report** instead — one outcome per target
@@ -518,6 +539,18 @@ agree and GENERAL_ERROR when they do not, having already written the report.
 being written to — the same bytes can be valid in one project and name a schema
 that does not exist in the next, and storing them there anyway would defer a
 guaranteed activation failure. Register schemas store-wide first.
+
+The two registry-**reading** verbs that plan those writes, `workflow list` and
+`workflow lint`, accept `--project <ref>` alone *(amended 2026-09-24 —
+DKT-2793)*, taking the same ref forms (prefix, name, identity path, row id) and
+failing on an unknown ref with the same error. `workflow list --project B`
+lists B's registry, with `--deprecated`, `--orphans`, and `--name` applying
+there; `workflow lint <file> --project B` resolves `vote_rule` and `payload`
+references in B and reports `new` / `unchanged` / CONFLICT against B's rows —
+the verdict `workflow register --project B` would reach. Neither takes
+`--all-projects`: each emits one project's payload, and the store-wide reading
+is `registry audit`'s. A project whose checkout is missing from this machine
+can therefore be read from any other, as it could already be written.
 
 `[match]` also accepts `domain_paths = [..]`, a list of path globs naming the paths
 this pipeline's domain occupies *(amended 2026-09-03 — DKT-1182)*. **It binds nothing.**

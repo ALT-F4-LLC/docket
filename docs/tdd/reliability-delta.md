@@ -1048,6 +1048,36 @@ amendment, not a stage: three additive columns with defaults, a
 a rewind guard that probes the COLUMNS (the v27–v34 form, since v35 adds no
 table and no index). No v5–v10 column, table, or count changes.
 
+### AMENDMENT — the span extends to v36 (schema retirement, 2026-09-24)
+
+**What changed.** v36 adds ONE column to one table, `schemas.deprecated_at_ms`
+(`INTEGER`, NULL by default). It is the schema half of v11's
+`workflows.deprecated_at_ms`: a timestamp marking a registered schema version
+as retired from service. NULL means the version is in service, exactly as it
+did before the column existed.
+
+**Why it needed a version.** `docket registry audit` reports orphaned schemas,
+but a schema no file declares had no way to be retired: `docket schema`
+offered only `register`, `list`, and `show`, and the only way to clear an
+orphan was a direct edit to the store. `docket schema deprecate` sets the
+timestamp and never deletes. A retired version stays readable by explicit
+`@version` and keeps validating payloads for every run that pinned it;
+`workflow register`, `workflow lint`, and activation's auto-registration refuse
+a NEW `payload` reference to it; `schema list` hides it by default; and
+`registry audit` reports an orphan whose every version is retired as
+`retired: true`, as it already did for workflows.
+
+**NULL means in service, and nothing else.** The migration back-fills nothing:
+retirement is an operator act, and no schema is retired by an upgrade. Every
+pre-v36 row reads as a version in service, which is what the column can
+truthfully say about it.
+
+**Why the ratified arithmetic is untouched.** Like v11–v35, v36 is an
+amendment, not a stage: one additive nullable column, a `hasColumn`-probed
+`ALTER` so the migration is idempotent and re-runnable, and a rewind guard that
+probes the COLUMN (the v27–v35 form, since v36 adds no table and no index). No
+v5–v10 column, table, or count changes.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

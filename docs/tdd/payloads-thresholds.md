@@ -415,13 +415,14 @@ U3 exists because it is not hypothetical: group 1 ships `schemas`, group 2
 ships `action_results`, and the operator's own tracker is migrated by whichever
 binary happens to be built between them.
 
-## 4.5 `docket schema register|list|show`
+## 4.5 `docket schema register|list|show|deprecate`
 
 | Verb | Flags | Effect |
 |---|---|---|
 | `docket schema register <name@version> <file.json>` | `--json[=v2]` | read; parse as JSON; validate as a schema document (the library compiles it — a schema that does not compile is refused here, not at first use); derive the ordered index (§4.3); insert per §4.4's three outcomes |
-| `docket schema list` | `--json[=v2]` | registered schemas: `name`, `version`, `sha256`, `ordered_fields`, `builtin`, `created_at_ms`. A `Collection` envelope under v2, per the `workflow list` precedent |
-| `docket schema show <name@version>` | `--json[=v2]`, `--body` | the row; `--body` emits the registered **bytes verbatim** (what a run validates against, not a re-serialization) |
+| `docket schema list` | `--json[=v2]`, `--deprecated` | registered schemas: `name`, `version`, `sha256`, `ordered_fields`, `builtin`, `created_at_ms`. A `Collection` envelope under v2, per the `workflow list` precedent. Retired versions are hidden unless `--deprecated` is passed; v2 items carry `deprecated_at_ms` when set *(amended 2026-09-24 — DKT-2792)* |
+| `docket schema show <name@version>` | `--json[=v2]`, `--body` | the row; `--body` emits the registered **bytes verbatim** (what a run validates against, not a re-serialization). A bare name resolves the highest version still in service; an explicit `@version` resolves a retired one |
+| `docket schema deprecate <name@version>` | `--json[=v2]`, `--restore`, `--project`, `--all-projects` | sets `deprecated_at_ms` and never deletes; refuses (CONFLICT, no override) a version a workflow still in service names as `payload`, naming the referencers, and refuses the builtin. `workflow register`, `workflow lint`, and auto-registration refuse a new `payload` reference to a retired version; runs that pinned it are untouched *(amended 2026-09-24 — DKT-2792; engine-spec §11.1)* |
 
 **`name@version` is an argument, not two flags** — §1's surface line is
 `docket schema register name@v schema.json` and it is followed exactly. The

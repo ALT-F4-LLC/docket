@@ -29,7 +29,15 @@ resolve against what is registered, and the verdict reports whether a real
 register would be NEW, UNCHANGED (identical bytes already registered), or a
 CONFLICT (different bytes at a frozen name@version — bump [pipeline].version
 to adopt the edit). The conflict case fails the lint: a definition that can
-never register as-is has not passed.`,
+never register as-is has not passed.
+
+A registry is PER PROJECT, and so is the verdict. By default the references
+resolve and the registration probe runs against the project the working
+directory resolves to; --project runs them against one other project's
+registry instead, so the verdict is the one 'docket workflow register
+--project <ref>' would reach there. It takes the same refs the writing verbs
+take (PREFIX, NAME, IDENTITY, or row id), so a project whose checkout is
+missing from this machine can still be linted against from any other.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowLint(cmd, args, getWriter(cmd))
@@ -55,6 +63,14 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 		return err
 	}
 
+	// ONE project for every question below. The vote-rule check, the schema
+	// check, and the registration probe must all consult the same registry,
+	// or the verdict would be a composite no single `register` could reach.
+	projectID, err := resolveReadProject(cmd, conn)
+	if err != nil {
+		return err
+	}
+
 	// The SAME pipeline register runs, call for call, so the two cannot drift:
 	// grammar and step rules (workflow.Load), vote rules against the config
 	// registry (V26), threshold fields and literals against the registered
@@ -63,10 +79,7 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 	if err != nil {
 		return workflowErr(err)
 	}
-	if err := workflow.ValidateVoteRules(def, voteRuleResolver{conn, getProjectID(cmd)}); err != nil {
-		return workflowErr(err)
-	}
-	if err := workflow.ValidateSchemas(def, schemaResolver{conn, getProjectID(cmd)}); err != nil {
+	if err := validateWorkflowEnvironment(conn, def, projectID); err != nil {
 		return workflowErr(err)
 	}
 
@@ -91,7 +104,7 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 	// different bytes.
 	sum := workflow.SHA256(src)
 	registration := "new"
-	existing, err := db.GetWorkflow(conn, getProjectID(cmd), def.Pipeline.Name, def.Pipeline.Version)
+	existing, err := db.GetWorkflow(conn, projectID, def.Pipeline.Name, def.Pipeline.Version)
 	switch {
 	case errors.Is(err, db.ErrWorkflowNotFound):
 		// Free slot; a register would insert.
@@ -123,5 +136,6 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 }
 
 func init() {
+	addProjectReadFlag(workflowLintCmd, "Lint against the registry")
 	workflowCmd.AddCommand(workflowLintCmd)
 }
