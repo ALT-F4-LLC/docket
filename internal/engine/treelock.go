@@ -28,6 +28,17 @@ import (
 // pid-file scheme would need stale-lock detection, which needs deciding whether
 // a pid is alive — the "probe-once death evidence" doctrine engine-core §5
 // retires.
+//
+// WHICH TREES TAKE IT (L2, as amended). The lock guards the SHARED CHECKOUT:
+// the one tree several steps' gates can be measuring at once. A gate that runs
+// in a step's own `--worktree`, or in a pre-gate's scratch reconstruction,
+// takes no lock at all — that tree has one step behind it, and keying every
+// tree's gate to one per-project file serialized a whole wave's records and
+// claim-time pre-gates behind each other until the 5m bound expired, which
+// recorded correct work as unmeasured and pushed claims past the executor's
+// tool timeout. Engine actions always run in the shared checkout
+// (action_exec.go) and keep the lock unchanged. The decision lives in
+// gate_exec.go's sharesCheckout; this file only provides the mutex.
 
 // treeLockPollInterval bounds how often a blocked acquisition retries. flock's
 // blocking mode cannot be given a deadline directly, so the lock is taken

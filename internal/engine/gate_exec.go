@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -363,7 +364,16 @@ func (r *ExecRunner) spawnMatched(
 	// L3: the lock is acquired IMMEDIATELY BEFORE the spawn and released
 	// IMMEDIATELY AFTER, outside every transaction and never held across a
 	// database write.
-	if entry.Tree {
+	//
+	// ONLY A GATE ON THE SHARED CHECKOUT TAKES IT (L2). The mutex exists so
+	// two builds cannot race one tree; a gate measuring a step's own worktree
+	// or a pre-gate's scratch reconstruction has that tree to itself, and
+	// serializing it against every other worktree's gate on one per-project
+	// lock is what queued a wave's records behind each other until the
+	// 5m bound expired and parked correct work as unmeasured. Two gates on
+	// the SAME isolated worktree are not serialized either; that tree has one
+	// step behind it, and the trade is accepted in §7.4.
+	if entry.Tree && sharesCheckout(dir, r.RepoRoot) {
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
 			// L4/L7: the serialization the gate requires cannot be provided, so
@@ -420,6 +430,19 @@ func (r *ExecRunner) spawnMatched(
 	}
 
 	return out, nil
+}
+
+// sharesCheckout reports whether a gate's working directory IS the shared
+// checkout, the one tree more than one step can be measuring at once.
+//
+// A plain cleaned-path comparison, the same test gateBaseSHA applies to a
+// step's work root, and with the same limit: a worktree reached through a
+// symlink to the checkout reads as isolated. That errs toward not locking,
+// which is the direction the per-project lock's own failure taught — an
+// unlocked gate on a shared tree risks a racing build, a locked gate on an
+// isolated tree risks a wave parked behind a lock nobody needed.
+func sharesCheckout(dir, repoRoot string) bool {
+	return dir == "" || filepath.Clean(dir) == filepath.Clean(repoRoot)
 }
 
 // stepRef renders a step id for the child environment, or "" when there is no
