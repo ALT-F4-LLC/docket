@@ -35,8 +35,8 @@ import (
 //
 // Known limit: a foreign export merged into a project that already holds its
 // own rows under the same ids is indistinguishable from the project's own
-// export, and those rows are skipped rather than remapped. Before this change
-// that case failed the whole import on the first label mapping.
+// export, and those rows are skipped rather than remapped. Import a foreign
+// export into a fresh project instead, which is the consolidation path.
 type importRemap struct {
 	tx *sql.Tx
 	// remapped counts the ids reassigned; a label matched by name is not one.
