@@ -1081,8 +1081,18 @@ func (e *Engine) runRoutingStage(
 		// reads "" and so does a first empty diff, and comparing the two
 		// strings alone suppressed exactly the record DKT-259 keeps: a
 		// genuine first "nothing changed".
-		if latest, ok := latestIssueDiffBody(conn, step.RunID, step.IssueID); ok &&
-			latest == diffBody {
+		//
+		// IDENTICAL MEANS BODY AND PAYLOAD. The payload names the head and
+		// worktree every consumer renders as the target under review, and a
+		// retry that lands the same patch on a fresh base produces the same
+		// body at a NEW head in a NEW worktree. Comparing bodies alone dropped
+		// that record, so every downstream packet targeted the prior
+		// attempt's commit and its swept worktree, and the verify chain
+		// judged a tree the step had already superseded. A gate-only re-run
+		// over an untouched tree still yields the same body AND the same
+		// payload, so it is still suppressed, which keeps `rerun-gates` honest.
+		if latest, ok := latestIssueDiffRecord(conn, step.RunID, step.IssueID); ok &&
+			latest.body == diffBody && latest.payload == diffPayload {
 			wantsDiff = false
 		}
 	}
@@ -3673,25 +3683,34 @@ func measureDiff(body string) DiffFacts {
 	return facts
 }
 
-// latestIssueDiffBody is the issue's newest recorded `issue.diff` body, and
+// issueDiffRecord is one recorded `issue.diff` as the byte-identical guard
+// compares it: the body and the round-record payload that names its head and
+// worktree.
+type issueDiffRecord struct {
+	body    string
+	payload string
+}
+
+// latestIssueDiffRecord is the issue's newest recorded `issue.diff`, and
 // whether one exists.
 //
 // It answers false on a read failure too, which is indistinguishable from "no
 // diff yet" and is the right collapse: both mean "no reason to suppress", and a
 // guard that suppresses writes must fail toward recording. An extra artifact is
-// noise; a lost one is evidence. The flag is separate from the body because an
-// EMPTY recorded body is a real record, and "" alone cannot say which it is.
-func latestIssueDiffBody(conn *sql.DB, runID, issueID int) (string, bool) {
-	var body string
+// noise; a lost one is evidence. The flag is separate from the record because
+// an EMPTY recorded body is a real record, and "" alone cannot say which it is.
+func latestIssueDiffRecord(conn *sql.DB, runID, issueID int) (issueDiffRecord, bool) {
+	var rec issueDiffRecord
 	err := conn.QueryRow(
-		`SELECT a.body FROM artifacts a JOIN steps s ON s.id = a.step_id
+		`SELECT a.body, COALESCE(a.payload, '') FROM artifacts a
+		  JOIN steps s ON s.id = a.step_id
 		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
 		  ORDER BY a.id DESC LIMIT 1`,
-		runID, issueID, ArtifactKindIssueDiff).Scan(&body)
+		runID, issueID, ArtifactKindIssueDiff).Scan(&rec.body, &rec.payload)
 	if err != nil {
-		return "", false
+		return issueDiffRecord{}, false
 	}
-	return body, true
+	return rec, true
 }
 
 // issueHasRecordedChange reports whether the issue already has an `issue.diff`
