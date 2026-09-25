@@ -183,6 +183,12 @@ func (e *Engine) OpenDispatch(
 		return nil, err
 	}
 
+	// Scratch trees whose claims died before releasing them are reclaimed
+	// here, before any step is offered: a wave's worth of claims is about to
+	// reconstruct trees beside them, and this is the safe point a killed
+	// claim never reached. Best-effort by construction (pregate_scratch.go).
+	sweepStalePreGateScratch(runExecRoot(conn, runID))
+
 	// DKT-105 / DKT-89: action and vote steps are ENGINE-RUN — no dispatcher
 	// ever claims one, `claim` refuses them outright — and a dispatcher that
 	// only ever calls `dispatch open` never calls `next`, so this verb must
@@ -1904,6 +1910,10 @@ func (e *Engine) CloseDispatch(
 	if err != nil {
 		return nil, err
 	}
+
+	// The wave is over: any scratch tree still registered with no live claim
+	// behind it is a leak, and this is the other safe point that reclaims it.
+	sweepStalePreGateScratch(runExecRoot(conn, runID))
 
 	integration, unintegrated, err := e.integrationVerdict(conn, runID, defs, skipIntegrationReason, nowMS)
 	if err != nil {

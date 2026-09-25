@@ -487,7 +487,9 @@ func isScratchShapedPath(path string) bool {
 // only, never FAIL, and doctorDisposition excludes it from `clean` on top of
 // that, so a straggler can never itself block an attach. It exists to be
 // SEEN, not acted on by this verb: reclaiming one is `git worktree prune`'s
-// job (or the owning session's own close sweep), and doctor is read-only.
+// job (or the owning session's own close sweep; a pre-gate scratch tree whose
+// claim died is reclaimed by the next dispatch open or close), and doctor is
+// read-only.
 func checkDoctorStragglers(cwd string) DoctorCheck {
 	out, err := osexec.Command("git", gitDirArgs(cwd, "worktree", "list", "--porcelain")...).Output()
 	if err != nil {
