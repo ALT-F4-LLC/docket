@@ -79,6 +79,23 @@ type runListResult struct {
 	limit int
 }
 
+// newRunListResult builds the list result with an empty collection rendered as
+// `[]`, never `null`.
+//
+// db.ListRuns returns a nil slice when nothing matches, and encoding/json
+// renders a nil slice as `null`. The v2 Collection path never showed it — its
+// items go through runListPayload — but the v1 dialect marshals this struct
+// directly, so a project with no non-terminal run printed `"runs":null` and a
+// reader iterating `.data.runs[]` failed on it. `step list --issue` settled the
+// rule for an empty collection: it is `[]`, and the normalization lives where
+// the result is built so no marshaling path can miss it.
+func newRunListResult(runs []*model.Run, total, limit int) runListResult {
+	if runs == nil {
+		runs = []*model.Run{}
+	}
+	return runListResult{Runs: runs, Total: total, limit: limit}
+}
+
 func (r runListResult) CollectionItems() any { return runListPayload{runs: r.Runs} }
 func (r runListResult) CollectionTotal() int { return r.Total }
 func (r runListResult) CollectionTruncated() bool {
@@ -112,7 +129,7 @@ func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	result := runListResult{Runs: runs, Total: total, limit: limit}
+	result := newRunListResult(runs, total, limit)
 	var message string
 	if !w.JSONMode {
 		message = renderRunList(runs)
