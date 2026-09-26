@@ -107,6 +107,7 @@ type Registered struct {
 
 	fields   map[string]Field
 	names    []string
+	required []string
 	compiled *jsonschema.Schema
 }
 
@@ -150,6 +151,7 @@ func Compile(name string, version int, body []byte) (*Registered, error) {
 		Ordered:  indexFromFields(fields, names),
 		fields:   fields,
 		names:    names,
+		required: deriveRequired(doc),
 		compiled: compiled,
 	}, nil
 }
@@ -198,6 +200,19 @@ func (r *Registered) ValidateMember(field, value string) error {
 			value, r.Ref(), field, strings.Join(f.Enum, ", "))
 	}
 	return nil
+}
+
+// RequiredProperties lists the keys the document declares REQUIRED of a payload
+// element, in the author's declared order.
+//
+// It reads the same subschema FieldNames does — an array document's item
+// schema, or the root of an object document — because that is the level a
+// payload element is written at. A document declaring none returns none: the
+// caller states no contract rather than inventing one.
+func (r *Registered) RequiredProperties() []string {
+	out := make([]string, len(r.required))
+	copy(out, r.required)
+	return out
 }
 
 // FieldNames lists the declared top-level properties, in document order.

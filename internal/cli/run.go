@@ -57,10 +57,10 @@ func unknownRunVerb(cmd *cobra.Command, verb string) error {
 
 // runVerbSuggestions maps a verb an operator plausibly reaches for onto the one
 // that actually exists. `list` is the observed miss: runs are enumerated by
-// `run status --active`, which is not a name anyone guesses.
+// `run status`, which is not a name anyone guesses.
 var runVerbSuggestions = map[string]string{
-	"list": "run status --active",
-	"ls":   "run status --active",
+	"list": "run status",
+	"ls":   "run status",
 	"show": "run status RUN-N",
 	"log":  "run report RUN-N",
 }
@@ -103,6 +103,8 @@ func runErr(err error) error {
 			return cmdErr(err, output.ErrConflict)
 		case engine.CodeGone:
 			return cmdErr(err, output.ErrGone)
+		case engine.CodeAuth:
+			return cmdErr(err, output.ErrAuth)
 		}
 	}
 	switch {

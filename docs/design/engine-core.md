@@ -352,7 +352,7 @@ consequences, mechanically:
   so no torn state exists.
 - **Dispatcher session dies** ⇒ nothing happens. Leases lapse; the run sits `active`
   with a ready set. Any new dispatcher session picks up exactly where things stood —
-  the reference harness injects `docket run status --active` at session start so
+  the reference harness injects `docket run status` at session start so
   resumption is automatic (upstream 03 §7). There is no handoff narrative, no
   crash-recovery doctrine.
 - **Docket contention** ⇒ SQLite WAL + busy timeout + single-transaction claims

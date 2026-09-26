@@ -188,3 +188,46 @@ func TestRunStepListEnumeratesTheRun(t *testing.T) {
 		t.Error("RunStepList(absent run) returned no error")
 	}
 }
+
+// TestStepRowCarriesLoopHistory pins the projection half of the loop-history
+// fields: a step whose history db.SetStepLoopHistoryTx wrote must show all
+// three values on the row StepRowFor renders (the row behind `next`,
+// `dispatch open`, `step show`, and claim context), and a step with none must
+// show zero values. The columns alone disclose nothing to a reader.
+func TestStepRowCarriesLoopHistory(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	id := stepIDByInstance(t, conn, "implement@0")
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = db.SetStepLoopHistoryTx(tx, id, 3, "review@0#0", "needs-fix", nowMS)
+	testsupport.Must(t, err, "SetStepLoopHistoryTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	ttls, err := loadTTLConfig(conn, run.ID)
+	testsupport.Must(t, err, "loadTTLConfig: %v", err)
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		row, err := StepRowFor(sched, stepNamed(t, sched, "implement@0"), ttls)
+		testsupport.Must(t, err, "StepRowFor(implement@0): %v", err)
+		if row.LoopRoundsRun != 3 {
+			t.Errorf("loop_rounds_run = %d, want 3", row.LoopRoundsRun)
+		}
+		if row.LoopTriggerStep != "review@0#0" {
+			t.Errorf("loop_trigger_step = %q, want %q", row.LoopTriggerStep, "review@0#0")
+		}
+		if row.LoopLatestVerdict != "needs-fix" {
+			t.Errorf("loop_latest_verdict = %q, want %q", row.LoopLatestVerdict, "needs-fix")
+		}
+
+		fresh, err := StepRowFor(sched, stepNamed(t, sched, "review@0#0"), ttls)
+		testsupport.Must(t, err, "StepRowFor(review@0#0): %v", err)
+		if fresh.LoopRoundsRun != 0 || fresh.LoopTriggerStep != "" ||
+			fresh.LoopLatestVerdict != "" {
+			t.Errorf("row without loop history = (%d, %q, %q), want zero values",
+				fresh.LoopRoundsRun, fresh.LoopTriggerStep, fresh.LoopLatestVerdict)
+		}
+	})
+}

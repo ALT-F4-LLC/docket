@@ -304,6 +304,169 @@ func TestRenderIsDeterministicAtFixedState(t *testing.T) {
 	}
 }
 
+// TestPacketStatesThePayloadContract pins that a step declaring a `payload`
+// schema renders the keys that payload must carry, so a worker can satisfy the
+// contract without fetching the schema separately. Naming the schema and its
+// hash told a worker only which document to go and read.
+func TestPacketStatesThePayloadContract(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "reconcile@0")
+
+	result, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+
+	// `findings@1`, the fixture's declared schema, requires `severity`.
+	for _, want := range []string{"required", "severity"} {
+		if !strings.Contains(result.Packet, want) {
+			t.Errorf("the packet does not state the payload contract (%q missing):\n%s",
+				want, result.Packet)
+		}
+	}
+}
+
+// TestPacketListsMultipleRequiredKeys pins the exact required-properties line
+// for a schema requiring more than one key: the label, the keys in the author's
+// order, and the separator between them. The committed fixture requires a
+// single key, so its render never executes the template's separator branch,
+// and every schema this line serves in practice is multi-key.
+//
+// The two-key schema registers under the fixture's own `findings@1` ref so the
+// committed workflow binds unchanged; its threshold still needs `severity` to
+// be an ordered enum, which the body keeps.
+func TestPacketListsMultipleRequiredKeys(t *testing.T) {
+	conn := mustDB(t)
+	registerSchemaFixture(t, conn, "findings", 1, `{
+		"type": "array",
+		"items": {
+			"type": "object",
+			"properties": {
+				"severity": {
+					"type": "string",
+					"enum": ["info", "low", "medium", "high", "blocker"],
+					"ordered_enum": true
+				},
+				"status": { "type": "string", "enum": ["met", "unmet"] }
+			},
+			"required": ["severity", "status"]
+		}
+	}`)
+	src, err := os.ReadFile(fixturePath)
+	testsupport.Must(t, err, "reading fixture: %v", err)
+	registerSource(t, conn, src, fixturePath)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	stepID := stepIDByInstance(t, conn, "reconcile@0")
+
+	result, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+
+	want := "Each payload element carries these required properties: severity, status"
+	for _, line := range strings.Split(result.Packet, "\n") {
+		if line == want {
+			return
+		}
+	}
+	t.Errorf("no line of the packet reads exactly %q:\n%s", want, result.Packet)
+}
+
+// TestPacketOmitsTheContractWhenNoPayloadIsDeclared keeps the addition dormant
+// for a step with no `payload`: nothing new appears, so a definition that
+// declares none renders exactly as before.
+func TestPacketOmitsTheContractWhenNoPayloadIsDeclared(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	result, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+
+	if strings.Contains(result.Packet, "required properties") {
+		t.Errorf("a step declaring no payload rendered a payload contract:\n%s",
+			result.Packet)
+	}
+}
+
+// TestPacketDegradesOnUnresolvablePin pins payloadRequiredKeys' degradation:
+// a declared payload ref the run did not pin yields a packet with the schema
+// line and NO required-properties line, rather than a refusal. Rendering is how
+// a worker learns what to do; `step complete` reports the broken pin set
+// precisely, and withholding the packet would replace that diagnosable failure
+// with a worker that never started.
+//
+// Activation pins every referenced schema, so the state is reached by removing
+// the pin afterwards — the same shape as a run whose pin set was restored
+// without it.
+func TestPacketDegradesOnUnresolvablePin(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	execSQL(t, conn, `DELETE FROM pins WHERE run_id = ? AND kind = ? AND ref = ?`,
+		run.ID, db.PinKindSchema, "findings@1")
+	stepID := stepIDByInstance(t, conn, "reconcile@0")
+
+	result, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "a step whose payload ref is not pinned refused to "+
+		"render: %v — the packet degrades, it does not withhold", err)
+
+	assertContractDegraded(t, result.Packet)
+}
+
+// TestPacketDegradesOnUnregisteredSchema is the second refusal class
+// payloadRequiredKeys degrades on: the ref is pinned but the registry row
+// behind it is gone. Like an absent pin, `step complete` reports it precisely,
+// so the packet renders without the contract line rather than refusing.
+func TestPacketDegradesOnUnregisteredSchema(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	execSQL(t, conn, `DELETE FROM schemas WHERE name = ? AND version = ?`, "findings", 1)
+	stepID := stepIDByInstance(t, conn, "reconcile@0")
+
+	result, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "a step whose pinned schema is no longer registered "+
+		"refused to render: %v — the packet degrades, it does not withhold", err)
+
+	assertContractDegraded(t, result.Packet)
+}
+
+// TestRenderPropagatesPinReadFailure draws the line the two degradation tests
+// sit on the other side of: a store that cannot ANSWER the pin resolution is
+// not a pin that does not resolve. The failure propagates out of RenderStepAs,
+// as the template and packet-file pin reads already do, rather than rendering a
+// packet whose contract line is missing for a reason nothing reports.
+//
+// The schemas table is dropped rather than the pins table because the context
+// bundle lists pins first; a pins failure would surface there and never reach
+// payloadRequiredKeys. A missing schemas table reaches it alone.
+func TestRenderPropagatesPinReadFailure(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	execSQL(t, conn, `DROP TABLE schemas`)
+	stepID := stepIDByInstance(t, conn, "reconcile@0")
+
+	_, err := RenderStep(conn, stepID, "", nowMS)
+	if err == nil {
+		t.Fatal("a render over an unreadable schema store produced a packet; the " +
+			"store failure was discarded as if the ref merely did not resolve")
+	}
+	if code, ok := CodeOf(err); ok && code == CodeValidation {
+		t.Errorf("a store failure surfaced as a validation refusal: %v", err)
+	}
+}
+
+// assertContractDegraded requires a packet that still names its payload schema
+// and carries no required-properties line.
+func assertContractDegraded(t *testing.T, packet string) {
+	t.Helper()
+	if !strings.Contains(packet, "Its payload must satisfy the schema: findings@1") {
+		t.Errorf("the packet dropped the schema line:\n%s", packet)
+	}
+	if strings.Contains(packet, "required properties") {
+		t.Errorf("the packet states required properties it could not read:\n%s", packet)
+	}
+}
+
 // TestAttemptNumberingPreAndPostClaim pins DKT-64's reconciliation: `attempt`
 // is ONE monotonic, 0-based, spent-count column, and every surface — the
 // ready-steps row `next --run` reads, the rendered packet header, and a

@@ -26,6 +26,7 @@ var createCmd = &cobra.Command{
 		description, _ := cmd.Flags().GetString("description")
 		status, _ := cmd.Flags().GetString("status")
 		priority, _ := cmd.Flags().GetString("priority")
+		size, _ := cmd.Flags().GetString("size")
 		kind, _ := cmd.Flags().GetString("type")
 		labelFlag, _ := cmd.Flags().GetStringSlice("label")
 		fileFlag, _ := cmd.Flags().GetStringSlice("file")
@@ -82,6 +83,17 @@ var createCmd = &cobra.Command{
 							huh.NewOption("critical", "critical"),
 						).
 						Value(&priority), // pre-selects flag default ("none")
+					huh.NewSelect[string]().
+						Title("Size").
+						Options(
+							huh.NewOption("(none)", ""),
+							huh.NewOption("trivial", "trivial"),
+							huh.NewOption("small", "small"),
+							huh.NewOption("bounded", "bounded"),
+							huh.NewOption("needs-design", "needs-design"),
+							huh.NewOption("unknown", "unknown"),
+						).
+						Value(&size), // pre-selects flag default ("")
 					huh.NewSelect[string]().
 						Title("Type").
 						Options(
@@ -148,6 +160,15 @@ var createCmd = &cobra.Command{
 		if err := model.ValidatePriority(model.Priority(priority)); err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
+		// Size is validated only when given: unlike Priority, whose "none" is
+		// itself a valid value, an unset --size leaves the flag default ""
+		// (SizeNone), which ValidateSize refuses — the default must NOT be
+		// validated, or `issue create` with no --size at all would fail.
+		if size != "" {
+			if err := model.ValidateSize(model.Size(size)); err != nil {
+				return cmdErr(err, output.ErrValidation)
+			}
+		}
 		if err := model.ValidateIssueKind(model.IssueKind(kind)); err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
@@ -170,6 +191,7 @@ var createCmd = &cobra.Command{
 			Description: description,
 			Status:      model.Status(status),
 			Priority:    model.Priority(priority),
+			Size:        model.Size(size),
 			Kind:        model.IssueKind(kind),
 			Assignee:    assignee,
 		}
@@ -214,6 +236,7 @@ func init() {
 	createCmd.Flags().StringP("description", "d", "", "Issue description (use \"-\" for stdin)")
 	createCmd.Flags().StringP("status", "s", "backlog", "Issue status")
 	createCmd.Flags().StringP("priority", "p", "none", "Issue priority")
+	createCmd.Flags().String("size", "", "Issue size (trivial, small, bounded, needs-design, unknown)")
 	createCmd.Flags().StringP("type", "T", "task", "Issue type")
 	createCmd.Flags().StringSliceP("label", "l", nil, "Issue labels (repeatable)")
 	createCmd.Flags().StringSliceP("file", "f", nil, "File paths (repeatable)")

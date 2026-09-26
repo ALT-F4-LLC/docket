@@ -452,3 +452,356 @@ func TestRunReportRollsUpVoteUsage(t *testing.T) {
 		t.Errorf("tokens rollup = %+v, want 300 across 2 seat reports", tokens)
 	}
 }
+
+// complementarityPayload has one UNIQUE cluster (a scalar severity, one
+// member) and one CORROBORATED cluster (two members) — the exact shape
+// DKT-2452's acceptance criteria names, and low enough on the ladder that
+// neither reaches the fixture's `hold_spread = 2`, so `reconcile` routes
+// straight through with no vote panel to drive first.
+const complementarityPayload = `[
+  {"id":"C-1","severity":"low","member_ids":["a-1"]},
+  {"id":"C-2","severity":["medium","high"],"member_ids":["a-2","b-1"]}
+]`
+
+// TestRunReportRollsUpComplementarity is DKT-2452: the run report gains a
+// section computing, per `aggregate` step, unique versus corroborated
+// cluster counts from `members`' length and the judge-artifact count that fed
+// the round, from `step_inputs` on the producer step (`synthesize`).
+//
+// It reads `members`, not the payload's own `member_ids` — see
+// ClusterComplementarity's doc comment for why: `members` is engine-owned and
+// generic, `member_ids` is the workflow author's own linkage key, and the two
+// agree in length wherever both exist.
+func TestRunReportRollsUpComplementarity(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.Complementarity) != 1 {
+		t.Fatalf("complementarity = %+v, want exactly one aggregate step's row",
+			report.Complementarity)
+	}
+	row := report.Complementarity[0]
+	if row.Instance != "reconcile@0" {
+		t.Errorf("instance = %q, want reconcile@0", row.Instance)
+	}
+	if row.Unique != 1 || row.Corroborated != 1 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/1: %+v",
+			row.Unique, row.Corroborated, row)
+	}
+	wantDist := []MemberCount{{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}}
+	if !reflect.DeepEqual(row.ByMemberCount, wantDist) {
+		t.Errorf("by_member_count = %+v, want %+v", row.ByMemberCount, wantDist)
+	}
+	// The fixture's `synthesize@0` binds `review.*`, fanned out to 4 judges
+	// (§7.5's example): that is the round's judge-artifact count, read off
+	// `step_inputs` at synthesize's own claim rather than off reconcile, which
+	// is never claimed and so never gets step_inputs of its own.
+	if row.InputArtifacts != 4 {
+		t.Errorf("input_artifacts = %d, want 4 (the fixture's 4 review seats)",
+			row.InputArtifacts)
+	}
+	if row.PayloadUnreadable {
+		t.Error("payload_unreadable is set on a well-formed round")
+	}
+}
+
+// TestRunReportOmitsComplementarityBeforeAnyRound is the absent case: an
+// aggregate step that has not yet completed contributes no row, never a
+// zeroed one — the same "absence is not a fact" discipline as
+// TestReportOnAPlanningRunIsAllZeros.
+func TestRunReportOmitsComplementarityBeforeAnyRound(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.Complementarity) != 0 {
+		t.Errorf("complementarity = %+v, want none before reconcile runs",
+			report.Complementarity)
+	}
+}
+
+// TestComplementarityOfCountsTheRecordedSplit unit-tests the pure counter
+// directly, over a below-floor set the way `route_at` (DKT-593) produces
+// one: fully reduced clusters that never reach the step's own artifact
+// payload. TestBuiltinRouteAtSplitsTheOutputFromTheRecord already pins that
+// the builtin routes them into the action's own row; this pins that once
+// read back, they count exactly as an emitted cluster of the same member
+// count would.
+func TestComplementarityOfCountsTheRecordedSplit(t *testing.T) {
+	emitted := []map[string]any{
+		{"id": "B", "severity": "blocker", KeyMembers: []any{"blocker"}},
+	}
+	recorded := []map[string]any{
+		{"id": "A", "severity": "low", KeyMembers: []any{"low", "low"}},
+	}
+
+	unique, corroborated, dist := complementarityOf(emitted, recorded)
+	if unique != 1 || corroborated != 1 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/1 across both sets",
+			unique, corroborated)
+	}
+	want := []MemberCount{{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}}
+	if !reflect.DeepEqual(dist, want) {
+		t.Errorf("distribution = %+v, want %+v", dist, want)
+	}
+}
+
+// TestRecordedBelowFloorReadsOnlyTheLastPassingRow pins the retried-aggregate
+// case: two passing `aggregate` rows for one step (ordinals 0 and 1) with
+// different below-floor sets. Only the ordinal-1 set is the round the newest
+// artifact belongs to, so only it is read and counted.
+func TestRecordedBelowFloorReadsOnlyTheLastPassingRow(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+	step := mustStep(t, conn, "reconcile@0")
+
+	first := `[{"id":"OLD-1","members":["p","q","r"]},{"id":"OLD-2","members":["s"]}]`
+	last := `[{"id":"NEW-1","members":["x","y","z"]}]`
+
+	res, err := conn.Exec(`UPDATE action_results SET output = ?
+		 WHERE step_id = ? AND action = 'aggregate' AND ordinal = 0 AND verdict = ?`,
+		first, step.ID, db.ActionVerdictPass)
+	testsupport.Must(t, err, "updating ordinal 0: %v", err)
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("updated %d ordinal-0 aggregate rows, want 1", n)
+	}
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = db.InsertActionResultTx(tx, db.ActionResultRow{
+		RunID: step.RunID, StepID: step.ID, Action: "aggregate", Ordinal: 1,
+		Output: last, Verdict: db.ActionVerdictPass, Builtin: true,
+		CreatedAtMS: nowMS,
+	})
+	testsupport.Must(t, err, "inserting ordinal 1: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "commit: %v", err)
+
+	recorded, err := recordedBelowFloor(conn, step.ID)
+	testsupport.Must(t, err, "recordedBelowFloor: %v", err)
+	if len(recorded) != 1 || recorded[0]["id"] != "NEW-1" {
+		t.Errorf("recorded = %+v, want only the ordinal-1 set [NEW-1]", recorded)
+	}
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Complementarity) != 1 {
+		t.Fatalf("complementarity = %+v, want one row", report.Complementarity)
+	}
+	row := report.Complementarity[0]
+	// Emitted C-1 (1 member) and C-2 (2), plus NEW-1 (3) counted once.
+	if row.Unique != 1 || row.Corroborated != 2 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/2", row.Unique, row.Corroborated)
+	}
+	want := []MemberCount{
+		{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}, {Members: 3, Clusters: 1},
+	}
+	if !reflect.DeepEqual(row.ByMemberCount, want) {
+		t.Errorf("by_member_count = %+v, want %+v", row.ByMemberCount, want)
+	}
+}
+
+// sourceFieldFixture is the committed fixture with one line added to
+// `reconcile`'s params: `source_field = "member_sources"`. Read from disk
+// rather than duplicated by hand, so a change to the fixture's topology
+// cannot silently drift this variant out of sync with it.
+func sourceFieldFixture(t *testing.T) []byte {
+	t.Helper()
+	src, err := os.ReadFile(fixturePath)
+	testsupport.Must(t, err, "reading fixture: %v", err)
+	old := `params = { field = "severity", method = "median", hold_spread = 2, output = "findings" }`
+	replacement := `params = { field = "severity", method = "median", hold_spread = 2, output = "findings", source_field = "member_sources" }`
+	out := strings.Replace(string(src), old, replacement, 1)
+	if out == string(src) {
+		t.Fatalf("fixture no longer contains reconcile's expected params line; "+
+			"update sourceFieldFixture to match:\n%s", src)
+	}
+	return []byte(out)
+}
+
+// sourcePayload has one cluster whose `member_sources` names a single review
+// seat (unique to that seat's executor) and one whose `member_sources` names
+// two DIFFERENT seats (corroborated across two executors) — the exact shape
+// DKT-2462's acceptance criteria names. The fixture's four review seats each
+// declare a distinct `fanout` hint (judge-correctness, judge-architecture,
+// judge-simplicity, judge-testing), so `review@0#0` and `review@0#1` resolve
+// to two different executors, and the test can tell "unique" from
+// "corroborated" apart by more than count alone.
+const sourcePayload = `[
+  {"id":"C-1","severity":"low","member_ids":["a-1"],"member_sources":["review@0#0"]},
+  {"id":"C-2","severity":["medium","high"],"member_ids":["a-2","b-1"],"member_sources":["review@0#0","review@0#1"]}
+]`
+
+// TestRunReportGroupsClustersBySourceField is DKT-2462: once an `aggregate`
+// step declares `source_field`, the run report groups the round's clusters by
+// each distinct value that field names and resolves it to the producing
+// step's executor hint — grouping by an opaque, workflow-named key rather
+// than a literal `member_sources` core would have to know about (the same
+// discipline `route_at` keeps by taking its floor as a value, not assuming a
+// field name).
+func TestRunReportGroupsClustersBySourceField(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerSource(t, conn, sourceFieldFixture(t), fixturePath)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	driveToReconcile(t, conn, e, sourcePayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.SourceAttribution) != 2 {
+		t.Fatalf("source_attribution = %+v, want one row per distinct source",
+			report.SourceAttribution)
+	}
+
+	byInstance := make(map[string]ClusterSourceAttribution, len(report.SourceAttribution))
+	for _, row := range report.SourceAttribution {
+		byInstance[row.Source] = row
+	}
+
+	unique, ok := byInstance["review@0#0"]
+	if !ok {
+		t.Fatalf("no row for review@0#0: %+v", report.SourceAttribution)
+	}
+	if unique.Clusters != 2 {
+		t.Errorf("review@0#0 clusters = %d, want 2 (it fed both C-1 and C-2)",
+			unique.Clusters)
+	}
+	if unique.Executor != "judge-correctness" {
+		t.Errorf("review@0#0 executor = %q, want judge-correctness (fanout[0])",
+			unique.Executor)
+	}
+
+	corroborating, ok := byInstance["review@0#1"]
+	if !ok {
+		t.Fatalf("no row for review@0#1: %+v", report.SourceAttribution)
+	}
+	if corroborating.Clusters != 1 {
+		t.Errorf("review@0#1 clusters = %d, want 1 (only C-2)", corroborating.Clusters)
+	}
+	if corroborating.Executor != "judge-architecture" {
+		t.Errorf("review@0#1 executor = %q, want judge-architecture (fanout[1])",
+			corroborating.Executor)
+	}
+
+	// C-2 names both sources: that is what makes it CORROBORATED in the
+	// executor-attribution sense — two different executors' review seats
+	// contributed to the same cluster, not one seat's finding merged with
+	// itself.
+	if unique.Instance != "reconcile@0" || corroborating.Instance != "reconcile@0" {
+		t.Errorf("instance = %q / %q, want reconcile@0 on both rows",
+			unique.Instance, corroborating.Instance)
+	}
+}
+
+// TestRunReportOmitsSourceAttributionWithoutTheParam is the absent case:
+// `source_field` undeclared (the committed fixture's `reconcile`, unmodified)
+// produces no section at all, matching Recorded's absent-`route_at`
+// convention rather than an empty-but-present list.
+func TestRunReportOmitsSourceAttributionWithoutTheParam(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.SourceAttribution) != 0 {
+		t.Errorf("source_attribution = %+v, want none: reconcile declares no source_field",
+			report.SourceAttribution)
+	}
+}
+
+// TestReportRendersEvidenceLessFindingsAsUnsupported is DKT-2451's report
+// half: every structured finding a panel recorded rides in the document with
+// the evidence it cited, and an entry that cited nothing is marked
+// unsupported out loud rather than left as a row with an absent list.
+func TestReportRendersEvidenceLessFindingsAsUnsupported(t *testing.T) {
+	conn := mustDB(t)
+	runID, proposalID, artifactID := evidenceRun(t, conn)
+	ref := "artifact:" + model.FormatArtifactID(artifactID)
+
+	findings := &model.Findings{
+		Blockers: []model.Finding{{Text: "the test fails on main", Evidence: []string{ref}}},
+		Concerns: []model.Finding{{Text: "naming could be tighter"}},
+	}
+	err := ValidateCastEvidence(conn, proposalID, findings)
+	testsupport.Must(t, err, "ValidateCastEvidence: %v", err)
+	_, err = db.CastVote(conn, &model.Vote{
+		ProposalID: proposalID, VoterName: "alice", VoterRole: "reviewer",
+		Verdict: model.VerdictReject, Confidence: 0.9, DomainRelevance: 0.8,
+		FindingsJSON: findings,
+	})
+	testsupport.Must(t, err, "CastVote: %v", err)
+
+	report, err := LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Findings) != 2 {
+		t.Fatalf("the report carries %d findings, want 2: %s",
+			len(report.Findings), mustJSON(t, report.Findings))
+	}
+	supported, unsupported := report.Findings[0], report.Findings[1]
+	if supported.Kind != FindingBlocker || supported.Unsupported ||
+		len(supported.Evidence) != 1 || supported.Evidence[0] != ref {
+		t.Errorf("the cited finding rendered as %s", mustJSON(t, supported))
+	}
+	if unsupported.Kind != FindingConcern || !unsupported.Unsupported || len(unsupported.Evidence) != 0 {
+		t.Errorf("the evidence-less finding rendered as %s, want unsupported", mustJSON(t, unsupported))
+	}
+	for _, row := range report.Findings {
+		if row.Proposal != model.FormatProposalID(proposalID) || row.Voter != "alice" || row.Role != "reviewer" {
+			t.Errorf("finding row misattributed: %s", mustJSON(t, row))
+		}
+	}
+}
+
+// TestReportWithholdsFindingsWhileTheBallotIsSealed: a SealedOpen proposal's
+// casts are withheld here exactly as in `vote show` (DKT-2447), and appear
+// once the tally closes the ballot.
+func TestReportWithholdsFindingsWhileTheBallotIsSealed(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedVoteGateRun(t, conn)
+	err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "sealing the rule: %v", err)
+	proposalID := openGateProposal(t, conn, testEngine(), runID)
+
+	cast := func(seat string) {
+		t.Helper()
+		_, err := db.CastVote(conn, &model.Vote{
+			ProposalID: proposalID, VoterName: seat, Verdict: model.VerdictApprove,
+			Confidence: 0.9, DomainRelevance: 0.8,
+			FindingsJSON: &model.Findings{Concerns: []model.Finding{{Text: "from " + seat}}},
+		})
+		testsupport.Must(t, err, "CastVote(%s): %v", seat, err)
+	}
+	cast("alice")
+	report, err := LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Findings) != 0 {
+		t.Fatalf("a sealed, still-open ballot leaked %d finding(s) into the report",
+			len(report.Findings))
+	}
+
+	cast("bob")
+	cast("carol")
+	report, err = LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport after the tally: %v", err)
+	if len(report.Findings) != 3 {
+		t.Errorf("after the tally closed the ballot the report carries %d finding(s), want 3",
+			len(report.Findings))
+	}
+}

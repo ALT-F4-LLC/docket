@@ -87,6 +87,8 @@ TOML
 
   run_env "$ZI" run activate RUN-1 --json
   assert_exit "ZI" "ZI1_activate" 0
+  local ZI_CTOK
+  ZI_CTOK=$(activation_token)
   assert_json "ZI" "ZI1_active" '.data.run.status' "active"
 
   # The claim that lands exactly on the cap: ALLOWED.
@@ -152,7 +154,7 @@ TOML
   # has not changed. Raising a cap mid-run has no verb in v1 — recorded
   # rather than invented here.
   # ---------------------------------------------------------------------------
-  run_env "$ZI" run resume RUN-1 --json
+  DOCKET_TOKEN="$ZI_CTOK" run_env "$ZI" run resume RUN-1 --json
   assert_exit "ZI" "ZI2_resume" 0
   assert_json "ZI" "ZI2_resumed_active" '.data.status' "active"
 

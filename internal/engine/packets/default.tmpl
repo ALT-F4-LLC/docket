@@ -18,6 +18,11 @@ target_worktree: {{.TargetWorktree}}
 
 == REQUEST
 {{.Issue.BodySnapshot}}
+{{- range .Notes}}
+
+== RUN NOTE {{.ID}}
+{{.Text}}
+{{- end}}
 {{range .Files}}
 == FILE {{.Path}}  {{.SHA256}}
 {{.Body}}
@@ -53,4 +58,7 @@ This step records no artifact.
 {{- end}}
 {{- if .PayloadSchema}}
 Its payload must satisfy the schema: {{.PayloadSchema}}
+{{- if .PayloadRequired}}
+Each payload element carries these required properties: {{range $i, $k := .PayloadRequired}}{{if $i}}, {{end}}{{$k}}{{end}}
+{{- end}}
 {{- end}}

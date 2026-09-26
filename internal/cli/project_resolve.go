@@ -67,6 +67,23 @@ var readOnlyLeafVerbs = map[string]bool{
 	"board": true, "next": true, "plan": true, "stats": true, "export": true,
 	"steps": true, "version": true, "help": true, "completion": true,
 	"manifest": true,
+	// doctor is six read-only environment checks by its own contract, and it
+	// is exactly the verb an operator runs from a directory whose binding they
+	// are unsure of; minting a project row there answered the question by
+	// changing the answer.
+	"doctor": true,
+	// registry audit compares the registry against the corpus and writes
+	// nothing; no other group spells a leaf `audit`.
+	"audit": true,
+}
+
+// readOnlyVerbPaths are read verbs whose leaf name also names a write
+// elsewhere, so they are keyed by full path instead of joining
+// readOnlyLeafVerbs. `policy resolve` only reports the seats a run's policy
+// resolves to, but `step resolve` records a resolution and must keep
+// registering; a bare "resolve" leaf would silently stop it.
+var readOnlyVerbPaths = map[string]bool{
+	"policy resolve": true,
 }
 
 // commandMayRegisterProject reports whether cmd is allowed to create a project
@@ -77,6 +94,9 @@ func commandMayRegisterProject(cmd *cobra.Command) bool {
 	// from arbitrary directories, which is the worst possible place to mint a
 	// project.
 	if isGuardCmd(cmd) {
+		return false
+	}
+	if readOnlyVerbPaths[commandPath(cmd)] {
 		return false
 	}
 	for c := cmd; c != nil; c = c.Parent() {

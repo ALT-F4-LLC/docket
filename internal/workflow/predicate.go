@@ -67,6 +67,36 @@ func (p Predicate) Ordered() bool {
 	return false
 }
 
+// The reserved `diff.*` family (DKT-2063): the engine's own measurement of the
+// change a tree-holding step recorded, addressable from a threshold predicate
+// like a payload field but never declared by a payload schema.
+//
+// The names live HERE rather than in the engine because the validator must
+// know them (V45-V47 and the V21a exemption) and internal/engine imports this
+// package, not the reverse — the same reason VoteCastFields is here. The engine
+// evaluates over them; this package decides at register time that a predicate
+// naming them can mean something.
+const (
+	DiffFieldLines = "diff.lines"
+	DiffFieldFiles = "diff.files"
+	DiffFieldEmpty = "diff.empty"
+)
+
+// DiffFields is the closed reserved vocabulary — exactly these three names. A
+// lookalike such as `diff.bogus` is an ordinary undeclared field, so a match
+// here is by name and never by prefix.
+var DiffFields = []string{DiffFieldLines, DiffFieldFiles, DiffFieldEmpty}
+
+// IsDiffField reports whether a predicate field is one of the reserved
+// `diff.*` names.
+func IsDiffField(field string) bool {
+	switch field {
+	case DiffFieldLines, DiffFieldFiles, DiffFieldEmpty:
+		return true
+	}
+	return false
+}
+
 // ParsePredicate decomposes a §11.2 predicate string.
 //
 // It returns an error only for a string V21 would already have rejected, so a

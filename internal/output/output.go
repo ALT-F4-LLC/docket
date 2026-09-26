@@ -68,6 +68,29 @@ func (w *Writer) Success(data any, message string) {
 	writeHumanSuccess(w.Stdout, message)
 }
 
+// Outcome renders a result whose COMMAND succeeded but whose SUBJECT did not.
+//
+// The envelope, the payload, and the exit code are Success's exactly — the verb
+// did what it was asked, and a caller branching on `$?` or on `.ok` must not be
+// told otherwise. What changes is the one thing a human reads first: the line
+// carries the failure glyph instead of the checkmark.
+//
+// It exists because `step record` had no way to say "recorded, and the gate
+// failed" (DKT-982). A gate failure parks the step, and the park was printed as
+// `✔ Completed STEP-N (waiting-human)` — a success glyph on a failed outcome,
+// which an executor read as a pass and reported up as one.
+func (w *Writer) Outcome(data any, message string) {
+	if w.JSONMode {
+		if w.JSONVersion == JSONV2 {
+			writeJSONSuccessV2(w.Stdout, data, message)
+		} else {
+			writeJSONSuccess(w.Stdout, data, message)
+		}
+		return
+	}
+	writeHumanOutcome(w.Stdout, message)
+}
+
 // Error renders an error. In JSON mode the error is wrapped in an error
 // envelope written to Stdout. In human mode the error is printed to Stderr
 // with an "Error: " prefix. The corresponding exit code is returned so the

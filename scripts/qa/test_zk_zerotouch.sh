@@ -140,6 +140,11 @@ test_zk_zerotouch() {
 
   zk_run run activate RUN-1 --json
   assert_exit "ZK" "ZK_Z5_activate" 0
+  # The activation's conductor capability (DKT-2465): the one human input the
+  # approval below needs beyond the verb itself, and it rides the environment,
+  # so the traced command line is exactly the verb the audit allows.
+  local ZK_CTOK
+  ZK_CTOK=$(activation_token)
 
   # F21: the `registered` array, with the outcome.
   assert_json "ZK" "ZK_Z5_registered_len" "(.data.registered | length)" "1"
@@ -196,7 +201,7 @@ test_zk_zerotouch() {
   local ZK_HUMAN
   ZK_HUMAN=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].step')
 
-  zk_run step approve "$ZK_HUMAN" --json
+  DOCKET_TOKEN="$ZK_CTOK" zk_run step approve "$ZK_HUMAN" --json
   assert_exit "ZK" "ZK_Z7_approve" 0
 
   zk_run next --run RUN-1 --json
@@ -468,6 +473,11 @@ test_zk_zerotouch() {
   # bound, how many it expanded, how many steps and pins and fences it produced.
   # The scan changed WHERE the definition came from and nothing else, so any
   # other difference is this stage leaking into the dormant path.
+  #
+  # .data.conductor_token is excluded for the same reason .data.run is: a
+  # first activation mints it fresh (256 bits of crypto/rand, DKT-2465), so it
+  # necessarily differs between two activations of the same definition and
+  # says nothing about what the scan changed.
   local ZK_CFG2 ZK_CFG_ACT ZK_NOCFG_ACT
   ZK_CFG2=$(qa_mktemp_d)
   run_env "$ZK_CFG2" init >/dev/null
@@ -477,10 +487,10 @@ test_zk_zerotouch() {
   run_env "$ZK_CFG2" run start --issue DKT-1 --json >/dev/null
   run_env "$ZK_CFG2" run activate RUN-1 --json
   ZK_CFG_ACT=$(printf '%s' "$CMD_STDOUT" | jq -S \
-    'del(.data.registered, .data.pins_from_config, .data.run, .message)')
+    'del(.data.registered, .data.pins_from_config, .data.run, .data.conductor_token, .message)')
 
   ZK_NOCFG_ACT=$(printf '%s' "$ZK_NOCFG_OUT" | jq -S \
-    'del(.data.registered, .data.pins_from_config, .data.run, .message)')
+    'del(.data.registered, .data.pins_from_config, .data.run, .data.conductor_token, .message)')
 
   check_cond "ZK" "ZK_F19_activation_shape_identical" "activation differs between a config-driven and a hand-registered repo beyond the registered block: $ZK_CFG_ACT vs $ZK_NOCFG_ACT" [ "$ZK_CFG_ACT" = "$ZK_NOCFG_ACT" ]
   rm -rf "$ZK_CFG2"

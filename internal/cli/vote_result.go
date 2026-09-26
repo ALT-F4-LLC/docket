@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -13,25 +12,19 @@ import (
 
 // voteResultData is the JSON wire format for vote result output.
 type voteResultData struct {
-	ID               string        `json:"id"`
-	Status           string        `json:"status"`
-	FinalOutcome     string        `json:"final_outcome"`
-	EscalationReason *string       `json:"escalation_reason"`
-	WeightedScore    *float64      `json:"weighted_score"`
-	Threshold        float64       `json:"threshold"`
-	VotesCast        int           `json:"votes_cast"`
-	VotesRequired    int           `json:"votes_required"`
-	QuorumReached    bool          `json:"quorum_reached"`
-	Votes            []*model.Vote `json:"votes"`
-}
-
-func (d voteResultData) MarshalJSON() ([]byte, error) {
-	type Alias voteResultData
-	a := Alias(d)
-	if a.Votes == nil {
-		a.Votes = []*model.Vote{}
-	}
-	return json.Marshal(a)
+	ID               string   `json:"id"`
+	Status           string   `json:"status"`
+	FinalOutcome     string   `json:"final_outcome"`
+	EscalationReason *string  `json:"escalation_reason"`
+	WeightedScore    *float64 `json:"weighted_score"`
+	Threshold        float64  `json:"threshold"`
+	Sealed           bool     `json:"sealed"`
+	VotesCast        int      `json:"votes_cast"`
+	VotesRequired    int      `json:"votes_required"`
+	QuorumReached    bool     `json:"quorum_reached"`
+	// Votes is wireVotes' projection: every cast in full, or only who cast
+	// and when while the proposal is SealedOpen (DKT-2447). Always an array.
+	Votes any `json:"votes"`
 }
 
 var voteResultCmd = &cobra.Command{
@@ -75,10 +68,11 @@ func runVoteResult(cmd *cobra.Command, args []string, w *output.Writer) error {
 		EscalationReason: proposal.EscalationReason,
 		WeightedScore:    proposal.WeightedScore,
 		Threshold:        proposal.Threshold,
+		Sealed:           proposal.Sealed,
 		VotesCast:        votesCast,
 		VotesRequired:    proposal.RequiredVoters,
 		QuorumReached:    quorumReached,
-		Votes:            votes,
+		Votes:            wireVotes(proposal, votes),
 	}
 
 	var message string

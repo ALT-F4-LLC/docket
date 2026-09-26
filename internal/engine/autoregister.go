@@ -436,20 +436,39 @@ func registerScanTx(tx *sql.Tx, projectID int, scan *configScan, nowMS int64) ([
 // registerConfigWorkflowTx, which already word it precisely; a second refusal
 // here would be the same failure reported twice, worse.
 func registryIdentityKey(path string, src []byte) (string, bool) {
+	kind, name, version, ok := configIdentity(path, src)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%s\x00%s@%d", kind, name, version), true
+}
+
+// configIdentity is registryIdentityKey's three parts, unjoined: the KIND a
+// config file registers as, and the NAME and VERSION it registers under.
+//
+// It exists because the cross-project audit (registry_audit.go) needs the
+// version as a NUMBER to compare against a registered one, and re-deriving
+// "where does a config file's identity come from" a second time is exactly how
+// the audit and registration would come to disagree about what the corpus
+// declares. Both callers read it from here, so they cannot.
+//
+// `src` is consulted ONLY for a workflow — a schema's identity is its filename
+// — so a caller auditing a corpus may pass nil for a schema path rather than
+// reading a document it will not parse.
+func configIdentity(path string, src []byte) (kind, name string, version int, ok bool) {
 	if isSchemaConfigPath(path) {
 		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		name, version, err := workflow.ParsePayloadRef(base)
 		if err != nil {
-			return "", false
+			return "", "", 0, false
 		}
-		return fmt.Sprintf("%s\x00%s@%d", RegistrationKindSchema, name, version), true
+		return RegistrationKindSchema, name, version, true
 	}
 	def, err := workflow.Parse(src)
 	if err != nil {
-		return "", false
+		return "", "", 0, false
 	}
-	return fmt.Sprintf("%s\x00%s@%d",
-		RegistrationKindWorkflow, def.Pipeline.Name, def.Pipeline.Version), true
+	return RegistrationKindWorkflow, def.Pipeline.Name, def.Pipeline.Version, true
 }
 
 // registerConfigSchemaTx registers one `.docket/config/schemas/NAME@V.json`.
@@ -682,7 +701,7 @@ func filePin(root, path string) (db.Pin, error) {
 		return db.Pin{}, validationErr("reading the pinned config file %s: %v", path, err)
 	}
 	ref := path
-	if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, ok := configRelativeRef([]string{root}, path); ok {
 		ref = rel
 	}
 	return db.Pin{
@@ -766,6 +785,14 @@ func (r txSchemaResolver) Schema(name string, version int) (*workflow.Registered
 	}
 	if err != nil {
 		return nil, err
+	}
+	// A retired version is refused for NEW references (v36), exactly as
+	// internal/cli's schemaResolver refuses it: F7's rule is that activation
+	// accepts nothing `workflow register` would refuse. A run that ALREADY
+	// pinned the version is untouched — pins resolve through GetSchemaTx at an
+	// explicit version, which never filters.
+	if row.Deprecated() {
+		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrRetired, name, version)
 	}
 	return schema.Compile(row.Name, row.Version, []byte(row.Body))
 }

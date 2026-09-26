@@ -46,6 +46,15 @@ type Spec struct {
 	Env []string
 	// Timeout bounds the run. Zero means DefaultTimeout.
 	Timeout time.Duration
+	// Deadline, when set, is a wall-clock point the run may not pass: the
+	// effective timeout is the smaller of Timeout and the time remaining to
+	// it, and a run that starts with none remaining spawns nothing and
+	// reports a timeout. It can only SHORTEN a run, never extend one, so the
+	// security bound Timeout carries is untouched. It exists so a phase made
+	// of several runs — the claim's pre-gates, which re-run a flaky command
+	// up to MaxFlakyAttempts times — can be bounded as a whole rather than
+	// per spawn.
+	Deadline time.Time
 	// Stdin is fed to the child and then closed, or nil for an empty stdin.
 	//
 	// It is DATA, never a command. The no-interpreter invariant is untouched by

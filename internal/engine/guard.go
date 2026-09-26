@@ -55,13 +55,18 @@ type GuardVerdict struct {
 //     proposal leaves a dispatchable step, which blocks again until `next`
 //     routes it. The same reading covers a `gated` routing step whose every
 //     unresolved held cluster is such a vote.
-//   - A `pending` step waiting only on its predecessors does not block on its
-//     own: whatever it waits on either blocks in its place or is exempt for a
-//     reason that covers the whole chain. Any other unreadiness — headroom, a
-//     paused run, a budget stop, an unacknowledged reap — still blocks, since
-//     those name work or acknowledgment the session owes before stopping.
-//     (A held cluster awaiting ONE OPERATOR still denies: the materialized
-//     human step is pending and ready, per H11's decided semantics.)
+//   - A `pending` step waiting only on its predecessors, or waiting because
+//     the RUN ITSELF is `waiting-human` (paused), does not block on its own
+//     (DKT-1845): a paused run is the run-level version of the same
+//     wait-on-a-person exemption a `waiting-human` STEP already gets, and a
+//     step that never started is not work a stop interferes with. Any other
+//     unreadiness — headroom, a budget stop, an unacknowledged reap — still
+//     blocks, since those name work or acknowledgment the session owes before
+//     stopping. (A held cluster awaiting ONE OPERATOR still denies: the
+//     materialized human step is pending and ready, per H11's decided
+//     semantics. A `claimed`/`running` step still denies even while its run
+//     is paused — `run pause` honors in-flight completes rather than killing
+//     them, so the machine may still have a live worker to interrupt.)
 //
 // projectID scopes the question to one project's runs; 0 answers over every
 // project — the same contract as RunListOptions.ProjectID. Scoping exists
@@ -192,7 +197,8 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 			}
 			ready, cond := sched.Ready(step)
 			blocked = ready ||
-				(cond != CondPredecessors && cond != CondIssueDeps)
+				(cond != CondPredecessors && cond != CondIssueDeps &&
+					cond != CondRunActive)
 		}
 		if blocked {
 			out = append(out, step.Instance+" ("+step.Status+")")
@@ -265,8 +271,8 @@ func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) b
 	return unresolved > 0
 }
 
-// GuardGate answers `docket guard gate --step NAME`: does a PASSED gate step of
-// that name exist for the active run?
+// GuardGate answers `docket guard gate --step NAME [--run RUN-N]`: does a
+// PASSED gate step of that name exist?
 //
 // "Passed" is `done` with a `pass` routing — the state `step approve` produces
 // on a human gate, and the state a tallied approval produces on a vote gate. A
@@ -284,10 +290,31 @@ func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) b
 // nothing else about the test loosened, and a vote still open reads `pending`
 // here and denies exactly as an unapproved human gate does.
 //
-// projectID scopes the search to one project's runs; 0 answers over every
-// project (see GuardStop). An approval is a decision about ONE project's gate,
-// so a same-named gate in another project must not answer for it.
-func GuardGate(conn *sql.DB, stepName string, projectID int) (*GuardVerdict, error) {
+// WHICH RUNS ANSWER is the caller's choice, and the two forms ask different
+// questions:
+//
+//   - runID names ONE run, and only that run's gate can answer. An approval is
+//     a decision about one run's change, so another run's approval says nothing
+//     about this one. This is the form for a caller that knows which run it is
+//     acting under — an executor's brief carries its step id, and `step show`
+//     resolves the run from it. The named run is exempt from project scoping
+//     (naming a run is naming intent, as `guard record` reads it); a run that
+//     does not exist is a NOT_FOUND refusal rather than a denial or an allow,
+//     because a typo in a hook must not read as either; and a run that has
+//     ended denies outright, since its gates authorized work that is over.
+//
+//   - runID 0 answers over EVERY active run in scope, allowing on the first
+//     approved gate of that name. The reading is cross-run by construction: one
+//     run's approval opens the gate for every caller in the project until that
+//     run finishes, including a caller working under a second run whose own
+//     gate is still undecided. The form exists for callers with no run context
+//     — an operator session's hook cannot know which run a git write belongs
+//     to — and a hook that has a run should scope instead.
+//
+// projectID scopes the unscoped search to one project's runs; 0 answers over
+// every project (see GuardStop). An approval is a decision about ONE project's
+// gate, so a same-named gate in another project must not answer for it.
+func GuardGate(conn *sql.DB, stepName string, runID, projectID int) (*GuardVerdict, error) {
 	if stepName == "" {
 		return nil, validationErr("--step is required: name the gate to check")
 	}
@@ -297,7 +324,24 @@ func GuardGate(conn *sql.DB, stepName string, projectID int) (*GuardVerdict, err
 	  WHERE r.status NOT IN ('done', 'abandoned')
 	    AND s.step_name = ? AND s.kind IN (?, ?)`
 	args := []any{stepName, workflow.TypeHuman, workflow.TypeVote}
-	if projectID != 0 {
+	subject := fmt.Sprintf("gate %q", stepName)
+	searched := "any active run"
+	switch {
+	case runID != 0:
+		run, err := db.GetRun(conn, runID)
+		if err != nil {
+			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
+		}
+		if run.Status.Terminal() {
+			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
+				"run %s is %s; its gates authorize nothing further",
+				model.FormatRunID(runID), run.Status)}, nil
+		}
+		query += ` AND s.run_id = ?`
+		args = append(args, runID)
+		subject += " in " + model.FormatRunID(runID)
+		searched = model.FormatRunID(runID)
+	case projectID != 0:
 		query += ` AND r.project_id = ?`
 		args = append(args, projectID)
 	}
@@ -338,11 +382,11 @@ func GuardGate(conn *sql.DB, stepName string, projectID int) (*GuardVerdict, err
 		return &GuardVerdict{Allowed: true}, nil
 	case found:
 		return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-			"gate %q is %s, not approved", stepName, state)}, nil
+			"%s is %s, not approved", subject, state)}, nil
 	default:
 		return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-			"no `type=\"human\"` or `type=\"vote\"` step named %q in any active run",
-			stepName)}, nil
+			"no `type=\"human\"` or `type=\"vote\"` step named %q in %s",
+			stepName, searched)}, nil
 	}
 }
 

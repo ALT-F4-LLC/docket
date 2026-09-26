@@ -23,9 +23,9 @@ set -euo pipefail
 # at the shared tree. Outside any git repo, fall back to the script's own root.
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$(dirname "${BASH_SOURCE[0]}")/../..")"
 
-echo "=== build: go1.26.6 build ./... ==="
+echo "=== build: go build ./... ==="
 
-if ! go1.26.6 build ./... 2>&1; then
+if ! go build ./... 2>&1; then
   cat >&2 <<'EOF'
 
 build FAILED: the tree does not compile.

@@ -118,27 +118,66 @@ var resolveValues = []string{
 	ResolveFixRound, ResolveRerunGates,
 }
 
-// DecideStep is `step approve` and `step reject` — §6.10's human-gate verbs.
-//
-// NO TOKEN. A human gate is not claimed, so there is no lease to authorize
-// against; the authority is the operator's access to the repository, which is
-// the same authority `issue close` has always relied on.
-func (e *Engine) DecideStep(conn *sql.DB, stepID int, approve bool, note string, nowMS int64) error {
-	return e.DecideStepValue(conn, stepID, approve, note, "", nowMS)
+// DecideOptions are `step approve` and `step reject`'s inputs — the
+// ResolveOptions shape, adopted when the ruling gained its attribution
+// (DKT-2450): a fifth positional on `(approve, note, value, nowMS)` is how call
+// sites end up passing the wrong string.
+type DecideOptions struct {
+	// Approve is the verb: true for `approve`, false for `reject`.
+	Approve bool
+	// Note is `--note`.
+	Note string
+	// Value is `--value` (DKT-42): an operator's corrected value for a held
+	// cluster's aggregated field, validated against the pinned schema's
+	// declared enum and applied only on approve of a materialized held step.
+	// Every other decision passes "".
+	Value string
+	// By is who is ruling and from where. REQUIRED: an empty field refuses the
+	// decision before anything is written (see Attribution).
+	By Attribution
+	// Under is the authority the decision is made under (DKT-1899). REQUIRED:
+	// the zero value refuses the decision before anything is written.
+	Under Authority
+	// Token is the run's conductor capability (DKT-2465, conductor.go). It is
+	// REQUIRED on a bound run and ignored on an unbound one; the empty string
+	// authorizes nothing.
+	Token string
+	NowMS int64
 }
 
-// DecideStepValue is DecideStep carrying `--value` (DKT-42): an operator's
-// corrected value for a held cluster's aggregated field, validated against the
-// pinned schema's declared enum and applied only on approve of a materialized
-// held step. Every other decision passes "" and is DecideStep unchanged.
-func (e *Engine) DecideStepValue(
-	conn *sql.DB, stepID int, approve bool, note, value string, nowMS int64,
-) error {
+// DecideStepWith is `step approve` and `step reject` — §6.10's human-gate
+// verbs.
+//
+// NO LEASE TOKEN: a human gate is never claimed, so there is no lease to
+// authorize against. What the verb requires instead is the RUN's conductor
+// capability (DKT-2465, conductor.go) — the authority used to be repository
+// access alone, which under a harness every executor shares, so an executor
+// could approve the very gate its own commit is guarded on. The record
+// carries WHO ruled and from where (DKT-2450) — the same two claim-level
+// fields a trust grant carries, on the event.
+func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) error {
+	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
+	verb := "step approve"
+	if !approve {
+		verb = "step reject"
+	}
+	if err := opts.By.require(verb); err != nil {
+		return err
+	}
+	if err := opts.Under.require(verb); err != nil {
+		return err
+	}
+
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return err
+	}
+	// Before any branch, and before the status is inspected: a caller without
+	// the capability learns that the step exists and nothing else.
+	if err := authorizeConductor(conn, step.RunID, opts.Token, verb); err != nil {
 		return err
 	}
 
@@ -168,7 +207,7 @@ func (e *Engine) DecideStepValue(
 				step.Instance, step.Status, db.StepWaitingHuman,
 				step.Instance, strings.Join(resolveValues, "|"))
 		}
-		return e.decideMaterializedStep(conn, step, approve, note, value, nowMS)
+		return e.decideMaterializedStep(conn, step, opts)
 	}
 
 	// R10: approve/reject on a non-`human` step is VALIDATION_ERROR. The
@@ -202,7 +241,7 @@ func (e *Engine) DecideStepValue(
 	// approving a declared gate finishes that gate, and approving a held
 	// cluster un-defers the aggregate step's routing.
 	if step.Materialized {
-		return e.decideMaterializedStep(conn, step, approve, note, value, nowMS)
+		return e.decideMaterializedStep(conn, step, opts)
 	}
 
 	// `--value` is a held-cluster correction: it sets the aggregated field of
@@ -265,26 +304,117 @@ func (e *Engine) DecideStepValue(
 	}
 	status := statusForRouting(routing)
 
-	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
+	// V13 forbids a human gate's `on_fail` from being `waiting-human`, so the
+	// only way this write parks is a rejection whose fix loop was refused —
+	// and that park's reason is the ENGINE's. The operator's
+	// note stays in the routing record and on the step-rejected event; it is
+	// not the reason the row is waiting, the refused bound is.
+	class, bound := loopBoundClass(loop)
+	parkReason := ""
+	if bound {
+		parkReason = loopBoundParkReason(loop)
+	}
+
+	if err := db.SetStepRoutingWithParkReasonTx(
+		tx, step.ID, routing, note, status, class, parkReason, nowMS,
+	); err != nil {
+		return err
+	}
+	// The note as before, plus who decided (DKT-2450) and under what authority
+	// (DKT-1899).
+	decided, err := rulingData(opts.By, opts.Under.addTo(noteField(note)))
+	if err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: event, RunID: step.RunID,
-		Instance: step.Instance, IssueID: step.IssueID, Data: note,
+		Instance: step.Instance, IssueID: step.IssueID, Data: decided,
 	}); err != nil {
 		return err
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(
+		tx, step, defs[step.WorkflowID], spec, routing, nowMS,
+	); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// ResolveStep is `step resolve --as retry|skip|abandon-issue|override-pass` —
-// §6.10's `waiting-human` resolutions.
-func (e *Engine) ResolveStep(
-	conn *sql.DB, stepID int, as, note string, nowMS int64,
+// ResolveOptions are `step resolve`'s inputs — the CompleteOptions/ClaimOptions
+// shape, adopted here when the third positional variant arrived (DKT-1034): a
+// fourth dimension on `(as, note, batch, dropInterposed)` is how call sites end
+// up passing the wrong bool.
+type ResolveOptions struct {
+	// As is `--as`: one of resolveValues.
+	As string
+	// Note is `-m`/`--note`, the steering channel (DKT-247/DKT-725).
+	Note string
+	// Batch is `--batch` (DKT-546); override-pass only.
+	Batch bool
+	// DropInterposed is `--drop-interposed` (DKT-861); override-pass only.
+	DropInterposed bool
+	// Worktree is `--worktree` (DKT-1034): RE-PIN the step's recorded
+	// `issue.diff` to this checkout's tree before resolving — see
+	// IssueDiffRepin. override-pass and rerun-gates only.
+	Worktree string
+	// By is who is ruling and from where. REQUIRED: an empty field refuses the
+	// resolution before anything is written (see Attribution).
+	By Attribution
+	// Under is the authority the resolution is made under (DKT-1899).
+	// REQUIRED: the zero value refuses it before anything is written.
+	Under Authority
+	// Token is the run's conductor capability (DKT-2465, conductor.go):
+	// required on a bound run, ignored on an unbound one.
+	Token string
+	NowMS int64
+}
+
+// ResolveOutcome is what a resolution reports beyond its error: the facts the
+// verb established that the step row does not carry.
+type ResolveOutcome struct {
+	// Repin is the issue.diff re-pin `--worktree` performed, nil without the
+	// flag.
+	Repin *IssueDiffRepin `json:"issue_diff_repin,omitempty"`
+}
+
+// ResolveStepWith is every `step resolve` shape — §6.10's `waiting-human`
+// resolutions, `--batch` (DKT-546), `--drop-interposed` (DKT-861), and
+// `--worktree` (DKT-1034) — and reports the outcome the step row does not
+// carry.
+//
+// `--batch` is the resolution plus one run-scoped grant per failed completion
+// gate, so later steps in the SAME run failing the same gate with the same
+// failure signature (gate name + exit + reason) auto-pass at routing instead of
+// re-asking the operator; the grant dies with the run. `--drop-interposed` is
+// the operator's EXPLICIT acknowledgment that override-pass's generic pass
+// skips the step(s) the threshold interposes; without it, resolveStep refuses
+// such an override-pass BEFORE anything commits, because the DKT-470 warning
+// used to arrive beside a mutation already decided (RUN-61's verify-tribunal,
+// skipped under the operator who had chosen override-pass precisely to reach
+// it).
+func (e *Engine) ResolveStepWith(
+	conn *sql.DB, stepID int, opts ResolveOptions,
+) (*ResolveOutcome, error) {
+	out := &ResolveOutcome{}
+	if err := e.resolveStep(conn, stepID, opts, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (e *Engine) resolveStep(
+	conn *sql.DB, stepID int, opts ResolveOptions, out *ResolveOutcome,
 ) error {
+	as, note, nowMS := opts.As, opts.Note, opts.NowMS
+	batch, dropInterposed := opts.Batch, opts.DropInterposed
+
+	if err := opts.By.require("step resolve"); err != nil {
+		return err
+	}
+	if err := opts.Under.require("step resolve"); err != nil {
+		return err
+	}
+
 	step, err := db.GetStep(conn, stepID)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -292,9 +422,54 @@ func (e *Engine) ResolveStep(
 	if err != nil {
 		return err
 	}
+	// The conductor capability, before the flags are even validated: a caller
+	// without it learns that the step exists and nothing else (DKT-2465).
+	if err := authorizeConductor(conn, step.RunID, opts.Token, "step resolve"); err != nil {
+		return err
+	}
 
 	if !contains(resolveValues, as) {
 		return validationErr("--as must be one of %v, got %q", resolveValues, as)
+	}
+
+	// --batch WIDENS what one authorization covers — one grant auto-passing N
+	// future failures is a trust-boundary change — so it rides only the verb
+	// whose ruling it extends. A batch `skip` or `abandon-issue` has no
+	// coherent meaning: those decide THIS step, not the failure's signature.
+	if batch && as != ResolveOverridePass {
+		return validationErr(
+			"--batch extends an override-pass ruling to later identical gate "+
+				"failures in this run, so it requires --as %s, got %q",
+			ResolveOverridePass, as)
+	}
+
+	// --drop-interposed WAIVES a refusal only override-pass can trigger
+	// (DKT-861): on any other resolution it acknowledges a consequence that
+	// cannot occur, so it is refused the way --batch is rather than accepted
+	// as though it had covered something.
+	if dropInterposed && as != ResolveOverridePass {
+		return validationErr(
+			"--drop-interposed acknowledges that an override-pass skips the "+
+				"step(s) its threshold interposes, so it requires --as %s, got %q",
+			ResolveOverridePass, as)
+	}
+
+	// --worktree RE-PINS the step's recorded issue.diff before resolving
+	// (DKT-1034), and it rides only the two resolutions that keep the step's
+	// own record as the reviewed object: override-pass accepts the work as it
+	// stands and rerun-gates re-measures it. `retry` re-executes and records
+	// its own diff; `skip` and `abandon-issue` take the work OUT of the run;
+	// `fix-round` mints a new round whose body records the round's own — a
+	// re-pin under any of those would revise a record nothing downstream
+	// reads, so it is refused the way --batch is rather than accepted as
+	// though it had bound something.
+	if opts.Worktree != "" && as != ResolveOverridePass && as != ResolveRerunGates {
+		return validationErr(
+			"--worktree re-pins the step's recorded issue.diff to a patched "+
+				"checkout, which only --as %s or --as %s keep as the reviewed "+
+				"object (retry records its own diff; skip, abandon-issue, and "+
+				"fix-round leave nothing downstream reading this one), got %q",
+			ResolveOverridePass, ResolveRerunGates, as)
 	}
 
 	// R11: `resolve` on a step that is not `waiting-human` is
@@ -309,6 +484,35 @@ func (e *Engine) ResolveStep(
 			"step %s is %s, not %s; resolve applies to parked steps "+
 				"(and to `type=\"vote\"` steps, whose voters it moves a run past)",
 			step.Instance, step.Status, db.StepWaitingHuman)
+	}
+
+	// A resolution that REOPENS WORK is refused under a terminal run. `retry`
+	// returns the step to `pending` and `fix-round` mints a fresh pending
+	// round; both leave the run holding a claimable step, and a `done` or
+	// `abandoned` run never returns to `active`: RA5 makes re-activation a
+	// CONFLICT, `run resume` accepts only `waiting-human`, and the rollup
+	// (setRunStatusTx) declines to revive a terminal run on the premise that
+	// no verb creates that state. RUN-93 STEP-6010 showed what accepting it
+	// looks like: the retry succeeded, the step sat `pending` with
+	// blocked_reason "run is not active", and no verb could reach it short of
+	// editing the database. The refusal names the run so the operator learns
+	// the conflict is the run's, not the step's. R11 lets a vote step be
+	// resolved at ANY status, which is the door a terminal run's skipped vote
+	// walked through.
+	if as == ResolveRetry || as == ResolveFixRound {
+		run, err := db.GetRun(conn, step.RunID)
+		if err != nil {
+			return err
+		}
+		if run.Status.Terminal() {
+			return conflictErr(
+				"step %s cannot be resolved --as %s: its run %s is %s, and a "+
+					"%s run holds no claimable work — nothing returns it to "+
+					"active (run resume applies to a waiting-human run; "+
+					"re-activation refuses a terminal one). Plan the step's "+
+					"issue into a new run instead",
+				step.Instance, as, run.Ref(), run.Status, run.Status)
+		}
 	}
 
 	// `retry` CANNOT move a step parked by a REJECTED HOLD, so it is
@@ -348,6 +552,53 @@ func (e *Engine) ResolveStep(
 				"instead: `docket step approve %s` (with --value to correct the "+
 				"computed value) or `docket step reject %s`",
 			step.Instance, step.Instance, step.Instance)
+	}
+
+	// The SAME refusal, one shape over — and the one the guard above MISSED
+	// (DKT-726). That guard is scoped to `step.Materialized`: an engine-minted
+	// `reconcile-held@N#M` cluster whose tally failed. A plain
+	// workflow-declared `type="vote"` step — `security-vote@8`, not minted by
+	// anything — carries its OWN tribunal proposal, and when that proposal was
+	// already tallied the guard did not see it. Retry fell through to the
+	// generic path below, reset the attempt budget and the lease, returned the
+	// step to `pending`, and the next `next` re-read the SAME proposal: the
+	// idempotency key is (run, issue, instance), so no second ballot is opened
+	// and no cast changes. `routeVoteStep` re-announced the identical verdict
+	// and routed to the identical place. Observed on RUN-51 STEP-2433,
+	// security-vote@8 / DKT-V256 rejected 3/3, which cost a full
+	// run-pause/run-resume cycle to land exactly where it started.
+	//
+	// The condition is the PROPOSAL being decided, not the step being parked:
+	// an APPROVED tally is just as sticky as a rejected one, and retrying over
+	// it re-reads the same pass. Only an `open` proposal — nothing decided yet,
+	// nothing to re-read — leaves retry meaning something, and R11's exception
+	// exists precisely so a resolution stays offered there.
+	//
+	// The remedy list differs from the held cluster's because the question is
+	// not one an operator can simply answer: a workflow vote step's verdict is
+	// the panel's. `fix-round` is the verb that was actually wanted on RUN-51 —
+	// it authorizes another round of WORK on the reported problem and mints a
+	// fresh vote at a new ordinal, which opens a NEW proposal because the
+	// instance changed.
+	if as == ResolveRetry && step.Kind == workflow.TypeVote {
+		outcome, err := ReadStepVoteOutcome(conn, step)
+		if err != nil {
+			return err
+		}
+		if outcome != nil && outcome.Verdict != "" {
+			return validationErr(
+				"step %s cannot be retried: its proposal %s is already %s, and "+
+					"retry resets the retry budget, which is not what is "+
+					"blocking it — the decision is sticky, so the same tally "+
+					"would be read again and the step would route to the same "+
+					"place. Use --as %s to authorize another round of work on "+
+					"the problem (a fresh vote, on a new proposal), --as %s to "+
+					"accept the step as passing, --as %s to route it skipped, "+
+					"or --as %s to drop the issue from this run",
+				step.Instance, model.FormatProposalID(outcome.ProposalID),
+				outcome.Status, ResolveFixRound, ResolveOverridePass,
+				ResolveSkip, ResolveAbandonIssue)
+		}
 	}
 
 	if as == ResolveRetry {
@@ -401,6 +652,28 @@ func (e *Engine) ResolveStep(
 	}
 	spec := workflow.StepByName(defs[step.WorkflowID], step.StepName)
 
+	// DKT-861: the DKT-470 warning arrived beside a mutation already decided —
+	// an operator promised the interposed gate would still run had no move
+	// left but regret (RUN-61's verify-tribunal went `skipped` and the run
+	// rolled to `done` under the operator who chose override-pass precisely to
+	// reach that gate). The consequence is now a REFUSAL ahead of the
+	// transaction: override-pass on a step whose threshold interposes other
+	// step(s) proceeds only under the explicit --drop-interposed
+	// acknowledgment, and nothing commits until the operator has read the
+	// exact sentence the warning used to print after the fact. The detection
+	// is the same spec + ThresholdTargets read skipUnroutedTargets makes when
+	// this resolution commits, so the refusal and the skip cannot disagree. A
+	// step with no interposed targets resolves exactly as before, no flag
+	// required.
+	if as == ResolveOverridePass && !dropInterposed {
+		if warning := overridePassInterposedWarning(step.Instance, spec); warning != "" {
+			return validationErr(
+				"%s. Refusing without --drop-interposed, the explicit "+
+					"acknowledgment that skipping them is intended (DKT-861)",
+				warning)
+		}
+	}
+
 	// `rerun-gates` needs gates to re-run (DKT-259). A step that declares none
 	// would rewind to `recorded`, find nothing to measure, and route again on
 	// the same evidence — an expensive no-op that looks like it did something.
@@ -413,6 +686,41 @@ func (e *Engine) ResolveStep(
 					"it to routing and decide on the same evidence. If the "+
 					"step's own output is what needs redoing, that is --as %s",
 				step.Instance, ResolveRerunGates, ResolveRetry)
+		}
+	}
+
+	// The grant's source rows, read BEFORE the transaction for the same
+	// pooled-connection reason as routingStepOf above. A park with no failed
+	// completion gate — a rejected hold, a quorum that never arrived, a
+	// gap-only completion — has no signature to grant from, and refusing is
+	// honest where recording a grant that can never match would look like it
+	// did something.
+	var grantRows []db.GateResultRow
+	if batch {
+		rows, err := db.GateResultsForStep(conn, step.ID)
+		if err != nil {
+			return err
+		}
+		grantRows = failingCompletionRows(rows)
+		if len(grantRows) == 0 {
+			return validationErr(
+				"step %s has no failed completion gate to grant from; --batch "+
+					"records the parked step's failing gate signature(s), and "+
+					"this park was not caused by one", step.Instance)
+		}
+	}
+
+	// THE RE-PIN IS COMPUTED HERE, LAST BEFORE THE TRANSACTION (DKT-1034): it
+	// is a git subprocess, which §6 keeps outside every transaction, and it is
+	// the most expensive refusal in this function, so every cheaper one above
+	// gets its say first. The artifact it produces lands INSIDE the
+	// resolution's transaction below — a re-pin without its resolution would
+	// move the reviewed object under a step still parked, and a resolution
+	// without its re-pin is exactly RUN-67.
+	var repin *IssueDiffRepin
+	if opts.Worktree != "" {
+		if repin, err = e.prepareIssueDiffRepin(conn, step, spec, opts.Worktree); err != nil {
+			return err
 		}
 	}
 
@@ -474,7 +782,11 @@ func (e *Engine) ResolveStep(
 		// AUTHORIZED (DKT-340). The operator has read whatever park stands
 		// and asked for the round; the non-convergence refusal must not fire
 		// against the very verb that park names as its way out.
-		outcome, err := EnterLoopAuthorized(tx, step, defs[step.WorkflowID], nowMS)
+		// The note rides into the round it authorizes (DKT-725): stamped onto
+		// the new instances' routing records, it renders in their packets as
+		// `== RESOLUTION` — the only channel that reaches a NEW round, since
+		// comments never render and `body_snapshot` froze at activation.
+		outcome, err := EnterLoopAuthorized(tx, step, defs[step.WorkflowID], note, nowMS)
 		if err != nil {
 			return err
 		}
@@ -518,14 +830,64 @@ func (e *Engine) ResolveStep(
 		routing, status = "", db.StepGated
 	}
 
-	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
+	// The re-pin lands BEFORE the routing record and the resolution event, so
+	// the trail reads in the order the facts occurred: the reviewed object
+	// moved, and THEN the step was resolved over it. For rerun-gates the saga
+	// resumed below re-runs the gates in the re-pointed worktree and its
+	// routing stage recomputes a diff that is byte-identical to the one just
+	// recorded, which the DKT-258 guard then declines to record twice.
+	if repin != nil {
+		if err := applyIssueDiffRepin(tx, step, repin, as, nowMS); err != nil {
+			return err
+		}
+		out.Repin = repin
+	}
+
+	// A resolution ANSWERS a park; every `--as` above leaves a non-parked status,
+	// so this write never sets a class and never clears the one it is answering.
+	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, "", nowMS); err != nil {
+		return err
+	}
+	// The resolution as before, plus who ruled (DKT-2450).
+	resolved, err := rulingData(opts.By, opts.Under.addTo(map[string]any{"detail": as}))
+	if err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventStepResolved, RunID: step.RunID,
-		Instance: step.Instance, IssueID: step.IssueID, Data: as,
+		Instance: step.Instance, IssueID: step.IssueID, Data: resolved,
 	}); err != nil {
 		return err
+	}
+	// The grants and the resolution are ONE transaction (the DKT-237 loop-grant
+	// discipline): a ruling recorded without its resolution would cover
+	// failures the operator never overrode, and a resolution without its
+	// grants would silently drop the ruling's reach. One grant per failed
+	// gate, each event-logged, so the feed shows exactly what authority was
+	// minted and the grant rows carry the shared justification (`--note`).
+	if batch {
+		for _, r := range grantRows {
+			// The fingerprint is COPIED off the parked step's own failing row
+			// (DKT-1796) rather than recomputed: the ruling must bind to the
+			// content the operator read before resolving, not to a later
+			// re-run's.
+			grantID, err := db.InsertGateOverrideGrantTx(tx, db.GateOverrideGrant{
+				RunID: step.RunID, OriginStepID: step.ID, Gate: r.Gate,
+				Exit: r.Exit, Reason: r.Reason, Fingerprint: r.Fingerprint,
+				Note: note, CreatedAtMS: nowMS,
+			})
+			if err != nil {
+				return err
+			}
+			if err := recordEvent(tx, eventRecord{
+				Kind: EventGateOverrideGranted, RunID: step.RunID,
+				Instance: step.Instance, IssueID: step.IssueID,
+				Data: fmt.Sprintf("%s#%d fp=%s",
+					r.Gate, grantID, shortFingerprint(r.Fingerprint)),
+			}); err != nil {
+				return err
+			}
+		}
 	}
 	// An `override-pass` on a held cluster IS the approve-computed answer — it
 	// records `done` with a `pass` routing, which is exactly what heldDecision
@@ -547,7 +909,9 @@ func (e *Engine) ResolveStep(
 			return err
 		}
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(
+		tx, step, defs[step.WorkflowID], spec, routing, nowMS,
+	); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -589,7 +953,7 @@ func (e *Engine) ResolveStep(
 // is what override-pass does.
 //
 // It answers a question about the step's DEFINITION, which the resolution it
-// precedes does not change, so it is independent of ResolveStep and safe to
+// precedes does not change, so it is independent of ResolveStepWith and safe to
 // call and print before that call commits anything — the operator sees the
 // blast radius of what they are about to approve.
 func OverridePassSkipsInterposedTargets(conn *sql.DB, stepID int) []string {
@@ -602,20 +966,36 @@ func OverridePassSkipsInterposedTargets(conn *sql.DB, stepID int) []string {
 		return nil
 	}
 	spec := workflow.StepByName(defs[step.WorkflowID], step.StepName)
+	if warning := overridePassInterposedWarning(step.Instance, spec); warning != "" {
+		return []string{warning}
+	}
+	return nil
+}
+
+// overridePassInterposedWarning is the DKT-470 sentence, computed ONCE for
+// both surfaces that present it: the advisory warning
+// (OverridePassSkipsInterposedTargets, printed beside an acknowledged
+// resolution) and resolveStep's pre-transaction refusal (DKT-861). The
+// detection is the same spec + workflow.ThresholdTargets read the reconcile's
+// skipUnroutedTargets makes when the resolution commits — one logic path, so
+// what is warned about and what is skipped cannot drift. Empty when there is
+// nothing to warn about: a nil spec (a materialized step, whose minted name
+// the definition never declares) or a threshold with no step-name routing.
+func overridePassInterposedWarning(instance string, spec *workflow.Step) string {
 	if spec == nil {
-		return nil
+		return ""
 	}
 	targets := workflow.ThresholdTargets(spec.Threshold)
 	if len(targets) == 0 {
-		return nil
+		return ""
 	}
-	return []string{fmt.Sprintf(
+	return fmt.Sprintf(
 		"override-pass on %s records a generic %q routing and does not "+
 			"evaluate its threshold — interposed step(s) %s will NOT be "+
 			"routed to as a result, whatever the (unevaluated) payload would "+
 			"have decided; resolve them directly if their condition should "+
 			"still apply",
-		step.Instance, RoutingPass, strings.Join(targets, ", "))}
+		instance, RoutingPass, strings.Join(targets, ", "))
 }
 
 // FailStep is `step fail` — the explicit-failure counterpart to `complete`.
@@ -771,6 +1151,44 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	}
 	status := statusForRouting(routing)
 
+	// The budget is what ended this step; a refused loop entry is the narrower
+	// cause when the exhaustion's `on_fail` tried to buy a round and could not.
+	//
+	// The park's reason is the ENGINE's account of that cause, never the
+	// worker's `--note`: the note stays in the routing record, on the
+	// step-failed event, and in the trail comment, where it always was, and an
+	// empty note no longer leaves a parked row with nothing to say.
+	class := db.ParkClassAttemptsExhausted
+	parkReason := attemptsExhaustedParkReason(attempt, max)
+	if bound, ok := loopBoundClass(loop); ok {
+		class = bound
+		parkReason = loopBoundParkReason(loop)
+	}
+
+	// An exhausted step whose `on_fail` names a triage panel suspends for it,
+	// exactly as a gate failure does (DKT-1901) — both reach statusForRouting,
+	// whose step-name default would otherwise record this failure as `done`.
+	//
+	// A panel that has already ruled on this ordinal parks instead. Its
+	// sentence is the engine's and names the way out, so it joins the budget's
+	// count in the park's reason; and it is APPENDED to the worker's note in
+	// the routing record, the event, and the trail, the way a refused loop's
+	// reason is above, so the worker's account of the failure survives.
+	panelRouting, panelReason, panelStatus, err := suspendForPanel(
+		tx, step, spec, routing, note, status, nowMS)
+	if err != nil {
+		return err
+	}
+	if panelRouting != routing && panelStatus == db.StepWaitingHuman {
+		parkReason = attemptsExhaustedParkReason(attempt, max) + "; " + panelReason
+		if note != "" {
+			note += "; " + panelReason
+		} else {
+			note = panelReason
+		}
+	}
+	routing, status = panelRouting, panelStatus
+
 	if err := db.RetireStepTokenTx(tx, step.ID); err != nil {
 		return err
 	}
@@ -780,7 +1198,9 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
-	if err := db.SetStepRoutingTx(tx, step.ID, routingRecord(routing, note), status, nowMS); err != nil {
+	if err := db.SetStepRoutingWithParkReasonTx(
+		tx, step.ID, routing, note, status, class, parkReason, nowMS,
+	); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
@@ -796,7 +1216,9 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 		failureNote(step.Instance, note, attempt, max), nowMS); err != nil {
 		return err
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if err := reconcileIssueAndRun(
+		tx, step, defs[step.WorkflowID], spec, routing, nowMS,
+	); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -823,6 +1245,31 @@ func failureNote(instance, note string, attempt, max int) string {
 		b.WriteString(".")
 	}
 	return b.String()
+}
+
+// attemptsExhaustedParkReason is the engine's `park_reason` for a step that
+// spent its attempt budget: the park class and the count that ended it,
+// `attempts-exhausted: <attempt> of <max>`.
+//
+// It carries no caller text. The worker's `--note` explains the LAST failure,
+// and it stays where that failure is recorded — the routing record, the
+// step-failed event, the trail comment — while this names why the row is
+// waiting: not one failure, but the budget. The park is reached only through
+// `exhausted`, which requires `max > 0`, so the denominator is always stated.
+func attemptsExhaustedParkReason(attempt, max int) string {
+	return fmt.Sprintf("%s: %d of %d", db.ParkClassAttemptsExhausted, attempt, max)
+}
+
+// loopBoundParkReason is the engine's `park_reason` for a step whose fix loop
+// was refused at its bound: `fix-loop-exhausted: <bound reason>`.
+//
+// The bound reason is already the engine's — `exhausted` composes it from the
+// ordinal and the pinned `max_fix_loops`, naming the way out — so the prefix is
+// what turns a sentence about the loop into the reason the row parked. The
+// note the rejection or failure carried stays in the routing record and on
+// its own event; it is not folded in here.
+func loopBoundParkReason(loop *LoopOutcome) string {
+	return "fix-loop-exhausted: " + loop.Reason
 }
 
 // commit closes the transaction when the preceding step succeeded, so a branch

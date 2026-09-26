@@ -1,69 +1,67 @@
 #!/usr/bin/env bash
 #
-# self-hygiene — the author's own check, before a reviewer spends attention.
+# self-hygiene — name the CLI surface change so its reference gets updated.
 #
-# Wired as the `self-hygiene` gate on `implement`. It mechanizes the
-# ONE bar docs/spec/review-strategy.md §4 states that no other gate covers: a
-# CLI surface change must update skills/docket/SKILL.md in the same change,
-# because "a stale table is drift and blocks review". (This used to cite
-# CLAUDE.md, deleted at 408a294 — the rule moved, and this citation now points
-# at the spec section that actually states it.)
+# Wired as the `self-hygiene` gate on `implement`. It collects the change set
+# under review, narrows it to the gated issue's scope, and reports every
+# non-test file under internal/cli/ — where flags, verbs, and help text live —
+# so the author and the reviewer both see that the CLI surface moved. It exits
+# non-zero only when it cannot measure: an empty or unreadable base, a git that
+# refuses. A measured change set, whatever it holds, exits 0.
 #
-# SKILL.md HAS A TWIN, AND THIS GATE CANNOT SEE IT. The corpus copy at
-# dotfiles.vorpal.git/main/src/user/claude_code/skills/docket/SKILL.md is what
-# `just activate` installs and what every session actually executes; this
-# repo's copy is the one that moves first, because this gate makes a CLI
-# surface change update it. Satisfying this gate therefore leaves the
-# installed copy stale until the same edit lands there too — the observed
-# direction of every drift so far. That repo's tests/docket-skill-sync.test.sh
-# byte-diffs the pair and fails on any difference; it is not wired here
-# because CI checks out only this repository, so the check would find no
-# second copy and SKIP unconditionally. Convergence is the author's to carry:
-# land the edit in BOTH copies, same session.
+# WHY IT NO LONGER REQUIRES A SKILL.md EDIT. This gate used to fail any
+# non-test internal/cli/ change that did not also touch skills/docket/SKILL.md,
+# the CLI reference. That file left this repository at a54e3a2; the only copy
+# now lives in the dotfiles corpus
+# (dotfiles.vorpal.git/main/src/user/claude_code/skills/docket/SKILL.md),
+# which `just activate` installs and which no gate here can see or diff. A
+# gate that demands an edit to a path that cannot exist in the change set is
+# unsatisfiable by hand, so the requirement is retired rather than re-pointed.
+# No in-repository reference covers the surface either: README.md's Command
+# Reference lists a handful of the top-level verbs and no flags, and `--help`
+# text is not generated into any checked-in file. Keeping the reference
+# current is therefore the author's to carry into the corpus, and this gate's
+# job is to make sure that need is stated in the step's output rather than
+# discovered at review.
 #
 # It deliberately checks nothing else. `build`, `tests`, `genericity`, and
 # `secret-scan` are their own gates, and a hygiene check that re-ran them would
 # make one failure surface as two.
 #
-# CI has no staged or unstaged state to read — a checked-out pull
-# request is a clean tree, and the change under review lives only in the
-# COMMITTED diff between the PR's base and its head. So this script also
-# accepts an optional base-ref argument: with one, "changed" means the files a
-# `git diff <base>...HEAD` names; without one, behavior is unchanged from the
-# working-tree scan the `implement` gate uses.
+# THREE WAYS TO NAME THE CHANGE SET, in precedence order:
+#
+#   1. An explicit base-ref argument (CI). A checked-out pull request is a
+#      clean tree; the change under review is the COMMITTED diff between the
+#      PR's base and its head, `git diff --name-only <base>...HEAD`.
+#   2. DOCKET_GATE_BASE (the engine). Executors commit before `step record`,
+#      so a completion gate on a worktree-recorded step also runs on a clean
+#      tree; the engine exports the step's fork point (internal/engine/gate.go,
+#      `Base`) and the change set is `git diff --name-only $DOCKET_GATE_BASE...HEAD`
+#      in the gate's own cwd. Before this mode the working-tree scan below ran
+#      on that clean tree and reported "no changes" for every step.
+#   3. The working-tree scan (an author by hand, before committing): staged,
+#      unstaged, and untracked files together.
 #
 # CALLED WITH NO ARGUMENT vs. CALLED WITH AN EMPTY ONE are different things,
 # and `${1:-}` cannot tell them apart. One argument, even an empty one,
-# commits to CI mode and fails closed rather than silently downgrading to the
-# working-tree scan on a clean checkout — see secret-scan.sh's header for the
-# full reasoning (same defect, same fix).
+# commits to base-ref mode and fails closed rather than silently downgrading
+# to the working-tree scan on a clean checkout — see secret-scan.sh's header
+# for the full reasoning. DOCKET_GATE_BASE follows the same rule: the engine
+# leaves it UNSET when it has no base (a shared-checkout step, the pre-claim
+# path), never empty, so a set-but-empty value is a caller defect and fails
+# closed the same way.
 #
-# THE CHANGE-SET DEFINITION DIFFERS FROM secret-scan.sh's, DELIBERATELY
-# (AC2). This gate uses a two-tree diff, `git diff --name-only
-# A...HEAD`; secret-scan.sh walks each commit's own patch,
-# `git log -p --diff-merges=first-parent A..HEAD`. Both headers state the
-# difference so neither reads as an oversight.
-#
-# The reason is that the two gates ask different questions:
-#
-#   secret-scan asks "was a credential EVER ADDED in this range?" — a
-#   historical question. A credential added in one commit and removed in the
-#   next is still a leak: it is in the reflog, in any fetched copy, and in
-#   GitHub's API. So it must see every intermediate state, which only a
-#   per-commit walk gives.
-#
-#   self-hygiene asks "does the change AS IT WILL LAND keep SKILL.md in step
-#   with internal/cli?" — a question about the end state. If a PR touches
-#   internal/cli in one commit and reverts it in the next, the merged result
-#   documents nothing new and there is nothing to update. A per-commit walk
-#   would demand a SKILL.md edit for a surface change the PR does not
-#   actually make, which is a gate failing on correct work — the failure mode
-#   that teaches people to route around it.
-#
-# So the asymmetry is the point: a security gate errs toward seeing more, a
-# documentation gate toward matching what ships. Note the two-tree form needs
-# no merge-commit handling — `A...HEAD` compares the merge base against the
-# final tree, so a conflict resolution is already inside what it compares.
+# THE CHANGE-SET DEFINITION DIFFERS FROM secret-scan.sh's, DELIBERATELY.
+# This gate uses a two-tree diff, `git diff --name-only A...HEAD`;
+# secret-scan.sh walks each commit's own patch,
+# `git log -p --diff-merges=first-parent A..HEAD`. secret-scan asks "was a
+# credential EVER ADDED in this range?" — a historical question, where an add
+# reverted in the next commit is still a leak. This gate asks which files the
+# change AS IT WILL LAND touches: a surface change made in one commit and
+# reverted in the next changes nothing that a reference would document, and
+# reporting it would name a change the step does not make. The two-tree form
+# needs no merge-commit handling — `A...HEAD` compares the merge base against
+# the final tree, so a conflict resolution is already inside what it compares.
 
 set -euo pipefail
 
@@ -81,24 +79,31 @@ if [ "$#" -gt 0 ]; then
     echo "checkout having scanned nothing." >&2
     exit 1
   fi
+elif [ -n "${DOCKET_GATE_BASE+set}" ]; then
+  BASE_REF="$DOCKET_GATE_BASE"
+  if [ -z "$BASE_REF" ]; then
+    echo "self-hygiene FAILED: DOCKET_GATE_BASE is set but empty; refusing to fall" >&2
+    echo "back to the working-tree scan, which would pass a committed worktree" >&2
+    echo "having scanned nothing." >&2
+    exit 1
+  fi
 else
   BASE_REF=""
 fi
 
 if [ -n "$BASE_REF" ]; then
-  # CI mode: the change under review is the committed diff, not the working
-  # tree — a checked-out PR has nothing staged or unstaged to find. A single
-  # base...HEAD diff has no duplicates to remove, unlike the else branch below.
+  # Base-ref mode (CI or the engine): the change under review is the committed
+  # diff, not the working tree. A single base...HEAD diff has no duplicates to
+  # remove, unlike the else branch below.
   if ! changed=$(git diff --name-only "$BASE_REF"...HEAD -- .); then
     echo "self-hygiene FAILED: could not collect the change set; nothing was scanned." >&2
     exit 1
   fi
 else
-  # --cached is not optional: this gate also runs on `implement`, before any
-  # commit, so an executor that stages its work as it goes is ordinary — and a
-  # staged file appears in NEITHER a bare working-tree diff NOR the untracked
-  # list. A staged internal/cli/ change would pass this gate silently without
-  # it.
+  # --cached is not optional: by hand this runs before any commit, so an
+  # author who stages work as they go is ordinary — and a staged file appears
+  # in NEITHER a bare working-tree diff NOR the untracked list. A staged
+  # internal/cli/ change would go unreported without it.
   #
   # EACH command is checked SEPARATELY, and none of them runs inside the `if`
   # condition. The previous form was
@@ -166,31 +171,23 @@ if [ -z "$changed" ]; then
   exit 0
 fi
 
-# A CLI surface change is one that touches internal/cli — where flags, verbs,
-# and their help text live. That is what SKILL.md's tables document.
-#
-# DKT-70 retro candidate 1: a diff that touches internal/cli/ but ONLY
-# *_test.go files there changes no flag, verb, or help text — it is an
-# internal refactor or a test addition, and this gate's own failure message
-# already told the operator to say so and let the reviewer weigh it. That
-# escape hatch shouldn't be needed for the mechanical case: if every
-# internal/cli/ file in the (possibly scope-narrowed) change set is a test
-# file, there is nothing for SKILL.md to document, so skip straight to ok.
-if printf '%s\n' "$changed" | grep '^internal/cli/' | grep -qv '_test\.go$'; then
-  if ! printf '%s\n' "$changed" | grep -q '^skills/docket/SKILL.md$'; then
-    cat >&2 <<'EOF'
-self-hygiene FAILED: internal/cli changed but skills/docket/SKILL.md did not.
+# A CLI surface change is one that touches a non-test file under internal/cli.
+# A diff that touches only *_test.go files there changes no flag, verb, or
+# help text — it is a refactor or a test addition, and there is nothing for a
+# reference to document.
+surface=$(printf '%s\n' "$changed" | grep '^internal/cli/' | grep -v '_test\.go$' || true)
 
-docs/spec/review-strategy.md §4 makes this a PR bar: SKILL.md documents the
-CLI, and its flag/verb tables must be updated in the same change as any
-surface change — a stale table is drift and blocks review.
-
-If this change genuinely alters no documented flag or verb (an internal
-refactor, a comment, a test), say so in the step's report and the reviewer can
-weigh it.
-EOF
-    exit 1
-  fi
+if [ -z "$surface" ]; then
+  echo "self-hygiene: ok (no CLI surface change)"
+  exit 0
 fi
 
-echo "self-hygiene: ok"
+count=$(printf '%s\n' "$surface" | wc -l | tr -d ' ')
+echo "self-hygiene: CLI surface changed — $count non-test file(s) under internal/cli:"
+printf '%s\n' "$surface" | sed 's/^/  /'
+cat <<'EOF'
+The CLI reference (skills/docket/SKILL.md) lives in the dotfiles corpus, not
+in this repository, so this gate cannot check it. If this change adds,
+removes, or renames a flag, verb, or help text, update the corpus copy in the
+same session; if it alters nothing documented, say so in the step's report.
+EOF

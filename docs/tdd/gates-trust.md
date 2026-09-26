@@ -1,6 +1,6 @@
 # TDD: gates, the execution trust model, and the exec runner (stage 4)
 
-Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08
+Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25
 (docs/tdd/gates-trust-review.md, verdict SOUND WITH FIXES — F1–F5 folded in; see
 that file's response table for the per-finding
 mapping) · implements docs/design/engine-spec.md **§4 (whole)**
@@ -49,7 +49,7 @@ Out of scope, explicitly, each with the stage that owns it:
 | Budget enforcement and the floor; `run report`; `dispatch open\|close\|verify\|abandon`; `guard spawn\|record`; `events list --since` | S6 | §10 stage 6 |
 | The **write-class reap-acknowledgment half of §9 item 10** ("a reaped write-class step cannot gain a successor until the reap is acknowledged") | S6 | it is dispatch mechanics — `guard spawn` surfaces the `reaped` event (§2), and `guard spawn` is stage 6's. DKT-4's own AC text says so: "gate re-run half only". **This stage proves the gate half in full** (§9.2) |
 | `events --follow`, `events prune` | S7 | §10 stage 7 |
-| Worktree-isolated parallel writes (upstream D9) | never core | engine-core §5 names it "an optional instance optimization"; the tree mutex (§7.4) is the always-available baseline |
+| Worktree-isolated parallel writes (upstream D9) | never core | engine-core §5 names it "an optional instance optimization"; the tree mutex (§7.4) is the always-available baseline for the shared checkout, and an isolated worktree's gates run beside it unlocked (§7.4 L2) |
 
 ### 1.1 Genericity check (CLAUDE.md PR bar, docs/design/genericity.md)
 
@@ -166,7 +166,7 @@ an operator who runs `docket` in it.
 | T10 | **Trust-entry over-authorization via `--prefix`.** A prefix entry for `make` authorizes `make anything`, including a target that a repo defines to do something hostile. | Prefix entries are **explicit opt-in only** (§3.3): full-argv hashes are the default, `--prefix` is a separate flag that **prints an over-authorization warning naming what it authorizes**, the entry records `prefix = true`, and **a prefix entry matches only when the entry opted in** — a full-argv entry never matches by prefix (§7.2 M3) | §9.1 `TestPrefixMatchingRequiresOptIn` + the warning asserted by substring |
 | T11 | **Gate result forgery / silent stubbing.** A run shows green gates that never ran. | Every recorded result carries its **real `argv`, `exit`, `duration_ms`, and captured `output`** (§6.1). The S3 `stub: true` field is **absent on every result this stage produces** (§6.2), and the migration marks S3-era trail results so the two are distinguishable forever. An `unmatched` gate records a distinct **`verdict = "unmatched"`**, never `pass` | §9.2 `TestRealResultsCarryNoStubField`; QA asserts `stub` is absent post-migration on new results and present on migrated S3 rows |
 | T12 | **Double execution of a non-idempotent gate on resume** (§9 item 10). A crash between `gate-started` and the result record; resume re-runs a gate that committed, deployed, or charged something. | §2's at-least-once rule, implemented exactly: a started-but-unrecorded gate re-runs **only if its trust entry is flagged `re-runnable`**, else the step **parks `waiting-human`** (§7.5). The flag is per-**entry**, i.e. the operator's declaration about their own command — core never infers idempotence | §9.2 `TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable` — every saga boundary, both flag values |
-| T13 | **Concurrent tree mutation.** Two gates that touch the working tree (`tree = true`) run concurrently from parallel read-step completions and race a build. | An **engine-held per-repo mutex** (§7.4), which is **not** the database transaction — gates run outside transactions by construction (§6 of engine-spec: "No subprocess ever executes inside a transaction"). The mechanism is pinned in §7.4: an OS-level advisory lock on a lockfile in the repo's `.docket/` directory | §9.2 `TestTreeGatesSerialize` — two concurrent `tree=true` gates, each recording entry/exit timestamps, asserted non-overlapping; and a crash-holding-the-lock case |
+| T13 | **Concurrent tree mutation.** Two gates that touch the working tree (`tree = true`) run concurrently from parallel read-step completions and race a build. | An **engine-held mutex on the shared checkout** (§7.4), which is **not** the database transaction — gates run outside transactions by construction (§6 of engine-spec: "No subprocess ever executes inside a transaction"). The mechanism is pinned in §7.4: an OS-level advisory lock on a lockfile in the repo's `.docket/` directory, taken only by a gate running in the shared checkout; a gate in a step's own worktree or a scratch reconstruction has its tree to itself and takes none (L2) | §9.2 `TestTreeGatesSerialize` — two concurrent `tree=true` gates, each recording entry/exit timestamps, asserted non-overlapping; a crash-holding-the-lock case; and `TestIsolatedWorktreeGatesDoNotSerialize` — eight tree gates on eight worktrees run concurrently with no lock wait recorded |
 | T14 | **Pre-gate as a bypass.** Pre-gates run at claim (§11.1), earlier in the lifecycle and on a different code path than the saga's gates — an implementation could reasonably "simplify" them into a trusted path. | **Same trust model, no exceptions** (§7.6). Pre-gates resolve through the identical matcher, the identical runner, the identical env allowlist and timeout, and an unmatched pre-gate is reported `unmatched` and does **not** execute. The only differences are *when* they run and *where the result goes* | §9.2 `TestPreGatesUseTheSameTrustPath` — an untrusted pre-gate command does not execute and the claim still succeeds with the result recorded `unmatched` |
 | T15 | **Path resolution hijack.** `argv[0]` is `make`; a repo ships `./make`, or `PATH` contains `.`, so a repo-controlled binary runs. | Resolution is `exec.LookPath` against the **allowlisted `PATH`** (§5.3), which is inherited from the operator's environment and never modified by docket; **the current directory is never prepended** and a relative `argv[0]` containing no separator is **not** resolved against cwd. A trust entry may name an absolute path, which resolves to itself. §5.2 records the residual: an operator whose own `PATH` contains `.` is already exposed everywhere, and docket does not repair that | §9.1 `TestArgv0IsNotResolvedAgainstTheWorkingDirectory` — a `./make` planted in the repo root is not executed |
 | T16 | **Fenced command harvested from an issue body an attacker can write.** Not a clone — a *live* repo where an attacker can file an issue. | The gate still needs a **matching trust entry** (T1's mechanism), so filing an issue grants nothing. §2 (engine-spec) adds the operator-facing half: activation "surfaces what activation will bind — including every harvested fenced command, verbatim". §7.7 makes that concrete at this stage: `run activate` **prints every harvested command and its trust-match status** (matched / unmatched), so an operator sees `unmatched` commands before the run, not after | §9.2 `TestActivationReportsFenceTrustStatus`; QA asserts the verbatim print |
@@ -561,6 +561,33 @@ It is deliberately NOT the pre-existing `gate_results.stub`, which marks a row
 migrated from an S3 `gate_trail` — that is a fact about which era produced the
 row, and one column carrying both would answer neither question.
 
+### AMENDMENT (DKT-607) — a stub records its reason
+
+A stub entry may carry `stub_reason`, set by `docket trust add --stub
+--stub-reason "<why; tracking issue>"`. It records the DECISION behind the
+placeholder: why no real check exists yet and which issue tracks replacing it
+(e.g. `"no scanner selected yet; removal tracked by DKT-607"`).
+
+**The problem it solves.** DKT-265 made hollow green visible; it did not make it
+EXPLAINED. Two tribunal seats on DKT-V196 independently rediscovered the same
+corpus stubs (`secret-scan`, `sdet-abuse`) because the decision that they remain
+stubs lived only in tribunal transcripts. The project's stub-gate policy
+requires every stub to have a removal-tracking issue; this field is where that
+reference becomes discoverable from the surfaces an operator actually reads.
+
+**Where it surfaces.** The activation gate preflight prints it under the stub's
+own line (and carries it as `stub_reason` in the JSON row); a stub with NO
+recorded reason gets a remedy line naming `--stub-reason`. `trust list` renders
+it inside the `stub(no-real-check: …)` marker, and it rides §3.6's event beside
+`stub`.
+
+**Constraints.** It only makes sense alongside `stub = true`: a reason on a
+non-stub entry is refused at parse and at add, the closed direction. It is
+OPTIONAL on a stub — every pre-DKT-607 stub entry has none and keeps loading
+with an empty reason. Changing or erasing it on a re-add is a `CONFLICT`, since
+the reason is the documented decision and a silent rewrite would swap one
+decision for another under a re-approval.
+
 ## 3.6 Trust changes are event-logged (T9)
 
 `trust add` and `trust rm` write a **`trust-added` / `trust-removed` event** into
@@ -597,11 +624,31 @@ T9's residual auditable rather than invisible; and `events` gains two kinds,
 which extends the closed set (engine-spine §7.6) — §6.4 lists every event kind
 this stage adds, so §9 item 2's closed-set check keeps passing.
 
-Recording is **mandatory-or-fail** inside a repo (DKT-81): the event is written
-before the store, and a recording failure fails the verb with the store
-untouched, so the ledger and the allowlist cannot silently diverge. An
+Recording is **mandatory-or-fail** inside a repo (DKT-81). The event and the
+store are two writes, and one invariant fixes their order: whichever write
+fails, the surviving partial failure must never let the record claim **less**
+authority than the store grants. The invariant points opposite ways for
+granting and revoking:
+
+- **`trust add`** writes the event before the store. A recording failure fails
+  the verb with the store untouched; a store failure after the event leaves a
+  recorded grant that never landed, which over-reports authority.
+- **`trust rm`** publishes the store before it records the event. A publish
+  failure removes nothing and records nothing; a recording failure after a
+  successful publish fails the verb with the entry **already removed**, and the
+  verb says so. The record then still shows the entry as trusted, which
+  over-reports authority. Recording first would leave the reverse: a
+  revocation on record for an entry that still authorizes execution.
+
+Neither verb lets the ledger and the allowlist diverge silently. An
 **idempotent re-add emits no event** — an event proves a change, never mere
 repetition.
+
+**AMENDMENT (DKT-2198, 2026-09-15): removal publishes before it records.** The
+DKT-81 decision wrote the event before the store for both verbs. That order
+still governs `trust add`; for `trust rm` it could leave a recorded revocation
+over an entry the store still grants, so the removal verb takes the
+store-first order above.
 
 `trust list` and `trust rm` outside a repo work and write no event; the trust
 store is user-level and does not require a repo to manage. `add` and `rm`
@@ -897,6 +944,71 @@ the next environment variable anyone invents.
 | `CI` | `1` | the near-universal convention for "non-interactive"; it makes tools skip prompts and progress spinners without docket having to know each tool |
 | `DOCKET_GATE` | the gate name | so a check can behave differently under docket if its author wants; opaque to core |
 | `DOCKET_REPO` | the repo root | the same value as `Dir`, for tools that need it in an env |
+| `DOCKET_GATE_BASE` | the step's base commit sha, **worktree-recorded completion gates only** | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
+| `DOCKET_STEP` | the step's reference, `STEP-N` | so a gate can ask the engine for its **own inputs** — the identity `docket step context` and `docket step artifacts` take — instead of re-deriving which step it is from `DOCKET_ISSUE` plus an instance-name convention; see below *(added 2026-09-03, DKT-1186)* |
+| `GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` | a scratch directory deleted with the tree, **gates measuring a reconstruction only** | both tools cache issues by package content while storing the absolute path each was found at, and re-open that path to find the `//nolint` that suppresses it. A reconstruction outlives neither, so its entries must not either — see §7.6's DKT-1166 amendment *(added 2026-09-03, DKT-1166)* |
+
+**`DOCKET_GATE_BASE` — the step's committed range** *(DKT-992)*. Executors
+commit **before** `step record`, so at gate time a worktree-recorded step's
+tree is clean: a working-tree-only scan measures zero lines however large the
+change (RUN-66's secret-scan passed 8/8 write steps that way), and a gate
+guessing `git diff HEAD~1` is wrong for every multi-commit step. The engine
+already knows the step's base — the worktree's **fork point**, the same
+resolution the diff stage's `runDiffBase` applies — so completion gates of a
+`--worktree`-recorded step export it:
+
+- **Worktree-recorded step**: `DOCKET_GATE_BASE` names the commit the worktree
+  was created from. `git diff $DOCKET_GATE_BASE..HEAD` in the gate's own cwd
+  (the worktree, per DKT-9) is exactly the step's committed change — the same
+  range the recorded `issue.diff` describes.
+- **Non-worktree step**: the variable is **unset** — that is the documented
+  pick between the two admissible encodings (unset, or equal to `HEAD`). The
+  shared checkout has no fork point, the run's pinned commit is not this
+  step's base (sibling work lands between them, DKT-42's over-attribution),
+  and a live `HEAD` read is a value docket cannot vouch for as a range
+  endpoint. Absence — never an invented sha — is the encoding, the same
+  convention as `DOCKET_SCOPE`.
+- The variable is also unset when the fork point cannot be resolved, and on
+  the pre-claim path (a pre-gate measures the tree under review, not a
+  recorded completion; after integration sweeps a worktree, no honest base
+  survives to export).
+- **Fail closed on absence**: a range-shaped gate that finds the variable
+  absent while the tree is clean has nothing it can honestly scan, and should
+  fail rather than pass having measured nothing — "we couldn't check, so
+  carry on" is what makes a control decorative (N3).
+
+**`DOCKET_STEP` — the gate's own identity** *(DKT-1186)*. A gate frequently
+needs an **artifact an earlier step of the same issue produced** — a threat
+model feeding an abuse-case check, a synthesis feeding a verifier. Nothing in
+the child environment named the step, so the only route was to rebuild the
+gate's identity from outside the engine: `docket step list --issue
+$DOCKET_ISSUE`, pick the row by a **hardcoded instance-name convention**, parse
+that listing's JSON shape, then `docket step artifacts` on the result. That is
+three couplings to things the engine is free to change — instance naming,
+listing order, wire shape — and each one breaks silently when it moves. It was
+observed in the wild (RUN-80's activation gate, `agentic-services` commit
+`897c0a7`) and flagged as a precedent not to set.
+
+- **Value**: the step's rendered reference, `STEP-N` — precisely the argument
+  `docket step context STEP-N` and `docket step artifacts STEP-N` take. The
+  bundle's `inputs` **are** the artifacts the step was handed, so
+  `docket step context $DOCKET_STEP` answers "what were my inputs" in one verb
+  against a stable identity, and `docket step artifact ARTIFACT-N` fetches a
+  body from there.
+- **Set on both paths**: completion gates (the saga) and pre-gates (the
+  pre-claim path) alike. The pre-claim path is where it matters most — a
+  pre-gate runs *before* the claim hands the bundle over, so asking the engine
+  by reference is its only route to the chain's artifacts.
+- **No new authority.** Both verbs are read-only and take no token, and the
+  reference is an identifier the child could already reconstruct by hand. This
+  makes the lookup cheap and correct rather than conventional and fragile; it
+  does not widen what a gate may do. `DOCKET_PATH` and `DOCKET_TOKEN` remain
+  excluded, unchanged.
+- **Unset, never `STEP-0`**: a gate spawned with no step in hand (a bare runner,
+  a future caller) sees the variable **absent**. A well-formed id that resolves
+  to nothing fails inside the gate's own tooling with a misleading message,
+  where absence is a condition the gate can test — the same encoding
+  `DOCKET_SCOPE` and `DOCKET_GATE_BASE` use.
 
 **Excluded, by name, in addition to being absent from the allowlist:**
 
@@ -1179,11 +1291,11 @@ repo, acquired for the duration of a `tree = true` gate's execution.
 | # | Clause |
 |---|---|
 | L1 | The lock is `flock(2)` (`syscall.Flock`, `LOCK_EX`) on a lockfile created `0600` at `<repo>/.docket/tree.lock`. It is **advisory and process-scoped** — held by the docket process running the gate, released when that process exits **by any means, including SIGKILL**, because the kernel releases flocks on fd close. This is the property a database row or a lockfile-with-a-pid cannot match: a crashed engine leaves no stale lock to clear |
-| L2 | It is **per repo**, keyed by the repo root — the same identity as §3.4's, so a second checkout of the same project does not serialize against the first |
+| L2 | It guards **the shared checkout**, keyed by the project — the same identity as §3.4's. **Only a gate whose working directory is the shared checkout takes it.** A gate running in a step's own `--worktree`, or in a pre-gate's scratch reconstruction (§7.6), takes **no lock**: that tree has one step behind it, and keying every tree's gate to one per-project lock serialized a whole wave's records and claim-time pre-gates behind each other until the bound expired, recording correct work as unmeasured and holding claims past the executor's tool timeout. The accepted trade: two gates on the **same** isolated worktree are not serialized against each other either. Engine actions (docs/tdd/payloads-thresholds.md §6.2, A7; `action_exec.go`) always run in the shared checkout and always take it |
 | L3 | It is acquired **immediately before the spawn** and released **immediately after the process exits**, outside every transaction, and it is never held across a database write |
-| L4 | Acquisition **blocks**, with the gate's own timeout as its bound: a gate waiting on the mutex longer than its timeout records `verdict='fail'` with `reason` naming the wait. Blocking rather than failing fast is correct — the whole purpose is to make the second gate wait for the first |
+| L4 | Acquisition **blocks**, with the gate's own timeout as its bound: a gate waiting on the mutex longer than its timeout records `verdict='skipped'` with `reason` naming the wait — nothing ran, so nothing about the tree was measured, and the execution verdict stays `fail` so routing remains fail-closed. Blocking rather than failing fast is correct — the whole purpose is to make the second gate wait for the first |
 | L5 | An in-process `sync.Mutex` is held **in addition**, because `flock` semantics between two fds in the *same* process are not exclusion; two goroutines in one engine must serialize on the Go mutex, and two engine processes on the flock. Both, or the single-process case silently races |
-| L6 | Gates without `tree = true` take **no lock** and run in parallel freely — engine-core §5's "read-only fan-outs parallelize freely (the proven win)" |
+| L6 | Gates without `tree = true` take **no lock** and run in parallel freely — engine-core §5's "read-only fan-outs parallelize freely (the proven win)". So do `tree = true` gates on an isolated tree (L2): parallel writes in distinct worktrees are the other proven win, and the lock must not take it back |
 | L7 | **The lockfile is opened `O_NOFOLLOW`, and an existing non-regular file is a refusal.** `.docket/tree.lock` sits inside the repository, so it is repo-shippable content: a hostile repo can commit it as a **symlink** (to `~/.ssh/config`, to a device node, to a FIFO), and an ordinary open would follow it. The open is `O_RDWR\|O_CREAT\|O_NOFOLLOW` with mode `0600`; if the path exists and `Lstat` reports anything other than a **regular file**, docket refuses with a `VALIDATION_ERROR` naming the path and what it found — the **identical language and disposition as §3.2's I1**, which established this discipline for the trust file. The `tree = true` gate does not run; it records `verdict='fail'` with the refusal as its `reason`, because the serialization it requires cannot be provided. |
 
 L7's blast radius is small on its own — the worst case is an `flock` taken on an
@@ -1275,6 +1387,14 @@ step's inputs rather than of any gate:
 | sha reachable, tree gone | **Reconstruct** it — `git worktree add --detach` into a throwaway checkout, measure, release. Sweeping a checkout does not delete the object |
 | neither | `skipped`, spawning nothing, with a reason naming the sha or the swept path |
 
+**The lock timeout is the same case (DKT-91).** A `tree = true` gate whose
+working-tree mutex does not come free within its bound never spawns either, so
+it records `skipped` with a reason naming the wait — no exit code, no duration,
+no output — and parks as unmeasured rather than routing per `on_fail`. The
+cause differs from a swept worktree; the fact does not. `fail` there spent the
+token a genuinely failing build spends, and a fix loop entered on it would ask
+a worker to fix a tree the engine never opened.
+
 Reconstruction is what makes mode 2 a fixed bug rather than a documented park:
 parking every swept-worktree verify is honest and useless. It is NOT a
 best-effort fallback — if the sha cannot be checked out the gate skips, exactly
@@ -1304,6 +1424,46 @@ RUN-29 STEP-746 record `skipped` and silently pass-route.
 PG4 is unchanged and still applies: a PRE-gate that could not bind its tree is
 data for the step's worker, not a park. Parking on it would be the engine
 judging a step by an input it handed the step itself.
+
+### AMENDMENT (DKT-1166) — a throwaway tree gets throwaway linter caches
+
+DKT-254 gave a pre-gate the right tree. It did not give it a cache that dies
+with that tree, and a class of tool needs exactly that.
+
+**The mechanism.** golangci-lint and staticcheck cache each reported issue
+keyed by **package content**, storing the **absolute path** the issue was found
+at, and re-open that path afterwards to look for the `//nolint` (or
+`//lint:ignore`) comment that would suppress it. A reconstruction is deleted
+within the minute; the content hash is not. So one reconstruction's entries are
+replayed in the next, the suppression lookup re-opens a file that is gone, and
+an already-suppressed issue is re-emitted as live.
+
+**Observed**: harness RUN-64/STEP-2939 recorded `ac-commands: fail, exit 2` over
+a clean tree. Build and tests exited 0; `make lint` reported one forbidigo issue
+at `../docket-pregate-4091742512/…/timelinecompare_test.go` — a directory an
+earlier reconstruction had already removed — with golangci-lint warning it could
+not read that file, while the source carried `//nolint:forbidigo` on the line
+above and the same sha linted in place reported `0 issues.`
+
+**The cwd was never the problem.** DKT-254 already binds the reconstruction and
+`gate_exec.go` already spawns in it, which is why the reported path was
+*relative to* the current reconstruction. The carrier is the cache, and it
+poisons in both directions: the operator's own persistent cache also receives
+entries naming a `docket-pregate-*` path docket is about to delete.
+
+**The rule.** A gate that measures a tree docket will delete gets its
+path-carrying result caches inside a scratch root docket deletes with that tree
+(`GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` — §5.3). A gate over a tree that
+stays on disk keeps its shared caches: re-analysis is a real cost, and it is
+only worth paying where the tree is genuinely throwaway. The Go **build** cache
+is deliberately untouched — what makes an entry dangerous here is a stored
+source path the tool re-opens to decide suppression, and relocating `GOCACHE`
+would rebuild the standard library on every reconstruction for no such benefit.
+
+A cache root that cannot be created **fails the reconstruction**, which records
+`skipped`, on the same reasoning as the rest of this section: a measurement that
+can report a suppressed issue as live is measuring the wrong thing, and that is
+the defect, while measuring nothing is a gap.
 
 ### 7.6.1 Ordering and the claim restructure
 
@@ -1345,8 +1505,9 @@ Transaction A sets `expires_ms` when it wins the CAS. Phase 2 then runs
 **subprocesses** — each bounded by the gate's own timeout, which defaults to
 **5m** (§5.4 X5) and can be a per-entry override, and a step may declare several
 pre-gates that run one at a time. The wall time between the CAS and the response
-is therefore unbounded in principle and minutes in practice, and **all of it is
-deducted from a lease the caller has not yet received**. A pre-gate-heavy step
+was therefore unbounded in principle and minutes in practice (it is now capped
+by §7.6.2 PG5's 60s budget, which is still longer than a short TTL), and **all
+of it is deducted from a lease the caller has not yet received**. A pre-gate-heavy step
 hands its worker a mostly-spent lease; with a short configured TTL it can hand
 over an **already-expired** one, so the worker's first `step complete` fails on a
 lease it never had a chance to use, the step is reaped, and the pre-gates run
@@ -1378,13 +1539,16 @@ when the caller gets it.
 
 | # | Clause |
 |---|---|
-| PG1 | A pre-gate resolves through the **identical** matcher (§7.2), the identical env allowlist (§5.3), the identical timeout and process-group kill (§5.4), the identical capture (§5.5), and the identical tree mutex when `tree = true` (§7.4). There is no pre-gate-specific path anywhere in `internal/exec` or `internal/trust`. |
+| PG1 | A pre-gate resolves through the **identical** matcher (§7.2), the identical env allowlist (§5.3), the identical timeout and process-group kill (§5.4), the identical capture (§5.5), and the identical tree mutex when `tree = true` **and** it runs in the shared checkout (§7.4 L2) — a pre-gate measuring a step's worktree or a scratch reconstruction takes none, exactly as a completion gate there takes none. There is no pre-gate-specific path anywhere in `internal/exec` or `internal/trust`. |
 | PG2 | An **unmatched pre-gate does not execute**, records `verdict='unmatched'` with `pre = 1`, and **the claim still succeeds** — the result rides in the bundle as `unmatched`, and the step's worker sees that its measurement did not run. A pre-gate is a measurement whose *result* the step consumes; refusing the claim would make an untrusted command able to block work, which is a denial-of-service an issue author should not have. |
 | PG3 | A **failing** pre-gate (non-zero exit) likewise does not refuse the claim: the result is `fail` and rides in the bundle. §11.1 calls these "measure-then-judge steps" — the judging is the step's job, which is exactly why the failure is data rather than a refusal. |
 | PG4 | Pre-gate results are **excluded from the saga's gate verdict** (`gateVerdict` filters `pre = 1`). They are inputs to the step, not judgments of it. S3 already excludes `pre` gates from `completionGates` (saga.go:311–320); this is the read-side counterpart. |
+| PG5 | **The pre-gate phase is bounded as a whole** by a **60s budget** (`claimPreGateBudget`, pregate.go), taken from the start of phase 2 so reconstruction, any lock wait, and every gate's execution spend from one purse. Each gate's timeout is clamped to what remains — a flaky entry's re-runs included, through `exec.Spec.Deadline` — and a gate whose turn comes with nothing left records `verdict='skipped'` with `reason` naming the budget. A gate the clamp cuts off records its timeout as `fail`, with `reason` naming the budget beside the entry's own timeout so the row does not read as a changed entry. **The claim still succeeds** (PG2, PG3): the budget decides *when* `docket step claim` returns, never *whether*. The bound exists because an executor runs the claim under a **120s tool timeout**, and a claim that outlives it is backgrounded with its token unread and its lease left to a forced reap; sixty seconds leaves the rest of that window for transactions A and B, context assembly, and the packet render under load. |
 
 PG2 and PG3 together mean a pre-gate never blocks — a deliberate asymmetry with
-completion gates, and the reason is in §11.1's own parenthetical.
+completion gates, and the reason is in §11.1's own parenthetical. PG5 keeps
+that asymmetry: a slow pre-gate is cut short and reported, not turned into a
+refusal that a slow command could use to block work.
 
 ### 7.6.3 Where the results land in the bundle
 
@@ -1502,6 +1666,8 @@ registry (SKILL.md's engine-configuration table), not a new table:
 |---|---|---|
 | `vote.rule.<name>.threshold` | float in (0,1] | the approval threshold this rule tallies at |
 | `vote.rule.<name>.criticality` | `low\|medium\|high\|critical` | the proposal's criticality |
+| `vote.rule.<name>.sealed` | bool, default `false` | whether proposals opened under this rule withhold their casts from the read verbs until the tally closes them (DKT-2447, below) |
+| `vote.rule.<name>.hold_on_dissent` | bool, default `false` | whether an approved tally that carries at least one `reject` cast parks the vote step for the operator instead of passing |
 
 `<name>` is an opaque string, exactly as `lease.ttl.<class>`'s class is. A rule
 "exists" iff `vote.rule.<name>.threshold` is set. This reuses the config
@@ -1511,6 +1677,84 @@ machinery, its `VALIDATION_ERROR`-on-unknown-key behavior, and its
 **`required_voters` comes from `len(voters)`, not from the config**, because
 §11.1 puts the voter list on the step. A rule is about *how strictly to tally*;
 the step is about *who casts*.
+
+**Roster and weighting are declared on the vote step, not in config
+(DKT-2562, DKT-2764).** Who may cast and what a cast is worth are
+authorization decisions, and a config key carries none: `docket config set`
+has no per-caller identity, so a seat constrained by a rule could rewrite the
+rule before casting. The two switches therefore live in the vote step's
+`[[step]]` table — `roster = "open"` (the default) or `"strict"`, and
+`weighting = "declared"` (the default) or `"equal"` — and activation pins them
+with the workflow beside `voters`, where a live ballot cannot have them
+changed underneath it. They are **not engine-config keys**: the
+`vote.rule.<name>.roster` and `.weighting` keys that once registered them are
+retired, and `config set` refuses each by name pointing at the field that
+replaced it. Enforcement applies on **vote steps only**: `docket vote cast`
+resolves the proposal back to the pinned step and reads the switches there,
+so a proposal no vote step opened (an operator's own, a reap acknowledgment's,
+a materialized held cluster's minted panel) enforces neither.
+
+- `roster = "strict"` refuses a cast whose `--voter` is not one of the step's
+  pinned `voters` as a `VALIDATION_ERROR` naming the voter and the roster, and
+  writes no vote (DKT-2511). `open` is today's behavior: the list is counted
+  and a cast under any name fills a seat.
+- `weighting = "equal"` tallies every cast at 1.0 × 1.0 while each vote row
+  keeps the confidence and domain relevance the seat declared (DKT-2512);
+  `declared` is `db.CastVote`'s existing arithmetic, reached through the same
+  function with one flag.
+
+**Why this reverses the opaque-voter decision, and only for steps that opt
+in.** `internal/engine/vote.go`'s proposal construction records that "the
+voter hints themselves are OPAQUE: core never interprets one" — it counts
+them for `required_voters` and nothing more, and that stays true of every
+ballot by default. A step declaring `roster = "strict"` opts into the one
+comparison the cast path then makes: the name on the cast must be one of
+those hints. Core still never dispatches to a hint and never reads meaning
+into one; it compares two strings the author wrote. Making that comparison
+the default would have turned every registered ballot strict at once, and a
+threshold nobody chose is not a threshold — so the switch is opt-in, per
+step, and pinned. The recusal seam (`reviews`, `recuse = "executor"`) is the
+same shape and lives in engine-spec §11.1.
+
+**Sealed ballots (DKT-2447).** Every proposal used to render every recorded
+cast — verdict, confidence, relevance, weight, findings, summary — while it
+was still open, so a seat that read the proposal after a sibling had cast saw
+the sibling's verdict and reasoning before casting its own: the public-board
+channel for anchoring and collusion. `vote.rule.<name>.sealed = true` closes
+that channel for the proposals a rule opens. The flag is resolved beside the
+threshold in `resolveVoteRule` and **stored on the proposal at open** (v28's
+`proposals.sealed`, reliability-delta §2), so an edit to the rule cannot
+change what a live ballot renders under the seats mid-vote; `vote create
+--sealed` is the same flag for a conversational proposal.
+
+While a sealed proposal is `open`, `vote show`, `vote result` and `gate
+status` render only **who has cast and how many casts are in**: the human
+views list voter names under a `sealed` note, the JSON `votes` array carries
+`{voter_name, created_at}` entries and no verdict, confidence, relevance,
+weight, findings or summary keys, and `gate status` reports each seat's
+`cast` without its `verdict`. `vote list` already rendered only the count.
+The moment the status leaves `open` — a tally, a `vote commit`, a `vote
+close` — everything renders, and the `vote-record` context artifact a
+downstream step consumes is composed only after the vote step routes, so it
+never carries an open ballot's casts.
+
+Sealing is a **norm-level shield, not a security boundary.** It changes what
+the read verbs *render* and nothing else: `db.CastVote`, its weighted score,
+its quorum and the one-cast-per-voter constraint never read the flag, and the
+vote rows stay exactly as readable as before through `docket export`,
+`ListAllVotes`, and direct store access with `sqlite3`. A seat that wants to
+read a sibling's cast can; the shield removes the default path that handed
+it to every seat that merely looked at the proposal it was asked to judge.
+
+**Holding on dissent.** A rule's tally is a weighted mean, so two approve
+casts outweigh one reject and a dissenting seat's verdict leaves no trace in
+routing once the score clears the threshold. `vote.rule.<name>.hold_on_dissent = true`
+closes that gap: when such a rule's proposal tallies approved but at least
+one cast's verdict is `reject`, the vote step parks `waiting-human` instead
+of passing, with a reason naming the dissenting seat's voter name (each one,
+sorted, when more than one seat dissented) — except a panel that is deciding
+the tally's own question, which keeps the routing that decision already gave
+it.
 
 ## 8.4 What is NOT in scope here
 

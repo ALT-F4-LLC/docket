@@ -29,10 +29,28 @@ type planPhaseJSON struct {
 type planIssue struct {
 	Issue     *model.Issue
 	BlockedBy []string
+	// withBody selects the full pre-DKT-1053 row (planIssueJSON) over the
+	// summary row (planIssueRowJSON). Unexported: it is a rendering choice,
+	// never a wire field.
+	withBody bool
 }
 
-// planIssueJSON is the explicit JSON wire format for planIssue, avoiding the
-// fragile marshal-unmarshal-remarshal pattern (mirrors showResultJSON).
+// planIssueRowJSON is `plan`'s default row: the summary row every
+// list-shaped verb emits (issue_row.go), plus `blocked_by` (DKT-1053).
+//
+// Sharing issueRow means a plan row now also carries the keys the shared row
+// has and planIssueJSON never gained — `issue` (DKT-452), and `scope` and
+// `resolution` when set (DKT-55, DKT-245). Those are additions a consumer of
+// the existing keys cannot notice; `description` is the only key that moved.
+type planIssueRowJSON struct {
+	issueRow
+	BlockedBy []string `json:"blocked_by"`
+}
+
+// planIssueJSON is the explicit JSON wire format for a `--with-body` plan
+// row, avoiding the fragile marshal-unmarshal-remarshal pattern (mirrors
+// showResultJSON). It is the shape `plan` emitted before DKT-1053, kept
+// byte-identical for the caller that wants every description in one call.
 type planIssueJSON struct {
 	ID          string         `json:"id"`
 	ParentID    *string        `json:"parent_id,omitempty"`
@@ -50,9 +68,22 @@ type planIssueJSON struct {
 	BlockedBy   []string       `json:"blocked_by"`
 }
 
-// MarshalJSON implements custom JSON serialization for planIssue.
+// MarshalJSON implements custom JSON serialization for planIssue: the summary
+// row by default, the full row under --with-body.
 func (p planIssue) MarshalJSON() ([]byte, error) {
 	i := p.Issue
+
+	blockedBy := p.BlockedBy
+	if blockedBy == nil {
+		blockedBy = []string{}
+	}
+
+	if !p.withBody {
+		return json.Marshal(planIssueRowJSON{
+			issueRow:  summarizeIssue(i),
+			BlockedBy: blockedBy,
+		})
+	}
 
 	labels := i.Labels
 	if labels == nil {
@@ -65,10 +96,6 @@ func (p planIssue) MarshalJSON() ([]byte, error) {
 	docs := i.Docs
 	if docs == nil {
 		docs = []model.DocRef{}
-	}
-	blockedBy := p.BlockedBy
-	if blockedBy == nil {
-		blockedBy = []string{}
 	}
 
 	j := planIssueJSON{
@@ -118,9 +145,11 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	sizes, _ := cmd.Flags().GetStringSlice("size")
 	types, _ := cmd.Flags().GetStringSlice("type")
 	assignee, _ := cmd.Flags().GetString("assignee")
 	rootFlag, _ := cmd.Flags().GetString("root")
+	withBody, _ := cmd.Flags().GetBool("with-body")
 
 	// Validate status filter values.
 	for _, s := range statuses {
@@ -130,6 +159,11 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 	for _, p := range priorities {
 		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
+	for _, sz := range sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
 	}
@@ -167,6 +201,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 		Statuses:   statuses,
 		Labels:     labels,
 		Priorities: priorities,
+		Sizes:      sizes,
 		Types:      types,
 		Assignee:   assignee,
 	}
@@ -198,6 +233,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 			planIssues[j] = planIssue{
 				Issue:     issue,
 				BlockedBy: collectDeps(issue.ID, dag),
+				withBody:  withBody,
 			}
 		}
 		phases[i] = planPhaseJSON{
@@ -377,7 +413,9 @@ func init() {
 	planCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (repeatable; default: every non-done status)")
 	planCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	planCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
+	planCmd.Flags().StringSlice("size", nil, "Filter by size (repeatable)")
 	planCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")
 	planCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
+	planCmd.Flags().Bool("with-body", false, withBodyHelp)
 	rootCmd.AddCommand(planCmd)
 }

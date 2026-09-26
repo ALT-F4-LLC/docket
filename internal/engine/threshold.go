@@ -49,6 +49,50 @@ import (
 // RoutingPass is §11.2's default: no threshold matches ⇒ pass.
 const RoutingPass = "pass"
 
+// The reserved `diff.*` family (DKT-2063).
+//
+// These three fields are NOT payload fields and never reach a payload schema.
+// They name the engine's own measurement of the change a tree-holding step
+// recorded, which is why they are reserved rather than registered: a step's
+// payload is whatever its executor chose to emit, and `implement` emits a
+// markdown change-summary with no payload at all — so the facts a change track
+// wants to route on (how big was the change, was there one) exist in the ledger
+// and no payload predicate can reach them.
+//
+// They are ORDERED WITHOUT AN ORDERED_ENUM, and that is not a hole in T3. T3
+// exists because core does not know whether `high` outranks `medium`; it does
+// know that 21 > 20. `diff.lines` and `diff.files` are counts the engine itself
+// computed, compared numerically, so there is no order to guess and nothing to
+// park on.
+//
+// The names are the workflow package's (DKT-2518, DKT-2551): the validator
+// decides at register time where a `diff.*` predicate may appear and what it
+// may compare against, and this package imports that one, so the vocabulary
+// lives there and is read here — one spelling, as VoteCastFields is.
+const (
+	DiffFieldLines = workflow.DiffFieldLines
+	DiffFieldFiles = workflow.DiffFieldFiles
+	DiffFieldEmpty = workflow.DiffFieldEmpty
+)
+
+// DiffFacts is the engine's measurement of one step's recorded change, the
+// values the reserved `diff.*` family evaluates over.
+//
+// A nil *DiffFacts is "this step holds no tree", and every `diff.*` predicate
+// is then an ordinary unknown field — the S5 behavior, untouched. An ABSENT
+// round record is a different fact and is a non-nil zero value: no change was
+// measured, so Lines and Files are 0 and Empty is true. The two must not
+// collapse, because `any(diff.empty == false)` has to be decided (false) for a
+// step that recorded nothing, not left to the no-such-field path.
+type DiffFacts struct {
+	// Lines is added plus removed content lines.
+	Lines int
+	// Files is the number of files the diff touches.
+	Files int
+	// Empty reports that no content line changed.
+	Empty bool
+}
+
 // OrderResolver reports what the step's PINNED payload schema declares about a
 // field (§5, §4.3).
 //
@@ -110,6 +154,22 @@ func EvaluateThreshold(
 	instance string, threshold map[string]string, order []string,
 	payloads []map[string]any, schema OrderResolver,
 ) (ThresholdResult, error) {
+	return EvaluateThresholdOverDiff(
+		instance, threshold, order, payloads, schema, nil)
+}
+
+// EvaluateThresholdOverDiff is EvaluateThreshold with the reserved `diff.*`
+// family available (DKT-2063).
+//
+// `facts` is non-nil exactly for a step whose completion measured a tree, and
+// a `diff.*` predicate then evaluates over that measurement instead of over the
+// payload set. Passing nil is EvaluateThreshold's behavior in full: `diff.lines`
+// is an ordinary field name nothing declares, and every existing caller keeps
+// the evaluation it had.
+func EvaluateThresholdOverDiff(
+	instance string, threshold map[string]string, order []string,
+	payloads []map[string]any, schema OrderResolver, facts *DiffFacts,
+) (ThresholdResult, error) {
 	for _, routing := range order {
 		src, ok := threshold[routing]
 		if !ok {
@@ -122,7 +182,7 @@ func EvaluateThreshold(
 				"step %s: %v", instance, err)
 		}
 
-		matched, why, err := evaluate(pred, payloads, schema)
+		matched, why, err := evaluate(pred, payloads, schema, facts)
 		if err != nil {
 			return ThresholdResult{}, err
 		}
@@ -189,7 +249,20 @@ func whyValueUnordered(field, value string) string {
 // knows which of T3's three cases it hit.
 func evaluate(
 	p workflow.Predicate, payloads []map[string]any, schema OrderResolver,
+	facts *DiffFacts,
 ) (matched bool, why string, err error) {
+	// ---- The reserved `diff.*` family, before everything. -------------------
+	//
+	// It is decided first because it is not a payload question at all: the
+	// aggregation short-circuits below are about how many payload elements there
+	// are, and the engine's own diff measurement is one fact regardless. Running
+	// T4 over it would make `all(diff.lines <= 20)` true for a step that emitted
+	// no payload — a size assertion answered by the absence of an unrelated
+	// artifact.
+	if facts != nil && isDiffField(p.Field) {
+		return evaluateDiff(p, *facts)
+	}
+
 	// ---- T4, BEFORE T3. ----------------------------------------------------
 	//
 	// Over zero payloads the aggregation short-circuits without ever consulting
@@ -290,6 +363,84 @@ func evaluateOrdered(
 		}
 	}
 	return aggregate(p, count, len(payloads)), "", nil
+}
+
+// isDiffField reports whether a predicate field names the reserved family.
+func isDiffField(field string) bool {
+	switch field {
+	case DiffFieldLines, DiffFieldFiles, DiffFieldEmpty:
+		return true
+	}
+	return false
+}
+
+// evaluateDiff decides a reserved `diff.*` predicate against the step's own
+// measurement.
+//
+// THE AGGREGATION IS NOT APPLIED. `diff.lines` is one number for the step, not
+// a column over a set, so `any(diff.lines > 20)` and `all(diff.lines > 20)`
+// are the same assertion and both mean "the change this step recorded exceeds
+// 20 lines". Aggregating instead — a one-element set, say — would let
+// `count>=2(diff.lines > 20)` read as never-true for reasons an author could
+// not see, and folding it into the payload set would make the answer depend on
+// how many clusters an unrelated artifact happened to carry.
+//
+// A literal that is not a number (or not a boolean, for `diff.empty`) is a
+// DECLARATION ERROR, not a park: T3 parks when core cannot know an order, and
+// here it knows the order perfectly and the author wrote something that is not
+// a count. The refusal names the predicate so the definition can be corrected.
+func evaluateDiff(p workflow.Predicate, facts DiffFacts) (bool, string, error) {
+	if p.Field == DiffFieldEmpty {
+		if p.Ordered() {
+			return false, "", validationErr(
+				"threshold predicate %q: %q is a boolean and has no order",
+				p.Source, DiffFieldEmpty)
+		}
+		want, err := strconv.ParseBool(p.Literal)
+		if err != nil {
+			return false, "", validationErr(
+				"threshold predicate %q: %q takes a boolean literal, not %q",
+				p.Source, DiffFieldEmpty, p.Literal)
+		}
+		same := facts.Empty == want
+		return (p.Op == workflow.OpEQ) == same, "", nil
+	}
+
+	got := facts.Lines
+	if p.Field == DiffFieldFiles {
+		got = facts.Files
+	}
+	want, err := strconv.Atoi(p.Literal)
+	if err != nil {
+		return false, "", validationErr(
+			"threshold predicate %q: %q takes an integer literal, not %q",
+			p.Source, p.Field, p.Literal)
+	}
+	return compareCounts(p.Op, got, want), "", nil
+}
+
+// compareCounts applies any §11.2 operator to two INTEGERS.
+//
+// It is separate from comparePositions because the two compare different
+// things: positions are ranks in a user's declared order and carry equality
+// only by accident of being integers, while these are counts the engine
+// measured, where `==` and `!=` are as meaningful as `>`.
+func compareCounts(op string, got, want int) bool {
+	switch op {
+	case workflow.OpEQ:
+		return got == want
+	case workflow.OpNE:
+		return got != want
+	case workflow.OpGE:
+		return got >= want
+	case workflow.OpGT:
+		return got > want
+	case workflow.OpLE:
+		return got <= want
+	case workflow.OpLT:
+		return got < want
+	}
+	return false
 }
 
 // comparePositions applies an ordered operator to two POSITIONS.

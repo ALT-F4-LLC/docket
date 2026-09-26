@@ -311,7 +311,51 @@ would inflate the closure for no gain.
 The default template gains a section rendering each file's body between
 delimiters carrying its path and hash. `== PINNED` **stays** — it is still the
 honest list of what the run pinned, and now the files that were inlined are
-also legible as content rather than only as pointers.
+also legible as content rather than only as pointers. For a pin the section
+still lists only by path and hash, `docket pin show RUN-N PATH` prints the
+pinned bytes at that path, so a step can read text the packet names but does
+not inline.
+
+#### 1.4.1 `issue.files` — an issue's attachments reach the same section (DKT-44)
+
+`issue.files` is an `inputs` entry, declared beside the other engine-produced
+forms:
+
+| form | resolves to |
+|---|---|
+| `issue.body` | the issue's activation-frozen body snapshot |
+| `issue.diff` | the computed VCS diff recorded for the issue |
+| `issue.files` | **the bytes of every path the issue attaches** |
+| `issue.latest.<kind>` | the issue's latest recorded artifact of one kind |
+| `issue.linked.<relation>.<kind>` | an artifact recorded under a linked issue |
+
+A step declaring it receives each attached path as its own
+
+```
+== FILE <path>  <sha256>
+<the file's content>
+```
+
+section — the same section §1.4's declared `packet` entries render into,
+appended after them, because the contract and fragments are what a worker reads
+before the material the contract applies to.
+
+It is the one input form whose resolution **reads the filesystem**. The others
+answer from run state, which is why they are snapshot-pinned; an attachment is a
+path, and a path's contents live where the project keeps them. The read is
+against the **run's recorded exec root** — the project checkout the issue's
+paths are relative to — never the invoking process's cwd, because the claim that
+needs the bytes typically runs from a linked worktree that does not have them.
+That is the defect the form closes: the attachments that forced it were
+untracked, so they existed in the shared checkout and nowhere else, and an
+isolated executor told its inputs arrive in the packet had no sanctioned way to
+reach them.
+
+An attached path the engine cannot read **refuses** with a `VALIDATION_ERROR`
+naming the path, rather than rendering a packet that silently omits a declared
+input. Since `step claim --render` renders as a pre-claim preflight (§1.2's
+refuse-rather-than-drift discipline, applied on the claim path), that refusal
+costs no lease.
 
 ### 1.5 Closure size: counted where the spec says to count it
 
@@ -328,6 +372,16 @@ pinned and hashed them.
 
 **This is the one place the fix reaches beyond render.** It is not scope creep;
 it is the difference between the caps meaning something and meaning nothing.
+
+**`issue.files` attachments are the exception: their bytes are not counted**,
+in `ContextSize` or against the §11.1 caps. The caps run when activation expands
+the steps, against byte counts activation has just pinned. The form does not
+pin attachments: §1.4.1 reads them live from the run's exec root when the
+packet renders, because the attachments that forced the form were untracked. At
+expansion there is nothing to measure, so attachments are deliberately
+uncapped rather than estimated. The cost: a step declaring `issue.files` can
+render a packet larger than its recorded closure size, and nothing refuses it.
+Each attachment's `== FILE` header carries its path and hash, not its size.
 
 ### 1.6 Registration and validation
 

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Scratch-tree reconstruction for pre-gates (DKT-254).
@@ -40,10 +41,62 @@ type scratchTree struct {
 	// Dir is the reconstructed checkout, or "" when reconstruction was not
 	// attempted or did not succeed.
 	Dir string
+	// Cache is a scratch cache root that lives exactly as long as Dir, handed
+	// to the gate's children as their linter result caches (DKT-1166).
+	//
+	// It is a SIBLING of the reconstruction, never a directory inside it: the
+	// tree is the subject under measurement, and a cache written into it would
+	// show up in `git status`, in a linter's own file walk, and in any gate
+	// that hashes the tree.
+	//
+	// WHY IT EXISTS AT ALL. A result cache keyed by package content but
+	// carrying absolute source paths outlives the tree it was written from.
+	// Reconstructions are deleted within the minute, so entries written from
+	// one poison every later run over the same content — the linter re-opens a
+	// path that is gone, cannot find the `//nolint` comment there, and
+	// re-emits an issue the source suppressed (harness RUN-64/STEP-2939).
+	// Scoping the cache to the tree's own lifetime removes the carrier.
+	Cache string
 	// parent is the checkout whose object database holds the sha, and the one
 	// that must be told to forget the worktree on removal. `git worktree
 	// remove` run from anywhere else does not know about it.
 	parent string
+	// lock is the liveness flock this process holds on the tree's sidecar
+	// lockfile for as long as the tree exists. It is what lets a later sweep
+	// tell a tree whose claim is still measuring from one whose claim died:
+	// the kernel drops the flock when this process exits by any means,
+	// including SIGKILL, so a sweeper that can take the lock knows nobody is
+	// left to release the tree. The same property the tree mutex chose flock
+	// for, and for the same reason: no pid file, no stale-lock detection.
+	lock *os.File
+}
+
+// scratchLockPath is the sidecar lockfile beside a scratch tree, and
+// scratchCachePath its cache root: both are DERIVED from the tree's own path,
+// so a sweeper that finds the tree in `git worktree list` can find everything
+// that was created with it without any registry.
+func scratchLockPath(dir string) string  { return dir + ".lock" }
+func scratchCachePath(dir string) string { return dir + "-cache" }
+
+// scratchPrefix is the name every scratch tree starts with, and the only
+// thing the sweep matches on: a detached worktree named otherwise is
+// somebody else's, whatever directory it sits in.
+const scratchPrefix = "docket-pregate-"
+
+// holdScratchLock creates the sidecar lockfile and takes its flock. It is
+// taken BEFORE `git worktree add`, so there is no moment at which the tree
+// exists and its holder cannot be told from a corpse.
+func holdScratchLock(dir string) (*os.File, error) {
+	file, err := os.OpenFile(scratchLockPath(dir),
+		os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 // reconstructTarget checks `sha` out into a throwaway detached worktree.
@@ -72,7 +125,7 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 		return scratchTree{}
 	}
 
-	dir, err := os.MkdirTemp("", "docket-pregate-")
+	dir, err := os.MkdirTemp("", scratchPrefix)
 	if err != nil {
 		return scratchTree{}
 	}
@@ -83,15 +136,37 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 		return scratchTree{}
 	}
 
+	// The liveness lock comes FIRST. A tree that exists before its lock is
+	// held is a tree a concurrent sweep would read as abandoned.
+	lock, err := holdScratchLock(dir)
+	if err != nil {
+		return scratchTree{}
+	}
+
 	// --detach: no branch is created, so nothing about the repository's branch
 	// namespace changes and two concurrent reconstructions of the same sha do
 	// not collide on a name.
 	if err := exec.Command("git", gitDirArgs(parent,
 		"worktree", "add", "--detach", dir, sha)...).Run(); err != nil {
 		os.RemoveAll(dir)
+		lock.Close()
+		os.Remove(scratchLockPath(dir))
 		return scratchTree{}
 	}
-	return scratchTree{Dir: dir, parent: parent}
+
+	// The tree-lifetime cache root (DKT-1166). Its failure is treated exactly
+	// like the worktree's: no reconstruction, and the caller records `skipped`.
+	// That is the same trade this file already makes everywhere else — a
+	// measurement taken without it can report a suppressed issue as live, and
+	// this file's whole doctrine is that measuring the WRONG thing is the
+	// defect while measuring nothing is merely a gap. It is a sibling named
+	// after the tree, so the sweep can find it from the tree alone.
+	cache := scratchCachePath(dir)
+	if err := os.Mkdir(cache, 0o700); err != nil {
+		(scratchTree{Dir: dir, parent: parent, lock: lock}).release()
+		return scratchTree{}
+	}
+	return scratchTree{Dir: dir, Cache: cache, parent: parent, lock: lock}
 }
 
 // release removes the scratch tree and its administrative record.
@@ -106,17 +181,117 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 // Errors are ignored, and the reason is that there is nothing useful to do with
 // one: the measurement already happened and its verdict is recorded, so failing
 // the step over a directory that would not delete would discard real evidence
-// to report a housekeeping problem. `git worktree prune` reclaims anything left
-// behind.
+// to report a housekeeping problem. Whatever is left behind — by a failure
+// here, or by a claim that was killed before reaching this defer — is
+// reclaimed by sweepStalePreGateScratch at the next dispatch open or close.
 func (s scratchTree) release() {
+	// The cache root goes whatever else happens, and BEFORE the early return:
+	// it is a sibling of the tree, so a scratchTree that never got a Dir can
+	// still be holding one, and a cache left behind is the exact carrier this
+	// mechanism exists to destroy (DKT-1166).
+	if s.Cache != "" {
+		_ = os.RemoveAll(s.Cache)
+	}
 	if s.Dir == "" {
 		return
 	}
-	if s.parent != "" {
-		_ = exec.Command("git", gitDirArgs(s.parent,
-			"worktree", "remove", "--force", s.Dir)...).Run()
+	removeScratchTree(s.parent, s.Dir)
+	// The lock goes LAST, after the tree it vouches for: a sweeper that takes
+	// it must find nothing left to remove.
+	if s.lock != nil {
+		s.lock.Close()
 	}
-	_ = os.RemoveAll(s.Dir)
+	_ = os.Remove(scratchLockPath(s.Dir))
+}
+
+// removeScratchTree removes one scratch worktree and its administrative
+// record, in both directions, with the cache root beside it.
+func removeScratchTree(parent, dir string) {
+	if parent != "" {
+		_ = exec.Command("git", gitDirArgs(parent,
+			"worktree", "remove", "--force", dir)...).Run()
+	}
+	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(scratchCachePath(dir))
+}
+
+// sweepStalePreGateScratch removes every scratch tree registered against
+// execRoot whose creating claim is no longer alive, and reports what it
+// removed.
+//
+// WHY IT EXISTS. release() is a defer inside the claim, and a claim the
+// harness backgrounded at its tool timeout and terminated at the executor's
+// turn end never reaches it. Five detached worktrees and their caches stayed
+// registered across sessions; doctor reported them, and reported them only,
+// because doctor is read-only by doctrine. The sweep runs at the two points
+// a conductor already touches the run — dispatch open and dispatch close —
+// which are the "later safe point" that makes a leaked tree bounded rather
+// than permanent.
+//
+// LIVENESS IS THE FLOCK, NOTHING ELSE. A tree whose sidecar lock a sweeper
+// can take has no holder: the kernel released it when the claim died. A tree
+// whose lock is held is a claim mid-measurement, and the sweep leaves it
+// alone however old it looks. A tree with NO sidecar lock predates this
+// mechanism — nothing can be holding it — and is stale by the same rule. No
+// pid is inspected and no age is consulted, for the reason the tree mutex
+// gives: deciding whether a pid is alive is the doctrine this design retires.
+//
+// Best-effort throughout. A removal that fails leaves the entry for the next
+// sweep and for doctor to report; nothing here can fail the dispatch, because
+// housekeeping must not stand between an operator and a manifest.
+func sweepStalePreGateScratch(execRoot string) []string {
+	if execRoot == "" {
+		return nil
+	}
+	out, err := exec.Command("git", gitDirArgs(execRoot,
+		"worktree", "list", "--porcelain")...).Output()
+	if err != nil {
+		return nil
+	}
+
+	var swept []string
+	for line := range strings.SplitSeq(string(out), "\n") {
+		path, ok := strings.CutPrefix(line, "worktree ")
+		if !ok || !strings.HasPrefix(filepath.Base(path), scratchPrefix) {
+			continue
+		}
+		lock, live := probeScratchLock(path)
+		if live {
+			continue
+		}
+		removeScratchTree(execRoot, path)
+		if lock != nil {
+			lock.Close()
+		}
+		_ = os.Remove(scratchLockPath(path))
+		swept = append(swept, path)
+	}
+	if len(swept) > 0 {
+		// An entry whose directory was already gone declines `worktree
+		// remove`; prune reclaims the administrative record git kept for it.
+		_ = exec.Command("git", gitDirArgs(execRoot, "worktree", "prune")...).Run()
+	}
+	return swept
+}
+
+// probeScratchLock reports whether a scratch tree's claim is still alive, and
+// hands back the lock when the sweeper now holds it so removal can proceed
+// under it.
+//
+// A missing lockfile is "not live": nothing can hold a lock that does not
+// exist. Any other failure to open it is "live", the fail-closed direction
+// for a sweeper — leaving a stale tree for the next pass costs a WARN, while
+// removing a tree a claim is measuring costs a recorded verdict.
+func probeScratchLock(dir string) (lock *os.File, live bool) {
+	file, err := os.OpenFile(scratchLockPath(dir), os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, !os.IsNotExist(err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		return nil, true
+	}
+	return file, false
 }
 
 // bindablePreGateRoot reports the directory a step's pre-gates should measure,

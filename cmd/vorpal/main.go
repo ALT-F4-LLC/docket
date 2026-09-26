@@ -11,14 +11,7 @@ import (
 
 func main() {
 	ctx := config.GetContext()
-	ctxTarget := ctx.GetTarget()
-
-	systems := []string{
-		"aarch64-darwin",
-		"aarch64-linux",
-		"x86_64-darwin",
-		"x86_64-linux",
-	}
+	ctxTarget := ctx.GetTargetStr()
 
 	ffmpeg, err := ctx.FetchArtifactAlias("ffmpeg:8.0.1")
 	if err != nil {
@@ -81,7 +74,7 @@ func main() {
 	}
 
 	_, err = artifact.
-		NewDevelopmentEnvironment("docket-shell", systems).
+		NewDevelopmentEnvironment("docket-shell", config.SYSTEMS).
 		WithArtifacts([]*string{
 			ffmpeg,
 			gobin,
@@ -104,7 +97,7 @@ func main() {
 		log.Fatalf("error building project environment: %v", err)
 	}
 
-	_, err = language.NewGo("docket", systems).
+	_, err = language.NewGo("docket", config.SYSTEMS).
 		WithBuildDirectory("cmd/docket").
 		WithIncludes([]string{
 			"cmd/docket",
