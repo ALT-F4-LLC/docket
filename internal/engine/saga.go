@@ -1055,15 +1055,15 @@ func (e *Engine) runRoutingStage(
 		// it protects (DKT-2548): that body is what `issue.diff` resolves to
 		// and what a review would read, so routing sizes the same object.
 		//
-		// THE RETAINED RECORD'S TARGET STANDS TOO (DKT-2871). A retry that
+		// THE RETAINED RECORD'S TARGET STANDS TOO. A retry that
 		// forks its worktree from a shared head already carrying the work
 		// diffs empty, and its own round record names that worktree and NO
-		// head (it stands at its base, DKT-1374). Re-recording the retained
+		// head, since it stands at its base. Re-recording the retained
 		// body under that payload would claim the diff was observed in a tree
 		// where nothing was, drop `target_sha` from every downstream packet,
 		// and bind them to a path integration sweeps. The retained head is a
 		// commit whose patch the shared branch carries, which the stale-
-		// target advisory acquits (DKT-424/DKT-1033); moving the target on
+		// target advisory acquits; moving the target on
 		// purpose is annotate-integration's or the `--worktree` re-pin's job.
 		// The step ROW's work_root still moves to the retry's tree (stageZero),
 		// so the retried step's own gates measure where it ran.

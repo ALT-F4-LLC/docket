@@ -18,16 +18,16 @@ import (
 // cherry-pick, which mints a new sha), then resolved `--as retry`. Attempt 2
 // forked worktree B from the integrated head, found the work already in place,
 // committed nothing, and recorded done. Its diff against B's fork point is
-// empty, so the DKT-259 guard drops the re-record and the issue's newest
+// empty, so the empty-re-record guard drops the re-record and the issue's newest
 // issue.diff is still attempt 1's.
 //
 // Recording attempt 1's body under attempt 2's payload instead would pair a
 // diff measured in A with a round record naming B — a row saying that diff was
 // observed in a tree where nothing was; and B's payload carries no `head` at
-// all, since B stands at its own base (DKT-1374), so the packets would lose
+// all, since B stands at its own base, so the packets would lose
 // `target_sha` and gain a worktree path that integration sweeps. The retained
 // target is a commit whose patch the shared branch carries, which is exactly
-// what the stale-target advisory acquits (DKT-424/DKT-1033); moving the target
+// what the stale-target advisory acquits; moving the target
 // on purpose is the annotate-integration and `--worktree` re-pin verbs' job.
 
 // TestRetryThatDiffsEmptyKeepsTheRetainedTarget is the reproduction the
@@ -117,7 +117,7 @@ func TestRetryThatDiffsEmptyKeepsTheRetainedTarget(t *testing.T) {
 	head, worktree, records = newestIssueDiffTarget(t, conn, run.ID, issue)
 	if records != 1 {
 		t.Errorf("the issue holds %d issue.diff record(s), want 1 — an empty "+
-			"re-record must not replace a recorded change (DKT-259)", records)
+			"re-record must not replace a recorded change", records)
 	}
 	if head != headA || worktree != treeA {
 		t.Errorf("newest issue.diff names %s in %s, want attempt 1's %s in %s",

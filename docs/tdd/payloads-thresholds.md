@@ -748,8 +748,8 @@ Two measurement rules keep the facts honest about the object review reads:
   body — what `issue.diff` resolves to and a review would read — not from the
   empty body the retry computed (DKT-2548). That record's round record stands
   too: downstream packets keep its `head` and `worktree` as the target, since
-  the retry's own record would name a tree at its base with no head to bind
-  (DKT-2871); moving the target on purpose is the annotate-integration and
+  the retry's own record would name a tree at its base with no head to bind;
+  moving the target on purpose is the annotate-integration and
   `--worktree` re-pin verbs' job. A FIRST empty diff, with no
   record for the issue yet, still records: neither the DKT-259 guard nor the
   byte-identical guard fires without an earlier record to protect or match.
