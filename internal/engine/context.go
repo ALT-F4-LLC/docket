@@ -1323,10 +1323,57 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 // (resolveLatestOfKind) instead of naming a producer.
 //
 // nil means no redirect applies; the caller keeps ordinalScoped's answer.
+//
+// The `<step>.gate-results` form (resolveGateResults) rides the same rule
+// (DKT-3131): the body that stands in for a named producer's ARTIFACT is the
+// body that stands in for its recorded GATES, so conditions 1–3 and 5 are
+// shared through loopRedirectBody, and only condition 4 differs by column.
 func loopProducerRedirect(
 	artifacts []*db.Artifact, producers map[int]*db.Step, def *workflow.Definition,
 	step *db.Step, stepName, kind string, boundOrdinal int,
 ) []*db.Artifact {
+	body := loopRedirectBody(def, step, stepName, kind, boundOrdinal)
+	if body == nil {
+		return nil
+	}
+
+	var out []*db.Artifact
+	for _, a := range artifacts {
+		if kind != "*" && a.Kind != kind {
+			continue
+		}
+		producer := producers[a.StepID]
+		if producer == nil || producer.IssueID != step.IssueID {
+			continue
+		}
+		if !recordedProducer(producer.Status) || producer.Ordinal != step.Ordinal {
+			continue
+		}
+		if producer.StepName != body.Name {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// loopRedirectBody answers the definitional half of loopProducerRedirect:
+// WHICH loop body, if any, stands in for the named producer at this step. It
+// is conditions 1, 2, 3 and 5 of that rule — downstream of `after_loop`,
+// ordinal > 0, the named producer's binding stale, exactly one `loop = true`
+// body of `kind` whose `after_loop` chain contains the consumer — with
+// condition 4 (did that body record at this ordinal) left to the caller,
+// because the column it checks differs per input form: an artifact of the
+// kind for `<step>.<kind>`, a recorded instance for `<step>.gate-results`.
+//
+// `kind` is the artifact kind the match is over; `"*"` admits any body.
+// `boundOrdinal` is the ordinal the ordinary rule bound the named producer
+// at, or -1 when it bound nothing.
+//
+// nil means no body stands in and the caller keeps the ordinary answer.
+func loopRedirectBody(
+	def *workflow.Definition, step *db.Step, stepName, kind string, boundOrdinal int,
+) *workflow.Step {
 	if def == nil || step.Ordinal == 0 || boundOrdinal >= step.Ordinal {
 		return nil
 	}
@@ -1362,28 +1409,7 @@ func loopProducerRedirect(
 		}
 		body = s
 	}
-	if body == nil {
-		return nil
-	}
-
-	var out []*db.Artifact
-	for _, a := range artifacts {
-		if kind != "*" && a.Kind != kind {
-			continue
-		}
-		producer := producers[a.StepID]
-		if producer == nil || producer.IssueID != step.IssueID {
-			continue
-		}
-		if !recordedProducer(producer.Status) || producer.Ordinal != step.Ordinal {
-			continue
-		}
-		if producer.StepName != body.Name {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
+	return body
 }
 
 // recordedProducer reports whether an instance in this status has finished the
@@ -1635,6 +1661,18 @@ func resolveIssueDiff(
 // the done-filter alone would drop the step (`claimed` at assembly) and the
 // input would silently resolve absent. Completion-side rows, not yet recorded
 // at claim, show up as the empty array the previous paragraph promises.
+//
+// The loop rebind (DKT-12) applies here as it does to artifacts (DKT-3131).
+// Before it did, a consumer downstream of `after_loop` re-entered at ordinal
+// N read `implement@0`'s recorded gates on every round: RUN-117's verify-ac,
+// re-run after a fix round, judged the tree `fix@N` produced against the
+// tests `implement@0` ran. The body that stands in for the named producer is
+// the one loopRedirectBody picks for the producer's EMITTED kind — `fix`
+// stands in for `implement`'s gates for the same reason it stands in for its
+// change-summary — and its recorded instances at this ordinal replace the
+// stale binding. A body that recorded no gates at this ordinal is still the
+// answer: the empty array says "this round ran no checks", which is truer
+// than the previous round's results.
 func resolveGateResults(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, stepName string,
 ) ([]ContextInput, error) {
@@ -1651,6 +1689,10 @@ func resolveGateResults(
 			best = s.Ordinal
 		}
 		candidates = append(candidates, s)
+	}
+
+	if redirect := loopRedirectGateProducers(sched, step, stepName, best); len(redirect) > 0 {
+		candidates, best = redirect, step.Ordinal
 	}
 	if best < 0 {
 		return nil, nil
@@ -1695,6 +1737,44 @@ func resolveGateResults(
 		})
 	}
 	return out, nil
+}
+
+// loopRedirectGateProducers is loopProducerRedirect's condition 4 for the
+// gate-results column: the recorded instances of the standing-in loop body at
+// exactly this step's ordinal, for this issue. Which body stands in is
+// loopRedirectBody's answer, asked over the NAMED producer's emitted kind — a
+// producer that emits nothing has no body standing in for it and keeps the
+// ordinary binding. nil means no redirect applies.
+func loopRedirectGateProducers(
+	sched *Scheduler, step *db.Step, stepName string, boundOrdinal int,
+) []*db.Step {
+	def := sched.defs[step.WorkflowID]
+	if def == nil {
+		return nil
+	}
+	named := workflow.StepByName(def, stepName)
+	if named == nil {
+		return nil
+	}
+	kind := workflow.ArtifactKind(named)
+	if kind == "" {
+		return nil
+	}
+	body := loopRedirectBody(def, step, stepName, kind, boundOrdinal)
+	if body == nil {
+		return nil
+	}
+	var out []*db.Step
+	for _, s := range sched.steps {
+		if s.IssueID != step.IssueID || s.StepName != body.Name {
+			continue
+		}
+		if s.Ordinal != step.Ordinal || !recordedProducer(s.Status) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // encodeGateResults renders recorded rows in the §11.4 `gate result` shape —
