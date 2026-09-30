@@ -1324,10 +1324,10 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 //
 // nil means no redirect applies; the caller keeps ordinalScoped's answer.
 //
-// The `<step>.gate-results` form (resolveGateResults) rides the same rule
-// (DKT-3131): the body that stands in for a named producer's ARTIFACT is the
-// body that stands in for its recorded GATES, so conditions 1–3 and 5 are
-// shared through loopRedirectBody, and only condition 4 differs by column.
+// The `<step>.gate-results` form (resolveGateResults) rides the same rule:
+// the body that stands in for a named producer's ARTIFACT is the body that
+// stands in for its recorded GATES, so conditions 1–3 and 5 are shared
+// through loopRedirectBody, and only condition 4 differs by column.
 func loopProducerRedirect(
 	artifacts []*db.Artifact, producers map[int]*db.Step, def *workflow.Definition,
 	step *db.Step, stepName, kind string, boundOrdinal int,
@@ -1662,11 +1662,11 @@ func resolveIssueDiff(
 // input would silently resolve absent. Completion-side rows, not yet recorded
 // at claim, show up as the empty array the previous paragraph promises.
 //
-// The loop rebind (DKT-12) applies here as it does to artifacts (DKT-3131).
-// Before it did, a consumer downstream of `after_loop` re-entered at ordinal
-// N read `implement@0`'s recorded gates on every round: RUN-117's verify-ac,
-// re-run after a fix round, judged the tree `fix@N` produced against the
-// tests `implement@0` ran. The body that stands in for the named producer is
+// The loop rebind applies here as it does to artifacts. Before it did, a
+// consumer downstream of `after_loop` re-entered at ordinal N read
+// `implement@0`'s recorded gates on every round: a verify-ac re-run after a
+// fix round judged the tree `fix@N` produced against the tests `implement@0`
+// ran. The body that stands in for the named producer is
 // the one loopRedirectBody picks for the producer's EMITTED kind — `fix`
 // stands in for `implement`'s gates for the same reason it stands in for its
 // change-summary — and its recorded instances at this ordinal replace the

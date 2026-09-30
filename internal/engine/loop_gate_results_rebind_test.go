@@ -9,20 +9,20 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// DKT-3131 — `<step>.gate-results` did not rebind to the loop body's latest
-// round. The artifact form rides loopProducerRedirect (DKT-12): a consumer
-// downstream of `after_loop` re-entered at ordinal N reads `fix@N`'s
-// change-summary where it declared `implement.change-summary`. The
+// `<step>.gate-results` did not rebind to the loop body's latest round. The
+// artifact form rides loopProducerRedirect: a consumer downstream of
+// `after_loop` re-entered at ordinal N reads `fix@N`'s change-summary where
+// it declared `implement.change-summary`. The
 // gate-results form resolved through its own instance scan and never applied
 // the redirect, so the same consumer's `implement.gate-results` read
-// `implement@0`'s recorded gates on every round. RUN-117 measured it: a
+// `implement@0`'s recorded gates on every round. In one measured run, a
 // verify-ac re-run after a fix round judged the tree `fix@N` produced against
 // the tests `implement@0` had run.
 //
 // These tests pin the fix and its boundary. The consumer downstream of
 // `after_loop` reads the body's recorded gates at its ordinal; the loop body's
 // own `implement.gate-results` still binds `implement@0`, exactly as its
-// `implement.change-summary` does (DKT-492's excluded case).
+// `implement.change-summary` does.
 
 // gateRebindLoopSrc is standard-change's fix loop, minimized: implement runs
 // `checks`, a review fanout reads its recorded gates and its change-summary,
@@ -209,7 +209,7 @@ func TestReviewRoundZeroReadsTheImplementGates(t *testing.T) {
 // loop body's own `implement.gate-results` never redirects. `fix@1` reads
 // `implement@0`'s gates, the same instance its `implement.change-summary`
 // binds, because `implement` is genuinely upstream of the loop and the body
-// is never in `after_loop`'s downstream set (DKT-492).
+// is never in `after_loop`'s downstream set.
 func TestLoopBodyGateResultsStillBindTheNamedProducer(t *testing.T) {
 	conn := mustDB(t)
 	e := testEngine()
