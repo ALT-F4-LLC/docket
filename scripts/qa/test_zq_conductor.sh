@@ -104,13 +104,13 @@ TOML
   run_env "$ZQ" run status RUN-1 --json=v2
   ZQ_V_BEFORE=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.run.row_version')
 
-  run_env "$ZQ" step approve STEP-2 --json </dev/null
+  run_env "$ZQ" step approve STEP-2 --authority operator --json </dev/null
   assert_exit "ZQ" "ZQ3_approve_no_token" 3
   assert_json "ZQ" "ZQ3_approve_no_token_code" '.code' "VALIDATION_ERROR"
   assert_stdout_contains "ZQ" "ZQ3_names_env" "DOCKET_TOKEN"
   assert_stdout_contains "ZQ" "ZQ3_names_recovery" "run conduct"
 
-  DOCKET_TOKEN=deadbeef run_env "$ZQ" step approve STEP-2 --json
+  DOCKET_TOKEN=deadbeef run_env "$ZQ" step approve STEP-2 --authority operator --json
   assert_exit "ZQ" "ZQ3_approve_wrong_token" 5
   assert_json "ZQ" "ZQ3_approve_wrong_code" '.code' "AUTH_ERROR"
   if printf '%s' "$CMD_STDOUT" | grep -q "deadbeef"; then
@@ -119,21 +119,21 @@ TOML
     check "ZQ" "ZQ3_no_echo" "PASS"
   fi
 
-  DOCKET_TOKEN=deadbeef run_env "$ZQ" step reject STEP-2 --json
+  DOCKET_TOKEN=deadbeef run_env "$ZQ" step reject STEP-2 --authority operator --json
   assert_exit "ZQ" "ZQ3_reject_wrong_token" 5
-  DOCKET_TOKEN=deadbeef run_env "$ZQ" step resolve STEP-2 --as skip --json
+  DOCKET_TOKEN=deadbeef run_env "$ZQ" step resolve STEP-2 --as skip --authority operator --json
   assert_exit "ZQ" "ZQ3_resolve_wrong_token" 5
   DOCKET_TOKEN=deadbeef run_env "$ZQ" step reap STEP-1 --reason "gone" --json
   assert_exit "ZQ" "ZQ3_reap_wrong_token" 5
-  DOCKET_TOKEN=deadbeef run_env "$ZQ" run pause RUN-1 --json
+  DOCKET_TOKEN=deadbeef run_env "$ZQ" run pause RUN-1 --authority operator --json
   assert_exit "ZQ" "ZQ3_pause_wrong_token" 5
-  run_env "$ZQ" run pause RUN-1 --json </dev/null
+  run_env "$ZQ" run pause RUN-1 --authority operator --json </dev/null
   assert_exit "ZQ" "ZQ3_pause_no_token" 3
   DOCKET_TOKEN=deadbeef run_env "$ZQ" run resume RUN-1 --json
   assert_exit "ZQ" "ZQ3_resume_wrong_token" 5
-  DOCKET_TOKEN=deadbeef run_env "$ZQ" run abandon RUN-1 --reason "no" --json
+  DOCKET_TOKEN=deadbeef run_env "$ZQ" run abandon RUN-1 --reason "no" --authority operator --json
   assert_exit "ZQ" "ZQ3_abandon_wrong_token" 5
-  DOCKET_TOKEN=deadbeef run_env "$ZQ" run abandon RUN-1 --issue DKT-1 --reason "no" --json
+  DOCKET_TOKEN=deadbeef run_env "$ZQ" run abandon RUN-1 --issue DKT-1 --reason "no" --authority operator --json
   assert_exit "ZQ" "ZQ3_abandon_issue_wrong_token" 5
 
   # Nothing moved: the gate is still ready, the run still active and at the
@@ -149,7 +149,7 @@ TOML
   # ---------------------------------------------------------------------------
   # ZQ4: THE HOLDER IS NOT REFUSED. Pause and resume under the ticket.
   # ---------------------------------------------------------------------------
-  DOCKET_TOKEN="$ZQ_TOKEN" run_env "$ZQ" run pause RUN-1 --reason "lunch" --json=v2
+  DOCKET_TOKEN="$ZQ_TOKEN" run_env "$ZQ" run pause RUN-1 --reason "lunch" --authority operator --json=v2
   assert_exit "ZQ" "ZQ4_pause" 0
   assert_json "ZQ" "ZQ4_paused" '.data.status' "waiting-human"
   DOCKET_TOKEN="$ZQ_TOKEN" run_env "$ZQ" run resume RUN-1 --json=v2
@@ -167,7 +167,7 @@ TOML
   ZQ_TOKEN2=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.token')
   check_cond "ZQ" "ZQ5_fresh_token" "conduct returned the standing token" [ "$ZQ_TOKEN2" != "$ZQ_TOKEN" ]
 
-  DOCKET_TOKEN="$ZQ_TOKEN" run_env "$ZQ" step approve STEP-2 --json
+  DOCKET_TOKEN="$ZQ_TOKEN" run_env "$ZQ" step approve STEP-2 --authority operator --json
   assert_exit "ZQ" "ZQ5_old_token_retired" 5
   assert_json "ZQ" "ZQ5_old_token_code" '.code' "AUTH_ERROR"
 
@@ -201,7 +201,7 @@ TOML
   # accepted channel — which reconciles this single-gate run to done. A
   # terminal run then refuses the seat (R12).
   # ---------------------------------------------------------------------------
-  DOCKET_PATH="$ZQ" run_stdin "$ZQ_TOKEN2" step approve STEP-2 --note "looks right" --json=v2
+  DOCKET_PATH="$ZQ" run_stdin "$ZQ_TOKEN2" step approve STEP-2 --note "looks right" --authority operator --json=v2
   assert_exit "ZQ" "ZQ6_approve_via_stdin" 0
   run_env "$ZQ" step show STEP-2 --json=v2
   assert_json "ZQ" "ZQ6_gate_done" '.data.status' "done"
@@ -224,7 +224,7 @@ TOML
   assert_exit "ZQ" "ZQ7_activate" 0
   sqlite3 "$ZQ/issues.db" "UPDATE runs SET conductor_token_hash = NULL WHERE id = 2"
 
-  run_env "$ZQ" run pause RUN-2 --reason "legacy" --json=v2 </dev/null
+  run_env "$ZQ" run pause RUN-2 --reason "legacy" --authority operator --json=v2 </dev/null
   assert_exit "ZQ" "ZQ7_legacy_pause_allowed" 0
   assert_json "ZQ" "ZQ7_legacy_paused" '.data.status' "waiting-human"
 

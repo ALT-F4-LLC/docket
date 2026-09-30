@@ -329,7 +329,7 @@ TOML
   fi
 
   # A TERMINAL run's cap is history (B-3).
-  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run abandon RUN-1 --reason "done rehearsing" --json
+  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run abandon RUN-1 --reason "done rehearsing" --authority operator --json
   assert_exit "ZL" "ZL3_abandon" 0
   run_env "$ZL_B" run budget RUN-1 --set 50 --json
   assert_exit "ZL" "ZL3_terminal_refused" 4
@@ -454,7 +454,7 @@ TOML
   run_env "$ZL_R" issue create -t "A finished job" -d "for the archive" --json >/dev/null
   run_env "$ZL_R" run start --issue DKT-1 --json >/dev/null
   run_env "$ZL_R" run activate RUN-1 --json >/dev/null
-  DOCKET_TOKEN="$(activation_token)" run_env "$ZL_R" run abandon RUN-1 --reason "archived" --json >/dev/null
+  DOCKET_TOKEN="$(activation_token)" run_env "$ZL_R" run abandon RUN-1 --reason "archived" --authority operator --json >/dev/null
 
   # THE DEFAULT IS 0, AND 0 RETAINS EVERYTHING. A retention key defaulting the
   # other way would make the first prune an operator ever typed delete their

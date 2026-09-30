@@ -168,7 +168,7 @@ test_zh_stranger() {
   local ZH_APPROVE
   ZH_APPROVE=$(sqlite3 "$ZH/issues.db" \
     "SELECT id FROM steps WHERE instance='approve@0';")
-  DOCKET_TOKEN="$ZH_CTOK" run_env "$ZH" step approve "STEP-$ZH_APPROVE" --json
+  DOCKET_TOKEN="$ZH_CTOK" run_env "$ZH" step approve "STEP-$ZH_APPROVE" --authority operator --json
   assert_exit "ZH" "ZH7_approve" 0
 
   # ---------------------------------------------------------------------------

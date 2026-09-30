@@ -201,7 +201,7 @@ test_zk_zerotouch() {
   local ZK_HUMAN
   ZK_HUMAN=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].step')
 
-  DOCKET_TOKEN="$ZK_CTOK" zk_run step approve "$ZK_HUMAN" --json
+  DOCKET_TOKEN="$ZK_CTOK" zk_run step approve "$ZK_HUMAN" --authority operator --json
   assert_exit "ZK" "ZK_Z7_approve" 0
 
   zk_run next --run RUN-1 --json

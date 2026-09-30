@@ -854,7 +854,7 @@ SQL
   local ZG_RUN1_TOKEN ZG_RUN2_TOKEN
   ZG_RUN2_TOKEN=$(conductor_of "$ZG_RUN" RUN-2)
   ZG_RUN1_TOKEN=$(conductor_of "$ZG_RUN" RUN-1)
-  DOCKET_TOKEN="$ZG_RUN2_TOKEN" run_env "$ZG_RUN" run abandon RUN-2 --reason "superseded by ZG" --json
+  DOCKET_TOKEN="$ZG_RUN2_TOKEN" run_env "$ZG_RUN" run abandon RUN-2 --reason "superseded by ZG" --authority operator --json
   assert_exit "ZG" "ZG10_abandon_exit" 0
   assert_json "ZG" "ZG10_abandoned" ".data.status" "abandoned"
   run_env "$ZG_RUN" run activate RUN-2 --json
@@ -863,16 +863,16 @@ SQL
 
   # `run abandon` without --reason is refused: "abandoned" alone does not
   # answer the question somebody asks later.
-  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run abandon RUN-1 --json
+  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run abandon RUN-1 --authority operator --json
   assert_exit "ZG" "ZG10_abandon_needs_reason" 3
 
   # pause / resume, and the refusal of an illegal transition. A no-op success
   # would let a harness believe it had quiesced a run that never was active.
-  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run pause RUN-1 --reason "operator review" --json
+  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run pause RUN-1 --reason "operator review" --authority operator --json
   assert_exit "ZG" "ZG10_pause_exit" 0
   assert_json "ZG" "ZG10_paused" ".data.status" "waiting-human"
   assert_json "ZG" "ZG10_pause_reason" ".data.reason" "operator review"
-  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run pause RUN-1 --reason "again" --json
+  DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run pause RUN-1 --reason "again" --authority operator --json
   assert_exit "ZG" "ZG10_double_pause_exit" 4
   assert_json "ZG" "ZG10_double_pause_code" ".code" "CONFLICT"
   DOCKET_TOKEN="$ZG_RUN1_TOKEN" run_env "$ZG_RUN" run resume RUN-1 --json
@@ -1358,15 +1358,15 @@ TOML
 
   # R10: approve/reject on a NON-human step. Under the conductor's token, so
   # the refusal proven is the kind check and not a missing capability.
-  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step approve STEP-3 --json
+  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step approve STEP-3 --authority operator --json
   assert_exit "ZG" "ZG14_R10_exit" 3
   assert_json "ZG" "ZG14_R10_code" ".code" "VALIDATION_ERROR"
   assert_stdout_contains "ZG" "ZG14_R10_names_kind" "executor"
-  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step reject STEP-3 --json
+  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step reject STEP-3 --authority operator --json
   assert_exit "ZG" "ZG14_R10_reject_exit" 3
 
   # R11: resolve on a step that is not parked.
-  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step resolve STEP-3 --as skip --json
+  DOCKET_TOKEN="$ZG_S_TOKEN" run_env "$ZG_S" step resolve STEP-3 --as skip --authority operator --json
   assert_exit "ZG" "ZG14_R11_exit" 3
   assert_json "ZG" "ZG14_R11_code" ".code" "VALIDATION_ERROR"
 
@@ -1550,7 +1550,7 @@ TOML
     [ -z "$ZG_SID" ] && break
     ZG_KIND=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].kind')
     if [ "$ZG_KIND" = "human" ]; then
-      DOCKET_TOKEN="$ZG_K_CTOK" run_env "$ZG_K" step approve "$ZG_SID" --json
+      DOCKET_TOKEN="$ZG_K_CTOK" run_env "$ZG_K" step approve "$ZG_SID" --authority operator --json
       continue
     fi
     run_env "$ZG_K" step claim "$ZG_SID" --owner survivor --json
@@ -1631,7 +1631,7 @@ TOML
   assert_exit "ZG" "ZG17_gate_denies" 2
   assert_stderr_contains "ZG" "ZG17_gate_reason" "not approved"
 
-  DOCKET_TOKEN="$ZG_G_TOKEN" run_env "$ZG_G" step approve "$ZG_G_SID" --json
+  DOCKET_TOKEN="$ZG_G_TOKEN" run_env "$ZG_G" step approve "$ZG_G_SID" --authority operator --json
   assert_exit "ZG" "ZG17_approve" 0
 
   # AFTER the approve: allowed.
@@ -2030,7 +2030,7 @@ TOML
   run_env "$ZG_L" guard gate --step commit-gate
   assert_exit "ZG" "ZG20_guard_gate_denies" 2
 
-  DOCKET_TOKEN="$ZG_L_TOKEN" run_env "$ZG_L" step approve "$ZG_L_GATE" --json
+  DOCKET_TOKEN="$ZG_L_TOKEN" run_env "$ZG_L" step approve "$ZG_L_GATE" --authority operator --json
   assert_exit "ZG" "ZG20_approve" 0
 
   # ...and ALLOWS after it.
@@ -2915,7 +2915,7 @@ ZGCLUSTEOF
   # rather than parking, which is the half T3 used to make impossible.
   local ZG_A_HELDID
   ZG_A_HELDID=$(zg_step_id "$ZG_A" 'reconcile-held@0#0')
-  DOCKET_TOKEN="$(conductor_of "$ZG_A" RUN-1)" run_env "$ZG_A" step approve "$ZG_A_HELDID" --json
+  DOCKET_TOKEN="$(conductor_of "$ZG_A" RUN-1)" run_env "$ZG_A" step approve "$ZG_A_HELDID" --authority operator --json
   assert_exit "ZG" "ZG28_approve" 0
 
   local ZG_A_RESOLVED
@@ -3016,7 +3016,7 @@ ZGNARROWEOF
   ZG_C_HELDID=$(zg_step_id "$ZG_C" 'reconcile-held@0#0')
   local ZG_C_TOKEN
   ZG_C_TOKEN=$(conductor_of "$ZG_C" RUN-1)
-  DOCKET_TOKEN="$ZG_C_TOKEN" run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "not acceptable" --json
+  DOCKET_TOKEN="$ZG_C_TOKEN" run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "not acceptable" --authority operator --json
   assert_exit "ZG" "ZG28_reject" 0
 
   local ZG_C_AFTER
@@ -3050,7 +3050,7 @@ ZGNARROWEOF
   check_cond "ZG" "ZG28_rejected_step_is_done" "the rejected held step is '$ZG_C_HELDSTATE', want done" [ "$ZG_C_HELDSTATE" = "done" ]
 
   # H16: a second decision on a resolved hold is CONFLICT (exit 4).
-  DOCKET_TOKEN="$ZG_C_TOKEN" run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "again" --json
+  DOCKET_TOKEN="$ZG_C_TOKEN" run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "again" --authority operator --json
   assert_exit "ZG" "ZG28_double_decision_conflict" 4
   assert_json "ZG" "ZG28_double_decision_code" ".code" "CONFLICT"
 
