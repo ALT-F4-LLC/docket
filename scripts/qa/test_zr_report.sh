@@ -10,7 +10,9 @@
 # cannot parse (exit 3), and renders a human page that names its sections.
 #
 # THE STRANGER TEST. No workflow needs to exist for the page to be readable:
-# a shop that has run nothing gets a page saying so.
+# a registered shop that has run nothing gets a page saying so. A directory
+# the store has never registered gets a refusal naming --all-projects instead
+# of an empty page for a project that does not exist.
 
 test_zr_report() {
   printf "Section ZR: The cross-run ledger (DKT-2453)"
@@ -20,6 +22,20 @@ test_zr_report() {
 
   run_env "$ZR" init --json
   assert_exit "ZR" "ZR0_init" 0
+
+  # ZR0: a read-only verb never registers the invoking repository, so the
+  # project-scoped read from a store that has never seen this project is a
+  # VALIDATION_ERROR pointing at --all-projects, not an empty page for a
+  # project that does not exist.
+  run_env "$ZR" report executors --json
+  assert_exit "ZR" "ZR0_unbound" 3
+  assert_json "ZR" "ZR0_unbound_code" ".code" "VALIDATION_ERROR"
+  assert_stdout_contains "ZR" "ZR0_unbound_names_flag" "all-projects"
+
+  # A writing verb registers the project. set-prefix is the cheapest one that
+  # leaves no issue, run, or workflow behind, so the store stays empty.
+  run_env "$ZR" project set-prefix ZR --json
+  assert_exit "ZR" "ZR0_register" 0
 
   # ZR1: the JSON contract on an empty store.
   run_env "$ZR" report executors --json
