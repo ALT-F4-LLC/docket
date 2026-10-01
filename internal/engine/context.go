@@ -1436,7 +1436,13 @@ func loopRedirectBody(
 // closed round-1 clusters because `reconcile@2` — the instance whose park
 // routed that very round — was `superseded` rather than `done`.
 //
-// Admitting (1) costs nothing by construction: a swept step has no artifacts.
+// Admitting (1) costs nothing for artifact reads: a swept step has no
+// artifacts. The ledger-form inputs are the exception. For a
+// `<step>.gate-results` or `<step>.vote-record` input, a swept step at ordinal
+// N is a recorded producer, so it pins the resolved ordinal to N and shadows
+// older ordinals. For gate-results that yields an empty array. For vote-record
+// it yields no input, since the swept vote step has no proposal. Both are
+// intended: no panel or check ran that round.
 func recordedProducer(status string) bool {
 	return status == db.StepDone || status == db.StepSuperseded
 }
