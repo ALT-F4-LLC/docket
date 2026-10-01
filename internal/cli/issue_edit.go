@@ -196,6 +196,9 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 			if err != nil {
 				return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 			}
+			if err := hydrateIssueAssociations(conn, issue); err != nil {
+				return err
+			}
 			w.Success(withIssueVersion(issue), "")
 		} else {
 			w.Info("No changes specified")

@@ -15,8 +15,9 @@ import (
 // TestStatusVerbsEchoStoredAssociations pins the status verbs to what
 // `issue show` reports. `issue close --json=v2` answered "labels":[] and
 // "files":[] for an issue that kept both, because the refetch read the issues
-// row alone; `issue move` and the already-in-state paths of close and reopen
-// had the same gap. Each verb's payload must carry the stored labels and files.
+// row alone; `issue move`, the already-in-state paths of close and reopen, and
+// a no-op `issue edit` had the same gap. Each verb's payload must carry the
+// stored labels and files.
 func TestStatusVerbsEchoStoredAssociations(t *testing.T) {
 	conn := newTestDB(t)
 	id := createIssue(t, conn, "labelled and filed", model.StatusTodo, model.PriorityNone)
@@ -38,6 +39,7 @@ func TestStatusVerbsEchoStoredAssociations(t *testing.T) {
 		{"close already closed", closeCmd, []string{ref}},
 		{"reopen", reopenCmd, []string{ref}},
 		{"reopen not closed", reopenCmd, []string{ref}},
+		{"edit with no changes", editCmd, []string{ref}},
 	}
 	for _, s := range steps {
 		s.cmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
