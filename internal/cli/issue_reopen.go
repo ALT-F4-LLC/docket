@@ -30,6 +30,9 @@ var reopenCmd = &cobra.Command{
 
 		if issue.Status != model.StatusDone {
 			if w.JSONMode {
+				if err := hydrateIssueAssociations(conn, issue); err != nil {
+					return err
+				}
 				w.Success(withIssueVersion(issue), "")
 			} else {
 				w.Info("Issue %s is not closed", model.FormatID(id))

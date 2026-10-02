@@ -64,7 +64,7 @@ func TestEventShapeOmitsNullRunAndStep(t *testing.T) {
 	conn := mustDB(t)
 	err := RecordTrustEvent(
 		conn, EventTrustAdded,
-		TrustGrant{Name: "checks", ArgvSHA256: "abc123", Repo: "/repo"}, nowMS,
+		TrustGrant{Name: "checks", ArgvSHA256: "abc123", Repo: "/repo", Actor: "tester", Cwd: "/repo"}, nowMS,
 	)
 	testsupport.Must(t, err, "RecordTrustEvent: %v", err)
 
@@ -91,6 +91,41 @@ func TestEventShapeOmitsNullRunAndStep(t *testing.T) {
 		if _, present := fields[key]; present {
 			t.Errorf("%q is present in the wire shape of a run-less event; E1 omits it", key)
 		}
+	}
+}
+
+// TestUnattributedTrustEventIsRefused is DKT-595, at the one entry point a
+// trust event has into the table.
+//
+// The 2026-08-19 batch was written by a writer that supplied neither actor nor
+// cwd, and the ledger could not afterwards say whether that writer was an old
+// binary or a non-interactive path. The guard lives in RecordTrustEvent itself —
+// not only in the CLI that resolves the fields today — so a future writer that
+// cannot supply them is refused rather than trusted to degrade honestly. The
+// refusal is BEFORE the write: no event of any shape lands.
+func TestUnattributedTrustEventIsRefused(t *testing.T) {
+	conn := mustDB(t)
+
+	for _, tc := range []struct {
+		name  string
+		grant TrustGrant
+	}{
+		{"no actor", TrustGrant{Name: "checks", ArgvSHA256: "abc123", Repo: "/repo", Cwd: "/repo"}},
+		{"no cwd", TrustGrant{Name: "checks", ArgvSHA256: "abc123", Repo: "/repo", Actor: "tester"}},
+		{"neither", TrustGrant{Name: "checks", ArgvSHA256: "abc123", Repo: "/repo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := RecordTrustEvent(conn, EventTrustAdded, tc.grant, nowMS)
+			if err == nil {
+				t.Fatal("an unattributed trust event was recorded; a writer that cannot say who and from where must be refused")
+			}
+		})
+	}
+
+	page, err := ListEvents(conn, EventQuery{})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	if len(page.Events) != 0 {
+		t.Errorf("a refused trust event left %d event(s) behind; the refusal must precede the write", len(page.Events))
 	}
 }
 
@@ -260,7 +295,7 @@ func TestRunFilterScopesTheFeed(t *testing.T) {
 	runID, _ := budgetRun(t, conn, 0)
 	err := RecordTrustEvent(
 		conn, EventTrustAdded,
-		TrustGrant{Name: "checks", ArgvSHA256: "abc123", Repo: "/repo"}, nowMS,
+		TrustGrant{Name: "checks", ArgvSHA256: "abc123", Repo: "/repo", Actor: "tester", Cwd: "/repo"}, nowMS,
 	)
 	testsupport.Must(t, err, "RecordTrustEvent: %v", err)
 

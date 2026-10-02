@@ -67,14 +67,15 @@ func (s *Scheduler) writeClassOf(class string) bool {
 	return ok && limit.Max > 0
 }
 
-// reapExpiredTx is `next`'s and `dispatch open`'s SHARED reap: the lease write,
-// the `lease-reaped` event, and — A16 — the `reap_acks` row, ALL IN THE CALLER'S
-// TRANSACTION.
+// reapExpiredTx is the SHARED reap of `next`, `dispatch open` and
+// `dispatch close`: the lease write, the `lease-reaped` event, and — A16 —
+// the `reap_acks` row, ALL IN THE CALLER'S TRANSACTION.
 //
-// It is one function rather than two similar loops because the two scheduling
+// It is one function rather than three similar loops because the scheduling
 // verbs reaping differently is a bug with no symptom until a manifest disagrees
 // with the `next` that follows it. §5.2 P5 requires `dispatch open` to perform
-// "the same lazy reap `next` does", and sharing the code is how that stays true.
+// "the same lazy reap `next` does" and `dispatch close` to perform it too,
+// before its own discrepancy probe; sharing the code is how that stays true.
 //
 // A17: `reaped_seq` is the seq of the `lease-reaped` event written by THIS reap,
 // read back with `last_insert_rowid()` in the same transaction — so the ack row
@@ -101,14 +102,14 @@ func reapExpiredTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]stri
 
 // reapOneTx reaps ONE step: the row reset, the event, and — for a bounded
 // class — the acknowledgment hold, in the caller's transaction. It is shared
-// by the lazy expiry reap above and by ForceReapStep (DKT-83), so a forced
+// by the lazy expiry reap above and by ForceReapStepWith (DKT-83), so a forced
 // reap cannot drift from an expiry's consequences: same event kind, same
 // headroom hold, same snapshot reflection.
 //
 // `data` rides in the `lease-reaped` event when non-empty; the expiry path
-// passes none, and the forced path records who-said-so and why — which is how
-// a reader distinguishes them, the same data.reason discipline that separates
-// a budget pause from an operator's.
+// passes none, and the forced path records who-said-so (`actor`/`cwd`,
+// DKT-2450) and why — which is how a reader distinguishes them, the same
+// data.reason discipline that separates a budget pause from an operator's.
 func reapOneTx(
 	tx *sql.Tx, sched *Scheduler, runID int, step *db.Step, data string, nowMS int64,
 ) error {
@@ -162,18 +163,34 @@ func reapOneTx(
 
 		// Reflect the reap in the loaded snapshot, so the readiness pass sees
 		// the step it just freed rather than the row it read a moment ago —
-		// the counter too, so the offer this same call renders carries the
-		// reap it performed.
+		// the counter too, and the last-claim-end this same call's offer
+		// renders (DKT-1279): W3 offers the reaped step in the SAME answer
+		// that performed the reap, and that row must say "reaped" without a
+		// second read of the row this transaction just wrote.
 		step.Status = db.StepPending
 		step.Owner, step.TokenHash, step.ExpiresMS = "", "", 0
 		step.StartedMS = nil
 		step.ReapedClaims++
+		step.LastClaimEnd = db.ClaimEndReaped
 	}
 	return nil
 }
 
-// ForceReapStep is `docket step reap` (DKT-83): an operator or relay that has
-// ESTABLISHED an executor is dead clears its claim now, instead of waiting
+// ForceReapOptions are `step reap`'s inputs.
+type ForceReapOptions struct {
+	// Reason is `--reason`, REQUIRED: the assertion that the holder is gone.
+	Reason string
+	// By is who asserted it and from where. REQUIRED: an empty field refuses
+	// the reap before anything is written (see Attribution).
+	By Attribution
+	// Token is the run's conductor capability (DKT-2465, conductor.go):
+	// required on a bound run, ignored on an unbound one.
+	Token string
+	NowMS int64
+}
+
+// ForceReapStepWith is `docket step reap` (DKT-83): an operator or relay that
+// has ESTABLISHED an executor is dead clears its claim now, instead of waiting
 // out the full lease TTL.
 //
 // Liveness was TTL-only, and the TTL cannot be sized right in both
@@ -183,18 +200,36 @@ func reapOneTx(
 // start — the write-reap acknowledgment says so — but the RELAY that spawned
 // the executor can, and this verb is the channel for what it observed.
 //
-// TOKEN-FREE, like approve/resolve: the authority is repository access plus
-// the assertion, recorded with `--reason`, that the holder is gone. It is not
-// an eviction primitive a bystander reaches casually — a forced reap of a
-// LIVE worker has exactly the risks a lease expiry has, which is why every
-// consequence is the expiry reap's own: same event kind (`lease-reaped`, with
-// `data.forced` and the reason distinguishing it), same write-class headroom
-// hold, same return of the step to the pool.
-func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
+// NO LEASE TOKEN — the holder's own token is exactly what a reap cannot
+// require, since the premise is that the holder is dead. What the verb
+// requires instead is the RUN's conductor capability (DKT-2465, conductor.go),
+// plus the assertion, recorded with `--reason`, that the holder is gone: the
+// relay that spawned the executor holds the capability, the executor it is
+// reaping never did, and a sibling executor cannot clear a claim it merely
+// wants out of its way. It is not an eviction primitive a bystander reaches
+// casually — a forced reap of a LIVE worker has exactly the risks a lease
+// expiry has, which is why every SCHEDULING consequence is the expiry reap's
+// own: same event kind (`lease-reaped`, with `data.forced` and the reason
+// distinguishing it), same write-class headroom hold, same return of the step
+// to the pool.
+//
+// The one deliberate divergence is the ATTEMPT BUDGET (DKT-585): a reap
+// carrying `data.forced` does not count the reaped attempt against
+// `max_attempts`, because the verb's premise is that the holder died before
+// an executor could fail — see the exemption below, and
+// db.ExemptStepAttemptFromBudgetTx for why it is a +1 nudge of the base and
+// never a touch of `attempt` itself.
+func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
+	reason, nowMS := opts.Reason, opts.NowMS
 	if reason == "" {
 		return validationErr(
 			"--reason is required: a forced reap asserts the holder is gone, " +
 				"and somebody will ask on whose word")
+	}
+	// ...and the answer is recorded (DKT-2450), not left for the asker to
+	// reconstruct from wall-clock.
+	if err := opts.By.require("step reap"); err != nil {
+		return err
 	}
 
 	step, err := db.GetStep(conn, stepID)
@@ -202,6 +237,11 @@ func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return err
+	}
+	// The conductor capability, before the lease is even inspected: a caller
+	// without it learns that the step exists and nothing else (DKT-2465).
+	if err := authorizeConductor(conn, step.RunID, opts.Token, "step reap"); err != nil {
 		return err
 	}
 	if step.Status != db.StepClaimed && step.Status != db.StepRunning {
@@ -235,11 +275,27 @@ func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 		}
 	}
 
-	data, err := json.Marshal(map[string]any{"forced": true, "reason": reason})
+	data, err := rulingData(opts.By, map[string]any{"forced": true, "reason": reason})
 	if err != nil {
 		return fmt.Errorf("recording the forced reap: %w", err)
 	}
-	if err := reapOneTx(tx, sched, step.RunID, target, string(data), nowMS); err != nil {
+	if err := reapOneTx(tx, sched, step.RunID, target, data, nowMS); err != nil {
+		return err
+	}
+	// A forced reap does not consume the attempt budget (DKT-585). The claim
+	// already spent an `attempt` when it was minted — the counter increments at
+	// claim, and ReapStepTx rightly leaves it alone — but the SPEND is a relay's
+	// assertion that the holder died, not a measurement that an executor
+	// failed, so the exhaustion math (`attempt - attempt_base` against
+	// `max_attempts`, the `step fail` branch) must not count it.
+	//
+	// This lives HERE and not in reapOneTx, per ReapStepTx's own mechanism/
+	// classification split: the shared reap is mechanism, and the two callers
+	// classify differently. An ordinary TTL expiry may still be an executor
+	// that went unresponsive under its own load — a judgment the expiry path
+	// keeps charging for, unchanged — while the forced path carries an explicit
+	// assertion (`data.forced`, `--reason`) that no executor ever got to work.
+	if err := db.ExemptStepAttemptFromBudgetTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

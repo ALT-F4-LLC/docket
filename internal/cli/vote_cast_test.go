@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,8 +14,11 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // TestParseVoteMetadata pins what `vote cast --metadata` accepts and what it
@@ -404,4 +408,189 @@ func runVoteCastCapturingStderr(t *testing.T, conn *sql.DB, args ...string) (str
 	ctx := context.WithValue(context.Background(), dbKey, conn)
 	err := cmd.ExecuteContext(ctx)
 	return stderr.String(), err
+}
+
+// TestVoteCastRefusesEvidenceItCannotResolve is DKT-2451 at the CLI
+// boundary: a cast whose findings cite evidence on a proposal bound to no run
+// is refused as VALIDATION_ERROR naming the proposal, and nothing records —
+// while the same findings citing nothing land exactly as they always did.
+func TestVoteCastRefusesEvidenceItCannotResolve(t *testing.T) {
+	conn := newTestDB(t)
+	id, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "an operator's own ballot", Criticality: model.CriticalityLow,
+		Status: model.ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	ref := model.FormatProposalID(id)
+
+	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject",
+		"--confidence", "0.9", "--domain-relevance", "0.8",
+		"--findings-json", `{"blockers":[{"text":"reproduced","evidence":["artifact:ARTIFACT-1"]}]}`)
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation {
+		t.Fatalf("a cast citing evidence on an unbound proposal returned %v, want VALIDATION_ERROR", err)
+	}
+	if !strings.Contains(err.Error(), ref) {
+		t.Errorf("refusal %q does not name the proposal", err)
+	}
+	votes, err := db.GetProposalVotes(conn, id)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	if len(votes) != 0 {
+		t.Fatalf("the refused cast recorded anyway: %+v", votes)
+	}
+
+	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject",
+		"--confidence", "0.9", "--domain-relevance", "0.8",
+		"--findings-json", `{"blockers":["asserted, not reproduced"]}`)
+	testsupport.Must(t, err, "a cast citing nothing was refused: %v", err)
+	votes, err = db.GetProposalVotes(conn, id)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	if len(votes) != 1 || votes[0].FindingsJSON == nil || votes[0].FindingsJSON.Blockers[0].Text != "asserted, not reproduced" {
+		t.Errorf("the evidence-less cast did not record its findings: %+v", votes)
+	}
+}
+
+// seedPinnedVoteProposal registers `src` as a pinned workflow, expands its
+// `review` step for a fresh issue in a fresh run, and opens the step's
+// proposal through the engine's own phase 2 — the shape `docket vote cast`
+// meets on a live run, with the pinned bytes the cast path reads its
+// `roster` and `recuse` from. The panel has three seats and the tests cast at
+// most two, so no cast reaches quorum and routes the hand-seeded run.
+func seedPinnedVoteProposal(t *testing.T, conn *sql.DB, src string) string {
+	t.Helper()
+	err := db.SetConfig(conn, 0, db.VoteRuleThresholdKey("majority"), "0.6")
+	testsupport.Must(t, err, "registering the vote rule: %v", err)
+
+	def, err := workflow.Parse([]byte(src))
+	testsupport.Must(t, err, "Parse: %v", err)
+	testsupport.Must(t, workflow.Validate(def), "Validate: %v", err)
+	parsed, err := workflow.Canonical(def)
+	testsupport.Must(t, err, "Canonical: %v", err)
+
+	res, err := conn.Exec(
+		`INSERT INTO workflows (name, version, source_sha256, body, parsed, created_at_ms)
+		 VALUES ('pinned-vote', 1, 'x', ?, ?, 1)`, src, string(parsed))
+	testsupport.Must(t, err, "seeding a workflow: %v", err)
+	wfID, _ := res.LastInsertId()
+	res, err = conn.Exec(
+		`INSERT INTO runs (request, status, created_at_ms, updated_at_ms)
+		 VALUES ('', 'active', 1, 1)`)
+	testsupport.Must(t, err, "seeding a run: %v", err)
+	runID, _ := res.LastInsertId()
+	res, err = conn.Exec(
+		`INSERT INTO issues (title, status, created_at, updated_at)
+		 VALUES ('vote subject', 'backlog', '2026-09-23', '2026-09-23')`)
+	testsupport.Must(t, err, "seeding an issue: %v", err)
+	issueID, _ := res.LastInsertId()
+	res, err = conn.Exec(
+		`INSERT INTO steps
+		   (run_id, issue_id, workflow_id, step_name, instance, kind, status,
+		    created_at_ms, updated_at_ms)
+		 VALUES (?, ?, ?, 'review', 'review@0', 'vote', 'pending', 1, 1)`,
+		runID, issueID, wfID)
+	testsupport.Must(t, err, "seeding the vote step: %v", err)
+	stepID, _ := res.LastInsertId()
+	step, err := db.GetStep(conn, int(stepID))
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	id, err := engine.OpenVoteProposal(conn, step, workflow.StepByName(def, "review"), model.NowMS())
+	testsupport.Must(t, err, "OpenVoteProposal: %v", err)
+	return model.FormatProposalID(id)
+}
+
+// pinnedVoteSrc is a producer step and the `review` panel over it, with
+// `tail` appended to the panel's table.
+func pinnedVoteSrc(tail string) string {
+	return `
+[pipeline]
+name = "pinned-vote"
+version = 1
+[[step]]
+name = "implement"
+executor = "worker"
+emits = "k"
+[[step]]
+name = "review"
+after = ["implement"]
+type = "vote"
+voters = ["alice", "bob", "worker"]
+vote_rule = "majority"
+on_fail = "skip"
+` + tail + "\n"
+}
+
+// assertCastRefused checks the command returned VALIDATION_ERROR naming each
+// `wants`, and that the proposal holds exactly `votes` rows afterwards.
+func assertCastRefused(t *testing.T, conn *sql.DB, err error, ref string, votes int, wants ...string) {
+	t.Helper()
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation {
+		t.Fatalf("the cast returned %v, want VALIDATION_ERROR", err)
+	}
+	for _, want := range wants {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err.Error(), want)
+		}
+	}
+	id, perr := model.ParseProposalID(ref)
+	testsupport.Must(t, perr, "ParseProposalID: %v", perr)
+	if got := len(votesByVoter(t, conn, id)); got != votes {
+		t.Errorf("the proposal holds %d vote(s) after the refusal, want %d", got, votes)
+	}
+}
+
+// TestVoteCastStrictRosterRefusesOffRoster is DKT-2511 at the CLI boundary:
+// `docket vote cast --voter mallory` on a strict-roster step's proposal is
+// refused as VALIDATION_ERROR naming the voter and the roster, with no vote
+// written; an on-roster seat lands; and the same off-roster cast lands under
+// the default roster.
+func TestVoteCastStrictRosterRefusesOffRoster(t *testing.T) {
+	base := []string{"--verdict", "approve", "--confidence", "0.9", "--domain-relevance", "0.8"}
+
+	t.Run("strict roster", func(t *testing.T) {
+		conn := newTestDB(t)
+		ref := seedPinnedVoteProposal(t, conn, pinnedVoteSrc(`roster = "strict"`))
+
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "mallory"}, base...)...)
+		assertCastRefused(t, conn, err, ref, 0, `"mallory"`, `"strict"`, `"review"`)
+
+		err = runVoteCastCmd(t, conn, append([]string{ref, "--voter", "bob"}, base...)...)
+		testsupport.Must(t, err, "an on-roster cast was refused: %v", err)
+	})
+
+	t.Run("open roster by default", func(t *testing.T) {
+		conn := newTestDB(t)
+		ref := seedPinnedVoteProposal(t, conn, pinnedVoteSrc(``))
+
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "mallory"}, base...)...)
+		testsupport.Must(t, err, "an off-roster cast under the open default was refused: %v", err)
+	})
+}
+
+// TestVoteCastRecusesDeclaredReviewedStep is DKT-2525 at the CLI boundary: a
+// cast from the executor hint of the step the panel `reviews` is refused as
+// VALIDATION_ERROR naming both steps, a sibling seat lands, and the executor's
+// own cast lands when the panel declares no recuse.
+func TestVoteCastRecusesDeclaredReviewedStep(t *testing.T) {
+	base := []string{"--verdict", "approve", "--confidence", "0.9", "--domain-relevance", "0.8"}
+
+	t.Run("recuse = executor", func(t *testing.T) {
+		conn := newTestDB(t)
+		ref := seedPinnedVoteProposal(t, conn,
+			pinnedVoteSrc("reviews = \"implement\"\nrecuse = \"executor\""))
+
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "worker"}, base...)...)
+		assertCastRefused(t, conn, err, ref, 0, `"review"`, `"implement"`, `"worker"`)
+
+		err = runVoteCastCmd(t, conn, append([]string{ref, "--voter", "alice"}, base...)...)
+		testsupport.Must(t, err, "a sibling seat's cast was refused: %v", err)
+	})
+
+	t.Run("no recuse declared", func(t *testing.T) {
+		conn := newTestDB(t)
+		ref := seedPinnedVoteProposal(t, conn, pinnedVoteSrc(`reviews = "implement"`))
+
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "worker"}, base...)...)
+		testsupport.Must(t, err, "the executor's cast was refused with no recuse declared: %v", err)
+	})
 }

@@ -106,7 +106,8 @@ const (
 	KeyEventsRetain = "events.retain"
 
 	// KeyVoteRulePrefix is the named-threshold-configuration namespace:
-	// vote.rule.<name>.threshold and vote.rule.<name>.criticality
+	// vote.rule.<name>.threshold, vote.rule.<name>.criticality,
+	// vote.rule.<name>.sealed and vote.rule.<name>.hold_on_dissent
 	// (gates-trust §8.3).
 	//
 	// A workflow's `type="vote"` step names a rule rather than passing flags,
@@ -114,10 +115,41 @@ const (
 	// as lease.ttl.<class>'s class is, and this reuses the config machinery
 	// rather than adding a table: a rule "exists" iff its `.threshold` is set.
 	KeyVoteRulePrefix = "vote.rule."
-	// KeyVoteRuleThresholdSuffix and KeyVoteRuleCriticalitySuffix complete a
-	// rule's two keys.
-	KeyVoteRuleThresholdSuffix   = ".threshold"
-	KeyVoteRuleCriticalitySuffix = ".criticality"
+	// KeyVoteRuleThresholdSuffix, KeyVoteRuleCriticalitySuffix,
+	// KeyVoteRuleSealedSuffix and KeyVoteRuleHoldOnDissentSuffix complete a
+	// rule's four keys.
+	//
+	// `.sealed` is opt-in and defaults to false: a sealed rule opens proposals
+	// whose casts the read verbs withhold (verdict, weights, findings, summary)
+	// until the tally closes the proposal, so a seat reading the ballot cannot
+	// anchor on a sibling's verdict. It is a RENDERING rule only — the tally
+	// and the one-cast-per-voter constraint never consult it.
+	//
+	// `.hold_on_dissent` is opt-in and defaults to false (DKT-2449): under a
+	// keyed rule an APPROVED tally that carries at least one `reject` parks
+	// the vote step for the operator instead of passing. The tally itself is
+	// untouched — the weighted mean is still db.CastVote's — and the park is
+	// strictly additive: it displaces a `pass` and never a fail route.
+	KeyVoteRuleThresholdSuffix     = ".threshold"
+	KeyVoteRuleCriticalitySuffix   = ".criticality"
+	KeyVoteRuleSealedSuffix        = ".sealed"
+	KeyVoteRuleHoldOnDissentSuffix = ".hold_on_dissent"
+
+	// retiredVoteRuleRosterSuffix and retiredVoteRuleWeightingSuffix are the
+	// two vote-rule keys DKT-2448 registered and DKT-2764 RETIRED. Who may
+	// cast and what a cast is worth are AUTHORIZATION decisions, and a config
+	// key carries none: `docket config set` has no per-caller identity, so a
+	// seat constrained by a rule could rewrite the rule before casting. Both
+	// switches now live on the vote step (`roster`, `weighting` in the
+	// `[[step]]` table), pinned at activation with `voters`.
+	//
+	// The suffixes survive only so `config set` can refuse them BY NAME and
+	// point at the field that replaced each — a key that stopped existing
+	// would otherwise refuse as "unknown", and an operator who read the old
+	// docs would not learn where the switch went. Nothing reads a stored
+	// value under either key; a legacy row is inert.
+	retiredVoteRuleRosterSuffix    = ".roster"
+	retiredVoteRuleWeightingSuffix = ".weighting"
 
 	// KeyVoteHoldRule and KeyVoteHoldVoters configure how a MATERIALIZED HELD
 	// step is decided: by one operator (the default) or by a tally.
@@ -140,6 +172,17 @@ const (
 	// whichever pipeline held, so who answers it is a project-level policy.
 	KeyVoteHoldRule   = "vote.hold.rule"
 	KeyVoteHoldVoters = "vote.hold.voters"
+	// KeyVoteHoldCost is the declared `expected_cost` a MATERIALIZED HELD vote
+	// step is minted with (DKT-584). An engine-minted held ballot has no
+	// `[[step]]` table to declare a cost in, so it carried 0 by construction —
+	// and since a vote step's declared cost accrues to the budget floor at
+	// materialization, that made every held panel invisible to the floor.
+	//
+	// Default "0", which is EXACTLY the prior behavior: a held ballot accrues
+	// nothing until an instance states what its panels cost. It applies only
+	// when a hold is minted as `vote` (both vote.hold.* keys set); a hold
+	// minted `human` is one operator's decision, not a panel's spend.
+	KeyVoteHoldCost = "vote.hold.cost"
 
 	// KeyAutoRegister toggles §9's auto-registration: whether `run activate`
 	// registers a workflow/schema it finds in an instance-config root
@@ -381,7 +424,8 @@ var engineConfigSpecs = []ConfigSpec{
 		Kind:    KindDuration,
 		Default: "15m",
 		Doc: "How long a claimed step may go unrecorded before it counts as a " +
-			"dispatch discrepancy",
+			"dispatch discrepancy, and how long after a run's newest step record " +
+			"its unbilled steps stay usage-pending rather than missing",
 	},
 	{
 		Key:     KeyEventsRetain,
@@ -407,6 +451,14 @@ var engineConfigSpecs = []ConfigSpec{
 		Default: "",
 		Doc: "Comma-separated voters on a materialized held step. Empty (the " +
 			"default) mints held steps as `human` for one operator to decide",
+	},
+	{
+		Key:     KeyVoteHoldCost,
+		Kind:    KindNonNegativeNumber,
+		Default: "0",
+		Doc: "Declared expected_cost a materialized held VOTE step is minted " +
+			"with, accrued to the run's budget floor at materialization. 0 " +
+			"(the default) accrues nothing, the prior behavior",
 	},
 	{
 		Key:     KeyAutoRegister,
@@ -454,9 +506,10 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 		}, nil
 	}
 
-	// vote.rule.<name>.threshold / .criticality (gates-trust §8.3), matched
-	// dynamically for the same reason the per-class TTL is: <name> is an
-	// opaque string, so the set of valid keys is open by design.
+	// vote.rule.<name>.threshold / .criticality / .sealed / .hold_on_dissent
+	// (gates-trust §8.3),
+	// matched dynamically for the same reason the per-class TTL is: <name> is
+	// an opaque string, so the set of valid keys is open by design.
 	if rest, ok := strings.CutPrefix(key, KeyVoteRulePrefix); ok {
 		if name, found := strings.CutSuffix(rest, KeyVoteRuleThresholdSuffix); found && name != "" {
 			return ConfigSpec{
@@ -473,6 +526,44 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 				Doc:     fmt.Sprintf("Criticality for vote rule %q", name),
 			}, nil
 		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleSealedSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether proposals opened under vote rule %q "+
+					"withhold their casts from the read verbs until the tally "+
+					"closes them; false (the default) renders every cast as it lands", name),
+			}, nil
+		}
+		// The two RETIRED identity keys (DKT-2764) refuse by name, pointing
+		// at the vote-step field that replaced each. They fall under
+		// ErrUnknownConfigKey so the CLI reports them as VALIDATION_ERROR
+		// exactly as any other key it does not know.
+		if name, found := strings.CutSuffix(rest, retiredVoteRuleRosterSuffix); found && name != "" {
+			return ConfigSpec{}, fmt.Errorf(
+				"%w: %q is retired; who may cast is declared on the vote step "+
+					"itself, `roster = \"strict\"` in its [[step]] table, pinned at "+
+					"activation — a config key carries no authorization",
+				ErrUnknownConfigKey, key)
+		}
+		if name, found := strings.CutSuffix(rest, retiredVoteRuleWeightingSuffix); found && name != "" {
+			return ConfigSpec{}, fmt.Errorf(
+				"%w: %q is retired; what a cast is worth is declared on the vote "+
+					"step itself, `weighting = \"equal\"` in its [[step]] table, "+
+					"pinned at activation — a config key carries no authorization",
+				ErrUnknownConfigKey, key)
+		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleHoldOnDissentSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether an APPROVED tally under vote rule %q "+
+					"that carries at least one reject parks its step for the "+
+					"operator; false (the default) routes it as before", name),
+			}, nil
+		}
 	}
 
 	return ConfigSpec{}, fmt.Errorf("%w: %q (known keys: %s)",
@@ -481,7 +572,7 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 
 // KnownConfigKeys lists the fixed keys, plus the open-ended patterns.
 func KnownConfigKeys() []string {
-	keys := make([]string, 0, len(engineConfigSpecs)+3)
+	keys := make([]string, 0, len(engineConfigSpecs)+5)
 	for _, spec := range engineConfigSpecs {
 		keys = append(keys, spec.Key)
 	}
@@ -489,6 +580,8 @@ func KnownConfigKeys() []string {
 		KeyLeaseTTLPrefix+"<class>",
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleThresholdSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleCriticalitySuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleSealedSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleHoldOnDissentSuffix,
 	)
 	return keys
 }
@@ -594,14 +687,23 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 	return nil
 }
 
-// VoteRuleThresholdKey and VoteRuleCriticalityKey build a rule's two keys, so
-// the string concatenation lives in one place rather than at every reader.
+// VoteRuleThresholdKey, VoteRuleCriticalityKey, VoteRuleSealedKey and
+// VoteRuleHoldOnDissentKey build a rule's four keys, so the string
+// concatenation lives in one place rather than at every reader.
 func VoteRuleThresholdKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleThresholdSuffix
 }
 
 func VoteRuleCriticalityKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleCriticalitySuffix
+}
+
+func VoteRuleSealedKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleSealedSuffix
+}
+
+func VoteRuleHoldOnDissentKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleHoldOnDissentSuffix
 }
 
 // VoteRuleExists reports whether a rule is registered.
@@ -743,28 +845,68 @@ func effectiveConfigProject(projectID int, key string) int {
 // SetConfig stores a validated engine-configuration value. A non-zero
 // projectID writes the project's override; zero writes the store-wide
 // default every project falls back to.
+//
+// It is SetConfigTx in a transaction of its own; the validation, the key
+// shape and the upsert are that function's, stated once.
 func SetConfig(db *sql.DB, projectID int, key, value string) error {
-	spec, err := LookupConfigSpec(key)
+	tx, err := db.Begin()
 	if err != nil {
+		return fmt.Errorf("storing config %s: %w", key, err)
+	}
+	defer tx.Rollback()
+	if _, err := SetConfigTx(tx, projectID, key, value); err != nil {
 		return err
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("storing config %s: %w", key, err)
+	}
+	return nil
+}
+
+// SetConfigTx is SetConfig inside a CALLER'S transaction (DKT-2563), and it
+// returns the value the SAME scope row held before the write — empty when the
+// key was unset at that scope.
+//
+// It exists so a write to a security-load-bearing key can be recorded in the
+// same transaction as the write itself: the config-changed event carries the
+// prior and the new value, and an event committed separately from the write
+// it describes could survive a write that rolled back, or vice versa. The
+// prior value is read here, under the transaction, rather than by the caller
+// through GetConfig — a pool read from inside a transaction deadlocks against
+// internal/db's single connection, the same constraint GetConfigTx exists for.
+//
+// "Prior" is the row at THIS scope (the project's override, or the store-wide
+// default), not the effective value GetConfig would resolve: the event
+// describes what the write replaced, and a project override replaces nothing
+// store-wide.
+func SetConfigTx(tx *sql.Tx, projectID int, key, value string) (prior string, err error) {
+	spec, err := LookupConfigSpec(key)
+	if err != nil {
+		return "", err
+	}
 	if err := ValidateConfigValue(spec, value); err != nil {
-		return err
+		return "", err
 	}
 
 	metaKey := metaConfigPrefix + key
 	if projectID = effectiveConfigProject(projectID, key); projectID != 0 {
 		metaKey = projectConfigKey(projectID, key)
 	}
-	_, err = db.Exec(
+
+	err = tx.QueryRow(`SELECT value FROM meta WHERE key = ?`, metaKey).Scan(&prior)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("reading the prior value of config %s: %w", key, err)
+	}
+
+	_, err = tx.Exec(
 		`INSERT INTO meta (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		metaKey, value,
 	)
 	if err != nil {
-		return fmt.Errorf("storing config %s: %w", key, err)
+		return "", fmt.Errorf("storing config %s: %w", key, err)
 	}
-	return nil
+	return prior, nil
 }
 
 // ConfigEntry is one key's effective value and where it came from.

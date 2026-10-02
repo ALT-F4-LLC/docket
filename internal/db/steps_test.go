@@ -544,3 +544,74 @@ func TestReadyIsNeverPersisted(t *testing.T) {
 		}
 	}
 }
+
+// TestLoopHistoryFactsRoundTrip proves the three loop-history facts a
+// fix-loop-exhausted step parks with — rounds run against the cap, the step
+// that triggered the loop, and the latest fix-round verdict — survive one
+// SetStepLoopHistoryTx write and come back on the row's model.StepRow.
+//
+// It writes through the setter directly rather than through the exhaustion
+// routing transaction: the facts are storage here, and the call site inside
+// that transaction is a separate criterion.
+//
+// It also pins the row move the setter promises CAS-guarded readers: one
+// row_version bump and updated_at_ms set to the caller's nowMS.
+func TestLoopHistoryFactsRoundTrip(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = SetStepLoopHistoryTx(tx, id, 3, "judge-correctness@0", "concerns", 2000)
+	testsupport.Must(t, err, "SetStepLoopHistoryTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	row := model.StepRow{
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+	}
+	if row.LoopRoundsRun != 3 {
+		t.Errorf("LoopRoundsRun = %d, want 3", row.LoopRoundsRun)
+	}
+	if row.LoopTriggerStep != "judge-correctness@0" {
+		t.Errorf("LoopTriggerStep = %q, want judge-correctness@0", row.LoopTriggerStep)
+	}
+	if row.LoopLatestVerdict != "concerns" {
+		t.Errorf("LoopLatestVerdict = %q, want concerns", row.LoopLatestVerdict)
+	}
+
+	if step.RowVersion != before.RowVersion+1 {
+		t.Errorf("RowVersion = %d, want %d — CAS-guarded readers must see the row move",
+			step.RowVersion, before.RowVersion+1)
+	}
+	if step.UpdatedAtMS != 2000 {
+		t.Errorf("UpdatedAtMS = %d, want 2000 (the setter's nowMS)", step.UpdatedAtMS)
+	}
+}
+
+// TestLoopHistoryFactsAbsentBeforeWrite pins the unwritten reading: a step that
+// never exhausted a loop carries no loop history, so the fields stay at their
+// zero values and serialize away under omitempty.
+func TestLoopHistoryFactsAbsentBeforeWrite(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	row := model.StepRow{
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+	}
+	if row.LoopRoundsRun != 0 || row.LoopTriggerStep != "" || row.LoopLatestVerdict != "" {
+		t.Errorf("unwritten loop history = %d/%q/%q, want 0//",
+			row.LoopRoundsRun, row.LoopTriggerStep, row.LoopLatestVerdict)
+	}
+}

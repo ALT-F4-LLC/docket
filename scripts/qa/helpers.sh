@@ -99,6 +99,27 @@ run_stdin() {
   rm -f "$tmpout" "$tmperr"
 }
 
+# The conductor capability (DKT-2465): the seven operator verbs — step
+# approve/reject/resolve/reap, run pause/resume/abandon — require the run's
+# token on a bound run, and every run this binary activates is bound at
+# birth. A section that drives a run through those verbs holds the token the
+# way a conductor session does.
+#
+# activation_token — the token the LAST run_env activation returned, read
+# from its envelope (`conductor_token`, a first activation only).
+activation_token() {
+  printf '%s' "$CMD_STDOUT" | jq -r '.data.conductor_token // empty'
+}
+
+# conductor_of DIR RUN-N — take the run's seat the way a fresh session does
+# and print the fresh token. It records a `conductor-seated` event, so a
+# section asserting an exact event sequence captures the activation's token
+# instead.
+conductor_of() {
+  local dp="$1" run="$2"
+  DOCKET_PATH="$dp" "$DOCKET" run conduct "$run" --json=v2 2>/dev/null | jq -r '.data.token'
+}
+
 # Run with a custom DOCKET_PATH.
 run_env() {
   local dp="$1"; shift

@@ -65,8 +65,8 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 	defer tx.Rollback()
 
 	res, err := tx.Exec(
-		`INSERT INTO proposals (project_id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO proposals (project_id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed, created_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		projectOrDefault(p.ProjectID),
 		p.Description,
 		p.Rationale,
@@ -79,6 +79,7 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 		p.RequiredVoters,
 		p.Threshold,
 		p.WeightedScore,
+		p.Sealed,
 		p.CreatedBy,
 		now,
 		now,
@@ -106,10 +107,30 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 	return id, nil
 }
 
+// proposalQuerier is the read surface GetProposal/GetProposalVotes need,
+// satisfied by *sql.DB and *sql.Tx alike — one query text for both callers, so
+// the pooled and the in-transaction reads cannot drift.
+type proposalQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
 // GetProposal returns a proposal by ID, or ErrNotFound if it does not exist.
 func GetProposal(db *sql.DB, id int) (*model.Proposal, error) {
-	row := db.QueryRow(
-		`SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at
+	return getProposal(db, id)
+}
+
+// GetProposalTx is GetProposal inside a CALLER'S transaction — the engine's
+// context assembly resolves `<step>.vote-record` inputs (DKT-545) in the claim
+// transaction, and reading through the pool there would see a different
+// snapshot than the bundle it is assembling.
+func GetProposalTx(tx *sql.Tx, id int) (*model.Proposal, error) {
+	return getProposal(tx, id)
+}
+
+func getProposal(q proposalQuerier, id int) (*model.Proposal, error) {
+	row := q.QueryRow(
+		`SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed, created_by, created_at, updated_at
 		 FROM proposals WHERE id = ?`, id,
 	)
 	p, err := scanProposalFrom(row)
@@ -159,7 +180,7 @@ func ListProposals(db *sql.DB, projectID int, status string, criticality string,
 	}
 
 	// Get rows.
-	query := "SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, created_by, created_at, updated_at FROM proposals " + where + " ORDER BY created_at ASC"
+	query := "SELECT id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed, created_by, created_at, updated_at FROM proposals " + where + " ORDER BY created_at ASC"
 	queryArgs := append([]any{}, args...)
 	if limit > 0 {
 		query += " LIMIT ?"
@@ -187,7 +208,25 @@ func ListProposals(db *sql.DB, projectID int, status string, criticality string,
 // CastVote inserts a vote and auto-finalizes the proposal when quorum is reached.
 // Returns ErrNotFound if the proposal does not exist.
 // Returns ErrConflict if the voter already voted or the proposal is already finalized.
+//
+// The tally is the DECLARED one — each cast weighted by its own confidence
+// times its own domain relevance — which is what every caller before DKT-2512
+// got and what an ad-hoc proposal still gets. A vote step that declares
+// `weighting = "equal"` reaches the same function through CastVoteWeighted.
 func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
+	return CastVoteWeighted(db, v, false)
+}
+
+// CastVoteWeighted is CastVote with the tally's weighting chosen by the caller
+// (DKT-2512). With `equal` set, every cast weighs 1.0 × 1.0 in the score —
+// the vote ROW still keeps the confidence and domain relevance the caster
+// declared, in their existing columns, so what a seat claimed about its own
+// testimony is on record even where it does not price the tally.
+//
+// The flag is passed per cast rather than stored on the proposal because the
+// tally happens inside the quorum-reaching cast, and the value comes from the
+// vote step's PINNED definition, which cannot change under a live ballot.
+func CastVoteWeighted(db *sql.DB, v *model.Vote, equal bool) (*CastVoteResult, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
@@ -345,6 +384,11 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 				return nil, fmt.Errorf("scanning vote for score: %w", err)
 			}
 			weight := confidence * domainRelevance
+			if equal {
+				// Equal weighting: the declared values were scanned and sit
+				// on the row; they price nothing here.
+				weight = 1.0
+			}
 			totalWeight += weight
 			if model.Verdict(verdict) == model.VerdictApprove || model.Verdict(verdict) == model.VerdictApproveWithConcerns {
 				weightedSum += weight
@@ -389,7 +433,17 @@ func CastVote(db *sql.DB, v *model.Vote) (*CastVoteResult, error) {
 
 // GetProposalVotes returns all votes for a proposal, ordered by creation time.
 func GetProposalVotes(db *sql.DB, proposalID int) ([]*model.Vote, error) {
-	rows, err := db.Query(
+	return getProposalVotes(db, proposalID)
+}
+
+// GetProposalVotesTx is GetProposalVotes inside a CALLER'S transaction — see
+// GetProposalTx for why the vote-record input resolution needs one.
+func GetProposalVotesTx(tx *sql.Tx, proposalID int) ([]*model.Vote, error) {
+	return getProposalVotes(tx, proposalID)
+}
+
+func getProposalVotes(q proposalQuerier, proposalID int) ([]*model.Vote, error) {
+	rows, err := q.Query(
 		`SELECT id, proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, metadata, created_at
 		 FROM votes WHERE proposal_id = ? ORDER BY created_at ASC`, proposalID,
 	)
@@ -486,7 +540,7 @@ func GetProposalIssues(db *sql.DB, proposalID int) ([]int, error) {
 // proposal id ascending. It is the reverse edge of GetProposalIssues.
 func GetIssueProposals(db *sql.DB, issueID int) ([]model.Proposal, error) {
 	rows, err := db.Query(
-		`SELECT p.id, p.description, p.rationale, p.domain_tags, p.files_changed, p.criticality, p.status, p.final_outcome, p.escalation_reason, p.required_voters, p.threshold, p.weighted_score, p.created_by, p.created_at, p.updated_at
+		`SELECT p.id, p.description, p.rationale, p.domain_tags, p.files_changed, p.criticality, p.status, p.final_outcome, p.escalation_reason, p.required_voters, p.threshold, p.weighted_score, p.sealed, p.created_by, p.created_at, p.updated_at
 		 FROM proposals p
 		 JOIN proposal_issues pi ON pi.proposal_id = p.id
 		 WHERE pi.issue_id = ?
@@ -620,7 +674,7 @@ func scanProposalFrom(s scanner) (*model.Proposal, error) {
 	err := s.Scan(
 		&p.ID, &p.Description, &p.Rationale, &domainTagsRaw, &filesChangedRaw,
 		&p.Criticality, &p.Status, &p.FinalOutcome, &escalationReason,
-		&p.RequiredVoters, &p.Threshold, &weightedScore, &createdBy,
+		&p.RequiredVoters, &p.Threshold, &weightedScore, &p.Sealed, &createdBy,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -761,7 +815,7 @@ func ListAllProposals(db *sql.DB, projectID int) ([]*model.Proposal, error) {
 	rows, err := db.Query(
 		`SELECT id, description, rationale, domain_tags, files_changed, criticality,
 		        status, final_outcome, escalation_reason, required_voters, threshold,
-		        weighted_score, created_by, created_at, updated_at
+		        weighted_score, sealed, created_by, created_at, updated_at
 		 FROM proposals `+where+` ORDER BY id ASC`, args...,
 	)
 	if err != nil {
@@ -857,12 +911,12 @@ func InsertProposalWithID(tx *sql.Tx, p *model.Proposal) (bool, error) {
 	res, err := tx.Exec(
 		`INSERT OR IGNORE INTO proposals
 		 (id, project_id, description, rationale, domain_tags, files_changed, criticality, status,
-		  final_outcome, escalation_reason, required_voters, threshold, weighted_score,
+		  final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed,
 		  created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, projectOrDefault(p.ProjectID), p.Description, p.Rationale, string(domainTagsJSON), string(filesChangedJSON),
 		string(p.Criticality), string(p.Status), p.FinalOutcome, escalationReason,
-		p.RequiredVoters, p.Threshold, weightedScore, p.CreatedBy,
+		p.RequiredVoters, p.Threshold, weightedScore, p.Sealed, p.CreatedBy,
 		p.CreatedAt.UTC().Format(time.RFC3339), p.UpdatedAt.UTC().Format(time.RFC3339),
 	)
 	if err != nil {

@@ -121,8 +121,16 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// ATTRIBUTABLE — and on §9 item 2: releasing write headroom IS a
 		// transition (a successor becomes claimable that was not), and without
 		// this kind the release would appear in the feed as nothing at all.
+		//
+		// `dispatch-extended` (DKT-2071) is the fourth, on the same argument
+		// that separates the closing pair: an operator following the feed must
+		// see that the batch GREW mid-wave. Rows the engine minted after the
+		// open — a fix round, a held-cluster gate, a limit-cut tail — become
+		// spawnable under the manifest they were never opened with, and an
+		// append with no event would make those launches indistinguishable
+		// from the relay drift the manifest exists to detect.
 		"dispatch-opened", "dispatch-closed", "dispatch-abandoned",
-		"reap-acknowledged",
+		"dispatch-extended", "reap-acknowledged",
 
 		// Stage 7's two (docs/tdd/events-follow.md §6, §7.3).
 		//
@@ -152,6 +160,13 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// against nine session transcripts.
 		"project-registered",
 
+		// The conductor seat kind (DKT-2465) — ONE. `run conduct` is the
+		// token-free route to the capability the seven operator verbs
+		// require, so the seat changing hands is a transition an auditor
+		// must be able to attribute; without it a rotation would be visible
+		// only as the standing conductor's next ruling refusing.
+		"conductor-seated",
+
 		// The spawn carve-out kind (DKT-236) — ONE. It records a hold being
 		// STEPPED PAST, which is the one case where "no event" and "nothing
 		// happened" say the same thing while meaning opposite things: a spawn
@@ -167,17 +182,84 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// the one transition that rewrites the evidence other records are
 		// checked against while leaving no trace of the value it replaced.
 		"run-repinned",
+
+		// The batch gate-override kinds (DKT-546) — TWO, each the
+		// spawn-admitted argument again: a park stepped past on standing
+		// authority. `gate-override-granted` is the authority being minted
+		// (one operator ruling per failed gate), `step-batch-overridden` is
+		// it being spent — without the second, an auto-applied override would
+		// be indistinguishable in the feed from an engine-computed pass.
+		"gate-override-granted",
+		"step-batch-overridden",
+
+		// The stale-target waiver kind (DKT-742) — ONE, the granted half of
+		// the DKT-546 argument alone: an operator minting standing authority
+		// over a repeating advisory. No "spent" counterpart, because applying
+		// a waiver changes no step's state — the advisory is recomputed by
+		// verbs that write nothing.
+		"stale-target-waived",
+
+		// The scope-refresh kind (DKT-869) — ONE, on the `run-repinned`
+		// argument in its other column: this is the second and last transition
+		// that moves a frozen premise while a run is live. Without it, two
+		// steps of one run rendering two different declared scopes would be
+		// indistinguishable in the record from the snapshot drift the freeze
+		// exists to prevent — the discontinuity has to be dated and
+		// attributable for `run refresh-scope` to be an exception rather than
+		// a hole. No "spent" counterpart: the refreshed snapshot IS the new
+		// premise, and every later render reads it the way every render always
+		// read the frozen one.
+		"issue-scope-refreshed",
+
+		// The body-refresh kind (DKT-2291) — ONE, the scope refresh's twin:
+		// `run_issues.body_snapshot` is the other half of the premise a
+		// packet states, and a refreshed half with no event is the same
+		// silent drift. It carries the superseded and refreshed body hashes
+		// and the operator's reason.
+		"issue-body-refreshed",
+
+		// The issue.diff re-pin kind (DKT-1034) — ONE, the `run-repinned`
+		// argument in its third column: the round record a step recorded is
+		// the frozen premise every downstream review packet renders its
+		// target from, and `step resolve --worktree` is the one verb that
+		// moves it on purpose. It carries the stale sha and the re-pinned
+		// sha, so a packet that judged the wrong commit is distinguishable
+		// in the record from one that rendered correctly.
+		"issue-diff-repinned",
+
+		// The run-note kind (DKT-1079) — ONE, the `run-repinned` argument
+		// in its fourth column: a note is the third thing that changes what
+		// a live run's packets say (beside a repin and a scope refresh), and
+		// two renders of one step that differ by a `== RUN NOTE` section
+		// must be distinguishable in the record from the drift the snapshot
+		// discipline exists to prevent. No "spent" counterpart: rendering a
+		// note changes no step's state, and every later render reads it the
+		// way every render reads the frozen body.
+		"run-note-added",
+
+		// The config-write kind (DKT-2766) — ONE, the `run-repinned`
+		// argument again: a vote rule's threshold is a premise every tally
+		// under it is judged against, and `config set` has no per-caller
+		// authorization, so a rewrite of it must be dated and attributed or
+		// two ballots approved under two thresholds are indistinguishable in
+		// the record. No run: a config write belongs to a project.
+		"config-changed",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 43 {
+	if len(eventKinds) != 53 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
-			"DKT-236's spawn carve-out, DKT-294's live-status mirror, and "+
-			"DKT-408's repin kind enumerate 43 (see DKT-21)",
+			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
+			"DKT-408's repin kind, DKT-546's batch-override pair, "+
+			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
+			"kind, DKT-2291's body-refresh kind, DKT-1034's issue.diff "+
+			"re-pin kind, DKT-1079's run-note kind, DKT-2465's "+
+			"conductor-seat kind, DKT-2071's dispatch-extend kind, and "+
+			"DKT-2766's config-changed kind enumerate 53 (see DKT-21)",
 			len(eventKinds))
 	}
 }

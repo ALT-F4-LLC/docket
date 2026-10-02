@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/render"
@@ -360,6 +361,80 @@ func TestWriterWarnEmitsInHumanMode(t *testing.T) {
 	got := stderr.String()
 	if got != "Warning: something is off\n" {
 		t.Errorf("Writer.Warn = %q, want %q", got, "Warning: something is off\n")
+	}
+}
+
+// enableColors makes render.ColorsEnabled() true for the duration of one test.
+//
+// t.Setenv cannot express it on its own: ColorsEnabled uses LookupEnv, so
+// NO_COLOR="" still disables colors. The variable has to be genuinely absent.
+func enableColors(t *testing.T) {
+	t.Helper()
+	if prev, ok := os.LookupEnv("NO_COLOR"); ok {
+		testsupport.Must(t, os.Unsetenv("NO_COLOR"), "unsetting NO_COLOR: %v", nil)
+		t.Cleanup(func() { _ = os.Setenv("NO_COLOR", prev) })
+	}
+	t.Setenv("TERM", "xterm-256color")
+	if !render.ColorsEnabled() {
+		t.Fatal("premise: colors are still disabled, so the glyph under test " +
+			"would not be emitted either way")
+	}
+}
+
+// TestWriterOutcomeSwapsTheCheckmarkForTheFailureGlyph is DKT-982's second
+// acceptance criterion at the writer: a parked outcome must not be presented
+// behind a "✔".
+//
+// Success is exercised in the same test over the same message, because the
+// claim is a DIFFERENCE between the two paths — asserting only that Outcome
+// prints ✘ would still pass if Success had quietly stopped printing ✔.
+func TestWriterOutcomeSwapsTheCheckmarkForTheFailureGlyph(t *testing.T) {
+	enableColors(t)
+
+	const message = "gate self-hygiene failed (exit 2); STEP-3107 parked waiting-human"
+
+	var adverse, stderr bytes.Buffer
+	(&Writer{Stdout: &adverse, Stderr: &stderr}).Outcome(nil, message)
+
+	if bytes.Contains(adverse.Bytes(), []byte("✔")) {
+		t.Errorf("Outcome = %q, and it carries the success checkmark — a park "+
+			"behind a ✔ is the whole of DKT-982", adverse.String())
+	}
+	if !bytes.Contains(adverse.Bytes(), []byte("✘")) {
+		t.Errorf("Outcome = %q, want the failure glyph", adverse.String())
+	}
+	if !bytes.Contains(adverse.Bytes(), []byte(message)) {
+		t.Errorf("Outcome = %q, want it to carry the message", adverse.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q; the command succeeded, so nothing goes there",
+			stderr.String())
+	}
+
+	var ok bytes.Buffer
+	(&Writer{Stdout: &ok, Stderr: &bytes.Buffer{}}).Success(nil, message)
+	if !bytes.Contains(ok.Bytes(), []byte("✔")) {
+		t.Errorf("Success = %q, want the checkmark it has always printed", ok.String())
+	}
+}
+
+// TestWriterOutcomeJSONIsASuccessEnvelope pins the half that must NOT change:
+// the recording succeeded, so a caller branching on `.ok` or on the exit code
+// is told exactly what Success would tell it. Only the human line differs.
+func TestWriterOutcomeJSONIsASuccessEnvelope(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w := &Writer{JSONMode: true, Stdout: &stdout, Stderr: &stderr}
+
+	w.Outcome(map[string]string{"status": "waiting-human"}, "gate build failed (exit 2)")
+
+	var env successEnvelope
+	err := json.Unmarshal(stdout.Bytes(), &env)
+	testsupport.Must(t, err, "unmarshal: %v", err)
+	if !env.OK {
+		t.Error("ok = false; the recording succeeded — its subject did not")
+	}
+	if env.Message != "gate build failed (exit 2)" {
+		t.Errorf("message = %q, want the outcome line", env.Message)
 	}
 }
 

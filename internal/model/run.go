@@ -71,7 +71,7 @@ func ValidateRunStatus(s RunStatus) error {
 }
 
 // Terminal reports whether a run has reached an end state. A terminal run
-// refuses re-activation (RA5) and drops out of `run status --active`.
+// refuses re-activation (RA5) and drops out of the default `run status` list.
 func (s RunStatus) Terminal() bool {
 	return s == RunDone || s == RunAbandoned
 }

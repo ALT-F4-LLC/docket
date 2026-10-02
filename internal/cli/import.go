@@ -34,7 +34,7 @@ func newImportCmd() *cobra.Command {
 		RunE:  runImport,
 	}
 	cmd.Flags().Bool("merge", false,
-		"Import into a non-empty project; colliding ids are remapped, nothing is dropped")
+		"Import into a non-empty project; this project's own rows are skipped, ids colliding with another project's rows are remapped, nothing is dropped")
 	cmd.Flags().Bool("replace", false,
 		"Replace THIS PROJECT's data with the import file (destructive)")
 	cmd.Flags().Bool("yes", false,

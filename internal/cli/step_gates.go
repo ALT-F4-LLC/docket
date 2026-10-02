@@ -45,8 +45,15 @@ type stepGateResult struct {
 	// DKT-425 was opened about (216KB from one step, 80% of it a passing
 	// gate's).
 	OutputTail string `json:"output_tail,omitempty"`
-	Truncated  bool   `json:"truncated"`
-	Pre        bool   `json:"pre"`
+	// Fingerprint is the SHA-256 of this row's capture with run-varying text
+	// removed — the content half of the signature a batch override grant is
+	// keyed on (DKT-1796). It rides the default summary rather than the
+	// `--full` body because it is what a conductor compares between two parked
+	// steps to tell one failure from another WITHOUT pulling two logs. Empty
+	// when the gate printed nothing, or on a row recorded before v30.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	Truncated   bool   `json:"truncated"`
+	Pre         bool   `json:"pre"`
 	Stub       bool   `json:"s3_migrated,omitempty"`
 	// StubEntry is NOT omitempty. It is the field a consumer checks to ask
 	// "was this assurance real", and an omitted key would make a false answer
@@ -231,7 +238,8 @@ func buildStepGatesResult(step string, rows []db.GateResultRow, scope gateOutput
 		row := stepGateResult{
 			Gate: r.Gate, Ordinal: r.Ordinal, Verdict: r.Verdict,
 			Exit: r.Exit, DurationMS: r.DurationMS, Argv: r.Argv,
-			OutputBytes: len(r.Output), Truncated: r.Truncated, Pre: r.Pre,
+			OutputBytes: len(r.Output), Fingerprint: r.Fingerprint,
+			Truncated: r.Truncated, Pre: r.Pre,
 			Stub: r.Stub, StubEntry: r.StubEntry,
 			Reason: r.Reason, CreatedAtMS: r.CreatedAtMS,
 		}

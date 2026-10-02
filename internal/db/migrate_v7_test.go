@@ -82,6 +82,7 @@ func dropV7Tables(t *testing.T, db *sql.DB) {
 	for _, table := range []string{
 		"usage_ledger", "dispatch_rows", "dispatches", "reap_acks",
 		"action_results",
+		"gate_override_grants",
 		"gate_results", "trust_cache",
 		"events",
 		"step_inputs", "artifacts",
@@ -162,6 +163,7 @@ func TestMigrateV7UpgradesAPhase1Database(t *testing.T) {
 	for _, table := range []string{
 		"usage_ledger", "dispatch_rows", "dispatches", "reap_acks",
 		"action_results",
+		"gate_override_grants",
 		"gate_results", "trust_cache",
 		"events",
 		"step_inputs", "artifacts",

@@ -139,6 +139,12 @@ func renderMetadata(issue *model.Issue) string {
 		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Parent:"), model.FormatID(*issue.ParentID)))
 	}
 
+	if issue.Size != model.SizeNone {
+		sizeStyle := lipgloss.NewStyle().Foreground(ColorFromName(issue.Size.Color()))
+		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Size:"),
+			sizeStyle.Render(fmt.Sprintf("%s %s", issue.Size.Icon(), string(issue.Size)))))
+	}
+
 	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Created:"), humanize.Time(issue.CreatedAt)))
 	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Updated:"), humanize.Time(issue.UpdatedAt)))
 
@@ -523,6 +529,9 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	}
 	if issue.ParentID != nil {
 		fmt.Fprintf(&b, "Parent: %s\n", model.FormatID(*issue.ParentID))
+	}
+	if issue.Size != model.SizeNone {
+		fmt.Fprintf(&b, "Size: %s %s\n", issue.Size.Icon(), string(issue.Size))
 	}
 	fmt.Fprintf(&b, "Created: %s\n", humanize.Time(issue.CreatedAt))
 	fmt.Fprintf(&b, "Updated: %s\n", humanize.Time(issue.UpdatedAt))

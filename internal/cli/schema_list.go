@@ -50,6 +50,13 @@ var schemaListCmd = &cobra.Command{
 	Use:     "list",
 	Short:   "List registered payload schemas",
 	Aliases: []string{"ls"},
+	Long: `List registered payload schemas.
+
+--deprecated includes retired versions (deprecated_at_ms set) in the listing;
+without it, only versions still in service — the ones a workflow's payload may
+newly reference — are shown. A retired version is never deleted: it stays
+readable by explicit @version and keeps serving the runs that pinned it. See
+` + "`docket schema deprecate --help`" + `.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaList(cmd, args, getWriter(cmd))
 	},
@@ -60,11 +67,17 @@ func runSchemaList(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	name, _ := cmd.Flags().GetString("name")
 	limit, _ := cmd.Flags().GetInt("limit")
+	deprecated, _ := cmd.Flags().GetBool("deprecated")
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
 
-	schemas, total, err := db.ListSchemas(conn, db.SchemaListOptions{ProjectID: getProjectID(cmd), Name: name, Limit: limit})
+	schemas, total, err := db.ListSchemas(conn, db.SchemaListOptions{
+		ProjectID:         getProjectID(cmd),
+		Name:              name,
+		Limit:             limit,
+		ExcludeDeprecated: !deprecated,
+	})
 	if err != nil {
 		return cmdErr(fmt.Errorf("listing schemas: %w", err), output.ErrGeneral)
 	}
@@ -90,6 +103,9 @@ func renderSchemaList(schemas []*model.Schema) string {
 		if s.Builtin {
 			b.WriteString("  builtin")
 		}
+		if s.Deprecated() {
+			b.WriteString("  [deprecated]")
+		}
 		if fields := s.OrderedFields(); len(fields) > 0 {
 			fmt.Fprintf(&b, "  ordered: %s", joinFields(fields))
 		}
@@ -109,5 +125,7 @@ func joinFields(fields []string) string {
 func init() {
 	schemaListCmd.Flags().String("name", "", "Filter by schema name")
 	schemaListCmd.Flags().Int("limit", 50, "Maximum number of results")
+	schemaListCmd.Flags().Bool("deprecated", false,
+		"Include deprecated (retired) schema versions in the listing")
 	schemaCmd.AddCommand(schemaListCmd)
 }

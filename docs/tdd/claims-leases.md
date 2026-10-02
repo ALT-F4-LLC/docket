@@ -275,6 +275,28 @@ same guarantee §9.3 states for `complete`.
 refusal never writes — including never bumping `attempt` and never touching the
 CAS `version`. Proven by asserting the version is unchanged after each refusal.
 
+### 4.0 The conductor capability's rows (DKT-2465, v29)
+
+The seven operator verbs — `step approve`, `step reject`, `step resolve`,
+`step reap`, `run pause`, `run resume`, `run abandon` — reuse the matrix's
+shape against the RUN's conductor capability (reliability-delta §2, the v29
+amendment; `internal/engine/conductor.go`). Same transport, same channels,
+same codes:
+
+| # | Situation | Verb | Code | Exit |
+|---|---|---|---|---|
+| R9 | run bound, no token supplied | the seven | `VALIDATION_ERROR` | 3 |
+| R10 | run bound, wrong token | the seven | `AUTH_ERROR` | 5 |
+| R11 | run unbound (activated before v29, never conducted) | the seven | **allowed**, as before | 0 |
+| R12 | `run conduct` on a terminal run | conduct | `CONFLICT` | 4 |
+
+R9 and R10 are checked after the step or run is found and before its status
+is inspected or anything is written, so a caller without the capability learns
+only that the target exists. R11 is the dormancy guarantee at the run level:
+the check binds the moment a capability exists, and every run this binary
+activates is bound at birth. There is no STALE_LEASE row: the capability has
+no TTL, and it ends only with the run or with a `run conduct` that retires it.
+
 ### 4.1 Unleased issues stay unleased
 
 An issue with `owner IS NULL` is not "claimed by nobody who must be checked" —

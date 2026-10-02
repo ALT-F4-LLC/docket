@@ -64,6 +64,11 @@ func runEventsFollow(cmd *cobra.Command) error {
 		limit = eventsDefaultLimit
 	}
 
+	tail, err := eventsTailFlag(cmd)
+	if err != nil {
+		return err
+	}
+
 	interval, _ := cmd.Flags().GetDuration("interval")
 	if interval <= 0 {
 		return cmdErr(
@@ -89,7 +94,7 @@ func runEventsFollow(cmd *cobra.Command) error {
 	if err := followEvents(ctx, followOptions{
 		conn: conn,
 		query: engine.EventQuery{
-			Since: since, RunID: runID, Limit: limit,
+			Since: since, RunID: runID, Limit: limit, Tail: tail,
 			ProjectID: eventsProjectScope(cmd),
 		},
 		interval:    interval,
@@ -127,6 +132,25 @@ func followEvents(ctx context.Context, opts followOptions) error {
 	// per-cycle closure because it is the ONE thing that must survive a cycle.
 	cursor := opts.query.Since
 
+	// tail is the STARTING CURSOR, and it applies to the FIRST CYCLE ONLY
+	// (DKT-752).
+	//
+	// `--tail N` means "start me at the newest N". Before this, the follow
+	// dropped the flag entirely and opened at seq 0, so a watcher arming
+	// `--follow --tail 20` received the whole retained history — thousands of
+	// rows on a busy store — before reaching anything live.
+	//
+	// It cannot survive past the first cycle: `Tail` is a SELECTION over the
+	// whole feed, not a window above a cursor, so a second tailed read would
+	// re-print the same newest N every interval and never advance. So the first
+	// cycle selects the newest N, the cursor advances over what it returned by
+	// the ordinary W3 rule, and every cycle after it is a plain `--since` read.
+	//
+	// A first cycle that returns NOTHING leaves the cursor at Since (0 — `--tail`
+	// and `--since` are mutually exclusive), which is correct: an empty feed has
+	// nothing to skip past, and whatever is written next lands above 0.
+	tail := opts.query.Tail
+
 	// fatal carries a TERMINAL condition out of the loop (W8).
 	//
 	// It exists because RunWatch tolerates two errors before giving up — the
@@ -161,6 +185,13 @@ func followEvents(ctx context.Context, opts followOptions) error {
 	}, func(ctx context.Context, w *output.Writer) error {
 		query := opts.query
 		query.Since = cursor
+		query.Tail = tail
+		// The first tailed read is a selection over the whole feed, so it starts
+		// from no cursor; ListEvents ignores Limit in that mode and the window is
+		// N itself.
+		if tail > 0 {
+			query.Since = 0
+		}
 		page, err := engine.ListEvents(opts.conn, query)
 		if err != nil {
 			// GONE is terminal; anything else is transient and gets RunWatch's
@@ -179,6 +210,19 @@ func followEvents(ctx context.Context, opts followOptions) error {
 			cursor = page.Events[n-1].Seq
 		}
 
+		// The window that actually bounded this page: N under the opening tailed
+		// read, `--limit` for every cycle after it. It is captured BEFORE `tail`
+		// is spent so `truncated` describes the bound that applied.
+		//
+		// `tail` is cleared only after a SUCCESSFUL read: a cycle that failed
+		// transiently returned above without reaching here, so the retry is still
+		// the opening read and still starts at the newest N.
+		effectiveLimit := opts.query.Limit
+		if tail > 0 {
+			effectiveLimit = tail
+			tail = 0
+		}
+
 		// A quiet cycle prints NOTHING — not an empty array, not "No events."
 		// A follower's output must be the events and only the events, or a
 		// consumer piping it would receive a page of nothing every interval
@@ -190,7 +234,7 @@ func followEvents(ctx context.Context, opts followOptions) error {
 		}
 
 		result := eventsListResult{
-			Events: page.Events, Total: page.Total, limit: opts.query.Limit}
+			Events: page.Events, Total: page.Total, limit: effectiveLimit}
 		var message string
 		if !w.JSONMode {
 			// A follow with no project scope is the cross-project feed, so it

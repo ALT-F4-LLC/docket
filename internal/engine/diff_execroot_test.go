@@ -80,7 +80,7 @@ func TestRunDiffBasePrefersThePinnedCommitSHA(t *testing.T) {
 	runGit(t, shared, "add", "-A")
 	runGit(t, shared, "commit", "-qm", "sibling issue advances the shared checkout")
 
-	if got := runDiffBase(conn, pinnedRun.ID, shared, shared); got != pinned {
+	if got, _ := runDiffBase(conn, pinnedRun.ID, shared, shared); got != pinned {
 		t.Errorf("runDiffBase = %q, want the run's pinned commit_sha %q — "+
 			"a live read would have followed the checkout past its fork point",
 			got, pinned)
@@ -93,7 +93,7 @@ func TestRunDiffBasePrefersThePinnedCommitSHA(t *testing.T) {
 		"AddRunIssue: %v", err)
 
 	want := sharedCheckoutHead(shared)
-	if got := runDiffBase(conn, unpinnedRun.ID, shared, shared); got != want {
+	if got, _ := runDiffBase(conn, unpinnedRun.ID, shared, shared); got != want {
 		t.Errorf("runDiffBase for a run with no recorded commit_sha = %q, "+
 			"want the live fallback %q (the pre-fix behavior, preserved)", got, want)
 	}
@@ -188,7 +188,7 @@ func TestWorktreeDiffBaseIsTheForkPoint(t *testing.T) {
 	runGit(t, worktree, "add", "-A")
 	runGit(t, worktree, "commit", "-qm", "the step's commit")
 
-	base := runDiffBase(conn, run.ID, worktree, shared)
+	base, _ := runDiffBase(conn, run.ID, worktree, shared)
 	if base != fork {
 		t.Errorf("runDiffBase(worktree) = %q, want the fork point %q, not "+
 			"the pinned %q", base, fork, pinned)
@@ -206,7 +206,7 @@ func TestWorktreeDiffBaseIsTheForkPoint(t *testing.T) {
 
 	// The shared checkout itself still diffs from the pinned commit: there
 	// is no fork point when dir IS the exec root.
-	if got := runDiffBase(conn, run.ID, shared, shared); got != pinned {
+	if got, _ := runDiffBase(conn, run.ID, shared, shared); got != pinned {
 		t.Errorf("runDiffBase(exec root) = %q, want the pinned %q", got, pinned)
 	}
 }

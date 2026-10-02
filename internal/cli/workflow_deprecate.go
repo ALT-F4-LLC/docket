@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -42,6 +43,15 @@ nothing else can stop it from binding.
 
 Use --restore to put a retired version back into binding.
 
+A registry is PER PROJECT, and so is retirement. By default this retires the
+version in the project the working directory resolves to; --project retires it
+in one other project, and --all-projects retires it in every project in the
+store. Both report each project's own outcome: a project where the version was
+never registered is reported as not-registered and a project where it was
+already retired as already-deprecated, while every project that did retire it
+still did. This is the answer to "this orphaned name has to go everywhere",
+which previously meant one invocation per checkout.
+
 THE OLDER ESCAPE HATCH, for context. Before this verb, the only way to stop a
 name from binding was to re-register that SAME name at a HIGHER version whose
 [match] admits nothing — for example labels_all and unless_labels naming the
@@ -76,6 +86,16 @@ func runWorkflowDeprecate(cmd *cobra.Command, args []string, w *output.Writer) e
 	}
 
 	restore, _ := cmd.Flags().GetBool("restore")
+
+	targets, fannedOut, err := resolveRegistryTargets(cmd, conn)
+	if err != nil {
+		return err
+	}
+	if fannedOut {
+		return deprecateWorkflowAcrossProjects(
+			cmd, w, conn, args[0], name, version, restore, targets)
+	}
+
 	if restore {
 		wf, err := db.RestoreWorkflow(conn, getProjectID(cmd), name, version)
 		if err != nil {
@@ -100,8 +120,78 @@ func runWorkflowDeprecate(cmd *cobra.Command, args []string, w *output.Writer) e
 	return nil
 }
 
+// describeDeprecateFailure gives a fanned-out refusal the SAME sentence its
+// single-project counterpart writes, so the per-project detail line reads as
+// what the operator would have seen standing in that checkout. The sentinels
+// stay wrapped, since the classifier and the report both match on them.
+func describeDeprecateFailure(err error, ref string) error {
+	if errors.Is(err, db.ErrWorkflowAlreadyDeprecated) {
+		return fmt.Errorf("%s is already deprecated: %w", ref, err)
+	}
+	return describeMissingWorkflow(err, ref)
+}
+
+// deprecateWorkflowAcrossProjects is the --project / --all-projects path for
+// both directions of the verb.
+//
+// RESTORE IS IDEMPOTENT AND DEPRECATE IS NOT, and the report keeps that
+// asymmetry visible rather than smoothing it: db.RestoreWorkflow returns the
+// row unchanged when it was never retired (reported as already-binding, a
+// success), while db.DeprecateWorkflow refuses a second retirement (reported as
+// already-deprecated, a failure carrying CONFLICT). Both readings are the
+// single-project behavior, per project, which is the criterion — a sweep must
+// not turn one project's refusal into another's silence.
+func deprecateWorkflowAcrossProjects(
+	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	ref, name string, version int, restore bool, targets []*model.Project,
+) error {
+	operation := "workflow deprecate"
+	if restore {
+		operation = "workflow deprecate --restore"
+	}
+	report := &registryFanoutReport{
+		Operation: operation, Subject: ref, Scope: fanoutScope(cmd),
+	}
+
+	for _, target := range targets {
+		var (
+			wf      *model.Workflow
+			err     error
+			outcome string
+		)
+		if restore {
+			// The pre-state decides which success this is; RestoreWorkflow
+			// itself returns the same row either way.
+			before, lookupErr := db.GetWorkflow(conn, target.ID, name, version)
+			if lookupErr != nil {
+				report.Results = append(report.Results, registryFailureResult(
+					target, describeDeprecateFailure(lookupErr, ref), workflowErr))
+				continue
+			}
+			outcome = outcomeAlreadyBinding
+			if before.Deprecated() {
+				outcome = outcomeRestored
+			}
+			wf, err = db.RestoreWorkflow(conn, target.ID, name, version)
+		} else {
+			outcome = outcomeDeprecated
+			wf, err = db.DeprecateWorkflow(conn, target.ID, name, version, model.NowMS())
+		}
+		if err != nil {
+			report.Results = append(report.Results, registryFailureResult(
+				target, describeDeprecateFailure(err, ref), workflowErr))
+			continue
+		}
+		report.Results = append(report.Results,
+			registrySuccessResult(target, outcome, wf.Ref()))
+	}
+
+	return finishRegistryFanout(w, report)
+}
+
 func init() {
 	workflowDeprecateCmd.Flags().Bool(
 		"restore", false, "Return a retired version to binding")
+	addRegistryTargetFlags(workflowDeprecateCmd, "Retire the version")
 	workflowCmd.AddCommand(workflowDeprecateCmd)
 }

@@ -42,6 +42,9 @@ func workflowListCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().String("name", "", "")
 	cmd.Flags().Int("limit", limit, "")
+	cmd.Flags().Bool("orphans", false, "")
+	cmd.Flags().Bool("deprecated", false, "")
+	cmd.Flags().String("project", "", "")
 	return cmd
 }
 
@@ -201,6 +204,22 @@ func TestWorkflowRegisterRejectsEmptyStdin(t *testing.T) {
 
 // TestWorkflowShowSelectsHighestVersion: `workflow show NAME` without
 // @version means the highest registered.
+func TestRenderMatchIncludesSizesAny(t *testing.T) {
+	m := &workflow.Match{SizesAny: []string{"small", "trivial"}}
+	out := renderMatch(m)
+	if !strings.Contains(out, "sizes_any") || !strings.Contains(out, "[small, trivial]") {
+		t.Fatalf("expected sizes_any [small, trivial] in output, got: %q", out)
+	}
+}
+
+func TestRenderMatchSizesAnyAloneIsABindingTerm(t *testing.T) {
+	m := &workflow.Match{SizesAny: []string{"small"}}
+	out := renderMatch(m)
+	if strings.Contains(out, "no binding terms") {
+		t.Fatalf("sizes_any alone should bind; got fallback line in output: %q", out)
+	}
+}
+
 func TestWorkflowShowSelectsHighestVersion(t *testing.T) {
 	conn := newTestDB(t)
 	err := registerSource(t, conn, minimalWorkflow)

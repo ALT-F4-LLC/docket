@@ -262,6 +262,15 @@ func newVoteCastCmd() *cobra.Command {
 				findingsJSON = &f
 			}
 
+			// Evidence references are resolved against the proposal's run BEFORE
+			// the cast records (DKT-2451): a cast has no amend path, and a
+			// reference that resolves against nothing must refuse here, by
+			// name, rather than land as a citation nobody can follow. Findings
+			// citing nothing pass through untouched, exactly as before.
+			if err := engine.ValidateCastEvidence(conn, proposalID, findingsJSON); err != nil {
+				return runErr(err)
+			}
+
 			// Validate ranges.
 			if confidence < 0.0 || confidence > 1.0 {
 				return cmdErr(fmt.Errorf("--confidence must be in [0.0, 1.0]"), output.ErrValidation)
@@ -332,8 +341,17 @@ func newVoteCastCmd() *cobra.Command {
 				Usage:           usage,
 			}
 
-			result, err := db.CastVote(conn, vote)
+			// The engine's cast path (engine/vote_cast.go) reads the vote
+			// step's pinned `roster`, `weighting` and `recuse` before the
+			// existing tally runs: a name off a strict roster or the reviewed
+			// step's own executor is refused here as VALIDATION_ERROR with no
+			// vote written, and an equal-weighted step tallies every cast the
+			// same. An ad-hoc proposal enforces nothing and tallies as before.
+			result, err := engine.CastVote(conn, vote)
 			if err != nil {
+				if _, ok := engine.CodeOf(err); ok {
+					return runErr(err)
+				}
 				if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
 					return e
 				}
@@ -388,14 +406,19 @@ func newVoteCastCmd() *cobra.Command {
 	cmd.Flags().Float64("confidence", 0, "Confidence 0.0-1.0")
 	cmd.Flags().Float64("domain-relevance", 0, "Domain relevance 0.0-1.0")
 	cmd.Flags().String("findings", "", "Review findings (use \"-\" for stdin)")
-	cmd.Flags().String("findings-json", "", "Structured findings JSON (use \"-\" for stdin)")
+	cmd.Flags().String("findings-json", "",
+		"Structured findings JSON: {\"blockers\": [...], \"concerns\": [...], "+
+			"\"suggestions\": [...]}. An entry is a string, or {\"text\": ..., "+
+			"\"evidence\": [\"artifact:ARTIFACT-N\", \"gate:<name>\"]} citing what it "+
+			"rests on; every reference must resolve in the run the proposal was "+
+			"opened for, or the cast is refused (use \"-\" for stdin)")
 	cmd.Flags().String("summary", "", "Review summary (use \"-\" for stdin)")
 	cmd.Flags().String("summary-file", "",
 		"Read the review summary from PATH (alternative to --summary; use when "+
 			"stdin already feeds --findings)")
 	cmd.Flags().String("metadata", "",
-		"Opaque JSON object claiming what cast this vote — worked example in "+
-			"skills/docket/SKILL.md; unverified, visible to anyone who can list "+
+		"Opaque JSON object claiming what cast this vote — see the docket skill for a "+
+			"worked example; unverified, visible to anyone who can list "+
 			"processes, and then stored and exported verbatim, so treat it as public")
 	cmd.Flags().String("usage", "",
 		`This seat's own spend report: {"unit": n, ...}, recorded per seat in `+

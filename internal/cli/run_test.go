@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -66,9 +67,29 @@ func runStartCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().String("request-file", "", "")
 	cmd.Flags().Float64("budget", 0, "")
+	cmd.Flags().Float64("usage-budget", 0, "")
 	cmd.Flags().StringSlice("issue", nil, "")
 	addIdempotencyKeyFlag(cmd)
 	return cmd
+}
+
+// runStartUsageBudget starts a run with the given flags set and returns the
+// MEASURED cap the run row stored.
+func runStartUsageBudget(t *testing.T, conn *sql.DB, set map[string]string) float64 {
+	t.Helper()
+
+	cmd := runStartCmdWithDB(conn)
+	for flag, value := range set {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatalf("setting --%s: %v", flag, err)
+		}
+	}
+	w, _ := bufWriter(true)
+	testsupport.Must(t, runRunStart(cmd, w), "run start: %v", nil)
+
+	run, err := db.GetRun(conn, 1)
+	testsupport.Must(t, err, "reading run: %v", err)
+	return run.UsageBudget
 }
 
 // runActivateWithWriter drives runRunActivate against a FACTORY-built
@@ -92,7 +113,7 @@ func runActivateWithWriter(t *testing.T, conn *sql.DB, w *output.Writer, args ..
 
 func runStatusCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd := cmdWithDB(conn)
-	cmd.Flags().Bool("active", false, "")
+	cmd.Flags().Bool("all", false, "")
 	cmd.Flags().Int("limit", 50, "")
 	return cmd
 }
@@ -101,7 +122,9 @@ func runMoveCmdWithDB(conn *sql.DB, name string) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Use = name
 	cmd.Flags().String("reason", "", "")
-	return cmd
+	// A resume registers no authority flags in production, but the helper
+	// serves all three verbs and an unread flag costs a resume nothing.
+	return withOperatorAuthority(cmd)
 }
 
 // seedRun registers the workflow, creates a task issue, and starts a run over
@@ -171,6 +194,120 @@ func TestRunStartStoresBudget(t *testing.T) {
 	}
 	if run.Status != model.RunPlanning {
 		t.Errorf("status = %q, want %q", run.Status, model.RunPlanning)
+	}
+}
+
+// runStartBudgetSource starts a run through `run start` with the given flags,
+// then reads back what `docket run budget RUN-N --json` reports — the read
+// path an operator uses, with no `run budget --set` in between.
+func runStartBudgetSource(t *testing.T, conn *sql.DB, set map[string]string) (float64, string) {
+	t.Helper()
+
+	cmd := runStartCmdWithDB(conn)
+	for flag, value := range set {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatalf("setting --%s: %v", flag, err)
+		}
+	}
+	w, _ := bufWriter(true)
+	testsupport.Must(t, runRunStart(cmd, w), "run start: %v", nil)
+
+	readCmd := cmdWithDB(conn)
+	readCmd.Flags().Float64("set", 0, "")
+	readCmd.Flags().String("reason", "", "")
+	addIfVersionFlag(readCmd)
+	readW, readBuf := bufWriter(true)
+	err := runRunBudget(readCmd, model.FormatRunID(1), readW)
+	testsupport.Must(t, err, "run budget: %v", err)
+
+	var envelope struct {
+		Data struct {
+			Budget float64 `json:"budget"`
+			Source string  `json:"source"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(readBuf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", readBuf.String(), err)
+	}
+	return envelope.Data.Budget, envelope.Data.Source
+}
+
+// TestRunStartExplicitZeroBudgetIsUnlimited pins DKT-1539: `--budget 0` is
+// documented as unlimited, so an EXPLICIT 0 must override a non-zero
+// `budget.default` rather than fall through to it. Before the fix the zero was
+// indistinguishable from an omitted flag and the run recorded the config
+// default instead.
+func TestRunStartExplicitZeroBudgetIsUnlimited(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyBudgetDefault, "12"),
+		"setting budget.default: %v", nil)
+
+	budget, source := runStartBudgetSource(t, conn, map[string]string{"budget": "0"})
+	if budget != 0 || source != string(engine.BudgetUnlimited) {
+		t.Errorf("budget = %g, source = %q, want 0 and %q",
+			budget, source, engine.BudgetUnlimited)
+	}
+}
+
+// TestRunStartOmittedBudgetInheritsConfigDefault is the other half of the same
+// rule: without the flag the run still takes `budget.default`.
+func TestRunStartOmittedBudgetInheritsConfigDefault(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyBudgetDefault, "12"),
+		"setting budget.default: %v", nil)
+
+	budget, source := runStartBudgetSource(t, conn, nil)
+	if budget != 12 || source != string(engine.BudgetFromConfig) {
+		t.Errorf("budget = %g, source = %q, want 12 and %q",
+			budget, source, engine.BudgetFromConfig)
+	}
+}
+
+// TestRunStartExplicitZeroUsageBudgetIsUnlimited is the MEASURED twin of
+// TestRunStartExplicitZeroBudgetIsUnlimited: `--usage-budget 0` is documented
+// as unlimited, so an explicit 0 must override a non-zero
+// `budget.usage.default` rather than fall through to it.
+func TestRunStartExplicitZeroUsageBudgetIsUnlimited(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyUsageBudgetDefault, "12"),
+		"setting budget.usage.default: %v", nil)
+
+	if got := runStartUsageBudget(t, conn, map[string]string{"usage-budget": "0"}); got != 0 {
+		t.Errorf("usage budget = %g, want 0 (an explicit 0 is unlimited)", got)
+	}
+}
+
+// TestRunStartOmittedUsageBudgetInheritsConfigDefault is the other half:
+// without the flag the run still takes `budget.usage.default`.
+func TestRunStartOmittedUsageBudgetInheritsConfigDefault(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyUsageBudgetDefault, "12"),
+		"setting budget.usage.default: %v", nil)
+
+	if got := runStartUsageBudget(t, conn, nil); got != 12 {
+		t.Errorf("usage budget = %g, want 12 from budget.usage.default", got)
+	}
+}
+
+// TestBudgetZeroIsDocumentedAsUnlimited keeps the two help surfaces an
+// operator reads before typing `--budget 0` saying what the flag now does:
+// 0 is unlimited, and an explicit 0 beats `budget.default`.
+func TestBudgetZeroIsDocumentedAsUnlimited(t *testing.T) {
+	budgetFlag := runStartCmd.Flags().Lookup("budget")
+	if budgetFlag == nil {
+		t.Fatal("run start has no --budget flag")
+	}
+	for _, want := range []string{"0 means unlimited", "overrides `budget.default`"} {
+		if !strings.Contains(budgetFlag.Usage, want) {
+			t.Errorf("--budget usage %q does not mention %q", budgetFlag.Usage, want)
+		}
+	}
+	if !strings.Contains(runStartCmd.Long, "0 means unlimited") {
+		t.Error("`run start --help` no longer documents 0 as unlimited")
+	}
+	if !strings.Contains(configSetCmd.Long, "budget.default") ||
+		!strings.Contains(configSetCmd.Long, "0 is unlimited") {
+		t.Error("`config set --help` no longer documents budget.default's 0 as unlimited")
 	}
 }
 
@@ -384,6 +521,68 @@ func TestRunActivateHelpDocumentsCostFields(t *testing.T) {
 	}
 }
 
+// TestRunActivateNamesBlockedIssues is DKT-1180's boundary: an activation
+// that leaves an issue unexpanded says so on the summary line, naming the
+// predecessor holding it, and carries the same roster as `blocked_issues` in
+// the JSON envelope — so `issues_expanded: 0` is never the whole report. The
+// --help text names the field, as DKT-517's cost fields set the precedent.
+func TestRunActivateNamesBlockedIssues(t *testing.T) {
+	conn := newTestDB(t)
+	runID, rootID := seedRun(t, conn)
+	nextID, err := db.CreateIssue(conn, &model.Issue{
+		Title: "waits on the root", Description: "a body",
+		Status: model.StatusBacklog, Priority: model.PriorityNone,
+		Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "creating the successor: %v", err)
+	_, err = conn.Exec(
+		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
+		 VALUES (?, ?, 'depends_on', '2026-08-02T00:00:00Z')`, nextID, rootID)
+	testsupport.Must(t, err, "seeding relation: %v", err)
+	err = db.AddRunIssue(conn, runID, nextID)
+	testsupport.Must(t, err, "adding the successor to the run: %v", err)
+
+	// Human mode on a dry run, so the JSON pass below sees the same first
+	// activation rather than a re-activation.
+	w, buf := bufWriter(false)
+	err = runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+	testsupport.Must(t, err, "run activate --dry-run: %v", err)
+	want := "1 issue(s) still blocked (" + model.FormatID(nextID) +
+		" waits on " + model.FormatID(rootID) + " todo)"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("summary line %q does not carry %q", buf.String(), want)
+	}
+
+	w, buf = bufWriter(true)
+	err = runActivateWithWriter(t, conn, w, model.FormatRunID(runID))
+	testsupport.Must(t, err, "run activate: %v", err)
+	var envelope struct {
+		Data struct {
+			IssuesExpanded int                   `json:"issues_expanded"`
+			BlockedIssues  []engine.BlockedIssue `json:"blocked_issues"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+	}
+	if envelope.Data.IssuesExpanded != 1 {
+		t.Errorf("expanded %d, want 1 (the root alone)", envelope.Data.IssuesExpanded)
+	}
+	wantRoster := []engine.BlockedIssue{{
+		IssueID: model.FormatID(nextID),
+		BlockedBy: []engine.BlockingIssue{{
+			IssueID: model.FormatID(rootID), Status: string(model.StatusTodo),
+		}},
+	}}
+	if got := envelope.Data.BlockedIssues; !reflect.DeepEqual(got, wantRoster) {
+		t.Errorf("blocked_issues = %+v, want %+v", got, wantRoster)
+	}
+
+	if long := newRunActivateCmd().Long; !strings.Contains(long, "blocked_issues") {
+		t.Error("--help text does not document `blocked_issues`")
+	}
+}
+
 // runActivateViaCLI drives a FRESH `run activate` command, built through the
 // SAME newRunActivateCmd factory the package's registered runActivateCmd
 // uses, through cobra's own arg parsing — the way a shell invocation would:
@@ -565,6 +764,161 @@ func TestRunActivateCarriesScopeWarnings(t *testing.T) {
 		if strings.Contains(buf.String(), "scope_warnings") {
 			t.Errorf("payload carries scope_warnings for a run whose issue "+
 				"declared its scope: %s", buf.String())
+		}
+	})
+}
+
+// baselineWorkflow and domainWorkflow are DKT-1182's routing pair, in the shape
+// the corpus actually has: a baseline selected by NO positive label that
+// declares no domain, and a pipeline selected by one label that declares the
+// paths its domain occupies. An issue labelled `ui` binds the second and only
+// the second; anything else falls into the first.
+const baselineWorkflow = `
+[pipeline]
+name = "baseline-run"
+version = 1
+[match]
+kind = ["task"]
+unless_labels = ["ui"]
+[[step]]
+name = "first"
+after = []
+executor = "someone"
+emits = "result"
+`
+
+const domainWorkflow = `
+[pipeline]
+name = "ui-run"
+version = 1
+[match]
+kind = ["task"]
+labels_any = ["ui"]
+domain_paths = ["internal/tui/**"]
+[[step]]
+name = "first"
+after = []
+executor = "someone"
+emits = "result"
+`
+
+// TestRunActivateCarriesBindingWarnings is DKT-1182 at the CLI boundary: the
+// exactly-one-WRONG-match signal must reach BOTH channels — the JSON envelope a
+// conductor parses and the stderr line an operator reads — and a run whose
+// labels and scope agree must carry no key at all.
+//
+// The dry run is the case the issue was filed about: it is where a conductor
+// decides whether to commit a run, and by the time a real activation could
+// report a mis-binding the binding is already made.
+func TestRunActivateCarriesBindingWarnings(t *testing.T) {
+	// seedMisbound builds the HRN-1118 shape: an issue scoped entirely inside
+	// `ui-run`'s declared domain, labelled for neither pipeline, so it binds the
+	// label-less `unit-run` baseline exactly once.
+	seedMisbound := func(t *testing.T, conn *sql.DB, labels []string) (runID, issueID int) {
+		t.Helper()
+		registerForRun(t, conn, baselineWorkflow)
+		registerForRun(t, conn, domainWorkflow)
+
+		id, err := db.CreateIssue(conn, &model.Issue{
+			Title: "flaky conversation screen test", Description: "a body",
+			Status: model.StatusBacklog, Priority: model.PriorityNone,
+			Kind: model.IssueKindTask,
+		}, labels, nil)
+		testsupport.Must(t, err, "creating issue: %v", err)
+		err = db.SetIssueScopeGlobs(conn, id,
+			`["internal/tui/screens/conversation_test.go"]`)
+		testsupport.Must(t, err, "setting scope: %v", err)
+
+		run, err := db.InsertRun(conn, 1, "", 0, model.NowMS())
+		testsupport.Must(t, err, "starting run: %v", err)
+		err = db.AddRunIssue(conn, run.ID, id)
+		testsupport.Must(t, err, "adding issue to run: %v", err)
+		return run.ID, id
+	}
+
+	t.Run("the dry run's JSON payload carries the array", func(t *testing.T) {
+		conn := newTestDB(t)
+		runID, issueID := seedMisbound(t, conn, []string{"qa"})
+
+		w, buf := bufWriter(true)
+
+		err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+		testsupport.Must(t, err, "run activate --dry-run: %v", err)
+
+		var envelope struct {
+			Data struct {
+				DryRun          bool `json:"dry_run"`
+				BindingWarnings []struct {
+					Issue          string   `json:"issue"`
+					BoundWorkflow  string   `json:"bound_workflow"`
+					DomainWorkflow string   `json:"domain_workflow"`
+					Scope          []string `json:"scope"`
+					MissingLabels  []string `json:"missing_labels"`
+					Reason         string   `json:"reason"`
+				} `json:"binding_warnings"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+			t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+		}
+		if !envelope.Data.DryRun {
+			t.Fatal("envelope does not report dry_run")
+		}
+		if len(envelope.Data.BindingWarnings) != 1 {
+			t.Fatalf("binding_warnings holds %d entries, want 1: %s",
+				len(envelope.Data.BindingWarnings), buf.String())
+		}
+		got := envelope.Data.BindingWarnings[0]
+		if got.Issue != model.FormatID(issueID) {
+			t.Errorf("binding_warnings[0].issue = %q, want %q",
+				got.Issue, model.FormatID(issueID))
+		}
+		if got.BoundWorkflow != "baseline-run@1" {
+			t.Errorf("bound_workflow = %q, want baseline-run@1", got.BoundWorkflow)
+		}
+		if got.DomainWorkflow != "ui-run@1" {
+			t.Errorf("domain_workflow = %q, want ui-run@1", got.DomainWorkflow)
+		}
+		if len(got.MissingLabels) != 1 || got.MissingLabels[0] != "ui" {
+			t.Errorf("missing_labels = %v, want [ui]", got.MissingLabels)
+		}
+		if len(got.Scope) != 1 || got.Reason == "" {
+			t.Errorf("binding_warnings[0] = %+v, want the scope and a reason", got)
+		}
+	})
+
+	t.Run("human mode writes it to stderr", func(t *testing.T) {
+		conn := newTestDB(t)
+		runID, issueID := seedMisbound(t, conn, []string{"qa"})
+
+		stderr := &bytes.Buffer{}
+		w := &output.Writer{Stdout: &bytes.Buffer{}, Stderr: stderr}
+
+		err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+		testsupport.Must(t, err, "run activate --dry-run: %v", err)
+
+		out := stderr.String()
+		// The issue, and BOTH workflows: what will run, and what the paths say
+		// should. A line naming only one of them leaves the reader to guess.
+		for _, want := range []string{model.FormatID(issueID), "baseline-run@1", "ui-run@1"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("stderr does not name %q: %q", want, out)
+			}
+		}
+	})
+
+	t.Run("a correctly labelled issue carries no key", func(t *testing.T) {
+		conn := newTestDB(t)
+		runID, _ := seedMisbound(t, conn, []string{"ui"})
+
+		w, buf := bufWriter(true)
+
+		err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID), "--dry-run")
+		testsupport.Must(t, err, "run activate --dry-run: %v", err)
+
+		if strings.Contains(buf.String(), "binding_warnings") {
+			t.Errorf("payload carries binding_warnings for an issue labelled for "+
+				"the workflow whose domain it sits in: %s", buf.String())
 		}
 	})
 }
@@ -871,10 +1225,43 @@ func snapshotRunState(t *testing.T, conn *sql.DB) string {
 	return state
 }
 
-// TestRunStatusActiveExcludesTerminalRuns covers `--active`. `planning` counts
-// as active: a run that exists but has not been activated is still live work
-// an operator is mid-way through.
-func TestRunStatusActiveExcludesTerminalRuns(t *testing.T) {
+// TestRunStatusListRendersEmptyAsArray pins the v1 shape a bare `run status
+// --json` prints when no run is non-terminal: `"runs":[]`, never
+// `"runs":null`. A conductor iterating `.data.runs[]` fails on null, and the
+// v2 Collection path never had the defect, so the assertion is on the v1
+// bytes the skill's bare invocation reads.
+func TestRunStatusListRendersEmptyAsArray(t *testing.T) {
+	conn := newTestDB(t)
+
+	cmd := runStatusCmdWithDB(conn)
+	w, buf := bufWriter(true)
+	err := runRunStatus(cmd, nil, w)
+	testsupport.Must(t, err, "run status: %v", err)
+
+	var envelope struct {
+		Data struct {
+			Runs  json.RawMessage `json:"runs"`
+			Total int             `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+	}
+	if got := string(envelope.Data.Runs); got != "[]" {
+		t.Errorf("runs = %s, want [] — a reader iterating .data.runs[] cannot "+
+			"iterate null", got)
+	}
+	if envelope.Data.Total != 0 {
+		t.Errorf("total = %d, want 0", envelope.Data.Total)
+	}
+}
+
+// TestRunStatusListDefaultsToNonTerminalRuns covers the bare list and `--all`.
+// The default hides terminal runs, since a list an operator opens to find work
+// should not bury the live runs under history; `--all` is the way back to the
+// full record. `planning` counts as live: a run that exists but has not been
+// activated is still work an operator is mid-way through.
+func TestRunStatusListDefaultsToNonTerminalRuns(t *testing.T) {
 	conn := newTestDB(t)
 
 	planning, err := db.InsertRun(conn, 1, "planning", 0, model.NowMS())
@@ -884,20 +1271,50 @@ func TestRunStatusActiveExcludesTerminalRuns(t *testing.T) {
 	err = db.SetRunStatus(conn, done.ID, model.RunDone, "", model.NowMS())
 	testsupport.Must(t, err, "setting run done: %v", err)
 
-	cmd := runStatusCmdWithDB(conn)
-	err = cmd.Flags().Set("active", "true")
-	testsupport.Must(t, err, "setting --active: %v", err)
-	w, buf := bufWriter(true)
-	err = runRunStatus(cmd, nil, w)
-	testsupport.Must(t, err, "run status --active: %v", err)
+	t.Run("default excludes terminal runs", func(t *testing.T) {
+		cmd := runStatusCmdWithDB(conn)
+		w, buf := bufWriter(true)
+		err := runRunStatus(cmd, nil, w)
+		testsupport.Must(t, err, "run status: %v", err)
 
-	out := buf.String()
-	if !strings.Contains(out, planning.Ref()) {
-		t.Errorf("--active omitted the planning run %s: %s", planning.Ref(), out)
-	}
-	if strings.Contains(out, done.Ref()) {
-		t.Errorf("--active included the done run %s: %s", done.Ref(), out)
-	}
+		out := buf.String()
+		if !strings.Contains(out, planning.Ref()) {
+			t.Errorf("default list omitted the planning run %s: %s", planning.Ref(), out)
+		}
+		if strings.Contains(out, done.Ref()) {
+			t.Errorf("default list included the done run %s: %s", done.Ref(), out)
+		}
+	})
+
+	t.Run("--all includes terminal runs", func(t *testing.T) {
+		cmd := runStatusCmdWithDB(conn)
+		err := cmd.Flags().Set("all", "true")
+		testsupport.Must(t, err, "setting --all: %v", err)
+		w, buf := bufWriter(true)
+		err = runRunStatus(cmd, nil, w)
+		testsupport.Must(t, err, "run status --all: %v", err)
+
+		out := buf.String()
+		for _, run := range []*model.Run{planning, done} {
+			if !strings.Contains(out, run.Ref()) {
+				t.Errorf("--all omitted %s (%s): %s", run.Ref(), run.Status, out)
+			}
+		}
+	})
+
+	t.Run("--all rejects a single-run argument", func(t *testing.T) {
+		cmd := runStatusCmdWithDB(conn)
+		err := cmd.Flags().Set("all", "true")
+		testsupport.Must(t, err, "setting --all: %v", err)
+		w, _ := bufWriter(true)
+		err = runRunStatus(cmd, []string{planning.Ref()}, w)
+		if err == nil {
+			t.Fatal("run status --all RUN-N = nil, want a validation error")
+		}
+		if !strings.Contains(err.Error(), "--all") {
+			t.Errorf("error %q does not name the misapplied flag", err)
+		}
+	})
 }
 
 // TestRunLifecycleTransitions walks the §1.1 machine and asserts that an
@@ -910,6 +1327,7 @@ func TestRunLifecycleTransitions(t *testing.T) {
 	w, _ := bufWriter(true)
 	err := runActivateWithWriter(t, conn, w, model.FormatRunID(runID))
 	testsupport.Must(t, err, "activate: %v", err)
+	seatConductor(t, conn, runID)
 
 	pause := runMoveCmdWithDB(conn, "pause")
 	err = pause.Flags().Set("reason", "operator review")

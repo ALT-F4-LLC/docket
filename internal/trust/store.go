@@ -78,6 +78,23 @@ type Entry struct {
 	// recorded exactly as any other; the flag only travels with the verdict so
 	// that hollow green stays visibly hollow.
 	Stub bool `toml:"stub"`
+	// StubReason says WHY the entry is a stub and which issue tracks replacing
+	// it with the real check (DKT-607). Free text, but the convention the
+	// stub-gate policy asks for is a reason plus a tracking reference, e.g.
+	// "no scanner selected yet; removal tracked by DKT-607".
+	//
+	// WHY IT EXISTS. A `stub = true` alone says the assurance is hollow; it
+	// does not say whether that is a deliberate, tracked decision or a
+	// placeholder somebody forgot. Tribunal panels kept rediscovering the same
+	// stubs run after run because the decision lived only in transcripts. The
+	// reason travels with the entry so gate_preflight and `trust list` can
+	// surface it where the stub itself is surfaced.
+	//
+	// It only makes sense alongside Stub: a reason on a non-stub entry is a
+	// malformed file and is refused at parse (and at add). It is OPTIONAL on a
+	// stub — every pre-DKT-607 stub entry has none, and an empty reason simply
+	// renders as unexplained.
+	StubReason string `toml:"stub_reason,omitempty"`
 	// Timeout is a per-entry override of the default, as a duration string.
 	Timeout string `toml:"timeout"`
 	// Network declares the hosts this command must reach, as bare hostnames.

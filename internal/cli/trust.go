@@ -101,6 +101,14 @@ disclosure.`,
 	// both directions. It changes nothing about how the command runs.
 	cmd.Flags().Bool("stub", false,
 		"this is a placeholder, not the check its name implies; its passes are marked hollow in reports")
+	// --stub-reason records the DECISION behind the placeholder (DKT-607): why
+	// no real check exists yet and which issue tracks replacing it. The reason
+	// surfaces wherever the stub does — `trust list`, the activation gate
+	// preflight, the grant event — so the decision is discoverable without a
+	// tribunal transcript. Requires --stub; a reason on a real check is a
+	// contradiction and is refused.
+	cmd.Flags().String("stub-reason", "",
+		"why this entry is a stub and which issue tracks replacing it, e.g. \"no scanner selected; tracked by DKT-607\" (requires --stub)")
 	cmd.Flags().String("timeout", "",
 		"per-command timeout (e.g. 90s, 10m); defaults to 5m")
 	// --network DECLARES a requirement; it does not grant one. Core cannot
@@ -135,8 +143,21 @@ var trustRmCmd = newTrustRmCmd()
 
 func newTrustRmCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:         "rm <name>",
-		Short:       "Remove an approved command",
+		Use:   "rm <name>",
+		Short: "Remove an approved command",
+		Long: `Remove an approved command.
+
+The trust store is PUBLISHED FIRST, and the trust-removed event is recorded
+only after that publish succeeds. A revocation recorded ahead of the write
+could leave an entry that still authorizes execution while the event log said
+it had been revoked, so the log would claim less authority than the store
+grants.
+
+The order means two failures are possible and both name what happened. If the
+store cannot be published, nothing is removed and nothing is recorded. If the
+store is published and the event cannot be recorded, the entry IS removed and
+the command says so; the log then still shows the entry as trusted, which is
+the conservative direction.`,
 		Args:        cobra.ExactArgs(1),
 		Annotations: map[string]string{"skipDB": ""},
 		RunE:        runTrustRm,
@@ -162,6 +183,7 @@ type trustAddResult struct {
 	Tree       bool     `json:"tree"`
 	Flaky      bool     `json:"flaky"`
 	Stub       bool     `json:"stub"`
+	StubReason string   `json:"stub_reason,omitempty"`
 	Timeout    string   `json:"timeout,omitempty"`
 	Idempotent bool     `json:"idempotent"`
 	Warnings   []string `json:"warnings,omitempty"`
@@ -179,6 +201,7 @@ type trustEntryView struct {
 	Tree       bool     `json:"tree"`
 	Flaky      bool     `json:"flaky"`
 	Stub       bool     `json:"stub"`
+	StubReason string   `json:"stub_reason,omitempty"`
 	Timeout    string   `json:"timeout,omitempty"`
 	AddedAtMS  int64    `json:"added_at_ms"`
 }
@@ -186,11 +209,46 @@ type trustEntryView struct {
 type trustListResult struct {
 	Entries []trustEntryView `json:"entries"`
 	Total   int              `json:"total"`
+	// actionNames marks entry names declared `action = "<name>"` by some
+	// workflow (DKT-1283 AC5) — everything else classifies "gate". It rides
+	// out-of-band rather than as a field on trustEntryView so v1's frozen shape
+	// carries no trace of it — only CollectionItems, which v1 never consults,
+	// reads it.
+	actionNames map[string]bool
 }
 
-func (r trustListResult) CollectionItems() any      { return r.Entries }
+func (r trustListResult) CollectionItems() any {
+	return trustEntryViewsV2{views: r.Entries, actionNames: r.actionNames}
+}
 func (r trustListResult) CollectionTotal() int      { return r.Total }
 func (r trustListResult) CollectionTruncated() bool { return false }
+
+// trustEntryViewV2 is trustEntryView plus its class (DKT-1283 AC5), the same
+// v1/v2 split versioned.go's payload wrappers use: the v1 struct is untouched,
+// and a second shape carries the field v2 alone reports.
+type trustEntryViewV2 struct {
+	trustEntryView
+	Class string `json:"class"`
+}
+
+// trustEntryViewsV2 implements output.Versioned so `trust list --json=v2`'s
+// items carry `class` without trustEntryView itself gaining the field.
+type trustEntryViewsV2 struct {
+	views       []trustEntryView
+	actionNames map[string]bool
+}
+
+func (p trustEntryViewsV2) VersionedPayload() any {
+	out := make([]trustEntryViewV2, len(p.views))
+	for i, v := range p.views {
+		class := "gate"
+		if p.actionNames[v.Name] {
+			class = "action"
+		}
+		out[i] = trustEntryViewV2{trustEntryView: v, Class: class}
+	}
+	return out
+}
 
 type trustRmResult struct {
 	Name    string `json:"name"`
@@ -231,6 +289,7 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 	tree, _ := cmd.Flags().GetBool("tree")
 	flaky, _ := cmd.Flags().GetBool("flaky")
 	stub, _ := cmd.Flags().GetBool("stub")
+	stubReason, _ := cmd.Flags().GetString("stub-reason")
 	timeout, _ := cmd.Flags().GetString("timeout")
 	network, _ := cmd.Flags().GetStringSlice("network")
 
@@ -252,7 +311,7 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 	res, err := trust.Add(trust.AddRequest{
 		Name: name, Argv: argv, RepoRoot: repoRoot, Global: global,
 		Prefix: prefix, ReRunnable: reRunnable, Tree: tree, Flaky: flaky,
-		Stub:    stub,
+		Stub: stub, StubReason: stubReason,
 		Timeout: timeout, Network: network, NowMS: time.Now().UnixMilli(),
 		OnChange: recorder.record,
 	})
@@ -289,7 +348,7 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 		Name: res.Entry.Name, Argv: res.Entry.Argv, ArgvSHA256: res.Entry.ArgvSHA256,
 		Repo: res.Entry.Repo, Global: res.Entry.Global, Prefix: res.Entry.Prefix,
 		ReRunnable: res.Entry.ReRunnable, Tree: res.Entry.Tree, Flaky: res.Entry.Flaky,
-		Stub:    res.Entry.Stub,
+		Stub: res.Entry.Stub, StubReason: res.Entry.StubReason,
 		Network: res.Entry.Network,
 		Timeout: res.Entry.Timeout, Idempotent: res.Idempotent, Warnings: warnings,
 	}
@@ -341,7 +400,7 @@ func runTrustList(cmd *cobra.Command, args []string) error {
 			Name: e.Name, Argv: e.Argv, ArgvSHA256: e.ArgvSHA256, Repo: e.Repo,
 			Global: e.Global, Prefix: e.Prefix, ReRunnable: e.ReRunnable,
 			Network: e.Network,
-			Tree:    e.Tree, Flaky: e.Flaky, Stub: e.Stub,
+			Tree:    e.Tree, Flaky: e.Flaky, Stub: e.Stub, StubReason: e.StubReason,
 			Timeout: e.Timeout, AddedAtMS: e.AddedAtMS,
 		})
 	}
@@ -362,7 +421,13 @@ func runTrustList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	w.Success(trustListResult{Entries: views, Total: len(views)},
+	// The classification is best-effort and only ever consulted under
+	// --json=v2 (CollectionItems, which v1 never calls) — a scan failure here
+	// must not turn `trust list` from a file read into a command that can fail
+	// on an unrelated corpus problem. Every name simply reads "gate".
+	actionNames, _ := engine.ActionNames()
+
+	w.Success(trustListResult{Entries: views, Total: len(views), actionNames: actionNames},
 		fmt.Sprintf("%d trusted command(s)", len(views)))
 	return nil
 }
@@ -384,15 +449,25 @@ func runTrustRm(cmd *cobra.Command, args []string) error {
 	}
 
 	// The record is written from INSIDE the removal, under the store lock and
-	// ahead of the write, with the entry as it stood — so it names the hash and
-	// flags of what actually went away rather than of whatever a pre-read
-	// lookup by name happened to find first.
+	// AFTER the store is published (DKT-2198), with the entry as it stood — so
+	// it names the hash and flags of what actually went away rather than of
+	// whatever a pre-read lookup by name happened to find first, and a publish
+	// that never lands leaves no revocation recorded against an entry that
+	// still authorizes execution.
 	recorder := &trustEventRecorder{cmd: cmd, kind: engine.EventTrustRemoved}
 
 	removed, err := trust.Remove(trust.RemoveRequest{
 		Name: name, RepoRoot: repoRoot, Global: global, OnChange: recorder.record,
 	})
 	if err != nil {
+		// A removal that was published before the record failed is a COMPLETED
+		// revocation with no trail. Reporting it as a plain store failure would
+		// tell the operator the opposite of what happened — that the entry is
+		// still trusted — and send them to re-run a removal that already took
+		// effect.
+		if removed {
+			return trustCmdError(fmt.Errorf("%q was removed from the trust store, but the change could not be recorded: %w", name, err))
+		}
 		return trustCmdError(err)
 	}
 	if !removed {
@@ -424,14 +499,22 @@ func trustFlagSummary(e trustEntryView) string {
 		{e.ReRunnable, " re-runnable"},
 		{e.Tree, " tree"},
 		{e.Flaky, " flaky"},
-		// Spelled out rather than abbreviated to "stub". This line is what an
-		// operator auditing the store reads, and the fact worth reading is not
-		// that a word was set but that everything this entry ever passes is
-		// hollow (DKT-265).
-		{e.Stub, " stub(no-real-check)"},
 	} {
 		if f.on {
 			out += f.name
+		}
+	}
+	// Spelled out rather than abbreviated to "stub". This line is what an
+	// operator auditing the store reads, and the fact worth reading is not
+	// that a word was set but that everything this entry ever passes is
+	// hollow (DKT-265) — and, when one was recorded, WHY and what tracks
+	// fixing it (DKT-607). The reason renders through the escaping renderer
+	// like the argv: it is free text an operator may have pasted.
+	if e.Stub {
+		if e.StubReason != "" {
+			out += " stub(no-real-check: " + exec.Render(e.StubReason) + ")"
+		} else {
+			out += " stub(no-real-check)"
 		}
 	}
 	// The declared hosts, named rather than flagged: "network" alone would say
@@ -443,6 +526,14 @@ func trustFlagSummary(e trustEntryView) string {
 	return out
 }
 
+// getwd is os.Getwd, swappable ONLY by tests. The failure it lets a test
+// inject is real — a working directory deleted or made unsearchable
+// mid-session — but not portably reproducible: on darwin, getcwd answers from
+// the kernel's name cache even after the directory is unlinked, so a test that
+// deleted its own cwd would pass on Linux and assert nothing here. The refusal
+// this guards (DKT-595) is worth the seam.
+var getwd = os.Getwd
+
 // errTrustUnrecorded marks the failure to write §3.6's event, so the taxonomy
 // can tell it from the store failures around it: nothing is wrong with the
 // operator's request, and telling them it was invalid would send them to fix an
@@ -450,18 +541,30 @@ func trustFlagSummary(e trustEntryView) string {
 var errTrustUnrecorded = errors.New("the trust change was not recorded")
 
 // trustEventRecorder writes the trust-added / trust-removed event, as the hook
-// trust.Add and trust.Remove run under their lock BEFORE writing the store
-// (§3.6).
+// trust.Add and trust.Remove run under their lock (§3.6): BEFORE the store is
+// written for an add, and AFTER it is published for a removal. Both orders
+// serve one invariant — the surviving partial failure must never let the trail
+// claim less authority than the store grants — which points opposite ways for
+// granting and revoking (see RemoveRequest.OnChange).
 //
 // MANDATORY INSIDE A REPO, NOT BEST-EFFORT. The record used to be written after
 // the store, with its error discarded, which meant a database that refused the
 // insert left a granted entry and no trace of the grant. An absent event is not
 // a neutral outcome: an auditor reads it as "no grant happened", so a trail that
 // can silently lose entries is worse than one that is known to be missing. Being
-// the hook is what fixes it — an error here aborts the change with nothing
-// written, and the only divergence that survives is a recorded change that then
-// failed to land, which is loud rather than silent and errs toward over-reporting
-// authority rather than under-reporting it.
+// the hook is what fixes it — on an ADD an error here aborts the grant with
+// nothing written, and the only divergence that survives is a recorded grant
+// that then failed to land, which is loud rather than silent and errs toward
+// over-reporting authority rather than under-reporting it. On a REMOVAL the
+// publish has already happened when this runs, so an error leaves a completed
+// revocation with no trail — also over-reporting, and the verb says so.
+//
+// MANDATORY INCLUDES ATTRIBUTED (DKT-595). An event that lands without its
+// actor and cwd is the 2026-08-19 shape — a ledger that shows privilege
+// widening and cannot say by whom — so "recorded" means recorded WITH both
+// fields: a working directory that cannot be read aborts the change through
+// this same hook, and RecordTrustEvent itself refuses an empty actor or cwd
+// from any writer.
 //
 // OUTSIDE A REPO THE VERB STILL WORKS. The store is user-level (§3.5): requiring
 // a database to manage it would mean someone who installed docket could not
@@ -510,15 +613,27 @@ func (r *trustEventRecorder) record(entry trust.Entry) error {
 	// HERE, at the call site, rather than inside the recorder: the engine has
 	// no business shelling out to `git config`, and a helper that resolved its
 	// own actor would be a helper that could attribute an event to whoever
-	// happened to be running the process that called it.
+	// happened to be running the process that called it. The actor resolver
+	// never yields the empty string — git identity, then the OS username, then
+	// the literal "unknown", which is its honest report of an anonymous
+	// environment and counts as an answer.
 	//
-	// A cwd that cannot be read is not a failure to record the grant. The grant
-	// is the thing that matters; the empty string says the disambiguator was
-	// unavailable, which is a smaller and more honest loss than refusing to
-	// write the event at all.
-	cwd, err := os.Getwd()
+	// A cwd that cannot be read REFUSES THE WHOLE CHANGE (DKT-595). This
+	// reverses a decision this comment used to state — that the empty string
+	// was "a smaller and more honest loss than refusing to write the event at
+	// all" — and the 2026-08-19 batch is why it was wrong: 43 unattributed
+	// events, twelve of them widening network egress, and the ledger could not
+	// say who or from where. The disambiguator is not a nice-to-have riding on
+	// the grant; it is the half of the record the audit question is made of,
+	// and it can never be backfilled. The grant, by contrast, can be retried
+	// from a readable directory — so between an unrecordable attribution and a
+	// retryable refusal, the refusal is the smaller loss. Inside a repo the
+	// record is already MANDATORY, and this failure aborts through the same
+	// hook — with nothing written to either file on an add, and with the
+	// removal already published on a rm, which the verb reports.
+	cwd, err := getwd()
 	if err != nil {
-		cwd = ""
+		return fmt.Errorf("%w: the working directory could not be resolved (%w); a trust change must record where it was made from, so run it again from a readable directory", errTrustUnrecorded, err)
 	}
 	if err := engine.RecordTrustEvent(conn, r.kind, engine.TrustGrant{
 		Name:       entry.Name,
@@ -532,6 +647,7 @@ func (r *trustEventRecorder) record(entry trust.Entry) error {
 		Network:    entry.Network,
 		Timeout:    entry.Timeout,
 		Stub:       entry.Stub,
+		StubReason: entry.StubReason,
 		Actor:      config.DefaultAuthor(),
 		Cwd:        cwd,
 	}, time.Now().UnixMilli()); err != nil {
@@ -559,8 +675,9 @@ func trustCmdError(err error) error {
 	case errors.Is(err, sql.ErrNoRows):
 		return cmdErr(err, output.ErrNotFound)
 	case errors.Is(err, errTrustUnrecorded):
-		// The request was well-formed and the store is untouched; what failed is
-		// this repo's event log. GENERAL_ERROR rather than VALIDATION_ERROR so a
+		// The request was well-formed and what failed is this repo's event log:
+		// on an add the store is untouched, on a rm the removal has already
+		// landed and the message says so. GENERAL_ERROR rather than VALIDATION_ERROR so a
 		// caller does not retry with a "corrected" argv against a database that
 		// will refuse the next write too.
 		return cmdErr(err, output.ErrGeneral)

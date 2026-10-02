@@ -16,6 +16,9 @@ var runStatusCmd = &cobra.Command{
 	Short: "Show a run, or list runs",
 	Long: `Show one run's status and step rollup, or list runs when given no ID.
 
+The list shows only runs that are not done or abandoned — the work an operator
+can still act on. ` + "`--all`" + ` widens it to every run the project has recorded.
+
 READ-ONLY. This verb computes effective status and WRITES NOTHING — status
 never lies just because nobody ran a scheduling command, and a read that
 mutated would make "I only looked at it" untrue.`,
@@ -76,6 +79,23 @@ type runListResult struct {
 	limit int
 }
 
+// newRunListResult builds the list result with an empty collection rendered as
+// `[]`, never `null`.
+//
+// db.ListRuns returns a nil slice when nothing matches, and encoding/json
+// renders a nil slice as `null`. The v2 Collection path never showed it — its
+// items go through runListPayload — but the v1 dialect marshals this struct
+// directly, so a project with no non-terminal run printed `"runs":null` and a
+// reader iterating `.data.runs[]` failed on it. `step list --issue` settled the
+// rule for an empty collection: it is `[]`, and the normalization lives where
+// the result is built so no marshaling path can miss it.
+func newRunListResult(runs []*model.Run, total, limit int) runListResult {
+	if runs == nil {
+		runs = []*model.Run{}
+	}
+	return runListResult{Runs: runs, Total: total, limit: limit}
+}
+
 func (r runListResult) CollectionItems() any { return runListPayload{runs: r.Runs} }
 func (r runListResult) CollectionTotal() int { return r.Total }
 func (r runListResult) CollectionTruncated() bool {
@@ -85,13 +105,13 @@ func (r runListResult) CollectionTruncated() bool {
 func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
 
-	activeOnly, _ := cmd.Flags().GetBool("active")
+	all, _ := cmd.Flags().GetBool("all")
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	if len(args) == 1 {
-		if activeOnly {
+		if all {
 			return cmdErr(
-				fmt.Errorf("--active filters a list; it does not apply to a single run"),
+				fmt.Errorf("--all widens a list; it does not apply to a single run"),
 				output.ErrValidation)
 		}
 		return showOneRun(cmd, args[0], w)
@@ -103,13 +123,13 @@ func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	runs, total, err := db.ListRuns(conn, db.RunListOptions{
 		ProjectID:  getProjectID(cmd),
-		ActiveOnly: activeOnly, Limit: limit,
+		ActiveOnly: !all, Limit: limit,
 	})
 	if err != nil {
 		return runErr(err)
 	}
 
-	result := runListResult{Runs: runs, Total: total, limit: limit}
+	result := newRunListResult(runs, total, limit)
 	var message string
 	if !w.JSONMode {
 		message = renderRunList(runs)
@@ -253,7 +273,7 @@ func requestSummary(s string) string {
 }
 
 func init() {
-	runStatusCmd.Flags().Bool("active", false, "List only runs that are not done or abandoned")
+	runStatusCmd.Flags().Bool("all", false, "List every run, including done and abandoned ones")
 	runStatusCmd.Flags().Int("limit", 50, "Maximum number of results")
 	runCmd.AddCommand(runStatusCmd)
 }

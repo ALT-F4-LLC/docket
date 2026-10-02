@@ -6,7 +6,9 @@ docs/tdd/claims-leases.md §2, schema v6) across every surface that renders it,
 after RUN-5 (2026-08-08) found the rendering inconsistent enough to mislead
 two independent consumers. Amended for DKT-490 (schema v23): the retry-reset
 claim v16 obsoleted is corrected, and the failure-vs-reap marker §"What to
-check" called for now exists (`failed_attempts` / `reaped_claims`).
+check" called for now exists (`failed_attempts` / `reaped_claims`). Amended
+again for DKT-1279 (schema v27): the breakdown's own gap — it counts, it
+does not say which ending is the LAST one — gets `prior_attempt_end`.
 
 ## The one counter
 
@@ -93,6 +95,20 @@ from the same number:
    back-fills nothing, so zero on pre-v23 claims means "no recorded
    breakdown"). An escalation policy that means "escalate after N *failures*"
    reads `failed_attempts`, and never `attempt`.
+3. The breakdown counters answer "how many of each has this step EVER had",
+   which goes ambiguous the moment a step's history mixes both — one failure
+   and one reap, in either order, both read `failed_attempts: 1,
+   reaped_claims: 1`, and neither counter says which ending THIS re-offer
+   follows. `prior_attempt_end` (schema v27, DKT-1279) answers that directly:
+   `"failed"` or `"reaped"`, the end reason of the MOST RECENT claim to leave
+   the step, overwritten every time one ends (never a tally). RUN-80
+   DISPATCH-400 is the motivating incident — ten leases reaped after a
+   session was killed mid-wave, the steps re-dispatched at `attempt`
+   incremented, and an `on_failure` escalation policy read that as "failed
+   once" and routed all ten a tier up, because a reap is a liveness event and
+   nothing on the row said so. Rides the same rows as `failed_attempts`/
+   `reaped_claims` (`next`, `dispatch open`, `step show`, `step list`),
+   `omitempty`, absent for a step that has never had a claim end either way.
 
 ## Regression coverage
 
@@ -108,3 +124,9 @@ at two moments, not two counters.
 `step fail` counts the reverse in both its branches, a lazy reap at `claim`
 counts like the scheduler's, a recorded park and its `resolve --as retry`
 touch neither, and `attempt` moves at claims alone throughout.
+
+`internal/engine/prior_attempt_end_test.go` pins `prior_attempt_end`
+(DKT-1279): a lease-expiry reap's own `next` call renders the re-offered row
+carrying `"reaped"` — the same-transaction snapshot reflection, not a second
+read — an explicit `step fail` renders `"failed"`, a forced `step reap`
+renders `"reaped"` too, and a step never claimed omits the field entirely.

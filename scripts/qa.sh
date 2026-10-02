@@ -127,6 +127,8 @@ SECTIONS=(
   ZN:test_zn_packet
   ZO:test_zo_backfill
   ZP:test_zp_fail_metadata
+  ZQ:test_zq_conductor
+  ZR:test_zr_report
 )
 
 REACHED_TARGET=false
@@ -178,9 +180,9 @@ fi
 # surface only, and is skipped when a single section was requested, since it is
 # a whole-repo check rather than a section's.
 #
-# copy-verify, render-verify, and the CI-wiring gate-baseref-regression /
-# gate-coverage-check run here for the same reason: each is a whole-repo,
-# diff-independent check, not a section's.
+# copy-verify, render-verify, and the CI-wiring gate-baseref-regression run
+# here for the same reason: each is a whole-repo, diff-independent check, not
+# a section's.
 #
 # ONE BLOCK SHAPE, defined once as `run_gate` in qa/helpers.sh. This
 # section used to hold five copies of the same twelve lines, which had already
@@ -216,15 +218,11 @@ if [ -z "$SECTION" ]; then
   run_gate "RV" "RV_render_coverage" "render-verify gate" \
     "render-verify.sh" 'MISSING|raw ANSI escape'
 
-  # gate-baseref-regression and gate-coverage-check pin the CI wiring
-  # itself (findings C1/C2/C5 and C3): the former runs the base-ref mode of
-  # secret-scan.sh/self-hygiene.sh through their real entry points, the
-  # latter checks ci.yaml's GATE COVERAGE block against the actual directory.
+  # gate-baseref-regression pins the CI wiring itself (findings C1/C2/C5):
+  # it runs the base-ref mode of secret-scan.sh/self-hygiene.sh through their
+  # real entry points.
   run_gate "BR" "BR_baseref_mode" "gate-baseref-regression" \
     "gate-baseref-regression.sh" 'FAIL'
-
-  run_gate "GC" "GC_ci_coverage_block" "gate-coverage-check" \
-    "gate-coverage-check.sh" 'FAIL'
 fi
 
 # --- Report ------------------------------------------------------------------

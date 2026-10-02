@@ -69,7 +69,28 @@ type RunBudgetReport struct {
 	UsageCap   float64 `json:"usage_cap,omitempty"`
 	UsageUnit  string  `json:"usage_budget_unit,omitempty"`
 	UsageSpend float64 `json:"usage_spend,omitempty"`
+
+	// VoteUsageNote states, on any run whose panels cast, that the seats'
+	// measured spend (the report's `vote_usage` section) is EXCLUDED from
+	// `reported` and `spend` — and why (DKT-584).
+	//
+	// It is a note rather than a fold because `Reported` must remain exactly
+	// the rows enforcement's own snapshot sums (the step usage_ledger): the
+	// report publishing a "reported" no decision was made against is the
+	// two-sources-of-truth failure RunFloorTx's export exists to prevent. The
+	// seats' DECLARED cost reaches the budget through the floor instead — a
+	// vote step's expected_cost accrues at materialization — so the panel is
+	// not invisible; its measured spend is simply accounted in its own
+	// section, and this line says so instead of leaving the omission silent.
+	VoteUsageNote string `json:"vote_usage_note,omitempty"`
 }
+
+// VoteUsageExcludedNote is VoteUsageNote's one value, a constant so the JSON
+// document and the rendered report cannot say it differently.
+const VoteUsageExcludedNote = "vote_usage is excluded from reported and spend: " +
+	"those sum the step usage_ledger the cap enforcement reads, and seat casts " +
+	"land in the separate vote_usage ledger; a vote step's declared " +
+	"expected_cost accrues to the floor instead"
 
 // RunReport is the whole document — R1 through R7, in that order.
 type RunReport struct {
@@ -81,6 +102,28 @@ type RunReport struct {
 	WallClockMS int64 `json:"wall_clock_ms,omitempty"`
 
 	Budget RunBudgetReport `json:"budget"`
+
+	// PinnedWorkflows is DKT-594's first half: per pinned workflow, how many
+	// registered versions the corpus has advanced since this run froze.
+	//
+	// It rides in the report rather than in `verify-pins` because the question
+	// is not about DRIFT. A pinned `ui-change@8` whose file is byte-identical to
+	// what the registry holds is perfectly sound and can still be five versions
+	// behind, and `verify-pins` — which compares hashes at one ref — is right to
+	// call it `ok`. What a post-mortem reader needs before trusting a finding is
+	// the other number, and until this section it existed in no read verb: every
+	// analyst on RUN-32 recovered it from git by hand.
+	PinnedWorkflows []PinnedWorkflowStaleness `json:"pinned_workflows,omitempty"`
+
+	// PinEpochs is DKT-594's second half: the run's pin-agreement timeline,
+	// PRESENT ONLY ON A RUN THAT REPINNED.
+	//
+	// A run whose agreement never moved has one epoch, every step ran under it,
+	// and the `pins` table already says what it was — so the section is absent
+	// and each step's `pin_epoch` is absent with it, rather than a column of 1s
+	// on every report in the store. Where it IS present it is what RUN-39's
+	// analysts assembled by hand from event seqs and step ids.
+	PinEpochs []PinEpoch `json:"pin_epochs,omitempty"`
 
 	// Steps is R3: the count by EFFECTIVE status, computed at read.
 	Steps []model.StatusCount `json:"steps,omitempty"`
@@ -112,6 +155,12 @@ type RunReport struct {
 	// this is the rollup that says whether they need to.
 	Actors []ActorCount `json:"actors,omitempty"`
 
+	// Authorities is DKT-1899: the run's resolutions counted by the authority
+	// they were made under. E21's Actors answers WHAT CAUSED a transition;
+	// this answers, for the human ones, WHAT ENTITLED it — the distinction the
+	// conductor policy routes on and that only a free-text note used to carry.
+	Authorities []AuthorityCount `json:"authorities,omitempty"`
+
 	Gates       []db.VerdictCount   `json:"gates,omitempty"`
 	GateTrail   []db.ResultTrailRow `json:"gate_trail,omitempty"`
 	Actions     []db.VerdictCount   `json:"actions,omitempty"`
@@ -122,6 +171,39 @@ type RunReport struct {
 	// status check into a document dump, and the bodies are one `step context`
 	// away for anyone who wants them.
 	Artifacts []ArtifactIndexEntry `json:"artifacts,omitempty"`
+
+	// Complementarity is DKT-2452: per `aggregate` step, how many of its
+	// clusters are UNIQUE (one member) versus CORROBORATED (more than one),
+	// the distribution of member counts across clusters, and how many
+	// upstream artifacts fed the round that produced them. It is the number
+	// Anthropic's fanout-width case for multi-agent review depends on ("only
+	// 12 vulnerabilities in common") and that this run document had no way to
+	// show: `aggregate` has always written `members` on every cluster, and
+	// nothing before this read it back.
+	//
+	// It reads `members` (engine-owned, §7.6), never the author's own
+	// `member_ids` linkage key: `members`' length already equals
+	// `member_ids`'s wherever both exist (findings-cluster@3 declares them in
+	// the same arrival order), and `members` is ALSO defined on a
+	// carried-forward standing finding, which has a scalar `severity` and no
+	// `member_ids` at all. Reading the author's key here would make core's
+	// generic rollup depend on one workflow's own vocabulary; reading
+	// `members` keeps it something every `aggregate` step answers, whatever
+	// field it aggregates.
+	Complementarity []ClusterComplementarity `json:"complementarity,omitempty"`
+
+	// SourceAttribution is DKT-2462: per `aggregate` step that declares
+	// `source_field`, one row per DISTINCT value that field's arrays name
+	// across the round's clusters — the step ref that produced a member — with
+	// how many clusters that source contributed to and, when the ref resolves
+	// to a step in this run, the executor hint that step declared.
+	//
+	// It reads `params.source_field` (aggregate.go's ParamSourceField), never
+	// a corpus-owned name such as `member_sources`: core groups by whatever
+	// key the workflow names, the same way `route_at` takes its floor as an
+	// opaque value rather than assuming a field. Absent the param, this is
+	// nil, matching Recorded's absent-parameter convention.
+	SourceAttribution []ClusterSourceAttribution `json:"source_attribution,omitempty"`
 
 	// Metadata is R7, the genericity line at its thinnest: keys to distinct
 	// values with counts, verbatim and uninterpreted.
@@ -157,6 +239,36 @@ type RunReport struct {
 	// like a zero.
 	VoteUsageCoverage db.VoteUsageCoverage `json:"vote_usage_coverage"`
 
+	// SilentVoteSeats is the identity behind VoteUsageCoverage.Silent
+	// (DKT-733): each cast that reported no spend — which seat, on which
+	// proposal, seated via which path. The count alone told an operator that
+	// seats went silent on a run and nothing said WHICH, so `vote
+	// backfill-usage` — the verb that exists to close exactly this gap
+	// (DKT-115) — could not be aimed without spelunking proposals by hand.
+	//
+	// `omitempty`: a run whose every seat reported carries no key, because the
+	// coverage line already says so and an empty list would restate it.
+	SilentVoteSeats []SilentVoteSeat `json:"silent_vote_seats,omitempty"`
+
+	// Findings is DKT-2451: every structured finding the run's panels
+	// recorded, one row per entry, with the evidence it cited — or the
+	// statement that it cited none.
+	//
+	// It exists because the record could not tell an ASSERTED finding from a
+	// REPRODUCED one: `step_inputs` says what a judge step was served, and
+	// nothing said what a cast relied on. A cast may now cite
+	// `artifact:ARTIFACT-N` and `gate:<name>` references the engine resolved
+	// against this run when the cast recorded (ValidateCastEvidence), and this
+	// section is where the two kinds of finding become distinguishable: an
+	// entry with no citation carries `unsupported`, set out loud rather than
+	// left to be inferred from an absent list.
+	//
+	// Casts on a proposal that is SealedOpen (DKT-2447) are withheld here as
+	// they are in every other read verb; they appear once the tally closes.
+	// `omitempty`: a run whose panels recorded no structured findings carries
+	// no key.
+	Findings []CastFinding `json:"findings,omitempty"`
+
 	// StepUsage is the ledger row by row — which step, which attempt, which
 	// unit, how much, and who measured it. Budget.Reported is the same rows
 	// summed per unit; this is the detail behind that headline.
@@ -169,6 +281,74 @@ type RunReport struct {
 	// all, and conductors hand-filtered batches by trial and error across
 	// three sessions. `omitempty`, so a run whose ledger is empty is unchanged.
 	StepUsage []db.StepUsageRow `json:"step_usage,omitempty"`
+
+	// MissingUsage is D2 asked WITHOUT its grace (D7): every claimed step that
+	// reached a terminal status and has no ledger row, however recently.
+	// `next` and `dispatch close` give such a step `dispatch.grace` to be
+	// back-filled, so a relay that launches its usage join beside the close
+	// rather than ahead of it is never refused for the lag — and a run's last
+	// wave has no later close to refuse at all. This is where that wave's
+	// silence shows: the done report reads it the way it reads
+	// `silent_vote_seats`, and both must be empty before a run is called
+	// finished. `omitempty`: a fully billed run carries no key.
+	MissingUsage []Discrepancy `json:"missing_usage,omitempty"`
+}
+
+// The three lists a structured finding can come from — CastFinding.Kind's
+// closed vocabulary, core's own and never stored text.
+const (
+	FindingBlocker    = "blocker"
+	FindingConcern    = "concern"
+	FindingSuggestion = "suggestion"
+)
+
+// CastFinding is one entry of one cast's structured findings on one of the
+// run's proposals (DKT-2451), with the evidence it cited.
+type CastFinding struct {
+	Proposal string `json:"proposal"`
+	Voter    string `json:"voter"`
+	Role     string `json:"role,omitempty"`
+	// Kind is which list the entry came from: blocker, concern, or suggestion.
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+	// Evidence is the references the engine resolved when the cast recorded,
+	// in the caster's order and canonical spelling.
+	Evidence []string `json:"evidence,omitempty"`
+	// Unsupported marks an entry that cited nothing. A flag rather than the
+	// absence of Evidence, so a consumer never reads an omitted key as "not
+	// applicable" — the same discipline VoteUsageCoverage states for silence.
+	Unsupported bool `json:"unsupported,omitempty"`
+}
+
+// StepRuling is one operator ruling on a step and its attribution (DKT-2450):
+// the event kind that recorded it, and the claim-level actor and cwd the verb
+// resolved at its call site — see Attribution.
+type StepRuling struct {
+	// Event is the ruling's kind: `step-approved`, `step-rejected`,
+	// `step-resolved`, or `lease-reaped` for a `step reap`. An expiry reap
+	// shares that kind but is the scheduler's act and never appears here.
+	Event string `json:"event"`
+	Actor string `json:"actor"`
+	Cwd   string `json:"cwd"`
+}
+
+// AuthorityCount is one row of DKT-1899's rollup: an authority, and how many
+// of the run's resolutions were made under it.
+//
+// The rollup answers the question the note could not: of this run's
+// resolutions, how many an operator decided, how many applied a standing
+// authorization, and how many the conductor made on its own reproduction. The
+// order is the three values' DECLARED order, not by count, for ActorCount's
+// R9 reason, and an authority with no resolutions is omitted rather than shown
+// as zero.
+//
+// Resolutions recorded BEFORE this field existed carry no authority and are
+// counted under none of the three: an uncountable resolution is exactly what
+// this replaces, and inventing a bucket for it would put the guess back in the
+// number.
+type AuthorityCount struct {
+	Authority string `json:"authority"`
+	Count     int    `json:"count"`
 }
 
 // ActorCount is one row of E21's rollup: a cause, and how many of the run's
@@ -208,6 +388,17 @@ type StepAttempt struct {
 	// selected ...`. Empty for a step that has not been routed yet, which is
 	// itself the answer for a `pending` or `claimed` row.
 	Routing string `json:"routing,omitempty"`
+	// ParkReason is the ENGINE's text for why this step parked, kept apart
+	// from Routing so neither overwrites the other (DKT-1898).
+	//
+	// On a RESOLVED park, Routing is the resolution — its routing and the
+	// resolver's note — and this is still the question that park asked. Reading
+	// the two together is what the report could not do: 328 park events across
+	// the store, and the engine's own text survived on 3 of them.
+	//
+	// Empty on a step that never parked, and on one parked before the column
+	// existed.
+	ParkReason string `json:"park_reason,omitempty"`
 	// Vote is a vote step's proposal and how it tallied, `DKT-V38 rejected`.
 	//
 	// A vote step's `attempts` is permanently 0 — it is never claimed — so the
@@ -222,6 +413,62 @@ type StepAttempt struct {
 	// never opened — which is exactly the never-convened case the reader needs
 	// to tell apart.
 	Vote string `json:"vote,omitempty"`
+	// Ruling is the LAST operator ruling recorded on this step — an approve,
+	// a reject, a resolve, or a forced reap — and who made it, from where
+	// (DKT-2450). `Routing` says what was decided; this says by whom. Absent
+	// on a step nobody ruled on, and on one whose last ruling predates
+	// attribution.
+	Ruling *StepRuling `json:"ruling,omitempty"`
+	// PinEpoch is WHICH PIN AGREEMENT this step's recorded work ran under
+	// (DKT-594), indexing RunReport.PinEpochs.
+	//
+	// Absent unless the run actually repinned, and absent on a step that has not
+	// run — see PinEpochs and stepReportsAnEpoch. On a run whose agreement moved
+	// mid-flight it is the field that says which bytes a completed step
+	// consumed: `pins` holds only the CURRENT agreement, completed steps' rows
+	// are never rewritten, and correlating the two was the hand-join RUN-39's
+	// post-mortem performed against event seqs (5375/5376 vs STEP-1350/1353).
+	PinEpoch int `json:"pin_epoch,omitempty"`
+
+	// Metadata is THIS STEP'S WHOLE BAG, verbatim (DKT-868) — the detail behind
+	// RunReport.Metadata exactly as StepUsage is the detail behind
+	// Budget.Reported.
+	//
+	// The rollup answers "which values did this key take, and how often". It
+	// cannot answer "which values did two keys take TOGETHER on one step",
+	// because grouping by key is precisely what discards the pairing. Any bag
+	// whose keys are a REQUEST and its RESOLUTION — the shape the corpus
+	// actually writes — is therefore unaggregatable from the report: RUN-51's
+	// rollup showed one key with no `low` value and its partner with one, a
+	// mismatch on exactly one step that no reader could name. Recovering it
+	// meant `step show` per step, and the audit that motivated this ran ~90 of
+	// them across 19 runs.
+	//
+	// It rides on the ATTEMPT ROW rather than in a section of its own so the
+	// bag arrives already joined to the four facts that make it interpretable:
+	// effective status, routing, attempt count and issue. That is what closes
+	// the other half of the gap — a step that FAILED or was reaped carries only
+	// what its dispatcher recorded at claim (`step claim --metadata`, DKT-592),
+	// and in a rollup that half-bag is indistinguishable from a completed
+	// step's, so drift concentrated in failures reads as no drift at all.
+	//
+	// CORE READS NO KEY HERE, as everywhere (docs/design/genericity.md, R7). It
+	// publishes the bag; what a pair of keys MEANS — a tier, a variant, a desk
+	// — stays the workflow author's business, and the consumer does the
+	// comparison core must not learn how to make.
+	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// MetadataUnreadable marks a step whose stored bag exists but does not
+	// decode, so an absent `metadata` is never silently read as "the dispatcher
+	// recorded nothing" — the exact ambiguity DKT-868 is about. It mirrors
+	// model.Vote's field of the same name and the same purpose.
+	//
+	// The bag is NOT re-validated here: a read verb that refused because one
+	// row held odd bytes would be useless during exactly the run an operator
+	// wants to inspect (R10), which is why db.MetadataRollup skips such a row
+	// too. This row says so out loud rather than skipping silently, because a
+	// per-step row IS the row — there are no other rows to carry the fact.
+	MetadataUnreadable bool `json:"metadata_unreadable,omitempty"`
 }
 
 // DispositionAbandoned is the one issue-level terminal ruling core records as
@@ -284,6 +531,69 @@ type ArtifactIndexEntry struct {
 	Supersedes string `json:"supersedes,omitempty"`
 }
 
+// MemberCount is one point of ClusterComplementarity's distribution: how many
+// clusters this round reduced from exactly this many members.
+type MemberCount struct {
+	Members  int `json:"members"`
+	Clusters int `json:"clusters"`
+}
+
+// ClusterComplementarity is DKT-2452's row, one per `aggregate` step instance.
+type ClusterComplementarity struct {
+	Step     string `json:"step"`
+	Instance string `json:"instance"`
+	Issue    string `json:"issue"`
+	// Unique counts clusters with exactly one member: the field's declared
+	// order had one voice on that value, corroborated by nothing.
+	Unique int `json:"unique"`
+	// Corroborated counts clusters with more than one member: the SAME
+	// measurement Anthropic's fanout-width case made ("only 12 vulnerabilities
+	// in common") — how much of the round agreed rather than merely occurred.
+	Corroborated int `json:"corroborated"`
+	// ByMemberCount is Unique and Corroborated's own detail, ordered by
+	// member count ascending (a total key, R9): every cluster this round
+	// reduced, grouped by how many members it had.
+	ByMemberCount []MemberCount `json:"by_member_count,omitempty"`
+	// InputArtifacts is how many artifacts fed the step whose output this
+	// round reduced — `step_inputs` on that PRODUCER step, not on the
+	// aggregate step itself (an action step is never claimed and so never
+	// gets a `step_inputs` row of its own, per DKT-1054). Summed over every
+	// run step sharing the producer's declared name, so a fanned-out producer
+	// (`review@0#0..3`) counts every sibling's artifact once. Zero when the
+	// producer step cannot be resolved — an aggregate step with no
+	// `<step>.<kind>` input, which V3/V29 already make unregisterable, but a
+	// restored database is not required to have run today's validation.
+	InputArtifacts int `json:"input_artifacts"`
+	// PayloadUnreadable marks a step whose aggregate output does not decode
+	// as the array of objects §7.6 promises, so an absent row is never read
+	// as "this round produced nothing" (the same discipline MetadataUnreadable
+	// states). The bag is not re-validated here (R10): a read verb that
+	// refused over one odd artifact would be useless during exactly the run
+	// an operator wants to inspect.
+	PayloadUnreadable bool `json:"payload_unreadable,omitempty"`
+}
+
+// ClusterSourceAttribution is DKT-2462's row, one per distinct source-field
+// value seen across one `aggregate` step's round.
+type ClusterSourceAttribution struct {
+	Step     string `json:"step"`
+	Instance string `json:"instance"`
+	Issue    string `json:"issue"`
+	// Source is the opaque value itself — a step ref such as `review@0#0` in
+	// this corpus's convention, but core treats it as a string it groups,
+	// never as content it parses.
+	Source string `json:"source"`
+	// Executor is the hint the named step declared, when Source resolves to a
+	// step instance in this run. Empty when it does not resolve — a source
+	// naming a step outside this run, or a value that is not a step ref at
+	// all — kept rather than dropped (R10), since an unresolved source is
+	// still a fact about the round.
+	Executor string `json:"executor,omitempty"`
+	// Clusters is how many of the round's clusters this source contributed a
+	// member to.
+	Clusters int `json:"clusters"`
+}
+
 // LoadRunReport builds the document. IT WRITES NOTHING.
 func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	run, err := db.GetRun(conn, runID)
@@ -339,18 +649,51 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
 		return nil, err
 	}
+	// DKT-584: the vote-step key family alone missed every panel the run's
+	// machinery convened OUTSIDE a vote step — reap-ack ballots, and the
+	// conversational gates (activation panels and the like) whose only link to
+	// the run is that their text names it. Their casts appeared in NO run
+	// section at all. The extra ids widen the usage rollup and its coverage
+	// line to those proposals; the vote-step sections above are unchanged.
+	extraProposalIDs, err := conversationalRunProposalIDs(conn, runID)
+	if err != nil {
+		return nil, err
+	}
 	if report.VoteUsage, err = db.VoteUsageRollup(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+		extraProposalIDs...); err != nil {
 		return nil, err
 	}
 	if report.VoteUsageCoverage, err = db.VoteUsageCoverageFor(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+		extraProposalIDs...); err != nil {
+		return nil, err
+	}
+	if report.SilentVoteSeats, err = silentVoteSeats(
+		conn, runID, extraProposalIDs); err != nil {
+		return nil, err
+	}
+	if report.Findings, err = castFindings(conn, runID, extraProposalIDs); err != nil {
 		return nil, err
 	}
 	if report.StepUsage, err = db.UsageByStep(conn, runID); err != nil {
 		return nil, err
 	}
 	if report.Artifacts, err = artifactIndex(conn, runID); err != nil {
+		return nil, err
+	}
+	if report.Complementarity, err = complementarityRollup(conn, runID, defs); err != nil {
+		return nil, err
+	}
+	if report.SourceAttribution, err = sourceAttributionRollup(conn, runID, defs); err != nil {
+		return nil, err
+	}
+	// DKT-594's staleness diff: the run's workflow pins against the registry's
+	// current head. Up here with the other pool reads for the reason stated
+	// above — it needs no snapshot, and reading it from inside the transaction
+	// below would deadlock the one-connection pool.
+	if report.PinnedWorkflows, err = pinnedWorkflowStaleness(
+		conn, run.ProjectID, runID); err != nil {
 		return nil, err
 	}
 
@@ -375,6 +718,18 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	}
 
 	report.WallClockMS = wallClockMS(run, nowMS)
+
+	// D7's ungraced question, in the same snapshot as the statuses that say
+	// which steps ran: what is still owing NOW, the freshly recorded included.
+	ungraced, err := discrepanciesGracedTx(tx, sched, runID, nowMS, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range ungraced {
+		if d.Kind == DiscrepancyMissingUsage {
+			report.MissingUsage = append(report.MissingUsage, d)
+		}
+	}
 
 	cap, floor, reportedInUnit, spend, _, unit := sched.Budget()
 	// AN UNLIMITED RUN'S SNAPSHOT DELIBERATELY QUERIED NOTHING (D1), so the
@@ -412,6 +767,15 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if err := annotateVoteOutcomes(tx, runID, sched, attempts); err != nil {
 		return nil, err
 	}
+	// DKT-594: which agreement each step's recorded work ran under, in the SAME
+	// snapshot as the statuses that decide whether a step ran at all.
+	if report.PinEpochs, err = annotatePinEpochs(tx, runID, attempts); err != nil {
+		return nil, err
+	}
+	// DKT-2450: who ruled on each step, in the same snapshot.
+	if err := annotateStepRulings(tx, runID, attempts); err != nil {
+		return nil, err
+	}
 	report.Steps, report.Attempts = counts, attempts
 
 	// The issue-level rulings, read in the SAME snapshot as the steps they
@@ -429,6 +793,12 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	}
 	report.Actors = actors
 
+	// DKT-1899: the same rollup narrowed to the resolutions, in the same
+	// transaction for the same reason.
+	if report.Authorities, err = authorityRollupTx(tx, runID); err != nil {
+		return nil, err
+	}
+
 	usageCap, usageSpend, usageUnit, _ := sched.UsageBudget()
 
 	report.Budget = RunBudgetReport{
@@ -443,6 +813,12 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		Spend:        spend,
 		BurnRate:     burnRate(floor, report.WallClockMS),
 		BreachReason: facts.BreachReason,
+	}
+	// The exclusion is stated whenever there is anything to exclude: a cast
+	// happened, whether or not its seat reported spend (DKT-584). A run with
+	// no panels carries no note — there is nothing being left out.
+	if report.VoteUsageCoverage.Casts > 0 || len(report.VoteUsage) > 0 {
+		report.Budget.VoteUsageNote = VoteUsageExcludedNote
 	}
 
 	// The transaction is rolled back by the deferred call and never committed:
@@ -498,14 +874,29 @@ func effectiveStepFacts(sched *Scheduler) ([]model.StatusCount, []StepAttempt) {
 		status := EffectiveStatus(sched, step)
 		counts[status]++
 		row := StepAttempt{
-			Step:     model.FormatStepID(step.ID),
-			Instance: step.Instance,
-			Status:   status,
-			Attempts: step.Attempt,
-			Routing:  step.Routing,
+			Step:       model.FormatStepID(step.ID),
+			Instance:   step.Instance,
+			Status:     status,
+			Attempts:   step.Attempt,
+			Routing:    step.Routing,
+			ParkReason: step.ParkReason,
 		}
 		if step.IssueID != 0 {
 			row.Issue = model.FormatID(step.IssueID)
+		}
+		// DKT-868: the step's own bag rides with its status.
+		//
+		// TOLERANT, NOT SILENT. A stored bag that does not decode leaves
+		// `Metadata` nil and sets the flag beside it — the R10 tolerance
+		// db.MetadataRollup already applies to the same column (a read verb must
+		// not refuse because one row holds odd bytes), without the rollup's
+		// freedom to drop the row and let the other rows carry the answer.
+		//
+		// The decode names no key: it hands over whatever object was stored.
+		if bag, err := decodeMetadata(step.Metadata); err != nil {
+			row.MetadataUnreadable = true
+		} else {
+			row.Metadata = bag
 		}
 		attempts = append(attempts, row)
 	}
@@ -707,6 +1098,360 @@ func abandonNote(routing string) string {
 	return strings.TrimSpace(note)
 }
 
+// complementarityRollup is DKT-2452: one ClusterComplementarity row per
+// `aggregate` step instance in the run.
+//
+// It walks every step rather than every artifact because the question is
+// "what did THIS ROUND of clustering produce", and an aggregate step that
+// hit route_at (DKT-593) or a hold resolution (H13) leaves that answer split
+// across more than one place: the step's own newest artifact (superseded
+// ones excluded — a resolution records a NEW artifact of the same kind
+// rather than editing the old one) and, when route_at routed clusters below
+// its floor, the builtin's own action_results row.
+func complementarityRollup(
+	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
+) ([]ClusterComplementarity, error) {
+	steps, err := db.ListRunSteps(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	byName := make(map[string][]*db.Step, len(steps))
+	for _, s := range steps {
+		byName[s.StepName] = append(byName[s.StepName], s)
+	}
+
+	var out []ClusterComplementarity
+	for _, s := range steps {
+		// A materialized held/vote step (H5) has no entry in the pinned
+		// definition; StepByName returns nil for it, and it is never itself
+		// an aggregate step — the hold it carries is the RESOLUTION of one.
+		def := defs[s.WorkflowID]
+		if def == nil {
+			continue
+		}
+		spec := workflow.StepByName(def, s.StepName)
+		if spec == nil || spec.Action != workflow.ActionAggregate {
+			continue
+		}
+		params, err := ParseAggregateParams(spec.Params)
+		if err != nil {
+			// V28/V28a already refuse this at register time; a row that
+			// still fails here belongs to a database restored from
+			// elsewhere. Not this report's failure to surface (R10) — the
+			// row is simply omitted, exactly as an aggregate step with no
+			// clusters yet would be.
+			continue
+		}
+
+		row := ClusterComplementarity{
+			Step: s.StepName, Instance: s.Instance, Issue: model.FormatID(s.IssueID),
+		}
+
+		emitted, ok, err := latestAggregatePayload(conn, s.ID, params.Output)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// Never claimed a cluster yet — an aggregate step with no
+			// completed round. An absent row, not a zeroed one (R10's
+			// "reads as nothing happened" trap MetadataUnreadable also
+			// guards against).
+			continue
+		}
+		var recorded []map[string]any
+		if emitted != nil {
+			recorded, err = recordedBelowFloor(conn, s.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if emitted == nil {
+			row.PayloadUnreadable = true
+		} else {
+			row.Unique, row.Corroborated, row.ByMemberCount =
+				complementarityOf(emitted, recorded)
+		}
+
+		row.InputArtifacts, err = producerInputCount(conn, spec, s.IssueID, byName)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, row)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Instance < out[j].Instance })
+	return out, nil
+}
+
+// latestAggregatePayload reads an aggregate step's NEWEST artifact of the
+// step's declared output kind and decodes its payload. ok is false when the
+// step has produced no such artifact yet; the payload itself is nil (as
+// opposed to a non-nil empty slice) when the newest artifact's payload does
+// not decode as an array of objects.
+func latestAggregatePayload(
+	conn *sql.DB, stepID int, kind string,
+) (payload []map[string]any, ok bool, err error) {
+	artifacts, err := db.ListStepArtifacts(conn, stepID)
+	if err != nil {
+		return nil, false, err
+	}
+	var newest *db.Artifact
+	for _, a := range artifacts {
+		if a.Kind == kind {
+			newest = a
+		}
+	}
+	if newest == nil {
+		return nil, false, nil
+	}
+	if json.Unmarshal([]byte(newest.Payload), &payload) != nil {
+		return nil, true, nil
+	}
+	return payload, true, nil
+}
+
+// recordedBelowFloor reads the below-floor clusters a `route_at` split routed
+// into the builtin's own action_results row (DKT-593), decoded the same way
+// as the emitted payload. Absent route_at, or absent any below-floor
+// cluster, the row's output is empty and this returns nil, nil.
+//
+// Only the highest-ordinal passing row counts, the same newest-record rule
+// latestAggregatePayload applies to the artifact: a retried step's earlier
+// rows describe rounds the newest artifact superseded.
+func recordedBelowFloor(conn *sql.DB, stepID int) ([]map[string]any, error) {
+	outputs, err := db.ActionOutputsFor(conn, stepID, workflow.ActionAggregate)
+	if err != nil {
+		return nil, err
+	}
+	// ActionOutputsFor orders by ordinal, unique per (step, action).
+	if len(outputs) == 0 || outputs[len(outputs)-1] == "" {
+		return nil, nil
+	}
+	var clusters []map[string]any
+	if json.Unmarshal([]byte(outputs[len(outputs)-1]), &clusters) != nil {
+		return nil, nil
+	}
+	return clusters, nil
+}
+
+// complementarityOf is the pure count: unique (one member) versus
+// corroborated (more than one) clusters, and the full distribution, over the
+// union of a round's emitted and below-floor clusters.
+//
+// It reads `members` (KeyMembers, §7.6) — the engine's own record of a
+// cluster's inputs — never the payload's other keys. A cluster with no
+// readable `members` array (a malformed record; `aggregate` always writes
+// one) contributes to neither count nor the distribution, the same
+// skip-the-row discipline `db.MetadataRollup` uses for an unreadable bag.
+func complementarityOf(sets ...[]map[string]any) (unique, corroborated int, dist []MemberCount) {
+	counts := make(map[int]int)
+	for _, set := range sets {
+		for _, cluster := range set {
+			raw, ok := cluster[KeyMembers].([]any)
+			if !ok {
+				continue
+			}
+			n := len(raw)
+			if n == 1 {
+				unique++
+			} else if n > 1 {
+				corroborated++
+			}
+			counts[n]++
+		}
+	}
+	members := make([]int, 0, len(counts))
+	for n := range counts {
+		members = append(members, n)
+	}
+	sort.Ints(members)
+	for _, n := range members {
+		dist = append(dist, MemberCount{Members: n, Clusters: counts[n]})
+	}
+	return unique, corroborated, dist
+}
+
+// producerInputCount answers "how many artifacts fed the round that produced
+// this aggregate step's clusters" — `step_inputs` on the PRODUCER step named
+// by the aggregate step's own `inputs` (never on the aggregate step itself:
+// an action step is never claimed, so it never gets step_inputs of its own,
+// DKT-1054). Summed over every run step sharing the producer's declared
+// name and the aggregate step's issue, so a fanned-out producer counts every
+// sibling once and a multi-issue run does not cross lanes.
+//
+// Zero when no input resolves to a producer name — an aggregate step with no
+// `<step>.<kind>` input, which V3/V29 already refuse at register time for a
+// freshly validated workflow, but a restored database is not guaranteed to
+// have passed today's validation.
+func producerInputCount(
+	conn *sql.DB, spec *workflow.Step, issueID int, byName map[string][]*db.Step,
+) (int, error) {
+	seen := make(map[string]bool)
+	total := 0
+	for _, declared := range spec.Inputs {
+		stepName, _, ok := splitInput(declared)
+		if !ok || seen[stepName] {
+			continue
+		}
+		seen[stepName] = true
+		for _, producer := range byName[stepName] {
+			if producer.IssueID != issueID {
+				continue
+			}
+			n, err := db.StepInputCount(conn, producer.ID)
+			if err != nil {
+				return 0, err
+			}
+			total += n
+		}
+	}
+	return total, nil
+}
+
+// sourceAttributionRollup is DKT-2462: one ClusterSourceAttribution row per
+// distinct value an `aggregate` step's declared `source_field` names across
+// its round's clusters, counted over the same emitted+recorded union
+// complementarityRollup reads (a `route_at` split, DKT-593, must not make a
+// below-floor cluster's sources invisible to this report either).
+func sourceAttributionRollup(
+	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
+) ([]ClusterSourceAttribution, error) {
+	steps, err := db.ListRunSteps(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	var executors map[string]string // lazily built: most runs declare no source_field
+	var out []ClusterSourceAttribution
+	for _, s := range steps {
+		def := defs[s.WorkflowID]
+		if def == nil {
+			continue
+		}
+		spec := workflow.StepByName(def, s.StepName)
+		if spec == nil || spec.Action != workflow.ActionAggregate {
+			continue
+		}
+		params, err := ParseAggregateParams(spec.Params)
+		if err != nil {
+			continue // same restored-database allowance as complementarityRollup
+		}
+		if params.SourceField == "" {
+			continue
+		}
+
+		emitted, ok, err := latestAggregatePayload(conn, s.ID, params.Output)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		var recorded []map[string]any
+		if emitted != nil {
+			recorded, err = recordedBelowFloor(conn, s.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		counts := sourceCounts(params.SourceField, emitted, recorded)
+		if len(counts) == 0 {
+			continue
+		}
+		if executors == nil {
+			executors, err = runStepExecutorsByInstance(conn, runID)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		sources := make([]string, 0, len(counts))
+		for source := range counts {
+			sources = append(sources, source)
+		}
+		sort.Strings(sources)
+		for _, source := range sources {
+			out = append(out, ClusterSourceAttribution{
+				Step: s.StepName, Instance: s.Instance, Issue: model.FormatID(s.IssueID),
+				Source: source, Executor: executors[source], Clusters: counts[source],
+			})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Instance != out[j].Instance {
+			return out[i].Instance < out[j].Instance
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out, nil
+}
+
+// sourceCounts tallies, over the union of a round's emitted and below-floor
+// clusters, how many clusters each distinct value of `field` names — a
+// cluster whose array under `field` repeats one value (the same source
+// merged with itself within one cluster) counts that source once, not twice,
+// since the question this answers is "how many clusters did this source
+// contribute to", not "how many members trace to it".
+//
+// A cluster with no readable array under `field` contributes nothing, the
+// same skip-the-row discipline complementarityOf uses for an unreadable
+// `members`.
+func sourceCounts(field string, sets ...[]map[string]any) map[string]int {
+	counts := make(map[string]int)
+	for _, set := range sets {
+		for _, cluster := range set {
+			raw, ok := cluster[field].([]any)
+			if !ok {
+				continue
+			}
+			seen := make(map[string]bool, len(raw))
+			for _, v := range raw {
+				source, ok := v.(string)
+				if !ok || source == "" || seen[source] {
+					continue
+				}
+				seen[source] = true
+				counts[source]++
+			}
+		}
+	}
+	return counts
+}
+
+// runStepExecutorsByInstance maps a run's step instances to their declared
+// executor hint, for resolving a source_field value (a step ref) back to WHO
+// produced it. A step with no hint (an action step, or one with neither
+// `executor` nor `fanout`) maps to "", which callers read as unresolved —
+// ClusterSourceAttribution's `omitempty` never claims an executor core does
+// not know.
+func runStepExecutorsByInstance(conn *sql.DB, runID int) (map[string]string, error) {
+	out := make(map[string]string)
+	rows, err := conn.Query(
+		`SELECT instance, executor FROM steps WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading step executors: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			instance string
+			executor sql.NullString
+		)
+		if err := rows.Scan(&instance, &executor); err != nil {
+			return nil, fmt.Errorf("reading a step executor: %w", err)
+		}
+		out[instance] = executor.String
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading step executors: %w", err)
+	}
+	return out, nil
+}
+
 // artifactIndex is R6: what was produced, never the bodies.
 func artifactIndex(conn *sql.DB, runID int) ([]ArtifactIndexEntry, error) {
 	artifacts, err := db.ListRunArtifacts(conn, runID)
@@ -769,6 +1514,202 @@ func artifactIndex(conn *sql.DB, runID int) ([]ArtifactIndexEntry, error) {
 	return out, nil
 }
 
+// The two seating paths a run's vote seats are minted through (DKT-733).
+// These are the values SilentVoteSeat.Path carries, and they are core's own
+// closed vocabulary — derived from HOW the proposal joined the run's
+// membership, never from anything a caster asserted.
+const (
+	// SeatPathVoteStep: the proposal is keyed under the run's vote-step
+	// family (voteIdempotencyPrefix) — an engine-minted `type = "vote"` step
+	// row, whose panel is seated in-wave.
+	SeatPathVoteStep = "vote-step"
+	// SeatPathConversationalGate: everything the run's machinery convened
+	// OUTSIDE a vote step — a reap-ack ballot keyed under
+	// ReapAckProposalKey's family, or a proposal whose text names the run (an
+	// activation panel opened with `vote create`). These panels are seated
+	// conductor-side.
+	SeatPathConversationalGate = "conversational-gate"
+)
+
+// SilentVoteSeat is one cast that reported no spend, with the seating path
+// that minted its proposal (DKT-733). The proposal id is the argument `vote
+// backfill-usage` takes, so each row is an aimable backfill, not just a name.
+type SilentVoteSeat struct {
+	Proposal string `json:"proposal"`
+	Voter    string `json:"voter"`
+	Role     string `json:"role,omitempty"`
+	Path     string `json:"path"`
+}
+
+// silentVoteSeats enumerates the casts the coverage line counts as silent and
+// labels each with its seating path. The rows come through the SAME
+// membership the coverage count uses; the label is resolved HERE because only
+// the engine owns the key-family spellings: a proposal in the run's vote-step
+// family is a vote-step seat, and anything else in the membership — reap-ack
+// keyed or run-named — is a conversational gate (the extraIDs' two halves,
+// per conversationalRunProposalIDs).
+func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat, error) {
+	rows, err := db.SilentVoteSeatsFor(
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID), extraIDs...)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+
+	keyed, err := db.LookupIdempotencyKeys(
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	if err != nil {
+		return nil, err
+	}
+	voteStep := make(map[int]bool, len(keyed))
+	for _, id := range keyed {
+		voteStep[id] = true
+	}
+
+	out := make([]SilentVoteSeat, 0, len(rows))
+	for _, r := range rows {
+		path := SeatPathConversationalGate
+		if voteStep[r.ProposalID] {
+			path = SeatPathVoteStep
+		}
+		out = append(out, SilentVoteSeat{
+			Proposal: model.FormatProposalID(r.ProposalID),
+			Voter:    r.Voter,
+			Role:     r.Role,
+			Path:     path,
+		})
+	}
+	return out, nil
+}
+
+// castFindings is DKT-2451's section: every structured finding recorded on
+// the run's proposals — the vote-step family plus the conversational gates
+// the usage rollups already attribute (extraIDs) — one row per entry.
+//
+// A pool read, taken with the other rollups BEFORE the report's snapshot
+// transaction opens (the one-connection rule LoadRunReport states). Proposals
+// ascend by id and casts by voter name within one, and entries keep their
+// findings' own order (blockers, concerns, suggestions, each as cast): a total
+// key, per R9, since a voter casts once per proposal.
+//
+// A SealedOpen proposal contributes nothing: the ballot is still secret, and
+// this verb must not be the one read surface that leaks what a seat found
+// before the tally closes. Its rows appear once the status leaves `open`.
+func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error) {
+	keyed, err := db.LookupIdempotencyKeys(
+		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool, len(keyed)+len(extraIDs))
+	ids := make([]int, 0, len(keyed)+len(extraIDs))
+	for _, id := range keyed {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range extraIDs {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+
+	var out []CastFinding
+	for _, id := range ids {
+		proposal, err := db.GetProposal(conn, id)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s for its findings: %w",
+				model.FormatProposalID(id), err)
+		}
+		if proposal.SealedOpen() {
+			continue
+		}
+		votes, err := db.GetProposalVotes(conn, id)
+		if err != nil {
+			return nil, fmt.Errorf("reading the casts of %s for their findings: %w",
+				model.FormatProposalID(id), err)
+		}
+		sort.SliceStable(votes, func(i, j int) bool {
+			return votes[i].VoterName < votes[j].VoterName
+		})
+		for _, v := range votes {
+			if v.FindingsJSON == nil {
+				continue
+			}
+			for _, list := range []struct {
+				kind    string
+				entries []model.Finding
+			}{
+				{FindingBlocker, v.FindingsJSON.Blockers},
+				{FindingConcern, v.FindingsJSON.Concerns},
+				{FindingSuggestion, v.FindingsJSON.Suggestions},
+			} {
+				for _, entry := range list.entries {
+					out = append(out, CastFinding{
+						Proposal:    model.FormatProposalID(id),
+						Voter:       v.VoterName,
+						Role:        v.VoterRole,
+						Kind:        list.kind,
+						Text:        entry.Text,
+						Evidence:    entry.Evidence,
+						Unsupported: len(entry.Evidence) == 0,
+					})
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// conversationalRunProposalIDs resolves the run's CONVERSATIONAL-GATE
+// proposals — the ballots the run's machinery convened outside any vote step
+// (DKT-584), whose casts otherwise appear in no run section at all:
+//
+//   - reap-ack ballots, keyed under ReapAckProposalKey's family — positively
+//     attributed through the same idempotency table the vote-step family uses;
+//   - proposals that NAME the run in their description or rationale (an
+//     activation panel opened with `vote create` carries no key and no step,
+//     and its text is its only link to the run it gates).
+//
+// Vote-step proposals are deliberately NOT re-resolved here: the rollups
+// already select their key family by prefix, and the membership test is a set
+// test, so an overlap would be harmless but a second spelling of that family
+// would not.
+func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
+	keyed, err := db.LookupIdempotencyKeys(
+		conn, db.ScopeVoteCreate, reapAckRunPrefix(runID))
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool, len(keyed))
+	ids := make([]int, 0, len(keyed))
+	for _, id := range keyed {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	named, err := db.ProposalIDsNaming(conn, model.FormatRunID(runID))
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range named {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	// A TOTAL order (R9): the ids feed a parameterized IN whose bound values
+	// participate in query text equality for no engine, but a deterministic
+	// argument list keeps two reports byte-identical in any future trace.
+	sort.Ints(ids)
+	return ids, nil
+}
+
 // configuredBudgetDefault reads `budget.default` for R6's source derivation.
 func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 	entry, err := db.GetConfig(conn, projectID, db.KeyBudgetDefault)
@@ -784,6 +1725,123 @@ func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 		return 0, nil
 	}
 	return value, nil
+}
+
+// authorityRollupTx counts the run's resolutions by the authority each was
+// made under (DKT-1899) — every `step-resolved`, `step-approved`,
+// `step-rejected`, `run-paused` and `run-abandoned` the run recorded.
+//
+// EVERY RESOLUTION COUNTS, not only the last one per step, because the
+// question is how a run's decisions were authorized, and a step decided twice
+// was authorized twice. That is the opposite of annotateStepRulings' last-word
+// rule, which answers a different question about a different unit.
+//
+// A payload that does not parse, or that carries no authority, is SKIPPED: a
+// malformed row is not worth failing a read verb over (R10), and a resolution
+// recorded before the field existed is genuinely uncountable — reporting it
+// under a guessed authority would restore the ambiguity this ends.
+func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
+	rows, err := tx.Query(
+		`SELECT data FROM events WHERE run_id = ? AND kind IN (?, ?, ?, ?, ?)`,
+		runID, EventStepResolved, EventStepApproved, EventStepRejected,
+		EventRunPaused, EventRunAbandoned)
+	if err != nil {
+		return nil, fmt.Errorf("reading the run's resolutions: %w", err)
+	}
+	defer rows.Close()
+
+	counts := map[string]int{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("reading a resolution: %w", err)
+		}
+		var payload struct {
+			Authority string `json:"authority"`
+		}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			continue
+		}
+		if payload.Authority == "" {
+			continue
+		}
+		counts[payload.Authority]++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading the run's resolutions: %w", err)
+	}
+
+	var out []AuthorityCount
+	for _, authority := range []string{
+		AuthorityOperator, AuthorityStandingGrant, AuthorityConductor,
+	} {
+		if n := counts[authority]; n > 0 {
+			out = append(out, AuthorityCount{Authority: authority, Count: n})
+		}
+	}
+	return out, nil
+}
+
+// annotateStepRulings fills each step's `Ruling` with the last operator ruling
+// recorded on it (DKT-2450) — read through the transaction, in one query for
+// the whole run, for annotateVoteOutcomes' two reasons.
+//
+// LAST RULING WINS, as for issue dispositions: a step reaped by a relay and
+// later resolved by an operator is annotated with the resolution. A forced
+// reap counts; an expiry reap shares its kind but is the scheduler's act and
+// carries no actor, so `data.forced` is what admits a `lease-reaped` row. A
+// ruling recorded before attribution existed carries neither field and
+// annotates nothing — an earlier attributed ruling is not promoted over it,
+// because it is not the last word.
+func annotateStepRulings(tx *sql.Tx, runID int, attempts []StepAttempt) error {
+	rows, err := tx.Query(
+		`SELECT step_id, kind, data FROM events
+		  WHERE run_id = ? AND step_id IS NOT NULL AND kind IN (?, ?, ?, ?)
+		  ORDER BY seq`,
+		runID, EventStepApproved, EventStepRejected, EventStepResolved, EventLeaseReaped)
+	if err != nil {
+		return fmt.Errorf("reading the run's rulings: %w", err)
+	}
+	defer rows.Close()
+
+	rulings := make(map[string]*StepRuling)
+	for rows.Next() {
+		var (
+			stepID int
+			kind   string
+			data   string
+		)
+		if err := rows.Scan(&stepID, &kind, &data); err != nil {
+			return fmt.Errorf("reading a ruling: %w", err)
+		}
+		var payload struct {
+			Forced bool   `json:"forced"`
+			Actor  string `json:"actor"`
+			Cwd    string `json:"cwd"`
+		}
+		// Core's own payload, and a malformed one is not worth failing a read
+		// verb over (R10): it costs this step's annotation and nothing else.
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			continue
+		}
+		if kind == EventLeaseReaped && !payload.Forced {
+			continue
+		}
+		step := model.FormatStepID(stepID)
+		if payload.Actor == "" && payload.Cwd == "" {
+			delete(rulings, step)
+			continue
+		}
+		rulings[step] = &StepRuling{Event: kind, Actor: payload.Actor, Cwd: payload.Cwd}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading the run's rulings: %w", err)
+	}
+
+	for i := range attempts {
+		attempts[i].Ruling = rulings[attempts[i].Step]
+	}
+	return nil
 }
 
 // annotateVoteOutcomes fills each vote step's `Vote` with its proposal and how

@@ -36,6 +36,25 @@ func Run(spec Spec) (Result, error) {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	if !spec.Deadline.IsZero() {
+		remaining := time.Until(spec.Deadline)
+		if remaining <= 0 {
+			// Nothing spawns. The result is a timeout that consumed no wall
+			// time, which is the honest record of a phase whose budget was
+			// already spent before this command's turn came.
+			return Result{
+				Argv:     append([]string(nil), spec.Argv...),
+				Exit:     -1,
+				TimedOut: true,
+				Reason: fmt.Sprintf(
+					"the command was not started: its deadline passed %s before it could run",
+					(-remaining).Round(time.Millisecond)),
+			}, nil
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
 
 	// argv[0] and argv[1:] as SEPARATE ARGUMENTS. This is the whole of the
 	// no-interpreter property at the spawn site.

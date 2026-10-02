@@ -23,6 +23,29 @@ import (
 // 574 events, zero `run-abandoned`). Every run-row status transition now
 // writes its event in the same transaction as the status.
 
+// MoveRunOptions are the lifecycle verbs' inputs — one options entry rather
+// than a seven-positional signature, for the reason DecideOptions gives.
+type MoveRunOptions struct {
+	RunID int
+	// Verb names the CLI verb for the refusal message: pause, resume, abandon.
+	Verb string
+	// To is the target status; From is the closed set of statuses the
+	// transition may leave.
+	To   model.RunStatus
+	From []model.RunStatus
+	// Reason is `--reason`, required by the CLI on an abandon.
+	Reason string
+	// Under is the authority a PAUSE or an ABANDON is exercised under
+	// (DKT-1899), required on exactly those two. A RESUME carries none: it
+	// returns a run to work rather than disposing of anything, so there is no
+	// resolution for an authority to answer for.
+	Under Authority
+	// Token is the run's conductor capability (DKT-2465, conductor.go):
+	// required on a bound run, ignored on an unbound one.
+	Token string
+	NowMS int64
+}
+
 // lifecycleEvents maps each operator-reachable target status to its event
 // kind. `run-done` is absent deliberately: no operator verb moves a run to
 // `done` — that is the reconciliation rollup's transition, and it already
@@ -33,8 +56,8 @@ var lifecycleEvents = map[model.RunStatus]string{
 	model.RunAbandoned:    EventRunAbandoned,
 }
 
-// MoveRun applies one operator lifecycle transition and records its event
-// atomically. `verb` names the CLI verb for the refusal message; `from` is the
+// MoveRunWith applies one operator lifecycle transition and records its event
+// atomically. `Verb` names the CLI verb for the refusal message; `From` is the
 // closed set of statuses the transition may leave.
 //
 // The event's `data` carries `from`, `to`, and the operator's `reason` —
@@ -54,13 +77,27 @@ var lifecycleEvents = map[model.RunStatus]string{
 // itself resolves the breach (DKT-80).
 // The []string it returns is the run's OUTSTANDING WORKTREES (DKT-116) —
 // non-nil only on an abandon; see recordedWorktreesTx.
-func MoveRun(
-	conn *sql.DB, runID int, verb string, to model.RunStatus,
-	from []model.RunStatus, reason string, nowMS int64,
-) (*model.Run, []string, error) {
+//
+// EVERY MOVE REQUIRES THE RUN'S CONDUCTOR CAPABILITY on a bound run
+// (DKT-2465, conductor.go): a pause, resume or abandon is the conductor's
+// decision, and before the capability existed any executor sharing the
+// checkout could park or end the run it was working in. The check is inside
+// the transaction, after the run is found and before its status is inspected,
+// so a caller without the capability learns only that the run exists.
+func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error) {
+	runID, verb, to, from, reason, nowMS :=
+		opts.RunID, opts.Verb, opts.To, opts.From, opts.Reason, opts.NowMS
 	kind, ok := lifecycleEvents[to]
 	if !ok {
 		return nil, nil, fmt.Errorf("no lifecycle event kind for a move to %s", to)
+	}
+	// A pause and an abandon are dispositions, and DKT-1899 requires each to
+	// say under what authority it was made. A resume is neither, and is
+	// deliberately exempt.
+	if kind == EventRunPaused || kind == EventRunAbandoned {
+		if err := opts.Under.require("run " + verb); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	tx, err := conn.Begin()
@@ -74,6 +111,9 @@ func MoveRun(
 		return nil, nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := authorizeConductorTx(tx, runID, opts.Token, "run "+verb); err != nil {
 		return nil, nil, err
 	}
 
@@ -145,6 +185,11 @@ func MoveRun(
 	if len(worktrees) > 0 {
 		payload["worktrees"] = worktrees
 	}
+	// DKT-1899, on the two kinds that require it. A resume's payload is
+	// unchanged, so nothing reading it meets a key that means nothing there.
+	if opts.Under.Kind != "" {
+		opts.Under.addTo(payload)
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("recording the %s transition: %w", kind, err)
@@ -211,7 +256,19 @@ type AbandonIssueOutcome struct {
 	Worktrees []string `json:"-"`
 }
 
-// AbandonIssueInRun is the per-issue disposition (DKT-28): every remaining
+// AbandonIssueOptions are `run abandon --issue`'s inputs.
+type AbandonIssueOptions struct {
+	RunID   int
+	IssueID int
+	// Reason is `--reason`, required.
+	Reason string
+	// Token is the run's conductor capability (DKT-2465, conductor.go):
+	// required on a bound run, ignored on an unbound one.
+	Token string
+	NowMS int64
+}
+
+// AbandonIssueInRunWith is the per-issue disposition (DKT-28): every remaining
 // step of ONE issue stops, with a reason, and the run and its other issues
 // continue.
 //
@@ -226,9 +283,12 @@ type AbandonIssueOutcome struct {
 // routing produces (reconcile.go), and the issue's own status is deliberately
 // NOT forced terminal for the routing's reason exactly: this is a statement
 // about the RUN's work on the issue, and triage stays the operator's.
-func AbandonIssueInRun(
-	conn *sql.DB, runID, issueID int, reason string, nowMS int64,
-) (*AbandonIssueOutcome, error) {
+//
+// It requires the run's conductor capability exactly as the whole-run abandon
+// does (DKT-2465): the per-issue disposition ends a lane's work the same way,
+// and an executor must not be able to end a sibling's.
+func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+	runID, issueID, reason, nowMS := opts.RunID, opts.IssueID, opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("abandoning an issue: %w", err)
@@ -240,6 +300,9 @@ func AbandonIssueInRun(
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeConductorTx(tx, runID, opts.Token, "run abandon --issue"); err != nil {
 		return nil, err
 	}
 	if run.Status != model.RunActive && run.Status != model.RunWaitingHuman {

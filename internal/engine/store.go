@@ -46,6 +46,9 @@ func loadIssues(tx *sql.Tx, runIssues []*db.RunIssue) (map[int]*model.Issue, err
 // issueTx reads the issue fields binding, snapshotting, and promotion need.
 // It reads a subset on purpose: activation has no business with an issue's
 // assignee or parent, and a SELECT * would invite a later stage to use one.
+// `size` joined `priority` and `kind` here for the same reason: binding
+// evaluates `[match].sizes_any` against it (schema v34), exactly as it
+// already evaluates `kind` against `[match].kind`.
 func issueTx(tx *sql.Tx, id int) (*model.Issue, error) {
 	var (
 		issue       model.Issue
@@ -54,11 +57,11 @@ func issueTx(tx *sql.Tx, id int) (*model.Issue, error) {
 		updatedAt   string
 	)
 	err := tx.QueryRow(
-		`SELECT id, title, description, status, priority, kind, created_at, updated_at, version
+		`SELECT id, title, description, status, priority, kind, size, created_at, updated_at, version
 		   FROM issues WHERE id = ?`, id,
 	).Scan(
 		&issue.ID, &issue.Title, &description, &issue.Status, &issue.Priority,
-		&issue.Kind, &createdAt, &updatedAt, &issue.Version,
+		&issue.Kind, &issue.Size, &createdAt, &updatedAt, &issue.Version,
 	)
 	if err == sql.ErrNoRows {
 		return nil, notFoundErr(db.ErrNotFound, "issue %s not found", model.FormatID(id))

@@ -59,8 +59,10 @@ func TestRanWithoutReportingIsStillADiscrepancy(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
+	// Probed past the grace: recorded less than `dispatch.grace` ago the step
+	// is usage PENDING (D7), and this test is about one that stayed unbilled.
 	var found bool
-	for _, d := range discrepanciesAt(t, conn, runID, nowMS) {
+	for _, d := range discrepanciesAt(t, conn, runID, nowMS+1000+graceMS(t, conn)+1) {
 		if d.Kind == DiscrepancyMissingUsage {
 			found = true
 		}
@@ -88,7 +90,8 @@ func TestDiscrepancyRefusalNamesStepIDs(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
-	_, err := NewEngine().NextSteps(conn, runID, 0, nowMS)
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	_, err := NewEngine().NextSteps(conn, runID, 0, past)
 	if err == nil {
 		t.Fatal("premise: `next` must refuse over the discrepancy")
 	}
@@ -116,8 +119,9 @@ func TestOpenDispatchRefusesWhatNextRefuses(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
-	_, nextErr := NewEngine().NextSteps(conn, runID, 0, nowMS)
-	_, openErr := NewEngine().OpenDispatch(conn, runID, 0, nil, nowMS)
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	_, nextErr := NewEngine().NextSteps(conn, runID, 0, past)
+	_, openErr := NewEngine().OpenDispatch(conn, runID, 0, nil, past)
 
 	if nextErr == nil {
 		t.Fatal("premise: `next` must refuse")
@@ -146,7 +150,7 @@ func TestAcceptedMissingUsageUnblocksNext(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
-	outcome, err := e.CloseDispatch(conn, runID, true, nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS)
 	testsupport.Must(t, err, "close --accept-missing-usage: %v", err)
 	if len(outcome.Accepted) == 0 {
 		t.Fatal("premise: the close must have accepted something")
@@ -177,11 +181,12 @@ func TestAcceptMissingUsageNeedsNoOpenDispatch(t *testing.T) {
 		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
 		db.StepDone, nowMS+1000, id)
 
-	if _, err := e.NextSteps(conn, runID, 0, nowMS); err == nil {
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	if _, err := e.NextSteps(conn, runID, 0, past); err == nil {
 		t.Fatal("premise: the run must be refusing")
 	}
 
-	outcome, err := e.CloseDispatch(conn, runID, true, nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS)
 	testsupport.Must(t, err, "close --accept-missing-usage with no dispatch "+
 		"open: %v — this is the documented way out of the refusal, and "+
 		"requiring a manifest to reach it is the cycle", err)
@@ -202,7 +207,7 @@ func TestCloseWithNoDispatchStillRefusesWithoutTheFlag(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
 
-	_, err := testEngine().CloseDispatch(conn, runID, false, nowMS)
+	_, err := testEngine().CloseDispatch(conn, runID, false, "", nowMS)
 	if err == nil {
 		t.Fatal("`dispatch close` succeeded with no dispatch open")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -279,6 +280,36 @@ func (r *ExecRunner) spawnMatched(
 		}
 	}
 
+	// THE CLAIM'S PRE-GATE BUDGET (§7.6.2 PG5). On the pre-claim path the
+	// whole phase is bounded so the claim returns inside the executor's tool
+	// timeout: this gate gets what remains of the budget, or nothing. A
+	// budget already spent records `skipped` — nothing spawned, nothing
+	// measured, the same shape as a lock that never came free — and the
+	// claim still succeeds, because PG2/PG3 say a pre-gate never blocks work.
+	entryTimeout := timeout
+	if !sc.Deadline.IsZero() {
+		remaining := time.Until(sc.Deadline)
+		if remaining <= 0 {
+			return GateExecution{
+				Verdict: VerdictFail,
+				Results: []GateResultRow{{
+					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictSkipped,
+					Argv: match.Argv,
+					Reason: fmt.Sprintf(
+						"the claim's %s pre-gate budget was spent before this gate "+
+							"could run; nothing was measured", claimPreGateBudget),
+					TrustEntry: entry.Name,
+					StubEntry:  entry.Stub,
+					ArgvSHA256: trust.ArgvSHA256(match.Argv),
+					Prefix:     entry.Prefix,
+				}},
+			}, nil
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+
 	// The MATCHED entry's own declaration is what reaches the child,
 	// the same discipline §7.2 M1 applies to argv: the entry that authorized
 	// the command is the entry that configures it, so there is no window in
@@ -286,6 +317,14 @@ func (r *ExecRunner) spawnMatched(
 	env, err := exec.BuildEnv(exec.EnvPolicy{
 		Gate: g.Name, Repo: r.RepoRoot, Network: entry.Network,
 		Issue: model.FormatID(sc.IssueID), Scope: sc.Scope,
+		// DKT-1186: the step's own reference, so the gate can ask the engine
+		// for its inputs (`docket step context $DOCKET_STEP`) instead of
+		// rediscovering which step it is from the issue plus a convention.
+		// Rendered here and nowhere else, and only when a step is actually in
+		// hand — a zero id would render `STEP-0`, which names no row.
+		Step:      stepRef(sc.StepID),
+		Base:      sc.Base,
+		CacheRoot: sc.CacheRoot,
 	})
 	if err != nil {
 		return GateExecution{}, err
@@ -350,20 +389,36 @@ func (r *ExecRunner) spawnMatched(
 		}
 		dir = sc.WorkRoot
 	}
-	spec := exec.Spec{Argv: argv, Dir: dir, Env: env, Timeout: timeout}
+	// The deadline rides on the spec as well as clamping the timeout above:
+	// a flaky entry re-runs inside exec.RunAttempts, and each attempt must
+	// see what is left of the budget, not a fresh copy of the first clamp.
+	spec := exec.Spec{Argv: argv, Dir: dir, Env: env, Timeout: timeout, Deadline: sc.Deadline}
 
 	// L3: the lock is acquired IMMEDIATELY BEFORE the spawn and released
 	// IMMEDIATELY AFTER, outside every transaction and never held across a
 	// database write.
-	if entry.Tree {
+	//
+	// ONLY A GATE ON THE SHARED CHECKOUT TAKES IT (L2). The mutex exists so
+	// two builds cannot race one tree; a gate measuring a step's own worktree
+	// or a pre-gate's scratch reconstruction has that tree to itself, and
+	// serializing it against every other worktree's gate on one per-project
+	// lock is what queued a wave's records behind each other until the
+	// 5m bound expired and parked correct work as unmeasured. Two gates on
+	// the SAME isolated worktree are not serialized either; that tree has one
+	// step behind it, and the trade is accepted in §7.4.
+	if entry.Tree && sharesCheckout(dir, r.RepoRoot) {
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
 			// L4/L7: the serialization the gate requires cannot be provided, so
-			// it fails rather than running unserialized.
+			// it does not run unserialized. Nothing spawned and no tree was
+			// read, which is the vanished-worktree fact above wearing a
+			// different cause, so it takes the same shape (DKT-91): the ROW is
+			// `skipped` and routes as a gate that measured nothing, while the
+			// execution verdict stays fail so routing remains fail-closed.
 			return GateExecution{
 				Verdict: VerdictFail,
 				Results: []GateResultRow{{
-					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictFail,
+					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictSkipped,
 					Argv: match.Argv, Reason: lockErr.Error(),
 					TrustEntry: entry.Name,
 					StubEntry:  entry.Stub,
@@ -387,6 +442,20 @@ func (r *ExecRunner) spawnMatched(
 		if exit == 0 && !a.Result.TimedOut {
 			verdict = VerdictPass
 		}
+		reason := networkAwareReason(a.Result.Reason, entry, verdict)
+		if a.Result.TimedOut && !sc.Deadline.IsZero() &&
+			a.Result.DurationMS < entryTimeout.Milliseconds() {
+			// The timeout the child hit was the budget's remainder, not the
+			// entry's own bound. Say so, or a reader of the row concludes the
+			// trust entry's timeout changed. Decided from the attempt's own
+			// duration rather than from the clamp above, because a lock wait
+			// or an earlier flaky attempt can spend the budget after that
+			// clamp was computed and exec.Run clamps again from the deadline.
+			reason = withScratchNote(reason, fmt.Sprintf(
+				"the claim's %s pre-gate budget bounded this gate below its "+
+					"entry's %s timeout, so the claim returns inside the "+
+					"executor's tool timeout", claimPreGateBudget, entryTimeout))
+		}
 		out.Results = append(out.Results, GateResultRow{
 			Gate:       g.Name,
 			Ordinal:    firstOrdinal + i,
@@ -396,7 +465,7 @@ func (r *ExecRunner) spawnMatched(
 			Output:     a.Result.Output,
 			Truncated:  a.Result.Truncated,
 			Verdict:    verdict,
-			Reason:     networkAwareReason(a.Result.Reason, entry, verdict),
+			Reason:     reason,
 			TrustEntry: entry.Name,
 			StubEntry:  entry.Stub,
 			ArgvSHA256: trust.ArgvSHA256(match.Argv),
@@ -408,6 +477,35 @@ func (r *ExecRunner) spawnMatched(
 	}
 
 	return out, nil
+}
+
+// sharesCheckout reports whether a gate's working directory IS the shared
+// checkout, the one tree more than one step can be measuring at once.
+//
+// A plain cleaned-path comparison, the same test gateBaseSHA applies to a
+// step's work root, and with the same limit: a worktree reached through a
+// symlink to the checkout reads as isolated. That errs toward not locking,
+// which is the direction the per-project lock's own failure taught — an
+// unlocked gate on a shared tree risks a racing build, a locked gate on an
+// isolated tree risks a wave parked behind a lock nobody needed.
+func sharesCheckout(dir, repoRoot string) bool {
+	return dir == "" || filepath.Clean(dir) == filepath.Clean(repoRoot)
+}
+
+// stepRef renders a step id for the child environment, or "" when there is no
+// step to name (DKT-1186).
+//
+// The guard is the point: model.FormatStepID(0) is a perfectly well-formed
+// `STEP-0` that resolves to nothing, and handing a gate an identifier that
+// looks valid and answers NOT_FOUND is strictly worse than handing it nothing
+// — the first fails inside the gate's own tooling with a misleading message,
+// the second is a condition the gate can test for. Absence is the encoding
+// DOCKET_SCOPE and DOCKET_GATE_BASE already use for "docket does not know".
+func stepRef(stepID int) string {
+	if stepID <= 0 {
+		return ""
+	}
+	return model.FormatStepID(stepID)
 }
 
 // networkAwareReason annotates a FAILING gate that declared a network

@@ -197,7 +197,7 @@ docket events prune --before-run RUN-N   # everything belonging to that run
 
 | # | Clause |
 |---|---|
-| P8 | An event belonging to a run whose status is not `done` or `abandoned` is **never deleted**. `model.RunStatus.Terminal()` is the predicate — the same one `run status --active` and re-activation already use, so "terminal" has one definition |
+| P8 | An event belonging to a run whose status is not `done` or `abandoned` is **never deleted**. `model.RunStatus.Terminal()` is the predicate — the same one the default `run status` list and re-activation already use, so "terminal" has one definition |
 | P9 | The refusal is a **CONFLICT (exit 4) naming the runs**, not a silent skip. A prune that quietly retained half its range would leave an operator believing space was reclaimed and a consumer believing a boundary moved |
 | P10 | It is evaluated **inside the delete's transaction** (F3), so the set refused and the set deleted are computed over one snapshot |
 | P11 | Events with **no run** — trust grants — are prunable by `--before`, because there is no run whose liveness could forbid it. They are the one class `--before-run` can never reach, and the help says so |

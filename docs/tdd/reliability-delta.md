@@ -592,6 +592,492 @@ the counters are authoritative only for claims that ended after v23. The wire
 fields are `omitempty`, so every row with no counted outcome serializes
 byte-identically to v22's rendering.
 
+### AMENDMENT — the span extends to v24 (DKT-546, 2026-08-22)
+
+**What changed.** v24 adds ONE table, `gate_override_grants`: one operator
+ruling that a gate's failure signature — gate name + exit code + reason
+classification, and since v30 the content fingerprint — is environmental for
+the remainder of ONE run. A grant is
+minted by `step resolve --as override-pass --batch` (one row per failed
+completion gate of the parked step, in the resolution's own transaction), and
+spent by the routing stage: a later step of the same run whose EVERY failing
+gate matches a grant routes the same generic `pass` the operator's own
+override-pass records, instead of parking. `covered_steps` counts the spends,
+bumped in the routing transaction; both edges are event-logged
+(`gate-override-granted` / `step-batch-overridden`, attributed human /
+threshold), so the feed walks from every auto-pass back to the person. The
+grant dies with its run — the `run_id` FK is the whole scope rule, and a new
+run re-asks. A cover blocked by an interposed threshold target (DKT-470's
+shape) parks as before, with the block named.
+
+**What it fixes.** Refit mining of 25 runs / 34 issues found the dominant
+operator toil is environmental gate parks — build failed 30/46 recorded
+verdicts, tests 26/45, self-hygiene 18/34 — virtually every one
+operator-overridden as a sandbox artifact, not a code defect, and each park
+resolved individually: in RUN-42 the operator's own resolution was
+"override-pass each as it parks", the same ruling re-made per step. No
+mechanism let one ruling cover subsequent identical failures in the same run.
+
+**Why the ratified arithmetic is untouched.** Like v11–v23, v24 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v7/v8 form, since v24 adds no column). It
+BACK-FILLS NOTHING — no operator granted a batch override before the verb for
+granting one existed — and it is dormant: a run that never records a grant
+reads byte-identically to v23 on every verb.
+
+### AMENDMENT — the span extends to v25 (DKT-742, 2026-08-25)
+
+**What changed.** v25 adds ONE table, `stale_target_waivers`: one operator
+ruling that a specific stale-target warning — one (step instance, target sha)
+pair — has been adjudicated for the remainder of ONE run. A waiver is minted
+by `dispatch waive-target` (one row per named step instance, all for one
+target sha, in one transaction, each row event-logged as
+`stale-target-waived`, attributed human), and consulted READ-ONLY by the
+DKT-193/424/451 advisory judge at `dispatch open`/`verify` and at held
+resolutions: a would-be warning whose (instance, target) pair matches a
+waiver — the sha compared as a case-insensitive prefix of at least 7 hex
+characters, because the advisory renders it at 12 — is dropped from the
+answer. There is deliberately no "spent" counter and no per-application event:
+the advisory is recomputed by `dispatch verify`, which writes nothing by
+contract, and a suppressed warning changes no step's state. The waiver dies
+with its run — the `run_id` FK is the whole scope rule, and a new run
+re-warns.
+
+**What it fixes.** The stale-target advisory had no memory: RUN-52 fired the
+IDENTICAL adjudicated warning four times across DISPATCH-295/297/301 (the
+shared HEAD moves at every integration, so the pair recurs under a different
+rendered reason each time), each firing costing an investigation and the
+first an operator gate, until the operator issued a standing waiver that
+lived only in session memory — where the engine could not see it. A different
+target sha on the same row, or the same sha on an unnamed row, is a different
+question and still warns, which is what keeps a new divergence from riding an
+old ruling.
+
+**Why the ratified arithmetic is untouched.** Like v11–v24, v25 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v24 form, since v25 adds no column). It BACK-FILLS
+NOTHING — no operator waived a stale-target warning before the verb for
+waiving one existed — and it is dormant: a run that never records a waiver
+reads byte-identically to v24 on every verb.
+
+### AMENDMENT — the span extends to v26 (DKT-1079, 2026-09-02)
+
+**What changed.** v26 adds ONE table, `run_notes`: a standing statement
+whoever drives a run records ONCE against it, and every packet the run
+renders from then on carries — for every step of every issue, verbatim, as a
+`== RUN NOTE N` section directly after `== REQUEST`, and in `step context` as
+`context.notes`. A note is minted by `run note add` (one row, event-logged as
+`run-note-added` carrying the text, attributed human) and read by context
+assembly as its sixth source, in the claim's own transaction beside the other
+five. It is append-only — no edit, no delete — because a packet is the record
+of what a worker was told, and two renders of one step that disagreed about
+that with nothing in the ledger between them would be exactly the drift the
+snapshot discipline exists to prevent; a changed ruling is a second note. The
+note dies with its run — the `run_id` FK is the whole scope rule.
+
+**What it fixes.** A packet's every writable source was step-scoped. RUN-70's
+conductor gate-probed before dispatch, found `tests` failing on clean HEAD,
+got the operator's disposition ("file issue, override-pass"), filed DKT-1075
+— and had nowhere to put any of it that a packet reads: issue comments are an
+audit surface (§6.6), the body froze at activation, and no step had a routing
+record for `step resolve -m` to reach. The executor stashed, re-ran the
+suite, re-derived the failure, and filed DKT-1076, a duplicate the conductor
+then spent three more calls closing.
+
+**Why the ratified arithmetic is untouched.** Like v11–v25, v26 is an
+amendment, not a stage: one additive table, `CREATE TABLE IF NOT EXISTS`
+throughout so the migration is idempotent and re-runnable, and a rewind guard
+that probes the TABLE (the v24/v25 form, since v26 adds no column). It
+BACK-FILLS NOTHING — no dispatcher recorded a note before the verb for
+recording one existed — and it is dormant: a run that never records a note
+reads byte-identically to v25 on every verb, every bundle, and every packet
+(`notes` is `omitempty`, and the template's section renders only over a
+non-empty list).
+
+### AMENDMENT — the span extends to v27 (DKT-1279, 2026-09-03)
+
+**What changed.** v27 adds ONE column on `steps`, `last_claim_end TEXT NOT
+NULL DEFAULT ''`: the END REASON of the MOST RECENT claim to leave this step,
+`'failed'` or `'reaped'` (`db.ClaimEndFailed` / `db.ClaimEndReaped`),
+overwritten by whichever of `MarkStepAttemptFailedTx` / `MarkStepClaimReapedTx`
+ran last — the same two write sites v23's counters already use, now also
+stamping this column. It rides the wire as `prior_attempt_end` on
+`model.StepRow` (`next --run`, `dispatch open`, `step show`, `claim`'s
+`context.step`) and on `StepListEntry` (`step list`), beside
+`failed_attempts`/`reaped_claims`, `omitempty` on both.
+
+**What it fixes.** v23's counters answer "how many of each has this step EVER
+had", and that is the wrong question the moment a step's history mixes both:
+RUN-80 DISPATCH-400 was killed mid-wave by a session usage limit, the engine
+reaped ten leases, the steps re-dispatched at `attempt` incremented, and
+wave.js/policy's `on_failure` escalation read that as "failed once" and
+routed all ten a tier up to opus/xhigh — a reap is a liveness event, not a
+quality verdict, and no field on the row named which ending THIS re-offer
+followed. A router does not want a tally; it wants the answer to "was the
+attempt I am about to hop past a measured failure or a silence", and the
+existing breakdown cannot give that answer once a step has failed once and
+been reaped once, in either order — both readings are consistent with
+`failed_attempts=1, reaped_claims=1`.
+
+**Why the ratified arithmetic is untouched.** Like v11–v26, v27 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable,
+and a rewind guard that probes the COLUMN (the v21–v23 form, since v27 adds no
+table). It BACK-FILLS NOTHING, for v23's own reason: the event log holds
+`step-failed` and `lease-reaped` rows a value could be derived from, but
+events are prunable and a back-fill would assert more than the store can
+promise. An empty string on a pre-v27 claim means "no recorded ending", the
+same never-captured honesty v23's zero counters use, and the wire fields are
+`omitempty`, so every row with no claim yet ended serializes byte-identically
+to v26's rendering. The in-memory snapshot `reapOneTx` reflects mid-transaction
+now carries the same field alongside the counter it already bumps, so W3's
+same-call offer (the reap and its own re-offer, one answer) carries the
+ending it just recorded rather than requiring a second read.
+
+### AMENDMENT — the span extends to v28 (DKT-2447, 2026-09-13)
+
+**What changed.** v28 adds ONE column on `proposals`, `sealed INTEGER NOT NULL
+DEFAULT 0`: the RENDERING RULE the proposal was opened under. A proposal
+opened under a vote rule with `vote.rule.<name>.sealed = true` (resolved in
+`resolveVoteRule`, stored by `OpenVoteProposal`), or by `vote create --sealed`,
+carries `1`. While such a proposal is still `open`, `vote show`, `vote result`
+and `gate status` withhold every cast's verdict, confidence, relevance,
+weight, findings and summary and render only who has cast and how many casts
+are in; once the status leaves `open`, everything renders. It rides the wire
+as `sealed` on the proposal object (`vote show`, `vote result`, `vote list`,
+`vote create`, export/import), and the withheld casts ride as
+`{voter_name, created_at}` entries in the same `votes` array.
+
+**What it fixes.** Every open proposal rendered every recorded cast in full,
+so a seat that read the proposal after a sibling had cast saw the sibling's
+verdict and reasoning before casting its own — the public-board channel for
+anchoring and collusion that Anthropic's "Patterns and problems in emerging
+multiagent systems" names (DOC-130 candidate 1). Sealing is OPT-IN per rule,
+so every pre-existing rule and every pre-existing workflow renders exactly as
+before.
+
+**Why the ratified arithmetic is untouched.** Like v11–v27, v28 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable,
+and a rewind guard that probes the COLUMN (the v27 form, since v28 adds no
+table). It BACK-FILLS NOTHING: no proposal that opened before the rule
+existed was opened sealed, and `0` says exactly that. The flag is stored on
+the proposal rather than re-resolved from the rule at read time so an edit
+to the rule cannot change what a live ballot renders under the seats
+mid-vote. Sealing is a NORM-LEVEL SHIELD, not a security boundary: the tally
+(`db.CastVote`) and the one-cast-per-voter constraint never read the column,
+and the vote rows stay readable through `export`, `ListAllVotes` and direct
+store access — gates-trust §8.3 records the same caveat beside the key.
+
+### AMENDMENT — the span extends to v29 (DKT-2465, 2026-09-14)
+
+**What changed.** v29 adds ONE column on `runs`, `conductor_token_hash TEXT`
+(nullable, no default): the SHA-256 of the run's CONDUCTOR CAPABILITY. A run's
+first activation mints a 256-bit token with `model.MintToken`, stores the hash
+and returns the token exactly once (`conductor_token` in the activate
+envelope, its own line in human mode); `docket run conduct RUN-N` re-mints it,
+retiring any standing one, and records a `conductor-seated` event carrying
+`actor`, `cwd` and `rotated`. The seven operator verbs — `step approve`,
+`step reject`, `step resolve`, `step reap`, `run pause`, `run resume`,
+`run abandon` (with or without `--issue`) — require the token on a bound run,
+read from `DOCKET_TOKEN` or stdin exactly as a lease token is: none supplied
+is the R1 `VALIDATION_ERROR`, a wrong one the R3 `AUTH_ERROR`, both checked
+after the step or run is found and before its status is inspected or anything
+is written.
+
+**What it fixes.** The seven verbs were token-free by design — "the authority
+is repository access" — and under a harness every executor a wave spawns
+shares the operator's checkout, filesystem and environment, so repository
+access resolved to "any executor": an executor could approve the very
+`commit-gate` its own `git commit` is guarded on, reject a sibling's gate,
+resolve a parked step, or park or end the run it was working in, and the
+engine had no field on which to tell a conductor's ruling from an executor's
+(DKT-2450's `actor`/`cwd` are self-reported audit fields, not authorization).
+The only guard was a harness hook covering one verb for one harness's
+callers.
+
+**Why the ratified arithmetic is untouched.** Like v11–v28, v29 is an
+amendment, not a stage: one additive nullable column, a `hasColumn`-probed
+`ALTER` so the migration is idempotent and re-runnable, and a rewind guard
+that probes the COLUMN (the v27/v28 form, since v29 adds no table). It
+BACK-FILLS NOTHING, and it cannot: a capability is returned once to whoever
+minted it, and a migration has nobody to return one to. `NULL` therefore
+means UNBOUND, and an unbound run — every run activated before v29 and not
+since conducted — stays open to the seven verbs exactly as before: the check
+binds the moment a capability exists, the same posture as a guard reached
+with no engine (allow, not deny). Every run this binary activates is bound at
+birth. The mechanism is TAMPER-EVIDENT rather than tamper-proof, and that is
+recorded beside it: `run conduct` is necessarily token-free (nothing
+authenticates a caller, and a run whose conductor died must not be
+un-pausable forever), so a caller that takes the seat retires the standing
+token — the displaced conductor's next ruling refuses `AUTH_ERROR` and the
+`conductor-seated` event names the taker. A harness that keys its callers
+keeps executors off that one verb; the engine keeps them off the other seven.
+
+### AMENDMENT — the span extends to v30 (DKT-1796, 2026-09-15)
+
+**What changed.** v30 adds ONE column to each of two tables,
+`gate_results.fingerprint` and `gate_override_grants.fingerprint`
+(`TEXT NOT NULL DEFAULT ''`): the CONTENT half of a gate failure's signature.
+**The batch override grant signature is now (gate, exit, reason,
+fingerprint)** — `grantMatches` compares all four, and a grant carrying an
+EMPTY fingerprint matches nothing at all. Empty means pre-v30 and nothing
+else — a row recorded at v30 or later always carries a value, since a gate
+that printed nothing hashes the empty capture — so that refusal reaches
+grants minted before the column existed and leaves an `unmatched` park, whose
+process never ran and whose capture is empty by nature, coverable exactly as
+v24 intended. Every recorded
+`gate_results` row carries a fingerprint, computed at record time in
+`recordGateRows` (the single write path) and exposed as `fingerprint` by
+`docket step gates STEP-N --json`. A `--batch` grant COPIES the fingerprint off
+the parked step's own failing row rather than recomputing it, so the ruling
+binds to the content the operator read. Both ledger edges name the signature:
+`gate-override-granted` carries `<gate>#<grant id> fp=<12 hex>` and
+`step-batch-overridden` carries `<grant ids> fp=<12 hex per grant>`, the
+fingerprint appended after a space so the id list each payload already carried
+is byte-identical to what a reader splitting on `#` or `,` saw before.
+
+**The normalization rules**, applied in this order before the SHA-256, and
+nothing else:
+
+1. ANSI CSI and OSC escape sequences are removed.
+2. Carriage returns are dropped and trailing spaces and tabs are stripped from
+   each line, so CRLF and a progress redraw hash as their plain form.
+3. RFC3339-ish timestamps and bare `HH:MM:SS(.fff)` clock times become
+   `<time>`.
+4. Absolute POSIX paths become `<path>/` plus their LAST TWO segments, so a
+   scratch root or worktree prefix drops out while the file that failed still
+   names itself.
+5. Go-style durations (`0.31s`, `12ms`, `2m30.1s`, `1h2m3s`) become `<dur>`.
+6. Leading and trailing blank lines are removed.
+
+Line ORDER is preserved, and no line is sorted, deduplicated or dropped: a
+different failure set is a different signature. Test names, assertion text,
+file names and line numbers all survive normalization by design.
+UNDER-normalizing is the safe direction — surviving text can only make two
+failures look DIFFERENT, which parks a step for a human, whereas stripped text
+makes two failures look the SAME, which is the waiver this amendment removes.
+
+**What it fixes.** v24 keyed the grant on (gate, exit, reason), and
+`internal/exec` sets `reason` only for a timeout or a refusal, so an ordinary
+failing gate's signature was (gate, exit, empty). After one clean reproduction
+every later step in the run failing that gate with that exit auto-passed at
+routing with nobody reading its output — a waiver by GATE NAME, broader than
+the failure the operator ruled on. Three DKT-V417 tribunal seats converged on
+it independently: a genuine regression a worker introduces in `internal/app` or
+`internal/tui` surfaced as the same "gate failed" and rode the same standing
+ruling, so the tests gate carried near-zero regression signal for the rest of
+the run. A grant now covers the failure the operator actually read.
+
+**Known limit.** The fingerprint narrows the authority; it does not
+authenticate the content. A worker authors the code whose gate output it is, so
+output crafted to normalize to a granted failure's form would match — the
+control's answer to that is detective, not preventive: the covered row's full
+capture stays stored, and both ledger edges name the signature spent.
+
+**Why the ratified arithmetic is untouched.** Like v11–v29, v30 is an
+amendment, not a stage: two additive columns with a default, `hasColumn`-probed
+`ALTER`s so the migration is idempotent and re-runnable, and a rewind guard
+that probes the COLUMNS (the v27–v29 form, since v30 adds no table). It
+BACK-FILLS NOTHING — the fingerprint is a function of a normalization this
+binary defines, and stamping a capture recorded under an earlier engine with
+today's rules would assert an identity nothing computed. On a `gate_results`
+row the blank is inert; on a `gate_override_grants` row it is load-bearing and
+fail-closed: the grant stops matching, so a run mid-flight across the upgrade
+re-asks the operator instead of spending an authority whose content nobody can
+name.
+
+### AMENDMENT — the span extends to v31 (DKT-2071, 2026-09-15)
+
+**What changed.** v31 adds ONE column to one table, `dispatches.extended_seq`
+(`INTEGER NOT NULL DEFAULT 0`): the event seq of a manifest's latest
+`dispatch extend` (docs/tdd/runs-dispatch.md §5.10). `opened_seq` has always
+been a column here, and it records where a manifest started; `extended_seq`
+records where it last grew. The two are read together off one row, and
+`ExtendDispatchTx` writes the new expiry and the new seq in the SAME CAS on
+`(id, status='open')`, because they describe one append — a manifest grown past
+the wall clock it was budgeted for, or one that has demonstrably grown and
+cannot say when, are both states the pair exists to prevent. The column is
+overwritten on every extend, including one that appended nothing: an empty
+extend still happened, and the event log keeps the full history of appends that
+a column accumulating them would only duplicate.
+
+**What it fixes.** `dispatch extend` recorded its seq only on the
+`dispatch-extended` event's data and the response envelope. A reader holding the
+`dispatches` row could say when the manifest opened but not whether it had since
+been extended, and had to join the event log to find out — which makes the
+manifest row an incomplete statement of its own state, and leaves the two halves
+of one manifest's log position in two different stores.
+
+**Zero means never extended, and nothing else.** An event seq is 1-based, so no
+real append can write a zero, and the migration back-fills nothing: no manifest
+predating the verb for extending one has been extended. The blank is inert
+rather than load-bearing — nothing refuses on it — so a run mid-flight across
+the upgrade reads its open manifest as un-extended, which it is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v30, v31 is an amendment,
+not a stage: one additive column with a default, a `hasColumn`-probed `ALTER` so
+the migration is idempotent and re-runnable, and a rewind guard that probes the
+COLUMN (the v27–v30 form, since v31 adds no table and no index).
+
+### AMENDMENT — the span extends to v32 (DKT-1898, 2026-09-15)
+
+**What changed.** v32 adds ONE column to one table, `steps.park_reason`
+(`TEXT NOT NULL DEFAULT ''`): the engine's text for why a step could not be
+decided. It is a column of its own rather than more of `routing` because the
+two are different facts with different authors and different lifetimes.
+`routing` holds the LATEST decision and its author's note, and `step resolve`
+overwrites it with the resolution — which erased the park's reason at the
+moment it was answered. `park_reason` is written only where a step parks, so
+the question survives its own answer instead of being overwritten by it.
+
+**What it fixes.** A parked step's reason lived only in `routing`, so
+resolving the park destroyed the record of why it had parked in the first
+place. A reader auditing a resolved step could see the resolution but not the
+question it answered.
+
+**Blank means never parked, and nothing else.** The default is the empty
+string, and the migration back-fills nothing: no step predating this column
+has a park reason to recover. The blank is inert rather than load-bearing —
+nothing refuses on it — so a step that never parked reads as never parked,
+which it is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v31, v32 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v31 form, since v32 adds no
+table and no index).
+
+### AMENDMENT — the span extends to v33 (DKT-1900, 2026-09-15)
+
+**What changed.** v33 adds ONE column to one table, `steps.park_class`
+(`TEXT NOT NULL DEFAULT ''`): a closed-enum classification of why a step
+parked, beside v32's free-text `park_reason`. `park_reason` explains a park to
+a person; it cannot be routed on. A conductor or panel deciding what to do
+with a parked row must distinguish a gate that failed on the work from a gate
+that could not run, a threshold routing from a loop that hit its bound — and
+reconstructing that from the reason sentence means parsing prose the engine
+is free to reword. This column records the distinction as a value, assigned
+from the routing transaction's own facts and never inferred at read time.
+
+**What it fixes.** A parked step's cause lived only in `park_reason`'s prose,
+so anything routing on why a step parked had to pattern-match a sentence the
+engine could reword at any time. `park_class` gives that same fact a closed,
+compiler-checked vocabulary: `SetStepRoutingTx` writes both columns in one
+statement and refuses a park that names no class, so the two halves of one
+fact cannot disagree.
+
+**Blank means parked before the column existed, and nothing else.** The
+default is the empty string, and the migration back-fills nothing: no step
+predating this column has a class to recover. The blank is inert rather than
+load-bearing — nothing refuses on it for an existing row — so a step parked
+under the old code reads as unclassified, which it is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v32, v33 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v32 form, since v33 adds no
+table and no index).
+
+### AMENDMENT — the span extends to v34 (operator request, 2026-09-16)
+
+**What changed.** v34 adds ONE column to one table, `issues.size`
+(`TEXT NOT NULL DEFAULT ''`): the operator's estimate of how much work an
+issue is, as a closed enum (`model.Size`: trivial, small, bounded,
+needs-design, unknown) rather than free-text labels. It replaces the
+`small`/`trivial` label convention as workflow-routing input — a `[match]`
+clause can now bind on `sizes_any` the same way it binds on `kind` and
+`labels_any` (see engine-spec.md §11.1) — while the labels themselves remain
+available for other purposes.
+
+**What it fixes.** Sizing existed only as an operator-applied labeling
+convention with no engine representation: an issue's size was two free-text
+label strings a workflow's `[match]` happened to read, undocumented anywhere
+in this repo, and indistinguishable from any other label an issue carried.
+This column makes sizing first-class, closed-enum issue data — set and read
+through `docket issue create|edit --size` the same way `--priority` already
+is — so a caller can ask an issue's size without inferring it from labels a
+workflow author chose for an unrelated reason.
+
+**Blank means no size declared, and nothing else.** The default is the empty
+string, and the migration back-fills nothing: an issue created before this
+column existed had no size declared under the label convention either, so
+blank is the correct reading of every existing row, not a guess. The blank is
+inert rather than load-bearing — nothing refuses on it, and a `[match]`
+clause with no `sizes_any` binds exactly as it did before this column
+existed — so an issue that never declares a size reads as unsized, which it
+is.
+
+**Why the ratified arithmetic is untouched.** Like v11–v33, v34 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v33 form, since v34 adds no
+table and no index).
+
+### AMENDMENT — the span extends to v35 (loop-history facts, 2026-09-23)
+
+**What changed.** v35 adds THREE columns to one table, all on `steps`:
+`loop_rounds_run` (`INTEGER NOT NULL DEFAULT 0`), `loop_trigger_step`
+(`TEXT NOT NULL DEFAULT ''`) and `loop_latest_verdict`
+(`TEXT NOT NULL DEFAULT ''`). Together they are the loop history a fix-loop
+exhaustion leaves on the refusing step: how many rounds ran against the cap,
+the instance whose verdict opened the loop, and the verdict the last round
+ended on. They are three columns rather than one encoded string because a
+reader of a loop-bound park asks each question separately, and the count is an
+integer a router compares against the pinned cap.
+
+**Why it needed a version.** Before v35 these facts existed only in the event
+log, and `events prune` deletes that log for a terminal run. A router reading
+the park, an operator, and `step show` could reconstruct the history only while
+the events survived, and could not reconstruct it at all afterwards. The loop
+refusal writes all three columns in the same transaction as its routing
+decision, so no reader sees an exhaustion whose history has not landed.
+
+**Zero and blank mean the step never exhausted a loop, and nothing else.** The
+defaults are zero and the empty string, and the migration back-fills nothing:
+recovering a historical loop's trigger and last verdict would mean mining a
+prunable event log, and a guessed verdict is worse than an absent one. Every
+pre-v35 row reads as a step that never exhausted a loop, which is what the
+columns can truthfully say about it.
+
+**Why the ratified arithmetic is untouched.** Like v11–v34, v35 is an
+amendment, not a stage: three additive columns with defaults, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMNS (the v27–v34 form, since v35 adds no
+table and no index). No v5–v10 column, table, or count changes.
+
+### AMENDMENT — the span extends to v36 (schema retirement, 2026-09-24)
+
+**What changed.** v36 adds ONE column to one table, `schemas.deprecated_at_ms`
+(`INTEGER`, NULL by default). It is the schema half of v11's
+`workflows.deprecated_at_ms`: a timestamp marking a registered schema version
+as retired from service. NULL means the version is in service, exactly as it
+did before the column existed.
+
+**Why it needed a version.** `docket registry audit` reports orphaned schemas,
+but a schema no file declares had no way to be retired: `docket schema`
+offered only `register`, `list`, and `show`, and the only way to clear an
+orphan was a direct edit to the store. `docket schema deprecate` sets the
+timestamp and never deletes. A retired version stays readable by explicit
+`@version` and keeps validating payloads for every run that pinned it;
+`workflow register`, `workflow lint`, and activation's auto-registration refuse
+a NEW `payload` reference to it; `schema list` hides it by default; and
+`registry audit` reports an orphan whose every version is retired as
+`retired: true`, as it already did for workflows.
+
+**NULL means in service, and nothing else.** The migration back-fills nothing:
+retirement is an operator act, and no schema is retired by an upgrade. Every
+pre-v36 row reads as a version in service, which is what the column can
+truthfully say about it.
+
+**Why the ratified arithmetic is untouched.** Like v11–v35, v36 is an
+amendment, not a stage: one additive nullable column, a `hasColumn`-probed
+`ALTER` so the migration is idempotent and re-runnable, and a rewind guard that
+probes the COLUMN (the v27–v35 form, since v36 adds no table and no index). No
+v5–v10 column, table, or count changes.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay
