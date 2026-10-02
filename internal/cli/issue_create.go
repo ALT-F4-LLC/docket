@@ -201,17 +201,30 @@ var createCmd = &cobra.Command{
 			return err
 		}
 
-		id, err := db.CreateIssueIdempotent(conn, &issue, labelFlag, fileFlag, idempotencyKey)
-		if err != nil {
-			return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
+		// A replayed key returns the earlier issue and writes nothing to it:
+		// this call's flags describe a create that is not happening.
+		var id int
+		replayed := false
+		if idempotencyKey != "" {
+			id, replayed, err = db.LookupIdempotencyKey(conn, db.ScopeIssueCreate, idempotencyKey)
+			if err != nil {
+				return cmdErr(err, output.ErrGeneral)
+			}
 		}
 
-		// Scope is written after the insert rather than through CreateIssue,
-		// so the create path an unmodified `issue create` takes is unchanged:
-		// a repo that never declares a scope executes exactly the v6 code and
-		// leaves scope_globs NULL (§3 phase-2 dormancy).
-		if err := applyScope(cmd, conn, id); err != nil {
-			return err
+		if !replayed {
+			id, err = db.CreateIssueIdempotent(conn, &issue, labelFlag, fileFlag, idempotencyKey)
+			if err != nil {
+				return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
+			}
+
+			// Scope is written after the insert rather than through CreateIssue,
+			// so the create path an unmodified `issue create` takes is unchanged:
+			// a repo that never declares a scope executes exactly the v6 code and
+			// leaves scope_globs NULL (§3 phase-2 dormancy).
+			if err := applyScope(cmd, conn, id); err != nil {
+				return err
+			}
 		}
 
 		// Refetch to get full object with timestamps.

@@ -8,6 +8,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/pflag"
 )
 
 // TestIssueCreateEchoesAppliedLabels is DKT-240.
@@ -69,6 +70,104 @@ func TestIssueCreateEchoesAppliedLabels(t *testing.T) {
 	testsupport.Must(t, err, "GetIssueLabels: %v", err)
 	if len(stored) != len(env.Data.Labels) {
 		t.Errorf("stored labels %v disagree with the echoed %v", stored, env.Data.Labels)
+	}
+}
+
+// resetCreateFlags returns createCmd's flags and the root --json flag to their
+// defaults with Changed cleared. Set(name, "") is not enough: it leaves
+// Changed true, and applyScope keys on Changed("scope"), so a leaked scope
+// would be written by every later create in the package.
+func resetCreateFlags() {
+	createCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if sv, ok := f.Value.(pflag.SliceValue); ok {
+			_ = sv.Replace(nil)
+		} else {
+			_ = f.Value.Set(f.DefValue)
+		}
+		f.Changed = false
+	})
+	_ = rootCmd.PersistentFlags().Set("json", "")
+	rootCmd.PersistentFlags().Lookup("json").Changed = false
+}
+
+// TestIssueCreateReplayWritesNothing: a create replayed under an idempotency
+// key returns the earlier issue and leaves it exactly as it was. The replay
+// used to overwrite the earlier issue's scope with its own --scope while
+// version, updated_at, and the activity log stayed put, so nothing recorded
+// the change.
+func TestIssueCreateReplayWritesNothing(t *testing.T) {
+	conn := newTestDB(t)
+	cmd := cmdWithDB(conn)
+	cmd.SetContext(context.WithValue(cmd.Context(), dbKey, conn))
+	createCmd.SetContext(cmd.Context())
+	resetCreateFlags()
+	t.Cleanup(resetCreateFlags)
+
+	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+	testsupport.Must(t, createCmd.Flags().Set("idempotency-key", "K"), "set --idempotency-key")
+
+	create := func(title, scope string) string {
+		t.Helper()
+		testsupport.Must(t, createCmd.Flags().Set("title", title), "set --title")
+		testsupport.Must(t, createCmd.Flags().Set("scope", scope), "set --scope")
+		restore := captureStdout(t)
+		runErr := createCmd.RunE(createCmd, nil)
+		out := restore()
+		testsupport.Must(t, runErr, "issue create --scope %s: %v", scope, runErr)
+		var env struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &env); err != nil {
+			t.Fatalf("create payload is not JSON: %v\n%s", err, out)
+		}
+		// Replace, not a second Set: a changed slice flag appends on Set.
+		testsupport.Must(t, createCmd.Flags().Lookup("scope").Value.(pflag.SliceValue).Replace(nil), "clear --scope")
+		return env.Data.ID
+	}
+
+	firstID := create("original", "a/**")
+	id, err := model.ParseID(firstID)
+	testsupport.Must(t, err, "ParseID(%q): %v", firstID, err)
+
+	scopeBefore, err := db.IssueScopeGlobs(conn, id)
+	testsupport.Must(t, err, "IssueScopeGlobs: %v", err)
+	if scopeBefore != `["a/**"]` {
+		t.Fatalf("first create under a fresh key stored scope %q, want %q", scopeBefore, `["a/**"]`)
+	}
+
+	// Pin updated_at to a past instant so a replay that rewrites it within
+	// the same wall-clock second still shows up as a change.
+	_, err = conn.Exec(`UPDATE issues SET updated_at = ? WHERE id = ?`, "2020-01-01T00:00:00Z", id)
+	testsupport.Must(t, err, "pin updated_at: %v", err)
+	before, err := db.GetIssue(conn, id)
+	testsupport.Must(t, err, "GetIssue: %v", err)
+	activityBefore, err := db.CountActivity(conn, id)
+	testsupport.Must(t, err, "CountActivity: %v", err)
+
+	replayID := create("replayed", "b/**")
+	if replayID != firstID {
+		t.Fatalf("replay under the same key returned %s, want the earlier issue %s", replayID, firstID)
+	}
+
+	scopeAfter, err := db.IssueScopeGlobs(conn, id)
+	testsupport.Must(t, err, "IssueScopeGlobs: %v", err)
+	if scopeAfter != scopeBefore {
+		t.Errorf("replay changed the earlier issue's scope from %q to %q", scopeBefore, scopeAfter)
+	}
+	after, err := db.GetIssue(conn, id)
+	testsupport.Must(t, err, "GetIssue: %v", err)
+	if after.Version != before.Version {
+		t.Errorf("replay changed version from %d to %d", before.Version, after.Version)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("replay changed updated_at from %s to %s", before.UpdatedAt, after.UpdatedAt)
+	}
+	activityAfter, err := db.CountActivity(conn, id)
+	testsupport.Must(t, err, "CountActivity: %v", err)
+	if activityAfter != activityBefore {
+		t.Errorf("replay changed the activity row count from %d to %d", activityBefore, activityAfter)
 	}
 }
 
