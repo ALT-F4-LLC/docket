@@ -97,6 +97,15 @@ func runRunVerifyPins(cmd *cobra.Command, ref string, w *output.Writer) error {
 				"run to pin them, or take the reference back out of the " +
 				"referencing file"
 		}
+		// Unpinned gates are a separate report, but an unsound run must not
+		// hide them: name them beside the drift.
+		if len(report.Gates) > 0 {
+			names := make([]string, 0, len(report.Gates))
+			for _, g := range report.Gates {
+				names = append(names, fmt.Sprintf("%q", g.Gate))
+			}
+			remedy += "; gates with no pinned script: " + strings.Join(names, ", ")
+		}
 		return cmdErr(fmt.Errorf("%s: %s%s",
 			report.Run, engine.PinReportReason(report), remedy), code)
 	}
@@ -116,6 +125,11 @@ func renderPinReport(r *engine.PinReport) string {
 	// precisely the false confidence DKT-821 was.
 	fmt.Fprintf(&b, "%s: %d pin(s), all sound; every ref they reference is pinned",
 		r.Run, len(r.Pins))
+	// Unpinned gates are a report, never a refusal: a `make <target>` trust
+	// entry names no script, so the run holds nothing to compare.
+	for _, g := range r.Gates {
+		fmt.Fprintf(&b, "\ngate %q: %s (%s)", g.Gate, g.Status, g.Reason)
+	}
 	return b.String()
 }
 

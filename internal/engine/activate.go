@@ -822,6 +822,21 @@ func activateTx(
 		filePins = append(filePins, closure...)
 	}
 
+	// The scripts the bound workflows' gates execute are pinned too, so a
+	// mid-run edit to one is reported by `verify-pins` instead of silently
+	// changing what a later verify reads. Only trust entries whose argv names
+	// a file under the run's exec root contribute; the rest are reported
+	// there as unpinned. A re-activation keeps the original hash (RA2 drops a
+	// ref already pinned at insert below), so an edited script stays drifted.
+	gateDefs := make(map[int]*workflow.Definition, len(runIssues))
+	for i, ri := range runIssues {
+		if bound := bindings[ri.IssueID]; bound != nil && bound.definition != nil {
+			gateDefs[i] = bound.definition
+		}
+	}
+	filePins = append(filePins,
+		gateScriptPins(gateDefs, gatePinStore, resolvePaths().Identity, run.ExecRoot)...)
+
 	pins := make([]db.Pin, 0, len(bindings)+len(filePins))
 	for _, ri := range runIssues {
 		bound := bindings[ri.IssueID]

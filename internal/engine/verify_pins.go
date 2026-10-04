@@ -87,6 +87,12 @@ type PinReport struct {
 	Changed  int `json:"changed"`
 	Missing  int `json:"missing"`
 	Unpinned int `json:"unpinned"`
+	// Gates lists the declared gates whose script this run does not pin, by
+	// gate name. It is a report beside the pin check, not part of it:
+	// Sound() ignores it, since a `make <target>` entry names no script file.
+	// Empty (never nil), in gate-name order.
+	Gates         []GateVerdict `json:"gates"`
+	UnpinnedGates int           `json:"unpinned_gates"`
 }
 
 // Sound reports whether every pin still matches AND the pin set is closed —
@@ -118,7 +124,16 @@ func (r *PinReport) Sound() bool {
 // a bundle depend on the working tree. This verb is the deliberate opposite —
 // it asks about the tree, on purpose, and writes nothing.
 func VerifyPins(conn *sql.DB, runID int) (*PinReport, error) {
-	return verifyPinsClosedIn(conn, runID, instanceConfigRoots())
+	report, err := verifyPinsClosedIn(conn, runID, instanceConfigRoots())
+	if err != nil {
+		return nil, err
+	}
+	// The gate half is a report, never a verdict on the pins: it names the
+	// declared gates whose script the run does not hold a pin for.
+	if err := verifyGateScripts(conn, runID, report, gatePinStore, resolvePaths().Identity); err != nil {
+		return nil, err
+	}
+	return report, nil
 }
 
 // verifyPinsClosedIn is the whole-run answer: the per-pin check, plus the
@@ -182,6 +197,7 @@ func verifyPinsIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
 		// Both lists are empty rather than nil so `--json` emits arrays on a
 		// clean run — the same wire shape a consumer parses either way.
 		Pins: []PinVerdict{}, References: []ReferenceVerdict{},
+		Gates: []GateVerdict{},
 	}
 
 	for _, p := range pins {

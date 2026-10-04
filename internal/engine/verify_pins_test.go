@@ -8,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -178,5 +179,190 @@ func TestVerifyPinsIsDeterministic(t *testing.T) {
 				t.Fatalf("row %d moved: %+v -> %+v", i, first[i], report.Pins[i])
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Gate scripts are pinned at activation and reported when unpinned
+// ---------------------------------------------------------------------------
+
+// gateScriptFixture builds a repo whose gate scripts a run's gates execute and
+// swaps in a trust store whose entries name them three ways: a relative argv,
+// an absolute argv under the exec root, and a build tool naming no script.
+func gateScriptFixture(t *testing.T) (repo string, conn *sql.DB, runID int) {
+	t.Helper()
+	conn = mustDB(t)
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving the repo root: %v", err)
+	for name, body := range map[string]string{
+		"scripts/qa/build.sh":        "echo build\n",
+		"scripts/qa/ac-commands.sh":  "echo ac\n",
+		"scripts/qa/self-hygiene.sh": "echo hygiene\n",
+	} {
+		path := filepath.Join(repo, name)
+		testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o755), "mkdir")
+		testsupport.Must(t, os.WriteFile(path, []byte(body), 0o755), "writing %s", name)
+	}
+
+	entry := func(name string, argv ...string) trust.Entry {
+		return trust.Entry{
+			Name: name, Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Global: true,
+		}
+	}
+	prior := gatePinStore
+	gatePinStore = sandboxTrust(t,
+		entry("build", "bash", "scripts/qa/build.sh"),
+		entry("ac-commands", "bash", filepath.Join(repo, "scripts/qa/ac-commands.sh")),
+		entry("tests", "make", "tests"),
+	)
+	t.Cleanup(func() { gatePinStore = prior })
+
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "test run", 0, nowMS,
+		db.RunContext{ExecRoot: repo})
+	testsupport.Must(t, err, "starting run: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "adding the issue")
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	return repo, conn, run.ID
+}
+
+func filePinFor(t *testing.T, conn *sql.DB, runID int, ref string) (db.Pin, bool) {
+	t.Helper()
+	pins, err := db.ListPins(conn, runID)
+	testsupport.Must(t, err, "ListPins: %v", err)
+	for _, p := range pins {
+		if p.Kind == db.PinKindFile && p.Ref == ref {
+			return p, true
+		}
+	}
+	return db.Pin{}, false
+}
+
+// TestActivationPinsGateScripts: each gate whose trusted argv names a file
+// under the exec root gets a file pin holding that file's SHA-256, whether the
+// argv spells the path relatively or as an absolute path under the root.
+func TestActivationPinsGateScripts(t *testing.T) {
+	repo, conn, runID := gateScriptFixture(t)
+
+	for rel, body := range map[string]string{
+		"scripts/qa/build.sh":       "echo build\n",
+		"scripts/qa/ac-commands.sh": "echo ac\n",
+	} {
+		ref := filepath.Join(repo, rel)
+		p, ok := filePinFor(t, conn, runID, ref)
+		if !ok {
+			t.Fatalf("no file pin for gate script %s; the gate's argv names it", ref)
+		}
+		if want := workflow.SHA256([]byte(body)); p.SHA256 != want {
+			t.Errorf("pin for %s holds %s, want %s", ref, p.SHA256, want)
+		}
+	}
+	if _, ok := filePinFor(t, conn, runID,
+		filepath.Join(repo, "scripts/qa/self-hygiene.sh")); ok {
+		t.Error("a script no declared gate's trusted argv names was pinned")
+	}
+}
+
+// TestVerifyPinsReportsAnEditedGateScriptAsDrift: a script changed after
+// activation is a changed pin, so the report is not sound and names the ref.
+func TestVerifyPinsReportsAnEditedGateScriptAsDrift(t *testing.T) {
+	repo, conn, runID := gateScriptFixture(t)
+	script := filepath.Join(repo, "scripts/qa/ac-commands.sh")
+
+	report, err := VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+	if !report.Sound() {
+		t.Fatalf("an untouched run reads unsound: %s", PinReportReason(report))
+	}
+
+	testsupport.Must(t, os.WriteFile(script, []byte("echo edited\n"), 0o755), "editing the script")
+	report, err = VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+	if report.Sound() {
+		t.Fatal("the report reads sound with a pinned gate script edited after activation")
+	}
+	var drift *PinVerdict
+	for i := range report.Pins {
+		if report.Pins[i].Ref == script {
+			drift = &report.Pins[i]
+		}
+	}
+	if drift == nil || drift.Status != PinChanged {
+		t.Errorf("the edited script's verdict is %+v, want %q for ref %s", drift, PinChanged, script)
+	}
+}
+
+// TestVerifyPinsReportsUnpinnedGates: a gate whose trusted argv names no file
+// under the exec root is listed as unpinned by name, and that report never
+// makes the run unsound, because most trust entries are `make <target>`.
+func TestVerifyPinsReportsUnpinnedGates(t *testing.T) {
+	_, conn, runID := gateScriptFixture(t)
+
+	report, err := VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+
+	got := map[string]GateVerdict{}
+	for _, g := range report.Gates {
+		got[g.Gate] = g
+	}
+	if g, ok := got["tests"]; !ok || g.Status != GateUnpinned {
+		t.Errorf("the make-style gate `tests` is not listed as unpinned: %+v", report.Gates)
+	}
+	for _, name := range []string{"build", "ac-commands"} {
+		if _, ok := got[name]; ok {
+			t.Errorf("gate %q names a pinned script but is listed as unpinned", name)
+		}
+	}
+	if report.UnpinnedGates != len(report.Gates) {
+		t.Errorf("unpinned_gates = %d, want %d", report.UnpinnedGates, len(report.Gates))
+	}
+	if !report.Sound() {
+		t.Errorf("an unpinned gate made the report unsound: %s", PinReportReason(report))
+	}
+}
+
+// TestRepoLocalGateFilesRefusesPathsOutsideTheRoot: a path that resolves
+// outside the exec root, by `..` or by symlink, is not repo-local.
+func TestRepoLocalGateFilesRefusesPathsOutsideTheRoot(t *testing.T) {
+	outside, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving: %v", err)
+	secret := filepath.Join(outside, "gate.sh")
+	testsupport.Must(t, os.WriteFile(secret, []byte("x\n"), 0o755), "writing")
+
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving: %v", err)
+	testsupport.Must(t, os.Symlink(secret, filepath.Join(repo, "link.sh")), "symlink")
+
+	for _, argv := range [][]string{
+		{"bash", secret},
+		{"bash", "link.sh"},
+		{"bash", "../" + filepath.Base(outside) + "/gate.sh"},
+		{"make", "tests"},
+		{"bash", "-c", "true"},
+	} {
+		if got := repoLocalGateFiles(argv, repo); len(got) != 0 {
+			t.Errorf("argv %v resolved to repo-local files %v, want none", argv, got)
+		}
+	}
+}
+
+// TestRepoLocalGateFilesPinsOnlyTheScript: a file a tool merely receives as an
+// argument (a test a run is meant to edit) is not the gate's script, so it is
+// not pinned and its edit is not reported as drift. An interpreter's first
+// non-flag argument is the script.
+func TestRepoLocalGateFilesPinsOnlyTheScript(t *testing.T) {
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving: %v", err)
+	file := filepath.Join(repo, "tests", "x.py")
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(file), 0o755), "mkdir")
+	testsupport.Must(t, os.WriteFile(file, []byte("x\n"), 0o755), "writing")
+
+	if got := repoLocalGateFiles([]string{"pytest", "tests/x.py"}, repo); len(got) != 0 {
+		t.Errorf("a tool's argument was pinned as the gate script: %v", got)
+	}
+	if got := repoLocalGateFiles([]string{"bash", "tests/x.py"}, repo); len(got) != 1 || got[0] != file {
+		t.Errorf("an interpreter's script argument resolved to %v, want [%s]", got, file)
 	}
 }
