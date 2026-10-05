@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -623,6 +624,17 @@ func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, cha
 	oldIssue, err := getIssueTx(tx, id)
 	if err != nil {
 		return err
+	}
+
+	// An operator moving an issue INTO done supersedes a routing's earlier
+	// "abandoned": the delivered issue must not read as cancelled.
+	// `run_disposition` keeps the run-level record. Re-asserting done on an
+	// issue already there is not a transition and keeps the resolution.
+	if updates["status"] == string(model.StatusDone) && oldIssue.Status != model.StatusDone {
+		if _, explicit := updates["resolution"]; !explicit {
+			updates = maps.Clone(updates)
+			updates["resolution"] = ""
+		}
 	}
 
 	var setClauses []string
