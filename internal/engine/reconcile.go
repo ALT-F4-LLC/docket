@@ -450,11 +450,15 @@ func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
 // §2.1). Rewriting it to epoch-ms would change what every existing verb emits
 // and break §9 item 8, which is why v7's own timestamps are separate `_ms`
 // columns rather than a migration of this one.
+//
+// The transition clears `resolution`: an `abandoned` left by an earlier run no
+// longer describes an issue this run finished. The `status != done` guard keeps
+// an abandonment recorded AFTER completion (DKT-245) from being erased.
 func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
 
 	res, err := tx.Exec(
-		`UPDATE issues SET status = ?, updated_at = ?, version = version + 1
+		`UPDATE issues SET status = ?, resolution = '', updated_at = ?, version = version + 1
 		  WHERE id = ? AND status != ?`,
 		model.StatusDone, now, step.IssueID, model.StatusDone,
 	)
