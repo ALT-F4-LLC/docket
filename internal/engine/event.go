@@ -384,6 +384,13 @@ const (
 	// its own, but contention is a coordination fact a store-only retro
 	// counts. It carries the step, the requesting owner, and the reason.
 	EventClaimRefused = "claim-refused"
+
+	// EventVoteReseated and EventStepDeferred (DKT-2759) are facts only the
+	// conductor observes, recorded through `run fact add`: a vote seat it
+	// re-spawned, and a step it held back on budget or behind a chain (the
+	// cause rides in data). Both carry the actor and cwd that reported them.
+	EventVoteReseated = "vote-reseated"
+	EventStepDeferred = "step-deferred"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -427,6 +434,8 @@ var eventKinds = map[string]bool{
 	EventConfigChanged:        true,
 	EventDispatchCloseRefused: true,
 	EventClaimRefused:         true,
+	EventVoteReseated:         true,
+	EventStepDeferred:         true,
 }
 
 // recordEvent writes one event in the caller's transaction.

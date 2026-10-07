@@ -609,6 +609,12 @@ var eventActors = map[string]Actor{
 	// The refused claim (DKT-2776): the same actor as the `step-claimed` it
 	// failed to become — a worker, or the dispatcher acting for one.
 	EventClaimRefused: ActorHuman,
+
+	// The conductor's reported facts (DKT-2759): nothing in the engine
+	// observes a re-seat or a deferral; each exists because the conductor
+	// ran `run fact add`, which is precisely what `human` means here.
+	EventVoteReseated: ActorHuman,
+	EventStepDeferred: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,

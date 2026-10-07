@@ -254,12 +254,17 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// argument: claim contention moves no state but is a coordination
 		// fact a store-only retro counts.
 		"claim-refused",
+
+		// The conductor's reported facts (DKT-2759) — TWO: a re-seat and a
+		// deferral, the coordination facts only the conductor observes. A
+		// budget and a chain deferral are one outcome with two causes.
+		"vote-reseated", "step-deferred",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 55 {
+	if len(eventKinds) != 57 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
@@ -270,8 +275,9 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			"re-pin kind, DKT-1079's run-note kind, DKT-2465's "+
 			"conductor-seat kind, DKT-2071's dispatch-extend kind, "+
 			"DKT-2766's config-changed kind, DKT-2758's "+
-			"dispatch-close-refused kind, and DKT-2776's claim-refused kind "+
-			"enumerate 55 (see DKT-21)",
+			"dispatch-close-refused kind, DKT-2776's claim-refused kind, and "+
+			"DKT-2759's two conductor-fact kinds "+
+			"enumerate 57 (see DKT-21)",
 			len(eventKinds))
 	}
 }
