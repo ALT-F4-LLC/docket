@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"os/exec"
 	"strings"
 	"testing"
@@ -239,7 +240,7 @@ func TestWaiverSuppressesAdjudicatedStaleTarget(t *testing.T) {
 	// advisory's own 12-character rendering.
 	waived, err := e.WaiveStaleTargets(conn, run.ID,
 		[]string{"review@0#0", "review@0#1", "review@0#2"},
-		"cafe1234cafe", "the divergence is the later format pass", nowMS)
+		"cafe1234cafe", "the divergence is the later format pass", testBy, nowMS)
 	testsupport.Must(t, err, "waive: %v", err)
 	if len(waived) != 3 {
 		t.Fatalf("waivers minted = %d, want 3: %+v", len(waived), waived)
@@ -281,7 +282,7 @@ func TestWaiverDoesNotCoverADifferentSignature(t *testing.T) {
 	// A waiver for a DIFFERENT sha on every row: nothing may be suppressed.
 	_, err := e.WaiveStaleTargets(conn, run.ID,
 		[]string{"review@0#0", "review@0#1", "review@0#2", "review@0#3"},
-		"beefbeefbeef", "ruled on some other target", nowMS)
+		"beefbeefbeef", "ruled on some other target", testBy, nowMS)
 	testsupport.Must(t, err, "waive: %v", err)
 
 	m, err := e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
@@ -305,7 +306,7 @@ func TestWaiverSuppressesAbsentTargetWarning(t *testing.T) {
 
 	_, err := e.WaiveStaleTargets(conn, run.ID,
 		[]string{"review@0#0", "review@0#1", "review@0#2", "review@0#3"},
-		"cafe1234cafe1234", "seats judge the integrated successor instead", nowMS)
+		"cafe1234cafe1234", "seats judge the integrated successor instead", testBy, nowMS)
 	testsupport.Must(t, err, "waive: %v", err)
 
 	m, err := e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
@@ -332,13 +333,60 @@ func TestWaiveStaleTargetsRefusesBadInputs(t *testing.T) {
 		{"a non-hex sha", []string{"review@0#0"}, "not-a-sha!!"},
 		{"a too-short prefix", []string{"review@0#0"}, "cafe12"},
 	} {
-		if _, err := e.WaiveStaleTargets(conn, run.ID, c.instances, c.sha, "", nowMS); err == nil {
+		if _, err := e.WaiveStaleTargets(conn, run.ID, c.instances, c.sha, "", testBy, nowMS); err == nil {
 			t.Errorf("%s: the waiver was recorded", c.name)
 		}
 	}
 
 	if _, err := e.WaiveStaleTargets(conn, 999999,
-		[]string{"review@0#0"}, "cafe1234cafe", "", nowMS); err == nil {
+		[]string{"review@0#0"}, "cafe1234cafe", "", testBy, nowMS); err == nil {
 		t.Error("a waiver was recorded against a run that does not exist")
+	}
+}
+
+// TestWaiveStaleTargetsRecordsRulingAttribution is DKT-2654 criterion 1: each
+// stale-target-waived event is a JSON object carrying the ruling's actor and
+// cwd beside the target sha and the waiver id it minted.
+func TestWaiveStaleTargetsRecordsRulingAttribution(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	by := Attribution{Actor: "the conductor", Cwd: "/work/shared"}
+	waived, err := e.WaiveStaleTargets(conn, run.ID, []string{"review@0#0"},
+		"cafe1234cafe", "adjudicated", by, nowMS)
+	testsupport.Must(t, err, "waive: %v", err)
+
+	page, err := ListEvents(conn, EventQuery{RunID: run.ID, Kind: EventStaleTargetWaived})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	if len(page.Events) != 1 {
+		t.Fatalf("%d stale-target-waived events, want 1", len(page.Events))
+	}
+	var data map[string]any
+	testsupport.Must(t, json.Unmarshal(page.Events[0].Data, &data), "decoding %s: %v", page.Events[0].Data, nil)
+	if data["actor"] != by.Actor || data["cwd"] != by.Cwd {
+		t.Errorf("actor/cwd = %v/%v, want %q/%q", data["actor"], data["cwd"], by.Actor, by.Cwd)
+	}
+	if data["target_sha"] != waived[0].Target || data["waiver"] != float64(waived[0].ID) {
+		t.Errorf("event data %v does not match the waiver %+v", data, waived[0])
+	}
+}
+
+// TestWaiveStaleTargetsRefusesEmptyAttribution is DKT-2654 criterion 2: a zero
+// attribution is refused before any waiver row or event is written.
+func TestWaiveStaleTargetsRefusesEmptyAttribution(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	if _, err := e.WaiveStaleTargets(conn, run.ID, []string{"review@0#0"},
+		"cafe1234cafe", "adjudicated", Attribution{}, nowMS); err == nil {
+		t.Fatal("an unattributed waiver was recorded")
+	}
+	var rows int
+	testsupport.Must(t, conn.QueryRow(`SELECT COUNT(*) FROM stale_target_waivers`).Scan(&rows),
+		"counting waivers: %v", nil)
+	page, err := ListEvents(conn, EventQuery{RunID: run.ID, Kind: EventStaleTargetWaived})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	if rows != 0 || len(page.Events) != 0 {
+		t.Errorf("%d waiver rows and %d events after a refusal, want 0 and 0", rows, len(page.Events))
 	}
 }

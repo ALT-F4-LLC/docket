@@ -976,8 +976,12 @@ func runDispatchWaiveTarget(cmd *cobra.Command, w *output.Writer) error {
 	target, _ := cmd.Flags().GetString("target")
 	note, _ := cmd.Flags().GetString("note")
 
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
 	waivers, err := engine.NewEngine().WaiveStaleTargets(
-		conn, runID, steps, target, note, model.NowMS())
+		conn, runID, steps, target, note, by, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}

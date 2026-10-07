@@ -53,7 +53,7 @@ var waiverSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 // instance with a new signature, and the operator waives what warned, not
 // what might.
 func (e *Engine) WaiveStaleTargets(
-	conn *sql.DB, runID int, instances []string, targetSHA, note string,
+	conn *sql.DB, runID int, instances []string, targetSHA, note string, by Attribution,
 	nowMS int64,
 ) ([]WaivedTarget, error) {
 	if len(instances) == 0 {
@@ -69,6 +69,13 @@ func (e *Engine) WaiveStaleTargets(
 			"target sha %q is not a hex commit sha (or a prefix of at least "+
 				"7 characters); pass the `target_sha` the stale-target "+
 				"warning named", targetSHA)
+	}
+
+	// DKT-2654: a waiver is a ruling that silences an advisory for good, so
+	// its event names who ruled and from where; an unattributed one is
+	// refused before any waiver row or event is written.
+	if err := by.require("dispatch waive-target"); err != nil {
+		return nil, err
 	}
 
 	if _, err := db.GetRun(conn, runID); err != nil {
@@ -93,9 +100,15 @@ func (e *Engine) WaiveStaleTargets(
 		if err != nil {
 			return nil, err
 		}
+		data, err := rulingData(by, map[string]any{
+			"target_sha": targetSHA, "waiver": id,
+		})
+		if err != nil {
+			return nil, err
+		}
 		if err := recordEvent(tx, eventRecord{
 			Kind: EventStaleTargetWaived, RunID: runID, Instance: instance,
-			Data: fmt.Sprintf("%s#%d", targetSHA, id), AtMS: nowMS,
+			Data: data, AtMS: nowMS,
 		}); err != nil {
 			return nil, err
 		}
