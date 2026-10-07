@@ -10,6 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -459,6 +460,28 @@ func TestVoteShowJSON_CarriesEachSeatsUsage(t *testing.T) {
 		}
 		if !reflect.DeepEqual(v["usage_source"], w[1]) {
 			t.Errorf("%s usage_source = %#v, want %#v", voter, v["usage_source"], w[1])
+		}
+	}
+
+	// The same keys survive the v2 envelope.
+	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
+	testsupport.Must(t, runVoteShow(cmdWithDB(conn), []string{model.FormatProposalID(pid)}, w),
+		"runVoteShow --json=v2: %v", nil)
+	var v2 struct {
+		Data struct {
+			Votes []map[string]any `json:"votes"`
+		} `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &v2), "decoding v2: %v", nil)
+	if len(v2.Data.Votes) != 2 {
+		t.Fatalf("v2 vote show lists %d casts, want 2: %s", len(v2.Data.Votes), buf.String())
+	}
+	for _, v := range v2.Data.Votes {
+		w := want[v["voter_name"].(string)]
+		if !reflect.DeepEqual(v["usage"], w[0]) || !reflect.DeepEqual(v["usage_source"], w[1]) {
+			t.Errorf("v2 cast %v: usage %#v source %#v, want %#v %#v",
+				v["voter_name"], v["usage"], v["usage_source"], w[0], w[1])
 		}
 	}
 
