@@ -1019,7 +1019,6 @@ func runSteps(t *testing.T, conn *sql.DB, runID int) []*db.Step {
 	return steps
 }
 
-// lastRunEvent returns the kind and data of a run's most recent event.
 // countRunEvents counts a run's events of one kind.
 func countRunEvents(t *testing.T, conn *sql.DB, runID int, kind string) int {
 	t.Helper()
