@@ -1509,7 +1509,7 @@ checkable, and it stops being an argument and becomes a script.
 | `next` | `step-ready`, `lease-reaped`, `join-completed`, `loop-entered`, `dispatch-abandoned` (TTL), `issue-promoted` |
 | `gate` | `gate-started`, `gate-recorded`, `gate-unmatched`, `gate-rerun`, `vote-opened`, `vote-tallied` |
 | `threshold` | `step-routed`, `step-failed`, `step-superseded`, `step-skipped`, `step-held` |
-| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-extended` (DKT-2071), `dispatch-closed`, `dispatch-abandoned` (explicit), `conductor-seated` (DKT-2465) |
+| `human` | `run-started`, `run-activated`, `run-paused`, `run-resumed`, `run-abandoned`, `run-done`, `step-claimed`, `step-heartbeat`, `step-recorded`, `step-resolved`, `step-approved`, `step-rejected`, `issue-abandoned`, `trust-added`, `trust-removed`, `dispatch-opened`, `dispatch-extended` (DKT-2071), `dispatch-closed`, `dispatch-abandoned` (explicit), `conductor-seated` (DKT-2465), `dispatch-close-refused` (DKT-2758), `claim-refused` (DKT-2776) |
 
 **Two rows need their sentence:**
 
