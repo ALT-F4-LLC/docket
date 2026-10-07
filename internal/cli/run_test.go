@@ -1565,6 +1565,14 @@ func TestRunStatusShowsActivationHead(t *testing.T) {
 		t.Errorf("run status text does not show the activation head:\n%s", text)
 	}
 
+	// Pruning old events must not turn the status read into a GONE: the
+	// head is read directly, not through the cursor feed.
+	_, err = conn.Exec(`DELETE FROM events WHERE seq = (SELECT MIN(seq) FROM events)`)
+	testsupport.Must(t, err, "pruning the oldest event: %v", err)
+	if !strings.Contains(status(true, runID), commit) {
+		t.Errorf("run status lost the activation head after a prune")
+	}
+
 	// A run whose activation recorded no head shows none.
 	bare, _ := seedRun(t, conn)
 	_, err = engine.Activate(conn, bare, engine.ActivateOptions{NowMS: model.NowMS()})

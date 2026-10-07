@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -767,19 +768,31 @@ type ActivationHead struct {
 
 // LatestActivationHead reads ActivationHead for `run status` (DKT-3310). It
 // returns nil when the latest run-activated event carries no commit.
+//
+// It reads the row directly rather than through ListEvents: that is a cursor
+// feed whose GONE probe refuses a zero cursor once anything was pruned, and
+// a status read must not fail because old events were retired.
 func LatestActivationHead(conn *sql.DB, runID int) (*ActivationHead, error) {
-	page, err := ListEvents(conn, EventQuery{RunID: runID, Kind: EventRunActivated, Tail: 1})
+	tx, err := conn.Begin()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading the activation head: %w", err)
 	}
-	if len(page.Events) == 0 {
+	defer tx.Rollback()
+	var raw string
+	err = tx.QueryRow(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`,
+		runID, EventRunActivated).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the activation head: %w", err)
 	}
 	var data struct {
 		Branch string `json:"head_branch"`
 		Commit string `json:"head_commit"`
 	}
-	if err := json.Unmarshal(page.Events[0].Data, &data); err != nil || data.Commit == "" {
+	if err := json.Unmarshal([]byte(raw), &data); err != nil || data.Commit == "" {
 		return nil, nil
 	}
 	return &ActivationHead{Branch: data.Branch, Commit: data.Commit}, nil
