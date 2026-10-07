@@ -215,6 +215,15 @@ func TestGapWithoutHeaderMaterializesAsBefore(t *testing.T) {
 	if len(labels) != 0 {
 		t.Errorf("gap issue labels = %v, want none", labels)
 	}
+	// DKT-3294: no `Files:` line, so no files and no scope.
+	files, err := db.GetIssueFiles(conn, gapID)
+	testsupport.Must(t, err, "reading files: %v", err)
+	if len(files) != 0 {
+		t.Errorf("gap issue files = %v, want none", files)
+	}
+	if issue.Scope != nil {
+		t.Errorf("gap issue scope = %v, want none declared", *issue.Scope)
+	}
 }
 
 // TestParseGapHeader covers the mapping table and the block's boundaries
@@ -408,4 +417,70 @@ func TestGapRefusals(t *testing.T) {
 		Token: claim.Token, Artifact: []byte("summary"), NowMS: nowMS,
 	})
 	testsupport.Must(t, err, "complete after the refusal: %v", err)
+}
+
+// gapIssueFromHeader completes implement@0 with one gap whose body is body and
+// returns the materialized issue and its files.
+func gapIssueFromHeader(t *testing.T, body string) (*model.Issue, []string) {
+	t.Helper()
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	e := testEngine()
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+	var gapIssues []string
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change summary"),
+		Gaps: [][]byte{[]byte(body)}, GapIssues: &gapIssues, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete with a gap: %v", err)
+	if len(gapIssues) != 1 {
+		t.Fatalf("gap issues = %v, want exactly one ref", gapIssues)
+	}
+	gapID, err := model.ParseID(gapIssues[0])
+	testsupport.Must(t, err, "parsing %s: %v", gapIssues[0], err)
+	issue, err := db.GetIssue(conn, gapID)
+	testsupport.Must(t, err, "reading the gap issue: %v", err)
+	files, err := db.GetIssueFiles(conn, gapID)
+	testsupport.Must(t, err, "reading files: %v", err)
+	return issue, files
+}
+
+func scopeOf(issue *model.Issue) []string {
+	if issue.Scope == nil {
+		return nil
+	}
+	return *issue.Scope
+}
+
+// TestGapHeaderPromotesFilesAndScope is DKT-3294: the engine sets the gap
+// issue's files and scope from its `Files:` header line (scope defaulting to
+// the files), and an explicit `Scope:` line takes precedence.
+func TestGapHeaderPromotesFilesAndScope(t *testing.T) {
+	issue, files := gapIssueFromHeader(t, "# Drain the helper\n"+
+		"Home: THIS repository\n"+
+		"Files: a.sh, tests/a.test.sh\n"+
+		"Severity: high\n\nbody\n")
+	want := []string{"a.sh", "tests/a.test.sh"}
+	slices.Sort(files)
+	if !slices.Equal(files, want) {
+		t.Errorf("files = %v, want %v", files, want)
+	}
+	if !slices.Equal(scopeOf(issue), want) {
+		t.Errorf("scope = %v, want the Files: paths %v", scopeOf(issue), want)
+	}
+	if issue.Priority != model.PriorityHigh {
+		t.Errorf("priority = %q, want high", issue.Priority)
+	}
+
+	issue, files = gapIssueFromHeader(t, "# Drain the helper\n"+
+		"Files: a.sh\n"+
+		"Scope: src/**\n\nbody\n")
+	if !slices.Equal(files, []string{"a.sh"}) {
+		t.Errorf("files = %v, want [a.sh]", files)
+	}
+	if !slices.Equal(scopeOf(issue), []string{"src/**"}) {
+		t.Errorf("scope = %v, want the explicit [src/**]", scopeOf(issue))
+	}
 }

@@ -485,6 +485,8 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 			Priority:    attrs.Priority,
 			Kind:        attrs.Kind,
 			Labels:      attrs.Labels,
+			Files:       attrs.Files,
+			Scope:       attrs.Scope,
 		}, step.IssueID)
 		if err != nil {
 			return err
@@ -572,6 +574,8 @@ type gapAttrs struct {
 	Priority model.Priority
 	Kind     model.IssueKind
 	Labels   []string
+	Files    []string
+	Scope    []string
 }
 
 // gapHeaderLine matches one `Key: value` line of a gap's leading header block.
@@ -642,6 +646,11 @@ func parseGapHeader(gap []byte) gapAttrs {
 			}
 		case "labels":
 			attrs.Labels = parseGapLabels(value, attrs.Labels)
+		case "files":
+			// DKT-3294: one physical line, comma-separated (operator ruling).
+			attrs.Files = parseGapList(value, attrs.Files)
+		case "scope":
+			attrs.Scope = parseGapList(value, attrs.Scope)
 		}
 	}
 
@@ -650,7 +659,19 @@ func parseGapHeader(gap []byte) gapAttrs {
 	if attrs.Priority == "" {
 		attrs.Priority = severity
 	}
+	// A gap that names its files and no scope is scoped to exactly those
+	// files; an explicit `Scope:` line takes precedence (operator ruling,
+	// DKT-3294).
+	if attrs.Scope == nil && len(attrs.Files) > 0 {
+		attrs.Scope = slices.Clone(attrs.Files)
+	}
 	return attrs
+}
+
+// parseGapList appends the comma-separated, trimmed, de-duplicated entries of
+// value to seen — parseGapLabels's rule, for file paths and scope globs.
+func parseGapList(value string, seen []string) []string {
+	return parseGapLabels(value, seen)
 }
 
 // parseGapLabels appends the comma-separated label names in value to seen,

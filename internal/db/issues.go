@@ -1337,6 +1337,10 @@ type GapIssue struct {
 	Priority    model.Priority
 	Kind        model.IssueKind
 	Labels      []string
+	// Files and Scope come from the gap's `Files:` and `Scope:` header lines
+	// (DKT-3294). A nil Scope stores SQL NULL: no scope declared.
+	Files []string
+	Scope []string
 }
 
 // InsertGapIssueTx materializes a backlog issue from a recorded gap artifact
@@ -1366,13 +1370,22 @@ func InsertGapIssueTx(tx *sql.Tx, projectID int, gap GapIssue, relatedIssueID in
 		kind = model.IssueKindTask
 	}
 
+	var scopeGlobs any
+	if gap.Scope != nil {
+		encoded, err := json.Marshal(gap.Scope)
+		if err != nil {
+			return 0, fmt.Errorf("serializing a gap issue's scope: %w", err)
+		}
+		scopeGlobs = string(encoded)
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.Exec(
-		`INSERT INTO issues (project_id, title, description, status, priority, kind, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO issues (project_id, title, description, status, priority, kind, created_at, updated_at, scope_globs)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		projectID, gap.Title, gap.Description,
 		string(model.StatusBacklog), string(priority), string(kind),
-		now, now,
+		now, now, scopeGlobs,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("materializing a gap issue: %w", err)
@@ -1395,6 +1408,14 @@ func InsertGapIssueTx(tx *sql.Tx, projectID int, gap GapIssue, relatedIssueID in
 			id, labelID,
 		); err != nil {
 			return 0, fmt.Errorf("labelling gap issue %d: %w", id, err)
+		}
+	}
+	for _, fp := range gap.Files {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO issue_files (issue_id, file_path) VALUES (?, ?)`,
+			id, fp,
+		); err != nil {
+			return 0, fmt.Errorf("attaching file %q to gap issue %d: %w", fp, id, err)
 		}
 	}
 
