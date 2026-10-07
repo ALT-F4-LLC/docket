@@ -44,6 +44,13 @@ target_worktree: {{.TargetWorktree}}
 (no note was recorded with this routing)
 {{- end}}
 {{- end}}
+{{- if .Gates}}
+
+== GATES
+{{- range .Gates}}
+{{.Name}}{{if .Pre}} (pre){{end}}: {{if .Source}}commands from {{.Source}}, each matched when the gate runs{{else if .Matched}}{{range $i, $a := .Argv}}{{if $i}} {{end}}{{$a}}{{end}}{{else}}unmatched{{if .Reason}} ({{.Reason}}){{end}}{{end}}
+{{- end}}
+{{- end}}
 {{if .Pins}}
 == PINNED
 {{- range .Pins}}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -32,8 +33,9 @@ import (
 // artifacts, and the pin list — plus DKT-1079's sixth, the run's recorded
 // notes, rendered as `== RUN NOTE N` beside the request) plus the step's
 // declared packet files and the step's OWN routing record, rendered as
-// `== RESOLUTION`. Two consequences operators repeatedly discover the hard
-// way:
+// `== RESOLUTION` — plus the TRUST STORE, read at render time, which names
+// the argv each declared gate matches for the `== GATES` section (DKT-3292).
+// Two consequences operators repeatedly discover the hard way:
 //
 //   - issue COMMENTS never render. They are an audit surface, not a context
 //     source, and no template can reach them.
@@ -88,6 +90,11 @@ type packetData struct {
 	// This is the field whose absence made the corpus inert — `--template F`
 	// could not recover the content because no field carried it.
 	Files []PacketFile
+	// Gates is the step's declared gate set, in declared order, each with the
+	// argv the trust store matches for it at render time (DKT-3292), so a
+	// worker reads the checks it will face instead of running `trust list`
+	// or reading a workflow file. An unmatched gate says so.
+	Gates []PacketGate
 }
 
 // RenderResult is one rendered work packet, with the provenance of the template
@@ -214,6 +221,7 @@ func RenderStepAs(
 		// engine can check it.
 		PayloadSchema:   spec.Payload,
 		PayloadRequired: required,
+		Gates:           packetGates(spec),
 	}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("rendering the packet for %s: %w", step.Instance, err)
@@ -334,4 +342,57 @@ func templateSource(
 	}
 
 	return string(content), path, true, nil
+}
+
+// PacketGate is one declared gate as a packet renders it (DKT-3292).
+type PacketGate struct {
+	Name string
+	// Pre marks a gate that runs at claim rather than at record.
+	Pre bool
+	// Source is a fence gate's source; its commands are the fenced lines,
+	// each matched when the gate runs, so no single argv is rendered.
+	Source string
+	// Matched and Argv are the trust store's answer for a named gate.
+	Matched bool
+	Argv    []string
+	// Reason is why a named gate is unmatched.
+	Reason string
+}
+
+// renderTrustRoster reads the trust store and this repository's identity for
+// the GATES section — the same two reads a gate run makes. A field-like var so
+// a test can supply a sandbox store.
+var renderTrustRoster = func() (*trust.Store, string, error) {
+	store, err := trust.Load()
+	if err != nil {
+		return nil, "", err
+	}
+	identity, err := trust.RepoIdentity(resolvePaths().Identity)
+	if err != nil {
+		return nil, "", err
+	}
+	return store, identity, nil
+}
+
+// packetGates resolves the step's declared gates against the trust store,
+// read once, at render time. It renders; it never runs anything.
+func packetGates(spec *workflow.Step) []PacketGate {
+	if spec == nil || len(spec.Gates) == 0 {
+		return nil
+	}
+	store, identity, rosterErr := renderTrustRoster()
+	out := make([]PacketGate, 0, len(spec.Gates))
+	for _, g := range spec.Gates {
+		pg := PacketGate{Name: g.Name, Pre: g.Pre, Source: g.Source}
+		switch {
+		case g.Source != "":
+		case rosterErr != nil:
+			pg.Reason = fmt.Sprintf("the trust store could not be read: %v", rosterErr)
+		default:
+			match := store.Lookup(identity, g.Name, nil)
+			pg.Matched, pg.Argv, pg.Reason = match.Matched, match.Argv, match.Reason
+		}
+		out = append(out, pg)
+	}
+	return out
 }

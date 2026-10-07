@@ -8,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
 // §6.11 and §6.11.1 — rendering, and the pinned-template verification.
@@ -504,5 +505,69 @@ func TestAttemptNumberingPreAndPostClaim(t *testing.T) {
 	testsupport.Must(t, err, "GetStep after claim: %v", err)
 	if after.Attempt != 1 {
 		t.Fatalf("post-claim attempt = %d, want 1", after.Attempt)
+	}
+}
+
+// renderGatesSrc declares three gates on one step and none on another.
+const renderGatesSrc = `
+[pipeline]
+name = "render-gates-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+executor = "w"
+emits = "change-summary"
+after = []
+gates = [{ name = "lint" }, { name = "tests", pre = true }, { name = "audit" }]
+
+[[step]]
+name = "summarize"
+executor = "w"
+emits = "summary"
+after = ["implement"]
+`
+
+// TestRenderGates is DKT-3292: a step's packet lists its declared gates in
+// declared order with the argv the trust store matches, an unmatched marker
+// for a gate with no entry, and no GATES section for a step with none.
+func TestRenderGates(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(renderGatesSrc), "render-gates.toml")
+	issue := createIssue(t, conn, "gates", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	saved := renderTrustRoster
+	t.Cleanup(func() { renderTrustRoster = saved })
+	renderTrustRoster = func() (*trust.Store, string, error) {
+		return &trust.Store{Version: trust.FormatVersion, Entries: []trust.Entry{
+			{Name: "lint", Argv: []string{"make", "lint"}, Repo: "/repo"},
+			{Name: "tests", Argv: []string{"go", "test", "./..."}, Repo: "/repo"},
+		}}, "/repo", nil
+	}
+
+	result, err := RenderStep(conn, stepIDByInstance(t, conn, "implement@0"), "", nowMS)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+	packet := result.Packet
+	section := packet[strings.Index(packet, "== GATES"):]
+	want := []string{"lint: make lint", "tests (pre): go test ./...", "audit: unmatched"}
+	at := 0
+	for _, line := range want {
+		i := strings.Index(section[at:], line)
+		if i < 0 {
+			t.Fatalf("GATES section lacks %q in declared order:\n%s", line, packet)
+		}
+		at += i + len(line)
+	}
+
+	result, err = RenderStep(conn, stepIDByInstance(t, conn, "summarize@0"), "", nowMS)
+	testsupport.Must(t, err, "RenderStep summarize: %v", err)
+	if strings.Contains(result.Packet, "== GATES") {
+		t.Errorf("a step with no gates renders a GATES section:\n%s", result.Packet)
 	}
 }
