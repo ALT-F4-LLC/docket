@@ -130,6 +130,12 @@ type Engine struct {
 	// advisory call an integration diverged, because it is the one that
 	// actually measured the patch.
 	PatchContainedFn func(execRoot, sha string) (contained, known bool)
+	// StepPatchContainedFn is PatchContainedFn for a write-class step's own
+	// commit at dispatch close (DKT-3288), bounded below by the step's recorded
+	// base so only base..sha is judged; `diverged` names inherited base
+	// commits the shared branch no longer carries, for the close's advisory.
+	// An empty base asks the unbounded question. A field for DiffFn's reason.
+	StepPatchContainedFn func(execRoot, sha, base string) (contained, known bool, diverged []string)
 	// TreeMatchFn reports whether execRoot's HEAD still carries `sha`'s TREE
 	// on the paths `sha`'s work touched — or, where that question has no
 	// evidence to answer with, whether the two carry the same root tree
@@ -204,15 +210,16 @@ type Engine struct {
 func NewEngine() *Engine {
 	paths := repoPathsFrom(resolvePaths())
 	return &Engine{
-		Gates:            NewExecRunner(paths),
-		Actions:          NewActionRunner(paths),
-		DiffFn:           GitDiff,
-		HeadFn:           sharedCheckoutHead,
-		IsAncestorFn:     gitAncestorOfHead,
-		PatchContainedFn: gitPatchContainedInHead,
-		TreeMatchFn:      gitTreeMatchesHead,
-		ObjectExistsFn:   gitCommitResolvable,
-		CommitPatchFn:    GitCommitPatch,
+		Gates:                NewExecRunner(paths),
+		Actions:              NewActionRunner(paths),
+		DiffFn:               GitDiff,
+		HeadFn:               sharedCheckoutHead,
+		IsAncestorFn:         gitAncestorOfHead,
+		PatchContainedFn:     gitPatchContainedInHead,
+		StepPatchContainedFn: gitStepPatchContainedInHead,
+		TreeMatchFn:          gitTreeMatchesHead,
+		ObjectExistsFn:       gitCommitResolvable,
+		CommitPatchFn:        GitCommitPatch,
 	}
 }
 
@@ -2940,11 +2947,52 @@ func gitCommitResolvable(execRoot, sha string) (exists, known bool) {
 // verdict in this family that measured the work itself, and the only one the
 // advisory may word as a divergence.
 func gitPatchContainedInHead(execRoot, sha string) (contained, known bool) {
+	return gitPatchContainedInHeadFrom(execRoot, sha, "")
+}
+
+// gitStepPatchContainedInHead is StepPatchContainedFn's real implementation
+// (DKT-3288): gitPatchContainedInHead bounded below by the step's recorded
+// base, so only the step's OWN commits (base..sha) are judged. A shared
+// branch rebased mid-run rewrites inherited base commits, and judging the
+// whole HEAD..sha range blamed those on a step whose own commit was picked
+// verbatim. When the step's commits are carried, `diverged` names the
+// inherited commits (HEAD..base, by `git cherry`) the branch no longer
+// carries by patch — an advisory, never a refusal. An empty base falls back
+// to the unbounded probe.
+func gitStepPatchContainedInHead(execRoot, sha, base string) (contained, known bool, diverged []string) {
+	if base == "" {
+		contained, known = gitPatchContainedInHead(execRoot, sha)
+		return contained, known, nil
+	}
+	contained, known = gitPatchContainedInHeadFrom(execRoot, sha, base)
+	if !known || !contained {
+		return contained, known, nil
+	}
+	out, err := exec.Command("git", gitDirArgs(execRoot, "cherry", "HEAD", base)...).Output()
+	if err != nil {
+		return contained, known, nil
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(line, "+ "); ok {
+			diverged = append(diverged, strings.TrimSpace(rest))
+		}
+	}
+	return contained, known, diverged
+}
+
+// gitPatchContainedInHeadFrom is the probe over base..sha, or HEAD..sha when
+// base is empty.
+func gitPatchContainedInHeadFrom(execRoot, sha, base string) (contained, known bool) {
 	if execRoot == "" || sha == "" {
 		return false, false
 	}
-	out, err := exec.Command("git",
-		gitDirArgs(execRoot, "cherry", "HEAD", sha)...).Output()
+	cherry := []string{"cherry", "HEAD", sha}
+	wantRange, squashRange := "HEAD.."+sha, "HEAD..."+sha
+	if base != "" {
+		cherry = append(cherry, base)
+		wantRange, squashRange = base+".."+sha, base+".."+sha
+	}
+	out, err := exec.Command("git", gitDirArgs(execRoot, cherry...)...).Output()
 	if err != nil {
 		return false, false
 	}
@@ -2959,7 +3007,7 @@ func gitPatchContainedInHead(execRoot, sha string) (contained, known bool) {
 		}
 	}
 	if !tested {
-		// Nothing in HEAD..sha to test: the target is on HEAD's history after
+		// Nothing in the range to test: the target is on HEAD's history after
 		// all (ancestry answers that, not this), or its line is merges only.
 		return false, false
 	}
@@ -2967,7 +3015,7 @@ func gitPatchContainedInHead(execRoot, sha string) (contained, known bool) {
 		return true, true
 	}
 
-	want, ok := gitZeroContextPatchIDs(execRoot, "HEAD.."+sha)
+	want, ok := gitZeroContextPatchIDs(execRoot, wantRange)
 	if !ok || len(want) == 0 {
 		return false, false // no patch content on the target's side to match
 	}
@@ -2991,7 +3039,7 @@ func gitPatchContainedInHead(execRoot, sha string) (contained, known bool) {
 	}
 	// A squashed integration: the target line's whole diff, landed as one
 	// commit, matches no single commit of the line but does match the range.
-	if squash, ok := gitZeroContextRangePatchID(execRoot, sha); ok && carried[squash] {
+	if squash, ok := gitZeroContextRangePatchID(execRoot, squashRange); ok && carried[squash] {
 		return true, true
 	}
 	return false, true
@@ -3020,10 +3068,10 @@ func gitZeroContextPatchIDs(execRoot, rangeSpec string) (ids []string, ok bool) 
 // gitZeroContextRangePatchID is the patch-id of the target line's combined
 // diff — `git diff HEAD...<sha>`, everything since the merge base as one
 // patch — which is what a squashed integration commits.
-func gitZeroContextRangePatchID(execRoot, sha string) (id string, ok bool) {
+func gitZeroContextRangePatchID(execRoot, rangeSpec string) (id string, ok bool) {
 	out, err := exec.Command("git", gitDirArgs(execRoot,
 		"diff", "--no-color", "--no-ext-diff", "--no-renames", "-U0",
-		"--inter-hunk-context=0", "HEAD..."+sha)...).Output()
+		"--inter-hunk-context=0", rangeSpec)...).Output()
 	if err != nil {
 		return "", false
 	}
@@ -3315,6 +3363,15 @@ func (e *Engine) appendRoundDelta(
 	}
 	if head != "" {
 		record["head"] = head
+		// DKT-3288: the FIXED base the head's own commits stack on — a
+		// worktree's fork point or the run's pinned start — captured now,
+		// because a later rebase of the shared branch moves a live
+		// merge-base. Close's integration probe bounds base..head with it, so
+		// an inherited base commit the rebase rewrote is not blamed on the
+		// step's own, verbatim-picked commit.
+		if base != "" && !liveBase {
+			record["base"] = base
+		}
 	}
 	if (head != "" || blocked) && step.Ordinal > 0 {
 		prev := lastReviewedIssueDiffHead(conn, step.RunID, step.IssueID)

@@ -72,6 +72,11 @@ type CheckedIntegration struct {
 	// every close after the one that accepted it would refuse on it again
 	// (RUN-90, four steps, every close for the rest of the run).
 	Prior string `json:"prior,omitempty"`
+	// BaseDiverged is DKT-3288's advisory: inherited commits under the step's
+	// recorded base that the shared branch no longer carries by patch (a
+	// mid-run rebase rewrote them). The step's own commits were judged
+	// patch-equivalent; these are named, never refused on.
+	BaseDiverged []string `json:"base_diverged,omitempty"`
 }
 
 // IntegrationCheck is what a close's verification did, riding on CloseOutcome
@@ -96,7 +101,10 @@ type IntegrationCheck struct {
 // or nil when git has to be asked.
 type integrationCandidate struct {
 	step, instance, sha, worktree string
-	prior                         *CheckedIntegration
+	// base is the fixed commit the step's own commits stack on, from its
+	// issue.diff record (DKT-3288); "" for a record that predates it.
+	base  string
+	prior *CheckedIntegration
 	// resolved marks a record the verified integration annotation wrote
 	// (`resolved_from` in its payload): the sha names the commit the shared
 	// branch carries for work whose original commit it could not have matched.
@@ -149,6 +157,7 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 			Head         string `json:"head"`
 			Worktree     string `json:"worktree"`
 			ResolvedFrom string `json:"resolved_from"`
+			Base         string `json:"base"`
 		}
 		if json.Unmarshal([]byte(a.Payload), &record) != nil || record.Head == "" {
 			// No commit recorded — the step's work produced nothing to
@@ -159,7 +168,7 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 		id := model.FormatStepID(step.ID)
 		out = append(out, integrationCandidate{
 			step: id, instance: step.Instance,
-			sha: record.Head, worktree: record.Worktree,
+			sha: record.Head, worktree: record.Worktree, base: record.Base,
 			prior:    accepted[id+"@"+record.Head],
 			resolved: record.ResolvedFrom != "",
 		})
@@ -225,8 +234,9 @@ func (e *Engine) checkIntegration(
 	}
 
 	type verdict struct {
-		how string
-		ok  bool
+		how      string
+		ok       bool
+		diverged []string
 	}
 	cache := make(map[string]verdict, len(candidates))
 
@@ -238,20 +248,37 @@ func (e *Engine) checkIntegration(
 			checked = append(checked, *c.prior)
 			continue
 		}
-		v, seen := cache[c.sha]
+		// Keyed by sha AND base: the same tip judged from two recorded bases
+		// asks two different questions.
+		key := c.sha + "@" + c.base
+		v, seen := cache[key]
 		if !seen {
+			// DKT-3288: with a recorded base, only the step's own commits
+			// (base..sha) are judged, so a rebase that rewrote an inherited
+			// base commit cannot fail a step whose own work was picked
+			// verbatim; the rewritten commits ride on the verdict instead.
+			patch := func() (bool, bool, []string) {
+				if c.base != "" && e.StepPatchContainedFn != nil {
+					return e.StepPatchContainedFn(execRoot, c.sha, c.base)
+				}
+				if e.PatchContainedFn == nil {
+					return false, false, nil
+				}
+				contained, known := e.PatchContainedFn(execRoot, c.sha)
+				return contained, known, nil
+			}
 			if ancestor, known := e.IsAncestorFn(execRoot, c.sha); known && ancestor {
 				v = verdict{how: "ancestor", ok: true}
-			} else if e.PatchContainedFn == nil {
+			} else if e.PatchContainedFn == nil && e.StepPatchContainedFn == nil {
 				v = verdict{how: "unintegrated", ok: false}
-			} else if contained, known := e.PatchContainedFn(execRoot, c.sha); known && contained {
-				v = verdict{how: "patch-equivalent", ok: true}
+			} else if contained, known, diverged := patch(); known && contained {
+				v = verdict{how: "patch-equivalent", ok: true, diverged: diverged}
 			} else if known {
 				v = verdict{how: "unintegrated", ok: false}
 			} else {
 				v = verdict{how: "cherry-error", ok: false}
 			}
-			cache[c.sha] = v
+			cache[key] = v
 		}
 		if v.ok {
 			how := v.how
@@ -264,6 +291,7 @@ func (e *Engine) checkIntegration(
 			}
 			checked = append(checked, CheckedIntegration{
 				Step: c.step, Instance: c.instance, SHA: c.sha, How: how,
+				BaseDiverged: v.diverged,
 			})
 		} else {
 			unintegrated = append(unintegrated, UnintegratedStep{

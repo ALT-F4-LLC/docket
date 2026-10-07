@@ -3,9 +3,13 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -382,5 +386,102 @@ after = []
 	testsupport.Must(t, err, "CloseDispatch: %v", err)
 	if outcome.Integration == nil || outcome.Integration.Status != "verified" || len(outcome.Integration.Checked) != 0 {
 		t.Errorf("Integration = %+v, want verified with nothing checked (no write-class steps)", outcome.Integration)
+	}
+}
+
+// rebasedBaseRepo builds DKT-3288's shape in a real repository: the step's
+// worktree forks at base B; the shared branch is then rebased so B is
+// rewritten with different content; the step's own commit S is integrated
+// onto it — verbatim, or with one hunk edited when edited is true. It returns
+// the shared checkout, S, and B.
+func rebasedBaseRepo(t *testing.T, edited bool) (execRoot, step, base string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		testsupport.Must(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644),
+			"writing %s: %v", name, nil)
+	}
+	gitRun(t, dir, "init", "-q", "-b", "main")
+	write("a.txt", "a\n")
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "A")
+	root := gitRun(t, dir, "rev-parse", "HEAD")
+	write("b.txt", "one\n")
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "B")
+	base = gitRun(t, dir, "rev-parse", "HEAD")
+
+	gitRun(t, dir, "checkout", "-q", "-b", "work")
+	write("s.txt", "line 1\nline 2\nline 3\n")
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "S")
+	step = gitRun(t, dir, "rev-parse", "HEAD")
+
+	// The shared branch is rebased: B is rewritten with different content.
+	gitRun(t, dir, "checkout", "-q", "main")
+	gitRun(t, dir, "reset", "-q", "--hard", root)
+	write("b.txt", "one, rewritten\n")
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "B rewritten")
+
+	if edited {
+		write("s.txt", "line 1\nline 2 edited during the pick\nline 3\n")
+		gitRun(t, dir, "add", ".")
+		gitRun(t, dir, "commit", "-q", "-m", "S, hand-resolved")
+	} else {
+		gitRun(t, dir, "cherry-pick", step)
+	}
+	return dir, step, base
+}
+
+// TestCloseJudgesOnlyTheStepsOwnCommitsAfterABaseRewrite is DKT-3288
+// criteria 1 and 3: a verbatim pick of the step's own commit is
+// patch-equivalent although the shared branch rewrote an inherited base
+// commit, and that rewritten commit is named on the verdict as an advisory.
+func TestCloseJudgesOnlyTheStepsOwnCommitsAfterABaseRewrite(t *testing.T) {
+	execRoot, step, base := rebasedBaseRepo(t, false)
+	checked, unintegrated := NewEngine().checkIntegration(execRoot, []integrationCandidate{{
+		step: "STEP-1", instance: "implement@0", sha: step, base: base,
+	}})
+	if len(unintegrated) != 0 || len(checked) != 1 || checked[0].How != "patch-equivalent" {
+		t.Fatalf("checked=%+v unintegrated=%+v; want one patch-equivalent verdict", checked, unintegrated)
+	}
+	if got := checked[0].BaseDiverged; len(got) != 1 || got[0] != base {
+		t.Errorf("base_diverged = %v, want the rewritten base commit [%s]", got, base)
+	}
+}
+
+// TestCloseStillRefusesAnEditedPickAfterABaseRewrite is DKT-3288 criterion 2:
+// with the same rewrite, a pick whose hunk was edited is unintegrated.
+func TestCloseStillRefusesAnEditedPickAfterABaseRewrite(t *testing.T) {
+	execRoot, step, base := rebasedBaseRepo(t, true)
+	checked, unintegrated := NewEngine().checkIntegration(execRoot, []integrationCandidate{{
+		step: "STEP-1", instance: "implement@0", sha: step, base: base,
+	}})
+	if len(checked) != 0 || len(unintegrated) != 1 || unintegrated[0].How != "unintegrated" {
+		t.Fatalf("checked=%+v unintegrated=%+v; want one unintegrated verdict", checked, unintegrated)
+	}
+}
+
+// TestIssueDiffRecordCarriesTheFixedBase pins the record half of DKT-3288:
+// the base close bounds the probe with is written beside the head when the
+// step records, and never for a live base.
+func TestIssueDiffRecordCarriesTheFixedBase(t *testing.T) {
+	e := testEngine()
+	e.HeadFn = func(string) string { return "head-sha" }
+	var body string
+	payload := e.appendRoundDelta(nil, &db.Step{WorkRoot: "/w"}, "/w", "/x", "base-sha", false, &body)
+	var record map[string]string
+	testsupport.Must(t, json.Unmarshal([]byte(payload), &record), "decoding %q: %v", payload, nil)
+	if record["base"] != "base-sha" || record["head"] != "head-sha" {
+		t.Errorf("record = %v, want head and the fixed base", record)
+	}
+	payload = e.appendRoundDelta(nil, &db.Step{WorkRoot: "/w"}, "/w", "/x", "live-sha", true, &body)
+	if strings.Contains(payload, "live-sha") {
+		t.Errorf("a live base was recorded: %s", payload)
 	}
 }
