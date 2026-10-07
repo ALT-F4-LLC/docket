@@ -101,7 +101,7 @@ const ResolutionIntegratedSHA = "integrated-sha"
 // ancestry seam wired; an unanswerable ancestry question; and a sha that is not
 // an ancestor of the shared checkout's HEAD.
 func (e *Engine) AnnotateIntegration(
-	conn *sql.DB, stepID int, sha, metadata string, nowMS int64,
+	conn *sql.DB, stepID int, sha, metadata string, by Attribution, nowMS int64,
 ) (*IntegrationAnnotation, error) {
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if !fullCommitSHA.MatchString(sha) {
@@ -110,6 +110,20 @@ func (e *Engine) AnnotateIntegration(
 				"`git rev-parse <ref>` in the shared checkout resolves one", sha)
 	}
 	annotation, err := integrationMetadata(sha, metadata)
+	if err != nil {
+		return nil, err
+	}
+	// DKT-2770: the integration annotation is a conductor ruling (it repins
+	// what downstream judges read), so its event names who made it and from
+	// where, and an unattributed one is refused before anything is written.
+	if err := by.require("step annotate --integrated-sha"); err != nil {
+		return nil, err
+	}
+	var annotated map[string]any
+	if err := json.Unmarshal([]byte(annotation), &annotated); err != nil {
+		return nil, fmt.Errorf("recording the annotation: %w", err)
+	}
+	eventData, err := rulingData(by, annotated)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +241,7 @@ func (e *Engine) AnnotateIntegration(
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventStepAnnotated, RunID: step.RunID,
 		Instance: step.Instance, IssueID: step.IssueID,
-		Data: annotation, AtMS: nowMS,
+		Data: eventData, AtMS: nowMS,
 	}); err != nil {
 		return nil, err
 	}

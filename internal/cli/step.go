@@ -1194,7 +1194,11 @@ record, under its holder's token.`,
 			}
 			return emitStepState(w, conn, id, "Annotated")
 		}
-		ann, err := engine.NewEngine().AnnotateIntegration(conn, id, sha, metadata, model.NowMS())
+		by, err := rulingBy()
+		if err != nil {
+			return err
+		}
+		ann, err := engine.NewEngine().AnnotateIntegration(conn, id, sha, metadata, by, model.NowMS())
 		if err != nil {
 			return stepErr(err, stepLabel(id))
 		}
