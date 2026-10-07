@@ -15,6 +15,9 @@ target_sha: {{.TargetSHA}}
 {{- if .TargetWorktree}}
 target_worktree: {{.TargetWorktree}}
 {{- end}}
+{{- if .DiffBase}}
+issue.diff base: {{.DiffBase}}
+{{- end}}
 
 == REQUEST
 {{.Issue.BodySnapshot}}

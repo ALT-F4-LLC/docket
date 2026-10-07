@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -569,5 +570,41 @@ func TestRenderGates(t *testing.T) {
 	testsupport.Must(t, err, "RenderStep summarize: %v", err)
 	if strings.Contains(result.Packet, "== GATES") {
 		t.Errorf("a step with no gates renders a GATES section:\n%s", result.Packet)
+	}
+}
+
+// TestRenderStatesTheIssueDiffBase is DKT-3307: a packet consuming issue.diff
+// states the base that diff was computed from, equal to the base its round
+// record carries.
+func TestRenderStatesTheIssueDiffBase(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "diff base", "body", "task", nil)
+	const pinned = "0123456789abcdef0123456789abcdef01234567"
+	run, err := db.InsertRunWithContext(conn, 1, "diff base run", 0, nowMS,
+		db.RunContext{CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue: %v", err)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	e.HeadFn = func(string) string { return "89abcdef0123456789abcdef0123456789abcdef" }
+	completeStepAt(t, conn, e, issue, "implement@0", "")
+
+	var payload string
+	err = conn.QueryRow(`SELECT a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
+		WHERE s.instance = 'implement@0' AND a.kind = ?`, ArtifactKindIssueDiff).Scan(&payload)
+	testsupport.Must(t, err, "reading the round record: %v", err)
+	var record map[string]string
+	testsupport.Must(t, json.Unmarshal([]byte(payload), &record), "decoding %q: %v", payload, nil)
+	if record["base"] == "" {
+		t.Fatalf("premise: the round record carries no base: %s", payload)
+	}
+
+	result, err := RenderStep(conn, stepIDIn(t, conn, issue, "review@0#0"), "", nowMS)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+	if !strings.Contains(result.Packet, "\nissue.diff base: "+record["base"]+"\n") {
+		t.Errorf("packet does not state `issue.diff base: %s`:\n%s", record["base"], result.Packet)
 	}
 }

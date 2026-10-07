@@ -82,6 +82,11 @@ type Context struct {
 	// new sha. Both absent when the resolved diff carries no round record.
 	TargetSHA      string `json:"target_sha,omitempty"`
 	TargetWorktree string `json:"target_worktree,omitempty"`
+	// DiffBase is the commit the resolved `issue.diff` was computed from, read
+	// from the same round record (DKT-3307), so a judge reviewing it knows
+	// the range without rebuilding the diff. Absent for a record that
+	// predates the field.
+	DiffBase string `json:"diff_base,omitempty"`
 	// Resolution is the ruling recorded on THIS STEP that sent it back for
 	// rework — the routing, and the note whoever decided it wrote (DKT-247).
 	//
@@ -520,7 +525,7 @@ func assembleContext(
 	return &Context{
 		Step: row, Issue: *issue, Inputs: inputs, Pins: pins,
 		LoopEntry: loopEntryOf(step), Metadata: metadata,
-		TargetSHA: sha, TargetWorktree: worktree,
+		TargetSHA: sha, TargetWorktree: worktree, DiffBase: resolveDiffBase(inputs),
 		Resolution: resolution, Notes: notes,
 	}, nil
 }
@@ -1878,4 +1883,22 @@ func (c *Context) Meta() ContextMeta {
 	meta.TotalBytes = meta.IssueBytes + meta.InputsBytes + meta.PinsBytes +
 		meta.MetadataBytes + meta.NotesBytes
 	return meta
+}
+
+// resolveDiffBase lifts `base` from the same round record resolveTarget reads
+// (DKT-3307): the first `issue.diff` input's payload.
+func resolveDiffBase(inputs []ContextInput) string {
+	for _, in := range inputs {
+		if in.Kind != ArtifactKindIssueDiff || in.Payload == "" {
+			continue
+		}
+		var record struct {
+			Base string `json:"base"`
+		}
+		if json.Unmarshal([]byte(in.Payload), &record) != nil {
+			continue
+		}
+		return record.Base
+	}
+	return ""
 }
