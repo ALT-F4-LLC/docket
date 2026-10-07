@@ -166,7 +166,7 @@ mutated scheduling state would make a hook's mere presence change a run.`,
 }
 
 var guardSpawnCmd = &cobra.Command{
-	Use:   "spawn (--run RUN-N | --active) [--rows FILE] [--ack-reap SEQ] [--deciding-vote PROPOSAL-N]",
+	Use:   "spawn (--run RUN-N | --active) [--rows FILE] [--ack-reap SEQ] [--deciding-vote PROPOSAL-N | --usage-join]",
 	Short: "Allow when the proposed batch matches and no reap is unacknowledged",
 	Long: `Allow (exit 0) when BOTH hold: the proposed rows byte-match the open
 dispatch, and no write-class reap is unacknowledged. Deny (exit 2) otherwise.
@@ -209,7 +209,17 @@ of every active run holding a step for one of the proposal's linked issues
 (` + "`vote link`" + `), and a run the proposal does not serve denies as it would without
 the flag, saying so.
 
-It writes nothing except that acknowledgment and, when the carve-out is used,
+--usage-join admits a launch that CLAIMS NO STEP, such as a read-only usage
+join over finished transcripts, past a reap hold: it consumes no write-class
+headroom, so the hold has nothing to protect from it. It relaxes the REAP half
+ONLY, never the row comparison, and is refused with --rows: a launch proposing
+rows is dispatch-bearing, and is denied under the hold as it would be without
+the flag. It is mutually exclusive with --deciding-vote, applies on both --run
+and --active, and every use is event-logged as spawn-admitted with carve_out
+usage-join. The engine cannot see what the launch does; naming it a usage join
+is the caller's claim, and the event makes every such claim findable.
+
+It writes nothing except that acknowledgment and, when a carve-out is used,
 that audit event.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -235,11 +245,13 @@ that audit event.`,
 		if err != nil {
 			return err
 		}
+		usageJoin, _ := cmd.Flags().GetBool("usage-join")
 
 		verdict, err := engine.NewEngine().GuardSpawn(
 			getDB(cmd), runID, engine.SpawnOptions{
 				Rows: rows, AckSeqs: seqs, DecidingVote: decidingVote,
-				NowMS: model.NowMS(),
+				UsageJoin: usageJoin,
+				NowMS:     model.NowMS(),
 			})
 		if err != nil {
 			return runErr(err)
@@ -273,9 +285,10 @@ func runGuardSpawnActive(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	usageJoin, _ := cmd.Flags().GetBool("usage-join")
 
 	verdict, err := engine.GuardSpawnActive(
-		getDB(cmd), guardProjectScope(cmd), decidingVote, model.NowMS())
+		getDB(cmd), guardProjectScope(cmd), decidingVote, usageJoin, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}
@@ -422,6 +435,9 @@ func init() {
 	guardSpawnCmd.Flags().String("deciding-vote", "",
 		"Admit this batch past a reap hold because it exists to decide the "+
 			"named OPEN proposal (PROPOSAL-N); event-logged")
+	guardSpawnCmd.Flags().Bool("usage-join", false,
+		"Admit a launch that claims no step past a reap hold (reap half only; "+
+			"refused with --rows); event-logged")
 	guardSpawnCmd.Flags().Int64Slice("ack-reap", nil,
 		"Acknowledge a write-class reap by its `lease-reaped` event seq (repeatable)")
 

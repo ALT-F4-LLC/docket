@@ -191,7 +191,15 @@ type SpawnOptions struct {
 	// about a relay spawning a batch the engine never issued, which has
 	// nothing to do with who decides a hold.
 	DecidingVote int
-	NowMS        int64
+	// UsageJoin is `--usage-join` (DKT-3289): the launch claims no step — a
+	// read-only usage join over finished transcripts — so it consumes no
+	// write-class headroom and a reap hold has nothing to protect from it.
+	// Like DecidingVote it relaxes the REAP half only and is event-logged;
+	// unlike it, nothing names a proposal, so the engine enforces the one
+	// thing it can check: a launch that proposes rows is dispatch-bearing
+	// and is denied under the hold.
+	UsageJoin bool
+	NowMS     int64
 }
 
 // GuardSpawn answers `docket guard spawn`: may the relay start this batch?
@@ -227,6 +235,9 @@ func (e *Engine) GuardSpawn(
 	if _, err := db.GetRun(conn, runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
+	if opts.UsageJoin && opts.DecidingVote > 0 {
+		return nil, validationErr(usageJoinWithDecidingVote)
+	}
 
 	// G10 / G12: the acks come FIRST and are the ONLY thing this verb writes.
 	// Without `--ack-reap` the transaction below never opens and the verb is a
@@ -246,8 +257,16 @@ func (e *Engine) GuardSpawn(
 	}
 
 	// (b) THE REAP CHECK, which is the half §2 assigns to this verb by name.
-	return spawnReapVerdict(conn, runID, opts.DecidingVote, opts.NowMS)
+	// A usage join that proposes rows is not a launch that claims nothing, so
+	// it gets no carve-out (DKT-3289).
+	usageJoin := opts.UsageJoin && opts.Rows == nil
+	return spawnReapVerdict(conn, runID, opts.DecidingVote, usageJoin, opts.NowMS)
 }
+
+// usageJoinWithDecidingVote refuses naming both carve-outs: each relaxes the
+// same reap half for a different reason, and the audit event records one.
+const usageJoinWithDecidingVote = "--usage-join and --deciding-vote are mutually " +
+	"exclusive: a usage join claims nothing and decides nothing"
 
 // decidingVoteCarveOut is DKT-236: the reap hold does not deny the panel that
 // exists to decide it.
@@ -497,7 +516,7 @@ func storedManifestRows(conn *sql.DB, runID int) ([]db.DispatchRow, error) {
 // shared with `next`'s headroom message, so the two cannot describe the same
 // hold differently.
 func spawnReapVerdict(
-	conn *sql.DB, runID, decidingVote int, nowMS int64,
+	conn *sql.DB, runID, decidingVote int, usageJoin bool, nowMS int64,
 ) (*GuardVerdict, error) {
 	// The hold is read in a transaction this function does not hold open: the
 	// carve-out below opens its own, and the pool is capped at ONE connection.
@@ -514,6 +533,12 @@ func spawnReapVerdict(
 	}
 
 	hold := ReapHoldReason(open)
+	if usageJoin {
+		if err := recordGuardCarveOut(conn, runID, 0, hold, nowMS); err != nil {
+			return nil, err
+		}
+		return usageJoinVerdict(hold), nil
+	}
 	if decidingVote > 0 {
 		verdict, err := decidingVoteCarveOut(conn, decidingVote, hold)
 		if err != nil {
@@ -536,7 +561,18 @@ func spawnReapVerdict(
 // the same discoverability rule the ack advice follows.
 func reapHoldDenial(hold string) string {
 	return hold + "; a panel spawned to DECIDE this hold passes " +
-		"--deciding-vote PROPOSAL-N"
+		"--deciding-vote PROPOSAL-N, and a launch that claims no step passes " +
+		"--usage-join"
+}
+
+// usageJoinVerdict is the allow a usage join gets past a hold, with the
+// carve-out named in its reason so the relay's log shows it (DKT-3289).
+func usageJoinVerdict(hold string) *GuardVerdict {
+	return &GuardVerdict{
+		Allowed: true,
+		Reason: "allowed as a usage join: " + hold + " — a launch that claims " +
+			"no step consumes no write-class headroom",
+	}
 }
 
 // GuardSpawnActive answers `docket guard spawn --active`: may every active run
@@ -565,9 +601,15 @@ func reapHoldDenial(hold string) string {
 //
 // Runs are checked in guardRunScope's own oldest-first order, so the FIRST
 // denial found names the OLDEST run that would deny.
+//
+// `--usage-join` (DKT-3289) admits the hold of every run: the launch claims
+// no step on any of them, so no run's headroom is at stake.
 func GuardSpawnActive(
-	conn *sql.DB, projectID, decidingVote int, nowMS int64,
+	conn *sql.DB, projectID, decidingVote int, usageJoin bool, nowMS int64,
 ) (*GuardVerdict, error) {
+	if usageJoin && decidingVote > 0 {
+		return nil, validationErr(usageJoinWithDecidingVote)
+	}
 	runIDs, err := guardRunScope(conn, 0, projectID)
 	if err != nil {
 		return nil, err
@@ -598,6 +640,10 @@ func GuardSpawnActive(
 		}
 		hold := ReapHoldReason(open)
 		run := model.FormatRunID(id)
+		if usageJoin {
+			admitted = append(admitted, carveOut{id, hold, run + ": " + usageJoinVerdict(hold).Reason})
+			continue
+		}
 		if decidingVote == 0 {
 			return &GuardVerdict{Allowed: false, Reason: run + ": " + reapHoldDenial(hold)}, nil
 		}
@@ -648,15 +694,17 @@ func openReapHold(conn *sql.DB, runID int) ([]db.ReapAck, error) {
 
 // recordGuardCarveOut writes the audit row for a spawn admitted past a reap
 // hold — the one case where a missing event and "nothing happened" would say
-// the same thing while meaning opposite things.
+// the same thing while meaning opposite things. A proposalID of 0 is the
+// usage-join carve-out (DKT-3289), which names no proposal.
 func recordGuardCarveOut(
 	conn *sql.DB, runID, proposalID int, hold string, nowMS int64,
 ) error {
-	data, err := json.Marshal(map[string]any{
-		"carve_out": "deciding-vote",
-		"proposal":  model.FormatProposalID(proposalID),
-		"hold":      hold,
-	})
+	fields := map[string]any{"carve_out": "usage-join", "hold": hold}
+	if proposalID > 0 {
+		fields["carve_out"] = "deciding-vote"
+		fields["proposal"] = model.FormatProposalID(proposalID)
+	}
+	data, err := json.Marshal(fields)
 	if err != nil {
 		return fmt.Errorf("recording the spawn carve-out: %w", err)
 	}

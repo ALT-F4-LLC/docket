@@ -243,7 +243,7 @@ func TestActiveDecidingVoteAdmitsTheRunTheProposalServes(t *testing.T) {
 	at := reapWriterOf(t, conn, held)
 
 	// Premise: the plain question denies, naming the held run.
-	denied, err := GuardSpawnActive(conn, 0, 0, at)
+	denied, err := GuardSpawnActive(conn, 0, 0, false, at)
 	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
 	if denied.Allowed || !strings.Contains(denied.Reason, model.FormatRunID(held)) {
 		t.Fatalf("premise: the hold on %s must deny --active; allowed=%v reason=%q",
@@ -253,7 +253,7 @@ func TestActiveDecidingVoteAdmitsTheRunTheProposalServes(t *testing.T) {
 	proposalID := openProposal(t, conn, "acknowledge the reaped judge lease?")
 	linkProposal(t, conn, proposalID, heldIssue)
 
-	allowed, err := GuardSpawnActive(conn, 0, proposalID, at)
+	allowed, err := GuardSpawnActive(conn, 0, proposalID, false, at)
 	testsupport.Must(t, err, "GuardSpawnActive --deciding-vote: %v", err)
 	if !allowed.Allowed {
 		t.Fatalf("the panel that exists to decide %s's hold was denied by it: %s",
@@ -293,7 +293,7 @@ func TestActiveDecidingVoteServingNoActiveRunDenies(t *testing.T) {
 	proposalID := openProposal(t, conn, "about a run that is over")
 	linkProposal(t, conn, proposalID, endedIssue)
 
-	verdict, err := GuardSpawnActive(conn, 0, proposalID, at)
+	verdict, err := GuardSpawnActive(conn, 0, proposalID, false, at)
 	testsupport.Must(t, err, "GuardSpawnActive --deciding-vote: %v", err)
 	if verdict.Allowed {
 		t.Fatal("a proposal serving no active run admitted a spawn past another run's hold")
@@ -323,7 +323,7 @@ func TestActiveDecidingVoteDoesNotReachAnotherRunsHold(t *testing.T) {
 	proposalID := openProposal(t, conn, "about the other run")
 	linkProposal(t, conn, proposalID, servedIssue)
 
-	verdict, err := GuardSpawnActive(conn, 0, proposalID, at)
+	verdict, err := GuardSpawnActive(conn, 0, proposalID, false, at)
 	testsupport.Must(t, err, "GuardSpawnActive --deciding-vote: %v", err)
 	if verdict.Allowed {
 		t.Fatal("a vote serving one run admitted a spawn past ANOTHER run's hold")
@@ -358,7 +358,7 @@ func TestActiveDecidingVoteRecordsNoCarveOutOnADenial(t *testing.T) {
 	proposalID := openProposal(t, conn, "acknowledge the served run's reap?")
 	linkProposal(t, conn, proposalID, servedIssue)
 
-	verdict, err := GuardSpawnActive(conn, 0, proposalID, at)
+	verdict, err := GuardSpawnActive(conn, 0, proposalID, false, at)
 	testsupport.Must(t, err, "GuardSpawnActive --deciding-vote: %v", err)
 	if verdict.Allowed {
 		t.Fatal("a hold on an unserved run did not deny")
@@ -381,7 +381,7 @@ func TestActiveDecidingVoteIsNarrow(t *testing.T) {
 		runID := serializedRun(t, conn)
 		at := reapWriterOf(t, conn, runID)
 
-		_, err := GuardSpawnActive(conn, 0, 9999, at)
+		_, err := GuardSpawnActive(conn, 0, 9999, false, at)
 		if err == nil {
 			t.Fatal("an id nobody created was answered as a proposal serving no run")
 		}
@@ -401,7 +401,7 @@ func TestActiveDecidingVoteIsNarrow(t *testing.T) {
 		execSQL(t, conn, `UPDATE proposals SET status = ? WHERE id = ?`,
 			string(model.ProposalStatusApproved), id)
 
-		_, err := GuardSpawnActive(conn, 0, id, at)
+		_, err := GuardSpawnActive(conn, 0, id, false, at)
 		if err == nil {
 			t.Fatal("a decided proposal admitted the spawn")
 		}

@@ -534,7 +534,7 @@ func TestGuardSpawnActiveDeniesTheOlderRunWithAHold(t *testing.T) {
 	// Only the OLDER run holds an unacknowledged write reap.
 	reapOneWriter(t, conn, older.ID)
 
-	verdict, err := GuardSpawnActive(conn, 0, 0, nowMS)
+	verdict, err := GuardSpawnActive(conn, 0, 0, false, nowMS)
 	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
 	if verdict.Allowed {
 		t.Fatal("AC1: an unacknowledged reap on the older run did not deny --active")
@@ -562,7 +562,7 @@ func TestGuardSpawnActiveAllowsWhenNoActiveRunHoldsAReap(t *testing.T) {
 		testsupport.Must(t, err, "activate %s: %v", name, err)
 	}
 
-	verdict, err := GuardSpawnActive(conn, 0, 0, nowMS)
+	verdict, err := GuardSpawnActive(conn, 0, 0, false, nowMS)
 	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
 	if !verdict.Allowed {
 		t.Errorf("two unheld active runs were denied: %s", verdict.Reason)
