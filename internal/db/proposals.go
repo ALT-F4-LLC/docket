@@ -464,14 +464,14 @@ func getProposalVotes(q proposalQuerier, proposalID int) ([]*model.Vote, error) 
 	// Each vote's Usage comes from that vote's OWN vote_usage rows (DKT-2775),
 	// never the run-level rollup, so a per-seat read can calibrate the seat.
 	// A vote with no rows gets an empty, non-nil map: "reported nothing".
-	usage, _, err := proposalVoteUsage(q, proposalID)
+	usage, sources, err := proposalVoteUsage(q, proposalID)
 	if err != nil {
 		return nil, err
 	}
 	for _, v := range votes {
-		v.Usage = usage[v.ID]
+		v.Usage, v.UsageSource = usage[v.ID], sources[v.ID]
 		if v.Usage == nil {
-			v.Usage = map[string]float64{}
+			v.Usage, v.UsageSource = map[string]float64{}, map[string]string{}
 		}
 	}
 

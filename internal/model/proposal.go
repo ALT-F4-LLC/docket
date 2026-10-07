@@ -352,10 +352,17 @@ type Vote struct {
 	// 0, so two seats collide). Written to `vote_usage` in the cast's own
 	// transaction; units are opaque strings under usage_ledger's discipline
 	// (finite, non-negative), and like Metadata it is a claim the seat makes,
-	// not a fact core verifies. Write-side only: reads go through the
-	// run-level rollup.
-	Usage     map[string]float64
-	CreatedAt time.Time
+	// not a fact core verifies. On read it is filled from this vote's own
+	// vote_usage rows (DKT-2757) — an empty, non-nil map when the seat
+	// reported nothing — so a reader can calibrate one seat; the run-level
+	// rollup stays the per-run sum.
+	Usage map[string]float64
+	// UsageSource is read-side only: for each unit in Usage, the source of
+	// that unit's own vote_usage row ("reported" at cast time, or the
+	// back-fill's own, "backfilled"). A seat's units can mix sources, so it
+	// is per unit, never one value per cast.
+	UsageSource map[string]string
+	CreatedAt   time.Time
 }
 
 // voteJSON is the JSON wire format for Vote.
@@ -374,8 +381,13 @@ type voteJSON struct {
 	Metadata        map[string]any `json:"metadata,omitempty"`
 	// A vote whose stored bag would not decode. Omitted for every ordinary
 	// vote, so the wire form of a store with no odd cells is unchanged.
-	MetadataUnreadable bool   `json:"metadata_unreadable,omitempty"`
-	CreatedAt          string `json:"created_at"`
+	MetadataUnreadable bool `json:"metadata_unreadable,omitempty"`
+	// Usage and UsageSource are pointers so a read vote with no rows emits
+	// `{}` (it reported nothing) while a vote never read from the store —
+	// a cast's own echo — emits neither key.
+	Usage       *map[string]float64 `json:"usage,omitempty"`
+	UsageSource *map[string]string  `json:"usage_source,omitempty"`
+	CreatedAt   string              `json:"created_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Vote.
@@ -395,6 +407,9 @@ func (v Vote) MarshalJSON() ([]byte, error) {
 		Metadata:           v.Metadata,
 		MetadataUnreadable: v.MetadataUnreadable,
 		CreatedAt:          v.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if v.Usage != nil && v.UsageSource != nil {
+		j.Usage, j.UsageSource = &v.Usage, &v.UsageSource
 	}
 
 	return json.Marshal(j)

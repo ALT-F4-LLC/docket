@@ -3,10 +3,12 @@ package cli
 import (
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
@@ -403,6 +405,71 @@ func TestVoteResultJSON_SealedProposalWithholdsCastsUntilFinalized(t *testing.T)
 	for _, v := range votes {
 		if v["verdict"] != string(model.VerdictApproveWithConcerns) || v["summary"] == nil {
 			t.Errorf("closed result withholds %v's cast: %v", v["voter_name"], v)
+		}
+	}
+}
+
+// TestVoteShowJSON_CarriesEachSeatsUsage is DKT-2757: on a proposal that is
+// not sealed-open, every cast carries `usage` from its own vote_usage rows
+// and `usage_source` naming each unit's source, so a mixed seat shows its
+// reported and back-filled units apart; a seat with no rows carries `{}` for
+// both. A sealed-open proposal carries neither.
+func TestVoteShowJSON_CarriesEachSeatsUsage(t *testing.T) {
+	conn := newTestDB(t)
+	pid, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "usage on the wire", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 3, Threshold: 0.5,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	cast := func(voter string, usage map[string]float64) {
+		t.Helper()
+		_, err := db.CastVote(conn, &model.Vote{
+			ProposalID: pid, VoterName: voter, VoterRole: "reviewer",
+			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8,
+			Usage: usage,
+		})
+		testsupport.Must(t, err, "CastVote(%s): %v", voter, err)
+	}
+	cast("seat-a", map[string]float64{"output_tokens": 10, "tool_uses": 3})
+	cast("seat-b", nil)
+	err = engine.NewEngine().BackfillVoteUsage(conn, pid, []engine.VoteBackfillRow{
+		{Voter: "seat-a", Unit: "input_tokens", Quantity: 5},
+	}, "", model.NowMS())
+	testsupport.Must(t, err, "BackfillVoteUsage: %v", err)
+
+	_, votes := voteShowData(t, conn, pid)
+	want := map[string][2]map[string]any{
+		"seat-a": {
+			{"output_tokens": 10.0, "tool_uses": 3.0, "input_tokens": 5.0},
+			{"output_tokens": "reported", "tool_uses": "reported", "input_tokens": "backfilled"},
+		},
+		"seat-b": {{}, {}},
+	}
+	if len(votes) != 2 {
+		t.Fatalf("vote show lists %d casts, want 2", len(votes))
+	}
+	for _, v := range votes {
+		voter, _ := v["voter_name"].(string)
+		w, ok := want[voter]
+		if !ok {
+			t.Fatalf("unexpected cast %v", v)
+		}
+		if !reflect.DeepEqual(v["usage"], w[0]) {
+			t.Errorf("%s usage = %#v, want %#v", voter, v["usage"], w[0])
+		}
+		if !reflect.DeepEqual(v["usage_source"], w[1]) {
+			t.Errorf("%s usage_source = %#v, want %#v", voter, v["usage_source"], w[1])
+		}
+	}
+
+	sealed := sealedProposal(t, conn)
+	castSealedSeat(t, conn, sealed, "seat-a")
+	_, sealedVotes := voteShowData(t, conn, sealed)
+	for _, v := range sealedVotes {
+		for _, key := range []string{"usage", "usage_source"} {
+			if _, ok := v[key]; ok {
+				t.Errorf("sealed-open cast carries %q: %v", key, v)
+			}
 		}
 	}
 }
