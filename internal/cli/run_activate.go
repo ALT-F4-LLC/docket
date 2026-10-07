@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -236,12 +237,18 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	reason, _ := cmd.Flags().GetString("reason")
 
-	result, err := engine.Activate(conn, runID, engine.ActivateOptions{
+	opts := engine.ActivateOptions{
 		FilePins: pins,
 		NowMS:    model.NowMS(),
 		DryRun:   dryRun,
 		Reason:   reason,
-	})
+	}
+	// The activating checkout's head rides on the run-activated event
+	// (DKT-3263), read the same best-effort way `run start` records G8.
+	if cfg := getCfg(cmd); cfg != nil && cfg.ExecRoot != "" {
+		opts.HeadBranch, opts.HeadCommit = config.GitHead(cfg.ExecRoot)
+	}
+	result, err := engine.Activate(conn, runID, opts)
 	if err != nil {
 		return runErr(err)
 	}

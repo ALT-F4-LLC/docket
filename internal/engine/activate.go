@@ -36,6 +36,14 @@ type ActivateOptions struct {
 	// on the run-activated event's data when non-empty — matching `run budget
 	// --set --reason`, `run abandon --reason`, and `step reap --reason`.
 	Reason string
+	// HeadBranch and HeadCommit are the activating checkout's HEAD, read by
+	// the verb through config.GitHead on the configured exec root and
+	// recorded on the run-activated event's data (DKT-3263), so a close
+	// report can range `git log <head_commit>..HEAD` even after the shared
+	// branch is rewritten. Each is omitted when empty: outside a checkout
+	// the head is unknown, never invented.
+	HeadBranch string
+	HeadCommit string
 }
 
 // ActivateResult reports what one activation did, for the verb to render.
@@ -1100,8 +1108,18 @@ func activateTx(
 		result.ConductorToken = token
 	}
 	activatedData := ""
+	activatedFields := map[string]any{}
 	if opts.Reason != "" {
-		data, err := json.Marshal(map[string]any{"reason": opts.Reason})
+		activatedFields["reason"] = opts.Reason
+	}
+	if opts.HeadBranch != "" {
+		activatedFields["head_branch"] = opts.HeadBranch
+	}
+	if opts.HeadCommit != "" {
+		activatedFields["head_commit"] = opts.HeadCommit
+	}
+	if len(activatedFields) > 0 {
+		data, err := json.Marshal(activatedFields)
 		if err != nil {
 			return nil, fmt.Errorf("recording the run-activated event: %w", err)
 		}

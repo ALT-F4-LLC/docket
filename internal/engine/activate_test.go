@@ -187,7 +187,73 @@ func TestActivateBindsExactlyOneWorkflow(t *testing.T) {
 // escaped value — a reason containing a quote or a newline — without a
 // hand-escaped literal.
 type activatedEventData struct {
-	Reason string `json:"reason"`
+	Reason     string `json:"reason"`
+	HeadBranch string `json:"head_branch"`
+	HeadCommit string `json:"head_commit"`
+}
+
+// TestActivateRecordsHead is DKT-3263: the activating checkout's HEAD branch
+// and commit ride on the run-activated event beside the reason, on the first
+// activation and on a re-activation (each its own head), and a run activated
+// with no head stated records neither key rather than an invented one.
+func TestActivateRecordsHead(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+
+	const firstCommit = "0123456789abcdef0123456789abcdef01234567"
+	const secondCommit = "89abcdef0123456789abcdef0123456789abcdef"
+	_, err := Activate(conn, run.ID, ActivateOptions{
+		NowMS: nowMS, Reason: "kickoff", HeadBranch: "main", HeadCommit: firstCommit,
+	})
+	testsupport.Must(t, err, "activate: %v", err)
+	_, err = Activate(conn, run.ID, ActivateOptions{
+		NowMS: nowMS + 1000, HeadBranch: "feature/x", HeadCommit: secondCommit,
+	})
+	testsupport.Must(t, err, "re-activate: %v", err)
+
+	page, err := ListEvents(conn, EventQuery{RunID: run.ID})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	var got []activatedEventData
+	for _, event := range page.Events {
+		if event.Kind != EventRunActivated {
+			continue
+		}
+		var data activatedEventData
+		testsupport.Must(t, json.Unmarshal(event.Data, &data), "decoding data: %v", err)
+		got = append(got, data)
+	}
+	want := []activatedEventData{
+		{Reason: "kickoff", HeadBranch: "main", HeadCommit: firstCommit},
+		{HeadBranch: "feature/x", HeadCommit: secondCommit},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("run-activated events = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("run-activated event %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// No head stated (the exec root is not a checkout): neither key appears.
+	other := startRun(t, conn, createIssue(t, conn, "other", "a body", "task", nil))
+	_, err = Activate(conn, other.ID, ActivateOptions{NowMS: nowMS})
+	testsupport.Must(t, err, "activate without head: %v", err)
+	page, err = ListEvents(conn, EventQuery{RunID: other.ID})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	event, ok := findEvent(t, page, EventRunActivated)
+	if !ok {
+		t.Fatal("no run-activated event recorded")
+	}
+	var fields map[string]json.RawMessage
+	testsupport.Must(t, json.Unmarshal(event.Data, &fields), "decoding data: %v", err)
+	for _, key := range []string{"head_branch", "head_commit"} {
+		if _, ok := fields[key]; ok {
+			t.Errorf("run-activated data %s carries %s with no head stated", event.Data, key)
+		}
+	}
 }
 
 // TestActivateRecordsReasonAndTimestampOnTheActivatedEvent is DKT-53/DKT-56:
