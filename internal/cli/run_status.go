@@ -41,6 +41,10 @@ type runStatusResult struct {
 	// replaced must warn before a conduct session attaches and dispatches
 	// anything, not after a wave discovers it from render CONFLICTs.
 	PinDrift []engine.PinVerdict `json:"pin_drift,omitempty"`
+	// ActivationHead is the checkout head the latest activation recorded
+	// (DKT-3310), so an operator reads it without the events verb. Absent
+	// when no activation recorded one.
+	ActivationHead *engine.ActivationHead `json:"activation_head,omitempty"`
 }
 
 // pinJSON is §11.4's `pins` element: `{path, sha256}` for a file pin, and the
@@ -57,17 +61,19 @@ type pinJSON struct {
 // into it — the rollup is about the run, not part of it.
 func (r runStatusResult) VersionedPayload() any {
 	return struct {
-		Run      any                 `json:"run"`
-		Issues   int                 `json:"issues"`
-		Steps    []model.StatusCount `json:"steps,omitempty"`
-		Pins     []pinJSON           `json:"pins,omitempty"`
-		PinDrift []engine.PinVerdict `json:"pin_drift,omitempty"`
+		Run            any                    `json:"run"`
+		Issues         int                    `json:"issues"`
+		Steps          []model.StatusCount    `json:"steps,omitempty"`
+		Pins           []pinJSON              `json:"pins,omitempty"`
+		PinDrift       []engine.PinVerdict    `json:"pin_drift,omitempty"`
+		ActivationHead *engine.ActivationHead `json:"activation_head,omitempty"`
 	}{
-		Run:      model.VersionedRun{Run: *r.Run},
-		Issues:   r.Issues,
-		Steps:    r.Steps,
-		Pins:     r.Pins,
-		PinDrift: r.PinDrift,
+		Run:            model.VersionedRun{Run: *r.Run},
+		Issues:         r.Issues,
+		Steps:          r.Steps,
+		Pins:           r.Pins,
+		PinDrift:       r.PinDrift,
+		ActivationHead: r.ActivationHead,
 	}
 }
 
@@ -169,7 +175,12 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	result := runStatusResult{Run: run, Issues: len(runIssues), Steps: steps}
+	head, err := engine.LatestActivationHead(conn, runID)
+	if err != nil {
+		return runErr(err)
+	}
+
+	result := runStatusResult{Run: run, Issues: len(runIssues), Steps: steps, ActivationHead: head}
 	for _, p := range pins {
 		result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
 	}
@@ -223,6 +234,13 @@ func renderRunStatus(r runStatusResult) string {
 		fmt.Fprintf(&b, "Request: %s\n", requestSummary(r.Run.Request))
 	}
 	fmt.Fprintf(&b, "Issues: %d\n", r.Issues)
+	if h := r.ActivationHead; h != nil {
+		if h.Branch != "" {
+			fmt.Fprintf(&b, "Activation head: %s (%s)\n", h.Commit, h.Branch)
+		} else {
+			fmt.Fprintf(&b, "Activation head: %s\n", h.Commit)
+		}
+	}
 
 	if len(r.Steps) > 0 {
 		var parts []string

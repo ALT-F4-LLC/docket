@@ -1525,3 +1525,54 @@ func TestRunStartReadsRequestFile(t *testing.T) {
 		t.Errorf("code = %q, want %q", got, output.ErrNotFound)
 	}
 }
+
+// TestRunStatusShowsActivationHead is DKT-3310: `run status` shows the head
+// the latest activation recorded on its run-activated event, in --json=v2
+// and in text, and shows nothing when no head was recorded.
+func TestRunStatusShowsActivationHead(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	_, err := engine.Activate(conn, runID, engine.ActivateOptions{
+		NowMS: model.NowMS(), HeadBranch: "main", HeadCommit: commit,
+	})
+	testsupport.Must(t, err, "activate: %v", err)
+
+	status := func(jsonMode bool, id int) string {
+		w, buf := bufWriter(jsonMode)
+		w.JSONVersion = output.JSONV2
+		err := runRunStatus(runStatusCmdWithDB(conn), []string{model.FormatRunID(id)}, w)
+		testsupport.Must(t, err, "run status: %v", err)
+		return buf.String()
+	}
+
+	var envelope struct {
+		Data struct {
+			ActivationHead *struct {
+				Branch string `json:"branch"`
+				Commit string `json:"commit"`
+			} `json:"activation_head"`
+		} `json:"data"`
+	}
+	out := status(true, runID)
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", out, err)
+	}
+	if h := envelope.Data.ActivationHead; h == nil || h.Commit != commit || h.Branch != "main" {
+		t.Errorf("run status activation_head = %+v, want {main %s}", h, commit)
+	}
+	if text := status(false, runID); !strings.Contains(text, "Activation head: "+commit) {
+		t.Errorf("run status text does not show the activation head:\n%s", text)
+	}
+
+	// A run whose activation recorded no head shows none.
+	bare, _ := seedRun(t, conn)
+	_, err = engine.Activate(conn, bare, engine.ActivateOptions{NowMS: model.NowMS()})
+	testsupport.Must(t, err, "activate bare: %v", err)
+	if out := status(true, bare); strings.Contains(out, "activation_head") {
+		t.Errorf("run status shows an activation head none recorded: %s", out)
+	}
+	if text := status(false, bare); strings.Contains(text, "Activation head") {
+		t.Errorf("run status text shows an activation head none recorded:\n%s", text)
+	}
+}

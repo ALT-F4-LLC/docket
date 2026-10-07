@@ -754,3 +754,33 @@ func ValidateEventKind(kind string) error {
 	return validationErr("unknown event kind %q; valid kinds: %s",
 		kind, strings.Join(kinds, ", "))
 }
+
+// ActivationHead is the checkout head the run's LATEST activation recorded on
+// its run-activated event (DKT-3263): the head the shared branch stood at
+// when the run's current roster was bound. Both fields are empty when no
+// activation recorded one (the exec root was not a checkout, or the run
+// activated before heads were recorded) — absence, never a guess.
+type ActivationHead struct {
+	Branch string `json:"branch,omitempty"`
+	Commit string `json:"commit"`
+}
+
+// LatestActivationHead reads ActivationHead for `run status` (DKT-3310). It
+// returns nil when the latest run-activated event carries no commit.
+func LatestActivationHead(conn *sql.DB, runID int) (*ActivationHead, error) {
+	page, err := ListEvents(conn, EventQuery{RunID: runID, Kind: EventRunActivated, Tail: 1})
+	if err != nil {
+		return nil, err
+	}
+	if len(page.Events) == 0 {
+		return nil, nil
+	}
+	var data struct {
+		Branch string `json:"head_branch"`
+		Commit string `json:"head_commit"`
+	}
+	if err := json.Unmarshal(page.Events[0].Data, &data); err != nil || data.Commit == "" {
+		return nil, nil
+	}
+	return &ActivationHead{Branch: data.Branch, Commit: data.Commit}, nil
+}
