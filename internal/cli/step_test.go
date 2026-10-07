@@ -181,6 +181,9 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 		// `reap` (DKT-83): the forced-liveness verb — a relay that established
 		// its executor is dead clears the claim instead of waiting out the TTL.
 		"reap",
+		// `hold` (DKT-3287/DKT-3305): the conductor parks one ready step for
+		// the operator without abandoning the rest of its issue.
+		"hold",
 		"show", "context", "render",
 		// The OUTPUT side of the read surface. `context` re-emits
 		// what a step consumed; these re-emit what it produced, which nothing

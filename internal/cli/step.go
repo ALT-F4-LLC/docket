@@ -395,6 +395,50 @@ dead attempt's usage remains back-fillable against it.`,
 	},
 }
 
+var stepHoldCmd = &cobra.Command{
+	Use:   "hold STEP-N --reason R",
+	Short: "Park one ready step for the operator",
+	Long: `Park one READY step waiting-human (park class ` + "`held`" + `), so the next
+dispatch stops offering it while the rest of its issue runs on.
+
+A step that declares no max_attempts is re-offered after every failure, and
+before this verb the only way to stop offering it was ` + "`run abandon --issue`" + `,
+which ends every step of the issue. A held step resolves like any other park:
+` + "`step resolve --as retry`" + ` returns it to the pool, ` + "`--as skip`" + ` skips it.
+
+Ready steps only. A claimed step that keeps failing is force-reaped first
+(` + "`step reap`" + `, which spends no attempt) and then held. --reason is required
+and becomes the step's park reason; the hold is recorded as one step-held event
+carrying the reason, the actor, and the working directory.
+
+Like reap, it requires the RUN'S CONDUCTOR CAPABILITY via DOCKET_TOKEN or stdin;
+a run activated before the capability existed asks for none.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runStepHold(cmd, args, getWriter(cmd))
+	},
+}
+
+func runStepHold(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+	id, err := stepArg(args[0])
+	if err != nil {
+		return err
+	}
+	reason, _ := cmd.Flags().GetString("reason")
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+	if err := engine.HoldStep(conn, id, engine.HoldOptions{
+		Reason: reason, By: by, Token: stepConductorToken(conn, id, os.Stdin),
+		NowMS: model.NowMS(),
+	}); err != nil {
+		return stepErr(err, stepLabel(id))
+	}
+	return emitStepState(w, conn, id, "Held")
+}
+
 func runStepReap(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
 	id, err := stepArg(args[0])
@@ -1844,6 +1888,8 @@ func init() {
 	stepArtifactCmd.Flags().Bool("payload", false,
 		"Print only the structured payload, for piping into jq")
 
+	stepHoldCmd.Flags().String("reason", "",
+		"Why the step is parked for the operator (required)")
 	stepReapCmd.Flags().String("reason", "",
 		"Why the holder is being declared dead (required)")
 
@@ -1860,7 +1906,7 @@ func init() {
 
 	for _, sub := range []*cobra.Command{
 		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
-		stepApproveCmd, stepRejectCmd, stepResolveCmd, stepReapCmd,
+		stepApproveCmd, stepRejectCmd, stepResolveCmd, stepReapCmd, stepHoldCmd,
 		stepAnnotateCmd,
 		stepShowCmd, stepListCmd, stepContextCmd, stepRenderCmd,
 		stepArtifactsCmd, stepArtifactCmd,
