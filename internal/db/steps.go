@@ -119,6 +119,9 @@ const (
 	// its `on_fail` fell back to `waiting-human`, the same outcome a step
 	// would have reached with no panel at all.
 	ParkClassTriageUndecided ParkClass = "triage-undecided"
+	// ParkClassHeld: the run's conductor parked one ready step for the
+	// operator through `step hold` (DKT-3287), with its own stated reason.
+	ParkClassHeld ParkClass = "held"
 )
 
 // StepTerminal reports whether a status ends a step's life. A terminal step is
