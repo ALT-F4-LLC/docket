@@ -491,3 +491,53 @@ func ReapHoldReason(reaps []db.ReapAck) string {
 		"`dispatch open --ack-reap <seq>` (or `guard spawn --ack-reap <seq>`)")
 	return b.String()
 }
+
+// ackSameDispatchReapsTx is DKT-3286: a reconciled close acknowledges, as
+// `dispatch-close`, every open reap the engine can prove belonged to that
+// close's own wave — the reap was NOT forced, and the claim it ended was taken
+// after the dispatch opened, on a step the dispatch's manifest carries.
+//
+// The engine establishes both facts from its own records, which is what a
+// panel convened for such a reap could not do: the holder was this wave's,
+// and the wave is over. A forced reap keeps its hold (somebody asserted the
+// holder was gone, and that assertion is what a panel reviews), and so does a
+// claim admitted under any other dispatch.
+func ackSameDispatchReapsTx(tx *sql.Tx, runID int, open *db.Dispatch, nowMS int64) error {
+	reaps, err := db.UnacknowledgedReapsTx(tx, runID)
+	if err != nil {
+		return err
+	}
+	var seqs []int64
+	for _, r := range reaps {
+		var data string
+		if err := tx.QueryRow(`SELECT data FROM events WHERE seq = ?`, r.ReapedSeq).
+			Scan(&data); err != nil {
+			return fmt.Errorf("reading reap %d: %w", r.ReapedSeq, err)
+		}
+		var payload struct {
+			Forced bool `json:"forced"`
+		}
+		// An unreadable payload is not proof of a plain expiry, so it holds.
+		if json.Unmarshal([]byte(data), &payload) != nil || payload.Forced {
+			continue
+		}
+		var admitted bool
+		if err := tx.QueryRow(
+			`SELECT EXISTS(
+			   SELECT 1 FROM dispatch_rows dr
+			    WHERE dr.dispatch_id = ? AND dr.step_id = ?)
+			 AND COALESCE((SELECT MAX(seq) FROM events
+			                WHERE kind = ? AND step_id = ? AND seq < ?), 0) > ?`,
+			open.ID, r.StepID, EventStepClaimed, r.StepID, r.ReapedSeq, open.OpenedSeq,
+		).Scan(&admitted); err != nil {
+			return fmt.Errorf("reading reap %d's claim: %w", r.ReapedSeq, err)
+		}
+		if admitted {
+			seqs = append(seqs, r.ReapedSeq)
+		}
+	}
+	if len(seqs) == 0 {
+		return nil
+	}
+	return ackReapsTx(tx, runID, seqs, db.AckByDispatchClose, nowMS)
+}

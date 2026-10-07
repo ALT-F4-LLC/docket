@@ -2089,6 +2089,12 @@ func (e *Engine) closeDispatch(
 	// "records the acceptance" means. An acceptance visible only in a terminal
 	// scrollback is not a record. AC3: `integration` rides beside it — verified
 	// with its checked shas, or skipped with the operator's reason.
+	// DKT-3286: the reaps this wave's own holders left, acknowledged by the
+	// close that proves the wave is over. In the close's transaction, so a
+	// lost race rolls the acknowledgments back with it.
+	if err := ackSameDispatchReapsTx(tx, runID, open, nowMS); err != nil {
+		return nil, err
+	}
 	if e.beforeCloseCAS != nil {
 		e.beforeCloseCAS(tx, open.ID)
 	}

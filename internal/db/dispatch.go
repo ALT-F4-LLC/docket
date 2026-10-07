@@ -329,13 +329,18 @@ type ReapAck struct {
 	CreatedAtMS int64
 }
 
-// Acknowledgers — A8's closed pair. The value records the acknowledging VERB
+// Acknowledgers — A8's closed set. The value records the acknowledging VERB
 // and never a user identity, because core has no identity model.
 const (
 	// AckByGuardSpawn is `guard spawn --ack-reap`, group 3's entry point.
 	AckByGuardSpawn = "guard-spawn"
 	// AckByDispatchOpen is `dispatch open --ack-reap`, this group's.
 	AckByDispatchOpen = "dispatch-open"
+	// AckByDispatchClose is a reconciled `dispatch close` acknowledging a
+	// NON-FORCED reap of a claim admitted under that same dispatch
+	// (DKT-3286, runs-dispatch §6.2 A8). Abandon, forced reaps, and claims
+	// from another dispatch keep the hold.
+	AckByDispatchClose = "dispatch-close"
 )
 
 // InsertReapAckTx records a reap as unacknowledged, in the reap's own

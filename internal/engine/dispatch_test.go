@@ -1464,13 +1464,20 @@ func TestCloseReapsLapsedLeasesBeforeProbing(t *testing.T) {
 		t.Errorf("%d lease-reaped events, want 1 — the reap must be logged the "+
 			"same way `next` logs it", n)
 	}
-	acks := openReapsOf(t, conn, runID)
-	if len(acks) != 1 {
-		t.Fatalf("%d unacknowledged reaps after close reaped a bounded-class "+
-			"step, want 1", len(acks))
+	// The bounded-class reap writes its ack row exactly as `next`'s does; the
+	// reconciled close then acknowledges it, because the claim it ended was
+	// admitted under this same dispatch and the reap was not forced (DKT-3286).
+	var rows int
+	var ackedBy string
+	err = conn.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(acked_by), '') FROM reap_acks
+		  WHERE run_id = ? AND step_id = ?`, runID, stepID).Scan(&rows, &ackedBy)
+	testsupport.Must(t, err, "reading the ack row: %v", err)
+	if rows != 1 {
+		t.Fatalf("%d ack rows after close reaped a bounded-class step, want 1", rows)
 	}
-	if acks[0].StepID != stepID {
-		t.Errorf("the ack row names step %d, want %d", acks[0].StepID, stepID)
+	if ackedBy != db.AckByDispatchClose {
+		t.Errorf("the same-dispatch reap was acked by %q, want %q", ackedBy, db.AckByDispatchClose)
 	}
 }
 
