@@ -1206,7 +1206,7 @@ available through **two** entry points that write the same row:
 | # | Clause |
 |---|---|
 | A7 | An ack sets `reap_acks.acked_at_ms` and `acked_by` for the row whose `reaped_seq` matches, CAS on `acked_at_ms IS NULL` (C7, A4) |
-| A8 | `acked_by` records the acknowledging **verb and run**, never a user identity — core has no identity model. Its value is one of `guard-spawn` \| `dispatch-open` |
+| A8 | `acked_by` records the acknowledging **verb and run**, never a user identity — core has no identity model. Its value is one of `guard-spawn` \| `dispatch-open` \| `dispatch-close`. `dispatch-close` is admitted only for a NON-FORCED reap of a claim admitted under the SAME dispatch that close reconciles (DKT-3304); abandon, forced reaps, and claims from another dispatch keep the hold |
 | A9 | Acknowledging a seq that is not a reap, or not this run's, is `VALIDATION_ERROR` naming the seq. **A4's forgery point**: an ack must name a real reap |
 | A10 | An ack of an already-acknowledged reap is a **success that changes nothing** (idempotent), so a relay retrying its hook does not fail |
 | A11 | `guard spawn` **without** `--ack-reap` still *reports* unacknowledged reaps in its denial reason, naming each seq and the exact flag to pass. That is §2's "surfaced by `guard spawn`", and it is what makes the mechanism discoverable rather than documented |
@@ -1218,7 +1218,7 @@ available through **two** entry points that write the same row:
 | **Automatic ack after a timeout** | violates A5 outright. It converts "confirmed gone" into "probably gone by now", which is the assumption the tree-fence hazard exists because we cannot make |
 | **Ack implied by the next `next` call** | violates A5 the same way, and worse: `next` is called by anything, including a human running it to look. A read-shaped verb would silently authorize a write |
 | **Ack by the dead executor's token** | violates A2 fatally — the token holder is the thing presumed dead |
-| **Ack by `dispatch close`** | violates A2 in the crash case: the relay that opened the dispatch is gone, and `dispatch abandon` (the crash path) must stay unconditional (P21). Tying the ack there would make a crashed relay's reap permanently unacknowledgeable |
+| **Ack by `dispatch close`** (narrowed, now admitted) | rejected as the ONLY acknowledger: it violates A2 in the crash case — the relay that opened the dispatch is gone, and `dispatch abandon` (the crash path) must stay unconditional (P21), so tying every ack there would make a crashed relay's reap permanently unacknowledgeable. The narrowed case is admitted BESIDE the other two acknowledgers: a reconciled close acknowledges a non-forced reap of a claim admitted under that same dispatch, because the engine establishes from its own dispatch state that the holder it reaped was that wave's and the wave is over. Operator ruling (docket-groom pass 20261004T003235Z), verbatim: "amend docs/tdd/runs-dispatch.md section 6.2 to admit dispatch close as a third acknowledger, limited to non-forced reaps of claims admitted under the same dispatch. Abandon, forced reaps and other-dispatch claims keep the hold. A8 and the rejected-alternatives row are updated to record the ruling." |
 | **A dedicated `docket reap ack` verb** | adds a verb to §1's surface summary, which is a spec deviation for no gain. `guard spawn` is where §2 already puts the surfacing, and `dispatch open` is where a *new* relay's first act naturally goes |
 
 **A2 in full — the crashed-relay argument.** Relay opens a dispatch, spawns a
