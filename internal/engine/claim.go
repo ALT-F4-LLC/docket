@@ -341,6 +341,12 @@ func claimStepWithGates(
 	if err != nil {
 		return nil, err
 	}
+	// DKT-3300: the shared checkout's HEAD as this claim found it, read
+	// before the transaction (no subprocess runs inside one) and recorded on
+	// the claim event. A step with no fork point diffs its issue.diff from
+	// it, so the diff holds the step's own work rather than every commit
+	// since the run started.
+	claimHead := sharedCheckoutHead(runExecRoot(conn, step.RunID))
 
 	tx, err := conn.Begin()
 	if err != nil {
@@ -593,8 +599,21 @@ func claimStepWithGates(
 		Kind: EventStepClaimed, RunID: fresh.RunID,
 		Instance: fresh.Instance, IssueID: fresh.IssueID,
 	}
+	claimData := map[string]any{}
 	if opts.CostMultiplier > 0 {
-		claimEvent.Data = fmt.Sprintf(`{"expected_cost":%g}`, claimCost)
+		claimData["expected_cost"] = claimCost
+	}
+	// Writers only (the ruling's words): a read step that commits nothing
+	// keeps the old base, so its record does not erase the writer's target.
+	if claimHead != "" && sched.writeClassOf(fresh.Class) {
+		claimData["claim_head"] = claimHead
+	}
+	if len(claimData) > 0 {
+		encoded, err := json.Marshal(claimData)
+		if err != nil {
+			return nil, fmt.Errorf("recording the claim: %w", err)
+		}
+		claimEvent.Data = string(encoded)
 	}
 	if err := recordEvent(tx, claimEvent); err != nil {
 		return nil, err

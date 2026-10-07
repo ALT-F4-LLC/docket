@@ -200,7 +200,7 @@ func TestRunDiffBaseResolvesInsideACheckout(t *testing.T) {
 	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
 	testsupport.Must(t, db.AddRunIssue(conn, unpinned.ID, issue), "AddRunIssue: %v", err)
 
-	base, live := runDiffBase(conn, unpinned.ID, unrelated, shared)
+	base, live := runDiffBase(conn, unpinned.ID, 0, unrelated, shared)
 	if base != sharedHead || !live {
 		t.Errorf("runDiffBase(no fork point, no pinned commit) = (%q, %v), "+
 			"want the exec root's own HEAD %s as a live base", base, live, sharedHead)
@@ -212,7 +212,7 @@ func TestRunDiffBaseResolvesInsideACheckout(t *testing.T) {
 	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
 	testsupport.Must(t, db.AddRunIssue(conn, outside.ID, issue), "AddRunIssue: %v", err)
 
-	if base, _ := runDiffBase(conn, outside.ID, unrelated, noCheckout); base != "" {
+	if base, _ := runDiffBase(conn, outside.ID, 0, unrelated, noCheckout); base != "" {
 		t.Errorf("runDiffBase(exec root is not a checkout) = %q, want no base", base)
 	}
 }

@@ -485,3 +485,70 @@ func TestIssueDiffRecordCarriesTheFixedBase(t *testing.T) {
 		t.Errorf("a live base was recorded: %s", payload)
 	}
 }
+
+// TestWriterDiffBaseIsItsClaimHead is DKT-3300: a write-class step recorded in
+// the shared checkout diffs from the HEAD its first claim recorded, not from
+// the run's older pinned commit, so a commit integrated between the two is not
+// rendered as this step's work; the record carries the base it used.
+func TestWriterDiffBaseIsItsClaimHead(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		testsupport.Must(t, os.WriteFile(filepath.Join(repo, name), []byte(body), 0o644),
+			"writing %s: %v", name, nil)
+	}
+	gitRun(t, repo, "init", "-q", "-b", "main")
+	write("seed.txt", "seed\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-q", "-m", "run start")
+	pinned := gitRun(t, repo, "rev-parse", "HEAD")
+
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(writeClassWorkflowSrc), "integration-fixture.toml")
+	issue := createIssue(t, conn, "writer base", "a body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "writer base run", 0, nowMS,
+		db.RunContext{ExecRoot: repo, CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue: %v", err)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	// A sibling's work lands on the shared branch before this writer claims.
+	write("sibling.txt", "A SIBLING'S INTEGRATED WORK\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-q", "-m", "sibling")
+	claimHead := gitRun(t, repo, "rev-parse", "HEAD")
+
+	e := testEngine()
+	e.DiffFn = GitDiff
+	e.HeadFn = sharedCheckoutHead
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+	write("work.txt", "THE WRITER'S OWN CHANGE\n")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-q", "-m", "writer")
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change summary"), NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete: %v", err)
+
+	var body, payload string
+	err = conn.QueryRow(`SELECT body, payload FROM artifacts WHERE step_id = ? AND kind = ?`,
+		stepID, ArtifactKindIssueDiff).Scan(&body, &payload)
+	testsupport.Must(t, err, "reading issue.diff: %v", err)
+	if !strings.Contains(body, "THE WRITER'S OWN CHANGE") {
+		t.Errorf("issue.diff lacks the writer's change:\n%s", body)
+	}
+	if strings.Contains(body, "SIBLING") {
+		t.Errorf("issue.diff carries the intervening sibling commit:\n%s", body)
+	}
+	var record map[string]string
+	testsupport.Must(t, json.Unmarshal([]byte(payload), &record), "decoding %q: %v", payload, nil)
+	if record["base"] != claimHead {
+		t.Errorf("record base = %q, want the claim head %q", record["base"], claimHead)
+	}
+}

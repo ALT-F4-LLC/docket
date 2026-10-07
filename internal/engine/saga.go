@@ -1647,7 +1647,7 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	// DKT-11 / DKT-20 / DKT-42: for a worktree, the base is its FORK POINT;
 	// for the shared checkout, the run's PINNED starting commit — see
 	// runDiffBase's doc for why.
-	base, liveBase := runDiffBase(conn, step.RunID, dir, execRoot)
+	base, liveBase := runDiffBase(conn, step.RunID, step.ID, dir, execRoot)
 	body, err = e.DiffFn(dir, base, scope)
 	if err != nil {
 		return "", "", fmt.Errorf("computing the diff for %s: %w", step.Instance, err)
@@ -2733,10 +2733,22 @@ func runExecRoot(conn *sql.DB, runID int) string {
 // caller resolved it to default `dir`, and passing it in keeps this compare
 // and that defaulting reading ONE value rather than two resolutions that
 // could disagree.
-func runDiffBase(conn *sql.DB, runID int, dir, execRoot string) (base string, live bool) {
+func runDiffBase(conn *sql.DB, runID, stepID int, dir, execRoot string) (base string, live bool) {
 	if dir != "" && dir != execRoot {
 		if fork := worktreeForkPoint(dir, execRoot); fork != "" {
 			return fork, false
+		}
+	}
+	// DKT-3300 (operator ruling): a WRITER recorded in the shared checkout
+	// diffs from the shared HEAD its FIRST claim found, recorded on that claim
+	// event (write-class claims only, so a reader that commits nothing keeps
+	// the old base and cannot erase the writer's target). The pinned run
+	// commit predates every sibling's integration, so diffing from it put
+	// earlier commits' hunks in the writer's issue.diff. A worktree keeps its
+	// fork point; a live HEAD read at completion is never used here.
+	if dir == "" || dir == execRoot {
+		if head := claimHeadOf(conn, stepID); head != "" {
+			return head, false
 		}
 	}
 	run, err := db.GetRun(conn, runID)
@@ -3849,4 +3861,27 @@ func latestRecordedChange(conn *sql.DB, runID, issueID int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// claimHeadOf reads `claim_head` from the step's FIRST step-claimed event —
+// the first, so a retry still diffs from before attempt one's commits —
+// the shared checkout's HEAD when that claim was taken (DKT-3300). "" when no
+// claim recorded one.
+func claimHeadOf(conn *sql.DB, stepID int) string {
+	if stepID == 0 {
+		return ""
+	}
+	var data string
+	if err := conn.QueryRow(
+		`SELECT data FROM events WHERE kind = ? AND step_id = ? ORDER BY seq ASC LIMIT 1`,
+		EventStepClaimed, stepID).Scan(&data); err != nil {
+		return ""
+	}
+	var payload struct {
+		ClaimHead string `json:"claim_head"`
+	}
+	if json.Unmarshal([]byte(data), &payload) != nil {
+		return ""
+	}
+	return payload.ClaimHead
 }
