@@ -519,13 +519,19 @@ func TestBreachPausesTheRunWithAReason(t *testing.T) {
 	}
 
 	// B23: `run-paused`, with the reason in `data`. The kind is the existing
-	// one, so §9 item 2's closed set is unchanged.
-	kind, data := lastRunEvent(t, conn, runID)
-	if kind != EventRunPaused {
-		t.Errorf("the breach wrote a %q event, want %q — a new kind would widen "+
+	// one, so §9 item 2's closed set is unchanged. The refused claim's own
+	// `claim-refused` (DKT-2776) follows it; that records the claim, not the
+	// pause, so the pause is read by kind rather than as the last event.
+	if n := countRunEvents(t, conn, runID, EventRunPaused); n != 1 {
+		t.Errorf("the breach wrote %d %q events, want 1 — a new kind would widen "+
 			"the closed set for a transition that is already a pause",
-			kind, EventRunPaused)
+			n, EventRunPaused)
 	}
+	var data string
+	err = conn.QueryRow(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`,
+		runID, EventRunPaused).Scan(&data)
+	testsupport.Must(t, err, "reading the pause event: %v", err)
 	if !strings.Contains(data, `"reason":"budget"`) {
 		t.Errorf("the pause event's data is %q, want it to carry reason=budget", data)
 	}
@@ -1014,15 +1020,6 @@ func runSteps(t *testing.T, conn *sql.DB, runID int) []*db.Step {
 }
 
 // lastRunEvent returns the kind and data of a run's most recent event.
-func lastRunEvent(t *testing.T, conn *sql.DB, runID int) (kind, data string) {
-	t.Helper()
-	err := conn.QueryRow(
-		`SELECT kind, data FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1`,
-		runID).Scan(&kind, &data)
-	testsupport.Must(t, err, "reading the last event of %s: %v", model.FormatRunID(runID), err)
-	return kind, data
-}
-
 // countRunEvents counts a run's events of one kind.
 func countRunEvents(t *testing.T, conn *sql.DB, runID int, kind string) int {
 	t.Helper()

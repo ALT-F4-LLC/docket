@@ -376,6 +376,14 @@ const (
 	// conversation that drove the wave. It carries the run, the reason, and
 	// the dispatch when one was open.
 	EventDispatchCloseRefused = "dispatch-close-refused"
+
+	// EventClaimRefused (DKT-2776) records a `step claim` that refused
+	// CONFLICT: an unclaimable kind, a step not ready (headroom included),
+	// a lost CAS against a live lease, a claim lost while its pre-gates
+	// ran, or a budget refusal. Like a refused close it moves no state of
+	// its own, but contention is a coordination fact a store-only retro
+	// counts. It carries the step, the requesting owner, and the reason.
+	EventClaimRefused = "claim-refused"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -418,6 +426,7 @@ var eventKinds = map[string]bool{
 	EventRunNoteAdded:         true,
 	EventConfigChanged:        true,
 	EventDispatchCloseRefused: true,
+	EventClaimRefused:         true,
 }
 
 // recordEvent writes one event in the caller's transaction.

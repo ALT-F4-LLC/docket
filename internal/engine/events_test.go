@@ -249,12 +249,17 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// it is a coordination fact a store-only retro counts, and without
 		// it a refused close was visible only in the driving conversation.
 		"dispatch-close-refused",
+
+		// The refused claim (DKT-2776) — ONE, on the refused close's
+		// argument: claim contention moves no state but is a coordination
+		// fact a store-only retro counts.
+		"claim-refused",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 54 {
+	if len(eventKinds) != 55 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
@@ -264,8 +269,9 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			"kind, DKT-2291's body-refresh kind, DKT-1034's issue.diff "+
 			"re-pin kind, DKT-1079's run-note kind, DKT-2465's "+
 			"conductor-seat kind, DKT-2071's dispatch-extend kind, "+
-			"DKT-2766's config-changed kind, and DKT-2758's "+
-			"dispatch-close-refused kind enumerate 54 (see DKT-21)",
+			"DKT-2766's config-changed kind, DKT-2758's "+
+			"dispatch-close-refused kind, and DKT-2776's claim-refused kind "+
+			"enumerate 55 (see DKT-21)",
 			len(eventKinds))
 	}
 }

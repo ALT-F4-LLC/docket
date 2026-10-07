@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -171,7 +172,7 @@ type ClaimOptions struct {
 // A step with NO pre-gates takes the identical path with an empty phase 2, so
 // the overwhelmingly common case is byte-identical to S3's behavior.
 func ClaimStep(conn *sql.DB, stepID int, opts ClaimOptions) (*ClaimResult, error) {
-	return claimStepWithGates(conn, stepID, opts, nil)
+	return claimRecordingRefusals(conn, stepID, opts, nil)
 }
 
 // ClaimStepWithGates is ClaimStep with a gate runner, so pre-gates execute.
@@ -184,7 +185,7 @@ func ClaimStep(conn *sql.DB, stepID int, opts ClaimOptions) (*ClaimResult, error
 func (e *Engine) ClaimStepWithGates(
 	conn *sql.DB, stepID int, opts ClaimOptions,
 ) (*ClaimResult, error) {
-	return claimStepWithGates(conn, stepID, opts, e)
+	return claimRecordingRefusals(conn, stepID, opts, e)
 }
 
 // ClaimStepRendered is ClaimStepWithGates for `step claim --render`: the claim
@@ -225,7 +226,7 @@ func (e *Engine) ClaimStepRendered(
 		return nil, nil, err
 	}
 
-	result, err := claimStepWithGates(conn, stepID, opts, e)
+	result, err := claimRecordingRefusals(conn, stepID, opts, e)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -240,6 +241,59 @@ func (e *Engine) ClaimStepRendered(
 		return nil, nil, incompleteClaim(result, err)
 	}
 	return result, packet, nil
+}
+
+// claimRecordingRefusals records every CONFLICT-coded refusal of claimStepWithGates
+// as one `claim-refused` event (DKT-2776), in its own transaction that
+// commits although the claim did not. A lost CAS surfaces as db.ErrLeaseHeld,
+// which the CLI maps to CONFLICT, so it counts too.
+func claimRecordingRefusals(
+	conn *sql.DB, stepID int, opts ClaimOptions, e *Engine,
+) (*ClaimResult, error) {
+	result, err := claimStepWithGates(conn, stepID, opts, e)
+	code, isEngine := CodeOf(err)
+	if (isEngine && code == CodeConflict) || errors.Is(err, db.ErrLeaseHeld) {
+		if recErr := recordClaimRefused(conn, stepID, opts, err.Error()); recErr != nil {
+			return nil, recErr
+		}
+	}
+	return result, err
+}
+
+// claimHookBeforeCAS and claimHookBeforeRefresh run inside the claim's
+// transaction just before the lease CAS, and inside transaction B just
+// before the pre-gate lease refresh. Test-only, nil in production: they let a
+// test move the lease first and reach the two race refusals (DKT-2776),
+// which one process on a single-writer store cannot otherwise lose.
+var (
+	claimHookBeforeCAS     func(tx *sql.Tx, stepID int)
+	claimHookBeforeRefresh func(tx *sql.Tx, stepID int)
+)
+
+// recordClaimRefused writes the `claim-refused` event (DKT-2776).
+func recordClaimRefused(conn *sql.DB, stepID int, opts ClaimOptions, reason string) error {
+	step, err := db.GetStep(conn, stepID)
+	if err != nil {
+		return fmt.Errorf("recording the refused claim: %w", err)
+	}
+	data, err := json.Marshal(map[string]any{
+		"step": model.FormatStepID(stepID), "owner": opts.Owner, "reason": reason,
+	})
+	if err != nil {
+		return fmt.Errorf("recording the refused claim: %w", err)
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		return fmt.Errorf("recording the refused claim: %w", err)
+	}
+	defer tx.Rollback()
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventClaimRefused, RunID: step.RunID, Instance: step.Instance,
+		IssueID: step.IssueID, Data: string(data), AtMS: opts.NowMS,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func claimStepWithGates(
@@ -477,6 +531,9 @@ func claimStepWithGates(
 	}
 
 	// ---- The CAS claim. ----------------------------------------------------
+	if claimHookBeforeCAS != nil {
+		claimHookBeforeCAS(tx, fresh.ID)
+	}
 	token, lease, err := db.ClaimStepTx(tx, fresh.ID, opts.Owner, ttlMS, opts.NowMS)
 	if err != nil {
 		return nil, err
@@ -713,6 +770,9 @@ func claimStepWithGates(
 	// never award a claim.
 	committed.Context.PreGates = preResults
 
+	if claimHookBeforeRefresh != nil {
+		claimHookBeforeRefresh(txB, fresh.ID)
+	}
 	refreshed, err := db.RefreshClaimLeaseTx(
 		txB, fresh.ID, lease.TokenHash, ttlMS, opts.NowMS)
 	if err != nil {

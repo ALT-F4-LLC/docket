@@ -605,6 +605,10 @@ var eventActors = map[string]Actor{
 	// relay acting for one, ran `dispatch close` — the same actor as the
 	// `dispatch-closed` it failed to become.
 	EventDispatchCloseRefused: ActorHuman,
+
+	// The refused claim (DKT-2776): the same actor as the `step-claimed` it
+	// failed to become — a worker, or the dispatcher acting for one.
+	EventClaimRefused: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,
