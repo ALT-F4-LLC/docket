@@ -600,6 +600,11 @@ var eventActors = map[string]Actor{
 	// one) ran `config set`, and the event's `changed_by` names who, which
 	// is precisely what `human` means in this table.
 	EventConfigChanged: ActorHuman,
+
+	// The refused close (DKT-2758): it exists only because a person, or the
+	// relay acting for one, ran `dispatch close` — the same actor as the
+	// `dispatch-closed` it failed to become.
+	EventDispatchCloseRefused: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,

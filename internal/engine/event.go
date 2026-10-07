@@ -367,6 +367,15 @@ const (
 	// 2026-09-17). Like `project-registered` it has NO RUN: a config write
 	// belongs to a project, not to any run of it.
 	EventConfigChanged = "config-changed"
+
+	// EventDispatchCloseRefused (DKT-2758) records a `dispatch close` that
+	// refused CONFLICT: unintegrated commits, no open dispatch, unreconciled
+	// discrepancies, nothing to accept, or a lost close race. A refusal
+	// changes no state, but it is a coordination fact a store-only retro
+	// must be able to count, and without the event it reached only the
+	// conversation that drove the wave. It carries the run, the reason, and
+	// the dispatch when one was open.
+	EventDispatchCloseRefused = "dispatch-close-refused"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -402,12 +411,13 @@ var eventKinds = map[string]bool{
 	EventRunRepinned:         true,
 	EventSpawnAdmitted:       true,
 	EventGateOverrideGranted: true, EventStepBatchOverridden: true,
-	EventStaleTargetWaived:   true,
-	EventIssueScopeRefreshed: true,
-	EventIssueBodyRefreshed:  true,
-	EventIssueDiffRepinned:   true,
-	EventRunNoteAdded:        true,
-	EventConfigChanged:       true,
+	EventStaleTargetWaived:    true,
+	EventIssueScopeRefreshed:  true,
+	EventIssueBodyRefreshed:   true,
+	EventIssueDiffRepinned:    true,
+	EventRunNoteAdded:         true,
+	EventConfigChanged:        true,
+	EventDispatchCloseRefused: true,
 }
 
 // recordEvent writes one event in the caller's transaction.

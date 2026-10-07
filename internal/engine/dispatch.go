@@ -1903,9 +1903,55 @@ type CloseOutcome struct {
 // override: the check does not run at all, and the reason rides on the close
 // event instead (§3.6's "record the override, don't silently honor it"
 // pattern this codebase already applies to trust changes).
+//
+// DKT-2758: every CONFLICT it returns is recorded as one
+// `dispatch-close-refused` event, in its own transaction that commits although
+// the close did not, naming the dispatch when one was open.
 func (e *Engine) CloseDispatch(
 	conn *sql.DB, runID int, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
 ) (*CloseOutcome, error) {
+	openID := 0
+	outcome, err := e.closeDispatch(conn, runID, acceptMissingUsage, skipIntegrationReason, nowMS, &openID)
+	if code, ok := CodeOf(err); ok && code == CodeConflict {
+		if recErr := recordCloseRefused(conn, runID, openID, err.Error(), nowMS); recErr != nil {
+			return nil, recErr
+		}
+	}
+	return outcome, err
+}
+
+// recordCloseRefused writes the `dispatch-close-refused` event (DKT-2758).
+func recordCloseRefused(conn *sql.DB, runID, dispatchID int, reason string, nowMS int64) error {
+	fields := map[string]any{"reason": reason}
+	if dispatchID > 0 {
+		fields["dispatch"] = FormatDispatchID(dispatchID)
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Errorf("recording the refused close: %w", err)
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		return fmt.Errorf("recording the refused close: %w", err)
+	}
+	defer tx.Rollback()
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventDispatchCloseRefused, RunID: runID, Data: string(data), AtMS: nowMS,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// closeDispatch is CloseDispatch's body. openID receives the open dispatch's
+// id as soon as one is read, so a refusal can name it.
+func (e *Engine) closeDispatch(
+	conn *sql.DB, runID int, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
+	openID *int,
+) (*CloseOutcome, error) {
+	if id, ok := openDispatchID(conn, runID); ok {
+		*openID = id
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -2043,6 +2089,9 @@ func (e *Engine) CloseDispatch(
 	// "records the acceptance" means. An acceptance visible only in a terminal
 	// scrollback is not a record. AC3: `integration` rides beside it — verified
 	// with its checked shas, or skipped with the operator's reason.
+	if e.beforeCloseCAS != nil {
+		e.beforeCloseCAS(tx, open.ID)
+	}
 	moved, err := closeDispatchTx(tx, open.ID, runID, db.DispatchClosed, reason,
 		EventDispatchClosed, map[string]any{"accepted": instances, "integration": integration},
 		"recording the close", nowMS)
@@ -2314,4 +2363,19 @@ func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
 	return conflictErr(
 		"%s is no longer open: it is %s (%s) — another invocation closed it first",
 		FormatDispatchID(dispatchID), current.Status, current.CloseReason)
+}
+
+// openDispatchID reads the run's open dispatch id, if any, in a rolled-back
+// transaction of its own.
+func openDispatchID(conn *sql.DB, runID int) (int, bool) {
+	tx, err := conn.Begin()
+	if err != nil {
+		return 0, false
+	}
+	defer tx.Rollback()
+	open, err := db.OpenDispatchTx(tx, runID)
+	if err != nil {
+		return 0, false
+	}
+	return open.ID, true
 }

@@ -175,6 +175,11 @@ type Engine struct {
 	// a working tree. A field for DiffFn's reason: the real one shells out to
 	// git, and a test injects a body. nil records an empty body.
 	CommitPatchFn func(execRoot, sha string, scope []string) (string, error)
+	// beforeCloseCAS runs inside a close's transaction just before the
+	// manifest's CAS. Test-only: it lets a test move the row first and reach
+	// the lost-close-race refusal (DKT-2758), which one transaction on a
+	// single-writer store cannot otherwise lose. nil in production.
+	beforeCloseCAS func(tx *sql.Tx, dispatchID int)
 }
 
 // NewEngine builds the S5 engine: the REAL gate runner, the REAL action runner,
