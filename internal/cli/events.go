@@ -71,6 +71,11 @@ mid-incident question "what just happened". They still arrive oldest-first, so
 the last seq is still the cursor to store. --tail and --since are mutually
 exclusive: one jumps to the end of the feed, the other walks it forward.
 
+--kind KIND and --step STEP-N filter BEFORE --limit and --tail, and total
+counts only the matches, so a lookup by kind or step covers the whole trail
+rather than the oldest page. An unknown kind is refused with the valid kinds;
+a step that does not exist is not found.
+
 With --follow, --tail N is the STARTING CURSOR: the stream opens with the newest
 N and then follows live, instead of replaying the whole retained history first.
 
@@ -156,6 +161,22 @@ func eventsTailFlag(cmd *cobra.Command) (int, error) {
 	return tail, nil
 }
 
+// eventsPredicateFlags reads `--kind` and `--step` for BOTH entry points, for
+// the reason eventsTailFlag is shared: a filter one path validated and the
+// other did not would let `--follow` answer a lookup `list` refuses.
+func eventsPredicateFlags(cmd *cobra.Command) (kind string, stepID int, err error) {
+	kind, _ = cmd.Flags().GetString("kind")
+	if err := engine.ValidateEventKind(kind); err != nil {
+		return "", 0, runErr(err)
+	}
+	stepRef, _ := cmd.Flags().GetString("step")
+	stepID, err = engine.ResolveStepFilter(getDB(cmd), stepRef)
+	if err != nil {
+		return "", 0, runErr(err)
+	}
+	return kind, stepID, nil
+}
+
 func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 	conn := getDB(cmd)
 
@@ -176,6 +197,10 @@ func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 	if err != nil {
 		return err
 	}
+	kind, stepID, err := eventsPredicateFlags(cmd)
+	if err != nil {
+		return err
+	}
 
 	runRef, _ := cmd.Flags().GetString("run")
 	runID, err := engine.ResolveRunFilter(conn, runRef)
@@ -185,6 +210,7 @@ func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 
 	page, err := engine.ListEvents(conn, engine.EventQuery{
 		Since: since, RunID: runID, Limit: limit, Tail: tail,
+		Kind: kind, StepID: stepID,
 		ProjectID: eventsProjectScope(cmd),
 	})
 	if err != nil {
@@ -331,6 +357,10 @@ func init() {
 			"there; excludes --since")
 	eventsListCmd.Flags().Int(
 		"limit", 0, fmt.Sprintf("Maximum events to return (default %d)", eventsDefaultLimit))
+	eventsListCmd.Flags().String(
+		"kind", "", "Return only events of this kind, matched before --limit and --tail")
+	eventsListCmd.Flags().String(
+		"step", "", "Return only this step's events (STEP-N), matched before --limit and --tail")
 
 	// `--follow` (docs/tdd/events-follow.md §4). engine-spec §1 writes the verb
 	// as `docket events --follow [--since SEQ]`; the flag lands on `list`

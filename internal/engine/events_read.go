@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -101,6 +103,13 @@ type EventQuery struct {
 	// cursor cannot answer without first paging through the entire history to
 	// reach the end.
 	Tail int
+	// Kind filters to one event kind; empty is every kind. StepID filters to
+	// one step's events by its joinable id; zero is every step. Both are
+	// predicates in the WHERE clause, so they apply BEFORE Limit and Tail and
+	// Total counts only the matches (DKT-3293): a lookup by kind or step
+	// covers the whole trail instead of searching the oldest page.
+	Kind   string
+	StepID int
 	// ProjectID scopes the feed to one project (v12); 0 is the whole store.
 	//
 	// An event's project is its RUN's when it has one, else its ISSUE's, else
@@ -261,6 +270,14 @@ func eventFilter(q EventQuery) (string, []any) {
 	if q.RunID != 0 {
 		where += ` AND e.run_id = ?`
 		args = append(args, q.RunID)
+	}
+	if q.Kind != "" {
+		where += ` AND e.kind = ?`
+		args = append(args, q.Kind)
+	}
+	if q.StepID != 0 {
+		where += ` AND e.step_id = ?`
+		args = append(args, q.StepID)
 	}
 	// THE PROJECT SCOPE IS DROPPED UNDER `--run` (DKT-583). A run has exactly
 	// one project, so the run clause above is already that project's scope and
@@ -701,4 +718,39 @@ func ResolveRunFilter(conn *sql.DB, ref string) (int, error) {
 		return 0, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	return runID, nil
+}
+
+// ResolveStepFilter maps `--step STEP-N` onto a step id, refusing a step that
+// does not exist, for the same reason ResolveRunFilter refuses a missing run:
+// a filter over nothing would answer with a successful empty page. Only the
+// joinable id is accepted, never a `name@k#i` instance label, which collides
+// across issues in one run.
+func ResolveStepFilter(conn *sql.DB, ref string) (int, error) {
+	if ref == "" {
+		return 0, nil
+	}
+	stepID, err := model.ParseStepID(ref)
+	if err != nil {
+		return 0, validationErr("%s is not a step reference (expected STEP-N)", ref)
+	}
+	if _, err := db.GetStep(conn, stepID); err != nil {
+		return 0, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
+	}
+	return stepID, nil
+}
+
+// ValidateEventKind refuses a `--kind` outside the closed set, naming the
+// valid kinds. An unknown kind would otherwise match nothing and read as
+// "no such event happened", the silent miss the filter exists to end.
+func ValidateEventKind(kind string) error {
+	if kind == "" {
+		return nil
+	}
+	if _, ok := eventKinds[kind]; ok {
+		return nil
+	}
+	kinds := EventKinds()
+	sort.Strings(kinds)
+	return validationErr("unknown event kind %q; valid kinds: %s",
+		kind, strings.Join(kinds, ", "))
 }

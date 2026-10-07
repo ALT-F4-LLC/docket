@@ -10,6 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -101,6 +102,8 @@ func eventsListCmdWithDB(conn *sql.DB) *cobra.Command {
 	cmd.Flags().Bool("all-projects", false, "")
 	cmd.Flags().Int("tail", 0, "")
 	cmd.Flags().Int("limit", 0, "")
+	cmd.Flags().String("kind", "", "")
+	cmd.Flags().String("step", "", "")
 	return cmd
 }
 
@@ -257,5 +260,151 @@ func TestEventsListWithoutRunStaysScopedToTheInvokingProject(t *testing.T) {
 	if out.Data.Events[0].Run != hereRun {
 		t.Errorf("the scoped feed carries %q, want this project's %q",
 			out.Data.Events[0].Run, hereRun)
+	}
+}
+
+// eventsFilteredJSON drives `events list --run <ref> --json=v2` with the named
+// extra flags set, returning the decoded v2 page or the verb's error.
+func eventsFilteredJSON(
+	t *testing.T, conn *sql.DB, runRef string, flags map[string]string,
+) (items []struct {
+	Seq    int64  `json:"seq"`
+	Kind   string `json:"kind"`
+	StepID string `json:"step_id"`
+}, total int, truncated bool, err error) {
+	t.Helper()
+	cmd := eventsListCmdWithDB(conn)
+	testsupport.Must(t, cmd.Flags().Set("run", runRef), "setting --run: %v", nil)
+	for name, value := range flags {
+		testsupport.Must(t, cmd.Flags().Set(name, value), "setting --%s: %v", name, nil)
+	}
+	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
+	if err := runEventsList(cmd, w); err != nil {
+		return nil, 0, false, err
+	}
+	var out struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Items []struct {
+				Seq    int64  `json:"seq"`
+				Kind   string `json:"kind"`
+				StepID string `json:"step_id"`
+			} `json:"items"`
+			Total     int  `json:"total"`
+			Truncated bool `json:"truncated"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshalling the envelope: %v\n%s", err, buf.String())
+	}
+	return out.Data.Items, out.Data.Total, out.Data.Truncated, nil
+}
+
+// seedFilterRun activates a run and writes 150 run events after activation:
+// kind lease-reaped at positions 120 and 140, and the run's second step's
+// events only past position 100. It returns the run ref, the lease-reaped
+// seqs, the target step id, and that step's seeded seqs.
+func seedFilterRun(t *testing.T, conn *sql.DB) (string, []int64, int, []int64) {
+	t.Helper()
+	runID := activatedRunForNext(t, conn)
+	var steps []int
+	rows, err := conn.Query(`SELECT id FROM steps WHERE run_id = ? ORDER BY id`, runID)
+	testsupport.Must(t, err, "listing steps: %v", err)
+	for rows.Next() {
+		var id int
+		testsupport.Must(t, rows.Scan(&id), "scanning step: %v", nil)
+		steps = append(steps, id)
+	}
+	rows.Close()
+	if len(steps) < 2 {
+		t.Fatalf("fixture run has %d steps, want at least 2", len(steps))
+	}
+	// Only fresh kinds and a step nothing else wrote to, so the expected sets
+	// are exactly what this fixture seeds.
+	_, err = conn.Exec(`DELETE FROM events WHERE run_id = ? AND (kind = 'lease-reaped' OR step_id = ?)`,
+		runID, steps[1])
+	testsupport.Must(t, err, "clearing fixture events: %v", err)
+
+	var reaped, stepSeqs []int64
+	for pos := 1; pos <= 150; pos++ {
+		kind, step := "probe", any(steps[0])
+		if pos == 120 || pos == 140 {
+			kind = engine.EventLeaseReaped
+		}
+		if pos > 100 && pos%10 == 5 {
+			step = steps[1]
+		}
+		res, err := conn.Exec(
+			`INSERT INTO events (at_ms, kind, run_id, step_id, data) VALUES (?, ?, ?, ?, '{}')`,
+			int64(pos), kind, runID, step)
+		testsupport.Must(t, err, "seeding event %d: %v", pos, err)
+		seq, _ := res.LastInsertId()
+		if kind == engine.EventLeaseReaped {
+			reaped = append(reaped, seq)
+		}
+		if step == steps[1] {
+			stepSeqs = append(stepSeqs, seq)
+		}
+	}
+	return model.FormatRunID(runID), reaped, steps[1], stepSeqs
+}
+
+// TestEventsListKindFilter is DKT-3293: `--kind lease-reaped` over a run of
+// 150-plus events returns exactly the two reaps at positions 120 and 140 with
+// truncated false, where the unfiltered default page holds neither.
+func TestEventsListKindFilter(t *testing.T) {
+	conn := newTestDB(t)
+	runRef, reaped, _, _ := seedFilterRun(t, conn)
+
+	items, total, truncated, err := eventsFilteredJSON(t, conn, runRef,
+		map[string]string{"kind": engine.EventLeaseReaped})
+	testsupport.Must(t, err, "events list --kind: %v", err)
+	if truncated || total != 2 || len(items) != 2 {
+		t.Fatalf("--kind lease-reaped: %d items, total %d, truncated %v; want 2, 2, false",
+			len(items), total, truncated)
+	}
+	for i, item := range items {
+		if item.Seq != reaped[i] || item.Kind != engine.EventLeaseReaped {
+			t.Errorf("item %d = %+v, want seq %d of kind lease-reaped", i, item, reaped[i])
+		}
+	}
+}
+
+// TestEventsListStepFilter is DKT-3293's CLI half of the step criterion:
+// `--step STEP-N` returns exactly that step's events, all past position 100.
+func TestEventsListStepFilter(t *testing.T) {
+	conn := newTestDB(t)
+	runRef, _, stepID, stepSeqs := seedFilterRun(t, conn)
+
+	items, total, truncated, err := eventsFilteredJSON(t, conn, runRef,
+		map[string]string{"step": model.FormatStepID(stepID)})
+	testsupport.Must(t, err, "events list --step: %v", err)
+	if truncated || total != len(stepSeqs) || len(items) != len(stepSeqs) {
+		t.Fatalf("--step: %d items, total %d, truncated %v; want %d, %d, false",
+			len(items), total, truncated, len(stepSeqs), len(stepSeqs))
+	}
+	for i, item := range items {
+		if item.Seq != stepSeqs[i] || item.StepID != model.FormatStepID(stepID) {
+			t.Errorf("item %d = %+v, want seq %d of %s", i, item, stepSeqs[i], model.FormatStepID(stepID))
+		}
+	}
+}
+
+// TestEventsListUnknownKind is DKT-3293: an unrecognized --kind is refused
+// with VALIDATION_ERROR listing the valid kinds, never an empty page.
+func TestEventsListUnknownKind(t *testing.T) {
+	conn := newTestDB(t)
+	runRef, _, _, _ := seedFilterRun(t, conn)
+
+	items, _, _, err := eventsFilteredJSON(t, conn, runRef,
+		map[string]string{"kind": "no-such-kind"})
+	assertCmdCode(t, err, output.ErrValidation, "events list --kind no-such-kind")
+	if !strings.Contains(err.Error(), engine.EventLeaseReaped) ||
+		!strings.Contains(err.Error(), engine.EventRunActivated) {
+		t.Errorf("refusal %q does not list the valid kinds", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("refusal returned %d items", len(items))
 	}
 }

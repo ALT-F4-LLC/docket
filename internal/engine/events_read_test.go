@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -668,4 +669,145 @@ func TestTailZeroIsUnchanged(t *testing.T) {
 		t.Errorf("Tail=0 with Limit=3 gave %v, want the OLDEST three starting at %d",
 			got, seqs[0])
 	}
+}
+
+// seedRunEvents writes n events on runID, all of kind "probe" except the ones
+// overrides names by 1-based position, each attributed to stepAt's step when
+// stepAt names a step for that position. It returns the seqs in order.
+func seedRunEvents(
+	t *testing.T, conn *sql.DB, runID, n int,
+	overrides map[int]string, stepAt func(pos int) int,
+) []int64 {
+	t.Helper()
+	seqs := make([]int64, 0, n)
+	for pos := 1; pos <= n; pos++ {
+		kind := "probe"
+		if k, ok := overrides[pos]; ok {
+			kind = k
+		}
+		var step any
+		if stepAt != nil {
+			if id := stepAt(pos); id != 0 {
+				step = id
+			}
+		}
+		res, err := conn.Exec(
+			`INSERT INTO events (at_ms, kind, run_id, step_id, data) VALUES (?, ?, ?, ?, '{}')`,
+			int64(1700000000000+pos), kind, runID, step)
+		testsupport.Must(t, err, "seeding event %d: %v", pos, err)
+		seq, err := res.LastInsertId()
+		testsupport.Must(t, err, "reading seq of event %d: %v", pos, err)
+		seqs = append(seqs, seq)
+	}
+	return seqs
+}
+
+// TestListEventsKindFilter is DKT-3293: a kind lookup over a 150-event run
+// whose only match sits past the oldest 100 returns it, because the predicate
+// is in the WHERE clause before the limit, and Total counts the matches only.
+func TestListEventsKindFilter(t *testing.T) {
+	conn := mustDB(t)
+	runID, _ := budgetRun(t, conn, 0)
+	var before int
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE run_id = ? AND kind = ?`,
+		runID, EventLeaseReaped).Scan(&before), "counting: %v", nil)
+	seqs := seedRunEvents(t, conn, runID, 150, map[int]string{130: EventLeaseReaped}, nil)
+
+	page, err := ListEvents(conn, EventQuery{RunID: runID, Kind: EventLeaseReaped, Limit: 100})
+	testsupport.Must(t, err, "ListEvents(Kind): %v", err)
+	if page.Total != before+1 || len(page.Events) != before+1 {
+		t.Fatalf("Kind filter: %d events, Total %d; want %d of each",
+			len(page.Events), page.Total, before+1)
+	}
+	last := page.Events[len(page.Events)-1]
+	if last.Seq != seqs[129] || last.Kind != EventLeaseReaped {
+		t.Errorf("Kind filter returned %+v, want seq %d of kind %s", last, seqs[129], EventLeaseReaped)
+	}
+	for _, e := range page.Events {
+		if e.Kind != EventLeaseReaped {
+			t.Errorf("Kind filter returned a %s event (seq %d)", e.Kind, e.Seq)
+		}
+	}
+}
+
+// TestListEventsStepFilter is DKT-3293: a step lookup returns exactly that
+// step's events, all of which sit past the oldest 100, and Total counts them.
+func TestListEventsStepFilter(t *testing.T) {
+	conn := mustDB(t)
+	runID, _ := budgetRun(t, conn, 0)
+	var stepIDs []int
+	rows, err := conn.Query(`SELECT id FROM steps WHERE run_id = ? ORDER BY id LIMIT 2`, runID)
+	testsupport.Must(t, err, "listing steps: %v", err)
+	for rows.Next() {
+		var id int
+		testsupport.Must(t, rows.Scan(&id), "scanning step: %v", nil)
+		stepIDs = append(stepIDs, id)
+	}
+	rows.Close()
+	if len(stepIDs) != 2 {
+		t.Fatalf("fixture run has %d steps, want at least 2", len(stepIDs))
+	}
+	other, target := stepIDs[0], stepIDs[1]
+	var before int
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE step_id = ?`, target).Scan(&before), "counting: %v", nil)
+
+	seqs := seedRunEvents(t, conn, runID, 150, nil, func(pos int) int {
+		if pos > 100 && pos%10 == 0 {
+			return target
+		}
+		return other
+	})
+	want := map[int64]bool{}
+	for pos := 110; pos <= 150; pos += 10 {
+		want[seqs[pos-1]] = true
+	}
+
+	page, err := ListEvents(conn, EventQuery{RunID: runID, StepID: target, Limit: 100})
+	testsupport.Must(t, err, "ListEvents(StepID): %v", err)
+	if page.Total != before+len(want) || len(page.Events) != before+len(want) {
+		t.Fatalf("Step filter: %d events, Total %d; want %d of each",
+			len(page.Events), page.Total, before+len(want))
+	}
+	got := 0
+	for _, e := range page.Events {
+		if e.StepID != model.FormatStepID(target) {
+			t.Errorf("Step filter returned seq %d of step %s", e.Seq, e.StepID)
+		}
+		if want[e.Seq] {
+			got++
+		}
+	}
+	if got != len(want) {
+		t.Errorf("Step filter returned %d of the %d seeded events past position 100", got, len(want))
+	}
+}
+
+// TestEventKindAndStepFilterRefusals: an unknown kind is a validation error
+// naming the valid kinds, and a step that does not exist is not found, so
+// neither filter can answer a lookup with a successful empty page.
+func TestEventKindAndStepFilterRefusals(t *testing.T) {
+	conn := mustDB(t)
+	err := ValidateEventKind("no-such-kind")
+	if code, _ := CodeOf(err); code != CodeValidation {
+		t.Fatalf("ValidateEventKind(unknown) = %v, want a validation error", err)
+	}
+	if !strings.Contains(err.Error(), EventLeaseReaped) {
+		t.Errorf("refusal %q does not list the valid kinds", err)
+	}
+	if err := ValidateEventKind(EventLeaseReaped); err != nil {
+		t.Errorf("ValidateEventKind(%s) = %v, want nil", EventLeaseReaped, err)
+	}
+	if _, err := ResolveStepFilter(conn, "STEP-999999"); !hasCode(err, CodeNotFound) {
+		t.Errorf("ResolveStepFilter(missing) = %v, want not found", err)
+	}
+	if _, err := ResolveStepFilter(conn, "review@1#0"); !hasCode(err, CodeValidation) {
+		t.Errorf("ResolveStepFilter(instance label) = %v, want a validation error", err)
+	}
+}
+
+func hasCode(err error, want ErrorCode) bool {
+	code, ok := CodeOf(err)
+	return ok && code == want
 }

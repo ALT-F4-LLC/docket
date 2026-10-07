@@ -68,6 +68,10 @@ func runEventsFollow(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	kind, stepID, err := eventsPredicateFlags(cmd)
+	if err != nil {
+		return err
+	}
 
 	interval, _ := cmd.Flags().GetDuration("interval")
 	if interval <= 0 {
@@ -95,6 +99,7 @@ func runEventsFollow(cmd *cobra.Command) error {
 		conn: conn,
 		query: engine.EventQuery{
 			Since: since, RunID: runID, Limit: limit, Tail: tail,
+			Kind: kind, StepID: stepID,
 			ProjectID: eventsProjectScope(cmd),
 		},
 		interval:    interval,
