@@ -180,6 +180,7 @@ A blank class means the row parked before the column existed.
 | `attempts-exhausted` | the step spent its `max_attempts` budget |
 | `join-missed` | a join completed below `min_siblings` |
 | `triage-undecided` | a triage panel (DKT-1901) closed without a usable verdict — declined, no quorum, or retired without a tally — falling back to the same `waiting-human` a step with no panel would have reached |
+| `held` | the run's conductor parked one READY step for the operator through `step hold` (`HoldStep`, DKT-3287), with its own stated reason; `step resolve` then retries, skips, or fails it |
 
 `paused` is not among them: it is a RUN status, never written to `steps.status`,
 so a paused run removes its steps from the scheduler through their run rather
@@ -353,7 +354,7 @@ anything — under a trust model fit for an OSS tool:
 - Trust entries default to **full-argv hashes**; prefix entries are explicit opt-in
   (`trust add --prefix`, with an over-authorization warning). Tokens pass via
   env/stdin, never argv; claim markers are 0600 in a per-user runtime dir.
-- **Conductor capability (DKT-2465).** The operator verbs — `step approve`,
+- **Conductor capability (DKT-2465).** The operator verbs — `step approve`, `step hold` (DKT-3287),
   `step reject`, `step resolve`, `step reap`, `run pause`, `run resume`, `run
   abandon` — are not token-free. Each requires the run's *conductor capability*: a
   256-bit token minted at the run's first activation (returned once, hash-only
