@@ -41,6 +41,16 @@ import (
 // refused cast writes no vote row. The db sentinels (ErrNotFound, ErrConflict)
 // come back unwrapped from the tally, as they always did.
 func CastVote(conn *sql.DB, vote *model.Vote) (*db.CastVoteResult, error) {
+	// DKT-3290: a verdict that carries concerns carries its rationale. A seat
+	// whose summary file write was refused passed `--summary ""`, and the gate
+	// recorded an approve-with-concerns with nothing saying what concerned it.
+	// Refused before anything is written; an approve still needs no rationale.
+	if (vote.Verdict == model.VerdictApproveWithConcerns || vote.Verdict == model.VerdictReject) &&
+		strings.TrimSpace(vote.Summary) == "" {
+		return nil, validationErr(
+			"a %s cast needs its rationale: --summary (or --summary-file / --summary -) "+
+				"is empty, so the gate would record the verdict without saying why", vote.Verdict)
+	}
 	policy, err := castPolicyOf(conn, vote.ProposalID)
 	if err != nil {
 		return nil, err

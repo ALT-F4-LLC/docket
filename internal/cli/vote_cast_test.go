@@ -423,7 +423,7 @@ func TestVoteCastRefusesEvidenceItCannotResolve(t *testing.T) {
 	testsupport.Must(t, err, "CreateProposal: %v", err)
 	ref := model.FormatProposalID(id)
 
-	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject",
+	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject", "--summary", "reproduced",
 		"--confidence", "0.9", "--domain-relevance", "0.8",
 		"--findings-json", `{"blockers":[{"text":"reproduced","evidence":["artifact:ARTIFACT-1"]}]}`)
 	var cmdError *CmdError
@@ -439,7 +439,7 @@ func TestVoteCastRefusesEvidenceItCannotResolve(t *testing.T) {
 		t.Fatalf("the refused cast recorded anyway: %+v", votes)
 	}
 
-	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject",
+	err = runVoteCastCmd(t, conn, ref, "--voter", "seat-a", "--verdict", "reject", "--summary", "reproduced",
 		"--confidence", "0.9", "--domain-relevance", "0.8",
 		"--findings-json", `{"blockers":["asserted, not reproduced"]}`)
 	testsupport.Must(t, err, "a cast citing nothing was refused: %v", err)

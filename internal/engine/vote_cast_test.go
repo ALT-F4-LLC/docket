@@ -96,6 +96,7 @@ func castWeighted(
 	return CastVote(conn, &model.Vote{
 		ProposalID: proposalID, VoterName: voter, Verdict: verdict,
 		Confidence: confidence, DomainRelevance: relevance,
+		Summary: "the seat's rationale",
 	})
 }
 
@@ -337,4 +338,48 @@ func TestVoteCastRecusesDeclaredReviewedStep(t *testing.T) {
 		_, err := castAs(conn, fx.proposalID, "alice")
 		testsupport.Must(t, err, "a name in neither sibling's hint was refused: %v", err)
 	})
+}
+
+// TestVoteCastNeedsARationaleWithConcerns is DKT-3290: an approve-with-concerns
+// or reject cast with an empty or whitespace-only summary is refused naming
+// --summary and records nothing; a non-empty summary records verbatim; an
+// approve still records with none.
+func TestVoteCastNeedsARationaleWithConcerns(t *testing.T) {
+	cases := []struct {
+		name    string
+		verdict model.Verdict
+		summary string
+		refused bool
+	}{
+		{"empty approve-with-concerns", model.VerdictApproveWithConcerns, "", true},
+		{"approve-with-concerns with a rationale", model.VerdictApproveWithConcerns, "concern: X", false},
+		{"empty reject", model.VerdictReject, "", true},
+		{"whitespace approve-with-concerns", model.VerdictApproveWithConcerns, "  \n\t", true},
+		{"empty approve", model.VerdictApprove, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			conn := mustDB(t)
+			id := openProposal(t, conn, "needs a rationale")
+			_, err := CastVote(conn, &model.Vote{
+				ProposalID: id, VoterName: "seat-a", VoterRole: "reviewer",
+				Verdict: c.verdict, Confidence: 0.9, DomainRelevance: 0.8, Summary: c.summary,
+			})
+			votes, readErr := db.GetProposalVotes(conn, id)
+			testsupport.Must(t, readErr, "GetProposalVotes: %v", readErr)
+			if c.refused {
+				if !hasCode(err, CodeValidation) || !strings.Contains(err.Error(), "--summary") {
+					t.Errorf("err = %v, want a validation error naming --summary", err)
+				}
+				if len(votes) != 0 {
+					t.Errorf("%d votes recorded by a refused cast, want 0", len(votes))
+				}
+				return
+			}
+			testsupport.Must(t, err, "CastVote: %v", err)
+			if len(votes) != 1 || votes[0].Summary != c.summary {
+				t.Errorf("votes = %+v, want one with summary %q", votes, c.summary)
+			}
+		})
+	}
 }
