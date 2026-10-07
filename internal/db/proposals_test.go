@@ -1800,3 +1800,84 @@ func TestProposalSealedRoundTrips(t *testing.T) {
 		t.Error("an imported sealed proposal read back unsealed")
 	}
 }
+
+// TestGetProposalVotesReadsEachVotesOwnUsage is DKT-2775: each vote's Usage
+// comes from its own vote_usage rows (an empty, non-nil map when it has
+// none), and GetProposalVoteUsageSources gives each unit its own row's
+// source, so a mixed vote shows reported and back-filled units apart.
+func TestGetProposalVotesReadsEachVotesOwnUsage(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	id, err := CreateProposal(db, &model.Proposal{
+		Description: "usage read", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 9, Threshold: 0.67,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	cast := func(name string, usage map[string]float64) int {
+		t.Helper()
+		result, err := CastVote(db, &model.Vote{
+			ProposalID: id, VoterName: name, VoterRole: "reviewer",
+			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8,
+			Usage: usage,
+		})
+		testsupport.Must(t, err, "CastVote %s: %v", name, err)
+		return result.Vote.ID
+	}
+	backfill := func(voteID int, unit, source string) {
+		t.Helper()
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		defer tx.Rollback()
+		testsupport.Must(t, InsertVoteUsageTx(tx, int64(voteID), unit, 7, source, 1),
+			"InsertVoteUsageTx: %v", nil)
+		testsupport.Must(t, tx.Commit(), "Commit: %v", nil)
+	}
+
+	a := cast("seat-a", map[string]float64{"output_tokens": 10, "tool_uses": 3})
+	b := cast("seat-b", nil)
+	c := cast("seat-c", nil)
+	backfill(c, "input_tokens", "backfilled")
+	backfill(c, "output_tokens", "backfilled")
+	d := cast("seat-d", map[string]float64{"output_tokens": 4})
+	backfill(d, "input_tokens", "backfilled")
+
+	votes, err := GetProposalVotes(db, id)
+	testsupport.Must(t, err, "GetProposalVotes: %v", err)
+	byID := map[int]*model.Vote{}
+	for _, v := range votes {
+		byID[v.ID] = v
+	}
+	wantUsage := map[int]map[string]float64{
+		a: {"output_tokens": 10, "tool_uses": 3},
+		b: {},
+		c: {"input_tokens": 7, "output_tokens": 7},
+		d: {"output_tokens": 4, "input_tokens": 7},
+	}
+	for voteID, want := range wantUsage {
+		got := byID[voteID].Usage
+		if got == nil {
+			t.Errorf("vote %d Usage is nil, want a non-nil map", voteID)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("vote %d Usage = %v, want %v", voteID, got, want)
+		}
+	}
+
+	sources, err := GetProposalVoteUsageSources(db, id)
+	testsupport.Must(t, err, "GetProposalVoteUsageSources: %v", err)
+	wantSources := map[int]map[string]string{
+		a: {"output_tokens": "reported", "tool_uses": "reported"},
+		b: {},
+		c: {"input_tokens": "backfilled", "output_tokens": "backfilled"},
+		d: {"output_tokens": "reported", "input_tokens": "backfilled"},
+	}
+	for voteID, want := range wantSources {
+		got, ok := sources[voteID]
+		if !ok || got == nil {
+			t.Errorf("vote %d has no non-nil source map", voteID)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("vote %d sources = %v, want %v", voteID, got, want)
+		}
+	}
+}

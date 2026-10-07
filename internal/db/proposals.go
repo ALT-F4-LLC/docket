@@ -461,7 +461,90 @@ func getProposalVotes(q proposalQuerier, proposalID int) ([]*model.Vote, error) 
 		return nil, err
 	}
 
+	// Each vote's Usage comes from that vote's OWN vote_usage rows (DKT-2775),
+	// never the run-level rollup, so a per-seat read can calibrate the seat.
+	// A vote with no rows gets an empty, non-nil map: "reported nothing".
+	usage, _, err := proposalVoteUsage(q, proposalID)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range votes {
+		v.Usage = usage[v.ID]
+		if v.Usage == nil {
+			v.Usage = map[string]float64{}
+		}
+	}
+
 	return votes, nil
+}
+
+// GetProposalVoteUsageSources returns, per vote id, each usage unit's stored
+// source (UsageSourceReported for the seat's cast-time report, or the
+// back-fill's own source) read from that unit's own vote_usage row
+// (DKT-2775). Every vote of the proposal has an entry; a vote with no rows
+// maps to an empty, non-nil map. It is a db-level return rather than a field
+// on model.Vote because the source describes the ledger row, not the cast.
+func GetProposalVoteUsageSources(db *sql.DB, proposalID int) (map[int]map[string]string, error) {
+	_, sources, err := proposalVoteUsage(db, proposalID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT id FROM votes WHERE proposal_id = ?`, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("querying votes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning vote id: %w", err)
+		}
+		if sources[id] == nil {
+			sources[id] = map[string]string{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading vote ids: %w", err)
+	}
+	return sources, nil
+}
+
+// proposalVoteUsage reads every vote_usage row of one proposal's votes, keyed
+// by vote id: unit -> quantity, and unit -> source.
+func proposalVoteUsage(
+	q proposalQuerier, proposalID int,
+) (map[int]map[string]float64, map[int]map[string]string, error) {
+	rows, err := q.Query(
+		`SELECT vu.vote_id, vu.unit, vu.quantity, vu.source
+		 FROM vote_usage vu JOIN votes v ON v.id = vu.vote_id
+		 WHERE v.proposal_id = ?`, proposalID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("querying vote usage: %w", err)
+	}
+	defer rows.Close()
+	usage := map[int]map[string]float64{}
+	sources := map[int]map[string]string{}
+	for rows.Next() {
+		var (
+			voteID   int
+			unit     string
+			quantity float64
+			source   string
+		)
+		if err := rows.Scan(&voteID, &unit, &quantity, &source); err != nil {
+			return nil, nil, fmt.Errorf("scanning vote usage: %w", err)
+		}
+		if usage[voteID] == nil {
+			usage[voteID] = map[string]float64{}
+			sources[voteID] = map[string]string{}
+		}
+		usage[voteID][unit] = quantity
+		sources[voteID][unit] = source
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("reading vote usage: %w", err)
+	}
+	return usage, sources, nil
 }
 
 // LinkProposalIssue links a proposal to an issue.
