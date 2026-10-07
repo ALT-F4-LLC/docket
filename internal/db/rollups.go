@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -634,4 +635,44 @@ func SilentVoteSeatsFor(db *sql.DB, scope, prefix string, extraIDs ...int) ([]Si
 			}
 			return row, nil
 		})
+}
+
+// LinkedProposal is a proposal linked to an issue bound to a run, with its
+// creation time, for the run report's linked-panel attribution (DKT-3291).
+type LinkedProposal struct {
+	ID        int
+	CreatedAt time.Time
+}
+
+// ProposalsLinkedToRunIssues lists every proposal whose proposal_issues
+// links name an issue bound to the run (run_issues), once each.
+func ProposalsLinkedToRunIssues(db *sql.DB, runID int) ([]LinkedProposal, error) {
+	rows, err := db.Query(
+		`SELECT DISTINCT p.id, p.created_at
+		   FROM proposals p
+		   JOIN proposal_issues pi ON pi.proposal_id = p.id
+		   JOIN run_issues ri ON ri.issue_id = pi.issue_id AND ri.run_id = ?
+		  ORDER BY p.id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("finding proposals linked to run %d's issues: %w", runID, err)
+	}
+	defer rows.Close()
+	var out []LinkedProposal
+	for rows.Next() {
+		var (
+			id      int
+			created string
+		)
+		if err := rows.Scan(&id, &created); err != nil {
+			return nil, fmt.Errorf("reading a linked proposal: %w", err)
+		}
+		at, err := time.Parse(time.RFC3339, created)
+		if err != nil {
+			// An unparseable creation time cannot be placed in the run's
+			// window, so it is not attributed by inference.
+			continue
+		}
+		out = append(out, LinkedProposal{ID: id, CreatedAt: at})
+	}
+	return out, rows.Err()
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -1703,6 +1704,32 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 		}
 	}
 
+	// DKT-3291: a panel the conductor convened and linked (`vote link
+	// --issue`) to an issue bound to this run, created inside the run's
+	// activation-to-terminal window, is the run's too — the structured link
+	// is the attribution, where the text form above relies on the conductor
+	// having written the run id. The window keeps a panel about the same
+	// issue under an earlier or later run out of this one.
+	linked, err := db.ProposalsLinkedToRunIssues(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+	if len(linked) > 0 {
+		from, to, ok, err := runActiveWindowMS(conn, runID)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range linked {
+			// created_at has second precision, so the lower bound is the
+			// activation's second.
+			at := p.CreatedAt.UnixMilli()
+			if ok && at >= from/1000*1000 && at <= to && !seen[p.ID] {
+				seen[p.ID] = true
+				ids = append(ids, p.ID)
+			}
+		}
+	}
+
 	// A TOTAL order (R9): the ids feed a parameterized IN whose bound values
 	// participate in query text equality for no engine, but a deterministic
 	// argument list keeps two reports byte-identical in any future trace.
@@ -1911,4 +1938,30 @@ func annotateVoteOutcomes(
 			model.FormatProposalID(id), status)
 	}
 	return nil
+}
+
+// runActiveWindowMS is the run's activation-to-terminal window: the first
+// run-activated event's time to the last run-done or run-abandoned event's,
+// open-ended while the run is live. ok is false for a run never activated.
+func runActiveWindowMS(conn *sql.DB, runID int) (from, to int64, ok bool, err error) {
+	var first sql.NullInt64
+	if err := conn.QueryRow(
+		`SELECT MIN(at_ms) FROM events WHERE run_id = ? AND kind = ?`,
+		runID, EventRunActivated).Scan(&first); err != nil {
+		return 0, 0, false, fmt.Errorf("reading the run's activation: %w", err)
+	}
+	if !first.Valid {
+		return 0, 0, false, nil
+	}
+	var last sql.NullInt64
+	if err := conn.QueryRow(
+		`SELECT MAX(at_ms) FROM events WHERE run_id = ? AND kind IN (?, ?)`,
+		runID, EventRunDone, EventRunAbandoned).Scan(&last); err != nil {
+		return 0, 0, false, fmt.Errorf("reading the run's end: %w", err)
+	}
+	to = math.MaxInt64
+	if last.Valid {
+		to = last.Int64
+	}
+	return first.Int64, to, true, nil
 }
