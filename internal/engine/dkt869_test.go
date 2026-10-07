@@ -33,7 +33,7 @@ import (
 
 // refresh drives the engine entry point with the fixture's reason.
 func refresh(conn *sql.DB, runID, issueID int) (*RefreshedScope, error) {
-	return RefreshIssueScopeInRun(conn, runID, issueID, "scope widened", nowMS)
+	return RefreshIssueScopeInRun(conn, runID, issueID, "scope widened", testBy, nowMS)
 }
 
 // widen is the authorized act the refresh copies: the ONLY writer of
@@ -259,7 +259,7 @@ func TestRefreshRefusesWhereItCouldOnlyRewriteHistory(t *testing.T) {
 		runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
 		widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
 
-		_, err := RefreshIssueScopeInRun(conn, runID, issue, "  ", nowMS)
+		_, err := RefreshIssueScopeInRun(conn, runID, issue, "  ", testBy, nowMS)
 		if err == nil {
 			t.Fatal("a refresh with no reason was accepted")
 		}
@@ -453,4 +453,31 @@ func fmtJSON(v any) string {
 		return "<unencodable>"
 	}
 	return string(out)
+}
+
+// TestRefreshEventCarriesTheAttribution is DKT-3127: the issue-scope-refreshed
+// event carries the caller's actor and cwd beside its existing keys.
+func TestRefreshEventCarriesTheAttribution(t *testing.T) {
+	conn := mustDB(t)
+	runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+	widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
+	by := Attribution{Actor: "the conductor", Cwd: "/work/shared"}
+	_, err := RefreshIssueScopeInRun(conn, runID, issue, "scope widened", by, nowMS)
+	testsupport.Must(t, err, "refreshing: %v", err)
+
+	var data string
+	err = conn.QueryRow(
+		`SELECT data FROM events WHERE kind = ? AND run_id = ? AND issue_id = ?`,
+		EventIssueScopeRefreshed, runID, issue).Scan(&data)
+	testsupport.Must(t, err, "reading the refresh event: %v", err)
+	var payload map[string]any
+	testsupport.Must(t, json.Unmarshal([]byte(data), &payload), "decoding: %v", nil)
+	if payload["actor"] != by.Actor || payload["cwd"] != by.Cwd {
+		t.Errorf("event actor/cwd = %v/%v, want %q/%q", payload["actor"], payload["cwd"], by.Actor, by.Cwd)
+	}
+	for _, key := range []string{"issue", "reason", "from", "to", "steps"} {
+		if _, ok := payload[key]; !ok {
+			t.Errorf("event lost its %q key: %s", key, data)
+		}
+	}
 }

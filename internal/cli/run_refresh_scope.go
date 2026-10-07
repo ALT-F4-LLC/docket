@@ -94,8 +94,12 @@ func runRunRefreshScope(cmd *cobra.Command, ref string, w *output.Writer) error 
 			output.ErrValidation)
 	}
 
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
 	outcome, err := engine.RefreshIssueScopeInRun(
-		conn, runID, issueID, reason, model.NowMS())
+		conn, runID, issueID, reason, by, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}

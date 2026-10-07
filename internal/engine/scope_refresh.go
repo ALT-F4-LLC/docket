@@ -115,12 +115,17 @@ var refreshBlockingStepStatuses = []string{
 // matches — and it would let two steps of one issue disagree about scope
 // inside one dispatch, which is the drift D2 exists to prevent.
 func RefreshIssueScopeInRun(
-	conn *sql.DB, runID, issueID int, reason string, nowMS int64,
+	conn *sql.DB, runID, issueID int, reason string, by Attribution, nowMS int64,
 ) (*RefreshedScope, error) {
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted scope; the event " +
 				"trail must say why a live run's packets changed what they declare")
+	}
+	// DKT-3127: the refresh changes what a live run's packets declare, so its
+	// event names who refreshed it and from where, as other rulings do.
+	if err := by.require("run refresh-scope"); err != nil {
+		return nil, err
 	}
 
 	tx, err := conn.Begin()
@@ -217,7 +222,7 @@ func RefreshIssueScopeInRun(
 	}
 
 	// D4: one event, carrying both scopes, the steps it reaches, and why.
-	data, err := json.Marshal(map[string]any{
+	data, err := rulingData(by, map[string]any{
 		"issue": model.FormatID(issueID), "reason": reason,
 		"from": frozen, "to": live, "steps": steps,
 	})
@@ -226,7 +231,7 @@ func RefreshIssueScopeInRun(
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventIssueScopeRefreshed, RunID: runID, IssueID: issueID,
-		Data: string(data), AtMS: nowMS,
+		Data: data, AtMS: nowMS,
 	}); err != nil {
 		return nil, err
 	}
