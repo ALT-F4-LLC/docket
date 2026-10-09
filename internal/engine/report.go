@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -612,9 +613,11 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	//
 	// internal/db caps the connection pool at ONE connection, so a pool read
 	// from inside an open transaction deadlocks permanently rather than
-	// failing. TestNoPoolReadsInsideTransactions enforces that lexically —
-	// which is the right conservatism: a rollback that silently failed would
-	// leave the transaction open and turn the next of these into the deadlock.
+	// failing. TestNoPoolReadsInsideTransactions matches only conn.Begin(), so
+	// it does not see the snapshot opened through beginRunReportSnapshot: this
+	// function keeps the rule by keeping every pool read above that call. A
+	// rollback that silently failed would leave the transaction open and turn
+	// the next of these into the deadlock.
 	//
 	// Nothing here needs the snapshot. These are rollups over append-only
 	// result tables that no read can change, so reading them a moment early
@@ -704,7 +707,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// it: effective status is a question about a set of rows at one instant, and
 	// a report that re-read between sections could count one step twice under
 	// two statuses.
-	tx, err := conn.Begin()
+	tx, err := beginRunReportSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning the report: %w", err)
 	}
@@ -826,6 +829,18 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// there is nothing to commit, and R8's zero-write property is that
 	// structural fact rather than a convention.
 	return report, nil
+}
+
+// beginRunReportSnapshot opens the report's read snapshot as a deferred BEGIN.
+//
+// The handle's plain Begin is BEGIN IMMEDIATE, which would hold the write lock
+// for the whole report — the scheduler load, the discrepancy scan, the budget
+// reads — and a large run's report could outlast another process's
+// busy_timeout. ReadOnly makes the driver issue a deferred BEGIN instead: the
+// snapshot never upgrades to a write, so the stale-snapshot hazard the
+// immediate lock exists to prevent cannot arise here, and writers proceed.
+func beginRunReportSnapshot(conn *sql.DB) (*sql.Tx, error) {
+	return conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 }
 
 // wallClockMS is activation -> now, or activation -> the terminal transition.

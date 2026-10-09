@@ -9,7 +9,8 @@ import (
 
 // Open opens or creates the SQLite database at the given path.
 // It sets pragmas for WAL mode, foreign key enforcement, and busy timeout,
-// and makes every transaction on the handle BEGIN IMMEDIATE.
+// and makes every transaction not opened with sql.TxOptions{ReadOnly: true}
+// BEGIN IMMEDIATE; a read-only one is a deferred BEGIN.
 func Open(dbPath string) (*sql.DB, error) {
 	// _txlock=immediate makes Begin() take the write lock up front instead
 	// of at the first write. Docket's transactions read before they write —
@@ -22,9 +23,13 @@ func Open(dbPath string) (*sql.DB, error) {
 	// competing writer waits inside busy_timeout instead, and the transaction
 	// that wins reads state no one else can change under it.
 	//
-	// Read-only transactions on this handle take the lock too. In WAL mode
-	// that blocks other writers, never readers, and every such transaction
-	// here is a short SELECT — a millisecond wait for a writer, not a stall.
+	// A transaction opened with Begin() takes the lock at once, and in WAL
+	// mode a held lock blocks other writers for as long as it is held. A
+	// transaction opened with sql.TxOptions{ReadOnly: true} opts out: the
+	// driver issues a deferred BEGIN, which takes no write lock. That is safe
+	// only for a transaction that never writes, since it never upgrades and so
+	// never meets SQLITE_BUSY_SNAPSHOT. A long read — a run report — opens
+	// its snapshot that way so writers in other processes do not wait on it.
 	db, err := sql.Open("sqlite", dbPath+"?_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)

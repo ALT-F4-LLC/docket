@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"strings"
@@ -84,6 +85,12 @@ func (c *countingConn) Prepare(query string) (driver.Stmt, error) {
 }
 
 func (c *countingConn) Begin() (driver.Tx, error) { return c.Conn.Begin() }
+
+// BeginTx forwards TxOptions to the sqlite conn. Without it database/sql falls
+// back to Begin and rejects a read-only transaction, which the run report opens.
+func (c *countingConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	return c.Conn.(driver.ConnBeginTx).BeginTx(ctx, opts)
+}
 
 func (c *countingConn) Close() error { return c.Conn.Close() }
 
