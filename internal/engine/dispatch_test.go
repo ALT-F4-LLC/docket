@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // Dispatch — §5's clauses, one test per clause group (TDD §6.7).
@@ -132,6 +134,180 @@ func TestDispatchOpenDrivesActionSteps(t *testing.T) {
 	if !sawConsequence || !sawExecutor {
 		t.Fatalf("manifest rows = %+v, want verify@0 (the driven action's "+
 			"consequence, issue A) and implement@0 (executor, issue B)", m.Rows)
+	}
+}
+
+// cascadeDriveSrc: an action step whose routing readies a second action step
+// and a vote step. The human `decide` ahead of it lets a test choose whether
+// `reduce` becomes ready before the open or under an open manifest.
+const cascadeDriveSrc = `
+[pipeline]
+name = "cascade-drive"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "seed"
+after = []
+executor = "x"
+emits = "findings"
+
+[[step]]
+name = "decide"
+after = ["seed"]
+type = "human"
+on_fail = "skip"
+
+[[step]]
+name = "reduce"
+after = ["decide"]
+action = "aggregate"
+inputs = ["seed.findings"]
+params = { field = "severity", method = "median", output = "findings" }
+payload = "findings@1"
+
+[[step]]
+name = "rereduce"
+after = ["reduce"]
+action = "aggregate"
+inputs = ["seed.findings"]
+params = { field = "severity", method = "median", output = "findings" }
+payload = "findings@1"
+
+[[step]]
+name = "poll"
+after = ["reduce"]
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "skip"
+`
+
+// cascadeRun activates a run of cascadeDriveSrc with `seed` complete, so the
+// next approval of `decide` readies `reduce` without driving it.
+func cascadeRun(t *testing.T, e *Engine) (*sql.DB, int) {
+	t.Helper()
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(cascadeDriveSrc), "cascade-drive.toml")
+	issue := createIssue(t, conn, "cascade drive", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	return conn, run.ID
+}
+
+// approveDecide approves `decide@0`, readying `reduce@0` undriven.
+func approveDecide(t *testing.T, conn *sql.DB, e *Engine) {
+	t.Helper()
+	err := e.DecideStep(conn, stepIDByInstance(t, conn, "decide@0"), true, "ok", nowMS)
+	testsupport.Must(t, err, "approve decide@0: %v", err)
+}
+
+// countingActionRunner forwards to a real runner and counts executions per
+// step instance, so a test can assert how often the engine ran an action
+// without replacing the computation its routing depends on.
+type countingActionRunner struct {
+	inner ActionRunner
+	runs  map[string]int
+}
+
+func countActions(e *Engine) *countingActionRunner {
+	c := &countingActionRunner{inner: e.Actions, runs: map[string]int{}}
+	e.Actions = c
+	return c
+}
+
+func (c *countingActionRunner) Run(
+	ctx context.Context, a ActionSpec, sc StepContext,
+) (ActionResult, error) {
+	c.runs[sc.Instance]++
+	return c.inner.Run(ctx, a, sc)
+}
+
+// TestDispatchOpenDrivesACascadedActionStep: an action the open drives routes
+// and readies a second action step. The open keeps driving until nothing
+// routes, so the second action has run and the manifest carries no ready
+// action row for it.
+func TestDispatchOpenDrivesACascadedActionStep(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	m := openDispatch(t, conn, runID, 0, nowMS)
+
+	if got := stepStatus(t, conn, "rereduce@0"); got != db.StepDone {
+		t.Errorf("rereduce@0 is %q after dispatch open, want %q — reduce@0's "+
+			"routing readied it inside the same call", got, db.StepDone)
+	}
+	for _, r := range m.Rows {
+		if r.Instance == "rereduce@0" && r.Kind == workflow.ClassAction && r.Status == db.StepReady {
+			t.Errorf("the manifest carries rereduce@0 as a ready action row; " +
+				"no relay will ever execute it")
+		}
+	}
+}
+
+// TestDispatchOpenOpensACascadedVoteProposal: an action the open drives routes
+// and readies a vote step. The open drives that vote step too, so its manifest
+// row carries the proposal a panel casts on.
+func TestDispatchOpenOpensACascadedVoteProposal(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	m := openDispatch(t, conn, runID, 0, nowMS)
+
+	poll, err := db.GetStep(conn, stepIDByInstance(t, conn, "poll@0"))
+	testsupport.Must(t, err, "reading poll@0: %v", err)
+	id, err := findVoteProposal(conn, poll)
+	testsupport.Must(t, err, "finding poll@0's proposal: %v", err)
+	if id == 0 {
+		t.Fatal("poll@0 has no proposal after dispatch open")
+	}
+	var pollRow *model.StepRow
+	for i := range m.Rows {
+		if m.Rows[i].Instance == "poll@0" {
+			pollRow = &m.Rows[i]
+		}
+	}
+	if pollRow == nil {
+		t.Fatalf("manifest rows %v carry no poll@0", instancesOf(m.Rows))
+	}
+	if want := model.FormatProposalID(id); pollRow.Proposal != want {
+		t.Errorf("poll@0 row proposal = %q, want %q", pollRow.Proposal, want)
+	}
+}
+
+// TestDispatchOpenRunsAnUncascadedActionOnce: with one ready action whose
+// routing readies nothing engine-run, the open executes it exactly once.
+func TestDispatchOpenRunsAnUncascadedActionOnce(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(extendDrivesSrc), "extend-drives.toml")
+	issue := createIssue(t, conn, "uncascaded", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+	counter := countActions(e)
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	approveDecide(t, conn, e)
+
+	_, err = e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
+	testsupport.Must(t, err, "dispatch open: %v", err)
+
+	if got := counter.runs["reduce@0"]; got != 1 {
+		t.Errorf("reduce@0 ran %d times during dispatch open, want 1", got)
+	}
+	if len(counter.runs) != 1 {
+		t.Errorf("actions run = %v, want only reduce@0", counter.runs)
 	}
 }
 

@@ -195,37 +195,26 @@ func (e *Engine) OpenDispatch(
 	// drive their lifecycle too or a `kind:"action"` row rides into manifest
 	// after manifest, ready and unexecuted.
 	//
-	// The drives run BEFORE the manifest is computed — the read-your-writes
+	// The drive runs BEFORE the manifest is computed — the read-your-writes
 	// shape DKT-55 closed in `next`, closed here by ORDER instead of
 	// recomputation. `next` patches and re-derives because its first pass IS
 	// its answer; a manifest is COMMITTED (P6/C1), and rows committed before
-	// the drives could describe a step this same call then routed — a relay
+	// the drive could describe a step this same call then routed — a relay
 	// spawning a panel against an already-decided proposal, the same
 	// booted-and-died waste DKT-101 closed for scopes. Driving first means
 	// the one manifest below is computed over the routed state: a proposal
 	// the drive opened renders on its row natively (stepRow reads
 	// sched.voteProposals), a tally it resolved routes before rendering, and
-	// a step a route un-deferred is offered rather than missing. The drives
-	// own their transactions and none is open yet, so the pool-of-one rule
-	// that forced `next`'s drives after its commit is satisfied by
-	// construction.
-	preSched, err := readySnapshot(conn, runID, defs, nowMS)
-	if err != nil {
-		return nil, err
-	}
-	preRows, _, preSteps, err := readyRows(preSched, ttls, limit)
-	if err != nil {
-		return nil, err
-	}
-	// The READY prefix only (next.go's identical clause): staged rows are
-	// previews, and their lifecycles belong to the `step record` that readies
-	// them mid-wave, not to this open.
-	preSteps = readyOnly(preRows, preSteps)
-	if _, _, err := e.driveVoteSteps(
-		conn, defs, pendingVoteSteps(preSched), preSteps, preSched.holdTally, nowMS); err != nil {
-		return nil, err
-	}
-	if _, err := e.driveActionSteps(conn, preSteps, nowMS); err != nil {
+	// a step a route un-deferred is offered rather than missing.
+	//
+	// It is `step record`'s drive, run to quiescence, so an action whose
+	// routing readies another action or vote step drives that one too rather
+	// than leaving it as an undriven ready row. It covers every ready
+	// engine-run step, not only the `--limit` prefix: no dispatcher claims an
+	// engine-run step, so driving one costs the offer no slot. The drive owns
+	// its transactions and none is open yet, so the pool-of-one rule that
+	// forced `next`'s drives after its commit is satisfied by construction.
+	if err := e.DriveRunLifecycles(conn, runID, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -424,10 +413,10 @@ type Extension struct {
 // so `dispatch verify` and the spawn guard compare them exactly as they compare
 // an opened row.
 //
-// IT DRIVES VOTE AND ACTION LIFECYCLES before computing its rows, exactly as
-// OpenDispatch does. `step record` and `step fail` drive them after their own
-// writes, but `step approve`, `step reject` and `step resolve` ready work
-// mid-wave without driving it. An undriven vote step appended here would carry
+// IT DRIVES VOTE AND ACTION LIFECYCLES to quiescence before computing its rows,
+// exactly as OpenDispatch does. `step record` and `step fail` drive them after
+// their own writes, but `step approve`, `step reject` and `step resolve` ready
+// work mid-wave without driving it. An undriven vote step appended here would carry
 // no proposal to cast on, and an undriven action step would ride the manifest
 // as a ready row no relay can execute.
 //
@@ -444,22 +433,9 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 		return nil, err
 	}
 
-	// OpenDispatch's drive, over the same unlimited offer the append below
-	// computes, and before its transaction for the same reasons.
-	preSched, err := readySnapshot(conn, runID, defs, nowMS)
-	if err != nil {
-		return nil, err
-	}
-	preRows, _, preSteps, err := readyRows(preSched, ttls, 0)
-	if err != nil {
-		return nil, err
-	}
-	preSteps = readyOnly(preRows, preSteps)
-	if _, _, err := e.driveVoteSteps(
-		conn, defs, pendingVoteSteps(preSched), preSteps, preSched.holdTally, nowMS); err != nil {
-		return nil, err
-	}
-	if _, err := e.driveActionSteps(conn, preSteps, nowMS); err != nil {
+	// OpenDispatch's drive to quiescence, before its transaction for the same
+	// reasons.
+	if err := e.DriveRunLifecycles(conn, runID, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -591,21 +567,20 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 // deliberately absent (engine-run steps hold no leases; each verb's own
 // writing pass re-reaps).
 //
-// Both scheduling verbs project from the returned scheduler via readyRows, so
-// a re-derived snapshot cannot disagree with the shared tail about ordering,
-// truncation, or staging:
+// Its callers:
 //
 //   - NextSteps, after a driver routed something (DKT-55): the rows its first
 //     pass rendered describe the run from BEFORE the routing, and reloading
 //     rather than patching also catches the wider case a patch cannot — a
 //     routed step un-deferring a downstream dependency that would otherwise
 //     be missing from the response entirely until the caller polled again.
-//   - OpenDispatch and ExtendDispatch, before their drives (DKT-105): the
-//     ready steps the vote and action drives act on — the same pipeline the
-//     manifest will run, one snapshot earlier. The scheduler itself matters because driveVoteSteps
-//     resolves materialized specs against its holdTally, and a second config
-//     read could hand the drive a different roster than the manifest's own
-//     snapshot would.
+//     It projects the reload through readyRows, so the re-derived rows cannot
+//     disagree with the shared tail about ordering, truncation, or staging.
+//   - DriveRunLifecycles, once per pass: each routing pass leaves the
+//     previous snapshot stale. The scheduler itself matters because
+//     driveVoteSteps resolves materialized specs against its holdTally, and a
+//     second config read could hand the drive a different roster than the
+//     snapshot's own ready set.
 func readySnapshot(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) (*Scheduler, error) {
@@ -728,10 +703,9 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 	}
 
 	// `steps` (the limited, index-aligned []*db.Step behind `rows`) travels
-	// back to the caller so the drive passes — `next`'s own, and `dispatch
-	// open`'s pre-drive readySnapshot — act on the SAME set this pipeline
-	// admitted (DKT-105). Callers that drive lifecycles must take the READY
-	// rows only (rows[i].Status == db.StepReady): a staged step's lifecycle
+	// back to the caller so `next`'s drive passes act on the SAME set this
+	// pipeline admitted (DKT-105). Callers that drive lifecycles must take the
+	// READY rows only (rows[i].Status == db.StepReady): a staged step's lifecycle
 	// belongs to the `step record` that readies it, not to the offer that
 	// previewed it.
 	return rows, total, steps, nil

@@ -614,6 +614,79 @@ func TestDispatchExtendDrivesVoteAndActionLifecycles(t *testing.T) {
 	}
 }
 
+// TestDispatchExtendDrivesCascadedLifecycles: an action step readied under an
+// open manifest routes and readies a second action step and a vote step. The
+// extend keeps driving until nothing routes, so the second action has run
+// rather than being appended as a ready row, and the appended vote row carries
+// its proposal.
+func TestDispatchExtendDrivesCascadedLifecycles(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	openDispatch(t, conn, runID, 0, nowMS)
+	approveDecide(t, conn, e)
+
+	x := extendDispatch(t, conn, runID, nowMS)
+
+	if got := stepStatus(t, conn, "rereduce@0"); got != db.StepDone {
+		t.Errorf("rereduce@0 is %q after the extend, want %q — reduce@0's "+
+			"routing readied it inside the same call", got, db.StepDone)
+	}
+	var pollRow *model.StepRow
+	for i := range x.Rows {
+		switch x.Rows[i].Instance {
+		case "rereduce@0":
+			if x.Rows[i].Status == db.StepReady {
+				t.Errorf("extend appended rereduce@0 as a ready row; no relay " +
+					"will ever execute it")
+			}
+		case "poll@0":
+			pollRow = &x.Rows[i]
+		}
+	}
+	if pollRow == nil {
+		t.Fatalf("extend appended %v, want poll@0", instancesOf(x.Rows))
+	}
+	poll, err := db.GetStep(conn, stepIDByInstance(t, conn, "poll@0"))
+	testsupport.Must(t, err, "reading poll@0: %v", err)
+	id, err := findVoteProposal(conn, poll)
+	testsupport.Must(t, err, "finding poll@0's proposal: %v", err)
+	if id == 0 || pollRow.Proposal != model.FormatProposalID(id) {
+		t.Errorf("appended poll@0 row proposal = %q, stored proposal id = %d; "+
+			"want the row to carry the open proposal", pollRow.Proposal, id)
+	}
+}
+
+// TestDispatchExtendRunsAnUncascadedActionOnce: with one action readied under
+// an open manifest whose routing readies nothing engine-run, the extend
+// executes it exactly once.
+func TestDispatchExtendRunsAnUncascadedActionOnce(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(extendDrivesSrc), "extend-drives.toml")
+	issue := createIssue(t, conn, "uncascaded", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+	counter := countActions(e)
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	_, err = e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
+	testsupport.Must(t, err, "dispatch open: %v", err)
+	approveDecide(t, conn, e)
+
+	_, err = e.ExtendDispatch(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "dispatch extend: %v", err)
+
+	if got := counter.runs["reduce@0"]; got != 1 {
+		t.Errorf("reduce@0 ran %d times, want 1", got)
+	}
+	if len(counter.runs) != 1 {
+		t.Errorf("actions run = %v, want only reduce@0", counter.runs)
+	}
+}
+
 // TestDispatchExtendResolvesAQuorumMiss: a fanout join that completes below
 // `min_siblings` under an open manifest is routed by the extend per its
 // `on_fail`, as `dispatch open` and `next` route one. Left unresolved, every
