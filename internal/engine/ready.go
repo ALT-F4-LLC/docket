@@ -1123,10 +1123,14 @@ func (s *Scheduler) classInFlight(step *db.Step) int {
 		}
 		// Occupancy is claimed + running + gated: a `gated` step's worker has
 		// finished, but the saga is still the engine's and counting it keeps
-		// the bound honest against a burst of completions.
+		// the bound honest against a burst of completions. A step suspended on
+		// its triage panel is the exception: it waits on voters, and holding
+		// its slot for the whole deliberation would starve the class.
 		switch other.Status {
 		case db.StepClaimed, db.StepRunning, db.StepGated:
-			inFlight++
+			if !s.suspendedOnOwnPanel(other) {
+				inFlight++
+			}
 		}
 	}
 	// The stage-6 term: a lapsed-but-unconfirmed writer is a thing that may
@@ -1135,6 +1139,22 @@ func (s *Scheduler) classInFlight(step *db.Step) int {
 	// re-offered.
 	inFlight += s.unacknowledgedReapsInClass(step.Class, step.ID)
 	return inFlight
+}
+
+// suspendedOnOwnPanel reports whether a step is suspended on the triage panel
+// its own `on_fail` names. A step whose spec cannot be resolved, or that names
+// no panel, is not suspended.
+func (s *Scheduler) suspendedOnOwnPanel(step *db.Step) bool {
+	def := s.defs[step.WorkflowID]
+	if def == nil {
+		return false
+	}
+	spec := materializedSpec(def, step, s.holdTally)
+	if spec == nil {
+		return false
+	}
+	panel := spec.OnFailTarget()
+	return panel != "" && suspendedOnPanel(step, panel)
 }
 
 // HeadroomDetail renders the numbers behind a CondHeadroom refusal: the

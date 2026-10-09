@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -473,6 +474,97 @@ after = []
 				"core must ship no class named `write` and no default of 1 "+
 				"(§6.5, genericity.md)", cond)
 		}
+	})
+}
+
+// TestClassInFlightExcludesTriageSuspended pins R5's occupancy for a step
+// suspended on its triage panel: it waits on voters, not a worker, so it holds
+// no slot in its class while the panel deliberates. A gated step whose routing
+// names no panel is still the engine's saga and keeps its slot.
+func TestClassInFlightExcludesTriageSuspended(t *testing.T) {
+	const src = `
+[pipeline]
+name = "limited-triage"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "one"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+on_fail = "triage"
+
+[[step]]
+name = "triage"
+after = ["one"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+
+[step.on_fail_routes]
+approved = "retry"
+rejected = "abandon-issue"
+
+[[step]]
+name = "two"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(src), "limited-triage.toml")
+
+	issue := createIssue(t, conn, "limited triage", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	setOne := func(routing string) {
+		execSQL(t, conn,
+			`UPDATE steps SET status = ?, routing = ? WHERE instance = ? AND issue_id = ?`,
+			db.StepGated, routing, "one@0", issue)
+	}
+
+	t.Run("a step suspended on its panel holds no slot", func(t *testing.T) {
+		setOne("triage")
+		loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+			if one := stepNamed(t, sched, "one@0"); !suspendedOnPanel(one, "triage") {
+				t.Fatalf("one@0 = %q routing %q; the fixture did not suspend it "+
+					"on its triage panel", one.Status, one.Routing)
+			}
+			two := stepNamed(t, sched, "two@0")
+			if ready, cond := sched.Ready(two); !ready {
+				t.Errorf("two@0 blocked by %q while the only other write step "+
+					"waits on its triage panel: %s", cond, sched.HeadroomDetail(two))
+			}
+			if detail := sched.HeadroomDetail(two); !strings.Contains(detail, "0 claimed/running") {
+				t.Errorf("HeadroomDetail = %q, want 0 claimed/running", detail)
+			}
+		})
+	})
+
+	t.Run("a gated step routed elsewhere keeps its slot", func(t *testing.T) {
+		setOne(workflow.OnFailFixLoop)
+		loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+			ready, cond := sched.Ready(stepNamed(t, sched, "two@0"))
+			if ready {
+				t.Error("two@0 is ready while a gated write step not on a panel " +
+					"fills the class at max = 1")
+			}
+			if cond != CondHeadroom {
+				t.Errorf("blocked by %q, want %q", cond, CondHeadroom)
+			}
+		})
 	})
 }
 
