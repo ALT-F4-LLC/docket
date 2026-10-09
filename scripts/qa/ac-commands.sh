@@ -57,12 +57,12 @@ echo "commit: $(git rev-parse --short HEAD)"
 echo "tree:   $(git status --porcelain | wc -l | tr -d ' ') uncommitted path(s)"
 echo
 
-# go1.26.6 rather than `go`: that is the binary this toolchain provides, and a
+# go1.26.9 rather than `go`: that is the binary this toolchain provides, and a
 # gate that names a command the environment lacks records "unmatched" and
 # teaches the verifier nothing.
-run build go1.26.6 build ./...
+run build go1.26.9 build ./...
 # Acceptance criteria worded with -count=1 must be settled by a fresh run, not a cached result.
-run tests go1.26.6 test -count=1 ./...
+run tests go1.26.9 test -count=1 ./...
 
 echo "=== end ac-commands ==="
 exit "$worst"
