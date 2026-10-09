@@ -424,11 +424,12 @@ type Extension struct {
 // so `dispatch verify` and the spawn guard compare them exactly as they compare
 // an opened row.
 //
-// IT DOES NOT DRIVE VOTE OR ACTION LIFECYCLES the way OpenDispatch does. The
-// `step record` that readies work mid-wave already drives them to quiescence
-// (DriveRunLifecycles), so a ready engine-run step cannot survive to this call;
-// driving again here would mean a second owner of the same lifecycle with no
-// caller that needs it.
+// IT DRIVES VOTE AND ACTION LIFECYCLES before computing its rows, exactly as
+// OpenDispatch does. `step record` and `step fail` drive them after their own
+// writes, but `step approve`, `step reject` and `step resolve` ready work
+// mid-wave without driving it. An undriven vote step appended here would carry
+// no proposal to cast on, and an undriven action step would ride the manifest
+// as a ready row no relay can execute.
 //
 // An EXPIRED manifest is refused rather than extended: extending one would push
 // a lapsed manifest's expiry back out and resurrect a batch the TTL had already
@@ -440,6 +441,25 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 	}
 	ttls, err := loadTTLConfig(conn, runID)
 	if err != nil {
+		return nil, err
+	}
+
+	// OpenDispatch's drive, over the same unlimited offer the append below
+	// computes, and before its transaction for the same reasons.
+	preSched, err := readySnapshot(conn, runID, defs, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	preRows, _, preSteps, err := readyRows(preSched, ttls, 0)
+	if err != nil {
+		return nil, err
+	}
+	preSteps = readyOnly(preRows, preSteps)
+	if _, _, err := e.driveVoteSteps(
+		conn, defs, pendingVoteSteps(preSched), preSteps, preSched.holdTally, nowMS); err != nil {
+		return nil, err
+	}
+	if _, err := e.driveActionSteps(conn, preSteps, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -482,6 +502,9 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 	// and that is as true of an appended row as of an opened one.
 	reaped, err := reapExpiredTx(tx, sched, runID, nowMS)
 	if err != nil {
+		return nil, err
+	}
+	if err := resolveQuorumMisses(tx, sched, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -577,9 +600,9 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 //     rather than patching also catches the wider case a patch cannot — a
 //     routed step un-deferring a downstream dependency that would otherwise
 //     be missing from the response entirely until the caller polled again.
-//   - OpenDispatch, before its drives (DKT-105): the ready steps the vote and
-//     action drives act on — the same pipeline the manifest will run, one
-//     snapshot earlier. The scheduler itself matters because driveVoteSteps
+//   - OpenDispatch and ExtendDispatch, before their drives (DKT-105): the
+//     ready steps the vote and action drives act on — the same pipeline the
+//     manifest will run, one snapshot earlier. The scheduler itself matters because driveVoteSteps
 //     resolves materialized specs against its holdTally, and a second config
 //     read could hand the drive a different roster than the manifest's own
 //     snapshot would.

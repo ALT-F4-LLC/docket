@@ -479,6 +479,140 @@ func TestDispatchExtendKeepsVerifyPassing(t *testing.T) {
 	}
 }
 
+// extendDrivesSrc: two chains whose engine-run tails are readied by operator
+// rulings rather than by `step record` — a vote step behind an executor the
+// operator resolves, and an action step behind a human step the operator
+// approves. Neither ruling drives lifecycles, so the extend that follows is
+// the first engine invocation to observe them ready.
+const extendDrivesSrc = `
+[pipeline]
+name = "extend-drives"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "flaky"
+after = []
+executor = "w"
+emits = "out"
+max_attempts = 1
+on_fail = "waiting-human"
+
+[[step]]
+name = "poll"
+after = ["flaky"]
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "skip"
+
+[[step]]
+name = "seed"
+after = []
+executor = "x"
+emits = "findings"
+
+[[step]]
+name = "decide"
+after = ["seed"]
+type = "human"
+on_fail = "skip"
+
+[[step]]
+name = "reduce"
+after = ["decide"]
+action = "aggregate"
+inputs = ["seed.findings"]
+params = { field = "severity", method = "median", output = "findings" }
+payload = "findings@1"
+`
+
+// TestDispatchExtendDrivesVoteAndActionLifecycles: a vote step readied by
+// `step resolve` and an action step readied by `step approve` under an open
+// manifest are driven by the extend before it computes its rows — the vote row
+// it appends carries an open proposal, the action has run rather than riding
+// in as a ready row nothing will execute, and `dispatch verify` agrees with
+// what was stored.
+func TestDispatchExtendDrivesVoteAndActionLifecycles(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(extendDrivesSrc), "extend-drives.toml")
+	issue := createIssue(t, conn, "extend drives", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	// flaky parks waiting-human and seed completes, so the open manifest
+	// carries neither poll@0 nor reduce@0 as ready work.
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	flakyID := stepIDByInstance(t, conn, "flaky@0")
+	claim, err := ClaimStep(conn, flakyID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim flaky@0: %v", err)
+	err = e.FailStep(conn, flakyID, claim.Token, "gave up", "", nowMS)
+	testsupport.Must(t, err, "fail flaky@0: %v", err)
+	openDispatch(t, conn, run.ID, 0, nowMS)
+
+	// The two rulings, under the open manifest.
+	err = e.ResolveStep(conn, flakyID, ResolveSkip, "not needed", nowMS)
+	testsupport.Must(t, err, "resolve flaky@0: %v", err)
+	err = e.DecideStep(conn, stepIDByInstance(t, conn, "decide@0"), true, "ok", nowMS)
+	testsupport.Must(t, err, "approve decide@0: %v", err)
+
+	poll, err := db.GetStep(conn, stepIDByInstance(t, conn, "poll@0"))
+	testsupport.Must(t, err, "reading poll@0: %v", err)
+	if id, err := findVoteProposal(conn, poll); err != nil || id != 0 {
+		t.Fatalf("poll@0 has proposal %d (err %v) before the extend; the "+
+			"test's premise is that the rulings left it undriven", id, err)
+	}
+	if got := stepStatus(t, conn, "reduce@0"); got != db.StepPending {
+		t.Fatalf("reduce@0 is %q before the extend; the test's premise is "+
+			"that the approval left it ready and unexecuted", got)
+	}
+
+	x := extendDispatch(t, conn, run.ID, nowMS)
+
+	var pollRow *model.StepRow
+	for i := range x.Rows {
+		if x.Rows[i].Instance == "poll@0" {
+			pollRow = &x.Rows[i]
+		}
+	}
+	if pollRow == nil {
+		t.Fatalf("extend appended %v, want poll@0 — the vote step the "+
+			"resolution readied", instancesOf(x.Rows))
+	}
+	if pollRow.Proposal == "" {
+		t.Errorf("the appended poll@0 row carries no proposal — a relay would " +
+			"seat a panel with no ballot to cast on")
+	}
+	if got := stepStatus(t, conn, "reduce@0"); got != db.StepDone {
+		t.Errorf("reduce@0 is %q after the extend, want %q — an action step "+
+			"is engine-run, and no relay will ever execute an appended one",
+			got, db.StepDone)
+	}
+	for _, r := range x.Rows {
+		if r.Instance == "reduce@0" && r.Status == db.StepReady {
+			t.Errorf("extend appended reduce@0 as a ready row; the action " +
+				"should have run before the rows were computed")
+		}
+	}
+
+	result, mismatch, err := e.VerifyDispatch(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "dispatch verify: %v", err)
+	if mismatch != nil {
+		t.Fatalf("verify reported a mismatch at position %d after the extend:\n"+
+			"  stored:   %s\n  computed: %s",
+			mismatch.Position, mismatch.Stored, mismatch.Computed)
+	}
+	if !result.Verified {
+		t.Errorf("verify.Verified = false after the extend, want true")
+	}
+}
+
 // TestDispatchExtendLeavesUnlaunchedRowsPending is AC4: an appended row nobody
 // claimed stays `pending` and the close does not call it a discrepancy. A
 // manifest is not a lock and an APPENDED row is no more of one than an opened
