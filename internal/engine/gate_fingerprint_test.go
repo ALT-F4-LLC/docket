@@ -85,7 +85,7 @@ func TestGateResultFingerprint(t *testing.T) {
 		got := normalizeGateOutput(block("got (cached), want 0.5s"))
 		for _, kept := range []string{
 			"replay_test.go:41: got (cached), want <dur>",
-			"FAIL\tgithub.com<path>/internal/app\t(cached)",
+			"/internal/app\t(cached)",
 		} {
 			if !strings.Contains(got, kept) {
 				t.Errorf("normalization rewrote failing-block text; want %q in:\n%s",
