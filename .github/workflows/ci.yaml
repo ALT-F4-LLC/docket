@@ -67,6 +67,24 @@ jobs:
       - name: self-hygiene
         run: ./scripts/qa/self-hygiene.sh "${{ steps.base.outputs.sha }}"
 
+  # The vorpal build compiles cmd/docket only; it runs no tests, so the Go
+  # suite needs its own job.
+  go-test:
+    needs:
+      - check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go test ./...
+        env:
+          DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
+
   build:
     needs:
       - check
@@ -135,6 +153,7 @@ jobs:
   release:
     if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
     needs:
+      - go-test
       - test
     permissions:
       attestations: write
