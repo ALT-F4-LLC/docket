@@ -541,32 +541,30 @@ func (s *Scheduler) offerPredecessors(step *db.Step, stageOf map[int]int) []*db.
 // model.BumpScope, the latter with the issue whose held scope intersected — so
 // the caller records the reason at the bump site instead of re-deriving it
 // afterwards from a stage number that no longer says which rule produced it.
-// A fit answers "" and 0.
+// Scope is tested first, so a stage that refuses on both rules reports scope:
+// the caller's SCOPE WINS precedence applies within a stage as well as across
+// stages. A fit answers "" and 0.
 func (s *Scheduler) cohortFits(
 	step *db.Step, k int, classCount map[int]map[string]int, scopeHeld map[int]map[int][]string,
 ) (string, int) {
+	if scope := s.foreignScope(step.IssueID); len(scope) > 0 && s.holdsTree(step) {
+		// Sorted, so a stage held by several intersecting issues names the same
+		// one every time: the recorded reason must not depend on map iteration
+		// order.
+		held := make([]int, 0, len(scopeHeld[k]))
+		for issueID := range scopeHeld[k] {
+			held = append(held, issueID)
+		}
+		sort.Ints(held)
+		for _, issueID := range held {
+			if issueID != step.IssueID && ScopesIntersect(scope, scopeHeld[k][issueID]) {
+				return model.BumpScope, issueID
+			}
+		}
+	}
 	if limit, ok := s.limits[step.Class]; ok && limit.Max > 0 {
 		if classCount[k][step.Class] >= limit.Max {
 			return model.BumpHeadroom, 0
-		}
-	}
-	if !s.holdsTree(step) {
-		return "", 0
-	}
-	scope := s.foreignScope(step.IssueID)
-	if len(scope) == 0 {
-		return "", 0
-	}
-	// Sorted, so a stage held by several intersecting issues names the same one
-	// every time: the recorded reason must not depend on map iteration order.
-	held := make([]int, 0, len(scopeHeld[k]))
-	for issueID := range scopeHeld[k] {
-		held = append(held, issueID)
-	}
-	sort.Ints(held)
-	for _, issueID := range held {
-		if issueID != step.IssueID && ScopesIntersect(scope, scopeHeld[k][issueID]) {
-			return model.BumpScope, issueID
 		}
 	}
 	return "", 0

@@ -413,8 +413,8 @@ func TestDispatchVerifyNormalizesScopeBump(t *testing.T) {
 //   - `u`, leveled to 3 behind `q`, is refused for SCOPE at 3 (`a`), then for
 //     HEADROOM at 4 (`s`), and lands at 5.
 //
-// Headroom is tested before scope at each stage, which is why each refusal
-// above is the only one that stage reports.
+// No single stage above refuses a row on both rules; that case has its own
+// fixtures below.
 const bumpDoubleWorkflowSrc = `
 [pipeline]
 name = "bump-double-fixture"
@@ -518,4 +518,136 @@ func TestStagedRowsBumpScopeBeatsHeadroom(t *testing.T) {
 			}
 		})
 	}
+}
+
+// bumpBothAtOneStageWorkflowSrc lets one stage refuse a row for both rules at
+// once: `a` and `b` share a write class capped at one, so the first issue's `b`
+// holds stage 1's only write slot AND its `x/**` scope there.
+const bumpBothAtOneStageWorkflowSrc = `
+[pipeline]
+name = "bump-both-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "a"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = []
+
+[[step]]
+name = "b"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = ["a"]
+`
+
+// bumpScopeThenBothWorkflowSrc keeps `b` out of the write class, so a stage
+// where only a `b` sits holds scope without spending the write slot.
+const bumpScopeThenBothWorkflowSrc = `
+[pipeline]
+name = "bump-scope-then-both-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "a"
+executor = "w"
+class = "write"
+emits = "change-summary"
+after = []
+
+[[step]]
+name = "b"
+executor = "w"
+emits = "change-summary"
+after = ["a"]
+`
+
+// TestStagedRowsBumpScopeBeatsHeadroomAtOneStage: when a single stage refuses
+// a row for both rules, the row reports `scope` and names the issue holding
+// that stage. Reporting `headroom` there tells a relay the gap retires when a
+// slot frees, and it may co-run the row with the writer it conflicts with.
+func TestStagedRowsBumpScopeBeatsHeadroomAtOneStage(t *testing.T) {
+	t.Run("one stage refuses for both", func(t *testing.T) {
+		conn := mustDB(t)
+		registerSource(t, conn, []byte(bumpBothAtOneStageWorkflowSrc), "bump-both.toml")
+		first := createIssue(t, conn, "holds the tree", "a body", "task", nil)
+		second := createIssue(t, conn, "wants the tree", "a body", "task", nil)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, first, `["x/**"]`),
+			"declaring the first scope")
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, second, `["x/a"]`),
+			"declaring the second scope")
+		run := startRun(t, conn, first, second)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		answer, err := testEngine().NextSteps(conn, run.ID, 0, nowMS)
+		testsupport.Must(t, err, "next: %v", err)
+		got := offeredBumps(answer.Steps)
+		firstID, secondID := model.FormatID(first), model.FormatID(second)
+
+		// The first issue's `b` holds both stage 1's write slot and `x/**`.
+		if row := got[firstID+" b@0"]; row.stage != 1 {
+			t.Fatalf("premise: %s b@0 = %+v, want stage 1", firstID, row)
+		}
+		row := got[secondID+" a@0"]
+		if row.stage != 2 || row.bump != model.BumpScope || row.issue != firstID {
+			t.Errorf("%s a@0 = %+v, want stage 2 bump %q naming %s — stage 1 "+
+				"refused it for scope as well as headroom", secondID, row,
+				model.BumpScope, firstID)
+		}
+	})
+
+	t.Run("later stage refuses for both", func(t *testing.T) {
+		conn := mustDB(t)
+		registerSource(t, conn, []byte(bumpScopeThenBothWorkflowSrc), "bump-scope-then-both.toml")
+		first := createIssue(t, conn, "holds the tree", "a body", "task", nil)
+		second := createIssue(t, conn, "wants the tree", "a body", "task", nil)
+		third := createIssue(t, conn, "also wants the tree", "a body", "task", nil)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, first, `["x/**"]`),
+			"declaring the first scope")
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, second, `["x/a"]`),
+			"declaring the second scope")
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, third, `["x/a"]`),
+			"declaring the third scope")
+		run := startRun(t, conn, first, second, third)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		answer, err := testEngine().NextSteps(conn, run.ID, 0, nowMS)
+		testsupport.Must(t, err, "next: %v", err)
+		got := offeredBumps(answer.Steps)
+		firstID, secondID, thirdID := model.FormatID(first), model.FormatID(second),
+			model.FormatID(third)
+
+		// Stage 1 holds only the first issue's classless `b`, so it refuses the
+		// third issue's `a` for scope alone. Stage 2 holds the second issue's
+		// `a`, which spends the write slot and intersects `x/a`: both rules.
+		if row := got[firstID+" b@0"]; row.stage != 1 {
+			t.Fatalf("premise: %s b@0 = %+v, want stage 1", firstID, row)
+		}
+		if row := got[secondID+" a@0"]; row.stage != 2 || row.issue != firstID {
+			t.Fatalf("premise: %s a@0 = %+v, want stage 2 naming %s",
+				secondID, row, firstID)
+		}
+		row := got[thirdID+" a@0"]
+		if row.stage != 3 || row.bump != model.BumpScope || row.issue != secondID {
+			t.Errorf("%s a@0 = %+v, want stage 3 bump %q naming %s — the "+
+				"holder of the stage it was last pushed past, not %s",
+				thirdID, row, model.BumpScope, secondID, firstID)
+		}
+	})
 }
