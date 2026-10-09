@@ -1083,6 +1083,22 @@ func (e *Engine) verifyDispatchTx(
 			continue
 		}
 		current, ok := computedByStep[want.StepID]
+		if !ok && preGateHeld(sched, want.StepID) {
+			// A HELD ROW IS NOT A MISSING ONE (gates-trust §7.6.2 PG6). The
+			// step is pending, its predecessors are done, and the one thing
+			// keeping it out of the recomputation is a detached pre-gate run
+			// still measuring its target — a hold that lifts on its own, with
+			// nothing recorded and nothing routed in between. A manifest that
+			// staged this step behind its predecessors (the implement →
+			// verify-ac lane, the common case) promised exactly what is
+			// happening: the wave's claim is deferred, not denied, so the row
+			// verifies as it would the moment the lock lifts. Without this
+			// clause nearly every such lane failed its verify, and the
+			// reconcile with it, the instant the child took the lock.
+			verdict.Verdict = RowMatched
+			result.Rows = append(result.Rows, verdict)
+			continue
+		}
 		if !ok {
 			verdict.Verdict = RowMissing
 			verdict.Stored = want.RowJSON

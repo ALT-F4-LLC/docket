@@ -67,6 +67,23 @@ const (
 	// CondBudget is R7: budget headroom exists. S6 owns the check; at S3 the
 	// seam returns true (§6.3), so this constant exists but never fires yet.
 	CondBudget ReadyCondition = "no budget headroom"
+	// CondPreGatePending is the pre-gate hold (gates-trust §7.6.2 PG6): a
+	// detached run is measuring this step's pre-gates against the target its
+	// claim would resolve, and still holds the (step, target) in-flight lock.
+	// The claim never waits on that run, so a claim admitted now would run
+	// the gate inside its own budget and record the cut — the row the
+	// detached run exists to replace. Evaluated after every clause but the
+	// budget (R7): it applies only to a step whose place in the run admits
+	// it, so a step still behind its predecessors keeps reporting
+	// CondPredecessors (and stays stageable) whatever the lock says, and a
+	// CondBudget refusal still means every other condition held, which the
+	// claim's cost override relies on. A stored manifest row whose step is
+	// held verifies as matched (dispatch verify): the hold defers the claim
+	// without changing the offer. It lifts
+	// when the lock does — the run records its rows, or the child dies and
+	// the kernel drops the flock — and a run that never launched holds
+	// nothing.
+	CondPreGatePending ReadyCondition = "a detached pre-gate run for its target is in flight"
 )
 
 // Scheduler answers readiness over one consistent snapshot of a run.
@@ -171,6 +188,16 @@ type Scheduler struct {
 	// often is waste this removes. Populated lazily via loopClosure, not
 	// eagerly here, because most snapshots involve no loop step at all.
 	loopClosureCache map[int]map[string]bool
+	// preGateHolds is the pre-gate hold's half of the snapshot (gates-trust
+	// §7.6.2 PG6, CondPreGatePending): the pending pre-gated steps whose
+	// detached run holds its (step, target) in-flight lock at this instant,
+	// keyed by step id to the target sha the lock is keyed to. Loaded with
+	// the rest of the snapshot (loadDetachedPreGateHolds, pregate_detached.go)
+	// for the reason every other field is: Ready has no transaction to
+	// resolve a target in, and a lock probed once per snapshot gives every
+	// Ready over that snapshot one answer. nil on the dormant path — a run
+	// whose definitions declare no pre-gate over `issue.diff` probes nothing.
+	preGateHolds map[int]string
 }
 
 // loopClosure returns afterLoopDownstream(def), computed once per workflow id
@@ -341,6 +368,15 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	}
 	for _, step := range steps {
 		s.stepByID[step.ID] = step
+	}
+
+	// The pre-gate hold, last, because it resolves targets over the snapshot
+	// just assembled (stepByID, defs, holdTally) — the same resolution the
+	// claim performs, so the lock it probes is the lock the claim's detached
+	// run holds. Dormant unless a pinned definition declares a pre-gate over
+	// `issue.diff`.
+	if err := s.loadDetachedPreGateHolds(tx); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -626,7 +662,28 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 		return false, CondHeadroom
 	}
 
-	// R7: budget headroom — S6's, a seam returning true at S3 (§6.3).
+	// The pre-gate hold (gates-trust §7.6.2 PG6), after every clause that
+	// describes the step's place in the run and BEFORE the budget: a step
+	// that every clause above admits, whose pre-gates a detached run is
+	// measuring right now, waits for that run's complete result rather than
+	// being claimed into a budget-cut one. Not a numbered clause, because it
+	// narrows the ready set without changing what readiness means — the step
+	// is ready the moment the lock lifts, with nothing recorded and nothing
+	// routed in between — and placed after R3 so a step still behind its
+	// predecessors keeps reporting CondPredecessors, the condition the staged
+	// closure stages on (lookahead.go), while the lock is held for most of a
+	// run's life. It precedes R7 because the claim's cost override (claim.go,
+	// DKT-867) admits a CondBudget refusal on the real cost, trusting that
+	// CondBudget means every other condition held; a hold reported after the
+	// budget would be admitted through that override, and a held step that is
+	// also over budget would pause the run over a step nothing may claim yet.
+	// CondPreGatePending's own comment says what lifts it.
+	if _, held := s.preGateHolds[step.ID]; held {
+		return false, CondPreGatePending
+	}
+
+	// R7: budget headroom — S6's, a seam returning true at S3 (§6.3). Last,
+	// so a CondBudget refusal means every other condition held (claim.go).
 	if !s.budgetHeadroom(step) {
 		return false, CondBudget
 	}

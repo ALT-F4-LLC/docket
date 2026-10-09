@@ -317,10 +317,12 @@ func probeScratchLock(dir string) (lock *os.File, live bool) {
 	return probeLiveLock(scratchLockPath(dir))
 }
 
-// probeLiveLock is probeScratchLock's mechanism for any liveness lockfile: the
-// detached pre-gate run's in-flight lock (pregate_detached.go) is probed by the
-// same rule, with the same fail-closed reading of a lockfile that cannot be
-// opened.
+// probeLiveLock is probeScratchLock's mechanism: a liveness lockfile read the
+// SWEEPER's way, where a lockfile that cannot be opened or locked is "live"
+// because the cost of a wrong "dead" is a tree removed under a measurement.
+// The detached pre-gate run's in-flight lock reads the other way
+// (detachedPreGateHeld, pregate_detached.go): there a wrong "live" is a step
+// held forever, so only a flock another holder refuses counts.
 func probeLiveLock(path string) (lock *os.File, live bool) {
 	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {

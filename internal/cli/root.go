@@ -138,6 +138,10 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// The detached pre-gate hold's lock directory, fixed from this same
+		// resolution so no scheduler snapshot resolves it under its own
+		// transaction's write lock (gates-trust §7.6.2 PG6).
+		engine.PrimeDetachedPreGateLockDir(cfg)
 
 		ctx := context.WithValue(cmd.Context(), cfgKey, cfg)
 

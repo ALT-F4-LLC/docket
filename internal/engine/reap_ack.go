@@ -172,6 +172,12 @@ func reapOneTx(
 		step.StartedMS = nil
 		step.ReapedClaims++
 		step.LastClaimEnd = db.ClaimEndReaped
+		// The same reflection for the pre-gate hold (gates-trust §7.6.2
+		// PG6): the holds were probed while this step was claimed, so it was
+		// no candidate; the readiness pass that follows must see its lock.
+		if err := sched.refreshDetachedPreGateHold(tx, step); err != nil {
+			return err
+		}
 	}
 	return nil
 }

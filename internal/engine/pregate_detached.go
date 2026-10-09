@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -60,6 +62,21 @@ import (
 // it held exits without measuring. The launcher probes the same lock so a run
 // in flight is not re-launched at every later completion; a probe that misses
 // costs one child that exits at the lock.
+//
+// THE SCHEDULER HOLDS THE STEP WHILE THE RUN IS IN FLIGHT. The claim never
+// waits, so a claim that arrives while the child is still measuring runs the
+// gate on its PG5 path and records the cut — the exact row this file exists
+// to replace, and for a verify step whose evidence IS that gate's exit, no
+// evidence at all. So a pending pre-gated step whose (step, target) lock is
+// held right now is not ready (ready.go, CondPreGatePending): `next` and
+// `dispatch open` do not offer it, the staged closure does not stage it, and a
+// claim is refused rather than served a budget-cut row. The hold is the same
+// flock, probed once per scheduler snapshot (loadDetachedPreGateHolds) for
+// the step's exact resolved target, and it lifts the way the lock does: the
+// child releases it when its rows are recorded, and the kernel releases it
+// when the child dies. A lock nobody took — a child that never launched, or a
+// lock directory that does not resolve — holds nothing. A live child is
+// bounded by its entries' own timeouts, so the hold is too.
 
 // LaunchDetachedPreGates starts one detached pre-gate run for a step and a
 // target sha, outside the calling process. nil means the mechanism is off and
@@ -74,8 +91,35 @@ var LaunchDetachedPreGates func(stepID int, targetSHA string) error
 // the tree lock's own, so a local store keeps them in `.docket/` and the global
 // store under its `locks/`. A variable so a test can point it at a temp
 // directory; "" means no lock can be taken and no run may start.
-var detachedPreGateLockDir = func() string {
-	lock := repoPathsFrom(resolvePaths()).LockPath
+//
+// Resolved ONCE per process. The resolution shells out to git (config.Resolve
+// locates the worktree), and the readiness hold asks for the directory from
+// inside a scheduler snapshot's transaction, on every scheduling verb that
+// finds a pre-gated step at its turn; the store a process runs against does
+// not change between those calls, so the first answer is every answer. The
+// CLI primes it from the config it already resolved (PrimeDetachedPreGateLockDir),
+// so under `docket` the first call never shells out at all — and never from
+// inside a transaction, which under BEGIN IMMEDIATE holds the write lock.
+var detachedPreGateLockDir = sync.OnceValue(func() string {
+	return lockDirOf(resolvePaths())
+})
+
+// PrimeDetachedPreGateLockDir fixes the in-flight lock directory from a
+// config the caller already resolved, so no scheduler snapshot pays a git
+// resolution for it. The CLI calls it once at entry, after config.Resolve and
+// before any verb opens a transaction. A nil config leaves the lazy default.
+func PrimeDetachedPreGateLockDir(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	dir := lockDirOf(cfg)
+	detachedPreGateLockDir = func() string { return dir }
+}
+
+// lockDirOf is the tree lock's directory for a resolved config, "" when the
+// config resolves no tree lock.
+func lockDirOf(cfg *config.Config) string {
+	lock := repoPathsFrom(cfg).LockPath
 	if lock == "" {
 		return ""
 	}
@@ -189,7 +233,19 @@ func detachedPreGateCandidates(
 	if run := sched.Run(); run == nil || run.Status != model.RunActive {
 		return nil, nil
 	}
+	return detachablePreGateSteps(tx, sched, nil)
+}
 
+// detachablePreGateSteps is detachedPreGateCandidates' body over an
+// already-loaded snapshot: every pending executor step of the run that
+// measures no worktree of its own, consumes `issue.diff`, declares a pre-gate,
+// and resolves a target sha right now — narrowed to the steps `admit` accepts
+// when one is given. The launcher and the readiness hold both read it, so the
+// key a run records, the key a claim looks up, and the key the hold probes are
+// one resolution (resolvedTargetFor over the live artifacts).
+func detachablePreGateSteps(
+	tx *sql.Tx, sched *Scheduler, admit func(*db.Step) bool,
+) ([]detachedPreGateCandidate, error) {
 	var (
 		artifacts []*db.Artifact
 		out       []detachedPreGateCandidate
@@ -206,8 +262,12 @@ func detachedPreGateCandidates(
 		if len(gates) == 0 {
 			continue
 		}
+		if admit != nil && !admit(step) {
+			continue
+		}
 		if artifacts == nil {
-			if artifacts, err = db.ListRunArtifactsTx(tx, runID); err != nil {
+			var err error
+			if artifacts, err = db.ListRunArtifactsTx(tx, step.RunID); err != nil {
 				return nil, err
 			}
 		}
@@ -221,6 +281,81 @@ func detachedPreGateCandidates(
 		out = append(out, detachedPreGateCandidate{step: step, sha: sha, gates: gates})
 	}
 	return out, nil
+}
+
+// loadDetachedPreGateHolds fills the scheduler's preGateHolds: the pending
+// pre-gated steps whose (step, resolved target) detached run holds its
+// in-flight lock at this instant (the file comment's "the scheduler holds the
+// step"). Called by LoadScheduler, inside the snapshot's transaction, because
+// resolving a target needs one and Ready has none.
+//
+// DORMANT by the same two guards the launcher uses: a run that is not active
+// offers nothing anyway, and a run whose pinned definitions declare no
+// pre-gate over `issue.diff` can have no detached run to wait on, so neither
+// pays a resolution or a probe. Candidates are narrowed to steps whose R3
+// holds (predecessorsDone, side-effect free): a step still behind its
+// predecessors is where the lock is held for most of a run's life, and it
+// would report CondPredecessors whatever the lock says, so resolving its
+// target would buy nothing. The hold clause itself sits after every clause of
+// Ready but the budget, so the hold applies only to a step whose place in the
+// run admits it whatever this narrowing admits.
+//
+// THE PROBE NEVER BLOCKS, NEVER CREATES, AND KEEPS NOTHING: detachedPreGateHeld
+// opens the lockfile without O_CREATE, tries the flock non-blocking, and a
+// lock it acquires — a child that died with the file in place — is closed
+// again here. A missing lockfile, or no lock directory at all, is no hold.
+func (s *Scheduler) loadDetachedPreGateHolds(tx *sql.Tx) error {
+	return s.probeDetachedPreGateHolds(tx, s.predecessorsDone)
+}
+
+// refreshDetachedPreGateHold re-probes ONE step's hold after a lazy reap
+// returned it to `pending` inside this snapshot (claim.go, reapOneTx). The
+// holds were loaded with the snapshot, when the step was still claimed and so
+// not a candidate; a readiness pass over the reflected reap would otherwise
+// offer — or admit the claim of — a step whose detached run is in flight,
+// which is the one state the hold exists to refuse. Same guards, same
+// resolution, same probe as the load; only the admission narrows to the step.
+func (s *Scheduler) refreshDetachedPreGateHold(tx *sql.Tx, step *db.Step) error {
+	delete(s.preGateHolds, step.ID)
+	return s.probeDetachedPreGateHolds(tx, func(c *db.Step) bool { return c.ID == step.ID })
+}
+
+// preGateHeld reports whether the hold is the ONE condition keeping a step out
+// of the ready set over this snapshot: Ready answers CondPreGatePending, so
+// the step is pending, placed, routed, unconflicted, within headroom, and
+// waiting only on its detached run. `dispatch verify` reads a stored row in
+// this state as matched rather than missing (verifyDispatchTx): the hold
+// defers the wave's claim without changing what the manifest offered.
+func preGateHeld(s *Scheduler, stepID int) bool {
+	step := s.stepByID[stepID]
+	if step == nil {
+		return false
+	}
+	ok, cond := s.Ready(step)
+	return !ok && cond == CondPreGatePending
+}
+
+// probeDetachedPreGateHolds is the body loadDetachedPreGateHolds and
+// refreshDetachedPreGateHold share: resolve the admitted candidates' targets,
+// probe each (step, target) lock, and record the ones held.
+func (s *Scheduler) probeDetachedPreGateHolds(tx *sql.Tx, admit func(*db.Step) bool) error {
+	if s.run == nil || s.run.Status != model.RunActive || !declaresDetachablePreGates(s.defs) {
+		return nil
+	}
+	candidates, err := detachablePreGateSteps(tx, s, admit)
+	if err != nil {
+		return err
+	}
+	for _, c := range candidates {
+		if !detachedPreGateHeld(detachedPreGateLockPath(c.step.ID, c.sha)) {
+			continue
+		}
+		if s.preGateHolds == nil {
+			s.preGateHolds = make(map[int]string)
+		}
+		s.preGateHolds[c.step.ID] = c.sha
+	}
+	return nil
 }
 
 // declaresDetachablePreGates reports whether any pinned definition has a step
@@ -554,12 +689,36 @@ func releaseDetachedPreGateLock(lock *os.File, path string) {
 // right now. No path means nowhere to lock, which is read as "do not launch":
 // a child could not keep itself single either.
 func detachedPreGateInFlight(path string) bool {
+	return path == "" || detachedPreGateHeld(path)
+}
+
+// detachedPreGateHeld is the readiness hold's reading of the same lock: a run
+// holds it, or nothing does. ONLY A FLOCK ANOTHER HOLDER REFUSES (EWOULDBLOCK)
+// IS A HOLD. No path is nothing — no lock directory means no child ever took
+// a lock there, so there is no run to wait on — and so is a lockfile that is
+// missing, that cannot be opened, whose flock fails for any reason other than
+// a holder, or whose flock this probe can take (closed again at once; the
+// probe keeps nothing). Errors read as "not held" deliberately, the opposite
+// of probeLiveLock's sweeper reading: a hold is a refusal to offer, and a
+// probe that cannot ask the kernel knows of no run to wait on. On a filesystem
+// where flock fails, a child creates the lockfile, fails its own flock, and
+// exits without removing it; a probe that read every error as "held" would
+// then hold the step — and suppress every relaunch — forever. The one reading
+// that differs from the launcher's is the empty path, because the two answer
+// different questions: "may I launch?" fails closed to not launching, "may I
+// offer?" fails closed to offering, which is the step's behavior before this
+// hold existed. On an error the launcher therefore relaunches, and the child
+// exits at its own flock failure: one wasted child per completion, never a
+// permanent hold.
+func detachedPreGateHeld(path string) bool {
 	if path == "" {
-		return true
+		return false
 	}
-	lock, live := probeLiveLock(path)
-	if lock != nil {
-		lock.Close()
+	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false
 	}
-	return live
+	defer file.Close()
+	err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	return errors.Is(err, syscall.EWOULDBLOCK)
 }

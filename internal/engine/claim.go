@@ -393,6 +393,12 @@ func claimStepWithGates(
 		fresh.Owner, fresh.TokenHash, fresh.ExpiresMS = "", "", 0
 		fresh.StartedMS = nil
 		fresh.ReapedClaims++
+		// The pre-gate hold was loaded while this step was still claimed, so
+		// it was no candidate; now that it is pending again, probe its lock
+		// before R8 asks (gates-trust §7.6.2 PG6).
+		if err := sched.refreshDetachedPreGateHold(tx, fresh); err != nil {
+			return nil, err
+		}
 	}
 
 	spec := materializedSpec(defs[fresh.WorkflowID], fresh, sched.holdTally)
