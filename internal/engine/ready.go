@@ -855,8 +855,10 @@ func suspendedOnPanel(step *db.Step, panel string) bool {
 }
 
 // openInterposedGates returns the non-terminal interposed-gate instances that
-// hold this step (DKT-168): for each `after` predecessor whose threshold
-// names step-name targets, the target instances that are not yet terminal.
+// hold this step (DKT-168): for each `after` predecessor that can interpose
+// a step (workflow.InterposedTargets: its threshold step-name routings, its
+// on_fail panel, and its on_exhausted target), the target instances that are
+// not yet terminal.
 // The step's own name is excluded — a gate is not held by itself — and its
 // instances resolve by predecessorInstances' ordinal rule, the same fallback
 // every other R3 read uses. A target with no instances holds nothing: there
@@ -883,7 +885,7 @@ func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 		if predSpec == nil {
 			continue
 		}
-		for _, target := range workflow.ThresholdTargets(predSpec.Threshold) {
+		for _, target := range workflow.InterposedTargets(predSpec) {
 			if target == step.StepName {
 				continue
 			}

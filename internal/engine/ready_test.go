@@ -1158,3 +1158,52 @@ func TestAwaitingDecisionBehindOpenExecutorTarget(t *testing.T) {
 		})
 	})
 }
+
+// TestOnExhaustedVoteTargetHoldsDownstream is the on_exhausted half of R3's
+// interposition clause: a fix-loop exhaustion leaves its routing step terminal
+// `done`, so the hold on the routing step's ordinary downstream is the only
+// thing keeping that downstream behind an undecided panel. exhaustionSrc gives
+// `check` two `after` successors, so whichever one on_exhausted does not name
+// is the ordinary downstream.
+func TestOnExhaustedVoteTargetHoldsDownstream(t *testing.T) {
+	t.Run("an open vote target holds the downstream until it terminalizes", func(t *testing.T) {
+		conn, runID := exhaust(t, "panel")
+		check := mustStep(t, conn, "check@1")
+		if check.Status != db.StepDone || !routingIs(check.Routing, "panel") {
+			t.Fatalf("check@1 = %q routing %q, want done routing panel",
+				check.Status, check.Routing)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "drain@1"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("drain@1 ready=%v cond=%q while panel@1 is open, "+
+					"want CondGateOpen", ok, cond)
+			}
+		})
+
+		execSQL(t, conn, `UPDATE steps SET status = ? WHERE step_name = 'panel' AND issue_id = ?`,
+			string(db.StepDone), check.IssueID)
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if ok, cond := sched.Ready(stepNamed(t, sched, "drain@1")); !ok {
+				t.Errorf("drain@1 held by %q after every panel instance "+
+					"terminalized", cond)
+			}
+		})
+	})
+
+	t.Run("an open executor target leaves the downstream ready", func(t *testing.T) {
+		conn, runID := exhaust(t, "drain")
+		if got := stepStatus(t, conn, "drain@1"); db.StepTerminal(got) {
+			t.Fatalf("drain@1 = %q, want the executor target still open", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if ok, cond := sched.Ready(stepNamed(t, sched, "panel@1")); !ok {
+				t.Errorf("panel@1 held by %q while an open EXECUTOR "+
+					"on_exhausted target runs; only vote or human targets hold",
+					cond)
+			}
+		})
+	})
+}
