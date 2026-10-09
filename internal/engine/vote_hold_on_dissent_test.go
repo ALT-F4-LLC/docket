@@ -88,35 +88,11 @@ func TestVoteRuleHoldOnDissentKey(t *testing.T) {
 // `waiting-human`, never the reverse, so a rejected tally keeps its `on_fail`
 // route and a triage panel is never parked on the question it just answered.
 func TestVoteHoldOnDissentParksApprovedWithReject(t *testing.T) {
-	// driveDissentGate opens the ballot, casts the given verdicts in seat
-	// order, drives the tally, and returns the routed gate step.
 	driveDissentGate := func(
 		t *testing.T, hold string, verdicts ...model.Verdict,
 	) (*sql.DB, *db.Step) {
 		t.Helper()
-		conn := mustDB(t)
-		registerVoteRule(t, conn, "majority", "0.5", "")
-		if hold != "" {
-			err := db.SetConfig(conn, 0, db.VoteRuleHoldOnDissentKey("majority"), hold)
-			testsupport.Must(t, err, "setting hold_on_dissent: %v", err)
-		}
-		registerSource(t, conn, []byte(holdOnDissentSrc), "dissent-hold.toml")
-		issue := createIssue(t, conn, "dissent", "body", "task", nil)
-		run := startRun(t, conn, issue)
-		_, err := activate(conn, run.ID)
-		testsupport.Must(t, err, "activate: %v", err)
-		e := testEngine()
-
-		proposalID := openGateProposal(t, conn, e, run.ID)
-		for i, seat := range []string{"seat-a", "seat-b", "seat-c"} {
-			castSeat(t, conn, proposalID, seat, verdicts[i], "")
-		}
-		err = e.DriveVoteProposal(conn, proposalID, nowMS)
-		testsupport.Must(t, err, "driving the tally: %v", err)
-
-		gate, err := db.GetStep(conn, stepIDByInstance(t, conn, "gate@0"))
-		testsupport.Must(t, err, "reading gate@0: %v", err)
-		return conn, gate
+		return driveDissentGateSrc(t, holdOnDissentSrc, hold, verdicts...)
 	}
 
 	// Two approvals against one reject: the weighted mean clears 0.5, so the
@@ -175,6 +151,78 @@ func TestVoteHoldOnDissentParksApprovedWithReject(t *testing.T) {
 		if !strings.HasPrefix(gate.Routing, workflow.OnFailAbandonIssue) {
 			t.Errorf("gate@0 routing = %q for a rejected tally, want the declared %q",
 				gate.Routing, workflow.OnFailAbandonIssue)
+		}
+	})
+}
+
+// driveDissentGateSrc registers src under rule `majority` at 0.5 with
+// `.hold_on_dissent` set to hold (left unset when empty), opens the gate's
+// ballot, casts the given verdicts in seat order (seat-a, seat-b, seat-c),
+// drives the tally, and returns the routed gate step.
+func driveDissentGateSrc(
+	t *testing.T, src, hold string, verdicts ...model.Verdict,
+) (*sql.DB, *db.Step) {
+	t.Helper()
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	if hold != "" {
+		err := db.SetConfig(conn, 0, db.VoteRuleHoldOnDissentKey("majority"), hold)
+		testsupport.Must(t, err, "setting hold_on_dissent: %v", err)
+	}
+	registerSource(t, conn, []byte(src), "dissent-hold.toml")
+	issue := createIssue(t, conn, "dissent", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	proposalID := openGateProposal(t, conn, e, run.ID)
+	for i, seat := range []string{"seat-a", "seat-b", "seat-c"} {
+		castSeat(t, conn, proposalID, seat, verdicts[i], "")
+	}
+	err = e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+
+	gate, err := db.GetStep(conn, stepIDByInstance(t, conn, "gate@0"))
+	testsupport.Must(t, err, "reading gate@0: %v", err)
+	return conn, gate
+}
+
+// explicitPassSrc is holdOnDissentSrc with the gate's author affirmatively
+// declaring the cast set fine: the `pass` predicate matches any tally with an
+// approve cast, so it matches every approved tally below.
+const explicitPassSrc = holdOnDissentSrc + `threshold = { "pass" = 'any(verdict == approve)' }
+`
+
+// TestVoteHoldOnDissentExplicitPassStillParks pins the precedence between the
+// two routing authorities on an approved tally: the operator's
+// `hold_on_dissent` outranks a workflow author's threshold predicate that
+// explicitly matched `pass`.
+func TestVoteHoldOnDissentExplicitPassStillParks(t *testing.T) {
+	t.Run("keyed approved-with-reject parks despite the explicit pass", func(t *testing.T) {
+		conn, gate := driveDissentGateSrc(t, explicitPassSrc, "true",
+			model.VerdictApprove, model.VerdictApprove, model.VerdictReject)
+		if !strings.HasPrefix(gate.Routing, workflow.OnFailWaitingHuman) {
+			t.Fatalf("gate@0 routing = %q, want %q — an author's explicit `pass` "+
+				"must not silence the operator's hold on a dissented approval",
+				gate.Routing, workflow.OnFailWaitingHuman)
+		}
+		if !strings.Contains(gate.Routing, "seat-c") {
+			t.Errorf("gate@0 routing record %q does not name the dissenting seat", gate.Routing)
+		}
+		if got := stepStatus(t, conn, "gate@0"); got != db.StepWaitingHuman {
+			t.Errorf("gate@0 status = %q, want %q", got, db.StepWaitingHuman)
+		}
+	})
+
+	// Control: with no dissent the explicit `pass` predicate routes the gate
+	// to pass, so the park above is what moved it.
+	t.Run("keyed clean approval takes the explicit pass", func(t *testing.T) {
+		_, gate := driveDissentGateSrc(t, explicitPassSrc, "true",
+			model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
+		if !strings.HasPrefix(gate.Routing, RoutingPass) {
+			t.Errorf("gate@0 routing = %q for a clean approval, want %q",
+				gate.Routing, RoutingPass)
 		}
 	})
 }

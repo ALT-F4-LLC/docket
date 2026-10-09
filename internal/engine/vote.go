@@ -612,9 +612,16 @@ func routeVoteStep(
 	// pass. A triage panel (which the first arm passed) is excluded
 	// explicitly, because parking it on the question it just answered is what
 	// DKT-1901 forbids; a rejected tally keeps its `on_fail` because the
-	// second arm already moved `routing`; a `threshold` match keeps its own
-	// routing for the same reason; and a COMMITTED proposal is skipped by the
-	// approved-status test, as §8.4's manual commit is the operator's answer.
+	// second arm already moved `routing`; a `threshold` match on `fix-loop` or
+	// `waiting-human` keeps its own routing for the same reason; and a
+	// COMMITTED proposal is skipped by the approved-status test, as §8.4's
+	// manual commit is the operator's answer.
+	//
+	// `routing == RoutingPass` covers both a tally no threshold predicate
+	// matched and one where the workflow author's predicate explicitly
+	// matched `pass`. The park fires in both cases: the operator's
+	// hold_on_dissent outranks an author's explicit `pass`, so a declared
+	// threshold can never silence a dissent the operator asked to see.
 	if routing == RoutingPass && outcome.Status == model.ProposalStatusApproved &&
 		!(triaged != nil && triageDecided(outcome)) {
 		dissentReason, err := dissentHold(conn, step, spec, outcome.ProposalID)
