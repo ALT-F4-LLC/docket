@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -550,5 +551,219 @@ func TestWriterDiffBaseIsItsClaimHead(t *testing.T) {
 	testsupport.Must(t, json.Unmarshal([]byte(payload), &record), "decoding %q: %v", payload, nil)
 	if record["base"] != claimHead {
 		t.Errorf("record base = %q, want the claim head %q", record["base"], claimHead)
+	}
+}
+
+// gatedWriteWorkflowSrc is a write-class step whose failing gate parks it,
+// followed by a non-write step that can park the issue after the writer is
+// done — the two places an operator rules a writer's work out of the run.
+const gatedWriteWorkflowSrc = `
+[pipeline]
+name = "gated-write-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+
+[[step]]
+name = "implement"
+executor = "w"
+class = "write"
+emits = "change-summary"
+gates = ["build"]
+on_fail = "waiting-human"
+after = []
+
+[[step]]
+name = "review"
+executor = "r"
+emits = "report"
+gates = ["build"]
+on_fail = "waiting-human"
+after = ["implement"]
+`
+
+// gatedWriteRun activates one run over gatedWriteWorkflowSrc holding
+// issueCount issues. Every git probe answers "not integrated", so any
+// candidate the check collects refuses the close. *head is the sha the next
+// completion records.
+func gatedWriteRun(t *testing.T, issueCount int) (*sql.DB, *Engine, *exitGates, int, []int, *string) {
+	t.Helper()
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(gatedWriteWorkflowSrc), "gated-write-fixture.toml")
+	issues := make([]int, issueCount)
+	for i := range issues {
+		issues[i] = createIssue(t, conn, "gated write fixture", "a body", "task", nil)
+	}
+	run := startRun(t, conn, issues...)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	head := ""
+	gates := &exitGates{}
+	e := testEngine()
+	e.Gates = gates
+	e.HeadFn = func(string) string { return head }
+	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
+	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, true }
+	return conn, e, gates, run.ID, issues, &head
+}
+
+// issueStepID resolves an instance within one issue of one run.
+func issueStepID(t *testing.T, conn *sql.DB, runID, issueID int, instance string) int {
+	t.Helper()
+	var id int
+	err := conn.QueryRow(
+		`SELECT id FROM steps WHERE run_id = ? AND issue_id = ? AND instance = ?`,
+		runID, issueID, instance,
+	).Scan(&id)
+	testsupport.Must(t, err, "finding %s of issue %d: %v", instance, issueID, err)
+	return id
+}
+
+// completeAs claims and completes one step, leaving it wherever its gate
+// routes it, and returns the status it landed in.
+func completeAs(t *testing.T, conn *sql.DB, e *Engine, stepID int) string {
+	t.Helper()
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim step %d: %v", stepID, err)
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the summary"),
+		WorkDir: "/worktrees/wf-gated", NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete step %d: %v", stepID, err)
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	return step.Status
+}
+
+// requireRecordedHead fails unless the step's own issue.diff names sha, so an
+// ignored candidate is proven ignored rather than never recorded.
+func requireRecordedHead(t *testing.T, conn *sql.DB, stepID int, sha string) {
+	t.Helper()
+	var payload string
+	err := conn.QueryRow(
+		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ? ORDER BY id DESC LIMIT 1`,
+		stepID, ArtifactKindIssueDiff).Scan(&payload)
+	testsupport.Must(t, err, "reading step %d's issue.diff: %v", stepID, err)
+	if !strings.Contains(payload, sha) {
+		t.Fatalf("premise: step %d's issue.diff payload %q does not record %s", stepID, payload, sha)
+	}
+}
+
+// requireVerifiedWithout closes the run with no skip reason and requires a
+// verified close that neither refused on nor checked sha.
+func requireVerifiedWithout(t *testing.T, conn *sql.DB, e *Engine, runID int, sha string) {
+	t.Helper()
+	openDispatch(t, conn, runID, 0, nowMS+2)
+	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS+2)
+	testsupport.Must(t, err, "CloseDispatch without --skip-integration-check: %v", err)
+	if outcome.Integration == nil || outcome.Integration.Status != "verified" {
+		t.Fatalf("Integration = %+v, want status verified", outcome.Integration)
+	}
+	for _, c := range outcome.Integration.Checked {
+		if c.SHA == sha {
+			t.Errorf("Checked = %+v, want no row for %s", outcome.Integration.Checked, sha)
+		}
+	}
+}
+
+// TestCloseIgnoresAnAbandonedIssuesWriter: once the run abandons an issue, its
+// writers' commits are not integration candidates, whether the writer itself
+// was routed abandon-issue or finished before a later step abandoned the issue.
+func TestCloseIgnoresAnAbandonedIssuesWriter(t *testing.T) {
+	t.Run("writer routed abandon-issue", func(t *testing.T) {
+		conn, e, gates, runID, issues, head := gatedWriteRun(t, 1)
+		implement := issueStepID(t, conn, runID, issues[0], "implement@0")
+		*head, gates.fail, gates.exit = "abad0000aa01", true, 1
+		if got := completeAs(t, conn, e, implement); got != db.StepWaitingHuman {
+			t.Fatalf("premise: implement@0 = %q, want %q", got, db.StepWaitingHuman)
+		}
+		requireRecordedHead(t, conn, implement, "abad0000aa01")
+		testsupport.Must(t, e.ResolveStep(conn, implement, ResolveAbandonIssue,
+			"the approach was wrong", nowMS+1), "resolve --as abandon-issue")
+
+		requireVerifiedWithout(t, conn, e, runID, "abad0000aa01")
+	})
+
+	t.Run("writer done, a later step routed abandon-issue", func(t *testing.T) {
+		conn, e, gates, runID, issues, head := gatedWriteRun(t, 1)
+		implement := issueStepID(t, conn, runID, issues[0], "implement@0")
+		*head = "abad0000bb02"
+		if got := completeAs(t, conn, e, implement); got != db.StepDone {
+			t.Fatalf("premise: implement@0 = %q, want %q", got, db.StepDone)
+		}
+		requireRecordedHead(t, conn, implement, "abad0000bb02")
+		review := issueStepID(t, conn, runID, issues[0], "review@0")
+		gates.fail, gates.exit = true, 1
+		if got := completeAs(t, conn, e, review); got != db.StepWaitingHuman {
+			t.Fatalf("premise: review@0 = %q, want %q", got, db.StepWaitingHuman)
+		}
+		testsupport.Must(t, e.ResolveStep(conn, review, ResolveAbandonIssue,
+			"the review reproduced no fix", nowMS+1), "resolve --as abandon-issue")
+
+		requireVerifiedWithout(t, conn, e, runID, "abad0000bb02")
+	})
+}
+
+// TestCloseIgnoresASkipResolvedWriter: a writer the operator resolved --as
+// skip took its work out of the run, so its commit is not a candidate.
+func TestCloseIgnoresASkipResolvedWriter(t *testing.T) {
+	conn, e, gates, runID, issues, head := gatedWriteRun(t, 1)
+	implement := issueStepID(t, conn, runID, issues[0], "implement@0")
+	*head, gates.fail, gates.exit = "5c1b0000cc03", true, 1
+	if got := completeAs(t, conn, e, implement); got != db.StepWaitingHuman {
+		t.Fatalf("premise: implement@0 = %q, want %q", got, db.StepWaitingHuman)
+	}
+	requireRecordedHead(t, conn, implement, "5c1b0000cc03")
+	testsupport.Must(t, e.ResolveStep(conn, implement, ResolveSkip,
+		"superseded by another issue's change", nowMS+1), "resolve --as skip")
+	step, err := db.GetStep(conn, implement)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepSkipped {
+		t.Fatalf("premise: implement@0 = %q after resolve --as skip, want %q", step.Status, db.StepSkipped)
+	}
+
+	requireVerifiedWithout(t, conn, e, runID, "5c1b0000cc03")
+}
+
+// TestCloseStillRefusesAWriterBesideAnAbandonedIssue: abandoning one issue
+// excludes only that issue's writers; another issue's unintegrated commit in
+// the same run still refuses the close, named in the refusal.
+func TestCloseStillRefusesAWriterBesideAnAbandonedIssue(t *testing.T) {
+	conn, e, gates, runID, issues, head := gatedWriteRun(t, 2)
+
+	abandoned := issueStepID(t, conn, runID, issues[0], "implement@0")
+	*head, gates.fail, gates.exit = "abad0000dd04", true, 1
+	if got := completeAs(t, conn, e, abandoned); got != db.StepWaitingHuman {
+		t.Fatalf("premise: abandoned implement@0 = %q, want %q", got, db.StepWaitingHuman)
+	}
+	testsupport.Must(t, e.ResolveStep(conn, abandoned, ResolveAbandonIssue,
+		"the approach was wrong", nowMS+1), "resolve --as abandon-issue")
+
+	live := issueStepID(t, conn, runID, issues[1], "implement@0")
+	*head, gates.fail = "11fe0000ee05", false
+	if got := completeAs(t, conn, e, live); got != db.StepDone {
+		t.Fatalf("premise: live implement@0 = %q, want %q", got, db.StepDone)
+	}
+
+	openDispatch(t, conn, runID, 0, nowMS+2)
+	_, err := e.CloseDispatch(conn, runID, true, "", nowMS+2)
+	if err == nil {
+		t.Fatal("want a refusal over the live issue's unintegrated commit")
+	}
+	msg := err.Error()
+	for _, want := range []string{model.FormatStepID(live), "11fe0000ee05"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not name %q", msg, want)
+		}
+	}
+	for _, unwanted := range []string{model.FormatStepID(abandoned), "abad0000dd04"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("refusal %q names the abandoned writer's %q", msg, unwanted)
+		}
 	}
 }

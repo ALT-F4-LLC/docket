@@ -117,6 +117,13 @@ type integrationCandidate struct {
 // `issue.diff` artifact (highest artifact id when a retry re-recorded one) —
 // and marks each one an earlier close of this run already accepted.
 //
+// Work the run ruled out is never a candidate: a step resolved `skipped`, and
+// every write-class step of an issue this run abandoned, whatever that step's
+// own status. Abandonment is read from the run's `issue-abandoned` events,
+// the one record both abandon paths write (issueDispositionsTx reads it the
+// same way); the steps alone cannot say it, because `run abandon --issue`
+// writes no routing and a writer finished before the abandonment stays done.
+//
 // The prior record is the `dispatch-closed` event's own `integration.checked`
 // list (what a close writes, verified or skipped), keyed by step AND sha: a
 // step that re-recorded a new head after the close that accepted its old one
@@ -143,10 +150,17 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 	if err != nil {
 		return nil, err
 	}
+	abandoned, err := abandonedIssuesTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
 
 	var out []integrationCandidate
 	for _, step := range sched.Steps() {
 		if !sched.writeClassOf(step.Class) || !db.StepTerminal(step.Status) {
+			continue
+		}
+		if step.Status == db.StepSkipped || abandoned[step.IssueID] {
 			continue
 		}
 		a, ok := own[step.ID]
@@ -174,6 +188,28 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 		})
 	}
 	return out, nil
+}
+
+// abandonedIssuesTx reads the issues this run abandoned, by either path.
+func abandonedIssuesTx(tx *sql.Tx, runID int) (map[int]bool, error) {
+	rows, err := tx.Query(
+		`SELECT DISTINCT issue_id FROM events
+		  WHERE run_id = ? AND kind = ? AND issue_id IS NOT NULL`,
+		runID, EventIssueAbandoned)
+	if err != nil {
+		return nil, fmt.Errorf("reading abandoned issues: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int]bool{}
+	for rows.Next() {
+		var issueID int
+		if err := rows.Scan(&issueID); err != nil {
+			return nil, fmt.Errorf("reading abandoned issues: %w", err)
+		}
+		out[issueID] = true
+	}
+	return out, rows.Err()
 }
 
 // priorIntegrationsTx reads every acceptance the run's earlier closes
