@@ -1173,40 +1173,46 @@ with a ` + "`resolved`" + ` verdict instead of needing --skip-integration-check.
 It also sets ` + "`integrated_sha`" + ` in the step's metadata. The sha must be
 the full 40-hex id of ONE ordinary commit whose patch is the step's landed
 work; a merge commit records an empty diff. Both flags may be given together.
+On a run bound to a conductor capability, --integrated-sha requires that
+token via DOCKET_TOKEN or stdin (never argv); --metadata alone does not.
 
 A step that has not finished refuses: a live step's metadata lands with its
 record, under its holder's token.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w := getWriter(cmd)
-		conn := getDB(cmd)
+		return runStepAnnotate(cmd, args, getWriter(cmd))
+	},
+}
 
-		id, err := stepArg(args[0])
-		if err != nil {
-			return err
-		}
-		metadata, _ := cmd.Flags().GetString("metadata")
-		sha, _ := cmd.Flags().GetString("integrated-sha")
+func runStepAnnotate(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
 
-		if sha == "" {
-			if _, err := engine.AnnotateStep(conn, id, metadata, model.NowMS()); err != nil {
-				return stepErr(err, stepLabel(id))
-			}
-			return emitStepState(w, conn, id, "Annotated")
-		}
-		by, err := rulingBy()
-		if err != nil {
-			return err
-		}
-		ann, err := engine.NewEngine().AnnotateIntegration(conn, id, sha, metadata, by, model.NowMS())
-		if err != nil {
+	id, err := stepArg(args[0])
+	if err != nil {
+		return err
+	}
+	metadata, _ := cmd.Flags().GetString("metadata")
+	sha, _ := cmd.Flags().GetString("integrated-sha")
+
+	if sha == "" {
+		if _, err := engine.AnnotateStep(conn, id, metadata, model.NowMS()); err != nil {
 			return stepErr(err, stepLabel(id))
 		}
-		// The re-record is a FACT the row does not carry, reported the way a
-		// resolution reports its re-pin: on the success line and as
-		// `issue_diff_repin` in the envelope.
-		return emitResolvedState(w, conn, id, "Annotated", nil, ann.Repin)
-	},
+		return emitStepState(w, conn, id, "Annotated")
+	}
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+	token := stepConductorToken(conn, id, os.Stdin)
+	ann, err := engine.NewEngine().AnnotateIntegration(conn, id, sha, metadata, by, token, model.NowMS())
+	if err != nil {
+		return stepErr(err, stepLabel(id))
+	}
+	// The re-record is a FACT the row does not carry, reported the way a
+	// resolution reports its re-pin: on the success line and as
+	// `issue_diff_repin` in the envelope.
+	return emitResolvedState(w, conn, id, "Annotated", nil, ann.Repin)
 }
 
 // stepDetailPayload is `step show`'s shape for a step that has something to

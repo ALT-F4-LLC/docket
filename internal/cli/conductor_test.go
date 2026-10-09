@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,11 +13,12 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 )
 
-// DKT-2465 at the CLI boundary: the seven operator verbs READ the conductor
-// capability from DOCKET_TOKEN, and never touch stdin on a run that holds
-// none.
+// DKT-2465 at the CLI boundary: the seven operator verbs, and `step annotate
+// --integrated-sha`, READ the conductor capability from DOCKET_TOKEN, and
+// never touch stdin on a run that holds none.
 //
 // The engine test proves the refusal matrix for every writer; what a CLI
 // test adds is the transport — the token reaches the engine from the
@@ -283,4 +285,109 @@ func TestActivateReturnsTheConductorTokenOnce(t *testing.T) {
 			t.Error("the printed line is not the token the run is bound to")
 		}
 	})
+}
+
+// annotateCmdWithDB builds a `step annotate` command with its real flag names.
+func annotateCmdWithDB(conn *sql.DB, sha string) *cobra.Command {
+	cmd := cmdWithDB(conn)
+	cmd.Flags().String("metadata", "", "")
+	cmd.Flags().String("integrated-sha", sha, "")
+	return cmd
+}
+
+// annotatedEffects is everything `step annotate --integrated-sha` writes: the
+// step's newest issue.diff, its metadata, and the two events it logs.
+type annotatedEffects struct {
+	latestDiff int
+	metadata   string
+	events     int
+}
+
+func readAnnotatedEffects(t *testing.T, conn *sql.DB, stepID int) annotatedEffects {
+	t.Helper()
+	var got annotatedEffects
+	err := conn.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM artifacts WHERE step_id = ? AND kind = ?`,
+		stepID, engine.ArtifactKindIssueDiff).Scan(&got.latestDiff)
+	testsupport.Must(t, err, "reading the latest issue.diff: %v", err)
+	err = conn.QueryRow(`SELECT COALESCE(metadata, '') FROM steps WHERE id = ?`, stepID).Scan(&got.metadata)
+	testsupport.Must(t, err, "reading metadata: %v", err)
+	err = conn.QueryRow(`SELECT COUNT(*) FROM events WHERE step_id = ? AND kind IN (?, ?)`,
+		stepID, engine.EventStepAnnotated, engine.EventIssueDiffRepinned).Scan(&got.events)
+	testsupport.Must(t, err, "counting events: %v", err)
+	return got
+}
+
+// integratedRun is parkedRepinRun with implement@0 finished by an
+// override-pass, so its recorded head (the executor's commit) differs from the
+// commit the shared branch carries for it: the exec root's HEAD, the
+// cherry-picked patch. It returns that commit and the run's conductor token.
+func integratedRun(t *testing.T, conn *sql.DB) (*repinRun, string, string) {
+	t.Helper()
+	r := parkedRepinRun(t, conn)
+	token := envToken(t)
+	cmd := resolveCmdWithDB(conn)
+	testsupport.Must(t, cmd.Flags().Set("as", "override-pass"), "set --as: %v", nil)
+	w, _ := bufWriter(true)
+	err := runStepResolve(cmd, []string{model.FormatStepID(r.implementID)}, w)
+	testsupport.Must(t, err, "finishing implement@0: %v", err)
+	return r, repinGit(t, r.execRoot, "rev-parse", "HEAD"), token
+}
+
+// TestAnnotateIntegratedSHARequiresTheConductor: on a bound run the verb
+// refuses a missing token VALIDATION_ERROR and a wrong one AUTH_ERROR, before
+// anything is written or any git question is asked, and the run's own token
+// re-records issue.diff.
+func TestAnnotateIntegratedSHARequiresTheConductor(t *testing.T) {
+	conn := newTestDB(t)
+	r, integrated, token := integratedRun(t, conn)
+	step := []string{model.FormatStepID(r.implementID)}
+	annotate := func(sha string) error {
+		w, _ := bufWriter(true)
+		return runStepAnnotate(annotateCmdWithDB(conn, sha), step, w)
+	}
+	before := readAnnotatedEffects(t, conn, r.implementID)
+
+	refusals := []struct {
+		name, token, sha string
+		want             output.ErrorCode
+	}{
+		{"no token", "", integrated, output.ErrValidation},
+		{"no token and a sha the branch does not carry", "", strings.Repeat("ab", 20), output.ErrValidation},
+		{"a wrong token", "deadbeef", integrated, output.ErrAuth},
+	}
+	for _, tc := range refusals {
+		t.Setenv(TokenEnvVar, tc.token)
+		assertCmdCode(t, annotate(tc.sha), tc.want, "step annotate --integrated-sha with "+tc.name)
+		if after := readAnnotatedEffects(t, conn, r.implementID); after != before {
+			t.Errorf("%s: the refused annotation wrote %+v -> %+v", tc.name, before, after)
+		}
+	}
+
+	t.Setenv(TokenEnvVar, token)
+	err := annotate(integrated)
+	testsupport.Must(t, err, "step annotate with the run's token: %v", err)
+	after := readAnnotatedEffects(t, conn, r.implementID)
+	if after.latestDiff == before.latestDiff || after.events != before.events+2 ||
+		!strings.Contains(after.metadata, integrated) {
+		t.Errorf("effects %+v -> %+v, want a new issue.diff, two events, and integrated_sha %s",
+			before, after, integrated)
+	}
+}
+
+// TestAnnotateIntegratedSHAOnAnUnboundRunNeedsNoConductor: a run with no
+// capability minted is annotated without a token.
+func TestAnnotateIntegratedSHAOnAnUnboundRunNeedsNoConductor(t *testing.T) {
+	conn := newTestDB(t)
+	r, integrated, _ := integratedRun(t, conn)
+	_, err := conn.Exec(`UPDATE runs SET conductor_token_hash = NULL WHERE id = ?`, r.runID)
+	testsupport.Must(t, err, "unbinding: %v", err)
+	t.Setenv(TokenEnvVar, "")
+	before := readAnnotatedEffects(t, conn, r.implementID)
+
+	w, _ := bufWriter(true)
+	err = runStepAnnotate(annotateCmdWithDB(conn, integrated), []string{model.FormatStepID(r.implementID)}, w)
+	testsupport.Must(t, err, "step annotate on an unbound run: %v", err)
+	if after := readAnnotatedEffects(t, conn, r.implementID); after.latestDiff == before.latestDiff {
+		t.Errorf("effects %+v -> %+v, want a new issue.diff", before, after)
+	}
 }

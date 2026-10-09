@@ -94,14 +94,15 @@ const ResolutionIntegratedSHA = "integrated-sha"
 // and `integrated_sha` (plus any further metadata) is merged onto the step's
 // record — all of it in one transaction after the git questions are answered.
 //
-// It refuses: a malformed sha; a step that is not terminal (a live step's
-// record lands under its holder's token); a step that records no `issue.diff`
-// of its own (nothing downstream reads a re-record of it); a step whose record
-// names no commit (there is no divergence to resolve); an engine with no
-// ancestry seam wired; an unanswerable ancestry question; and a sha that is not
-// an ancestor of the shared checkout's HEAD.
+// It refuses: a malformed sha; a caller that does not present the step's run's
+// conductor capability, when the run is bound to one; a step that is not
+// terminal (a live step's record lands under its holder's token); a step that
+// records no `issue.diff` of its own (nothing downstream reads a re-record of
+// it); a step whose record names no commit (there is no divergence to
+// resolve); an engine with no ancestry seam wired; an unanswerable ancestry
+// question; and a sha that is not an ancestor of the shared checkout's HEAD.
 func (e *Engine) AnnotateIntegration(
-	conn *sql.DB, stepID int, sha, metadata string, by Attribution, nowMS int64,
+	conn *sql.DB, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
 ) (*IntegrationAnnotation, error) {
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if !fullCommitSHA.MatchString(sha) {
@@ -133,6 +134,11 @@ func (e *Engine) AnnotateIntegration(
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return nil, err
+	}
+	// Before any git question, so an unauthorized caller spawns no subprocess
+	// and its refusal does not depend on the shared checkout's state.
+	if err := authorizeConductor(conn, step.RunID, token, "step annotate --integrated-sha"); err != nil {
 		return nil, err
 	}
 	if !db.StepTerminal(step.Status) {
@@ -168,9 +174,8 @@ func (e *Engine) AnnotateIntegration(
 				"commit a recorded one landed as", step.Instance, sha)
 	}
 
-	// The git questions, OUTSIDE any transaction (§6). Ancestry is the whole
-	// authorization: nothing below runs on a sha the shared branch does not
-	// carry.
+	// The git questions, OUTSIDE any transaction (§6). Nothing below runs on a
+	// sha the shared branch does not carry.
 	execRoot := runExecRoot(conn, step.RunID)
 	if e == nil || e.IsAncestorFn == nil {
 		return nil, conflictErr(

@@ -41,7 +41,7 @@ func TestAnnotateIntegrationResolvesCloseAndRecord(t *testing.T) {
 		t.Fatal("premise: the close accepted the unintegrated recorded commit")
 	}
 
-	ann, err := e.AnnotateIntegration(conn, stepID, resolvedSHA, `{"note":"resolved by hand"}`, testBy, nowMS+1)
+	ann, err := e.AnnotateIntegration(conn, stepID, resolvedSHA, `{"note":"resolved by hand"}`, testBy, testConductorToken, nowMS+1)
 	testsupport.Must(t, err, "annotate --integrated-sha: %v", err)
 	if ann.IntegratedSHA != resolvedSHA || ann.ResolvedFrom != "deadbeef00" {
 		t.Errorf("annotation = %+v, want integrated %s resolved from deadbeef00", ann, resolvedSHA)
@@ -130,7 +130,7 @@ func TestAnnotateIntegrationRefusesAnUnverifiedSHA(t *testing.T) {
 	}
 	for _, tc := range cases {
 		e.IsAncestorFn = tc.ancestry
-		_, err := e.AnnotateIntegration(conn, stepID, strangerSHA, "", testBy, nowMS+1)
+		_, err := e.AnnotateIntegration(conn, stepID, strangerSHA, "", testBy, testConductorToken, nowMS+1)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want a refusal naming %q", tc.name, err, tc.want)
 		}
@@ -153,7 +153,7 @@ func TestAnnotateIntegrationValidatesTheSHA(t *testing.T) {
 	e.IsAncestorFn = func(_, _ string) (bool, bool) { return true, true }
 	stepID := stepIDByInstance(t, conn, "implement@0")
 	for _, bad := range []string{"", "deadbeef", "HEAD", strings.Repeat("g", 40)} {
-		if _, err := e.AnnotateIntegration(conn, stepID, bad, "", testBy, nowMS); err == nil ||
+		if _, err := e.AnnotateIntegration(conn, stepID, bad, "", testBy, testConductorToken, nowMS); err == nil ||
 			!strings.Contains(err.Error(), "full 40-hex") {
 			t.Errorf("sha %q: err = %v, want the full-sha validation", bad, err)
 		}
@@ -174,7 +174,7 @@ func TestAnnotateIntegrationRefusesALiveStep(t *testing.T) {
 	stepID := stepIDByInstance(t, conn, "implement@0")
 	claimInstance(t, conn, "implement@0", nowMS)
 
-	_, err = e.AnnotateIntegration(conn, stepID, resolvedSHA, "", testBy, nowMS)
+	_, err = e.AnnotateIntegration(conn, stepID, resolvedSHA, "", testBy, testConductorToken, nowMS)
 	if err == nil || !strings.Contains(err.Error(), "finished step") {
 		t.Errorf("err = %v, want a refusal on the live step", err)
 	}
@@ -197,7 +197,7 @@ func annotationFixture(t *testing.T) (*sql.DB, *Engine, int) {
 func TestAnnotateIntegrationRecordsTheAttribution(t *testing.T) {
 	conn, e, stepID := annotationFixture(t)
 	by := Attribution{Actor: "the conductor", Cwd: "/work/shared"}
-	_, err := e.AnnotateIntegration(conn, stepID, resolvedSHA, "", by, nowMS+1)
+	_, err := e.AnnotateIntegration(conn, stepID, resolvedSHA, "", by, testConductorToken, nowMS+1)
 	testsupport.Must(t, err, "annotate: %v", err)
 
 	page, err := ListEvents(conn, EventQuery{StepID: stepID, Kind: EventStepAnnotated})
@@ -227,7 +227,7 @@ func TestAnnotateIntegrationRefusesAMissingAttribution(t *testing.T) {
 			testsupport.Must(t, conn.QueryRow(`SELECT COALESCE(metadata, '') FROM steps WHERE id = ?`, stepID).
 				Scan(&metaBefore), "reading metadata: %v", nil)
 
-			if _, err := e.AnnotateIntegration(conn, stepID, resolvedSHA, "", by, nowMS+1); err == nil {
+			if _, err := e.AnnotateIntegration(conn, stepID, resolvedSHA, "", by, testConductorToken, nowMS+1); err == nil {
 				t.Fatal("an unattributed annotation was accepted")
 			}
 			after, err := stepLatestIssueDiff(conn, stepID)
