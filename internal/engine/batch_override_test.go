@@ -100,6 +100,9 @@ type exitGates struct {
 	fail   bool
 	exit   int
 	output string
+	// truncated names the gates whose failing capture reports Truncated, the
+	// flag internal/exec sets when output overran the capture cap.
+	truncated map[string]bool
 }
 
 // environmentalFailure is the capture both the granted failure and the
@@ -117,6 +120,7 @@ func (g *exitGates) Run(_ context.Context, spec GateSpec, _ StepContext) (GateRe
 		}
 		return GateResult{
 			Gate: spec.Name, Exit: g.exit, Verdict: VerdictFail, Output: out,
+			Truncated: g.truncated[spec.Name],
 		}, nil
 	}
 	return GateResult{Gate: spec.Name, Exit: 0, Verdict: VerdictPass}, nil
@@ -356,6 +360,135 @@ func TestBatchRefusesAParkWithNoFailedGate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no failed completion gate") {
 		t.Errorf("refusal = %q, want it to say there is nothing to grant from", err)
+	}
+}
+
+// batchTwoGateSrc: one executor step with two completion gates, so a single
+// park carries two failing rows for one batch to grant from.
+const batchTwoGateSrc = `
+[pipeline]
+name = "batch-two-gate"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+executor = "implement"
+emits = "change-summary"
+gates = ["build", "tests"]
+on_fail = "waiting-human"
+`
+
+// TestBatchOverrideRefusesATruncatedRow: a truncated capture is fingerprinted
+// over its head only, so a grant minted from it would cover failures whose
+// differing content fell past the cap. One truncated row refuses the WHOLE
+// batch before anything is written: no grant for either gate, and the step
+// stays parked with its routing untouched.
+func TestBatchOverrideRefusesATruncatedRow(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedBatchRun(t, conn, batchTwoGateSrc, "batch-two-gate.toml")
+
+	gates := &exitGates{fail: true, exit: 1, truncated: map[string]bool{"tests": true}}
+	e := testEngine()
+	e.Gates = gates
+
+	implementID := stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, implementID)
+
+	rows, err := db.GateResultsForStep(conn, implementID)
+	testsupport.Must(t, err, "reading gate rows: %v", err)
+	failing := failingCompletionRows(rows)
+	if len(failing) != 2 {
+		t.Fatalf("premise: %d failing completion rows, want 2 (build, tests)", len(failing))
+	}
+	for _, r := range failing {
+		if want := r.Gate == "tests"; r.Truncated != want {
+			t.Fatalf("premise: gate %q Truncated = %v, want %v", r.Gate, r.Truncated, want)
+		}
+	}
+	routingBefore := stepRoutingByID(t, conn, implementID)
+
+	err = e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact", nowMS+1)
+	if err == nil {
+		t.Fatal("--batch over a truncated failing row was accepted")
+	}
+	if code, _ := CodeOf(err); code != CodeValidation {
+		t.Errorf("refusal code = %q, want %q (%v)", code, CodeValidation, err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, `"tests"`) || !strings.Contains(msg, "truncated") {
+		t.Errorf("refusal = %q, want it to name gate \"tests\" and its truncated capture", msg)
+	}
+
+	var grantsFromStep int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM gate_override_grants WHERE origin_step_id = ?`,
+		implementID).Scan(&grantsFromStep)
+	testsupport.Must(t, err, "counting grants: %v", err)
+	if grantsFromStep != 0 {
+		t.Errorf("grants with origin %d = %d, want 0 for every gate in the batch",
+			implementID, grantsFromStep)
+	}
+	if got := eventKindCount(t, conn, runID, EventStepResolved); got != 0 {
+		t.Errorf("%s events = %d, want 0: the resolution must not be recorded",
+			EventStepResolved, got)
+	}
+	step, err := db.GetStep(conn, implementID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepWaitingHuman {
+		t.Errorf("status = %q after the refusal, want %q", step.Status, db.StepWaitingHuman)
+	}
+	if got := stepRoutingByID(t, conn, implementID); got != routingBefore {
+		t.Errorf("routing = %q after the refusal, want it unchanged from %q", got, routingBefore)
+	}
+}
+
+// TestBatchOverrideMintsOneGrantPerUntruncatedFailingGate: with no truncated
+// row the batch mints exactly one grant per failing gate, each carrying its
+// origin row's fingerprint verbatim.
+func TestBatchOverrideMintsOneGrantPerUntruncatedFailingGate(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedBatchRun(t, conn, batchTwoGateSrc, "batch-two-gate.toml")
+
+	gates := &exitGates{fail: true, exit: 1}
+	e := testEngine()
+	e.Gates = gates
+
+	implementID := stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, implementID)
+
+	rows, err := db.GateResultsForStep(conn, implementID)
+	testsupport.Must(t, err, "reading gate rows: %v", err)
+	originFingerprint := make(map[string]string)
+	for _, r := range failingCompletionRows(rows) {
+		originFingerprint[r.Gate] = r.Fingerprint
+	}
+	if len(originFingerprint) != 2 {
+		t.Fatalf("premise: failing gates = %v, want build and tests", originFingerprint)
+	}
+
+	err = e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact", nowMS+1)
+	testsupport.Must(t, err, "batch resolve: %v", err)
+
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 2 {
+		t.Fatalf("grants = %d, want 2 (one per failing gate)", len(grants))
+	}
+	seen := make(map[string]bool)
+	for _, g := range grants {
+		want, ok := originFingerprint[g.Gate]
+		if !ok || seen[g.Gate] {
+			t.Errorf("grant for gate %q: unexpected or duplicate", g.Gate)
+			continue
+		}
+		seen[g.Gate] = true
+		if want == "" || g.Fingerprint != want {
+			t.Errorf("grant %q fingerprint = %q, want origin row's %q", g.Gate, g.Fingerprint, want)
+		}
 	}
 }
 

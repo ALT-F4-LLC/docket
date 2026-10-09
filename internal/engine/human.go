@@ -720,6 +720,17 @@ func (e *Engine) resolveStep(
 						"it could never match a later failure; resolve the step "+
 						"without --batch", step.Instance, r.Gate, r.Ordinal)
 			}
+			// A truncated capture is fingerprinted over its head only, so a
+			// grant minted from it would also cover failures that differ past
+			// the cap, content the operator never read.
+			if r.Truncated {
+				return validationErr(
+					"step %s: gate %q (row %d) capture was truncated at the "+
+						"capture cap, so its fingerprint covers only the head of "+
+						"the output and a --batch grant could cover failures "+
+						"nobody read; no grant was minted for any gate. Resolve "+
+						"the step without --batch", step.Instance, r.Gate, r.Ordinal)
+			}
 		}
 	}
 

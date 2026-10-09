@@ -839,6 +839,17 @@ binds to the content the operator read. Both ledger edges name the signature:
 fingerprint appended after a space so the id list each payload already carried
 is byte-identical to what a reader splitting on `#` or `,` saw before.
 
+**The fingerprint covers the stored capture, not the whole stream.**
+`internal/exec` keeps only the first `CaptureCap` bytes of a gate's output and
+sets the row's `truncated` flag when it dropped the rest, so a truncated row's
+fingerprint names its head alone. Two failures that differ only past the cap
+share a fingerprint. `step resolve --as override-pass --batch` therefore
+refuses the WHOLE batch with a `VALIDATION_ERROR` naming the gate when ANY
+failing completion row on the step is truncated. The refusal fires before the
+resolution's transaction opens, so it mints no grant for any gate in the batch
+and records no resolution: the step stays parked, and the operator resolves it
+without `--batch`. That ruling decides only this step.
+
 **The normalization rules**, applied in this order before the SHA-256, and
 nothing else:
 
@@ -878,8 +889,11 @@ the run. A grant now covers the failure the operator actually read.
 **Known limit.** The fingerprint narrows the authority; it does not
 authenticate the content. A worker authors the code whose gate output it is, so
 output crafted to normalize to a granted failure's form would match — the
-control's answer to that is detective, not preventive: the covered row's full
-capture stays stored, and both ledger edges name the signature spent.
+control's answer to that is detective, not preventive: the covered row's
+stored capture stays readable, and both ledger edges name the signature spent.
+A COVERED row can itself be truncated, since the refusal above applies at mint
+and not at match; its stored capture then holds only the head, and the row's
+`truncated` flag is the signal that the failure may lie past it.
 
 **Why the ratified arithmetic is untouched.** Like v11–v29, v30 is an
 amendment, not a stage: two additive columns with a default, `hasColumn`-probed
