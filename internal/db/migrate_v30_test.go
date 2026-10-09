@@ -4,7 +4,7 @@ import "testing"
 
 // TestV30AddsFingerprintColumnsAndBackfillsNothing: v30 adds the failure-content
 // fingerprint to `gate_results` and `gate_override_grants` (DKT-1796). Both are
-// TEXT NOT NULL DEFAULT ” and the migration back-fills nothing — the
+// TEXT NOT NULL with an empty-string default, and the migration back-fills nothing — the
 // fingerprint is a function of a normalization this binary defines, and
 // stamping an older capture with today's rules would assert an identity the
 // engine never computed.

@@ -2543,7 +2543,7 @@ func migrateV28ToV29(tx *sql.Tx) error {
 // (engine.GateFingerprint), so the grant covers the failure CONTENT the
 // operator read.
 //
-// Both columns are TEXT NOT NULL DEFAULT ” and empty means PRE-v30 and
+// Both columns are TEXT NOT NULL with an empty-string default, and empty means PRE-v30 and
 // nothing else: a row recorded at v30 or later always carries a fingerprint,
 // since a gate that printed nothing hashes the empty capture. On the grant
 // side the blank is fail-closed — a pre-v30 grant vouches for no content, so
