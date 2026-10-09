@@ -184,6 +184,46 @@ func TestOnChangeFailureWritesNothing(t *testing.T) {
 	}
 }
 
+// TestTrustAddRecordsBeforeAFailedPublish pins the add path's half of the
+// record-before-publish order: when the store publish fails, the grant has
+// already been recorded, the add fails loudly, and the store is unchanged. The
+// event log then over-reports authority, which is the tolerated direction; an
+// add that recorded nothing here would mean the record had moved after the
+// publish, where a failed record could leave an unrecorded grant.
+func TestTrustAddRecordsBeforeAFailedPublish(t *testing.T) {
+	path := sandbox(t)
+	repo := t.TempDir()
+
+	_, err := addAt(path, AddRequest{
+		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
+	})
+	testsupport.Must(t, err, "seeding addAt: %v", err)
+
+	sealStoreDir(t, path)
+
+	lintArgv := []string{"make", "lint"}
+	var recorded []Entry
+	_, err = addAt(path, AddRequest{
+		Name: "lint", Argv: lintArgv, RepoRoot: repo,
+		OnChange: func(e Entry) error { recorded = append(recorded, e); return nil },
+	})
+	if err == nil {
+		t.Fatal("an add whose publish cannot land must fail")
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("the grant was recorded %d time(s), want exactly 1 before the failed publish", len(recorded))
+	}
+	if recorded[0].Name != "lint" || recorded[0].ArgvSHA256 != ArgvSHA256(lintArgv) {
+		t.Errorf("the hook must receive the entry being added; got %+v", recorded[0])
+	}
+
+	st, err := loadAt(path)
+	testsupport.Must(t, err, "loadAt: %v", err)
+	if len(st.Entries) != 1 || st.Entries[0].Name != "checks" {
+		t.Errorf("a failed publish must leave the store untouched; got %+v", st.Entries)
+	}
+}
+
 // TestOnChangeIsNotCalledWhenNothingChanges pins the idempotence row's other
 // consequence: a re-add of an identical entry writes nothing, so there is
 // nothing to record. A record that fired here would prove neither novelty nor
