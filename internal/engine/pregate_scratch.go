@@ -239,7 +239,12 @@ func removeScratchTree(parent, dir string) {
 // Best-effort throughout. A removal that fails leaves the entry for the next
 // sweep and for doctor to report; nothing here can fail the dispatch, because
 // housekeeping must not stand between an operator and a manifest.
+//
+// Legacy caches are swept first and independently of execRoot; see
+// sweepLegacyPreGateCaches. They are not part of the returned list, which
+// names registered scratch trees only.
 func sweepStalePreGateScratch(execRoot string) []string {
+	sweepLegacyPreGateCaches()
 	if execRoot == "" {
 		return nil
 	}
@@ -272,6 +277,32 @@ func sweepStalePreGateScratch(execRoot string) []string {
 		_ = exec.Command("git", gitDirArgs(execRoot, "worktree", "prune")...).Run()
 	}
 	return swept
+}
+
+// legacyCachePrefix names the cache roots an earlier binary created with
+// os.MkdirTemp("", "docket-pregate-cache-*"), before caches were named after
+// their tree.
+const legacyCachePrefix = "docket-pregate-cache-"
+
+// sweepLegacyPreGateCaches removes every legacy cache directory directly in
+// os.TempDir().
+//
+// No tree derives these names, so the flock rule cannot reach them, and none
+// is current: the binary that wrote them had no liveness lock and this one
+// never creates the name. A current tree is docket-pregate-<digits> and its
+// cache docket-pregate-<digits>-cache, so the prefix cannot match either.
+// Best-effort, like the sweep that calls it.
+func sweepLegacyPreGateCaches() {
+	tmp := os.TempDir()
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), legacyCachePrefix) {
+			_ = os.RemoveAll(filepath.Join(tmp, entry.Name()))
+		}
+	}
 }
 
 // probeScratchLock reports whether a scratch tree's claim is still alive, and

@@ -150,3 +150,51 @@ func TestReleaseRemovesTheSidecarLock(t *testing.T) {
 		t.Errorf("release() left the tree registered: %v", got)
 	}
 }
+
+// TestLegacyPreGateCachesAreSweptAtDispatchOpen covers caches left by the
+// binary that predates tree-named caches: they were created as
+// os.MkdirTemp("", "docket-pregate-cache-*") and no tree derives their name,
+// so dispatch open removes them by name. Everything else in the temp dir
+// stays, including the cache of a scratch tree whose claim is still alive.
+func TestLegacyPreGateCachesAreSweptAtDispatchOpen(t *testing.T) {
+	tmp := t.TempDir()
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	repoRoot := t.TempDir()
+	sha := seedGitRepo(t, repoRoot, "measured.txt", "under review")
+	setRunExecRoot(t, conn, run.ID, repoRoot)
+	t.Setenv("TMPDIR", tmp)
+
+	legacy := filepath.Join(tmp, "docket-pregate-cache-legacy")
+	err := os.MkdirAll(filepath.Join(legacy, "golangci-lint"), 0o700)
+	testsupport.Must(t, err, "seeding the legacy cache: %v", err)
+	err = os.WriteFile(filepath.Join(legacy, "golangci-lint", "entry"), []byte("stale"), 0o600)
+	testsupport.Must(t, err, "seeding the legacy cache entry: %v", err)
+	unrelated := filepath.Join(tmp, "other-cache-x")
+	err = os.Mkdir(unrelated, 0o700)
+	testsupport.Must(t, err, "seeding the unrelated directory: %v", err)
+
+	// The live tree is reconstructed under the same TMPDIR, so its
+	// current-format cache sits beside the legacy one, and its lock stays
+	// held by this test for the whole sweep.
+	live := reconstructTarget(conn, run.ID, sha)
+	if live.Dir == "" || live.Cache == "" || live.lock == nil {
+		t.Fatalf("reconstruction did not produce a locked scratch tree: %+v", live)
+	}
+	t.Cleanup(live.release)
+	if filepath.Dir(live.Cache) != tmp {
+		t.Fatalf("live cache %s is not beside the legacy cache in %s", live.Cache, tmp)
+	}
+
+	_, err = NewEngine().OpenDispatch(conn, run.ID, 10, nil, nowMS)
+	testsupport.Must(t, err, "OpenDispatch: %v", err)
+
+	if exists(legacy) {
+		t.Errorf("legacy cache %s survived dispatch open", legacy)
+	}
+	for _, p := range []string{live.Dir, live.Cache, unrelated} {
+		if !exists(p) {
+			t.Errorf("%s was removed by the legacy cache sweep", p)
+		}
+	}
+}
