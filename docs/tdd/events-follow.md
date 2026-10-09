@@ -114,7 +114,7 @@ migration at all, and `TestSchemaVersionIsUnchangedAtS7` asserts
 
 | # | Clause |
 |---|---|
-| D1 | `events prune` is a verb nobody is obliged to run. Docket still deletes nothing on its own — there is no automatic retention sweep, no prune inside `next`, no compaction at `run done`. The retention *config key* exists and defaults to **0, meaning "retain everything"**, which is the posture operations.md §2 already documents |
+| D1 | `events prune` is a verb nobody is obliged to run. Docket still deletes nothing on its own — there is no automatic retention sweep, no prune inside `next`, no compaction at `run done`. The retention *config key* exists and defaults to **0, which imposes no retention window**: prune at 0 is bounded only by `--before` or `--before-run` and the live-run refusal. Docket deletes nothing it was not asked to delete, the posture operations.md §2 documents |
 | D2 | `--follow` is a flag on a read verb. Without it, `events list` is byte-identical to S6's, which `TestEventsListIsUnchangedByFollow` asserts by diffing the same call before and after |
 | D3 | `run budget --set` is a new sub-verb. `run start --budget` is untouched, and a run nobody re-caps has the same `budget` column value it always had |
 | D4 | The dormancy sweep runs against **engine-s6** and must show ZERO diffs on every existing verb's output — the standing check each stage has carried |
@@ -219,7 +219,7 @@ refusal is protecting arithmetic, not sentiment.
 | # | Clause |
 |---|---|
 | P12 | The boundary is a **config key: `events.retain`** — a duration. Events younger than it are never pruned, whatever `--before` says |
-| P13 | Default **`0`, meaning retain everything**, which makes prune a verb that refuses everything until an operator states a policy. That is the dormant posture D1 requires and the one operations.md §2 documents |
+| P13 | Default **`0`, which imposes no retention window**, so prune at 0 is bounded only by `--before` or `--before-run` and the live-run refusal, not by age. Nothing is deleted until an operator runs prune with a target. That is the dormant posture D1 requires and the one operations.md §2 documents |
 | P14 | A `--before` that would cross the boundary is **clamped and reported**, not silently truncated: the answer names how many rows the boundary held back |
 | P15 | `--before-run` on a terminal run is **not** clamped by the boundary. A run that is done and whose artifacts an operator is discarding wholesale is the case §3's boundary is not about |
 
