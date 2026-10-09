@@ -61,7 +61,10 @@ type GuardVerdict struct {
 //     the RUN ITSELF is `waiting-human` (paused), does not block on its own
 //     (DKT-1845): a paused run is the run-level version of the same
 //     wait-on-a-person exemption a `waiting-human` STEP already gets, and a
-//     step that never started is not work a stop interferes with. Any other
+//     step that never started is not work a stop interferes with. The same
+//     holds for a step held because its ISSUE is parked on a person (R2b):
+//     R2b precedes R3, so a parked step's successors report the park rather
+//     than their unfinished predecessor. Any other
 //     unreadiness — headroom, a budget stop, an unacknowledged reap — still
 //     blocks, since those name work or acknowledgment the session owes before
 //     stopping. (A held cluster awaiting ONE OPERATOR still denies: the
@@ -200,7 +203,7 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 			ready, cond := sched.Ready(step)
 			blocked = ready ||
 				(cond != CondPredecessors && cond != CondIssueDeps &&
-					cond != CondRunActive)
+					cond != CondRunActive && cond != CondIssueParked)
 		}
 		if blocked {
 			out = append(out, step.Instance+" ("+step.Status+")")
