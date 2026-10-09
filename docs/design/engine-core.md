@@ -289,7 +289,15 @@ Budget and control inputs are core-owned (engine-spec §11): per-step `expected_
 in workflow definitions, the per-run cap (`docket run start --budget`,
 `docket config` default), attempt caps (step fields, config defaults), and
 concurrency + lease TTLs per executor class (`[limits]`). The instance's `policy.toml`
-carries only dispatcher-side spawn routing — the engine never reads it.
+carries spawn routing, and the engine reads it. Activation pins its bytes by content
+hash like any other config file. When a run pins one, the engine reads that file
+whenever it renders a step row that needs routing, such as a `next` row, and
+refuses with a CONFLICT if its bytes no longer match the hash recorded at
+activation. From it the engine resolves each executor
+row's `{model, effort, variant}` and each vote row's seat assignments. A variant that
+`[sizes]` maps from the issue's size label replaces the `[executors]` starting variant
+(internal/engine/policy_resolve.go `sizeVariant`). A run that pins no `policy.toml`
+leaves those fields absent.
 
 Usage is recorded per step (executors attach what they observe; the reference harness
 back-fills from its dispatch journal, source recorded), but the cap does not rest on

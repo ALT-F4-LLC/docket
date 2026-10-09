@@ -1971,6 +1971,12 @@ otherwise be resolved silently by whoever implements first.
   need an owner and a reset policy, neither of which the spec defines.
 - **No event compaction, retention enforcement, or `--follow`.** S7's, all
   three.
-- **No `policy.toml` interpretation.** It is pinned as bytes (F4) and never
-  parsed. engine-core §7: "The instance's `policy.toml` carries only
-  dispatcher-side spawn routing — the engine never reads it."
+- **No `policy.toml` interpretation at activation.** Activation pins it as
+  bytes (F4) and does not parse it. The engine reads it later, for routing
+  (engine-core §7): whenever it renders a step row that needs routing,
+  such as a `next` row, it reads the pinned file, refuses with a CONFLICT
+  if the bytes no longer match the hash recorded at activation, and
+  resolves each executor row's
+  `{model, effort, variant}` and each vote row's seat assignments. A variant
+  that `[sizes]` maps from the issue's size label replaces the `[executors]`
+  starting variant.
