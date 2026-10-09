@@ -347,6 +347,11 @@ func measurePreGate(
 		// pointing at a file that is gone.
 		CacheRoot: m.scratch.Cache,
 		Deadline:  m.deadline,
+		// The completion gates' resolution applied to the measured tree: a
+		// live worktree's fork point, or for a reconstruction (detached at
+		// the target sha) the merge-base of that sha and the shared head.
+		// Unset for the shared checkout and for a tree with no merge-base.
+		Base: gateBaseSHA(conn, step.RunID, m.workRoot),
 	}
 
 	var rows []GateResultRow

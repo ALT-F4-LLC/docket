@@ -905,3 +905,134 @@ func TestFlakyReRunClearsAnEarlierSkip(t *testing.T) {
 			"superseded by a real measurement", unmeasured)
 	}
 }
+
+// Pre-gates learn the base of the tree they measure through DOCKET_GATE_BASE,
+// exactly as completion gates do: a range-shaped pre-gate (copy-verify under
+// ac-commands) otherwise examines an empty range. The witness is the child's
+// own environment — the gate is `printenv DOCKET_GATE_BASE`, so a pass with
+// the expected sha proves the variable arrived, and printenv's exit 1 with no
+// output proves it was absent rather than empty.
+
+// runGateBasePreGate drives the fixture's ac-commands pre-gate as printenv
+// against the given target, with the run's exec root and pinned commit set,
+// and returns the one result.
+func runGateBasePreGate(
+	t *testing.T, execRoot, pinned, targetSHA, workRoot string,
+) PreGateResult {
+	t.Helper()
+	printenvPath, err := exec.LookPath("printenv")
+	if err != nil {
+		t.Skip("printenv is not installed")
+	}
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	argv := []string{printenvPath, "DOCKET_GATE_BASE"}
+	runner := NewExecRunner(testRepoPaths(execRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Global: true,
+	})
+	e := testEngine()
+	e.Gates = runner
+
+	step := preGateStep(t, conn, e)
+	setRunExecRoot(t, conn, step.RunID, execRoot)
+	_, err = conn.Exec(`UPDATE runs SET commit_sha = ? WHERE id = ?`, pinned, step.RunID)
+	testsupport.Must(t, err, "pinning the run's commit: %v", err)
+
+	got, err := runPreGates(conn, e, step,
+		[]workflow.Gate{{Name: "ac-commands", Pre: true}}, targetSHA, workRoot, nowMS)
+	testsupport.Must(t, err, "runPreGates: %v", err)
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1", len(got))
+	}
+	return got[0]
+}
+
+func wantGateBase(t *testing.T, r PreGateResult, want string) {
+	t.Helper()
+	if r.Verdict != VerdictPass {
+		t.Fatalf("verdict = %q (output %q, reason %q), want %q — printenv found "+
+			"no DOCKET_GATE_BASE in the pre-gate's environment",
+			r.Verdict, r.Output, r.Reason, VerdictPass)
+	}
+	if got := strings.TrimSpace(r.Output); got != want {
+		t.Errorf("the pre-gate saw DOCKET_GATE_BASE=%q, want %q", got, want)
+	}
+}
+
+func wantNoGateBase(t *testing.T, r PreGateResult) {
+	t.Helper()
+	if got := strings.TrimSpace(r.Output); got != "" {
+		t.Errorf("the pre-gate saw DOCKET_GATE_BASE=%q, want the variable unset", got)
+	}
+	if r.Verdict != VerdictFail {
+		t.Errorf("verdict = %q, want %q — printenv exits 1 only when the "+
+			"variable is genuinely unset", r.Verdict, VerdictFail)
+	}
+}
+
+// TestPreGateExportsGateBase: a pre-gate bound to a live worktree distinct from
+// the exec root sees that worktree's fork point — not its HEAD, not the shared
+// checkout's later head, and not the pinned run commit.
+func TestPreGateExportsGateBase(t *testing.T) {
+	shared := t.TempDir()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	gitRun(t, shared, "init", "-q")
+	gitRun(t, shared, "commit", "--allow-empty", "-q", "-m", "fork point")
+	fork := gitRun(t, shared, "rev-parse", "HEAD")
+	worktree := filepath.Join(t.TempDir(), "wt")
+	gitRun(t, shared, "worktree", "add", "-q", worktree)
+	gitRun(t, worktree, "commit", "--allow-empty", "-q", "-m", "step work")
+	workHead := gitRun(t, worktree, "rev-parse", "HEAD")
+	gitRun(t, shared, "commit", "--allow-empty", "-q", "-m", "sibling work")
+	sharedHead := gitRun(t, shared, "rev-parse", "HEAD")
+
+	r := runGateBasePreGate(t, shared, sharedHead, workHead, worktree)
+	wantGateBase(t, r, fork)
+}
+
+// TestPreGateGateBaseReconstructed: a pre-gate measuring a reconstruction of a
+// target sha sees the merge-base of that sha and the shared checkout head.
+func TestPreGateGateBaseReconstructed(t *testing.T) {
+	shared := t.TempDir()
+	seedGitRepo(t, shared, "measured.txt", "under review")
+	fork := gitRun(t, shared, "rev-parse", "HEAD")
+	target := gitRun(t, shared, "commit-tree", "HEAD^{tree}", "-p", fork, "-m", "target")
+	gitRun(t, shared, "commit", "--allow-empty", "-q", "-m", "sibling work")
+	pinned := gitRun(t, shared, "rev-parse", "HEAD")
+
+	r := runGateBasePreGate(t, shared, pinned, target, filepath.Join(t.TempDir(), "gone"))
+	if !strings.Contains(r.Reason, "reconstruction") {
+		t.Fatalf("the pre-gate did not measure a reconstruction: %q", r.Reason)
+	}
+	wantGateBase(t, r, fork)
+}
+
+// TestPreGateGateBaseReconstructedUnresolvable: a reconstructed target that
+// shares no history with the shared checkout has no fork point, so the
+// variable is absent — never empty and never the pinned run commit.
+func TestPreGateGateBaseReconstructedUnresolvable(t *testing.T) {
+	shared := t.TempDir()
+	pinned := seedGitRepo(t, shared, "measured.txt", "under review")
+	orphan := gitRun(t, shared, "commit-tree", "HEAD^{tree}", "-m", "orphan")
+
+	r := runGateBasePreGate(t, shared, pinned, orphan, filepath.Join(t.TempDir(), "gone"))
+	if !strings.Contains(r.Reason, "reconstruction") {
+		t.Fatalf("the pre-gate did not measure a reconstruction: %q", r.Reason)
+	}
+	wantNoGateBase(t, r)
+}
+
+// TestPreGateGateBaseAbsentWithoutTarget: with nothing under review the
+// pre-gate measures the shared checkout, which has no fork point to export.
+func TestPreGateGateBaseAbsentWithoutTarget(t *testing.T) {
+	shared := t.TempDir()
+	pinned := seedGitRepo(t, shared, "measured.txt", "shared")
+
+	r := runGateBasePreGate(t, shared, pinned, "", "")
+	wantNoGateBase(t, r)
+}
