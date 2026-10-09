@@ -54,6 +54,7 @@ func issueFilesCheckout(t *testing.T) string {
 	} {
 		c := exec.Command("git", cmd...)
 		c.Dir = root
+		c.Env = gitEnv()
 		out, err := c.CombinedOutput()
 		testsupport.Must(t, err, "git %v: %v\n%s", cmd, err, out)
 	}
@@ -72,10 +73,31 @@ func issueFilesCheckout(t *testing.T) string {
 	} {
 		c := exec.Command("git", cmd...)
 		c.Dir = root
+		c.Env = gitEnv()
 		out, err := c.CombinedOutput()
 		testsupport.Must(t, err, "git %v: %v\n%s", cmd, err, out)
 	}
 	return root
+}
+
+// TestIssueFilesCheckoutIgnoresOperatorGitConfig pins the helper's hermetic
+// git environment: a global config that demands commit signing through a
+// failing program must not reach the helper's commit.
+func TestIssueFilesCheckoutIgnoresOperatorGitConfig(t *testing.T) {
+	home := t.TempDir()
+	gitconfig := "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n"
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(gitconfig), 0o644); err != nil {
+		t.Fatalf("writing .gitconfig: %v", err)
+	}
+	t.Setenv("HOME", home)
+	for _, key := range []string{"GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, "") // registers the restore
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unsetting %s: %v", key, err)
+		}
+	}
+
+	issueFilesCheckout(t)
 }
 
 // issueFilesFixture is the attachment set: one committed path and two loose
