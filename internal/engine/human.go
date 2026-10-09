@@ -708,6 +708,19 @@ func (e *Engine) resolveStep(
 					"records the parked step's failing gate signature(s), and "+
 					"this park was not caused by one", step.Instance)
 		}
+		// Only a row recorded before v30 lacks a fingerprint (recordGateRows
+		// stamps every later one), and grantMatches spends no grant without
+		// one. Refusing the whole batch keeps the ruling from covering less
+		// than the operator read.
+		for _, r := range grantRows {
+			if r.Fingerprint == "" {
+				return validationErr(
+					"step %s: gate %q (row %d) was recorded before the v30 "+
+						"fingerprint migration, so a --batch grant minted from "+
+						"it could never match a later failure; resolve the step "+
+						"without --batch", step.Instance, r.Gate, r.Ordinal)
+			}
+		}
 	}
 
 	// THE RE-PIN IS COMPUTED HERE, LAST BEFORE THE TRANSACTION (DKT-1034): it

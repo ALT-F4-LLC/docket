@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
@@ -163,6 +164,115 @@ func TestGrantRequiresFingerprintMatch(t *testing.T) {
 				"two blanks are not a matching signature")
 		}
 	})
+}
+
+// parkOnPreV30Row parks implement@0 through a failing gate, then blanks the
+// row's fingerprint the way migrateV29ToV30 leaves a row recorded before the
+// upgrade: a step that was already parked when the operator upgraded.
+func parkOnPreV30Row(t *testing.T) (conn *sql.DB, e *Engine, runID, stepID int) {
+	t.Helper()
+	conn = mustDB(t)
+	runID = activatedBatchRun(t, conn, batchOverrideSrc, "batch-override.toml")
+	e = testEngine()
+	e.Gates = &exitGates{fail: true, exit: 1}
+	stepID = stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, stepID)
+
+	res, err := conn.Exec(
+		`UPDATE gate_results SET fingerprint = '' WHERE step_id = ?`, stepID)
+	testsupport.Must(t, err, "blanking the fingerprint: %v", err)
+	if n, _ := res.RowsAffected(); n == 0 {
+		t.Fatal("premise: the park recorded no gate row to blank")
+	}
+	return conn, e, runID, stepID
+}
+
+// TestBatchOverrideRefusesAnEmptyFingerprintRow: a --batch ruling on a row
+// recorded before v30 would mint a grant grantMatches can never spend, a
+// standing ruling in the ledger that covers nothing. The mint refuses instead,
+// naming the cause and the resolve that still works, and records nothing.
+func TestBatchOverrideRefusesAnEmptyFingerprintRow(t *testing.T) {
+	conn, e, runID, implementID := parkOnPreV30Row(t)
+
+	err := e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact, not a code defect", nowMS+1)
+	if err == nil {
+		t.Fatal("--batch on a pre-v30 gate row was accepted")
+	}
+	assertCode(t, err, CodeValidation)
+	msg := err.Error()
+	for _, want := range []string{"build", "before the v30 fingerprint migration", "without --batch"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal = %q, want it to contain %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "no failed completion gate") {
+		t.Errorf("refusal = %q reads as the no-failed-gate refusal; the "+
+			"operator must learn the row predates fingerprints", msg)
+	}
+
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 0 {
+		t.Errorf("grants = %d, want 0 — a refused batch mints nothing", len(grants))
+	}
+	if got := eventKindCount(t, conn, runID, EventGateOverrideGranted); got != 0 {
+		t.Errorf("%s events = %d, want 0", EventGateOverrideGranted, got)
+	}
+	if got := eventKindCount(t, conn, runID, EventStepResolved); got != 0 {
+		t.Errorf("%s events = %d, want 0 — a refused batch resolves nothing",
+			EventStepResolved, got)
+	}
+	step, err := db.GetStep(conn, implementID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepWaitingHuman {
+		t.Errorf("implement@0 = %q, want it still %q", step.Status, db.StepWaitingHuman)
+	}
+}
+
+// TestBatchOverrideMintsOffFingerprintedRows: the refusal is keyed on the
+// empty fingerprint, not on --batch. A park whose failing row carries one
+// mints its grant and resolves exactly as before.
+func TestBatchOverrideMintsOffFingerprintedRows(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedBatchRun(t, conn, batchOverrideSrc, "batch-override.toml")
+	e := testEngine()
+	e.Gates = &exitGates{fail: true, exit: 1}
+	implementID := stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, implementID)
+
+	err := e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact, not a code defect", nowMS+1)
+	testsupport.Must(t, err, "resolve --as override-pass --batch: %v", err)
+
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 1 || grants[0].Fingerprint == "" {
+		t.Errorf("grants = %+v, want one carrying a fingerprint", grants)
+	}
+	if got := eventKindCount(t, conn, runID, EventStepResolved); got != 1 {
+		t.Errorf("%s events = %d, want 1", EventStepResolved, got)
+	}
+}
+
+// TestSingleOverrideResolvesAPreV30Row: the refusal is --batch's alone. A
+// single override-pass mints no grant, so a pre-v30 row costs it nothing, and
+// it is the route the batch refusal points the operator to.
+func TestSingleOverrideResolvesAPreV30Row(t *testing.T) {
+	conn, e, runID, implementID := parkOnPreV30Row(t)
+
+	err := e.ResolveStep(conn, implementID, ResolveOverridePass,
+		"sandbox artifact, not a code defect", nowMS+1)
+	testsupport.Must(t, err, "resolve --as override-pass: %v", err)
+
+	if got := eventKindCount(t, conn, runID, EventStepResolved); got != 1 {
+		t.Errorf("%s events = %d, want 1", EventStepResolved, got)
+	}
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 0 {
+		t.Errorf("grants = %d, want 0 — a single resolve mints no grant", len(grants))
+	}
 }
 
 func intPtr(v int) *int { return &v }
