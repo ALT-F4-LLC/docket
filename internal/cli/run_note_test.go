@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -174,6 +175,123 @@ func TestRunNoteAddCLIMapsEngineCodes(t *testing.T) {
 	if !asCmdErr(err, &ce) || ce.Code != output.ErrValidation {
 		t.Errorf("blank note: err = %v, want VALIDATION_ERROR", err)
 	}
+}
+
+// runNoteWrites counts a run's note rows and run-note-added events, the two
+// writes a refused `run note add` must leave untouched.
+func runNoteWrites(t *testing.T, conn *sql.DB, runID int) (notes, events int) {
+	t.Helper()
+	err := conn.QueryRow(`SELECT COUNT(*) FROM run_notes WHERE run_id = ?`, runID).Scan(&notes)
+	testsupport.Must(t, err, "counting notes: %v", err)
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE run_id = ? AND kind = 'run-note-added'`, runID,
+	).Scan(&events)
+	testsupport.Must(t, err, "counting events: %v", err)
+	return notes, events
+}
+
+// TestRunNoteAddCLIRequiresTheConductorCapability: on a bound run the verb
+// reads the capability from DOCKET_TOKEN and refuses without it or with any
+// other token, writing nothing; an unbound run needs none.
+func TestRunNoteAddCLIRequiresTheConductorCapability(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	runRef := model.FormatRunID(runID)
+	capability := seatConductor(t, conn, runID)
+
+	addNote := func() error {
+		cmd := runNoteCmdWithDB(conn)
+		testsupport.Must(t, cmd.Flags().Set("text", "a ruling"), "setting --text: %v", nil)
+		w, _ := bufWriter(true)
+		return runRunNoteAdd(cmd, runRef, w)
+	}
+	refused := func(name string, want output.ErrorCode) {
+		t.Helper()
+		notesBefore, eventsBefore := runNoteWrites(t, conn, runID)
+		assertCmdCode(t, addNote(), want, name)
+		notesAfter, eventsAfter := runNoteWrites(t, conn, runID)
+		if notesAfter != notesBefore || eventsAfter != eventsBefore {
+			t.Errorf("%s wrote: notes %d -> %d, events %d -> %d",
+				name, notesBefore, notesAfter, eventsBefore, eventsAfter)
+		}
+	}
+
+	withStdin(t, "")
+	t.Setenv(TokenEnvVar, "")
+	refused("no token", output.ErrValidation)
+	t.Setenv(TokenEnvVar, "deadbeef")
+	refused("a wrong token", output.ErrAuth)
+
+	t.Setenv(TokenEnvVar, capability)
+	testsupport.Must(t, addNote(), "run note add with the capability: %v", nil)
+	if notes, events := runNoteWrites(t, conn, runID); notes != 1 || events != 1 {
+		t.Errorf("notes = %d, events = %d after the authorized add; want 1 and 1", notes, events)
+	}
+
+	t.Run("an unbound run", func(t *testing.T) {
+		unbound, _ := seedRun(t, conn)
+		t.Setenv(TokenEnvVar, "")
+		cmd := runNoteCmdWithDB(conn)
+		testsupport.Must(t, cmd.Flags().Set("text", "a ruling"), "setting --text: %v", nil)
+		w, _ := bufWriter(true)
+		err := runRunNoteAdd(cmd, model.FormatRunID(unbound), w)
+		testsupport.Must(t, err, "run note add on an unbound run: %v", err)
+		if notes, events := runNoteWrites(t, conn, unbound); notes != 1 || events != 1 {
+			t.Errorf("notes = %d, events = %d; want 1 and 1", notes, events)
+		}
+	})
+}
+
+// TestRunNoteAddCLIStdinNoteTakesTokenOnlyFromEnv: under --file - stdin is
+// the note, never a token, so the capability comes only from DOCKET_TOKEN.
+// withStdin backs stdin with a file rather than a pipe, as elsewhere in the
+// suite, so a read to EOF cannot hang the test.
+func TestRunNoteAddCLIStdinNoteTakesTokenOnlyFromEnv(t *testing.T) {
+	const piped = "tests fails on clean HEAD; override-pass"
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	runRef := model.FormatRunID(runID)
+	capability := seatConductor(t, conn, runID)
+
+	addFromStdin := func() (*bytes.Buffer, error) {
+		withStdin(t, piped)
+		cmd := runNoteCmdWithDB(conn)
+		testsupport.Must(t, cmd.Flags().Set("file", "-"), "setting --file: %v", nil)
+		w, buf := bufWriter(true)
+		return buf, runRunNoteAdd(cmd, runRef, w)
+	}
+
+	t.Run("DOCKET_TOKEN holds the capability", func(t *testing.T) {
+		t.Setenv(TokenEnvVar, capability)
+		buf, err := addFromStdin()
+		testsupport.Must(t, err, "run note add --file -: %v", err)
+		var env struct {
+			Data struct {
+				Note engine.RunNote `json:"note"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %v\n%s", nil, buf.String())
+		if env.Data.Note.Text != piped {
+			t.Errorf("recorded note = %q, want the piped text %q", env.Data.Note.Text, piped)
+		}
+	})
+
+	t.Run("DOCKET_TOKEN unset", func(t *testing.T) {
+		t.Setenv(TokenEnvVar, "")
+		notesBefore, eventsBefore := runNoteWrites(t, conn, runID)
+		_, err := addFromStdin()
+		assertCmdCode(t, err, output.ErrValidation, "run note add --file - with no DOCKET_TOKEN")
+		// The capability refusal, not the empty-note one a stdin read taken as
+		// a token would leave behind.
+		if !strings.Contains(err.Error(), "conductor capability") {
+			t.Errorf("the refusal %q is not the missing-capability refusal", err)
+		}
+		notesAfter, eventsAfter := runNoteWrites(t, conn, runID)
+		if notesAfter != notesBefore || eventsAfter != eventsBefore {
+			t.Errorf("the refusal wrote: notes %d -> %d, events %d -> %d",
+				notesBefore, notesAfter, eventsBefore, eventsAfter)
+		}
+	})
 }
 
 func TestRunNoteListCLI(t *testing.T) {

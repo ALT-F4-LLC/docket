@@ -59,9 +59,9 @@ func TestRunNoteRendersInEveryPacketOfTheRun(t *testing.T) {
 		}
 	}
 
-	first, err := AddRunNote(conn, run.ID, noteText, nowMS)
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
-	second, err := AddRunNote(conn, run.ID, "Second ruling: also pre-existing.", nowMS+1)
+	second, err := AddRunNote(conn, run.ID, testConductorToken, "Second ruling: also pre-existing.", nowMS+1)
 	testsupport.Must(t, err, "AddRunNote (second): %v", err)
 	if second.ID <= first.ID {
 		t.Fatalf("note ids = %d then %d, want ascending", first.ID, second.ID)
@@ -116,7 +116,7 @@ func TestRunNoteIsRunScoped(t *testing.T) {
 	_, err := activate(conn, second.ID)
 	testsupport.Must(t, err, "activating the second run: %v", err)
 
-	_, err = AddRunNote(conn, first.ID, noteText, nowMS)
+	_, err = AddRunNote(conn, first.ID, testConductorToken, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 
 	for id, instance := range noteRunSteps(t, conn, second.ID) {
@@ -140,7 +140,7 @@ func TestRunNoteIsRunScoped(t *testing.T) {
 func TestRunNoteIsDeterministicAtFixedState(t *testing.T) {
 	conn := mustDB(t)
 	run, issue := activatedRun(t, conn)
-	_, err := AddRunNote(conn, run.ID, noteText, nowMS)
+	_, err := AddRunNote(conn, run.ID, testConductorToken, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 	stepID := stepIDByInstance(t, conn, "implement@0")
 
@@ -179,7 +179,7 @@ func TestRunNoteRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := AddRunNote(conn, tc.run, tc.text, nowMS)
+			_, err := AddRunNote(conn, tc.run, testConductorToken, tc.text, nowMS)
 			if err == nil {
 				t.Fatal("the note was accepted")
 			}
@@ -193,14 +193,14 @@ func TestRunNoteRefusals(t *testing.T) {
 	}
 
 	// Exactly at the cap is fine: the cap is a ceiling, not a strict bound.
-	if _, err := AddRunNote(conn, run.ID, strings.Repeat("y", RunNoteMaxBytes), nowMS); err != nil {
+	if _, err := AddRunNote(conn, run.ID, testConductorToken, strings.Repeat("y", RunNoteMaxBytes), nowMS); err != nil {
 		t.Errorf("a note exactly at the cap was refused: %v", err)
 	}
 
 	// A terminal run renders no more packets, so a note against it is CONFLICT.
 	err := db.SetRunStatus(conn, run.ID, model.RunAbandoned, "test", nowMS)
 	testsupport.Must(t, err, "abandoning the run: %v", err)
-	_, err = AddRunNote(conn, run.ID, noteText, nowMS)
+	_, err = AddRunNote(conn, run.ID, testConductorToken, noteText, nowMS)
 	if code, ok := CodeOf(err); !ok || code != CodeConflict {
 		t.Errorf("a note on an abandoned run: code = %v (%v), want CONFLICT: %v", code, ok, err)
 	}
@@ -226,7 +226,7 @@ func TestRunNoteOnAPlanningRun(t *testing.T) {
 	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
 	run := startRun(t, conn, issue)
 
-	note, err := AddRunNote(conn, run.ID, noteText, nowMS)
+	note, err := AddRunNote(conn, run.ID, "", noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote on a planning run: %v", err)
 
 	_, err = activate(conn, run.ID)
@@ -240,10 +240,76 @@ func TestRunNoteOnAPlanningRun(t *testing.T) {
 	}
 }
 
+// noteWrites counts what a note write leaves behind: the run's note rows and
+// its run-note-added events. A refusal must move neither.
+func noteWrites(t *testing.T, conn *sql.DB, runID int) (notes, events int) {
+	t.Helper()
+	err := conn.QueryRow(`SELECT COUNT(*) FROM run_notes WHERE run_id = ?`, runID).Scan(&notes)
+	testsupport.Must(t, err, "counting notes: %v", err)
+	err = conn.QueryRow(`SELECT COUNT(*) FROM events WHERE run_id = ? AND kind = ?`,
+		runID, EventRunNoteAdded).Scan(&events)
+	testsupport.Must(t, err, "counting run-note-added events: %v", err)
+	return notes, events
+}
+
+// TestRunNoteRequiresTheConductorCapability: a note renders in every later
+// packet as the dispatcher's word, so on a bound run only the capability's
+// holder writes one; an unbound run takes a note without a token.
+func TestRunNoteRequiresTheConductorCapability(t *testing.T) {
+	conn := mustDB(t)
+	bound, _ := activatedRun(t, conn)
+	retired, _, err := model.MintToken()
+	testsupport.Must(t, err, "MintToken: %v", err)
+
+	refusals := []struct {
+		name  string
+		token string
+		code  ErrorCode
+	}{
+		{"no token", "", CodeValidation},
+		{"wrong token", retired, CodeAuth},
+	}
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			notesBefore, eventsBefore := noteWrites(t, conn, bound.ID)
+			_, err := AddRunNote(conn, bound.ID, tc.token, noteText, nowMS)
+			if code, ok := CodeOf(err); !ok || code != tc.code {
+				t.Fatalf("code = %v (%v), want %s: %v", code, ok, tc.code, err)
+			}
+			notesAfter, eventsAfter := noteWrites(t, conn, bound.ID)
+			if notesAfter != notesBefore || eventsAfter != eventsBefore {
+				t.Errorf("the refusal wrote: notes %d -> %d, events %d -> %d",
+					notesBefore, notesAfter, eventsBefore, eventsAfter)
+			}
+		})
+	}
+
+	t.Run("the run's capability", func(t *testing.T) {
+		notesBefore, eventsBefore := noteWrites(t, conn, bound.ID)
+		_, err := AddRunNote(conn, bound.ID, testConductorToken, noteText, nowMS)
+		testsupport.Must(t, err, "AddRunNote with the capability: %v", err)
+		notesAfter, eventsAfter := noteWrites(t, conn, bound.ID)
+		if notesAfter != notesBefore+1 || eventsAfter != eventsBefore+1 {
+			t.Errorf("notes %d -> %d, events %d -> %d; want one of each",
+				notesBefore, notesAfter, eventsBefore, eventsAfter)
+		}
+	})
+
+	t.Run("an unbound run", func(t *testing.T) {
+		issue := createIssue(t, conn, "unbound", "a body", "task", nil)
+		unbound := startRun(t, conn, issue)
+		_, err := AddRunNote(conn, unbound.ID, "", noteText, nowMS)
+		testsupport.Must(t, err, "AddRunNote on an unbound run: %v", err)
+		if notes, events := noteWrites(t, conn, unbound.ID); notes != 1 || events != 1 {
+			t.Errorf("notes = %d, events = %d; want 1 and 1", notes, events)
+		}
+	})
+}
+
 func TestRunNoteIsEventLogged(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
-	note, err := AddRunNote(conn, run.ID, noteText, nowMS)
+	note, err := AddRunNote(conn, run.ID, testConductorToken, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 
 	var runID int
@@ -277,7 +343,7 @@ func TestRunNoteMetaCountsNotes(t *testing.T) {
 
 	without, err := ReadContext(conn, stepID, nowMS)
 	testsupport.Must(t, err, "ReadContext: %v", err)
-	_, err = AddRunNote(conn, run.ID, noteText, nowMS)
+	_, err = AddRunNote(conn, run.ID, testConductorToken, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 	with, err := ReadContext(conn, stepID, nowMS)
 	testsupport.Must(t, err, "ReadContext: %v", err)
@@ -301,7 +367,7 @@ func TestRunNoteDropsOneTrailingNewline(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
 
-	note, err := AddRunNote(conn, run.ID, "  keep my leading spaces\nand my blank line\n\n", nowMS)
+	note, err := AddRunNote(conn, run.ID, testConductorToken, "  keep my leading spaces\nand my blank line\n\n", nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 	if note.Text != "  keep my leading spaces\nand my blank line\n" {
 		t.Errorf("stored text = %q, want exactly one trailing newline dropped", note.Text)

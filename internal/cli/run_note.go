@@ -60,6 +60,10 @@ for example:
 does not fit a shell argument. One trailing newline is dropped so a file-fed
 note renders exactly as the same words passed inline; nothing else is touched.
 
+On a run bound to a conductor capability, the verb requires that capability
+via DOCKET_TOKEN or stdin, never argv. With --file -, stdin carries the note,
+so only DOCKET_TOKEN carries the capability.
+
 The note is capped at 16 KiB because it rides every packet of the run; keep
 the detail on the issue the note cites. Legal while the run is planning,
 active, or parked — the motivating note is written BEFORE the first dispatch —
@@ -109,8 +113,17 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Under --file - stdin carries the note, so the capability comes only from
+	// the environment: a stdin read here would take the note as a token, and a
+	// piped token would be recorded as the note.
+	var token string
+	if path, _ := cmd.Flags().GetString("file"); path == "-" {
+		token = strings.TrimSpace(os.Getenv(TokenEnvVar))
+	} else {
+		token = conductorToken(conn, runID, os.Stdin)
+	}
 
-	note, err := engine.AddRunNote(conn, runID, text, model.NowMS())
+	note, err := engine.AddRunNote(conn, runID, token, text, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}

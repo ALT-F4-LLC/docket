@@ -63,7 +63,12 @@ type RunNote struct {
 //
 // One trailing newline is dropped, so a note fed from a file renders exactly
 // as the same words passed inline; nothing else about the text is touched.
-func AddRunNote(conn *sql.DB, runID int, text string, nowMS int64) (*RunNote, error) {
+//
+// A note renders in every later packet as the dispatcher's word, so on a run
+// bound to a conductor capability only its holder may write one: `token` is
+// checked inside the transaction that writes the note, by the same matrix the
+// operator verbs use. An unbound run accepts a note without a token.
+func AddRunNote(conn *sql.DB, runID int, token, text string, nowMS int64) (*RunNote, error) {
 	text = strings.TrimSuffix(text, "\n")
 	if strings.TrimSpace(text) == "" {
 		return nil, validationErr(
@@ -94,6 +99,9 @@ func AddRunNote(conn *sql.DB, runID int, text string, nowMS int64) (*RunNote, er
 		return nil, fmt.Errorf("recording the run note: %w", err)
 	}
 	defer tx.Rollback()
+	if err := authorizeConductorTx(tx, runID, token, "run note add"); err != nil {
+		return nil, err
+	}
 
 	id, err := db.InsertRunNoteTx(tx, db.RunNote{
 		RunID: runID, Text: text, CreatedAtMS: nowMS,
