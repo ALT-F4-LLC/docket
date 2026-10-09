@@ -728,6 +728,8 @@ func getFieldValue(issue *model.Issue, field string) string {
 		return string(issue.Kind)
 	case "assignee":
 		return issue.Assignee
+	case "resolution":
+		return issue.Resolution
 	case "parent_id":
 		if issue.ParentID != nil {
 			return fmt.Sprintf("%d", *issue.ParentID)
