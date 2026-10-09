@@ -32,7 +32,10 @@ import (
 //  1. ANSI CSI/OSC escape sequences are removed.
 //  2. Carriage returns are dropped and trailing horizontal whitespace on each
 //     line is removed, so CRLF and a progress redraw hash as their plain form.
-//  3. Go-style durations (`1.234s`, `0.5ms`, `2m30.1s`) become `<dur>`.
+//  3. Go-style durations (`1.234s`, `0.5ms`, `2m30.1s`) become `<dur>`. The
+//     literal `(cached)` token also becomes `<dur>`, but only where `go test`
+//     prints it in place of the duration on a passing-package summary line
+//     (`ok  \t<pkg>\t(cached)`); anywhere else it survives.
 //  4. Integer-with-unit durations (`in 42ms`, `after 3s`) are covered by the
 //     same rule, which is why it accepts a bare integer mantissa.
 //  5. RFC3339-ish timestamps and `HH:MM:SS(.fff)` clock times become `<time>`.
@@ -72,6 +75,11 @@ var (
 	timestampRFC = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?`)
 	clockTime    = regexp.MustCompile(`\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b`)
 	absolutePath = regexp.MustCompile(`/(?:[\w.@%+~-]+/)+[\w.@%+~-]+`)
+
+	// cachedPassResult matches the `(cached)` token `go test` prints instead of
+	// a duration on a passing package's summary line. The package field holds
+	// no tab, so the match holds after path elision rewrites the import path.
+	cachedPassResult = regexp.MustCompile(`(?m)^(ok[ \t]+[^\t\n]+\t)\(cached\)`)
 )
 
 func normalizeGateOutput(output string) string {
@@ -81,6 +89,7 @@ func normalizeGateOutput(output string) string {
 	s = clockTime.ReplaceAllString(s, "<time>")
 	s = absolutePath.ReplaceAllStringFunc(s, elidePathPrefix)
 	s = durationText.ReplaceAllString(s, "<dur>")
+	s = cachedPassResult.ReplaceAllString(s, "${1}<dur>")
 
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {

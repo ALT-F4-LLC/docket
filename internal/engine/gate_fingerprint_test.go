@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // ptyFailure renders the RUN-95 `pty.Open` capture with the two things that
 // vary between two runs of ONE unchanged environmental failure: the worktree
@@ -9,6 +12,22 @@ func ptyFailure(worktree, duration string) string {
 	return "--- FAIL: TestTUIAttaches (" + duration + ")\n" +
 		"    " + worktree + "/internal/tui/attach_test.go:41: pty.Open: operation not permitted\n" +
 		"FAIL\tgithub.com/ALT-F4-LLC/docket/internal/tui\t" + duration + "\n"
+}
+
+// wholeSuiteCapture renders one `go test ./...` run as the tests gate records
+// it: the same failing internal/tui block surrounded by passing-package summary
+// lines. appResult is the internal/app summary's result field, which is a
+// duration on a fresh run and `(cached)` on a test-cache hit; appSuffix is any
+// text `go test` prints after it, such as a coverage figure.
+func wholeSuiteCapture(appResult, appSuffix string) string {
+	return "?   \tgithub.com/ALT-F4-LLC/docket/cmd/docket\t[no test files]\n" +
+		"ok  \tgithub.com/ALT-F4-LLC/docket/internal/app\t" + appResult + appSuffix + "\n" +
+		"ok  \tgithub.com/ALT-F4-LLC/docket/internal/engine\t4.102s\n" +
+		"--- FAIL: TestTUIAttaches (0.31s)\n" +
+		"    attach_test.go:41: pty.Open: operation not permitted\n" +
+		"FAIL\n" +
+		"FAIL\tgithub.com/ALT-F4-LLC/docket/internal/tui\t0.874s\n" +
+		"FAIL\n"
 }
 
 // TestGateResultFingerprint: the fingerprint is stable across run-varying text
@@ -41,6 +60,43 @@ func TestGateResultFingerprint(t *testing.T) {
 		b := GateFingerprint("2026-09-14T23:59:59Z build failed\n")
 		if a != b {
 			t.Errorf("timestamps changed the fingerprint:\n a = %s\n b = %s", a, b)
+		}
+	})
+
+	t.Run("stable across a cached passing package in a whole-suite run", func(t *testing.T) {
+		for _, suffix := range []string{"", "\tcoverage: 50.0% of statements"} {
+			cached := GateFingerprint(wholeSuiteCapture("(cached)", suffix))
+			fresh := GateFingerprint(wholeSuiteCapture("2.874s", suffix))
+			if cached != fresh {
+				t.Errorf("suffix %q: an unrelated package being a test-cache "+
+					"hit changed the fingerprint:\n cached = %s\n fresh  = %s\n"+
+					"the same failure must keep one signature across whole-suite runs",
+					suffix, cached, fresh)
+			}
+		}
+	})
+
+	t.Run("cached text inside a failing block is kept", func(t *testing.T) {
+		block := func(assertion string) string {
+			return "--- FAIL: TestReplayTiming (0.31s)\n" +
+				"    replay_test.go:41: " + assertion + "\n" +
+				"FAIL\tgithub.com/ALT-F4-LLC/docket/internal/app\t(cached)\n"
+		}
+		got := normalizeGateOutput(block("got (cached), want 0.5s"))
+		for _, kept := range []string{
+			"replay_test.go:41: got (cached), want <dur>",
+			"FAIL\tgithub.com<path>/internal/app\t(cached)",
+		} {
+			if !strings.Contains(got, kept) {
+				t.Errorf("normalization rewrote failing-block text; want %q in:\n%s",
+					kept, got)
+			}
+		}
+		a := GateFingerprint(block("got (cached), want 0.5s"))
+		b := GateFingerprint(block("got 0.5s, want (cached)"))
+		if a == b {
+			t.Errorf("assertions differing only in where (cached) appears "+
+				"collapsed to one fingerprint (%s)", a)
 		}
 	})
 

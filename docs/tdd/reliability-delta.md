@@ -851,6 +851,10 @@ nothing else:
    scratch root or worktree prefix drops out while the file that failed still
    names itself.
 5. Go-style durations (`0.31s`, `12ms`, `2m30.1s`, `1h2m3s`) become `<dur>`.
+   The literal `(cached)` token also becomes `<dur>`, but only in the duration
+   position of a `go test` passing-package summary line
+   (`ok  \t<pkg>\t(cached)`). A `(cached)` anywhere else, such as in FAIL
+   output or assertion text, survives.
 6. Leading and trailing blank lines are removed.
 
 Line ORDER is preserved, and no line is sorted, deduplicated or dropped: a
