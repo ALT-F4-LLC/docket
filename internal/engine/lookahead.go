@@ -248,13 +248,16 @@ func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
 			// A row can be refused by both rules on the way up. SCOPE WINS: a
 			// headroom refusal retires the moment a slot frees, while a scope
 			// conflict must stay serialized however the cohort empties, so the
-			// stronger obligation is the honest one to report.
+			// stronger obligation is the honest one to report. Among scope
+			// refusals the LAST wins: the issue holding the highest stage the
+			// row was pushed past is the one it must stay behind, and it is
+			// still placed when every lower holder has retired.
 			for {
 				reason, issueID := s.cohortFits(e.step, k, classCount, scopeHeld)
 				if reason == "" {
 					break
 				}
-				if e.bump != model.BumpScope {
+				if !(e.bump == model.BumpScope && reason == model.BumpHeadroom) {
 					e.bump, e.bumpIssue = reason, issueID
 				}
 				k++

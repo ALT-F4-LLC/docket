@@ -219,6 +219,49 @@ func TestStagedRowsCarryBumpReason(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("scope by successive issues", func(t *testing.T) {
+		conn := mustDB(t)
+		registerSource(t, conn, []byte(bumpScopeWorkflowSrc), "bump-scope.toml")
+		first := createIssue(t, conn, "holds the tree", "a body", "task", nil)
+		second := createIssue(t, conn, "wants the tree", "a body", "task", nil)
+		third := createIssue(t, conn, "also wants the tree", "a body", "task", nil)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, first, `["x/**"]`),
+			"declaring the first scope")
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, second, `["x/a"]`),
+			"declaring the second scope")
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, third, `["x/a"]`),
+			"declaring the third scope")
+		run := startRun(t, conn, first, second, third)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		answer, err := testEngine().NextSteps(conn, run.ID, 0, nowMS)
+		testsupport.Must(t, err, "next: %v", err)
+		got := offeredBumps(answer.Steps)
+		firstID, secondID, thirdID := model.FormatID(first), model.FormatID(second),
+			model.FormatID(third)
+
+		// The first issue's `b` holds stage 1 and the second issue's `a`,
+		// refused there, holds stage 2. The third issue's `a` is refused at 1
+		// by the first issue, then at 2 by the second, and lands at 3: the
+		// issue it must stay behind is the one holding the stage it was last
+		// pushed past.
+		if row := got[secondID+" a@0"]; row.stage != 2 || row.issue != firstID {
+			t.Fatalf("premise: %s a@0 = %+v, want stage 2 naming %s",
+				secondID, row, firstID)
+		}
+		row := got[thirdID+" a@0"]
+		if row.stage != 3 || row.bump != model.BumpScope {
+			t.Errorf("%s a@0 = %+v, want stage 3 bump %q", thirdID, row,
+				model.BumpScope)
+		}
+		if row.issue != secondID {
+			t.Errorf("%s a@0 bump_issue = %q, want %q — the issue holding "+
+				"stage 2, not %s, whose rows sit below it", thirdID, row.issue,
+				secondID, firstID)
+		}
+	})
 }
 
 // TestDispatchVerifyNormalizesBump: the new fields are OPEN-TIME facts, hashed
