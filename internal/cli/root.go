@@ -10,6 +10,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
@@ -448,6 +449,11 @@ func getProjectID(cmd *cobra.Command) int {
 // Execute runs the root command and returns an exit code.
 func Execute() int {
 	initWatchFlags()
+	// The detached pre-gate launcher is installed HERE, in the binary's real
+	// entry, and nowhere else: it re-executes this process's own executable,
+	// which under `go test` is the test binary. An engine or CLI test that
+	// completes a step must never find it installed (gates-trust §7.6.2 PG6).
+	engine.LaunchDetachedPreGates = launchDetachedPreGates
 	if err := rootCmd.Execute(); err != nil {
 		// PersistentPreRunE already wrote this invocation's output and asked
 		// to stop before RunE. Not a failure: exit 0, render nothing.

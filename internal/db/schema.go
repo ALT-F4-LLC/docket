@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 36
+const currentSchemaVersion = 37
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -206,6 +206,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	34: migrateV33ToV34,
 	35: migrateV34ToV35,
 	36: migrateV35ToV36,
+	37: migrateV36ToV37,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2894,6 +2895,58 @@ func migrateV35ToV36(tx *sql.Tx) error {
 	return nil
 }
 
+// v37AddedColumns is v37's whole schema change: `target_sha` on
+// `gate_results` — the commit a pre-gate result was measured against when it
+// was measured OUTSIDE the claim (gates-trust §7.6.2 PG6).
+//
+// A pre-gate that cannot finish inside the claim's budget runs detached,
+// before the claim, against the step's resolved target sha. The claim reuses
+// that result only for the SAME step and the SAME target, so the target has
+// to be a key on the row rather than an inference from its prose: the
+// reconstruction note in `reason` names twelve characters of a sha for a
+// reader, which is not a thing a claim should match on. Rows the claim itself
+// records, and every completion-side row, leave the column empty: they are
+// measured at the moment they are consumed and were never candidates for
+// reuse.
+//
+// TEXT NOT NULL with an empty-string default, and empty means "not keyed to a
+// target": a pre-v37 row, a claim-time row, or a completion row. Nothing reads
+// a blank as a key.
+var v37AddedColumns = []struct{ table, column, ddl string }{
+	{"gate_results", "target_sha",
+		`ALTER TABLE gate_results ADD COLUMN target_sha TEXT NOT NULL DEFAULT ''`},
+}
+
+// v37ColumnSentinels are the columns the rewind guard probes, the v27–v36
+// form: v37 adds no table and no index, so a database stamped 37 by a binary
+// built mid-change carries every v36 sentinel and this column never arrives.
+var v37ColumnSentinels = []struct{ table, column string }{
+	{"gate_results", "target_sha"},
+}
+
+// migrateV36ToV37 adds the detached pre-gate target column.
+//
+// It BACK-FILLS NOTHING: no existing row was measured by a detached run, so
+// the empty string is the only true value for every one of them. `ALTER TABLE
+// ADD COLUMN` is not idempotent in SQLite, so the migration probes first and
+// stays re-runnable, the same shape v10 through v36 use.
+func migrateV36ToV37(tx *sql.Tx) error {
+	for _, col := range v37AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v36 to v37: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v36 to v37: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3636,6 +3689,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 35
+				break
+			}
+		}
+	}
+
+	// The v37 guard, in the same COLUMN form as v36 and for its reason: v37
+	// adds one column and no table, so a database stamped 37 by a binary built
+	// mid-change carries every v36 sentinel and `gate_results.target_sha`
+	// never arrives.
+	if version >= 37 {
+		for _, col := range v37ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v37 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 36
 				break
 			}
 		}

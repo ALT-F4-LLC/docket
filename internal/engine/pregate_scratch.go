@@ -283,7 +283,15 @@ func sweepStalePreGateScratch(execRoot string) []string {
 // for a sweeper — leaving a stale tree for the next pass costs a WARN, while
 // removing a tree a claim is measuring costs a recorded verdict.
 func probeScratchLock(dir string) (lock *os.File, live bool) {
-	file, err := os.OpenFile(scratchLockPath(dir), os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	return probeLiveLock(scratchLockPath(dir))
+}
+
+// probeLiveLock is probeScratchLock's mechanism for any liveness lockfile: the
+// detached pre-gate run's in-flight lock (pregate_detached.go) is probed by the
+// same rule, with the same fail-closed reading of a lockfile that cannot be
+// opened.
+func probeLiveLock(path string) (lock *os.File, live bool) {
+	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, !os.IsNotExist(err)
 	}

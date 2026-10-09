@@ -1078,6 +1078,33 @@ amendment, not a stage: one additive nullable column, a `hasColumn`-probed
 probes the COLUMN (the v27–v35 form, since v36 adds no table and no index). No
 v5–v10 column, table, or count changes.
 
+### AMENDMENT — the span extends to v37 (the detached pre-gate target, 2026-10-08)
+
+**What changed.** v37 adds ONE column to one table, `gate_results.target_sha`
+(`TEXT NOT NULL DEFAULT ''`): the commit a pre-gate result was measured against
+when the measurement ran OUTSIDE the claim. Empty means "not keyed to a
+target" — every claim-time row, every completion-side row, and every row that
+predates the column.
+
+**Why it needed a version.** A pre-gate longer than the claim's 60s budget
+(gates-trust §7.6.2 PG5) could never hand the claim a complete result: the
+claim cut it off and recorded the cut. The remedy (gates-trust §7.6.2 PG6)
+runs such a gate DETACHED, before the claim, against the step's resolved target
+sha, and the claim reuses the recorded result for the same step and the same
+target only. That match needs the target on the row as a key; the
+reconstruction note in `reason` names twelve characters of a sha for a reader,
+and matching a claim on prose is not a key.
+
+**Empty means unkeyed, and nothing else.** The migration back-fills nothing:
+no existing row was measured by a detached run, so the empty string is the only
+true value for every one of them, and a blank is never matched as a target.
+
+**Why the ratified arithmetic is untouched.** Like v11–v36, v37 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and a
+rewind guard that probes the COLUMN (the v27–v36 form, since v37 adds no table
+and no index). No v5–v10 column, table, or count changes.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay

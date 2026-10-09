@@ -873,7 +873,7 @@ func reMintOwnClaim(
 	if err != nil {
 		return nil, err
 	}
-	preGates, err := recordedPreGates(tx, fresh.ID)
+	preGates, err := recordedPreGates(tx, fresh.ID, bundle.TargetSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -902,7 +902,15 @@ func reMintOwnClaim(
 // recordedPreGates replays the pre-gate results a claim already recorded, LAST
 // attempt per gate — the same rule attachGateOutcomes applies to the saga's
 // gates, for the same reason: a gate re-run after a resume did not fail twice.
-func recordedPreGates(tx *sql.Tx, stepID int) ([]PreGateResult, error) {
+//
+// A ROW KEYED TO ANOTHER TARGET IS NOT THIS CLAIM'S (gates-trust §7.6.2 PG6).
+// A detached run stamps the sha it measured on its rows; one that finished
+// after the step's target moved, and after this claim measured the new one,
+// would sit at the highest ordinal and replay a pass for a tree the claim
+// never resolved. targetSHA is the sha this claim's bundle carries: a row
+// stamped with a different one is skipped, and an unstamped row — the claim's
+// own measurement, or one from before the column — replays as before.
+func recordedPreGates(tx *sql.Tx, stepID int, targetSHA string) ([]PreGateResult, error) {
 	rows, err := db.GateResultsForStepTx(tx, stepID)
 	if err != nil {
 		return nil, err
@@ -910,7 +918,7 @@ func recordedPreGates(tx *sql.Tx, stepID int) ([]PreGateResult, error) {
 	last := make(map[string]db.GateResultRow)
 	order := make([]string, 0, len(rows))
 	for _, r := range rows {
-		if !r.Pre {
+		if !r.Pre || (r.TargetSHA != "" && r.TargetSHA != targetSHA) {
 			continue
 		}
 		prev, seen := last[r.Gate]
@@ -926,12 +934,7 @@ func recordedPreGates(tx *sql.Tx, stepID int) ([]PreGateResult, error) {
 	}
 	out := make([]PreGateResult, 0, len(order))
 	for _, gate := range order {
-		r := last[gate]
-		out = append(out, PreGateResult{
-			Gate: r.Gate, Argv: r.Argv, Exit: r.Exit, DurationMS: r.DurationMS,
-			Output: r.Output, Truncated: r.Truncated, Verdict: r.Verdict,
-			Reason: r.Reason,
-		})
+		out = append(out, preGateResultOfRecorded(last[gate]))
 	}
 	return out, nil
 }

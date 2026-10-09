@@ -918,6 +918,13 @@ func (e *Engine) resolveStep(
 		return fmt.Errorf("committing the resolution: %w", err)
 	}
 
+	// A re-pin moved the target every downstream pre-gate measures, and this
+	// commit is where the new sha first exists; the same point the routing
+	// stage's own round record is reacted to (gates-trust §7.6.2 PG6).
+	if repin != nil && !repin.Unchanged {
+		e.startDetachedPreGates(conn, step.RunID, nowMS)
+	}
+
 	// A SEPARATE transaction, for decideMaterializedStep's stated reason: the
 	// routing stage owns its own four-table commit, and a crash between the two
 	// leaves a resolved question and an unrouted step, which the next

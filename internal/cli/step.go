@@ -1911,7 +1911,7 @@ func init() {
 	for _, sub := range []*cobra.Command{
 		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
 		stepApproveCmd, stepRejectCmd, stepResolveCmd, stepReapCmd, stepHoldCmd,
-		stepAnnotateCmd,
+		stepAnnotateCmd, stepPreGateCmd,
 		stepShowCmd, stepListCmd, stepContextCmd, stepRenderCmd,
 		stepArtifactsCmd, stepArtifactCmd,
 	} {

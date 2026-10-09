@@ -52,6 +52,15 @@ type GateResultRow struct {
 	// row recorded at v30 or later always carries a value: EMPTY means the row
 	// predates v30 and nothing else.
 	Fingerprint string
+	// TargetSHA is the commit this PRE-gate row was measured against when the
+	// measurement ran OUTSIDE the claim — a detached pre-gate run started when
+	// the step's target was recorded, so a gate longer than the claim's budget
+	// can still hand the claim a complete result (gates-trust §7.6.2 PG6). The
+	// claim reuses a recorded row only for the same step and the same target,
+	// and this is the key it matches on. EMPTY on every row the claim itself
+	// records, on every completion-side row, and on every row recorded before
+	// v37: none of those was measured for reuse, and a blank is never a key.
+	TargetSHA   string
 	CreatedAtMS int64
 }
 
@@ -100,11 +109,11 @@ func InsertGateResultTx(tx *sql.Tx, r GateResultRow) error {
 		`INSERT INTO gate_results
 		   (run_id, step_id, gate, ordinal, argv, exit, duration_ms, output,
 		    truncated, verdict, pre, stub, stub_entry, reason, fingerprint,
-		    created_at_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    target_sha, created_at_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.StepID, r.Gate, r.Ordinal, argv, exit, r.DurationMS, r.Output,
 		boolToInt(r.Truncated), r.Verdict, boolToInt(r.Pre), boolToInt(r.Stub),
-		boolToInt(r.StubEntry), reason, r.Fingerprint, r.CreatedAtMS)
+		boolToInt(r.StubEntry), reason, r.Fingerprint, r.TargetSHA, r.CreatedAtMS)
 	if err != nil {
 		return fmt.Errorf("recording the gate result: %w", err)
 	}
@@ -114,7 +123,7 @@ func InsertGateResultTx(tx *sql.Tx, r GateResultRow) error {
 const gateResultSelect = `
 SELECT id, run_id, step_id, gate, ordinal, argv, exit, duration_ms,
        output, truncated, verdict, pre, stub, stub_entry, reason, fingerprint,
-       created_at_ms
+       target_sha, created_at_ms
   FROM gate_results`
 
 // GateResultsForStep returns every recorded result for a step, in insertion
@@ -211,7 +220,7 @@ func scanGateResults(rows *sql.Rows, err error) ([]GateResultRow, error) {
 			&row.ID, &row.RunID, &row.StepID, &row.Gate, &row.Ordinal, &argv, &exit,
 			&row.DurationMS, &row.Output, &truncated, &row.Verdict, &pre, &stub,
 			&stubEntry,
-			&reason, &row.Fingerprint, &row.CreatedAtMS,
+			&reason, &row.Fingerprint, &row.TargetSHA, &row.CreatedAtMS,
 		); err != nil {
 			return GateResultRow{}, fmt.Errorf("reading a gate result: %w", err)
 		}

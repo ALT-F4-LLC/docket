@@ -249,6 +249,13 @@ func (e *Engine) AnnotateIntegration(
 		return nil, fmt.Errorf("annotating %s: %w", step.Instance, err)
 	}
 
+	// The integrated sha is now the target every downstream pre-gate
+	// measures, and this commit is where it first exists (gates-trust §7.6.2
+	// PG6) — the same reaction the routing stage's own round record gets.
+	if !repin.Unchanged {
+		e.startDetachedPreGates(conn, step.RunID, nowMS)
+	}
+
 	out := &IntegrationAnnotation{IntegratedSHA: sha, ResolvedFrom: from, Repin: repin}
 	if from == sha {
 		out.ResolvedFrom = ""

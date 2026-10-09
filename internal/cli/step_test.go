@@ -203,6 +203,12 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 		// integration mints, most of all. Opaque KV merged onto the finished
 		// step's metadata, event-logged.
 		"annotate",
+		// `pregate` (gates-trust §7.6.2 PG6): the detached pre-gate run the
+		// engine launches as a re-execution of this binary when a step's
+		// target is first recorded. HIDDEN — it is the engine's argv, not an
+		// operator's verb — but it is surface this binary answers to, so it is
+		// counted here rather than exempted by its flag.
+		"pregate",
 	}
 
 	have := make(map[string]bool)

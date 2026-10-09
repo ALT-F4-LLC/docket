@@ -745,16 +745,27 @@ func (e *Engine) ResumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 	// and being reached at all is a bug, so it says so.
 	const maxStages = 1000
 
+	// advanced records that THIS invocation moved the saga, so the completion
+	// below is one this call produced rather than one it merely observed.
+	advanced := false
 	for range maxStages {
 		step, err := db.GetStep(conn, stepID)
 		if err != nil {
 			return err
 		}
 		if !step.InSaga() {
+			if advanced {
+				// The routing stage this call committed may have recorded an
+				// `issue.diff` round record, which is the moment a downstream
+				// step's pre-gate target first exists (gates-trust §7.6.2
+				// PG6). Best-effort, outside every transaction, after the
+				// saga is closed: nothing here can fail a completed step.
+				e.startDetachedPreGates(conn, step.RunID, nowMS)
+			}
 			return nil // Complete.
 		}
 
-		advanced, err := e.advanceOne(conn, step, nowMS)
+		moved, err := e.advanceOne(conn, step, nowMS)
 		if err != nil {
 			if errors.Is(err, db.ErrSagaStageMoved) {
 				// Lost the race to a concurrent resumer. Re-read and continue:
@@ -763,9 +774,10 @@ func (e *Engine) ResumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 			}
 			return err
 		}
-		if !advanced {
+		if !moved {
 			return nil
 		}
+		advanced = true
 	}
 	return fmt.Errorf("step %s: the saga did not converge in %d stages",
 		model.FormatStepID(stepID), maxStages)
@@ -1915,6 +1927,7 @@ func recordGateRows(
 			Fingerprint: GateFingerprint(r.Output),
 			Stub:        r.Stub,
 			StubEntry:   r.StubEntry,
+			TargetSHA:   r.TargetSHA,
 			CreatedAtMS: nowMS,
 		}); err != nil {
 			return err

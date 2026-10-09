@@ -118,6 +118,12 @@ type GateResultRow struct {
 	// Distinct from Stub above, which is about which era of this codebase
 	// produced the row. A row can be either, both, or neither.
 	StubEntry bool
+	// TargetSHA keys a PRE-gate row measured by a detached run to the commit
+	// it measured (§7.6.2 PG6), so a claim reuses it for that target only. The
+	// runner never sets it: the detached phase stamps its rows after the
+	// measurement, exactly as the claim path stamps Pre. Empty everywhere
+	// else.
+	TargetSHA string
 }
 
 // Run executes one gate: match, then spawn only what matched.
