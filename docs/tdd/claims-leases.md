@@ -256,6 +256,13 @@ Mapped to this stage's verbs. Every row is proven by a test (§7):
 | R7 | non-holder closes a live-leased issue | close | `AUTH_ERROR` | 5 |
 | R8 | claim against an expired lease | claim | **succeeds**, `attempt++` | 0 |
 
+**Step claims diverge at R5.** An issue claim against a live lease returns
+`CONFLICT` for every caller, including the lease's own owner. A step claim whose
+`--owner` equals the live lease's recorded owner instead succeeds with a
+re-minted token that replaces the prior one. That path trusts `--owner`, a
+caller-supplied and publicly shown string, as the holder identity; see
+engine-spine.md §6.9.
+
 **R2 and R3 are both AUTH_ERROR, deliberately.** "This issue is unclaimed" and
 "your token is wrong" are the same answer to the caller — you do not hold this
 lease — and distinguishing them leaks whether a lease exists to a caller holding

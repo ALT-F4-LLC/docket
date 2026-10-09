@@ -1211,8 +1211,10 @@ in `internal/db/leases.go` are **generalized over a table name**, not copied: a
 `ClaimIssue`/`HeartbeatIssue`/`ReleaseIssue` become thin wrappers over the shared
 implementation. `authorizeHolder`'s three-way refusal (ErrNotHolder / ErrLeaseExpired
 / ErrLeaseHeld) is reused unchanged — which is why the S3 refusal matrix (§6.9) is
-the S2 matrix with step verbs substituted, and why it cannot drift between the two
-entities.
+the S2 matrix with step verbs substituted, and why the rows those helpers decide
+cannot drift between the two entities. R5 is the one step-level divergence: a step
+claim whose `--owner` matches a live lease's recorded owner re-mints the token
+instead of returning `CONFLICT` (§6.9). Issue claims have no re-mint path.
 
 The claim response returns token **and** context in one response — "one atomic
 mediation: an unclaimed executor has nothing, a claimed one has everything"
@@ -1443,8 +1445,9 @@ per `on_fail` when attempts are exhausted, per the status machine.
 
 ## 6.9 Refusal matrix (§9 item 3, at step level)
 
-The S2 matrix with step verbs substituted — same helper, same codes, so it cannot
-drift:
+The S2 matrix with step verbs substituted, using the same helpers and codes. R5
+diverges from S2: a step claim by the live lease's own owner re-mints the token,
+where an issue claim always returns `CONFLICT`.
 
 | # | Situation | Verb | Code | Exit |
 |---|---|---|---|---|
@@ -1452,7 +1455,7 @@ drift:
 | R2 | token supplied, step unclaimed | heartbeat/complete/fail | `AUTH_ERROR` | 5 |
 | R3 | token supplied, wrong value | heartbeat/complete/fail | `AUTH_ERROR` | 5 |
 | R4 | correct token, lease expired | heartbeat/complete/fail | `STALE_LEASE` | 6 |
-| R5 | claim against a live lease | claim | `CONFLICT` | 4 |
+| R5 | claim against a live lease | claim | `CONFLICT` for any other `--owner`; **succeeds** with a re-minted token when `--owner` equals the recorded owner | 4; 0 |
 | R6 | N concurrent claims on one ready step | claim | 1 × exit 0, N−1 × `CONFLICT` | 4 |
 | R7 | claim against an expired lease | claim | **succeeds**, `attempt++` | 0 |
 | R8 | claim a step that is not ready (R1–R7 of §6.3 unmet) | claim | `CONFLICT` naming the unmet condition | 4 |
@@ -1460,6 +1463,22 @@ drift:
 | R10 | `approve`/`reject` on a non-`human` step | approve/reject | `VALIDATION_ERROR` | 3 |
 | R11 | `resolve` on a step not in `waiting-human` | resolve | `VALIDATION_ERROR` | 3 |
 | R12 | artifact exceeding 1MiB | complete | `VALIDATION_ERROR` | 3 |
+
+**R5 trusts `--owner` as the holder identity.** A claim against a live lease whose
+`--owner` equals the lease's recorded owner exits 0 with `re_minted`. The engine
+mints a fresh token that replaces the prior one, so the prior token stops
+authorizing. `attempt`, accrual and expiry are unchanged. The re-mint recovers a
+token whose claim response never reached its holder. A claim with any other owner
+returns `CONFLICT` (exit 4), as at S2. While the claim's pre-gate results are
+still unrecorded, a same-owner claim also returns `CONFLICT`.
+
+The owner match is the only check. `--owner` is caller-supplied text, `step show`
+prints it, and dispatcher conventions such as `wave:STEP-N:attempt` make it
+predictable, so it is not a secret. Any caller that presents the owner string
+receives a working token and voids the holder's. A dispatcher must therefore
+give each concurrent claimant a distinct owner. Claimants that share one become
+a single holder: they get re-minted tokens instead of R6's `CONFLICT`, and only
+the last token issued can record.
 
 **R8 is new relative to S2** and it matters: `claim` must enforce readiness itself,
 not trust that the caller ran `next`. A dispatcher racing a scope conflict would
