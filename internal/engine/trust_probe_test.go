@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,6 +43,26 @@ func worktreeCount(t *testing.T, repo string) int {
 }
 
 func noAction(string) bool { return false }
+
+// probeTempDir points os.MkdirTemp at a fresh directory, so everything the
+// probe creates beside its worktree lands where the test can see it.
+func probeTempDir(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	return tmp
+}
+
+// assertNoProbeLeftovers fails when anything the probe created in tmp, the
+// worktree or its cache root, survived ProbeTrust's return.
+func assertNoProbeLeftovers(t *testing.T, tmp string) {
+	t.Helper()
+	left, err := os.ReadDir(tmp)
+	testsupport.Must(t, err, "reading %s: %v", tmp, err)
+	for _, e := range left {
+		t.Errorf("probe leftover in %s: %s", tmp, e.Name())
+	}
+}
 
 // TestProbeTrustRunsEveryEntryEvenAfterAFailure is AC1: nothing
 // short-circuits on the first failure, and each entry gets its own row with
@@ -156,9 +177,11 @@ func TestProbeTrustEnforcesPerEntryTimeout(t *testing.T) {
 
 // TestProbeTrustRemovesWorktreeOnSuccess and its two siblings below are AC4:
 // removed on success, on a failure inside ProbeTrust, and on interruption
-// (a canceled context) — `git worktree list` shows no leftover in any case.
+// (a canceled context) — `git worktree list` shows no leftover in any case,
+// and neither the worktree nor its cache root remains on disk.
 func TestProbeTrustRemovesWorktreeOnSuccess(t *testing.T) {
 	repo := probeRepo(t)
+	tmp := probeTempDir(t)
 	entries := []trust.Entry{{Name: "ok", Argv: []string{"true"}}}
 
 	_, err := ProbeTrust(context.Background(), repo, entries, noAction)
@@ -167,10 +190,12 @@ func TestProbeTrustRemovesWorktreeOnSuccess(t *testing.T) {
 	if n := worktreeCount(t, repo); n != 0 {
 		t.Errorf("want no leftover worktree after a clean probe, got %d", n)
 	}
+	assertNoProbeLeftovers(t, tmp)
 }
 
 func TestProbeTrustRemovesWorktreeWhenEntriesFail(t *testing.T) {
 	repo := probeRepo(t)
+	tmp := probeTempDir(t)
 	entries := []trust.Entry{{Name: "fails", Argv: []string{"false"}}}
 
 	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
@@ -182,10 +207,12 @@ func TestProbeTrustRemovesWorktreeWhenEntriesFail(t *testing.T) {
 	if n := worktreeCount(t, repo); n != 0 {
 		t.Errorf("want no leftover worktree after a probe with failures, got %d", n)
 	}
+	assertNoProbeLeftovers(t, tmp)
 }
 
 func TestProbeTrustRemovesWorktreeOnCanceledContext(t *testing.T) {
 	repo := probeRepo(t)
+	tmp := probeTempDir(t)
 	entries := []trust.Entry{
 		{Name: "one", Argv: []string{"true"}},
 		{Name: "two", Argv: []string{"true"}},
@@ -199,6 +226,59 @@ func TestProbeTrustRemovesWorktreeOnCanceledContext(t *testing.T) {
 	}
 	if n := worktreeCount(t, repo); n != 0 {
 		t.Errorf("want no leftover worktree after interruption, got %d", n)
+	}
+	assertNoProbeLeftovers(t, tmp)
+}
+
+// TestProbeTrustGivesLintersAnEphemeralCacheRoot: a probed gate's linter
+// caches point into a directory that dies with the probe worktree, not into
+// the operator's own cache. Entries cached there name the worktree's paths,
+// and a cache that outlives it replays suppressed issues as live.
+func TestProbeTrustGivesLintersAnEphemeralCacheRoot(t *testing.T) {
+	repo := probeRepo(t)
+	probeTempDir(t)
+	operatorCache := t.TempDir()
+	t.Setenv("GOLANGCI_LINT_CACHE", filepath.Join(operatorCache, "golangci-lint"))
+	t.Setenv("STATICCHECK_CACHE", filepath.Join(operatorCache, "staticcheck"))
+
+	entries := []trust.Entry{{
+		Name: "lint",
+		Argv: []string{"/bin/sh", "-c",
+			`printf 'GOLANGCI_LINT_CACHE=%s\nSTATICCHECK_CACHE=%s\n' "$GOLANGCI_LINT_CACHE" "$STATICCHECK_CACHE"`},
+	}}
+
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+	if len(result.Gates) != 1 || result.Gates[0].Exit == nil || *result.Gates[0].Exit != 0 {
+		t.Fatalf("want one passing gate row, got %+v", result.Gates)
+	}
+
+	seen := map[string]string{}
+	for _, line := range strings.Split(result.Gates[0].LogTail, "\n") {
+		if name, value, ok := strings.Cut(line, "="); ok {
+			seen[name] = value
+		}
+	}
+	golangci, staticcheck := seen["GOLANGCI_LINT_CACHE"], seen["STATICCHECK_CACHE"]
+	for name, v := range map[string]string{"GOLANGCI_LINT_CACHE": golangci, "STATICCHECK_CACHE": staticcheck} {
+		if v == "" {
+			t.Errorf("%s is unset in the probed gate's environment", name)
+			continue
+		}
+		if strings.HasPrefix(v, operatorCache) {
+			t.Errorf("%s = %q points into the operator's cache %q", name, v, operatorCache)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+
+	root := filepath.Dir(golangci)
+	if filepath.Dir(staticcheck) != root {
+		t.Fatalf("want both caches under one root, got %q and %q", golangci, staticcheck)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Errorf("cache root %q outlived the probe (stat err: %v)", root, err)
 	}
 }
 

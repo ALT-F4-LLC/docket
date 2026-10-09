@@ -128,7 +128,7 @@ func ProbeTrust(
 		if ctx.Err() != nil {
 			break
 		}
-		result.Gates = append(result.Gates, runProbeGate(repoRoot, worktree.Dir, head, e))
+		result.Gates = append(result.Gates, runProbeGate(repoRoot, worktree, head, e))
 	}
 
 	for _, g := range result.Gates {
@@ -158,7 +158,11 @@ func ProbeTrust(
 // exactly right — the throwaway worktree sits at the probed sha, nothing has
 // been committed on top of it, and an empty footprint is the answer a healthy
 // gate should give. A later refactor must not unify the two.
-func runProbeGate(repoRoot, worktreeDir, base string, e trust.Entry) TrustProbeGate {
+//
+// The linter caches go to the worktree's own cache root for the reason
+// exec.EnvPolicy.CacheRoot documents: the worktree is deleted when the probe
+// returns, so a cache entry naming its paths must be deleted with it.
+func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e trust.Entry) TrustProbeGate {
 	row := TrustProbeGate{Name: e.Name, Stub: e.Stub}
 	if len(e.Argv) == 0 {
 		row.LogTail = "roster entry has no argv — nothing to run"
@@ -181,13 +185,14 @@ func runProbeGate(repoRoot, worktreeDir, base string, e trust.Entry) TrustProbeG
 
 	env, err := dexec.BuildEnv(dexec.EnvPolicy{
 		Gate: e.Name, Repo: repoRoot, Network: e.Network, Base: base,
+		CacheRoot: worktree.Cache,
 	})
 	if err != nil {
 		row.LogTail = err.Error()
 		return row
 	}
 
-	res, err := dexec.Run(dexec.Spec{Argv: argv, Dir: worktreeDir, Env: env, Timeout: timeout})
+	res, err := dexec.Run(dexec.Spec{Argv: argv, Dir: worktree.Dir, Env: env, Timeout: timeout})
 	if err != nil {
 		row.LogTail = err.Error()
 		return row
@@ -232,7 +237,11 @@ func probeHead(repoRoot string) (string, error) {
 // probeWorktreeHandle is the throwaway detached checkout ProbeTrust measures
 // every gate in.
 type probeWorktreeHandle struct {
-	Dir    string
+	Dir string
+	// Cache is the linter cache root that lives exactly as long as Dir. It is
+	// a sibling of the worktree, never inside it, so the cache stays out of
+	// the tree the gates measure (scratchTree.Cache holds the same rule).
+	Cache  string
 	parent string
 }
 
@@ -260,7 +269,15 @@ func probeWorktree(repoRoot, sha string) (probeWorktreeHandle, error) {
 		os.RemoveAll(dir)
 		return probeWorktreeHandle{}, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
-	return probeWorktreeHandle{Dir: dir, parent: repoRoot}, nil
+
+	handle := probeWorktreeHandle{Dir: dir, parent: repoRoot}
+	cache := dir + "-cache"
+	if err := os.Mkdir(cache, 0o700); err != nil {
+		handle.release()
+		return probeWorktreeHandle{}, fmt.Errorf("creating the linter cache root: %w", err)
+	}
+	handle.Cache = cache
+	return handle, nil
 }
 
 // release removes the worktree and its administrative record, in both
@@ -268,8 +285,12 @@ func probeWorktree(repoRoot, sha string) (probeWorktreeHandle, error) {
 // the identical two-step for the identical reason: `os.RemoveAll` alone
 // leaves a stale `.git/worktrees` entry `git worktree list` reports forever,
 // and `git worktree remove` alone can decline over a gate's stray output
-// file, which `--force` covers.
+// file, which `--force` covers. The cache root goes with it, so no linter
+// cache entry naming the deleted worktree outlives the probe.
 func (h probeWorktreeHandle) release() {
+	if h.Cache != "" {
+		_ = os.RemoveAll(h.Cache)
+	}
 	if h.Dir == "" {
 		return
 	}
