@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
@@ -99,7 +100,8 @@ func runRunRefreshScope(cmd *cobra.Command, ref string, w *output.Writer) error 
 		return err
 	}
 	outcome, err := engine.RefreshIssueScopeInRun(
-		conn, runID, issueID, reason, by, model.NowMS())
+		conn, runID, issueID, reason, by, conductorToken(conn, runID, os.Stdin),
+		model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}

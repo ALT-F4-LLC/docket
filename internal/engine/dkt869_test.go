@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -31,9 +32,14 @@ import (
 // runs unchanged — the freeze is still the default, and this verb is the
 // exception to it.
 
-// refresh drives the engine entry point with the fixture's reason.
+// refresh drives the engine entry point with the fixture's reason, as the
+// suite's seated conductor.
 func refresh(conn *sql.DB, runID, issueID int) (*RefreshedScope, error) {
-	return RefreshIssueScopeInRun(conn, runID, issueID, "scope widened", testBy, nowMS)
+	if err := seatTestConductor(conn, runID); err != nil {
+		return nil, err
+	}
+	return RefreshIssueScopeInRun(
+		conn, runID, issueID, "scope widened", testBy, testConductorToken, nowMS)
 }
 
 // widen is the authorized act the refresh copies: the ONLY writer of
@@ -259,7 +265,9 @@ func TestRefreshRefusesWhereItCouldOnlyRewriteHistory(t *testing.T) {
 		runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
 		widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
 
-		_, err := RefreshIssueScopeInRun(conn, runID, issue, "  ", testBy, nowMS)
+		testsupport.Must(t, seatTestConductor(conn, runID), "seating the conductor")
+		_, err := RefreshIssueScopeInRun(
+			conn, runID, issue, "  ", testBy, testConductorToken, nowMS)
 		if err == nil {
 			t.Fatal("a refresh with no reason was accepted")
 		}
@@ -462,7 +470,9 @@ func TestRefreshEventCarriesTheAttribution(t *testing.T) {
 	runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
 	widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
 	by := Attribution{Actor: "the conductor", Cwd: "/work/shared"}
-	_, err := RefreshIssueScopeInRun(conn, runID, issue, "scope widened", by, nowMS)
+	testsupport.Must(t, seatTestConductor(conn, runID), "seating the conductor")
+	_, err := RefreshIssueScopeInRun(
+		conn, runID, issue, "scope widened", by, testConductorToken, nowMS)
 	testsupport.Must(t, err, "refreshing: %v", err)
 
 	var data string
@@ -480,4 +490,83 @@ func TestRefreshEventCarriesTheAttribution(t *testing.T) {
 			t.Errorf("event lost its %q key: %s", key, data)
 		}
 	}
+}
+
+// TestRefreshRequiresTheConductorCapability: on a bound run only the conductor
+// may move the frozen scope. Without the check an executor could widen its own
+// issue with `issue edit --scope` and then make that widen reach its packets.
+func TestRefreshRequiresTheConductorCapability(t *testing.T) {
+	bound := func(t *testing.T) (*sql.DB, int, int) {
+		t.Helper()
+		conn := mustDB(t)
+		runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+		hash, err := db.RunConductorHash(conn, runID)
+		testsupport.Must(t, err, "reading the conductor hash: %v", err)
+		if hash == "" {
+			t.Fatal("premise: activation minted no conductor capability")
+		}
+		widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
+		return conn, runID, issue
+	}
+	call := func(conn *sql.DB, runID, issue int, token string) error {
+		_, err := RefreshIssueScopeInRun(
+			conn, runID, issue, "scope widened", testBy, token, nowMS)
+		return err
+	}
+
+	t.Run("no token", func(t *testing.T) {
+		conn, runID, issue := bound(t)
+		err := call(conn, runID, issue, "")
+		if code, ok := CodeOf(err); !ok || code != CodeValidation {
+			t.Fatalf("error = %v (code %v), want VALIDATION_ERROR", err, code)
+		}
+		assertFrozenScope(t, conn, runID, issue, "internal/a/**")
+		assertNoRefreshEvent(t, conn, runID)
+	})
+
+	t.Run("a token that is not the run's", func(t *testing.T) {
+		conn, runID, issue := bound(t)
+		err := call(conn, runID, issue, "an-executors-lease-token")
+		if code, ok := CodeOf(err); !ok || code != CodeAuth {
+			t.Fatalf("error = %v (code %v), want AUTH_ERROR", err, code)
+		}
+		if !errors.Is(err, ErrNotConductor) {
+			t.Errorf("error %v does not wrap ErrNotConductor", err)
+		}
+		assertFrozenScope(t, conn, runID, issue, "internal/a/**")
+		assertNoRefreshEvent(t, conn, runID)
+	})
+
+	t.Run("the authorization precedes the state checks", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+		err := call(conn, runID, issue, "")
+		if code, ok := CodeOf(err); !ok || code != CodeValidation {
+			t.Fatalf("error = %v (code %v), want VALIDATION_ERROR before the "+
+				"no-widen CONFLICT", err, code)
+		}
+	})
+
+	t.Run("the current conductor token", func(t *testing.T) {
+		conn, runID, issue := bound(t)
+		testsupport.Must(t, seatTestConductor(conn, runID), "seating the conductor")
+		testsupport.Must(t, call(conn, runID, issue, testConductorToken),
+			"refreshing as the conductor")
+		assertFrozenScope(t, conn, runID, issue, "internal/a/**", "internal/b/**")
+	})
+}
+
+// TestRefreshOnAnUnboundRunNeedsNoToken: a run with no minted capability
+// (activated before the capability existed and never conducted) stays
+// refreshable without a token, as every conductor-gated verb treats it.
+func TestRefreshOnAnUnboundRunNeedsNoToken(t *testing.T) {
+	conn := mustDB(t)
+	runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+	mustExec(t, conn, `UPDATE runs SET conductor_token_hash = NULL WHERE id = ?`, runID)
+	widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
+
+	_, err := RefreshIssueScopeInRun(
+		conn, runID, issue, "scope widened", testBy, "", nowMS)
+	testsupport.Must(t, err, "refreshing an unbound run: %v", err)
+	assertFrozenScope(t, conn, runID, issue, "internal/a/**", "internal/b/**")
 }

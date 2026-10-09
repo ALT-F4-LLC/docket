@@ -114,8 +114,13 @@ var refreshBlockingStepStatuses = []string{
 // its siblings' scope too, which is a blast radius the argument no longer
 // matches — and it would let two steps of one issue disagree about scope
 // inside one dispatch, which is the drift D2 exists to prevent.
+//
+// On a bound run it requires the conductor capability (DKT-2465) as `token`:
+// `issue edit --scope` is ungated, so without this check an executor could
+// widen its own issue and then make that widen reach its own packets.
 func RefreshIssueScopeInRun(
-	conn *sql.DB, runID, issueID int, reason string, by Attribution, nowMS int64,
+	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
 ) (*RefreshedScope, error) {
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
@@ -139,6 +144,9 @@ func RefreshIssueScopeInRun(
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeConductorTx(tx, runID, token, "run refresh-scope"); err != nil {
 		return nil, err
 	}
 	// The same two statuses repin accepts, for the same reason: a `planning`

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -159,6 +160,83 @@ func TestRunRefreshScopeRefusesAClaimedStep(t *testing.T) {
 
 	_, refreshErr := refreshScope(t, conn, runID, issueID, "authorized", false)
 	assertRefreshCode(t, refreshErr, output.ErrConflict, "fix@2")
+}
+
+// TestRunRefreshScopeRequiresTheConductorCapability: on a bound run the verb
+// reads the conductor token from DOCKET_TOKEN and refuses without it, so an
+// executor cannot make its own `issue edit --scope` reach its packets.
+func TestRunRefreshScopeRequiresTheConductorCapability(t *testing.T) {
+	bound := func(t *testing.T) (*sql.DB, int, int, string) {
+		t.Helper()
+		conn := newTestDB(t)
+		runID, issueID := scopedIssueInLiveRun(t, conn, `["a/**"]`, `["a/**"]`)
+		token := seatConductor(t, conn, runID)
+		editWithScope(t, conn, issueID, false, "a/**", "b/**")
+		return conn, runID, issueID, token
+	}
+
+	t.Run("no token", func(t *testing.T) {
+		conn, runID, issueID, _ := bound(t)
+		t.Setenv(TokenEnvVar, "")
+		_, err := refreshScope(t, conn, runID, issueID, "authorized", false)
+		assertRefreshCode(t, err, output.ErrValidation, TokenEnvVar)
+		assertRefreshRefused(t, conn, runID, issueID)
+	})
+
+	t.Run("a token that is not the run's", func(t *testing.T) {
+		conn, runID, issueID, _ := bound(t)
+		t.Setenv(TokenEnvVar, "an-executors-lease-token")
+		_, err := refreshScope(t, conn, runID, issueID, "authorized", false)
+		assertRefreshCode(t, err, output.ErrAuth, "conductor capability")
+		assertRefreshRefused(t, conn, runID, issueID)
+	})
+
+	t.Run("the current conductor token", func(t *testing.T) {
+		conn, runID, issueID, token := bound(t)
+		t.Setenv(TokenEnvVar, token)
+		_, err := refreshScope(t, conn, runID, issueID, "authorized", false)
+		testsupport.Must(t, err, "run refresh-scope as the conductor: %v", err)
+		if got := snapshotScopeJSON(t, conn, runID, issueID); got != `["a/**","b/**"]` {
+			t.Errorf("snapshot scope = %s, want the widened declaration", got)
+		}
+	})
+}
+
+// TestRunRefreshScopeOnAnUnboundRunNeedsNoToken: a run with no minted
+// capability is refreshed without a token, as at every conductor-gated verb.
+func TestRunRefreshScopeOnAnUnboundRunNeedsNoToken(t *testing.T) {
+	t.Setenv(TokenEnvVar, "")
+	conn := newTestDB(t)
+	runID, issueID := scopedIssueInLiveRun(t, conn, `["a/**"]`, `["a/**"]`)
+	hash, err := db.RunConductorHash(conn, runID)
+	testsupport.Must(t, err, "reading the conductor hash: %v", err)
+	if hash != "" {
+		t.Fatal("premise: the fixture run is bound to a conductor capability")
+	}
+	editWithScope(t, conn, issueID, false, "a/**", "b/**")
+
+	_, err = refreshScope(t, conn, runID, issueID, "authorized", false)
+	testsupport.Must(t, err, "run refresh-scope on an unbound run: %v", err)
+	if got := snapshotScopeJSON(t, conn, runID, issueID); got != `["a/**","b/**"]` {
+		t.Errorf("snapshot scope = %s, want the widened declaration", got)
+	}
+}
+
+// assertRefreshRefused checks that a refused refresh wrote nothing: the
+// snapshot keeps its frozen scope and no issue-scope-refreshed event exists.
+func assertRefreshRefused(t *testing.T, conn *sql.DB, runID, issueID int) {
+	t.Helper()
+	if got := snapshotScopeJSON(t, conn, runID, issueID); got != `["a/**"]` {
+		t.Errorf("snapshot scope = %s after a refused refresh, want it frozen", got)
+	}
+	var n int
+	err := conn.QueryRow(`SELECT COUNT(*) FROM events WHERE kind = ? AND run_id = ?`,
+		engine.EventIssueScopeRefreshed, runID).Scan(&n)
+	testsupport.Must(t, err, "counting refresh events: %v", err)
+	if n != 0 {
+		t.Errorf("%d %s event(s) recorded by a refused refresh",
+			n, engine.EventIssueScopeRefreshed)
+	}
 }
 
 func assertRefreshCode(t *testing.T, err error, want output.ErrorCode, names string) {
