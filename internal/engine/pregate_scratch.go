@@ -2,12 +2,16 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // Scratch-tree reconstruction for pre-gates (DKT-254).
@@ -348,6 +352,92 @@ func scratchNote(sha, dir string) string {
 			"checked out anywhere reachable, so it was rebuilt from the object "+
 			"database rather than substituting a different tree",
 		short, filepath.Base(dir))
+}
+
+// retainedTargetAdvisory is the sentence a claim's measured pre-gate rows carry
+// when the target is a head retained across a later round that recorded no
+// commit, and the shared checkout's history does not contain it. It is "" in
+// every other case, including when git cannot answer the ancestry question.
+//
+// The target is never moved here. The verdict still describes the retained
+// head; the sentence tells the operator that this is the tree measured and
+// which verbs move the target on purpose.
+func retainedTargetAdvisory(
+	conn *sql.DB, e *Engine, step *db.Step, targetSHA string,
+) (string, error) {
+	if targetSHA == "" || e == nil || e.IsAncestorFn == nil {
+		return "", nil
+	}
+	retained, err := retainedAcrossNoCommitRound(conn, step, targetSHA)
+	if err != nil || !retained {
+		return "", err
+	}
+	ancestor, known := e.IsAncestorFn(runExecRoot(conn, step.RunID), targetSHA)
+	if !known || ancestor {
+		return "", nil
+	}
+	return fmt.Sprintf(
+		"the measured tree is the retained target %s: a later round recorded no "+
+			"commit, and the shared checkout's history does not contain this "+
+			"head; move the target with `docket step annotate --integrated-sha` "+
+			"or `docket step resolve --as rerun-gates --worktree`",
+		targetSHA), nil
+}
+
+// retainedAcrossNoCommitRound reports whether a tree-holding executor step of
+// the step's issue recorded its declared artifact after the newest issue.diff
+// naming targetSHA. Such a completion computed a diff and recorded none, so
+// the target it left in place is retained from an earlier round.
+//
+// A holding step records its declared artifact before its own issue.diff, so
+// the round that produced the target never counts against it.
+func retainedAcrossNoCommitRound(conn *sql.DB, step *db.Step, targetSHA string) (bool, error) {
+	artifacts, err := db.ListRunArtifacts(conn, step.RunID)
+	if err != nil {
+		return false, err
+	}
+	steps, err := db.ListRunSteps(conn, step.RunID)
+	if err != nil {
+		return false, err
+	}
+	issueSteps := make(map[int]*db.Step, len(steps))
+	for _, s := range steps {
+		if s.IssueID == step.IssueID {
+			issueSteps[s.ID] = s
+		}
+	}
+
+	targetDiff := 0
+	for _, a := range artifacts {
+		if a.Kind != ArtifactKindIssueDiff || issueSteps[a.StepID] == nil || a.ID < targetDiff {
+			continue
+		}
+		var record struct {
+			Head string `json:"head"`
+		}
+		if json.Unmarshal([]byte(a.Payload), &record) == nil && record.Head == targetSHA {
+			targetDiff = a.ID
+		}
+	}
+	if targetDiff == 0 {
+		return false, nil
+	}
+
+	defs, err := StepDefinitions(conn, step.RunID)
+	if err != nil {
+		return false, err
+	}
+	for _, a := range artifacts {
+		producer := issueSteps[a.StepID]
+		if a.ID <= targetDiff || producer == nil || !isExecutorStep(producer) {
+			continue
+		}
+		spec := materializedSpec(defs[producer.WorkflowID], producer, holdTally{})
+		if spec != nil && stepHoldsTree(spec) && a.Kind == workflow.ArtifactKind(spec) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // withScratchNote appends the reconstruction note to a row's reason, keeping

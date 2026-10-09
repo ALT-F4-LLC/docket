@@ -250,9 +250,22 @@ func runPreGates(
 		}
 	}
 
+	// Whether the target is a retained head the shared checkout does not
+	// carry is a fact about this claim, decided once like the binding. A
+	// served row was measured before the claim, so it gains the sentence in
+	// the bundle only; a row measured here records it.
+	advisory, err := retainedTargetAdvisory(conn, e, step, targetSHA)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, gate := range gates {
 		if r, ok := served[gate.Name]; ok {
-			out = append(out, preGateResultOfRecorded(r))
+			result := preGateResultOfRecorded(r)
+			if advisory != "" {
+				result.Reason = withScratchNote(result.Reason, advisory)
+			}
+			out = append(out, result)
 			continue
 		}
 
@@ -262,7 +275,7 @@ func runPreGates(
 		} else {
 			rows, err = measurePreGate(conn, e, step, gate, preGateMeasurement{
 				workRoot: workRoot, scratch: scratch, targetSHA: targetSHA,
-				deadline: deadline,
+				deadline: deadline, advisory: advisory,
 			}, nowMS)
 		}
 		if err != nil {
@@ -291,6 +304,10 @@ type preGateMeasurement struct {
 	// reason, so a claim can find them and a reader can tell them from rows
 	// the claim measured itself.
 	detached bool
+	// advisory, when set, is appended to every recorded row's reason: the
+	// claim found the target retained and off the shared history
+	// (retainedTargetAdvisory).
+	advisory string
 	// record, when set, is asked INSIDE the recording transaction whether the
 	// rows may still be written; false writes nothing and the measurement
 	// ends with errPreGateRecordDeclined. The detached path uses it to refuse
@@ -395,6 +412,9 @@ func measurePreGate(
 		if m.detached {
 			rows[i].TargetSHA = m.targetSHA
 			rows[i].Reason = withScratchNote(rows[i].Reason, detachedNote(m.targetSHA))
+		}
+		if m.advisory != "" {
+			rows[i].Reason = withScratchNote(rows[i].Reason, m.advisory)
 		}
 	}
 

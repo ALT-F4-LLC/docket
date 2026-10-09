@@ -1036,3 +1036,210 @@ func TestPreGateGateBaseAbsentWithoutTarget(t *testing.T) {
 	r := runGateBasePreGate(t, shared, pinned, "", "")
 	wantNoGateBase(t, r)
 }
+
+// A verify claim whose target was retained across a round that recorded no
+// commit measures that retained head, and says so when the shared checkout
+// does not carry it. The target never moves on its own: moving it is the
+// annotate-integration or `--worktree` re-pin verbs' job, and the advisory
+// names both.
+
+const (
+	retainedAnnotateVerb = "docket step annotate --integrated-sha"
+	retainedRepinVerb    = "docket step resolve --as rerun-gates --worktree"
+)
+
+// trustedTruePreGateEngine is an engine whose ac-commands pre-gate is trusted
+// and always passes, so a case's assertions rest on the reason alone.
+func trustedTruePreGateEngine(t *testing.T, repoRoot string) *Engine {
+	t.Helper()
+	argv := []string{"/usr/bin/true"}
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Global: true,
+	})
+	e := testEngine()
+	e.Gates = runner
+	return e
+}
+
+// retainedTargetRun activates the fixture over a real shared checkout and
+// commits implement's change in its own worktree, returning the run's issue,
+// the shared checkout, the worktree, and its head.
+func retainedTargetRun(t *testing.T, conn *sql.DB) (issue int, shared, tree, head string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	shared = gitRepo(t)
+	pinned := gitRun(t, shared, "rev-parse", "HEAD")
+
+	registerFixture(t, conn)
+	issue = createIssue(t, conn, "retained target", "body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "retained-target run", 0, nowMS,
+		db.RunContext{ExecRoot: shared, CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue: %v", err)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	tree = filepath.Join(t.TempDir(), "wf-implement-a")
+	gitRun(t, shared, "worktree", "add", "-q", tree)
+	writeFile(t, tree, "internal/tracked.txt", "THE CHANGE\n")
+	gitRun(t, tree, "add", "-A")
+	gitRun(t, tree, "commit", "-qm", "the change")
+	return issue, shared, tree, gitRun(t, tree, "rev-parse", "HEAD")
+}
+
+// claimVerifyOverRetainedTarget records implement's commit (attempt 1, parked
+// on a failing gate), lets integrate land it on the shared checkout, retries
+// implement in a worktree forked from the new shared head (attempt 2 commits
+// nothing, so its empty diff is dropped and attempt 1's head is retained),
+// drives the run to verify, and claims it. It returns the claim and the
+// retained head.
+func claimVerifyOverRetainedTarget(
+	t *testing.T, integrate func(shared, headA string),
+) (*ClaimResult, string) {
+	t.Helper()
+	conn := mustDB(t)
+	issue, shared, treeA, headA := retainedTargetRun(t, conn)
+
+	gates := &scriptedGates{fail: true}
+	writer := testEngine()
+	writer.Gates = gates
+	writer.DiffFn = GitDiff
+	writer.HeadFn = sharedCheckoutHead
+
+	implement := stepIDIn(t, conn, issue, "implement@0")
+	claim, err := ClaimStep(conn, implement, ClaimOptions{Owner: "w1", NowMS: nowMS})
+	testsupport.Must(t, err, "claim (attempt 1): %v", err)
+	err = writer.CompleteStep(conn, implement, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change summary"),
+		WorkDir: treeA, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete (attempt 1): %v", err)
+
+	integrate(shared, headA)
+	gates.fail = false
+	err = writer.ResolveStep(conn, implement, ResolveRetry, "redo it on the integrated base", nowMS+1)
+	testsupport.Must(t, err, "resolve --as retry: %v", err)
+
+	treeB := filepath.Join(t.TempDir(), "wf-implement-b")
+	gitRun(t, shared, "worktree", "add", "-q", "--detach", treeB)
+	claim, err = ClaimStep(conn, implement, ClaimOptions{Owner: "w2", NowMS: nowMS + 2})
+	testsupport.Must(t, err, "claim (attempt 2): %v", err)
+	err = writer.CompleteStep(conn, implement, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change was already there"),
+		WorkDir: treeB, NowMS: nowMS + 2,
+	})
+	testsupport.Must(t, err, "complete (attempt 2): %v", err)
+	run := stepRunID(t, conn, implement)
+	if head, _, records := newestIssueDiffTarget(t, conn, run, issue); records != 1 || head != headA {
+		t.Fatalf("the retry left %d issue.diff record(s) naming %s, want 1 naming %s",
+			records, head, headA)
+	}
+
+	// The fixture's review steps hold the tree; an empty diff keeps their
+	// completions from recording an issue.diff over the retained one.
+	pass := testEngine()
+	pass.DiffFn = func(_, _ string, _ []string) (string, error) { return "", nil }
+	for i := range 4 {
+		claimAndComplete(t, conn, pass, "review@0#"+strconv.Itoa(i), "findings", "")
+	}
+	claimAndComplete(t, conn, pass, "synthesize@0", "synthesized", "")
+	driveAction(t, conn, pass, "reconcile@0")
+
+	verify, err := trustedTruePreGateEngine(t, shared).ClaimStepWithGates(conn,
+		stepIDIn(t, conn, issue, "verify@0"),
+		ClaimOptions{Owner: "verifier", NowMS: nowMS + 3})
+	testsupport.Must(t, err, "claim verify: %v", err)
+	if len(verify.Context.PreGates) != 1 {
+		t.Fatalf("the verify claim carries %d pre-gate results, want 1",
+			len(verify.Context.PreGates))
+	}
+	return verify, headA
+}
+
+func stepRunID(t *testing.T, conn *sql.DB, stepID int) int {
+	t.Helper()
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep(%d): %v", stepID, err)
+	return step.RunID
+}
+
+// TestRetainedTargetOffSharedHistoryNamesTheRemedies: the shared checkout took
+// a cherry-pick of the retained head, so the head itself is off its history.
+// The pre-gate still measures the retained head, and its reason says that tree
+// is the retained target and how to move it.
+func TestRetainedTargetOffSharedHistoryNamesTheRemedies(t *testing.T) {
+	verify, headA := claimVerifyOverRetainedTarget(t, func(shared, headA string) {
+		writeFile(t, shared, "internal/sibling.txt", "a sibling issue's work\n")
+		gitRun(t, shared, "add", "-A")
+		gitRun(t, shared, "commit", "-qm", "sibling work")
+		gitRun(t, shared, "cherry-pick", headA)
+	})
+
+	if verify.Context.TargetSHA != headA {
+		t.Errorf("target_sha = %q, want the retained head %s", verify.Context.TargetSHA, headA)
+	}
+	reason := verify.Context.PreGates[0].Reason
+	for _, want := range []string{"retained target", headA, retainedAnnotateVerb, retainedRepinVerb} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the pre-gate reason does not contain %q:\n%s", want, reason)
+		}
+	}
+}
+
+// TestRetainedTargetOnSharedHistoryCarriesNoAdvisory: the shared checkout
+// fast-forwarded to the retained head, so there is nothing to move.
+func TestRetainedTargetOnSharedHistoryCarriesNoAdvisory(t *testing.T) {
+	verify, headA := claimVerifyOverRetainedTarget(t, func(shared, headA string) {
+		gitRun(t, shared, "merge", "-q", "--ff-only", headA)
+	})
+
+	if verify.Context.TargetSHA != headA {
+		t.Errorf("target_sha = %q, want the retained head %s", verify.Context.TargetSHA, headA)
+	}
+	reason := verify.Context.PreGates[0].Reason
+	for _, unwanted := range []string{retainedAnnotateVerb, retainedRepinVerb} {
+		if strings.Contains(reason, unwanted) {
+			t.Errorf("the pre-gate reason names %q for a target the shared checkout "+
+				"carries:\n%s", unwanted, reason)
+		}
+	}
+}
+
+// TestUnintegratedTargetWithoutALaterRoundCarriesNoAdvisory: a target off the
+// shared history is the ordinary state before integration. With no later
+// round that recorded no commit, the target is not retained, and the reason
+// says nothing about moving it.
+func TestUnintegratedTargetWithoutALaterRoundCarriesNoAdvisory(t *testing.T) {
+	conn := mustDB(t)
+	issue, shared, tree, head := retainedTargetRun(t, conn)
+
+	writer := testEngine()
+	writer.DiffFn = GitDiff
+	writer.HeadFn = sharedCheckoutHead
+	implement := stepIDIn(t, conn, issue, "implement@0")
+	claim, err := ClaimStep(conn, implement, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim implement: %v", err)
+	err = writer.CompleteStep(conn, implement, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change summary"),
+		WorkDir: tree, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete implement: %v", err)
+
+	verify, err := db.GetStep(conn, stepIDIn(t, conn, issue, "verify@0"))
+	testsupport.Must(t, err, "GetStep(verify@0): %v", err)
+	got, err := runPreGates(conn, trustedTruePreGateEngine(t, shared), verify,
+		[]workflow.Gate{{Name: "ac-commands", Pre: true}}, head, tree, nowMS)
+	testsupport.Must(t, err, "runPreGates: %v", err)
+	if len(got) != 1 || got[0].Verdict != VerdictPass {
+		t.Fatalf("results = %+v, want one pass", got)
+	}
+	if strings.Contains(got[0].Reason, retainedAnnotateVerb) ||
+		strings.Contains(got[0].Reason, retainedRepinVerb) {
+		t.Errorf("an unintegrated target with no later round carries the "+
+			"retained-target advisory:\n%s", got[0].Reason)
+	}
+}
