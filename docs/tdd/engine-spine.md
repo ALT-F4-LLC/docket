@@ -260,7 +260,15 @@ bare-int shorthand (`"write" = 1` ⇒ `{max: 1}`), per §11.1.
 ## 4.3 Register-time validation table
 
 Every row is a `VALIDATION_ERROR` (exit 3) naming the workflow, the step, and the
-offending field. Every row is a test case (§4.6). The table is the phase's contract:
+offending field. Every row is a test case (§4.6). The table is the phase's contract,
+and its rows match the `RuleIDs` slice in `internal/workflow/validate.go` one for one.
+V12, the old `on_fail` closed-vocabulary rule, is gone: a value outside that
+vocabulary now names a triage panel, and V40 resolves it.
+
+Most rows are decided by `Validate`, a pure function of the definition's bytes.
+V26 runs in `ValidateVoteRules`, and V21a–V21d, V25a, V28a, V29, V30, and V37a run
+in `ValidateSchemas`, because they consult the project's registered vote rules and
+schemas. V21d records a case that is *not* an error.
 
 | # | Rule | Spec line |
 |---|---|---|
@@ -275,22 +283,57 @@ offending field. Every row is a test case (§4.6). The table is the phase's cont
 | V9 | every `after` entry names a step in this workflow | §11.1 `after`: "intra-workflow predecessors" |
 | V10 | `after = []` is legal and means root; a **missing** `after` on a non-exempt step is the error | §11.1: "`[]` = root (implicit topology was a footgun)" |
 | V11 | `inputs` entries match `<step>.<kind>` \| `<step>.*` \| `issue.body` \| `issue.diff`; the named step exists; a `<step>.<kind>` names a kind that step actually produces (§4.3.1) | §11.1 `inputs` |
-| V12 | `on_fail` ∈ {`fix-loop`, `waiting-human`, `skip`, `abandon-issue`} | §11.1 `on_fail`; engine-core §4 "closed vocabulary" |
+| V11a | a step may not produce an artifact of the reserved kind `gate-results`; `<step>.gate-results` is the engine-served input form for recorded gate results, so such an artifact could never be addressed | §11.1 `inputs`; §4.3.1 |
+| V11b | a step may not produce an artifact of the reserved kind `vote-record`; `<step>.vote-record` is the engine-served input form for a vote step's recorded proposal | §11.1 `inputs` (`<step>.vote-record`); §4.3.1 |
 | V13 | **a `type="human"` step's reject routing may not be `waiting-human`** — evaluated against the **effective** routing (declared `on_fail`, else the §11.1 default), so the default cannot smuggle the deadlock back in (§4.3.2) | §2: "a human gate's reject routing may not itself be `waiting-human` (register-time VALIDATION_ERROR)"; §11.1 `on_fail` (amended 2026-08-03) |
-| V13a | **`on_fail` is required, explicitly, on `type="human"` steps** — the corollary of V13 over the effective value; the error names the step and the three legal values | §11.1 `on_fail`: "`type="human"` steps must declare it explicitly and `"waiting-human"` is invalid there" (amended 2026-08-03) |
+| V13a | **`on_fail` is required, explicitly, on `type="human"` and `type="vote"` steps** — the corollary of V13 over the effective value; the error names the step and the legal values for its type (`waiting-human` is legal on a vote step, where it escalates to an operator) | §11.1 `on_fail`: "`type="human"` steps must declare it explicitly and `"waiting-human"` is invalid there" (amended 2026-08-03) |
 | V14 | `voters` and `vote_rule` required on `type="vote"`, forbidden elsewhere | §11.1 `voters`, `vote_rule` |
 | V15 | `fanout` non-empty when present | §11.1 `fanout` |
 | V16 | `min_siblings` ≥ 1 and ≤ `len(fanout)`; only on fanout steps | §11.1 `min_siblings`; §2 fanout joins |
 | V17 | `after_loop` names an existing step; only meaningful with `loop = true` in the workflow | §11.3 |
 | V17b | a step that can route `fix-loop` (via `on_fail` or `threshold`) requires a `loop = true` step in the workflow (DKT-196) | §11.3 |
+| V17c | when every `loop = true` body declares `serves`, a step that can route `fix-loop` (via `on_fail`, `threshold`, or a triage panel's `fix-round`) must appear in at least one body's `serves`; a body without `serves` serves every trigger | §11.3 "every step that can route `fix-loop` must be served by at least one body" |
 | V18 | `loop = true` steps have no `after` (their ordering comes from loop entry) | §11.1 `after`; §11.3 (3) |
-| V19 | `max_attempts` ≥ 1; `max_fix_loops` ≥ 0; `expected_cost` ≥ 0 | §11.1 |
+| V19 | `max_attempts` ≥ 1; `max_fix_loops` ≥ 0; `max_stalled_rounds` ≥ 0; `expected_cost` ≥ 0 | §11.1 |
 | V20 | `threshold` keys ∈ {`fix-loop`, `waiting-human`, `pass`} ∪ step names in this workflow | §11.2 |
 | V21 | `threshold` predicate parses as `agg(field op literal)`, `agg ∈ {any, all, count>=n}`, `op ∈ {==, !=, >=, >, <=, <}` | §11.2 |
+| V21a | each `threshold` predicate's field is a top-level property of the item schema the step's `payload` names; the reserved `diff.*` fields are exempt (V45–V47) | payloads-thresholds §4.9.1 |
+| V21b | each predicate's literal is a member of the field's `enum` when it declares one, and otherwise parses as its declared `type` (`number`, `integer`, `boolean`) | payloads-thresholds §4.9.1 |
+| V21c | an ordered operator (`>=`, `>`, `<=`, `<`) requires the field to declare `ordered_enum` | payloads-thresholds §4.9.1 |
+| V21d | a step with a `threshold` and no `payload` gets V21's grammar check only: no field check, and T3 at runtime. Not an error; no code path emits it | payloads-thresholds §4.9.1 |
 | V22 | `when` parses as a predicate over `kind`/`labels` only, its clauses joined by `and` throughout or `or` throughout — a mix of the two is refused (DKT-548). A clause is `<kind\|labels> <==\|!=\|contains> <value>` or the set form `labels contains-any (a, b, c)`, whose list must be non-empty, comma-separated, and free of whitespace inside its values; `contains-any` is `labels`-only (DKT-550). The set operator is equivalently spelled `contains_any` and its list equivalently delimited `[a, b, c]`, with the delimiters required to pair (DKT-1000) | §11.1 `when`; engine-core §4 "conditions (predicates over issue kind/labels only)" |
 | V23 | `class` defaults to the `executor` value when unset | §11.1 `class`: "default = executor value" |
 | V24 | `[limits]` values: `max` ≥ 1, `lease_ttl`/`max_step_duration` parse as durations | §11.1 `[limits]` |
 | V25 | `payload` matches `name@version` shape (**shape only** at S3 — §6.14) | §11.1 `payload` |
+| V25a | `payload` names a registered `name@version` that is not retired | payloads-thresholds §4.9.1 |
+| V26 | a `type="vote"` step's `vote_rule` names a registered threshold configuration; the error lists the registered rules and, when other projects configure the rule, gives the `--global` remedy | gates-trust §8.2 |
+| V27 | a step `name` may not end in the reserved `-held` suffix, and `action` may not name a reserved builtin this build does not implement | payloads-thresholds §7.1 |
+| V28 | `action = "aggregate"` requires `params.field`, `params.method` ∈ {`median`, `max`, `min`}, and `params.output`; `hold_spread` is an integer ≥ 0, and `route_at` and `source_field` are non-empty strings, when present; no other `params` keys | payloads-thresholds §7.1 |
+| V28a | an `aggregate` step's `params.route_at` names a value in the order its schema declares for `params.field` | payloads-thresholds §7.1 |
+| V29 | an `aggregate` step declares `payload`, and that schema declares `params.field` as `ordered_enum` | payloads-thresholds §7.1 |
+| V30 | an `aggregate` step's schema accepts a probe output document built from the schema's own declared values | payloads-thresholds §7.1 |
+| V31 | `action = "aggregate"` requires a non-empty `inputs` | §2 `aggregate`: its input is the step's declared `inputs` artifacts |
+| V32 | each `packet` entry is non-empty, relative (no leading `/` or `~`), and has no `..` segment, with backslashes read as `/`; shape only, since a file's existence is checked at activation | packet-composition §1.6 |
+| V33 | a `packet` entry with the `{executor}` token requires the step to declare `executor` or `fanout` | packet-composition §1.6 |
+| V34 | a step may not be named `issue.latest` or `issue.linked`, or start with `issue.latest.` or `issue.linked.`; those are engine-served input forms | §11.1 `inputs` |
+| V35 | `serves` is valid only on `loop = true` steps; each entry is non-empty and names a step of this workflow that can route `fix-loop` | §11.3 "`serves` is valid only on `loop = true` steps" |
+| V36 | on a `type="vote"` step, each `threshold` routing is `fix-loop`, `waiting-human`, or `pass` (no step names), the operator is `==` or `!=`, and the field is `vote`, `verdict`, or `voter` | §11.2 |
+| V37 | `pass_floor` declares both `field` and `at`, and the step declares `payload` | §11.1 `pass_floor` |
+| V37a | `pass_floor.field` is declared as `ordered_enum` in the step's schema, and `pass_floor.at` is a value of that order | §11.1 `pass_floor`; payloads-thresholds §4.9.1 |
+| V38 | a positive `max_stalled_rounds` requires a step that can route `fix-loop` and records an artifact (not a `type` step) | §11.1 `max_stalled_rounds` |
+| V39 | every `after_fired` entry names a step in this workflow | §11.1 `after_fired` |
+| V39a | every `after_fired` entry also appears in the step's `after` | §11.1 `after_fired`: "every entry must also appear in `after`" |
+| V40 | an `on_fail` outside the closed vocabulary names a triage panel: the routing step must be an executor, and the name must resolve to a `type="vote"` step whose `after` includes the routing step | §11.1 `on_fail` |
+| V40a | `on_fail_routes` is valid only on `type="vote"` steps, and its keys are `approved` or `rejected` | §11.1 `on_fail_routes` |
+| V40b | each `on_fail_routes` value is `retry`, `fix-round`, `abandon-issue`, or `waiting-human`; `fix-round` requires a `loop = true` body serving every step that routes to the panel | §11.1 `on_fail_routes` |
+| V40c | a vote step named by another step's `on_fail` must declare `on_fail_routes`, and its own `on_fail` may not be `skip` | §11.1 `on_fail_routes` |
+| V41 | `on_exhausted` is valid only on a step that can route `fix-loop` and declares a positive `max_fix_loops`; a value other than `waiting-human` or `abandon-issue` names a `type="vote"` or executor step whose `after` includes this step | §11.1 `on_exhausted` |
+| V42 | every `[match].sizes_any` entry is a valid issue size: `trivial`, `small`, `bounded`, `needs-design`, or `unknown`. A definition-level rule, so the error names the field and no step | §11.1 `[match]`; reliability-delta "AMENDMENT — the span extends to v34" |
+| V43 | `roster`, `weighting`, and `recuse` are valid only on `type="vote"` steps, with values in {`open`, `strict`}, {`declared`, `equal`}, and {`none`, `executor`} | §11.1 `roster`, `weighting`, `recuse` |
+| V44 | `reviews` is valid only on `type="vote"` steps and names another step of this workflow, not the vote step itself | §11.1 `reviews` |
+| V45 | a `threshold` predicate over a reserved `diff.*` field requires a tree-holding step: an executor or fanout step that does not declare `holds_tree = false` | §11.2; payloads-thresholds §5.1 |
+| V46 | a predicate over `diff.lines` or `diff.files` compares against an integer literal, under any operator | §11.2; payloads-thresholds §5.1 |
+| V47 | a predicate over `diff.empty` uses `==` or `!=` and compares against a boolean literal | §11.2; payloads-thresholds §5.1 |
 
 **V5 and V8 are the two the spec calls out by name**, and they are the two that
 make a workflow's topology unambiguous. V13/V13a are called out because they are the
@@ -453,7 +496,7 @@ lifecycle. It creates the directory tree if absent and never overwrites without
 
 | Situation | Code | Exit |
 |---|---|---|
-| grammar/validation/lint failure (V1–V25 incl. V13a, L1–L4) | `VALIDATION_ERROR` | 3 |
+| grammar/validation/lint failure (every rule in `RuleIDs`, §4.3; L1–L4) | `VALIDATION_ERROR` | 3 |
 | file unreadable / not found | `NOT_FOUND` | 2 |
 | re-register differing bytes at existing `name@version` | `CONFLICT` | 4 |
 | `workflow show` on an unregistered name/version | `NOT_FOUND` | 2 |
@@ -474,10 +517,9 @@ in the style of `internal/planner/plan_test.go`:
   `TestValidationTableIsComplete`, which asserts one test case per documented rule
   ID. (A validation table that drifts from its tests is a table that documents
   behavior the code does not have.) **The rule IDs are the authority, not a count**:
-  the test enumerates `V1…V25` *including* `V13a`, i.e. **26 rules across 25 numbered
-  IDs**, and asserts set equality between the documented IDs and the test cases'
-  IDs — never `len(cases) == 25`, which is exactly the assertion that breaks when a
-  rule is split. V13 and V13a are separate cases: V13 feeds a human step with an
+  the test reads every rule in `RuleIDs`, including split rules such as `V13a`, and
+  asserts set equality between those IDs and the test cases' IDs — never a fixed
+  `len(cases)`, which is exactly the assertion that breaks when a rule is split. V13 and V13a are separate cases: V13 feeds a human step with an
   explicit `on_fail = "waiting-human"`, V13a feeds one that declares no `on_fail`,
   and each asserts its own distinct message (§4.3.2).
 - **The lint table L1–L4**, including L2's two exceptions (a threshold-interposed
