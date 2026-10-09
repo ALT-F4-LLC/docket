@@ -709,7 +709,8 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 //
 // It is the pin check minus the sound rows rather than its own walk, so the
 // warning a surface prints and the report `verify-pins` exits 4 on can never
-// name different pins.
+// name different pins: both resolve refs against runConfigRoots, the run's
+// recorded exec root, falling back to the invoking roots when none is recorded.
 //
 // It is the PER-PIN half only. `verify-pins` also reports refs the pinned bytes
 // reference and the pin set does not hold (DKT-821), and that question has no
@@ -717,7 +718,7 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 // so this advisory keeps to the pins and keeps to a hash-per-pin of work on
 // every `run status`.
 func PinDrift(conn *sql.DB, runID int) ([]PinVerdict, error) {
-	report, err := verifyPinsIn(conn, runID, instanceConfigRoots())
+	report, err := verifyPinsIn(conn, runID, runConfigRoots(conn, runID))
 	if err != nil {
 		return nil, err
 	}

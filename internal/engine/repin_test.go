@@ -700,3 +700,44 @@ func TestRepinRefusalSortsEachClaimUnderItsOwnHeading(t *testing.T) {
 		t.Errorf("refusal %q does not list the lapsed claim under the lapsed heading", err)
 	}
 }
+
+// TestPinDriftMatchesVerifyPinsFromAnUnanchoredCwd: the `run status` warning
+// and the `verify-pins` report name the same pins for a run whose pins live
+// under its recorded checkout's `.docket/config`, checked from a cwd whose
+// live roots do not hold them. Both must resolve against the run's roots.
+func TestPinDriftMatchesVerifyPinsFromAnUnanchoredCwd(t *testing.T) {
+	conn, runID, repoConfig := unanchoredRunFixture(t)
+
+	unsound := func() (fromDrift, fromVerify []string) {
+		t.Helper()
+		drift, err := PinDrift(conn, runID)
+		testsupport.Must(t, err, "PinDrift: %v", err)
+		for _, v := range drift {
+			fromDrift = append(fromDrift, v.Ref+" "+string(v.Status))
+		}
+		report, err := VerifyPins(conn, runID)
+		testsupport.Must(t, err, "VerifyPins: %v", err)
+		for _, v := range report.Pins {
+			if v.Status != PinOK {
+				fromVerify = append(fromVerify, v.Ref+" "+string(v.Status))
+			}
+		}
+		return fromDrift, fromVerify
+	}
+
+	drift, verify := unsound()
+	if strings.Join(drift, "\n") != strings.Join(verify, "\n") || len(drift) != 0 {
+		t.Errorf("intact pins: PinDrift names %q, VerifyPins names %q; want "+
+			"both empty", drift, verify)
+	}
+
+	testsupport.Must(t, os.WriteFile(filepath.Join(repoConfig, "contracts/project.md"),
+		[]byte("edited\n"), 0o644), "editing the contract")
+	drift, verify = unsound()
+	want := "contracts/project.md " + string(PinChanged)
+	if strings.Join(drift, "\n") != strings.Join(verify, "\n") ||
+		len(drift) != 1 || drift[0] != want {
+		t.Errorf("edited pin: PinDrift names %q, VerifyPins names %q; want "+
+			"both exactly [%q]", drift, verify, want)
+	}
+}
