@@ -153,7 +153,6 @@ jobs:
   release:
     if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
     needs:
-      - go-test
       - test
     permissions:
       attestations: write
