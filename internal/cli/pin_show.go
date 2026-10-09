@@ -35,6 +35,10 @@ is the run's agreement about bytes and printing the edit would substitute
 content the run never agreed to. ` + "`docket run verify-pins`" + ` reports the
 same drift across the whole pin set.
 
+A RUN-N that names no run is NOT_FOUND, as ` + "`docket run verify-pins`" + ` answers.
+A run that has not been activated has no pin set and is refused
+(VALIDATION_ERROR) as such.
+
 READ-ONLY: no lease, no lock, no event.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {

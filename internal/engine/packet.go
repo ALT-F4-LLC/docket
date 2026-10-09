@@ -402,14 +402,32 @@ func checkPacketRef(ref, entry string) error {
 // run never agreed to, which is the same silent substitution the resolver
 // refuses at render. The refusal names both hashes, as `run verify-pins` does.
 //
+// THE RUN RESOLVES BEFORE ITS PIN SET IS READ. An absent run and a run that
+// never activated both list zero pins, and the ladder would report either as
+// an unpinned path with a repin remedy neither can use. A missing run is
+// NOT_FOUND, as `run verify-pins` answers; an unactivated one has no pin set.
+//
 // It writes nothing: no lease, no lock, no event.
 func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
+	runRef := model.FormatRunID(runID)
+	run, err := db.GetRun(conn, runID)
+	if errors.Is(err, db.ErrRunNotFound) {
+		return "", notFoundErr(err, "run %s not found", runRef)
+	}
+	if err != nil {
+		return "", err
+	}
+	if run.ActivatedAtMS == nil {
+		return "", validationErr(
+			"%s has no pin set because it has not been activated; activation "+
+				"pins the files its packets read", runRef)
+	}
 	pins, err := db.ListPins(conn, runID)
 	if err != nil {
 		return "", err
 	}
 	body, _, err := readPinnedPacketFile(
-		model.FormatRunID(runID), packetPinsForRun(pins),
+		runRef, packetPinsForRun(pins),
 		instanceConfigRoots(), ref)
 	if err != nil {
 		if code, ok := CodeOf(err); ok && code == CodeConflict {

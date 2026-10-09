@@ -176,6 +176,9 @@ func TestPinShowPrintsPinnedContent(t *testing.T) {
 		if !strings.Contains(err.Error(), "unpinned.toml") {
 			t.Errorf("err = %q, want it to name the path", err.Error())
 		}
+		if !strings.Contains(err.Error(), "pin set, which froze at activation") {
+			t.Errorf("err = %q, want the unpinned-path refusal", err.Error())
+		}
 		if strings.Contains(buf.String(), "never pinned") {
 			t.Errorf("output = %q, want no bytes printed for an unpinned path",
 				buf.String())
@@ -183,7 +186,71 @@ func TestPinShowPrintsPinnedContent(t *testing.T) {
 	})
 }
 
-// TestPinShowRefusesDriftedBytes is AC2: the printed bytes hash to the pin, so a
+// pinShowRefusal runs `pin show` for policy.toml, which sits on disk under the
+// fixture's config root, and returns the refusal it must produce.
+func pinShowRefusal(t *testing.T, conn *sql.DB, runRef string) *CmdError {
+	t.Helper()
+	w, buf := bufWriter(false)
+	err := runPinShow(cmdWithDB(conn), runRef, "policy.toml", w)
+	if err == nil {
+		t.Fatalf("pin show %s printed %q, want a refusal", runRef, buf.String())
+	}
+	cerr, ok := err.(*CmdError)
+	if !ok {
+		t.Fatalf("err = %T, want *CmdError", err)
+	}
+	return cerr
+}
+
+// A run id that names no run row is NOT_FOUND, the code `run verify-pins`
+// returns for the same id, rather than an unpinned path with a repin remedy
+// for a run that does not exist.
+func TestPinShowNonexistentRunIsNotFound(t *testing.T) {
+	conn, _, _ := pinShowFixture(t)
+	missing := model.FormatRunID(9999)
+
+	cerr := pinShowRefusal(t, conn, missing)
+	if cerr.Code != output.ErrNotFound {
+		t.Errorf("code = %q, want %q", cerr.Code, output.ErrNotFound)
+	}
+	if !strings.Contains(cerr.Error(), missing) || !strings.Contains(cerr.Error(), "not found") {
+		t.Errorf("err = %q, want it to name %s as not found", cerr.Error(), missing)
+	}
+	for _, remedy := range []string{"repin", "new run"} {
+		if strings.Contains(cerr.Error(), remedy) {
+			t.Errorf("err = %q, want no %q remedy for a run that does not exist",
+				cerr.Error(), remedy)
+		}
+	}
+}
+
+// A run that exists but never activated has no pin set at all; the refusal
+// says so instead of claiming the path is missing from a frozen pin set.
+func TestPinShowUnactivatedRunHasNoPinSet(t *testing.T) {
+	conn, _, _ := pinShowFixture(t)
+	issueID := createIssue(t, conn, "never activated", model.StatusBacklog, model.PriorityNone)
+	run, err := db.InsertRun(conn, 1, "unactivated run", 0, model.NowMS())
+	testsupport.Must(t, err, "InsertRun: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issueID), "AddRunIssue")
+
+	cerr := pinShowRefusal(t, conn, run.Ref())
+	if cerr.Code != output.ErrValidation {
+		t.Errorf("code = %q, want %q", cerr.Code, output.ErrValidation)
+	}
+	for _, want := range []string{run.Ref(), "has no pin set", "not been activated"} {
+		if !strings.Contains(cerr.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", cerr.Error(), want)
+		}
+	}
+	for _, wrong := range []string{"which froze at activation", "repin", "new run"} {
+		if strings.Contains(cerr.Error(), wrong) {
+			t.Errorf("err = %q, want no %q for a run that never activated",
+				cerr.Error(), wrong)
+		}
+	}
+}
+
+// TestPinShowRefusesDriftedBytes is AC2:the printed bytes hash to the pin, so a
 // file edited after activation refuses with both hashes rather than printing.
 func TestPinShowRefusesDriftedBytes(t *testing.T) {
 	conn, configDir, runRef := pinShowFixture(t)
