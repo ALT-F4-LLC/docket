@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -182,6 +183,139 @@ func TestRoundBaseFallsBackWhenNoReviewHasRun(t *testing.T) {
 		t.Errorf("fix@1 round_base = %.12s, want the newest recorded head %.12s — "+
 			"the fallback left the round with no delta", got, s0)
 	}
+}
+
+// TestRoundDeltaGuardsTheForkPointClip: the unreviewed round is integrated onto
+// the shared branch before the next round forks fresh. The fork point then
+// descends from the head review@0 judged, but advancing to it would clip fix@1
+// — which no review ever read — out of review@2's delta.
+func TestRoundDeltaGuardsTheForkPointClip(t *testing.T) {
+	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
+
+	rounds.commitRound(t, "IMPLEMENT ROUND 0")
+	completeStepAt(t, conn, e, issue, "implement@0", rounds.work)
+	s0 := gitRun(t, rounds.work, "rev-parse", "HEAD")
+
+	completeReviewRoundIn(t, conn, e, issue, 0)
+	completeInIssue(t, conn, e, issue, "synthesize@0", "the synthesis", "")
+	driveActionInIssue(t, conn, e, issue, "reconcile@0")
+	completeInIssue(t, conn, e, issue, "verify@0", "the ac report", unmetPayload)
+
+	w1 := commitInFreshWorktree(t, rounds.work, "fix-round-1",
+		"feature.txt", "IMPLEMENT ROUND 0\nFIX ROUND 1 THE UNREVIEWED CHANGE\n")
+	completeStepAt(t, conn, e, issue, "fix@1", w1)
+
+	failToPark(t, conn, e, issue, "review@1#0")
+	resolveErr := e.ResolveStep(conn, stepIDIn(t, conn, issue, "review@1#0"),
+		ResolveFixRound, "one more round", nowMS)
+	testsupport.Must(t, resolveErr, "resolving review@1#0: %v", resolveErr)
+	if !stepExists(t, conn, "fix@2") {
+		t.Fatal("premise: the authorized round must have minted fix@2")
+	}
+
+	// The conductor integrates fix@1, and fix@2 forks fresh from the result.
+	gitRun(t, rounds.work, "cherry-pick", gitRun(t, w1, "rev-parse", "HEAD"))
+	w2 := commitInFreshWorktree(t, rounds.work, "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
+	completeStepAt(t, conn, e, issue, "fix@2", w2)
+
+	if got := issueRoundBase(t, conn, runID, issue); got != s0 {
+		t.Errorf("fix@2 round_base = %.12s, want the head review@0 judged %.12s", got, s0)
+	}
+	delta := reviewRoundDelta(t, conn, issue, "review@2#0")
+	if !strings.Contains(delta, "\n+FIX ROUND 1 THE UNREVIEWED CHANGE") {
+		t.Errorf("the integrated but unreviewed round's change is missing from "+
+			"the delta its judges read:\n%s", delta)
+	}
+}
+
+// TestRoundDeltaAdvancesPastReviewedSiblingIntegration: every earlier round
+// was reviewed, so sibling work integrated before this round's fresh fork
+// stays clipped out of the delta.
+func TestRoundDeltaAdvancesPastReviewedSiblingIntegration(t *testing.T) {
+	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
+
+	rounds.commitRound(t, "IMPLEMENT ROUND 0")
+	completeStepAt(t, conn, e, issue, "implement@0", rounds.work)
+
+	completeReviewRoundIn(t, conn, e, issue, 0)
+	completeInIssue(t, conn, e, issue, "synthesize@0", "the synthesis", "")
+	driveActionInIssue(t, conn, e, issue, "reconcile@0")
+	completeInIssue(t, conn, e, issue, "verify@0", "the ac report", unmetPayload)
+
+	fork := integrateSibling(t, rounds.work)
+	w1 := commitInFreshWorktree(t, rounds.work, "fix-round-1",
+		"feature.txt", "IMPLEMENT ROUND 0\nFIX ROUND 1\n")
+	completeStepAt(t, conn, e, issue, "fix@1", w1)
+
+	if got := issueRoundBase(t, conn, runID, issue); got != fork {
+		t.Errorf("fix@1 round_base = %.12s, want the fork point %.12s", got, fork)
+	}
+	if delta := reviewRoundDelta(t, conn, issue, "review@1#0"); strings.Contains(delta, siblingMarker) {
+		t.Errorf("the sibling's integrated commit leaked into the delta:\n%s", delta)
+	}
+}
+
+// TestRoundDeltaNoReviewedHeadAdvancesToFork: with no review-judged head the
+// base falls back to the newest recorded one, and a fresh fork after a verbatim
+// integration still advances to the fork point.
+func TestRoundDeltaNoReviewedHeadAdvancesToFork(t *testing.T) {
+	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
+
+	rounds.commitRound(t, "IMPLEMENT ROUND 0")
+	completeStepAt(t, conn, e, issue, "implement@0", rounds.work)
+
+	failToPark(t, conn, e, issue, "review@0#0")
+	resolveErr := e.ResolveStep(conn, stepIDIn(t, conn, issue, "review@0#0"),
+		ResolveFixRound, "skip the panel", nowMS)
+	testsupport.Must(t, resolveErr, "resolving review@0#0: %v", resolveErr)
+	if !stepExists(t, conn, "fix@1") {
+		t.Fatal("premise: the authorized round must have minted fix@1")
+	}
+
+	fork := integrateSibling(t, rounds.work)
+	w1 := commitInFreshWorktree(t, rounds.work, "fix-round-1",
+		"feature.txt", "IMPLEMENT ROUND 0\nFIX ROUND 1\n")
+	completeStepAt(t, conn, e, issue, "fix@1", w1)
+
+	if got := issueRoundBase(t, conn, runID, issue); got != fork {
+		t.Errorf("fix@1 round_base = %.12s, want the fork point %.12s", got, fork)
+	}
+}
+
+const siblingMarker = "SIBLING ISSUE WORK"
+
+// commitInFreshWorktree adds a worktree at the shared checkout's head, as a
+// conductor does for each new round, and commits one file in it.
+func commitInFreshWorktree(t *testing.T, shared, name, file, content string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	gitRun(t, shared, "worktree", "add", "-q", dir)
+	writeFile(t, dir, file, content)
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "commit", "-qm", name)
+	return dir
+}
+
+// integrateSibling fast-forwards the shared checkout onto a sibling issue's
+// commit and returns the new shared head.
+func integrateSibling(t *testing.T, shared string) string {
+	t.Helper()
+	sibling := commitInFreshWorktree(t, shared, "sibling", "sibling.txt", siblingMarker+"\n")
+	gitRun(t, shared, "merge", "-q", "--ff-only", gitRun(t, sibling, "rev-parse", "HEAD"))
+	return gitRun(t, shared, "rev-parse", "HEAD")
+}
+
+// reviewRoundDelta renders a review step's packet and returns its round-delta
+// section.
+func reviewRoundDelta(t *testing.T, conn *sql.DB, issue int, instance string) string {
+	t.Helper()
+	rendered, err := RenderStep(conn, stepIDIn(t, conn, issue, instance), "", nowMS)
+	testsupport.Must(t, err, "RenderStep(%s): %v", instance, err)
+	_, delta, found := strings.Cut(rendered.Packet, "round delta: changes since")
+	if !found {
+		t.Fatalf("%s's packet carries no round-delta section:\n%s", instance, rendered.Packet)
+	}
+	return delta
 }
 
 // failToPark exhausts a step's attempts so it parks at waiting-human — the

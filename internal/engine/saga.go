@@ -2847,12 +2847,16 @@ func worktreeForkPoint(dir, execRoot string) string {
 // branch state — an ancestor of HEAD by construction — and fork..HEAD is this
 // round's own commits alone, which is the scoping the round delta promises.
 //
-// prev survives in exactly two shapes. A worktree that persisted across
+// prev survives in exactly three shapes. A worktree that persisted across
 // rounds has its fork point BEHIND prev — advancing to it would re-attribute
 // the previous round's own work to this round — and that holds whether or not
 // the integration diverged, because the round's own commits still stack on
-// prev in place. And the shared checkout has no fork point at all.
-func roundDeltaBase(dir, execRoot, prev string) string {
+// prev in place. The shared checkout has no fork point at all. And when
+// unreviewedFollows reports that a round no review judged was recorded after
+// prev, prev..fork may carry that round's integrated work, which clipping
+// would hide from the next panel; prev then stays even past a verbatim
+// integration.
+func roundDeltaBase(dir, execRoot, prev string, unreviewedFollows bool) string {
 	if dir == "" || dir == execRoot {
 		return prev
 	}
@@ -2861,7 +2865,11 @@ func roundDeltaBase(dir, execRoot, prev string) string {
 		return prev
 	}
 	if isAncestor(dir, prev, fork) {
-		// Verbatim integration: prev..fork is inherited shared-branch history.
+		// Verbatim integration: prev..fork is inherited shared-branch history,
+		// unless an unreviewed round's integrated work sits in it.
+		if unreviewedFollows {
+			return prev
+		}
 		return fork
 	}
 	if isAncestor(dir, fork, prev) {
@@ -3420,10 +3428,16 @@ func (e *Engine) appendRoundDelta(
 		}
 	}
 	if (head != "" || blocked) && step.Ordinal > 0 {
-		prev := lastReviewedIssueDiffHead(conn, step.RunID, step.IssueID)
+		reviewed := lastReviewedIssueDiffHead(conn, step.RunID, step.IssueID)
+		latest := latestIssueDiffHead(conn, step.RunID, step.IssueID)
+		prev := reviewed
 		if prev == "" {
-			prev = latestIssueDiffHead(conn, step.RunID, step.IssueID)
+			prev = latest
 		}
+		// A newer recorded head than the judged one is a round no review read.
+		// With no judged head there is nothing to reach back to, so the
+		// fallback clips as before.
+		unreviewedFollows := reviewed != "" && latest != reviewed
 		if prev != "" && prev != head {
 			// DKT-171/DKT-409: `prev` predates whatever integration landed
 			// on the shared branch between rounds. A fresh worktree forked
@@ -3433,8 +3447,11 @@ func (e *Engine) appendRoundDelta(
 			// fork point whenever prev is not strictly ahead of it —
 			// verbatim integration puts prev behind the fork, a cherry-
 			// pick integration leaves it on a superseded line beside it —
-			// so fork..HEAD is exactly "this round's work alone".
-			base := roundDeltaBase(dir, execRoot, prev)
+			// so fork..HEAD is exactly "this round's work alone". The one
+			// exception is a verbatim integration with an unreviewed round
+			// after prev: that round's work is in prev..fork, and the next
+			// panel must still see it.
+			base := roundDeltaBase(dir, execRoot, prev, unreviewedFollows)
 			delta, err := e.DiffFn(dir, base, nil)
 			if err == nil {
 				record["round_base"] = base
