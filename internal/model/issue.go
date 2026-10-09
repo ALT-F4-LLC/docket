@@ -711,9 +711,9 @@ type issueJSON struct {
 	// third time: an issue with no declared size marshals byte-identically to
 	// the pre-Size era, while a sized one is visible on the default surface
 	// `docket issue show`/`list` already render every other field on.
-	Size       string `json:"size,omitempty"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
+	Size      string `json:"size,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Issue.

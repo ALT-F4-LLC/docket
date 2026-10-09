@@ -313,7 +313,7 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 			want: workflow.OnFailAbandonIssue, status: db.StepFailedRouted,
 		},
 		{
-			name: "a panel declining to decide parks for an operator",
+			name:     "a panel declining to decide parks for an operator",
 			verdict:  model.VerdictReject,
 			approved: "retry", rejected: "waiting-human",
 			want: workflow.OnFailWaitingHuman, status: db.StepWaitingHuman,

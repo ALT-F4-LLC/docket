@@ -48,6 +48,7 @@ type GuardVerdict struct {
 //
 //   - A `waiting-human` step does NOT block — a run parked on a person is
 //     waiting for something a stop cannot interfere with.
+//
 //   - A VOTE step whose proposal is OPEN does not block (DKT-107): its panel
 //     decides out-of-session, and yielding the turn is exactly how a session
 //     waits for it — the deny was a toll paid at every turn-end for as long
@@ -55,6 +56,7 @@ type GuardVerdict struct {
 //     proposal leaves a dispatchable step, which blocks again until `next`
 //     routes it. The same reading covers a `gated` routing step whose every
 //     unresolved held cluster is such a vote.
+//
 //   - A `pending` step waiting only on its predecessors, or waiting because
 //     the RUN ITSELF is `waiting-human` (paused), does not block on its own
 //     (DKT-1845): a paused run is the run-level version of the same

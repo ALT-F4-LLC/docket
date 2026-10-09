@@ -37,7 +37,7 @@ type GateOverrideGrant struct {
 	OriginStepID int
 	Gate         string
 	Exit         *int
-	Reason string
+	Reason       string
 	// Fingerprint is the origin row's `gate_results.fingerprint`, COPIED at
 	// mint and never recomputed (DKT-1796): the ruling binds to the content the
 	// operator read, not to whatever a later re-run happens to print.
