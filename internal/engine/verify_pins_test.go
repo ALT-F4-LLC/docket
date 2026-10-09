@@ -366,3 +366,116 @@ func TestRepoLocalGateFilesPinsOnlyTheScript(t *testing.T) {
 		t.Errorf("an interpreter's script argument resolved to %v, want [%s]", got, file)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Pins resolve against the run's checkout, not the invoking cwd
+// ---------------------------------------------------------------------------
+
+// onGlobalStore moves the process onto the global store from cwd, with an
+// empty HOME and an empty trust store. Call it AFTER registerFixture, whose
+// fixture paths are relative to the package directory.
+func onGlobalStore(t *testing.T, cwd string) {
+	t.Helper()
+	home := t.TempDir()
+	// DOCKET_PATH is pinned package-wide by TestMain; clearing it puts
+	// resolution on the global store, the only source with a repo-side root.
+	t.Setenv("DOCKET_PATH", "")
+	t.Setenv("HOME", home)
+	t.Chdir(cwd)
+
+	prior := gatePinStore
+	gatePinStore = sandboxTrust(t)
+	t.Cleanup(func() { gatePinStore = prior })
+}
+
+// unanchoredRunFixture activates a run recorded in a checkout and pins one
+// file under checkout/.docket/config, then leaves the process in a non-git
+// directory on the global store. Neither invoking root (HOME's, the cwd's)
+// holds the pinned ref, so only the run's recorded exec root resolves it.
+func unanchoredRunFixture(t *testing.T) (conn *sql.DB, runID int, repoConfig string) {
+	t.Helper()
+	elsewhere := t.TempDir()
+	checkout, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving the checkout: %v", err)
+	conn = mustDB(t)
+	registerFixture(t, conn)
+	onGlobalStore(t, elsewhere)
+
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "test run", 0, nowMS,
+		db.RunContext{ExecRoot: checkout})
+	testsupport.Must(t, err, "starting run: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "adding the issue")
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	repoConfig = filepath.Join(checkout, ".docket", "config")
+	pinAFile(t, conn, run.ID, repoConfig, "contracts/project.md", "the repo's contract\n")
+
+	if cfg := resolvePaths(); cfg.Anchored || contains(instanceConfigRoots(), repoConfig) {
+		t.Fatalf("premise: the invocation must be unanchored and blind to the "+
+			"checkout's config (anchored %v, roots %v)", cfg.Anchored, instanceConfigRoots())
+	}
+	return conn, run.ID, repoConfig
+}
+
+// TestVerifyPinsResolvesTheRunsCheckoutFromAnUnanchoredCwd: a run whose pins
+// live under its checkout's `.docket/config` verifies clean from a non-git
+// directory, because the roots come from the run's recorded exec root.
+func TestVerifyPinsResolvesTheRunsCheckoutFromAnUnanchoredCwd(t *testing.T) {
+	conn, runID, _ := unanchoredRunFixture(t)
+
+	report, err := VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+	if report.Missing != 0 || report.Changed != 0 {
+		t.Errorf("missing = %d, changed = %d, want 0 and 0: the run's repo-side "+
+			"pin was resolved against the invoking cwd, not the run's checkout",
+			report.Missing, report.Changed)
+	}
+	if !report.Sound() {
+		t.Errorf("an untouched run reads unsound from an unanchored cwd: %s",
+			PinReportReason(report))
+	}
+}
+
+// TestVerifyPinsReportsRepoSideDriftFromAnUnanchoredCwd: an edit to the run's
+// repo-side pinned file is drift, not a missing file, from the same cwd.
+func TestVerifyPinsReportsRepoSideDriftFromAnUnanchoredCwd(t *testing.T) {
+	conn, runID, repoConfig := unanchoredRunFixture(t)
+	testsupport.Must(t, os.WriteFile(filepath.Join(repoConfig, "contracts/project.md"),
+		[]byte("edited\n"), 0o644), "editing the contract")
+
+	report, err := VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+	if report.Changed != 1 || report.Missing != 0 {
+		t.Errorf("changed = %d, missing = %d, want 1 and 0: an edited repo-side "+
+			"pin must read as drift", report.Changed, report.Missing)
+	}
+}
+
+// TestVerifyPinsFallsBackToTheInvokingRootsWithNoRecordedExecRoot: a run that
+// recorded no exec root still resolves its repo-side pins against the
+// checkout VerifyPins is invoked from.
+func TestVerifyPinsFallsBackToTheInvokingRootsWithNoRecordedExecRoot(t *testing.T) {
+	checkout := t.TempDir()
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	onGlobalStore(t, checkout)
+
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	if run.ExecRoot != "" {
+		t.Fatalf("premise: the run must record no exec root, got %q", run.ExecRoot)
+	}
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	pinAFile(t, conn, run.ID, filepath.Join(checkout, ".docket", "config"),
+		"contracts/project.md", "the repo's contract\n")
+
+	report, err := VerifyPins(conn, run.ID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+	if !report.Sound() {
+		t.Errorf("a run with no recorded exec root reads unsound from its own "+
+			"checkout (missing = %d): %s", report.Missing, PinReportReason(report))
+	}
+}

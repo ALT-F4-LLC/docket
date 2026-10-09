@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -312,7 +313,24 @@ func resolveConfigRoot(root string) (string, bool, error) {
 // already had that check run for it, and a root that will not resolve simply
 // holds none of the refs it is asked for.
 func instanceConfigRoots() []string {
-	dirs := resolvePaths().InstanceConfigDirs()
+	return configRootsOf(resolvePaths())
+}
+
+// runConfigRoots is instanceConfigRoots for one RUN: the same roots, with the
+// repository side taken from the run's recorded exec root (runExecRoot) rather
+// than the invoking process's cwd. A run's repo-side pins live under the
+// checkout it started in, so a reader asking about that run from anywhere
+// else, such as a non-git directory or another checkout, must look there. A
+// run with no recorded exec root falls back to the invoking process's roots.
+func runConfigRoots(conn *sql.DB, runID int) []string {
+	cfg := *resolvePaths()
+	cfg.ExecRoot = runExecRoot(conn, runID)
+	return configRootsOf(&cfg)
+}
+
+// configRootsOf canonicalizes and deduplicates cfg's instance-config roots.
+func configRootsOf(cfg *config.Config) []string {
+	dirs := cfg.InstanceConfigDirs()
 	out := make([]string, 0, len(dirs))
 	for _, dir := range dirs {
 		if dir == "" {

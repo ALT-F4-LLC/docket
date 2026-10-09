@@ -123,8 +123,12 @@ func (r *PinReport) Sound() bool {
 // file a pin names", because the hash IS the contract and re-reading would make
 // a bundle depend on the working tree. This verb is the deliberate opposite —
 // it asks about the tree, on purpose, and writes nothing.
+//
+// The tree is the RUN's: refs resolve against runConfigRoots, so a run whose
+// pins live under its checkout's `.docket/config` verifies the same from any
+// cwd, including one outside every git checkout.
 func VerifyPins(conn *sql.DB, runID int) (*PinReport, error) {
-	report, err := verifyPinsClosedIn(conn, runID, instanceConfigRoots())
+	report, err := verifyPinsClosedIn(conn, runID, runConfigRoots(conn, runID))
 	if err != nil {
 		return nil, err
 	}
