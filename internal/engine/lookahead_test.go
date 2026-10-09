@@ -418,6 +418,31 @@ func TestClosureLevelsExecutorTargetBesideDownstream(t *testing.T) {
 	}
 }
 
+// TestNextStepsHoldsDownstreamBehindOpenHumanTarget is the human half of
+// DKT-168 beside TestClosureLevelsExecutorTargetBesideDownstream: an open
+// HUMAN threshold target is still a gate, so the offer leaves the routing
+// step's downstream out until the decision lands.
+func TestNextStepsHoldsDownstreamBehindOpenHumanTarget(t *testing.T) {
+	conn := mustDB(t)
+	runID, _ := activateInterposed(t, conn, interposeHumanHoldSrc)
+
+	claimAndComplete(t, conn, testEngine(), "reconcile@0", "blocked finding",
+		`[{"status":"blocked"}]`)
+	if got := stepStatus(t, conn, "signoff@0"); got != db.StepPending {
+		t.Fatalf("signoff@0 = %q after being routed to, want pending", got)
+	}
+
+	answer, err := testEngine().NextSteps(conn, runID, 0, nowMS)
+	testsupport.Must(t, err, "next: %v", err)
+
+	for _, row := range answer.Steps {
+		if row.Instance == "verify@0" {
+			t.Errorf("verify@0 offered at stage %d behind an open HUMAN gate: %v",
+				row.Stage, instancesIn(answer))
+		}
+	}
+}
+
 // TestStageableFromIgnoresOpenExecutorTargetAbsentFromOffer is DKT-2076's
 // membership half: stageableFrom's gate-in-offer rule applies only to the
 // gates openInterposedGates returns, so an open EXECUTOR target the offer does

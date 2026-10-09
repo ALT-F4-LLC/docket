@@ -986,6 +986,35 @@ executor = "verify"
 emits = "record"
 `
 
+// interposeHumanHoldSrc is the same shape with a HUMAN target, the other kind
+// openInterposedGates holds for.
+const interposeHumanHoldSrc = `
+[pipeline]
+name = "interpose-human-hold"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "signoff" = "any(status == blocked)" }
+
+[[step]]
+name = "signoff"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
 // TestInterposedExecutorTargetDoesNotHoldDownstream is DKT-2076: R3's second
 // interposition clause holds a routing step's ordinary downstream only for
 // threshold targets of kind vote or human. An open EXECUTOR target runs beside
@@ -1029,6 +1058,26 @@ func TestInterposedExecutorTargetDoesNotHoldDownstream(t *testing.T) {
 			if ok || cond != CondGateOpen {
 				t.Errorf("verify@0 ready=%v cond=%q behind an open VOTE gate, "+
 					"want CondGateOpen: DKT-168 is unchanged", ok, cond)
+			}
+		})
+	})
+
+	t.Run("human target still holds the downstream", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeHumanHoldSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "signoff@0"); got != db.StepPending {
+			t.Fatalf("signoff@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("verify@0 ready=%v cond=%q behind an open HUMAN gate, "+
+					"want CondGateOpen", ok, cond)
 			}
 		})
 	})
