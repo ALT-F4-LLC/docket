@@ -28,12 +28,15 @@ import (
 // reading call sites.
 
 // countingDriver wraps the sqlite driver and tallies prepared statements whose
-// text matches a caller-supplied predicate.
+// text matches a caller-supplied predicate. It also records the options of
+// every transaction opened through it, so a test can observe whether a verb's
+// snapshot was read-only.
 type countingDriver struct {
-	mu      sync.Mutex
-	count   int
-	matched []string
-	match   func(query string) bool
+	mu        sync.Mutex
+	count     int
+	matched   []string
+	match     func(query string) bool
+	txOptions []driver.TxOptions
 }
 
 func (d *countingDriver) Open(name string) (driver.Conn, error) {
@@ -62,9 +65,21 @@ func (d *countingDriver) matchedQueries() []string {
 	return append([]string(nil), d.matched...)
 }
 
+func (d *countingDriver) observeBeginTx(opts driver.TxOptions) {
+	d.mu.Lock()
+	d.txOptions = append(d.txOptions, opts)
+	d.mu.Unlock()
+}
+
+func (d *countingDriver) beginTxOptions() []driver.TxOptions {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]driver.TxOptions(nil), d.txOptions...)
+}
+
 func (d *countingDriver) reset() {
 	d.mu.Lock()
-	d.count, d.matched = 0, nil
+	d.count, d.matched, d.txOptions = 0, nil, nil
 	d.mu.Unlock()
 }
 
@@ -86,9 +101,11 @@ func (c *countingConn) Prepare(query string) (driver.Stmt, error) {
 
 func (c *countingConn) Begin() (driver.Tx, error) { return c.Conn.Begin() }
 
-// BeginTx forwards TxOptions to the sqlite conn. Without it database/sql falls
-// back to Begin and rejects a read-only transaction, which the run report opens.
+// BeginTx records and forwards TxOptions to the sqlite conn. Without it
+// database/sql falls back to Begin and rejects a read-only transaction, which
+// the run report opens.
 func (c *countingConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	c.d.observeBeginTx(opts)
 	return c.Conn.(driver.ConnBeginTx).BeginTx(ctx, opts)
 }
 
@@ -202,6 +219,39 @@ func TestRunReportQueryCount(t *testing.T) {
 		t.Errorf("run report executes %d statements over a ~10-step run; a "+
 			"rollup that queries per step turns a polled verb into the "+
 			"expensive thing in a run", queries)
+	}
+}
+
+// TestRunReportOpensReadOnlySnapshot pins that LoadRunReport itself opens its
+// snapshot read-only, which is what makes the driver issue a deferred BEGIN
+// instead of holding the write lock for the whole report. Observing it through
+// LoadRunReport, rather than the snapshot helper, catches a call site that
+// reverts to the handle's plain Begin.
+func TestRunReportOpensReadOnlySnapshot(t *testing.T) {
+	counter, conn := registerCounting(t, nil)
+	err := initCountingSchema(t, conn)
+	testsupport.Must(t, err, "preparing the counting database: %v", err)
+
+	runID, _ := budgetRun(t, conn, 100)
+
+	counter.reset()
+	_, err = LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	opened := counter.beginTxOptions()
+	readOnly := 0
+	for i, opts := range opened {
+		if !opts.ReadOnly {
+			t.Errorf("LoadRunReport transaction %d of %d opened with ReadOnly=false "+
+				"(%+v); a read-write BEGIN is IMMEDIATE and holds the write lock "+
+				"for the whole report", i+1, len(opened), opts)
+			continue
+		}
+		readOnly++
+	}
+	if readOnly == 0 {
+		t.Errorf("LoadRunReport opened no read-only transaction; it opened %d "+
+			"transactions with options %+v", len(opened), opened)
 	}
 }
 
