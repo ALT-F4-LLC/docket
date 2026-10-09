@@ -9,6 +9,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
 // DKT-1564 — a claim that commits its lease must never end without handing the
@@ -297,4 +298,131 @@ func TestReclaimAfterTheTokenRetiresIsRefused(t *testing.T) {
 	if code, _ := CodeOf(err); code != CodeConflict {
 		t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
 	}
+}
+
+// parkedGateRunner is a trusted runner whose every execution parks until the
+// test releases it, so a claim can be held inside its pre-gate phase: the
+// lease is committed and no pre-gate row is recorded yet.
+type parkedGateRunner struct {
+	*ExecRunner
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p parkedGateRunner) Execute(
+	ctx context.Context, g GateSpec, sc StepContext,
+) (GateExecution, error) {
+	p.entered <- struct{}{}
+	<-p.release
+	return p.ExecRunner.Execute(ctx, g, sc)
+}
+
+// TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord pins the boundary
+// between a stranded claim and one whose pre-gate phase is still running.
+//
+// While the phase runs, the same owner's re-claim must not re-mint: the new
+// token would replace the hash the original claim's lease refresh is keyed
+// on, and the re-minted bundle would carry no gate results because none are
+// recorded yet. Once the rows are recorded, the re-claim re-mints and the
+// bundle replays them.
+func TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(selfGateResultsWorkflow), "selfgateresults.toml")
+	issue := createIssue(t, conn, "a re-claim during pre-gates", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	inner := NewExecRunner(testRepoPaths(repoRoot))
+	inner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot),
+	})
+	runner := parkedGateRunner{
+		ExecRunner: inner,
+		entered:    make(chan struct{}, 1),
+		release:    make(chan struct{}),
+	}
+	released := false
+	releaseGate := func() {
+		if !released {
+			released = true
+			close(runner.release)
+		}
+	}
+	t.Cleanup(releaseGate)
+
+	e := testEngine()
+	e.Gates = runner
+	stepID := stepIDByInstance(t, conn, "verify@0")
+	const owner = "wave:STEP-1"
+
+	type claimOutcome struct {
+		result *ClaimResult
+		err    error
+	}
+	original := make(chan claimOutcome, 1)
+	go func() {
+		result, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+			Owner: owner, NowMS: nowMS,
+		})
+		original <- claimOutcome{result, err}
+	}()
+	<-runner.entered
+
+	before, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	_, err = e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: nowMS + 1000,
+	})
+	if err == nil {
+		t.Fatal("a same-owner re-claim re-minted while the pre-gate phase was running")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+	}
+	if !strings.Contains(err.Error(), "pre-gate phase") {
+		t.Errorf("err = %q, want it to name the in-flight pre-gate phase", err.Error())
+	}
+
+	after, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if after.TokenHash != before.TokenHash {
+		t.Error("the refused re-claim re-keyed the lease the running claim holds")
+	}
+
+	releaseGate()
+	first := <-original
+	testsupport.Must(t, first.err,
+		"the original claim failed after its pre-gate phase finished: %v", first.err)
+	if err := db.AuthorizeStepRead(conn, stepID, first.result.Token, nowMS+1000); err != nil {
+		t.Errorf("the original claim's token does not authorize its lease: %v", err)
+	}
+	assertOwnPreGateInput(t, "original claim bundle", first.result.Context)
+
+	rows, err := db.GateResultsForStep(conn, stepID)
+	testsupport.Must(t, err, "GateResultsForStep: %v", err)
+	if len(rows) != 1 || !rows[0].Pre || rows[0].Gate != "ac-commands" {
+		t.Errorf("recorded gate rows = %+v, want the one pre-gate row", rows)
+	}
+
+	reMinted, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: nowMS + 2000,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim after the pre-gate rows recorded was refused: %v", err)
+	if !reMinted.ReMinted {
+		t.Error("the re-claim after the pre-gate phase was not a re-mint")
+	}
+	if reMinted.Attempt != first.result.Attempt {
+		t.Errorf("the re-mint reported attempt %d, want %d",
+			reMinted.Attempt, first.result.Attempt)
+	}
+	if len(reMinted.Context.PreGates) == 0 {
+		t.Error("the re-minted bundle carries no pre-gate results")
+	}
+	assertOwnPreGateInput(t, "re-minted bundle", reMinted.Context)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -438,7 +439,11 @@ func claimStepWithGates(
 	// carries. The bundle is the RECORDED one for the same reason `step
 	// context` reads it back: this claim was already handed out, and its
 	// bindings are the ones the step is bound to.
-	if reMint, err := reMintOwnClaim(tx, sched, fresh, ttls, opts); reMint != nil || err != nil {
+	//
+	// A claim still inside its pre-gate phase is refused instead: its rows are
+	// not recorded yet, and its lease refresh is keyed on the token a re-mint
+	// would replace.
+	if reMint, err := reMintOwnClaim(tx, sched, fresh, spec, ttls, opts); reMint != nil || err != nil {
 		return reMint, err
 	}
 
@@ -857,27 +862,44 @@ func claimStepWithGates(
 // rather than re-measured. Re-running them would spawn subprocesses against a
 // tree the claimant has been working in since, so the second answer would not
 // describe the same subject the first one did.
+//
+// A declared pre-gate with no result for this claim yet means the original
+// claim is still inside its pre-gate phase. That re-claim is refused with a
+// retryable CONFLICT and writes nothing: re-minting there would hand back a
+// bundle without the results and void the token the running phase's lease
+// refresh is keyed on.
 func reMintOwnClaim(
-	tx *sql.Tx, sched *Scheduler, fresh *db.Step, ttls ttlConfig, opts ClaimOptions,
+	tx *sql.Tx, sched *Scheduler, fresh *db.Step, spec *workflow.Step,
+	ttls ttlConfig, opts ClaimOptions,
 ) (*ClaimResult, error) {
 	if opts.Owner == "" || fresh.Owner != opts.Owner || !fresh.Lease().Live(opts.NowMS) {
 		return nil, nil
-	}
-
-	token, err := db.ReMintStepTokenTx(tx, fresh.ID, opts.Owner, opts.NowMS)
-	if err != nil {
-		return nil, err
 	}
 
 	bundle, err := AssembleRecordedContext(tx, sched, fresh, ttls)
 	if err != nil {
 		return nil, err
 	}
+	pending, err := unrecordedPreGates(tx, fresh, preClaimGates(spec), bundle.TargetSHA)
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) > 0 {
+		return nil, conflictErr(
+			"step %s: the claim held by %s is still in its pre-gate phase "+
+				"(no result recorded yet for %s); retry once the phase finishes",
+			fresh.Instance, opts.Owner, strings.Join(pending, ", "))
+	}
 	preGates, err := recordedPreGates(tx, fresh.ID, bundle.TargetSHA)
 	if err != nil {
 		return nil, err
 	}
 	bundle.PreGates = preGates
+
+	token, err := db.ReMintStepTokenTx(tx, fresh.ID, opts.Owner, opts.NowMS)
+	if err != nil {
+		return nil, err
+	}
 
 	var rowVersion int
 	if err := tx.QueryRow(
@@ -937,6 +959,47 @@ func recordedPreGates(tx *sql.Tx, stepID int, targetSHA string) ([]PreGateResult
 		out = append(out, preGateResultOfRecorded(last[gate]))
 	}
 	return out, nil
+}
+
+// unrecordedPreGates names the declared pre-gates that have no result for the
+// step's current claim yet, in declared order.
+//
+// A gate counts as recorded when its claim measured it or served it:
+//   - the claim's own rows are unstamped and carry the claim's time, which is
+//     also the step's `started_ms`, so an earlier attempt's rows predate it;
+//   - a served detached result is a complete row keyed to the claim's target
+//     (recordedDetachedPreGate, gates-trust §7.6.2 PG6).
+func unrecordedPreGates(
+	tx *sql.Tx, step *db.Step, gates []workflow.Gate, targetSHA string,
+) ([]string, error) {
+	if len(gates) == 0 {
+		return nil, nil
+	}
+	rows, err := db.GateResultsForStepTx(tx, step.ID)
+	if err != nil {
+		return nil, err
+	}
+	var claimedAtMS int64
+	if step.StartedMS != nil {
+		claimedAtMS = *step.StartedMS
+	}
+	measured := make(map[string]bool)
+	for _, r := range rows {
+		if r.Pre && r.TargetSHA == "" && r.CreatedAtMS >= claimedAtMS {
+			measured[r.Gate] = true
+		}
+	}
+	var pending []string
+	for _, gate := range gates {
+		if measured[gate.Name] {
+			continue
+		}
+		if _, served := recordedDetachedPreGate(rows, gate.Name, targetSHA); served {
+			continue
+		}
+		pending = append(pending, gate.Name)
+	}
+	return pending, nil
 }
 
 // recordStepInputs materializes the resolved input bindings. Engine-produced
