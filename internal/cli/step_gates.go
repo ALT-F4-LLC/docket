@@ -54,7 +54,7 @@ type stepGateResult struct {
 	Fingerprint string `json:"fingerprint,omitempty"`
 	Truncated   bool   `json:"truncated"`
 	Pre         bool   `json:"pre"`
-	Stub       bool   `json:"s3_migrated,omitempty"`
+	Stub        bool   `json:"s3_migrated,omitempty"`
 	// StubEntry is NOT omitempty. It is the field a consumer checks to ask
 	// "was this assurance real", and an omitted key would make a false answer
 	// indistinguishable from a docket too old to have one (DKT-265).
