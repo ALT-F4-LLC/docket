@@ -58,7 +58,11 @@ It REFUSES rather than proceeding when the change could be straddled:
 
 --reason is required. A live run's packets changing what they declare is
 something somebody will ask about later, and a trail that shows the scope
-moving without saying why is a record that rewrote itself.`,
+moving without saying why is a record that rewrote itself.
+
+Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
+via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
+for none.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunRefreshScope(cmd, args[0], getWriter(cmd))
