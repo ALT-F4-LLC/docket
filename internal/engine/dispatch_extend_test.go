@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -610,6 +611,48 @@ func TestDispatchExtendDrivesVoteAndActionLifecycles(t *testing.T) {
 	}
 	if !result.Verified {
 		t.Errorf("verify.Verified = false after the extend, want true")
+	}
+}
+
+// TestDispatchExtendResolvesAQuorumMiss: a fanout join that completes below
+// `min_siblings` under an open manifest is routed by the extend per its
+// `on_fail`, as `dispatch open` and `next` route one. Left unresolved, every
+// sibling is terminal, the successor is never offered, and nothing records why.
+func TestDispatchExtendResolvesAQuorumMiss(t *testing.T) {
+	conn, run := quorumRun(t)
+	e := testEngine()
+
+	// One sibling done and three still ready when the manifest opens, so the
+	// open has no miss to resolve.
+	claimAndComplete(t, conn, e, "spread@0#0", "findings", "")
+	openDispatch(t, conn, run.ID, 0, nowMS)
+
+	// The join completes below quorum (1 done < 2) after the open.
+	for i := 1; i < 4; i++ {
+		execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = ?`,
+			db.StepFailedRouted, fmt.Sprintf("spread@0#%d", i))
+	}
+	const reason = "join completed below min_siblings = 2"
+	if raw := stepRoutingRaw(t, conn, "spread@0#0"); strings.Contains(raw, reason) {
+		t.Fatalf("spread@0#0 routing is %q before the extend; the test's "+
+			"premise is an unresolved miss", raw)
+	}
+
+	extendDispatch(t, conn, run.ID, nowMS)
+
+	if raw := stepRoutingRaw(t, conn, "spread@0#0"); !strings.Contains(raw, reason) {
+		t.Errorf("spread@0#0 routing = %q after the extend, want it to contain %q",
+			raw, reason)
+	}
+	if got := stepRouting(t, conn, "spread@0#0"); got != workflow.OnFailWaitingHuman {
+		t.Errorf("spread@0#0 routed %q, want %q (its on_fail)",
+			got, workflow.OnFailWaitingHuman)
+	}
+	if got := stepStatus(t, conn, "spread@0#0"); got != db.StepWaitingHuman {
+		t.Errorf("spread@0#0 = %q after the extend, want %q", got, db.StepWaitingHuman)
+	}
+	if n := eventKindCount(t, conn, run.ID, EventJoinCompleted); n != 1 {
+		t.Errorf("%d %s events after the extend, want 1", n, EventJoinCompleted)
 	}
 }
 
