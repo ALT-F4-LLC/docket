@@ -224,6 +224,60 @@ func TestTrustAddRecordsBeforeAFailedPublish(t *testing.T) {
 	}
 }
 
+// TestWriteStorePostCreateTempFailureNamesTheStore reaches the Write branch of
+// writeStore: CreateTemp succeeds, but the temp file it hands back is open
+// read-only, so the owner's Chmod succeeds and Write fails (EBADF), the way
+// ENOSPC or EIO would fail it on a real disk. The error must name the store
+// that did not change, not only the temp file the deferred cleanup has already
+// deleted. Sealing the directory instead would reach CreateTemp or Rename,
+// never this branch.
+func TestWriteStorePostCreateTempFailureNamesTheStore(t *testing.T) {
+	path := sandbox(t)
+	repo := t.TempDir()
+
+	_, err := addAt(path, AddRequest{
+		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
+	})
+	testsupport.Must(t, err, "seeding addAt: %v", err)
+	before, err := os.ReadFile(path)
+	testsupport.Must(t, err, "reading the seeded store: %v", err)
+
+	t.Cleanup(func() { createTemp = os.CreateTemp })
+	createTemp = func(dir, pattern string) (*os.File, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		name := f.Name()
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		return os.Open(name)
+	}
+
+	err = writeStore(path, &Store{Version: 1})
+	if err == nil {
+		t.Fatal("a publish whose temp file cannot be written must fail")
+	}
+	if !strings.Contains(err.Error(), "writing ") {
+		t.Fatalf("the injection must reach the Write branch; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the failure must name the store %s, not only its temp file; got: %v", path, err)
+	}
+
+	after, err := os.ReadFile(path)
+	testsupport.Must(t, err, "reading the store after the failed publish: %v", err)
+	if string(after) != string(before) {
+		t.Errorf("a failed publish must leave the store byte-for-byte unchanged")
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".trust-*.toml"))
+	testsupport.Must(t, err, "globbing for temp files: %v", err)
+	if len(leftovers) != 0 {
+		t.Errorf("a failed publish must remove its temp file; found %v", leftovers)
+	}
+}
+
 // TestOnChangeIsNotCalledWhenNothingChanges pins the idempotence row's other
 // consequence: a re-add of an identical entry writes nothing, so there is
 // nothing to record. A record that fired here would prove neither novelty nor

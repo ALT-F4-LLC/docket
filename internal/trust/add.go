@@ -406,6 +406,12 @@ func ensureStoreDir(dir string) error {
 	return checkDirIntegrity(dir)
 }
 
+// createTemp is writeStore's temp-file constructor, swappable ONLY by tests: a
+// real filesystem cannot portably be made to fail Chmod, Write, Sync, or Close
+// on a file it just created. Tests that swap it restore it with t.Cleanup and
+// must not run in parallel.
+var createTemp = os.CreateTemp
+
 // writeStore is I5's atomic publish: a temp file in the SAME directory, created
 // O_EXCL with mode 0600, then renamed over the target.
 //
@@ -420,7 +426,7 @@ func writeStore(path string, st *Store) error {
 	}
 
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".trust-*.toml")
+	tmp, err := createTemp(dir, ".trust-*.toml")
 	if err != nil {
 		// The target store is named as well as the directory: every publish
 		// failure must identify WHICH store did not change, and the directory
@@ -437,19 +443,19 @@ func writeStore(path string, st *Store) error {
 	// requirement rather than relying on that, so a future stdlib change or a
 	// restrictive umask cannot silently widen it.
 	if err := tmp.Chmod(storeFileMode); err != nil {
-		return fmt.Errorf("setting mode on %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: setting mode on %s: %w", path, tmpPath, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("writing %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: writing %s: %w", path, tmpPath, err)
 	}
 	// fsync before rename: a rename that lands before the data is durable
 	// leaves an empty trust file after a power loss, which is an allowlist that
 	// silently lost every entry.
 	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("syncing %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: syncing %s: %w", path, tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: closing %s: %w", path, tmpPath, err)
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
