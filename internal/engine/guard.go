@@ -55,7 +55,8 @@ type GuardVerdict struct {
 //     as a panel deliberated. The exemption ends with the proposal: a decided
 //     proposal leaves a dispatchable step, which blocks again until `next`
 //     routes it. The same reading covers a `gated` routing step whose every
-//     unresolved held cluster is such a vote.
+//     unresolved held cluster is such a vote, and a `gated` step suspended on
+//     its triage panel while that panel's proposal is open.
 //
 //   - A `pending` step waiting only on its predecessors, or waiting because
 //     the RUN ITSELF is `waiting-human` (paused), does not block on its own
@@ -195,7 +196,8 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 		case db.StepClaimed, db.StepRunning:
 			blocked = true
 		case db.StepGated:
-			blocked = !gatedOnOpenVotes(sched, step, openVotes)
+			blocked = !gatedOnOpenVotes(sched, step, openVotes) &&
+				!suspendedOnOpenPanel(sched, step, openVotes)
 		case db.StepPending:
 			if openVotes[step.ID] {
 				break
@@ -274,6 +276,23 @@ func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) b
 		}
 	}
 	return unresolved > 0
+}
+
+// suspendedOnOpenPanel reports whether a gated step is suspended on its triage
+// panel (suspendedOnPanel) while that panel's proposal is still open. Once the
+// proposal is decided the verdict still has to be applied, which is `next`'s
+// work, so the step blocks again.
+func suspendedOnOpenPanel(sched *Scheduler, step *db.Step, openVotes map[int]bool) bool {
+	for _, panel := range sched.steps {
+		if !openVotes[panel.ID] || panel.IssueID != step.IssueID ||
+			panel.Ordinal != step.Ordinal {
+			continue
+		}
+		if suspendedOnPanel(step, panel.StepName) {
+			return true
+		}
+	}
+	return false
 }
 
 // GuardGate answers `docket guard gate --step NAME [--run RUN-N]`: does a
