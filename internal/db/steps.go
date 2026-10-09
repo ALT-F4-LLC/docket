@@ -926,8 +926,8 @@ func ReapStepTx(tx *sql.Tx, id int, nowMS int64) error {
 //
 // It exists because `pending` and a live lease are a CONTRADICTION that the
 // system had no way to express and every reader disagreed about.
-// `claimPredicate` says a step is claimable only when `owner IS NULL OR owner
-// = ” OR expires_ms <= now`, so a step returned to `pending` with its lease
+// `claimPredicate` says a step is claimable only when `owner` is null or empty or
+// `expires_ms <= now`, so a step returned to `pending` with its lease
 // intact is a step the scheduler offers and no claimant can take. What CAN
 // still happen is the worst case: the ORIGINAL holder's token is still valid,
 // so it re-records without re-claiming — and `attempt` increments only at
