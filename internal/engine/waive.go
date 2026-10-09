@@ -52,9 +52,12 @@ var waiverSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 // them against live steps: a fanout sibling minted by a later round is a NEW
 // instance with a new signature, and the operator waives what warned, not
 // what might.
+//
+// A waiver is a conductor ruling: on a run bound to a conductor capability,
+// token must be that capability, checked inside the writing transaction.
 func (e *Engine) WaiveStaleTargets(
 	conn *sql.DB, runID int, instances []string, targetSHA, note string, by Attribution,
-	nowMS int64,
+	token string, nowMS int64,
 ) ([]WaivedTarget, error) {
 	if len(instances) == 0 {
 		return nil, validationErr("name at least one step instance to waive")
@@ -90,6 +93,10 @@ func (e *Engine) WaiveStaleTargets(
 		return nil, fmt.Errorf("recording the stale-target waiver(s): %w", err)
 	}
 	defer tx.Rollback()
+
+	if err := authorizeConductorTx(tx, runID, token, "dispatch waive-target"); err != nil {
+		return nil, err
+	}
 
 	out := make([]WaivedTarget, 0, len(instances))
 	for _, instance := range instances {

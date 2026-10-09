@@ -8,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -26,9 +27,18 @@ func waiveTargetCmdWithDB(conn *sql.DB, runRef, target, note string, steps []str
 	return cmd
 }
 
+// activatedWaiveRunHolding activates a run and holds the conductor capability
+// the activation minted in DOCKET_TOKEN, as the conductor session does.
+func activatedWaiveRunHolding(t *testing.T, conn *sql.DB) int {
+	t.Helper()
+	runID, _ := seedRun(t, conn)
+	activateHolding(t, conn, runID, model.NowMS())
+	return runID
+}
+
 func TestDispatchWaiveTargetCLIRecordsAndReports(t *testing.T) {
 	conn := newTestDB(t)
-	runID := activatedDispatchRunForCLI(t, conn)
+	runID := activatedWaiveRunHolding(t, conn)
 	runRef := model.FormatRunID(runID)
 
 	w, buf := bufWriter(true)
@@ -69,9 +79,30 @@ func TestDispatchWaiveTargetCLIRecordsAndReports(t *testing.T) {
 	}
 }
 
+func TestDispatchWaiveTargetCLIRefusesAWrongToken(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedWaiveRunHolding(t, conn)
+	t.Setenv(TokenEnvVar, "deadbeef")
+
+	w, _ := bufWriter(true)
+	cmd := waiveTargetCmdWithDB(conn, model.FormatRunID(runID),
+		"cafe1234cafe", "", []string{"review@0#0"})
+	assertCmdCode(t, runDispatchWaiveTarget(cmd, w), output.ErrAuth,
+		"dispatch waive-target with a wrong token")
+
+	var count int
+	err := conn.QueryRow(
+		`SELECT COUNT(*) FROM stale_target_waivers WHERE run_id = ?`, runID,
+	).Scan(&count)
+	testsupport.Must(t, err, "counting waivers: %v", err)
+	if count != 0 {
+		t.Errorf("stale_target_waivers rows = %d after a refusal, want 0", count)
+	}
+}
+
 func TestDispatchWaiveTargetCLIHumanMessageNamesTheSteps(t *testing.T) {
 	conn := newTestDB(t)
-	runID := activatedDispatchRunForCLI(t, conn)
+	runID := activatedWaiveRunHolding(t, conn)
 
 	w, buf := bufWriter(false)
 	cmd := waiveTargetCmdWithDB(conn, model.FormatRunID(runID),
@@ -87,7 +118,7 @@ func TestDispatchWaiveTargetCLIHumanMessageNamesTheSteps(t *testing.T) {
 
 func TestDispatchWaiveTargetCLIRefusesANonHexTarget(t *testing.T) {
 	conn := newTestDB(t)
-	runID := activatedDispatchRunForCLI(t, conn)
+	runID := activatedWaiveRunHolding(t, conn)
 
 	w, _ := bufWriter(true)
 	cmd := waiveTargetCmdWithDB(conn, model.FormatRunID(runID),

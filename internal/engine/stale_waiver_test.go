@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -240,7 +242,7 @@ func TestWaiverSuppressesAdjudicatedStaleTarget(t *testing.T) {
 	// advisory's own 12-character rendering.
 	waived, err := e.WaiveStaleTargets(conn, run.ID,
 		[]string{"review@0#0", "review@0#1", "review@0#2"},
-		"cafe1234cafe", "the divergence is the later format pass", testBy, nowMS)
+		"cafe1234cafe", "the divergence is the later format pass", testBy, testConductorToken, nowMS)
 	testsupport.Must(t, err, "waive: %v", err)
 	if len(waived) != 3 {
 		t.Fatalf("waivers minted = %d, want 3: %+v", len(waived), waived)
@@ -282,7 +284,7 @@ func TestWaiverDoesNotCoverADifferentSignature(t *testing.T) {
 	// A waiver for a DIFFERENT sha on every row: nothing may be suppressed.
 	_, err := e.WaiveStaleTargets(conn, run.ID,
 		[]string{"review@0#0", "review@0#1", "review@0#2", "review@0#3"},
-		"beefbeefbeef", "ruled on some other target", testBy, nowMS)
+		"beefbeefbeef", "ruled on some other target", testBy, testConductorToken, nowMS)
 	testsupport.Must(t, err, "waive: %v", err)
 
 	m, err := e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
@@ -306,7 +308,7 @@ func TestWaiverSuppressesAbsentTargetWarning(t *testing.T) {
 
 	_, err := e.WaiveStaleTargets(conn, run.ID,
 		[]string{"review@0#0", "review@0#1", "review@0#2", "review@0#3"},
-		"cafe1234cafe1234", "seats judge the integrated successor instead", testBy, nowMS)
+		"cafe1234cafe1234", "seats judge the integrated successor instead", testBy, testConductorToken, nowMS)
 	testsupport.Must(t, err, "waive: %v", err)
 
 	m, err := e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
@@ -333,13 +335,13 @@ func TestWaiveStaleTargetsRefusesBadInputs(t *testing.T) {
 		{"a non-hex sha", []string{"review@0#0"}, "not-a-sha!!"},
 		{"a too-short prefix", []string{"review@0#0"}, "cafe12"},
 	} {
-		if _, err := e.WaiveStaleTargets(conn, run.ID, c.instances, c.sha, "", testBy, nowMS); err == nil {
+		if _, err := e.WaiveStaleTargets(conn, run.ID, c.instances, c.sha, "", testBy, testConductorToken, nowMS); err == nil {
 			t.Errorf("%s: the waiver was recorded", c.name)
 		}
 	}
 
 	if _, err := e.WaiveStaleTargets(conn, 999999,
-		[]string{"review@0#0"}, "cafe1234cafe", "", testBy, nowMS); err == nil {
+		[]string{"review@0#0"}, "cafe1234cafe", "", testBy, testConductorToken, nowMS); err == nil {
 		t.Error("a waiver was recorded against a run that does not exist")
 	}
 }
@@ -353,7 +355,7 @@ func TestWaiveStaleTargetsRecordsRulingAttribution(t *testing.T) {
 	e := testEngine()
 	by := Attribution{Actor: "the conductor", Cwd: "/work/shared"}
 	waived, err := e.WaiveStaleTargets(conn, run.ID, []string{"review@0#0"},
-		"cafe1234cafe", "adjudicated", by, nowMS)
+		"cafe1234cafe", "adjudicated", by, testConductorToken, nowMS)
 	testsupport.Must(t, err, "waive: %v", err)
 
 	page, err := ListEvents(conn, EventQuery{RunID: run.ID, Kind: EventStaleTargetWaived})
@@ -378,7 +380,7 @@ func TestWaiveStaleTargetsRefusesEmptyAttribution(t *testing.T) {
 	run, _ := activatedRun(t, conn)
 	e := testEngine()
 	if _, err := e.WaiveStaleTargets(conn, run.ID, []string{"review@0#0"},
-		"cafe1234cafe", "adjudicated", Attribution{}, nowMS); err == nil {
+		"cafe1234cafe", "adjudicated", Attribution{}, testConductorToken, nowMS); err == nil {
 		t.Fatal("an unattributed waiver was recorded")
 	}
 	var rows int
@@ -388,5 +390,101 @@ func TestWaiveStaleTargetsRefusesEmptyAttribution(t *testing.T) {
 	testsupport.Must(t, err, "ListEvents: %v", err)
 	if rows != 0 || len(page.Events) != 0 {
 		t.Errorf("%d waiver rows and %d events after a refusal, want 0 and 0", rows, len(page.Events))
+	}
+}
+
+// waiverWrites counts what a waive-target call left behind on a run: the
+// waiver rows and the stale-target-waived events.
+func waiverWrites(t *testing.T, conn *sql.DB, runID int) (rows, events int) {
+	t.Helper()
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT COUNT(*) FROM stale_target_waivers WHERE run_id = ?`, runID).Scan(&rows),
+		"counting waivers: %v", nil)
+	page, err := ListEvents(conn, EventQuery{RunID: runID, Kind: EventStaleTargetWaived})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	return rows, len(page.Events)
+}
+
+var waiveInstances = []string{"review@0#0", "review@0#1"}
+
+// On a run bound to a conductor capability, a waiver presented with no token
+// is refused before any row or event is written.
+func TestWaiveStaleTargetsRefusesMissingToken(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := boundRun(t, conn)
+
+	_, err := testEngine().WaiveStaleTargets(conn, run.ID, waiveInstances,
+		"cafe1234cafe", "adjudicated", testBy, "", nowMS)
+	assertConductorCode(t, err, CodeValidation, "dispatch waive-target with no token")
+	if rows, events := waiverWrites(t, conn, run.ID); rows != 0 || events != 0 {
+		t.Errorf("%d waiver rows and %d events after a refusal, want 0 and 0", rows, events)
+	}
+}
+
+// A token that is not the run's current capability, including the one a
+// `run conduct` rotation retired, is an AUTH_ERROR and writes nothing.
+func TestWaiveStaleTargetsRefusesWrongToken(t *testing.T) {
+	conn := mustDB(t)
+	run, activationToken := boundRun(t, conn)
+	_, err := ConductRun(conn, run.ID, ConductOptions{By: testBy, NowMS: nowMS})
+	testsupport.Must(t, err, "run conduct: %v", err)
+
+	for name, token := range map[string]string{
+		"a guessed token":   "deadbeef",
+		"the retired token": activationToken,
+	} {
+		_, err := testEngine().WaiveStaleTargets(conn, run.ID, waiveInstances,
+			"cafe1234cafe", "adjudicated", testBy, token, nowMS)
+		assertConductorCode(t, err, CodeAuth, "dispatch waive-target with "+name)
+		if !errors.Is(err, ErrNotConductor) {
+			t.Errorf("%s: err = %v, want it to wrap ErrNotConductor", name, err)
+		}
+		if rows, events := waiverWrites(t, conn, run.ID); rows != 0 || events != 0 {
+			t.Errorf("%s: %d waiver rows and %d events after a refusal, want 0 and 0",
+				name, rows, events)
+		}
+	}
+}
+
+// The capability Activate returned records one waiver row and one
+// stale-target-waived event per named instance, and no event carries it.
+func TestWaiveStaleTargetsRecordsWithTheRunsCapability(t *testing.T) {
+	conn := mustDB(t)
+	run, token := boundRun(t, conn)
+
+	waived, err := testEngine().WaiveStaleTargets(conn, run.ID, waiveInstances,
+		"cafe1234cafe", "adjudicated", testBy, token, nowMS)
+	testsupport.Must(t, err, "waive with the run's capability: %v", err)
+	if len(waived) != len(waiveInstances) {
+		t.Fatalf("waivers minted = %d, want %d: %+v", len(waived), len(waiveInstances), waived)
+	}
+	rows, events := waiverWrites(t, conn, run.ID)
+	if rows != len(waiveInstances) || events != len(waiveInstances) {
+		t.Errorf("%d waiver rows and %d events, want %d of each",
+			rows, events, len(waiveInstances))
+	}
+	page, err := ListEvents(conn, EventQuery{RunID: run.ID, Kind: EventStaleTargetWaived})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	for _, ev := range page.Events {
+		if strings.Contains(string(ev.Data), token) {
+			t.Errorf("a stale-target-waived event carries the capability: %s", ev.Data)
+		}
+	}
+}
+
+// A run with no capability minted (activated before the capability existed)
+// takes a waiver with no token, as every operator verb does on such a run.
+func TestWaiveStaleTargetsAllowsAnUnboundRunWithoutToken(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := boundRun(t, conn)
+	unbind(t, conn, run.ID)
+
+	waived, err := testEngine().WaiveStaleTargets(conn, run.ID, waiveInstances,
+		"cafe1234cafe", "adjudicated", testBy, "", nowMS)
+	testsupport.Must(t, err, "waive on an unbound run: %v", err)
+	rows, events := waiverWrites(t, conn, run.ID)
+	if len(waived) != 2 || rows != 2 || events != 2 {
+		t.Errorf("waived %d, %d rows, %d events on an unbound run, want 2 of each",
+			len(waived), rows, events)
 	}
 }

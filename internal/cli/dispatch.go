@@ -953,7 +953,10 @@ names: the same step warning about a DIFFERENT sha, or the same sha on a step
 no waiver names, warns exactly as before — a new divergence never rides an old
 ruling. Waivers are RUN-SCOPED and die with their run; each one is recorded as
 a ` + "`stale-target-waived`" + ` event, so the feed shows what standing precedent was
-minted and why.`,
+minted and why.
+
+On a run bound to a conductor capability this requires that capability, via
+DOCKET_TOKEN or an owner-only file on stdin, never argv.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchWaiveTarget(cmd, getWriter(cmd))
 	},
@@ -981,7 +984,8 @@ func runDispatchWaiveTarget(cmd *cobra.Command, w *output.Writer) error {
 		return err
 	}
 	waivers, err := engine.NewEngine().WaiveStaleTargets(
-		conn, runID, steps, target, note, by, model.NowMS())
+		conn, runID, steps, target, note, by, conductorToken(conn, runID, os.Stdin),
+		model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}
