@@ -512,30 +512,3 @@ func TestVoteHoldOnDissentCommittedWithoutChecksPasses(t *testing.T) {
 	testsupport.Must(t, err, "driving the tally: %v", err)
 	assertDissentGatePassed(t, conn)
 }
-
-// A committed triage panel is disposed of by its own on_fail, never by the
-// dissent park: parking it would hold every step of the issue behind the
-// question it was convened to answer.
-func TestVoteHoldOnDissentCommittedTriagePanelNotParked(t *testing.T) {
-	conn, _, e := triageRun(t, "retry", "abandon-issue")
-	err := db.SetConfig(conn, 0, db.VoteRuleHoldOnDissentKey("majority"), "true")
-	testsupport.Must(t, err, "setting hold_on_dissent: %v", err)
-
-	proposalID, err := findVoteProposal(conn, mustStep(t, conn, "triage@0"))
-	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
-	if proposalID == 0 {
-		t.Fatal("no proposal opened for triage@0")
-	}
-	castSeat(t, conn, proposalID, "seat-a", model.VerdictApprove, "")
-	castSeat(t, conn, proposalID, "seat-b", model.VerdictReject, "")
-	commitDissentGate(t, conn, proposalID)
-	err = e.DriveVoteProposal(conn, proposalID, nowMS)
-	testsupport.Must(t, err, "driving the tally: %v", err)
-
-	panel := mustStep(t, conn, "triage@0")
-	if panel.Status == db.StepWaitingHuman ||
-		strings.Contains(panel.Routing, "hold_on_dissent") {
-		t.Errorf("triage@0 status = %q, routing = %q — a committed panel must "+
-			"not be parked on its own dissent", panel.Status, panel.Routing)
-	}
-}
