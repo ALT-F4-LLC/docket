@@ -138,6 +138,14 @@ type voterTally struct {
 type ledgerTallies struct {
 	executors map[string]*executorTally
 	voters    map[string]*voterTally
+	// A proposal can be attributed to several runs in the window — its text
+	// names each, or it is one run's vote-step panel whose text names
+	// another — yet its casts are one set of facts. stepOwnedProposals holds
+	// the window's vote-step panels, credited only by the run that opened
+	// them, so the panel keeps its step's columns; creditedProposals holds
+	// every proposal already credited, so a text-attributed one counts once.
+	stepOwnedProposals map[int]bool
+	creditedProposals  map[int]bool
 }
 
 func (l *ledgerTallies) executor(hint string, runID int) *executorTally {
@@ -173,10 +181,7 @@ func LoadExecutorLedger(conn *sql.DB, opts ExecutorLedgerOptions) (*ExecutorLedg
 	// behind every count is read in one fixed order (R9).
 	sort.Slice(runs, func(i, j int) bool { return runs[i].ID < runs[j].ID })
 
-	tallies := &ledgerTallies{
-		executors: map[string]*executorTally{}, voters: map[string]*voterTally{},
-	}
-	ledger := &ExecutorLedger{Executors: []ExecutorLedgerRow{}, Voters: []VoterLedgerRow{}}
+	admitted := make([]int, 0, len(runs))
 	for _, run := range runs {
 		if opts.SinceRun > 0 && run.ID < opts.SinceRun {
 			continue
@@ -184,8 +189,22 @@ func LoadExecutorLedger(conn *sql.DB, opts ExecutorLedgerOptions) (*ExecutorLedg
 		if opts.SinceMS > 0 && run.CreatedAtMS < opts.SinceMS {
 			continue
 		}
-		ledger.Runs++
-		if err := ledgerRun(conn, run.ID, tallies); err != nil {
+		admitted = append(admitted, run.ID)
+	}
+	stepOwned, err := voteStepProposalsOf(conn, admitted)
+	if err != nil {
+		return nil, err
+	}
+
+	tallies := &ledgerTallies{
+		executors: map[string]*executorTally{}, voters: map[string]*voterTally{},
+		stepOwnedProposals: stepOwned, creditedProposals: map[int]bool{},
+	}
+	ledger := &ExecutorLedger{
+		Runs: len(admitted), Executors: []ExecutorLedgerRow{}, Voters: []VoterLedgerRow{},
+	}
+	for _, runID := range admitted {
+		if err := ledgerRun(conn, runID, tallies); err != nil {
 			return nil, err
 		}
 	}
@@ -394,6 +413,26 @@ func ledgerClusters(conn *sql.DB, runID int, steps []*db.Step, tallies *ledgerTa
 	return nil
 }
 
+// voteStepProposalsOf returns the ids of the proposals the given runs' vote
+// steps opened.
+func voteStepProposalsOf(conn *sql.DB, runIDs []int) (map[int]bool, error) {
+	keyed, err := db.LookupIdempotencyKeys(conn, db.ScopeVoteCreate, voteStepScopePrefix)
+	if err != nil {
+		return nil, fmt.Errorf("reading the vote-step proposals: %w", err)
+	}
+	inWindow := make(map[int]bool, len(runIDs))
+	for _, id := range runIDs {
+		inWindow[id] = true
+	}
+	owned := make(map[int]bool)
+	for key, id := range keyed {
+		if runID, ok := voteStepRunOf(key); ok && inWindow[runID] {
+			owned[id] = true
+		}
+	}
+	return owned, nil
+}
+
 // ledgerCasts credits each voter name with its casts on the run's proposals —
 // the vote-step family and the conversational gates the run report already
 // attributes — and, where the proposal is a vote step's, with what became of
@@ -420,7 +459,7 @@ func ledgerCasts(
 		return err
 	}
 	for _, id := range extra {
-		if _, seen := stepOf[id]; !seen {
+		if _, seen := stepOf[id]; !seen && !tallies.stepOwnedProposals[id] {
 			stepOf[id] = nil
 			ids = append(ids, id)
 		}
@@ -428,6 +467,10 @@ func ledgerCasts(
 	sort.Ints(ids)
 
 	for _, id := range ids {
+		if tallies.creditedProposals[id] {
+			continue
+		}
+		tallies.creditedProposals[id] = true
 		proposal, err := db.GetProposal(conn, id)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", model.FormatProposalID(id), err)

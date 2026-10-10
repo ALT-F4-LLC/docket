@@ -126,6 +126,59 @@ func TestExecutorLedgerGroupsRunsUnderOneHint(t *testing.T) {
 	}
 }
 
+// TestExecutorLedgerCountsAProposalNamingTwoRunsOnce: a conversational
+// proposal whose text names two runs in the window is attributed to both, but
+// its casts are one set of facts, so each counts once across the ledger.
+func TestExecutorLedgerCountsAProposalNamingTwoRunsOnce(t *testing.T) {
+	conn := mustDB(t)
+	firstRun, _, _ := evidenceRun(t, conn)
+	secondRun, _, _ := secondEvidenceRun(t, conn)
+
+	id, err := db.CreateProposal(conn, &model.Proposal{
+		ProjectID:   1,
+		Description: "panel for " + model.FormatRunID(firstRun),
+		Rationale:   "also covers " + model.FormatRunID(secondRun),
+		Criticality: model.CriticalityMedium,
+		Threshold:   0.5, RequiredVoters: 1,
+		Status: model.ProposalStatusOpen, CreatedBy: "conductor",
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	castSeat(t, conn, id, "carol", model.VerdictApprove, "")
+
+	ledger, err := LoadExecutorLedger(conn, ExecutorLedgerOptions{ProjectID: 1})
+	testsupport.Must(t, err, "LoadExecutorLedger: %v", err)
+
+	carol := voterRow(t, ledger, "carol")
+	if carol.Casts != 1 || carol.Approve != 1 {
+		t.Errorf("row for carol = %+v, want casts 1 and approve 1: one vote on one "+
+			"proposal, however many runs it names", carol)
+	}
+}
+
+// TestExecutorLedgerCreditsAVoteStepPanelToItsOwnRun: a vote step's panel
+// whose text names an EARLIER run in the window is still credited by the run
+// that opened it, once, with its step's fate.
+func TestExecutorLedgerCreditsAVoteStepPanelToItsOwnRun(t *testing.T) {
+	conn := mustDB(t)
+	firstRun, _, _ := evidenceRun(t, conn)
+	secondRun, secondProposal, _ := secondEvidenceRun(t, conn)
+
+	execSQL(t, conn, `UPDATE proposals SET rationale = ? WHERE id = ?`,
+		"retry of "+model.FormatRunID(firstRun), secondProposal)
+	execSQL(t, conn, `UPDATE steps SET routing = 'fix-loop' WHERE id = ?`,
+		stepInRun(t, conn, secondRun, "gate@0").ID)
+	castSeat(t, conn, secondProposal, "dave", model.VerdictReject, "")
+
+	ledger, err := LoadExecutorLedger(conn, ExecutorLedgerOptions{ProjectID: 1})
+	testsupport.Must(t, err, "LoadExecutorLedger: %v", err)
+
+	dave := voterRow(t, ledger, "dave")
+	want := VoterLedgerRow{Voter: "dave", Runs: 1, Casts: 1, Reject: 1, FixLoopRoutes: 1}
+	if dave != want {
+		t.Errorf("row for dave = %+v, want %+v", dave, want)
+	}
+}
+
 // ledgerClusterPayload is sourcePayload plus a HELD cluster: C-3's spread
 // reaches the fixture's hold_spread, and its two members come from the second
 // review seat — so that seat's executor is credited a corroborated cluster
