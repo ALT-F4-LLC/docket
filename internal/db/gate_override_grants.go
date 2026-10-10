@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 )
 
@@ -48,7 +49,16 @@ type GateOverrideGrant struct {
 	// flight across the upgrade. Only a pre-v30 grant is ever blank — a row
 	// recorded at v30 or later always carries a fingerprint, the empty
 	// capture's included.
-	Fingerprint  string
+	Fingerprint string
+	// Argv is the origin row's `gate_results.argv`, copied at mint. Nil means
+	// the origin row recorded none (an unmatched gate never resolved a
+	// command); it is a value, not a wildcard.
+	Argv []string
+	// ArgvLegacy reports a grant whose command is unknown: one recorded before
+	// v38, or by a binary that does not write the column. Argv is nil for such
+	// a grant, and the flag is what separates it from a nil-argv mint. The
+	// insert path never writes it.
+	ArgvLegacy   bool
 	Note         string
 	CoveredSteps int
 	CreatedAtMS  int64
@@ -65,13 +75,17 @@ func InsertGateOverrideGrantTx(tx *sql.Tx, g GateOverrideGrant) (int, error) {
 	if g.Exit != nil {
 		exit = *g.Exit
 	}
+	argv, err := json.Marshal(g.Argv)
+	if err != nil {
+		return 0, fmt.Errorf("encoding the gate override grant argv: %w", err)
+	}
 	res, err := tx.Exec(
 		`INSERT INTO gate_override_grants
-		   (run_id, origin_step_id, gate, exit, reason, fingerprint, note,
+		   (run_id, origin_step_id, gate, exit, reason, fingerprint, argv, note,
 		    covered_steps, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-		g.RunID, g.OriginStepID, g.Gate, exit, g.Reason, g.Fingerprint, g.Note,
-		g.CreatedAtMS)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+		g.RunID, g.OriginStepID, g.Gate, exit, g.Reason, g.Fingerprint,
+		string(argv), g.Note, g.CreatedAtMS)
 	if err != nil {
 		return 0, fmt.Errorf("recording the gate override grant: %w", err)
 	}
@@ -87,7 +101,7 @@ func InsertGateOverrideGrantTx(tx *sql.Tx, g GateOverrideGrant) (int, error) {
 func GateOverrideGrantsForRun(conn *sql.DB, runID int) ([]GateOverrideGrant, error) {
 	rows, err := conn.Query(
 		`SELECT id, run_id, origin_step_id, gate, exit, reason, fingerprint,
-		        note, covered_steps, created_at_ms
+		        argv, note, covered_steps, created_at_ms
 		   FROM gate_override_grants WHERE run_id = ? ORDER BY id`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading gate override grants: %w", err)
@@ -97,10 +111,11 @@ func GateOverrideGrantsForRun(conn *sql.DB, runID int) ([]GateOverrideGrant, err
 			var (
 				g    GateOverrideGrant
 				exit sql.NullInt64
+				argv string
 			)
 			if err := r.Scan(
 				&g.ID, &g.RunID, &g.OriginStepID, &g.Gate, &exit, &g.Reason,
-				&g.Fingerprint, &g.Note, &g.CoveredSteps, &g.CreatedAtMS,
+				&g.Fingerprint, &argv, &g.Note, &g.CoveredSteps, &g.CreatedAtMS,
 			); err != nil {
 				return GateOverrideGrant{}, fmt.Errorf(
 					"reading a gate override grant: %w", err)
@@ -108,6 +123,12 @@ func GateOverrideGrantsForRun(conn *sql.DB, runID int) ([]GateOverrideGrant, err
 			if exit.Valid {
 				code := int(exit.Int64)
 				g.Exit = &code
+			}
+			if argv == grantArgvLegacy {
+				g.ArgvLegacy = true
+			} else if err := json.Unmarshal([]byte(argv), &g.Argv); err != nil {
+				return GateOverrideGrant{}, fmt.Errorf(
+					"reading gate override grant %d's argv: %w", g.ID, err)
 			}
 			return g, nil
 		})

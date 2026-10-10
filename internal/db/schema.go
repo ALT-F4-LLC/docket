@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 37
+const currentSchemaVersion = 38
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -207,6 +207,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	35: migrateV34ToV35,
 	36: migrateV35ToV36,
 	37: migrateV36ToV37,
+	38: migrateV37ToV38,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -2961,6 +2962,58 @@ func migrateV36ToV37(tx *sql.Tx) error {
 	return nil
 }
 
+// grantArgvLegacy is the `gate_override_grants.argv` value that means "this
+// grant's command is unknown": every grant that predates v38, and every grant
+// a binary that does not write the column inserts. It is deliberately not
+// valid JSON, so it cannot collide with an encoded argv (`null` for a grant
+// minted from an unmatched gate, a JSON array otherwise), and a reader that
+// skipped the marker check would fail to decode it rather than read it as a
+// nil argv.
+const grantArgvLegacy = "legacy"
+
+// v38AddedColumns is v38's whole schema change: `argv` on
+// `gate_override_grants`, the command a grant was minted from.
+//
+// A grant keyed on (gate, exit, reason, fingerprint) cannot tell two commands
+// under one gate name apart when both fail without output: the empty capture
+// fingerprints identically. The column records the failing row's argv so the
+// grant can bind to the command the operator ruled on.
+//
+// The DEFAULT is the legacy marker, so the ADD COLUMN itself marks every
+// pre-existing row and no separate back-fill exists to forget.
+var v38AddedColumns = []struct{ table, column, ddl string }{
+	{"gate_override_grants", "argv",
+		`ALTER TABLE gate_override_grants ADD COLUMN argv TEXT NOT NULL DEFAULT '` +
+			grantArgvLegacy + `'`},
+}
+
+// v38ColumnSentinels are the columns the rewind guard probes, the v27–v37
+// form: v38 adds no table and no index, so a database stamped 38 by a binary
+// built mid-change carries every v37 sentinel and `argv` never arrives.
+var v38ColumnSentinels = []struct{ table, column string }{
+	{"gate_override_grants", "argv"},
+}
+
+// migrateV37ToV38 adds the grant argv column. `ALTER TABLE ADD COLUMN` is not
+// idempotent in SQLite, so the migration probes first and stays re-runnable,
+// the same shape v10 through v37 use.
+func migrateV37ToV38(tx *sql.Tx) error {
+	for _, col := range v38AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v37 to v38: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v37 to v38: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3721,6 +3774,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 36
+				break
+			}
+		}
+	}
+
+	// The v38 guard, in the same COLUMN form as v37 and for its reason: v38
+	// adds one column and no table, so a database stamped 38 by a binary built
+	// mid-change carries every v37 sentinel and `gate_override_grants.argv`
+	// never arrives.
+	if version >= 38 {
+		for _, col := range v38ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v38 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 37
 				break
 			}
 		}

@@ -66,8 +66,9 @@ func TestMigrateToV37(t *testing.T) {
 	if err := Migrate(db); err != nil {
 		t.Fatalf("Migrate from v36: %v", err)
 	}
-	if v, _ := SchemaVersion(db); v != 37 {
-		t.Errorf("schema_version after migrating from v36 = %d, want 37", v)
+	if v, _ := SchemaVersion(db); v != currentSchemaVersion {
+		t.Errorf("schema_version after migrating from v36 = %d, want %d",
+			v, currentSchemaVersion)
 	}
 	p, err := GetProposal(db, int(id))
 	if err != nil {
