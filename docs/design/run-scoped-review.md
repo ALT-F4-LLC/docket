@@ -48,12 +48,24 @@ canonical-form change on re-register as a CONFLICT (internal/workflow/parse.go:1
 states the rule for `roster`; internal/workflow/canonical.go:19-25 states why).
 
 Binding. Issue workflows bind per issue through `[match]` under the exactly-one
-rule (internal/engine/activate.go:1332, `bindIssue`). A run-scoped definition has
-no `[match]` (V48a) and binds per run: at the first activation, among the
-bindable (non-retired) definitions whose scope is `run`, zero names means the run
-has no run phase; exactly one name binds its highest version; two or more names
-is a `VALIDATION_ERROR` listing them, the exactly-one rule's analog. The binding
-is pinned with the issue workflows and inherited by re-activations (activate.go's
+rule (internal/engine/activate.go:1332, `bindIssue`). Issue binding admits only
+definitions whose effective scope is `issue`: `bindableDefinitions`
+(activate.go:1290) drops a definition whose scope is `run` beside the retired
+ones, before the highest-version reduction, and `bindIssue` (activate.go:1336)
+and `lintDomainScopeMismatch` (activate.go:1588) both take their candidate set
+from it, so a registered run-scoped definition is never a candidate for any
+issue's exactly-one match and never a workflow the domain lint names. The filter
+is what makes a run-scoped definition registerable at all: it has no `[match]`
+(V48a), and `(*Match).Matches` returns true for a nil match (match.go:53-56), so
+without the filter every registered run-scoped definition would match every
+issue and the exactly-one count would refuse every activation in the project.
+It therefore lands in phase 1 with the grammar (§6), before any run-scoped
+binding exists. A run-scoped definition binds per run: at the first activation,
+among the non-retired definitions whose scope is `run` (a reduction of its own,
+phase 2, not `bindableDefinitions`), zero names means the run has no run phase;
+exactly one name binds its highest version; two or more names is a
+`VALIDATION_ERROR` listing them, the exactly-one rule's analog. The binding is
+pinned with the issue workflows and inherited by re-activations (activate.go's
 RA2 comment at line 603 and RA3 comment at line 665).
 
 Expansion. `workflow.Expand` runs once for the bound run-scoped definition with an
@@ -118,6 +130,8 @@ Alternatives weighed.
 | A per-step `scope = "run"` flag inside ordinary issue workflows | A run pins several workflows, so N bound definitions can each declare the step: either N reviews run or a dedupe rule must say whose wins. `after` edges would cross the issue/run boundary, and `Expand`'s per-issue purity contract would have to carve out a once-per-run row. |
 | A post-integration phase every issue workflow opts into, assembled by the engine | Needs a definition for the phase's steps anyway, plus an opt-in flag per issue workflow and a merge rule. The opt-in half is deferred (§7) and can be added to D1 later without changing its shape. |
 | Keep reviewing per issue and rely on `dispatch close`'s integration check | The check proves commits are present, not that the integrated tree is correct, and a hand-resolved cherry-pick is content no reviewer saw. This is the gap the request names; doing nothing leaves it. |
+| Refuse `scope = "run"` at register time until phase 2 binds it, instead of filtering issue binding in phase 1 | Phase 1's acceptance (`workflow lint` reports `new` on the §5 definition) would be unmeetable, and phase 2 would still need the filter, since the run-scoped reduction and the issue reduction read the same registered rows. The filter is one clause in `bindableDefinitions` and is needed in every later phase. |
+| Filter in `bindIssue` and `lintDomainScopeMismatch` separately, leaving `bindableDefinitions` untouched | Two call sites enforce one invariant by convention; a third consumer of `bindableDefinitions` would inherit the defect. The filter inside `bindableDefinitions` keeps the lint's documented promise that it names only workflows the issue could have bound. |
 
 ### 3.2 D2: `run.diff` is a fresh integration-branch read, recorded at claim
 
@@ -313,9 +327,16 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/workflow/canonical.go: no code change; the `omitempty` tag is what
   keeps existing canonical forms byte-identical, verified by a round-trip test.
 - internal/workflow/expand_test.go: expansion of a run-scoped fixture.
-- internal/engine/activate.go: run-scoped binding (zero/one/many), eager
-  expansion with NULL `issue_id`, the D5 refusal.
-- internal/engine/activate_test.go.
+- internal/engine/activate.go, phase 1: the issue-binding scope filter.
+  `bindableDefinitions` (line 1290) admits only definitions whose effective
+  scope is `issue` (unset or `"issue"`), so `bindIssue` and
+  `lintDomainScopeMismatch` never see a run-scoped definition.
+- internal/engine/activate.go, phase 2: run-scoped binding (zero/one/many) over
+  the non-retired `run`-scoped definitions, eager expansion with NULL
+  `issue_id`, the D5 refusal.
+- internal/engine/activate_test.go: phase 1 asserts that registering the §5
+  definition leaves an issue's binding unchanged; phase 2 covers the run-scoped
+  binding and the D5 refusal.
 - internal/db/runs.go: `InsertStepTx` writes NULL for a zero `IssueID`.
 - internal/db/steps.go: `scanSteps` reads `issue_id` through `sql.NullInt64`.
 - internal/db/schema.go: migration adding the partial unique index on
@@ -413,11 +434,20 @@ Phase 3 lets the same definition declare `threshold = { "fix-loop" = ... }`, a
 Each phase is one issue with its own acceptance criteria; the split follows the
 four surfaces plus storage, in dependency order.
 
-Phase 1, grammar and lint. `[pipeline] scope`; V48, V48a, V48b; V11 and L4 admit
-`run.diff`; canonical-form round trip. Acceptance: `workflow lint` on the §5
-definition reports `new`; the same definition with `[match]` added is refused
-naming V48a; an issue-scoped definition declaring `run.diff` is refused naming
-V48; every definition in `internal/workflow/testdata` re-registers `unchanged`.
+Phase 1, grammar, lint, and the issue-binding scope filter. `[pipeline] scope`;
+V48, V48a, V48b; V11 and L4 admit `run.diff`; canonical-form round trip; the
+issue-binding scope filter, `bindableDefinitions` admits only definitions whose
+effective scope is `issue`, so `bindIssue` and `lintDomainScopeMismatch` never
+consider a run-scoped definition (§3.1). The filter ships in this phase, not
+phase 2, because the phase makes a run-scoped definition registerable and a
+registered one with no `[match]` would otherwise match every issue. Acceptance:
+`workflow lint` on the §5 definition reports `new`; the same definition with
+`[match]` added is refused naming V48a; an issue-scoped definition declaring
+`run.diff` is refused naming V48; every definition in `internal/workflow/testdata`
+re-registers `unchanged`; with the §5 definition registered, an issue that bound
+exactly one workflow before it was registered binds that same workflow and its
+activation succeeds, and `lintDomainScopeMismatch` reports nothing it did not
+report before.
 
 Phase 2, binding, storage, readiness, packet. NULL `issue_id` rows; partial
 unique index; run-scoped binding and the D5 refusal; R2c; `run.diff` recorded at
