@@ -613,11 +613,11 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	//
 	// internal/db caps the connection pool at ONE connection, so a pool read
 	// from inside an open transaction deadlocks permanently rather than
-	// failing. TestNoPoolReadsInsideTransactions matches only conn.Begin(), so
-	// it does not see the snapshot opened through beginRunReportSnapshot: this
-	// function keeps the rule by keeping every pool read above that call. A
-	// rollback that silently failed would leave the transaction open and turn
-	// the next of these into the deadlock.
+	// failing. This function keeps every pool read above the
+	// beginRunReportSnapshot call, and TestNoPoolReadsInsideTransactions covers
+	// the beginRunReportSnapshot region, so a pool read moved below it fails
+	// that test. A rollback that silently failed would leave the transaction
+	// open and turn the next of these into the deadlock.
 	//
 	// Nothing here needs the snapshot. These are rollups over append-only
 	// result tables that no read can change, so reading them a moment early
