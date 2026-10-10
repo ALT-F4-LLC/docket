@@ -90,7 +90,8 @@ func TestVoteCommitCommitsWithTheRunsCapability(t *testing.T) {
 	proposalID, token := approvedVoteStepProposal(t, conn, true)
 	t.Setenv(TokenEnvVar, token)
 
-	testsupport.Must(t, runVoteCommit(conn, proposalID), "vote commit with the capability: %v", nil)
+	err := runVoteCommit(conn, proposalID)
+	testsupport.Must(t, err, "vote commit with the capability: %v", err)
 	assertProposalStatus(t, conn, proposalID, model.ProposalStatusCommitted)
 }
 
@@ -108,7 +109,8 @@ func TestVoteCommitNeedsNoTokenOffTheConductorPath(t *testing.T) {
 		})
 		testsupport.Must(t, err, "CreateProposal: %v", err)
 
-		testsupport.Must(t, runVoteCommit(conn, proposalID), "vote commit: %v", nil)
+		err = runVoteCommit(conn, proposalID)
+		testsupport.Must(t, err, "vote commit: %v", err)
 		assertProposalStatus(t, conn, proposalID, model.ProposalStatusCommitted)
 	})
 
@@ -118,7 +120,8 @@ func TestVoteCommitNeedsNoTokenOffTheConductorPath(t *testing.T) {
 		conn := newTestDB(t)
 		proposalID, _ := approvedVoteStepProposal(t, conn, false)
 
-		testsupport.Must(t, runVoteCommit(conn, proposalID), "vote commit: %v", nil)
+		err := runVoteCommit(conn, proposalID)
+		testsupport.Must(t, err, "vote commit: %v", err)
 		assertProposalStatus(t, conn, proposalID, model.ProposalStatusCommitted)
 	})
 }
