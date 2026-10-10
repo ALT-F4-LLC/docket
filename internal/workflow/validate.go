@@ -1755,10 +1755,7 @@ func hasLoopStep(def *Definition) bool {
 // which enters a round for THIS step. The DECLARED values only: the `on_fail`
 // default is `waiting-human`, so silence never routes there.
 func canRouteFixLoop(def *Definition, step *Step) bool {
-	if step.OnFail == OnFailFixLoop {
-		return true
-	}
-	if _, ok := step.Threshold[OnFailFixLoop]; ok {
+	if routesFixLoopDirectly(step) {
 		return true
 	}
 	panel := StepByName(def, step.OnFailTarget())
@@ -1771,6 +1768,18 @@ func canRouteFixLoop(def *Definition, step *Step) bool {
 		}
 	}
 	return false
+}
+
+// routesFixLoopDirectly reports whether the step itself routes `fix-loop`,
+// through `on_fail` or a `threshold` key, rather than through a triage panel.
+// Only these routes enter the loop without a grant, so only they can meet the
+// loop bound's refusal.
+func routesFixLoopDirectly(step *Step) bool {
+	if step.OnFail == OnFailFixLoop {
+		return true
+	}
+	_, ok := step.Threshold[OnFailFixLoop]
+	return ok
 }
 
 // anyBodyServes reports whether at least one `loop = true` step serves a
@@ -1794,8 +1803,10 @@ func anyBodyServes(def *Definition, trigger string) bool {
 // misunderstanding of what the field is for.
 // validateOnExhausted is V41 (DKT-1902): `on_exhausted` declares where a
 // fix-loop exhaustion routes, so it is declarable only where an exhaustion can
-// happen — on a step that routes `fix-loop` under a declared bound — and its
-// value must be one the engine can carry out.
+// happen — on a step whose own `on_fail` or `threshold` routes `fix-loop`
+// under a declared bound — and its value must be one the engine can carry out.
+// A triage panel's `fix-round` does not qualify: it grants the round it enters,
+// so the bound never refuses on that path.
 //
 // The closed half is `waiting-human` and `abandon-issue`. A value outside it
 // names a step, which must resolve and must be a vote step (whose proposal
@@ -1820,6 +1831,18 @@ func validateOnExhausted(def *Definition, byName map[string]*Step, step *Step) e
 					"`fix-loop` — it says where that routing goes once the loop "+
 					"bound refuses another round, and this step never routes there",
 				step.Name),
+		}
+	}
+	if !routesFixLoopDirectly(step) {
+		return &Error{
+			Rule: "V41", Step: step.Name, Field: "on_exhausted",
+			Message: fmt.Sprintf(
+				"step %q: `on_exhausted` is only valid where `on_fail` or a "+
+					"`threshold` key routes `fix-loop` — this step reaches the loop "+
+					"only through triage panel %q's `fix-round`, and every `fix-loop` "+
+					"entry on that path is grant-authorized, so the loop bound never "+
+					"refuses and the routing declared here could never fire",
+				step.Name, step.OnFailTarget()),
 		}
 	}
 	if step.MaxFixLoops == nil || *step.MaxFixLoops <= 0 {

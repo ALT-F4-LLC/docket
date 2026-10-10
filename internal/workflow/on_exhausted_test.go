@@ -98,6 +98,17 @@ func TestOnExhaustedVocabulary(t *testing.T) {
 			want: "requires a positive `max_fix_loops`",
 		},
 		{
+			name: "rejects a step that routes fix-loop only through a triage panel", target: "drain",
+			edit: func(def *Definition) {
+				routeCheckThroughTriage(def)
+				check := StepByName(def, "check")
+				check.Threshold = nil
+				one := 1
+				check.MaxFixLoops = &one
+			},
+			want: "every `fix-loop` entry on that path is grant-authorized",
+		},
+		{
 			name: "rejects a step that is neither vote nor executor", target: "drain",
 			edit: func(def *Definition) {
 				drain := StepByName(def, "drain")
@@ -127,6 +138,25 @@ func TestOnExhaustedVocabulary(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOnExhaustedAcceptsThresholdBesideTriage pins that a triage panel does not
+// cost a step its `on_exhausted` when the step also routes `fix-loop` through
+// a `threshold` key: that route enters the loop unauthorized, so the bound can
+// refuse it and the declared routing can fire.
+func TestOnExhaustedAcceptsThresholdBesideTriage(t *testing.T) {
+	def := parseOnExhausted(t, "drain")
+	routeCheckThroughTriage(def)
+	if err := Validate(def); err != nil {
+		t.Fatalf("a threshold `fix-loop` route beside a triage panel must validate, got %v", err)
+	}
+}
+
+// routeCheckThroughTriage points `check`'s `on_fail` at the vote panel and
+// maps the panel's approval to a fix round for it.
+func routeCheckThroughTriage(def *Definition) {
+	StepByName(def, "check").OnFail = "panel"
+	StepByName(def, "panel").OnFailRoutes = map[string]string{"approved": TriageFixRound}
 }
 
 // interposedOnExhausted is the interposed target an accepted value implies: a
