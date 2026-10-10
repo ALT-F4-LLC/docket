@@ -271,7 +271,7 @@ const (
 func AssembleContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
 ) (*Context, error) {
-	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssueBody)
+	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssue)
 }
 
 // AssembleRecordedContext builds a step's context bundle over the artifacts its
@@ -309,7 +309,7 @@ func AssembleContext(
 func AssembleRecordedContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
 ) (*Context, error) {
-	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssueBody)
+	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssue)
 }
 
 // artifactSource loads the artifact set one assembly resolves over.
@@ -325,34 +325,32 @@ func recordedArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
 	return db.ListStepInputArtifactsTx(tx, step.ID)
 }
 
-// bodySource resolves the description an assembly renders, given the one the
-// run-issue row currently holds.
+// issueSource corrects the `context.issue` an assembly states, given the one
+// the run-issue row currently holds.
 //
-// It is the artifactSource seam applied to the other input a refresh can move
-// (DKT-2291). `body_snapshot` is a column rather than a per-step row, so
+// It is the artifactSource seam applied to the inputs a refresh can move: the
+// description (`body_snapshot`, DKT-2291) and the scope inside
+// `issue_snapshot` (DKT-869). Both are columns rather than per-step rows, so
 // unlike `step_inputs` there is nothing a claim recorded to read back — and a
-// read-back that took the live column would report a body the step was never
-// given the moment `run refresh-body` ran.
-type bodySource func(tx *sql.Tx, step *db.Step, snapshot string) (string, error)
+// read-back that took the live columns would report a body or a scope the step
+// was never given the moment `run refresh-body` or `run refresh-scope` ran.
+type issueSource func(tx *sql.Tx, step *db.Step, issue *ContextIssue) error
 
-// liveIssueBody is the column as it stands — the claim's view, and what every
-// assembly did before DKT-2291.
-func liveIssueBody(_ *sql.Tx, _ *db.Step, snapshot string) (string, error) {
-	return snapshot, nil
-}
+// liveIssue leaves the columns as they stand — the claim's view.
+func liveIssue(*sql.Tx, *db.Step, *ContextIssue) error { return nil }
 
-// recordedIssueBody is the body the step's claim was given, reconstructed from
-// the refresh ledger (DKT-2291).
+// recordedIssue rewinds the body and the scope to the ones the step's claim
+// was given, reconstructed from the refresh ledger.
 //
 // The anchor is the CURRENT ATTEMPT'S CLAIM, `started_ms`, not the step row's
-// `created_at_ms`. A refresh cannot run while any step is `claimed`, `running`
-// or `gated` (AC2), so no refresh falls between a claim and its record: the
-// EARLIEST refresh later than the claim is therefore the one that superseded
-// the body this attempt was handed, and its `from_body` is that body. No later
-// row can improve on that answer, and the event's `steps` list cannot supply it
-// — a step can appear in that list and still have been handed out before the
-// refresh (a `waiting-human` attempt that already recorded), or be absent from
-// it for two different reasons at once.
+// `created_at_ms`. Neither refresh can run while any step is `claimed`,
+// `running` or `gated`, so no refresh falls between a claim and its record:
+// the EARLIEST refresh of each kind later than the claim is therefore the one
+// that superseded what this attempt was handed, and its `from` side is that
+// value. No later row can improve on that answer, and the event's `steps` list
+// cannot supply it — a step can appear in that list and still have been handed
+// out before the refresh (a `waiting-human` attempt that already recorded), or
+// be absent from it for two different reasons at once.
 //
 // `started_ms` is stamped in the claim transaction and cleared only by the
 // paths that return a row to `pending` — reap, `resolve --as retry`, triage.
@@ -361,22 +359,23 @@ func liveIssueBody(_ *sql.Tx, _ *db.Step, snapshot string) (string, error) {
 // supersede sweep moves it straight to `superseded`, touching neither
 // `attempt` nor `started_ms`. Such a row passes recordedClaim (`attempt > 0`,
 // status terminal) and reaches here with a nil anchor, so the live column is
-// a FALLBACK, not the body its last claim was handed — recordedArtifacts
-// still serves that reaped attempt's `step_inputs`, so the read-back can pair
-// one attempt's artifacts with a later body. A nil anchor means this path, or
-// pre-v16 history.
+// a FALLBACK, not the body or scope its last claim was handed —
+// recordedArtifacts still serves that reaped attempt's `step_inputs`, so the
+// read-back can pair one attempt's artifacts with a later body or scope. A nil
+// anchor means this path, or pre-v16 history.
 //
-// RETENTION: the reconstruction reads an `issue-body-refreshed` row from the
-// events table, which `events prune` deletes for a terminal run. A prune
-// deletes every event below its boundary, so while this attempt's own
-// `step-claimed` row survives, every refresh row after it survives too. Once a
-// prune covering the run has removed that claim row, a missing refresh row no
-// longer means "no refresh", and the read-back reports the body GONE instead
-// of stating the live column as the body this attempt was handed.
-func recordedIssueBody(tx *sql.Tx, step *db.Step, snapshot string) (string, error) {
+// RETENTION: the reconstruction reads refresh rows from the events table,
+// which `events prune` deletes for a terminal run. A prune deletes every event
+// below its boundary, so while this attempt's own `step-claimed` row survives,
+// every refresh row after it survives too. Once a prune covering the run has
+// removed that claim row, a missing refresh row no longer means "no refresh",
+// and the read-back reports the body and scope GONE instead of stating the
+// live columns as what this attempt was handed.
+func recordedIssue(tx *sql.Tx, step *db.Step, issue *ContextIssue) error {
 	if step.StartedMS == nil {
-		return snapshot, nil
+		return nil
 	}
+	claimedAtMS := *step.StartedMS
 	var claimPruned bool
 	err := tx.QueryRow(
 		`SELECT EXISTS (SELECT 1 FROM events
@@ -384,39 +383,79 @@ func recordedIssueBody(tx *sql.Tx, step *db.Step, snapshot string) (string, erro
 		    AND NOT EXISTS (SELECT 1 FROM events
 		                     WHERE kind = ? AND step_id = ? AND at_ms >= ?)`,
 		EventEventsPruned, step.RunID,
-		EventStepClaimed, step.ID, *step.StartedMS).Scan(&claimPruned)
+		EventStepClaimed, step.ID, claimedAtMS).Scan(&claimPruned)
 	if err != nil {
-		return "", fmt.Errorf("reading %s's claim record: %w", step.Instance, err)
+		return fmt.Errorf("reading %s's claim record: %w", step.Instance, err)
 	}
 	if claimPruned {
-		return "", goneErr(
-			"step %s: its recorded issue body is unavailable — %s's events up to "+
-				"this claim were pruned (`events prune`), and the body refreshes "+
-				"the read-back reconstructs from were pruned with them",
+		return goneErr(
+			"step %s: its recorded issue body and scope are unavailable — %s's "+
+				"events up to this claim were pruned (`events prune`), and the "+
+				"refreshes the read-back reconstructs from were pruned with them",
 			step.Instance, model.FormatRunID(step.RunID))
 	}
+	if issue.BodySnapshot, err = recordedIssueBody(tx, step, claimedAtMS, issue.BodySnapshot); err != nil {
+		return err
+	}
+	issue.Scope, err = recordedIssueScope(tx, step, claimedAtMS, issue.Scope)
+	return err
+}
+
+// recordedIssueBody is the body the claim at claimedAtMS was given (DKT-2291):
+// the superseding refresh's `from_body`, or the column when none followed.
+func recordedIssueBody(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot string) (string, error) {
+	var refresh struct {
+		FromBody string `json:"from_body"`
+	}
+	found, err := refreshAfterClaim(tx, step, claimedAtMS, EventIssueBodyRefreshed, &refresh)
+	if err != nil || !found {
+		return snapshot, err
+	}
+	return refresh.FromBody, nil
+}
+
+// recordedIssueScope is the scope the claim at claimedAtMS was given (DKT-869):
+// the superseding refresh's `from`, or the snapshot's when none followed.
+func recordedIssueScope(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot []string) ([]string, error) {
+	var refresh struct {
+		From []string `json:"from"`
+	}
+	found, err := refreshAfterClaim(tx, step, claimedAtMS, EventIssueScopeRefreshed, &refresh)
+	if err != nil || !found {
+		return snapshot, err
+	}
+	// An undeclared frozen scope is encoded as `null`; contextIssue states it
+	// as `[]`, and the read-back must not disagree with it on that case.
+	if refresh.From == nil {
+		return []string{}, nil
+	}
+	return refresh.From, nil
+}
+
+// refreshAfterClaim decodes into `into` the earliest `kind` refresh of the
+// step's issue that followed the claim at claimedAtMS, reporting whether one
+// exists. None means nothing superseded what the claim was handed, so the
+// column still holds it.
+func refreshAfterClaim(
+	tx *sql.Tx, step *db.Step, claimedAtMS int64, kind string, into any,
+) (bool, error) {
 	var data string
-	err = tx.QueryRow(
+	err := tx.QueryRow(
 		`SELECT data FROM events
 		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
 		  ORDER BY at_ms, seq
 		  LIMIT 1`,
-		EventIssueBodyRefreshed, step.RunID, step.IssueID, *step.StartedMS).Scan(&data)
+		kind, step.RunID, step.IssueID, claimedAtMS).Scan(&data)
 	if err == sql.ErrNoRows {
-		// No refresh followed this attempt's claim, so nothing superseded the
-		// body it was handed and the column still holds it.
-		return snapshot, nil
+		return false, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
+		return false, fmt.Errorf("reading %s's %s events: %w", step.Instance, kind, err)
 	}
-	var refresh struct {
-		FromBody string `json:"from_body"`
+	if err := json.Unmarshal([]byte(data), into); err != nil {
+		return false, fmt.Errorf("reading %s's %s events: %w", step.Instance, kind, err)
 	}
-	if err := json.Unmarshal([]byte(data), &refresh); err != nil {
-		return "", fmt.Errorf("reading %s's body refreshes: %w", step.Instance, err)
-	}
-	return refresh.FromBody, nil
+	return true, nil
 }
 
 // recordedClaim reports whether a step's context is the one a claim recorded —
@@ -443,7 +482,7 @@ func recordedClaim(step *db.Step) bool {
 
 func assembleContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
-	source artifactSource, body bodySource,
+	source artifactSource, issueView issueSource,
 ) (*Context, error) {
 	def := sched.defs[step.WorkflowID]
 	if def == nil {
@@ -468,11 +507,12 @@ func assembleContext(
 	if err != nil {
 		return nil, err
 	}
-	// Which description this assembly states (DKT-2291). It lands before the
-	// resolvers because `== REQUEST` and `== INPUT issue.body` both render this
-	// one field, so a read-back that corrected only one of them would reproduce
-	// the split packet the refresh exists to prevent.
-	if issue.BodySnapshot, err = body(tx, step, issue.BodySnapshot); err != nil {
+	// Which description and scope this assembly states (DKT-2291, DKT-869).
+	// It lands before the resolvers because `== REQUEST` and
+	// `== INPUT issue.body` both render the description, so a read-back that
+	// corrected only one of them would reproduce the split packet the refresh
+	// exists to prevent.
+	if err := issueView(tx, step, issue); err != nil {
 		return nil, err
 	}
 

@@ -397,6 +397,86 @@ func TestRefreshRecordsTheDiscontinuity(t *testing.T) {
 	}
 }
 
+// TestRecordedReadBackKeepsTheScopeItsClaimRanUnder pins property 3 on the read
+// side: a refresh rewrites the snapshot every step of the issue reads, so a
+// handed-out step's read-back must reconstruct the scope its claim was given
+// from the event, or a reviewer measures its diff against a scope that did not
+// exist when it ran.
+func TestRecordedReadBackKeepsTheScopeItsClaimRanUnder(t *testing.T) {
+	frozen := []string{"internal/a/**"}
+	widened := []string{"internal/a/**", "internal/b/**"}
+	e := testEngine()
+
+	claimAndRecord := func(t *testing.T, conn *sql.DB, stepID int, atMS int64) {
+		t.Helper()
+		claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: atMS})
+		testsupport.Must(t, err, "claiming: %v", err)
+		err = e.CompleteStep(conn, stepID, CompleteOptions{
+			Token: claim.Token, Artifact: []byte("recorded"), NowMS: atMS,
+		})
+		testsupport.Must(t, err, "recording: %v", err)
+	}
+	recordedScope := func(t *testing.T, conn *sql.DB, stepID int) []string {
+		t.Helper()
+		bundle, err := ReadContext(conn, stepID, nowMS+2)
+		testsupport.Must(t, err, "reading the recorded context: %v", err)
+		return bundle.Issue.Scope
+	}
+
+	t.Run("steps claimed before the refresh keep the frozen scope", func(t *testing.T) {
+		conn := mustDB(t)
+		registerSource(t, conn, []byte(bodyInputWorkflow), "bodies.toml")
+		issue := createIssue(t, conn, "widen me", "body", "task", nil)
+		widen(t, conn, issue, fmtJSON(frozen))
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+		done := stepIDOf(t, conn, run.ID, issue, "first@0")
+		parked := stepIDOf(t, conn, run.ID, issue, "second@0")
+
+		claimAndRecord(t, conn, done, nowMS)
+		claimAndRecord(t, conn, parked, nowMS)
+		// A recorded attempt parked for a ruling is refreshable, so the refresh
+		// REACHES it — and its artifact was still recorded under the old scope.
+		// Recording the last step closed the run, so the fixture parks both.
+		mustExec(t, conn, `UPDATE steps SET status = ? WHERE id = ?`,
+			db.StepWaitingHuman, parked)
+		mustExec(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
+			string(model.RunWaitingHuman), run.ID)
+
+		widen(t, conn, issue, fmtJSON(widened))
+		testsupport.Must(t, seatTestConductor(conn, run.ID), "seating the conductor")
+		outcome, err := RefreshIssueScopeInRun(
+			conn, run.ID, issue, "scope widened", testBy, testConductorToken, nowMS+1)
+		testsupport.Must(t, err, "refreshing: %v", err)
+		if len(outcome.Steps) != 1 || outcome.Steps[0] != "second@0" {
+			t.Fatalf("premise: outcome.Steps = %v, want the parked step reached",
+				outcome.Steps)
+		}
+
+		for name, stepID := range map[string]int{"done": done, "waiting-human": parked} {
+			if got := recordedScope(t, conn, stepID); fmtJSON(got) != fmtJSON(frozen) {
+				t.Errorf("%s step's recorded scope = %v, want %v — the scope its "+
+					"claim ran under, not the refreshed one", name, got, frozen)
+			}
+		}
+	})
+
+	t.Run("a step claimed after the refresh reads the refreshed scope", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue, stepID := scopedIssueInRun(t, conn, fmtJSON(frozen))
+		widen(t, conn, issue, fmtJSON(widened))
+		_, err := refresh(conn, runID, issue)
+		testsupport.Must(t, err, "refreshing: %v", err)
+
+		claimAndRecord(t, conn, stepID, nowMS+1)
+
+		if got := recordedScope(t, conn, stepID); fmtJSON(got) != fmtJSON(widened) {
+			t.Errorf("recorded scope = %v, want the refreshed %v", got, widened)
+		}
+	})
+}
+
 // TestScopeEditAdvisoryNamesTheRefresh: DKT-741's disclosure fires at the
 // moment an operator spends a widen on a live run, and it is the only place
 // this verb is discoverable from. An advisory still naming only abandon +
