@@ -7,7 +7,6 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
-	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // DKT-587: RUN-34 (security-load-bearing@10, max_fix_loops = 2) showed three
@@ -432,7 +431,8 @@ func TestClusterScopedBoundAdmitsExactlyItsRounds(t *testing.T) {
 
 // assertClusterLoopHistory pins the loop history a cluster-bound refusal
 // writes to the refusing step: the cluster's rounds, the refusing instance as
-// the trigger, and the fix-loop verdict.
+// the trigger, and no latest verdict, because the refusing round's
+// unmetPayload records none.
 func assertClusterLoopHistory(t *testing.T, conn *sql.DB, instance string, rounds int) {
 	t.Helper()
 	step := mustStep(t, conn, instance)
@@ -442,9 +442,8 @@ func assertClusterLoopHistory(t *testing.T, conn *sql.DB, instance string, round
 	if step.LoopTriggerStep != instance {
 		t.Errorf("loop_trigger_step = %q, want %q", step.LoopTriggerStep, instance)
 	}
-	if step.LoopLatestVerdict != workflow.OnFailFixLoop {
-		t.Errorf("loop_latest_verdict = %q, want %q",
-			step.LoopLatestVerdict, workflow.OnFailFixLoop)
+	if step.LoopLatestVerdict != "" {
+		t.Errorf("loop_latest_verdict = %q, want \"\"", step.LoopLatestVerdict)
 	}
 }
 

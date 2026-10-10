@@ -732,7 +732,9 @@ it did not move. A refused entry writes THREE LOOP-HISTORY FACTS on the triggeri
 step's row, in the same transaction as the routing decision, so no reader sees an
 exhaustion whose history has not landed: the rounds that actually ran against the
 cap, the instance whose verdict opened the loop (the triggering step's own
-`name@k#i`), and the routing verdict the latest round ended on (the refused
+`name@k#i`), and the verdict the latest round recorded (the string `verdict`
+field of the first element of the triggering step's payload that carries one,
+copied verbatim; empty when none does, and never the routing token
 `fix-loop`). They are readable as `loop_rounds_run`, `loop_trigger_step`, and
 `loop_latest_verdict` on the step row `docket step show STEP-N --json=v2` emits
 (11.4), `omitempty` so every row outside an exhaustion serializes exactly as before.

@@ -52,16 +52,20 @@ emits = "notes"
 after = ["check"]
 `
 
+// verdictPayload routes `check` to `fix-loop` like unmetPayload, and records
+// a round verdict for the loop history to copy.
+const verdictPayload = `[{"status":"unmet","verdict":"request-changes"}]`
+
 // TestFixLoopExhaustionRouting is criterion 2: the routing a fix-loop
 // exhaustion takes is the one `on_exhausted` declares, and the same
 // transaction records the loop history — rounds run against the cap, the
-// instance that triggered the loop, and the verdict the last round ended on.
+// instance that triggered the loop, and the verdict the last round recorded.
 //
 // `max_fix_loops = 1` so each case spends the budget in one round: check@0
 // enters ordinal 1, and check@1 exhausts.
 func TestFixLoopExhaustionRouting(t *testing.T) {
 	t.Run("the default parks waiting-human", func(t *testing.T) {
-		conn, _ := exhaust(t, workflow.OnFailWaitingHuman)
+		conn, _ := exhaustRecording(t, workflow.OnFailWaitingHuman, verdictPayload)
 
 		step := mustStep(t, conn, "check@1")
 		if step.Status != db.StepWaitingHuman {
@@ -70,11 +74,21 @@ func TestFixLoopExhaustionRouting(t *testing.T) {
 		if step.ParkClass != db.ParkClassLoopBound {
 			t.Errorf("park class = %q, want %q", step.ParkClass, db.ParkClassLoopBound)
 		}
-		assertLoopHistory(t, step)
+		assertLoopHistory(t, step, "request-changes")
+	})
+
+	t.Run("a round that recorded no verdict stores none", func(t *testing.T) {
+		conn, _ := exhaustRecording(t, workflow.OnFailWaitingHuman, unmetPayload)
+
+		step := mustStep(t, conn, "check@1")
+		if step.Status != db.StepWaitingHuman {
+			t.Errorf("check@1 = %q, want %q", step.Status, db.StepWaitingHuman)
+		}
+		assertLoopHistory(t, step, "")
 	})
 
 	t.Run("abandon-issue abandons", func(t *testing.T) {
-		conn, _ := exhaust(t, workflow.OnFailAbandonIssue)
+		conn, _ := exhaustRecording(t, workflow.OnFailAbandonIssue, verdictPayload)
 
 		step := mustStep(t, conn, "check@1")
 		if step.Status != db.StepFailedRouted {
@@ -91,11 +105,11 @@ func TestFixLoopExhaustionRouting(t *testing.T) {
 				"must abandon, not merely record a routing",
 				issue.Resolution, db.IssueResolutionAbandoned)
 		}
-		assertLoopHistory(t, step)
+		assertLoopHistory(t, step, "request-changes")
 	})
 
 	t.Run("a named vote step opens its proposal", func(t *testing.T) {
-		conn, runID := exhaust(t, "panel")
+		conn, runID := exhaustRecording(t, "panel", verdictPayload)
 
 		step := mustStep(t, conn, "check@1")
 		if step.Status == db.StepWaitingHuman {
@@ -108,7 +122,7 @@ func TestFixLoopExhaustionRouting(t *testing.T) {
 		if step.ParkClass != "" {
 			t.Errorf("park class = %q on a routed step, want none", step.ParkClass)
 		}
-		assertLoopHistory(t, step)
+		assertLoopHistory(t, step, "request-changes")
 
 		assertReady(t, conn, runID, "panel@1")
 
@@ -122,7 +136,7 @@ func TestFixLoopExhaustionRouting(t *testing.T) {
 	})
 
 	t.Run("a named executor step is instantiated and ready", func(t *testing.T) {
-		conn, runID := exhaust(t, "drain")
+		conn, runID := exhaustRecording(t, "drain", verdictPayload)
 
 		step := mustStep(t, conn, "check@1")
 		if step.Status == db.StepWaitingHuman {
@@ -132,7 +146,7 @@ func TestFixLoopExhaustionRouting(t *testing.T) {
 		if !routingIs(step.Routing, "drain") {
 			t.Errorf("check@1 routing = %q, want %q", step.Routing, "drain")
 		}
-		assertLoopHistory(t, step)
+		assertLoopHistory(t, step, "request-changes")
 
 		if !stepExists(t, conn, "drain@1") {
 			t.Fatal("drain@1 was never instantiated")
@@ -142,8 +156,15 @@ func TestFixLoopExhaustionRouting(t *testing.T) {
 }
 
 // exhaust runs one issue's loop until `max_fix_loops = 1` refuses the second
-// entry, under a workflow whose exhaustion routes to target.
+// entry, under a workflow whose exhaustion routes to target. check@1, the
+// round that exhausts, records verdictPayload.
 func exhaust(t *testing.T, target string) (*sql.DB, int) {
+	t.Helper()
+	return exhaustRecording(t, target, verdictPayload)
+}
+
+// exhaustRecording is exhaust with check@1 recording lastPayload.
+func exhaustRecording(t *testing.T, target, lastPayload string) (*sql.DB, int) {
 	t.Helper()
 	conn := mustDB(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")
@@ -157,7 +178,7 @@ func exhaust(t *testing.T, target string) (*sql.DB, int) {
 	}
 	driveFixtureRound(t, 1)
 	claimAndComplete(t, conn, e, "fix@1", "the fix", "")
-	claimAndComplete(t, conn, e, "check@1", roundReport(1), unmetPayload)
+	claimAndComplete(t, conn, e, "check@1", roundReport(1), lastPayload)
 
 	if stepExists(t, conn, "fix@2") {
 		t.Fatal("fix@2 exists; max_fix_loops = 1 must refuse the second entry")
@@ -181,8 +202,9 @@ func assertReady(t *testing.T, conn *sql.DB, runID int, instance string) {
 
 // assertLoopHistory pins the three facts the routing transaction records: one
 // round ran against the cap, `check@1` is the instance whose verdict opened
-// the loop, and the round ended on a `fix-loop` verdict.
-func assertLoopHistory(t *testing.T, step *db.Step) {
+// the loop, and loop_latest_verdict holds the verdict check@1's payload
+// recorded, verbatim — "" when it recorded none, never the routing token.
+func assertLoopHistory(t *testing.T, step *db.Step, verdict string) {
 	t.Helper()
 	if step.LoopRoundsRun != 1 {
 		t.Errorf("loop_rounds_run = %d, want 1", step.LoopRoundsRun)
@@ -190,9 +212,8 @@ func assertLoopHistory(t *testing.T, step *db.Step) {
 	if step.LoopTriggerStep != "check@1" {
 		t.Errorf("loop_trigger_step = %q, want %q", step.LoopTriggerStep, "check@1")
 	}
-	if step.LoopLatestVerdict != workflow.OnFailFixLoop {
-		t.Errorf("loop_latest_verdict = %q, want %q",
-			step.LoopLatestVerdict, workflow.OnFailFixLoop)
+	if step.LoopLatestVerdict != verdict {
+		t.Errorf("loop_latest_verdict = %q, want %q", step.LoopLatestVerdict, verdict)
 	}
 }
 

@@ -137,7 +137,7 @@ func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 //
 // THE HISTORY IS WRITTEN HERE because this is the only place that knows it.
 // The rounds against the cap, the instance whose verdict opened the loop, and
-// the verdict that round ended on are facts of the refusal, and a reader
+// the verdict that round recorded are facts of the refusal, and a reader
 // downstream — a router reading the park, an operator, `step show` — could
 // otherwise reconstruct them only from the prunable event log. Written in the
 // SAME transaction as the routing decision, so no reader ever sees an
@@ -147,17 +147,63 @@ func exhausted(
 	ordinal, roundsRun int, reason string, nowMS int64,
 ) (*LoopOutcome, error) {
 	routing := workflow.OnFailWaitingHuman
-	if spec := workflow.StepByName(def, trigger); spec != nil {
+	spec := workflow.StepByName(def, trigger)
+	if spec != nil {
 		routing = spec.EffectiveOnExhausted()
 	}
+	verdict, err := recordedVerdict(tx, step, spec)
+	if err != nil {
+		return nil, err
+	}
 	if err := db.SetStepLoopHistoryTx(
-		tx, step.ID, roundsRun, step.Instance, workflow.OnFailFixLoop, nowMS,
+		tx, step.ID, roundsRun, step.Instance, verdict, nowMS,
 	); err != nil {
 		return nil, err
 	}
 	return &LoopOutcome{
 		Entered: false, Ordinal: ordinal, Routing: routing, Reason: reason,
 	}, nil
+}
+
+// recordedVerdict is the verdict the trigger row's round recorded: the string
+// `verdict` field of the first element of its newest declared-kind payload
+// that carries one, copied verbatim. "" when the step is not in its pinned
+// definition, declares no emit, recorded an empty payload, or recorded no
+// element carrying a string `verdict`.
+//
+// It never substitutes the routing token. `fix-loop` is how the round was
+// routed, which the refusal already implies; a reader of the loop history asks
+// what the round concluded.
+func recordedVerdict(tx *sql.Tx, step *db.Step, spec *workflow.Step) (string, error) {
+	if spec == nil {
+		return "", nil
+	}
+	kind := workflow.ArtifactKind(spec)
+	if kind == "" {
+		return "", nil
+	}
+	var payload sql.NullString
+	err := tx.QueryRow(
+		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
+		  ORDER BY id DESC LIMIT 1`,
+		step.ID, kind,
+	).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading %s's recorded %s: %w", step.Instance, kind, err)
+	}
+	elements, err := parsePayload([]byte(payload.String))
+	if err != nil {
+		return "", fmt.Errorf("reading %s's recorded %s: %w", step.Instance, kind, err)
+	}
+	for _, element := range elements {
+		if verdict, ok := element["verdict"].(string); ok {
+			return verdict, nil
+		}
+	}
+	return "", nil
 }
 
 // roundMovedNothing reports whether the round BELOW the one about to be entered

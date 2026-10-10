@@ -847,9 +847,10 @@ func SetStepRoutingWithParkReasonTx(
 // whose verdict opened the loop, and the verdict the last round ended on.
 //
 // They are ONE statement because they are one fact — this loop ran this many
-// rounds from here and ended on this — and a trigger stored without its verdict
-// describes a loop nothing measured. The caller derives all three from the loop
-// state its exhaustion decision already holds.
+// rounds from here and ended on this. latestVerdict is the verdict the trigger
+// round recorded, verbatim, and "" when it recorded none; it is never the
+// routing token that entered the loop. The caller derives all three from the
+// loop state its exhaustion decision already holds.
 //
 // It follows SetStepMetadataTx's shape — same row_version bump, same
 // updated_at_ms — because this is a step-row mutation like any other and
