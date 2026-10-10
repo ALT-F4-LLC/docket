@@ -2195,7 +2195,7 @@ func settleAcceptedTx(tx *sql.Tx, accepted []Discrepancy) ([]string, error) {
 	return out, nil
 }
 
-// AbandonDispatch is P21: it closes the open manifest UNCONDITIONALLY.
+// AbandonDispatchWith is P21: it closes the open manifest UNCONDITIONALLY.
 //
 // NO DISCREPANCY BLOCKS IT, and that is the whole point: §2 provides "explicit
 // `dispatch abandon` for a crashed relay", and the relay is gone and cannot
@@ -2261,16 +2261,6 @@ type AbandonDispatchOptions struct {
 	NowMS  int64
 }
 
-// AbandonDispatch is AbandonDispatchWith presenting no capability, so it
-// refuses on a bound run and succeeds only on an unbound one. It remains for
-// the CLI caller until that caller reads the token and moves to the `With`
-// form.
-func (e *Engine) AbandonDispatch(
-	conn *sql.DB, runID int, reason string, nowMS int64,
-) (*CloseOutcome, error) {
-	return e.AbandonDispatchWith(conn, runID, AbandonDispatchOptions{Reason: reason, NowMS: nowMS})
-}
-
 // ---- `next`'s lazy abandon and its refusal (§5.5, §5.7) --------------------
 
 // autoAbandonExpiredDispatchTx is P13, P14, and P15: `next` retires a manifest
@@ -2304,7 +2294,7 @@ func autoAbandonExpiredDispatchTx(tx *sql.Tx, runID int, nowMS int64) error {
 	// C3's loser (another invocation abandoned it first) writes nothing: `moved`
 	// comes back false and closeDispatchTx returns a nil error for it, which is
 	// exactly the "nothing to write" outcome this caller wants — unlike
-	// CloseDispatch/AbandonDispatch, which report the lost race as a conflict.
+	// CloseDispatch/AbandonDispatchWith, which report the lost race as a conflict.
 	_, err = closeDispatchTx(tx, open.ID, runID, db.DispatchAbandoned,
 		db.CloseReasonTTL, EventDispatchAbandoned, map[string]any{},
 		"recording the TTL abandon", nowMS)
@@ -2312,19 +2302,20 @@ func autoAbandonExpiredDispatchTx(tx *sql.Tx, runID int, nowMS int64) error {
 }
 
 // closeDispatchTx is the CAS-close-and-record-event core shared by
-// CloseDispatch, AbandonDispatch, and autoAbandonExpiredDispatchTx (P18-P21):
+// CloseDispatch, AbandonDispatchWith, and autoAbandonExpiredDispatchTx
+// (P18-P21):
 // the `dispatches` CAS (P22/C2/C3's guard, common to all three) and, only on
 // the winning side, ONE event recording what happened.
 //
 // It deliberately does NOT own the transaction (the three callers disagree on
 // when to commit — autoAbandonExpiredDispatchTx's caller commits later, as
 // part of `next`'s own transaction) and does NOT decide what a lost race
-// means (CloseDispatch and AbandonDispatch treat it as P22's conflict;
+// means (CloseDispatch and AbandonDispatchWith treat it as P22's conflict;
 // autoAbandonExpiredDispatchTx treats it as C3's silent no-op) — both stay
 // with the caller, via the returned `moved`.
 //
 // `payload` carries the event-kind-specific extra fields (CloseDispatch's
-// `accepted`, AbandonDispatch's optional `detail`); `dispatch` and `reason`
+// `accepted`, AbandonDispatchWith's optional `detail`); `dispatch` and `reason`
 // are added here, the two keys every closing event carries.
 func closeDispatchTx(
 	tx *sql.Tx, dispatchID, runID int, status, reason, eventKind string,
