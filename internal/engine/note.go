@@ -68,7 +68,18 @@ type RunNote struct {
 // bound to a conductor capability only its holder may write one: `token` is
 // checked inside the transaction that writes the note, by the same matrix the
 // operator verbs use. An unbound run accepts a note without a token.
-func AddRunNote(conn *sql.DB, runID int, token, text string, nowMS int64) (*RunNote, error) {
+//
+// `under` says whose ruling the note carries, and the run-note-added event
+// records it as `authority`. The token proves the writer holds the run; it
+// cannot tell an operator's decision relayed by the conductor from the
+// conductor's own, so the writer must state which. ParseRunNoteAuthority's
+// two-value set is enforced here as well as at the CLI, so it binds every
+// writer.
+func AddRunNote(conn *sql.DB, runID int, token string, under Authority, text string, nowMS int64) (*RunNote, error) {
+	under, err := ParseRunNoteAuthority(under.Kind)
+	if err != nil {
+		return nil, err
+	}
 	text = strings.TrimSuffix(text, "\n")
 	if strings.TrimSpace(text) == "" {
 		return nil, validationErr(
@@ -113,7 +124,7 @@ func AddRunNote(conn *sql.DB, runID int, token, text string, nowMS int64) (*RunN
 	// The event carries the note VERBATIM, as `step-annotated` carries its
 	// annotation: the feed must be able to say what every later worker was
 	// told without a join against the note table.
-	data, err := json.Marshal(map[string]any{"note": id, "text": text})
+	data, err := json.Marshal(under.addTo(map[string]any{"note": id, "text": text}))
 	if err != nil {
 		return nil, fmt.Errorf("recording the run note: %w", err)
 	}
@@ -127,6 +138,28 @@ func AddRunNote(conn *sql.DB, runID int, token, text string, nowMS int64) (*RunN
 		return nil, fmt.Errorf("recording the run note: %w", err)
 	}
 	return &RunNote{ID: id, Text: text, RecordedAtMS: nowMS}, nil
+}
+
+// ParseRunNoteAuthority turns `--authority` into the authority a run note is
+// recorded under: operator or conductor. Every other value, standing-grant
+// included, is a validation error, and the empty value is refused rather
+// than defaulted, as ParseAuthority refuses it.
+func ParseRunNoteAuthority(kind string) (Authority, error) {
+	switch kind {
+	case AuthorityOperator, AuthorityConductor:
+		return Authority{Kind: kind}, nil
+	case "":
+		return Authority{}, validationErr(
+			"--authority is required: %s or %s — a run note renders in every "+
+				"packet as a ruling, so it must say whether an operator decided or "+
+				"the conductor did, and defaulting the answer would record an "+
+				"authority nobody asserted", AuthorityOperator, AuthorityConductor)
+	default:
+		return Authority{}, validationErr(
+			"--authority %q is not one of %s, %s: a run note is recorded under an "+
+				"operator's decision or the conductor's own", kind,
+			AuthorityOperator, AuthorityConductor)
+	}
 }
 
 // ListRunNotes returns a run's notes in the order they render.

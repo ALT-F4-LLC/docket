@@ -44,7 +44,7 @@ renders them only where it ranges over ` + "`.Notes`" + ` (each has ` + "`.ID`" 
 }
 
 var runNoteAddCmd = &cobra.Command{
-	Use:   "add RUN-N (--text T | --file F)",
+	Use:   "add RUN-N --authority operator|conductor (--text T | --file F)",
 	Short: "Record a note that every later packet of the run carries",
 	Long: `Record one note against a run.
 
@@ -52,9 +52,20 @@ Put in it what a worker would otherwise rediscover: the gate, why its failure
 is pre-existing, the issue tracking it, and the disposition already given —
 for example:
 
-  docket run note add RUN-70 --text "Gate tests fails on clean HEAD \
+  docket run note add RUN-70 --authority operator \
+      --text "Gate tests fails on clean HEAD \
       (routing_sweep_test.go), pre-existing and tracked as DKT-1075; \
       disposition: override-pass. Do not re-derive it and do not file a gap."
+
+--authority states whose ruling the note carries, and the run-note-added
+event records it:
+
+  operator        an operator decided, or the conductor relays that decision.
+  conductor       the conductor decided on its own, with no operator in the
+                  loop.
+
+There is no default, and standing-grant is refused: a note records who
+decided, and a missing answer would read as the commonest one.
 
 --file reads the note from a file, or from stdin with "-", for a note that
 does not fit a shell argument. One trailing newline is dropped so a file-fed
@@ -109,6 +120,13 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 	if err != nil {
 		return cmdErr(err, output.ErrValidation)
 	}
+	// Parsed before the note or the token is read, so a refused authority
+	// leaves stdin unconsumed.
+	kind, _ := cmd.Flags().GetString("authority")
+	under, err := engine.ParseRunNoteAuthority(kind)
+	if err != nil {
+		return runErr(err)
+	}
 	text, err := runNoteText(cmd)
 	if err != nil {
 		return err
@@ -123,7 +141,7 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 		token = conductorToken(conn, runID, os.Stdin)
 	}
 
-	note, err := engine.AddRunNote(conn, runID, token, text, model.NowMS())
+	note, err := engine.AddRunNote(conn, runID, token, under, text, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}
@@ -226,6 +244,8 @@ func init() {
 		"The note, inline (exactly one of --text or --file)")
 	runNoteAddCmd.Flags().String("file", "",
 		"Read the note from this file; \"-\" reads stdin")
+	runNoteAddCmd.Flags().String("authority", "",
+		"Whose ruling the note carries: operator or conductor (required)")
 
 	runNoteCmd.AddCommand(runNoteAddCmd, runNoteListCmd)
 	runCmd.AddCommand(runNoteCmd)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,10 +23,19 @@ import (
 // renders in is the engine's to prove (internal/engine/note_test.go); what
 // this file asserts is the verb.
 
+// runNoteCmdWithDB answers --authority operator, so a test that is not about
+// authority states one; runNoteCmdNoAuthority leaves it unanswered.
 func runNoteCmdWithDB(conn *sql.DB) *cobra.Command {
+	cmd := runNoteCmdNoAuthority(conn)
+	_ = cmd.Flags().Set("authority", engine.AuthorityOperator)
+	return cmd
+}
+
+func runNoteCmdNoAuthority(conn *sql.DB) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().String("text", "", "")
 	cmd.Flags().String("file", "", "")
+	cmd.Flags().String("authority", "", "")
 	return cmd
 }
 
@@ -294,6 +304,116 @@ func TestRunNoteAddCLIStdinNoteTakesTokenOnlyFromEnv(t *testing.T) {
 	})
 }
 
+// runNoteEventAuthority reads the authority off the run-note-added event that
+// recorded note id.
+func runNoteEventAuthority(t *testing.T, conn *sql.DB, noteID int) any {
+	t.Helper()
+	var data string
+	err := conn.QueryRow(
+		`SELECT data FROM events WHERE kind = 'run-note-added' AND json_extract(data, '$.note') = ?`,
+		noteID,
+	).Scan(&data)
+	testsupport.Must(t, err, "reading note %d's event: %v", noteID, err)
+	var payload map[string]any
+	testsupport.Must(t, json.Unmarshal([]byte(data), &payload), "event data %q: %v", data, nil)
+	return payload["authority"]
+}
+
+// TestRunNoteAddCLIRecordsTheStatedAuthority: --authority operator and
+// --authority conductor each land on the note's event as stated.
+func TestRunNoteAddCLIRecordsTheStatedAuthority(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	runRef := model.FormatRunID(runID)
+	t.Setenv(TokenEnvVar, seatConductor(t, conn, runID))
+
+	for _, kind := range []string{"operator", "conductor"} {
+		cmd := runNoteCmdNoAuthority(conn)
+		testsupport.Must(t, cmd.Flags().Set("authority", kind), "setting --authority: %v", nil)
+		testsupport.Must(t, cmd.Flags().Set("text", "ruled by "+kind), "setting --text: %v", nil)
+		w, buf := bufWriter(true)
+		err := runRunNoteAdd(cmd, runRef, w)
+		testsupport.Must(t, err, "run note add --authority %s: %v", kind, err)
+
+		var env struct {
+			Data struct {
+				Note engine.RunNote `json:"note"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %v\n%s", nil, buf.String())
+		if got := runNoteEventAuthority(t, conn, env.Data.Note.ID); got != kind {
+			t.Errorf("--authority %s: event authority = %v, want %q", kind, got, kind)
+		}
+	}
+}
+
+// TestRunNoteAddCLIRefusesAnAuthorityItCannotRecord: a standing grant, an
+// unknown value, and no --authority at all are each VALIDATION_ERROR and
+// write nothing. The run is bound and the capability supplied, so the refusal
+// is the authority's and not the token's.
+func TestRunNoteAddCLIRefusesAnAuthorityItCannotRecord(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	runRef := model.FormatRunID(runID)
+	t.Setenv(TokenEnvVar, seatConductor(t, conn, runID))
+
+	for _, tc := range []struct {
+		name      string
+		authority string
+		set       bool
+	}{
+		{"standing-grant", "standing-grant", true},
+		{"an unknown value", "admin", true},
+		{"no --authority", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := runNoteCmdNoAuthority(conn)
+			if tc.set {
+				testsupport.Must(t, cmd.Flags().Set("authority", tc.authority), "setting --authority: %v", nil)
+			}
+			testsupport.Must(t, cmd.Flags().Set("text", "a ruling"), "setting --text: %v", nil)
+			notesBefore, eventsBefore := runNoteWrites(t, conn, runID)
+			w, _ := bufWriter(true)
+			err := runRunNoteAdd(cmd, runRef, w)
+			assertCmdCode(t, err, output.ErrValidation, "run note add with "+tc.name)
+			if err != nil && !strings.Contains(err.Error(), "--authority") {
+				t.Errorf("the refusal %q does not name --authority", err)
+			}
+			notesAfter, eventsAfter := runNoteWrites(t, conn, runID)
+			if notesAfter != notesBefore || eventsAfter != eventsBefore {
+				t.Errorf("the refusal wrote: notes %d -> %d, events %d -> %d",
+					notesBefore, notesAfter, eventsBefore, eventsAfter)
+			}
+		})
+	}
+}
+
+// TestRunNoteAddCLIRefusesTheAuthorityBeforeReadingStdin: under --file - an
+// invalid --authority is refused before the note is read, so the caller's
+// stdin is left unconsumed.
+func TestRunNoteAddCLIRefusesTheAuthorityBeforeReadingStdin(t *testing.T) {
+	const piped = "tests fails on clean HEAD; override-pass"
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	t.Setenv(TokenEnvVar, seatConductor(t, conn, runID))
+	withStdin(t, piped)
+
+	cmd := runNoteCmdNoAuthority(conn)
+	testsupport.Must(t, cmd.Flags().Set("authority", "bogus"), "setting --authority: %v", nil)
+	testsupport.Must(t, cmd.Flags().Set("file", "-"), "setting --file: %v", nil)
+	w, _ := bufWriter(true)
+	err := runRunNoteAdd(cmd, model.FormatRunID(runID), w)
+	assertCmdCode(t, err, output.ErrValidation, "run note add --file - --authority bogus")
+	if notes, events := runNoteWrites(t, conn, runID); notes != 0 || events != 0 {
+		t.Errorf("the refusal wrote: notes = %d, events = %d", notes, events)
+	}
+	rest, readErr := io.ReadAll(os.Stdin)
+	testsupport.Must(t, readErr, "reading stdin after the refusal: %v", readErr)
+	if string(rest) != piped {
+		t.Errorf("stdin after the refusal = %q, want it unread (%q)", rest, piped)
+	}
+}
+
 func TestRunNoteListCLI(t *testing.T) {
 	conn := newTestDB(t)
 	runID, _ := seedRun(t, conn)
@@ -366,7 +486,7 @@ func TestRunNoteVerbsAreRegistered(t *testing.T) {
 			t.Errorf("run note has no %q subcommand", want)
 		}
 	}
-	for _, flag := range []string{"text", "file"} {
+	for _, flag := range []string{"text", "file", "authority"} {
 		if runNoteAddCmd.Flags().Lookup(flag) == nil {
 			t.Errorf("run note add has no --%s flag", flag)
 		}
