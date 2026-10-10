@@ -78,7 +78,11 @@ refuses the activation and names both paths.
 
 Re-activating an active run expands newly-unblocked phases only and INHERITS
 the original pin set — a workflow re-registered or a pinned file edited since
-activation does not reach a run already under way. Whatever an activation leaves
+activation does not reach a run already under way. The one addition it reports
+is a policy.toml the run did not start under: when the original pin set held
+none and the config now does, re-activation pins it, warns on stderr in human
+mode, and carries it as ` + "`new_policy_pin`" + ` {ref, sha256} in JSON, because
+waiting rows adopt it from then on. Whatever an activation leaves
 unexpanded is named, with the predecessor(s) still holding it and their status,
 in the summary line and in the JSON envelope's ` + "`blocked_issues`" + ` — so
 "0 issue(s) expanded" is never the whole report.
@@ -186,6 +190,10 @@ type activateResult struct {
 	Registered []engine.Registration `json:"registered,omitempty"`
 	// PinsFromConfig counts what the scan pinned rather than registered (F4).
 	PinsFromConfig int `json:"pins_from_config,omitempty"`
+	// NewPolicyPin is the policy.toml a re-activation pinned because the run
+	// held none, which waiting rows adopt from here on. `omitempty`, so a
+	// re-activation that pinned no new policy carries no key.
+	NewPolicyPin *engine.PolicyPin `json:"new_policy_pin,omitempty"`
 	// PromotedIssues names every issue this activation moved backlog -> todo,
 	// by display id (DKT-102/DKT-94: counts alone don't tell an operator
 	// approving a `--dry-run` WHICH issues would move). Carried on both a
@@ -296,6 +304,17 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		w.Warn("workflow %s: %s", warning.Workflow, warning.Reason)
 	}
 
+	// A policy.toml the run did not start under changes the model, effort,
+	// and variant its waiting rows resolve to, so the adoption is named.
+	if pin := result.NewPolicyPin; pin != nil {
+		pinned, adopt := "pinned", "adopt"
+		if result.DryRun {
+			pinned, adopt = "would pin", "would adopt"
+		}
+		w.Warn("re-activation %s %s (sha256 %s), which the run did not start "+
+			"under; waiting rows %s it", pinned, pin.Ref, pin.SHA256, adopt)
+	}
+
 	// §7.7 S1: every harvested fenced command, verbatim, with its trust status
 	// — so an operator sees `unmatched` commands BEFORE the run rather than
 	// after. It renders through the escaping renderer (T18): the bytes are
@@ -336,6 +355,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		HoldPolicy:        result.HoldPolicy,
 		Registered:        result.Registered,
 		PinsFromConfig:    result.PinsFromConfig,
+		NewPolicyPin:      result.NewPolicyPin,
 		DryRun:            result.DryRun,
 		PromotedIssues:    result.PromotedIssues,
 		BoundIssues:       result.BoundIssues,

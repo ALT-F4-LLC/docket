@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -169,6 +170,13 @@ type ActivateResult struct {
 	// listed: a closure can hold dozens of files and none of them is a
 	// decision an operator needs to read before approving.
 	PinsFromConfig int
+	// NewPolicyPin names the policy.toml a RE-ACTIVATION pinned because the
+	// run's pin set held none. Waiting rows resolve model, effort, and variant
+	// against the pinned policy, so from this activation on they adopt a
+	// policy the run did not start under. Nil on a first activation and on a
+	// re-activation that pinned no new policy.toml; an inherited policy pin
+	// keeps its original hash (RA2) and is never reported here.
+	NewPolicyPin *PolicyPin
 
 	// Fences is the §7.7 trust report: every harvested fenced command and
 	// whether a trust entry authorizes it (gates-trust §7.7, threat T16).
@@ -219,6 +227,12 @@ type ActivateResult struct {
 	// Activate's DryRun branch reads these; a real activation ignores them.
 	preActivationStatus        model.RunStatus
 	preActivationActivatedAtMS *int64
+}
+
+// PolicyPin is a pinned policy.toml: its config-relative ref and content hash.
+type PolicyPin struct {
+	Ref    string `json:"ref"`
+	SHA256 string `json:"sha256"`
 }
 
 // FenceReport is one harvested command and its trust status (§7.7 S1/S2).
@@ -824,6 +838,11 @@ func activateTx(
 		closure := packetClosurePins(scan, runIssues, bindings)
 		if reactivation {
 			closure = withoutAlreadyPinned(closure, existingPins, scan.roots)
+			for _, p := range closure {
+				if path.Clean(filepath.ToSlash(p.Ref)) == policyPinRef {
+					result.NewPolicyPin = &PolicyPin{Ref: p.Ref, SHA256: p.SHA256}
+				}
+			}
 		} else {
 			result.PinsFromConfig = len(closure)
 		}

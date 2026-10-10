@@ -2877,3 +2877,91 @@ func TestRestoreReturnsAVersionToBinding(t *testing.T) {
 	_, err = activate(conn, run.ID)
 	testsupport.Must(t, err, "activation still refuses after restore: %v", err)
 }
+
+// policyPinRow returns the run's policy.toml pin row, or nil when it has none.
+func policyPinRow(t *testing.T, conn *sql.DB, runID int) *db.Pin {
+	t.Helper()
+	for _, p := range pinsByKind(t, conn, runID, db.PinKindFile) {
+		if filepath.ToSlash(p.Ref) == "policy.toml" {
+			pin := p
+			return &pin
+		}
+	}
+	return nil
+}
+
+// TestReactivationReportsANewlyPinnedPolicy: a run activated before the config
+// held a policy.toml pins one at re-activation, and the result names it, so an
+// operator learns that waiting rows will resolve against a policy the run did
+// not start under.
+func TestReactivationReportsANewlyPinnedPolicy(t *testing.T) {
+	conn, configDir := configRepo(t)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+
+	first := createIssue(t, conn, "first", "body", "task", nil)
+	run := startRun(t, conn, first)
+	result, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "first activate: %v", err)
+	if result.NewPolicyPin != nil {
+		t.Fatalf("first activation reports new policy pin %+v with no policy.toml",
+			result.NewPolicyPin)
+	}
+	if row := policyPinRow(t, conn, run.ID); row != nil {
+		t.Fatalf("run pins policy.toml %+v before the config holds one", row)
+	}
+
+	writeConfigFile(t, configDir, "policy.toml", "opaque = \"added mid-run\"\n")
+	second := createIssue(t, conn, "late arrival", "late body", "task", nil)
+	err = db.AddRunIssue(conn, run.ID, second)
+	testsupport.Must(t, err, "adding issue to an active run: %v", err)
+
+	result, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "re-activate: %v", err)
+
+	row := policyPinRow(t, conn, run.ID)
+	if row == nil {
+		t.Fatal("re-activation did not pin the policy.toml the config now holds")
+	}
+	if result.NewPolicyPin == nil {
+		t.Fatalf("re-activation pinned policy.toml %+v and reported no new policy pin", row)
+	}
+	if result.NewPolicyPin.Ref != row.Ref || result.NewPolicyPin.SHA256 != row.SHA256 {
+		t.Errorf("new policy pin = %+v, want the pinned row's ref %q and sha256 %q",
+			result.NewPolicyPin, row.Ref, row.SHA256)
+	}
+}
+
+// TestReactivationKeepsAnInheritedPolicyPin is RA2 for policy.toml: an edit to
+// an already-pinned policy file neither reaches the run nor reads as a new pin.
+func TestReactivationKeepsAnInheritedPolicyPin(t *testing.T) {
+	conn, configDir := configRepo(t)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, configDir, "policy.toml", "opaque = \"original\"\n")
+
+	first := createIssue(t, conn, "first", "body", "task", nil)
+	run := startRun(t, conn, first)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "first activate: %v", err)
+	before := policyPinRow(t, conn, run.ID)
+	if before == nil {
+		t.Fatal("first activation did not pin policy.toml")
+	}
+
+	rewriteConfigFile(t, configDir, "policy.toml", "opaque = \"EDITED mid-run\"\n")
+	second := createIssue(t, conn, "late arrival", "late body", "task", nil)
+	err = db.AddRunIssue(conn, run.ID, second)
+	testsupport.Must(t, err, "adding issue to an active run: %v", err)
+
+	result, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "re-activate: %v", err)
+
+	after := policyPinRow(t, conn, run.ID)
+	if after == nil || after.SHA256 != before.SHA256 {
+		t.Errorf("policy.toml pin after re-activation = %+v, want the original hash %q",
+			after, before.SHA256)
+	}
+	if result.NewPolicyPin != nil {
+		t.Errorf("re-activation reports new policy pin %+v for an inherited policy.toml",
+			result.NewPolicyPin)
+	}
+}
