@@ -728,8 +728,18 @@ to `"fix-loop"`: (1) the issue's loop counter increments; an entry exceeding
 `max_fix_loops` (plus `fix-round` grants) routes per the triggering step's
 `on_exhausted` instead: `waiting-human` when undeclared (the default),
 `abandon-issue`, the name of a `type="vote"` step, or the name of an executor
-step — only `waiting-human` parks, and loops are bounded by construction. A round is also
-refused as NON-CONVERGENT when the round below it left the issue's scope
+step — only `waiting-human` parks. The automatic loop is bounded by construction;
+rounds past it are extensions, each one explicit decision, and a declared
+`max_fix_loops_hard` (beside the issue-level `max_fix_loops`, never below it, V48)
+bounds the extensions a vote can mint. Of the extensions it bounds vote-minted rounds
+only: once the hard cap is reached, a triage panel's `fix-round` outcome mints no
+round and records no grant, and the triaged step parks `waiting-human` regardless of
+`on_exhausted`; an operator's `step resolve --as fix-round` at the cap is still
+admitted. So that the panel cannot be bypassed, grants its approvals record never
+lift the automatic loop's effective bound past the hard cap; that refusal is the
+ordinary exhaustion above. With no `max_fix_loops_hard` declared, extension is
+unbounded *(added 2026-10-10, DKT-2521)*. A round is also refused as NON-CONVERGENT
+when the round below it left the issue's scope
 byte-identical to the round below that (`issue.diff` fingerprints), because the next
 round would read the same tree and reach the same verdict; that refusal always routes
 `waiting-human` regardless of `on_exhausted` (nothing superseded, nothing instantiated,
