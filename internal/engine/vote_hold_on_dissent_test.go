@@ -116,6 +116,11 @@ func TestVoteHoldOnDissentParksApprovedWithReject(t *testing.T) {
 		if got := stepStatus(t, conn, "gate@0"); got != db.StepWaitingHuman {
 			t.Errorf("gate@0 status = %q, want %q", got, db.StepWaitingHuman)
 		}
+		// No threshold is declared, so the class must name the hold, not a
+		// threshold park.
+		if gate.ParkClass != db.ParkClassDissentHeld {
+			t.Errorf("gate@0 park_class = %q, want %q", gate.ParkClass, db.ParkClassDissentHeld)
+		}
 	})
 
 	t.Run("keyed false takes the ordinary route", func(t *testing.T) {
@@ -314,6 +319,34 @@ func TestVoteHoldOnDissentExplicitPassStillParks(t *testing.T) {
 				gate.Routing, RoutingPass)
 		}
 	})
+}
+
+// concernParkSrc is holdOnDissentSrc with a threshold that parks any approved
+// tally carrying an approve-with-concerns cast.
+const concernParkSrc = holdOnDissentSrc + `threshold = { "waiting-human" = 'any(verdict == approve-with-concerns)' }
+`
+
+// TestVoteThresholdParkKeepsThresholdClass: an approved tally that a matched
+// threshold parks, with no dissent hold in play, is a threshold park. The hold
+// owns its own class; a threshold park must not read as one.
+func TestVoteThresholdParkKeepsThresholdClass(t *testing.T) {
+	conn, gate := driveDissentGateSrc(t, concernParkSrc, "",
+		model.VerdictApproveWithConcerns, model.VerdictApprove, model.VerdictApprove)
+	proposalID, err := findVoteProposal(conn, gate)
+	testsupport.Must(t, err, "finding gate@0's proposal: %v", err)
+	proposal, err := db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if proposal.Status != model.ProposalStatusApproved {
+		t.Fatalf("proposal status = %q, want approved", proposal.Status)
+	}
+
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepWaitingHuman {
+		t.Fatalf("gate@0 status = %q, want %q — the threshold must park the step",
+			got, db.StepWaitingHuman)
+	}
+	if gate.ParkClass != db.ParkClassThresholdRouted {
+		t.Errorf("gate@0 park_class = %q, want %q", gate.ParkClass, db.ParkClassThresholdRouted)
+	}
 }
 
 // TestVoteHoldOnDissentExclusions holds the park guard's two exclusions that

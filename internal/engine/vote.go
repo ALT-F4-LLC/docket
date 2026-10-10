@@ -580,6 +580,7 @@ func routeVoteStep(
 
 	routing := RoutingPass
 	concernReason := ""
+	var concernClass db.ParkClass
 	switch {
 	case triaged != nil && triageDecided(outcome):
 		// A TRIAGE PANEL THAT REACHED A VERDICT IS DONE, whichever way it
@@ -612,6 +613,7 @@ func routeVoteStep(
 		}
 		if result.Routing != RoutingPass {
 			routing, concernReason = result.Routing, result.Reason
+			concernClass = db.ParkClassThresholdRouted
 		}
 	}
 
@@ -643,6 +645,7 @@ func routeVoteStep(
 		}
 		if dissentReason != "" {
 			routing, concernReason = workflow.OnFailWaitingHuman, dissentReason
+			concernClass = db.ParkClassDissentHeld
 		}
 	}
 
@@ -688,13 +691,14 @@ func routeVoteStep(
 	// with nothing downstream to consume it: RUN-25's security-vote rejected
 	// with a reproduced blocker, routed `fix-loop`, and the issue closed done
 	// with no fix step ever created.
-	// The class follows the SAME branch that chose the routing above, read from
-	// the tally and the threshold result rather than from the text either wrote:
-	// a failed verdict is a rejection, and an approved tally that a declared
-	// threshold routed away from `pass` is a threshold park.
+	// The class is the one the branch that chose the routing above named when
+	// it decided, never read from the text it wrote. A failed verdict is a
+	// rejection. An approved tally parks for one of two reasons: a declared
+	// threshold routed it away from `pass` (a threshold park), or the rule's
+	// hold_on_dissent held it on a `reject` cast (a dissent hold).
 	class := db.ParkClassVoteRejected
-	if outcome.Verdict != VerdictFail && concernReason != "" {
-		class = db.ParkClassThresholdRouted
+	if concernClass != "" {
+		class = concernClass
 	}
 	reason := string(outcome.Status)
 	if concernReason != "" {

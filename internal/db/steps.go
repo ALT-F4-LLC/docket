@@ -98,6 +98,10 @@ const (
 	ParkClassLoopBound ParkClass = "loop-bound"
 	// ParkClassVoteRejected: a vote tallied to a rejection.
 	ParkClassVoteRejected ParkClass = "vote-rejected"
+	// ParkClassDissentHeld: a vote rule's `hold_on_dissent` decision parked an
+	// approved tally because a seat cast `reject`. No threshold matched a park;
+	// the operator's hold displaced the `pass` the tally would have routed.
+	ParkClassDissentHeld ParkClass = "dissent-held"
 	// ParkClassHeldRejected: an operator rejected a held cluster, and the
 	// ROUTING step takes the consequence.
 	ParkClassHeldRejected ParkClass = "held-rejected"
