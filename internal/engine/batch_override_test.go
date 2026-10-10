@@ -1136,4 +1136,37 @@ func TestBatchGrantMatchesOnlyTheArgvItWasMintedFrom(t *testing.T) {
 				"a NULL argv grant must cover a NULL argv row")
 		}
 	})
+
+	// A legacy grant decodes to a nil argv, the same as a NULL-argv row, so
+	// against an `unmatched` failure the legacy flag alone must refuse it.
+	t.Run("a legacy grant covers no unmatched failure", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := activatedBatchRun(t, conn, batchArgvSrc, "batch-argv.toml")
+		gates := &rowGates{row: GateResultRow{
+			Verdict: VerdictUnmatched,
+			Reason:  `gate "build" matches no trust entry`,
+		}}
+		e := testEngine()
+		e.Gates = gates
+
+		g := mint(t, conn, e, runID)
+		if g.Argv != nil || g.Exit != nil {
+			t.Fatalf("premise: grant = (argv %q, exit %v), want NULL argv and exit",
+				g.Argv, g.Exit)
+		}
+		_, err := conn.Exec(
+			`UPDATE gate_override_grants SET argv = 'legacy' WHERE id = ?`, g.ID)
+		testsupport.Must(t, err, "marking the grant legacy: %v", err)
+		grants, err := db.GateOverrideGrantsForRun(conn, runID)
+		testsupport.Must(t, err, "re-reading grants: %v", err)
+		if !grants[0].ArgvLegacy || grants[0].Argv != nil {
+			t.Fatalf("premise: grant = (argv %q, legacy %v), want legacy with nil argv",
+				grants[0].Argv, grants[0].ArgvLegacy)
+		}
+
+		if autoPassed(t, conn, e, claimStep(t, conn, runID, "package@0")) {
+			t.Error("package@0 repeated the unmatched failure and auto-passed on a " +
+				"legacy grant; a grant with no recorded argv must cover nothing")
+		}
+	})
 }
