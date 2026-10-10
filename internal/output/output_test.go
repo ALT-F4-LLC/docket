@@ -474,6 +474,84 @@ func TestWriterPartialFailureJSONKeepsDataInFailureEnvelope(t *testing.T) {
 	}
 }
 
+// partialFailureData runs PartialFailure under version and returns the decoded
+// .data of the single envelope on stdout, after checking ok is false.
+func partialFailureData(t *testing.T, version JSONVersion, payload any) any {
+	t.Helper()
+	var stdout bytes.Buffer
+	w := &Writer{JSONMode: true, JSONVersion: version, Stdout: &stdout, Stderr: &bytes.Buffer{}}
+
+	w.PartialFailure(payload, "", errors.New("1 of 2 projects failed"), ErrConflict)
+
+	var env map[string]any
+	err := json.Unmarshal(stdout.Bytes(), &env)
+	testsupport.Must(t, err, "stdout is not one JSON document: %v\n%s", err, stdout.String())
+	if env["ok"] != false {
+		t.Errorf("ok = %v, want false", env["ok"])
+	}
+	return env["data"]
+}
+
+// A Collection payload takes the same per-version shape on a failure envelope
+// as Success gives it: {items, total, truncated} under v2, untouched under v1.
+func TestWriterPartialFailureShapesCollectionPerVersion(t *testing.T) {
+	coll := testCollection{items: []string{"a", "b"}, total: 7, truncated: true}
+
+	t.Run("v2", func(t *testing.T) {
+		got := partialFailureData(t, JSONV2, coll)
+		want := map[string]any{"items": []any{"a", "b"}, "total": float64(7), "truncated": true}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("data = %#v, want exactly %#v", got, want)
+		}
+	})
+
+	t.Run("v1", func(t *testing.T) {
+		raw := partialFailureData(t, JSONV1, coll)
+		got, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("data type = %T, want map", raw)
+		}
+		for _, key := range []string{"items", "total", "truncated"} {
+			if _, present := got[key]; present {
+				t.Errorf("v1 failure envelope leaked v2 key %q: %#v", key, got)
+			}
+		}
+	})
+}
+
+// testVersioned is a minimal Versioned payload: v1 marshals the receiver, v2
+// marshals VersionedPayload, which adds the version field.
+type testVersioned struct {
+	ID string `json:"id"`
+}
+
+func (p testVersioned) VersionedPayload() any {
+	return struct {
+		ID      string `json:"id"`
+		Version int    `json:"version"`
+	}{ID: p.ID, Version: 3}
+}
+
+func TestWriterPartialFailureShapesVersionedPerVersion(t *testing.T) {
+	payload := testVersioned{ID: "DKT-1"}
+
+	t.Run("v2", func(t *testing.T) {
+		got := partialFailureData(t, JSONV2, payload)
+		want := map[string]any{"id": "DKT-1", "version": float64(3)}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("data = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("v1", func(t *testing.T) {
+		got := partialFailureData(t, JSONV1, payload)
+		want := map[string]any{"id": "DKT-1"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("data = %#v, want %#v", got, want)
+		}
+	})
+}
+
 func TestWriterPartialFailureHumanPrintsReportAndError(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
