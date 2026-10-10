@@ -1884,9 +1884,10 @@ func loopRedirectGateProducers(
 	return out
 }
 
-// encodeGateResults renders recorded rows in the §11.4 `gate result` shape —
-// the same keys a claim response's `pre_gates` carries, so a consumer parses
-// one shape wherever gate results appear.
+// encodeGateResults renders recorded rows in the §11.4 `gate result` shape,
+// plus the `stub` and `s3_migrated` flags `docket step gates` carries: a
+// consumer reading a `pass` here instead of re-running the check must be able
+// to tell a placeholder or migrated row from a measurement.
 func encodeGateResults(rows []db.GateResultRow) (string, error) {
 	type wire struct {
 		Gate       string   `json:"gate"`
@@ -1898,14 +1899,19 @@ func encodeGateResults(rows []db.GateResultRow) (string, error) {
 		Truncated  bool     `json:"truncated"`
 		Verdict    string   `json:"verdict"`
 		Pre        bool     `json:"pre,omitempty"`
-		Reason     string   `json:"reason,omitempty"`
+		Stub       bool     `json:"s3_migrated,omitempty"`
+		// StubEntry is never omitted: an absent key would read the same as a
+		// docket too old to carry the flag.
+		StubEntry bool   `json:"stub"`
+		Reason    string `json:"reason,omitempty"`
 	}
 	encoded := make([]wire, 0, len(rows))
 	for _, r := range rows {
 		encoded = append(encoded, wire{
 			Gate: r.Gate, Ordinal: r.Ordinal, Argv: r.Argv, Exit: r.Exit,
 			DurationMS: r.DurationMS, Output: r.Output, Truncated: r.Truncated,
-			Verdict: r.Verdict, Pre: r.Pre, Reason: r.Reason,
+			Verdict: r.Verdict, Pre: r.Pre, Stub: r.Stub, StubEntry: r.StubEntry,
+			Reason: r.Reason,
 		})
 	}
 	body, err := json.Marshal(encoded)

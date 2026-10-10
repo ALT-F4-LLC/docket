@@ -170,6 +170,103 @@ func assertOwnPreGateInput(t *testing.T, where string, ctx *Context) {
 	}
 }
 
+// claimOwnPreGateContext claims selfGateResultsWorkflow's verify@0 with its
+// `ac-commands` pre-gate trusted by an entry whose placeholder declaration is
+// `stubEntry`, and returns the claim's context bundle.
+func claimOwnPreGateContext(t *testing.T, stubEntry bool) *Context {
+	t.Helper()
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(selfGateResultsWorkflow), "selfgateresults.toml")
+	issue := createIssue(t, conn, "flag placeholder passes", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Stub: stubEntry,
+	})
+	e.Gates = runner
+
+	claim, err := e.ClaimStepWithGates(conn, stepIDByInstance(t, conn, "verify@0"),
+		ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim verify: %v", err)
+	return claim.Context
+}
+
+// gateResultsRows parses the context's single gate-results body into generic
+// maps, so a test can tell an absent key from a false one.
+func gateResultsRows(t *testing.T, ctx *Context) []map[string]any {
+	t.Helper()
+	var rows []map[string]any
+	found := false
+	for _, input := range ctx.Inputs {
+		if input.Kind == "gate-results" {
+			found = true
+			err := json.Unmarshal([]byte(input.Body), &rows)
+			testsupport.Must(t, err, "parsing the gate-results body: %v", err)
+		}
+	}
+	if !found {
+		t.Fatal("the context carries no gate-results input")
+	}
+	if len(rows) != 1 {
+		t.Fatalf("gate results = %+v, want exactly one row", rows)
+	}
+	return rows
+}
+
+// A pass authorized by a placeholder trust entry must say so in the input a
+// reviewer reads instead of re-running the check, and a real entry's pass must
+// say so too: an absent key cannot be told apart from a docket too old to
+// carry the flag.
+func TestGateResultsInputCarriesStubEntry(t *testing.T) {
+	for _, stubEntry := range []bool{true, false} {
+		row := gateResultsRows(t, claimOwnPreGateContext(t, stubEntry))[0]
+		got, present := row["stub"]
+		if !present {
+			t.Errorf("stub entry %v: row %+v has no `stub` key", stubEntry, row)
+			continue
+		}
+		if got != stubEntry {
+			t.Errorf("stub entry %v: `stub` = %v", stubEntry, got)
+		}
+	}
+}
+
+// A row migrated from an S3 pass-through trail renders `s3_migrated: true`;
+// any other row omits the key, matching `docket step gates`.
+func TestGateResultsInputCarriesS3Migrated(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(gateResultsWorkflow), "gateresults.toml")
+	issue := createIssue(t, conn, "flag migrated rows", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	// testEngine's PassThroughRunner is the S3 runner: every row it records
+	// carries Stub.
+	claimAndComplete(t, conn, testEngine(), "implement@0", "summary", "")
+	claim, err := ClaimStep(conn, stepIDByInstance(t, conn, "review@0"),
+		ClaimOptions{Owner: "judge", NowMS: nowMS})
+	testsupport.Must(t, err, "claim review: %v", err)
+
+	migrated := gateResultsRows(t, claim.Context)[0]
+	if migrated["s3_migrated"] != true {
+		t.Errorf("S3-migrated row %+v lacks `s3_migrated: true`", migrated)
+	}
+
+	current := gateResultsRows(t, claimOwnPreGateContext(t, false))[0]
+	if _, present := current["s3_migrated"]; present {
+		t.Errorf("row from the real runner %+v carries `s3_migrated`; "+
+			"the key is omitted when false", current)
+	}
+}
+
 // TestGateResultsRegisterRules: the form validates against the step's
 // EXISTENCE only — gates can arrive from a fence source the definition does
 // not enumerate — and the kind itself is reserved from `emits`.
