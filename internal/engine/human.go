@@ -708,6 +708,24 @@ func (e *Engine) resolveStep(
 					"records the parked step's failing gate signature(s), and "+
 					"this park was not caused by one", step.Instance)
 		}
+		// A skipped gate measured nothing, and routing parks its step as
+		// gate-skipped without consulting any grant, so a grant minted from
+		// this park would never apply. Refusing the whole batch, `fail` rows
+		// included, keeps the operator from believing a ruling covers more
+		// than it does.
+		var skipped []string
+		for _, r := range grantRows {
+			if r.Verdict == db.GateVerdictSkipped {
+				skipped = append(skipped, fmt.Sprintf("%q", r.Gate))
+			}
+		}
+		if len(skipped) > 0 {
+			return validationErr(
+				"step %s: gate(s) %s skipped and measured nothing, so no later "+
+					"routing consults a --batch grant for this park; no grant was "+
+					"minted for any gate. Resolve the step without --batch",
+				step.Instance, strings.Join(skipped, ", "))
+		}
 		// Only a row recorded before v30 lacks a fingerprint (recordGateRows
 		// stamps every later one), and grantMatches spends no grant without
 		// one. Refusing the whole batch keeps the ruling from covering less

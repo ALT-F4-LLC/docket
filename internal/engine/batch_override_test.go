@@ -103,6 +103,9 @@ type exitGates struct {
 	// truncated names the gates whose failing capture reports Truncated, the
 	// flag internal/exec sets when output overran the capture cap.
 	truncated map[string]bool
+	// skipped names the gates that report VerdictSkipped instead of failing,
+	// the shape a gate takes when it could not measure its tree.
+	skipped map[string]bool
 }
 
 // environmentalFailure is the capture both the granted failure and the
@@ -113,6 +116,9 @@ const environmentalFailure = "clang: error: unable to spawn process " +
 func (g *exitGates) Run(_ context.Context, spec GateSpec, _ StepContext) (GateResult, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.skipped[spec.Name] {
+		return GateResult{Gate: spec.Name, Verdict: VerdictSkipped}, nil
+	}
 	if g.fail {
 		out := g.output
 		if out == "" {
@@ -442,6 +448,54 @@ func TestBatchOverrideRefusesATruncatedRow(t *testing.T) {
 	}
 	if got := stepRoutingByID(t, conn, implementID); got != routingBefore {
 		t.Errorf("routing = %q after the refusal, want it unchanged from %q", got, routingBefore)
+	}
+}
+
+// TestBatchOverrideRefusesAParkWithASkippedGate: a skipped gate measured
+// nothing, and routing parks such a step as gate-skipped without consulting a
+// grant, so a grant minted from it could never apply. One skipped row refuses
+// the WHOLE batch: no grant for the skipped gate, and none for the `fail` gate
+// beside it, which the operator ruled on only as part of a park whose cause
+// was the skip.
+func TestBatchOverrideRefusesAParkWithASkippedGate(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedBatchRun(t, conn, batchTwoGateSrc, "batch-two-gate.toml")
+
+	gates := &exitGates{fail: true, exit: 1, skipped: map[string]bool{"tests": true}}
+	e := testEngine()
+	e.Gates = gates
+
+	implementID := stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, implementID)
+
+	rows, err := db.GateResultsForStep(conn, implementID)
+	testsupport.Must(t, err, "reading gate rows: %v", err)
+	verdicts := make(map[string]string)
+	for _, r := range failingCompletionRows(rows) {
+		verdicts[r.Gate] = r.Verdict
+	}
+	if verdicts["build"] != db.GateVerdictFail || verdicts["tests"] != db.GateVerdictSkipped {
+		t.Fatalf("premise: failing completion verdicts = %v, want build=fail tests=skipped",
+			verdicts)
+	}
+
+	err = e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact", nowMS+1)
+	if err == nil {
+		t.Fatal("--batch over a park with a skipped gate was accepted")
+	}
+	if code, _ := CodeOf(err); code != CodeValidation {
+		t.Errorf("refusal code = %q, want %q (%v)", code, CodeValidation, err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, `"tests"`) || !strings.Contains(msg, "skipped") {
+		t.Errorf("refusal = %q, want it to name skipped gate \"tests\"", msg)
+	}
+
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 0 {
+		t.Errorf("grants = %d, want 0: neither the skipped nor the failing gate "+
+			"may be granted from this park", len(grants))
 	}
 }
 
