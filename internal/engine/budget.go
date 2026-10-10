@@ -279,6 +279,7 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 //	   WHERE e.run_id = ? AND e.kind = 'step-claimed'
 //	+ SELECT COALESCE(SUM(expected_cost), 0)
 //	    FROM steps WHERE run_id = ? AND kind = 'vote'
+//	     AND status NOT IN ('skipped', 'superseded')
 //
 // THE SECOND SUM IS DKT-584. A vote step is unclaimable by construction
 // (§6.15), so it can never write the `step-claimed` event the first sum counts
@@ -307,7 +308,9 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 //     engine-core §7's "bounded loops bound the floor" arriving from §11.3
 //     rather than from arithmetic here.
 //   - B11, a superseded, skipped, or never-claimed step contributes nothing: the
-//     accrual is per CLAIM EVENT, and a step never claimed produced none.
+//     accrual is per CLAIM EVENT, and a step never claimed produced none. A
+//     vote row accrues at materialization instead, so the second sum excludes
+//     skipped and superseded rows: a panel that is never routed costs nothing.
 //   - B5, the value accrued is the STEP ROW's `expected_cost`, materialized at
 //     expansion from the pinned definition and never re-read from the live
 //     `workflows` table. A run pins its definitions; its floor is computed from
@@ -342,8 +345,10 @@ func RunFloorTx(tx *sql.Tx, runID int) (float64, error) {
 		           FROM events e JOIN steps s ON s.id = e.step_id
 		          WHERE e.run_id = ? AND e.kind = ?), 0)
 		      + COALESCE((SELECT SUM(expected_cost)
-		           FROM steps WHERE run_id = ? AND kind = ?), 0)`,
+		           FROM steps WHERE run_id = ? AND kind = ?
+		            AND status NOT IN (?, ?)), 0)`,
 		runID, EventStepClaimed, runID, workflow.TypeVote,
+		db.StepSkipped, db.StepSuperseded,
 	).Scan(&floor)
 	if err != nil {
 		return 0, fmt.Errorf("computing the floor for %s: %w",

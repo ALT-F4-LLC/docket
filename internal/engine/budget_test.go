@@ -196,6 +196,73 @@ func TestFloorIgnoresUnclaimedSteps(t *testing.T) {
 	}
 }
 
+// threePanelSrc declares three vote steps with distinct costs, so a floor that
+// counts any subset of them is distinguishable from every other subset.
+const threePanelSrc = `
+[pipeline]
+name = "three-panels"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+executor = "worker"
+emits = "diff"
+expected_cost = 1.0
+
+[[step]]
+name = "panel-skipped"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 2.0
+on_fail = "waiting-human"
+
+[[step]]
+name = "panel-superseded"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 4.0
+on_fail = "waiting-human"
+
+[[step]]
+name = "panel-pending"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 8.0
+on_fail = "waiting-human"
+`
+
+// TestFloorIgnoresSkippedAndSupersededVoteRows is B11 for vote steps: a vote
+// row accrues at materialization, but a skipped or superseded panel is never
+// routed, so it contributes nothing.
+func TestFloorIgnoresSkippedAndSupersededVoteRows(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(threePanelSrc), "three-panels.toml")
+	issue := createIssue(t, conn, "three panels", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'panel-skipped@0'`,
+		db.StepSkipped)
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'panel-superseded@0'`,
+		db.StepSuperseded)
+
+	want := expectedCostOf(t, conn, "panel-pending@0")
+	if got := runFloor(t, conn, run.ID); got != want {
+		t.Errorf("floor = %g, want %g (only the pending panel accrues; the "+
+			"skipped 2.0 and superseded 4.0 panels must not)", got, want)
+	}
+}
+
 // TestFloorBoundedByMaxFixLoops is B10 at the fixture's `max_fix_loops = 2`: the
 // floor cannot exceed the arithmetic bound, ever.
 //
