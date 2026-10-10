@@ -324,8 +324,7 @@ changes. The verb writes through existing DAO functions to existing columns.
 ## 6. Surface documentation
 
 The loadable `docket` skill gains `dispatch backfill-usage` in the same PR,
-per the CLAUDE.md standing rule — flag table and verb table both, or the PR is
-drift and blocks review.
+flag table and verb table both — a stale table is drift and blocks review.
 
 ## 7. Sequencing: E-8 lands first
 

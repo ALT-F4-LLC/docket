@@ -77,7 +77,7 @@ COMPLETE.** That table is asserted, not merely satisfied: §2.4 specifies
 past 10 without an amendment issue, because the span was ratified at stage 1
 and stages 4–6 were built on its arithmetic.
 
-### 1.1 Genericity check (CLAUDE.md PR bar, docs/design/genericity.md)
+### 1.1 Genericity check (PR bar, docs/design/genericity.md)
 
 Per the S3/S4/S5 pattern, over **every** noun this stage introduces into core
 surface — flag names, JSON keys, column names, error strings, help text, event
@@ -581,8 +581,8 @@ passes the stranger test on its face.
 | B26a | **The same guard covers `run pause` (DKT-305).** A run-level pause parks no step either, and it writes no `breach_reason` — nor should it, that column is the budget's own record — so before v22 an operator's pause was undone by the next step to route, with an empty-data `run-resumed` naming nobody (RUN-31: paused seq 3054, resumed seq 3077, then a four-judge review, a synthesize, a reconcile, and two votes ran unattended). `MoveRun` therefore writes `pause_origin = 'operator'` with the pause and clears it with the resume or abandon that ends the park, and the rollup declines to resume ANY run-level origin. A STEP-level park is unaffected: its origin is empty, the rollup created that park and the rollup resolves it, or every retry would need an operator verb |
 
 **B25 is the one place this stage found the spec genuinely incomplete**, and it
-is filed rather than fixed, per CLAUDE.md. The workaround until the amendment
-lands is documented in SKILL.md and operations.md: abandon and re-start with a
+is filed rather than fixed. The workaround until the amendment
+lands is documented in the loadable `docket` skill and operations.md: abandon and re-start with a
 larger `--budget`, which is lossy, or edit `runs.budget` with `sqlite3`, which
 is worse. Saying so plainly is better than shipping a verb the spec's surface
 summary does not list.
@@ -1475,7 +1475,7 @@ minimum returns GONE rather than silently skipping."*
 | E14 | `GONE` is a **new error-taxonomy code**, exit **6**, meaning "the cursor is below the retained minimum; the events you asked for no longer exist" |
 | E15 | It is raised when `--since SEQ` names a seq below `MIN(seq)` in `events` **and** the table is non-empty **and** a prune has occurred. §8.6.1 defines that last condition |
 | E16 | **The trigger cannot fire at this stage.** Nothing prunes: `events prune` is S7's (§10 stage 7), and no other path deletes an event. So `MIN(seq)` is always 1 in a v10 repo and E15's condition is unreachable |
-| E17 | The **shape is specified and implemented here** — the code, the exit, the message, the taxonomy row, the SKILL.md entry — because `--since` is the verb that must return it, and a stage that shipped the cursor without its out-of-range answer would ship a verb whose contract S7 has to retrofit |
+| E17 | The **shape is specified and implemented here** — the code, the exit, the message, the taxonomy row, the `docket` skill's error-taxonomy entry — because `--since` is the verb that must return it, and a stage that shipped the cursor without its out-of-range answer would ship a verb whose contract S7 has to retrofit |
 | E18 | `TestGoneShapeIsReachableOnlyByPruning` constructs the state **by deleting rows directly in the test**, asserts `GONE` with its exit code and message, and documents that no product code path reaches it yet |
 
 **§8.6.1 — how "a prune has occurred" is known without a pruner.** The
@@ -1650,7 +1650,7 @@ whether *auto*-registration should inherit it, or auto-bump, or overwrite.
 **(a) is chosen. The argument, against both tenets it is accused of violating:**
 
 **Against the immutability contract** — (a) *is* the immutability contract.
-`name@version` is frozen (SKILL.md's own table); auto-registration is a
+`name@version` is frozen (the `docket` skill's frozen-name table); auto-registration is a
 registration; therefore it refuses. (b) and (c) are the options that break
 immutability, one by minting versions nobody chose and one by mutating a frozen
 row. The only question was whether auto-registration deserves an exemption, and
@@ -1922,8 +1922,8 @@ directory warning in docs", and no document has carried them; this stage
 creates the home. Both follow the `architecture.md`/`security.md` living-document
 convention: sections appear only when the code behind them exists.
 
-**SKILL.md's flag and verb tables are updated in the SAME commit as each
-surface change** (CLAUDE.md: "a stale table is drift and blocks review"). Group
+**The loadable `docket` skill's flag and verb tables are updated in the SAME
+commit as each surface change**: a stale table is drift and blocks review. Group
 2's commit that adds `dispatch open` adds its flag table; it is not deferred to
 group 3.
 

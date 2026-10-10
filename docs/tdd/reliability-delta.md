@@ -20,7 +20,7 @@ engine-spec.md §5, verbatim, is the whole of this stage:
 Out of scope, explicitly: everything in §10 stages 2–7. No workflow, run, step,
 artifact, gate, trust, or event surface lands here. Schema stops at v5.
 
-**Genericity check (CLAUDE.md PR bar).** Every noun introduced by this stage —
+**Genericity check (PR bar, docs/design/genericity.md).** Every noun introduced by this stage —
 `items`, `total`, `truncated`, `version`, `if-version`, `idempotency-key`, `seq`,
 `AUTH_ERROR`, `STALE_LEASE`, `TIMEOUT`, `UNTRUSTED` — is a generic
 concurrency/pagination/transport concept. No agent, model, prompt, brief, node,
@@ -1488,4 +1488,4 @@ in `.data` under v2; idempotency keys on create verbs; the v4 fixture and its
 golden-diff proof; per-file CAS-conflict tests.
 
 The loadable `docket` skill's flag/verb tables update in whichever PR changes the surface
-(both, here) — a stale table blocks review per CLAUDE.md.
+(both, here) — a stale table is drift and blocks review.

@@ -417,7 +417,7 @@ cap. Discovering it at claim time would have already cost a dispatcher a round
 trip.
 
 The loadable `docket` skill gains the `packet` row in its grammar table in
-the same PR, per CLAUDE.md — a stale table is drift and blocks review.
+the same PR — a stale table is drift and blocks review.
 
 ## 2. Alternatives considered
 
