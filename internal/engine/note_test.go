@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -371,6 +372,83 @@ func TestRunNoteDropsOneTrailingNewline(t *testing.T) {
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 	if note.Text != "  keep my leading spaces\nand my blank line\n" {
 		t.Errorf("stored text = %q, want exactly one trailing newline dropped", note.Text)
+	}
+}
+
+// notesOf reads one step's bundle notes through a context read verb.
+func notesOf(
+	t *testing.T, conn *sql.DB, stepID int,
+	read func(*sql.DB, int, int64) (*Context, error),
+) []RunNote {
+	t.Helper()
+	bundle, err := read(conn, stepID, nowMS+2)
+	testsupport.Must(t, err, "reading step %d's context: %v", stepID, err)
+	return bundle.Notes
+}
+
+// TestRecordedContextNotesStopAtTheClaim: a handed-out step's read-back carries
+// the notes its claim was given, not ones added after it, while the live bundle
+// and a step claimed later carry every note.
+func TestRecordedContextNotesStopAtTheClaim(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteText, nowMS)
+	testsupport.Must(t, err, "AddRunNote (first): %v", err)
+
+	implementID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, implementID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim implement@0: %v", err)
+
+	second, err := AddRunNote(conn, run.ID, testConductorToken, "Added after the claim.", nowMS+1)
+	testsupport.Must(t, err, "AddRunNote (second): %v", err)
+
+	err = e.CompleteStep(conn, implementID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change summary"), NowMS: nowMS + 1,
+	})
+	testsupport.Must(t, err, "complete implement@0: %v", err)
+
+	if got, want := notesOf(t, conn, implementID, ReadContext), []RunNote{*first}; !reflect.DeepEqual(got, want) {
+		t.Errorf("implement@0's read-back notes = %+v, want only the note present at its claim %+v",
+			got, want)
+	}
+	both := []RunNote{*first, *second}
+	if got := notesOf(t, conn, implementID, ReadLiveContext); !reflect.DeepEqual(got, both) {
+		t.Errorf("implement@0's live notes = %+v, want every run note %+v", got, both)
+	}
+
+	// Claimed in the same millisecond the second note was recorded: a note at
+	// the claim's own instant is one the claim was given.
+	reviewID := stepIDByInstance(t, conn, "review@0#0")
+	_, err = ClaimStep(conn, reviewID, ClaimOptions{Owner: "judge", NowMS: nowMS + 1})
+	testsupport.Must(t, err, "claim review@0#0: %v", err)
+	if got := notesOf(t, conn, reviewID, ReadContext); !reflect.DeepEqual(got, both) {
+		t.Errorf("review@0#0's read-back notes = %+v, want both notes present at its claim %+v",
+			got, both)
+	}
+}
+
+// TestRecordedContextNotesNilAnchorFallsBackToLive: a recorded claim without a
+// `started_ms` anchor reads back the run's live notes, as its body does.
+func TestRecordedContextNotesNilAnchorFallsBackToLive(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteText, nowMS)
+	testsupport.Must(t, err, "AddRunNote (first): %v", err)
+	second, err := AddRunNote(conn, run.ID, testConductorToken, "Second ruling.", nowMS)
+	testsupport.Must(t, err, "AddRunNote (second): %v", err)
+
+	implementID := stepIDByInstance(t, conn, "implement@0")
+	claimAndComplete(t, conn, e, "implement@0", "the change summary", "")
+	execSQL(t, conn, `UPDATE steps SET started_ms = NULL WHERE id = ?`, implementID)
+
+	both := []RunNote{*first, *second}
+	if got := notesOf(t, conn, implementID, ReadContext); !reflect.DeepEqual(got, both) {
+		t.Errorf("read-back notes without a claim anchor = %+v, want the live notes %+v",
+			got, both)
 	}
 }
 

@@ -271,7 +271,7 @@ const (
 func AssembleContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
 ) (*Context, error) {
-	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssue)
+	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssue, liveNotes)
 }
 
 // AssembleRecordedContext builds a step's context bundle over the artifacts its
@@ -309,7 +309,7 @@ func AssembleContext(
 func AssembleRecordedContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
 ) (*Context, error) {
-	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssue)
+	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssue, recordedNotes)
 }
 
 // artifactSource loads the artifact set one assembly resolves over.
@@ -482,7 +482,7 @@ func recordedClaim(step *db.Step) bool {
 
 func assembleContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
-	source artifactSource, issueView issueSource,
+	source artifactSource, issueView issueSource, notesOf noteSource,
 ) (*Context, error) {
 	def := sched.defs[step.WorkflowID]
 	if def == nil {
@@ -566,8 +566,8 @@ func assembleContext(
 
 	// Source 6: the run's notes (DKT-1079), read in the same transaction as
 	// everything else so a claimant sees the notes that stood at the moment
-	// its token was minted.
-	notes, err := contextNotes(tx, step.RunID)
+	// its token was minted; a read-back states only those (the source).
+	notes, err := notesOf(tx, step)
 	if err != nil {
 		return nil, err
 	}
@@ -590,6 +590,40 @@ func assembleContext(
 		TargetSHA: sha, TargetWorktree: worktree, DiffBase: resolveDiffBase(inputs),
 		Resolution: resolution, Notes: notes,
 	}, nil
+}
+
+// noteSource resolves the run notes an assembly states.
+//
+// It is the bodySource seam applied to the third input that moves after a
+// claim: notes are append-only run state with no per-step record, so a
+// read-back that took the whole table would report notes added after the
+// claim as guidance the step was given.
+type noteSource func(tx *sql.Tx, step *db.Step) ([]RunNote, error)
+
+// liveNotes is every note the run holds — the claim's view.
+func liveNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
+	return contextNotes(tx, step.RunID)
+}
+
+// recordedNotes is the notes the step's current claim was handed: those
+// recorded at or before its `started_ms`. The claim stamps `started_ms` with
+// the same clock reading its assembly runs at, so a note recorded in that
+// millisecond was already visible to it.
+//
+// A nil anchor falls back to the live notes, by the rule and for the reasons
+// recordedIssueBody documents.
+func recordedNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
+	notes, err := contextNotes(tx, step.RunID)
+	if err != nil || step.StartedMS == nil {
+		return notes, err
+	}
+	var handed []RunNote
+	for _, n := range notes {
+		if n.RecordedAtMS <= *step.StartedMS {
+			handed = append(handed, n)
+		}
+	}
+	return handed, nil
 }
 
 // contextNotes reads the run's notes into the bundle's shape (DKT-1079).
