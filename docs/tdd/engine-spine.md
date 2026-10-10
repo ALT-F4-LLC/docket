@@ -712,6 +712,24 @@ four properties are what keep it from being a hole in §9 item 5:
    operator's reason — so two steps of one run declaring two different scopes is a
    dated, attributable fact rather than drift a reader must infer.
 
+**The description gets the same exception.** `docket run refresh-body RUN-N --issue
+DKT-M --reason R` re-snapshots one run-issue's `body_snapshot` and `body_sha256`
+(`RefreshIssueBodyInRun`), which the packet's `== REQUEST` and `== INPUT issue.body`
+render. Without it, a packet could render a refreshed scope beside the superseded
+criterion wording, and the fresh `scope:` line made the stale body look current. It
+holds the same four properties:
+
+1. **It copies the live description verbatim.** There is no `--body` on it; `issue
+   create|edit --description` stays the sole writer of the text it copies. It
+   **refuses** (VALIDATION_ERROR) when the live description already equals the
+   snapshot: amend the issue first.
+2. **No step straddles it.** It refuses while any of the issue's steps is `claimed`,
+   `running`, or `gated`, and while a dispatch is open.
+3. **It rewrites no recorded step context.** Terminal steps keep the request their
+   claim recorded; only the remaining steps render the amended text.
+4. **The discontinuity is in the ledger.** One `issue-body-refreshed` event carries
+   both shas, the superseded text, the instances reached, and the operator's reason.
+
 `issue edit --scope` **warns**, naming the run, the frozen scope, the count of live
 steps, and **both** verbs, whenever the edit changes the scope of an issue that still
 has non-terminal steps in a non-terminal run (`ScopeEditFrozenForActiveRuns`). It
