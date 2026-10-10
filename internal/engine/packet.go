@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -496,9 +497,9 @@ func stepPacketFiles(
 }
 
 // AttachmentMaxBytes caps the bytes one `issue.files` attachment may inline
-// into a packet. It is a CONSTANT, not config, following db.ArtifactMaxBytes,
-// whose 1 MiB it matches.
-const AttachmentMaxBytes = 1 << 20
+// into a packet. It is the gate-output capture cap, the engine's existing bound
+// on bytes headed into an executor's context, and a CONSTANT, not config.
+const AttachmentMaxBytes = exec.CaptureCap
 
 // issueAttachmentFiles resolves a step's `issue.files` input (DKT-44) to the
 // bytes of every path its issue attaches, for rendering beside the declared
@@ -588,8 +589,14 @@ func readAttachment(full string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("not a regular file (type %s)", info.Mode().Type())
 	}
+	return readCappedAttachment(f)
+}
 
-	body, err := io.ReadAll(io.LimitReader(f, AttachmentMaxBytes+1))
+// readCappedAttachment reads all of r, consuming at most AttachmentMaxBytes+1
+// bytes, and refuses a body over the cap: the one byte past it is how an
+// oversized source is told apart from one exactly at the cap.
+func readCappedAttachment(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, AttachmentMaxBytes+1))
 	if err != nil {
 		return nil, err
 	}

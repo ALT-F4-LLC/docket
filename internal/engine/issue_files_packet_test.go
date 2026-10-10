@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	dexec "github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -308,6 +310,117 @@ func TestPacketRendersIssueFilesRefusesAFIFO(t *testing.T) {
 	}
 }
 
+// TestPacketRendersIssueFilesRefusesOtherNonRegularFiles: a directory, and a
+// character device reached through an in-checkout symlink, refuse like a FIFO.
+// /dev/null is the device because reading it is harmless; a check narrowed to
+// pipes would render it as an empty section.
+func TestPacketRendersIssueFilesRefusesOtherNonRegularFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		make       func(full string) error
+	}{
+		{"directory", "docs/subdir.md", func(full string) error {
+			return os.Mkdir(full, 0o755)
+		}},
+		{"device via symlink", "docs/null.md", func(full string) error {
+			return os.Symlink("/dev/null", full)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			root := issueFilesCheckout(t)
+			testsupport.Must(t, tc.make(filepath.Join(root, tc.path)),
+				"creating %s: %v", tc.path, nil)
+			activateIssueFilesRun(t, conn, root, []string{tc.path})
+
+			_, err := RenderStep(conn, stepIDByInstance(t, conn, "transcribe@0"), "", nowMS)
+			if code, ok := CodeOf(err); !ok || code != CodeValidation {
+				t.Fatalf("CodeOf(err) = %q, want %q (err: %v)", code, CodeValidation, err)
+			}
+			if !strings.Contains(err.Error(), tc.path) {
+				t.Errorf("refusal does not name %s:\n  %v", tc.path, err)
+			}
+		})
+	}
+}
+
+// TestClaimRenderRefusesAFIFOAttachmentWithoutALease: `step claim --render`
+// renders before it claims, so a FIFO attachment refuses promptly there and the
+// step keeps no lease, spends no attempt, and records no claim.
+func TestClaimRenderRefusesAFIFOAttachmentWithoutALease(t *testing.T) {
+	conn := mustDB(t)
+	root := issueFilesCheckout(t)
+	testsupport.Must(t, syscall.Mkfifo(filepath.Join(root, "docs/pipe.md"), 0o600),
+		"mkfifo: %v", nil)
+	activateIssueFilesRun(t, conn, root, []string{"docs/pipe.md"})
+	stepID := stepIDByInstance(t, conn, "transcribe@0")
+
+	refused := make(chan error, 1)
+	go func() {
+		_, _, err := NewEngine().ClaimStepRendered(conn, stepID, ClaimOptions{
+			Owner: "wave:STEP-1", NowMS: nowMS,
+		}, "", "")
+		refused <- err
+	}()
+
+	select {
+	case err := <-refused:
+		if code, ok := CodeOf(err); !ok || code != CodeValidation {
+			t.Fatalf("CodeOf(err) = %q, want %q (err: %v)", code, CodeValidation, err)
+		}
+		if !strings.Contains(err.Error(), "docs/pipe.md") {
+			t.Errorf("refusal does not name the FIFO's path:\n  %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		if w, err := os.OpenFile(filepath.Join(root, "docs/pipe.md"), os.O_WRONLY, 0); err == nil {
+			w.Close()
+		}
+		<-refused
+		t.Fatal("ClaimStepRendered blocked on a FIFO attachment; want a prompt refusal")
+	}
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepPending {
+		t.Errorf("status = %q after a refused claim, want %q", step.Status, db.StepPending)
+	}
+	if step.Owner != "" || step.TokenHash != "" || step.ExpiresMS != 0 {
+		t.Errorf("a refused claim left a lease: owner=%q token_hash set=%v expires=%d",
+			step.Owner, step.TokenHash != "", step.ExpiresMS)
+	}
+	if step.Attempt != 0 {
+		t.Errorf("attempt = %d after a refused claim, want 0", step.Attempt)
+	}
+	assertEventCount(t, conn, EventStepClaimed, 0)
+}
+
+// countingReader yields an endless run of bytes, counting every one handed out.
+type countingReader struct{ consumed int }
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	r.consumed += len(p)
+	return len(p), nil
+}
+
+// TestReadCappedAttachmentConsumesAtMostOnePastTheCap: the cap bounds the
+// bytes READ, not only the bytes kept, so an oversized source costs at most
+// AttachmentMaxBytes+1 bytes of memory before it refuses. The source stops
+// after twice the cap so an unbounded read fails this test instead of hanging.
+func TestReadCappedAttachmentConsumesAtMostOnePastTheCap(t *testing.T) {
+	source := &countingReader{}
+	_, err := readCappedAttachment(io.LimitReader(source, 2*AttachmentMaxBytes))
+	if err == nil {
+		t.Fatal("readCappedAttachment accepted a source past the cap; want a refusal")
+	}
+	if source.consumed > AttachmentMaxBytes+1 {
+		t.Errorf("read %d bytes from an oversized source, want at most %d",
+			source.consumed, AttachmentMaxBytes+1)
+	}
+}
+
 // TestPacketRendersIssueFilesRefusesAnOverCapFile: an attachment one byte past
 // AttachmentMaxBytes refuses, naming the path and the cap, rather than inlining
 // the file or a truncated prefix of it.
@@ -328,6 +441,25 @@ func TestPacketRendersIssueFilesRefusesAnOverCapFile(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal does not name %q:\n  %v", want, err)
 		}
+	}
+}
+
+// TestPacketRendersIssueFilesCapIsTheGateCaptureCap: the per-file cap is the
+// engine's gate-output capture cap, the bound the recorded cap decision names,
+// so a file one byte past it refuses.
+func TestPacketRendersIssueFilesCapIsTheGateCaptureCap(t *testing.T) {
+	conn := mustDB(t)
+	root := issueFilesCheckout(t)
+	writeAttachment(t, root, "docs/over.md", strings.Repeat("z", dexec.CaptureCap+1))
+	activateIssueFilesRun(t, conn, root, []string{"docs/over.md"})
+
+	_, err := RenderStep(conn, stepIDByInstance(t, conn, "transcribe@0"), "", nowMS)
+	if err == nil {
+		t.Fatalf("RenderStep inlined a %d-byte attachment, one past the gate "+
+			"capture cap; want a refusal", dexec.CaptureCap+1)
+	}
+	if code, ok := CodeOf(err); !ok || code != CodeValidation {
+		t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
 	}
 }
 
