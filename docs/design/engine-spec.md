@@ -674,8 +674,8 @@ cast, addressable fields `vote` / `verdict` (aliases for the cast's verdict) and
 `voter` — and only after an **APPROVED** tally. A rejected tally routes per
 `on_fail`, exactly as before. A manually committed proposal (an operator setting
 the final outcome by hand) carries the approved tally's casts, so it is evaluated
-exactly as an approved one: against the threshold, and, when that routes `pass`,
-against the `vote.rule.<name>.hold_on_dissent` park. Committing never routes a
+exactly as an approved one: against the threshold, and, when the threshold routes
+`pass` or none is declared, against the `vote.rule.<name>.hold_on_dissent` park. Committing never routes a
 tally past either check. When either check parks the step `waiting-human`, an
 operator passes it with `docket step resolve --as override-pass`. A triage panel
 takes neither check. The routing vocabulary is
