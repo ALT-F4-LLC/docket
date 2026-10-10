@@ -35,7 +35,7 @@ var RuleIDs = []string{
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 	"V40", "V40a", "V40b", "V40c", "V41",
 	"V42", "V43", "V44",
-	"V45", "V46", "V47", "V48",
+	"V45", "V46", "V47", "V48", "V49",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -408,6 +408,22 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 			Rule: "V18", Step: step.Name, Field: "after",
 			Message: fmt.Sprintf(
 				"step %q: `loop = true` steps have no `after` — their ordering comes from loop entry",
+				step.Name),
+		}
+	}
+
+	// V49: a loop body is never a vote step. A body has no `after` (V10/V18),
+	// so a ballot it opened could not be ordered behind the round's repair
+	// work. Its record is also unreachable downstream: L4 refuses a consumer
+	// naming the body, and the loop rebind matches bodies by emitted kind,
+	// which a vote step does not have.
+	if step.Loop && step.Type == TypeVote {
+		return &Error{
+			Rule: "V49", Step: step.Name, Field: "loop",
+			Message: fmt.Sprintf(
+				"step %q: a `loop = true` step may not be `type=\"vote\"` — a loop "+
+					"body re-does producing work, and a ballot it opened could be "+
+					"neither ordered behind that work nor read by any step downstream",
 				step.Name),
 		}
 	}

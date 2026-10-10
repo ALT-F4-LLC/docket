@@ -625,6 +625,28 @@ emits = "notes"
 		wants: []string{`"check"`, "`max_fix_loops_hard`", "`max_fix_loops`"},
 	},
 	{
+		rule: "V49", name: "loop body declared as a vote step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "check"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+[[step]]
+name = "repanel"
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+loop = true
+after_loop = "check"
+`,
+		wants: []string{`"repanel"`, "`loop = true`", "`type=\"vote\"`"},
+	},
+	{
 		rule: "V13", name: "human step routing rejects to waiting-human",
 		src: `
 [pipeline]
