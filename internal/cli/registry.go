@@ -63,12 +63,12 @@ Two findings, per registered NAME rather than per version:
             cleanup pass has to be able to see its own work.
 
 THE CORPUS IS SCANNED ONCE, not once per project: '~/.docket/config' is shared
-by every project in the store, so what "current" means is one answer. The roots
-that were scanned are reported, because they are read from THIS invocation's
-config — a repository's own '.docket/config/' additions belong to the checkout
-you are standing in, so a name another project registered from ITS local config
-directory is reported orphaned here. That is why the roots are printed rather
-than assumed.
+by every project in the store, so what "current" means is one answer. Only the
+shared store root's config is scanned. A repository's own '.docket/config/'
+additions are never read, so the result does not depend on the working
+directory the audit runs from. A name a project registered only from its
+repository's config has no file in the scanned root and is reported orphaned.
+The scanned root is printed so a reader can see where "current" was read from.
 
 It REPAIRS NOTHING. Adopting a bumped definition is what activation does,
 inside a transaction, with the validation and collision rules that go with it.`,

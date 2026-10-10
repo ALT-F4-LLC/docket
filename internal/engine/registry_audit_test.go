@@ -2,8 +2,12 @@ package engine
 
 import (
 	"database/sql"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -298,6 +302,46 @@ func TestRegistryAuditNarrowsToOneProject(t *testing.T) {
 	if audit.BehindTotal != 1 {
 		t.Errorf("behind_total = %d, want 1: the totals count the AUDITED "+
 			"population, not the store", audit.BehindTotal)
+	}
+}
+
+// TestRegistryAuditDoesNotDependOnTheCallingCheckout: the audit spans every
+// project in the store, so the corpus it compares against cannot be one
+// checkout's `.docket/config`. A name declared only in checkout X's local
+// config must classify the same whether the audit runs from X or from Y.
+func TestRegistryAuditDoesNotDependOnTheCallingCheckout(t *testing.T) {
+	home := t.TempDir()
+	withLocal := t.TempDir()
+	withoutLocal := t.TempDir()
+	conn := mustDB(t)
+
+	auditCorpus(t, filepath.Join(home, ".docket", "config"))
+	writeConfigFile(t, filepath.Join(withLocal, ".docket", "config"),
+		"workflows/local-only.toml",
+		strings.Replace(investigationV8, `name = "investigation"`, `name = "local-only"`, 1))
+	registerWorkflowRow(t, conn, db.DefaultProjectID, "local-only", 8)
+
+	// The global store is the only source whose roots include the checkout's
+	// own config; DOCKET_PATH is pinned package-wide by TestMain.
+	t.Setenv("DOCKET_PATH", "")
+	t.Setenv("HOME", home)
+
+	auditFrom := func(dir string) *RegistryAudit {
+		t.Helper()
+		t.Chdir(dir)
+		if cfg := resolvePaths(); cfg.Source != config.SourceGlobal ||
+			cfg.ExecRoot != canonical(t, dir) {
+			t.Fatalf("resolution from %s = %s store with exec root %s, want the "+
+				"global store rooted at that directory", dir, cfg.Source, cfg.ExecRoot)
+		}
+		return auditOnce(t, conn, RegistryAuditOptions{})
+	}
+	fromX := auditFrom(withLocal)
+	fromY := auditFrom(withoutLocal)
+
+	if !reflect.DeepEqual(fromX, fromY) {
+		t.Errorf("the audit depends on the calling checkout:\nfrom X: %+v\nfrom Y: %+v",
+			*fromX, *fromY)
 	}
 }
 

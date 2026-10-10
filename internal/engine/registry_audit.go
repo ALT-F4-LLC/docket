@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -83,14 +84,24 @@ type CorpusIndex struct {
 	err error
 }
 
-// ScanCorpus scans the instance-config roots for the audit.
+// ScanCorpus scans the shared store root's config for the audit, and nothing
+// else.
+//
+// The repository-side root the other readers union in belongs to whichever
+// checkout invoked the command, and the audit compares EVERY project's rows.
+// Scanning it would classify other projects against this checkout's additions,
+// so the same store would audit differently depending on the working directory.
 //
 // The error is the SCAN's own refusal — a root that is a regular file, a
 // dangling symlink — surfaced rather than swallowed, for orphan_registration's
 // reason: those are exactly the states in which having looked nowhere would be
 // reported as every registration being stale.
 func ScanCorpus() (*CorpusIndex, error) {
-	scan, err := scanConfigDirs(resolvePaths().InstanceConfigDirs())
+	var roots []string
+	if store := resolvePaths().DocketDir; store != "" {
+		roots = []string{filepath.Join(store, "config")}
+	}
+	scan, err := scanConfigDirs(roots)
 	if err != nil {
 		return nil, err
 	}
