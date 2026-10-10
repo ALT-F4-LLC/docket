@@ -10,7 +10,7 @@ import (
 // is a hard refusal, matching wave.js's resolve() — no synthesized default.
 func TestResolveExecutorRefusesUnknownHint(t *testing.T) {
 	doc := mustParseEscalationWalkPolicy(t)
-	if _, err := doc.ResolveExecutor("no-such-seat", 0, "", nil); err == nil {
+	if _, err := doc.ResolveExecutor("no-such-seat", 0, "", "", nil); err == nil {
 		t.Error("want a refusal for a hint with no [executors] row")
 	}
 }
@@ -18,7 +18,7 @@ func TestResolveExecutorRefusesUnknownHint(t *testing.T) {
 // TestResolveSeatRefusesUnknownSeat is the same refusal on the vote path.
 func TestResolveSeatRefusesUnknownSeat(t *testing.T) {
 	doc := mustParseEscalationWalkPolicy(t)
-	if _, err := doc.ResolveSeat("no-such-seat", nil); err == nil {
+	if _, err := doc.ResolveSeat("no-such-seat", "", nil); err == nil {
 		t.Error("want a refusal for a voter with no [executors] row")
 	}
 }
@@ -41,7 +41,7 @@ worker = { variant = "no-such-variant" }
 	if err != nil {
 		t.Fatalf("parsePolicy: %v", err)
 	}
-	if _, err := doc.ResolveExecutor("worker", 0, "", nil); err == nil {
+	if _, err := doc.ResolveExecutor("worker", 0, "", "", nil); err == nil {
 		t.Error("want a refusal when [executors].variant names an undeclared variant")
 	}
 }
@@ -66,7 +66,7 @@ worker = { variant = "tier-a" }
 	if err != nil {
 		t.Fatalf("parsePolicy: %v", err)
 	}
-	if _, err := doc.ResolveExecutor("worker", 1, "", nil); err == nil {
+	if _, err := doc.ResolveExecutor("worker", 1, "", "", nil); err == nil {
 		t.Error("want a refusal when escalate_to names an undeclared variant")
 	}
 }
@@ -89,7 +89,7 @@ worker = { variant = "tier-a", never = ["fable"] }
 	if err != nil {
 		t.Fatalf("parsePolicy: %v", err)
 	}
-	if _, err := doc.ResolveExecutor("worker", 0, "", nil); err == nil {
+	if _, err := doc.ResolveExecutor("worker", 0, "", "", nil); err == nil {
 		t.Error("want a refusal when the standing variant is forbidden and no fallback exists")
 	}
 }
@@ -116,7 +116,7 @@ banned = "allowed"
 	if err != nil {
 		t.Fatalf("parsePolicy: %v", err)
 	}
-	got, err := doc.ResolveSeat("seat-a", nil)
+	got, err := doc.ResolveSeat("seat-a", "", nil)
 	if err != nil {
 		t.Fatalf("ResolveSeat: %v", err)
 	}
@@ -148,7 +148,7 @@ nodes = ["seat-a"]
 	if err != nil {
 		t.Fatalf("parsePolicy: %v", err)
 	}
-	got, err := doc.ResolveSeat("seat-a", nil)
+	got, err := doc.ResolveSeat("seat-a", "", nil)
 	if err != nil {
 		t.Fatalf("ResolveSeat: %v", err)
 	}
@@ -190,7 +190,7 @@ gemini-tier = "start"
 		t.Fatalf("parsePolicy: %v", err)
 	}
 	// Unlabelled: never is empty, the hop lands on gemini-tier's model freely.
-	got, err := doc.ResolveExecutor("worker", 1, "", nil)
+	got, err := doc.ResolveExecutor("worker", 1, "", "", nil)
 	if err != nil {
 		t.Fatalf("ResolveExecutor (unlabelled): %v", err)
 	}
@@ -200,7 +200,7 @@ gemini-tier = "start"
 
 	// Labelled sensitive: [security].never merges in, so the same hop never
 	// lands on the forbidden model.
-	got, err = doc.ResolveExecutor("worker", 1, "", []string{"sensitive"})
+	got, err = doc.ResolveExecutor("worker", 1, "", "", []string{"sensitive"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor (labelled): %v", err)
 	}
@@ -277,7 +277,7 @@ fable-xhigh = "opus-max"
 					tt.failedAttempts, tt.reapedClaims)
 			}
 
-			direct, err := doc.ResolveExecutor(row.Executor, row.FailedAttempts, row.Instance, row.Labels)
+			direct, err := doc.ResolveExecutor(row.Executor, row.FailedAttempts, row.Instance, row.Size, row.Labels)
 			if err != nil {
 				t.Fatalf("ResolveExecutor: %v", err)
 			}

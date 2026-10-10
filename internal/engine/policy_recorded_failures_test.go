@@ -53,7 +53,7 @@ func TestResolverKeysHopsOnRecordedFailures(t *testing.T) {
 					row.Variant, tt.want, tt.attempt, tt.failedAttempts, tt.reapedClaims)
 			}
 
-			direct, err := doc.ResolveExecutor(row.Executor, tt.failedAttempts, row.Instance, row.Labels)
+			direct, err := doc.ResolveExecutor(row.Executor, tt.failedAttempts, row.Instance, row.Size, row.Labels)
 			if err != nil {
 				t.Fatalf("ResolveExecutor: %v", err)
 			}

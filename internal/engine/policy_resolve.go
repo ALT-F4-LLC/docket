@@ -3,6 +3,8 @@ package engine
 import (
 	"fmt"
 	"regexp"
+
+	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
 // PolicyAssignment is the {model, effort, variant} triple ResolveExecutor and
@@ -22,8 +24,9 @@ var investigatorClassExecutors = []string{"investigate", "research"}
 var roundOrdinal = regexp.MustCompile(`@(\d+)(?:#\d+)?$`)
 
 // ResolveExecutor resolves one executor row's {model, effort, variant} — a
-// port of wave.js's resolve(): the row's [executors] entry — or, when the
-// issue carries a label [sizes] maps, that mapped variant instead — walked
+// port of wave.js's resolve(): the row's [executors] entry — or, when [sizes]
+// maps the issue's frozen size or one of its labels, that mapped variant
+// instead (see sizeVariant) — walked
 // forward through [variants].escalate_to by (recorded failures + round)
 // hops, redirected around any [security]-forbidden model, and clamped to
 // [security].ceiling on a sensitive row.
@@ -34,10 +37,11 @@ var roundOrdinal = regexp.MustCompile(`@(\d+)(?:#\d+)?$`)
 // the re-run resolves to the tier it was reaped from. Spent claims
 // (the row's Attempt) are therefore NOT the hop key; a live claim and a reap
 // both leave the tier where it stands. instance is the step's instance name,
-// for round parsing. labels is the issue's snapshotted labels — consulted
-// both for [sizes] (an issue-driven STARTING variant, before any hop) and,
-// as before, for [security].labels sensitivity.
-func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance string, labels []string) (PolicyAssignment, error) {
+// for round parsing. size is the issue's size frozen at activation, empty
+// when it declared none. labels is the issue's snapshotted labels. Both feed
+// [sizes] (an issue-driven STARTING variant, before any hop); labels alone
+// feed [security].labels sensitivity.
+func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance, size string, labels []string) (PolicyAssignment, error) {
 	found, ok := p.Executors[hint]
 	if !ok {
 		return PolicyAssignment{}, fmt.Errorf("executor hint %q has no [executors] row", hint)
@@ -48,7 +52,7 @@ func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance st
 		return PolicyAssignment{}, fmt.Errorf(
 			"[executors].%s names variant %q, which has no [variants] row", hint, variant)
 	}
-	if sv, ok := p.sizeVariant(labels); ok {
+	if sv, ok := p.sizeVariant(size, labels); ok {
 		if _, ok := p.Variants[sv]; !ok {
 			return PolicyAssignment{}, fmt.Errorf(
 				"[sizes] names variant %q, which has no [variants] row", sv)
@@ -135,10 +139,11 @@ func (p *policyDoc) ResolveExecutor(hint string, failedAttempts int, instance st
 
 // ResolveSeat resolves one vote step's voter to {model, effort, variant} — a
 // port of wave.js's resolveSeat(): the seat's declared STANDING variant only
-// (a vote seat has no attempt or round to walk) — or, when the issue carries
-// a label [sizes] maps, that mapped variant instead — clamped and redirected
+// (a vote seat has no attempt or round to walk) — or, when [sizes] maps the
+// issue's frozen size or one of its labels, that mapped variant instead (see
+// sizeVariant) — clamped and redirected
 // by the same [security] rules ResolveExecutor applies.
-func (p *policyDoc) ResolveSeat(seat string, labels []string) (PolicyAssignment, error) {
+func (p *policyDoc) ResolveSeat(seat, size string, labels []string) (PolicyAssignment, error) {
 	found, ok := p.Executors[seat]
 	if !ok {
 		return PolicyAssignment{}, fmt.Errorf("voter %q has no [executors] row", seat)
@@ -149,7 +154,7 @@ func (p *policyDoc) ResolveSeat(seat string, labels []string) (PolicyAssignment,
 		return PolicyAssignment{}, fmt.Errorf(
 			"[executors].%s names variant %q, which has no [variants] row", seat, variant)
 	}
-	if sv, ok := p.sizeVariant(labels); ok {
+	if sv, ok := p.sizeVariant(size, labels); ok {
 		if _, ok := p.Variants[sv]; !ok {
 			return PolicyAssignment{}, fmt.Errorf(
 				"[sizes] names variant %q, which has no [variants] row", sv)
@@ -181,8 +186,11 @@ func (p *policyDoc) ResolveSeat(seat string, labels []string) (PolicyAssignment,
 	return PolicyAssignment{Model: spec.Model, Effort: spec.Effort, Variant: variant}, nil
 }
 
-// sizeVariant reports the [sizes]-mapped variant for the issue's labels, and
-// whether one applies at all. It is consulted BEFORE the [security] ceiling
+// sizeVariant reports the [sizes]-mapped variant for the issue, and whether
+// one applies at all. The frozen size wins when it is set, is not unknown,
+// and [sizes] maps it; otherwise the first [sizes]-mapped label applies, so
+// an unsized, unknown-sized, or unmapped-size issue routes as it did before
+// size became a field. It is consulted BEFORE the [security] ceiling
 // clamp captures `standing` — a size-derived variant is a new starting point
 // for the walk, not an escalation hop, so it must land before `standing` is
 // read, and it is still subject to [security]'s ceiling/never afterward like
@@ -194,9 +202,14 @@ func (p *policyDoc) ResolveSeat(seat string, labels []string) (PolicyAssignment,
 // an operator or `issue show` already reads top-to-bottom, rather than an
 // arbitrary map-iteration pick or a second precedence table this grammar does
 // not otherwise need.
-func (p *policyDoc) sizeVariant(labels []string) (string, bool) {
+func (p *policyDoc) sizeVariant(size string, labels []string) (string, bool) {
 	if len(p.Sizes) == 0 {
 		return "", false
+	}
+	if size != "" && size != string(model.SizeUnknown) {
+		if v, ok := p.Sizes[size]; ok {
+			return v, true
+		}
 	}
 	for _, l := range labels {
 		if v, ok := p.Sizes[l]; ok {

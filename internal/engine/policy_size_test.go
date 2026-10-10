@@ -1,6 +1,10 @@
 package engine
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/ALT-F4-LLC/docket/internal/model"
+)
 
 // sizePolicyTOML exercises [sizes] against a chain that also carries
 // [security], so a size-derived starting variant's interaction with the
@@ -38,7 +42,7 @@ func TestResolveExecutorNoSizeLabelIsUnchanged(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", nil)
+	got, err := doc.ResolveExecutor("worker", 0, "worker@0", "", nil)
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -53,7 +57,7 @@ func TestResolveExecutorAppliesSizeLabel(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"trivial"})
+	got, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"trivial"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -70,7 +74,7 @@ func TestResolveExecutorFirstMatchingSizeLabelWins(t *testing.T) {
 
 	// "needs-design" appears first in the issue's declared label order, so it wins
 	// over "trivial" even though "trivial" would otherwise sort earlier.
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"needs-design", "trivial"})
+	got, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"needs-design", "trivial"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -78,7 +82,7 @@ func TestResolveExecutorFirstMatchingSizeLabelWins(t *testing.T) {
 		t.Errorf("got %+v, want the first-declared label's opus-high", got)
 	}
 
-	reversed, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"trivial", "needs-design"})
+	reversed, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"trivial", "needs-design"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -93,7 +97,7 @@ func TestResolveExecutorSizeLabelStillClampsToSecurityCeiling(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"needs-design", "sensitive"})
+	got, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"needs-design", "sensitive"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
@@ -112,7 +116,7 @@ func TestResolveExecutorRefusesUnknownSizeVariant(t *testing.T) {
 		Sizes:     map[string]string{"trivial": "no-such-variant"},
 	}
 
-	if _, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"trivial"}); err == nil {
+	if _, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"trivial"}); err == nil {
 		t.Error("want a refusal for a [sizes] entry naming a variant with no [variants] row")
 	}
 }
@@ -123,7 +127,7 @@ func TestResolveSeatNoSizeLabelIsUnchanged(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveSeat("worker", nil)
+	got, err := doc.ResolveSeat("worker", "", nil)
 	if err != nil {
 		t.Fatalf("ResolveSeat: %v", err)
 	}
@@ -138,7 +142,7 @@ func TestResolveSeatAppliesSizeLabel(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveSeat("worker", []string{"trivial"})
+	got, err := doc.ResolveSeat("worker", "", []string{"trivial"})
 	if err != nil {
 		t.Fatalf("ResolveSeat: %v", err)
 	}
@@ -153,7 +157,7 @@ func TestResolveSeatSizeLabelStillClampsToSecurityCeiling(t *testing.T) {
 		t.Fatalf("parsePolicy: %v", err)
 	}
 
-	got, err := doc.ResolveSeat("worker", []string{"needs-design", "sensitive"})
+	got, err := doc.ResolveSeat("worker", "", []string{"needs-design", "sensitive"})
 	if err != nil {
 		t.Fatalf("ResolveSeat: %v", err)
 	}
@@ -174,12 +178,121 @@ func TestParsePolicyAcceptsAbsentSizes(t *testing.T) {
 		t.Errorf("Sizes = %+v, want empty for a policy with no [sizes] table", doc.Sizes)
 	}
 
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", []string{"trivial"})
+	got, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"trivial"})
 	if err != nil {
 		t.Fatalf("ResolveExecutor: %v", err)
 	}
 	if got.Variant != "tier-a" {
 		t.Errorf("got %+v, want the executor's own standing tier-a "+
 			"(a label naming no [sizes] entry must not change resolution)", got)
+	}
+}
+
+// frozenSizePolicyTOML maps a frozen Size, a size label, and unknown to three
+// distinct variants, none of them worker's own sonnet-medium, so each test
+// can tell which input chose the starting variant.
+const frozenSizePolicyTOML = `
+[policy]
+version = 2
+
+[variants]
+haiku-low = { model = "haiku", effort = "low" }
+sonnet-low = { model = "sonnet", effort = "low" }
+sonnet-medium = { model = "sonnet", effort = "medium" }
+opus-high = { model = "opus", effort = "high" }
+
+[executors]
+worker = { variant = "sonnet-medium" }
+
+[sizes]
+small = "haiku-low"
+trivial = "opus-high"
+unknown = "sonnet-low"
+`
+
+// onlySmallPolicyTOML maps only small, so a frozen bounded Size has no
+// [sizes] entry of its own.
+const onlySmallPolicyTOML = `
+[policy]
+version = 2
+
+[variants]
+haiku-low = { model = "haiku", effort = "low" }
+sonnet-medium = { model = "sonnet", effort = "medium" }
+
+[executors]
+worker = { variant = "sonnet-medium" }
+
+[sizes]
+small = "haiku-low"
+`
+
+func TestFrozenSizeRouting(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy string
+		size   string
+		labels []string
+		want   string
+	}{
+		{"mapped size with no size label", frozenSizePolicyTOML, "small", nil, "haiku-low"},
+		{"mapped size beats a mapped size label", frozenSizePolicyTOML, "small", []string{"trivial"}, "haiku-low"},
+		{"unknown size falls back to the size label", frozenSizePolicyTOML, "unknown", []string{"trivial"}, "opus-high"},
+		{"unmapped size falls back to the size label", onlySmallPolicyTOML, "bounded", []string{"small"}, "haiku-low"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			doc, err := parsePolicy([]byte(tt.policy))
+			if err != nil {
+				t.Fatalf("parsePolicy: %v", err)
+			}
+
+			executor, err := doc.ResolveExecutor("worker", 0, "worker@0", tt.size, tt.labels)
+			if err != nil {
+				t.Fatalf("ResolveExecutor: %v", err)
+			}
+			if executor.Variant != tt.want {
+				t.Errorf("ResolveExecutor(size %q, labels %v) variant = %q, want %q",
+					tt.size, tt.labels, executor.Variant, tt.want)
+			}
+
+			seat, err := doc.ResolveSeat("worker", tt.size, tt.labels)
+			if err != nil {
+				t.Fatalf("ResolveSeat: %v", err)
+			}
+			if seat.Variant != tt.want {
+				t.Errorf("ResolveSeat(size %q, labels %v) variant = %q, want %q",
+					tt.size, tt.labels, seat.Variant, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveRowRoutingAppliesFrozenSize(t *testing.T) {
+	doc, err := parsePolicy([]byte(frozenSizePolicyTOML))
+	if err != nil {
+		t.Fatalf("parsePolicy: %v", err)
+	}
+
+	executorRow := &model.StepRow{Step: "STEP-1", Instance: "worker@0", Executor: "worker", Size: "small"}
+	if err := resolveRowRouting(doc, executorRow); err != nil {
+		t.Fatalf("resolveRowRouting executor row: %v", err)
+	}
+	if executorRow.Variant != "haiku-low" {
+		t.Errorf("executor row variant = %q, want small's haiku-low", executorRow.Variant)
+	}
+
+	voteRow := &model.StepRow{Step: "STEP-2", Instance: "vote@0", Voters: []string{"worker", "worker"}, Size: "small"}
+	if err := resolveRowRouting(doc, voteRow); err != nil {
+		t.Fatalf("resolveRowRouting vote row: %v", err)
+	}
+	if len(voteRow.VoterAssignments) != 2 {
+		t.Fatalf("vote row has %d voter assignments, want 2", len(voteRow.VoterAssignments))
+	}
+	for _, a := range voteRow.VoterAssignments {
+		if a.Variant != "haiku-low" {
+			t.Errorf("voter %q variant = %q, want small's haiku-low", a.Voter, a.Variant)
+		}
 	}
 }

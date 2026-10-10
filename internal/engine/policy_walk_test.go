@@ -113,7 +113,7 @@ func mustParseEscalationWalkPolicy(t *testing.T) *policyDoc {
 
 func variantAt(t *testing.T, doc *policyDoc, executor string, attempt int, labels []string) string {
 	t.Helper()
-	got, err := doc.ResolveExecutor(executor, attempt, "", labels)
+	got, err := doc.ResolveExecutor(executor, attempt, "", "", labels)
 	if err != nil {
 		return "THREW: " + err.Error()
 	}
@@ -122,7 +122,7 @@ func variantAt(t *testing.T, doc *policyDoc, executor string, attempt int, label
 
 func modelAt(t *testing.T, doc *policyDoc, executor string, attempt int, labels []string) string {
 	t.Helper()
-	got, err := doc.ResolveExecutor(executor, attempt, "", labels)
+	got, err := doc.ResolveExecutor(executor, attempt, "", "", labels)
 	if err != nil {
 		return "THREW: " + err.Error()
 	}
@@ -131,7 +131,7 @@ func modelAt(t *testing.T, doc *policyDoc, executor string, attempt int, labels 
 
 func variantAtRound(t *testing.T, doc *policyDoc, executor, instance string, attempt int, labels []string) string {
 	t.Helper()
-	got, err := doc.ResolveExecutor(executor, attempt, instance, labels)
+	got, err := doc.ResolveExecutor(executor, attempt, instance, "", labels)
 	if err != nil {
 		return "THREW: " + err.Error()
 	}

@@ -115,7 +115,7 @@ func ResolveSeats(conn *sql.DB, runID int, seats, labels []string) ([]model.Vote
 
 	out := make([]model.VoterAssignment, 0, len(seats))
 	for _, seat := range seats {
-		assignment, err := policy.ResolveSeat(seat, labels)
+		assignment, err := policy.ResolveSeat(seat, "", labels)
 		if err != nil {
 			return nil, notFoundErr(db.ErrNotFound,
 				"resolving seat %q from %s's pinned policy.toml: %v",
@@ -146,7 +146,7 @@ func resolveRowRouting(policy *policyDoc, row *model.StepRow) error {
 	}
 	switch {
 	case row.Executor != "":
-		assignment, err := policy.ResolveExecutor(row.Executor, row.FailedAttempts, row.Instance, row.Labels)
+		assignment, err := policy.ResolveExecutor(row.Executor, row.FailedAttempts, row.Instance, row.Size, row.Labels)
 		if err != nil {
 			return validationErr(
 				"resolving %s@%s from the run's pinned policy.toml: %v", row.Step, row.Instance, err)
@@ -155,7 +155,7 @@ func resolveRowRouting(policy *policyDoc, row *model.StepRow) error {
 	case len(row.Voters) > 0:
 		assignments := make([]model.VoterAssignment, 0, len(row.Voters))
 		for _, voter := range row.Voters {
-			assignment, err := policy.ResolveSeat(voter, row.Labels)
+			assignment, err := policy.ResolveSeat(voter, row.Size, row.Labels)
 			if err != nil {
 				return validationErr(
 					"resolving %s@%s voter %q from the run's pinned policy.toml: %v",
