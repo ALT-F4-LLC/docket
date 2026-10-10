@@ -985,7 +985,7 @@ the next environment variable anyone invents.
 | `CI` | `1` | the near-universal convention for "non-interactive"; it makes tools skip prompts and progress spinners without docket having to know each tool |
 | `DOCKET_GATE` | the gate name | so a check can behave differently under docket if its author wants; opaque to core |
 | `DOCKET_REPO` | the repo root | the same value as `Dir`, for tools that need it in an env |
-| `DOCKET_GATE_BASE` | the step's base commit sha, **worktree-recorded completion gates only** | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
+| `DOCKET_GATE_BASE` | the base commit sha of the tree the gate measures, for **worktree-recorded completion gates and pre-gates** measuring a bound worktree or a reconstruction | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
 | `DOCKET_STEP` | the step's reference, `STEP-N` | so a gate can ask the engine for its **own inputs** — the identity `docket step context` and `docket step artifacts` take — instead of re-deriving which step it is from `DOCKET_ISSUE` plus an instance-name convention; see below *(added 2026-09-03, DKT-1186)* |
 | `GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` | a scratch directory deleted with the tree, **gates measuring a reconstruction only** | both tools cache issues by package content while storing the absolute path each was found at, and re-open that path to find the `//nolint` that suppresses it. A reconstruction outlives neither, so its entries must not either — see §7.6's DKT-1166 amendment *(added 2026-09-03, DKT-1166)* |
 
@@ -996,7 +996,8 @@ change (RUN-66's secret-scan passed 8/8 write steps that way), and a gate
 guessing `git diff HEAD~1` is wrong for every multi-commit step. The engine
 already knows the step's base — the worktree's **fork point**, the same
 resolution the diff stage's `runDiffBase` applies — so completion gates of a
-`--worktree`-recorded step export it:
+`--worktree`-recorded step export it, and pre-gates export the same
+resolution applied to the tree they measure:
 
 - **Worktree-recorded step**: `DOCKET_GATE_BASE` names the commit the worktree
   was created from. `git diff $DOCKET_GATE_BASE..HEAD` in the gate's own cwd
@@ -1009,10 +1010,16 @@ resolution the diff stage's `runDiffBase` applies — so completion gates of a
   and a live `HEAD` read is a value docket cannot vouch for as a range
   endpoint. Absence — never an invented sha — is the encoding, the same
   convention as `DOCKET_SCOPE`.
-- The variable is also unset when the fork point cannot be resolved, and on
-  the pre-claim path (a pre-gate measures the tree under review, not a
-  recorded completion; after integration sweeps a worktree, no honest base
-  survives to export).
+- **Pre-gate on a bound worktree**: a pre-gate measuring the step's live
+  worktree gets that worktree's fork point, the same value its completion
+  gates get.
+- **Pre-gate on a reconstruction**: a pre-gate measuring a scratch tree
+  reconstructed at the target sha gets the merge-base of that target sha and
+  the shared checkout's head.
+- **Pre-gate on the shared checkout**: the variable is unset, for the same
+  reason as a non-worktree step.
+- The variable is also unset, on either path, when the fork point or
+  merge-base cannot be resolved.
 - **Fail closed on absence**: a range-shaped gate that finds the variable
   absent while the tree is clean has nothing it can honestly scan, and should
   fail rather than pass having measured nothing — "we couldn't check, so
