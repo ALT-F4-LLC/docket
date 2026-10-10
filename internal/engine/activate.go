@@ -1859,6 +1859,11 @@ type issueSnapshotFields struct {
 	Labels []string         `json:"labels"`
 	Scope  []string         `json:"scope"`
 	Linked map[string][]int `json:"linked,omitempty"`
+	// Files is the issue's attached path list as of activation, the list
+	// `issue.files` renders. A nil pointer is a snapshot written before the
+	// list was frozen and encodes no key; activation always writes a non-nil
+	// pointer, so an issue with no attachments encodes `"files":[]`.
+	Files *[]string `json:"files,omitempty"`
 }
 
 func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (string, error) {
@@ -1881,12 +1886,18 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (str
 		labels = []string{}
 	}
 
+	files, err := attachedPathsTx(tx, issue.ID)
+	if err != nil {
+		return "", fmt.Errorf("reading attached files for %s: %w", model.FormatID(issue.ID), err)
+	}
+
 	snapshot := issueSnapshotFields{
 		Title:  issue.Title,
 		Kind:   string(issue.Kind),
 		Labels: labels,
 		Scope:  scope,
 		Linked: linked,
+		Files:  &files,
 	}
 
 	out, err := json.Marshal(snapshot)
@@ -1894,6 +1905,29 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (str
 		return "", fmt.Errorf("serializing snapshot for %s: %w", model.FormatID(issue.ID), err)
 	}
 	return string(out), nil
+}
+
+// attachedPathsTx reads an issue's attached paths inside the activation
+// transaction, so the frozen list is the one the binding commits with. The
+// result is never nil: an issue with no attachments yields an empty list.
+func attachedPathsTx(tx *sql.Tx, issueID int) ([]string, error) {
+	rows, err := tx.Query(
+		`SELECT file_path FROM issue_files WHERE issue_id = ? ORDER BY file_path`,
+		issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	paths := []string{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	return paths, rows.Err()
 }
 
 // harvestFences is stage 5: extract fenced blocks from the issue's SNAPSHOT

@@ -808,7 +808,7 @@ func TestActivateSnapshotsBodyAndFields(t *testing.T) {
 	// stored. The exact bytes are asserted because context bundles are
 	// golden-diffed and a reordering here makes the goldens flap.
 	want := `{"title":"snapshot me","kind":"task","labels":["alpha","beta"],` +
-		`"scope":["internal/db/**"]}`
+		`"scope":["internal/db/**"],"files":[]}`
 	if ri.IssueSnapshot != want {
 		t.Errorf("issue_snapshot =\n  %s\nwant\n  %s", ri.IssueSnapshot, want)
 	}

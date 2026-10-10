@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -496,6 +497,10 @@ func stepPacketFiles(
 // bytes of every path its issue attaches, for rendering beside the declared
 // packet files.
 //
+// THE PATH LIST IS FROZEN; THE BYTES ARE LIVE. The paths come from the run's
+// activation snapshot, so a file attached mid-run never reaches that run's
+// packets. Each path's bytes are read at render time.
+//
 // A step that does not declare the form reads nothing: the attachments are an
 // input like any other, and an issue's file list is not automatically every
 // step's business.
@@ -528,7 +533,7 @@ func issueAttachmentFiles(
 		return nil, nil
 	}
 
-	paths, err := db.GetIssueFiles(conn, step.IssueID)
+	paths, err := frozenAttachedPaths(conn, step.RunID, step.IssueID)
 	if err != nil {
 		return nil, err
 	}
@@ -570,6 +575,35 @@ func checkAttachmentPath(issueID int, path string) error {
 		}
 	}
 	return nil
+}
+
+// frozenAttachedPaths returns the attached path list the run's issue snapshot
+// froze at activation. A snapshot written before the list was frozen carries
+// no `files` key, and for that run the live attachment list stands in.
+func frozenAttachedPaths(conn *sql.DB, runID, issueID int) ([]string, error) {
+	var snapshot sql.NullString
+	err := conn.QueryRow(
+		`SELECT issue_snapshot FROM run_issues WHERE run_id = ? AND issue_id = ?`,
+		runID, issueID,
+	).Scan(&snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
+			model.FormatID(issueID), err)
+	}
+
+	var frozen struct {
+		Files *[]string `json:"files"`
+	}
+	if snapshot.String != "" {
+		if err := json.Unmarshal([]byte(snapshot.String), &frozen); err != nil {
+			return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
+				model.FormatID(issueID), err)
+		}
+	}
+	if frozen.Files == nil {
+		return db.GetIssueFiles(conn, issueID)
+	}
+	return *frozen.Files, nil
 }
 
 // pinSetOwner names the run a refusal is about. A resolution that carries no
