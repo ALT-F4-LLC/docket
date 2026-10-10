@@ -104,6 +104,29 @@ func (w *Writer) Error(err error, code ErrorCode) int {
 	return ExitCodeForError(code)
 }
 
+// PartialFailure renders a command that failed but still has a report worth
+// keeping, such as a fan-out where some targets succeeded and others did not.
+// The corresponding exit code is returned so the caller can pass it to os.Exit.
+//
+// In JSON mode Stdout receives exactly one envelope: ok false, the error and
+// code exactly as Error would write them, and data as Success would write it
+// for the selected version. A caller reading .ok and a caller reading the exit
+// code therefore reach the same verdict. In human mode the message (the
+// rendered report) goes to Stdout with the failure glyph and the error goes to
+// Stderr, as Error writes it.
+func (w *Writer) PartialFailure(data any, message string, err error, code ErrorCode) int {
+	if w.JSONMode {
+		if w.JSONVersion == JSONV2 {
+			data = shapeV2Data(data)
+		}
+		writeJSONPartialFailure(w.Stdout, data, err, code)
+	} else {
+		writeHumanOutcome(w.Stdout, message)
+		writeHumanError(w.Stderr, err)
+	}
+	return ExitCodeForError(code)
+}
+
 // Info writes an informational message to Stderr. In quiet mode or JSON mode,
 // Info is a no-op (the JSON envelope on Stdout is the sole structured output).
 func (w *Writer) Info(format string, args ...any) {

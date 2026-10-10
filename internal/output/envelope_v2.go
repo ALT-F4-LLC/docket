@@ -51,11 +51,11 @@ type Versioned interface {
 	VersionedPayload() any
 }
 
-// writeJSONSuccessV2 writes a v2 success envelope to w. Collection results are
+// shapeV2Data returns the v2 form of a payload. Collection results are
 // reshaped to {items, total, truncated} and versioned payloads gain their
-// `version` field; every other result marshals exactly as it does under v1,
-// since a scalar payload has no items/total/truncated to report.
-func writeJSONSuccessV2(w io.Writer, data any, message string) {
+// `version` field; every other result is returned unchanged, since a scalar
+// payload has no items/total/truncated to report.
+func shapeV2Data(data any) any {
 	if v, ok := data.(Versioned); ok {
 		data = v.VersionedPayload()
 	}
@@ -71,12 +71,17 @@ func writeJSONSuccessV2(w io.Writer, data any, message string) {
 			Truncated: c.CollectionTruncated(),
 		}
 	}
+	return data
+}
 
+// writeJSONSuccessV2 writes a v2 success envelope to w, with data in its v2
+// form (see shapeV2Data).
+func writeJSONSuccessV2(w io.Writer, data any, message string) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	enc.Encode(successEnvelope{
 		OK:      true,
-		Data:    data,
+		Data:    shapeV2Data(data),
 		Message: message,
 	})
 }

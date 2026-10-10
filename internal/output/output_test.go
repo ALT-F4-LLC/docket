@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/render"
@@ -435,6 +437,59 @@ func TestWriterOutcomeJSONIsASuccessEnvelope(t *testing.T) {
 	}
 	if env.Message != "gate build failed (exit 2)" {
 		t.Errorf("message = %q, want the outcome line", env.Message)
+	}
+}
+
+func TestWriterPartialFailureJSONKeepsDataInFailureEnvelope(t *testing.T) {
+	for _, version := range []JSONVersion{JSONV1, JSONV2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			w := &Writer{JSONMode: true, JSONVersion: version, Stdout: &stdout, Stderr: &stderr}
+			payload := map[string]any{"succeeded": float64(11), "failed": float64(2)}
+
+			exit := w.PartialFailure(payload, "", errors.New("2 of 13 projects failed"), ErrConflict)
+
+			if exit != ExitConflict {
+				t.Errorf("exit code = %d, want %d", exit, ExitConflict)
+			}
+			var env map[string]any
+			err := json.Unmarshal(stdout.Bytes(), &env)
+			testsupport.Must(t, err, "stdout is not one JSON document: %v\n%s", err, stdout.String())
+			if env["ok"] != false {
+				t.Errorf("ok = %v, want false", env["ok"])
+			}
+			if !reflect.DeepEqual(env["data"], payload) {
+				t.Errorf("data = %#v, want %#v", env["data"], payload)
+			}
+			if env["error"] != "2 of 13 projects failed" {
+				t.Errorf("error = %v, want %q", env["error"], "2 of 13 projects failed")
+			}
+			if env["code"] != string(ErrConflict) {
+				t.Errorf("code = %v, want %q", env["code"], ErrConflict)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing in JSON mode", stderr.String())
+			}
+		})
+	}
+}
+
+func TestWriterPartialFailureHumanPrintsReportAndError(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	var stdout, stderr bytes.Buffer
+	w := &Writer{Stdout: &stdout, Stderr: &stderr}
+
+	exit := w.PartialFailure(nil, "project a: ok\nproject b: conflict", errors.New("1 of 2 projects failed"), ErrConflict)
+
+	if exit != ExitConflict {
+		t.Errorf("exit code = %d, want %d", exit, ExitConflict)
+	}
+	if stdout.String() != "project a: ok\nproject b: conflict\n" {
+		t.Errorf("stdout = %q, want the report", stdout.String())
+	}
+	if stderr.String() != "Error: 1 of 2 projects failed\n" {
+		t.Errorf("stderr = %q, want the error line", stderr.String())
 	}
 }
 
