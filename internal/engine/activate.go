@@ -861,8 +861,13 @@ func activateTx(
 			gateDefs[i] = bound.definition
 		}
 	}
+	var projectIdentity string
+	if err := tx.QueryRow(`SELECT identity FROM projects WHERE id = ?`,
+		db.DefaultProjectIDOr(run.ProjectID)).Scan(&projectIdentity); err != nil {
+		return nil, fmt.Errorf("reading the identity of run %s's project: %w", run.Ref(), err)
+	}
 	filePins = append(filePins,
-		gateScriptPins(gateDefs, gatePinStore, resolvePaths().Identity, run.ExecRoot)...)
+		gateScriptPins(gateDefs, gatePinStore, projectIdentity, run.ExecRoot)...)
 
 	pins := make([]db.Pin, 0, len(bindings)+len(filePins))
 	for _, ri := range runIssues {

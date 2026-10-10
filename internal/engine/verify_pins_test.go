@@ -300,10 +300,9 @@ func TestVerifyPinsReportsAnEditedGateScriptAsDrift(t *testing.T) {
 // under the exec root is listed as unpinned by name, and that report never
 // makes the run unsound, because most trust entries are `make <target>`.
 func TestVerifyPinsReportsUnpinnedGates(t *testing.T) {
-	_, conn, runID := gateScriptFixture(t)
+	repo, conn, runID := gateScriptFixture(t)
 
-	report, err := VerifyPins(conn, runID)
-	testsupport.Must(t, err, "VerifyPins: %v", err)
+	report := gateReportWith(t, conn, runID, gatePinStore, repo)
 
 	got := map[string]GateVerdict{}
 	for _, g := range report.Gates {
@@ -332,17 +331,36 @@ func TestVerifyPinsReportsUnpinnedGates(t *testing.T) {
 }
 
 // gateReportWith builds the verify-pins report for a run the way VerifyPins
-// does, with the trust loader and the repo identity path supplied.
+// does, with the trust loader and the invoking exec root supplied.
 func gateReportWith(
 	t *testing.T, conn *sql.DB, runID int,
-	load func() (*trust.Store, error), identityPath string,
+	load func() (*trust.Store, error), invokingRoot string,
 ) *PinReport {
 	t.Helper()
 	report, err := verifyPinsClosedIn(conn, runID, runConfigRoots(conn, runID))
 	testsupport.Must(t, err, "verifyPinsClosedIn: %v", err)
-	testsupport.Must(t, verifyGateScripts(conn, runID, report, load, identityPath),
+	testsupport.Must(t, verifyGateScripts(conn, runID, report, load, invokingRoot),
 		"verifyGateScripts")
 	return report
+}
+
+// setRunProjectIdentity records identity on the project that owns runID, the
+// row `run start` binds a run to.
+func setRunProjectIdentity(t *testing.T, conn *sql.DB, runID int, identity string) {
+	t.Helper()
+	_, err := conn.Exec(`UPDATE projects SET identity = ?
+		WHERE id = (SELECT project_id FROM runs WHERE id = ?)`, identity, runID)
+	testsupport.Must(t, err, "setting the project identity: %v", err)
+}
+
+// gateRow is the report's row for gate, or nil.
+func gateRow(report *PinReport, gate string) *GateVerdict {
+	for i := range report.Gates {
+		if report.Gates[i].Gate == gate {
+			return &report.Gates[i]
+		}
+	}
+	return nil
 }
 
 // assertUncheckedGate requires the report to name gate as could-not-check with
@@ -407,10 +425,218 @@ func TestVerifyPinsReportsARepoBoundGateUncheckedWhenTheIdentityDoesNotResolve(t
 	repoBound := sandboxTrust(t, trust.Entry{
 		Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Repo: repo,
 	})
+	setRunProjectIdentity(t, conn, runID, filepath.Join(repo, "no-such-dir"))
 
-	report := gateReportWith(t, conn, runID, repoBound, filepath.Join(repo, "no-such-dir"))
+	report := gateReportWith(t, conn, runID, repoBound, repo)
 
 	assertUncheckedGate(t, report, "build", "repo identity did not resolve")
+}
+
+// TestVerifyPinsMatchesGateTrustUnderTheRunsProjectIdentity: the gate half
+// matches trust entries under the identity the run's project records, so a
+// verify-pins invoked with another repository's identity still finds the
+// run's repo-bound entry and reports its script pinned.
+func TestVerifyPinsMatchesGateTrustUnderTheRunsProjectIdentity(t *testing.T) {
+	repo, conn, runID := gateScriptFixture(t)
+	setRunProjectIdentity(t, conn, runID, repo)
+	argv := []string{"bash", "scripts/qa/build.sh"}
+	gatePinStore = sandboxTrust(t, trust.Entry{
+		Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Repo: repo,
+	})
+	if invoker, _ := trust.RepoIdentity(resolvePaths().Identity); invoker == repo {
+		t.Fatalf("premise: the invocation's identity must differ from the run's checkout %s", repo)
+	}
+
+	report := gateReportWith(t, conn, runID, gatePinStore, repo)
+
+	if row := gateRow(report, "build"); row != nil {
+		t.Errorf("gate build is bound to the run's project and its script is pinned, "+
+			"but the report lists it: %+v", *row)
+	}
+}
+
+// TestActivationPinsGateScriptsUnderTheRunsProjectIdentity: activation matches
+// under the same identity verify-pins does, so a run whose project binds the
+// gate's only trust entry pins that gate's script.
+func TestActivationPinsGateScriptsUnderTheRunsProjectIdentity(t *testing.T) {
+	conn := mustDB(t)
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving the repo root: %v", err)
+	script := filepath.Join(repo, "scripts/qa/build.sh")
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(script), 0o755), "mkdir")
+	testsupport.Must(t, os.WriteFile(script, []byte("echo build\n"), 0o755), "writing")
+
+	argv := []string{"bash", "scripts/qa/build.sh"}
+	prior := gatePinStore
+	gatePinStore = sandboxTrust(t, trust.Entry{
+		Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Repo: repo,
+	})
+	t.Cleanup(func() { gatePinStore = prior })
+	if invoker, _ := trust.RepoIdentity(resolvePaths().Identity); invoker == repo {
+		t.Fatalf("premise: the invocation's identity must differ from the run's checkout %s", repo)
+	}
+
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "test run", 0, nowMS,
+		db.RunContext{ExecRoot: repo})
+	testsupport.Must(t, err, "starting run: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "adding the issue")
+	setRunProjectIdentity(t, conn, run.ID, repo)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	if _, ok := filePinFor(t, conn, run.ID, script); !ok {
+		t.Errorf("no pin for %s: activation did not match the run's project-bound entry", script)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The copy the invoking checkout would execute is compared to the pin
+// ---------------------------------------------------------------------------
+
+// secondCheckout makes a second checkout B holding the same gate scripts the
+// fixture wrote under A.
+func secondCheckout(t *testing.T) string {
+	t.Helper()
+	b, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving checkout B: %v", err)
+	for name, body := range map[string]string{
+		"scripts/qa/build.sh":       "echo build\n",
+		"scripts/qa/ac-commands.sh": "echo ac\n",
+	} {
+		path := filepath.Join(b, name)
+		testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o755), "mkdir")
+		testsupport.Must(t, os.WriteFile(path, []byte(body), 0o755), "writing %s", name)
+	}
+	return b
+}
+
+// TestVerifyPinsReportsAnEditedCopyInTheInvokingCheckout: a run activated in
+// checkout A and checked from checkout B compares B's copy of each relatively
+// named gate script, the copy bash would open there, with A's pin. An edit to
+// B's copy, including one too large to be a pinned script, is reported and
+// makes the run unsound while A's own pin still reads ok.
+func TestVerifyPinsReportsAnEditedCopyInTheInvokingCheckout(t *testing.T) {
+	for name, edited := range map[string][]byte{
+		"edited":    []byte("exit 0\n"),
+		"oversized": make([]byte, maxGateScriptBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, conn, runID := gateScriptFixture(t)
+			b := secondCheckout(t)
+			bCopy := filepath.Join(b, "scripts/qa/build.sh")
+			testsupport.Must(t, os.WriteFile(bCopy, edited, 0o755), "editing B's copy")
+
+			report := gateReportWith(t, conn, runID, gatePinStore, b)
+
+			row := gateRow(report, "build")
+			if row == nil || row.Status != GateExecutedCopyChanged {
+				t.Fatalf("gate build's row is %+v, want status %q", row, GateExecutedCopyChanged)
+			}
+			if !strings.Contains(row.Reason, bCopy) {
+				t.Errorf("the row's reason %q does not name B's copy %s", row.Reason, bCopy)
+			}
+			if report.ExecutedCopyChanged != 1 {
+				t.Errorf("executed_copy_changed = %d, want 1", report.ExecutedCopyChanged)
+			}
+			if report.Sound() {
+				t.Error("the report reads sound while B's copy differs from the pinned script")
+			}
+			if !strings.Contains(PinReportReason(report), bCopy) {
+				t.Errorf("the refusal text %q does not name B's copy", PinReportReason(report))
+			}
+			aPin := filepath.Join(a, "scripts/qa/build.sh")
+			for _, p := range report.Pins {
+				if p.Ref == aPin && p.Status != PinOK {
+					t.Errorf("A's untouched pin reads %q, want %q", p.Status, PinOK)
+				}
+			}
+		})
+	}
+}
+
+// TestVerifyPinsIsCleanWhenTheInvokingCheckoutMatches: a B whose copies match
+// the pins adds no row.
+func TestVerifyPinsIsCleanWhenTheInvokingCheckoutMatches(t *testing.T) {
+	_, conn, runID := gateScriptFixture(t)
+	b := secondCheckout(t)
+
+	report := gateReportWith(t, conn, runID, gatePinStore, b)
+
+	for _, gate := range []string{"build", "ac-commands"} {
+		if row := gateRow(report, gate); row != nil {
+			t.Errorf("gate %s has a row with B identical to A: %+v", gate, *row)
+		}
+	}
+	if !report.Sound() {
+		t.Errorf("an untouched run reads unsound from a matching checkout: %s", PinReportReason(report))
+	}
+}
+
+// TestVerifyPinsIgnoresTheInvokingCopyOfAnAbsolutelyNamedScript: an entry that
+// names A's script by absolute path runs A's copy from any cwd, so B's copy is
+// not what executes and its edit is not reported.
+func TestVerifyPinsIgnoresTheInvokingCopyOfAnAbsolutelyNamedScript(t *testing.T) {
+	_, conn, runID := gateScriptFixture(t)
+	b := secondCheckout(t)
+	testsupport.Must(t, os.WriteFile(filepath.Join(b, "scripts/qa/ac-commands.sh"),
+		[]byte("exit 0\n"), 0o755), "editing B's copy")
+
+	report := gateReportWith(t, conn, runID, gatePinStore, b)
+
+	if row := gateRow(report, "ac-commands"); row != nil {
+		t.Errorf("gate ac-commands names A's script absolutely, but B's copy is reported: %+v", *row)
+	}
+	if !report.Sound() {
+		t.Errorf("an edit to a copy no gate executes made the run unsound: %s", PinReportReason(report))
+	}
+}
+
+// TestVerifyPinsReportsAnAbsentCopyInTheInvokingCheckout: a B with no copy of a
+// relatively named script is reported, without making the run unsound: bash
+// cannot open the file there, so the gate fails rather than running other
+// bytes.
+func TestVerifyPinsReportsAnAbsentCopyInTheInvokingCheckout(t *testing.T) {
+	_, conn, runID := gateScriptFixture(t)
+	b := secondCheckout(t)
+	bCopy := filepath.Join(b, "scripts/qa/build.sh")
+	testsupport.Must(t, os.Remove(bCopy), "removing B's copy")
+
+	report := gateReportWith(t, conn, runID, gatePinStore, b)
+
+	row := gateRow(report, "build")
+	if row == nil || row.Status != GateExecutedCopyAbsent {
+		t.Fatalf("gate build's row is %+v, want status %q", row, GateExecutedCopyAbsent)
+	}
+	if !strings.Contains(row.Reason, bCopy) {
+		t.Errorf("the row's reason %q does not name B's path %s", row.Reason, bCopy)
+	}
+	if !report.Sound() {
+		t.Errorf("an absent copy made the run unsound: %s", PinReportReason(report))
+	}
+}
+
+// TestVerifyPinsComparesTheCopyUnderTheInvokingExecRoot: VerifyPins itself
+// takes the invoking checkout from the process's resolved exec root.
+func TestVerifyPinsComparesTheCopyUnderTheInvokingExecRoot(t *testing.T) {
+	_, conn, runID := gateScriptFixture(t)
+	b := secondCheckout(t)
+	bCopy := filepath.Join(b, "scripts/qa/build.sh")
+	testsupport.Must(t, os.WriteFile(bCopy, []byte("exit 0\n"), 0o755), "editing B's copy")
+	store := gatePinStore
+	onGlobalStore(t, b)
+	gatePinStore = store
+	if root := resolvePaths().ExecRoot; root != b {
+		t.Fatalf("premise: the invoking exec root must be B %s, got %s", b, root)
+	}
+
+	report, err := VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+
+	if row := gateRow(report, "build"); row == nil || row.Status != GateExecutedCopyChanged {
+		t.Errorf("gate build's row is %+v, want status %q", row, GateExecutedCopyChanged)
+	}
 }
 
 // TestVerifyPinsReportsAnUnmatchedGateUnchecked: with the identity resolved, a
@@ -421,6 +647,7 @@ func TestVerifyPinsReportsAnUnmatchedGateUnchecked(t *testing.T) {
 	onlyBuild := sandboxTrust(t, trust.Entry{
 		Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Global: true,
 	})
+	setRunProjectIdentity(t, conn, runID, repo)
 
 	report := gateReportWith(t, conn, runID, onlyBuild, repo)
 

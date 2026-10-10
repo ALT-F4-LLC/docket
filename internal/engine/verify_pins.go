@@ -88,21 +88,28 @@ type PinReport struct {
 	Missing  int `json:"missing"`
 	Unpinned int `json:"unpinned"`
 	// Gates lists the declared gates whose script this run does not pin
-	// (GateUnpinned) or could not check (GateUnchecked), by gate name. It is a
-	// report beside the pin check, not part of it: Sound() ignores it, since a
-	// `make <target>` entry names no script file. Empty (never nil) only when
-	// every declared gate was checked and found pinned, in gate-name order.
+	// (GateUnpinned) or could not check (GateUnchecked), and those whose copy
+	// under the invoking exec root differs from the pin
+	// (GateExecutedCopyChanged) or is absent (GateExecutedCopyAbsent), by gate
+	// name. Sound() reads only GateExecutedCopyChanged: a `make <target>`
+	// entry names no script file, and an absent copy cannot run. Empty (never
+	// nil) only when every declared gate was checked, found pinned, and found
+	// matching where it would execute, in gate-name order.
 	Gates []GateVerdict `json:"gates"`
 	// UnpinnedGates counts only the GateUnpinned rows.
 	UnpinnedGates int `json:"unpinned_gates"`
+	// ExecutedCopyChanged counts the GateExecutedCopyChanged rows, the one
+	// gate status Sound() reads.
+	ExecutedCopyChanged int `json:"executed_copy_changed"`
 }
 
-// Sound reports whether every pin still matches AND the pin set is closed —
-// the two halves of "is this run's pin story healthy". A run can fail either
-// half alone: RUN-59 had all 30 pins matching disk and four judge steps that
-// could not be claimed.
+// Sound reports whether every pin still matches, the pin set is closed, and
+// no gate run from the invoking checkout would execute a script other than
+// the pinned one. A run can fail any of these alone: RUN-59 had all 30 pins
+// matching disk and four judge steps that could not be claimed.
 func (r *PinReport) Sound() bool {
-	return r.Changed == 0 && r.Missing == 0 && r.Unpinned == 0
+	return r.Changed == 0 && r.Missing == 0 && r.Unpinned == 0 &&
+		r.ExecutedCopyChanged == 0
 }
 
 // VerifyPins checks a run's WHOLE pin set against what those refs resolve to
@@ -134,9 +141,10 @@ func VerifyPins(conn *sql.DB, runID int) (*PinReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The gate half is a report, never a verdict on the pins: it names the
-	// declared gates whose script the run does not hold a pin for.
-	if err := verifyGateScripts(conn, runID, report, gatePinStore, resolvePaths().Identity); err != nil {
+	// The gate half names the declared gates whose script the run does not
+	// hold a pin for, and the gates whose copy under this invocation's exec
+	// root, the cwd a gate run from here executes in, differs from the pin.
+	if err := verifyGateScripts(conn, runID, report, gatePinStore, resolvePaths().ExecRoot); err != nil {
 		return nil, err
 	}
 	return report, nil
@@ -350,6 +358,11 @@ func PinReportReason(r *PinReport) string {
 		}
 		out = append(out, fmt.Sprintf(
 			"%s references %s, which %s does not pin (%s)", by, v.Ref, r.Run, where))
+	}
+	for _, g := range r.Gates {
+		if g.Status == GateExecutedCopyChanged {
+			out = append(out, fmt.Sprintf("gate %q: %s", g.Gate, g.Reason))
+		}
 	}
 	return joinClauses(out)
 }
