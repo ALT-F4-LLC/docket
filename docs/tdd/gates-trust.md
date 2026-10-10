@@ -2145,7 +2145,7 @@ blocks review.
 | Group | Docs in the same commit group |
 |---|---|
 | 1 | **None.** No surface changes; nothing to document. Package doc comments carry §3's and §5's reasoning, in the style `internal/engine/gate.go` established |
-| 2 | **docs/spec/security.md — the major update** (§13.1); **SKILL.md**: the `docket trust` verb/flag tables, the gate/fence documentation in the workflow-grammar section, `vote_rule` + the `vote.rule.*` config keys in the engine-configuration table, `run activate --dry-run`, the `gate result` shape, and the error codes; **docs/spec/architecture.md**: gate execution in the saga, the tree mutex, and the vote-step lifecycle |
+| 2 | **docs/spec/security.md — the major update** (§13.1); **the loadable `docket` skill**: the `docket trust` verb/flag tables, the gate/fence documentation in the workflow-grammar section, `vote_rule` + the `vote.rule.*` config keys in the engine-configuration table, `run activate --dry-run`, the `gate result` shape, and the error codes; **docs/spec/architecture.md**: gate execution in the saga, the tree mutex, and the vote-step lifecycle |
 
 ## 13.1 docs/spec/security.md is the major update
 
