@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +18,8 @@ import (
 // parks resolved one at a time: the same "sandbox artifact, not a code defect"
 // ruling re-made for every step of a run. `step resolve --as override-pass
 // --batch` records that ruling ONCE, as one grant per failed gate (gate name +
-// exit + reason + content fingerprint — the failure signature, DKT-1796), and
+// exit + reason + content fingerprint + argv — the failure signature,
+// DKT-1796), and
 // the routing stage consults the
 // run's grants before parking a later step whose failure carries the same
 // signature.
@@ -70,7 +72,8 @@ func failingCompletionRows(rows []db.GateResultRow) []db.GateResultRow {
 }
 
 // grantMatches reports whether one grant covers one failing row: same gate,
-// same exit, same reason classification, same content fingerprint. NULL exit
+// same exit, same reason classification, same content fingerprint, same argv.
+// NULL exit
 // matches only NULL — an `unmatched` gate never ran, and "no process existed"
 // is not exit 0.
 //
@@ -86,11 +89,23 @@ func failingCompletionRows(rows []db.GateResultRow) []db.GateResultRow {
 // never blank — a gate that printed nothing hashes the empty capture — so this
 // refusal reaches pre-v30 grants and nothing else, and an `unmatched` park
 // stays coverable exactly as v24 intended.
+//
+// THE ARGV IS WHAT KEEPS A SILENT FAILURE FROM RIDING ANOTHER COMMAND'S
+// RULING. Every gate that printed nothing shares the empty capture's
+// fingerprint, so the command that ran must equal the one the operator read,
+// element for element. A legacy grant, recorded before its argv was, matches
+// nothing for the same reason a blank fingerprint does. A NULL argv is a value
+// rather than that marker: it matches only another NULL, so an `unmatched`
+// park stays coverable.
 func grantMatches(g db.GateOverrideGrant, r db.GateResultRow) bool {
 	if g.Gate != r.Gate || g.Reason != r.Reason {
 		return false
 	}
 	if g.Fingerprint == "" || g.Fingerprint != r.Fingerprint {
+		return false
+	}
+	if g.ArgvLegacy || (g.Argv == nil) != (r.Argv == nil) ||
+		!slices.Equal(g.Argv, r.Argv) {
 		return false
 	}
 	if (g.Exit == nil) != (r.Exit == nil) {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -822,4 +824,207 @@ func TestBatchGrantParksALaterRoundWithADifferentSignature(t *testing.T) {
 			"fresh decision no matter how many rounds a grant has covered",
 			EventStepBatchOverridden, got)
 	}
+}
+
+// batchArgvSrc: one gated step to mint the grant on, then two independent
+// steps sharing its gate, so one can stay parked without blocking the other.
+const batchArgvSrc = `
+[pipeline]
+name = "batch-argv"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+executor = "implement"
+emits = "change-summary"
+gates = ["build"]
+on_fail = "waiting-human"
+
+[[step]]
+name = "package"
+after = ["implement"]
+executor = "package"
+emits = "package-record"
+gates = ["build"]
+on_fail = "waiting-human"
+
+[[step]]
+name = "ship"
+after = ["implement"]
+executor = "ship"
+emits = "ship-record"
+gates = ["build"]
+on_fail = "waiting-human"
+`
+
+// rowGates records exactly the row a test sets, through the rich Execute seam,
+// so a failure can carry a chosen argv with empty output, or be an `unmatched`
+// row with NULL argv and NULL exit — shapes exitGates' Run path cannot record.
+type rowGates struct {
+	row GateResultRow
+}
+
+func (g *rowGates) Run(context.Context, GateSpec, StepContext) (GateResult, error) {
+	return GateResult{}, errors.New("rowGates records through Execute")
+}
+
+func (g *rowGates) Execute(_ context.Context, spec GateSpec, _ StepContext) (GateExecution, error) {
+	row := g.row
+	row.Gate = spec.Name
+	return GateExecution{Results: []GateResultRow{row}, Verdict: VerdictFail}, nil
+}
+
+// TestBatchGrantMatchesOnlyTheArgvItWasMintedFrom: two failures of the same
+// gate with the same exit, the same reason, and no output fingerprint
+// identically, so the command that ran is what tells them apart. A grant
+// covers the argv the operator read, a legacy grant with no recorded argv
+// covers nothing, and a NULL argv (an `unmatched` gate) is a value that covers
+// another NULL argv.
+func TestBatchGrantMatchesOnlyTheArgvItWasMintedFrom(t *testing.T) {
+	argvA := []string{"bash", "scripts/qa/build.sh"}
+	argvB := []string{"bash", "scripts/qa/build.sh", "--release"}
+	silentFailure := func(argv []string) GateResultRow {
+		exit := 1
+		return GateResultRow{Argv: argv, Exit: &exit, Verdict: VerdictFail}
+	}
+
+	// mint parks implement@0 on the gates' current row and resolves it with
+	// --batch, returning the run's one grant.
+	mint := func(t *testing.T, conn *sql.DB, e *Engine, runID int) db.GateOverrideGrant {
+		t.Helper()
+		implementID := stepIDInRun(t, conn, runID, "implement@0")
+		parkThroughFailingGate(t, conn, e, implementID)
+		testsupport.Must(t, e.ResolveStepBatch(conn, implementID,
+			ResolveOverridePass, "sandbox artifact", nowMS+1), "batch resolve")
+		grants, err := db.GateOverrideGrantsForRun(conn, runID)
+		testsupport.Must(t, err, "reading grants: %v", err)
+		if len(grants) != 1 {
+			t.Fatalf("grants = %d, want 1", len(grants))
+		}
+		return grants[0]
+	}
+
+	// claimed is one claimed step awaiting completion. Both later steps are
+	// claimed before either completes, because a park stops further claims.
+	type claimed struct {
+		id    int
+		token string
+	}
+	claimStep := func(t *testing.T, conn *sql.DB, runID int, instance string) claimed {
+		t.Helper()
+		stepID := stepIDInRun(t, conn, runID, instance)
+		claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS + 2})
+		testsupport.Must(t, err, "claim %s: %v", instance, err)
+		return claimed{id: stepID, token: claim.Token}
+	}
+
+	// autoPassed completes a claimed step on the gates' current row and reports
+	// whether it auto-passed rather than parked.
+	autoPassed := func(t *testing.T, conn *sql.DB, e *Engine, c claimed) bool {
+		t.Helper()
+		err := e.CompleteStep(conn, c.id, CompleteOptions{
+			Token: c.token, Artifact: []byte("a record"), NowMS: nowMS + 3,
+		})
+		testsupport.Must(t, err, "complete step %d: %v", c.id, err)
+		step, err := db.GetStep(conn, c.id)
+		testsupport.Must(t, err, "GetStep %d: %v", c.id, err)
+		switch step.Status {
+		case db.StepDone:
+			return true
+		case db.StepWaitingHuman:
+			return false
+		}
+		t.Fatalf("%s = %q, want %q or %q", step.Instance, step.Status,
+			db.StepDone, db.StepWaitingHuman)
+		return false
+	}
+
+	t.Run("covers the minted argv and parks another", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := activatedBatchRun(t, conn, batchArgvSrc, "batch-argv.toml")
+		gates := &rowGates{row: silentFailure(argvA)}
+		e := testEngine()
+		e.Gates = gates
+
+		g := mint(t, conn, e, runID)
+		if g.ArgvLegacy || !slices.Equal(g.Argv, argvA) {
+			t.Fatalf("grant argv = %q (legacy %v), want %q copied off the parked row",
+				g.Argv, g.ArgvLegacy, argvA)
+		}
+
+		pkg := claimStep(t, conn, runID, "package@0")
+		ship := claimStep(t, conn, runID, "ship@0")
+		gates.row = silentFailure(argvB)
+		if autoPassed(t, conn, e, pkg) {
+			t.Error("package@0 failed a different command and auto-passed on a " +
+				"grant minted for another argv; want it parked")
+		}
+		gates.row = silentFailure(argvA)
+		if !autoPassed(t, conn, e, ship) {
+			t.Error("ship@0 failed the granted command and parked; want auto-pass")
+		}
+
+		grants, err := db.GateOverrideGrantsForRun(conn, runID)
+		testsupport.Must(t, err, "re-reading grants: %v", err)
+		if grants[0].CoveredSteps != 1 {
+			t.Errorf("covered_steps = %d, want 1 (ship@0 only)", grants[0].CoveredSteps)
+		}
+	})
+
+	t.Run("a legacy grant covers no argv", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := activatedBatchRun(t, conn, batchArgvSrc, "batch-argv.toml")
+		gates := &rowGates{row: silentFailure(argvA)}
+		e := testEngine()
+		e.Gates = gates
+
+		g := mint(t, conn, e, runID)
+		// The insert path never writes the legacy marker; only a grant
+		// recorded before the argv column existed carries it.
+		_, err := conn.Exec(
+			`UPDATE gate_override_grants SET argv = 'legacy' WHERE id = ?`, g.ID)
+		testsupport.Must(t, err, "marking the grant legacy: %v", err)
+		grants, err := db.GateOverrideGrantsForRun(conn, runID)
+		testsupport.Must(t, err, "re-reading grants: %v", err)
+		if !grants[0].ArgvLegacy {
+			t.Fatal("premise: the grant must read back as legacy")
+		}
+
+		pkg := claimStep(t, conn, runID, "package@0")
+		ship := claimStep(t, conn, runID, "ship@0")
+		if autoPassed(t, conn, e, pkg) {
+			t.Error("package@0 auto-passed on a legacy grant with the minted argv; " +
+				"a grant with no recorded argv must cover nothing")
+		}
+		gates.row = silentFailure(argvB)
+		if autoPassed(t, conn, e, ship) {
+			t.Error("ship@0 auto-passed on a legacy grant with another argv; " +
+				"a grant with no recorded argv must cover nothing")
+		}
+	})
+
+	t.Run("an unmatched grant covers a later unmatched failure", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := activatedBatchRun(t, conn, batchArgvSrc, "batch-argv.toml")
+		gates := &rowGates{row: GateResultRow{
+			Verdict: VerdictUnmatched,
+			Reason:  `gate "build" matches no trust entry`,
+		}}
+		e := testEngine()
+		e.Gates = gates
+
+		g := mint(t, conn, e, runID)
+		if g.ArgvLegacy || g.Argv != nil || g.Exit != nil {
+			t.Fatalf("grant = (argv %q, legacy %v, exit %v), want NULL argv and exit",
+				g.Argv, g.ArgvLegacy, g.Exit)
+		}
+
+		if !autoPassed(t, conn, e, claimStep(t, conn, runID, "package@0")) {
+			t.Error("package@0 repeated the granted unmatched failure and parked; " +
+				"a NULL argv grant must cover a NULL argv row")
+		}
+	})
 }

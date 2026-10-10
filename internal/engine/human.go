@@ -919,14 +919,14 @@ func (e *Engine) resolveStep(
 	// minted and the grant rows carry the shared justification (`--note`).
 	if batch {
 		for _, r := range grantRows {
-			// The fingerprint is COPIED off the parked step's own failing row
-			// (DKT-1796) rather than recomputed: the ruling must bind to the
-			// content the operator read before resolving, not to a later
-			// re-run's.
+			// The fingerprint and argv are COPIED off the parked step's own
+			// failing row (DKT-1796) rather than recomputed: the ruling must
+			// bind to the content and the command the operator read before
+			// resolving, not to a later re-run's or a later trust entry's.
 			grantID, err := db.InsertGateOverrideGrantTx(tx, db.GateOverrideGrant{
 				RunID: step.RunID, OriginStepID: step.ID, Gate: r.Gate,
 				Exit: r.Exit, Reason: r.Reason, Fingerprint: r.Fingerprint,
-				Note: note, CreatedAtMS: nowMS,
+				Argv: r.Argv, Note: note, CreatedAtMS: nowMS,
 			})
 			if err != nil {
 				return err
