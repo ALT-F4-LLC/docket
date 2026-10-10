@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -104,14 +105,23 @@ func dissentHold(
 	if err != nil {
 		return "", err
 	}
-	// The rule resolves here rather than riding the proposal, so a rule
-	// REMOVED mid-ballot fails loudly at routing exactly as it does at open: a
-	// threshold nobody chose is not a threshold.
-	rule, err := resolveVoteRule(conn, projectID, spec.VoteRule)
+	// Only the hold key is read: the tally's threshold, criticality, and seal
+	// were pinned on the proposal at open, so a fault in any other rule field
+	// must not stop a rule that never opted in from routing.
+	holdEntry, err := db.GetConfig(conn, projectID, db.VoteRuleHoldOnDissentKey(spec.VoteRule))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolving vote rule %q: %w", spec.VoteRule, err)
 	}
-	if !rule.HoldOnDissent {
+	// A malformed stored value fails loudly rather than reading as false: a
+	// silent false would fail OPEN, passing a dissented approval the operator
+	// asked to see.
+	held, err := strconv.ParseBool(holdEntry.Value)
+	if err != nil {
+		return "", fmt.Errorf(
+			"vote rule %q has a malformed hold_on_dissent flag %q: %w",
+			spec.VoteRule, holdEntry.Value, err)
+	}
+	if !held {
 		return "", nil
 	}
 

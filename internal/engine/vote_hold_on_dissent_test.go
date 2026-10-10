@@ -163,6 +163,19 @@ func driveDissentGateSrc(
 	t *testing.T, src, hold string, verdicts ...model.Verdict,
 ) (*sql.DB, *db.Step) {
 	t.Helper()
+	conn, e, proposalID := castDissentGate(t, src, hold, verdicts...)
+	err := e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+	return conn, dissentGateStep(t, conn)
+}
+
+// castDissentGate is driveDissentGateSrc up to the last cast: the tally is
+// decided but not yet routed, so a test can change the rule's config before
+// it calls DriveVoteProposal itself.
+func castDissentGate(
+	t *testing.T, src, hold string, verdicts ...model.Verdict,
+) (*sql.DB, *Engine, int) {
+	t.Helper()
 	conn := mustDB(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")
 	if hold != "" {
@@ -180,12 +193,88 @@ func driveDissentGateSrc(
 	for i, seat := range []string{"seat-a", "seat-b", "seat-c"} {
 		castSeat(t, conn, proposalID, seat, verdicts[i], "")
 	}
-	err = e.DriveVoteProposal(conn, proposalID, nowMS)
-	testsupport.Must(t, err, "driving the tally: %v", err)
+	return conn, e, proposalID
+}
 
+func dissentGateStep(t *testing.T, conn *sql.DB) *db.Step {
+	t.Helper()
 	gate, err := db.GetStep(conn, stepIDByInstance(t, conn, "gate@0"))
 	testsupport.Must(t, err, "reading gate@0: %v", err)
-	return conn, gate
+	return gate
+}
+
+// plantRuleConfig writes a rule key straight into `meta` after the casts,
+// bypassing SetConfig's validation — the shape a restored or hand-edited
+// store has. An empty value deletes the row instead.
+func plantRuleConfig(t *testing.T, conn *sql.DB, key, value string) {
+	t.Helper()
+	var err error
+	if value == "" {
+		_, err = conn.Exec(`DELETE FROM meta WHERE key = ?`, "config."+key)
+	} else {
+		_, err = conn.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`,
+			"config."+key, value)
+	}
+	testsupport.Must(t, err, "planting %s=%q: %v", key, value, err)
+}
+
+// An UNKEYED rule's routing reads only `.hold_on_dissent`, so a fault in any
+// other rule field after the casts land leaves the ordinary route untouched,
+// exactly as it did before the hold existed.
+func TestVoteHoldOnDissentUnkeyedRoutesWithoutThreshold(t *testing.T) {
+	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
+		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
+	plantRuleConfig(t, conn, db.VoteRuleThresholdKey("majority"), "")
+
+	if err := e.DriveVoteProposal(conn, proposalID, nowMS); err != nil {
+		t.Fatalf("DriveVoteProposal: %v — an unkeyed step must not need the "+
+			"rule's threshold to route", err)
+	}
+	assertDissentGatePassed(t, conn)
+}
+
+func TestVoteHoldOnDissentUnkeyedIgnoresMalformedSealed(t *testing.T) {
+	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
+		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
+	plantRuleConfig(t, conn, db.VoteRuleSealedKey("majority"), "maybe")
+
+	if err := e.DriveVoteProposal(conn, proposalID, nowMS); err != nil {
+		t.Fatalf("DriveVoteProposal: %v — an unkeyed step must not read the "+
+			"rule's sealed flag to route", err)
+	}
+	assertDissentGatePassed(t, conn)
+}
+
+// A malformed hold value fails CLOSED: reading it as false would pass a
+// dissented approval the operator may have asked to see.
+func TestVoteHoldOnDissentMalformedHoldBlocksRouting(t *testing.T) {
+	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
+		model.VerdictApprove, model.VerdictApprove, model.VerdictReject)
+	plantRuleConfig(t, conn, db.VoteRuleHoldOnDissentKey("majority"), "maybe")
+
+	err := e.DriveVoteProposal(conn, proposalID, nowMS)
+	if err == nil || !strings.Contains(err.Error(), "malformed hold_on_dissent flag") {
+		t.Errorf("DriveVoteProposal error = %v, want one naming the malformed "+
+			"hold_on_dissent flag", err)
+	}
+	gate := dissentGateStep(t, conn)
+	if gate.Routing != "" {
+		t.Errorf("gate@0 routing = %q, want none while the hold is unreadable", gate.Routing)
+	}
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepPending {
+		t.Errorf("gate@0 status = %q, want %q", got, db.StepPending)
+	}
+}
+
+func assertDissentGatePassed(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	gate := dissentGateStep(t, conn)
+	if !strings.HasPrefix(gate.Routing, RoutingPass) {
+		t.Errorf("gate@0 routing = %q, want %q", gate.Routing, RoutingPass)
+	}
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepDone {
+		t.Errorf("gate@0 status = %q, want %q", got, db.StepDone)
+	}
 }
 
 // explicitPassSrc is holdOnDissentSrc with the gate's author affirmatively
