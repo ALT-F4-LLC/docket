@@ -1,6 +1,6 @@
 # TDD: gates, the execution trust model, and the exec runner (stage 4)
 
-Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25; §7.6.2 PG6 detached pre-gate run added — 2026-10-08; §7.6.2 PG6 readiness hold while a detached run is in flight — 2026-10-09
+Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25; §7.6.2 PG6 detached pre-gate run added — 2026-10-08; §7.6.2 PG6 readiness hold while a detached run is in flight — 2026-10-09; §2.1 residual 1, §3.1, and §3.5 amended for content-pinned absolute `argv[0]` entries — 2026-10-09
 (docs/tdd/gates-trust-review.md, verdict SOUND WITH FIXES — F1–F5 folded in; see
 that file's response table for the per-finding
 mapping) · implements docs/design/engine-spec.md **§4 (whole)**
@@ -187,6 +187,25 @@ residuals are accepted, and each is accepted for a stated reason:
    binding to; §7.7's activation report shows which commands a run will invoke.
    An operator who trusts `make test` in a repo has decided to run that repo's
    build, which is the same decision they make by typing `make test`.
+
+   **Exception: a content-pinned entry** *(amended 2026-10-09, operator ruling
+   in docket-groom pass 20261004T003235Z)*. When a trust entry's `argv[0]` is
+   an **absolute path**, `trust add` stores a content hash of the
+   **symlink-resolved executable** — SHA-256 of the file at
+   `filepath.EvalSymlinks(filepath.Abs(argv[0]))`, the same normalization
+   §5.2.1 R1/R4 apply — in the entry's `argv0_sha256` (§3.1). Before every
+   spawn the runner re-hashes that resolved file; a hash that differs is
+   **refused** with `verdict = "unmatched"`, no spawn, and a `reason` naming the
+   path and both hashes. For that executable this is prevention, not
+   disclosure: a repo that rewrites `scripts/build.sh` after the operator
+   trusted it by absolute path gets no execution. The **re-pin path** is
+   re-running `docket trust add` for the same name, which replaces the stored
+   hash with the current file's (§3.5). The pin covers the resolved `argv[0]`
+   executable **only**: files it sources or reads, Makefile targets, libraries,
+   and every other input stay this residual. An entry whose `argv[0]` is
+   absolute but that carries no `argv0_sha256` — one written before this
+   amendment — still matches, with a warning naming the entry and the re-pin
+   command.
 2. **Self-trust by a misbehaving session** (T9, upstream D14). Accepted by the
    design record; bounded as T9 lists. The one thing this stage adds beyond D14
    is **auditability**: a `trust-added` event (§3.6) means the run's own trail
@@ -258,6 +277,7 @@ version = 1
 name       = "tests"                      # the gate name a workflow references
 argv       = ["make", "test"]             # resolved argv; NEVER a shell string
 argv_sha256 = "9f2c…"                     # hash of the canonical argv (§3.3)
+argv0_sha256 = "4b1e…"                    # content pin; only when argv[0] is absolute (below)
 repo       = "/Users/x/src/docket"        # repo binding (§3.4); absent when global
 global     = false                        # true = this entry applies in any repo
 prefix     = false                        # true = prefix match, explicit opt-in (§3.3)
@@ -268,6 +288,26 @@ timeout    = "5m"                         # per-entry override of the default
 network    = ["vuln.go.dev"]              # hosts this command must reach (§3.7)
 added_at_ms = 1754…
 ```
+
+**`argv0_sha256` content-pins an absolute `argv[0]`** *(amended 2026-10-09,
+operator ruling in docket-groom pass 20261004T003235Z; amends §2.1 residual
+1)*. When the entry's `argv[0]` is an absolute path, `trust add` hashes the
+**symlink-resolved executable** — SHA-256 of the bytes at
+`filepath.EvalSymlinks(filepath.Abs(argv[0]))` — and stores it, hex-encoded, as
+`argv0_sha256`. An entry whose `argv[0]` is a bare name has no such key, and a
+hand-edited file that gives it one is a parse error. At every spawn the runner
+re-hashes the same resolved file:
+
+| Stored `argv0_sha256` | File's current hash | Outcome |
+|---|---|---|
+| present | equal | matches; executes |
+| present | different | **refused**: `verdict = "unmatched"`, no spawn, `reason` naming the gate, the resolved path, and both hashes, and stating the re-pin command |
+| absent (entry predates the pin) | — | matches; executes, with a warning naming the entry and the re-pin command |
+
+**Re-pin** is `docket trust add` for the same name, argv, and flags: it
+replaces the stored `argv0_sha256` with the current file's hash (§3.5). The
+pin covers the resolved `argv[0]` executable only, never files it sources or
+reads; those remain §2.1 residual 1.
 
 ### 3.7 `network` — declaring what a gate must reach *(amended 2026-08-07, DKT-31)*
 
@@ -481,7 +521,8 @@ docket *hides* would erode it.
 | Situation | Behavior |
 |---|---|
 | `trust add` of a name+repo that does not exist | insert; exit 0 |
-| identical argv and flags at an existing name+repo | idempotent success, nothing written; exit 0 |
+| identical argv and flags at an existing name+repo, and any `argv0_sha256` still equal to the executable's hash | idempotent success, nothing written; exit 0 |
+| identical argv and flags at an existing name+repo, absolute `argv[0]`, and the resolved executable's hash differs from the stored `argv0_sha256` (or none is stored) | **re-pin** (§3.1): the stored `argv0_sha256` is replaced with the current hash, and the disclosure names the path and both hashes; exit 0 |
 | **different argv or flags** at an existing name+repo | `CONFLICT` (exit 4) naming both argvs and instructing `trust rm` first |
 
 The last row is the important one. A silent overwrite means a trusted name's
