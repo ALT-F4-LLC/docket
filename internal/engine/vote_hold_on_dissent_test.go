@@ -282,6 +282,36 @@ func TestVoteHoldOnDissentRoutesOnPinnedHold(t *testing.T) {
 	}
 }
 
+// TestVoteHoldOnDissentProjectOverrideParks: a hold set only at the run's
+// project, with the store-wide row unset, is the hold the ballot opens under.
+// Reading the store-wide row alone would open the ballot unheld and pass.
+func TestVoteHoldOnDissentProjectOverrideParks(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(holdOnDissentSrc), "dissent-hold.toml")
+	issue := createIssue(t, conn, "dissent", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	projectID, err := db.RunProjectID(conn, run.ID)
+	testsupport.Must(t, err, "RunProjectID: %v", err)
+	if projectID == 0 {
+		t.Fatal("premise: the run resolved project 0, which is the store-wide scope")
+	}
+	err = db.SetConfig(conn, projectID, db.VoteRuleHoldOnDissentKey("majority"), "true")
+	testsupport.Must(t, err, "setting the project's hold_on_dissent: %v", err)
+
+	e := testEngine()
+	proposalID := openGateProposal(t, conn, e, run.ID)
+	castSeat(t, conn, proposalID, "seat-a", model.VerdictApprove, "")
+	castSeat(t, conn, proposalID, "seat-b", model.VerdictApprove, "")
+	castSeat(t, conn, proposalID, "seat-c", model.VerdictReject, "")
+	err = e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+	assertDissentGateHeld(t, conn)
+}
+
 // A keyed ballot routes on its pinned hold, so removing the rule's threshold
 // after open cannot stop the hold from being evaluated.
 func TestVoteHoldOnDissentKeyedRoutesWithoutThreshold(t *testing.T) {
