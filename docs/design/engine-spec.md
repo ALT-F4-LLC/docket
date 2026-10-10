@@ -221,8 +221,10 @@ or a pinned instance template file. Packet *layout* is thereby core mechanics wh
 instance's harness hands the packet to an LLM as its prompt; core neither knows nor
 cares.)
 
-**Run notes.** `docket run note add RUN-N --text "…"` (or `--file F`, `-` for stdin)
-records a standing statement against a run — once — and every packet the run
+**Run notes.** `docket run note add RUN-N --authority operator|conductor --text "…"`
+(or `--file F`, `-` for stdin) records a standing statement against a run — once —
+and states whose ruling it carries: `--authority` has no default, and
+`standing-grant` is refused. Every packet the run
 renders from then on carries it verbatim as a `== RUN NOTE N` section directly
 after `== REQUEST`, for every step of every issue; `step context` carries it as
 `context.notes`, so a contract can name it. It is the one steering channel that is
@@ -234,7 +236,8 @@ the first dispatch and which every worker otherwise rediscovers and re-files
 (DKT-1079). Issue comments remain an audit surface and never render. Notes are
 append-only (a changed ruling is a second note, rendered after the first), capped
 at 16 KiB because each rides every packet, refused on a terminal run, and each is
-recorded as a `run-note-added` event carrying its text, attributed human.
+recorded as a `run-note-added` event carrying its text and an `authority` key whose
+value is `operator` or `conductor`, attributed human.
 `docket run note list RUN-N` reads them back in render order.
 
 **Guards.** `docket guard spawn|record|stop|gate` are deterministic allow/deny

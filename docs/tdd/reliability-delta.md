@@ -668,8 +668,10 @@ reads byte-identically to v24 on every verb.
 whoever drives a run records ONCE against it, and every packet the run
 renders from then on carries — for every step of every issue, verbatim, as a
 `== RUN NOTE N` section directly after `== REQUEST`, and in `step context` as
-`context.notes`. A note is minted by `run note add` (one row, event-logged as
-`run-note-added` carrying the text, attributed human) and read by context
+`context.notes`. A note is minted by
+`run note add --authority operator|conductor` (one row, event-logged as
+`run-note-added` carrying the text and an `authority` key whose value is
+`operator` or `conductor`, attributed human) and read by context
 assembly as its sixth source, in the claim's own transaction beside the other
 five. It is append-only — no edit, no delete — because a packet is the record
 of what a worker was told, and two renders of one step that disagreed about
