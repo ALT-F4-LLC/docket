@@ -190,6 +190,10 @@ func voteCastPayloads(votes []*model.Vote) []map[string]any {
 // (ledgerProducer) and contributes no input, even if it opened a proposal
 // before an operator skipped it. The consumer never falls back to an earlier
 // round's panel.
+//
+// A recorded vote step whose proposal is still SealedOpen — one an operator
+// resolved past before the tally closed the ballot — contributes the sealed
+// projection: who cast and how many, nothing of what (DKT-2447).
 func resolveVoteRecords(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, stepName string,
 ) ([]ContextInput, error) {
@@ -257,7 +261,12 @@ func resolveVoteRecords(
 			return nil, fmt.Errorf(
 				"reading the casts of %s: %w", producer.Instance, err)
 		}
-		body, err := encodeVoteRecord(proposal, votes)
+		var body string
+		if proposal.SealedOpen() {
+			body, err = encodeSealedVoteRecord(proposal, votes)
+		} else {
+			body, err = encodeVoteRecord(proposal, votes)
+		}
 		if err != nil {
 			return nil, fmt.Errorf(
 				"encoding the vote record of %s: %w", producer.Instance, err)
@@ -311,6 +320,28 @@ func encodeVoteRecord(p *model.Proposal, votes []*model.Vote) (string, error) {
 	}
 
 	body, err := json.Marshal(encoded)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// encodeSealedVoteRecord renders a SealedOpen proposal as the vote-record
+// body: the casts are model.SealedCasts, the same `{voter_name, created_at}`
+// projection `vote show --json` emits, so no verdict, confidence, rationale
+// or findings key reaches a downstream packet before the tally.
+func encodeSealedVoteRecord(p *model.Proposal, votes []*model.Vote) (string, error) {
+	body, err := json.Marshal(struct {
+		Proposal string             `json:"proposal"`
+		Status   string             `json:"status"`
+		Sealed   bool               `json:"sealed"`
+		Casts    []model.SealedCast `json:"casts"`
+	}{
+		Proposal: model.FormatProposalID(p.ID),
+		Status:   string(p.Status),
+		Sealed:   true,
+		Casts:    model.SealedCasts(votes),
+	})
 	if err != nil {
 		return "", err
 	}

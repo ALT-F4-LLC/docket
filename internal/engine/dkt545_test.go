@@ -390,6 +390,85 @@ func TestVoteRecordResolvesAsAnInput(t *testing.T) {
 	}
 }
 
+// TestOverridePassOnOpenSealedVoteWithholdsVoteRecord: an operator who moves a
+// run past a sealed ballot that is still open routes the vote step without a
+// tally, so the vote-record a downstream step reads must stay sealed — voter
+// names and cast count only — or a seat that has not cast yet reads its
+// siblings' verdicts from the downstream packet (DKT-2447).
+func TestOverridePassOnOpenSealedVoteWithholdsVoteRecord(t *testing.T) {
+	const (
+		rationale    = "ZQX-SEALED-RATIONALE"
+		findingText  = "ZQX-SEALED-FINDING"
+		confidence   = 0.37
+		confidenceTx = "0.37"
+	)
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "sealing the rule: %v", err)
+	registerSource(t, conn, []byte(voteRecordSrc), "vote-record-wf.toml")
+	issue := createIssue(t, conn, "override a sealed vote", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	proposalID := openGateProposal(t, conn, e, run.ID)
+	_, err = db.CastVote(conn, &model.Vote{
+		ProposalID: proposalID, VoterName: "seat-a",
+		Verdict:    model.VerdictApproveWithConcerns,
+		Confidence: confidence, DomainRelevance: 0.8, Summary: rationale,
+		FindingsJSON: &model.Findings{Concerns: []model.Finding{{Text: findingText}}},
+	})
+	testsupport.Must(t, err, "CastVote(seat-a): %v", err)
+
+	gateID := stepIDByInstance(t, conn, "gate@0")
+	err = e.ResolveStep(conn, gateID, ResolveOverridePass, "moving past the panel", nowMS)
+	testsupport.Must(t, err, "resolve gate@0 --as override-pass: %v", err)
+	proposal, err := db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "reading the proposal: %v", err)
+	if !proposal.SealedOpen() {
+		t.Fatalf("proposal is sealed=%v status=%s after override-pass; the "+
+			"scenario needs a still-open sealed ballot", proposal.Sealed, proposal.Status)
+	}
+
+	claim, err := ClaimStep(conn, stepIDByInstance(t, conn, "report@0"),
+		ClaimOptions{Owner: "reporter", NowMS: nowMS})
+	testsupport.Must(t, err, "claim report@0: %v", err)
+
+	records := 0
+	for _, input := range claim.Context.Inputs {
+		if input.Kind != workflow.VoteRecordKind {
+			continue
+		}
+		records++
+		for _, leaked := range []string{rationale, findingText, confidenceTx} {
+			if strings.Contains(input.Body, leaked) {
+				t.Errorf("vote-record from %s carries %q from an open sealed "+
+					"ballot: %s", input.ProducerStep, leaked, input.Body)
+			}
+		}
+		var record struct {
+			Casts []map[string]json.RawMessage `json:"casts"`
+		}
+		err := json.Unmarshal([]byte(input.Body), &record)
+		testsupport.Must(t, err, "parsing the record: %v", err)
+		for _, cast := range record.Casts {
+			for _, key := range []string{"verdict", "vote", "confidence", "rationale", "summary", "findings"} {
+				if _, ok := cast[key]; ok {
+					t.Errorf("sealed vote-record cast carries %q: %s", key, input.Body)
+				}
+			}
+		}
+		if len(record.Casts) != 1 || string(record.Casts[0]["voter_name"]) != `"seat-a"` {
+			t.Errorf("sealed vote-record casts = %s, want seat-a's name only", input.Body)
+		}
+	}
+	if records != 1 {
+		t.Errorf("report@0 carries %d vote-record inputs, want gate@0's sealed one", records)
+	}
+}
+
 // TestVoteCastPayloadKeysMatchTheValidator pins the drift V36 and the payload
 // builder must not develop: the keys the engine builds are EXACTLY the fields
 // the validator admits, both read from workflow.VoteCastFields.
