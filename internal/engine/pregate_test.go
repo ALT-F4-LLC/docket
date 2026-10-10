@@ -542,6 +542,105 @@ func TestGateRecordedEventCarriesStubMarker(t *testing.T) {
 	}
 }
 
+// TestPreGatesCarryStubEntry: a claim's `pre_gates` carries the authorizing
+// entry's `stub` declaration, so a step reading its pre-gate verdicts from the
+// bundle can tell a placeholder pass from a measurement. The key is present
+// for a real entry too: an absent key would read the same as a docket too old
+// to carry the flag.
+func TestPreGatesCarryStubEntry(t *testing.T) {
+	for _, stub := range []bool{true, false} {
+		t.Run("stub="+strconv.FormatBool(stub), func(t *testing.T) {
+			conn := mustDB(t)
+			stepID, e := stubTrustedPreGateRun(t, conn, stub)
+			res, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+				Owner: "w", NowMS: nowMS,
+			})
+			testsupport.Must(t, err, "claim: %v", err)
+			assertPreGateStub(t, res.Context.PreGates, stub)
+		})
+	}
+}
+
+// TestRecordedPreGatesCarryStubEntry: a re-minted claim rebuilds `pre_gates`
+// from the stored rows, and carries the same `stub` the fresh claim did.
+func TestRecordedPreGatesCarryStubEntry(t *testing.T) {
+	for _, stub := range []bool{true, false} {
+		t.Run("stub="+strconv.FormatBool(stub), func(t *testing.T) {
+			conn := mustDB(t)
+			stepID, e := stubTrustedPreGateRun(t, conn, stub)
+			owner := ClaimOptions{Owner: "w", NowMS: nowMS}
+			_, err := e.ClaimStepWithGates(conn, stepID, owner)
+			testsupport.Must(t, err, "claim: %v", err)
+
+			owner.NowMS = nowMS + 1000
+			again, err := e.ClaimStepWithGates(conn, stepID, owner)
+			testsupport.Must(t, err, "the owner's re-claim: %v", err)
+			if !again.ReMinted {
+				t.Fatal("the owner's re-claim was not a re-mint")
+			}
+			assertPreGateStub(t, again.Context.PreGates, stub)
+		})
+	}
+}
+
+// TestPreGateResultCarriesS3Migrated: a stored S3-migrated row renders
+// `s3_migrated` in the bundle, and a live row omits the key, matching
+// `docket step gates` and the gate-results input.
+func TestPreGateResultCarriesS3Migrated(t *testing.T) {
+	migrated, err := json.Marshal(preGateResultOfRecorded(db.GateResultRow{
+		Gate: "g", Verdict: VerdictPass, Stub: true,
+	}))
+	testsupport.Must(t, err, "marshal: %v", err)
+	if !strings.Contains(string(migrated), `"s3_migrated":true`) {
+		t.Errorf("an S3-migrated row renders %s, want \"s3_migrated\":true", migrated)
+	}
+
+	live, err := json.Marshal(preGateResultOfRecorded(db.GateResultRow{
+		Gate: "g", Verdict: VerdictPass,
+	}))
+	testsupport.Must(t, err, "marshal: %v", err)
+	if strings.Contains(string(live), `"s3_migrated"`) {
+		t.Errorf("a live row renders %s, want no s3_migrated key", live)
+	}
+}
+
+// stubTrustedPreGateRun advances the fixture to `verify@0`, whose
+// `ac-commands` pre-gate is authorized by a trust entry declaring `stub`.
+func stubTrustedPreGateRun(t *testing.T, conn *sql.DB, stub bool) (int, *Engine) {
+	t.Helper()
+	activatedRun(t, conn)
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Stub: stub,
+	})
+	e.Gates = runner
+	return advanceToVerify(t, conn, e), e
+}
+
+// assertPreGateStub checks the bundle's wire form: the lone `ac-commands`
+// element passes and carries `stub` as a present key with the wanted value.
+func assertPreGateStub(t *testing.T, preGates []PreGateResult, want bool) {
+	t.Helper()
+	body, err := json.Marshal(preGates)
+	testsupport.Must(t, err, "marshal pre_gates: %v", err)
+	var elems []map[string]any
+	testsupport.Must(t, json.Unmarshal(body, &elems), "pre_gates is not an array: %v", nil)
+	if len(elems) != 1 || elems[0]["gate"] != "ac-commands" {
+		t.Fatalf("pre_gates = %s, want the one ac-commands result", body)
+	}
+	if elems[0]["verdict"] != VerdictPass {
+		t.Errorf("pre_gates = %s, want verdict %q", body, VerdictPass)
+	}
+	got, present := elems[0]["stub"]
+	if !present || got != want {
+		t.Errorf("pre_gates = %s, want \"stub\":%v present", body, want)
+	}
+}
+
 // gateRecordedData reads the `gate-recorded` payload for one step's gate, and
 // fails the test when there is none.
 func gateRecordedData(

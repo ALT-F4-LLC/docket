@@ -624,14 +624,22 @@ type PreGateResult struct {
 	Output     string   `json:"output"`
 	Truncated  bool     `json:"truncated"`
 	Verdict    string   `json:"verdict"`
-	Reason     string   `json:"reason,omitempty"`
+	// Stub and StubEntry are the flags `docket step gates` carries, so a
+	// consumer judging from a `pass` here can tell a placeholder or migrated
+	// row from a measurement. StubEntry describes the authorizing trust entry:
+	// it is false on a row no entry authorized, so read the verdict first.
+	Stub bool `json:"s3_migrated,omitempty"`
+	// StubEntry is never omitted: an absent key would read the same as a
+	// docket too old to carry the flag.
+	StubEntry bool   `json:"stub"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 func preGateResultOf(r GateResultRow) PreGateResult {
 	return PreGateResult{
 		Gate: r.Gate, Argv: r.Argv, Exit: r.Exit, DurationMS: r.DurationMS,
 		Output: r.Output, Truncated: r.Truncated, Verdict: r.Verdict,
-		Reason: r.Reason,
+		Stub: r.Stub, StubEntry: r.StubEntry, Reason: r.Reason,
 	}
 }
 
@@ -642,7 +650,7 @@ func preGateResultOfRecorded(r db.GateResultRow) PreGateResult {
 	return PreGateResult{
 		Gate: r.Gate, Argv: r.Argv, Exit: r.Exit, DurationMS: r.DurationMS,
 		Output: r.Output, Truncated: r.Truncated, Verdict: r.Verdict,
-		Reason: r.Reason,
+		Stub: r.Stub, StubEntry: r.StubEntry, Reason: r.Reason,
 	}
 }
 
