@@ -690,6 +690,34 @@ func TestProposalSealedWireAndPredicate(t *testing.T) {
 	}
 }
 
+// TestProposalJSONHoldOnDissent: the hold-on-dissent policy a proposal was
+// opened under rides the wire as `hold_on_dissent`, and both values survive a
+// round trip, so an export cannot turn a pinned hold into its absence.
+func TestProposalJSONHoldOnDissent(t *testing.T) {
+	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	for _, want := range []bool{true, false} {
+		p := Proposal{
+			ID: 7, Description: "hold", Criticality: CriticalityMedium,
+			Status: ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+			HoldOnDissent: want, CreatedAt: now, UpdatedAt: now,
+		}
+		data, err := json.Marshal(p)
+		testsupport.Must(t, err, "Marshal: %v", err)
+		var raw map[string]any
+		err = json.Unmarshal(data, &raw)
+		testsupport.Must(t, err, "Unmarshal raw: %v", err)
+		if got, ok := raw["hold_on_dissent"]; !ok || got != want {
+			t.Errorf("JSON hold_on_dissent = %v (present %v), want %v", got, ok, want)
+		}
+		back := Proposal{HoldOnDissent: !want}
+		err = json.Unmarshal(data, &back)
+		testsupport.Must(t, err, "Unmarshal: %v", err)
+		if back.HoldOnDissent != want {
+			t.Errorf("HoldOnDissent after round trip = %v, want %v", back.HoldOnDissent, want)
+		}
+	}
+}
+
 // TestFindingWireFormIsPolymorphic pins DKT-2451's compatibility promise: an
 // entry with no evidence encodes as the bare string it always was — so every
 // stored findings_json row and every consumer reads byte-identically — and

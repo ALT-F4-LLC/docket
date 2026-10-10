@@ -1801,6 +1801,89 @@ func TestProposalSealedRoundTrips(t *testing.T) {
 	}
 }
 
+// TestProposalHoldOnDissentRoundTrips: the hold-on-dissent flag a proposal is
+// created with reads back unchanged, true and false, through get, list,
+// by-issue, and an export/import round trip.
+func TestProposalHoldOnDissentRoundTrips(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	iid := createTestIssueForProposal(t, db, "hold-on-dissent")
+
+	ids := map[bool]int{}
+	for _, hold := range []bool{true, false} {
+		id, err := CreateProposal(db, &model.Proposal{
+			Description: fmt.Sprintf("hold=%v", hold), Criticality: model.CriticalityMedium,
+			Status: model.ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+			HoldOnDissent: hold,
+		})
+		testsupport.Must(t, err, "CreateProposal(hold=%v): %v", hold, err)
+		err = LinkProposalIssue(db, id, iid)
+		testsupport.Must(t, err, "LinkProposalIssue: %v", err)
+		ids[hold] = id
+	}
+
+	check := func(path string, got map[int]bool) {
+		t.Helper()
+		for want, id := range ids {
+			hold, ok := got[id]
+			if !ok {
+				t.Errorf("%s: proposal %d missing", path, id)
+				continue
+			}
+			if hold != want {
+				t.Errorf("%s: proposal %d HoldOnDissent = %v, want %v", path, id, hold, want)
+			}
+		}
+	}
+	byID := func(ps []*model.Proposal) map[int]bool {
+		out := map[int]bool{}
+		for _, p := range ps {
+			out[p.ID] = p.HoldOnDissent
+		}
+		return out
+	}
+
+	got := map[int]bool{}
+	for _, id := range ids {
+		p, err := GetProposal(db, id)
+		testsupport.Must(t, err, "GetProposal(%d): %v", id, err)
+		got[id] = p.HoldOnDissent
+	}
+	check("get", got)
+
+	listed, _, err := ListProposals(db, 0, "", "", "", 0)
+	testsupport.Must(t, err, "ListProposals: %v", err)
+	check("list", byID(listed))
+
+	byIssue, err := GetIssueProposals(db, iid)
+	testsupport.Must(t, err, "GetIssueProposals: %v", err)
+	got = map[int]bool{}
+	for _, p := range byIssue {
+		got[p.ID] = p.HoldOnDissent
+	}
+	check("by-issue", got)
+
+	// Export/import: every exported row lands in a fresh store with its flag.
+	exported, err := ListAllProposals(db, 0)
+	testsupport.Must(t, err, "ListAllProposals: %v", err)
+	check("export", byID(exported))
+
+	restored := mustInitAndMigrate(t)
+	tx, err := restored.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	for _, p := range exported {
+		inserted, err := InsertProposalWithID(tx, p)
+		testsupport.Must(t, err, "InsertProposalWithID(%d): %v", p.ID, err)
+		if !inserted {
+			t.Fatalf("InsertProposalWithID(%d) inserted nothing", p.ID)
+		}
+	}
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+	imported, err := ListAllProposals(restored, 0)
+	testsupport.Must(t, err, "ListAllProposals(restored): %v", err)
+	check("import", byID(imported))
+}
+
 // TestGetProposalVotesReadsEachVotesOwnUsage is DKT-2775: each vote's Usage
 // comes from its own vote_usage rows (an empty, non-nil map when it has
 // none), and GetProposalVoteUsageSources gives each unit its own row's

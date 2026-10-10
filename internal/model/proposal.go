@@ -197,6 +197,12 @@ type Proposal struct {
 	// never read it, and the rows stay readable through export and direct
 	// store access.
 	Sealed bool
+	// HoldOnDissent is the vote rule's hold-on-dissent policy recorded on the
+	// proposal: an APPROVED tally carrying at least one `reject` parks its
+	// vote step for the operator rather than passing. It lives on the row,
+	// beside Sealed, so the policy a ballot was opened under can be read back
+	// instead of re-resolved from a rule that may have been edited mid-vote.
+	HoldOnDissent bool
 }
 
 // SealedOpen reports whether the proposal's casts are currently withheld: it
@@ -222,6 +228,7 @@ type proposalJSON struct {
 	Threshold        float64  `json:"threshold"`
 	WeightedScore    *float64 `json:"weighted_score"`
 	Sealed           bool     `json:"sealed"`
+	HoldOnDissent    bool     `json:"hold_on_dissent"`
 	CreatedBy        string   `json:"created_by"`
 	CreatedAt        string   `json:"created_at"`
 	UpdatedAt        string   `json:"updated_at"`
@@ -252,6 +259,7 @@ func (p Proposal) MarshalJSON() ([]byte, error) {
 		Threshold:        p.Threshold,
 		WeightedScore:    p.WeightedScore,
 		Sealed:           p.Sealed,
+		HoldOnDissent:    p.HoldOnDissent,
 		CreatedBy:        p.CreatedBy,
 		CreatedAt:        p.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:        p.UpdatedAt.UTC().Format(time.RFC3339),
@@ -289,6 +297,7 @@ func (p *Proposal) UnmarshalJSON(data []byte) error {
 	p.Threshold = j.Threshold
 	p.WeightedScore = j.WeightedScore
 	p.Sealed = j.Sealed
+	p.HoldOnDissent = j.HoldOnDissent
 	p.CreatedBy = j.CreatedBy
 
 	p.Rationale = j.Rationale

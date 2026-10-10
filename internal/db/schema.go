@@ -2895,9 +2895,11 @@ func migrateV35ToV36(tx *sql.Tx) error {
 	return nil
 }
 
-// v37AddedColumns is v37's whole schema change: `target_sha` on
-// `gate_results` — the commit a pre-gate result was measured against when it
-// was measured OUTSIDE the claim (gates-trust §7.6.2 PG6).
+// v37AddedColumns is v37's whole schema change: two columns, one on each of
+// two tables.
+//
+// `target_sha` on `gate_results` is the commit a pre-gate result was measured
+// against when it was measured OUTSIDE the claim (gates-trust §7.6.2 PG6).
 //
 // A pre-gate that cannot finish inside the claim's budget runs detached,
 // before the claim, against the step's resolved target sha. The claim reuses
@@ -2912,23 +2914,35 @@ func migrateV35ToV36(tx *sql.Tx) error {
 // TEXT NOT NULL with an empty-string default, and empty means "not keyed to a
 // target": a pre-v37 row, a claim-time row, or a completion row. Nothing reads
 // a blank as a key.
+//
+// `hold_on_dissent` on `proposals` is the vote rule's hold-on-dissent policy
+// recorded on the proposal, the same open-time pinning `sealed` (v28) gives
+// the rendering rule, so a rule edited mid-vote cannot change how a live
+// ballot routes. Zero is every pre-v37 proposal's value.
 var v37AddedColumns = []struct{ table, column, ddl string }{
 	{"gate_results", "target_sha",
 		`ALTER TABLE gate_results ADD COLUMN target_sha TEXT NOT NULL DEFAULT ''`},
+	{"proposals", "hold_on_dissent",
+		`ALTER TABLE proposals ADD COLUMN hold_on_dissent INTEGER NOT NULL DEFAULT 0`},
 }
 
 // v37ColumnSentinels are the columns the rewind guard probes, the v27–v36
 // form: v37 adds no table and no index, so a database stamped 37 by a binary
-// built mid-change carries every v36 sentinel and this column never arrives.
+// built mid-change carries every v36 sentinel and these columns never arrive.
+// Both are probed: a store stamped 37 by a binary that carried only
+// `target_sha` lacks `hold_on_dissent`, and the guard re-runs v37 to add it.
 var v37ColumnSentinels = []struct{ table, column string }{
 	{"gate_results", "target_sha"},
+	{"proposals", "hold_on_dissent"},
 }
 
-// migrateV36ToV37 adds the detached pre-gate target column.
+// migrateV36ToV37 adds the detached pre-gate target column and the proposal
+// hold-on-dissent column.
 //
 // It BACK-FILLS NOTHING: no existing row was measured by a detached run, so
-// the empty string is the only true value for every one of them. `ALTER TABLE
-// ADD COLUMN` is not idempotent in SQLite, so the migration probes first and
+// the empty string is the only true value for every one of them; and no
+// existing proposal pinned a hold, so zero is theirs. `ALTER TABLE ADD COLUMN`
+// is not idempotent in SQLite, so the migration probes each column first and
 // stays re-runnable, the same shape v10 through v36 use.
 func migrateV36ToV37(tx *sql.Tx) error {
 	for _, col := range v37AddedColumns {
@@ -3695,9 +3709,9 @@ func Migrate(db *sql.DB) error {
 	}
 
 	// The v37 guard, in the same COLUMN form as v36 and for its reason: v37
-	// adds one column and no table, so a database stamped 37 by a binary built
-	// mid-change carries every v36 sentinel and `gate_results.target_sha`
-	// never arrives.
+	// adds columns and no table, so a database stamped 37 by a binary built
+	// mid-change carries every v36 sentinel and `gate_results.target_sha` or
+	// `proposals.hold_on_dissent` never arrives.
 	if version >= 37 {
 		for _, col := range v37ColumnSentinels {
 			exists, err := hasColumnDB(db, col.table, col.column)
