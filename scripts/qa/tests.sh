@@ -23,9 +23,11 @@ set -euo pipefail
 # at the shared tree. Outside any git repo, fall back to the script's own root.
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$(dirname "${BASH_SOURCE[0]}")/../..")"
 
-echo "=== tests: go1.26.9 test ./... ==="
+# -timeout 30m: internal/engine alone runs 6 to 13 minutes when several gate
+# suites share the host, past go test's 10m per-package default.
+echo "=== tests: go1.26.9 test -timeout 30m ./... ==="
 
-if ! go1.26.9 test ./... 2>&1; then
+if ! go1.26.9 test -timeout 30m ./... 2>&1; then
   cat >&2 <<'EOF'
 
 tests FAILED: at least one package's tests did not pass.
