@@ -1464,5 +1464,5 @@ ms timestamps + seq in new tables only); `--if-version` on mutating verbs; versi
 in `.data` under v2; idempotency keys on create verbs; the v4 fixture and its
 golden-diff proof; per-file CAS-conflict tests.
 
-`skills/docket/SKILL.md` flag/verb tables update in whichever PR changes the surface
+The loadable `docket` skill's flag/verb tables update in whichever PR changes the surface
 (both, here) — a stale table blocks review per CLAUDE.md.

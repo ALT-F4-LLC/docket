@@ -1906,13 +1906,13 @@ run to audit, which requires the first two groups.
 
 | Group | Document | Rows |
 |---|---|---|
-| 1 | `skills/docket/SKILL.md` | `run start --budget` loses "not yet enforced"; **new** `docket run report` section with the R1–R7 table; `docket config` gains `budget.unit`; `step complete --usage` loses "enforces nothing"; the `next row` table's `expected_cost` row loses "enforces nothing yet" |
+| 1 | the loadable `docket` skill | `run start --budget` loses "not yet enforced"; **new** `docket run report` section with the R1–R7 table; `docket config` gains `budget.unit`; `step complete --usage` loses "enforces nothing"; the `next row` table's `expected_cost` row loses "enforces nothing yet" |
 | 1 | **`docs/spec/performance.md`** (**new**) | the floor query's cost, the report's query count, the measured numbers of §12.2, and the stated fallback |
 | 1 | `docs/spec/architecture.md` | the usage ledger and the budget mechanism, as implemented |
-| 2 | `skills/docket/SKILL.md` | **new** `docket dispatch` section (four verbs, flag tables, the discrepancy table, the refusal table); `docket next` gains its refusal rows; the error table gains dispatch `CONFLICT`s |
+| 2 | the loadable `docket` skill | **new** `docket dispatch` section (four verbs, flag tables, the discrepancy table, the refusal table); `docket next` gains its refusal rows; the error table gains dispatch `CONFLICT`s |
 | 2 | **`docs/spec/operations.md`** (**new**) | backup (`sqlite3 .backup`), the WAL-on-synced-directory warning, retention posture, dispatch recovery runbook, and the B25 budget-raise workaround |
 | 2 | `docs/spec/architecture.md` | dispatch tables and the reap-ack ledger |
-| 3 | `skills/docket/SKILL.md` | **new** `docket events` section (`list --since`, the cursor contract, `GONE`); `docket guard` table gains `record` and `spawn` rows; `docket run activate` gains the auto-registration paragraph and the `registered` array; the error table gains `GONE` (exit 9 — appended; exit 6 is STALE_LEASE since S1, amended per DKT-33) |
+| 3 | the loadable `docket` skill | **new** `docket events` section (`list --since`, the cursor contract, `GONE`); `docket guard` table gains `record` and `spawn` rows; `docket run activate` gains the auto-registration paragraph and the `registered` array; the error table gains `GONE` (exit 9 — appended; exit 6 is STALE_LEASE since S1, amended per DKT-33) |
 | 3 | `docs/spec/operations.md` | the retention/prune posture note pointing at S7 |
 | 3 | `docs/spec/security.md` | §1.3's three additions: `--usage` caps, event-data rendering, auto-registration reads-not-executes |
 

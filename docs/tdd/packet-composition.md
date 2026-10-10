@@ -416,8 +416,8 @@ the run — the same fat-transaction, leaves-nothing-behind stance as the contex
 cap. Discovering it at claim time would have already cost a dispatcher a round
 trip.
 
-`skills/docket/SKILL.md` gains the `packet` row in its grammar table in the
-same PR, per CLAUDE.md — a stale table is drift and blocks review.
+The loadable `docket` skill gains the `packet` row in its grammar table in
+the same PR, per CLAUDE.md — a stale table is drift and blocks review.
 
 ## 2. Alternatives considered
 
