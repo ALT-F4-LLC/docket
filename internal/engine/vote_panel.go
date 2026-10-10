@@ -3,7 +3,6 @@ package engine
 import (
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -25,13 +24,6 @@ import (
 // the link does not exist yet. So vote-opened is recorded by the first cast
 // that observes the panel attributed, once per run, and vote-tallied by the
 // cast that reaches quorum, with the score db.CastVote computed.
-
-// panelRun is one run that attributes a conductor panel, with the run-bound
-// issue the panel is linked through.
-type panelRun struct {
-	RunID   int
-	IssueID int
-}
 
 // recordConductorPanelEvents writes a step-less panel's vote lifecycle events
 // onto every run that attributes it. A vote step's own proposal is skipped:
@@ -67,66 +59,16 @@ func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *db.CastVot
 	return nil
 }
 
-// conductorPanelRuns lists the runs that attribute a panel: each run binding
-// an issue the panel is linked to, whose activation-to-terminal window holds
-// the panel's creation. It is the run report's attribution rule
-// (conversationalRunProposalIDs), asked from the panel's side.
-func conductorPanelRuns(conn *sql.DB, proposalID int) ([]panelRun, error) {
-	rows, err := conn.Query(
-		`SELECT ri.run_id, MIN(ri.issue_id), p.created_at
-		   FROM proposals p
-		   JOIN proposal_issues pi ON pi.proposal_id = p.id
-		   JOIN run_issues ri ON ri.issue_id = pi.issue_id
-		  WHERE p.id = ?
-		  GROUP BY ri.run_id
-		  ORDER BY ri.run_id`, proposalID)
+// conductorPanelRuns lists the runs that attribute a panel, in run order. It
+// is the run report's attribution rule (conversationalRunProposalIDs), asked
+// from the panel's side.
+func conductorPanelRuns(conn *sql.DB, proposalID int) ([]db.ProposalRunLink, error) {
+	runs, err := linkedPanelAttributions(conn, db.ProposalRunLinkFilter{ProposalID: proposalID})
 	if err != nil {
 		return nil, fmt.Errorf("finding the runs of %s: %w",
 			model.FormatProposalID(proposalID), err)
 	}
-	var candidates []panelRun
-	var created string
-	for rows.Next() {
-		var run panelRun
-		if err := rows.Scan(&run.RunID, &run.IssueID, &created); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("reading a run of %s: %w",
-				model.FormatProposalID(proposalID), err)
-		}
-		candidates = append(candidates, run)
-	}
-	// Closed before the window reads below: the pool holds one connection.
-	iterErr := rows.Err()
-	rows.Close()
-	if iterErr != nil {
-		return nil, fmt.Errorf("reading the runs of %s: %w",
-			model.FormatProposalID(proposalID), iterErr)
-	}
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-
-	createdAt, err := time.Parse(time.RFC3339, created)
-	if err != nil {
-		// An unparseable creation time cannot be placed in a run's window, so
-		// the panel is not attributed by inference — the report's rule too.
-		return nil, nil
-	}
-	at := createdAt.UnixMilli()
-
-	var out []panelRun
-	for _, run := range candidates {
-		from, to, ok, err := runActiveWindowMS(conn, run.RunID)
-		if err != nil {
-			return nil, err
-		}
-		// created_at has second precision, so the lower bound is the
-		// activation's second.
-		if ok && at >= from/1000*1000 && at <= to {
-			out = append(out, run)
-		}
-	}
-	return out, nil
+	return runs, nil
 }
 
 // recordPanelRunEvents records, in one transaction on one run, the panel's
@@ -134,7 +76,7 @@ func conductorPanelRuns(conn *sql.DB, proposalID int) ([]panelRun, error) {
 // is non-empty. The existence check shares the write-locked transaction
 // (internal/db opens every Begin immediate) with the write, so neither a later
 // cast nor a concurrent one opens the panel a second time.
-func recordPanelRunEvents(conn *sql.DB, run panelRun, proposalID int, tally string) error {
+func recordPanelRunEvents(conn *sql.DB, run db.ProposalRunLink, proposalID int, tally string) error {
 	pid := model.FormatProposalID(proposalID)
 	tx, err := conn.Begin()
 	if err != nil {

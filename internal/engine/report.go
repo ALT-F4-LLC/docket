@@ -1725,25 +1725,15 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 	// --issue`) to an issue bound to this run, created inside the run's
 	// activation-to-terminal window, is the run's too — the structured link
 	// is the attribution, where the text form above relies on the conductor
-	// having written the run id. The window keeps a panel about the same
-	// issue under an earlier or later run out of this one.
-	linked, err := db.ProposalsLinkedToRunIssues(conn, runID)
+	// having written the run id.
+	linked, err := linkedPanelAttributions(conn, db.ProposalRunLinkFilter{RunID: runID})
 	if err != nil {
 		return nil, err
 	}
-	if len(linked) > 0 {
-		from, to, ok, err := runActiveWindowMS(conn, runID)
-		if err != nil {
-			return nil, err
-		}
-		for _, p := range linked {
-			// created_at has second precision, so the lower bound is the
-			// activation's second.
-			at := p.CreatedAt.UnixMilli()
-			if ok && at >= from/1000*1000 && at <= to && !seen[p.ID] {
-				seen[p.ID] = true
-				ids = append(ids, p.ID)
-			}
+	for _, link := range linked {
+		if !seen[link.ProposalID] {
+			seen[link.ProposalID] = true
+			ids = append(ids, link.ProposalID)
 		}
 	}
 
@@ -1957,6 +1947,41 @@ func annotateVoteOutcomes(
 			model.FormatProposalID(id), status)
 	}
 	return nil
+}
+
+// linkedPanelAttributions applies the linked-panel attribution rule: a
+// proposal linked to an issue a run binds is that run's when its creation
+// falls inside the run's activation-to-terminal window. The window keeps a
+// panel about the same issue under an earlier or later run out of this one.
+// It returns the matching links, narrowed by filter.
+func linkedPanelAttributions(conn *sql.DB, filter db.ProposalRunLinkFilter) ([]db.ProposalRunLink, error) {
+	links, err := db.ProposalRunLinks(conn, filter)
+	if err != nil {
+		return nil, err
+	}
+	type window struct {
+		from, to int64
+		ok       bool
+	}
+	windows := make(map[int]window)
+	var out []db.ProposalRunLink
+	for _, link := range links {
+		w, cached := windows[link.RunID]
+		if !cached {
+			w.from, w.to, w.ok, err = runActiveWindowMS(conn, link.RunID)
+			if err != nil {
+				return nil, err
+			}
+			windows[link.RunID] = w
+		}
+		// created_at has second precision, so the lower bound is the
+		// activation's second.
+		at := link.CreatedAt.UnixMilli()
+		if w.ok && at >= w.from/1000*1000 && at <= w.to {
+			out = append(out, link)
+		}
+	}
+	return out, nil
 }
 
 // runActiveWindowMS is the run's activation-to-terminal window: the first

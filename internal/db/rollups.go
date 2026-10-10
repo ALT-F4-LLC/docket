@@ -637,42 +637,65 @@ func SilentVoteSeatsFor(db *sql.DB, scope, prefix string, extraIDs ...int) ([]Si
 		})
 }
 
-// LinkedProposal is a proposal linked to an issue bound to a run, with its
-// creation time, for the run report's linked-panel attribution (DKT-3291).
-type LinkedProposal struct {
-	ID        int
+// ProposalRunLink pairs a proposal with a run that binds an issue the proposal
+// is linked to (proposal_issues to run_issues), for linked-panel attribution.
+type ProposalRunLink struct {
+	ProposalID int
+	RunID      int
+	// IssueID is the lowest run-bound issue the proposal is linked through.
+	IssueID   int
 	CreatedAt time.Time
 }
 
-// ProposalsLinkedToRunIssues lists every proposal whose proposal_issues
-// links name an issue bound to the run (run_issues), once each.
-func ProposalsLinkedToRunIssues(db *sql.DB, runID int) ([]LinkedProposal, error) {
+// ProposalRunLinkFilter narrows ProposalRunLinks; a zero field matches any.
+type ProposalRunLinkFilter struct {
+	RunID      int
+	ProposalID int
+}
+
+// ProposalRunLinks lists every (proposal, run) pair in which the run binds an
+// issue the proposal is linked to, once each, ordered by proposal then run.
+// A proposal whose created_at does not parse as RFC3339 is omitted: its
+// creation cannot be placed in any run's window, so it is attributed to no
+// run by inference.
+func ProposalRunLinks(db *sql.DB, filter ProposalRunLinkFilter) ([]ProposalRunLink, error) {
+	where := "1 = 1"
+	var args []any
+	if filter.RunID != 0 {
+		where += " AND ri.run_id = ?"
+		args = append(args, filter.RunID)
+	}
+	if filter.ProposalID != 0 {
+		where += " AND p.id = ?"
+		args = append(args, filter.ProposalID)
+	}
 	rows, err := db.Query(
-		`SELECT DISTINCT p.id, p.created_at
+		`SELECT p.id, ri.run_id, MIN(ri.issue_id), p.created_at
 		   FROM proposals p
 		   JOIN proposal_issues pi ON pi.proposal_id = p.id
-		   JOIN run_issues ri ON ri.issue_id = pi.issue_id AND ri.run_id = ?
-		  ORDER BY p.id`, runID)
+		   JOIN run_issues ri ON ri.issue_id = pi.issue_id
+		  WHERE `+where+`
+		  GROUP BY p.id, ri.run_id
+		  ORDER BY p.id, ri.run_id`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("finding proposals linked to run %d's issues: %w", runID, err)
+		return nil, fmt.Errorf("finding proposals linked to run-bound issues: %w", err)
 	}
 	defer rows.Close()
-	var out []LinkedProposal
+	var out []ProposalRunLink
 	for rows.Next() {
 		var (
-			id      int
+			link    ProposalRunLink
 			created string
 		)
-		if err := rows.Scan(&id, &created); err != nil {
-			return nil, fmt.Errorf("reading a linked proposal: %w", err)
+		if err := rows.Scan(&link.ProposalID, &link.RunID, &link.IssueID, &created); err != nil {
+			return nil, fmt.Errorf("reading a proposal's run link: %w", err)
 		}
 		at, err := time.Parse(time.RFC3339, created)
 		if err != nil {
-			// An unparseable creation time cannot be placed in the run's
-			// window, so it is not attributed by inference.
 			continue
 		}
-		out = append(out, LinkedProposal{ID: id, CreatedAt: at})
+		link.CreatedAt = at
+		out = append(out, link)
 	}
 	return out, rows.Err()
 }
