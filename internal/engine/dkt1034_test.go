@@ -172,7 +172,7 @@ func TestOverridePassWorktreeRepinsTheReviewedObject(t *testing.T) {
 
 	// THE PREMISE: the recorded target is the pre-patch commit, and it is
 	// what every consumer would render from.
-	if got := latestIssueDiffHead(conn, run.ID, issue); got != w.executorSHA {
+	if got := latestIssueDiffHead(conn, run.ID, issue, 0); got != w.executorSHA {
 		t.Fatalf("premise: recorded head = %q, want the executor's commit %q", got, w.executorSHA)
 	}
 	before := issueDiffArtifacts(t, conn, w.implementID)
@@ -377,7 +377,7 @@ func TestRerunGatesWorktreeRepinsAndMeasuresThere(t *testing.T) {
 	if artifacts[1].Supersedes != artifacts[0].Artifact {
 		t.Errorf("newest record supersedes %q, want %s", artifacts[1].Supersedes, artifacts[0].Artifact)
 	}
-	if got := latestIssueDiffHead(conn, run.ID, step.IssueID); got != patch {
+	if got := latestIssueDiffHead(conn, run.ID, step.IssueID, 0); got != patch {
 		t.Errorf("the issue's newest recorded head = %q, want %q", got, patch)
 	}
 }

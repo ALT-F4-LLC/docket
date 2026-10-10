@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -279,6 +280,57 @@ func TestRoundDeltaNoReviewedHeadAdvancesToFork(t *testing.T) {
 
 	if got := issueRoundBase(t, conn, runID, issue); got != fork {
 		t.Errorf("fix@1 round_base = %.12s, want the fork point %.12s", got, fork)
+	}
+}
+
+// TestRepinRoundBaseExcludesOwnHead: a re-pin recomputes the step's issue.diff
+// after the step already recorded one, so the issue's newest head is the
+// step's OWN earlier record. That head is this round, not a round recorded
+// after the judged one, so the re-pinned delta still advances past the
+// verbatim sibling integration to the worktree's fork point.
+func TestRepinRoundBaseExcludesOwnHead(t *testing.T) {
+	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
+
+	rounds.commitRound(t, "IMPLEMENT ROUND 0")
+	completeStepAt(t, conn, e, issue, "implement@0", rounds.work)
+
+	completeReviewRoundIn(t, conn, e, issue, 0)
+	completeInIssue(t, conn, e, issue, "synthesize@0", "the synthesis", "")
+	driveActionInIssue(t, conn, e, issue, "reconcile@0")
+	completeInIssue(t, conn, e, issue, "verify@0", "the ac report", unmetPayload)
+
+	fork := integrateSibling(t, rounds.work)
+	w1 := commitInFreshWorktree(t, rounds.work, "fix-round-1",
+		"feature.txt", "IMPLEMENT ROUND 0\nFIX ROUND 1\n")
+	completeStepAt(t, conn, e, issue, "fix@1", w1)
+	if got := issueRoundBase(t, conn, runID, issue); got != fork {
+		t.Fatalf("premise: fix@1 round_base = %.12s, want the fork point %.12s", got, fork)
+	}
+
+	// The re-pin's own computation: the step as recorded from the named
+	// checkout (prepareIssueDiffRepin).
+	step, err := db.GetStep(conn, stepIDIn(t, conn, issue, "fix@1"))
+	testsupport.Must(t, err, "GetStep(fix@1): %v", err)
+	pinned := *step
+	pinned.WorkRoot = w1
+	body, payload, err := e.computeIssueDiff(conn, &pinned)
+	testsupport.Must(t, err, "computeIssueDiff(fix@1): %v", err)
+
+	var record struct {
+		RoundBase string `json:"round_base"`
+	}
+	err = json.Unmarshal([]byte(payload), &record)
+	testsupport.Must(t, err, "unmarshal %q: %v", payload, err)
+	if record.RoundBase != fork {
+		t.Errorf("re-pinned fix@1 round_base = %.12s, want the fork point %.12s — "+
+			"the step's own earlier head read as an unreviewed round", record.RoundBase, fork)
+	}
+	_, delta, found := strings.Cut(body, roundDeltaMarker)
+	if !found {
+		t.Fatalf("the re-pinned diff carries no round-delta section:\n%s", body)
+	}
+	if strings.Contains(delta, "sibling.txt") {
+		t.Errorf("the sibling's integrated commit leaked into the re-pinned delta:\n%s", delta)
 	}
 }
 

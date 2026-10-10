@@ -1164,7 +1164,7 @@ func (e *Engine) runRoutingStage(
 	// the zero-byte delta, because DKT-340's non-convergence guard fires only
 	// at the NEXT loop's entry, after the wasted round has already been paid
 	// for. The comparison is scoped to this step's OWN records rather than
-	// latestIssueDiffHead's issue-wide newest, because another producer
+	// latestIssueDiffHead's newest across the issue, because another producer
 	// (`implement` at ordinal 0, a downstream committer) may have written the
 	// issue's newest head, and the question here is whether THIS body moved
 	// the tree since ITS last round.
@@ -3429,7 +3429,7 @@ func (e *Engine) appendRoundDelta(
 	}
 	if (head != "" || blocked) && step.Ordinal > 0 {
 		reviewed := lastReviewedIssueDiffHead(conn, step.RunID, step.IssueID)
-		latest := latestIssueDiffHead(conn, step.RunID, step.IssueID)
+		latest := latestIssueDiffHead(conn, step.RunID, step.IssueID, step.ID)
 		prev := reviewed
 		if prev == "" {
 			prev = latest
@@ -3476,15 +3476,22 @@ func (e *Engine) appendRoundDelta(
 }
 
 // latestIssueDiffHead reads the `head` the issue's newest issue.diff artifact
-// recorded, "" when none did — a run started before the round record existed,
-// or a tree whose HEAD could not be resolved at the time.
-func latestIssueDiffHead(conn *sql.DB, runID, issueID int) string {
+// recorded by any step other than exceptStepID, "" when none did — a run
+// started before the round record existed, or a tree whose HEAD could not be
+// resolved at the time.
+//
+// The recording step's own artifacts are excluded because they are this round,
+// not a later one: an issue.diff re-pin (diff_repin.go) recomputes a step that
+// already recorded, and counting that step's earlier head as a round recorded
+// after the judged one kept round_base at the judged head, putting sibling
+// issues' verbatim-integrated commits back into the round delta.
+func latestIssueDiffHead(conn *sql.DB, runID, issueID, exceptStepID int) string {
 	var payload sql.NullString
 	err := conn.QueryRow(
 		`SELECT a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
+		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ? AND a.step_id <> ?
 		  ORDER BY a.id DESC LIMIT 1`,
-		runID, issueID, ArtifactKindIssueDiff).Scan(&payload)
+		runID, issueID, ArtifactKindIssueDiff, exceptStepID).Scan(&payload)
 	if err != nil {
 		return ""
 	}
@@ -3541,7 +3548,7 @@ func lastReviewedIssueDiffHead(conn *sql.DB, runID, issueID int) string {
 // step's OWN ordinal is what keeps a re-completion at the same ordinal — an
 // operator `--as retry` — from comparing against its own first record.
 //
-// Filtered to the step's NAME, unlike latestIssueDiffHead's issue-wide read:
+// Filtered to the step's NAME, unlike latestIssueDiffHead's read across the issue:
 // the issue's newest head may belong to a different producer entirely, and
 // this comparison is only meaningful between two hand-backs of the same body.
 func priorRoundHandBack(conn *sql.DB, step *db.Step) string {
