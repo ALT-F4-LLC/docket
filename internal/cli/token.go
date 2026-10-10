@@ -68,9 +68,9 @@ func optionalToken(stdin io.Reader) string {
 	return tok
 }
 
-// conductorToken returns the token to present on one of the seven operator
-// verbs — `step approve|reject|resolve|reap`, `run pause|resume|abandon` —
-// for run `runID` (DKT-2465).
+// conductorToken returns the token to present for run `runID` on an operator
+// verb whose engine path checks the run's conductor capability
+// (authorizeConductor/authorizeConductorTx) (DKT-2465).
 //
 // NOTHING IS READ UNLESS THE RUN IS BOUND to a conductor capability, for
 // tokenForClose's reason exactly: the stdin fallback drains its reader to EOF,

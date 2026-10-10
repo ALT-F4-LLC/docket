@@ -11,9 +11,8 @@ import (
 
 // The CONDUCTOR CAPABILITY (DKT-2465).
 //
-// `step approve`, `step reject`, `step resolve`, `step reap`, `run pause`,
-// `run resume` and `run abandon` were token-free: "the authority is repository
-// access". Under a harness every executor a wave spawns shares the operator's
+// The operator verbs were token-free: "the authority is repository access".
+// Under a harness every executor a wave spawns shares the operator's
 // checkout, filesystem and environment, so repository access resolved to "any
 // executor" — an executor could approve the commit-gate its own `git commit`
 // is guarded on, reject a sibling's gate, or park the run — and the engine had
@@ -25,10 +24,11 @@ import (
 // model.MintToken, hash-only storage (`runs.conductor_token_hash`), the same
 // env/stdin transport (`DOCKET_TOKEN`, never argv) and the same child-process
 // scrub (exec.deniedEnv). It is minted at the run's FIRST ACTIVATION and
-// returned once in that response, and re-minted by `run conduct`. The seven
-// verbs require it on a bound run; an executor is never handed it, so the
-// documented path refuses it the way `step record` refuses an unclaimed
-// worker.
+// returned once in that response, and re-minted by `run conduct`. On a bound
+// run it is required by every verb whose engine path calls authorizeConductor
+// or authorizeConductorTx; docs/design/engine-spec.md carries the canonical
+// enumeration. An executor is never handed it, so the documented path refuses
+// it the way `step record` refuses an unclaimed worker.
 //
 // TWO POSTURES ARE DELIBERATE AND STATED:
 //
@@ -43,7 +43,8 @@ import (
 //     tamper-proof: a caller that takes the seat retires the standing token,
 //     so the standing conductor's next ruling refuses AUTH_ERROR, and the
 //     `conductor-seated` event names the taker's actor and cwd. A harness that
-//     keys callers keeps its executors off that ONE verb rather than seven.
+//     keys callers keeps its executors off `run conduct` rather than off every
+//     gated verb.
 
 // ErrNotConductor is the sentinel under an AUTH_ERROR refusal, so a caller
 // mapping errors can test for it without matching the message.
