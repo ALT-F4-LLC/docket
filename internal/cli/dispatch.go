@@ -913,7 +913,9 @@ func runDispatchAbandon(cmd *cobra.Command, w *output.Writer) error {
 	}
 	reason, _ := cmd.Flags().GetString("reason")
 
-	outcome, err := engine.NewEngine().AbandonDispatch(conn, runID, reason, model.NowMS())
+	outcome, err := engine.NewEngine().AbandonDispatchWith(conn, runID, engine.AbandonDispatchOptions{
+		Reason: reason, Token: conductorToken(conn, runID, cmd.InOrStdin()), NowMS: model.NowMS(),
+	})
 	if err != nil {
 		return runErr(err)
 	}

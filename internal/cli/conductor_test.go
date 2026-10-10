@@ -80,9 +80,38 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 		name string
 		// setup readies the fixture; the returned closure runs the verb.
 		setup func(t *testing.T) func() error
+		// refused, when set, asserts what a refusal must leave behind.
+		refused func(t *testing.T, err error)
+		// onStdin, when set, readies a second fixture and returns the verb
+		// run with the held capability piped on stdin instead.
+		onStdin func(t *testing.T, token string) func() error
+	}
+	// The `dispatch abandon` row's fixture, shared by its setup and hooks.
+	var abandonConn *sql.DB
+	var abandonRun int
+	runAbandon := func(stdin string) error {
+		cmd := cmdWithDB(abandonConn)
+		cmd.Flags().String("run", model.FormatRunID(abandonRun), "")
+		cmd.Flags().String("reason", "", "")
+		cmd.SetIn(strings.NewReader(stdin))
+		w, _ := bufWriter(true)
+		return runDispatchAbandon(cmd, w)
+	}
+	dispatchStatus := func(t *testing.T) string {
+		t.Helper()
+		var status string
+		err := abandonConn.QueryRow(`SELECT status FROM dispatches WHERE run_id = ? ORDER BY id DESC LIMIT 1`,
+			abandonRun).Scan(&status)
+		testsupport.Must(t, err, "reading the dispatch row: %v", err)
+		return status
+	}
+	openAbandonable := func(t *testing.T) {
+		t.Helper()
+		_, err := engine.NewEngine().OpenDispatch(abandonConn, abandonRun, 0, nil, model.NowMS())
+		testsupport.Must(t, err, "dispatch open: %v", err)
 	}
 	verbs := []verb{
-		{"step approve", func(t *testing.T) func() error {
+		{name: "step approve", setup: func(t *testing.T) func() error {
 			conn := newTestDB(t)
 			gate := readyGate(t, conn)
 			return func() error {
@@ -90,7 +119,7 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 				return runDecide(decideCmdWithDB(conn), []string{model.FormatStepID(gate)}, true, w)
 			}
 		}},
-		{"step reject", func(t *testing.T) func() error {
+		{name: "step reject", setup: func(t *testing.T) func() error {
 			conn := newTestDB(t)
 			gate := readyGate(t, conn)
 			return func() error {
@@ -98,7 +127,7 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 				return runDecide(decideCmdWithDB(conn), []string{model.FormatStepID(gate)}, false, w)
 			}
 		}},
-		{"step resolve", func(t *testing.T) func() error {
+		{name: "step resolve", setup: func(t *testing.T) func() error {
 			conn := newTestDB(t)
 			id := parkedStep(t, conn)
 			return func() error {
@@ -108,7 +137,7 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 				return runStepResolve(cmd, []string{model.FormatStepID(id)}, w)
 			}
 		}},
-		{"step reap", func(t *testing.T) func() error {
+		{name: "step reap", setup: func(t *testing.T) func() error {
 			conn := newTestDB(t)
 			activatedRunForNext(t, conn)
 			first := stepIDNamed(t, conn, "first@0")
@@ -121,7 +150,7 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 				return runStepReap(cmd, []string{model.FormatStepID(first)}, w)
 			}
 		}},
-		{"run pause", func(t *testing.T) func() error {
+		{name: "run pause", setup: func(t *testing.T) func() error {
 			conn := newTestDB(t)
 			runID := activatedRunForNext(t, conn)
 			return func() error {
@@ -131,7 +160,7 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 				}, w)
 			}
 		}},
-		{"run abandon --issue", func(t *testing.T) func() error {
+		{name: "run abandon --issue", setup: func(t *testing.T) func() error {
 			conn := newTestDB(t)
 			runID := activatedRunForNext(t, conn)
 			var issueID int
@@ -144,6 +173,43 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 				return abandonIssueInRun(cmd, model.FormatRunID(runID), model.FormatID(issueID))
 			}
 		}},
+		{
+			name: "dispatch abandon",
+			setup: func(t *testing.T) func() error {
+				abandonConn = newTestDB(t)
+				abandonRun = activatedRunForNext(t, abandonConn)
+				openAbandonable(t)
+				return func() error { return runAbandon("") }
+			},
+			refused: func(t *testing.T, err error) {
+				var ce *CmdError
+				if errors.As(err, &ce) && ce.Code == output.ErrValidation {
+					for _, want := range []string{TokenEnvVar, "stdin", "run conduct"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("refusal %q does not name %q", err, want)
+						}
+					}
+				}
+				if got := dispatchStatus(t); got != db.DispatchOpen {
+					t.Errorf("dispatch status after a refusal = %q, want %q", got, db.DispatchOpen)
+				}
+			},
+			onStdin: func(t *testing.T, token string) func() error {
+				if got := dispatchStatus(t); got != db.DispatchAbandoned {
+					t.Fatalf("dispatch status after the held token = %q, want %q", got, db.DispatchAbandoned)
+				}
+				openAbandonable(t)
+				return func() error {
+					if err := runAbandon(token + "\n"); err != nil {
+						return err
+					}
+					if got := dispatchStatus(t); got != db.DispatchAbandoned {
+						t.Errorf("dispatch status after the piped token = %q, want %q", got, db.DispatchAbandoned)
+					}
+					return nil
+				}
+			},
+		},
 	}
 
 	for _, v := range verbs {
@@ -152,11 +218,26 @@ func TestOperatorVerbsReadTheCapabilityFromTheEnvironment(t *testing.T) {
 			token := envToken(t)
 
 			t.Setenv(TokenEnvVar, "")
-			assertCmdCode(t, run(), output.ErrValidation, v.name+" with no token")
+			err := run()
+			assertCmdCode(t, err, output.ErrValidation, v.name+" with no token")
+			if v.refused != nil {
+				v.refused(t, err)
+			}
 			t.Setenv(TokenEnvVar, "deadbeef")
-			assertCmdCode(t, run(), output.ErrAuth, v.name+" with a wrong token")
+			err = run()
+			assertCmdCode(t, err, output.ErrAuth, v.name+" with a wrong token")
+			if v.refused != nil {
+				v.refused(t, err)
+			}
 			t.Setenv(TokenEnvVar, token)
 			testsupport.Must(t, run(), "%s with the held capability: %v", v.name, nil)
+
+			if v.onStdin != nil {
+				piped := v.onStdin(t, token)
+				t.Setenv(TokenEnvVar, "")
+				err = piped()
+				testsupport.Must(t, err, "%s with the capability on stdin: %v", v.name, err)
+			}
 		})
 	}
 }
