@@ -100,9 +100,10 @@ const (
 	// `events.retain` governing only events is not what "artifact-retention"
 	// names.
 	//
-	// The default is "0", which means RETAIN EVERYTHING: prune refuses every
-	// event until an operator states a policy. That is the dormant posture —
-	// Docket deletes nothing an operator did not ask it to delete.
+	// The default is "0", which imposes NO RETENTION WINDOW: prune at 0 is
+	// bounded only by its `--before` or `--before-run` target and the live-run
+	// refusal, not by age. That is the dormant posture — nothing is deleted
+	// until an operator runs prune with a target.
 	KeyEventsRetain = "events.retain"
 
 	// KeyVoteRulePrefix is the named-threshold-configuration namespace:
@@ -231,13 +232,14 @@ const (
 	// existing proposal machinery already understands.
 	KindCriticality
 	// KindRetentionWindow is a duration that may also be ZERO, where zero means
-	// "retain everything" rather than "retain nothing"
+	// "no retention window": prune holds back no event by age
 	// (docs/tdd/events-follow.md §5.3 P13).
 	//
 	// It is a separate kind from KindDuration because that one rejects zero —
 	// correctly, since a zero lease TTL would expire a claim the instant it was
-	// made. Here zero is the DEFAULT and the safe end of the range: a retention
-	// window nobody set must protect every event, not expose every event.
+	// made. Here zero is the DEFAULT: a window nobody set adds no age boundary,
+	// and prune's explicit target and live-run refusal still bound what it
+	// deletes.
 	KindRetentionWindow
 	// KindUnitName is an OPAQUE unit name, or empty. Core never enumerates
 	// units and never has a default one, so the only validation possible is the
@@ -432,7 +434,7 @@ var engineConfigSpecs = []ConfigSpec{
 		Kind:    KindRetentionWindow,
 		Default: "0",
 		Doc: "How long events are protected from `events prune`; 0 (the default) " +
-			"retains everything",
+			"imposes no retention window",
 	},
 	{
 		Key:  KeyVoteHoldRule,
@@ -637,7 +639,7 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 			return fmt.Errorf("%s: %w", spec.Key, err)
 		}
 	case KindRetentionWindow:
-		// "0" is the documented way to say "retain everything", so it is parsed
+		// "0" is the documented way to say "no retention window", so it is parsed
 		// before the duration parser gets it — `time.ParseDuration("0")` happens
 		// to accept a bare zero, but relying on that would make the key's
 		// contract depend on a parser's tolerance.
@@ -647,12 +649,12 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 		d, err := time.ParseDuration(value)
 		if err != nil {
 			return fmt.Errorf(
-				"%s must be a duration such as \"720h\", or 0 to retain everything: %w",
+				"%s must be a duration such as \"720h\", or 0 for no retention window: %w",
 				spec.Key, err)
 		}
 		if d < 0 {
 			return fmt.Errorf(
-				"%s must not be negative, got %q — 0 retains everything",
+				"%s must not be negative, got %q — 0 imposes no retention window",
 				spec.Key, value)
 		}
 	case KindUnitName:
@@ -1060,8 +1062,8 @@ func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 	return entries, nil
 }
 
-// EventsRetain resolves the retention window, with 0 meaning "retain
-// everything" (docs/tdd/events-follow.md §5.3).
+// EventsRetain resolves the retention window, with 0 meaning "no retention
+// window" (docs/tdd/events-follow.md §5.3).
 //
 // It returns the DURATION rather than a cutoff timestamp, because the caller
 // computes the cutoff inside the prune's own transaction against that
