@@ -973,8 +973,9 @@ ruling. Waivers are RUN-SCOPED and die with their run; each one is recorded as
 a ` + "`stale-target-waived`" + ` event, so the feed shows what standing precedent was
 minted and why.
 
-On a run bound to a conductor capability this requires that capability, via
-DOCKET_TOKEN or an owner-only file on stdin, never argv.`,
+Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
+via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
+for none.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchWaiveTarget(cmd, getWriter(cmd))
 	},
