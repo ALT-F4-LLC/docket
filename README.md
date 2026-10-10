@@ -100,7 +100,7 @@ Every command supports `--json` for structured, machine-readable output. All JSO
 
 **Partial failure:** `{"ok": false, "data": { ... }, "error": "...", "code": "CONFLICT"}`
 
-Cross-project registry commands (`docket workflow register`, `docket workflow deprecate`, `docket workflow lint`, `docket schema register`, and `docket schema deprecate`) return this shape when at least one project fails. `data` holds the per-project report (`results`, `succeeded`, `failed`), and `error` states how many projects failed. `code` is the failed projects' shared code, or `GENERAL_ERROR` when their codes differ. The process exits non-zero with the exit code for that `code`, so `.ok` and the exit status agree.
+Cross-project registry commands (`docket workflow register`, `docket workflow deprecate`, `docket workflow lint --all-projects`, `docket schema register`, and `docket schema deprecate`) return this shape when at least one project fails. `data` holds the per-project report, including `results`, `succeeded`, and `failed`, and `error` states how many projects failed. `code` is the failed projects' shared code, or `GENERAL_ERROR` when their codes differ. The process exits non-zero with the exit code for that `code`, so `.ok` and the exit status agree.
 
 Error codes: `GENERAL_ERROR` (exit 1), `NOT_FOUND` (exit 2), `VALIDATION_ERROR` (exit 3), `CONFLICT` (exit 4).
 
