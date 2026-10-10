@@ -224,57 +224,75 @@ func TestTrustAddRecordsBeforeAFailedPublish(t *testing.T) {
 	}
 }
 
-// TestWriteStorePostCreateTempFailureNamesTheStore reaches the Write branch of
-// writeStore: CreateTemp succeeds, but the temp file it hands back is open
-// read-only, so the owner's Chmod succeeds and Write fails (EBADF), the way
-// ENOSPC or EIO would fail it on a real disk. The error must name the store
-// that did not change, not only the temp file the deferred cleanup has already
-// deleted. Sealing the directory instead would reach CreateTemp or Rename,
-// never this branch.
+// TestWriteStorePostCreateTempFailureNamesTheStore reaches the Chmod and Write
+// branches of writeStore through the createTemp seam: CreateTemp succeeds, but
+// the temp file it hands back is already closed (Chmod fails with
+// os.ErrClosed) or open read-only (the owner's Chmod succeeds and Write fails
+// with EBADF, the way ENOSPC or EIO would fail it on a real disk). Each error
+// must name the store that did not change, not only the temp file the deferred
+// cleanup has already deleted. Sealing the directory instead would reach
+// CreateTemp or Rename, never these branches.
+//
+// The Sync and Close branches are not runtime-covered and stay read-verified:
+// a concrete *os.File from the createTemp seam cannot fail Sync or Close
+// without first failing Chmod, which runs before them on the same file.
 func TestWriteStorePostCreateTempFailureNamesTheStore(t *testing.T) {
-	path := sandbox(t)
-	repo := t.TempDir()
+	reopenReadOnly := func(f *os.File) (*os.File, error) { return os.Open(f.Name()) }
+	handBackClosed := func(f *os.File) (*os.File, error) { return f, nil }
 
-	_, err := addAt(path, AddRequest{
-		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
-	})
-	testsupport.Must(t, err, "seeding addAt: %v", err)
-	before, err := os.ReadFile(path)
-	testsupport.Must(t, err, "reading the seeded store: %v", err)
+	for _, tc := range []struct {
+		name   string
+		branch string
+		hobble func(closed *os.File) (*os.File, error)
+	}{
+		{name: "chmod", branch: "setting mode on ", hobble: handBackClosed},
+		{name: "write", branch: "writing ", hobble: reopenReadOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := sandbox(t)
+			repo := t.TempDir()
 
-	t.Cleanup(func() { createTemp = os.CreateTemp })
-	createTemp = func(dir, pattern string) (*os.File, error) {
-		f, err := os.CreateTemp(dir, pattern)
-		if err != nil {
-			return nil, err
-		}
-		name := f.Name()
-		if err := f.Close(); err != nil {
-			return nil, err
-		}
-		return os.Open(name)
-	}
+			_, err := addAt(path, AddRequest{
+				Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
+			})
+			testsupport.Must(t, err, "seeding addAt: %v", err)
+			before, err := os.ReadFile(path)
+			testsupport.Must(t, err, "reading the seeded store: %v", err)
 
-	err = writeStore(path, &Store{Version: 1})
-	if err == nil {
-		t.Fatal("a publish whose temp file cannot be written must fail")
-	}
-	if !strings.Contains(err.Error(), "writing ") {
-		t.Fatalf("the injection must reach the Write branch; got: %v", err)
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Errorf("the failure must name the store %s, not only its temp file; got: %v", path, err)
-	}
+			t.Cleanup(func() { createTemp = os.CreateTemp })
+			createTemp = func(dir, pattern string) (*os.File, error) {
+				f, err := os.CreateTemp(dir, pattern)
+				if err != nil {
+					return nil, err
+				}
+				if err := f.Close(); err != nil {
+					return nil, err
+				}
+				return tc.hobble(f)
+			}
 
-	after, err := os.ReadFile(path)
-	testsupport.Must(t, err, "reading the store after the failed publish: %v", err)
-	if string(after) != string(before) {
-		t.Errorf("a failed publish must leave the store byte-for-byte unchanged")
-	}
-	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".trust-*.toml"))
-	testsupport.Must(t, err, "globbing for temp files: %v", err)
-	if len(leftovers) != 0 {
-		t.Errorf("a failed publish must remove its temp file; found %v", leftovers)
+			err = writeStore(path, &Store{Version: 1})
+			if err == nil {
+				t.Fatal("a publish whose temp file cannot be prepared must fail")
+			}
+			if !strings.Contains(err.Error(), tc.branch) {
+				t.Fatalf("the injection must reach the %q branch; got: %v", tc.branch, err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("the failure must name the store %s, not only its temp file; got: %v", path, err)
+			}
+
+			after, err := os.ReadFile(path)
+			testsupport.Must(t, err, "reading the store after the failed publish: %v", err)
+			if string(after) != string(before) {
+				t.Errorf("a failed publish must leave the store byte-for-byte unchanged")
+			}
+			leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".trust-*.toml"))
+			testsupport.Must(t, err, "globbing for temp files: %v", err)
+			if len(leftovers) != 0 {
+				t.Errorf("a failed publish must remove its temp file; found %v", leftovers)
+			}
+		})
 	}
 }
 
