@@ -1147,6 +1147,11 @@ type StepView struct {
 	// a conductor or panel decides on, where ParkReason is the prose it shows
 	// the person it escalates to. Empty exactly where ParkReason is.
 	ParkClass db.ParkClass
+	// Authority is what entitled the step's latest ruling (operator,
+	// standing-grant, or conductor); AuthorityRef names the standing grant and
+	// is set only beside standing-grant. Both empty on a step never ruled on.
+	Authority    string
+	AuthorityRef string
 	// Owner and ExpiresMS are the stored lease's facts, reported whenever the
 	// effective status still counts that lease: always for a LIVE lease, and
 	// for a LAPSED one only while the run is not active. Scheduler.Expired —
@@ -1265,6 +1270,8 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		Routing: fresh.Routing, SagaStage: fresh.SagaStage,
 		ParkReason:     fresh.ParkReason,
 		ParkClass:      fresh.ParkClass,
+		Authority:      fresh.Authority,
+		AuthorityRef:   fresh.AuthorityRef,
 		Gates:          gates,
 		HeldCluster:    heldCluster,
 		TargetSHA:      targetSHA,

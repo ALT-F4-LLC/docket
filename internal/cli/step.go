@@ -1244,13 +1244,18 @@ type stepDetailPayload struct {
 	// ParkClass is the same park in the closed vocabulary a conductor routes on
 	// (DKT-1900); ParkReason beside it is what a person reads.
 	ParkClass db.ParkClass `json:"park_class,omitempty"`
+	// Authority is what entitled the step's resolution, spelled as the ruling
+	// event spells it. AuthorityRef is present only for a standing grant.
+	Authority    string `json:"authority,omitempty"`
+	AuthorityRef string `json:"authority_ref,omitempty"`
 }
 
 // stepShowPayload wraps a view only when there is something to add, so the
 // unchanged case does not even pay for a wrapper type on the wire.
 func stepShowPayload(view *engine.StepView) any {
 	if view.HeldCluster == nil && view.TargetSHA == "" &&
-		view.TargetWorktree == "" && view.ParkReason == "" && view.ParkClass == "" {
+		view.TargetWorktree == "" && view.ParkReason == "" && view.ParkClass == "" &&
+		view.Authority == "" {
 		return view.Row
 	}
 	return stepDetailPayload{
@@ -1260,6 +1265,8 @@ func stepShowPayload(view *engine.StepView) any {
 		TargetWorktree: view.TargetWorktree,
 		ParkReason:     view.ParkReason,
 		ParkClass:      view.ParkClass,
+		Authority:      view.Authority,
+		AuthorityRef:   view.AuthorityRef,
 	}
 }
 
@@ -1331,7 +1338,12 @@ A step that PARKED carries park_reason: the engine's own text for what it
 could not decide. It is not the same field as routing and it is not replaced
 by one — routing on a resolved park holds the resolver's routing and note,
 while park_reason still holds the question. Absent on a step that never
-parked, and on one parked before the field existed.`,
+parked, and on one parked before the field existed.
+
+A step resolved by approve, reject, or resolve carries authority: operator,
+standing-grant, or conductor, the value its ruling was recorded under.
+authority_ref names the grant and appears only beside standing-grant. Both
+are absent on a step no ruling has resolved.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepShow(cmd, args, getWriter(cmd))
