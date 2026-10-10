@@ -242,16 +242,17 @@ func canonicalPath(path string) string {
 // (or a `name@version`) present in two roots with DIFFERENT bytes — see
 // scanConfigDirs — so first-found can never mean "silently shadowed".
 func (c *Config) InstanceConfigDirs() []string {
+	shared := c.SharedConfigDir()
 	if c.Source != SourceGlobal {
-		if c.DocketDir == "" {
+		if shared == "" {
 			return nil
 		}
-		return []string{filepath.Join(c.DocketDir, "config")}
+		return []string{shared}
 	}
 
 	var roots []string
-	if c.DocketDir != "" {
-		roots = append(roots, filepath.Join(c.DocketDir, "config"))
+	if shared != "" {
+		roots = append(roots, shared)
 	}
 	if c.ExecRoot != "" {
 		repo := filepath.Join(c.ExecRoot, ".docket", "config")
@@ -279,6 +280,14 @@ func (c *Config) InstanceConfigDir() string {
 		}
 		return filepath.Join(c.ExecRoot, ".docket", "config")
 	}
+	return c.SharedConfigDir()
+}
+
+// SharedConfigDir returns the store root's config directory, the corpus every
+// source reads first, or "" when no store resolved. It names only the store's
+// root; the repository-side additions the global store unions in are not part
+// of it.
+func (c *Config) SharedConfigDir() string {
 	if c.DocketDir == "" {
 		return ""
 	}

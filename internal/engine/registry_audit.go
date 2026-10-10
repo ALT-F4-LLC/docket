@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 
@@ -98,8 +97,8 @@ type CorpusIndex struct {
 // reported as every registration being stale.
 func ScanCorpus() (*CorpusIndex, error) {
 	var roots []string
-	if store := resolvePaths().DocketDir; store != "" {
-		roots = []string{filepath.Join(store, "config")}
+	if shared := resolvePaths().SharedConfigDir(); shared != "" {
+		roots = []string{shared}
 	}
 	scan, err := scanConfigDirs(roots)
 	if err != nil {

@@ -299,6 +299,25 @@ func TestInstanceConfigDirWritesToTheRepository(t *testing.T) {
 	}
 }
 
+// TestSharedConfigDir pins the store root's config path every source reads
+// first, and its absence when no store resolved.
+func TestSharedConfigDir(t *testing.T) {
+	t.Run("a store names its config directory", func(t *testing.T) {
+		cfg := &Config{DocketDir: filepath.Join("srv", "store")}
+		want := filepath.Join("srv", "store", "config")
+		if got := cfg.SharedConfigDir(); got != want {
+			t.Errorf("SharedConfigDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no store names no directory", func(t *testing.T) {
+		cfg := &Config{}
+		if got := cfg.SharedConfigDir(); got != "" {
+			t.Errorf("SharedConfigDir = %q, want empty when DocketDir is empty", got)
+		}
+	})
+}
+
 // equalPaths compares two root lists element-wise, order included: the order IS
 // the precedence.
 func equalPaths(got, want []string) bool {
