@@ -58,7 +58,15 @@ func CastVote(conn *sql.DB, vote *model.Vote) (*db.CastVoteResult, error) {
 	if err := policy.authorize(vote.VoterName); err != nil {
 		return nil, err
 	}
-	return db.CastVoteWeighted(conn, vote, policy.equalWeighting())
+	result, err := db.CastVoteWeighted(conn, vote, policy.equalWeighting())
+	if err != nil {
+		return nil, err
+	}
+	if err := recordConductorPanelEvents(conn, vote.ProposalID, result); err != nil {
+		return nil, fmt.Errorf("the vote recorded, but recording %s's run events failed: %w",
+			model.FormatProposalID(vote.ProposalID), err)
+	}
+	return result, nil
 }
 
 // castPolicy is the vote step behind one proposal, as pinned. The zero value —
