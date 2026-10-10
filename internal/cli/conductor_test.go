@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -452,6 +453,37 @@ func TestAnnotateIntegratedSHARequiresTheConductor(t *testing.T) {
 		!strings.Contains(after.metadata, integrated) {
 		t.Errorf("effects %+v -> %+v, want a new issue.diff, two events, and integrated_sha %s",
 			before, after, integrated)
+	}
+}
+
+// TestAnnotateMetadataOnlyLeavesStdinUnread: on a bound run, --metadata
+// without --integrated-sha needs no capability, so it must not drain stdin
+// even when a token is waiting there — an unclosed pipe would hang it.
+func TestAnnotateMetadataOnlyLeavesStdinUnread(t *testing.T) {
+	conn := newTestDB(t)
+	r, _, token := integratedRun(t, conn)
+	hash, err := db.RunConductorHash(conn, r.runID)
+	testsupport.Must(t, err, "reading the conductor hash: %v", err)
+	if hash == "" {
+		t.Fatal("precondition: the run is not bound to a conductor capability")
+	}
+	t.Setenv(TokenEnvVar, "")
+	withStdin(t, token+"\n")
+
+	cmd := annotateCmdWithDB(conn, "")
+	err = cmd.Flags().Set("metadata", `{"annotated_by":"metadata-only"}`)
+	testsupport.Must(t, err, "set --metadata: %v", err)
+	w, _ := bufWriter(true)
+	err = runStepAnnotate(cmd, []string{model.FormatStepID(r.implementID)}, w)
+	testsupport.Must(t, err, "step annotate --metadata on a bound run: %v", err)
+
+	if got := readAnnotatedEffects(t, conn, r.implementID); !strings.Contains(got.metadata, `"metadata-only"`) {
+		t.Errorf("metadata = %q, want the annotated value", got.metadata)
+	}
+	off, err := os.Stdin.Seek(0, io.SeekCurrent)
+	testsupport.Must(t, err, "reading the stdin offset: %v", err)
+	if off != 0 {
+		t.Errorf("stdin offset = %d, want 0: a --metadata-only annotation read stdin", off)
 	}
 }
 
