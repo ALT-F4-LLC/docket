@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -359,6 +360,74 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCommittedTriagePanelEventsMatchSkippedRow: an operator's manual commit
+// (§8.4) is an outcome the triage mapping has no key for, so the panel closes
+// `skipped` and its own `on_fail` disposes of the step it was asked about.
+// Every event recorded for the panel must agree with that row: a `pass`
+// routing event beside a `skipped` row tells an event consumer the panel
+// passed when it did not.
+func TestCommittedTriagePanelEventsMatchSkippedRow(t *testing.T) {
+	conn, _, e := triageRun(t, "retry", "abandon-issue")
+	panel := mustStep(t, conn, "triage@0")
+	proposalID, err := findVoteProposal(conn, panel)
+	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+	if proposalID == 0 {
+		t.Fatal("no proposal opened for triage@0")
+	}
+	_, err = conn.Exec(`UPDATE proposals SET status = ? WHERE id = ?`,
+		model.ProposalStatusCommitted, proposalID)
+	testsupport.Must(t, err, "committing the proposal: %v", err)
+	testsupport.Must(t, e.DriveVoteProposal(conn, proposalID, nowMS),
+		"driving the committed proposal: %v", err)
+
+	panel = mustStep(t, conn, "triage@0")
+	if panel.Status != db.StepSkipped {
+		t.Fatalf("triage@0 status = %q, want %q — a committed outcome is "+
+			"outside the mapping's vocabulary, so the panel closes without ruling",
+			panel.Status, db.StepSkipped)
+	}
+
+	rows, err := conn.Query(
+		`SELECT kind, data FROM events WHERE step_id = ? ORDER BY seq`, panel.ID)
+	testsupport.Must(t, err, "reading triage@0's events: %v", err)
+	defer rows.Close()
+	skipped := 0
+	var seen []string
+	for rows.Next() {
+		var kind, data string
+		testsupport.Must(t, rows.Scan(&kind, &data), "scanning an event")
+		var fields struct {
+			Detail string `json:"detail"`
+		}
+		testsupport.Must(t, json.Unmarshal([]byte(data), &fields),
+			"decoding a %s event's data", kind)
+		seen = append(seen, kind+" "+fields.Detail)
+		switch kind {
+		case EventStepRouted:
+			t.Errorf("triage@0 has a %s event %q beside a %q row — the panel's "+
+				"disposition is its skip, and no routing names it",
+				kind, fields.Detail, panel.Status)
+		case EventStepSkipped:
+			skipped++
+			if !strings.Contains(fields.Detail, "without reaching a verdict") {
+				t.Errorf("triage@0's %s event reads %q, want the reason the "+
+					"panel closed without ruling", kind, fields.Detail)
+			}
+		default:
+			if fields.Detail == RoutingPass ||
+				strings.HasPrefix(fields.Detail, RoutingPass+":") {
+				t.Errorf("triage@0 has a %s event reporting routing %q beside "+
+					"a %q row", kind, fields.Detail, panel.Status)
+			}
+		}
+	}
+	testsupport.Must(t, rows.Err(), "iterating triage@0's events: %v", rows.Err())
+	if skipped != 1 {
+		t.Errorf("triage@0 recorded %d %s events, want exactly 1; events: %q",
+			skipped, EventStepSkipped, seen)
 	}
 }
 

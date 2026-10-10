@@ -703,9 +703,16 @@ func routeVoteStep(
 	}
 	status := statusForRouting(routing)
 
-	if err := db.SetStepRoutingTx(tx, step.ID,
-		routing, reason, status, class, nowMS); err != nil {
-		return err
+	// A triage panel whose outcome the mapping has no key for (an operator's
+	// manual commit, §8.4) is disposed of by releaseUntriaged below, which
+	// writes its row `skipped` and records that as its event. Writing or
+	// announcing a routing for it here would contradict that row.
+	releasedByPanel := triaged != nil && !triageDecided(outcome)
+	if !releasedByPanel {
+		if err := db.SetStepRoutingTx(tx, step.ID,
+			routing, reason, status, class, nowMS); err != nil {
+			return err
+		}
 	}
 	if routingStep != nil {
 		// AFTER the routing above, so this cluster's own verdict is visible to
@@ -754,11 +761,13 @@ func routeVoteStep(
 			return err
 		}
 	}
-	if err := recordEvent(tx, eventRecord{
-		Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
-		IssueID: step.IssueID, Data: routingRecord(routing, reason), AtMS: nowMS,
-	}); err != nil {
-		return err
+	if !releasedByPanel {
+		if err := recordEvent(tx, eventRecord{
+			Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
+			IssueID: step.IssueID, Data: routingRecord(routing, reason), AtMS: nowMS,
+		}); err != nil {
+			return err
+		}
 	}
 	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
 		return err
