@@ -71,6 +71,12 @@ func authorizeConductor(conn *sql.DB, runID int, token, verb string) error {
 	return checkConductor(hash, token, runID, verb)
 }
 
+// AuthorizeConductor is authorizeConductor for a CLI verb whose write lives
+// outside the engine (`vote commit`): the verb runs it before writing.
+func AuthorizeConductor(conn *sql.DB, runID int, token, verb string) error {
+	return authorizeConductor(conn, runID, token, verb)
+}
+
 // checkConductor is the refusal matrix, in the lease matrix's shape
 // (claims-leases §4): no capability minted → allow; none supplied → the R1
 // VALIDATION_ERROR naming both channels; wrong → the R3 AUTH_ERROR. The

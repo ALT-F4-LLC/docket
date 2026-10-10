@@ -369,6 +369,19 @@ func IsVoteStepProposal(conn *sql.DB, proposalID int) (bool, error) {
 	return found && strings.HasPrefix(key, voteStepScopePrefix), nil
 }
 
+// VoteProposalRun returns the run whose vote step opened a proposal. The
+// second return is false for a proposal bound to no run: a conversational
+// ballot, or a caller-forged key whose run part does not parse, which
+// DriveVoteProposal likewise routes nowhere.
+func VoteProposalRun(conn *sql.DB, proposalID int) (int, bool, error) {
+	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, proposalID)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	runID, ok := voteStepRunOf(key)
+	return runID, ok, nil
+}
+
 // voteRule is a resolved threshold configuration (§8.3).
 type voteRule struct {
 	Threshold   float64
