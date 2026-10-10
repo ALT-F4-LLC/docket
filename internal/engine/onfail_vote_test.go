@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -537,4 +538,147 @@ func mustStep(t *testing.T, conn *sql.DB, instance string) *db.Step {
 	step, err := db.GetStep(conn, stepIDByInstance(t, conn, instance))
 	testsupport.Must(t, err, "reading %s: %v", instance, err)
 	return step
+}
+
+// loopTriageSrc puts a triage panel behind the LOOP BODY as well as the first
+// executor: `fix` names the panel in its `on_fail`, and the panel is ordered
+// after both. A failed `review` gate routes `fix-loop`, which is the fixture's
+// way into ordinal 1.
+const loopTriageSrc = `
+[pipeline]
+name = "loop-triage-lane"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+after = []
+executor = "x"
+emits = "findings"
+gates = ["build"]
+on_fail = "triage"
+
+[[step]]
+name = "triage"
+after = ["implement", "fix"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+
+[step.on_fail_routes]
+approved = "fix-round"
+rejected = "abandon-issue"
+
+[[step]]
+name = "review"
+after = ["implement"]
+executor = "y"
+emits = "verdict"
+gates = ["verdict"]
+on_fail = "fix-loop"
+
+[[step]]
+name = "fix"
+executor = "x"
+emits = "findings"
+gates = ["build"]
+on_fail = "triage"
+loop = true
+after_loop = "review"
+`
+
+// TestLoopBodyFailureRoutesToItsOrdinalsPanel: a loop body whose `on_fail`
+// names a triage panel needs that panel at the body's own ordinal. Without
+// panel@k a failure at ordinal k >= 1 has nothing to suspend for, and the step
+// strands with no panel and no release.
+func TestLoopBodyFailureRoutesToItsOrdinalsPanel(t *testing.T) {
+	// enterOrdinalOne passes implement@0, fails review@0's gate into a fix
+	// round, and returns with fix@1 instantiated and nothing at ordinal 1
+	// recorded yet. The engine it returns fails every gate.
+	enterOrdinalOne := func(t *testing.T) (*sql.DB, *model.Run, *Engine) {
+		t.Helper()
+		conn := mustDB(t)
+		registerVoteRule(t, conn, "majority", "0.5", "")
+		registerSource(t, conn, []byte(loopTriageSrc), "loop-triage-lane.toml")
+
+		issue := createIssue(t, conn, "loop-triaged", "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		e := testEngine()
+		claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+		e.Gates = failingGates{}
+		claimAndComplete(t, conn, e, "review@0", "the verdict", "")
+		err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+		testsupport.Must(t, err, "driving after review@0's failure: %v", err)
+		if !stepExists(t, conn, "fix@1") {
+			t.Fatal("premise: review@0's fix-loop did not enter ordinal 1")
+		}
+		return conn, run, e
+	}
+
+	t.Run("a failing round suspends for the ordinal's panel", func(t *testing.T) {
+		conn, run, e := enterOrdinalOne(t)
+		panelExists := stepExists(t, conn, "triage@1")
+		if !panelExists {
+			t.Error("no triage@1 row after the lane entered ordinal 1: fix@1 " +
+				"names the panel in its on_fail, and a failure there would " +
+				"have no panel to suspend for")
+		}
+		claimAndComplete(t, conn, e, "fix@1", "the round-1 candidate", "")
+		err := e.DriveRunLifecycles(conn, run.ID, nowMS)
+		testsupport.Must(t, err, "driving after fix@1's failure: %v", err)
+
+		// Suspended FOR triage@1: a `gated` row naming the panel with no panel
+		// row at its ordinal is the strand, not the suspension.
+		step := mustStep(t, conn, "fix@1")
+		if step.Status != db.StepGated || !routingIs(step.Routing, "triage") ||
+			!panelExists {
+			t.Errorf("fix@1 = %q routing %q with triage@1 present = %v, want "+
+				"%q routing %q with the panel present", step.Status,
+				step.Routing, panelExists, db.StepGated, "triage")
+		}
+		if !panelExists {
+			t.FailNow()
+		}
+
+		panel := mustStep(t, conn, "triage@1")
+		proposalID, err := findVoteProposal(conn, panel)
+		testsupport.Must(t, err, "finding triage@1's proposal: %v", err)
+		if proposalID == 0 {
+			t.Fatal("no proposal opened for triage@1 — the panel was never asked")
+		}
+		proposal, err := db.GetProposal(conn, proposalID)
+		testsupport.Must(t, err, "reading the proposal: %v", err)
+		if proposal.Status != model.ProposalStatusOpen {
+			t.Errorf("triage@1's proposal status = %q, want %q",
+				proposal.Status, model.ProposalStatusOpen)
+		}
+		context := proposal.Description + "\n" + proposal.Rationale
+		if !strings.Contains(context, "fix@1") {
+			t.Errorf("triage@1's proposal does not name fix@1's failure; it "+
+				"reads %q", context)
+		}
+	})
+
+	t.Run("a passing round skips the ordinal's panel", func(t *testing.T) {
+		conn, run, e := enterOrdinalOne(t)
+		e.Gates = PassThroughRunner{}
+		claimAndComplete(t, conn, e, "fix@1", "the round-1 candidate", "")
+		err := e.DriveRunLifecycles(conn, run.ID, nowMS)
+		testsupport.Must(t, err, "driving after fix@1 passed: %v", err)
+
+		if got := stepStatus(t, conn, "triage@1"); got != db.StepSkipped {
+			t.Errorf("triage@1 status = %q, want %q — a panel nobody routed "+
+				"to must be terminalized, or it blocks the issue forever",
+				got, db.StepSkipped)
+		}
+		if ready := readyInstances(t, conn); !slices.Contains(ready, "review@1") {
+			t.Errorf("review@1 is not ready after fix@1 passed; ready = %q", ready)
+		}
+	})
 }

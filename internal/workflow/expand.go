@@ -95,7 +95,7 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 // ExpandOrdinal is expansion at a LOOP ORDINAL — §11.3 clauses (3) and (4),
 // the counterpart of Expand's ordinary expansion at ordinal 0.
 //
-// Two sets of steps instantiate at ordinal k, and only these two:
+// Three sets of steps instantiate at ordinal k, and only these three:
 //
 //   - clause (3): the SERVING `loop = true` steps, supplied as `bodies` —
 //     the triggering step's cluster (LoopBodiesFor), which is every body when
@@ -103,11 +103,16 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 //   - clause (4): the cluster's `after_loop` roots AND THEIR DOWNSTREAM CHAIN
 //     ("`after_loop` and its downstream chain re-instantiate at ordinal k"),
 //     supplied as `downstream` because the chain is a property of the
-//     definition's shape that the caller already computed for the sweep.
+//     definition's shape that the caller already computed for the sweep;
+//   - the triage panel each instantiated body's `on_fail` names.
+//     A body failing at ordinal k suspends for the panel AT ordinal k, so a
+//     panel left at ordinal 0 would leave that failure with nothing to rule
+//     on. Derived here rather than supplied: the sweep never reads it, and a
+//     panel a passing body did not route to is skipped by the routing itself.
 //
-// Both sets are the CALLER's, computed for the entry's triggering step, so
-// the instantiation and the supersede sweep read one answer to "what does
-// this cluster re-run" rather than two that can drift.
+// The first two sets are the CALLER's, computed for the entry's triggering
+// step, so the instantiation and the supersede sweep read one answer to "what
+// does this cluster re-run" rather than two that can drift.
 //
 // EVERYTHING ELSE IS LEFT AT ITS EXISTING ORDINAL. `implement` is upstream of
 // `after_loop`: it does not re-run, its artifact is not reproduced, and §7.4's
@@ -122,11 +127,21 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 func ExpandOrdinal(
 	def *Definition, s Subject, ordinal int, bodies, downstream map[string]bool,
 ) []StepInstance {
-	out := make([]StepInstance, 0, len(def.Steps))
-
+	panels := make(map[string]bool)
 	for _, step := range def.Steps {
-		// Clause (3) or clause (4); a step in neither set does not re-instantiate.
-		if !(step.Loop && bodies[step.Name]) && !downstream[step.Name] {
+		if step.Loop && bodies[step.Name] {
+			if panel := step.OnFailTarget(); panel != "" {
+				panels[panel] = true
+			}
+		}
+	}
+
+	out := make([]StepInstance, 0, len(def.Steps))
+	for _, step := range def.Steps {
+		// Clause (3), clause (4), or a body's panel; any other step does not
+		// re-instantiate.
+		if !(step.Loop && bodies[step.Name]) && !downstream[step.Name] &&
+			!panels[step.Name] {
 			continue
 		}
 		out = append(out, expandStep(step, s, ordinal)...)

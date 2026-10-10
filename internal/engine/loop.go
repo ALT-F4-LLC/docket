@@ -1176,8 +1176,8 @@ func downstreamClosure(def *workflow.Definition, roots []string) map[string]bool
 }
 
 // instantiateOrdinal writes the rows clauses (3) and (4) call for: the
-// triggering cluster's loop bodies and its re-instantiated `after_loop`
-// chain, all at ordinal k. `bodies` and `downstream` are the caller's — the
+// triggering cluster's loop bodies, the triage panels their `on_fail` names,
+// and its re-instantiated `after_loop` chain, all at ordinal k. `bodies` and `downstream` are the caller's — the
 // same trigger-scoped sets the sweep and the bound already read, so one
 // entry's four effects cannot disagree about which cluster it is.
 //
