@@ -261,8 +261,9 @@ the class word alone (internal/db/steps.go:823) and the park reads
 reason in the routing branch that assigns `ParkClassThresholdRouted`
 (saga.go:1374-1378), under the `<class>: <prose>` shape the other engine park
 reasons use (`attemptsExhaustedParkReason`, human.go:1290; `loopBoundParkReason`,
-human.go:1302). The template, with `{count}` the findings count (the number of
-payload elements the matched arm's predicate selected), `{predicate}` the arm's
+human.go:1302). The template, with `{count}` the findings count as the threshold
+sees it (the number of payload elements the matched arm's predicate selected;
+`aggregate@1` carries one element per input cluster), `{predicate}` the arm's
 source text, and `{resolutions}` the supported set above:
 
 ```
@@ -271,8 +272,8 @@ threshold-routed: {count} payload element(s) matched "{predicate}" on the run's 
 
 `{resolutions}` renders as `--as override-pass (accept the integrated tree as
 reviewed) or --as skip (leave it unreviewed)`, and nothing else: the two values
-are the whole supported set on this park. Rendered for the §5 definition with two
-high findings:
+are the whole supported set on this park. Rendered for the §5 definition when two
+of the aggregate's clusters reduce to `high` or above:
 
 ```
 threshold-routed: 2 payload element(s) matched "any(severity >= high)" on the run's integrated diff; resolve with --as override-pass (accept the integrated tree as reviewed) or --as skip (leave it unreviewed)
