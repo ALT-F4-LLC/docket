@@ -36,6 +36,12 @@ type Entry struct {
 	// ArgvSHA256 is the hash of the canonical argv (§3.3), hex-encoded. It is
 	// stored so a hand-edited or corrupted file is caught rather than obeyed.
 	ArgvSHA256 string `toml:"argv_sha256"`
+	// Argv0SHA256 pins the CONTENT of an absolute argv[0] (§3.1): the
+	// hex-encoded SHA-256 of the symlink-resolved file, taken at add time and
+	// re-checked by Lookup. Empty for a bare-name argv[0], which is never
+	// pinned, and for an entry written before pinning existed, which matches
+	// with a warning.
+	Argv0SHA256 string `toml:"argv0_sha256,omitempty"`
 	// Repo is the repo binding (§3.4) — the absolute, symlink-resolved path of
 	// the directory containing the repo's .docket store. Empty when Global.
 	Repo string `toml:"repo"`
@@ -141,6 +147,10 @@ func (e Entry) NeedsNetwork() bool { return len(e.Network) > 0 }
 // argv is what executes (§7.2 M1). Matching does not produce a permission that
 // is later applied to a command read from somewhere else, so there is no window
 // between the check and the spawn in which anything can be swapped.
+//
+// The one input outside the snapshot is the file a pinned absolute argv[0]
+// names (§3.1). Lookup re-hashes it on every call, which narrows the window
+// between that hash and the spawn but does not close it.
 type Store struct {
 	// Version is the file format version (§3.1). An unknown version is a hard
 	// refusal, never a best-effort parse.

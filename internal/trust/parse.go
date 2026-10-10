@@ -2,6 +2,7 @@ package trust
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -101,7 +102,32 @@ func validateEntry(e Entry, idx int, path string) error {
 		}
 	}
 
+	// A content pin is optional, so an entry written before pinning existed
+	// still loads. When present it must be one the add path could have written:
+	// only an absolute argv[0] is pinned, and the value is a SHA-256 in the
+	// encoding Lookup compares against byte for byte.
+	if e.Argv0SHA256 != "" {
+		if !filepath.IsAbs(e.Argv[0]) {
+			return fmt.Errorf("%w: %s in %s has argv0_sha256, but its argv[0] %q is not an absolute path; only an absolute argv[0] is content-pinned", ErrParse, where, path, e.Argv[0])
+		}
+		if !isLowerHexSHA256(e.Argv0SHA256) {
+			return fmt.Errorf("%w: %s in %s has argv0_sha256 %q, which is not 64 lowercase hex characters", ErrParse, where, path, e.Argv0SHA256)
+		}
+	}
+
 	return nil
+}
+
+func isLowerHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // rejectUndecoded turns BurntSushi's undecoded-key report into the strict-mode

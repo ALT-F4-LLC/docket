@@ -104,9 +104,10 @@ type AddResult struct {
 	// Idempotent is true when an identical entry already existed and nothing
 	// was written.
 	Idempotent bool
-	// Warnings carries the --prefix over-authorization warning (§3.3). It is
-	// NEVER suppressed — not by --yes, not by anything. Suppressing it is
-	// exactly what would make the conversational posture unsafe.
+	// Warnings carries the --prefix over-authorization warning (§3.3) and the
+	// re-pin disclosure (§3.5). They are NEVER suppressed — not by --yes, not
+	// by anything. Suppressing them is exactly what would make the
+	// conversational posture unsafe.
 	Warnings []string
 }
 
@@ -146,20 +147,34 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 		return nil, err
 	}
 
-	if existing := findEntry(st, entry.Name, entry.Repo, entry.Global); existing != nil {
-		if entriesEquivalent(*existing, entry) {
+	existing := findEntry(st, entry.Name, entry.Repo, entry.Global)
+	if existing != nil {
+		if !entriesEquivalent(*existing, entry) {
+			// A SILENT OVERWRITE would mean a trusted name's meaning can change
+			// without the operator ever seeing the old value — the same
+			// reasoning that makes a re-register with differing bytes a
+			// CONFLICT, applied to a security-relevant file. Every differing
+			// property is named, so the operator can see what would have
+			// changed.
+			return nil, fmt.Errorf("%w: %q is already trusted in this repo as %s; the add would change %s. Remove it first with `docket trust rm %s` if the change is intended",
+				ErrConflict, entry.Name, CanonicalArgv(existing.Argv),
+				strings.Join(entryChanges(*existing, entry), "; "), entry.Name)
+		}
+		if existing.Argv0SHA256 == entry.Argv0SHA256 {
 			// Idempotent success: nothing written, exit 0. Re-approving the
 			// same command with the same flags is not a change.
 			return &AddResult{Entry: *existing, Idempotent: true, Warnings: warnings}, nil
 		}
-		// A SILENT OVERWRITE would mean a trusted name's meaning can change
-		// without the operator ever seeing the old value — the same reasoning
-		// that makes a re-register with differing bytes a CONFLICT, applied to
-		// a security-relevant file. Every differing property is named, so the
-		// operator can see what would have changed.
-		return nil, fmt.Errorf("%w: %q is already trusted in this repo as %s; the add would change %s. Remove it first with `docket trust rm %s` if the change is intended",
-			ErrConflict, entry.Name, CanonicalArgv(existing.Argv),
-			strings.Join(entryChanges(*existing, entry), "; "), entry.Name)
+		// The RE-PIN (§3.5): same command and flags, but the file argv[0]
+		// names now holds different bytes, or the entry predates pinning.
+		// Re-running the add is the operator approving those bytes, so it is a
+		// change: recorded, written, and disclosed with both hashes.
+		previous := existing.Argv0SHA256
+		if previous == "" {
+			previous = "none"
+		}
+		warnings = append(warnings, fmt.Sprintf("re-pinned %s: argv0_sha256 %s to %s",
+			entry.Argv[0], previous, entry.Argv0SHA256))
 	}
 
 	if req.OnChange != nil {
@@ -168,7 +183,11 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 		}
 	}
 
-	st.Entries = append(st.Entries, entry)
+	if existing != nil {
+		*existing = entry
+	} else {
+		st.Entries = append(st.Entries, entry)
+	}
 	if err := writeStore(path, st); err != nil {
 		return nil, err
 	}
@@ -276,6 +295,18 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 		Timeout:    req.Timeout,
 		Network:    req.Network,
 		AddedAtMS:  req.NowMS,
+	}
+
+	// §3.1's content pin. An absolute argv[0] names one file, and the operator
+	// is approving its current bytes. A file that cannot be hashed refuses the
+	// add: an absolute entry written without a pin would read as a legacy one
+	// and match whatever the file later holds.
+	if filepath.IsAbs(req.Argv[0]) {
+		_, sum, err := argv0ContentSHA256(req.Argv[0])
+		if err != nil {
+			return Entry{}, nil, fmt.Errorf("pinning the content of %s: %w", req.Argv[0], err)
+		}
+		e.Argv0SHA256 = sum
 	}
 
 	// P3: global requires the explicit flag; there is no implicit path to it.
