@@ -898,15 +898,63 @@ func enterLoop(
 //
 // Zero means unbounded, which is what a definition declaring nothing means.
 func maxFixLoops(def *workflow.Definition) int {
+	if step := issueBoundStep(def); step != nil {
+		return *step.MaxFixLoops
+	}
+	return 0
+}
+
+// maxFixLoopsHard reads the `max_fix_loops_hard` declared beside the
+// issue-level bound maxFixLoops reads, so the soft and hard caps always come
+// from the same declaration. Zero means none is declared and a panel's
+// extensions are unbounded.
+func maxFixLoopsHard(def *workflow.Definition) int {
+	step := issueBoundStep(def)
+	if step == nil || step.MaxFixLoopsHard == nil {
+		return 0
+	}
+	return *step.MaxFixLoopsHard
+}
+
+// issueBoundStep is the step declaring the issue-level `max_fix_loops`: the
+// first positive declaration outside a `serves`-scoped loop body, or nil.
+func issueBoundStep(def *workflow.Definition) *workflow.Step {
 	for _, step := range def.Steps {
 		if step.Loop && len(step.Serves) > 0 {
 			continue
 		}
 		if step.MaxFixLoops != nil && *step.MaxFixLoops > 0 {
-			return *step.MaxFixLoops
+			return step
 		}
 	}
-	return 0
+	return nil
+}
+
+// extensionPastHardCap is the hard cap's refusal of one more VOTE-MINTED round:
+// the reason the round a triage panel's `fix-round` would mint exceeds
+// `max_fix_loops_hard`, or "" when it fits or no hard cap is declared.
+//
+// It reads the issue's current ordinal rather than its grants, because the cap
+// bounds rounds: a panel approving a round the soft cap already admits spends
+// no extension. An operator's `fix-round` never asks, so it is admitted past
+// the cap exactly as it is past the soft bound.
+func extensionPastHardCap(tx *sql.Tx, step *db.Step, def *workflow.Definition) (string, error) {
+	hard := maxFixLoopsHard(def)
+	if hard <= 0 {
+		return "", nil
+	}
+	ri, err := db.GetRunIssueTx(tx, step.RunID, step.IssueID)
+	if err != nil {
+		return "", err
+	}
+	next := ri.LoopCount + 1
+	if next <= hard {
+		return "", nil
+	}
+	return fmt.Sprintf(
+		"loop %d would exceed max_fix_loops_hard = %d on %s, past which a panel "+
+			"cannot extend; `docket step resolve --as fix-round` authorizes one more round",
+		next, hard, model.FormatID(step.IssueID)), nil
 }
 
 // scopedClusterBodies is the set of `serves`-SCOPED loop bodies serving one

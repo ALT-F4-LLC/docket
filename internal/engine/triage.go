@@ -340,9 +340,23 @@ func applyTriageRetry(tx *sql.Tx, router *db.Step, note string, nowMS int64) err
 // V40b refuses the mapping at register time unless a loop body serves the
 // triaged step, so the refusal an unauthorized entry would produce here is not
 // reachable from a validated definition.
+//
+// The panel's approval is the loop-extension vote, so a declared
+// `max_fix_loops_hard` is checked BEFORE the grant: at the cap the step parks
+// for an operator whatever `on_exhausted` says, and no grant is recorded for a
+// round that was not minted.
 func applyTriageFixRound(
 	tx *sql.Tx, router *db.Step, def *workflow.Definition, note string, nowMS int64,
 ) error {
+	capped, err := extensionPastHardCap(tx, router, def)
+	if err != nil {
+		return err
+	}
+	if capped != "" {
+		return db.SetStepRoutingTx(tx, router.ID,
+			workflow.OnFailWaitingHuman, note+": "+capped,
+			db.StepWaitingHuman, db.ParkClassLoopBound, nowMS)
+	}
 	if _, err := db.GrantLoopTx(tx, router.RunID, router.IssueID); err != nil {
 		return err
 	}
