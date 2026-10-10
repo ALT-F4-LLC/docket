@@ -11,57 +11,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// hardCapSrc is loopTriageSrc with the issue-level bound declared on `review`:
-// `max_fix_loops = 1` spends the soft cap on review@0's own fix-loop, so every
-// later round is one the triage panel behind `fix` mints. BOUNDS is replaced
-// with the case's optional `max_fix_loops_hard` line.
-const hardCapSrc = `
-[pipeline]
-name = "hard-cap-lane"
-version = 1
-
-[match]
-kind = ["task"]
-
-[[step]]
-name = "implement"
-after = []
-executor = "x"
-emits = "findings"
-gates = ["build"]
-on_fail = "triage"
-
-[[step]]
-name = "triage"
-after = ["implement", "fix"]
-type = "vote"
-voters = ["seat-a", "seat-b"]
-vote_rule = "majority"
-on_fail = "waiting-human"
-
-[step.on_fail_routes]
-approved = "fix-round"
-rejected = "abandon-issue"
-
-[[step]]
-name = "review"
-after = ["implement"]
-executor = "y"
-emits = "verdict"
-gates = ["verdict"]
-on_fail = "fix-loop"
-max_fix_loops = 1
-BOUNDS
-[[step]]
-name = "fix"
-executor = "x"
-emits = "findings"
-gates = ["build"]
-on_fail = "triage"
-loop = true
-after_loop = "review"
-`
-
 // TestFixLoopExtensionHardCap: a triage panel's `fix-round` approval is the
 // extension vote, and each one mints exactly one round. A declared
 // `max_fix_loops_hard` stops the panel minting past it — the step parks for an
@@ -69,10 +18,7 @@ after_loop = "review"
 // operator's own `fix-round` at the cap is still admitted.
 func TestFixLoopExtensionHardCap(t *testing.T) {
 	t.Run("approvals mint one round each until the hard cap, then park", func(t *testing.T) {
-		// `on_exhausted` names a non-park routing so the park below is shown to
-		// come from the hard cap, not from the declared exhaustion routing.
-		conn, run, e := hardCapLane(t,
-			"max_fix_loops_hard = 3\non_exhausted = \"abandon-issue\"")
+		conn, run, issue, e := hardCapLane(t, 1, 3)
 
 		// Ordinals 2 and 3 are the two rounds the cap leaves the panel.
 		for ordinal := 1; ordinal <= 2; ordinal++ {
@@ -92,28 +38,78 @@ func TestFixLoopExtensionHardCap(t *testing.T) {
 			}
 		}
 
+		grantsBefore := loopGrants(t, conn, run.ID, issue)
 		approveFailedRound(t, conn, e, 3)
 		if stepExists(t, conn, "fix@4") {
 			t.Fatal("fix@4 exists: the panel minted a round past max_fix_loops_hard = 3")
 		}
-		step := mustStep(t, conn, "fix@3")
-		if step.Status != db.StepWaitingHuman {
-			t.Errorf("fix@3 = %q at the hard cap, want %q", step.Status, db.StepWaitingHuman)
+		// A refused extension records nothing: a grant here would raise the
+		// automatic loop's allowance for a round no one minted.
+		if got := loopGrants(t, conn, run.ID, issue); got != grantsBefore {
+			t.Errorf("loop_grants = %d after the refused approval, want it unchanged at %d",
+				got, grantsBefore)
 		}
-		if step.ParkClass != db.ParkClassLoopBound {
-			t.Errorf("fix@3 park class = %q, want %q", step.ParkClass, db.ParkClassLoopBound)
+		if got := loopCount(t, conn, run.ID, issue); got != 3 {
+			t.Errorf("loop_count = %d after the refused approval, want it unchanged at 3", got)
 		}
-		if !strings.Contains(step.ParkReason, "max_fix_loops_hard") {
-			t.Errorf("fix@3's park reason does not name the hard cap: %q", step.ParkReason)
-		}
+		assertHardCapPark(t, conn, "fix@3")
 		if got := runStatusOf(t, conn, run.ID); got != string(model.RunWaitingHuman) {
 			t.Errorf("run status = %q with fix@3 parked at the hard cap, want %q",
 				got, model.RunWaitingHuman)
 		}
 	})
 
+	t.Run("a hard cap equal to max_fix_loops admits no extension", func(t *testing.T) {
+		conn, _, _, e := hardCapLane(t, 1, 1)
+
+		approveFailedRound(t, conn, e, 1)
+		if stepExists(t, conn, "fix@2") {
+			t.Fatal("fix@2 exists: max_fix_loops_hard = max_fix_loops = 1 " +
+				"declares no extensions, yet the panel minted one")
+		}
+		assertHardCapPark(t, conn, "fix@1")
+	})
+
+	t.Run("a panel round inside the soft cap does not let the automatic loop pass the hard cap", func(t *testing.T) {
+		conn, run, issue, e := hardCapLane(t, 2, 2)
+
+		// Round 2 is within max_fix_loops = 2, so this approval extends nothing.
+		approveFailedRound(t, conn, e, 1)
+		if !stepExists(t, conn, "fix@2") {
+			t.Fatal("premise: the approval at ordinal 1 minted no fix@2")
+		}
+
+		// fix@2 passes, and review@2's failure asks the automatic fix-loop for
+		// round 3: past both caps, with no vote or operator approving it.
+		driveFixtureRound(t, 2)
+		e.Gates = PassThroughRunner{}
+		claimAndComplete(t, conn, e, "fix@2", "a candidate that passes its gates", "")
+		testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
+			"driving after fix@2 passed")
+		e.Gates = failingGates{}
+		claimAndComplete(t, conn, e, "review@2", "the verdict at ordinal 2", "")
+		testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
+			"driving after review@2's failure")
+
+		if stepExists(t, conn, "fix@3") {
+			t.Fatal("fix@3 exists: the automatic fix-loop entered round 3 " +
+				"past max_fix_loops_hard = 2")
+		}
+		if got := loopCount(t, conn, run.ID, issue); got != 2 {
+			t.Errorf("loop_count = %d after the refused entry, want 2", got)
+		}
+		step := mustStep(t, conn, "review@2")
+		if step.Status != db.StepWaitingHuman {
+			t.Errorf("review@2 = %q past the hard cap, want %q",
+				step.Status, db.StepWaitingHuman)
+		}
+		if !strings.Contains(step.ParkReason, "max_fix_loops_hard = 2") {
+			t.Errorf("review@2's park reason does not name the hard cap: %q", step.ParkReason)
+		}
+	})
+
 	t.Run("with no hard cap declared, approvals keep minting rounds", func(t *testing.T) {
-		conn, _, e := hardCapLane(t, "")
+		conn, _, _, e := hardCapLane(t, 1, 0)
 
 		// Past ordinal 3, where the capped case parks.
 		for ordinal := 1; ordinal <= 4; ordinal++ {
@@ -129,7 +125,7 @@ func TestFixLoopExtensionHardCap(t *testing.T) {
 	})
 
 	t.Run("an operator's fix-round at the hard cap is admitted", func(t *testing.T) {
-		conn, _, e := hardCapLane(t, "max_fix_loops_hard = 2")
+		conn, _, _, e := hardCapLane(t, 1, 2)
 
 		approveFailedRound(t, conn, e, 1)
 		approveFailedRound(t, conn, e, 2)
@@ -152,15 +148,22 @@ func TestFixLoopExtensionHardCap(t *testing.T) {
 	})
 }
 
-// hardCapLane activates hardCapSrc with bounds declared on `review`, passes
-// implement@0, and fails review@0 into the soft cap's one round, returning with
-// fix@1 instantiated. The engine it returns fails every gate.
-func hardCapLane(t *testing.T, bounds string) (*sql.DB, *model.Run, *Engine) {
+// hardCapLane activates loopTriageSrc with `max_fix_loops = soft` and, when
+// hard > 0, `max_fix_loops_hard = hard` declared on `review`, passes
+// implement@0, and fails review@0 into ordinal 1, returning with fix@1
+// instantiated. Every later round is one the triage panel behind `fix` mints
+// or the automatic loop enters. The engine it returns fails every gate.
+func hardCapLane(t *testing.T, soft, hard int) (*sql.DB, *model.Run, int, *Engine) {
 	t.Helper()
 	conn := mustDB(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")
-	src := strings.Replace(hardCapSrc, "BOUNDS", bounds, 1)
-	registerSource(t, conn, []byte(src), "hard-cap-lane.toml")
+	bounds := fmt.Sprintf("max_fix_loops = %d\n", soft)
+	if hard > 0 {
+		bounds += fmt.Sprintf("max_fix_loops_hard = %d\n", hard)
+	}
+	const reviewRouting = "on_fail = \"fix-loop\"\n"
+	src := strings.Replace(loopTriageSrc, reviewRouting, reviewRouting+bounds, 1)
+	registerSource(t, conn, []byte(src), "loop-triage-lane.toml")
 
 	issue := createIssue(t, conn, "hard-capped", "body", "task", nil)
 	run := startRun(t, conn, issue)
@@ -176,7 +179,24 @@ func hardCapLane(t *testing.T, bounds string) (*sql.DB, *model.Run, *Engine) {
 	if !stepExists(t, conn, "fix@1") {
 		t.Fatal("premise: review@0's fix-loop did not enter ordinal 1")
 	}
-	return conn, run, e
+	return conn, run, issue, e
+}
+
+// assertHardCapPark checks that a triaged step the panel approved at the hard
+// cap parked for an operator with the loop-bound class and a reason naming
+// the cap.
+func assertHardCapPark(t *testing.T, conn *sql.DB, instance string) {
+	t.Helper()
+	step := mustStep(t, conn, instance)
+	if step.Status != db.StepWaitingHuman {
+		t.Errorf("%s = %q at the hard cap, want %q", instance, step.Status, db.StepWaitingHuman)
+	}
+	if step.ParkClass != db.ParkClassLoopBound {
+		t.Errorf("%s park class = %q, want %q", instance, step.ParkClass, db.ParkClassLoopBound)
+	}
+	if !strings.Contains(step.ParkReason, "max_fix_loops_hard") {
+		t.Errorf("%s's park reason does not name the hard cap: %q", instance, step.ParkReason)
+	}
 }
 
 // approveFailedRound fails fix@ordinal's gates, which suspends it for

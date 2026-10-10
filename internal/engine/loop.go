@@ -630,6 +630,16 @@ func enterLoop(
 	if max > 0 {
 		max += grants
 	}
+	// A declared `max_fix_loops_hard` caps the grants for every UNAUTHORIZED
+	// entry. A panel's approval of a round the soft bound already admits
+	// still records a grant, so without this an automatic round could pass
+	// the hard cap with no vote or operator approving it. Authorized entries
+	// skip it: a panel's extension is refused at the cap before its grant
+	// (applyTriageFixRound), and an operator's fix-round is admitted past it.
+	bound := "max_fix_loops"
+	if hard := maxFixLoopsHard(def); !authorized && hard > 0 && max > hard {
+		max, bound = hard, "max_fix_loops_hard"
+	}
 	if max > 0 && count > max {
 		// BOUNDED. §11.3 (1): "exceeding `max_fix_loops` routes `waiting-human`
 		// instead".
@@ -668,9 +678,9 @@ func enterLoop(
 		// output tokens in no ledger. A refusal that names no next move is what
 		// makes that the reasonable thing to do.
 		reason := fmt.Sprintf(
-			"loop %d would exceed max_fix_loops = %d on %s; "+
+			"loop %d would exceed %s = %d on %s; "+
 				"`docket step resolve --as fix-round` authorizes one more round",
-			count, max, model.FormatID(step.IssueID))
+			count, bound, max, model.FormatID(step.IssueID))
 		return exhausted(tx, step, def, trigger, count-1, count-1, reason, nowMS)
 	}
 
