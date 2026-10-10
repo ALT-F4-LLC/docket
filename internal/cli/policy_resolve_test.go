@@ -42,11 +42,15 @@ version = 2
 [variants]
 guarded = { model = "sonnet", effort = "medium", escalate_to = "tier-a" }
 tier-a = { model = "opus", effort = "high" }
+quick = { model = "haiku", effort = "low" }
 
 [executors]
 worker = { variant = "guarded" }
 seat-a = { variant = "tier-a" }
 seat-b = { variant = "guarded" }
+
+[sizes]
+small = "quick"
 
 [security]
 ceiling = "guarded"
@@ -104,9 +108,16 @@ func writePolicyFile(t *testing.T, configDir, rel, body string) {
 	testsupport.Must(t, err, "writing %s: %v", path, err)
 }
 
-func policyResolveCmdWithDB(conn *sql.DB, runRef string, labels []string) *cobra.Command {
+// policyResolveCmdWithDB builds the flag set runPolicyResolve reads. An empty
+// size leaves --size at the real command's registered default, so a test
+// that omits it exercises what an omitted --size resolves to.
+func policyResolveCmdWithDB(conn *sql.DB, runRef, size string, labels []string) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().String("run", runRef, "")
+	cmd.Flags().String("size", policyResolveCmd.Flags().Lookup("size").DefValue, "")
+	if size != "" {
+		_ = cmd.Flags().Set("size", size)
+	}
 	cmd.Flags().StringSliceP("label", "l", labels, "")
 	return cmd
 }
@@ -119,11 +130,13 @@ type policySeatsJSON struct {
 }
 
 // TestPolicyResolveJSON is AC1: one call, one entry per seat, in request
-// order, carrying the seat's model, effort and variant.
+// order, carrying the seat's model, effort and variant. With --size omitted
+// each seat stands on its own variant even though the policy maps
+// [sizes].small.
 func TestPolicyResolveJSON(t *testing.T) {
 	conn, runID := policySeatRun(t, policySeatTOML)
 
-	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), nil)
+	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), "", nil)
 	w, buf := bufWriter(true)
 	err := runPolicyResolve(cmd, []string{"seat-a", "seat-b"}, w)
 	testsupport.Must(t, err, "runPolicyResolve: %v", err)
@@ -155,7 +168,7 @@ func TestPolicyResolveJSON(t *testing.T) {
 func TestPolicyResolveLabelReachesTheSecurityCheck(t *testing.T) {
 	conn, runID := policySeatRun(t, policySeatTOML)
 
-	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), []string{"sensitive"})
+	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), "", []string{"sensitive"})
 	w, buf := bufWriter(true)
 	err := runPolicyResolve(cmd, []string{"seat-a"}, w)
 	testsupport.Must(t, err, "runPolicyResolve: %v", err)
@@ -169,6 +182,39 @@ func TestPolicyResolveLabelReachesTheSecurityCheck(t *testing.T) {
 	}
 	if got.Data.Seats[0].Variant != "guarded" || got.Data.Seats[0].Model != "sonnet" {
 		t.Errorf("seat-a = %+v, want the ceiling sonnet/medium/guarded", got.Data.Seats[0])
+	}
+}
+
+// TestPolicyResolveSizeReachesTheSizesTable: --size stands in for the frozen
+// Size a vote step row snapshots, so --size small seats the [sizes].small
+// variant.
+func TestPolicyResolveSizeReachesTheSizesTable(t *testing.T) {
+	conn, runID := policySeatRun(t, policySeatTOML)
+
+	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), "small", nil)
+	w, buf := bufWriter(true)
+	err := runPolicyResolve(cmd, []string{"seat-b"}, w)
+	testsupport.Must(t, err, "runPolicyResolve: %v", err)
+
+	var got policySeatsJSON
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	want := model.VoterAssignment{Voter: "seat-b", Model: "haiku", Effort: "low", Variant: "quick"}
+	if len(got.Data.Seats) != 1 || got.Data.Seats[0] != want {
+		t.Errorf("seats = %+v, want [sizes].small's %+v", got.Data.Seats, want)
+	}
+}
+
+// TestPolicyResolveRegistersSize: --size is a flag on the real command, with
+// no default, so an omitted --size resolves as an unsized row does.
+func TestPolicyResolveRegistersSize(t *testing.T) {
+	flag := policyResolveCmd.Flags().Lookup("size")
+	if flag == nil {
+		t.Fatal("policy resolve registers no --size flag")
+	}
+	if flag.DefValue != "" {
+		t.Errorf("--size default = %q, want empty", flag.DefValue)
 	}
 }
 
@@ -228,7 +274,7 @@ func TestPolicyResolveRefusals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, runID := policySeatRun(t, tt.policy)
-			cmd := policyResolveCmdWithDB(conn, tt.runRef(runID), nil)
+			cmd := policyResolveCmdWithDB(conn, tt.runRef(runID), "", nil)
 			w, buf := bufWriter(true)
 
 			err := runPolicyResolve(cmd, tt.seats, w)

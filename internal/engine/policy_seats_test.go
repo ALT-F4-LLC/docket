@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
@@ -58,7 +59,7 @@ func TestResolveSeatsMatchesVoteRowAssignments(t *testing.T) {
 		t.Fatalf("no offer row named %q; offer was %+v", "gate", next.Steps)
 	}
 
-	got, err := ResolveSeats(conn, runID, []string{"seat-a", "seat-b"}, nil)
+	got, err := ResolveSeats(conn, runID, []string{"seat-a", "seat-b"}, "", nil)
 	testsupport.Must(t, err, "ResolveSeats: %v", err)
 
 	assertSeatsEqual(t, got, row.VoterAssignments)
@@ -75,7 +76,7 @@ func TestResolveSeatsMatchesVoteRowAssignments(t *testing.T) {
 func TestResolveSeatsOrderFollowsTheRequest(t *testing.T) {
 	conn, runID := policyFixtureRun(t, policyFixtureTOML)
 
-	got, err := ResolveSeats(conn, runID, []string{"seat-b", "seat-a"}, nil)
+	got, err := ResolveSeats(conn, runID, []string{"seat-b", "seat-a"}, "", nil)
 	testsupport.Must(t, err, "ResolveSeats: %v", err)
 
 	if len(got) != 2 || got[0].Voter != "seat-b" || got[1].Voter != "seat-a" {
@@ -96,7 +97,7 @@ func TestResolveSeatsAppliesSecurityByNode(t *testing.T) {
 		t.Fatalf("no offer row named %q; offer was %+v", "gate", next.Steps)
 	}
 
-	got, err := ResolveSeats(conn, runID, []string{"seat-a"}, nil)
+	got, err := ResolveSeats(conn, runID, []string{"seat-a"}, "", nil)
 	testsupport.Must(t, err, "ResolveSeats: %v", err)
 
 	if got[0].Variant != "guarded" || got[0].Model != "sonnet" || got[0].Effort != "medium" {
@@ -111,14 +112,14 @@ func TestResolveSeatsAppliesSecurityByNode(t *testing.T) {
 func TestResolveSeatsAppliesSecurityByLabel(t *testing.T) {
 	conn, runID := policyFixtureRun(t, securityPolicyTOML)
 
-	unlabelled, err := ResolveSeats(conn, runID, []string{"seat-b"}, nil)
+	unlabelled, err := ResolveSeats(conn, runID, []string{"seat-b"}, "", nil)
 	testsupport.Must(t, err, "ResolveSeats: %v", err)
 	if unlabelled[0].Variant != "forbidden" || unlabelled[0].Model != "opus" {
 		t.Errorf("seat-b without labels = %+v, want its standing opus/low/forbidden",
 			unlabelled[0])
 	}
 
-	labelled, err := ResolveSeats(conn, runID, []string{"seat-b"}, []string{"sensitive"})
+	labelled, err := ResolveSeats(conn, runID, []string{"seat-b"}, "", []string{"sensitive"})
 	testsupport.Must(t, err, "ResolveSeats: %v", err)
 	if labelled[0].Variant != "safe" || labelled[0].Model != "haiku" {
 		t.Errorf("seat-b with the sensitive label = %+v, want the fallback haiku/low/safe",
@@ -146,9 +147,73 @@ func TestResolveSeatsLabelParityWithALabelledVoteRow(t *testing.T) {
 	}
 
 	got, err := ResolveSeats(
-		conn, run.ID, []string{"seat-a", "seat-b"}, []string{"sensitive"})
+		conn, run.ID, []string{"seat-a", "seat-b"}, "", []string{"sensitive"})
 	testsupport.Must(t, err, "ResolveSeats: %v", err)
 	assertSeatsEqual(t, got, row.VoterAssignments)
+}
+
+// sizedSeatPolicyTOML maps the small Size to a variant neither seat stands
+// on, so a seat resolved with size small is distinguishable from its
+// standing answer.
+const sizedSeatPolicyTOML = `
+[policy]
+version = 2
+
+[variants]
+tier-a = { model = "opus", effort = "high" }
+tier-b = { model = "sonnet", effort = "medium" }
+quick = { model = "haiku", effort = "low" }
+
+[executors]
+worker = { variant = "tier-a" }
+seat-a = { variant = "tier-a" }
+seat-b = { variant = "tier-b" }
+
+[sizes]
+small = "quick"
+`
+
+// TestResolveSeatsSizeParityWithASizedVoteRow: the size a caller passes buys
+// exactly what the issue's frozen Size buys a vote row, and omitting it
+// leaves each seat on its standing variant.
+func TestResolveSeatsSizeParityWithASizedVoteRow(t *testing.T) {
+	conn, dir := configRepo(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	writeConfigFile(t, dir, "workflows/policy-fixture.toml", policyFixtureWorkflow)
+	writeConfigFile(t, dir, "policy.toml", sizedSeatPolicyTOML)
+	issue, err := db.CreateIssue(conn, &model.Issue{
+		Title: "sized fixture", Description: "a body", Status: model.StatusBacklog,
+		Priority: model.PriorityNone, Kind: model.IssueKind("task"),
+		Size: model.SizeSmall,
+	}, nil, nil)
+	testsupport.Must(t, err, "creating issue: %v", err)
+	run := startRun(t, conn, issue)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	next, err := testEngine().NextSteps(conn, run.ID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+	row := findRow(next.Steps, "gate")
+	if row == nil {
+		t.Fatalf("no offer row named %q; offer was %+v", "gate", next.Steps)
+	}
+
+	sized, err := ResolveSeats(
+		conn, run.ID, []string{"seat-a", "seat-b"}, string(model.SizeSmall), nil)
+	testsupport.Must(t, err, "ResolveSeats: %v", err)
+	for _, seat := range sized {
+		if seat.Variant != "quick" || seat.Model != "haiku" || seat.Effort != "low" {
+			t.Errorf("%s with size small = %+v, want [sizes].small's haiku/low/quick",
+				seat.Voter, seat)
+		}
+	}
+	assertSeatsEqual(t, sized, row.VoterAssignments)
+
+	unsized, err := ResolveSeats(conn, run.ID, []string{"seat-a", "seat-b"}, "", nil)
+	testsupport.Must(t, err, "ResolveSeats: %v", err)
+	if unsized[0].Variant != "tier-a" || unsized[1].Variant != "tier-b" {
+		t.Errorf("seats without a size = %+v, want their standing tier-a and tier-b", unsized)
+	}
 }
 
 // TestResolveSeatsRefusesAnUnknownSeat: one bad seat fails the whole call,
@@ -156,7 +221,7 @@ func TestResolveSeatsLabelParityWithALabelledVoteRow(t *testing.T) {
 func TestResolveSeatsRefusesAnUnknownSeat(t *testing.T) {
 	conn, runID := policyFixtureRun(t, policyFixtureTOML)
 
-	_, err := ResolveSeats(conn, runID, []string{"seat-a", "no-such-seat"}, nil)
+	_, err := ResolveSeats(conn, runID, []string{"seat-a", "no-such-seat"}, "", nil)
 	if err == nil {
 		t.Fatal("want a refusal for a seat with no [executors] row")
 	}
@@ -173,7 +238,7 @@ func TestResolveSeatsRefusesAnUnknownSeat(t *testing.T) {
 func TestResolveSeatsRefusesARunWithNoPinnedPolicy(t *testing.T) {
 	conn, runID := policyFixtureRun(t, "")
 
-	_, err := ResolveSeats(conn, runID, []string{"seat-a"}, nil)
+	_, err := ResolveSeats(conn, runID, []string{"seat-a"}, "", nil)
 	if err == nil {
 		t.Fatal("want a refusal for a run with no pinned policy.toml")
 	}
@@ -187,7 +252,7 @@ func TestResolveSeatsRefusesARunWithNoPinnedPolicy(t *testing.T) {
 func TestResolveSeatsRefusesAnUnknownRun(t *testing.T) {
 	conn, _ := policyFixtureRun(t, policyFixtureTOML)
 
-	_, err := ResolveSeats(conn, 9999, []string{"seat-a"}, nil)
+	_, err := ResolveSeats(conn, 9999, []string{"seat-a"}, "", nil)
 	if err == nil {
 		t.Fatal("want a refusal for a run that does not exist")
 	}

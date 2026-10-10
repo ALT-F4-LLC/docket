@@ -85,17 +85,20 @@ func (p *runPolicy) load() (*policyDoc, error) {
 // contract forbids choosing a model, tier or effort. This is that lookup, from
 // the run's own pinned policy: it calls the SAME (*policyDoc).ResolveSeat
 // resolveRowPolicy calls, so the never-list merge, the [security] ceiling
-// clamp and the [escalation.fallback] redirect apply identically.
+// clamp, the [sizes] starting variant and the [escalation.fallback] redirect
+// apply identically.
 //
-// labels stands in for the issue labels a vote step row snapshots. A
-// conversational gate carries none of its own, so the caller supplies whatever
-// governs the [security] sensitivity check; empty means "not sensitive by
-// label", exactly as an unlabelled row resolves.
+// size stands in for the frozen Size a vote step row snapshots; empty
+// resolves as an unsized row does. labels stands in for the issue labels the
+// row snapshots. A conversational gate carries none of its own, so the
+// caller supplies whatever governs the [security] sensitivity check and the
+// [sizes] label fallback; empty means "not sensitive by label", exactly as an
+// unlabelled row resolves.
 //
 // EVERY SEAT RESOLVES OR THE CALL FAILS. A caller building a judge panel needs
 // the whole roster, and returning the seats that happened to resolve would
 // seat a panel nobody chose while hiding which seat the policy has no row for.
-func ResolveSeats(conn *sql.DB, runID int, seats, labels []string) ([]model.VoterAssignment, error) {
+func ResolveSeats(conn *sql.DB, runID int, seats []string, size string, labels []string) ([]model.VoterAssignment, error) {
 	if _, err := db.GetRun(conn, runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
@@ -115,7 +118,7 @@ func ResolveSeats(conn *sql.DB, runID int, seats, labels []string) ([]model.Vote
 
 	out := make([]model.VoterAssignment, 0, len(seats))
 	for _, seat := range seats {
-		assignment, err := policy.ResolveSeat(seat, "", labels)
+		assignment, err := policy.ResolveSeat(seat, size, labels)
 		if err != nil {
 			return nil, notFoundErr(db.ErrNotFound,
 				"resolving seat %q from %s's pinned policy.toml: %v",

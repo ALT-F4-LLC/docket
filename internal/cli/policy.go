@@ -31,21 +31,27 @@ same one that fills a step row's routing.`,
 }
 
 var policyResolveCmd = &cobra.Command{
-	Use:   "resolve --run RUN-N SEAT [SEAT...]",
+	Use:   "resolve --run RUN-N [--size SIZE] SEAT [SEAT...]",
 	Short: "Resolve each seat's model, effort and variant from the run's pinned policy",
 	Long: `Resolve one {voter, model, effort, variant} per named seat, in the order given.
 
 This is the SAME resolution a vote step row's voter_assignments carry: the
-per-seat ` + "`[executors].<seat>.never`" + ` list merged with ` + "`[security].never`" + ` on a
-sensitive seat, the standing variant clamped to ` + "`[security].ceiling`" + `, and a
+seat's standing variant, or the ` + "`[sizes]`" + ` variant its size or a label maps to;
+the per-seat ` + "`[executors].<seat>.never`" + ` list merged with ` + "`[security].never`" + ` on a
+sensitive seat; that variant clamped to ` + "`[security].ceiling`" + `; and a
 still-forbidden model redirected through ` + "`[escalation.fallback]`" + `. A seat is
 sensitive when it is named in ` + "`[security].nodes`" + ` or when a --label matches
 ` + "`[security].labels`" + `.
 
+--size stands in for the frozen Size a vote step row snapshots from its issue.
+A size other than unknown that ` + "`[sizes]`" + ` maps sets every seat's starting
+variant ahead of any mapped --label; with no --size the seats resolve as an
+unsized row does.
+
 --label (repeatable) stands in for the issue labels a vote step row snapshots.
 A conversational gate carries none of its own, so pass whatever labels govern
-the sensitivity check; with none passed the seats resolve as an unlabelled row
-does.
+the sensitivity check and the ` + "`[sizes]`" + ` label fallback; with none passed the
+seats resolve as an unlabelled row does.
 
 EVERY SEAT RESOLVES OR THE CALL FAILS with NOT_FOUND naming the seat. A panel
 needs its whole roster, and a partial answer would seat a panel nobody chose.
@@ -84,9 +90,10 @@ func runPolicyResolve(cmd *cobra.Command, args []string, w *output.Writer) error
 	if err != nil {
 		return err
 	}
+	size, _ := cmd.Flags().GetString("size")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 
-	seats, err := engine.ResolveSeats(getDB(cmd), runID, args, labels)
+	seats, err := engine.ResolveSeats(getDB(cmd), runID, args, size, labels)
 	if err != nil {
 		return runErr(err)
 	}
@@ -114,6 +121,8 @@ func renderPolicySeats(seats []model.VoterAssignment) string {
 func init() {
 	policyResolveCmd.Flags().String(
 		"run", "", "The run whose pinned policy.toml the seats resolve against")
+	policyResolveCmd.Flags().String("size", "",
+		"The vote row's frozen issue Size to route [sizes] by (trivial, small, bounded, needs-design, unknown)")
 	policyResolveCmd.Flags().StringSliceP("label", "l", nil,
 		"Label to weigh in the [security] sensitivity check (repeatable)")
 
