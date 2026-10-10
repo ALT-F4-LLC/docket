@@ -2092,7 +2092,7 @@ TOML
   local ZG_L_KINDS ZG_L_UNKNOWN
   ZG_L_KINDS=$(sqlite3 "$ZG_L/issues.db" "SELECT DISTINCT kind FROM events ORDER BY kind;")
   ZG_L_UNKNOWN=$(printf '%s\n' "$ZG_L_KINDS" | grep -vxE \
-    'run-started|run-activated|run-paused|run-resumed|run-abandoned|run-done|step-ready|step-claimed|step-heartbeat|step-recorded|gate-started|gate-recorded|step-routed|step-failed|step-superseded|step-skipped|step-resolved|step-approved|step-rejected|loop-entered|join-completed|lease-reaped|issue-promoted|issue-abandoned|issue-in-progress|issue-review|gate-unmatched|gate-rerun|trust-added|trust-removed|vote-opened|vote-tallied|project-registered' || true)
+    'run-started|run-activated|run-paused|run-resumed|run-abandoned|run-done|step-ready|step-claimed|step-heartbeat|step-recorded|claim-refused|gate-started|gate-recorded|step-routed|step-failed|step-superseded|step-skipped|step-resolved|step-approved|step-rejected|loop-entered|join-completed|lease-reaped|issue-promoted|issue-abandoned|issue-in-progress|issue-review|gate-unmatched|gate-rerun|trust-added|trust-removed|vote-opened|vote-tallied|project-registered' || true)
   if [ -z "$ZG_L_UNKNOWN" ]; then
     check "ZG" "ZG21_kinds_are_closed" "PASS"
   else
