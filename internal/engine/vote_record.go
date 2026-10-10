@@ -47,13 +47,12 @@ import (
 // evaluateVoteThreshold applies a vote step's `threshold` table to its
 // proposal's recorded casts (DKT-545).
 //
-// Called by routeVoteStep after an APPROVED tally only:
+// Called by routeVoteStep after an APPROVED or COMMITTED tally only:
 //
 //   - a REJECTED tally routes per `on_fail`, exactly as before — the threshold
 //     asks "was the approval clean", which is not a question about a rejection.
-//   - a COMMITTED proposal skips it too: §8.4's manual commit is an operator
-//     setting the final outcome by hand, and a threshold overriding that would
-//     re-open a question a person just closed.
+//   - a COMMITTED proposal is asked it like an approved one: §8.4's commit is
+//     accepted only from approved, so its cast set is the approved tally's.
 //
 // The schema resolver is nil — casts have no registered payload schema — which
 // makes equality the whole language (T1 needs no schema) and any ordered

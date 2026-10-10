@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -892,5 +894,53 @@ func TestT1IsSchemaTypedForDeclaredFields(t *testing.T) {
 	if got := evalOne(t, "any(score == 1.50)", `[{"score":1.5}]`); got.Routing != RoutingPass {
 		t.Errorf("the schema-less reading changed: routed %q, want %q",
 			got.Routing, RoutingPass)
+	}
+}
+
+// commitAndRouteConcernGate tallies concernParkSrc's gate over the given casts
+// with no dissent hold, commits the approved proposal by hand before routing
+// runs, then routes it and returns the gate step.
+func commitAndRouteConcernGate(t *testing.T, verdicts ...model.Verdict) (*db.Step, string) {
+	t.Helper()
+	conn, e, proposalID := castDissentGate(t, concernParkSrc, "", verdicts...)
+	commitDissentGate(t, conn, proposalID)
+	err := e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the committed tally: %v", err)
+	return dissentGateStep(t, conn), stepStatus(t, conn, "gate@0")
+}
+
+// A committed proposal was an approved tally first, so committing it before
+// routing runs must not skip the threshold the approved tally would meet.
+// TestVoteThresholdParkKeepsThresholdClass is the approved twin.
+func TestVoteThresholdRoutesCommittedProposal(t *testing.T) {
+	gate, status := commitAndRouteConcernGate(t,
+		model.VerdictApproveWithConcerns, model.VerdictApprove, model.VerdictApprove)
+
+	if !strings.HasPrefix(gate.Routing, workflow.OnFailWaitingHuman) {
+		t.Errorf("gate@0 routing = %q, want the threshold's %q",
+			gate.Routing, workflow.OnFailWaitingHuman)
+	}
+	if status != db.StepWaitingHuman {
+		t.Errorf("gate@0 status = %q, want %q", status, db.StepWaitingHuman)
+	}
+	if gate.ParkClass != db.ParkClassThresholdRouted {
+		t.Errorf("gate@0 park_class = %q, want %q", gate.ParkClass, db.ParkClassThresholdRouted)
+	}
+}
+
+// A committed proposal whose casts match no predicate passes, as an approved
+// one does: the threshold is evaluated, not assumed to match.
+func TestVoteThresholdCommittedNoMatchPasses(t *testing.T) {
+	gate, status := commitAndRouteConcernGate(t,
+		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
+
+	if !strings.HasPrefix(gate.Routing, RoutingPass) {
+		t.Errorf("gate@0 routing = %q, want %q", gate.Routing, RoutingPass)
+	}
+	if status != db.StepDone {
+		t.Errorf("gate@0 status = %q, want %q", status, db.StepDone)
+	}
+	if gate.ParkClass == db.ParkClassThresholdRouted {
+		t.Errorf("gate@0 park_class = %q, want no threshold park", gate.ParkClass)
 	}
 }

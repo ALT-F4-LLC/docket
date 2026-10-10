@@ -581,6 +581,11 @@ func routeVoteStep(
 	routing := RoutingPass
 	concernReason := ""
 	var concernClass db.ParkClass
+	// §8.4's commit is accepted only from approved and casting closes at the
+	// tally, so a committed proposal carries the approved tally's cast set and
+	// is routed as one.
+	approvedTally := outcome.Status == model.ProposalStatusApproved ||
+		outcome.Status == model.ProposalStatusCommitted
 	switch {
 	case triaged != nil && triageDecided(outcome):
 		// A TRIAGE PANEL THAT REACHED A VERDICT IS DONE, whichever way it
@@ -597,16 +602,18 @@ func routeVoteStep(
 		routing = RoutingPass
 	case outcome.Verdict == VerdictFail:
 		routing = spec.EffectiveOnFail()
-	case outcome.Status == model.ProposalStatusApproved && len(spec.Threshold) > 0:
+	case approvedTally && triaged == nil && len(spec.Threshold) > 0:
 		// DKT-545: an APPROVED tally with a declared `threshold` is asked one
 		// more question — over the CAST SET, not the tally: an approval built
 		// on approve-with-concerns casts can route into the same revise loop
 		// a rejection does, instead of the concerns evaporating. No threshold
 		// declared (every pre-existing workflow) means no evaluation and the
-		// exact prior behavior; a COMMITTED proposal skips it too, because
-		// §8.4's manual commit is an operator setting the final outcome by
-		// hand. Evaluated OUTSIDE the transaction below, like every other
-		// pooled read in this function.
+		// exact prior behavior. A COMMITTED proposal is asked it too, so a
+		// commit landing before routing runs cannot route a tally past the
+		// threshold its approval would meet. A triage panel never is: an
+		// approved panel takes the arm above, and a committed one must not
+		// diverge from it. Evaluated OUTSIDE the transaction below, like
+		// every other pooled read in this function.
 		result, err := evaluateVoteThreshold(conn, step, spec, outcome.ProposalID)
 		if err != nil {
 			return err
@@ -640,8 +647,6 @@ func routeVoteStep(
 	// matched `pass`. The park fires in both cases: the operator's
 	// hold_on_dissent outranks an author's explicit `pass`, so a declared
 	// threshold can never silence a dissent the operator asked to see.
-	approvedTally := outcome.Status == model.ProposalStatusApproved ||
-		outcome.Status == model.ProposalStatusCommitted
 	if routing == RoutingPass && approvedTally && triaged == nil {
 		dissentReason, err := dissentHold(conn, step, spec, outcome.ProposalID)
 		if err != nil {
