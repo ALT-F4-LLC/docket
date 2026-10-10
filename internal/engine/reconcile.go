@@ -457,10 +457,18 @@ func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
 func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
 
+	prior, resolution, err := db.IssueStatusResolutionTx(tx, step.IssueID)
+	if err != nil {
+		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)
+	}
+	if db.DoneTransitionClearsResolution(prior, model.StatusDone, false) {
+		resolution = ""
+	}
+
 	res, err := tx.Exec(
-		`UPDATE issues SET status = ?, resolution = '', updated_at = ?, version = version + 1
+		`UPDATE issues SET status = ?, resolution = ?, updated_at = ?, version = version + 1
 		  WHERE id = ? AND status != ?`,
-		model.StatusDone, now, step.IssueID, model.StatusDone,
+		model.StatusDone, resolution, now, step.IssueID, model.StatusDone,
 	)
 	if err != nil {
 		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)

@@ -247,6 +247,34 @@ func SetIssueResolutionTx(tx *sql.Tx, issueID int, resolution string) error {
 	return nil
 }
 
+// DoneTransitionClearsResolution reports whether a status write must clear the
+// issue's resolution. Every writer that can move an issue into done decides
+// through it.
+//
+// Moving an issue INTO done supersedes a routing's earlier "abandoned": the
+// delivered issue must not read as cancelled. `run_disposition` keeps the
+// run-level record. Re-asserting done on an issue already there is not a
+// transition and keeps the resolution, and a caller that sets `resolution`
+// explicitly keeps the value it set.
+func DoneTransitionClearsResolution(prior, target model.Status, explicitResolution bool) bool {
+	return target == model.StatusDone && prior != model.StatusDone && !explicitResolution
+}
+
+// IssueStatusResolutionTx reads an issue's status and resolution inside tx, or
+// returns ErrNotFound.
+func IssueStatusResolutionTx(tx *sql.Tx, issueID int) (model.Status, string, error) {
+	var status model.Status
+	var resolution string
+	err := tx.QueryRow(`SELECT status, resolution FROM issues WHERE id = ?`, issueID).Scan(&status, &resolution)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("reading the status of issue %d: %w", issueID, err)
+	}
+	return status, resolution, nil
+}
+
 // IssueProjectID returns the project an issue is homed in, or ErrNotFound.
 //
 // It exists for validations that need the project WITHOUT the issue's whole
@@ -626,15 +654,11 @@ func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, cha
 		return err
 	}
 
-	// An operator moving an issue INTO done supersedes a routing's earlier
-	// "abandoned": the delivered issue must not read as cancelled.
-	// `run_disposition` keeps the run-level record. Re-asserting done on an
-	// issue already there is not a transition and keeps the resolution.
-	if updates["status"] == string(model.StatusDone) && oldIssue.Status != model.StatusDone {
-		if _, explicit := updates["resolution"]; !explicit {
-			updates = maps.Clone(updates)
-			updates["resolution"] = ""
-		}
+	target, _ := updates["status"].(string)
+	_, explicit := updates["resolution"]
+	if DoneTransitionClearsResolution(oldIssue.Status, model.Status(target), explicit) {
+		updates = maps.Clone(updates)
+		updates["resolution"] = ""
 	}
 
 	var setClauses []string

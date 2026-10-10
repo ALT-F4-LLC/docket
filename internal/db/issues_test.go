@@ -353,3 +353,27 @@ func TestUpdateIssue_DoneWithEmptyResolutionRecordsNoResolutionActivity(t *testi
 		t.Errorf("resolution activity rows = %d, want 0: %+v", len(rows), rows)
 	}
 }
+
+func TestDoneTransitionClearsResolution(t *testing.T) {
+	// Every row starts from an issue resolved IssueResolutionAbandoned; the
+	// rule decides whether the status write clears it or leaves it standing.
+	cases := []struct {
+		name               string
+		prior, target      model.Status
+		explicitResolution bool
+		wantClear          bool
+	}{
+		{"todo moving to done clears the abandoned resolution", model.StatusTodo, model.StatusDone, false, true},
+		{"done re-asserting done keeps the abandoned resolution", model.StatusDone, model.StatusDone, false, false},
+		{"todo moving to done with an explicit resolution keeps the explicit value", model.StatusTodo, model.StatusDone, true, false},
+		{"todo moving to in-progress keeps the abandoned resolution", model.StatusTodo, model.StatusInProgress, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := DoneTransitionClearsResolution(c.prior, c.target, c.explicitResolution); got != c.wantClear {
+				t.Errorf("DoneTransitionClearsResolution(%q, %q, %v) = %v, want %v",
+					c.prior, c.target, c.explicitResolution, got, c.wantClear)
+			}
+		})
+	}
+}
