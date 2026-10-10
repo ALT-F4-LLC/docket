@@ -399,7 +399,7 @@ type voteRule struct {
 	// the step's declaration, pinned at activation, is the only authority.
 	//
 	// HoldOnDissent is the rule's opt-in routing dimension (DKT-2449): an
-	// APPROVED tally carrying at least one `reject` parks its vote step for
+	// APPROVED or COMMITTED tally carrying at least one `reject` parks its vote step for
 	// the operator rather than passing, with the dissenting seat named in the
 	// routing record. Unlike Sealed it is read at ROUTE time rather than
 	// stored on the proposal at open, so a key edited between the last cast
@@ -624,21 +624,25 @@ func routeVoteStep(
 	//
 	// Placed AFTER the switch and guarded on `routing == RoutingPass`, which
 	// is what makes the park strictly ADDITIVE: it can only ever displace a
-	// pass. A triage panel (which the first arm passed) is excluded
-	// explicitly, because parking it on the question it just answered is what
-	// DKT-1901 forbids; a rejected tally keeps its `on_fail` because the
-	// second arm already moved `routing`; a `threshold` match on `fix-loop` or
-	// `waiting-human` keeps its own routing for the same reason; and a
-	// COMMITTED proposal is skipped by the approved-status test, as §8.4's
-	// manual commit is the operator's answer.
+	// pass. Every triage panel is excluded explicitly, decided or committed,
+	// because parking it on the question it just answered is what DKT-1901
+	// forbids; a rejected tally keeps its `on_fail` because the second arm
+	// already moved `routing`; and a `threshold` match on `fix-loop` or
+	// `waiting-human` keeps its own routing for the same reason.
+	//
+	// A COMMITTED proposal is parked exactly as an APPROVED one is: §8.4's
+	// commit is accepted only from approved, so its cast set is the approved
+	// tally's, and a commit landing before routing runs (a paused run holds
+	// routing indefinitely) must not pass a dissent the rule asked to see.
 	//
 	// `routing == RoutingPass` covers both a tally no threshold predicate
 	// matched and one where the workflow author's predicate explicitly
 	// matched `pass`. The park fires in both cases: the operator's
 	// hold_on_dissent outranks an author's explicit `pass`, so a declared
 	// threshold can never silence a dissent the operator asked to see.
-	if routing == RoutingPass && outcome.Status == model.ProposalStatusApproved &&
-		!(triaged != nil && triageDecided(outcome)) {
+	approvedTally := outcome.Status == model.ProposalStatusApproved ||
+		outcome.Status == model.ProposalStatusCommitted
+	if routing == RoutingPass && approvedTally && triaged == nil {
 		dissentReason, err := dissentHold(conn, step, spec, outcome.ProposalID)
 		if err != nil {
 			return err

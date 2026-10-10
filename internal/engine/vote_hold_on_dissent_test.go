@@ -181,6 +181,17 @@ func castDissentGate(
 	t *testing.T, src, hold string, verdicts ...model.Verdict,
 ) (*sql.DB, *Engine, int) {
 	t.Helper()
+	conn, e, _, proposalID := openDissentGate(t, src, hold)
+	for i, seat := range []string{"seat-a", "seat-b", "seat-c"} {
+		castSeat(t, conn, proposalID, seat, verdicts[i], "")
+	}
+	return conn, e, proposalID
+}
+
+// openDissentGate is castDissentGate up to the open ballot, with no casts
+// landed, returning the run so a test can move it between casts.
+func openDissentGate(t *testing.T, src, hold string) (*sql.DB, *Engine, int, int) {
+	t.Helper()
 	conn := mustDB(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")
 	if hold != "" {
@@ -194,11 +205,7 @@ func castDissentGate(
 	testsupport.Must(t, err, "activate: %v", err)
 	e := testEngine()
 
-	proposalID := openGateProposal(t, conn, e, run.ID)
-	for i, seat := range []string{"seat-a", "seat-b", "seat-c"} {
-		castSeat(t, conn, proposalID, seat, verdicts[i], "")
-	}
-	return conn, e, proposalID
+	return conn, e, run.ID, openGateProposal(t, conn, e, run.ID)
 }
 
 func dissentGateStep(t *testing.T, conn *sql.DB) *db.Step {
@@ -419,4 +426,116 @@ func TestVoteHoldOnDissentExclusions(t *testing.T) {
 		}
 		stepIDByInstance(t, conn, "fix@1") // fatals if the fix round never opened
 	})
+}
+
+// commitDissentGate commits the gate's proposal the way `docket vote commit`
+// does. CommitProposal accepts only an approved proposal, so a nil error also
+// establishes that the tally approved.
+func commitDissentGate(t *testing.T, conn *sql.DB, proposalID int) {
+	t.Helper()
+	err := db.CommitProposal(conn, proposalID, "committed by hand", "")
+	testsupport.Must(t, err, "committing the proposal: %v", err)
+}
+
+// A committed proposal was an approved tally first, so committing it before
+// routing runs must not launder a dissent the keyed rule would have parked.
+func TestVoteHoldOnDissentParksCommittedWithReject(t *testing.T) {
+	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "true",
+		model.VerdictApprove, model.VerdictApprove, model.VerdictReject)
+	commitDissentGate(t, conn, proposalID)
+
+	err := e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+
+	gate := dissentGateStep(t, conn)
+	if !strings.HasPrefix(gate.Routing, workflow.OnFailWaitingHuman) {
+		t.Fatalf("gate@0 routing = %q, want %q — a committed tally carrying a "+
+			"reject must park under a keyed rule like an approved one",
+			gate.Routing, workflow.OnFailWaitingHuman)
+	}
+	if !strings.Contains(gate.Routing, "hold_on_dissent parked it on seat-c") {
+		t.Errorf("gate@0 routing record %q does not carry the dissent reason "+
+			"naming seat-c", gate.Routing)
+	}
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepWaitingHuman {
+		t.Errorf("gate@0 status = %q, want %q", got, db.StepWaitingHuman)
+	}
+}
+
+// The window the commit exploits: a paused run routes nothing, so the last
+// cast decides the tally and leaves the step pending until resume.
+func TestVoteHoldOnDissentCommittedWhilePaused(t *testing.T) {
+	conn, e, runID, proposalID := openDissentGate(t, holdOnDissentSrc, "true")
+	castSeat(t, conn, proposalID, "seat-a", model.VerdictApprove, "")
+	castSeat(t, conn, proposalID, "seat-b", model.VerdictApprove, "")
+
+	_, _, err := MoveRun(conn, runID, "pause", model.RunWaitingHuman,
+		[]model.RunStatus{model.RunActive}, "stepping away", nowMS+1)
+	testsupport.Must(t, err, "pause: %v", err)
+
+	castSeat(t, conn, proposalID, "seat-c", model.VerdictReject, "")
+	// The drive `vote cast` makes at the deciding cast: the pause must hold it,
+	// or this test never reaches the window it exists for.
+	err = e.DriveVoteProposal(conn, proposalID, nowMS+2)
+	testsupport.Must(t, err, "driving the deciding cast: %v", err)
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepPending {
+		t.Fatalf("premise: gate@0 status = %q on the paused run, want %q",
+			got, db.StepPending)
+	}
+
+	commitDissentGate(t, conn, proposalID)
+	_, _, err = MoveRun(conn, runID, "resume", model.RunActive,
+		[]model.RunStatus{model.RunWaitingHuman}, "back", nowMS+3)
+	testsupport.Must(t, err, "resume: %v", err)
+	err = e.DriveVoteProposal(conn, proposalID, nowMS+4)
+	testsupport.Must(t, err, "driving after resume: %v", err)
+
+	gate := dissentGateStep(t, conn)
+	if !strings.HasPrefix(gate.Routing, workflow.OnFailWaitingHuman) {
+		t.Fatalf("gate@0 routing = %q after resume, want %q — a commit while "+
+			"paused must not pass a dissented tally",
+			gate.Routing, workflow.OnFailWaitingHuman)
+	}
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepWaitingHuman {
+		t.Errorf("gate@0 status = %q, want %q", got, db.StepWaitingHuman)
+	}
+}
+
+// The park stays additive for a committed proposal: with no keyed rule and
+// no threshold there is nothing to displace the pass.
+func TestVoteHoldOnDissentCommittedWithoutChecksPasses(t *testing.T) {
+	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
+		model.VerdictApprove, model.VerdictApprove, model.VerdictReject)
+	commitDissentGate(t, conn, proposalID)
+
+	err := e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+	assertDissentGatePassed(t, conn)
+}
+
+// A committed triage panel is disposed of by its own on_fail, never by the
+// dissent park: parking it would hold every step of the issue behind the
+// question it was convened to answer.
+func TestVoteHoldOnDissentCommittedTriagePanelNotParked(t *testing.T) {
+	conn, _, e := triageRun(t, "retry", "abandon-issue")
+	err := db.SetConfig(conn, 0, db.VoteRuleHoldOnDissentKey("majority"), "true")
+	testsupport.Must(t, err, "setting hold_on_dissent: %v", err)
+
+	proposalID, err := findVoteProposal(conn, mustStep(t, conn, "triage@0"))
+	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+	if proposalID == 0 {
+		t.Fatal("no proposal opened for triage@0")
+	}
+	castSeat(t, conn, proposalID, "seat-a", model.VerdictApprove, "")
+	castSeat(t, conn, proposalID, "seat-b", model.VerdictReject, "")
+	commitDissentGate(t, conn, proposalID)
+	err = e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+
+	panel := mustStep(t, conn, "triage@0")
+	if panel.Status == db.StepWaitingHuman ||
+		strings.Contains(panel.Routing, "hold_on_dissent") {
+		t.Errorf("triage@0 status = %q, routing = %q — a committed panel must "+
+			"not be parked on its own dissent", panel.Status, panel.Routing)
+	}
 }
