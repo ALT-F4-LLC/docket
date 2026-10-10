@@ -53,22 +53,27 @@ Two findings, per registered NAME rather than per version:
             next activation there adopts it; until then the project binds the
             older definition.
 
-  orphaned  no file in any scanned root declares that name any more — the
+  orphaned  no file in the scanned root declares that name. That is the
             residue of a rename or a deletion, since registering a new name
-            never retires the old one. A workflow still binds until it is
-            deprecated ('docket workflow deprecate <name>@<version>'), and a
-            schema still accepts new payload references until it is
+            never retires the old one, OR a name the project registered from
+            its repository's own '.docket/config/', which this audit does not
+            read and which is still that project's live definition. Before
+            deprecating an orphan, confirm from the owning checkout that its
+            repository config does not declare it ('docket workflow list
+            --orphans' reads both roots). A workflow still binds until it is deprecated
+            ('docket workflow deprecate <name>@<version>'), and a schema
+            still accepts new payload references until it is
             ('docket schema deprecate <name>@<version>'). An orphan whose
             every version is retired is still reported, marked retired: the
             cleanup pass has to be able to see its own work.
 
-THE CORPUS IS SCANNED ONCE, not once per project: '~/.docket/config' is shared
-by every project in the store, so what "current" means is one answer. Only the
-shared store root's config is scanned. A repository's own '.docket/config/'
-additions are never read, so the result does not depend on the working
-directory the audit runs from. A name a project registered only from its
-repository's config has no file in the scanned root and is reported orphaned.
-The scanned root is printed so a reader can see where "current" was read from.
+THE CORPUS IS SCANNED ONCE, not once per project: the store root's config
+('~/.docket/config' for the global store) is shared by every project in the
+store, so what "current" means is one answer. Only the shared store root's
+config is scanned. A repository's own '.docket/config/' additions are never
+read, so the result does not depend on the working directory the audit runs
+from. The scanned root is printed so a reader can see where "current" was read
+from.
 
 It REPAIRS NOTHING. Adopting a bumped definition is what activation does,
 inside a transaction, with the validation and collision rules that go with it.`,
@@ -103,8 +108,9 @@ func runRegistryAudit(cmd *cobra.Command, _ []string, w *output.Writer) error {
 	}
 	if !index.Scanned() {
 		return cmdErr(fmt.Errorf(
-			"no instance-config root exists on this machine, so no registry can "+
-				"be compared against anything: with nothing to scan, every "+
+			"the shared store root has no config directory, and the audit never "+
+				"reads a repository's .docket/config, so no registry can be "+
+				"compared against anything: with nothing to scan, every "+
 				"registered name would look orphaned"), output.ErrValidation)
 	}
 	if err := index.Err(); err != nil {
@@ -189,8 +195,10 @@ func renderRegistryAudit(audit *engine.RegistryAudit) string {
 	fmt.Fprintf(&b,
 		"%d of %d project(s) carry findings: %d name(s) behind, %d orphaned.\n"+
 			"A behind name is adopted by the next `docket run activate` in that "+
-			"project; an orphaned one is retired with `docket workflow deprecate` "+
-			"or `docket schema deprecate`.",
+			"project. An orphaned one may still be declared in its project's own "+
+			"repository config, which this audit does not read: confirm with "+
+			"`docket workflow list --orphans` from that checkout, then retire it "+
+			"with `docket workflow deprecate` or `docket schema deprecate`.",
 		dirty, len(audit.Projects), audit.BehindTotal, audit.OrphanedTotal)
 	return b.String()
 }

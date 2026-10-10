@@ -166,6 +166,33 @@ func TestRegistryAuditNamesEveryProjectsDrift(t *testing.T) {
 	if !strings.Contains(human, "registered 4, current 8") {
 		t.Errorf("the render does not state both versions of the lag:\n%s", human)
 	}
+	// An orphan here can be a name a project registered from its own
+	// repository config, which still binds there. The deprecate advice must
+	// send the operator to that checkout's own orphan check first.
+	if !strings.Contains(human, "docket workflow list --orphans") {
+		t.Errorf("the summary advises deprecating every orphan without the "+
+			"owning checkout's cross-check:\n%s", human)
+	}
+}
+
+// TestRegistryAuditHelpStatesTheSharedRootRule: the help text is the only
+// operator-facing statement of which corpus the audit reads, so it must name
+// the shared-root-only rule and its working-directory independence.
+func TestRegistryAuditHelpStatesTheSharedRootRule(t *testing.T) {
+	long := strings.Join(strings.Fields(registryAuditCmd.Long), " ")
+	for _, want := range []string{
+		"Only the shared store root's config is scanned.",
+		"the result does not depend on the working directory",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("the registry audit help never says %q:\n%s",
+				want, registryAuditCmd.Long)
+		}
+	}
+	if strings.Contains(long, "the checkout you are standing in") {
+		t.Errorf("the registry audit help still ties the scanned roots to the "+
+			"invoking checkout:\n%s", registryAuditCmd.Long)
+	}
 }
 
 // TestRegistryAuditNarrowsToOneProject: every project is the default, since
@@ -231,6 +258,42 @@ func TestRegistryAuditRefusesWithNothingToScan(t *testing.T) {
 	}
 	if got := codeOf(t, err); got != output.ErrValidation {
 		t.Errorf("error code = %q, want %q", got, output.ErrValidation)
+	}
+}
+
+// TestRegistryAuditRefusalNamesTheSharedRoot: under the global store, a
+// checkout's own '.docket/config' is never scanned, so a machine whose only
+// config lives in a repository still has nothing to compare against. The
+// refusal must say the shared root is what is missing, not that no config
+// exists anywhere.
+func TestRegistryAuditRefusalNamesTheSharedRoot(t *testing.T) {
+	conn := newTestDB(t)
+	home := t.TempDir()
+	checkout := t.TempDir()
+	local := filepath.Join(checkout, ".docket", "config", "workflows", "investigation.toml")
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(local), 0o755), "creating %s", filepath.Dir(local))
+	testsupport.Must(t, os.WriteFile(local, []byte(auditInvestigationV8), 0o644),
+		"writing %s", local)
+	auditWorkflowRow(t, conn, db.DefaultProjectID, "investigation", 8)
+
+	// DOCKET_PATH is pinned package-wide by TestMain; clearing it selects the
+	// global store rooted at HOME, the only store that has a repository root.
+	t.Setenv("DOCKET_PATH", "")
+	t.Setenv("HOME", home)
+	t.Chdir(checkout)
+
+	w, _ := bufWriter(true)
+	err := runRegistryAudit(registryAuditCmdWithDB(conn), nil, w)
+	if err == nil {
+		t.Fatal("the audit ran with no shared store config to compare against")
+	}
+	if got := codeOf(t, err); got != output.ErrValidation {
+		t.Errorf("error code = %q, want %q", got, output.ErrValidation)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "shared store root") ||
+		!strings.Contains(msg, ".docket/config") {
+		t.Errorf("the refusal does not say the shared store root's config is "+
+			"missing and a repository's config is not read: %s", msg)
 	}
 }
 

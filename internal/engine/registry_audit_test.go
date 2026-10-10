@@ -343,6 +343,20 @@ func TestRegistryAuditDoesNotDependOnTheCallingCheckout(t *testing.T) {
 		t.Errorf("the audit depends on the calling checkout:\nfrom X: %+v\nfrom Y: %+v",
 			*fromX, *fromY)
 	}
+
+	// Equal is not enough: both runs must have read the shared root and
+	// classified the registered name against it.
+	shared := filepath.Join(canonical(t, home), ".docket", "config")
+	if len(fromY.Roots) != 1 || fromY.Roots[0] != shared {
+		t.Errorf("scanned roots = %v, want only the shared store root %s",
+			fromY.Roots, shared)
+	}
+	if p := projectAudit(t, fromY, db.DefaultProjectID); p.Compared != 1 {
+		t.Errorf("compared %d registered name(s), want 1 (local-only)", p.Compared)
+	}
+	if fromY.BehindTotal != 0 {
+		t.Errorf("behind_total = %d, want 0", fromY.BehindTotal)
+	}
 }
 
 // TestCorpusIndexReportsNothingScannedWithNoRoot is the state every caller has
