@@ -761,12 +761,14 @@ appearing later would break the `run start` invocation an S3-era harness scripte
 failing the whole activation:
 
 1. **Bind.** For each issue in the run, evaluate every registered workflow's
-   `[match]` (`kind`, `labels_any`, `labels_all`, `unless_labels`) against the
-   issue. **Exactly one must match.** Zero or multiple ⇒ `VALIDATION_ERROR`
-   "naming the issue and the candidate workflows" (§11.1, verbatim). Match
-   evaluation: `kind` ∈ list (absent ⇒ any); `labels_any` intersects; `labels_all`
-   subset; `unless_labels` disjoint — `unless_labels` is evaluated **last and wins**,
-   so an exclusion cannot be defeated by an inclusion.
+   `[match]` (`kind`, `labels_any`, `labels_all`, `sizes_any`, `unless_labels`)
+   against the issue. **Exactly one must match.** Zero or multiple ⇒
+   `VALIDATION_ERROR` "naming the issue and the candidate workflows" (§11.1,
+   verbatim). Match evaluation: `kind` ∈ list (absent ⇒ any); `labels_any`
+   intersects; `labels_all` subset; `sizes_any` ∋ the issue's declared size
+   (absent ⇒ any); `unless_labels` disjoint. `sizes_any` is an inclusion clause
+   evaluated with the other three before `unless_labels`, which is evaluated
+   **last and wins**, so an exclusion cannot be defeated by an inclusion.
 2. **Lint the work DAG.** `planner.BuildDAG` + `TopoSort` over the run's issues and
    their `depends_on` relations — reused directly, no adaptation needed at this
    level. A cycle is `VALIDATION_ERROR` with the existing `CycleError` rendering.

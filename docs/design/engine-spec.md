@@ -478,7 +478,12 @@ not part of the core surface.
 `[pipeline]` — `name` (string, required), `version` (int, required), `description?`.
 
 `[match]` — `kind = [..]`, `labels_any = [..]`, `labels_all = [..]`,
-`unless_labels = [..]`. Evaluated at activation; **exactly one** workflow may match an
+`sizes_any = [..]`, `unless_labels = [..]`. `sizes_any` matches when the issue's
+declared size is in the list; an absent list matches any issue, and an issue with no
+declared size matches only an absent list. It is an inclusion clause, evaluated with
+`kind`, `labels_any`, and `labels_all` before `unless_labels`, which is evaluated
+**last and wins** *(amended 2026-10-09 — schema v34, reliability-delta "AMENDMENT —
+the span extends to v34")*. Evaluated at activation; **exactly one** workflow may match an
 issue — zero or multiple matches is a VALIDATION_ERROR naming the issue and the
 candidate workflows. Matching is evaluated over the **highest registered version of
 each workflow name** (mirroring `workflow show`'s resolution); superseded versions
