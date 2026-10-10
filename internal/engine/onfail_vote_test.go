@@ -792,3 +792,95 @@ after_loop = "review"
 			"panel, even though lint-fix@1 is skipped")
 	}
 }
+
+// TestFirstLaneFailureOpensPanelOrderedAfterLoopBody: a panel ordered after a
+// loop body is still the first lane's panel at ordinal 0, where the body has no
+// instance until a fix round enters it. A failed implement@0 must reach it, or
+// the suspension strands with no panel able to answer.
+func TestFirstLaneFailureOpensPanelOrderedAfterLoopBody(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(loopTriageSrc), "loop-triage-lane.toml")
+
+	issue := createIssue(t, conn, "first-lane triaged", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	e.Gates = failingGates{}
+	claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+	err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after implement@0's failure: %v", err)
+
+	if stepExists(t, conn, "fix@0") {
+		t.Fatal("premise: fix@0 exists; the loop body must be unentered at ordinal 0")
+	}
+	step := mustStep(t, conn, "implement@0")
+	if step.Status != db.StepGated || !routingIs(step.Routing, "triage") {
+		t.Errorf("implement@0 = %q routing %q, want %q routing %q",
+			step.Status, step.Routing, db.StepGated, "triage")
+	}
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		if ready, cond := sched.Ready(stepNamed(t, sched, "triage@0")); !ready {
+			t.Errorf("triage@0 blocked by %q: implement@0 is suspended on it, and "+
+				"the unentered loop body fix has no instance to wait for", cond)
+		}
+	})
+
+	panel := mustStep(t, conn, "triage@0")
+	proposalID, err := findVoteProposal(conn, panel)
+	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+	if proposalID == 0 {
+		t.Fatal("no proposal opened for triage@0 — implement@0 strands")
+	}
+	proposal, err := db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "reading the proposal: %v", err)
+	if proposal.Status != model.ProposalStatusOpen {
+		t.Errorf("triage@0's proposal status = %q, want %q",
+			proposal.Status, model.ProposalStatusOpen)
+	}
+}
+
+// TestSuccessorOfUnenteredLoopBodyWaits: the ordinal-0 exemption belongs to a
+// panel a suspended router names. An ordinary step ordered after the loop body
+// still waits for the body, so review-like work is not released before the
+// loop is entered. implement@0 passes, which leaves the unentered `fix` as the
+// only predecessor able to hold audit@0.
+func TestSuccessorOfUnenteredLoopBodyWaits(t *testing.T) {
+	src := loopTriageSrc + `
+[[step]]
+name = "audit"
+after = ["implement", "fix"]
+executor = "y"
+emits = "verdict"
+`
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(src), "loop-triage-lane.toml")
+
+	issue := createIssue(t, conn, "loop successor", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+	err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after implement@0 passed: %v", err)
+	if got := stepStatus(t, conn, "implement@0"); got != db.StepDone {
+		t.Fatalf("premise: implement@0 status = %q, want %q", got, db.StepDone)
+	}
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		ready, cond := sched.Ready(stepNamed(t, sched, "audit@0"))
+		if ready {
+			t.Fatal("audit@0 is ready at ordinal 0 although its predecessor fix " +
+				"has not been entered and no suspended router names audit")
+		}
+		if cond != CondPredecessors {
+			t.Errorf("audit@0 blocked by %q, want %q", cond, CondPredecessors)
+		}
+	})
+}

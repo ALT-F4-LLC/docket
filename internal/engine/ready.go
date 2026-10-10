@@ -788,7 +788,14 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 		siblings := s.predecessorInstances(step, predName)
 		if len(siblings) == 0 {
 			// A predecessor with no instance at or below this ordinal has not
-			// been expanded (or is a loop body not yet entered): not done.
+			// been expanded, or is a loop body not yet entered: not done. The
+			// one exception is a triage panel a router is suspended on: an
+			// unentered loop body has nothing to wait for, and waiting would
+			// strand the router at ordinal 0.
+			if pred := workflow.StepByName(def, predName); pred != nil && pred.Loop &&
+				s.hasRouterSuspendedOn(step) {
+				continue
+			}
 			return false
 		}
 
@@ -908,6 +915,24 @@ func (s *Scheduler) routedTo(step *db.Step) bool {
 			// A triage panel's predecessor is SUSPENDED rather than done
 			// (DKT-1901): its failure is the question the panel exists to
 			// answer, so waiting for it to terminalize first would deadlock.
+			if suspendedOnPanel(pred, step.StepName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasRouterSuspendedOn reports whether an instance of one of the step's routing
+// predecessors is suspended on it as its triage panel. Instances resolve by
+// predecessorInstances' ordinal rule, as in routedTo.
+func (s *Scheduler) hasRouterSuspendedOn(step *db.Step) bool {
+	def := s.defs[step.WorkflowID]
+	if def == nil {
+		return false
+	}
+	for _, predName := range workflow.RoutingPredecessors(def, step.StepName) {
+		for _, pred := range s.predecessorInstances(step, predName) {
 			if suspendedOnPanel(pred, step.StepName) {
 				return true
 			}
