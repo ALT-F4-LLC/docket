@@ -315,3 +315,75 @@ func TestVoteHoldOnDissentExplicitPassStillParks(t *testing.T) {
 		}
 	})
 }
+
+// TestVoteHoldOnDissentExclusions holds the park guard's two exclusions that
+// routing order alone enforces: each case is an APPROVED tally carrying a
+// reject under a keyed rule, which parks anywhere the exclusion is lost.
+func TestVoteHoldOnDissentExclusions(t *testing.T) {
+	requireApproved := func(t *testing.T, conn *sql.DB, proposalID int) {
+		t.Helper()
+		proposal, err := db.GetProposal(conn, proposalID)
+		testsupport.Must(t, err, "GetProposal: %v", err)
+		if proposal.Status != model.ProposalStatusApproved {
+			t.Fatalf("proposal status = %q, want approved — the case must reach "+
+				"the park guard with a dissented approval", proposal.Status)
+		}
+	}
+
+	// The triage arm itself sets `pass`, so only the explicit triage conjunct
+	// keeps a decided panel from being parked on the question it answered.
+	t.Run("a decided triage panel is not parked", func(t *testing.T) {
+		conn, _, e := triageRun(t, "retry", "abandon-issue")
+		err := db.SetConfig(conn, 0, db.VoteRuleHoldOnDissentKey("majority"), "true")
+		testsupport.Must(t, err, "setting hold_on_dissent: %v", err)
+
+		proposalID, err := findVoteProposal(conn, mustStep(t, conn, "triage@0"))
+		testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+		if proposalID == 0 {
+			t.Fatal("no proposal opened for triage@0")
+		}
+		// One approve against one reject at equal weight scores exactly the
+		// 0.5 rule, which approves.
+		castSeat(t, conn, proposalID, "seat-a", model.VerdictApprove, "")
+		castSeat(t, conn, proposalID, "seat-b", model.VerdictReject, "")
+		err = e.DriveVoteProposal(conn, proposalID, nowMS)
+		testsupport.Must(t, err, "driving the tally: %v", err)
+		requireApproved(t, conn, proposalID)
+
+		panel := mustStep(t, conn, "triage@0")
+		if strings.HasPrefix(panel.Routing, workflow.OnFailWaitingHuman) ||
+			strings.Contains(panel.Routing, "hold_on_dissent") {
+			t.Errorf("triage@0 routing = %q — a decided panel must not be "+
+				"parked on its own dissent", panel.Routing)
+		}
+		if panel.Status != db.StepDone {
+			t.Errorf("triage@0 status = %q, want %q", panel.Status, db.StepDone)
+		}
+		step := mustStep(t, conn, "implement@0")
+		if !routingIs(step.Routing, ResolveRetry) {
+			t.Errorf("implement@0 routing = %q, want the panel's mapped %q",
+				step.Routing, ResolveRetry)
+		}
+	})
+
+	// A threshold that routed `fix-loop` must keep it: the park is clearable
+	// by `override-pass`, so displacing a fix round with it loosens the gate.
+	t.Run("a threshold fix-loop is not displaced by the park", func(t *testing.T) {
+		conn, gate := driveDissentGateSrc(t, concernLoopSrc, "true",
+			model.VerdictApproveWithConcerns, model.VerdictApproveWithConcerns,
+			model.VerdictReject)
+		proposalID, err := findVoteProposal(conn, gate)
+		testsupport.Must(t, err, "finding gate@0's proposal: %v", err)
+		requireApproved(t, conn, proposalID)
+
+		if !strings.HasPrefix(gate.Routing, workflow.OnFailFixLoop) {
+			t.Errorf("gate@0 routing = %q, want the threshold's %q",
+				gate.Routing, workflow.OnFailFixLoop)
+		}
+		if strings.HasPrefix(gate.Routing, workflow.OnFailWaitingHuman) {
+			t.Errorf("gate@0 routing = %q — the dissent park replaced a fix-loop route",
+				gate.Routing)
+		}
+		stepIDByInstance(t, conn, "fix@1") // fatals if the fix round never opened
+	})
+}
