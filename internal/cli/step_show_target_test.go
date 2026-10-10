@@ -186,3 +186,47 @@ func TestStepShowHumanModeStatesTheTarget(t *testing.T) {
 		t.Errorf("a step with no target printed a target section:\n%s", buf.String())
 	}
 }
+
+// TestStepShowJSONCarriesLoopHistory: the loop-history facts reach the
+// envelope only because stepDetailPayload EMBEDS model.StepRow. A named field
+// in its place would nest them under that field on every wrapped step, so
+// both payload paths are asserted at top level.
+func TestStepShowJSONCarriesLoopHistory(t *testing.T) {
+	row := model.StepRow{
+		LoopRoundsRun:     2,
+		LoopTriggerStep:   "review@0#0",
+		LoopLatestVerdict: "needs-fix",
+	}
+	want := map[string]string{
+		"loop_rounds_run":     `2`,
+		"loop_trigger_step":   `"review@0#0"`,
+		"loop_latest_verdict": `"needs-fix"`,
+	}
+
+	for _, tc := range []struct {
+		name    string
+		view    engine.StepView
+		wrapped bool
+	}{
+		{name: "bare row", view: engine.StepView{Row: row}},
+		{name: "wrapper", view: engine.StepView{Row: row, HeldCluster: &engine.HeldClusterLink{}}, wrapped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := stepShowPayload(&tc.view)
+			if _, isWrapper := payload.(stepDetailPayload); isWrapper != tc.wrapped {
+				t.Fatalf("stepShowPayload returned %T; this case exercises the %s path", payload, tc.name)
+			}
+			raw, err := json.Marshal(payload)
+			testsupport.Must(t, err, "marshal: %v", err)
+
+			var top map[string]json.RawMessage
+			err = json.Unmarshal(raw, &top)
+			testsupport.Must(t, err, "unmarshal: %v\n%s", err, raw)
+			for key, value := range want {
+				if got, ok := top[key]; !ok || string(got) != value {
+					t.Errorf("top-level %s = %s (present %t), want %s:\n%s", key, got, ok, value, raw)
+				}
+			}
+		})
+	}
+}
