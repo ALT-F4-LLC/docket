@@ -35,7 +35,9 @@ import (
 // against the vote step's pinned switches, then record it through the existing
 // tally. An ad-hoc proposal (no vote step behind it) and a materialized held
 // step (whose minted name the pinned definition never declares) enforce
-// nothing and tally exactly as before.
+// nothing and tally exactly as before. An ad-hoc panel a run attributes also
+// records its vote-opened and vote-tallied events on that run
+// (recordConductorPanelEvents).
 //
 // A refusal is a VALIDATION_ERROR, raised BEFORE the transaction opens, so a
 // refused cast writes no vote row. The db sentinels (ErrNotFound, ErrConflict)

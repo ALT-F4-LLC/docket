@@ -131,8 +131,9 @@ func conductorPanelRuns(conn *sql.DB, proposalID int) ([]panelRun, error) {
 
 // recordPanelRunEvents records, in one transaction on one run, the panel's
 // vote-opened unless the run already has it, then its vote-tallied when tally
-// is non-empty. The existence check shares the transaction with the write so
-// that a later cast does not open the panel a second time.
+// is non-empty. The existence check shares the write-locked transaction
+// (internal/db opens every Begin immediate) with the write, so neither a later
+// cast nor a concurrent one opens the panel a second time.
 func recordPanelRunEvents(conn *sql.DB, run panelRun, proposalID int, tally string) error {
 	pid := model.FormatProposalID(proposalID)
 	tx, err := conn.Begin()
