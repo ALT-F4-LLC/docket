@@ -16,6 +16,12 @@ import (
 	"golang.org/x/term"
 )
 
+// voteStepKeyPrefix is the head of the engine's vote-step idempotency keys
+// (engine.voteStepScopePrefix). The engine opens a vote step's proposal under
+// such a key and adopts whatever proposal already holds it, so a caller key in
+// this family would let the caller pre-seed the step's ballot.
+const voteStepKeyPrefix = "vote-step:"
+
 var voteCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a new consensus proposal",
@@ -214,6 +220,13 @@ var voteCreateCmd = &cobra.Command{
 		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
 			return err
+		}
+		if strings.HasPrefix(idempotencyKey, voteStepKeyPrefix) {
+			return cmdErr(
+				fmt.Errorf("--%s must not begin with %q: that key family links workflow vote steps to their proposals",
+					idempotencyKeyFlag, voteStepKeyPrefix),
+				output.ErrValidation,
+			)
 		}
 
 		id, err := db.CreateProposalIdempotent(conn, &proposal, idempotencyKey)
