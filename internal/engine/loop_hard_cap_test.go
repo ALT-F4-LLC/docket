@@ -69,7 +69,10 @@ after_loop = "review"
 // operator's own `fix-round` at the cap is still admitted.
 func TestFixLoopExtensionHardCap(t *testing.T) {
 	t.Run("approvals mint one round each until the hard cap, then park", func(t *testing.T) {
-		conn, _, e := hardCapLane(t, "max_fix_loops_hard = 3")
+		// `on_exhausted` names a non-park routing so the park below is shown to
+		// come from the hard cap, not from the declared exhaustion routing.
+		conn, run, e := hardCapLane(t,
+			"max_fix_loops_hard = 3\non_exhausted = \"abandon-issue\"")
 
 		// Ordinals 2 and 3 are the two rounds the cap leaves the panel.
 		for ordinal := 1; ordinal <= 2; ordinal++ {
@@ -78,6 +81,10 @@ func TestFixLoopExtensionHardCap(t *testing.T) {
 			if !stepExists(t, conn, next) {
 				t.Fatalf("approval at ordinal %d minted no %s; the hard cap "+
 					"of 3 still had room", ordinal, next)
+			}
+			if beyond := fmt.Sprintf("fix@%d", ordinal+2); stepExists(t, conn, beyond) {
+				t.Fatalf("approval at ordinal %d minted %s as well; one approval "+
+					"mints exactly one round", ordinal, beyond)
 			}
 			if got := stepStatus(t, conn, fmt.Sprintf("fix@%d", ordinal)); got != db.StepSuperseded {
 				t.Errorf("fix@%d = %q after its round was approved, want %q",
@@ -98,6 +105,10 @@ func TestFixLoopExtensionHardCap(t *testing.T) {
 		}
 		if !strings.Contains(step.ParkReason, "max_fix_loops_hard") {
 			t.Errorf("fix@3's park reason does not name the hard cap: %q", step.ParkReason)
+		}
+		if got := runStatusOf(t, conn, run.ID); got != string(model.RunWaitingHuman) {
+			t.Errorf("run status = %q with fix@3 parked at the hard cap, want %q",
+				got, model.RunWaitingHuman)
 		}
 	})
 
