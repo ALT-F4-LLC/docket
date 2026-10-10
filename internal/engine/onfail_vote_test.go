@@ -682,3 +682,113 @@ func TestLoopBodyFailureRoutesToItsOrdinalsPanel(t *testing.T) {
 		}
 	})
 }
+
+// whenGatedFix gives loopTriageSrc's `fix` body a `when` that holds only for an
+// issue labeled run-fix.
+var whenGatedFix = strings.Replace(loopTriageSrc,
+	"on_fail = \"triage\"\nloop = true",
+	"on_fail = \"triage\"\nwhen = \"labels contains run-fix\"\nloop = true", 1)
+
+// enterOrdinalOneWith registers src, passes implement@0, fails review@0's gate
+// into a fix round, and returns with ordinal 1 expanded. The engine it returns
+// passes every gate.
+func enterOrdinalOneWith(
+	t *testing.T, src string, labels []string,
+) (*sql.DB, int, *model.Run, *Engine) {
+	t.Helper()
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(src), "loop-triage-lane.toml")
+
+	issue := createIssue(t, conn, "loop-triaged", "body", "task", labels)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+	e.Gates = failingGates{}
+	claimAndComplete(t, conn, e, "review@0", "the verdict", "")
+	err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after review@0's failure: %v", err)
+	if !stepExists(t, conn, "fix@1") {
+		t.Fatal("premise: review@0's fix-loop did not enter ordinal 1")
+	}
+	e.Gates = PassThroughRunner{}
+	return conn, issue, run, e
+}
+
+// TestWhenFalseLoopBodyPanelDoesNotStrandAfterLoop: a loop body skipped by its
+// `when` at ordinal k never runs, so nothing routes to or skips its on_fail
+// panel. A pending panel@k would hold the after_loop root and the issue
+// forever, so the expansion must leave it non-blocking.
+func TestWhenFalseLoopBodyPanelDoesNotStrandAfterLoop(t *testing.T) {
+	conn, issue, run, e := enterOrdinalOneWith(t, whenGatedFix, nil)
+
+	if got := stepStatus(t, conn, "fix@1"); got != db.StepSkipped {
+		t.Fatalf("premise: fix@1 status = %q, want %q", got, db.StepSkipped)
+	}
+	if stepExists(t, conn, "triage@1") {
+		if got := stepStatus(t, conn, "triage@1"); got != db.StepSkipped {
+			t.Errorf("triage@1 status = %q, want absent or %q: no body at "+
+				"ordinal 1 can route to it", got, db.StepSkipped)
+		}
+	}
+	if ready := readyInstances(t, conn); !slices.Contains(ready, "review@1") {
+		t.Errorf("review@1 is not ready with fix@1 skipped; ready = %q", ready)
+	}
+
+	claimAndComplete(t, conn, e, "review@1", "the round-1 verdict", "")
+	err := e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after review@1 passed: %v", err)
+	if got := stepStatus(t, conn, "review@1"); got != db.StepDone {
+		t.Errorf("review@1 status = %q, want %q", got, db.StepDone)
+	}
+	if got := issueStatus(t, conn, issue); got != "done" {
+		t.Errorf("issue status = %q, want %q", got, "done")
+	}
+}
+
+// TestWhenTrueLoopBodyPanelIsInstantiated: a body whose `when` holds can fail
+// at ordinal k, so its panel must exist there.
+func TestWhenTrueLoopBodyPanelIsInstantiated(t *testing.T) {
+	conn, _, _, _ := enterOrdinalOneWith(t, whenGatedFix, []string{"run-fix"})
+
+	if got := stepStatus(t, conn, "fix@1"); got != db.StepPending {
+		t.Fatalf("premise: fix@1 status = %q, want %q", got, db.StepPending)
+	}
+	if !stepExists(t, conn, "triage@1") {
+		t.Error("no triage@1 row: fix@1 runs at ordinal 1 and names the " +
+			"panel in its on_fail")
+	}
+}
+
+// TestWhenMixedLoopBodyPanelIsInstantiated: when two bodies name one panel and
+// only one of them runs, the panel is still needed for that one.
+func TestWhenMixedLoopBodyPanelIsInstantiated(t *testing.T) {
+	src := strings.Replace(whenGatedFix,
+		`after = ["implement", "fix"]`,
+		`after = ["implement", "fix", "lint-fix"]`, 1) + `
+[[step]]
+name = "lint-fix"
+executor = "x"
+emits = "findings"
+gates = ["build"]
+on_fail = "triage"
+when = "labels contains run-lint-fix"
+loop = true
+after_loop = "review"
+`
+	conn, _, _, _ := enterOrdinalOneWith(t, src, []string{"run-fix"})
+
+	if got := stepStatus(t, conn, "fix@1"); got != db.StepPending {
+		t.Fatalf("premise: fix@1 status = %q, want %q", got, db.StepPending)
+	}
+	if got := stepStatus(t, conn, "lint-fix@1"); got != db.StepSkipped {
+		t.Fatalf("premise: lint-fix@1 status = %q, want %q", got, db.StepSkipped)
+	}
+	if !stepExists(t, conn, "triage@1") {
+		t.Error("no triage@1 row: fix@1 runs at ordinal 1 and names the " +
+			"panel, even though lint-fix@1 is skipped")
+	}
+}

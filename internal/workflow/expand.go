@@ -104,11 +104,13 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 //     ("`after_loop` and its downstream chain re-instantiate at ordinal k"),
 //     supplied as `downstream` because the chain is a property of the
 //     definition's shape that the caller already computed for the sweep;
-//   - the triage panel each instantiated body's `on_fail` names.
-//     A body failing at ordinal k suspends for the panel AT ordinal k, so a
-//     panel left at ordinal 0 would leave that failure with nothing to rule
-//     on. Derived here rather than supplied: the sweep never reads it, and a
-//     panel a passing body did not route to is skipped by the routing itself.
+//   - the triage panel each instantiated body's `on_fail` names, when that
+//     body's `when` holds. A body failing at ordinal k suspends for the panel
+//     AT ordinal k, so a panel left at ordinal 0 would leave that failure with
+//     nothing to rule on. Derived here rather than supplied: the sweep never
+//     reads it, and a panel a passing body did not route to is skipped by the
+//     routing itself. A body expanded `skipped` never runs and so never routes;
+//     a panel only it named would stay pending and hold the after_loop root.
 //
 // The first two sets are the CALLER's, computed for the entry's triggering
 // step, so the instantiation and the supersede sweep read one answer to "what
@@ -129,7 +131,7 @@ func ExpandOrdinal(
 ) []StepInstance {
 	panels := make(map[string]bool)
 	for _, step := range def.Steps {
-		if step.Loop && bodies[step.Name] {
+		if step.Loop && bodies[step.Name] && WhenHolds(step.When, s) {
 			if panel := step.OnFailTarget(); panel != "" {
 				panels[panel] = true
 			}
