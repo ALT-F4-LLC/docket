@@ -129,6 +129,7 @@ SECTIONS=(
   ZP:test_zp_fail_metadata
   ZQ:test_zq_conductor
   ZR:test_zr_report
+  ZS:test_zs_diff_scope
 )
 
 REACHED_TARGET=false
