@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -493,6 +495,11 @@ func stepPacketFiles(
 		instanceConfigRoots(), entries)
 }
 
+// AttachmentMaxBytes caps the bytes one `issue.files` attachment may inline
+// into a packet. It is a CONSTANT, not config, following db.ArtifactMaxBytes,
+// whose 1 MiB it matches.
+const AttachmentMaxBytes = 1 << 20
+
 // issueAttachmentFiles resolves a step's `issue.files` input (DKT-44) to the
 // bytes of every path its issue attaches, for rendering beside the declared
 // packet files.
@@ -519,7 +526,9 @@ func stepPacketFiles(
 // executor's only evidence would be an absence — the failure mode this form
 // exists to end. The refusal is a VALIDATION_ERROR naming the path, and
 // because `step claim --render` renders as a PRE-CLAIM preflight, it costs no
-// lease: the step stays exactly as claimable as it was.
+// lease: the step stays exactly as claimable as it was. A path that is not a
+// regular file, or that holds more than AttachmentMaxBytes, refuses the same
+// way.
 //
 // AN ESCAPING PATH REFUSES BEFORE ANY READ. Every writer of an issue's file
 // list stores its paths verbatim, so this read is the one place containment
@@ -544,7 +553,7 @@ func issueAttachmentFiles(
 		if err := checkAttachmentPath(step.IssueID, path); err != nil {
 			return nil, err
 		}
-		body, err := os.ReadFile(filepath.Join(root, path))
+		body, err := readAttachment(filepath.Join(root, path))
 		if err != nil {
 			return nil, validationErr(
 				"issue %s attaches %q, which `issue.files` could not read from "+
@@ -556,6 +565,39 @@ func issueAttachmentFiles(
 		})
 	}
 	return out, nil
+}
+
+// readAttachment returns the whole of the regular file at `full`, or refuses.
+//
+// The open is non-blocking so a FIFO cannot stall the render waiting for a
+// writer, and the type check runs on the opened descriptor, so no swap between
+// check and read can slip a special file past it. The size bound applies to
+// the bytes actually read, never to a reported size, and an over-cap file is
+// refused rather than truncated: a partial section would be consumed as whole.
+func readAttachment(full string) ([]byte, error) {
+	f, err := os.OpenFile(full, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (type %s)", info.Mode().Type())
+	}
+
+	body, err := io.ReadAll(io.LimitReader(f, AttachmentMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > AttachmentMaxBytes {
+		return nil, fmt.Errorf("larger than the %d-byte attachment cap",
+			AttachmentMaxBytes)
+	}
+	return body, nil
 }
 
 // checkAttachmentPath is checkPacketRef's containment rule applied to an issue

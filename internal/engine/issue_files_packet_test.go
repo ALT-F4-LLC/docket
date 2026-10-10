@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -267,6 +270,82 @@ func TestPacketRendersIssueFilesLiveForPreFreezeSnapshot(t *testing.T) {
 		if !strings.Contains(packet, fileSection(path, body)) {
 			t.Errorf("pre-freeze snapshot: packet lacks live attachment %s:\n%s", path, packet)
 		}
+	}
+}
+
+// TestPacketRendersIssueFilesRefusesAFIFO: an attachment that is not a regular
+// file refuses, and the refusal comes back without any writer opening the pipe.
+// A plain open of a FIFO blocks until a writer arrives, which stalled the claim.
+func TestPacketRendersIssueFilesRefusesAFIFO(t *testing.T) {
+	conn := mustDB(t)
+	root := issueFilesCheckout(t)
+	testsupport.Must(t, syscall.Mkfifo(filepath.Join(root, "docs/pipe.md"), 0o600),
+		"mkfifo: %v", nil)
+	activateIssueFilesRun(t, conn, root, []string{"docs/pipe.md"})
+	stepID := stepIDByInstance(t, conn, "transcribe@0")
+
+	refused := make(chan error, 1)
+	go func() {
+		_, err := RenderStep(conn, stepID, "", nowMS)
+		refused <- err
+	}()
+
+	select {
+	case err := <-refused:
+		if code, ok := CodeOf(err); !ok || code != CodeValidation {
+			t.Fatalf("CodeOf(err) = %q, want %q (err: %v)", code, CodeValidation, err)
+		}
+		if !strings.Contains(err.Error(), "docs/pipe.md") {
+			t.Errorf("refusal does not name the FIFO's path:\n  %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		// Unblock the stalled render so the test can tear down its database.
+		if w, err := os.OpenFile(filepath.Join(root, "docs/pipe.md"), os.O_WRONLY, 0); err == nil {
+			w.Close()
+		}
+		<-refused
+		t.Fatal("RenderStep blocked on a FIFO attachment; want a prompt refusal")
+	}
+}
+
+// TestPacketRendersIssueFilesRefusesAnOverCapFile: an attachment one byte past
+// AttachmentMaxBytes refuses, naming the path and the cap, rather than inlining
+// the file or a truncated prefix of it.
+func TestPacketRendersIssueFilesRefusesAnOverCapFile(t *testing.T) {
+	conn := mustDB(t)
+	root := issueFilesCheckout(t)
+	writeAttachment(t, root, "docs/huge.md", strings.Repeat("x", AttachmentMaxBytes+1))
+	activateIssueFilesRun(t, conn, root, []string{"docs/huge.md"})
+
+	_, err := RenderStep(conn, stepIDByInstance(t, conn, "transcribe@0"), "", nowMS)
+	if err == nil {
+		t.Fatal("RenderStep inlined an attachment over the cap; want a refusal")
+	}
+	if code, ok := CodeOf(err); !ok || code != CodeValidation {
+		t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
+	}
+	for _, want := range []string{"docs/huge.md", strconv.Itoa(AttachmentMaxBytes)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q:\n  %v", want, err)
+		}
+	}
+}
+
+// TestPacketRendersIssueFilesAtExactlyTheCap: a file of exactly
+// AttachmentMaxBytes renders whole, with the sha256 of its full body.
+func TestPacketRendersIssueFilesAtExactlyTheCap(t *testing.T) {
+	conn := mustDB(t)
+	root := issueFilesCheckout(t)
+	body := strings.Repeat("y", AttachmentMaxBytes)
+	writeAttachment(t, root, "docs/full.md", body)
+	activateIssueFilesRun(t, conn, root, []string{"docs/full.md"})
+
+	packet := renderTranscribe(t, conn)
+	if !strings.Contains(packet, fileSection("docs/full.md", body)) {
+		t.Errorf("packet lacks docs/full.md at exactly the cap with its full sha256")
+	}
+	if !strings.Contains(packet, body) {
+		t.Errorf("packet does not carry docs/full.md's whole body")
 	}
 }
 
