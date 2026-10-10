@@ -418,3 +418,107 @@ func allTableCounts(t *testing.T, conn *sql.DB) map[string]int {
 	}
 	return counts
 }
+
+// bodyRefreshRun activates the two-step body fixture: `before` and `after` are
+// the steps a test claims on either side of a body refresh.
+func bodyRefreshRun(t *testing.T) (conn *sql.DB, runID, issue, before, after int) {
+	t.Helper()
+	conn = mustDB(t)
+	registerSource(t, conn, []byte(bodyInputWorkflow), "bodies.toml")
+	issue = createIssue(t, conn, "amend me", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	before = stepIDOf(t, conn, run.ID, issue, "first@0")
+	after = stepIDOf(t, conn, run.ID, issue, "second@0")
+	return conn, run.ID, issue, before, after
+}
+
+func refreshRunBody(t *testing.T, conn *sql.DB, runID, issue int, body string, atMS int64) {
+	t.Helper()
+	amend(t, conn, issue, body)
+	_, err := RefreshIssueBodyInRun(conn, runID, issue, "operator amended", atMS)
+	testsupport.Must(t, err, "refreshing: %v", err)
+}
+
+// TestPrunedRunReportsRecordedBodyUnavailable: once a done run's events are
+// pruned, the refresh rows the read-back reconstructs from may be gone, so
+// every claim that preceded the prune reports its body unavailable rather than
+// the live description, whether or not a refresh followed that claim.
+func TestPrunedRunReportsRecordedBodyUnavailable(t *testing.T) {
+	conn, runID, issue, before, after := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	refreshRunBody(t, conn, runID, issue, "body, amended", nowMS+1)
+	recordClaim(t, conn, after, nowMS+2)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	_, err := PruneEvents(conn, PruneQuery{BeforeRun: runID, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+
+	for name, stepID := range map[string]int{
+		"claimed before the refresh": before,
+		"claimed after the refresh":  after,
+	} {
+		bundle, err := ReadContext(conn, stepID, nowMS+4)
+		if err == nil {
+			t.Errorf("step %s: read-back returned body %q; want it reported "+
+				"unavailable after the prune", name, bundle.Issue.BodySnapshot)
+			continue
+		}
+		if code, _ := CodeOf(err); code != CodeGone {
+			t.Errorf("step %s: error code %q, want %q: %v", name, code, CodeGone, err)
+		}
+		if !strings.Contains(err.Error(), "pruned") {
+			t.Errorf("step %s: error %q does not name the prune", name, err)
+		}
+	}
+}
+
+// TestRecordedBodyUnprunedRunReadsRecordedBody is the same fixture without the
+// prune: each step reads the body its own claim was handed.
+func TestRecordedBodyUnprunedRunReadsRecordedBody(t *testing.T) {
+	conn, runID, issue, before, after := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	amended := "body, amended"
+	refreshRunBody(t, conn, runID, issue, amended, nowMS+1)
+	recordClaim(t, conn, after, nowMS+2)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	if got := recordedBodyOf(t, conn, before); got != "body" {
+		t.Errorf("pre-refresh step read %q, want the refresh row's from_body %q", got, "body")
+	}
+	if got := recordedBodyOf(t, conn, after); got != amended {
+		t.Errorf("post-refresh step read %q, want the refreshed body %q", got, amended)
+	}
+}
+
+// TestPruneBelowAClaimKeepsItsRecordedBody: a `--before` boundary that does not
+// reach a step's claim event leaves every later event, the refresh row
+// included, so that step's read-back is still served.
+func TestPruneBelowAClaimKeepsItsRecordedBody(t *testing.T) {
+	conn, runID, issue, before, _ := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = recordEvent(tx, eventRecord{
+		Kind: EventStepClaimed, RunID: runID, Instance: "first@0", IssueID: issue, AtMS: nowMS,
+	})
+	testsupport.Must(t, err, "recording the claim event: %v", err)
+	testsupport.Must(t, tx.Commit(), "committing the claim event")
+	refreshRunBody(t, conn, runID, issue, "body, amended", nowMS+1)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	var claimSeq int64
+	err = conn.QueryRow(`SELECT seq FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, before).Scan(&claimSeq)
+	testsupport.Must(t, err, "reading the claim seq: %v", err)
+	result, err := PruneEvents(conn, PruneQuery{Before: claimSeq, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+	if result.Pruned == 0 {
+		t.Fatal("the fixture pruned nothing below the claim; the case needs a prune")
+	}
+
+	if got := recordedBodyOf(t, conn, before); got != "body" {
+		t.Errorf("read-back = %q, want the recorded body %q", got, "body")
+	}
+}

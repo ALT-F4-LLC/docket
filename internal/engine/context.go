@@ -367,14 +367,36 @@ func liveIssueBody(_ *sql.Tx, _ *db.Step, snapshot string) (string, error) {
 // pre-v16 history.
 //
 // RETENTION: the reconstruction reads an `issue-body-refreshed` row from the
-// events table, which `events prune` deletes for a terminal run. After such a
-// prune a pre-refresh step's read-back falls back to the live column.
+// events table, which `events prune` deletes for a terminal run. A prune
+// deletes every event below its boundary, so while this attempt's own
+// `step-claimed` row survives, every refresh row after it survives too. Once a
+// prune covering the run has removed that claim row, a missing refresh row no
+// longer means "no refresh", and the read-back reports the body GONE instead
+// of stating the live column as the body this attempt was handed.
 func recordedIssueBody(tx *sql.Tx, step *db.Step, snapshot string) (string, error) {
 	if step.StartedMS == nil {
 		return snapshot, nil
 	}
-	var data string
+	var claimPruned bool
 	err := tx.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM events
+		                 WHERE kind = ? AND (run_id = ? OR run_id IS NULL))
+		    AND NOT EXISTS (SELECT 1 FROM events
+		                     WHERE kind = ? AND step_id = ? AND at_ms >= ?)`,
+		EventEventsPruned, step.RunID,
+		EventStepClaimed, step.ID, *step.StartedMS).Scan(&claimPruned)
+	if err != nil {
+		return "", fmt.Errorf("reading %s's claim record: %w", step.Instance, err)
+	}
+	if claimPruned {
+		return "", goneErr(
+			"step %s: its recorded issue body is unavailable — %s's events up to "+
+				"this claim were pruned (`events prune`), and the body refreshes "+
+				"the read-back reconstructs from were pruned with them",
+			step.Instance, model.FormatRunID(step.RunID))
+	}
+	var data string
+	err = tx.QueryRow(
 		`SELECT data FROM events
 		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
 		  ORDER BY at_ms, seq

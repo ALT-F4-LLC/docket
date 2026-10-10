@@ -247,6 +247,14 @@ func pruneFilter(q PruneQuery) (string, []any) {
 // audit trail — it would change what the engine COMPUTES, silently, in the
 // direction of running a gate twice and letting a run spend past its cap.
 //
+// A TERMINAL run's events are not unused either: they are deletable because
+// what still reads them detects the loss. The recorded body read-back
+// (recordedIssueBody in context.go) reconstructs the description a handed-out
+// step was given from the run's `issue-body-refreshed` rows. When a prune has
+// removed a step's claim event, and with it any refresh row the read-back
+// needs, that read-back reports the recorded body unavailable (GONE) rather
+// than stating the live description as the body the step was handed.
+//
 // Events with NO RUN — trust grants — pass this check (P11). There is no run
 // whose liveness could forbid them, and refusing them would make the repo-wide
 // feed unprunable forever.
