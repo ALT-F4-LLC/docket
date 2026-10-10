@@ -822,14 +822,23 @@ keeps executors off that one verb; the engine keeps them off the other seven.
 `gate_results.fingerprint` and `gate_override_grants.fingerprint`
 (`TEXT NOT NULL DEFAULT ''`): the CONTENT half of a gate failure's signature.
 **The batch override grant signature is now (gate, exit, reason,
-fingerprint)** — `grantMatches` compares all four, and a grant carrying an
-EMPTY fingerprint matches nothing at all. Empty means pre-v30 and nothing
+fingerprint, argv)** — `grantMatches` compares all five, and a grant carrying
+an EMPTY fingerprint matches nothing at all. Empty means pre-v30 and nothing
 else — a row recorded at v30 or later always carries a value, since a gate
 that printed nothing hashes the empty capture — so that refusal reaches
 grants minted before the column existed and leaves an `unmatched` park, whose
 process never ran and whose capture is empty by nature, coverable exactly as
-v24 intended. Every recorded
-`gate_results` row carries a fingerprint, computed at record time in
+v24 intended. The argv is the gate command's argument vector, recorded in
+`gate_override_grants.argv` since v38 (DKT-2609) and copied off the failing
+row at mint, so a gate that fails silently cannot ride a ruling the operator
+made on another command whose empty capture fingerprints the same. Argv
+equality is element for element, and an empty argv is never a wildcard. Only
+a LEGACY grant — minted before the argv column existed, told apart by
+DKT-2609's marker, the column's non-JSON `'legacy'` default — matches no row
+on argv. A grant minted from a failing row whose recorded argv is NULL (an
+`unmatched` gate, which never ran a command) is not legacy: it covers only
+rows whose argv is also NULL, so an `unmatched` park stays coverable. Every
+recorded `gate_results` row carries a fingerprint, computed at record time in
 `recordGateRows` (the single write path) and exposed as `fingerprint` by
 `docket step gates STEP-N --json`. A `--batch` grant COPIES the fingerprint off
 the parked step's own failing row rather than recomputing it, so the ruling

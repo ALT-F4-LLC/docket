@@ -39,7 +39,8 @@ import (
 // grant per round would re-ask the identical settled question every round —
 // the exact toil DKT-546 measured. The operator's protection is that the
 // question stays settled only while the ANSWER does: a round whose gate fails
-// with a different exit or reason parks for a fresh decision.
+// with a different exit, reason, content fingerprint, or argv parks for a
+// fresh decision.
 
 // failingCompletionRows reduces a step's recorded gate rows to the last-ordinal
 // completion rows that did not pass — the rows a batch override grant records,
