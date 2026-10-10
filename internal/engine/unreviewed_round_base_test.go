@@ -229,6 +229,114 @@ func TestRoundDeltaGuardsTheForkPointClip(t *testing.T) {
 	}
 }
 
+// cherryPickedRounds is what cherryPickUnreviewedRound leaves behind for its
+// assertions: the head review@0 judged, its cherry-picked copy on the shared
+// branch, and fix@2's fork point (fix@1's cherry-picked copy).
+type cherryPickedRounds struct {
+	conn               *sql.DB
+	runID, issue       int
+	judged, judgedCopy string
+	fork               string
+}
+
+// cherryPickUnreviewedRound drives the conductor's cherry-pick integration
+// around an unreviewed fix round: implement@0 records s0 in a worktree and
+// review@0 judges it; a sibling lands and s0 is cherry-picked after it as s0';
+// fix@1 forks at s0' and records f1; review@1 parks into fix@2; f1 is
+// cherry-picked as f1', with integrated_sha annotated on fix@1 when
+// recordIntegration is set; and fix@2 forks fresh at f1' and records.
+func cherryPickUnreviewedRound(t *testing.T, recordIntegration bool) cherryPickedRounds {
+	t.Helper()
+	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
+	shared := rounds.work
+
+	w0 := commitInFreshWorktree(t, shared, "implement-0", "feature.txt", "IMPLEMENT ROUND 0\n")
+	completeStepAt(t, conn, e, issue, "implement@0", w0)
+	s0 := gitRun(t, w0, "rev-parse", "HEAD")
+
+	completeReviewRoundIn(t, conn, e, issue, 0)
+	completeInIssue(t, conn, e, issue, "synthesize@0", "the synthesis", "")
+	driveActionInIssue(t, conn, e, issue, "reconcile@0")
+	completeInIssue(t, conn, e, issue, "verify@0", "the ac report", unmetPayload)
+
+	integrateSibling(t, shared)
+	gitRun(t, shared, "cherry-pick", s0)
+	s0Copy := gitRun(t, shared, "rev-parse", "HEAD")
+
+	w1 := commitInFreshWorktree(t, shared, "fix-round-1", "fix1.txt", "FIX ROUND 1 THE UNREVIEWED CHANGE\n")
+	completeStepAt(t, conn, e, issue, "fix@1", w1)
+
+	failToPark(t, conn, e, issue, "review@1#0")
+	resolveErr := e.ResolveStep(conn, stepIDIn(t, conn, issue, "review@1#0"),
+		ResolveFixRound, "one more round", nowMS)
+	testsupport.Must(t, resolveErr, "resolving review@1#0: %v", resolveErr)
+	if !stepExists(t, conn, "fix@2") {
+		t.Fatal("premise: the authorized round must have minted fix@2")
+	}
+
+	gitRun(t, shared, "cherry-pick", gitRun(t, w1, "rev-parse", "HEAD"))
+	f1Copy := gitRun(t, shared, "rev-parse", "HEAD")
+	if recordIntegration {
+		testsupport.Must(t, seatTestConductor(conn, runID), "seating the conductor")
+		e.IsAncestorFn = gitAncestorOfHead
+		_, err := e.AnnotateIntegration(conn, stepIDIn(t, conn, issue, "fix@1"),
+			f1Copy, "", testBy, testConductorToken, nowMS)
+		testsupport.Must(t, err, "annotate fix@1 --integrated-sha: %v", err)
+	}
+
+	w2 := commitInFreshWorktree(t, shared, "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
+	if isAncestor(w2, s0, f1Copy) || isAncestor(w2, f1Copy, s0) {
+		t.Fatal("premise: the judged head and fix@2's fork point must have diverged")
+	}
+	completeStepAt(t, conn, e, issue, "fix@2", w2)
+
+	return cherryPickedRounds{
+		conn: conn, runID: runID, issue: issue,
+		judged: s0, judgedCopy: s0Copy, fork: f1Copy,
+	}
+}
+
+// TestRoundDeltaKeepsUnreviewedRoundAfterCherryPick: the judged head and the
+// unreviewed round were both cherry-picked, so the judged head is off the
+// branch beside fix@2's fork point. The base reaches back to where fix@1's
+// integrated commit landed, keeping fix@1 in review@2's delta and the sibling
+// integrated before it out.
+func TestRoundDeltaKeepsUnreviewedRoundAfterCherryPick(t *testing.T) {
+	r := cherryPickUnreviewedRound(t, true)
+
+	if got := issueRoundBase(t, r.conn, r.runID, r.issue); got != r.judgedCopy {
+		t.Errorf("fix@2 round_base = %.12s, want %.12s, the commit fix@1's "+
+			"integrated copy landed on (fork point %.12s)", got, r.judgedCopy, r.fork)
+	}
+	delta := reviewRoundDelta(t, r.conn, r.issue, "review@2#0")
+	if !strings.Contains(delta, "\n+FIX ROUND 1 THE UNREVIEWED CHANGE") {
+		t.Errorf("the unreviewed round's change is missing from the delta its "+
+			"judges read:\n%s", delta)
+	}
+	if strings.Contains(delta, "sibling.txt") {
+		t.Errorf("the sibling integrated before the judged head's copy leaked "+
+			"into the delta:\n%s", delta)
+	}
+}
+
+// TestRoundDeltaKeepsUnreviewedRoundWithoutIntegratedSHA: the same shape with
+// no integrated_sha recorded. Nothing names where fix@1 landed, so the base
+// falls back to the judged head itself: the delta over-reports the
+// integration's reshaping rather than hiding fix@1.
+func TestRoundDeltaKeepsUnreviewedRoundWithoutIntegratedSHA(t *testing.T) {
+	r := cherryPickUnreviewedRound(t, false)
+
+	if got := issueRoundBase(t, r.conn, r.runID, r.issue); got != r.judged {
+		t.Errorf("fix@2 round_base = %.12s, want the head review@0 judged %.12s "+
+			"(fork point %.12s)", got, r.judged, r.fork)
+	}
+	delta := reviewRoundDelta(t, r.conn, r.issue, "review@2#0")
+	if !strings.Contains(delta, "\n+FIX ROUND 1 THE UNREVIEWED CHANGE") {
+		t.Errorf("the unreviewed round's change is missing from the delta its "+
+			"judges read:\n%s", delta)
+	}
+}
+
 // TestRoundDeltaAdvancesPastReviewedSiblingIntegration: every earlier round
 // was reviewed, so sibling work integrated before this round's fresh fork
 // stays clipped out of the delta.

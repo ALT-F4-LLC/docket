@@ -2814,12 +2814,7 @@ func worktreeForkPoint(dir, execRoot string) string {
 	if sharedHead == "" {
 		return ""
 	}
-	out, err := exec.Command("git",
-		gitDirArgs(dir, "merge-base", "HEAD", sharedHead)...).Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return mergeBase(dir, "HEAD", sharedHead)
 }
 
 // roundDeltaBase resolves the commit a loop re-entry's ROUND DELTA diffs from
@@ -2856,7 +2851,16 @@ func worktreeForkPoint(dir, execRoot string) string {
 // prev, prev..fork may carry that round's integrated work, which clipping
 // would hide from the next panel; prev then stays even past a verbatim
 // integration.
-func roundDeltaBase(dir, execRoot, prev string, unreviewedFollows bool) string {
+//
+// A diverged integration with an unreviewed round is the one shape neither
+// base serves: the fork point clips the round, and prev..HEAD carries sibling
+// work. unreviewedLanding, the commit the earliest unreviewed round's work was
+// integrated as (its `integrated_sha`), names the answer: the base is where
+// that commit landed, its parent's merge-base with the fork point. Absent it,
+// prev stays, over-reporting the integration's reshaping rather than hiding
+// the round. Only the first unreviewedLanding is read; a call with none
+// names no landing.
+func roundDeltaBase(dir, execRoot, prev string, unreviewedFollows bool, unreviewedLanding ...string) string {
 	if dir == "" || dir == execRoot {
 		return prev
 	}
@@ -2878,8 +2882,27 @@ func roundDeltaBase(dir, execRoot, prev string, unreviewedFollows bool) string {
 		return prev
 	}
 	// Diverged: integration minted new commits, and prev is no longer part of
-	// the branch's history. The fork point is the shared base (DKT-409).
-	return fork
+	// the branch's history. The fork point is the shared base (DKT-409) unless
+	// it would clip an unreviewed round.
+	if !unreviewedFollows {
+		return fork
+	}
+	if len(unreviewedLanding) > 0 && unreviewedLanding[0] != "" {
+		if landed := mergeBase(dir, fork, unreviewedLanding[0]+"^"); landed != "" {
+			return landed
+		}
+	}
+	return prev
+}
+
+// mergeBase resolves the best common ancestor of two revisions in dir's
+// history, "" when git cannot answer.
+func mergeBase(dir, a, b string) string {
+	out, err := exec.Command("git", gitDirArgs(dir, "merge-base", a, b)...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // isAncestor reports whether `anc` is an ancestor of `desc` in dir's history.
@@ -3428,16 +3451,20 @@ func (e *Engine) appendRoundDelta(
 		}
 	}
 	if (head != "" || blocked) && step.Ordinal > 0 {
-		reviewed := lastReviewedIssueDiffHead(conn, step.RunID, step.IssueID)
+		reviewed := lastReviewedIssueDiff(conn, step.RunID, step.IssueID)
 		latest := latestIssueDiffHead(conn, step.RunID, step.IssueID, step.ID)
-		prev := reviewed
+		prev := reviewed.head
 		if prev == "" {
 			prev = latest
 		}
 		// A newer recorded head than the judged one is a round no review read.
 		// With no judged head there is nothing to reach back to, so the
 		// fallback clips as before.
-		unreviewedFollows := reviewed != "" && latest != reviewed
+		unreviewedFollows := reviewed.head != "" && latest != reviewed.head
+		var unreviewedLanding string
+		if unreviewedFollows {
+			unreviewedLanding = earliestUnreviewedLanding(conn, step.RunID, step.IssueID, step.ID, reviewed)
+		}
 		if prev != "" && prev != head {
 			// DKT-171/DKT-409: `prev` predates whatever integration landed
 			// on the shared branch between rounds. A fresh worktree forked
@@ -3447,11 +3474,11 @@ func (e *Engine) appendRoundDelta(
 			// fork point whenever prev is not strictly ahead of it —
 			// verbatim integration puts prev behind the fork, a cherry-
 			// pick integration leaves it on a superseded line beside it —
-			// so fork..HEAD is exactly "this round's work alone". The one
-			// exception is a verbatim integration with an unreviewed round
-			// after prev: that round's work is in prev..fork, and the next
-			// panel must still see it.
-			base := roundDeltaBase(dir, execRoot, prev, unreviewedFollows)
+			// so fork..HEAD is exactly "this round's work alone". The
+			// exception is an unreviewed round after prev: its integrated
+			// work sits before the fork, and the next panel must still see
+			// it, so the base stays at prev or where that round landed.
+			base := roundDeltaBase(dir, execRoot, prev, unreviewedFollows, unreviewedLanding)
 			delta, err := e.DiffFn(dir, base, nil)
 			if err == nil {
 				record["round_base"] = base
@@ -3498,8 +3525,8 @@ func latestIssueDiffHead(conn *sql.DB, runID, issueID, exceptStepID int) string 
 	return handBackHead(payload.String)
 }
 
-// lastReviewedIssueDiffHead reads the `head` of the newest issue.diff a done
-// REVIEWING step of the issue was actually handed, "" when no such step has
+// lastReviewedIssueDiff reads the newest issue.diff a done REVIEWING step of
+// the issue was actually handed, the zero record when no such step has
 // recorded yet.
 //
 // The round delta starts here rather than at the newest recorded head because a
@@ -3520,21 +3547,66 @@ func latestIssueDiffHead(conn *sql.DB, runID, issueID, exceptStepID int) string 
 // reviewer's verdict was discarded with its round, and a FAILED judge's claim
 // still bound its inputs, so admitting either would name a head no panel read —
 // which is the defect this closes, reproduced one status wider.
-func lastReviewedIssueDiffHead(conn *sql.DB, runID, issueID int) string {
-	var payload sql.NullString
+func lastReviewedIssueDiff(conn *sql.DB, runID, issueID int) reviewedIssueDiff {
+	var (
+		reviewed reviewedIssueDiff
+		payload  sql.NullString
+	)
 	err := conn.QueryRow(
-		`SELECT a.payload FROM step_inputs si
+		`SELECT a.id, a.step_id, a.payload FROM step_inputs si
 		   JOIN artifacts a ON a.id = si.artifact_id
 		   JOIN steps s ON s.id = si.step_id
 		  WHERE s.run_id = ? AND s.issue_id = ? AND s.status = ? AND a.kind = ?
 		    AND NOT EXISTS (SELECT 1 FROM artifacts p
 		                     WHERE p.step_id = s.id AND p.kind = a.kind)
 		  ORDER BY a.id DESC LIMIT 1`,
-		runID, issueID, db.StepDone, ArtifactKindIssueDiff).Scan(&payload)
+		runID, issueID, db.StepDone, ArtifactKindIssueDiff).Scan(
+		&reviewed.artifactID, &reviewed.producerID, &payload)
 	if err != nil {
+		return reviewedIssueDiff{}
+	}
+	reviewed.head = handBackHead(payload.String)
+	return reviewed
+}
+
+// reviewedIssueDiff is the issue.diff record a review was handed: its artifact,
+// the step that produced it, and the head it names ("" when none was judged).
+type reviewedIssueDiff struct {
+	artifactID, producerID int
+	head                   string
+}
+
+// earliestUnreviewedLanding reads the `integrated_sha` on the first round
+// recorded after the judged record — the commit the conductor landed that
+// round's work as — "" when no such round exists or it recorded no full
+// commit id.
+//
+// The judged record's own producer and the recording step are skipped: an
+// integration annotation re-records its step's issue.diff, so a later artifact
+// of the judged producer is that judged round re-pointed, and the recording
+// step is this round, not one before it.
+func earliestUnreviewedLanding(conn *sql.DB, runID, issueID, exceptStepID int, reviewed reviewedIssueDiff) string {
+	var metadata sql.NullString
+	err := conn.QueryRow(
+		`SELECT s.metadata FROM artifacts a JOIN steps s ON s.id = a.step_id
+		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
+		    AND a.id > ? AND a.step_id NOT IN (?, ?)
+		  ORDER BY a.id LIMIT 1`,
+		runID, issueID, ArtifactKindIssueDiff,
+		reviewed.artifactID, reviewed.producerID, exceptStepID).Scan(&metadata)
+	if err != nil || metadata.String == "" {
 		return ""
 	}
-	return handBackHead(payload.String)
+	var bag map[string]any
+	if json.Unmarshal([]byte(metadata.String), &bag) != nil {
+		return ""
+	}
+	// `--metadata` can set the key free-form; only a full commit id reaches git.
+	sha, _ := bag[MetadataKeyIntegratedSHA].(string)
+	if !fullCommitSHA.MatchString(sha) {
+		return ""
+	}
+	return sha
 }
 
 // priorRoundHandBack is the hand-back head THIS step's own name recorded at
