@@ -228,7 +228,8 @@ func TestDispatchCloseSkipIntegrationPlainCloseNeedsNoToken(t *testing.T) {
 	cmd := dispatchCloseCmdWithDB(conn, model.FormatRunID(runID))
 	cmd.SetIn(tripwireReader{t})
 	w, buf := bufWriter(true)
-	testsupport.Must(t, runDispatchClose(cmd, w), "plain dispatch close with no token: %v", nil)
+	err := runDispatchClose(cmd, w)
+	testsupport.Must(t, err, "plain dispatch close with no token: %v", err)
 	if strings.Contains(buf.String(), skipReason) {
 		t.Errorf("a plain close recorded a skip:\n%s", buf.String())
 	}
