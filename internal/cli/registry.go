@@ -59,8 +59,9 @@ Two findings, per registered NAME rather than per version:
             its repository's own '.docket/config/', which this audit does not
             read and which is still that project's live definition. Before
             deprecating an orphan, confirm from the owning checkout that its
-            repository config does not declare it ('docket workflow list
-            --orphans' reads both roots). A workflow still binds until it is deprecated
+            repository config does not declare it: for a workflow, 'docket
+            workflow list --orphans' reads both roots; for a schema, look in
+            that checkout's '.docket/config/schemas/'. A workflow still binds until it is deprecated
             ('docket workflow deprecate <name>@<version>'), and a schema
             still accepts new payload references until it is
             ('docket schema deprecate <name>@<version>'). An orphan whose
@@ -196,9 +197,10 @@ func renderRegistryAudit(audit *engine.RegistryAudit) string {
 		"%d of %d project(s) carry findings: %d name(s) behind, %d orphaned.\n"+
 			"A behind name is adopted by the next `docket run activate` in that "+
 			"project. An orphaned one may still be declared in its project's own "+
-			"repository config, which this audit does not read: confirm with "+
-			"`docket workflow list --orphans` from that checkout, then retire it "+
-			"with `docket workflow deprecate` or `docket schema deprecate`.",
+			"repository config, which this audit does not read. Confirm from that "+
+			"checkout first (a workflow with `docket workflow list --orphans`, a "+
+			"schema in its `.docket/config/schemas/`), then retire it with "+
+			"`docket workflow deprecate` or `docket schema deprecate`.",
 		dirty, len(audit.Projects), audit.BehindTotal, audit.OrphanedTotal)
 	return b.String()
 }
