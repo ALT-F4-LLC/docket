@@ -173,6 +173,7 @@ A blank class means the row parked before the column existed.
 | `loop-bound` | a `fix-loop` entry refused because the ordinal would exceed `max_fix_loops` plus grants, and only that refusal — every `applyFixLoop` caller, from `EnterLoop`'s refusal rather than its wording |
 | `loop-stalled` | an unauthorized `fix-loop` entry refused for non-convergence with budget still left — `EnterLoop`'s stall refusal (`LoopOutcome.Stalled`), raised when `roundMovedNothing` finds no scoped bytes moved, `routingVerdictUnchanged` finds the routing step's verdict repeated, or `volumeStalled` finds the routed volume flat past `max_stalled_rounds`; an authorized round waives it |
 | `vote-rejected` | a vote step tallied to a rejection |
+| `dissent-held` | a vote rule's `hold_on_dissent` decision: an approved (or committed) tally that `dissentHold` parks because a seat cast `reject`, with no threshold having routed a park, either because none matched or because the matched predicate was `pass`; a triage panel and a rejected tally never take it |
 | `held-rejected` | an operator rejected a held cluster; the consequence lands on the ROUTING step, never the materialized one, which ends `done` either way |
 | `gap-only` | a completion whose only recorded artifacts were gaps, decided before any gate verdict |
 | `unchanged-handback` | a loop round handed back the commit its previous round recorded, so the review chain would re-read one tree |
