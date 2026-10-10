@@ -344,6 +344,57 @@ func mustJSON(t *testing.T, v any) string {
 	return string(out)
 }
 
+// TestAuthorityRollupCountsRunNotesByTheirAuthority: a run note counts in the
+// authority rollup under the authority its event recorded, a note recorded
+// before notes carried one counts under none, and every note still counts as
+// a human event in the actor rollup.
+func TestAuthorityRollupCountsRunNotesByTheirAuthority(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	humanEvents := func(report *RunReport) int {
+		for _, row := range report.Actors {
+			if row.Actor == string(ActorHuman) {
+				return row.Count
+			}
+		}
+		return 0
+	}
+	before, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport before the notes: %v", err)
+	if len(before.Authorities) != 0 {
+		t.Fatalf("the run counts authorities before any note: %+v", before.Authorities)
+	}
+
+	for _, kind := range []string{AuthorityOperator, AuthorityConductor} {
+		_, err := AddRunNote(conn, run.ID, testConductorToken, Authority{Kind: kind}, "ruled by "+kind, nowMS)
+		testsupport.Must(t, err, "AddRunNote under %s: %v", kind, err)
+	}
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	err = recordEvent(tx, eventRecord{
+		Kind: EventRunNoteAdded, RunID: run.ID,
+		Data: `{"note":999,"text":"recorded before notes carried an authority"}`, AtMS: nowMS,
+	})
+	testsupport.Must(t, err, "recording an authority-less note: %v", err)
+	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
+
+	after, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport after the notes: %v", err)
+	want := []AuthorityCount{
+		{Authority: AuthorityOperator, Count: 1},
+		{Authority: AuthorityConductor, Count: 1},
+	}
+	if !reflect.DeepEqual(after.Authorities, want) {
+		t.Errorf("authorities = %+v, want %+v", after.Authorities, want)
+	}
+	if got, wantHuman := humanEvents(after), humanEvents(before)+3; got != wantHuman {
+		t.Errorf("human events = %d, want %d: every note, authority-less included, "+
+			"counts as a human event", got, wantHuman)
+	}
+}
+
 // TestRunReportRollsUpVoteMetadata pins DKT-71's read half: the metadata
 // claims cast votes carry — model, effort, spend, whatever a seat asserted —
 // surface in the run report as their own rollup, opaque keys to counted

@@ -157,8 +157,8 @@ type RunReport struct {
 	// this is the rollup that says whether they need to.
 	Actors []ActorCount `json:"actors,omitempty"`
 
-	// Authorities is DKT-1899: the run's resolutions counted by the authority
-	// they were made under. E21's Actors answers WHAT CAUSED a transition;
+	// Authorities is DKT-1899: the run's resolutions and run notes counted by
+	// the authority they were made under. E21's Actors answers WHAT CAUSED a transition;
 	// this answers, for the human ones, WHAT ENTITLED it — the distinction the
 	// conductor policy routes on and that only a free-text note used to carry.
 	Authorities []AuthorityCount `json:"authorities,omitempty"`
@@ -335,7 +335,7 @@ type StepRuling struct {
 }
 
 // AuthorityCount is one row of DKT-1899's rollup: an authority, and how many
-// of the run's resolutions were made under it.
+// of the run's resolutions and run notes were made under it.
 //
 // The rollup answers the question the note could not: of this run's
 // resolutions, how many an operator decided, how many applied a standing
@@ -1771,9 +1771,11 @@ func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 	return value, nil
 }
 
-// authorityRollupTx counts the run's resolutions by the authority each was
-// made under (DKT-1899) — every `step-resolved`, `step-approved`,
-// `step-rejected`, `run-paused` and `run-abandoned` the run recorded.
+// authorityRollupTx counts the run's resolutions and run notes by the
+// authority each was made under (DKT-1899) — every `step-resolved`,
+// `step-approved`, `step-rejected`, `run-paused`, `run-abandoned` and
+// `run-note-added` the run recorded. A note renders in every later packet as a
+// ruling, so it counts under the authority it was recorded with.
 //
 // EVERY RESOLUTION COUNTS, not only the last one per step, because the
 // question is how a run's decisions were authorized, and a step decided twice
@@ -1786,9 +1788,9 @@ func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 // under a guessed authority would restore the ambiguity this ends.
 func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
 	rows, err := tx.Query(
-		`SELECT data FROM events WHERE run_id = ? AND kind IN (?, ?, ?, ?, ?)`,
+		`SELECT data FROM events WHERE run_id = ? AND kind IN (?, ?, ?, ?, ?, ?)`,
 		runID, EventStepResolved, EventStepApproved, EventStepRejected,
-		EventRunPaused, EventRunAbandoned)
+		EventRunPaused, EventRunAbandoned, EventRunNoteAdded)
 	if err != nil {
 		return nil, fmt.Errorf("reading the run's resolutions: %w", err)
 	}
