@@ -530,6 +530,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		// routing policy BEFORE it spawns. Without them every such rule fell
 		// through to its default silently (see model.StepRow.Labels).
 		Labels:  sched.LabelsFor(step.IssueID),
+		Size:    sched.SizeFor(step.IssueID),
 		Attempt: step.Attempt,
 		// The outcome breakdown rides beside the count it explains (DKT-490):
 		// a dispatcher deciding whether to escalate reads how many of those

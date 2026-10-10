@@ -123,10 +123,11 @@ type Scheduler struct {
 	// already states the numbers honestly; the scheduling verbs did not.
 	budgetHolds map[string]float64
 	issues      map[int]*issueFacts
-	// issueLabels are the run's issues' labels AS FROZEN AT ACTIVATION, keyed by
-	// issue id. Readiness never consults them — they exist so a rendered `next`
-	// row can carry what a dispatcher needs to route (model/StepRow.Labels).
-	issueLabels map[int][]string
+	// frozenRouting is the run's issues' routing facts AS FROZEN AT ACTIVATION,
+	// keyed by issue id. Readiness never consults them — they exist so a
+	// rendered `next` row can carry what a dispatcher needs to route
+	// (model/StepRow.Labels and Size).
+	frozenRouting map[int]snapshotRouting
 	// foreignScopes are the scope globs of issues OUTSIDE this run whose steps
 	// currently hold a scope. They are loaded eagerly rather than looked up
 	// lazily because a missing entry would read as "no scope" — S1's
@@ -253,13 +254,13 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	}
 
 	facts := make(map[int]*issueFacts, len(runIssues))
-	// Labels come from the FROZEN snapshot activation wrote, not from a live
-	// join — the same source and the same reason as the context bundle (§6.6).
-	// Routing is a context question, so a mid-run relabel must not silently
-	// change how an already-scheduled step routes. Contrast `scope_globs` in
+	// Labels and size come from the FROZEN snapshot activation wrote, not from
+	// a live join — the same source and the same reason as the context bundle
+	// (§6.6). Routing is a context question, so a mid-run relabel or resize
+	// must not silently change how an already-scheduled step routes. Contrast `scope_globs` in
 	// loadIssueFacts, read live on purpose because it answers a scheduling
 	// question instead. No extra query: ListRunIssuesTx already carries it.
-	labels := make(map[int][]string, len(runIssues))
+	routing := make(map[int]snapshotRouting, len(runIssues))
 	for _, ri := range runIssues {
 		f, err := loadIssueFacts(tx, ri.IssueID)
 		if err != nil {
@@ -267,12 +268,12 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		}
 		facts[ri.IssueID] = f
 
-		ls, err := snapshotLabels(ri.IssueSnapshot)
+		r, err := decodeSnapshotRouting(ri.IssueSnapshot)
 		if err != nil {
 			return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
 				model.FormatID(ri.IssueID), err)
 		}
-		labels[ri.IssueID] = ls
+		routing[ri.IssueID] = r
 	}
 
 	// R2b's fact, from the snapshot already loaded: an issue with a step
@@ -353,7 +354,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	limits, limitSources := mergeLimits(defs)
 	s := &Scheduler{
 		run: run, steps: steps, foreign: foreign, issues: facts,
-		issueLabels:   labels,
+		frozenRouting: routing,
 		foreignScopes: foreignScopes,
 		defs:          defs, nowMS: nowMS,
 		stepByID:      make(map[int]*db.Step, len(steps)),
@@ -415,22 +416,28 @@ func loadIssueFacts(tx *sql.Tx, issueID int) (*issueFacts, error) {
 	}, nil
 }
 
-// snapshotLabels pulls the labels out of a `run_issues.issue_snapshot` blob.
+// snapshotRouting is the part of a `run_issues.issue_snapshot` blob a rendered
+// row routes on.
+type snapshotRouting struct {
+	Labels []string `json:"labels"`
+	Size   string   `json:"size"`
+}
+
+// decodeSnapshotRouting pulls the routing facts out of a snapshot blob.
 //
-// An issue frozen before the snapshot carried labels, or one with none, yields
-// nil rather than an error: a label-less issue is ordinary, and `omitempty` on
-// the wire makes it serialize exactly as it did before the field existed.
-func snapshotLabels(snapshot string) ([]string, error) {
+// An issue frozen before the snapshot carried labels or a size, or one with
+// none, yields the zero value rather than an error: an unlabelled or unsized
+// issue is ordinary, and `omitempty` on the wire makes it serialize exactly as
+// it did before the fields existed.
+func decodeSnapshotRouting(snapshot string) (snapshotRouting, error) {
+	var frozen snapshotRouting
 	if snapshot == "" {
-		return nil, nil
-	}
-	var frozen struct {
-		Labels []string `json:"labels"`
+		return frozen, nil
 	}
 	if err := json.Unmarshal([]byte(snapshot), &frozen); err != nil {
-		return nil, err
+		return snapshotRouting{}, err
 	}
-	return frozen.Labels, nil
+	return frozen, nil
 }
 
 // LabelsFor is the frozen labels of the issue a step belongs to, for rendering
@@ -439,7 +446,16 @@ func (s *Scheduler) LabelsFor(issueID int) []string {
 	if s == nil {
 		return nil
 	}
-	return s.issueLabels[issueID]
+	return s.frozenRouting[issueID].Labels
+}
+
+// SizeFor is the frozen size of the issue a step belongs to, for rendering a
+// `next` row. It answers nothing about readiness.
+func (s *Scheduler) SizeFor(issueID int) string {
+	if s == nil {
+		return ""
+	}
+	return s.frozenRouting[issueID].Size
 }
 
 func decodeScope(stored string) ([]string, error) {

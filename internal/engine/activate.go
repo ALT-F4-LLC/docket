@@ -1869,6 +1869,10 @@ type issueSnapshotFields struct {
 	// list was frozen and encodes no key; activation always writes a non-nil
 	// pointer, so an issue with no attachments encodes `"files":[]`.
 	Files *[]string `json:"files,omitempty"`
+	// Size is the issue's declared size as of activation. An issue with no
+	// declared size, and a snapshot written before size was frozen, encode no
+	// key, so those snapshots stay byte-identical.
+	Size string `json:"size,omitempty"`
 }
 
 func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (string, error) {
@@ -1903,6 +1907,7 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (str
 		Scope:  scope,
 		Linked: linked,
 		Files:  &files,
+		Size:   string(issue.Size),
 	}
 
 	out, err := json.Marshal(snapshot)

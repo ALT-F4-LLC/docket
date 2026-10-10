@@ -72,6 +72,11 @@ type StepRow struct {
 	// A recorded amendment in the same class as `Instance` and `Kind`: additive,
 	// `omitempty` so a label-less issue serializes exactly as before.
 	Labels []string `json:"labels,omitempty"`
+	// Size is the issue's size AS FROZEN AT ACTIVATION, from the same snapshot
+	// and for the same reason as Labels: a mid-run resize must not change how
+	// an already-scheduled step routes. Absent when the issue declared no size
+	// or its snapshot predates the frozen size.
+	Size string `json:"size,omitempty"`
 	// Voters is the step's declared voter list, present ONLY on vote steps and
 	// absent everywhere else.
 	//
