@@ -825,7 +825,7 @@ func TestRunReportSnapshotDoesNotBlockWriters(t *testing.T) {
 	_, err = writer.Exec("PRAGMA busy_timeout=50")
 	testsupport.Must(t, err, "shortening busy_timeout: %v", err)
 
-	snapshot, err := beginRunReportSnapshot(reporter)
+	snapshot, err := beginReadSnapshot(reporter)
 	testsupport.Must(t, err, "opening the snapshot: %v", err)
 	defer snapshot.Rollback()
 	// A deferred BEGIN holds nothing until its first read; read so the
@@ -853,4 +853,55 @@ func TestRunReportSnapshotDoesNotBlockWriters(t *testing.T) {
 		t.Errorf("snapshot saw %d rows after the writer committed, want %d: "+
 			"the report must read one instant", during, before)
 	}
+}
+
+// TestRunStatusAndStepListReadPastAHeldWriteLock pins that `run status` and
+// `step list` load their scheduler snapshot as readers: while another process
+// holds the write lock, both return without waiting out busy_timeout. A
+// snapshot taken under BEGIN IMMEDIATE would queue behind that lock and fail
+// with SQLITE_BUSY.
+func TestRunStatusAndStepListReadPastAHeldWriteLock(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedVoteGateRun(t, conn)
+
+	wantSteps, err := RunStepList(conn, runID, nowMS)
+	testsupport.Must(t, err, "RunStepList before the lock: %v", err)
+	if len(wantSteps) == 0 {
+		t.Fatal("the fixture run has no steps, so the case would prove nothing")
+	}
+	wantCounts, err := EffectiveStatusCounts(conn, runID, nowMS)
+	testsupport.Must(t, err, "EffectiveStatusCounts before the lock: %v", err)
+
+	var path string
+	err = conn.QueryRow("SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&path)
+	testsupport.Must(t, err, "reading the database path: %v", err)
+	writer, err := db.Open(path)
+	testsupport.Must(t, err, "opening the writer's handle: %v", err)
+	t.Cleanup(func() { writer.Close() })
+	lock, err := writer.Begin()
+	testsupport.Must(t, err, "taking the write lock: %v", err)
+	defer lock.Rollback()
+
+	_, err = conn.Exec("PRAGMA busy_timeout=50")
+	testsupport.Must(t, err, "shortening busy_timeout: %v", err)
+
+	t.Run("step list", func(t *testing.T) {
+		got, err := RunStepList(conn, runID, nowMS)
+		if err != nil {
+			t.Fatalf("RunStepList while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantSteps) {
+			t.Errorf("RunStepList under the lock = %s, want %s",
+				mustJSON(t, got), mustJSON(t, wantSteps))
+		}
+	})
+	t.Run("run status", func(t *testing.T) {
+		got, err := EffectiveStatusCounts(conn, runID, nowMS)
+		if err != nil {
+			t.Fatalf("EffectiveStatusCounts while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantCounts) {
+			t.Errorf("EffectiveStatusCounts under the lock = %v, want %v", got, wantCounts)
+		}
+	})
 }

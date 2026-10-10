@@ -614,8 +614,8 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// internal/db caps the connection pool at ONE connection, so a pool read
 	// from inside an open transaction deadlocks permanently rather than
 	// failing. This function keeps every pool read above the
-	// beginRunReportSnapshot call, and TestNoPoolReadsInsideTransactions covers
-	// the beginRunReportSnapshot region, so a pool read moved below it fails
+	// beginReadSnapshot call, and TestNoPoolReadsInsideTransactions covers
+	// the beginReadSnapshot region, so a pool read moved below it fails
 	// that test. A rollback that silently failed would leave the transaction
 	// open and turn the next of these into the deadlock.
 	//
@@ -707,7 +707,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// it: effective status is a question about a set of rows at one instant, and
 	// a report that re-read between sections could count one step twice under
 	// two statuses.
-	tx, err := beginRunReportSnapshot(conn)
+	tx, err := beginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning the report: %w", err)
 	}
@@ -831,15 +831,17 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	return report, nil
 }
 
-// beginRunReportSnapshot opens the report's read snapshot as a deferred BEGIN.
+// beginReadSnapshot opens a read snapshot as a deferred BEGIN, for a
+// transaction that only reads and is always rolled back.
 //
 // The handle's plain Begin is BEGIN IMMEDIATE, which would hold the write lock
-// for the whole report — the scheduler load, the discrepancy scan, the budget
-// reads — and a large run's report could outlast another process's
-// busy_timeout. ReadOnly makes the driver issue a deferred BEGIN instead: the
-// snapshot never upgrades to a write, so the stale-snapshot hazard the
-// immediate lock exists to prevent cannot arise here, and writers proceed.
-func beginRunReportSnapshot(conn *sql.DB) (*sql.Tx, error) {
+// for the whole read — a scheduler load on a large run, or a full report — and
+// could outlast another process's busy_timeout. ReadOnly makes the driver
+// issue a deferred BEGIN instead: the snapshot never upgrades to a write, so
+// the stale-snapshot hazard the immediate lock exists to prevent cannot arise
+// here, and writers proceed. The driver does not enforce ReadOnly, so a caller
+// must issue no write inside the snapshot.
+func beginReadSnapshot(conn *sql.DB) (*sql.Tx, error) {
 	return conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 }
 
