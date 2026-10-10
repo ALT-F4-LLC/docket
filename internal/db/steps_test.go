@@ -596,6 +596,41 @@ func TestLoopHistoryFactsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestStepsAuthorityColumnRoundTrips proves the authority a resolution was
+// made under, and the standing grant it names, survive one SetStepAuthorityTx
+// write and come back on the row.
+func TestStepsAuthorityColumnRoundTrips(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+	if before.Authority != "" || before.AuthorityRef != "" {
+		t.Fatalf("an unresolved step carries authority %q/%q, want none",
+			before.Authority, before.AuthorityRef)
+	}
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = SetStepAuthorityTx(tx, id, "standing-grant", "RUN NOTE 54", 2000)
+	testsupport.Must(t, err, "SetStepAuthorityTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Authority != "standing-grant" {
+		t.Errorf("Authority = %q, want standing-grant", step.Authority)
+	}
+	if step.AuthorityRef != "RUN NOTE 54" {
+		t.Errorf("AuthorityRef = %q, want %q — a standing grant must name the "+
+			"authorization it applies", step.AuthorityRef, "RUN NOTE 54")
+	}
+	if step.RowVersion != before.RowVersion+1 {
+		t.Errorf("RowVersion = %d, want %d — CAS-guarded readers must see the row move",
+			step.RowVersion, before.RowVersion+1)
+	}
+}
+
 // TestLoopHistoryFactsAbsentBeforeWrite pins the unwritten reading: a step that
 // never exhausted a loop carries no loop history, so the fields stay at their
 // zero values and serialize away under omitempty.

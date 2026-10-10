@@ -302,6 +302,13 @@ type Step struct {
 	// write after it, so it cannot say when the step recorded. Zero means the
 	// step has not recorded a terminal result.
 	RecordedAtMS int64
+	// Authority is the authority the step's latest ruling was made under (v40):
+	// operator, standing-grant, or conductor, the same word its ruling event
+	// carries. AuthorityRef names the standing authorization and is set only
+	// with standing-grant. Both are "" on a step no ruling has resolved, and on
+	// rows resolved before the columns existed.
+	Authority    string
+	AuthorityRef string
 }
 
 // Ref renders the step's `STEP-N` display identity.
@@ -330,7 +337,8 @@ SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, ins
        gate_trail, routing, park_reason, park_class,
        loop_rounds_run, loop_trigger_step, loop_latest_verdict,
        metadata, context_bytes, materialized, usage_recorded,
-       created_at_ms, updated_at_ms, row_version, work_root, recorded_at_ms
+       created_at_ms, updated_at_ms, row_version, work_root, recorded_at_ms,
+       authority, authority_ref
   FROM steps`
 
 // GetStep reads one step by id.
@@ -444,7 +452,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.LoopRoundsRun, &step.LoopTriggerStep, &step.LoopLatestVerdict,
 		&metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
-		&step.RecordedAtMS,
+		&step.RecordedAtMS, &step.Authority, &step.AuthorityRef,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrStepNotFound
@@ -868,6 +876,25 @@ func SetStepRoutingWithParkReasonTx(
 	)
 	if err != nil {
 		return fmt.Errorf("recording step routing: %w", err)
+	}
+	return nil
+}
+
+// SetStepAuthorityTx records the authority a ruling on the step was made
+// under, and the standing authorization it names. A ruling site calls it in
+// the transaction that writes the ruling's routing, so the row and the ruling
+// event cannot disagree. authorityRef is "" except on a standing grant.
+func SetStepAuthorityTx(
+	tx *sql.Tx, id int, authority, authorityRef string, nowMS int64,
+) error {
+	_, err := tx.Exec(
+		`UPDATE steps SET authority = ?, authority_ref = ?, updated_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE id = ?`,
+		authority, authorityRef, nowMS, id,
+	)
+	if err != nil {
+		return fmt.Errorf("recording step authority: %w", err)
 	}
 	return nil
 }

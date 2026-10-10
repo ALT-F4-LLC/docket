@@ -984,6 +984,11 @@ func (e *Engine) decideMaterializedStep(
 		tx, held.ID, routing, note, db.StepDone, "", nowMS); err != nil {
 		return err
 	}
+	if err := db.SetStepAuthorityTx(
+		tx, held.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
+	); err != nil {
+		return err
+	}
 	if approve {
 		// AFTER the routing above, so this cluster's own verdict is visible to
 		// the per-cluster read. Still the same transaction: §7.7.3's rule that

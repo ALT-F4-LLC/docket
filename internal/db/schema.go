@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 39
+const currentSchemaVersion = 40
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -209,6 +209,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	37: migrateV36ToV37,
 	38: migrateV37ToV38,
 	39: migrateV38ToV39,
+	40: migrateV39ToV40,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3066,6 +3067,48 @@ func migrateV38ToV39(tx *sql.Tx) error {
 	return nil
 }
 
+// v40AddedColumns is v40's whole schema change: `authority` and
+// `authority_ref` on `steps`, the authority a ruling on the step was made
+// under. Before v40 only the ruling event carried it, so a reader of one
+// resolved row could not tell an operator's decision from a standing grant's
+// or the conductor's.
+var v40AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "authority",
+		`ALTER TABLE steps ADD COLUMN authority TEXT NOT NULL DEFAULT ''`},
+	{"steps", "authority_ref",
+		`ALTER TABLE steps ADD COLUMN authority_ref TEXT NOT NULL DEFAULT ''`},
+}
+
+// v40ColumnSentinels are the columns the rewind guard probes, the v27–v39
+// form: v40 adds no table and no index, so a database stamped 40 by a binary
+// built mid-change carries every v39 sentinel and the authority columns never
+// arrive.
+var v40ColumnSentinels = []struct{ table, column string }{
+	{"steps", "authority"},
+	{"steps", "authority_ref"},
+}
+
+// migrateV39ToV40 adds the step authority columns. It back-fills nothing: the
+// authority of a ruling made before v40 is on its event, and "" is the honest
+// reading of a row that never recorded one. It probes before each ALTER, so it
+// stays re-runnable.
+func migrateV39ToV40(tx *sql.Tx) error {
+	for _, col := range v40AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v39 to v40: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v39 to v40: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3862,6 +3905,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 38
+				break
+			}
+		}
+	}
+
+	// The v40 guard, in the same COLUMN form as v39 and for its reason: v40
+	// adds two columns and no table, so a database stamped 40 by a binary built
+	// mid-change carries every v39 sentinel and the authority columns never
+	// arrive.
+	if version >= 40 {
+		for _, col := range v40ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v40 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 39
 				break
 			}
 		}

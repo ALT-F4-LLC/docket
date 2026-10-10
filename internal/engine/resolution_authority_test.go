@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
@@ -187,6 +188,72 @@ func TestResolutionAuthorityIsRecorded(t *testing.T) {
 			t.Errorf("run-resumed carries authority = %#v; a resume disposes of "+
 				"nothing and asserts no authority", data["authority"])
 		}
+	})
+}
+
+// assertRowAuthority checks that the resolved step's row carries the authority
+// its ruling event carries, so a reader of the row alone can tell who was
+// entitled to decide.
+func assertRowAuthority(t *testing.T, conn *sql.DB, stepID int, event map[string]any) {
+	t.Helper()
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "reading the resolved step: %v", err)
+	wantRef, _ := event["authority_ref"].(string)
+	if step.Authority != event["authority"] {
+		t.Errorf("step row authority = %q, want the event's %#v",
+			step.Authority, event["authority"])
+	}
+	if step.AuthorityRef != wantRef {
+		t.Errorf("step row authority_ref = %q, want the event's %q",
+			step.AuthorityRef, wantRef)
+	}
+}
+
+// TestStepRowCarriesResolutionAuthority: each ruling site writes the authority
+// it puts on its event onto the step row too, so a single resolved step says
+// whether an operator decided, a standing grant applied, or the conductor
+// acted.
+func TestStepRowCarriesResolutionAuthority(t *testing.T) {
+	t.Run("DecideStepWith", func(t *testing.T) {
+		conn := mustDB(t)
+		activatedRun(t, conn)
+		e := testEngine()
+		gateID := readyHumanGate(t, conn, e)
+
+		err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
+			Approve: true, Note: "looks right", By: auditBy, Under: grantUnder, NowMS: nowMS,
+		})
+		testsupport.Must(t, err, "approve: %v", err)
+
+		assertRowAuthority(t, conn, gateID, rulingPayload(t, conn, gateID, EventStepApproved))
+	})
+
+	t.Run("resolveStep", func(t *testing.T) {
+		conn := mustDB(t)
+		e := testEngine()
+		id := parkedExecutor(t, conn, e)
+
+		_, err := e.ResolveStepWith(conn, id, ResolveOptions{Token: testConductorToken,
+			As: ResolveSkip, Note: "not needed", By: auditBy, Under: grantUnder, NowMS: nowMS,
+		})
+		testsupport.Must(t, err, "resolve: %v", err)
+
+		assertRowAuthority(t, conn, id, rulingPayload(t, conn, id, EventStepResolved))
+	})
+
+	t.Run("decideMaterializedStep", func(t *testing.T) {
+		conn := mustDB(t)
+		e := testEngine()
+		driveMirrorReconcile(t, conn, e)
+		held := heldStep(t, conn, "reconcile-held@0#0")
+
+		err := e.DecideStepWith(conn, held.ID, DecideOptions{Token: testConductorToken,
+			Approve: true, Note: "call it high", Value: "high", By: auditBy,
+			Under: grantUnder, NowMS: nowMS,
+		})
+		testsupport.Must(t, err, "approve --value: %v", err)
+
+		assertRowAuthority(t, conn, held.ID, rulingPayload(t, conn, held.ID, EventStepApproved))
 	})
 }
 

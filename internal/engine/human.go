@@ -320,6 +320,11 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	); err != nil {
 		return err
 	}
+	if err := db.SetStepAuthorityTx(
+		tx, step.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
+	); err != nil {
+		return err
+	}
 	// The note as before, plus who decided (DKT-2450) and under what authority
 	// (DKT-1899).
 	decided, err := rulingData(opts.By, opts.Under.addTo(noteField(note)))
@@ -888,6 +893,11 @@ func (e *Engine) resolveStep(
 	// A resolution ANSWERS a park; every `--as` above leaves a non-parked status,
 	// so this write never sets a class and never clears the one it is answering.
 	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, "", nowMS); err != nil {
+		return err
+	}
+	if err := db.SetStepAuthorityTx(
+		tx, step.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
+	); err != nil {
 		return err
 	}
 	// The resolution as before, plus who ruled (DKT-2450).
