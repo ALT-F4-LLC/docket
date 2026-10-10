@@ -309,7 +309,16 @@ type Step struct {
 	// rows resolved before the columns existed.
 	Authority    string
 	AuthorityRef string
+	// ClaimPhase is ClaimPhasePreGates from the commit of a pre-gated claim's
+	// first transaction until its context transaction commits (v41), and ""
+	// otherwise. It describes the claim that last wrote it, so it is only
+	// meaningful while that claim's lease is live.
+	ClaimPhase string
 }
+
+// ClaimPhasePreGates marks a claim whose lease committed and whose pre-gate
+// phase and context transaction have not yet both committed.
+const ClaimPhasePreGates = "pre-gates"
 
 // Ref renders the step's `STEP-N` display identity.
 func (s *Step) Ref() string { return model.FormatStepID(s.ID) }
@@ -338,7 +347,7 @@ SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, ins
        loop_rounds_run, loop_trigger_step, loop_latest_verdict,
        metadata, context_bytes, materialized, usage_recorded,
        created_at_ms, updated_at_ms, row_version, work_root, recorded_at_ms,
-       authority, authority_ref
+       authority, authority_ref, claim_phase
   FROM steps`
 
 // GetStep reads one step by id.
@@ -452,7 +461,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.LoopRoundsRun, &step.LoopTriggerStep, &step.LoopLatestVerdict,
 		&metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
-		&step.RecordedAtMS, &step.Authority, &step.AuthorityRef,
+		&step.RecordedAtMS, &step.Authority, &step.AuthorityRef, &step.ClaimPhase,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrStepNotFound
@@ -549,6 +558,18 @@ func RefreshClaimLeaseTx(
 		return false, fmt.Errorf("refreshing the claim lease: %w", err)
 	}
 	return n > 0, nil
+}
+
+// SetStepClaimPhaseTx writes the step's claim phase. It leaves `row_version`
+// alone: the phase is bookkeeping inside one claim, not a transition a CAS
+// reader must observe.
+func SetStepClaimPhaseTx(tx *sql.Tx, id int, phase string, nowMS int64) error {
+	if _, err := tx.Exec(
+		`UPDATE steps SET claim_phase = ?, updated_at_ms = ? WHERE id = ?`,
+		phase, nowMS, id); err != nil {
+		return fmt.Errorf("setting the claim phase: %w", err)
+	}
+	return nil
 }
 
 // ReMintStepTokenTx replaces the token on a LIVE lease held by `owner`, leaving

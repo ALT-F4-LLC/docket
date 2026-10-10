@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 40
+const currentSchemaVersion = 41
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -210,6 +210,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	38: migrateV37ToV38,
 	39: migrateV38ToV39,
 	40: migrateV39ToV40,
+	41: migrateV40ToV41,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3109,6 +3110,43 @@ func migrateV39ToV40(tx *sql.Tx) error {
 	return nil
 }
 
+// v41AddedColumns is v41's whole schema change: `claim_phase` on `steps`,
+// set while a pre-gated claim's context transaction has not committed. The
+// pre-gate rows cannot carry that: the last one commits before the context
+// transaction does, and nothing else that transaction writes differs from
+// what the claim's first transaction wrote.
+var v41AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "claim_phase",
+		`ALTER TABLE steps ADD COLUMN claim_phase TEXT NOT NULL DEFAULT ''`},
+}
+
+// v41ColumnSentinels are the columns the rewind guard probes, the v27–v40
+// form: v41 adds no table and no index, so a database stamped 41 by a binary
+// built mid-change carries every v40 sentinel and `claim_phase` never arrives.
+var v41ColumnSentinels = []struct{ table, column string }{
+	{"steps", "claim_phase"},
+}
+
+// migrateV40ToV41 adds `steps.claim_phase`. It back-fills nothing: a claim
+// in flight across the upgrade reads "" and is treated as settled. It probes
+// before the ALTER, so it stays re-runnable.
+func migrateV40ToV41(tx *sql.Tx) error {
+	for _, col := range v41AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v40 to v41: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v40 to v41: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3923,6 +3961,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 39
+				break
+			}
+		}
+	}
+
+	// The v41 guard, in the same COLUMN form as v40 and for its reason: v41
+	// adds one column and no table, so a database stamped 41 by a binary built
+	// mid-change carries every v40 sentinel and `steps.claim_phase` never
+	// arrives.
+	if version >= 41 {
+		for _, col := range v41ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v41 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 40
 				break
 			}
 		}

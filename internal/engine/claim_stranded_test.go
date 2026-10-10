@@ -426,3 +426,143 @@ func TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord(t *testing.T) {
 	}
 	assertOwnPreGateInput(t, "re-minted bundle", reMinted.Context)
 }
+
+// TestSameOwnerReclaimBeforeTransactionBCommitsIsRefused pins the window
+// between the last pre-gate row committing and transaction B committing.
+//
+// Every declared pre-gate has a row there, so a row count cannot tell the
+// window from a settled claim. A re-mint inside it would replace the token
+// hash transaction B's lease refresh is keyed on, and the original claim
+// would fail as lost. The re-claim must be a retryable CONFLICT that leaves
+// the lease alone; once transaction B commits, the same re-claim re-mints.
+func TestSameOwnerReclaimBeforeTransactionBCommitsIsRefused(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(selfGateResultsWorkflow), "selfgateresults.toml")
+	issue := createIssue(t, conn, "a re-claim before transaction B", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot),
+	})
+	e := testEngine()
+	e.Gates = runner
+	stepID := stepIDByInstance(t, conn, "verify@0")
+	const owner = "wave:STEP-1"
+
+	var (
+		inWindowErr error
+		hookRan     bool
+	)
+	claimHookAfterPreGates = func(id int) {
+		claimHookAfterPreGates = nil
+		hookRan = true
+
+		before, err := db.GetStep(conn, id)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		rows, err := db.GateResultsForStep(conn, id)
+		testsupport.Must(t, err, "GateResultsForStep: %v", err)
+		if len(rows) != 1 || !rows[0].Pre {
+			t.Errorf("rows inside the window = %+v, want the one recorded pre-gate row", rows)
+		}
+
+		_, inWindowErr = e.ClaimStepWithGates(conn, id, ClaimOptions{
+			Owner: owner, NowMS: nowMS + 1000,
+		})
+
+		after, err := db.GetStep(conn, id)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		if after.TokenHash != before.TokenHash {
+			t.Error("the in-window re-claim re-keyed the lease transaction B refreshes")
+		}
+	}
+	t.Cleanup(func() { claimHookAfterPreGates = nil })
+
+	first, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: nowMS,
+	})
+	if !hookRan {
+		t.Fatal("the claim never reached the window after its pre-gates")
+	}
+	if inWindowErr == nil {
+		t.Error("a same-owner re-claim re-minted before transaction B committed")
+	} else if code, _ := CodeOf(inWindowErr); code != CodeConflict {
+		t.Errorf("in-window code = %q, want %q — err = %q",
+			code, CodeConflict, inWindowErr.Error())
+	}
+	testsupport.Must(t, err, "the original claim failed after the in-window re-claim: %v", err)
+	if err := db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000); err != nil {
+		t.Errorf("the original claim's token does not authorize its lease: %v", err)
+	}
+	if len(first.Context.PreGates) == 0 {
+		t.Error("the original claim's bundle carries no pre-gate results")
+	}
+	assertOwnPreGateInput(t, "original claim bundle", first.Context)
+
+	reMinted, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: nowMS + 2000,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim after transaction B committed was refused: %v", err)
+	if !reMinted.ReMinted {
+		t.Error("the re-claim after transaction B was not a re-mint")
+	}
+	if reMinted.Attempt != first.Attempt {
+		t.Errorf("the re-mint reported attempt %d, want %d", reMinted.Attempt, first.Attempt)
+	}
+	if len(reMinted.Context.PreGates) == 0 {
+		t.Error("the re-minted bundle carries no pre-gate results")
+	}
+	assertOwnPreGateInput(t, "re-minted bundle", reMinted.Context)
+}
+
+// TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires pins that the
+// pre-gate phase marker belongs to one lease. A claim that fails before
+// transaction B commits leaves the marker behind; once its lease expires, a
+// fresh claim reaps it and succeeds, and that claim settles normally.
+func TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	e := testEngine()
+	stepID := advanceToVerify(t, conn, e)
+	const owner = "wave:STEP-1"
+	const ttlMS = 1000
+
+	e.Gates = failingGateRunner{err: errors.New("the pre-gate runner failed")}
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, TTLOverride: ttlMS, NowMS: nowMS,
+	})
+	var incomplete *IncompleteClaimError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want the claim to fail before transaction B", err, err)
+	}
+
+	e.Gates = PassThroughRunner{}
+	later := nowMS + ttlMS + 1
+	fresh, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: later,
+	})
+	testsupport.Must(t, err,
+		"a claim after the unsettled lease expired was refused: %v", err)
+	if fresh.ReMinted {
+		t.Error("the claim after expiry re-minted the expired lease instead of taking a new one")
+	}
+	if fresh.Attempt != incomplete.Result.Attempt+1 {
+		t.Errorf("attempt = %d, want %d", fresh.Attempt, incomplete.Result.Attempt+1)
+	}
+
+	again, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: later + 1,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim of the settled fresh claim was refused: %v", err)
+	if !again.ReMinted {
+		t.Error("the re-claim of the settled fresh claim was not a re-mint")
+	}
+}

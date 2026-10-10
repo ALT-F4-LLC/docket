@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -266,9 +265,14 @@ func claimRecordingRefusals(
 // before the pre-gate lease refresh. Test-only, nil in production: they let a
 // test move the lease first and reach the two race refusals (DKT-2776),
 // which one process on a single-writer store cannot otherwise lose.
+//
+// claimHookAfterPreGates runs outside any transaction, after the last
+// pre-gate row committed and before transaction B begins, so a test can
+// issue a second claim inside that window.
 var (
 	claimHookBeforeCAS     func(tx *sql.Tx, stepID int)
 	claimHookBeforeRefresh func(tx *sql.Tx, stepID int)
+	claimHookAfterPreGates func(stepID int)
 )
 
 // recordClaimRefused writes the `claim-refused` event (DKT-2776).
@@ -446,10 +450,10 @@ func claimStepWithGates(
 	// context` reads it back: this claim was already handed out, and its
 	// bindings are the ones the step is bound to.
 	//
-	// A claim still inside its pre-gate phase is refused instead: its rows are
-	// not recorded yet, and its lease refresh is keyed on the token a re-mint
-	// would replace.
-	if reMint, err := reMintOwnClaim(tx, sched, fresh, spec, ttls, opts); reMint != nil || err != nil {
+	// A claim whose context transaction has not committed is refused instead:
+	// its bundle is not final, and its lease refresh is keyed on the token a
+	// re-mint would replace.
+	if reMint, err := reMintOwnClaim(tx, sched, fresh, ttls, opts); reMint != nil || err != nil {
 		return reMint, err
 	}
 
@@ -678,6 +682,22 @@ func claimStepWithGates(
 	// Exclusion is decided, and decided HERE and only here. Everything after
 	// this commit runs as the winning claimant.
 	preGates := preClaimGates(spec)
+
+	// The claim phase marks the span from this commit to transaction B's, so
+	// a same-owner re-claim inside it is refused rather than re-minted
+	// (reMintOwnClaim). Every winning claim writes it, which overwrites a
+	// marker an earlier claim left when it ended before transaction B.
+	phase := ""
+	if len(preGates) > 0 {
+		phase = db.ClaimPhasePreGates
+	}
+	if fresh.ClaimPhase != phase {
+		if err := db.SetStepClaimPhaseTx(tx, fresh.ID, phase, opts.NowMS); err != nil {
+			return nil, err
+		}
+		fresh.ClaimPhase = phase
+	}
+
 	if len(preGates) == 0 {
 		// NO PRE-GATES: the S3 path exactly. Assembly stays in the same
 		// transaction, so the common case keeps the single-transaction claim
@@ -770,6 +790,9 @@ func claimStepWithGates(
 	if err != nil {
 		return nil, incompleteClaim(committed, err)
 	}
+	if claimHookAfterPreGates != nil {
+		claimHookAfterPreGates(fresh.ID)
+	}
 
 	// ---- PHASE 3: transaction B. -------------------------------------------
 	txB, err := conn.Begin()
@@ -818,6 +841,10 @@ func claimStepWithGates(
 	}
 	fresh.ExpiresMS = refreshed2ExpiresMS(opts.NowMS, ttlMS)
 	committed.LeaseExpiresMS = fresh.ExpiresMS
+	if err := db.SetStepClaimPhaseTx(txB, fresh.ID, "", opts.NowMS); err != nil {
+		return nil, incompleteClaim(committed, err)
+	}
+	fresh.ClaimPhase = ""
 
 	// LR3: NO NEW EVENT. The refresh is part of the claim, and the claim
 	// already emitted `step-claimed` in transaction A. A second lifecycle event
@@ -869,32 +896,27 @@ func claimStepWithGates(
 // tree the claimant has been working in since, so the second answer would not
 // describe the same subject the first one did.
 //
-// A declared pre-gate with no result for this claim yet means the original
-// claim is still inside its pre-gate phase. That re-claim is refused with a
-// retryable CONFLICT and writes nothing: re-minting there would hand back a
-// bundle without the results and void the token the running phase's lease
-// refresh is keyed on.
+// A claim whose phase is still ClaimPhasePreGates has not committed its
+// context transaction. That re-claim is refused with a retryable CONFLICT and
+// writes nothing: re-minting there would hand back a bundle without the
+// claim's final results and void the token transaction B's lease refresh is
+// keyed on.
 func reMintOwnClaim(
-	tx *sql.Tx, sched *Scheduler, fresh *db.Step, spec *workflow.Step,
-	ttls ttlConfig, opts ClaimOptions,
+	tx *sql.Tx, sched *Scheduler, fresh *db.Step, ttls ttlConfig, opts ClaimOptions,
 ) (*ClaimResult, error) {
 	if opts.Owner == "" || fresh.Owner != opts.Owner || !fresh.Lease().Live(opts.NowMS) {
 		return nil, nil
+	}
+	if fresh.ClaimPhase == db.ClaimPhasePreGates {
+		return nil, conflictErr(
+			"step %s: the claim held by %s is still in its pre-gate phase "+
+				"(its context transaction has not committed); retry once the phase finishes",
+			fresh.Instance, opts.Owner)
 	}
 
 	bundle, err := AssembleRecordedContext(tx, sched, fresh, ttls)
 	if err != nil {
 		return nil, err
-	}
-	pending, err := unrecordedPreGates(tx, fresh, preClaimGates(spec), bundle.TargetSHA)
-	if err != nil {
-		return nil, err
-	}
-	if len(pending) > 0 {
-		return nil, conflictErr(
-			"step %s: the claim held by %s is still in its pre-gate phase "+
-				"(no result recorded yet for %s); retry once the phase finishes",
-			fresh.Instance, opts.Owner, strings.Join(pending, ", "))
 	}
 	preGates, err := recordedPreGates(tx, fresh.ID, bundle.TargetSHA)
 	if err != nil {
@@ -965,47 +987,6 @@ func recordedPreGates(tx *sql.Tx, stepID int, targetSHA string) ([]PreGateResult
 		out = append(out, preGateResultOfRecorded(last[gate]))
 	}
 	return out, nil
-}
-
-// unrecordedPreGates names the declared pre-gates that have no result for the
-// step's current claim yet, in declared order.
-//
-// A gate counts as recorded when its claim measured it or served it:
-//   - the claim's own rows are unstamped and carry the claim's time, which is
-//     also the step's `started_ms`, so an earlier attempt's rows predate it;
-//   - a served detached result is a complete row keyed to the claim's target
-//     (recordedDetachedPreGate, gates-trust §7.6.2 PG6).
-func unrecordedPreGates(
-	tx *sql.Tx, step *db.Step, gates []workflow.Gate, targetSHA string,
-) ([]string, error) {
-	if len(gates) == 0 {
-		return nil, nil
-	}
-	rows, err := db.GateResultsForStepTx(tx, step.ID)
-	if err != nil {
-		return nil, err
-	}
-	var claimedAtMS int64
-	if step.StartedMS != nil {
-		claimedAtMS = *step.StartedMS
-	}
-	measured := make(map[string]bool)
-	for _, r := range rows {
-		if r.Pre && r.TargetSHA == "" && r.CreatedAtMS >= claimedAtMS {
-			measured[r.Gate] = true
-		}
-	}
-	var pending []string
-	for _, gate := range gates {
-		if measured[gate.Name] {
-			continue
-		}
-		if _, served := recordedDetachedPreGate(rows, gate.Name, targetSHA); served {
-			continue
-		}
-		pending = append(pending, gate.Name)
-	}
-	return pending, nil
 }
 
 // recordStepInputs materializes the resolved input bindings. Engine-produced
