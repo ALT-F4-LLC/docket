@@ -725,10 +725,12 @@ func routeVoteStep(
 	status := statusForRouting(routing)
 
 	// A triage panel whose outcome the mapping has no key for (an operator's
-	// manual commit, §8.4) is disposed of by releaseUntriaged below, which
-	// writes its row `skipped` and records that as its event. Writing or
-	// announcing a routing for it here would contradict that row.
-	releasedByPanel := triaged != nil && !triageDecided(outcome)
+	// manual commit, §8.4, or a decided verdict `on_fail_routes` does not
+	// name) is disposed of by releaseUntriaged below, which writes its row
+	// `skipped` and records that as its event. Writing or announcing a routing
+	// for it here would contradict that row.
+	_, mapped := triageRouting(spec, outcome)
+	releasedByPanel := triaged != nil && !mapped
 	if !releasedByPanel {
 		if err := db.SetStepRoutingTx(tx, step.ID,
 			routing, reason, status, class, nowMS); err != nil {
@@ -761,24 +763,13 @@ func routeVoteStep(
 	//
 	// A REJECTION IS A DECISION and applies its mapped routing: the panel read
 	// the failure and declined to endorse the work, which is exactly one of the
-	// two verdicts the mapping is keyed on. What applies NOTHING is a tally that
-	// reached no verdict at all — a quorum miss, or a proposal retired without a
-	// tally — because there the panel could not agree and the step's disposition
-	// is still an open question. It stays suspended, and this vote step's own
-	// `on_fail`, which V13a requires it to declare, is the human backstop.
+	// two verdicts the mapping is keyed on. An outcome the mapping has no
+	// routing for — an operator's manual commit (§8.4), or a verdict
+	// `on_fail_routes` does not name — is disposed of by this vote step's own
+	// `on_fail` instead, rather than this guessing which routing was meant.
 	if triaged != nil {
-		if triageDecided(outcome) {
-			if err := applyTriageOutcome(
-				tx, step, spec, def, triaged, triageVerdict(outcome), nowMS,
-			); err != nil {
-				return err
-			}
-		} else if err := releaseUntriaged(
-			tx, step, triaged, spec, def, outcome, nowMS); err != nil {
-			// A verdict outside the mapping's vocabulary — an operator's manual
-			// commit (§8.4). The panel reached an outcome the mapping has no key
-			// for, so its own `on_fail` disposes of the step rather than this
-			// guessing which of two keys was meant.
+		if err := applyTriageOutcome(
+			tx, step, spec, def, triaged, outcome, nowMS); err != nil {
 			return err
 		}
 	}

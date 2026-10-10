@@ -431,6 +431,62 @@ func TestCommittedTriagePanelEventsMatchSkippedRow(t *testing.T) {
 	}
 }
 
+// TestTriageUnmappedVerdict: a tally that DECIDES a verdict its
+// `on_fail_routes` has no key for answered a question the mapping cannot
+// apply, so the panel's own `on_fail` disposes of the triaged step exactly as
+// it does for a tally that reached no verdict. Leaving the step `gated` would
+// strand it: nothing else resolves a suspension once the proposal is closed.
+func TestTriageUnmappedVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		onFail string
+		want   string
+		status string
+	}{
+		{onFail: "waiting-human", want: workflow.OnFailWaitingHuman, status: db.StepWaitingHuman},
+		{onFail: "abandon-issue", want: workflow.OnFailAbandonIssue, status: db.StepFailedRouted},
+		{onFail: "fix-loop", want: workflow.OnFailFixLoop, status: db.StepSuperseded},
+	} {
+		t.Run(tc.onFail, func(t *testing.T) {
+			conn := mustDB(t)
+			registerVoteRule(t, conn, "majority", "0.5", "")
+			src := strings.Replace(triageSrc, `approved = "APPROVED"`+"\n", "", 1)
+			src = strings.Replace(src, "REJECTED", "abandon-issue", 1)
+			src = strings.Replace(src, `on_fail = "waiting-human"`,
+				`on_fail = "`+tc.onFail+`"`, 1)
+			registerSource(t, conn, []byte(src), "triage-lane.toml")
+
+			issue := createIssue(t, conn, "unmapped", "body", "task", nil)
+			run := startRun(t, conn, issue)
+			_, err := activate(conn, run.ID)
+			testsupport.Must(t, err, "activate: %v", err)
+
+			e := testEngine()
+			e.Gates = failingGates{}
+			claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+			testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
+				"driving after the failed record: %v", err)
+			castTriage(t, conn, e, model.VerdictApprove)
+
+			step := mustStep(t, conn, "implement@0")
+			if step.Status == db.StepGated {
+				t.Fatalf("implement@0 is still %q after the panel decided — "+
+					"an unmapped verdict left it with nothing able to resolve it",
+					step.Status)
+			}
+			if !routingIs(step.Routing, tc.want) {
+				t.Errorf("implement@0 routing = %q, want %q", step.Routing, tc.want)
+			}
+			if step.Status != tc.status {
+				t.Errorf("implement@0 status = %q, want %q", step.Status, tc.status)
+			}
+			if got := stepStatus(t, conn, "triage@0"); got != db.StepSkipped {
+				t.Errorf("triage@0 status = %q, want %q — the mapping applied "+
+					"nothing, so the panel closes without ruling", got, db.StepSkipped)
+			}
+		})
+	}
+}
+
 // triageRun activates the fixture with the mapping filled in and drives
 // implement@0 to its gate failure.
 func triageRun(t *testing.T, approved, rejected string) (*sql.DB, *model.Run, *Engine) {

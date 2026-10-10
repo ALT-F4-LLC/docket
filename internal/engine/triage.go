@@ -216,23 +216,35 @@ func indent(s string) string {
 // performs for an operator disposing of the same failure, because that is what
 // the panel is standing in for.
 //
-// A verdict the mapping does not name, and a tally that FAILED, both leave the
-// step suspended: a panel that could not agree decided nothing, and the vote
-// step's own `on_fail` — which V13a requires it to declare — is then the human
-// backstop. That asymmetry is deliberate and matches the held path's: a tally
-// may answer the question it was asked, and may not decline to answer it and
-// still have effect.
+// An outcome the mapping has no routing for — a verdict the panel's
+// `on_fail_routes` does not name (V40c does not require both keys), or one
+// outside the verdict vocabulary — is handed to releaseUntriaged, so the
+// panel's own `on_fail` disposes of the step. Returning without a disposition
+// would strand it `gated`: the proposal is closed and nothing else resolves a
+// suspension.
 func applyTriageOutcome(
 	tx *sql.Tx, panel *db.Step, spec *workflow.Step, def *workflow.Definition,
-	router *db.Step, verdict string, nowMS int64,
+	router *db.Step, outcome *VoteOutcome, nowMS int64,
 ) error {
-	routing, ok := spec.OnFailRoutes[verdict]
+	routing, ok := triageRouting(spec, outcome)
 	if !ok {
-		return nil
+		return releaseUntriaged(tx, panel, router, spec, def, outcome, nowMS)
 	}
 
-	note := fmt.Sprintf("%s ruled %s by %s", panel.Instance, routing, verdict)
+	note := fmt.Sprintf("%s ruled %s by %s",
+		panel.Instance, routing, triageVerdict(outcome))
 	return applyTriageRouting(tx, def, router, routing, note, nowMS)
+}
+
+// triageRouting returns the routing the panel's `on_fail_routes` maps the
+// tally's verdict to, and false when the tally decided nothing or decided a
+// verdict the mapping has no key for.
+func triageRouting(spec *workflow.Step, outcome *VoteOutcome) (string, bool) {
+	if !triageDecided(outcome) {
+		return "", false
+	}
+	routing, ok := spec.OnFailRoutes[triageVerdict(outcome)]
+	return routing, ok
 }
 
 // applyTriageRouting performs one triage routing on the step that was triaged,
@@ -352,7 +364,8 @@ func applyTriageFixRound(
 
 // releaseUntriaged disposes of a suspended step whose panel closed WITHOUT
 // reaching a verdict the mapping is keyed on (DKT-1901) — a quorum miss, a
-// proposal retired without a tally, or an operator's manual commit.
+// proposal retired without a tally, an operator's manual commit, or a decided
+// verdict the panel's `on_fail_routes` has no key for.
 //
 // THE PANEL'S OWN `on_fail` GOVERNS HERE, and this is the only place it is
 // read for a triaging panel. That is what makes it the backstop: V13a already
@@ -374,7 +387,8 @@ func releaseUntriaged(
 ) error {
 	routing := spec.EffectiveOnFail()
 	note := fmt.Sprintf(
-		"%s closed %s without reaching a verdict, so its own `on_fail` (%s) "+
+		"%s closed %s without reaching a verdict its `on_fail_routes` maps, "+
+			"so its own `on_fail` (%s) "+
 			"disposes of %s",
 		panel.Instance, outcome.Status, routing, router.Instance)
 
