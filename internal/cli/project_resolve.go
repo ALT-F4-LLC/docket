@@ -77,13 +77,16 @@ var readOnlyLeafVerbs = map[string]bool{
 	"audit": true,
 }
 
-// readOnlyVerbPaths are read verbs whose leaf name also names a write
-// elsewhere, so they are keyed by full path instead of joining
-// readOnlyLeafVerbs. `policy resolve` only reports the seats a run's policy
+// readOnlyVerbPaths are read verbs keyed by full path rather than by leaf in
+// readOnlyLeafVerbs: either the leaf also names a write elsewhere, or it is
+// specific to one group. `policy resolve` only reports the seats a run's policy
 // resolves to, but `step resolve` records a resolution and must keep
-// registering; a bare "resolve" leaf would silently stop it.
+// registering; a bare "resolve" leaf would silently stop it. `run verify-pins`
+// reads the run it is handed and writes nothing, so it must also work from a
+// directory that is not a repository.
 var readOnlyVerbPaths = map[string]bool{
-	"policy resolve": true,
+	"policy resolve":  true,
+	"run verify-pins": true,
 }
 
 // commandMayRegisterProject reports whether cmd is allowed to create a project

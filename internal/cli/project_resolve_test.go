@@ -51,7 +51,7 @@ func commandAt(t *testing.T, path string) *cobra.Command {
 func TestReadVerbsNeverRegisterAProject(t *testing.T) {
 	reads := []string{
 		"issue list", "issue show", "issue graph", "issue log",
-		"run report", "run status",
+		"run report", "run status", "run verify-pins",
 		"step list", "step show", "step gates", "step context", "step render",
 		"step artifact", "step artifacts",
 		"doc list", "doc show",
