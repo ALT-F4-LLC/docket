@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -65,6 +66,36 @@ func optionalToken(stdin io.Reader) string {
 		return ""
 	}
 	return tok
+}
+
+// conductorToken returns the token to present on one of the seven operator
+// verbs — `step approve|reject|resolve|reap`, `run pause|resume|abandon` —
+// for run `runID` (DKT-2465).
+//
+// NOTHING IS READ UNLESS THE RUN IS BOUND to a conductor capability, for
+// tokenForClose's reason exactly: the stdin fallback drains its reader to EOF,
+// and an agent whose inherited stdin pipe never closes would hang forever on
+// a run that needs no token at all — every run activated before the
+// capability existed. The look here is advisory: the authoritative check runs
+// inside the verb's own transaction, and a run bound after this read refuses
+// the empty token there rather than being ruled on without one.
+func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
+	hash, err := db.RunConductorHash(conn, runID)
+	if err != nil || hash == "" {
+		return ""
+	}
+	return optionalToken(stdin)
+}
+
+// stepConductorToken is conductorToken for a verb addressed by STEP-N: the
+// step's run is what the capability is bound to. A step that does not exist
+// yields "" and leaves the NOT_FOUND to the engine, which owns that refusal.
+func stepConductorToken(conn *sql.DB, stepID int, stdin io.Reader) string {
+	step, err := db.GetStep(conn, stepID)
+	if err != nil {
+		return ""
+	}
+	return conductorToken(conn, step.RunID, stdin)
 }
 
 // errMissingToken names both accepted channels, since a caller that supplied

@@ -3,9 +3,11 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
@@ -35,6 +37,19 @@ var voteCommitCmd = &cobra.Command{
 
 		outcome, _ := cmd.Flags().GetString("outcome")
 		escalationReason, _ := cmd.Flags().GetString("escalation-reason")
+
+		// A vote step's proposal is routed by its run; committing it out of
+		// band is a conductor's ruling, so a bound run requires its capability.
+		runID, stepOwned, err := engine.VoteProposalRun(conn, proposalID)
+		if err != nil {
+			return cmdErr(err, output.ErrGeneral)
+		}
+		if stepOwned {
+			token := conductorToken(conn, runID, os.Stdin)
+			if err := engine.AuthorizeConductor(conn, runID, token, "vote commit"); err != nil {
+				return runErr(err)
+			}
+		}
 
 		err = db.CommitProposal(conn, proposalID, outcome, escalationReason)
 		if err != nil {

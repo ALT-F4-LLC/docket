@@ -116,8 +116,14 @@ func InsertWorkflowTx(
 
 // GetWorkflow returns one registered workflow WITHIN ONE PROJECT (v12 — a
 // name@version is a per-project registration). A version of 0 selects the
-// HIGHEST registered version, which is what `workflow show NAME` without
-// `@version` means.
+// HIGHEST NON-DEPRECATED registered version, which is what `workflow show
+// NAME` without `@version` means — and, by design, the same version
+// `run activate` binds (engine.bindableDefinitions retires deprecated rows
+// first, then takes the highest of what remains; DKT-616). A name whose every
+// version is deprecated therefore resolves to ErrWorkflowNotFound, mirroring
+// binding removing the name from routing altogether. An explicit version
+// still resolves a deprecated row: retired versions stay registered and
+// reachable for the runs that pinned them.
 func GetWorkflow(db *sql.DB, projectID int, name string, version int) (*model.Workflow, error) {
 	projectID = projectOrDefault(projectID)
 	if version > 0 {
@@ -126,7 +132,8 @@ func GetWorkflow(db *sql.DB, projectID int, name string, version int) (*model.Wo
 			projectID, name, version))
 	}
 	return scanWorkflow(db.QueryRow(
-		workflowSelect+` WHERE project_id = ? AND name = ? ORDER BY version DESC LIMIT 1`,
+		workflowSelect+` WHERE project_id = ? AND name = ? AND deprecated_at_ms IS NULL
+		 ORDER BY version DESC LIMIT 1`,
 		projectID, name))
 }
 
@@ -136,6 +143,12 @@ type WorkflowListOptions struct {
 	ProjectID int
 	Name      string
 	Limit     int
+	// ExcludeDeprecated drops retired versions (`deprecated_at_ms` set) from
+	// both the rows and the pre-limit total. Zero value is false so every
+	// existing caller — binding readers that need the full lineage to judge
+	// staleness — keeps seeing every version; only `workflow list`'s default
+	// opts this in.
+	ExcludeDeprecated bool
 }
 
 // ListWorkflows returns registered workflows, newest registration first, and
@@ -152,6 +165,9 @@ func ListWorkflows(db *sql.DB, opts WorkflowListOptions) ([]*model.Workflow, int
 	if opts.Name != "" {
 		clauses = append(clauses, `name = ?`)
 		args = append(args, opts.Name)
+	}
+	if opts.ExcludeDeprecated {
+		clauses = append(clauses, `deprecated_at_ms IS NULL`)
 	}
 	where := ``
 	if len(clauses) > 0 {
@@ -181,6 +197,64 @@ func ListWorkflows(db *sql.DB, opts WorkflowListOptions) ([]*model.Workflow, int
 	}
 
 	return workflows, total, nil
+}
+
+// WorkflowVersion is one registered version's IDENTITY, without its bytes
+// (DKT-594).
+//
+// It exists because the staleness question — "how many versions has this name
+// advanced since the run pinned it" — is answered by the version column alone,
+// and the rows that answer it carry a `body` and a `parsed` each. A corpus with
+// 41 commits in four days has names registered a dozen deep; loading every one
+// of their bodies to subtract two integers would make a read verb's cost scale
+// with the size of the definitions it is not reading.
+type WorkflowVersion struct {
+	Name    string
+	Version int
+	// Binds is false for a version RETIRED from binding (`deprecated_at_ms` set).
+	//
+	// The distinction is the same one bindableDefinitions makes: retirement is a
+	// binding-time filter, so the version a fresh run would pin is the highest
+	// one that still binds, and a staleness count computed over retired rows
+	// would tell an operator to chase a version nothing can bind.
+	Binds bool
+}
+
+// WorkflowVersionsFor returns every registered version of the NAMED workflows
+// within one project, ordered by (name, version) so a caller's reduction is
+// deterministic.
+//
+// An empty `names` returns no rows and makes no query: the caller has nothing
+// to ask about, and an unfiltered scan of the whole registry is never what
+// "these names" means.
+func WorkflowVersionsFor(conn *sql.DB, projectID int, names []string) ([]WorkflowVersion, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(names))
+	args := []any{projectOrDefault(projectID)}
+	for i, n := range names {
+		placeholders[i] = "?"
+		args = append(args, n)
+	}
+	rows, err := conn.Query(
+		`SELECT name, version, deprecated_at_ms FROM workflows
+		  WHERE project_id = ? AND name IN (`+strings.Join(placeholders, ", ")+`)
+		  ORDER BY name ASC, version ASC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing registered workflow versions: %w", err)
+	}
+	return scanRows(rows, "workflow versions", func(r *sql.Rows) (WorkflowVersion, error) {
+		var (
+			v            WorkflowVersion
+			deprecatedAt sql.NullInt64
+		)
+		if err := r.Scan(&v.Name, &v.Version, &deprecatedAt); err != nil {
+			return WorkflowVersion{}, fmt.Errorf("reading a workflow version: %w", err)
+		}
+		v.Binds = !deprecatedAt.Valid || deprecatedAt.Int64 == 0
+		return v, nil
+	})
 }
 
 // workflowSelect names the columns in a fixed order, so the two scan helpers

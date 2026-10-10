@@ -11,10 +11,14 @@ import (
 )
 
 // boardColumn represents a single status column in the board JSON output.
+//
+// Issues is typed `any` for the same reason listResult's is: summary rows
+// (issueRowsPayload) by default, the full issue shape (issueListPayload) under
+// `--with-body` (DKT-1053; see issue_row.go).
 type boardColumn struct {
-	Status string         `json:"status"`
-	Count  int            `json:"count"`
-	Issues []*model.Issue `json:"issues"`
+	Status string `json:"status"`
+	Count  int    `json:"count"`
+	Issues any    `json:"issues"`
 }
 
 // boardResult is the JSON output structure for the board command.
@@ -35,8 +39,10 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	sizes, _ := cmd.Flags().GetStringSlice("size")
 	assignee, _ := cmd.Flags().GetString("assignee")
 	expand, _ := cmd.Flags().GetBool("expand")
+	withBody, _ := cmd.Flags().GetBool("with-body")
 
 	// Validate filter enum values.
 	for _, p := range priorities {
@@ -44,10 +50,16 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 			return cmdErr(err, output.ErrValidation)
 		}
 	}
+	for _, sz := range sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
 
 	opts := db.ListOptions{
 		ProjectID:   getProjectID(cmd),
 		Priorities:  priorities,
+		Sizes:       sizes,
 		Labels:      labels,
 		Assignee:    assignee,
 		IncludeDone: true,
@@ -86,7 +98,7 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 			columns = append(columns, boardColumn{
 				Status: string(status),
 				Count:  len(col),
-				Issues: col,
+				Issues: issuesPayload(col, withBody),
 			})
 		}
 
@@ -123,7 +135,9 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 func init() {
 	boardCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	boardCmd.Flags().StringSliceP("priority", "p", nil, "Filter by priority (repeatable)")
+	boardCmd.Flags().StringSlice("size", nil, "Filter by size (repeatable)")
 	boardCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	boardCmd.Flags().Bool("expand", false, "Show sub-issues individually instead of rolling up")
+	boardCmd.Flags().Bool("with-body", false, withBodyHelp)
 	rootCmd.AddCommand(boardCmd)
 }

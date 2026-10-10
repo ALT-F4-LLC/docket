@@ -415,13 +415,14 @@ U3 exists because it is not hypothetical: group 1 ships `schemas`, group 2
 ships `action_results`, and the operator's own tracker is migrated by whichever
 binary happens to be built between them.
 
-## 4.5 `docket schema register|list|show`
+## 4.5 `docket schema register|list|show|deprecate`
 
 | Verb | Flags | Effect |
 |---|---|---|
 | `docket schema register <name@version> <file.json>` | `--json[=v2]` | read; parse as JSON; validate as a schema document (the library compiles it — a schema that does not compile is refused here, not at first use); derive the ordered index (§4.3); insert per §4.4's three outcomes |
-| `docket schema list` | `--json[=v2]` | registered schemas: `name`, `version`, `sha256`, `ordered_fields`, `builtin`, `created_at_ms`. A `Collection` envelope under v2, per the `workflow list` precedent |
-| `docket schema show <name@version>` | `--json[=v2]`, `--body` | the row; `--body` emits the registered **bytes verbatim** (what a run validates against, not a re-serialization) |
+| `docket schema list` | `--json[=v2]`, `--deprecated` | registered schemas: `name`, `version`, `sha256`, `ordered_fields`, `builtin`, `created_at_ms`. A `Collection` envelope under v2, per the `workflow list` precedent. Retired versions are hidden unless `--deprecated` is passed; v2 items carry `deprecated_at_ms` when set *(amended 2026-09-24 — DKT-2792)* |
+| `docket schema show <name@version>` | `--json[=v2]`, `--body` | the row; `--body` emits the registered **bytes verbatim** (what a run validates against, not a re-serialization). A bare name resolves the highest version still in service; an explicit `@version` resolves a retired one |
+| `docket schema deprecate <name@version>` | `--json[=v2]`, `--restore`, `--project`, `--all-projects` | sets `deprecated_at_ms` and never deletes; refuses (CONFLICT, no override) a version a workflow still in service names as `payload`, naming the referencers, and refuses the builtin. `workflow register`, `workflow lint`, and auto-registration refuse a new `payload` reference to a retired version; runs that pinned it are untouched *(amended 2026-09-24 — DKT-2792; engine-spec §11.1)* |
 
 **`name@version` is an argument, not two flags** — §1's surface line is
 `docket schema register name@v schema.json` and it is followed exactly. The
@@ -703,6 +704,99 @@ mechanical:
 package-level variable — the same purity discipline as §4.9.2, and what lets
 the table tests run without a database.
 
+### 5.1 The reserved `diff.*` family *(added 2026-09-24, DKT-2063, DKT-2518, DKT-2548–DKT-2551)*
+
+A write step's threshold can route on the SIZE of the change the step recorded,
+which no payload predicate can reach: `implement` emits a markdown
+change-summary with no payload at all, and the facts a change track wants —
+how big was the change, was there one — exist only in the ledger. Three
+reserved field names address them. They are the engine's own measurement, never
+a payload field, and no schema declares them.
+
+| Field | Value | Measured as |
+|---|---|---|
+| `diff.lines` | integer | added PLUS removed content lines |
+| `diff.files` | integer | files the diff touches (`diff --git` headers) |
+| `diff.empty` | boolean | whether the recorded body holds a change |
+
+**Evaluated at record time, over the step's recorded `issue.diff` round
+record.** The measurement is taken in the completion transaction of a
+tree-holding executor step (a fanout sibling included), over the in-scope cumulative diff that completion
+recorded (the object a review is sized against; the round-delta and
+out-of-scope trailers are not counted, since neither is this issue's own
+change). Routing then applies the ordinary interposed-target semantics: the
+matched routing's step is released and the unrouted siblings skip in the same
+transaction, exactly as a payload predicate would route. The aggregation is NOT
+applied — `diff.lines` is one number for the step, not a column over a set, so
+`any(diff.lines > 20)` and `all(diff.lines > 20)` are the same assertion.
+`diff.lines` and `diff.files` compare numerically without an `ordered_enum`:
+T3 exists because core does not know whether `high` outranks `medium`; it does
+know that 21 > 20, so there is no order to guess and nothing to park on.
+
+Two measurement rules keep the facts honest about the object review reads:
+
+- `--- `/`+++ ` lines are file headers only between a block's `diff --git`
+  line and its first `@@` hunk header; inside a hunk they are content and
+  count toward `diff.lines` (DKT-2550).
+- `diff.empty` agrees with the ledger's own record-or-drop test
+  (`diffRecordsNoChange`) over the same in-scope portion, so a rename-, mode-,
+  or binary-only diff the ledger keeps as a real change reads
+  `diff.empty == false` even though it carries no `+`/`-` line (DKT-2549).
+- When an `--as retry` re-execution computes an empty diff and the DKT-259
+  guard drops the re-record because the issue already holds a non-empty
+  `issue.diff`, the facts are measured from THAT latest recorded non-empty
+  body — what `issue.diff` resolves to and a review would read — not from the
+  empty body the retry computed (DKT-2548). That record's round record stands
+  too: downstream packets keep its `head` and `worktree` as the target, since
+  the retry's own record would name a tree at its base with no head to bind;
+  moving the target on purpose is the annotate-integration and
+  `--worktree` re-pin verbs' job. A FIRST empty diff, with no
+  record for the issue yet, still records: neither the DKT-259 guard nor the
+  byte-identical guard fires without an earlier record to protect or match.
+
+**The absent-record rule.** A tree-holding step whose completion recorded no
+change evaluates as `diff.empty == true`, `diff.lines == 0`, and
+`diff.files == 0` — a decided answer, not an unknown field. `any(diff.empty ==
+false)` is therefore DECIDED false for such a step and the review it keys is
+skipped (cascading through `after_fired`), rather than falling through to the
+no-such-field path. On a step that holds no tree there is no measurement, and
+`diff.lines` is an ordinary undeclared field evaluated exactly as any other.
+
+**Register-time lint** (DKT-2518), decided in `Validate` on bytes alone, because
+a step with no `payload` would otherwise take the V21d skip and reach the
+engine with a predicate that can never mean anything:
+
+1. **V45 — placement.** A `diff.*` predicate on a step that does not hold the
+   tree — an `action` or `type` step, or an executor or fanout step declaring
+   `holds_tree = false` — is refused, naming the step and the tree-holding
+   requirement. The rule keys on the engine's evaluation condition (a
+   measurement exists exactly for a tree-holding executor row), not on a
+   `class` value: on any other step the facts are nil and the predicate would
+   silently never match. A fanout step is admitted because it expands to
+   executor rows, and each tree-holding sibling measures and routes on the
+   change it recorded *(amended 2026-09-24: the first cut refused fanout
+   outright, stricter than the engine)*.
+2. **V46 — count literal.** A non-numeric literal under an ordered operator
+   (`<`, `<=`, `>`, `>=`) on `diff.lines` or `diff.files` is refused under its
+   own id, naming the literal and the operator: the counts are ordered
+   numerically, so the literal must be an integer. The same holds under `==`
+   and `!=` (`any(diff.files == none)`), since the engine parses a count
+   literal as an integer before it looks at the operator.
+3. **V47 — boolean.** `diff.empty` under an ordered operator (it has no order)
+   or compared against a literal that is not a boolean is refused, naming the
+   field and the operator or literal.
+
+The engine still refuses every one of these shapes at record time
+(`evaluateDiff`); the lint moves each refusal from a parked run to the author's
+terminal, so a registered definition never reaches one. **V21a does
+not apply** to the three names (DKT-2551): on a payload-declaring step the
+cross-validation skips exactly `diff.lines`, `diff.files`, and `diff.empty` by
+name — a lookalike such as `diff.bogus` is an ordinary undeclared field V21a
+refuses — because the alternative told an author to add `diff.lines` to a
+payload schema, which the design forbids. The names are the workflow package's
+(`workflow.DiffFields`), read by the engine, so validator and evaluator share
+one spelling as they do for `VoteCastFields`.
+
 ## 6. The real `ActionRunner`
 
 `internal/engine/action.go`'s seam is honored: `NewEngine` swaps
@@ -832,7 +926,7 @@ requirement rather than drift:
 |---|---|---|
 | M-a | **`ActionResult` gains `Held []int` and `Results []ActionResultRow`** | §2 requires the held-cluster outcome and §6.3 requires per-attempt records; a seam that could only return a payload could express neither |
 | M-b | **The routing stage gains a `held` branch** and the saga a `held` stage (§7.7) | §2's "materializes a `type=human` step … gating the routing step" is a *deferral* of routing, and a routing stage that always routes cannot defer |
-| M-c | **`DecideStep` gains a materialized-step branch** (§7.7) | `approve`/`reject` on a materialized step resumes another step's saga, which the S3 path had no reason to do |
+| M-c | **`DecideStepWith` gains a materialized-step branch** (§7.7) | `approve`/`reject` on a materialized step resumes another step's saga, which the S3 path had no reason to do |
 | M-d | **Stage 0 gains schema validation** (§4.8) and `EvaluateThreshold` gains a resolver parameter (§5) | both are this stage's subject |
 
 Recorded as a **note on DKT-5** (§11 A7), not as a spec amendment: no
@@ -863,6 +957,8 @@ unchanged.
 | `method` | `median` \| `max` \| `min` | yes | the reduction |
 | `hold_spread` | integer ≥ 0, default 0 | no | hold when spread **≥** this; `0` never holds |
 | `output` | string | yes (already V11's, §4.3.1) | the produced artifact kind |
+| `route_at` | string, a value of `field`'s declared order | no | routing floor *(amended 2026-08-23, DKT-593 — see the amendment below)*: a cluster whose reduced value's position is **≥** its position is emitted to the output payload; the rest go to the record. Absent ⇒ every cluster emits, byte-for-byte the pre-`route_at` output |
+| `source_field` | string, a property name | no | *(amended 2026-09-13, DKT-2462 — see the amendment below)*: names a property of each input element holding an array of opaque source labels. Core neither validates nor reduces by it; the run report groups clusters by it. Absent ⇒ no such grouping in the report |
 
 New register-time rules, each a `VALIDATION_ERROR` naming workflow, step, and
 param, each a test case:
@@ -870,7 +966,8 @@ param, each a test case:
 | # | Rule | Argument |
 |---|---|---|
 | V27 | a step's `name` may not end in **`-held`**, and `action` may not name a builtin other than `aggregate` | the first reserves the materialized identity (§7.7) so a definition cannot collide with one; the second turns "my trusted `aggregate` command never runs" into a register-time sentence |
-| V28 | `action = "aggregate"` requires `field`, `method ∈ {median,max,min}`, `output`; `hold_spread` an integer ≥ 0 if present; **no other keys** | the discipline every V-rule follows. A typo'd `method = "medain"` is otherwise discovered hours into a run, on a step whose inputs are already spent |
+| V28 | `action = "aggregate"` requires `field`, `method ∈ {median,max,min}`, `output`; `hold_spread` an integer ≥ 0 if present; `route_at` a non-empty string if present *(DKT-593)*; `source_field` a non-empty string if present *(DKT-2462)*; **no other keys** | the discipline every V-rule follows. A typo'd `method = "medain"` is otherwise discovered hours into a run, on a step whose inputs are already spent |
+| V28a | `route_at`, when declared, must name a value of `params.field`'s declared order *(DKT-593)* | the floor is a **position** in that order, and a value with no position has no floor to name — G4's discipline asked at register time. Schema-aware, so it lives in `ValidateSchemas` beside V29 rather than in the pure-bytes V28 |
 | V29 | an `aggregate` step must declare `payload = name@version`, and that schema must declare `params.field` as **`ordered_enum`** | median, max, and min are all defined **only** over an order. An aggregate without a declared order is a step that can never compute, and §11.2's own restriction is the same restriction |
 | V30 | the declared schema must **accept an aggregate-shaped document**: a synthetic probe built from the schema's own declared enum values (§7.6) is validated against it at register time | the output must satisfy *both* the instance schema and `aggregate@1` (§7.6). An instance schema with `"additionalProperties": false` makes that conjunction unsatisfiable — and the failure would otherwise land at the end of a review fan-out, hours in. The probe is deterministic and invents nothing: every value in it comes from the schema being checked, and it carries the aggregate output keys (`members`, `held`) plus one carried-through extra key so the conjunction it tests is the real one (review F3) |
 
@@ -880,6 +977,57 @@ order from the schema of the step the aggregate reads its input from. That is
 magic (nothing in the grammar says an action reads its predecessor's payload),
 it is unstable under `inputs` edits, and it hides the one declaration an
 author most needs to see.
+
+### AMENDMENT (DKT-593) — `route_at`: a routing floor
+
+RUN-43 spent 71.6% of its output tokens on fix rounds that closed roughly as
+many clusters as they opened, because every reconciled cluster — whatever its
+reduced value — entered the loop, and `contracts/fix.md` rightly forbids the
+FIXER from filtering ("the reconciled set is the work"). The missing piece was
+never the fixer's to add: which clusters are worth a round is a ROUTING
+question, and routing is core's.
+
+`route_at = "<value>"` names a floor in `field`'s declared order. Like every
+value the builtin touches it is an **opaque token compared only by position**
+(§4.3 I3) — a severity floor for a severity order, a ripeness floor for a
+ripeness order, and core cannot tell the difference.
+
+| # | Clause |
+|---|---|
+| R1 | A cluster whose **reduced value's** position is **≥** the floor's position is emitted to the output payload — the wire the threshold evaluates and every downstream `inputs` reader consumes. The comparison is over the reduced value, exactly as the threshold's would be: a cluster whose members reach `high` but whose median is `low` is a `low` cluster to both |
+| R2 | A cluster below the floor goes **to the record**: fully reduced — value, members, demotion trail — into the aggregate's own `action_results` row (`output` column, the audit channel every attempt already writes), and counted in the artifact body. It never enters the artifact payload, so the threshold and the loop never see it. Routed, not erased: the input artifacts remain immutable and addressable, and the reduction's trail is attributed in the row |
+| R3 | A **held cluster is never routed below the floor.** Its computed value is exactly the value the hold refuses to trust — the members disagree, and the operator resolving it may accept a different value (`--value`) — so routing it out by that value would spend the decision the hold exists to ask. It is emitted, it gates the step (§7.7), and the floor's opinion waits for the operator's |
+| R4 | `Held` indices address the **emitted** payload — the payload the artifact records and `<step>-held@k#i` resolves against (H2a) — which coincides with input positions whenever nothing was routed below |
+| R5 | **Absent ⇒ byte-for-byte today's output.** No key, no floor, nothing recorded, G2's identity property untouched — the same no-cliff discipline `hold_spread = 0` follows |
+| R6 | Every cluster below the floor is legal: the emitted payload is then the **empty array**, a valid `aggregate@1` document over which any threshold predicate finds nothing — the round is simply not entered |
+| R7 | Validation is split as V28/V28a: presence and type are pure bytes (V28); membership in the declared order needs the schema and lives in `ValidateSchemas` (V28a). At run time — a definition can arrive through a restored database — the same two refusals fire in `ParseAggregateParams` and `Aggregate` respectively, the second naming the value per G4 |
+
+This is **core routing, not fixer filtering**: the set the fixer receives has
+already been routed, so `contracts/fix.md`'s prohibition stands unchanged —
+there is nothing left in the reconciled set to filter.
+
+### AMENDMENT (DKT-2462) — `source_field`: reporting attribution without a domain vocabulary
+
+DKT-2452 gave the run report a per-`aggregate`-step count of unique versus
+corroborated clusters (§7.6's `members`). It could not attribute a cluster to
+the **executor** that produced a member: `members` is core's own reduced
+record, with no per-member origin, and core must not resolve one by opening a
+judge worker's own artifact payload — that is payload interpretation
+(genericity, §1.1.1), and a finding's own `id` is unique only within its
+producing worker's payload, so two workers can emit the same id and an id
+alone cannot disambiguate.
+
+`source_field = "<name>"` names a property of each input element holding an
+array of opaque source labels — a workflow's own convention for a
+member's producing step ref, say. Core reads the NAME to know which other key
+to read; it never assumes the name `member_sources` or any other domain word.
+G3 already carries that array through to the output element verbatim, so
+`Aggregate` itself needs no change for the value to survive reduction — the
+param exists solely so `docket run report` can group a round's clusters by
+that key and resolve each value to the step instance (and its declared
+executor hint) that produced it, without core hardcoding one corpus's field
+name. Absent `source_field`, the report's grouping section is omitted
+entirely, matching `route_at`'s absent-parameter convention.
 
 ## 7.2 The input shape: what a "cluster" is
 
@@ -897,7 +1045,7 @@ is the *judged* half, performed by a synthesizing worker; reconciliation is the
 |---|---|
 | G1 | `field` holding an **array** ⇒ the members are its elements, in payload order (order does not affect any result; §7.3 sorts by position) |
 | G2 | `field` holding a **scalar** ⇒ a one-member cluster. The median/max/min of one value is that value, the spread is 0, nothing is held, and nothing is demoted |
-| G3 | Every **other key of the element is carried through verbatim** into the output element. Core does not read them (genericity), and dropping them would strip an instance's own identifiers from the very payload a downstream step consumes |
+| G3 | Every **other key of the element is carried through verbatim** into the output element, **except the core-owned names** (`members`, `held`, `demoted_from`, `operator_resolved`, `operator_note`, `operator_set_from`, `operator_set_mirrors`), which are dropped so that a key of that name in the output is always core's own write. Core does not read the rest (genericity), and dropping them would strip an instance's own identifiers from the very payload a downstream step consumes. **Aggregation never writes an author's key. Hold resolution is the one exception** (amended by DKT-42 and DKT-1548): when an operator resolves a held cluster with a corrected value, core writes that value onto the threshold field, retains the computed value it replaced in `operator_set_from`, carries the correction onto the other fields the step's own threshold compares, and names each field it rewrote in `operator_set_mirrors` — so every key core wrote on the author's behalf is recorded beside the decision that caused it |
 | G4 | A member value **not present** in the declared order (§4.3 I4) is a step failure with a reason naming the value and the field. **Not** sorted, not ignored |
 | G5 | An **empty** members array is a step failure naming the element index — an empty cluster has no median, and inventing one (null? the lowest?) is exactly the kind of guess this stage exists to refuse |
 
@@ -1078,7 +1226,7 @@ clause below is this TDD's, and each is a test.
 | H12b | **Ordering inside the approve transaction** *(DKT-15)*. The decision is written to the cluster step **before** the payload is resolved, because resolution now reads each cluster step's own status to decide which elements to mark — with the old order the cluster being approved reads as undecided and nothing is marked. Under the previous whole-hold shape the order was immaterial, since approval was inferred from the caller rather than read back. Both remain in one transaction, so §7.7.3's atomicity is unchanged |
 | H13 | **Artifacts stay immutable** (engine-core §1.4). Approval records a **new** artifact rather than annotating the old one, which is the same rule a step re-run follows. The held payload remains addressable forever: what the engine computed and what the operator accepted are two records, not one overwritten one |
 | H14 | The materialized step ends **`done` on both** approve and reject — it recorded a decision, which is what a gate does. The *consequence* lands on the routing step. This is also why V13's rule (a human gate may not route rejects to `waiting-human`) is not violated when the routing step's `on_fail` **is** `waiting-human`: the park is on a **different** step, resolvable by `step resolve`, not a step parking on its own decision |
-| H15 | Both verbs are **token-free**, per §2 — a human gate is resolved by an operator who never claimed it |
+| H15 | Neither verb takes a **lease token**, per §2 — a human gate is resolved by an operator who never claimed it. Both require the run's **conductor capability** (DKT-2465, reliability-delta §2 v29), checked before the held step's status is inspected |
 | H16 | `approve`/`reject` on a materialized step whose routing step is **not** in `held` (a double approve, a resumed race) is `CONFLICT` naming both steps. The saga advance is CAS-guarded on `saga_stage = 'held'`, so the loser writes nothing |
 
 ### 7.7.4 §11.3 interplay
@@ -1302,7 +1450,7 @@ starts from a shape rather than a blank page.
 | Non-goal | Why not now | What a future amendment would look like |
 |---|---|---|
 | **Dotted/nested threshold field paths** | §11.2's grammar is a bare field token; indexing nested orders would build a map no predicate can query (§4.2 O5) | extend `predicateShape` to `a.b`, and the ordered index to JSON-Pointer keys, in one change |
-| **`step approve --set <field>=<value>`** for a held cluster | engine-core §6's "an accepted severity" needs a **typed** channel; parsing it from a note is core reading instance meaning out of prose (§7.8) | `--set field=value`, validated against the pinned schema's declared order, recorded as the resolved value with the computed one retained |
+| **`step approve --set <field>=<value>`** for a held cluster | engine-core §6's "an accepted severity" needs a **typed** channel; parsing it from a note is core reading instance meaning out of prose (§7.8) | **Shipped in a different shape.** DKT-42 delivered `step approve --value <value>` — the value is the held threshold field's, validated against the pinned schema's declared order, recorded as the resolved value with the computed one retained in `operator_set_from`. DKT-1548 added the mirror correction: the corrected value is carried onto the other fields the step's threshold compares, each named in `operator_set_mirrors` (G3). A general `--set <field>=<value>` for an arbitrary field remains unbuilt |
 | **More builtins** (`mean`, `mode`, `percentile`) | §2 names exactly one builtin and says the rest are user-trusted commands. Each addition is core acquiring an opinion about what is worth computing | a named builtin plus its params in §2, with the same register-time validation table |
 | **A schema `deprecate`/`rm` verb** | schemas are immutable and pinned; deleting one breaks a completed run's ability to explain itself | a `retired_at_ms` column and a `list --all`, never a delete |
 | **Cross-field predicates** (`any(a >= b)`) | §11.2's right-hand side is a literal, and comparing two fields requires deciding whether their orders are commensurable — a question only the schema author can answer | an explicit `comparable_with` annotation, refused by default |

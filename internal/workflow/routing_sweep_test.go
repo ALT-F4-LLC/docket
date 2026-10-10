@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -37,10 +38,22 @@ import (
 // own `.docket/config/workflows` — because that union is what the engine
 // actually binds against (autoregister.go). Sweeping anything else would
 // certify a corpus no invocation uses.
+//
+// WHAT "EVERY ISSUE STATE" EXCLUDES. A corpus may RESERVE a label: every
+// workflow declines it in `unless_labels` and none selects on it, so an issue
+// carrying it binds nothing in every state — on purpose. The shared store did
+// exactly that when it dropped its never-run `release` and `retro` pipelines
+// and kept each sibling's exclusion "so a stray label fails activation loudly
+// instead of silently binding standard-change". That refusal is routing
+// working as designed, not a gap, so the sweep sets reserved labels aside —
+// derived from the clauses, asserted through the production predicate, and
+// logged by name (partitionLabels, routableVocabulary) — and demands
+// exactly-one-match over everything that remains.
 
-// sweepLabels is the label vocabulary the nine [match] clauses discriminate on:
+// sweepLabels is the label vocabulary the [match] clauses discriminate on:
 // every label named in a `labels_any`, `labels_all`, or `unless_labels` across
-// the set, plus the ones the pipelines are selected by.
+// the set, plus the ones the pipelines are selected by. partitionLabels then
+// splits it into what the sweep enumerates and what the corpus reserves.
 //
 // It is derived from the parsed clauses rather than hand-listed, so a label
 // introduced by a future workflow enters the sweep automatically. A
@@ -67,14 +80,129 @@ func sweepLabels(defs []*Definition) []string {
 	return out
 }
 
+// labelPartition is sweepLabels split three ways by how the corpus treats
+// each label — see partitionLabels.
+type labelPartition struct {
+	routable []string // enumerated by the sweep: selected by some workflow, or orphaned
+	reserved []string // declined by every workflow, selected by none: set aside
+	// orphaned maps a label no workflow selects on but only SOME decline to
+	// the workflows that do not decline it — an exclusion that lost its
+	// owner without becoming a reservation.
+	orphaned map[string][]string
+}
+
+// partitionLabels splits the vocabulary into the ROUTABLE labels the sweep
+// enumerates and the RESERVED labels it deliberately leaves out.
+//
+// A label is reserved when NO workflow selects on it (it appears in no
+// `labels_any` or `labels_all`) and EVERY workflow declines it (each one has a
+// `[match]` table naming it in `unless_labels`). Every state carrying such a
+// label binds nothing — each clause's exclusion term fires — and that is the
+// corpus authors' decision made once per workflow, not an omission; a
+// workflow that starts selecting on the label lifts the reservation on its
+// own, because "selected by none" stops holding.
+//
+// Unanimity is what makes it intent. A label that some workflows decline and
+// none selects is an ORPHANED exclusion: an issue carrying it routes on its
+// other labels through whichever workflows lack the term and binds nothing
+// when those are absent. Orphans stay routable so the sweep surfaces their
+// states as the gaps they are, and routableVocabulary names the cause
+// alongside. A workflow with no `[match]` table admits everything, so its
+// presence makes every unselected label an orphan rather than a reservation.
+func partitionLabels(defs []*Definition, labels []string) labelPartition {
+	selected := make(map[string]struct{})
+	for _, d := range defs {
+		if d.Match == nil {
+			continue
+		}
+		for _, l := range d.Match.LabelsAny {
+			selected[l] = struct{}{}
+		}
+		for _, l := range d.Match.LabelsAll {
+			selected[l] = struct{}{}
+		}
+	}
+
+	p := labelPartition{orphaned: make(map[string][]string)}
+	for _, l := range labels {
+		if _, ok := selected[l]; ok {
+			p.routable = append(p.routable, l)
+			continue
+		}
+		var admits []string
+		for _, d := range defs {
+			if d.Match == nil || !slices.Contains(d.Match.UnlessLabels, l) {
+				admits = append(admits, d.Pipeline.Name)
+			}
+		}
+		if len(admits) == 0 {
+			p.reserved = append(p.reserved, l)
+			continue
+		}
+		p.routable = append(p.routable, l)
+		p.orphaned[l] = admits
+	}
+	return p
+}
+
+// routableVocabulary is the prologue the three sweeps share: derive the
+// vocabulary, set the reserved labels aside, ASSERT what makes them reserved,
+// and enforce the non-vacuity floor on what remains.
+//
+// The reserved set is asserted rather than merely skipped. partitionLabels
+// reads `unless_labels` directly — a re-implementation of one of the four
+// terms, which is exactly what this file's header warns against — so every
+// reserved label is re-checked through the production predicate: for every
+// kind, the bare state must bind NO workflow. The set is then logged by name,
+// so the test output states which labels the corpus refuses by design. An
+// orphaned exclusion fails here with its cause, on top of the states the
+// sweep itself reports.
+func routableVocabulary(t *testing.T, defs []*Definition, kinds []string) (routable, reserved []string) {
+	t.Helper()
+	p := partitionLabels(defs, sweepLabels(defs))
+
+	orphans := make([]string, 0, len(p.orphaned))
+	for l := range p.orphaned {
+		orphans = append(orphans, l)
+	}
+	sort.Strings(orphans)
+	for _, l := range orphans {
+		t.Errorf("label %q is selected by no workflow and declined by only some: %v admit it; "+
+			"either every workflow must decline it (reserving it, so the label fails "+
+			"activation loudly) or one must select on it", l, p.orphaned[l])
+	}
+
+	for _, l := range p.reserved {
+		for _, kind := range kinds {
+			subject := Subject{Kind: kind, Labels: []string{l}}
+			for _, d := range defs {
+				if d.Match.Matches(subject) {
+					t.Errorf("reserved label %q binds workflow %q at kind=%s; a label every "+
+						"clause declines cannot bind, so the partition and the predicate disagree",
+						l, d.Pipeline.Name, kind)
+				}
+			}
+		}
+	}
+	if len(p.reserved) > 0 {
+		t.Logf("reserved labels, declined by every workflow and selected by none, so every "+
+			"state carrying one binds nothing by design and is left out of the sweep: %v",
+			p.reserved)
+	}
+
+	requireNonVacuousLabels(t, p.routable)
+	return p.routable, p.reserved
+}
+
 // minShippedWorkflows and minSweepLabels are non-vacuity floors (AC-5): a
 // corpus that shrinks toward "one workflow with a match clause that
 // discriminates on nothing" still parses and still sweeps, but sweeps a
 // near-empty state space and PASSES — a degenerate corpus of exactly that
 // shape was reproduced logging "swept 5 states ... of 0 labels" against 465
-// for the real one. Both floors sit well below the shipped corpus (9
-// workflows, 8 labels as of this writing) so ordinary corpus edits do not
-// trip them, and well above the degenerate case so a real shrink does.
+// for the real one. Both floors sit well below the shipped corpus (8
+// workflows; 11 labels named, 9 routable and 2 reserved, as of this writing)
+// so ordinary corpus edits do not trip them, and well above the degenerate
+// case so a real shrink does.
 const (
 	minShippedWorkflows = 6
 	minSweepLabels      = 4
@@ -166,11 +294,12 @@ func loadShippedWorkflows(t *testing.T) []*Definition {
 // requireNonVacuousLabels enforces the label half of the non-vacuity floor
 // (see minSweepLabels): a corpus whose match clauses stop discriminating on
 // labels still sweeps and still passes, over a state space too small to mean
-// anything.
+// anything. It is measured over the ROUTABLE vocabulary — a corpus that
+// reserved every label it names would sweep nothing and must trip it.
 func requireNonVacuousLabels(t *testing.T, labels []string) {
 	t.Helper()
 	if len(labels) < minSweepLabels {
-		t.Fatalf("only %d labels discriminated across the swept corpus, want at least %d; "+
+		t.Fatalf("only %d routable labels discriminated across the swept corpus, want at least %d; "+
 			"a corpus whose match clauses stopped discriminating on labels would sweep a "+
 			"near-empty state space and pass", len(labels), minSweepLabels)
 	}
@@ -247,14 +376,17 @@ func kindStrings() []string {
 // activate at all; multi-match means activation refuses with exactly-one-match.
 // The multi count was already 0 before this check existed and must stay there —
 // a sweep that only watched the zero side would let a precedence bug in.
+//
+// "Every issue state" is every state over the ROUTABLE vocabulary: a state
+// carrying a reserved label binds nothing by the corpus's own design and is
+// asserted as such in routableVocabulary rather than counted as a gap here.
 func TestShippedWorkflowsRouteEveryIssueState(t *testing.T) {
 	defs := loadShippedWorkflows(t)
-	labels := sweepLabels(defs)
-	requireNonVacuousLabels(t, labels)
+	labels, reserved := routableVocabulary(t, defs, kindStrings())
 	res := sweep(defs, kindStrings(), labels, 3)
 
-	t.Logf("swept %d states over %d kinds x label subsets<=3 of %d labels",
-		res.total, len(kindStrings()), len(labels))
+	t.Logf("swept %d states over %d kinds x label subsets<=3 of %d routable labels (%d reserved)",
+		res.total, len(kindStrings()), len(labels), len(reserved))
 
 	if len(res.zero) > 0 {
 		t.Errorf("%d issue states bind NO workflow and cannot activate; first 10:\n  %s",
@@ -272,11 +404,11 @@ func TestShippedWorkflowsRouteEveryIssueState(t *testing.T) {
 // simultaneous labels is still a gap.
 func TestShippedWorkflowsRouteFullPowerset(t *testing.T) {
 	defs := loadShippedWorkflows(t)
-	labels := sweepLabels(defs)
-	requireNonVacuousLabels(t, labels)
+	labels, reserved := routableVocabulary(t, defs, kindStrings())
 	res := sweep(defs, kindStrings(), labels, len(labels))
 
-	t.Logf("swept %d states over the full 2^%d powerset", res.total, len(labels))
+	t.Logf("swept %d states over the full 2^%d powerset of routable labels (%d reserved)",
+		res.total, len(labels), len(reserved))
 
 	if len(res.zero) > 0 {
 		t.Errorf("%d issue states bind NO workflow; first 10:\n  %s",
@@ -379,9 +511,8 @@ func TestNoKindListEnumeratesTheClosedSet(t *testing.T) {
 // nothing, which is the regression this pins.
 func TestAddingASixthKindKeepsEveryStateRoutable(t *testing.T) {
 	defs := loadShippedWorkflows(t)
-	labels := sweepLabels(defs)
-
 	kinds := append(kindStrings(), "spike")
+	labels, _ := routableVocabulary(t, defs, kinds)
 	res := sweep(defs, kinds, labels, 3)
 
 	if len(res.zero) > 0 {

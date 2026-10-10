@@ -149,8 +149,9 @@ type RunListOptions struct {
 	// ProjectID scopes the list to one project (v12); 0 = every project.
 	ProjectID int
 	// ActiveOnly restricts the list to runs that are not terminal — the
-	// `--active` flag. `planning` counts as active: a run that exists but has
-	// not been activated is still live work an operator is mid-way through.
+	// `run status` default, lifted by `--all`. `planning` counts as active: a
+	// run that exists but has not been activated is still live work an
+	// operator is mid-way through.
 	ActiveOnly bool
 	Limit      int
 }
@@ -255,6 +256,61 @@ func SetRunPauseOriginTx(tx *sql.Tx, id int, origin model.RunPauseOrigin) error 
 			model.FormatRunID(id), err)
 	}
 	return nil
+}
+
+// SetRunConductorHashTx binds a run to a conductor capability, or re-keys
+// one (DKT-2465): `hash` is the SHA-256 of a token the caller minted with
+// model.MintToken and returns exactly once. Only the hash is ever stored, the
+// discipline the lease columns follow, so a copied database yields no live
+// capability.
+//
+// It does NOT bump `row_version`, for `SetRunPauseOriginTx`'s reason: the
+// binding is written beside an activation or as its own attributed event, and
+// neither is an edit to the run an `--if-version` caller is racing.
+func SetRunConductorHashTx(tx *sql.Tx, id int, hash string) error {
+	res, err := tx.Exec(
+		`UPDATE runs SET conductor_token_hash = ? WHERE id = ?`, hash, id)
+	if err != nil {
+		return fmt.Errorf("binding the conductor capability for %s: %w",
+			model.FormatRunID(id), err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("binding the conductor capability for %s: %w",
+			model.FormatRunID(id), err)
+	}
+	if n == 0 {
+		return ErrRunNotFound
+	}
+	return nil
+}
+
+// RunConductorHashTx reads a run's conductor capability hash inside a
+// transaction. The empty string means UNBOUND — a run activated before v29
+// and never conducted — which the engine treats as "no capability exists, so
+// nothing is required", never as a hash the empty token could match.
+func RunConductorHashTx(tx *sql.Tx, id int) (string, error) {
+	return runConductorHash(tx, id)
+}
+
+// RunConductorHash is RunConductorHashTx on the connection, for the CLI's
+// advisory read: whether a verb must look for a token at all. The
+// authoritative check runs inside the verb's own transaction.
+func RunConductorHash(db *sql.DB, id int) (string, error) {
+	return runConductorHash(db, id)
+}
+
+func runConductorHash(q rowQuerier, id int) (string, error) {
+	var hash sql.NullString
+	err := q.QueryRow(`SELECT conductor_token_hash FROM runs WHERE id = ?`, id).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrRunNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the conductor capability for %s: %w",
+			model.FormatRunID(id), err)
+	}
+	return hash.String, nil
 }
 
 // RunPauseOriginTx reads where a run's park was decided. A run that is not
@@ -440,6 +496,63 @@ func BindRunIssueTx(tx *sql.Tx, ri *RunIssue) error {
 	)
 	if err != nil {
 		return fmt.Errorf("binding issue %d: %w", ri.IssueID, err)
+	}
+	return nil
+}
+
+// SetRunIssueSnapshotTx rewrites ONE run-issue's `issue_snapshot` blob and
+// nothing else (DKT-869).
+//
+// It is deliberately narrower than BindRunIssueTx, which writes the binding and
+// all three snapshot columns together because activation produces them as one
+// fact. The scope refresh is not that fact: it re-reads exactly one field of an
+// already-frozen snapshot and must leave `workflow_id`, `body_snapshot`, and
+// `body_sha256` untouched — a refresh that re-bound the workflow, or rewrote
+// the description snapshot from the live issue, would smuggle §9 item 5's
+// mid-run edit immunity out through a verb that says it is about scope.
+//
+// A miss is a caller error rather than a no-op: the row was read moments ago
+// inside this same transaction, so zero rows affected means the membership the
+// decision was made on no longer stands.
+func SetRunIssueSnapshotTx(tx *sql.Tx, runID, issueID int, snapshot string) error {
+	res, err := tx.Exec(
+		`UPDATE run_issues SET issue_snapshot = ? WHERE run_id = ? AND issue_id = ?`,
+		snapshot, runID, issueID,
+	)
+	if err != nil {
+		return fmt.Errorf("rewriting issue %d's snapshot: %w", issueID, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("issue %d is no longer part of run %d", issueID, runID)
+	}
+	return nil
+}
+
+// SetRunIssueBodyTx rewrites ONE run-issue's description snapshot and the sha
+// that names it, and nothing else (DKT-2291).
+//
+// It is SetRunIssueSnapshotTx's counterpart on the other frozen column, and
+// narrow for the same reason: the body refresh re-reads exactly the issue's
+// description and must leave `workflow_id` and `issue_snapshot` untouched — a
+// refresh that also re-bound the workflow, or re-snapshotted the scope, would
+// smuggle a second ruling through a verb that says it is about the body. The
+// two columns move together because they are one fact: this text, and the
+// digest that names it.
+//
+// A miss is a caller error rather than a no-op, as above: the row was read
+// moments ago inside this same transaction, so zero rows affected means the
+// membership the decision was made on no longer stands.
+func SetRunIssueBodyTx(tx *sql.Tx, runID, issueID int, body, sha string) error {
+	res, err := tx.Exec(
+		`UPDATE run_issues SET body_snapshot = ?, body_sha256 = ?
+		  WHERE run_id = ? AND issue_id = ?`,
+		body, sha, runID, issueID,
+	)
+	if err != nil {
+		return fmt.Errorf("rewriting issue %d's body snapshot: %w", issueID, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("issue %d is no longer part of run %d", issueID, runID)
 	}
 	return nil
 }

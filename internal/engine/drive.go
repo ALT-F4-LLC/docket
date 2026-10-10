@@ -22,9 +22,9 @@ import (
 // (next.go), §8.1's "the first engine invocation that observes the step
 // ready". These entry points make `step record` and the quorum-reaching `vote
 // cast` observing invocations too: the verb layer calls DriveRunLifecycles
-// after its own write commits, exactly as `next` and `dispatch open` call the
-// same drivers after theirs. No daemon watches; the lifecycle still advances
-// only when somebody talks to the engine.
+// after its own write commits, and `dispatch open` and `dispatch extend` call
+// it before computing their rows. No daemon watches; the lifecycle still
+// advances only when somebody talks to the engine.
 
 // DriveRunLifecycles advances every engine-run lifecycle a run has ready — the
 // vote phases (open, read, route) and the action steps — to quiescence.

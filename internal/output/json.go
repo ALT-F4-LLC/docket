@@ -97,6 +97,15 @@ type errorEnvelope struct {
 	Code  ErrorCode `json:"code"`
 }
 
+// partialFailureEnvelope is the JSON structure for a failed command that still
+// carries its report: the error envelope plus data.
+type partialFailureEnvelope struct {
+	OK    bool      `json:"ok"`
+	Data  any       `json:"data"`
+	Error string    `json:"error"`
+	Code  ErrorCode `json:"code"`
+}
+
 // writeJSONSuccess writes a success envelope to w.
 func writeJSONSuccess(w io.Writer, data any, message string) {
 	enc := json.NewEncoder(w)
@@ -114,6 +123,18 @@ func writeJSONError(w io.Writer, err error, code ErrorCode) {
 	enc.SetEscapeHTML(false)
 	enc.Encode(errorEnvelope{
 		OK:    false,
+		Error: err.Error(),
+		Code:  code,
+	})
+}
+
+// writeJSONPartialFailure writes a partial-failure envelope to w.
+func writeJSONPartialFailure(w io.Writer, data any, err error, code ErrorCode) {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.Encode(partialFailureEnvelope{
+		OK:    false,
+		Data:  data,
 		Error: err.Error(),
 		Code:  code,
 	})

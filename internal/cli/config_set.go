@@ -6,7 +6,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -72,7 +74,12 @@ mid-run.`,
 			projectID = 0
 		}
 
-		if err := db.SetConfig(conn, projectID, key, value); err != nil {
+		// Through the engine rather than db.SetConfig directly (DKT-2767): a
+		// write to a vote-rule key records a `config-changed` event in the
+		// write's own transaction, attributed to the same identity the
+		// activity log uses, so a rewrite of a security-load-bearing key is
+		// detectable even though nothing yet prevents it.
+		if err := engine.SetConfig(conn, projectID, key, value, config.DefaultAuthor()); err != nil {
 			if errors.Is(err, db.ErrUnknownConfigKey) {
 				return cmdErr(err, output.ErrValidation)
 			}

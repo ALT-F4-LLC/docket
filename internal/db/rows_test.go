@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"runtime"
 	"testing"
-	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
@@ -24,27 +24,40 @@ func TestScanRowsWrapsIterationError(t *testing.T) {
 		testsupport.Must(t, execErr(db, `INSERT INTO probe (id) VALUES (?)`, i), "insert probe row")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	rows, err := db.QueryContext(ctx, `SELECT id FROM probe`)
 	testsupport.Must(t, err, "querying probe rows")
 
-	// Give the deadline time to elapse before the loop below drains rows,
-	// so Next() observes the cancellation rather than racing it.
-	time.Sleep(5 * time.Millisecond)
-
+	canceled := false
 	_, err = scanRows(rows, "probe rows", func(r *sql.Rows) (int, error) {
 		var n int
-		scanErr := r.Scan(&n)
-		return n, scanErr
+		if scanErr := r.Scan(&n); scanErr != nil {
+			return 0, scanErr
+		}
+		if !canceled {
+			canceled = true
+			// Cancel mid-iteration, then hand off until the *sql.Rows itself
+			// reports the cancellation. database/sql records it from a
+			// background goroutine, and Next() only consults that record on
+			// entry; without this handshake the remaining rows can drain to
+			// EOF first, after which Rows.Err() reports nil and the wrapping
+			// tail under test never runs. Waiting on r.Err() makes the rest
+			// of the iteration observe the cancellation deterministically.
+			cancel()
+			for r.Err() == nil {
+				runtime.Gosched()
+			}
+		}
+		return n, nil
 	})
 
 	if err == nil {
-		t.Fatalf("scanRows returned nil error for a canceled query; want the wrapped context.DeadlineExceeded")
+		t.Fatalf("scanRows returned nil error for a canceled query; want the wrapped context.Canceled")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("scanRows error = %v, want it to unwrap (errors.Is) to context.DeadlineExceeded", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("scanRows error = %v, want it to unwrap (errors.Is) to context.Canceled", err)
 	}
 	wantSubstr := "iterating probe rows:"
 	if got := err.Error(); len(got) < len(wantSubstr) || got[:len(wantSubstr)] != wantSubstr {

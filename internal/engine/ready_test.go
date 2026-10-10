@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -476,6 +477,97 @@ after = []
 	})
 }
 
+// TestClassInFlightExcludesTriageSuspended pins R5's occupancy for a step
+// suspended on its triage panel: it waits on voters, not a worker, so it holds
+// no slot in its class while the panel deliberates. A gated step whose routing
+// names no panel is still the engine's saga and keeps its slot.
+func TestClassInFlightExcludesTriageSuspended(t *testing.T) {
+	const src = `
+[pipeline]
+name = "limited-triage"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "one"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+on_fail = "triage"
+
+[[step]]
+name = "triage"
+after = ["one"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+
+[step.on_fail_routes]
+approved = "retry"
+rejected = "abandon-issue"
+
+[[step]]
+name = "two"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(src), "limited-triage.toml")
+
+	issue := createIssue(t, conn, "limited triage", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	setOne := func(routing string) {
+		execSQL(t, conn,
+			`UPDATE steps SET status = ?, routing = ? WHERE instance = ? AND issue_id = ?`,
+			db.StepGated, routing, "one@0", issue)
+	}
+
+	t.Run("a step suspended on its panel holds no slot", func(t *testing.T) {
+		setOne("triage")
+		loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+			if one := stepNamed(t, sched, "one@0"); !suspendedOnPanel(one, "triage") {
+				t.Fatalf("one@0 = %q routing %q; the fixture did not suspend it "+
+					"on its triage panel", one.Status, one.Routing)
+			}
+			two := stepNamed(t, sched, "two@0")
+			if ready, cond := sched.Ready(two); !ready {
+				t.Errorf("two@0 blocked by %q while the only other write step "+
+					"waits on its triage panel: %s", cond, sched.HeadroomDetail(two))
+			}
+			if detail := sched.HeadroomDetail(two); !strings.Contains(detail, "0 claimed/running") {
+				t.Errorf("HeadroomDetail = %q, want 0 claimed/running", detail)
+			}
+		})
+	})
+
+	t.Run("a gated step routed elsewhere keeps its slot", func(t *testing.T) {
+		setOne(workflow.OnFailFixLoop)
+		loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+			ready, cond := sched.Ready(stepNamed(t, sched, "two@0"))
+			if ready {
+				t.Error("two@0 is ready while a gated write step not on a panel " +
+					"fills the class at max = 1")
+			}
+			if cond != CondHeadroom {
+				t.Errorf("blocked by %q, want %q", cond, CondHeadroom)
+			}
+		})
+	})
+}
+
 // TestReadyR6Status falsifies R6 across every non-pending persisted status.
 func TestReadyR6Status(t *testing.T) {
 	for _, status := range []string{
@@ -922,4 +1014,288 @@ func TestMergeLimitsTakesTheTighterBound(t *testing.T) {
 	if got := sources["write"]; got != "bounded@2" {
 		t.Errorf("cap source = %q, want %q", got, "bounded@2")
 	}
+}
+
+// interposeExecutorSrc is standard-change's shape (DKT-2076): the routing
+// step's threshold names an EXECUTOR target, and the routing step's ordinary
+// downstream does not read that target's output.
+const interposeExecutorSrc = `
+[pipeline]
+name = "interpose-executor"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "drain-highs" = "any(status == blocked)" }
+
+[[step]]
+name = "drain-highs"
+after = ["reconcile"]
+executor = "drain-highs"
+emits = "record"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// interposeVoteHoldSrc is the same shape with a VOTE target, the DKT-168 case
+// the restriction must leave untouched.
+const interposeVoteHoldSrc = `
+[pipeline]
+name = "interpose-vote-hold"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "tribunal" = "any(status == blocked)" }
+
+[[step]]
+name = "tribunal"
+after = ["reconcile"]
+type = "vote"
+voters = ["seat-a", "seat-b", "seat-c"]
+vote_rule = "majority"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// interposeHumanHoldSrc is the same shape with a HUMAN target, the other kind
+// openInterposedGates holds for.
+const interposeHumanHoldSrc = `
+[pipeline]
+name = "interpose-human-hold"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "signoff" = "any(status == blocked)" }
+
+[[step]]
+name = "signoff"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// TestInterposedExecutorTargetDoesNotHoldDownstream is DKT-2076: R3's second
+// interposition clause holds a routing step's ordinary downstream only for
+// threshold targets of kind vote or human. An open EXECUTOR target runs beside
+// that downstream rather than ahead of it: nothing downstream reads its output,
+// so the extra level bought a dispatch round and no ordering guarantee.
+func TestInterposedExecutorTargetDoesNotHoldDownstream(t *testing.T) {
+	t.Run("executor target leaves the downstream ready", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeExecutorSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "drain-highs@0"); got != db.StepPending {
+			t.Fatalf("drain-highs@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if !ok {
+				t.Errorf("verify@0 held by %q while an open EXECUTOR target "+
+					"runs; its own predecessors are done and it reads nothing "+
+					"drain-highs emits", cond)
+			}
+		})
+	})
+
+	t.Run("vote target still holds the downstream", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeVoteHoldSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "tribunal@0"); got != db.StepPending {
+			t.Fatalf("tribunal@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("verify@0 ready=%v cond=%q behind an open VOTE gate, "+
+					"want CondGateOpen: DKT-168 is unchanged", ok, cond)
+			}
+		})
+	})
+
+	t.Run("human target still holds the downstream", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeHumanHoldSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "signoff@0"); got != db.StepPending {
+			t.Fatalf("signoff@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("verify@0 ready=%v cond=%q behind an open HUMAN gate, "+
+					"want CondGateOpen", ok, cond)
+			}
+		})
+	})
+}
+
+// interposedHumanDownstream appends a human gate as the routing step's second
+// ordinary downstream, beside `verify`, to either interposed shape above.
+const interposedHumanDownstream = `
+[[step]]
+name = "approve"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+`
+
+// TestAwaitingDecisionBehindOpenExecutorTarget is DKT-2076's mirror half:
+// AwaitingDecision reads the same openInterposedGates as Ready, so a human
+// gate behind an open EXECUTOR target is a decision whose turn has come, while
+// one behind an open VOTE target still waits (DKT-168). The vote case cannot
+// read the issue as not awaiting: the open vote target is itself awaiting.
+func TestAwaitingDecisionBehindOpenExecutorTarget(t *testing.T) {
+	t.Run("executor target leaves the gate awaiting decision", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn,
+			interposeExecutorSrc+interposedHumanDownstream)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "drain-highs@0"); got != db.StepPending {
+			t.Fatalf("drain-highs@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if !sched.AwaitingDecision(stepNamed(t, sched, "approve@0")) {
+				t.Errorf("approve@0 not awaiting decision while an open " +
+					"EXECUTOR target runs; it holds only for vote or human targets")
+			}
+			if !sched.IssueAwaitingDecision(issue) {
+				t.Errorf("issue %d not awaiting decision with approve@0's "+
+					"turn come", issue)
+			}
+		})
+	})
+
+	t.Run("vote target still holds the gate", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn,
+			interposeVoteHoldSrc+interposedHumanDownstream)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "tribunal@0"); got != db.StepPending {
+			t.Fatalf("tribunal@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if sched.AwaitingDecision(stepNamed(t, sched, "approve@0")) {
+				t.Errorf("approve@0 awaiting decision behind an open VOTE " +
+					"gate; DKT-168 is unchanged")
+			}
+			// The open vote is itself a decision whose turn has come, so the
+			// issue still reads awaiting; the hold shows as approve@0 being
+			// absent from what carries it.
+			var awaiting []string
+			for _, step := range sched.Steps() {
+				if step.IssueID == issue && sched.AwaitingDecision(step) {
+					awaiting = append(awaiting, step.Instance)
+				}
+			}
+			if !sched.IssueAwaitingDecision(issue) ||
+				len(awaiting) != 1 || awaiting[0] != "tribunal@0" {
+				t.Errorf("issue %d awaiting=%v on %v, want true on "+
+					"[tribunal@0] alone", issue,
+					sched.IssueAwaitingDecision(issue), awaiting)
+			}
+		})
+	})
+}
+
+// TestOnExhaustedVoteTargetHoldsDownstream is the on_exhausted half of R3's
+// interposition clause: a fix-loop exhaustion leaves its routing step terminal
+// `done`, so the hold on the routing step's ordinary downstream is the only
+// thing keeping that downstream behind an undecided panel. exhaustionSrc gives
+// `check` two `after` successors, so whichever one on_exhausted does not name
+// is the ordinary downstream.
+func TestOnExhaustedVoteTargetHoldsDownstream(t *testing.T) {
+	t.Run("an open vote target holds the downstream until it terminalizes", func(t *testing.T) {
+		conn, runID := exhaust(t, "panel")
+		check := mustStep(t, conn, "check@1")
+		if check.Status != db.StepDone || !routingIs(check.Routing, "panel") {
+			t.Fatalf("check@1 = %q routing %q, want done routing panel",
+				check.Status, check.Routing)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "drain@1"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("drain@1 ready=%v cond=%q while panel@1 is open, "+
+					"want CondGateOpen", ok, cond)
+			}
+		})
+
+		execSQL(t, conn, `UPDATE steps SET status = ? WHERE step_name = 'panel' AND issue_id = ?`,
+			string(db.StepDone), check.IssueID)
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if ok, cond := sched.Ready(stepNamed(t, sched, "drain@1")); !ok {
+				t.Errorf("drain@1 held by %q after every panel instance "+
+					"terminalized", cond)
+			}
+		})
+	})
+
+	t.Run("an open executor target leaves the downstream ready", func(t *testing.T) {
+		conn, runID := exhaust(t, "drain")
+		if got := stepStatus(t, conn, "drain@1"); db.StepTerminal(got) {
+			t.Fatalf("drain@1 = %q, want the executor target still open", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if ok, cond := sched.Ready(stepNamed(t, sched, "panel@1")); !ok {
+				t.Errorf("panel@1 held by %q while an open EXECUTOR "+
+					"on_exhausted target runs; only vote or human targets hold",
+					cond)
+			}
+		})
+	})
 }

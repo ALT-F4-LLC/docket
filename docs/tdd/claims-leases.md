@@ -256,6 +256,13 @@ Mapped to this stage's verbs. Every row is proven by a test (§7):
 | R7 | non-holder closes a live-leased issue | close | `AUTH_ERROR` | 5 |
 | R8 | claim against an expired lease | claim | **succeeds**, `attempt++` | 0 |
 
+**Step claims diverge at R5.** An issue claim against a live lease returns
+`CONFLICT` for every caller, including the lease's own owner. A step claim whose
+`--owner` equals the live lease's recorded owner instead succeeds with a
+re-minted token that replaces the prior one. That path trusts `--owner`, a
+caller-supplied and publicly shown string, as the holder identity; see
+engine-spine.md §6.9.
+
 **R2 and R3 are both AUTH_ERROR, deliberately.** "This issue is unclaimed" and
 "your token is wrong" are the same answer to the caller — you do not hold this
 lease — and distinguishing them leaks whether a lease exists to a caller holding
@@ -274,6 +281,28 @@ same guarantee §9.3 states for `complete`.
 **Refusals are checked before the mutation, in the same transaction as it.** A
 refusal never writes — including never bumping `attempt` and never touching the
 CAS `version`. Proven by asserting the version is unchanged after each refusal.
+
+### 4.0 The conductor capability's rows (DKT-2465, v29)
+
+The seven operator verbs — `step approve`, `step reject`, `step resolve`,
+`step reap`, `run pause`, `run resume`, `run abandon` — reuse the matrix's
+shape against the RUN's conductor capability (reliability-delta §2, the v29
+amendment; `internal/engine/conductor.go`). Same transport, same channels,
+same codes:
+
+| # | Situation | Verb | Code | Exit |
+|---|---|---|---|---|
+| R9 | run bound, no token supplied | the seven | `VALIDATION_ERROR` | 3 |
+| R10 | run bound, wrong token | the seven | `AUTH_ERROR` | 5 |
+| R11 | run unbound (activated before v29, never conducted) | the seven | **allowed**, as before | 0 |
+| R12 | `run conduct` on a terminal run | conduct | `CONFLICT` | 4 |
+
+R9 and R10 are checked after the step or run is found and before its status
+is inspected or anything is written, so a caller without the capability learns
+only that the target exists. R11 is the dormancy guarantee at the run level:
+the check binds the moment a capability exists, and every run this binary
+activates is bound at birth. There is no STALE_LEASE row: the capability has
+no TTL, and it ends only with the run or with a `run conduct` that retires it.
 
 ### 4.1 Unleased issues stay unleased
 
@@ -458,5 +487,5 @@ PR #33 provides CI on every push. Every commit leaves the branch green.
    lease-ending, effective status on reads.
 4. `config set|get`.
 5. QA section ZF + the 4→6 fixture proof + the byte-compat sweep.
-6. `skills/docket/SKILL.md` tables and `docs/spec/security.md`, in the same
+6. The loadable `docket` skill's tables and `docs/spec/security.md`, in the same
    commits as the surface changes they document.

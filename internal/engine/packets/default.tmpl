@@ -15,9 +15,17 @@ target_sha: {{.TargetSHA}}
 {{- if .TargetWorktree}}
 target_worktree: {{.TargetWorktree}}
 {{- end}}
+{{- if .DiffBase}}
+issue.diff base: {{.DiffBase}}
+{{- end}}
 
 == REQUEST
 {{.Issue.BodySnapshot}}
+{{- range .Notes}}
+
+== RUN NOTE {{.ID}}
+{{.Text}}
+{{- end}}
 {{range .Files}}
 == FILE {{.Path}}  {{.SHA256}}
 {{.Body}}
@@ -39,6 +47,13 @@ target_worktree: {{.TargetWorktree}}
 (no note was recorded with this routing)
 {{- end}}
 {{- end}}
+{{- if .Gates}}
+
+== GATES
+{{- range .Gates}}
+{{.Name}}{{if .Pre}} (pre){{end}}: {{if .Source}}commands from {{.Source}}, each matched when the gate runs{{else if .Matched}}{{range $i, $a := .Argv}}{{if $i}} {{end}}{{$a}}{{end}}{{else}}unmatched{{if .Reason}} ({{.Reason}}){{end}}{{end}}
+{{- end}}
+{{- end}}
 {{if .Pins}}
 == PINNED
 {{- range .Pins}}
@@ -53,4 +68,7 @@ This step records no artifact.
 {{- end}}
 {{- if .PayloadSchema}}
 Its payload must satisfy the schema: {{.PayloadSchema}}
+{{- if .PayloadRequired}}
+Each payload element carries these required properties: {{range $i, $k := .PayloadRequired}}{{if $i}}, {{end}}{{$k}}{{end}}
+{{- end}}
 {{- end}}

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -335,7 +336,7 @@ func ackVia(t *testing.T, conn *sql.DB, runID int, seq int64, at int64) {
 	t.Helper()
 	_, err := NewEngine().OpenDispatch(conn, runID, 0, []int64{seq}, at)
 	testsupport.Must(t, err, "dispatch open --ack-reap %d: %v", seq, err)
-	_, err = NewEngine().AbandonDispatch(conn, runID, "", at)
+	_, err = abandonAsConductor(conn, NewEngine(), runID, "", at)
 	testsupport.Must(t, err, "abandoning the ack's dispatch: %v", err)
 }
 
@@ -673,5 +674,104 @@ func stripComments(src string) string {
 			b.WriteString("\n")
 			src = src[line+end+1:]
 		}
+	}
+}
+
+// closeAckEvents returns the reap-acknowledged events naming seq, by acker.
+func closeAckEvents(t *testing.T, conn *sql.DB, runID int, seq int64) []string {
+	t.Helper()
+	page, err := ListEvents(conn, EventQuery{RunID: runID, Kind: EventReapAcknowledged})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	var by []string
+	for _, e := range page.Events {
+		var data struct {
+			ReapedSeq int64  `json:"reaped_seq"`
+			AckedBy   string `json:"acked_by"`
+		}
+		testsupport.Must(t, json.Unmarshal(e.Data, &data), "decoding: %v", nil)
+		if data.ReapedSeq == seq {
+			by = append(by, data.AckedBy)
+		}
+	}
+	return by
+}
+
+// reapSeqOf is the seq of the step's latest lease-reaped event.
+func reapSeqOf(t *testing.T, conn *sql.DB, runID int, instance string) int64 {
+	t.Helper()
+	var seq int64
+	err := conn.QueryRow(
+		`SELECT MAX(seq) FROM events WHERE run_id = ? AND kind = ? AND step_id = ?`,
+		runID, EventLeaseReaped, stepIDByInstance(t, conn, instance)).Scan(&seq)
+	testsupport.Must(t, err, "reading the reap seq: %v", err)
+	return seq
+}
+
+// TestReconciledCloseAcksItsOwnWavesReap is DKT-3286 criterion 1: a claim
+// admitted under dispatch D lapses, D's reconciled close reaps it and
+// acknowledges it as dispatch-close, and the next open carries no hold.
+func TestReconciledCloseAcksItsOwnWavesReap(t *testing.T) {
+	conn := mustDB(t)
+	runID := serializedRun(t, conn)
+	instance := openDispatch(t, conn, runID, 0, nowMS).Rows[0].Instance
+	claim := claimInstance(t, conn, instance, nowMS)
+
+	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past)
+	testsupport.Must(t, err, "CloseDispatch: %v", err)
+
+	seq := reapSeqOf(t, conn, runID, instance)
+	if by := closeAckEvents(t, conn, runID, seq); len(by) != 1 || by[0] != db.AckByDispatchClose {
+		t.Fatalf("acks of reap %d = %v, want exactly [%s]", seq, by, db.AckByDispatchClose)
+	}
+	if hold := openDispatch(t, conn, runID, 0, past+1).ReapHold; hold != "" {
+		t.Errorf("the next open carries a reap hold: %q", hold)
+	}
+}
+
+// TestReconciledCloseKeepsAForcedReapsHold is DKT-3286 criterion 2: a reap
+// forced before the close keeps its hold.
+func TestReconciledCloseKeepsAForcedReapsHold(t *testing.T) {
+	conn := mustDB(t)
+	runID := serializedRun(t, conn)
+	instance := openDispatch(t, conn, runID, 0, nowMS).Rows[0].Instance
+	claimInstance(t, conn, instance, nowMS)
+	testsupport.Must(t, ForceReapStep(conn, stepIDByInstance(t, conn, instance),
+		"the holder crashed", nowMS+1), "ForceReapStep: %v", nil)
+
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS+2)
+	testsupport.Must(t, err, "CloseDispatch: %v", err)
+
+	seq := reapSeqOf(t, conn, runID, instance)
+	if by := closeAckEvents(t, conn, runID, seq); len(by) != 0 {
+		t.Fatalf("the forced reap %d was acknowledged by %v; it must keep its hold", seq, by)
+	}
+	if hold := openDispatch(t, conn, runID, 0, nowMS+3).ReapHold; hold == "" {
+		t.Error("the next open carries no hold after a forced reap")
+	}
+}
+
+// TestReconciledCloseKeepsAnotherDispatchsReapHold is DKT-3286 criterion 3: a
+// claim admitted under D1, which is abandoned, lapses while D2 is open; D2's
+// reconciled close does not acknowledge it.
+func TestReconciledCloseKeepsAnotherDispatchsReapHold(t *testing.T) {
+	conn := mustDB(t)
+	runID := serializedRun(t, conn)
+	instance := openDispatch(t, conn, runID, 0, nowMS).Rows[0].Instance
+	claim := claimInstance(t, conn, instance, nowMS)
+	_, err := abandonAsConductor(conn, NewEngine(), runID, "the relay died", nowMS+1)
+	testsupport.Must(t, err, "dispatch abandon: %v", err)
+	openDispatch(t, conn, runID, 0, nowMS+2)
+
+	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1
+	_, err = NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past)
+	testsupport.Must(t, err, "CloseDispatch D2: %v", err)
+
+	seq := reapSeqOf(t, conn, runID, instance)
+	if by := closeAckEvents(t, conn, runID, seq); len(by) != 0 {
+		t.Fatalf("reap %d of a claim from an abandoned dispatch was acknowledged by %v", seq, by)
+	}
+	if hold := openDispatch(t, conn, runID, 0, past+1).ReapHold; hold == "" {
+		t.Error("the next open carries no hold for another dispatch's reap")
 	}
 }

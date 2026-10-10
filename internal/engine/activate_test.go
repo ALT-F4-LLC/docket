@@ -123,7 +123,17 @@ func startRun(t *testing.T, conn *sql.DB, issueIDs ...int) *model.Run {
 
 // activate runs the fat transaction with the fixed timestamp.
 func activate(conn *sql.DB, runID int, pins ...string) (*ActivateResult, error) {
-	return Activate(conn, runID, ActivateOptions{FilePins: pins, NowMS: nowMS})
+	result, err := Activate(conn, runID, ActivateOptions{FilePins: pins, NowMS: nowMS})
+	if err != nil {
+		return nil, err
+	}
+	// The suite's fixed conductor holds every fixture run (DKT-2465): a test
+	// calling a ruling's `With` form directly presents testConductorToken. A
+	// test about the capability itself activates through Activate.
+	if err := seatTestConductor(conn, runID); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // countRows is the "nothing was written" probe the atomicity assertions use.
@@ -177,7 +187,73 @@ func TestActivateBindsExactlyOneWorkflow(t *testing.T) {
 // escaped value — a reason containing a quote or a newline — without a
 // hand-escaped literal.
 type activatedEventData struct {
-	Reason string `json:"reason"`
+	Reason     string `json:"reason"`
+	HeadBranch string `json:"head_branch"`
+	HeadCommit string `json:"head_commit"`
+}
+
+// TestActivateRecordsHead is DKT-3263: the activating checkout's HEAD branch
+// and commit ride on the run-activated event beside the reason, on the first
+// activation and on a re-activation (each its own head), and a run activated
+// with no head stated records neither key rather than an invented one.
+func TestActivateRecordsHead(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+
+	const firstCommit = "0123456789abcdef0123456789abcdef01234567"
+	const secondCommit = "89abcdef0123456789abcdef0123456789abcdef"
+	_, err := Activate(conn, run.ID, ActivateOptions{
+		NowMS: nowMS, Reason: "kickoff", HeadBranch: "main", HeadCommit: firstCommit,
+	})
+	testsupport.Must(t, err, "activate: %v", err)
+	_, err = Activate(conn, run.ID, ActivateOptions{
+		NowMS: nowMS + 1000, HeadBranch: "feature/x", HeadCommit: secondCommit,
+	})
+	testsupport.Must(t, err, "re-activate: %v", err)
+
+	page, err := ListEvents(conn, EventQuery{RunID: run.ID})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	var got []activatedEventData
+	for _, event := range page.Events {
+		if event.Kind != EventRunActivated {
+			continue
+		}
+		var data activatedEventData
+		testsupport.Must(t, json.Unmarshal(event.Data, &data), "decoding data: %v", err)
+		got = append(got, data)
+	}
+	want := []activatedEventData{
+		{Reason: "kickoff", HeadBranch: "main", HeadCommit: firstCommit},
+		{HeadBranch: "feature/x", HeadCommit: secondCommit},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("run-activated events = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("run-activated event %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// No head stated (the exec root is not a checkout): neither key appears.
+	other := startRun(t, conn, createIssue(t, conn, "other", "a body", "task", nil))
+	_, err = Activate(conn, other.ID, ActivateOptions{NowMS: nowMS})
+	testsupport.Must(t, err, "activate without head: %v", err)
+	page, err = ListEvents(conn, EventQuery{RunID: other.ID})
+	testsupport.Must(t, err, "ListEvents: %v", err)
+	event, ok := findEvent(t, page, EventRunActivated)
+	if !ok {
+		t.Fatal("no run-activated event recorded")
+	}
+	var fields map[string]json.RawMessage
+	testsupport.Must(t, json.Unmarshal(event.Data, &fields), "decoding data: %v", err)
+	for _, key := range []string{"head_branch", "head_commit"} {
+		if _, ok := fields[key]; ok {
+			t.Errorf("run-activated data %s carries %s with no head stated", event.Data, key)
+		}
+	}
 }
 
 // TestActivateRecordsReasonAndTimestampOnTheActivatedEvent is DKT-53/DKT-56:
@@ -732,7 +808,7 @@ func TestActivateSnapshotsBodyAndFields(t *testing.T) {
 	// stored. The exact bytes are asserted because context bundles are
 	// golden-diffed and a reordering here makes the goldens flap.
 	want := `{"title":"snapshot me","kind":"task","labels":["alpha","beta"],` +
-		`"scope":["internal/db/**"]}`
+		`"scope":["internal/db/**"],"files":[]}`
 	if ri.IssueSnapshot != want {
 		t.Errorf("issue_snapshot =\n  %s\nwant\n  %s", ri.IssueSnapshot, want)
 	}
@@ -2247,6 +2323,55 @@ func TestBindingAgreesWithWorkflowShowResolution(t *testing.T) {
 			t.Errorf("superseded docs-review@%d is no longer resolvable: %v", v, err)
 		}
 	}
+
+	// DKT-616: deprecating the TOP version is the one case where the two
+	// resolutions used to diverge — binding retired @3 and fell back to @2,
+	// while show still displayed @3. Both must now land on @2, and the
+	// deprecated @3 must remain reachable by explicit @version.
+	_, err = db.DeprecateWorkflow(conn, 1, "docs-review", 3, nowMS)
+	testsupport.Must(t, err, "deprecating docs-review@3: %v", err)
+
+	shown, err = db.GetWorkflow(conn, 1, "docs-review", 0)
+	testsupport.Must(t, err, "resolving docs-review after deprecating @3: %v", err)
+	if shown.Version != 2 {
+		t.Errorf("`workflow show docs-review` resolves to @%d after deprecating @3, want @2", shown.Version)
+	}
+
+	definitions, err = loadDefinitions(conn, 1)
+	testsupport.Must(t, err, "reloading definitions: %v", err)
+	bound = nil
+	for _, d := range bindableDefinitions(definitions) {
+		if d.workflow.Name == "docs-review" {
+			bound = d
+		}
+	}
+	if bound == nil {
+		t.Fatal("binding kept no candidate for docs-review after deprecating @3")
+	}
+	if bound.workflow.Ref() != shown.Ref() {
+		t.Errorf("with @3 deprecated, binding resolves docs-review to %s but `workflow show` resolves it to %s; "+
+			"§11.1 requires they agree", bound.workflow.Ref(), shown.Ref())
+	}
+	if _, err := db.GetWorkflow(conn, 1, "docs-review", 3); err != nil {
+		t.Errorf("deprecated docs-review@3 is no longer resolvable by explicit version: %v", err)
+	}
+
+	// Retiring EVERY version removes the name from binding; show agrees by
+	// reporting not-found rather than surfacing a retired row.
+	for _, v := range []int{1, 2} {
+		_, err := db.DeprecateWorkflow(conn, 1, "docs-review", v, nowMS)
+		testsupport.Must(t, err, "deprecating docs-review@%d: %v", v, err)
+	}
+	if _, err := db.GetWorkflow(conn, 1, "docs-review", 0); !errors.Is(err, db.ErrWorkflowNotFound) {
+		t.Errorf("with every version deprecated, `workflow show docs-review` returned %v, want ErrWorkflowNotFound", err)
+	}
+	definitions, err = loadDefinitions(conn, 1)
+	testsupport.Must(t, err, "reloading definitions: %v", err)
+	for _, d := range bindableDefinitions(definitions) {
+		if d.workflow.Name == "docs-review" {
+			t.Errorf("with every version deprecated, binding still kept %s", d.workflow.Ref())
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2395,7 +2520,7 @@ func TestRenamePlusBumpRefusesActivation(t *testing.T) {
 		t.Fatal("activation succeeded on an issue two workflow NAMES match " +
 			"after a rename-plus-bump; today's binding refuses this")
 	}
-	assertRenamePlusBumpWedge(t, err, issue)
+	assertRenamePlusBumpWedge(t, err, issue, wedgeCandidatesOrphaned)
 
 	// Scoped to this run: the earlier activation that registered gone@1 wrote
 	// its own steps, pins and binding on this same connection.
@@ -2412,14 +2537,22 @@ func TestRenamePlusBumpRefusesActivation(t *testing.T) {
 }
 
 // assertRenamePlusBumpWedge asserts that err is the exact rename-plus-bump
-// wedge refusal: CodeValidation, naming the issue and the candidates
-// "gone@1, gone-renamed@2" (name-ascending, per loadDefinitions' sort at
+// wedge refusal: CodeValidation, naming the issue and rendering its candidates
+// as `wantCandidates` (name-ascending, per loadDefinitions' sort at
 // activate.go:610-615). Shared by TestRenamePlusBumpRefusesActivation and
 // TestTombstoneRetiresAWedgedName's setup, so the tombstone test's
 // precondition is pinned as precisely as the refusal it retires — a zero-match
 // refusal or an unrelated error would satisfy a bare "err != nil" check just
 // as readily, and would leave the tombstone test's premise silently wrong.
-func assertRenamePlusBumpWedge(t *testing.T, err error, issue int) {
+//
+// The candidate rendering is a PARAMETER since DKT-609, because the two call
+// sites arrange the same refusal over different repository states and the
+// refusal now says so: one deletes gone.toml from a real config root (so
+// "gone" is an orphaned registration and is annotated), the other registers
+// both names directly with no config root to scan (so nothing was checked and
+// nothing is annotated). Hard-coding one string would have made the other call
+// site pass on an assertion it did not mean.
+func assertRenamePlusBumpWedge(t *testing.T, err error, issue int, wantCandidates string) {
 	t.Helper()
 	if code, _ := CodeOf(err); code != CodeValidation {
 		t.Errorf("error code = %q, want %q", code, CodeValidation)
@@ -2429,14 +2562,21 @@ func assertRenamePlusBumpWedge(t *testing.T, err error, issue int) {
 	if !strings.Contains(msg, model.FormatID(issue)) {
 		t.Errorf("error does not name the issue: %s", msg)
 	}
-	// Name-ascending, matching loadDefinitions' sort: "gone" before
-	// "gone-renamed".
-	const wantCandidates = "gone@1, gone-renamed@2"
 	if !strings.Contains(msg, wantCandidates) {
 		t.Errorf("error does not name the candidates as %q: %s", wantCandidates, msg)
 	}
 	assertMultiMatchBranch(t, err)
 }
+
+// wedgeCandidatesUnchecked is the candidate rendering when NO instance-config
+// root exists to scan: bare refs, name-ascending, exactly as before DKT-609.
+// "Nothing was checked" must never render as "nothing is orphaned".
+const wedgeCandidatesUnchecked = "gone@1, gone-renamed@2"
+
+// wedgeCandidatesOrphaned is the same refusal after a real rename in a real
+// config root: the stranded registration is annotated and its live replacement
+// is not, which is the whole of DKT-609's second acceptance criterion.
+const wedgeCandidatesOrphaned = "gone@1" + orphanAnnotation + ", gone-renamed@2"
 
 // multiMatchDiscriminator is the ONLY text distinguishing bindIssue's two
 // refusal branches (activate.go:762-767 versus :756-761).
@@ -2509,7 +2649,7 @@ func TestTombstoneRetiresAWedgedName(t *testing.T) {
 		t.Fatal("setup: expected the rename-plus-bump wedge to refuse before " +
 			"the tombstone is registered")
 	}
-	assertRenamePlusBumpWedge(t, err, wedged)
+	assertRenamePlusBumpWedge(t, err, wedged, wedgeCandidatesUnchecked)
 
 	// The tombstone: re-register "gone" at a HIGHER version with a [match]
 	// that admits NOTHING, by construction rather than by picking an issue
@@ -2736,4 +2876,92 @@ func TestRestoreReturnsAVersionToBinding(t *testing.T) {
 	run := startRun(t, conn, issue)
 	_, err = activate(conn, run.ID)
 	testsupport.Must(t, err, "activation still refuses after restore: %v", err)
+}
+
+// policyPinRow returns the run's policy.toml pin row, or nil when it has none.
+func policyPinRow(t *testing.T, conn *sql.DB, runID int) *db.Pin {
+	t.Helper()
+	for _, p := range pinsByKind(t, conn, runID, db.PinKindFile) {
+		if filepath.ToSlash(p.Ref) == "policy.toml" {
+			pin := p
+			return &pin
+		}
+	}
+	return nil
+}
+
+// TestReactivationReportsANewlyPinnedPolicy: a run activated before the config
+// held a policy.toml pins one at re-activation, and the result names it, so an
+// operator learns that waiting rows will resolve against a policy the run did
+// not start under.
+func TestReactivationReportsANewlyPinnedPolicy(t *testing.T) {
+	conn, configDir := configRepo(t)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+
+	first := createIssue(t, conn, "first", "body", "task", nil)
+	run := startRun(t, conn, first)
+	result, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "first activate: %v", err)
+	if result.NewPolicyPin != nil {
+		t.Fatalf("first activation reports new policy pin %+v with no policy.toml",
+			result.NewPolicyPin)
+	}
+	if row := policyPinRow(t, conn, run.ID); row != nil {
+		t.Fatalf("run pins policy.toml %+v before the config holds one", row)
+	}
+
+	writeConfigFile(t, configDir, "policy.toml", "opaque = \"added mid-run\"\n")
+	second := createIssue(t, conn, "late arrival", "late body", "task", nil)
+	err = db.AddRunIssue(conn, run.ID, second)
+	testsupport.Must(t, err, "adding issue to an active run: %v", err)
+
+	result, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "re-activate: %v", err)
+
+	row := policyPinRow(t, conn, run.ID)
+	if row == nil {
+		t.Fatal("re-activation did not pin the policy.toml the config now holds")
+	}
+	if result.NewPolicyPin == nil {
+		t.Fatalf("re-activation pinned policy.toml %+v and reported no new policy pin", row)
+	}
+	if result.NewPolicyPin.Ref != row.Ref || result.NewPolicyPin.SHA256 != row.SHA256 {
+		t.Errorf("new policy pin = %+v, want the pinned row's ref %q and sha256 %q",
+			result.NewPolicyPin, row.Ref, row.SHA256)
+	}
+}
+
+// TestReactivationKeepsAnInheritedPolicyPin is RA2 for policy.toml: an edit to
+// an already-pinned policy file neither reaches the run nor reads as a new pin.
+func TestReactivationKeepsAnInheritedPolicyPin(t *testing.T) {
+	conn, configDir := configRepo(t)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, configDir, "policy.toml", "opaque = \"original\"\n")
+
+	first := createIssue(t, conn, "first", "body", "task", nil)
+	run := startRun(t, conn, first)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "first activate: %v", err)
+	before := policyPinRow(t, conn, run.ID)
+	if before == nil {
+		t.Fatal("first activation did not pin policy.toml")
+	}
+
+	rewriteConfigFile(t, configDir, "policy.toml", "opaque = \"EDITED mid-run\"\n")
+	second := createIssue(t, conn, "late arrival", "late body", "task", nil)
+	err = db.AddRunIssue(conn, run.ID, second)
+	testsupport.Must(t, err, "adding issue to an active run: %v", err)
+
+	result, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "re-activate: %v", err)
+
+	after := policyPinRow(t, conn, run.ID)
+	if after == nil || after.SHA256 != before.SHA256 {
+		t.Errorf("policy.toml pin after re-activation = %+v, want the original hash %q",
+			after, before.SHA256)
+	}
+	if result.NewPolicyPin != nil {
+		t.Errorf("re-activation reports new policy pin %+v for an inherited policy.toml",
+			result.NewPolicyPin)
+	}
 }

@@ -275,3 +275,105 @@ func TestListIssues_ParentFetchingPattern(t *testing.T) {
 		t.Errorf("parent.Status = %q, want %q", parent.Status, model.StatusInProgress)
 	}
 }
+
+// seedResolution sets an issue's resolution the way the engine does, outside
+// the shared update path, so the update under test sees it as the old value.
+func seedResolution(t *testing.T, conn *sql.DB, id int, resolution string) {
+	t.Helper()
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	testsupport.Must(t, SetIssueResolutionTx(tx, id, resolution), "SetIssueResolutionTx")
+	testsupport.Must(t, tx.Commit(), "Commit")
+}
+
+// activityFor returns the issue's activity rows for one field.
+func activityFor(t *testing.T, conn *sql.DB, id int, field string) []model.Activity {
+	t.Helper()
+	rows, err := GetActivity(conn, id, 0)
+	testsupport.Must(t, err, "GetActivity: %v", err)
+	var out []model.Activity
+	for _, a := range rows {
+		if a.FieldChanged == field {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func assertResolutionRow(t *testing.T, rows []model.Activity, oldVal, newVal string) {
+	t.Helper()
+	if len(rows) != 1 {
+		t.Fatalf("resolution activity rows = %d, want 1: %+v", len(rows), rows)
+	}
+	if rows[0].OldValue != oldVal || rows[0].NewValue != newVal {
+		t.Errorf("resolution row = %q -> %q, want %q -> %q", rows[0].OldValue, rows[0].NewValue, oldVal, newVal)
+	}
+}
+
+func TestUpdateIssue_ImplicitDoneClearRecordsResolutionActivity(t *testing.T) {
+	conn := mustOpen(t)
+	testsupport.Must(t, Initialize(conn), "Initialize")
+	id := createTestIssue(t, conn, "abandoned-todo", model.StatusTodo, model.PriorityMedium)
+	seedResolution(t, conn, id, IssueResolutionAbandoned)
+
+	err := UpdateIssue(conn, id, map[string]interface{}{"status": string(model.StatusDone)}, "tester")
+	testsupport.Must(t, err, "UpdateIssue: %v", err)
+
+	assertResolutionRow(t, activityFor(t, conn, id, "resolution"), IssueResolutionAbandoned, "")
+}
+
+func TestUpdateIssue_ReopenClearRecordsResolutionActivity(t *testing.T) {
+	conn := mustOpen(t)
+	testsupport.Must(t, Initialize(conn), "Initialize")
+	id := createTestIssue(t, conn, "abandoned-done", model.StatusDone, model.PriorityMedium)
+	seedResolution(t, conn, id, IssueResolutionAbandoned)
+
+	err := UpdateIssue(conn, id, map[string]interface{}{
+		"status":     string(model.StatusBacklog),
+		"resolution": "",
+	}, "tester")
+	testsupport.Must(t, err, "UpdateIssue: %v", err)
+
+	assertResolutionRow(t, activityFor(t, conn, id, "resolution"), IssueResolutionAbandoned, "")
+}
+
+func TestUpdateIssue_DoneWithEmptyResolutionRecordsNoResolutionActivity(t *testing.T) {
+	conn := mustOpen(t)
+	testsupport.Must(t, Initialize(conn), "Initialize")
+	id := createTestIssue(t, conn, "plain-todo", model.StatusTodo, model.PriorityMedium)
+
+	err := UpdateIssue(conn, id, map[string]interface{}{"status": string(model.StatusDone)}, "tester")
+	testsupport.Must(t, err, "UpdateIssue: %v", err)
+
+	if rows := activityFor(t, conn, id, "status"); len(rows) != 1 {
+		t.Fatalf("status activity rows = %d, want 1: %+v", len(rows), rows)
+	}
+	if rows := activityFor(t, conn, id, "resolution"); len(rows) != 0 {
+		t.Errorf("resolution activity rows = %d, want 0: %+v", len(rows), rows)
+	}
+}
+
+func TestDoneTransitionClearsResolution(t *testing.T) {
+	// Every row starts from an issue resolved IssueResolutionAbandoned; the
+	// rule decides whether the status write clears it or leaves it standing.
+	cases := []struct {
+		name               string
+		prior, target      model.Status
+		explicitResolution bool
+		wantClear          bool
+	}{
+		{"todo moving to done clears the abandoned resolution", model.StatusTodo, model.StatusDone, false, true},
+		{"done re-asserting done keeps the abandoned resolution", model.StatusDone, model.StatusDone, false, false},
+		{"todo moving to done with an explicit resolution keeps the explicit value", model.StatusTodo, model.StatusDone, true, false},
+		{"todo moving to in-progress keeps the abandoned resolution", model.StatusTodo, model.StatusInProgress, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := DoneTransitionClearsResolution(c.prior, c.target, c.explicitResolution); got != c.wantClear {
+				t.Errorf("DoneTransitionClearsResolution(%q, %q, %v) = %v, want %v",
+					c.prior, c.target, c.explicitResolution, got, c.wantClear)
+			}
+		})
+	}
+}

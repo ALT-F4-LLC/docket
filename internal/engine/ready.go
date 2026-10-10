@@ -29,6 +29,15 @@ const (
 	CondRunActive ReadyCondition = "run is not active"
 	// CondIssueDeps is R2: the issue's depends_on predecessors are satisfied.
 	CondIssueDeps ReadyCondition = "the issue's dependencies are not satisfied"
+	// CondIssueParked is R2b: no step of the issue is parked `waiting-human`.
+	// A park is the ISSUE's — the operator is being asked about that issue,
+	// and nothing else on it moves until they rule — and only the issue's:
+	// the run stays `active` and every other issue's rows keep scheduling
+	// (reconcileRun parks the run only once no unparked work remains).
+	// RUN-90 measured the run-level alternative: eleven parks, each a single
+	// issue's verify, each stopping all 45 issues — 1372 of 1656 dispatched
+	// rows never launched.
+	CondIssueParked ReadyCondition = "the issue is parked on an operator decision"
 	// CondPredecessors is R3: intra-workflow `after` predecessors are done,
 	// and a fanned-out predecessor is joined.
 	CondPredecessors ReadyCondition = "an `after` predecessor is not done"
@@ -58,6 +67,23 @@ const (
 	// CondBudget is R7: budget headroom exists. S6 owns the check; at S3 the
 	// seam returns true (§6.3), so this constant exists but never fires yet.
 	CondBudget ReadyCondition = "no budget headroom"
+	// CondPreGatePending is the pre-gate hold (gates-trust §7.6.2 PG6): a
+	// detached run is measuring this step's pre-gates against the target its
+	// claim would resolve, and still holds the (step, target) in-flight lock.
+	// The claim never waits on that run, so a claim admitted now would run
+	// the gate inside its own budget and record the cut — the row the
+	// detached run exists to replace. Evaluated after every clause but the
+	// budget (R7): it applies only to a step whose place in the run admits
+	// it, so a step still behind its predecessors keeps reporting
+	// CondPredecessors (and stays stageable) whatever the lock says, and a
+	// CondBudget refusal still means every other condition held, which the
+	// claim's cost override relies on. A stored manifest row whose step is
+	// held verifies as matched (dispatch verify): the hold defers the claim
+	// without changing the offer. It lifts
+	// when the lock does — the run records its rows, or the child dies and
+	// the kernel drops the flock — and a run that never launched holds
+	// nothing.
+	CondPreGatePending ReadyCondition = "a detached pre-gate run for its target is in flight"
 )
 
 // Scheduler answers readiness over one consistent snapshot of a run.
@@ -97,10 +123,11 @@ type Scheduler struct {
 	// already states the numbers honestly; the scheduling verbs did not.
 	budgetHolds map[string]float64
 	issues      map[int]*issueFacts
-	// issueLabels are the run's issues' labels AS FROZEN AT ACTIVATION, keyed by
-	// issue id. Readiness never consults them — they exist so a rendered `next`
-	// row can carry what a dispatcher needs to route (model/StepRow.Labels).
-	issueLabels map[int][]string
+	// frozenRouting is the run's issues' routing facts AS FROZEN AT ACTIVATION,
+	// keyed by issue id. Readiness never consults them — they exist so a
+	// rendered `next` row can carry what a dispatcher needs to route
+	// (model/StepRow.Labels and Size).
+	frozenRouting map[int]snapshotRouting
 	// foreignScopes are the scope globs of issues OUTSIDE this run whose steps
 	// currently hold a scope. They are loaded eagerly rather than looked up
 	// lazily because a missing entry would read as "no scope" — S1's
@@ -128,6 +155,11 @@ type Scheduler struct {
 	// of the world. It counts UNACKNOWLEDGED reaps per class, and it is nil on
 	// the dormant path — a run with nothing reaped never allocates it (D3).
 	reapHold map[string]int
+	// policy is the run's pinned policy.toml, read lazily by the first
+	// rendered row that needs routing (stepRow) and never by readiness
+	// itself: which model a row routes to is a rendering fact, not a
+	// scheduling one.
+	policy *runPolicy
 	// openReaps are the rows behind reapHold, kept so the REFUSAL can name the
 	// same reaps the predicate counted. A headroom denial with nothing running
 	// is baffling unless the message names why (§6.3).
@@ -157,6 +189,16 @@ type Scheduler struct {
 	// often is waste this removes. Populated lazily via loopClosure, not
 	// eagerly here, because most snapshots involve no loop step at all.
 	loopClosureCache map[int]map[string]bool
+	// preGateHolds is the pre-gate hold's half of the snapshot (gates-trust
+	// §7.6.2 PG6, CondPreGatePending): the pending pre-gated steps whose
+	// detached run holds its (step, target) in-flight lock at this instant,
+	// keyed by step id to the target sha the lock is keyed to. Loaded with
+	// the rest of the snapshot (loadDetachedPreGateHolds, pregate_detached.go)
+	// for the reason every other field is: Ready has no transaction to
+	// resolve a target in, and a lock probed once per snapshot gives every
+	// Ready over that snapshot one answer. nil on the dormant path — a run
+	// whose definitions declare no pre-gate over `issue.diff` probes nothing.
+	preGateHolds map[int]string
 }
 
 // loopClosure returns afterLoopDownstream(def), computed once per workflow id
@@ -182,6 +224,11 @@ type issueFacts struct {
 	priority   model.Priority
 	scopeGlobs []string
 	depsOK     bool
+	// parked is R2b's fact: some step of this issue is `waiting-human`.
+	// Read off the same step snapshot the rest of the predicate answers
+	// against, never re-queried, so a park and the rows it holds are one
+	// consistent view.
+	parked bool
 }
 
 // LoadScheduler reads everything the predicate needs, once, inside tx.
@@ -207,13 +254,13 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	}
 
 	facts := make(map[int]*issueFacts, len(runIssues))
-	// Labels come from the FROZEN snapshot activation wrote, not from a live
-	// join — the same source and the same reason as the context bundle (§6.6).
-	// Routing is a context question, so a mid-run relabel must not silently
-	// change how an already-scheduled step routes. Contrast `scope_globs` in
+	// Labels and size come from the FROZEN snapshot activation wrote, not from
+	// a live join — the same source and the same reason as the context bundle
+	// (§6.6). Routing is a context question, so a mid-run relabel or resize
+	// must not silently change how an already-scheduled step routes. Contrast `scope_globs` in
 	// loadIssueFacts, read live on purpose because it answers a scheduling
 	// question instead. No extra query: ListRunIssuesTx already carries it.
-	labels := make(map[int][]string, len(runIssues))
+	routing := make(map[int]snapshotRouting, len(runIssues))
 	for _, ri := range runIssues {
 		f, err := loadIssueFacts(tx, ri.IssueID)
 		if err != nil {
@@ -221,12 +268,23 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		}
 		facts[ri.IssueID] = f
 
-		ls, err := snapshotLabels(ri.IssueSnapshot)
+		r, err := decodeSnapshotRouting(ri.IssueSnapshot)
 		if err != nil {
 			return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
 				model.FormatID(ri.IssueID), err)
 		}
-		labels[ri.IssueID] = ls
+		routing[ri.IssueID] = r
+	}
+
+	// R2b's fact, from the snapshot already loaded: an issue with a step
+	// parked `waiting-human` holds every other row of that issue.
+	for _, step := range steps {
+		if step.Status != db.StepWaitingHuman {
+			continue
+		}
+		if f, ok := facts[step.IssueID]; ok {
+			f.parked = true
+		}
 	}
 
 	// Every foreign holder's scope, eagerly: an unknown scope must not read as
@@ -285,10 +343,18 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		return nil, err
 	}
 
+	// The pin LIST only, in the same transaction as the rest of the snapshot.
+	// The policy file behind its policy.toml entry is opened only when a
+	// rendered row asks for routing (runPolicy).
+	pins, err := db.ListPinsTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+
 	limits, limitSources := mergeLimits(defs)
 	s := &Scheduler{
 		run: run, steps: steps, foreign: foreign, issues: facts,
-		issueLabels:   labels,
+		frozenRouting: routing,
 		foreignScopes: foreignScopes,
 		defs:          defs, nowMS: nowMS,
 		stepByID:      make(map[int]*db.Step, len(steps)),
@@ -299,9 +365,19 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		openReaps:     openReaps,
 		holdTally:     tally,
 		voteProposals: proposals,
+		policy:        &runPolicy{runID: runID, pins: pins},
 	}
 	for _, step := range steps {
 		s.stepByID[step.ID] = step
+	}
+
+	// The pre-gate hold, last, because it resolves targets over the snapshot
+	// just assembled (stepByID, defs, holdTally) — the same resolution the
+	// claim performs, so the lock it probes is the lock the claim's detached
+	// run holds. Dormant unless a pinned definition declares a pre-gate over
+	// `issue.diff`.
+	if err := s.loadDetachedPreGateHolds(tx); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -340,22 +416,28 @@ func loadIssueFacts(tx *sql.Tx, issueID int) (*issueFacts, error) {
 	}, nil
 }
 
-// snapshotLabels pulls the labels out of a `run_issues.issue_snapshot` blob.
+// snapshotRouting is the part of a `run_issues.issue_snapshot` blob a rendered
+// row routes on.
+type snapshotRouting struct {
+	Labels []string `json:"labels"`
+	Size   string   `json:"size"`
+}
+
+// decodeSnapshotRouting pulls the routing facts out of a snapshot blob.
 //
-// An issue frozen before the snapshot carried labels, or one with none, yields
-// nil rather than an error: a label-less issue is ordinary, and `omitempty` on
-// the wire makes it serialize exactly as it did before the field existed.
-func snapshotLabels(snapshot string) ([]string, error) {
+// An issue frozen before the snapshot carried labels or a size, or one with
+// none, yields the zero value rather than an error: an unlabelled or unsized
+// issue is ordinary, and `omitempty` on the wire makes it serialize exactly as
+// it did before the fields existed.
+func decodeSnapshotRouting(snapshot string) (snapshotRouting, error) {
+	var frozen snapshotRouting
 	if snapshot == "" {
-		return nil, nil
-	}
-	var frozen struct {
-		Labels []string `json:"labels"`
+		return frozen, nil
 	}
 	if err := json.Unmarshal([]byte(snapshot), &frozen); err != nil {
-		return nil, err
+		return snapshotRouting{}, err
 	}
-	return frozen.Labels, nil
+	return frozen, nil
 }
 
 // LabelsFor is the frozen labels of the issue a step belongs to, for rendering
@@ -364,7 +446,16 @@ func (s *Scheduler) LabelsFor(issueID int) []string {
 	if s == nil {
 		return nil
 	}
-	return s.issueLabels[issueID]
+	return s.frozenRouting[issueID].Labels
+}
+
+// SizeFor is the frozen size of the issue a step belongs to, for rendering a
+// `next` row. It answers nothing about readiness.
+func (s *Scheduler) SizeFor(issueID int) string {
+	if s == nil {
+		return ""
+	}
+	return s.frozenRouting[issueID].Size
 }
 
 func decodeScope(stored string) ([]string, error) {
@@ -544,6 +635,13 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 		return false, CondIssueDeps
 	}
 
+	// R2b: the issue is not parked on an operator decision (see the
+	// condition's own comment). Checked before scope and headroom for the
+	// same reason R1 leads: "the issue is parked" explains a whole lane.
+	if facts != nil && facts.parked {
+		return false, CondIssueParked
+	}
+
 	// R3: intra-workflow `after` predecessors are done.
 	if !s.predecessorsDone(step) {
 		return false, CondPredecessors
@@ -559,7 +657,9 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 	}
 
 	// R3's second interposition clause (DKT-168): an OPEN interposed gate on a
-	// predecessor holds that predecessor's ordinary downstream. Deadlock-free
+	// predecessor holds that predecessor's ordinary downstream — a gate being a
+	// vote or human target only (DKT-2076; see openInterposedGates).
+	// Deadlock-free
 	// by the routing's own bookkeeping: a routing that chose against the gate
 	// terminalizes it in the same transaction (skipUnroutedTargets), one that
 	// chose it leaves it pending exactly until it resolves, and a gate parked
@@ -578,7 +678,28 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 		return false, CondHeadroom
 	}
 
-	// R7: budget headroom — S6's, a seam returning true at S3 (§6.3).
+	// The pre-gate hold (gates-trust §7.6.2 PG6), after every clause that
+	// describes the step's place in the run and BEFORE the budget: a step
+	// that every clause above admits, whose pre-gates a detached run is
+	// measuring right now, waits for that run's complete result rather than
+	// being claimed into a budget-cut one. Not a numbered clause, because it
+	// narrows the ready set without changing what readiness means — the step
+	// is ready the moment the lock lifts, with nothing recorded and nothing
+	// routed in between — and placed after R3 so a step still behind its
+	// predecessors keeps reporting CondPredecessors, the condition the staged
+	// closure stages on (lookahead.go), while the lock is held for most of a
+	// run's life. It precedes R7 because the claim's cost override (claim.go,
+	// DKT-867) admits a CondBudget refusal on the real cost, trusting that
+	// CondBudget means every other condition held; a hold reported after the
+	// budget would be admitted through that override, and a held step that is
+	// also over budget would pause the run over a step nothing may claim yet.
+	// CondPreGatePending's own comment says what lifts it.
+	if _, held := s.preGateHolds[step.ID]; held {
+		return false, CondPreGatePending
+	}
+
+	// R7: budget headroom — S6's, a seam returning true at S3 (§6.3). Last,
+	// so a CondBudget refusal means every other condition held (claim.go).
 	if !s.budgetHeadroom(step) {
 		return false, CondBudget
 	}
@@ -673,7 +794,16 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 
 		// J1/J2: EVERY sibling must be terminal. `waiting-human` is not, so an
 		// operator's open question holds the join — which is the park.
+		//
+		// A sibling SUSPENDED ON THIS STEP is the one exception (DKT-1901): it
+		// routed its failure to this panel and is waiting for the panel's
+		// verdict, so requiring it to be terminal first would deadlock the pair.
+		// The exemption is keyed on the routing naming THIS step, so an ordinary
+		// successor still waits for the suspended step exactly as before.
 		for _, pred := range siblings {
+			if suspendedOnPanel(pred, step.StepName) {
+				continue
+			}
 			if !db.StepTerminal(pred.Status) {
 				return false
 			}
@@ -715,12 +845,22 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 // has instances, and the fallback applies only where re-instantiation did not
 // reach.
 func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.Step {
-	if at := s.instancesOf(step.IssueID, predName, step.Ordinal); len(at) > 0 {
+	return predecessorInstancesIn(s.steps, step, predName)
+}
+
+// predecessorInstancesIn is predecessorInstances over an explicit step set, so
+// the `after_fired` cascade (after_fired.go) — which runs inside a routing
+// transaction with no Scheduler loaded — resolves a predecessor by the SAME
+// ordinal rule R3 uses. Two readings of "which instances of g does S wait on"
+// would disagree at the first loop that re-instantiated one of them and not
+// the other.
+func predecessorInstancesIn(steps []*db.Step, step *db.Step, predName string) []*db.Step {
+	if at := instancesAt(steps, step.IssueID, predName, step.Ordinal); len(at) > 0 {
 		return at
 	}
 
 	best := -1
-	for _, other := range s.steps {
+	for _, other := range steps {
 		if other.IssueID != step.IssueID || other.StepName != predName {
 			continue
 		}
@@ -731,7 +871,7 @@ func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.S
 	if best < 0 {
 		return nil
 	}
-	return s.instancesOf(step.IssueID, predName, best)
+	return instancesAt(steps, step.IssueID, predName, best)
 }
 
 // routedTo is R3's interposition clause (DKT-38): for a step some `threshold`
@@ -765,18 +905,44 @@ func (s *Scheduler) routedTo(step *db.Step) bool {
 			if pred.Status == db.StepDone && routingIs(pred.Routing, step.StepName) {
 				return true
 			}
+			// A triage panel's predecessor is SUSPENDED rather than done
+			// (DKT-1901): its failure is the question the panel exists to
+			// answer, so waiting for it to terminalize first would deadlock.
+			if suspendedOnPanel(pred, step.StepName) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// suspendedOnPanel reports whether a step failed and routed that failure to the
+// named triage panel, and is waiting for its verdict (DKT-1901).
+//
+// The status is `gated` — the non-terminal shape a held routing step wears —
+// and the routing names the panel. Both halves are required: `gated` alone is
+// an ordinary step mid-saga, and the routing alone would also match the step
+// after the panel's verdict terminalized it.
+func suspendedOnPanel(step *db.Step, panel string) bool {
+	return step.Status == db.StepGated && routingIs(step.Routing, panel)
+}
+
 // openInterposedGates returns the non-terminal interposed-gate instances that
-// hold this step (DKT-168): for each `after` predecessor whose threshold
-// names step-name targets, the target instances that are not yet terminal.
+// hold this step (DKT-168): for each `after` predecessor that can interpose
+// a step (workflow.InterposedTargets: its threshold step-name routings, its
+// on_fail panel, and its on_exhausted target), the target instances that are
+// not yet terminal.
 // The step's own name is excluded — a gate is not held by itself — and its
 // instances resolve by predecessorInstances' ordinal rule, the same fallback
 // every other R3 read uses. A target with no instances holds nothing: there
 // is no gate to wait on.
+//
+// Only a vote or human target holds (DKT-2076). Those are DECISIONS the
+// downstream's own validity depends on: running past an undecided panel is
+// work the decision can invalidate. An interposed EXECUTOR target is ordinary
+// work the routing chose to add — the corpus's drain-highs — and no downstream
+// reads its output, so holding for it bought a dispatch level and no ordering
+// anything needed.
 func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
@@ -792,11 +958,14 @@ func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 		if predSpec == nil {
 			continue
 		}
-		for _, target := range workflow.ThresholdTargets(predSpec.Threshold) {
+		for _, target := range workflow.InterposedTargets(predSpec) {
 			if target == step.StepName {
 				continue
 			}
 			for _, gate := range s.predecessorInstances(step, target) {
+				if gate.Kind != workflow.TypeVote && gate.Kind != workflow.TypeHuman {
+					continue
+				}
 				if !db.StepTerminal(gate.Status) {
 					out = append(out, gate)
 				}
@@ -908,8 +1077,14 @@ func (s *Scheduler) quorumMet(predName string, def *workflow.Definition, sibling
 // instancesOf returns every instance of a named step for one issue at an
 // ordinal — the fanout siblings when there are any, or the single instance.
 func (s *Scheduler) instancesOf(issueID int, name string, ordinal int) []*db.Step {
+	return instancesAt(s.steps, issueID, name, ordinal)
+}
+
+// instancesAt is instancesOf over an explicit step set — see
+// predecessorInstancesIn for why the rule is shared rather than copied.
+func instancesAt(steps []*db.Step, issueID int, name string, ordinal int) []*db.Step {
 	var out []*db.Step
-	for _, step := range s.steps {
+	for _, step := range steps {
 		if step.IssueID == issueID && step.StepName == name && step.Ordinal == ordinal {
 			out = append(out, step)
 		}
@@ -1021,10 +1196,14 @@ func (s *Scheduler) classInFlight(step *db.Step) int {
 		}
 		// Occupancy is claimed + running + gated: a `gated` step's worker has
 		// finished, but the saga is still the engine's and counting it keeps
-		// the bound honest against a burst of completions.
+		// the bound honest against a burst of completions. A step suspended on
+		// its triage panel is the exception: it waits on voters, and holding
+		// its slot for the whole deliberation would starve the class.
 		switch other.Status {
 		case db.StepClaimed, db.StepRunning, db.StepGated:
-			inFlight++
+			if !s.suspendedOnOwnPanel(other) {
+				inFlight++
+			}
 		}
 	}
 	// The stage-6 term: a lapsed-but-unconfirmed writer is a thing that may
@@ -1033,6 +1212,22 @@ func (s *Scheduler) classInFlight(step *db.Step) int {
 	// re-offered.
 	inFlight += s.unacknowledgedReapsInClass(step.Class, step.ID)
 	return inFlight
+}
+
+// suspendedOnOwnPanel reports whether a step is suspended on the triage panel
+// its own `on_fail` names. A step whose spec cannot be resolved, or that names
+// no panel, is not suspended.
+func (s *Scheduler) suspendedOnOwnPanel(step *db.Step) bool {
+	def := s.defs[step.WorkflowID]
+	if def == nil {
+		return false
+	}
+	spec := materializedSpec(def, step, s.holdTally)
+	if spec == nil {
+		return false
+	}
+	panel := spec.OnFailTarget()
+	return panel != "" && suspendedOnPanel(step, panel)
 }
 
 // HeadroomDetail renders the numbers behind a CondHeadroom refusal: the
@@ -1100,8 +1295,7 @@ func (s *Scheduler) Expired(step *db.Step) bool {
 		return false
 	}
 
-	lease := step.Lease()
-	if lease.Held() && !lease.Live(s.nowMS) {
+	if leaseLapsed(step, s.nowMS) {
 		return true
 	}
 
@@ -1118,6 +1312,15 @@ func (s *Scheduler) Expired(step *db.Step) bool {
 		return false
 	}
 	return s.nowMS-*step.StartedMS >= max.Milliseconds()
+}
+
+// leaseLapsed is the lease half of Expired, shared with run repin's quiescence
+// guard, which has no workflow definitions in hand and so cannot build a
+// Scheduler. A grace window or clock-source change belongs here, where every
+// surface that speaks about a lapsed lease reads it.
+func leaseLapsed(step *db.Step, nowMS int64) bool {
+	lease := step.Lease()
+	return lease.Held() && !lease.Live(nowMS)
 }
 
 // SortSteps orders a ready set by PRIORITY THEN AGE (§2: "Ordering: priority
@@ -1444,7 +1647,7 @@ func (s *Scheduler) claimablePass(sorted []*db.Step, evicted map[int]bool) []*db
 			admitted[step.Class]++
 		}
 		s.grantScope(step, granted)
-		admittedCost += step.ExpectedCost
+		admittedCost += reservableCost(step)
 		out = append(out, step)
 	}
 	return out
@@ -1528,7 +1731,10 @@ func (s *Scheduler) offerBudget(step *db.Step, admittedCost float64) bool {
 	if s.budget.unlimited() {
 		return true
 	}
-	return s.budget.spend()+admittedCost+step.ExpectedCost <= s.budget.cap
+	// reservableCost, not ExpectedCost: a vote step's declared cost is already
+	// in the floor at materialization (DKT-584), so the offer must not reserve
+	// it a second time.
+	return s.budget.spend()+admittedCost+reservableCost(step) <= s.budget.cap
 }
 
 func (s *Scheduler) priorityOf(step *db.Step) int {

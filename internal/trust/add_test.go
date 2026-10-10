@@ -184,6 +184,100 @@ func TestOnChangeFailureWritesNothing(t *testing.T) {
 	}
 }
 
+// TestTrustAddRecordsBeforeAFailedPublish pins the add path's half of the
+// record-before-publish order: when the store publish fails, the grant has
+// already been recorded, the add fails loudly, and the store is unchanged. The
+// event log then over-reports authority, which is the tolerated direction; an
+// add that recorded nothing here would mean the record had moved after the
+// publish, where a failed record could leave an unrecorded grant.
+func TestTrustAddRecordsBeforeAFailedPublish(t *testing.T) {
+	path := sandbox(t)
+	repo := t.TempDir()
+
+	_, err := addAt(path, AddRequest{
+		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
+	})
+	testsupport.Must(t, err, "seeding addAt: %v", err)
+
+	sealStoreDir(t, path)
+
+	lintArgv := []string{"make", "lint"}
+	var recorded []Entry
+	_, err = addAt(path, AddRequest{
+		Name: "lint", Argv: lintArgv, RepoRoot: repo,
+		OnChange: func(e Entry) error { recorded = append(recorded, e); return nil },
+	})
+	if err == nil {
+		t.Fatal("an add whose publish cannot land must fail")
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("the grant was recorded %d time(s), want exactly 1 before the failed publish", len(recorded))
+	}
+	if recorded[0].Name != "lint" || recorded[0].ArgvSHA256 != ArgvSHA256(lintArgv) {
+		t.Errorf("the hook must receive the entry being added; got %+v", recorded[0])
+	}
+
+	st, err := loadAt(path)
+	testsupport.Must(t, err, "loadAt: %v", err)
+	if len(st.Entries) != 1 || st.Entries[0].Name != "checks" {
+		t.Errorf("a failed publish must leave the store untouched; got %+v", st.Entries)
+	}
+}
+
+// TestWriteStorePostCreateTempFailureNamesTheStore reaches the Write branch of
+// writeStore: CreateTemp succeeds, but the temp file it hands back is open
+// read-only, so the owner's Chmod succeeds and Write fails (EBADF), the way
+// ENOSPC or EIO would fail it on a real disk. The error must name the store
+// that did not change, not only the temp file the deferred cleanup has already
+// deleted. Sealing the directory instead would reach CreateTemp or Rename,
+// never this branch.
+func TestWriteStorePostCreateTempFailureNamesTheStore(t *testing.T) {
+	path := sandbox(t)
+	repo := t.TempDir()
+
+	_, err := addAt(path, AddRequest{
+		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
+	})
+	testsupport.Must(t, err, "seeding addAt: %v", err)
+	before, err := os.ReadFile(path)
+	testsupport.Must(t, err, "reading the seeded store: %v", err)
+
+	t.Cleanup(func() { createTemp = os.CreateTemp })
+	createTemp = func(dir, pattern string) (*os.File, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		name := f.Name()
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		return os.Open(name)
+	}
+
+	err = writeStore(path, &Store{Version: 1})
+	if err == nil {
+		t.Fatal("a publish whose temp file cannot be written must fail")
+	}
+	if !strings.Contains(err.Error(), "writing ") {
+		t.Fatalf("the injection must reach the Write branch; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the failure must name the store %s, not only its temp file; got: %v", path, err)
+	}
+
+	after, err := os.ReadFile(path)
+	testsupport.Must(t, err, "reading the store after the failed publish: %v", err)
+	if string(after) != string(before) {
+		t.Errorf("a failed publish must leave the store byte-for-byte unchanged")
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".trust-*.toml"))
+	testsupport.Must(t, err, "globbing for temp files: %v", err)
+	if len(leftovers) != 0 {
+		t.Errorf("a failed publish must remove its temp file; found %v", leftovers)
+	}
+}
+
 // TestOnChangeIsNotCalledWhenNothingChanges pins the idempotence row's other
 // consequence: a re-add of an identical entry writes nothing, so there is
 // nothing to record. A record that fired here would prove neither novelty nor
@@ -261,19 +355,25 @@ func TestRemoveOnChangeSeesTheEntryItRemoves(t *testing.T) {
 			seen.Tree, seen.Network)
 	}
 
-	// The refusal path, same as add: the store keeps the entry.
+	// The refusal path is NOT the same as add (DKT-2198): the removal is
+	// published before the record, so a failing hook fails the verb over an
+	// entry that is already gone. TestTrustRemoveReportsAnUnrecordedRemoval
+	// pins that surviving shape and why it is the safe direction.
 	boom := errors.New("the record could not be written")
-	_, err = removeAt(path, RemoveRequest{
+	removedAnyway, err := removeAt(path, RemoveRequest{
 		Name: "checks", RepoRoot: repoA,
 		OnChange: func(Entry) error { return boom },
 	})
 	if !errors.Is(err, boom) {
 		t.Fatalf("the hook's error must fail the remove; got %v", err)
 	}
+	if !removedAnyway {
+		t.Error("the publish already landed, so the removal must be reported")
+	}
 	st, err := loadAt(path)
 	testsupport.Must(t, err, "loadAt: %v", err)
-	if len(st.Entries) != 1 {
-		t.Errorf("a refused remove must delete nothing; got %+v", st.Entries)
+	if len(st.Entries) != 0 {
+		t.Errorf("the published removal must have taken effect; got %+v", st.Entries)
 	}
 }
 

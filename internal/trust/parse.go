@@ -2,6 +2,7 @@ package trust
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -84,6 +85,14 @@ func validateEntry(e Entry, idx int, path string) error {
 		return fmt.Errorf("%w: %s in %s sets both global = true and repo = %q; an entry binds to one repo or to all, never both", ErrParse, where, path, e.Repo)
 	}
 
+	// A stub_reason on a non-stub entry is contradictory (DKT-607). Refusing is
+	// the closed direction, same as global+repo above: honoring the reason
+	// would imply the entry is a stub the flag denies, and dropping it would
+	// silently discard a key the operator wrote.
+	if e.StubReason != "" && !e.Stub {
+		return fmt.Errorf("%w: %s in %s has a stub_reason but stub is not true; a reason describes a stub, so set stub = true or remove stub_reason", ErrParse, where, path)
+	}
+
 	// The stored hash must describe the stored argv. This catches a corrupted
 	// or hand-edited file (M3): an operator who edits `argv` without recomputing
 	// the hash gets a refusal rather than an entry whose two halves disagree.
@@ -93,7 +102,32 @@ func validateEntry(e Entry, idx int, path string) error {
 		}
 	}
 
+	// A content pin is optional, so an entry written before pinning existed
+	// still loads. When present it must be one the add path could have written:
+	// only an absolute argv[0] is pinned, and the value is a SHA-256 in the
+	// encoding Lookup compares against byte for byte.
+	if e.Argv0SHA256 != "" {
+		if !filepath.IsAbs(e.Argv[0]) {
+			return fmt.Errorf("%w: %s in %s has argv0_sha256, but its argv[0] %q is not an absolute path; only an absolute argv[0] is content-pinned", ErrParse, where, path, e.Argv[0])
+		}
+		if !isLowerHexSHA256(e.Argv0SHA256) {
+			return fmt.Errorf("%w: %s in %s has argv0_sha256 %q, which is not 64 lowercase hex characters", ErrParse, where, path, e.Argv0SHA256)
+		}
+	}
+
 	return nil
+}
+
+func isLowerHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // rejectUndecoded turns BurntSushi's undecoded-key report into the strict-mode

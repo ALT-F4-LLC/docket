@@ -568,7 +568,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		Confidence:      0.9,
 		DomainRelevance: 0.8,
 		Summary:         "approved",
-		FindingsJSON:    &model.Findings{Concerns: []string{"nit"}},
+		FindingsJSON:    &model.Findings{Concerns: []model.Finding{{Text: "nit"}}},
 	}); err != nil {
 		t.Fatalf("CastVote: %v", err)
 	}

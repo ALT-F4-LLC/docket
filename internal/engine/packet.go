@@ -2,13 +2,16 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -95,25 +98,15 @@ const packetFrontmatterFence = "---"
 // entry living in the shared root resolves identically from any cwd, including a
 // linked worktree that carries no `.docket/` of its own.
 func resolvePacketFiles(
-	pins map[string]string, roots []string, entries []string,
+	runRef string, pins map[string]string, roots []string, entries []string,
 ) ([]PacketFile, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
 
 	var out []PacketFile
-	seen := make(map[string]bool, len(entries))
-
-	// add resolves one file and appends it, returning the includes it declares.
-	// A file already inlined returns no includes, which is what makes the
-	// de-duplication also terminate the one-level walk on a diamond.
-	add := func(ref string) ([]string, error) {
-		if seen[ref] {
-			return nil, nil
-		}
-		seen[ref] = true
-
-		body, hash, err := readPinnedPacketFile(pins, roots, ref)
+	err := walkPacketFiles(entries, func(ref string) ([]string, error) {
+		body, hash, err := readPinnedPacketFile(runRef, pins, roots, ref)
 		if err != nil {
 			return nil, err
 		}
@@ -123,22 +116,40 @@ func resolvePacketFiles(
 		}
 		out = append(out, PacketFile{Path: ref, SHA256: hash, Body: stripped})
 		return includes, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// walkPacketFiles shares the renderer's ordered, one-level traversal with
+// activation's byte accounting. A ref visited as an include is also skipped
+// if it appears later as a direct entry, so its children stay excluded.
+func walkPacketFiles(entries []string, visit func(string) ([]string, error)) error {
+	seen := make(map[string]bool, len(entries))
+	add := func(ref string) ([]string, error) {
+		if seen[ref] {
+			return nil, nil
+		}
+		seen[ref] = true
+		return visit(ref)
 	}
 
 	for _, entry := range entries {
 		includes, err := add(entry)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// ONE LEVEL, AND NO FURTHER: an include's own declared includes are
 		// parsed (so a malformed one still refuses) and then discarded.
 		for _, include := range includes {
 			if _, err := add(include); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	return out, nil
+	return nil
 }
 
 // readPinnedPacketFile is §1.2's ladder for one file.
@@ -155,8 +166,13 @@ func resolvePacketFiles(
 // unpinned one means the file was not in the config directory when the run
 // activated — reading the live tree would break the byte-identical property
 // outright. Refusing is the only answer consistent with §8's Properties clause.
+//
+// That row's MESSAGE then splits by whether the ref resolves on disk (DKT-818):
+// a ref nothing ever wrote needs writing, while one sitting under a config root
+// needs a run whose pin set includes it. Same code, same refusal — a true
+// sentence about which of the two it is.
 func readPinnedPacketFile(
-	pins map[string]string, roots []string, ref string,
+	runRef string, pins map[string]string, roots []string, ref string,
 ) (body, hash string, err error) {
 	candidates := make([]string, 0, len(roots))
 	for _, root := range roots {
@@ -178,10 +194,31 @@ func readPinnedPacketFile(
 		}
 	}
 	if !pinned {
+		// THE REFUSAL NAMES THE CAUSE IT ACTUALLY HAS (DKT-818). "Not pinned"
+		// has two causes with two different remedies, and the message used to
+		// state only one of them: "add it under an instance-config root and
+		// start a new run". On RUN-59 both unpinned fragments were ALREADY
+		// under `~/.docket/config/fragments/` — a repin had adopted contract
+		// bytes that reached them — so the conductor went looking for a missing
+		// file, found it present, and had to re-derive the real cause. The pin
+		// set was frozen at activation; the filesystem was never the problem.
+		// So the ladder branches HERE, where both facts are in hand: the ref is
+		// unpinned, and this walk already knows every path it could resolve to.
+		for _, full := range candidates {
+			if _, serr := os.Stat(full); serr != nil {
+				continue
+			}
+			return "", "", validationErr(
+				"packet file %q is not in %s's pin set, which froze at activation; "+
+					"the file is on disk at %s, but a run reads only what it "+
+					"snapshotted, so its presence cannot admit it here — start a new "+
+					"run to pin it, or see `docket run repin --help`",
+				ref, pinSetOwner(runRef), full)
+		}
 		return "", "", validationErr(
-			"packet file %q is not pinned by this run; a packet reads only files the "+
-				"run snapshotted at activation, so add it under an instance-config "+
-				"root and start a new run", ref)
+			"packet file %q is not in %s's pin set, which froze at activation, and "+
+				"resolves under no instance-config root; add it under one and start "+
+				"a new run to pin it", ref, pinSetOwner(runRef))
 	}
 
 	// FIRST ROOT THAT HOLDS IT WINS, and the hash check below then applies to
@@ -350,6 +387,58 @@ func checkPacketRef(ref, entry string) error {
 	return nil
 }
 
+// PinContent is the bytes a run pinned at one config-relative path (DKT-2026).
+//
+// A rendered packet names its pinned files by ref and sha256, so a contract
+// telling a worker to test something against `policy.toml` named a document the
+// worker had no sanctioned way to open: `policy resolve` answers with routing
+// derived from that file, not with its text. This is the read that closes the
+// gap, and it is deliberately the SAME LADDER the packet resolves entries
+// through — config-relative ref first, the legacy absolute form second — so the
+// bytes a reader gets here are the bytes a packet would have carried, never a
+// working-tree copy that happens to sit at the path.
+//
+// DRIFT REFUSES RATHER THAN PRINTS. The pin is the run's agreement about bytes;
+// printing an edited file under the pinned ref would hand a worker content the
+// run never agreed to, which is the same silent substitution the resolver
+// refuses at render. The refusal names both hashes, as `run verify-pins` does.
+//
+// THE RUN RESOLVES BEFORE ITS PIN SET IS READ. An absent run and a run that
+// never activated both list zero pins, and the ladder would report either as
+// an unpinned path with a repin remedy neither can use. A missing run is
+// NOT_FOUND, as `run verify-pins` answers; an unactivated one has no pin set.
+//
+// It writes nothing: no lease, no lock, no event.
+func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
+	runRef := model.FormatRunID(runID)
+	run, err := db.GetRun(conn, runID)
+	if errors.Is(err, db.ErrRunNotFound) {
+		return "", notFoundErr(err, "run %s not found", runRef)
+	}
+	if err != nil {
+		return "", err
+	}
+	if run.ActivatedAtMS == nil {
+		return "", validationErr(
+			"%s has no pin set because it has not been activated; activation "+
+				"pins the files its packets read", runRef)
+	}
+	pins, err := db.ListPins(conn, runID)
+	if err != nil {
+		return "", err
+	}
+	body, _, err := readPinnedPacketFile(
+		runRef, packetPinsForRun(pins),
+		instanceConfigRoots(), ref)
+	if err != nil {
+		if code, ok := CodeOf(err); ok && code == CodeConflict {
+			return "", conflictErr("pin drift: %s", err.Error())
+		}
+		return "", err
+	}
+	return body, nil
+}
+
 // sha256Hex is workflow.SHA256, named locally so this file reads as one story.
 func sha256Hex(content []byte) string { return workflow.SHA256(content) }
 
@@ -399,5 +488,130 @@ func stepPacketFiles(
 		return nil, err
 	}
 
-	return resolvePacketFiles(packetPinsForRun(pins), instanceConfigRoots(), entries)
+	return resolvePacketFiles(
+		model.FormatRunID(step.RunID), packetPinsForRun(pins),
+		instanceConfigRoots(), entries)
+}
+
+// issueAttachmentFiles resolves a step's `issue.files` input (DKT-44) to the
+// bytes of every path its issue attaches, for rendering beside the declared
+// packet files.
+//
+// THE PATH LIST IS FROZEN; THE BYTES ARE LIVE. The paths come from the run's
+// activation snapshot, so a file attached mid-run never reaches that run's
+// packets. Each path's bytes are read at render time.
+//
+// A step that does not declare the form reads nothing: the attachments are an
+// input like any other, and an issue's file list is not automatically every
+// step's business.
+//
+// THE READ IS AGAINST THE RUN'S EXEC ROOT, never the invoking process's cwd.
+// An attached path is relative to the project checkout the issue's work happens
+// in, and the claim that needs these bytes typically runs from a linked
+// worktree that does not have them — which is the whole defect: HRN-23's three
+// attachments were untracked, so they existed in the shared checkout and
+// nowhere else, and an isolated executor had no sanctioned way to reach them.
+// `runExecRoot` is the same resolution the diff stage already uses for exactly
+// this reason.
+//
+// AN UNREADABLE PATH REFUSES. Rendering the packet without it would hand the
+// step a document that silently lacks an input the workflow declared, and the
+// executor's only evidence would be an absence — the failure mode this form
+// exists to end. The refusal is a VALIDATION_ERROR naming the path, and
+// because `step claim --render` renders as a PRE-CLAIM preflight, it costs no
+// lease: the step stays exactly as claimable as it was.
+//
+// AN ESCAPING PATH REFUSES BEFORE ANY READ. Every writer of an issue's file
+// list stores its paths verbatim, so this read is the one place containment
+// can hold for every row, including rows attached before the rule existed.
+// The rule is checkPacketRef's, applied to the run's checkout. It is lexical:
+// a symlink inside the checkout is still followed.
+func issueAttachmentFiles(
+	conn *sql.DB, step *db.Step, spec *workflow.Step,
+) ([]PacketFile, error) {
+	if spec == nil || !slices.Contains(spec.Inputs, workflow.InputIssueFiles) {
+		return nil, nil
+	}
+
+	paths, err := frozenAttachedPaths(conn, step.RunID, step.IssueID)
+	if err != nil {
+		return nil, err
+	}
+
+	root := runExecRoot(conn, step.RunID)
+	out := make([]PacketFile, 0, len(paths))
+	for _, path := range paths {
+		if err := checkAttachmentPath(step.IssueID, path); err != nil {
+			return nil, err
+		}
+		body, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			return nil, validationErr(
+				"issue %s attaches %q, which `issue.files` could not read from "+
+					"the run's checkout %s: %v",
+				model.FormatID(step.IssueID), path, root, err)
+		}
+		out = append(out, PacketFile{
+			Path: path, SHA256: sha256Hex(body), Body: string(body),
+		})
+	}
+	return out, nil
+}
+
+// checkAttachmentPath is checkPacketRef's containment rule applied to an issue
+// attachment, whose paths are relative to the run's checkout.
+func checkAttachmentPath(issueID int, path string) error {
+	normalized := strings.ReplaceAll(path, `\`, "/")
+	if strings.HasPrefix(normalized, "/") || strings.HasPrefix(normalized, "~") {
+		return validationErr(
+			"issue %s attaches %q, which is not a relative path inside the "+
+				"run's checkout", model.FormatID(issueID), path)
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return validationErr(
+				"issue %s attaches %q, which escapes the run's checkout with `..`",
+				model.FormatID(issueID), path)
+		}
+	}
+	return nil
+}
+
+// frozenAttachedPaths returns the attached path list the run's issue snapshot
+// froze at activation. A snapshot written before the list was frozen carries
+// no `files` key, and for that run the live attachment list stands in.
+func frozenAttachedPaths(conn *sql.DB, runID, issueID int) ([]string, error) {
+	var snapshot sql.NullString
+	err := conn.QueryRow(
+		`SELECT issue_snapshot FROM run_issues WHERE run_id = ? AND issue_id = ?`,
+		runID, issueID,
+	).Scan(&snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
+			model.FormatID(issueID), err)
+	}
+
+	var frozen struct {
+		Files *[]string `json:"files"`
+	}
+	if snapshot.String != "" {
+		if err := json.Unmarshal([]byte(snapshot.String), &frozen); err != nil {
+			return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
+				model.FormatID(issueID), err)
+		}
+	}
+	if frozen.Files == nil {
+		return db.GetIssueFiles(conn, issueID)
+	}
+	return *frozen.Files, nil
+}
+
+// pinSetOwner names the run a refusal is about. A resolution that carries no
+// run — a direct call in a unit test, or any future seam holding only a pin
+// map — gets the deictic form, so the sentence reads correctly either way.
+func pinSetOwner(runRef string) string {
+	if runRef == "" {
+		return "this run"
+	}
+	return runRef
 }

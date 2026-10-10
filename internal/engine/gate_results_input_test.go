@@ -2,8 +2,10 @@ package engine
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -170,6 +172,103 @@ func assertOwnPreGateInput(t *testing.T, where string, ctx *Context) {
 	}
 }
 
+// claimOwnPreGateContext claims selfGateResultsWorkflow's verify@0 with its
+// `ac-commands` pre-gate trusted by an entry whose placeholder declaration is
+// `stubEntry`, and returns the claim's context bundle.
+func claimOwnPreGateContext(t *testing.T, stubEntry bool) *Context {
+	t.Helper()
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(selfGateResultsWorkflow), "selfgateresults.toml")
+	issue := createIssue(t, conn, "flag placeholder passes", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Stub: stubEntry,
+	})
+	e.Gates = runner
+
+	claim, err := e.ClaimStepWithGates(conn, stepIDByInstance(t, conn, "verify@0"),
+		ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim verify: %v", err)
+	return claim.Context
+}
+
+// gateResultsRows parses the context's single gate-results body into generic
+// maps, so a test can tell an absent key from a false one.
+func gateResultsRows(t *testing.T, ctx *Context) []map[string]any {
+	t.Helper()
+	var rows []map[string]any
+	found := false
+	for _, input := range ctx.Inputs {
+		if input.Kind == "gate-results" {
+			found = true
+			err := json.Unmarshal([]byte(input.Body), &rows)
+			testsupport.Must(t, err, "parsing the gate-results body: %v", err)
+		}
+	}
+	if !found {
+		t.Fatal("the context carries no gate-results input")
+	}
+	if len(rows) != 1 {
+		t.Fatalf("gate results = %+v, want exactly one row", rows)
+	}
+	return rows
+}
+
+// A pass authorized by a placeholder trust entry must say so in the input a
+// reviewer reads instead of re-running the check, and a real entry's pass must
+// say so too: an absent key cannot be told apart from a docket too old to
+// carry the flag.
+func TestGateResultsInputCarriesStubEntry(t *testing.T) {
+	for _, stubEntry := range []bool{true, false} {
+		row := gateResultsRows(t, claimOwnPreGateContext(t, stubEntry))[0]
+		got, present := row["stub"]
+		if !present {
+			t.Errorf("stub entry %v: row %+v has no `stub` key", stubEntry, row)
+			continue
+		}
+		if got != stubEntry {
+			t.Errorf("stub entry %v: `stub` = %v", stubEntry, got)
+		}
+	}
+}
+
+// A row migrated from an S3 pass-through trail renders `s3_migrated: true`;
+// any other row omits the key, matching `docket step gates`.
+func TestGateResultsInputCarriesS3Migrated(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(gateResultsWorkflow), "gateresults.toml")
+	issue := createIssue(t, conn, "flag migrated rows", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	// testEngine's PassThroughRunner is the S3 runner: every row it records
+	// carries Stub.
+	claimAndComplete(t, conn, testEngine(), "implement@0", "summary", "")
+	claim, err := ClaimStep(conn, stepIDByInstance(t, conn, "review@0"),
+		ClaimOptions{Owner: "judge", NowMS: nowMS})
+	testsupport.Must(t, err, "claim review: %v", err)
+
+	migrated := gateResultsRows(t, claim.Context)[0]
+	if migrated["s3_migrated"] != true {
+		t.Errorf("S3-migrated row %+v lacks `s3_migrated: true`", migrated)
+	}
+
+	current := gateResultsRows(t, claimOwnPreGateContext(t, false))[0]
+	if _, present := current["s3_migrated"]; present {
+		t.Errorf("row from the real runner %+v carries `s3_migrated`; "+
+			"the key is omitted when false", current)
+	}
+}
+
 // TestGateResultsRegisterRules: the form validates against the step's
 // EXISTENCE only — gates can arrive from a fence source the definition does
 // not enumerate — and the kind itself is reserved from `emits`.
@@ -204,5 +303,131 @@ emits = "gate-results"
 `
 	if err := registerSourceErr(t, []byte(shadowed)); err == nil {
 		t.Error("a step emitting the reserved gate-results kind registered")
+	}
+}
+
+// A skipped producer at the latest ordinal makes `<step>.gate-results` resolve
+// empty for that ordinal instead of falling back to an earlier round's rows.
+// An ordinary `<step>.<kind>` input over the same producer still falls back.
+// The fixture's `review` re-runs every round, records its own `review-checks`
+// gate, and feeds `synthesize` both forms.
+const skippedGateProducerSrc = `
+[pipeline]
+name = "skipped-gate-producer"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+after = []
+executor = "author"
+emits = "change-summary"
+
+[[step]]
+name = "review"
+after = ["implement"]
+executor = "judge"
+emits = "findings"
+gates = ["review-checks"]
+
+[[step]]
+name = "synthesize"
+after = ["review"]
+executor = "synthesize-findings"
+emits = "findings"
+inputs = ["review.findings", "review.gate-results"]
+
+[[step]]
+name = "reconcile"
+after = ["synthesize"]
+action = "aggregate"
+params = { field = "severity", method = "max", hold_spread = 2, output = "findings" }
+inputs = ["synthesize.findings"]
+payload = "findings@1"
+threshold = { "fix-loop" = "any(severity >= blocker)" }
+max_fix_loops = 2
+
+[[step]]
+name = "fix"
+executor = "author"
+emits = "change-summary"
+loop = true
+inputs = ["reconcile.findings"]
+after_loop = "review"
+`
+
+const (
+	roundZeroReview = "REVIEW-0: the round-0 findings."
+	roundOneReview  = "REVIEW-1: findings the operator skipped past."
+)
+
+// skippedReviewRoundOne drives round 0 into the fix loop, then records
+// `review@1` (its findings and a passing `review-checks` row) and moves it to
+// `skipped`, as `resolve --as skip` does to a parked step that had recorded.
+// It returns `synthesize@1`'s assembled inputs.
+func skippedReviewRoundOne(t *testing.T) []ContextInput {
+	t.Helper()
+	conn := mustDB(t)
+	e := testEngine()
+	registerFixtureSchema(t, conn)
+	registerSource(t, conn, []byte(skippedGateProducerSrc), "skipped-gate-producer.toml")
+	issue := createIssue(t, conn, "land the change", "the issue body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	driveFixtureRound(t, 0)
+	claimAndComplete(t, conn, e, "implement@0", "the change", "")
+	claimAndComplete(t, conn, e, "review@0", roundZeroReview, "")
+	claimAndComplete(t, conn, e, "synthesize@0", "the synthesis", blockerPayload)
+	driveAction(t, conn, e, "reconcile@0")
+	if !stepExists(t, conn, "review@1") || !stepExists(t, conn, "synthesize@1") {
+		t.Fatal("premise: the blocker did not re-enter review at ordinal 1")
+	}
+
+	driveFixtureRound(t, 1)
+	claimAndComplete(t, conn, e, "fix@1", "the fix", "")
+	claimAndComplete(t, conn, e, "review@1", roundOneReview, "")
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'review@1'`,
+		db.StepSkipped)
+
+	bundle, err := ReadContext(conn, stepIDByInstance(t, conn, "synthesize@1"), nowMS)
+	testsupport.Must(t, err, "assembling synthesize@1's bundle: %v", err)
+	return bundle.Inputs
+}
+
+func TestSkippedLatestProducerResolvesEmptyGateResults(t *testing.T) {
+	gates := gateResultsInputs(t, skippedReviewRoundOne(t))
+	rows, ok := gates["review@1"]
+	if len(gates) != 1 || !ok {
+		t.Fatalf("synthesize@1's gate-results are from %v, want review@1 alone: "+
+			"a skipped producer pins the ordinal, never falls back to review@0",
+			keysOf(gates))
+	}
+	if len(rows) != 0 {
+		t.Errorf("review@1's gate results = %+v, want an empty array: the "+
+			"skipped instance's recorded rows are not its input", rows)
+	}
+}
+
+func TestSkippedLatestProducerArtifactInputFallsBack(t *testing.T) {
+	var found []string
+	for _, in := range skippedReviewRoundOne(t) {
+		// The loop also carries the prior round's synthesize and reconcile
+		// findings; only the review.findings binding is under test.
+		if in.Kind != "findings" || !strings.HasPrefix(in.ProducerStep, "review@") {
+			continue
+		}
+		found = append(found, in.ProducerStep)
+		if in.ProducerStep != "review@0" || in.Body != roundZeroReview {
+			t.Errorf("synthesize@1's review.findings is %s %q, want review@0 %q: "+
+				"an ordinary input skips past a skipped producer",
+				in.ProducerStep, in.Body, roundZeroReview)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("synthesize@1 binds review.findings from %v, want review@0 alone", found)
 	}
 }

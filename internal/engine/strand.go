@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -39,7 +40,39 @@ import (
 // A conductor that does not use it loses nothing it had: its proposal simply is
 // not auto-closed, exactly as today.
 func ReapAckProposalKey(runID int, seq int64) string {
-	return "reap-ack:" + strconv.Itoa(runID) + ":" + strconv.FormatInt(seq, 10)
+	return reapAckRunPrefix(runID) + strconv.FormatInt(seq, 10)
+}
+
+// reapAckRunPrefix is the key family of ONE RUN's reap-ack ballots — the part
+// of the key above that does not vary per reap. It exists so the report's
+// vote-usage attribution (DKT-584) and the writer above cannot spell the key
+// differently, exactly as voteIdempotencyPrefix guards its own family.
+func reapAckRunPrefix(runID int) string {
+	return reapAckScopePrefix + strconv.Itoa(runID) + ":"
+}
+
+// reapAckScopePrefix is the literal head of every reap-ack key, named so the
+// writer above and the parser below cannot spell it differently.
+const reapAckScopePrefix = "reap-ack:"
+
+// reapAckRunOf parses the RUN id back out of a reap-ack idempotency key — the
+// inverse of reapAckRunPrefix, kept beside it for the same cannot-drift
+// reason voteStepRunOf sits beside voteIdempotencyPrefix. The second return
+// is false for a key of any other family.
+func reapAckRunOf(key string) (int, bool) {
+	suffix, ok := strings.CutPrefix(key, reapAckScopePrefix)
+	if !ok {
+		return 0, false
+	}
+	runPart, _, ok := strings.Cut(suffix, ":")
+	if !ok {
+		return 0, false
+	}
+	runID, err := strconv.Atoi(runPart)
+	if err != nil {
+		return 0, false
+	}
+	return runID, true
 }
 
 // closeRunProposalsTx closes every OPEN proposal this run's vote steps opened,

@@ -114,7 +114,7 @@ migration at all, and `TestSchemaVersionIsUnchangedAtS7` asserts
 
 | # | Clause |
 |---|---|
-| D1 | `events prune` is a verb nobody is obliged to run. Docket still deletes nothing on its own — there is no automatic retention sweep, no prune inside `next`, no compaction at `run done`. The retention *config key* exists and defaults to **0, meaning "retain everything"**, which is the posture operations.md §2 already documents |
+| D1 | `events prune` is a verb nobody is obliged to run. Docket still deletes nothing on its own — there is no automatic retention sweep, no prune inside `next`, no compaction at `run done`. The retention *config key* exists and defaults to **0, which imposes no retention window**: prune at 0 is bounded only by `--before` or `--before-run` and the live-run refusal. Docket deletes nothing it was not asked to delete, the posture operations.md §2 documents |
 | D2 | `--follow` is a flag on a read verb. Without it, `events list` is byte-identical to S6's, which `TestEventsListIsUnchangedByFollow` asserts by diffing the same call before and after |
 | D3 | `run budget --set` is a new sub-verb. `run start --budget` is untouched, and a run nobody re-caps has the same `budget` column value it always had |
 | D4 | The dormancy sweep runs against **engine-s6** and must show ZERO diffs on every existing verb's output — the standing check each stage has carried |
@@ -197,7 +197,7 @@ docket events prune --before-run RUN-N   # everything belonging to that run
 
 | # | Clause |
 |---|---|
-| P8 | An event belonging to a run whose status is not `done` or `abandoned` is **never deleted**. `model.RunStatus.Terminal()` is the predicate — the same one `run status --active` and re-activation already use, so "terminal" has one definition |
+| P8 | An event belonging to a run whose status is not `done` or `abandoned` is **never deleted**. `model.RunStatus.Terminal()` is the predicate — the same one the default `run status` list and re-activation already use, so "terminal" has one definition |
 | P9 | The refusal is a **CONFLICT (exit 4) naming the runs**, not a silent skip. A prune that quietly retained half its range would leave an operator believing space was reclaimed and a consumer believing a boundary moved |
 | P10 | It is evaluated **inside the delete's transaction** (F3), so the set refused and the set deleted are computed over one snapshot |
 | P11 | Events with **no run** — trust grants — are prunable by `--before`, because there is no run whose liveness could forbid it. They are the one class `--before-run` can never reach, and the help says so |
@@ -219,7 +219,7 @@ refusal is protecting arithmetic, not sentiment.
 | # | Clause |
 |---|---|
 | P12 | The boundary is a **config key: `events.retain`** — a duration. Events younger than it are never pruned, whatever `--before` says |
-| P13 | Default **`0`, meaning retain everything**, which makes prune a verb that refuses everything until an operator states a policy. That is the dormant posture D1 requires and the one operations.md §2 documents |
+| P13 | Default **`0`, which imposes no retention window**, so prune at 0 is bounded only by `--before` or `--before-run` and the live-run refusal, not by age. Nothing is deleted until an operator runs prune with a target. That is the dormant posture D1 requires and the one operations.md §2 documents |
 | P14 | A `--before` that would cross the boundary is **clamped and reported**, not silently truncated: the answer names how many rows the boundary held back |
 | P15 | `--before-run` on a terminal run is **not** clamped by the boundary. A run that is done and whose artifacts an operator is discarding wholesale is the case §3's boundary is not about |
 
@@ -387,7 +387,7 @@ The rule earned a second demonstration; file first, then write the number down.
 
 | Target | Change |
 |---|---|
-| `skills/docket/SKILL.md` | `docket events` gains `--follow` (flag table) and `events prune` (new sub-verb); `docket run` gains `run budget`; the `GONE` row's "no path reaches this yet" note is **deleted** — a path reaches it now |
+| The loadable `docket` skill | `docket events` gains `--follow` (flag table) and `events prune` (new sub-verb); `docket run` gains `run budget`; the `GONE` row's "no path reaches this yet" note is **deleted** — a path reaches it now |
 | `docs/spec/operations.md` §2 | The retention section is completed: the S6 pointer ("stage 7's") is resolved into the actual policy, the prune runbook, and what a trim costs |
 | `docs/spec/operations.md` §4 | The manual-edit runbook is replaced by the verb. The SQL stays as a footnote for a repo on an older binary, marked as such |
 | `docs/spec/architecture.md` | Retention and the follow loop, one subsection each |

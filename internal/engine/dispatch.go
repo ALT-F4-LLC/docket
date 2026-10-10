@@ -41,6 +41,21 @@ type Manifest struct {
 	// that a dispatch is open cannot tell whether waiting is a strategy.
 	ExpiresMS int64           `json:"expires_ms"`
 	Rows      []model.StepRow `json:"rows"`
+	// Total is the ready set's size BEFORE `--limit` cut it, and Truncated
+	// says whether the cut dropped anything. They ride BESIDE the §11.4 shape
+	// for StaleTargets' reason: a relay reading only `rows` cannot tell a run
+	// whose remaining work fits from one the cap is metering out, and RUN-95's
+	// conductor read a post-cut count as the run's whole offer twice against a
+	// 930-row ready set. Rows are untouched, so hashing and `dispatch verify`
+	// are unchanged.
+	Total     int  `json:"total"`
+	Truncated bool `json:"truncated"`
+	// Limits is the effective per-class `[limits] max` from the scheduler's
+	// merged limits, for every class present in the manifest's rows. Without
+	// it a relay inferred each class's concurrency from the largest same-stage
+	// count in the manifest, which a chain-deep manifest carrying few issues
+	// per stage under-certifies.
+	Limits map[string]int `json:"limits,omitempty"`
 	// StaleTargets rides BESIDE the §11.4 shape for ExpiresMS's reason: a
 	// conductor about to spend review budget on these rows needs the staleness
 	// named (DKT-193). Never a row field — rows are hashed at open and
@@ -70,6 +85,23 @@ type Manifest struct {
 	// conductor must get to decide before the wave, not discover it from
 	// exit codes inside one.
 	PinDrift []PinVerdict `json:"pin_drift,omitempty"`
+	// Reaped names the step instances whose leases THIS open reaped — the
+	// same fact `next` reports in ReadySteps.Reaped, on the wire because a
+	// relay that only ever opens dispatches never calls `next`. OpenedSeq is
+	// the boundary for reaps the relay has not yet seen; a reap the open
+	// itself performs lands AFTER that boundary, and --ack-reap applied to the
+	// same open cannot cover it. Without this a relay learned of its own
+	// open's reap only when `guard spawn --active` denied the launch it had
+	// just composed (RUN-95: two of four launches, about nine minutes each to
+	// convene the panel, join its usage, and relaunch).
+	Reaped []string `json:"reaped,omitempty"`
+	// ReapHold is A11's guidance for every unacknowledged bounded-class reap
+	// still holding this run's headroom once the open committed — the reaps
+	// above included — with each seq and the flag that clears it. It is the
+	// text `guard spawn` will deny the next launch with, handed to the relay
+	// BEFORE it composes that launch, so the panel or the acknowledgment can
+	// come first. Empty whenever nothing is held.
+	ReapHold string `json:"reap_hold,omitempty"`
 }
 
 // StaleTarget names one manifest row whose packet will render from a recorded
@@ -84,6 +116,14 @@ type StaleTarget struct {
 	TargetSHA  string `json:"target_sha"`
 	SharedHead string `json:"shared_head"`
 	Reason     string `json:"reason"`
+	// Absent distinguishes DKT-742's harder case machine-readably: the
+	// recorded target does not resolve as a commit object from the shared
+	// checkout AT ALL (`git cat-file -e <sha>^{commit}` fails), as opposed to
+	// resolving but sitting off HEAD's history. A consumer planning a wave
+	// reads it as "no seat can reconstruct this tree", not merely "confirm
+	// the tree before reviewing". `omitempty` keeps every divergence-shaped
+	// advisory byte-identical to what it always was.
+	Absent bool `json:"absent,omitempty"`
 }
 
 // FormatDispatchID renders a dispatch's display identity.
@@ -143,43 +183,38 @@ func (e *Engine) OpenDispatch(
 		return nil, err
 	}
 
+	// Scratch trees whose claims died before releasing them are reclaimed
+	// here, before any step is offered: a wave's worth of claims is about to
+	// reconstruct trees beside them, and this is the safe point a killed
+	// claim never reached. Best-effort by construction (pregate_scratch.go).
+	sweepStalePreGateScratch(runExecRoot(conn, runID))
+
 	// DKT-105 / DKT-89: action and vote steps are ENGINE-RUN — no dispatcher
 	// ever claims one, `claim` refuses them outright — and a dispatcher that
 	// only ever calls `dispatch open` never calls `next`, so this verb must
 	// drive their lifecycle too or a `kind:"action"` row rides into manifest
 	// after manifest, ready and unexecuted.
 	//
-	// The drives run BEFORE the manifest is computed — the read-your-writes
+	// The drive runs BEFORE the manifest is computed — the read-your-writes
 	// shape DKT-55 closed in `next`, closed here by ORDER instead of
 	// recomputation. `next` patches and re-derives because its first pass IS
 	// its answer; a manifest is COMMITTED (P6/C1), and rows committed before
-	// the drives could describe a step this same call then routed — a relay
+	// the drive could describe a step this same call then routed — a relay
 	// spawning a panel against an already-decided proposal, the same
 	// booted-and-died waste DKT-101 closed for scopes. Driving first means
 	// the one manifest below is computed over the routed state: a proposal
 	// the drive opened renders on its row natively (stepRow reads
 	// sched.voteProposals), a tally it resolved routes before rendering, and
-	// a step a route un-deferred is offered rather than missing. The drives
-	// own their transactions and none is open yet, so the pool-of-one rule
-	// that forced `next`'s drives after its commit is satisfied by
-	// construction.
-	preSched, err := readySnapshot(conn, runID, defs, nowMS)
-	if err != nil {
-		return nil, err
-	}
-	preRows, _, preSteps, err := readyRows(preSched, ttls, limit)
-	if err != nil {
-		return nil, err
-	}
-	// The READY prefix only (next.go's identical clause): staged rows are
-	// previews, and their lifecycles belong to the `step record` that readies
-	// them mid-wave, not to this open.
-	preSteps = readyOnly(preRows, preSteps)
-	if _, _, err := e.driveVoteSteps(
-		conn, defs, pendingVoteSteps(preSched), preSteps, preSched.holdTally, nowMS); err != nil {
-		return nil, err
-	}
-	if _, err := e.driveActionSteps(conn, preSteps, nowMS); err != nil {
+	// a step a route un-deferred is offered rather than missing.
+	//
+	// It is `step record`'s drive, run to quiescence, so an action whose
+	// routing readies another action or vote step drives that one too rather
+	// than leaving it as an undriven ready row. It covers every ready
+	// engine-run step, not only the `--limit` prefix: no dispatcher claims an
+	// engine-run step, so driving one costs the offer no slot. The drive owns
+	// its transactions and none is open yet, so the pool-of-one rule that
+	// forced `next`'s drives after its commit is satisfied by construction.
+	if err := e.DriveRunLifecycles(conn, runID, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -208,9 +243,13 @@ func (e *Engine) OpenDispatch(
 		return nil, err
 	}
 
-	// P5's reap, and with it §6.4's ack rows — the same helper `next` uses, so
-	// the two scheduling verbs cannot reap differently.
-	if _, err := reapExpiredTx(tx, sched, runID, nowMS); err != nil {
+	// P5's reap, and with it §6.4's ack rows — the same helper `next`,
+	// `dispatch open`, and `dispatch close` use, so the three scheduling
+	// verbs cannot reap differently. What it reaped rides
+	// out on the manifest (Manifest.Reaped): the acks above were applied
+	// before this reap, so nothing the caller passed can have covered it.
+	reaped, err := reapExpiredTx(tx, sched, runID, nowMS)
+	if err != nil {
 		return nil, err
 	}
 	if err := resolveQuorumMisses(tx, sched, nowMS); err != nil {
@@ -224,7 +263,7 @@ func (e *Engine) OpenDispatch(
 		return nil, err
 	}
 
-	rows, _, rowSteps, err := readyRows(sched, ttls, limit)
+	rows, total, rowSteps, err := readyRows(sched, ttls, limit)
 	// Read off the SAME snapshot the rows came from, so the manifest cannot
 	// name a hold that a different pass decided (DKT-242).
 	budgetHeld := sched.BudgetHoldReason()
@@ -311,9 +350,212 @@ func (e *Engine) OpenDispatch(
 	return &Manifest{
 		Dispatch: FormatDispatchID(dispatchID), Run: model.FormatRunID(runID),
 		OpenedSeq: openedSeq, ExpiresMS: expiresMS, Rows: rows,
+		Total:        total,
+		Truncated:    len(rows) < total,
+		Limits:       rowClassLimits(sched, rows),
 		StaleTargets: e.staleTargets(conn, runID, candidates),
 		BudgetHeld:   budgetHeld,
 		PinDrift:     pinDriftAdvisory(conn, runID),
+		Reaped:       reaped,
+		// The snapshot's open reaps include the ones this open just performed
+		// (reapOneTx reflects each into the hold), so the text names exactly
+		// what `guard spawn` will hold the next launch on.
+		ReapHold: ReapHoldReason(sched.UnacknowledgedReaps()),
+	}, nil
+}
+
+// Extension is `dispatch extend`'s answer: the open manifest's identity and the
+// rows this call APPENDED, never the whole grown list.
+//
+// The appended rows alone are what the caller can act on — they are the batch
+// `guard spawn --rows` will admit as a subset of the stored manifest — and a
+// response carrying the grown manifest would invite a relay to re-spawn rows it
+// already launched.
+type Extension struct {
+	Dispatch string `json:"dispatch"`
+	Run      string `json:"run"`
+	// ExtendedSeq is the event seq the appended rows were computed at — the
+	// same fact `opened_seq` records for the open, read before this call's own
+	// event so it names the log position rather than the append.
+	ExtendedSeq int64 `json:"extended_seq"`
+	// ExpiresMS is the manifest's expiry AFTER the extension, grown by the
+	// appended rows' own staged lease sum.
+	ExpiresMS int64           `json:"expires_ms"`
+	Rows      []model.StepRow `json:"rows"`
+	// Reaped names the step instances whose leases this extend reaped, the
+	// same channel OpenDispatch reports its own reaps on.
+	Reaped []string `json:"reaped,omitempty"`
+	// ReapHold is A11's guidance for the hold THIS EXTEND left behind, carried
+	// for OpenDispatch.ReapHold's reason: an extend runs the same shared reap,
+	// and reaping a BOUNDED class inserts an unacknowledged `reap_acks` row
+	// that denies the next `guard spawn --active`. A relay that extends and
+	// then launches the appended rows would meet that denial with no warning
+	// from the verb that created it, and the engine's own advice names
+	// `dispatch open --ack-reap` — a verb this relay cannot reach without the
+	// dispatch boundary the extend exists to avoid.
+	ReapHold string `json:"reap_hold,omitempty"`
+}
+
+// ExtendDispatch appends rows the engine minted or readied since the open to
+// the run's OPEN manifest (DKT-2071).
+//
+// It exists because the manifest is frozen at open and a fix round is minted at
+// the RECORD TIME of the step whose routing chose `fix-loop` — never at `next`
+// — so every loop round started in a later dispatch by construction, and a
+// relay paid a whole dispatch boundary (the remainder of its wave plus the
+// bookkeeping) for a row the engine had already readied. The same applies to a
+// held-cluster gate, an `on_fail` route, and the chain tail a `--limit` cut.
+//
+// ONE OPEN MANIFEST, STILL. This is an APPEND to the manifest the relay is
+// already reconciling, not a second dispatch: P24's refusal of `next` and the
+// single-open index are both untouched, so relay drift still stalls loudly. The
+// appended rows are byte-hashed with the same canonicalRowBytes the open used,
+// so `dispatch verify` and the spawn guard compare them exactly as they compare
+// an opened row.
+//
+// IT DRIVES VOTE AND ACTION LIFECYCLES to quiescence before computing its rows,
+// exactly as OpenDispatch does. `step record` and `step fail` drive them after
+// their own writes, but `step approve`, `step reject` and `step resolve` ready
+// work mid-wave without driving it. An undriven vote step appended here would carry
+// no proposal to cast on, and an undriven action step would ride the manifest
+// as a ready row no relay can execute.
+//
+// An EXPIRED manifest is refused rather than extended: extending one would push
+// a lapsed manifest's expiry back out and resurrect a batch the TTL had already
+// given up on, which is the wedge `dispatch abandon` exists to avoid.
+func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extension, error) {
+	defs, err := StepDefinitions(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+	ttls, err := loadTTLConfig(conn, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	// OpenDispatch's drive to quiescence, before its transaction for the same
+	// reasons.
+	if err := e.DriveRunLifecycles(conn, runID, nowMS); err != nil {
+		return nil, err
+	}
+
+	tx, err := conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("extending a dispatch: %w", err)
+	}
+	defer tx.Rollback()
+
+	open, err := db.OpenDispatchTx(tx, runID)
+	if err != nil {
+		return nil, noOpenDispatchErr(err, runID)
+	}
+	if open.Expired(nowMS) {
+		return nil, conflictErr(
+			"%s expired at %d and cannot be extended — close it, abandon it, or "+
+				"open a new manifest", FormatDispatchID(open.ID), open.ExpiresMS)
+	}
+
+	stored, err := db.ListDispatchRowsTx(tx, open.ID)
+	if err != nil {
+		return nil, err
+	}
+	onManifest := make(map[int]bool, len(stored))
+	nextPosition := 0
+	for _, row := range stored {
+		onManifest[row.StepID] = true
+		if row.Position >= nextPosition {
+			nextPosition = row.Position + 1
+		}
+	}
+
+	sched, err := LoadScheduler(tx, runID, defs, nowMS)
+	if err != nil {
+		return nil, err
+	}
+
+	// P5's reap, the shared one every scheduling verb runs: offering a row a
+	// reap would have freed makes the manifest wrong the moment it is written,
+	// and that is as true of an appended row as of an opened one.
+	reaped, err := reapExpiredTx(tx, sched, runID, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveQuorumMisses(tx, sched, nowMS); err != nil {
+		return nil, err
+	}
+
+	// UNLIMITED (limit 0): `--limit` is the OPEN's budget over a fresh batch.
+	// An extend offers what became ready since, and truncating it here would
+	// leave exactly the tail this verb exists to stop stranding.
+	rows, _, _, err := readyRows(sched, ttls, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	appended := make([]model.StepRow, 0, len(rows))
+	for _, row := range rows {
+		stepID, err := model.ParseStepID(row.Step)
+		if err != nil {
+			return nil, fmt.Errorf("rendering manifest row %s: %w", row.Instance, err)
+		}
+		if onManifest[stepID] {
+			continue
+		}
+		raw, sum, err := canonicalRowBytes(row)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.InsertDispatchRowTx(tx, open.ID, db.DispatchRow{
+			Position: nextPosition, StepID: stepID, Instance: row.Instance,
+			RowJSON: raw, RowSHA256: sum,
+		}); err != nil {
+			return nil, err
+		}
+		nextPosition++
+		appended = append(appended, row)
+	}
+
+	// The appended rows' OWN staged lease sum, added to the standing expiry:
+	// the manifest must outlive the work it now carries, and the rows already
+	// stored were budgeted for at open.
+	expiresMS := open.ExpiresMS + stagedLeaseSumMS(appended)
+
+	extendedSeq, err := lastEventSeqTx(tx)
+	if err != nil {
+		return nil, err
+	}
+
+	// The CAS runs on EVERY extend, including the one that appended nothing:
+	// `extended_seq` is the manifest's own record that it was extended and at
+	// what log position, and an empty extend is still an extend that a reader
+	// holding the dispatch row must be able to see. Only the expiry is
+	// conditional on the append, and it is conditional by arithmetic —
+	// stagedLeaseSumMS of no rows is zero.
+	moved, err := db.ExtendDispatchTx(tx, open.ID, expiresMS, extendedSeq)
+	if err != nil {
+		return nil, err
+	}
+	if !moved {
+		return nil, conflictErr(
+			"%s stopped being open while it was being extended",
+			FormatDispatchID(open.ID))
+	}
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventDispatchExtended, RunID: runID, AtMS: nowMS,
+		Data: fmt.Sprintf(`{"dispatch":%q,"rows":%d,"expires_ms":%d,"extended_seq":%d}`,
+			FormatDispatchID(open.ID), len(appended), expiresMS, extendedSeq),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("extending a dispatch: %w", err)
+	}
+
+	return &Extension{
+		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
+		ExtendedSeq: extendedSeq, ExpiresMS: expiresMS, Rows: appended,
+		Reaped: reaped, ReapHold: ReapHoldReason(sched.UnacknowledgedReaps()),
 	}, nil
 }
 
@@ -325,21 +567,20 @@ func (e *Engine) OpenDispatch(
 // deliberately absent (engine-run steps hold no leases; each verb's own
 // writing pass re-reaps).
 //
-// Both scheduling verbs project from the returned scheduler via readyRows, so
-// a re-derived snapshot cannot disagree with the shared tail about ordering,
-// truncation, or staging:
+// Its callers:
 //
 //   - NextSteps, after a driver routed something (DKT-55): the rows its first
 //     pass rendered describe the run from BEFORE the routing, and reloading
 //     rather than patching also catches the wider case a patch cannot — a
 //     routed step un-deferring a downstream dependency that would otherwise
 //     be missing from the response entirely until the caller polled again.
-//   - OpenDispatch, before its drives (DKT-105): the ready steps the vote and
-//     action drives act on — the same pipeline the manifest will run, one
-//     snapshot earlier. The scheduler itself matters because driveVoteSteps
-//     resolves materialized specs against its holdTally, and a second config
-//     read could hand the drive a different roster than the manifest's own
-//     snapshot would.
+//     It projects the reload through readyRows, so the re-derived rows cannot
+//     disagree with the shared tail about ordering, truncation, or staging.
+//   - DriveRunLifecycles, once per pass: each routing pass leaves the
+//     previous snapshot stale. The scheduler itself matters because
+//     driveVoteSteps resolves materialized specs against its holdTally, and a
+//     second config read could hand the drive a different roster than the
+//     snapshot's own ready set.
 func readySnapshot(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) (*Scheduler, error) {
@@ -433,9 +674,7 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 	entries := sched.lookaheadOffer(ready)
 
 	total := len(entries)
-	if limit > 0 && len(entries) > limit {
-		entries = entries[:limit]
-	}
+	entries = laneCompleteCut(entries, limit)
 
 	rows := make([]model.StepRow, 0, len(entries))
 	steps := make([]*db.Step, 0, len(entries))
@@ -446,6 +685,16 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 		}
 		row.Stage = e.stage
 		row.Conditional = e.conditional
+		// Phase C's recorded reason, plus the row's own scope globs: the two
+		// halves of what a reader needs to tell a serializing stage gap from a
+		// packing one, and to test a pair the offer never placed in one cohort.
+		// Both ride on the offer row rather than on stepRow, so every other
+		// rendering of a step's row keeps its bytes.
+		row.Bump = e.bump
+		if e.bump == model.BumpScope {
+			row.BumpIssue = model.FormatID(e.bumpIssue)
+		}
+		row.Scope = sched.foreignScope(e.step.IssueID)
 		if e.staged {
 			row.Status = db.StepStaged
 		}
@@ -454,13 +703,84 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 	}
 
 	// `steps` (the limited, index-aligned []*db.Step behind `rows`) travels
-	// back to the caller so the drive passes — `next`'s own, and `dispatch
-	// open`'s pre-drive readySnapshot — act on the SAME set this pipeline
-	// admitted (DKT-105). Callers that drive lifecycles must take the READY
-	// rows only (rows[i].Status == db.StepReady): a staged step's lifecycle
+	// back to the caller so `next`'s drive passes act on the SAME set this
+	// pipeline admitted (DKT-105). Callers that drive lifecycles must take the
+	// READY rows only (rows[i].Status == db.StepReady): a staged step's lifecycle
 	// belongs to the `step record` that readies it, not to the offer that
 	// previewed it.
 	return rows, total, steps, nil
+}
+
+// rowClassLimits is Manifest.Limits: the merged `[limits] max` for each class
+// the manifest's rows actually carry. A class with no declared max is omitted —
+// unbounded is what the absence of a `[limits]` entry means, and a zero would
+// read as "no concurrency at all".
+func rowClassLimits(sched *Scheduler, rows []model.StepRow) map[string]int {
+	out := make(map[string]int)
+	for _, r := range rows {
+		if r.Class == "" {
+			continue
+		}
+		if max := sched.Limit(r.Class).Max; max > 0 {
+			out[r.Class] = max
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// laneCompleteCut applies `--limit` by ISSUE rather than by row: it walks the
+// stage-major entries, admits an issue's whole in-offer closure the first time
+// one of its rows is reached, and stops before the issue whose closure would
+// carry the total past the limit. An issue is never split. When the first
+// issue's closure alone exceeds the limit it is admitted whole, because half a
+// chain is the shape this cut exists to prevent.
+//
+// The prefix cut it replaces never separated a row from an in-offer
+// predecessor, but it routinely separated a row from its own DEPENDENTS: the
+// stage-major order puts every issue's deepest stages last, so a cap kept each
+// issue's shallow rows and dropped its tail, and an issue's chain then spanned
+// three to five dispatches (RUN-95: 84% of chain rows ran in a later wave than
+// the one that readied them). Cutting whole lanes lets one wave run an issue
+// from implement to verify with no dispatch boundary inside it.
+//
+// Order is preserved: the result is a subsequence of the stage-major input, so
+// the runnable-prefix property still holds — the staged closure never crosses
+// issues (lookahead.go), so every survivor's predecessors survive with it.
+func laneCompleteCut(entries []offerEntry, limit int) []offerEntry {
+	if limit <= 0 || len(entries) <= limit {
+		return entries
+	}
+
+	closureSize := make(map[int]int, len(entries))
+	var order []int
+	for _, e := range entries {
+		issue := e.step.IssueID
+		if closureSize[issue] == 0 {
+			order = append(order, issue)
+		}
+		closureSize[issue]++
+	}
+
+	admitted := make(map[int]bool, len(order))
+	used := 0
+	for _, issue := range order {
+		if used > 0 && used+closureSize[issue] > limit {
+			break
+		}
+		admitted[issue] = true
+		used += closureSize[issue]
+	}
+
+	out := make([]offerEntry, 0, used)
+	for _, e := range entries {
+		if admitted[e.step.IssueID] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // readyOnly narrows readyRows' index-aligned steps to the rows rendered
@@ -737,6 +1057,22 @@ func (e *Engine) verifyDispatchTx(
 			continue
 		}
 		current, ok := computedByStep[want.StepID]
+		if !ok && preGateHeld(sched, want.StepID) {
+			// A HELD ROW IS NOT A MISSING ONE (gates-trust §7.6.2 PG6). The
+			// step is pending, its predecessors are done, and the one thing
+			// keeping it out of the recomputation is a detached pre-gate run
+			// still measuring its target — a hold that lifts on its own, with
+			// nothing recorded and nothing routed in between. A manifest that
+			// staged this step behind its predecessors (the implement →
+			// verify-ac lane, the common case) promised exactly what is
+			// happening: the wave's claim is deferred, not denied, so the row
+			// verifies as it would the moment the lock lifts. Without this
+			// clause nearly every such lane failed its verify, and the
+			// reconcile with it, the instant the child took the lock.
+			verdict.Verdict = RowMatched
+			result.Rows = append(result.Rows, verdict)
+			continue
+		}
 		if !ok {
 			verdict.Verdict = RowMissing
 			verdict.Stored = want.RowJSON
@@ -810,6 +1146,16 @@ func comparableVerifyBytes(stored, current model.StepRow) (string, string, error
 	// Conditional is Stage's sibling (DKT-26): a set-relative hint whose value
 	// legitimately changes as the hold-capable predecessor routes or retires.
 	stored.Conditional, current.Conditional = false, false
+	// Bump, BumpIssue and Scope are Stage's siblings for the same reason: a
+	// bump is a fact about which other rows shared a cohort at open, so a row
+	// whose cohort-mate has since recorded legitimately recomputes to `none`,
+	// and the issue scope the offer read moves with an authorized mid-run
+	// refresh. Reporting either as drift would call the batch working a
+	// conflict. The stored bytes keep the open-time answer; only this
+	// comparison looks past it.
+	stored.Bump, current.Bump = "", ""
+	stored.BumpIssue, current.BumpIssue = "", ""
+	stored.Scope, current.Scope = nil, nil
 	if stored.Status == db.StepStaged || current.Status == db.StepStaged {
 		stored.Status, current.Status = db.StepReady, db.StepReady
 		stored.Proposal, current.Proposal = "", ""
@@ -883,8 +1229,36 @@ func consumesIssueDiff(spec *workflow.Step) bool {
 // that is provably not an ancestor of the shared HEAD is stale — the
 // conductor integrated something other than the recorded commit, so a packet
 // rendered from it reviews a tree the branch no longer carries. An
-// unanswerable question (missing git, GC'd object, no ancestry seam) warns
-// about nothing: absence of evidence is not staleness.
+// unanswerable question (missing git, no ancestry seam) warns about nothing:
+// absence of evidence is not staleness.
+//
+// AN ABSENT OBJECT IS EVIDENCE, NOT ABSENCE OF IT (DKT-742). IsAncestorFn's
+// `known = false` covers both "git could not answer" and "the object is not
+// in the shared store at all", and skipping both silently was exactly
+// backwards for the second: a target that cannot even be resolved is the
+// WORST state a packet can render from, not the safest. RUN-52's DKT-V253
+// dispatched a three-seat vote whose packet named a sha `git cat-file -t`
+// found in no checkout — each seat discovered that independently, mid-wave,
+// with no warning having fired. So an unanswerable ancestry now asks the
+// narrower question the seats asked (ObjectExistsFn, `git cat-file -e
+// <sha>^{commit}`): a DEFINITIVE "no such object" warns with its own reason;
+// anything short of definitive stays silent exactly as before. The recorded
+// sha itself is never rewritten — the round record is the producer's frozen
+// evidence, and DKT-725/DKT-741 both settled that a recorded reference is
+// surfaced when it goes bad, not silently re-derived.
+//
+// AN ADJUDICATED WARNING DOES NOT RE-FIRE (DKT-742's companion half). An
+// operator who investigated a warning and ruled it acceptable records a
+// run-scoped waiver for the (step instance, target sha) pair — the
+// gate_override_grants shape (DKT-546) applied to this advisory — and rows
+// matching a waiver are dropped from the answer. The signature is the pair
+// alone: the same pair re-fires nothing however often HEAD moves, while a
+// different sha on the same row (RUN-52's DISPATCH-301, target rotated to
+// 7e072f54) or the same sha on an unnamed row is a fresh question and still
+// warns. The filter is READ-ONLY because this judge serves `dispatch verify`,
+// which writes nothing by contract; the audit trail is the waiver's own
+// `stale-target-waived` event at recording time. A waiver read that fails
+// leaves every warning standing — the safe direction for an advisory.
 //
 // ANCESTRY ALONE IS NOT THE TEST (DKT-424). The sanctioned integration flow
 // cherry-picks an isolated worktree's commit onto the shared branch, which
@@ -899,11 +1273,27 @@ func consumesIssueDiff(spec *workflow.Step) bool {
 // warned, and the conductor spent ~50s proving by hand what the probe now
 // establishes (DKT-451).
 //
-// The tree probe may only ACQUIT. Unanswerable (no TreeMatchFn wired, git
-// absent, unrelated histories with differing trees, an empty touched-path set
-// whose commits' root trees also differ) leaves DKT-193's verdict exactly as it
-// stood, and the reason then says the tree question went unanswered rather than
-// claiming a difference nothing measured.
+// THE PATCH IS THE THING MEASURED, NOT THE TIP (DKT-1033). A tree comparison
+// on a moving branch tip reads any later commit on the same paths as a
+// difference: RUN-67 warned "integration diverged" on all nine review rows of
+// a run whose three integrations were plain `git cherry-pick -x` — two into
+// non-overlapping regions of one Makefile, one followed by a conductor patch
+// to the same test file — with every hunk byte-identical on HEAD. So a
+// disproved ancestry now asks about the PATCH first: does HEAD's side of the
+// merge base carry a patch-id equivalent of each commit on the target's side
+// (PatchContainedFn — `git cherry`, refined by a zero-context patch-id
+// comparison)? The tree probe speaks after it, and only where the patch probe
+// did not already acquit.
+//
+// Both probes may only ACQUIT, and the reason names which one accused. Only a
+// patch probe that ran and found the patch missing may say "diverged", because
+// only it measured the work; a tree difference the patch probe could not check
+// is worded as content that could not be matched, which is all it measured;
+// and the unanswerable states (no probe wired, git absent, unrelated histories
+// with differing trees, an empty touched-path set whose commits' root trees
+// also differ) leave DKT-193's verdict exactly as it stood, with a reason that
+// says the question went unanswered rather than claiming a difference nothing
+// measured.
 //
 // THE REASON NAMES THE CLAIM-TIME SEMANTICS (DKT-415), because the decision the
 // warning exists to inform is "is dispatching through this safe". Claim
@@ -926,11 +1316,30 @@ func (e *Engine) staleTargets(
 	if sharedHead == "" {
 		return nil
 	}
+	// The run's standing waivers (DKT-742), loaded lazily: only a judge about
+	// to warn pays the read, and a failed read waives nothing.
+	var waivers []db.StaleTargetWaiver
+	waiversLoaded := false
+	waived := func(instance, sha string) bool {
+		if !waiversLoaded {
+			waivers, _ = db.StaleTargetWaiversForRun(conn, runID)
+			waiversLoaded = true
+		}
+		for _, w := range waivers {
+			if waiverCovers(w, instance, sha) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// One verdict per SHA, not per row: a review fanout's siblings all render
 	// from the same recorded target, and the git questions are identical.
 	type verdict struct {
-		ancestor, known      bool
-		treeMatch, treeKnown bool
+		ancestor, known       bool
+		contained, patchKnown bool
+		treeMatch, treeKnown  bool
+		absent                bool
 	}
 	cache := make(map[string]verdict, len(candidates))
 	var out []StaleTarget
@@ -938,59 +1347,164 @@ func (e *Engine) staleTargets(
 		v, seen := cache[c.sha]
 		if !seen {
 			v.ancestor, v.known = e.IsAncestorFn(execRoot, c.sha)
-			if v.known && !v.ancestor && e.TreeMatchFn != nil {
+			if v.known && !v.ancestor && e.PatchContainedFn != nil {
+				// DKT-1033: the patch question first — it is the one about
+				// the work rather than the tip.
+				v.contained, v.patchKnown = e.PatchContainedFn(execRoot, c.sha)
+			}
+			if v.known && !v.ancestor && !(v.patchKnown && v.contained) &&
+				e.TreeMatchFn != nil {
+				// The tree probe is acquittal-only, so it is worth asking
+				// wherever the patch probe did not already acquit: a squash
+				// that folded several issues into one commit carries this
+				// work's content on its paths without carrying its patch-id.
 				v.treeMatch, v.treeKnown = e.TreeMatchFn(execRoot, c.sha)
+			}
+			if !v.known && e.ObjectExistsFn != nil {
+				// DKT-742: the ancestry question was unanswerable — ask the
+				// narrower one a packet consumer will ask anyway. Only a
+				// definitive "no such object" accuses; every genuinely
+				// unanswerable state stays silent.
+				exists, existsKnown := e.ObjectExistsFn(execRoot, c.sha)
+				v.absent = existsKnown && !exists
 			}
 			cache[c.sha] = v
 		}
-		if !v.known || v.ancestor {
+		if v.known && v.ancestor {
 			continue
 		}
-		if v.treeKnown && v.treeMatch {
-			// DKT-424: the sha was rewritten (cherry-pick integration), the
-			// tree was not. The branch carries exactly what the packet
-			// renders on the paths this work touched — nothing to warn about.
+		if !v.known && !v.absent {
 			continue
+		}
+		if v.known && ((v.patchKnown && v.contained) || (v.treeKnown && v.treeMatch)) {
+			// DKT-424, DKT-1033: the sha was rewritten (cherry-pick
+			// integration), the work was not. The branch carries this
+			// target's patch, or exactly what the packet renders on the paths
+			// the work touched — nothing to warn about.
+			continue
+		}
+		if waived(c.instance, c.sha) {
+			// DKT-742: this exact (step, target) pair was adjudicated by an
+			// operator; the standing ruling is engine-visible now.
+			continue
+		}
+		evidence := staleUndetermined
+		switch {
+		case v.patchKnown:
+			evidence = stalePatchMissing
+		case v.treeKnown:
+			evidence = staleTreeUnmatched
+		}
+		reason := staleTargetReason(c.sha, sharedHead, evidence)
+		if v.absent {
+			reason = staleTargetAbsentReason(c.sha, sharedHead)
 		}
 		out = append(out, StaleTarget{
 			Instance: c.instance, Issue: c.issue,
 			TargetSHA: c.sha, SharedHead: sharedHead,
-			Reason: staleTargetReason(c.sha, sharedHead, v.treeKnown),
+			Reason: reason, Absent: v.absent,
 		})
 	}
 	return out
 }
 
-// staleTargetReason renders the advisory's sentence, in the two shapes the
-// evidence actually supports (DKT-424).
+// waiverCovers reports whether one waiver covers one would-be warning: the
+// SAME step instance, and a target sha the waiver's recorded sha is a
+// case-insensitive prefix of (>= 7 hex chars, enforced at the verb). Prefix
+// rather than equality because the advisory the operator copies the sha from
+// renders it at 12 characters; case-insensitive because git itself is.
+func waiverCovers(w db.StaleTargetWaiver, instance, sha string) bool {
+	return w.StepInstance == instance &&
+		strings.HasPrefix(strings.ToLower(sha), strings.ToLower(w.TargetSHA))
+}
+
+// staleEvidence names which probe produced the advisory's second half, so the
+// sentence claims exactly what was measured and no more (DKT-424, DKT-1033).
+type staleEvidence int
+
+const (
+	// staleUndetermined: neither the patch question nor the tree question
+	// could be answered. The ancestry fact stands alone.
+	staleUndetermined staleEvidence = iota
+	// staleTreeUnmatched: the patch question could not be asked; the tree
+	// probe ran and HEAD's content on the paths the work touched did not
+	// match the target's. A later commit on the same paths reads exactly this
+	// way, so it is not a divergence claim.
+	staleTreeUnmatched
+	// stalePatchMissing: the patch probe ran and no commit on HEAD's side of
+	// the merge base carries this work's patch. The one shape that measured
+	// the work itself, and the only one the advisory may call a divergence.
+	stalePatchMissing
+)
+
+// staleTargetReason renders the advisory's sentence, in the three shapes the
+// evidence actually supports (DKT-424, DKT-1033).
 //
-// `treeChecked` is the difference between "the branch's content differs from
-// the packet's, measured" and "the sha diverged and the content question could
-// not be asked". The conductor's next move differs between them — the first is
-// a divergence to look at, the second is a probe to repair or a tree to
-// hand-check — so the string may not blur the two.
-func staleTargetReason(sha, sharedHead string, treeChecked bool) string {
-	evidence := fmt.Sprintf(
+// The conductor's next move differs between them — a missing patch is a
+// divergence to look at, an unmatched tree is content to hand-check against
+// whatever landed on those paths since, an unanswered question is a probe to
+// repair — so the string may not blur them, and in particular may not say
+// "diverged" for anything but the patch measurement: RUN-67 read that word on
+// nine rows whose patches were all intact.
+func staleTargetReason(sha, sharedHead string, evidence staleEvidence) string {
+	sentence := fmt.Sprintf(
 		"the recorded target sha %.12s is not an ancestor of the shared "+
 			"checkout's HEAD %.12s", sha, sharedHead)
-	if treeChecked {
-		evidence += ", and its tree still differs from that HEAD on the paths " +
-			"the work touched — integration diverged from the recorded commit " +
-			"rather than merely rewriting its sha, so a packet rendered from it " +
-			"reviews a tree the branch no longer carries"
-	} else {
-		evidence += ", and whether HEAD still carries its tree could not be " +
-			"determined (git could not answer, or the two share no comparable " +
-			"history) — a cherry-picked integration mints a new sha for " +
-			"identical content, so confirm the tree before reading this as a " +
-			"divergence; if integration did diverge, a packet rendered from " +
-			"this sha reviews a tree the branch no longer carries"
+	switch evidence {
+	case stalePatchMissing:
+		sentence += ", and no commit on the shared branch since their merge " +
+			"base carries its patch (`git cherry` and a zero-context patch-id " +
+			"comparison both ran against HEAD) — integration diverged from the " +
+			"recorded commit rather than merely rewriting its sha, or never " +
+			"landed it, so a packet rendered from it reviews a change the " +
+			"branch does not carry"
+	case staleTreeUnmatched:
+		sentence += ", and whether HEAD carries its patch could not be tested " +
+			"(patch-id equivalence had nothing to compare), while HEAD's " +
+			"content could not be matched to its tree on the paths the work " +
+			"touched — a later commit on those same paths reads exactly this " +
+			"way, so this is not evidence that integration changed the work; " +
+			"confirm the content by hand before acting on this row"
+	default:
+		sentence += ", and whether HEAD still carries its patch or its tree " +
+			"could not be determined (git could not answer, or the two share " +
+			"no comparable history) — a cherry-picked integration mints a new " +
+			"sha for identical content, so confirm the content by hand before " +
+			"acting on this row; if integration never landed it, a packet " +
+			"rendered from this sha reviews a change the branch does not carry"
 	}
-	return evidence +
-		". A claim does not re-derive the target from HEAD: the packet renders " +
-		"from whichever recorded diff artifact resolves at claim time, so this " +
-		"row stays on this sha unless an upstream step records a newer diff for " +
-		"the issue first"
+	return sentence + staleTargetClaimSemantics
+}
+
+// staleTargetClaimSemantics is DKT-415's claim-time tail, shared by every
+// advisory shape: the decision the warning informs is "is dispatching through
+// this safe", and that turns on what a claim will actually render.
+const staleTargetClaimSemantics = ". A claim does not re-derive the target " +
+	"from HEAD: the packet renders from whichever recorded diff artifact " +
+	"resolves at claim time, so this row stays on this sha unless an upstream " +
+	"step records a newer diff for the issue first"
+
+// staleTargetAbsentReason renders DKT-742's advisory shape: the recorded
+// target does not resolve as a commit object from the shared checkout at all.
+//
+// It is a THIRD sentence rather than a variant of staleTargetReason's two,
+// because the conductor's next move differs again: a divergence is compared,
+// an unanswered tree is hand-checked, but an absent object can be NEITHER —
+// no seat can `git cat-file` or `git archive` this sha from the shared
+// checkout, so the packet's target is unusable as recorded and the work needs
+// its integrated successor (or the change-summary artifact) judged instead,
+// which is exactly the workaround RUN-52's three vote seats each re-derived
+// alone.
+func staleTargetAbsentReason(sha, sharedHead string) string {
+	return fmt.Sprintf(
+		"the recorded target sha %.12s does not resolve as a commit from the "+
+			"shared checkout at all (`git cat-file -e %.12s^{commit}` fails "+
+			"against HEAD %.12s's checkout) — the producing worktree's commit "+
+			"never reached the shared object store, or was pruned after "+
+			"integration removed its worktree and branch. No consumer can "+
+			"reconstruct this tree from the shared checkout; judge the step's "+
+			"integrated successor or its recorded change-summary instead",
+		sha, sha, sharedHead) + staleTargetClaimSemantics
 }
 
 // noOpenDispatchErr maps the storage sentinel onto the taxonomy once.
@@ -1013,8 +1527,8 @@ const (
 	// activity is older than `dispatch.grace`.
 	DiscrepancyClaimedUnrecorded DiscrepancyKind = "claimed-but-unrecorded"
 	// DiscrepancyMissingUsage is D2: a step that reached a terminal status after
-	// the run's activation with zero `usage_ledger` rows, IN A RUN THAT HAS EVER
-	// OPENED A DISPATCH.
+	// the run's activation, more than `dispatch.grace` ago (D7), with zero
+	// `usage_ledger` rows, IN A RUN THAT HAS EVER OPENED A DISPATCH.
 	DiscrepancyMissingUsage DiscrepancyKind = "usage-rows-missing"
 )
 
@@ -1042,6 +1556,22 @@ type Discrepancy struct {
 // a list that led with the acceptance flag would invite closing over work that
 // is still running.
 func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Discrepancy, error) {
+	return discrepanciesGracedTx(tx, sched, runID, nowMS, true)
+}
+
+// discrepanciesGracedTx is discrepanciesTx with D2's grace (D7) switchable.
+//
+// The probe `next`, `dispatch open` and a plain `dispatch close` run is the
+// GRACED one: a step recorded less than `dispatch.grace` ago is usage PENDING,
+// not missing. Two callers ask the UNGRACED question — everything still owing,
+// however young. `dispatch close --accept-missing-usage`, because an
+// acceptance that skipped the young steps would resurface them as a refusal
+// minutes after the operator settled the run; and the run report, because a
+// report exists to say what is owed now, and a run's last wave has no later
+// close at which the grace would lapse into a refusal.
+func discrepanciesGracedTx(
+	tx *sql.Tx, sched *Scheduler, runID int, nowMS int64, usageGrace bool,
+) ([]Discrepancy, error) {
 	grace, err := db.DispatchGraceTx(tx, sched.run.ProjectID)
 	if err != nil {
 		return nil, err
@@ -1052,9 +1582,33 @@ func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Di
 	// ---- D1: claimed but unrecorded past grace. ---------------------------
 	//
 	// The resolution is LEASE EXPIRY, verbatim from §2 ("lease expiry clears
-	// claimed-but-unrecorded"): the step's TTL lapses, `next` reaps it, and the
-	// discrepancy dissolves on its own. The message names the expiry TIME so an
-	// operator knows how long to wait rather than being told to wait.
+	// claimed-but-unrecorded"): the step's TTL lapses, the next scheduling verb
+	// reaps it, and the discrepancy dissolves on its own. The message names the
+	// expiry TIME so an operator knows how long to wait rather than being told
+	// to wait.
+	//
+	// THE ADVICE BRANCHES ON THE LEASE'S ACTUAL STATE, because the exits differ
+	// and only one set is ever right. Under a LIVE lease past the grace there is
+	// nothing to reap, so the operator waits, establishes the holder dead and
+	// runs `step reap`, or gives the manifest up with `dispatch abandon`. Under
+	// a LAPSED lease every one of those is wrong — waiting is a no-op, the reap
+	// an unnecessary escalation, the abandon destructive — and the correct act
+	// is the cheap one: run a scheduling verb and let it reap.
+	//
+	// The branch asks `Lease.Live`, which is the predicate `Scheduler.Expired`
+	// reaps on. Restating the comparison would let the advice and the reap drift
+	// apart at the boundary instant, promising a reap that would not happen.
+	//
+	// The branch is not vestigial: `next`, `dispatch open` and `dispatch close`
+	// each reap a lapsed lease before reaching this probe, so from them only the
+	// live branch can render. `guard record` (guard_dispatch.go, G13) and
+	// `run report` (report.go) do NOT reap — the guard surfaces this string
+	// verbatim as its denial reason, on exactly the lapsed lease default
+	// `lease.ttl.default` = `dispatch.grace` makes ordinary.
+	//
+	// The live branch does not name `next` as THE reaper either: `next` cannot
+	// be the way out of a D1 raised by a close, since it refuses P24 while that
+	// dispatch is open and rolls its own reap back with the refusal.
 	//
 	// D1 IS SCOPED TO AN ACTIVE RUN, for the same reason the reap it names is
 	// (Scheduler.Expired). This clause and that reap are one mechanism
@@ -1088,12 +1642,29 @@ func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Di
 		if nowMS-activity < grace.Milliseconds() {
 			continue
 		}
+		resolution := fmt.Sprintf(
+			"lease expiry clears it: the lease lapsed at %d and `next` reaps "+
+				"it before probing, which dissolves this discrepancy — "+
+				"`dispatch open` reaps it too but also opens a manifest, a "+
+				"side effect `next` does not have; if a usage-rows-missing "+
+				"discrepancy co-occurs on this run then `next` refuses as "+
+				"well, and `docket step reap %s --reason ...` is the verb "+
+				"that clears this one directly",
+			step.ExpiresMS, model.FormatStepID(step.ID))
+		if step.Lease().Live(nowMS) {
+			resolution = fmt.Sprintf(
+				"lease expiry clears it: the lease lapses at %d, and `next`, "+
+					"`dispatch open` and `dispatch close` each reap a lapsed lease "+
+					"before probing, so a lease one of them reports is still live — "+
+					"wait for it to lapse and re-run, or `docket step reap %s "+
+					"--reason ...` once the holder is established dead, or "+
+					"`dispatch abandon` to give the manifest up",
+				step.ExpiresMS, model.FormatStepID(step.ID))
+		}
 		out = append(out, Discrepancy{
 			Kind: DiscrepancyClaimedUnrecorded,
 			Step: model.FormatStepID(step.ID), Instance: step.Instance,
-			Resolution: fmt.Sprintf(
-				"lease expiry clears it: the lease lapses at %d, after which `next` "+
-					"reaps the step and the discrepancy dissolves", step.ExpiresMS),
+			Resolution: resolution,
 		})
 	}
 
@@ -1122,8 +1693,36 @@ func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Di
 		activatedMS = *a
 	}
 
+	// D7: USAGE PENDING. The relay measures a wave's spend from agent
+	// transcripts after the wave returns, and a probe that refused the
+	// instant a step recorded put that join ahead of every close — on
+	// RUN-90, 21 joins of about 2.5 minutes each, serial with the close.
+	// Within the window the relay back-fills beside the close instead of
+	// ahead of it; past it, an unbilled step is unreconciled exactly as
+	// before, and the same `dispatch.grace` that judges a silent claim
+	// judges a silent record.
+	//
+	// THE CLOCK IS THE WAVE'S LAST RECORD, NOT EACH STEP'S OWN. The join
+	// cannot start before the wave returns, and a wave returns when its LAST
+	// step records — so a step that recorded early in a long wave was never
+	// late to bill; it was waiting on the same return every other step was.
+	// Measured per step, every wave longer than the grace refused its close on
+	// the early steps no matter when it returned (RUN-95: an 89-minute and a
+	// 287-minute wave, 86 refusals on the second, the join forced onto the
+	// close's critical path both times), and the only exits were to raise the
+	// grace — which is also D1's silent-claim window — or to accept the usage
+	// as missing minutes before it landed. So the grace is measured from the
+	// newest record among the run's terminal executor steps, billed or not:
+	// ranging over the unbilled alone would move the clock BACKWARD as each
+	// back-fill landed and flip the rest to missing mid-join. D1 keeps its
+	// per-step measurement; a silent claim is one step's own silence.
+	waveEndMS := latestExecutorRecordMS(sched, activatedMS)
+
 	for _, step := range sched.Steps() {
 		if !missingUsage(step, activatedMS) {
+			continue
+		}
+		if usageGrace && nowMS-waveEndMS < grace.Milliseconds() {
 			continue
 		}
 		out = append(out, Discrepancy{
@@ -1145,6 +1744,36 @@ func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Di
 		return out[i].Instance < out[j].Instance
 	})
 	return out, nil
+}
+
+// latestExecutorRecordMS is D7's clock: the newest `recorded_at_ms` among the
+// run's terminal executor steps that a worker held and that recorded after
+// activation — the population missingUsage judges, whether or not each has
+// billed. It is the instant the run's most recent wave returned, as far as the
+// rows can tell, and 0 when no such step exists (D7 then defers nothing,
+// because there is nothing to defer).
+//
+// It reads `recorded_at_ms` rather than `updated_at_ms` because later row
+// writes (an annotation, a loop-history or budget write) bump `updated_at_ms`
+// without recording anything, and each such bump would restart the grace.
+func latestExecutorRecordMS(sched *Scheduler, activatedMS int64) int64 {
+	var latest int64
+	for _, step := range sched.Steps() {
+		if !db.StepTerminal(step.Status) || step.Attempt == 0 {
+			continue
+		}
+		switch step.Kind {
+		case workflow.ClassAction, workflow.TypeHuman, workflow.TypeVote:
+			continue
+		}
+		if activatedMS == 0 || step.RecordedAtMS < activatedMS {
+			continue
+		}
+		if step.RecordedAtMS > latest {
+			latest = step.RecordedAtMS
+		}
+	}
+	return latest
 }
 
 // missingUsage is D2's predicate over one step, with D3, D4, and D5 each as a
@@ -1253,7 +1882,24 @@ type CloseOutcome struct {
 	// stderr carried would be gone by the time anyone audited. It names ids
 	// because instances repeat across issues (DKT-315).
 	Accepted []string `json:"accepted,omitempty"`
+	// Integration is DKT-1284's verdict: every write-class step's recorded
+	// commit was found integrated into the shared branch ("verified", with
+	// the checked shas), or the operator named a reason to skip asking
+	// ("skipped"). It is never nil — a close that reached this far always
+	// ran one of the two.
+	Integration *IntegrationCheck `json:"integration,omitempty"`
 }
+
+// IntegrationSkip is `dispatch close --skip-integration-check`. The zero value
+// runs the integration check. A non-empty Reason skips it, and Token is the
+// run's conductor capability that authorizes the skip on a bound run.
+type IntegrationSkip struct {
+	Reason string
+	Token  string
+}
+
+// skipIntegrationVerb names the override in a conductor refusal.
+const skipIntegrationVerb = "dispatch close --skip-integration-check"
 
 // CloseDispatch is P18, P19, P20, and P22.
 //
@@ -1276,12 +1922,84 @@ type CloseOutcome struct {
 // the same event against the run, and reports what it accepted. Without the
 // flag the refusal is unchanged: closing a manifest that is not open is still
 // a conflict, because there is nothing to close.
+//
+// DKT-1284: BEFORE ANY OF THAT, it verifies every write-class step's own
+// recorded commit reached the shared branch (dispatch_integration.go) —
+// ancestor first, patch-equivalent (`git cherry`) when a cherry-pick minted a
+// new sha for identical content, refusing CONFLICT with the unintegrated list
+// otherwise. skip.Reason, when non-empty, is the operator's override: the
+// check does not run at all, and the reason rides on the close event instead
+// (§3.6's "record the override, don't silently honor it" pattern this
+// codebase already applies to trust changes). Every later close of the run
+// honors that record, so on a bound run the override requires the run's
+// conductor capability in skip.Token; a close without it requires none.
+//
+// DKT-2758: every CONFLICT it returns is recorded as one
+// `dispatch-close-refused` event, in its own transaction that commits although
+// the close did not, naming the dispatch when one was open.
 func (e *Engine) CloseDispatch(
-	conn *sql.DB, runID int, acceptMissingUsage bool, nowMS int64,
+	conn *sql.DB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 ) (*CloseOutcome, error) {
+	openID := 0
+	outcome, err := e.closeDispatch(conn, runID, acceptMissingUsage, skip, nowMS, &openID)
+	if code, ok := CodeOf(err); ok && code == CodeConflict {
+		if recErr := recordCloseRefused(conn, runID, openID, err.Error(), nowMS); recErr != nil {
+			return nil, recErr
+		}
+	}
+	return outcome, err
+}
+
+// recordCloseRefused writes the `dispatch-close-refused` event (DKT-2758).
+func recordCloseRefused(conn *sql.DB, runID, dispatchID int, reason string, nowMS int64) error {
+	fields := map[string]any{"reason": reason}
+	if dispatchID > 0 {
+		fields["dispatch"] = FormatDispatchID(dispatchID)
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Errorf("recording the refused close: %w", err)
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		return fmt.Errorf("recording the refused close: %w", err)
+	}
+	defer tx.Rollback()
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventDispatchCloseRefused, RunID: runID, Data: string(data), AtMS: nowMS,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// closeDispatch is CloseDispatch's body. openID receives the open dispatch's
+// id as soon as one is read, so a refusal can name it.
+func (e *Engine) closeDispatch(
+	conn *sql.DB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
+	openID *int,
+) (*CloseOutcome, error) {
+	if id, ok := openDispatchID(conn, runID); ok {
+		*openID = id
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
+	}
+
+	// The wave is over: any scratch tree still registered with no live claim
+	// behind it is a leak, and this is the other safe point that reclaims it.
+	sweepStalePreGateScratch(runExecRoot(conn, runID))
+
+	integration, unintegrated, err := e.integrationVerdict(conn, runID, defs, skip.Reason, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	if len(unintegrated) > 0 {
+		return nil, conflictErr(
+			"%s cannot close: %d write-class step commit(s) are not integrated "+
+				"into the shared branch: %s",
+			model.FormatRunID(runID), len(unintegrated), UnintegratedReason(unintegrated))
 	}
 
 	tx, err := conn.Begin()
@@ -1289,6 +2007,12 @@ func (e *Engine) CloseDispatch(
 		return nil, fmt.Errorf("closing a dispatch: %w", err)
 	}
 	defer tx.Rollback()
+
+	if skip.Reason != "" {
+		if err := authorizeConductorTx(tx, runID, skip.Token, skipIntegrationVerb); err != nil {
+			return nil, err
+		}
+	}
 
 	open, err := db.OpenDispatchTx(tx, runID)
 	noOpen := err != nil && strings.Contains(err.Error(), db.ErrNoOpenDispatch.Error())
@@ -1305,7 +2029,34 @@ func (e *Engine) CloseDispatch(
 	if err != nil {
 		return nil, err
 	}
-	found, err := discrepanciesTx(tx, sched, runID, nowMS)
+
+	// P5's reap, before the probe, for the reason `next` and `dispatch open`
+	// run it there: the reap is what clears D1, and a close that probed first
+	// would report a lapsed lease as a discrepancy whose only stated resolution
+	// this very close performs.
+	//
+	// THIS IS A SPEC READING AND IT IS RECORDED AS ONE. engine-spec §6 confines
+	// lazy reaping to `next`/`claim`, and §5.2 P5 already extends it to
+	// `dispatch open`. `dispatch close` is read here as the same kind of verb:
+	// a MUTATING scheduling verb reconciling the same manifest against the same
+	// rows, not a read. The alternative reading — close probes stored status
+	// without reaping — makes D1 unresolvable in the state close exists for: on
+	// RUN-91 ten steps sat stored `claimed` with lapsed leases and zero
+	// `lease-reaped` events, because `next` reaps and then refuses P24 on the
+	// open dispatch, and that refusal rolls its own reap back (next.go).
+	//
+	// It is the SHARED helper, not a second loop, so a close cannot reap
+	// differently from the verbs that follow it: same lease reset, same
+	// `reaped_claims` bump, same `lease-reaped` event, same `reap_acks` hold
+	// for a bounded class.
+	if _, err := reapExpiredTx(tx, sched, runID, nowMS); err != nil {
+		return nil, err
+	}
+
+	// The acceptance asks UNGRACED (D7): the flag settles every step still
+	// owing usage, the freshly recorded ones included, so the run does not
+	// resurface them as a refusal once their grace lapses.
+	found, err := discrepanciesGracedTx(tx, sched, runID, nowMS, !acceptMissingUsage)
 	if err != nil {
 		return nil, err
 	}
@@ -1351,7 +2102,7 @@ func (e *Engine) CloseDispatch(
 					"accept", model.FormatRunID(runID))
 		}
 		data, err := json.Marshal(map[string]any{
-			"accepted": instances, "reason": reason,
+			"accepted": instances, "reason": reason, "integration": integration,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("recording the acceptance: %w", err)
@@ -1366,15 +2117,25 @@ func (e *Engine) CloseDispatch(
 		}
 		return &CloseOutcome{
 			Run: model.FormatRunID(runID), Status: db.DispatchClosed,
-			Reason: reason, Accepted: instances,
+			Reason: reason, Accepted: instances, Integration: integration,
 		}, nil
 	}
 
 	// P19: the accepted step list rides in the EVENT's data, which is what
 	// "records the acceptance" means. An acceptance visible only in a terminal
-	// scrollback is not a record.
+	// scrollback is not a record. AC3: `integration` rides beside it — verified
+	// with its checked shas, or skipped with the operator's reason.
+	// DKT-3286: the reaps this wave's own holders left, acknowledged by the
+	// close that proves the wave is over. In the close's transaction, so a
+	// lost race rolls the acknowledgments back with it.
+	if err := ackSameDispatchReapsTx(tx, runID, open, nowMS); err != nil {
+		return nil, err
+	}
+	if e.beforeCloseCAS != nil {
+		e.beforeCloseCAS(tx, open.ID)
+	}
 	moved, err := closeDispatchTx(tx, open.ID, runID, db.DispatchClosed, reason,
-		EventDispatchClosed, map[string]any{"accepted": instances},
+		EventDispatchClosed, map[string]any{"accepted": instances, "integration": integration},
 		"recording the close", nowMS)
 	if err != nil {
 		return nil, err
@@ -1392,6 +2153,7 @@ func (e *Engine) CloseDispatch(
 	return &CloseOutcome{
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
 		Status: db.DispatchClosed, Reason: reason, Accepted: instances,
+		Integration: integration,
 	}, nil
 }
 
@@ -1440,14 +2202,24 @@ func settleAcceptedTx(tx *sql.Tx, accepted []Discrepancy) ([]string, error) {
 // resolve anything. A version that checked discrepancies first would be a
 // recovery verb that refuses to recover, which is how a crashed relay wedges a
 // run — the exact failure §2's recovery design exists to make impossible.
-func (e *Engine) AbandonDispatch(
-	conn *sql.DB, runID int, reason string, nowMS int64,
+//
+// It requires the run's conductor capability: retiring the live manifest is
+// the conductor's decision, and an executor sharing the checkout must not be
+// able to pull a batch out from under it. The TTL abandon `next` performs
+// stays token-free, because there the engine, not the caller, decides.
+func (e *Engine) AbandonDispatchWith(
+	conn *sql.DB, runID int, opts AbandonDispatchOptions,
 ) (*CloseOutcome, error) {
+	reason, nowMS := opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("abandoning a dispatch: %w", err)
 	}
 	defer tx.Rollback()
+
+	if err := authorizeConductorTx(tx, runID, opts.Token, "dispatch abandon"); err != nil {
+		return nil, err
+	}
 
 	open, err := db.OpenDispatchTx(tx, runID)
 	if err != nil {
@@ -1479,6 +2251,24 @@ func (e *Engine) AbandonDispatch(
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
 		Status: db.DispatchAbandoned, Reason: db.CloseReasonOperator,
 	}, nil
+}
+
+// AbandonDispatchOptions carries `dispatch abandon`'s inputs. Token is the
+// run's conductor capability, required once the run is bound.
+type AbandonDispatchOptions struct {
+	Reason string
+	Token  string
+	NowMS  int64
+}
+
+// AbandonDispatch is AbandonDispatchWith presenting no capability, so it
+// refuses on a bound run and succeeds only on an unbound one. It remains for
+// the CLI caller until that caller reads the token and moves to the `With`
+// form.
+func (e *Engine) AbandonDispatch(
+	conn *sql.DB, runID int, reason string, nowMS int64,
+) (*CloseOutcome, error) {
+	return e.AbandonDispatchWith(conn, runID, AbandonDispatchOptions{Reason: reason, NowMS: nowMS})
 }
 
 // ---- `next`'s lazy abandon and its refusal (§5.5, §5.7) --------------------
@@ -1643,4 +2433,19 @@ func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
 	return conflictErr(
 		"%s is no longer open: it is %s (%s) — another invocation closed it first",
 		FormatDispatchID(dispatchID), current.Status, current.CloseReason)
+}
+
+// openDispatchID reads the run's open dispatch id, if any, in a rolled-back
+// transaction of its own.
+func openDispatchID(conn *sql.DB, runID int) (int, bool) {
+	tx, err := conn.Begin()
+	if err != nil {
+		return 0, false
+	}
+	defer tx.Rollback()
+	open, err := db.OpenDispatchTx(tx, runID)
+	if err != nil {
+		return 0, false
+	}
+	return open.ID, true
 }

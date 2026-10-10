@@ -1,6 +1,11 @@
 package trust
 
-import "fmt"
+import (
+	"fmt"
+	"path/filepath"
+
+	"github.com/ALT-F4-LLC/docket/internal/exec"
+)
 
 // Match is the result of a trust lookup (§7.2).
 //
@@ -31,21 +36,63 @@ type Match struct {
 	// fence line needs an issue-body edit. Without a reason all four render
 	// identically and the operator is left hunting.
 	Reason string
+	// Warning accompanies a match the operator should still act on: an entry
+	// with an absolute argv[0] but no content pin, which predates pinning and
+	// executes whatever bytes the file holds now. Empty otherwise.
+	Warning string
 }
 
 // Lookup matches a candidate argv for a gate name against an immutable store
-// snapshot, in the current repo (§7.2 M1–M6).
+// snapshot, in the current repo (§7.2 M1–M6), then holds the selected entry to
+// its content pin (§3.1 argv0_sha256).
 //
-// Purity is the point: (snapshot, repo identity, gate name, candidate argv) →
-// (matched entry | unmatched reason), with no I/O. The store was read ONCE into
-// the snapshot at the start of the gate stage, so there is no second read to
-// race.
+// The argv half is pure: (snapshot, repo identity, gate name, candidate argv)
+// → (matched entry | unmatched reason). The store was read ONCE into the
+// snapshot at the start of the gate stage, so there is no second read of it to
+// race. The pin half is the one read Lookup makes: it hashes the file a pinned
+// absolute argv[0] resolves to, at every lookup, because a pin checked once at
+// load would let the file change for the rest of the stage.
 //
 // candidateArgv is nil for a NAMED gate — the entry's own argv is the command,
 // so the match is by name and binding. It is the tokenized fence line for a
 // FENCE gate, which must additionally hash-equal the entry (or be element-wise
 // prefixed by it, when and only when the entry opted in).
 func (s *Store) Lookup(repoIdentity, gate string, candidateArgv []string) Match {
+	m := s.matchArgv(repoIdentity, gate, candidateArgv)
+	if !m.Matched {
+		return m
+	}
+	return checkContentPin(gate, m)
+}
+
+// checkContentPin applies §3.1's pin table to a match the argv rules already
+// made. It runs once on the selected entry rather than inside each branch, so
+// a named gate, an exact fence line, and a prefix fence line are held to the
+// same file: all three execute the entry's argv[0].
+func checkContentPin(gate string, m Match) Match {
+	argv0 := m.Entry.Argv[0]
+	if !filepath.IsAbs(argv0) {
+		return m
+	}
+	repin := fmt.Sprintf("re-run `docket trust add %s -- %s` with the entry's existing flags", gate, exec.RenderArgv(m.Entry.Argv))
+
+	if m.Entry.Argv0SHA256 == "" {
+		m.Warning = fmt.Sprintf("gate %q: the trust entry for %s has no content pin, so whatever that file holds now runs; to pin it, %s", gate, argv0, repin)
+		return m
+	}
+
+	resolved, current, err := argv0ContentSHA256(argv0)
+	if err != nil {
+		return Match{Reason: fmt.Sprintf("gate %q: cannot verify the content pin of %s: %v", gate, argv0, err)}
+	}
+	if current != m.Entry.Argv0SHA256 {
+		return Match{Reason: fmt.Sprintf("gate %q: %s changed since it was trusted (pinned argv0_sha256 %s, now %s); if the change is intended, %s", gate, resolved, m.Entry.Argv0SHA256, current, repin)}
+	}
+	return m
+}
+
+// matchArgv is Lookup's argv half: M1–M6 over the snapshot, with no I/O.
+func (s *Store) matchArgv(repoIdentity, gate string, candidateArgv []string) Match {
 	if s == nil {
 		return Match{Reason: unmatchedNoEntry(gate)}
 	}

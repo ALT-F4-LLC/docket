@@ -36,9 +36,10 @@ the log's growth, and it refuses more than it accepts:
     deleted. A live run's events are what the engine computes from — its budget
     floor is summed from its claim events, and its saga resumes from its gate
     events — so pruning them would change the run rather than only its record.
-  - Events younger than ` + "`docket config events.retain`" + ` are never deleted. That
-    window defaults to 0, which retains EVERYTHING: prune deletes nothing at all
-    until a retention policy is set.
+  - Without ` + "`--before-run`" + `, events younger than ` + "`docket config events.retain`" + `
+    are never deleted; ` + "`--before-run`" + ` is not held by that window. The window
+    defaults to 0, which imposes no retention window: a prune at 0 is bounded
+    only by ` + "`--before`" + ` or ` + "`--before-run`" + ` and by the live-run refusal above.
 
 Pruning breaks the audit trail that ` + "`docket run report`" + ` reports over. Prune
 whole runs that have finished rather than the oldest events across all of them,

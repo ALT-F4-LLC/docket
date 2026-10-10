@@ -25,6 +25,7 @@
   ],
   "step": {
     "attempt": 0,
+    "blocked_reason": "an `after` predecessor is not done",
     "class": "commit-author",
     "executor": "commit-author",
     "expected_cost": 0.1,

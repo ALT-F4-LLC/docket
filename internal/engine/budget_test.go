@@ -196,6 +196,73 @@ func TestFloorIgnoresUnclaimedSteps(t *testing.T) {
 	}
 }
 
+// threePanelSrc declares three vote steps with distinct costs, so a floor that
+// counts any subset of them is distinguishable from every other subset.
+const threePanelSrc = `
+[pipeline]
+name = "three-panels"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+executor = "worker"
+emits = "diff"
+expected_cost = 1.0
+
+[[step]]
+name = "panel-skipped"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 2.0
+on_fail = "waiting-human"
+
+[[step]]
+name = "panel-superseded"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 4.0
+on_fail = "waiting-human"
+
+[[step]]
+name = "panel-pending"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 8.0
+on_fail = "waiting-human"
+`
+
+// TestFloorIgnoresSkippedAndSupersededVoteRows is B11 for vote steps: a vote
+// row accrues at materialization, but a skipped or superseded panel is never
+// routed, so it contributes nothing.
+func TestFloorIgnoresSkippedAndSupersededVoteRows(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(threePanelSrc), "three-panels.toml")
+	issue := createIssue(t, conn, "three panels", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'panel-skipped@0'`,
+		db.StepSkipped)
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'panel-superseded@0'`,
+		db.StepSuperseded)
+
+	want := expectedCostOf(t, conn, "panel-pending@0")
+	if got := runFloor(t, conn, run.ID); got != want {
+		t.Errorf("floor = %g, want %g (only the pending panel accrues; the "+
+			"skipped 2.0 and superseded 4.0 panels must not)", got, want)
+	}
+}
+
 // TestFloorBoundedByMaxFixLoops is B10 at the fixture's `max_fix_loops = 2`: the
 // floor cannot exceed the arithmetic bound, ever.
 //
@@ -519,13 +586,19 @@ func TestBreachPausesTheRunWithAReason(t *testing.T) {
 	}
 
 	// B23: `run-paused`, with the reason in `data`. The kind is the existing
-	// one, so §9 item 2's closed set is unchanged.
-	kind, data := lastRunEvent(t, conn, runID)
-	if kind != EventRunPaused {
-		t.Errorf("the breach wrote a %q event, want %q — a new kind would widen "+
+	// one, so §9 item 2's closed set is unchanged. The refused claim's own
+	// `claim-refused` (DKT-2776) follows it; that records the claim, not the
+	// pause, so the pause is read by kind rather than as the last event.
+	if n := countRunEvents(t, conn, runID, EventRunPaused); n != 1 {
+		t.Errorf("the breach wrote %d %q events, want 1 — a new kind would widen "+
 			"the closed set for a transition that is already a pause",
-			kind, EventRunPaused)
+			n, EventRunPaused)
 	}
+	var data string
+	err = conn.QueryRow(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`,
+		runID, EventRunPaused).Scan(&data)
+	testsupport.Must(t, err, "reading the pause event: %v", err)
 	if !strings.Contains(data, `"reason":"budget"`) {
 		t.Errorf("the pause event's data is %q, want it to carry reason=budget", data)
 	}
@@ -1011,16 +1084,6 @@ func runSteps(t *testing.T, conn *sql.DB, runID int) []*db.Step {
 	steps, err := db.ListRunStepsTx(tx, runID)
 	testsupport.Must(t, err, "ListRunStepsTx: %v", err)
 	return steps
-}
-
-// lastRunEvent returns the kind and data of a run's most recent event.
-func lastRunEvent(t *testing.T, conn *sql.DB, runID int) (kind, data string) {
-	t.Helper()
-	err := conn.QueryRow(
-		`SELECT kind, data FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1`,
-		runID).Scan(&kind, &data)
-	testsupport.Must(t, err, "reading the last event of %s: %v", model.FormatRunID(runID), err)
-	return kind, data
 }
 
 // countRunEvents counts a run's events of one kind.

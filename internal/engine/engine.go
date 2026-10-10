@@ -34,6 +34,12 @@ const (
 	// at this stage — nothing prunes until S7 — and the SHAPE ships here because
 	// `--since` is the verb that must return it.
 	CodeGone ErrorCode = "GONE"
+	// CodeAuth is AUTH_ERROR (exit 5): a caller presenting a token that is not
+	// the run's conductor capability on one of the operator verbs (DKT-2465).
+	// The same code the lease refusals use for "you do not hold this", and
+	// for the same reason: the answer to a caller with no capability never
+	// says more than that.
+	CodeAuth ErrorCode = "AUTH_ERROR"
 )
 
 // Error is an activation failure carrying its taxonomy code.

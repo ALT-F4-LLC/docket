@@ -1,8 +1,12 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,7 +176,7 @@ func TestPacketIncludesAreOneLevelDeep(t *testing.T) {
 		"---\npacket_includes:\n  - fragments/deeper.md\n---\nMIDDLE\n")
 	writeFixture(t, root, "fragments/deeper.md", "DEEPEST\n")
 
-	files, err := resolvePacketFiles(testPinSet(t, root,
+	files, err := resolvePacketFiles("RUN-1", testPinSet(t, root,
 		"checklists/proofing.md", "fragments/house-style.md", "fragments/deeper.md"),
 		[]string{root}, []string{"checklists/proofing.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
@@ -198,7 +202,7 @@ func TestPacketIncludesDedupe(t *testing.T) {
 		"---\npacket_includes:\n  - fragments/shared.md\n---\nB\n")
 	writeFixture(t, root, "fragments/shared.md", "SHARED\n")
 
-	files, err := resolvePacketFiles(testPinSet(t, root,
+	files, err := resolvePacketFiles("RUN-1", testPinSet(t, root,
 		"checklists/a.md", "checklists/b.md", "fragments/shared.md"),
 		[]string{root}, []string{"checklists/a.md", "checklists/b.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
@@ -234,7 +238,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 		root := t.TempDir()
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 		files, err := resolvePacketFiles(
-			testPinSet(t, root, "checklists/a.md"), []string{root}, []string{"checklists/a.md"})
+			"RUN-1", testPinSet(t, root, "checklists/a.md"),
+			[]string{root}, []string{"checklists/a.md"})
 		testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 		if len(files) != 1 || strings.TrimSpace(files[0].Body) != "BODY" {
 			t.Errorf("files = %+v, want the file's bytes inlined", files)
@@ -252,7 +257,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 
 		writeFixture(t, root, "checklists/a.md", "EDITED\n")
 
-		_, err := resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		_, err := resolvePacketFiles(
+			"RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("an edited file resolved, want CONFLICT")
 		}
@@ -271,7 +277,7 @@ func TestPacketResolutionLadder(t *testing.T) {
 		err := os.Remove(filepath.Join(root, "checklists/a.md"))
 		testsupport.Must(t, err, "removing the fixture: %v", err)
 
-		_, err = resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		_, err = resolvePacketFiles("RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		if code, _ := CodeOf(err); code != CodeNotFound {
 			t.Errorf("code = %q (err %v), want %q", code, err, CodeNotFound)
 		}
@@ -281,7 +287,9 @@ func TestPacketResolutionLadder(t *testing.T) {
 		root := t.TempDir()
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 
-		_, err := resolvePacketFiles(map[string]string{}, []string{root}, []string{"checklists/a.md"})
+		_, err := resolvePacketFiles(
+			"RUN-1", map[string]string{}, []string{root},
+			[]string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("an unpinned file was read, want a refusal")
 		}
@@ -296,7 +304,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 			"---\npacket_includes:\n  - fragments/missing.md\n---\nA\n")
 
 		_, err := resolvePacketFiles(
-			testPinSet(t, root, "checklists/a.md"), []string{root}, []string{"checklists/a.md"})
+			"RUN-1", testPinSet(t, root, "checklists/a.md"),
+			[]string{root}, []string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("a dangling include was skipped — that is DKT-70's failure signature")
 		}
@@ -316,7 +325,8 @@ func TestPacketResolutionIsDeterministic(t *testing.T) {
 
 	var first string
 	for i := 0; i < 16; i++ {
-		files, err := resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		files, err := resolvePacketFiles(
+			"RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 		var b strings.Builder
 		for _, f := range files {
@@ -407,5 +417,81 @@ func TestRenderStepAsNamesTheResolvedExecutor(t *testing.T) {
 	testsupport.Must(t, err, "RenderStepAs(\"\"): %v", err)
 	if same.Packet != plain.Packet {
 		t.Error("RenderStepAs with no override differs from RenderStep")
+	}
+}
+
+// attachedStep activates an `issue.files` run whose exec root is root, with
+// paths attached to its issue, and returns the store, the step, and a spec
+// declaring the form.
+func attachedStep(
+	t *testing.T, root string, paths []string,
+) (*sql.DB, *db.Step, *workflow.Step) {
+	t.Helper()
+	conn := mustDB(t)
+	activateIssueFilesRun(t, conn, root, paths)
+	step, err := db.GetStep(conn, stepIDByInstance(t, conn, "transcribe@0"))
+	testsupport.Must(t, err, "GetStep: %v", err)
+	return conn, step, &workflow.Step{Inputs: []string{workflow.InputIssueFiles}}
+}
+
+// TestIssueAttachmentFilesRefusesAnEscapingPath: an attachment that is
+// absolute, starts with `~`, or has a `..` segment is refused before any read,
+// so a row naming a host file outside the run's checkout cannot inline it.
+// The escape target exists, so an unguarded read of the `..` rows succeeds.
+func TestIssueAttachmentFilesRefusesAnEscapingPath(t *testing.T) {
+	for _, path := range []string{
+		"../escape.txt",
+		"docs/../../escape.txt",
+		"/etc/passwd",
+		"~/escape.txt",
+	} {
+		t.Run(path, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "root")
+			writeFixture(t, base, "escape.txt", "ESCAPED host bytes\n")
+			conn, step, spec := attachedStep(t, root, []string{path})
+
+			out, err := issueAttachmentFiles(conn, step, spec)
+			if err == nil {
+				t.Fatalf("issueAttachmentFiles accepted %q; got %+v", path, out)
+			}
+			if code, ok := CodeOf(err); !ok || code != CodeValidation {
+				t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, path) {
+				t.Errorf("refusal does not name %q:\n  %s", path, msg)
+			}
+			if !strings.Contains(msg, "not a relative path inside") &&
+				!strings.Contains(msg, "escapes") {
+				t.Errorf("refusal lacks the containment wording:\n  %s", msg)
+			}
+			if strings.Contains(msg, "could not read") {
+				t.Errorf("refusal comes from a read, not the guard:\n  %s", msg)
+			}
+			if out != nil {
+				t.Errorf("refusal returned files: %+v", out)
+			}
+		})
+	}
+}
+
+// TestIssueAttachmentFilesInlinesContainedPath: a relative path inside the
+// run's checkout still arrives with its bytes and their sha256 unchanged.
+func TestIssueAttachmentFilesInlinesContainedPath(t *testing.T) {
+	root := t.TempDir()
+	body := "contained attachment body\n"
+	writeFixture(t, root, "docs/notes.md", body)
+	conn, step, spec := attachedStep(t, root, []string{"docs/notes.md"})
+
+	got, err := issueAttachmentFiles(conn, step, spec)
+	testsupport.Must(t, err, "issueAttachmentFiles: %v", err)
+
+	digest := sha256.Sum256([]byte(body))
+	want := []PacketFile{{
+		Path: "docs/notes.md", SHA256: hex.EncodeToString(digest[:]), Body: body,
+	}}
+	if !slices.Equal(got, want) {
+		t.Errorf("issueAttachmentFiles = %+v, want %+v", got, want)
 	}
 }

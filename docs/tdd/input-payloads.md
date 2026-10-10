@@ -224,7 +224,7 @@ that, and nothing should.
 
 ## 8. Surface documentation
 
-`skills/docket/SKILL.md` needs no verb or flag change for Part I — the field is
+The loadable `docket` skill needs no verb or flag change for Part I — the field is
 additive inside an existing response shape. The context-bundle shape is
 documented in engine-spec.md §11.4; that table gains the `payload` row in the
 same PR.

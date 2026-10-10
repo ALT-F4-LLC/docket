@@ -544,3 +544,159 @@ func TestReadyIsNeverPersisted(t *testing.T) {
 		}
 	}
 }
+
+// TestLoopHistoryFactsRoundTrip proves the three loop-history facts a
+// fix-loop-exhausted step parks with — rounds run against the cap, the step
+// that triggered the loop, and the latest fix-round verdict — survive one
+// SetStepLoopHistoryTx write and come back on the row's model.StepRow.
+//
+// It writes through the setter directly rather than through the exhaustion
+// routing transaction: the facts are storage here, and the call site inside
+// that transaction is a separate criterion.
+//
+// It also pins the row move the setter promises CAS-guarded readers: one
+// row_version bump and updated_at_ms set to the caller's nowMS.
+func TestLoopHistoryFactsRoundTrip(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = SetStepLoopHistoryTx(tx, id, 3, "judge-correctness@0", "concerns", 2000)
+	testsupport.Must(t, err, "SetStepLoopHistoryTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	row := model.StepRow{
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+	}
+	if row.LoopRoundsRun != 3 {
+		t.Errorf("LoopRoundsRun = %d, want 3", row.LoopRoundsRun)
+	}
+	if row.LoopTriggerStep != "judge-correctness@0" {
+		t.Errorf("LoopTriggerStep = %q, want judge-correctness@0", row.LoopTriggerStep)
+	}
+	if row.LoopLatestVerdict != "concerns" {
+		t.Errorf("LoopLatestVerdict = %q, want concerns", row.LoopLatestVerdict)
+	}
+
+	if step.RowVersion != before.RowVersion+1 {
+		t.Errorf("RowVersion = %d, want %d — CAS-guarded readers must see the row move",
+			step.RowVersion, before.RowVersion+1)
+	}
+	if step.UpdatedAtMS != 2000 {
+		t.Errorf("UpdatedAtMS = %d, want 2000 (the setter's nowMS)", step.UpdatedAtMS)
+	}
+}
+
+// TestStepsAuthorityColumnRoundTrips proves the authority a resolution was
+// made under, and the standing grant it names, survive one SetStepAuthorityTx
+// write and come back on the row.
+func TestStepsAuthorityColumnRoundTrips(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+	if before.Authority != "" || before.AuthorityRef != "" {
+		t.Fatalf("an unresolved step carries authority %q/%q, want none",
+			before.Authority, before.AuthorityRef)
+	}
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = SetStepAuthorityTx(tx, id, "standing-grant", "RUN NOTE 54", 2000)
+	testsupport.Must(t, err, "SetStepAuthorityTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Authority != "standing-grant" {
+		t.Errorf("Authority = %q, want standing-grant", step.Authority)
+	}
+	if step.AuthorityRef != "RUN NOTE 54" {
+		t.Errorf("AuthorityRef = %q, want %q — a standing grant must name the "+
+			"authorization it applies", step.AuthorityRef, "RUN NOTE 54")
+	}
+	if step.RowVersion != before.RowVersion+1 {
+		t.Errorf("RowVersion = %d, want %d — CAS-guarded readers must see the row move",
+			step.RowVersion, before.RowVersion+1)
+	}
+}
+
+// TestLoopHistoryFactsAbsentBeforeWrite pins the unwritten reading: a step that
+// never exhausted a loop carries no loop history, so the fields stay at their
+// zero values and serialize away under omitempty.
+func TestLoopHistoryFactsAbsentBeforeWrite(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	row := model.StepRow{
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+	}
+	if row.LoopRoundsRun != 0 || row.LoopTriggerStep != "" || row.LoopLatestVerdict != "" {
+		t.Errorf("unwritten loop history = %d/%q/%q, want 0//",
+			row.LoopRoundsRun, row.LoopTriggerStep, row.LoopLatestVerdict)
+	}
+}
+
+// TestRecordedAtStampsOnlyTheMoveIntoTerminal pins `recorded_at_ms`'s writers:
+// the move into a terminal status stamps it, and neither a non-terminal move,
+// a metadata write, nor a rewrite of an already-terminal row moves it.
+func TestRecordedAtStampsOnlyTheMoveIntoTerminal(t *testing.T) {
+	db, id := stepTestDB(t)
+	write := func(name string, fn func(tx *sql.Tx) error) *Step {
+		t.Helper()
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		defer tx.Rollback()
+		err = fn(tx)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		err = tx.Commit()
+		testsupport.Must(t, err, "Commit: %v", err)
+		step, err := GetStep(db, id)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		return step
+	}
+
+	step := write("running", func(tx *sql.Tx) error {
+		return SetStepStatusTx(tx, id, StepRunning, 1500, 0)
+	})
+	if step.RecordedAtMS != 0 {
+		t.Errorf("after a move to %s, RecordedAtMS = %d, want 0", StepRunning, step.RecordedAtMS)
+	}
+
+	step = write("routing to done", func(tx *sql.Tx) error {
+		return SetStepRoutingTx(tx, id, "next", "", StepDone, "", 2000)
+	})
+	if step.RecordedAtMS != 2000 {
+		t.Errorf("after the move to %s, RecordedAtMS = %d, want 2000", StepDone, step.RecordedAtMS)
+	}
+
+	step = write("metadata", func(tx *sql.Tx) error {
+		return SetStepMetadataTx(tx, id, `{"k":"v"}`, 3000)
+	})
+	if step.RecordedAtMS != 2000 || step.UpdatedAtMS != 3000 {
+		t.Errorf("after a metadata write, RecordedAtMS = %d and UpdatedAtMS = %d, "+
+			"want 2000 and 3000", step.RecordedAtMS, step.UpdatedAtMS)
+	}
+
+	step = write("terminal rewrite", func(tx *sql.Tx) error {
+		return SetStepStatusTx(tx, id, StepSuperseded, 4000, 0)
+	})
+	if step.RecordedAtMS != 2000 {
+		t.Errorf("after a terminal-to-terminal rewrite, RecordedAtMS = %d, want 2000",
+			step.RecordedAtMS)
+	}
+}

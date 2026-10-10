@@ -11,6 +11,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -24,6 +25,37 @@ import (
 // artifacts each delimited and labeled in DECLARED order, the pinned-file list
 // with hashes, and the output instruction — and it names NO instance concept.
 // The genericity gate checks its bytes like any other core surface.
+//
+// WHAT A PACKET DRAWS FROM — the exhaustive list, for anyone deciding where
+// to put words they need a worker to read (DKT-725). A packet is the context
+// bundle (§6.6's five sources: the pinned step definition, the issue's
+// ACTIVATION-FROZEN body_snapshot and issue_snapshot, recorded input
+// artifacts, and the pin list — plus DKT-1079's sixth, the run's recorded
+// notes, rendered as `== RUN NOTE N` beside the request) plus the step's
+// declared packet files and the step's OWN routing record, rendered as
+// `== RESOLUTION` — plus the TRUST STORE, read at render time, which names
+// the argv each declared gate matches for the `== GATES` section (DKT-3292).
+// Two consequences operators repeatedly discover the hard way:
+//
+//   - issue COMMENTS never render. They are an audit surface, not a context
+//     source, and no template can reach them.
+//   - a mid-run `description` edit never renders. The packet reads
+//     `body_snapshot`, frozen at activation — §9 item 5's edit immunity.
+//   - a mid-run `--scope` edit never renders either, and for the same reason:
+//     the brief's `scope:` line reads `issue_snapshot`, and so does the scope
+//     the step's `issue.diff` is recorded over (DKT-741). There is no verb
+//     that refreshes it; an authorized mid-run widen is made real by taking
+//     the issue out of the run and re-planning it, and `issue edit --scope`
+//     says so when it lands on an issue with live steps in a live run.
+//
+// The sanctioned steering channels are two. Per step, the resolve note: `step
+// resolve --as retry|rerun-gates -m` renders on the same step's re-execution,
+// and `--as fix-round -m` is stamped onto the new round's rows
+// (stampEntryRouting) so the authorization's remedy reaches the round it paid
+// for. Per run, the run note (DKT-1079): `run note add RUN-N` renders in every
+// packet of the run from that moment on, for a fact about the run rather than
+// about one step — a gate known to fail on clean HEAD, the issue tracking it,
+// the disposition already given — so no worker rediscovers it per step.
 
 // defaultPacket is the shipped template. It lives under internal/ because the
 // Vorpal build's include list requires embeds there — the same constraint the
@@ -42,6 +74,14 @@ type packetData struct {
 	// PayloadSchema is `payload`'s `schema@ver`, or "" — carried so the packet
 	// can state the contract even though the SCHEMA REGISTER is S5's.
 	PayloadSchema string
+	// PayloadRequired is the keys that schema declares required of a payload
+	// element, read from the bytes the run PINNED.
+	//
+	// The ref alone told a worker only which document to go and read, and the
+	// cost was measured: workers fetched the schema by hand, and the ones that
+	// did not failed their first record on a missing key. The keys are the part
+	// a worker acts on, so they travel with the ref.
+	PayloadRequired []string
 	// Files are the step's declared packet files, resolved in declared order
 	// with each entry followed by its own declared includes (§1.4).
 	//
@@ -50,6 +90,11 @@ type packetData struct {
 	// This is the field whose absence made the corpus inert — `--template F`
 	// could not recover the content because no field carried it.
 	Files []PacketFile
+	// Gates is the step's declared gate set, in declared order, each with the
+	// argv the trust store matches for it at render time (DKT-3292), so a
+	// worker reads the checks it will face instead of running `trust list`
+	// or reading a workflow file. An unmatched gate says so.
+	Gates []PacketGate
 }
 
 // RenderResult is one rendered work packet, with the provenance of the template
@@ -85,10 +130,15 @@ func RenderStep(
 // to the declared hint alone, so a label-resolved executor could never
 // receive its own contract: the corpus shipped per-resolved-hint files that
 // no packet could ever name. The resolved hint arrives here, at render time,
-// which is where substitution ALREADY re-derives — activation pinned the
-// whole config tree, so the resolved contract verifies against its pin like
-// any other entry, and a hint whose contract does not exist refuses loudly
-// naming the exact path.
+// which is where substitution ALREADY re-derives — and the resolved contract
+// verifies against its pin like any other entry, while a hint whose contract
+// does not exist refuses loudly naming the exact path. Since DKT-581,
+// activation pins the packet CLOSURE rather than the whole config tree —
+// entries substituted with the declared executor and fanout hints — so a
+// resolved hint outside the workflow's own declarations resolves only if the
+// corpus declares it somewhere in the bound definition (the shipped corpus
+// declares label-resolved executors as `when`-gated steps, which the closure
+// covers) or the operator pinned its contract with `--pin`.
 //
 // An empty executor is the declared behavior, unchanged. The override also
 // lands on the rendered step row's `executor`, so the packet's `target:`
@@ -145,6 +195,21 @@ func RenderStepAs(
 		return nil, err
 	}
 
+	// The issue's attachments, for a step that declared `issue.files` (DKT-44).
+	// They land AFTER the declared entries because the contract and fragments
+	// are what a worker reads first; the attachments are the material that
+	// contract is applied to.
+	attached, err := issueAttachmentFiles(conn, step, spec)
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, attached...)
+
+	required, err := payloadRequiredKeys(conn, step.RunID, spec.Payload)
+	if err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	data := packetData{
 		Context: bundle,
@@ -154,7 +219,9 @@ func RenderStepAs(
 		// VALIDATING against it: the schema register lands at S5, and the packet
 		// stating the contract is what lets a worker satisfy it before the
 		// engine can check it.
-		PayloadSchema: spec.Payload,
+		PayloadSchema:   spec.Payload,
+		PayloadRequired: required,
+		Gates:           packetGates(spec),
 	}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("rendering the packet for %s: %w", step.Instance, err)
@@ -163,6 +230,36 @@ func RenderStepAs(
 	return &RenderResult{
 		Packet: buf.String(), Template: name, TemplatePinned: pinned,
 	}, nil
+}
+
+// payloadRequiredKeys reads the required properties out of the schema bytes the
+// run PINNED — the same resolution `step complete` validates against, so the
+// packet cannot state a contract the engine will not enforce.
+//
+// A ref that does not resolve yields no keys rather than a refusal. Rendering a
+// packet is how a worker learns what to do; a run whose pin set cannot produce
+// the bytes has a problem `step complete` reports precisely, and withholding
+// the whole packet over it would replace one diagnosable failure with a worker
+// that never started.
+//
+// Only pinnedSchema's VALIDATION refusals degrade that way — the ref is not
+// pinned, the pinned schema is no longer registered, its bytes drifted or no
+// longer compile. Every other error is the store failing to answer, which the
+// two sibling pin reads above already propagate; a packet rendered over an
+// unreadable pin set would carry a contract line missing for a reason nothing
+// reports.
+func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) {
+	if ref == "" {
+		return nil, nil
+	}
+	registered, err := pinnedSchema(conn, runID, ref)
+	if err != nil {
+		if code, ok := CodeOf(err); ok && code == CodeValidation {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return registered.RequiredProperties(), nil
 }
 
 // templateSource resolves the template's bytes, VERIFYING A PINNED PATH against
@@ -198,9 +295,18 @@ func templateSource(
 	if err != nil {
 		return "", "", false, err
 	}
+	// The pin is looked up by the ref activation RECORDED, not only by the
+	// path as typed: a template under an instance-config root is
+	// pinned by its config-relative ref, whatever cwd `--pin` named it from,
+	// and `--template` names it the same way. The verbatim form stays honored
+	// for a path outside every root and for a pre-v12 run.
+	wanted := map[string]bool{path: true}
+	if ref, ok := configRelativeRef(instanceConfigRoots(), path); ok {
+		wanted[ref] = true
+	}
 	var pinnedHash string
 	for _, p := range pins {
-		if p.Kind == db.PinKindFile && p.Ref == path {
+		if p.Kind == db.PinKindFile && wanted[p.Ref] {
 			pinnedHash = p.SHA256
 			break
 		}
@@ -236,4 +342,57 @@ func templateSource(
 	}
 
 	return string(content), path, true, nil
+}
+
+// PacketGate is one declared gate as a packet renders it (DKT-3292).
+type PacketGate struct {
+	Name string
+	// Pre marks a gate that runs at claim rather than at record.
+	Pre bool
+	// Source is a fence gate's source; its commands are the fenced lines,
+	// each matched when the gate runs, so no single argv is rendered.
+	Source string
+	// Matched and Argv are the trust store's answer for a named gate.
+	Matched bool
+	Argv    []string
+	// Reason is why a named gate is unmatched.
+	Reason string
+}
+
+// renderTrustRoster reads the trust store and this repository's identity for
+// the GATES section — the same two reads a gate run makes. A field-like var so
+// a test can supply a sandbox store.
+var renderTrustRoster = func() (*trust.Store, string, error) {
+	store, err := trust.Load()
+	if err != nil {
+		return nil, "", err
+	}
+	identity, err := trust.RepoIdentity(resolvePaths().Identity)
+	if err != nil {
+		return nil, "", err
+	}
+	return store, identity, nil
+}
+
+// packetGates resolves the step's declared gates against the trust store,
+// read once, at render time. It renders; it never runs anything.
+func packetGates(spec *workflow.Step) []PacketGate {
+	if spec == nil || len(spec.Gates) == 0 {
+		return nil
+	}
+	store, identity, rosterErr := renderTrustRoster()
+	out := make([]PacketGate, 0, len(spec.Gates))
+	for _, g := range spec.Gates {
+		pg := PacketGate{Name: g.Name, Pre: g.Pre, Source: g.Source}
+		switch {
+		case g.Source != "":
+		case rosterErr != nil:
+			pg.Reason = fmt.Sprintf("the trust store could not be read: %v", rosterErr)
+		default:
+			match := store.Lookup(identity, g.Name, nil)
+			pg.Matched, pg.Argv, pg.Reason = match.Matched, match.Argv, match.Reason
+		}
+		out = append(out, pg)
+	}
+	return out
 }

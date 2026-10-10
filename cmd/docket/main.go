@@ -1,3 +1,4 @@
+// Command docket is the CLI entry point for Docket.
 package main
 
 import (

@@ -29,8 +29,12 @@ type AddRequest struct {
 	// Stub declares the argv a placeholder rather than the check its name
 	// implies (DKT-265). It changes no execution behavior; it travels with the
 	// verdict so a hollow pass reads as hollow.
-	Stub    bool
-	Timeout string
+	Stub bool
+	// StubReason says why the entry is a stub and which issue tracks replacing
+	// it (DKT-607). Only meaningful alongside Stub; an add that supplies a
+	// reason without the declaration is refused.
+	StubReason string
+	Timeout    string
 	// Network is the host list this command must reach. It declares
 	// a requirement; it grants nothing.
 	Network []string
@@ -65,9 +69,25 @@ type RemoveRequest struct {
 	Name     string
 	RepoRoot string // the repo whose binding to remove; ignored when Global
 	Global   bool
-	// OnChange runs INSIDE the lock, after the entry to delete has been found
-	// and BEFORE the store is written, receiving the entry AS IT STOOD. Same
-	// contract and same reasoning as AddRequest.OnChange.
+	// OnChange runs INSIDE the lock, receiving the entry AS IT STOOD, but
+	// AFTER the store has been published — the opposite order from
+	// AddRequest.OnChange, and deliberately so (DKT-2198).
+	//
+	// WHY THE ORDER INVERTS FOR REMOVAL. Both hooks protect the same
+	// invariant: whichever half of the two-file change fails, the surviving
+	// state must never let the record claim LESS authority than the store
+	// grants. For an add, recording first satisfies it — what survives is a
+	// grant that failed to land, over-reporting authority. For a removal the
+	// same order satisfies the opposite: a revocation that was recorded and
+	// never happened, leaving an entry that still authorizes execution while
+	// the trail says it does not. So removal publishes first, and what can
+	// survive here is a removal that landed unrecorded — the trail still shows
+	// the entry as trusted, which is conservative rather than permissive.
+	//
+	// A non-nil error fails the removal, but the entry is ALREADY GONE by
+	// then; removeAt reports removed=true alongside the error so the caller
+	// can say so rather than describing a completed revocation as a store
+	// failure.
 	//
 	// It receives the entry rather than leaving the caller to look one up
 	// beforehand, because a caller's own pre-read cannot see the binding this
@@ -84,9 +104,10 @@ type AddResult struct {
 	// Idempotent is true when an identical entry already existed and nothing
 	// was written.
 	Idempotent bool
-	// Warnings carries the --prefix over-authorization warning (§3.3). It is
-	// NEVER suppressed — not by --yes, not by anything. Suppressing it is
-	// exactly what would make the conversational posture unsafe.
+	// Warnings carries the --prefix over-authorization warning (§3.3) and the
+	// re-pin disclosure (§3.5). They are NEVER suppressed — not by --yes, not
+	// by anything. Suppressing them is exactly what would make the
+	// conversational posture unsafe.
 	Warnings []string
 }
 
@@ -126,20 +147,34 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 		return nil, err
 	}
 
-	if existing := findEntry(st, entry.Name, entry.Repo, entry.Global); existing != nil {
-		if entriesEquivalent(*existing, entry) {
+	existing := findEntry(st, entry.Name, entry.Repo, entry.Global)
+	if existing != nil {
+		if !entriesEquivalent(*existing, entry) {
+			// A SILENT OVERWRITE would mean a trusted name's meaning can change
+			// without the operator ever seeing the old value — the same
+			// reasoning that makes a re-register with differing bytes a
+			// CONFLICT, applied to a security-relevant file. Every differing
+			// property is named, so the operator can see what would have
+			// changed.
+			return nil, fmt.Errorf("%w: %q is already trusted in this repo as %s; the add would change %s. Remove it first with `docket trust rm %s` if the change is intended",
+				ErrConflict, entry.Name, CanonicalArgv(existing.Argv),
+				strings.Join(entryChanges(*existing, entry), "; "), entry.Name)
+		}
+		if existing.Argv0SHA256 == entry.Argv0SHA256 {
 			// Idempotent success: nothing written, exit 0. Re-approving the
 			// same command with the same flags is not a change.
 			return &AddResult{Entry: *existing, Idempotent: true, Warnings: warnings}, nil
 		}
-		// A SILENT OVERWRITE would mean a trusted name's meaning can change
-		// without the operator ever seeing the old value — the same reasoning
-		// that makes a re-register with differing bytes a CONFLICT, applied to
-		// a security-relevant file. Every differing property is named, so the
-		// operator can see what would have changed.
-		return nil, fmt.Errorf("%w: %q is already trusted in this repo as %s; the add would change %s. Remove it first with `docket trust rm %s` if the change is intended",
-			ErrConflict, entry.Name, CanonicalArgv(existing.Argv),
-			strings.Join(entryChanges(*existing, entry), "; "), entry.Name)
+		// The RE-PIN (§3.5): same command and flags, but the file argv[0]
+		// names now holds different bytes, or the entry predates pinning.
+		// Re-running the add is the operator approving those bytes, so it is a
+		// change: recorded, written, and disclosed with both hashes.
+		previous := existing.Argv0SHA256
+		if previous == "" {
+			previous = "none"
+		}
+		warnings = append(warnings, fmt.Sprintf("re-pinned %s: argv0_sha256 %s to %s",
+			entry.Argv[0], previous, entry.Argv0SHA256))
 	}
 
 	if req.OnChange != nil {
@@ -148,7 +183,11 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 		}
 	}
 
-	st.Entries = append(st.Entries, entry)
+	if existing != nil {
+		*existing = entry
+	} else {
+		st.Entries = append(st.Entries, entry)
+	}
 	if err := writeStore(path, st); err != nil {
 		return nil, err
 	}
@@ -161,6 +200,10 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 // Returns false when no such entry existed, which callers render as a
 // NOT_FOUND rather than a failure — removing something absent is not an error
 // worth an exit code of its own.
+//
+// The bool and the error are INDEPENDENT. A true alongside a non-nil error
+// means the entry was published as removed and RemoveRequest.OnChange then
+// failed: the revocation happened, its record did not.
 func Remove(req RemoveRequest) (bool, error) {
 	path, err := StorePath()
 	if err != nil {
@@ -196,15 +239,16 @@ func removeAt(path string, req RemoveRequest) (bool, error) {
 		return false, nil
 	}
 
-	if req.OnChange != nil {
-		if err := req.OnChange(st.Entries[idx]); err != nil {
-			return false, err
-		}
-	}
-
+	removed := st.Entries[idx]
 	st.Entries = slices.Delete(st.Entries, idx, idx+1)
 	if err := writeStore(path, st); err != nil {
 		return false, err
+	}
+
+	if req.OnChange != nil {
+		if err := req.OnChange(removed); err != nil {
+			return true, err
+		}
 	}
 	return true, nil
 }
@@ -230,6 +274,12 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 	if len(req.Argv) == 0 {
 		return Entry{}, nil, fmt.Errorf("%w: a trust entry needs a command; pass it after `--`", ErrParse)
 	}
+	// The same contradiction parse refuses in a hand-edited file (DKT-607),
+	// refused at the door: a reason describes a stub, and an add carrying one
+	// without the declaration meant one of the two flags is a mistake.
+	if req.StubReason != "" && !req.Stub {
+		return Entry{}, nil, fmt.Errorf("%w: --stub-reason describes a stub entry; pass --stub with it or drop the reason", ErrParse)
+	}
 
 	e := Entry{
 		Name:       req.Name,
@@ -241,9 +291,22 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 		Tree:       req.Tree,
 		Flaky:      req.Flaky,
 		Stub:       req.Stub,
+		StubReason: req.StubReason,
 		Timeout:    req.Timeout,
 		Network:    req.Network,
 		AddedAtMS:  req.NowMS,
+	}
+
+	// §3.1's content pin. An absolute argv[0] names one file, and the operator
+	// is approving its current bytes. A file that cannot be hashed refuses the
+	// add: an absolute entry written without a pin would read as a legacy one
+	// and match whatever the file later holds.
+	if filepath.IsAbs(req.Argv[0]) {
+		_, sum, err := argv0ContentSHA256(req.Argv[0])
+		if err != nil {
+			return Entry{}, nil, fmt.Errorf("pinning the content of %s: %w", req.Argv[0], err)
+		}
+		e.Argv0SHA256 = sum
 	}
 
 	// P3: global requires the explicit flag; there is no implicit path to it.
@@ -346,6 +409,13 @@ func entryChanges(existing, proposed Entry) []string {
 			changes = append(changes, fmt.Sprintf("%s %t to %t", f.name, f.old, f.new))
 		}
 	}
+	// `stub_reason` joins for the same reason `stub` did: the reason is the
+	// documented decision (DKT-607) — why this assurance is hollow and which
+	// issue tracks fixing it — and a re-add that silently rewrote or erased it
+	// would swap one documented decision for another with no trace.
+	if existing.StubReason != proposed.StubReason {
+		changes = append(changes, fmt.Sprintf("stub_reason %q to %q", existing.StubReason, proposed.StubReason))
+	}
 	if !slices.Equal(existing.Network, proposed.Network) {
 		// Order-sensitive, because the stored list is what an operator reads and
 		// a reorder is still an edit to the file they audit. The remedy the
@@ -367,6 +437,12 @@ func ensureStoreDir(dir string) error {
 	return checkDirIntegrity(dir)
 }
 
+// createTemp is writeStore's temp-file constructor, swappable ONLY by tests: a
+// real filesystem cannot portably be made to fail Chmod, Write, Sync, or Close
+// on a file it just created. Tests that swap it restore it with t.Cleanup and
+// must not run in parallel.
+var createTemp = os.CreateTemp
+
 // writeStore is I5's atomic publish: a temp file in the SAME directory, created
 // O_EXCL with mode 0600, then renamed over the target.
 //
@@ -381,9 +457,12 @@ func writeStore(path string, st *Store) error {
 	}
 
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".trust-*.toml")
+	tmp, err := createTemp(dir, ".trust-*.toml")
 	if err != nil {
-		return fmt.Errorf("creating a temporary file in %s: %w", dir, err)
+		// The target store is named as well as the directory: every publish
+		// failure must identify WHICH store did not change, and the directory
+		// alone leaves an operator comparing a path they were never shown.
+		return fmt.Errorf("publishing the trust store %s: creating a temporary file in %s: %w", path, dir, err)
 	}
 	tmpPath := tmp.Name()
 	defer func() {
@@ -395,19 +474,19 @@ func writeStore(path string, st *Store) error {
 	// requirement rather than relying on that, so a future stdlib change or a
 	// restrictive umask cannot silently widen it.
 	if err := tmp.Chmod(storeFileMode); err != nil {
-		return fmt.Errorf("setting mode on %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: setting mode on %s: %w", path, tmpPath, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("writing %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: writing %s: %w", path, tmpPath, err)
 	}
 	// fsync before rename: a rename that lands before the data is durable
 	// leaves an empty trust file after a power loss, which is an allowlist that
 	// silently lost every entry.
 	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("syncing %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: syncing %s: %w", path, tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpPath, err)
+		return fmt.Errorf("publishing the trust store %s: closing %s: %w", path, tmpPath, err)
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {

@@ -33,6 +33,9 @@ var closeCmd = &cobra.Command{
 
 		if issue.Status == model.StatusDone {
 			if w.JSONMode {
+				if err := hydrateIssueAssociations(conn, issue); err != nil {
+					return err
+				}
 				w.Success(withIssueVersion(issue), "")
 			} else {
 				w.Info("Issue %s is already closed", model.FormatID(id))
@@ -67,6 +70,10 @@ var closeCmd = &cobra.Command{
 		issue, err = db.GetIssue(conn, id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
+		}
+
+		if err := hydrateIssueAssociations(conn, issue); err != nil {
+			return err
 		}
 
 		w.Success(withIssueVersion(issue), fmt.Sprintf("Closed %s: %s", model.FormatID(id), issue.Title))

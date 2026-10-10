@@ -10,6 +10,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
@@ -50,6 +51,24 @@ func cmdErr(err error, code output.ErrorCode) *CmdError {
 // returning nil would run the command against a database that is not there.
 // Execute recognizes it explicitly and never renders it.
 var errSkipRun = errors.New("docket: handled in pre-run")
+
+// reportedFailure says the command ALREADY WROTE its own structured output and
+// the process must now exit non-zero without a second envelope.
+//
+// It exists for the cross-project registry writes (DKT-615), where the result
+// is genuinely plural: eleven projects registered, two conflicted. Both of the
+// alternatives lose information a caller needs. Returning a *CmdError would
+// replace the per-project report with one flattened sentence about whichever
+// failure was picked to represent the rest; returning nil would exit 0 on a
+// command that did not do what was asked in two of thirteen places.
+//
+// Nothing reads its message — Execute recognizes the type and renders nothing —
+// but it carries one so an unhandled path is still legible.
+type reportedFailure struct{ Code output.ErrorCode }
+
+func (e *reportedFailure) Error() string {
+	return "docket: reported in the command's own output"
+}
 
 // isGuardCmd reports whether cmd is one of the `docket guard` predicates.
 //
@@ -119,6 +138,10 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// The detached pre-gate hold's lock directory, fixed from this same
+		// resolution so no scheduler snapshot resolves it under its own
+		// transaction's write lock (gates-trust §7.6.2 PG6).
+		engine.PrimeDetachedPreGateLockDir(cfg)
 
 		ctx := context.WithValue(cmd.Context(), cfgKey, cfg)
 
@@ -293,7 +316,12 @@ func init() {
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "Suppress non-essential output")
 	rootCmd.PersistentFlags().BoolP("watch", "w", false, "Watch for changes and refresh output")
 	rootCmd.PersistentFlags().Duration(
-		"interval", 2*time.Second, "Poll interval for --watch and --follow (minimum 500ms)")
+		"interval", 2*time.Second,
+		// The UNIT IS NAMED because a bare number is the natural thing to type
+		// and it is refused: `--interval 2000` fails with pflag's "missing unit
+		// in duration", which tells an operator what is wrong but not what to
+		// write instead. The example does.
+		"Poll interval for --watch and --follow, with a unit (e.g. 2s, 500ms; minimum 500ms)")
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
 }
@@ -425,11 +453,23 @@ func getProjectID(cmd *cobra.Command) int {
 // Execute runs the root command and returns an exit code.
 func Execute() int {
 	initWatchFlags()
+	// The detached pre-gate launcher is installed HERE, in the binary's real
+	// entry, and nowhere else: it re-executes this process's own executable,
+	// which under `go test` is the test binary. An engine or CLI test that
+	// completes a step must never find it installed (gates-trust §7.6.2 PG6).
+	engine.LaunchDetachedPreGates = launchDetachedPreGates
 	if err := rootCmd.Execute(); err != nil {
 		// PersistentPreRunE already wrote this invocation's output and asked
 		// to stop before RunE. Not a failure: exit 0, render nothing.
 		if errors.Is(err, errSkipRun) {
 			return 0
+		}
+		// The command wrote its own report — a fanned-out registry write whose
+		// outcome differed per project. Exit non-zero, render NOTHING: a second
+		// envelope would make stdout two JSON documents.
+		var reported *reportedFailure
+		if errors.As(err, &reported) {
+			return output.ExitCodeForError(reported.Code)
 		}
 		raw, _ := rootCmd.PersistentFlags().GetString("json")
 		// An invalid --json value falls back to human error rendering, which

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -40,6 +41,7 @@ type ListOptions struct {
 	ProjectID  int      // scope to one project (v12); 0 = every project
 	Statuses   []string // filter by status (multiple = OR)
 	Priorities []string // filter by priority (multiple = OR)
+	Sizes      []string // filter by size (multiple = OR); "" never matches a row
 	Labels     []string // filter by label name (multiple = AND)
 	Types      []string // filter by kind (multiple = OR)
 	Assignee   string   // filter by assignee
@@ -66,6 +68,7 @@ var validSortFields = map[string]bool{
 	"title":      true,
 	"status":     true,
 	"priority":   true,
+	"size":       true,
 	"kind":       true,
 	"assignee":   true,
 	"created_at": true,
@@ -78,6 +81,7 @@ var validUpdateFields = map[string]bool{
 	"description": true,
 	"status":      true,
 	"priority":    true,
+	"size":        true,
 	"kind":        true,
 	"assignee":    true,
 	"parent_id":   true,
@@ -93,24 +97,27 @@ var validUpdateFields = map[string]bool{
 // (find-or-create) and linked to the issue within the same transaction.
 // Files are attached to the issue if provided.
 func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string) (int, error) {
-	return CreateIssueIdempotent(db, issue, labels, files, "")
+	id, _, err := CreateIssueIdempotent(db, issue, labels, files, "")
+	return id, err
 }
 
 // CreateIssueIdempotent is CreateIssue with an optional idempotency key.
 //
 // When idempotencyKey is non-empty and was already used for this scope, the
-// original issue's id is returned and nothing is inserted — a retried create
-// after a dropped response must succeed, not fail. The key record and the
-// insert commit in the SAME transaction, so a crash between them cannot
-// orphan either.
-func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, files []string, idempotencyKey string) (int, error) {
+// original issue's id is returned with inserted=false and nothing is inserted —
+// a retried create after a dropped response must succeed, not fail. inserted
+// is true only when this call created the issue, so a caller that writes more
+// after the insert keys on it rather than on a lookup of its own, which another
+// process could race. The key record and the insert commit in the SAME
+// transaction, so a crash between them cannot orphan either.
+func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, files []string, idempotencyKey string) (int, bool, error) {
 	if idempotencyKey != "" {
 		existingID, found, err := LookupIdempotencyKey(db, ScopeIssueCreate, idempotencyKey)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if found {
-			return existingID, nil
+			return existingID, false, nil
 		}
 	}
 
@@ -118,14 +125,14 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 
 	tx, err := db.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("beginning transaction: %w", err)
+		return 0, false, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	projectID := projectOrDefault(issue.ProjectID)
 	res, err := tx.Exec(
-		`INSERT INTO issues (project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO issues (project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, size)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		projectID,
 		nilIfZeroPtr(issue.ParentID),
 		issue.Title,
@@ -136,14 +143,15 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 		issue.Assignee,
 		now,
 		now,
+		string(issue.Size),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("inserting issue: %w", err)
+		return 0, false, fmt.Errorf("inserting issue: %w", err)
 	}
 
 	id64, err := res.LastInsertId()
 	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
+		return 0, false, fmt.Errorf("getting last insert id: %w", err)
 	}
 	id := int(id64)
 
@@ -151,13 +159,13 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 	for _, name := range labels {
 		labelID, err := findOrCreateLabel(tx, projectID, name)
 		if err != nil {
-			return 0, fmt.Errorf("processing label %q: %w", name, err)
+			return 0, false, fmt.Errorf("processing label %q: %w", name, err)
 		}
 		if _, err := tx.Exec(
 			`INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)`,
 			id, labelID,
 		); err != nil {
-			return 0, fmt.Errorf("linking label %q: %w", name, err)
+			return 0, false, fmt.Errorf("linking label %q: %w", name, err)
 		}
 	}
 
@@ -167,13 +175,13 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 			`INSERT OR IGNORE INTO issue_files (issue_id, file_path) VALUES (?, ?)`,
 			id, fp,
 		); err != nil {
-			return 0, fmt.Errorf("attaching file %q: %w", fp, err)
+			return 0, false, fmt.Errorf("attaching file %q: %w", fp, err)
 		}
 	}
 
 	// Record creation activity.
 	if err := RecordActivity(tx, id, "created", "", "", ""); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	// Record file attachment activity if files were provided at creation.
@@ -181,7 +189,7 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 		sorted := slices.Clone(files)
 		sort.Strings(sorted)
 		if err := RecordActivity(tx, id, "files", "", strings.Join(sorted, ", "), ""); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
 
@@ -189,15 +197,15 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 	// leave a created issue whose key is unrecorded, so the retry duplicates.
 	if idempotencyKey != "" {
 		if err := RecordIdempotencyKeyTx(tx, ScopeIssueCreate, idempotencyKey, id); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("committing transaction: %w", err)
+		return 0, false, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return id, nil
+	return id, true, nil
 }
 
 // issueColumns is the column list every issue SELECT uses, in the exact order
@@ -209,11 +217,11 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 const (
 	issueColumns = `id, parent_id, title, description, status, priority, kind, assignee,
 	                created_at, updated_at, version, owner, token_hash, expires_ms, attempt,
-	                scope_globs, project_id, resolution`
+	                scope_globs, project_id, resolution, size`
 
 	issueColumnsQualified = `i.id, i.parent_id, i.title, i.description, i.status, i.priority, i.kind, i.assignee,
 	                         i.created_at, i.updated_at, i.version, i.owner, i.token_hash, i.expires_ms, i.attempt,
-	                         i.scope_globs, i.project_id, i.resolution`
+	                         i.scope_globs, i.project_id, i.resolution, i.size`
 )
 
 // IssueResolutionAbandoned is the resolution the `abandon-issue` routing and
@@ -240,6 +248,34 @@ func SetIssueResolutionTx(tx *sql.Tx, issueID int, resolution string) error {
 		return fmt.Errorf("recording the resolution of issue %d: %w", issueID, err)
 	}
 	return nil
+}
+
+// DoneTransitionClearsResolution reports whether a status write must clear the
+// issue's resolution. Every writer that can move an issue into done decides
+// through it.
+//
+// Moving an issue INTO done supersedes a routing's earlier "abandoned": the
+// delivered issue must not read as cancelled. `run_disposition` keeps the
+// run-level record. Re-asserting done on an issue already there is not a
+// transition and keeps the resolution, and a caller that sets `resolution`
+// explicitly keeps the value it set.
+func DoneTransitionClearsResolution(prior, target model.Status, explicitResolution bool) bool {
+	return target == model.StatusDone && prior != model.StatusDone && !explicitResolution
+}
+
+// IssueStatusResolutionTx reads an issue's status and resolution inside tx, or
+// returns ErrNotFound.
+func IssueStatusResolutionTx(tx *sql.Tx, issueID int) (model.Status, string, error) {
+	var status model.Status
+	var resolution string
+	err := tx.QueryRow(`SELECT status, resolution FROM issues WHERE id = ?`, issueID).Scan(&status, &resolution)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("reading the status of issue %d: %w", issueID, err)
+	}
+	return status, resolution, nil
 }
 
 // IssueProjectID returns the project an issue is homed in, or ErrNotFound.
@@ -354,6 +390,14 @@ func ListIssues(db *sql.DB, opts ListOptions) ([]*model.Issue, int, error) {
 		whereClauses = append(whereClauses, fmt.Sprintf("i.priority IN (%s)", placeholders))
 		for _, p := range opts.Priorities {
 			args = append(args, p)
+		}
+	}
+
+	if len(opts.Sizes) > 0 {
+		placeholders := makePlaceholders(len(opts.Sizes))
+		whereClauses = append(whereClauses, fmt.Sprintf("i.size IN (%s)", placeholders))
+		for _, sz := range opts.Sizes {
+			args = append(args, sz)
 		}
 	}
 
@@ -613,6 +657,13 @@ func updateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, cha
 		return err
 	}
 
+	target, _ := updates["status"].(string)
+	_, explicit := updates["resolution"]
+	if DoneTransitionClearsResolution(oldIssue.Status, model.Status(target), explicit) {
+		updates = maps.Clone(updates)
+		updates["resolution"] = ""
+	}
+
 	var setClauses []string
 	var args []interface{}
 
@@ -698,10 +749,14 @@ func getFieldValue(issue *model.Issue, field string) string {
 		return string(issue.Status)
 	case "priority":
 		return string(issue.Priority)
+	case "size":
+		return string(issue.Size)
 	case "kind":
 		return string(issue.Kind)
 	case "assignee":
 		return issue.Assignee
+	case "resolution":
+		return issue.Resolution
 	case "parent_id":
 		if issue.ParentID != nil {
 			return fmt.Sprintf("%d", *issue.ParentID)
@@ -932,7 +987,7 @@ func scanIssueFrom(s scanner) (*model.Issue, error) {
 		&i.Status, &i.Priority, &i.Kind, &assignee,
 		&createdAt, &updatedAt, &i.Version,
 		&owner, &tokenHash, &expiresMS, &attempt,
-		&scopeGlobs, &i.ProjectID, &i.Resolution,
+		&scopeGlobs, &i.ProjectID, &i.Resolution, &i.Size,
 	)
 	if err != nil {
 		return nil, err
@@ -1180,6 +1235,12 @@ func CountByPriority(db *sql.DB, projectID int) (map[string]int, error) {
 	return countByColumn(db, projectID, "priority")
 }
 
+// CountBySize returns a map of size -> count, scoped to a project when
+// projectID is non-zero. The "" key counts issues with no size declared.
+func CountBySize(db *sql.DB, projectID int) (map[string]int, error) {
+	return countByColumn(db, projectID, "size")
+}
+
 // ClearAllData deletes all data from every persistent table within a single
 // transaction. The schema and meta table are preserved.
 //
@@ -1291,6 +1352,26 @@ func ClearProjectDataTx(tx *sql.Tx, projectID int) error {
 	return nil
 }
 
+// GapIssue is the shape one recorded gap materializes into: the mechanically
+// derived title and the verbatim body, plus whatever ranking the gap's own
+// header block declared.
+//
+// Priority and Kind carry the CALLER's decision, not a parse: an empty
+// Priority means "the gap declared none" and lands `none`, an empty Kind lands
+// `task`. Both defaults are applied here, once, so a caller that declares
+// nothing gets exactly the row this insert always wrote (DKT-1082).
+type GapIssue struct {
+	Title       string
+	Description string
+	Priority    model.Priority
+	Kind        model.IssueKind
+	Labels      []string
+	// Files and Scope come from the gap's `Files:` and `Scope:` header lines
+	// (DKT-3294). A nil Scope stores SQL NULL: no scope declared.
+	Files []string
+	Scope []string
+}
+
 // InsertGapIssueTx materializes a backlog issue from a recorded gap artifact
 // (DKT-72), inside the completion saga's transaction, and relates it to the
 // issue whose step recorded the gap.
@@ -1301,14 +1382,39 @@ func ClearProjectDataTx(tx *sql.Tx, projectID int) error {
 // claim with no record behind it. `relates_to` rather than a directional
 // relation: a gap is out-of-scope BY DEFINITION, so it must not block the
 // issue that surfaced it.
-func InsertGapIssueTx(tx *sql.Tx, projectID int, title, description string, relatedIssueID int) (int, error) {
+//
+// The ranking rides in the same transaction as the row it ranks (DKT-1082):
+// a drained high-severity cluster that landed `priority none` was invisible to
+// every priority-ordered planning pass, which is the same "residue nothing
+// re-reads" failure one layer up.
+func InsertGapIssueTx(tx *sql.Tx, projectID int, gap GapIssue, relatedIssueID int) (int, error) {
+	projectID = projectOrDefault(projectID)
+
+	priority := gap.Priority
+	if priority == "" {
+		priority = model.PriorityNone
+	}
+	kind := gap.Kind
+	if kind == "" {
+		kind = model.IssueKindTask
+	}
+
+	var scopeGlobs any
+	if gap.Scope != nil {
+		encoded, err := json.Marshal(gap.Scope)
+		if err != nil {
+			return 0, fmt.Errorf("serializing a gap issue's scope: %w", err)
+		}
+		scopeGlobs = string(encoded)
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.Exec(
-		`INSERT INTO issues (project_id, title, description, status, priority, kind, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		projectOrDefault(projectID), title, description,
-		string(model.StatusBacklog), string(model.PriorityNone), string(model.IssueKindTask),
-		now, now,
+		`INSERT INTO issues (project_id, title, description, status, priority, kind, created_at, updated_at, scope_globs)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, gap.Title, gap.Description,
+		string(model.StatusBacklog), string(priority), string(kind),
+		now, now, scopeGlobs,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("materializing a gap issue: %w", err)
@@ -1318,6 +1424,29 @@ func InsertGapIssueTx(tx *sql.Tx, projectID int, title, description string, rela
 		return 0, fmt.Errorf("materializing a gap issue: %w", err)
 	}
 	id := int(id64)
+
+	// Labels are a per-project namespace, and the gap issue's own project is
+	// the one they live in — the same rule `issue label add` follows.
+	for _, name := range gap.Labels {
+		labelID, err := findOrCreateLabel(tx, projectID, name)
+		if err != nil {
+			return 0, fmt.Errorf("labelling gap issue %d: %w", id, err)
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)`,
+			id, labelID,
+		); err != nil {
+			return 0, fmt.Errorf("labelling gap issue %d: %w", id, err)
+		}
+	}
+	for _, fp := range gap.Files {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO issue_files (issue_id, file_path) VALUES (?, ?)`,
+			id, fp,
+		); err != nil {
+			return 0, fmt.Errorf("attaching file %q to gap issue %d: %w", fp, id, err)
+		}
+	}
 
 	if _, err := tx.Exec(
 		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
@@ -1348,8 +1477,8 @@ func InsertIssueWithID(tx *sql.Tx, issue *model.Issue) (bool, error) {
 	}
 
 	res, err := tx.Exec(
-		`INSERT OR IGNORE INTO issues (id, project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, scope_globs)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO issues (id, project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, scope_globs, size)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		issue.ID,
 		projectOrDefault(issue.ProjectID),
 		nilIfZeroPtr(issue.ParentID),
@@ -1362,6 +1491,7 @@ func InsertIssueWithID(tx *sql.Tx, issue *model.Issue) (bool, error) {
 		issue.CreatedAt.UTC().Format(time.RFC3339),
 		issue.UpdatedAt.UTC().Format(time.RFC3339),
 		scopeGlobs,
+		string(issue.Size),
 	)
 	if err != nil {
 		return false, fmt.Errorf("inserting issue with id %d: %w", issue.ID, err)

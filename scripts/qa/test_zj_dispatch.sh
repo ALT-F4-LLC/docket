@@ -118,6 +118,8 @@ TOML
   assert_exit "ZJ" "ZJ1_start" 0
   run_env "$ZJ" run activate RUN-1 --json
   assert_exit "ZJ" "ZJ1_activate" 0
+  local ZJ_CTOK
+  ZJ_CTOK=$(activation_token)
 
   # --- K1: open a dispatch over a real ready set; `verify` passes. -----------
   run_env "$ZJ" dispatch open --run RUN-1 --json
@@ -157,7 +159,7 @@ TOML
   # K1/K2 manifest is retired explicitly, the TTL is shortened, and a FRESH
   # manifest is opened which is born already past its expiry. That fresh
   # manifest is the crashed relay's.
-  run_env "$ZJ" dispatch abandon --run RUN-1 --reason "end of the K1/K2 arm" --json
+  DOCKET_TOKEN="$ZJ_CTOK" run_env "$ZJ" dispatch abandon --run RUN-1 --reason "end of the K1/K2 arm" --json
   assert_exit "ZJ" "ZJ1_K3_retire_live_manifest" 0
 
   run_env "$ZJ" config set dispatch.ttl 1ms --json
@@ -239,7 +241,7 @@ TOML
   assert_exit "ZJ" "ZJ2_refused" 4
 
   # --- K4: abandon with a reason; `next` answers immediately. ---------------
-  run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died" --json
+  DOCKET_TOKEN="$ZJ_CTOK" run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died" --json
   assert_exit "ZJ" "ZJ2_K4_abandon" 0
   assert_json "ZJ" "ZJ2_K4_status" '.data.status' "abandoned"
 
@@ -272,7 +274,7 @@ TOML
   ZJ_TOKEN=$(echo "$CMD_STDOUT" | jq -r '.data.token')
 
   # The relay dies; an operator retires its manifest.
-  run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died mid-batch" --json
+  DOCKET_TOKEN="$ZJ_CTOK" run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died mid-batch" --json
   assert_exit "ZJ" "ZJ3_K7_abandon" 0
 
   # The executor finishes. Its usage is recorded, because a relay that
@@ -332,6 +334,8 @@ TOML
   assert_exit "ZJ" "ZJ4_start" 0
   run_env "$ZJ" run activate RUN-2 --json
   assert_exit "ZJ" "ZJ4_activate" 0
+  local ZJ_CTOK2
+  ZJ_CTOK2=$(activation_token)
 
   # --- W1: the baseline. Both press steps exist; the press is bounded at 1. --
   run_env "$ZJ" next --run RUN-2 --json
@@ -455,7 +459,7 @@ TOML
   check_cond "ZJ" "ZJ4_W6_ack_event" "$ZJ_ACK_EV reap-acknowledged events, want 1" [ "$ZJ_ACK_EV" = "1" ]
 
   # --- W8: a SECOND ack of the same seq succeeds and changes nothing. -------
-  run_env "$ZJ" dispatch abandon --run RUN-2 --json
+  DOCKET_TOKEN="$ZJ_CTOK2" run_env "$ZJ" dispatch abandon --run RUN-2 --json
   assert_exit "ZJ" "ZJ4_W8_clear_dispatch" 0
   run_env "$ZJ" dispatch open --run RUN-2 --ack-reap "$ZJ_SEQ" --json
   assert_exit "ZJ" "ZJ4_W8_second_ack_succeeds" 0
@@ -465,7 +469,7 @@ TOML
   check_cond "ZJ" "ZJ4_W8_idempotent" "a second ack produced $ZJ_ACK_EV events, want the original 1 — A10 makes it a no-op" [ "$ZJ_ACK_EV" = "1" ]
 
   # --- W7: write-class steps flow again. -----------------------------------
-  run_env "$ZJ" dispatch abandon --run RUN-2 --json
+  DOCKET_TOKEN="$ZJ_CTOK2" run_env "$ZJ" dispatch abandon --run RUN-2 --json
   assert_exit "ZJ" "ZJ4_W7_clear" 0
 
   # The lease goes back to a workable length first. `lease.ttl.press` was 1ms so

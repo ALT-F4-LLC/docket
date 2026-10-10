@@ -45,6 +45,10 @@ type VoteOutcome struct {
 	// Score is the weighted score the existing tally computed, when there is
 	// one.
 	Score *float64
+	// Required is the proposal's `required_voters` — the denominator a ballot
+	// count is read against (DKT-895). Carried because the proposal read below
+	// already has it; nothing recomputes quorum from it.
+	Required int
 }
 
 // voteStepKey identifies one run's vote step uniquely across every issue it
@@ -160,21 +164,31 @@ func loadVoteProposalsTx(tx *sql.Tx, runID int, steps []*db.Step) (map[voteStepK
 
 	out := make(map[voteStepKey]int, len(keyed))
 	for key, id := range keyed {
-		suffix, ok := strings.CutPrefix(key, prefix)
-		if !ok {
-			continue
+		if k, ok := parseVoteStepKey(prefix, key); ok {
+			out[k] = id
 		}
-		issuePart, instance, ok := strings.Cut(suffix, ":")
-		if !ok {
-			continue
-		}
-		issueID, err := strconv.Atoi(issuePart)
-		if err != nil {
-			continue
-		}
-		out[voteStepKey{Issue: model.FormatID(issueID), Instance: instance}] = id
 	}
 	return out, nil
+}
+
+// parseVoteStepKey recovers the (issue, instance) half of a vote-step
+// idempotency key under one run's prefix — the inverse of voteIdempotencyKey,
+// kept beside the bulk reader so the two readers of the family cannot parse
+// it differently. The second return is false for a key of another shape.
+func parseVoteStepKey(prefix, key string) (voteStepKey, bool) {
+	suffix, ok := strings.CutPrefix(key, prefix)
+	if !ok {
+		return voteStepKey{}, false
+	}
+	issuePart, instance, ok := strings.Cut(suffix, ":")
+	if !ok {
+		return voteStepKey{}, false
+	}
+	issueID, err := strconv.Atoi(issuePart)
+	if err != nil {
+		return voteStepKey{}, false
+	}
+	return voteStepKey{Issue: model.FormatID(issueID), Instance: instance}, true
 }
 
 // OpenVoteProposal is §8.1 phase 2: the first engine invocation that observes a
@@ -200,19 +214,35 @@ func OpenVoteProposal(
 		return 0, err
 	}
 
+	// A TRIAGE PANEL OPENS WITH THE FAILURE IT IS ASKED ABOUT (DKT-1901). The
+	// question is "what should happen to this failed step", and a panel that
+	// cannot see the gate rows and the attempt's output is being asked to decide
+	// it blind — which is how the corpus's override-passes came to be rubber
+	// stamps. Empty for every other vote step, so their proposals are unchanged.
+	rationale := fmt.Sprintf("workflow vote step %s", step.Instance)
+	if evidence, err := triageEvidence(conn, step); err != nil {
+		return 0, err
+	} else if evidence != "" {
+		rationale += "\n\n" + evidence
+	}
+
 	proposal := &model.Proposal{
-		ProjectID:   projectID,
-		Description: fmt.Sprintf("%s (%s)", step.Instance, spec.Name),
-		Rationale:   fmt.Sprintf("workflow vote step %s", step.Instance),
-		Criticality: rule.Criticality,
-		Threshold:   rule.Threshold,
+		ProjectID:     projectID,
+		Description:   fmt.Sprintf("%s (%s)", step.Instance, spec.Name),
+		Rationale:     rationale,
+		Criticality:   rule.Criticality,
+		Threshold:     rule.Threshold,
+		Sealed:        rule.Sealed,
+		HoldOnDissent: rule.HoldOnDissent,
 		// §8.2: required_voters is len(voters), NOT a config value. A rule is
 		// about HOW STRICTLY TO TALLY; the step is about WHO CASTS, and §11.1
 		// puts the voter list on the step.
 		//
 		// The voter hints themselves are OPAQUE: core never interprets one,
-		// never validates it against anything, and never dispatches to one. It
-		// counts them.
+		// never dispatches to one, and by default never validates a cast
+		// against one — it counts them. A step that declares `roster =
+		// "strict"` opts into the one comparison the cast path then makes
+		// (vote_cast.go): the name on the cast must be one of these hints.
 		RequiredVoters: len(spec.Voters),
 		Status:         model.ProposalStatusOpen,
 		CreatedBy:      "docket",
@@ -250,7 +280,35 @@ func ReadVoteOutcome(conn *sql.DB, step *db.Step, spec *workflow.Step) (*VoteOut
 	if spec.Type != workflow.TypeVote {
 		return nil, nil
 	}
+	return readVoteProposalOutcome(conn, step)
+}
 
+// ReadStepVoteOutcome is ReadVoteOutcome asked of the STEP ROW rather than the
+// pinned spec: the same single read, keyed off `step.Kind`.
+//
+// It exists for callers that have a step and no spec, and must not grow a
+// second read of proposals to compensate (DKT-726). `step resolve` is the
+// motivating one — a resolution is offered on a vote step whatever its status
+// (R11), so the refusal it needs to compute has to be decidable before the
+// pinned definition is even loaded, and for a MATERIALIZED step the definition
+// never declares the minted name at all, so `workflow.StepByName` returns nil
+// there and the spec-keyed reader could never be called.
+//
+// The MINTED KIND is the authority for what a step is — the same fact the
+// `resolvable` test and the parked-vote refusal above it already key off. A
+// step whose kind is not `vote` has no proposal by construction, and reports
+// nothing.
+func ReadStepVoteOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) {
+	if step.Kind != workflow.TypeVote {
+		return nil, nil
+	}
+	return readVoteProposalOutcome(conn, step)
+}
+
+// readVoteProposalOutcome is the one read both entry points share: resolve the
+// step's proposal through its idempotency key and observe the status the tally
+// already wrote.
+func readVoteProposalOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) {
 	proposalID, err := findVoteProposal(conn, step)
 	if err != nil || proposalID == 0 {
 		return nil, err
@@ -265,6 +323,7 @@ func ReadVoteOutcome(conn *sql.DB, step *db.Step, spec *workflow.Step) (*VoteOut
 		ProposalID: proposalID,
 		Status:     proposal.Status,
 		Score:      proposal.WeightedScore,
+		Required:   proposal.RequiredVoters,
 	}
 	switch proposal.Status {
 	case model.ProposalStatusApproved, model.ProposalStatusCommitted:
@@ -311,10 +370,42 @@ func IsVoteStepProposal(conn *sql.DB, proposalID int) (bool, error) {
 	return found && strings.HasPrefix(key, voteStepScopePrefix), nil
 }
 
+// VoteProposalRun returns the run whose vote step opened a proposal. The
+// second return is false for a proposal bound to no run: a conversational
+// ballot, or a caller-forged key whose run part does not parse, which
+// DriveVoteProposal likewise routes nowhere.
+func VoteProposalRun(conn *sql.DB, proposalID int) (int, bool, error) {
+	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, proposalID)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	runID, ok := voteStepRunOf(key)
+	return runID, ok, nil
+}
+
 // voteRule is a resolved threshold configuration (§8.3).
 type voteRule struct {
 	Threshold   float64
 	Criticality model.Criticality
+	// Sealed is the rule's opt-in rendering dimension (DKT-2447): a proposal
+	// opened under a sealed rule withholds its casts from the read verbs until
+	// the tally closes it. Resolved here and STORED on the proposal at open,
+	// so a rule edited mid-vote cannot change a live ballot's rendering.
+	Sealed bool
+	// A rule carries NO roster and NO weighting (DKT-2764). Both once sat here
+	// as `vote.rule.<name>.roster` / `.weighting` config keys; they moved onto
+	// the vote step (`roster`, `weighting`, workflow/vote_policy.go) because a
+	// config key has no per-caller identity and a constrained seat could flip
+	// it before casting. A legacy row under either key is ignored by design —
+	// the step's declaration, pinned at activation, is the only authority.
+	//
+	// HoldOnDissent is the rule's opt-in routing dimension (DKT-2449): an
+	// APPROVED or COMMITTED tally carrying at least one `reject` parks its vote step for
+	// the operator rather than passing, with the dissenting seat named in the
+	// routing record. Like Sealed it is STORED on the proposal at open and
+	// routing reads the stored value, so a key edited after the ballot opens
+	// cannot change how that ballot routes.
+	HoldOnDissent bool
 }
 
 // resolveVoteRule reads a named rule from the engine-config registry.
@@ -345,9 +436,35 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
 	}
 
+	sealedEntry, err := db.GetConfig(conn, projectID, db.VoteRuleSealedKey(name))
+	if err != nil {
+		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
+	}
+	sealed, err := strconv.ParseBool(sealedEntry.Value)
+	if err != nil {
+		return voteRule{}, fmt.Errorf(
+			"vote rule %q has a malformed sealed flag %q: %w", name, sealedEntry.Value, err)
+	}
+
+	holdEntry, err := db.GetConfig(conn, projectID, db.VoteRuleHoldOnDissentKey(name))
+	if err != nil {
+		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
+	}
+	// A malformed stored value fails loudly rather than reading as false: a
+	// silent false would fail OPEN with respect to the hold, passing a
+	// dissented approval the operator asked to see.
+	holdOnDissent, err := strconv.ParseBool(holdEntry.Value)
+	if err != nil {
+		return voteRule{}, fmt.Errorf(
+			"vote rule %q has a malformed hold_on_dissent flag %q: %w",
+			name, holdEntry.Value, err)
+	}
+
 	return voteRule{
-		Threshold:   threshold,
-		Criticality: model.Criticality(criticalityEntry.Value),
+		Threshold:     threshold,
+		Criticality:   model.Criticality(criticalityEntry.Value),
+		Sealed:        sealed,
+		HoldOnDissent: holdOnDissent,
 	}, nil
 }
 
@@ -369,6 +486,41 @@ func recordVoteEvent(
 	return tx.Commit()
 }
 
+// voteTallyDetail renders the `vote-tallied` event's detail: the proposal, the
+// status, the WEIGHTED SCORE, and the BALLOT COUNT, each labelled.
+//
+// DKT-895: the detail used to read `DKT-V289 approved (1)`, where `1` was the
+// weighted score printed bare. On RUN-62 a three-ballot unanimous
+// approve-with-concerns scored 1.00 and rendered as `(1)` — indistinguishable
+// from "one ballot", so a reader watching the feed saw a panel that had lost
+// two of its three seats and could only disprove it with `docket vote show`.
+// Two numbers with one pair of parentheses between them is the whole defect:
+// the fix labels both and prints the score the way every other surface does
+// (`%.2f`, matching `vote show`'s "Weighted score" line, so the two agree
+// digit for digit).
+//
+// The ballot count is the ONE extra read, taken here at tally time rather than
+// on VoteOutcome, so the per-invocation outcome read (readVoteProposalOutcome,
+// which every dispatch does for every vote step) does not grow a second query
+// to serve an event detail written once — DKT-726's rule about that reader.
+// `RequiredVoters` is free: the proposal that read already loaded carries it.
+func voteTallyDetail(conn *sql.DB, outcome *VoteOutcome) (string, error) {
+	score := "none"
+	if outcome.Score != nil {
+		score = strconv.FormatFloat(*outcome.Score, 'f', 2, 64)
+	}
+
+	votes, err := db.GetProposalVotes(conn, outcome.ProposalID)
+	if err != nil {
+		return "", fmt.Errorf("reading the casts of %s for its tally event: %w",
+			model.FormatProposalID(outcome.ProposalID), err)
+	}
+
+	return fmt.Sprintf("%s %s score=%s ballots=%d/%d",
+		model.FormatProposalID(outcome.ProposalID), outcome.Status,
+		score, len(votes), outcome.Required), nil
+}
+
 // routeVoteStep is §8.1 phase 5: the ordinary routing transaction, over the
 // verdict the tally produced.
 //
@@ -376,6 +528,11 @@ func recordVoteEvent(
 // approve/reject): `pass` ⇒ the step is done and successors become ready;
 // `fail` ⇒ routed per the step's EFFECTIVE on_fail — identically to a human
 // gate's reject.
+//
+// DKT-545 adds one clause between the two: an APPROVED tally on a step that
+// declares a `threshold` is evaluated over the recorded casts before it
+// routes pass — see evaluateVoteThreshold. A step declaring none behaves
+// exactly as the paragraph above describes, byte for byte.
 //
 // On a DECLARED vote step that on_fail should not be `waiting-human`, for the
 // reason V13 states about human gates: parking would make the step wait on the
@@ -394,9 +551,112 @@ func routeVoteStep(
 	conn *sql.DB, step *db.Step, def *workflow.Definition, spec *workflow.Step,
 	outcome *VoteOutcome, nowMS int64,
 ) error {
+	// The step this panel was asked about, if any (DKT-1901). Read BEFORE the
+	// transaction opens, for the reason every other pooled read here is: inside
+	// it the pooled connection would deadlock rather than fail.
+	triaged, err := triageRouter(conn, step, def)
+	if err != nil {
+		return err
+	}
+
+	// A proposal retired WITHOUT a tally routes nothing on its own: no verdict
+	// was reached, so the vote step keeps waiting exactly as it always has. The
+	// one thing it must do is release a step suspended behind it, which is the
+	// only reason this function is reached for a closed proposal at all.
+	if outcome.Verdict == "" {
+		if triaged == nil {
+			return nil
+		}
+		tx, err := conn.Begin()
+		if err != nil {
+			return fmt.Errorf("releasing the step %s triaged: %w", step.Instance, err)
+		}
+		defer tx.Rollback()
+		if err := releaseUntriaged(
+			tx, step, triaged, spec, def, outcome, nowMS); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
 	routing := RoutingPass
-	if outcome.Verdict == VerdictFail {
+	concernReason := ""
+	var concernClass db.ParkClass
+	// §8.4's commit is accepted only from approved and casting closes at the
+	// tally, so a committed proposal carries the approved tally's cast set and
+	// is routed as one.
+	approvedTally := outcome.Status == model.ProposalStatusApproved ||
+		outcome.Status == model.ProposalStatusCommitted
+	switch {
+	case triaged != nil && triageDecided(outcome):
+		// A TRIAGE PANEL THAT REACHED A VERDICT IS DONE, whichever way it
+		// voted (DKT-1901). A rejection is not this step's own failure — it is
+		// the answer it was convened to give, and `on_fail_routes` applies it
+		// below. Routing the panel per its `on_fail` here would park the panel
+		// on the question it just answered, and R2b would then hold every step
+		// of the issue behind it: the triage lane would park exactly what it
+		// exists to keep moving.
+		//
+		// The panel's own `on_fail` is reached only through the case below,
+		// where the tally produced NO verdict and the mapping has nothing to
+		// apply. That is the backstop the spec documents.
+		routing = RoutingPass
+	case outcome.Verdict == VerdictFail:
 		routing = spec.EffectiveOnFail()
+	case approvedTally && triaged == nil && len(spec.Threshold) > 0:
+		// DKT-545: an APPROVED tally with a declared `threshold` is asked one
+		// more question — over the CAST SET, not the tally: an approval built
+		// on approve-with-concerns casts can route into the same revise loop
+		// a rejection does, instead of the concerns evaporating. No threshold
+		// declared (every pre-existing workflow) means no evaluation and the
+		// exact prior behavior. A COMMITTED proposal is asked it too, so a
+		// commit landing before routing runs cannot route a tally past the
+		// threshold its approval would meet. A triage panel never is: an
+		// approved panel takes the arm above, and a committed one must not
+		// diverge from it. Evaluated OUTSIDE the transaction below, like
+		// every other pooled read in this function.
+		result, err := evaluateVoteThreshold(conn, step, spec, outcome.ProposalID)
+		if err != nil {
+			return err
+		}
+		if result.Routing != RoutingPass {
+			routing, concernReason = result.Routing, result.Reason
+			concernClass = db.ParkClassThresholdRouted
+		}
+	}
+
+	// A LONE REJECT UNDER A KEYED RULE PARKS THE STEP (DKT-2449). The tally is
+	// a weighted mean and approve-with-concerns adds to it, so a dissenting
+	// seat's findings left no trace in routing once the score cleared the
+	// threshold.
+	//
+	// Placed AFTER the switch and guarded on `routing == RoutingPass`, which
+	// is what makes the park strictly ADDITIVE: it can only ever displace a
+	// pass. Every triage panel is excluded explicitly, decided or committed,
+	// because parking it on the question it just answered is what DKT-1901
+	// forbids; a rejected tally keeps its `on_fail` because the second arm
+	// already moved `routing`; and a `threshold` match on `fix-loop` or
+	// `waiting-human` keeps its own routing for the same reason.
+	//
+	// A COMMITTED proposal is parked exactly as an APPROVED one is: §8.4's
+	// commit is accepted only from approved, so its cast set is the approved
+	// tally's, and a commit landing before routing runs (a paused run holds
+	// routing indefinitely) must not pass a dissent the rule asked to see.
+	//
+	// `routing == RoutingPass` covers both a tally no threshold predicate
+	// matched and one where the workflow author's predicate explicitly
+	// matched `pass`. The park fires in both cases: the operator's
+	// hold_on_dissent outranks an author's explicit `pass`, so a declared
+	// threshold can never silence a dissent the operator asked to see.
+	if routing == RoutingPass && approvedTally && triaged == nil {
+		dissentReason, err := dissentHold(conn, outcome.ProposalID)
+		if err != nil {
+			return err
+		}
+		if dissentReason != "" {
+			routing, concernReason = workflow.OnFailWaitingHuman, dissentReason
+			concernClass = db.ParkClassDissentHeld
+		}
 	}
 
 	// A MATERIALIZED held step that PASSED resolves its cluster's payload in
@@ -421,13 +681,11 @@ func routeVoteStep(
 
 	// The tally is announced before the routing commits, carrying the score the
 	// EXISTING computation produced — this stage reads it, never recomputes it.
-	score := "no score"
-	if outcome.Score != nil {
-		score = strconv.FormatFloat(*outcome.Score, 'f', -1, 64)
+	detail, err := voteTallyDetail(conn, outcome)
+	if err != nil {
+		return err
 	}
-	if err := recordVoteEvent(conn, EventVoteTallied, step,
-		fmt.Sprintf("%s %s (%s)", model.FormatProposalID(outcome.ProposalID),
-			outcome.Status, score), nowMS); err != nil {
+	if err := recordVoteEvent(conn, EventVoteTallied, step, detail, nowMS); err != nil {
 		return err
 	}
 
@@ -443,7 +701,22 @@ func routeVoteStep(
 	// with nothing downstream to consume it: RUN-25's security-vote rejected
 	// with a reproduced blocker, routed `fix-loop`, and the issue closed done
 	// with no fix step ever created.
+	// The class is the one the branch that chose the routing above named when
+	// it decided, never read from the text it wrote. A failed verdict is a
+	// rejection. An approved tally parks for one of two reasons: a declared
+	// threshold routed it away from `pass` (a threshold park), or the rule's
+	// hold_on_dissent held it on a `reject` cast (a dissent hold).
+	class := db.ParkClassVoteRejected
+	if concernClass != "" {
+		class = concernClass
+	}
 	reason := string(outcome.Status)
+	if concernReason != "" {
+		// The concern routing's record names the matched predicate (or the T3
+		// park's cause), because "approved" alone would read as a pass to
+		// anyone auditing why the step did not route pass.
+		reason = concernReason
+	}
 	var loop *LoopOutcome
 	routing, loop, err = applyFixLoop(tx, step, def, routing, nowMS)
 	if err != nil {
@@ -452,11 +725,23 @@ func routeVoteStep(
 	if loop != nil && loop.Reason != "" {
 		reason = loop.Reason
 	}
+	if bound, ok := loopBoundClass(loop); ok {
+		class = bound
+	}
 	status := statusForRouting(routing)
 
-	if err := db.SetStepRoutingTx(tx, step.ID,
-		routingRecord(routing, reason), status, nowMS); err != nil {
-		return err
+	// A triage panel whose outcome the mapping has no key for (an operator's
+	// manual commit, §8.4, or a decided verdict `on_fail_routes` does not
+	// name) is disposed of by releaseUntriaged below, which writes its row
+	// `skipped` and records that as its event. Writing or announcing a routing
+	// for it here would contradict that row.
+	_, mapped := triageRouting(spec, outcome)
+	releasedByPanel := triaged != nil && !mapped
+	if !releasedByPanel {
+		if err := db.SetStepRoutingTx(tx, step.ID,
+			routing, reason, status, class, nowMS); err != nil {
+			return err
+		}
 	}
 	if routingStep != nil {
 		// AFTER the routing above, so this cluster's own verdict is visible to
@@ -477,13 +762,32 @@ func routeVoteStep(
 			return err
 		}
 	}
-	if err := recordEvent(tx, eventRecord{
-		Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
-		IssueID: step.IssueID, Data: routing, AtMS: nowMS,
-	}); err != nil {
-		return err
+	// THE PANEL'S VERDICT REACHES THE STEP IT TRIAGED (DKT-1901), in this same
+	// transaction: a verdict recorded without its consequence is the defect
+	// DKT-168 fixed for `fix-loop`, and it would leave the triaged step
+	// suspended with nothing left to resolve it.
+	//
+	// A REJECTION IS A DECISION and applies its mapped routing: the panel read
+	// the failure and declined to endorse the work, which is exactly one of the
+	// two verdicts the mapping is keyed on. An outcome the mapping has no
+	// routing for — an operator's manual commit (§8.4), or a verdict
+	// `on_fail_routes` does not name — is disposed of by this vote step's own
+	// `on_fail` instead, rather than this guessing which routing was meant.
+	if triaged != nil {
+		if err := applyTriageOutcome(
+			tx, step, spec, def, triaged, outcome, nowMS); err != nil {
+			return err
+		}
 	}
-	if err := reconcileIssueAndRun(tx, step, spec, routing, nowMS); err != nil {
+	if !releasedByPanel {
+		if err := recordEvent(tx, eventRecord{
+			Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
+			IssueID: step.IssueID, Data: routingRecord(routing, reason), AtMS: nowMS,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
 		return err
 	}
 	return tx.Commit()

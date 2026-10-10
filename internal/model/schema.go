@@ -41,12 +41,23 @@ type Schema struct {
 	Builtin     bool
 	CreatedAtMS int64
 	RowVersion  int
+	// DeprecatedAtMS is when this version was RETIRED FROM SERVICE, or 0 when
+	// it is still in service (v36).
+	//
+	// Retirement is a reference-time filter, not a retraction: a retired row
+	// is never deleted, stays readable by explicit `@version`, and a run that
+	// already pinned it keeps validating payloads against it. The only thing
+	// it stops doing is accepting NEW `payload` references at registration.
+	DeprecatedAtMS int64
 }
 
 // Ref renders the `name@version` identity a run pins.
 func (s *Schema) Ref() string {
 	return fmt.Sprintf("%s@%d", s.Name, s.Version)
 }
+
+// Deprecated reports whether this version has been retired from service.
+func (s *Schema) Deprecated() bool { return s.DeprecatedAtMS > 0 }
 
 // OrderedFields lists the fields the schema declares an order for, sorted.
 //
@@ -120,20 +131,26 @@ type schemaVersionedJSON struct {
 	Builtin       bool     `json:"builtin"`
 	CreatedAtMS   int64    `json:"created_at_ms"`
 	RowVersion    int      `json:"row_version"`
+	// DeprecatedAtMS marks a version retired from service (v36). Omitted while
+	// the version is in service, per the "a field that is not a fact does not
+	// appear" rule, and the same key `workflow`'s v2 shape uses. v2 only: v1
+	// is frozen and never gains fields.
+	DeprecatedAtMS int64 `json:"deprecated_at_ms,omitempty"`
 }
 
 // VersionedPayload implements output.Versioned.
 func (s *Schema) VersionedPayload() any {
 	base := s.wire()
 	return schemaVersionedJSON{
-		Name:          base.Name,
-		Version:       base.Version,
-		SourcePath:    base.SourcePath,
-		SourceSHA256:  base.SourceSHA256,
-		OrderedFields: base.OrderedFields,
-		Builtin:       base.Builtin,
-		CreatedAtMS:   base.CreatedAtMS,
-		RowVersion:    s.RowVersion,
+		Name:           base.Name,
+		Version:        base.Version,
+		SourcePath:     base.SourcePath,
+		SourceSHA256:   base.SourceSHA256,
+		OrderedFields:  base.OrderedFields,
+		Builtin:        base.Builtin,
+		CreatedAtMS:    base.CreatedAtMS,
+		RowVersion:     s.RowVersion,
+		DeprecatedAtMS: s.DeprecatedAtMS,
 	}
 }
 

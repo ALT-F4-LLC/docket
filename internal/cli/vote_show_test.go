@@ -3,11 +3,14 @@ package cli
 import (
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -174,5 +177,322 @@ func TestVoteShow_OmitsLinkedDocsWhenEmpty(t *testing.T) {
 				t.Errorf("empty proposal should omit Linked Docs section:\n%s", buf.String())
 			}
 		})
+	}
+}
+
+// sealedProposal opens a proposal under the sealed rendering rule (DKT-2447)
+// with room for two casts, so one cast leaves it open and the second closes
+// it — the two states the sealed tests read across.
+func sealedProposal(t *testing.T, conn *sql.DB) int {
+	t.Helper()
+	id, err := db.CreateProposal(conn, &model.Proposal{
+		Description:    "Sealed ballot",
+		Criticality:    model.CriticalityMedium,
+		Status:         model.ProposalStatusOpen,
+		RequiredVoters: 2,
+		Threshold:      0.5,
+		Sealed:         true,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	return id
+}
+
+// castSealedSeat casts one fully-populated ballot: a verdict, both weights, a
+// summary and structured findings — every field a sibling seat could anchor
+// on, so a leak of any one of them is visible.
+func castSealedSeat(t *testing.T, conn *sql.DB, pid int, voter string) {
+	t.Helper()
+	_, err := db.CastVote(conn, &model.Vote{
+		ProposalID:      pid,
+		VoterName:       voter,
+		VoterRole:       "reviewer",
+		Verdict:         model.VerdictApproveWithConcerns,
+		Confidence:      0.9,
+		DomainRelevance: 0.8,
+		Summary:         "the summary of " + voter,
+		FindingsJSON:    &model.Findings{Concerns: []model.Finding{{Text: "a concern from " + voter}}},
+	})
+	testsupport.Must(t, err, "CastVote(%s): %v", voter, err)
+}
+
+// voteShowData runs `vote show --json` and returns the envelope's data object
+// with its votes decoded generically, so a test can ask which KEYS are on the
+// wire rather than which values a typed decode defaulted.
+func voteShowData(t *testing.T, conn *sql.DB, pid int) (map[string]json.RawMessage, []map[string]any) {
+	t.Helper()
+	w, buf := bufWriter(true)
+	err := runVoteShow(cmdWithDB(conn), []string{model.FormatProposalID(pid)}, w)
+	testsupport.Must(t, err, "runVoteShow: %v", err)
+
+	var env struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	var votes []map[string]any
+	if err := json.Unmarshal(env.Data["votes"], &votes); err != nil {
+		t.Fatalf("unmarshal votes: %v\n%s", err, env.Data["votes"])
+	}
+	return env.Data, votes
+}
+
+// sealedCastFields are the vote keys a sealed-open proposal must NOT put on
+// the wire: everything a sibling seat could read a verdict or its reasoning
+// out of.
+var sealedCastFields = []string{
+	"verdict", "confidence", "domain_relevance", "effective_weight",
+	"findings", "findings_json", "summary",
+}
+
+// DKT-2447: a proposal opened sealed withholds every cast's verdict, weights,
+// findings and summary from `vote show --json` while it is open — a seat that
+// reads the ballot after a sibling has cast sees only WHO has cast — and
+// carries all of them once the tally closes it.
+func TestVoteShowJSON_SealedProposalWithholdsCastsUntilFinalized(t *testing.T) {
+	conn := newTestDB(t)
+	pid := sealedProposal(t, conn)
+
+	castSealedSeat(t, conn, pid, "seat-a")
+	data, votes := voteShowData(t, conn, pid)
+
+	// Errorf, not Fatalf: the leak checks below are the criterion, and they
+	// must still run (and fail for the leak) on a tree that has no `sealed`
+	// key at all.
+	if string(data["status"]) != `"open"` || string(data["sealed"]) != `true` {
+		t.Errorf("after one cast: status=%s sealed=%s, want open and true",
+			data["status"], data["sealed"])
+	}
+	if len(votes) != 1 || votes[0]["voter_name"] != "seat-a" {
+		t.Fatalf("open sealed proposal lists votes %v, want one entry naming seat-a", votes)
+	}
+	for _, key := range sealedCastFields {
+		if _, present := votes[0][key]; present {
+			t.Errorf("open sealed proposal carries %q on the wire: %s", key, data["votes"])
+		}
+	}
+	for _, leaked := range []string{"the summary of seat-a", "a concern from seat-a",
+		string(model.VerdictApproveWithConcerns)} {
+		if strings.Contains(string(data["votes"]), leaked) {
+			t.Errorf("open sealed proposal leaks %q: %s", leaked, data["votes"])
+		}
+	}
+
+	castSealedSeat(t, conn, pid, "seat-b")
+	data, votes = voteShowData(t, conn, pid)
+
+	if string(data["status"]) != `"approved"` {
+		t.Fatalf("after quorum: status=%s, want approved", data["status"])
+	}
+	if len(votes) != 2 {
+		t.Fatalf("closed proposal lists %d votes, want 2: %s", len(votes), data["votes"])
+	}
+	for _, v := range votes {
+		for _, key := range sealedCastFields {
+			if _, present := v[key]; !present {
+				t.Errorf("closed proposal omits %q for %v: %s", key, v["voter_name"], data["votes"])
+			}
+		}
+		if v["verdict"] != string(model.VerdictApproveWithConcerns) {
+			t.Errorf("closed proposal verdict for %v = %v, want %s",
+				v["voter_name"], v["verdict"], model.VerdictApproveWithConcerns)
+		}
+		if v["summary"] != "the summary of "+v["voter_name"].(string) {
+			t.Errorf("closed proposal summary for %v = %v", v["voter_name"], v["summary"])
+		}
+	}
+}
+
+// The human rendering of a sealed-open proposal names who has cast and how
+// many casts are in, and nothing of what they cast — in both the styled and
+// the plain renderer.
+func TestVoteShow_SealedProposalRendersOnlyVoterNamesWhileOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		noColor bool
+	}{
+		{"styled", false},
+		{"plain", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noColor {
+				t.Setenv("NO_COLOR", "1")
+			} else {
+				t.Setenv("TERM", "xterm-256color")
+			}
+			conn := newTestDB(t)
+			pid := sealedProposal(t, conn)
+			castSealedSeat(t, conn, pid, "seat-a")
+
+			w, buf := bufWriter(false)
+			err := runVoteShow(cmdWithDB(conn), []string{model.FormatProposalID(pid)}, w)
+			testsupport.Must(t, err, "runVoteShow: %v", err)
+			out := buf.String()
+
+			for _, want := range []string{"seat-a", "1/2", "sealed"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("sealed-open rendering lacks %q:\n%s", want, out)
+				}
+			}
+			for _, leaked := range []string{string(model.VerdictApproveWithConcerns),
+				"the summary of seat-a", "a concern from seat-a", "conf=", "weight="} {
+				if strings.Contains(out, leaked) {
+					t.Errorf("sealed-open rendering leaks %q:\n%s", leaked, out)
+				}
+			}
+
+			castSealedSeat(t, conn, pid, "seat-b")
+			w, buf = bufWriter(false)
+			err = runVoteShow(cmdWithDB(conn), []string{model.FormatProposalID(pid)}, w)
+			testsupport.Must(t, err, "runVoteShow after quorum: %v", err)
+			out = buf.String()
+			for _, want := range []string{string(model.VerdictApproveWithConcerns),
+				"the summary of seat-a", "a concern from seat-b"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("closed rendering lacks %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// `vote result --json` follows the same rule as `vote show --json` (DKT-2447):
+// while a sealed proposal is open its votes array names the casters and
+// carries no verdict, weights, findings or summary; the count and quorum
+// fields still answer "is the ballot still waiting".
+func TestVoteResultJSON_SealedProposalWithholdsCastsUntilFinalized(t *testing.T) {
+	conn := newTestDB(t)
+	pid := sealedProposal(t, conn)
+	castSealedSeat(t, conn, pid, "seat-a")
+
+	result := func() (map[string]json.RawMessage, []map[string]any) {
+		t.Helper()
+		w, buf := bufWriter(true)
+		err := runVoteResult(cmdWithDB(conn), []string{model.FormatProposalID(pid)}, w)
+		testsupport.Must(t, err, "runVoteResult: %v", err)
+		var env struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+		}
+		var votes []map[string]any
+		if err := json.Unmarshal(env.Data["votes"], &votes); err != nil {
+			t.Fatalf("unmarshal votes: %v\n%s", err, env.Data["votes"])
+		}
+		return env.Data, votes
+	}
+
+	data, votes := result()
+	if string(data["sealed"]) != `true` || string(data["votes_cast"]) != `1` ||
+		string(data["quorum_reached"]) != `false` {
+		t.Errorf("sealed-open result: sealed=%s votes_cast=%s quorum_reached=%s",
+			data["sealed"], data["votes_cast"], data["quorum_reached"])
+	}
+	if len(votes) != 1 || votes[0]["voter_name"] != "seat-a" {
+		t.Fatalf("sealed-open result votes = %v, want one entry naming seat-a", votes)
+	}
+	for _, key := range sealedCastFields {
+		if _, present := votes[0][key]; present {
+			t.Errorf("sealed-open result carries %q: %s", key, data["votes"])
+		}
+	}
+
+	castSealedSeat(t, conn, pid, "seat-b")
+	data, votes = result()
+	if string(data["status"]) != `"approved"` || len(votes) != 2 {
+		t.Fatalf("after quorum: status=%s votes=%d, want approved and 2", data["status"], len(votes))
+	}
+	for _, v := range votes {
+		if v["verdict"] != string(model.VerdictApproveWithConcerns) || v["summary"] == nil {
+			t.Errorf("closed result withholds %v's cast: %v", v["voter_name"], v)
+		}
+	}
+}
+
+// TestVoteShowJSON_CarriesEachSeatsUsage is DKT-2757: on a proposal that is
+// not sealed-open, every cast carries `usage` from its own vote_usage rows
+// and `usage_source` naming each unit's source, so a mixed seat shows its
+// reported and back-filled units apart; a seat with no rows carries `{}` for
+// both. A sealed-open proposal carries neither.
+func TestVoteShowJSON_CarriesEachSeatsUsage(t *testing.T) {
+	conn := newTestDB(t)
+	pid, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "usage on the wire", Criticality: model.CriticalityMedium,
+		Status: model.ProposalStatusOpen, RequiredVoters: 3, Threshold: 0.5,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	cast := func(voter string, usage map[string]float64) {
+		t.Helper()
+		_, err := db.CastVote(conn, &model.Vote{
+			ProposalID: pid, VoterName: voter, VoterRole: "reviewer",
+			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8,
+			Usage: usage,
+		})
+		testsupport.Must(t, err, "CastVote(%s): %v", voter, err)
+	}
+	cast("seat-a", map[string]float64{"output_tokens": 10, "tool_uses": 3})
+	cast("seat-b", nil)
+	err = engine.NewEngine().BackfillVoteUsage(conn, pid, []engine.VoteBackfillRow{
+		{Voter: "seat-a", Unit: "input_tokens", Quantity: 5},
+	}, "", model.NowMS())
+	testsupport.Must(t, err, "BackfillVoteUsage: %v", err)
+
+	_, votes := voteShowData(t, conn, pid)
+	want := map[string][2]map[string]any{
+		"seat-a": {
+			{"output_tokens": 10.0, "tool_uses": 3.0, "input_tokens": 5.0},
+			{"output_tokens": "reported", "tool_uses": "reported", "input_tokens": "backfilled"},
+		},
+		"seat-b": {{}, {}},
+	}
+	if len(votes) != 2 {
+		t.Fatalf("vote show lists %d casts, want 2", len(votes))
+	}
+	for _, v := range votes {
+		voter, _ := v["voter_name"].(string)
+		w, ok := want[voter]
+		if !ok {
+			t.Fatalf("unexpected cast %v", v)
+		}
+		if !reflect.DeepEqual(v["usage"], w[0]) {
+			t.Errorf("%s usage = %#v, want %#v", voter, v["usage"], w[0])
+		}
+		if !reflect.DeepEqual(v["usage_source"], w[1]) {
+			t.Errorf("%s usage_source = %#v, want %#v", voter, v["usage_source"], w[1])
+		}
+	}
+
+	// The same keys survive the v2 envelope.
+	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
+	testsupport.Must(t, runVoteShow(cmdWithDB(conn), []string{model.FormatProposalID(pid)}, w),
+		"runVoteShow --json=v2: %v", nil)
+	var v2 struct {
+		Data struct {
+			Votes []map[string]any `json:"votes"`
+		} `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &v2), "decoding v2: %v", nil)
+	if len(v2.Data.Votes) != 2 {
+		t.Fatalf("v2 vote show lists %d casts, want 2: %s", len(v2.Data.Votes), buf.String())
+	}
+	for _, v := range v2.Data.Votes {
+		w := want[v["voter_name"].(string)]
+		if !reflect.DeepEqual(v["usage"], w[0]) || !reflect.DeepEqual(v["usage_source"], w[1]) {
+			t.Errorf("v2 cast %v: usage %#v source %#v, want %#v %#v",
+				v["voter_name"], v["usage"], v["usage_source"], w[0], w[1])
+		}
+	}
+
+	sealed := sealedProposal(t, conn)
+	castSealedSeat(t, conn, sealed, "seat-a")
+	_, sealedVotes := voteShowData(t, conn, sealed)
+	for _, v := range sealedVotes {
+		for _, key := range []string{"usage", "usage_source"} {
+			if _, ok := v[key]; ok {
+				t.Errorf("sealed-open cast carries %q: %v", key, v)
+			}
+		}
 	}
 }

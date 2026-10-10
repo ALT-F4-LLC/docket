@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // Dispatch — §5's clauses, one test per clause group (TDD §6.7).
@@ -132,6 +134,180 @@ func TestDispatchOpenDrivesActionSteps(t *testing.T) {
 	if !sawConsequence || !sawExecutor {
 		t.Fatalf("manifest rows = %+v, want verify@0 (the driven action's "+
 			"consequence, issue A) and implement@0 (executor, issue B)", m.Rows)
+	}
+}
+
+// cascadeDriveSrc: an action step whose routing readies a second action step
+// and a vote step. The human `decide` ahead of it lets a test choose whether
+// `reduce` becomes ready before the open or under an open manifest.
+const cascadeDriveSrc = `
+[pipeline]
+name = "cascade-drive"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "seed"
+after = []
+executor = "x"
+emits = "findings"
+
+[[step]]
+name = "decide"
+after = ["seed"]
+type = "human"
+on_fail = "skip"
+
+[[step]]
+name = "reduce"
+after = ["decide"]
+action = "aggregate"
+inputs = ["seed.findings"]
+params = { field = "severity", method = "median", output = "findings" }
+payload = "findings@1"
+
+[[step]]
+name = "rereduce"
+after = ["reduce"]
+action = "aggregate"
+inputs = ["seed.findings"]
+params = { field = "severity", method = "median", output = "findings" }
+payload = "findings@1"
+
+[[step]]
+name = "poll"
+after = ["reduce"]
+type = "vote"
+voters = ["a", "b"]
+vote_rule = "majority"
+on_fail = "skip"
+`
+
+// cascadeRun activates a run of cascadeDriveSrc with `seed` complete, so the
+// next approval of `decide` readies `reduce` without driving it.
+func cascadeRun(t *testing.T, e *Engine) (*sql.DB, int) {
+	t.Helper()
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(cascadeDriveSrc), "cascade-drive.toml")
+	issue := createIssue(t, conn, "cascade drive", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	return conn, run.ID
+}
+
+// approveDecide approves `decide@0`, readying `reduce@0` undriven.
+func approveDecide(t *testing.T, conn *sql.DB, e *Engine) {
+	t.Helper()
+	err := e.DecideStep(conn, stepIDByInstance(t, conn, "decide@0"), true, "ok", nowMS)
+	testsupport.Must(t, err, "approve decide@0: %v", err)
+}
+
+// countingActionRunner forwards to a real runner and counts executions per
+// step instance, so a test can assert how often the engine ran an action
+// without replacing the computation its routing depends on.
+type countingActionRunner struct {
+	inner ActionRunner
+	runs  map[string]int
+}
+
+func countActions(e *Engine) *countingActionRunner {
+	c := &countingActionRunner{inner: e.Actions, runs: map[string]int{}}
+	e.Actions = c
+	return c
+}
+
+func (c *countingActionRunner) Run(
+	ctx context.Context, a ActionSpec, sc StepContext,
+) (ActionResult, error) {
+	c.runs[sc.Instance]++
+	return c.inner.Run(ctx, a, sc)
+}
+
+// TestDispatchOpenDrivesACascadedActionStep: an action the open drives routes
+// and readies a second action step. The open keeps driving until nothing
+// routes, so the second action has run and the manifest carries no ready
+// action row for it.
+func TestDispatchOpenDrivesACascadedActionStep(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	m := openDispatch(t, conn, runID, 0, nowMS)
+
+	if got := stepStatus(t, conn, "rereduce@0"); got != db.StepDone {
+		t.Errorf("rereduce@0 is %q after dispatch open, want %q — reduce@0's "+
+			"routing readied it inside the same call", got, db.StepDone)
+	}
+	for _, r := range m.Rows {
+		if r.Instance == "rereduce@0" && r.Kind == workflow.ClassAction && r.Status == db.StepReady {
+			t.Errorf("the manifest carries rereduce@0 as a ready action row; " +
+				"no relay will ever execute it")
+		}
+	}
+}
+
+// TestDispatchOpenOpensACascadedVoteProposal: an action the open drives routes
+// and readies a vote step. The open drives that vote step too, so its manifest
+// row carries the proposal a panel casts on.
+func TestDispatchOpenOpensACascadedVoteProposal(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	m := openDispatch(t, conn, runID, 0, nowMS)
+
+	poll, err := db.GetStep(conn, stepIDByInstance(t, conn, "poll@0"))
+	testsupport.Must(t, err, "reading poll@0: %v", err)
+	id, err := findVoteProposal(conn, poll)
+	testsupport.Must(t, err, "finding poll@0's proposal: %v", err)
+	if id == 0 {
+		t.Fatal("poll@0 has no proposal after dispatch open")
+	}
+	var pollRow *model.StepRow
+	for i := range m.Rows {
+		if m.Rows[i].Instance == "poll@0" {
+			pollRow = &m.Rows[i]
+		}
+	}
+	if pollRow == nil {
+		t.Fatalf("manifest rows %v carry no poll@0", instancesOf(m.Rows))
+	}
+	if want := model.FormatProposalID(id); pollRow.Proposal != want {
+		t.Errorf("poll@0 row proposal = %q, want %q", pollRow.Proposal, want)
+	}
+}
+
+// TestDispatchOpenRunsAnUncascadedActionOnce: with one ready action whose
+// routing readies nothing engine-run, the open executes it exactly once.
+func TestDispatchOpenRunsAnUncascadedActionOnce(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(extendDrivesSrc), "extend-drives.toml")
+	issue := createIssue(t, conn, "uncascaded", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+	counter := countActions(e)
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	approveDecide(t, conn, e)
+
+	_, err = e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
+	testsupport.Must(t, err, "dispatch open: %v", err)
+
+	if got := counter.runs["reduce@0"]; got != 1 {
+		t.Errorf("reduce@0 ran %d times during dispatch open, want 1", got)
+	}
+	if len(counter.runs) != 1 {
+		t.Errorf("actions run = %v, want only reduce@0", counter.runs)
 	}
 }
 
@@ -347,9 +523,16 @@ func TestManifestLimitSlicesAfterOrdering(t *testing.T) {
 	}
 	abandon(t, conn, runID, nowMS)
 
+	// DKT-2070: the cut's unit is the LANE, so `--limit 1` admits the first
+	// ordered issue's whole in-offer closure — smaller than one closure means
+	// the first closure whole — and never a second issue's rows.
 	limited := openDispatch(t, conn, runID, 1, nowMS)
-	if len(limited.Rows) != 1 {
-		t.Fatalf("--limit 1 produced %d rows", len(limited.Rows))
+	for _, r := range limited.Rows {
+		if r.Issue != full.Rows[0].Issue {
+			t.Fatalf("--limit 1 admitted a row for %s beside the first ordered "+
+				"issue %s — the cut must never start a lane it cannot finish",
+				r.Issue, full.Rows[0].Issue)
+		}
 	}
 	if limited.Rows[0].Issue != full.Rows[0].Issue {
 		t.Errorf("--limit 1 kept %s (%s); the ordered ready set starts with %s "+
@@ -362,8 +545,20 @@ func TestManifestLimitSlicesAfterOrdering(t *testing.T) {
 
 func abandon(t *testing.T, conn *sql.DB, runID int, at int64) {
 	t.Helper()
-	_, err := NewEngine().AbandonDispatch(conn, runID, "", at)
+	_, err := abandonAsConductor(conn, NewEngine(), runID, "", at)
 	testsupport.Must(t, err, "dispatch abandon: %v", err)
+}
+
+// abandonAsConductor is `dispatch abandon` by the suite's fixed conductor,
+// the way the ruling wrappers seat and present testConductorToken.
+func abandonAsConductor(
+	conn *sql.DB, e *Engine, runID int, reason string, at int64,
+) (*CloseOutcome, error) {
+	if err := seatTestConductor(conn, runID); err != nil {
+		return nil, err
+	}
+	return e.AbandonDispatchWith(conn, runID, AbandonDispatchOptions{
+		Reason: reason, Token: testConductorToken, NowMS: at})
 }
 
 // ---------------------------------------------------------------------------
@@ -685,12 +880,20 @@ func TestVerifyLimitedManifestKeepsTheFixerAndVerifies(t *testing.T) {
 			"closure (8 rows), got %d: %+v", len(unlimited.Steps), unlimited.Steps)
 	}
 
+	// DKT-2070 superseded DKT-38's row prefix with a LANE-complete cut: these
+	// eight rows are one issue's single in-offer closure, so a limit below it
+	// admits the closure whole rather than a stage-ordered prefix of it. The
+	// fixer still leads its judges, and the manifest reports the overrun.
 	limited := openDispatch(t, conn, run.ID, 2, nowMS)
-	if len(limited.Rows) != 2 ||
+	if len(limited.Rows) != 8 ||
 		limited.Rows[0].Instance != "fix@1" || limited.Rows[0].Stage != 0 ||
 		limited.Rows[1].Stage != 1 {
-		t.Fatalf("--limit 2 must keep the stage-order prefix — fix@1 at "+
-			"stage 0, one judge at stage 1 — got: %+v", limited.Rows)
+		t.Fatalf("--limit 2 must admit the single lane whole, fix@1 at stage 0 "+
+			"ahead of its judges — got: %+v", limited.Rows)
+	}
+	if limited.Total != 8 || limited.Truncated {
+		t.Errorf("limited manifest total=%d truncated=%v, want 8 and false — "+
+			"the whole ready set was admitted", limited.Total, limited.Truncated)
 	}
 
 	result, mismatch, err := NewEngine().VerifyDispatch(conn, run.ID, nowMS)
@@ -1146,7 +1349,8 @@ func TestDiscrepancyD2RequiresDispatchHistory(t *testing.T) {
 	openDispatch(t, conn, runID, 0, nowMS)
 	abandon(t, conn, runID, nowMS)
 
-	ds := discrepanciesAt(t, conn, runID, nowMS)
+	// Past the grace: within it the step is usage PENDING (D7), not missing.
+	ds := discrepanciesAt(t, conn, runID, nowMS+1000+graceMS(t, conn)+1)
 	var found bool
 	for _, d := range ds {
 		if d.Kind == DiscrepancyMissingUsage {
@@ -1252,24 +1456,40 @@ func completeAStepWithoutUsage(t *testing.T, conn *sql.DB, runID int) string {
 	return instance
 }
 
-// finishWithoutUsage drives one instance to `done` with no ledger rows.
+// finishWithoutUsage drives one instance to `done` at nowMS+1000 with no
+// ledger rows.
+func finishWithoutUsage(t *testing.T, conn *sql.DB, instance string) {
+	t.Helper()
+	finishWithoutUsageAt(t, conn, instance, nowMS+1000)
+}
+
+// finishWithoutUsageAt drives one instance to `done` at `at` with no ledger
+// rows.
 //
-// The status is set directly rather than driven through the saga: the probe asks
-// about a TERMINAL step with no ledger rows, and the saga would pull in gates and
-// artifacts these tests are not about. `updated_at_ms` is set PAST the run's
-// activation so D3's historical exclusion does not fire — which is the one
-// detail that makes this a D2 fixture rather than a D3 one.
+// The status moves through db.SetStepStatusTx rather than the saga: the probe
+// asks about a TERMINAL step with no ledger rows, and the saga would pull in
+// gates and artifacts these tests are not about. SetStepStatusTx is the write
+// that stamps `recorded_at_ms`, D7's clock, and `updated_at_ms`, D3's. `at`
+// must fall PAST the run's activation so D3's historical exclusion does not
+// fire — which is the one detail that makes this a D2 fixture rather than a D3
+// one.
 //
 // `attempt` is set to 1 for the same class of reason (DKT-315): D2 is about a
 // step that RAN and did not report, and `attempt` counts claims, so a row left
 // at 0 describes a step no worker ever held — which owes nothing and is not a
 // discrepancy. Setting the status without it modelled a state no run can
 // reach.
-func finishWithoutUsage(t *testing.T, conn *sql.DB, instance string) {
+func finishWithoutUsageAt(t *testing.T, conn *sql.DB, instance string, at int64) {
 	t.Helper()
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, nowMS+1000, stepIDByInstance(t, conn, instance))
+	id := stepIDByInstance(t, conn, instance)
+	execSQL(t, conn, `UPDATE steps SET attempt = 1 WHERE id = ?`, id)
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	err = db.SetStepStatusTx(tx, id, db.StepDone, at, 0)
+	testsupport.Must(t, err, "finishing %s: %v", instance, err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 }
 
 // TestDiscrepancyD3ExcludesHistoricalSteps is D3: a step that reached its
@@ -1347,6 +1567,31 @@ func TestDiscrepancyD5ExemptsActionAndHumanSteps(t *testing.T) {
 // §5.6 — close and abandon
 // ---------------------------------------------------------------------------
 
+// claimPastGraceWithLiveLease arranges the ONE state in which a close still
+// reports D1: a step claimed long enough ago to be past `dispatch.grace` whose
+// lease has NOT lapsed. It claims with a TTL of twice the grace and returns the
+// instant to close at, one millisecond past the grace.
+//
+// A claim at the default TTL cannot produce this state, because core's default
+// `lease.ttl.default` equals `dispatch.grace`: the lease lapses exactly as the
+// grace does, and close reaps it before probing.
+func claimPastGraceWithLiveLease(
+	t *testing.T, conn *sql.DB, instance string,
+) (at int64) {
+	t.Helper()
+	grace := graceMS(t, conn)
+	claim, err := ClaimStep(conn, stepIDByInstance(t, conn, instance),
+		ClaimOptions{Owner: "worker", TTLOverride: 2 * grace, NowMS: nowMS})
+	testsupport.Must(t, err, "claim %s: %v", instance, err)
+
+	at = nowMS + grace + 1
+	if claim.LeaseExpiresMS <= at {
+		t.Fatalf("premise: the lease must still be live at %d, expires at %d",
+			at, claim.LeaseExpiresMS)
+	}
+	return at
+}
+
 // TestCloseRefusesPerDiscrepancy is P18: `dispatch close` refuses while a
 // discrepancy exists, ENUMERATING each with its resolution.
 func TestCloseRefusesPerDiscrepancy(t *testing.T) {
@@ -1355,20 +1600,88 @@ func TestCloseRefusesPerDiscrepancy(t *testing.T) {
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
 
 	instance := manifest.Rows[0].Instance
-	claimInstance(t, conn, instance, nowMS)
-	past := nowMS + graceMS(t, conn) + 1
+	past := claimPastGraceWithLiveLease(t, conn, instance)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, false, past)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past)
 	if err == nil {
-		t.Fatal("close succeeded with a claimed-but-unrecorded step")
+		t.Fatal("close succeeded with a claimed-but-unrecorded step on a LIVE lease")
 	}
 	if code, ok := CodeOf(err); !ok || code != CodeConflict {
 		t.Errorf("the refusal has code %q, want CONFLICT", code)
 	}
-	for _, want := range []string{instance, string(DiscrepancyClaimedUnrecorded), "lease expiry"} {
+	// The resolution must name the exits an operator can actually take under
+	// the open dispatch this close is trying to reconcile. `next` is not one of
+	// them: it refuses P24 while the dispatch is open, and its refusal rolls
+	// back the very reap it just performed.
+	for _, want := range []string{
+		instance, string(DiscrepancyClaimedUnrecorded), "step reap", "dispatch abandon",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal %q does not name %q", err, want)
 		}
+	}
+}
+
+// TestCloseReapsLapsedLeasesBeforeProbing is the close half of P5's lazy reap:
+// a claimed step whose lease has LAPSED is reaped by the close itself, not
+// reported back as a discrepancy whose named resolution the close blocks.
+//
+// It asserts the reap's full consequences rather than the bare success,
+// because a close that merely stopped refusing — by exempting expired leases
+// from D1, say — would leave the run's rows stored `claimed` forever, which is
+// exactly the RUN-91 state (ten claimed steps, zero `lease-reaped` events)
+// this change exists to prevent.
+//
+// The fixture is the bounded-class workflow so the `reap_acks` row is in play:
+// close must reap IDENTICALLY to `next` and `dispatch open`, headroom hold
+// included, or a manifest can disagree with the `next` that follows it.
+func TestCloseReapsLapsedLeasesBeforeProbing(t *testing.T) {
+	conn := mustDB(t)
+	runID := serializedRun(t, conn)
+	manifest := openDispatch(t, conn, runID, 0, nowMS)
+
+	instance := manifest.Rows[0].Instance
+	claim := claimInstance(t, conn, instance, nowMS)
+
+	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past); err != nil {
+		t.Fatalf("close refused over a LAPSED lease (%v); the reap that clears "+
+			"the discrepancy is close's own, and `next` cannot perform it while "+
+			"this dispatch is open", err)
+	}
+
+	stepID := stepIDByInstance(t, conn, instance)
+	var status, owner string
+	var expires int64
+	err := conn.QueryRow(
+		`SELECT status, COALESCE(owner, ''), COALESCE(expires_ms, 0)
+		 FROM steps WHERE id = ?`, stepID).Scan(&status, &owner, &expires)
+	testsupport.Must(t, err, "reading the reaped step: %v", err)
+	if status != string(db.StepPending) {
+		t.Errorf("status = %q after the close, want %q", status, db.StepPending)
+	}
+	if owner != "" || expires != 0 {
+		t.Errorf("the lease survived the close: owner %q, expires %d", owner, expires)
+	}
+
+	if n := eventKindCount(t, conn, runID, EventLeaseReaped); n != 1 {
+		t.Errorf("%d lease-reaped events, want 1 — the reap must be logged the "+
+			"same way `next` logs it", n)
+	}
+	// The bounded-class reap writes its ack row exactly as `next`'s does; the
+	// reconciled close then acknowledges it, because the claim it ended was
+	// admitted under this same dispatch and the reap was not forced (DKT-3286).
+	var rows int
+	var ackedBy string
+	err = conn.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(acked_by), '') FROM reap_acks
+		  WHERE run_id = ? AND step_id = ?`, runID, stepID).Scan(&rows, &ackedBy)
+	testsupport.Must(t, err, "reading the ack row: %v", err)
+	if rows != 1 {
+		t.Fatalf("%d ack rows after close reaped a bounded-class step, want 1", rows)
+	}
+	if ackedBy != db.AckByDispatchClose {
+		t.Errorf("the same-dispatch reap was acked by %q, want %q", ackedBy, db.AckByDispatchClose)
 	}
 }
 
@@ -1390,11 +1703,12 @@ func TestCloseAcceptMissingUsageRecordsTheAcceptance(t *testing.T) {
 	instance := manifest.Rows[0].Instance
 	finishWithoutUsage(t, conn, instance)
 
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, nowMS); err == nil {
+	past := nowMS + 1000 + graceMS(t, conn) + 1
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past); err == nil {
 		t.Fatal("premise: close must refuse over a missing-usage discrepancy")
 	}
 
-	outcome, err := NewEngine().CloseDispatch(conn, runID, true, nowMS)
+	outcome, err := NewEngine().CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "close --accept-missing-usage: %v", err)
 	if outcome.Reason != db.CloseReasonAcceptedMissingUsage {
 		t.Errorf("close_reason = %q, want %q",
@@ -1424,6 +1738,69 @@ func TestCloseAcceptMissingUsageRecordsTheAcceptance(t *testing.T) {
 	}
 }
 
+// TestCloseNoOpenDispatchReapsLapsedLease pins the reap as UNCONDITIONAL: the
+// no-open-dispatch acceptance path reaps exactly as the open-manifest path
+// does.
+//
+// That path is the RUN-14 shape — an active run, the dispatch gone, the
+// operator reaching for `close --accept-missing-usage`. If the run also holds
+// a step stored `claimed` on a lapsed lease, the acceptance succeeds only
+// because the reap runs first; a close that reaped only when a manifest was
+// open would refuse D1 here, which is the same deadlock the reap exists to
+// remove, in the one state where no dispatch is even open.
+//
+// The reap's CONSEQUENCES are asserted, not the bare acceptance: a close that
+// merely stopped refusing would leave the row stored `claimed` forever.
+func TestCloseNoOpenDispatchReapsLapsedLease(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+
+	// Open and abandon: the run has dispatch history — which is what makes an
+	// unreported step a D2 discrepancy at all — and no dispatch is open.
+	openDispatch(t, conn, runID, 0, nowMS)
+	abandon(t, conn, runID, nowMS)
+
+	// The step whose lease lapses. The DEFAULT TTL is what makes this the real
+	// shape: core's `lease.ttl.default` equals `dispatch.grace`, so a claim left
+	// alone lapses exactly as the grace does.
+	claim := claimInstance(t, conn, "implement@0", nowMS)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	// A second step, terminal with no ledger rows: the missing usage the
+	// acceptance is for. Without it there is nothing to accept and the no-open
+	// path refuses on its own terms.
+	finishWithoutUsage(t, conn, "review@0#0")
+
+	at := claim.LeaseExpiresMS + graceMS(t, conn) + 1
+	outcome, err := NewEngine().CloseDispatch(conn, runID, true, IntegrationSkip{}, at)
+	testsupport.Must(t, err, "close --accept-missing-usage with no dispatch open "+
+		"refused over a LAPSED lease (%v); the reap that clears the discrepancy "+
+		"is this close's own, and no other verb can perform it here", err)
+	if outcome.Reason != db.CloseReasonAcceptedMissingUsage {
+		t.Errorf("close_reason = %q, want %q",
+			outcome.Reason, db.CloseReasonAcceptedMissingUsage)
+	}
+
+	var status, owner string
+	var expires int64
+	err = conn.QueryRow(
+		`SELECT status, COALESCE(owner, ''), COALESCE(expires_ms, 0)
+		 FROM steps WHERE id = ?`, stepID).Scan(&status, &owner, &expires)
+	testsupport.Must(t, err, "reading the reaped step: %v", err)
+	if status != string(db.StepPending) {
+		t.Errorf("status = %q after the close, want %q — the acceptance path "+
+			"must reap, not merely close", status, db.StepPending)
+	}
+	if owner != "" || expires != 0 {
+		t.Errorf("the lease survived the close: owner %q, expires %d", owner, expires)
+	}
+
+	if n := eventKindCount(t, conn, runID, EventLeaseReaped); n != 1 {
+		t.Errorf("%d lease-reaped events, want 1 — a close with no manifest open "+
+			"must log its reap the same way `next` logs it", n)
+	}
+}
+
 // TestAcceptMissingUsageDoesNotAcceptD1 is P20: the flag accepts exactly ONE
 // class.
 //
@@ -1433,10 +1810,9 @@ func TestAcceptMissingUsageDoesNotAcceptD1(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
-	claimInstance(t, conn, manifest.Rows[0].Instance, nowMS)
-	past := nowMS + graceMS(t, conn) + 1
+	past := claimPastGraceWithLiveLease(t, conn, manifest.Rows[0].Instance)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, true, past)
+	_, err := NewEngine().CloseDispatch(conn, runID, true, IntegrationSkip{}, past)
 	if err == nil {
 		t.Fatal("--accept-missing-usage closed over a claimed-but-unrecorded " +
 			"step; P20 forbids it, or a relay closes over work still running")
@@ -1455,15 +1831,14 @@ func TestAbandonIsUnconditional(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
-	claimInstance(t, conn, manifest.Rows[0].Instance, nowMS)
-	past := nowMS + graceMS(t, conn) + 1
+	past := claimPastGraceWithLiveLease(t, conn, manifest.Rows[0].Instance)
 
 	// The premise: a discrepancy exists and `close` refuses.
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, past); err == nil {
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past); err == nil {
 		t.Fatal("premise: close must refuse here")
 	}
 
-	outcome, err := NewEngine().AbandonDispatch(conn, runID, "relay died", past)
+	outcome, err := abandonAsConductor(conn, NewEngine(), runID, "relay died", past)
 	testsupport.Must(t, err, "abandon with a discrepancy present: %v — P21 makes it "+
 		"unconditional, or a crashed relay wedges the run", err)
 
@@ -1496,7 +1871,7 @@ func TestCloseRacingAbandonReportsWhy(t *testing.T) {
 	// The abandon wins; the close arrives second.
 	abandon(t, conn, runID, nowMS)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, false, nowMS)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS)
 	if err == nil {
 		t.Fatal("close succeeded against an abandoned dispatch")
 	}

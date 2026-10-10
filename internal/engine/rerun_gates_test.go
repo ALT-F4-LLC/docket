@@ -187,8 +187,8 @@ func TestRerunGatesRefusesAStepWithNoCompletionGates(t *testing.T) {
 // TestRetryLeavesNoLiveLease pins the invariant DKT-259's accounting half rests
 // on: a step returned to `pending` is a step NOBODY HOLDS.
 //
-// `claimPredicate` claims only against `owner IS NULL OR owner = ” OR
-// expires_ms <= now`, so `pending` with a live lease is a step the scheduler
+// `claimPredicate` claims only against a null or empty `owner` or
+// `expires_ms <= now`, so `pending` with a live lease is a step the scheduler
 // offers and no claimant can take — while the original holder's token still
 // works, letting a re-execution record without re-claiming and land on the
 // first execution's attempt number.

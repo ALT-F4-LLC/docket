@@ -25,7 +25,8 @@ import (
 // TestMergeMetadataReadsNoKey. A merge that special-cased one key would be core
 // having an opinion about what a workflow author's bag of strings means.
 
-// MetadataMaxBytes caps one completion's `--metadata` bag.
+// MetadataMaxBytes caps one `--metadata` bag, on every verb that takes one —
+// `claim`, `complete`, `fail`, `annotate`.
 //
 // The bag is opaque, so nothing else bounds it. Without a cap a worker can push
 // an artifact-sized body into a column the R7 rollup groups BY DISTINCT VALUE,
@@ -181,7 +182,17 @@ func validateFailMetadataSize(raw string) error {
 	return validateMetadataSizeWithRemedy(raw, "the note")
 }
 
-// validateMetadataSizeWithRemedy is the shared cap check both verbs' size
+// validateClaimMetadataSize is `claim`'s cap check, the same MetadataMaxBytes
+// measured the same way (DKT-592). The remedy differs again because the
+// channels do: a claim records nothing but the bag, so the only place bulk
+// detail can go is the completion this claim is the start of — and naming
+// `--artifact-file` outright would send a dispatcher looking for a flag `step
+// claim` does not have.
+func validateClaimMetadataSize(raw string) error {
+	return validateMetadataSizeWithRemedy(raw, "the artifact or the payload at completion")
+}
+
+// validateMetadataSizeWithRemedy is the shared cap check the verbs' size
 // validators call — one size limit, one message shape, remedy text supplied
 // by the caller because only the caller knows which channels its verb offers.
 func validateMetadataSizeWithRemedy(raw, remedy string) error {

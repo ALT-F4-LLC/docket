@@ -156,6 +156,15 @@ var exportCollections = []exportCollection{
 			return fmt.Sprintf("issue-label mapping (issue=%d, label=%d)", m.IssueID, m.LabelID)
 		},
 		func(tx *sql.Tx, m model.IssueLabelMapping) (bool, error) {
+			// A mapping whose issue or label is in neither the export nor
+			// the project is skipped, never a raw foreign-key failure:
+			// the rows it joins were dropped by a filtered export or
+			// deleted since, and the import runs in one transaction, so
+			// failing here would write nothing at all.
+			ok, err := rowsExist(tx, "issues", m.IssueID, "labels", m.LabelID)
+			if err != nil || !ok {
+				return false, err
+			}
 			return db.InsertIssueLabelMapping(tx, m.IssueID, m.LabelID)
 		},
 	),
@@ -168,6 +177,10 @@ var exportCollections = []exportCollection{
 			return fmt.Sprintf("issue-file mapping (issue=%d, file=%q)", m.IssueID, m.FilePath)
 		},
 		func(tx *sql.Tx, m model.IssueFileMapping) (bool, error) {
+			ok, err := rowsExist(tx, "issues", m.IssueID)
+			if err != nil || !ok {
+				return false, err
+			}
 			return db.InsertIssueFileMapping(tx, m.IssueID, m.FilePath)
 		},
 	),
@@ -273,6 +286,23 @@ var exportCollections = []exportCollection{
 			return db.InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt)
 		},
 	),
+}
+
+// rowsExist reports whether every (table, id) pair names a row. It is the
+// guard a join row's insert runs before trusting its foreign keys, so a
+// dangling mapping is counted as skipped instead of aborting the import.
+func rowsExist(tx *sql.Tx, pairs ...any) (bool, error) {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		table, id := pairs[i].(string), pairs[i+1].(int)
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM `+table+` WHERE id = ?)`, id).Scan(&exists); err != nil {
+			return false, fmt.Errorf("probing %s id %d: %w", table, id, err)
+		}
+		if !exists {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // insertIssueWithoutParent inserts an issue with parent_id held back, and puts

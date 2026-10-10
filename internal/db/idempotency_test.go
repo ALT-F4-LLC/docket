@@ -39,9 +39,9 @@ func countIssues(t *testing.T, db *sql.DB) int {
 func TestIdempotentCreateReplaysOriginal(t *testing.T) {
 	db := newIdemDB(t)
 
-	first, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
+	first, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
 	testsupport.Must(t, err, "first create: %v", err)
-	second, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
+	second, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
 	testsupport.Must(t, err, "replay: %v", err)
 
 	if first != second {
@@ -104,12 +104,40 @@ func TestInsertRunWithoutKeyNeverDeduplicates(t *testing.T) {
 	}
 }
 
+// TestCreateIssueIdempotentReportsInsert: the caller learns from the create
+// itself whether it inserted, so post-insert writes (the CLI's --scope) can key
+// on that answer instead of a separate lookup another process can race.
+func TestCreateIssueIdempotentReportsInsert(t *testing.T) {
+	db := newIdemDB(t)
+
+	first, inserted, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
+	testsupport.Must(t, err, "first create: %v", err)
+	if !inserted {
+		t.Error("create under a fresh key reported inserted=false")
+	}
+	if n := countIssues(t, db); n != 1 {
+		t.Fatalf("issue count after fresh create = %d, want 1", n)
+	}
+
+	second, inserted, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
+	testsupport.Must(t, err, "replay: %v", err)
+	if inserted {
+		t.Error("create under a recorded key reported inserted=true")
+	}
+	if second != first {
+		t.Errorf("replay returned id %d, want the recorded %d", second, first)
+	}
+	if n := countIssues(t, db); n != 1 {
+		t.Errorf("issue count after replay = %d, want 1", n)
+	}
+}
+
 func TestIdempotentCreateDistinctKeys(t *testing.T) {
 	db := newIdemDB(t)
 
-	first, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-a")
+	first, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-a")
 	testsupport.Must(t, err, "create a: %v", err)
-	second, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-b")
+	second, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-b")
 	testsupport.Must(t, err, "create b: %v", err)
 
 	if first == second {
@@ -136,7 +164,7 @@ func TestCreateWithoutKeyNeverDeduplicates(t *testing.T) {
 func TestIdempotencyKeysAreScopedPerVerb(t *testing.T) {
 	db := newIdemDB(t)
 
-	issueID, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "shared")
+	issueID, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "shared")
 	testsupport.Must(t, err, "issue create: %v", err)
 	docID, err := CreateDocIdempotent(db, &model.Doc{Title: "doc", Type: "adr"}, "shared")
 	testsupport.Must(t, err, "doc create: %v", err)
@@ -198,7 +226,7 @@ func TestIdempotencyKeysAreScopedPerVerb(t *testing.T) {
 func TestIdempotencyKeyRecordedWithEntity(t *testing.T) {
 	db := newIdemDB(t)
 
-	id, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "atomic")
+	id, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "atomic")
 	testsupport.Must(t, err, "create: %v", err)
 
 	got, found, err := LookupIdempotencyKey(db, ScopeIssueCreate, "atomic")
@@ -228,7 +256,7 @@ func TestIdempotencySeqIsMonotonic(t *testing.T) {
 	db := newIdemDB(t)
 
 	for _, key := range []string{"k1", "k2", "k3"} {
-		_, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, key)
+		_, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, key)
 		testsupport.Must(t, err, "create %s: %v", key, err)
 	}
 

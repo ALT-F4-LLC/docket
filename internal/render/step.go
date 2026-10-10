@@ -91,6 +91,14 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 		fmt.Fprintf(&b, "  of which:  %d failed, %d reaped\n",
 			row.FailedAttempts, row.ReapedClaims)
 	}
+	// The loop history is one fact, written together at a fix-loop
+	// exhaustion, so the trigger gates all three lines: a zero rounds count
+	// is still a fact on an exhausted row (a cap of 0), not an absent one.
+	if row.LoopTriggerStep != "" {
+		fmt.Fprintf(&b, "  loop rounds:  %d\n", row.LoopRoundsRun)
+		fmt.Fprintf(&b, "  loop trigger: %s\n", row.LoopTriggerStep)
+		fmt.Fprintf(&b, "  loop verdict: %s\n", row.LoopLatestVerdict)
+	}
 
 	// A held lease is reported with its owner, mirroring the v6 `lease` object's
 	// rule: a field that is not a fact yet does not appear.
@@ -103,6 +111,14 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 	// verbs that read the raw row — `run repin`'s quiescence guard — still
 	// count it as mid-flight. Named here so an operator holding a `ready` and
 	// a repin CONFLICT at the same instant can see both are right.
+	//
+	// Off an active run the flag is unset and this line does not print, because
+	// `Scheduler.Expired` is suspended there: on a `waiting-human` run a lapsed
+	// claim reads as plain `claimed` with its past `expires` above, while `run
+	// repin` still names the lapse and points at `step reap`. The line's own
+	// text would be false on a parked run — no `next` or `claim` will reap it
+	// until the run is active again — so its absence is that suspension, not a
+	// missing label.
 	if row.LeaseExpired {
 		fmt.Fprintf(&b, "  lease:     expired, not yet reaped — next/claim will "+
 			"reap it; run repin still counts the claim as mid-flight\n")

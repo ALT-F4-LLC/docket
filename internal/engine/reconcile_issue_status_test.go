@@ -273,6 +273,86 @@ func TestIssueCompletionComments(t *testing.T) {
 	}
 }
 
+// driveIssueToDone completes every step of the fixture's issue, so the
+// completion check reaches completeIssue.
+func driveIssueToDone(t *testing.T, conn *sql.DB, e *Engine) {
+	t.Helper()
+	driveToVerify(t, conn, e, 0)
+	claimAndComplete(t, conn, e, "verify@0", "report", metPayload)
+	err := e.DecideStep(conn, stepIDByInstance(t, conn, "commit-gate@0"), true, "", nowMS)
+	testsupport.Must(t, err, "approve commit-gate@0: %v", err)
+	claimAndComplete(t, conn, e, "commit@0", "the commit record", "")
+}
+
+// TestCompletionClearsAStaleAbandonedResolution: an earlier run abandoned the
+// issue (status back at `todo`, resolution `abandoned`), and this run finished
+// it. A `done` issue still reading `abandoned` contradicts itself.
+func TestCompletionClearsAStaleAbandonedResolution(t *testing.T) {
+	conn := mustDB(t)
+	_, issue := activatedRun(t, conn)
+	e := testEngine()
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = db.SetIssueResolutionTx(tx, issue, db.IssueResolutionAbandoned)
+	testsupport.Must(t, err, "seeding the earlier run's resolution: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "commit: %v", err)
+
+	driveIssueToDone(t, conn, e)
+
+	after, err := db.GetIssue(conn, issue)
+	testsupport.Must(t, err, "GetIssue: %v", err)
+	if after.Status != model.StatusDone {
+		t.Fatalf("premise: status = %q, want %q", after.Status, model.StatusDone)
+	}
+	if after.Resolution != "" {
+		t.Errorf("resolution = %q after this run completed the issue, want it "+
+			"cleared — the earlier run's abandonment no longer describes it",
+			after.Resolution)
+	}
+}
+
+// TestAbandonAfterCompletionKeepsTheResolution: the issue's steps all
+// completed (status `done`), and only then did the `abandon-issue` routing mark
+// it. The issue stays `done` + `abandoned`, and a later completion pass over the
+// already-done row does not erase that record.
+func TestAbandonAfterCompletionKeepsTheResolution(t *testing.T) {
+	conn := mustDB(t)
+	run, issue := activatedRun(t, conn)
+	e := testEngine()
+
+	driveIssueToDone(t, conn, e)
+	if got := issueStatus(t, conn, issue); got != string(model.StatusDone) {
+		t.Fatalf("premise: issue = %q, want %q", got, model.StatusDone)
+	}
+
+	// The step id is read BEFORE the transaction opens: querying the same
+	// connection while one is in flight blocks on SQLite.
+	stepID := firstStepOfIssue(t, conn, run.ID, issue)
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	step, err := db.GetStepTx(tx, stepID)
+	testsupport.Must(t, err, "GetStepTx: %v", err)
+	err = abandonIssue(tx, step, nowMS)
+	testsupport.Must(t, err, "abandonIssue: %v", err)
+	err = completeIssue(tx, step, nowMS)
+	testsupport.Must(t, err, "completeIssue: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "commit: %v", err)
+
+	after, err := db.GetIssue(conn, issue)
+	testsupport.Must(t, err, "GetIssue: %v", err)
+	if after.Status != model.StatusDone {
+		t.Errorf("status = %q, want %q left alone", after.Status, model.StatusDone)
+	}
+	if after.Resolution != db.IssueResolutionAbandoned {
+		t.Errorf("resolution = %q, want %q — the abandonment came after the "+
+			"completion and must survive it", after.Resolution, db.IssueResolutionAbandoned)
+	}
+}
+
 // TestTrailCommentsCarryTheTransactionsClock is DKT-378's second half.
 //
 // `commentEngineEvent` is the ONLY non-test caller of `InsertEngineComment` in

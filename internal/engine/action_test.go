@@ -184,6 +184,96 @@ func TestBuiltinSpawnsNoProcess(t *testing.T) {
 	}
 }
 
+// TestBuiltinRouteAtSplitsTheOutputFromTheRecord is DKT-593 at the runner
+// seam: the ARTIFACT payload — the wire the threshold evaluates and every
+// downstream `inputs` reader consumes — carries only the clusters at or above
+// the floor, while the below-floor clusters land, fully reduced, in the
+// builtin's own `action_results` row. Routed, not erased: the record is
+// attributed, and the loop is not fed.
+func TestBuiltinRouteAtSplitsTheOutputFromTheRecord(t *testing.T) {
+	runner := &ExecActionRunner{
+		RepoRoot: t.TempDir(),
+		LoadStore: func() (*trust.Store, error) {
+			t.Error("the builtin consulted the trust store (B1)")
+			return &trust.Store{}, nil
+		},
+	}
+
+	result, err := runner.Run(context.Background(), ActionSpec{
+		Name: workflow.ActionAggregate, Output: "findings",
+		Params: map[string]any{
+			"field": "severity", "method": "median", "output": "findings",
+			"route_at": "high",
+		},
+		Inputs: []map[string]any{
+			{"severity": "low", "id": "A"},
+			{"severity": "blocker", "id": "B"},
+		},
+		Order: severityOrder,
+	}, StepContext{Instance: "reconcile@0", RunID: 1, IssueID: 1})
+	testsupport.Must(t, err, "Run: %v", err)
+	if result.Failed {
+		t.Fatalf("the builtin failed: %s", result.Reason)
+	}
+
+	var emitted []map[string]any
+	testsupport.Must(t, json.Unmarshal([]byte(result.Payload), &emitted),
+		"decoding the payload: %v", err)
+	if len(emitted) != 1 || emitted[0]["id"] != "B" {
+		t.Errorf("the artifact payload is %s, want only cluster B — the "+
+			"below-floor cluster must not reach the loop output", result.Payload)
+	}
+
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %+v, want the builtin's one row", result.Results)
+	}
+	var recorded []map[string]any
+	testsupport.Must(t, json.Unmarshal([]byte(result.Results[0].Output), &recorded),
+		"decoding the recorded clusters: %v", err)
+	if len(recorded) != 1 || recorded[0]["id"] != "A" || recorded[0]["severity"] != "low" {
+		t.Errorf("the action row records %s, want the reduced below-floor "+
+			"cluster A", result.Results[0].Output)
+	}
+
+	if !strings.Contains(result.Body, "2 cluster(s) reduced") ||
+		!strings.Contains(result.Body, "1 below the `route_at` floor") {
+		t.Errorf("the body does not account for both halves: %q", result.Body)
+	}
+}
+
+// TestBuiltinWithoutRouteAtRecordsNothingInItsRow is the absent case at the
+// same seam: no floor, an empty audit Output, and a body with no floor
+// sentence — byte-for-byte the pre-route_at builtin.
+func TestBuiltinWithoutRouteAtRecordsNothingInItsRow(t *testing.T) {
+	runner := &ExecActionRunner{
+		RepoRoot:  t.TempDir(),
+		LoadStore: func() (*trust.Store, error) { return &trust.Store{}, nil },
+	}
+	result, err := runner.Run(context.Background(), ActionSpec{
+		Name: workflow.ActionAggregate, Output: "findings",
+		Params: map[string]any{
+			"field": "severity", "method": "median", "output": "findings",
+		},
+		Inputs: []map[string]any{{"severity": "low", "id": "A"}},
+		Order:  severityOrder,
+	}, StepContext{Instance: "reconcile@0", RunID: 1, IssueID: 1})
+	testsupport.Must(t, err, "Run: %v", err)
+	if result.Failed {
+		t.Fatalf("the builtin failed: %s", result.Reason)
+	}
+	if result.Results[0].Output != "" {
+		t.Errorf("the action row carries %q; with no route_at there is nothing "+
+			"to record", result.Results[0].Output)
+	}
+	if strings.Contains(result.Body, "route_at") {
+		t.Errorf("the body mentions a floor nobody declared: %q", result.Body)
+	}
+	if result.Payload != `[{"held":false,"id":"A","members":["low"],`+
+		`"operator_resolved":false,"severity":"low"}]` {
+		t.Errorf("the absent case's payload changed shape: %s", result.Payload)
+	}
+}
+
 // childProcessCount counts this process's children, so a spawn is observable.
 func childProcessCount(t *testing.T) int {
 	t.Helper()

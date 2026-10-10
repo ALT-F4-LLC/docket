@@ -23,33 +23,46 @@ type voteShowResult struct {
 
 // voteShowResultJSON is the wire format for vote show.
 type voteShowResultJSON struct {
-	ID               string        `json:"id"`
-	Description      string        `json:"description"`
-	Rationale        string        `json:"rationale"`
-	DomainTags       []string      `json:"domain_tags"`
-	FilesChanged     []string      `json:"files_changed"`
-	Criticality      string        `json:"criticality"`
-	Status           string        `json:"status"`
-	FinalOutcome     string        `json:"final_outcome"`
-	EscalationReason *string       `json:"escalation_reason"`
-	RequiredVoters   int           `json:"required_voters"`
-	Threshold        float64       `json:"threshold"`
-	WeightedScore    *float64      `json:"weighted_score"`
-	CreatedBy        string        `json:"created_by"`
-	CreatedAt        string        `json:"created_at"`
-	UpdatedAt        string        `json:"updated_at"`
-	Votes            []*model.Vote `json:"votes"`
-	LinkedIssues     []string      `json:"linked_issues"`
-	LinkedDocs       []string      `json:"linked_docs"`
+	ID               string   `json:"id"`
+	Description      string   `json:"description"`
+	Rationale        string   `json:"rationale"`
+	DomainTags       []string `json:"domain_tags"`
+	FilesChanged     []string `json:"files_changed"`
+	Criticality      string   `json:"criticality"`
+	Status           string   `json:"status"`
+	FinalOutcome     string   `json:"final_outcome"`
+	EscalationReason *string  `json:"escalation_reason"`
+	RequiredVoters   int      `json:"required_voters"`
+	Threshold        float64  `json:"threshold"`
+	WeightedScore    *float64 `json:"weighted_score"`
+	Sealed           bool     `json:"sealed"`
+	CreatedBy        string   `json:"created_by"`
+	CreatedAt        string   `json:"created_at"`
+	UpdatedAt        string   `json:"updated_at"`
+	// Votes is []*model.Vote in full, or []model.SealedCast (voter name and
+	// cast time only) while the proposal is SealedOpen (DKT-2447). Always an
+	// array on the wire.
+	Votes        any      `json:"votes"`
+	LinkedIssues []string `json:"linked_issues"`
+	LinkedDocs   []string `json:"linked_docs"`
+}
+
+// wireVotes is the votes array a proposal's read verbs put on the wire: every
+// cast in full, or — while the proposal is sealed and still open — only who
+// cast and when. The ONE place the projection is chosen for JSON, so `vote
+// show` and `vote result` cannot disagree about it.
+func wireVotes(proposal *model.Proposal, votes []*model.Vote) any {
+	if proposal.SealedOpen() {
+		return model.SealedCasts(votes)
+	}
+	if votes == nil {
+		return []*model.Vote{}
+	}
+	return votes
 }
 
 func (r voteShowResult) MarshalJSON() ([]byte, error) {
 	p := r.Proposal
-
-	votes := r.Votes
-	if votes == nil {
-		votes = []*model.Vote{}
-	}
 
 	linkedIssues := make([]string, 0, len(r.LinkedIssues))
 	for _, id := range r.LinkedIssues {
@@ -83,10 +96,11 @@ func (r voteShowResult) MarshalJSON() ([]byte, error) {
 		RequiredVoters:   p.RequiredVoters,
 		Threshold:        p.Threshold,
 		WeightedScore:    p.WeightedScore,
+		Sealed:           p.Sealed,
 		CreatedBy:        p.CreatedBy,
 		CreatedAt:        p.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:        p.UpdatedAt.UTC().Format(time.RFC3339),
-		Votes:            votes,
+		Votes:            wireVotes(p, r.Votes),
 		LinkedIssues:     linkedIssues,
 		LinkedDocs:       linkedDocs,
 	}

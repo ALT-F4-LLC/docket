@@ -98,7 +98,7 @@ echo "--- running the matched abuse-case tests ---"
 # Run ONLY the abuse-case tests, not the whole suite: `tests` is its own gate
 # and re-running it here would make one failure surface as two.
 if [ -n "$matches" ]; then
-  if ! go1.26.6 test -run "Test[A-Za-z0-9_]*($pattern)" ./... 2>&1; then
+  if ! go1.26.9 test -run "Test[A-Za-z0-9_]*($pattern)" ./... 2>&1; then
     cat >&2 <<'EOF'
 
 sdet-abuse FAILED: an abuse-case test did not pass.

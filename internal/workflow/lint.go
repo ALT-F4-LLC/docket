@@ -233,7 +233,7 @@ func lintInputOrdering(def *Definition, g *stepGraph) error {
 		ancestors := ancestorsOf(g, step.Name)
 
 		for _, input := range step.Inputs {
-			if input == "issue.body" || input == "issue.diff" {
+			if input == "issue.body" || input == "issue.diff" || input == InputIssueFiles {
 				continue
 			}
 			// `issue.latest.<kind>` names no producer step: it resolves over
@@ -244,6 +244,13 @@ func lintInputOrdering(def *Definition, g *stepGraph) error {
 			// `issue.latest` as a step name and refuse every non-loop
 			// consumer of the form.
 			if _, ok := LatestKind(input); ok {
+				continue
+			}
+			// `issue.linked.<relation>.<kind>` (DKT-547) likewise names no
+			// producer step: its artifact was recorded under ANOTHER issue and
+			// pinned at activation, so it exists before any step of this
+			// workflow runs — there is no ordering for L4 to enforce.
+			if _, _, ok := LinkedInput(input); ok {
 				continue
 			}
 			m := inputShape.FindStringSubmatch(input)
