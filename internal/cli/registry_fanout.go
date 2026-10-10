@@ -40,10 +40,10 @@ import (
 //     CONFLICT never cancels another project's success, and never hides it:
 //     every target appears in the report with its own outcome.
 //
-//  3. A PARTIAL FAILURE IS STILL A FAILURE. The report is written to stdout —
-//     a machine consumer needs the per-project detail precisely when something
-//     went wrong — and the process then exits non-zero without a second
-//     envelope. See reportedFailure in root.go.
+//  3. A PARTIAL FAILURE IS STILL A FAILURE. The report is written to stdout in
+//     an ok: false envelope — a machine consumer needs the per-project detail
+//     precisely when something went wrong — and the process then exits
+//     non-zero without a second envelope. See reportedFailure in root.go.
 
 // registryOutcome is the closed vocabulary of what happened in one project.
 //
@@ -282,7 +282,8 @@ func registrySuccessResult(p *model.Project, outcome, ref string) registryFanout
 // THE REPORT IS ALWAYS WRITTEN, failure included: the per-project detail is
 // what the caller needs most when something went wrong, and an error envelope
 // carrying one flattened string would throw away twelve projects' outcomes to
-// describe one.
+// describe one. When any project failed the report rides in an ok: false
+// envelope carrying the exit code, so `.ok` and `$?` give the same verdict.
 func finishRegistryFanout(w *output.Writer, report *registryFanoutReport) error {
 	for _, r := range report.Results {
 		if r.failed() {
@@ -296,12 +297,15 @@ func finishRegistryFanout(w *output.Writer, report *registryFanoutReport) error 
 	if !w.JSONMode {
 		message = renderRegistryFanout(report)
 	}
-	w.Success(report, message)
 
 	if report.Failed == 0 {
+		w.Success(report, message)
 		return nil
 	}
-	return &reportedFailure{Code: fanoutExitCode(report)}
+	code := fanoutExitCode(report)
+	w.PartialFailure(report, message, fmt.Errorf("%d of %d project(s) failed",
+		report.Failed, len(report.Results)), code)
+	return &reportedFailure{Code: code}
 }
 
 // fanoutExitCode picks the code the process exits with when some targets

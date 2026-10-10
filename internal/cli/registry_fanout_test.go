@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -509,6 +511,178 @@ func TestRegistryFanoutHumanReportNamesEveryProject(t *testing.T) {
 	} {
 		if !strings.Contains(human, want) {
 			t.Errorf("the render never mentions %q:\n%s", want, human)
+		}
+	}
+}
+
+// registryFanoutVerb is one registry-writing verb run as a three-project sweep.
+// seedAll prepares every project; seedConflict makes exactly one of them refuse
+// with CONFLICT.
+type registryFanoutVerb struct {
+	name         string
+	seedAll      func(t *testing.T, conn *sql.DB, projects []int)
+	seedConflict func(t *testing.T, conn *sql.DB, victim int)
+	run          func(t *testing.T, conn *sql.DB, w *output.Writer) error
+}
+
+func registryFanoutVerbs() []registryFanoutVerb {
+	return []registryFanoutVerb{
+		{
+			name: "workflow register",
+			seedConflict: func(t *testing.T, conn *sql.DB, victim int) {
+				_, _, err := db.InsertWorkflow(conn, &model.Workflow{
+					ProjectID: victim, Name: "unit", Version: 1,
+					SourceSHA256: "not-the-same-hash", Body: "other bytes", Parsed: "{}",
+				}, model.NowMS())
+				testsupport.Must(t, err, "seeding the conflicting workflow: %v", err)
+			},
+			run: func(t *testing.T, conn *sql.DB, w *output.Writer) error {
+				return runWorkflowRegister(fanoutCmd(conn, "", true),
+					[]string{writeWorkflowFile(t, minimalWorkflow)}, w)
+			},
+		},
+		{
+			name: "workflow deprecate",
+			seedAll: func(t *testing.T, conn *sql.DB, projects []int) {
+				for _, id := range projects {
+					auditWorkflowRow(t, conn, id, "release", 7)
+				}
+			},
+			seedConflict: func(t *testing.T, conn *sql.DB, victim int) {
+				_, err := db.DeprecateWorkflow(conn, victim, "release", 7, model.NowMS())
+				testsupport.Must(t, err, "pre-retiring in one project: %v", err)
+			},
+			run: func(t *testing.T, conn *sql.DB, w *output.Writer) error {
+				return runWorkflowDeprecate(fanoutCmd(conn, "", true),
+					[]string{"release@7"}, w)
+			},
+		},
+		{
+			name: "schema register",
+			seedConflict: func(t *testing.T, conn *sql.DB, victim int) {
+				_, _, err := db.InsertSchema(conn, &model.Schema{
+					ProjectID: victim, Name: "findings", Version: 1,
+					SourceSHA256: "not-the-same-hash", Body: `{"type":"object"}`, Ordered: "{}",
+				}, model.NowMS())
+				testsupport.Must(t, err, "seeding the conflicting schema: %v", err)
+			},
+			run: func(t *testing.T, conn *sql.DB, w *output.Writer) error {
+				return runSchemaRegister(fanoutCmd(conn, "", true),
+					[]string{"findings@1", writeSchema(t, findingsSchema)}, w)
+			},
+		},
+	}
+}
+
+var registryFanoutJSONModes = []struct {
+	name    string
+	version output.JSONVersion
+}{
+	{"v1", output.JSONV1},
+	{"v2", output.JSONV2},
+}
+
+// fanoutEnvelope is the whole stdout of a fanned-out --json run.
+type fanoutEnvelope struct {
+	OK   bool                 `json:"ok"`
+	Data registryFanoutReport `json:"data"`
+	Code output.ErrorCode     `json:"code"`
+}
+
+// singleFanoutEnvelopeOf decodes stdout as exactly ONE JSON document: with a
+// second envelope a parser would read `.ok` from whichever one it hit first.
+func singleFanoutEnvelopeOf(t *testing.T, raw []byte) fanoutEnvelope {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var envelope fanoutEnvelope
+	if err := dec.Decode(&envelope); err != nil {
+		t.Fatalf("stdout is not a JSON document: %v\n%s", err, raw)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		t.Fatalf("stdout carries more than one JSON document:\n%s", raw)
+	}
+	return envelope
+}
+
+// runRegistryFanoutSweep seeds three projects, makes the second one conflict
+// when conflict is set, and runs the verb under one --json version.
+func runRegistryFanoutSweep(
+	t *testing.T, verb registryFanoutVerb, version output.JSONVersion, conflict bool,
+) (fanoutEnvelope, []int, error) {
+	t.Helper()
+	conn := newTestDB(t)
+	one, two, three := threeProjects(t, conn)
+	projects := []int{one, two, three}
+	if verb.seedAll != nil {
+		verb.seedAll(t, conn, projects)
+	}
+	if conflict {
+		verb.seedConflict(t, conn, two)
+	}
+	buf := &bytes.Buffer{}
+	w := &output.Writer{
+		JSONMode: true, JSONVersion: version, Stdout: buf, Stderr: &bytes.Buffer{},
+	}
+	err := verb.run(t, conn, w)
+	return singleFanoutEnvelopeOf(t, buf.Bytes()), projects, err
+}
+
+// TestRegistryFanoutPartialFailureEmitsOneFailureEnvelope: a sweep where one
+// project conflicts is a failure on BOTH channels a script reads, `.ok` and the
+// exit code, and the single envelope still carries every project's row.
+func TestRegistryFanoutPartialFailureEmitsOneFailureEnvelope(t *testing.T) {
+	for _, verb := range registryFanoutVerbs() {
+		for _, mode := range registryFanoutJSONModes {
+			t.Run(verb.name+"/"+mode.name, func(t *testing.T) {
+				envelope, projects, err := runRegistryFanoutSweep(t, verb, mode.version, true)
+
+				if envelope.OK {
+					t.Error("ok = true on a sweep where one project failed; a " +
+						"script reading .ok and one reading the exit code disagree")
+				}
+				if envelope.Code != output.ErrConflict {
+					t.Errorf("envelope code = %q, want %q", envelope.Code, output.ErrConflict)
+				}
+				report := envelope.Data
+				if report.Failed != 1 || report.Succeeded != 2 {
+					t.Errorf("data = %+v, want 2 succeeded / 1 failed", report)
+				}
+				if len(report.Results) != len(projects) {
+					t.Fatalf("data.results has %d rows, want one per target (%d)",
+						len(report.Results), len(projects))
+				}
+				for _, id := range projects {
+					outcomeIn(t, report, id)
+				}
+				if got := reportedCodeOf(t, err); got != output.ErrConflict {
+					t.Errorf("exit code = %q, want %q", got, output.ErrConflict)
+				}
+			})
+		}
+	}
+}
+
+// TestRegistryFanoutAllSuccessKeepsOkTrue: the failure envelope is for a sweep
+// that failed somewhere, not for every fanned-out report.
+func TestRegistryFanoutAllSuccessKeepsOkTrue(t *testing.T) {
+	for _, verb := range registryFanoutVerbs() {
+		for _, mode := range registryFanoutJSONModes {
+			t.Run(verb.name+"/"+mode.name, func(t *testing.T) {
+				envelope, projects, err := runRegistryFanoutSweep(t, verb, mode.version, false)
+				testsupport.Must(t, err, "an all-success sweep returned %v", err)
+
+				if !envelope.OK {
+					t.Error("ok = false on a sweep where every project succeeded")
+				}
+				report := envelope.Data
+				if report.Failed != 0 || report.Succeeded != len(projects) {
+					t.Errorf("data = %+v, want %d succeeded / 0 failed", report, len(projects))
+				}
+				if len(report.Results) != len(projects) {
+					t.Errorf("data.results has %d rows, want %d", len(report.Results), len(projects))
+				}
+			})
 		}
 	}
 }
