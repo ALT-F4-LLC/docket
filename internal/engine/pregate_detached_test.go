@@ -1012,9 +1012,9 @@ func TestUnprobeableLockIsNoHold(t *testing.T) {
 // The mutant that evaluates the hold after R7 admits the held claim here.
 func TestBudgetOverrideDoesNotBypassTheHold(t *testing.T) {
 	shrinkClaimBudget(t, 500*time.Millisecond)
-	conn, e, run, repoRoot := preGatedRun(t, nil)
+	conn, _, run, repoRoot := preGatedRun(t, nil)
 	argv, sentinel := witnessCommand(t, repoRoot, "claimed-through-override")
-	e = execEngineWithTrust(t, repoRoot, trust.Entry{
+	e := execEngineWithTrust(t, repoRoot, trust.Entry{
 		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
 		Repo: mustResolve(repoRoot),
 	})
@@ -1082,9 +1082,9 @@ func TestBudgetOverrideDoesNotBypassTheHold(t *testing.T) {
 // offers the step as ready.
 func TestLazyReapReprobesTheHold(t *testing.T) {
 	shrinkClaimBudget(t, 500*time.Millisecond)
-	conn, e, run, repoRoot := preGatedRun(t, nil)
+	conn, _, run, repoRoot := preGatedRun(t, nil)
 	argv, _ := witnessCommand(t, repoRoot, "first-claim")
-	e = execEngineWithTrust(t, repoRoot, trust.Entry{
+	e := execEngineWithTrust(t, repoRoot, trust.Entry{
 		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
 		Repo: mustResolve(repoRoot),
 	})

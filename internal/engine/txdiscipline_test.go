@@ -5,7 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -56,25 +56,32 @@ import (
 // position-only check flags both and gets itself disabled.
 func TestNoPoolReadsInsideTransactions(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	testsupport.Must(t, err, "parsing the package: %v", err)
+	entries, err := os.ReadDir(".")
+	testsupport.Must(t, err, "listing the package: %v", err)
 
-	for _, pkg := range pkgs {
-		openers := txOpenerHelpers(pkg.Files)
-		for _, file := range pkg.Files {
-			ast.Inspect(file, func(n ast.Node) bool {
-				fn, ok := n.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					return true
-				}
-				for _, read := range poolReadsInsideTransactions(fn, openers) {
-					t.Errorf("%s: %s", fset.Position(read.pos), read.msg)
-				}
-				return true
-			})
+	files := map[string]*ast.File{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
 		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		testsupport.Must(t, err, "parsing %s: %v", name, err)
+		files[name] = file
+	}
+
+	openers := txOpenerHelpers(files)
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				return true
+			}
+			for _, read := range poolReadsInsideTransactions(fn, openers) {
+				t.Errorf("%s: %s", fset.Position(read.pos), read.msg)
+			}
+			return true
+		})
 	}
 }
 

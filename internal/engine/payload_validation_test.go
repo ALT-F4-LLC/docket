@@ -45,12 +45,12 @@ func activatedPayloadRun(t *testing.T, conn *sql.DB) *model.Run {
 	return run
 }
 
-// completeWithPayload claims a step and completes it, returning the refusal (or
-// nil) plus the step's row_version BEFORE the attempt, so a caller can assert
-// that a refusal wrote nothing.
+// completeWithPayload claims a step and completes it, returning the step's
+// row_version BEFORE the attempt plus the refusal (or nil), so a caller can
+// assert that a refusal wrote nothing.
 func completeWithPayload(
 	t *testing.T, conn *sql.DB, e *Engine, instance, payload string,
-) (err error, versionBefore int) {
+) (versionBefore int, err error) {
 	t.Helper()
 	stepID := stepIDByInstance(t, conn, instance)
 
@@ -64,10 +64,10 @@ func completeWithPayload(
 		t.Fatalf("GetStep: %v", gerr)
 	}
 
-	return e.CompleteStep(conn, stepID, CompleteOptions{
+	return step.RowVersion, e.CompleteStep(conn, stepID, CompleteOptions{
 		Token: claim.Token, Artifact: []byte("a body"),
 		Payload: []byte(payload), NowMS: nowMS,
-	}), step.RowVersion
+	})
 }
 
 // assertRefusedCleanly is the assertion every §6.9 refusal carries: a
@@ -125,7 +125,7 @@ func TestPayloadC1SchemalessStepIsUnchanged(t *testing.T) {
 
 		claimAndComplete(t, conn, e, "assess@0", "a body", `[{"severity":"low"}]`)
 
-		err, before := completeWithPayload(t, conn, e, "note@0", `{"not":"an array"}`)
+		before, err := completeWithPayload(t, conn, e, "note@0", `{"not":"an array"}`)
 		if err == nil {
 			t.Fatal("a non-array payload was accepted on a schema-less step")
 		}
@@ -144,7 +144,7 @@ func TestPayloadC2C3RefusalIsPathPrecise(t *testing.T) {
 	activatedPayloadRun(t, conn)
 	e := testEngine()
 
-	err, before := completeWithPayload(t, conn, e, "assess@0",
+	before, err := completeWithPayload(t, conn, e, "assess@0",
 		`[{"severity":"low"},{"severity":"urgent"}]`)
 	if err == nil {
 		t.Fatal("an invalid payload was accepted")
@@ -172,7 +172,7 @@ func TestPayloadC3CapsAtFiveLines(t *testing.T) {
 	for range 8 {
 		elements = append(elements, `{"severity":"nope"}`)
 	}
-	err, before := completeWithPayload(t, conn, e, "assess@0", "["+strings.Join(elements, ",")+"]")
+	before, err := completeWithPayload(t, conn, e, "assess@0", "["+strings.Join(elements, ",")+"]")
 	if err == nil {
 		t.Fatal("an invalid payload was accepted")
 	}
@@ -195,7 +195,7 @@ func TestPayloadC4AbsentPayloadIsRefused(t *testing.T) {
 	activatedPayloadRun(t, conn)
 	e := testEngine()
 
-	err, before := completeWithPayload(t, conn, e, "assess@0", "")
+	before, err := completeWithPayload(t, conn, e, "assess@0", "")
 	if err == nil {
 		t.Fatal("a step declaring `payload` completed with none")
 	}
@@ -315,7 +315,7 @@ func TestPayloadValidationReadsThePinnedBytes(t *testing.T) {
 		`{"type":"array"}`)
 	testsupport.Must(t, err, "swapping the registry row: %v", err)
 
-	err, before := completeWithPayload(t, conn, e, "assess@0", `[{"severity":"low"}]`)
+	before, err := completeWithPayload(t, conn, e, "assess@0", `[{"severity":"low"}]`)
 	if err == nil {
 		t.Fatal("validation used the swapped bytes; the pin decided nothing")
 	}

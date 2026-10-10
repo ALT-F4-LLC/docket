@@ -99,8 +99,6 @@ func (c *countingConn) Prepare(query string) (driver.Stmt, error) {
 	return c.Conn.Prepare(query)
 }
 
-func (c *countingConn) Begin() (driver.Tx, error) { return c.Conn.Begin() }
-
 // BeginTx records and forwards TxOptions to the sqlite conn. Without it
 // database/sql falls back to Begin and rejects a read-only transaction, which
 // the run report opens.
