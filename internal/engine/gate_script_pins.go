@@ -25,7 +25,15 @@ var gatePinStore = trust.Load
 // turn a visibility feature into a blanket block.
 const GateUnpinned = "unpinned"
 
-// GateVerdict is one declared gate whose script this run does not pin.
+// GateUnchecked is the status of a declared gate whose script could not be
+// checked at all: the trust store is unreadable, the repo identity does not
+// resolve, or no trust entry matches the gate. It is distinct from
+// GateUnpinned so a report with nothing checked never reads as all pinned,
+// and like GateUnpinned it never makes PinReport.Sound false.
+const GateUnchecked = "unchecked"
+
+// GateVerdict is one declared gate whose script this run does not pin, or
+// whose script could not be checked.
 type GateVerdict struct {
 	Gate   string `json:"gate"`
 	Status string `json:"status"`
@@ -136,16 +144,15 @@ func declaredGateNames(defs map[int]*workflow.Definition) []string {
 }
 
 // matchedGateArgv is the argv of the trust entry a declared gate resolves to
-// in this repo, or nil when the store cannot be read or no entry matches. An
-// unmatched gate is `gate-unmatched`'s subject, not this file's.
+// in this repo, or nil and the store's unmatched reason when no entry matches.
 func matchedGateArgv(
 	store *trust.Store, identity, gate string,
-) []string {
+) ([]string, string) {
 	m := store.Lookup(identity, gate, nil)
 	if !m.Matched || m.Entry == nil {
-		return nil
+		return nil, m.Reason
 	}
-	return m.Entry.Argv
+	return m.Entry.Argv, ""
 }
 
 // gateScriptPins is the file pins a run records for the scripts its declared
@@ -176,7 +183,8 @@ func gateScriptPins(
 	var pins []db.Pin
 	seen := map[string]bool{}
 	for _, name := range names {
-		for _, file := range repoLocalGateFiles(matchedGateArgv(store, identity, name), execRoot) {
+		argv, _ := matchedGateArgv(store, identity, name)
+		for _, file := range repoLocalGateFiles(argv, execRoot) {
 			if seen[file] {
 				continue
 			}
@@ -195,7 +203,9 @@ func gateScriptPins(
 
 // unpinnedGates lists the declared gates whose script the run does not pin:
 // an entry whose argv names no repo-local file, or one naming a file the run
-// holds no pin for (a run activated before gate scripts were pinned).
+// holds no pin for (a run activated before gate scripts were pinned). A gate
+// that cannot be checked at all is listed as GateUnchecked with the cause, so
+// an empty list means every declared gate was checked and found pinned.
 func unpinnedGates(
 	defs map[int]*workflow.Definition, pins []PinVerdict,
 	loadStore func() (*trust.Store, error), identityPath, execRoot string,
@@ -207,9 +217,15 @@ func unpinnedGates(
 	}
 	store, err := loadStore()
 	if err != nil {
+		for _, name := range names {
+			out = append(out, GateVerdict{
+				Gate: name, Status: GateUnchecked,
+				Reason: fmt.Sprintf("the trust store could not be read: %v", err),
+			})
+		}
 		return out
 	}
-	identity, _ := trust.RepoIdentity(identityPath)
+	identity, identityErr := trust.RepoIdentity(identityPath)
 
 	pinned := map[string]bool{}
 	for _, p := range pins {
@@ -218,8 +234,16 @@ func unpinnedGates(
 		}
 	}
 	for _, name := range names {
-		argv := matchedGateArgv(store, identity, name)
+		argv, unmatched := matchedGateArgv(store, identity, name)
 		if argv == nil {
+			reason := "unmatched: " + unmatched
+			if identityErr != nil {
+				// Only global entries can match without an identity, so a
+				// repo-bound entry for this gate may exist and be unreachable.
+				reason = fmt.Sprintf("the repo identity did not resolve (%v), "+
+					"so no repo-bound trust entry can match", identityErr)
+			}
+			out = append(out, GateVerdict{Gate: name, Status: GateUnchecked, Reason: reason})
 			continue
 		}
 		if execRoot == "" || !filepath.IsAbs(execRoot) {
@@ -268,6 +292,11 @@ func verifyGateScripts(
 		return err
 	}
 	report.Gates = unpinnedGates(defs, report.Pins, loadStore, identityPath, run.ExecRoot)
-	report.UnpinnedGates = len(report.Gates)
+	report.UnpinnedGates = 0
+	for _, g := range report.Gates {
+		if g.Status == GateUnpinned {
+			report.UnpinnedGates++
+		}
+	}
 	return nil
 }

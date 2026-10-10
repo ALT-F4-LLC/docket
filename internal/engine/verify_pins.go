@@ -87,12 +87,14 @@ type PinReport struct {
 	Changed  int `json:"changed"`
 	Missing  int `json:"missing"`
 	Unpinned int `json:"unpinned"`
-	// Gates lists the declared gates whose script this run does not pin, by
-	// gate name. It is a report beside the pin check, not part of it:
-	// Sound() ignores it, since a `make <target>` entry names no script file.
-	// Empty (never nil), in gate-name order.
-	Gates         []GateVerdict `json:"gates"`
-	UnpinnedGates int           `json:"unpinned_gates"`
+	// Gates lists the declared gates whose script this run does not pin
+	// (GateUnpinned) or could not check (GateUnchecked), by gate name. It is a
+	// report beside the pin check, not part of it: Sound() ignores it, since a
+	// `make <target>` entry names no script file. Empty (never nil) only when
+	// every declared gate was checked and found pinned, in gate-name order.
+	Gates []GateVerdict `json:"gates"`
+	// UnpinnedGates counts only the GateUnpinned rows.
+	UnpinnedGates int `json:"unpinned_gates"`
 }
 
 // Sound reports whether every pin still matches AND the pin set is closed —

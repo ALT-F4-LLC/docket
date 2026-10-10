@@ -99,11 +99,13 @@ func runRunVerifyPins(cmd *cobra.Command, ref string, w *output.Writer) error {
 		}
 		// Unpinned gates are a separate report, but an unsound run must not
 		// hide them: name them beside the drift.
-		if len(report.Gates) > 0 {
-			names := make([]string, 0, len(report.Gates))
-			for _, g := range report.Gates {
+		var names []string
+		for _, g := range report.Gates {
+			if g.Status == engine.GateUnpinned {
 				names = append(names, fmt.Sprintf("%q", g.Gate))
 			}
+		}
+		if len(names) > 0 {
 			remedy += "; gates with no pinned script: " + strings.Join(names, ", ")
 		}
 		return cmdErr(fmt.Errorf("%s: %s%s",

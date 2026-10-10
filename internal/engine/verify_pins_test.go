@@ -2,8 +2,10 @@ package engine
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -315,11 +317,118 @@ func TestVerifyPinsReportsUnpinnedGates(t *testing.T) {
 			t.Errorf("gate %q names a pinned script but is listed as unpinned", name)
 		}
 	}
-	if report.UnpinnedGates != len(report.Gates) {
-		t.Errorf("unpinned_gates = %d, want %d", report.UnpinnedGates, len(report.Gates))
+	unpinned := 0
+	for _, g := range report.Gates {
+		if g.Status == GateUnpinned {
+			unpinned++
+		}
+	}
+	if report.UnpinnedGates != unpinned {
+		t.Errorf("unpinned_gates = %d, want %d", report.UnpinnedGates, unpinned)
 	}
 	if !report.Sound() {
 		t.Errorf("an unpinned gate made the report unsound: %s", PinReportReason(report))
+	}
+}
+
+// gateReportWith builds the verify-pins report for a run the way VerifyPins
+// does, with the trust loader and the repo identity path supplied.
+func gateReportWith(
+	t *testing.T, conn *sql.DB, runID int,
+	load func() (*trust.Store, error), identityPath string,
+) *PinReport {
+	t.Helper()
+	report, err := verifyPinsClosedIn(conn, runID, runConfigRoots(conn, runID))
+	testsupport.Must(t, err, "verifyPinsClosedIn: %v", err)
+	testsupport.Must(t, verifyGateScripts(conn, runID, report, load, identityPath),
+		"verifyGateScripts")
+	return report
+}
+
+// assertUncheckedGate requires the report to name gate as could-not-check with
+// a reason containing why, while the run stays sound and counts no unpinned
+// gate.
+func assertUncheckedGate(t *testing.T, report *PinReport, gate, why string) {
+	t.Helper()
+	var row *GateVerdict
+	for i := range report.Gates {
+		if report.Gates[i].Gate == gate {
+			row = &report.Gates[i]
+		}
+	}
+	switch {
+	case row == nil:
+		t.Errorf("gate %q is absent from the report, which reads as pinned: %+v", gate, report.Gates)
+	case row.Status != GateUnchecked:
+		t.Errorf("gate %q has status %q, want %q", gate, row.Status, GateUnchecked)
+	case !strings.Contains(row.Reason, why):
+		t.Errorf("gate %q reason %q does not say %q", gate, row.Reason, why)
+	}
+	if report.UnpinnedGates != 0 {
+		t.Errorf("unpinned_gates = %d, want 0: a gate that could not be checked is not unpinned",
+			report.UnpinnedGates)
+	}
+	if !report.Sound() {
+		t.Errorf("a gate that could not be checked made the report unsound: %s", PinReportReason(report))
+	}
+}
+
+// TestVerifyPinsReportsEveryGateUncheckedWhenTheTrustStoreIsUnreadable: an
+// unreadable store is stated per declared gate, never an empty gate list.
+func TestVerifyPinsReportsEveryGateUncheckedWhenTheTrustStoreIsUnreadable(t *testing.T) {
+	repo, conn, runID := gateScriptFixture(t)
+	unreadable := func() (*trust.Store, error) {
+		return nil, errors.New("open trust.toml: permission denied")
+	}
+
+	report := gateReportWith(t, conn, runID, unreadable, repo)
+
+	defs, err := StepDefinitions(conn, runID)
+	testsupport.Must(t, err, "StepDefinitions: %v", err)
+	declared := declaredGateNames(defs)
+	if !contains(declared, "build") {
+		t.Fatalf("premise: the run must declare the build gate, declares %v", declared)
+	}
+	if len(report.Gates) != len(declared) {
+		t.Errorf("report has %d gate rows, want one per declared gate %v: %+v",
+			len(report.Gates), declared, report.Gates)
+	}
+	for _, gate := range declared {
+		assertUncheckedGate(t, report, gate, "trust store could not be read")
+	}
+}
+
+// TestVerifyPinsReportsARepoBoundGateUncheckedWhenTheIdentityDoesNotResolve:
+// a gate whose only entry is repo-bound cannot match without a repo identity,
+// and the report says so instead of omitting the gate.
+func TestVerifyPinsReportsARepoBoundGateUncheckedWhenTheIdentityDoesNotResolve(t *testing.T) {
+	repo, conn, runID := gateScriptFixture(t)
+	argv := []string{"bash", "scripts/qa/build.sh"}
+	repoBound := sandboxTrust(t, trust.Entry{
+		Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Repo: repo,
+	})
+
+	report := gateReportWith(t, conn, runID, repoBound, filepath.Join(repo, "no-such-dir"))
+
+	assertUncheckedGate(t, report, "build", "repo identity did not resolve")
+}
+
+// TestVerifyPinsReportsAnUnmatchedGateUnchecked: with the identity resolved, a
+// declared gate no trust entry matches is named as unmatched.
+func TestVerifyPinsReportsAnUnmatchedGateUnchecked(t *testing.T) {
+	repo, conn, runID := gateScriptFixture(t)
+	argv := []string{"bash", "scripts/qa/build.sh"}
+	onlyBuild := sandboxTrust(t, trust.Entry{
+		Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Global: true,
+	})
+
+	report := gateReportWith(t, conn, runID, onlyBuild, repo)
+
+	assertUncheckedGate(t, report, "tests", "unmatched")
+	for _, g := range report.Gates {
+		if g.Gate == "build" {
+			t.Errorf("gate build matches and its script is pinned, but it is reported: %+v", g)
+		}
 	}
 }
 
