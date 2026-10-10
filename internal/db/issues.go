@@ -97,24 +97,27 @@ var validUpdateFields = map[string]bool{
 // (find-or-create) and linked to the issue within the same transaction.
 // Files are attached to the issue if provided.
 func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string) (int, error) {
-	return CreateIssueIdempotent(db, issue, labels, files, "")
+	id, _, err := CreateIssueIdempotent(db, issue, labels, files, "")
+	return id, err
 }
 
 // CreateIssueIdempotent is CreateIssue with an optional idempotency key.
 //
 // When idempotencyKey is non-empty and was already used for this scope, the
-// original issue's id is returned and nothing is inserted — a retried create
-// after a dropped response must succeed, not fail. The key record and the
-// insert commit in the SAME transaction, so a crash between them cannot
-// orphan either.
-func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, files []string, idempotencyKey string) (int, error) {
+// original issue's id is returned with inserted=false and nothing is inserted —
+// a retried create after a dropped response must succeed, not fail. inserted
+// is true only when this call created the issue, so a caller that writes more
+// after the insert keys on it rather than on a lookup of its own, which another
+// process could race. The key record and the insert commit in the SAME
+// transaction, so a crash between them cannot orphan either.
+func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, files []string, idempotencyKey string) (int, bool, error) {
 	if idempotencyKey != "" {
 		existingID, found, err := LookupIdempotencyKey(db, ScopeIssueCreate, idempotencyKey)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if found {
-			return existingID, nil
+			return existingID, false, nil
 		}
 	}
 
@@ -122,7 +125,7 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 
 	tx, err := db.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("beginning transaction: %w", err)
+		return 0, false, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -143,12 +146,12 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 		string(issue.Size),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("inserting issue: %w", err)
+		return 0, false, fmt.Errorf("inserting issue: %w", err)
 	}
 
 	id64, err := res.LastInsertId()
 	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
+		return 0, false, fmt.Errorf("getting last insert id: %w", err)
 	}
 	id := int(id64)
 
@@ -156,13 +159,13 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 	for _, name := range labels {
 		labelID, err := findOrCreateLabel(tx, projectID, name)
 		if err != nil {
-			return 0, fmt.Errorf("processing label %q: %w", name, err)
+			return 0, false, fmt.Errorf("processing label %q: %w", name, err)
 		}
 		if _, err := tx.Exec(
 			`INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)`,
 			id, labelID,
 		); err != nil {
-			return 0, fmt.Errorf("linking label %q: %w", name, err)
+			return 0, false, fmt.Errorf("linking label %q: %w", name, err)
 		}
 	}
 
@@ -172,13 +175,13 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 			`INSERT OR IGNORE INTO issue_files (issue_id, file_path) VALUES (?, ?)`,
 			id, fp,
 		); err != nil {
-			return 0, fmt.Errorf("attaching file %q: %w", fp, err)
+			return 0, false, fmt.Errorf("attaching file %q: %w", fp, err)
 		}
 	}
 
 	// Record creation activity.
 	if err := RecordActivity(tx, id, "created", "", "", ""); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	// Record file attachment activity if files were provided at creation.
@@ -186,7 +189,7 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 		sorted := slices.Clone(files)
 		sort.Strings(sorted)
 		if err := RecordActivity(tx, id, "files", "", strings.Join(sorted, ", "), ""); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
 
@@ -194,15 +197,15 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 	// leave a created issue whose key is unrecorded, so the retry duplicates.
 	if idempotencyKey != "" {
 		if err := RecordIdempotencyKeyTx(tx, ScopeIssueCreate, idempotencyKey, id); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("committing transaction: %w", err)
+		return 0, false, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return id, nil
+	return id, true, nil
 }
 
 // issueColumns is the column list every issue SELECT uses, in the exact order

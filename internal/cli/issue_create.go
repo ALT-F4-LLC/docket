@@ -201,27 +201,21 @@ var createCmd = &cobra.Command{
 			return err
 		}
 
-		// A replayed key returns the earlier issue and writes nothing to it:
-		// this call's flags describe a create that is not happening.
-		var id int
-		replayed := false
-		if idempotencyKey != "" {
-			id, replayed, err = db.LookupIdempotencyKey(conn, db.ScopeIssueCreate, idempotencyKey)
-			if err != nil {
-				return cmdErr(err, output.ErrGeneral)
-			}
+		id, inserted, err := db.CreateIssueIdempotent(conn, &issue, labelFlag, fileFlag, idempotencyKey)
+		if err != nil {
+			return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
 		}
 
-		if !replayed {
-			id, err = db.CreateIssueIdempotent(conn, &issue, labelFlag, fileFlag, idempotencyKey)
-			if err != nil {
-				return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
-			}
-
-			// Scope is written after the insert rather than through CreateIssue,
-			// so the create path an unmodified `issue create` takes is unchanged:
-			// a repo that never declares a scope executes exactly the v6 code and
-			// leaves scope_globs NULL (§3 phase-2 dormancy).
+		// A replayed key returns the earlier issue and writes nothing to it:
+		// this call's flags describe a create that is not happening. Only the
+		// create's own answer can say so; a lookup made before it can be raced
+		// by another process committing the same key.
+		//
+		// Scope is written after the insert rather than through CreateIssue,
+		// so the create path an unmodified `issue create` takes is unchanged:
+		// a repo that never declares a scope executes exactly the v6 code and
+		// leaves scope_globs NULL (§3 phase-2 dormancy).
+		if inserted {
 			if err := applyScope(cmd, conn, id); err != nil {
 				return err
 			}
