@@ -112,9 +112,18 @@ type ReconcileOutcome struct {
 // harder.
 func (e *Engine) ReconcileDispatch(
 	conn *sql.DB, runID int, rows []BackfillRow, source string,
-	onDuplicate string, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
+	onDuplicate string, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 ) (*ReconcileOutcome, error) {
 	out := &ReconcileOutcome{Run: model.FormatRunID(runID)}
+
+	// A refused override must write nothing, and stage 1 commits usage rows
+	// before stage 3 could refuse it. The close re-checks inside its own
+	// transaction, which stays the authoritative ruling.
+	if skip.Reason != "" {
+		if err := authorizeConductor(conn, runID, skip.Token, skipIntegrationVerb); err != nil {
+			return out, err
+		}
+	}
 
 	// ---- stage 1: back-fill -------------------------------------------------
 	//
@@ -151,7 +160,7 @@ func (e *Engine) ReconcileDispatch(
 	out.Verify = verify
 
 	// ---- stage 3: close -----------------------------------------------------
-	closed, err := e.CloseDispatch(conn, runID, acceptMissingUsage, skipIntegrationReason, nowMS)
+	closed, err := e.CloseDispatch(conn, runID, acceptMissingUsage, skip, nowMS)
 	if err != nil {
 		return out, &StageError{Stage: StageClose, Err: err}
 	}

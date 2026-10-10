@@ -717,7 +717,7 @@ func TestReconciledCloseAcksItsOwnWavesReap(t *testing.T) {
 	claim := claimInstance(t, conn, instance, nowMS)
 
 	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1
-	_, err := NewEngine().CloseDispatch(conn, runID, false, "", past)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past)
 	testsupport.Must(t, err, "CloseDispatch: %v", err)
 
 	seq := reapSeqOf(t, conn, runID, instance)
@@ -739,7 +739,7 @@ func TestReconciledCloseKeepsAForcedReapsHold(t *testing.T) {
 	testsupport.Must(t, ForceReapStep(conn, stepIDByInstance(t, conn, instance),
 		"the holder crashed", nowMS+1), "ForceReapStep: %v", nil)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, false, "", nowMS+2)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS+2)
 	testsupport.Must(t, err, "CloseDispatch: %v", err)
 
 	seq := reapSeqOf(t, conn, runID, instance)
@@ -764,7 +764,7 @@ func TestReconciledCloseKeepsAnotherDispatchsReapHold(t *testing.T) {
 	openDispatch(t, conn, runID, 0, nowMS+2)
 
 	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1
-	_, err = NewEngine().CloseDispatch(conn, runID, false, "", past)
+	_, err = NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past)
 	testsupport.Must(t, err, "CloseDispatch D2: %v", err)
 
 	seq := reapSeqOf(t, conn, runID, instance)

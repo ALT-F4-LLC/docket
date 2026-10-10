@@ -80,7 +80,7 @@ func TestCloseRefusesAnUnintegratedWriteStep(t *testing.T) {
 	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
 	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, true }
 
-	_, err := e.CloseDispatch(conn, runID, true, "", nowMS)
+	_, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	if err == nil {
 		t.Fatal("want a refusal over the unintegrated write-step commit")
 	}
@@ -100,7 +100,7 @@ func TestCloseAcceptsAnAncestorIntegratedWriteStep(t *testing.T) {
 	e.IsAncestorFn = func(_, sha string) (bool, bool) { return sha == "cafefeed01", true }
 	openDispatch(t, conn, runID, 0, nowMS)
 
-	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "CloseDispatch: %v", err)
 
 	if outcome.Integration == nil || outcome.Integration.Status != "verified" {
@@ -121,7 +121,7 @@ func TestCloseAcceptsAPatchEquivalentWriteStep(t *testing.T) {
 	e.PatchContainedFn = func(_, sha string) (bool, bool) { return sha == "beadfeed02", true }
 	openDispatch(t, conn, runID, 0, nowMS)
 
-	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "CloseDispatch: %v", err)
 
 	if outcome.Integration == nil || outcome.Integration.Status != "verified" {
@@ -139,7 +139,7 @@ func TestCloseCherryErrorCountsAsUnintegrated(t *testing.T) {
 	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
 	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, false } // known=false: cherry itself failed
 
-	_, err := e.CloseDispatch(conn, runID, true, "", nowMS)
+	_, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	if err == nil {
 		t.Fatal("want a refusal when the patch probe itself could not run")
 	}
@@ -159,7 +159,8 @@ func TestCloseSkipIntegrationCheckRecordsTheReason(t *testing.T) {
 	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, true }
 	openDispatch(t, conn, runID, 0, nowMS)
 
-	outcome, err := e.CloseDispatch(conn, runID, true, "verified by hand, ops incident 88", nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, true,
+		IntegrationSkip{Reason: "verified by hand, ops incident 88", Token: testConductorToken}, nowMS)
 	testsupport.Must(t, err, "CloseDispatch with --skip-integration-check: %v", err)
 
 	if outcome.Integration == nil || outcome.Integration.Status != "skipped" {
@@ -270,7 +271,7 @@ func TestDispatchCloseHonorsPriorIntegration(t *testing.T) {
 	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
 	e.PatchContainedFn = func(_, sha string) (bool, bool) { return sha == "154e3be7ed65", true }
 	first := openDispatch(t, conn, runID, 0, nowMS)
-	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "first close: %v", err)
 	if outcome.Integration.Status != "verified" || len(outcome.Integration.Checked) != 1 {
 		t.Fatalf("first close Integration = %+v, want one verified row", outcome.Integration)
@@ -284,7 +285,7 @@ func TestDispatchCloseHonorsPriorIntegration(t *testing.T) {
 	completeWriteStep(t, conn, e, "amend@0", "/worktrees/wf-amend")
 	second := openDispatch(t, conn, runID, 0, nowMS+1)
 
-	_, err = e.CloseDispatch(conn, runID, true, "", nowMS+1)
+	_, err = e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS+1)
 	if err == nil {
 		t.Fatal("want a refusal over amend@0's unintegrated commit")
 	}
@@ -299,7 +300,7 @@ func TestDispatchCloseHonorsPriorIntegration(t *testing.T) {
 	// Integrate the second commit; the close accepts both — one honored from
 	// the prior close, one asked of git — and says which was which.
 	e.PatchContainedFn = func(_, sha string) (bool, bool) { return sha == "d0e9747b8acd", true }
-	outcome, err = e.CloseDispatch(conn, runID, true, "", nowMS+1)
+	outcome, err = e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS+1)
 	testsupport.Must(t, err, "second close: %v", err)
 	if outcome.Dispatch != second.Dispatch {
 		t.Errorf("closed %s, want %s", outcome.Dispatch, second.Dispatch)
@@ -325,11 +326,12 @@ func TestDispatchCloseHonorsASkippedPriorClose(t *testing.T) {
 	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
 	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, true }
 	first := openDispatch(t, conn, runID, 0, nowMS)
-	_, err := e.CloseDispatch(conn, runID, true, "hand-integrated per operator ruling", nowMS)
+	_, err := e.CloseDispatch(conn, runID, true,
+		IntegrationSkip{Reason: "hand-integrated per operator ruling", Token: testConductorToken}, nowMS)
 	testsupport.Must(t, err, "skipped close: %v", err)
 
 	openDispatch(t, conn, runID, 0, nowMS+1)
-	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS+1)
+	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS+1)
 	testsupport.Must(t, err, "close after a skipped close: %v", err)
 	if outcome.Integration.Status != "verified" || len(outcome.Integration.Checked) != 1 {
 		t.Fatalf("Integration = %+v, want verified with the one honored row", outcome.Integration)
@@ -383,7 +385,7 @@ after = []
 	e.PatchContainedFn = func(_, _ string) (bool, bool) { return false, true }
 	openDispatch(t, conn, run.ID, 0, nowMS)
 
-	outcome, err := e.CloseDispatch(conn, run.ID, true, "", nowMS)
+	outcome, err := e.CloseDispatch(conn, run.ID, true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "CloseDispatch: %v", err)
 	if outcome.Integration == nil || outcome.Integration.Status != "verified" || len(outcome.Integration.Checked) != 0 {
 		t.Errorf("Integration = %+v, want verified with nothing checked (no write-class steps)", outcome.Integration)
@@ -659,7 +661,7 @@ func requireRecordedHead(t *testing.T, conn *sql.DB, stepID int, sha string) {
 func requireVerifiedWithout(t *testing.T, conn *sql.DB, e *Engine, runID int, sha string) {
 	t.Helper()
 	openDispatch(t, conn, runID, 0, nowMS+2)
-	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS+2)
+	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS+2)
 	testsupport.Must(t, err, "CloseDispatch without --skip-integration-check: %v", err)
 	if outcome.Integration == nil || outcome.Integration.Status != "verified" {
 		t.Fatalf("Integration = %+v, want status verified", outcome.Integration)
@@ -751,7 +753,7 @@ func TestCloseStillRefusesAWriterBesideAnAbandonedIssue(t *testing.T) {
 	}
 
 	openDispatch(t, conn, runID, 0, nowMS+2)
-	_, err := e.CloseDispatch(conn, runID, true, "", nowMS+2)
+	_, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS+2)
 	if err == nil {
 		t.Fatal("want a refusal over the live issue's unintegrated commit")
 	}

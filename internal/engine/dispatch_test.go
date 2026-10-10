@@ -1602,7 +1602,7 @@ func TestCloseRefusesPerDiscrepancy(t *testing.T) {
 	instance := manifest.Rows[0].Instance
 	past := claimPastGraceWithLiveLease(t, conn, instance)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, false, "", past)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past)
 	if err == nil {
 		t.Fatal("close succeeded with a claimed-but-unrecorded step on a LIVE lease")
 	}
@@ -1644,7 +1644,7 @@ func TestCloseReapsLapsedLeasesBeforeProbing(t *testing.T) {
 	claim := claimInstance(t, conn, instance, nowMS)
 
 	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", past); err != nil {
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past); err != nil {
 		t.Fatalf("close refused over a LAPSED lease (%v); the reap that clears "+
 			"the discrepancy is close's own, and `next` cannot perform it while "+
 			"this dispatch is open", err)
@@ -1704,11 +1704,11 @@ func TestCloseAcceptMissingUsageRecordsTheAcceptance(t *testing.T) {
 	finishWithoutUsage(t, conn, instance)
 
 	past := nowMS + 1000 + graceMS(t, conn) + 1
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", past); err == nil {
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past); err == nil {
 		t.Fatal("premise: close must refuse over a missing-usage discrepancy")
 	}
 
-	outcome, err := NewEngine().CloseDispatch(conn, runID, true, "", nowMS)
+	outcome, err := NewEngine().CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "close --accept-missing-usage: %v", err)
 	if outcome.Reason != db.CloseReasonAcceptedMissingUsage {
 		t.Errorf("close_reason = %q, want %q",
@@ -1772,7 +1772,7 @@ func TestCloseNoOpenDispatchReapsLapsedLease(t *testing.T) {
 	finishWithoutUsage(t, conn, "review@0#0")
 
 	at := claim.LeaseExpiresMS + graceMS(t, conn) + 1
-	outcome, err := NewEngine().CloseDispatch(conn, runID, true, "", at)
+	outcome, err := NewEngine().CloseDispatch(conn, runID, true, IntegrationSkip{}, at)
 	testsupport.Must(t, err, "close --accept-missing-usage with no dispatch open "+
 		"refused over a LAPSED lease (%v); the reap that clears the discrepancy "+
 		"is this close's own, and no other verb can perform it here", err)
@@ -1812,7 +1812,7 @@ func TestAcceptMissingUsageDoesNotAcceptD1(t *testing.T) {
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
 	past := claimPastGraceWithLiveLease(t, conn, manifest.Rows[0].Instance)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, true, "", past)
+	_, err := NewEngine().CloseDispatch(conn, runID, true, IntegrationSkip{}, past)
 	if err == nil {
 		t.Fatal("--accept-missing-usage closed over a claimed-but-unrecorded " +
 			"step; P20 forbids it, or a relay closes over work still running")
@@ -1834,7 +1834,7 @@ func TestAbandonIsUnconditional(t *testing.T) {
 	past := claimPastGraceWithLiveLease(t, conn, manifest.Rows[0].Instance)
 
 	// The premise: a discrepancy exists and `close` refuses.
-	if _, err := NewEngine().CloseDispatch(conn, runID, false, "", past); err == nil {
+	if _, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, past); err == nil {
 		t.Fatal("premise: close must refuse here")
 	}
 
@@ -1871,7 +1871,7 @@ func TestCloseRacingAbandonReportsWhy(t *testing.T) {
 	// The abandon wins; the close arrives second.
 	abandon(t, conn, runID, nowMS)
 
-	_, err := NewEngine().CloseDispatch(conn, runID, false, "", nowMS)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS)
 	if err == nil {
 		t.Fatal("close succeeded against an abandoned dispatch")
 	}

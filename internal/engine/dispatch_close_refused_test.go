@@ -71,7 +71,7 @@ func TestDispatchCloseRefusalsWriteAnEvent(t *testing.T) {
 			e, conn, runID, open, accept, at := c.setup(t)
 			before := len(closeRefusedEvents(t, conn, runID))
 
-			_, err := e.CloseDispatch(conn, runID, accept, "", at)
+			_, err := e.CloseDispatch(conn, runID, accept, IntegrationSkip{}, at)
 			if code, ok := CodeOf(err); !ok || code != CodeConflict {
 				t.Fatalf("CloseDispatch err = %v, want CONFLICT", err)
 			}

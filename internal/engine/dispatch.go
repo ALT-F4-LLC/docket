@@ -1890,6 +1890,17 @@ type CloseOutcome struct {
 	Integration *IntegrationCheck `json:"integration,omitempty"`
 }
 
+// IntegrationSkip is `dispatch close --skip-integration-check`. The zero value
+// runs the integration check. A non-empty Reason skips it, and Token is the
+// run's conductor capability that authorizes the skip on a bound run.
+type IntegrationSkip struct {
+	Reason string
+	Token  string
+}
+
+// skipIntegrationVerb names the override in a conductor refusal.
+const skipIntegrationVerb = "dispatch close --skip-integration-check"
+
 // CloseDispatch is P18, P19, P20, and P22.
 //
 // It closes the open manifest ONLY IF no discrepancy exists. With one, it
@@ -1916,19 +1927,21 @@ type CloseOutcome struct {
 // recorded commit reached the shared branch (dispatch_integration.go) —
 // ancestor first, patch-equivalent (`git cherry`) when a cherry-pick minted a
 // new sha for identical content, refusing CONFLICT with the unintegrated list
-// otherwise. skipIntegrationReason, when non-empty, is the operator's
-// override: the check does not run at all, and the reason rides on the close
-// event instead (§3.6's "record the override, don't silently honor it"
-// pattern this codebase already applies to trust changes).
+// otherwise. skip.Reason, when non-empty, is the operator's override: the
+// check does not run at all, and the reason rides on the close event instead
+// (§3.6's "record the override, don't silently honor it" pattern this
+// codebase already applies to trust changes). Every later close of the run
+// honors that record, so on a bound run the override requires the run's
+// conductor capability in skip.Token; a close without it requires none.
 //
 // DKT-2758: every CONFLICT it returns is recorded as one
 // `dispatch-close-refused` event, in its own transaction that commits although
 // the close did not, naming the dispatch when one was open.
 func (e *Engine) CloseDispatch(
-	conn *sql.DB, runID int, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
+	conn *sql.DB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 ) (*CloseOutcome, error) {
 	openID := 0
-	outcome, err := e.closeDispatch(conn, runID, acceptMissingUsage, skipIntegrationReason, nowMS, &openID)
+	outcome, err := e.closeDispatch(conn, runID, acceptMissingUsage, skip, nowMS, &openID)
 	if code, ok := CodeOf(err); ok && code == CodeConflict {
 		if recErr := recordCloseRefused(conn, runID, openID, err.Error(), nowMS); recErr != nil {
 			return nil, recErr
@@ -1963,7 +1976,7 @@ func recordCloseRefused(conn *sql.DB, runID, dispatchID int, reason string, nowM
 // closeDispatch is CloseDispatch's body. openID receives the open dispatch's
 // id as soon as one is read, so a refusal can name it.
 func (e *Engine) closeDispatch(
-	conn *sql.DB, runID int, acceptMissingUsage bool, skipIntegrationReason string, nowMS int64,
+	conn *sql.DB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 	openID *int,
 ) (*CloseOutcome, error) {
 	if id, ok := openDispatchID(conn, runID); ok {
@@ -1978,7 +1991,7 @@ func (e *Engine) closeDispatch(
 	// behind it is a leak, and this is the other safe point that reclaims it.
 	sweepStalePreGateScratch(runExecRoot(conn, runID))
 
-	integration, unintegrated, err := e.integrationVerdict(conn, runID, defs, skipIntegrationReason, nowMS)
+	integration, unintegrated, err := e.integrationVerdict(conn, runID, defs, skip.Reason, nowMS)
 	if err != nil {
 		return nil, err
 	}
@@ -1994,6 +2007,12 @@ func (e *Engine) closeDispatch(
 		return nil, fmt.Errorf("closing a dispatch: %w", err)
 	}
 	defer tx.Rollback()
+
+	if skip.Reason != "" {
+		if err := authorizeConductorTx(tx, runID, skip.Token, skipIntegrationVerb); err != nil {
+			return nil, err
+		}
+	}
 
 	open, err := db.OpenDispatchTx(tx, runID)
 	noOpen := err != nil && strings.Contains(err.Error(), db.ErrNoOpenDispatch.Error())

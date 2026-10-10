@@ -944,7 +944,7 @@ func TestHeldStagedRowVerifiesAsMatched(t *testing.T) {
 	// — back-fill, verify, close — runs to a closed dispatch over the held row.
 	out, err := e.ReconcileDispatch(conn, run.ID, []BackfillRow{
 		{Step: implementID, Unit: "tokens", Quantity: 1000},
-	}, "wave-journal:held", "", true, "", nowMS)
+	}, "wave-journal:held", "", true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "reconcile over the held staged row: %v", err)
 	if got := verdictOf(out.Verify, "verify@0"); got != RowMatched {
 		t.Errorf("reconcile's verify@0 verdict = %q while held, want %q", got, RowMatched)

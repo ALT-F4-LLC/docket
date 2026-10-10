@@ -46,7 +46,7 @@ func TestFreshlyRecordedStepIsUsagePending(t *testing.T) {
 
 	// The close reconciles inside the window, and `next` answers after it:
 	// the join is off the critical path.
-	outcome, err := e.CloseDispatch(conn, runID, false, "", fresh)
+	outcome, err := e.CloseDispatch(conn, runID, false, IntegrationSkip{}, fresh)
 	testsupport.Must(t, err, "a plain close inside the grace refused: %v", err)
 	if outcome.Reason != db.CloseReasonReconciled {
 		t.Errorf("close_reason = %q, want %q", outcome.Reason, db.CloseReasonReconciled)
@@ -96,7 +96,7 @@ func TestUsageGraceIsMeasuredFromTheWaveEnd(t *testing.T) {
 			"discrepancy (%v); D7 measures from the wave end, not the step's own record",
 			DiscrepancyMissingUsage, ds)
 	}
-	outcome, err := e.CloseDispatch(conn, runID, false, "", inside)
+	outcome, err := e.CloseDispatch(conn, runID, false, IntegrationSkip{}, inside)
 	testsupport.Must(t, err, "a plain close inside the wave-end grace refused: %v", err)
 	if outcome.Reason != db.CloseReasonReconciled {
 		t.Errorf("close_reason = %q, want %q", outcome.Reason, db.CloseReasonReconciled)
@@ -163,7 +163,7 @@ func TestUsageGraceIgnoresAnnotation(t *testing.T) {
 			"discrepancy (%v); the annotation restarted the grace",
 			instance, DiscrepancyMissingUsage, ds)
 	}
-	_, err = e.CloseDispatch(conn, runID, false, "", past)
+	_, err = e.CloseDispatch(conn, runID, false, IntegrationSkip{}, past)
 	if code, ok := CodeOf(err); !ok || code != CodeConflict {
 		t.Errorf("a plain close at the grace after the record: err = %v, want CONFLICT", err)
 	}
@@ -179,7 +179,7 @@ func TestAcceptMissingUsageSettlesPendingStepsToo(t *testing.T) {
 	manifest := openDispatch(t, conn, runID, 0, nowMS)
 	finishWithoutUsage(t, conn, manifest.Rows[0].Instance)
 
-	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS+1000)
+	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS+1000)
 	testsupport.Must(t, err, "close --accept-missing-usage inside the grace: %v", err)
 	if len(outcome.Accepted) == 0 {
 		t.Fatal("the acceptance skipped a step inside the grace; it would " +

@@ -31,6 +31,7 @@ func dispatchCloseCmdWithDB(conn *sql.DB, runRef string) *cobra.Command {
 	cmd.Flags().String("backfill-from", "", "")
 	cmd.Flags().String("on-duplicate", "refuse", "")
 	cmd.Flags().String("source", "", "")
+	cmd.Flags().String("skip-integration-check", "", "")
 	return cmd
 }
 
@@ -248,7 +249,7 @@ func TestDispatchCloseBackfillFromRefusesADirectory(t *testing.T) {
 // had, and `close` gained exactly three.
 func TestDispatchCloseDeclaresTheReconcileFlags(t *testing.T) {
 	for _, name := range []string{"backfill-from", "on-duplicate", "source",
-		"accept-missing-usage", "run"} {
+		"accept-missing-usage", "skip-integration-check", "run"} {
 		if dispatchCloseCmd.Flags().Lookup(name) == nil {
 			t.Errorf("`dispatch close` declares no --%s", name)
 		}

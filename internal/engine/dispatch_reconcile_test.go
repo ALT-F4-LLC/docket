@@ -32,7 +32,7 @@ func TestReconcileRunsAllThreeStages(t *testing.T) {
 	// longer refuses over a freshly recorded step (D7 gives it
 	// `dispatch.grace`), so the ungraced view is where the debt shows; past
 	// the grace the close would refuse as it always did.
-	if _, err := e.CloseDispatch(conn, runID, false, "", nowMS+graceMS(t, conn)+1); err == nil {
+	if _, err := e.CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS+graceMS(t, conn)+1); err == nil {
 		t.Fatal("premise: `close` must refuse past the grace over the missing " +
 			"usage that the back-fill stage exists to record")
 	}
@@ -42,7 +42,7 @@ func TestReconcileRunsAllThreeStages(t *testing.T) {
 
 	out, err := e.ReconcileDispatch(conn, runID, []BackfillRow{
 		{Step: implID, Unit: "tokens", Quantity: 48211},
-	}, "wave-journal:wf-7", "", false, "", nowMS)
+	}, "wave-journal:wf-7", "", false, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "reconcile: %v", err)
 
 	if out.Backfill == nil || out.Backfill.Written != 1 || out.Backfill.Steps != 1 {
@@ -93,7 +93,7 @@ func TestReconcileMatchesTheManualOrdering(t *testing.T) {
 	if mismatch != nil {
 		t.Fatalf("manual verify found a mismatch at row %d", mismatch.Position)
 	}
-	_, err = manualEngine.CloseDispatch(manualConn, manualRun, false, "", nowMS)
+	_, err = manualEngine.CloseDispatch(manualConn, manualRun, false, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "manual close: %v", err)
 
 	// The reconcile, in another.
@@ -106,7 +106,7 @@ func TestReconcileMatchesTheManualOrdering(t *testing.T) {
 
 	_, err = oneEngine.ReconcileDispatch(oneConn, oneRun, []BackfillRow{
 		{Step: oneStep, Unit: "tokens", Quantity: 48211},
-	}, "wave-journal:wf-7", "", false, "", nowMS)
+	}, "wave-journal:wf-7", "", false, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "reconcile: %v", err)
 
 	// What the ledger holds, row for row.
@@ -165,7 +165,7 @@ func TestReconcileStopsAtAFailedBackfill(t *testing.T) {
 	out, err := e.ReconcileDispatch(conn, runID, []BackfillRow{
 		{Step: implID, Unit: "tokens", Quantity: 48211},
 		{Step: 999999, Unit: "tokens", Quantity: 1},
-	}, "", "", false, "", nowMS)
+	}, "", "", false, IntegrationSkip{}, nowMS)
 	if err == nil {
 		t.Fatal("the reconcile succeeded over a step that does not exist")
 	}
@@ -233,7 +233,7 @@ func TestReconcileStopsAtAFailedVerify(t *testing.T) {
 
 	out, err := e.ReconcileDispatch(conn, runID, []BackfillRow{
 		{Step: implID, Unit: "tokens", Quantity: 48211},
-	}, "", "", false, "", nowMS)
+	}, "", "", false, IntegrationSkip{}, nowMS)
 	if err == nil {
 		t.Fatal("the reconcile closed over a drifted manifest")
 	}
@@ -289,7 +289,7 @@ func TestReconcileLeavesTheStandaloneVerbsAlone(t *testing.T) {
 	}, "", "", nowMS)
 	testsupport.Must(t, err, "backfill-usage: %v", err)
 
-	outcome, err := e.CloseDispatch(conn, runID, false, "", nowMS)
+	outcome, err := e.CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "close: %v", err)
 	if outcome.Status != db.DispatchClosed || outcome.Reason != db.CloseReasonReconciled {
 		t.Fatalf("close outcome = %+v, want (%s, %s)",

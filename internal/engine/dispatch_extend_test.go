@@ -757,7 +757,7 @@ func TestDispatchExtendLeavesUnlaunchedRowsPending(t *testing.T) {
 
 	// The close REFUSES CONFLICT on any discrepancy, so succeeding is the
 	// assertion: a pending appended row is the dispatch working, not drift.
-	outcome, err := e.CloseDispatch(conn, run.ID, false, "", nowMS)
+	outcome, err := e.CloseDispatch(conn, run.ID, false, IntegrationSkip{}, nowMS)
 	if err != nil {
 		t.Fatalf("close after an extend refused: %v — the never-launched "+
 			"appended rows %v are still pending, which is not a discrepancy",

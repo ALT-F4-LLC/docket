@@ -37,7 +37,7 @@ func TestAnnotateIntegrationResolvesCloseAndRecord(t *testing.T) {
 
 	// Premise: as recorded, the close refuses — a hand-resolved cherry-pick is
 	// neither an ancestor nor patch-equivalent.
-	if _, err := e.CloseDispatch(conn, runID, true, "", nowMS); err == nil {
+	if _, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS); err == nil {
 		t.Fatal("premise: the close accepted the unintegrated recorded commit")
 	}
 
@@ -82,7 +82,7 @@ func TestAnnotateIntegrationResolvesCloseAndRecord(t *testing.T) {
 	// The close: verified, and the verdict says HOW the head came to be the
 	// branch's.
 	openDispatch(t, conn, runID, 0, nowMS+2)
-	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS+2)
+	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS+2)
 	testsupport.Must(t, err, "CloseDispatch after the annotation: %v", err)
 	if outcome.Integration == nil || outcome.Integration.Status != "verified" {
 		t.Fatalf("Integration = %+v, want status verified", outcome.Integration)
