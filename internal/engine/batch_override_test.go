@@ -482,13 +482,14 @@ func TestBatchOverrideRefusesAParkWithASkippedGate(t *testing.T) {
 	err = e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
 		"sandbox artifact", nowMS+1)
 	if err == nil {
-		t.Fatal("--batch over a park with a skipped gate was accepted")
-	}
-	if code, _ := CodeOf(err); code != CodeValidation {
-		t.Errorf("refusal code = %q, want %q (%v)", code, CodeValidation, err)
-	}
-	if msg := err.Error(); !strings.Contains(msg, `"tests"`) || !strings.Contains(msg, "skipped") {
-		t.Errorf("refusal = %q, want it to name skipped gate \"tests\"", msg)
+		t.Error("--batch over a park with a skipped gate was accepted")
+	} else {
+		if code, _ := CodeOf(err); code != CodeValidation {
+			t.Errorf("refusal code = %q, want %q (%v)", code, CodeValidation, err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, `"tests"`) || !strings.Contains(msg, "skipped") {
+			t.Errorf("refusal = %q, want it to name skipped gate \"tests\"", msg)
+		}
 	}
 
 	grants, err := db.GateOverrideGrantsForRun(conn, runID)
