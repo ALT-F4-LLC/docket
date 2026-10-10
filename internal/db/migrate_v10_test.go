@@ -107,7 +107,8 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// park reason (DKT-1898), the park class (DKT-1900), the issue size
 	// (operator request, 2026-09-16), the loop-history facts
 	// (DKT-2522), schema retirement (DKT-2792), the detached pre-gate
-	// target (2026-10-08), the grant argv (2026-10-09), the step
+	// target and the hold-on-dissent flag (2026-10-08), the grant argv
+	// (2026-10-09), the step
 	// recorded-at clock (2026-10-10), the step resolution authority
 	// (2026-10-10), and the claim phase (2026-10-10) — each recorded in
 	// docs/tdd/reliability-delta.md §2 under

@@ -1115,11 +1115,15 @@ v5–v10 column, table, or count changes.
 
 ### AMENDMENT — the span extends to v37 (the detached pre-gate target, 2026-10-08)
 
-**What changed.** v37 adds ONE column to one table, `gate_results.target_sha`
-(`TEXT NOT NULL DEFAULT ''`): the commit a pre-gate result was measured against
-when the measurement ran OUTSIDE the claim. Empty means "not keyed to a
-target" — every claim-time row, every completion-side row, and every row that
-predates the column.
+**What changed.** v37 adds two columns, one on each of two tables.
+`gate_results.target_sha` (`TEXT NOT NULL DEFAULT ''`) is the commit a pre-gate
+result was measured against when the measurement ran OUTSIDE the claim. Empty
+means "not keyed to a target" — every claim-time row, every completion-side
+row, and every row that predates the column. `proposals.hold_on_dissent`
+(`INTEGER NOT NULL DEFAULT 0`) records the vote rule's hold-on-dissent policy on
+the proposal, beside `sealed` (v28), so the policy a ballot was opened under is
+read back rather than re-resolved from a rule edited mid-vote. Zero is every
+pre-v37 proposal's value.
 
 **Why it needed a version.** A pre-gate longer than the claim's 60s budget
 (gates-trust §7.6.2 PG5) could never hand the claim a complete result: the
@@ -1130,15 +1134,25 @@ target only. That match needs the target on the row as a key; the
 reconstruction note in `reason` names twelve characters of a sha for a reader,
 and matching a claim on prose is not a key.
 
+**Why `hold_on_dissent` needed no new version.** The column was folded into
+the unreleased v37 instead of opening v38. A store stamped 37 by a binary built
+before the fold carries `target_sha` but lacks `hold_on_dissent`, so
+`v37ColumnSentinels` gives the rewind guard a `proposals.hold_on_dissent`
+probe beside the `gate_results.target_sha` one. On a store stamped 37 that
+lacks the column, the guard re-runs the idempotent v37 migration, which skips
+`target_sha` and adds `hold_on_dissent`.
+
 **Empty means unkeyed, and nothing else.** The migration back-fills nothing:
 no existing row was measured by a detached run, so the empty string is the only
-true value for every one of them, and a blank is never matched as a target.
+true value for every one of them, and a blank is never matched as a target. No
+existing proposal pinned a hold, so zero is theirs.
 
 **Why the ratified arithmetic is untouched.** Like v11–v36, v37 is an
-amendment, not a stage: one additive column with a default, a
-`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and a
-rewind guard that probes the COLUMN (the v27–v36 form, since v37 adds no table
-and no index). No v5–v10 column, table, or count changes.
+amendment, not a stage: two additive columns with defaults, a
+`hasColumn`-probed `ALTER` per column so the migration is idempotent and
+re-runnable, and a rewind guard that probes both COLUMNS (the v27–v36 form,
+since v37 adds no table and no index). No v5–v10 column, table, or count
+changes.
 
 ### 2.1 The never-mutate rule
 
