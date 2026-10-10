@@ -16,7 +16,8 @@
 .PHONY: bin test lint vet install clean demo \
         build tests qa-test self-hygiene doc-validate citation-check secret-scan \
         vuln-scan sdet-abuse tdd-preflight reserved-name-check \
-        render-verify copy-verify ac-commands
+        render-verify copy-verify ac-commands \
+        diff-scope-docs diff-scope-trivial diff-scope-small
 
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
@@ -102,3 +103,12 @@ copy-verify:
 
 ac-commands:
 	@bash $(QA)/ac-commands.sh
+
+diff-scope-docs:
+	@bash $(QA)/diff-scope.sh docs-only
+
+diff-scope-trivial:
+	@bash $(QA)/diff-scope.sh trivial
+
+diff-scope-small:
+	@bash $(QA)/diff-scope.sh small
