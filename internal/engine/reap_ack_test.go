@@ -336,7 +336,7 @@ func ackVia(t *testing.T, conn *sql.DB, runID int, seq int64, at int64) {
 	t.Helper()
 	_, err := NewEngine().OpenDispatch(conn, runID, 0, []int64{seq}, at)
 	testsupport.Must(t, err, "dispatch open --ack-reap %d: %v", seq, err)
-	_, err = NewEngine().AbandonDispatch(conn, runID, "", at)
+	_, err = abandonAsConductor(conn, NewEngine(), runID, "", at)
 	testsupport.Must(t, err, "abandoning the ack's dispatch: %v", err)
 }
 
@@ -759,8 +759,8 @@ func TestReconciledCloseKeepsAnotherDispatchsReapHold(t *testing.T) {
 	runID := serializedRun(t, conn)
 	instance := openDispatch(t, conn, runID, 0, nowMS).Rows[0].Instance
 	claim := claimInstance(t, conn, instance, nowMS)
-	_, err := NewEngine().AbandonDispatch(conn, runID, "the relay died", nowMS+1)
-	testsupport.Must(t, err, "AbandonDispatch: %v", err)
+	_, err := abandonAsConductor(conn, NewEngine(), runID, "the relay died", nowMS+1)
+	testsupport.Must(t, err, "dispatch abandon: %v", err)
 	openDispatch(t, conn, runID, 0, nowMS+2)
 
 	past := claim.LeaseExpiresMS + graceMS(t, conn) + 1

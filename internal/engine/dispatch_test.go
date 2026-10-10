@@ -545,8 +545,20 @@ func TestManifestLimitSlicesAfterOrdering(t *testing.T) {
 
 func abandon(t *testing.T, conn *sql.DB, runID int, at int64) {
 	t.Helper()
-	_, err := NewEngine().AbandonDispatch(conn, runID, "", at)
+	_, err := abandonAsConductor(conn, NewEngine(), runID, "", at)
 	testsupport.Must(t, err, "dispatch abandon: %v", err)
+}
+
+// abandonAsConductor is `dispatch abandon` by the suite's fixed conductor,
+// the way the ruling wrappers seat and present testConductorToken.
+func abandonAsConductor(
+	conn *sql.DB, e *Engine, runID int, reason string, at int64,
+) (*CloseOutcome, error) {
+	if err := seatTestConductor(conn, runID); err != nil {
+		return nil, err
+	}
+	return e.AbandonDispatchWith(conn, runID, AbandonDispatchOptions{
+		Reason: reason, Token: testConductorToken, NowMS: at})
 }
 
 // ---------------------------------------------------------------------------
@@ -1826,7 +1838,7 @@ func TestAbandonIsUnconditional(t *testing.T) {
 		t.Fatal("premise: close must refuse here")
 	}
 
-	outcome, err := NewEngine().AbandonDispatch(conn, runID, "relay died", past)
+	outcome, err := abandonAsConductor(conn, NewEngine(), runID, "relay died", past)
 	testsupport.Must(t, err, "abandon with a discrepancy present: %v — P21 makes it "+
 		"unconditional, or a crashed relay wedges the run", err)
 

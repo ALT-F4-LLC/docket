@@ -2183,14 +2183,24 @@ func settleAcceptedTx(tx *sql.Tx, accepted []Discrepancy) ([]string, error) {
 // resolve anything. A version that checked discrepancies first would be a
 // recovery verb that refuses to recover, which is how a crashed relay wedges a
 // run — the exact failure §2's recovery design exists to make impossible.
-func (e *Engine) AbandonDispatch(
-	conn *sql.DB, runID int, reason string, nowMS int64,
+//
+// It requires the run's conductor capability: retiring the live manifest is
+// the conductor's decision, and an executor sharing the checkout must not be
+// able to pull a batch out from under it. The TTL abandon `next` performs
+// stays token-free, because there the engine, not the caller, decides.
+func (e *Engine) AbandonDispatchWith(
+	conn *sql.DB, runID int, opts AbandonDispatchOptions,
 ) (*CloseOutcome, error) {
+	reason, nowMS := opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("abandoning a dispatch: %w", err)
 	}
 	defer tx.Rollback()
+
+	if err := authorizeConductorTx(tx, runID, opts.Token, "dispatch abandon"); err != nil {
+		return nil, err
+	}
 
 	open, err := db.OpenDispatchTx(tx, runID)
 	if err != nil {
@@ -2222,6 +2232,24 @@ func (e *Engine) AbandonDispatch(
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
 		Status: db.DispatchAbandoned, Reason: db.CloseReasonOperator,
 	}, nil
+}
+
+// AbandonDispatchOptions carries `dispatch abandon`'s inputs. Token is the
+// run's conductor capability, required once the run is bound.
+type AbandonDispatchOptions struct {
+	Reason string
+	Token  string
+	NowMS  int64
+}
+
+// AbandonDispatch is AbandonDispatchWith presenting no capability, so it
+// refuses on a bound run and succeeds only on an unbound one. It remains for
+// the CLI caller until that caller reads the token and moves to the `With`
+// form.
+func (e *Engine) AbandonDispatch(
+	conn *sql.DB, runID int, reason string, nowMS int64,
+) (*CloseOutcome, error) {
+	return e.AbandonDispatchWith(conn, runID, AbandonDispatchOptions{Reason: reason, NowMS: nowMS})
 }
 
 // ---- `next`'s lazy abandon and its refusal (§5.5, §5.7) --------------------

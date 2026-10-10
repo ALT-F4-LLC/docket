@@ -76,7 +76,7 @@ func TestBackfillRetiresTheD2Wedge(t *testing.T) {
 	// that way would retire the very discrepancy the back-fill is here to
 	// retire. `abandon` retires the manifest and accepts nothing, which is
 	// exactly the state this test needs.
-	_, err := e.AbandonDispatch(conn, runID, "clearing the manifest", nowMS)
+	_, err := abandonAsConductor(conn, e, runID, "clearing the manifest", nowMS)
 	testsupport.Must(t, err, "dispatch abandon: %v", err)
 
 	// D2 stands once the grace lapses (D7): the step ran and reported nothing,
@@ -129,7 +129,7 @@ func TestBackfillUsageSurvivesDispatchAbandon(t *testing.T) {
 	completeWithoutUsage(t, conn, e, implID)
 
 	// The wave is operator-stopped: abandon, not close.
-	_, err := e.AbandonDispatch(conn, runID, "operator stopped the wave", nowMS)
+	_, err := abandonAsConductor(conn, e, runID, "operator stopped the wave", nowMS)
 	testsupport.Must(t, err, "dispatch abandon: %v", err)
 
 	// The usage the relay measured before the abandon still lands.

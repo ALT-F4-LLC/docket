@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -46,10 +47,12 @@ func unbind(t *testing.T, conn *sql.DB, runID int) {
 	execSQL(t, conn, `UPDATE runs SET conductor_token_hash = NULL WHERE id = ?`, runID)
 }
 
-// snapshot is the "nothing was written" probe: the event count and the run's
-// and step's CAS versions.
+// snapshot is the "nothing was written" probe: the event count, the run's
+// and step's CAS versions, and the status of the run's latest dispatch ("" when
+// it never opened one).
 type snapshot struct {
 	events, runVersion, stepVersion int
+	dispatchStatus                  string
 }
 
 func snap(t *testing.T, conn *sql.DB, runID, stepID int) snapshot {
@@ -61,6 +64,9 @@ func snap(t *testing.T, conn *sql.DB, runID, stepID int) snapshot {
 		err = conn.QueryRow(`SELECT row_version FROM steps WHERE id = ?`, stepID).Scan(&s.stepVersion)
 		testsupport.Must(t, err, "step row_version: %v", err)
 	}
+	err = conn.QueryRow(`SELECT COALESCE(MAX(status), '') FROM dispatches WHERE id =
+		(SELECT MAX(id) FROM dispatches WHERE run_id = ?)`, runID).Scan(&s.dispatchStatus)
+	testsupport.Must(t, err, "dispatch status: %v", err)
 	return s
 }
 
@@ -188,6 +194,29 @@ var conductorVerbs = []conductorVerb{
 			_, err := AbandonIssueInRunWith(conn, AbandonIssueOptions{
 				RunID: run.ID, IssueID: issueID, Reason: "mis-routed", Token: token, NowMS: nowMS})
 			return err
+		},
+	},
+	{
+		name: "dispatch abandon",
+		setup: func(t *testing.T, conn *sql.DB, _ *Engine, run *model.Run) int {
+			openDispatch(t, conn, run.ID, 0, nowMS)
+			// The snapshot's dispatch status is the refusal check's subject:
+			// it must read open here for "unchanged" to mean "still open".
+			if s := snap(t, conn, run.ID, 0); s.dispatchStatus != db.DispatchOpen {
+				t.Fatalf("premise: dispatch status = %q, want %q", s.dispatchStatus, db.DispatchOpen)
+			}
+			return 0
+		},
+		call: func(conn *sql.DB, e *Engine, run *model.Run, _ int, token string) error {
+			outcome, err := e.AbandonDispatchWith(conn, run.ID, AbandonDispatchOptions{
+				Reason: "relay died", Token: token, NowMS: nowMS})
+			if err != nil {
+				return err
+			}
+			if outcome.Status != db.DispatchAbandoned {
+				return fmt.Errorf("dispatch status = %q, want %q", outcome.Status, db.DispatchAbandoned)
+			}
+			return nil
 		},
 	},
 }
