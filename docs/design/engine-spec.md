@@ -675,10 +675,11 @@ cast, addressable fields `vote` / `verdict` (aliases for the cast's verdict) and
 `on_fail`, exactly as before. A manually committed proposal (an operator setting
 the final outcome by hand) carries the approved tally's casts, so it is evaluated
 exactly as an approved one: against the threshold, and, when the threshold routes
-`pass` or none is declared, against the `vote.rule.<name>.hold_on_dissent` park. Committing never routes a
-tally past either check. When either check parks the step `waiting-human`, an
-operator passes it with `docket step resolve --as override-pass`. A triage panel
-takes neither check. The routing vocabulary is
+`pass` or none is declared, against the `vote.rule.<name>.hold_on_dissent`
+park. Committing never routes a tally past either check. When either check parks
+the step `waiting-human`, an operator passes it with
+`docket step resolve --as override-pass`. A triage panel takes neither check.
+The routing vocabulary is
 restricted to `"fix-loop"` / `"waiting-human"` / `"pass"` — step-name
 interposition is not available on vote steps — and operators to equality, because
 casts have no registered schema and ordered comparisons are defined only over
