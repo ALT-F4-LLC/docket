@@ -358,7 +358,7 @@ anything — under a trust model fit for an OSS tool:
   env/stdin, never argv; claim markers are 0600 in a per-user runtime dir.
 - **Conductor capability (DKT-2465).** The operator verbs — `step approve`, `step hold` (DKT-3287),
   `step reject`, `step resolve`, `step reap`, `run pause`, `run resume`, `run
-  abandon`, `dispatch waive-target` — are not token-free. Each requires the run's *conductor capability*: a
+  abandon`, `dispatch waive-target`, `dispatch abandon` — are not token-free. Each requires the run's *conductor capability*: a
   256-bit token minted at the run's first activation (returned once, hash-only
   storage on `runs.conductor_token_hash`), re-minted by `run conduct RUN-N`, and
   presented via `DOCKET_TOKEN`/stdin like a lease token. "Repository access is the
