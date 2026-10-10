@@ -272,6 +272,12 @@ type Step struct {
 	// under `max_fix_loops = 2` is therefore the signature of a recorded
 	// grant, not of the counter differing by entry path.
 	MaxFixLoops *int `toml:"max_fix_loops" json:"max_fix_loops,omitempty"`
+	// MaxFixLoopsHard is the opt-in ceiling MaxFixLoops may be extended to on
+	// this step. It is declared only beside a positive `max_fix_loops` and
+	// never below it (V48); equal to it declares that the bound admits no
+	// extensions. It is a declaration only: the engine's loop bound reads
+	// MaxFixLoops alone.
+	MaxFixLoopsHard *int `toml:"max_fix_loops_hard" json:"max_fix_loops_hard,omitempty"`
 	// OnExhausted is where a `fix-loop` routing goes when the next ordinal
 	// would exceed the bound above (DKT-1902). `waiting-human` — the default,
 	// and what every workflow got before this key existed — parks for an

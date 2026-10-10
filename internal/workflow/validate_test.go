@@ -613,6 +613,17 @@ emits = "notes"
 `,
 		wants: []string{`"check"`, "`on_exhausted`", `"drain"`, "ordered behind it"},
 	},
+	// V48: `max_fix_loops_hard` refuses two ways — one row per refusal.
+	{
+		rule: "V48", name: "max_fix_loops_hard below max_fix_loops",
+		src:   maxFixLoopsHardSrc("max_fix_loops = 3\nmax_fix_loops_hard = 2\n"),
+		wants: []string{`"check"`, "`max_fix_loops_hard`", "`max_fix_loops`"},
+	},
+	{
+		rule: "V48", name: "max_fix_loops_hard without a positive max_fix_loops",
+		src:   maxFixLoopsHardSrc("max_fix_loops_hard = 2\n"),
+		wants: []string{`"check"`, "`max_fix_loops_hard`", "`max_fix_loops`"},
+	},
 	{
 		rule: "V13", name: "human step routing rejects to waiting-human",
 		src: `
@@ -2102,6 +2113,87 @@ func TestValidationTable(t *testing.T) {
 			for _, want := range tc.wants {
 				if !strings.Contains(we.Error(), want) {
 					t.Errorf("%s: error %q does not mention %q", tc.rule, we.Error(), want)
+				}
+			}
+		})
+	}
+}
+
+// maxFixLoopsHardSrc is a workflow whose `check` step routes `fix-loop` to a
+// loop body, with `bounds` spliced into the `check` step as its fix-loop keys.
+func maxFixLoopsHardSrc(bounds string) string {
+	return `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "check"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+` + bounds + `[[step]]
+name = "fix"
+executor = "y"
+emits = "k"
+loop = true
+after_loop = "check"
+`
+}
+
+// TestMaxFixLoopsHardLint pins V48: `max_fix_loops_hard` registers only at or
+// above a positive `max_fix_loops` on the same step.
+func TestMaxFixLoopsHardLint(t *testing.T) {
+	accepted := []struct {
+		name string
+		soft int
+		hard int
+	}{
+		{name: "hard equal to soft declares no extensions", soft: 2, hard: 2},
+		{name: "hard above soft", soft: 2, hard: 5},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			src := maxFixLoopsHardSrc(fmt.Sprintf(
+				"max_fix_loops = %d\nmax_fix_loops_hard = %d\n", tc.soft, tc.hard))
+			def, err := Parse([]byte(src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if err := Validate(def); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			got := StepByName(def, "check").MaxFixLoopsHard
+			if got == nil || *got != tc.hard {
+				t.Errorf("MaxFixLoopsHard = %v, want %d", got, tc.hard)
+			}
+		})
+	}
+
+	rejected := []struct {
+		name   string
+		bounds string
+	}{
+		{name: "hard below soft", bounds: "max_fix_loops = 3\nmax_fix_loops_hard = 2\n"},
+		{name: "hard without max_fix_loops", bounds: "max_fix_loops_hard = 2\n"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			def, err := Parse([]byte(maxFixLoopsHardSrc(tc.bounds)))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = Validate(def)
+			werr, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("Validate = %v (%T), want a *workflow.Error", err, err)
+			}
+			if werr.Rule != "V48" || werr.Step != "check" || werr.Field != "max_fix_loops_hard" {
+				t.Errorf("Rule, Step, Field = %q, %q, %q, want V48, check, max_fix_loops_hard (%v)",
+					werr.Rule, werr.Step, werr.Field, err)
+			}
+			for _, want := range []string{`"check"`, "`max_fix_loops_hard`", "`max_fix_loops`"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %s", err, want)
 				}
 			}
 		})

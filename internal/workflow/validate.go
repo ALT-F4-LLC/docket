@@ -35,7 +35,7 @@ var RuleIDs = []string{
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 	"V40", "V40a", "V40b", "V40c", "V41",
 	"V42", "V43", "V44",
-	"V45", "V46", "V47",
+	"V45", "V46", "V47", "V48",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists
@@ -739,6 +739,9 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 
 	// V41 (DKT-1902): `on_exhausted` says where a fix-loop exhaustion routes.
 	if err := validateOnExhausted(def, byName, step); err != nil {
+		return err
+	}
+	if err := validateMaxFixLoopsHard(step); err != nil {
 		return err
 	}
 
@@ -1889,6 +1892,36 @@ func validateOnExhausted(def *Definition, byName map[string]*Step, step *Step) e
 					"%q — a step acting on this loop's exhaustion must be ordered "+
 					"behind it",
 				step.Name, target, step.Name),
+		}
+	}
+	return nil
+}
+
+// validateMaxFixLoopsHard is V48: `max_fix_loops_hard` is a ceiling over the
+// same step's `max_fix_loops`, so it needs a positive soft bound to sit above
+// and may not sit below it.
+func validateMaxFixLoopsHard(step *Step) error {
+	if step.MaxFixLoopsHard == nil {
+		return nil
+	}
+	hard := *step.MaxFixLoopsHard
+	if step.MaxFixLoops == nil || *step.MaxFixLoops <= 0 {
+		return &Error{
+			Rule: "V48", Step: step.Name, Field: "max_fix_loops_hard",
+			Message: fmt.Sprintf(
+				"step %q: `max_fix_loops_hard` requires a positive `max_fix_loops` "+
+					"on the same step — an unbounded loop has no bound for a "+
+					"ceiling to extend",
+				step.Name),
+		}
+	}
+	if soft := *step.MaxFixLoops; hard < soft {
+		return &Error{
+			Rule: "V48", Step: step.Name, Field: "max_fix_loops_hard",
+			Message: fmt.Sprintf(
+				"step %q: `max_fix_loops_hard` (%d) must be >= `max_fix_loops` "+
+					"(%d) — the ceiling cannot sit below the bound it extends",
+				step.Name, hard, soft),
 		}
 	}
 	return nil
