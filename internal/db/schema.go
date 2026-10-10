@@ -2916,9 +2916,9 @@ func migrateV35ToV36(tx *sql.Tx) error {
 // a blank as a key.
 //
 // `hold_on_dissent` on `proposals` is the vote rule's hold-on-dissent policy
-// recorded on the proposal, the same open-time pinning `sealed` (v28) gives
-// the rendering rule, so a rule edited mid-vote cannot change how a live
-// ballot routes. Zero is every pre-v37 proposal's value.
+// recorded on the proposal, beside `sealed` (v28), so the policy a ballot was
+// opened under can be read back rather than re-resolved from a rule edited
+// mid-vote. Zero is every pre-v37 proposal's value.
 var v37AddedColumns = []struct{ table, column, ddl string }{
 	{"gate_results", "target_sha",
 		`ALTER TABLE gate_results ADD COLUMN target_sha TEXT NOT NULL DEFAULT ''`},
