@@ -27,6 +27,14 @@ func TestV28RewindGuardConvergesAStampedStore(t *testing.T) {
 		t.Fatalf("Migrate on the half-migrated store: %v", err)
 	}
 
+	exists, err := hasColumnDB(db, "proposals", "sealed")
+	if err != nil {
+		t.Fatalf("probing proposals.sealed: %v", err)
+	}
+	if !exists {
+		t.Error("proposals.sealed still missing after the rewind guard should have re-run v28")
+	}
+
 	for _, col := range v28ColumnSentinels {
 		exists, err := hasColumnDB(db, col.table, col.column)
 		if err != nil {
