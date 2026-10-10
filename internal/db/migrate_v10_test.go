@@ -107,7 +107,8 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// park reason (DKT-1898), the park class (DKT-1900), the issue size
 	// (operator request, 2026-09-16), the loop-history facts
 	// (DKT-2522), schema retirement (DKT-2792), the detached pre-gate
-	// target (2026-10-08), and the grant argv (2026-10-09) — each recorded in
+	// target (2026-10-08), the grant argv (2026-10-09), and the step
+	// recorded-at clock (2026-10-10) — each recorded in
 	// docs/tdd/reliability-delta.md §2 under
 	// its own heading, with the reason it needed a version and the argument
 	// that it leaves the ratified v5-v10 arithmetic untouched.
@@ -117,10 +118,10 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// this test firing is exactly how v11 through v23 came to be documented
 	// rather than discovered afterwards. Raising the number without editing
 	// that section is the move it exists to stop.
-	if currentSchemaVersion != 38 {
-		t.Errorf("currentSchemaVersion = %d, want 38 — the span of "+
-			"docs/tdd/reliability-delta.md §2 ends at v38 (the grant "+
-			"argv). Moving past 38 needs an amendment against that "+
+	if currentSchemaVersion != 39 {
+		t.Errorf("currentSchemaVersion = %d, want 39 — the span of "+
+			"docs/tdd/reliability-delta.md §2 ends at v39 (the step "+
+			"recorded-at clock). Moving past 39 needs an amendment against that "+
 			"section, per docs/design/amendments.md", currentSchemaVersion)
 	}
 

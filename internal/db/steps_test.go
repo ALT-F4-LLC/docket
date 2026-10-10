@@ -615,3 +615,53 @@ func TestLoopHistoryFactsAbsentBeforeWrite(t *testing.T) {
 			row.LoopRoundsRun, row.LoopTriggerStep, row.LoopLatestVerdict)
 	}
 }
+
+// TestRecordedAtStampsOnlyTheMoveIntoTerminal pins `recorded_at_ms`'s writers:
+// the move into a terminal status stamps it, and neither a non-terminal move,
+// a metadata write, nor a rewrite of an already-terminal row moves it.
+func TestRecordedAtStampsOnlyTheMoveIntoTerminal(t *testing.T) {
+	db, id := stepTestDB(t)
+	write := func(name string, fn func(tx *sql.Tx) error) *Step {
+		t.Helper()
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		defer tx.Rollback()
+		err = fn(tx)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		err = tx.Commit()
+		testsupport.Must(t, err, "Commit: %v", err)
+		step, err := GetStep(db, id)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		return step
+	}
+
+	step := write("running", func(tx *sql.Tx) error {
+		return SetStepStatusTx(tx, id, StepRunning, 1500, 0)
+	})
+	if step.RecordedAtMS != 0 {
+		t.Errorf("after a move to %s, RecordedAtMS = %d, want 0", StepRunning, step.RecordedAtMS)
+	}
+
+	step = write("routing to done", func(tx *sql.Tx) error {
+		return SetStepRoutingTx(tx, id, "next", "", StepDone, "", 2000)
+	})
+	if step.RecordedAtMS != 2000 {
+		t.Errorf("after the move to %s, RecordedAtMS = %d, want 2000", StepDone, step.RecordedAtMS)
+	}
+
+	step = write("metadata", func(tx *sql.Tx) error {
+		return SetStepMetadataTx(tx, id, `{"k":"v"}`, 3000)
+	})
+	if step.RecordedAtMS != 2000 || step.UpdatedAtMS != 3000 {
+		t.Errorf("after a metadata write, RecordedAtMS = %d and UpdatedAtMS = %d, "+
+			"want 2000 and 3000", step.RecordedAtMS, step.UpdatedAtMS)
+	}
+
+	step = write("terminal rewrite", func(tx *sql.Tx) error {
+		return SetStepStatusTx(tx, id, StepSuperseded, 4000, 0)
+	})
+	if step.RecordedAtMS != 2000 {
+		t.Errorf("after a terminal-to-terminal rewrite, RecordedAtMS = %d, want 2000",
+			step.RecordedAtMS)
+	}
+}

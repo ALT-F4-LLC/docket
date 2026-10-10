@@ -351,9 +351,10 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 
 	if _, err := tx.Exec(
 		`UPDATE steps
-		    SET status = ?, updated_at_ms = ?, row_version = row_version + 1
+		    SET status = ?, updated_at_ms = ?, recorded_at_ms = ?,
+		        row_version = row_version + 1
 		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)`,
-		db.StepFailedRouted, nowMS, runID, issueID,
+		db.StepFailedRouted, nowMS, nowMS, runID, issueID,
 		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
 	); err != nil {
 		return nil, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)

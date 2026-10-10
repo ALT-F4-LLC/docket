@@ -529,11 +529,11 @@ func abandonIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 		model.FormatID(step.IssueID), step.Instance))
 	_, err := tx.Exec(
 		`UPDATE steps
-		    SET status = ?, routing = ?, updated_at_ms = ?,
+		    SET status = ?, routing = ?, updated_at_ms = ?, recorded_at_ms = ?,
 		        row_version = row_version + 1
 		  WHERE run_id = ? AND issue_id = ? AND id != ?
 		    AND status NOT IN (?, ?, ?, ?)`,
-		db.StepFailedRouted, cascade, nowMS, step.RunID, step.IssueID, step.ID,
+		db.StepFailedRouted, cascade, nowMS, nowMS, step.RunID, step.IssueID, step.ID,
 		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
 	)
 	if err != nil {

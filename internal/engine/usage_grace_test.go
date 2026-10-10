@@ -86,9 +86,7 @@ func TestUsageGraceIsMeasuredFromTheWaveEnd(t *testing.T) {
 	// wave runs on for two graces before its last step records.
 	finishWithoutUsage(t, conn, early)
 	lastRecord := nowMS + 1000 + 2*grace
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, lastRecord, stepIDByInstance(t, conn, late))
+	finishWithoutUsageAt(t, conn, late, lastRecord)
 
 	// Per-step measurement would have called the early step missing here: it
 	// recorded two graces ago. Measured from the wave's end it is pending.
@@ -131,6 +129,35 @@ func TestUsageGraceIsMeasuredFromTheWaveEnd(t *testing.T) {
 	if ds := discrepanciesAt(t, conn, runID, inside); containsKind(ds, DiscrepancyMissingUsage) {
 		t.Errorf("billing the wave's last step flipped an earlier unbilled step to "+
 			"missing inside the grace (%v)", ds)
+	}
+}
+
+// TestUsageGraceIgnoresAnnotation: an annotation is not a record. The grace
+// runs from the wave's last terminal record, so annotating an unbilled step one
+// ms before the grace lapses leaves it missing at the grace, and a plain close
+// there is refused.
+func TestUsageGraceIgnoresAnnotation(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	runID := dispatchRun(t, conn)
+	manifest := openDispatch(t, conn, runID, 0, nowMS)
+	instance := manifest.Rows[0].Instance
+	finishWithoutUsage(t, conn, instance) // recorded at nowMS+1000
+
+	recorded := nowMS + 1000
+	grace := graceMS(t, conn)
+	_, err := AnnotateStep(conn, stepIDByInstance(t, conn, instance),
+		`{"note": "late"}`, recorded+grace-1)
+	testsupport.Must(t, err, "annotating the finished step: %v", err)
+
+	past := recorded + grace
+	if ds := discrepanciesAt(t, conn, runID, past); !containsKind(ds, DiscrepancyMissingUsage) {
+		t.Errorf("at the grace after the record, an annotated unbilled step is not a %s "+
+			"discrepancy (%v); the annotation restarted the grace", DiscrepancyMissingUsage, ds)
+	}
+	_, err = e.CloseDispatch(conn, runID, false, "", past)
+	if code, ok := CodeOf(err); !ok || code != CodeConflict {
+		t.Errorf("a plain close at the grace after the record: err = %v, want CONFLICT", err)
 	}
 }
 

@@ -54,10 +54,7 @@ func TestRanWithoutReportingIsStillADiscrepancy(t *testing.T) {
 	openDispatch(t, conn, runID, 0, nowMS)
 	abandon(t, conn, runID, nowMS)
 
-	id := stepIDByInstance(t, conn, "implement@0")
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, nowMS+1000, id)
+	finishWithoutUsage(t, conn, "implement@0")
 
 	// Probed past the grace: recorded less than `dispatch.grace` ago the step
 	// is usage PENDING (D7), and this test is about one that stayed unbilled.
@@ -86,9 +83,7 @@ func TestDiscrepancyRefusalNamesStepIDs(t *testing.T) {
 	openDispatch(t, conn, runID, 0, nowMS)
 	abandon(t, conn, runID, nowMS)
 	id := stepIDByInstance(t, conn, "implement@0")
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, nowMS+1000, id)
+	finishWithoutUsage(t, conn, "implement@0")
 
 	past := nowMS + 1000 + graceMS(t, conn) + 1
 	_, err := NewEngine().NextSteps(conn, runID, 0, past)
@@ -114,10 +109,7 @@ func TestOpenDispatchRefusesWhatNextRefuses(t *testing.T) {
 	runID := dispatchRun(t, conn)
 	openDispatch(t, conn, runID, 0, nowMS)
 	abandon(t, conn, runID, nowMS)
-	id := stepIDByInstance(t, conn, "implement@0")
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, nowMS+1000, id)
+	finishWithoutUsage(t, conn, "implement@0")
 
 	past := nowMS + 1000 + graceMS(t, conn) + 1
 	_, nextErr := NewEngine().NextSteps(conn, runID, 0, past)
@@ -145,10 +137,7 @@ func TestAcceptedMissingUsageUnblocksNext(t *testing.T) {
 	e := testEngine()
 	runID := dispatchRun(t, conn)
 	openDispatch(t, conn, runID, 0, nowMS)
-	id := stepIDByInstance(t, conn, "implement@0")
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, nowMS+1000, id)
+	finishWithoutUsage(t, conn, "implement@0")
 
 	outcome, err := e.CloseDispatch(conn, runID, true, "", nowMS)
 	testsupport.Must(t, err, "close --accept-missing-usage: %v", err)
@@ -176,10 +165,7 @@ func TestAcceptMissingUsageNeedsNoOpenDispatch(t *testing.T) {
 	runID := dispatchRun(t, conn)
 	openDispatch(t, conn, runID, 0, nowMS)
 	abandon(t, conn, runID, nowMS)
-	id := stepIDByInstance(t, conn, "implement@0")
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, nowMS+1000, id)
+	finishWithoutUsage(t, conn, "implement@0")
 
 	past := nowMS + 1000 + graceMS(t, conn) + 1
 	if _, err := e.NextSteps(conn, runID, 0, past); err == nil {

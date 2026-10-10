@@ -292,6 +292,11 @@ type Step struct {
 	CreatedAtMS int64
 	UpdatedAtMS int64
 	RowVersion  int
+	// RecordedAtMS is the instant the step last moved into a terminal status
+	// (v39), written only by that transition. UpdatedAtMS moves on every row
+	// write after it, so it cannot say when the step recorded. Zero means the
+	// step has not recorded a terminal result.
+	RecordedAtMS int64
 }
 
 // Ref renders the step's `STEP-N` display identity.
@@ -320,7 +325,7 @@ SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, ins
        gate_trail, routing, park_reason, park_class,
        loop_rounds_run, loop_trigger_step, loop_latest_verdict,
        metadata, context_bytes, materialized, usage_recorded,
-       created_at_ms, updated_at_ms, row_version, work_root
+       created_at_ms, updated_at_ms, row_version, work_root, recorded_at_ms
   FROM steps`
 
 // GetStep reads one step by id.
@@ -434,6 +439,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.LoopRoundsRun, &step.LoopTriggerStep, &step.LoopLatestVerdict,
 		&metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
+		&step.RecordedAtMS,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrStepNotFound
@@ -627,15 +633,31 @@ func RetireStepTokenTx(tx *sql.Tx, id int) error {
 	return leaseSteps.clearLeaseTx(tx, id)
 }
 
+// terminalStatusesSQL is StepTerminal's set as an SQL value list.
+var terminalStatusesSQL = "'" + StepDone + "', '" + StepSkipped + "', '" +
+	StepSuperseded + "', '" + StepFailedRouted + "'"
+
+// recordedAtOnTerminalEntry is the SET entry that stamps `recorded_at_ms` when
+// a write moves a step INTO a terminal status. SQLite evaluates SET
+// expressions against the row as it was before the write, so `status` in the
+// CASE is the old status: a rewrite of an already-terminal row keeps its
+// record time, and a step retried out of a terminal status stamps again when
+// it next records. Bind the new status, then the write's time.
+var recordedAtOnTerminalEntry = `recorded_at_ms = CASE
+	WHEN ? IN (` + terminalStatusesSQL + `) AND status NOT IN (` + terminalStatusesSQL + `)
+	THEN ? ELSE recorded_at_ms END`
+
 // SetStepStatusTx moves a step's status inside the caller's transaction,
-// bumping the CAS column and refreshing `updated_at_ms`.
+// bumping the CAS column and refreshing `updated_at_ms`. A move into a
+// terminal status also stamps `recorded_at_ms`.
 //
 // `activityMS` refreshes the saga's activity clock when non-zero — §6.8's
 // "every stage commit refreshing the step's activity clock". Passing 0 leaves
 // it alone, which is what a non-saga transition wants.
 func SetStepStatusTx(tx *sql.Tx, id int, status string, nowMS, activityMS int64) error {
-	query := `UPDATE steps SET status = ?, updated_at_ms = ?, row_version = row_version + 1`
-	args := []any{status, nowMS}
+	query := `UPDATE steps SET status = ?, updated_at_ms = ?, row_version = row_version + 1, ` +
+		recordedAtOnTerminalEntry
+	args := []any{status, nowMS, status, nowMS}
 	if activityMS > 0 {
 		query += `, activity_ms = ?`
 		args = append(args, activityMS)
@@ -807,7 +829,8 @@ func SetStepRoutingTx(
 // into the other.
 //
 // `parkReason` is written only when this write parks the step, under the same
-// condition as `class`, and is otherwise ignored.
+// condition as `class`, and is otherwise ignored. A move into a terminal status
+// stamps `recorded_at_ms`, as SetStepStatusTx does.
 //
 // A park is NEVER stored with an empty reason: `step show` omits an empty
 // `park_reason`, so the row would read as a step that never parked. A blank
@@ -830,11 +853,13 @@ func SetStepRoutingWithParkReasonTx(
 		`UPDATE steps SET routing = ?, status = ?, activity_ms = ?, updated_at_ms = ?,
 		        park_reason = CASE WHEN ? = ? THEN ? ELSE park_reason END,
 		        park_class = CASE WHEN ? = ? THEN ? ELSE park_class END,
+		        `+recordedAtOnTerminalEntry+`,
 		        row_version = row_version + 1
 		  WHERE id = ?`,
 		nullable(RoutingRecord(routing, reason)), status, nowMS, nowMS,
 		status, StepWaitingHuman, parkReason,
-		status, StepWaitingHuman, string(class), id,
+		status, StepWaitingHuman, string(class),
+		status, nowMS, id,
 	)
 	if err != nil {
 		return fmt.Errorf("recording step routing: %w", err)
@@ -879,7 +904,9 @@ func SetStepLoopHistoryTx(
 //
 // It follows SetStepRoutingTx's shape — same row_version bump, same
 // updated_at_ms — because a metadata write is a step-row mutation like any
-// other and CAS-guarded readers must see it move.
+// other and CAS-guarded readers must see it move. It leaves `recorded_at_ms`
+// alone: annotating a finished step is not a record, and the usage grace
+// measures from records.
 func SetStepMetadataTx(tx *sql.Tx, id int, metadata string, nowMS int64) error {
 	_, err := tx.Exec(
 		`UPDATE steps SET metadata = ?, updated_at_ms = ?,

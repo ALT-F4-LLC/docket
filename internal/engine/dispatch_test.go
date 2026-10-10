@@ -1444,24 +1444,40 @@ func completeAStepWithoutUsage(t *testing.T, conn *sql.DB, runID int) string {
 	return instance
 }
 
-// finishWithoutUsage drives one instance to `done` with no ledger rows.
+// finishWithoutUsage drives one instance to `done` at nowMS+1000 with no
+// ledger rows.
+func finishWithoutUsage(t *testing.T, conn *sql.DB, instance string) {
+	t.Helper()
+	finishWithoutUsageAt(t, conn, instance, nowMS+1000)
+}
+
+// finishWithoutUsageAt drives one instance to `done` at `at` with no ledger
+// rows.
 //
-// The status is set directly rather than driven through the saga: the probe asks
-// about a TERMINAL step with no ledger rows, and the saga would pull in gates and
-// artifacts these tests are not about. `updated_at_ms` is set PAST the run's
-// activation so D3's historical exclusion does not fire — which is the one
-// detail that makes this a D2 fixture rather than a D3 one.
+// The status moves through db.SetStepStatusTx rather than the saga: the probe
+// asks about a TERMINAL step with no ledger rows, and the saga would pull in
+// gates and artifacts these tests are not about. SetStepStatusTx is the write
+// that stamps `recorded_at_ms`, D7's clock, and `updated_at_ms`, D3's. `at`
+// must fall PAST the run's activation so D3's historical exclusion does not
+// fire — which is the one detail that makes this a D2 fixture rather than a D3
+// one.
 //
 // `attempt` is set to 1 for the same class of reason (DKT-315): D2 is about a
 // step that RAN and did not report, and `attempt` counts claims, so a row left
 // at 0 describes a step no worker ever held — which owes nothing and is not a
 // discrepancy. Setting the status without it modelled a state no run can
 // reach.
-func finishWithoutUsage(t *testing.T, conn *sql.DB, instance string) {
+func finishWithoutUsageAt(t *testing.T, conn *sql.DB, instance string, at int64) {
 	t.Helper()
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, updated_at_ms = ?, attempt = 1 WHERE id = ?`,
-		db.StepDone, nowMS+1000, stepIDByInstance(t, conn, instance))
+	id := stepIDByInstance(t, conn, instance)
+	execSQL(t, conn, `UPDATE steps SET attempt = 1 WHERE id = ?`, id)
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	err = db.SetStepStatusTx(tx, id, db.StepDone, at, 0)
+	testsupport.Must(t, err, "finishing %s: %v", instance, err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
 }
 
 // TestDiscrepancyD3ExcludesHistoricalSteps is D3: a step that reached its

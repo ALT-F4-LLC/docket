@@ -1746,12 +1746,16 @@ func discrepanciesGracedTx(
 	return out, nil
 }
 
-// latestExecutorRecordMS is D7's clock: the newest `updated_at_ms` among the
+// latestExecutorRecordMS is D7's clock: the newest `recorded_at_ms` among the
 // run's terminal executor steps that a worker held and that recorded after
-// activation — the same population missingUsage judges, whether or not each
-// has billed. It is the instant the run's most recent wave returned, as far as
-// the rows can tell, and 0 when no such step exists (D7 then defers nothing,
+// activation — the population missingUsage judges, whether or not each has
+// billed. It is the instant the run's most recent wave returned, as far as the
+// rows can tell, and 0 when no such step exists (D7 then defers nothing,
 // because there is nothing to defer).
+//
+// It reads `recorded_at_ms` rather than `updated_at_ms` because later row
+// writes (an annotation, a loop-history or budget write) bump `updated_at_ms`
+// without recording anything, and each such bump would restart the grace.
 func latestExecutorRecordMS(sched *Scheduler, activatedMS int64) int64 {
 	var latest int64
 	for _, step := range sched.Steps() {
@@ -1762,11 +1766,11 @@ func latestExecutorRecordMS(sched *Scheduler, activatedMS int64) int64 {
 		case workflow.ClassAction, workflow.TypeHuman, workflow.TypeVote:
 			continue
 		}
-		if activatedMS == 0 || step.UpdatedAtMS < activatedMS {
+		if activatedMS == 0 || step.RecordedAtMS < activatedMS {
 			continue
 		}
-		if step.UpdatedAtMS > latest {
-			latest = step.UpdatedAtMS
+		if step.RecordedAtMS > latest {
+			latest = step.RecordedAtMS
 		}
 	}
 	return latest

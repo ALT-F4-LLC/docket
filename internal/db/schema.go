@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 38
+const currentSchemaVersion = 39
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -208,6 +208,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	36: migrateV35ToV36,
 	37: migrateV36ToV37,
 	38: migrateV37ToV38,
+	39: migrateV38ToV39,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3014,6 +3015,57 @@ func migrateV37ToV38(tx *sql.Tx) error {
 	return nil
 }
 
+// v39AddedColumns is v39's whole schema change: `recorded_at_ms` on `steps`,
+// the instant the step last moved into a terminal status.
+//
+// The usage grace measures from the newest terminal record in a run, and
+// `updated_at_ms` cannot carry that: every later row write (an annotation, a
+// loop-history write, a budget move) bumps it, so each one restarted the
+// grace. This column is written only by the transition into a terminal status.
+// Zero means the step has not recorded a terminal result.
+var v39AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "recorded_at_ms",
+		`ALTER TABLE steps ADD COLUMN recorded_at_ms INTEGER NOT NULL DEFAULT 0`},
+}
+
+// v39ColumnSentinels are the columns the rewind guard probes, the v27–v38
+// form: v39 adds no table and no index, so a database stamped 39 by a binary
+// built mid-change carries every v38 sentinel and `recorded_at_ms` never
+// arrives.
+var v39ColumnSentinels = []struct{ table, column string }{
+	{"steps", "recorded_at_ms"},
+}
+
+// migrateV38ToV39 adds `steps.recorded_at_ms` and back-fills it from
+// `updated_at_ms` on every row already in a terminal status, so a run active
+// across the upgrade keeps a non-zero wave-end clock. `updated_at_ms` is the
+// best record time a pre-v39 row has: it can only be later than the true
+// record, never earlier. The back-fill touches only rows still at zero, so a
+// re-run leaves recorded stamps alone.
+func migrateV38ToV39(tx *sql.Tx) error {
+	for _, col := range v39AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v38 to v39: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v38 to v39: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	if _, err := tx.Exec(
+		`UPDATE steps SET recorded_at_ms = updated_at_ms
+		  WHERE recorded_at_ms = 0 AND status IN (?, ?, ?, ?)`,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted,
+	); err != nil {
+		return fmt.Errorf("migrating v38 to v39: back-filling steps.recorded_at_ms: %w", err)
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3792,6 +3844,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 37
+				break
+			}
+		}
+	}
+
+	// The v39 guard, in the same COLUMN form as v38 and for its reason: v39
+	// adds one column and no table, so a database stamped 39 by a binary built
+	// mid-change carries every v38 sentinel and `steps.recorded_at_ms` never
+	// arrives.
+	if version >= 39 {
+		for _, col := range v39ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v39 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 38
 				break
 			}
 		}
