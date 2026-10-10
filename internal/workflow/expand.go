@@ -104,13 +104,15 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 //     ("`after_loop` and its downstream chain re-instantiate at ordinal k"),
 //     supplied as `downstream` because the chain is a property of the
 //     definition's shape that the caller already computed for the sweep;
-//   - the triage panel each instantiated body's `on_fail` names, when that
-//     body's `when` holds. A body failing at ordinal k suspends for the panel
-//     AT ordinal k, so a panel left at ordinal 0 would leave that failure with
-//     nothing to rule on. Derived here rather than supplied: the sweep never
-//     reads it, and a panel a passing body did not route to is skipped by the
-//     routing itself. A body expanded `skipped` never runs and so never routes;
-//     a panel only it named would stay pending and hold the after_loop root.
+//   - every step an instantiated body can interpose (InterposedTargets: its
+//     threshold step-name routings, its `on_fail` panel, its `on_exhausted`
+//     target), when that body's `when` holds. A body routing at ordinal k
+//     opens its target AT ordinal k, and a target left at ordinal 0 resolves
+//     its routing predecessor at ordinal 0 or below, so it would never see
+//     that routing. Derived here rather than supplied: the sweep never reads
+//     it, and a target the body did not route to is skipped by the routing
+//     itself. A body expanded `skipped` never runs and so never routes; a
+//     target only it named would stay pending and hold the after_loop root.
 //
 // The first two sets are the CALLER's, computed for the entry's triggering
 // step, so the instantiation and the supersede sweep read one answer to "what
@@ -129,21 +131,21 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 func ExpandOrdinal(
 	def *Definition, s Subject, ordinal int, bodies, downstream map[string]bool,
 ) []StepInstance {
-	panels := make(map[string]bool)
+	targets := make(map[string]bool)
 	for _, step := range def.Steps {
 		if step.Loop && bodies[step.Name] && WhenHolds(step.When, s) {
-			if panel := step.OnFailTarget(); panel != "" {
-				panels[panel] = true
+			for _, target := range InterposedTargets(step) {
+				targets[target] = true
 			}
 		}
 	}
 
 	out := make([]StepInstance, 0, len(def.Steps))
 	for _, step := range def.Steps {
-		// Clause (3), clause (4), or a body's panel; any other step does not
-		// re-instantiate.
+		// Clause (3), clause (4), or a body's interposed target; any other
+		// step does not re-instantiate.
 		if !(step.Loop && bodies[step.Name]) && !downstream[step.Name] &&
-			!panels[step.Name] {
+			!targets[step.Name] {
 			continue
 		}
 		out = append(out, expandStep(step, s, ordinal)...)

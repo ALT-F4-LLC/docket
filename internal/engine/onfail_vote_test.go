@@ -884,3 +884,96 @@ emits = "verdict"
 		}
 	})
 }
+
+// loopThresholdSrc gives the loop body a `threshold` that routes BY NAME to
+// `drain`, a step ordered after the body and outside review's after_loop chain.
+// A failed `review` gate routes `fix-loop` into ordinal 1, as in loopTriageSrc.
+const loopThresholdSrc = `
+[pipeline]
+name = "loop-threshold-lane"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+after = []
+executor = "x"
+emits = "candidate"
+
+[[step]]
+name = "review"
+after = ["implement"]
+executor = "y"
+emits = "verdict"
+gates = ["verdict"]
+on_fail = "fix-loop"
+
+[[step]]
+name = "fix"
+executor = "x"
+emits = "report"
+loop = true
+after_loop = "review"
+threshold = { "drain" = "any(status == blocked)" }
+
+[[step]]
+name = "drain"
+after = ["fix"]
+executor = "d"
+emits = "drain-report"
+`
+
+// TestLoopBodyThresholdRoutesToItsOrdinalsTarget: a body at ordinal k whose
+// threshold routes by name needs the target at ordinal k. A target left at
+// ordinal 0 resolves its routing predecessor at ordinal 0 or below, never sees
+// fix@1's routing, and stays pending while fix@1 records `done`.
+func TestLoopBodyThresholdRoutesToItsOrdinalsTarget(t *testing.T) {
+	conn, _, run, e := enterOrdinalOneWith(t, loopThresholdSrc, nil)
+
+	claimAndComplete(t, conn, e, "fix@1", "blocked", `[{"status":"blocked"}]`)
+	err := e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after fix@1 routed to drain: %v", err)
+	if step := mustStep(t, conn, "fix@1"); !routingIs(step.Routing, "drain") {
+		t.Fatalf("premise: fix@1 routing = %q, want %q", step.Routing, "drain")
+	}
+
+	if !stepExists(t, conn, "drain@1") {
+		t.Fatal("no drain@1 row: fix@1 routed to drain at ordinal 1, and a " +
+			"target left at ordinal 0 cannot see that routing")
+	}
+	if ready := readyInstances(t, conn); !slices.Contains(ready, "drain@1") {
+		t.Fatalf("drain@1 is not ready after fix@1 routed to it; ready = %q", ready)
+	}
+	claimAndComplete(t, conn, e, "drain@1", "drained", "")
+	if got := stepStatus(t, conn, "drain@1"); got != db.StepDone {
+		t.Errorf("drain@1 status = %q, want %q", got, db.StepDone)
+	}
+}
+
+// TestLoopBodyThresholdUnroutedTargetIsSkipped: when fix@1 routes elsewhere,
+// its ordinal's target is terminalized `skipped` and the issue completes
+// rather than waiting on a pending target.
+func TestLoopBodyThresholdUnroutedTargetIsSkipped(t *testing.T) {
+	conn, issue, run, e := enterOrdinalOneWith(t, loopThresholdSrc, nil)
+
+	claimAndComplete(t, conn, e, "fix@1", "clear", `[{"status":"ok"}]`)
+	err := e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after fix@1 passed: %v", err)
+
+	if !stepExists(t, conn, "drain@1") {
+		t.Fatal("no drain@1 row: fix@1 can route to drain at ordinal 1")
+	}
+	if got := stepStatus(t, conn, "drain@1"); got != db.StepSkipped {
+		t.Errorf("drain@1 status = %q, want %q — a target nobody routed to "+
+			"must be terminalized, or it blocks the issue", got, db.StepSkipped)
+	}
+
+	claimAndComplete(t, conn, e, "review@1", "the round-1 verdict", "")
+	err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after review@1 passed: %v", err)
+	if got := issueStatus(t, conn, issue); got != "done" {
+		t.Errorf("issue status = %q, want %q", got, "done")
+	}
+}
