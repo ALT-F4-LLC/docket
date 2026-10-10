@@ -2197,6 +2197,7 @@ func TestMaxFixLoopsHardLint(t *testing.T) {
 	}{
 		{name: "hard below soft", bounds: "max_fix_loops = 3\nmax_fix_loops_hard = 2\n"},
 		{name: "hard without max_fix_loops", bounds: "max_fix_loops_hard = 2\n"},
+		{name: "hard over unbounded zero max_fix_loops", bounds: "max_fix_loops = 0\nmax_fix_loops_hard = 2\n"},
 	}
 	for _, tc := range rejected {
 		t.Run(tc.name, func(t *testing.T) {
