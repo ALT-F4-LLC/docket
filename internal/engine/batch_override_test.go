@@ -1,11 +1,14 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,7 +16,9 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
 // DKT-546 — the run-scoped batch gate-override.
@@ -450,6 +455,110 @@ func TestBatchOverrideRefusesATruncatedRow(t *testing.T) {
 	}
 	if got := stepRoutingByID(t, conn, implementID); got != routingBefore {
 		t.Errorf("routing = %q after the refusal, want it unchanged from %q", got, routingBefore)
+	}
+}
+
+// overCapFailingBuild trusts a real `build` gate that prints more than
+// exec.CaptureCap bytes and exits non-zero: /bin/cat streams an over-cap file,
+// then fails on a path that does not exist. No fake stands between the
+// child's capture and the recorded row, so the truncation flag these tests
+// read is the one internal/exec set.
+func overCapFailingBuild(t *testing.T, repoRoot string) trust.Entry {
+	t.Helper()
+	dir := t.TempDir()
+	flood := filepath.Join(dir, "flood.txt")
+	err := os.WriteFile(flood, bytes.Repeat([]byte("x"), exec.CaptureCap+4096), 0o600)
+	testsupport.Must(t, err, "writing the over-cap file: %v", err)
+	argv := []string{"/bin/cat", flood, filepath.Join(dir, "missing")}
+	return trust.Entry{
+		Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Timeout: "30s",
+	}
+}
+
+// TestExecRunnerCarriesCaptureTruncationIntoItsResults: an over-cap failing
+// gate run through the real runner reports Truncated on the row Execute
+// returns for recording and on the single result Run returns.
+func TestExecRunnerCarriesCaptureTruncationIntoItsResults(t *testing.T) {
+	repoRoot := t.TempDir()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, overCapFailingBuild(t, repoRoot))
+
+	ex, err := runner.Execute(context.Background(), GateSpec{Name: "build"}, StepContext{})
+	testsupport.Must(t, err, "Execute: %v", err)
+	if ex.Verdict != VerdictFail || len(ex.Results) != 1 {
+		t.Fatalf("Execute = verdict %q with %d rows, want %q with 1",
+			ex.Verdict, len(ex.Results), VerdictFail)
+	}
+	row := ex.Results[0]
+	if row.Verdict != VerdictFail || row.Exit == nil || *row.Exit == 0 {
+		t.Fatalf("row = verdict %q exit %v, want a non-zero %q", row.Verdict, row.Exit, VerdictFail)
+	}
+	if !row.Truncated {
+		t.Errorf("Execute row Truncated = false for a %d-byte capture; the "+
+			"flag internal/exec set was dropped before the row", len(row.Output))
+	}
+
+	res, err := runner.Run(context.Background(), GateSpec{Name: "build"}, StepContext{})
+	testsupport.Must(t, err, "Run: %v", err)
+	if res.Verdict != VerdictFail || res.Exit == 0 {
+		t.Fatalf("Run = verdict %q exit %d, want a non-zero %q", res.Verdict, res.Exit, VerdictFail)
+	}
+	if !res.Truncated {
+		t.Error("Run result Truncated = false for an over-cap capture; the " +
+			"single-result seam dropped the flag")
+	}
+}
+
+// TestBatchOverrideRefusesATruncatedCaptureFromTheRealRunner: the --batch
+// truncation refusal holds end to end. The gate really runs, its over-cap
+// capture is recorded through the saga, the stored row reads back truncated,
+// and the batch resolve on that park is refused with nothing minted.
+func TestBatchOverrideRefusesATruncatedCaptureFromTheRealRunner(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedBatchRun(t, conn, batchOverrideSrc, "batch-override.toml")
+	repoRoot := t.TempDir()
+	e := execEngineWithTrust(t, repoRoot, overCapFailingBuild(t, repoRoot))
+
+	implementID := stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, implementID)
+
+	rows, err := db.GateResultsForStep(conn, implementID)
+	testsupport.Must(t, err, "reading gate rows: %v", err)
+	failing := failingCompletionRows(rows)
+	if len(failing) != 1 || failing[0].Gate != "build" {
+		t.Fatalf("premise: failing completion rows = %+v, want one build row", failing)
+	}
+	if !failing[0].Truncated {
+		t.Fatal("stored build row Truncated = false for an over-cap capture; " +
+			"the flag was lost between the runner and the store")
+	}
+
+	err = e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact", nowMS+1)
+	if err == nil {
+		t.Fatal("--batch over a truncated capture from the real runner was accepted")
+	}
+	if code, _ := CodeOf(err); code != CodeValidation {
+		t.Errorf("refusal code = %q, want %q (%v)", code, CodeValidation, err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, `"build"`) || !strings.Contains(msg, "truncated") {
+		t.Errorf("refusal = %q, want it to name gate \"build\" and its truncated capture", msg)
+	}
+
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 0 {
+		t.Errorf("grants = %d after the refusal, want 0", len(grants))
+	}
+	if got := eventKindCount(t, conn, runID, EventStepResolved); got != 0 {
+		t.Errorf("%s events = %d, want 0: the resolution must not be recorded",
+			EventStepResolved, got)
+	}
+	step, err := db.GetStep(conn, implementID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepWaitingHuman {
+		t.Errorf("status = %q after the refusal, want %q", step.Status, db.StepWaitingHuman)
 	}
 }
 
