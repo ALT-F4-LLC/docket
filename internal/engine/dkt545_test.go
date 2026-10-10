@@ -469,6 +469,153 @@ func TestOverridePassOnOpenSealedVoteWithholdsVoteRecord(t *testing.T) {
 	}
 }
 
+// sealedCast is one seat's cast in the sealed-ballot tests below, with the
+// distinct markers the rendered vote-record must carry once the ballot is no
+// longer open.
+type sealedCast struct {
+	seat       string
+	verdict    model.Verdict
+	confidence float64
+	rationale  string
+}
+
+// startSealedVoteRecordRun opens gate@0's ballot under a sealed majority rule
+// in the voteRecordSrc workflow and returns the engine and proposal id.
+func startSealedVoteRecordRun(t *testing.T, conn *sql.DB) (*Engine, int) {
+	t.Helper()
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "sealing the rule: %v", err)
+	registerSource(t, conn, []byte(voteRecordSrc), "vote-record-wf.toml")
+	issue := createIssue(t, conn, "a sealed ballot", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+	return e, openGateProposal(t, conn, e, run.ID)
+}
+
+func castSealed(t *testing.T, conn *sql.DB, proposalID int, c sealedCast) {
+	t.Helper()
+	_, err := db.CastVote(conn, &model.Vote{
+		ProposalID: proposalID, VoterName: c.seat, Verdict: c.verdict,
+		Confidence: c.confidence, DomainRelevance: 0.8, Summary: c.rationale,
+	})
+	testsupport.Must(t, err, "CastVote(%s): %v", c.seat, err)
+}
+
+// assertFullVoteRecord claims report@0 and checks that gate@0's vote-record
+// renders every cast in want with its verdict, confidence and rationale, and
+// carries no "sealed" key.
+func assertFullVoteRecord(t *testing.T, conn *sql.DB, want []sealedCast) {
+	t.Helper()
+	claim, err := ClaimStep(conn, stepIDByInstance(t, conn, "report@0"),
+		ClaimOptions{Owner: "reporter", NowMS: nowMS})
+	testsupport.Must(t, err, "claim report@0: %v", err)
+
+	var bodies []string
+	for _, input := range claim.Context.Inputs {
+		if input.Kind == workflow.VoteRecordKind {
+			bodies = append(bodies, input.Body)
+		}
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("report@0 carries %d vote-record inputs, want gate@0's one", len(bodies))
+	}
+	body := bodies[0]
+
+	var keys map[string]json.RawMessage
+	err = json.Unmarshal([]byte(body), &keys)
+	testsupport.Must(t, err, "parsing the record keys: %v", err)
+	if _, ok := keys["sealed"]; ok {
+		t.Errorf("vote-record of a ballot that is no longer open carries a sealed key: %s", body)
+	}
+
+	var record struct {
+		Casts []struct {
+			Voter      string   `json:"voter"`
+			Verdict    string   `json:"verdict"`
+			Confidence *float64 `json:"confidence"`
+			Rationale  string   `json:"rationale"`
+		} `json:"casts"`
+	}
+	err = json.Unmarshal([]byte(body), &record)
+	testsupport.Must(t, err, "parsing the record: %v", err)
+	if len(record.Casts) != len(want) {
+		t.Fatalf("vote-record carries %d casts, want %d: %s", len(record.Casts), len(want), body)
+	}
+	for _, w := range want {
+		found := false
+		for _, c := range record.Casts {
+			if c.Voter != w.seat {
+				continue
+			}
+			found = true
+			if c.Verdict != string(w.verdict) || c.Rationale != w.rationale ||
+				c.Confidence == nil || *c.Confidence != w.confidence {
+				t.Errorf("%s's rendered cast = %+v, want verdict %q, confidence %v, rationale %q",
+					w.seat, c, w.verdict, w.confidence, w.rationale)
+			}
+		}
+		if !found {
+			t.Errorf("vote-record has no cast from %s: %s", w.seat, body)
+		}
+	}
+}
+
+// TestTalliedSealedVoteRendersFullVoteRecord: once the tally closes a sealed
+// ballot, the seal lifts and the downstream vote-record carries every cast's
+// verdict, confidence and rationale — the inputs a revise step consumes.
+func TestTalliedSealedVoteRendersFullVoteRecord(t *testing.T) {
+	conn := mustDB(t)
+	e, proposalID := startSealedVoteRecordRun(t, conn)
+	casts := []sealedCast{
+		{"seat-a", model.VerdictApproveWithConcerns, 0.37, "ZQX-TALLIED-RATIONALE-A"},
+		{"seat-b", model.VerdictApprove, 0.61, "ZQX-TALLIED-RATIONALE-B"},
+	}
+	for _, c := range casts {
+		castSealed(t, conn, proposalID, c)
+	}
+	err := e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+
+	proposal, err := db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "reading the proposal: %v", err)
+	if !proposal.Sealed || proposal.SealedOpen() || proposal.Status == model.ProposalStatusOpen {
+		t.Fatalf("proposal is sealed=%v status=%s after the tally; the scenario "+
+			"needs a sealed ballot the tally has closed", proposal.Sealed, proposal.Status)
+	}
+
+	assertFullVoteRecord(t, conn, casts)
+}
+
+// TestClosedSealedVoteRendersFullVoteRecord: a sealed ballot closed before
+// every seat cast is no longer open, so the casts that were made render in
+// full; the operator then moves the vote step past the closed ballot.
+func TestClosedSealedVoteRendersFullVoteRecord(t *testing.T) {
+	conn := mustDB(t)
+	e, proposalID := startSealedVoteRecordRun(t, conn)
+	cast := sealedCast{"seat-a", model.VerdictReject, 0.42, "ZQX-CLOSED-RATIONALE-A"}
+	castSealed(t, conn, proposalID, cast)
+
+	err := db.CloseProposal(conn, proposalID, "panel will not reach quorum")
+	testsupport.Must(t, err, "closing the proposal: %v", err)
+	err = e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the closed proposal: %v", err)
+	err = e.ResolveStep(conn, stepIDByInstance(t, conn, "gate@0"),
+		ResolveOverridePass, "the panel closed without a tally", nowMS)
+	testsupport.Must(t, err, "resolve gate@0 --as override-pass: %v", err)
+
+	proposal, err := db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "reading the proposal: %v", err)
+	if !proposal.Sealed || proposal.SealedOpen() || proposal.Status != model.ProposalStatusClosed {
+		t.Fatalf("proposal is sealed=%v status=%s; the scenario needs a closed "+
+			"sealed ballot", proposal.Sealed, proposal.Status)
+	}
+
+	assertFullVoteRecord(t, conn, []sealedCast{cast})
+}
+
 // TestVoteCastPayloadKeysMatchTheValidator pins the drift V36 and the payload
 // builder must not develop: the keys the engine builds are EXACTLY the fields
 // the validator admits, both read from workflow.VoteCastFields.
