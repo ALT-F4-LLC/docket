@@ -387,7 +387,7 @@ The rule earned a second demonstration; file first, then write the number down.
 
 | Target | Change |
 |---|---|
-| `skills/docket/SKILL.md` | `docket events` gains `--follow` (flag table) and `events prune` (new sub-verb); `docket run` gains `run budget`; the `GONE` row's "no path reaches this yet" note is **deleted** — a path reaches it now |
+| The loadable `docket` skill | `docket events` gains `--follow` (flag table) and `events prune` (new sub-verb); `docket run` gains `run budget`; the `GONE` row's "no path reaches this yet" note is **deleted** — a path reaches it now |
 | `docs/spec/operations.md` §2 | The retention section is completed: the S6 pointer ("stage 7's") is resolved into the actual policy, the prune runbook, and what a trim costs |
 | `docs/spec/operations.md` §4 | The manual-edit runbook is replaced by the verb. The SQL stays as a footnote for a repo on an older binary, marked as such |
 | `docs/spec/architecture.md` | Retention and the follow loop, one subsection each |

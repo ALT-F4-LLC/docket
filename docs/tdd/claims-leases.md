@@ -487,5 +487,5 @@ PR #33 provides CI on every push. Every commit leaves the branch green.
    lease-ending, effective status on reads.
 4. `config set|get`.
 5. QA section ZF + the 4→6 fixture proof + the byte-compat sweep.
-6. `skills/docket/SKILL.md` tables and `docs/spec/security.md`, in the same
+6. The loadable `docket` skill's tables and `docs/spec/security.md`, in the same
    commits as the surface changes they document.

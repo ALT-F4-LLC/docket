@@ -2138,9 +2138,9 @@ meaningful sense.
 
 # 13. Documentation, scheduled per group
 
-CLAUDE.md's same-PR rule: *"skills/docket/SKILL.md documents the CLI — update its
+The same-PR rule: the loadable `docket` skill documents the CLI, so update its
 flag/verb tables in the same PR as any surface change; a stale table is drift and
-blocks review."*
+blocks review.
 
 | Group | Docs in the same commit group |
 |---|---|
