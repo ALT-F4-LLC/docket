@@ -170,7 +170,8 @@ A blank class means the row parked before the column existed.
 | `gate-unmatched` | a gate named no trust entry, so it never ran: the same branch when a recorded row's verdict is `unmatched`, and the gate-resolution path that parks on an unmatched entry outright |
 | `gate-skipped` | a gate measured nothing because the judged commit could not be bound — the routing stage's unmeasured branch, decided before the failed-verdict one |
 | `threshold-routed` | a declared `threshold` evaluated to a park, at the routing stage and at a vote step's approved-with-concerns evaluation |
-| `loop-bound` | a `fix-loop` entry refused because the ordinal would exceed `max_fix_loops` plus grants — every `applyFixLoop` caller, from `EnterLoop`'s refusal rather than its wording |
+| `loop-bound` | a `fix-loop` entry refused because the ordinal would exceed `max_fix_loops` plus grants, and only that refusal — every `applyFixLoop` caller, from `EnterLoop`'s refusal rather than its wording |
+| `loop-stalled` | an unauthorized `fix-loop` entry refused for non-convergence with budget still left — `EnterLoop`'s stall refusal (`LoopOutcome.Stalled`), raised when `roundMovedNothing` finds no scoped bytes moved, `routingVerdictUnchanged` finds the routing step's verdict repeated, or `volumeStalled` finds the routed volume flat past `max_stalled_rounds`; an authorized round waives it |
 | `vote-rejected` | a vote step tallied to a rejection |
 | `held-rejected` | an operator rejected a held cluster; the consequence lands on the ROUTING step, never the materialized one, which ends `done` either way |
 | `gap-only` | a completion whose only recorded artifacts were gaps, decided before any gate verdict |
