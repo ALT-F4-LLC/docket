@@ -515,6 +515,12 @@ func stepPacketFiles(
 // exists to end. The refusal is a VALIDATION_ERROR naming the path, and
 // because `step claim --render` renders as a PRE-CLAIM preflight, it costs no
 // lease: the step stays exactly as claimable as it was.
+//
+// AN ESCAPING PATH REFUSES BEFORE ANY READ. Every writer of an issue's file
+// list stores its paths verbatim, so this read is the one place containment
+// can hold for every row, including rows attached before the rule existed.
+// The rule is checkPacketRef's, applied to the run's checkout. It is lexical:
+// a symlink inside the checkout is still followed.
 func issueAttachmentFiles(
 	conn *sql.DB, step *db.Step, spec *workflow.Step,
 ) ([]PacketFile, error) {
@@ -530,6 +536,9 @@ func issueAttachmentFiles(
 	root := runExecRoot(conn, step.RunID)
 	out := make([]PacketFile, 0, len(paths))
 	for _, path := range paths {
+		if err := checkAttachmentPath(step.IssueID, path); err != nil {
+			return nil, err
+		}
 		body, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil {
 			return nil, validationErr(
@@ -542,6 +551,25 @@ func issueAttachmentFiles(
 		})
 	}
 	return out, nil
+}
+
+// checkAttachmentPath is checkPacketRef's containment rule applied to an issue
+// attachment, whose paths are relative to the run's checkout.
+func checkAttachmentPath(issueID int, path string) error {
+	normalized := strings.ReplaceAll(path, `\`, "/")
+	if strings.HasPrefix(normalized, "/") || strings.HasPrefix(normalized, "~") {
+		return validationErr(
+			"issue %s attaches %q, which is not a relative path inside the "+
+				"run's checkout", model.FormatID(issueID), path)
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return validationErr(
+				"issue %s attaches %q, which escapes the run's checkout with `..`",
+				model.FormatID(issueID), path)
+		}
+	}
+	return nil
 }
 
 // pinSetOwner names the run a refusal is about. A resolution that carries no
