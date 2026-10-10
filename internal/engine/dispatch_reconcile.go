@@ -103,7 +103,9 @@ type ReconcileOutcome struct {
 // pipeline would hit the ledger's (step, attempt, unit) key on the rows that
 // are already in — so a caller that reports the partial work reports the
 // truth. The error is always non-nil when a stage failed; nothing about the
-// partial outcome should be read as success.
+// partial outcome should be read as success. A refused integration override
+// is the one exception: it is ruled on before any stage runs, so it returns
+// the conductor refusal itself, not a *StageError, with no stage recorded.
 //
 // AN EMPTY BATCH IS REFUSED, at the back-fill stage, by BackfillUsage's own
 // rule. That is the intended behaviour rather than a skip-to-verify: a wave
