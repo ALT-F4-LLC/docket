@@ -1095,7 +1095,7 @@ func readContext(conn *sql.DB, stepID int, nowMS int64, live bool) (*Context, er
 		return nil, err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := beginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning context read: %w", err)
 	}
@@ -1217,7 +1217,7 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		return nil, err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := beginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning step read: %w", err)
 	}
