@@ -869,8 +869,16 @@ nothing else:
 6. Leading and trailing blank lines are removed.
 
 Line ORDER is preserved, and no line is sorted, deduplicated or dropped: a
-different failure set is a different signature. Test names, assertion text,
-file names and line numbers all survive normalization by design.
+different failure set is a different signature. The rules match text by
+shape, not by role: durations, timestamps and clock times, and `/`-led runs of
+two or more path segments are elided WHEREVER they occur, including inside
+assertion text and Go import paths. `want 3s, got 5s` and `want 4s, got 9s`
+both become `want <dur>, got <dur>`, and
+`github.com/ALT-F4-LLC/docket/internal/tui` becomes
+`github.com<path>/internal/tui`. What survives is the rest: test names (a
+subtest path nested three or more levels below its test keeps only its last
+two levels), file names, line numbers, the words around an elided value, and
+line order.
 UNDER-normalizing is the safe direction — surviving text can only make two
 failures look DIFFERENT, which parks a step for a human, whereas stripped text
 makes two failures look the SAME, which is the waiver this amendment removes.

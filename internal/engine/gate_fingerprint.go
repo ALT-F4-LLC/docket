@@ -23,26 +23,36 @@ import (
 // DIFFERENT — a grant that stops matching parks a step for a human, which is
 // the pre-DKT-546 posture. Text that is stripped makes two failures look the
 // SAME, which re-creates the gate-wide waiver inside the control meant to
-// remove it. So the rules below strip only text that varies between two runs of
-// one unchanged failure, and nothing that could name WHICH failure it is: test
-// names, assertion text, file names and line numbers all survive.
+// remove it. So the rules below target the shapes of text that varies between
+// two runs of one unchanged failure. They match by shape, not by role: a
+// duration, a timestamp or clock time, or a `/`-led run of two or more path
+// segments is elided WHEREVER it occurs, including inside assertion text
+// (`want 3s, got 5s` and `want 4s, got 9s` both become `want <dur>, got <dur>`)
+// and inside Go import paths (`github.com/ALT-F4-LLC/docket/internal/tui`
+// becomes `github.com<path>/internal/tui`). What survives is the rest: test
+// names (a subtest path nested three or more levels below its test keeps only
+// its last two levels), file names, line numbers, the words around an elided
+// value, and line order.
 //
-// The exact rules, which docs/tdd/reliability-delta.md states as the contract:
+// The exact rules, in the order normalizeGateOutput applies them, which
+// docs/tdd/reliability-delta.md states as the contract:
 //
 //  1. ANSI CSI/OSC escape sequences are removed.
 //  2. Carriage returns are dropped and trailing horizontal whitespace on each
 //     line is removed, so CRLF and a progress redraw hash as their plain form.
-//  3. Go-style durations (`1.234s`, `0.5ms`, `2m30.1s`) become `<dur>`. The
+//  3. RFC3339-ish timestamps and `HH:MM:SS(.fff)` clock times become `<time>`.
+//  4. Absolute POSIX paths become `<path>/<tail>`: the leading directories are
+//     replaced and the LAST TWO segments are kept. A scratch root or worktree
+//     prefix varies per run; the tail is what names the file that failed, and
+//     dropping it would let any two failures in different files collide. The
+//     match is any `/`-led run of two or more segments, so it also rewrites the
+//     part of a Go import path or URL after its first `/`.
+//  5. Go-style durations (`1.234s`, `0.5ms`, `2m30.1s`) become `<dur>`. The
 //     literal `(cached)` token also becomes `<dur>`, but only where `go test`
 //     prints it in place of the duration on a passing-package summary line
 //     (`ok  \t<pkg>\t(cached)`); anywhere else it survives.
-//  4. Integer-with-unit durations (`in 42ms`, `after 3s`) are covered by the
+//  6. Integer-with-unit durations (`in 42ms`, `after 3s`) are covered by the
 //     same rule, which is why it accepts a bare integer mantissa.
-//  5. RFC3339-ish timestamps and `HH:MM:SS(.fff)` clock times become `<time>`.
-//  6. Absolute POSIX paths become `<path>/<tail>`: the leading directories are
-//     replaced and the LAST TWO segments are kept. A scratch root or worktree
-//     prefix varies per run; the tail is what names the file that failed, and
-//     dropping it would let any two failures in different files collide.
 //  7. Leading and trailing blank lines are removed.
 //
 // Nothing else is touched. In particular line ORDER is preserved and no line is
