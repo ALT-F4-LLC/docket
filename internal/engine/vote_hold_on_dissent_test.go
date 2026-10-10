@@ -230,9 +230,90 @@ func plantRuleConfig(t *testing.T, conn *sql.DB, key, value string) {
 	testsupport.Must(t, err, "planting %s=%q: %v", key, value, err)
 }
 
-// An UNKEYED rule's routing reads only `.hold_on_dissent`, so a fault in any
-// other rule field after the casts land leaves the ordinary route untouched,
-// exactly as it did before the hold existed.
+// TestVoteOpenPinsHoldOnDissent: the ballot records the hold its rule carried
+// at open, beside the seal, so routing has a value no later edit can move.
+func TestVoteOpenPinsHoldOnDissent(t *testing.T) {
+	for _, tc := range []struct {
+		hold string
+		want bool
+	}{
+		{hold: "true", want: true},
+		{hold: "", want: false},
+	} {
+		t.Run("hold="+tc.hold, func(t *testing.T) {
+			conn, _, _, proposalID := openDissentGate(t, holdOnDissentSrc, tc.hold)
+			proposal, err := db.GetProposal(conn, proposalID)
+			testsupport.Must(t, err, "GetProposal: %v", err)
+			if proposal.HoldOnDissent != tc.want {
+				t.Errorf("proposal HoldOnDissent = %v under hold %q, want %v",
+					proposal.HoldOnDissent, tc.hold, tc.want)
+			}
+		})
+	}
+}
+
+// TestVoteHoldOnDissentRoutesOnPinnedHold: an edit to the rule's hold key
+// between the last cast and routing does not move the route. The ballot
+// routes on the hold it opened under, in both directions, whether the key is
+// flipped, deleted, or replaced with a malformed value.
+func TestVoteHoldOnDissentRoutesOnPinnedHold(t *testing.T) {
+	for _, tc := range []struct {
+		name, openedHold, editedHold string
+		wantParked                   bool
+	}{
+		{"opened true then flipped false still parks", "true", "false", true},
+		{"opened true then key deleted still parks", "true", "", true},
+		{"opened unset then flipped true routes ordinarily", "", "true", false},
+		{"opened unset then malformed routes ordinarily", "", "maybe", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, tc.openedHold,
+				model.VerdictApprove, model.VerdictApprove, model.VerdictReject)
+			plantRuleConfig(t, conn, db.VoteRuleHoldOnDissentKey("majority"), tc.editedHold)
+
+			err := e.DriveVoteProposal(conn, proposalID, nowMS)
+			testsupport.Must(t, err, "driving the tally: %v", err)
+			if !tc.wantParked {
+				assertDissentGatePassed(t, conn)
+				return
+			}
+			assertDissentGateHeld(t, conn)
+		})
+	}
+}
+
+// A keyed ballot routes on its pinned hold, so removing the rule's threshold
+// after open cannot stop the hold from being evaluated.
+func TestVoteHoldOnDissentKeyedRoutesWithoutThreshold(t *testing.T) {
+	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "true",
+		model.VerdictApprove, model.VerdictApprove, model.VerdictReject)
+	plantRuleConfig(t, conn, db.VoteRuleThresholdKey("majority"), "")
+
+	if err := e.DriveVoteProposal(conn, proposalID, nowMS); err != nil {
+		t.Fatalf("DriveVoteProposal: %v — a keyed step must not need the "+
+			"rule's threshold to route", err)
+	}
+	assertDissentGateHeld(t, conn)
+}
+
+func assertDissentGateHeld(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	gate := dissentGateStep(t, conn)
+	if !strings.HasPrefix(gate.Routing, workflow.OnFailWaitingHuman) ||
+		!strings.Contains(gate.Routing, "seat-c") {
+		t.Errorf("gate@0 routing = %q, want %q naming seat-c",
+			gate.Routing, workflow.OnFailWaitingHuman)
+	}
+	if gate.ParkClass != db.ParkClassDissentHeld {
+		t.Errorf("gate@0 park_class = %q, want %q", gate.ParkClass, db.ParkClassDissentHeld)
+	}
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepWaitingHuman {
+		t.Errorf("gate@0 status = %q, want %q", got, db.StepWaitingHuman)
+	}
+}
+
+// Routing reads no rule key, so a fault in any rule field after the casts
+// land leaves an unkeyed step's ordinary route untouched.
 func TestVoteHoldOnDissentUnkeyedRoutesWithoutThreshold(t *testing.T) {
 	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
 		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
@@ -255,27 +336,6 @@ func TestVoteHoldOnDissentUnkeyedIgnoresMalformedSealed(t *testing.T) {
 			"rule's sealed flag to route", err)
 	}
 	assertDissentGatePassed(t, conn)
-}
-
-// A malformed hold value fails CLOSED: reading it as false would pass a
-// dissented approval the operator may have asked to see.
-func TestVoteHoldOnDissentMalformedHoldBlocksRouting(t *testing.T) {
-	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
-		model.VerdictApprove, model.VerdictApprove, model.VerdictReject)
-	plantRuleConfig(t, conn, db.VoteRuleHoldOnDissentKey("majority"), "maybe")
-
-	err := e.DriveVoteProposal(conn, proposalID, nowMS)
-	if err == nil || !strings.Contains(err.Error(), "malformed hold_on_dissent flag") {
-		t.Errorf("DriveVoteProposal error = %v, want one naming the malformed "+
-			"hold_on_dissent flag", err)
-	}
-	gate := dissentGateStep(t, conn)
-	if gate.Routing != "" {
-		t.Errorf("gate@0 routing = %q, want none while the hold is unreadable", gate.Routing)
-	}
-	if got := stepStatus(t, conn, "gate@0"); got != db.StepPending {
-		t.Errorf("gate@0 status = %q, want %q", got, db.StepPending)
-	}
 }
 
 func assertDissentGatePassed(t *testing.T, conn *sql.DB) {

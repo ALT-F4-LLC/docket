@@ -227,12 +227,13 @@ func OpenVoteProposal(
 	}
 
 	proposal := &model.Proposal{
-		ProjectID:   projectID,
-		Description: fmt.Sprintf("%s (%s)", step.Instance, spec.Name),
-		Rationale:   rationale,
-		Criticality: rule.Criticality,
-		Threshold:   rule.Threshold,
-		Sealed:      rule.Sealed,
+		ProjectID:     projectID,
+		Description:   fmt.Sprintf("%s (%s)", step.Instance, spec.Name),
+		Rationale:     rationale,
+		Criticality:   rule.Criticality,
+		Threshold:     rule.Threshold,
+		Sealed:        rule.Sealed,
+		HoldOnDissent: rule.HoldOnDissent,
 		// §8.2: required_voters is len(voters), NOT a config value. A rule is
 		// about HOW STRICTLY TO TALLY; the step is about WHO CASTS, and §11.1
 		// puts the voter list on the step.
@@ -401,9 +402,9 @@ type voteRule struct {
 	// HoldOnDissent is the rule's opt-in routing dimension (DKT-2449): an
 	// APPROVED or COMMITTED tally carrying at least one `reject` parks its vote step for
 	// the operator rather than passing, with the dissenting seat named in the
-	// routing record. Unlike Sealed it is read at ROUTE time rather than
-	// stored on the proposal at open, so a key edited between the last cast
-	// and the routing invocation governs that routing.
+	// routing record. Like Sealed it is STORED on the proposal at open and
+	// routing reads the stored value, so a key edited after the ballot opens
+	// cannot change how that ballot routes.
 	HoldOnDissent bool
 }
 
@@ -648,7 +649,7 @@ func routeVoteStep(
 	// hold_on_dissent outranks an author's explicit `pass`, so a declared
 	// threshold can never silence a dissent the operator asked to see.
 	if routing == RoutingPass && approvedTally && triaged == nil {
-		dissentReason, err := dissentHold(conn, step, spec, outcome.ProposalID)
+		dissentReason, err := dissentHold(conn, outcome.ProposalID)
 		if err != nil {
 			return err
 		}

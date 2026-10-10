@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -95,32 +94,20 @@ func evaluateVoteThreshold(
 // dissenting seat leaves no trace in routing — which is the defect the rule's
 // opt-in `.hold_on_dissent` closes.
 //
+// The hold is the one OpenVoteProposal pinned on the proposal, never the live
+// rule: a key edited after open must not move the route, and a rule field
+// removed after open must not stop the step from routing.
+//
 // Both reads are pooled, so this is called from OUTSIDE routeVoteStep's
 // transaction, like every other read there.
-func dissentHold(
-	conn *sql.DB, step *db.Step, spec *workflow.Step, proposalID int,
-) (string, error) {
-	projectID, err := db.RunProjectID(conn, step.RunID)
-	if err != nil {
-		return "", err
-	}
-	// Only the hold key is read: the tally's threshold, criticality, and seal
-	// were pinned on the proposal at open, so a fault in any other rule field
-	// must not stop a rule that never opted in from routing.
-	holdEntry, err := db.GetConfig(conn, projectID, db.VoteRuleHoldOnDissentKey(spec.VoteRule))
-	if err != nil {
-		return "", fmt.Errorf("resolving vote rule %q: %w", spec.VoteRule, err)
-	}
-	// A malformed stored value fails loudly rather than reading as false: a
-	// silent false would fail OPEN, passing a dissented approval the operator
-	// asked to see.
-	held, err := strconv.ParseBool(holdEntry.Value)
+func dissentHold(conn *sql.DB, proposalID int) (string, error) {
+	proposal, err := db.GetProposal(conn, proposalID)
 	if err != nil {
 		return "", fmt.Errorf(
-			"vote rule %q has a malformed hold_on_dissent flag %q: %w",
-			spec.VoteRule, holdEntry.Value, err)
+			"reading %s for its dissent hold: %w",
+			model.FormatProposalID(proposalID), err)
 	}
-	if !held {
+	if !proposal.HoldOnDissent {
 		return "", nil
 	}
 
