@@ -155,12 +155,32 @@ func RefreshIssueBodyInRun(
 	}
 
 	// Quiescence, per issue for the steps and per run for the dispatch — the
-	// same two checks, spelled here with the body's wording rather than
-	// parameterized: the refusals are what an operator reads, and a shared one
-	// would have to say "premise" where it can say what actually moved.
-	steps, err := refreshableSteps(tx, runID, issueID, run.Ref())
+	// same checks, with every refusal spelled here in the body's wording rather
+	// than parameterized: the refusals are what an operator reads, and a shared
+	// one would have to say "premise" where it can say what actually moved.
+	steps, straddled, err := refreshableSteps(tx, runID, issueID, run.Ref())
 	if err != nil {
 		return nil, err
+	}
+	if len(straddled) > 0 {
+		return nil, conflictErr(
+			"%d step(s) of %s in %s are mid-flight (%s); a refresh under one "+
+				"would change the description an executor's packet asked it "+
+				"to satisfy while it is still executing, or while its gates "+
+				"still judge an artifact written to the frozen description — "+
+				"wait for them to record (or for their leases to be reaped), "+
+				"then retry",
+			len(straddled), model.FormatID(issueID), run.Ref(),
+			strings.Join(straddled, ", "))
+	}
+	if len(steps) == 0 {
+		return nil, conflictErr(
+			"every step of %s in %s is terminal; their artifacts are already "+
+				"recorded against the description they ran under and no "+
+				"packet will render again, so a refresh could only rewrite "+
+				"that record. The amended description reaches the issue's "+
+				"NEXT run",
+			model.FormatID(issueID), run.Ref())
 	}
 	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
 		return nil, conflictErr(

@@ -206,9 +206,27 @@ func RefreshIssueScopeInRun(
 	}
 
 	// D2: quiescence, per issue for the steps and per run for the dispatch.
-	steps, err := refreshableSteps(tx, runID, issueID, run.Ref())
+	steps, straddled, err := refreshableSteps(tx, runID, issueID, run.Ref())
 	if err != nil {
 		return nil, err
+	}
+	if len(straddled) > 0 {
+		return nil, conflictErr(
+			"%d step(s) of %s in %s are mid-flight (%s); a refresh under one "+
+				"would change what an executor's packet means mid-execution, "+
+				"or run a gate over paths the artifact it gates never covered "+
+				"— wait for them to record (or for their leases to be reaped), "+
+				"then retry",
+			len(straddled), model.FormatID(issueID), run.Ref(),
+			strings.Join(straddled, ", "))
+	}
+	if len(steps) == 0 {
+		return nil, conflictErr(
+			"every step of %s in %s is terminal; their diffs are already "+
+				"recorded over the scope they ran under and no packet will "+
+				"render again, so a refresh could only rewrite that record. "+
+				"The widened scope reaches the issue's NEXT run",
+			model.FormatID(issueID), run.Ref())
 	}
 	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
 		return nil, conflictErr(
@@ -254,9 +272,12 @@ func RefreshIssueScopeInRun(
 }
 
 // refreshableSteps returns the non-terminal instances of one issue in one run,
-// in id order, refusing when any of them would straddle the change or when
-// there are none left to reach.
-func refreshableSteps(tx *sql.Tx, runID, issueID int, runRef string) ([]string, error) {
+// in id order, and separately the ones that would straddle the change, each
+// as "instance (status)". It refuses nothing itself: the caller words both
+// refusals, because what an operator must be told is what actually moved.
+func refreshableSteps(
+	tx *sql.Tx, runID, issueID int, runRef string,
+) (instances, straddled []string, err error) {
 	rows, err := tx.Query(
 		`SELECT instance, status FROM steps
 		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
@@ -264,7 +285,7 @@ func refreshableSteps(tx *sql.Tx, runID, issueID int, runRef string) ([]string, 
 		runID, issueID,
 		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted)
 	if err != nil {
-		return nil, fmt.Errorf("collecting %s's remaining steps: %w", runRef, err)
+		return nil, nil, fmt.Errorf("collecting %s's remaining steps: %w", runRef, err)
 	}
 	type liveStep struct{ instance, status string }
 	remaining, err := scanTxRows(rows, func(r *sql.Rows) (liveStep, error) {
@@ -272,17 +293,13 @@ func refreshableSteps(tx *sql.Tx, runID, issueID int, runRef string) ([]string, 
 		return s, r.Scan(&s.instance, &s.status)
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	blocking := make(map[string]bool, len(refreshBlockingStepStatuses))
 	for _, s := range refreshBlockingStepStatuses {
 		blocking[s] = true
 	}
-	var (
-		instances []string
-		straddled []string
-	)
 	for _, s := range remaining {
 		if blocking[s.status] {
 			straddled = append(straddled, fmt.Sprintf("%s (%s)", s.instance, s.status))
@@ -290,25 +307,7 @@ func refreshableSteps(tx *sql.Tx, runID, issueID int, runRef string) ([]string, 
 		}
 		instances = append(instances, s.instance)
 	}
-	if len(straddled) > 0 {
-		return nil, conflictErr(
-			"%d step(s) of %s in %s are mid-flight (%s); a refresh under one "+
-				"would change what an executor's packet means mid-execution, "+
-				"or run a gate over paths the artifact it gates never covered "+
-				"— wait for them to record (or for their leases to be reaped), "+
-				"then retry",
-			len(straddled), model.FormatID(issueID), runRef,
-			strings.Join(straddled, ", "))
-	}
-	if len(instances) == 0 {
-		return nil, conflictErr(
-			"every step of %s in %s is terminal; their diffs are already "+
-				"recorded over the scope they ran under and no packet will "+
-				"render again, so a refresh could only rewrite that record. "+
-				"The widened scope reaches the issue's NEXT run",
-			model.FormatID(issueID), runRef)
-	}
-	return instances, nil
+	return instances, straddled, nil
 }
 
 // runIssueTx loads one `run_issues` row, distinguishing "not in this run" from

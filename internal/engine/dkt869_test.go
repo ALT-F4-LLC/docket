@@ -159,7 +159,7 @@ func TestRefreshRefusesAStraddlingStep(t *testing.T) {
 			if code, ok := CodeOf(err); !ok || code != CodeConflict {
 				t.Errorf("error code = %v, want CONFLICT: %v", code, err)
 			}
-			for _, want := range []string{"flaky@0", status} {
+			for _, want := range []string{"flaky@0", status, "never covered"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the refusal does not name %q:\n%s", want, err)
 				}
@@ -210,6 +210,9 @@ func TestRefreshRefusesWhereItCouldOnlyRewriteHistory(t *testing.T) {
 		}
 		if code, ok := CodeOf(err); !ok || code != CodeConflict {
 			t.Errorf("error code = %v, want CONFLICT: %v", code, err)
+		}
+		if !strings.Contains(err.Error(), "widened scope") {
+			t.Errorf("the refusal does not say where the widened scope lands:\n%s", err)
 		}
 		assertFrozenScope(t, conn, runID, issue, "internal/a/**")
 	})

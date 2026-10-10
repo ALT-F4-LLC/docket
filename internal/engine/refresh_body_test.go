@@ -193,10 +193,13 @@ func TestRefreshBodyRefusesWhileStepsStraddle(t *testing.T) {
 			if code, ok := CodeOf(err); !ok || code != CodeConflict {
 				t.Errorf("error code = %v, want CONFLICT: %v", code, err)
 			}
-			for _, want := range []string{"flaky@0", status} {
+			for _, want := range []string{"flaky@0", status, "description"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the refusal does not name %q:\n%s", want, err)
 				}
+			}
+			if strings.Contains(err.Error(), "never covered") {
+				t.Errorf("the body refusal speaks of scope, which did not move:\n%s", err)
 			}
 			if got, _ := runIssueBody(t, conn, runID, issue); got != "body" {
 				t.Errorf("body_snapshot = %q; a refused refresh must write nothing", got)
@@ -225,6 +228,39 @@ func TestRefreshBodyRefusesWhileStepsStraddle(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "DISPATCH-") {
 			t.Errorf("the refusal does not name the open dispatch:\n%s", err)
+		}
+		if got, _ := runIssueBody(t, conn, runID, issue); got != "body" {
+			t.Errorf("body_snapshot = %q; a refused refresh must write nothing", got)
+		}
+		assertNoBodyRefreshEvent(t, conn, runID)
+	})
+}
+
+// TestRefreshBodyRefusesWhereItCouldOnlyRewriteHistory: with every step of the
+// issue terminal no packet will render again, so the refusal must point the
+// operator at the issue's next run in the body's own terms, not the scope's.
+func TestRefreshBodyRefusesWhereItCouldOnlyRewriteHistory(t *testing.T) {
+	t.Run("every step of the issue is terminal", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue, stepID := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+		amend(t, conn, issue, "amended after the issue finished")
+		mustExec(t, conn, `UPDATE steps SET status = ? WHERE id = ?`,
+			db.StepDone, stepID)
+
+		_, err := refreshBody(conn, runID, issue)
+		if err == nil {
+			t.Fatal("a refresh over a fully-recorded issue was accepted")
+		}
+		if code, ok := CodeOf(err); !ok || code != CodeConflict {
+			t.Errorf("error code = %v, want CONFLICT: %v", code, err)
+		}
+		for _, want := range []string{"description", "NEXT run"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal does not name %q:\n%s", want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "widened scope") {
+			t.Errorf("the body refusal speaks of scope, which did not move:\n%s", err)
 		}
 		if got, _ := runIssueBody(t, conn, runID, issue); got != "body" {
 			t.Errorf("body_snapshot = %q; a refused refresh must write nothing", got)
