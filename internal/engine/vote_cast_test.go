@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -381,5 +382,64 @@ func TestVoteCastNeedsARationaleWithConcerns(t *testing.T) {
 				t.Errorf("votes = %+v, want one with summary %q", votes, c.summary)
 			}
 		})
+	}
+}
+
+// failRunEventInserts installs a trigger that aborts every step-less insert of
+// the given event kinds: the writes a panel's run events make after the cast's
+// own transaction has committed.
+func failRunEventInserts(t *testing.T, conn *sql.DB, kinds ...string) {
+	t.Helper()
+	execSQL(t, conn, fmt.Sprintf(
+		`CREATE TRIGGER fail_run_event_inserts BEFORE INSERT ON events
+		 WHEN NEW.step_id IS NULL AND NEW.kind IN ('%s')
+		 BEGIN SELECT RAISE(ABORT, 'injected run-event failure'); END`,
+		strings.Join(kinds, "', '")))
+}
+
+// TestCastVoteReturnsCommittedResultWhenPanelEventsFail: when an attributed
+// panel's run events cannot be written after the vote has committed, CastVote
+// still hands back the committed cast's result beside an error naming the
+// proposal; a cast refused before the commit still returns no result.
+func TestCastVoteReturnsCommittedResultWhenPanelEventsFail(t *testing.T) {
+	conn := mustDB(t)
+	_, issue := activatedRun(t, conn)
+	id, err := db.CreateProposal(conn, &model.Proposal{
+		ProjectID: 1, Description: "should the loop extend?", Rationale: "conductor panel",
+		Criticality: model.CriticalityMedium, Threshold: 0.5, RequiredVoters: 2,
+		Status: model.ProposalStatusOpen, CreatedBy: "conductor",
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	linkProposal(t, conn, id, issue)
+	execSQL(t, conn, `UPDATE proposals SET created_at = ? WHERE id = ?`,
+		time.UnixMilli(nowMS).Add(time.Minute).UTC().Format(time.RFC3339), id)
+	failRunEventInserts(t, conn, EventVoteOpened)
+
+	refused, err := CastVote(conn, &model.Vote{
+		ProposalID: id, VoterName: "seat-0", Verdict: model.VerdictReject,
+		Confidence: 0.9, DomainRelevance: 0.8,
+	})
+	if err == nil || refused != nil {
+		t.Fatalf("refused cast = (%+v, %v), want a nil result and an error", refused, err)
+	}
+	if n := voteCount(t, conn, id); n != 0 {
+		t.Fatalf("%d votes after a refused cast, want 0", n)
+	}
+
+	result, err := castAs(conn, id, "seat-1")
+	if err == nil {
+		t.Fatal("CastVote returned no error although the panel's run events failed")
+	}
+	if pid := model.FormatProposalID(id); !strings.Contains(err.Error(), pid) {
+		t.Errorf("error %q does not name %s", err.Error(), pid)
+	}
+	if result == nil {
+		t.Fatal("CastVote returned a nil result for a cast that committed")
+	}
+	if result.VotesCast != 1 || result.Vote == nil || result.Vote.VoterName != "seat-1" {
+		t.Errorf("result = %+v, want seat-1's committed cast with 1 vote cast", result)
+	}
+	if n := voteCount(t, conn, id); n != 1 {
+		t.Errorf("%d votes recorded, want the committed cast's 1", n)
 	}
 }

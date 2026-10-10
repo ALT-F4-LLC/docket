@@ -139,3 +139,79 @@ func TestStepBoundVoteRecordsOneEventOfEachKind(t *testing.T) {
 		t.Errorf("run vote events %v; want exactly one opened and one tallied", got)
 	}
 }
+
+// gatedShipSrc is a vote step with a step after it, so routing the vote is
+// observable as the downstream step becoming claimable.
+const gatedShipSrc = `
+[pipeline]
+name = "gated-ship"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "seed"
+after = []
+executor = "x"
+emits = "findings"
+
+[[step]]
+name = "gate"
+after = ["seed"]
+type = "vote"
+voters = ["seat-a", "seat-b", "seat-c"]
+vote_rule = "majority"
+on_fail = "skip"
+
+[[step]]
+name = "ship"
+after = ["gate"]
+executor = "x"
+emits = "findings"
+`
+
+// TestStepBoundDecidingCastRoutesWhenPanelEventsWouldFail: a vote step's
+// proposal is linked to a run-bound issue inside the run's window, so it looks
+// attributed to the panel path. With every step-less vote event write forced to
+// fail, the deciding cast still returns its committed result and no error, and
+// the vote step routes so the step after it can be claimed. Step-boundness is
+// settled before the commit, so no post-commit read or write of the panel path
+// stands between the cast and the routing.
+func TestStepBoundDecidingCastRoutesWhenPanelEventsWouldFail(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.67", "")
+	registerSource(t, conn, []byte(gatedShipSrc), "gated-ship.toml")
+	issue := createIssue(t, conn, "gated", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	proposalID := openGateProposal(t, conn, e, run.ID)
+	// The fixture clock is not the wall clock: place the proposal inside the
+	// run's window, where the panel attribution rule would claim it.
+	execSQL(t, conn, `UPDATE proposals SET created_at = ? WHERE id = ?`,
+		time.UnixMilli(nowMS).Add(time.Minute).UTC().Format(time.RFC3339), proposalID)
+	failRunEventInserts(t, conn, EventVoteOpened, EventVoteTallied)
+
+	var result *db.CastVoteResult
+	for _, seat := range []string{"seat-a", "seat-b", "seat-c"} {
+		result, err = CastVote(conn, &model.Vote{
+			ProposalID: proposalID, VoterName: seat,
+			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8,
+		})
+		testsupport.Must(t, err, "CastVote(%s): %v", seat, err)
+	}
+	if result == nil || !result.QuorumReached {
+		t.Fatalf("deciding cast result = %+v, want the committed cast that reached quorum", result)
+	}
+
+	testsupport.Must(t, e.DriveVoteProposal(conn, proposalID, nowMS), "driving the tally")
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepDone {
+		t.Errorf("gate@0 = %q after the deciding cast, want %q", got, db.StepDone)
+	}
+	_, err = ClaimStep(conn, stepIDByInstance(t, conn, "ship@0"),
+		ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claiming ship@0 after the vote routed: %v", err)
+}

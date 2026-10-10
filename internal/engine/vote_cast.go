@@ -64,8 +64,13 @@ func CastVote(conn *sql.DB, vote *model.Vote) (*db.CastVoteResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if policy.stepBound {
+		return result, nil
+	}
+	// The vote has committed and a finalized proposal refuses a retry, so a
+	// failure here still hands back the committed result beside the error.
 	if err := recordConductorPanelEvents(conn, vote.ProposalID, result); err != nil {
-		return nil, fmt.Errorf("the vote recorded, but recording %s's run events failed: %w",
+		return result, fmt.Errorf("the vote recorded, but recording %s's run events failed: %w",
 			model.FormatProposalID(vote.ProposalID), err)
 	}
 	return result, nil
@@ -75,6 +80,9 @@ func CastVote(conn *sql.DB, vote *model.Vote) (*db.CastVoteResult, error) {
 // no declared vote step — is the permissive policy: open roster, declared
 // weighting, no recusal, which is every ballot's behavior before DKT-2541.
 type castPolicy struct {
+	// stepBound reports that an engine vote step opened the proposal (its
+	// create is keyed under the vote-step prefix), even when spec is nil.
+	stepBound bool
 	// spec is the pinned vote step, or nil for a proposal no declared step
 	// opened.
 	spec *workflow.Step
@@ -99,13 +107,16 @@ func castPolicyOf(conn *sql.DB, proposalID int) (castPolicy, error) {
 	if !found || !strings.HasPrefix(key, voteStepScopePrefix) {
 		return castPolicy{}, nil
 	}
+	// A vote step opened this proposal. Every policy below carries that, even
+	// one with no switches to enforce.
+	unenforced := castPolicy{stepBound: true}
 	runID, ok := voteStepRunOf(key)
 	if !ok {
-		return castPolicy{}, nil
+		return unenforced, nil
 	}
 	want, ok := parseVoteStepKey(voteIdempotencyPrefix(runID), key)
 	if !ok {
-		return castPolicy{}, nil
+		return unenforced, nil
 	}
 
 	steps, err := db.ListRunSteps(conn, runID)
@@ -124,7 +135,7 @@ func castPolicyOf(conn *sql.DB, proposalID int) (castPolicy, error) {
 		// The key names a step the run no longer has. Nothing to enforce
 		// and nothing to fail on: the proposal is still a real ballot, and
 		// the tally is what decides it.
-		return castPolicy{}, nil
+		return unenforced, nil
 	}
 
 	defs, err := StepDefinitions(conn, runID)
@@ -133,15 +144,15 @@ func castPolicyOf(conn *sql.DB, proposalID int) (castPolicy, error) {
 	}
 	def := defs[step.WorkflowID]
 	if def == nil {
-		return castPolicy{}, nil
+		return unenforced, nil
 	}
 	spec := workflow.StepByName(def, step.StepName)
 	if spec == nil || spec.Type != workflow.TypeVote {
 		// A materialized held step: the definition never declares its
 		// minted name, so there is no `[[step]]` table to read switches from.
-		return castPolicy{}, nil
+		return unenforced, nil
 	}
-	policy := castPolicy{spec: spec}
+	policy := castPolicy{stepBound: true, spec: spec}
 	if spec.Reviews != "" {
 		policy.reviewed = workflow.StepByName(def, spec.Reviews)
 	}

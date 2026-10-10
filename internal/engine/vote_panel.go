@@ -26,13 +26,10 @@ import (
 // cast that reaches quorum, with the score db.CastVote computed.
 
 // recordConductorPanelEvents writes a step-less panel's vote lifecycle events
-// onto every run that attributes it. A vote step's own proposal is skipped:
-// its step already announces it.
+// onto every run that attributes it. The caller passes only a step-less
+// panel: a vote step's own proposal is announced by its step, and CastVote
+// settles step-boundness before the vote commits.
 func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *db.CastVoteResult) error {
-	stepBound, err := IsVoteStepProposal(conn, proposalID)
-	if err != nil || stepBound {
-		return err
-	}
 	runs, err := conductorPanelRuns(conn, proposalID)
 	if err != nil || len(runs) == 0 {
 		return err
