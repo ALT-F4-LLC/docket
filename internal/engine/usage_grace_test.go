@@ -151,9 +151,17 @@ func TestUsageGraceIgnoresAnnotation(t *testing.T) {
 	testsupport.Must(t, err, "annotating the finished step: %v", err)
 
 	past := recorded + grace
-	if ds := discrepanciesAt(t, conn, runID, past); !containsKind(ds, DiscrepancyMissingUsage) {
-		t.Errorf("at the grace after the record, an annotated unbilled step is not a %s "+
-			"discrepancy (%v); the annotation restarted the grace", DiscrepancyMissingUsage, ds)
+	ds := discrepanciesAt(t, conn, runID, past)
+	var missing []string
+	for _, d := range ds {
+		if d.Kind == DiscrepancyMissingUsage {
+			missing = append(missing, d.Instance)
+		}
+	}
+	if !contains(missing, instance) {
+		t.Errorf("at the grace after the record, the annotated unbilled %s is not a %s "+
+			"discrepancy (%v); the annotation restarted the grace",
+			instance, DiscrepancyMissingUsage, ds)
 	}
 	_, err = e.CloseDispatch(conn, runID, false, "", past)
 	if code, ok := CodeOf(err); !ok || code != CodeConflict {
