@@ -579,6 +579,11 @@ var eventActors = map[string]Actor{
 	// (DKT-2544 records the gap).
 	EventIssueBodyRefreshed: ActorHuman,
 
+	// The attachment-list refresh is `human` for the same reason as its scope
+	// and body twins: activation freezes the list once, and it moves only
+	// because a person ran the refresh naming the run it should reach.
+	EventIssueFilesRefreshed: ActorHuman,
+
 	// The issue.diff re-pin (DKT-1034): nothing in the engine re-records a
 	// step's diff after the fact — the routing stage records it once at
 	// completion and every resolution leaves it standing (rerun-gates by

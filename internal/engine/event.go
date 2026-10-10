@@ -312,6 +312,13 @@ const (
 	// and attribute the discontinuity rather than infer it.
 	EventIssueBodyRefreshed = "issue-body-refreshed"
 
+	// The activation snapshot's attachment LIST being re-frozen mid-run. The
+	// `files` key of `run_issues.issue_snapshot` is what `issue.files` renders,
+	// so a detach reaches a live run's packets only through this refresh. It
+	// carries the frozen list, the live list that replaced it, the step
+	// instances it reaches, and the operator's reason.
+	EventIssueFilesRefreshed = "issue-files-refreshed"
+
 	// A step's recorded `issue.diff` being RE-PINNED to another tree
 	// (DKT-1034): `step resolve --worktree` recomputed the diff and its target
 	// sha from a checkout an operator patched out of band, and recorded the
@@ -429,6 +436,7 @@ var eventKinds = map[string]bool{
 	EventStaleTargetWaived:    true,
 	EventIssueScopeRefreshed:  true,
 	EventIssueBodyRefreshed:   true,
+	EventIssueFilesRefreshed:  true,
 	EventIssueDiffRepinned:    true,
 	EventRunNoteAdded:         true,
 	EventConfigChanged:        true,
