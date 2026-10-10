@@ -1544,8 +1544,25 @@ func loopRedirectBody(
 // older ordinals. For gate-results that yields an empty array. For vote-record
 // it yields no input, since the swept vote step has no proposal. Both are
 // intended: no panel or check ran that round.
+//
+// A `skipped` producer is excluded here, so an ordinary `<step>.<kind>` input
+// falls back past it to the latest recorded ordinal. The ledger forms treat it
+// as they treat a swept step (ledgerProducer): a skipped instance at ordinal N
+// pins the resolved ordinal to N, gate-results yields an empty array for it,
+// and vote-record yields no input. Falling back would hand the consumer an
+// earlier round's checks or panel objections, which a later round may already
+// have settled. The skipped instance's own ledger is not read: a step skipped
+// by `resolve --as skip` may have recorded rows or opened a proposal before it
+// parked, and the operator moved past them.
 func recordedProducer(status string) bool {
 	return status == db.StepDone || status == db.StepSuperseded
+}
+
+// ledgerProducer reports whether an instance in this status pins the ordinal a
+// `<step>.gate-results` or `<step>.vote-record` input resolves at. It is
+// recordedProducer plus `skipped`; see recordedProducer for why.
+func ledgerProducer(status string) bool {
+	return recordedProducer(status) || status == db.StepSkipped
 }
 
 // matchingArtifacts selects the artifacts a `<step>.<kind>` or `<step>.*` input
@@ -1761,7 +1778,11 @@ func resolveIssueDiff(
 // EMPTY ARRAY, not an absent input: "this step ran no checks" is an answer a
 // consumer can act on, while an absent input reads as a resolution failure.
 //
-// The one departure from artifact resolution: the REQUESTING step admits
+// A `skipped` producer departs from artifact resolution (ledgerProducer): it
+// pins the ordinal like a recorded one and contributes an empty array, so the
+// consumer never falls back to an earlier round's results.
+//
+// The other departure from artifact resolution: the REQUESTING step admits
 // itself regardless of status (DKT-12). Its `pre = true` gate rows are
 // committed before context assembly runs, so a self-declared
 // `<self>.gate-results` is the step reading its own claim-time measurements —
@@ -1789,7 +1810,7 @@ func resolveGateResults(
 		if s.IssueID != step.IssueID || s.StepName != stepName {
 			continue
 		}
-		if s.Ordinal > step.Ordinal || (!recordedProducer(s.Status) && s.ID != step.ID) {
+		if s.Ordinal > step.Ordinal || (!ledgerProducer(s.Status) && s.ID != step.ID) {
 			continue
 		}
 		if s.Ordinal > best {
@@ -1827,9 +1848,12 @@ func resolveGateResults(
 
 	out := make([]ContextInput, 0, len(producers))
 	for _, producer := range producers {
-		rows, err := db.GateResultsForStepTx(tx, producer.ID)
-		if err != nil {
-			return nil, err
+		var rows []db.GateResultRow
+		if producer.Status != db.StepSkipped {
+			var err error
+			if rows, err = db.GateResultsForStepTx(tx, producer.ID); err != nil {
+				return nil, err
+			}
 		}
 		body, err := encodeGateResults(rows)
 		if err != nil {

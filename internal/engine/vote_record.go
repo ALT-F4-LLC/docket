@@ -185,6 +185,11 @@ func voteCastPayloads(votes []*model.Vote) []map[string]any {
 // `docket step resolve` before its ballot opened — contributes no input:
 // there is no record, and fabricating an empty one would report "a vote
 // happened and nobody cast" about a vote that never opened.
+//
+// A `skipped` vote step pins the ordinal as gate-results' skipped producer does
+// (ledgerProducer) and contributes no input, even if it opened a proposal
+// before an operator skipped it. The consumer never falls back to an earlier
+// round's panel.
 func resolveVoteRecords(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, stepName string,
 ) ([]ContextInput, error) {
@@ -195,7 +200,7 @@ func resolveVoteRecords(
 			s.Kind != workflow.TypeVote {
 			continue
 		}
-		if s.Ordinal > step.Ordinal || !recordedProducer(s.Status) {
+		if s.Ordinal > step.Ordinal || !ledgerProducer(s.Status) {
 			continue
 		}
 		if s.Ordinal > best {
@@ -229,6 +234,9 @@ func resolveVoteRecords(
 
 	out := make([]ContextInput, 0, len(producers))
 	for _, producer := range producers {
+		if producer.Status == db.StepSkipped {
+			continue
+		}
 		proposalID, found, err := db.LookupIdempotencyKeyTx(
 			tx, db.ScopeVoteCreate,
 			voteIdempotencyKey(producer.RunID, producer.IssueID, producer.Instance))

@@ -91,3 +91,36 @@ func TestLoopBodyReadsTheLatestRoundsVoteRecord(t *testing.T) {
 			"at round 2 must read the panel that routed round 2, not round 0's", got)
 	}
 }
+
+// A skipped vote step at the latest ordinal leaves the consumer with no
+// vote-record input. Falling back would hand `fix@2` round 0's panel
+// objections, which round 1 already settled. `gate@1` opens and tallies its
+// proposal before it moves to `skipped`, as `resolve --as skip` leaves a
+// parked vote step, so the proposal it carries is not read either.
+func TestSkippedLatestVoteStepYieldsNoVoteRecord(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(concernLoopSrc), "concern-loop.toml")
+	issue := createIssue(t, conn, "two rounds", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	driveFixtureRound(t, 0)
+	openGateProposal(t, conn, e, run.ID)
+	concernRound(t, conn, e, "gate@0")
+	driveFixtureRound(t, 1)
+	fixVoteRecord(t, conn, e, "fix@1")
+	err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after fix@1: %v", err)
+	concernRound(t, conn, e, "gate@1")
+	driveFixtureRound(t, 2)
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'gate@1'`,
+		db.StepSkipped)
+
+	if got := fixVoteRecord(t, conn, e, "fix@2"); got != "" {
+		t.Errorf("fix@2 read vote-record from %q, want none: a skipped gate@1 "+
+			"pins ordinal 1 and must not fall back to gate@0's panel", got)
+	}
+}

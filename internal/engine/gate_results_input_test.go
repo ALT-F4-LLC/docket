@@ -2,8 +2,10 @@ package engine
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -301,5 +303,131 @@ emits = "gate-results"
 `
 	if err := registerSourceErr(t, []byte(shadowed)); err == nil {
 		t.Error("a step emitting the reserved gate-results kind registered")
+	}
+}
+
+// A skipped producer at the latest ordinal makes `<step>.gate-results` resolve
+// empty for that ordinal instead of falling back to an earlier round's rows.
+// An ordinary `<step>.<kind>` input over the same producer still falls back.
+// The fixture's `review` re-runs every round, records its own `review-checks`
+// gate, and feeds `synthesize` both forms.
+const skippedGateProducerSrc = `
+[pipeline]
+name = "skipped-gate-producer"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+after = []
+executor = "author"
+emits = "change-summary"
+
+[[step]]
+name = "review"
+after = ["implement"]
+executor = "judge"
+emits = "findings"
+gates = ["review-checks"]
+
+[[step]]
+name = "synthesize"
+after = ["review"]
+executor = "synthesize-findings"
+emits = "findings"
+inputs = ["review.findings", "review.gate-results"]
+
+[[step]]
+name = "reconcile"
+after = ["synthesize"]
+action = "aggregate"
+params = { field = "severity", method = "max", hold_spread = 2, output = "findings" }
+inputs = ["synthesize.findings"]
+payload = "findings@1"
+threshold = { "fix-loop" = "any(severity >= blocker)" }
+max_fix_loops = 2
+
+[[step]]
+name = "fix"
+executor = "author"
+emits = "change-summary"
+loop = true
+inputs = ["reconcile.findings"]
+after_loop = "review"
+`
+
+const (
+	roundZeroReview = "REVIEW-0: the round-0 findings."
+	roundOneReview  = "REVIEW-1: findings the operator skipped past."
+)
+
+// skippedReviewRoundOne drives round 0 into the fix loop, then records
+// `review@1` (its findings and a passing `review-checks` row) and moves it to
+// `skipped`, as `resolve --as skip` does to a parked step that had recorded.
+// It returns `synthesize@1`'s assembled inputs.
+func skippedReviewRoundOne(t *testing.T) []ContextInput {
+	t.Helper()
+	conn := mustDB(t)
+	e := testEngine()
+	registerFixtureSchema(t, conn)
+	registerSource(t, conn, []byte(skippedGateProducerSrc), "skipped-gate-producer.toml")
+	issue := createIssue(t, conn, "land the change", "the issue body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	driveFixtureRound(t, 0)
+	claimAndComplete(t, conn, e, "implement@0", "the change", "")
+	claimAndComplete(t, conn, e, "review@0", roundZeroReview, "")
+	claimAndComplete(t, conn, e, "synthesize@0", "the synthesis", blockerPayload)
+	driveAction(t, conn, e, "reconcile@0")
+	if !stepExists(t, conn, "review@1") || !stepExists(t, conn, "synthesize@1") {
+		t.Fatal("premise: the blocker did not re-enter review at ordinal 1")
+	}
+
+	driveFixtureRound(t, 1)
+	claimAndComplete(t, conn, e, "fix@1", "the fix", "")
+	claimAndComplete(t, conn, e, "review@1", roundOneReview, "")
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'review@1'`,
+		db.StepSkipped)
+
+	bundle, err := ReadContext(conn, stepIDByInstance(t, conn, "synthesize@1"), nowMS)
+	testsupport.Must(t, err, "assembling synthesize@1's bundle: %v", err)
+	return bundle.Inputs
+}
+
+func TestSkippedLatestProducerResolvesEmptyGateResults(t *testing.T) {
+	gates := gateResultsInputs(t, skippedReviewRoundOne(t))
+	rows, ok := gates["review@1"]
+	if len(gates) != 1 || !ok {
+		t.Fatalf("synthesize@1's gate-results are from %v, want review@1 alone: "+
+			"a skipped producer pins the ordinal, never falls back to review@0",
+			keysOf(gates))
+	}
+	if len(rows) != 0 {
+		t.Errorf("review@1's gate results = %+v, want an empty array: the "+
+			"skipped instance's recorded rows are not its input", rows)
+	}
+}
+
+func TestSkippedLatestProducerArtifactInputFallsBack(t *testing.T) {
+	var found []string
+	for _, in := range skippedReviewRoundOne(t) {
+		// The loop also carries the prior round's synthesize and reconcile
+		// findings; only the review.findings binding is under test.
+		if in.Kind != "findings" || !strings.HasPrefix(in.ProducerStep, "review@") {
+			continue
+		}
+		found = append(found, in.ProducerStep)
+		if in.ProducerStep != "review@0" || in.Body != roundZeroReview {
+			t.Errorf("synthesize@1's review.findings is %s %q, want review@0 %q: "+
+				"an ordinary input skips past a skipped producer",
+				in.ProducerStep, in.Body, roundZeroReview)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("synthesize@1 binds review.findings from %v, want review@0 alone", found)
 	}
 }
