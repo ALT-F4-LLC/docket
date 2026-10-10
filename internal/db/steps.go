@@ -96,6 +96,11 @@ const (
 	// ParkClassLoopBound: a fix loop was refused because `max_fix_loops` is
 	// spent — LoopOutcome.Entered is false, never the bound's wording.
 	ParkClassLoopBound ParkClass = "loop-bound"
+	// ParkClassLoopStalled: an unauthorized fix loop was refused for
+	// non-convergence — the last round moved no scoped bytes, the routing step
+	// repeated its verdict, or the routed volume held flat past
+	// `max_stalled_rounds` — with budget still left. LoopOutcome.Stalled.
+	ParkClassLoopStalled ParkClass = "loop-stalled"
 	// ParkClassVoteRejected: a vote tallied to a rejection.
 	ParkClassVoteRejected ParkClass = "vote-rejected"
 	// ParkClassDissentHeld: a vote rule's `hold_on_dissent` decision parked an

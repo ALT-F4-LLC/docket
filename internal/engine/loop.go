@@ -58,6 +58,9 @@ type LoopOutcome struct {
 	Routing string
 	// Reason explains a bound, for the operator resolving the parked step.
 	Reason string
+	// Stalled reports that the refusal was non-convergence rather than the
+	// `max_fix_loops` bound: budget remained, but the loop was not moving.
+	Stalled bool
 	// Superseded lists the instances the sweep terminated (clause 2).
 	Superseded []string
 	// Instantiated lists the instances this entry created — the loop bodies of
@@ -103,11 +106,12 @@ func applyFixLoop(
 // loopBoundClass classifies the park a REFUSED loop entry produces (DKT-1900),
 // and reports whether the outcome parked at all.
 //
-// The fact it reads is LoopOutcome.Entered — EnterLoop's own answer about the
-// ordinal and the pinned `max_fix_loops` — never outcome.Reason. Every caller
-// of applyFixLoop that can park routes through here, so the bound's wording
-// stays free to change without moving a classification: a park that is bounded
-// is bounded because no round was minted, not because a sentence says so.
+// The facts it reads are LoopOutcome.Entered and LoopOutcome.Stalled —
+// EnterLoop's own answers about the ordinal against the pinned `max_fix_loops`
+// and about non-convergence — never outcome.Reason. Every caller of
+// applyFixLoop that can park routes through here, so the refusal's wording
+// stays free to change without moving a classification: a park is bounded or
+// stalled because of what EnterLoop measured, not because a sentence says so.
 func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 	if outcome == nil || outcome.Entered {
 		return "", false
@@ -118,6 +122,9 @@ func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 	// `on_exhausted` or from the default that predates the key.
 	if outcome.Routing != workflow.OnFailWaitingHuman {
 		return "", false
+	}
+	if outcome.Stalled {
+		return db.ParkClassLoopStalled, true
 	}
 	return db.ParkClassLoopBound, true
 }
@@ -805,7 +812,7 @@ func enterLoop(
 			count, clause)
 		return &LoopOutcome{
 			Entered: false, Ordinal: count - 1,
-			Routing: workflow.OnFailWaitingHuman, Reason: reason,
+			Routing: workflow.OnFailWaitingHuman, Reason: reason, Stalled: true,
 		}, nil
 	}
 

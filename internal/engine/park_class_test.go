@@ -396,6 +396,54 @@ func TestParkClassIsDerivedFromEngineFacts(t *testing.T) {
 				view.ParkReason)
 		}
 	})
+
+	// A non-convergence refusal is not the bound: budget remains, and the
+	// remedy differs. Each of EnterLoop's three stall producers parks
+	// `loop-stalled`, with max_fix_loops never reached in any fixture.
+	t.Run(string(db.ParkClassLoopStalled), func(t *testing.T) {
+		t.Run("round-moved-nothing", func(t *testing.T) {
+			conn := mustDB(t)
+			run, _ := activatedRun(t, conn)
+			tree := &treeState{body: "the original change"}
+			e := convergenceEngine(tree)
+
+			driveRound(t, conn, e, 0)
+			driveRound(t, conn, e, 1)
+
+			assertParkClass(t, conn,
+				park{run.ID, stepIDByInstance(t, conn, "reconcile@1")},
+				db.ParkClassLoopStalled)
+		})
+
+		t.Run("routing-verdict-unchanged", func(t *testing.T) {
+			conn := mustDB(t)
+			run, _ := activatedRun(t, conn)
+			e := testEngine()
+
+			driveToVerify(t, conn, e, 0)
+			claimAndComplete(t, conn, e, "verify@0", theSameACReport, unmetPayload)
+			driveToVerify(t, conn, e, 1)
+			claimAndComplete(t, conn, e, "verify@1", theSameACReport, unmetPayload)
+
+			assertParkClass(t, conn,
+				park{run.ID, stepIDByInstance(t, conn, "verify@1")},
+				db.ParkClassLoopStalled)
+		})
+
+		t.Run("volume-stalled", func(t *testing.T) {
+			conn := mustDB(t)
+			run, _ := activatedCustomRun(t, conn, volumeWorkflowSrc)
+			e := testEngine()
+
+			for ordinal := range 3 {
+				driveVolumeRound(t, conn, e, ordinal, 2)
+			}
+
+			assertParkClass(t, conn,
+				park{run.ID, stepIDByInstance(t, conn, "reconcile@2")},
+				db.ParkClassLoopStalled)
+		})
+	})
 }
 
 // TestUnmatchedGateIsReportedApartFromAFailure pins the fact the gate classes
