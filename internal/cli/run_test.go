@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -353,6 +354,79 @@ func TestRunStartIdempotencyKeyReplaysOriginal(t *testing.T) {
 	testsupport.Must(t, err, "reading run: %v", err)
 	if run.Budget != 12.5 {
 		t.Errorf("budget = %g, want 12.5 (the replay's --budget=99 must not overwrite the original)", run.Budget)
+	}
+}
+
+// startKeyedRun runs `run start --idempotency-key key --issue <issueID>`.
+func startKeyedRun(t *testing.T, conn *sql.DB, key string, issueID int) {
+	t.Helper()
+	cmd := runStartCmdWithDB(conn)
+	err := cmd.Flags().Set("idempotency-key", key)
+	testsupport.Must(t, err, "setting --idempotency-key: %v", err)
+	err = cmd.Flags().Set("issue", model.FormatID(issueID))
+	testsupport.Must(t, err, "setting --issue: %v", err)
+	w, _ := bufWriter(true)
+	err = runRunStart(cmd, w)
+	testsupport.Must(t, err, "run start: %v", err)
+}
+
+// rosterOf returns the issue ids attached to a run, ascending.
+func rosterOf(t *testing.T, conn *sql.DB, runID int) []int {
+	t.Helper()
+	issues, err := db.ListRunIssues(conn, runID)
+	testsupport.Must(t, err, "listing run issues: %v", err)
+	ids := make([]int, 0, len(issues))
+	for _, ri := range issues {
+		ids = append(ids, ri.IssueID)
+	}
+	return ids
+}
+
+// A replay returns the original run unchanged, so its --issue list describes
+// an attachment that is not happening: only the first call's issue joins.
+func TestRunStartIdempotencyKeyReplayIgnoresIssues(t *testing.T) {
+	conn := newTestDB(t)
+	x := createIssue(t, conn, "x", model.StatusTodo, model.PriorityMedium)
+	y := createIssue(t, conn, "y", model.StatusTodo, model.PriorityMedium)
+
+	startKeyedRun(t, conn, "retry-1", x)
+	if got := rosterOf(t, conn, 1); !slices.Equal(got, []int{x}) {
+		t.Fatalf("first run start roster = %v, want [%d]", got, x)
+	}
+
+	startKeyedRun(t, conn, "retry-1", y)
+
+	var n int
+	err := conn.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&n)
+	testsupport.Must(t, err, "counting runs: %v", err)
+	if n != 1 {
+		t.Errorf("run count = %d, want 1 — the replay created a duplicate", n)
+	}
+	if got := rosterOf(t, conn, 1); !slices.Equal(got, []int{x}) {
+		t.Errorf("roster after replay = %v, want [%d] — the replay's --issue attached to the original run", got, x)
+	}
+}
+
+// A replay against a run that has left `planning` must not attach issues to
+// it either; the run's roster and status stay as they were.
+func TestRunStartIdempotencyKeyReplayLeavesNonPlanningRunUnchanged(t *testing.T) {
+	conn := newTestDB(t)
+	x := createIssue(t, conn, "x", model.StatusTodo, model.PriorityMedium)
+	z := createIssue(t, conn, "z", model.StatusTodo, model.PriorityMedium)
+
+	startKeyedRun(t, conn, "retry-1", x)
+	err := db.SetRunStatus(conn, 1, model.RunDone, "", model.NowMS())
+	testsupport.Must(t, err, "finishing run: %v", err)
+
+	startKeyedRun(t, conn, "retry-1", z)
+
+	if got := rosterOf(t, conn, 1); !slices.Equal(got, []int{x}) {
+		t.Errorf("roster after replay = %v, want [%d]", got, x)
+	}
+	run, err := db.GetRun(conn, 1)
+	testsupport.Must(t, err, "reading run: %v", err)
+	if run.Status != model.RunDone {
+		t.Errorf("status after replay = %s, want %s", run.Status, model.RunDone)
 	}
 }
 

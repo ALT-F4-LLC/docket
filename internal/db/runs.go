@@ -43,26 +43,31 @@ type RunContext struct {
 
 // InsertRunWithContext is InsertRun carrying the invocation's context.
 func InsertRunWithContext(db *sql.DB, projectID int, request string, budget float64, nowMS int64, ctx RunContext) (*model.Run, error) {
-	return InsertRunWithContextIdempotent(db, projectID, request, budget, nowMS, ctx, "")
+	run, _, err := InsertRunWithContextIdempotent(db, projectID, request, budget, nowMS, ctx, "")
+	return run, err
 }
 
 // InsertRunWithContextIdempotent is InsertRunWithContext with an optional
 // idempotency key — `docket run start --idempotency-key`.
 //
-// A repeat call with the same key returns the ORIGINAL run unchanged and
-// creates nothing, the same create-verb replay-protection pattern
+// A repeat call with the same key returns the ORIGINAL run unchanged with
+// inserted=false and creates nothing, the same create-verb replay-protection
+// pattern
 // CreateIssueIdempotent, CreateDocIdempotent, and CreateProposalIdempotent use
 // (internal/db/idempotency.go): a `run start` that commits but dies before its
 // response must be safe to retry, or the key protects nothing. The key record
 // and the insert commit in the SAME transaction, so a crash between them
-// cannot orphan either.
-func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, budget float64, nowMS int64, ctx RunContext, idempotencyKey string) (*model.Run, error) {
+// cannot orphan either. inserted tells the caller whether this call created
+// the run, so writes that belong to a new run (the CLI's --issue) skip a
+// replay without a separate lookup another process could race.
+func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, budget float64, nowMS int64, ctx RunContext, idempotencyKey string) (run *model.Run, inserted bool, err error) {
 	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeRunStart, idempotencyKey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if hit {
-		return GetRun(db, existingID)
+		run, err = GetRun(db, existingID)
+		return run, false, err
 	}
 	defer tx.Rollback()
 
@@ -76,25 +81,26 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 		ctx.ExecRoot, ctx.Branch, ctx.CommitSHA, ctx.Hostname,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("creating run: %w", err)
+		return nil, false, fmt.Errorf("creating run: %w", err)
 	}
 	id64, err := res.LastInsertId()
 	if err != nil {
-		return nil, fmt.Errorf("reading created run id: %w", err)
+		return nil, false, fmt.Errorf("reading created run id: %w", err)
 	}
 	id := int(id64)
 
 	if idempotencyKey != "" {
 		if err := RecordIdempotencyKeyTx(tx, ScopeRunStart, idempotencyKey, id); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing transaction: %w", err)
+		return nil, false, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return GetRun(db, id)
+	run, err = GetRun(db, id)
+	return run, true, err
 }
 
 // runSelect names the columns in a fixed order so every scan agrees.

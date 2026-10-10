@@ -61,10 +61,10 @@ func TestIdempotentCreateReplaysOriginal(t *testing.T) {
 func TestInsertRunIdempotentReplaysOriginal(t *testing.T) {
 	db := newIdemDB(t)
 
-	first, err := InsertRunWithContextIdempotent(
+	first, _, err := InsertRunWithContextIdempotent(
 		db, 0, "first request", 10, model.NowMS(), RunContext{}, "run-key-1")
 	testsupport.Must(t, err, "first run start: %v", err)
-	second, err := InsertRunWithContextIdempotent(
+	second, _, err := InsertRunWithContextIdempotent(
 		db, 0, "different request", 99, model.NowMS(), RunContext{}, "run-key-1")
 	testsupport.Must(t, err, "replay: %v", err)
 
@@ -83,6 +83,30 @@ func TestInsertRunIdempotentReplaysOriginal(t *testing.T) {
 	testsupport.Must(t, err, "counting runs: %v", err)
 	if n != 1 {
 		t.Errorf("run count = %d, want 1 — the replay inserted a duplicate", n)
+	}
+}
+
+// TestInsertRunIdempotentReportsInsert mirrors
+// TestCreateIssueIdempotentReportsInsert for `run start`: the CLI attaches
+// --issue only when the create itself says it inserted.
+func TestInsertRunIdempotentReportsInsert(t *testing.T) {
+	db := newIdemDB(t)
+
+	first, inserted, err := InsertRunWithContextIdempotent(
+		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-1")
+	testsupport.Must(t, err, "first run start: %v", err)
+	if !inserted {
+		t.Error("run start under a fresh key reported inserted=false")
+	}
+
+	replay, inserted, err := InsertRunWithContextIdempotent(
+		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-1")
+	testsupport.Must(t, err, "replay: %v", err)
+	if inserted {
+		t.Error("replay of an existing key reported inserted=true")
+	}
+	if replay.ID != first.ID {
+		t.Errorf("replay returned run %d, want the original %d", replay.ID, first.ID)
 	}
 }
 

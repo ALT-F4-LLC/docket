@@ -172,11 +172,17 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 		return err
 	}
 
-	run, err := db.InsertRunWithContextIdempotent(conn, getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey)
+	run, inserted, err := db.InsertRunWithContextIdempotent(conn, getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey)
 	if err != nil {
 		return runErr(err)
 	}
 
+	// A replayed key returns the original run unchanged: this call's --issue
+	// list describes an attachment that is not happening, and the original
+	// may already have left `planning`.
+	if !inserted {
+		issueIDs = nil
+	}
 	for _, id := range issueIDs {
 		if err := db.AddRunIssue(conn, run.ID, id); err != nil {
 			return runErr(err)
