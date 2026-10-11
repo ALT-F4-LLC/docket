@@ -388,3 +388,64 @@ func TestTrailCommentsCarryTheTransactionsClock(t *testing.T) {
 		t.Fatal("premise: no engine-authored comment to check")
 	}
 }
+
+// statusRowsToDone reads the old_value of every `status` activity_log row that
+// moved the issue to `done`, oldest first.
+func statusRowsToDone(t *testing.T, conn *sql.DB, issueID int) []string {
+	t.Helper()
+	rows, err := conn.Query(
+		`SELECT old_value FROM activity_log
+		  WHERE issue_id = ? AND field_changed = 'status' AND new_value = ?
+		  ORDER BY id`, issueID, model.StatusDone)
+	testsupport.Must(t, err, "query activity_log: %v", err)
+	defer rows.Close()
+	var olds []string
+	for rows.Next() {
+		var old string
+		err := rows.Scan(&old)
+		testsupport.Must(t, err, "scan: %v", err)
+		olds = append(olds, old)
+	}
+	testsupport.Must(t, rows.Err(), "rows: %v", rows.Err())
+	return olds
+}
+
+// TestCompletionRecordsPriorStatus: completeIssue's status row records the
+// status the issue held right before the update, not a hardcoded in-progress,
+// and a second completion of an already-done issue writes no second row.
+func TestCompletionRecordsPriorStatus(t *testing.T) {
+	for _, from := range []model.Status{model.StatusReview, model.StatusTodo, model.StatusInProgress} {
+		t.Run(string(from), func(t *testing.T) {
+			conn := mustDB(t)
+			run, issue := activatedRun(t, conn)
+			stepID := firstStepOfIssue(t, conn, run.ID, issue)
+
+			_, err := conn.Exec(`UPDATE issues SET status = ? WHERE id = ?`, from, issue)
+			testsupport.Must(t, err, "seeding status %q: %v", from, err)
+
+			complete := func() {
+				t.Helper()
+				tx, err := conn.Begin()
+				testsupport.Must(t, err, "begin: %v", err)
+				step, err := db.GetStepTx(tx, stepID)
+				testsupport.Must(t, err, "GetStepTx: %v", err)
+				err = completeIssue(tx, step, nowMS)
+				testsupport.Must(t, err, "completeIssue: %v", err)
+				err = tx.Commit()
+				testsupport.Must(t, err, "commit: %v", err)
+			}
+
+			complete()
+			olds := statusRowsToDone(t, conn, issue)
+			if len(olds) != 1 || olds[0] != string(from) {
+				t.Fatalf("done status rows old_value = %v, want [%s]", olds, from)
+			}
+
+			complete()
+			if again := statusRowsToDone(t, conn, issue); len(again) != len(olds) {
+				t.Errorf("re-completing a done issue wrote status rows %v, want %v unchanged",
+					again, olds)
+			}
+		})
+	}
+}

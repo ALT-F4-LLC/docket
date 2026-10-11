@@ -484,7 +484,7 @@ func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	_, err = tx.Exec(
 		`INSERT INTO activity_log (issue_id, field_changed, old_value, new_value, changed_by, created_at)
 		 VALUES (?, 'status', ?, ?, '', ?)`,
-		step.IssueID, model.StatusInProgress, model.StatusDone, now,
+		step.IssueID, prior, model.StatusDone, now,
 	)
 	if err != nil {
 		return fmt.Errorf("recording completion of %s: %w", model.FormatID(step.IssueID), err)
