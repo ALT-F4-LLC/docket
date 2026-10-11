@@ -507,7 +507,9 @@ const AttachmentMaxBytes = exec.CaptureCap
 //
 // THE PATH LIST IS FROZEN; THE BYTES ARE LIVE. The paths come from the run's
 // activation snapshot, so a file attached mid-run never reaches that run's
-// packets. Each path's bytes are read at render time.
+// packets. A step its claim already handed out (recordedClaim) reads back the
+// list that claim was given, rewound past any later `run refresh-files`
+// (recordedAttachedPaths). Each path's bytes are read at render time.
 //
 // A step that does not declare the form reads nothing: the attachments are an
 // input like any other, and an issue's file list is not automatically every
@@ -550,7 +552,13 @@ func issueAttachmentFiles(
 		return nil, nil
 	}
 
-	paths, err := frozenAttachedPaths(conn, step.RunID, step.IssueID)
+	var paths []string
+	var err error
+	if recordedClaim(step) {
+		paths, err = recordedAttachedPaths(conn, step)
+	} else {
+		paths, err = frozenAttachedPaths(conn, step.RunID, step.IssueID)
+	}
 	if err != nil {
 		return nil, err
 	}

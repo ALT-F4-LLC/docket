@@ -432,15 +432,40 @@ func recordedIssueScope(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot [
 	return refresh.From, nil
 }
 
+// recordedAttachedPaths is the `issue.files` path list a recorded claim was
+// given: the earliest later `issue-files-refreshed` event's `from`, or the
+// snapshot's frozen list when none followed. It shares recordedIssue's anchor,
+// and with no anchor the frozen list is the same fallback.
+func recordedAttachedPaths(conn *sql.DB, step *db.Step) ([]string, error) {
+	frozen, err := frozenAttachedPaths(conn, step.RunID, step.IssueID)
+	if err != nil || step.StartedMS == nil {
+		return frozen, err
+	}
+	var refresh struct {
+		From []string `json:"from"`
+	}
+	found, err := refreshAfterClaim(conn, step, *step.StartedMS, EventIssueFilesRefreshed, &refresh)
+	if err != nil || !found {
+		return frozen, err
+	}
+	return refresh.From, nil
+}
+
+// rowQuerier is the single-row read refreshAfterClaim needs, satisfied by
+// *sql.Tx for context assembly and *sql.DB for packet rendering.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // refreshAfterClaim decodes into `into` the earliest `kind` refresh of the
 // step's issue that followed the claim at claimedAtMS, reporting whether one
 // exists. None means nothing superseded what the claim was handed, so the
 // column still holds it.
 func refreshAfterClaim(
-	tx *sql.Tx, step *db.Step, claimedAtMS int64, kind string, into any,
+	q rowQuerier, step *db.Step, claimedAtMS int64, kind string, into any,
 ) (bool, error) {
 	var data string
-	err := tx.QueryRow(
+	err := q.QueryRow(
 		`SELECT data FROM events
 		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
 		  ORDER BY at_ms, seq

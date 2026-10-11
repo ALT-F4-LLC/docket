@@ -307,3 +307,116 @@ func TestRefreshIssueFilesRequiresTheConductorCapability(t *testing.T) {
 		}
 	})
 }
+
+// twoStepFilesWorkflow is two sequential steps that both declare `issue.files`,
+// so one can be terminal while the other still renders live.
+const twoStepFilesWorkflow = `
+[pipeline]
+name = "attachment-pair"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "first"
+after = []
+executor = "author"
+emits = "doc"
+inputs = ["issue.files"]
+
+[[step]]
+name = "second"
+after = ["first"]
+executor = "author"
+emits = "doc2"
+inputs = ["issue.files"]
+`
+
+// twoStepAttachmentRun activates twoStepFilesWorkflow with docs/a.md and
+// docs/b.md attached and written to the run's checkout, and returns the ids of
+// its two steps.
+func twoStepAttachmentRun(t *testing.T) (conn *sql.DB, issue, runID, firstID, secondID int) {
+	t.Helper()
+	conn = mustDB(t)
+	root := issueFilesCheckout(t)
+	writeAttachment(t, root, "docs/a.md", "attachment a\n")
+	writeAttachment(t, root, "docs/b.md", "attachment b\n")
+	registerSource(t, conn, []byte(twoStepFilesWorkflow), "attachment-pair.toml")
+	issue = createIssue(t, conn, "transcribe the attachments", "the issue body", "task", nil)
+	testsupport.Must(t, db.AttachFiles(conn, issue, []string{"docs/a.md", "docs/b.md"}, ""),
+		"AttachFiles: %v", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "attachment run", 0, nowMS,
+		db.RunContext{ExecRoot: root})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue: %v", nil)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	return conn, issue, run.ID,
+		stepIDOf(t, conn, run.ID, issue, "first@0"),
+		stepIDOf(t, conn, run.ID, issue, "second@0")
+}
+
+// renderedAttachments lists the `issue.files` paths the step's packet carries,
+// in packet order.
+func renderedAttachments(t *testing.T, conn *sql.DB, stepID int) []string {
+	t.Helper()
+	result, err := RenderStep(conn, stepID, "", nowMS+2)
+	testsupport.Must(t, err, "RenderStep: %v", err)
+	var paths []string
+	for _, line := range strings.Split(result.Packet, "\n") {
+		if rest, ok := strings.CutPrefix(line, "== FILE docs/"); ok {
+			paths = append(paths, "docs/"+strings.Fields(rest)[0])
+		}
+	}
+	return paths
+}
+
+// TestRefreshIssueFilesKeepsRecordedAttachmentList: a step claimed before the
+// refresh reads back the list its claim was handed (the event's `from`), while
+// the step still to be claimed renders the refreshed (`to`) list.
+//
+// second@0 is back at `pending` with an earlier attempt's claim stamp still
+// on the row, so only recordedClaim, not a missing anchor, keeps its render
+// live.
+func TestRefreshIssueFilesKeepsRecordedAttachmentList(t *testing.T) {
+	conn, issue, runID, firstID, secondID := twoStepAttachmentRun(t)
+	recordClaim(t, conn, firstID, nowMS-1)
+	mustExec(t, conn, `UPDATE steps SET attempt = 1, started_ms = ? WHERE id = ?`,
+		nowMS-1, secondID)
+
+	detach(t, conn, issue, "docs/a.md")
+	_, err := refreshFilesAsConductor(conn, runID, issue, "operator detached a")
+	testsupport.Must(t, err, "RefreshIssueFilesInRun: %v", err)
+
+	if got, want := renderedAttachments(t, conn, firstID),
+		[]string{"docs/a.md", "docs/b.md"}; !slices.Equal(got, want) {
+		t.Errorf("terminal first@0 renders %v, want its claim-time list %v", got, want)
+	}
+	if got, want := renderedAttachments(t, conn, secondID),
+		[]string{"docs/b.md"}; !slices.Equal(got, want) {
+		t.Errorf("pending second@0 renders %v, want the refreshed list %v", got, want)
+	}
+}
+
+// TestRecordedAttachmentListWithoutLaterRefreshIsTheSnapshot: a recorded
+// claim no refresh followed reads the snapshot's frozen list unchanged.
+func TestRecordedAttachmentListWithoutLaterRefreshIsTheSnapshot(t *testing.T) {
+	conn, issue, runID, firstID, secondID := twoStepAttachmentRun(t)
+
+	recordClaim(t, conn, firstID, nowMS-1)
+	if got, want := renderedAttachments(t, conn, firstID),
+		[]string{"docs/a.md", "docs/b.md"}; !slices.Equal(got, want) {
+		t.Errorf("first@0 with no refresh renders %v, want the frozen list %v", got, want)
+	}
+
+	detach(t, conn, issue, "docs/a.md")
+	_, err := refreshFilesAsConductor(conn, runID, issue, "operator detached a")
+	testsupport.Must(t, err, "RefreshIssueFilesInRun: %v", err)
+	recordClaim(t, conn, secondID, nowMS+1)
+	if got, want := renderedAttachments(t, conn, secondID),
+		[]string{"docs/b.md"}; !slices.Equal(got, want) {
+		t.Errorf("second@0 claimed after the refresh renders %v, want the frozen list %v",
+			got, want)
+	}
+}
