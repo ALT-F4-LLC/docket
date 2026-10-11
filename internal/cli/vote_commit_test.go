@@ -2,6 +2,7 @@ package cli
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -96,8 +97,10 @@ func TestVoteCommitCommitsWithTheRunsCapability(t *testing.T) {
 }
 
 // TestVoteCommitNeedsNoTokenOffTheConductorPath: a conversational proposal,
-// and a vote step's proposal on a run that never minted a capability, commit
-// with no token.
+// a vote step's proposal on a run that never minted a capability, and a
+// proposal keyed with an operator key or a vote-step key whose run part does
+// not parse, commit with no token. A vote-step key naming a missing run is
+// refused NOT_FOUND.
 func TestVoteCommitNeedsNoTokenOffTheConductorPath(t *testing.T) {
 	t.Run("conversational proposal", func(t *testing.T) {
 		t.Setenv(TokenEnvVar, "")
@@ -124,4 +127,44 @@ func TestVoteCommitNeedsNoTokenOffTheConductorPath(t *testing.T) {
 		testsupport.Must(t, err, "vote commit: %v", err)
 		assertProposalStatus(t, conn, proposalID, model.ProposalStatusCommitted)
 	})
+
+	// A keyed proposal is classified by its key alone, whatever run state the
+	// store holds: each case seeds one bound run beside the keyed proposal.
+	// The missing-run key is filled in with an id past every run.
+	for _, tc := range []struct {
+		name, key string
+		refused   bool
+	}{
+		{name: "operator key", key: "retry-1"},
+		{name: "forged vote-step key with an unparseable run", key: "vote-step:notanumber:x:y"},
+		{name: "vote-step key naming a missing run", key: "vote-step:%d:1:review@0", refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(TokenEnvVar, "")
+			withStdin(t, "")
+			conn := newTestDB(t)
+			approvedVoteStepProposal(t, conn, true)
+			key := tc.key
+			if strings.Contains(key, "%d") {
+				var missing int
+				err := conn.QueryRow(`SELECT MAX(id) + 1 FROM runs`).Scan(&missing)
+				testsupport.Must(t, err, "picking a missing run id: %v", err)
+				key = fmt.Sprintf(key, missing)
+			}
+			proposalID, err := db.CreateProposalIdempotent(conn, &model.Proposal{
+				Description: "a keyed ballot", Criticality: model.CriticalityLow,
+				Status: model.ProposalStatusApproved, RequiredVoters: 1, Threshold: 0.5,
+			}, key)
+			testsupport.Must(t, err, "CreateProposalIdempotent: %v", err)
+
+			err = runVoteCommit(conn, proposalID)
+			if tc.refused {
+				assertCmdCode(t, err, output.ErrNotFound, "vote commit naming a missing run")
+				assertProposalStatus(t, conn, proposalID, model.ProposalStatusApproved)
+				return
+			}
+			testsupport.Must(t, err, "vote commit: %v", err)
+			assertProposalStatus(t, conn, proposalID, model.ProposalStatusCommitted)
+		})
+	}
 }
