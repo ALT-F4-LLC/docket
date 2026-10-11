@@ -84,9 +84,11 @@ type policyDoc struct {
 	Executors  map[string]policyExecutor `toml:"executors"`
 	Security   policySecurity            `toml:"security"`
 	Escalation policyEscalation          `toml:"escalation"`
-	// Sizes is `[sizes]`: an issue size-label name (e.g. "trivial", "small")
-	// mapped to the [variants] row a row should STAND ON instead of its
-	// [executors] entry's own variant, when the issue carries that label.
+	// Sizes is `[sizes]`: an issue size (e.g. "trivial", "small") mapped to
+	// the [variants] row a row should STAND ON instead of its [executors]
+	// entry's own variant. Keys are consulted against the issue's frozen Size
+	// first, when it is set, not unknown, and mapped here; otherwise the
+	// first of the issue's labels that [sizes] maps applies (see sizeVariant).
 	// Optional — an omitted or empty table leaves every row's standing
 	// variant exactly as it resolved before this field existed, so a policy
 	// that never declares [sizes] is byte-for-byte unaffected.
