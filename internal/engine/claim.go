@@ -130,6 +130,10 @@ type ClaimOptions struct {
 	// accrues what ITS claim declared — an escalated re-claim accrues more
 	// than the cheap first attempt did (B9's re-accrual, made variant-aware).
 	CostMultiplier float64
+	// RecoverySecret is the claimant's proof for a later same-owner re-claim.
+	// The first claim stores only its hash; a re-claim of a lease that stored
+	// one re-mints only when it presents the same secret (reMintOwnClaim).
+	RecoverySecret string
 	NowMS          int64
 }
 
@@ -555,7 +559,8 @@ func claimStepWithGates(
 	if claimHookBeforeCAS != nil {
 		claimHookBeforeCAS(tx, fresh.ID)
 	}
-	token, lease, err := db.ClaimStepTx(tx, fresh.ID, opts.Owner, ttlMS, opts.NowMS)
+	token, lease, err := db.ClaimStepWithRecoveryTx(
+		tx, fresh.ID, opts.Owner, opts.RecoverySecret, ttlMS, opts.NowMS)
 	if err != nil {
 		return nil, err
 	}
@@ -901,11 +906,30 @@ func claimStepWithGates(
 // writes nothing: re-minting there would hand back a bundle without the
 // claim's final results and void the token transaction B's lease refresh is
 // keyed on.
+//
+// The owner string is public, so it identifies the claimant without proving
+// it. A lease whose first claim stored a recovery hash re-mints only for a
+// caller presenting the matching secret; any other caller gets CONFLICT and
+// the lease is untouched. A lease with no stored hash still re-mints on the
+// owner alone, because no caller can supply a secret until the CLI accepts
+// one. The refusal names the step and owner only, never a secret or hash.
+//
+// A re-mint appends `step-reminted` in this transaction.
 func reMintOwnClaim(
 	tx *sql.Tx, sched *Scheduler, fresh *db.Step, ttls ttlConfig, opts ClaimOptions,
 ) (*ClaimResult, error) {
 	if opts.Owner == "" || fresh.Owner != opts.Owner || !fresh.Lease().Live(opts.NowMS) {
 		return nil, nil
+	}
+	var recoveryHash sql.NullString
+	if err := tx.QueryRow(
+		`SELECT recovery_hash FROM steps WHERE id = ?`, fresh.ID).Scan(&recoveryHash); err != nil {
+		return nil, fmt.Errorf("reading the recovery hash: %w", err)
+	}
+	if recoveryHash.Valid && !model.TokenMatches(opts.RecoverySecret, recoveryHash.String) {
+		return nil, conflictErr(
+			"step %s: the claim held by %s was taken with a recovery secret, and this "+
+				"re-claim did not present it", fresh.Instance, opts.Owner)
 	}
 	if fresh.ClaimPhase == db.ClaimPhasePreGates {
 		return nil, conflictErr(
@@ -933,6 +957,18 @@ func reMintOwnClaim(
 	if err := tx.QueryRow(
 		`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&rowVersion); err != nil {
 		return nil, fmt.Errorf("reading step version: %w", err)
+	}
+	data, err := json.Marshal(map[string]any{
+		"step": model.FormatStepID(fresh.ID), "owner": opts.Owner, "attempt": fresh.Attempt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("recording the re-mint: %w", err)
+	}
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventStepReminted, RunID: fresh.RunID, Instance: fresh.Instance,
+		IssueID: fresh.IssueID, Data: string(data), AtMS: opts.NowMS,
+	}); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing the re-minted token: %w", err)

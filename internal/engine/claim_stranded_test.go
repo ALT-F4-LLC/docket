@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -564,5 +566,161 @@ func TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires(t *testing.T) {
 		"a same-owner re-claim of the settled fresh claim was refused: %v", err)
 	if !again.ReMinted {
 		t.Error("the re-claim of the settled fresh claim was not a re-mint")
+	}
+}
+
+// The recovery secrets a claimant presents in the tests below. Synthetic,
+// never a real credential.
+const (
+	testRecoverySecret  = "recovery-secret-of-the-first-claim"
+	wrongRecoverySecret = "recovery-secret-somebody-guessed"
+)
+
+// stepRemintedEvents decodes the step-reminted events written for a step.
+func stepRemintedEvents(t *testing.T, conn *sql.DB, stepID int) []map[string]any {
+	t.Helper()
+	rows, err := conn.Query(
+		`SELECT data FROM events WHERE kind = ? AND step_id = ? ORDER BY seq`,
+		EventStepReminted, stepID)
+	testsupport.Must(t, err, "querying step-reminted events: %v", err)
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var raw string
+		err := rows.Scan(&raw)
+		testsupport.Must(t, err, "scanning a step-reminted event: %v", err)
+		var data map[string]any
+		err = json.Unmarshal([]byte(raw), &data)
+		testsupport.Must(t, err, "decoding a step-reminted event: %v", err)
+		out = append(out, data)
+	}
+	testsupport.Must(t, rows.Err(), "reading step-reminted events: %v", rows.Err())
+	return out
+}
+
+// TestSameOwnerReclaimWithTheRecoverySecretReMintsAndRecordsIt pins that a
+// re-mint on a lease claimed with a recovery secret needs that secret: a
+// wrong one is refused, the right one re-keys the lease and leaves one
+// step-reminted event naming the owner and the attempt.
+func TestSameOwnerReclaimWithTheRecoverySecretReMintsAndRecordsIt(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	const owner = "wave:STEP-1"
+
+	first, err := ClaimStep(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "the first claim: %v", err)
+
+	_, err = ClaimStep(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: wrongRecoverySecret, NowMS: nowMS + 500,
+	})
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Fatalf("a re-claim with the wrong recovery secret: err = %v, want CONFLICT", err)
+	}
+
+	second, err := ClaimStep(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim presenting the recovery secret was refused: %v", err)
+	if !second.ReMinted {
+		t.Error("the re-claim reported a fresh claim, not a re-mint")
+	}
+	if err := db.AuthorizeStepRead(conn, stepID, second.Token, nowMS+1000); err != nil {
+		t.Errorf("the re-minted token does not authorize the lease: %v", err)
+	}
+	if db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000) == nil {
+		t.Error("the first claim's token still authorizes after the re-mint")
+	}
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Attempt != first.Attempt || second.Attempt != first.Attempt {
+		t.Errorf("attempt = %d (reported %d) after the re-mint, want %d",
+			step.Attempt, second.Attempt, first.Attempt)
+	}
+
+	var claimed int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, stepID).Scan(&claimed)
+	testsupport.Must(t, err, "counting step-claimed events: %v", err)
+	if claimed != 1 {
+		t.Errorf("%d step-claimed events, want 1 — a re-mint accrues nothing", claimed)
+	}
+
+	reminted := stepRemintedEvents(t, conn, stepID)
+	if len(reminted) != 1 {
+		t.Fatalf("%d step-reminted events, want exactly 1", len(reminted))
+	}
+	if reminted[0]["owner"] != owner {
+		t.Errorf("step-reminted owner = %v, want %q", reminted[0]["owner"], owner)
+	}
+	if reminted[0]["attempt"] != float64(first.Attempt) {
+		t.Errorf("step-reminted attempt = %v, want %d", reminted[0]["attempt"], first.Attempt)
+	}
+}
+
+// TestSameOwnerReclaimWithoutTheRecoverySecretIsRefused pins that the owner
+// string alone no longer re-keys a lease claimed with a recovery secret. A
+// re-claim with no secret or a wrong one is CONFLICT and leaves the lease as
+// it was: the holder's token still authorizes, attempt and row_version do not
+// move, and no step-reminted event is written. Neither secret appears in the
+// refusal.
+func TestSameOwnerReclaimWithoutTheRecoverySecretIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, secret string
+	}{
+		{"no secret", ""},
+		{"wrong secret", wrongRecoverySecret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			activatedRun(t, conn)
+			stepID := stepIDByInstance(t, conn, "implement@0")
+			const owner = "wave:STEP-1"
+
+			first, err := ClaimStep(conn, stepID, ClaimOptions{
+				Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
+			})
+			testsupport.Must(t, err, "the first claim: %v", err)
+			before, err := db.GetStep(conn, stepID)
+			testsupport.Must(t, err, "GetStep: %v", err)
+
+			result, err := ClaimStep(conn, stepID, ClaimOptions{
+				Owner: owner, RecoverySecret: tc.secret, NowMS: nowMS + 1000,
+			})
+			if err == nil {
+				t.Fatalf("the re-claim succeeded (re-minted %v); want CONFLICT", result.ReMinted)
+			}
+			if code, _ := CodeOf(err); code != CodeConflict {
+				t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+			}
+			if strings.Contains(err.Error(), testRecoverySecret) ||
+				strings.Contains(err.Error(), wrongRecoverySecret) {
+				t.Errorf("the refusal discloses a recovery secret: %q", err.Error())
+			}
+
+			if err := db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000); err != nil {
+				t.Errorf("the holder's token stopped authorizing after a refused re-claim: %v", err)
+			}
+			after, err := db.GetStep(conn, stepID)
+			testsupport.Must(t, err, "GetStep: %v", err)
+			if after.Attempt != before.Attempt {
+				t.Errorf("attempt = %d, want %d", after.Attempt, before.Attempt)
+			}
+			if after.RowVersion != before.RowVersion {
+				t.Errorf("row_version = %d, want %d — a refusal writes nothing",
+					after.RowVersion, before.RowVersion)
+			}
+			if after.TokenHash != before.TokenHash {
+				t.Error("the refused re-claim re-keyed the lease")
+			}
+			if n := len(stepRemintedEvents(t, conn, stepID)); n != 0 {
+				t.Errorf("%d step-reminted events after a refused re-claim, want 0", n)
+			}
+		})
 	}
 }

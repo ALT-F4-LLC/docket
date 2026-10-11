@@ -261,6 +261,11 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// fact a store-only retro counts.
 		"claim-refused",
 
+		// The same-owner re-mint — ONE. It re-keys a live lease and voids
+		// the previous token without a `step-claimed`, so the re-key is
+		// otherwise invisible in the record.
+		"step-reminted",
+
 		// The conductor's reported facts (DKT-2759) — TWO: a re-seat and a
 		// deferral, the coordination facts only the conductor observes. A
 		// budget and a chain deferral are one outcome with two causes.
@@ -270,7 +275,7 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 58 {
+	if len(eventKinds) != 59 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
@@ -282,9 +287,9 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			"re-pin kind, DKT-1079's run-note kind, DKT-2465's "+
 			"conductor-seat kind, DKT-2071's dispatch-extend kind, "+
 			"DKT-2766's config-changed kind, DKT-2758's "+
-			"dispatch-close-refused kind, DKT-2776's claim-refused kind, and "+
-			"DKT-2759's two conductor-fact kinds "+
-			"enumerate 58 (see DKT-21)",
+			"dispatch-close-refused kind, DKT-2776's claim-refused kind, the "+
+			"step-reminted kind, and DKT-2759's two conductor-fact kinds "+
+			"enumerate 59 (see DKT-21)",
 			len(eventKinds))
 	}
 }

@@ -392,6 +392,12 @@ const (
 	// counts. It carries the step, the requesting owner, and the reason.
 	EventClaimRefused = "claim-refused"
 
+	// EventStepReminted records a same-owner re-claim that re-keyed its own
+	// live lease (reMintOwnClaim). The re-mint voids the previous token and
+	// writes no `step-claimed`, so without this event a re-key, benign or
+	// not, leaves no trace. It carries the step, the owner, and the attempt.
+	EventStepReminted = "step-reminted"
+
 	// EventVoteReseated and EventStepDeferred (DKT-2759) are facts only the
 	// conductor observes, recorded through `run fact add`: a vote seat it
 	// re-spawned, and a step it held back on budget or behind a chain (the
@@ -442,6 +448,7 @@ var eventKinds = map[string]bool{
 	EventConfigChanged:        true,
 	EventDispatchCloseRefused: true,
 	EventClaimRefused:         true,
+	EventStepReminted:         true,
 	EventVoteReseated:         true,
 	EventStepDeferred:         true,
 }
