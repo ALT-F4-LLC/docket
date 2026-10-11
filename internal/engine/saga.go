@@ -3553,7 +3553,7 @@ func lastReviewedIssueDiff(conn *sql.DB, runID, issueID int) reviewedIssueDiff {
 		payload  sql.NullString
 	)
 	err := conn.QueryRow(
-		`SELECT a.id, a.step_id, a.payload FROM step_inputs si
+		`SELECT a.id, a.payload FROM step_inputs si
 		   JOIN artifacts a ON a.id = si.artifact_id
 		   JOIN steps s ON s.id = si.step_id
 		  WHERE s.run_id = ? AND s.issue_id = ? AND s.status = ? AND a.kind = ?
@@ -3561,7 +3561,7 @@ func lastReviewedIssueDiff(conn *sql.DB, runID, issueID int) reviewedIssueDiff {
 		                     WHERE p.step_id = s.id AND p.kind = a.kind)
 		  ORDER BY a.id DESC LIMIT 1`,
 		runID, issueID, db.StepDone, ArtifactKindIssueDiff).Scan(
-		&reviewed.artifactID, &reviewed.producerID, &payload)
+		&reviewed.artifactID, &payload)
 	if err != nil {
 		return reviewedIssueDiff{}
 	}
@@ -3569,11 +3569,11 @@ func lastReviewedIssueDiff(conn *sql.DB, runID, issueID int) reviewedIssueDiff {
 	return reviewed
 }
 
-// reviewedIssueDiff is the issue.diff record a review was handed: its artifact,
-// the step that produced it, and the head it names ("" when none was judged).
+// reviewedIssueDiff is the issue.diff record a review was handed: its artifact
+// and the head it names ("" when none was judged).
 type reviewedIssueDiff struct {
-	artifactID, producerID int
-	head                   string
+	artifactID int
+	head       string
 }
 
 // earliestUnreviewedRound reports whether a round no review read was recorded
@@ -3581,12 +3581,13 @@ type reviewedIssueDiff struct {
 // the commit the conductor landed that round's work as — "" when it recorded
 // no full commit id.
 //
-// The judged record's own producer and the recording step are not such a
-// round: an integration annotation re-records its step's issue.diff, so a
-// later artifact of the judged producer is that judged round re-pointed, and
-// the recording step is this round, not one before it. Whether a round follows
-// and where it landed come from this one lookup, so the two cannot disagree on
-// what counts as unreviewed.
+// Such a round is a step whose FIRST issue.diff postdates the judged record.
+// An integration annotation or a re-pin re-records an existing step's
+// issue.diff, so a later artifact of a step that had already recorded by then
+// (the judged producer, or any round before it) is that round re-pointed, not
+// a new one. The recording step is this round, not one before it. Whether a
+// round follows and where it landed come from this one lookup, so the two
+// cannot disagree on what counts as unreviewed.
 func earliestUnreviewedRound(
 	conn *sql.DB, runID, issueID, exceptStepID int, reviewed reviewedIssueDiff,
 ) (follows bool, landing string) {
@@ -3594,10 +3595,13 @@ func earliestUnreviewedRound(
 	err := conn.QueryRow(
 		`SELECT s.metadata FROM artifacts a JOIN steps s ON s.id = a.step_id
 		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
-		    AND a.id > ? AND a.step_id NOT IN (?, ?)
+		    AND a.id > ? AND a.step_id <> ?
+		    AND NOT EXISTS (SELECT 1 FROM artifacts p
+		                     WHERE p.step_id = a.step_id AND p.kind = a.kind
+		                       AND p.id <= ?)
 		  ORDER BY a.id LIMIT 1`,
 		runID, issueID, ArtifactKindIssueDiff,
-		reviewed.artifactID, reviewed.producerID, exceptStepID).Scan(&metadata)
+		reviewed.artifactID, exceptStepID, reviewed.artifactID).Scan(&metadata)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, ""
 	}

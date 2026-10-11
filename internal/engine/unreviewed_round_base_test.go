@@ -246,10 +246,8 @@ type cherryPickScenario struct {
 }
 
 // newCherryPickScenario records implement@0's s0 in a worktree and has review@0
-// judge it, then lands a sibling and cherry-picks s0 after it as s0'. With
-// annotateJudged, the conductor annotates implement@0 with s0', which
-// re-records the judged step's issue.diff.
-func newCherryPickScenario(t *testing.T, annotateJudged bool) *cherryPickScenario {
+// judge it, then lands a sibling and cherry-picks s0 after it as s0'.
+func newCherryPickScenario(t *testing.T) *cherryPickScenario {
 	t.Helper()
 	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
 	s := &cherryPickScenario{t: t, conn: conn, e: e, runID: runID, issue: issue, shared: rounds.work}
@@ -265,9 +263,6 @@ func newCherryPickScenario(t *testing.T, annotateJudged bool) *cherryPickScenari
 
 	integrateSibling(t, s.shared)
 	s.judgedCopy = s.integrate(s.judged)
-	if annotateJudged {
-		s.annotate("implement@0", s.judgedCopy)
-	}
 	return s
 }
 
@@ -314,42 +309,18 @@ func (s *cherryPickScenario) parkIntoFixRound(review, fix string) {
 	}
 }
 
-// cherryPickedRounds is what cherryPickUnreviewedRound leaves behind for its
-// assertions: the head review@0 judged, its cherry-picked copy on the shared
-// branch, and fix@2's fork point (fix@1's cherry-picked copy).
-type cherryPickedRounds struct {
-	conn               *sql.DB
-	runID, issue       int
-	judged, judgedCopy string
-	fork               string
-}
-
-// cherryPickUnreviewedRound drives the conductor's cherry-pick integration
-// around an unreviewed fix round: the judged head lands as s0'
-// (newCherryPickScenario); fix@1 forks at s0' and records f1; review@1 parks
-// into fix@2; f1 is cherry-picked as f1', with integrated_sha annotated on
-// fix@1 when recordIntegration is set; and fix@2 forks fresh at f1' and
-// records.
-func cherryPickUnreviewedRound(t *testing.T, annotateJudged, recordIntegration bool) cherryPickedRounds {
-	t.Helper()
-	s := newCherryPickScenario(t, annotateJudged)
+// unreviewedFixRound records fix@1 at a fresh fork of the shared head, parks
+// review@1 into fix@2 so no review reads fix@1, and cherry-picks fix@1's head
+// onto the shared branch. It returns that copy, f1', where fix@2 will fork.
+func (s *cherryPickScenario) unreviewedFixRound() string {
+	s.t.Helper()
 	f1 := s.recordRound("fix@1", "fix-round-1", "fix1.txt", "FIX ROUND 1 THE UNREVIEWED CHANGE\n")
 	s.parkIntoFixRound("review@1#0", "fix@2")
-
 	f1Copy := s.integrate(f1)
-	if recordIntegration {
-		s.annotate("fix@1", f1Copy)
-	}
-
 	if isAncestor(s.shared, s.judged, f1Copy) || isAncestor(s.shared, f1Copy, s.judged) {
-		t.Fatal("premise: the judged head and fix@2's fork point must have diverged")
+		s.t.Fatal("premise: the judged head and fix@2's fork point must have diverged")
 	}
-	s.recordRound("fix@2", "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
-
-	return cherryPickedRounds{
-		conn: s.conn, runID: s.runID, issue: s.issue,
-		judged: s.judged, judgedCopy: s.judgedCopy, fork: f1Copy,
-	}
+	return f1Copy
 }
 
 // TestRoundDeltaKeepsUnreviewedRoundAfterCherryPick: the judged head and the
@@ -358,13 +329,16 @@ func cherryPickUnreviewedRound(t *testing.T, annotateJudged, recordIntegration b
 // integrated commit landed, keeping fix@1 in review@2's delta and the sibling
 // integrated before it out.
 func TestRoundDeltaKeepsUnreviewedRoundAfterCherryPick(t *testing.T) {
-	r := cherryPickUnreviewedRound(t, false, true)
+	s := newCherryPickScenario(t)
+	fork := s.unreviewedFixRound()
+	s.annotate("fix@1", fork)
+	s.recordRound("fix@2", "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
 
-	if got := issueRoundBase(t, r.conn, r.runID, r.issue); got != r.judgedCopy {
+	if got := issueRoundBase(t, s.conn, s.runID, s.issue); got != s.judgedCopy {
 		t.Errorf("fix@2 round_base = %.12s, want %.12s, the commit fix@1's "+
-			"integrated copy landed on (fork point %.12s)", got, r.judgedCopy, r.fork)
+			"integrated copy landed on (fork point %.12s)", got, s.judgedCopy, fork)
 	}
-	delta := reviewRoundDelta(t, r.conn, r.issue, "review@2#0")
+	delta := reviewRoundDelta(t, s.conn, s.issue, "review@2#0")
 	if !strings.Contains(delta, "\n+FIX ROUND 1 THE UNREVIEWED CHANGE") {
 		t.Errorf("the unreviewed round's change is missing from the delta its "+
 			"judges read:\n%s", delta)
@@ -380,13 +354,15 @@ func TestRoundDeltaKeepsUnreviewedRoundAfterCherryPick(t *testing.T) {
 // falls back to the judged head itself: the delta over-reports the
 // integration's reshaping rather than hiding fix@1.
 func TestRoundDeltaKeepsUnreviewedRoundWithoutIntegratedSHA(t *testing.T) {
-	r := cherryPickUnreviewedRound(t, false, false)
+	s := newCherryPickScenario(t)
+	fork := s.unreviewedFixRound()
+	s.recordRound("fix@2", "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
 
-	if got := issueRoundBase(t, r.conn, r.runID, r.issue); got != r.judged {
+	if got := issueRoundBase(t, s.conn, s.runID, s.issue); got != s.judged {
 		t.Errorf("fix@2 round_base = %.12s, want the head review@0 judged %.12s "+
-			"(fork point %.12s)", got, r.judged, r.fork)
+			"(fork point %.12s)", got, s.judged, fork)
 	}
-	delta := reviewRoundDelta(t, r.conn, r.issue, "review@2#0")
+	delta := reviewRoundDelta(t, s.conn, s.issue, "review@2#0")
 	if !strings.Contains(delta, "\n+FIX ROUND 1 THE UNREVIEWED CHANGE") {
 		t.Errorf("the unreviewed round's change is missing from the delta its "+
 			"judges read:\n%s", delta)
@@ -399,7 +375,8 @@ func TestRoundDeltaKeepsUnreviewedRoundWithoutIntegratedSHA(t *testing.T) {
 // re-pointed, not a round no review read, so fix@1's delta still starts at its
 // fork point and the sibling integrated before s0' stays out.
 func TestRoundDeltaIgnoresAnnotatedJudgedHead(t *testing.T) {
-	s := newCherryPickScenario(t, true)
+	s := newCherryPickScenario(t)
+	s.annotate("implement@0", s.judgedCopy)
 	s.recordRound("fix@1", "fix-round-1", "fix1.txt", "FIX ROUND 1\n")
 	if isAncestor(s.shared, s.judged, s.judgedCopy) || isAncestor(s.shared, s.judgedCopy, s.judged) {
 		t.Fatal("premise: the judged head and fix@1's fork point must have diverged")
@@ -425,13 +402,17 @@ func TestRoundDeltaIgnoresAnnotatedJudgedHead(t *testing.T) {
 // re-record landed, so neither the sibling nor the already-judged round is in
 // review@2's delta.
 func TestRoundDeltaSkipsAnnotatedJudgedHeadBeforeUnreviewedRound(t *testing.T) {
-	r := cherryPickUnreviewedRound(t, true, true)
+	s := newCherryPickScenario(t)
+	s.annotate("implement@0", s.judgedCopy)
+	fork := s.unreviewedFixRound()
+	s.annotate("fix@1", fork)
+	s.recordRound("fix@2", "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
 
-	if got := issueRoundBase(t, r.conn, r.runID, r.issue); got != r.judgedCopy {
+	if got := issueRoundBase(t, s.conn, s.runID, s.issue); got != s.judgedCopy {
 		t.Errorf("fix@2 round_base = %.12s, want %.12s, the commit fix@1's "+
-			"integrated copy landed on (fork point %.12s)", got, r.judgedCopy, r.fork)
+			"integrated copy landed on (fork point %.12s)", got, s.judgedCopy, fork)
 	}
-	delta := reviewRoundDelta(t, r.conn, r.issue, "review@2#0")
+	delta := reviewRoundDelta(t, s.conn, s.issue, "review@2#0")
 	if !strings.Contains(delta, "\n+FIX ROUND 1 THE UNREVIEWED CHANGE") {
 		t.Errorf("the unreviewed round's change is missing from the delta its "+
 			"judges read:\n%s", delta)
@@ -445,12 +426,61 @@ func TestRoundDeltaSkipsAnnotatedJudgedHeadBeforeUnreviewedRound(t *testing.T) {
 	}
 }
 
+// TestRoundDeltaIgnoresLateAnnotationOfAnEarlierRound: review@1 judges fix@1,
+// and only afterwards does the conductor annotate implement@0 with s0'. That
+// re-records implement@0's issue.diff after the one review@1 judged, but
+// implement@0 is a round review@0 already read, not a round no review read. So
+// fix@2's delta starts at its fork point, f1', and carries neither judged round
+// nor either sibling.
+func TestRoundDeltaIgnoresLateAnnotationOfAnEarlierRound(t *testing.T) {
+	s := newCherryPickScenario(t)
+	f1 := s.recordRound("fix@1", "fix-round-1", "fix1.txt", "FIX ROUND 1 REVIEWED\n")
+	completeReviewRoundIn(t, s.conn, s.e, s.issue, 1)
+	completeInIssue(t, s.conn, s.e, s.issue, "synthesize@1", "the synthesis", "")
+	driveActionInIssue(t, s.conn, s.e, s.issue, "reconcile@1")
+	// A verdict that differs from verify@0's, so the loop's repeated-verdict
+	// guard lets the round through.
+	completeInIssue(t, s.conn, s.e, s.issue, "verify@1", "the round 1 ac report",
+		`[{"id":"AC2","status":"unmet"}]`)
+	if !stepExists(t, s.conn, "fix@2") {
+		t.Fatal("premise: review round 1 must have entered the loop again")
+	}
+
+	s.annotate("implement@0", s.judgedCopy)
+	// A second sibling lands before f1 is cherry-picked, so f1' is a new
+	// commit beside f1 rather than f1 itself.
+	second := commitInFreshWorktree(t, s.shared, "sibling-2", "sibling2.txt", "SECOND SIBLING\n")
+	gitRun(t, s.shared, "merge", "-q", "--ff-only", gitRun(t, second, "rev-parse", "HEAD"))
+	fork := s.integrate(f1)
+	if isAncestor(s.shared, f1, fork) || isAncestor(s.shared, fork, f1) {
+		t.Fatal("premise: the head review@1 judged and fix@2's fork point must have diverged")
+	}
+	s.recordRound("fix@2", "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
+
+	if got := issueRoundBase(t, s.conn, s.runID, s.issue); got != fork {
+		t.Errorf("fix@2 round_base = %.12s, want its fork point %.12s (judged head %.12s)",
+			got, fork, f1)
+	}
+	delta := reviewRoundDelta(t, s.conn, s.issue, "review@2#0")
+	if !strings.Contains(delta, "\n+FIX ROUND 2") {
+		t.Errorf("fix@2's own change is missing from its delta:\n%s", delta)
+	}
+	for _, judged := range []string{
+		"sibling.txt", "sibling2.txt", "\n+IMPLEMENT ROUND 0", "\n+FIX ROUND 1 REVIEWED",
+	} {
+		if strings.Contains(delta, judged) {
+			t.Errorf("work already judged or integrated before the fork (%q) is in "+
+				"the delta:\n%s", strings.TrimSpace(judged), delta)
+		}
+	}
+}
+
 // TestRoundDeltaReachesTheEarliestUnreviewedRound: fix@1 and fix@2 both follow
 // the judged head with no review between them, and both are cherry-picked and
 // annotated. fix@3's base is where the EARLIER of the two landed, so review@3
 // reads both rounds.
 func TestRoundDeltaReachesTheEarliestUnreviewedRound(t *testing.T) {
-	s := newCherryPickScenario(t, false)
+	s := newCherryPickScenario(t)
 	f1 := s.recordRound("fix@1", "fix-round-1", "fix1.txt", "FIX ROUND 1 THE UNREVIEWED CHANGE\n")
 	s.parkIntoFixRound("review@1#0", "fix@2")
 	s.annotate("fix@1", s.integrate(f1))
@@ -474,33 +504,34 @@ func TestRoundDeltaReachesTheEarliestUnreviewedRound(t *testing.T) {
 	}
 }
 
-// TestRoundDeltaFallsBackOnUnusableIntegratedSHA: `--metadata` sets
-// integrated_sha on the step row free-form. A value that is not a full commit
-// id, or one git cannot resolve, names no landing, so the base falls back to the
-// judged head and fix@1 stays in the delta. The abbreviated id resolves in git,
-// so only the full-id rule keeps it out.
+// TestRoundDeltaFallsBackOnUnusableIntegratedSHA: `--metadata` sets the step
+// row free-form. A value that is not a full commit id, one git cannot resolve,
+// or metadata that is not a JSON object names no landing, so the base falls
+// back to the judged head and fix@1 stays in the delta. The abbreviated id
+// resolves in git, so only the full-id rule keeps it out; the array still
+// reports fix@1 as a round no review read rather than hiding it.
 func TestRoundDeltaFallsBackOnUnusableIntegratedSHA(t *testing.T) {
-	for name, value := range map[string]func(f1Copy string) string{
-		"abbreviated id": func(f1Copy string) string { return f1Copy[:12] },
-		"flag-like":      func(string) string { return "--all" },
-		"absent commit":  func(string) string { return strings.Repeat("0123456789", 4) },
+	integratedSHA := func(sha string) string {
+		return fmt.Sprintf(`{%q: %q}`, MetadataKeyIntegratedSHA, sha)
+	}
+	for name, metadata := range map[string]func(f1Copy string) string{
+		"abbreviated id": func(f1Copy string) string { return integratedSHA(f1Copy[:12]) },
+		"flag-like":      func(string) string { return integratedSHA("--all") },
+		"absent commit":  func(string) string { return integratedSHA(strings.Repeat("0123456789", 4)) },
+		"not an object":  func(f1Copy string) string { return fmt.Sprintf("[%q]", f1Copy) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			s := newCherryPickScenario(t, false)
-			f1 := s.recordRound("fix@1", "fix-round-1", "fix1.txt", "FIX ROUND 1 THE UNREVIEWED CHANGE\n")
-			s.parkIntoFixRound("review@1#0", "fix@2")
-			f1Copy := s.integrate(f1)
-			metadata, err := json.Marshal(map[string]string{MetadataKeyIntegratedSHA: value(f1Copy)})
-			testsupport.Must(t, err, "marshal metadata: %v", err)
-			_, err = s.conn.Exec(`UPDATE steps SET metadata = ? WHERE id = ?`,
-				string(metadata), stepIDIn(t, s.conn, s.issue, "fix@1"))
+			s := newCherryPickScenario(t)
+			f1Copy := s.unreviewedFixRound()
+			_, err := s.conn.Exec(`UPDATE steps SET metadata = ? WHERE id = ?`,
+				metadata(f1Copy), stepIDIn(t, s.conn, s.issue, "fix@1"))
 			testsupport.Must(t, err, "setting fix@1's metadata: %v", err)
 
 			s.recordRound("fix@2", "fix-round-2", "fix2.txt", "FIX ROUND 2\n")
 
 			if got := issueRoundBase(t, s.conn, s.runID, s.issue); got != s.judged {
 				t.Errorf("fix@2 round_base = %.12s, want the head review@0 judged %.12s "+
-					"(integrated_sha %q)", got, s.judged, value(f1Copy))
+					"(fix@1 metadata %s)", got, s.judged, metadata(f1Copy))
 			}
 			delta := reviewRoundDelta(t, s.conn, s.issue, "review@2#0")
 			if !strings.Contains(delta, "\n+FIX ROUND 1 THE UNREVIEWED CHANGE") {
@@ -684,17 +715,29 @@ func stepStatusByID(t *testing.T, conn *sql.DB, stepID int) string {
 // attempt and parking on failure. The stock fixture leaves `review` unbounded,
 // so its judges re-offer forever and a round can never end without a verdict —
 // the very state an unreviewed fix round is reached through.
+//
+// review, synthesize and verify also declare `holds_tree = false`, as the
+// registered standard-change workflow does. A holding reader that completes in
+// the shared checkout after an integration records its own issue.diff, which
+// would make it a round of its own rather than a reader of the judged head.
 func parkableReviewFixture(t *testing.T, conn *sql.DB) {
 	t.Helper()
 	registerFixtureSchema(t, conn)
 	src, err := os.ReadFile(fixturePath)
 	testsupport.Must(t, err, "reading fixture: %v", err)
-	bounded := strings.Replace(string(src),
-		"inputs = [\"implement.change-summary\", \"issue.diff\"]",
-		"inputs = [\"implement.change-summary\", \"issue.diff\"]\nmax_attempts = 1\non_fail = \"waiting-human\"",
-		1)
-	if bounded == string(src) {
-		t.Fatal("the fixture's review inputs line moved; the bound was not applied")
+	edited := string(src)
+	for _, edit := range [][2]string{
+		{"inputs = [\"implement.change-summary\", \"issue.diff\"]",
+			"inputs = [\"implement.change-summary\", \"issue.diff\"]\nmax_attempts = 1\non_fail = \"waiting-human\""},
+		{"name = \"review\"\n", "name = \"review\"\nholds_tree = false\n"},
+		{"name = \"synthesize\"\n", "name = \"synthesize\"\nholds_tree = false\n"},
+		{"name = \"verify\"\n", "name = \"verify\"\nholds_tree = false\n"},
+	} {
+		next := strings.Replace(edited, edit[0], edit[1], 1)
+		if next == edited {
+			t.Fatalf("the fixture's %q line moved; the edit was not applied", edit[0])
+		}
+		edited = next
 	}
-	registerSource(t, conn, []byte(bounded), fixturePath)
+	registerSource(t, conn, []byte(edited), fixturePath)
 }
