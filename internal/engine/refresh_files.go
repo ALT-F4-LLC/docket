@@ -117,7 +117,7 @@ func RefreshIssueFilesInRun(
 	}
 	frozen := *snapshot.Files
 
-	live, err := attachedPathsTx(tx, issueID)
+	live, err := db.GetIssueFilesTx(tx, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the live attachment list for %s: %w",
 			model.FormatID(issueID), err)
@@ -135,9 +135,27 @@ func RefreshIssueFilesInRun(
 			model.FormatID(issueID))
 	}
 
-	steps, err := refreshableSteps(tx, runID, issueID, run.Ref())
+	steps, straddled, err := refreshableSteps(tx, runID, issueID, run.Ref())
 	if err != nil {
 		return nil, err
+	}
+	if len(straddled) > 0 {
+		return nil, conflictErr(
+			"%d step(s) of %s in %s are mid-flight (%s); a refresh under one "+
+				"would change which files an executor's packet carries while it "+
+				"is still executing, or while its gates still judge an artifact "+
+				"written against the frozen list — wait for them to record (or "+
+				"for their leases to be reaped), then retry",
+			len(straddled), model.FormatID(issueID), run.Ref(),
+			strings.Join(straddled, ", "))
+	}
+	if len(steps) == 0 {
+		return nil, conflictErr(
+			"every step of %s in %s is terminal; their artifacts are already "+
+				"recorded against the attachment list they ran under and no "+
+				"packet will render again, so a refresh could only rewrite that "+
+				"record. The changed list reaches the issue's NEXT run",
+			model.FormatID(issueID), run.Ref())
 	}
 	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
 		return nil, conflictErr(

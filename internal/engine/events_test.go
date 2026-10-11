@@ -218,6 +218,12 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// and the operator's reason.
 		"issue-body-refreshed",
 
+		// The files-refresh kind — ONE, the scope and body refreshes' third
+		// twin: the snapshot's `files` key is what `issue.files` renders, and
+		// a re-frozen attachment list with no event is the same silent drift.
+		// It carries the frozen and live lists and the operator's reason.
+		"issue-files-refreshed",
+
 		// The issue.diff re-pin kind (DKT-1034) — ONE, the `run-repinned`
 		// argument in its third column: the round record a step recorded is
 		// the frozen premise every downstream review packet renders its
@@ -264,20 +270,21 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 57 {
+	if len(eventKinds) != 58 {
 		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
 			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
 			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
 			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
 			"DKT-408's repin kind, DKT-546's batch-override pair, "+
 			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
-			"kind, DKT-2291's body-refresh kind, DKT-1034's issue.diff "+
+			"kind, DKT-2291's body-refresh kind, the files-refresh kind, "+
+			"DKT-1034's issue.diff "+
 			"re-pin kind, DKT-1079's run-note kind, DKT-2465's "+
 			"conductor-seat kind, DKT-2071's dispatch-extend kind, "+
 			"DKT-2766's config-changed kind, DKT-2758's "+
 			"dispatch-close-refused kind, DKT-2776's claim-refused kind, and "+
 			"DKT-2759's two conductor-fact kinds "+
-			"enumerate 57 (see DKT-21)",
+			"enumerate 58 (see DKT-21)",
 			len(eventKinds))
 	}
 }
