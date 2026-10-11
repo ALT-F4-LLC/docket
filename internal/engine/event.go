@@ -726,14 +726,19 @@ func (e eventRecord) atMS() int64 {
 type TrustGrant struct {
 	Name       string
 	ArgvSHA256 string
-	Repo       string
-	Global     bool
-	Prefix     bool
-	ReRunnable bool
-	Tree       bool
-	Flaky      bool
-	Network    []string
-	Timeout    string
+	// Argv0SHA256 is the content pin on argv[0]: the SHA-256 of the bytes the
+	// grant approved, empty when argv[0] is a bare name with no pin. Without it
+	// a re-pin of a changed script records the same argv hash as the original
+	// add, so the trail could not show which bytes were approved.
+	Argv0SHA256 string
+	Repo        string
+	Global      bool
+	Prefix      bool
+	ReRunnable  bool
+	Tree        bool
+	Flaky       bool
+	Network     []string
+	Timeout     string
 	// Stub is the operator's declaration that this entry authorizes a
 	// PLACEHOLDER rather than the check its name implies (DKT-265).
 	//
@@ -832,18 +837,19 @@ func RecordTrustEvent(conn *sql.DB, kind string, grant TrustGrant, atMS int64) e
 		network = []string{}
 	}
 	data, err := json.Marshal(map[string]any{
-		"name":        grant.Name,
-		"argv_sha256": grant.ArgvSHA256,
-		"repo":        grant.Repo,
-		"global":      grant.Global,
-		"prefix":      grant.Prefix,
-		"re_runnable": grant.ReRunnable,
-		"tree":        grant.Tree,
-		"flaky":       grant.Flaky,
-		"network":     network,
-		"timeout":     grant.Timeout,
-		"stub":        grant.Stub,
-		"stub_reason": grant.StubReason,
+		"name":         grant.Name,
+		"argv_sha256":  grant.ArgvSHA256,
+		"argv0_sha256": grant.Argv0SHA256,
+		"repo":         grant.Repo,
+		"global":       grant.Global,
+		"prefix":       grant.Prefix,
+		"re_runnable":  grant.ReRunnable,
+		"tree":         grant.Tree,
+		"flaky":        grant.Flaky,
+		"network":      network,
+		"timeout":      grant.Timeout,
+		"stub":         grant.Stub,
+		"stub_reason":  grant.StubReason,
 		// Written unconditionally like every other key — the key set stays
 		// exact in both directions — and, since the DKT-595 guard above,
 		// guaranteed NON-EMPTY. The empty string was once accepted here as

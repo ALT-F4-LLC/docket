@@ -636,20 +636,21 @@ func (r *trustEventRecorder) record(entry trust.Entry) error {
 		return fmt.Errorf("%w: the working directory could not be resolved (%w); a trust change must record where it was made from, so run it again from a readable directory", errTrustUnrecorded, err)
 	}
 	if err := engine.RecordTrustEvent(conn, r.kind, engine.TrustGrant{
-		Name:       entry.Name,
-		ArgvSHA256: entry.ArgvSHA256,
-		Repo:       entry.Repo,
-		Global:     entry.Global,
-		Prefix:     entry.Prefix,
-		ReRunnable: entry.ReRunnable,
-		Tree:       entry.Tree,
-		Flaky:      entry.Flaky,
-		Network:    entry.Network,
-		Timeout:    entry.Timeout,
-		Stub:       entry.Stub,
-		StubReason: entry.StubReason,
-		Actor:      config.DefaultAuthor(),
-		Cwd:        cwd,
+		Name:        entry.Name,
+		ArgvSHA256:  entry.ArgvSHA256,
+		Argv0SHA256: entry.Argv0SHA256,
+		Repo:        entry.Repo,
+		Global:      entry.Global,
+		Prefix:      entry.Prefix,
+		ReRunnable:  entry.ReRunnable,
+		Tree:        entry.Tree,
+		Flaky:       entry.Flaky,
+		Network:     entry.Network,
+		Timeout:     entry.Timeout,
+		Stub:        entry.Stub,
+		StubReason:  entry.StubReason,
+		Actor:       config.DefaultAuthor(),
+		Cwd:         cwd,
 	}, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("%w: %w", errTrustUnrecorded, err)
 	}

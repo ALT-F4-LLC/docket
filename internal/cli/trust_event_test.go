@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -178,6 +180,10 @@ func TestTrustAddEventCarriesEveryFlag(t *testing.T) {
 		// missing key a reader cannot tell from "this docket does not record
 		// reasons".
 		"stub_reason": "",
+		// EMPTY for a bare-name argv[0], which carries no content pin, and
+		// asserted rather than skipped: an absent key would read the same as a
+		// payload from a docket that never recorded pins.
+		"argv0_sha256": "",
 	}
 	want["kind"] = engine.EventTrustAdded
 
@@ -250,6 +256,108 @@ func TestTrustRemoveEventCarriesTheRemovedFlags(t *testing.T) {
 	}
 	if removed["argv_sha256"] != trust.ArgvSHA256([]string{"go", "run", "./scan"}) {
 		t.Errorf("the removal names the wrong argv hash: %#v", removed["argv_sha256"])
+	}
+}
+
+// writeScript writes an absolute-path script into a temp dir and returns its
+// path. Its bytes are what a trust add pins.
+func writeScript(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "check.sh")
+	err := os.WriteFile(path, []byte(body), 0o700)
+	testsupport.Must(t, err, "writing %s: %v", path, err)
+	return path
+}
+
+// fileSHA256 hashes a file's bytes independently of the trust package, so a
+// shared bug in its hasher cannot make the assertion self-confirming.
+func fileSHA256(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	testsupport.Must(t, err, "reading %s: %v", path, err)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestTrustAddEventCarriesArgv0Pin: the event names the bytes the grant
+// approved, and it is the same pin the store holds for that grant.
+func TestTrustAddEventCarriesArgv0Pin(t *testing.T) {
+	_, cfg := trustRepo(t)
+	script := writeScript(t, "#!/bin/sh\nexit 0\n")
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", script)
+	testsupport.Must(t, err, "trust add: %v", err)
+
+	entries := trustEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("got %d trust entries, want the one add", len(entries))
+	}
+	stored := entries[0].Argv0SHA256
+	if stored == "" {
+		t.Fatal("the stored entry carries no content pin for an absolute argv[0]")
+	}
+
+	events := trustEvents(t, cfg)
+	if len(events) != 1 {
+		t.Fatalf("got %d trust events, want exactly the one add", len(events))
+	}
+	if events[0]["argv0_sha256"] != stored {
+		t.Errorf("the event's argv0_sha256 = %#v, want the stored pin %q",
+			events[0]["argv0_sha256"], stored)
+	}
+}
+
+// TestRepinEventShowsChangedContentHash: a re-pin after the script changed is
+// distinguishable in the trail from a duplicate add. Both events name the same
+// command, and only the content pin shows that the approved bytes changed.
+func TestRepinEventShowsChangedContentHash(t *testing.T) {
+	_, cfg := trustRepo(t)
+	script := writeScript(t, "#!/bin/sh\nexit 0\n")
+	args := []string{"checks", "--", script}
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), args...)
+	testsupport.Must(t, err, "first add: %v", err)
+	firstHash := fileSHA256(t, script)
+
+	err = os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o700)
+	testsupport.Must(t, err, "changing the script: %v", err)
+	changedHash := fileSHA256(t, script)
+
+	err = runTrustVerb(t, cfg, newTrustAddCmd(), args...)
+	testsupport.Must(t, err, "re-pin add: %v", err)
+
+	events := trustEvents(t, cfg)
+	if len(events) != 2 {
+		t.Fatalf("got %d trust events, want the add and the re-pin", len(events))
+	}
+	first, second := events[0], events[1]
+	for i, e := range events {
+		if e["kind"] != engine.EventTrustAdded {
+			t.Errorf("event %d is %v, want %s", i, e["kind"], engine.EventTrustAdded)
+		}
+	}
+	if first["argv_sha256"] != second["argv_sha256"] {
+		t.Errorf("the re-pin names a different command: %#v then %#v",
+			first["argv_sha256"], second["argv_sha256"])
+	}
+	if first["argv0_sha256"] != firstHash {
+		t.Errorf("the first event's argv0_sha256 = %#v, want the original file's %q",
+			first["argv0_sha256"], firstHash)
+	}
+	if second["argv0_sha256"] != changedHash {
+		t.Errorf("the re-pin event's argv0_sha256 = %#v, want the changed file's %q",
+			second["argv0_sha256"], changedHash)
+	}
+	if first["argv0_sha256"] == second["argv0_sha256"] {
+		t.Errorf("both events carry argv0_sha256 %#v; the re-pin is indistinguishable from a duplicate add",
+			first["argv0_sha256"])
+	}
+
+	// A third add over unchanged bytes is idempotent and records nothing.
+	err = runTrustVerb(t, cfg, newTrustAddCmd(), args...)
+	testsupport.Must(t, err, "identical re-add: %v", err)
+	if events := trustEvents(t, cfg); len(events) != 2 {
+		t.Errorf("got %d trust events after an identical re-add, want still 2", len(events))
 	}
 }
 
