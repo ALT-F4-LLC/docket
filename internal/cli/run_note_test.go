@@ -252,6 +252,52 @@ func TestRunNoteAddCLIRequiresTheConductorCapability(t *testing.T) {
 	})
 }
 
+// TestRunNoteAddCLITakesTheCapabilityFromStdin: with --text or --file PATH
+// and DOCKET_TOKEN empty, a bound run takes the capability piped on stdin.
+func TestRunNoteAddCLITakesTheCapabilityFromStdin(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	runRef := model.FormatRunID(runID)
+	capability := seatConductor(t, conn, runID)
+
+	path := filepath.Join(t.TempDir(), "note.txt")
+	testsupport.Must(t, os.WriteFile(path, []byte("ruled from a file"), 0o644),
+		"writing the note file: %v", nil)
+
+	for _, tc := range []struct {
+		name, flag, value, want string
+	}{
+		{"--text", "text", "ruled from argv", "ruled from argv"},
+		{"--file PATH", "file", path, "ruled from a file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(TokenEnvVar, "")
+			withStdin(t, capability)
+			cmd := runNoteCmdWithDB(conn)
+			testsupport.Must(t, cmd.Flags().Set(tc.flag, tc.value), "setting --%s: %v", tc.flag, nil)
+			notesBefore, eventsBefore := runNoteWrites(t, conn, runID)
+			w, buf := bufWriter(true)
+			err := runRunNoteAdd(cmd, runRef, w)
+			testsupport.Must(t, err, "run note add %s with the capability on stdin: %v", tc.name, err)
+
+			var env struct {
+				Data struct {
+					Note engine.RunNote `json:"note"`
+				} `json:"data"`
+			}
+			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %v\n%s", nil, buf.String())
+			if env.Data.Note.Text != tc.want {
+				t.Errorf("recorded note = %q, want %q", env.Data.Note.Text, tc.want)
+			}
+			notesAfter, eventsAfter := runNoteWrites(t, conn, runID)
+			if notesAfter != notesBefore+1 || eventsAfter != eventsBefore+1 {
+				t.Errorf("notes %d -> %d, events %d -> %d; want each to rise by 1",
+					notesBefore, notesAfter, eventsBefore, eventsAfter)
+			}
+		})
+	}
+}
+
 // TestRunNoteAddCLIStdinNoteTakesTokenOnlyFromEnv: under --file - stdin is
 // the note, never a token, so the capability comes only from DOCKET_TOKEN.
 // withStdin backs stdin with a file rather than a pipe, as elsewhere in the
