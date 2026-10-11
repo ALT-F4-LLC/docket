@@ -222,7 +222,22 @@ claim writes the park there instead, through `SetStepRoutingWithParkReasonTx`
 head in `UnintegratedReason`'s shape (dispatch_integration.go:406), records a
 `step-routed` event carrying the routing record (the routing stage's own
 event, saga.go:1556; no new event kind), commits A, and returns a CONFLICT
-whose text is the park reason. Consuming the verdict inside A is what keeps
+whose text is the park reason. The park is exempt from `recordClaimRefused`:
+it writes no `claim-refused` event. Every claim entry point (`ClaimStep`,
+`ClaimStepWithGates`, `ClaimStepRendered`; claim.go:175-230) goes through
+`claimRecordingRefusals` (claim.go:247-262), which today records every
+CONFLICT from `claimStepWithGates` as a `claim-refused` event in its own
+transaction. The park's CONFLICT carries a package sentinel,
+`errIntegrationParked`, as its `Error.Err` cause (engine.go:46-55, the field
+that lets `errors.Is` reach through the wrapper), and
+`claimRecordingRefusals` skips `recordClaimRefused` when `errors.Is(err,
+errIntegrationParked)`. The claimant still reads CONFLICT with the park reason
+as its text. The exemption keeps `EventClaimRefused`'s contract true: it is a
+refusal that "moves no state of its own" (event.go:380-386), and the park
+moves the row to `waiting-human`. A parked claim therefore records exactly one
+event, the `step-routed` that A commits, in one transaction. A later claim of
+the parked row is refused as not ready, moves nothing, and records
+`claim-refused` as every not-ready refusal does. Consuming the verdict inside A is what keeps
 the claim's exclusion rule single: the same CAS state that would have minted
 the lease decides the park, a reaped-then-re-offered row is parked in the one
 transaction that reaped it, and no second transaction re-reads the row. The
@@ -370,6 +385,8 @@ asks).
 | Raw `IsAncestorFn`/`PatchContainedFn` probes per recorded head at claim, without `integrationVerdict` | Smaller call, which is its only strength. It drops the prior-close record, so a hand-resolved pick that a close already accepted (never an ancestor, never patch-equivalent; dispatch_integration.go:70-73) would park every dispatch-driven run that resolved a conflict, and it drops the skipped and abandoned exclusions. `integrationVerdict` is the gate `dispatch close` runs; a second verdict would be a second answer to one question. |
 | A readiness-time git probe inside R2c | Puts a subprocess in the scheduler's snapshot, which §6 forbids and which `integrationVerdict` itself avoids by rolling back before probing (dispatch_integration.go:369-372); every `next` would pay the probes for every run-scoped row. |
 | A new event kind for the park | Names the decision in the feed, which is its strength. The routing record and the park class already carry it, and a kind costs a closed-set change (`TestEventKindsAreAClosedSet`) for a fact two columns state. |
+| Return the park as a distinct outcome or error code that `claimRecordingRefusals` does not record | Removes the special case from `claimRecordingRefusals`, which is its strength. It adds a code to the claim's taxonomy that every claimant, the CLI exit mapping and every wave conductor must learn, for a refusal whose remedy is the same as any other CONFLICT's: do not run the step. The sentinel reaches the same event set with one clause in the one function that decides what to record. |
+| Keep CONFLICT and record both `step-routed` and `claim-refused`, amending `EventClaimRefused`'s contract | Needs no change in `claimRecordingRefusals`, which is its strength. `claim-refused` would stop meaning "moved no state", a store-only retro that counts refusals as contention would count every park as contention, and the two events land in two transactions, so a crash between them leaves a park with no refusal record and the counts disagree by driver luck. |
 | Record the claim's verified result as a `dispatch-closed` acceptance so later claims honor it | Saves one probe pair per candidate on later claims. It would write a close event with no close, and every reader of `dispatch-closed` (`run report`, the prior-close record) would have to learn a third author. Re-probing is cheap and truthful; §8 names the cost. |
 
 ### 3.2 D2: `run.diff` is a committed integration-branch read, recorded at claim
@@ -850,7 +867,9 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
   the lazy reap, where the CAS claim would be written: park the row
   `waiting-human` with class `integration-unverified` and the §3.1 reason,
   record the `step-routed` event, commit A, and return CONFLICT with no lease
-  and no `run.diff`.
+  and no `run.diff`. The CONFLICT wraps the `errIntegrationParked` sentinel,
+  and `claimRecordingRefusals` skips `recordClaimRefused` for it, so the park
+  writes no `claim-refused` event (§3.1, "The failure case").
   Then compute `run.diff` before the claim transaction from
   the existing `claim_head` sha, which is the diff tip and the payload `head`,
   and record it inside the transaction.
@@ -863,8 +882,9 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/db/steps.go: `ParkClassIntegrationUnverified ParkClass =
   "integration-unverified"`, beside `ParkClassHeld` (line 124), produced by
   the claim's park alone.
-- internal/engine/claim_test.go: the no-dispatch unintegrated-head park and its
-  retry (§6, phase 2), and a dispatch-driven run whose claim asks git nothing.
+- internal/engine/claim_test.go: the no-dispatch unintegrated-head park, its
+  event set (one `step-routed`, no `claim-refused`), and its retry (§6,
+  phase 2), and a dispatch-driven run whose claim asks git nothing.
 - docs/design/engine-spec.md §2, "Park class" table: the
   `integration-unverified` row (the amendment text is in §10; the edit is the
   amendment's, not this note's).
@@ -1031,7 +1051,9 @@ worktree and never cherry-picked onto the shared branch, `step claim
 review@0#0` returns CONFLICT, the row is `waiting-human` with `park_class`
 `integration-unverified` and a `park_reason` equal to the §3.1 rendering for
 that step and that head, with the literal `<branch-sha>` token, byte for byte, the run has no `run.diff` artifact, the
-row has no lease (`owner` empty, `attempt` unchanged), and `next` offers no
+row has no lease (`owner` empty, `attempt` unchanged), the parked claim
+records exactly one event, a `step-routed` for `review@0#0` carrying the
+`waiting-human` routing, and zero `claim-refused` events, and `next` offers no
 run-scoped row; after the commit is cherry-picked onto the shared branch and
 `step resolve review@0#0 --as retry`, the next `step claim review@0#0` succeeds
 and its `run.diff` body contains the picked change; on the same fixture with
@@ -1118,6 +1140,10 @@ the integration check's `checked` list includes the run-scoped fix's head.
 - `integration-unverified` is a new value in the park-class enum
   (engine-spec §2, amended in §10); a conductor or panel that routes on the
   class learns one more word.
+- `claimRecordingRefusals` stops recording every CONFLICT a claim returns: the
+  integration park's CONFLICT writes `step-routed` and no `claim-refused`
+  (§3.1). A retro that counts claim CONFLICTs from `claim-refused` alone misses
+  parks; it reads them from `step-routed` with class `integration-unverified`.
 - `run.diff` reads committed history only, at claim and at a tree-holding
   step's completion, body and round delta alike. Uncommitted or untracked work
   in the exec root at claim is not reviewed by the run-scoped panel: an
@@ -1239,4 +1265,7 @@ claim.go in particular has shifted by four lines at HEAD (the `claim_head` read
 is at 354 there and 350 at the pin). One premise of that section is an
 inference and is marked: that the only writer of `integration.checked` is the
 close (a search for `EventDispatchClosed` writers outside tests found the two
-sites in dispatch.go cited there and no other).
+sites in dispatch.go cited there and no other). The failure case's
+`claim-refused` citations (claim.go:175-230 and 247-262, engine.go:46-55,
+event.go:380-386) were read at 3c73f103 through `git show` in a later
+revision.
