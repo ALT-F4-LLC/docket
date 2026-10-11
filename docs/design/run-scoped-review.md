@@ -291,7 +291,11 @@ and `events list` prints `-` for it (internal/cli/events.go:279), and the
 Phase 2 applies the same guard where a row is built from `step.IssueID`:
 `next` (internal/engine/next.go:519), the `StepListEntry` that `step list` and
 `step show` share (next.go:678), and the `step list` text column
-(internal/cli/step.go, which prints `row.Issue` with no dash today).
+(internal/cli/step.go, which prints `row.Issue` with no dash today), and the two
+`run report` rollups `complementarityRollup` (internal/engine/report.go:1166)
+and `sourceAttributionRollup` (report.go:1396), which format
+`model.FormatID(s.IssueID)` with no guard and run on a run-scoped aggregate
+step such as `reconcile@0`.
 `model.FormatID` is unchanged: 0 is not an issue id (`ParseID` refuses
 `DKT-0`), and a formatter that returned `""` for it would turn every missed
 call site into a silent blank instead of a case the phase 2 criterion catches.
@@ -832,6 +836,10 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/engine/after_fired.go and internal/db/steps.go:
   `propagateAfterFiredSkips` and `ListIssueStepsTx` take the NULL reading so a
   `--as skip` cascades over the run-scoped successors (§3.3).
+- internal/engine/report.go: `complementarityRollup` and
+  `sourceAttributionRollup` apply the §3.1 display rule (`""` in JSON, `-` in a
+  text column) to run-scoped rows, so `run report` prints no `<PREFIX>-0` for
+  `reconcile@0`.
 
 ### Fix-loop routing
 
