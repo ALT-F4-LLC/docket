@@ -341,6 +341,12 @@ func TestRefreshedSnapshotIsByteIdenticalApartFromScope(t *testing.T) {
 		`{"title":"t","kind":"task","labels":[],"scope":[]}`,
 		`{"title":"t","kind":"bug","labels":["a","b"],"scope":["x/**","y/**"]}`,
 		`{"title":"t","kind":"task","labels":["a"],"scope":["x"],"linked":{"blocks.diff":[7,9]}}`,
+		// The attachment list frozen at activation: a pre-freeze snapshot has
+		// no key (above), a frozen empty list is `[]`, and both must survive.
+		// Collapsing `"files":[]` would send the run back to the live
+		// attachment list.
+		`{"title":"t","kind":"task","labels":[],"scope":[],"files":[]}`,
+		`{"title":"t","kind":"task","labels":[],"scope":["x"],"files":["a.md"]}`,
 	} {
 		scope, err := decodeSnapshotScope(blob)
 		testsupport.Must(t, err, "decoding %s: %v", blob, err)
