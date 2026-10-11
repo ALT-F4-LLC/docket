@@ -50,25 +50,28 @@ const GateExecutedCopyAbsent = "executed-copy-absent"
 
 // GateStepCopyChanged is the status of a gate whose relatively named script
 // resolves, under a work root a step of the run recorded, to bytes other than
-// the pinned ones, or to a file that cannot be read. A gate run for that step
-// executes that copy. It never makes PinReport.Sound false, because an issue
-// may legitimately edit a gate script.
+// the pinned ones, or to a file that cannot be checked. A gate run in that
+// work root would execute that copy. It never makes PinReport.Sound false,
+// because an issue may legitimately edit a gate script.
 const GateStepCopyChanged = "step-copy-changed"
 
 // GateStepCopyAbsent is the status of a gate whose relatively named script
-// does not exist under a work root a step of the run recorded, or whose work
-// root no longer exists. Like GateStepCopyChanged it never makes
-// PinReport.Sound false.
+// does not exist under a work root a step of the run recorded, or of the one
+// row a work root that no longer exists gets. Like GateStepCopyChanged it
+// never makes PinReport.Sound false.
 const GateStepCopyAbsent = "step-copy-absent"
 
-// GateVerdict is one declared gate whose script this run does not pin, or
-// whose script could not be checked.
+// GateVerdict is one finding about a declared gate's script: the run does not
+// pin it, it could not be checked, or a copy of it where a gate runs (the
+// invoking exec root, a step's recorded work root) differs from the pin or is
+// absent. Status names which.
 type GateVerdict struct {
 	Gate   string `json:"gate"`
 	Status string `json:"status"`
-	// Reason says why there is nothing pinned, so an operator can tell a
-	// `make` entry (retarget it to name the script) from a pin that was never
-	// recorded (the run activated before gate scripts were pinned).
+	// Reason says why, naming the paths and steps involved, so an operator can
+	// tell a `make` entry (retarget it to name the script) from a pin that was
+	// never recorded (the run activated before gate scripts were pinned), or
+	// an edited copy from a swept work root.
 	Reason string `json:"reason"`
 }
 
@@ -278,9 +281,11 @@ func gateScriptPins(
 // that cannot be checked at all is listed as GateUnchecked with the cause. A
 // pinned gate whose copy under invokingRoot differs from its pin, or is
 // absent, is listed too (see executedCopyVerdict), and so is each differing
-// or absent copy under stepRoots (see stepCopyVerdicts). An empty list means
-// every declared gate was checked, found pinned, and found matching where it
-// would execute.
+// or absent copy under stepRoots (see stepCopyVerdicts). A step work root
+// that no longer exists is listed once, under the first gate with a script to
+// compare there (see goneRootVerdicts), not once per gate and script. An
+// empty list means every declared gate was checked, found pinned, and found
+// matching where it would execute.
 func gateVerdicts(
 	defs map[int]*workflow.Definition, pins []PinVerdict,
 	loadStore func() (*trust.Store, error), projectIdentity, execRoot, invokingRoot string,
@@ -309,6 +314,7 @@ func gateVerdicts(
 			pinned[p.Ref] = p.Pinned
 		}
 	}
+	goneRootsListed := false
 	for _, name := range names {
 		argv, unmatched := matchedGateArgv(store, identity, name)
 		if argv == nil {
@@ -354,10 +360,18 @@ func gateVerdicts(
 		if unpinned {
 			continue
 		}
-		if v, ok := executedCopyVerdict(name, argv, execRoot, invokingRoot, pinned); ok {
+		scripts := pinnedRelativeScripts(argv, execRoot, pinned)
+		if len(scripts) == 0 {
+			continue
+		}
+		if v, ok := executedCopyVerdict(name, scripts, execRoot, invokingRoot); ok {
 			out = append(out, v)
 		}
-		out = append(out, stepCopyVerdicts(name, argv, execRoot, pinned, stepRoots)...)
+		if !goneRootsListed {
+			out = append(out, goneRootVerdicts(name, stepRoots)...)
+			goneRootsListed = true
+		}
+		out = append(out, stepCopyVerdicts(name, scripts, stepRoots)...)
 	}
 	return out
 }
@@ -369,12 +383,17 @@ type pinnedRelativeScript struct {
 }
 
 // pinnedRelativeScripts is the relatively named script tokens of argv whose
-// file under root, the symlink-resolved exec root, the run pins. Bash opens a
-// relative script operand against its cwd, so a gate run from another tree
-// executes that tree's copy of each.
+// file under execRoot, symlinks resolved, the run pins. Bash opens a relative
+// script operand against its cwd, so a gate run from another tree executes
+// that tree's copy of each. An absolutely named script runs as the pinned
+// file itself from any cwd and is not listed.
 func pinnedRelativeScripts(
-	argv []string, root string, pinned map[string]string,
+	argv []string, execRoot string, pinned map[string]string,
 ) []pinnedRelativeScript {
+	root, err := filepath.EvalSymlinks(execRoot)
+	if err != nil {
+		return nil
+	}
 	var out []pinnedRelativeScript
 	for _, tok := range gateScriptTokens(argv) {
 		if filepath.IsAbs(tok) {
@@ -391,63 +410,111 @@ func pinnedRelativeScripts(
 	return out
 }
 
-// executedCopyVerdict compares the copy of a gate's script that a gate run
-// from invokingRoot would execute with the copy the run pinned under
-// execRoot. It reports the first relatively named script whose copy differs
-// or is absent, and nothing when invokingRoot is the run's own checkout.
+// copyComparison is how one tree's copy of a pinned script compares with the
+// pin.
+type copyComparison int
+
+const (
+	copyMatches copyComparison = iota
+	copyAbsent
+	copyUncheckable
+	copyDiffers
+)
+
+// compareCopy compares the file at path, the copy a gate run would open, with
+// the pinned hash want. The detail is what a Reason reports: how the copy
+// differs, or why it cannot be checked.
 //
-// Only relative tokens are compared: bash opens a relative script operand
-// against its cwd, so the executed copy is invokingRoot joined with the
-// token. That path is read as bash would open it, without the outside-root
-// and size skips repoLocalGateFiles applies, so a replacement too large or
-// too far away to be pinned is still reported.
-func executedCopyVerdict(
-	gate string, argv []string, execRoot, invokingRoot string, pinned map[string]string,
-) (GateVerdict, bool) {
-	if invokingRoot == "" || !filepath.IsAbs(invokingRoot) {
-		return GateVerdict{}, false
+// The path is read as bash would open it, following symlinks and without the
+// outside-root skip repoLocalGateFiles applies, so a replacement too far away
+// to be pinned is still compared. A copy larger than maxGateScriptBytes
+// differs without being read, because no pin covers a file that large. A
+// non-regular file (a directory, a FIFO) cannot be checked and is never read,
+// since a read could block.
+func compareCopy(path, want string) (copyComparison, string) {
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return copyAbsent, ""
+	case err != nil:
+		return copyUncheckable, err.Error()
+	case !info.Mode().IsRegular():
+		return copyUncheckable, "not a regular file"
+	case info.Size() > maxGateScriptBytes:
+		return copyDiffers, fmt.Sprintf("holds %d bytes, more than any pinned script", info.Size())
 	}
-	root, err := filepath.EvalSymlinks(execRoot)
+	f, err := os.Open(path)
 	if err != nil {
+		return copyUncheckable, err.Error()
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return copyUncheckable, err.Error()
+	}
+	if found := hex.EncodeToString(h.Sum(nil)); found != want {
+		return copyDiffers, "holds " + found
+	}
+	return copyMatches, ""
+}
+
+// copyReason is the Reason for a copy that does not match its pin. where names
+// the copy and the gate run that would execute it. The detail is quoted: it
+// can carry a path from a tree an executor chose, and the text reaches a
+// terminal.
+func copyReason(cmp copyComparison, detail, where string, s pinnedRelativeScript) string {
+	switch cmp {
+	case copyAbsent:
+		return fmt.Sprintf("%s does not exist; the run pins %q", where, s.pinnedFile)
+	case copyUncheckable:
+		return fmt.Sprintf("%s cannot be checked against the pinned %q: %q", where, s.pinnedFile, detail)
+	default:
+		return fmt.Sprintf("%s %s; the run pins %q at %s", where, detail, s.pinnedFile, s.want)
+	}
+}
+
+// executedCopyVerdict compares the copy of each of a gate's relatively named,
+// pinned scripts that a gate run from invokingRoot would execute with the
+// pin. It reports the first copy that differs or is absent, and nothing when
+// invokingRoot is the run's own checkout.
+func executedCopyVerdict(
+	gate string, scripts []pinnedRelativeScript, execRoot, invokingRoot string,
+) (GateVerdict, bool) {
+	if invokingRoot == "" || !filepath.IsAbs(invokingRoot) ||
+		resolvedPath(invokingRoot) == resolvedPath(execRoot) {
 		return GateVerdict{}, false
 	}
-	if invoking, err := filepath.EvalSymlinks(invokingRoot); err == nil && invoking == root {
-		return GateVerdict{}, false
-	}
-	for _, s := range pinnedRelativeScripts(argv, root, pinned) {
+	for _, s := range scripts {
 		executed := filepath.Join(invokingRoot, s.tok)
-		found, err := fileSHA256(executed)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			return GateVerdict{Gate: gate, Status: GateExecutedCopyAbsent, Reason: fmt.Sprintf(
-				"%q, the copy a gate run from %q would execute, does not exist; the run pins %q",
-				executed, invokingRoot, s.pinnedFile)}, true
-		case err != nil:
-			return GateVerdict{Gate: gate, Status: GateExecutedCopyChanged, Reason: fmt.Sprintf(
-				"%q, the copy a gate run from %q would execute, cannot be checked against "+
-					"the pinned %q: %v", executed, invokingRoot, s.pinnedFile, err)}, true
-		case found != s.want:
-			return GateVerdict{Gate: gate, Status: GateExecutedCopyChanged, Reason: fmt.Sprintf(
-				"%q, the copy a gate run from %q would execute, holds %s; the run pins %q at %s",
-				executed, invokingRoot, found, s.pinnedFile, s.want)}, true
+		cmp, detail := compareCopy(executed, s.want)
+		if cmp == copyMatches {
+			continue
 		}
+		status := GateExecutedCopyChanged
+		if cmp == copyAbsent {
+			status = GateExecutedCopyAbsent
+		}
+		where := fmt.Sprintf("%q, the copy a gate run from %q would execute,", executed, invokingRoot)
+		return GateVerdict{Gate: gate, Status: status, Reason: copyReason(cmp, detail, where, s)}, true
 	}
 	return GateVerdict{}, false
 }
 
 // stepWorkRoot is one distinct work root the run's steps recorded
-// (steps.work_root), as first recorded, and the steps that recorded it.
+// (steps.work_root), as first recorded, the steps that recorded it, and
+// whether it no longer exists.
 type stepWorkRoot struct {
 	path  string
 	steps []string
+	gone  bool
 }
 
 // stepWorkRoots groups the run's recorded step work roots by symlink-resolved
 // path, in step order. A root that is execRoot or invokingRoot, by resolved
 // path or by recorded spelling, is left out: verifyFilePin and
 // executedCopyVerdict already compare those trees, and a step row would
-// repeat theirs. A root that no longer resolves is kept under its recorded
-// spelling, so its absence is reported rather than skipped.
+// repeat theirs. A root that no longer exists is kept under its recorded
+// spelling and marked gone, so its absence is reported rather than skipped.
 func stepWorkRoots(steps []*db.Step, execRoot, invokingRoot string) []stepWorkRoot {
 	covered := map[string]bool{}
 	for _, root := range []string{execRoot, invokingRoot} {
@@ -470,7 +537,8 @@ func stepWorkRoots(steps []*db.Step, execRoot, invokingRoot string) []stepWorkRo
 		if !ok {
 			i = len(out)
 			index[key] = i
-			out = append(out, stepWorkRoot{path: s.WorkRoot})
+			_, err := os.Stat(s.WorkRoot)
+			out = append(out, stepWorkRoot{path: s.WorkRoot, gone: errors.Is(err, os.ErrNotExist)})
 		}
 		out[i].steps = append(out[i].steps, s.Ref())
 	}
@@ -486,79 +554,53 @@ func resolvedPath(path string) string {
 	return filepath.Clean(path)
 }
 
-// stepCopyVerdicts compares each step work root's copy of the gate's
-// relatively named, pinned scripts with the pin, and lists one row per root
-// and script whose copy differs, cannot be read (GateStepCopyChanged), or is
-// absent (GateStepCopyAbsent). Each row names every step that recorded the
-// root. Unlike executedCopyVerdict it reports every difference, not the
-// first.
-func stepCopyVerdicts(
-	gate string, argv []string, execRoot string, pinned map[string]string, roots []stepWorkRoot,
-) []GateVerdict {
-	if len(roots) == 0 {
-		return nil
-	}
-	root, err := filepath.EvalSymlinks(execRoot)
-	if err != nil {
-		return nil
-	}
-	scripts := pinnedRelativeScripts(argv, root, pinned)
+// goneRootVerdicts lists each step work root that no longer exists as one
+// GateStepCopyAbsent row under gate, naming the root and every step that
+// recorded it. No copy under a gone root can be compared for any gate, so
+// gateVerdicts lists these once, under the first gate with a script to
+// compare, rather than once per gate and script: work roots are swept at
+// integration, and per-script rows for each would bury a differing copy.
+func goneRootVerdicts(gate string, roots []stepWorkRoot) []GateVerdict {
 	var out []GateVerdict
 	for _, wr := range roots {
-		steps := strings.Join(wr.steps, ", ")
-		_, rootErr := os.Stat(wr.path)
-		for _, s := range scripts {
-			executed := filepath.Join(wr.path, s.tok)
-			found, err := fileSHA256(executed)
-			v := GateVerdict{Gate: gate}
-			switch {
-			case errors.Is(rootErr, os.ErrNotExist):
-				v.Status, v.Reason = GateStepCopyAbsent, fmt.Sprintf(
-					"%q, the copy a gate run for %s executed, cannot be checked: the work root %q "+
-						"no longer exists; the run pins %q", executed, steps, wr.path, s.pinnedFile)
-			case errors.Is(err, os.ErrNotExist):
-				v.Status, v.Reason = GateStepCopyAbsent, fmt.Sprintf(
-					"%q, the copy a gate run for %s executed, does not exist; the run pins %q",
-					executed, steps, s.pinnedFile)
-			case err != nil:
-				v.Status, v.Reason = GateStepCopyChanged, fmt.Sprintf(
-					"%q, the copy a gate run for %s executed, cannot be checked against "+
-						"the pinned %q: %v", executed, steps, s.pinnedFile, err)
-			case found != s.want:
-				v.Status, v.Reason = GateStepCopyChanged, fmt.Sprintf(
-					"%q, the copy a gate run for %s executed, holds %s; the run pins %q at %s",
-					executed, steps, found, s.pinnedFile, s.want)
-			default:
-				continue
-			}
-			out = append(out, v)
+		if wr.gone {
+			out = append(out, GateVerdict{Gate: gate, Status: GateStepCopyAbsent, Reason: fmt.Sprintf(
+				"the work root %q recorded by %s no longer exists, so no gate script copy under it "+
+					"can be checked", wr.path, strings.Join(wr.steps, ", "))})
 		}
 	}
 	return out
 }
 
-// fileSHA256 is the hex SHA-256 of a regular file's content, read as a
-// stream so an oversized file is hashed without holding it in memory. A
-// non-regular file (a directory, a FIFO) is an error, never a read that could
-// block.
-func fileSHA256(path string) (string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", err
+// stepCopyVerdicts compares each existing step work root's copy of the
+// gate's relatively named, pinned scripts with the pin, and lists one row per
+// root and script whose copy differs, cannot be checked
+// (GateStepCopyChanged), or is absent (GateStepCopyAbsent). Each row names
+// every step that recorded the root. Unlike executedCopyVerdict it reports
+// every difference, not the first. Gone roots are goneRootVerdicts' rows.
+func stepCopyVerdicts(gate string, scripts []pinnedRelativeScript, roots []stepWorkRoot) []GateVerdict {
+	var out []GateVerdict
+	for _, wr := range roots {
+		if wr.gone {
+			continue
+		}
+		steps := strings.Join(wr.steps, ", ")
+		for _, s := range scripts {
+			executed := filepath.Join(wr.path, s.tok)
+			cmp, detail := compareCopy(executed, s.want)
+			if cmp == copyMatches {
+				continue
+			}
+			status := GateStepCopyChanged
+			if cmp == copyAbsent {
+				status = GateStepCopyAbsent
+			}
+			where := fmt.Sprintf("%q, the copy a gate run in the work root of %s would execute,",
+				executed, steps)
+			out = append(out, GateVerdict{Gate: gate, Status: status, Reason: copyReason(cmp, detail, where, s)})
+		}
 	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%s is not a regular file", path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return out
 }
 
 // verifyGateScripts fills the report's gate half, comparing executed copies

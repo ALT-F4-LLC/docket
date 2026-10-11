@@ -88,13 +88,18 @@ type PinReport struct {
 	Missing  int `json:"missing"`
 	Unpinned int `json:"unpinned"`
 	// Gates lists the declared gates whose script this run does not pin
-	// (GateUnpinned) or could not check (GateUnchecked), and those whose copy
+	// (GateUnpinned) or could not check (GateUnchecked), those whose copy
 	// under the invoking exec root differs from the pin
-	// (GateExecutedCopyChanged) or is absent (GateExecutedCopyAbsent), by gate
-	// name. Sound() reads only GateExecutedCopyChanged: a `make <target>`
-	// entry names no script file, and an absent copy cannot run. Empty (never
-	// nil) only when every declared gate was checked, found pinned, and found
-	// matching where it would execute, in gate-name order.
+	// (GateExecutedCopyChanged) or is absent (GateExecutedCopyAbsent), and
+	// those whose copy under a work root a step recorded differs from the pin
+	// (GateStepCopyChanged) or is absent, or whose work root is gone
+	// (GateStepCopyAbsent), by gate name. Sound() reads only
+	// GateExecutedCopyChanged: a `make <target>` entry names no script file,
+	// an absent copy cannot run, and a step may legitimately edit a gate
+	// script, so Sound() does not read GateStepCopyChanged or
+	// GateStepCopyAbsent. Empty (never nil) only when every declared gate was
+	// checked, found pinned, and found matching where it would execute, in
+	// gate-name order.
 	Gates []GateVerdict `json:"gates"`
 	// UnpinnedGates counts only the GateUnpinned rows.
 	UnpinnedGates int `json:"unpinned_gates"`
@@ -106,7 +111,9 @@ type PinReport struct {
 // Sound reports whether every pin still matches, the pin set is closed, and
 // no gate run from the invoking checkout would execute a script other than
 // the pinned one. A run can fail any of these alone: RUN-59 had all 30 pins
-// matching disk and four judge steps that could not be claimed.
+// matching disk and four judge steps that could not be claimed. It does not
+// read the step work-root rows (GateStepCopyChanged, GateStepCopyAbsent):
+// they report copies a step may legitimately edit, never a blocking finding.
 func (r *PinReport) Sound() bool {
 	return r.Changed == 0 && r.Missing == 0 && r.Unpinned == 0 &&
 		r.ExecutedCopyChanged == 0

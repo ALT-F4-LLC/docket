@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -911,12 +912,22 @@ func TestVerifyPinsStaysSoundWithOnlyAStepWorktreeRow(t *testing.T) {
 
 // TestVerifyPinsReportsAnAbsentStepWorktree: a recorded work root that is
 // gone, or that lacks the pinned script, is a row naming the step and the
-// missing path, never a silent skip, and it leaves the run sound.
+// missing path (the root, or the script under it), never a silent skip, and
+// it leaves the run sound.
 func TestVerifyPinsReportsAnAbsentStepWorktree(t *testing.T) {
-	for name, remove := range map[string]func(w string) error{
-		"work root removed": os.RemoveAll,
-		"script removed": func(w string) error {
-			return os.Remove(filepath.Join(w, "scripts/qa/build.sh"))
+	for name, tc := range map[string]struct {
+		remove  func(w string) error
+		missing func(w string) string
+	}{
+		"work root removed": {
+			remove:  os.RemoveAll,
+			missing: func(w string) string { return w },
+		},
+		"script removed": {
+			remove: func(w string) error {
+				return os.Remove(filepath.Join(w, "scripts/qa/build.sh"))
+			},
+			missing: func(w string) string { return filepath.Join(w, "scripts/qa/build.sh") },
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -924,7 +935,7 @@ func TestVerifyPinsReportsAnAbsentStepWorktree(t *testing.T) {
 			w := secondCheckout(t)
 			step := recordedSteps(t, conn, runID, 1)[0]
 			recordWorkRoot(t, conn, step, w)
-			testsupport.Must(t, remove(w), "removing from W")
+			testsupport.Must(t, tc.remove(w), "removing from W")
 
 			report := gateReportWith(t, conn, runID, gatePinStore, a)
 
@@ -935,7 +946,7 @@ func TestVerifyPinsReportsAnAbsentStepWorktree(t *testing.T) {
 			if GateStepCopyAbsent == GateStepCopyChanged {
 				t.Errorf("the absent status %q is not distinct from the differing one", GateStepCopyAbsent)
 			}
-			for _, want := range []string{step.Ref(), filepath.Join(w, "scripts/qa/build.sh")} {
+			for _, want := range []string{step.Ref(), tc.missing(w)} {
 				if !strings.Contains(rows[0].Reason, want) {
 					t.Errorf("the row's reason %q does not name %s", rows[0].Reason, want)
 				}
@@ -992,4 +1003,173 @@ func TestVerifyPinsDoesNotDuplicateStepWorktreeRows(t *testing.T) {
 	if n := len(gateRowsWith(report, "build", GateStepCopyAbsent)); n != 0 {
 		t.Errorf("gate build has %d %q rows, want 0: %+v", n, GateStepCopyAbsent, report.Gates)
 	}
+}
+
+// pinHygieneAsTheTestsGate points the fixture's `tests` gate at the relatively
+// named scripts/qa/self-hygiene.sh and pins A's copy as activation would, so
+// two declared gates each name a relative, pinned script. It returns the
+// trust loader that matches those entries.
+func pinHygieneAsTheTestsGate(
+	t *testing.T, conn *sql.DB, runID int, a string,
+) func() (*trust.Store, error) {
+	t.Helper()
+	entry := func(name string, argv ...string) trust.Entry {
+		return trust.Entry{
+			Name: name, Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Global: true,
+		}
+	}
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	testsupport.Must(t, db.InsertPinTx(tx, db.Pin{
+		RunID: runID, Kind: db.PinKindFile, Ref: filepath.Join(a, "scripts/qa/self-hygiene.sh"),
+		SHA256: workflow.SHA256([]byte("echo hygiene\n")),
+	}), "InsertPinTx")
+	testsupport.Must(t, tx.Commit(), "Commit")
+	return sandboxTrust(t,
+		entry("build", "bash", "scripts/qa/build.sh"),
+		entry("ac-commands", "bash", filepath.Join(a, "scripts/qa/ac-commands.sh")),
+		entry("tests", "bash", "scripts/qa/self-hygiene.sh"),
+	)
+}
+
+// TestVerifyPinsReportsEveryStepWorktreeAndScript: each distinct work root is
+// compared for each relatively named, pinned script, so two edited roots give
+// a row each, naming their own step, and a root missing one of two scripts
+// gives an absent row for that script alone. A root whose copies match adds
+// nothing, and a root that is gone gives one row however many scripts would
+// have been compared under it.
+func TestVerifyPinsReportsEveryStepWorktreeAndScript(t *testing.T) {
+	a, conn, runID := gateScriptFixture(t)
+	load := pinHygieneAsTheTestsGate(t, conn, runID, a)
+	build := func(w string) string { return filepath.Join(w, "scripts/qa/build.sh") }
+	hygiene := func(w string) string { return filepath.Join(w, "scripts/qa/self-hygiene.sh") }
+
+	roots := make([]string, 4)
+	for i := range roots {
+		roots[i] = secondCheckout(t)
+		testsupport.Must(t, os.WriteFile(hygiene(roots[i]), []byte("echo hygiene\n"), 0o755),
+			"writing the hygiene copy")
+	}
+	testsupport.Must(t, os.WriteFile(build(roots[0]), []byte("exit 0\n"), 0o755), "editing root 0")
+	testsupport.Must(t, os.WriteFile(build(roots[1]), []byte("exit 1\n"), 0o755), "editing root 1")
+	testsupport.Must(t, os.Remove(hygiene(roots[1])), "removing root 1's hygiene copy")
+	// roots[2] matches every pin.
+	testsupport.Must(t, os.RemoveAll(roots[3]), "removing root 3")
+	steps := recordedSteps(t, conn, runID, 4)
+	for i, w := range roots {
+		recordWorkRoot(t, conn, steps[i], w)
+	}
+
+	report := gateReportWith(t, conn, runID, load, a)
+
+	changed := gateRowsWith(report, "build", GateStepCopyChanged)
+	if len(changed) != 2 {
+		t.Fatalf("gate build has %d %q rows, want one per edited root: %+v",
+			len(changed), GateStepCopyChanged, report.Gates)
+	}
+	for i := range 2 {
+		found := false
+		for _, row := range changed {
+			if strings.Contains(row.Reason, build(roots[i])) {
+				found = true
+				if !strings.Contains(row.Reason, steps[i].Ref()) {
+					t.Errorf("the row for %s does not name %s: %q", build(roots[i]), steps[i].Ref(), row.Reason)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no %q row names the edited copy %s: %+v", GateStepCopyChanged, build(roots[i]), changed)
+		}
+	}
+	if n := len(gateRowsWith(report, "tests", GateStepCopyChanged)); n != 0 {
+		t.Errorf("gate tests has %d %q rows, want 0: %+v", n, GateStepCopyChanged, report.Gates)
+	}
+	absentScript := gateRowsWith(report, "tests", GateStepCopyAbsent)
+	if len(absentScript) != 1 {
+		t.Fatalf("gate tests has %d %q rows, want 1 for root 1: %+v",
+			len(absentScript), GateStepCopyAbsent, report.Gates)
+	}
+	for _, want := range []string{steps[1].Ref(), hygiene(roots[1])} {
+		if !strings.Contains(absentScript[0].Reason, want) {
+			t.Errorf("the absent-script row %q does not name %s", absentScript[0].Reason, want)
+		}
+	}
+
+	var gone []GateVerdict
+	for _, g := range report.Gates {
+		if strings.Contains(g.Reason, roots[2]) {
+			t.Errorf("the matching root %s has a row: %+v", roots[2], g)
+		}
+		if strings.Contains(g.Reason, roots[3]) {
+			gone = append(gone, g)
+		}
+	}
+	if len(gone) != 1 {
+		t.Fatalf("the removed root %s has %d rows, want 1 whatever the script count: %+v",
+			roots[3], len(gone), gone)
+	}
+	if gone[0].Status != GateStepCopyAbsent || !strings.Contains(gone[0].Reason, steps[3].Ref()) {
+		t.Errorf("the removed root's row is %+v, want status %q naming %s",
+			gone[0], GateStepCopyAbsent, steps[3].Ref())
+	}
+	if !report.Sound() {
+		t.Errorf("step work-root rows made the run unsound: %s", PinReportReason(report))
+	}
+}
+
+// TestVerifyPinsReportsAnUncheckableStepWorktreeCopy: a step copy that cannot
+// be hashed as a pinned script is a differing row naming the step and the
+// path, never a skip. The executor chose the work root, so its path reaches
+// the reason escaped, and a copy too large to be any pinned script is reported
+// without being read.
+func TestVerifyPinsReportsAnUncheckableStepWorktreeCopy(t *testing.T) {
+	t.Run("not a regular file", func(t *testing.T) {
+		a, conn, runID := gateScriptFixture(t)
+		parent, err := filepath.EvalSymlinks(t.TempDir())
+		testsupport.Must(t, err, "resolving: %v", err)
+		w := filepath.Join(parent, "w\x1b[2Kevil")
+		copyPath := filepath.Join(w, "scripts/qa/build.sh")
+		testsupport.Must(t, os.MkdirAll(copyPath, 0o755), "a directory at the script path")
+		step := recordedSteps(t, conn, runID, 1)[0]
+		recordWorkRoot(t, conn, step, w)
+
+		report := gateReportWith(t, conn, runID, gatePinStore, a)
+
+		rows := gateRowsWith(report, "build", GateStepCopyChanged)
+		if len(rows) != 1 {
+			t.Fatalf("gate build has %d %q rows, want 1: %+v", len(rows), GateStepCopyChanged, report.Gates)
+		}
+		if strings.ContainsRune(rows[0].Reason, '\x1b') {
+			t.Errorf("the reason carries a raw control byte from the work root: %q", rows[0].Reason)
+		}
+		for _, want := range []string{step.Ref(), strconv.Quote(copyPath)} {
+			if !strings.Contains(rows[0].Reason, want) {
+				t.Errorf("the row's reason %q does not name %s", rows[0].Reason, want)
+			}
+		}
+	})
+	t.Run("oversized", func(t *testing.T) {
+		a, conn, runID := gateScriptFixture(t)
+		w := secondCheckout(t)
+		copyPath := filepath.Join(w, "scripts/qa/build.sh")
+		content := make([]byte, maxGateScriptBytes+1)
+		testsupport.Must(t, os.WriteFile(copyPath, content, 0o755), "writing an oversized copy")
+		step := recordedSteps(t, conn, runID, 1)[0]
+		recordWorkRoot(t, conn, step, w)
+
+		report := gateReportWith(t, conn, runID, gatePinStore, a)
+
+		rows := gateRowsWith(report, "build", GateStepCopyChanged)
+		if len(rows) != 1 {
+			t.Fatalf("gate build has %d %q rows, want 1: %+v", len(rows), GateStepCopyChanged, report.Gates)
+		}
+		for _, want := range []string{step.Ref(), copyPath} {
+			if !strings.Contains(rows[0].Reason, want) {
+				t.Errorf("the row's reason %q does not name %s", rows[0].Reason, want)
+			}
+		}
+		if strings.Contains(rows[0].Reason, workflow.SHA256(content)) {
+			t.Errorf("the oversized copy was read and hashed: %q", rows[0].Reason)
+		}
+	})
 }
