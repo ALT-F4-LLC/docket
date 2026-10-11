@@ -29,10 +29,11 @@ const (
 	CodeNotFound ErrorCode = "NOT_FOUND"
 	// CodeConflict is CONFLICT (exit 4): re-activating a terminal run (RA5).
 	CodeConflict ErrorCode = "CONFLICT"
-	// CodeGone is GONE: an `events list --since` cursor below the retained
-	// minimum (docs/tdd/runs-dispatch.md §8.6). No product code path reaches it
-	// at this stage — nothing prunes until S7 — and the SHAPE ships here because
-	// `--since` is the verb that must return it.
+	// CodeGone is GONE: history that `events prune` removed. Two product paths
+	// return it (docs/tdd/runs-dispatch.md §8.6): an `events list --since`
+	// cursor below the retained minimum, and the recorded issue body and scope
+	// read-back (recordedIssue in context.go, reached by step context and step
+	// render) when the prune removed the step's claim event.
 	CodeGone ErrorCode = "GONE"
 	// CodeAuth is AUTH_ERROR (exit 5): a caller presenting a token that is not
 	// the run's conductor capability on one of the operator verbs (DKT-2465).
