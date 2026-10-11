@@ -206,7 +206,35 @@ func TestPolicyResolveSizeReachesTheSizesTable(t *testing.T) {
 	}
 }
 
-// TestPolicyResolveRegistersSize: --size is a flag on the real command, with
+// TestPolicyResolveAcceptsEverySize: every Size a vote row can carry is a
+// valid --size, including unknown and the sizes this policy leaves unmapped,
+// which resolve to the seat's own variant as such a row does.
+func TestPolicyResolveAcceptsEverySize(t *testing.T) {
+	conn, runID := policySeatRun(t, policySeatTOML)
+
+	for _, size := range []string{"trivial", "small", "bounded", "needs-design", "unknown"} {
+		t.Run(size, func(t *testing.T) {
+			cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), size, nil)
+			w, buf := bufWriter(true)
+			err := runPolicyResolve(cmd, []string{"seat-b"}, w)
+			testsupport.Must(t, err, "runPolicyResolve --size %s: %v", size, err)
+
+			var got policySeatsJSON
+			if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+			}
+			want := model.VoterAssignment{Voter: "seat-b", Model: "sonnet", Effort: "medium", Variant: "guarded"}
+			if size == "small" {
+				want = model.VoterAssignment{Voter: "seat-b", Model: "haiku", Effort: "low", Variant: "quick"}
+			}
+			if len(got.Data.Seats) != 1 || got.Data.Seats[0] != want {
+				t.Errorf("seats = %+v, want %+v", got.Data.Seats, want)
+			}
+		})
+	}
+}
+
+// TestPolicyResolveRegistersSize:--size is a flag on the real command, with
 // no default, so an omitted --size resolves as an unsized row does.
 func TestPolicyResolveRegistersSize(t *testing.T) {
 	flag := policyResolveCmd.Flags().Lookup("size")
@@ -225,6 +253,7 @@ func TestPolicyResolveRefusals(t *testing.T) {
 		name    string
 		policy  string
 		runRef  func(runID int) string
+		size    string
 		seats   []string
 		want    output.ErrorCode
 		message string
@@ -269,17 +298,40 @@ func TestPolicyResolveRefusals(t *testing.T) {
 			want:    output.ErrNotFound,
 			message: "no-such-seat",
 		},
+		{
+			// A --size no vote row can carry is refused, not silently
+			// resolved as the unsized roster.
+			name:    "a misspelled --size",
+			policy:  policySeatTOML,
+			runRef:  func(runID int) string { return model.FormatRunID(runID) },
+			size:    "smal",
+			seats:   []string{"seat-a"},
+			want:    output.ErrValidation,
+			message: `"smal"`,
+		},
+		{
+			name:    "a --size outside the vocabulary's case",
+			policy:  policySeatTOML,
+			runRef:  func(runID int) string { return model.FormatRunID(runID) },
+			size:    "Small",
+			seats:   []string{"seat-a"},
+			want:    output.ErrValidation,
+			message: `"Small"`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, runID := policySeatRun(t, tt.policy)
-			cmd := policyResolveCmdWithDB(conn, tt.runRef(runID), "", nil)
+			cmd := policyResolveCmdWithDB(conn, tt.runRef(runID), tt.size, nil)
 			w, buf := bufWriter(true)
 
 			err := runPolicyResolve(cmd, tt.seats, w)
 			if err == nil {
 				t.Fatalf("want a refusal, got output %s", buf.String())
+			}
+			if buf.Len() != 0 {
+				t.Errorf("a refusal wrote output %s, want no seats", buf.String())
 			}
 			var ce *CmdError
 			if !errors.As(err, &ce) {

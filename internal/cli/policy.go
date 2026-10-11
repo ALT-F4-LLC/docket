@@ -91,6 +91,14 @@ func runPolicyResolve(cmd *cobra.Command, args []string, w *output.Writer) error
 		return err
 	}
 	size, _ := cmd.Flags().GetString("size")
+	// Validated as a vote row's frozen Size is, so a typo cannot silently
+	// resolve the unsized roster. The empty default stays unvalidated: an
+	// omitted --size resolves as an unsized row does.
+	if size != "" {
+		if err := model.ValidateSize(model.Size(size)); err != nil {
+			return cmdErr(err, output.ErrValidation)
+		}
+	}
 	labels, _ := cmd.Flags().GetStringSlice("label")
 
 	seats, err := engine.ResolveSeats(getDB(cmd), runID, args, size, labels)
