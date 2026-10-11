@@ -316,6 +316,6 @@ func TestPinShowWritesNothing(t *testing.T) {
 	}
 	if !found {
 		t.Error("`pin` is absent from `docket --help`'s command list, so a " +
-			"claimed step's brief cannot name it")
+			"claimed step's packet cannot name it")
 	}
 }

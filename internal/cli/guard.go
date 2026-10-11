@@ -105,7 +105,7 @@ still being cast reads as undecided and denies.
 WHICH RUNS ANSWER is the caller's choice. With --run RUN-N only that run's gate
 answers: an approval is a decision about one run's change, so another run's
 approval says nothing about it. Use this form when the caller knows its run —
-an executor's brief carries its step id, and ` + "`step show STEP-N`" + ` names the
+a claimed step's rendered packet carries its step id, and ` + "`step show STEP-N`" + ` names the
 run. The named run is honored regardless of project; a run that does not exist
 is a NOT_FOUND error rather than a verdict; a run that has ended denies.
 
