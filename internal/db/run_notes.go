@@ -18,10 +18,15 @@ import (
 // fact would make two renders of one step disagree about that with nothing
 // in the ledger explaining the difference. A ruling that changes is recorded
 // as a second note, which renders after the first.
+//
+// Authority is the authority the writer asserted when recording the note,
+// stored verbatim. A note recorded before the column existed reads "": its
+// authority is unknown, and nothing infers one for it.
 type RunNote struct {
 	ID          int
 	RunID       int
 	Text        string
+	Authority   string
 	CreatedAtMS int64
 }
 
@@ -33,8 +38,8 @@ type RunNote struct {
 // ruling that renders nowhere.
 func InsertRunNoteTx(tx *sql.Tx, n RunNote) (int, error) {
 	res, err := tx.Exec(
-		`INSERT INTO run_notes (run_id, text, created_at_ms) VALUES (?, ?, ?)`,
-		n.RunID, n.Text, n.CreatedAtMS)
+		`INSERT INTO run_notes (run_id, text, authority, created_at_ms) VALUES (?, ?, ?, ?)`,
+		n.RunID, n.Text, n.Authority, n.CreatedAtMS)
 	if err != nil {
 		return 0, fmt.Errorf("recording the run note: %w", err)
 	}
@@ -53,7 +58,7 @@ func InsertRunNoteTx(tx *sql.Tx, n RunNote) (int, error) {
 // one consistent run state (engine-core §8's "one atomic mediation").
 func ListRunNotesTx(tx *sql.Tx, runID int) ([]RunNote, error) {
 	rows, err := tx.Query(
-		`SELECT id, run_id, text, created_at_ms
+		`SELECT id, run_id, text, authority, created_at_ms
 		   FROM run_notes WHERE run_id = ? ORDER BY id`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading run notes: %w", err)
@@ -64,7 +69,7 @@ func ListRunNotesTx(tx *sql.Tx, runID int) ([]RunNote, error) {
 // ListRunNotes is ListRunNotesTx on the pooled connection, for the read verb.
 func ListRunNotes(conn *sql.DB, runID int) ([]RunNote, error) {
 	rows, err := conn.Query(
-		`SELECT id, run_id, text, created_at_ms
+		`SELECT id, run_id, text, authority, created_at_ms
 		   FROM run_notes WHERE run_id = ? ORDER BY id`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading run notes: %w", err)
@@ -75,7 +80,7 @@ func ListRunNotes(conn *sql.DB, runID int) ([]RunNote, error) {
 func scanRunNotes(rows *sql.Rows) ([]RunNote, error) {
 	return scanRows(rows, "run notes", func(r *sql.Rows) (RunNote, error) {
 		var n RunNote
-		if err := r.Scan(&n.ID, &n.RunID, &n.Text, &n.CreatedAtMS); err != nil {
+		if err := r.Scan(&n.ID, &n.RunID, &n.Text, &n.Authority, &n.CreatedAtMS); err != nil {
 			return RunNote{}, fmt.Errorf("reading a run note: %w", err)
 		}
 		return n, nil

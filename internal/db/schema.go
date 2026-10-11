@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 41
+const currentSchemaVersion = 42
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -211,6 +211,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	39: migrateV38ToV39,
 	40: migrateV39ToV40,
 	41: migrateV40ToV41,
+	42: migrateV41ToV42,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3147,6 +3148,40 @@ func migrateV40ToV41(tx *sql.Tx) error {
 	return nil
 }
 
+// v42AddedColumns is v42's whole schema change: `authority` on `run_notes`,
+// the authority a note's writer asserted when recording it.
+var v42AddedColumns = []struct{ table, column, ddl string }{
+	{"run_notes", "authority",
+		`ALTER TABLE run_notes ADD COLUMN authority TEXT NOT NULL DEFAULT ''`},
+}
+
+// v42ColumnSentinels are the columns the rewind guard probes, the v41 form:
+// v42 adds no table and no index, so a database stamped 42 by a binary built
+// mid-change carries every v41 sentinel and `authority` never arrives.
+var v42ColumnSentinels = []struct{ table, column string }{
+	{"run_notes", "authority"},
+}
+
+// migrateV41ToV42 adds `run_notes.authority`. It back-fills nothing: a note
+// recorded before the column existed reads "", an unknown authority, never
+// one inferred for it. It probes before the ALTER, so it stays re-runnable.
+func migrateV41ToV42(tx *sql.Tx) error {
+	for _, col := range v42AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v41 to v42: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v41 to v42: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3979,6 +4014,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 40
+				break
+			}
+		}
+	}
+
+	// The v42 guard, in the same COLUMN form as v41 and for its reason: v42
+	// adds one column and no table, so a database stamped 42 by a binary built
+	// mid-change carries every v41 sentinel and `run_notes.authority` never
+	// arrives.
+	if version >= 42 {
+		for _, col := range v42ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v42 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 41
 				break
 			}
 		}
