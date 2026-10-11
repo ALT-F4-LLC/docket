@@ -7,9 +7,9 @@
 # and fails the step when any package fails.
 #
 # It runs `go test ./...` and NOT `scripts/qa.sh`. The two cover different
-# things: qa.sh is the CLI-behavior harness the `qa` CI job runs (see
+# things: qa.sh is the CLI-behavior harness the `test` CI job runs (see
 # .github/workflows/ci.yaml), while this gate is the unit/integration suite the
-# `test` CI job runs. Running qa.sh here would make one failure surface twice
+# `go-test` CI job runs. Running qa.sh here would make one failure surface twice
 # and would serialize every gate behind a multi-minute harness.
 #
 # go1.26.9 rather than `go`: the name the other gates already use
