@@ -456,9 +456,10 @@ TOML
   run_env "$ZL_R" run activate RUN-1 --json >/dev/null
   DOCKET_TOKEN="$(activation_token)" run_env "$ZL_R" run abandon RUN-1 --reason "archived" --authority operator --json >/dev/null
 
-  # THE DEFAULT IS 0, AND 0 RETAINS EVERYTHING. A retention key defaulting the
-  # other way would make the first prune an operator ever typed delete their
-  # whole log.
+  # THE DEFAULT IS 0, WHICH IMPOSES NO RETENTION WINDOW (docs/tdd/events-follow.md
+  # P13). A prune at 0 is bounded only by --before/--before-run and the live-run
+  # refusal, not by age. Nothing is deleted until an operator runs prune with a
+  # target.
   run_env "$ZL_R" config get events.retain --json
   assert_exit "ZL" "ZL5_retain_key" 0
   assert_json "ZL" "ZL5_retain_default" '.data.value' "0"
