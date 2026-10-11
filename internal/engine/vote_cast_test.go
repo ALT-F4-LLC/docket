@@ -467,6 +467,16 @@ func TestCastPolicyOfStepBound(t *testing.T) {
 	held := seedVoteStepInRun(t, conn, int64(runID), wfID,
 		workflow.HeldStepName("review")+"@0")
 
+	// A step row whose workflow the run's pinned definitions lack. The
+	// foreign key on steps.workflow_id makes that a dangling reference, so
+	// seed it with the check off. The pool holds one connection, so the
+	// pragma reaches the insert.
+	_, err = conn.Exec(`PRAGMA foreign_keys=OFF`)
+	testsupport.Must(t, err, "disabling foreign keys: %v", err)
+	unpinned := seedVoteStepInRun(t, conn, int64(runID), wfID+1000, "review@0")
+	_, err = conn.Exec(`PRAGMA foreign_keys=ON`)
+	testsupport.Must(t, err, "enabling foreign keys: %v", err)
+
 	keyed := func(t *testing.T, key string) int {
 		t.Helper()
 		id, err := db.CreateProposalIdempotent(conn, &model.Proposal{
@@ -487,6 +497,8 @@ func TestCastPolicyOfStepBound(t *testing.T) {
 		{"key names a step the run has no row for", prefix + "999999:review@0"},
 		{"key names a materialized held step",
 			voteIdempotencyKey(runID, held.IssueID, held.Instance)},
+		{"key names a step whose workflow has no pinned definition",
+			voteIdempotencyKey(runID, unpinned.IssueID, unpinned.Instance)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			policy, err := castPolicyOf(conn, keyed(t, tc.key))
