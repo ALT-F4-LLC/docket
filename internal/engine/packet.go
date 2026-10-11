@@ -534,8 +534,15 @@ const AttachmentMaxBytes = exec.CaptureCap
 // AN ESCAPING PATH REFUSES BEFORE ANY READ. Every writer of an issue's file
 // list stores its paths verbatim, so this read is the one place containment
 // can hold for every row, including rows attached before the rule existed.
-// The rule is checkPacketRef's, applied to the run's checkout. It is lexical:
-// a symlink inside the checkout is still followed.
+// The rule is checkPacketRef's, applied to the run's checkout, and it is
+// lexical.
+//
+// A SYMLINK OUT OF THE CHECKOUT REFUSES. Every read goes through an os.Root
+// opened on the run's checkout, so resolution stays beneath it through every
+// symlink component, and a symlink that leaves it, or is absolute, refuses
+// as an unreadable path. A symlink whose target stays inside still inlines,
+// under the attached path. A hard link is not a path property, so os.Root does
+// not contain it.
 func issueAttachmentFiles(
 	conn *sql.DB, step *db.Step, spec *workflow.Step,
 ) ([]PacketFile, error) {
@@ -548,13 +555,27 @@ func issueAttachmentFiles(
 		return nil, err
 	}
 
-	root := runExecRoot(conn, step.RunID)
 	out := make([]PacketFile, 0, len(paths))
+	if len(paths) == 0 {
+		return out, nil
+	}
 	for _, path := range paths {
 		if err := checkAttachmentPath(step.IssueID, path); err != nil {
 			return nil, err
 		}
-		body, err := readAttachment(filepath.Join(root, path))
+	}
+
+	root := runExecRoot(conn, step.RunID)
+	checkout, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, validationErr(
+			"issue %s attaches %q, which `issue.files` could not read: the run's "+
+				"checkout %s does not open: %v",
+			model.FormatID(step.IssueID), paths[0], root, err)
+	}
+	defer checkout.Close()
+	for _, path := range paths {
+		body, err := readAttachment(checkout, path)
 		if err != nil {
 			return nil, validationErr(
 				"issue %s attaches %q, which `issue.files` could not read from "+
@@ -568,15 +589,16 @@ func issueAttachmentFiles(
 	return out, nil
 }
 
-// readAttachment returns the whole of the regular file at `full`, or refuses.
+// readAttachment returns the whole of the regular file at `path` inside
+// `checkout`, or refuses.
 //
 // The open is non-blocking so a FIFO cannot stall the render waiting for a
 // writer, and the type check runs on the opened descriptor, so no swap between
 // check and read can slip a special file past it. The size bound applies to
 // the bytes actually read, never to a reported size, and an over-cap file is
 // refused rather than truncated: a partial section would be consumed as whole.
-func readAttachment(full string) ([]byte, error) {
-	f, err := os.OpenFile(full, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+func readAttachment(checkout *os.Root, path string) ([]byte, error) {
+	f, err := checkout.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}

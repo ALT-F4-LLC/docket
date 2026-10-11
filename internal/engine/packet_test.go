@@ -495,3 +495,62 @@ func TestIssueAttachmentFilesInlinesContainedPath(t *testing.T) {
 		t.Errorf("issueAttachmentFiles = %+v, want %+v", got, want)
 	}
 }
+
+// TestIssueAttachmentFilesRefusesASymlinkOutOfTheRoot: an attached path with no
+// `..` passes the lexical guard, but a symlink at that path inside the run's
+// checkout resolving outside it is refused, and none of the target's bytes
+// reach the error or the returned files.
+func TestIssueAttachmentFilesRefusesASymlinkOutOfTheRoot(t *testing.T) {
+	const sentinel = "ESCAPED host bytes via symlink\n"
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	writeFixture(t, base, "escape.txt", sentinel)
+	testsupport.Must(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755), "mkdir: %v", nil)
+	testsupport.Must(t,
+		os.Symlink("../../escape.txt", filepath.Join(root, "docs", "link.md")),
+		"symlink: %v", nil)
+	conn, step, spec := attachedStep(t, root, []string{"docs/link.md"})
+
+	out, err := issueAttachmentFiles(conn, step, spec)
+	if err == nil {
+		t.Fatalf("issueAttachmentFiles followed the escaping symlink; got %+v", out)
+	}
+	if code, ok := CodeOf(err); !ok || code != CodeValidation {
+		t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "docs/link.md") {
+		t.Errorf("refusal does not name docs/link.md:\n  %s", msg)
+	}
+	if strings.Contains(msg, strings.TrimSpace(sentinel)) {
+		t.Errorf("refusal carries the escaped target's bytes:\n  %s", msg)
+	}
+	if out != nil {
+		t.Errorf("refusal returned files: %+v", out)
+	}
+}
+
+// TestIssueAttachmentFilesInlinesASymlinkInsideTheRoot: a symlink whose target
+// stays inside the run's checkout still inlines its target's bytes, under the
+// attached alias path.
+func TestIssueAttachmentFilesInlinesASymlinkInsideTheRoot(t *testing.T) {
+	root := t.TempDir()
+	body := "real attachment body\n"
+	writeFixture(t, root, "real.md", body)
+	testsupport.Must(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755), "mkdir: %v", nil)
+	testsupport.Must(t,
+		os.Symlink("../real.md", filepath.Join(root, "docs", "alias.md")),
+		"symlink: %v", nil)
+	conn, step, spec := attachedStep(t, root, []string{"docs/alias.md"})
+
+	got, err := issueAttachmentFiles(conn, step, spec)
+	testsupport.Must(t, err, "issueAttachmentFiles: %v", err)
+
+	digest := sha256.Sum256([]byte(body))
+	want := []PacketFile{{
+		Path: "docs/alias.md", SHA256: hex.EncodeToString(digest[:]), Body: body,
+	}}
+	if !slices.Equal(got, want) {
+		t.Errorf("issueAttachmentFiles = %+v, want %+v", got, want)
+	}
+}
