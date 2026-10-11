@@ -712,6 +712,164 @@ func checkPinRecheckBeforeEachAttempt(t *testing.T, gateFor pinGateSpec) {
 	}
 }
 
+// symlinkedPinnedScript writes content to repoRoot/files/c.sh and links
+// repoRoot/gate.sh to it, the layout a writer retargets: the trust entry names
+// the link, and its pin is c.sh's bytes.
+func symlinkedPinnedScript(t *testing.T, repoRoot, content string) (link, target string) {
+	t.Helper()
+	files := filepath.Join(repoRoot, "files")
+	mkErr := os.Mkdir(files, 0o755)
+	testsupport.Must(t, mkErr, "creating the script directory: %v", mkErr)
+	target = filepath.Join(files, "c.sh")
+	writeErr := os.WriteFile(target, []byte(content), 0o755)
+	testsupport.Must(t, writeErr, "writing the pinned script: %v", writeErr)
+	link = filepath.Join(repoRoot, "gate.sh")
+	linkErr := os.Symlink(target, link)
+	testsupport.Must(t, linkErr, "linking the pinned script: %v", linkErr)
+	return link, target
+}
+
+// assertReasonNamesPaths fails unless reason names each path in its
+// symlink-resolved form, the form the runner spawns and re-resolves.
+func assertReasonNamesPaths(t *testing.T, reason string, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		resolved, err := filepath.EvalSymlinks(p)
+		testsupport.Must(t, err, "resolving %s: %v", p, err)
+		if !strings.Contains(reason, resolved) {
+			t.Errorf("the reason does not name %s: %q", resolved, reason)
+		}
+	}
+}
+
+// TestGatePinRecheckRefusesRetargetedArgv0: the pinned argv[0] is a symlink,
+// and while the gate waits for the tree lock a writer copies the pinned bytes
+// to d.sh, rewrites c.sh, and repoints the link at d.sh. The re-check hashes
+// d.sh and matches, but the gate would spawn c.sh, so the runner refuses
+// because the re-resolved path is not the spawned one.
+func TestGatePinRecheckRefusesRetargetedArgv0(t *testing.T) {
+	repoRoot := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "evil")
+	content := pinScriptHeader + "A\nexit 0\n"
+	link, target := symlinkedPinnedScript(t, repoRoot, content)
+	decoy := filepath.Join(repoRoot, "files", "d.sh")
+
+	ex := runTreeGateAcrossHeldLock(t, repoRoot,
+		pinnedEntry(repoRoot, link, trustHashOf(content)), namedPinGate(link), func() {
+			err := os.WriteFile(decoy, []byte(content), 0o755)
+			testsupport.Must(t, err, "writing the pinned-bytes copy: %v", err)
+			err = os.WriteFile(target, []byte("#!/bin/sh\n/usr/bin/touch "+marker+"\n"), 0o755)
+			testsupport.Must(t, err, "rewriting the spawned script: %v", err)
+			err = os.Symlink(decoy, link+".new")
+			testsupport.Must(t, err, "linking the retarget: %v", err)
+			err = os.Rename(link+".new", link)
+			testsupport.Must(t, err, "retargeting the link: %v", err)
+		})
+
+	if sentinelExists(t, marker) {
+		t.Error("the rewritten script RAN behind a link retargeted to pinned bytes")
+	}
+	if len(ex.Results) != 1 {
+		t.Fatalf("got %d rows, want 1: %+v", len(ex.Results), ex.Results)
+	}
+	row := ex.Results[0]
+	if row.Verdict != VerdictUnmatched || ex.Verdict != VerdictFail {
+		t.Errorf("row verdict %q, gate verdict %q; want %q and %q",
+			row.Verdict, ex.Verdict, VerdictUnmatched, VerdictFail)
+	}
+	if row.Exit != nil {
+		t.Errorf("exit = %d on a gate that spawned nothing, want nil", *row.Exit)
+	}
+	if row.TrustEntry != "tests" {
+		t.Errorf("the row names entry %q, want %q: the refusal did not come "+
+			"from the post-lock re-check", row.TrustEntry, "tests")
+	}
+	assertReasonNamesPaths(t, row.Reason, target, decoy)
+}
+
+// TestGatePinRecheckRefusesRetargetBeforeAttempt: a flaky pinned gate behind
+// a symlink whose first attempt repoints the link at a pinned-bytes copy,
+// replaces the original target with a script that plants marker-2, and fails.
+// The re-attempt would spawn the original target, so it is refused.
+func TestGatePinRecheckRefusesRetargetBeforeAttempt(t *testing.T) {
+	repoRoot := t.TempDir()
+	markers := t.TempDir()
+	first := filepath.Join(markers, "attempt-0")
+	second := filepath.Join(markers, "marker-2")
+	link := filepath.Join(repoRoot, "gate.sh")
+	target := filepath.Join(repoRoot, "files", "c.sh")
+	decoy := filepath.Join(repoRoot, "files", "d.sh")
+	// The running script is replaced by rename, never rewritten in place, so
+	// the shell reading attempt 0 keeps reading the bytes it started with.
+	body := fmt.Sprintf(
+		"/usr/bin/touch %[1]s\n"+
+			"/bin/ln -s %[3]s %[4]s.new\n"+
+			"/bin/mv -f %[4]s.new %[4]s\n"+
+			"printf '#!/bin/sh\\n/usr/bin/touch %[2]s\\n' > %[5]s.new\n"+
+			"/bin/chmod 755 %[5]s.new\n"+
+			"/bin/mv -f %[5]s.new %[5]s\n"+
+			"exit 1\n",
+		first, second, decoy, link, target)
+	content := pinScriptHeader + "A\n" + body
+	symlinkedPinnedScript(t, repoRoot, content)
+	writeErr := os.WriteFile(decoy, []byte(content), 0o755)
+	testsupport.Must(t, writeErr, "writing the pinned-bytes copy: %v", writeErr)
+
+	entry := pinnedEntry(repoRoot, link, trustHashOf(content))
+	entry.Flaky = true
+	entry.Tree = true
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, entry)
+
+	ex, err := runner.Execute(context.Background(), namedPinGate(link), StepContext{})
+	testsupport.Must(t, err, "running the flaky gate: %v", err)
+
+	if !sentinelExists(t, first) {
+		t.Fatal("the first attempt did not run")
+	}
+	if sentinelExists(t, second) {
+		t.Error("the re-attempt RAN the replaced target behind the retargeted link")
+	}
+	if len(ex.Results) != 2 {
+		t.Fatalf("got %d rows, want 2 (the failed run, then the refusal): %+v",
+			len(ex.Results), ex.Results)
+	}
+	if r := ex.Results[0]; r.Ordinal != 0 || r.Verdict != VerdictFail {
+		t.Errorf("row 0 = ordinal %d verdict %q, want 0 and %q", r.Ordinal, r.Verdict, VerdictFail)
+	}
+	r := ex.Results[1]
+	if r.Ordinal != 1 || r.Verdict != VerdictUnmatched || r.Exit != nil {
+		t.Errorf("row 1 = ordinal %d verdict %q exit %v, want 1, %q, nil",
+			r.Ordinal, r.Verdict, r.Exit, VerdictUnmatched)
+	}
+	assertReasonNamesPaths(t, r.Reason, target, decoy)
+	if ex.Verdict != VerdictFail {
+		t.Errorf("gate verdict = %q, want %q", ex.Verdict, VerdictFail)
+	}
+}
+
+// TestGatePinRecheckStableSymlinkRuns is the benign half: a pinned argv[0]
+// that is a symlink left alone across a contended tree lock still runs.
+func TestGatePinRecheckStableSymlinkRuns(t *testing.T) {
+	repoRoot := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	content := pinScriptHeader + "A\n/usr/bin/touch " + marker + "\n"
+	link, _ := symlinkedPinnedScript(t, repoRoot, content)
+
+	ex := runTreeGateAcrossHeldLock(t, repoRoot,
+		pinnedEntry(repoRoot, link, trustHashOf(content)), namedPinGate(link), func() {})
+
+	if !sentinelExists(t, marker) {
+		t.Errorf("the pinned script behind a stable link did not run: %+v", ex.Results)
+	}
+	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictPass {
+		t.Errorf("rows = %+v, want one %q row", ex.Results, VerdictPass)
+	}
+	if ex.Verdict != VerdictPass {
+		t.Errorf("gate verdict = %q, want %q: %+v", ex.Verdict, VerdictPass, ex.Results)
+	}
+}
+
 const legacyPinText = "has no content pin"
 
 // legacyEntry is pinnedEntry without its content pin: an absolute argv[0]

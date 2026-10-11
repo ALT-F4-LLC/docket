@@ -303,7 +303,10 @@ func (r *ExecRunner) spawnMatched(
 // snapshot. It runs before every attempt, after any tree-lock wait, because
 // the content pin (§3.1 argv0_sha256) is checked "before every spawn": the
 // pinned file can change during the lock wait or between flaky attempts, and
-// only the pin half of the Lookup can change its answer.
+// only the pin half of the Lookup can change its answer. That half re-resolves
+// the entry's argv[0] afresh, so a pinned argv[0] must first re-resolve to the
+// path being spawned, or a retargeted symlink would have the pin hash one file
+// while another runs.
 func (r *ExecRunner) spawnMatchedRows(
 	g GateSpec, sc StepContext, match trust.Match, firstOrdinal int,
 	relookup func() trust.Match,
@@ -470,6 +473,18 @@ func (r *ExecRunner) spawnMatchedRows(
 	// attempt, after any lock wait, against the tree the attempt will open.
 	var scriptNotes []string
 	recheckPin := func() error {
+		if entry.Argv0SHA256 != "" && filepath.IsAbs(entryArgv0) {
+			now, err := exec.NormalizePath(entryArgv0)
+			if err != nil {
+				return fmt.Errorf("gate %q: cannot re-resolve %s before spawning %s: %v",
+					g.Name, entryArgv0, spec.Argv[0], err)
+			}
+			if now != spec.Argv[0] {
+				return fmt.Errorf("gate %q: %s now resolves to %s, not to %s, the file this gate spawns; "+
+					"its content pin would be checked against a file that does not run",
+					g.Name, entryArgv0, now, spec.Argv[0])
+			}
+		}
 		if again := relookup(); !again.Matched {
 			return errors.New(again.Reason)
 		}
