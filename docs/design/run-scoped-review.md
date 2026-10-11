@@ -123,6 +123,25 @@ internal/engine/stage.go:79 (`precedesInSet`) requires equal `IssueID`; run-scop
 rows all read 0 and so order among themselves, which is the fixer-then-judges
 ordering the run-scoped cluster (D3) needs.
 
+Display. A run-scoped row has no issue, and every operator surface shows it
+the same way: the `issue` field is the empty string `""` in `--json` output,
+and a text issue column shows `-`. The row's run id, which each of these
+surfaces already prints, names its subject. The rule covers `next`, `step
+list`, `step show`, `events list` and every other event feed, `run show`, and
+`run report`. Message text that names a step's subject, such as an error or a
+park reason, names the run (`RUN-N`) where an issue row names `DKT-N`. No
+surface prints `<PREFIX>-0`. Two surfaces already follow the rule: an event
+with a NULL `issue_id` leaves `Issue` empty (internal/engine/events_read.go:244)
+and `events list` prints `-` for it (internal/cli/events.go:279), and `run
+show` sets `Issue` only when `IssueID != 0` (internal/engine/report.go:902).
+Phase 2 applies the same guard where a row is built from `step.IssueID`:
+`next` (internal/engine/next.go:519), the `StepListEntry` that `step list` and
+`step show` share (next.go:678), and the `step list` text column
+(internal/cli/step.go, which prints `row.Issue` with no dash today).
+`model.FormatID` is unchanged: 0 is not an issue id (`ParseID` refuses
+`DKT-0`), and a formatter that returned `""` for it would turn every missed
+call site into a silent blank instead of a case the phase 2 criterion catches.
+
 Alternatives weighed.
 
 | Candidate | Why it lost |
@@ -531,7 +550,10 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/engine/ready.go: clause R2c and the union-scope R4 read for run-scoped
   rows.
 - internal/engine/ready_test.go.
-- internal/engine/next.go: `issue` empty on run-scoped rows.
+- internal/engine/next.go: `issue` empty on run-scoped `next` rows and on the
+  `StepListEntry` that `step list` and `step show` read (§3.1 display rule).
+- internal/cli/step.go: the `step list` text column prints `-` for an empty
+  issue.
 
 ### Packet input resolution
 
@@ -684,7 +706,11 @@ changes all lie inside the union scope; with an uncommitted modification to an
 in-scope tracked file and an untracked in-scope file present in the exec root
 at claim, neither appears in the recorded `run.diff` body; a
 run started outside a checkout is refused at activation with the D5 message and
-leaves zero step rows; every existing bundle fixture is byte-identical. For the
+leaves zero step rows; every existing bundle fixture is byte-identical; no
+operator surface renders `<PREFIX>-0`, or any `-0` issue id, for a run-scoped
+row: on that fixture `next`, `step list`, `step show`, `events list`, `run
+show`, and `run report` each show `review@0#0` under the §3.1 display rule,
+`""` in the `--json` `issue` field and `-` in a text issue column. For the
 park: with `review.findings` recorded so that two of three clusters reduce to
 `high`, `reconcile@0` parks with `park_reason` equal to the §3.3 rendering byte
 for byte; `step resolve reconcile@0 --as retry`, `--as rerun-gates`, and `--as
@@ -755,8 +781,9 @@ the integration check's `checked` list includes the run-scoped fix's head.
   operator's own. The body's out-of-scope section discloses paths outside the
   union scope, and nothing else distinguishes them; this is accepted.
 - `db.Step.IssueID == 0` becomes a meaningful value. Every reader that formats
-  `model.FormatID(step.IssueID)` for a run-scoped row prints a nonsense id until
-  it is taught the case; phase 2's review has to grep for the pattern.
+  `model.FormatID(step.IssueID)` must apply the §3.1 display rule (`""` in
+  JSON, `-` in a text column, the run named in messages) before it can show a
+  run-scoped row, and phase 2's acceptance holds every operator surface to it.
 - The `next` row's `issue` field is empty on run-scoped rows. A dispatcher that
   indexes by issue must tolerate the empty string.
 - Phase 3 adds a second loop subject, so `enterLoop`'s counter reads and writes
