@@ -219,6 +219,41 @@ func TestCheckDoctorPinsOKForASoundRun(t *testing.T) {
 	}
 }
 
+// TestCheckDoctorPinsDriftsWhenOnlyAnExecutedCopyChanged: a run activated in
+// checkout A and checked from checkout B, whose copy of a gate script was
+// edited after activation, is DRIFT naming the gate, and doctor is not clean,
+// even though no pin changed and none is missing.
+func TestCheckDoctorPinsDriftsWhenOnlyAnExecutedCopyChanged(t *testing.T) {
+	_, conn, runID := gateScriptFixture(t)
+	b := secondCheckout(t)
+	testsupport.Must(t, os.WriteFile(filepath.Join(b, "scripts/qa/build.sh"),
+		[]byte("exit 0\n"), 0o755), "editing B's copy")
+	store := gatePinStore
+	onGlobalStore(t, b)
+	gatePinStore = store
+	if root := resolvePaths().ExecRoot; root != b {
+		t.Fatalf("premise: the invoking exec root must be B %s, got %s", b, root)
+	}
+	report, err := VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+	if report.ExecutedCopyChanged != 1 || report.Changed != 0 || report.Missing != 0 {
+		t.Fatalf("premise: executed_copy_changed=%d changed=%d missing=%d, want 1, 0, 0",
+			report.ExecutedCopyChanged, report.Changed, report.Missing)
+	}
+
+	c := checkDoctorPins(conn, runID)
+	if c.Verdict != DoctorDrift {
+		t.Errorf("verdict = %s, want DRIFT for an executed copy that differs from its pin: %s",
+			c.Verdict, c.Detail)
+	}
+	if !strings.Contains(c.Detail, `gate "build"`) {
+		t.Errorf("detail %q does not name gate build", c.Detail)
+	}
+	if clean, _ := doctorDisposition([]DoctorCheck{c}); clean {
+		t.Error("doctorDisposition reads clean while a gate's executed copy differs from its pin")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // checkDoctorLinkFarm — check 5
 // ---------------------------------------------------------------------------
