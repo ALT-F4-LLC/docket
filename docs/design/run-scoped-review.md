@@ -203,7 +203,7 @@ nothing new. A run with no close has no
 priors, so each candidate is asked of git once per claim; a shared-checkout
 writer's head is the branch tip or behind it and passes by ancestry, and a
 worktree writer's cherry-picked head passes by patch. A hand-resolved pick on
-such a run passes only after `step annotate STEP-N --integrated-sha`
+such a run passes only after `step annotate STEP-N --integrated-sha <branch-sha>`
 (annotate_integration.go:16, 104) re-records the head as the commit the shared
 branch carries, the remedy `dispatch close` already relies on for the same
 case. A `cherry-error` verdict (git could not answer) counts as unintegrated,
@@ -234,16 +234,53 @@ routing stage (hold.go:81-95 at the pinned commit). The reason, under the
 `<class>: <prose>` form §3.3 uses:
 
 ```
-integration-unverified: {step} {instance}: sha {sha12} ({how}) in {worktree}[; ...]; cherry-pick each commit onto the shared branch, or `step annotate {step} --integrated-sha` for a hand-resolved pick, then resolve with --as retry
+integration-unverified: {finding}[; {finding}...] | cherry-pick each commit onto the shared branch, or for a hand-resolved pick run {annotate}[, {annotate}...], then resolve with --as retry
 ```
 
-`{step} {instance}: sha {sha12} ({how}) in {worktree}` is `UnintegratedReason`'s
-rendering of one finding, `; `-joined, with ` in {worktree}` present only when
-the record names one and `{how}` either `unintegrated` or `cherry-error`.
-Rendered for a fixture whose second writer recorded in a worktree:
+`{finding}` is `{step} {instance}: sha {sha12} ({how}) in {worktree}`,
+`UnintegratedReason`'s rendering of one unintegrated step, with ` in {worktree}`
+present only when the record names one and `{how}` either `unintegrated` or
+`cherry-error`. Findings are `; `-joined. The finding list ends at ` | `, a
+delimiter the list never uses, so the remedy is never read as another finding.
+`{annotate}` is `` `step annotate {step} --integrated-sha <branch-sha>` ``. The
+remedy carries one `{annotate}` clause per finding, in the finding list's
+order, and each clause's `{step}` is that finding's `{step}`; an operator runs
+the clauses for the findings they hand-resolved and cherry-picks the rest.
+`<branch-sha>` is the one value the engine cannot know at park time, so the
+engine prints the token `<branch-sha>` literally and the operator replaces it.
+It is the full 40-hex commit id the shared branch carries after the operator's
+pick, read with `git rev-parse HEAD` in the shared checkout once the pick is
+made; it is not the step's recorded head and not `HEAD` at park time.
+`AnnotateIntegration` refuses anything but a full commit id
+(annotate_integration.go:107-111), so the 12-hex `{sha12}` is wrong. The step id
+and the flag are concrete in the printed text. On a run bound to a conductor,
+`step annotate` also requires the conductor token (step.go:1176), which the
+operator supplies as for any other conductor-gated verb.
+Rendered for a fixture whose second writer recorded in a worktree (one finding),
+as the engine prints it:
 
 ```
-integration-unverified: STEP-12 implement@0: sha 3f9a2c1b7e04 (unintegrated) in /repo/.claude/worktrees/wf_ab12; cherry-pick each commit onto the shared branch, or `step annotate STEP-12 --integrated-sha` for a hand-resolved pick, then resolve with --as retry
+integration-unverified: STEP-12 implement@0: sha 3f9a2c1b7e04 (unintegrated) in /repo/.claude/worktrees/wf_ab12 | cherry-pick each commit onto the shared branch, or for a hand-resolved pick run `step annotate STEP-12 --integrated-sha <branch-sha>`, then resolve with --as retry
+```
+
+As the operator runs it after the pick, with `<branch-sha>` replaced by the `git rev-parse HEAD` output:
+
+```
+step annotate STEP-12 --integrated-sha 9b1d4e7a02c65f83a0d1e4b7c92f5a6830de1b74
+```
+
+Rendered for a fixture with two unintegrated writers, the second a `cherry-error`
+(two findings, one clause each), as the engine prints it:
+
+```
+integration-unverified: STEP-12 implement@0: sha 3f9a2c1b7e04 (unintegrated) in /repo/.claude/worktrees/wf_ab12; STEP-15 implement@0: sha 8d41e0a96c52 (cherry-error) | cherry-pick each commit onto the shared branch, or for a hand-resolved pick run `step annotate STEP-12 --integrated-sha <branch-sha>`, `step annotate STEP-15 --integrated-sha <branch-sha>`, then resolve with --as retry
+```
+
+As the operator runs it after the pick (one command per hand-resolved finding):
+
+```
+step annotate STEP-12 --integrated-sha 9b1d4e7a02c65f83a0d1e4b7c92f5a6830de1b74
+step annotate STEP-15 --integrated-sha 9b1d4e7a02c65f83a0d1e4b7c92f5a6830de1b74
 ```
 
 The park stops the phase: the "no step of the run is parked `waiting-human`"
@@ -968,13 +1005,13 @@ second write-class step recorded its `issue.diff` with a `head` committed in a
 worktree and never cherry-picked onto the shared branch, `step claim
 review@0#0` returns CONFLICT, the row is `waiting-human` with `park_class`
 `integration-unverified` and a `park_reason` equal to the §3.1 rendering for
-that step and that head byte for byte, the run has no `run.diff` artifact, the
+that step and that head, with the literal `<branch-sha>` token, byte for byte, the run has no `run.diff` artifact, the
 row has no lease (`owner` empty, `attempt` unchanged), and `next` offers no
 run-scoped row; after the commit is cherry-picked onto the shared branch and
 `step resolve review@0#0 --as retry`, the next `step claim review@0#0` succeeds
 and its `run.diff` body contains the picked change; on the same fixture with
 the second writer's head hand-resolved onto the branch (no patch match),
-`step annotate STEP-N --integrated-sha <branch sha>` followed by `--as retry`
+the §3.1 remedy `step annotate STEP-N --integrated-sha <branch-sha>` (with the conductor token on a conductor-bound run) followed by `--as retry`
 also lets the claim succeed; and on a dispatch-driven fixture whose close
 recorded every head in `integration.checked`, the claim's `IsAncestorFn` and
 `PatchContainedFn` seams are called zero times; a
