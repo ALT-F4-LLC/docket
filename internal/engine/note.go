@@ -27,7 +27,7 @@ import (
 //
 // `run note add` records the statement ONCE against the run. Context assembly
 // reads it as its sixth source, the default template renders it as
-// `== RUN NOTE N` beside the request, and `step context` carries it as
+// `== RUN NOTE N (authority: K)` beside the request, and `step context` carries it as
 // `notes` so a contract can name it. It is append-only and event-logged,
 // like every other post-activation move of a packet's premises (repin, scope
 // refresh): what a worker was told is part of the record.
@@ -46,6 +46,10 @@ const RunNoteMaxBytes = 16 << 10
 type RunNote struct {
 	ID   int    `json:"id"`
 	Text string `json:"text"`
+	// Authority is the authority the writer recorded the note under, operator
+	// or conductor, and RunNoteAuthorityUnknown for a note whose row stores
+	// neither. It never comes from Text, which may claim any authority.
+	Authority string `json:"authority"`
 	// RecordedAtMS dates the note, so a reader of a packet can tell a note
 	// recorded before dispatch from one added mid-run.
 	RecordedAtMS int64 `json:"recorded_at_ms"`
@@ -115,7 +119,7 @@ func AddRunNote(conn *sql.DB, runID int, token string, under Authority, text str
 	}
 
 	id, err := db.InsertRunNoteTx(tx, db.RunNote{
-		RunID: runID, Text: text, CreatedAtMS: nowMS,
+		RunID: runID, Text: text, Authority: under.Kind, CreatedAtMS: nowMS,
 	})
 	if err != nil {
 		return nil, err
@@ -137,7 +141,23 @@ func AddRunNote(conn *sql.DB, runID int, token string, under Authority, text str
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("recording the run note: %w", err)
 	}
-	return &RunNote{ID: id, Text: text, RecordedAtMS: nowMS}, nil
+	return &RunNote{ID: id, Text: text, Authority: under.Kind, RecordedAtMS: nowMS}, nil
+}
+
+// RunNoteAuthorityUnknown labels a note whose stored authority is not one a
+// writer can record: a row written before the column existed stores "", and
+// nothing infers an authority for it.
+const RunNoteAuthorityUnknown = "unknown"
+
+// runNoteFromRow is the one conversion from a stored note to its read shape.
+// A stored authority outside ParseRunNoteAuthority's set reads as unknown
+// rather than verbatim, so no stored value reaches a packet header unchecked.
+func runNoteFromRow(n db.RunNote) RunNote {
+	authority := n.Authority
+	if _, err := ParseRunNoteAuthority(authority); err != nil {
+		authority = RunNoteAuthorityUnknown
+	}
+	return RunNote{ID: n.ID, Text: n.Text, Authority: authority, RecordedAtMS: n.CreatedAtMS}
 }
 
 // ParseRunNoteAuthority turns `--authority` into the authority a run note is
@@ -176,7 +196,7 @@ func ListRunNotes(conn *sql.DB, runID int) ([]RunNote, error) {
 	}
 	out := make([]RunNote, 0, len(rows))
 	for _, n := range rows {
-		out = append(out, RunNote{ID: n.ID, Text: n.Text, RecordedAtMS: n.CreatedAtMS})
+		out = append(out, runNoteFromRow(n))
 	}
 	return out, nil
 }

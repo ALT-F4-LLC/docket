@@ -641,7 +641,7 @@ func contextNotes(tx *sql.Tx, runID int) ([]RunNote, error) {
 	}
 	out := make([]RunNote, 0, len(rows))
 	for _, n := range rows {
-		out = append(out, RunNote{ID: n.ID, Text: n.Text, RecordedAtMS: n.CreatedAtMS})
+		out = append(out, runNoteFromRow(n))
 	}
 	return out, nil
 }

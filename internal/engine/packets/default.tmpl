@@ -23,7 +23,7 @@ issue.diff base: {{.DiffBase}}
 {{.Issue.BodySnapshot}}
 {{- range .Notes}}
 
-== RUN NOTE {{.ID}}
+== RUN NOTE {{.ID}} (authority: {{.Authority}})
 {{.Text}}
 {{- end}}
 {{range .Files}}
