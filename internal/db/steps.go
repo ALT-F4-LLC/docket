@@ -508,6 +508,16 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 func ClaimStepTx(
 	tx *sql.Tx, id int, owner string, ttlMS, nowMS int64,
 ) (token string, lease *model.Lease, err error) {
+	return ClaimStepWithRecoveryTx(tx, id, owner, "", ttlMS, nowMS)
+}
+
+// ClaimStepWithRecoveryTx is ClaimStepTx for a claimant that supplies a
+// recovery secret. The step row keeps only model.HashToken(recoverySecret) in
+// `recovery_hash`, or NULL when the secret is empty. Every claim writes the
+// column, so a hash never outlives the lease it was claimed with.
+func ClaimStepWithRecoveryTx(
+	tx *sql.Tx, id int, owner, recoverySecret string, ttlMS, nowMS int64,
+) (token string, lease *model.Lease, err error) {
 	if owner == "" {
 		return "", nil, fmt.Errorf("claiming step: owner must not be empty")
 	}
@@ -518,6 +528,14 @@ func ClaimStepTx(
 	lease, err = leaseSteps.claimTx(tx, id, owner, hash, nowMS+ttlMS, nowMS)
 	if err != nil {
 		return "", nil, err
+	}
+	var recoveryHash sql.NullString
+	if recoverySecret != "" {
+		recoveryHash = sql.NullString{String: model.HashToken(recoverySecret), Valid: true}
+	}
+	if _, err := tx.Exec(`UPDATE steps SET recovery_hash = ? WHERE id = ?`,
+		recoveryHash, id); err != nil {
+		return "", nil, fmt.Errorf("storing the recovery hash: %w", err)
 	}
 	return token, lease, nil
 }

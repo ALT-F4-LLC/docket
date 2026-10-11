@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 42
+const currentSchemaVersion = 43
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -212,6 +212,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	40: migrateV39ToV40,
 	41: migrateV40ToV41,
 	42: migrateV41ToV42,
+	43: migrateV42ToV43,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3182,6 +3183,42 @@ func migrateV41ToV42(tx *sql.Tx) error {
 	return nil
 }
 
+// v43AddedColumns is v43's whole schema change: `recovery_hash` on `steps`,
+// the SHA-256 of the recovery secret the current lease was claimed with, the
+// `token_hash` discipline: the secret itself is never stored. NULL means the
+// claim supplied no secret, so it has no default and no back-fill.
+var v43AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "recovery_hash",
+		`ALTER TABLE steps ADD COLUMN recovery_hash TEXT`},
+}
+
+// v43ColumnSentinels are the columns the rewind guard probes, the v42 form:
+// v43 adds no table and no index, so a database stamped 43 by a binary built
+// mid-change carries every v42 sentinel and `recovery_hash` never arrives.
+var v43ColumnSentinels = []struct{ table, column string }{
+	{"steps", "recovery_hash"},
+}
+
+// migrateV42ToV43 adds `steps.recovery_hash`. It back-fills nothing: a lease
+// live across the upgrade was claimed without a secret and reads NULL. It
+// probes before the ALTER, so it stays re-runnable.
+func migrateV42ToV43(tx *sql.Tx) error {
+	for _, col := range v43AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v42 to v43: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v42 to v43: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -4032,6 +4069,24 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 41
+				break
+			}
+		}
+	}
+
+	// The v43 guard, in the same COLUMN form as v42 and for its reason: v43
+	// adds one column and no table, so a database stamped 43 by a binary built
+	// mid-change carries every v42 sentinel and `steps.recovery_hash` never
+	// arrives.
+	if version >= 43 {
+		for _, col := range v43ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v43 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 42
 				break
 			}
 		}
