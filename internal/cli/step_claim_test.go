@@ -18,6 +18,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
@@ -286,8 +287,22 @@ func assertUnclaimed(t *testing.T, conn *sql.DB, stepID int) {
 func TestStepClaimTakesNoSecretOnArgv(t *testing.T) {
 	want := []string{"cost-multiplier", "executor", "metadata", "owner", "render", "template", "ttl"}
 
+	// Executing or rendering the package-global command merges the root's
+	// persistent flags into Flags() and adds cobra's --help. Do both first, as
+	// an earlier test or iteration may have, so the result cannot depend on order.
+	stepClaimCmd.InitDefaultHelpFlag()
+	usage := stepClaimCmd.UsageString()
+
+	// cobra's own --help is not part of the claim's surface. The annotation, not
+	// the name, identifies it, so a claim flag named help is still pinned.
+	addedByCobra := func(name string) bool {
+		f := stepClaimCmd.Flags().Lookup(name)
+		return f != nil && len(f.Annotations[cobra.FlagSetByCobraAnnotation]) > 0
+	}
+
 	var registered []string
-	stepClaimCmd.Flags().VisitAll(func(f *pflag.Flag) { registered = append(registered, f.Name) })
+	stepClaimCmd.LocalFlags().VisitAll(func(f *pflag.Flag) { registered = append(registered, f.Name) })
+	registered = slices.DeleteFunc(registered, addedByCobra)
 	sort.Strings(registered)
 	if !slices.Equal(registered, want) {
 		t.Errorf("step claim flags = %v, want exactly %v: no flag may carry the "+
@@ -295,7 +310,6 @@ func TestStepClaimTakesNoSecretOnArgv(t *testing.T) {
 	}
 
 	// The command's own "Flags:" block; "Global Flags:" are the root's.
-	usage := stepClaimCmd.UsageString()
 	_, local, found := strings.Cut(usage, "\nFlags:\n")
 	if !found {
 		t.Fatalf("step claim --help has no Flags section:\n%s", usage)
@@ -310,8 +324,7 @@ func TestStepClaimTakesNoSecretOnArgv(t *testing.T) {
 			}
 		}
 	}
-	// cobra adds --help itself; it is not part of the claim's own surface.
-	listed = slices.DeleteFunc(listed, func(n string) bool { return n == "help" })
+	listed = slices.DeleteFunc(listed, addedByCobra)
 	sort.Strings(listed)
 	if !slices.Equal(listed, want) {
 		t.Errorf("step claim --help lists %v, want exactly %v", listed, want)
