@@ -6,6 +6,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // DKT-55/DKT-80: `next` must never answer with a snapshot that disagrees
@@ -122,6 +123,110 @@ func TestNextDoesNotRecomputeWhenNothingRouted(t *testing.T) {
 	}
 	if len(ready) != 1 || ready[0] != "implement@0" {
 		t.Errorf("ready rows = %v, want exactly [implement@0]", ready)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// `next` drives engine-run lifecycles to quiescence
+// ---------------------------------------------------------------------------
+
+// The three tests below are dispatch_test.go's cascade trio asked of `next`,
+// over the same fixtures: an action step whose routing readies a second action
+// step and a vote step. One pass over the first offer's ready prefix drove
+// `reduce@0`, then re-rendered the offer with `rereduce@0` as a ready action
+// row nothing but the engine can run and `poll@0` as a ready vote row with no
+// ballot — each stranded until the next poll. `next` now drives the
+// re-rendered offer again until a pass routes nothing.
+
+// TestNextDrivesACascadedActionStep: the second action has run inside the
+// same call, and the answer carries no ready action row for it.
+func TestNextDrivesACascadedActionStep(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	answer, err := e.NextSteps(conn, runID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+
+	if got := stepStatus(t, conn, "rereduce@0"); got != db.StepDone {
+		t.Errorf("rereduce@0 is %q after one next, want %q — reduce@0's routing "+
+			"readied it inside the same call", got, db.StepDone)
+	}
+	for _, row := range answer.Steps {
+		if row.Instance == "rereduce@0" && row.Kind == workflow.ClassAction &&
+			row.Status == db.StepReady {
+			t.Errorf("the answer carries rereduce@0 as a ready action row; " +
+				"no relay will ever execute it")
+		}
+	}
+}
+
+// TestNextOpensACascadedVoteProposal: the vote step the routing readied has
+// its ballot open by the time the call answers, and its row says which.
+func TestNextOpensACascadedVoteProposal(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	answer, err := e.NextSteps(conn, runID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+
+	poll, err := db.GetStep(conn, stepIDByInstance(t, conn, "poll@0"))
+	testsupport.Must(t, err, "reading poll@0: %v", err)
+	id, err := findVoteProposal(conn, poll)
+	testsupport.Must(t, err, "finding poll@0's proposal: %v", err)
+	if id == 0 {
+		t.Fatal("poll@0 has no proposal after the next that readied it")
+	}
+	proposal, err := db.GetProposal(conn, id)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if proposal.Status != model.ProposalStatusOpen {
+		t.Errorf("poll@0's proposal is %q, want %q — phase 2 opens a ballot, "+
+			"nothing in this call casts on it", proposal.Status, model.ProposalStatusOpen)
+	}
+	var pollRow *model.StepRow
+	for i := range answer.Steps {
+		if answer.Steps[i].Instance == "poll@0" {
+			pollRow = &answer.Steps[i]
+		}
+	}
+	if pollRow == nil {
+		t.Fatalf("the answer %v carries no poll@0", instancesIn(answer))
+	}
+	if pollRow.Status != db.StepReady {
+		t.Errorf("poll@0 row status = %q, want %q", pollRow.Status, db.StepReady)
+	}
+	if want := model.FormatProposalID(id); pollRow.Proposal != want {
+		t.Errorf("poll@0 row proposal = %q, want %q", pollRow.Proposal, want)
+	}
+}
+
+// TestNextRunsAnUncascadedActionOnce: with one ready action whose routing
+// readies nothing engine-run, the call executes it exactly once — the
+// re-derived pass finds it routed and drives nothing.
+func TestNextRunsAnUncascadedActionOnce(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(extendDrivesSrc), "extend-drives.toml")
+	issue := createIssue(t, conn, "uncascaded", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+	counter := countActions(e)
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	approveDecide(t, conn, e)
+
+	_, err = e.NextSteps(conn, run.ID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+
+	if got := counter.runs["reduce@0"]; got != 1 {
+		t.Errorf("reduce@0 ran %d times during next, want 1", got)
+	}
+	if len(counter.runs) != 1 {
+		t.Errorf("actions run = %v, want only reduce@0", counter.runs)
 	}
 }
 

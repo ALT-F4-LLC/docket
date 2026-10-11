@@ -191,7 +191,7 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	//
 	// Shared with `dispatch open` (readyRows, dispatch.go) rather than
 	// reimplemented here — P1's one code path. Sharing it also means the
-	// re-derived pass below, after a driver routes something, cannot drift
+	// re-derived passes below, after a driver routes something, cannot drift
 	// from this one's ordering, truncation, or staging rules.
 	rows, total, ready, err := readyRows(sched, ttls, limit)
 	if err != nil {
@@ -208,86 +208,115 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// (§8.1), and an action driven early would run against inputs that do not
 	// exist yet. The ready prefix is read off the rendered status rather than
 	// re-asking the predicate, so the drivers act on exactly the set this
-	// response calls ready.
+	// response calls ready — on every pass of the loop below, each of which
+	// re-renders the offer before it drives.
 	ready = readyOnly(rows, ready)
 
-	// ---- The vote lifecycle (gates-trust §8.1 phases 2, 4, and 5). ---------
+	// ---- The engine-run lifecycles, driven to quiescence. ------------------
 	//
-	// AFTER the commit, because the proposal machinery opens its own
-	// transactions and internal/db caps the pool at one connection — calling it
-	// from inside the transaction above would deadlock rather than fail.
+	// AFTER the commit, because the proposal machinery and the action saga
+	// open their own transactions and internal/db caps the pool at one
+	// connection — calling either from inside the transaction above would
+	// deadlock rather than fail.
 	//
 	// `next` is the driver because §8.1 phase 2's trigger is "the first engine
 	// invocation that observes the step ready", and this is that invocation.
 	// Nothing is scheduled and no daemon watches: the lifecycle advances when
 	// somebody asks what is ready, which is the same laziness the saga's resume
-	// uses.
-	opened, voteRouted, err := e.driveVoteSteps(
-		conn, defs, pendingVoteSteps(sched), ready, sched.holdTally, nowMS)
-	if err != nil {
-		return nil, err
-	}
-	// The proposal a phase-2 open just created, onto the rows this call already
-	// rendered — the scheduler's snapshot predates it by construction. Keyed by
-	// (issue, instance), not instance alone (DKT-65): two issues' vote steps
-	// can render the identical instance string. Superseded below when a driver
-	// routed something and the whole snapshot is re-derived — this patch is
-	// what a plain phase-2 open (no resolution yet, so no recompute) leaves in
-	// place.
-	for i := range rows {
-		key := voteStepKey{Issue: rows[i].Issue, Instance: rows[i].Instance}
-		if id := opened[key]; id != 0 && rows[i].Proposal == "" {
-			rows[i].Proposal = model.FormatProposalID(id)
-		}
-	}
-
-	// ---- The action lifecycle (§6.15 as amended). ----------------
+	// uses. The action lifecycle (§6.15 as amended) rides in the same slot for
+	// the same reason: an action step is the engine's own work, and `next` is
+	// the invocation that observes it ready. A dispatcher never claims one —
+	// `claim` refuses — so if `next` did not drive them, every run in the
+	// fixture would stop dead at `reconcile` with nothing in the system able to
+	// move it.
 	//
-	// The SAME laziness, for the same reason, in the same slot: an action step
-	// is the engine's own work, and `next` is the invocation that observes it
-	// ready. A dispatcher never claims one — `claim` refuses — so if `next` did
-	// not drive them, every run in the fixture would stop dead at `reconcile`
-	// with nothing in the system able to move it.
-	actionRouted, err := e.driveActionSteps(conn, ready, nowMS)
-	if err != nil {
-		return nil, err
-	}
-
-	// ---- DKT-55: read-your-writes. -----------------------------------------
-	//
-	// The rows above are the readiness pass's OWN committed snapshot, taken
-	// before either driver ran (the pool-of-one ordering the vote-lifecycle
-	// comment explains). A driver that actually routed something — a tally
-	// resolved, an action ran — leaves that snapshot stale: it can still say
-	// `ready` for a step this same call just decided, and it cannot show a
-	// step that only became ready because a routed hold un-defered its
-	// aggregate. RUN-4 measured the consequence: a relay misread a decided
-	// gate as undecided and a strict conductor improvised a dispatch to
-	// "force" routing that had already happened.
-	//
-	// Gated on the drivers' own report of whether they routed anything, so the
-	// ordinary call — nothing for either driver to advance — still pays
-	// exactly the one scheduler pass above. The connection-pool cap of 1 rules
-	// out a second pass on EVERY call, not on the routed ones, which is the
-	// distinction this branch exists to make.
+	// A LOOP, for drive.go's reason: routing cascades. An action's routing
+	// readies the action behind it, or a vote step whose ballot phase 2 must
+	// open, and one pass over the first offer's ready prefix left such a step
+	// rendered `ready` with no execution and no proposal until the next poll —
+	// a one-poll gap for a vote row, and for an action row a gap no relay can
+	// close, since nothing but the engine may run one. Each pass drives the
+	// ready prefix of the offer as it stands; a pass that routed anything
+	// re-derives the offer (DKT-55, below) and drives again, until a pass
+	// routes nothing. The pass count is bounded by the run's step count plus
+	// one, as DriveRunLifecycles bounds its own: every routing pass moves at
+	// least one step off `ready`, so a hypothetical non-converging chain is an
+	// engine fault the bound turns from a hang into a finished call. A held
+	// step a pass materializes is outside that count and need not be in it:
+	// nobody decides it inside this call, so it routes nothing. The bound stops
+	// the DRIVING and never the re-derivation, so the rows returned always
+	// postdate the last routing this call performed.
 	loopHeld := sched.LoopHoldReason()
 	budgetHeld := sched.BudgetHoldReason()
 	unroutedHeld := sched.UnroutedHoldReason()
-	if voteRouted || actionRouted {
+	snap := sched
+	for pass := 0; ; pass++ {
+		// ---- The vote lifecycle (gates-trust §8.1 phases 2, 4, and 5). -----
+		opened, voteRouted, err := e.driveVoteSteps(
+			conn, defs, pendingVoteSteps(snap), ready, snap.holdTally, nowMS)
+		if err != nil {
+			return nil, err
+		}
+		// The proposal a phase-2 open just created, onto the rows this pass
+		// rendered — the snapshot predates it by construction. Keyed by
+		// (issue, instance), not instance alone (DKT-65): two issues' vote
+		// steps can render the identical instance string. Superseded when the
+		// pass routed something and the whole snapshot is re-derived — this
+		// patch is what a plain phase-2 open (no resolution yet, so no
+		// recompute) leaves in place.
+		for i := range rows {
+			key := voteStepKey{Issue: rows[i].Issue, Instance: rows[i].Instance}
+			if id := opened[key]; id != 0 && rows[i].Proposal == "" {
+				rows[i].Proposal = model.FormatProposalID(id)
+			}
+		}
+
+		// ---- The action lifecycle (§6.15 as amended). ----------------------
+		actionRouted, err := e.driveActionSteps(conn, ready, nowMS)
+		if err != nil {
+			return nil, err
+		}
+		if !voteRouted && !actionRouted {
+			break
+		}
+
+		// ---- DKT-55: read-your-writes. -------------------------------------
+		//
+		// The rows above are the readiness pass's OWN committed snapshot, taken
+		// before either driver ran (the pool-of-one ordering explained above).
+		// A driver that actually routed something — a tally resolved, an
+		// action ran — leaves that snapshot stale: it can still say `ready`
+		// for a step this same call just decided, and it cannot show a step
+		// that only became ready because a routed hold un-defered its
+		// aggregate. RUN-4 measured the consequence: a relay misread a decided
+		// gate as undecided and a strict conductor improvised a dispatch to
+		// "force" routing that had already happened.
+		//
+		// Gated on the drivers' own report of whether they routed anything
+		// (the break above), so the ordinary call — nothing for either driver
+		// to advance — still pays exactly the one scheduler pass above. The
+		// connection-pool cap of 1 rules out a second pass on EVERY call, not
+		// on the routed ones, which is the distinction the break exists to
+		// make.
 		fresh, err := readySnapshot(conn, runID, defs, nowMS)
 		if err != nil {
 			return nil, err
 		}
-		rows, total, _, err = readyRows(fresh, ttls, limit)
+		rows, total, ready, err = readyRows(fresh, ttls, limit)
 		if err != nil {
 			return nil, err
 		}
+		ready = readyOnly(rows, ready)
 		// The re-derived snapshot's own loop and budget holds ride back with
-		// it — the first pass's are stale for the same reason its rows were
+		// it — the previous pass's are stale for the same reason its rows were
 		// (DKT-61, DKT-242, DKT-470).
 		loopHeld = fresh.LoopHoldReason()
 		budgetHeld = fresh.BudgetHoldReason()
 		unroutedHeld = fresh.UnroutedHoldReason()
+		snap = fresh
+		if pass >= len(sched.Steps()) {
+			break
+		}
 	}
 
 	// §6.3's closing paragraph: the refusal reports `CondHeadroom`, and `next`
@@ -306,9 +335,10 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 
 // driveActionSteps runs every ready action step engine-side, and reports
 // whether it actually ran one — the DKT-55 signal NextSteps uses to decide
-// whether the rows it already rendered need re-deriving. Every action it
-// drives moves that step's status away from the `ready` its row still
-// claims, so any run through the loop body makes the prior snapshot stale.
+// whether the rows it already rendered need re-deriving and driving again.
+// Every action it drives moves that step's status away from the `ready` its
+// row still claims, so any run through the loop body makes the prior snapshot
+// stale.
 //
 // A step already in the saga is left to the ordinary resume — RunActionStep is
 // idempotent, but skipping the call keeps a `next` over a held step from
@@ -366,11 +396,12 @@ func (e *Engine) driveActionSteps(conn *sql.DB, ready []*db.Step, nowMS int64) (
 // voter needs.
 //
 // It also returns whether phase 5 routed a step — the DKT-55 signal
-// NextSteps uses to decide the rows it already rendered need re-deriving.
-// Opening a proposal (phase 2) does not set it: the row a fresh proposal
-// belongs to is still genuinely ready, and the patch above already carries
-// its id. Only routing does, since it moves the step off `ready` for real
-// and can un-defer an aggregate that readies a step this call never saw.
+// NextSteps uses to decide the rows it already rendered need re-deriving and
+// driving again. Opening a proposal (phase 2) does not set it: the row a
+// fresh proposal belongs to is still genuinely ready, and the patch above
+// already carries its id. Only routing does, since it moves the step off
+// `ready` for real and can un-defer an aggregate that readies a step this
+// call never saw.
 func (e *Engine) driveVoteSteps(
 	conn *sql.DB, defs map[int]*workflow.Definition, candidates, ready []*db.Step,
 	tally holdTally, nowMS int64,
