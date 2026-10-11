@@ -3,13 +3,13 @@
 # diff-scope — refuse a change whose working-tree footprint exceeds what its
 # track promised.
 #
-# Wired as `diff-scope-docs`, `diff-scope-trivial` and `diff-scope-small` on
-# the implement and fix steps of docs-only, trivial-change and small-change
-# (src/user/docket/config/workflows/). Those tracks bind on a LABEL alone:
-# `docs-only`, `trivial`, `small`. Nothing in the engine reads the diff, so
-# before this gate an issue labelled docs-only could ship a code change past
-# document-only gates (no build, tests, secret-scan, vuln-scan, threat model
-# or security vote), and a 400-line change labelled trivial met zero judges.
+# Wired as the Makefile targets `diff-scope-docs`, `diff-scope-trivial` and
+# `diff-scope-small`, which invoke this script with `docs-only`, `trivial` and
+# `small`. Those tracks bind on a LABEL alone. Nothing in the engine reads the
+# diff, so before this gate an issue labelled docs-only could ship a code
+# change past document-only gates (no build, tests, secret-scan, vuln-scan,
+# threat model or security vote), and a 400-line change labelled trivial met
+# zero judges.
 # The plan skill's sizing rule describes the footprint each label promises;
 # this script is the mechanical half of that promise.
 #
@@ -26,9 +26,7 @@
 #   docs-only  every touched path is a document (see is_doc below);
 #   trivial    at most one path, no added or deleted file, at most
 #              TRIVIAL_MAX_LINES changed lines (insertions + deletions);
-#   small      at most two paths, all in one directory, no added file; a
-#              workflow file and its same-name changelog count as one
-#              directory (see is_workflow_changelog_pair).
+#   small      at most two paths, all in one directory, no added file.
 # Every track: a touched path matching a line of the optional repo-local
 # pattern file .docket/scope-control-paths (one shell glob per line, `#`
 # comments) fails — a change under a control class never rides a light track,
@@ -109,25 +107,6 @@ is_doc() { # <path>
         README*|LICENSE*|LICENCE*|CHANGELOG*|CONTRIBUTING*|CODEOWNERS|NOTICE*|AUTHORS*) return 0 ;;
     esac
     return 1
-}
-
-# A workflow version bump edits the workflow file and its version history,
-# which lives in a sibling directory; small treats that exact pair as one unit.
-WORKFLOW_DIR=src/user/docket/config/workflows
-CHANGELOG_DIR=src/user/docket/config/changelogs
-is_workflow_changelog_pair() { # <path> <path>
-    local p workflow changelog name
-    for p in "${deleted[@]:-}"; do
-        [ "$p" != "$1" ] && [ "$p" != "$2" ] || return 1
-    done
-    case "$1" in
-        "$WORKFLOW_DIR"/*) workflow="$1" changelog="$2" ;;
-        *) workflow="$2" changelog="$1" ;;
-    esac
-    name=${workflow#"$WORKFLOW_DIR"/}
-    name=${name%.toml}
-    case "$name" in ''|*/*) return 1 ;; esac
-    [ "$workflow" = "$WORKFLOW_DIR/$name.toml" ] && [ "$changelog" = "$CHANGELOG_DIR/$name.md" ]
 }
 
 # ---- collect the footprint ------------------------------------------------
@@ -230,8 +209,7 @@ case "$TRACK" in
         [ "${#added[@]}" -eq 0 ] || reasons+=("added file(s): ${added[*]}; small adds no file")
         if [ "$nfiles" -eq 2 ]; then
             d1=$(dirname "${paths[0]}"); d2=$(dirname "${paths[1]}")
-            [ "$d1" = "$d2" ] || is_workflow_changelog_pair "${paths[0]}" "${paths[1]}" \
-                || reasons+=("paths span two directories ($d1, $d2); small stays in one")
+            [ "$d1" = "$d2" ] || reasons+=("paths span two directories ($d1, $d2); small stays in one")
         fi
         ;;
 esac
