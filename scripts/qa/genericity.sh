@@ -71,6 +71,36 @@ BANNED=(
 # CONCEPTS, which is a judgment a reviewer makes. The words above are the ones
 # with no innocent reading in a flag, key, or template.
 
+# --- Admitted forms ----------------------------------------------------------
+#
+# Each entry is "<banned word> <ERE>": a form of that word core surface ships
+# on purpose, per the "Admitted forms" section of docs/design/genericity.md.
+# Matching is case-sensitive on the surface text. The scan deletes every
+# admitted match from a line before testing the banned word, so an admitted
+# form never shields another use of the word on the same line. Anything not
+# listed, including new prose such as "model routing" in an error string,
+# still fails.
+ADMITTED=(
+  # The run policy's routing key: `model = "..."` in a variant spec, and its
+  # key=value renderings in test and diagnostic text.
+  'model model *= *'
+  # The same key as a persisted JSON field and a TOML field.
+  'model (json|toml):"model[",]'
+  # The routing triple a seat resolves to.
+  'model model(/effort/variant|, effort)'
+  # The MODEL column header of the policy seat table.
+  'model ^"MODEL"$'
+  # Shipped policy help and error text naming the routing key.
+  'model still-forbidden model redirected through'
+  'model no permitted model reachable from'
+  # Exported identifiers of the internal/model package (MVC data model).
+  'model model\.[A-Z]'
+  # The retired config link-farm layout, a design sense of the word.
+  'model link-farm model'
+  # A seat name: the security threat-model step.
+  'model threat-model'
+)
+
 # --- Where core surface lives ------------------------------------------------
 SEARCH_PATHS=(
   internal
@@ -211,6 +241,54 @@ FIXTURE
 }
 extractor_selftest
 
+# banned_hits prints "<file>: <surface text>" for each line of a surface file
+# ("<file>\t<surface text>" per line) that still contains WORD once every
+# ADMITTED form of WORD is deleted from it. Only the text column is tested:
+# every file under internal/model/ would otherwise match `model` on its own
+# path and the check would report itself.
+banned_hits() {
+  local word="$1" surface="$2"
+  awk -F'\t' -v word="$word" '
+    BEGIN { pattern = "(^|[^A-Za-z0-9_])" tolower(word) "([^A-Za-z0-9_]|$)" }
+    FNR == NR {
+      sep = index($0, " ")
+      if (substr($0, 1, sep - 1) == word) admitted[++n] = substr($0, sep + 1)
+      next
+    }
+    {
+      text = $2
+      for (i = 1; i <= n; i++) gsub(admitted[i], " ", text)
+      if (tolower(text) ~ pattern) printf "%s: %s\n", $1, $2
+    }
+  ' <(printf '%s\n' "${ADMITTED[@]}") "$surface" || true
+}
+
+# --- Admission self-test -----------------------------------------------------
+#
+# A shipped form must be admitted, and a prose use of the word must stay a hit
+# even on a line that also carries an admitted form. FATAL otherwise: an
+# admission list that swallows prose turns the gate green while blind.
+admission_selftest() {
+  local fixture hits
+  fixture=$(mktemp "${TMPDIR:-/tmp}/genericity-admit.XXXXXX")
+  printf '%s\t%s\n' \
+    fixture.go '`json:"model,omitempty"`' \
+    fixture.go '"model=%q has no model routing"' > "$fixture"
+  hits=$(banned_hits model "$fixture")
+  rm -f "$fixture"
+  if printf '%s\n' "$hits" | grep -q 'omitempty'; then
+    printf 'FATAL: admission self-test — the shipped json:"model" tag was\n'
+    printf 'reported; the admitted forms are not being applied\n'
+    exit 1
+  fi
+  if ! printf '%s\n' "$hits" | grep -q 'model routing'; then
+    printf 'FATAL: admission self-test — prose "model routing" was admitted;\n'
+    printf 'an admitted form is shielding the rest of its line\n'
+    exit 1
+  fi
+}
+admission_selftest
+
 # template_lines treats an embedded template as surface in its entirety: every
 # byte is read by the first user to run `workflow init`, comments included.
 #
@@ -282,18 +360,7 @@ SURFACE_COUNT=$(grep -c '' "$SURFACE_FILE")
 printf "scanning %d lines of core surface\n\n" "$SURFACE_COUNT"
 
 for word in "${BANNED[@]}"; do
-  # Match against the surface TEXT only, never the file-path column this script
-  # carries for reporting. Every file under internal/model/ would otherwise
-  # match `model` on its own path and the check would report itself.
-  #
-  # awk splits on the tab separator written above, tests only field 2, and
-  # re-attaches the path for the lines that hit.
-  hits=$(
-    awk -F'\t' -v word="$word" '
-      BEGIN { pattern = "(^|[^A-Za-z0-9_])" tolower(word) "([^A-Za-z0-9_]|$)" }
-      tolower($2) ~ pattern { printf "%s: %s\n", $1, $2 }
-    ' "$SURFACE_FILE" || true
-  )
+  hits=$(banned_hits "$word" "$SURFACE_FILE")
 
   if [ -n "$hits" ]; then
     found_any=true

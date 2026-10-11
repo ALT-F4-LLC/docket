@@ -12,6 +12,28 @@ an opaque KV bag; ordered meaning comes from user-registered schemas; computatio
 beyond scheduling arithmetic are user-trusted commands. The stranger test for every
 verb: *a team that has never run an LLM should find it useful as documented.*
 
+## Admitted forms (repository amendment, 2026-10-10)
+
+This section is not part of the upstream extract. The run policy ships a variant
+routing key named `model`: an opaque string the engine copies from the policy to the
+step row and never interprets. The key is persisted (`json:"model,omitempty"` on step
+rows and voter assignments), so renaming it would break stored data. `scripts/qa/genericity.sh` therefore
+admits these forms of `model`, and only these:
+
+- the routing key: `model = "..."` in policy TOML, and `model=` or `model =` in
+  key/value renderings;
+- the key as a struct tag: `json:"model..."` and `toml:"model"`;
+- the routing triple: `model/effort/variant` and `model, effort`;
+- the `MODEL` column header of the policy seat table;
+- two shipped policy strings: "still-forbidden model redirected through" and "no
+  permitted model reachable from";
+- senses unrelated to agents: exported identifiers of the `internal/model` package,
+  the retired "link-farm model" config layout, and the `threat-model` seat name.
+
+Every other use of `model` in core surface still fails the gate, including new prose
+such as "model routing" in an error string. Admitting a new form means adding it here
+and to the gate's `ADMITTED` list in the same change.
+
 ## Out of scope (hard boundaries)
 
 No daemon; no network; no model calls; no prompt/agent vocabulary anywhere in core
