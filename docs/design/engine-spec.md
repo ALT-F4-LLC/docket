@@ -403,7 +403,10 @@ VALIDATION_ERROR on silent-drop cases (fires under `--json=v2` only; v1/human ou
 stays byte-identical per §9.8); idempotency keys on create verbs; millisecond
 timestamps + `seq`; error taxonomy extended once for all new verbs (NOT_FOUND,
 VALIDATION_ERROR, CONFLICT, AUTH_ERROR, STALE_LEASE, TIMEOUT, UNTRUSTED; `GONE`
-appended at stage 6 for the events read surface — DKT-33, 2026-08-05). Generic,
+appended at stage 6 for history that `events prune` removed: the events read
+surface (a `--since` cursor below the retained minimum) and the recorded-context
+read (`step context`, `step render`) after a prune removed the step's claim
+event — DKT-33, 2026-08-05). Generic,
 valuable standalone — and it deletes nine wrapper scripts in the reference instance's
 predecessor tooling.
 
