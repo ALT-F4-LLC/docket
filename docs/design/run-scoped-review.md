@@ -34,7 +34,7 @@ final review)" (line 63). The storage admits it, `steps.issue_id` is nullable
 | D2 | `run.diff` derivation | A committed read of the integration branch, recorded as a `run.diff` artifact at the claim of each run-scoped step that declares the input: the claim resolves the shared checkout's HEAD to one commit sha once, and a dedicated call computes `git diff <run.commit_sha> <head_sha> -- <union of the run's issue scopes>` between those two commits, with the round record `{base, head, sha256}` whose `head` is that same sha. Uncommitted changes and untracked files in `run.exec_root` are not part of the body. Never the union of issue diffs. |
 | D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V48b), so a rejection routes `waiting-human`; the resolutions that park supports, and the reason it carries, are decided in §3.3 and owned by phase 2. |
 | D4 | Register-time lint | V48: `[pipeline] scope`, when present, is `"issue"` or `"run"`, and a definition whose scope is `issue` has no step whose `inputs` names `run.diff`. V48a: a definition whose scope is `run` declares no `[match]` table, no step `when`, and no step input of an `issue.*` form. V48b (phase 1 and 2 only): a definition whose scope is `run` has no `loop = true` step, no `threshold`, `on_fail`, or `on_fail_routes` value equal to `fix-loop` or `fix-round`, and no step declaring `on_exhausted` or `serves`. |
-| D5 | Activation with no integration point | Activation is refused (`VALIDATION_ERROR`, inside the fat transaction, nothing written) when a run-scoped definition binds, some step of it declares `run.diff` or holds the tree, and the run's `exec_root` or `commit_sha` is empty. The refusal names the run, the definition, the empty field, and the two remedies: start the run from inside the checkout, or retire the run-scoped definition with `workflow deprecate`. |
+| D5 | Activation with no integration point | Activation is refused (`VALIDATION_ERROR`, inside the fat transaction, nothing written) when a run-scoped definition binds, some step of it declares `run.diff` or holds the tree, and the run's `exec_root` or `commit_sha` is empty. The refusal message is the fixed template in §3.5, with the run, the definition as `name@version`, and the empty field(s) substituted. |
 
 ## 3. Design
 
@@ -611,8 +611,40 @@ body has no checkout to write.
 The behavior: when a run-scoped definition binds and at least one of its steps
 declares `run.diff` or holds the tree (`holds_tree` unset or true), and the run's
 `exec_root` or `commit_sha` is empty, `activateTx` returns `validationErr` before
-any row is written, so the fat transaction rolls back whole. The message names
-the run, the definition as `name@version`, the empty field, and both remedies.
+any row is written, so the fat transaction rolls back whole. The message is the
+template below, a single line in the style of the engine's other activation
+refusals. It offers two remedies, worded as fixed text: start the run from
+inside the checkout, or retire the run-scoped definition with
+`docket workflow deprecate <name>@<version>`.
+
+```
+run <run> binds run-scoped workflow <name>@<version>, which reads run.diff or holds the tree, but the run has no integration point (<empty-fields>); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate <name>@<version>`
+```
+
+Substitutions: `<run>` is the run's display id (`RUN-7`); `<name>@<version>` is
+the bound run-scoped definition, written twice with the same value;
+`<empty-fields>` is one of three fixed strings chosen by which of the two
+fields is empty. Output for each branch, for run `RUN-7` bound to
+`final-review@1`:
+
+`exec_root` empty, `commit_sha` set:
+
+```
+run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (exec_root is empty); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate final-review@1`
+```
+
+`commit_sha` empty, `exec_root` set:
+
+```
+run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (commit_sha is empty); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate final-review@1`
+```
+
+Both empty:
+
+```
+run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (exec_root and commit_sha are empty); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate final-review@1`
+```
+
 A run-scoped definition with neither a `run.diff` reader nor a tree holder (a
 run-level human gate, say) binds and expands regardless; it needs no integration
 point.
@@ -855,8 +887,8 @@ the second writer's head hand-resolved onto the branch (no patch match),
 also lets the claim succeed; and on a dispatch-driven fixture whose close
 recorded every head in `integration.checked`, the claim's `IsAncestorFn` and
 `PatchContainedFn` seams are called zero times; a
-run started outside a checkout is refused at activation with the D5 message and
-leaves zero step rows; every existing bundle fixture is byte-identical; no
+run started outside a checkout is refused at activation with the D5 message (the §3.5 template, rendered for the
+empty field(s)) and leaves zero step rows; every existing bundle fixture is byte-identical; no
 operator surface renders `<PREFIX>-0`, or any `-0` issue id, for a run-scoped
 row: on that fixture `next`, `step list`, `step show`, `events list`, `run
 show`, and `run report` each show `review@0#0` under the §3.1 display rule,
