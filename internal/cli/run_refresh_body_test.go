@@ -12,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
+	"github.com/spf13/pflag"
 )
 
 // The engine half of the body refresh is pinned in
@@ -234,4 +235,93 @@ func TestRunRefreshBodyHelpStatesProperties(t *testing.T) {
 			t.Errorf("--help does not state the %s property (%q):\n%s", name, phrase, help)
 		}
 	}
+}
+
+// runRefreshBodyThroughRoot drives `docket run refresh-body <args>` through the
+// real root command, so the registered flags, Args rule and RunE closure are
+// what is exercised. Cobra keeps flag values across Execute calls, so every
+// flag goes back to its default afterwards.
+func runRefreshBodyThroughRoot(t *testing.T, args ...string) error {
+	t.Helper()
+	rootCmd.SetArgs(append([]string{"run", "refresh-body"}, args...))
+	defer func() {
+		rootCmd.SetArgs(nil)
+		reset := func(f *pflag.Flag) {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+		runRefreshBodyCmd.Flags().Visit(reset)
+		rootCmd.PersistentFlags().Visit(reset)
+	}()
+	return rootCmd.Execute()
+}
+
+// TestRunRefreshBodyThroughTheRootCommand pins the registered command itself:
+// the --issue and --reason flag names, the one-positional Args rule, and the
+// RunE closure handing the positional run ID to the verb body.
+func TestRunRefreshBodyThroughTheRootCommand(t *testing.T) {
+	const amended = "AC1: the operator's amended wording"
+	seeded := func(t *testing.T) (*sql.DB, int, int) {
+		t.Helper()
+		t.Setenv(TokenEnvVar, "")
+		conn := newVoteCreateStore(t)
+		runID, issueID := bodyFrozenIssueInLiveRun(t, conn)
+		_, err := conn.Exec(`UPDATE issues SET description = ? WHERE id = ?`,
+			amended, issueID)
+		testsupport.Must(t, err, "amending the description: %v", err)
+		return conn, runID, issueID
+	}
+
+	t.Run("no --issue", func(t *testing.T) {
+		conn, runID, issueID := seeded(t)
+		err := runRefreshBodyThroughRoot(t,
+			model.FormatRunID(runID), "--reason", "r")
+		assertRefreshCode(t, err, output.ErrValidation, "--issue")
+		assertBodyRefreshRefused(t, conn, runID, issueID)
+	})
+
+	t.Run("no --reason", func(t *testing.T) {
+		conn, runID, issueID := seeded(t)
+		err := runRefreshBodyThroughRoot(t,
+			model.FormatRunID(runID), "--issue", model.FormatID(issueID))
+		assertRefreshCode(t, err, output.ErrValidation, "--reason")
+		assertBodyRefreshRefused(t, conn, runID, issueID)
+	})
+
+	for name, positionals := range map[string]func(runID int) []string{
+		"zero positionals": func(int) []string { return nil },
+		"two positionals": func(runID int) []string {
+			return []string{model.FormatRunID(runID), model.FormatRunID(runID)}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, runID, issueID := seeded(t)
+			args := append(positionals(runID),
+				"--issue", model.FormatID(issueID), "--reason", "r")
+			err := runRefreshBodyThroughRoot(t, args...)
+			if err == nil || !strings.Contains(err.Error(), "accepts 1 arg") {
+				t.Fatalf("err = %v, want cobra's one-positional argument error", err)
+			}
+			assertBodyRefreshRefused(t, conn, runID, issueID)
+		})
+	}
+
+	t.Run("a valid invocation refreshes the positional run", func(t *testing.T) {
+		conn, runID, issueID := seeded(t)
+		err := runRefreshBodyThroughRoot(t, model.FormatRunID(runID),
+			"--issue", model.FormatID(issueID), "--reason", "r")
+		testsupport.Must(t, err, "run refresh-body: %v", err)
+		if body, _ := snapshotBody(t, conn, runID, issueID); body != amended {
+			t.Errorf("body snapshot = %q, want the live description %q", body, amended)
+		}
+		var n int
+		err = conn.QueryRow(
+			`SELECT COUNT(*) FROM events WHERE kind = ? AND run_id = ?`,
+			engine.EventIssueBodyRefreshed, runID).Scan(&n)
+		testsupport.Must(t, err, "counting refresh events: %v", err)
+		if n != 1 {
+			t.Errorf("%d %s event(s) on %s, want 1",
+				n, engine.EventIssueBodyRefreshed, model.FormatRunID(runID))
+		}
+	})
 }
