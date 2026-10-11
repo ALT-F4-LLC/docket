@@ -790,12 +790,18 @@ from ordinary expansion — instantiate at ordinal `k`, with `inputs` bound with
 ordinal `k` (falling back to the highest earlier ordinal per input), ordered by
 (declared position, sibling index, artifact id) — never event order. (4) When the loop
 body's gates pass, `after_loop` and its downstream chain re-instantiate at ordinal
-`k`; gates re-run; thresholds re-apply. Issue completion is evaluated over
+`k`; gates re-run; thresholds re-apply. A third set instantiates at `k` with the
+bodies: for each instantiated body whose `when` holds, the steps it can interpose —
+the triage panel its `on_fail` names, its `threshold` step-name routings, and its
+`on_exhausted` target — so a body failing at ordinal `k` >= 1 has a panel@`k` to
+suspend for; a body expanded `skipped` brings none. Issue completion is evaluated over
 highest-ordinal instances only. Prior instances and artifacts remain immutable and
 addressable; the ledger attributes every instance. There is no other loop construct.
 Predecessor satisfaction and issue completion resolve per step name over instances at
 the highest existing ordinal ≤ the consumer's (mirroring input binding);
-re-instantiation never spans steps outside the `after_loop` chain. *(Clarified
+re-instantiation never spans steps outside the `after_loop` chain, except the
+interposed targets of an instantiated body (the `on_fail` triage panel among them).
+*(Clarified
 2026-08-03, S3 stage review.)*
 
 **Cluster scoping** *(amended 2026-08-22, DKT-544)*: a `loop = true` body may declare
