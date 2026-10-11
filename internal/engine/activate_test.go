@@ -2965,3 +2965,67 @@ func TestReactivationKeepsAnInheritedPolicyPin(t *testing.T) {
 			result.NewPolicyPin)
 	}
 }
+
+// TestReactivationReportsNoPolicyPinForANewPacketFile: a re-activation that
+// pins only a newly bound workflow's packet file, with policy.toml inherited,
+// reports no new policy pin. The report keys on the policy.toml ref, so a new
+// contract never reads as a policy the waiting rows adopt.
+func TestReactivationReportsNoPolicyPinForANewPacketFile(t *testing.T) {
+	conn, configDir := configRepo(t)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, configDir, "workflows/auto-bug.toml", `
+[pipeline]
+name = "auto-bug"
+version = 1
+
+[match]
+kind = ["bug"]
+
+[[step]]
+name = "diagnose"
+executor = "w"
+emits = "out"
+after = []
+packet = ["contracts/late.md"]
+`)
+	writeConfigFile(t, configDir, "contracts/late.md", "the late workflow's contract\n")
+	writeConfigFile(t, configDir, "policy.toml", "opaque = \"original\"\n")
+
+	first := createIssue(t, conn, "first", "body", "task", nil)
+	run := startRun(t, conn, first)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "first activate: %v", err)
+	if policyPinRow(t, conn, run.ID) == nil {
+		t.Fatal("premise: the first activation must pin policy.toml")
+	}
+	for _, p := range pinsByKind(t, conn, run.ID, db.PinKindFile) {
+		if filepath.ToSlash(p.Ref) == "contracts/late.md" {
+			t.Fatal("premise: the unbound workflow's packet file must not be " +
+				"pinned at the first activation")
+		}
+	}
+
+	second := createIssue(t, conn, "late arrival", "late body", "bug", nil)
+	err = db.AddRunIssue(conn, run.ID, second)
+	testsupport.Must(t, err, "adding issue to an active run: %v", err)
+
+	result, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "re-activate: %v", err)
+	if !result.Reactivation {
+		t.Fatal("premise: the second activation must be a re-activation")
+	}
+
+	var latePinned bool
+	for _, p := range pinsByKind(t, conn, run.ID, db.PinKindFile) {
+		if filepath.ToSlash(p.Ref) == "contracts/late.md" {
+			latePinned = true
+		}
+	}
+	if !latePinned {
+		t.Error("re-activation did not pin the newly bound workflow's packet file")
+	}
+	if result.NewPolicyPin != nil {
+		t.Errorf("re-activation reports new policy pin %+v when it pinned only a "+
+			"packet file", result.NewPolicyPin)
+	}
+}
