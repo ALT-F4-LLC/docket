@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,6 +232,55 @@ func TestRepinAfterIntendedChange(t *testing.T) {
 	again.OnChange = func(Entry) error { calls++; return nil }
 	if res := f.add(t, again); !res.Idempotent || calls != 0 {
 		t.Errorf("a re-add with an unchanged file must be idempotent and unrecorded; idempotent=%t calls=%d", res.Idempotent, calls)
+	}
+}
+
+// TestRepinUpgradesALegacyEntry is the remedy the legacy warning names: re-running
+// the same add over an entry written before pinning existed pins the file's
+// current bytes, records and discloses the change from "none", and a later
+// edit to the script no longer matches.
+func TestRepinUpgradesALegacyEntry(t *testing.T) {
+	const body = "#!/bin/sh\nexit 0\n"
+
+	f := newPinFixture(t)
+	script := writeScript(t, t.TempDir(), "gate.sh", body)
+	argv := []string{script, "small"}
+	writeStoreFile(t, f.storePath, fmt.Sprintf(`version = 1
+
+[[entry]]
+name = "checks"
+argv = [%q, %q]
+argv_sha256 = %q
+repo = %q
+`, argv[0], argv[1], ArgvSHA256(argv), f.identity), storeFileMode)
+
+	if m := f.lookup(t, "checks", nil); !m.Matched || m.Warning == "" {
+		t.Fatalf("the fixture must be a legacy entry that matches with a warning; got %+v", m)
+	}
+
+	var recorded []Entry
+	res := f.add(t, AddRequest{
+		Name:     "checks",
+		Argv:     argv,
+		OnChange: func(e Entry) error { recorded = append(recorded, e); return nil },
+	})
+	pin := sha256Hex(body)
+	if res.Idempotent {
+		t.Error("pinning a legacy entry changes the store; it must not report itself idempotent")
+	}
+	if len(recorded) != 1 || recorded[0].Argv0SHA256 != pin {
+		t.Errorf("the upgrade must be recorded once with the file's hash %s; got %+v", pin, recorded)
+	}
+	want := fmt.Sprintf("re-pinned %s: argv0_sha256 none to %s", script, pin)
+	if disclosure := strings.Join(res.Warnings, "\n"); !strings.Contains(disclosure, want) {
+		t.Errorf("the disclosure must read %q; got %q", want, disclosure)
+	}
+	assertStoredPin(t, f.storePath, pin)
+
+	err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755)
+	testsupport.Must(t, err, "rewriting the script: %v", err)
+	if m := f.lookup(t, "checks", nil); m.Matched {
+		t.Errorf("after the upgrade a one-byte edit must be unmatched; got %+v", m)
 	}
 }
 
