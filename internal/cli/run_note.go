@@ -15,7 +15,7 @@ import (
 
 // `docket run note add|list` — DKT-1079. The dispatcher's channel into every
 // packet of a run: a statement recorded once against the run, rendered as
-// `== RUN NOTE N` beside the request in every packet the run renders from
+// `== RUN NOTE <id> (authority: <kind>)` beside the request in every packet the run renders from
 // then on, and carried by `step context` as `notes`.
 
 var runNoteCmd = &cobra.Command{
@@ -34,13 +34,19 @@ and each one rediscovered the failure and filed a duplicate.
 
 A run note is that channel. ` + "`run note add`" + ` records the statement once; every
 packet the run renders afterwards — every step, every issue, every round —
-carries it verbatim as a ` + "`== RUN NOTE N`" + ` section right after ` + "`== REQUEST`" + `,
-and ` + "`step context`" + ` exposes it as ` + "`notes`" + ` so a contract can name it. Notes are
-append-only and each is recorded as a ` + "`run-note-added`" + ` event carrying its text,
-so the feed says what every later worker was told.
+carries it verbatim as a ` + "`== RUN NOTE <id> (authority: <kind>)`" + ` section right
+after ` + "`== REQUEST`" + `, and ` + "`step context`" + ` exposes it as ` + "`notes`" + ` so a contract can
+name it. Notes are append-only and each is recorded as a ` + "`run-note-added`" + ` event
+carrying its text, so the feed says what every later worker was told.
+
+<kind> is operator or conductor, the authority the writer recorded with
+--authority, or unknown for a note stored without one. It comes from the note
+record, never from its text, and it states what the writer recorded, not a
+verified operator decision. ` + "`run note list`" + ` shows it beside each note.
 
 The shipped packet template renders notes; a custom ` + "`step render --template F`" + `
-renders them only where it ranges over ` + "`.Notes`" + ` (each has ` + "`.ID`" + ` and ` + "`.Text`" + `).`,
+renders them only where it ranges over ` + "`.Notes`" + ` (each has ` + "`.ID`" + `, ` + "`.Authority`" + `,
+and ` + "`.Text`" + `).`,
 }
 
 var runNoteAddCmd = &cobra.Command{
@@ -221,8 +227,9 @@ func runRunNoteList(cmd *cobra.Command, ref string, w *output.Writer) error {
 	return nil
 }
 
-// renderRunNotes is the listing's human form: one block per note, dated, the
-// text indented under its header so a multi-line note reads as one entry.
+// renderRunNotes is the listing's human form: one block per note, dated and
+// carrying the authority the packet header shows, the text indented under its
+// header so a multi-line note reads as one entry.
 func renderRunNotes(l runNoteListing) string {
 	if len(l.Notes) == 0 {
 		return fmt.Sprintf("%s has no notes", l.Run)
@@ -231,7 +238,7 @@ func renderRunNotes(l runNoteListing) string {
 	fmt.Fprintf(&b, "%s has %d note(s)", l.Run, len(l.Notes))
 	for _, n := range l.Notes {
 		when := time.UnixMilli(n.RecordedAtMS).UTC().Format(time.RFC3339)
-		fmt.Fprintf(&b, "\n  [%d] %s", n.ID, when)
+		fmt.Fprintf(&b, "\n  [%d] %s (authority: %s)", n.ID, when, n.Authority)
 		for _, line := range strings.Split(n.Text, "\n") {
 			fmt.Fprintf(&b, "\n      %s", line)
 		}

@@ -58,7 +58,8 @@ docket dispatch open|close|verify|abandon --run RUN-N
                                                 #   discrepancies exist; abandon unsticks
 docket run      note add|list RUN-N             # a standing statement recorded once
                                                 #   against the run, rendered as
-                                                #   `== RUN NOTE N` in EVERY packet the
+                                                #   `== RUN NOTE <id> (authority: <kind>)`
+                                                #   in EVERY packet the
                                                 #   run renders from then on and carried
                                                 #   by `context.notes` (DKT-1079)
 docket step     claim STEP-N                    # atomic; mints a capability token and
@@ -225,9 +226,14 @@ cares.)
 (or `--file F`, `-` for stdin) records a standing statement against a run — once —
 and states whose ruling it carries: `--authority` has no default, and
 `standing-grant` is refused. Every packet the run
-renders from then on carries it verbatim as a `== RUN NOTE N` section directly
-after `== REQUEST`, for every step of every issue; `step context` carries it as
-`context.notes`, so a contract can name it. It is the one steering channel that is
+renders from then on carries it verbatim as a `== RUN NOTE <id> (authority: <kind>)`
+section directly after `== REQUEST`, for every step of every issue; `step context`
+carries it as `context.notes`, so a contract can name it. `<kind>` is `operator` or
+`conductor`, as the writer recorded it, or `unknown` for a note stored without a
+recordable authority. It comes from the note record, never from the note's text,
+and states what the writer recorded rather than a verified operator decision. A
+custom `step render --template F` that ranges over `.Notes` reads each note's
+`.ID`, `.Authority`, and `.Text`. It is the one steering channel that is
 run-wide: `step resolve -m` reaches the step it rules on (and the round it
 authorizes), which is right for a ruling about one step's work and useless for a
 fact about the whole run — a required gate known to fail on clean HEAD, the issue
@@ -238,7 +244,8 @@ append-only (a changed ruling is a second note, rendered after the first), cappe
 at 16 KiB because each rides every packet, refused on a terminal run, and each is
 recorded as a `run-note-added` event carrying its text and an `authority` key whose
 value is `operator` or `conductor`, attributed human.
-`docket run note list RUN-N` reads them back in render order.
+`docket run note list RUN-N` reads them back in render order, each with its
+authority.
 
 **Guards.** `docket guard spawn|record|stop|gate` are deterministic allow/deny
 predicates over engine state for harness enforcement points (exit 0 allow / exit 2
@@ -840,7 +847,7 @@ a verdict is `unmatched` or timed out, null on ordinary pass/fail *(added
 `notes?` is the run's recorded notes (`docket run note add`, DKT-1079) in insertion
 order, present only when the run has at least one, so every bundle of a run without
 notes is byte-identical to before the member existed. `run note list RUN-N` and
-`run note add`'s answer carry the same `{id, text, recorded_at_ms}` shape.
+`run note add`'s answer carry the same `{id, text, authority, recorded_at_ms}` shape.
 
 `docket step context STEP-N` re-emits `context` read-only (no token required; local
 inspection). `--meta` on it reports per-section byte counts — the closure-size record

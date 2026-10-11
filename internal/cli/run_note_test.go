@@ -458,9 +458,19 @@ func TestRunNoteListCLI(t *testing.T) {
 	err = runRunNoteList(cmdWithDB(conn), runRef, w)
 	testsupport.Must(t, err, "run note list (human): %v", err)
 	out := buf.String()
-	for _, want := range []string{"2 note(s)", "first ruling", "second ruling", "      with a second line"} {
+	for _, want := range []string{"2 note(s)", "first ruling", "second ruling", "      with a second line", "(authority: operator)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the human listing lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunNoteHelpNamesTheAuthorityHeader: the help a template author reads
+// shows the header with its authority and names .Authority as a note field.
+func TestRunNoteHelpNamesTheAuthorityHeader(t *testing.T) {
+	for _, want := range []string{"== RUN NOTE <id> (authority: <kind>)", "`.Authority`"} {
+		if !strings.Contains(runNoteCmd.Long, want) {
+			t.Errorf("run note help lacks %q", want)
 		}
 	}
 }
