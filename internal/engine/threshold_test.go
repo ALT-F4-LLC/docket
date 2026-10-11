@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -949,4 +950,107 @@ func TestVoteThresholdCommittedNoMatchPasses(t *testing.T) {
 	if gate.ParkClass == db.ParkClassThresholdRouted {
 		t.Errorf("gate@0 park_class = %q, want no threshold park", gate.ParkClass)
 	}
+}
+
+// thresholdTriageSrc is triageSrc with a `threshold` on the panel whose
+// `fix-loop` predicate matches every approved cast set below. The mapping is
+// filled in so an approved panel retries the step it triaged.
+func thresholdTriageSrc() string {
+	src := strings.Replace(triageSrc, "APPROVED", workflow.TriageRetry, 1)
+	src = strings.Replace(src, "REJECTED", workflow.TriageAbandonIssue, 1)
+	return strings.Replace(src, "on_fail = \"waiting-human\"\n",
+		"on_fail = \"waiting-human\"\n"+
+			"threshold = { \"fix-loop\" = 'any(verdict == approve)' }\n", 1)
+}
+
+// routeThresholdTriagePanel drives implement@0 into thresholdTriageSrc's
+// panel, tallies the panel approved, optionally commits the proposal before
+// routing runs, and then routes it.
+func routeThresholdTriagePanel(t *testing.T, commit bool) *sql.DB {
+	t.Helper()
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(thresholdTriageSrc()), "triage-lane.toml")
+	issue := createIssue(t, conn, "triaged", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	e.Gates = failingGates{}
+	claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+	err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after the failed record: %v", err)
+
+	proposalID, err := findVoteProposal(conn, mustStep(t, conn, "triage@0"))
+	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+	if proposalID == 0 {
+		t.Fatal("no proposal opened for triage@0")
+	}
+	castSeat(t, conn, proposalID, "seat-a", model.VerdictApprove, "")
+	castSeat(t, conn, proposalID, "seat-b", model.VerdictApprove, "")
+	if commit {
+		commitDissentGate(t, conn, proposalID) // fatals unless the tally approved
+	}
+	err = e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+	return conn
+}
+
+// TestVoteThresholdSkipsTriagePanel: a triage panel is never asked its own
+// `threshold`, approved or committed. An approved panel takes the triage arm
+// before the threshold arm; a committed one skips that arm, because
+// triageDecided excludes `committed`, so only the threshold arm's own
+// triaged == nil conjunct keeps it out. Without it the matched `fix-loop`
+// enters a loop on the panel's behalf, minting fix@1 and superseding review@0
+// for a panel releaseUntriaged then writes `skipped`.
+func TestVoteThresholdSkipsTriagePanel(t *testing.T) {
+	assertNoThresholdRouting := func(t *testing.T, conn *sql.DB) {
+		t.Helper()
+		panel := mustStep(t, conn, "triage@0")
+		if panel.ParkClass == db.ParkClassThresholdRouted {
+			t.Errorf("triage@0 park_class = %q, want no threshold park", panel.ParkClass)
+		}
+		if routingIs(panel.Routing, workflow.OnFailFixLoop) {
+			t.Errorf("triage@0 routing = %q, want no threshold `fix-loop`", panel.Routing)
+		}
+		if stepExists(t, conn, "fix@1") {
+			t.Error("fix@1 exists — the panel's threshold opened a fix round")
+		}
+		if got := stepStatus(t, conn, "review@0"); got != db.StepPending {
+			t.Errorf("review@0 status = %q, want %q — a fix round superseded it",
+				got, db.StepPending)
+		}
+	}
+
+	t.Run("an approved panel applies its mapping", func(t *testing.T) {
+		conn := routeThresholdTriagePanel(t, false)
+		assertNoThresholdRouting(t, conn)
+		if got := stepStatus(t, conn, "triage@0"); got != db.StepDone {
+			t.Errorf("triage@0 status = %q, want %q", got, db.StepDone)
+		}
+		step := mustStep(t, conn, "implement@0")
+		if !routingIs(step.Routing, ResolveRetry) || step.Status != db.StepPending {
+			t.Errorf("implement@0 = %q %q, want the mapped %q, %q",
+				step.Status, step.Routing, ResolveRetry, db.StepPending)
+		}
+	})
+
+	// A committed outcome is outside the mapping's vocabulary, so the panel
+	// closes `skipped` and its own `on_fail` disposes of implement@0
+	// (TestCommittedTriagePanelEventsMatchSkippedRow). This case pins that the
+	// threshold adds nothing to that disposition.
+	t.Run("a committed panel is released by its on_fail", func(t *testing.T) {
+		conn := routeThresholdTriagePanel(t, true)
+		assertNoThresholdRouting(t, conn)
+		if got := stepStatus(t, conn, "triage@0"); got != db.StepSkipped {
+			t.Errorf("triage@0 status = %q, want %q", got, db.StepSkipped)
+		}
+		step := mustStep(t, conn, "implement@0")
+		if step.Status != db.StepWaitingHuman ||
+			step.ParkClass != db.ParkClassTriageUndecided {
+			t.Errorf("implement@0 = %q %q, want %q %q from the panel's on_fail",
+				step.Status, step.ParkClass, db.StepWaitingHuman, db.ParkClassTriageUndecided)
+		}
+	})
 }
