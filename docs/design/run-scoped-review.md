@@ -280,13 +280,14 @@ Display. A run-scoped row has no issue, and every operator surface shows it
 the same way: the `issue` field is the empty string `""` in `--json` output,
 and a text issue column shows `-`. The row's run id, which each of these
 surfaces already prints, names its subject. The rule covers `next`, `step
-list`, `step show`, `events list` and every other event feed, `run show`, and
+list`, `step show`, `events list` and every other event feed, and
 `run report`. Message text that names a step's subject, such as an error or a
 park reason, names the run (`RUN-N`) where an issue row names `DKT-N`. No
 surface prints `<PREFIX>-0`. Two surfaces already follow the rule: an event
 with a NULL `issue_id` leaves `Issue` empty (internal/engine/events_read.go:244)
-and `events list` prints `-` for it (internal/cli/events.go:279), and `run
-show` sets `Issue` only when `IssueID != 0` (internal/engine/report.go:902).
+and `events list` prints `-` for it (internal/cli/events.go:279), and the
+`StepAttempt` rows of `run report` set `Issue` only when `IssueID != 0`
+(`effectiveStepFacts`, internal/engine/report.go:902).
 Phase 2 applies the same guard where a row is built from `step.IssueID`:
 `next` (internal/engine/next.go:519), the `StepListEntry` that `step list` and
 `step show` share (next.go:678), and the `step list` text column
@@ -961,8 +962,7 @@ recorded every head in `integration.checked`, the claim's `IsAncestorFn` and
 run started outside a checkout is refused at activation with the D5 message (the §3.5 template, rendered for the
 empty field(s)) and leaves zero step rows; every existing bundle fixture is byte-identical; no
 operator surface renders `<PREFIX>-0`, or any `-0` issue id, for a run-scoped
-row: on that fixture `next`, `step list`, `step show`, `events list`, `run
-show`, and `run report` each show `review@0#0` under the §3.1 display rule,
+row: on that fixture `next`, `step list`, `step show`, `events list`, and `run report` each show `review@0#0` under the §3.1 display rule,
 `""` in the `--json` `issue` field and `-` in a text issue column. For the
 park: with `review.findings` recorded so that two of three clusters reduce to
 `high`, `reconcile@0` parks with `park_reason` equal to the §3.3 rendering byte
