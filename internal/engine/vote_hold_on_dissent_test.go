@@ -192,6 +192,14 @@ func castDissentGate(
 // landed, returning the run so a test can move it between casts.
 func openDissentGate(t *testing.T, src, hold string) (*sql.DB, *Engine, int, int) {
 	t.Helper()
+	conn, e, runID := startDissentRun(t, src, hold)
+	return conn, e, runID, openGateProposal(t, conn, e, runID)
+}
+
+// startDissentRun is openDissentGate up to the activated run: seed@0 is not
+// yet recorded, so gate@0's ballot has not opened.
+func startDissentRun(t *testing.T, src, hold string) (*sql.DB, *Engine, int) {
+	t.Helper()
 	conn := mustDB(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")
 	if hold != "" {
@@ -203,9 +211,7 @@ func openDissentGate(t *testing.T, src, hold string) (*sql.DB, *Engine, int, int
 	run := startRun(t, conn, issue)
 	_, err := activate(conn, run.ID)
 	testsupport.Must(t, err, "activate: %v", err)
-	e := testEngine()
-
-	return conn, e, run.ID, openGateProposal(t, conn, e, run.ID)
+	return conn, testEngine(), run.ID
 }
 
 func dissentGateStep(t *testing.T, conn *sql.DB) *db.Step {
@@ -215,9 +221,9 @@ func dissentGateStep(t *testing.T, conn *sql.DB) *db.Step {
 	return gate
 }
 
-// plantRuleConfig writes a rule key straight into `meta` after the casts,
-// bypassing SetConfig's validation — the shape a restored or hand-edited
-// store has. An empty value deletes the row instead.
+// plantRuleConfig writes a rule key straight into `meta`, bypassing
+// SetConfig's validation — the shape a restored or hand-edited store has. An
+// empty value deletes the row instead.
 func plantRuleConfig(t *testing.T, conn *sql.DB, key, value string) {
 	t.Helper()
 	var err error
@@ -249,6 +255,28 @@ func TestVoteOpenPinsHoldOnDissent(t *testing.T) {
 					proposal.HoldOnDissent, tc.hold, tc.want)
 			}
 		})
+	}
+}
+
+// TestVoteOpenRefusesMalformedHoldOnDissent: open is the only parse between
+// the rule's configured hold and the pinned column, so a malformed value must
+// stop the ballot from opening rather than pin a hold nobody chose.
+func TestVoteOpenRefusesMalformedHoldOnDissent(t *testing.T) {
+	conn, e, runID := startDissentRun(t, holdOnDissentSrc, "")
+	plantRuleConfig(t, conn, db.VoteRuleHoldOnDissentKey("majority"), "maybe")
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	err := e.DriveRunLifecycles(conn, runID, nowMS)
+	if err == nil || !strings.Contains(err.Error(), "hold_on_dissent") {
+		t.Errorf("DriveRunLifecycles error = %v, want one naming hold_on_dissent", err)
+	}
+	proposalID, err := findVoteProposal(conn, dissentGateStep(t, conn))
+	testsupport.Must(t, err, "finding gate@0's proposal: %v", err)
+	if proposalID != 0 {
+		t.Errorf("proposal %d opened for gate@0 under a malformed hold_on_dissent", proposalID)
+	}
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepPending {
+		t.Errorf("gate@0 status = %q, want %q", got, db.StepPending)
 	}
 }
 
