@@ -36,8 +36,16 @@ unclaimable. Those are reported separately, as ` + "`references`" + `:
                       packet entry) names a ref this run does not pin — the
                       claim refuses (exit 3) whether or not the file is there
 
-Exit 4 if any pin changed, exit 2 if any is missing and none changed, exit 3 if
-the pins are all sound but the pin set is not closed, 0 when both halves pass.
+Each declared gate whose relatively named script the run pins is also checked
+where a gate run from this checkout would execute it, as ` + "`gates`" + `:
+
+  executed-copy-changed  this checkout's copy of the script differs from the
+                         run's pin; restore the gate script in the invoking
+                         checkout, or run the gate from the run's checkout
+
+Exit 4 if any pin changed or any gate is executed-copy-changed, exit 2 if any
+pin is missing and none changed, exit 3 if the pins are all sound but the pin
+set is not closed, 0 when every check passes.
 
 WHY THIS VERB EXISTS. The verbs that check pins each check only the pins THEY
 read: step render verifies its template and its own step's packet files, and a
@@ -83,6 +91,13 @@ func runRunVerifyPins(cmd *cobra.Command, ref string, w *output.Writer) error {
 			code = output.ErrNotFound
 			// A missing ref has no current bytes to adopt; repin would refuse.
 			remedy = "; restore the file(s) or abandon the run"
+		case report.ExecutedCopyChanged > 0:
+			// A gate run from the invoking checkout would execute other bytes
+			// than the run pinned. The run's own pins are intact, so repin has
+			// nothing to adopt and a new run would pin the run's checkout
+			// again; the fix is the invoking copy or where the gate runs.
+			remedy = "; restore the gate script in the invoking checkout, " +
+				"or run the gate from the run's checkout"
 		default:
 			// ONLY THE CLOSURE IS OPEN. Nothing drifted, so there is nothing on
 			// disk to restore and repin has no changed bytes to adopt — it

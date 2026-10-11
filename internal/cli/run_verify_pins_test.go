@@ -244,6 +244,16 @@ gates = ["lint", "tests"]
 // the config dir, and the run ref.
 func gatedVerifyPinsFixture(t *testing.T, trustTests bool) (*sql.DB, string, string) {
 	t.Helper()
+	return gatedVerifyPinsFixtureWith(t, trustTests, nil)
+}
+
+// gatedVerifyPinsFixtureWith is gatedVerifyPinsFixture with a hook that runs
+// before activation and receives the run's exec root, so a test can place a
+// gate script there for activation to pin.
+func gatedVerifyPinsFixtureWith(
+	t *testing.T, trustTests bool, beforeActivate func(execRoot string),
+) (*sql.DB, string, string) {
+	t.Helper()
 	// THE TEMP DIRS COME FIRST, BEFORE t.Setenv — `t.TempDir()` reads TMPDIR.
 	root := t.TempDir()
 	xdg := t.TempDir()
@@ -275,6 +285,9 @@ func gatedVerifyPinsFixture(t *testing.T, trustTests bool) (*sql.DB, string, str
 		db.RunContext{ExecRoot: execRoot})
 	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
 	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issueID), "AddRunIssue")
+	if beforeActivate != nil {
+		beforeActivate(execRoot)
+	}
 	_, err = engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: model.NowMS()})
 	testsupport.Must(t, err, "Activate: %v", err)
 	return conn, configDir, run.Ref()
@@ -418,5 +431,152 @@ func TestVerifyPinsJSONCarriesUncheckedGates(t *testing.T) {
 		case row.Reason == "":
 			t.Errorf("gate %q has an empty reason", gate)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The executed copy alone differs: exit 4 with the executed-copy remedy
+// ---------------------------------------------------------------------------
+
+// executedCopyFixture activates a gated run whose `lint` gate runs the
+// relatively named scripts/qa/lint.sh, pinned from the run's exec root, then
+// writes different bytes to the copy under the invoking exec root (the parent
+// of DOCKET_PATH). Only that gate's executed copy differs from its pin.
+func executedCopyFixture(t *testing.T) (*sql.DB, string, string) {
+	t.Helper()
+	const script = "scripts/qa/lint.sh"
+	writeScript := func(root, body string) {
+		full := filepath.Join(root, script)
+		testsupport.Must(t, os.MkdirAll(filepath.Dir(full), 0o755), "mkdir %s", full)
+		testsupport.Must(t, os.WriteFile(full, []byte(body), 0o755), "writing %s", full)
+	}
+	conn, configDir, runRef := gatedVerifyPinsFixtureWith(t, false, func(execRoot string) {
+		writeScript(execRoot, "echo lint\n")
+		_, err := trust.Add(trust.AddRequest{
+			Name: "lint", Argv: []string{"bash", script}, Global: true,
+			NowMS: time.Now().UnixMilli(),
+		})
+		testsupport.Must(t, err, "trust.Add(lint): %v", err)
+	})
+	writeScript(filepath.Dir(filepath.Dir(configDir)), "exit 0\n")
+
+	if got := gateStatuses(t, conn, runRef)["lint"]; got != engine.GateExecutedCopyChanged {
+		t.Fatalf("gate lint status = %q, want %q", got, engine.GateExecutedCopyChanged)
+	}
+	return conn, configDir, runRef
+}
+
+// TestVerifyPinsExecutedCopyChangedExitsConflict: nothing drifted, nothing is
+// missing, and the pin set is closed, but a gate run from the invoking
+// checkout would execute other bytes than the pinned script. That is exit 4,
+// and the remedy is about the invoking copy, not the closure.
+func TestVerifyPinsExecutedCopyChangedExitsConflict(t *testing.T) {
+	conn, _, runRef := executedCopyFixture(t)
+
+	w, _ := bufWriter(false)
+	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
+	if err == nil {
+		t.Fatal("verify-pins reported clean on a run whose invoking copy of a gate script differs from its pin")
+	}
+	cerr, ok := err.(*CmdError)
+	if !ok {
+		t.Fatalf("err = %T, want *CmdError", err)
+	}
+	if cerr.Code != output.ErrConflict {
+		t.Errorf("code = %q, want %q", cerr.Code, output.ErrConflict)
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		`gate "lint"`,
+		"restore the gate script in the invoking checkout",
+		"run the gate from the run's checkout",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("err = %q, want it to say %q", msg, want)
+		}
+	}
+	for _, unwanted := range []string{"the pin set froze", "start a new run", "docket run repin"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("err = %q says %q, which cannot fix an invoking copy that differs", msg, unwanted)
+		}
+	}
+}
+
+// TestVerifyPinsMissingOutranksExecutedCopyChanged: a missing pin keeps exit 2
+// even when a gate's executed copy also differs.
+func TestVerifyPinsMissingOutranksExecutedCopyChanged(t *testing.T) {
+	conn, configDir, runRef := executedCopyFixture(t)
+	testsupport.Must(t, os.Remove(filepath.Join(configDir, "contracts/judge.md")),
+		"removing the pinned contract")
+
+	w, _ := bufWriter(false)
+	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
+	cerr, ok := err.(*CmdError)
+	if !ok {
+		t.Fatalf("err = %v (%T), want *CmdError", err, err)
+	}
+	if cerr.Code != output.ErrNotFound {
+		t.Errorf("code = %q, want %q", cerr.Code, output.ErrNotFound)
+	}
+}
+
+// TestVerifyPinsChangedOutranksExecutedCopyChanged: a changed pin keeps exit 4
+// with the repin remedy even when a gate's executed copy also differs.
+func TestVerifyPinsChangedOutranksExecutedCopyChanged(t *testing.T) {
+	conn, configDir, runRef := executedCopyFixture(t)
+	driftJudgeContract(t, configDir)
+
+	w, _ := bufWriter(false)
+	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
+	cerr, ok := err.(*CmdError)
+	if !ok {
+		t.Fatalf("err = %v (%T), want *CmdError", err, err)
+	}
+	if cerr.Code != output.ErrConflict {
+		t.Errorf("code = %q, want %q", cerr.Code, output.ErrConflict)
+	}
+	if !strings.Contains(err.Error(), "docket run repin") {
+		t.Errorf("err = %q, want the repin remedy", err.Error())
+	}
+}
+
+// TestVerifyPinsMissingExitsNotFound: a missing pin with nothing changed is
+// exit 2.
+func TestVerifyPinsMissingExitsNotFound(t *testing.T) {
+	conn, configDir, runRef := verifyPinsFixture(t, "", false)
+	testsupport.Must(t, os.Remove(filepath.Join(configDir, "contracts/judge.md")),
+		"removing the pinned contract")
+
+	w, _ := bufWriter(false)
+	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
+	cerr, ok := err.(*CmdError)
+	if !ok {
+		t.Fatalf("err = %v (%T), want *CmdError", err, err)
+	}
+	if cerr.Code != output.ErrNotFound {
+		t.Errorf("code = %q, want %q", cerr.Code, output.ErrNotFound)
+	}
+}
+
+// TestVerifyPinsHelpNamesExecutedCopyChanged: the exit-code paragraph of the
+// Long help lists executed-copy-changed with exit 4.
+func TestVerifyPinsHelpNamesExecutedCopyChanged(t *testing.T) {
+	long := runVerifyPinsCmd.Long
+	var exitPara string
+	for _, para := range strings.Split(long, "\n\n") {
+		if strings.HasPrefix(para, "Exit 4") {
+			exitPara = para
+		}
+	}
+	if exitPara == "" {
+		t.Fatalf("Long help has no paragraph starting %q:\n%s", "Exit 4", long)
+	}
+	if !strings.Contains(exitPara, "executed-copy-changed") {
+		t.Errorf("exit-code paragraph = %q, want it to name executed-copy-changed", exitPara)
+	}
+	// The help is wrapped, so the remedy is matched across line breaks.
+	if !strings.Contains(strings.Join(strings.Fields(long), " "),
+		"restore the gate script in the invoking checkout, or run the gate from the run's checkout") {
+		t.Errorf("Long help does not give the executed-copy remedy:\n%s", long)
 	}
 }
