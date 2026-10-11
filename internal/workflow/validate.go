@@ -1813,13 +1813,6 @@ func anyBodyServes(def *Definition, trigger string) bool {
 	return false
 }
 
-// validateOnFailRoutes is V40a-V40c (DKT-1901): the triage mapping's keys, its
-// values, and the workflow conditions each value needs to be applicable.
-//
-// The mapping is declared on the PANEL, so it is validated here whether or not
-// any step currently routes to it — a mapping nobody reads is an authoring
-// mistake worth naming at register, and one declared on a non-vote step is a
-// misunderstanding of what the field is for.
 // validateOnExhausted is V41 (DKT-1902): `on_exhausted` declares where a
 // fix-loop exhaustion routes, so it is declarable only where an exhaustion can
 // happen — on a step whose own `on_fail` or `threshold` routes `fix-loop`
@@ -1943,6 +1936,13 @@ func validateMaxFixLoopsHard(step *Step) error {
 	return nil
 }
 
+// validateOnFailRoutes is V40a-V40c (DKT-1901): the triage mapping's keys, its
+// values, and the workflow conditions each value needs to be applicable.
+//
+// The mapping is declared on the PANEL, so it is validated here whether or not
+// any step currently routes to it — a mapping nobody reads is an authoring
+// mistake worth naming at register, and one declared on a non-vote step is a
+// misunderstanding of what the field is for.
 func validateOnFailRoutes(def *Definition, step *Step) error {
 	// V40c's companion: a triaging panel's OWN `on_fail` disposes of the step it
 	// was asked about when the tally reaches no verdict, so `skip` is refused
