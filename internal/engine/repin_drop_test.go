@@ -107,9 +107,9 @@ func TestRepinDropsADeletedRefNoPendingStepReads(t *testing.T) {
 		opts RepinOptions
 	}{
 		{"--drop-unresolvable", RepinOptions{
-			Reason: "cc92e38 deleted it", DropUnresolvable: true}},
+			Token: testConductorToken, Reason: "cc92e38 deleted it", DropUnresolvable: true}},
 		{"--drop by name", RepinOptions{
-			Reason: "cc92e38 deleted it", Drop: []string{"contracts/implement.md"}}},
+			Token: testConductorToken, Reason: "cc92e38 deleted it", Drop: []string{"contracts/implement.md"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -225,9 +225,9 @@ func TestRepinRefusesToDropARefAPendingStepReads(t *testing.T) {
 		opts RepinOptions
 	}{
 		{"--drop-unresolvable", RepinOptions{
-			Reason: "the install", DropUnresolvable: true}},
+			Token: testConductorToken, Reason: "the install", DropUnresolvable: true}},
 		{"--drop by name", RepinOptions{
-			Reason: "the install", Drop: []string{"contracts/review.md"}}},
+			Token: testConductorToken, Reason: "the install", Drop: []string{"contracts/review.md"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -275,7 +275,7 @@ func TestRepinDropsAndUpdatesInOneCall(t *testing.T) {
 	rewriteConfigFile(t, configDir, "contracts/review.md", "the install's new contract\n")
 
 	outcome, err := RepinRunWith(conn, runID, RepinOptions{
-		Reason: "corpus install: one edit, one deletion", DropUnresolvable: true,
+		Token: testConductorToken, Reason: "corpus install: one edit, one deletion", DropUnresolvable: true,
 	}, nowMS)
 	testsupport.Must(t, err, "RepinRunWith: %v", err)
 
@@ -335,7 +335,7 @@ func TestRepinRefusesADropThatDescribesTheWrongThing(t *testing.T) {
 		rewriteConfigFile(t, configDir, "contracts/review.md", "edited, not deleted\n")
 
 		_, err := RepinRunWith(conn, runID, RepinOptions{
-			Reason: "r", Drop: []string{"contracts/review.md"}}, nowMS)
+			Token: testConductorToken, Reason: "r", Drop: []string{"contracts/review.md"}}, nowMS)
 		if err == nil {
 			t.Fatal("--drop retired a ref that still resolves")
 		}
@@ -357,7 +357,7 @@ func TestRepinRefusesADropThatDescribesTheWrongThing(t *testing.T) {
 		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
 
 		_, err := RepinRunWith(conn, runID, RepinOptions{
-			Reason: "r", DropUnresolvable: true}, nowMS)
+			Token: testConductorToken, Reason: "r", DropUnresolvable: true}, nowMS)
 		if err == nil {
 			t.Fatal("a file that exists but cannot be read was retired as deleted")
 		}
@@ -374,7 +374,7 @@ func TestRepinRefusesADropThatDescribesTheWrongThing(t *testing.T) {
 		deleteConfigFile(t, configDir, "contracts/implement.md")
 
 		_, err := RepinRunWith(conn, runID, RepinOptions{
-			Reason: "r", Drop: []string{"contracts/never-pinned.md"}}, nowMS)
+			Token: testConductorToken, Reason: "r", Drop: []string{"contracts/never-pinned.md"}}, nowMS)
 		if err == nil {
 			t.Fatal("--drop accepted a ref this run does not pin")
 		}
@@ -405,7 +405,7 @@ func TestRepinNeverDropsARegisteredObjectPin(t *testing.T) {
 	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
 
 	_, err = RepinRunWith(conn, runID, RepinOptions{
-		Reason: "r", DropUnresolvable: true}, nowMS)
+		Token: testConductorToken, Reason: "r", DropUnresolvable: true}, nowMS)
 	if err == nil {
 		t.Fatal("--drop-unresolvable retired a schema pin")
 	}
@@ -417,7 +417,7 @@ func TestRepinNeverDropsARegisteredObjectPin(t *testing.T) {
 	}
 
 	_, err = RepinRunWith(conn, runID, RepinOptions{
-		Reason: "r", Drop: []string{"gone@1"}}, nowMS)
+		Token: testConductorToken, Reason: "r", Drop: []string{"gone@1"}}, nowMS)
 	if err == nil {
 		t.Fatal("--drop retired a schema pin")
 	}

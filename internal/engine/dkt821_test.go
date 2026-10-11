@@ -233,7 +233,7 @@ func TestARepinTodayLeavesNoUnpinnedReference(t *testing.T) {
 	writeConfigFile(t, configDir, "fragments/laziness-ladder.md", "the ladder\n")
 
 	_, err = RepinRunWith(conn, run.ID, RepinOptions{
-		Reason: "adopting the second edition"}, nowMS)
+		Token: testConductorToken, Reason: "adopting the second edition"}, nowMS)
 	testsupport.Must(t, err, "RepinRunWith: %v", err)
 
 	report, err := VerifyPins(conn, run.ID)

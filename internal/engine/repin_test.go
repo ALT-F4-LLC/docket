@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,7 +135,7 @@ func TestRepinUpdatesPendingAgreementAndPreservesCompletedProvenance(t *testing.
 	eventsBefore := dumpRows(t, conn,
 		`SELECT * FROM events WHERE step_id = ? ORDER BY seq`, doneID)
 
-	outcome, err := repinRunIn(conn, run.ID, "corpus install 2026-08-20", nowMS,
+	outcome, err := repinRunIn(conn, run.ID, "corpus install 2026-08-20", testConductorToken, nowMS,
 		[]string{root})
 	testsupport.Must(t, err, "repinRunIn: %v", err)
 
@@ -225,7 +227,7 @@ func TestRepinRecordsOneEventPerChangedRef(t *testing.T) {
 			filepath.Join(root, ref), []byte(body), 0o644), "rewriting %s", ref)
 	}
 
-	outcome, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	outcome, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 	testsupport.Must(t, err, "repinRunIn: %v", err)
 	if len(outcome.Repinned) != 2 {
 		t.Fatalf("repinned %d, want 2", len(outcome.Repinned))
@@ -267,7 +269,7 @@ func TestRepinRefusesWhileAStepIsInFlight(t *testing.T) {
 	execSQL(t, conn, `UPDATE steps SET status = ? WHERE run_id = ? AND instance = ?`,
 		db.StepClaimed, run.ID, "implement@0")
 
-	_, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	_, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under a claimed step")
 	}
@@ -317,7 +319,7 @@ func TestRepinRefusesWhenOnlyCompletedStepsRemain(t *testing.T) {
 				filepath.Join(root, "contracts/d.md"), []byte("NEW\n"), 0o644), "rewrite")
 			tc.wedge(t, conn, run.ID)
 
-			_, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+			_, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 			if err == nil {
 				t.Fatal("repin rewrote pins that only completed steps reference")
 			}
@@ -351,7 +353,7 @@ func TestRepinRefusesUnderAnOpenDispatch(t *testing.T) {
 		`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
 		 VALUES (?, 'open', 0, ?, ?)`, run.ID, nowMS+60_000, nowMS)
 
-	_, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	_, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under an open dispatch")
 	}
@@ -377,7 +379,7 @@ func TestRepinRefusesOnAMissingPin(t *testing.T) {
 		filepath.Join(root, "contracts/f.md"), []byte("NEW\n"), 0o644), "rewrite")
 	testsupport.Must(t, os.Remove(filepath.Join(root, "contracts/gone.md")), "remove")
 
-	_, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	_, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded with a pinned ref missing from disk")
 	}
@@ -402,7 +404,7 @@ func TestRepinIsANoOpOnASoundRun(t *testing.T) {
 	pinAFile(t, conn, run.ID, root, "contracts/g.md", "SAME\n")
 
 	for range 2 {
-		outcome, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+		outcome, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 		testsupport.Must(t, err, "repinRunIn: %v", err)
 		if len(outcome.Repinned) != 0 {
 			t.Fatalf("repinned %d pin(s) on a sound run", len(outcome.Repinned))
@@ -424,12 +426,12 @@ func TestRepinThenRepinIsIdempotent(t *testing.T) {
 	testsupport.Must(t, os.WriteFile(
 		filepath.Join(root, "contracts/h.md"), []byte("V2\n"), 0o644), "rewrite")
 
-	first, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	first, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 	testsupport.Must(t, err, "first repin: %v", err)
 	if len(first.Repinned) != 1 {
 		t.Fatalf("first repin moved %d pin(s), want 1", len(first.Repinned))
 	}
-	second, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	second, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 	testsupport.Must(t, err, "second repin: %v", err)
 	if len(second.Repinned) != 0 {
 		t.Fatalf("second repin moved %d pin(s), want 0", len(second.Repinned))
@@ -564,7 +566,7 @@ func TestRepinRefusalNamesTheVerbsThatReapALapsedClaim(t *testing.T) {
 
 	// While the lease is live the operator is told to wait, and nothing
 	// suggests a reap is available — there is nothing to reap yet.
-	_, err = repinRunIn(conn, run.ID, "install", nowMS, []string{root})
+	_, err = repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under a live claim")
 	}
@@ -581,7 +583,7 @@ func TestRepinRefusalNamesTheVerbsThatReapALapsedClaim(t *testing.T) {
 	// Past expiry the claim is lapsed-but-unreaped: still refused, but now the
 	// refusal names the step under its own heading and the verbs that clear it.
 	late := claim.LeaseExpiresMS + 1
-	_, err = repinRunIn(conn, run.ID, "install", late, []string{root})
+	_, err = repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under a lapsed-but-unreaped claim")
 	}
@@ -627,7 +629,7 @@ func TestRepinRefusalNamesStepReapOnAPausedRun(t *testing.T) {
 	execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
 		string(model.RunWaitingHuman), run.ID)
 
-	_, err := repinRunIn(conn, run.ID, "install", claim.LeaseExpiresMS+1, []string{root})
+	_, err := repinRunIn(conn, run.ID, "install", testConductorToken, claim.LeaseExpiresMS+1, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under a lapsed claim on a paused run")
 	}
@@ -678,7 +680,7 @@ func TestRepinRefusalSortsEachClaimUnderItsOwnHeading(t *testing.T) {
 		   token_hash = 'x', expires_ms = ? WHERE run_id = ? AND instance = ?`,
 		at+600_000, run.ID, "synthesize@0")
 
-	_, err := repinRunIn(conn, run.ID, "install", at, []string{root})
+	_, err := repinRunIn(conn, run.ID, "install", testConductorToken, at, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under two claims")
 	}
@@ -739,5 +741,87 @@ func TestPinDriftMatchesVerifyPinsFromAnUnanchoredCwd(t *testing.T) {
 		len(drift) != 1 || drift[0] != want {
 		t.Errorf("edited pin: PinDrift names %q, VerifyPins names %q; want "+
 			"both exactly [%q]", drift, verify, want)
+	}
+}
+
+// driftedPin pins one file on run runID and rewrites it on disk, so a repin
+// has a change to adopt and reaches its transaction. It returns the root, the
+// ref, the pinned hash, and the hash of the bytes now on disk.
+func driftedPin(t *testing.T, conn *sql.DB, runID int) (root, ref, pinned, onDisk string) {
+	t.Helper()
+	root, ref = t.TempDir(), "contracts/judge-security.md"
+	pinned = pinAFile(t, conn, runID, root, ref, "BEFORE\n")
+	after := []byte("AFTER\n")
+	testsupport.Must(t, os.WriteFile(filepath.Join(root, ref), after, 0o644), "rewriting %s", ref)
+	return root, ref, pinned, fmt.Sprintf("%x", sha256.Sum256(after))
+}
+
+// TestRepinRefusesWithoutTheConductorCapability: on a bound run a repin with
+// no token refuses VALIDATION_ERROR and one with a wrong token refuses
+// AUTH_ERROR, and neither moves the pin or records a repin event.
+func TestRepinRefusesWithoutTheConductorCapability(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root, ref, pinned, _ := driftedPin(t, conn, run.ID)
+
+	cases := []struct {
+		name, token string
+		want        ErrorCode
+	}{
+		{"no token", "", CodeValidation},
+		{"a wrong token", "not-the-conductor", CodeAuth},
+	}
+	for _, tc := range cases {
+		_, err := repinRunIn(conn, run.ID, "install", tc.token, nowMS, []string{root})
+		if err == nil {
+			t.Fatalf("%s: repin of a bound run succeeded", tc.name)
+		}
+		if got, _ := CodeOf(err); got != tc.want {
+			t.Errorf("%s: code = %q, want %q (%v)", tc.name, got, tc.want, err)
+		}
+		if tc.want == CodeAuth && !errors.Is(err, ErrNotConductor) {
+			t.Errorf("%s: err = %v, want ErrNotConductor", tc.name, err)
+		}
+		if got := pinSHA(t, conn, run.ID, ref); got != pinned {
+			t.Errorf("%s: the refused repin moved the pin %s -> %s", tc.name, pinned, got)
+		}
+		if n := len(repinEvents(t, conn, run.ID)); n != 0 {
+			t.Errorf("%s: the refused repin recorded %d run-repinned event(s)", tc.name, n)
+		}
+	}
+}
+
+// TestRepinWithTheRunsConductorTokenAdoptsTheDrift: the run's own capability
+// re-pins the drifted ref to the bytes on disk and records its event.
+func TestRepinWithTheRunsConductorTokenAdoptsTheDrift(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root, ref, _, onDisk := driftedPin(t, conn, run.ID)
+
+	_, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
+	testsupport.Must(t, err, "repin with the run's conductor token: %v", err)
+	if got := pinSHA(t, conn, run.ID, ref); got != onDisk {
+		t.Errorf("pin = %s, want the disk hash %s", got, onDisk)
+	}
+	if n := len(repinEvents(t, conn, run.ID)); n != 1 {
+		t.Errorf("recorded %d run-repinned event(s), want 1", n)
+	}
+}
+
+// TestRepinOnAnUnboundRunNeedsNoToken: a run with no conductor capability
+// minted re-pins without a token, as it did before the capability existed.
+func TestRepinOnAnUnboundRunNeedsNoToken(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	execSQL(t, conn, `UPDATE runs SET conductor_token_hash = NULL WHERE id = ?`, run.ID)
+	root, ref, _, onDisk := driftedPin(t, conn, run.ID)
+
+	_, err := repinRunIn(conn, run.ID, "install", "", nowMS, []string{root})
+	testsupport.Must(t, err, "repin of an unbound run with no token: %v", err)
+	if got := pinSHA(t, conn, run.ID, ref); got != onDisk {
+		t.Errorf("pin = %s, want the disk hash %s", got, onDisk)
+	}
+	if n := len(repinEvents(t, conn, run.ID)); n != 1 {
+		t.Errorf("recorded %d run-repinned event(s), want 1", n)
 	}
 }

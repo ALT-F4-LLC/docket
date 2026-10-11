@@ -165,9 +165,10 @@ type RepinOptions struct {
 	Token string
 }
 
-// RepinRun re-pins a run's drifted pins to what their refs resolve to now.
-func RepinRun(conn *sql.DB, runID int, reason string, nowMS int64) (*RepinOutcome, error) {
-	return RepinRunWith(conn, runID, RepinOptions{Reason: reason}, nowMS)
+// RepinRun re-pins a run's drifted pins to what their refs resolve to now,
+// presenting token as the run's conductor capability.
+func RepinRun(conn *sql.DB, runID int, reason, token string, nowMS int64) (*RepinOutcome, error) {
+	return RepinRunWith(conn, runID, RepinOptions{Reason: reason, Token: token}, nowMS)
 }
 
 // RepinRunWith is RepinRun with the DKT-582 dispositions.
@@ -181,9 +182,9 @@ func RepinRunWith(
 // verifyPinsIn takes, for the same reason: which file a ref resolves to is the
 // thing under test.
 func repinRunIn(
-	conn *sql.DB, runID int, reason string, nowMS int64, roots []string,
+	conn *sql.DB, runID int, reason, token string, nowMS int64, roots []string,
 ) (*RepinOutcome, error) {
-	return repinRunOptsIn(conn, runID, RepinOptions{Reason: reason}, nowMS, roots)
+	return repinRunOptsIn(conn, runID, RepinOptions{Reason: reason, Token: token}, nowMS, roots)
 }
 
 // repinRunOptsIn is repinRunIn with dispositions.

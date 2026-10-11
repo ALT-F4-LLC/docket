@@ -70,7 +70,7 @@ func TestRepinPinsTheAdoptedBytesNewlyRequiredRefs(t *testing.T) {
 	writeConfigFile(t, configDir, "fragments/new.md", fragmentBody)
 
 	outcome, err := RepinRunWith(conn, run.ID, RepinOptions{
-		Reason: "dee7670 introduced the fragment"}, nowMS)
+		Token: testConductorToken, Reason: "dee7670 introduced the fragment"}, nowMS)
 	testsupport.Must(t, err, "RepinRunWith: %v", err)
 
 	if len(outcome.Repinned) != 1 || outcome.Repinned[0].Ref != "contracts/implement.md" {
@@ -166,7 +166,7 @@ func TestRepinRefusesWhenANewlyRequiredRefHasNoBytes(t *testing.T) {
 	// The corpus edit, MINUS the fragment: B1 includes a file nobody wrote.
 	writeConfigFile(t, configDir, "contracts/implement.md", dkt805ContractB1)
 
-	_, err = RepinRunWith(conn, run.ID, RepinOptions{Reason: "adopt dee7670"}, nowMS)
+	_, err = RepinRunWith(conn, run.ID, RepinOptions{Token: testConductorToken, Reason: "adopt dee7670"}, nowMS)
 	if err == nil {
 		t.Fatal("a repin whose adopted bytes require an unresolvable ref succeeded")
 	}

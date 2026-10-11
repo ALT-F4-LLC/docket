@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -502,5 +505,81 @@ func TestAnnotateIntegratedSHAOnAnUnboundRunNeedsNoConductor(t *testing.T) {
 	testsupport.Must(t, err, "step annotate on an unbound run: %v", err)
 	if after := readAnnotatedEffects(t, conn, r.implementID); after.latestDiff == before.latestDiff {
 		t.Errorf("effects %+v -> %+v, want a new issue.diff", before, after)
+	}
+}
+
+// TestRunRepinReadsTheConductorCapability: on a bound run with a drifted pin,
+// `run repin` refuses an empty DOCKET_TOKEN and empty stdin VALIDATION_ERROR
+// and a wrong token AUTH_ERROR, leaving the pin and the event trail alone, and
+// the token activation returned re-pins the drifted ref.
+func TestRunRepinReadsTheConductorCapability(t *testing.T) {
+	conn := newTestDB(t)
+	store := t.TempDir()
+	t.Setenv("DOCKET_PATH", store)
+	runID := activatedRunForNext(t, conn)
+	token := envToken(t)
+
+	ref := "contracts/judge-security.md"
+	path := filepath.Join(store, "config", ref)
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o755), "mkdir")
+	testsupport.Must(t, os.WriteFile(path, []byte("BEFORE\n"), 0o644), "write")
+	pinned := fmt.Sprintf("%x", sha256.Sum256([]byte("BEFORE\n")))
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	testsupport.Must(t, db.InsertPinTx(tx, db.Pin{
+		RunID: runID, Kind: db.PinKindFile, Ref: ref, SHA256: pinned,
+	}), "InsertPinTx")
+	testsupport.Must(t, tx.Commit(), "Commit")
+	testsupport.Must(t, os.WriteFile(path, []byte("AFTER\n"), 0o644), "rewrite")
+	onDisk := fmt.Sprintf("%x", sha256.Sum256([]byte("AFTER\n")))
+
+	repin := func() error {
+		cmd := cmdWithDB(conn)
+		cmd.Flags().String("reason", "corpus install", "")
+		cmd.Flags().StringArray("drop", nil, "")
+		cmd.Flags().Bool("drop-unresolvable", false, "")
+		cmd.SetIn(strings.NewReader(""))
+		w, _ := bufWriter(true)
+		return runRunRepin(cmd, model.FormatRunID(runID), w)
+	}
+	pin := func() string {
+		var sha string
+		err := conn.QueryRow(`SELECT sha256 FROM pins WHERE run_id = ? AND ref = ?`,
+			runID, ref).Scan(&sha)
+		testsupport.Must(t, err, "reading the pin: %v", err)
+		return sha
+	}
+	repinEvents := func() int {
+		var n int
+		err := conn.QueryRow(`SELECT COUNT(*) FROM events WHERE run_id = ? AND kind = ?`,
+			runID, engine.EventRunRepinned).Scan(&n)
+		testsupport.Must(t, err, "counting run-repinned events: %v", err)
+		return n
+	}
+
+	for _, tc := range []struct {
+		name, token string
+		want        output.ErrorCode
+	}{
+		{"no token", "", output.ErrValidation},
+		{"a wrong token", "deadbeef", output.ErrAuth},
+	} {
+		t.Setenv(TokenEnvVar, tc.token)
+		assertCmdCode(t, repin(), tc.want, "run repin with "+tc.name)
+		if got := pin(); got != pinned {
+			t.Errorf("%s: the refused repin moved the pin %s -> %s", tc.name, pinned, got)
+		}
+		if n := repinEvents(); n != 0 {
+			t.Errorf("%s: the refused repin recorded %d run-repinned event(s)", tc.name, n)
+		}
+	}
+
+	t.Setenv(TokenEnvVar, token)
+	testsupport.Must(t, repin(), "run repin with the run's token: %v", nil)
+	if got := pin(); got != onDisk {
+		t.Errorf("pin = %s, want the disk hash %s", got, onDisk)
+	}
+	if n := repinEvents(); n != 1 {
+		t.Errorf("recorded %d run-repinned event(s), want 1", n)
 	}
 }

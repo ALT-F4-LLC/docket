@@ -110,7 +110,7 @@ func TestVerifyPinsStillReportsDriftInsideTheClosure(t *testing.T) {
 	}
 
 	// And repin — the recovery verb — still adopts exactly those two.
-	outcome, err := RepinRun(conn, runID, "corpus install", nowMS)
+	outcome, err := RepinRun(conn, runID, "corpus install", testConductorToken, nowMS)
 	testsupport.Must(t, err, "RepinRun: %v", err)
 	if len(outcome.Repinned) != 2 {
 		t.Fatalf("repinned %d pin(s), want the 2 drifted ones: %+v",

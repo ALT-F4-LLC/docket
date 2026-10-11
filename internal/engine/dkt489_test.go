@@ -71,7 +71,7 @@ func TestExpiredUnreapedClaimIsLabeledOnTheStepSurfaces(t *testing.T) {
 		t.Fatalf("live claim lists status=%q lease_expired=%v, want %q/false",
 			row.Status, row.LeaseExpired, db.StepClaimed)
 	}
-	if _, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root}); err == nil {
+	if _, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root}); err == nil {
 		t.Fatal("repin proceeded under a live claim")
 	}
 
@@ -104,7 +104,7 @@ func TestExpiredUnreapedClaimIsLabeledOnTheStepSurfaces(t *testing.T) {
 		t.Errorf("step show JSON %s does not carry lease_expired", raw)
 	}
 
-	_, err = repinRunIn(conn, run.ID, "install", late, []string{root})
+	_, err = repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under an expired-but-unreaped claim; the reap, " +
 			"not the expiry, is when the executor is confirmed gone")
@@ -154,7 +154,7 @@ func TestRepinProceedsOnceAnExpiredClaimIsReaped(t *testing.T) {
 	testsupport.Must(t, err, "claim: %v", err)
 	late := claim.LeaseExpiresMS + 1
 
-	if _, err := repinRunIn(conn, run.ID, "install", late, []string{root}); err == nil {
+	if _, err := repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root}); err == nil {
 		t.Fatal("repin proceeded under an expired-but-unreaped claim")
 	}
 
@@ -173,7 +173,7 @@ func TestRepinProceedsOnceAnExpiredClaimIsReaped(t *testing.T) {
 	}
 
 	// ...and repin now proceeds.
-	outcome, err := repinRunIn(conn, run.ID, "install", late, []string{root})
+	outcome, err := repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root})
 	testsupport.Must(t, err, "repin after the reap: %v", err)
 	if len(outcome.Repinned) != 1 {
 		t.Errorf("repinned %d pin(s) after the reap, want 1", len(outcome.Repinned))
@@ -229,7 +229,7 @@ func TestLapsedClaimIsUnlabeledOnAPausedRun(t *testing.T) {
 
 	// The other half of the pairing, and what makes the silence an exception
 	// rather than agreement: repin does name the lapse on this same row.
-	_, err = repinRunIn(conn, run.ID, "install", late, []string{root})
+	_, err = repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under a lapsed claim on a paused run")
 	}

@@ -187,7 +187,7 @@ func TestCompletedStepReportsTheAgreementItRanUnder(t *testing.T) {
 	// The corpus install, and the operator's recovery.
 	testsupport.Must(t, os.WriteFile(
 		filepath.Join(root, ref), []byte("AFTER\n"), 0o644), "replacing the contract")
-	outcome, err := repinRunIn(conn, run.ID, "corpus install 2026-08-23", nowMS+1000,
+	outcome, err := repinRunIn(conn, run.ID, "corpus install 2026-08-23", testConductorToken, nowMS+1000,
 		[]string{root})
 	testsupport.Must(t, err, "repinRunIn: %v", err)
 	if len(outcome.Repinned) != 1 {
@@ -236,7 +236,7 @@ func TestStepRunAfterARepinReportsTheNewAgreement(t *testing.T) {
 
 	testsupport.Must(t, os.WriteFile(
 		filepath.Join(root, ref), []byte("AFTER\n"), 0o644), "replacing the contract")
-	_, err := repinRunIn(conn, run.ID, "corpus install", nowMS+1000, []string{root})
+	_, err := repinRunIn(conn, run.ID, "corpus install", testConductorToken, nowMS+1000, []string{root})
 	testsupport.Must(t, err, "repinRunIn: %v", err)
 
 	e := testEngine()
@@ -265,7 +265,7 @@ func TestAStepThatHasNotRunCarriesNoEpoch(t *testing.T) {
 
 	testsupport.Must(t, os.WriteFile(
 		filepath.Join(root, ref), []byte("AFTER\n"), 0o644), "replacing the contract")
-	_, err := repinRunIn(conn, run.ID, "corpus install", nowMS+1000, []string{root})
+	_, err := repinRunIn(conn, run.ID, "corpus install", testConductorToken, nowMS+1000, []string{root})
 	testsupport.Must(t, err, "repinRunIn: %v", err)
 
 	report, err := LoadRunReport(conn, run.ID, nowMS+2000)
