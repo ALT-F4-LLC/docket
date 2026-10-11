@@ -55,42 +55,43 @@ func issueDescription(n int) string {
 
 // seedDescribedIssues creates 11 todo feature issues with real descriptions,
 // plus one bug so the type filter has something to exclude and one done issue
-// so the default listing has something to hide. It returns the 11
-// descriptions in id order.
-func seedDescribedIssues(t *testing.T, conn *sql.DB) []string {
+// so the default listing has something to hide. It returns every seeded
+// description keyed by issue title, so a test finds the description of the
+// issue a row names whatever order or subset of rows came back.
+func seedDescribedIssues(t *testing.T, conn *sql.DB) map[string]string {
 	t.Helper()
 
-	descriptions := make([]string, 0, 11)
+	descriptions := make(map[string]string, 13)
+	create := func(issue *model.Issue) {
+		t.Helper()
+		descriptions[issue.Title] = issue.Description
+		_, err := db.CreateIssue(conn, issue, nil, nil)
+		testsupport.Must(t, err, "CreateIssue(%q): %v", issue.Title, err)
+	}
+
 	for i := 1; i <= 11; i++ {
-		desc := issueDescription(i)
-		descriptions = append(descriptions, desc)
-		_, err := db.CreateIssue(conn, &model.Issue{
+		create(&model.Issue{
 			Title:       fmt.Sprintf("Planned issue %d", i),
-			Description: desc,
+			Description: issueDescription(i),
 			Status:      model.StatusTodo,
 			Priority:    model.PriorityHigh,
 			Kind:        model.IssueKindFeature,
-		}, nil, nil)
-		testsupport.Must(t, err, "CreateIssue(%d): %v", i, err)
+		})
 	}
-
-	_, err := db.CreateIssue(conn, &model.Issue{
+	create(&model.Issue{
 		Title:       "Not a feature",
 		Description: issueDescription(98),
 		Status:      model.StatusTodo,
 		Priority:    model.PriorityLow,
 		Kind:        model.IssueKindBug,
-	}, nil, nil)
-	testsupport.Must(t, err, "CreateIssue(bug): %v", err)
-
-	_, err = db.CreateIssue(conn, &model.Issue{
+	})
+	create(&model.Issue{
 		Title:       "Already finished",
 		Description: issueDescription(99),
 		Status:      model.StatusDone,
 		Priority:    model.PriorityLow,
 		Kind:        model.IssueKindFeature,
-	}, nil, nil)
-	testsupport.Must(t, err, "CreateIssue(done): %v", err)
+	})
 
 	return descriptions
 }
@@ -102,13 +103,16 @@ var summaryRowKeys = []string{
 	"assignee", "labels", "files", "docs", "created_at", "updated_at",
 }
 
-// assertSummaryRows checks that every row is a summary row whose
-// description_bytes matches the description it does not carry.
-func assertSummaryRows(t *testing.T, rows []map[string]json.RawMessage, descriptions []string) {
+// assertSummaryRows checks that wantRows rows came back, each a summary row
+// whose description_bytes matches the description of the issue the row itself
+// names. descriptions maps every seeded title to its description, so the rows
+// may be any subset of the seeded issues in any order.
+func assertSummaryRows(t *testing.T, rows []map[string]json.RawMessage, descriptions map[string]string, wantRows int) {
 	t.Helper()
-	if len(rows) != len(descriptions) {
-		t.Fatalf("rows = %d, want %d", len(rows), len(descriptions))
+	if len(rows) != wantRows {
+		t.Fatalf("rows = %d, want %d", len(rows), wantRows)
 	}
+	seen := make(map[string]bool, len(rows))
 	for i, row := range rows {
 		if _, ok := row["description"]; ok {
 			t.Errorf("row %d carries a description key; listings must be description-free", i)
@@ -118,36 +122,70 @@ func assertSummaryRows(t *testing.T, rows []map[string]json.RawMessage, descript
 				t.Errorf("row %d is missing %q; got keys %v", i, key, keysOf(row))
 			}
 		}
+		title, want, ok := seededDescription(t, i, row, descriptions, seen)
+		if !ok {
+			continue
+		}
 		var descBytes int
 		if err := json.Unmarshal(row["description_bytes"], &descBytes); err != nil {
-			t.Fatalf("row %d description_bytes: %v", i, err)
+			t.Fatalf("row %d (%q) description_bytes: %v", i, title, err)
 		}
-		if descBytes != len(descriptions[i]) {
-			t.Errorf("row %d description_bytes = %d, want %d", i, descBytes, len(descriptions[i]))
+		if descBytes != len(want) {
+			t.Errorf("row %d (%q) description_bytes = %d, want %d", i, title, descBytes, len(want))
 		}
 	}
 }
 
-// assertFullRows checks that every row is the pre-DKT-1053 shape: the whole
-// description present, and no description_bytes standing in for it.
-func assertFullRows(t *testing.T, rows []map[string]json.RawMessage, descriptions []string) {
+// assertFullRows checks that wantRows rows came back, each the pre-DKT-1053
+// shape: the whole description of the issue the row itself names, and no
+// description_bytes standing in for it. descriptions is the same title lookup
+// assertSummaryRows takes.
+func assertFullRows(t *testing.T, rows []map[string]json.RawMessage, descriptions map[string]string, wantRows int) {
 	t.Helper()
-	if len(rows) != len(descriptions) {
-		t.Fatalf("rows = %d, want %d", len(rows), len(descriptions))
+	if len(rows) != wantRows {
+		t.Fatalf("rows = %d, want %d", len(rows), wantRows)
 	}
+	seen := make(map[string]bool, len(rows))
 	for i, row := range rows {
 		if _, ok := row["description_bytes"]; ok {
 			t.Errorf("row %d carries description_bytes under --with-body; the full shape has no such key", i)
 		}
+		title, want, ok := seededDescription(t, i, row, descriptions, seen)
+		if !ok {
+			continue
+		}
 		var desc string
 		if err := json.Unmarshal(row["description"], &desc); err != nil {
-			t.Fatalf("row %d description: %v", i, err)
+			t.Fatalf("row %d (%q) description: %v", i, title, err)
 		}
-		if desc != descriptions[i] {
-			t.Errorf("row %d description = %d bytes, want the full %d-byte description",
-				i, len(desc), len(descriptions[i]))
+		if desc != want {
+			t.Errorf("row %d (%q) description = %d bytes, want the full %d-byte description",
+				i, title, len(desc), len(want))
 		}
 	}
+}
+
+// seededDescription finds the seeded description of the issue a row names by
+// the row's own title, never by the row's position. It reports a row whose
+// title was not seeded, or that repeats an earlier row, and returns ok=false
+// for it.
+func seededDescription(t *testing.T, i int, row map[string]json.RawMessage, descriptions map[string]string, seen map[string]bool) (title, want string, ok bool) {
+	t.Helper()
+	if err := json.Unmarshal(row["title"], &title); err != nil {
+		t.Errorf("row %d title: %v", i, err)
+		return "", "", false
+	}
+	want, ok = descriptions[title]
+	if !ok {
+		t.Errorf("row %d names title %q, which was not seeded", i, title)
+		return title, "", false
+	}
+	if seen[title] {
+		t.Errorf("row %d repeats title %q", i, title)
+		return title, "", false
+	}
+	seen[title] = true
+	return title, want, true
 }
 
 // TestIssueListJSON_IsSummaryRows is DKT-1053's acceptance criterion,
@@ -181,7 +219,7 @@ func TestIssueListJSON_IsSummaryRows(t *testing.T) {
 	if env.Data.Total != 11 {
 		t.Errorf("total = %d, want 11", env.Data.Total)
 	}
-	assertSummaryRows(t, env.Data.Issues, descriptions)
+	assertSummaryRows(t, env.Data.Issues, descriptions, 11)
 
 	// The description is absent, not emptied: no row may smuggle it back.
 	if strings.Contains(buf.String(), "the conductor dispatched the wave") {
@@ -211,7 +249,7 @@ func TestIssueListJSON_WithBodyRestoresDescriptions(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	assertFullRows(t, env.Data.Issues, descriptions)
+	assertFullRows(t, env.Data.Issues, descriptions, 11)
 	if buf.Len() < 4096 {
 		t.Errorf("--with-body output = %d bytes; the descriptions did not come back", buf.Len())
 	}
@@ -363,9 +401,9 @@ func TestIssueListJSONV2_SummaryRowsCarryVersion(t *testing.T) {
 					len(env.Data.Items), env.Data.Total, env.Data.Truncated)
 			}
 			if withBody {
-				assertFullRows(t, env.Data.Items, descriptions[:5])
+				assertFullRows(t, env.Data.Items, descriptions, 5)
 			} else {
-				assertSummaryRows(t, env.Data.Items, descriptions[:5])
+				assertSummaryRows(t, env.Data.Items, descriptions, 5)
 			}
 			for i, item := range env.Data.Items {
 				var version int
@@ -407,10 +445,10 @@ func TestNextJSON_IsSummaryRows(t *testing.T) {
 			t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 		}
 		if withBody {
-			assertFullRows(t, env.Data.Issues, descriptions)
+			assertFullRows(t, env.Data.Issues, descriptions, 11)
 			continue
 		}
-		assertSummaryRows(t, env.Data.Issues, descriptions)
+		assertSummaryRows(t, env.Data.Issues, descriptions, 11)
 		if buf.Len() >= 4096 {
 			t.Errorf("next -T feature --json = %d bytes, want < 4096", buf.Len())
 		}
@@ -451,10 +489,10 @@ func TestPlanJSON_IsSummaryRows(t *testing.T) {
 			}
 		}
 		if withBody {
-			assertFullRows(t, rows, descriptions)
+			assertFullRows(t, rows, descriptions, 11)
 			continue
 		}
-		assertSummaryRows(t, rows, descriptions)
+		assertSummaryRows(t, rows, descriptions, 11)
 		if buf.Len() >= 4096 {
 			t.Errorf("plan -T feature --json = %d bytes, want < 4096", buf.Len())
 		}
@@ -499,10 +537,10 @@ func TestBoardJSON_IsSummaryRows(t *testing.T) {
 			}
 		}
 		if withBody {
-			assertFullRows(t, todo, descriptions)
+			assertFullRows(t, todo, descriptions, 11)
 			continue
 		}
-		assertSummaryRows(t, todo, descriptions)
+		assertSummaryRows(t, todo, descriptions, 11)
 		if buf.Len() >= 4096 {
 			t.Errorf("board -p high --json = %d bytes, want < 4096", buf.Len())
 		}
