@@ -266,7 +266,7 @@ V12, the old `on_fail` closed-vocabulary rule, is gone: a value outside that
 vocabulary now names a triage panel, and V40 resolves it.
 
 Most rows are decided by `Validate`, a pure function of the definition's bytes.
-V26 runs in `ValidateVoteRules`, and V21a–V21d, V25a, V28a, V29, V30, and V37a run
+V26 runs in `ValidateVoteRules`, and V21a–V21d, V25a, V28a, V29, V30, V37a, and V50 run
 in `ValidateSchemas`, because they consult the project's registered vote rules and
 schemas. V21d records a case that is *not* an error.
 
@@ -334,6 +334,9 @@ schemas. V21d records a case that is *not* an error.
 | V45 | a `threshold` predicate over a reserved `diff.*` field requires a tree-holding step: an executor or fanout step that does not declare `holds_tree = false` | §11.2; payloads-thresholds §5.1 |
 | V46 | a predicate over `diff.lines` or `diff.files` compares against an integer literal, under any operator | §11.2; payloads-thresholds §5.1 |
 | V47 | a predicate over `diff.empty` uses `==` or `!=` and compares against a boolean literal | §11.2; payloads-thresholds §5.1 |
+| V48 | `max_fix_loops_hard` requires a positive `max_fix_loops` on the same step, and must be >= that `max_fix_loops` | §11.1 `max_fix_loops_hard` |
+| V49 | a `loop = true` step may not be `type="vote"` | §11.1 `loop`; §11.3 (3) |
+| V50 | `verdict_field` requires the step to declare a `payload`, and must name a property that the step's pinned schema declares | §11.1 `verdict_field` |
 
 **V5 and V8 are the two the spec calls out by name**, and they are the two that
 make a workflow's topology unambiguous. V13/V13a are called out because they are the
