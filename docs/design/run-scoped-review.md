@@ -68,6 +68,61 @@ exactly one name binds its highest version; two or more names is a
 pinned with the issue workflows and inherited by re-activations (activate.go's
 RA2 comment at line 603 and RA3 comment at line 665).
 
+The filter changes which zero-match refusal `bindIssue` reports when no
+issue-scoped definition is bindable (`candidates` empty). The deciding
+condition is the count of registered issue-scoped versions, retired ones
+included, not `len(definitions)`. A count above zero means every registered
+issue-scoped version is retired: the all-retired message, whose `<N>` is that
+count, so with retired issue-scoped versions and a run-scoped definition both
+registered, `<N>` equals the number of retired issue-scoped versions and the
+run-scoped rows are not counted. A count of zero means no issue-scoped
+definition is registered: the only-run-scoped message when at least one
+run-scoped version is registered, and the none-registered message when nothing
+is. Today `bindIssue` tests `len(definitions) > 0`, so a project whose only
+registration is a run-scoped definition falls into the all-retired branch,
+which claims deprecated versions and offers `--restore` when nothing is
+retired; phase 1 replaces that test with the issue-scoped count and adds the
+only-run-scoped branch. Each message is one line, in the style of the engine's
+other activation refusals.
+
+Every registered issue-scoped version is retired (today's message, unchanged
+except that `<N>` counts issue-scoped versions only):
+
+```
+issue <issue> matches no registered workflow: all <N> registered version(s) are deprecated, so none can bind. Restore one with `docket workflow deprecate <name>@<version> --restore`, or register a new version
+```
+
+Only run-scoped versions are registered (new in phase 1; its remedy is
+registering an issue-scoped workflow, and it neither says any version is
+deprecated nor offers `--restore`):
+
+```
+issue <issue> matches no registered workflow: no issue-scoped workflow is registered, and the <M> registered run-scoped version(s) never bind an issue. Register an issue-scoped workflow with `docket workflow register <file.toml>`
+```
+
+Nothing is registered (today's message, unchanged):
+
+```
+issue <issue> matches no registered workflow: none is registered
+```
+
+Substitutions: `<issue>` is the issue's display id (`DKT-12`); `<N>` is the
+number of registered issue-scoped versions; `<M>` is the number of registered
+run-scoped versions, retired ones included; `<name>@<version>` and
+`<file.toml>` are literal text the operator fills in. Output for the two
+states phase 1 tests, for issue `DKT-12`. Only the §5 definition registered:
+
+```
+issue DKT-12 matches no registered workflow: no issue-scoped workflow is registered, and the 1 registered run-scoped version(s) never bind an issue. Register an issue-scoped workflow with `docket workflow register <file.toml>`
+```
+
+Two retired versions of an issue-scoped workflow plus the §5 definition
+registered:
+
+```
+issue DKT-12 matches no registered workflow: all 2 registered version(s) are deprecated, so none can bind. Restore one with `docket workflow deprecate <name>@<version> --restore`, or register a new version
+```
+
 Expansion. `workflow.Expand` runs once for the bound run-scoped definition with an
 empty `Subject`, at ordinal 0, in the same fat transaction that expands the
 phase-one issues, and the rows are written with `issue_id` NULL. `Expand` stays
@@ -860,7 +915,14 @@ registered one with no `[match]` would otherwise match every issue. Acceptance:
 re-registers `unchanged`; with the §5 definition registered, an issue that bound
 exactly one workflow before it was registered binds that same workflow and its
 activation succeeds, and `lintDomainScopeMismatch` reports nothing it did not
-report before.
+report before; with only the §5 definition registered and no issue-scoped
+workflow, activation refuses with the only-run-scoped message (the §3.1
+template, rendered with `<M>` = 1) byte for byte, which neither says any
+version is deprecated nor offers `--restore`; with two retired versions of an
+issue-scoped workflow plus the §5 definition registered, activation refuses
+with the all-retired message (the §3.1 template, rendered with `<N>` = 2) byte
+for byte, so `<N>` equals the retired issue-scoped versions and excludes the
+run-scoped one.
 
 Phase 2, binding, storage, readiness, packet, and the park's resolution. NULL
 `issue_id` rows; partial unique index; run-scoped binding and the D5 refusal;
