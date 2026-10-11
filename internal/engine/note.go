@@ -2,7 +2,6 @@ package engine
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -79,10 +78,17 @@ type RunNote struct {
 // conductor's own, so the writer must state which. ParseRunNoteAuthority's
 // two-value set is enforced here as well as at the CLI, so it binds every
 // writer.
-func AddRunNote(conn *sql.DB, runID int, token string, under Authority, text string, nowMS int64) (*RunNote, error) {
+//
+// `by` says who wrote the note and from where, and the event records it as
+// `actor` and `cwd`, as every ruling does. A note with either field empty is
+// refused as a validation error before anything is written.
+func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
 	under, err := ParseRunNoteAuthority(under.Kind)
 	if err != nil {
 		return nil, err
+	}
+	if err := by.require("run note"); err != nil {
+		return nil, validationErr("%v", err)
 	}
 	text = strings.TrimSuffix(text, "\n")
 	if strings.TrimSpace(text) == "" {
@@ -128,12 +134,12 @@ func AddRunNote(conn *sql.DB, runID int, token string, under Authority, text str
 	// The event carries the note VERBATIM, as `step-annotated` carries its
 	// annotation: the feed must be able to say what every later worker was
 	// told without a join against the note table.
-	data, err := json.Marshal(under.addTo(map[string]any{"note": id, "text": text}))
+	data, err := rulingData(by, under.addTo(map[string]any{"note": id, "text": text}))
 	if err != nil {
 		return nil, fmt.Errorf("recording the run note: %w", err)
 	}
 	if err := recordEvent(tx, eventRecord{
-		Kind: EventRunNoteAdded, RunID: runID, Data: string(data), AtMS: nowMS,
+		Kind: EventRunNoteAdded, RunID: runID, Data: data, AtMS: nowMS,
 	}); err != nil {
 		return nil, err
 	}

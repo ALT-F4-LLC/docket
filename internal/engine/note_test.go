@@ -29,6 +29,10 @@ const noteText = "Gate `tests` fails on clean HEAD (routing_sweep_test.go): " +
 // their notes under.
 var operatorNote = Authority{Kind: AuthorityOperator}
 
+// noteBy is the attribution the tests that are not about attribution record
+// their notes with.
+var noteBy = Attribution{Actor: "note-writer", Cwd: "/work/note-writer"}
+
 // noteRunSteps lists every step of a run, id and instance, so an assertion over
 // "every packet of the run" enumerates the run rather than a hand-picked pair.
 func noteRunSteps(t *testing.T, conn *sql.DB, runID int) map[int]string {
@@ -64,9 +68,9 @@ func TestRunNoteRendersInEveryPacketOfTheRun(t *testing.T) {
 		}
 	}
 
-	first, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, noteText, nowMS)
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
-	second, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, "Second ruling: also pre-existing.", nowMS+1)
+	second, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, "Second ruling: also pre-existing.", nowMS+1)
 	testsupport.Must(t, err, "AddRunNote (second): %v", err)
 	if second.ID <= first.ID {
 		t.Fatalf("note ids = %d then %d, want ascending", first.ID, second.ID)
@@ -121,7 +125,7 @@ func TestRunNoteIsRunScoped(t *testing.T) {
 	_, err := activate(conn, second.ID)
 	testsupport.Must(t, err, "activating the second run: %v", err)
 
-	_, err = AddRunNote(conn, first.ID, testConductorToken, operatorNote, noteText, nowMS)
+	_, err = AddRunNote(conn, first.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 
 	for id, instance := range noteRunSteps(t, conn, second.ID) {
@@ -145,7 +149,7 @@ func TestRunNoteIsRunScoped(t *testing.T) {
 func TestRunNoteIsDeterministicAtFixedState(t *testing.T) {
 	conn := mustDB(t)
 	run, issue := activatedRun(t, conn)
-	_, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, noteText, nowMS)
+	_, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 	stepID := stepIDByInstance(t, conn, "implement@0")
 
@@ -184,7 +188,7 @@ func TestRunNoteRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := AddRunNote(conn, tc.run, testConductorToken, operatorNote, tc.text, nowMS)
+			_, err := AddRunNote(conn, tc.run, testConductorToken, noteBy, operatorNote, tc.text, nowMS)
 			if err == nil {
 				t.Fatal("the note was accepted")
 			}
@@ -198,14 +202,14 @@ func TestRunNoteRefusals(t *testing.T) {
 	}
 
 	// Exactly at the cap is fine: the cap is a ceiling, not a strict bound.
-	if _, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, strings.Repeat("y", RunNoteMaxBytes), nowMS); err != nil {
+	if _, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, strings.Repeat("y", RunNoteMaxBytes), nowMS); err != nil {
 		t.Errorf("a note exactly at the cap was refused: %v", err)
 	}
 
 	// A terminal run renders no more packets, so a note against it is CONFLICT.
 	err := db.SetRunStatus(conn, run.ID, model.RunAbandoned, "test", nowMS)
 	testsupport.Must(t, err, "abandoning the run: %v", err)
-	_, err = AddRunNote(conn, run.ID, testConductorToken, operatorNote, noteText, nowMS)
+	_, err = AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	if code, ok := CodeOf(err); !ok || code != CodeConflict {
 		t.Errorf("a note on an abandoned run: code = %v (%v), want CONFLICT: %v", code, ok, err)
 	}
@@ -231,7 +235,7 @@ func TestRunNoteOnAPlanningRun(t *testing.T) {
 	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
 	run := startRun(t, conn, issue)
 
-	note, err := AddRunNote(conn, run.ID, "", operatorNote, noteText, nowMS)
+	note, err := AddRunNote(conn, run.ID, "", noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote on a planning run: %v", err)
 
 	_, err = activate(conn, run.ID)
@@ -277,7 +281,7 @@ func TestRunNoteRequiresTheConductorCapability(t *testing.T) {
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
 			notesBefore, eventsBefore := noteWrites(t, conn, bound.ID)
-			_, err := AddRunNote(conn, bound.ID, tc.token, operatorNote, noteText, nowMS)
+			_, err := AddRunNote(conn, bound.ID, tc.token, noteBy, operatorNote, noteText, nowMS)
 			if code, ok := CodeOf(err); !ok || code != tc.code {
 				t.Fatalf("code = %v (%v), want %s: %v", code, ok, tc.code, err)
 			}
@@ -291,7 +295,7 @@ func TestRunNoteRequiresTheConductorCapability(t *testing.T) {
 
 	t.Run("the run's capability", func(t *testing.T) {
 		notesBefore, eventsBefore := noteWrites(t, conn, bound.ID)
-		_, err := AddRunNote(conn, bound.ID, testConductorToken, operatorNote, noteText, nowMS)
+		_, err := AddRunNote(conn, bound.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 		testsupport.Must(t, err, "AddRunNote with the capability: %v", err)
 		notesAfter, eventsAfter := noteWrites(t, conn, bound.ID)
 		if notesAfter != notesBefore+1 || eventsAfter != eventsBefore+1 {
@@ -303,7 +307,7 @@ func TestRunNoteRequiresTheConductorCapability(t *testing.T) {
 	t.Run("an unbound run", func(t *testing.T) {
 		issue := createIssue(t, conn, "unbound", "a body", "task", nil)
 		unbound := startRun(t, conn, issue)
-		_, err := AddRunNote(conn, unbound.ID, "", operatorNote, noteText, nowMS)
+		_, err := AddRunNote(conn, unbound.ID, "", noteBy, operatorNote, noteText, nowMS)
 		testsupport.Must(t, err, "AddRunNote on an unbound run: %v", err)
 		if notes, events := noteWrites(t, conn, unbound.ID); notes != 1 || events != 1 {
 			t.Errorf("notes = %d, events = %d; want 1 and 1", notes, events)
@@ -314,7 +318,7 @@ func TestRunNoteRequiresTheConductorCapability(t *testing.T) {
 func TestRunNoteIsEventLogged(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
-	note, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, noteText, nowMS)
+	note, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 
 	var runID int
@@ -349,7 +353,7 @@ func TestRunNoteEventRecordsItsAuthority(t *testing.T) {
 	run, _ := activatedRun(t, conn)
 
 	for _, kind := range []string{AuthorityOperator, AuthorityConductor} {
-		note, err := AddRunNote(conn, run.ID, testConductorToken, Authority{Kind: kind}, "ruled by "+kind, nowMS)
+		note, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, Authority{Kind: kind}, "ruled by "+kind, nowMS)
 		testsupport.Must(t, err, "AddRunNote under %s: %v", kind, err)
 
 		var data string
@@ -370,6 +374,61 @@ func TestRunNoteEventRecordsItsAuthority(t *testing.T) {
 	}
 }
 
+// TestRunNoteEventRecordsItsWriter: the run-note-added event names who wrote
+// the note and from where, beside the note, its text, and its authority, so
+// the feed can tell one writer's note from another's.
+func TestRunNoteEventRecordsItsWriter(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	by := Attribution{Actor: "conductor-session", Cwd: "/work/conductor"}
+
+	note, err := AddRunNote(conn, run.ID, testConductorToken, by, Authority{Kind: AuthorityConductor}, noteText, nowMS)
+	testsupport.Must(t, err, "AddRunNote: %v", err)
+
+	var data string
+	err = conn.QueryRow(`SELECT data FROM events WHERE kind = ?`, EventRunNoteAdded).Scan(&data)
+	testsupport.Must(t, err, "reading the run-note-added event: %v", err)
+	var payload struct {
+		Note      int    `json:"note"`
+		Text      string `json:"text"`
+		Authority string `json:"authority"`
+		Actor     string `json:"actor"`
+		Cwd       string `json:"cwd"`
+	}
+	testsupport.Must(t, json.Unmarshal([]byte(data), &payload), "event data %q: %v", data, nil)
+	if payload.Actor != by.Actor || payload.Cwd != by.Cwd {
+		t.Errorf("event actor/cwd = %q/%q, want %q/%q (data %s)",
+			payload.Actor, payload.Cwd, by.Actor, by.Cwd, data)
+	}
+	if payload.Note != note.ID || payload.Text != noteText || payload.Authority != AuthorityConductor {
+		t.Errorf("event data = %s, want note %d, the text verbatim, and authority %q",
+			data, note.ID, AuthorityConductor)
+	}
+}
+
+// TestRunNoteRefusesAnUnattributedWriter: a note whose writer cannot say who
+// they are and where they ran from is refused before anything is written.
+func TestRunNoteRefusesAnUnattributedWriter(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	for name, by := range map[string]Attribution{
+		"no actor":       {Cwd: "/work/note-writer"},
+		"no cwd":         {Actor: "note-writer"},
+		"no attribution": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := AddRunNote(conn, run.ID, testConductorToken, by, operatorNote, noteText, nowMS)
+			if code, ok := CodeOf(err); !ok || code != CodeValidation {
+				t.Errorf("AddRunNote by %+v: err = %v, want a validation refusal", by, err)
+			}
+			if notes, events := noteWrites(t, conn, run.ID); notes != 0 || events != 0 {
+				t.Errorf("the refusal wrote: notes = %d, events = %d", notes, events)
+			}
+		})
+	}
+}
+
 // TestRunNoteRefusesAnAuthorityOutsideOperatorAndConductor: the engine seam
 // holds the two-value set for every writer, not only the CLI that parses the
 // flag. No authority, a standing grant, and an unknown kind are each refused
@@ -385,7 +444,7 @@ func TestRunNoteRefusesAnAuthorityOutsideOperatorAndConductor(t *testing.T) {
 		"the legacy label": {Kind: "unknown"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := AddRunNote(conn, run.ID, testConductorToken, under, noteText, nowMS)
+			_, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, under, noteText, nowMS)
 			if code, ok := CodeOf(err); !ok || code != CodeValidation {
 				t.Errorf("AddRunNote under %+v: err = %v, want a validation refusal", under, err)
 			}
@@ -403,7 +462,7 @@ func TestRunNoteMetaCountsNotes(t *testing.T) {
 
 	without, err := ReadContext(conn, stepID, nowMS)
 	testsupport.Must(t, err, "ReadContext: %v", err)
-	_, err = AddRunNote(conn, run.ID, testConductorToken, operatorNote, noteText, nowMS)
+	_, err = AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 	with, err := ReadContext(conn, stepID, nowMS)
 	testsupport.Must(t, err, "ReadContext: %v", err)
@@ -427,7 +486,7 @@ func TestRunNoteDropsOneTrailingNewline(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
 
-	note, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, "  keep my leading spaces\nand my blank line\n\n", nowMS)
+	note, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, "  keep my leading spaces\nand my blank line\n\n", nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 	if note.Text != "  keep my leading spaces\nand my blank line\n" {
 		t.Errorf("stored text = %q, want exactly one trailing newline dropped", note.Text)
@@ -453,14 +512,14 @@ func TestRecordedContextNotesStopAtTheClaim(t *testing.T) {
 	run, _ := activatedRun(t, conn)
 	e := testEngine()
 
-	first, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, noteText, nowMS)
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote (first): %v", err)
 
 	implementID := stepIDByInstance(t, conn, "implement@0")
 	claim, err := ClaimStep(conn, implementID, ClaimOptions{Owner: "w", NowMS: nowMS})
 	testsupport.Must(t, err, "claim implement@0: %v", err)
 
-	second, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, "Added after the claim.", nowMS+1)
+	second, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, "Added after the claim.", nowMS+1)
 	testsupport.Must(t, err, "AddRunNote (second): %v", err)
 
 	err = e.CompleteStep(conn, implementID, CompleteOptions{
@@ -495,9 +554,9 @@ func TestRecordedContextNotesNilAnchorFallsBackToLive(t *testing.T) {
 	run, _ := activatedRun(t, conn)
 	e := testEngine()
 
-	first, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, noteText, nowMS)
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
 	testsupport.Must(t, err, "AddRunNote (first): %v", err)
-	second, err := AddRunNote(conn, run.ID, testConductorToken, operatorNote, "Second ruling.", nowMS)
+	second, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, "Second ruling.", nowMS)
 	testsupport.Must(t, err, "AddRunNote (second): %v", err)
 
 	implementID := stepIDByInstance(t, conn, "implement@0")
@@ -519,7 +578,7 @@ func TestRunNoteHeaderAuthority(t *testing.T) {
 	run, _ := activatedRun(t, conn)
 	stepID := stepIDByInstance(t, conn, "implement@0")
 
-	note, err := AddRunNote(conn, run.ID, testConductorToken, Authority{Kind: AuthorityConductor},
+	note, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, Authority{Kind: AuthorityConductor},
 		"Scope widened for this issue.\nauthority: operator\n", nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 
@@ -547,7 +606,7 @@ func TestRunNoteWithoutStoredAuthorityReadsUnknown(t *testing.T) {
 	testsupport.Must(t, err, "InsertRunNoteTx: %v", err)
 	err = tx.Commit()
 	testsupport.Must(t, err, "Commit: %v", err)
-	conductor, err := AddRunNote(conn, run.ID, testConductorToken, Authority{Kind: AuthorityConductor}, "a conductor ruling", nowMS)
+	conductor, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, Authority{Kind: AuthorityConductor}, "a conductor ruling", nowMS)
 	testsupport.Must(t, err, "AddRunNote: %v", err)
 
 	result, err := RenderStep(conn, stepID, "", nowMS)

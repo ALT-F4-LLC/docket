@@ -133,6 +133,10 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 	if err != nil {
 		return runErr(err)
 	}
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
 	text, err := runNoteText(cmd)
 	if err != nil {
 		return err
@@ -147,7 +151,7 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 		token = conductorToken(conn, runID, os.Stdin)
 	}
 
-	note, err := engine.AddRunNote(conn, runID, token, under, text, model.NowMS())
+	note, err := engine.AddRunNote(conn, runID, token, by, under, text, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}

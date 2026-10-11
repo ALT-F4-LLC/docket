@@ -367,7 +367,7 @@ func TestAuthorityRollupCountsRunNotesByTheirAuthority(t *testing.T) {
 	}
 
 	for _, kind := range []string{AuthorityOperator, AuthorityConductor} {
-		_, err := AddRunNote(conn, run.ID, testConductorToken, Authority{Kind: kind}, "ruled by "+kind, nowMS)
+		_, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, Authority{Kind: kind}, "ruled by "+kind, nowMS)
 		testsupport.Must(t, err, "AddRunNote under %s: %v", kind, err)
 	}
 	tx, err := conn.Begin()
