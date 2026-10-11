@@ -682,6 +682,11 @@ func trustCmdError(err error) error {
 		// caller does not retry with a "corrected" argv against a database that
 		// will refuse the next write too.
 		return cmdErr(err, output.ErrGeneral)
+	case errors.Is(err, trust.ErrPublish):
+		// The store could not be written (disk full, EIO, a sealed directory).
+		// GENERAL_ERROR for the same reason as errTrustUnrecorded: the argv was
+		// fine, and retrying a "corrected" one would hit the same filesystem.
+		return cmdErr(err, output.ErrGeneral)
 	default:
 		return cmdErr(err, output.ErrValidation)
 	}

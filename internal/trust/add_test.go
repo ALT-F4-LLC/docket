@@ -284,6 +284,9 @@ func TestWriteStorePostCreateTempFailureNamesTheStore(t *testing.T) {
 			if !strings.Contains(err.Error(), path) {
 				t.Errorf("the failure must name the store %s, not only its temp file; got: %v", path, err)
 			}
+			if !errors.Is(err, ErrPublish) {
+				t.Errorf("a publish failure must wrap ErrPublish so the CLI reports GENERAL_ERROR; got: %v", err)
+			}
 
 			after, err := os.ReadFile(path)
 			testsupport.Must(t, err, "reading the store after the failed publish: %v", err)

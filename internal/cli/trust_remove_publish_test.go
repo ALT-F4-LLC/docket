@@ -8,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
@@ -75,6 +76,52 @@ func TestTrustRemoveRecordsNoEventOnFailedPublish(t *testing.T) {
 	}
 	if events[0]["kind"] != engine.EventTrustAdded {
 		t.Errorf("a failed removal recorded a %v event", events[0]["kind"])
+	}
+}
+
+// TestTrustPublishFailureIsGeneralError: a store the filesystem refuses to
+// publish is GENERAL_ERROR, not VALIDATION_ERROR, for both verbs. The argv was
+// valid, so a caller must not retry with a "corrected" one.
+func TestTrustPublishFailureIsGeneralError(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
+	testsupport.Must(t, err, "trust add: %v", err)
+
+	sealTrustStoreDir(t)
+
+	rmErr := runTrustVerb(t, cfg, newTrustRmCmd(), "checks")
+	if rmErr == nil {
+		t.Fatal("trust rm must fail when the store cannot be published")
+	}
+	if code := errorCodeOf(t, rmErr); code != output.ErrGeneral {
+		t.Errorf("trust rm publish failure is %s, want GENERAL_ERROR: %v", code, rmErr)
+	}
+
+	// A new name, so the add is not the idempotent no-write branch.
+	addErr := runTrustVerb(t, cfg, newTrustAddCmd(), "scan", "--", "make", "scan")
+	if addErr == nil {
+		t.Fatal("trust add must fail when the store cannot be published")
+	}
+	if code := errorCodeOf(t, addErr); code != output.ErrGeneral {
+		t.Errorf("trust add publish failure is %s, want GENERAL_ERROR: %v", code, addErr)
+	}
+}
+
+// TestTrustAddUnpinnableArgv0IsValidation pins trustCmdError's default branch:
+// an absolute argv[0] that names no file is an argument fault, so it stays
+// VALIDATION_ERROR even though the failure is a filesystem error. Only the
+// publish sentinel moves to GENERAL_ERROR, not every I/O error.
+func TestTrustAddUnpinnableArgv0IsValidation(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	missing := filepath.Join(t.TempDir(), "no-such-binary")
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", missing)
+	if err == nil {
+		t.Fatal("trust add must refuse an absolute argv[0] that names no file")
+	}
+	if code := errorCodeOf(t, err); code != output.ErrValidation {
+		t.Errorf("the refusal is %s, want VALIDATION_ERROR: %v", code, err)
 	}
 }
 

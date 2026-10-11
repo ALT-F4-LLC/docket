@@ -462,7 +462,7 @@ func writeStore(path string, st *Store) error {
 		// The target store is named as well as the directory: every publish
 		// failure must identify WHICH store did not change, and the directory
 		// alone leaves an operator comparing a path they were never shown.
-		return fmt.Errorf("publishing the trust store %s: creating a temporary file in %s: %w", path, dir, err)
+		return fmt.Errorf("%w %s: creating a temporary file in %s: %w", ErrPublish, path, dir, err)
 	}
 	tmpPath := tmp.Name()
 	defer func() {
@@ -474,23 +474,23 @@ func writeStore(path string, st *Store) error {
 	// requirement rather than relying on that, so a future stdlib change or a
 	// restrictive umask cannot silently widen it.
 	if err := tmp.Chmod(storeFileMode); err != nil {
-		return fmt.Errorf("publishing the trust store %s: setting mode on %s: %w", path, tmpPath, err)
+		return fmt.Errorf("%w %s: setting mode on %s: %w", ErrPublish, path, tmpPath, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("publishing the trust store %s: writing %s: %w", path, tmpPath, err)
+		return fmt.Errorf("%w %s: writing %s: %w", ErrPublish, path, tmpPath, err)
 	}
 	// fsync before rename: a rename that lands before the data is durable
 	// leaves an empty trust file after a power loss, which is an allowlist that
 	// silently lost every entry.
 	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("publishing the trust store %s: syncing %s: %w", path, tmpPath, err)
+		return fmt.Errorf("%w %s: syncing %s: %w", ErrPublish, path, tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("publishing the trust store %s: closing %s: %w", path, tmpPath, err)
+		return fmt.Errorf("%w %s: closing %s: %w", ErrPublish, path, tmpPath, err)
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("publishing the trust store %s: %w", path, err)
+		return fmt.Errorf("%w %s: %w", ErrPublish, path, err)
 	}
 	return nil
 }

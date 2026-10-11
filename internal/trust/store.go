@@ -191,6 +191,12 @@ var ErrParse = errors.New("trust store parse")
 // value.
 var ErrConflict = errors.New("trust entry conflict")
 
+// ErrPublish wraps every writeStore failure (CreateTemp, Chmod, Write, Sync,
+// Close, Rename), whatever the errno. Callers map it to GENERAL_ERROR: the
+// request was valid and the filesystem refused it, so a "corrected" argv would
+// fail the same way. Its text is the prefix of each publish failure's message.
+var ErrPublish = errors.New("publishing the trust store")
+
 // StorePath resolves the trust file's location per §3.1's two-row table.
 //
 // THERE IS NO THIRD SOURCE. No --trust-file flag, no DOCKET_TRUST_FILE env var,
