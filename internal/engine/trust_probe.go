@@ -40,6 +40,10 @@ type TrustProbeGate struct {
 	// same rule gate-probe.js held: a vacuous pass must be impossible.
 	Exit    *int   `json:"exit"`
 	LogTail string `json:"log_tail"`
+	// Warning is the trust lookup's warning for an entry that still ran, such
+	// as an absolute argv[0] with no content pin. It is kept apart from
+	// LogTail so the gate's own output is never mixed with engine text.
+	Warning string `json:"warning,omitempty"`
 }
 
 // TrustProbeSkip is one roster entry the probe never ran because it is a
@@ -176,13 +180,6 @@ func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e 
 		}
 	}
 
-	resolved, err := dexec.Resolve(e.Argv[0], repoRoot, e.Argv[0])
-	if err != nil {
-		row.LogTail = err.Error()
-		return row
-	}
-	argv := append([]string{resolved}, e.Argv[1:]...)
-
 	env, err := dexec.BuildEnv(dexec.EnvPolicy{
 		Gate: e.Name, Repo: repoRoot, Network: e.Network, Base: base,
 		CacheRoot: worktree.Cache,
@@ -191,6 +188,20 @@ func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e 
 		row.LogTail = err.Error()
 		return row
 	}
+
+	match := lookupProbeEntry(e)
+	if !match.Matched {
+		row.LogTail = match.Reason
+		return row
+	}
+	row.Warning = match.Warning
+
+	resolved, err := dexec.Resolve(match.Argv[0], repoRoot, match.Entry.Argv[0])
+	if err != nil {
+		row.LogTail = err.Error()
+		return row
+	}
+	argv := append([]string{resolved}, match.Argv[1:]...)
 
 	res, err := dexec.Run(dexec.Spec{Argv: argv, Dir: worktree.Dir, Env: env, Timeout: timeout})
 	if err != nil {
@@ -209,6 +220,20 @@ func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e 
 		}
 	}
 	return row
+}
+
+// lookupProbeEntry holds one roster entry to the same Lookup the record-time
+// gate path makes, so the probe checks its content pin (§3.1 argv0_sha256)
+// before every spawn and returns the argv that must execute.
+//
+// The snapshot holds only this entry, so Lookup cannot select a different
+// entry of the same name. The entry is marked global because the caller
+// already filtered the roster by repo binding; repeating that check here
+// would need an identity the probe does not hold.
+func lookupProbeEntry(e trust.Entry) trust.Match {
+	e.Global = true
+	snapshot := &trust.Store{Entries: []trust.Entry{e}}
+	return snapshot.Lookup("", e.Name, nil)
 }
 
 // tailLines returns the last n non-empty-trimmed lines of s, the Go

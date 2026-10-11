@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -311,6 +313,161 @@ func TestProbeTrustHeadIsRepoHead(t *testing.T) {
 
 	if result.Head != strings.TrimSpace(string(want)) {
 		t.Errorf("Head = %q, want %q", result.Head, strings.TrimSpace(string(want)))
+	}
+}
+
+// markerScript writes an executable script outside the repo that creates
+// marker when run, and returns the script's path and the SHA-256 of its bytes,
+// the value `trust add` stores as argv0_sha256.
+func markerScript(t *testing.T, marker string) (path, pin string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "gate.sh")
+	body := []byte("#!/bin/sh\ntouch '" + marker + "'\n")
+	err := os.WriteFile(path, body, 0o755)
+	testsupport.Must(t, err, "writing %s: %v", path, err)
+	sum := sha256.Sum256(body)
+	return path, hex.EncodeToString(sum[:])
+}
+
+func assertMarker(t *testing.T, marker string, want bool) {
+	t.Helper()
+	_, err := os.Stat(marker)
+	if got := err == nil; got != want {
+		t.Errorf("marker %s present = %v, want %v (stat err: %v)", marker, got, want, err)
+	}
+}
+
+// TestProbeTrustRefusesDriftedContentPin: a pinned script rewritten after
+// `trust add` is not spawned, its row fails with the path and both hashes, and
+// the rest of the roster still probes.
+func TestProbeTrustRefusesDriftedContentPin(t *testing.T) {
+	repo := probeRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, pin := markerScript(t, marker)
+
+	f, err := os.OpenFile(script, os.O_APPEND|os.O_WRONLY, 0)
+	testsupport.Must(t, err, "opening %s: %v", script, err)
+	_, err = f.WriteString("#")
+	testsupport.Must(t, err, "rewriting %s: %v", script, err)
+	testsupport.Must(t, f.Close(), "closing %s", script)
+	drifted, err := os.ReadFile(script)
+	testsupport.Must(t, err, "reading %s: %v", script, err)
+	now := sha256.Sum256(drifted)
+	resolved, err := filepath.EvalSymlinks(script)
+	testsupport.Must(t, err, "resolving %s: %v", script, err)
+
+	entries := []trust.Entry{
+		{Name: "pinned", Argv: []string{script}, Argv0SHA256: pin},
+		{Name: "benign", Argv: []string{"true"}},
+	}
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 2 {
+		t.Fatalf("want 2 gate rows, got %+v", result.Gates)
+	}
+	g := result.Gates[0]
+	if g.Exit != nil {
+		t.Errorf("a drifted pinned entry must not be spawned: %+v", g)
+	}
+	for _, want := range []string{resolved, pin, hex.EncodeToString(now[:])} {
+		if !strings.Contains(g.LogTail, want) {
+			t.Errorf("row reason %q does not name %q", g.LogTail, want)
+		}
+	}
+	assertMarker(t, marker, false)
+	if b := result.Gates[1]; b.Exit == nil || *b.Exit != 0 {
+		t.Errorf("benign: the refused entry must not stop the rest: %+v", b)
+	}
+	if result.Passed || len(result.Failed) != 1 || result.Failed[0] != "pinned" {
+		t.Errorf("want failed = [pinned] and not passed, got %+v", result)
+	}
+}
+
+// TestProbeTrustRefusesUnhashablePin: a pinned file that cannot be read is
+// refused, never treated as a match, and is not spawned.
+func TestProbeTrustRefusesUnhashablePin(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode-0111 file, so the hash would not fail")
+	}
+	repo := probeRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, pin := markerScript(t, marker)
+	testsupport.Must(t, os.Chmod(script, 0o111), "chmod %s", script)
+
+	entries := []trust.Entry{{Name: "pinned", Argv: []string{script}, Argv0SHA256: pin}}
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 1 {
+		t.Fatalf("want 1 gate row, got %+v", result.Gates)
+	}
+	g := result.Gates[0]
+	if g.Exit != nil {
+		t.Errorf("an unverifiable pinned entry must not be spawned: %+v", g)
+	}
+	if want := "cannot verify the content pin of " + script; !strings.Contains(g.LogTail, want) {
+		t.Errorf("row reason %q does not contain %q", g.LogTail, want)
+	}
+	assertMarker(t, marker, false)
+	if result.Passed {
+		t.Error("an unverifiable pin must fail the probe")
+	}
+}
+
+// TestProbeTrustRunsUnchangedPinnedScript: a pinned script whose bytes match
+// its pin runs and passes.
+func TestProbeTrustRunsUnchangedPinnedScript(t *testing.T) {
+	repo := probeRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, pin := markerScript(t, marker)
+
+	entries := []trust.Entry{{Name: "pinned", Argv: []string{script}, Argv0SHA256: pin}}
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 1 {
+		t.Fatalf("want 1 gate row, got %+v", result.Gates)
+	}
+	if g := result.Gates[0]; g.Exit == nil || *g.Exit != 0 || g.Warning != "" {
+		t.Errorf("an unchanged pinned script must run, pass, and carry no warning: %+v", g)
+	}
+	assertMarker(t, marker, true)
+	if !result.Passed {
+		t.Errorf("want passed, got %+v", result)
+	}
+}
+
+// TestProbeTrustWarnsOnUnpinnedAbsoluteEntry: a legacy entry with an absolute
+// argv[0] and no pin still runs, and its row carries the re-pin warning; a
+// relative argv[0] has nothing to pin and carries none.
+func TestProbeTrustWarnsOnUnpinnedAbsoluteEntry(t *testing.T) {
+	repo := probeRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, _ := markerScript(t, marker)
+
+	entries := []trust.Entry{
+		{Name: "legacy", Argv: []string{script}},
+		{Name: "relative", Argv: []string{"true"}},
+	}
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 2 {
+		t.Fatalf("want 2 gate rows, got %+v", result.Gates)
+	}
+	legacy := result.Gates[0]
+	if legacy.Exit == nil || *legacy.Exit != 0 {
+		t.Errorf("a legacy unpinned entry must still run: %+v", legacy)
+	}
+	assertMarker(t, marker, true)
+	for _, want := range []string{"has no content pin", "docket trust add legacy"} {
+		if !strings.Contains(legacy.Warning, want) {
+			t.Errorf("legacy warning %q does not contain %q", legacy.Warning, want)
+		}
+	}
+	if w := result.Gates[1].Warning; w != "" {
+		t.Errorf("a relative argv[0] carries no pin warning, got %q", w)
 	}
 }
 
