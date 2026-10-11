@@ -213,6 +213,11 @@ func TestStepBoundVoteRecordsOneEventOfEachKind(t *testing.T) {
 	if proposalID == 0 {
 		t.Fatal("no proposal opened for gate@0")
 	}
+	// The proposal is stamped with the wall clock, which can fall before the
+	// fixed test clock's activation; move it inside the run's window so only
+	// the step-proposal exclusion keeps the panel path from announcing it.
+	execSQL(t, conn, `UPDATE proposals SET created_at = ? WHERE id = ?`,
+		time.UnixMilli(nowMS).Add(time.Minute).UTC().Format(time.RFC3339), proposalID)
 	testsupport.Must(t, RecordConductorPanelOpened(conn, proposalID),
 		"RecordConductorPanelOpened on a vote step's proposal")
 	for _, seat := range []string{"seat-a", "seat-b", "seat-c"} {
