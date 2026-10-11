@@ -81,6 +81,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - run: go vet ./...
+
       - run: go test -timeout 30m ./...
         env:
           DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
