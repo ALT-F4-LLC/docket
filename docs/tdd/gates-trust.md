@@ -82,7 +82,7 @@ construction:
   format has a slot for who or what will run it.
 
 **`vote`, `voter`, `proposal`, `verdict`, `quorum`, `threshold` are pre-existing
-Docket surface**, shipped since v2 and documented in SKILL.md's voting section.
+Docket surface**, shipped since v2 and documented in the voting section of the loadable `docket` skill.
 This stage drives that machinery from a workflow step; it introduces no new
 vocabulary there and changes none of its semantics (§8). A team voting on a
 documentation change reads every one of those words exactly as written — the
@@ -503,7 +503,7 @@ the help text says so.
 
 **Interactive by default; `--yes` skips the prompt.** Without `--yes` and with a
 TTY, `trust add` prints the argv, the repo binding, and every flag's effect, then
-asks for confirmation (the repo's existing `huh` idiom, SKILL.md's interactive
+asks for confirmation (the repo's existing `huh` idiom, the loadable `docket` skill's interactive
 forms section). With `--yes`, or with no TTY, it writes without prompting — and
 `--yes` is what a session runs, per D14.
 
@@ -1718,7 +1718,7 @@ The existing `vote create` takes `--criticality` (low|medium|high|critical) and
 flags, so `vote_rule` needs a named, stored configuration.
 
 **Threshold configs are `docket config` keys**, in the existing engine-config
-registry (SKILL.md's engine-configuration table), not a new table:
+registry (the loadable `docket` skill's engine-configuration table), not a new table:
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -2225,7 +2225,7 @@ transport) gains the gate-child exclusion, cross-referencing §8; §2 (what a le
 is not) gains a note that the trust boundary argument now also carries the trust
 file; §6 (threat notes) cross-references §11.
 
-**SKILL.md's `docket trust` section** documents the verb tables, the `--` argv
+**The loadable `docket` skill's `docket trust` section** documents the verb tables, the `--` argv
 boundary, the `--prefix` warning, the repo binding and its moved-repo
 consequence, and the fact that a missing trust file means "nothing runs" rather
 than an error — the stranger's first question, answered where they will look.
