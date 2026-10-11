@@ -136,3 +136,42 @@ func TestRunRefreshFiles(t *testing.T) {
 		assertFilesFrozen(t, conn, runID, issueID)
 	})
 }
+
+// TestRunRefreshFilesRequiresTheConductorCapability: on a bound run the verb
+// forwards the conductor token from DOCKET_TOKEN and refuses without it, so an
+// executor cannot make its own `issue file add|remove` reach its packets.
+func TestRunRefreshFilesRequiresTheConductorCapability(t *testing.T) {
+	bound := func(t *testing.T) (*sql.DB, int, int, string) {
+		t.Helper()
+		conn := newTestDB(t)
+		runID, issueID := filesFrozenIssueInLiveRun(t, conn, "docs/a.md")
+		return conn, runID, issueID, seatConductor(t, conn, runID)
+	}
+
+	t.Run("no token", func(t *testing.T) {
+		conn, runID, issueID, _ := bound(t)
+		t.Setenv(TokenEnvVar, "")
+		_, err := refreshFilesVerb(t, conn, runID, issueID, "operator detached b")
+		assertRefreshCode(t, err, output.ErrValidation, TokenEnvVar)
+		assertFilesFrozen(t, conn, runID, issueID)
+	})
+
+	t.Run("a token that is not the run's", func(t *testing.T) {
+		conn, runID, issueID, _ := bound(t)
+		t.Setenv(TokenEnvVar, "an-executors-lease-token")
+		_, err := refreshFilesVerb(t, conn, runID, issueID, "operator detached b")
+		assertRefreshCode(t, err, output.ErrAuth, "conductor capability")
+		assertFilesFrozen(t, conn, runID, issueID)
+	})
+
+	t.Run("the current conductor token", func(t *testing.T) {
+		conn, runID, issueID, token := bound(t)
+		t.Setenv(TokenEnvVar, token)
+		_, err := refreshFilesVerb(t, conn, runID, issueID, "operator detached b")
+		testsupport.Must(t, err, "run refresh-files as the conductor: %v", err)
+		if got := snapshotFiles(t, conn, runID, issueID); !slices.Equal(got,
+			[]string{"docs/a.md"}) {
+			t.Errorf("snapshot files = %v, want the live list [docs/a.md]", got)
+		}
+	})
+}
