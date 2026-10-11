@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -139,6 +140,18 @@ func TestStepShowReportsResolutionAuthority(t *testing.T) {
 				}
 				id := site.resolve(t, conn, flags)
 
+				human := stepShowHuman(t, conn, id)
+				if !strings.Contains(human, "\n  authority: "+authority+"\n") {
+					t.Errorf("human step show lacks the line `authority: %s`:\n%s", authority, human)
+				}
+				hasRef := strings.Contains(human, "authority ref:")
+				if wantRef != "" && !strings.Contains(human, "\n  authority ref: "+wantRef+"\n") {
+					t.Errorf("human step show lacks the line `authority ref: %s`:\n%s", wantRef, human)
+				}
+				if wantRef == "" && hasRef {
+					t.Errorf("human step show names an authority ref on a %s resolution:\n%s", authority, human)
+				}
+
 				row, raw := stepShowV2Row(t, conn, id)
 				var got string
 				if err := json.Unmarshal(row["authority"], &got); err != nil || got != authority {
@@ -159,5 +172,24 @@ func TestStepShowReportsResolutionAuthority(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// stepShowHuman runs `step show` without --json and returns the human block.
+func stepShowHuman(t *testing.T, conn *sql.DB, stepID int) string {
+	t.Helper()
+	w, buf := bufWriter(false)
+	err := runStepShow(cmdWithDB(conn), []string{model.FormatStepID(stepID)}, w)
+	testsupport.Must(t, err, "step show: %v\n%s", err, buf.String())
+	return buf.String()
+}
+
+// TestStepShowHumanOmitsAuthorityUnresolved: a step no ruling has resolved
+// prints no authority line, since there is no authority to report.
+func TestStepShowHumanOmitsAuthorityUnresolved(t *testing.T) {
+	conn := newTestDB(t)
+	id := readyGate(t, conn)
+	if human := stepShowHuman(t, conn, id); strings.Contains(human, "authority") {
+		t.Errorf("unresolved step prints an authority line:\n%s", human)
 	}
 }

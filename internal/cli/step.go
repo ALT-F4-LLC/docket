@@ -1354,6 +1354,20 @@ func renderStepTarget(view *engine.StepView) string {
 	return out
 }
 
+// renderStepAuthority is the human half of the JSON `authority` and
+// `authority_ref` keys: what entitled the step's resolution, and for a
+// standing grant, which grant. Empty on a step no ruling has resolved.
+func renderStepAuthority(view *engine.StepView) string {
+	if view.Authority == "" {
+		return ""
+	}
+	out := fmt.Sprintf("  authority: %s\n", view.Authority)
+	if view.AuthorityRef != "" {
+		out += fmt.Sprintf("  authority ref: %s\n", view.AuthorityRef)
+	}
+	return out
+}
+
 // renderHeldCluster is the human half: where the question came from.
 //
 // `step artifacts` on a held row says "produced no artifacts", which is true
@@ -1465,10 +1479,12 @@ func runStepShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 // stepShowMessage renders one step's human block, identically for the single
 // and the batch form — they rendered the same four pieces in two places, and
-// the target section is the fifth.
+// the target section is the fifth. The authority lines follow the detail
+// block and precede the gates: they say what entitled the routing above them.
 func stepShowMessage(view *engine.StepView) string {
 	return render.RenderStepDetail(
 		view.Row, view.Routing, view.SagaStage, view.Owner, view.ExpiresMS) +
+		renderStepAuthority(view) +
 		render.RenderStepGateSummary(view.Row.Step, gateRows(view.Gates)) +
 		renderHeldCluster(view.HeldCluster) +
 		renderStepTarget(view)
