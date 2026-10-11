@@ -313,7 +313,7 @@ type StepRow struct {
 	// LoopRoundsRun, LoopTriggerStep, and LoopLatestVerdict are the loop
 	// history a fix loop leaves behind when it exhausts its `max_fix_loops`
 	// budget: how many rounds actually ran against the cap, the instance whose
-	// verdict opened the loop, and the verdict the last round ended on.
+	// verdict opened the loop, and that trigger round's recorded verdict.
 	//
 	// They exist because a loop-bound park says only that the budget ran out.
 	// The three facts a person or a router needs next — was the cap reached or
@@ -324,8 +324,11 @@ type StepRow struct {
 	// the row, so all three are persisted together rather than leaving a reader
 	// to compute one and guess two.
 	//
-	// They are written as ONE fact by db.SetStepLoopHistoryTx and read back
-	// together: a trigger without its verdict describes a loop nothing measured.
+	// They are written together by db.SetStepLoopHistoryTx and read back
+	// together. LoopLatestVerdict is the trigger round's recorded verdict,
+	// verbatim, and "" when that round recorded none (its payload carried no
+	// string verdict), so an empty verdict beside a set LoopTriggerStep is
+	// legitimate.
 	// `omitempty`, so every row outside a loop exhaustion — which is nearly all
 	// of them — serializes exactly as before.
 	LoopRoundsRun     int    `json:"loop_rounds_run,omitempty"`
