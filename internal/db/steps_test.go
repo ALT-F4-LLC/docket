@@ -631,6 +631,43 @@ func TestStepsAuthorityColumnRoundTrips(t *testing.T) {
 	}
 }
 
+// TestStepsAuthorityOverwriteClearsRef proves a later ruling replaces the
+// whole authority record: an operator ruling after a standing grant leaves no
+// stale grant reference on the row.
+func TestStepsAuthorityOverwriteClearsRef(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+
+	writes := []struct{ authority, ref string }{
+		{"standing-grant", "RUN NOTE 54"},
+		{"operator", ""},
+	}
+	for i, w := range writes {
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		err = SetStepAuthorityTx(tx, id, w.authority, w.ref, int64(2000+i))
+		testsupport.Must(t, err, "SetStepAuthorityTx(%q, %q): %v", w.authority, w.ref, err)
+		err = tx.Commit()
+		testsupport.Must(t, err, "Commit: %v", err)
+	}
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Authority != "operator" {
+		t.Errorf("Authority = %q, want operator", step.Authority)
+	}
+	if step.AuthorityRef != "" {
+		t.Errorf("AuthorityRef = %q, want empty — a stale standing-grant "+
+			"reference survived the operator ruling", step.AuthorityRef)
+	}
+	if step.RowVersion != before.RowVersion+2 {
+		t.Errorf("RowVersion = %d, want %d — each authority write must move the row",
+			step.RowVersion, before.RowVersion+2)
+	}
+}
+
 // TestLoopHistoryFactsAbsentBeforeWrite pins the unwritten reading: a step that
 // never exhausted a loop carries no loop history, so the fields stay at their
 // zero values and serialize away under omitempty.
