@@ -497,36 +497,74 @@ func TestIssueAttachmentFilesInlinesContainedPath(t *testing.T) {
 }
 
 // TestIssueAttachmentFilesRefusesASymlinkOutOfTheRoot: an attached path with no
-// `..` passes the lexical guard, but a symlink at that path inside the run's
-// checkout resolving outside it is refused, and none of the target's bytes
+// `..` passes the lexical guard, but a symlink inside the run's checkout that
+// resolves outside it is refused, whether the escape is a relative or absolute
+// final component or an intermediate directory, and none of the target's bytes
 // reach the error or the returned files.
 func TestIssueAttachmentFilesRefusesASymlinkOutOfTheRoot(t *testing.T) {
 	const sentinel = "ESCAPED host bytes via symlink\n"
-	base := t.TempDir()
-	root := filepath.Join(base, "root")
-	writeFixture(t, base, "escape.txt", sentinel)
-	testsupport.Must(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755), "mkdir: %v", nil)
-	testsupport.Must(t,
-		os.Symlink("../../escape.txt", filepath.Join(root, "docs", "link.md")),
-		"symlink: %v", nil)
-	conn, step, spec := attachedStep(t, root, []string{"docs/link.md"})
+	cases := []struct {
+		name   string
+		attach string
+		// link returns the symlink's path relative to the checkout and its
+		// target, given base, the checkout's parent, which holds escape.txt.
+		link func(base string) (path, target string)
+	}{{
+		name:   "relative_final_component",
+		attach: "docs/link.md",
+		link: func(string) (string, string) {
+			return "docs/link.md", "../../escape.txt"
+		},
+	}, {
+		name:   "absolute_target",
+		attach: "docs/abslink.md",
+		link: func(base string) (string, string) {
+			return "docs/abslink.md", filepath.Join(base, "escape.txt")
+		},
+	}, {
+		name:   "directory_component",
+		attach: "docs/dirlink/escape.txt",
+		link: func(string) (string, string) {
+			return "docs/dirlink", "../.."
+		},
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "root")
+			writeFixture(t, base, "escape.txt", sentinel)
+			testsupport.Must(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755), "mkdir: %v", nil)
+			linkPath, target := tc.link(base)
+			testsupport.Must(t,
+				os.Symlink(target, filepath.Join(root, linkPath)),
+				"symlink: %v", nil)
+			// An unguarded read must reach the sentinel, so a refusal below is
+			// containment and not a missing fixture.
+			if escaped, err := os.ReadFile(filepath.Join(root, tc.attach)); err != nil ||
+				string(escaped) != sentinel {
+				t.Fatalf("fixture %s does not reach the sentinel: %q, %v",
+					tc.attach, escaped, err)
+			}
+			conn, step, spec := attachedStep(t, root, []string{tc.attach})
 
-	out, err := issueAttachmentFiles(conn, step, spec)
-	if err == nil {
-		t.Fatalf("issueAttachmentFiles followed the escaping symlink; got %+v", out)
-	}
-	if code, ok := CodeOf(err); !ok || code != CodeValidation {
-		t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "docs/link.md") {
-		t.Errorf("refusal does not name docs/link.md:\n  %s", msg)
-	}
-	if strings.Contains(msg, strings.TrimSpace(sentinel)) {
-		t.Errorf("refusal carries the escaped target's bytes:\n  %s", msg)
-	}
-	if out != nil {
-		t.Errorf("refusal returned files: %+v", out)
+			out, err := issueAttachmentFiles(conn, step, spec)
+			if err == nil {
+				t.Fatalf("issueAttachmentFiles followed the escaping symlink; got %+v", out)
+			}
+			if code, ok := CodeOf(err); !ok || code != CodeValidation {
+				t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.attach) {
+				t.Errorf("refusal does not name %s:\n  %s", tc.attach, msg)
+			}
+			if strings.Contains(msg, strings.TrimSpace(sentinel)) {
+				t.Errorf("refusal carries the escaped target's bytes:\n  %s", msg)
+			}
+			if out != nil {
+				t.Errorf("refusal returned files: %+v", out)
+			}
+		})
 	}
 }
 
