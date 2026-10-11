@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -14,6 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
 // DKT-821 — `verify-pins` answered exit 0 on RUN-59 while every remaining judge
@@ -207,5 +209,214 @@ func TestVerifyPinsExitsZeroOnAClosedPinSet(t *testing.T) {
 		t.Errorf("output = %q, want it to state BOTH halves — a reader told "+
 			"only \"all sound\" cannot tell whether the closure was checked",
 			got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Gate rows at the CLI: the remedy names only unpinned gates, and a sound run
+// renders could-not-check gates rather than hiding them.
+// ---------------------------------------------------------------------------
+
+// gatedVerifyPinsWorkflow declares two gates on one step, so a report can
+// hold an unpinned row beside an unchecked one.
+const gatedVerifyPinsWorkflow = `
+[pipeline]
+name = "gated-cli"
+version = 1
+
+[match]
+kind = ["feature"]
+
+[[step]]
+name = "judge"
+executor = "judge"
+emits = "change-summary"
+after = []
+packet = ["contracts/judge.md"]
+gates = ["lint", "tests"]
+`
+
+// gatedVerifyPinsFixture activates a run of gatedVerifyPinsWorkflow with
+// XDG_CONFIG_HOME pointed at an empty sandbox, so the trust store starts
+// absent and every declared gate is unchecked. With trustTests set, a global
+// `make tests` entry is added first: it matches the `tests` gate and names no
+// script, so that gate alone becomes unpinned. It returns the connection,
+// the config dir, and the run ref.
+func gatedVerifyPinsFixture(t *testing.T, trustTests bool) (*sql.DB, string, string) {
+	t.Helper()
+	// THE TEMP DIRS COME FIRST, BEFORE t.Setenv — `t.TempDir()` reads TMPDIR.
+	root := t.TempDir()
+	xdg := t.TempDir()
+	execRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("DOCKET_PATH", filepath.Join(root, ".docket"))
+
+	configDir := filepath.Join(root, ".docket", "config")
+	for rel, body := range map[string]string{
+		"workflows/gated-cli.toml": gatedVerifyPinsWorkflow,
+		"contracts/judge.md":       "the judge contract\n",
+		"policy.toml":              "opaque = \"instance policy\"\n",
+	} {
+		full := filepath.Join(configDir, rel)
+		testsupport.Must(t, os.MkdirAll(filepath.Dir(full), 0o755), "mkdir %s", rel)
+		testsupport.Must(t, os.WriteFile(full, []byte(body), 0o644), "writing %s", rel)
+	}
+	if trustTests {
+		_, err := trust.Add(trust.AddRequest{
+			Name: "tests", Argv: []string{"make", "tests"}, Global: true,
+			NowMS: time.Now().UnixMilli(),
+		})
+		testsupport.Must(t, err, "trust.Add(tests): %v", err)
+	}
+
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "gated", model.StatusBacklog, model.PriorityNone)
+	run, err := db.InsertRunWithContext(conn, 1, "test run", 0, model.NowMS(),
+		db.RunContext{ExecRoot: execRoot})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issueID), "AddRunIssue")
+	_, err = engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: model.NowMS()})
+	testsupport.Must(t, err, "Activate: %v", err)
+	return conn, configDir, run.Ref()
+}
+
+// driftJudgeContract rewrites the pinned contract after activation, so the
+// run is unsound on a changed pin.
+func driftJudgeContract(t *testing.T, configDir string) {
+	t.Helper()
+	testsupport.Must(t, os.WriteFile(filepath.Join(configDir, "contracts/judge.md"),
+		[]byte("the judge contract, edited after activation\n"), 0o644),
+		"drifting the contract")
+}
+
+// gateStatuses is the engine's verdict per declared gate, the precondition
+// each CLI assertion below rests on.
+func gateStatuses(t *testing.T, conn *sql.DB, runRef string) map[string]string {
+	t.Helper()
+	runID, err := model.ParseRunID(runRef)
+	testsupport.Must(t, err, "ParseRunID: %v", err)
+	report, err := engine.VerifyPins(conn, runID)
+	testsupport.Must(t, err, "VerifyPins: %v", err)
+	got := map[string]string{}
+	for _, g := range report.Gates {
+		got[g.Gate] = g.Status
+	}
+	return got
+}
+
+// TestVerifyPinsRemedyOmitsUncheckedGates: on an unsound run whose gates
+// could not be checked, the error must not list them as having no pinned
+// script. That list is what an operator reads on an unsound run, and an
+// unchecked gate may well be pinned.
+func TestVerifyPinsRemedyOmitsUncheckedGates(t *testing.T) {
+	conn, configDir, runRef := gatedVerifyPinsFixture(t, false)
+	driftJudgeContract(t, configDir)
+
+	statuses := gateStatuses(t, conn, runRef)
+	if len(statuses) != 2 || statuses["lint"] != engine.GateUnchecked ||
+		statuses["tests"] != engine.GateUnchecked {
+		t.Fatalf("gate statuses = %v, want lint and tests both %q", statuses, engine.GateUnchecked)
+	}
+
+	w, _ := bufWriter(false)
+	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
+	if err == nil {
+		t.Fatal("verify-pins reported clean on a run whose pinned contract drifted")
+	}
+	if strings.Contains(err.Error(), "gates with no pinned script") {
+		t.Errorf("err = %q lists could-not-check gates as having no pinned script",
+			err.Error())
+	}
+}
+
+// TestVerifyPinsRemedyNamesUnpinnedGates: on an unsound run, a gate whose
+// trusted argv names no script is named in the remedy, and an unchecked gate
+// beside it is not.
+func TestVerifyPinsRemedyNamesUnpinnedGates(t *testing.T) {
+	conn, configDir, runRef := gatedVerifyPinsFixture(t, true)
+	driftJudgeContract(t, configDir)
+
+	statuses := gateStatuses(t, conn, runRef)
+	if statuses["tests"] != engine.GateUnpinned || statuses["lint"] != engine.GateUnchecked {
+		t.Fatalf("gate statuses = %v, want tests %q and lint %q",
+			statuses, engine.GateUnpinned, engine.GateUnchecked)
+	}
+
+	w, _ := bufWriter(false)
+	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
+	if err == nil {
+		t.Fatal("verify-pins reported clean on a run whose pinned contract drifted")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `gates with no pinned script: "tests"`) {
+		t.Errorf("err = %q, want it to name the unpinned gate \"tests\"", msg)
+	}
+	if strings.Contains(msg, `"lint"`) {
+		t.Errorf("err = %q names the could-not-check gate \"lint\" as unpinned", msg)
+	}
+}
+
+// TestVerifyPinsRendersUncheckedGatesOnASoundRun: an absent trust store makes
+// every declared gate unchecked, which never makes the run unsound, so the
+// verb exits 0 and states each gate with its reason.
+func TestVerifyPinsRendersUncheckedGatesOnASoundRun(t *testing.T) {
+	conn, _, runRef := gatedVerifyPinsFixture(t, false)
+
+	w, buf := bufWriter(false)
+	if err := runRunVerifyPins(cmdWithDB(conn), runRef, w); err != nil {
+		t.Fatalf("verify-pins refuses a sound run with unchecked gates: %v", err)
+	}
+	out := buf.String()
+	for _, gate := range []string{"lint", "tests"} {
+		prefix := `gate "` + gate + `": unchecked (`
+		i := strings.Index(out, prefix)
+		if i < 0 {
+			t.Errorf("output = %q, want a line starting %q", out, prefix)
+			continue
+		}
+		line := out[i+len(prefix):]
+		if j := strings.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j]
+		}
+		if !strings.HasSuffix(line, ")") || strings.TrimSuffix(line, ")") == "" {
+			t.Errorf("gate %q line ends %q, want a non-empty reason in parentheses",
+				gate, line)
+		}
+	}
+}
+
+// TestVerifyPinsJSONCarriesUncheckedGates is the same sound run under --json:
+// each declared gate has a row with status "unchecked" and a non-empty reason.
+func TestVerifyPinsJSONCarriesUncheckedGates(t *testing.T) {
+	conn, _, runRef := gatedVerifyPinsFixture(t, false)
+
+	w, buf := bufWriter(true)
+	if err := runRunVerifyPins(cmdWithDB(conn), runRef, w); err != nil {
+		t.Fatalf("verify-pins --json refuses a sound run with unchecked gates: %v", err)
+	}
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Gates []engine.GateVerdict `json:"gates"`
+		} `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &envelope), "decoding %q", buf.String())
+	if !envelope.OK {
+		t.Fatalf("envelope = %s, want ok", buf.String())
+	}
+	rows := map[string]engine.GateVerdict{}
+	for _, g := range envelope.Data.Gates {
+		rows[g.Gate] = g
+	}
+	for _, gate := range []string{"lint", "tests"} {
+		row, ok := rows[gate]
+		switch {
+		case !ok:
+			t.Errorf("gates = %+v, want a row for %q", envelope.Data.Gates, gate)
+		case row.Status != engine.GateUnchecked:
+			t.Errorf("gate %q status = %q, want %q", gate, row.Status, engine.GateUnchecked)
+		case row.Reason == "":
+			t.Errorf("gate %q has an empty reason", gate)
+		}
 	}
 }
