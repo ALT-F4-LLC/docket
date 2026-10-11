@@ -85,7 +85,10 @@ else
   issue_status=0
   description=$(docket issue show "$DOCKET_ISSUE" --json | jq -r '.data.description // empty') || issue_status=$?
   if [ "$issue_status" -ne 0 ]; then
-    echo "qa checks: reading $DOCKET_ISSUE's criteria failed (exit $issue_status); none added"
+    # Name the store this child resolved: gate children are denied
+    # DOCKET_PATH, so it can differ from the engine's.
+    store=$(docket config --json | jq -r '"\(.data.db_path) (\(.data.store_source))"') || store="unresolved"
+    echo "qa checks: reading $DOCKET_ISSUE's criteria from store $store failed (exit $issue_status); none added"
     [ "$issue_status" -gt "$worst" ] && worst=$issue_status
     description=""
   fi
@@ -94,21 +97,25 @@ else
   criteria=$(printf '%s\n' "$description" | awk '/^Acceptance criteria/ { found = 1 } found')
   [ -n "$criteria" ] || criteria=$description
 
-  # The allow-list of section names is qa.sh's SECTIONS array itself, so a
-  # name qa.sh does not define is skipped here rather than reaching its
-  # "unknown section" exit after a full run. An empty read is a broken
-  # registry parse, not a criterion to skip quietly.
-  qa_known_sections=" $(sed -nE 's/^  ([A-Z]+):test_.*/\1/p' scripts/qa.sh | tr '\n' ' ' || true)"
-  if [ -z "${qa_known_sections// /}" ]; then
-    echo "qa checks: no section names read from scripts/qa.sh SECTIONS; no qa.sh section can run"
-    [ "$worst" -gt 1 ] || worst=1
-  fi
-
   # A qa.sh invocation is the span from `scripts/qa.sh` to the closing
   # backtick or end of line; its LAST field is the section, since the binary
   # placeholder varies (`<bin>`, `<built docket>`) and may contain spaces.
+  qa_spans=$(printf '%s\n' "$criteria" | grep -oE 'scripts/qa\.sh[^`]*' || true)
+
+  # The allow-list of section names is qa.sh's SECTIONS array itself, so a
+  # name qa.sh does not define is skipped here rather than reaching its
+  # "unknown section" exit after a full run. It is read only when a criterion
+  # names qa.sh, so an issue without one never depends on qa.sh's layout.
+  qa_known_sections=""
+  if [ -n "$qa_spans" ]; then
+    qa_known_sections=" $(sed -nE 's/^  ([A-Z]+):test_.*/\1/p' scripts/qa.sh | tr '\n' ' ' || true)"
+  fi
+
   while IFS= read -r span; do
     [ -n "$span" ] || continue
+    # An unbackticked span ends at end of line, so it can carry the
+    # sentence's closing punctuation.
+    span=${span%[.,:]}
     case "$span" in
       *[!A-Za-z0-9\ \<\>._/-]*)
         echo "qa checks: skipped '$span': shell metacharacter in invocation"
@@ -120,7 +127,12 @@ else
       continue
     fi
     section=${!#}
-    section=${section%.}
+    # An empty read is a broken registry parse, not a criterion to skip quietly.
+    if [ -z "${qa_known_sections// /}" ]; then
+      echo "qa checks: skipped '$span': no section names read from scripts/qa.sh SECTIONS"
+      [ "$worst" -gt 1 ] || worst=1
+      continue
+    fi
     case "$qa_known_sections" in
       *" $section "*) ;;
       *)
@@ -128,7 +140,7 @@ else
         continue ;;
     esac
     case " $qa_sections " in *" $section "*) ;; *) qa_sections="$qa_sections $section" ;; esac
-  done < <(printf '%s\n' "$criteria" | grep -oE 'scripts/qa\.sh[^`]*' || true)
+  done <<< "$qa_spans"
 
   while IFS= read -r path; do
     path=${path%.}
