@@ -110,9 +110,13 @@ run that uses dispatch that close has already run `integrationVerdict` over
 every write-class head, but no table the scheduler reads records that a
 worktree commit was integrated, and a run driven without dispatch (a fixture
 run, a `next`-driven harness) never writes a close at all. Integration is
-established for every run, whatever drives it, by the integration check at
-claim, below: a run-scoped step that R2c offers is claimed only after that
-check accepts every write-class head, and parks `waiting-human` otherwise. A
+established for every run, whether or not a dispatch exists, by the
+integration check at claim (detailed below): `integrationVerdict`
+(dispatch_integration.go:352), the gate `dispatch close` runs, is called at the
+claim's pre-transaction git moment, before the `claim_head` read
+(claim.go:350), over every write-class issue step's recorded `issue.diff` head
+against `run.exec_root`; a run-scoped step that R2c offers is claimed only when
+that call accepts every head, and parks `waiting-human` otherwise. A
 run driven without dispatch therefore reaches R2c when its issues finish and
 still cannot open the phase until its writers' commits are on the shared
 branch. R3 through R7 apply unchanged; R4 for a tree-holding run-scoped step
@@ -153,17 +157,26 @@ as it does at close.
 The failure case. When `integrationVerdict` returns a non-empty unintegrated
 list, the claim does not happen: no lease is minted, no token is returned, no
 attempt is spent, no `step_inputs` are bound, and no `run.diff` artifact is
-recorded (the diff is computed only after the check accepts). Instead the
-claim opens a short transaction, re-reads the row, and, if it is still
-`pending`, parks it `waiting-human` through `SetStepRoutingWithParkReasonTx`
+recorded (the diff is computed only after the check accepts). The git
+questions are asked before transaction A, like `claim_head`; the verdict is
+consumed inside A, after the lazy reap (claim.go:371-402) and the
+readiness check, at the point the CAS claim would otherwise be written: the
+claim writes the park there instead, through `SetStepRoutingWithParkReasonTx`
 (internal/db/steps.go:814) with routing `waiting-human`, a new park class
 `integration-unverified`, and a reason naming every unintegrated step and its
-head in `UnintegratedReason`'s shape (dispatch_integration.go:406), then
-records a `step-routed` event carrying the routing record (the routing stage's
-own event, saga.go:1556; no new event kind), commits, and returns a CONFLICT
-whose text is the park reason. The park follows `step hold`'s shape, the one
-existing park of a READY `pending` row outside the routing stage (hold.go:81-95
-at the pinned commit). The reason, under the `<class>: <prose>` form §3.3 uses:
+head in `UnintegratedReason`'s shape (dispatch_integration.go:406), records a
+`step-routed` event carrying the routing record (the routing stage's own
+event, saga.go:1556; no new event kind), commits A, and returns a CONFLICT
+whose text is the park reason. Consuming the verdict inside A is what keeps
+the claim's exclusion rule single: the same CAS state that would have minted
+the lease decides the park, a reaped-then-re-offered row is parked in the one
+transaction that reaped it, and no second transaction re-reads the row. The
+candidates were read in `integrationVerdict`'s own read-only transaction
+before A, so a head re-recorded between the two is the same window
+`claim_head` already has, and the next claim reads it. The park follows `step
+hold`'s shape, the one existing park of a READY `pending` row outside the
+routing stage (hold.go:81-95 at the pinned commit). The reason, under the
+`<class>: <prose>` form §3.3 uses:
 
 ```
 integration-unverified: {step} {instance}: sha {sha12} ({how}) in {worktree}[; ...]; cherry-pick each commit onto the shared branch, or `step annotate {step} --integrated-sha` for a hand-resolved pick, then resolve with --as retry
@@ -189,8 +202,9 @@ then rolls up `done` with its integrated review recorded as skipped or passed
 over a tree the engine never verified, which the routing record says.
 `abandon-issue` is refused by §3.3's subject rule. Two sibling claims that run
 the check concurrently read the same branch and reach the same verdict unless a
-commit lands between them; the second then parks or passes on the tree it saw,
-and its own `step-routed` record says which. The check is not recorded as an
+commit lands between them; each consumes its own verdict in its own transaction
+A, so the second parks or passes on the tree it saw, and its own `step-routed`
+record says which. The check is not recorded as an
 acceptance: nothing at the claim writes a `dispatch-closed` event (the only
 writer of `integration.checked` is the close, dispatch.go:2088 and 2115, and
 its no-manifest branch exists for usage acceptance alone, dispatch.go:2073-2079),
@@ -660,9 +674,11 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/engine/claim.go: the integration check (§3.1, "Integration at
   claim"): for a run-scoped step under D5's predicate, call
   `integrationVerdict` with no skip reason before the `claim_head` read; on a
-  non-empty unintegrated list, park the row `waiting-human` with class
-  `integration-unverified` and the §3.1 reason in a short transaction, record
-  the `step-routed` event, and return CONFLICT with no lease and no `run.diff`.
+  non-empty unintegrated list, consume the verdict inside transaction A after
+  the lazy reap, where the CAS claim would be written: park the row
+  `waiting-human` with class `integration-unverified` and the §3.1 reason,
+  record the `step-routed` event, commit A, and return CONFLICT with no lease
+  and no `run.diff`.
   Then compute `run.diff` before the claim transaction from
   the existing `claim_head` sha, which is the diff tip and the payload `head`,
   and record it inside the transaction.
