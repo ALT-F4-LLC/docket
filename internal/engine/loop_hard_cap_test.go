@@ -173,8 +173,6 @@ func TestFixLoopExtensionHardCap(t *testing.T) {
 // loop enters. The engine it returns fails every gate.
 func hardCapLane(t *testing.T, soft, hard int, onExhausted string) (*sql.DB, *model.Run, int, *Engine) {
 	t.Helper()
-	conn := mustDB(t)
-	registerVoteRule(t, conn, "majority", "0.5", "")
 	bounds := fmt.Sprintf("max_fix_loops = %d\n", soft)
 	if hard > 0 {
 		bounds += fmt.Sprintf("max_fix_loops_hard = %d\n", hard)
@@ -184,22 +182,7 @@ func hardCapLane(t *testing.T, soft, hard int, onExhausted string) (*sql.DB, *mo
 	}
 	const reviewRouting = "on_fail = \"fix-loop\"\n"
 	src := strings.Replace(loopTriageSrc, reviewRouting, reviewRouting+bounds, 1)
-	registerSource(t, conn, []byte(src), "loop-triage-lane.toml")
-
-	issue := createIssue(t, conn, "hard-capped", "body", "task", nil)
-	run := startRun(t, conn, issue)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	e := testEngine()
-	claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
-	e.Gates = failingGates{}
-	claimAndComplete(t, conn, e, "review@0", "the verdict", "")
-	testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
-		"driving after review@0's failure: %v", err)
-	if !stepExists(t, conn, "fix@1") {
-		t.Fatal("premise: review@0's fix-loop did not enter ordinal 1")
-	}
+	conn, issue, run, e := enterOrdinalOne(t, src, nil)
 	return conn, run, issue, e
 }
 

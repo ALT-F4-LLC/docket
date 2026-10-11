@@ -595,34 +595,8 @@ after_loop = "review"
 // panel@k a failure at ordinal k >= 1 has nothing to suspend for, and the step
 // strands with no panel and no release.
 func TestLoopBodyFailureRoutesToItsOrdinalsPanel(t *testing.T) {
-	// enterOrdinalOne passes implement@0, fails review@0's gate into a fix
-	// round, and returns with fix@1 instantiated and nothing at ordinal 1
-	// recorded yet. The engine it returns fails every gate.
-	enterOrdinalOne := func(t *testing.T) (*sql.DB, *model.Run, *Engine) {
-		t.Helper()
-		conn := mustDB(t)
-		registerVoteRule(t, conn, "majority", "0.5", "")
-		registerSource(t, conn, []byte(loopTriageSrc), "loop-triage-lane.toml")
-
-		issue := createIssue(t, conn, "loop-triaged", "body", "task", nil)
-		run := startRun(t, conn, issue)
-		_, err := activate(conn, run.ID)
-		testsupport.Must(t, err, "activate: %v", err)
-
-		e := testEngine()
-		claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
-		e.Gates = failingGates{}
-		claimAndComplete(t, conn, e, "review@0", "the verdict", "")
-		err = e.DriveRunLifecycles(conn, run.ID, nowMS)
-		testsupport.Must(t, err, "driving after review@0's failure: %v", err)
-		if !stepExists(t, conn, "fix@1") {
-			t.Fatal("premise: review@0's fix-loop did not enter ordinal 1")
-		}
-		return conn, run, e
-	}
-
 	t.Run("a failing round suspends for the ordinal's panel", func(t *testing.T) {
-		conn, run, e := enterOrdinalOne(t)
+		conn, _, run, e := enterOrdinalOne(t, loopTriageSrc, nil)
 		panelExists := stepExists(t, conn, "triage@1")
 		if !panelExists {
 			t.Error("no triage@1 row after the lane entered ordinal 1: fix@1 " +
@@ -666,7 +640,7 @@ func TestLoopBodyFailureRoutesToItsOrdinalsPanel(t *testing.T) {
 	})
 
 	t.Run("a passing round skips the ordinal's panel", func(t *testing.T) {
-		conn, run, e := enterOrdinalOne(t)
+		conn, _, run, e := enterOrdinalOne(t, loopTriageSrc, nil)
 		e.Gates = PassThroughRunner{}
 		claimAndComplete(t, conn, e, "fix@1", "the round-1 candidate", "")
 		err := e.DriveRunLifecycles(conn, run.ID, nowMS)
@@ -689,10 +663,23 @@ var whenGatedFix = strings.Replace(loopTriageSrc,
 	"on_fail = \"triage\"\nloop = true",
 	"on_fail = \"triage\"\nwhen = \"labels contains run-fix\"\nloop = true", 1)
 
-// enterOrdinalOneWith registers src, passes implement@0, fails review@0's gate
-// into a fix round, and returns with ordinal 1 expanded. The engine it returns
-// passes every gate.
+// enterOrdinalOneWith is enterOrdinalOne with the engine switched to pass every
+// gate on return.
 func enterOrdinalOneWith(
+	t *testing.T, src string, labels []string,
+) (*sql.DB, int, *model.Run, *Engine) {
+	t.Helper()
+	conn, issue, run, e := enterOrdinalOne(t, src, labels)
+	e.Gates = PassThroughRunner{}
+	return conn, issue, run, e
+}
+
+// enterOrdinalOne registers the majority vote rule and src, creates an issue
+// carrying labels, starts and activates its run, passes implement@0, fails
+// review@0's gate into a fix round, and returns with fix@1 instantiated and
+// nothing at ordinal 1 recorded yet. It is the one ordinal-one triage lane
+// setup; the engine it returns fails every gate.
+func enterOrdinalOne(
 	t *testing.T, src string, labels []string,
 ) (*sql.DB, int, *model.Run, *Engine) {
 	t.Helper()
@@ -714,7 +701,6 @@ func enterOrdinalOneWith(
 	if !stepExists(t, conn, "fix@1") {
 		t.Fatal("premise: review@0's fix-loop did not enter ordinal 1")
 	}
-	e.Gates = PassThroughRunner{}
 	return conn, issue, run, e
 }
 
