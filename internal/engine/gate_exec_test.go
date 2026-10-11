@@ -782,6 +782,27 @@ func TestGateRowCarriesLegacyPinWarning(t *testing.T) {
 		t.Errorf("the budget-skip row lacks the warning: %+v", skipped.Results)
 	}
 
+	t.Run("a resolve refusal carries the warning after its refusal", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "absent.sh")
+		refusing := NewExecRunner(testRepoPaths(repoRoot))
+		refusing.LoadStore = sandboxTrust(t, legacyEntry(repoRoot, missing))
+		got, err := refusing.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+		testsupport.Must(t, err, "running the gate on a missing argv[0]: %v", err)
+		if len(got.Results) != 1 || got.Results[0].Verdict != VerdictUnmatched {
+			t.Fatalf("rows = %+v, want one %q row", got.Results, VerdictUnmatched)
+		}
+		reason := got.Results[0].Reason
+		refusal := strings.Index(reason, "was not found on PATH")
+		if refusal < 0 {
+			t.Fatalf("the row lacks the resolve refusal: %q", reason)
+		}
+		for _, want := range []string{legacyPinText, "docket trust add tests --"} {
+			if at := strings.Index(reason, want); at < refusal {
+				t.Errorf("reason lacks %q after the refusal: %q", want, reason)
+			}
+		}
+	})
+
 	t.Run("a pinned entry records no warning", func(t *testing.T) {
 		pinned, sum := pinnedScript(t, "exit 0\n")
 		runner.LoadStore = sandboxTrust(t, pinnedEntry(repoRoot, pinned, sum))
