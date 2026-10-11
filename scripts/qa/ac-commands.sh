@@ -64,14 +64,16 @@ run build go1.26.9 build ./...
 # Acceptance criteria worded with -count=1 must be settled by a fresh run, not a cached result.
 # -timeout 60m: internal/engine alone took 1380-1570s under concurrent run load
 # (RUN-135), within minutes of the former 1800s cap; 60m leaves headroom over
-# that range. The trust entry's own timeout for this script must exceed 60m,
-# or it kills the gate before go test's cap does.
+# that range. The trust entry's own timeout for this script must exceed 60m
+# plus the qa checks below, or it kills the gate before they finish: one
+# docket build, then each named qa.sh section (every run re-runs sections B
+# through its target, about 45s for Z and 110s for ZG), then genericity.sh.
 run tests go1.26.9 test -count=1 -timeout 60m ./...
 
 # Run the scripts/qa checks the issue's acceptance criteria name, so an AC like
 # "`bash scripts/qa.sh <built docket> ZG` reports PASS" is settled by execution.
 # Criterion text is untrusted: nothing from it reaches a command line except a
-# qa.sh section token that matched the closed pattern below, and every other
+# qa.sh section token found in qa.sh's own SECTIONS registry, and every other
 # script runs by a literal path from this allow-list, never by the text's.
 # Anything off the list is printed as skipped and never executed.
 qa_sections=""
@@ -92,6 +94,16 @@ else
   criteria=$(printf '%s\n' "$description" | awk '/^Acceptance criteria/ { found = 1 } found')
   [ -n "$criteria" ] || criteria=$description
 
+  # The allow-list of section names is qa.sh's SECTIONS array itself, so a
+  # name qa.sh does not define is skipped here rather than reaching its
+  # "unknown section" exit after a full run. An empty read is a broken
+  # registry parse, not a criterion to skip quietly.
+  qa_known_sections=" $(sed -nE 's/^  ([A-Z]+):test_.*/\1/p' scripts/qa.sh | tr '\n' ' ' || true)"
+  if [ -z "${qa_known_sections// /}" ]; then
+    echo "qa checks: no section names read from scripts/qa.sh SECTIONS; no qa.sh section can run"
+    [ "$worst" -gt 1 ] || worst=1
+  fi
+
   # A qa.sh invocation is the span from `scripts/qa.sh` to the closing
   # backtick or end of line; its LAST field is the section, since the binary
   # placeholder varies (`<bin>`, `<built docket>`) and may contain spaces.
@@ -108,11 +120,13 @@ else
       continue
     fi
     section=${!#}
-    # qa.sh's section names: A-Z, then ZA-ZZ.
-    if ! [[ "$section" =~ ^Z?[A-Z]$ ]]; then
-      echo "qa checks: skipped '$span': section '$section' is not a qa.sh section name"
-      continue
-    fi
+    section=${section%.}
+    case "$qa_known_sections" in
+      *" $section "*) ;;
+      *)
+        echo "qa checks: skipped '$span': section '$section' is not a qa.sh section name"
+        continue ;;
+    esac
     case " $qa_sections " in *" $section "*) ;; *) qa_sections="$qa_sections $section" ;; esac
   done < <(printf '%s\n' "$criteria" | grep -oE 'scripts/qa\.sh[^`]*' || true)
 
