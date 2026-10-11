@@ -3,6 +3,9 @@ package trust
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -897,4 +900,94 @@ func TestEveryTestFileSandboxesXDG(t *testing.T) {
 			t.Errorf("%s touches the trust store but never sandboxes XDG_CONFIG_HOME (§9.5 SB1)", name)
 		}
 	}
+}
+
+// TestCreateTempAssignedOnlyAtDeclaration enforces that the createTemp seam is
+// rebound only by tests. Production code may name createTemp in exactly two
+// shapes: its package-level declaration and a call. Any other use (an
+// assignment, a shadowing declaration, taking its address) lets a production
+// edit substitute a temp file that skips writeStore's publish discipline.
+func TestCreateTempAssignedOnlyAtDeclaration(t *testing.T) {
+	t.Run("adversarial control: an assignment in a function body is reported", func(t *testing.T) {
+		src := "package trust\n\nimport \"os\"\n\nvar createTemp = os.CreateTemp\n\nfunc f() { createTemp = nil }\n"
+		violations, err := createTempMisuses("adversarial.go", src)
+		testsupport.Must(t, err, "parsing the adversarial control: %v", err)
+		if len(violations) != 1 {
+			t.Errorf("want exactly 1 violation, got %d: %v", len(violations), violations)
+		}
+	})
+
+	t.Run("benign control: the declaration alone passes despite a comment", func(t *testing.T) {
+		src := "package trust\n\nimport \"os\"\n\n// createTemp = nil\nvar createTemp = os.CreateTemp\n"
+		violations, err := createTempMisuses("benign.go", src)
+		testsupport.Must(t, err, "parsing the benign control: %v", err)
+		if len(violations) != 0 {
+			t.Errorf("want no violations, got %v", violations)
+		}
+	})
+
+	entries, err := os.ReadDir(".")
+	testsupport.Must(t, err, "reading the package directory: %v", err)
+	parsed := 0
+	for _, e := range entries {
+		name := e.Name()
+		// go build ignores _test.go files and names starting with _ or .;
+		// build constraints are deliberately not applied, so every GOOS's
+		// files are checked.
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") ||
+			strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		testsupport.Must(t, err, "reading %s: %v", name, err)
+		violations, err := createTempMisuses(name, src)
+		testsupport.Must(t, err, "parsing %s: %v", name, err)
+		for _, v := range violations {
+			t.Errorf("%s: createTemp is swappable only by tests; production code may only declare or call it", v)
+		}
+		parsed++
+	}
+	if parsed == 0 {
+		t.Fatal("no production Go files found in the package directory; the guard checked nothing")
+	}
+}
+
+// createTempMisuses parses src without comments and returns the position of
+// every createTemp identifier that is neither a package-level var
+// declaration's name nor the function of a call expression.
+func createTempMisuses(filename string, src any) ([]token.Position, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+
+	allowed := map[*ast.Ident]bool{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			for _, name := range spec.(*ast.ValueSpec).Names {
+				allowed[name] = true
+			}
+		}
+	}
+
+	var misuses []token.Position
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok {
+				allowed[id] = true
+			}
+		case *ast.Ident:
+			if n.Name == "createTemp" && !allowed[n] {
+				misuses = append(misuses, fset.Position(n.Pos()))
+			}
+		}
+		return true
+	})
+	return misuses, nil
 }
