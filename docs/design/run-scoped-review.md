@@ -319,8 +319,12 @@ surface, and no wire shape changes. On `next`, `step list` and `step show` the
 `issue` field is always present and is the empty string `""`. On `events list`
 and every other event feed (internal/engine/events_read.go:56) and on the
 `StepAttempt` rows of `run report` (internal/engine/report.go:385) the field
-is `omitempty`, so the `issue` key is absent. The row's run id, which each of
-these surfaces already prints, names its subject. The text rule covers `next`,
+is `omitempty`, so the `issue` key is absent. The two other `run report` row
+types, the rollup rows `ClusterComplementarity` (report.go:547) and
+`ClusterSourceAttribution` (report.go:583), declare `json:"issue"` without
+`omitempty`, so on a run-scoped step such as `reconcile@0` they carry
+`"issue": ""`. The row's run id, which each of these surfaces already prints,
+names its subject. The text rule covers `next`,
 `step list`, `step show`, `events list` and every other event feed, and
 `run report`. Message text that names a step's subject, such as an error or a
 park reason, names the run (`RUN-N`) where an issue row names `DKT-N`. No
@@ -1019,7 +1023,7 @@ run started outside a checkout is refused at activation with the D5 message (the
 empty field(s)) and leaves zero step rows; every existing bundle fixture is byte-identical; no
 operator surface renders `<PREFIX>-0`, or any `-0` issue id, for a run-scoped
 row: on that fixture `next`, `step list`, `step show`, `events list`, and `run report` each show `review@0#0` under the §3.1 display rule,
-`""` in the `--json` `issue` field on `next`, `step list` and `step show`, no `issue` key on `events list` and `run report`, and `-` in a text issue column on every surface. For the
+`""` in the `--json` `issue` field on `next`, `step list` and `step show`, no `issue` key on `events list` and on the `StepAttempt` rows of `run report`, `""` in the `issue` field of the `run report` `ClusterComplementarity` and `ClusterSourceAttribution` rollup rows, and `-` in a text issue column on every surface. For the
 park: with `review.findings` recorded so that two of three clusters reduce to
 `high`, `reconcile@0` parks with `park_reason` equal to the §3.3 rendering byte
 for byte; `step resolve reconcile@0 --as retry`, `--as rerun-gates`, and `--as
