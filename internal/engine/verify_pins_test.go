@@ -815,3 +815,181 @@ func TestVerifyPinsFallsBackToTheInvokingRootsWithNoRecordedExecRoot(t *testing.
 			"checkout (missing = %d): %s", report.Missing, PinReportReason(report))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The copies under the run's recorded step work roots are compared to the pin
+// ---------------------------------------------------------------------------
+
+// recordedSteps is the run's steps, requiring at least n of them.
+func recordedSteps(t *testing.T, conn *sql.DB, runID, n int) []*db.Step {
+	t.Helper()
+	steps, err := db.ListRunSteps(conn, runID)
+	testsupport.Must(t, err, "ListRunSteps: %v", err)
+	if len(steps) < n {
+		t.Fatalf("premise: the run must hold at least %d steps, holds %d", n, len(steps))
+	}
+	return steps
+}
+
+// recordWorkRoot sets the work root a step recorded, the column
+// `step record --worktree` writes.
+func recordWorkRoot(t *testing.T, conn *sql.DB, step *db.Step, root string) {
+	t.Helper()
+	_, err := conn.Exec(`UPDATE steps SET work_root = ? WHERE id = ?`, root, step.ID)
+	testsupport.Must(t, err, "recording the work root of %s: %v", step.Ref(), err)
+}
+
+// gateRowsWith is the report's rows for gate carrying status.
+func gateRowsWith(report *PinReport, gate, status string) []GateVerdict {
+	var out []GateVerdict
+	for _, g := range report.Gates {
+		if g.Gate == gate && g.Status == status {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// TestVerifyPinsReportsAnEditedStepWorktreeCopy: a step whose recorded work
+// root holds an edited copy of a relatively named gate script gets one row,
+// distinct from the invoking checkout's status, naming the step and the copy.
+// The copy of an absolutely named script there is not what executes and adds
+// no row.
+func TestVerifyPinsReportsAnEditedStepWorktreeCopy(t *testing.T) {
+	a, conn, runID := gateScriptFixture(t)
+	w := secondCheckout(t)
+	wCopy := filepath.Join(w, "scripts/qa/build.sh")
+	testsupport.Must(t, os.WriteFile(wCopy, []byte("exit 0\n"), 0o755), "editing W's copy")
+	testsupport.Must(t, os.WriteFile(filepath.Join(w, "scripts/qa/ac-commands.sh"),
+		[]byte("exit 0\n"), 0o755), "editing W's absolutely named copy")
+	step := recordedSteps(t, conn, runID, 1)[0]
+	recordWorkRoot(t, conn, step, w)
+
+	report := gateReportWith(t, conn, runID, gatePinStore, a)
+
+	rows := gateRowsWith(report, "build", GateStepCopyChanged)
+	if len(rows) != 1 {
+		t.Fatalf("gate build has %d %q rows, want 1: %+v", len(rows), GateStepCopyChanged, report.Gates)
+	}
+	if GateStepCopyChanged == GateExecutedCopyChanged {
+		t.Errorf("the step work-root status %q is not distinct from the invoking one", GateStepCopyChanged)
+	}
+	for _, want := range []string{step.Ref(), wCopy} {
+		if !strings.Contains(rows[0].Reason, want) {
+			t.Errorf("the row's reason %q does not name %s", rows[0].Reason, want)
+		}
+	}
+	if row := gateRow(report, "ac-commands"); row != nil {
+		t.Errorf("gate ac-commands names A's script absolutely, but W's copy is reported: %+v", *row)
+	}
+}
+
+// TestVerifyPinsStaysSoundWithOnlyAStepWorktreeRow: a step may legitimately
+// edit a gate script, so its row counts toward nothing Sound() reads.
+func TestVerifyPinsStaysSoundWithOnlyAStepWorktreeRow(t *testing.T) {
+	a, conn, runID := gateScriptFixture(t)
+	w := secondCheckout(t)
+	testsupport.Must(t, os.WriteFile(filepath.Join(w, "scripts/qa/build.sh"),
+		[]byte("exit 0\n"), 0o755), "editing W's copy")
+	recordWorkRoot(t, conn, recordedSteps(t, conn, runID, 1)[0], w)
+
+	report := gateReportWith(t, conn, runID, gatePinStore, a)
+
+	if len(gateRowsWith(report, "build", GateStepCopyChanged)) != 1 {
+		t.Fatalf("premise: the edited step copy must be reported: %+v", report.Gates)
+	}
+	if report.ExecutedCopyChanged != 0 {
+		t.Errorf("executed_copy_changed = %d, want 0 for a step work-root row", report.ExecutedCopyChanged)
+	}
+	if got := len(gateRowsWith(report, "tests", GateUnpinned)); report.UnpinnedGates != got {
+		t.Errorf("unpinned_gates = %d, want %d: the step row was counted", report.UnpinnedGates, got)
+	}
+	if !report.Sound() {
+		t.Errorf("a step work-root row made the run unsound: %s", PinReportReason(report))
+	}
+}
+
+// TestVerifyPinsReportsAnAbsentStepWorktree: a recorded work root that is
+// gone, or that lacks the pinned script, is a row naming the step and the
+// missing path, never a silent skip, and it leaves the run sound.
+func TestVerifyPinsReportsAnAbsentStepWorktree(t *testing.T) {
+	for name, remove := range map[string]func(w string) error{
+		"work root removed": os.RemoveAll,
+		"script removed": func(w string) error {
+			return os.Remove(filepath.Join(w, "scripts/qa/build.sh"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, conn, runID := gateScriptFixture(t)
+			w := secondCheckout(t)
+			step := recordedSteps(t, conn, runID, 1)[0]
+			recordWorkRoot(t, conn, step, w)
+			testsupport.Must(t, remove(w), "removing from W")
+
+			report := gateReportWith(t, conn, runID, gatePinStore, a)
+
+			rows := gateRowsWith(report, "build", GateStepCopyAbsent)
+			if len(rows) != 1 {
+				t.Fatalf("gate build has %d %q rows, want 1: %+v", len(rows), GateStepCopyAbsent, report.Gates)
+			}
+			if GateStepCopyAbsent == GateStepCopyChanged {
+				t.Errorf("the absent status %q is not distinct from the differing one", GateStepCopyAbsent)
+			}
+			for _, want := range []string{step.Ref(), filepath.Join(w, "scripts/qa/build.sh")} {
+				if !strings.Contains(rows[0].Reason, want) {
+					t.Errorf("the row's reason %q does not name %s", rows[0].Reason, want)
+				}
+			}
+			if !report.Sound() {
+				t.Errorf("an absent step copy made the run unsound: %s", PinReportReason(report))
+			}
+		})
+	}
+}
+
+// TestVerifyPinsDoesNotDuplicateStepWorktreeRows: a step whose work root
+// resolves to the run's exec root or to the invoking root adds no step row,
+// since the existing checks already cover those trees, and two steps sharing
+// one work root give one row naming both.
+func TestVerifyPinsDoesNotDuplicateStepWorktreeRows(t *testing.T) {
+	a, conn, runID := gateScriptFixture(t)
+	// A's own copy differs too, so a step row for the exec root would show;
+	// verifyFilePin reports that edit as a changed pin.
+	testsupport.Must(t, os.WriteFile(filepath.Join(a, "scripts/qa/build.sh"),
+		[]byte("exit 2\n"), 0o755), "editing the exec root's copy")
+	invoking := secondCheckout(t)
+	testsupport.Must(t, os.WriteFile(filepath.Join(invoking, "scripts/qa/build.sh"),
+		[]byte("exit 0\n"), 0o755), "editing the invoking copy")
+	shared := secondCheckout(t)
+	testsupport.Must(t, os.WriteFile(filepath.Join(shared, "scripts/qa/build.sh"),
+		[]byte("exit 1\n"), 0o755), "editing the shared copy")
+	links := t.TempDir()
+	toExecRoot, toInvoking := filepath.Join(links, "exec"), filepath.Join(links, "invoking")
+	testsupport.Must(t, os.Symlink(a, toExecRoot), "linking the exec root")
+	testsupport.Must(t, os.Symlink(invoking, toInvoking), "linking the invoking root")
+
+	steps := recordedSteps(t, conn, runID, 4)
+	recordWorkRoot(t, conn, steps[0], toExecRoot)
+	recordWorkRoot(t, conn, steps[1], toInvoking)
+	recordWorkRoot(t, conn, steps[2], shared)
+	recordWorkRoot(t, conn, steps[3], shared)
+
+	report := gateReportWith(t, conn, runID, gatePinStore, invoking)
+
+	if n := len(gateRowsWith(report, "build", GateExecutedCopyChanged)); n != 1 {
+		t.Errorf("gate build has %d %q rows, want 1: %+v", n, GateExecutedCopyChanged, report.Gates)
+	}
+	rows := gateRowsWith(report, "build", GateStepCopyChanged)
+	if len(rows) != 1 {
+		t.Fatalf("gate build has %d %q rows, want 1 for the shared root: %+v",
+			len(rows), GateStepCopyChanged, report.Gates)
+	}
+	for _, want := range []string{steps[2].Ref(), steps[3].Ref(), filepath.Join(shared, "scripts/qa/build.sh")} {
+		if !strings.Contains(rows[0].Reason, want) {
+			t.Errorf("the shared root's row %q does not name %s", rows[0].Reason, want)
+		}
+	}
+	if n := len(gateRowsWith(report, "build", GateStepCopyAbsent)); n != 0 {
+		t.Errorf("gate build has %d %q rows, want 0: %+v", n, GateStepCopyAbsent, report.Gates)
+	}
+}
