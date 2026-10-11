@@ -54,9 +54,15 @@ inputs = ["issue.body"]
 emits = "out2"
 `
 
-// refreshBody drives the engine entry point with the fixture's reason.
+// refreshBody drives the engine entry point with the fixture's reason, as the
+// suite's seated conductor.
 func refreshBody(conn *sql.DB, runID, issueID int) (*RefreshedBody, error) {
-	return RefreshIssueBodyInRun(conn, runID, issueID, "operator amended AC1", nowMS+1)
+	if err := seatTestConductor(conn, runID); err != nil {
+		return nil, err
+	}
+	return RefreshIssueBodyInRun(
+		conn, runID, issueID, "operator amended AC1", testBy, testConductorToken,
+		nowMS+1)
 }
 
 // amend is the authorized act the refresh copies, as issue edit writes it.
@@ -358,7 +364,8 @@ func TestRefreshBodyKeepsRecordedBodyAcrossLaterRefreshes(t *testing.T) {
 	refreshTo := func(t *testing.T, conn *sql.DB, runID, issue int, body string, atMS int64) {
 		t.Helper()
 		amend(t, conn, issue, body)
-		_, err := RefreshIssueBodyInRun(conn, runID, issue, "operator amended", atMS)
+		_, err := RefreshIssueBodyInRun(
+			conn, runID, issue, "operator amended", testBy, testConductorToken, atMS)
 		testsupport.Must(t, err, "refreshing: %v", err)
 	}
 

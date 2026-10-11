@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
@@ -40,7 +41,11 @@ their claim recorded, and only the remaining steps render the new text. One
 steps reached, and the reason.
 
 --reason is required: the event trail must say why a live run's packets
-changed what they ask for.`,
+changed what they ask for.
+
+Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
+via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
+for none.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunRefreshBody(cmd, args[0], getWriter(cmd))
@@ -77,7 +82,13 @@ func runRunRefreshBody(cmd *cobra.Command, ref string, w *output.Writer) error {
 			output.ErrValidation)
 	}
 
-	outcome, err := engine.RefreshIssueBodyInRun(conn, runID, issueID, reason, model.NowMS())
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+	outcome, err := engine.RefreshIssueBodyInRun(
+		conn, runID, issueID, reason, by, conductorToken(conn, runID, os.Stdin),
+		model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}

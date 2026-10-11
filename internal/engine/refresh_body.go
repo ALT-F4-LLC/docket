@@ -2,7 +2,6 @@ package engine
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -78,13 +77,22 @@ type RefreshedBody struct {
 // snapshot LIVES, one row per bound issue per run, read by every step of that
 // issue. A per-step verb would let two steps of one issue state two different
 // requests inside one dispatch.
+//
+// On a bound run it requires the conductor capability as `token`, as the
+// scope refresh does: `issue edit --description` is ungated, so without this
+// check an executor could amend its own issue and then make that amendment
+// reach its own packets.
 func RefreshIssueBodyInRun(
-	conn *sql.DB, runID, issueID int, reason string, nowMS int64,
+	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
 ) (*RefreshedBody, error) {
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted body; the event " +
 				"trail must say why a live run's packets changed what they ask for")
+	}
+	if err := by.require("run refresh-body"); err != nil {
+		return nil, err
 	}
 
 	tx, err := conn.Begin()
@@ -98,6 +106,9 @@ func RefreshIssueBodyInRun(
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeConductorTx(tx, runID, token, "run refresh-body"); err != nil {
 		return nil, err
 	}
 	// The same two statuses the scope refresh accepts, for the same reason: a
@@ -203,7 +214,7 @@ func RefreshIssueBodyInRun(
 	// That field is load-bearing rather than descriptive: a step already handed
 	// out reads its context back from the live column, so the body it was given
 	// survives here or nowhere (recordedIssueBody, context.go).
-	data, err := json.Marshal(map[string]any{
+	data, err := rulingData(by, map[string]any{
 		"issue": model.FormatID(issueID), "reason": reason,
 		"from_sha256": from, "to_sha256": to,
 		"from_body": ri.BodySnapshot, "steps": steps,
@@ -213,7 +224,7 @@ func RefreshIssueBodyInRun(
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventIssueBodyRefreshed, RunID: runID, IssueID: issueID,
-		Data: string(data), AtMS: nowMS,
+		Data: data, AtMS: nowMS,
 	}); err != nil {
 		return nil, err
 	}
