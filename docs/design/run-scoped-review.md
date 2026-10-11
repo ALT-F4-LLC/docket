@@ -131,8 +131,8 @@ phase-one issues, and the rows are written with `issue_id` NULL. `Expand` stays
 definition has no `when` (V51a), so the empty subject never reaches `WhenHolds`
 (internal/workflow/match.go:168). Eager expansion over lazy: the rows exist from
 activation, `reconcileRun`'s `unfinished` count (reconcile.go:591-600) keeps the
-run open for them with no new rollup rule, and `run show` lists the phase before
-it opens.
+run open for them with no new rollup rule, and `run status` counts the run-scoped
+steps before their phase opens.
 
 Row identity. Three storage facts decide the implementation:
 
@@ -1039,7 +1039,7 @@ every issue and every issue stays `done`; the second entry under `max_fix_loops
 = 1` parks `waiting-human` naming `--as fix-round`; a round whose `run.diff`
 sha256 equals the previous round's is refused as non-convergent.
 
-Phase 4, reporting. `run report` and `run show` render the run phase. Acceptance:
+Phase 4, reporting. `run report` renders the run phase. Acceptance:
 the report lists each run-scoped step with its artifacts under a run section and
 the integration check's `checked` list includes the run-scoped fix's head.
 
