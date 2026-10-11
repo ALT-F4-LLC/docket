@@ -283,8 +283,19 @@ type Step struct {
 	// MaxFixLoopsHard is the opt-in ceiling MaxFixLoops may be extended to on
 	// this step. It is declared only beside a positive `max_fix_loops` and
 	// never below it (V48); equal to it declares that the bound admits no
-	// extensions. It is a declaration only: the engine's loop bound reads
-	// MaxFixLoops alone.
+	// extensions. The engine reads it in three places:
+	//
+	//  1. A triage panel's `fix-round` approval is checked first
+	//     (applyTriageFixRound via extensionPastHardCap): when the issue's
+	//     next loop ordinal would exceed `max_fix_loops_hard`, no grant is
+	//     recorded and the step parks `waiting-human`, whatever `on_exhausted`
+	//     says. This bounds panel-minted (vote) rounds.
+	//  2. An unauthorized automatic fix-loop entry has its bound clamped to
+	//     `max_fix_loops_hard` when declared + grants would exceed it, so a
+	//     recorded grant cannot carry an automatic round past the hard cap.
+	//  3. An operator's `docket step resolve --as fix-round` is not bounded by
+	//     it: that entry is authorized and is admitted past the hard cap, as
+	//     it is past `max_fix_loops`.
 	MaxFixLoopsHard *int `toml:"max_fix_loops_hard" json:"max_fix_loops_hard,omitempty"`
 	// OnExhausted is where a `fix-loop` routing goes when the next ordinal
 	// would exceed the bound above (DKT-1902). `waiting-human` — the default,
