@@ -1043,7 +1043,18 @@ diff <base> <head> -- <union scope>` byte for byte, where `<head>` is the
 payload's recorded `head`, with no untracked section, in a fixture whose
 changes all lie inside the union scope; with an uncommitted modification to an
 in-scope tracked file and an untracked in-scope file present in the exec root
-at claim, neither appears in the recorded `run.diff` body; for the integration
+at claim, neither appears in the recorded `run.diff` body; in a fixture where
+one commit in base..head also touches a path outside the union scope, the
+in-scope diff (the recorded `run.diff` body before its out-of-scope section
+begins) still equals `git diff <base> <head> -- <union scope>` byte for byte,
+the out-of-scope section names that path, and the section's hunks equal `git
+diff <base> <head> -- <that path>` byte for byte; in a fixture whose
+out-of-scope hunks exceed `outOfScopeDiffCap` (128 KiB), the body truncates
+them at the cap with the line `# === out-of-scope hunks truncated at the cap;
+the file list above is complete ===` and still names every out-of-scope path
+in the section's file list; in a fixture with an empty union scope (no issue in
+the run declares scope globs), the `run.diff` body equals `git diff <base>
+<head>` with no pathspec byte for byte and carries no out-of-scope section; for the integration
 check, on a fixture run driven with no dispatch (no `dispatch-opened` or
 `dispatch-closed` event in the run) whose two issues are `done` and whose
 second write-class step recorded its `issue.diff` with a `head` committed in a
@@ -1061,7 +1072,11 @@ the second writer's head hand-resolved onto the branch (no patch match),
 the §3.1 remedy `step annotate STEP-N --integrated-sha <branch-sha>` (with the conductor token on a conductor-bound run) followed by `--as retry`
 also lets the claim succeed; and on a dispatch-driven fixture whose close
 recorded every head in `integration.checked`, the claim's `IsAncestorFn` and
-`PatchContainedFn` seams are called zero times; a
+`PatchContainedFn` seams are called zero times; on that same dispatch-driven
+fixture, with the exec root's `.git` moved aside after activation so
+`run.exec_root` stays set but `sharedCheckoutHead` yields no sha, `step claim
+review@0#0` succeeds and mints a lease, the claim records no `run.diff`
+artifact, and the bundle's `run.diff` input resolves empty under the D4 rule; a
 run started outside a checkout is refused at activation with the D5 message (the §3.5 template, rendered for the
 empty field(s)) and leaves zero step rows; every existing bundle fixture is byte-identical; no
 operator surface renders `<PREFIX>-0`, or any `-0` issue id, for a run-scoped
