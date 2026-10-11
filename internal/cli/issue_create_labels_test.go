@@ -264,6 +264,45 @@ func TestIssueCreateReplayOfKeyRecordedElsewhereLeavesIssue(t *testing.T) {
 	}
 }
 
+// TestIssueCreateWithoutKeyStoresScope: a create with no idempotency key is
+// always an insert, so its --scope must be stored. The CLI applies --scope
+// only when CreateIssueIdempotent reports inserted, so a keyless create that
+// reported no insert would drop the scope silently.
+func TestIssueCreateWithoutKeyStoresScope(t *testing.T) {
+	conn := newTestDB(t)
+	cmd := cmdWithDB(conn)
+	cmd.SetContext(context.WithValue(cmd.Context(), dbKey, conn))
+	createCmd.SetContext(cmd.Context())
+	resetCreateFlags()
+	t.Cleanup(resetCreateFlags)
+
+	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+	testsupport.Must(t, createCmd.Flags().Set("title", "keyless"), "set --title")
+	testsupport.Must(t, createCmd.Flags().Set("scope", "a/**"), "set --scope")
+
+	restore := captureStdout(t)
+	runErr := createCmd.RunE(createCmd, nil)
+	out := restore()
+	testsupport.Must(t, runErr, "issue create --scope a/**: %v", runErr)
+
+	var env struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("create payload is not JSON: %v\n%s", err, out)
+	}
+	id, err := model.ParseID(env.Data.ID)
+	testsupport.Must(t, err, "ParseID(%q): %v", env.Data.ID, err)
+
+	scope, err := db.IssueScopeGlobs(conn, id)
+	testsupport.Must(t, err, "IssueScopeGlobs: %v", err)
+	if scope != `["a/**"]` {
+		t.Errorf("keyless create stored scope %q, want %q", scope, `["a/**"]`)
+	}
+}
+
 // TestHydrateIssueAssociationsFillsJoins pins the helper itself: a struct out
 // of db.GetIssue carries no labels, files, or docs until it runs.
 func TestHydrateIssueAssociationsFillsJoins(t *testing.T) {
