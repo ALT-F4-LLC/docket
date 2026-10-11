@@ -527,10 +527,23 @@ func waitBlockedOnTreeLock(t *testing.T) {
 	t.Fatal("the gate never reached the tree-lock wait")
 }
 
+// pinGateSpec builds the gate that runs a pinned script, so each pin re-check
+// scenario runs once as a named gate and once as a fence gate: the two wire
+// their re-check through separate closures.
+type pinGateSpec func(script string) GateSpec
+
+// namedPinGate runs the entry's own argv.
+func namedPinGate(string) GateSpec { return GateSpec{Name: "tests"} }
+
+// fencePinGate harvests one line invoking the script by its absolute path.
+func fencePinGate(script string) GateSpec {
+	return GateSpec{Name: "tests", Source: "fence:tests", Commands: []string{script}}
+}
+
 // runTreeGateAcrossHeldLock runs a pinned tree gate on the shared checkout
 // while the test holds the tree lock, calls during() once the gate is blocked
 // on it, then releases the lock and returns what the gate recorded.
-func runTreeGateAcrossHeldLock(t *testing.T, repoRoot string, entry trust.Entry, during func()) GateExecution {
+func runTreeGateAcrossHeldLock(t *testing.T, repoRoot string, entry trust.Entry, spec GateSpec, during func()) GateExecution {
 	t.Helper()
 	entry.Tree = true
 	runner := NewExecRunner(testRepoPaths(repoRoot))
@@ -545,7 +558,7 @@ func runTreeGateAcrossHeldLock(t *testing.T, repoRoot string, entry trust.Entry,
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		ex, err := runner.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+		ex, err := runner.Execute(context.Background(), spec, StepContext{})
 		done <- outcome{ex, err}
 	}()
 
@@ -562,12 +575,21 @@ func runTreeGateAcrossHeldLock(t *testing.T, repoRoot string, entry trust.Entry,
 // while the gate waits for the tree lock, after its Lookup already matched.
 // The runner re-verifies the pin once the lock is held and spawns nothing.
 func TestGatePinRecheckAfterTreeLock(t *testing.T) {
+	checkPinRecheckAfterTreeLock(t, namedPinGate)
+}
+
+// TestFenceGatePinRecheckAfterTreeLock is AB-1 for a harvested fence line.
+func TestFenceGatePinRecheckAfterTreeLock(t *testing.T) {
+	checkPinRecheckAfterTreeLock(t, fencePinGate)
+}
+
+func checkPinRecheckAfterTreeLock(t *testing.T, gateFor pinGateSpec) {
 	repoRoot := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "ran")
 	script, pinned := pinnedScript(t, "/usr/bin/touch "+marker+"\n")
 
 	ex := runTreeGateAcrossHeldLock(t, repoRoot, pinnedEntry(repoRoot, script, pinned),
-		func() { rewritePinByte(t, script) })
+		gateFor(script), func() { rewritePinByte(t, script) })
 
 	if sentinelExists(t, marker) {
 		t.Error("the rewritten script RAN after the tree lock was released")
@@ -603,14 +625,28 @@ func TestGatePinRecheckAfterTreeLock(t *testing.T) {
 // TestGatePinRecheckUnchangedScriptRuns is the benign half: a pinned tree gate
 // whose script is untouched across a contended lock still runs.
 func TestGatePinRecheckUnchangedScriptRuns(t *testing.T) {
+	checkPinRecheckUnchangedScriptRuns(t, namedPinGate)
+}
+
+// TestFenceGatePinRecheckUnchangedScriptRuns is the benign half for a fence
+// line: its re-check must still match the line's own argv.
+func TestFenceGatePinRecheckUnchangedScriptRuns(t *testing.T) {
+	checkPinRecheckUnchangedScriptRuns(t, fencePinGate)
+}
+
+func checkPinRecheckUnchangedScriptRuns(t *testing.T, gateFor pinGateSpec) {
 	repoRoot := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "ran")
 	script, pinned := pinnedScript(t, "/usr/bin/touch "+marker+"\n")
 
-	ex := runTreeGateAcrossHeldLock(t, repoRoot, pinnedEntry(repoRoot, script, pinned), func() {})
+	ex := runTreeGateAcrossHeldLock(t, repoRoot, pinnedEntry(repoRoot, script, pinned),
+		gateFor(script), func() {})
 
 	if !sentinelExists(t, marker) {
 		t.Errorf("the unchanged pinned script did not run: %+v", ex.Results)
+	}
+	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictPass {
+		t.Errorf("rows = %+v, want one %q row", ex.Results, VerdictPass)
 	}
 	if ex.Verdict != VerdictPass {
 		t.Errorf("gate verdict = %q, want %q: %+v", ex.Verdict, VerdictPass, ex.Results)
@@ -621,6 +657,15 @@ func TestGatePinRecheckUnchangedScriptRuns(t *testing.T) {
 // first attempt rewrites one byte of itself and fails. The re-attempt is not
 // spawned, and its ordinal records the refusal.
 func TestGatePinRecheckBeforeEachAttempt(t *testing.T) {
+	checkPinRecheckBeforeEachAttempt(t, namedPinGate)
+}
+
+// TestFenceGatePinRecheckBeforeEachAttempt is AB-2 for a harvested fence line.
+func TestFenceGatePinRecheckBeforeEachAttempt(t *testing.T) {
+	checkPinRecheckBeforeEachAttempt(t, fencePinGate)
+}
+
+func checkPinRecheckBeforeEachAttempt(t *testing.T, gateFor pinGateSpec) {
 	repoRoot := t.TempDir()
 	markers := t.TempDir()
 	first := filepath.Join(markers, "attempt-0")
@@ -641,7 +686,7 @@ func TestGatePinRecheckBeforeEachAttempt(t *testing.T) {
 	runner := NewExecRunner(testRepoPaths(repoRoot))
 	runner.LoadStore = sandboxTrust(t, entry)
 
-	ex, err := runner.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+	ex, err := runner.Execute(context.Background(), gateFor(script), StepContext{})
 	testsupport.Must(t, err, "running the flaky gate: %v", err)
 
 	if !sentinelExists(t, first) {
