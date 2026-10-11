@@ -665,3 +665,134 @@ func TestGatePinRecheckBeforeEachAttempt(t *testing.T) {
 		t.Errorf("gate verdict = %q, want %q", ex.Verdict, VerdictFail)
 	}
 }
+
+const legacyPinText = "has no content pin"
+
+// legacyEntry is pinnedEntry without its content pin: an absolute argv[0]
+// trusted before argv0_sha256 existed.
+func legacyEntry(repoRoot, script string) trust.Entry {
+	return pinnedEntry(repoRoot, script, "")
+}
+
+// assertNoLegacyWarning fails when any row carries the legacy-pin text.
+func assertNoLegacyWarning(t *testing.T, rows []GateResultRow) {
+	t.Helper()
+	if len(rows) == 0 {
+		t.Fatal("the gate produced no rows")
+	}
+	for i, r := range rows {
+		if strings.Contains(r.Reason, legacyPinText) {
+			t.Errorf("row %d carries the legacy-pin warning: %q", i, r.Reason)
+		}
+	}
+}
+
+// TestGateRowCarriesLegacyPinWarning: a named gate whose entry has an absolute
+// argv[0] and no content pin still runs, and every row it records names the
+// missing pin and the re-pin command, after the reason the row already had.
+func TestGateRowCarriesLegacyPinWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "attempt-0")
+	script := filepath.Join(t.TempDir(), "gate.sh")
+	body := fmt.Sprintf("#!/bin/sh\nif [ -e %[1]s ]; then exit 0; fi\n/usr/bin/touch %[1]s\nexit 1\n", marker)
+	writeErr := os.WriteFile(script, []byte(body), 0o755)
+	testsupport.Must(t, writeErr, "writing the flaky script: %v", writeErr)
+
+	entry := legacyEntry(repoRoot, script)
+	entry.Flaky = true
+	entry.Network = []string{"vuln.go.dev"}
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, entry)
+
+	ex, err := runner.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+	testsupport.Must(t, err, "running the legacy gate: %v", err)
+
+	if len(ex.Results) != 2 {
+		t.Fatalf("got %d rows, want 2 (fail, then pass): %+v", len(ex.Results), ex.Results)
+	}
+	if ex.Results[0].Verdict != VerdictFail || ex.Results[1].Verdict != VerdictPass ||
+		ex.Verdict != VerdictPass {
+		t.Errorf("verdicts = %q, %q, gate %q; want fail, pass, gate pass",
+			ex.Results[0].Verdict, ex.Results[1].Verdict, ex.Verdict)
+	}
+	for i, r := range ex.Results {
+		for _, want := range []string{legacyPinText, "docket trust add tests --"} {
+			if !strings.Contains(r.Reason, want) {
+				t.Errorf("row %d reason lacks %q: %q", i, want, r.Reason)
+			}
+		}
+	}
+	failing := ex.Results[0].Reason
+	network := strings.Index(failing, "declares network access")
+	if network < 0 || network > strings.Index(failing, legacyPinText) {
+		t.Errorf("the failing row's network reason is missing or not first: %q", failing)
+	}
+
+	// An early-return row carries it too: a spent pre-gate budget spawns nothing.
+	skipped, err := runner.Execute(context.Background(), GateSpec{Name: "tests"},
+		StepContext{Deadline: time.Now().Add(-time.Second)})
+	testsupport.Must(t, err, "running the gate on a spent budget: %v", err)
+	if len(skipped.Results) != 1 || skipped.Results[0].Verdict != VerdictSkipped ||
+		!strings.Contains(skipped.Results[0].Reason, legacyPinText) {
+		t.Errorf("the budget-skip row lacks the warning: %+v", skipped.Results)
+	}
+
+	t.Run("a pinned entry records no warning", func(t *testing.T) {
+		pinned, sum := pinnedScript(t, "exit 0\n")
+		runner.LoadStore = sandboxTrust(t, pinnedEntry(repoRoot, pinned, sum))
+		got, err := runner.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+		testsupport.Must(t, err, "running the pinned gate: %v", err)
+		if got.Verdict != VerdictPass {
+			t.Errorf("gate verdict = %q, want %q: %+v", got.Verdict, VerdictPass, got.Results)
+		}
+		assertNoLegacyWarning(t, got.Results)
+	})
+
+	t.Run("a relative argv[0] records no warning", func(t *testing.T) {
+		argv := []string{"true"}
+		runner.LoadStore = sandboxTrust(t, trust.Entry{
+			Name: "tests", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+			Repo: mustResolve(repoRoot),
+		})
+		got, err := runner.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+		testsupport.Must(t, err, "running the relative gate: %v", err)
+		if got.Verdict != VerdictPass {
+			t.Errorf("gate verdict = %q, want %q: %+v", got.Verdict, VerdictPass, got.Results)
+		}
+		assertNoLegacyWarning(t, got.Results)
+	})
+}
+
+// TestFenceRowCarriesLegacyPinWarning: the warning is per line, attributed to
+// the entry that matched that line, not a flag on the whole fence gate.
+func TestFenceRowCarriesLegacyPinWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+	legacyScript, _ := pinnedScript(t, "exit 0\n")
+	pinnedPath, sum := pinnedScript(t, "exit 0\n")
+
+	legacy := legacyEntry(repoRoot, legacyScript)
+	legacy.Name = "checks"
+	pinned := pinnedEntry(repoRoot, pinnedPath, sum)
+	pinned.Name = "checks"
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, legacy, pinned)
+
+	ex, err := runner.Execute(context.Background(), GateSpec{
+		Name: "checks", Source: "fence:checks",
+		Commands: []string{legacyScript, pinnedPath},
+	}, StepContext{})
+	testsupport.Must(t, err, "running the fence gate: %v", err)
+
+	if len(ex.Results) != 2 {
+		t.Fatalf("got %d rows for two lines, want 2: %+v", len(ex.Results), ex.Results)
+	}
+	if ex.Verdict != VerdictPass {
+		t.Errorf("gate verdict = %q, want %q: %+v", ex.Verdict, VerdictPass, ex.Results)
+	}
+	for _, want := range []string{legacyPinText, "docket trust add checks --"} {
+		if !strings.Contains(ex.Results[0].Reason, want) {
+			t.Errorf("the legacy line's reason lacks %q: %q", want, ex.Results[0].Reason)
+		}
+	}
+	assertNoLegacyWarning(t, ex.Results[1:])
+}

@@ -244,6 +244,79 @@ func TestRenderGatePreflightNamesTheRemedy(t *testing.T) {
 	}
 }
 
+// TestPreflightWarnsLegacyPin: an entry with an absolute argv[0] and no content
+// pin resolves, so it is not "missing", but activation still says it runs
+// whatever the file holds and how to pin it.
+func TestPreflightWarnsLegacyPin(t *testing.T) {
+	repoRoot := t.TempDir()
+	pinnedPath, sum := pinnedScript(t, "exit 0\n")
+	pinned := trust.Entry{
+		Name: "build", Argv: []string{pinnedPath},
+		ArgvSHA256: trust.ArgvSHA256([]string{pinnedPath}), Argv0SHA256: sum, Global: true,
+	}
+	relative := trust.Entry{
+		Name: "lint", Argv: []string{"true"},
+		ArgvSHA256: trust.ArgvSHA256([]string{"true"}), Global: true,
+	}
+	legacyArgv := []string{"/usr/bin/true"}
+	legacy := trust.Entry{
+		Name: "tests", Argv: legacyArgv, ArgvSHA256: trust.ArgvSHA256(legacyArgv), Global: true,
+	}
+
+	rows, err := BuildGatePreflight(preflightDefs(
+		workflow.Gate{Name: "build"}, workflow.Gate{Name: "lint"}, workflow.Gate{Name: "tests"},
+	), sandboxTrust(t, pinned, relative, legacy), repoRoot)
+	if err != nil {
+		t.Fatalf("BuildGatePreflight: %v", err)
+	}
+	got, _ := preflightRow(rows, "tests")
+	if !got.Matched || !strings.Contains(got.Warning, legacyPinText) {
+		t.Errorf("the legacy gate's row lacks its warning: %+v", got)
+	}
+	for _, name := range []string{"build", "lint"} {
+		if r, _ := preflightRow(rows, name); !r.Matched || r.Warning != "" {
+			t.Errorf("%s: matched %v, warning %q; want matched with no warning",
+				name, r.Matched, r.Warning)
+		}
+	}
+
+	var buf strings.Builder
+	RenderGatePreflight(&buf, rows)
+	out := buf.String()
+	warningLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "warning:") && strings.Contains(line, "tests") {
+			warningLine = line
+		}
+	}
+	if warningLine == "" {
+		t.Fatalf("no `warning:` line names the legacy gate:\n%s", out)
+	}
+	after := out[strings.Index(out, warningLine)+len(warningLine):]
+	for _, want := range []string{legacyPinText, "docket trust add tests --"} {
+		if !strings.Contains(after, want) {
+			t.Errorf("the warning text after %q lacks %q:\n%s", warningLine, want, out)
+		}
+	}
+
+	t.Run("pinned and relative entries render no warning", func(t *testing.T) {
+		clean, err := BuildGatePreflight(preflightDefs(
+			workflow.Gate{Name: "build"}, workflow.Gate{Name: "lint"},
+		), sandboxTrust(t, pinned, relative), repoRoot)
+		if err != nil {
+			t.Fatalf("BuildGatePreflight: %v", err)
+		}
+		var buf strings.Builder
+		RenderGatePreflight(&buf, clean)
+		if strings.Contains(buf.String(), legacyPinText) {
+			t.Errorf("a pinned or relative roster rendered the legacy warning:\n%s", buf.String())
+		}
+		if buf.String() != "" {
+			t.Errorf("a fully resolved, pinned roster printed:\n%s", buf.String())
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // DKT-266 — the hold policy is visible before the run
 // ---------------------------------------------------------------------------

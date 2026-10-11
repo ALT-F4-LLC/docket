@@ -65,6 +65,10 @@ type GatePreflight struct {
 	// Reason explains an unmatched gate, verbatim from the matcher, so the
 	// preflight and the mid-run diagnostic say the same thing.
 	Reason string `json:"reason,omitempty"`
+	// Warning is the matcher's warning for a matched gate, verbatim: today an
+	// entry with an absolute argv[0] and no content pin, which runs whatever
+	// that file holds when the gate fires.
+	Warning string `json:"warning,omitempty"`
 }
 
 // BuildGatePreflight resolves every gate the run's bound workflows declare
@@ -132,7 +136,7 @@ func BuildGatePreflight(
 		default:
 			m := store.Lookup(identity, name, nil)
 			if m.Matched {
-				row.Matched = true
+				row.Matched, row.Warning = true, m.Warning
 				if m.Entry != nil {
 					row.Entry, row.Stub, row.StubReason =
 						m.Entry.Name, m.Entry.Stub, m.Entry.StubReason
@@ -167,6 +171,10 @@ func sortedKeys(set map[string]bool) []string {
 // run, so it is not a warning — but "secret-scan will execute /usr/bin/true"
 // is a fact about this run's assurance that belongs beside the roster the
 // operator is approving (DKT-265).
+//
+// A gate whose match carries a warning gets its own `warning:` line, whether
+// or not it is also a stub: it resolves and will run, but the operator has
+// something to act on before it does.
 func RenderGatePreflight(w interface{ Write([]byte) (int, error) }, rows []GatePreflight) {
 	var missing, stubs []GatePreflight
 	for _, r := range rows {
@@ -219,6 +227,14 @@ func RenderGatePreflight(w interface{ Write([]byte) (int, error) }, rows []GateP
 				"  A stub without a recorded reason: say why and what tracks fixing it with "+
 					"`docket trust rm <name>` then `docket trust add <name> -- <argv> --stub "+
 					"--stub-reason \"<why; tracking issue>\"`.\n")
+		}
+	}
+
+	for _, r := range rows {
+		if r.Matched && r.Warning != "" {
+			fmt.Fprintf(w, "\nwarning: declared gate %s (declared by %s) resolves with a warning:\n",
+				exec.Render(r.Gate), exec.Render(joinList(r.Workflows)))
+			fmt.Fprintf(w, "      %s\n", exec.Render(r.Warning))
 		}
 	}
 }

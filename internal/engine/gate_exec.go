@@ -278,7 +278,24 @@ func (r *ExecRunner) runFenceGate(
 	return out, nil
 }
 
-// spawnMatched runs a matched command, taking the tree mutex when the entry
+// spawnMatched runs a matched command and appends the match's warning to the
+// reason of every row it records, so each attempt and each early refusal of a
+// gate trusted without a content pin says so where its result is read.
+func (r *ExecRunner) spawnMatched(
+	g GateSpec, sc StepContext, match trust.Match, firstOrdinal int,
+	relookup func() trust.Match,
+) (GateExecution, error) {
+	ex, err := r.spawnMatchedRows(g, sc, match, firstOrdinal, relookup)
+	if err != nil || match.Warning == "" {
+		return ex, err
+	}
+	for i := range ex.Results {
+		ex.Results[i].Reason = withScratchNote(ex.Results[i].Reason, match.Warning)
+	}
+	return ex, nil
+}
+
+// spawnMatchedRows runs a matched command, taking the tree mutex when the entry
 // declares `tree = true` and recording every flaky attempt individually.
 //
 // relookup repeats the Lookup that produced match against the same store
@@ -286,7 +303,7 @@ func (r *ExecRunner) runFenceGate(
 // the content pin (§3.1 argv0_sha256) is checked "before every spawn": the
 // pinned file can change during the lock wait or between flaky attempts, and
 // only the pin half of the Lookup can change its answer.
-func (r *ExecRunner) spawnMatched(
+func (r *ExecRunner) spawnMatchedRows(
 	g GateSpec, sc StepContext, match trust.Match, firstOrdinal int,
 	relookup func() trust.Match,
 ) (GateExecution, error) {
