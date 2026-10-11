@@ -754,6 +754,24 @@ holds the same four properties:
 4. **The discontinuity is in the ledger.** One `issue-body-refreshed` event carries
    both shas, the superseded text, the instances reached, and the operator's reason.
 
+**The attachment list gets it too, and it is the revocation path.** `docket run
+refresh-files RUN-N --issue DKT-M --reason R` overwrites the `files` key of one
+run-issue's snapshot with the live `issue_files` list (`RefreshIssueFilesInRun`) and
+re-encodes every other snapshot field unchanged. A plain detach (`docket issue file
+remove`) does **not** change an active run's packets: it writes the live attachment
+list only, and `issue.files` keeps rendering the frozen path (with live bytes) until a
+refresh. So a detach is not live revocation, and deleting the file from disk does not
+revoke it either; the render refuses instead. To withdraw an attachment from a run
+already activated, detach it, then run `refresh-files`. It holds the same four
+properties: it copies the live list verbatim and refuses (CONFLICT) when nothing has
+been attached or removed since the freeze; it refuses while any of the issue's steps
+is `claimed`, `running`, or `gated` and while a dispatch is open; it rewrites no
+history; and one `issue-files-refreshed` event carries the old list, the new list, the
+steps reached, and the operator's reason. On a bound run it also requires the
+conductor capability, because `issue file add|remove` is ungated and an executor could
+otherwise change its own packets. A snapshot with no `files` key already renders the
+live list, so there is nothing to refresh.
+
 `issue edit --scope` **warns**, naming the run, the frozen scope, the count of live
 steps, and **both** verbs, whenever the edit changes the scope of an issue that still
 has non-terminal steps in a non-terminal run (`ScopeEditFrozenForActiveRuns`). It
