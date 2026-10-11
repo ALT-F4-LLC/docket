@@ -914,9 +914,9 @@ authenticate the content. A worker authors the code whose gate output it is, so
 output crafted to normalize to a granted failure's form would match — the
 control's answer to that is detective, not preventive: the covered row's
 stored capture stays readable, and both ledger edges name the signature spent.
-A COVERED row can itself be truncated, since the refusal above applies at mint
-and not at match; its stored capture then holds only the head, and the row's
-`truncated` flag is the signal that the failure may lie past it.
+A truncated failing row is not covered at all: the spend-time refusal
+described above (a batch grant never covers a truncated failing row) parks it
+for a human, so this limit concerns only crafted output that was captured whole.
 
 **Why the ratified arithmetic is untouched.** Like v11–v29, v30 is an
 amendment, not a stage: two additive columns with a default, `hasColumn`-probed
