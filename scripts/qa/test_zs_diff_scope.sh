@@ -7,7 +7,8 @@
 # DOCKET_GATE_BASE naming that base, the way the engine runs a completion gate
 # after the step has committed. A refusal must exit 1 AND name the rule it
 # broke, so a fixture defect that happens to exit 1 cannot pass as a refusal.
-# The last two cases pin the fail-closed contract: no usable base is exit 2.
+# ZS10 and ZS11 pin the fail-closed contract: no usable base is exit 2. ZS12 to
+# ZS14 leave the change uncommitted, to pin the working-tree half of the scope.
 
 # Hermetic git for the fixtures and the gate, as in gate-baseref-regression.sh:
 # an operator's global commit.gpgsign or hooks must not decide these cases.
@@ -145,6 +146,25 @@ test_zs_diff_scope() {
 
   zs_run small "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
   zs_expect "ZS11_base_unresolved" 2 "does not resolve to a commit"
+
+  # Uncommitted changes: the working-tree half of the footprint. These cases
+  # leave the change unstaged or untracked, with no zs_commit and no git add.
+  zs_fixture "$ZS/small-untracked"
+  printf 'new\n' > "$ZS_REPO/a/new.txt"
+  zs_run small "$ZS_BASE"
+  zs_expect "ZS12_small_untracked_added" 1 "added file(s): a/new.txt; small adds no file"
+
+  zs_fixture "$ZS/trivial-untracked"
+  printf 'new\n' > "$ZS_REPO/a/new.txt"
+  zs_run trivial "$ZS_BASE"
+  zs_expect "ZS13_trivial_untracked_added" 1 "added file(s): a/new.txt; trivial adds nothing"
+
+  zs_fixture "$ZS/trivial-unstaged-lines"
+  for i in 1 2 3 4 5 6 7 8 9 10 11; do
+    printf 'line %s\n' "$i" >> "$ZS_REPO/a/one.txt"
+  done
+  zs_run trivial "$ZS_BASE"
+  zs_expect "ZS14_trivial_unstaged_11_lines" 1 "11 changed lines; trivial allows 10"
 
   rm -rf "$ZS"
 }
