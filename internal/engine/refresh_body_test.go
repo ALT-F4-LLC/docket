@@ -478,3 +478,55 @@ func TestRefreshBodyRecordsTheDiscontinuity(t *testing.T) {
 		t.Errorf("event steps = %v, want the reached instance", payload.Steps)
 	}
 }
+
+// TestRefreshBodyEventCarriesTheAttribution: the issue-body-refreshed event
+// says who refreshed a live run's body and from where, as the caller supplied
+// them. The values differ from testBy so a hardcoded fixture cannot pass.
+func TestRefreshBodyEventCarriesTheAttribution(t *testing.T) {
+	conn := mustDB(t)
+	runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+	amend(t, conn, issue, "body, amended")
+	by := Attribution{Actor: "the conductor", Cwd: "/work/shared"}
+	testsupport.Must(t, seatTestConductor(conn, runID), "seating the conductor")
+	_, err := RefreshIssueBodyInRun(
+		conn, runID, issue, "operator amended AC1", by, testConductorToken, nowMS+1)
+	testsupport.Must(t, err, "refreshing: %v", err)
+
+	var data string
+	err = conn.QueryRow(
+		`SELECT data FROM events WHERE kind = ? AND run_id = ? AND issue_id = ?`,
+		EventIssueBodyRefreshed, runID, issue).Scan(&data)
+	testsupport.Must(t, err, "reading the refresh event: %v", err)
+	var payload map[string]any
+	testsupport.Must(t, json.Unmarshal([]byte(data), &payload), "decoding the event")
+	if payload["actor"] != by.Actor || payload["cwd"] != by.Cwd {
+		t.Errorf("event actor/cwd = %v/%v, want %q/%q",
+			payload["actor"], payload["cwd"], by.Actor, by.Cwd)
+	}
+}
+
+// TestRefreshBodyRefusesAnUnattributedCall: a refresh that cannot say who made
+// it is refused before anything is written, even with a real amendment and the
+// conductor's capability behind it.
+func TestRefreshBodyRefusesAnUnattributedCall(t *testing.T) {
+	conn := mustDB(t)
+	runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+	before, beforeSHA := runIssueBody(t, conn, runID, issue)
+	amend(t, conn, issue, "body, amended")
+	testsupport.Must(t, seatTestConductor(conn, runID), "seating the conductor")
+
+	_, err := RefreshIssueBodyInRun(
+		conn, runID, issue, "operator amended AC1", Attribution{},
+		testConductorToken, nowMS+1)
+	if err == nil {
+		t.Fatal("an unattributed refresh was accepted")
+	}
+	if !strings.Contains(err.Error(), "unattributed") {
+		t.Errorf("the refusal does not name the missing attribution:\n%s", err)
+	}
+	if got, gotSHA := runIssueBody(t, conn, runID, issue); got != before || gotSHA != beforeSHA {
+		t.Errorf("snapshot = %q/%q, want %q/%q; a refused refresh must write nothing",
+			got, gotSHA, before, beforeSHA)
+	}
+	assertNoBodyRefreshEvent(t, conn, runID)
+}
