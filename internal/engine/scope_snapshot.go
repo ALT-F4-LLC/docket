@@ -76,52 +76,22 @@ import (
 // an advisory that cannot be computed must never fail the verb that already
 // succeeded.
 func ScopeEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
-	// The live column FIRST, before the cursor below is open. The engine's
-	// pool is single-connection (§4.8's SQLite writer discipline), so a second
-	// query issued while rows are still being walked waits forever for a
-	// connection that the walk itself holds.
 	live, err := liveIssueScope(conn, issueID)
 	if err != nil {
 		return nil
 	}
-
-	rows, err := conn.Query(
-		`SELECT ri.run_id, ri.issue_snapshot, COUNT(s.id)
-		   FROM run_issues ri
-		   JOIN runs r ON r.id = ri.run_id
-		   LEFT JOIN steps s
-		     ON s.run_id = ri.run_id AND s.issue_id = ri.issue_id
-		    AND s.status NOT IN (`+placeholders(len(terminalStepStatuses))+`)
-		  WHERE ri.issue_id = ?
-		    AND ri.issue_snapshot IS NOT NULL AND ri.issue_snapshot != ''
-		    AND r.status NOT IN (?, ?)
-		  GROUP BY ri.run_id
-		 HAVING COUNT(s.id) > 0
-		  ORDER BY ri.run_id`,
-		append(
-			terminalStepStatusArgs(),
-			issueID, string(model.RunDone), string(model.RunAbandoned),
-		)...,
-	)
+	bindings, err := frozenBindingsWithLiveSteps(conn, issueID)
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = rows.Close() }()
 
 	var warnings []string
-	for rows.Next() {
-		var (
-			runID     int
-			snapshot  string
-			liveSteps int
-		)
-		if err := rows.Scan(&runID, &snapshot, &liveSteps); err != nil {
-			return nil
-		}
+	for _, b := range bindings {
+		runID, liveSteps := b.runID, b.liveSteps
 		var frozen struct {
 			Scope []string `json:"scope"`
 		}
-		if err := json.Unmarshal([]byte(snapshot), &frozen); err != nil {
+		if err := json.Unmarshal([]byte(b.issueSnapshot), &frozen); err != nil {
 			continue
 		}
 		if sameScope(frozen.Scope, live) {
@@ -149,10 +119,105 @@ func ScopeEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 			model.FormatRunID(runID), model.FormatID(issueID),
 		))
 	}
-	if rows.Err() != nil {
+	return warnings
+}
+
+// DescriptionEditFrozenForActiveRuns is ScopeEditFrozenForActiveRuns for an
+// `issue edit --description`: it names each live run that froze a different
+// description for issueID and still holds a non-terminal step that will render
+// it, and points at `run refresh-body`, the verb that makes the amendment
+// reach that run's remaining steps.
+//
+// The description has no live reader at all — a packet's REQUEST and
+// issue.body both render `run_issues.body_snapshot` — so, unlike the scope
+// advisory, there is no half of the edit that already took effect to report.
+// It is advisory-only and swallows every error to nil for the same reasons.
+func DescriptionEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
+	var description sql.NullString
+	if err := conn.QueryRow(
+		`SELECT description FROM issues WHERE id = ?`, issueID,
+	).Scan(&description); err != nil {
 		return nil
 	}
+	bindings, err := frozenBindingsWithLiveSteps(conn, issueID)
+	if err != nil {
+		return nil
+	}
+
+	var warnings []string
+	for _, b := range bindings {
+		if b.bodySnapshot == description.String {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"%s is bound into %s, which froze its description at activation "+
+				"(§5.1.1) — the %d step(s) still live there will render that "+
+				"frozen description as their packets' REQUEST and issue.body, "+
+				"NOT the description you just wrote. To make the amendment "+
+				"reach this run's remaining work, refresh its snapshot — "+
+				"`docket run refresh-body %s --issue %s --reason \"description amended\"` "+
+				"(refuses while any of the issue's steps is claimed, running "+
+				"or gated, or while a dispatch is open)",
+			model.FormatID(issueID), model.FormatRunID(b.runID), b.liveSteps,
+			model.FormatRunID(b.runID), model.FormatID(issueID),
+		))
+	}
 	return warnings
+}
+
+// frozenBinding is one run's activation snapshot of an issue, in a run where
+// that snapshot will still be rendered.
+type frozenBinding struct {
+	runID         int
+	issueSnapshot string
+	bodySnapshot  string
+	liveSteps     int
+}
+
+// frozenBindingsWithLiveSteps returns, in run order, every binding of issueID
+// into a non-terminal run that has activated it (so a snapshot exists) and
+// still holds at least one non-terminal step for it (so a packet will still be
+// rendered from that snapshot). This is the "live steps in a live run" both
+// mid-run edit advisories fire on.
+//
+// The rows are drained before returning, so a caller may query again: the
+// engine's pool is single-connection (§4.8's SQLite writer discipline), and a
+// query issued while this cursor was open would wait forever for the
+// connection the walk holds.
+func frozenBindingsWithLiveSteps(conn *sql.DB, issueID int) ([]frozenBinding, error) {
+	rows, err := conn.Query(
+		`SELECT ri.run_id, ri.issue_snapshot, COALESCE(ri.body_snapshot, ''),
+		        COUNT(s.id)
+		   FROM run_issues ri
+		   JOIN runs r ON r.id = ri.run_id
+		   LEFT JOIN steps s
+		     ON s.run_id = ri.run_id AND s.issue_id = ri.issue_id
+		    AND s.status NOT IN (`+placeholders(len(terminalStepStatuses))+`)
+		  WHERE ri.issue_id = ?
+		    AND ri.issue_snapshot IS NOT NULL AND ri.issue_snapshot != ''
+		    AND r.status NOT IN (?, ?)
+		  GROUP BY ri.run_id
+		 HAVING COUNT(s.id) > 0
+		  ORDER BY ri.run_id`,
+		append(
+			terminalStepStatusArgs(),
+			issueID, string(model.RunDone), string(model.RunAbandoned),
+		)...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var bindings []frozenBinding
+	for rows.Next() {
+		var b frozenBinding
+		if err := rows.Scan(&b.runID, &b.issueSnapshot, &b.bodySnapshot, &b.liveSteps); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, b)
+	}
+	return bindings, rows.Err()
 }
 
 // terminalStepStatuses is db.StepTerminal's membership, as the SQL above needs

@@ -34,7 +34,14 @@ work already in a run, refresh that run's snapshot as a second, explicit act —
 ` + "`docket run refresh-scope RUN-N --issue DKT-M --reason R`" + ` — or, where the
 run's premise changed rather than one declaration, take the issue out of the
 run and re-plan it. This command warns, naming the run and both verbs, when a
---scope edit lands on an issue with live steps in a live run.`,
+--scope edit lands on an issue with live steps in a live run.
+
+--description has no live reader: every packet's REQUEST and issue.body render
+the activation snapshot. To make an authorized amendment reach an activated
+run's remaining steps, refresh that snapshot as the same kind of second act —
+` + "`docket run refresh-body RUN-N --issue DKT-M --reason R`" + `. This command
+warns, naming the run and that verb, when a --description edit lands on an
+issue with live steps in a live run.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runIssueEdit(cmd, args, getWriter(cmd))
@@ -220,6 +227,17 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
+	// The description advisory runs only once the write above has landed:
+	// it compares the live column against each run's frozen body snapshot.
+	warnings := scopeWarnings
+	if _, descriptionChanged := updates["description"]; descriptionChanged {
+		descriptionWarnings := engine.DescriptionEditFrozenForActiveRuns(conn, id)
+		for _, warning := range descriptionWarnings {
+			w.Warn("%s", warning)
+		}
+		warnings = append(warnings, descriptionWarnings...)
+	}
+
 	updated, err := db.GetIssue(conn, id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
@@ -230,7 +248,7 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	w.Success(
-		withEditWarnings(withIssueVersion(updated), scopeWarnings),
+		withEditWarnings(withIssueVersion(updated), warnings),
 		fmt.Sprintf("Updated %s: %s", model.FormatID(id), updated.Title))
 
 	return nil
