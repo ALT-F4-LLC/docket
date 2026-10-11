@@ -225,7 +225,10 @@ cares.)
 **Run notes.** `docket run note add RUN-N --authority operator|conductor --text "…"`
 (or `--file F`, `-` for stdin) records a standing statement against a run — once —
 and states whose ruling it carries: `--authority` has no default, and
-`standing-grant` is refused. Every packet the run
+`standing-grant` is refused. On a run bound to a conductor capability, `run note add`
+requires that capability, presented via `DOCKET_TOKEN` or stdin and never argv; with
+`--file -` stdin carries the note, so the capability is read only from `DOCKET_TOKEN`.
+Every packet the run
 renders from then on carries it verbatim as a `== RUN NOTE <id> (authority: <kind>)`
 section directly after `== REQUEST`, for every step of every issue; `step context`
 carries it as `context.notes`, so a contract can name it. `<kind>` is `operator` or
@@ -367,8 +370,8 @@ anything — under a trust model fit for an OSS tool:
   (`trust add --prefix`, with an over-authorization warning). Tokens pass via
   env/stdin, never argv; claim markers are 0600 in a per-user runtime dir.
 - **Conductor capability (DKT-2465).** The operator verbs — `step approve`, `step hold` (DKT-3287),
-  `step reject`, `step resolve`, `step reap`, `run pause`, `run resume`, `run
-  abandon`, `dispatch waive-target`, `dispatch abandon` — are not token-free. Each requires the run's *conductor capability*: a
+  `step reject`, `step resolve`, `step reap`, `run pause`, `run resume`,
+  `run note add`, `run abandon`, `dispatch waive-target`, `dispatch abandon` — are not token-free. Each requires the run's *conductor capability*: a
   256-bit token minted at the run's first activation (returned once, hash-only
   storage on `runs.conductor_token_hash`), re-minted by `run conduct RUN-N`, and
   presented via `DOCKET_TOKEN`/stdin like a lease token. "Repository access is the
