@@ -47,7 +47,10 @@ and the report stays honest for every run it still covers.
 
 A consumer whose cursor falls below what survives is told so — ` + "`GONE`" + `
 (exit 9), naming the seq to resume from — rather than handed a short answer it
-would read as having caught up.`,
+would read as having caught up. Pruning a step's claim event also makes
+` + "`docket step context`" + ` and ` + "`docket step render`" + ` for that step return ` + "`GONE`" + `
+(exit 9): the recorded issue body and scope are read back from that event, so
+there is no seq to resume from.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runEventsPrune(cmd, getWriter(cmd))
