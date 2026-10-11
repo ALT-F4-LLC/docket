@@ -348,6 +348,15 @@ func newVoteCastCmd() *cobra.Command {
 			// vote written, and an equal-weighted step tallies every cast the
 			// same. An ad-hoc proposal enforces nothing and tallies as before.
 			result, err := engine.CastVote(conn, vote)
+			// A result beside the error is a cast that COMMITTED, followed by
+			// a panel-event write that failed (engine.CastVote). The cast
+			// stands and a retry would be refused, so it routes and prints
+			// like any other, and the invocation still fails naming what did
+			// not land — never as the refusal a cast with no result gets.
+			var afterCommit error
+			if err != nil && result != nil {
+				afterCommit, err = err, nil
+			}
 			if err != nil {
 				if _, ok := engine.CodeOf(err); ok {
 					return runErr(err)
@@ -371,9 +380,13 @@ func newVoteCastCmd() *cobra.Command {
 			if result.QuorumReached {
 				e := engine.NewEngine()
 				if err := e.DriveVoteProposal(conn, proposalID, model.NowMS()); err != nil {
-					return cmdErr(fmt.Errorf(
-						"the vote recorded and the proposal decided, but "+
-							"routing the vote step failed: %w", err), output.ErrGeneral)
+					if afterCommit != nil {
+						afterCommit = fmt.Errorf("%w; routing the vote step also failed: %v", afterCommit, err)
+					} else {
+						return cmdErr(fmt.Errorf(
+							"the vote recorded and the proposal decided, but "+
+								"routing the vote step failed: %w", err), output.ErrGeneral)
+					}
 				}
 			}
 
@@ -392,6 +405,13 @@ func newVoteCastCmd() *cobra.Command {
 				VotesRequired:  result.VotesRequired,
 				QuorumReached:  result.QuorumReached,
 				WeightedScore:  result.WeightedScore,
+			}
+
+			// One report, not a success followed by an error: in JSON mode
+			// that would put two documents on stdout.
+			if afterCommit != nil {
+				w.PartialFailure(data, msg, afterCommit, output.ErrGeneral)
+				return &reportedFailure{Code: output.ErrGeneral}
 			}
 
 			w.Success(data, msg)

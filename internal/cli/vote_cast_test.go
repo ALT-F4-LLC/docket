@@ -594,3 +594,140 @@ func TestVoteCastRecusesDeclaredReviewedStep(t *testing.T) {
 		testsupport.Must(t, err, "the executor's cast was refused with no recuse declared: %v", err)
 	})
 }
+
+// panelProposalWithFailingEvents opens an ad-hoc proposal linked to the issue
+// of an activated run — a conductor panel, whose run events engine.CastVote
+// writes AFTER the cast's own transaction commits — and installs a trigger
+// that aborts every step-less vote-opened insert, so each cast commits and
+// then fails on its panel events.
+func panelProposalWithFailingEvents(t *testing.T, conn *sql.DB) (int, string) {
+	t.Helper()
+	runID, issueID := seedRun(t, conn)
+	activateHolding(t, conn, runID, model.NowMS())
+	id, err := db.CreateProposal(conn, &model.Proposal{
+		ProjectID: 1, Description: "should the loop extend?", Rationale: "conductor panel",
+		Criticality: model.CriticalityMedium, Threshold: 0.5, RequiredVoters: 2,
+		Status: model.ProposalStatusOpen, CreatedBy: "conductor",
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	err = db.LinkProposalIssue(conn, id, issueID)
+	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
+	_, err = conn.Exec(
+		`CREATE TRIGGER fail_panel_events BEFORE INSERT ON events
+		 WHEN NEW.step_id IS NULL AND NEW.kind = 'vote-opened'
+		 BEGIN SELECT RAISE(ABORT, 'injected run-event failure'); END`)
+	testsupport.Must(t, err, "installing the failing trigger: %v", err)
+	return id, model.FormatProposalID(id)
+}
+
+// captureStderr is captureStdout's twin: the writer renders a human-mode
+// error to os.Stderr, not to the cobra command's stream.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	testsupport.Must(t, err, "os.Pipe: %v", err)
+	saved := os.Stderr
+	os.Stderr = w
+	return func() string {
+		os.Stderr = saved
+		w.Close()
+		var buf bytes.Buffer
+		_, copyErr := buf.ReadFrom(r)
+		testsupport.Must(t, copyErr, "reading the captured stderr: %v", copyErr)
+		r.Close()
+		return buf.String()
+	}
+}
+
+// assertReportedGeneral checks the command wrote its own report and exits
+// GENERAL_ERROR: the cast is already on stdout, so a second error envelope
+// from Execute would make stdout two JSON documents.
+func assertReportedGeneral(t *testing.T, err error) {
+	t.Helper()
+	var rf *reportedFailure
+	if !errors.As(err, &rf) {
+		t.Errorf("error %v is not a *reportedFailure, so the recorded cast was not reported", err)
+		return
+	}
+	if rf.Code != output.ErrGeneral {
+		t.Errorf("exit code = %s, want %s", rf.Code, output.ErrGeneral)
+	}
+}
+
+// TestVoteCastReportsCommittedCastWhenPanelEventsFail: when engine.CastVote
+// hands back a committed cast beside a panel-event error, `vote cast` prints
+// the recorded cast — votes cast / required, and the decided status and score
+// once quorum is reached — and exits GENERAL_ERROR naming the panel-event
+// failure, never the conflict or not-found message a refused cast gets.
+func TestVoteCastReportsCommittedCastWhenPanelEventsFail(t *testing.T) {
+	base := []string{"--verdict", "approve", "--confidence", "0.9", "--domain-relevance", "0.8", "--usage", `{"tokens":1}`}
+
+	castHuman := func(t *testing.T, conn *sql.DB, ref, voter string) (string, string, error) {
+		t.Helper()
+		stdout, stderr := captureStdout(t), captureStderr(t)
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", voter}, base...)...)
+		return stdout(), stderr(), err
+	}
+	assertPartial := func(t *testing.T, ref, stdout, stderr string, err error, wantOut ...string) {
+		t.Helper()
+		assertReportedGeneral(t, err)
+		for _, want := range wantOut {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("stdout %q does not print the recorded cast (%q)", stdout, want)
+			}
+		}
+		if !strings.Contains(stderr, "run events failed") || !strings.Contains(stderr, ref) {
+			t.Errorf("stderr %q does not name %s's panel-event failure", stderr, ref)
+		}
+		for _, wrong := range []string{"conflict", "not found"} {
+			if strings.Contains(stdout+stderr, wrong) {
+				t.Errorf("a committed cast was reported as %q: stdout %q, stderr %q", wrong, stdout, stderr)
+			}
+		}
+	}
+
+	t.Run("human", func(t *testing.T) {
+		conn := newTestDB(t)
+		id, ref := panelProposalWithFailingEvents(t, conn)
+
+		stdout, stderr, err := castHuman(t, conn, ref, "seat-1")
+		assertPartial(t, ref, stdout, stderr, err, "Vote recorded for "+ref+" (1/2 votes cast)")
+		if n := len(votesByVoter(t, conn, id)); n != 1 {
+			t.Fatalf("%d votes after the first cast, want its committed 1", n)
+		}
+
+		stdout, stderr, err = castHuman(t, conn, ref, "seat-2")
+		assertPartial(t, ref, stdout, stderr, err, "(2/2 votes cast) - APPROVED (score: ")
+		if n := len(votesByVoter(t, conn, id)); n != 2 {
+			t.Fatalf("%d votes after the deciding cast, want 2", n)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		conn := newTestDB(t)
+		_, ref := panelProposalWithFailingEvents(t, conn)
+
+		stdout := captureStdout(t)
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "seat-1", "--json", "v1"}, base...)...)
+		raw := stdout()
+		assertReportedGeneral(t, err)
+		var envelope struct {
+			OK    bool           `json:"ok"`
+			Data  voteCastResult `json:"data"`
+			Error string         `json:"error"`
+			Code  string         `json:"code"`
+		}
+		if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+			t.Fatalf("stdout is not one JSON envelope: %v\n%s", err, raw)
+		}
+		if envelope.OK || envelope.Code != string(output.ErrGeneral) {
+			t.Errorf("envelope ok=%v code=%q, want ok=false code=%q", envelope.OK, envelope.Code, output.ErrGeneral)
+		}
+		if envelope.Data.VotesCast != 1 || envelope.Data.VotesRequired != 2 || envelope.Data.Vote == nil {
+			t.Errorf("envelope data = %+v, want the committed 1/2 cast", envelope.Data)
+		}
+		if !strings.Contains(envelope.Error, "run events failed") || !strings.Contains(envelope.Error, ref) {
+			t.Errorf("envelope error %q does not name %s's panel-event failure", envelope.Error, ref)
+		}
+	})
+}
