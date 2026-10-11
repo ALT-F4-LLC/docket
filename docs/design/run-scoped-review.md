@@ -277,10 +277,14 @@ rows all read 0 and so order among themselves, which is the fixer-then-judges
 ordering the run-scoped cluster (D3) needs.
 
 Display. A run-scoped row has no issue, and every operator surface shows it
-the same way: the `issue` field is the empty string `""` in `--json` output,
-and a text issue column shows `-`. The row's run id, which each of these
-surfaces already prints, names its subject. The rule covers `next`, `step
-list`, `step show`, `events list` and every other event feed, and
+the same way in text: an issue column shows `-`. The `--json` form differs by
+surface, and no wire shape changes. On `next`, `step list` and `step show` the
+`issue` field is always present and is the empty string `""`. On `events list`
+and every other event feed (internal/engine/events_read.go:56) and on the
+`StepAttempt` rows of `run report` (internal/engine/report.go:385) the field
+is `omitempty`, so the `issue` key is absent. The row's run id, which each of
+these surfaces already prints, names its subject. The text rule covers `next`,
+`step list`, `step show`, `events list` and every other event feed, and
 `run report`. Message text that names a step's subject, such as an error or a
 park reason, names the run (`RUN-N`) where an issue row names `DKT-N`. No
 surface prints `<PREFIX>-0`. Two surfaces already follow the rule: an event
@@ -844,8 +848,8 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
   `propagateAfterFiredSkips` and `ListIssueStepsTx` take the NULL reading so a
   `--as skip` cascades over the run-scoped successors (§3.3).
 - internal/engine/report.go: `complementarityRollup` and
-  `sourceAttributionRollup` apply the §3.1 display rule (`""` in JSON, `-` in a
-  text column) to run-scoped rows, so `run report` prints no `<PREFIX>-0` for
+  `sourceAttributionRollup` apply the §3.1 display rule (`-` in a text
+  column) to run-scoped rows, so `run report` prints no `<PREFIX>-0` for
   `reconcile@0`.
 
 ### Fix-loop routing
@@ -978,7 +982,7 @@ run started outside a checkout is refused at activation with the D5 message (the
 empty field(s)) and leaves zero step rows; every existing bundle fixture is byte-identical; no
 operator surface renders `<PREFIX>-0`, or any `-0` issue id, for a run-scoped
 row: on that fixture `next`, `step list`, `step show`, `events list`, and `run report` each show `review@0#0` under the §3.1 display rule,
-`""` in the `--json` `issue` field and `-` in a text issue column. For the
+`""` in the `--json` `issue` field on `next`, `step list` and `step show`, no `issue` key on `events list` and `run report`, and `-` in a text issue column on every surface. For the
 park: with `review.findings` recorded so that two of three clusters reduce to
 `high`, `reconcile@0` parks with `park_reason` equal to the §3.3 rendering byte
 for byte; `step resolve reconcile@0 --as retry`, `--as rerun-gates`, and `--as
@@ -1063,8 +1067,9 @@ the integration check's `checked` list includes the run-scoped fix's head.
   operator's own. The body's out-of-scope section discloses paths outside the
   union scope, and nothing else distinguishes them; this is accepted.
 - `db.Step.IssueID == 0` becomes a meaningful value. Every reader that formats
-  `model.FormatID(step.IssueID)` must apply the §3.1 display rule (`""` in
-  JSON, `-` in a text column, the run named in messages) before it can show a
+  `model.FormatID(step.IssueID)` must apply the §3.1 display rule (`-` in a
+  text column, `""` or an absent key in JSON per surface, the run named in
+  messages) before it can show a
   run-scoped row, and phase 2's acceptance holds every operator surface to it.
 - The `next` row's `issue` field is empty on run-scoped rows. A dispatcher that
   indexes by issue must tolerate the empty string.
