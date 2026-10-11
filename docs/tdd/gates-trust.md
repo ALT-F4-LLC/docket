@@ -1798,9 +1798,15 @@ views list voter names under a `sealed` note, the JSON `votes` array carries
 weight, findings or summary keys, and `gate status` reports each seat's
 `cast` without its `verdict`. `vote list` already rendered only the count.
 The moment the status leaves `open` — a tally, a `vote commit`, a `vote
-close` — everything renders, and the `vote-record` context artifact a
-downstream step consumes is composed only after the vote step routes, so it
-never carries an open ballot's casts.
+close` — everything renders. The `vote-record` context artifact a downstream
+step consumes follows the same predicate, not routing order: `step resolve
+--as override-pass` routes a vote step to `done` while its sealed proposal is
+still `open`, so a routed vote step does not mean the ballot closed.
+`resolveVoteRecords` consults `proposal.SealedOpen()`, and a vote step
+resolved past in that state contributes only the sealed projection
+`{proposal, status, sealed: true, casts: [{voter_name, created_at}]}`, with no
+verdict, confidence, rationale or findings key. Once the proposal leaves
+`open`, the full record renders.
 
 Sealing is a **norm-level shield, not a security boundary.** It changes what
 the read verbs *render* and nothing else: `db.CastVote`, its weighted score,
