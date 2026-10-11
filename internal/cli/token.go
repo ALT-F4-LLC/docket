@@ -68,8 +68,8 @@ func optionalToken(stdin io.Reader) string {
 	return tok
 }
 
-// conductorToken returns the token to present for run `runID` on an operator
-// verb whose engine path checks the run's conductor capability
+// conductorToken returns the token to present for run `runID` on a
+// conductor-gated verb, one whose engine path checks the run's conductor capability
 // (authorizeConductor/authorizeConductorTx) (DKT-2465).
 //
 // NOTHING IS READ UNLESS THE RUN IS BOUND to a conductor capability, for

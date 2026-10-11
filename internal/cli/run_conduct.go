@@ -22,8 +22,7 @@ var runConductCmd = &cobra.Command{
 	Short: "Take a run's conductor seat, minting its capability token",
 	Long: `Take (or re-take) a run's conductor seat.
 
-The seven operator verbs — step approve, step reject, step resolve, step reap,
-run pause, run resume, run abandon — require the run's CONDUCTOR CAPABILITY: a
+Verbs that take run-scoped rulings require the run's CONDUCTOR CAPABILITY: a
 token the run's first activation returned once, supplied on each of them via
 DOCKET_TOKEN or stdin (never argv). This verb mints a fresh one and prints it
 ONCE. Any standing token is retired by the mint, so the session that held it
@@ -34,7 +33,7 @@ conductor session died must not be un-pausable forever — which makes the seat
 TAMPER-EVIDENT rather than tamper-proof: the ` + "`conductor-seated`" + ` event
 records who took it and from where, and the refusal the displaced conductor
 sees is the signal. A harness that keys its callers keeps executors off THIS
-verb, and the engine keeps them off the other seven.
+verb, and the engine keeps them off the verbs that require the capability.
 
 A run activated before the capability existed asks for no token until it is
 conducted; conducting it binds it. A terminal run is refused: there is
