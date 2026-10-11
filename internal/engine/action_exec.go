@@ -310,7 +310,23 @@ func (r *ExecActionRunner) spawnMatched(
 		defer lock.release()
 	}
 
+	// The pin hash re-resolves the entry's argv[0], while the spawn runs
+	// resolved. A symlinked component retargeted since Resolve would let the
+	// hash read one file and the spawn run another, so a pinned entry must
+	// still resolve to the path that spawns. Pins exist only on absolute
+	// argv[0], which Resolve's R4 already normalized to resolved.
 	recheckPin := func() error {
+		if entry.Argv0SHA256 != "" {
+			now, nerr := exec.NormalizePath(entryArgv0)
+			if nerr != nil {
+				return fmt.Errorf("trust entry %q: cannot re-resolve %s before spawning %s: %v",
+					entry.Name, exec.Render(entryArgv0), exec.Render(resolved), nerr)
+			}
+			if now != resolved {
+				return fmt.Errorf("trust entry %q: %s resolved to %s before the spawn but now resolves to %s; the pinned file is not the one that would run",
+					entry.Name, exec.Render(entryArgv0), exec.Render(resolved), exec.Render(now))
+			}
+		}
 		if again := relookup(); !again.Matched {
 			return errors.New(again.Reason)
 		}

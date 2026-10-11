@@ -908,3 +908,107 @@ func TestActionPinRecheckUnchangedScriptRuns(t *testing.T) {
 		t.Errorf("rows = %+v, want one %q row", result.Results, db.ActionVerdictPass)
 	}
 }
+
+// TestActionPinRecheckRefusesSymlinkRetarget: the entry trusts link/action.sh
+// with link -> trusted. While the action waits for the tree lock, a writer
+// copies the pinned bytes to decoy/action.sh, rewrites trusted/action.sh, and
+// repoints link -> decoy. The entry path now hashes clean, but the runner
+// would spawn trusted/action.sh, so a pinned entry is refused. An unpinned
+// entry carries no pin to protect and still runs.
+func TestActionPinRecheckRefusesSymlinkRetarget(t *testing.T) {
+	type layout struct {
+		script, trustedPath, decoyPath, pinnedMarker, rewrittenMarker string
+		pinnedContent                                                 string
+		retarget                                                      func()
+	}
+	build := func(t *testing.T) layout {
+		t.Helper()
+		dir, markers := t.TempDir(), t.TempDir()
+		trustedDir := filepath.Join(dir, "trusted")
+		decoyDir := filepath.Join(dir, "decoy")
+		link := filepath.Join(dir, "link")
+		for _, d := range []string{trustedDir, decoyDir} {
+			err := os.Mkdir(d, 0o755)
+			testsupport.Must(t, err, "creating %s: %v", d, err)
+		}
+		err := os.Symlink(trustedDir, link)
+		testsupport.Must(t, err, "linking %s: %v", link, err)
+
+		l := layout{
+			script:          filepath.Join(link, "action.sh"),
+			trustedPath:     filepath.Join(trustedDir, "action.sh"),
+			decoyPath:       filepath.Join(decoyDir, "action.sh"),
+			pinnedMarker:    filepath.Join(markers, "pinned-ran"),
+			rewrittenMarker: filepath.Join(markers, "rewritten-ran"),
+		}
+		l.pinnedContent = pinScriptHeader + "A\n/usr/bin/touch " + l.pinnedMarker + "\n" + actionReplyLine
+		rewritten := pinScriptHeader + "A\n/usr/bin/touch " + l.rewrittenMarker + "\n" + actionReplyLine
+		err = os.WriteFile(l.trustedPath, []byte(l.pinnedContent), 0o755)
+		testsupport.Must(t, err, "writing the trusted script: %v", err)
+		l.retarget = func() {
+			err := os.WriteFile(l.decoyPath, []byte(l.pinnedContent), 0o755)
+			testsupport.Must(t, err, "writing the decoy: %v", err)
+			err = os.WriteFile(l.trustedPath, []byte(rewritten), 0o755)
+			testsupport.Must(t, err, "rewriting the trusted script: %v", err)
+			err = os.Remove(link)
+			testsupport.Must(t, err, "removing %s: %v", link, err)
+			err = os.Symlink(decoyDir, link)
+			testsupport.Must(t, err, "repointing %s: %v", link, err)
+		}
+		return l
+	}
+
+	t.Run("pinned entry is refused", func(t *testing.T) {
+		repo := t.TempDir()
+		l := build(t)
+		resolvedBefore, err := filepath.EvalSymlinks(l.trustedPath)
+		testsupport.Must(t, err, "resolving the trusted script: %v", err)
+
+		result := runTreeActionAcrossHeldLock(t, repo,
+			pinnedActionEntry(repo, l.script, trustHashOf(l.pinnedContent)), l.retarget)
+
+		if sentinelExists(t, l.rewrittenMarker) {
+			t.Error("the rewritten script RAN under the pinned entry")
+		}
+		if sentinelExists(t, l.pinnedMarker) {
+			t.Error("the decoy ran; the runner spawns the path it resolved before the lock")
+		}
+		if !result.Failed {
+			t.Error("the action did not fail after its argv[0] was retargeted")
+		}
+		if len(result.Results) != 1 {
+			t.Fatalf("got %d rows, want 1: %+v", len(result.Results), result.Results)
+		}
+		row := result.Results[0]
+		if row.Verdict != db.ActionVerdictUnmatched || row.Exit != nil ||
+			row.TrustEntry != "pinned-action" {
+			t.Errorf("row = verdict %q exit %v entry %q, want %q, nil, %q",
+				row.Verdict, row.Exit, row.TrustEntry, db.ActionVerdictUnmatched, "pinned-action")
+		}
+		resolvedNow, err := filepath.EvalSymlinks(l.decoyPath)
+		testsupport.Must(t, err, "resolving the decoy: %v", err)
+		for _, want := range []string{resolvedBefore, resolvedNow} {
+			if !strings.Contains(row.Reason, want) {
+				t.Errorf("the reason does not name %s: %q", want, row.Reason)
+			}
+		}
+	})
+
+	t.Run("unpinned entry still runs", func(t *testing.T) {
+		repo := t.TempDir()
+		l := build(t)
+
+		result := runTreeActionAcrossHeldLock(t, repo,
+			pinnedActionEntry(repo, l.script, ""), l.retarget)
+
+		if !sentinelExists(t, l.rewrittenMarker) {
+			t.Errorf("the unpinned action did not spawn its resolved path: %+v", result.Results)
+		}
+		if result.Failed {
+			t.Errorf("the unpinned action failed: %s", result.Reason)
+		}
+		if len(result.Results) != 1 || result.Results[0].Verdict != db.ActionVerdictPass {
+			t.Errorf("rows = %+v, want one %q row", result.Results, db.ActionVerdictPass)
+		}
+	})
+}
