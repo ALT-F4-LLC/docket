@@ -289,11 +289,15 @@ and `events list` prints `-` for it (internal/cli/events.go:279), and the
 `StepAttempt` rows of `run report` set `Issue` only when `IssueID != 0`
 (`effectiveStepFacts`, internal/engine/report.go:902).
 Phase 2 applies the same guard where a row is built from `step.IssueID`:
-`next` (internal/engine/next.go:519), the `StepListEntry` that `step list` and
-`step show` share (next.go:678), and the `step list` text column
-(internal/cli/step.go, which prints `row.Issue` with no dash today), and the two
-`run report` rollups `complementarityRollup` (internal/engine/report.go:1166)
-and `sourceAttributionRollup` (report.go:1396), which format
+`stepRow` (internal/engine/next.go, the `Issue:` field), which builds the
+`model.StepRow` that `next` returns and that `step show` reads through
+`StepRowFor`; the `StepListEntry` that `RunStepList` and `IssueStepList` build
+for `step list` alone; the `next --run` text ISSUE column (`RenderStepRows`)
+and the `step show` `issue:` line (`RenderStepDetail`), both in
+internal/render/step.go, which print `row.Issue` with no dash today; the
+`step list` text column (internal/cli/step.go, same); and the two `run report`
+rollups `complementarityRollup` (internal/engine/report.go:1166) and
+`sourceAttributionRollup` (report.go:1396), which format
 `model.FormatID(s.IssueID)` with no guard and run on a run-scoped aggregate
 step such as `reconcile@0`.
 `model.FormatID` is unchanged: 0 is not an issue id (`ParseID` refuses
@@ -762,10 +766,13 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/engine/ready.go: clause R2c and the union-scope R4 read for run-scoped
   rows.
 - internal/engine/ready_test.go.
-- internal/engine/next.go: `issue` empty on run-scoped `next` rows and on the
-  `StepListEntry` that `step list` and `step show` read (§3.1 display rule).
+- internal/engine/next.go: `issue` empty on the `model.StepRow` that `stepRow`
+  builds for run-scoped rows, which `next` returns and `step show` reads
+  through `StepRowFor`, and on the `StepListEntry` that `step list` alone reads
+  (§3.1 display rule).
 - internal/cli/step.go: the `step list` text column prints `-` for an empty
   issue.
+- internal/render/step.go: `RenderStepRows` (`next --run` text ISSUE column) and `RenderStepDetail` (`step show` `issue:` line) print `-` for an empty issue.
 
 ### Packet input resolution
 
