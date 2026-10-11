@@ -702,7 +702,12 @@ cast, addressable fields `vote` / `verdict` (aliases for the cast's verdict) and
 the final outcome by hand) carries the approved tally's casts, so it is evaluated
 exactly as an approved one: against the threshold, and, when the threshold routes
 `pass` or none is declared, against the `vote.rule.<name>.hold_on_dissent`
-park. Committing never routes a tally past either check. When either check parks
+park. `vote.rule.<name>.hold_on_dissent` is a bool config key, default `false`;
+when `true`, an approved or manually committed tally carrying at least one
+`reject` cast parks the vote step `waiting-human` (park class `dissent-held`).
+The check applies only when the threshold routes `pass` or none is declared; a
+triage panel and a rejected tally never take it. Contract: gates-trust TDD §8.3.
+Committing never routes a tally past either check. When either check parks
 the step `waiting-human`, an operator passes it with
 `docket step resolve --as override-pass`. A triage panel takes neither check.
 The routing vocabulary is
