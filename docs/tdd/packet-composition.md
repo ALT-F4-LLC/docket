@@ -325,7 +325,7 @@ forms:
 |---|---|
 | `issue.body` | the issue's activation-frozen body snapshot |
 | `issue.diff` | the computed VCS diff recorded for the issue |
-| `issue.files` | **the bytes of every path the issue attaches** |
+| `issue.files` | **the bytes of every path in the attached list frozen at activation** (bytes read live at render) |
 | `issue.latest.<kind>` | the issue's latest recorded artifact of one kind |
 | `issue.linked.<relation>.<kind>` | an artifact recorded under a linked issue |
 
@@ -339,6 +339,14 @@ A step declaring it receives each attached path as its own
 section — the same section §1.4's declared `packet` entries render into,
 appended after them, because the contract and fragments are what a worker reads
 before the material the contract applies to.
+
+The **path list** is frozen; the **bytes** are not. Activation writes the issue's
+attached paths into `run_issues.issue_snapshot` as its `files` key (engine-spine
+§5.1.1), and `issue.files` renders that list, reading each path's bytes live at
+render time. A file attached to the issue mid-run therefore does not reach that
+run's packets, and a detached path keeps rendering until the list is refreshed
+(`docket run refresh-files`). A snapshot with no `files` key predates the freeze and
+renders the live attachment list instead; `"files":[]` is a frozen empty list.
 
 It is the one input form whose resolution **reads the filesystem**. The others
 answer from run state, which is why they are snapshot-pinned; an attachment is a

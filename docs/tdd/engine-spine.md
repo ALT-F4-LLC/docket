@@ -586,7 +586,7 @@ CREATE TABLE IF NOT EXISTS run_issues (
     workflow_id INTEGER REFERENCES workflows(id),  -- the binding (engine-core §1.2)
     body_snapshot TEXT,                            -- activation-time issue body
     body_sha256   TEXT,
-    issue_snapshot TEXT,                           -- activation-time {title, kind, labels, scope} as JSON (§5.1.1)
+    issue_snapshot TEXT,                           -- activation-time issue fields as JSON; key set in §5.1.1
     expanded_at_ms INTEGER,                        -- NULL until this issue's phase expands
     PRIMARY KEY (run_id, issue_id)
 );
@@ -644,15 +644,36 @@ one of those six; `id` is the key. The remaining four — `title`, `kind`, `labe
 `issue_snapshot` TEXT column holding canonical JSON:
 
 ```json
-{"title":"…","kind":"task","labels":["a","b"],"scope":["internal/db/**"]}
+{"title":"…","kind":"task","labels":["a","b"],"scope":["internal/db/**"],"linked":{"<relation>.<kind>":[12]},"files":["docs/x.md"],"size":"small"}
 ```
+
+`title`, `kind`, `labels`, and `scope` are always written. `linked`, `files`, and
+`size` are `omitempty` additions that landed later (`issueSnapshotFields`,
+`internal/engine/activate.go`):
+
+- `linked` — the activation-resolved pin set: each declared
+  `issue.linked.<relation>.<kind>` suffix to the artifact ids it pinned. Omitted when
+  the workflow declares no linked input.
+- `files` — the issue's attached path list as of activation, the list `issue.files`
+  renders (packet-composition §1.4.1). It is a pointer in the Go type so that absent
+  and empty differ; see the rule below.
+- `size` — the issue's declared size as of activation. Omitted when the issue
+  declares none.
+
+An omitted key keeps a snapshot without that form byte-identical to what it was
+before the key existed, which the golden bundles (§8.3) require.
+
+**`files`: absent is not empty.** Activation always writes the key, so an issue with
+no attachments snapshots `"files":[]`, a frozen empty list. A snapshot with **no**
+`files` key was written before the list was frozen, and `issue.files` renders the
+**live** attachment list for it. An absent key never means "no attachments".
 
 **One JSON column rather than four discrete ones**, because these fields are never
 queried, filtered, or joined on — they are read back whole, exactly once, to
 materialize `context.issue` — so discrete columns would buy nothing over a blob while
 costing a schema migration every time §11.4's issue shape gains a field.
 
-Canonical JSON (sorted keys, `labels`/`scope` in their stored order) is required, not
+Canonical JSON (a fixed key order, `labels`/`scope` in their stored order) is required, not
 incidental: `context` bundles are golden-diffed byte-for-byte (§8.3), so a
 map-iteration-ordered serialization here would make the goldens flap.
 
@@ -785,7 +806,7 @@ failing the whole activation:
    or is not a regular file is `NOT_FOUND` (exit 2); pinning is never partial.
 4. **Snapshot issue bodies and fields.** `run_issues.body_snapshot` + `body_sha256`
    for every issue in the run, **and** `issue_snapshot` — the canonical JSON of
-   `{title, kind, labels, scope}` (§5.1.1). Together these are the sole issue state
+   the issue fields §5.1.1 lists. Together these are the sole issue state
    the context bundle ever reads (§6.6); the mid-run-edit immunity of §9 item 5 rests
    entirely on this row, and §8.3's own test edits the title and adds a label, so a
    body-only snapshot fails it.
@@ -952,10 +973,10 @@ including `unless_labels` beating `labels_any`; absent clauses matching anything
   run rows, no steps, no pins written — the transaction is fat, so a failure leaves
   nothing).
 - snapshot: `body_snapshot` equals the body at activation; editing the issue body
-  afterward leaves it unchanged. **`issue_snapshot`** (§5.1.1) captures
-  `title`/`kind`/`labels`/`scope` at activation, is canonical JSON (asserted stable
+  afterward leaves it unchanged. **`issue_snapshot`** captures every key §5.1.1 lists
+  at activation, is canonical JSON (asserted stable
   across 100 serializations, same discipline as `parsed`), and is unchanged by an
-  edit to any of the four afterward.
+  edit to any of those fields afterward.
 - fence harvesting: multiple blocks, multiple tags, ordinals stable, hashes correct;
   a block whose tag no workflow declares is **not** harvested.
 - re-activation RA1–RA5.
@@ -1248,8 +1269,8 @@ reads, and may read, exactly these sources:
 
 1. the step row and its definition, from the **pinned** workflow's `parsed`;
 2. `run_issues.body_snapshot` — never the live issue body;
-3. `run_issues.issue_snapshot` — `title`/`kind`/`labels`/`scope` as of activation
-   (§5.1.1), never the live `issues` row;
+3. `run_issues.issue_snapshot` — the issue fields as of activation
+   (key set in §5.1.1), never the live `issues` row;
 4. recorded `artifacts` bodies, resolved per §6.7's input rule;
 5. `pins` rows (path + hash) — the *list*, not the file contents, with one
    exception: for a pending step of a non-terminal run, the step row's routing is
