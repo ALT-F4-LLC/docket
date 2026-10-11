@@ -1920,6 +1920,82 @@ func TestActivateWarnsOnUnresolvableScope(t *testing.T) {
 	}
 }
 
+// TestActivateWarnsWhenScopeOmitsSiblingTest is the test-file scope gap: an
+// issue scoped to a production Go file whose existing _test.go sibling the
+// scope does not admit sends a writer into a tree where the test it needs to
+// change is out of bounds. Activation names the pair and still binds the issue.
+func TestActivateWarnsWhenScopeOmitsSiblingTest(t *testing.T) {
+	repoRoot := t.TempDir()
+	engineDir := filepath.Join(repoRoot, "internal", "engine")
+	err := os.MkdirAll(engineDir, 0o755)
+	testsupport.Must(t, err, "MkdirAll: %v", err)
+	for _, name := range []string{"activate.go", "activate_test.go", "lone.go"} {
+		err = os.WriteFile(filepath.Join(engineDir, name), []byte("package engine\n"), 0o644)
+		testsupport.Must(t, err, "WriteFile %s: %v", name, err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		globs    string
+		execRoot string
+		warn     bool
+	}{
+		{"scope omits the existing sibling",
+			`["internal/engine/activate.go"]`, repoRoot, true},
+		{"scope admits the sibling by literal path",
+			`["internal/engine/activate.go","internal/engine/activate_test.go"]`, repoRoot, false},
+		{"scope admits the sibling by glob",
+			`["internal/engine/activate.go","internal/**/*_test.go"]`, repoRoot, false},
+		{"scoped file has no sibling test",
+			`["internal/engine/lone.go"]`, repoRoot, false},
+		{"run has no exec root",
+			`["internal/engine/activate.go"]`, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			registerFixture(t, conn)
+
+			issue := createIssue(t, conn, "fix the activation", "body", "task", nil)
+			err := db.SetIssueScopeGlobs(conn, issue, tc.globs)
+			testsupport.Must(t, err, "setting scope: %v", err)
+			run := startRun(t, conn, issue)
+			if tc.execRoot != "" {
+				execSQL(t, conn, `UPDATE runs SET exec_root = ? WHERE id = ?`, tc.execRoot, run.ID)
+			}
+
+			result, err := activate(conn, run.ID)
+			testsupport.Must(t, err, "activate: %v — the lint warns, it does not refuse", err)
+			if result.IssuesBound != 1 {
+				t.Fatalf("issues bound = %d, want 1", result.IssuesBound)
+			}
+
+			if !tc.warn {
+				if len(result.ScopeWarnings) != 0 {
+					t.Errorf("scope warnings = %+v, want none for scope %s",
+						result.ScopeWarnings, tc.globs)
+				}
+				return
+			}
+			if len(result.ScopeWarnings) != 1 {
+				t.Fatalf("scope warnings = %+v, want exactly one naming the omitted sibling",
+					result.ScopeWarnings)
+			}
+			warning := result.ScopeWarnings[0]
+			if warning.IssueID != model.FormatID(issue) {
+				t.Errorf("warning names %q, want %q", warning.IssueID, model.FormatID(issue))
+			}
+			for _, want := range []string{"internal/engine/activate.go", "internal/engine/activate_test.go"} {
+				if !strings.Contains(warning.Reason, want) {
+					t.Errorf("warning reason %q does not name %s", warning.Reason, want)
+				}
+			}
+			if result.Run.Status != model.RunActive {
+				t.Errorf("run status = %q, want %q", result.Run.Status, model.RunActive)
+			}
+		})
+	}
+}
+
 // TestScopeWarningRidesOnDryRun is the placement that matters most. `--dry-run`
 // exists so an operator sees what a run WOULD bind before committing to it, and
 // a hazard visible only after the commit is one the dry run failed to report.

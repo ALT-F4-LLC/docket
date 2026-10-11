@@ -774,6 +774,15 @@ func activateTx(
 	}
 	result.ScopeWarnings = append(result.ScopeWarnings, unresolvable...)
 
+	// The test-sibling lint: a scope naming a production Go file but not its
+	// existing _test.go leaves the writer unable to change the test the fix
+	// needs, which otherwise surfaces only as a parked step and a scope refresh.
+	siblings, err := lintOmittedSiblingTests(tx, runIssues, bindings, run.ExecRoot)
+	if err != nil {
+		return nil, err
+	}
+	result.ScopeWarnings = append(result.ScopeWarnings, siblings...)
+
 	// The label-vs-scope lint (DKT-1182): an issue whose scope says one pipeline
 	// owns it while its labels bound it to another. Binding refuses zero matches
 	// and refuses several; exactly one WRONG match is the shape it structurally
@@ -1562,6 +1571,101 @@ func lintUnresolvableScopes(
 		})
 	}
 	return out, nil
+}
+
+// lintOmittedSiblingTests reports every scope entry naming a literal Go
+// production file F whose sibling F_test.go exists under the run's repository
+// root while no entry of the same scope matches that sibling.
+//
+// Only literal entries are considered: a glob names no particular file, so it
+// has no particular sibling. A scoped file with no existing test is skipped,
+// because there is no test for the scope to have omitted. A run with no
+// recorded exec root is skipped for lintUnresolvableScopes' reason.
+func lintOmittedSiblingTests(
+	tx *sql.Tx, runIssues []*db.RunIssue, bindings map[int]*boundDefinition,
+	execRoot string,
+) ([]ScopeWarning, error) {
+	if execRoot == "" {
+		return nil, nil
+	}
+
+	var out []ScopeWarning
+	for _, ri := range runIssues {
+		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		if err != nil {
+			return nil, fmt.Errorf("reading scope for %s: %w",
+				model.FormatID(ri.IssueID), err)
+		}
+		if raw == "" {
+			continue
+		}
+		var globs []string
+		if err := json.Unmarshal([]byte(raw), &globs); err != nil {
+			continue
+		}
+
+		for _, file := range globs {
+			if strings.ContainsAny(file, "*?[{") ||
+				!strings.HasSuffix(file, ".go") || strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			sibling := strings.TrimSuffix(file, ".go") + "_test.go"
+			info, err := os.Stat(filepath.Join(execRoot, filepath.FromSlash(sibling)))
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if scopeAdmitsPath(globs, sibling) {
+				continue
+			}
+
+			workflowRef := ""
+			if bound := bindings[ri.IssueID]; bound != nil {
+				workflowRef = bound.workflow.Ref()
+			}
+			out = append(out, ScopeWarning{
+				IssueID:  model.FormatID(ri.IssueID),
+				Workflow: workflowRef,
+				Reason: fmt.Sprintf(
+					"scope names %s but not its existing test %s — a fix that must "+
+						"change the test cannot land; add the test to the issue's scope",
+					file, sibling),
+			})
+		}
+	}
+	return out, nil
+}
+
+// scopeAdmitsPath reports whether any scope entry matches the slash-separated
+// path p. Entries match segment by segment under path.Match, with a `**`
+// segment matching zero or more whole segments.
+func scopeAdmitsPath(globs []string, p string) bool {
+	for _, g := range globs {
+		if globSegmentsMatch(strings.Split(g, "/"), strings.Split(p, "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func globSegmentsMatch(glob, segs []string) bool {
+	for len(glob) > 0 {
+		if glob[0] == "**" {
+			for i := 0; i <= len(segs); i++ {
+				if globSegmentsMatch(glob[1:], segs[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(segs) == 0 {
+			return false
+		}
+		if ok, _ := path.Match(glob[0], segs[0]); !ok {
+			return false
+		}
+		glob, segs = glob[1:], segs[1:]
+	}
+	return len(segs) == 0
 }
 
 // lintDomainScopeMismatch reports every issue whose LABELS bound it to one
