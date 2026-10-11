@@ -1475,7 +1475,7 @@ minimum returns GONE rather than silently skipping."*
 | E14 | `GONE` is a **new error-taxonomy code**, exit **6**, meaning "the cursor is below the retained minimum; the events you asked for no longer exist" |
 | E15 | It is raised when `--since SEQ` names a seq below `MIN(seq)` in `events` **and** the table is non-empty **and** a prune has occurred. §8.6.1 defines that last condition |
 | E16 | **The trigger cannot fire at this stage.** Nothing prunes: `events prune` is S7's (§10 stage 7), and no other path deletes an event. So `MIN(seq)` is always 1 in a v10 repo and E15's condition is unreachable |
-| E17 | The **shape is specified and implemented here** — the code, the exit, the message, the taxonomy row, the `docket` skill's error-taxonomy entry — because `--since` is the verb that must return it, and a stage that shipped the cursor without its out-of-range answer would ship a verb whose contract S7 has to retrofit |
+| E17 | The **shape is specified and implemented here** — the code, the exit, the message, the taxonomy row, the loadable `docket` skill's error-taxonomy entry — because `--since` is the verb that must return it, and a stage that shipped the cursor without its out-of-range answer would ship a verb whose contract S7 has to retrofit |
 | E18 | `TestGoneShapeIsReachableOnlyByPruning` constructs the state **by deleting rows directly in the test**, asserts `GONE` with its exit code and message, and documents that no product code path reaches it yet |
 
 **§8.6.1 — how "a prune has occurred" is known without a pruner.** The
@@ -1650,7 +1650,7 @@ whether *auto*-registration should inherit it, or auto-bump, or overwrite.
 **(a) is chosen. The argument, against both tenets it is accused of violating:**
 
 **Against the immutability contract** — (a) *is* the immutability contract.
-`name@version` is frozen (the `docket` skill's frozen-name table); auto-registration is a
+`name@version` is frozen (the loadable `docket` skill's frozen-name table); auto-registration is a
 registration; therefore it refuses. (b) and (c) are the options that break
 immutability, one by minting versions nobody chose and one by mutating a frozen
 row. The only question was whether auto-registration deserves an exemption, and
