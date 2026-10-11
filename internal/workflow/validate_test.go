@@ -646,6 +646,26 @@ after_loop = "check"
 `,
 		wants: []string{`"repanel"`, "`loop = true`", "`type=\"vote\"`"},
 	},
+	{
+		rule: "V49", name: "loop body declared as a human step",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "check"
+executor = "x"
+emits = "k"
+threshold = { "fix-loop" = "any(status == unmet)" }
+[[step]]
+name = "regate"
+type = "human"
+on_fail = "waiting-human"
+loop = true
+after_loop = "check"
+`,
+		wants: []string{`"regate"`, "`loop = true`", "`type=\"human\"`"},
+	},
 	// V50: `verdict_field` names a property the step's pinned schema declares.
 	{
 		rule: "V50", name: "verdict_field naming a property the schema does not declare",

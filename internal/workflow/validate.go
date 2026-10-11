@@ -412,19 +412,19 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
-	// V49: a loop body is never a vote step. A body has no `after` (V10/V18),
-	// so a ballot it opened could not be ordered behind the round's repair
-	// work. Its record is also unreachable downstream: L4 refuses a consumer
-	// naming the body, and the loop rebind matches bodies by emitted kind,
-	// which a vote step does not have.
-	if step.Loop && step.Type == TypeVote {
+	// V49: a loop body is never a `type =` step, human or vote. A body has no
+	// `after` (V10/V18), so a gate it opened could not be ordered behind the
+	// round's repair work. Its record is also unreachable downstream: L4
+	// refuses a consumer naming the body, and the kind-matched loop rebind
+	// cannot select it, because ArtifactKind returns "" for ClassType.
+	if step.Loop && step.Type != "" {
 		return &Error{
 			Rule: "V49", Step: step.Name, Field: "loop",
 			Message: fmt.Sprintf(
-				"step %q: a `loop = true` step may not be `type=\"vote\"` — a loop "+
-					"body re-does producing work, and a ballot it opened could be "+
+				"step %q: a `loop = true` step may not be `type=%q` — a loop "+
+					"body re-does producing work, and a gate it opened could be "+
 					"neither ordered behind that work nor read by any step downstream",
-				step.Name),
+				step.Name, step.Type),
 		}
 	}
 
