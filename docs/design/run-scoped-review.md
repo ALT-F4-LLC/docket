@@ -32,8 +32,8 @@ final review)" (line 63). The storage admits it, `steps.issue_id` is nullable
 |---|---|---|
 | D1 | Workflow-expansion shape | A run-scoped workflow definition: `[pipeline] scope = "run"`. Its steps use the existing `[[step]]` grammar, expand once per run at activation with `issue_id` NULL, and become ready only after every issue of the run is terminal and no dispatch is open (readiness clause R2c). Readiness is not the integration proof: the claim of a run-scoped step that reads `run.diff` or holds the tree runs the integration check (§3.1, "Integration at claim"), driver-independent, and parks `waiting-human` instead of claiming when any write-class head is not on the shared branch. Not a per-step flag inside issue workflows, not an opt-in phase assembled from several bound workflows. |
 | D2 | `run.diff` derivation | A committed read of the integration branch, recorded as a `run.diff` artifact at the claim of each run-scoped step that declares the input: the claim resolves the shared checkout's HEAD to one commit sha once, and a dedicated call computes `git diff <run.commit_sha> <head_sha> -- <union of the run's issue scopes>` between those two commits, with the round record `{base, head, sha256}` whose `head` is that same sha. Uncommitted changes and untracked files in `run.exec_root` are not part of the body. Never the union of issue diffs. |
-| D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V48b), so a rejection routes `waiting-human`; the resolutions that park supports, and the reason it carries, are decided in §3.3 and owned by phase 2. |
-| D4 | Register-time lint | V48: `[pipeline] scope`, when present, is `"issue"` or `"run"`, and a definition whose scope is `issue` has no step whose `inputs` names `run.diff`. V48a: a definition whose scope is `run` declares no `[match]` table, no step `when`, and no step input of an `issue.*` form. V48b (phase 1 and 2 only): a definition whose scope is `run` has no `loop = true` step, no `threshold`, `on_fail`, or `on_fail_routes` value equal to `fix-loop` or `fix-round`, and no step declaring `on_exhausted` or `serves`. |
+| D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V51b), so a rejection routes `waiting-human`; the resolutions that park supports, and the reason it carries, are decided in §3.3 and owned by phase 2. |
+| D4 | Register-time lint | V51: `[pipeline] scope`, when present, is `"issue"` or `"run"`, and a definition whose scope is `issue` has no step whose `inputs` names `run.diff`. V51a: a definition whose scope is `run` declares no `[match]` table, no step `when`, and no step input of an `issue.*` form. V51b (phase 1 and 2 only): a definition whose scope is `run` has no `loop = true` step, no `threshold`, `on_fail`, or `on_fail_routes` value equal to `fix-loop` or `fix-round`, and no step declaring `on_exhausted` or `serves`. |
 | D5 | Activation with no integration point | Activation is refused (`VALIDATION_ERROR`, inside the fat transaction, nothing written) when a run-scoped definition binds, some step of it declares `run.diff` or holds the tree, and the run's `exec_root` or `commit_sha` is empty. The refusal message is the fixed template in §3.5, with the run, the definition as `name@version`, and the empty field(s) substituted. The checkout remedy is to start a new run from inside the checkout; the refused run stays in `planning`, is replaced rather than repaired, and `docket run abandon <run> --reason <reason>` ends it. The deprecate remedy is to retire every non-retired version of the definition's name, listed by `docket workflow list --name <name>`, with `docket workflow deprecate <name>@<version>` per version; retiring only the top version lets binding fall back to the next. |
 
 ## 3. Design
@@ -56,7 +56,7 @@ and `lintDomainScopeMismatch` (activate.go:1588) both take their candidate set
 from it, so a registered run-scoped definition is never a candidate for any
 issue's exactly-one match and never a workflow the domain lint names. The filter
 is what makes a run-scoped definition registerable at all: it has no `[match]`
-(V48a), and `(*Match).Matches` returns true for a nil match (match.go:53-56), so
+(V51a), and `(*Match).Matches` returns true for a nil match (match.go:53-56), so
 without the filter every registered run-scoped definition would match every
 issue and the exactly-one count would refuse every activation in the project.
 It therefore lands in phase 1 with the grammar (§6), before any run-scoped
@@ -73,7 +73,7 @@ empty `Subject`, at ordinal 0, in the same fat transaction that expands the
 phase-one issues, and the rows are written with `issue_id` NULL. `Expand` stays
 "a pure function of (issue kind, labels, pipeline definitions @ pinned version)"
 (internal/workflow/expand.go:53-56 quoting engine-core §2); a run-scoped
-definition has no `when` (V48a), so the empty subject never reaches `WhenHolds`
+definition has no `when` (V51a), so the empty subject never reaches `WhenHolds`
 (internal/workflow/match.go:168). Eager expansion over lazy: the rows exist from
 activation, `reconcileRun`'s `unfinished` count (reconcile.go:591-600) keeps the
 run open for them with no new rollup rule, and `run show` lists the phase before
@@ -381,7 +381,7 @@ definition whose subject is the run. The wording still needs the amendment in
 for an issue-scoped definition, the run's for a run-scoped one". This note
 proposes that amendment; it does not assume it.
 
-Phasing. The cluster is phase 3 (§6). Until it lands, V48b refuses `fix-loop` and
+Phasing. The cluster is phase 3 (§6). Until it lands, V51b refuses `fix-loop` and
 `loop = true` on a run-scoped definition at register time, so a phase-1 or
 phase-2 run-scoped review can route `pass`, `waiting-human`, or interpose a named
 step, and a rejection parks `waiting-human` with the findings beside it. The
@@ -425,7 +425,7 @@ step.IssueID, …)`, and comments through `commentEngineEvent(tx, step.IssueID,
 | `retry` | Refused on this park | Cause | Retry resets the attempt budget and re-runs the step (human.go:783-791); an action step re-run over the same terminal inputs matches the same arm and parks here again. The engine already refuses retry for the two other sticky causes it can read, a rejected hold (human.go:604-621; `parkedByRejectedHold`, internal/engine/held.go:606) and a decided vote (human.go:583-602; `ReadStepVoteOutcome`), and each refusal inspects the cause, not the row's scope. `retry` stays supported on a T3 park (its remedy is to register the order and re-run), on an executor step's matched arm (a re-execution records a new payload), and on every other park of a run-scoped step: a gate failure, the §9 size park. |
 | `rerun-gates` | Refused on this park | Cause | It re-runs the gates and re-evaluates the same threshold over the same recorded payload, the same inert outcome as `retry`, so the same test refuses it with the same message. That refusal runs before the existing no-gates refusal (human.go:682-690), whose message points at `retry`; on the §5 step, which declares no gates, the operator therefore reads the two values that move the step rather than a pointer to a value the next command refuses. |
 | `abandon-issue` | Refused | Subject | On a NULL row each of `abandonIssue`'s writes is a no-op or a write against a nonexistent issue, because there is no issue for this run to stop working on. It stays supported, as today, on an issue-scoped row parked the same way. |
-| `fix-round` | Refused until phase 3 | Neither | V48b forbids the loop body it would enter, and `GrantLoopTx` keys the grant on `step.IssueID` (human.go:803). Phase 3 makes it the remedy §6 names. |
+| `fix-round` | Refused until phase 3 | Neither | V51b forbids the loop body it would enter, and `GrantLoopTx` keys the grant on `step.IssueID` (human.go:803). Phase 3 makes it the remedy §6 names. |
 
 How the refusal reads the cause. `resolveStep` re-runs the routing stage's own
 evaluation, `EvaluateThresholdOverDiff` over `stepPayloads` and `stepOrder`
@@ -539,7 +539,7 @@ The second names the two values supported on every run-scoped park; whether
 `retry` applies is the first refusal's question, asked when the operator asks it.
 The two existing sticky refusals end "or --as abandon-issue to drop the issue
 from this run" (human.go:598-601, 618-621); on a NULL row phase 2 drops that
-clause, since a run-scoped definition may declare a vote or a hold (V48b forbids
+clause, since a run-scoped definition may declare a vote or a hold (V51b forbids
 neither) and the message would otherwise name a value the next command refuses.
 
 Rendered for the §5 definition after `step resolve reconcile@0 --as retry`:
@@ -560,42 +560,42 @@ Alternatives weighed, for the park's resolution first and the loop after it.
 | Re-enter each named issue's loop under that issue's own counter and its bound workflow's `max_fix_loops` | Three defects. The issue is `done` (`completeIssue`, reconcile.go:457-475) and nothing in the engine moves a done issue back; `reflectIssueStatus` (reconcile.go:268) only advances `in_progress` to `review`. Core would have to learn which issues a rejection names, either by reading payload content, which genericity.md forbids, or by re-opening every issue whose scope the diff touches, which re-runs N per-issue review chains over N per-issue diffs for a defect that lives in their intersection. And the run-scoped review itself must run again after the fixes, which is a run-scoped re-instantiation in any case, so this candidate needs the run-level construct and the issue-level reopen both. The question "whose bound governs a rejection spanning several issues" has no answer under it that is not invented: the smallest bound, the largest, or the first-declared are all arbitrary. |
 | No loop: a run-scoped rejection routes `waiting-human` only, and follow-up issues carry the fixes | This is phase 1 and 2's behavior, kept deliberately until the cluster lands. As the permanent answer it leaves the integrated tree's known defects to an operator on every run, which is the hand process the request asks to replace. |
 
-### 3.4 D4: V48 and its sub-rules
+### 3.4 D4: V51 and its sub-rules
 
-The rule table (internal/workflow/validate.go:27-38, `RuleIDs`) ends at V47 and
+The rule table (internal/workflow/validate.go:26-39, `RuleIDs`) ends at V50 and
 `TestValidationTableIsComplete` asserts set equality over it, so each new rule
 below is added to the table and to internal/workflow/validate_test.go together.
 V12 is deliberately absent and is not reused.
 
-V48, on `[pipeline] scope` and issue-side inputs. The definition-level condition:
+V51, on `[pipeline] scope` and issue-side inputs. The definition-level condition:
 `pipeline.scope` is unset, `"issue"`, or `"run"`; and when the effective scope is
 `issue`, no `[[step]]` has an `inputs` entry equal to `run.diff`. Refused with
-`Rule: "V48"`, `Field: "pipeline.scope"` for the value, or `Step`, `Field:
+`Rule: "V51"`, `Field: "pipeline.scope"` for the value, or `Step`, `Field:
 "inputs"` for the input, with the message naming the form and the scope it
 requires. This is V11's own reasoning (validate.go:1183-1200, the engine-form
 vocabulary) carried to a form that resolves only against a run: on an issue-bound
 step it would resolve to nothing on every run.
 
-V48a, on a run-scoped definition's issue-only fields. The condition, when the
+V51a, on a run-scoped definition's issue-only fields. The condition, when the
 effective scope is `run`: the definition has no `[match]` table; no step declares
 `when`; and no step has an `inputs` entry equal to `issue.body`, `issue.diff`,
 `issue.files`, or beginning `issue.latest.` or `issue.linked.`. Refused with
-`Rule: "V48a"` and the offending field. Each named field reads an issue that a
+`Rule: "V51a"` and the offending field. Each named field reads an issue that a
 run-scoped step does not have: `Matches` takes an issue subject (match.go:53),
 `WhenHolds` reads kind and labels (match.go:168), and each `issue.*` form resolves
 through `step.IssueID` (context.go:1594, 1202; `contextIssue` at 652).
 
-V48b, the phase gate. The condition, when the effective scope is `run`: no step
+V51b, the phase gate. The condition, when the effective scope is `run`: no step
 has `loop = true`; no `threshold`, `on_fail`, or `on_fail_routes` value is
 `fix-loop` or `fix-round`; and no step declares `on_exhausted` or `serves`.
-Refused with `Rule: "V48b"`. It is removed in phase 3 and its number is not
+Refused with `Rule: "V51b"`. It is removed in phase 3 and its number is not
 reused, the V12 convention.
 
 Two existing rules change shape, not number: V11's engine-form list admits
 `run.diff` (validate.go:1092, 1188, 1198), and L4's skip list does too
 (internal/workflow/lint.go:236), since `run.diff` names no producer step.
 
-Alternatives weighed. One combined V48 with three clauses was the other shape; the
+Alternatives weighed. One combined V51 with three clauses was the other shape; the
 sub-letter split follows V40/V40a/V40b/V40c and V21a-d so a test can falsify one
 clause and the refusal can name it. A lint-stage L5 was rejected because every
 condition is a predicate over the parsed fields alone and needs no graph.
@@ -797,9 +797,9 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 
 ### Lint
 
-- internal/workflow/validate.go: `RuleIDs` gains V48, V48a, V48b; `validatePipeline`
+- internal/workflow/validate.go: `RuleIDs` gains V51, V51a, V51b; `validatePipeline`
   checks the scope value; `validateInputs` admits `run.diff` under scope `run` and
-  refuses it under scope `issue`; a new `validateRunScope` applies V48a and V48b.
+  refuses it under scope `issue`; a new `validateRunScope` applies V51a and V51b.
 - internal/workflow/validate_test.go: one test per rule id, as
   `TestValidationTableIsComplete` requires.
 - internal/workflow/lint.go: L4's engine-form skip list admits `run.diff`.
@@ -848,15 +848,15 @@ Each phase is one issue with its own acceptance criteria; the split follows the
 four surfaces plus storage, in dependency order.
 
 Phase 1, grammar, lint, and the issue-binding scope filter. `[pipeline] scope`;
-V48, V48a, V48b; V11 and L4 admit `run.diff`; canonical-form round trip; the
+V51, V51a, V51b; V11 and L4 admit `run.diff`; canonical-form round trip; the
 issue-binding scope filter, `bindableDefinitions` admits only definitions whose
 effective scope is `issue`, so `bindIssue` and `lintDomainScopeMismatch` never
 consider a run-scoped definition (§3.1). The filter ships in this phase, not
 phase 2, because the phase makes a run-scoped definition registerable and a
 registered one with no `[match]` would otherwise match every issue. Acceptance:
 `workflow lint` on the §5 definition reports `new`; the same definition with
-`[match]` added is refused naming V48a; an issue-scoped definition declaring
-`run.diff` is refused naming V48; every definition in `internal/workflow/testdata`
+`[match]` added is refused naming V51a; an issue-scoped definition declaring
+`run.diff` is refused naming V51; every definition in `internal/workflow/testdata`
 re-registers `unchanged`; with the §5 definition registered, an issue that bound
 exactly one workflow before it was registered binds that same workflow and its
 activation succeeds, and `lintDomainScopeMismatch` reports nothing it did not
@@ -914,7 +914,7 @@ and refuses `--as retry`; a T3 park on either scope keeps its own reason and
 accepts `--as retry`.
 
 Phase 3, run-scoped loop cluster. `runs.loop_count`; `enterLoop` by subject;
-non-convergence over `run.diff`; `dispatch close` admits `run.diff` heads; V48b
+non-convergence over `run.diff`; `dispatch close` admits `run.diff` heads; V51b
 removed. Acceptance: a `fix-loop` routing from `reconcile@0` instantiates `fix@1`
 and supersedes nothing of any issue; `run_issues.loop_count` is unchanged for
 every issue and every issue stays `done`; the second entry under `max_fix_loops
@@ -1032,7 +1032,7 @@ acceptance.
   internal/engine/repopaths.go:28), and its recorded `head` is what the next
   review reads, so an interleaved operator commit shows up in the diff rather
   than vanishing.
-- Someone backfills V12 or renumbers V48b after its removal. Mitigation: the
+- Someone backfills V12 or renumbers V51b after its removal. Mitigation: the
   `RuleIDs` comment records both as reserved, the way V12's does today.
 - A fixture-driven run parks `integration-unverified` on every claim because
   its writers record in worktrees that the harness never integrates, and the
@@ -1054,7 +1054,7 @@ To be filed through docs/design/amendments.md; this note does not edit the spec.
   diff from the run's pinned starting commit to the shared checkout's HEAD commit
   resolved at claim, over the union of its issues' scopes, excluding uncommitted
   and untracked content, recorded at the claim of a run-scoped step that
-  declares it; valid only in a run-scoped definition (V48)".
+  declares it; valid only in a run-scoped definition (V51)".
 - engine-spec.md §11.3, clause 1: "the issue's loop counter increments" becomes
   "the subject's loop counter increments: the issue's for an issue-scoped
   definition, the run's for a run-scoped one"; the closing sentence "There is no
