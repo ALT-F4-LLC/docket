@@ -545,6 +545,19 @@ func TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires(t *testing.T) {
 		t.Fatalf("err = %v (%T), want the claim to fail before transaction B", err, err)
 	}
 
+	// The precondition this test names: the failed claim left the marker
+	// behind on a lease it still holds.
+	stale, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "reading the step after the failed claim: %v", err)
+	if stale.ClaimPhase != db.ClaimPhasePreGates {
+		t.Fatalf("claim phase = %q, want %q left by the failed claim",
+			stale.ClaimPhase, db.ClaimPhasePreGates)
+	}
+	if stale.Owner != owner || stale.ExpiresMS <= nowMS {
+		t.Fatalf("lease = owner %q expires %d, want a live lease held by %q at %d",
+			stale.Owner, stale.ExpiresMS, owner, nowMS)
+	}
+
 	e.Gates = PassThroughRunner{}
 	later := nowMS + ttlMS + 1
 	fresh, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
