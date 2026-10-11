@@ -15,6 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // DKT-1079 at the CLI boundary: `run note add` records the note and reports
@@ -432,6 +433,65 @@ func TestRunNoteAddCLIRefusesAnAuthorityItCannotRecord(t *testing.T) {
 			}
 		})
 	}
+}
+
+// runNoteAddThroughRoot drives `docket run note add <args>` through the real
+// root command, so the registered --authority default, the Args rule and the
+// RunE closure are what is exercised rather than a hand-built flag set. Cobra
+// keeps flag values across Execute calls, so every flag goes back to its
+// default afterwards.
+func runNoteAddThroughRoot(t *testing.T, args ...string) error {
+	t.Helper()
+	rootCmd.SetArgs(append([]string{"run", "note", "add"}, args...))
+	defer func() {
+		rootCmd.SetArgs(nil)
+		reset := func(f *pflag.Flag) {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+		runNoteAddCmd.Flags().Visit(reset)
+		rootCmd.PersistentFlags().Visit(reset)
+	}()
+	return rootCmd.Execute()
+}
+
+// TestRunNoteAddThroughTheRootCommandRequiresAnAuthority pins the shipped
+// registration: an omitted --authority is refused as VALIDATION_ERROR and
+// writes nothing, so a registered default can never stand in for the answer,
+// while --authority conductor records one conductor note. The run is bound
+// and the capability supplied, so a refusal is the authority's.
+func TestRunNoteAddThroughTheRootCommandRequiresAnAuthority(t *testing.T) {
+	conn := newVoteCreateStore(t)
+	runID, _ := seedRun(t, conn)
+	runRef := model.FormatRunID(runID)
+	t.Setenv(TokenEnvVar, seatConductor(t, conn, runID))
+
+	t.Run("no --authority", func(t *testing.T) {
+		err := runNoteAddThroughRoot(t, runRef, "--text", "T")
+		assertCmdCode(t, err, output.ErrValidation, "run note add with no --authority")
+		if notes, events := runNoteWrites(t, conn, runID); notes != 0 || events != 0 {
+			t.Errorf("the refusal wrote: notes = %d, events = %d", notes, events)
+		}
+	})
+
+	t.Run("--authority conductor", func(t *testing.T) {
+		err := runNoteAddThroughRoot(t, runRef, "--authority", "conductor", "--text", "T")
+		testsupport.Must(t, err, "run note add --authority conductor: %v", err)
+		if notes, events := runNoteWrites(t, conn, runID); notes != 1 || events != 1 {
+			t.Fatalf("notes = %d, events = %d; want 1 and 1", notes, events)
+		}
+		var noteID int
+		var authority sql.NullString
+		err = conn.QueryRow(`SELECT id, authority FROM run_notes WHERE run_id = ?`, runID).
+			Scan(&noteID, &authority)
+		testsupport.Must(t, err, "reading the note: %v", err)
+		if authority.String != engine.AuthorityConductor {
+			t.Errorf("note authority = %q, want %q", authority.String, engine.AuthorityConductor)
+		}
+		if got := runNoteEventAuthority(t, conn, noteID); got != engine.AuthorityConductor {
+			t.Errorf("event authority = %v, want %q", got, engine.AuthorityConductor)
+		}
+	})
 }
 
 // TestRunNoteAddCLIRefusesTheAuthorityBeforeReadingStdin: under --file - an
