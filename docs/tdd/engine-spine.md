@@ -1492,13 +1492,23 @@ token whose claim response never reached its holder. A claim with any other owne
 returns `CONFLICT` (exit 4), as at S2. While the claim's pre-gate results are
 still unrecorded, a same-owner claim also returns `CONFLICT`.
 
-The owner match is the only check. `--owner` is caller-supplied text, `step show`
-prints it, and dispatcher conventions such as `wave:STEP-N:attempt` make it
-predictable, so it is not a secret. Any caller that presents the owner string
-receives a working token and voids the holder's. A dispatcher must therefore
-give each concurrent claimant a distinct owner. Claimants that share one become
-a single holder: they get re-minted tokens instead of R6's `CONFLICT`, and only
-the last token issued can record.
+`--owner` is caller-supplied text, `step show` prints it, and dispatcher
+conventions such as `wave:STEP-N:attempt` make it predictable, so it is not a
+secret. Since DKT-3497, a lease whose first claim stored a recovery-secret hash
+re-mints only for a caller presenting the matching secret; any other same-owner
+claim gets `CONFLICT`. A lease with no stored hash still re-mints on the owner
+match alone, so any caller that presents the owner string receives a working
+token and voids the holder's. A dispatcher must therefore give each concurrent
+claimant a distinct owner. Claimants that share one on such a lease become a
+single holder: they get re-minted tokens instead of R6's `CONFLICT`, and only the
+last token issued can record.
+
+**The same-owner re-mint qualifies engine-spec §9 item 3.** "Duplicates lose at
+claim (CONFLICT)" holds only between distinct owners. For a lease with no stored
+recovery hash, the owner-string re-mint is an open, unaccepted weakness against
+that bar, not an accepted design. DKT-3497 landed the secret check for hashed
+leases; DKT-3724, the pending holdership check, is the tracked remedy for the
+remainder.
 
 **R8 is new relative to S2** and it matters: `claim` must enforce readiness itself,
 not trust that the caller ran `next`. A dispatcher racing a scope conflict would

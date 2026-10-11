@@ -261,7 +261,10 @@ Mapped to this stage's verbs. Every row is proven by a test (§7):
 `--owner` equals the live lease's recorded owner instead succeeds with a
 re-minted token that replaces the prior one. That path trusts `--owner`, a
 caller-supplied and publicly shown string, as the holder identity; see
-engine-spine.md §6.9.
+engine-spine.md §6.9. This re-mint qualifies §9 item 3 per distinct owner and is
+an open, unaccepted weakness, not an accepted design. DKT-3497 landed the
+recovery-secret check for leases whose first claim stored a hash; DKT-3724 is the
+tracked remedy for leases with none.
 
 **R2 and R3 are both AUTH_ERROR, deliberately.** "This issue is unclaimed" and
 "your token is wrong" are the same answer to the caller — you do not hold this
