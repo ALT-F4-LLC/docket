@@ -1465,7 +1465,8 @@ func loopProducerRedirect(
 // body of `kind` whose `after_loop` chain contains the consumer — with
 // condition 4 (did that body record at this ordinal) left to the caller,
 // because the column it checks differs per input form: an artifact of the
-// kind for `<step>.<kind>`, a recorded instance for `<step>.gate-results`.
+// kind for `<step>.<kind>`, a recorded or `skipped` instance for
+// `<step>.gate-results`.
 //
 // `kind` is the artifact kind the match is over; `"*"` admits any body.
 // `boundOrdinal` is the ordinal the ordinary rule bound the named producer
@@ -1797,10 +1798,11 @@ func resolveIssueDiff(
 // ran. The body that stands in for the named producer is
 // the one loopRedirectBody picks for the producer's EMITTED kind — `fix`
 // stands in for `implement`'s gates for the same reason it stands in for its
-// change-summary — and its recorded instances at this ordinal replace the
-// stale binding. A body that recorded no gates at this ordinal is still the
-// answer: the empty array says "this round ran no checks", which is truer
-// than the previous round's results.
+// change-summary — and its recorded or `skipped` instances at this ordinal
+// replace the stale binding. A body that recorded no gates at this ordinal,
+// or whose instance was skipped at it, is still the answer: the empty array
+// says "this round ran no checks", which is truer than the previous round's
+// results.
 func resolveGateResults(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, stepName string,
 ) ([]ContextInput, error) {
@@ -1871,11 +1873,25 @@ func resolveGateResults(
 }
 
 // loopRedirectGateProducers is loopProducerRedirect's condition 4 for the
-// gate-results column: the recorded instances of the standing-in loop body at
-// exactly this step's ordinal, for this issue. Which body stands in is
-// loopRedirectBody's answer, asked over the NAMED producer's emitted kind — a
-// producer that emits nothing has no body standing in for it and keeps the
-// ordinary binding. nil means no redirect applies.
+// gate-results column: the ledger instances of the standing-in loop body at
+// exactly this step's ordinal, for this issue — recorded or `skipped`
+// (ledgerProducer). Which body stands in is loopRedirectBody's answer, asked
+// over the NAMED producer's emitted kind — a producer that emits nothing has
+// no body standing in for it and keeps the ordinary binding.
+//
+// A `skipped` body instance at this ordinal redirects exactly as a recorded
+// one does, and resolveGateResults reads no ledger for it: the consumer's
+// input is that instance with the empty array, saying no checks ran this
+// round against the tree it reads. Admitting recorded instances alone made a
+// skipped `fix@N` return nil here, and a consumer downstream of `after_loop`
+// fell back to the named producer's stale rows — `implement@0`'s round-0
+// checks beside `fix@N`'s tree — the fallback the ledger forms refuse for a
+// skipped producer (recordedProducer).
+//
+// nil means no redirect applies: the body has no recorded or `skipped`
+// instance at this ordinal — none exists, or what exists is in flight or
+// `failed-routed` — and the caller keeps the ordinary binding, as the
+// artifact form does when the body recorded no artifact.
 func loopRedirectGateProducers(
 	sched *Scheduler, step *db.Step, stepName string, boundOrdinal int,
 ) []*db.Step {
@@ -1900,7 +1916,7 @@ func loopRedirectGateProducers(
 		if s.IssueID != step.IssueID || s.StepName != body.Name {
 			continue
 		}
-		if s.Ordinal != step.Ordinal || !recordedProducer(s.Status) {
+		if s.Ordinal != step.Ordinal || !ledgerProducer(s.Status) {
 			continue
 		}
 		out = append(out, s)

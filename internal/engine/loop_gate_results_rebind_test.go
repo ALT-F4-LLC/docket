@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -20,7 +21,8 @@ import (
 // the tests `implement@0` had run.
 //
 // These tests pin the fix and its boundary. The consumer downstream of
-// `after_loop` reads the body's recorded gates at its ordinal; the loop body's
+// `after_loop` reads the body's recorded gates at its ordinal, and the empty
+// array when the body's instance at that ordinal is `skipped`; the loop body's
 // own `implement.gate-results` still binds `implement@0`, exactly as its
 // `implement.change-summary` does.
 
@@ -259,6 +261,54 @@ func TestReviewRoundTwoReadsTheLatestFixRoundGates(t *testing.T) {
 	if _, ok := gates["fix@2"]; len(gates) != 1 || !ok {
 		t.Fatalf("review@2#0's gate-results are from %v, want fix@2 alone",
 			keysOf(gates))
+	}
+}
+
+// TestReviewRoundOneReadsAnEmptyArrayWhenTheFixRoundIsSkipped pins the
+// skipped stand-in: with `fix@1` `skipped` at the review fanout's ordinal, its
+// `implement.gate-results` still redirects to `fix@1` and resolves to the
+// empty array — never back to `implement@0`'s round-0 rows, and never to the
+// rows `fix@1` recorded before the operator moved past it. It is the rule a
+// direct `<step>.gate-results` input already applies to a skipped producer
+// (TestSkippedLatestProducerResolvesEmptyGateResults): no checks ran this
+// round against the tree the judges read, and saying so is truer than
+// presenting the previous round's results as this one's.
+func TestReviewRoundOneReadsAnEmptyArrayWhenTheFixRoundIsSkipped(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	activateGateRebindLoop(t, conn)
+	driveGateRebindRoundZero(t, conn, e)
+	driveFixtureRound(t, 1)
+	// fix@1 records a passing `fix-checks` row, then goes `skipped` — the
+	// state `resolve --as skip` leaves a parked instance that had recorded.
+	claimAndComplete(t, conn, e, "fix@1", fixSummary, "")
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'fix@1'`, db.StepSkipped)
+
+	for i := range 2 {
+		instance := fmt.Sprintf("review@1#%d", i)
+		bundle, err := ReadContext(conn, stepIDByInstance(t, conn, instance), nowMS)
+		testsupport.Must(t, err, "assembling %s's bundle: %v", instance, err)
+
+		var gates []ContextInput
+		for _, in := range bundle.Inputs {
+			if in.Kind == inputGateResults {
+				gates = append(gates, in)
+			}
+		}
+		if len(gates) != 1 {
+			t.Fatalf("%s binds %d gate-results inputs, want 1: %+v",
+				instance, len(gates), gates)
+		}
+		if gates[0].ProducerStep != "fix@1" {
+			t.Fatalf("%s's gate-results input is from %s with body %s, want fix@1: "+
+				"a skipped stand-in body pins the round and never falls back to "+
+				"implement@0", instance, gates[0].ProducerStep, gates[0].Body)
+		}
+		if gates[0].Body != "[]" {
+			t.Errorf("%s's gate results = %s, want the empty array `[]`: the "+
+				"skipped instance's recorded rows are not its input",
+				instance, gates[0].Body)
+		}
 	}
 }
 
