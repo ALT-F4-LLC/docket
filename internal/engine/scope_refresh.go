@@ -206,27 +206,28 @@ func RefreshIssueScopeInRun(
 	}
 
 	// D2: quiescence, per issue for the steps and per run for the dispatch.
-	steps, straddled, err := refreshableSteps(tx, runID, issueID, run.Ref())
-	if err != nil {
-		return nil, err
-	}
-	if len(straddled) > 0 {
+	steps, err := refreshableSteps(tx, runID, issueID, run.Ref())
+	var straddle *refreshStraddleError
+	var terminal *refreshAllTerminalError
+	switch {
+	case errors.As(err, &straddle):
 		return nil, conflictErr(
 			"%d step(s) of %s in %s are mid-flight (%s); a refresh under one "+
 				"would change what an executor's packet means mid-execution, "+
 				"or run a gate over paths the artifact it gates never covered "+
 				"— wait for them to record (or for their leases to be reaped), "+
 				"then retry",
-			len(straddled), model.FormatID(issueID), run.Ref(),
-			strings.Join(straddled, ", "))
-	}
-	if len(steps) == 0 {
+			len(straddle.Straddled), model.FormatID(issueID), run.Ref(),
+			strings.Join(straddle.Straddled, ", "))
+	case errors.As(err, &terminal):
 		return nil, conflictErr(
 			"every step of %s in %s is terminal; their diffs are already "+
 				"recorded over the scope they ran under and no packet will "+
 				"render again, so a refresh could only rewrite that record. "+
 				"The widened scope reaches the issue's NEXT run",
 			model.FormatID(issueID), run.Ref())
+	case err != nil:
+		return nil, err
 	}
 	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
 		return nil, conflictErr(
@@ -271,13 +272,36 @@ func RefreshIssueScopeInRun(
 	}, nil
 }
 
+// refreshStraddleError is the refusal for a refresh under a mid-flight step.
+// Straddled names each blocking step as "instance (status)", in id order.
+type refreshStraddleError struct {
+	Issue, Run string
+	Straddled  []string
+}
+
+func (e *refreshStraddleError) Error() string {
+	return fmt.Sprintf("%d step(s) of %s in %s are mid-flight (%s); wait for "+
+		"them to record (or for their leases to be reaped), then retry",
+		len(e.Straddled), e.Issue, e.Run, strings.Join(e.Straddled, ", "))
+}
+
+// refreshAllTerminalError is the refusal for a refresh no packet would render.
+type refreshAllTerminalError struct{ Issue, Run string }
+
+func (e *refreshAllTerminalError) Error() string {
+	return fmt.Sprintf("every step of %s in %s is terminal; no packet will "+
+		"render again, so a refresh could only rewrite recorded history",
+		e.Issue, e.Run)
+}
+
 // refreshableSteps returns the non-terminal instances of one issue in one run,
-// in id order, and separately the ones that would straddle the change, each
-// as "instance (status)". It refuses nothing itself: the caller words both
-// refusals, because what an operator must be told is what actually moved.
+// in id order, and refuses with a CONFLICT when any of them would straddle the
+// change (wrapping *refreshStraddleError) or when none remain (wrapping
+// *refreshAllTerminalError). A caller rewords either through errors.As, so an
+// operator is told what actually moved; one that does not still refuses.
 func refreshableSteps(
 	tx *sql.Tx, runID, issueID int, runRef string,
-) (instances, straddled []string, err error) {
+) ([]string, error) {
 	rows, err := tx.Query(
 		`SELECT instance, status FROM steps
 		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
@@ -285,7 +309,7 @@ func refreshableSteps(
 		runID, issueID,
 		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted)
 	if err != nil {
-		return nil, nil, fmt.Errorf("collecting %s's remaining steps: %w", runRef, err)
+		return nil, fmt.Errorf("collecting %s's remaining steps: %w", runRef, err)
 	}
 	type liveStep struct{ instance, status string }
 	remaining, err := scanTxRows(rows, func(r *sql.Rows) (liveStep, error) {
@@ -293,13 +317,14 @@ func refreshableSteps(
 		return s, r.Scan(&s.instance, &s.status)
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	blocking := make(map[string]bool, len(refreshBlockingStepStatuses))
 	for _, s := range refreshBlockingStepStatuses {
 		blocking[s] = true
 	}
+	var instances, straddled []string
 	for _, s := range remaining {
 		if blocking[s.status] {
 			straddled = append(straddled, fmt.Sprintf("%s (%s)", s.instance, s.status))
@@ -307,7 +332,19 @@ func refreshableSteps(
 		}
 		instances = append(instances, s.instance)
 	}
-	return instances, straddled, nil
+	issue := model.FormatID(issueID)
+	if len(straddled) > 0 {
+		return nil, quiescenceErr(&refreshStraddleError{
+			Issue: issue, Run: runRef, Straddled: straddled})
+	}
+	if len(instances) == 0 {
+		return nil, quiescenceErr(&refreshAllTerminalError{Issue: issue, Run: runRef})
+	}
+	return instances, nil
+}
+
+func quiescenceErr(cause error) *Error {
+	return &Error{Code: CodeConflict, Message: cause.Error(), Err: cause}
 }
 
 // runIssueTx loads one `run_issues` row, distinguishing "not in this run" from
