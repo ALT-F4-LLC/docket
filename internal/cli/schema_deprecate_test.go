@@ -174,7 +174,7 @@ func TestWorkflowLintAndRegisterRefuseARetiredSchema(t *testing.T) {
 	testsupport.Must(t, registerSchema(t, conn, "findings@1", findingsSchema), "register schema")
 	testsupport.Must(t, deprecateSchema(t, conn, "findings@1", false), "deprecate")
 
-	err, _ := lintSource(t, conn, readsFindings)
+	_, err := lintSource(t, conn, readsFindings)
 	if err == nil || codeOf(t, err) != output.ErrValidation {
 		t.Fatalf("lint of a definition naming a retired schema = %v, want VALIDATION_ERROR", err)
 	}
