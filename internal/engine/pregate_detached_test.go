@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -741,14 +742,43 @@ func TestDetachedPreGateInFlightHoldsTheStepUntilItsResultLands(t *testing.T) {
 // TestNoDetachedLockLeavesReadinessAndTheClaimUnchanged is the hold's other
 // half: a step whose pre-gates resolve a target but whose detached run never
 // launched — no lockfile exists — is ready exactly as before, and its claim
-// runs the gate on PG5's path and records the budget cut, the row
-// TestClaimReturnsWithinThePreGateBudget expects of a claim with no detached
-// result to serve.
+// runs the gate on PG5's path and records the budget's one row, keyed to no
+// target, as a claim with no detached result to serve does.
+//
+// The budget starts before the tree under review is bound, so which row it
+// leaves depends on when it runs out. Spent while the gate runs, it cuts the
+// gate off: `fail`. Spent before the gate starts, as a slow reconstruction on
+// a loaded host can do to 500ms, nothing spawns: `skipped`. The first case
+// accepts either. The second shrinks the budget to a nanosecond, which the
+// claim's own transactions spend before any gate is reached, so it pins
+// `skipped` every time.
 //
 // The mutant that holds whenever a pre-gate is declared, regardless of the
-// lock, reports the step blocked here.
+// lock, reports the step blocked in both cases. The mutant that accepts only
+// `fail` goes red on the second.
 func TestNoDetachedLockLeavesReadinessAndTheClaimUnchanged(t *testing.T) {
-	shrinkClaimBudget(t, 500*time.Millisecond)
+	cases := []struct {
+		name   string
+		budget time.Duration
+		accept []string
+	}{
+		{"budget ends during or before the gate", 500 * time.Millisecond,
+			[]string{VerdictFail, VerdictSkipped}},
+		{"budget spent before the gate starts", time.Nanosecond,
+			[]string{VerdictSkipped}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			noDetachedLockClaim(t, tc.budget, tc.accept)
+		})
+	}
+}
+
+// noDetachedLockClaim is one case of
+// TestNoDetachedLockLeavesReadinessAndTheClaimUnchanged: the claim runs under
+// budget and its one row must carry a verdict in accept and name the budget.
+func noDetachedLockClaim(t *testing.T, budget time.Duration, accept []string) {
+	shrinkClaimBudget(t, budget)
 	withDetachedPreGateLockDir(t)
 	installDetachedLauncher(t, func(int, string) error { return nil })
 
@@ -793,8 +823,11 @@ func TestNoDetachedLockLeavesReadinessAndTheClaimUnchanged(t *testing.T) {
 		t.Fatalf("pre-gate results = %+v, want one", claim.Context.PreGates)
 	}
 	row := claim.Context.PreGates[0]
-	if row.Verdict != VerdictFail || !strings.Contains(row.Reason, "pre-gate budget") {
-		t.Errorf("row = %+v, want the budgeted path's cut-off fail naming the budget", row)
+	if !slices.Contains(accept, row.Verdict) || !strings.Contains(row.Reason, "pre-gate budget") {
+		t.Errorf("row = %+v, want a verdict in %q naming the claim's pre-gate budget", row, accept)
+	}
+	if row.Verdict == VerdictSkipped && row.Exit != nil {
+		t.Errorf("the skipped row carries exit %d, so something ran", *row.Exit)
 	}
 	if rows := preGateRows(t, conn, stepID, "ac-commands"); len(rows) != 1 || rows[0].TargetSHA != "" {
 		t.Errorf("recorded rows = %+v, want the claim's own single row, keyed to no target", rows)
