@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -465,11 +466,16 @@ func (r *ExecRunner) spawnMatchedRows(
 		defer lock.release()
 	}
 
+	// The gate-script check joins the pin recheck so it runs before every
+	// attempt, after any lock wait, against the tree the attempt will open.
+	var scriptNotes []string
 	recheckPin := func() error {
 		if again := relookup(); !again.Matched {
 			return errors.New(again.Reason)
 		}
-		return nil
+		notes, err := checkGateScriptCopies(match.Argv, dir, sc)
+		scriptNotes = notes
+		return err
 	}
 	attempts, err := exec.RunVerifiedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin)
 	if err != nil {
@@ -481,14 +487,23 @@ func (r *ExecRunner) spawnMatchedRows(
 		if a.Refused != nil {
 			// The pin no longer holds: nothing spawned for this ordinal, so
 			// the row carries no argv and no exit, like a Resolve refusal.
-			out.Results = append(out.Results, GateResultRow{
+			row := GateResultRow{
 				Gate: g.Name, Ordinal: firstOrdinal + i, Verdict: VerdictUnmatched,
 				Reason:     a.Refused.Error(),
 				TrustEntry: entry.Name,
 				StubEntry:  entry.Stub,
 				ArgvSHA256: trust.ArgvSHA256(match.Argv),
 				Prefix:     entry.Prefix,
-			})
+			}
+			// The entry still matches, but the tree holds a script the run
+			// did not pin. Nothing ran, so the row is `skipped` (DKT-169's
+			// shape), not `unmatched`: the trust decision did not change.
+			var refused *gateScriptCopyRefused
+			if errors.As(a.Refused, &refused) {
+				row.Verdict = VerdictSkipped
+				row.Argv = match.Argv
+			}
+			out.Results = append(out.Results, row)
 			out.Verdict = VerdictFail
 			continue
 		}
@@ -530,8 +545,147 @@ func (r *ExecRunner) spawnMatchedRows(
 		// on attempt 2 passes; one that fails all three fails.
 		out.Verdict = verdict
 	}
+	for _, note := range scriptNotes {
+		for i := range out.Results {
+			out.Results[i].Reason = withScratchNote(out.Results[i].Reason, note)
+		}
+	}
 
 	return out, nil
+}
+
+// gateScriptCopyRefused is checkGateScriptCopies' refusal: the copy of a
+// pinned gate script under the gate's cwd is not the pinned bytes, and the
+// issue's scope does not cover it.
+type gateScriptCopyRefused struct{ reason string }
+
+func (e *gateScriptCopyRefused) Error() string { return e.reason }
+
+// checkGateScriptCopies compares the copy under dir of each relatively named
+// script operand of argv with the run's pin for the same path under
+// sc.PinRoot. Bash opens such an operand against its cwd, so the copy under
+// dir is the one that would run, and the executor of a step can write it.
+//
+// It refuses the first copy that differs, is absent, or cannot be checked,
+// unless sc.Scope covers its path: an issue whose scope edits a gate script
+// has to be able to run its own edit. It returns a note for each such exempt
+// copy and for each operand the run holds no pin for (a run activated before
+// gate scripts were pinned), which runs as before.
+func checkGateScriptCopies(argv []string, dir string, sc StepContext) ([]string, error) {
+	tokens := gateScriptTokens(argv)
+	if len(tokens) < 2 {
+		return nil, nil
+	}
+	var notes []string
+	// tokens[0] is the program. A relatively named one never reaches here:
+	// exec.Resolve refuses it before the spawn is prepared.
+	for _, tok := range tokens[1:] {
+		if filepath.IsAbs(tok) {
+			continue
+		}
+		pin, ok := runPinFor(tok, sc)
+		if !ok {
+			notes = append(notes, fmt.Sprintf(
+				"the run holds no pin for the gate script %q, so the copy under %q ran unchecked", tok, dir))
+			continue
+		}
+		cmp, detail := compareCopy(filepath.Join(dir, tok), pin.want)
+		if cmp == copyMatches {
+			continue
+		}
+		if scopeCovers(sc.Scope, tok) {
+			notes = append(notes, fmt.Sprintf(
+				"the copy of %q under %q differs from the run's pin and was not checked "+
+					"because the issue's scope edits it", tok, dir))
+			continue
+		}
+		where := fmt.Sprintf("%q, the copy this gate would execute from %q,", tok, dir)
+		return notes, &gateScriptCopyRefused{reason: copyReason(cmp, detail, where, pin) +
+			"; not running it, because the issue's scope does not cover that path"}
+	}
+	return notes, nil
+}
+
+// runPinFor finds the run's pin for a relatively named gate script. Pins are
+// keyed by the path activation resolved, so the spelled path under the pin
+// root is tried first, then the same path with symlinks resolved now: a
+// script replaced by a symlink after activation still finds its pin, and one
+// reached through a directory symlink that existed at activation does too.
+func runPinFor(tok string, sc StepContext) (pinnedRelativeScript, bool) {
+	if sc.PinRoot == "" {
+		return pinnedRelativeScript{}, false
+	}
+	spelled := filepath.Join(resolvedPath(sc.PinRoot), tok)
+	candidates := []string{spelled}
+	if resolved, err := filepath.EvalSymlinks(spelled); err == nil {
+		candidates = append(candidates, resolved)
+	}
+	for _, file := range candidates {
+		if want, ok := sc.FilePins[file]; ok {
+			return pinnedRelativeScript{tok: tok, pinnedFile: file, want: want}, true
+		}
+	}
+	return pinnedRelativeScript{}, false
+}
+
+// scopeCovers reports whether any scope entry, read as git reads a pathspec,
+// matches path: the diff stage hands scope to git as pathspecs, so the
+// exemption means what "in scope" means there. An entry without wildcards
+// matches itself and everything under it. One with wildcards matches as
+// fnmatch without FNM_PATHNAME, so `*` also matches `/`. An empty scope
+// covers nothing, and an entry that does not compile covers nothing.
+func scopeCovers(scope []string, path string) bool {
+	path = filepath.ToSlash(filepath.Clean(path))
+	for _, entry := range scope {
+		if !strings.ContainsAny(entry, `*?[\`) {
+			entry = strings.TrimSuffix(entry, "/")
+			if entry != "" && (path == entry || strings.HasPrefix(path, entry+"/")) {
+				return true
+			}
+			continue
+		}
+		if re, err := pathspecRegexp(entry); err == nil && re.MatchString(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathspecRegexp translates a wildcard pathspec to an anchored regexp: `*`
+// matches any run of characters, `?` any one, `[...]` (or `[!...]`) a class,
+// and a backslash escapes the next character.
+func pathspecRegexp(spec string) (*regexp.Regexp, error) {
+	var b strings.Builder
+	b.WriteString(`(?s)^`)
+	for i := 0; i < len(spec); i++ {
+		switch c := spec[i]; c {
+		case '*':
+			b.WriteString(`.*`)
+		case '?':
+			b.WriteString(`.`)
+		case '[':
+			end := strings.IndexByte(spec[i+1:], ']')
+			if end < 0 {
+				b.WriteString(`\[`)
+				continue
+			}
+			class := spec[i+1 : i+1+end]
+			if strings.HasPrefix(class, "!") {
+				class = "^" + class[1:]
+			}
+			b.WriteString("[" + class + "]")
+			i += end + 1
+		case '\\':
+			if i+1 < len(spec) {
+				i++
+			}
+			b.WriteString(regexp.QuoteMeta(spec[i : i+1]))
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	b.WriteString(`$`)
+	return regexp.Compile(b.String())
 }
 
 // sharesCheckout reports whether a gate's working directory IS the shared

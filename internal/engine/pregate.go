@@ -349,6 +349,10 @@ func measurePreGate(
 	if err != nil {
 		return nil, err
 	}
+	pinRoot, filePins, err := runGateScriptPins(conn, step.RunID)
+	if err != nil {
+		return nil, err
+	}
 	sc := StepContext{
 		Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
 		// The step's own id (DKT-1186), the same export the saga's gates
@@ -370,6 +374,9 @@ func measurePreGate(
 		// the target sha) the merge-base of that sha and the shared head.
 		// Unset for the shared checkout and for a tree with no merge-base.
 		Base: gateBaseSHA(conn, step.RunID, m.workRoot),
+		// The run's pins, checked against the reconstruction's copy of each
+		// relatively named gate script exactly as against a worktree's.
+		PinRoot: pinRoot, FilePins: filePins,
 	}
 
 	var rows []GateResultRow

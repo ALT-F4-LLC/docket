@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 
 	"github.com/ALT-F4-LLC/docket/internal/trust"
@@ -861,4 +862,270 @@ func TestFenceRowCarriesLegacyPinWarning(t *testing.T) {
 		}
 	}
 	assertNoLegacyWarning(t, ex.Results[1:])
+}
+
+// pinnedScriptGate is a run whose ExecRoot holds scripts/qa/tests.sh, the
+// `tests` entry `bash scripts/qa/tests.sh` that runs it, and a step worktree
+// holding a byte-identical copy. The script touches marker, so a test can tell
+// from the filesystem whether the copy under the gate's cwd ran.
+//
+// These tests run `bash`, departing from the no-interpreter rule above: the
+// exposure is specific to an interpreter opening a relatively named operand
+// against its cwd, and no other argv shape reaches it.
+type pinnedScriptGate struct {
+	runner             *ExecRunner
+	sc                 StepContext
+	execRoot, workRoot string
+	body, marker       string
+}
+
+const pinnedScriptRel = "scripts/qa/tests.sh"
+
+// newPinnedScriptGate activates the run. With pinned false the trust store at
+// activation holds no entry, so the run records no pin for the script, as a
+// run activated before gate scripts were pinned does.
+func newPinnedScriptGate(t *testing.T, pinned bool) *pinnedScriptGate {
+	t.Helper()
+	g := &pinnedScriptGate{
+		execRoot: resolvedTempDir(t),
+		workRoot: resolvedTempDir(t),
+		marker:   filepath.Join(t.TempDir(), "ran"),
+	}
+	g.body = fmt.Sprintf("/usr/bin/touch %q\n", g.marker)
+	writeScriptCopy(t, g.execRoot, g.body)
+	writeScriptCopy(t, g.workRoot, g.body)
+
+	argv := []string{"bash", pinnedScriptRel}
+	entry := trust.Entry{Name: "tests", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Global: true}
+	prior := gatePinStore
+	if pinned {
+		gatePinStore = sandboxTrust(t, entry)
+	} else {
+		gatePinStore = sandboxTrust(t)
+	}
+	t.Cleanup(func() { gatePinStore = prior })
+
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "gate script pin", "a body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "test run", 0, nowMS,
+		db.RunContext{ExecRoot: g.execRoot})
+	testsupport.Must(t, err, "starting run: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "adding the issue")
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	pinRoot, pins, err := runGateScriptPins(conn, run.ID)
+	testsupport.Must(t, err, "reading the run's gate script pins: %v", err)
+	g.sc = StepContext{RunID: run.ID, WorkRoot: g.workRoot, PinRoot: pinRoot, FilePins: pins}
+	g.runner = NewExecRunner(testRepoPaths(g.execRoot))
+	g.runner.LoadStore = sandboxTrust(t, entry)
+	return g
+}
+
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving a temp dir: %v", err)
+	return dir
+}
+
+func writeScriptCopy(t *testing.T, root, body string) {
+	t.Helper()
+	path := filepath.Join(root, pinnedScriptRel)
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o755), "mkdir")
+	testsupport.Must(t, os.WriteFile(path, []byte(body), 0o755), "writing %s", path)
+}
+
+func (g *pinnedScriptGate) run(t *testing.T) GateExecution {
+	t.Helper()
+	ex, err := g.runner.Execute(context.Background(), GateSpec{Name: "tests"}, g.sc)
+	testsupport.Must(t, err, "running the gate: %v", err)
+	return ex
+}
+
+func hexSHA256(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// assertRefusedCopy checks the one shape a refused copy records: nothing ran,
+// one skipped row whose reason carries every want, and a failed gate.
+func assertRefusedCopy(t *testing.T, g *pinnedScriptGate, ex GateExecution, wants ...string) {
+	t.Helper()
+	if ex.Verdict != VerdictFail {
+		t.Errorf("gate verdict = %q, want %q", ex.Verdict, VerdictFail)
+	}
+	if len(ex.Results) != 1 {
+		t.Fatalf("got %d rows, want 1: %+v", len(ex.Results), ex.Results)
+	}
+	row := ex.Results[0]
+	if row.Verdict != VerdictSkipped {
+		t.Errorf("row verdict = %q, want %q", row.Verdict, VerdictSkipped)
+	}
+	for _, want := range wants {
+		if !strings.Contains(row.Reason, want) {
+			t.Errorf("reason lacks %q: %q", want, row.Reason)
+		}
+	}
+	if sentinelExists(t, g.marker) {
+		t.Error("the gate ran a script copy that does not match the run's pin")
+	}
+}
+
+// TestGateRefusesEditedRelativeScriptUnderSpecDir: a one-byte edit to the
+// worktree's copy of a pinned script is refused at spawn when the issue's
+// scope does not cover it.
+func TestGateRefusesEditedRelativeScriptUnderSpecDir(t *testing.T) {
+	g := newPinnedScriptGate(t, true)
+	edited := g.body + "#"
+	writeScriptCopy(t, g.workRoot, edited)
+	g.sc.Scope = []string{"internal/engine/**"}
+
+	assertRefusedCopy(t, g, g.run(t), pinnedScriptRel, hexSHA256(g.body), hexSHA256(edited))
+}
+
+// TestGateRunsUnchangedRelativeScriptUnderSpecDir: a copy byte-identical to
+// the pin runs as before.
+func TestGateRunsUnchangedRelativeScriptUnderSpecDir(t *testing.T) {
+	g := newPinnedScriptGate(t, true)
+
+	ex := g.run(t)
+	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictPass || ex.Verdict != VerdictPass {
+		t.Fatalf("want one passing row and a passing gate, got %q: %+v", ex.Verdict, ex.Results)
+	}
+	if !sentinelExists(t, g.marker) {
+		t.Error("the unchanged script copy did not run")
+	}
+}
+
+// TestGateRunsInScopeEditedRelativeScriptWithNote: an issue whose scope covers
+// the script may run its own edit, and every row says the copy went unchecked.
+func TestGateRunsInScopeEditedRelativeScriptWithNote(t *testing.T) {
+	g := newPinnedScriptGate(t, true)
+	writeScriptCopy(t, g.workRoot, g.body+"#")
+	g.sc.Scope = []string{"scripts/qa/**"}
+
+	ex := g.run(t)
+	if !sentinelExists(t, g.marker) {
+		t.Fatalf("the in-scope edited copy did not run: %+v", ex.Results)
+	}
+	if len(ex.Results) == 0 {
+		t.Fatal("the gate recorded no rows")
+	}
+	for i, row := range ex.Results {
+		for _, want := range []string{
+			fmt.Sprintf("%q", pinnedScriptRel), "differs from the run's pin",
+			"was not checked because the issue's scope edits it",
+		} {
+			if !strings.Contains(row.Reason, want) {
+				t.Errorf("row %d reason lacks %q: %q", i, want, row.Reason)
+			}
+		}
+	}
+}
+
+// TestGateRefusesAbsentRelativeScriptUnderSpecDir: a worktree without the
+// pinned script is refused rather than handed to bash.
+func TestGateRefusesAbsentRelativeScriptUnderSpecDir(t *testing.T) {
+	g := newPinnedScriptGate(t, true)
+	testsupport.Must(t, os.Remove(filepath.Join(g.workRoot, pinnedScriptRel)), "removing the copy")
+
+	assertRefusedCopy(t, g, g.run(t), fmt.Sprintf("%q", pinnedScriptRel), "does not exist")
+}
+
+// TestGateRunsUnpinnedRelativeScriptWithNote: a run that holds no pin for the
+// script runs it as before, and the row names the missing pin.
+func TestGateRunsUnpinnedRelativeScriptWithNote(t *testing.T) {
+	g := newPinnedScriptGate(t, false)
+	writeScriptCopy(t, g.workRoot, g.body+"#")
+
+	ex := g.run(t)
+	if !sentinelExists(t, g.marker) {
+		t.Fatalf("a gate whose script the run never pinned was refused: %+v", ex.Results)
+	}
+	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictPass {
+		t.Fatalf("want one passing row, got %+v", ex.Results)
+	}
+	for _, want := range []string{"holds no pin", fmt.Sprintf("%q", pinnedScriptRel)} {
+		if !strings.Contains(ex.Results[0].Reason, want) {
+			t.Errorf("reason lacks %q: %q", want, ex.Results[0].Reason)
+		}
+	}
+}
+
+// TestGateRefusesEditedScriptInTheSharedCheckout: with no step worktree the
+// gate runs in the run's own checkout, and a copy edited there after
+// activation is refused too, including one replaced by a symlink that leads
+// out of the tree.
+func TestGateRefusesEditedScriptInTheSharedCheckout(t *testing.T) {
+	t.Run("edited in place", func(t *testing.T) {
+		g := newPinnedScriptGate(t, true)
+		g.sc.WorkRoot = ""
+		writeScriptCopy(t, g.execRoot, g.body+"#")
+		assertRefusedCopy(t, g, g.run(t), hexSHA256(g.body+"#"))
+	})
+	t.Run("replaced by a symlink out of the tree", func(t *testing.T) {
+		g := newPinnedScriptGate(t, true)
+		g.sc.WorkRoot = ""
+		outside := filepath.Join(resolvedTempDir(t), "tests.sh")
+		testsupport.Must(t, os.WriteFile(outside, []byte(g.body+"#"), 0o755), "writing the outside copy")
+		script := filepath.Join(g.execRoot, pinnedScriptRel)
+		testsupport.Must(t, os.Remove(script), "removing the pinned copy")
+		testsupport.Must(t, os.Symlink(outside, script), "linking the outside copy")
+		assertRefusedCopy(t, g, g.run(t), hexSHA256(g.body+"#"))
+	})
+}
+
+// TestGateRefusesAScriptCopyThatChangesBetweenFlakyAttempts: the check runs
+// before every attempt, so a script that rewrites its own copy cannot run a
+// second time.
+func TestGateRefusesAScriptCopyThatChangesBetweenFlakyAttempts(t *testing.T) {
+	g := newPinnedScriptGate(t, true)
+	g.body = fmt.Sprintf("/usr/bin/touch %q\necho '#' >> %s\nexit 1\n", g.marker, pinnedScriptRel)
+	writeScriptCopy(t, g.workRoot, g.body)
+	// The fixture pinned its default body; pin this one in its place.
+	g.sc.FilePins = map[string]string{filepath.Join(g.execRoot, pinnedScriptRel): hexSHA256(g.body)}
+	argv := []string{"bash", pinnedScriptRel}
+	g.runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "tests", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Global: true, Flaky: true,
+	})
+
+	ex := g.run(t)
+	if len(ex.Results) != 2 {
+		t.Fatalf("got %d rows, want 2 (the failing run, then the refusal): %+v", len(ex.Results), ex.Results)
+	}
+	if ex.Results[0].Verdict != VerdictFail || ex.Results[1].Verdict != VerdictSkipped ||
+		ex.Verdict != VerdictFail {
+		t.Errorf("verdicts = %q, %q, gate %q; want fail, skipped, gate fail",
+			ex.Results[0].Verdict, ex.Results[1].Verdict, ex.Verdict)
+	}
+}
+
+// TestGateScriptScopeExemptionReadsScopeAsAPathspec: the exemption follows
+// git's reading of a scope entry, the one the diff stage applies, and an
+// empty scope exempts nothing.
+func TestGateScriptScopeExemptionReadsScopeAsAPathspec(t *testing.T) {
+	for _, tc := range []struct {
+		scope  []string
+		exempt bool
+	}{
+		{nil, false},
+		{[]string{"scripts/qa/tests.sh"}, true},
+		{[]string{"scripts/qa"}, true},
+		{[]string{"scripts/*.sh"}, true},
+		{[]string{"scripts/qaX/**"}, false},
+		{[]string{"scripts/qa/*.py"}, false},
+		{[]string{"scripts/q"}, false},
+	} {
+		t.Run(fmt.Sprintf("%v", tc.scope), func(t *testing.T) {
+			g := newPinnedScriptGate(t, true)
+			writeScriptCopy(t, g.workRoot, g.body+"#")
+			g.sc.Scope = tc.scope
+			ex := g.run(t)
+			if ran := sentinelExists(t, g.marker); ran != tc.exempt {
+				t.Errorf("ran = %v, want %v: %+v", ran, tc.exempt, ex.Results)
+			}
+		})
+	}
 }

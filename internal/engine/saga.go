@@ -949,6 +949,10 @@ func (e *Engine) runGateStage(
 	if err != nil {
 		return err
 	}
+	pinRoot, filePins, err := runGateScriptPins(conn, step.RunID)
+	if err != nil {
+		return err
+	}
 	// The step's RECORDED worktree rides along (DKT-9), the same resolution
 	// the diff stage applies: a completion gate measures the tree the work
 	// happened in, not the shared checkout the saga was resumed from. So does
@@ -964,7 +968,8 @@ func (e *Engine) runGateStage(
 		// inputs, rather than re-deriving which step it is from the issue.
 		StepID: step.ID,
 		Scope:  scope, WorkRoot: step.WorkRoot,
-		Base: gateBaseSHA(conn, step.RunID, step.WorkRoot),
+		Base:    gateBaseSHA(conn, step.RunID, step.WorkRoot),
+		PinRoot: pinRoot, FilePins: filePins,
 	}
 
 	rows, err := runGate(e.Gates, spec, sc)
@@ -2703,6 +2708,25 @@ func runExecRoot(conn *sql.DB, runID int) string {
 		return run.ExecRoot
 	}
 	return resolvePaths().ExecRoot
+}
+
+// runGateScriptPins is the run's recorded exec root and its file pins, the
+// baseline the gate runner checks relatively named gate scripts against
+// (StepContext.PinRoot, StepContext.FilePins). Unlike runExecRoot it never
+// falls back to the invoking checkout: a run that recorded no exec root
+// pinned no gate script, and the invoker's tree is not its baseline. A pin
+// read that fails is an error, never an empty set, which would run every
+// script unchecked.
+func runGateScriptPins(conn *sql.DB, runID int) (string, map[string]string, error) {
+	run, err := db.GetRun(conn, runID)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading the run's exec root: %w", err)
+	}
+	pins, err := db.ListPins(conn, runID)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading the run's gate script pins: %w", err)
+	}
+	return run.ExecRoot, packetPinsForRun(pins), nil
 }
 
 // runDiffBase resolves the commit GitDiff's base should compare against for

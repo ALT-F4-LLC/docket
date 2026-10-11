@@ -112,6 +112,17 @@ type StepContext struct {
 	// off records its timeout with a reason naming the budget beside the
 	// entry's own timeout, so a reader does not conclude the entry changed.
 	Deadline time.Time
+	// PinRoot is the RUN's recorded exec root, the checkout its gate scripts
+	// were pinned under at activation, and FilePins is the run's file pins,
+	// keyed by ref (an absolute, symlink-resolved path for a gate script).
+	// The runner compares the copy of each relatively named gate script under
+	// the gate's cwd with the pin for the same path under PinRoot before every
+	// spawn. PinRoot is never the invoking checkout: under a saga resumed from
+	// another checkout that root holds no pins, and every script would run as
+	// unpinned. Both are empty when no run is in hand, and every relatively
+	// named script then runs as unpinned, with a note saying so.
+	PinRoot  string
+	FilePins map[string]string
 }
 
 // GateResult is one gate's outcome, in §11.4's `gate result` shape.
