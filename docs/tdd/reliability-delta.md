@@ -1160,6 +1160,35 @@ re-runnable, and a rewind guard that probes both COLUMNS (the v27–v36 form,
 since v37 adds no table and no index). No v5–v10 column, table, or count
 changes.
 
+### AMENDMENT — the span extends to v38 (the grant argv, 2026-10-11)
+
+**What changed.** v38 adds ONE column to one table, `gate_override_grants.argv`
+(`TEXT NOT NULL DEFAULT 'legacy'`): the command a grant was minted from. It
+holds the JSON `null` for a grant minted from an `unmatched` gate, which never
+ran a command, and a JSON array of the failing row's argument vector
+otherwise.
+
+**Why it needed a version.** A grant keyed on (gate, exit, reason, fingerprint)
+could not tell two commands apart. Two silent failures under one gate name
+share the empty-capture fingerprint, so a ruling the operator made on one
+command covered the other. Telling them apart needs the recorded argv on the
+grant, copied off the failing row at mint.
+
+**The legacy marker means an unknown command, and matches nothing.** The
+DEFAULT is the string `legacy`, so the `ADD COLUMN` itself marks every
+pre-existing grant as having an unknown command, and no separate back-fill
+exists to forget. The marker is not valid JSON, so it cannot collide with an
+encoded argv and a reader that skipped the marker check would fail to decode
+it. A legacy grant matches no gate row on argv; it is not a wildcard. A grant
+whose argv is `null` is not legacy: it covers only rows whose argv is also
+NULL.
+
+**Why the ratified arithmetic is untouched.** Like v11–v37, v38 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v37 form, since v38 adds no
+table and no index). No v5–v10 column, table, or count changes.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay
