@@ -31,7 +31,7 @@ final review)" (line 63). The storage admits it, `steps.issue_id` is nullable
 | # | Question | Decision |
 |---|---|---|
 | D1 | Workflow-expansion shape | A run-scoped workflow definition: `[pipeline] scope = "run"`. Its steps use the existing `[[step]]` grammar, expand once per run at activation with `issue_id` NULL, and become ready only after every issue of the run is terminal and no dispatch is open (readiness clause R2c). Not a per-step flag inside issue workflows, not an opt-in phase assembled from several bound workflows. |
-| D2 | `run.diff` derivation | A fresh read of the integration branch, recorded as a `run.diff` artifact at the claim of each run-scoped step that declares the input: `GitDiff(run.exec_root, run.commit_sha, union of the run's issue scopes)`, with the round record `{base, head, sha256}`. Never the union of issue diffs. |
+| D2 | `run.diff` derivation | A committed read of the integration branch, recorded as a `run.diff` artifact at the claim of each run-scoped step that declares the input: the claim resolves the shared checkout's HEAD to one commit sha once, and a dedicated call computes `git diff <run.commit_sha> <head_sha> -- <union of the run's issue scopes>` between those two commits, with the round record `{base, head, sha256}` whose `head` is that same sha. Uncommitted changes and untracked files in `run.exec_root` are not part of the body. Never the union of issue diffs. |
 | D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V48b), so a rejection routes `waiting-human`; the resolutions that park supports, and the reason it carries, are decided in §3.3 and owned by phase 2. |
 | D4 | Register-time lint | V48: `[pipeline] scope`, when present, is `"issue"` or `"run"`, and a definition whose scope is `issue` has no step whose `inputs` names `run.diff`. V48a: a definition whose scope is `run` declares no `[match]` table, no step `when`, and no step input of an `issue.*` form. V48b (phase 1 and 2 only): a definition whose scope is `run` has no `loop = true` step, no `threshold`, `on_fail`, or `on_fail_routes` value equal to `fix-loop` or `fix-round`, and no step declaring `on_exhausted` or `serves`. |
 | D5 | Activation with no integration point | Activation is refused (`VALIDATION_ERROR`, inside the fat transaction, nothing written) when a run-scoped definition binds, some step of it declares `run.diff` or holds the tree, and the run's `exec_root` or `commit_sha` is empty. The refusal names the run, the definition, the empty field, and the two remedies: start the run from inside the checkout, or retire the run-scoped definition with `workflow deprecate`. |
@@ -133,27 +133,46 @@ Alternatives weighed.
 | Refuse `scope = "run"` at register time until phase 2 binds it, instead of filtering issue binding in phase 1 | Phase 1's acceptance (`workflow lint` reports `new` on the §5 definition) would be unmeetable, and phase 2 would still need the filter, since the run-scoped reduction and the issue reduction read the same registered rows. The filter is one clause in `bindableDefinitions` and is needed in every later phase. |
 | Filter in `bindIssue` and `lintDomainScopeMismatch` separately, leaving `bindableDefinitions` untouched | Two call sites enforce one invariant by convention; a third consumer of `bindableDefinitions` would inherit the defect. The filter inside `bindableDefinitions` keeps the lint's documented promise that it names only workflows the issue could have bound. |
 
-### 3.2 D2: `run.diff` is a fresh integration-branch read, recorded at claim
+### 3.2 D2: `run.diff` is a committed integration-branch read, recorded at claim
 
 Form. `run.diff` is a new engine-produced input form beside `issue.diff` and a new
 engine-recorded artifact kind of the same name (context.go:247-258 is where the
-constants live). Body: `GitDiff(dir, base, scope)` (internal/engine/saga.go:2510)
-with `dir` the run's exec root, `base` the run's pinned starting commit, and
-`scope` the union of the run's issues' `scope_globs`. Every property `issue.diff`
-bodies have carries over unchanged because it is the same function: untracked
-files appear, out-of-scope hunks follow under the marked heading, and an empty
-union diffs the whole tree (`rawDiff`, saga.go:2681, "An empty pathspec diffs
-the whole tree"). Payload: `{"base": <commit_sha>, "head": <shared HEAD at
-claim>, "sha256": <body hash>}`.
+constants live). Body: a dedicated call, `committedRangeDiff(dir, base, head,
+scope)` (new in internal/engine/saga.go), not `GitDiff`. It computes `git diff
+<commit_sha> <head_sha> -- <union scope>` between two commits, with `dir` the
+run's exec root, `base` the run's pinned starting commit, `head` the sha the
+claim resolved (below), and `scope` the union of the run's issues'
+`scope_globs`. Both ends are commits, so the body describes committed history
+only: uncommitted changes and untracked files in `run.exec_root` are not part of
+it. `GitDiff` is the wrong call for this object: its `rawDiff` runs `git diff
+<base> -- <paths>` (saga.go:2681-2690), which compares base to the working
+tree, and it appends `untrackedDiff` (saga.go:2526), so on a dirty checkout its
+body would carry content no commit on the branch holds and no recorded `head`
+names. The dedicated call keeps the two properties of `issue.diff` that do hold
+for a commit range, the precedent being `GitCommitPatch` (saga.go:2598), the
+committed read that already carries them with no untracked half: paths the range
+touched outside the union scope are named and their hunks follow under the marked
+heading, capped as in `outOfScopeDiff`, both computed over the same two commits;
+and an empty union diffs the whole range, `rawDiff`'s rule ("An empty pathspec
+diffs the whole tree"). Payload: `{"base": <commit_sha>, "head": <head_sha>,
+"sha256": <body hash>}`.
 
 Base and tip. `runs.commit_sha` is pinned once at `run start` from the exec root's
 HEAD (internal/cli/run_start.go:161-164 via `config.GitHead`); `runDiffBase`
 (saga.go:2749) already names it as "the run's PINNED starting commit" for
-shared-checkout recordings. The tip is `sharedCheckoutHead(runExecRoot(conn,
-runID))`, the read `ClaimStepRendered` already performs before its transaction
-(internal/engine/claim.go:345-350) and records as `claim_head`. For a run diff the
-pinned commit is the right base for exactly the reason it is the wrong base for a
-single writer: everything integrated since the run began is the run's work.
+shared-checkout recordings. The tip is resolved once per claim:
+`sharedCheckoutHead(runExecRoot(conn, runID))`, the read `ClaimStepRendered`
+already performs before its transaction (internal/engine/claim.go:345-350) and
+records as `claim_head`, returns the shared HEAD as one commit sha. The claim
+passes that same sha to `committedRangeDiff` as the diff tip and writes it as the
+payload `head`; no second git read of HEAD occurs. The payload `head` therefore
+names the exact commit the body was computed against, and a commit landing on the
+shared branch between the resolution and the diff cannot enter the body, because
+the diff reads the resolved sha, not the moving ref. When the resolution yields no
+sha (no commit, or not a checkout), the claim records no `run.diff` and the input
+resolves empty under the D4 rule below. For a run diff the pinned commit is the
+right base for exactly the reason it is the wrong base for a single writer:
+everything integrated since the run began is the run's work.
 
 Recording moment. Context assembly reads no live state and `issue.diff` D4 is
 explicit that an absent artifact yields an empty diff, "never a live `git diff`"
@@ -180,9 +199,11 @@ the D4 rule, which happens only for a definition that declares `run.diff` on a
 step whose claim could not run git (the activation refusal in D5 prevents the
 common case).
 
-Tree-holding run-scoped steps record a `run.diff` at completion as well, exactly
-as `computeIssueDiff` records `issue.diff` for a tree-holding issue step
-(saga.go:1646-1685), with the round delta appended by `appendRoundDelta`
+Tree-holding run-scoped steps record a `run.diff` at completion as well, at the
+moment `computeIssueDiff` records `issue.diff` for a tree-holding issue step
+(saga.go:1646-1685), through the same committed read: the completion resolves
+HEAD to one sha once and uses it as both the diff tip and the payload `head`,
+with the round delta appended by `appendRoundDelta`
 (saga.go:3392) from the previous round's recorded head. That record is what the
 non-convergence check and `dispatch close`'s candidate collection read in D3.
 
@@ -191,6 +212,7 @@ Alternatives weighed.
 | Candidate | Why it lost |
 |---|---|
 | Union of issue diffs: concatenate each issue's D3-resolved `issue.diff` body | Each body is filtered to one issue's scope and computed against a different base (a worktree's fork point, or the claim head for a shared-checkout writer, saga.go:2749-2775). Concatenating them is not a patch anyone could apply, double-renders files two issues touched, and omits what a hand-resolved cherry-pick changed. It is cheaper and needs no git read, which is its only strength. |
+| Keep `GitDiff`'s working-tree read and record it as such: a dirty flag or a tree hash in the payload, the untracked trailer kept | It would show the panel uncommitted work, which is its strength. But the object would be a working tree no commit names, so `head` could not identify it, `dispatch close` and the phase-3 round delta key on commits, and a fanout's siblings would differ whenever anyone touched the checkout. The run's deliverable is what is on the shared branch; a committed read reviews exactly that, and §8 states what it leaves out. |
 | Record `run.diff` at `dispatch close`, inside `integrationVerdict`'s existing git moment | Binds the review to the dispatch flow; a fixture-driven run or a `next`-driven harness never closes a dispatch, so the input would never exist for them. The claim moment exists for every driver. |
 | Record `run.diff` once per ordinal, deduped across sibling claims | Needs a lock around compute-then-insert across processes, or a tolerance for two siblings reading different trees under one recorded object. Per-claim recording keeps the record truthful without a lock; the cost is one artifact per sibling. |
 
@@ -516,11 +538,14 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/engine/context.go: the `run.diff` input form and artifact kind
   constants, `resolveRunDiff` (new function in this file), the `run?` bundle
   member, and skipping `contextIssue` for run-scoped rows.
-- internal/engine/claim.go: compute and record `run.diff` before and inside the
-  claim transaction, beside the existing `claim_head` read.
-- internal/engine/saga.go: `computeRunDiff` (new function in this file) reusing
-  `GitDiff`, `runExecRoot`, and `appendRoundDelta` for tree-holding run-scoped
-  steps.
+- internal/engine/claim.go: compute `run.diff` before the claim transaction from
+  the existing `claim_head` sha, which is the diff tip and the payload `head`,
+  and record it inside the transaction.
+- internal/engine/saga.go: `committedRangeDiff` (new function in this file), the
+  two-commit `git diff <base> <head> -- <scope>` with the out-of-scope disclosure
+  over the same range and no untracked half; `computeRunDiff` (new) uses it with
+  `runExecRoot` and `appendRoundDelta` for tree-holding run-scoped steps.
+  `GitDiff` is not reused, because it reads the working tree.
 - internal/engine/packet.go and internal/engine/render.go: render the run's
   request where the issue section renders today.
 - internal/engine/context_test.go.
@@ -653,7 +678,11 @@ a fixture run with two issues, `next` offers no run-scoped row while any issue
 step is non-terminal or a dispatch is open, and offers `review@0#0` and
 `review@0#1` once both hold; the claimed bundle's first input is a `run.diff`
 whose payload `base` equals the run's `commit_sha` and whose body equals `git
-diff <base> HEAD -- <union scope>` plus the untracked trailer, byte for byte; a
+diff <base> <head> -- <union scope>` byte for byte, where `<head>` is the
+payload's recorded `head`, with no untracked section, in a fixture whose
+changes all lie inside the union scope; with an uncommitted modification to an
+in-scope tracked file and an untracked in-scope file present in the exec root
+at claim, neither appears in the recorded `run.diff` body; a
 run started outside a checkout is refused at activation with the D5 message and
 leaves zero step rows; every existing bundle fixture is byte-identical. For the
 park: with `review.findings` recorded so that two of three clusters reduce to
@@ -711,10 +740,16 @@ the integration check's `checked` list includes the run-scoped fix's head.
 - A run's wall clock grows by the run phase, and the run cannot roll up `done`
   until it finishes; an operator who wants the old behavior retires the
   run-scoped definition.
-- `run.diff` is a live read at claim. Two siblings claimed across a shared-branch
-  commit read different trees; the artifacts say so through `head`, but the
+- `run.diff` is read at claim. Two siblings claimed across a shared-branch
+  commit read different commits; the artifacts say so through `head`, but the
   panel's verdicts then describe two objects. R2c excludes in-run writers at that
   point; an out-of-engine commit is the remaining source.
+- `run.diff` reads committed history only. Uncommitted or untracked work in the
+  exec root at claim is not reviewed by the run-scoped panel: an operator's
+  hand edit, or a writer's output left uncommitted in the shared checkout, is
+  absent from the body, and nothing in the artifact flags that the checkout was
+  dirty. Work reaches the integrated review by being committed to the shared
+  branch before the claim.
 - `commit_sha` as base attributes every shared-branch commit since run start to
   the run, including commits from another run on the same branch or an
   operator's own. The body's out-of-scope section discloses paths outside the
@@ -776,8 +811,9 @@ To be filed through docs/design/amendments.md; this note does not edit the spec.
   and `"run"`; a run-scoped definition has no `[match]` and binds per run under
   the zero/one/many rule of §3.1.
 - engine-spec.md §11.1, `inputs` row: add `"run.diff"`, "the engine-computed VCS
-  diff of the run's shared checkout from its pinned starting commit over the
-  union of its issues' scopes, recorded at the claim of a run-scoped step that
+  diff from the run's pinned starting commit to the shared checkout's HEAD commit
+  resolved at claim, over the union of its issues' scopes, excluding uncommitted
+  and untracked content, recorded at the claim of a run-scoped step that
   declares it; valid only in a run-scoped definition (V48)".
 - engine-spec.md §11.3, clause 1: "the issue's loop counter increments" becomes
   "the subject's loop counter increments: the issue's for an issue-scoped
