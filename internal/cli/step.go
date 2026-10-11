@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,6 +123,13 @@ live lease under your own --owner is your own claim, and asking twice means the
 first token never reached you. The response carries ` + "`re_minted`" + `, and
 nothing else about the claim changes — same attempt, same accrual.
 
+A recovery secret makes that re-mint provable rather than owner-only. Redirect
+stdin from a 0600 file holding it (` + "`< recovery.secret`" + `): the first claim stores
+only its hash, and a re-claim re-mints only when it presents the same secret.
+The secret is read only from a redirected regular file, never from argv or the
+environment. A pipe or terminal on stdin supplies no secret, and a file that
+group or other can read is refused.
+
 Once the lease commits, this command exits 0 even if a later stage fails: the
 response carries the token plus ` + "`claim_error`" + `, so the claimant can end
 or complete the lease it provably holds rather than wait out the TTL.
@@ -183,10 +191,16 @@ claimed.`,
 			}
 		}
 
+		recoverySecret, err := readRecoverySecret(cmd.InOrStdin())
+		if err != nil {
+			return err
+		}
+
 		label := stepLabel(id)
 		claimOpts := engine.ClaimOptions{
 			Owner: owner, TTLOverride: ttlMS, Metadata: metadata,
-			CostMultiplier: costMultiplier, NowMS: model.NowMS(),
+			CostMultiplier: costMultiplier, RecoverySecret: recoverySecret,
+			NowMS: model.NowMS(),
 		}
 
 		render, _ := cmd.Flags().GetBool("render")
@@ -215,6 +229,57 @@ claimed.`,
 		}
 		return emitClaim(w, result, nil)
 	},
+}
+
+// maxRecoverySecretBytes bounds the read of a redirected secret file.
+const maxRecoverySecretBytes = 4096
+
+// readRecoverySecret returns the optional recovery secret `step claim` stores
+// the hash of, read from stdin ONLY when stdin is a redirected regular file.
+//
+// It deliberately shares nothing with readToken. DOCKET_TOKEN may hold a
+// conductor or lease token, and hashing that as the recovery secret would bind
+// the re-claim proof to a different capability. Draining any non-terminal
+// stdin would hang an agent whose inherited pipe never closes. A pipe, a
+// terminal, /dev/null, or a non-file reader therefore yields no secret, and
+// the claim proceeds without one.
+//
+// A regular file is the caller's explicit statement that it holds a secret,
+// so a file group or other can read, an empty one, or an oversize one is
+// refused before any lease is taken. No message carries the file's content.
+func readRecoverySecret(stdin io.Reader) (string, error) {
+	f, ok := stdin.(*os.File)
+	if !ok {
+		return "", nil
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", nil
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return "", cmdErr(fmt.Errorf(
+			"the recovery secret file on stdin has mode %04o; it must be 0600, "+
+				"readable by its owner only", perm),
+			output.ErrValidation)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxRecoverySecretBytes+1))
+	if err != nil {
+		return "", cmdErr(fmt.Errorf("reading the recovery secret from stdin: %w", err),
+			output.ErrValidation)
+	}
+	if len(data) > maxRecoverySecretBytes {
+		return "", cmdErr(fmt.Errorf(
+			"the recovery secret file on stdin exceeds %d bytes", maxRecoverySecretBytes),
+			output.ErrValidation)
+	}
+	secret := strings.TrimSpace(string(data))
+	if secret == "" {
+		return "", cmdErr(errors.New(
+			"the recovery secret file on stdin is empty; redirect a file holding the secret, "+
+				"or claim without redirecting stdin"),
+			output.ErrValidation)
+	}
+	return secret, nil
 }
 
 // emitIncompleteClaim delivers the TOKEN of a claim whose lease committed and
