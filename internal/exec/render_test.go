@@ -27,7 +27,7 @@ var hostileValues = []struct {
 	{"bell", "make test\x07"},
 	{"window title", "make test\x1b]0;t\x07"},
 	{"backspace run", "make test\x08\x08\x08\x08lint"},
-	{"C1 control", "make testmake lint"},
+	{"C1 control", "make test\u0085make lint"},
 	{"null", "make test\x00make lint"},
 	{"vertical tab", "make test\vmake lint"},
 }

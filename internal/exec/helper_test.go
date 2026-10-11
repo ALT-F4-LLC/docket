@@ -5,7 +5,6 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -173,11 +172,7 @@ func witness(t *testing.T) string {
 // invoke a compiler, and it happens at TEST SETUP, never through the package
 // under test.
 func goBuild(dir, out, src string) error {
-	gobin := filepath.Join(runtime.GOROOT(), "bin", "go")
-	if _, err := os.Stat(gobin); err != nil {
-		gobin = "go"
-	}
-	cmd := osexec.Command(gobin, "build", "-o", out, src)
+	cmd := osexec.Command("go", "build", "-o", out, src)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOFLAGS=", "CGO_ENABLED=0")
 	if b, err := cmd.CombinedOutput(); err != nil {
