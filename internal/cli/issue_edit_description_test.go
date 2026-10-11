@@ -113,6 +113,39 @@ func TestIssueEditDescriptionWarningRidesTheJSONEnvelope(t *testing.T) {
 	}
 }
 
+// TestIssueEditDescriptionMatchingTheFrozenBodyIsSilent: the issue still holds
+// a pending step in the live run, but the written description is exactly the
+// body the run froze, so that step already renders it and there is nothing for
+// refresh-body to copy.
+func TestIssueEditDescriptionMatchingTheFrozenBodyIsSilent(t *testing.T) {
+	conn := newTestDB(t)
+	const frozen = "the frozen criteria"
+	_, issueID := describedIssueInLiveRun(t, conn, frozen)
+
+	_, textStderr := editWithDescription(t, conn, issueID, false, frozen)
+	if textStderr != "" {
+		t.Errorf("stderr = %q, want silence", textStderr)
+	}
+
+	stdout, stderr := editWithDescription(t, conn, issueID, true, frozen)
+	if stderr != "" {
+		t.Errorf("stderr = %q in JSON mode, want silence", stderr)
+	}
+	var envelope struct {
+		OK   bool                       `json:"ok"`
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal([]byte(stdout), &envelope),
+		"decoding the envelope")
+	if !envelope.OK {
+		t.Fatalf("envelope is not ok: %s", stdout)
+	}
+	if _, ok := envelope.Data["warnings"]; ok {
+		t.Errorf("the envelope grew a warnings key on an edit the run "+
+			"already holds:\n%s", stdout)
+	}
+}
+
 // TestIssueEditDescriptionWithoutALiveStepIsUnchanged: once every step of the
 // issue has recorded, no packet will render the frozen description again, so
 // the edit raises nothing and its output carries no warnings key.
