@@ -68,5 +68,81 @@ run build go1.26.9 build ./...
 # or it kills the gate before go test's cap does.
 run tests go1.26.9 test -count=1 -timeout 60m ./...
 
+# Run the scripts/qa checks the issue's acceptance criteria name, so an AC like
+# "`bash scripts/qa.sh <built docket> ZG` reports PASS" is settled by execution.
+# Criterion text is untrusted: nothing from it reaches a command line except a
+# qa.sh section token that matched the closed pattern below, and every other
+# script runs by a literal path from this allow-list, never by the text's.
+# Anything off the list is printed as skipped and never executed.
+qa_sections=""
+qa_scripts=""
+if [ -z "${DOCKET_ISSUE:-}" ]; then
+  echo "qa checks: DOCKET_ISSUE unset; no criteria read, none added"
+  echo
+else
+  issue_status=0
+  description=$(docket issue show "$DOCKET_ISSUE" --json | jq -r '.data.description // empty') || issue_status=$?
+  if [ "$issue_status" -ne 0 ]; then
+    echo "qa checks: reading $DOCKET_ISSUE's criteria failed (exit $issue_status); none added"
+    [ "$issue_status" -gt "$worst" ] && worst=$issue_status
+    description=""
+  fi
+  # Scan only the criteria block when the issue has one: a qa.sh mention in
+  # the narrative above it is background, not a criterion to verify.
+  criteria=$(printf '%s\n' "$description" | awk '/^Acceptance criteria/ { found = 1 } found')
+  [ -n "$criteria" ] || criteria=$description
+
+  # A qa.sh invocation is the span from `scripts/qa.sh` to the closing
+  # backtick or end of line; its LAST field is the section, since the binary
+  # placeholder varies (`<bin>`, `<built docket>`) and may contain spaces.
+  while IFS= read -r span; do
+    [ -n "$span" ] || continue
+    case "$span" in
+      *[!A-Za-z0-9\ \<\>._/-]*)
+        echo "qa checks: skipped '$span': shell metacharacter in invocation"
+        continue ;;
+    esac
+    set -- $span
+    if [ "$#" -lt 3 ]; then
+      echo "qa checks: skipped '$span': no binary and section arguments"
+      continue
+    fi
+    section=${!#}
+    # qa.sh's section names: A-Z, then ZA-ZZ.
+    if ! [[ "$section" =~ ^Z?[A-Z]$ ]]; then
+      echo "qa checks: skipped '$span': section '$section' is not a qa.sh section name"
+      continue
+    fi
+    case " $qa_sections " in *" $section "*) ;; *) qa_sections="$qa_sections $section" ;; esac
+  done < <(printf '%s\n' "$criteria" | grep -oE 'scripts/qa\.sh[^`]*' || true)
+
+  while IFS= read -r path; do
+    path=${path%.}
+    case "$path" in
+      scripts/qa/genericity.sh)
+        case " $qa_scripts " in *" genericity "*) ;; *) qa_scripts="$qa_scripts genericity" ;; esac ;;
+      *)
+        echo "qa checks: skipped '$path': not on the qa script allow-list" ;;
+    esac
+  done < <(printf '%s\n' "$criteria" | grep -oE 'scripts/qa/[A-Za-z0-9_./-]+' | sort -u || true)
+  echo
+fi
+
+if [ -n "$qa_sections" ]; then
+  qa_bin_dir=$(mktemp -d "${TMPDIR:-/tmp}/ac-commands-qa.XXXXXX")
+  trap 'rm -rf "$qa_bin_dir"' EXIT
+  run qa-binary go1.26.9 build -o "$qa_bin_dir/docket" ./cmd/docket
+  for section in $qa_sections; do
+    if [ -x "$qa_bin_dir/docket" ]; then
+      run "qa.sh-$section" bash scripts/qa.sh "$qa_bin_dir/docket" "$section"
+    else
+      echo "qa checks: skipped qa.sh section $section: docket binary build failed"
+    fi
+  done
+fi
+for script in $qa_scripts; do
+  run "$script" bash "scripts/qa/$script.sh"
+done
+
 echo "=== end ac-commands ==="
 exit "$worst"
