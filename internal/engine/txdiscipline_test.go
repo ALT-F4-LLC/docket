@@ -45,7 +45,7 @@ import (
 //
 // The check: within a function, the region between a transaction opener
 // (`conn.Begin()`, `conn.BeginTx()`, or a package helper returning *sql.Tx,
-// such as beginRunReportSnapshot) and the matching `Commit()` is a LIVE
+// such as beginReadSnapshot) and the matching `Commit()` is a LIVE
 // TRANSACTION, and no call inside that region may touch the pool — neither
 // directly (`conn.Query`) nor by passing `conn` to a helper that might.
 //
@@ -97,7 +97,7 @@ type poolRead struct {
 type liveRegion struct{ from, to token.Pos }
 
 // txOpenerHelpers names the package functions that return a *sql.Tx, such as
-// beginRunReportSnapshot. Calling one opens a transaction as conn.Begin does.
+// beginReadSnapshot. Calling one opens a transaction as conn.Begin does.
 func txOpenerHelpers(files map[string]*ast.File) map[string]bool {
 	openers := map[string]bool{}
 	for _, file := range files {
