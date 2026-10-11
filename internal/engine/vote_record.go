@@ -60,6 +60,7 @@ import (
 // (a restored database), and the park is the honest answer.
 func evaluateVoteThreshold(
 	conn *sql.DB, step *db.Step, spec *workflow.Step, proposalID int,
+	status model.ProposalStatus,
 ) (ThresholdResult, error) {
 	votes, err := db.GetProposalVotes(conn, proposalID)
 	if err != nil {
@@ -77,11 +78,12 @@ func evaluateVoteThreshold(
 
 	// A matched routing carries the predicate verbatim in its reason (the
 	// same courtesy T3 extends): the operator reading the routing record sees
-	// WHY an approved tally did not pass, not just where it went.
+	// WHY an approved tally did not pass, not just where it went. It names
+	// the proposal's own status, so a committed proposal reads "committed".
 	if result.Routing != RoutingPass && !result.Parked {
 		result.Reason = fmt.Sprintf(
-			"approved, and threshold %q matched: %s",
-			result.Routing, spec.Threshold[result.Routing])
+			"%s, and threshold %q matched: %s",
+			status, result.Routing, spec.Threshold[result.Routing])
 	}
 	return result, nil
 }

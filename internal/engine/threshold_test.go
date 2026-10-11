@@ -926,6 +926,12 @@ func TestVoteThresholdRoutesCommittedProposal(t *testing.T) {
 	if gate.ParkClass != db.ParkClassThresholdRouted {
 		t.Errorf("gate@0 park_class = %q, want %q", gate.ParkClass, db.ParkClassThresholdRouted)
 	}
+	// The routing record names the commit, not the approval it superseded.
+	if !strings.Contains(gate.Routing, "committed, and threshold") ||
+		strings.Contains(gate.Routing, "approved, and threshold") {
+		t.Errorf("gate@0 routing = %q, want a reason naming %q, not %q",
+			gate.Routing, "committed, and threshold", "approved, and threshold")
+	}
 }
 
 // A committed proposal whose casts match no predicate passes, as an approved

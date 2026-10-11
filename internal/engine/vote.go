@@ -615,7 +615,7 @@ func routeVoteStep(
 		// approved panel takes the arm above, and a committed one must not
 		// diverge from it. Evaluated OUTSIDE the transaction below, like
 		// every other pooled read in this function.
-		result, err := evaluateVoteThreshold(conn, step, spec, outcome.ProposalID)
+		result, err := evaluateVoteThreshold(conn, step, spec, outcome.ProposalID, outcome.Status)
 		if err != nil {
 			return err
 		}

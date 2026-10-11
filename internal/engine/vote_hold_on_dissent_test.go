@@ -472,6 +472,10 @@ func TestVoteThresholdParkKeepsThresholdClass(t *testing.T) {
 	if gate.ParkClass != db.ParkClassThresholdRouted {
 		t.Errorf("gate@0 park_class = %q, want %q", gate.ParkClass, db.ParkClassThresholdRouted)
 	}
+	if !strings.Contains(gate.Routing, "approved, and threshold") {
+		t.Errorf("gate@0 routing = %q, want a reason naming %q",
+			gate.Routing, "approved, and threshold")
+	}
 }
 
 // TestVoteHoldOnDissentExclusions holds the park guard's two exclusions that
