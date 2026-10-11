@@ -1241,16 +1241,20 @@ mediation: an unclaimed executor has nothing, a claimed one has everything"
 (engine-core §8).
 
 **Context assembly is pure and snapshot-pinned** (engine-core §8; §9 item 5). It
-reads, and may read, exactly four sources:
+reads, and may read, exactly these sources:
 
 1. the step row and its definition, from the **pinned** workflow's `parsed`;
 2. `run_issues.body_snapshot` — never the live issue body;
 3. `run_issues.issue_snapshot` — `title`/`kind`/`labels`/`scope` as of activation
    (§5.1.1), never the live `issues` row;
 4. recorded `artifacts` bodies, resolved per §6.7's input rule;
-5. `pins` rows (path + hash) — the *list*, not the file contents.
+5. `pins` rows (path + hash) — the *list*, not the file contents, with one
+   exception: for a pending step of a non-terminal run, the step row's routing is
+   resolved from the run's pinned `policy.toml`, read from disk and hash-checked
+   against its pin.
 
-It never reads the working tree, never re-reads a file a pin names, and reads **no
+It never reads the working tree, never re-reads a file a pin names (other than
+that pinned `policy.toml` routing read), and reads **no
 live issue field at all** — `id` is the `run_issues` key and every other member of
 §11.4's `context.issue` comes from a snapshot column. The scheduler's live read of
 `issues.scope_globs` (§6.3 R4) is not context assembly and is deliberately excluded
