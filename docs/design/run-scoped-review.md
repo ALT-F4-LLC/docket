@@ -440,10 +440,29 @@ common case).
 
 Tree-holding run-scoped steps record a `run.diff` at completion as well, at the
 moment `computeIssueDiff` records `issue.diff` for a tree-holding issue step
-(saga.go:1646-1685), through the same committed read: the completion resolves
-HEAD to one sha once and uses it as both the diff tip and the payload `head`,
-with the round delta appended by `appendRoundDelta`
-(saga.go:3392) from the previous round's recorded head. That record is what the
+(saga.go:1646-1685), through the same committed read. The checkout it reads is
+the step's exec root at claim: the worktree the claim recorded as the step's
+`WorkRoot` when it holds one, otherwise `runExecRoot`, the same choice
+`computeIssueDiff` makes (saga.go:1654-1658). The completion reads that
+checkout's HEAD once, through `sharedCheckoutHead`, and uses the one sha as the
+diff tip of both ranges below and as the payload `head`; no second HEAD read
+occurs. The body is `committedRangeDiff(dir, <commit_sha>, <head>, <union
+scope>)`, as at claim. The round delta is a second committed two-commit range,
+`committedRangeDiff(dir, <prev>, <head>, nil)`, unscoped, from the previous
+round's recorded head (`prev`, the `head` of the newest earlier `run.diff`) to
+the resolved sha, appended under `roundDeltaMarker` and recorded as
+`round_base`. `appendRoundDelta` (saga.go:3415) does not produce it: that
+helper reads HEAD itself through `HeadFn` and the working tree through `DiffFn`,
+which the Engine wires to `GitDiff` (saga.go:215), so its trailer would mix an
+uncommitted, untracked read and a separate HEAD read into a committed body.
+A refused commit is a resolved head equal to the round base `prev`: the step
+committed nothing. The completion then records the payload with no `head`, as
+`appendRoundDelta` omits it for a blocked issue commit (saga.go:3437-3440), and
+the round-delta section reads `# (no commit this round)`, so no reader takes the
+pre-fix commit for the fix's tip and `dispatch close` collects no candidate
+from it. A fix round always follows a review whose claim recorded a
+`run.diff`, so `prev` exists; if none does, the completion records no delta and
+compares the resolved head against `commit_sha` instead. That record is what the
 non-convergence check and `dispatch close`'s candidate collection read in D3.
 
 Alternatives weighed.
@@ -851,9 +870,11 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
   amendment's, not this note's).
 - internal/engine/saga.go: `committedRangeDiff` (new function in this file), the
   two-commit `git diff <base> <head> -- <scope>` with the out-of-scope disclosure
-  over the same range and no untracked half; `computeRunDiff` (new) uses it with
-  `runExecRoot` and `appendRoundDelta` for tree-holding run-scoped steps.
-  `GitDiff` is not reused, because it reads the working tree.
+  over the same range and no untracked half; `computeRunDiff` (new) uses it for
+  tree-holding run-scoped steps, reading the exec root's HEAD at claim once and
+  computing both the body and the round delta (`prev` to that sha) as committed
+  ranges. `GitDiff` and `appendRoundDelta` are not reused, because both read
+  the working tree and `appendRoundDelta` also reads HEAD itself.
 - internal/engine/packet.go and internal/engine/render.go: render the run's
   request where the issue section renders today.
 - internal/engine/context_test.go.
@@ -1097,11 +1118,12 @@ the integration check's `checked` list includes the run-scoped fix's head.
 - `integration-unverified` is a new value in the park-class enum
   (engine-spec §2, amended in §10); a conductor or panel that routes on the
   class learns one more word.
-- `run.diff` reads committed history only. Uncommitted or untracked work in the
-  exec root at claim is not reviewed by the run-scoped panel: an operator's
-  hand edit, or a writer's output left uncommitted in the shared checkout, is
-  absent from the body, and nothing in the artifact flags that the checkout was
-  dirty. Work reaches the integrated review by being committed to the shared
+- `run.diff` reads committed history only, at claim and at a tree-holding
+  step's completion, body and round delta alike. Uncommitted or untracked work
+  in the exec root at claim is not reviewed by the run-scoped panel: an
+  operator's hand edit, or a writer's output left uncommitted in the shared
+  checkout, is absent from the body, and nothing in the artifact flags that the
+  checkout was dirty. Work reaches the integrated review by being committed to the shared
   branch before the claim.
 - `commit_sha` as base attributes every shared-branch commit since run start to
   the run, including commits from another run on the same branch or an
