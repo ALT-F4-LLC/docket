@@ -30,7 +30,7 @@ final review)" (line 63). The storage admits it, `steps.issue_id` is nullable
 
 | # | Question | Decision |
 |---|---|---|
-| D1 | Workflow-expansion shape | A run-scoped workflow definition: `[pipeline] scope = "run"`. Its steps use the existing `[[step]]` grammar, expand once per run at activation with `issue_id` NULL, and become ready only after every issue of the run is terminal and no dispatch is open (readiness clause R2c). Not a per-step flag inside issue workflows, not an opt-in phase assembled from several bound workflows. |
+| D1 | Workflow-expansion shape | A run-scoped workflow definition: `[pipeline] scope = "run"`. Its steps use the existing `[[step]]` grammar, expand once per run at activation with `issue_id` NULL, and become ready only after every issue of the run is terminal and no dispatch is open (readiness clause R2c). Readiness is not the integration proof: the claim of a run-scoped step that reads `run.diff` or holds the tree runs the integration check (§3.1, "Integration at claim"), driver-independent, and parks `waiting-human` instead of claiming when any write-class head is not on the shared branch. Not a per-step flag inside issue workflows, not an opt-in phase assembled from several bound workflows. |
 | D2 | `run.diff` derivation | A committed read of the integration branch, recorded as a `run.diff` artifact at the claim of each run-scoped step that declares the input: the claim resolves the shared checkout's HEAD to one commit sha once, and a dedicated call computes `git diff <run.commit_sha> <head_sha> -- <union of the run's issue scopes>` between those two commits, with the round record `{base, head, sha256}` whose `head` is that same sha. Uncommitted changes and untracked files in `run.exec_root` are not part of the body. Never the union of issue diffs. |
 | D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V48b), so a rejection routes `waiting-human`; the resolutions that park supports, and the reason it carries, are decided in §3.3 and owned by phase 2. |
 | D4 | Register-time lint | V48: `[pipeline] scope`, when present, is `"issue"` or `"run"`, and a definition whose scope is `issue` has no step whose `inputs` names `run.diff`. V48a: a definition whose scope is `run` declares no `[match]` table, no step `when`, and no step input of an `issue.*` form. V48b (phase 1 and 2 only): a definition whose scope is `run` has no `loop = true` step, no `threshold`, `on_fail`, or `on_fail_routes` value equal to `fix-loop` or `fix-round`, and no step declaring `on_exhausted` or `serves`. |
@@ -103,14 +103,98 @@ with a non-NULL `issue_id` is terminal (`done`, `skipped`, `superseded`,
 `failed-routed`, the set `issueStepsComplete` uses at reconcile.go:437-438), no
 step of the run is parked `waiting-human`, and `db.OpenDispatchTx`
 (internal/db/dispatch.go:180) finds no open dispatch. Every conjunct is a table
-read inside the scheduler's snapshot; none is a git probe. The open-dispatch
-conjunct is what makes "post-integration" true in the sanctioned flow: a dispatch
-closes only after `integrationVerdict` accepted or vouched for every write-class
-head, so a run that uses dispatch cannot open its review before the shared branch
-carries the work. A run driven without dispatch has no close to wait for and
-opens the phase when its issues finish. R3 through R7 apply unchanged; R4 for a
-tree-holding run-scoped step compares the union of the run's issue scopes, read
-through the same `loadIssueFacts` path (ready.go:389).
+read inside the scheduler's snapshot; none is a git probe. R2c therefore decides
+when the phase may be offered, not whether the shared branch carries the work:
+the open-dispatch conjunct orders the phase after a dispatch's close, and in a
+run that uses dispatch that close has already run `integrationVerdict` over
+every write-class head, but no table the scheduler reads records that a
+worktree commit was integrated, and a run driven without dispatch (a fixture
+run, a `next`-driven harness) never writes a close at all. Integration is
+established for every run, whatever drives it, by the integration check at
+claim, below: a run-scoped step that R2c offers is claimed only after that
+check accepts every write-class head, and parks `waiting-human` otherwise. A
+run driven without dispatch therefore reaches R2c when its issues finish and
+still cannot open the phase until its writers' commits are on the shared
+branch. R3 through R7 apply unchanged; R4 for a tree-holding run-scoped step
+compares the union of the run's issue scopes, read through the same
+`loadIssueFacts` path (ready.go:389).
+
+Integration at claim. The check is `integrationVerdict`
+(dispatch_integration.go:352), `dispatch close`'s own gate, called with no skip
+reason from `claimStepWithGates` for a run-scoped step whose definition
+declares `run.diff` or holds the tree (D5's predicate, so the step that needs
+an integrated tree is the step that is checked; a run-scoped step with neither
+is claimed as today). It runs at the claim's pre-transaction git moment, the
+point `sharedCheckoutHead` reads `claim_head` (claim.go:350), and before that
+read, so every head it accepts is an ancestor of the tip `run.diff` is then
+computed from. The verdict is the one `dispatch close` would reach: candidates
+are every terminal write-class step's most recent `issue.diff` head
+(`integrationCandidatesTx`, dispatch_integration.go:135; skipped steps and
+abandoned issues excluded; `run.diff` heads admitted in phase 3, §3.3), judged
+by ancestry then patch-equivalence through the same `IsAncestorFn`,
+`PatchContainedFn` and `StepPatchContainedFn` seams (`checkIntegration`,
+dispatch_integration.go:262), and a head an earlier close of the run accepted
+or vouched for is honored from that close's `integration.checked` record
+(`priorIntegrationsTx`, dispatch_integration.go:220) rather than asked of git
+again. That last rule is what keeps the check inert in the sanctioned flow: a
+dispatch-driven run reaches R2c with a close behind every writer, so each
+candidate carries a prior, the claim asks git only about a head no close has
+judged (none, when the last close followed the last writer), and it records
+nothing new. A run with no close has no
+priors, so each candidate is asked of git once per claim; a shared-checkout
+writer's head is the branch tip or behind it and passes by ancestry, and a
+worktree writer's cherry-picked head passes by patch. A hand-resolved pick on
+such a run passes only after `step annotate STEP-N --integrated-sha`
+(annotate_integration.go:16, 104) re-records the head as the commit the shared
+branch carries, the remedy `dispatch close` already relies on for the same
+case. A `cherry-error` verdict (git could not answer) counts as unintegrated,
+as it does at close.
+
+The failure case. When `integrationVerdict` returns a non-empty unintegrated
+list, the claim does not happen: no lease is minted, no token is returned, no
+attempt is spent, no `step_inputs` are bound, and no `run.diff` artifact is
+recorded (the diff is computed only after the check accepts). Instead the
+claim opens a short transaction, re-reads the row, and, if it is still
+`pending`, parks it `waiting-human` through `SetStepRoutingWithParkReasonTx`
+(internal/db/steps.go:814) with routing `waiting-human`, a new park class
+`integration-unverified`, and a reason naming every unintegrated step and its
+head in `UnintegratedReason`'s shape (dispatch_integration.go:406), then
+records a `step-routed` event carrying the routing record (the routing stage's
+own event, saga.go:1556; no new event kind), commits, and returns a CONFLICT
+whose text is the park reason. The park follows `step hold`'s shape, the one
+existing park of a READY `pending` row outside the routing stage (hold.go:81-95
+at the pinned commit). The reason, under the `<class>: <prose>` form §3.3 uses:
+
+```
+integration-unverified: {step} {instance}: sha {sha12} ({how}) in {worktree}[; ...]; cherry-pick each commit onto the shared branch, or `step annotate {step} --integrated-sha` for a hand-resolved pick, then resolve with --as retry
+```
+
+`{step} {instance}: sha {sha12} ({how}) in {worktree}` is `UnintegratedReason`'s
+rendering of one finding, `; `-joined, with ` in {worktree}` present only when
+the record names one and `{how}` either `unintegrated` or `cherry-error`.
+Rendered for a fixture whose second writer recorded in a worktree:
+
+```
+integration-unverified: STEP-12 implement@0: sha 3f9a2c1b7e04 (unintegrated) in /repo/.claude/worktrees/wf_ab12; cherry-pick each commit onto the shared branch, or `step annotate STEP-12 --integrated-sha` for a hand-resolved pick, then resolve with --as retry
+```
+
+The park stops the phase: the "no step of the run is parked `waiting-human`"
+conjunct of R2c holds every other run-scoped row unready, so a fanout's second
+sibling is not offered while the first is parked, and `next --explain` names
+the condition. `retry` is a real remedy on this park, unlike the §3.3 sticky
+cause: it returns the row to `pending` (human.go:783-791) and the next claim
+re-runs the check against the branch as it then stands. `skip` and
+`override-pass` stay supported with the consequences §3.3 gives them; the run
+then rolls up `done` with its integrated review recorded as skipped or passed
+over a tree the engine never verified, which the routing record says.
+`abandon-issue` is refused by §3.3's subject rule. Two sibling claims that run
+the check concurrently read the same branch and reach the same verdict unless a
+commit lands between them; the second then parks or passes on the tree it saw,
+and its own `step-routed` record says which. The check is not recorded as an
+acceptance: nothing at the claim writes a `dispatch-closed` event (the only
+writer of `integration.checked` is the close, dispatch.go:2088 and 2115, and
+its no-manifest branch exists for usage acceptance alone, dispatch.go:2073-2079),
+so a later claim of the same run asks git again. §8 states the cost.
 
 Packet shape. `contextIssue` (context.go:652) reads `run_issues` and errors for a
 missing row; a run-scoped assembly skips it and the bundle carries no `issue`
@@ -151,6 +235,19 @@ Alternatives weighed.
 | Keep reviewing per issue and rely on `dispatch close`'s integration check | The check proves commits are present, not that the integrated tree is correct, and a hand-resolved cherry-pick is content no reviewer saw. This is the gap the request names; doing nothing leaves it. |
 | Refuse `scope = "run"` at register time until phase 2 binds it, instead of filtering issue binding in phase 1 | Phase 1's acceptance (`workflow lint` reports `new` on the §5 definition) would be unmeetable, and phase 2 would still need the filter, since the run-scoped reduction and the issue reduction read the same registered rows. The filter is one clause in `bindableDefinitions` and is needed in every later phase. |
 | Filter in `bindIssue` and `lintDomainScopeMismatch` separately, leaving `bindableDefinitions` untouched | Two call sites enforce one invariant by convention; a third consumer of `bindableDefinitions` would inherit the defect. The filter inside `bindableDefinitions` keeps the lint's documented promise that it names only workflows the issue could have bound. |
+
+Alternatives weighed for the integration check (where it runs and what it
+asks).
+
+| Candidate | Why it lost |
+|---|---|
+| Leave integration to the open-dispatch conjunct and state the no-dispatch limitation in §8, covered by D5's refusal | This note's first draft. D5 refuses a run with no integration point, not a run whose writers' commits never reached it; a fixture run and a `next`-driven harness are supported drivers (§3.2 rejected the close-time `run.diff` record for exactly their sake), and on them R2c would open the phase, `run.diff` would omit the unintegrated work, and the panel could pass a tree lacking it with no signal. The gap the request names, re-opened by driver convention. |
+| An R2c conjunct over a recorded "integrated" fact | Keeps readiness a table read, which is its strength. The only recorder of integration today is the close (`integration.checked`), so without dispatch nothing would ever write the fact; the recorder would have to be a git probe somewhere, and the one git moment every driver shares is the claim. The claim check is that recorder with the park in place of the fact. |
+| Verify at each write-class step's completion, beside `computeIssueDiff` | The commit is still in the worktree when the step records; the sanctioned flow cherry-picks it afterwards, so the probe would fail every worktree writer by construction. |
+| Raw `IsAncestorFn`/`PatchContainedFn` probes per recorded head at claim, without `integrationVerdict` | Smaller call, which is its only strength. It drops the prior-close record, so a hand-resolved pick that a close already accepted (never an ancestor, never patch-equivalent; dispatch_integration.go:70-73) would park every dispatch-driven run that resolved a conflict, and it drops the skipped and abandoned exclusions. `integrationVerdict` is the gate `dispatch close` runs; a second verdict would be a second answer to one question. |
+| A readiness-time git probe inside R2c | Puts a subprocess in the scheduler's snapshot, which §6 forbids and which `integrationVerdict` itself avoids by rolling back before probing (dispatch_integration.go:369-372); every `next` would pay the probes for every run-scoped row. |
+| A new event kind for the park | Names the decision in the feed, which is its strength. The routing record and the park class already carry it, and a kind costs a closed-set change (`TestEventKindsAreAClosedSet`) for a fact two columns state. |
+| Record the claim's verified result as a `dispatch-closed` acceptance so later claims honor it | Saves one probe pair per candidate on later claims. It would write a close event with no close, and every reader of `dispatch-closed` (`run report`, the prior-close record) would have to learn a third author. Re-probing is cheap and truthful; §8 names the cost. |
 
 ### 3.2 D2: `run.diff` is a committed integration-branch read, recorded at claim
 
@@ -560,9 +657,29 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - internal/engine/context.go: the `run.diff` input form and artifact kind
   constants, `resolveRunDiff` (new function in this file), the `run?` bundle
   member, and skipping `contextIssue` for run-scoped rows.
-- internal/engine/claim.go: compute `run.diff` before the claim transaction from
+- internal/engine/claim.go: the integration check (§3.1, "Integration at
+  claim"): for a run-scoped step under D5's predicate, call
+  `integrationVerdict` with no skip reason before the `claim_head` read; on a
+  non-empty unintegrated list, park the row `waiting-human` with class
+  `integration-unverified` and the §3.1 reason in a short transaction, record
+  the `step-routed` event, and return CONFLICT with no lease and no `run.diff`.
+  Then compute `run.diff` before the claim transaction from
   the existing `claim_head` sha, which is the diff tip and the payload `head`,
   and record it inside the transaction.
+- internal/engine/dispatch_integration.go: `integrationVerdict` gains the
+  claim as a second caller; a doc-comment change only, since the function
+  already takes `conn`, the run, the definitions and a skip reason, and
+  already splits its read-only transaction from its probes. (The phase-3
+  `run.diff` admission in `integrationCandidatesTx` is listed under "Fix-loop
+  routing".)
+- internal/db/steps.go: `ParkClassIntegrationUnverified ParkClass =
+  "integration-unverified"`, beside `ParkClassHeld` (line 124), produced by
+  the claim's park alone.
+- internal/engine/claim_test.go: the no-dispatch unintegrated-head park and its
+  retry (§6, phase 2), and a dispatch-driven run whose claim asks git nothing.
+- docs/design/engine-spec.md §2, "Park class" table: the
+  `integration-unverified` row (the amendment text is in §10; the edit is the
+  amendment's, not this note's).
 - internal/engine/saga.go: `committedRangeDiff` (new function in this file), the
   two-commit `git diff <base> <head> -- <scope>` with the out-of-scope disclosure
   over the same range and no untracked half; `computeRunDiff` (new) uses it with
@@ -690,7 +807,8 @@ report before.
 
 Phase 2, binding, storage, readiness, packet, and the park's resolution. NULL
 `issue_id` rows; partial unique index; run-scoped binding and the D5 refusal;
-R2c; `run.diff` recorded at claim; the `run?` bundle member; and everything §3.3
+R2c; the integration check at claim and its `integration-unverified` park
+(§3.1); `run.diff` recorded at claim; the `run?` bundle member; and everything §3.3
 decides about the `waiting-human` park, because this phase is what makes that
 park reachable: the matched-arm park reason, the sticky-cause refusal of `retry`
 and `rerun-gates`, the subject refusal of `abandon-issue`, the NULL readings on
@@ -704,7 +822,23 @@ diff <base> <head> -- <union scope>` byte for byte, where `<head>` is the
 payload's recorded `head`, with no untracked section, in a fixture whose
 changes all lie inside the union scope; with an uncommitted modification to an
 in-scope tracked file and an untracked in-scope file present in the exec root
-at claim, neither appears in the recorded `run.diff` body; a
+at claim, neither appears in the recorded `run.diff` body; for the integration
+check, on a fixture run driven with no dispatch (no `dispatch-opened` or
+`dispatch-closed` event in the run) whose two issues are `done` and whose
+second write-class step recorded its `issue.diff` with a `head` committed in a
+worktree and never cherry-picked onto the shared branch, `step claim
+review@0#0` returns CONFLICT, the row is `waiting-human` with `park_class`
+`integration-unverified` and a `park_reason` equal to the §3.1 rendering for
+that step and that head byte for byte, the run has no `run.diff` artifact, the
+row has no lease (`owner` empty, `attempt` unchanged), and `next` offers no
+run-scoped row; after the commit is cherry-picked onto the shared branch and
+`step resolve review@0#0 --as retry`, the next `step claim review@0#0` succeeds
+and its `run.diff` body contains the picked change; on the same fixture with
+the second writer's head hand-resolved onto the branch (no patch match),
+`step annotate STEP-N --integrated-sha <branch sha>` followed by `--as retry`
+also lets the claim succeed; and on a dispatch-driven fixture whose close
+recorded every head in `integration.checked`, the claim's `IsAncestorFn` and
+`PatchContainedFn` seams are called zero times; a
 run started outside a checkout is refused at activation with the D5 message and
 leaves zero step rows; every existing bundle fixture is byte-identical; no
 operator surface renders `<PREFIX>-0`, or any `-0` issue id, for a run-scoped
@@ -744,8 +878,9 @@ the integration check's `checked` list includes the run-scoped fix's head.
 - More than one run-scoped definition bound to one run. Excluded by the
   exactly-one analog; a project composes one definition.
 - A run-scoped step before integration (a plan-approval gate at run start).
-  R2c makes run-scoped rows post-integration by construction; a pre-integration
-  run step is a different readiness rule and a separate design.
+  R2c and the claim's integration check make run-scoped rows post-integration
+  by construction; a pre-integration run step is a different readiness rule
+  and a separate design.
 - The reference instance's contracts and packet files for the run-scoped judges.
   Instance config lives outside this repository.
 - A per-run opt-out flag on `run activate` (§3.5).
@@ -770,6 +905,19 @@ the integration check's `checked` list includes the run-scoped fix's head.
   commit read different commits; the artifacts say so through `head`, but the
   panel's verdicts then describe two objects. R2c excludes in-run writers at that
   point; an out-of-engine commit is the remaining source.
+- Every claim of a run-scoped step under D5's predicate runs the integration
+  probes over every write-class head the run recorded: on a run with no close,
+  one `git merge-base --is-ancestor` per candidate and one `git cherry` per
+  worktree head, repeated on each sibling's claim and on each retry, because
+  the claim records no acceptance. A dispatch-driven run pays nothing here.
+- A run driven without dispatch whose writer hand-resolved a cherry-pick
+  cannot open its run phase until an operator runs `step annotate
+  --integrated-sha` for that head; before this note such a run opened the
+  phase with no operator action. The park names the step, the head and the
+  remedy.
+- `integration-unverified` is a new value in the park-class enum
+  (engine-spec §2, amended in §10); a conductor or panel that routes on the
+  class learns one more word.
 - `run.diff` reads committed history only. Uncommitted or untracked work in the
   exec root at claim is not reviewed by the run-scoped panel: an operator's
   hand edit, or a writer's output left uncommitted in the shared checkout, is
@@ -829,6 +977,14 @@ acceptance.
   than vanishing.
 - Someone backfills V12 or renumbers V48b after its removal. Mitigation: the
   `RuleIDs` comment records both as reserved, the way V12's does today.
+- A fixture-driven run parks `integration-unverified` on every claim because
+  its writers record in worktrees that the harness never integrates, and the
+  phase is resolved with `--as skip` by habit. Mitigation: the park reason
+  names the cherry-pick and the annotation as the remedies ahead of any
+  resolution, the phase-2 acceptance drives the cherry-pick-then-retry path,
+  and a skipped run-scoped review is recorded as skipped in the routing record
+  and `run report`, so the habit is visible. Accepted residual: an operator who
+  chooses to skip has chosen an unreviewed integration, and the record says so.
 
 ## 10. Proposed spec amendments
 
@@ -849,6 +1005,14 @@ To be filed through docs/design/amendments.md; this note does not edit the spec.
 - engine-spec.md §11.4, `context`: `issue` becomes optional and `run?: {id,
   request}` is added, present only on run-scoped rows; `next row`'s `issue` is
   empty on run-scoped rows.
+- engine-spec.md §2, "Park class" table: add `integration-unverified`,
+  "the claim of a run-scoped step that reads `run.diff` or holds the tree found
+  a write-class head the shared branch does not carry
+  (`integrationVerdict`'s unintegrated list, asked at claim); the row parks
+  before any lease is minted, and `step resolve --as retry` re-asks". The
+  enum is closed and each value names one producer; this is a new producer
+  with no existing word, which is why §3.3 could decline a new class for a
+  distinction one pure call derives and this note cannot.
 - engine-core.md §1.3: the parenthetical about run-level steps gains a pointer to
   this note.
 - docs/tdd/engine-spine.md §6.3: add the R2c row.
@@ -865,4 +1029,12 @@ an exhaustive proof is phase 2's test, which asserts every run-scoped row is
 readable through `ListRunStepsTx`). The §3.3 park-resolution citations added in
 the 2026-10-10 revision were read at 3c73f103 through `git show`, since the
 checkout had moved on; where HEAD differs (human.go, saga.go, db/steps.go have
-shifted by a few lines) the pinned numbers stand, per the header.
+shifted by a few lines) the pinned numbers stand, per the header. The §3.1
+"Integration at claim" citations added in the same day's second revision
+(claim.go, dispatch_integration.go, dispatch.go, hold.go, annotate_integration.go,
+db/steps.go, saga.go:1556) were likewise read at 3c73f103 through `git show`;
+claim.go in particular has shifted by four lines at HEAD (the `claim_head` read
+is at 354 there and 350 at the pin). One premise of that section is an
+inference and is marked: that the only writer of `integration.checked` is the
+close (a search for `EventDispatchClosed` writers outside tests found the two
+sites in dispatch.go cited there and no other).
