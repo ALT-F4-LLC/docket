@@ -19,11 +19,28 @@ import (
 // activation-to-terminal window. The same rule decides which runs record the
 // panel's vote-opened and vote-tallied events here.
 //
-// The emission site is the cast path, because it is the first engine call a
-// panel reaches after `vote link` has made it attributable: at `vote create`
-// the link does not exist yet. So vote-opened is recorded by the first cast
-// that observes the panel attributed, once per run, and vote-tallied by the
-// cast that reaches quorum, with the score db.CastVote computed.
+// A panel becomes attributable when `vote link` writes its link: at `vote
+// create` the link does not exist yet. So `vote link` records vote-opened on
+// each attributing run (RecordConductorPanelOpened), and the cast path records
+// it for a run that came to attribute the panel only later; either way once
+// per run. The cast that reaches quorum records vote-tallied, with the score
+// db.CastVote computed.
+
+// RecordConductorPanelOpened records a step-less panel's vote-opened on every
+// run that attributes it and has not recorded it yet. `vote link` calls it
+// once the link exists; a panel no run attributes records nothing.
+func RecordConductorPanelOpened(conn *sql.DB, proposalID int) error {
+	runs, err := conductorPanelRuns(conn, proposalID)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if err := recordPanelRunEvents(conn, run, proposalID, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // recordConductorPanelEvents writes a step-less panel's vote lifecycle events
 // onto every run that attributes it. The caller passes only a step-less
@@ -58,8 +75,13 @@ func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *db.CastVot
 
 // conductorPanelRuns lists the runs that attribute a panel, in run order. It
 // is the run report's attribution rule (conversationalRunProposalIDs), asked
-// from the panel's side.
+// from the panel's side. A vote step's own proposal has none here: its step
+// already announces it.
 func conductorPanelRuns(conn *sql.DB, proposalID int) ([]db.ProposalRunLink, error) {
+	stepBound, err := IsVoteStepProposal(conn, proposalID)
+	if err != nil || stepBound {
+		return nil, err
+	}
 	runs, err := linkedPanelAttributions(conn, db.ProposalRunLinkFilter{ProposalID: proposalID})
 	if err != nil {
 		return nil, fmt.Errorf("finding the runs of %s: %w",
