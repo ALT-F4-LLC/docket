@@ -439,8 +439,15 @@ write-class concurrency 1, budget warn 60% / pause 100%, context-size warn 64KB 
 2. Zero model-made scheduling decisions in a full run: every transition in events
    traceable to next/gate/threshold/human input.
 3. Capability proofs: an unclaimed worker cannot record (AUTH_ERROR); duplicates lose
-   at claim (CONFLICT); late completes refused (STALE_LEASE); racing dispatchers cause
-   no duplicate execution or lost updates.
+   at claim (CONFLICT) unless the claim's `--owner` equals the live lease's recorded
+   owner, which receives a re-minted token instead; late completes refused
+   (STALE_LEASE); racing dispatchers cause no duplicate execution or lost updates.
+   Open shortfall, not an accepted weakness: the same-owner re-mint means "duplicates
+   lose at claim" does not yet hold against a caller that presents the holder's owner
+   string. Since DKT-3497, a lease whose first claim stored a recovery-secret hash
+   re-mints only for the matching secret (read from stdin) and otherwise gets CONFLICT;
+   a lease with no stored hash still re-mints on the owner string alone. The pending
+   holdership check, DKT-3724, closes that remainder and is the tracked remedy.
 4. Kill a worker mid-step: lease expiry alone re-readies it; the run completes; the
    attempt trail is complete.
 5. Determinism: same run at same pins ⇒ identical step topology and byte-identical
