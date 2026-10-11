@@ -437,7 +437,7 @@ func bodyRefreshRun(t *testing.T) (conn *sql.DB, runID, issue, before, after int
 func refreshRunBody(t *testing.T, conn *sql.DB, runID, issue int, body string, atMS int64) {
 	t.Helper()
 	amend(t, conn, issue, body)
-	_, err := RefreshIssueBodyInRun(conn, runID, issue, "operator amended", atMS)
+	_, err := RefreshIssueBodyInRun(conn, runID, issue, "operator amended", testBy, testConductorToken, atMS)
 	testsupport.Must(t, err, "refreshing: %v", err)
 }
 
