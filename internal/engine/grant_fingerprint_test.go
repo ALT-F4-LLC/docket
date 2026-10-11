@@ -230,6 +230,79 @@ func TestBatchOverrideRefusesAnEmptyFingerprintRow(t *testing.T) {
 	}
 }
 
+// TestBatchOverrideRefusesAMixedBatchWithOneEmptyFingerprint: one pre-v30 row
+// refuses the WHOLE batch, not just its own gate. The blank row is "tests",
+// which sorts after "build", so a check of only the first row or of only an
+// all-blank batch would let the mint through. The fingerprinted "build" row
+// gets no grant either: a ruling may not cover less than the operator read.
+func TestBatchOverrideRefusesAMixedBatchWithOneEmptyFingerprint(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedBatchRun(t, conn, batchTwoGateSrc, "batch-two-gate.toml")
+	e := testEngine()
+	e.Gates = &exitGates{fail: true, exit: 1}
+	implementID := stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, implementID)
+
+	res, err := conn.Exec(
+		`UPDATE gate_results SET fingerprint = '' WHERE step_id = ? AND gate = 'tests'`,
+		implementID)
+	testsupport.Must(t, err, "blanking the tests fingerprint: %v", err)
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("premise: blanked %d tests rows, want 1", n)
+	}
+	rows, err := db.GateResultsForStep(conn, implementID)
+	testsupport.Must(t, err, "reading gate rows: %v", err)
+	failing := failingCompletionRows(rows)
+	if len(failing) != 2 {
+		t.Fatalf("premise: %d failing completion rows, want 2 (build, tests)", len(failing))
+	}
+	for _, r := range failing {
+		if blank := r.Fingerprint == ""; blank != (r.Gate == "tests") {
+			t.Fatalf("premise: gate %q fingerprint blank = %v, want only tests blank",
+				r.Gate, blank)
+		}
+	}
+	routingBefore := stepRoutingByID(t, conn, implementID)
+
+	err = e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact, not a code defect", nowMS+1)
+	if err == nil {
+		t.Fatal("--batch over a park with one pre-v30 row was accepted")
+	}
+	assertCode(t, err, CodeValidation)
+	msg := err.Error()
+	for _, want := range []string{`"tests"`, "before the v30 fingerprint migration"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal = %q, want it to contain %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, `"build"`) {
+		t.Errorf("refusal = %q names \"build\", whose row carries a fingerprint", msg)
+	}
+
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 0 {
+		t.Errorf("grants = %+v, want none, including none for the fingerprinted "+
+			"build gate", grants)
+	}
+	if got := eventKindCount(t, conn, runID, EventGateOverrideGranted); got != 0 {
+		t.Errorf("%s events = %d, want 0", EventGateOverrideGranted, got)
+	}
+	if got := eventKindCount(t, conn, runID, EventStepResolved); got != 0 {
+		t.Errorf("%s events = %d, want 0 — a refused batch resolves nothing",
+			EventStepResolved, got)
+	}
+	step, err := db.GetStep(conn, implementID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepWaitingHuman {
+		t.Errorf("implement@0 = %q, want it still %q", step.Status, db.StepWaitingHuman)
+	}
+	if got := stepRoutingByID(t, conn, implementID); got != routingBefore {
+		t.Errorf("routing = %q after the refusal, want it unchanged from %q", got, routingBefore)
+	}
+}
+
 // TestBatchOverrideMintsOffFingerprintedRows: the refusal is keyed on the
 // empty fingerprint, not on --batch. A park whose failing row carries one
 // mints its grant and resolves exactly as before.
