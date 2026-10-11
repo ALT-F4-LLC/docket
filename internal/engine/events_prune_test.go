@@ -441,6 +441,29 @@ func refreshRunBody(t *testing.T, conn *sql.DB, runID, issue int, body string, a
 	testsupport.Must(t, err, "refreshing: %v", err)
 }
 
+// recordClaimEvent writes the `step-claimed` row a real claim leaves in the
+// log, keyed to the step's own step_id, so a prune test can watch that row go.
+func recordClaimEvent(t *testing.T, conn *sql.DB, runID, issue int, instance string, atMS int64) {
+	t.Helper()
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = recordEvent(tx, eventRecord{
+		Kind: EventStepClaimed, RunID: runID, Instance: instance, IssueID: issue, AtMS: atMS,
+	})
+	testsupport.Must(t, err, "recording the claim event: %v", err)
+	testsupport.Must(t, tx.Commit(), "committing the claim event")
+}
+
+// claimEventCount counts the `step-claimed` rows naming stepID.
+func claimEventCount(t *testing.T, conn *sql.DB, stepID int) int {
+	t.Helper()
+	var n int
+	err := conn.QueryRow(`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, stepID).Scan(&n)
+	testsupport.Must(t, err, "counting claim events: %v", err)
+	return n
+}
+
 // TestPrunedRunReportsRecordedBodyUnavailable: once a done run's events are
 // pruned, the refresh rows the read-back reconstructs from may be gone, so
 // every claim that preceded the prune reports its body unavailable rather than
@@ -448,17 +471,31 @@ func refreshRunBody(t *testing.T, conn *sql.DB, runID, issue int, body string, a
 func TestPrunedRunReportsRecordedBodyUnavailable(t *testing.T) {
 	conn, runID, issue, before, after := bodyRefreshRun(t)
 	recordClaim(t, conn, before, nowMS)
+	recordClaimEvent(t, conn, runID, issue, "first@0", nowMS)
 	refreshRunBody(t, conn, runID, issue, "body, amended", nowMS+1)
 	recordClaim(t, conn, after, nowMS+2)
+	recordClaimEvent(t, conn, runID, issue, "second@0", nowMS+2)
 	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	steps := map[string]int{
+		"claimed before the refresh": before,
+		"claimed after the refresh":  after,
+	}
+	for name, stepID := range steps {
+		if n := claimEventCount(t, conn, stepID); n != 1 {
+			t.Fatalf("premise: step %s has %d step-claimed row(s) before the "+
+				"prune, want 1", name, n)
+		}
+	}
 
 	_, err := PruneEvents(conn, PruneQuery{BeforeRun: runID, NowMS: nowMS + 3})
 	testsupport.Must(t, err, "PruneEvents: %v", err)
 
-	for name, stepID := range map[string]int{
-		"claimed before the refresh": before,
-		"claimed after the refresh":  after,
-	} {
+	for name, stepID := range steps {
+		if n := claimEventCount(t, conn, stepID); n != 0 {
+			t.Errorf("step %s: %d step-claimed row(s) survived the prune, want 0",
+				name, n)
+		}
 		bundle, err := ReadContext(conn, stepID, nowMS+4)
 		if err == nil {
 			t.Errorf("step %s: read-back returned body %q; want it reported "+
