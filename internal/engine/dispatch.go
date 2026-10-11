@@ -849,7 +849,28 @@ const (
 	// offerable — claimed since the manifest opened, or excluded by a scope
 	// conflict with a row admitted since. The narrower, more alarming case.
 	RowMissing = "genuinely-missing"
+	// RowParkHeld: the step is still pending, and its issue is parked on an
+	// operator decision (R2b), which holds every pending row of that issue —
+	// typically the staged successors of the step that parked. Like the parked
+	// step's own `recorded` row, it does not make the verify fail: the park,
+	// not a conflict, is what keeps it out of the recomputation.
+	RowParkHeld = "held-by-park"
 )
+
+// issueParkHeld reports whether a step is pending in an issue that R2b holds:
+// some step of the issue is parked `waiting-human`. The fact is read directly
+// rather than through Ready's first failing condition, because a run whose
+// every unfinished issue is parked rolls up to `waiting-human` itself, and
+// Ready then answers R1 for the same rows. Only a PENDING step qualifies: a row
+// claimed since the manifest opened is unofferable for another reason.
+func issueParkHeld(s *Scheduler, stepID int) bool {
+	step := s.stepByID[stepID]
+	if step == nil || step.Status != db.StepPending {
+		return false
+	}
+	facts := s.issues[step.IssueID]
+	return facts != nil && facts.parked
+}
 
 // RowVerdict is one stored row's outcome. Stored and Computed carry the bytes
 // on a non-matching verdict, for the reason RowMismatch does: the evidence
@@ -1070,6 +1091,11 @@ func (e *Engine) verifyDispatchTx(
 			// clause nearly every such lane failed its verify, and the
 			// reconcile with it, the instant the child took the lock.
 			verdict.Verdict = RowMatched
+			result.Rows = append(result.Rows, verdict)
+			continue
+		}
+		if !ok && issueParkHeld(sched, want.StepID) {
+			verdict.Verdict = RowParkHeld
 			result.Rows = append(result.Rows, verdict)
 			continue
 		}

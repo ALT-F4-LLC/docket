@@ -272,6 +272,39 @@ func TestReconcileStopsAtAFailedVerify(t *testing.T) {
 	}
 }
 
+// TestReconcileClosesOverParkedSuccessors is DKT-3764's loop, broken: a lane
+// whose implement parked `waiting-human` leaves its staged successors pending
+// and unofferable, and the reconcile must still close the dispatch so that
+// `run refresh-scope`, the park's remedy, is accepted afterwards.
+func TestReconcileClosesOverParkedSuccessors(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	run, issue := activatedRun(t, conn)
+
+	manifest := openDispatch(t, conn, run.ID, 0, nowMS)
+	if len(stagedRowsOf(t, conn, manifest.Rows, issue)) == 0 {
+		t.Fatalf("premise: the manifest stages no successor of implement@0: %+v",
+			manifest.Rows)
+	}
+	implID := stepIDByInstance(t, conn, "implement@0")
+	parkGapOnly(t, conn, implID)
+
+	out, err := e.ReconcileDispatch(conn, run.ID, []BackfillRow{
+		{Step: implID, Unit: "tokens", Quantity: 48211},
+	}, "", "", false, IntegrationSkip{}, nowMS)
+	testsupport.Must(t, err, "reconcile over a parked lane: %v", err)
+	if out.Close == nil || out.Close.Status != db.DispatchClosed {
+		t.Fatalf("close stage reported %+v, want status %q", out.Close, db.DispatchClosed)
+	}
+	if status, _ := dispatchStatus(t, conn, run.ID); status != db.DispatchClosed {
+		t.Fatalf("stored dispatch is %q, want %q", status, db.DispatchClosed)
+	}
+
+	widen(t, conn, issue, `["internal/widened/**"]`)
+	_, err = refresh(conn, run.ID, issue)
+	testsupport.Must(t, err, "refresh-scope after the close: %v", err)
+}
+
 // TestReconcileLeavesTheStandaloneVerbsAlone is criterion 2 at the engine
 // level: the three functions the reconcile calls are the SAME ones the verbs
 // call, so a plain CloseDispatch on a plain run behaves exactly as before.
