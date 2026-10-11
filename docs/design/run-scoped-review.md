@@ -260,7 +260,7 @@ on the step's scope; an issue-scoped `aggregate` parked this way is parked for
 the same reason.
 
 The subject. A run-scoped row has `issue_id` NULL (§3.1). `abandon-issue`'s one
-job is to stop a run's work on an issue: `abandonIssue` (reconcile.go:495-566)
+job is to stop a run's work on an issue: `abandonIssue` (reconcile.go:495-560)
 cascades over `WHERE run_id = ? AND issue_id = ?`, calls
 `SetIssueResolutionTx(tx, step.IssueID, …)` and `releaseAbandonedIssueTx(tx,
 step.IssueID, …)`, and comments through `commentEngineEvent(tx, step.IssueID,
