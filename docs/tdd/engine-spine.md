@@ -335,7 +335,7 @@ schemas. V21d records a case that is *not* an error.
 | V46 | a predicate over `diff.lines` or `diff.files` compares against an integer literal, under any operator | §11.2; payloads-thresholds §5.1 |
 | V47 | a predicate over `diff.empty` uses `==` or `!=` and compares against a boolean literal | §11.2; payloads-thresholds §5.1 |
 | V48 | `max_fix_loops_hard` requires a positive `max_fix_loops` on the same step, and must be >= that `max_fix_loops` | §11.1 `max_fix_loops_hard` |
-| V49 | a `loop = true` step may not be `type="vote"` | §11.1 `loop`; §11.3 (3) |
+| V49 | a `loop = true` step may not declare any `type =` (`"human"` or `"vote"`) | §11.1 `loop`; §11.3 (3) |
 | V50 | `verdict_field` requires the step to declare a `payload`, and must name a property that the step's pinned schema declares | §11.1 `verdict_field` |
 
 **V5 and V8 are the two the spec calls out by name**, and they are the two that
