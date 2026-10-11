@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"slices"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -107,6 +108,53 @@ func TestInsertRunIdempotentReportsInsert(t *testing.T) {
 	}
 	if replay.ID != first.ID {
 		t.Errorf("replay returned run %d, want the original %d", replay.ID, first.ID)
+	}
+}
+
+// TestInsertRunIdempotentCommitsRosterWithRun: the roster commits in the same
+// transaction as the run and its key, so a retry that replays the key finds
+// the roster already written instead of an empty one.
+func TestInsertRunIdempotentCommitsRosterWithRun(t *testing.T) {
+	db := newIdemDB(t)
+
+	first, err := CreateIssue(db, probeIssue(), nil, nil)
+	testsupport.Must(t, err, "creating first issue: %v", err)
+	second, err := CreateIssue(db, probeIssue(), nil, nil)
+	testsupport.Must(t, err, "creating second issue: %v", err)
+	want := []int{first, second}
+
+	rosterOf := func(runID int) []int {
+		t.Helper()
+		rows, err := ListRunIssues(db, runID)
+		testsupport.Must(t, err, "ListRunIssues: %v", err)
+		ids := make([]int, 0, len(rows))
+		for _, ri := range rows {
+			ids = append(ids, ri.IssueID)
+		}
+		return ids
+	}
+
+	run, inserted, err := InsertRunWithContextIdempotent(
+		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-roster", first, second)
+	testsupport.Must(t, err, "first run start: %v", err)
+	if !inserted {
+		t.Fatal("run start under a fresh key reported inserted=false")
+	}
+	if got := rosterOf(run.ID); !slices.Equal(got, want) {
+		t.Errorf("roster after insert = %v, want %v", got, want)
+	}
+
+	replay, inserted, err := InsertRunWithContextIdempotent(
+		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-roster")
+	testsupport.Must(t, err, "replay: %v", err)
+	if inserted {
+		t.Error("replay of an existing key reported inserted=true")
+	}
+	if replay.ID != run.ID {
+		t.Fatalf("replay returned run %d, want the original %d", replay.ID, run.ID)
+	}
+	if got := rosterOf(run.ID); !slices.Equal(got, want) {
+		t.Errorf("roster after replay = %v, want %v", got, want)
 	}
 }
 

@@ -57,10 +57,11 @@ func InsertRunWithContext(db *sql.DB, projectID int, request string, budget floa
 // (internal/db/idempotency.go): a `run start` that commits but dies before its
 // response must be safe to retry, or the key protects nothing. The key record
 // and the insert commit in the SAME transaction, so a crash between them
-// cannot orphan either. inserted tells the caller whether this call created
-// the run, so writes that belong to a new run (the CLI's --issue) skip a
-// replay without a separate lookup another process could race.
-func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, budget float64, nowMS int64, ctx RunContext, idempotencyKey string) (run *model.Run, inserted bool, err error) {
+// cannot orphan either. The roster (issueIDs, one run_issues row each) commits
+// in that same transaction, so a replay finds the roster the original call
+// wrote; a replay's own issueIDs are ignored, like its other parameters.
+// inserted tells the caller whether this call created the run.
+func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, budget float64, nowMS int64, ctx RunContext, idempotencyKey string, issueIDs ...int) (run *model.Run, inserted bool, err error) {
 	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeRunStart, idempotencyKey)
 	if err != nil {
 		return nil, false, err
@@ -88,6 +89,15 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 		return nil, false, fmt.Errorf("reading created run id: %w", err)
 	}
 	id := int(id64)
+
+	for _, issueID := range issueIDs {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO run_issues (run_id, issue_id) VALUES (?, ?)`,
+			id, issueID,
+		); err != nil {
+			return nil, false, fmt.Errorf("adding issue to run: %w", err)
+		}
+	}
 
 	if idempotencyKey != "" {
 		if err := RecordIdempotencyKeyTx(tx, ScopeRunStart, idempotencyKey, id); err != nil {
