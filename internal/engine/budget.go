@@ -104,14 +104,6 @@ func (b budgetSnapshot) usageAdmits() bool {
 	return b.usageSpend <= b.usageCap
 }
 
-// usageHeadroom is what is left under the measured cap.
-func (b budgetSnapshot) usageHeadroom() float64 {
-	if !b.usageArmed() {
-		return 0
-	}
-	return b.usageCap - b.usageSpend
-}
-
 // BudgetSource names where an effective cap came from — the report's R6 line
 // (§4.10 R2) and nothing else. It is scheduling vocabulary: a flag, a config
 // key, or neither.
