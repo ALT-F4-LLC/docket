@@ -186,16 +186,32 @@ func TestTrustAddEventCarriesEveryFlag(t *testing.T) {
 		"argv0_sha256": "",
 	}
 	want["kind"] = engine.EventTrustAdded
+	assertExactTrustPayload(t, got, want)
 
-	// `actor` and `cwd` (DKT-263) are ENVIRONMENT-DERIVED, so they belong to the
-	// key set without belonging to the value table: pinning "Erik Reinert" here
-	// would assert the machine the suite happens to run on. Their values are
-	// TestTrustEventNamesWhoGrantedIt's business; what this test owns is that
-	// they are part of the exact shape a consumer reads.
+	// THE ARGV ITSELF NEVER RIDES ALONG (§3.6). The hash identifies the command;
+	// the arguments must not land in a feed a run report renders.
+	raw, err := json.Marshal(got)
+	testsupport.Must(t, err, "re-marshaling: %v", err)
+	if strings.Contains(string(raw), "./scan") {
+		t.Errorf("the event body contains the argv: %s", raw)
+	}
+}
+
+// assertExactTrustPayload checks a trust event's key set in both directions and
+// every value in want. A missing key is a property the trail cannot show; an
+// unexpected one is a payload drifting from the shape consumers read.
+//
+// `actor` and `cwd` (DKT-263) are ENVIRONMENT-DERIVED, so they belong to the
+// key set without belonging to the value table: pinning "Erik Reinert" here
+// would assert the machine the suite happens to run on. Their values are
+// TestTrustEventNamesWhoGrantedIt's business; what this helper owns is that
+// they are part of the exact shape a consumer reads.
+func assertExactTrustPayload(t *testing.T, got, want map[string]any) {
+	t.Helper()
 	derived := map[string]bool{"actor": true, "cwd": true}
 	for key := range derived {
 		if _, present := got[key]; !present {
-			t.Errorf("the event omits %q; a grant widens what code may execute, "+
+			t.Errorf("the event omits %q; a trust change alters what code may execute, "+
 				"so its trail must name who did it (DKT-263)", key)
 		}
 	}
@@ -215,14 +231,6 @@ func TestTrustAddEventCarriesEveryFlag(t *testing.T) {
 			continue
 		}
 		t.Errorf("the event carries an unexpected key %q", key)
-	}
-
-	// THE ARGV ITSELF NEVER RIDES ALONG (§3.6). The hash identifies the command;
-	// the arguments must not land in a feed a run report renders.
-	raw, err := json.Marshal(got)
-	testsupport.Must(t, err, "re-marshaling: %v", err)
-	if strings.Contains(string(raw), "./scan") {
-		t.Errorf("the event body contains the argv: %s", raw)
 	}
 }
 
@@ -248,14 +256,55 @@ func TestTrustRemoveEventCarriesTheRemovedFlags(t *testing.T) {
 	if removed["kind"] != engine.EventTrustRemoved {
 		t.Fatalf("the second event is %v, want %s", removed["kind"], engine.EventTrustRemoved)
 	}
-	if removed["tree"] != true {
-		t.Errorf("the removal does not record that the entry carried tree; got %#v", removed["tree"])
+	assertExactTrustPayload(t, removed, map[string]any{
+		"kind":        engine.EventTrustRemoved,
+		"name":        "scan",
+		"argv_sha256": trust.ArgvSHA256([]string{"go", "run", "./scan"}),
+		"repo":        mustRepoIdentity(t, cfg),
+		"global":      false,
+		"prefix":      false,
+		"re_runnable": false,
+		"tree":        true,
+		"flaky":       false,
+		"network":     []any{"vuln.go.dev"},
+		"timeout":     "",
+		"stub":        false,
+		"stub_reason": "",
+		// EMPTY for a bare-name argv[0], and asserted rather than skipped: a
+		// revocation that dropped the key would read the same as one from a
+		// docket that never recorded pins.
+		"argv0_sha256": "",
+	})
+}
+
+// TestTrustRemoveEventCarriesArgv0Pin: a revocation names the bytes it
+// revoked. The removal's pin is the file's own hash and the one the add
+// recorded, so the pair reads as the grant and its withdrawal.
+func TestTrustRemoveEventCarriesArgv0Pin(t *testing.T) {
+	_, cfg := trustRepo(t)
+	script := writeScript(t, "#!/bin/sh\nexit 0\n")
+	pin := fileSHA256(t, script)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", script)
+	testsupport.Must(t, err, "trust add: %v", err)
+	err = runTrustVerb(t, cfg, newTrustRmCmd(), "checks")
+	testsupport.Must(t, err, "trust rm: %v", err)
+
+	events := trustEvents(t, cfg)
+	if len(events) != 2 {
+		t.Fatalf("got %d trust events, want the add and the remove", len(events))
 	}
-	if !sameJSON(t, removed["network"], []any{"vuln.go.dev"}) {
-		t.Errorf("the removal does not record the revoked hosts; got %#v", removed["network"])
+	added, removed := events[0], events[1]
+	if removed["kind"] != engine.EventTrustRemoved {
+		t.Fatalf("the second event is %v, want %s", removed["kind"], engine.EventTrustRemoved)
 	}
-	if removed["argv_sha256"] != trust.ArgvSHA256([]string{"go", "run", "./scan"}) {
-		t.Errorf("the removal names the wrong argv hash: %#v", removed["argv_sha256"])
+	if removed["argv0_sha256"] != pin {
+		t.Errorf("the removal's argv0_sha256 = %#v, want the script's %q",
+			removed["argv0_sha256"], pin)
+	}
+	if removed["argv0_sha256"] != added["argv0_sha256"] {
+		t.Errorf("the removal's argv0_sha256 = %#v, want the add event's %#v",
+			removed["argv0_sha256"], added["argv0_sha256"])
 	}
 }
 
