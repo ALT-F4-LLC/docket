@@ -736,6 +736,10 @@ four properties are what keep it from being a hole in §9 item 5:
    operator's reason — so two steps of one run declaring two different scopes is a
    dated, attributable fact rather than drift a reader must infer.
 
+On a bound run `refresh-scope` also requires the conductor capability, presented via
+`DOCKET_TOKEN` or stdin, because an executor could otherwise widen its own scope
+snapshot; a run with no capability minted allows it without one.
+
 **The description gets the same exception.** `docket run refresh-body RUN-N --issue
 DKT-M --reason R` re-snapshots one run-issue's `body_snapshot` and `body_sha256`
 (`RefreshIssueBodyInRun`), which the packet's `== REQUEST` and `== INPUT issue.body`
