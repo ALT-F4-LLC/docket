@@ -1,6 +1,6 @@
 # Run-scoped review over a run's integrated diff
 
-Status: proposed — 2026-10-09 · design note settling the shape of a review step
+Status: proposed — 2026-10-10 · design note settling the shape of a review step
 that reads the integrated diff of a run's issues once they land on the shared
 branch. Every file:line citation below is read at engine commit 3c73f103. The
 decisions are proposed, not yet implemented; the spec amendments they require
@@ -32,7 +32,7 @@ final review)" (line 63). The storage admits it, `steps.issue_id` is nullable
 |---|---|---|
 | D1 | Workflow-expansion shape | A run-scoped workflow definition: `[pipeline] scope = "run"`. Its steps use the existing `[[step]]` grammar, expand once per run at activation with `issue_id` NULL, and become ready only after every issue of the run is terminal and no dispatch is open (readiness clause R2c). Not a per-step flag inside issue workflows, not an opt-in phase assembled from several bound workflows. |
 | D2 | `run.diff` derivation | A fresh read of the integration branch, recorded as a `run.diff` artifact at the claim of each run-scoped step that declares the input: `GitDiff(run.exec_root, run.commit_sha, union of the run's issue scopes)`, with the round record `{base, head, sha256}`. Never the union of issue diffs. |
-| D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V48b), so a rejection routes `waiting-human`. |
+| D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V48b), so a rejection routes `waiting-human`; the resolutions that park supports, and the reason it carries, are decided in §3.3 and owned by phase 2. |
 | D4 | Register-time lint | V48: `[pipeline] scope`, when present, is `"issue"` or `"run"`, and a definition whose scope is `issue` has no step whose `inputs` names `run.diff`. V48a: a definition whose scope is `run` declares no `[match]` table, no step `when`, and no step input of an `issue.*` form. V48b (phase 1 and 2 only): a definition whose scope is `run` has no `loop = true` step, no `threshold`, `on_fail`, or `on_fail_routes` value equal to `fix-loop` or `fix-round`, and no step declaring `on_exhausted` or `serves`. |
 | D5 | Activation with no integration point | Activation is refused (`VALIDATION_ERROR`, inside the fat transaction, nothing written) when a run-scoped definition binds, some step of it declares `run.diff` or holds the tree, and the run's `exec_root` or `commit_sha` is empty. The refusal names the run, the definition, the empty field, and the two remedies: start the run from inside the checkout, or retire the run-scoped definition with `workflow deprecate`. |
 
@@ -238,55 +238,173 @@ situation isn't expressible, the answer is `waiting-human`, not cleverness").
 
 Resolving the phase-2 park. `step resolve` accepts six values,
 `--as retry|rerun-gates|skip|abandon-issue|override-pass|fix-round`
-(internal/cli/step.go:942, 1085). A run-scoped step has no issue, so the stance
-on each value is decided here for a run-scoped (NULL `issue_id`) step parked
-`waiting-human` with class `threshold-routed` under phase 2:
+(internal/cli/step.go:942, 1085). Two facts about the parked row decide each
+value's stance, and the engine reads them separately: the park's cause and the
+row's subject. The stances below are decided for a run-scoped (NULL `issue_id`)
+step parked `waiting-human` with class `threshold-routed` under phase 2, and
+each row says which fact it keys on.
 
-| `--as` | Stance | Reason |
-|---|---|---|
-| `override-pass` | Supported | It records a generic `pass` on the step row (human.go:796-797) and reads no issue; the run then rolls up `done` with the park answered. |
-| `skip` | Supported | It routes the step `skipped` (human.go:792-793); the one issue-keyed read on its path is `propagateAfterFiredSkips`' `issue_id` (reconcile.go:57), which phase 2 teaches the NULL row as it does every other `IssueID == 0` reader (§3.1). The run rolls up `done` with its integrated review recorded as skipped. |
-| `retry` | Refused on this park | Retry resets the attempt budget and re-runs the step (human.go:783-791), and the aggregate re-reads the same terminal `review.findings` and parks here again; that is the stickiness the engine already refuses retry for on a rejected hold (human.go:605-621) and a decided vote (human.go:583-602), and the refusal names `override-pass` and `skip` in the same shape. `retry` stays supported on a run-scoped step parked for a cause that can change, such as a gate failure or the §9 size park. |
-| `abandon-issue` | Refused | `abandonIssue` (reconcile.go:495-560) cascades over `WHERE issue_id = ?`, writes `issues.resolution`, releases the issue to `todo`, and comments on `step.IssueID`; on a NULL row each is a no-op or a write against a nonexistent issue, because there is no issue for this run to stop working on. The refusal names `override-pass` and `skip`. |
+The cause. The §5 `reconcile` step is an action step (`action = "aggregate"`;
+`Step.Action`, internal/workflow/parse.go:116; `ClassAction`, parse.go:375). Its
+payload is a function of its inputs, the terminal `review.findings` artifacts,
+and its threshold is evaluated over that payload (saga.go:1210-1219,
+`stepPayloads`). When an arm matches `waiting-human`, `EvaluateThresholdOverDiff`
+returns the routing with `Parked` false (threshold.go:204); when an ordered
+comparison cannot be decided, T3 returns `waiting-human` with `Parked` true and a
+reason of its own (threshold.go:194-200). Both reach `ParkClassThresholdRouted`
+through one branch (saga.go:1374-1378), so the class alone does not separate
+them. The sticky cause this note keys on is the first: an action step whose
+threshold matched a `waiting-human` arm. Re-running it re-reads the same inputs,
+recomputes the same payload, and matches the same arm. The cause does not depend
+on the step's scope; an issue-scoped `aggregate` parked this way is parked for
+the same reason.
 
-`fix-round` is refused until phase 3: V48b forbids the loop body it would enter,
-and `GrantLoopTx` keys the grant on `step.IssueID` (human.go:803). Phase 3 makes
-it the remedy §6 names. `rerun-gates` is not a remedy here either: it re-runs the
-gates and re-evaluates the same threshold over the same payload.
+The subject. A run-scoped row has `issue_id` NULL (§3.1). `abandon-issue`'s one
+job is to stop a run's work on an issue: `abandonIssue` (reconcile.go:495-566)
+cascades over `WHERE run_id = ? AND issue_id = ?`, calls
+`SetIssueResolutionTx(tx, step.IssueID, …)` and `releaseAbandonedIssueTx(tx,
+step.IssueID, …)`, and comments through `commentEngineEvent(tx, step.IssueID,
+…)`. Its stance follows the subject and nothing about the park.
+
+| `--as` | Stance | Keyed on | Reason |
+|---|---|---|---|
+| `override-pass` | Supported | Neither | It records a generic `pass` on the step row (human.go:796-797) and reads no issue; the run then rolls up `done` with the park answered. On a step whose threshold interposes other steps it needs `--drop-interposed` (human.go:668-680), as on any step. |
+| `skip` | Supported | Neither | It routes the step `skipped` (human.go:792-793). Three issue-keyed reads sit on its reconcile path, and phase 2 teaches each the NULL row as it does every other `IssueID == 0` reader (§3.1): `targetRoutings` and `pendingTargetInstances` (reconcile.go:174-180, 221-226) and `ListIssueStepsTx` under `propagateAfterFiredSkips` (internal/engine/after_fired.go:72-78; internal/db/steps.go:374). Skip also terminalizes any step the threshold interposes, through `skipUnroutedTargets` (reconcile.go:49, 126-166), with no acknowledgment flag; the §5 definition interposes nothing, and the asymmetry against `override-pass`'s `--drop-interposed` is deferred (§7). The run rolls up `done` with its integrated review recorded as skipped. |
+| `retry` | Refused on this park | Cause | Retry resets the attempt budget and re-runs the step (human.go:783-791); an action step re-run over the same terminal inputs matches the same arm and parks here again. The engine already refuses retry for the two other sticky causes it can read, a rejected hold (human.go:604-621; `parkedByRejectedHold`, internal/engine/held.go:606) and a decided vote (human.go:583-602; `ReadStepVoteOutcome`), and each refusal inspects the cause, not the row's scope. `retry` stays supported on a T3 park (its remedy is to register the order and re-run), on an executor step's matched arm (a re-execution records a new payload), and on every other park of a run-scoped step: a gate failure, the §9 size park. |
+| `rerun-gates` | Refused on this park | Cause | It re-runs the gates and re-evaluates the same threshold over the same recorded payload, the same inert outcome as `retry`, so the same test refuses it with the same message. That refusal runs before the existing no-gates refusal (human.go:682-690), whose message points at `retry`; on the §5 step, which declares no gates, the operator therefore reads the two values that move the step rather than a pointer to a value the next command refuses. |
+| `abandon-issue` | Refused | Subject | On a NULL row each of `abandonIssue`'s writes is a no-op or a write against a nonexistent issue, because there is no issue for this run to stop working on. It stays supported, as today, on an issue-scoped row parked the same way. |
+| `fix-round` | Refused until phase 3 | Neither | V48b forbids the loop body it would enter, and `GrantLoopTx` keys the grant on `step.IssueID` (human.go:803). Phase 3 makes it the remedy §6 names. |
+
+How the refusal reads the cause. `resolveStep` re-runs the routing stage's own
+evaluation, `EvaluateThresholdOverDiff` over `stepPayloads` and `stepOrder`
+(saga.go:1219, 1195; internal/engine/order.go:67) with nil `DiffFacts`, for a
+step whose `Kind` is `ClassAction` and whose status is `waiting-human` with class
+`threshold-routed`. A result whose `Routing` is `waiting-human` and whose `Parked`
+is false is the sticky cause; any other result (a T3 park, a payload that has
+since changed) leaves `retry` and `rerun-gates` accepted. The evaluation is pure
+(saga.go:1244-1249: "It is pure, so calling it there costs nothing and races
+nothing"); nil facts are exact for an action step because V45 refuses a `diff.*`
+predicate on any step that is not a tree-holding executor or fanout
+(internal/workflow/validate.go:1431-1451); and reading the cause with the same
+call the park was decided by keeps the refusal and the park from disagreeing,
+the argument the interposed-targets refusal makes for reusing
+`skipUnroutedTargets`' read (human.go:655-667). The reason's text is never
+consulted: the spec forbids moving a row between classes by reading it
+(engine-spec.md §2, "Park class"), and a refusal keyed on prose would be fragile
+for the same reason.
 
 The park reason. A matched `waiting-human` arm returns no reason today
-(`EvaluateThresholdOverDiff`, threshold.go:204), so `SetStepRoutingTx` stores
-the class word alone (internal/db/steps.go:823) and the park reads
-`threshold-routed`, naming no remedy. Phase 2 composes the run-scoped park's
-reason in the routing branch that assigns `ParkClassThresholdRouted`
-(saga.go:1374-1378), under the `<class>: <prose>` shape the other engine park
-reasons use (`attemptsExhaustedParkReason`, human.go:1290; `loopBoundParkReason`,
-human.go:1302). The template, with `{count}` the findings count as the threshold
-sees it (the number of payload elements the matched arm's predicate selected;
-`aggregate@1` carries one element per input cluster), `{predicate}` the arm's
-source text, and `{resolutions}` the supported set above:
+(threshold.go:204), so `SetStepRoutingTx` stores the class word alone
+(internal/db/steps.go:823) and every threshold-routed park that is not T3 reads
+`threshold-routed`, naming no remedy. Phase 2 composes a reason for the sticky
+cause above, in two halves that follow what each side knows:
+
+- `evaluate` and `evaluateOrdered` report their match count beside the bool they
+  return today (T1 counts at threshold.go:301-311, T2 at 341-365, both through
+  `aggregate(p, count, len(payloads))`, 470-480), and `ThresholdResult`
+  (threshold.go:133-144) gains `Matched` and `Total`. For a matched
+  `waiting-human` arm, `EvaluateThresholdOverDiff` sets `Reason` to the cause
+  clause, as it already does for T3: `{count} of {total} payload
+  {element|elements} matched "{predicate}"`.
+- The saga's `evaluate` closure returns the `ThresholdResult` instead of
+  narrowing it to `(routing, reason)` (saga.go:1250-1257), and the branch that
+  assigns `ParkClassThresholdRouted` (saga.go:1374-1378) composes the stored
+  reason for a `ClassAction` step whose result is `waiting-human` with `Parked`
+  false, under the `<class>: <prose>` shape the other engine park reasons use
+  (`attemptsExhaustedParkReason`, human.go:1290; `loopBoundParkReason`,
+  human.go:1302):
 
 ```
-threshold-routed: {count} payload element(s) matched "{predicate}" on the run's integrated diff; resolve with {resolutions}
+threshold-routed: {count} of {total} payload {element|elements} matched "{predicate}"; resolve with {resolutions}
 ```
 
-`{resolutions}` renders as `--as override-pass (accept the integrated tree as
-reviewed) or --as skip (leave it unreviewed)`, and nothing else: the two values
-are the whole supported set on this park. Rendered for the §5 definition when two
-of the aggregate's clusters reduce to `high` or above:
+Placeholders. `{count}` is the number of payload elements the arm's predicate
+held for and `{total}` the payload set's size, both as the threshold saw them
+(`aggregate@1` carries one element per input cluster, so on the §5 definition
+both count clusters). `{predicate}` is the arm's source text. The noun is
+`element` when `{total}` is 1 and `elements` otherwise. `{resolutions}` is the
+step's supported set, rendered from the subject: `--as override-pass (accept the
+step as passing) or --as skip (route it skipped)` on a NULL row, and `--as
+override-pass (accept the step as passing), --as skip (route it skipped), or
+--as abandon-issue (drop the issue from this run)` on an issue row, the three
+glosses the rejected-hold refusal uses today (human.go:618-621). Nothing else is
+listed: `retry` and `rerun-gates` are refused on this park, `fix-round` until
+phase 3.
+
+Rendered for the §5 definition, three clusters of which two reduce to `high` or
+above:
 
 ```
-threshold-routed: 2 payload element(s) matched "any(severity >= high)" on the run's integrated diff; resolve with --as override-pass (accept the integrated tree as reviewed) or --as skip (leave it unreviewed)
+threshold-routed: 2 of 3 payload elements matched "any(severity >= high)"; resolve with --as override-pass (accept the step as passing) or --as skip (route it skipped)
 ```
 
-Issue-scoped threshold parks keep today's class-word reason; giving them the same
-template is a separate change, unassigned, triggered when an operator reads one.
+One cluster, at `high`:
 
-Alternatives weighed.
+```
+threshold-routed: 1 of 1 payload element matched "any(severity >= high)"; resolve with --as override-pass (accept the step as passing) or --as skip (route it skipped)
+```
+
+An `all(...)` arm over an empty payload, which T4 decides true without consulting
+the predicate (threshold.go:279-281):
+
+```
+threshold-routed: 0 of 0 payload elements matched "all(severity >= high)"; resolve with --as override-pass (accept the step as passing) or --as skip (route it skipped)
+```
+
+Where the composer stops. A T3 park keeps the reason the evaluator already
+composes; its remedy is the schema registration that text names. The
+stale-lineage branch (saga.go:1429-1433) evaluates so the ledger is attributed
+and materializes nothing, so the composer is not applied there and the result's
+own reason is stored as today. An executor step's matched `waiting-human` arm
+keeps the class-word reason: its re-execution can change the payload, so neither
+the sticky refusal nor this remedy list is right for it (§7).
+
+Consequence for issue-scoped rows. Because the refusal and the composer both key
+on the cause, an issue-scoped action step parked by a matched `waiting-human`
+arm gains the same reason, with `abandon-issue` in its `{resolutions}`, and
+loses `retry` and `rerun-gates` on that park. That is a behavior change on both
+scopes, listed in §8. It is decided here because the alternative, one park class
+carrying a policy that differs by scope, is the shape the table below rejects.
+
+The refusals, as templates. Each is a `validationErr` in `resolveStep`, in the
+shape of the rejected-hold refusal (human.go:609-618). `{as}` is the value the
+operator gave; `{resolutions}` is the subject's list above, from the renderer the
+park reason uses.
+
+Sticky cause, for `retry` and `rerun-gates`:
+
+```
+step {instance} cannot be resolved with --as {as}: it is parked because its threshold matched "{predicate}" over {count} of {total} payload {element|elements}, and an action step re-run over the same inputs would route here again. Use {resolutions}
+```
+
+Subject, for `abandon-issue` on a NULL row, whatever the park:
+
+```
+step {instance} belongs to the run, not to an issue, so --as abandon-issue has nothing to abandon. Use --as override-pass (accept the step as passing) or --as skip (route it skipped)
+```
+
+The second names the two values supported on every run-scoped park; whether
+`retry` applies is the first refusal's question, asked when the operator asks it.
+The two existing sticky refusals end "or --as abandon-issue to drop the issue
+from this run" (human.go:598-601, 618-621); on a NULL row phase 2 drops that
+clause, since a run-scoped definition may declare a vote or a hold (V48b forbids
+neither) and the message would otherwise name a value the next command refuses.
+
+Rendered for the §5 definition after `step resolve reconcile@0 --as retry`:
+
+```
+step reconcile@0 cannot be resolved with --as retry: it is parked because its threshold matched "any(severity >= high)" over 2 of 3 payload elements, and an action step re-run over the same inputs would route here again. Use --as override-pass (accept the step as passing) or --as skip (route it skipped)
+```
+
+Alternatives weighed, for the park's resolution first and the loop after it.
 
 | Candidate | Why it lost |
 |---|---|
-| Accept `retry` on the threshold-routed run-scoped park, as the engine does on an issue-scoped one, and name it in the park reason | The resolution would be accepted and inert: the aggregate re-reads the same findings and parks again with the same reason, so the park reason would offer a remedy that does not remedy. A supported value the park reason omits is the same defect from the other side. The refusal follows the engine's existing rejected-hold and decided-vote precedent and names the values that move the step. |
+| Key the refusal and the composer on scope: a run-scoped row with class `threshold-routed` (this note's first draft) | Too broad and too narrow at once. It refuses `retry` on a run-scoped T3 park, whose remedy is to register the order and re-run, and overwrites T3's own reason; it keeps `retry` accepted on an issue-scoped aggregate parked by the same matched arm, where it is just as inert. One park class would carry two policies split by scope across human.go and saga.go, and each new scope would need a table of its own. The cited precedents inspect the cause, not the row's scope. |
+| Key on the cause by recording it: split `threshold-routed` into a matched-arm class and an undecidable class | Enforces the distinction by construction rather than by a re-evaluation, which is its real strength. It changes a closed enum the spec lists (engine-spec.md §2, "Park class"), re-labels what every existing `threshold-routed` row means, and makes every conductor that routes on the class learn two values, for a distinction one pure function call makes at resolve time. |
+| Accept `retry` on the matched-arm park, as the engine does today, and name it in the park reason | The resolution would be accepted and inert: the aggregate re-reads the same findings and parks again with the same reason, so the park reason would offer a remedy that does not remedy. A supported value the park reason omits is the same defect from the other side. |
+| Compose the whole reason in saga.go from `Matched`, `Total`, and a new `Predicate` field on `ThresholdResult` | One composer instead of two halves, which is its strength. It adds a field that exists only to be printed and re-derives in saga.go a sentence the evaluator already composes for T3. The two halves follow a seam that exists: the evaluator states the cause (T3's `Reason`), the routing branch states the class and the remedy (`loopBoundParkReason`). |
+| Drop `{count}` from the template, so no evaluator change is needed | Removing the evaluator change is its only strength. The count is what tells an operator whether one cluster or every cluster crossed the line, and the issue's acceptance criteria require it. |
 | Re-enter each named issue's loop under that issue's own counter and its bound workflow's `max_fix_loops` | Three defects. The issue is `done` (`completeIssue`, reconcile.go:457-475) and nothing in the engine moves a done issue back; `reflectIssueStatus` (reconcile.go:268) only advances `in_progress` to `review`. Core would have to learn which issues a rejection names, either by reading payload content, which genericity.md forbids, or by re-opening every issue whose scope the diff touches, which re-runs N per-issue review chains over N per-issue diffs for a defect that lives in their intersection. And the run-scoped review itself must run again after the fixes, which is a run-scoped re-instantiation in any case, so this candidate needs the run-level construct and the issue-level reopen both. The question "whose bound governs a rejection spanning several issues" has no answer under it that is not invented: the smallest bound, the largest, or the first-declared are all arbitrary. |
 | No loop: a run-scoped rejection routes `waiting-human` only, and follow-up issues carry the fixes | This is phase 1 and 2's behavior, kept deliberately until the cluster lands. As the permanent answer it leaves the integrated tree's known defects to an operator on every run, which is the hand process the request asks to replace. |
 
@@ -409,6 +527,35 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
 - docs/design/engine-spec.md: §11.1 inputs row and §11.4 `context` shape (the
   amendment text is in §10; the edit is the amendment's, not this note's).
 
+### Park resolution (phase 2)
+
+- internal/engine/threshold.go: `evaluate` and `evaluateOrdered` report their
+  match count; `ThresholdResult` gains `Matched` and `Total`;
+  `EvaluateThresholdOverDiff` sets `Reason` to the §3.3 cause clause for a
+  matched `waiting-human` arm. `evaluateDiff` is unchanged: V45 keeps `diff.*`
+  off the action steps the composer serves.
+- internal/engine/threshold_test.go: the counts and the matched-arm reason for
+  `any`, for `all` over an empty set, and for `count>=n`; a T3 park's reason
+  unchanged.
+- internal/engine/saga.go: the `evaluate` closure returns the `ThresholdResult`;
+  the branch that assigns `ParkClassThresholdRouted` composes the §3.3 park
+  reason for a `ClassAction` step whose result is `waiting-human` and not
+  `Parked`; the stale-lineage branch does not.
+- internal/engine/human.go: `resolveStep` refuses `retry` and `rerun-gates` on
+  the sticky cause by re-evaluating the threshold, ahead of the no-gates
+  refusal; refuses `abandon-issue` on a NULL row; drops the `abandon-issue`
+  clause from the decided-vote and rejected-hold refusals on a NULL row; one
+  renderer for `{resolutions}`, shared with the saga's composer (§3.3).
+- internal/engine/human_test.go: each refusal's message on the §5 fixture, the
+  issue-scoped rendering, and `retry` still accepted on a T3 park.
+- internal/engine/reconcile.go: `reconcileIssueAndRun` skips the issue-status
+  mirror for a run-scoped step and still runs `reconcileRun`; `targetRoutings`
+  and `pendingTargetInstances` take the NULL `issue_id` reading so
+  `skipUnroutedTargets` works on a run-scoped step.
+- internal/engine/after_fired.go and internal/db/steps.go:
+  `propagateAfterFiredSkips` and `ListIssueStepsTx` take the NULL reading so a
+  `--as skip` cascades over the run-scoped successors (§3.3).
+
 ### Fix-loop routing
 
 - internal/engine/loop.go: `enterLoop` reads and restores the counter through
@@ -416,16 +563,6 @@ Every path not marked new exists at 3c73f103 (verified with `ls` in the checkout
   definition; `newestIssueDiffUpTo` gains a `run.diff` reading for the
   non-convergence check.
 - internal/engine/loop_test.go.
-- internal/engine/reconcile.go: `reconcileIssueAndRun` skips the issue-status
-  mirror for a run-scoped step and still runs `reconcileRun`;
-  `propagateAfterFiredSkips` takes the NULL `issue_id` reading so a `--as skip`
-  cascades over the run-scoped successors (§3.3).
-- internal/engine/human.go: `resolveStep` refuses `abandon-issue` on a run-scoped
-  step, and `retry` on a run-scoped step parked `threshold-routed`, each naming
-  `override-pass` and `skip` (§3.3).
-- internal/engine/human_test.go.
-- internal/engine/saga.go: the routing branch that assigns
-  `ParkClassThresholdRouted` composes the §3.3 park reason for a run-scoped step.
 - internal/engine/ready.go: R2c is also what keeps a re-instantiated run-scoped
   chain unready until its same-ordinal body finishes, reusing the loop-body
   closure (`loopClosure`, ready.go:205).
@@ -504,16 +641,31 @@ exactly one workflow before it was registered binds that same workflow and its
 activation succeeds, and `lintDomainScopeMismatch` reports nothing it did not
 report before.
 
-Phase 2, binding, storage, readiness, packet. NULL `issue_id` rows; partial
-unique index; run-scoped binding and the D5 refusal; R2c; `run.diff` recorded at
-claim; the `run?` bundle member. Acceptance: on a fixture run with two issues,
-`next` offers no run-scoped row while any issue step is non-terminal or a
-dispatch is open, and offers `review@0#0` and `review@0#1` once both hold; the
-claimed bundle's first input is a `run.diff` whose payload `base` equals the
-run's `commit_sha` and whose body equals `git diff <base> HEAD -- <union scope>`
-plus the untracked trailer, byte for byte; a run started outside a checkout is
-refused at activation with the D5 message and leaves zero step rows; every
-existing bundle fixture is byte-identical.
+Phase 2, binding, storage, readiness, packet, and the park's resolution. NULL
+`issue_id` rows; partial unique index; run-scoped binding and the D5 refusal;
+R2c; `run.diff` recorded at claim; the `run?` bundle member; and everything §3.3
+decides about the `waiting-human` park, because this phase is what makes that
+park reachable: the matched-arm park reason, the sticky-cause refusal of `retry`
+and `rerun-gates`, the subject refusal of `abandon-issue`, the NULL readings on
+`skip`'s reconcile path, and the `abandon-issue` clause dropped from the two
+existing refusals on a NULL row (the §4 "Park resolution" group). Acceptance: on
+a fixture run with two issues, `next` offers no run-scoped row while any issue
+step is non-terminal or a dispatch is open, and offers `review@0#0` and
+`review@0#1` once both hold; the claimed bundle's first input is a `run.diff`
+whose payload `base` equals the run's `commit_sha` and whose body equals `git
+diff <base> HEAD -- <union scope>` plus the untracked trailer, byte for byte; a
+run started outside a checkout is refused at activation with the D5 message and
+leaves zero step rows; every existing bundle fixture is byte-identical. For the
+park: with `review.findings` recorded so that two of three clusters reduce to
+`high`, `reconcile@0` parks with `park_reason` equal to the §3.3 rendering byte
+for byte; `step resolve reconcile@0 --as retry`, `--as rerun-gates`, and `--as
+abandon-issue` are each refused with the §3.3 message for that value; `--as
+skip` routes `reconcile@0` `skipped`, skips its run-scoped `after_fired`
+successors, and the run rolls up `done`; `--as override-pass` routes it `done`
+and the run rolls up `done`; an issue-scoped `aggregate` parked by a matched arm
+in the same fixture renders the template with `--as abandon-issue` in its list
+and refuses `--as retry`; a T3 park on either scope keeps its own reason and
+accepts `--as retry`.
 
 Phase 3, run-scoped loop cluster. `runs.loop_count`; `enterLoop` by subject;
 non-convergence over `run.diff`; `dispatch close` admits `run.diff` heads; V48b
@@ -542,6 +694,17 @@ the integration check's `checked` list includes the run-scoped fix's head.
 - The reference instance's contracts and packet files for the run-scoped judges.
   Instance config lives outside this repository.
 - A per-run opt-out flag on `run activate` (§3.5).
+- A composed park reason and a sticky-cause refusal for an executor step's
+  matched `waiting-human` arm. A re-execution can change its payload, so `retry`
+  is a real remedy there and the class-word reason stands. Deferred, unassigned,
+  triggered when an operator reads one.
+- Extending `--drop-interposed` to `--as skip`. The interposed-targets refusal
+  guards `override-pass` alone (human.go:668-680) and the flag is refused on any
+  other value (human.go:450-458), while `skip` reaches the same
+  `skipUnroutedTargets` with no acknowledgment, on both scopes today. The §3.3
+  skip row states the consequence; the guard is a separate change, unassigned,
+  triggered by the first run-scoped definition that declares an interposed
+  target beside its `waiting-human` arm.
 
 ## 8. What gets worse
 
@@ -564,6 +727,13 @@ the integration check's `checked` list includes the run-scoped fix's head.
 - Phase 3 adds a second loop subject, so `enterLoop`'s counter reads and writes
   branch on the subject. The branch is one accessor pair, but it is a second
   place a counter can be read wrong.
+- Every action step parked by a matched `waiting-human` arm, on either scope,
+  refuses `retry` and `rerun-gates` and carries the §3.3 reason (§3.3,
+  "Consequence for issue-scoped rows"). An operator or test that retried such a
+  park got an identical re-park before and now gets a refusal naming the values
+  that move the step; existing tests that retry a parked aggregate need the new
+  expectation, and `resolveStep` performs one threshold evaluation it did not
+  perform before.
 
 ## 9. Premortem
 
@@ -582,11 +752,13 @@ acceptance.
   large integrated change needs an operator's decision.
 - The panel finds a defect, routes `waiting-human` under phase 2, and the park sits
   for days because nothing names a remedy. Mitigation: the park reason is the
-  §3.3 template, carrying the findings count and the two resolutions supported on
-  a run-scoped threshold park (`override-pass`, `skip`); `retry` and
-  `abandon-issue` are refused there with a message naming the same two; phase 3
-  is scheduled before the first production workflow declares a run-scoped
-  threshold.
+  §3.3 template, carrying the match count and the two resolutions supported on a
+  run-scoped step parked by a matched arm (`override-pass`, `skip`); `retry` and
+  `rerun-gates` are refused there by the sticky-cause test and `abandon-issue`
+  by the subject test, each with the §3.3 message naming the same two; §6 places
+  the reason and the refusals in phase 2's scope and acceptance, so the park
+  cannot ship without its remedy; phase 3 is scheduled before the first
+  production workflow declares a run-scoped threshold.
 - A run-scoped fix body under phase 3 commits to the shared branch while an
   operator is hand-editing the same checkout. Mitigation: the body runs under
   the tree lock every tree-declaring gate already takes (`RepoPaths.LockPath`,
@@ -627,4 +799,7 @@ rather than from a test in this repository), and the claim that no code path
 writes a NULL `issue_id` step today (a search for `IssueID` writers found only
 `expandIssue` and the loop instantiation paths, all of which copy an issue's id;
 an exhaustive proof is phase 2's test, which asserts every run-scoped row is
-readable through `ListRunStepsTx`).
+readable through `ListRunStepsTx`). The §3.3 park-resolution citations added in
+the 2026-10-10 revision were read at 3c73f103 through `git show`, since the
+checkout had moved on; where HEAD differs (human.go, saga.go, db/steps.go have
+shifted by a few lines) the pinned numbers stand, per the header.
