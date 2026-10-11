@@ -83,7 +83,11 @@ the run and re-plan.
 
 --reason is required. A repin moves the agreement every packet is verified
 against, and a trail that shows the hashes changing without saying why is a
-record that rewrote itself.`,
+record that rewrote itself.
+
+Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
+via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
+for none.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunRepin(cmd, args[0], getWriter(cmd))
@@ -110,6 +114,7 @@ func runRunRepin(cmd *cobra.Command, ref string, w *output.Writer) error {
 
 	outcome, err := engine.RepinRunWith(conn, runID, engine.RepinOptions{
 		Reason: reason, Drop: drop, DropUnresolvable: dropUnresolvable,
+		Token: conductorToken(conn, runID, cmd.InOrStdin()),
 	}, model.NowMS())
 	if err != nil {
 		return runErr(err)

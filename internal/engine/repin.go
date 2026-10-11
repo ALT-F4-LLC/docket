@@ -159,6 +159,10 @@ type RepinOptions struct {
 	// without naming each. Pins that resolve to different bytes are untouched
 	// by it — those are repin's ordinary business.
 	DropUnresolvable bool
+	// Token is the run's conductor capability. A repin moves the agreement
+	// every remaining packet renders from, so on a bound run only the
+	// conductor may do it.
+	Token string
 }
 
 // RepinRun re-pins a run's drifted pins to what their refs resolve to now.
@@ -393,6 +397,9 @@ func repinRunOptsIn(
 	// holds at the moment the agreement moves, not merely when the verb began.
 	fresh, err := db.GetRunTx(tx, runID)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeConductorTx(tx, runID, opts.Token, "run repin"); err != nil {
 		return nil, err
 	}
 	if err := repinStatusGuard(fresh); err != nil {
