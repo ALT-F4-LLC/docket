@@ -337,7 +337,7 @@ func (r *ExecActionRunner) spawnMatched(
 	// ordinal. The pass predicate is exit-zero AND a parseable reply — a
 	// command that exits 0 and prints garbage has not produced a result, and
 	// re-running it is exactly what `flaky` is for.
-	attempts, err := exec.RunVerifiedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin)
+	attempts, refusal, err := exec.RunVerifiedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin)
 	if err != nil {
 		return r.failed(a, fmt.Sprintf("running action %s: %v", a.Name, err), match)
 	}
@@ -346,20 +346,6 @@ func (r *ExecActionRunner) spawnMatched(
 	var last *exec.Attempt
 	for i := range attempts {
 		attempt := attempts[i]
-		if attempt.Refused != nil {
-			// The pin no longer holds: nothing spawned for this ordinal, so
-			// the row carries no argv and no exit, like a Resolve refusal.
-			// RunVerifiedAttempts stops at a refusal, so this is the last
-			// attempt and it routes.
-			reason := attempt.Refused.Error()
-			out.Results = append(out.Results, ActionResultRow{
-				Action: a.Name, Ordinal: i, Verdict: db.ActionVerdictUnmatched,
-				Reason: reason, TrustEntry: entry.Name,
-				ArgvSHA256: trust.ArgvSHA256(match.Argv), Prefix: entry.Prefix,
-			})
-			out.Failed, out.Reason = true, reason
-			return out
-		}
 		exit := attempt.Result.Exit
 		verdict := db.ActionVerdictFail
 		if actionAttemptIsPass(attempt.Result) {
@@ -375,6 +361,19 @@ func (r *ExecActionRunner) spawnMatched(
 			Prefix: entry.Prefix,
 		})
 		last = &attempt
+	}
+	if refusal != nil {
+		// The pin no longer holds: nothing spawned for this ordinal, so the
+		// row carries no argv and no exit, like a Resolve refusal. Nothing ran
+		// after it, so it routes.
+		reason := refusal.Err.Error()
+		out.Results = append(out.Results, ActionResultRow{
+			Action: a.Name, Ordinal: refusal.Ordinal, Verdict: db.ActionVerdictUnmatched,
+			Reason: reason, TrustEntry: entry.Name,
+			ArgvSHA256: trust.ArgvSHA256(match.Argv), Prefix: entry.Prefix,
+		})
+		out.Failed, out.Reason = true, reason
+		return out
 	}
 	if last == nil {
 		return r.failed(a, "the command produced no attempts", match)

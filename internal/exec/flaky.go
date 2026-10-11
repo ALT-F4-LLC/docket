@@ -6,17 +6,22 @@ package exec
 const MaxFlakyAttempts = 3
 
 // Attempt is one execution of a command inside a single gate stage, carrying
-// the ordinal that makes F3's "recorded individually" concrete.
+// the ordinal that makes F3's "recorded individually" concrete. Every Attempt
+// is a process that ran; a declined spawn is a Refusal, never an Attempt.
 type Attempt struct {
 	// Ordinal is the re-run index: 0, 1, 2. It becomes the ordinal column on
 	// the row this attempt produces.
 	Ordinal int
-	// Result is what that attempt did. It is the zero Result when Refused is
-	// set, so a caller must read Refused before judging Result.
+	// Result is what that attempt did.
 	Result Result
-	// Refused is the pre-attempt check's refusal: this attempt was declined
-	// and no process ran. Nil for an attempt that spawned.
-	Refused error
+}
+
+// Refusal is the pre-attempt check declining the spawn at Ordinal: no process
+// ran for that ordinal and none runs after it. It carries no Result, so no
+// pass predicate can judge it.
+type Refusal struct {
+	Ordinal int
+	Err     error
 }
 
 // RunAttempts executes a command, re-running it on failure when and only when
@@ -43,16 +48,17 @@ type Attempt struct {
 // hardcoded `exit == 0` because the pass/fail mapping is the engine's decision,
 // and this package reports facts about processes.
 func RunAttempts(spec Spec, flaky bool, isPass func(Result) bool) ([]Attempt, error) {
-	return RunVerifiedAttempts(spec, flaky, isPass, nil)
+	attempts, _, err := RunVerifiedAttempts(spec, flaky, isPass, nil)
+	return attempts, err
 }
 
 // RunVerifiedAttempts is RunAttempts with a check that runs immediately before
 // every spawn, the first included. A non-nil verify that returns an error
-// stops the sequence: the refusal is recorded as its own attempt at that
-// ordinal, the attempts before it stay recorded, and nothing more runs. The
-// refusal is a recorded outcome rather than the returned error, because the
-// earlier attempts are evidence the caller still has to record.
-func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify func() error) ([]Attempt, error) {
+// stops the sequence: the attempts before it stay recorded, nothing more runs,
+// and the non-nil Refusal names the declined ordinal. The refusal is a
+// recorded outcome rather than the returned error, because the earlier
+// attempts are evidence the caller still has to record.
+func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify func() error) ([]Attempt, *Refusal, error) {
 	maxAttempts := 1
 	if flaky {
 		maxAttempts = MaxFlakyAttempts
@@ -61,8 +67,8 @@ func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify
 	attempts := make([]Attempt, 0, maxAttempts)
 	for i := 0; i < maxAttempts; i++ {
 		if verify != nil {
-			if refusal := verify(); refusal != nil {
-				return append(attempts, Attempt{Ordinal: i, Refused: refusal}), nil
+			if err := verify(); err != nil {
+				return attempts, &Refusal{Ordinal: i, Err: err}, nil
 			}
 		}
 		res, err := Run(spec)
@@ -70,7 +76,7 @@ func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify
 			// A refusal or a spawn failure is not a flaky failure and is not
 			// retried: re-running something that could not start would produce
 			// the same refusal three times and record it three times.
-			return attempts, err
+			return attempts, nil, err
 		}
 		attempts = append(attempts, Attempt{Ordinal: i, Result: res})
 
@@ -79,7 +85,7 @@ func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify
 			break
 		}
 	}
-	return attempts, nil
+	return attempts, nil, nil
 }
 
 // Verdict returns the attempt whose result decides routing (F4): THE LAST ONE.

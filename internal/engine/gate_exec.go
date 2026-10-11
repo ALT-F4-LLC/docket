@@ -477,36 +477,13 @@ func (r *ExecRunner) spawnMatchedRows(
 		scriptNotes = notes
 		return err
 	}
-	attempts, err := exec.RunVerifiedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin)
+	attempts, refusal, err := exec.RunVerifiedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin)
 	if err != nil {
 		return GateExecution{}, fmt.Errorf("running gate %s: %w", g.Name, err)
 	}
 
 	out := GateExecution{Verdict: VerdictFail}
 	for i, a := range attempts {
-		if a.Refused != nil {
-			// The pin no longer holds: nothing spawned for this ordinal, so
-			// the row carries no argv and no exit, like a Resolve refusal.
-			row := GateResultRow{
-				Gate: g.Name, Ordinal: firstOrdinal + i, Verdict: VerdictUnmatched,
-				Reason:     a.Refused.Error(),
-				TrustEntry: entry.Name,
-				StubEntry:  entry.Stub,
-				ArgvSHA256: trust.ArgvSHA256(match.Argv),
-				Prefix:     entry.Prefix,
-			}
-			// The entry still matches, but the tree holds a script the run
-			// did not pin. Nothing ran, so the row is `skipped` (DKT-169's
-			// shape), not `unmatched`: the trust decision did not change.
-			var refused *gateScriptCopyRefused
-			if errors.As(a.Refused, &refused) {
-				row.Verdict = VerdictSkipped
-				row.Argv = match.Argv
-			}
-			out.Results = append(out.Results, row)
-			out.Verdict = VerdictFail
-			continue
-		}
 		exit := a.Result.Exit
 		verdict := VerdictFail
 		if exit == 0 && !a.Result.TimedOut {
@@ -544,6 +521,28 @@ func (r *ExecRunner) spawnMatchedRows(
 		// F4: the verdict for routing is the LAST attempt's. A gate that passes
 		// on attempt 2 passes; one that fails all three fails.
 		out.Verdict = verdict
+	}
+	if refusal != nil {
+		// The pin no longer holds: nothing spawned for this ordinal, so the
+		// row carries no argv and no exit, like a Resolve refusal.
+		row := GateResultRow{
+			Gate: g.Name, Ordinal: firstOrdinal + refusal.Ordinal, Verdict: VerdictUnmatched,
+			Reason:     refusal.Err.Error(),
+			TrustEntry: entry.Name,
+			StubEntry:  entry.Stub,
+			ArgvSHA256: trust.ArgvSHA256(match.Argv),
+			Prefix:     entry.Prefix,
+		}
+		// The entry still matches, but the tree holds a script the run
+		// did not pin. Nothing ran, so the row is `skipped` (DKT-169's
+		// shape), not `unmatched`: the trust decision did not change.
+		var refused *gateScriptCopyRefused
+		if errors.As(refusal.Err, &refused) {
+			row.Verdict = VerdictSkipped
+			row.Argv = match.Argv
+		}
+		out.Results = append(out.Results, row)
+		out.Verdict = VerdictFail
 	}
 	for _, note := range scriptNotes {
 		for i := range out.Results {
