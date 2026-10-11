@@ -1469,7 +1469,7 @@ func finishWithoutUsage(t *testing.T, conn *sql.DB, instance string) {
 // The status moves through db.SetStepStatusTx rather than the saga: the probe
 // asks about a TERMINAL step with no ledger rows, and the saga would pull in
 // gates and artifacts these tests are not about. SetStepStatusTx is the write
-// that stamps `recorded_at_ms`, D7's clock, and `updated_at_ms`, D3's. `at`
+// that stamps `recorded_at_ms`, the clock D7 and D3 both read. `at`
 // must fall PAST the run's activation so D3's historical exclusion does not
 // fire — which is the one detail that makes this a D2 fixture rather than a D3
 // one.
@@ -1508,7 +1508,6 @@ func TestDiscrepancyD3ExcludesHistoricalSteps(t *testing.T) {
 	testsupport.Must(t, err, "next: %v", err)
 	stepID := stepIDByInstance(t, conn, answer.Steps[0].Instance)
 
-	// Terminal, no usage, and updated BEFORE the run was activated.
 	var activated int64
 	err = conn.QueryRow(
 		`SELECT COALESCE(activated_at_ms, 0) FROM runs WHERE id = ?`, runID,
@@ -1517,14 +1516,77 @@ func TestDiscrepancyD3ExcludesHistoricalSteps(t *testing.T) {
 	if activated == 0 {
 		t.Fatal("premise: the run must be activated")
 	}
-	execSQL(t, conn, `UPDATE steps SET status = ?, updated_at_ms = ? WHERE id = ?`,
-		db.StepDone, activated-1, stepID)
+
+	// Terminal, claimed, no usage, and recorded BEFORE the run was activated.
+	// `attempt = 1` keeps D5 from excusing the step first: an unclaimed step
+	// owes nothing whatever its clock, and this test would then pass with D3
+	// gone. `recorded_at_ms` is the clock D3 reads.
+	execSQL(t, conn,
+		`UPDATE steps SET status = ?, attempt = 1, recorded_at_ms = ?, updated_at_ms = ?
+		  WHERE id = ?`,
+		db.StepDone, activated-1, activated-1, stepID)
 
 	for _, d := range discrepanciesAt(t, conn, runID, nowMS) {
 		if d.Kind == DiscrepancyMissingUsage {
 			t.Errorf("a step terminal BEFORE activation is a discrepancy (%v); D3 "+
 				"excludes it, or upgrading the binary makes every historical run "+
 				"un-closable", d)
+		}
+	}
+}
+
+// TestDiscrepancyD3HoldsAcrossALaterAnnotation is D3 against a later row
+// write: annotating a step that recorded BEFORE activation bumps its
+// `updated_at_ms` past activation without recording anything, and the step
+// must stay out of D2. D3 reads `recorded_at_ms`, which only the terminal
+// transition writes, for the same reason D7's clock does.
+func TestDiscrepancyD3HoldsAcrossALaterAnnotation(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+	openDispatch(t, conn, runID, 0, nowMS)
+	abandon(t, conn, runID, nowMS)
+
+	answer, err := NewEngine().NextSteps(conn, runID, 0, nowMS)
+	testsupport.Must(t, err, "next: %v", err)
+	instance := answer.Steps[0].Instance
+	stepID := stepIDByInstance(t, conn, instance)
+
+	var activated int64
+	err = conn.QueryRow(
+		`SELECT COALESCE(activated_at_ms, 0) FROM runs WHERE id = ?`, runID,
+	).Scan(&activated)
+	testsupport.Must(t, err, "reading activated_at_ms: %v", err)
+	if activated == 0 {
+		t.Fatal("premise: the run must be activated")
+	}
+
+	// Claimed, terminal, no usage, and recorded BEFORE activation.
+	finishWithoutUsageAt(t, conn, instance, activated-1)
+
+	annotatedAt := activated + 1000
+	_, err = AnnotateStep(conn, stepID, `{"integrated": "later-fact"}`, annotatedAt)
+	testsupport.Must(t, err, "AnnotateStep: %v", err)
+
+	var recorded, updated int64
+	err = conn.QueryRow(
+		`SELECT recorded_at_ms, updated_at_ms FROM steps WHERE id = ?`, stepID,
+	).Scan(&recorded, &updated)
+	testsupport.Must(t, err, "reading the step's clocks: %v", err)
+	if recorded >= activated {
+		t.Fatalf("premise: recorded_at_ms = %d, want before activation %d",
+			recorded, activated)
+	}
+	if updated <= activated {
+		t.Fatalf("premise: updated_at_ms = %d after the annotation, want past "+
+			"activation %d", updated, activated)
+	}
+
+	want := model.FormatStepID(stepID)
+	for _, d := range discrepanciesAt(t, conn, runID, annotatedAt) {
+		if d.Kind == DiscrepancyMissingUsage && d.Step == want {
+			t.Errorf("annotating a step that recorded BEFORE activation made it a "+
+				"discrepancy (%v); D3 must read recorded_at_ms, which an "+
+				"annotation does not move", d)
 		}
 	}
 }

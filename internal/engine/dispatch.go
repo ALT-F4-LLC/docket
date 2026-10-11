@@ -1819,10 +1819,15 @@ func missingUsage(step *db.Step, activatedMS int64) bool {
 
 	// D3: THE HISTORICAL EXCLUSION. Steps completed before v10 have no ledger
 	// rows and are not discrepancies, so the probe excludes steps whose
-	// `updated_at_ms` predates the run's activation. Without this, upgrading the
-	// binary would instantly make every historical run's dispatch un-closable —
-	// a migration that breaks in-flight work.
-	if activatedMS == 0 || step.UpdatedAtMS < activatedMS {
+	// `recorded_at_ms` predates the run's activation. Without this, upgrading
+	// the binary would instantly make every historical run's dispatch
+	// un-closable — a migration that breaks in-flight work.
+	//
+	// It reads `recorded_at_ms`, D7's clock, rather than `updated_at_ms`: a
+	// later row write (an annotation, a loop-history or budget write) bumps
+	// `updated_at_ms` past activation without recording anything, and would
+	// pull a step that finished before activation into D2.
+	if activatedMS == 0 || step.RecordedAtMS < activatedMS {
 		return false
 	}
 
