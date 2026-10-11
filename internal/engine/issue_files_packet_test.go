@@ -16,6 +16,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	dexec "github.com/ALT-F4-LLC/docket/internal/exec"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -272,6 +273,46 @@ func TestPacketRendersIssueFilesLiveForPreFreezeSnapshot(t *testing.T) {
 		if !strings.Contains(packet, fileSection(path, body)) {
 			t.Errorf("pre-freeze snapshot: packet lacks live attachment %s:\n%s", path, packet)
 		}
+	}
+}
+
+// TestPacketRendersIssueFilesRefusesAnUndecodableSnapshot: a snapshot that does
+// not decode refuses the render. Falling back to the live list would let a
+// corrupt snapshot reopen the mid-run attach path the freeze closes.
+//
+// The snapshot is well-formed JSON whose `files` is not a list. Truncated JSON
+// would be refused earlier by the context read, which ignores `files`, so it
+// would never reach the attachment read this test pins.
+func TestPacketRendersIssueFilesRefusesAnUndecodableSnapshot(t *testing.T) {
+	conn := mustDB(t)
+	root := issueFilesCheckout(t)
+	writeAttachment(t, root, "docs/a.md", "attachment a\n")
+	writeAttachment(t, root, "docs/b.md", "attachment b\n")
+	issue, runID := activateIssueFilesRun(t, conn, root, []string{"docs/a.md"})
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	undecodable := `{"title":"transcribe the attachments","kind":"task",` +
+		`"labels":[],"scope":[],"files":5}`
+	testsupport.Must(t, db.SetRunIssueSnapshotTx(tx, runID, issue, undecodable),
+		"SetRunIssueSnapshotTx: %v", nil)
+	testsupport.Must(t, tx.Commit(), "Commit: %v", nil)
+
+	testsupport.Must(t, db.AttachFiles(conn, issue, []string{"docs/b.md"}, ""),
+		"AttachFiles: %v", nil)
+
+	result, err := RenderStep(conn, stepIDByInstance(t, conn, "transcribe@0"), "", nowMS)
+	if result != nil && (strings.Contains(result.Packet, "docs/b.md") ||
+		strings.Contains(result.Packet, "attachment b")) {
+		t.Errorf("undecodable snapshot: packet inlines docs/b.md from the live list:\n%s",
+			result.Packet)
+	}
+	if err == nil {
+		t.Fatal("RenderStep accepted an undecodable issue snapshot; want a refusal")
+	}
+	want := "reading the issue snapshot for " + model.FormatID(issue)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("refusal does not contain %q:\n  %v", want, err)
 	}
 }
 
