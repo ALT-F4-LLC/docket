@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,7 +192,9 @@ func (r *ExecRunner) runNamedGate(
 	if !match.Matched {
 		return r.unmatchedGate(g, match.Reason), nil
 	}
-	return r.spawnMatched(g, sc, match, 0)
+	return r.spawnMatched(g, sc, match, 0, func() trust.Match {
+		return store.Lookup(identity, g.Name, nil)
+	})
 }
 
 // runFenceGate runs the harvested fence lines, EACH MATCHED INDEPENDENTLY.
@@ -259,7 +262,9 @@ func (r *ExecRunner) runFenceGate(
 			continue
 		}
 
-		ex, err := r.spawnMatched(g, sc, match, ordinal)
+		ex, err := r.spawnMatched(g, sc, match, ordinal, func() trust.Match {
+			return store.Lookup(identity, g.Name, argv)
+		})
 		if err != nil {
 			return GateExecution{}, err
 		}
@@ -275,8 +280,15 @@ func (r *ExecRunner) runFenceGate(
 
 // spawnMatched runs a matched command, taking the tree mutex when the entry
 // declares `tree = true` and recording every flaky attempt individually.
+//
+// relookup repeats the Lookup that produced match against the same store
+// snapshot. It runs before every attempt, after any tree-lock wait, because
+// the content pin (§3.1 argv0_sha256) is checked "before every spawn": the
+// pinned file can change during the lock wait or between flaky attempts, and
+// only the pin half of the Lookup can change its answer.
 func (r *ExecRunner) spawnMatched(
 	g GateSpec, sc StepContext, match trust.Match, firstOrdinal int,
+	relookup func() trust.Match,
 ) (GateExecution, error) {
 	entry := match.Entry
 	timeout := exec.DefaultTimeout
@@ -396,7 +408,7 @@ func (r *ExecRunner) spawnMatched(
 		dir = sc.WorkRoot
 	}
 	// The deadline rides on the spec as well as clamping the timeout above:
-	// a flaky entry re-runs inside exec.RunAttempts, and each attempt must
+	// a flaky entry re-runs inside exec.RunVerifiedAttempts, and each attempt must
 	// see what is left of the budget, not a fresh copy of the first clamp.
 	spec := exec.Spec{Argv: argv, Dir: dir, Env: env, Timeout: timeout, Deadline: sc.Deadline}
 
@@ -436,13 +448,33 @@ func (r *ExecRunner) spawnMatched(
 		defer lock.release()
 	}
 
-	attempts, err := exec.RunAttempts(spec, entry.Flaky, exec.ExitZeroIsPass)
+	recheckPin := func() error {
+		if again := relookup(); !again.Matched {
+			return errors.New(again.Reason)
+		}
+		return nil
+	}
+	attempts, err := exec.RunVerifiedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin)
 	if err != nil {
 		return GateExecution{}, fmt.Errorf("running gate %s: %w", g.Name, err)
 	}
 
 	out := GateExecution{Verdict: VerdictFail}
 	for i, a := range attempts {
+		if a.Refused != nil {
+			// The pin no longer holds: nothing spawned for this ordinal, so
+			// the row carries no argv and no exit, like a Resolve refusal.
+			out.Results = append(out.Results, GateResultRow{
+				Gate: g.Name, Ordinal: firstOrdinal + i, Verdict: VerdictUnmatched,
+				Reason:     a.Refused.Error(),
+				TrustEntry: entry.Name,
+				StubEntry:  entry.Stub,
+				ArgvSHA256: trust.ArgvSHA256(match.Argv),
+				Prefix:     entry.Prefix,
+			})
+			out.Verdict = VerdictFail
+			continue
+		}
 		exit := a.Result.Exit
 		verdict := VerdictFail
 		if exit == 0 && !a.Result.TimedOut {

@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 
@@ -469,5 +472,196 @@ func TestNonStubEntryMarksNothingHollow(t *testing.T) {
 			t.Errorf("result[%d] is marked hollow but its entry declared no "+
 				"stub; a marker that is always set says nothing", i)
 		}
+	}
+}
+
+// pinScriptHeader precedes the byte a pin test rewrites. The byte sits in a
+// comment, so the rewritten script still runs and still plants its marker:
+// only the content pin can stop it.
+const pinScriptHeader = "#!/bin/sh\n# pin "
+
+// pinnedScript writes an executable shell script outside the repo whose body
+// follows a one-byte comment, and returns its path with its SHA-256.
+func pinnedScript(t *testing.T, body string) (path, sum string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "gate.sh")
+	content := pinScriptHeader + "A\n" + body
+	writeErr := os.WriteFile(path, []byte(content), 0o755)
+	testsupport.Must(t, writeErr, "writing the pinned script: %v", writeErr)
+	return path, trustHashOf(content)
+}
+
+// rewritePinByte flips the comment byte in place, the one-byte change a writer
+// to the pinned file makes.
+func rewritePinByte(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	testsupport.Must(t, err, "opening the pinned script: %v", err)
+	defer f.Close()
+	_, err = f.WriteAt([]byte("B"), int64(len(pinScriptHeader)))
+	testsupport.Must(t, err, "rewriting the pinned script: %v", err)
+}
+
+func pinnedEntry(repoRoot, script, sum string) trust.Entry {
+	argv := []string{script}
+	return trust.Entry{
+		Name: "tests", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Argv0SHA256: sum, Repo: mustResolve(repoRoot),
+	}
+}
+
+// waitBlockedOnTreeLock returns once some goroutine is waiting for the
+// in-process tree mutex, so a rewrite the caller makes next lands after the
+// gate's Lookup and inside its lock wait.
+func waitBlockedOnTreeLock(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	buf := make([]byte, 1<<20)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		if strings.Contains(string(buf[:n]), "engine.lockMutexBefore") {
+			return
+		}
+		time.Sleep(treeLockPollInterval)
+	}
+	t.Fatal("the gate never reached the tree-lock wait")
+}
+
+// runTreeGateAcrossHeldLock runs a pinned tree gate on the shared checkout
+// while the test holds the tree lock, calls during() once the gate is blocked
+// on it, then releases the lock and returns what the gate recorded.
+func runTreeGateAcrossHeldLock(t *testing.T, repoRoot string, entry trust.Entry, during func()) GateExecution {
+	t.Helper()
+	entry.Tree = true
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, entry)
+
+	lock, err := acquireTreeLock(runner.LockPath, time.Minute)
+	testsupport.Must(t, err, "holding the tree lock: %v", err)
+
+	type outcome struct {
+		ex  GateExecution
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		ex, err := runner.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+		done <- outcome{ex, err}
+	}()
+
+	waitBlockedOnTreeLock(t)
+	during()
+	lock.release()
+
+	got := <-done
+	testsupport.Must(t, got.err, "running the tree gate: %v", got.err)
+	return got.ex
+}
+
+// TestGatePinRecheckAfterTreeLock is AB-1: the pinned script is rewritten
+// while the gate waits for the tree lock, after its Lookup already matched.
+// The runner re-verifies the pin once the lock is held and spawns nothing.
+func TestGatePinRecheckAfterTreeLock(t *testing.T) {
+	repoRoot := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, pinned := pinnedScript(t, "/usr/bin/touch "+marker+"\n")
+
+	ex := runTreeGateAcrossHeldLock(t, repoRoot, pinnedEntry(repoRoot, script, pinned),
+		func() { rewritePinByte(t, script) })
+
+	if sentinelExists(t, marker) {
+		t.Error("the rewritten script RAN after the tree lock was released")
+	}
+	if len(ex.Results) != 1 {
+		t.Fatalf("got %d rows, want 1: %+v", len(ex.Results), ex.Results)
+	}
+	row := ex.Results[0]
+	if row.Verdict != VerdictUnmatched || ex.Verdict != VerdictFail {
+		t.Errorf("row verdict %q, gate verdict %q; want %q and %q",
+			row.Verdict, ex.Verdict, VerdictUnmatched, VerdictFail)
+	}
+	if row.Exit != nil {
+		t.Errorf("exit = %d on a gate that spawned nothing, want nil", *row.Exit)
+	}
+	// A Lookup-time refusal carries no entry; this row must come from the
+	// re-check that follows the lock, or the test lost its race.
+	if row.TrustEntry != "tests" {
+		t.Errorf("the row names entry %q, want %q: the refusal did not come "+
+			"from the post-lock re-check", row.TrustEntry, "tests")
+	}
+	content, err := os.ReadFile(script)
+	testsupport.Must(t, err, "reading the rewritten script: %v", err)
+	resolved, err := filepath.EvalSymlinks(script)
+	testsupport.Must(t, err, "resolving the script path: %v", err)
+	for _, want := range []string{resolved, pinned, trustHashOf(string(content))} {
+		if !strings.Contains(row.Reason, want) {
+			t.Errorf("the reason does not name %s: %q", want, row.Reason)
+		}
+	}
+}
+
+// TestGatePinRecheckUnchangedScriptRuns is the benign half: a pinned tree gate
+// whose script is untouched across a contended lock still runs.
+func TestGatePinRecheckUnchangedScriptRuns(t *testing.T) {
+	repoRoot := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, pinned := pinnedScript(t, "/usr/bin/touch "+marker+"\n")
+
+	ex := runTreeGateAcrossHeldLock(t, repoRoot, pinnedEntry(repoRoot, script, pinned), func() {})
+
+	if !sentinelExists(t, marker) {
+		t.Errorf("the unchanged pinned script did not run: %+v", ex.Results)
+	}
+	if ex.Verdict != VerdictPass {
+		t.Errorf("gate verdict = %q, want %q: %+v", ex.Verdict, VerdictPass, ex.Results)
+	}
+}
+
+// TestGatePinRecheckBeforeEachAttempt is AB-2: a flaky pinned script whose
+// first attempt rewrites one byte of itself and fails. The re-attempt is not
+// spawned, and its ordinal records the refusal.
+func TestGatePinRecheckBeforeEachAttempt(t *testing.T) {
+	repoRoot := t.TempDir()
+	markers := t.TempDir()
+	first := filepath.Join(markers, "attempt-0")
+	second := filepath.Join(markers, "attempt-1")
+	script := filepath.Join(t.TempDir(), "gate.sh")
+	body := fmt.Sprintf(
+		"if [ -e %[1]s ]; then /usr/bin/touch %[2]s; exit 0; fi\n"+
+			"/usr/bin/touch %[1]s\n"+
+			"printf B | /bin/dd of=%[3]s bs=1 seek=%[4]d conv=notrunc 2>/dev/null\n"+
+			"exit 1\n",
+		first, second, script, len(pinScriptHeader))
+	content := pinScriptHeader + "A\n" + body
+	writeErr := os.WriteFile(script, []byte(content), 0o755)
+	testsupport.Must(t, writeErr, "writing the self-rewriting script: %v", writeErr)
+
+	entry := pinnedEntry(repoRoot, script, trustHashOf(content))
+	entry.Flaky = true
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, entry)
+
+	ex, err := runner.Execute(context.Background(), GateSpec{Name: "tests"}, StepContext{})
+	testsupport.Must(t, err, "running the flaky gate: %v", err)
+
+	if !sentinelExists(t, first) {
+		t.Fatal("the first attempt did not run")
+	}
+	if sentinelExists(t, second) {
+		t.Error("the re-attempt RAN the rewritten script")
+	}
+	if len(ex.Results) != 2 {
+		t.Fatalf("got %d rows, want 2 (the failed run, then the refusal): %+v",
+			len(ex.Results), ex.Results)
+	}
+	if r := ex.Results[0]; r.Ordinal != 0 || r.Verdict != VerdictFail {
+		t.Errorf("row 0 = ordinal %d verdict %q, want 0 and %q", r.Ordinal, r.Verdict, VerdictFail)
+	}
+	if r := ex.Results[1]; r.Ordinal != 1 || r.Verdict != VerdictUnmatched || r.Exit != nil {
+		t.Errorf("row 1 = ordinal %d verdict %q exit %v, want 1, %q, nil",
+			r.Ordinal, r.Verdict, r.Exit, VerdictUnmatched)
+	}
+	if ex.Verdict != VerdictFail {
+		t.Errorf("gate verdict = %q, want %q", ex.Verdict, VerdictFail)
 	}
 }

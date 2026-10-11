@@ -11,8 +11,12 @@ type Attempt struct {
 	// Ordinal is the re-run index: 0, 1, 2. It becomes the ordinal column on
 	// the row this attempt produces.
 	Ordinal int
-	// Result is what that attempt did.
+	// Result is what that attempt did. It is the zero Result when Refused is
+	// set, so a caller must read Refused before judging Result.
 	Result Result
+	// Refused is the pre-attempt check's refusal: this attempt was declined
+	// and no process ran. Nil for an attempt that spawned.
+	Refused error
 }
 
 // RunAttempts executes a command, re-running it on failure when and only when
@@ -39,6 +43,16 @@ type Attempt struct {
 // hardcoded `exit == 0` because the pass/fail mapping is the engine's decision,
 // and this package reports facts about processes.
 func RunAttempts(spec Spec, flaky bool, isPass func(Result) bool) ([]Attempt, error) {
+	return RunVerifiedAttempts(spec, flaky, isPass, nil)
+}
+
+// RunVerifiedAttempts is RunAttempts with a check that runs immediately before
+// every spawn, the first included. A non-nil verify that returns an error
+// stops the sequence: the refusal is recorded as its own attempt at that
+// ordinal, the attempts before it stay recorded, and nothing more runs. The
+// refusal is a recorded outcome rather than the returned error, because the
+// earlier attempts are evidence the caller still has to record.
+func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify func() error) ([]Attempt, error) {
 	maxAttempts := 1
 	if flaky {
 		maxAttempts = MaxFlakyAttempts
@@ -46,6 +60,11 @@ func RunAttempts(spec Spec, flaky bool, isPass func(Result) bool) ([]Attempt, er
 
 	attempts := make([]Attempt, 0, maxAttempts)
 	for i := 0; i < maxAttempts; i++ {
+		if verify != nil {
+			if refusal := verify(); refusal != nil {
+				return append(attempts, Attempt{Ordinal: i, Refused: refusal}), nil
+			}
+		}
 		res, err := Run(spec)
 		if err != nil {
 			// A refusal or a spawn failure is not a flaky failure and is not
