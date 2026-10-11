@@ -143,8 +143,8 @@ registered commands at workflow transitions — §4 calls it "the one place it r
 anything." Everything below is an attack on that one place. Each row names the
 attack, the mechanism that closes it, and the test that proves the closure.
 
-The **trust boundary** is inherited from docs/spec/security.md §2 and restated
-because every entry depends on it: *Docket is a local-first tool operating on a
+The **trust boundary** is stated here, in this document's own words, because
+every entry depends on it: *Docket is a local-first tool operating on a
 file in the user's own repository; file permissions are the trust boundary.* An
 adversary with write access to `~/.config/docket/trust.toml` or to the docket
 binary has already won and is out of scope. The adversary this model defends
@@ -220,10 +220,10 @@ residuals are accepted, and each is accepted for a stated reason:
 
 Stated so the review can bound its own scope:
 
-- **Token transport is unchanged** (docs/spec/security.md §1.2): env or stdin,
-  never argv. This stage adds one rule on top — `DOCKET_TOKEN` is stripped from
+- **Token transport is unchanged** (the contract is in claims-leases.md §6 and §8): env
+  or stdin, never argv. This stage adds one rule on top — `DOCKET_TOKEN` is stripped from
   gate children (T5) — and no others.
-- **A lease is still not an authorization boundary** (security.md §2). Gates do
+- **A lease is still not an authorization boundary** (claims-leases.md §8; the boundary is §2 above). Gates do
   not change that; a gate result is a fact the engine produced, recorded in a
   database anyone with file access can edit.
 - **Read verbs still never execute** (§4, verbatim: "Read verbs never execute").
@@ -2193,9 +2193,14 @@ blocks review.
 | Group | Docs in the same commit group |
 |---|---|
 | 1 | **None.** No surface changes; nothing to document. Package doc comments carry §3's and §5's reasoning, in the style `internal/engine/gate.go` established |
-| 2 | **docs/spec/security.md — the major update** (§13.1); **the loadable `docket` skill**: the `docket trust` verb/flag tables, the gate/fence documentation in the workflow-grammar section, `vote_rule` + the `vote.rule.*` config keys in the engine-configuration table, `run activate --dry-run`, the `gate result` shape, and the error codes; **docs/spec/architecture.md**: gate execution in the saga, the tree mutex, and the vote-step lifecycle |
+| 2 | **docs/spec/security.md — the major update** (§13.1) *(history: this spec was later removed; §2 is now the live statement of the trust boundary)*; **the loadable `docket` skill**: the `docket trust` verb/flag tables, the gate/fence documentation in the workflow-grammar section, `vote_rule` + the `vote.rule.*` config keys in the engine-configuration table, `run activate --dry-run`, the `gate result` shape, and the error codes; **docs/spec/architecture.md**: gate execution in the saga, the tree mutex, and the vote-step lifecycle |
 
-## 13.1 docs/spec/security.md is the major update
+## 13.1 docs/spec/security.md is the major update (history)
+
+> **History.** `docs/spec/security.md` was removed after this plan was written.
+> The trust boundary and threat model now live in §2 of this document, which is
+> the live statement. The plan and table below are kept as the record of what
+> was planned, not as a pending deliverable.
 
 The threat model of §2 **lands there in user-facing form** — that is the work
 order's requirement and it is the right home: security.md is the living document

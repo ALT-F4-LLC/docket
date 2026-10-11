@@ -466,8 +466,8 @@ same vacuity reason.
 
 ## 8. Security documentation
 
-`docs/spec/security.md` (new) lands in the same commit as the surface, per
-CLAUDE.md's same-PR rule, and records the token transport contract as
+*History: this section planned `docs/spec/security.md`, which was later removed. The trust boundary now lives in docs/tdd/gates-trust.md §2.* The plan was that `docs/spec/security.md` (new) would land in the same commit as the surface, per
+CLAUDE.md's same-PR rule, and record the token transport contract as
 implemented: env/stdin only, hash-at-rest, tokens never in argv/`ps`, one-shot
 delivery, constant-time verification, and the explicit non-goal (a lease is
 mutual exclusion between cooperating callers with DB write access — it is not
@@ -488,4 +488,5 @@ PR #33 provides CI on every push. Every commit leaves the branch green.
 4. `config set|get`.
 5. QA section ZF + the 4→6 fixture proof + the byte-compat sweep.
 6. The loadable `docket` skill's tables and `docs/spec/security.md`, in the same
-   commits as the surface changes they document.
+   commits as the surface changes they document. *(History: `docs/spec/security.md`
+   was later removed; docs/tdd/gates-trust.md §2 is the live home of the trust boundary.)*
