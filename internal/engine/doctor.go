@@ -400,15 +400,20 @@ func checkDoctorPins(conn *sql.DB, runID int) DoctorCheck {
 		return DoctorCheck{Check: check, Verdict: DoctorOK,
 			Detail: fmt.Sprintf("%d pin(s), all sound", len(report.Pins))}
 	}
-	// The three-way disposition mirrors `run verify-pins`' own exit code
-	// table (runRunVerifyPins): changed bytes are the half a repin can fix,
-	// missing bytes have nothing to adopt, and an open closure alone is
-	// neither — a structural gap repin cannot touch.
+	// The disposition mirrors `run verify-pins`' own exit code table
+	// (runRunVerifyPins): changed bytes are the half a repin can fix, missing
+	// bytes have nothing to adopt, and a gate's executed copy that differs
+	// from its pin is drift too (exit 4) — its fix is restoring the gate
+	// script in the invoking checkout or running the gate from the run's
+	// checkout. Only an open closure alone is neither: a structural gap
+	// repin cannot touch.
 	switch {
 	case report.Changed > 0:
 		return DoctorCheck{Check: check, Verdict: DoctorDrift, Detail: PinReportReason(report)}
 	case report.Missing > 0:
 		return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: PinReportReason(report)}
+	case report.ExecutedCopyChanged > 0:
+		return DoctorCheck{Check: check, Verdict: DoctorDrift, Detail: PinReportReason(report)}
 	default:
 		return DoctorCheck{Check: check, Verdict: DoctorWarn, Detail: PinReportReason(report)}
 	}
