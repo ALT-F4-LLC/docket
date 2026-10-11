@@ -414,3 +414,59 @@ func TestArtifactKindPerStepClass(t *testing.T) {
 		t.Errorf("fixture `reconcile` artifact kind = %q, want \"findings\" from params.output", got)
 	}
 }
+
+// TestExpandOrdinalScopesOnFailPanelsToClusterBodies pins which `on_fail`
+// panels re-instantiate at a loop ordinal: only those named by a `loop = true`
+// body in the entered cluster. A body serving another trigger, and a non-loop
+// step, name panels that stay at their existing ordinal (§11.3 cluster
+// scoping).
+func TestExpandOrdinalScopesOnFailPanelsToClusterBodies(t *testing.T) {
+	def := &Definition{
+		Pipeline: Pipeline{Name: "clusters", Version: 1},
+		Steps: []*Step{
+			{Name: "implement", Executor: "writer", Emits: "change", After: []string{},
+				OnFail: "triage-r"},
+			{Name: "verify-a", Executor: "verifier", Emits: "report-a",
+				After: []string{"implement"}},
+			{Name: "verify-b", Executor: "verifier", Emits: "report-b",
+				After: []string{"implement"}},
+			{Name: "fix-a", Executor: "fixer", Emits: "change", Loop: true,
+				Serves: []string{"verify-a"}, OnFail: "triage-a"},
+			{Name: "fix-b", Executor: "fixer", Emits: "change", Loop: true,
+				Serves: []string{"verify-b"}, OnFail: "triage-b"},
+			{Name: "triage-a", Type: TypeVote},
+			{Name: "triage-b", Type: TypeVote},
+			{Name: "triage-r", Type: TypeVote},
+		},
+	}
+	bodies := map[string]bool{"fix-a": true}
+
+	rows := ExpandOrdinal(def, Subject{Kind: "task"}, 1, bodies, nil)
+
+	instances := make(map[string]bool)
+	for _, r := range rows {
+		instances[r.Instance] = true
+	}
+	if !instances["fix-a@1"] {
+		t.Errorf("fix-a@1 absent; the entered cluster's body instantiates at the ordinal")
+	}
+	if !instances["triage-a@1"] {
+		t.Errorf("triage-a@1 absent; the panel an in-cluster body's on_fail names " +
+			"instantiates with it")
+	}
+	if instances["fix-b@1"] {
+		t.Errorf("fix-b@1 present; a body serving another trigger is not re-run")
+	}
+	if instances["triage-b@1"] {
+		t.Errorf("triage-b@1 present; a panel named only by an out-of-cluster body " +
+			"must stay at its existing ordinal")
+	}
+	if instances["triage-r@1"] {
+		t.Errorf("triage-r@1 present; a panel named only by a non-loop step must " +
+			"stay at its existing ordinal")
+	}
+	if len(rows) != 2 {
+		t.Errorf("ExpandOrdinal produced %d rows, want 2 (fix-a@1, triage-a@1):\n%s",
+			len(rows), renderRows(rows))
+	}
+}
