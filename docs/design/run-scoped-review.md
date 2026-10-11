@@ -34,7 +34,7 @@ final review)" (line 63). The storage admits it, `steps.issue_id` is nullable
 | D2 | `run.diff` derivation | A committed read of the integration branch, recorded as a `run.diff` artifact at the claim of each run-scoped step that declares the input: the claim resolves the shared checkout's HEAD to one commit sha once, and a dedicated call computes `git diff <run.commit_sha> <head_sha> -- <union of the run's issue scopes>` between those two commits, with the round record `{base, head, sha256}` whose `head` is that same sha. Uncommitted changes and untracked files in `run.exec_root` are not part of the body. Never the union of issue diffs. |
 | D3 | Cross-issue loop entry | No issue's bound governs. A run-scoped step's `fix-loop` enters a run-scoped loop cluster: the counter is the run's (`runs.loop_count`), the bound is the run-scoped definition's own `max_fix_loops` read by the existing rule, and the body is the run-scoped definition's own `loop = true` step. Issue counters never move and completed issues stay `done`. Until the cluster lands (phase 3), `fix-loop` is refused at register time on a run-scoped definition (V48b), so a rejection routes `waiting-human`; the resolutions that park supports, and the reason it carries, are decided in §3.3 and owned by phase 2. |
 | D4 | Register-time lint | V48: `[pipeline] scope`, when present, is `"issue"` or `"run"`, and a definition whose scope is `issue` has no step whose `inputs` names `run.diff`. V48a: a definition whose scope is `run` declares no `[match]` table, no step `when`, and no step input of an `issue.*` form. V48b (phase 1 and 2 only): a definition whose scope is `run` has no `loop = true` step, no `threshold`, `on_fail`, or `on_fail_routes` value equal to `fix-loop` or `fix-round`, and no step declaring `on_exhausted` or `serves`. |
-| D5 | Activation with no integration point | Activation is refused (`VALIDATION_ERROR`, inside the fat transaction, nothing written) when a run-scoped definition binds, some step of it declares `run.diff` or holds the tree, and the run's `exec_root` or `commit_sha` is empty. The refusal message is the fixed template in §3.5, with the run, the definition as `name@version`, and the empty field(s) substituted. |
+| D5 | Activation with no integration point | Activation is refused (`VALIDATION_ERROR`, inside the fat transaction, nothing written) when a run-scoped definition binds, some step of it declares `run.diff` or holds the tree, and the run's `exec_root` or `commit_sha` is empty. The refusal message is the fixed template in §3.5, with the run, the definition as `name@version`, and the empty field(s) substituted. The checkout remedy is to start a new run from inside the checkout; the refused run stays in `planning`, is replaced rather than repaired, and `docket run abandon <run> --reason <reason>` ends it. The deprecate remedy is to retire every non-retired version of the definition's name, listed by `docket workflow list --name <name>`, with `docket workflow deprecate <name>@<version>` per version; retiring only the top version lets binding fall back to the next. |
 
 ## 3. Design
 
@@ -613,36 +613,45 @@ declares `run.diff` or holds the tree (`holds_tree` unset or true), and the run'
 `exec_root` or `commit_sha` is empty, `activateTx` returns `validationErr` before
 any row is written, so the fat transaction rolls back whole. The message is the
 template below, a single line in the style of the engine's other activation
-refusals. It offers two remedies, worded as fixed text: start the run from
-inside the checkout, or retire the run-scoped definition with
-`docket workflow deprecate <name>@<version>`.
+refusals. It offers two remedies, worded as fixed text. The checkout remedy is
+to start a new run from inside the checkout: the refused run stays in
+`planning` with nothing written and cannot gain an integration point, so it is
+replaced, not repaired, and an operator who wants it ended runs
+`docket run abandon <run> --reason <reason>`. The deprecate remedy is to retire
+every non-retired version of the run-scoped definition's name, not only the
+bound one: find the versions with `docket workflow list --name <name>` and run
+`docket workflow deprecate <name>@<version>` for each. Retiring only the top
+version lets binding fall back to the next version, which can be an older
+run-scoped version that refuses again.
 
 ```
-run <run> binds run-scoped workflow <name>@<version>, which reads run.diff or holds the tree, but the run has no integration point (<empty-fields>); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate <name>@<version>`
+run <run> binds run-scoped workflow <name>@<version>, which reads run.diff or holds the tree, but the run has no integration point (<empty-fields>); start a new run from inside the checkout (this run stays in planning; end it with `docket run abandon <run> --reason <reason>`), or retire every non-retired version of <name> (list them with `docket workflow list --name <name>`, then run `docket workflow deprecate <name>@<version>` for each; retiring only the top version lets binding fall back to the next)
 ```
 
-Substitutions: `<run>` is the run's display id (`RUN-7`); `<name>@<version>` is
-the bound run-scoped definition, written twice with the same value;
-`<empty-fields>` is one of three fixed strings chosen by which of the two
-fields is empty. Output for each branch, for run `RUN-7` bound to
-`final-review@1`:
+Substitutions: `<run>` is the run's display id (`RUN-7`); the first
+`<name>@<version>` is the bound run-scoped definition; `<name>` is that
+definition's name, repeated in the three places the remedy uses it; `<reason>` and the
+`@<version>` in the deprecate invocation are literal text the operator fills in,
+one version per invocation; `<empty-fields>` is one of three fixed strings
+chosen by which of the two fields is empty. Output for each branch, for run
+`RUN-7` bound to `final-review@1`:
 
 `exec_root` empty, `commit_sha` set:
 
 ```
-run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (exec_root is empty); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate final-review@1`
+run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (exec_root is empty); start a new run from inside the checkout (this run stays in planning; end it with `docket run abandon RUN-7 --reason <reason>`), or retire every non-retired version of final-review (list them with `docket workflow list --name final-review`, then run `docket workflow deprecate final-review@<version>` for each; retiring only the top version lets binding fall back to the next)
 ```
 
 `commit_sha` empty, `exec_root` set:
 
 ```
-run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (commit_sha is empty); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate final-review@1`
+run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (commit_sha is empty); start a new run from inside the checkout (this run stays in planning; end it with `docket run abandon RUN-7 --reason <reason>`), or retire every non-retired version of final-review (list them with `docket workflow list --name final-review`, then run `docket workflow deprecate final-review@<version>` for each; retiring only the top version lets binding fall back to the next)
 ```
 
 Both empty:
 
 ```
-run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (exec_root and commit_sha are empty); start the run from inside the checkout, or retire the run-scoped definition with `docket workflow deprecate final-review@1`
+run RUN-7 binds run-scoped workflow final-review@1, which reads run.diff or holds the tree, but the run has no integration point (exec_root and commit_sha are empty); start a new run from inside the checkout (this run stays in planning; end it with `docket run abandon RUN-7 --reason <reason>`), or retire every non-retired version of final-review (list them with `docket workflow list --name final-review`, then run `docket workflow deprecate final-review@<version>` for each; retiring only the top version lets binding fall back to the next)
 ```
 
 A run-scoped definition with neither a `run.diff` reader nor a tree holder (a
