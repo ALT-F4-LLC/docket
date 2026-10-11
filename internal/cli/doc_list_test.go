@@ -30,7 +30,7 @@ func docListCmdWithDB(conn *sql.DB) *cobra.Command {
 // than a shape test, so the body is deliberately long.
 func resumePromptBody(n int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Resume prompt %d\n\n", n)
+	fmt.Fprintf(&b, "# Resume note %d\n\n", n)
 	for i := 0; i < 120; i++ {
 		fmt.Fprintf(&b, "Step %d: the conductor dispatched the wave, the executor "+
 			"reported, and the gate seated a panel of three judges.\n", i)
@@ -38,7 +38,7 @@ func resumePromptBody(n int) string {
 	return b.String()
 }
 
-// seedResumePrompts creates 11 resume-prompt docs with real bodies plus one
+// seedResumePrompts creates 11 resume-note docs with real bodies plus one
 // document of another type, so the type filter has something to exclude.
 func seedResumePrompts(t *testing.T, conn *sql.DB) []string {
 	t.Helper()
@@ -48,9 +48,9 @@ func seedResumePrompts(t *testing.T, conn *sql.DB) []string {
 		body := resumePromptBody(i)
 		bodies = append(bodies, body)
 		_, err := db.CreateDoc(conn, &model.Doc{
-			Type:   "resume-prompt",
+			Type:   "resume-note",
 			Status: "active",
-			Title:  fmt.Sprintf("Resume prompt for RUN-%d", i),
+			Title:  fmt.Sprintf("Resume note for RUN-%d", i),
 			Body:   body,
 			Author: "conduct",
 		})
@@ -60,7 +60,7 @@ func seedResumePrompts(t *testing.T, conn *sql.DB) []string {
 	_, err := db.CreateDoc(conn, &model.Doc{
 		Type:   "tdd",
 		Status: "approved",
-		Title:  "Not a resume prompt",
+		Title:  "Not a resume note",
 		Body:   resumePromptBody(99),
 		Author: "tester",
 	})
@@ -70,7 +70,7 @@ func seedResumePrompts(t *testing.T, conn *sql.DB) []string {
 }
 
 // TestDocListJSON_IsSummaryRows is DKT-1045's acceptance criterion, measured:
-// `doc list -T resume-prompt --json` over eleven real resume prompts must come
+// `doc list -T resume-note --json` over eleven real resume notes must come
 // back under 4KB, and no row may carry a body. Before the fix the same corpus
 // produced tens of kilobytes — too large for a harness tool result — to answer
 // a question that needs only ids and titles.
@@ -79,14 +79,14 @@ func TestDocListJSON_IsSummaryRows(t *testing.T) {
 	bodies := seedResumePrompts(t, conn)
 
 	cmd := docListCmdWithDB(conn)
-	setFlags(t, cmd, map[string]string{"type": "resume-prompt", "sort": "id:asc"})
+	setFlags(t, cmd, map[string]string{"type": "resume-note", "sort": "id:asc"})
 	w, buf := bufWriter(true)
 	if err := runDocList(cmd, nil, w); err != nil {
 		t.Fatalf("runDocList: %v", err)
 	}
 
 	if buf.Len() >= 4096 {
-		t.Errorf("doc list -T resume-prompt --json = %d bytes, want < 4096", buf.Len())
+		t.Errorf("doc list -T resume-note --json = %d bytes, want < 4096", buf.Len())
 	}
 
 	var env struct {
@@ -136,7 +136,7 @@ func TestDocListJSON_WithBodyRestoresBodies(t *testing.T) {
 
 	cmd := docListCmdWithDB(conn)
 	setFlags(t, cmd, map[string]string{
-		"type": "resume-prompt", "sort": "id:asc", "with-body": "true",
+		"type": "resume-note", "sort": "id:asc", "with-body": "true",
 	})
 	w, buf := bufWriter(true)
 	if err := runDocList(cmd, nil, w); err != nil {
@@ -202,7 +202,7 @@ func TestDocListJSONV2_EnvelopeStillCounts(t *testing.T) {
 	seedResumePrompts(t, conn)
 
 	cmd := docListCmdWithDB(conn)
-	setFlags(t, cmd, map[string]string{"type": "resume-prompt", "limit": "5"})
+	setFlags(t, cmd, map[string]string{"type": "resume-note", "limit": "5"})
 	w, buf := bufWriter(true)
 	w.JSONVersion = output.JSONV2
 	if err := runDocList(cmd, nil, w); err != nil {
@@ -235,9 +235,9 @@ func TestDocShowJSON_StillCarriesTheBody(t *testing.T) {
 	conn := newTestDB(t)
 	body := resumePromptBody(1)
 	id, err := db.CreateDoc(conn, &model.Doc{
-		Type:   "resume-prompt",
+		Type:   "resume-note",
 		Status: "active",
-		Title:  "Resume prompt for RUN-1",
+		Title:  "Resume note for RUN-1",
 		Body:   body,
 		Author: "conduct",
 	})
@@ -265,9 +265,9 @@ func TestDocShowJSON_StillCarriesTheBody(t *testing.T) {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
 
-	if env.Data.ID != model.FormatDocID(id) || env.Data.Title != "Resume prompt for RUN-1" {
+	if env.Data.ID != model.FormatDocID(id) || env.Data.Title != "Resume note for RUN-1" {
 		t.Errorf("doc show identity = %q / %q, want %q / %q",
-			env.Data.ID, env.Data.Title, model.FormatDocID(id), "Resume prompt for RUN-1")
+			env.Data.ID, env.Data.Title, model.FormatDocID(id), "Resume note for RUN-1")
 	}
 	if env.Data.Body != body {
 		t.Errorf("doc show body = %d bytes, want the full %d-byte body",

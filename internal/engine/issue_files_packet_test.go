@@ -347,7 +347,7 @@ func TestPacketRendersIssueFilesRefusesAFIFO(t *testing.T) {
 			w.Close()
 		}
 		<-refused
-		t.Fatal("RenderStep blocked on a FIFO attachment; want a prompt refusal")
+		t.Fatal("RenderStep blocked on a FIFO attachment; want an immediate refusal")
 	}
 }
 
@@ -417,7 +417,7 @@ func TestClaimRenderRefusesAFIFOAttachmentWithoutALease(t *testing.T) {
 			w.Close()
 		}
 		<-refused
-		t.Fatal("ClaimStepRendered blocked on a FIFO attachment; want a prompt refusal")
+		t.Fatal("ClaimStepRendered blocked on a FIFO attachment; want an immediate refusal")
 	}
 
 	step, err := db.GetStep(conn, stepID)
