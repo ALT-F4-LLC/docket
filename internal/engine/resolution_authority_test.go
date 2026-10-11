@@ -255,6 +255,59 @@ func TestStepRowCarriesResolutionAuthority(t *testing.T) {
 
 		assertRowAuthority(t, conn, held.ID, rulingPayload(t, conn, held.ID, EventStepApproved))
 	})
+
+	// The rulings below carry no reference. Pinning the event first keeps the
+	// row comparison from passing on two empty values: the row must say
+	// "operator" or "conductor" with an empty authority_ref.
+	operator := Authority{Kind: AuthorityOperator}
+
+	t.Run("DecideStepWith approve under operator", func(t *testing.T) {
+		conn := mustDB(t)
+		activatedRun(t, conn)
+		e := testEngine()
+		gateID := readyHumanGate(t, conn, e)
+
+		err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
+			Approve: true, Note: "looks right", By: auditBy, Under: operator, NowMS: nowMS,
+		})
+		testsupport.Must(t, err, "approve: %v", err)
+
+		event := rulingPayload(t, conn, gateID, EventStepApproved)
+		assertAuthority(t, event, EventStepApproved, AuthorityOperator, "")
+		assertRowAuthority(t, conn, gateID, event)
+	})
+
+	t.Run("DecideStepWith reject under operator", func(t *testing.T) {
+		conn := mustDB(t)
+		activatedRun(t, conn)
+		e := testEngine()
+		gateID := readyHumanGate(t, conn, e)
+
+		err := e.DecideStepWith(conn, gateID, DecideOptions{Token: testConductorToken,
+			Approve: false, Note: "not yet", By: auditBy, Under: operator, NowMS: nowMS,
+		})
+		testsupport.Must(t, err, "reject: %v", err)
+
+		event := rulingPayload(t, conn, gateID, EventStepRejected)
+		assertAuthority(t, event, EventStepRejected, AuthorityOperator, "")
+		assertRowAuthority(t, conn, gateID, event)
+	})
+
+	t.Run("resolveStep under conductor", func(t *testing.T) {
+		conn := mustDB(t)
+		e := testEngine()
+		id := parkedExecutor(t, conn, e)
+
+		_, err := e.ResolveStepWith(conn, id, ResolveOptions{Token: testConductorToken,
+			As: ResolveSkip, Note: "not needed", By: auditBy,
+			Under: Authority{Kind: AuthorityConductor}, NowMS: nowMS,
+		})
+		testsupport.Must(t, err, "resolve: %v", err)
+
+		event := rulingPayload(t, conn, id, EventStepResolved)
+		assertAuthority(t, event, EventStepResolved, AuthorityConductor, "")
+		assertRowAuthority(t, conn, id, event)
+	})
 }
 
 // TestResolutionUnderNoAuthorityIsRefused: the seam refuses an unanswered
