@@ -83,6 +83,9 @@ jobs:
 
       - run: go vet ./...
 
+      # Pinned so CI and local runs agree; v0.7.0 is staticcheck 2026.1.
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+
       - run: go test -timeout 30m ./...
         env:
           DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
