@@ -451,13 +451,13 @@ scope>)`, as at claim. The round delta is a second committed two-commit range,
 `committedRangeDiff(dir, <prev>, <head>, nil)`, unscoped, from the previous
 round's recorded head (`prev`, the `head` of the newest earlier `run.diff`) to
 the resolved sha, appended under `roundDeltaMarker` and recorded as
-`round_base`. `appendRoundDelta` (saga.go:3415) does not produce it: that
+`round_base`. `appendRoundDelta` (saga.go:3392) does not produce it: that
 helper reads HEAD itself through `HeadFn` and the working tree through `DiffFn`,
 which the Engine wires to `GitDiff` (saga.go:215), so its trailer would mix an
 uncommitted, untracked read and a separate HEAD read into a committed body.
 A refused commit is a resolved head equal to the round base `prev`: the step
 committed nothing. The completion then records the payload with no `head`, as
-`appendRoundDelta` omits it for a blocked issue commit (saga.go:3437-3440), and
+`appendRoundDelta` omits it for a blocked issue commit (saga.go:3414-3417), and
 the round-delta section reads `# (no commit this round)`, so no reader takes the
 pre-fix commit for the fix's tip and `dispatch close` collects no candidate
 from it. A fix round always follows a review whose claim recorded a
