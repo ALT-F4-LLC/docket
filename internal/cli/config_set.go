@@ -41,6 +41,10 @@ a typo fails here rather than silently storing something nothing reads.
 
   lease.ttl.default    duration   fallback lease TTL
   lease.ttl.<class>    duration   per-class lease TTL; see below for what a class IS
+  limits.max.<class>   integer    class concurrency cap replacing the pinned [limits]
+                       or auto    max, read at every scheduling pass; auto is half
+                                  the host's CPUs (at least 1). Use --global to set
+                                  it for every project on this host
   attempt.max          integer    maximum claims per entity
   budget.default       number     default per-run budget cap; 0 is unlimited
   registration.auto    boolean    auto-register workflows/schemas at run activate; default true

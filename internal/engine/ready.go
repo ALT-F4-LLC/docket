@@ -142,6 +142,10 @@ type Scheduler struct {
 	// corpus to answer "what is the cap?" (DKT-23), which is the failure mode
 	// refusals exist to prevent.
 	limitSources map[string]string
+	// capOverrides marks the classes whose limits.max.<class> config value
+	// replaced the pinned max in limits, so a headroom refusal names the
+	// config key rather than a workflow whose declaration no longer binds.
+	capOverrides map[string]bool
 	defs         map[int]*workflow.Definition
 	nowMS        int64
 	stepByID     map[int]*db.Step
@@ -352,6 +356,10 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	}
 
 	limits, limitSources := mergeLimits(defs)
+	capOverrides, err := applyClassMaxOverrides(tx, run.ProjectID, limits)
+	if err != nil {
+		return nil, err
+	}
 	s := &Scheduler{
 		run: run, steps: steps, foreign: foreign, issues: facts,
 		frozenRouting: routing,
@@ -360,6 +368,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		stepByID:      make(map[int]*db.Step, len(steps)),
 		limits:        limits,
 		limitSources:  limitSources,
+		capOverrides:  capOverrides,
 		budget:        budget,
 		reapHold:      reapHold,
 		openReaps:     openReaps,
@@ -588,6 +597,30 @@ func mergeLimits(defs map[int]*workflow.Definition) (map[string]workflow.Limit, 
 		}
 	}
 	return out, sources
+}
+
+// applyClassMaxOverrides replaces the merged `[limits]` max with each set
+// limits.max.<class> config value, and returns the classes it overrode.
+//
+// It runs on every snapshot rather than at activation, so the cap follows the
+// host's current config without re-pinning the workflow. A class with no
+// override keeps its pinned max, unbounded included; an override on a class no
+// workflow bounds bounds it.
+func applyClassMaxOverrides(
+	tx *sql.Tx, projectID int, limits map[string]workflow.Limit,
+) (map[string]bool, error) {
+	caps, err := db.ClassMaxOverridesTx(tx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	overridden := make(map[string]bool, len(caps))
+	for class, capacity := range caps {
+		limit := limits[class]
+		limit.Max = capacity
+		limits[class] = limit
+		overridden[class] = true
+	}
+	return overridden, nil
 }
 
 // Steps returns the loaded step set, for callers that render alongside the
@@ -1274,7 +1307,9 @@ func (s *Scheduler) HeadroomDetail(step *db.Step) string {
 		detail += fmt.Sprintf(" and %d unacknowledged reap(s) holding headroom", held)
 	}
 	detail += fmt.Sprintf(" against max %d", limit.Max)
-	if source := s.limitSources[step.Class]; source != "" {
+	if s.capOverrides[step.Class] {
+		detail += fmt.Sprintf(", set by config %s%s", db.KeyClassMaxPrefix, step.Class)
+	} else if source := s.limitSources[step.Class]; source != "" {
 		detail += fmt.Sprintf(", set by [limits] in %s", source)
 	}
 	return detail

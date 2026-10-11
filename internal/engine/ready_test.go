@@ -2,6 +2,8 @@ package engine
 
 import (
 	"database/sql"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -473,6 +475,185 @@ after = []
 			t.Errorf("two@0 blocked by %q with NO [limits] declared — "+
 				"core must ship no class named `write` and no default of 1 "+
 				"(§6.5, genericity.md)", cond)
+		}
+	})
+}
+
+// classCapSrc pins `write` at max 2 across four independent roots, so a cap
+// both below and above the pinned max is observable.
+const classCapSrc = `
+[pipeline]
+name = "capped"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+
+[[step]]
+name = "a"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "b"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "c"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "d"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+`
+
+// classCapRun activates one issue over classCapSrc.
+func classCapRun(t *testing.T, conn *sql.DB) (*model.Run, int) {
+	t.Helper()
+	registerSource(t, conn, []byte(classCapSrc), "capped.toml")
+	issue := createIssue(t, conn, "capped", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	return run, issue
+}
+
+// admittedWrites is the number of `write` steps R5 admits concurrently in a
+// fresh snapshot: it claims the roots one at a time until the next root is
+// refused on headroom, then puts every root back to pending.
+func admittedWrites(t *testing.T, conn *sql.DB, runID, issue int) int {
+	t.Helper()
+	defer execSQL(t, conn, `UPDATE steps SET status = ? WHERE issue_id = ?`,
+		db.StepPending, issue)
+
+	roots := []string{"a@0", "b@0", "c@0", "d@0"}
+	for claimed, next := range roots {
+		var admitted bool
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ready, cond := sched.Ready(stepNamed(t, sched, next))
+			if !ready && cond != CondHeadroom {
+				t.Fatalf("%s blocked by %q, want ready or %q", next, cond, CondHeadroom)
+			}
+			admitted = ready
+		})
+		if !admitted {
+			return claimed
+		}
+		execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = ? AND issue_id = ?`,
+			db.StepClaimed, next, issue)
+	}
+	return len(roots)
+}
+
+// TestClassCapWithoutOverrideIsThePinnedMax: with no limits.max.<class> set,
+// the scheduler's cap is the pinned workflow's `[limits]` max, unchanged.
+func TestClassCapWithoutOverrideIsThePinnedMax(t *testing.T) {
+	conn := mustDB(t)
+	run, issue := classCapRun(t, conn)
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		if got := sched.Limit("write").Max; got != 2 {
+			t.Errorf("Limit(write).Max = %d with no override, want the pinned 2", got)
+		}
+	})
+	if got := admittedWrites(t, conn, run.ID, issue); got != 2 {
+		t.Errorf("admitted %d concurrent writes with no override, want the pinned 2", got)
+	}
+}
+
+// TestClassCapOverrideReplacesThePinnedMax: a numeric limits.max.<class> is
+// the class's cap whether it is below or above the pinned `[limits]` max.
+func TestClassCapOverrideReplacesThePinnedMax(t *testing.T) {
+	for _, n := range []int{1, 3} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			conn := mustDB(t)
+			run, issue := classCapRun(t, conn)
+			err := db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", strconv.Itoa(n))
+			testsupport.Must(t, err, "setting the override: %v", err)
+
+			loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+				if got := sched.Limit("write").Max; got != n {
+					t.Errorf("Limit(write).Max = %d, want the override %d", got, n)
+				}
+				detail := sched.HeadroomDetail(stepNamed(t, sched, "a@0"))
+				if !strings.Contains(detail, "set by config limits.max.write") {
+					t.Errorf("headroom detail does not name the override: %s", detail)
+				}
+			})
+			if got := admittedWrites(t, conn, run.ID, issue); got != n {
+				t.Errorf("admitted %d concurrent writes, want the override %d "+
+					"(pinned max is 2)", got, n)
+			}
+		})
+	}
+}
+
+// TestClassCapOverrideIsReadAtSchedulingTime: changing limits.max.<class>
+// between two snapshots of one active run changes what the next snapshot
+// admits, with the workflow pinned exactly as activation left it.
+func TestClassCapOverrideIsReadAtSchedulingTime(t *testing.T) {
+	conn := mustDB(t)
+	run, issue := classCapRun(t, conn)
+	key := db.KeyClassMaxPrefix + "write"
+
+	for _, step := range []struct {
+		value string
+		want  int
+	}{{"3", 3}, {"1", 1}, {"4", 4}} {
+		err := db.SetConfig(conn, 0, key, step.value)
+		testsupport.Must(t, err, "setting %s=%s: %v", key, step.value, err)
+		if got := admittedWrites(t, conn, run.ID, issue); got != step.want {
+			t.Errorf("after %s=%s the same run admitted %d writes, want %d",
+				key, step.value, got, step.want)
+		}
+	}
+}
+
+// TestClassCapProjectOverrideWinsOverStoreWide: the run's project value beats
+// the store-wide one, GetConfig's resolution order.
+func TestClassCapProjectOverrideWinsOverStoreWide(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := classCapRun(t, conn)
+	if run.ProjectID == 0 {
+		t.Fatal("the fixture run has no project; a project override cannot be told from a store-wide one")
+	}
+	key := db.KeyClassMaxPrefix + "write"
+	testsupport.Must(t, db.SetConfig(conn, 0, key, "3"), "store-wide: %v", nil)
+	testsupport.Must(t, db.SetConfig(conn, run.ProjectID, key, "1"), "project: %v", nil)
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		if got := sched.Limit("write").Max; got != 1 {
+			t.Errorf("Limit(write).Max = %d, want the project's 1 over the store's 3", got)
+		}
+	})
+}
+
+// TestClassCapAutoDerivesFromTheHost: `auto` resolves to half the host's CPUs,
+// never below one.
+func TestClassCapAutoDerivesFromTheHost(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := classCapRun(t, conn)
+	err := db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	want := max(1, runtime.NumCPU()/2)
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		if got := sched.Limit("write").Max; got != want {
+			t.Errorf("Limit(write).Max = %d under auto, want %d", got, want)
 		}
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,12 @@ const (
 	// The class is an opaque string — core never interprets its value
 	// (engine-spec.md §11.1 [limits]).
 	KeyLeaseTTLPrefix = "lease.ttl."
+	// KeyClassMaxPrefix is the per-class concurrency cap namespace:
+	// limits.max.<class>. A set value replaces the pinned workflows' merged
+	// `[limits]` max for that class. The scheduler reads it on every snapshot,
+	// never pins it, so a run moved to a different host follows that host's
+	// value. Unset leaves the pinned max in force.
+	KeyClassMaxPrefix = "limits.max."
 	// KeyAttemptMax caps retries per entity (engine-spec.md §11.1
 	// max_attempts).
 	KeyAttemptMax = "attempt.max"
@@ -267,7 +274,14 @@ const (
 	// every other kind — a reader that needs the parsed bool calls ParseBool
 	// itself, the same way a reader of KindDuration calls ParseDuration.
 	KindBool
+	// KindClassMax is a positive integer or ClassMaxAuto: a class's
+	// concurrency cap, where zero or a negative number would admit nothing.
+	KindClassMax
 )
+
+// ClassMaxAuto is the limits.max.<class> value that derives the cap from the
+// host's CPU count when the scheduler reads it.
+const ClassMaxAuto = "auto"
 
 // NameMaxBytes caps an opaque name stored in config or recorded in a ledger,
 // per §1.3's security note: such a name is attacker-controlled text that lands
@@ -508,6 +522,15 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 		}, nil
 	}
 
+	if class, ok := strings.CutPrefix(key, KeyClassMaxPrefix); ok && class != "" {
+		return ConfigSpec{
+			Key:  key,
+			Kind: KindClassMax,
+			Doc: fmt.Sprintf("Concurrency cap for class %q, replacing the "+
+				"pinned [limits] max; %q derives it from the host's CPUs", class, ClassMaxAuto),
+		}, nil
+	}
+
 	// vote.rule.<name>.threshold / .criticality / .sealed / .hold_on_dissent
 	// (gates-trust §8.3),
 	// matched dynamically for the same reason the per-class TTL is: <name> is
@@ -574,12 +597,13 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 
 // KnownConfigKeys lists the fixed keys, plus the open-ended patterns.
 func KnownConfigKeys() []string {
-	keys := make([]string, 0, len(engineConfigSpecs)+5)
+	keys := make([]string, 0, len(engineConfigSpecs)+6)
 	for _, spec := range engineConfigSpecs {
 		keys = append(keys, spec.Key)
 	}
 	keys = append(keys,
 		KeyLeaseTTLPrefix+"<class>",
+		KeyClassMaxPrefix+"<class>",
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleThresholdSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleCriticalitySuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleSealedSuffix,
@@ -685,8 +709,88 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 			return fmt.Errorf(
 				"%s must be a boolean (true/false), got %q", spec.Key, value)
 		}
+	case KindClassMax:
+		if value == ClassMaxAuto {
+			return nil
+		}
+		if _, err := parseClassMax(spec.Key, value); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// parseClassMax reads a numeric limits.max.<class> value: an integer >= 1.
+func parseClassMax(key, value string) (int, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a positive integer or %q, got %q",
+			key, ClassMaxAuto, value)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("%s must be >= 1, got %d", key, n)
+	}
+	return n, nil
+}
+
+// ClassMaxOverridesTx resolves every set limits.max.<class> inside the
+// scheduler's snapshot transaction, keyed by class, in one statement however
+// many classes a run names. A project's override wins over the store-wide
+// value, GetConfig's order. A class absent from the map keeps its pinned
+// `[limits]` max.
+//
+// ClassMaxAuto resolves here, at read time, to half the host's logical CPUs
+// and never below one, so the value tracks whichever host runs the scheduler.
+func ClassMaxOverridesTx(tx *sql.Tx, projectID int) (map[string]int, error) {
+	storePrefix := metaConfigPrefix + KeyClassMaxPrefix
+	projectPrefix := projectConfigKey(projectID, KeyClassMaxPrefix)
+	rows, err := tx.Query(
+		`SELECT key, value FROM meta
+		  WHERE substr(key, 1, ?) = ? OR (? != 0 AND substr(key, 1, ?) = ?)
+		  ORDER BY key`,
+		len(storePrefix), storePrefix,
+		projectID, len(projectPrefix), projectPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("reading class caps: %w", err)
+	}
+	defer rows.Close()
+
+	stored := map[string]string{}
+	overridden := map[string]bool{}
+	for rows.Next() {
+		var metaKey, value string
+		if err := rows.Scan(&metaKey, &value); err != nil {
+			return nil, fmt.Errorf("reading a class cap: %w", err)
+		}
+		if class, ok := strings.CutPrefix(metaKey, projectPrefix); ok && projectID != 0 {
+			stored[class] = value
+			overridden[class] = true
+		} else if class, ok := strings.CutPrefix(metaKey, storePrefix); ok && !overridden[class] {
+			stored[class] = value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading class caps: %w", err)
+	}
+
+	caps := make(map[string]int, len(stored))
+	for class, value := range stored {
+		if value == ClassMaxAuto {
+			caps[class] = autoClassMax(runtime.NumCPU())
+			continue
+		}
+		n, err := parseClassMax(KeyClassMaxPrefix+class, value)
+		if err != nil {
+			return nil, err
+		}
+		caps[class] = n
+	}
+	return caps, nil
+}
+
+// autoClassMax is ClassMaxAuto's formula.
+func autoClassMax(cpus int) int {
+	return max(1, cpus/2)
 }
 
 // VoteRuleThresholdKey, VoteRuleCriticalityKey, VoteRuleSealedKey and
@@ -1006,8 +1110,9 @@ func GetConfigTx(tx *sql.Tx, projectID int, key string) (ConfigEntry, error) {
 }
 
 // ListConfig returns every fixed key's effective value for one project, plus
-// every per-class TTL that has been explicitly set — store-wide or as a
-// project override, the override winning. Sorted for deterministic output.
+// every per-class TTL and class cap that has been explicitly set — store-wide
+// or as a project override, the override winning. Sorted for deterministic
+// output.
 func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 	entries := make([]ConfigEntry, 0, len(engineConfigSpecs))
 	for _, spec := range engineConfigSpecs {
@@ -1018,9 +1123,9 @@ func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 		entries = append(entries, entry)
 	}
 
-	// Explicitly-set class TTLs, from the store-wide namespace first and the
-	// project namespace second so an override replaces its fallback.
-	classTTLs := map[string]ConfigEntry{}
+	// Explicitly-set per-class keys, from the store-wide namespace first and
+	// the project namespace second so an override replaces its fallback.
+	classEntries := map[string]ConfigEntry{}
 	collect := func(pattern, trimPrefix string) error {
 		rows, err := db.Query(
 			`SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key`, pattern)
@@ -1037,27 +1142,29 @@ func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 			if key == KeyLeaseTTLDefault {
 				continue // already listed among the fixed keys
 			}
-			classTTLs[key] = ConfigEntry{Key: key, Value: value, Source: "set"}
+			classEntries[key] = ConfigEntry{Key: key, Value: value, Source: "set"}
 		}
 		return rows.Err()
 	}
-	if err := collect(metaConfigPrefix+KeyLeaseTTLPrefix+"%", metaConfigPrefix); err != nil {
-		return nil, err
-	}
-	if projectID != 0 {
-		prefix := fmt.Sprintf("%sp%d.", metaConfigPrefix, projectID)
-		if err := collect(prefix+KeyLeaseTTLPrefix+"%", prefix); err != nil {
+	for _, family := range []string{KeyLeaseTTLPrefix, KeyClassMaxPrefix} {
+		if err := collect(metaConfigPrefix+family+"%", metaConfigPrefix); err != nil {
 			return nil, err
+		}
+		if projectID != 0 {
+			prefix := fmt.Sprintf("%sp%d.", metaConfigPrefix, projectID)
+			if err := collect(prefix+family+"%", prefix); err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	keys := make([]string, 0, len(classTTLs))
-	for k := range classTTLs {
+	keys := make([]string, 0, len(classEntries))
+	for k := range classEntries {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		entries = append(entries, classTTLs[k])
+		entries = append(entries, classEntries[k])
 	}
 	return entries, nil
 }
