@@ -229,13 +229,21 @@ func (r *ExecActionRunner) runTrustedCommand(
 		return unmatched("%s", match.Reason)
 	}
 
-	return r.spawnMatched(a, sc, match)
+	return r.spawnMatched(a, sc, match, func() trust.Match {
+		return store.Lookup(identity, a.Name, nil)
+	})
 }
 
 // spawnMatched runs a matched action command and shapes its output into the
 // §6.2 contract.
+//
+// relookup repeats the Lookup that produced match against the same store
+// snapshot. It runs before every attempt, after any tree-lock wait, because
+// the content pin (gates-trust §3.1 argv0_sha256) is checked "before every
+// spawn": the pinned file can change during the lock wait or between flaky
+// attempts, and only the pin half of the Lookup can change its answer.
 func (r *ExecActionRunner) spawnMatched(
-	a ActionSpec, sc StepContext, match trust.Match,
+	a ActionSpec, sc StepContext, match trust.Match, relookup func() trust.Match,
 ) ActionResult {
 	entry := match.Entry
 
@@ -302,11 +310,18 @@ func (r *ExecActionRunner) spawnMatched(
 		defer lock.release()
 	}
 
+	recheckPin := func() error {
+		if again := relookup(); !again.Matched {
+			return errors.New(again.Reason)
+		}
+		return nil
+	}
+
 	// A8: flaky re-runs apply and are recorded individually with ascending
 	// ordinal. The pass predicate is exit-zero AND a parseable reply — a
 	// command that exits 0 and prints garbage has not produced a result, and
 	// re-running it is exactly what `flaky` is for.
-	attempts, err := exec.RunAttempts(spec, entry.Flaky, actionAttemptIsPass)
+	attempts, err := exec.RunVerifiedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin)
 	if err != nil {
 		return r.failed(a, fmt.Sprintf("running action %s: %v", a.Name, err), match)
 	}
@@ -315,6 +330,20 @@ func (r *ExecActionRunner) spawnMatched(
 	var last *exec.Attempt
 	for i := range attempts {
 		attempt := attempts[i]
+		if attempt.Refused != nil {
+			// The pin no longer holds: nothing spawned for this ordinal, so
+			// the row carries no argv and no exit, like a Resolve refusal.
+			// RunVerifiedAttempts stops at a refusal, so this is the last
+			// attempt and it routes.
+			reason := attempt.Refused.Error()
+			out.Results = append(out.Results, ActionResultRow{
+				Action: a.Name, Ordinal: i, Verdict: db.ActionVerdictUnmatched,
+				Reason: reason, TrustEntry: entry.Name,
+				ArgvSHA256: trust.ArgvSHA256(match.Argv), Prefix: entry.Prefix,
+			})
+			out.Failed, out.Reason = true, reason
+			return out
+		}
 		exit := attempt.Result.Exit
 		verdict := db.ActionVerdictFail
 		if actionAttemptIsPass(attempt.Result) {

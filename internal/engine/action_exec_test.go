@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -117,9 +118,9 @@ func TestActionsUseTheSameTrustPath(t *testing.T) {
 		return true
 	})
 	for _, want := range []string{
-		"exec.Resolve",     // A5: argv[0] resolution and repo containment
-		"exec.BuildEnv",    // A4: the env allowlist and the token exclusion
-		"exec.RunAttempts", // A6/A8: timeout, capture, flaky re-runs
+		"exec.Resolve",             // A5: argv[0] resolution and repo containment
+		"exec.BuildEnv",            // A4: the env allowlist and the token exclusion
+		"exec.RunVerifiedAttempts", // A6/A8 and the per-spawn pin re-check
 		"trust.RepoIdentity",
 		"trust.ArgvSHA256",
 	} {
@@ -738,5 +739,172 @@ func TestStubIsNotWrittenAtV9(t *testing.T) {
 	testsupport.Must(t, err, "marshalling: %v", err)
 	if strings.Contains(string(encoded), "stub") {
 		t.Errorf("an unstubbed artifact serializes with a `stub` key: %s", encoded)
+	}
+}
+
+// actionReplyLine is the minimal well-formed reply, so a pinned script that
+// runs passes and a test's red is "the script ran", never a parse failure.
+const actionReplyLine = `echo '{"body":"","payload":[]}'` + "\n"
+
+// pinnedActionEntry trusts script as action "pinned-action", pinned by sum.
+func pinnedActionEntry(repo, script, sum string) trust.Entry {
+	return trust.Entry{
+		Name: "pinned-action", Argv: []string{script}, Argv0SHA256: sum, Repo: repo,
+	}
+}
+
+// runTreeActionAcrossHeldLock runs a pinned tree action while the test holds
+// the tree lock, calls during() once the action is blocked on it, then
+// releases the lock and returns what the action recorded.
+func runTreeActionAcrossHeldLock(
+	t *testing.T, repo string, entry trust.Entry, during func(),
+) ActionResult {
+	t.Helper()
+	entry.Tree = true
+	err := os.MkdirAll(filepath.Join(repo, ".docket"), 0o755)
+	testsupport.Must(t, err, "creating .docket: %v", err)
+	runner := actionRunner(t, repo, entry)
+
+	lock, err := acquireTreeLock(runner.LockPath, time.Minute)
+	testsupport.Must(t, err, "holding the tree lock: %v", err)
+
+	type outcome struct {
+		result ActionResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := runner.Run(context.Background(),
+			actionSpec(entry.Name), StepContext{Instance: "reconcile@0"})
+		done <- outcome{result, err}
+	}()
+
+	waitBlockedOnTreeLock(t)
+	during()
+	lock.release()
+
+	got := <-done
+	testsupport.Must(t, got.err, "running the tree action: %v", got.err)
+	return got.result
+}
+
+// TestActionPinRecheckAfterTreeLock: the pinned script is rewritten while the
+// action waits for the tree lock, after its Lookup already matched. The runner
+// re-verifies the pin once the lock is held and spawns nothing.
+func TestActionPinRecheckAfterTreeLock(t *testing.T) {
+	repo := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, pinned := pinnedScript(t, "/usr/bin/touch "+marker+"\n"+actionReplyLine)
+
+	result := runTreeActionAcrossHeldLock(t, repo, pinnedActionEntry(repo, script, pinned),
+		func() { rewritePinByte(t, script) })
+
+	if sentinelExists(t, marker) {
+		t.Error("the rewritten script RAN after the tree lock was released")
+	}
+	if !result.Failed {
+		t.Error("the action did not fail after its pinned script changed")
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("got %d rows, want 1: %+v", len(result.Results), result.Results)
+	}
+	row := result.Results[0]
+	if row.Verdict != db.ActionVerdictUnmatched {
+		t.Errorf("row verdict = %q, want %q", row.Verdict, db.ActionVerdictUnmatched)
+	}
+	if row.Exit != nil {
+		t.Errorf("exit = %d on an action that spawned nothing, want nil", *row.Exit)
+	}
+	// A Lookup-time refusal carries no entry; this row must come from the
+	// re-check that follows the lock, or the test lost its race.
+	if row.TrustEntry != "pinned-action" {
+		t.Errorf("the row names entry %q, want %q: the refusal did not come "+
+			"from the post-lock re-check", row.TrustEntry, "pinned-action")
+	}
+	content, err := os.ReadFile(script)
+	testsupport.Must(t, err, "reading the rewritten script: %v", err)
+	resolved, err := filepath.EvalSymlinks(script)
+	testsupport.Must(t, err, "resolving the script path: %v", err)
+	for _, want := range []string{resolved, pinned, trustHashOf(string(content))} {
+		if !strings.Contains(row.Reason, want) {
+			t.Errorf("the reason does not name %s: %q", want, row.Reason)
+		}
+	}
+}
+
+// TestActionPinRecheckBeforeEachAttempt: a flaky pinned script whose first
+// attempt rewrites one byte of itself and fails. The re-attempt is not
+// spawned, and its ordinal records the refusal.
+func TestActionPinRecheckBeforeEachAttempt(t *testing.T) {
+	repo := t.TempDir()
+	markers := t.TempDir()
+	first := filepath.Join(markers, "marker-1")
+	second := filepath.Join(markers, "marker-2")
+	script := filepath.Join(t.TempDir(), "action.sh")
+	body := fmt.Sprintf(
+		"if [ -e %[1]s ]; then /usr/bin/touch %[2]s; %[5]s exit 0; fi\n"+
+			"/usr/bin/touch %[1]s\n"+
+			"printf B | /bin/dd of=%[3]s bs=1 seek=%[4]d conv=notrunc 2>/dev/null\n"+
+			"exit 1\n",
+		first, second, script, len(pinScriptHeader),
+		`echo '{"body":"","payload":[]}';`)
+	content := pinScriptHeader + "A\n" + body
+	writeErr := os.WriteFile(script, []byte(content), 0o755)
+	testsupport.Must(t, writeErr, "writing the self-rewriting script: %v", writeErr)
+
+	entry := pinnedActionEntry(repo, script, trustHashOf(content))
+	entry.Flaky = true
+	runner := actionRunner(t, repo, entry)
+
+	result, err := runner.Run(context.Background(),
+		actionSpec("pinned-action"), StepContext{Instance: "reconcile@0"})
+	testsupport.Must(t, err, "Run: %v", err)
+
+	if !sentinelExists(t, first) {
+		t.Fatal("the first attempt did not run")
+	}
+	if sentinelExists(t, second) {
+		t.Error("the re-attempt RAN the rewritten script")
+	}
+	if !result.Failed {
+		t.Error("the action did not fail after its pinned script changed")
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("got %d rows, want 2 (the failed run, then the refusal): %+v",
+			len(result.Results), result.Results)
+	}
+	if r := result.Results[0]; r.Ordinal != 0 || r.Verdict != db.ActionVerdictFail {
+		t.Errorf("row 0 = ordinal %d verdict %q, want 0 and %q",
+			r.Ordinal, r.Verdict, db.ActionVerdictFail)
+	}
+	r := result.Results[1]
+	if r.Ordinal != 1 || r.Verdict != db.ActionVerdictUnmatched || r.Exit != nil {
+		t.Errorf("row 1 = ordinal %d verdict %q exit %v, want 1, %q, nil",
+			r.Ordinal, r.Verdict, r.Exit, db.ActionVerdictUnmatched)
+	}
+	if !strings.Contains(r.Reason, "changed since it was trusted") ||
+		!strings.Contains(r.Reason, entry.Argv0SHA256) {
+		t.Errorf("row 1 reason does not name the pin mismatch: %q", r.Reason)
+	}
+}
+
+// TestActionPinRecheckUnchangedScriptRuns is the benign half: a pinned tree
+// action whose script is untouched across a contended lock still runs.
+func TestActionPinRecheckUnchangedScriptRuns(t *testing.T) {
+	repo := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, pinned := pinnedScript(t, "/usr/bin/touch "+marker+"\n"+actionReplyLine)
+
+	result := runTreeActionAcrossHeldLock(t, repo,
+		pinnedActionEntry(repo, script, pinned), func() {})
+
+	if !sentinelExists(t, marker) {
+		t.Errorf("the unchanged pinned script did not run: %+v", result.Results)
+	}
+	if result.Failed {
+		t.Errorf("the unchanged pinned action failed: %s", result.Reason)
+	}
+	if len(result.Results) != 1 || result.Results[0].Verdict != db.ActionVerdictPass {
+		t.Errorf("rows = %+v, want one %q row", result.Results, db.ActionVerdictPass)
 	}
 }
