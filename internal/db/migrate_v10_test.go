@@ -92,7 +92,7 @@ func TestMigrateToV10(t *testing.T) {
 // GAPS, because a missing entry turns Migrate's loop into a runtime error on a
 // user's database rather than a build-time failure on ours.
 func TestSchemaSpanIsComplete(t *testing.T) {
-	// The span now ends at v35. v11 through v35 are AMENDMENTS, not stages —
+	// The span now ends at v43. v11 through v43 are AMENDMENTS, not stages —
 	// workflow retirement (DKT-21), the projects dimension (operator request,
 	// 2026-08-09), vote provenance (DKT-71), per-seat vote spend (DKT-95),
 	// artifact revisions (DKT-70), the retry-budget base (DKT-86/DKT-90),

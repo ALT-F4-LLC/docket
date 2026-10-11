@@ -1189,6 +1189,129 @@ amendment, not a stage: one additive column with a default, a
 a rewind guard that probes the COLUMN (the v27–v37 form, since v38 adds no
 table and no index). No v5–v10 column, table, or count changes.
 
+### AMENDMENT — the span extends to v39 (the step recorded-at clock, 2026-10-10)
+
+**What changed.** v39 adds ONE column to one table, `steps.recorded_at_ms`
+(`INTEGER NOT NULL DEFAULT 0`): the instant the step last moved into a
+terminal status. Only the transition into a terminal status writes it. Zero
+means the step has not recorded a terminal result.
+
+**Why it needed a version.** The usage grace measures from the newest terminal
+record in a run, and `updated_at_ms` cannot carry that instant. Every later
+write to the row (an annotation, a loop-history write, a budget move) bumps
+`updated_at_ms`, so each one restarted the grace. A clock that only the
+terminal transition writes needs its own column.
+
+**The back-fill is an upper bound, and touches only zeros.** The migration
+copies `updated_at_ms` into `recorded_at_ms` on every row already in a terminal
+status (done, skipped, superseded, failed-routed), so a run active across the
+upgrade keeps a non-zero wave-end clock. `updated_at_ms` is the best record
+time a pre-v39 row has: it can only be later than the true record, never
+earlier. The `UPDATE` matches only rows still at zero, so a re-run leaves
+recorded stamps alone.
+
+**Why the ratified arithmetic is untouched.** Like v11–v38, v39 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v38 form, since v39 adds no
+table and no index). No v5–v10 column, table, or count changes.
+
+### AMENDMENT — the span extends to v40 (the step resolution authority, 2026-10-10)
+
+**What changed.** v40 adds two columns to one table, `steps.authority` and
+`steps.authority_ref` (both `TEXT NOT NULL DEFAULT ''`): the authority a
+ruling on the step was made under, and the reference that names it.
+
+**Why it needed a version.** Before v40 only the ruling event carried the
+authority. A reader of one resolved step row could not tell an operator's
+decision from a standing grant's or the conductor's without walking the event
+log. Putting the authority on the row it governs needs columns on that row.
+
+**Empty means unknown, and nothing else.** The migration back-fills nothing:
+the authority of a ruling made before v40 is on its event, and the empty string
+is the honest reading of a row that never recorded one.
+
+**Why the ratified arithmetic is untouched.** Like v11–v39, v40 is an
+amendment, not a stage: two additive columns with defaults, a
+`hasColumn`-probed `ALTER` per column so the migration is idempotent and
+re-runnable, and a rewind guard that probes both COLUMNS (the v27–v39 form,
+since v40 adds no table and no index). No v5–v10 column, table, or count
+changes.
+
+### AMENDMENT — the span extends to v41 (the claim phase, 2026-10-10)
+
+**What changed.** v41 adds ONE column to one table, `steps.claim_phase`
+(`TEXT NOT NULL DEFAULT ''`). A pre-gated claim's first transaction sets it,
+and the claim's context transaction clears it. The same-owner re-mint reads it.
+
+**Why it needed a version.** A pre-gated claim commits in two transactions,
+and between them the step is leased to its owner without a context bundle. A
+same-owner re-claim in that window re-minted a bundle without the claim's
+final pre-gate results and voided the token the context transaction's lease
+refresh is keyed on. Nothing else on the row distinguishes the window: the last
+pre-gate row commits before the context transaction does, and nothing else
+that transaction writes differs from what the first one wrote. The re-mint now
+refuses a claim still in the pre-gate phase with a retryable CONFLICT, and that
+check needs the phase stored on the step.
+
+**Empty means settled, and nothing else.** The migration back-fills nothing: a
+claim in flight across the upgrade reads the empty string and is treated as
+settled, which is how every claim behaved before the column existed.
+
+**Why the ratified arithmetic is untouched.** Like v11–v40, v41 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v40 form, since v41 adds no
+table and no index). No v5–v10 column, table, or count changes.
+
+### AMENDMENT — the span extends to v42 (the run-note authority, 2026-10-10)
+
+**What changed.** v42 adds ONE column to one table, `run_notes.authority`
+(`TEXT NOT NULL DEFAULT ''`): the authority a note's writer asserted when
+recording it, stored verbatim.
+
+**Why it needed a version.** A run note is a standing statement that every
+packet the run renders afterwards carries, and its row held only the run, the
+text, and the time. A reader could not tell which authority a note was recorded
+under. The note table is append-only (a changed ruling is a second note), so
+the authority has to be written with the note, on its row.
+
+**Empty means unknown, and nothing else.** The migration back-fills nothing: a
+note recorded before the column existed reads the empty string, an unknown
+authority, and nothing infers one for it.
+
+**Why the ratified arithmetic is untouched.** Like v11–v41, v42 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v41 form, since v42 adds no
+table and no index). No v5–v10 column, table, or count changes.
+
+### AMENDMENT — the span extends to v43 (the step recovery hash, 2026-10-10)
+
+**What changed.** v43 adds ONE column to one table, `steps.recovery_hash`
+(`TEXT`, NULL by default): the SHA-256 of the recovery secret the current lease
+was claimed with. It follows the `token_hash` discipline: the row keeps only
+the hash, never the secret. Every claim writes the column, so a hash never
+outlives the lease it was claimed with.
+
+**Why it needed a version.** The same-owner re-mint identified the claimant by
+its owner string, and the owner string is public, so it identifies without
+proving. A lease whose claim stored a recovery hash now re-mints only for a
+caller presenting the matching secret; any other caller gets CONFLICT and the
+lease is untouched. Checking the secret on a later call needs its hash stored
+on the step.
+
+**NULL means no secret, and nothing else.** The column has no default and the
+migration back-fills nothing: a lease live across the upgrade was claimed
+without a secret and reads NULL. A NULL lease still re-mints on the owner
+alone, exactly as every lease did before the column existed.
+
+**Why the ratified arithmetic is untouched.** Like v11–v42, v43 is an
+amendment, not a stage: one additive nullable column, a `hasColumn`-probed
+`ALTER` so the migration is idempotent and re-runnable, and a rewind guard
+that probes the COLUMN (the v27–v42 form, since v43 adds no table and no
+index). No v5–v10 column, table, or count changes.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay
