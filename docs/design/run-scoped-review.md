@@ -449,8 +449,8 @@ diff tip of both ranges below and as the payload `head`; no second HEAD read
 occurs. The body is `committedRangeDiff(dir, <commit_sha>, <head>, <union
 scope>)`, as at claim. The round delta is a second committed two-commit range,
 `committedRangeDiff(dir, <prev>, <head>, nil)`, unscoped, from the previous
-round's recorded head (`prev`, the `head` of the newest earlier `run.diff`) to
-the resolved sha, appended under `roundDeltaMarker` and recorded as
+round's recorded head (`prev`, the `head` of the newest earlier `run.diff` that
+recorded one) to the resolved sha, appended under `roundDeltaMarker` and recorded as
 `round_base`. `appendRoundDelta` (saga.go:3392) does not produce it: that
 helper reads HEAD itself through `HeadFn` and the working tree through `DiffFn`,
 which the Engine wires to `GitDiff` (saga.go:215), so its trailer would mix an
