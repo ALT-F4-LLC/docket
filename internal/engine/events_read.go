@@ -615,6 +615,9 @@ var eventActors = map[string]Actor{
 	// failed to become — a worker, or the dispatcher acting for one.
 	EventClaimRefused: ActorHuman,
 
+	// The re-mint: the same actor as the `step-claimed` whose lease it re-keys.
+	EventStepReminted: ActorHuman,
+
 	// The conductor's reported facts (DKT-2759): nothing in the engine
 	// observes a re-seat or a deferral; each exists because the conductor
 	// ran `run fact add`, which is precisely what `human` means here.
