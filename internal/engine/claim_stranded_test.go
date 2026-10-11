@@ -582,6 +582,90 @@ func TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires(t *testing.T) {
 	}
 }
 
+// TestTransactionBFailureRefusesReclaimUntilTheLeaseExpires pins the recovery
+// boundary when transaction B fails after the pre-gate rows are recorded.
+//
+// The lease refresh aborts, so the claim returns its token as an incomplete
+// claim and leaves the pre-gate phase marker behind. A same-owner re-claim
+// inside the lease is a CONFLICT that leaves the lease alone; once the lease
+// expires, the same owner takes a fresh claim at the next attempt.
+func TestTransactionBFailureRefusesReclaimUntilTheLeaseExpires(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	e := testEngine()
+	stepID := advanceToVerify(t, conn, e)
+	const owner = "wave:STEP-1"
+	const ttlMS = 1000
+
+	// The trigger lives in transaction B, so its rollback drops it again.
+	claimHookBeforeRefresh = func(tx *sql.Tx, _ int) {
+		claimHookBeforeRefresh = nil
+		_, err := tx.Exec(`CREATE TRIGGER fail_lease_refresh
+			BEFORE UPDATE OF activity_ms ON steps
+			BEGIN SELECT RAISE(ABORT, 'the lease refresh failed'); END`)
+		testsupport.Must(t, err, "installing the lease-refresh trigger: %v", err)
+	}
+	t.Cleanup(func() { claimHookBeforeRefresh = nil })
+
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, TTLOverride: ttlMS, NowMS: nowMS,
+	})
+	var incomplete *IncompleteClaimError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want an *IncompleteClaimError from transaction B", err, err)
+	}
+	if !strings.Contains(incomplete.Error(), "the lease refresh failed") {
+		t.Errorf("err = %q, want the injected lease-refresh failure", incomplete.Error())
+	}
+	if incomplete.Result == nil || incomplete.Result.Token == "" {
+		t.Fatalf("the incomplete claim carries no token: %+v", incomplete.Result)
+	}
+
+	rows, err := db.GateResultsForStep(conn, stepID)
+	testsupport.Must(t, err, "GateResultsForStep: %v", err)
+	if len(rows) != 1 || !rows[0].Pre {
+		t.Fatalf("rows after transaction B failed = %+v, want the one recorded pre-gate row", rows)
+	}
+
+	before, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if before.ClaimPhase != db.ClaimPhasePreGates {
+		t.Fatalf("claim phase = %q, want %q left by the failed transaction B",
+			before.ClaimPhase, db.ClaimPhasePreGates)
+	}
+
+	_, err = e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: nowMS + ttlMS/2,
+	})
+	if err == nil {
+		t.Fatal("a same-owner re-claim inside the lease re-minted a claim whose transaction B failed")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+	}
+	if !strings.Contains(err.Error(), "pre-gate phase") {
+		t.Errorf("err = %q, want it to name the pre-gate phase", err.Error())
+	}
+	after, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if after.TokenHash != before.TokenHash {
+		t.Error("the refused re-claim re-keyed the lease")
+	}
+
+	fresh, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: nowMS + ttlMS + 1,
+	})
+	testsupport.Must(t, err,
+		"a same-owner claim after the stranded lease expired was refused: %v", err)
+	if fresh.ReMinted {
+		t.Error("the claim after expiry re-minted the expired lease instead of taking a new one")
+	}
+	if fresh.Attempt != incomplete.Result.Attempt+1 {
+		t.Errorf("attempt = %d, want %d", fresh.Attempt, incomplete.Result.Attempt+1)
+	}
+}
+
 // The recovery secrets a claimant presents in the tests below. Synthetic,
 // never a real credential.
 const (
