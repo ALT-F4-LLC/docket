@@ -148,15 +148,17 @@ func TestRefreshIssueFilesRecordsOneHumanEvent(t *testing.T) {
 	}
 }
 
-// TestRefreshIssueFilesRefuses: each refusal writes nothing — the snapshot
-// blob is byte-identical and no event is recorded.
+// TestRefreshIssueFilesRefuses: each refusal names its cause and writes
+// nothing — the snapshot blob is byte-identical and no event is recorded.
 func TestRefreshIssueFilesRefuses(t *testing.T) {
-	for _, tc := range []struct {
+	type refusal struct {
 		name    string
 		arrange func(t *testing.T, conn *sql.DB, issue, runID int)
 		reason  string
 		code    ErrorCode
-	}{
+		wants   []string
+	}
+	cases := []refusal{
 		{
 			name:    "live list equals the frozen list",
 			arrange: func(*testing.T, *sql.DB, int, int) {},
@@ -194,7 +196,46 @@ func TestRefreshIssueFilesRefuses(t *testing.T) {
 			reason: "  ",
 			code:   CodeValidation,
 		},
-	} {
+		{
+			name: "every step of the issue is terminal",
+			arrange: func(t *testing.T, conn *sql.DB, issue, runID int) {
+				detach(t, conn, issue, "docs/b.md")
+				mustExec(t, conn,
+					`UPDATE steps SET status = ? WHERE run_id = ? AND issue_id = ?`,
+					db.StepDone, runID, issue)
+			},
+			reason: "detached b",
+			code:   CodeConflict,
+			wants:  []string{"every step", "terminal", "NEXT run"},
+		},
+		{
+			name: "a dispatch is open",
+			arrange: func(t *testing.T, conn *sql.DB, issue, runID int) {
+				detach(t, conn, issue, "docs/b.md")
+				mustExec(t, conn,
+					`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
+					 VALUES (?, 'open', 0, ?, ?)`, runID, nowMS+60_000, nowMS)
+			},
+			reason: "detached b",
+			code:   CodeConflict,
+			wants:  []string{"DISPATCH-"},
+		},
+	}
+	for _, status := range []string{db.StepClaimed, db.StepRunning, db.StepGated} {
+		cases = append(cases, refusal{
+			name: "a step is " + status,
+			arrange: func(t *testing.T, conn *sql.DB, issue, _ int) {
+				detach(t, conn, issue, "docs/b.md")
+				mustExec(t, conn, `UPDATE steps SET status = ? WHERE id = ?`,
+					status, stepIDByInstance(t, conn, "transcribe@0"))
+			},
+			reason: "detached b",
+			code:   CodeConflict,
+			wants:  []string{"transcribe@0", status},
+		})
+	}
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			conn, issue, runID := twoAttachmentRun(t)
 			tc.arrange(t, conn, issue, runID)
@@ -203,6 +244,11 @@ func TestRefreshIssueFilesRefuses(t *testing.T) {
 			_, err := refreshFilesAsConductor(conn, runID, issue, tc.reason)
 			if code, ok := CodeOf(err); !ok || code != tc.code {
 				t.Fatalf("error = %v (code %v), want %s", err, code, tc.code)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal does not name %q:\n%s", want, err)
+				}
 			}
 			if after := snapshotBlob(t, conn, runID, issue); after != before {
 				t.Errorf("refused refresh rewrote the snapshot:\n before %s\n after  %s",
