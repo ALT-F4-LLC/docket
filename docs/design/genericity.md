@@ -15,8 +15,10 @@ verb: *a team that has never run an LLM should find it useful as documented.*
 ## Admitted forms (repository amendment, 2026-10-10)
 
 This section is not part of the upstream extract. The run policy ships a variant
-routing key named `model`: an opaque string the engine copies from the policy to the
-step row and never interprets. The key is persisted (`json:"model,omitempty"` on step
+routing key named `model`: a string the engine copies from the policy to the step row.
+The engine also reads it: it compares the value against `[security].never`, redirects
+a forbidden value through `[escalation.fallback]`, and special-cases `fable` and `opus`
+during escalation. The key is persisted (`json:"model,omitempty"` on step
 rows and voter assignments), so renaming it would break stored data. `scripts/qa/genericity.sh` therefore
 admits these forms of `model`, and only these:
 
