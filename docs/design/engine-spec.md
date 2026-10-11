@@ -370,8 +370,13 @@ anything — under a trust model fit for an OSS tool:
   (`trust add --prefix`, with an over-authorization warning). Tokens pass via
   env/stdin, never argv; claim markers are 0600 in a per-user runtime dir.
 - **Conductor capability (DKT-2465).** The operator verbs — `step approve`, `step hold` (DKT-3287),
-  `step reject`, `step resolve`, `step reap`, `run pause`, `run resume`,
-  `run note add`, `run abandon`, `dispatch waive-target`, `dispatch abandon` — are not token-free. Each requires the run's *conductor capability*: a
+  `step reject`, `step resolve`, `step reap`, `step annotate --integrated-sha`, `vote commit`,
+  `dispatch close --skip-integration-check`, `dispatch waive-target`, `dispatch abandon`,
+  `run pause`, `run resume`, `run abandon`, `run abandon --issue`, `run repin`,
+  `run refresh-scope`, `run refresh-files`, `run refresh-body`, `run fact add`,
+  `run note add` — are not token-free. The set is every verb whose engine path calls
+  `authorizeConductor` or `authorizeConductorTx` (`internal/engine/conductor.go`); a new gated
+  verb joins this list in the same change. Each requires the run's *conductor capability*: a
   256-bit token minted at the run's first activation (returned once, hash-only
   storage on `runs.conductor_token_hash`), re-minted by `run conduct RUN-N`, and
   presented via `DOCKET_TOKEN`/stdin like a lease token. "Repository access is the
