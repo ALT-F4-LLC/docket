@@ -559,3 +559,73 @@ func TestPruneBelowAClaimKeepsItsRecordedBody(t *testing.T) {
 		t.Errorf("read-back = %q, want the recorded body %q", got, "body")
 	}
 }
+
+// TestRepoWidePruneAboveAClaimReportsRecordedBodyGone: a `--before` prune with
+// no run named writes its `events-pruned` row with a NULL run_id. That row
+// covers every run, so once it has removed a step's claim row the read-back
+// reports the body GONE rather than reading the live columns.
+func TestRepoWidePruneAboveAClaimReportsRecordedBodyGone(t *testing.T) {
+	conn, runID, issue, before, _ := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	recordClaimEvent(t, conn, runID, issue, "first@0", nowMS)
+	refreshRunBody(t, conn, runID, issue, "body, amended", nowMS+1)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	var claimSeq int64
+	err := conn.QueryRow(`SELECT seq FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, before).Scan(&claimSeq)
+	testsupport.Must(t, err, "reading the claim seq: %v", err)
+	_, err = PruneEvents(conn, PruneQuery{Before: claimSeq + 1, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+
+	if n := claimEventCount(t, conn, before); n != 0 {
+		t.Fatalf("premise: %d step-claimed row(s) survived the prune, want 0", n)
+	}
+	var repoWide int
+	err = conn.QueryRow(`SELECT COUNT(*) FROM events WHERE kind = ? AND run_id IS NULL`,
+		EventEventsPruned).Scan(&repoWide)
+	testsupport.Must(t, err, "counting repo-wide prune rows: %v", err)
+	if repoWide != 1 {
+		t.Fatalf("premise: %d events-pruned row(s) with a NULL run_id, want 1", repoWide)
+	}
+
+	bundle, err := ReadContext(conn, before, nowMS+4)
+	if err == nil {
+		t.Fatalf("read-back returned body %q; want it reported unavailable "+
+			"after the repo-wide prune", bundle.Issue.BodySnapshot)
+	}
+	if code, _ := CodeOf(err); code != CodeGone {
+		t.Errorf("error code %q, want %q: %v", code, CodeGone, err)
+	}
+	if !strings.Contains(err.Error(), "pruned") {
+		t.Errorf("error %q does not name the prune", err)
+	}
+}
+
+// TestPruningAnotherRunKeepsThisRunsRecordedBody: a `--before-run` prune's
+// `events-pruned` row names its run, and covers no other. Run A's step carries
+// no `step-claimed` row, so only the prune row's run scoping keeps a prune of
+// run B from reporting run A's body GONE.
+func TestPruningAnotherRunKeepsThisRunsRecordedBody(t *testing.T) {
+	conn, runA, issueA, stepA, _ := bodyRefreshRun(t)
+	recordClaim(t, conn, stepA, nowMS)
+	amended := "body, amended"
+	refreshRunBody(t, conn, runA, issueA, amended, nowMS+1)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runA)
+
+	issueB := createIssue(t, conn, "other work", "other body", "task", nil)
+	runB := startRun(t, conn, issueB)
+	_, err := activate(conn, runB.ID)
+	testsupport.Must(t, err, "activate run B: %v", err)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runB.ID)
+
+	result, err := PruneEvents(conn, PruneQuery{BeforeRun: runB.ID, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+	if result.Pruned == 0 {
+		t.Fatal("premise: pruning run B deleted nothing; the case needs a prune row")
+	}
+
+	if got := recordedBodyOf(t, conn, stepA); got != "body" {
+		t.Errorf("run A's read-back = %q, want its recorded body %q", got, "body")
+	}
+}
