@@ -562,6 +562,84 @@ func TestBatchOverrideRefusesATruncatedCaptureFromTheRealRunner(t *testing.T) {
 	}
 }
 
+// TestBatchOverrideNeverCoversATruncatedRow: a grant minted from an
+// untruncated failure must not cover a later TRUNCATED row, even one whose
+// stored head fingerprints the same. The later stream here prints the granted
+// text, then enough blank lines to push its real failure past the cap:
+// normalization drops the trailing blank lines, so the head hashes equal to
+// the grant, and only the row's truncated flag says the capture is not the
+// whole failure. The step parks for a human and the grant is not spent.
+func TestBatchOverrideNeverCoversATruncatedRow(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedBatchRun(t, conn, batchOverrideSrc, "batch-override.toml")
+
+	gates := &exitGates{fail: true, exit: 1}
+	e := testEngine()
+	e.Gates = gates
+
+	implementID := stepIDInRun(t, conn, runID, "implement@0")
+	parkThroughFailingGate(t, conn, e, implementID)
+	err := e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
+		"sandbox artifact, not a code defect", nowMS+1)
+	testsupport.Must(t, err, "resolve --as override-pass --batch: %v", err)
+	grants, err := db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "reading grants: %v", err)
+	if len(grants) != 1 {
+		t.Fatalf("premise: grants = %d, want 1", len(grants))
+	}
+
+	// The head internal/exec keeps of the padded stream: the granted text, then
+	// newlines up to the cap. The `--- FAIL` line after them was dropped.
+	gates.mu.Lock()
+	gates.output = environmentalFailure +
+		strings.Repeat("\n", exec.CaptureCap-len(environmentalFailure))
+	gates.truncated = map[string]bool{"build": true}
+	gates.mu.Unlock()
+
+	packageID := stepIDInRun(t, conn, runID, "package@0")
+	claim, err := ClaimStep(conn, packageID, ClaimOptions{Owner: "w2", NowMS: nowMS + 2})
+	testsupport.Must(t, err, "claim package: %v", err)
+	err = e.CompleteStep(conn, packageID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the package record"), NowMS: nowMS + 2,
+	})
+	testsupport.Must(t, err, "complete package: %v", err)
+
+	rows, err := db.GateResultsForStep(conn, packageID)
+	testsupport.Must(t, err, "reading package gate rows: %v", err)
+	failing := failingCompletionRows(rows)
+	if len(failing) != 1 {
+		t.Fatalf("premise: %d failing completion rows, want 1 (build)", len(failing))
+	}
+	row, g := failing[0], grants[0]
+	if !row.Truncated {
+		t.Fatal("premise: package build row Truncated = false, want true")
+	}
+	if row.Fingerprint != g.Fingerprint || row.Reason != g.Reason ||
+		row.Exit == nil || g.Exit == nil || *row.Exit != *g.Exit ||
+		!slices.Equal(row.Argv, g.Argv) {
+		t.Fatalf("premise: package row signature (%s, %v, %q, %q) differs from "+
+			"the grant's (%s, %v, %q, %q); only truncation may tell them apart",
+			row.Fingerprint, row.Exit, row.Reason, row.Argv,
+			g.Fingerprint, g.Exit, g.Reason, g.Argv)
+	}
+
+	step, err := db.GetStep(conn, packageID)
+	testsupport.Must(t, err, "GetStep package: %v", err)
+	if step.Status != db.StepWaitingHuman {
+		t.Errorf("package@0 = %q after a truncated failure, want %q",
+			step.Status, db.StepWaitingHuman)
+	}
+	if got := eventKindCount(t, conn, runID, EventStepBatchOverridden); got != 0 {
+		t.Errorf("%s events = %d, want 0", EventStepBatchOverridden, got)
+	}
+	grants, err = db.GateOverrideGrantsForRun(conn, runID)
+	testsupport.Must(t, err, "re-reading grants: %v", err)
+	if grants[0].CoveredSteps != 0 {
+		t.Errorf("covered_steps = %d after a truncated failure, want 0",
+			grants[0].CoveredSteps)
+	}
+}
+
 // TestBatchOverrideRefusesAParkWithASkippedGate: a skipped gate measured
 // nothing, and routing parks such a step as gate-skipped without consulting a
 // grant, so a grant minted from it could never apply. One skipped row refuses

@@ -859,7 +859,11 @@ refuses the WHOLE batch with a `VALIDATION_ERROR` naming the gate when ANY
 failing completion row on the step is truncated. The refusal fires before the
 resolution's transaction opens, so it mints no grant for any gate in the batch
 and records no resolution: the step stays parked, and the operator resolves it
-without `--batch`. That ruling decides only this step.
+without `--batch`. That ruling decides only this step. The same rule holds at
+spend time: a batch grant never covers a truncated failing row. A later step
+whose failing row is truncated parks for a human even when its fingerprint,
+exit, reason, and argv all match a grant, so a stream that repeats the
+ruled-on text and pads its real failure past the cap cannot ride the grant.
 
 **The normalization rules**, applied in this order before the SHA-256, and
 nothing else:

@@ -98,7 +98,16 @@ func failingCompletionRows(rows []db.GateResultRow) []db.GateResultRow {
 // nothing for the same reason a blank fingerprint does. A NULL argv is a value
 // rather than that marker: it matches only another NULL, so an `unmatched`
 // park stays coverable.
+//
+// A TRUNCATED ROW MATCHES NOTHING. Its fingerprint names only the head
+// internal/exec kept, so a stream that repeats the ruled-on text and then
+// pads its real failure past the cap hashes equal to the grant. The flag is
+// the only evidence the capture is not the whole failure, so such a step parks
+// for a human even when every other field matches.
 func grantMatches(g db.GateOverrideGrant, r db.GateResultRow) bool {
+	if r.Truncated {
+		return false
+	}
 	if g.Gate != r.Gate || g.Reason != r.Reason {
 		return false
 	}
