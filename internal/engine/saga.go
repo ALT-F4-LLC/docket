@@ -3457,13 +3457,15 @@ func (e *Engine) appendRoundDelta(
 		if prev == "" {
 			prev = latest
 		}
-		// A newer recorded head than the judged one is a round no review read.
 		// With no judged head there is nothing to reach back to, so the
 		// fallback clips as before.
-		unreviewedFollows := reviewed.head != "" && latest != reviewed.head
-		var unreviewedLanding string
-		if unreviewedFollows {
-			unreviewedLanding = earliestUnreviewedLanding(conn, step.RunID, step.IssueID, step.ID, reviewed)
+		var (
+			unreviewedFollows bool
+			unreviewedLanding string
+		)
+		if reviewed.head != "" {
+			unreviewedFollows, unreviewedLanding = earliestUnreviewedRound(
+				conn, step.RunID, step.IssueID, step.ID, reviewed)
 		}
 		if prev != "" && prev != head {
 			// DKT-171/DKT-409: `prev` predates whatever integration landed
@@ -3508,10 +3510,8 @@ func (e *Engine) appendRoundDelta(
 // resolved at the time.
 //
 // The recording step's own artifacts are excluded because they are this round,
-// not a later one: an issue.diff re-pin (diff_repin.go) recomputes a step that
-// already recorded, and counting that step's earlier head as a round recorded
-// after the judged one kept round_base at the judged head, putting sibling
-// issues' verbatim-integrated commits back into the round delta.
+// not an earlier one: an issue.diff re-pin (diff_repin.go) recomputes a step
+// that already recorded, and its own earlier head is not the previous round's.
 func latestIssueDiffHead(conn *sql.DB, runID, issueID, exceptStepID int) string {
 	var payload sql.NullString
 	err := conn.QueryRow(
@@ -3576,16 +3576,20 @@ type reviewedIssueDiff struct {
 	head                   string
 }
 
-// earliestUnreviewedLanding reads the `integrated_sha` on the first round
-// recorded after the judged record — the commit the conductor landed that
-// round's work as — "" when no such round exists or it recorded no full
-// commit id.
+// earliestUnreviewedRound reports whether a round no review read was recorded
+// after the judged record, and the `integrated_sha` on the first such round —
+// the commit the conductor landed that round's work as — "" when it recorded
+// no full commit id.
 //
-// The judged record's own producer and the recording step are skipped: an
-// integration annotation re-records its step's issue.diff, so a later artifact
-// of the judged producer is that judged round re-pointed, and the recording
-// step is this round, not one before it.
-func earliestUnreviewedLanding(conn *sql.DB, runID, issueID, exceptStepID int, reviewed reviewedIssueDiff) string {
+// The judged record's own producer and the recording step are not such a
+// round: an integration annotation re-records its step's issue.diff, so a
+// later artifact of the judged producer is that judged round re-pointed, and
+// the recording step is this round, not one before it. Whether a round follows
+// and where it landed come from this one lookup, so the two cannot disagree on
+// what counts as unreviewed.
+func earliestUnreviewedRound(
+	conn *sql.DB, runID, issueID, exceptStepID int, reviewed reviewedIssueDiff,
+) (follows bool, landing string) {
 	var metadata sql.NullString
 	err := conn.QueryRow(
 		`SELECT s.metadata FROM artifacts a JOIN steps s ON s.id = a.step_id
@@ -3594,19 +3598,24 @@ func earliestUnreviewedLanding(conn *sql.DB, runID, issueID, exceptStepID int, r
 		  ORDER BY a.id LIMIT 1`,
 		runID, issueID, ArtifactKindIssueDiff,
 		reviewed.artifactID, reviewed.producerID, exceptStepID).Scan(&metadata)
-	if err != nil || metadata.String == "" {
-		return ""
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ""
+	}
+	// An unanswerable lookup keeps the judged head: over-reporting the delta
+	// rather than hiding a round.
+	if err != nil {
+		return true, ""
 	}
 	var bag map[string]any
-	if json.Unmarshal([]byte(metadata.String), &bag) != nil {
-		return ""
+	if metadata.String == "" || json.Unmarshal([]byte(metadata.String), &bag) != nil {
+		return true, ""
 	}
 	// `--metadata` can set the key free-form; only a full commit id reaches git.
 	sha, _ := bag[MetadataKeyIntegratedSHA].(string)
 	if !fullCommitSHA.MatchString(sha) {
-		return ""
+		return true, ""
 	}
-	return sha
+	return true, sha
 }
 
 // priorRoundHandBack is the hand-back head THIS step's own name recorded at
