@@ -62,7 +62,11 @@ echo
 # teaches the verifier nothing.
 run build go1.26.9 build ./...
 # Acceptance criteria worded with -count=1 must be settled by a fresh run, not a cached result.
-run tests go1.26.9 test -count=1 -timeout 30m ./...
+# -timeout 60m: internal/engine alone took 1380-1570s under concurrent run load
+# (RUN-135), within minutes of the former 1800s cap; 60m leaves headroom over
+# that range. The trust entry's own timeout for this script must exceed 60m,
+# or it kills the gate before go test's cap does.
+run tests go1.26.9 test -count=1 -timeout 60m ./...
 
 echo "=== end ac-commands ==="
 exit "$worst"
