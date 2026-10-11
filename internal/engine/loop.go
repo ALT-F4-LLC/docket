@@ -173,16 +173,18 @@ func exhausted(
 }
 
 // recordedVerdict is the verdict the trigger row's round recorded: the string
-// `verdict` field of the first element of its newest declared-kind payload
-// that carries one, copied verbatim. "" when the step is not in its pinned
-// definition, declares no emit, recorded an empty payload, or recorded no
-// element carrying a string `verdict`.
+// value of the step's declared `verdict_field` in the first element of its
+// newest declared-kind payload that carries one, copied verbatim. "" when the
+// step is not in its pinned definition, declares no verdict property, declares
+// no emit, recorded an empty payload, or recorded no element carrying a string
+// value for that property. Which property carries a verdict is the author's
+// declaration (V50 checks it against the pinned schema); core reserves no name.
 //
 // It never substitutes the routing token. `fix-loop` is how the round was
 // routed, which the refusal already implies; a reader of the loop history asks
 // what the round concluded.
 func recordedVerdict(tx *sql.Tx, step *db.Step, spec *workflow.Step) (string, error) {
-	if spec == nil {
+	if spec == nil || spec.VerdictField == "" {
 		return "", nil
 	}
 	kind := workflow.ArtifactKind(spec)
@@ -206,7 +208,7 @@ func recordedVerdict(tx *sql.Tx, step *db.Step, spec *workflow.Step) (string, er
 		return "", fmt.Errorf("reading %s's recorded %s: %w", step.Instance, kind, err)
 	}
 	for _, element := range elements {
-		if verdict, ok := element["verdict"].(string); ok {
+		if verdict, ok := element[spec.VerdictField].(string); ok {
 			return verdict, nil
 		}
 	}

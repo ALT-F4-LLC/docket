@@ -26,6 +26,8 @@ kind = ["task"]
 name = "check"
 executor = "check"
 emits = "findings"
+payload = "round-verdict@1"
+verdict_field = "verdict"
 threshold = { "fix-loop" = "any(status == unmet)" }
 max_fix_loops = 1
 on_exhausted = "TARGET"
@@ -51,6 +53,20 @@ executor = "drain"
 emits = "notes"
 after = ["check"]
 `
+
+// roundVerdictSchema is `check`'s pinned payload: the `status` its threshold
+// reads, and the optional `verdict` property its `verdict_field` declares.
+const roundVerdictSchema = `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "status":  {"type": "string", "enum": ["met", "unmet"]},
+      "verdict": {"type": "string"}
+    }
+  }
+}`
 
 // verdictPayload routes `check` to `fix-loop` like unmetPayload, and records
 // a round verdict for the loop history to copy.
@@ -168,6 +184,7 @@ func exhaustRecording(t *testing.T, target, lastPayload string) (*sql.DB, int) {
 	t.Helper()
 	conn := mustDB(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSchemaFixture(t, conn, "round-verdict", 1, roundVerdictSchema)
 	runID, _ := activateInterposed(
 		t, conn, strings.Replace(exhaustionSrc, "TARGET", target, 1))
 	e := testEngine()

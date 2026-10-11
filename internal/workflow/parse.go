@@ -219,9 +219,17 @@ type Step struct {
 	// pinned order there is no position to compare — and the floor's own
 	// coherence against that schema is V37a's, at register time.
 	PassFloor *PassFloor `toml:"pass_floor" json:"pass_floor,omitempty"`
-	OnFail    string     `toml:"on_fail" json:"on_fail,omitempty"`
-	Loop      bool       `toml:"loop" json:"loop"`
-	AfterLoop string     `toml:"after_loop" json:"after_loop,omitempty"`
+	// VerdictField names the payload property that carries this step's round
+	// verdict: an OPAQUE TOKEN read exactly as `pass_floor.field` is. A
+	// fix-loop exhaustion copies that property's string value from the
+	// step's newest recorded payload into the loop history; with none
+	// declared, the history records no verdict, because core reserves no
+	// payload property name for one. Its presence in the step's pinned
+	// schema is V50's, at register time.
+	VerdictField string `toml:"verdict_field" json:"verdict_field,omitempty"`
+	OnFail       string `toml:"on_fail" json:"on_fail,omitempty"`
+	Loop         bool   `toml:"loop" json:"loop"`
+	AfterLoop    string `toml:"after_loop" json:"after_loop,omitempty"`
 	// Serves scopes a `loop = true` body to the steps whose `fix-loop`
 	// routings it answers (§11.3 cluster scoping, DKT-544): on a `fix-loop`
 	// routed by a step named here, this body instantiates and its

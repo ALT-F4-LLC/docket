@@ -103,6 +103,16 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 		// `verify`, whose `any(status == unmet)` needs no schema to be correct
 		// (T1). Equality has never needed an order and still does not.
 		if step.Payload == "" {
+			if step.VerdictField != "" {
+				return withWorkflow(&Error{
+					Rule: "V50", Step: step.Name, Field: "verdict_field",
+					Message: fmt.Sprintf(
+						"step %q: `verdict_field` names %q, but the step declares "+
+							"no `payload`; a verdict property is checked against "+
+							"the step's pinned schema, and there is none",
+						step.Name, step.VerdictField),
+				}, def.Pipeline.Name)
+			}
 			continue
 		}
 
@@ -118,6 +128,30 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 		}
 		if err := validatePassFloorSchema(step, registered); err != nil {
 			return withWorkflow(err, def.Pipeline.Name)
+		}
+		if err := validateVerdictFieldSchema(step, registered); err != nil {
+			return withWorkflow(err, def.Pipeline.Name)
+		}
+	}
+	return nil
+}
+
+// validateVerdictFieldSchema is V50: a declared `verdict_field` must name a
+// property the step's pinned schema declares. A loop history reading an
+// undeclared property would record an empty verdict on every exhaustion, and
+// the author would learn of the typo only from the park it was meant to explain.
+func validateVerdictFieldSchema(step *Step, registered *Registered) error {
+	if step.VerdictField == "" {
+		return nil
+	}
+	if _, ok := registered.Field(step.VerdictField); !ok {
+		return &Error{
+			Rule: "V50", Step: step.Name, Field: "verdict_field",
+			Message: fmt.Sprintf(
+				"step %q: `verdict_field` names %q, which %s does not "+
+					"declare. Declared fields: %s",
+				step.Name, step.VerdictField, registered.Ref(),
+				describeFields(registered)),
 		}
 	}
 	return nil

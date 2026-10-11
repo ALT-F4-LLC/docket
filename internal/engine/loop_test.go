@@ -1194,3 +1194,45 @@ func producerList(inputs []ContextInput) []string {
 	}
 	return out
 }
+
+// TestRecordedVerdictReadsOnlyTheDeclaredProperty pins whose name the loop
+// history reads a verdict from: the step's declared `verdict_field`, never a
+// property core reserves. A payload carrying a string `verdict` records none
+// when the step declares nothing, and a declared property wins over it.
+func TestRecordedVerdictReadsOnlyTheDeclaredProperty(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		verdictField string
+		payload      string
+		want         string
+	}{
+		{name: "no declaration stores none", payload: `[{"verdict":"approve"}]`, want: ""},
+		{name: "the declared property is copied", verdictField: "outcome",
+			payload: `[{"outcome":"x","verdict":"y"}]`, want: "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			run, _ := activatedRun(t, conn)
+			step := mustStep(t, conn, "implement@0")
+			spec := &workflow.Step{
+				Name: "implement", Executor: "implement", Emits: "change-summary",
+				VerdictField: tc.verdictField,
+			}
+
+			tx, err := conn.Begin()
+			testsupport.Must(t, err, "begin: %v", err)
+			defer tx.Rollback()
+			_, err = db.InsertArtifactTx(tx, db.Artifact{
+				RunID: run.ID, StepID: step.ID, Kind: "change-summary",
+				Body: "the round", Payload: tc.payload,
+			}, nowMS)
+			testsupport.Must(t, err, "inserting artifact: %v", err)
+
+			got, err := recordedVerdict(tx, step, spec)
+			testsupport.Must(t, err, "recordedVerdict: %v", err)
+			if got != tc.want {
+				t.Errorf("recordedVerdict = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

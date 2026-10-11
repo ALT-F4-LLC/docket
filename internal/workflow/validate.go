@@ -19,10 +19,10 @@ import (
 // (V13/V13a are one check and two author-facing errors; V21 is now one grammar
 // rule and four cross-validation rules).
 //
-// V21a-V21d, V25a, V28a, V29, V30, and V37a are the SCHEMA-AWARE half and live
-// in ValidateSchemas rather than in Validate: they are the only rules that ask
-// a question about the environment, and Validate stays a pure function of bytes
-// (§4.9.2). V27, V28, and V31 are decisions about bytes and stay here.
+// V21a-V21d, V25a, V28a, V29, V30, V37a, and V50 are the SCHEMA-AWARE half and
+// live in ValidateSchemas rather than in Validate: they are the only rules that
+// ask a question about the environment, and Validate stays a pure function of
+// bytes (§4.9.2). V27, V28, and V31 are decisions about bytes and stay here.
 var RuleIDs = []string{
 	"V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10",
 	// V12 was the `on_fail` closed-vocabulary rule. DKT-1901 reads a value
@@ -35,7 +35,7 @@ var RuleIDs = []string{
 	"V32", "V33", "V34", "V35", "V36", "V37", "V37a", "V38", "V39", "V39a",
 	"V40", "V40a", "V40b", "V40c", "V41",
 	"V42", "V43", "V44",
-	"V45", "V46", "V47", "V48", "V49",
+	"V45", "V46", "V47", "V48", "V49", "V50",
 }
 
 // VoteRuleResolver reports whether a named vote rule is registered, and lists

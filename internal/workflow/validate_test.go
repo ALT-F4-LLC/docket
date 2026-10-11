@@ -646,6 +646,53 @@ after_loop = "check"
 `,
 		wants: []string{`"repanel"`, "`loop = true`", "`type=\"vote\"`"},
 	},
+	// V50: `verdict_field` names a property the step's pinned schema declares.
+	{
+		rule: "V50", name: "verdict_field naming a property the schema does not declare",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+verdict_field = "outcome"
+`,
+		schemas: registeredRisk(),
+		wants:   []string{`"a"`, "`verdict_field`", `"outcome"`, "risk-report@1"},
+	},
+	{
+		rule: "V50", name: "verdict_field on a step with no payload",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+verdict_field = "outcome"
+`,
+		schemas: registeredRisk(),
+		wants:   []string{`"a"`, "`verdict_field`", `"outcome"`, "`payload`"},
+	},
+	{
+		rule: "V50", name: "verdict_field naming a declared property registers clean",
+		src: `
+[pipeline]
+name = "w"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "risk-report@1"
+verdict_field = "stage"
+`,
+		schemas: registeredRisk(),
+	},
 	{
 		rule: "V13", name: "human step routing rejects to waiting-human",
 		src: `
