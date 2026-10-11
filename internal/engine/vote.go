@@ -735,7 +735,10 @@ func routeVoteStep(
 	// name) is disposed of by releaseUntriaged below, which writes its row
 	// `skipped` and records that as its event. Writing or announcing a routing
 	// for it here would contradict that row.
-	_, mapped := triageRouting(spec, outcome)
+	triageApplied, mapped := triageRouting(spec, outcome)
+	if !mapped {
+		triageApplied = spec.EffectiveOnFail()
+	}
 	releasedByPanel := triaged != nil && !mapped
 	if !releasedByPanel {
 		if err := db.SetStepRoutingTx(tx, step.ID,
@@ -787,7 +790,16 @@ func routeVoteStep(
 			return err
 		}
 	}
-	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
+	// A panel whose verdict abandoned the issue it triaged reconciles as that
+	// abandonment, not as its own `pass`. The abandonment cascade has already
+	// made every step terminal, so a `pass` reconcile would reach the
+	// completion check and force the abandoned issue `done`, which is what
+	// reconcileIssueAndRun's abandon branch returns early to prevent.
+	issueRouting := routing
+	if triaged != nil && triageApplied == workflow.OnFailAbandonIssue {
+		issueRouting = workflow.OnFailAbandonIssue
+	}
+	if err := reconcileIssueAndRun(tx, step, def, spec, issueRouting, nowMS); err != nil {
 		return err
 	}
 	return tx.Commit()

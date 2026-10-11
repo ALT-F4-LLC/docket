@@ -359,6 +359,10 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 					t.Errorf("review@0 status = %q after the issue was abandoned, "+
 						"want a terminal status — the cascade did not run", got)
 				}
+				if got := issueStatus(t, conn, step.IssueID); got == string(model.StatusDone) {
+					t.Errorf("issue status = %q after the panel abandoned it — an "+
+						"abandoned issue is not a completed one", got)
+				}
 			}
 		})
 	}
@@ -483,6 +487,12 @@ func TestTriageUnmappedVerdict(t *testing.T) {
 			if got := stepStatus(t, conn, "triage@0"); got != db.StepSkipped {
 				t.Errorf("triage@0 status = %q, want %q — the mapping applied "+
 					"nothing, so the panel closes without ruling", got, db.StepSkipped)
+			}
+			if tc.want == workflow.OnFailAbandonIssue {
+				if got := issueStatus(t, conn, issue); got == string(model.StatusDone) {
+					t.Errorf("issue status = %q after the panel's on_fail abandoned "+
+						"it — an abandoned issue is not a completed one", got)
+				}
 			}
 		})
 	}
