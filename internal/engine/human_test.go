@@ -653,3 +653,74 @@ on_fail = "waiting-human"
 	}
 	_ = run
 }
+
+// humanStallSrc rejects through a human gate whose `on_fail` is `fix-loop`
+// with budget to spare, so the only refusal the second rejection can meet is
+// non-convergence: the fix round between the two rejections moves nothing.
+const humanStallSrc = `
+[pipeline]
+name = "human-gate-stall"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "work"
+after = []
+executor = "w"
+emits = "out"
+
+[[step]]
+name = "gate"
+after = ["work"]
+type = "human"
+on_fail = "fix-loop"
+max_fix_loops = 5
+
+[[step]]
+name = "fix"
+executor = "fixer"
+emits = "out"
+loop = true
+after_loop = "gate"
+`
+
+// TestRejectedHumanGateStallParksAsStalledNotExhausted pins the prose prefix
+// of a non-convergence park on a rejected human gate. The class already read
+// loop-stalled; the reason claimed the loop was exhausted while four rounds of
+// budget remained.
+func TestRejectedHumanGateStallParksAsStalledNotExhausted(t *testing.T) {
+	conn := mustDB(t)
+	runID := activateSrc(t, conn, humanStallSrc, "human-stall.toml")
+	tree := &treeState{body: "the original change"}
+	e := convergenceEngine(tree)
+
+	claimAndComplete(t, conn, e, "work@0", "the work", "")
+	testsupport.Must(t,
+		e.DecideStep(conn, stepIDByInstance(t, conn, "gate@0"), false,
+			"needs work", nowMS),
+		"first rejection: %v", nil)
+
+	// The fix round leaves the tree where it was, so the next entry would read
+	// the identical tree.
+	claimAndComplete(t, conn, e, "fix@1", "the fix", "")
+	gateID := stepIDByInstance(t, conn, "gate@1")
+	testsupport.Must(t,
+		e.DecideStep(conn, gateID, false, "still needs work", nowMS),
+		"second rejection: %v", nil)
+
+	if stepExists(t, conn, "fix@2") {
+		t.Fatal("premise: the second rejection must be refused as stalled, " +
+			"not enter round 2")
+	}
+	assertParkClass(t, conn, park{runID, gateID}, db.ParkClassLoopStalled)
+
+	view, err := LoadStepView(conn, gateID, nowMS)
+	testsupport.Must(t, err, "LoadStepView: %v", err)
+	if !strings.HasPrefix(view.ParkReason, "fix-loop-stalled: ") ||
+		!strings.Contains(view.ParkReason, "changed nothing") {
+		t.Errorf("park_reason = %q, want `fix-loop-stalled: ` followed by the "+
+			"loop's non-convergence reason", view.ParkReason)
+	}
+}

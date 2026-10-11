@@ -1320,14 +1320,18 @@ func attemptsExhaustedParkReason(attempt, max int) string {
 }
 
 // loopBoundParkReason is the engine's `park_reason` for a step whose fix loop
-// was refused at its bound: `fix-loop-exhausted: <bound reason>`.
+// was refused: `fix-loop-exhausted: <bound reason>` at the `max_fix_loops`
+// bound, `fix-loop-stalled: <bound reason>` for non-convergence, where budget
+// remained.
 //
-// The bound reason is already the engine's — `exhausted` composes it from the
-// ordinal and the pinned `max_fix_loops`, naming the way out — so the prefix is
-// what turns a sentence about the loop into the reason the row parked. The
-// note the rejection or failure carried stays in the routing record and on
-// its own event; it is not folded in here.
+// The bound reason is already the engine's — EnterLoop composes it, naming the
+// way out — so the prefix is what turns a sentence about the loop into the
+// reason the row parked. The note the rejection or failure carried stays in
+// the routing record and on its own event; it is not folded in here.
 func loopBoundParkReason(loop *LoopOutcome) string {
+	if loop.Stalled {
+		return "fix-loop-stalled: " + loop.Reason
+	}
 	return "fix-loop-exhausted: " + loop.Reason
 }
 
