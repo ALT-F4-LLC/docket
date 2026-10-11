@@ -53,17 +53,34 @@ func TestRenderStepDetailLoopHistory(t *testing.T) {
 		Status:            "waiting-human",
 		LoopRoundsRun:     3,
 		LoopTriggerStep:   "review@0",
-		LoopLatestVerdict: "fix-loop",
+		LoopLatestVerdict: "fail",
 	}
 	got := RenderStepDetail(exhausted, "", "", "", 0)
 	for _, want := range []string{
 		"  loop rounds:  3\n",
 		"  loop trigger: review@0\n",
-		"  loop verdict: fix-loop\n",
+		"  loop verdict: fail\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("exhausted row: missing %q in:\n%s", want, got)
 		}
+	}
+
+	// A trigger that recorded no verdict is ordinary: the rounds and trigger
+	// lines stay, and the verdict line is omitted rather than left blank.
+	noVerdict := exhausted
+	noVerdict.LoopLatestVerdict = ""
+	got = RenderStepDetail(noVerdict, "", "", "", 0)
+	for _, want := range []string{
+		"  loop rounds:  3\n",
+		"  loop trigger: review@0\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("empty-verdict row: missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "loop verdict:") {
+		t.Errorf("empty-verdict row: unexpected verdict line in:\n%s", got)
 	}
 
 	bare := model.StepRow{Step: "STEP-8", Instance: "build@0", Status: "pending"}

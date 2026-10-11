@@ -92,12 +92,16 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 			row.FailedAttempts, row.ReapedClaims)
 	}
 	// The loop history is one fact, written together at a fix-loop
-	// exhaustion, so the trigger gates all three lines: a zero rounds count
-	// is still a fact on an exhausted row (a cap of 0), not an absent one.
+	// exhaustion, so the trigger gates the rounds and trigger lines: a zero
+	// rounds count is still a fact on an exhausted row (a cap of 0), not an
+	// absent one. The verdict is omitted when the trigger recorded none,
+	// matching the JSON field's omitempty.
 	if row.LoopTriggerStep != "" {
 		fmt.Fprintf(&b, "  loop rounds:  %d\n", row.LoopRoundsRun)
 		fmt.Fprintf(&b, "  loop trigger: %s\n", row.LoopTriggerStep)
-		fmt.Fprintf(&b, "  loop verdict: %s\n", row.LoopLatestVerdict)
+		if row.LoopLatestVerdict != "" {
+			fmt.Fprintf(&b, "  loop verdict: %s\n", row.LoopLatestVerdict)
+		}
 	}
 
 	// A held lease is reported with its owner, mirroring the v6 `lease` object's
