@@ -443,3 +443,81 @@ func TestCastVoteReturnsCommittedResultWhenPanelEventsFail(t *testing.T) {
 		t.Errorf("%d votes recorded, want the committed cast's 1", n)
 	}
 }
+
+// TestCastPolicyOfStepBound pins stepBound on castPolicyOf's unenforced
+// returns. A proposal created under the vote-step prefix is step-bound even
+// when no pinned spec resolves for it, so CastVote skips the panel's run events
+// for it; a proposal created under any other key is not step-bound.
+func TestCastPolicyOfStepBound(t *testing.T) {
+	conn := mustDB(t)
+	fx := seedPinnedVoteStep(t, conn, voteFixture(`executor = "dev"`, ""))
+
+	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, fx.proposalID)
+	testsupport.Must(t, err, "IdempotencyKeyOf: %v", err)
+	runID, ok := voteStepRunOf(key)
+	if !found || !ok {
+		t.Fatalf("fixture proposal key %q (found %v) names no run", key, found)
+	}
+	var wfID int64
+	err = conn.QueryRow(`SELECT workflow_id FROM steps WHERE run_id = ?`, runID).Scan(&wfID)
+	testsupport.Must(t, err, "reading the fixture's workflow: %v", err)
+
+	// A materialized held step: a real step row in the run, under a minted
+	// name the pinned definition never declares.
+	held := seedVoteStepInRun(t, conn, int64(runID), wfID,
+		workflow.HeldStepName("review")+"@0")
+
+	keyed := func(t *testing.T, key string) int {
+		t.Helper()
+		id, err := db.CreateProposalIdempotent(conn, &model.Proposal{
+			Description: "keyed", Criticality: model.CriticalityLow,
+			Status: model.ProposalStatusOpen, RequiredVoters: 3, Threshold: 0.6,
+		}, key)
+		testsupport.Must(t, err, "CreateProposalIdempotent(%q): %v", key, err)
+		return id
+	}
+
+	prefix := voteIdempotencyPrefix(runID)
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"run part does not parse", voteStepScopePrefix + "not-a-run:1:review@0"},
+		{"issue part does not parse", prefix + "not-an-issue:review@0"},
+		{"key names a step the run has no row for", prefix + "999999:review@0"},
+		{"key names a materialized held step",
+			voteIdempotencyKey(runID, held.IssueID, held.Instance)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy, err := castPolicyOf(conn, keyed(t, tc.key))
+			if err != nil {
+				t.Fatalf("castPolicyOf(%q) error = %v, want nil", tc.key, err)
+			}
+			if !policy.stepBound {
+				t.Errorf("castPolicyOf(%q).stepBound = false, want true", tc.key)
+			}
+			if policy.spec != nil {
+				t.Errorf("castPolicyOf(%q).spec = %q, want nil", tc.key, policy.spec.Name)
+			}
+		})
+	}
+
+	t.Run("the declared vote step resolves its spec", func(t *testing.T) {
+		policy, err := castPolicyOf(conn, fx.proposalID)
+		testsupport.Must(t, err, "castPolicyOf: %v", err)
+		if !policy.stepBound || policy.spec == nil || policy.spec.Name != "review" {
+			t.Errorf("policy = %+v, want step-bound with the `review` spec", policy)
+		}
+	})
+
+	t.Run("a proposal outside the vote-step prefix is not step-bound", func(t *testing.T) {
+		for _, id := range []int{adHocProposal(t, conn, 3), keyed(t, "operator:ballot-1")} {
+			policy, err := castPolicyOf(conn, id)
+			testsupport.Must(t, err, "castPolicyOf: %v", err)
+			if policy.stepBound || policy.spec != nil {
+				t.Errorf("castPolicyOf(%s) = %+v, want the zero policy",
+					model.FormatProposalID(id), policy)
+			}
+		}
+	})
+}
