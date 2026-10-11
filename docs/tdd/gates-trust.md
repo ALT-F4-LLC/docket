@@ -985,7 +985,7 @@ the next environment variable anyone invents.
 | `CI` | `1` | the near-universal convention for "non-interactive"; it makes tools skip prompts and progress spinners without docket having to know each tool |
 | `DOCKET_GATE` | the gate name | so a check can behave differently under docket if its author wants; opaque to core |
 | `DOCKET_REPO` | the repo root | the same value as `Dir`, for tools that need it in an env |
-| `DOCKET_GATE_BASE` | the base commit sha of the tree the gate measures, for **worktree-recorded completion gates and pre-gates** measuring a bound worktree or a reconstruction | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
+| `DOCKET_GATE_BASE` | the base commit sha of the tree the gate measures, for **worktree-recorded completion gates and pre-gates** measuring a bound worktree or a reconstruction, and for **trust-probe gates** (`docket trust probe`, `runProbeGate`), whose value is the probed `HEAD` sha | so a range-shaped check can scan exactly the step's committed change — `DOCKET_GATE_BASE..HEAD` of the tree it runs in — see below *(added 2026-09-01, DKT-992)* |
 | `DOCKET_STEP` | the step's reference, `STEP-N` | so a gate can ask the engine for its **own inputs** — the identity `docket step context` and `docket step artifacts` take — instead of re-deriving which step it is from `DOCKET_ISSUE` plus an instance-name convention; see below *(added 2026-09-03, DKT-1186)* |
 | `GOLANGCI_LINT_CACHE`, `STATICCHECK_CACHE` | a scratch directory deleted with the tree, **gates measuring a reconstruction only** | both tools cache issues by package content while storing the absolute path each was found at, and re-open that path to find the `//nolint` that suppresses it. A reconstruction outlives neither, so its entries must not either — see §7.6's DKT-1166 amendment *(added 2026-09-03, DKT-1166)* |
 
@@ -1020,6 +1020,12 @@ resolution applied to the tree they measure:
   reason as a non-worktree step.
 - The variable is also unset, on either path, when the fork point or
   merge-base cannot be resolved.
+- **Trust probe** (`docket trust probe`): a probed gate receives the probed
+  `HEAD` sha. That value is deliberately not `gateBaseSHA`'s fork-point/unset
+  resolution: the throwaway worktree sits at the probed sha with nothing
+  committed on top, so an empty footprint is the healthy answer, and a gate
+  that refuses without the variable would otherwise report failed on clean
+  HEAD. See `runProbeGate` in `internal/engine/trust_probe.go`.
 - **Fail closed on absence**: a range-shaped gate that finds the variable
   absent while the tree is clean has nothing it can honestly scan, and should
   fail rather than pass having measured nothing — "we couldn't check, so
