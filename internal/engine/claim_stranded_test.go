@@ -825,9 +825,10 @@ func TestSameOwnerReclaimWithoutTheRecoverySecretIsRefused(t *testing.T) {
 // TestSameOwnerReclaimOfALeaseWithNoRecoveryHashIsRefused pins that a lease
 // whose first claim stored no recovery hash cannot be re-keyed by its owner
 // string, whether or not the re-claim presents a secret: there is nothing to
-// prove the secret against. The refusal is CONFLICT and leaves the lease as it
-// was, writes no step-reminted or further step-claimed event, and does not
-// echo the presented secret.
+// prove the secret against. The refusal is CONFLICT, says the lease was taken
+// without a recovery secret, leaves the lease as it was, writes no
+// step-reminted or further step-claimed event, and does not echo the
+// presented secret.
 func TestSameOwnerReclaimOfALeaseWithNoRecoveryHashIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name, secret string
@@ -861,6 +862,9 @@ func TestSameOwnerReclaimOfALeaseWithNoRecoveryHashIsRefused(t *testing.T) {
 			}
 			if code, _ := CodeOf(err); code != CodeConflict {
 				t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+			}
+			if !strings.Contains(err.Error(), "without a recovery secret") {
+				t.Errorf("the refusal does not say the lease holds no recovery secret: %q", err.Error())
 			}
 			if tc.secret != "" && strings.Contains(err.Error(), tc.secret) {
 				t.Errorf("the refusal discloses the presented secret: %q", err.Error())
