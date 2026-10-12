@@ -93,11 +93,16 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 	}
 	// The loop history is one fact, written together at a fix-loop
 	// exhaustion, so the trigger gates the rounds and trigger lines: a zero
-	// rounds count is still a fact on an exhausted row (a cap of 0), not an
-	// absent one. The verdict is omitted when the trigger recorded none,
-	// matching the JSON field's omitempty.
+	// rounds count is still a fact on an exhausted row, not an absent one.
+	// The rounds line names the cap they ran against only when one was
+	// recorded; a stored cap of 0 means none was. The verdict is omitted when
+	// the trigger recorded none, matching the JSON field's omitempty.
 	if row.LoopTriggerStep != "" {
-		fmt.Fprintf(&b, "  loop rounds:  %d\n", row.LoopRoundsRun)
+		if row.LoopCap > 0 {
+			fmt.Fprintf(&b, "  loop rounds:  %d of %d\n", row.LoopRoundsRun, row.LoopCap)
+		} else {
+			fmt.Fprintf(&b, "  loop rounds:  %d\n", row.LoopRoundsRun)
+		}
 		fmt.Fprintf(&b, "  loop trigger: %s\n", row.LoopTriggerStep)
 		if row.LoopLatestVerdict != "" {
 			fmt.Fprintf(&b, "  loop verdict: %s\n", row.LoopLatestVerdict)

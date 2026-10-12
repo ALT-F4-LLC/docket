@@ -44,20 +44,23 @@ func TestStepShowGateSummaryBytesAreUnchanged(t *testing.T) {
 }
 
 // The loop history a fix-loop exhaustion leaves on the row reaches `step show`
-// as one labeled line per fact, and a row outside an exhaustion shows none of
-// the three labels.
+// as one labeled line per fact, the rounds line naming the persisted cap they
+// ran against, and a row outside an exhaustion shows none of the three labels.
 func TestRenderStepDetailLoopHistory(t *testing.T) {
+	// The cap differs from the rounds count so the line cannot pass by
+	// printing either number twice.
 	exhausted := model.StepRow{
 		Step:              "STEP-7",
 		Instance:          "fix@0#3",
 		Status:            "waiting-human",
 		LoopRoundsRun:     3,
+		LoopCap:           5,
 		LoopTriggerStep:   "review@0",
 		LoopLatestVerdict: "fail",
 	}
 	got := RenderStepDetail(exhausted, "", "", "", 0)
 	for _, want := range []string{
-		"  loop rounds:  3\n",
+		"  loop rounds:  3 of 5\n",
 		"  loop trigger: review@0\n",
 		"  loop verdict: fail\n",
 	} {
@@ -72,7 +75,7 @@ func TestRenderStepDetailLoopHistory(t *testing.T) {
 	noVerdict.LoopLatestVerdict = ""
 	got = RenderStepDetail(noVerdict, "", "", "", 0)
 	for _, want := range []string{
-		"  loop rounds:  3\n",
+		"  loop rounds:  3 of 5\n",
 		"  loop trigger: review@0\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -81,6 +84,18 @@ func TestRenderStepDetailLoopHistory(t *testing.T) {
 	}
 	if strings.Contains(got, "loop verdict:") {
 		t.Errorf("empty-verdict row: unexpected verdict line in:\n%s", got)
+	}
+
+	// A history written without a recorded bound stores cap 0, which no
+	// refusal applies: the rounds line keeps the count and names no cap.
+	uncapped := exhausted
+	uncapped.LoopCap = 0
+	got = RenderStepDetail(uncapped, "", "", "", 0)
+	if !strings.Contains(got, "  loop rounds:  3\n") {
+		t.Errorf("uncapped row: missing %q in:\n%s", "  loop rounds:  3\n", got)
+	}
+	if strings.Contains(got, "loop rounds:  3 of") {
+		t.Errorf("uncapped row: unexpected cap suffix in:\n%s", got)
 	}
 
 	bare := model.StepRow{Step: "STEP-8", Instance: "build@0", Status: "pending"}
