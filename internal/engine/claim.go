@@ -910,9 +910,10 @@ func claimStepWithGates(
 // The owner string is public, so it identifies the claimant without proving
 // it. A lease whose first claim stored a recovery hash re-mints only for a
 // caller presenting the matching secret; any other caller gets CONFLICT and
-// the lease is untouched. A lease with no stored hash still re-mints on the
-// owner alone, because no caller can supply a secret until the CLI accepts
-// one. The refusal names the step and owner only, never a secret or hash.
+// the lease is untouched. A lease with no stored hash never re-mints, with or
+// without a presented secret, because there is nothing to prove the secret
+// against; its holder waits for expiry or a reap. Each refusal names the step
+// and owner only, never a secret or hash.
 //
 // A re-mint appends `step-reminted` in this transaction.
 func reMintOwnClaim(
@@ -926,7 +927,13 @@ func reMintOwnClaim(
 		`SELECT recovery_hash FROM steps WHERE id = ?`, fresh.ID).Scan(&recoveryHash); err != nil {
 		return nil, fmt.Errorf("reading the recovery hash: %w", err)
 	}
-	if recoveryHash.Valid && !model.TokenMatches(opts.RecoverySecret, recoveryHash.String) {
+	if !recoveryHash.Valid {
+		return nil, conflictErr(
+			"step %s: the claim held by %s was taken without a recovery secret, so it "+
+				"cannot be re-minted; wait for the lease to expire or reap it",
+			fresh.Instance, opts.Owner)
+	}
+	if !model.TokenMatches(opts.RecoverySecret, recoveryHash.String) {
 		return nil, conflictErr(
 			"step %s: the claim held by %s was taken with a recovery secret, and this "+
 				"re-claim did not present it", fresh.Instance, opts.Owner)
