@@ -1312,6 +1312,37 @@ amendment, not a stage: one additive nullable column, a `hasColumn`-probed
 that probes the COLUMN (the v27–v42 form, since v43 adds no table and no
 index). No v5–v10 column, table, or count changes.
 
+### AMENDMENT — the span extends to v44 (the fix-loop cap, 2026-10-11)
+
+**What changed.** v44 adds ONE column to one table, `steps.loop_cap`
+(`INTEGER NOT NULL DEFAULT 0`): the bound a refused fix-loop entry was
+measured against. It joins v35's three loop-history columns, and the
+loop-history write sets it in the same statement as `loop_rounds_run`,
+`loop_trigger_step`, and `loop_latest_verdict`.
+
+**Why it needed a version.** v35 persisted the rounds that ran against the
+cap, but not the cap. A reader of a loop-bound park could see "2 rounds" and
+not whether the bound was 2. The applied bound is not recomputable from the
+workflow either: it is `max_fix_loops` plus the issue's `fix-round` grants,
+clamped to `max_fix_loops_hard` for an unauthorized entry, or a `serves`
+cluster's own `max_fix_loops`. The refusal knew it, but kept it only inside
+the park reason's prose, which is not a field and is empty on some rows.
+Rendering "N of CAP" from a stored fact needs the cap on the row beside the
+count.
+
+**Zero means no recorded cap, and nothing else.** The migration back-fills
+nothing. A pre-v44 exhaustion's bound survives only in prunable events and
+park-reason prose, and re-deriving it from the workflow would misreport every
+granted, hard-clamped, or cluster-bounded loop. Every pre-v44 row reads zero,
+as does every row that never exhausted a loop. No refusal can record zero as
+its bound, because a bound of zero disables the check that refuses.
+
+**Why the ratified arithmetic is untouched.** Like v11–v43, v44 is an
+amendment, not a stage: one additive column with a default, a
+`hasColumn`-probed `ALTER` so the migration is idempotent and re-runnable, and
+a rewind guard that probes the COLUMN (the v27–v43 form, since v44 adds no
+table and no index). No v5–v10 column, table, or count changes.
+
 ### 2.1 The never-mutate rule
 
 engine-spec.md §3 requires v4 DBs open unchanged and existing verbs stay
