@@ -405,7 +405,7 @@ func TestLateDetachedResultForAMovedTargetIsNeitherRecordedNorReplayed(t *testin
 
 	// While the child's gate runs: the target moves to B, and the claim takes
 	// the step there.
-	owner := ClaimOptions{Owner: "w", NowMS: nowMS}
+	owner := ClaimOptions{Owner: "w", RecoverySecret: testRecoverySecret, NowMS: nowMS}
 	var claimed *ClaimResult
 	child := testEngine()
 	child.Gates = &movingTargetGates{move: func() {

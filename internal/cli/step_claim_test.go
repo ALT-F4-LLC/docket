@@ -109,12 +109,16 @@ func TestStepClaimCommandReMintsForItsOwnOwner(t *testing.T) {
 	testsupport.Must(t, cmd.Flags().Set("owner", "wave:STEP-1"), "setting --owner: %v", err)
 
 	arg := model.FormatStepID(stepID)
+	secret := secretFile(t, testRecoverySecret, 0o600)
+	cmd.SetIn(openStdin(t, secret))
 	testsupport.Must(t, stepClaimCmd.RunE(cmd, []string{arg}), "the first claim: %v", err)
 
 	before, err := db.GetStep(conn, stepID)
 	testsupport.Must(t, err, "GetStep: %v", err)
 
-	// The retry a stranded executor makes: same verb, same owner, same step.
+	// The retry a stranded executor makes: same verb, same owner, same step,
+	// same secret file.
+	cmd.SetIn(openStdin(t, secret))
 	testsupport.Must(t, stepClaimCmd.RunE(cmd, []string{arg}),
 		"the stranded executor's own re-claim was refused: %v", err)
 

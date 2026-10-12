@@ -99,14 +99,14 @@ func TestSameOwnerReclaimReMintsTheStrandedToken(t *testing.T) {
 	stepID := stepIDByInstance(t, conn, "implement@0")
 
 	first, err := ClaimStep(conn, stepID, ClaimOptions{
-		Owner: "wave:STEP-1", NowMS: nowMS,
+		Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS,
 	})
 	testsupport.Must(t, err, "the first claim: %v", err)
 
 	// The same owner, well inside the lease window — the retry a stranded
 	// executor makes.
 	second, err := ClaimStep(conn, stepID, ClaimOptions{
-		Owner: "wave:STEP-1", NowMS: nowMS + 1000,
+		Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
 	})
 	testsupport.Must(t, err,
 		"a same-owner re-claim inside the lease window was refused: %v", err)
@@ -169,7 +169,7 @@ func TestSameOwnerClaimantsShareOneLease(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			result, err := ClaimStep(conn, stepID, ClaimOptions{
-				Owner: "wave:STEP-1", NowMS: nowMS,
+				Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS,
 			})
 			if err != nil {
 				return
@@ -249,7 +249,7 @@ func TestRenderedReclaimReMintsForItsOwnOwner(t *testing.T) {
 	testsupport.Must(t, err, "activate: %v", err)
 
 	stepID := stepIDByInstance(t, conn, "implement@0")
-	opts := ClaimOptions{Owner: "wave:STEP-1", NowMS: nowMS}
+	opts := ClaimOptions{Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS}
 
 	first, _, err := NewEngine().ClaimStepRendered(conn, stepID, opts, "", "")
 	testsupport.Must(t, err, "the first rendered claim: %v", err)
@@ -368,7 +368,7 @@ func TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord(t *testing.T) {
 	original := make(chan claimOutcome, 1)
 	go func() {
 		result, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-			Owner: owner, NowMS: nowMS,
+			Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
 		})
 		original <- claimOutcome{result, err}
 	}()
@@ -378,7 +378,7 @@ func TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord(t *testing.T) {
 	testsupport.Must(t, err, "GetStep: %v", err)
 
 	_, err = e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, NowMS: nowMS + 1000,
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
 	})
 	if err == nil {
 		t.Fatal("a same-owner re-claim re-minted while the pre-gate phase was running")
@@ -412,7 +412,7 @@ func TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord(t *testing.T) {
 	}
 
 	reMinted, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, NowMS: nowMS + 2000,
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 2000,
 	})
 	testsupport.Must(t, err,
 		"a same-owner re-claim after the pre-gate rows recorded was refused: %v", err)
@@ -474,7 +474,7 @@ func TestSameOwnerReclaimBeforeTransactionBCommitsIsRefused(t *testing.T) {
 		}
 
 		_, inWindowErr = e.ClaimStepWithGates(conn, id, ClaimOptions{
-			Owner: owner, NowMS: nowMS + 1000,
+			Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
 		})
 
 		after, err := db.GetStep(conn, id)
@@ -486,7 +486,7 @@ func TestSameOwnerReclaimBeforeTransactionBCommitsIsRefused(t *testing.T) {
 	t.Cleanup(func() { claimHookAfterPreGates = nil })
 
 	first, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, NowMS: nowMS,
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
 	})
 	if !hookRan {
 		t.Fatal("the claim never reached the window after its pre-gates")
@@ -507,7 +507,7 @@ func TestSameOwnerReclaimBeforeTransactionBCommitsIsRefused(t *testing.T) {
 	assertOwnPreGateInput(t, "original claim bundle", first.Context)
 
 	reMinted, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, NowMS: nowMS + 2000,
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 2000,
 	})
 	testsupport.Must(t, err,
 		"a same-owner re-claim after transaction B committed was refused: %v", err)
@@ -561,7 +561,7 @@ func TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires(t *testing.T) {
 	e.Gates = PassThroughRunner{}
 	later := nowMS + ttlMS + 1
 	fresh, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, NowMS: later,
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: later,
 	})
 	testsupport.Must(t, err,
 		"a claim after the unsettled lease expired was refused: %v", err)
@@ -573,7 +573,7 @@ func TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires(t *testing.T) {
 	}
 
 	again, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, NowMS: later + 1,
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: later + 1,
 	})
 	testsupport.Must(t, err,
 		"a same-owner re-claim of the settled fresh claim was refused: %v", err)
@@ -609,7 +609,7 @@ func TestTransactionBFailureRefusesReclaimUntilTheLeaseExpires(t *testing.T) {
 	t.Cleanup(func() { claimHookBeforeRefresh = nil })
 
 	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, TTLOverride: ttlMS, NowMS: nowMS,
+		Owner: owner, RecoverySecret: testRecoverySecret, TTLOverride: ttlMS, NowMS: nowMS,
 	})
 	var incomplete *IncompleteClaimError
 	if !errors.As(err, &incomplete) {
@@ -636,7 +636,7 @@ func TestTransactionBFailureRefusesReclaimUntilTheLeaseExpires(t *testing.T) {
 	}
 
 	_, err = e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-		Owner: owner, NowMS: nowMS + ttlMS/2,
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + ttlMS/2,
 	})
 	if err == nil {
 		t.Fatal("a same-owner re-claim inside the lease re-minted a claim whose transaction B failed")

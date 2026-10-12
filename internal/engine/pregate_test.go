@@ -568,7 +568,7 @@ func TestRecordedPreGatesCarryStubEntry(t *testing.T) {
 		t.Run("stub="+strconv.FormatBool(stub), func(t *testing.T) {
 			conn := mustDB(t)
 			stepID, e := stubTrustedPreGateRun(t, conn, stub)
-			owner := ClaimOptions{Owner: "w", NowMS: nowMS}
+			owner := ClaimOptions{Owner: "w", RecoverySecret: testRecoverySecret, NowMS: nowMS}
 			_, err := e.ClaimStepWithGates(conn, stepID, owner)
 			testsupport.Must(t, err, "claim: %v", err)
 
