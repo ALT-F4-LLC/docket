@@ -38,7 +38,13 @@ type AddRequest struct {
 	// Network is the host list this command must reach. It declares
 	// a requirement; it grants nothing.
 	Network []string
-	NowMS   int64
+	// DeclaredFiles are repo-relative paths whose content the entry pins, and
+	// DeclaredRoot is the absolute directory they are hashed under. The root is
+	// separate from RepoRoot because the binding identity and the checkout a
+	// gate reads need not be the same directory.
+	DeclaredFiles []string
+	DeclaredRoot  string
+	NowMS         int64
 	// OnChange runs INSIDE the store lock, after the change has been decided
 	// and BEFORE the store is written. A non-nil error aborts the add with
 	// NOTHING written.
@@ -160,21 +166,17 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 				ErrConflict, entry.Name, CanonicalArgv(existing.Argv),
 				strings.Join(entryChanges(*existing, entry), "; "), entry.Name)
 		}
-		if existing.Argv0SHA256 == entry.Argv0SHA256 {
+		repins := pinChanges(*existing, entry)
+		if len(repins) == 0 {
 			// Idempotent success: nothing written, exit 0. Re-approving the
 			// same command with the same flags is not a change.
 			return &AddResult{Entry: *existing, Idempotent: true, Warnings: warnings}, nil
 		}
-		// The RE-PIN (§3.5): same command and flags, but the file argv[0]
-		// names now holds different bytes, or the entry predates pinning.
-		// Re-running the add is the operator approving those bytes, so it is a
-		// change: recorded, written, and disclosed with both hashes.
-		previous := existing.Argv0SHA256
-		if previous == "" {
-			previous = "none"
-		}
-		warnings = append(warnings, fmt.Sprintf("re-pinned %s: argv0_sha256 %s to %s",
-			entry.Argv[0], previous, entry.Argv0SHA256))
+		// The RE-PIN (§3.5): same command, flags, and declared paths, but a
+		// pinned file now holds different bytes, or the entry predates
+		// pinning. Re-running the add is the operator approving those bytes,
+		// so it is a change: recorded, written, and disclosed with both hashes.
+		warnings = append(warnings, repins...)
 	}
 
 	if req.OnChange != nil {
@@ -309,6 +311,24 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 		e.Argv0SHA256 = sum
 	}
 
+	// Declared files are pinned the same way, under the explicit root, and a
+	// file that cannot be hashed there refuses the add.
+	if len(req.DeclaredFiles) > 0 {
+		if req.Global {
+			return Entry{}, nil, fmt.Errorf("%w: a global entry cannot declare files; declared files bind to one repository", ErrParse)
+		}
+		if err := checkDeclaredPaths(req.DeclaredFiles); err != nil {
+			return Entry{}, nil, fmt.Errorf("%w: %v", ErrParse, err)
+		}
+		for _, p := range req.DeclaredFiles {
+			sum, err := declaredFileSHA256(req.DeclaredRoot, p)
+			if err != nil {
+				return Entry{}, nil, fmt.Errorf("pinning the content of declared file %s: %w", p, err)
+			}
+			e.DeclaredFiles = append(e.DeclaredFiles, DeclaredFile{Path: p, SHA256: sum})
+		}
+	}
+
 	// P3: global requires the explicit flag; there is no implicit path to it.
 	if !req.Global {
 		repo, err := RepoIdentity(req.RepoRoot)
@@ -426,7 +446,44 @@ func entryChanges(existing, proposed Entry) []string {
 	if existing.Timeout != proposed.Timeout {
 		changes = append(changes, fmt.Sprintf("timeout %q to %q", existing.Timeout, proposed.Timeout))
 	}
+	// The declared PATHS are part of the authorization; their hashes are not
+	// (a changed hash is a re-pin). A re-add that dropped a path would
+	// silently unpin a file the gate still reads, so any difference in the
+	// list, order included, is a conflict.
+	if oldPaths, newPaths := declaredPaths(existing.DeclaredFiles), declaredPaths(proposed.DeclaredFiles); !slices.Equal(oldPaths, newPaths) {
+		changes = append(changes, fmt.Sprintf("declared_files [%s] to [%s]",
+			strings.Join(oldPaths, " "), strings.Join(newPaths, " ")))
+	}
 	return changes
+}
+
+// pinChanges discloses every content pin a re-add would replace, one line per
+// file with both hashes. It assumes entryChanges found nothing, so the two
+// entries declare the same paths in the same order.
+func pinChanges(existing, proposed Entry) []string {
+	var changes []string
+	if existing.Argv0SHA256 != proposed.Argv0SHA256 {
+		previous := existing.Argv0SHA256
+		if previous == "" {
+			previous = "none"
+		}
+		changes = append(changes, fmt.Sprintf("re-pinned %s: argv0_sha256 %s to %s",
+			proposed.Argv[0], previous, proposed.Argv0SHA256))
+	}
+	for i, d := range proposed.DeclaredFiles {
+		if old := existing.DeclaredFiles[i].SHA256; old != d.SHA256 {
+			changes = append(changes, fmt.Sprintf("re-pinned declared file %s: sha256 %s to %s", d.Path, old, d.SHA256))
+		}
+	}
+	return changes
+}
+
+func declaredPaths(files []DeclaredFile) []string {
+	paths := make([]string, len(files))
+	for i, d := range files {
+		paths[i] = d.Path
+	}
+	return paths
 }
 
 // ensureStoreDir creates the config directory 0700 (I5).

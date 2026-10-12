@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
@@ -58,4 +59,30 @@ func argv0ContentSHA256(argv0 string) (resolved, sum string, err error) {
 		return resolved, "", err
 	}
 	return resolved, sum, nil
+}
+
+// declaredFileSHA256 hashes a declared repo-relative path under root, the
+// hasher behind both the pins trust add stores and the check LookupAt makes.
+//
+// The root is explicit and must be absolute: resolving against the process
+// cwd would hash whichever copy the caller happens to stand in, not the one the
+// gate reads. Root and file are both symlink-resolved before the containment
+// check, so a declared path that is a link out of the root is refused rather
+// than pinning bytes the repository does not own.
+func declaredFileSHA256(root, rel string) (string, error) {
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("the declared-file root %q is not an absolute path", root)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving the declared-file root %s: %w", root, err)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(resolvedRoot, rel))
+	if err != nil {
+		return "", fmt.Errorf("resolving declared file %s under %s: %w", rel, resolvedRoot, err)
+	}
+	if !exec.Under(resolvedRoot, resolved) {
+		return "", fmt.Errorf("declared file %s resolves to %s, outside the root %s", rel, resolved, resolvedRoot)
+	}
+	return exec.FileSHA256(resolved)
 }

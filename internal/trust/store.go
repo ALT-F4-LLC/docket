@@ -44,6 +44,14 @@ type Entry struct {
 	// pinned, and for an entry written before pinning existed, which matches
 	// with a warning.
 	Argv0SHA256 string `toml:"argv0_sha256,omitempty"`
+	// DeclaredFiles pins the CONTENT of repository files the command reads
+	// but does not name as argv[0] — a Makefile and the scripts it sources.
+	// Paths are repo-relative and hashed under an explicit root at add time;
+	// only LookupAt, which takes the root the gate will run in, can match an
+	// entry that declares any, so Lookup refuses such an entry. A global
+	// entry never declares files: with no repository bound, any repo holding
+	// the same bytes would satisfy the pin.
+	DeclaredFiles []DeclaredFile `toml:"declared_files,omitempty"`
 	// Repo is the repo binding (§3.4) — the absolute, symlink-resolved path of
 	// the directory containing the repo's .docket store. Empty when Global.
 	Repo string `toml:"repo"`
@@ -139,6 +147,13 @@ type Entry struct {
 	AddedAtMS int64 `toml:"added_at_ms"`
 }
 
+// DeclaredFile is one content-pinned repository file: a clean repo-relative
+// path and the hex-encoded SHA-256 of its bytes when the entry was added.
+type DeclaredFile struct {
+	Path   string `toml:"path"`
+	SHA256 string `toml:"sha256"`
+}
+
 // NeedsNetwork reports whether this entry declares any network requirement.
 func (e Entry) NeedsNetwork() bool { return len(e.Network) > 0 }
 
@@ -150,9 +165,10 @@ func (e Entry) NeedsNetwork() bool { return len(e.Network) > 0 }
 // is later applied to a command read from somewhere else, so there is no window
 // between the check and the spawn in which anything can be swapped.
 //
-// The one input outside the snapshot is the file a pinned absolute argv[0]
-// names (§3.1). Lookup re-hashes it on every call, which narrows the window
-// between that hash and the spawn but does not close it.
+// The inputs outside the snapshot are the file a pinned absolute argv[0] names
+// (§3.1) and an entry's declared files under the root LookupAt is given. Each
+// lookup re-hashes them, which narrows the window between that hash and the
+// spawn but does not close it.
 type Store struct {
 	// Version is the file format version (§3.1). An unknown version is a hard
 	// refusal, never a best-effort parse.

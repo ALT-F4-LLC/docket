@@ -57,12 +57,52 @@ type Match struct {
 // so the match is by name and binding. It is the tokenized fence line for a
 // FENCE gate, which must additionally hash-equal the entry (or be element-wise
 // prefixed by it, when and only when the entry opted in).
+//
+// An entry that declares files is REFUSED here: Lookup has no root to hash
+// them under, and matching without the check would hand a caller an executable
+// argv whose sourced files nobody verified. Only LookupAt can match it.
 func (s *Store) Lookup(repoIdentity, gate string, candidateArgv []string) Match {
 	m := s.matchArgv(repoIdentity, gate, candidateArgv)
 	if !m.Matched {
 		return m
 	}
+	if len(m.Entry.DeclaredFiles) > 0 {
+		return Match{Reason: fmt.Sprintf("gate %q: the trust entry pins declared files, which are verified only against the root the gate runs in, and this lookup was given no root; nothing runs", gate)}
+	}
 	return checkContentPin(gate, m)
+}
+
+// LookupAt is Lookup for a caller that knows the root the gate will spawn in:
+// the argv rules and the argv[0] pin apply unchanged, and then every declared
+// file of the selected entry is re-hashed under root. An entry with no
+// declared files matches exactly as it does through Lookup.
+func (s *Store) LookupAt(repoIdentity, gate string, candidateArgv []string, root string) Match {
+	m := s.matchArgv(repoIdentity, gate, candidateArgv)
+	if !m.Matched {
+		return m
+	}
+	m = checkContentPin(gate, m)
+	if !m.Matched {
+		return m
+	}
+	return checkDeclaredFiles(gate, m, root)
+}
+
+// checkDeclaredFiles holds a match to its entry's declared-file pins under
+// root. It is separate from checkContentPin because that check returns early
+// for a bare-name argv[0], and a `make` entry is exactly the one whose
+// sourced files need the pin.
+func checkDeclaredFiles(gate string, m Match, root string) Match {
+	for _, d := range m.Entry.DeclaredFiles {
+		current, err := declaredFileSHA256(root, d.Path)
+		if err != nil {
+			return Match{Reason: fmt.Sprintf("gate %q: cannot verify the content pin of declared file %s: %v", gate, d.Path, err)}
+		}
+		if current != d.SHA256 {
+			return Match{Reason: fmt.Sprintf("gate %q: declared file %s under %s changed since it was trusted (pinned sha256 %s, now %s); if the change is intended, re-run `docket trust add` for this gate with the entry's existing flags and declared files", gate, d.Path, root, d.SHA256, current)}
+		}
+	}
+	return m
 }
 
 // checkContentPin applies §3.1's pin table to a match the argv rules already

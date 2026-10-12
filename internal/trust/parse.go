@@ -115,6 +115,49 @@ func validateEntry(e Entry, idx int, path string) error {
 		}
 	}
 
+	if len(e.DeclaredFiles) > 0 {
+		if e.Global {
+			return fmt.Errorf("%w: %s in %s is global but declares files; declared files bind to one repository, so a global entry cannot pin them", ErrParse, where, path)
+		}
+		paths := make([]string, len(e.DeclaredFiles))
+		for i, d := range e.DeclaredFiles {
+			if !isLowerHexSHA256(d.SHA256) {
+				return fmt.Errorf("%w: %s in %s has declared file %q with sha256 %q, which is not 64 lowercase hex characters", ErrParse, where, path, d.Path, d.SHA256)
+			}
+			paths[i] = d.Path
+		}
+		if err := checkDeclaredPaths(paths); err != nil {
+			return fmt.Errorf("%w: %s in %s: %v", ErrParse, where, path, err)
+		}
+	}
+
+	return nil
+}
+
+// checkDeclaredPaths admits only paths that name one file under a root
+// unambiguously: non-empty, relative, already in filepath.Clean form, not the
+// root itself, never climbing out with "..", and each listed once. Clean form
+// is what makes the rest checkable as a string: "./a", "a//b", and "a/../b"
+// all fail it, so the ".." test only has to look at the leading component.
+func checkDeclaredPaths(paths []string) error {
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		switch {
+		case p == "":
+			return fmt.Errorf("a declared file path is empty")
+		case filepath.IsAbs(p):
+			return fmt.Errorf("declared file %q is absolute; declared files are repo-relative", p)
+		case filepath.Clean(p) != p:
+			return fmt.Errorf("declared file %q is not in clean form; write it as %q", p, filepath.Clean(p))
+		case p == ".":
+			return fmt.Errorf("declared file %q names the root, not a file", p)
+		case p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)):
+			return fmt.Errorf("declared file %q climbs out of the root", p)
+		case seen[p]:
+			return fmt.Errorf("declared file %q is listed more than once", p)
+		}
+		seen[p] = true
+	}
 	return nil
 }
 

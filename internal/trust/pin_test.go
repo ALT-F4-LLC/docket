@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -373,6 +374,215 @@ func TestParseRefusesAMalformedContentPin(t *testing.T) {
 			path := sandbox(t)
 			writeStoreFile(t, path, "version = 1\n\n[[entry]]\nname = \"g\"\nargv = "+tc.argv+
 				"\nargv0_sha256 = \""+tc.pin+"\"\nglobal = true\n", storeFileMode)
+			_, err := loadAt(path)
+			if !errors.Is(err, ErrParse) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("want a parse error mentioning %q; got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// --- Content pins on declared files under an explicit root ------------------
+
+const (
+	declaredMakefile = "check:\n\t. scripts/gate-range && echo ok\n"
+	declaredScript   = "#!/bin/sh\nBASE=main\n"
+)
+
+// declaredRoot is a temporary repository holding a makefile and the script it
+// sources, the shape the declared-file pin exists for.
+func declaredRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	testsupport.Must(t, os.MkdirAll(filepath.Join(root, "scripts"), 0o755), "creating scripts/")
+	writeScript(t, root, "Makefile", declaredMakefile)
+	writeScript(t, root, filepath.Join("scripts", "gate-range"), declaredScript)
+	return root
+}
+
+func declaredRequest(root string) AddRequest {
+	return AddRequest{
+		Name:          "diff-scope-small",
+		Argv:          []string{"make", "check"},
+		DeclaredFiles: []string{"Makefile", "scripts/gate-range"},
+		DeclaredRoot:  root,
+	}
+}
+
+func (f pinFixture) lookupAt(t *testing.T, gate, root string) Match {
+	t.Helper()
+	st, err := loadAt(f.storePath)
+	testsupport.Must(t, err, "loadAt: %v", err)
+	return st.LookupAt(f.identity, gate, nil, root)
+}
+
+// TestDeclaredFilePinMismatch: one changed byte in a declared file under the
+// root the gate will run in refuses the match, naming the repo-relative path
+// and both hashes. The argv[0] is a bare name, so the check cannot hide behind
+// the absolute-only argv[0] pin.
+func TestDeclaredFilePinMismatch(t *testing.T) {
+	f := newPinFixture(t)
+	root := declaredRoot(t)
+	f.add(t, declaredRequest(root))
+
+	m := f.lookupAt(t, "diff-scope-small", root)
+	if !m.Matched || !slices.Equal(m.Argv, []string{"make", "check"}) {
+		t.Fatalf("unchanged declared files must match with the entry's argv; got %+v", m)
+	}
+
+	if m := f.lookup(t, "diff-scope-small", nil); m.Matched || m.Argv != nil || !strings.Contains(m.Reason, "root") {
+		t.Errorf("Lookup has no root to verify declared files against, so it must refuse naming the root check; got %+v", m)
+	}
+	if m := f.lookupAt(t, "diff-scope-small", "relative/root"); m.Matched {
+		t.Errorf("a relative root must refuse; got %+v", m)
+	}
+
+	const drifted = "#!/bin/sh\nBASE=main~\n"
+	script := filepath.Join(root, "scripts", "gate-range")
+	testsupport.Must(t, os.WriteFile(script, []byte(drifted), 0o755), "rewriting the sourced script")
+
+	m = f.lookupAt(t, "diff-scope-small", root)
+	if m.Matched || m.Argv != nil || m.Entry != nil {
+		t.Fatalf("a drifted declared file must be unmatched with nothing to execute; got %+v", m)
+	}
+	for _, want := range []string{"scripts/gate-range", sha256Hex(declaredScript), sha256Hex(drifted)} {
+		if !strings.Contains(m.Reason, want) {
+			t.Errorf("the reason must name %q; got %q", want, m.Reason)
+		}
+	}
+
+	// An entry that declares no files is unaffected by the root.
+	f.add(t, AddRequest{Name: "plain", Argv: []string{"make", "test"}})
+	if got, want := f.lookupAt(t, "plain", root), f.lookup(t, "plain", nil); !got.Matched || !slices.Equal(got.Argv, want.Argv) {
+		t.Errorf("an entry without declared files must match as Lookup does; got %+v, want %+v", got, want)
+	}
+}
+
+// TestDeclaredFileRepin: re-adding the same entry after an intended edit
+// replaces every stored declared-file hash, discloses each change, and the
+// check against the same root matches again. Dropping a declared file is a
+// conflict, never a silent unpin.
+func TestDeclaredFileRepin(t *testing.T) {
+	const makefile2 = "check:\n\t. scripts/gate-range && echo fine\n"
+	const script2 = "#!/bin/sh\nBASE=origin/main\n"
+
+	f := newPinFixture(t)
+	root := declaredRoot(t)
+	f.add(t, declaredRequest(root))
+
+	testsupport.Must(t, os.WriteFile(filepath.Join(root, "Makefile"), []byte(makefile2), 0o644), "editing Makefile")
+	testsupport.Must(t, os.WriteFile(filepath.Join(root, "scripts", "gate-range"), []byte(script2), 0o755), "editing the script")
+	if m := f.lookupAt(t, "diff-scope-small", root); m.Matched {
+		t.Fatal("before the re-pin, edited declared files must be unmatched")
+	}
+
+	var recorded []Entry
+	req := declaredRequest(root)
+	req.OnChange = func(e Entry) error { recorded = append(recorded, e); return nil }
+	res := f.add(t, req)
+	if res.Idempotent || len(recorded) != 1 {
+		t.Fatalf("a re-pin is a recorded change; idempotent=%t records=%d", res.Idempotent, len(recorded))
+	}
+	disclosure := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{"Makefile", sha256Hex(declaredMakefile), sha256Hex(makefile2),
+		"scripts/gate-range", sha256Hex(declaredScript), sha256Hex(script2)} {
+		if !strings.Contains(disclosure, want) {
+			t.Errorf("the re-pin disclosure must name %q; got %q", want, disclosure)
+		}
+	}
+
+	want := []DeclaredFile{{Path: "Makefile", SHA256: sha256Hex(makefile2)}, {Path: "scripts/gate-range", SHA256: sha256Hex(script2)}}
+	st, err := loadAt(f.storePath)
+	testsupport.Must(t, err, "loadAt: %v", err)
+	if len(st.Entries) != 1 || !slices.Equal(st.Entries[0].DeclaredFiles, want) {
+		t.Fatalf("the store must hold the current hashes %+v; got %+v", want, st.Entries)
+	}
+	if m := f.lookupAt(t, "diff-scope-small", root); !m.Matched {
+		t.Errorf("after the re-pin the check must match; reason: %s", m.Reason)
+	}
+
+	again := declaredRequest(root)
+	var calls int
+	again.OnChange = func(Entry) error { calls++; return nil }
+	if res := f.add(t, again); !res.Idempotent || calls != 0 {
+		t.Errorf("a re-add with unchanged files must be idempotent and unrecorded; idempotent=%t calls=%d", res.Idempotent, calls)
+	}
+
+	dropped := declaredRequest(root)
+	dropped.DeclaredFiles = []string{"Makefile"}
+	if _, err := addAt(f.storePath, withRepo(dropped, f.identity)); !errors.Is(err, ErrConflict) {
+		t.Errorf("dropping a declared file must conflict; got %v", err)
+	}
+}
+
+// TestDeclaredFilesAreValidated refuses a declared path that could name a file
+// other than the one intended, at add and in a hand-edited store, and refuses
+// declared files on a global entry, which has no repository to bind them to.
+func TestDeclaredFilesAreValidated(t *testing.T) {
+	root := declaredRoot(t)
+	outside := writeScript(t, t.TempDir(), "outside.sh", "#!/bin/sh\n")
+	testsupport.Must(t, os.Symlink(outside, filepath.Join(root, "escape")), "planting an escaping symlink")
+
+	for _, tc := range []struct {
+		name  string
+		paths []string
+	}{
+		{"parent", []string{"../x"}},
+		{"absolute", []string{"/etc/passwd"}},
+		{"dot-prefixed", []string{"./Makefile"}},
+		{"unclean", []string{"scripts/../Makefile"}},
+		{"dot", []string{"."}},
+		{"empty", []string{""}},
+		{"duplicate", []string{"Makefile", "Makefile"}},
+		{"missing", []string{"absent"}},
+		{"escaping symlink", []string{"escape"}},
+	} {
+		t.Run("add "+tc.name, func(t *testing.T) {
+			f := newPinFixture(t)
+			req := declaredRequest(root)
+			req.DeclaredFiles = tc.paths
+			if _, err := addAt(f.storePath, withRepo(req, f.identity)); err == nil {
+				t.Fatalf("declared files %q must refuse the add", tc.paths)
+			}
+			st, err := loadAt(f.storePath)
+			testsupport.Must(t, err, "loadAt: %v", err)
+			if len(st.Entries) != 0 {
+				t.Errorf("a refused add must write nothing; got %+v", st.Entries)
+			}
+		})
+	}
+
+	t.Run("add global", func(t *testing.T) {
+		f := newPinFixture(t)
+		req := declaredRequest(root)
+		req.Global = true
+		if _, err := addAt(f.storePath, req); !errors.Is(err, ErrParse) {
+			t.Errorf("a global entry with declared files must be refused; got %v", err)
+		}
+	})
+
+	t.Run("add relative root", func(t *testing.T) {
+		f := newPinFixture(t)
+		req := declaredRequest("relative")
+		if _, err := addAt(f.storePath, withRepo(req, f.identity)); err == nil {
+			t.Error("a relative declared root must refuse the add")
+		}
+	})
+
+	valid := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name, binding, files, wantErr string
+	}{
+		{"parent", `repo = "/src/x"`, `{ path = "../x", sha256 = "` + valid + `" }`, "declared file"},
+		{"duplicate", `repo = "/src/x"`, `{ path = "a", sha256 = "` + valid + `" }, { path = "a", sha256 = "` + valid + `" }`, "more than once"},
+		{"bad hash", `repo = "/src/x"`, `{ path = "a", sha256 = "` + valid[:63] + `" }`, "64 lowercase hex"},
+		{"global", `global = true`, `{ path = "a", sha256 = "` + valid + `" }`, "global"},
+		{"unknown subkey", `repo = "/src/x"`, `{ path = "a", sha256 = "` + valid + `", mode = "x" }`, "unknown key"},
+	} {
+		t.Run("parse "+tc.name, func(t *testing.T) {
+			path := sandbox(t)
+			writeStoreFile(t, path, "version = 1\n\n[[entry]]\nname = \"g\"\nargv = [\"make\"]\n"+tc.binding+
+				"\ndeclared_files = ["+tc.files+"]\n", storeFileMode)
 			_, err := loadAt(path)
 			if !errors.Is(err, ErrParse) || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("want a parse error mentioning %q; got %v", tc.wantErr, err)
