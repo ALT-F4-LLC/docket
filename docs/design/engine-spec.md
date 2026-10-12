@@ -616,6 +616,11 @@ limit per class wins; unset values fall back to `docket config` defaults. Classe
 carry `max_step_duration` — a schedule-to-close bound independent of heartbeats, so a
 runaway executor cannot renew forever. (The reference instance's writer serialization
 is exactly `"write" = { max = 1, lease_ttl = "45m", max_step_duration = "2h" }`.)
+The config override `limits.max.<class>=auto` resolves at read time to
+max(1, NumCPU/2), where NumCPU is the scheduler host's logical CPU count, so a
+one-CPU host still admits one step of the class. Memory does not bound it. The
+formula is the same for every class: class names are opaque to core (§2), so
+core has no basis to assign a class its own fraction.
 
 `[[step]]` fields:
 
