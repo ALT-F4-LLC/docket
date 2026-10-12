@@ -1827,14 +1827,7 @@ func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
 				execution = append(execution, r)
 			}
 		}
-		for i, r := range execution {
-			retried := i+1 < len(execution) &&
-				r.Verdict == db.GateVerdictFail && r.Argv != nil &&
-				execution[i+1].Argv != nil && slices.Equal(r.Argv, execution[i+1].Argv)
-			if !retried {
-				routing = append(routing, r)
-			}
-		}
+		routing = append(routing, unsupersededAttempts(execution)...)
 	}
 	// Sorted so the reason a step parks with is the same sentence on every run
 	// over the same rows — map range order is not.
@@ -1845,6 +1838,22 @@ func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
 		return a.Ordinal - b.Ordinal
 	})
 	return routing
+}
+
+// unsupersededAttempts drops, from one execution of one gate in ordinal order,
+// every attempt a flaky re-run superseded: a `fail` directly followed by a row
+// running the same non-nil argv.
+func unsupersededAttempts(execution []db.GateResultRow) []db.GateResultRow {
+	var kept []db.GateResultRow
+	for i, r := range execution {
+		retried := i+1 < len(execution) &&
+			r.Verdict == db.GateVerdictFail && r.Argv != nil &&
+			execution[i+1].Argv != nil && slices.Equal(r.Argv, execution[i+1].Argv)
+		if !retried {
+			kept = append(kept, r)
+		}
+	}
+	return kept
 }
 
 // FailedGate is one completion gate whose routing attempt did not pass, in the
@@ -2062,9 +2071,8 @@ func recordGateEvents(
 	// three failed gates as passes, which is the worst possible failure mode for
 	// a feed whose purpose is to say what happened.
 	//
-	// The verdict is the LAST row's: attempts are recorded in order and a flaky
-	// re-run supersedes the attempt before it, so the final row is the outcome
-	// the saga itself routes on.
+	// The verdict comes from the reduction routing uses, so the feed names the
+	// row the saga routed on rather than whichever line ran last.
 	verdict, exit, pre, stub := gateOutcome(rows)
 	data, err := gateEventData(gate, verdict, exit, pre, stub)
 	if err != nil {
@@ -2076,21 +2084,53 @@ func recordGateEvents(
 	})
 }
 
-// gateOutcome reduces a gate's attempts to the one that counts: the LAST,
-// because a re-run supersedes the attempt before it. `pre` and `stub` ride
-// along from the same row: every attempt of one gate is produced by one
-// phase, so the last row's markers are the gate's.
+// gateOutcome reduces one execution of a gate to the row that counts, using
+// the reduction routing uses: unsupersededAttempts drops the attempts a flaky
+// re-run superseded, and a fence gate keeps one routing row per line. When a
+// routing row did not pass, the outcome is the non-pass row of highest
+// precedence (skipped, then unmatched, then fail, the earliest on a tie);
+// otherwise it is the last row. `verdict`, `exit`, `pre`, and `stub` all come
+// from that one row.
 //
 // `stub` reads StubEntry — the matched trust entry's own `stub` declaration
 // (DKT-265) — not the legacy S3-migration `Stub` field. StubEntry is what
 // `gate_results` (`step gates --json`) and `run report` already render as
 // `stub`, and DKT-983 asks this event to say what those surfaces already say.
 func gateOutcome(rows []GateResultRow) (verdict string, exit *int, pre, stub bool) {
-	if len(rows) == 0 {
+	execution := make([]db.GateResultRow, len(rows))
+	for i, r := range rows {
+		execution[i] = db.GateResultRow{
+			Gate: r.Gate, Ordinal: r.Ordinal, Argv: r.Argv, Exit: r.Exit,
+			Verdict: r.Verdict, Pre: r.Pre, StubEntry: r.StubEntry,
+		}
+	}
+	routing := unsupersededAttempts(execution)
+	if len(routing) == 0 {
 		return "", nil, false, false
 	}
-	last := rows[len(rows)-1]
-	return last.Verdict, last.Exit, last.Pre, last.StubEntry
+	outcome, rank := routing[len(routing)-1], 0
+	for _, r := range routing {
+		if p := nonPassPrecedence(r.Verdict); p > rank {
+			outcome, rank = r, p
+		}
+	}
+	return outcome.Verdict, outcome.Exit, outcome.Pre, outcome.StubEntry
+}
+
+// nonPassPrecedence ranks a verdict for the row a gate's report names: 0 for
+// a pass, and higher for the non-pass verdict that says more about why the
+// gate did not pass. A verdict outside the vocabulary ranks as a fail.
+func nonPassPrecedence(verdict string) int {
+	switch verdict {
+	case VerdictPass:
+		return 0
+	case VerdictSkipped:
+		return 3
+	case VerdictUnmatched:
+		return 2
+	default:
+		return 1
+	}
 }
 
 // gateEventData renders a gate event's payload: the gate name in `detail`,
