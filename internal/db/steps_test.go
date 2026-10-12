@@ -631,12 +631,20 @@ func TestLoopHistoryStoresAppliedBound(t *testing.T) {
 	if step.LoopRoundsRun != 3 {
 		t.Errorf("LoopRoundsRun = %d, want 3", step.LoopRoundsRun)
 	}
+	if step.LoopCap != 5 {
+		t.Errorf("GetStep LoopCap = %d, want the applied bound 5", step.LoopCap)
+	}
 
 	write("SetStepLoopHistoryTx", func(tx *sql.Tx) error {
 		return SetStepLoopHistoryTx(tx, id, 3, "judge-correctness@0", "concerns", 3000)
 	})
 	if got := readLoopCap(); got != 0 {
 		t.Errorf("loop_cap = %d after the bound-less write, want 0 (no recorded cap)", got)
+	}
+	step, err = GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.LoopCap != 0 {
+		t.Errorf("GetStep LoopCap = %d after the bound-less write, want 0", step.LoopCap)
 	}
 }
 

@@ -334,6 +334,11 @@ type StepRow struct {
 	LoopRoundsRun     int    `json:"loop_rounds_run,omitempty"`
 	LoopTriggerStep   string `json:"loop_trigger_step,omitempty"`
 	LoopLatestVerdict string `json:"loop_latest_verdict,omitempty"`
+	// LoopCap is the bound LoopRoundsRun was measured against, so a reader can
+	// tell a reached cap from a loop something else stopped without the pinned
+	// definition. 0, and omitted, outside a loop exhaustion and on histories
+	// written without a recorded bound.
+	LoopCap int `json:"loop_cap,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
 	// inside it (genericity.md).
 	Metadata map[string]any `json:"metadata,omitempty"`

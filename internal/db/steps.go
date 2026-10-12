@@ -272,11 +272,13 @@ type Step struct {
 	// opened the loop, and the verdict the last round ended on. ParkClass tells
 	// a router THAT the loop bound stopped this step; these tell it what the
 	// loop did before it stopped, which was otherwise reconstructible only from
-	// the prunable event log. Zero and "" on every row that never exhausted a
-	// loop, and on rows that predate the columns.
+	// the prunable event log. LoopCap is the bound those rounds were measured
+	// against (v44), 0 when the history was written without one. Zero and "" on
+	// every row that never exhausted a loop, and on rows that predate the columns.
 	LoopRoundsRun     int
 	LoopTriggerStep   string
 	LoopLatestVerdict string
+	LoopCap           int
 	Metadata          string
 	ContextBytes      int
 	// Materialized reports a step the ENGINE minted rather than one the pinned
@@ -344,7 +346,7 @@ SELECT id, run_id, issue_id, workflow_id, step_name, ordinal, sibling_index, ins
        reaped_claims, last_claim_end, max_attempts, expected_cost,
        owner, token_hash, expires_ms, started_ms, activity_ms, saga_stage,
        gate_trail, routing, park_reason, park_class,
-       loop_rounds_run, loop_trigger_step, loop_latest_verdict,
+       loop_rounds_run, loop_trigger_step, loop_latest_verdict, loop_cap,
        metadata, context_bytes, materialized, usage_recorded,
        created_at_ms, updated_at_ms, row_version, work_root, recorded_at_ms,
        authority, authority_ref, claim_phase
@@ -458,7 +460,7 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 		&step.ReapedClaims, &step.LastClaimEnd, &maxAtt, &step.ExpectedCost,
 		&owner, &tokenHash, &expires, &started, &activity, &saga,
 		&gateTrail, &routing, &step.ParkReason, &parkClass,
-		&step.LoopRoundsRun, &step.LoopTriggerStep, &step.LoopLatestVerdict,
+		&step.LoopRoundsRun, &step.LoopTriggerStep, &step.LoopLatestVerdict, &step.LoopCap,
 		&metadata, &ctxBytes, &mat, &usageRec,
 		&step.CreatedAtMS, &step.UpdatedAtMS, &step.RowVersion, &workRoot,
 		&step.RecordedAtMS, &step.Authority, &step.AuthorityRef, &step.ClaimPhase,

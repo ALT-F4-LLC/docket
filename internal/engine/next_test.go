@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"maps"
 	"runtime"
 	"testing"
@@ -297,10 +298,12 @@ func TestRunStepListEnumeratesTheRun(t *testing.T) {
 }
 
 // TestStepRowCarriesLoopHistory pins the projection half of the loop-history
-// fields: a step whose history db.SetStepLoopHistoryTx wrote must show all
-// three values on the row StepRowFor renders (the row behind `next`,
+// fields: a step whose history db.SetStepLoopHistoryWithCapTx wrote must show
+// all four values on the row StepRowFor renders (the row behind `next`,
 // `dispatch open`, `step show`, and claim context), and a step with none must
-// show zero values. The columns alone disclose nothing to a reader.
+// show zero values and serialize without loop_cap. The columns alone disclose
+// nothing to a reader. The cap differs from the rounds so a projection of the
+// wrong column cannot pass.
 func TestStepRowCarriesLoopHistory(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
@@ -308,8 +311,8 @@ func TestStepRowCarriesLoopHistory(t *testing.T) {
 
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
-	err = db.SetStepLoopHistoryTx(tx, id, 3, "review@0#0", "needs-fix", nowMS)
-	testsupport.Must(t, err, "SetStepLoopHistoryTx: %v", err)
+	err = db.SetStepLoopHistoryWithCapTx(tx, id, 3, 5, "review@0#0", "needs-fix", nowMS)
+	testsupport.Must(t, err, "SetStepLoopHistoryWithCapTx: %v", err)
 	err = tx.Commit()
 	testsupport.Must(t, err, "Commit: %v", err)
 
@@ -328,15 +331,37 @@ func TestStepRowCarriesLoopHistory(t *testing.T) {
 		if row.LoopLatestVerdict != "needs-fix" {
 			t.Errorf("loop_latest_verdict = %q, want %q", row.LoopLatestVerdict, "needs-fix")
 		}
+		if row.LoopCap != 5 {
+			t.Errorf("loop_cap = %d, want the written cap 5", row.LoopCap)
+		}
 
 		fresh, err := StepRowFor(sched, stepNamed(t, sched, "review@0#0"), ttls)
 		testsupport.Must(t, err, "StepRowFor(review@0#0): %v", err)
 		if fresh.LoopRoundsRun != 0 || fresh.LoopTriggerStep != "" ||
-			fresh.LoopLatestVerdict != "" {
-			t.Errorf("row without loop history = (%d, %q, %q), want zero values",
-				fresh.LoopRoundsRun, fresh.LoopTriggerStep, fresh.LoopLatestVerdict)
+			fresh.LoopLatestVerdict != "" || fresh.LoopCap != 0 {
+			t.Errorf("row without loop history = (%d, %q, %q, cap %d), want zero values",
+				fresh.LoopRoundsRun, fresh.LoopTriggerStep, fresh.LoopLatestVerdict,
+				fresh.LoopCap)
+		}
+
+		exhaustedJSON := marshalStepRowKeys(t, row)
+		if got, ok := exhaustedJSON["loop_cap"]; !ok || string(got) != "5" {
+			t.Errorf("exhausted row JSON loop_cap = %s (present %v), want 5", got, ok)
+		}
+		if got, ok := marshalStepRowKeys(t, fresh)["loop_cap"]; ok {
+			t.Errorf("fresh row JSON carries loop_cap = %s, want the key omitted", got)
 		}
 	})
+}
+
+func marshalStepRowKeys(t *testing.T, row model.StepRow) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(row)
+	testsupport.Must(t, err, "marshal StepRow: %v", err)
+	var keys map[string]json.RawMessage
+	err = json.Unmarshal(raw, &keys)
+	testsupport.Must(t, err, "unmarshal StepRow JSON: %v", err)
+	return keys
 }
 
 // TestNextCarriesEachOfferedClassCapAndSource: `next` reports the cap the

@@ -609,6 +609,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		LoopRoundsRun:     step.LoopRoundsRun,
 		LoopTriggerStep:   step.LoopTriggerStep,
 		LoopLatestVerdict: step.LoopLatestVerdict,
+		LoopCap:           step.LoopCap,
 		ExpectedCost:      step.ExpectedCost,
 		LeaseTTLS:         int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
 		Status:            db.StepReady,
