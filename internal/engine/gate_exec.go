@@ -436,7 +436,18 @@ func (r *ExecRunner) spawnMatchedRows(
 		}, nil
 	}
 
+	// A content-pinned entry spawns through exec.RunPinned, which resolves the
+	// unresolved argv[0] once and executes the path it hashed, so a symlink
+	// retargeted after `resolved` above can make it refuse but cannot make it
+	// run unpinned bytes. A rename over the hashed file, a write into it, or an
+	// interpreter re-opening it by name after the hash is not bound (DKT-3919).
+	// A flaky pinned entry keeps RunVerifiedAttempts' re-runs and with them
+	// the separate resolutions (DKT-3920).
+	pinnedSpawn := entry.Argv0SHA256 != "" && filepath.IsAbs(entryArgv0) && !entry.Flaky
 	argv := append([]string{resolved}, match.Argv[1:]...)
+	if pinnedSpawn {
+		argv = match.Argv
+	}
 
 	// DKT-9: the gate runs in the step's worktree when one is known, mirroring
 	// the diff stage's resolution (saga.go). RepoRoot stays the containment
@@ -514,7 +525,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	// attempt, after any lock wait, against the tree the attempt will open.
 	var scriptNotes []string
 	recheckPin := func() error {
-		if err := pinStillBindsSpawn(entry, spec.Argv[0]); err != nil {
+		if err := pinStillBindsSpawn(entry, resolved); err != nil {
 			return fmt.Errorf("gate %q: %w", g.Name, err)
 		}
 		if again := relookup(); !again.Matched {
@@ -524,9 +535,27 @@ func (r *ExecRunner) spawnMatchedRows(
 		scriptNotes = notes
 		return err
 	}
-	attempts, refusal, err := exec.RunVerifiedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin)
-	if err != nil {
-		return GateExecution{}, fmt.Errorf("running gate %s: %w", g.Name, err)
+	var (
+		attempts []exec.Attempt
+		refusal  *exec.Refusal
+	)
+	if pinnedSpawn {
+		// A pin refusal from RunPinned spawned nothing, so it records like the
+		// re-check's refusal: an unmatched row, not an engine error.
+		if err := recheckPin(); err != nil {
+			refusal = &exec.Refusal{Ordinal: 0, Err: err}
+		} else if res, err := exec.RunPinned(spec, entry.Argv0SHA256, r.RepoRoot, entryArgv0); errors.Is(err, exec.ErrRefused) {
+			refusal = &exec.Refusal{Ordinal: 0, Err: fmt.Errorf("gate %q: %w", g.Name, err)}
+		} else if err != nil {
+			return GateExecution{}, fmt.Errorf("running gate %s: %w", g.Name, err)
+		} else {
+			attempts = []exec.Attempt{{Ordinal: 0, Result: res}}
+		}
+	} else {
+		attempts, refusal, err = exec.RunVerifiedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin)
+		if err != nil {
+			return GateExecution{}, fmt.Errorf("running gate %s: %w", g.Name, err)
+		}
 	}
 
 	out := GateExecution{Verdict: VerdictFail}

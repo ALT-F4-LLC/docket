@@ -1014,6 +1014,92 @@ func TestGatePinRecheckStableSymlinkRuns(t *testing.T) {
 	}
 }
 
+// TestGatePinnedSpawnSurvivesArgv0Flips: a goroutine keeps retargeting the
+// pinned argv[0] link between the pinned script and an unpinned one while the
+// gate runs over and over. Every row is either a pass that printed the pinned
+// script's output or an unmatched row that spawned nothing, and the unpinned
+// script never runs: the runner hashes and spawns one resolution of the link.
+func TestGatePinnedSpawnSurvivesArgv0Flips(t *testing.T) {
+	for name, gateFor := range map[string]pinGateSpec{"named": namedPinGate, "fence": fencePinGate} {
+		t.Run(name, func(t *testing.T) { checkPinnedSpawnSurvivesArgv0Flips(t, gateFor) })
+	}
+}
+
+func checkPinnedSpawnSurvivesArgv0Flips(t *testing.T, gateFor pinGateSpec) {
+	// minRuns is above the 200 that caught an unpinned spawn in most runs on
+	// darwin/arm64, so a single run catches one far more reliably.
+	const (
+		minRuns     = 1000
+		maxRuns     = 5000
+		pinnedOut   = "PINNED-SCRIPT-RAN"
+		unpinnedOut = "UNPINNED-SCRIPT-RAN"
+	)
+	repoRoot := t.TempDir()
+	unpinnedMarker := filepath.Join(t.TempDir(), "unpinned-ran")
+	content := pinScriptHeader + "A\necho " + pinnedOut + "\n"
+	link, pinned := symlinkedPinnedScript(t, repoRoot, content)
+	unpinned := filepath.Join(repoRoot, "files", "u.sh")
+	writeErr := os.WriteFile(unpinned, []byte(
+		"#!/bin/sh\n/usr/bin/touch "+unpinnedMarker+"\necho "+unpinnedOut+"\n"), 0o755)
+	testsupport.Must(t, writeErr, "writing the unpinned script: %v", writeErr)
+
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, pinnedEntry(repoRoot, link, trustHashOf(content)))
+
+	stop := make(chan struct{})
+	flipperDone := make(chan struct{})
+	go func() {
+		defer close(flipperDone)
+		targets := [2]string{unpinned, pinned}
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := os.Symlink(targets[i%2], link+".new"); err != nil {
+				t.Errorf("linking the flip: %v", err)
+				return
+			}
+			if err := os.Rename(link+".new", link); err != nil {
+				t.Errorf("flipping the link: %v", err)
+				return
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-flipperDone
+	}()
+
+	runs, passes, refusals := 0, 0, 0
+	for ; runs < maxRuns && (runs < minRuns || passes == 0 || refusals == 0); runs++ {
+		ex, err := runner.Execute(context.Background(), gateFor(link), StepContext{})
+		testsupport.Must(t, err, "running the gate (run %d): %v", runs, err)
+		for _, row := range ex.Results {
+			switch {
+			case row.Verdict == VerdictPass && strings.Contains(row.Output, pinnedOut) &&
+				!strings.Contains(row.Output, unpinnedOut):
+				passes++
+			case row.Verdict == VerdictUnmatched && row.Exit == nil:
+				refusals++
+			default:
+				t.Fatalf("run %d recorded a row that is neither a pinned pass nor an "+
+					"unspawned refusal: %+v", runs, row)
+			}
+		}
+	}
+	t.Logf("%d runs: %d pinned passes, %d refusals", runs, passes, refusals)
+	if passes == 0 || refusals == 0 {
+		t.Fatalf("after %d runs: %d pinned passes, %d refusals; the flips never "+
+			"raced the gate both ways", runs, passes, refusals)
+	}
+	if sentinelExists(t, unpinnedMarker) {
+		t.Error("the unpinned script RAN behind the flipped link")
+	}
+}
+
 const legacyPinText = "has no content pin"
 
 // legacyEntry is pinnedEntry without its content pin: an absolute argv[0]
