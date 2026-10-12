@@ -196,14 +196,8 @@ func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e 
 	}
 	row.Warning = match.Warning
 
-	resolved, err := dexec.Resolve(match.Argv[0], repoRoot, match.Entry.Argv[0])
-	if err != nil {
-		row.LogTail = err.Error()
-		return row
-	}
-	argv := append([]string{resolved}, match.Argv[1:]...)
-
-	res, err := dexec.Run(dexec.Spec{Argv: argv, Dir: worktree.Dir, Env: env, Timeout: timeout})
+	res, err := spawnProbeGate(match, repoRoot,
+		dexec.Spec{Argv: match.Argv, Dir: worktree.Dir, Env: env, Timeout: timeout})
 	if err != nil {
 		row.LogTail = err.Error()
 		return row
@@ -222,9 +216,30 @@ func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e 
 	return row
 }
 
+// spawnProbeGate runs spec, whose argv[0] is still unresolved. A pinned entry
+// spawns through exec.RunPinned, which resolves argv[0] once, hashes that
+// path, and executes the same path string, so a symlink on the way to the
+// executable that is retargeted after Lookup's check cannot land the spawn on
+// unpinned bytes. RunPinned binds a path, not an inode: a rename over the
+// resolved file, or a directory component swapped for a symlink, between its
+// hash and execve can still run other bytes. An entry with no pin has nothing
+// to bind and runs through Resolve and Run.
+func spawnProbeGate(match trust.Match, repoRoot string, spec dexec.Spec) (dexec.Result, error) {
+	if pin := match.Entry.Argv0SHA256; pin != "" {
+		return dexec.RunPinned(spec, pin, repoRoot, match.Entry.Argv[0])
+	}
+	resolved, err := dexec.Resolve(spec.Argv[0], repoRoot, match.Entry.Argv[0])
+	if err != nil {
+		return dexec.Result{}, err
+	}
+	spec.Argv = append([]string{resolved}, spec.Argv[1:]...)
+	return dexec.Run(spec)
+}
+
 // lookupProbeEntry holds one roster entry to the same Lookup the record-time
-// gate path makes, so the probe checks its content pin (§3.1 argv0_sha256)
-// before every spawn and returns the argv that must execute.
+// gate path makes, so the probe refuses a drifted content pin (§3.1
+// argv0_sha256) with its reason and returns the argv that must execute. The
+// pin that authorizes the spawn is checked again by spawnProbeGate.
 //
 // The snapshot holds only this entry, so Lookup cannot select a different
 // entry of the same name. The entry is marked global because the caller

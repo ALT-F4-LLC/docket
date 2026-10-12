@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -488,5 +489,106 @@ func TestProbeTrustMeasuresTheWorktreeNotTheSharedCheckout(t *testing.T) {
 	testsupport.Must(t, err, "ProbeTrust: %v", err)
 	if !result.Passed {
 		t.Errorf("the probed tree must be the throwaway HEAD checkout, not the shared working tree: %+v", result.Gates)
+	}
+}
+
+// TestProbeTrustSurvivesPinnedSymlinkFlip: a pinned entry whose argv[0] is a
+// symlink retargeted between a pinned and an unpinned script for the whole
+// probe either runs the pinned script and passes, or is refused without a
+// spawn. It never records a pass that ran the unpinned script. The flip
+// retargets only the link; replacing the hashed file itself is outside what
+// the probe binds.
+func TestProbeTrustSurvivesPinnedSymlinkFlip(t *testing.T) {
+	repo := probeRepo(t)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "resolving the fixture dir: %v", err)
+	marker := filepath.Join(dir, "marker")
+	script := func(name string) (string, []byte) {
+		path := filepath.Join(dir, name+".sh")
+		body := []byte("#!/bin/sh\necho " + name + " >> '" + marker + "'\necho " + name + "\n")
+		testsupport.Must(t, os.WriteFile(path, body, 0o755), "writing %s", path)
+		return path, body
+	}
+	pinnedPath, pinnedBody := script("pinned")
+	unpinnedPath, _ := script("unpinned")
+	sum := sha256.Sum256(pinnedBody)
+	pin := hex.EncodeToString(sum[:])
+	link := filepath.Join(dir, "argv0")
+	testsupport.Must(t, os.Symlink(pinnedPath, link), "linking argv0")
+
+	const runs = 200
+	entries := make([]trust.Entry, runs)
+	for i := range entries {
+		entries[i] = trust.Entry{Name: "g" + strconv.Itoa(i), Argv: []string{link}, Argv0SHA256: pin}
+	}
+
+	stop := make(chan struct{})
+	flipped := make(chan struct{})
+	go func() {
+		defer close(flipped)
+		tmp := link + ".next"
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			target := pinnedPath
+			if i%2 == 1 {
+				target = unpinnedPath
+			}
+			// Symlink then rename replaces the link atomically, so it always
+			// names one of the two scripts. The script files are never touched.
+			_ = os.Remove(tmp)
+			if err := os.Symlink(target, tmp); err != nil {
+				t.Errorf("staging the flip: %v", err)
+				return
+			}
+			if err := os.Rename(tmp, link); err != nil {
+				t.Errorf("flipping the link: %v", err)
+				return
+			}
+		}
+	}()
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	close(stop)
+	<-flipped
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != runs {
+		t.Fatalf("want %d gate rows, got %d", runs, len(result.Gates))
+	}
+	var passed, refused int
+	for _, g := range result.Gates {
+		switch {
+		case g.Exit == nil:
+			refused++
+		case *g.Exit == 0 && strings.TrimSpace(g.LogTail) == "pinned":
+			passed++
+		default:
+			t.Errorf("%s: want a pass of the pinned script or a refusal, got exit %d and output %q",
+				g.Name, *g.Exit, g.LogTail)
+		}
+	}
+
+	b, err := os.ReadFile(marker)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading the marker: %v", err)
+	}
+	ranScripts := strings.Fields(string(b))
+	for _, name := range ranScripts {
+		if name != "pinned" {
+			t.Fatalf("the unpinned script ran (passed=%d refused=%d)", passed, refused)
+		}
+	}
+	if len(ranScripts) != passed {
+		t.Errorf("the marker records %d runs, but %d rows passed", len(ranScripts), passed)
+	}
+	// Both outcomes must occur, or the probe did not exercise the flip.
+	if passed == 0 || refused == 0 {
+		t.Fatalf("passed=%d refused=%d over %d runs; the flip was not exercised", passed, refused, runs)
+	}
+	if result.Passed {
+		t.Error("a refused pinned entry must fail the probe")
 	}
 }
