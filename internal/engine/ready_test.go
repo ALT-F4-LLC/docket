@@ -658,6 +658,83 @@ func TestClassCapAutoDerivesFromTheHost(t *testing.T) {
 	})
 }
 
+// TestClassCapsReportEachBoundedClassWithItsSource: the snapshot reports a
+// numeric override as "override", an auto override as "auto" rather than its
+// resolved integer's origin, an unoverridden class at its pinned max as
+// "workflow", and omits a class no `[limits]` row or override bounds.
+func TestClassCapsReportEachBoundedClassWithItsSource(t *testing.T) {
+	const src = `
+[pipeline]
+name = "four-classes"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+judge = { max = 3 }
+read = { max = 5 }
+
+[[step]]
+name = "w"
+executor = "x"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "j"
+executor = "x"
+class = "judge"
+emits = "out"
+after = []
+
+[[step]]
+name = "r"
+executor = "x"
+class = "read"
+emits = "out"
+after = []
+
+[[step]]
+name = "f"
+executor = "x"
+class = "free"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(src), "four-classes.toml")
+	run := startRun(t, conn, createIssue(t, conn, "four", "body", "task", nil))
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", "4")
+	testsupport.Must(t, err, "setting the numeric override: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"read", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	want := map[string]ClassCap{
+		"write": {Max: 4, Source: ClassCapOverride},
+		"read":  {Max: max(1, runtime.NumCPU()/2), Source: ClassCapAuto},
+		"judge": {Max: 3, Source: ClassCapWorkflow},
+	}
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		got := sched.ClassCaps()
+		for class, w := range want {
+			if got[class] != w {
+				t.Errorf("ClassCaps()[%q] = %+v, want %+v", class, got[class], w)
+			}
+		}
+		if c, ok := got["free"]; ok {
+			t.Errorf("ClassCaps() lists unbounded class free as %+v, want no entry", c)
+		}
+		if len(got) != len(want) {
+			t.Errorf("ClassCaps() = %+v, want exactly %+v", got, want)
+		}
+	})
+}
+
 // TestClassInFlightExcludesTriageSuspended pins R5's occupancy for a step
 // suspended on its triage panel: it waits on voters, not a worker, so it holds
 // no slot in its class while the panel deliberates. A gated step whose routing

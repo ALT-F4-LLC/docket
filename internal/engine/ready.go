@@ -142,10 +142,11 @@ type Scheduler struct {
 	// corpus to answer "what is the cap?" (DKT-23), which is the failure mode
 	// refusals exist to prevent.
 	limitSources map[string]string
-	// capOverrides marks the classes whose limits.max.<class> config value
-	// replaced the pinned max in limits, so a headroom refusal names the
-	// config key rather than a workflow whose declaration no longer binds.
-	capOverrides map[string]bool
+	// capOverrides maps each class whose limits.max.<class> config value
+	// replaced the pinned max in limits to ClassCapOverride or ClassCapAuto,
+	// so a headroom refusal names the config key rather than a workflow whose
+	// declaration no longer binds, and ClassCaps reports how the cap was set.
+	capOverrides map[string]ClassCapSource
 	defs         map[int]*workflow.Definition
 	nowMS        int64
 	stepByID     map[int]*db.Step
@@ -600,7 +601,8 @@ func mergeLimits(defs map[int]*workflow.Definition) (map[string]workflow.Limit, 
 }
 
 // applyClassMaxOverrides replaces the merged `[limits]` max with each set
-// limits.max.<class> config value, and returns the classes it overrode.
+// limits.max.<class> config value, and returns the classes it overrode with
+// each one's source.
 //
 // It runs on every snapshot rather than at activation, so the cap follows the
 // host's current config without re-pinning the workflow. A class with no
@@ -608,19 +610,60 @@ func mergeLimits(defs map[int]*workflow.Definition) (map[string]workflow.Limit, 
 // workflow bounds bounds it.
 func applyClassMaxOverrides(
 	tx *sql.Tx, projectID int, limits map[string]workflow.Limit,
-) (map[string]bool, error) {
+) (map[string]ClassCapSource, error) {
 	caps, err := db.ClassMaxOverridesTx(tx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	overridden := make(map[string]bool, len(caps))
-	for class, capacity := range caps {
+	overridden := make(map[string]ClassCapSource, len(caps))
+	for class, override := range caps {
 		limit := limits[class]
-		limit.Max = capacity
+		limit.Max = override.Max
 		limits[class] = limit
-		overridden[class] = true
+		overridden[class] = ClassCapOverride
+		if override.Auto {
+			overridden[class] = ClassCapAuto
+		}
 	}
 	return overridden, nil
+}
+
+// ClassCapSource names what set a class's effective max.
+type ClassCapSource string
+
+const (
+	// ClassCapWorkflow is a pinned workflow's `[limits]` max, with no
+	// limits.max.<class> value set.
+	ClassCapWorkflow ClassCapSource = "workflow"
+	// ClassCapOverride is a numeric limits.max.<class> value.
+	ClassCapOverride ClassCapSource = "override"
+	// ClassCapAuto is limits.max.<class>=auto, derived from the host's CPUs.
+	ClassCapAuto ClassCapSource = "auto"
+)
+
+// ClassCap is a class's effective max and what set it.
+type ClassCap struct {
+	Max    int
+	Source ClassCapSource
+}
+
+// ClassCaps returns the effective max and its source for every class this
+// snapshot bounds: the same caps R5 enforces. A class with no positive max is
+// unbounded and has no entry, the rule rowClassLimits follows, so every report
+// of class caps lists the same classes.
+func (s *Scheduler) ClassCaps() map[string]ClassCap {
+	out := make(map[string]ClassCap, len(s.limits))
+	for class, limit := range s.limits {
+		if limit.Max <= 0 {
+			continue
+		}
+		source, ok := s.capOverrides[class]
+		if !ok {
+			source = ClassCapWorkflow
+		}
+		out[class] = ClassCap{Max: limit.Max, Source: source}
+	}
+	return out
 }
 
 // Steps returns the loaded step set, for callers that render alongside the
@@ -1307,7 +1350,7 @@ func (s *Scheduler) HeadroomDetail(step *db.Step) string {
 		detail += fmt.Sprintf(" and %d unacknowledged reap(s) holding headroom", held)
 	}
 	detail += fmt.Sprintf(" against max %d", limit.Max)
-	if s.capOverrides[step.Class] {
+	if _, overridden := s.capOverrides[step.Class]; overridden {
 		detail += fmt.Sprintf(", set by config %s%s", db.KeyClassMaxPrefix, step.Class)
 	} else if source := s.limitSources[step.Class]; source != "" {
 		detail += fmt.Sprintf(", set by [limits] in %s", source)

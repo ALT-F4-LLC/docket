@@ -740,8 +740,9 @@ func parseClassMax(key, value string) (int, error) {
 // `[limits]` max.
 //
 // ClassMaxAuto resolves here, at read time, to half the host's logical CPUs
-// and never below one, so the value tracks whichever host runs the scheduler.
-func ClassMaxOverridesTx(tx *sql.Tx, projectID int) (map[string]int, error) {
+// and never below one, so the value tracks whichever host runs the scheduler;
+// its entry keeps Auto set so a report can say the cap was derived.
+func ClassMaxOverridesTx(tx *sql.Tx, projectID int) (map[string]ClassMaxOverride, error) {
 	storePrefix := metaConfigPrefix + KeyClassMaxPrefix
 	projectPrefix := projectConfigKey(projectID, KeyClassMaxPrefix)
 	rows, err := tx.Query(
@@ -773,19 +774,26 @@ func ClassMaxOverridesTx(tx *sql.Tx, projectID int) (map[string]int, error) {
 		return nil, fmt.Errorf("reading class caps: %w", err)
 	}
 
-	caps := make(map[string]int, len(stored))
+	caps := make(map[string]ClassMaxOverride, len(stored))
 	for class, value := range stored {
 		if value == ClassMaxAuto {
-			caps[class] = autoClassMax(runtime.NumCPU())
+			caps[class] = ClassMaxOverride{Max: autoClassMax(runtime.NumCPU()), Auto: true}
 			continue
 		}
 		n, err := parseClassMax(KeyClassMaxPrefix+class, value)
 		if err != nil {
 			return nil, err
 		}
-		caps[class] = n
+		caps[class] = ClassMaxOverride{Max: n}
 	}
 	return caps, nil
+}
+
+// ClassMaxOverride is one resolved limits.max.<class> value: the cap, and
+// whether it came from ClassMaxAuto rather than a number.
+type ClassMaxOverride struct {
+	Max  int
+	Auto bool
 }
 
 // autoClassMax is ClassMaxAuto's formula.
