@@ -938,28 +938,39 @@ func SetStepAuthorityTx(
 	return nil
 }
 
-// SetStepLoopHistoryTx records the three facts a fix loop leaves behind when it
-// exhausts `max_fix_loops`: the rounds that ran against the cap, the instance
-// whose verdict opened the loop, and the verdict the last round ended on.
+// SetStepLoopHistoryTx is SetStepLoopHistoryWithCapTx with no recorded cap:
+// it stores loop_cap 0.
+func SetStepLoopHistoryTx(
+	tx *sql.Tx, id, roundsRun int, triggerStep, latestVerdict string, nowMS int64,
+) error {
+	return SetStepLoopHistoryWithCapTx(tx, id, roundsRun, 0, triggerStep, latestVerdict, nowMS)
+}
+
+// SetStepLoopHistoryWithCapTx records the four facts a fix loop leaves behind
+// when it exhausts its bound: the rounds that ran, the bound they were measured
+// against, the instance whose verdict opened the loop, and the verdict the last
+// round ended on.
 //
 // They are ONE statement because they are one fact — this loop ran this many
-// rounds from here and ended on this. latestVerdict is the verdict the trigger
-// round recorded, verbatim, and "" when it recorded none; it is never the
-// routing token that entered the loop. The caller derives all three from the
-// loop state its exhaustion decision already holds.
+// rounds against this bound from here and ended on this. loopCap is the bound
+// the refusal applied; 0 means no recorded cap, which no refusal can apply
+// because a bound of zero disables the check. latestVerdict is the verdict the
+// trigger round recorded, verbatim, and "" when it recorded none; it is never
+// the routing token that entered the loop. The caller derives all four from
+// the loop state its exhaustion decision already holds.
 //
 // It follows SetStepMetadataTx's shape — same row_version bump, same
 // updated_at_ms — because this is a step-row mutation like any other and
 // CAS-guarded readers must see it move.
-func SetStepLoopHistoryTx(
-	tx *sql.Tx, id, roundsRun int, triggerStep, latestVerdict string, nowMS int64,
+func SetStepLoopHistoryWithCapTx(
+	tx *sql.Tx, id, roundsRun, loopCap int, triggerStep, latestVerdict string, nowMS int64,
 ) error {
 	_, err := tx.Exec(
-		`UPDATE steps SET loop_rounds_run = ?, loop_trigger_step = ?,
+		`UPDATE steps SET loop_rounds_run = ?, loop_cap = ?, loop_trigger_step = ?,
 		        loop_latest_verdict = ?, updated_at_ms = ?,
 		        row_version = row_version + 1
 		  WHERE id = ?`,
-		roundsRun, triggerStep, latestVerdict, nowMS, id,
+		roundsRun, loopCap, triggerStep, latestVerdict, nowMS, id,
 	)
 	if err != nil {
 		return fmt.Errorf("recording step loop history: %w", err)

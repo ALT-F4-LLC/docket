@@ -596,6 +596,50 @@ func TestLoopHistoryFactsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLoopHistoryStoresAppliedBound proves the bound-taking setter stores the
+// applied fix-loop bound in steps.loop_cap, and the bound-less setter stores 0
+// over it. The bound differs from roundsRun so a write of the wrong value
+// cannot pass.
+func TestLoopHistoryStoresAppliedBound(t *testing.T) {
+	db, id := stepTestDB(t)
+	readLoopCap := func() int {
+		t.Helper()
+		var loopCap int
+		err := db.QueryRow(`SELECT loop_cap FROM steps WHERE id = ?`, id).Scan(&loopCap)
+		testsupport.Must(t, err, "reading loop_cap: %v", err)
+		return loopCap
+	}
+	write := func(name string, fn func(tx *sql.Tx) error) {
+		t.Helper()
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		defer tx.Rollback()
+		err = fn(tx)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		err = tx.Commit()
+		testsupport.Must(t, err, "Commit: %v", err)
+	}
+
+	write("SetStepLoopHistoryWithCapTx", func(tx *sql.Tx) error {
+		return SetStepLoopHistoryWithCapTx(tx, id, 3, 5, "judge-correctness@0", "concerns", 2000)
+	})
+	if got := readLoopCap(); got != 5 {
+		t.Errorf("loop_cap = %d after the bound-taking write, want the applied bound 5", got)
+	}
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.LoopRoundsRun != 3 {
+		t.Errorf("LoopRoundsRun = %d, want 3", step.LoopRoundsRun)
+	}
+
+	write("SetStepLoopHistoryTx", func(tx *sql.Tx) error {
+		return SetStepLoopHistoryTx(tx, id, 3, "judge-correctness@0", "concerns", 3000)
+	})
+	if got := readLoopCap(); got != 0 {
+		t.Errorf("loop_cap = %d after the bound-less write, want 0 (no recorded cap)", got)
+	}
+}
+
 // TestStepsAuthorityColumnRoundTrips proves the authority a resolution was
 // made under, and the standing grant it names, survive one SetStepAuthorityTx
 // write and come back on the row.
