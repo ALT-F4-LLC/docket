@@ -296,6 +296,34 @@ func (r *ExecRunner) spawnMatched(
 	return ex, nil
 }
 
+// pinStillBindsSpawn refuses a pinned entry whose argv[0] no longer resolves
+// to spawned, the path the runner will execute. The content pin hashes the
+// file argv[0] resolves to now, while the spawn runs the path resolved
+// earlier, so a symlinked component retargeted in between would let the pin
+// hash one file while another runs. Pins exist only on absolute argv[0],
+// which Resolve's R4 normalized to spawned. It runs before every attempt,
+// ahead of the pin's own re-lookup.
+func pinStillBindsSpawn(entry *trust.Entry, spawned string) error {
+	argv0 := ""
+	if len(entry.Argv) > 0 {
+		argv0 = entry.Argv[0]
+	}
+	if entry.Argv0SHA256 == "" || !filepath.IsAbs(argv0) {
+		return nil
+	}
+	now, err := exec.NormalizePath(argv0)
+	if err != nil {
+		return fmt.Errorf("cannot re-resolve %s before spawning %s: %v",
+			exec.Render(argv0), exec.Render(spawned), err)
+	}
+	if now != spawned {
+		return fmt.Errorf("%s now resolves to %s, not to %s, the file that would spawn; "+
+			"its content pin would be checked against a file that does not run",
+			exec.Render(argv0), exec.Render(now), exec.Render(spawned))
+	}
+	return nil
+}
+
 // spawnMatchedRows runs a matched command, taking the tree mutex when the entry
 // declares `tree = true` and recording every flaky attempt individually.
 //
@@ -304,9 +332,7 @@ func (r *ExecRunner) spawnMatched(
 // the content pin (§3.1 argv0_sha256) is checked "before every spawn": the
 // pinned file can change during the lock wait or between flaky attempts, and
 // only the pin half of the Lookup can change its answer. That half re-resolves
-// the entry's argv[0] afresh, so a pinned argv[0] must first re-resolve to the
-// path being spawned, or a retargeted symlink would have the pin hash one file
-// while another runs.
+// the entry's argv[0] afresh, so pinStillBindsSpawn runs first.
 func (r *ExecRunner) spawnMatchedRows(
 	g GateSpec, sc StepContext, match trust.Match, firstOrdinal int,
 	relookup func() trust.Match,
@@ -473,17 +499,8 @@ func (r *ExecRunner) spawnMatchedRows(
 	// attempt, after any lock wait, against the tree the attempt will open.
 	var scriptNotes []string
 	recheckPin := func() error {
-		if entry.Argv0SHA256 != "" && filepath.IsAbs(entryArgv0) {
-			now, err := exec.NormalizePath(entryArgv0)
-			if err != nil {
-				return fmt.Errorf("gate %q: cannot re-resolve %s before spawning %s: %v",
-					g.Name, entryArgv0, spec.Argv[0], err)
-			}
-			if now != spec.Argv[0] {
-				return fmt.Errorf("gate %q: %s now resolves to %s, not to %s, the file this gate spawns; "+
-					"its content pin would be checked against a file that does not run",
-					g.Name, entryArgv0, now, spec.Argv[0])
-			}
+		if err := pinStillBindsSpawn(entry, spec.Argv[0]); err != nil {
+			return fmt.Errorf("gate %q: %w", g.Name, err)
 		}
 		if again := relookup(); !again.Matched {
 			return errors.New(again.Reason)

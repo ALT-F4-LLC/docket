@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -845,6 +846,40 @@ func TestGatePinRecheckRefusesRetargetBeforeAttempt(t *testing.T) {
 	assertReasonNamesPaths(t, r.Reason, target, decoy)
 	if ex.Verdict != VerdictFail {
 		t.Errorf("gate verdict = %q, want %q", ex.Verdict, VerdictFail)
+	}
+}
+
+// TestGatePinRecheckRefusalQuotesPaths: the re-check refusal renders the
+// entry's argv[0], the spawned path, and the re-resolved path quoted, so path
+// bytes cannot shape the reason text.
+func TestGatePinRecheckRefusalQuotesPaths(t *testing.T) {
+	repoRoot := t.TempDir()
+	content := pinScriptHeader + "A\nexit 0\n"
+	link, target := symlinkedPinnedScript(t, repoRoot, content)
+	decoy := filepath.Join(repoRoot, "files", "d.sh")
+
+	ex := runTreeGateAcrossHeldLock(t, repoRoot,
+		pinnedEntry(repoRoot, link, trustHashOf(content)), namedPinGate(link), func() {
+			err := os.WriteFile(decoy, []byte(content), 0o755)
+			testsupport.Must(t, err, "writing the pinned-bytes copy: %v", err)
+			err = os.Symlink(decoy, link+".new")
+			testsupport.Must(t, err, "linking the retarget: %v", err)
+			err = os.Rename(link+".new", link)
+			testsupport.Must(t, err, "retargeting the link: %v", err)
+		})
+
+	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictUnmatched {
+		t.Fatalf("rows = %+v, want one %q row", ex.Results, VerdictUnmatched)
+	}
+	spawned, err := filepath.EvalSymlinks(target)
+	testsupport.Must(t, err, "resolving the spawned script: %v", err)
+	reresolved, err := filepath.EvalSymlinks(decoy)
+	testsupport.Must(t, err, "resolving the decoy: %v", err)
+	reason := ex.Results[0].Reason
+	for _, p := range []string{link, spawned, reresolved} {
+		if !strings.Contains(reason, strconv.Quote(p)) {
+			t.Errorf("the reason does not name %s quoted: %q", strconv.Quote(p), reason)
+		}
 	}
 }
 
