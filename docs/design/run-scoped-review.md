@@ -466,20 +466,36 @@ diff tip of both ranges below and as the payload `head`; no second HEAD read
 occurs. The body is `committedRangeDiff(dir, <commit_sha>, <head>, <union
 scope>)`, as at claim. The round delta is a second committed two-commit range,
 `committedRangeDiff(dir, <prev>, <head>, nil)`, unscoped, from the previous
-round's recorded head (`prev`, the `head` of the newest earlier `run.diff` that
-recorded one) to the resolved sha, appended under `roundDeltaMarker` and recorded as
-`round_base`. `appendRoundDelta` (saga.go:3392) does not produce it: that
+round's reviewed head (`prev`) to the resolved sha, appended under
+`roundDeltaMarker` and recorded as `round_base`. `prev` is the `head` of the
+`run.diff` the round's review claim recorded, the object its panel was handed,
+as `appendRoundDelta` starts an issue's delta at the last reviewed head
+(saga.go:3431-3435). When the fix step itself declares `run.diff`, its own
+claim's record is newer, but it is this round's, so `prev` never resolves to it:
+`prev` names the review claim's record either way. `appendRoundDelta`
+(saga.go:3392) does not produce the delta: that
 helper reads HEAD itself through `HeadFn` and the working tree through `DiffFn`,
 which the Engine wires to `GitDiff` (saga.go:215), so its trailer would mix an
 uncommitted, untracked read and a separate HEAD read into a committed body.
-A refused commit is a resolved head equal to the round base `prev`: the step
-committed nothing. The completion then records the payload with no `head`, as
-`appendRoundDelta` omits it for a blocked issue commit (saga.go:3414-3417), and
-the round-delta section reads `# (no commit this round)`, so no reader takes the
+A refused commit is detected against the fix step's own fixed tree base, never
+against `prev`: the base `runDiffBase` resolves for the completion's `dir`
+(saga.go:2749-2772), which is the worktree fork point for a step holding a
+`WorkRoot` (saga.go:2752) and the fix claim's recorded `claim_head` for a
+shared-checkout fix (saga.go:2764). A resolved head equal to that base, with
+the base not a live read, means the step committed nothing: the rule the
+issue-scoped completion applies, `blocked := head == base && !liveBase`
+(saga.go:3414). `prev` is only the round delta's lower bound. A commit that
+lands on the shared branch between the review claim and the fix's start puts
+the fix's base past `prev`, so a fix that commits nothing resolves a head that
+differs from `prev` and equals its base. On a refused commit the completion
+records the payload with no `head`, as `appendRoundDelta` omits it for a
+blocked issue commit (saga.go:3414-3417), and the round-delta section reads
+`# (no commit this round)` in place of the range, so no reader takes the
 pre-fix commit for the fix's tip and `dispatch close` collects no candidate
 from it. A fix round always follows a review whose claim recorded a
-`run.diff`, so `prev` exists; if none does, the completion records no delta and
-compares the resolved head against `commit_sha` instead. That record is what the
+`run.diff`, so `prev` exists; if none does, the completion records no delta,
+and the refusal test is unchanged: it compares the resolved head against the
+same fork point or `claim_head` base. That record is what the
 non-convergence check and `dispatch close`'s candidate collection read in D3.
 
 Alternatives weighed.
@@ -1099,7 +1115,11 @@ removed. Acceptance: a `fix-loop` routing from `reconcile@0` instantiates `fix@1
 and supersedes nothing of any issue; `run_issues.loop_count` is unchanged for
 every issue and every issue stays `done`; the second entry under `max_fix_loops
 = 1` parks `waiting-human` naming `--as fix-round`; a round whose `run.diff`
-sha256 equals the previous round's is refused as non-convergent.
+sha256 equals the previous round's is refused as non-convergent; when a commit
+lands on the shared branch between the review claim and the fix step's start
+and the fix commits nothing, the fix's completion `run.diff` records no `head`,
+its round-delta section reads `# (no commit this round)`, and `dispatch close`
+collects no candidate from it.
 
 Phase 4, reporting. `run report` renders the run phase. Acceptance:
 the report lists each run-scoped step with its artifacts under a run section and
