@@ -337,15 +337,23 @@ func (r *ExecActionRunner) spawnMatched(
 	// A8: flaky re-runs apply and are recorded individually with ascending
 	// ordinal. The pass predicate is exit-zero AND a parseable reply — a
 	// command that exits 0 and prints garbage has not produced a result, and
-	// re-running it is exactly what `flaky` is for. A content-pinned entry runs
-	// once: the attempt loop spawns through exec.Run, which would not bind the
-	// pin to the spawned file.
-	var attempts []exec.Attempt
-	var refusal *exec.Refusal
+	// re-running it is exactly what `flaky` is for. Every attempt of a
+	// content-pinned entry spawns through exec.RunPinned, so each one runs the
+	// path it hashed. A RunPinned refusal spawned nothing: it is recorded as
+	// the refusal at the declined ordinal, after the attempts that ran.
+	//
+	// The binding covers a symlink retargeted between the hash and the spawn.
+	// A rename over the resolved path, or a write into the hashed file, between
+	// the hash and execve still runs bytes the pin does not name.
+	spawn := exec.Run
 	if pinned {
-		attempts, refusal, err = spawnPinnedOnce(spec, entry.Argv0SHA256, r.RepoRoot, entryArgv0, recheckPin)
-	} else {
-		attempts, refusal, err = exec.RunVerifiedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin)
+		spawn = func(s exec.Spec) (exec.Result, error) {
+			return exec.RunPinned(s, entry.Argv0SHA256, r.RepoRoot, entryArgv0)
+		}
+	}
+	attempts, refusal, err := exec.RunSpawnedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin, spawn)
+	if pinned && errors.Is(err, exec.ErrRefused) {
+		refusal, err = &exec.Refusal{Ordinal: len(attempts), Err: err}, nil
 	}
 	if err != nil {
 		return r.failed(a, fmt.Sprintf("running action %s: %v", a.Name, err), match)
@@ -429,29 +437,6 @@ func (r *ExecActionRunner) spawnMatched(
 
 	out.Body, out.Payload = reply.Body, reply.Payload
 	return out
-}
-
-// spawnPinnedOnce runs verify, then spawns spec through exec.RunPinned, which
-// hashes the file argv[0] resolves to and spawns that same path. A verify
-// failure or a RunPinned refusal is a Refusal at ordinal 0: nothing spawned.
-//
-// The binding covers a symlink retargeted between the hash and the spawn. A
-// rename over the resolved path, or a write into the hashed file, between the
-// hash and execve still runs bytes the pin does not name.
-func spawnPinnedOnce(
-	spec exec.Spec, pin, repoRoot, entryArgv0 string, verify func() error,
-) ([]exec.Attempt, *exec.Refusal, error) {
-	if err := verify(); err != nil {
-		return nil, &exec.Refusal{Err: err}, nil
-	}
-	res, err := exec.RunPinned(spec, pin, repoRoot, entryArgv0)
-	if errors.Is(err, exec.ErrRefused) {
-		return nil, &exec.Refusal{Err: err}, nil
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	return []exec.Attempt{{Result: res}}, nil, nil
 }
 
 // failed shapes a whole-action failure that is not a trust refusal.

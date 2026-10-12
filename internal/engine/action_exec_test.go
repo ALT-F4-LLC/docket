@@ -118,10 +118,10 @@ func TestActionsUseTheSameTrustPath(t *testing.T) {
 		return true
 	})
 	for _, want := range []string{
-		"exec.Resolve",             // A5: argv[0] resolution and repo containment
-		"exec.BuildEnv",            // A4: the env allowlist and the token exclusion
-		"exec.RunVerifiedAttempts", // A6/A8 and the per-spawn pin re-check
-		"exec.RunPinned",           // a pinned entry spawns the file it hashed
+		"exec.Resolve",            // A5: argv[0] resolution and repo containment
+		"exec.BuildEnv",           // A4: the env allowlist and the token exclusion
+		"exec.RunSpawnedAttempts", // A6/A8 and the per-spawn pin re-check
+		"exec.RunPinned",          // a pinned entry spawns the file it hashed
 		"trust.RepoIdentity",
 		"trust.ArgvSHA256",
 	} {
@@ -833,10 +833,92 @@ func TestActionPinRecheckAfterTreeLock(t *testing.T) {
 	}
 }
 
+// runCountingPinnedAction runs a content-pinned action whose script appends one
+// line to a counter file outside the script, sets n to the line count, then
+// runs body. It returns what the action recorded and how many times it ran.
+func runCountingPinnedAction(t *testing.T, flaky bool, body string) (ActionResult, int) {
+	t.Helper()
+	repo := t.TempDir()
+	counter := filepath.Join(t.TempDir(), "runs")
+	script, pinned := pinnedScript(t, fmt.Sprintf(
+		"echo x >> %[1]q\nn=$(wc -l < %[1]q | tr -d ' ')\n%[2]s", counter, body))
+	entry := pinnedActionEntry(repo, script, pinned)
+	entry.Flaky = flaky
+	runner := actionRunner(t, repo, entry)
+
+	result, err := runner.Run(context.Background(),
+		actionSpec("pinned-action"), StepContext{Instance: "reconcile@0"})
+	testsupport.Must(t, err, "Run: %v", err)
+
+	content, err := os.ReadFile(counter)
+	testsupport.Must(t, err, "reading the run counter: %v", err)
+	return result, strings.Count(string(content), "\n")
+}
+
+// assertAttemptRows checks that result recorded one row per verdict, in order,
+// with ascending ordinals from 0.
+func assertAttemptRows(t *testing.T, result ActionResult, verdicts ...string) {
+	t.Helper()
+	if len(result.Results) != len(verdicts) {
+		t.Fatalf("got %d rows, want %d: %+v", len(result.Results), len(verdicts), result.Results)
+	}
+	for i, want := range verdicts {
+		if r := result.Results[i]; r.Ordinal != i || r.Verdict != want {
+			t.Errorf("row %d = ordinal %d verdict %q, want %d and %q",
+				i, r.Ordinal, r.Verdict, i, want)
+		}
+	}
+}
+
+// TestPinnedFlakyActionPassesOnReattempt: a flaky content-pinned action that
+// fails once and then passes is re-attempted, records both attempts, and
+// passes.
+func TestPinnedFlakyActionPassesOnReattempt(t *testing.T) {
+	result, runs := runCountingPinnedAction(t, true,
+		"if [ \"$n\" -lt 2 ]; then exit 1; fi\n"+actionReplyLine)
+
+	if result.Failed {
+		t.Errorf("a flaky pinned action that passed on its re-attempt failed: %s", result.Reason)
+	}
+	if runs != 2 {
+		t.Errorf("the script ran %d times, want 2", runs)
+	}
+	assertAttemptRows(t, result, db.ActionVerdictFail, db.ActionVerdictPass)
+}
+
+// TestPinnedFlakyActionStopsAtMaxAttempts: a flaky content-pinned action that
+// always fails runs exec.MaxFlakyAttempts times, records each, and fails.
+func TestPinnedFlakyActionStopsAtMaxAttempts(t *testing.T) {
+	result, runs := runCountingPinnedAction(t, true, "exit 1\n")
+
+	if !result.Failed {
+		t.Error("a flaky pinned action that failed every attempt did not fail")
+	}
+	if runs != 3 {
+		t.Errorf("the script ran %d times, want 3", runs)
+	}
+	assertAttemptRows(t, result,
+		db.ActionVerdictFail, db.ActionVerdictFail, db.ActionVerdictFail)
+}
+
+// TestPinnedActionNotFlakyRunsOnce: F1 holds for a content-pinned entry, so a
+// failing pinned action not declared flaky runs exactly once.
+func TestPinnedActionNotFlakyRunsOnce(t *testing.T) {
+	result, runs := runCountingPinnedAction(t, false, "exit 1\n")
+
+	if !result.Failed {
+		t.Error("a failing pinned action did not fail")
+	}
+	if runs != 1 {
+		t.Errorf("the script ran %d times, want 1", runs)
+	}
+	assertAttemptRows(t, result, db.ActionVerdictFail)
+}
+
 // TestPinnedFlakyActionNeverRerunsRewrittenScript: a flaky pinned script whose
-// first attempt rewrites one byte of itself and fails. A content-pinned entry
-// spawns once through exec.RunPinned, so the failure routes and the rewritten
-// script never runs.
+// first attempt rewrites one byte of itself and fails. The re-attempt's pin
+// check refuses before anything spawns, so the rewritten script never runs and
+// the refusal is recorded after the failed attempt.
 func TestPinnedFlakyActionNeverRerunsRewrittenScript(t *testing.T) {
 	repo := t.TempDir()
 	markers := t.TempDir()
@@ -871,13 +953,9 @@ func TestPinnedFlakyActionNeverRerunsRewrittenScript(t *testing.T) {
 	if !result.Failed {
 		t.Error("the action did not fail after its pinned script changed")
 	}
-	if len(result.Results) != 1 {
-		t.Fatalf("got %d rows, want 1 (the failed run): %+v",
-			len(result.Results), result.Results)
-	}
-	if r := result.Results[0]; r.Ordinal != 0 || r.Verdict != db.ActionVerdictFail {
-		t.Errorf("row 0 = ordinal %d verdict %q, want 0 and %q",
-			r.Ordinal, r.Verdict, db.ActionVerdictFail)
+	assertAttemptRows(t, result, db.ActionVerdictFail, db.ActionVerdictUnmatched)
+	if r := result.Results[1]; r.Exit != nil {
+		t.Errorf("the refusal row has exit %d, want nil: nothing spawned", *r.Exit)
 	}
 }
 
