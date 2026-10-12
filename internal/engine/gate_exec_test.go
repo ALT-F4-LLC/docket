@@ -822,6 +822,40 @@ func checkPinRecheckBeforeEachAttempt(t *testing.T, gateFor pinGateSpec) {
 	}
 }
 
+// TestFlakyPinnedGatePassesOnReattempt: a flaky pinned script that fails its
+// first attempt and passes its second records both attempts, and the second
+// decides the gate's verdict.
+func TestFlakyPinnedGatePassesOnReattempt(t *testing.T) {
+	const pinnedOut = "PINNED-SCRIPT-RAN"
+	repoRoot := t.TempDir()
+	firstRan := filepath.Join(t.TempDir(), "attempt-0")
+	script, pinned := pinnedScript(t, fmt.Sprintf(
+		"echo %[1]s\nif [ -e %[2]s ]; then exit 0; fi\n/usr/bin/touch %[2]s\nexit 1\n",
+		pinnedOut, firstRan))
+	entry := pinnedEntry(repoRoot, script, pinned)
+	entry.Flaky = true
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, entry)
+
+	ex, err := runner.Execute(context.Background(), namedPinGate(script), StepContext{})
+	testsupport.Must(t, err, "running the flaky gate: %v", err)
+
+	if len(ex.Results) != 2 {
+		t.Fatalf("got %d rows, want 2 (the failed attempt, then the pass): %+v",
+			len(ex.Results), ex.Results)
+	}
+	for i, want := range []string{VerdictFail, VerdictPass} {
+		r := ex.Results[i]
+		if r.Ordinal != i || r.Verdict != want || !strings.Contains(r.Output, pinnedOut) {
+			t.Errorf("row %d = ordinal %d verdict %q output %q, want %d, %q, the pinned script's output",
+				i, r.Ordinal, r.Verdict, r.Output, i, want)
+		}
+	}
+	if ex.Verdict != VerdictPass {
+		t.Errorf("gate verdict = %q, want %q: the last attempt decides", ex.Verdict, VerdictPass)
+	}
+}
+
 // symlinkedPinnedScript writes content to repoRoot/files/c.sh and links
 // repoRoot/gate.sh to it, the layout a writer retargets: the trust entry names
 // the link, and its pin is c.sh's bytes.
@@ -1021,11 +1055,23 @@ func TestGatePinRecheckStableSymlinkRuns(t *testing.T) {
 // script never runs: the runner hashes and spawns one resolution of the link.
 func TestGatePinnedSpawnSurvivesArgv0Flips(t *testing.T) {
 	for name, gateFor := range map[string]pinGateSpec{"named": namedPinGate, "fence": fencePinGate} {
-		t.Run(name, func(t *testing.T) { checkPinnedSpawnSurvivesArgv0Flips(t, gateFor) })
+		t.Run(name, func(t *testing.T) { checkPinnedSpawnSurvivesArgv0Flips(t, gateFor, false) })
 	}
 }
 
-func checkPinnedSpawnSurvivesArgv0Flips(t *testing.T, gateFor pinGateSpec) {
+// TestFlakyGatePinnedSpawnSurvivesArgv0Flips is the same race for a flaky
+// pinned entry whose pinned script always fails, so every run re-attempts
+// under the flips: no attempt, the first or a re-run, spawns unpinned bytes.
+func TestFlakyGatePinnedSpawnSurvivesArgv0Flips(t *testing.T) {
+	for name, gateFor := range map[string]pinGateSpec{"named": namedPinGate, "fence": fencePinGate} {
+		t.Run(name, func(t *testing.T) { checkPinnedSpawnSurvivesArgv0Flips(t, gateFor, true) })
+	}
+}
+
+// checkPinnedSpawnSurvivesArgv0Flips runs the flip race. A non-flaky entry's
+// pinned script passes; a flaky entry's fails, so each run reaches re-attempts,
+// and a run only counts once some row with ordinal 1 or more was recorded.
+func checkPinnedSpawnSurvivesArgv0Flips(t *testing.T, gateFor pinGateSpec, flaky bool) {
 	// minRuns is above the 200 that caught an unpinned spawn in most runs on
 	// darwin/arm64, so a single run catches one far more reliably.
 	const (
@@ -1037,14 +1083,21 @@ func checkPinnedSpawnSurvivesArgv0Flips(t *testing.T, gateFor pinGateSpec) {
 	repoRoot := t.TempDir()
 	unpinnedMarker := filepath.Join(t.TempDir(), "unpinned-ran")
 	content := pinScriptHeader + "A\necho " + pinnedOut + "\n"
+	wantVerdict := VerdictPass
+	if flaky {
+		content += "exit 1\n"
+		wantVerdict = VerdictFail
+	}
 	link, pinned := symlinkedPinnedScript(t, repoRoot, content)
 	unpinned := filepath.Join(repoRoot, "files", "u.sh")
 	writeErr := os.WriteFile(unpinned, []byte(
 		"#!/bin/sh\n/usr/bin/touch "+unpinnedMarker+"\necho "+unpinnedOut+"\n"), 0o755)
 	testsupport.Must(t, writeErr, "writing the unpinned script: %v", writeErr)
 
+	entry := pinnedEntry(repoRoot, link, trustHashOf(content))
+	entry.Flaky = flaky
 	runner := NewExecRunner(testRepoPaths(repoRoot))
-	runner.LoadStore = sandboxTrust(t, pinnedEntry(repoRoot, link, trustHashOf(content)))
+	runner.LoadStore = sandboxTrust(t, entry)
 
 	stop := make(chan struct{})
 	flipperDone := make(chan struct{})
@@ -1073,27 +1126,31 @@ func checkPinnedSpawnSurvivesArgv0Flips(t *testing.T, gateFor pinGateSpec) {
 		<-flipperDone
 	}()
 
-	runs, passes, refusals := 0, 0, 0
-	for ; runs < maxRuns && (runs < minRuns || passes == 0 || refusals == 0); runs++ {
+	reattemptsRaced := !flaky
+	runs, spawns, refusals := 0, 0, 0
+	for ; runs < maxRuns && (runs < minRuns || spawns == 0 || refusals == 0 || !reattemptsRaced); runs++ {
 		ex, err := runner.Execute(context.Background(), gateFor(link), StepContext{})
 		testsupport.Must(t, err, "running the gate (run %d): %v", runs, err)
 		for _, row := range ex.Results {
 			switch {
-			case row.Verdict == VerdictPass && strings.Contains(row.Output, pinnedOut) &&
+			case row.Verdict == wantVerdict && strings.Contains(row.Output, pinnedOut) &&
 				!strings.Contains(row.Output, unpinnedOut):
-				passes++
+				spawns++
 			case row.Verdict == VerdictUnmatched && row.Exit == nil:
 				refusals++
 			default:
-				t.Fatalf("run %d recorded a row that is neither a pinned pass nor an "+
-					"unspawned refusal: %+v", runs, row)
+				t.Fatalf("run %d recorded a row that is neither a pinned %s nor an "+
+					"unspawned refusal: %+v", runs, wantVerdict, row)
+			}
+			if row.Ordinal > 0 {
+				reattemptsRaced = true
 			}
 		}
 	}
-	t.Logf("%d runs: %d pinned passes, %d refusals", runs, passes, refusals)
-	if passes == 0 || refusals == 0 {
-		t.Fatalf("after %d runs: %d pinned passes, %d refusals; the flips never "+
-			"raced the gate both ways", runs, passes, refusals)
+	t.Logf("%d runs: %d pinned %s rows, %d refusals", runs, spawns, wantVerdict, refusals)
+	if spawns == 0 || refusals == 0 || !reattemptsRaced {
+		t.Fatalf("after %d runs: %d pinned %s rows, %d refusals, re-attempts raced %t; "+
+			"the flips never raced the gate both ways", runs, spawns, wantVerdict, refusals, reattemptsRaced)
 	}
 	if sentinelExists(t, unpinnedMarker) {
 		t.Error("the unpinned script RAN behind the flipped link")

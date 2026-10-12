@@ -441,9 +441,8 @@ func (r *ExecRunner) spawnMatchedRows(
 	// retargeted after `resolved` above can make it refuse but cannot make it
 	// run unpinned bytes. A rename over the hashed file, a write into it, or an
 	// interpreter re-opening it by name after the hash is not bound (DKT-3919).
-	// A flaky pinned entry keeps RunVerifiedAttempts' re-runs and with them
-	// the separate resolutions (DKT-3920).
-	pinnedSpawn := entry.Argv0SHA256 != "" && filepath.IsAbs(entryArgv0) && !entry.Flaky
+	// A flaky pinned entry's re-attempts spawn through RunPinned too.
+	pinnedSpawn := entry.Argv0SHA256 != "" && filepath.IsAbs(entryArgv0)
 	argv := append([]string{resolved}, match.Argv[1:]...)
 	if pinnedSpawn {
 		argv = match.Argv
@@ -481,7 +480,7 @@ func (r *ExecRunner) spawnMatchedRows(
 		}
 	}
 	// The deadline rides on the spec as well as clamping the timeout above:
-	// a flaky entry re-runs inside exec.RunVerifiedAttempts, and each attempt must
+	// a flaky entry re-runs inside exec.RunSpawnedAttempts, and each attempt must
 	// see what is left of the budget, not a fresh copy of the first clamp.
 	spec := exec.Spec{Argv: argv, Dir: dir, Env: env, Timeout: timeout, Deadline: sc.Deadline}
 
@@ -540,16 +539,17 @@ func (r *ExecRunner) spawnMatchedRows(
 		refusal  *exec.Refusal
 	)
 	if pinnedSpawn {
+		runPinned := func(s exec.Spec) (exec.Result, error) {
+			return exec.RunPinned(s, entry.Argv0SHA256, r.RepoRoot, entryArgv0)
+		}
+		attempts, refusal, err = exec.RunSpawnedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin, runPinned)
 		// A pin refusal from RunPinned spawned nothing, so it records like the
-		// re-check's refusal: an unmatched row, not an engine error.
-		if err := recheckPin(); err != nil {
-			refusal = &exec.Refusal{Ordinal: 0, Err: err}
-		} else if res, err := exec.RunPinned(spec, entry.Argv0SHA256, r.RepoRoot, entryArgv0); errors.Is(err, exec.ErrRefused) {
-			refusal = &exec.Refusal{Ordinal: 0, Err: fmt.Errorf("gate %q: %w", g.Name, err)}
+		// re-check's refusal: an unmatched row at the declined ordinal, after
+		// the attempts that ran, not an engine error.
+		if errors.Is(err, exec.ErrRefused) {
+			refusal = &exec.Refusal{Ordinal: len(attempts), Err: fmt.Errorf("gate %q: %w", g.Name, err)}
 		} else if err != nil {
 			return GateExecution{}, fmt.Errorf("running gate %s: %w", g.Name, err)
-		} else {
-			attempts = []exec.Attempt{{Ordinal: 0, Result: res}}
 		}
 	} else {
 		attempts, refusal, err = exec.RunVerifiedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin)
