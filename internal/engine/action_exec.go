@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -244,7 +245,9 @@ func (r *ExecActionRunner) runTrustedCommand(
 // the content pin (gates-trust §3.1 argv0_sha256) is checked "before every
 // spawn": the pinned file can change during the lock wait or between flaky
 // attempts, and only the pin half of the Lookup can change its answer. The
-// same holds for declared files, which it re-hashes under the same root.
+// same holds for declared files, which it re-hashes under the same root. A
+// content-pinned entry then spawns through exec.RunPinned, which spawns
+// exactly the path it hashed.
 func (r *ExecActionRunner) spawnMatched(
 	a ActionSpec, sc StepContext, match trust.Match, relookup func() trust.Match,
 ) ActionResult {
@@ -290,8 +293,16 @@ func (r *ExecActionRunner) spawnMatched(
 		}
 	}
 
+	// A content-pinned entry hands RunPinned its UNRESOLVED argv[0]: RunPinned
+	// resolves it once and spawns the path it hashed, so `resolved` above only
+	// feeds the refusal and the pre-spawn re-check, never the spawned argv.
+	pinned := entry.Argv0SHA256 != "" && filepath.IsAbs(entryArgv0)
+	argv0 := resolved
+	if pinned {
+		argv0 = match.Argv[0]
+	}
 	spec := exec.Spec{
-		Argv: append([]string{resolved}, match.Argv[1:]...),
+		Argv: append([]string{argv0}, match.Argv[1:]...),
 		Dir:  r.RepoRoot, Env: env, Timeout: timeout,
 		// §6.2's stdin half: the §11.4 context object, one JSON document, then
 		// EOF. SplitStdout separates the structured reply from the diagnostic
@@ -326,8 +337,16 @@ func (r *ExecActionRunner) spawnMatched(
 	// A8: flaky re-runs apply and are recorded individually with ascending
 	// ordinal. The pass predicate is exit-zero AND a parseable reply — a
 	// command that exits 0 and prints garbage has not produced a result, and
-	// re-running it is exactly what `flaky` is for.
-	attempts, refusal, err := exec.RunVerifiedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin)
+	// re-running it is exactly what `flaky` is for. A content-pinned entry runs
+	// once: the attempt loop spawns through exec.Run, which would not bind the
+	// pin to the spawned file.
+	var attempts []exec.Attempt
+	var refusal *exec.Refusal
+	if pinned {
+		attempts, refusal, err = spawnPinnedOnce(spec, entry.Argv0SHA256, r.RepoRoot, entryArgv0, recheckPin)
+	} else {
+		attempts, refusal, err = exec.RunVerifiedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin)
+	}
 	if err != nil {
 		return r.failed(a, fmt.Sprintf("running action %s: %v", a.Name, err), match)
 	}
@@ -353,9 +372,9 @@ func (r *ExecActionRunner) spawnMatched(
 		last = &attempt
 	}
 	if refusal != nil {
-		// The pin no longer holds: nothing spawned for this ordinal, so the
-		// row carries no argv and no exit, like a Resolve refusal. Nothing ran
-		// after it, so it routes.
+		// The pin no longer holds, or the pinned spawn refused: nothing spawned
+		// for this ordinal, so the row carries no argv and no exit, like a
+		// Resolve refusal. Nothing ran after it, so it routes.
 		reason := refusal.Err.Error()
 		out.Results = append(out.Results, ActionResultRow{
 			Action: a.Name, Ordinal: refusal.Ordinal, Verdict: db.ActionVerdictUnmatched,
@@ -410,6 +429,29 @@ func (r *ExecActionRunner) spawnMatched(
 
 	out.Body, out.Payload = reply.Body, reply.Payload
 	return out
+}
+
+// spawnPinnedOnce runs verify, then spawns spec through exec.RunPinned, which
+// hashes the file argv[0] resolves to and spawns that same path. A verify
+// failure or a RunPinned refusal is a Refusal at ordinal 0: nothing spawned.
+//
+// The binding covers a symlink retargeted between the hash and the spawn. A
+// rename over the resolved path, or a write into the hashed file, between the
+// hash and execve still runs bytes the pin does not name.
+func spawnPinnedOnce(
+	spec exec.Spec, pin, repoRoot, entryArgv0 string, verify func() error,
+) ([]exec.Attempt, *exec.Refusal, error) {
+	if err := verify(); err != nil {
+		return nil, &exec.Refusal{Err: err}, nil
+	}
+	res, err := exec.RunPinned(spec, pin, repoRoot, entryArgv0)
+	if errors.Is(err, exec.ErrRefused) {
+		return nil, &exec.Refusal{Err: err}, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return []exec.Attempt{{Result: res}}, nil, nil
 }
 
 // failed shapes a whole-action failure that is not a trust refusal.

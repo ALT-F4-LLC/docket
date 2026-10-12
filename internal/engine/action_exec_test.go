@@ -89,7 +89,7 @@ func TestActionsUseTheSameTrustPath(t *testing.T) {
 	// the action runner must not construct a command itself.
 	allowed := map[string]bool{
 		"context": true, "encoding/json": true, "errors": true, "fmt": true,
-		"strings": true, "time": true,
+		"path/filepath": true, "strings": true, "time": true,
 		"github.com/ALT-F4-LLC/docket/internal/db":       true,
 		"github.com/ALT-F4-LLC/docket/internal/exec":     true,
 		"github.com/ALT-F4-LLC/docket/internal/trust":    true,
@@ -121,6 +121,7 @@ func TestActionsUseTheSameTrustPath(t *testing.T) {
 		"exec.Resolve",             // A5: argv[0] resolution and repo containment
 		"exec.BuildEnv",            // A4: the env allowlist and the token exclusion
 		"exec.RunVerifiedAttempts", // A6/A8 and the per-spawn pin re-check
+		"exec.RunPinned",           // a pinned entry spawns the file it hashed
 		"trust.RepoIdentity",
 		"trust.ArgvSHA256",
 	} {
@@ -832,10 +833,11 @@ func TestActionPinRecheckAfterTreeLock(t *testing.T) {
 	}
 }
 
-// TestActionPinRecheckBeforeEachAttempt: a flaky pinned script whose first
-// attempt rewrites one byte of itself and fails. The re-attempt is not
-// spawned, and its ordinal records the refusal.
-func TestActionPinRecheckBeforeEachAttempt(t *testing.T) {
+// TestPinnedFlakyActionNeverRerunsRewrittenScript: a flaky pinned script whose
+// first attempt rewrites one byte of itself and fails. A content-pinned entry
+// spawns once through exec.RunPinned, so the failure routes and the rewritten
+// script never runs.
+func TestPinnedFlakyActionNeverRerunsRewrittenScript(t *testing.T) {
 	repo := t.TempDir()
 	markers := t.TempDir()
 	first := filepath.Join(markers, "marker-1")
@@ -869,22 +871,13 @@ func TestActionPinRecheckBeforeEachAttempt(t *testing.T) {
 	if !result.Failed {
 		t.Error("the action did not fail after its pinned script changed")
 	}
-	if len(result.Results) != 2 {
-		t.Fatalf("got %d rows, want 2 (the failed run, then the refusal): %+v",
+	if len(result.Results) != 1 {
+		t.Fatalf("got %d rows, want 1 (the failed run): %+v",
 			len(result.Results), result.Results)
 	}
 	if r := result.Results[0]; r.Ordinal != 0 || r.Verdict != db.ActionVerdictFail {
 		t.Errorf("row 0 = ordinal %d verdict %q, want 0 and %q",
 			r.Ordinal, r.Verdict, db.ActionVerdictFail)
-	}
-	r := result.Results[1]
-	if r.Ordinal != 1 || r.Verdict != db.ActionVerdictUnmatched || r.Exit != nil {
-		t.Errorf("row 1 = ordinal %d verdict %q exit %v, want 1, %q, nil",
-			r.Ordinal, r.Verdict, r.Exit, db.ActionVerdictUnmatched)
-	}
-	if !strings.Contains(r.Reason, "changed since it was trusted") ||
-		!strings.Contains(r.Reason, entry.Argv0SHA256) {
-		t.Errorf("row 1 reason does not name the pin mismatch: %q", r.Reason)
 	}
 }
 
@@ -1148,4 +1141,110 @@ func TestActionDeclaredFileRecheckBeforeEachAttempt(t *testing.T) {
 		t.Errorf("row 1 = verdict %q reason %q, want %q naming %s",
 			r.Verdict, r.Reason, db.ActionVerdictUnmatched, declaredFilePath)
 	}
+}
+
+// TestActionSymlinkFlipNeverPassesUnpinnedBytes: the entry trusts link, a
+// symlink a concurrent writer keeps flipping between a pinned script and an
+// unpinned one, across many action runs. Every run either passes with the
+// pinned script's reply or is refused as unmatched before anything spawns; the
+// unpinned script never runs.
+//
+// This covers symlink retargeting only. A rename over the resolved file or a
+// write into it between the hash and the spawn is outside what a path-based
+// spawn binds.
+func TestActionSymlinkFlipNeverPassesUnpinnedBytes(t *testing.T) {
+	const (
+		minRuns = 1000
+		maxRuns = 2000
+	)
+	repo := t.TempDir()
+	dir, markers := t.TempDir(), t.TempDir()
+	pinnedRan := filepath.Join(markers, "pinned-ran")
+	unpinnedRan := filepath.Join(markers, "unpinned-ran")
+	script := func(name, body, marker string) (path, content string) {
+		path = filepath.Join(dir, name)
+		content = fmt.Sprintf("%s%s\necho x >> %q\necho '{\"body\":%q,\"payload\":[]}'\n",
+			pinScriptHeader, body, marker, body)
+		err := os.WriteFile(path, []byte(content), 0o755)
+		testsupport.Must(t, err, "writing %s: %v", name, err)
+		return path, content
+	}
+	pinnedPath, pinnedContent := script("pinned.sh", "P", pinnedRan)
+	unpinnedPath, _ := script("unpinned.sh", "U", unpinnedRan)
+
+	link := filepath.Join(dir, "link")
+	err := os.Symlink(pinnedPath, link)
+	testsupport.Must(t, err, "linking %s: %v", link, err)
+
+	stop, flipped := make(chan struct{}), make(chan error, 1)
+	go func() {
+		tmp := filepath.Join(dir, "link.tmp")
+		targets := [2]string{unpinnedPath, pinnedPath}
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				flipped <- nil
+				return
+			default:
+			}
+			if err := os.Symlink(targets[i%2], tmp); err != nil {
+				flipped <- err
+				return
+			}
+			if err := os.Rename(tmp, link); err != nil {
+				flipped <- err
+				return
+			}
+			time.Sleep(10 * time.Microsecond)
+		}
+	}()
+	var flipErr error
+	stopped := false
+	stopFlipper := func() {
+		if !stopped {
+			stopped = true
+			close(stop)
+			flipErr = <-flipped
+		}
+	}
+	t.Cleanup(stopFlipper)
+
+	runner := actionRunner(t, repo,
+		pinnedActionEntry(repo, link, trustHashOf(pinnedContent)))
+	var runs, pinnedPasses, refusals int
+	for runs < minRuns || (pinnedPasses == 0 && runs < maxRuns) {
+		runs++
+		result, err := runner.Run(context.Background(),
+			actionSpec("pinned-action"), StepContext{Instance: "reconcile@0"})
+		testsupport.Must(t, err, "Run %d: %v", runs, err)
+		if len(result.Results) == 0 {
+			t.Fatalf("run %d recorded no rows", runs)
+		}
+		row := result.Results[len(result.Results)-1]
+		switch {
+		case row.Verdict == db.ActionVerdictPass && !result.Failed && result.Body == "P":
+			pinnedPasses++
+		case row.Verdict == db.ActionVerdictUnmatched && result.Failed && row.Exit == nil:
+			refusals++
+		default:
+			exit := "none"
+			if row.Exit != nil {
+				exit = fmt.Sprint(*row.Exit)
+			}
+			t.Errorf("run %d recorded verdict %q body %q exit %s (%s); want a pass "+
+				"with the pinned reply or unmatched with nothing spawned",
+				runs, row.Verdict, result.Body, exit, row.Reason)
+		}
+	}
+	stopFlipper()
+	testsupport.Must(t, flipErr, "flipping %s: %v", link, flipErr)
+
+	if sentinelExists(t, unpinnedRan) {
+		t.Errorf("THE UNPINNED SCRIPT RAN under the pinned entry")
+	}
+	if pinnedPasses == 0 || !sentinelExists(t, pinnedRan) {
+		t.Fatalf("no run passed in %d runs (%d refused); the flip never left "+
+			"the pinned script in place long enough to prove anything", runs, refusals)
+	}
+	t.Logf("runs=%d pinnedPasses=%d refusals=%d", runs, pinnedPasses, refusals)
 }
