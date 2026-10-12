@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 43
+const currentSchemaVersion = 44
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -213,6 +213,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	41: migrateV40ToV41,
 	42: migrateV41ToV42,
 	43: migrateV42ToV43,
+	44: migrateV43ToV44,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3219,6 +3220,44 @@ func migrateV42ToV43(tx *sql.Tx) error {
 	return nil
 }
 
+// v44AddedColumns is v44's whole schema change: `loop_cap` on `steps`, the
+// bound a refused fix-loop entry was measured against. Zero means no recorded
+// cap: no refusal can record zero, because a bound of zero disables the check
+// that refuses.
+var v44AddedColumns = []struct{ table, column, ddl string }{
+	{"steps", "loop_cap",
+		`ALTER TABLE steps ADD COLUMN loop_cap INTEGER NOT NULL DEFAULT 0`},
+}
+
+// v44ColumnSentinels are the columns the rewind guard probes, the v43 form:
+// v44 adds no table and no index, so a database stamped 44 by a binary built
+// mid-change carries every v43 sentinel and `loop_cap` never arrives.
+var v44ColumnSentinels = []struct{ table, column string }{
+	{"steps", "loop_cap"},
+}
+
+// migrateV43ToV44 adds `steps.loop_cap`. It back-fills nothing: a pre-v44
+// exhaustion's bound survives only in prunable events and park-reason prose,
+// and re-deriving it from the workflow would misreport granted, hard-clamped,
+// and cluster-bounded loops. It probes before the ALTER, so it stays
+// re-runnable.
+func migrateV43ToV44(tx *sql.Tx) error {
+	for _, col := range v44AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v43 to v44: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v43 to v44: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -4087,6 +4126,23 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 42
+				break
+			}
+		}
+	}
+
+	// The v44 guard, in the same COLUMN form as v43 and for its reason: v44
+	// adds one column and no table, so a database stamped 44 by a binary built
+	// mid-change carries every v43 sentinel and `steps.loop_cap` never arrives.
+	if version >= 44 {
+		for _, col := range v44ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v44 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 43
 				break
 			}
 		}
