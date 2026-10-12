@@ -5,9 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
@@ -46,37 +43,19 @@ func ArgvSHA256(argv []string) string {
 }
 
 // argv0ContentSHA256 hashes the file an absolute argv[0] names, returning the
-// symlink-resolved path it read and the hex-encoded SHA-256 of its bytes. It is
-// the one hasher behind both the pin trust add stores and the check Lookup
-// makes, so the two cannot disagree about which file or which bytes.
-//
-// The resolution is exec.NormalizePath, the same one R1/R4 use to decide which
-// file executes. The open is non-blocking and the type check is an fstat of the
-// open descriptor, so a FIFO or device swapped in at that path is refused
-// rather than waited on, and nothing can be swapped between the check and the
-// read.
+// symlink-resolved path it read and the hex-encoded SHA-256 of its bytes. The
+// resolution is exec.NormalizePath, the same one R1/R4 use to decide which file
+// executes, and the hash is exec.FileSHA256, the one hasher exec.RunPinned
+// verifies with, so the pin trust add stores and the check Lookup makes cannot
+// disagree with the spawn about which bytes a pin names.
 func argv0ContentSHA256(argv0 string) (resolved, sum string, err error) {
 	resolved, err = exec.NormalizePath(argv0)
 	if err != nil {
 		return "", "", fmt.Errorf("resolving %s: %w", argv0, err)
 	}
-	f, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	sum, err = exec.FileSHA256(resolved)
 	if err != nil {
-		return resolved, "", fmt.Errorf("opening %s: %w", resolved, err)
+		return resolved, "", err
 	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return resolved, "", fmt.Errorf("inspecting %s: %w", resolved, err)
-	}
-	if !info.Mode().IsRegular() {
-		return resolved, "", fmt.Errorf("%s is %s, not a regular file", resolved, describeMode(info.Mode()))
-	}
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return resolved, "", fmt.Errorf("reading %s: %w", resolved, err)
-	}
-	return resolved, hex.EncodeToString(h.Sum(nil)), nil
+	return resolved, sum, nil
 }

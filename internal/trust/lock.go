@@ -5,6 +5,8 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
 
 // lockTimeout is W5's bound on acquisition.
@@ -115,7 +117,7 @@ func checkLockfileIntegrity(lockPath string) error {
 		return fmt.Errorf("%w: the lock file %s is a symlink, not a regular file", ErrIntegrity, lockPath)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: the lock file %s is %s, not a regular file", ErrIntegrity, lockPath, describeMode(info.Mode()))
+		return fmt.Errorf("%w: the lock file %s is %s, not a regular file", ErrIntegrity, lockPath, exec.DescribeMode(info.Mode()))
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return fmt.Errorf("%w: the lock file %s has mode %04o, but it must be %04o; fix it with: chmod 600 %s", ErrIntegrity, lockPath, perm, storeFileMode, lockPath)

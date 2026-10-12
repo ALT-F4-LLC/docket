@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
 
 // Entry is one trusted command, in §3.1's shape.
@@ -293,7 +295,7 @@ func checkFileIntegrity(path string, info os.FileInfo) error {
 		return fmt.Errorf("%w: %s is a symlink, not a regular file; the trust store is never a symlink because a link into a repository would let repo content grant itself execution", ErrIntegrity, path)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: %s is %s, not a regular file", ErrIntegrity, path, describeMode(info.Mode()))
+		return fmt.Errorf("%w: %s is %s, not a regular file", ErrIntegrity, path, exec.DescribeMode(info.Mode()))
 	}
 
 	// I2: mode is exactly 0600 — no group or world bits, read or write.
@@ -333,21 +335,4 @@ func checkDirIntegrity(dir string) error {
 		return fmt.Errorf("%w: %s is owned by uid %d, but docket is running as uid %d", ErrIntegrity, dir, owner, os.Getuid())
 	}
 	return nil
-}
-
-// describeMode names what a non-regular file is, so a refusal tells the
-// operator what it found rather than only that it refused.
-func describeMode(m os.FileMode) string {
-	switch {
-	case m.IsDir():
-		return "a directory"
-	case m&os.ModeNamedPipe != 0:
-		return "a FIFO"
-	case m&os.ModeSocket != 0:
-		return "a socket"
-	case m&os.ModeDevice != 0:
-		return "a device"
-	default:
-		return "not a regular file"
-	}
 }
