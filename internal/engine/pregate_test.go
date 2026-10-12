@@ -989,11 +989,13 @@ func TestMeasuredFailureIsNotReportedAsUnmeasured(t *testing.T) {
 //
 // F4 makes the LAST attempt's verdict the one that routes. A gate that could
 // not bind its tree on attempt 0 and measured it fine on attempt 1 has been
-// measured, and parking it would strand a step whose evidence exists.
+// measured, and parking it would strand a step whose evidence exists. A skip
+// ends its execution before any retry, so the measurement after it is a later
+// execution of the gate, recorded at a later time.
 func TestFlakyReRunClearsAnEarlierSkip(t *testing.T) {
 	verdict, unmeasured, _ := verdictOverRows([]db.GateResultRow{
-		{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped},
-		{Gate: "ac-commands", Ordinal: 1, Verdict: db.GateVerdictPass},
+		{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped, CreatedAtMS: nowMS},
+		{Gate: "ac-commands", Ordinal: 1, Verdict: db.GateVerdictPass, CreatedAtMS: nowMS + 1},
 	})
 	if verdict != VerdictPass {
 		t.Errorf("verdict = %q, want %q — F4 routes on the last attempt",

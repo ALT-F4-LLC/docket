@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -42,33 +41,19 @@ import (
 // with a different exit, reason, content fingerprint, or argv parks for a
 // fresh decision.
 
-// failingCompletionRows reduces a step's recorded gate rows to the last-ordinal
-// completion rows that did not pass — the rows a batch override grant records,
-// and the rows it must cover to route a later step past its park. The same
-// reduction verdictOverRows routes on: `pre` rows excluded, last ordinal per
-// gate wins, so a flaky gate that failed twice and passed third is not failing.
+// failingCompletionRows reduces a step's recorded gate rows to the routing rows
+// that did not pass — the rows a batch override grant records, and the rows it
+// must cover to route a later step past its park. It is the reduction
+// verdictOverRows routes on (routingGateRows), so a flaky command that failed
+// twice and passed third is not failing, and a fence gate contributes one row
+// for every line that did not pass.
 func failingCompletionRows(rows []db.GateResultRow) []db.GateResultRow {
-	last := make(map[string]db.GateResultRow)
-	for _, r := range rows {
-		if r.Pre {
-			continue
-		}
-		prev, seen := last[r.Gate]
-		if !seen || r.Ordinal >= prev.Ordinal {
-			last[r.Gate] = r
-		}
-	}
 	var failing []db.GateResultRow
-	for _, r := range last {
+	for _, r := range routingGateRows(rows) {
 		if r.Verdict != db.GateVerdictPass {
 			failing = append(failing, r)
 		}
 	}
-	// Sorted so the routing reason names the gates in the same order on every
-	// run over the same rows — map range order is not.
-	sort.Slice(failing, func(i, j int) bool {
-		return failing[i].Gate < failing[j].Gate
-	})
 	return failing
 }
 
@@ -219,7 +204,9 @@ func batchOverrideCover(
 		if !matched {
 			return nil, nil
 		}
-		cover.gates = append(cover.gates, r.Gate)
+		if !slices.Contains(cover.gates, r.Gate) {
+			cover.gates = append(cover.gates, r.Gate)
+		}
 	}
 
 	// A threshold that interposes another step forbids the auto-apply

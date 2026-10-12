@@ -92,8 +92,11 @@ func TestFailedGatesReportsWhatTheRoutingDecidedOn(t *testing.T) {
 	rows := []db.GateResultRow{
 		// A gate declared flaky: failed, then passed. F4 makes the last attempt
 		// the one that routes, so this must NOT be reported.
-		{Gate: "flaky", Ordinal: 0, Verdict: db.GateVerdictFail, Exit: exit(1)},
-		{Gate: "flaky", Ordinal: 1, Verdict: db.GateVerdictPass, Exit: exit(0)},
+		// Every attempt records the argv it ran.
+		{Gate: "flaky", Ordinal: 0, Verdict: db.GateVerdictFail, Exit: exit(1),
+			Argv: []string{"go", "test", "./..."}},
+		{Gate: "flaky", Ordinal: 1, Verdict: db.GateVerdictPass, Exit: exit(0),
+			Argv: []string{"go", "test", "./..."}},
 		// A pre-gate that failed. PG4: an input to the step, not a judgment of
 		// it, and it routed nothing.
 		{Gate: "pre-scan", Ordinal: 0, Verdict: db.GateVerdictFail, Exit: exit(9), Pre: true},
@@ -146,5 +149,51 @@ func TestFailedGatesReportsWhatTheRoutingDecidedOn(t *testing.T) {
 	if (verdict == VerdictFail) != (len(failed) > 0) {
 		t.Errorf("verdict = %q with %d failed gates — the report and the routing "+
 			"disagree about the same rows", verdict, len(failed))
+	}
+}
+
+// TestFailedGatesNamesAFenceGateWhoseEarlierLineFailed holds the same invariant
+// for a fence gate, whose lines share one gate name: a failing first line
+// followed by a passing last line fails the gate, and the report must say so.
+func TestFailedGatesNamesAFenceGateWhoseEarlierLineFailed(t *testing.T) {
+	cases := []struct {
+		name        string
+		first       db.GateResultRow
+		wantVerdict string
+		wantExit    *int
+	}{
+		{"first line unmatched", lineRow(0, db.GateVerdictUnmatched),
+			db.GateVerdictUnmatched, nil},
+		{"first line failed", lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
+			db.GateVerdictFail, gateExit(1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []db.GateResultRow{
+				tc.first,
+				lineRow(1, db.GateVerdictPass, "go", "vet", "./..."),
+			}
+			failed := failedGatesOverRows(rows)
+			if len(failed) != 1 || failed[0].Gate != "checks" {
+				t.Fatalf("FailedGates = %+v, want the one gate %q", failed, "checks")
+			}
+			got := failed[0]
+			if got.Verdict != tc.wantVerdict {
+				t.Errorf("verdict = %q, want %q", got.Verdict, tc.wantVerdict)
+			}
+			if (got.Exit == nil) != (tc.wantExit == nil) ||
+				(got.Exit != nil && *got.Exit != *tc.wantExit) {
+				t.Errorf("exit = %v, want %v", got.Exit, tc.wantExit)
+			}
+			if tc.wantVerdict == db.GateVerdictUnmatched && got.Reason == "" {
+				t.Errorf("the unmatched line's reason was not reported")
+			}
+
+			verdict, _, _ := verdictOverRows(rows)
+			if (verdict == VerdictFail) != (len(failed) > 0) {
+				t.Errorf("verdict = %q with %d failed gates — the report and the "+
+					"routing disagree about the same rows", verdict, len(failed))
+			}
+		})
 	}
 }

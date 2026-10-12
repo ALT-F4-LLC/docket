@@ -1763,54 +1763,88 @@ func gateVerdict(conn *sql.DB, stepID int) (string, []string, bool, error) {
 // a name list because nothing routes on WHICH entry was missing; the reason
 // text, built from the same rows, already names them.
 func verdictOverRows(rows []db.GateResultRow) (string, []string, bool) {
-	last := lastGateAttempts(rows)
-
 	verdict := VerdictPass
 	var unmeasured []string
 	unmatched := false
-	for _, r := range last {
+	for _, r := range routingGateRows(rows) {
 		if r.Verdict != db.GateVerdictPass {
 			verdict = VerdictFail
 		}
-		if r.Verdict == db.GateVerdictSkipped {
+		if r.Verdict == db.GateVerdictSkipped && !slices.Contains(unmeasured, r.Gate) {
 			unmeasured = append(unmeasured, r.Gate)
 		}
 		if r.Verdict == db.GateVerdictUnmatched {
 			unmatched = true
 		}
 	}
-	// Sorted so the reason a step parks with is the same sentence on every
-	// run over the same rows — map range order is not.
-	sort.Strings(unmeasured)
 	return verdict, unmeasured, unmatched
 }
 
-// lastGateAttempts reduces a step's recorded rows to the one attempt per gate
-// that ROUTES.
+// routingGateRows reduces a step's recorded rows to the rows that ROUTE: for
+// each gate, the last attempt of every command its latest execution ran, sorted
+// by gate name and then ordinal. A gate passes only when every one of its
+// routing rows passes.
 //
-// Ordinals carry flaky re-runs (§5.6 F3): every attempt is its own row, and F4
-// makes the LAST attempt's verdict the one that routes. So the decision is made
-// per (gate, ordinal-max), never over every row — otherwise a gate that failed
-// twice and passed on the third try would route as a failure, which is exactly
-// what declaring it flaky was meant to prevent. Pre-gate rows are excluded per
-// PG4: they are inputs to the step, not judgments of it.
+// One gate can record several commands: a fence gate records each harvested
+// line as its own row under the gate's name (§7.3 step 4), so an earlier line
+// that failed or never ran is not superseded by a later line that passed.
+// Ordinals also carry flaky re-runs (§5.6 F3), and F4 makes a command's LAST
+// attempt the one that routes. exec.RunVerifiedAttempts retries only after a
+// `fail` and records the retry directly after it with the same argv, so a row
+// is superseded exactly when it is a `fail` and the next row runs the same
+// non-nil argv. A row with no argv never ran a process and is never superseded.
+// Two adjacent fence lines with the identical command are therefore read as one
+// command retried.
 //
-// It is shared by the routing verdict and by FailedGates so the gates a caller
-// REPORTS are, by construction, the rows the saga ROUTED on. Two reductions
-// over the same table is how a report comes to contradict the routing beside
-// it — which is the class of defect DKT-982 is.
-func lastGateAttempts(rows []db.GateResultRow) map[string]db.GateResultRow {
-	last := make(map[string]db.GateResultRow)
+// `step resolve --as rerun-gates` runs a gate again on the same step and its
+// rows continue the ordinals, so only the latest execution routes. Every row of
+// one execution is written by recordGateRows with the same CreatedAtMS, which
+// identifies the execution holding the gate's highest ordinal. Two executions
+// recorded in the same millisecond read as one, which can only fail the gate.
+//
+// Pre-gate rows are excluded per PG4: they are inputs to the step, not
+// judgments of it. The routing verdict, FailedGates, and the batch override
+// cover all read this one reduction, so the gates a caller REPORTS or COVERS
+// are, by construction, the rows the saga ROUTED on (DKT-982).
+func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
+	byGate := make(map[string][]db.GateResultRow)
 	for _, r := range rows {
 		if r.Pre {
 			continue // PG4
 		}
-		prev, seen := last[r.Gate]
-		if !seen || r.Ordinal >= prev.Ordinal {
-			last[r.Gate] = r
+		byGate[r.Gate] = append(byGate[r.Gate], r)
+	}
+
+	var routing []db.GateResultRow
+	for _, gateRows := range byGate {
+		slices.SortStableFunc(gateRows, func(a, b db.GateResultRow) int {
+			return a.Ordinal - b.Ordinal
+		})
+		latest := gateRows[len(gateRows)-1].CreatedAtMS
+		var execution []db.GateResultRow
+		for _, r := range gateRows {
+			if r.CreatedAtMS == latest {
+				execution = append(execution, r)
+			}
+		}
+		for i, r := range execution {
+			retried := i+1 < len(execution) &&
+				r.Verdict == db.GateVerdictFail && r.Argv != nil &&
+				execution[i+1].Argv != nil && slices.Equal(r.Argv, execution[i+1].Argv)
+			if !retried {
+				routing = append(routing, r)
+			}
 		}
 	}
-	return last
+	// Sorted so the reason a step parks with is the same sentence on every run
+	// over the same rows — map range order is not.
+	slices.SortFunc(routing, func(a, b db.GateResultRow) int {
+		if c := strings.Compare(a.Gate, b.Gate); c != 0 {
+			return c
+		}
+		return a.Ordinal - b.Ordinal
+	})
+	return routing
 }
 
 // FailedGate is one completion gate whose routing attempt did not pass, in the
@@ -1849,23 +1883,22 @@ func FailedGates(conn *sql.DB, stepID int) ([]FailedGate, error) {
 // failedGatesOverRows is FailedGates over rows already read — pure, so a test
 // can weigh the reduction without a store.
 func failedGatesOverRows(rows []db.GateResultRow) []FailedGate {
-	last := lastGateAttempts(rows)
-
-	failed := make([]FailedGate, 0, len(last))
-	for _, r := range last {
+	failed := []FailedGate{}
+	for _, r := range routingGateRows(rows) {
 		// Not-pass, in the same sense verdictOverRows uses: `fail`, `unmatched`,
 		// and `skipped` all route as a failure, and a report that named only the
 		// first would be silent about the two the routing acted on.
 		if r.Verdict == db.GateVerdictPass {
 			continue
 		}
+		// One entry per gate: its first command that did not pass.
+		if n := len(failed); n > 0 && failed[n-1].Gate == r.Gate {
+			continue
+		}
 		failed = append(failed, FailedGate{
 			Gate: r.Gate, Verdict: r.Verdict, Exit: r.Exit, Reason: r.Reason,
 		})
 	}
-	// Sorted for verdictOverRows' reason: the sentence a step parks with must be
-	// the same on every run over the same rows, and map range order is not.
-	sort.Slice(failed, func(i, j int) bool { return failed[i].Gate < failed[j].Gate })
 	return failed
 }
 
