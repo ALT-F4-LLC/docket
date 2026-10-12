@@ -1,6 +1,6 @@
 # TDD: gates, the execution trust model, and the exec runner (stage 4)
 
-Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25; §7.6.2 PG6 detached pre-gate run added — 2026-10-08; §7.6.2 PG6 readiness hold while a detached run is in flight — 2026-10-09; §2.1 residual 1, §3.1, and §3.5 amended for content-pinned absolute `argv[0]` entries — 2026-10-09; §2.1 residual 1, §3.1, T4, and §7.2 M1 amended for the pin-bound spawn per DKT-3802 — 2026-10-12
+Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25; §7.6.2 PG6 detached pre-gate run added — 2026-10-08; §7.6.2 PG6 readiness hold while a detached run is in flight — 2026-10-09; §2.1 residual 1, §3.1, and §3.5 amended for content-pinned absolute `argv[0]` entries — 2026-10-09; §2.1 residual 1, §3.1, T4, and §7.2 M1 amended for the pin-bound spawn per DKT-3802 — 2026-10-12; §2.1 residual 1 and §3.1 amended for content-pinned declared files and their make-shadowing residual — 2026-10-12
 (docs/tdd/gates-trust-review.md, verdict SOUND WITH FIXES — F1–F5 folded in; see
 that file's response table for the per-finding
 mapping) · implements docs/design/engine-spec.md **§4 (whole)**
@@ -201,8 +201,9 @@ residuals are accepted, and each is accepted for a stated reason:
    change that races the spawn is bounded only as far as the spawn mechanism
    below binds it. The **re-pin path** is re-running `docket trust add` for the
    same name, which replaces the stored hash with the current file's (§3.5).
-   The pin covers the resolved `argv[0]` executable **only**: files it sources
-   or reads, Makefile targets, libraries, and every other input stay this
+   The `argv0_sha256` pin covers the resolved `argv[0]` executable **only**:
+   files it sources or reads that the entry does not declare (the declared-files
+   exception below), libraries, and every other undeclared input stay this
    residual. An entry whose `argv[0]` is absolute but that carries no
    `argv0_sha256` — one written before this amendment — still matches, with a
    warning naming the entry and the re-pin command.
@@ -251,6 +252,23 @@ residuals are accepted, and each is accepted for a stated reason:
    longer resolves to the path it will spawn (`pinStillBindsSpawn`,
    `internal/engine/gate_exec.go`), and its hash and its spawn still act on
    separate resolutions.
+
+   **Exception: declared files** *(amended 2026-10-12, DKT-3663)*. A
+   repo-bound entry may list repo-relative files its command reads, such as a
+   `Makefile` and the scripts its targets run, in `declared_files` (§3.1).
+   `trust add` hashes each declared file under an explicit absolute root and
+   stores the hashes; the declared-file check re-hashes them under the root the
+   gate runs in and reports `verdict = "unmatched"` on any drift. For those
+   files this is prevention, not disclosure: a repo that redefines the `test`
+   target in a declared `Makefile` gets no execution. The spawn-time re-check
+   is enforced by DKT-3808. What remains of this residual for an entry that
+   declares a build file is every input it does **not** declare, and the sharp
+   case is **shadowing**: GNU make reads `GNUmakefile`, then `makefile`, then
+   `Makefile`, and follows `include` directives, so an entry that declares
+   `Makefile` alone still runs a repo-added undeclared `GNUmakefile` or
+   `makefile` in its place, or an undeclared included makefile beside it. The
+   pin binds the bytes of the paths the operator named, not the set of files
+   the tool decides to read.
 2. **Self-trust by a misbehaving session** (T9, upstream D14). Accepted by the
    design record; bounded as T9 lists. The one thing this stage adds beyond D14
    is **auditability**: a `trust-added` event (§3.6) means the run's own trail
@@ -353,8 +371,49 @@ unbound:
 
 **Re-pin** is `docket trust add` for the same name, argv, and flags: it
 replaces the stored `argv0_sha256` with the current file's hash (§3.5). The
-pin covers the resolved `argv[0]` executable only, never files it sources or
-reads; those remain §2.1 residual 1.
+`argv0_sha256` pin covers the resolved `argv[0]` executable only. Files it
+sources or reads are pinned only by `declared_files` (below); undeclared, those
+remain §2.1 residual 1.
+
+**`declared_files` content-pins the files a command reads** *(amended
+2026-10-12, DKT-3663; amends §2.1 residual 1)*. An entry may list
+repo-relative paths, each stored with the hex-encoded SHA-256 of its bytes:
+
+```toml
+declared_files = [
+  { path = "Makefile",           sha256 = "7d0a…" },
+  { path = "scripts/qa/lint.sh", sha256 = "c31f…" },
+]
+```
+
+`trust add` takes the paths together with an **explicit absolute root**
+(`AddRequest.DeclaredRoot`, separate from the repo binding because the
+binding identity and the checkout a gate reads need not be the same
+directory), symlink-resolves the root and each file, refuses a file that
+resolves outside the root, and stores each file's hash
+(internal/trust/hash.go:72). Each path must be clean, relative, inside the
+root, and listed once; a **global** entry cannot declare files, at add or at
+parse, because with no repository bound any repo holding the same bytes would
+satisfy the pin (internal/trust/parse.go:118). The declared-file check,
+`Store.LookupAt`, takes the root the gate will run in and re-hashes every
+declared file under it after the argv rules and the `argv0_sha256` pin pass
+(internal/trust/match.go:79):
+
+| Declared file under the given root | Outcome |
+|---|---|
+| every hash equal | matches; executes |
+| any hash different | **refused**: `verdict = "unmatched"`, no spawn, `reason` naming the gate, the path, the root, both hashes, and the re-pin command |
+| missing, unreadable, or resolving outside the root | **refused**: `verdict = "unmatched"`, `reason` naming the path and the error |
+
+`Store.Lookup`, which has no root, refuses every entry that declares files
+(internal/trust/match.go:64), so such an entry never matches unverified.
+Running this check at spawn time, against the checkout the gate actually
+reads, is the enforcement DKT-3808 wires. Re-pin is `docket trust add` with the
+same name, argv, flags, and declared paths; a changed path list, order
+included, is a conflict rather than a re-pin, because a dropped path would
+silently unpin a file the gate still reads (internal/trust/add.go:449).
+Inputs the entry does not declare, including a make shadow file such as
+`GNUmakefile`, remain §2.1 residual 1.
 
 ### 3.7 `network` — declaring what a gate must reach *(amended 2026-08-07, DKT-31)*
 
@@ -991,7 +1050,8 @@ that matters, and it fails **closed**, with a reason that tells the operator the
 exact remedy: name the absolute path in the trust entry.
 
 **What this deliberately does not close.** A repo that supplies a *library*, a
-Makefile target, a compiler plugin, or any other input to a trusted binary still
+Makefile target the entry does not pin in `declared_files` (§3.1), a compiler
+plugin, or any other undeclared input to a trusted binary still
 influences what that binary does — that is §2.1 residual 1, and no resolution
 rule reaches it. R1–R5 close the narrower and sharper hole: the **executable
 itself** being repo content chosen by name.
