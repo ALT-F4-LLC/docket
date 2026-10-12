@@ -143,15 +143,17 @@ func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 // unconditional park did.
 //
 // THE HISTORY IS WRITTEN HERE because this is the only place that knows it.
-// The rounds against the cap, the instance whose verdict opened the loop, and
-// the verdict that round recorded are facts of the refusal, and a reader
-// downstream — a router reading the park, an operator, `step show` — could
-// otherwise reconstruct them only from the prunable event log. Written in the
-// SAME transaction as the routing decision, so no reader ever sees an
-// exhaustion whose history has not landed yet.
+// The rounds against the cap, the cap itself, the instance whose verdict
+// opened the loop, and the verdict that round recorded are facts of the
+// refusal, and a reader downstream — a router reading the park, an operator,
+// `step show` — could otherwise reconstruct them only from the prunable event
+// log. loopCap is the bound the refusal applied, after grants, the hard clamp,
+// or a cluster's own bound, which the declared `max_fix_loops` alone cannot
+// recover. Written in the SAME transaction as the routing decision, so no
+// reader ever sees an exhaustion whose history has not landed yet.
 func exhausted(
 	tx *sql.Tx, step *db.Step, def *workflow.Definition, trigger string,
-	ordinal, roundsRun int, reason string, nowMS int64,
+	ordinal, roundsRun, loopCap int, reason string, nowMS int64,
 ) (*LoopOutcome, error) {
 	routing := workflow.OnFailWaitingHuman
 	spec := workflow.StepByName(def, trigger)
@@ -162,8 +164,8 @@ func exhausted(
 	if err != nil {
 		return nil, err
 	}
-	if err := db.SetStepLoopHistoryTx(
-		tx, step.ID, roundsRun, step.Instance, verdict, nowMS,
+	if err := db.SetStepLoopHistoryWithCapTx(
+		tx, step.ID, roundsRun, loopCap, step.Instance, verdict, nowMS,
 	); err != nil {
 		return nil, err
 	}
@@ -683,7 +685,7 @@ func enterLoop(
 			"loop %d would exceed %s = %d on %s; "+
 				"`docket step resolve --as fix-round` authorizes one more round",
 			count, bound, max, model.FormatID(step.IssueID))
-		return exhausted(tx, step, def, trigger, count-1, count-1, reason, nowMS)
+		return exhausted(tx, step, def, trigger, count-1, count-1, max, reason, nowMS)
 	}
 
 	// THE CLUSTER'S OWN BOUND (§11.3 cluster scoping, DKT-544). A
@@ -713,7 +715,7 @@ func enterLoop(
 				"loop round %d for %q would exceed its cluster's max_fix_loops = %d "+
 					"on %s; `docket step resolve --as fix-round` authorizes one more round",
 				rounds+1, trigger, clusterMax, model.FormatID(step.IssueID))
-			return exhausted(tx, step, def, trigger, count-1, rounds, reason, nowMS)
+			return exhausted(tx, step, def, trigger, count-1, rounds, clusterMax, reason, nowMS)
 		}
 	}
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -169,6 +170,110 @@ func TestFixLoopExhaustionRouting(t *testing.T) {
 		}
 		assertReady(t, conn, runID, "drain@1")
 	})
+}
+
+// TestFixLoopExhaustionRecordsTheAppliedBound: a refused entry stores the
+// bound that refused it beside the rest of the loop history, on each of the
+// three refusal paths, and an admitted entry stores none. Every fixture's
+// applied bound differs from the trigger's declared `max_fix_loops`, so a
+// write of the declared value cannot pass.
+func TestFixLoopExhaustionRecordsTheAppliedBound(t *testing.T) {
+	t.Run("max_fix_loops plus a grant", func(t *testing.T) {
+		conn := exhaustAfterRounds(t, "max_fix_loops = 2\n", 1, 3)
+
+		if got := loopCapOf(t, conn, "check@3"); got != 3 {
+			t.Errorf("check@3 loop_cap = %d, want the applied bound 3 "+
+				"(max_fix_loops 2 + 1 grant)", got)
+		}
+		// check@0's entry was admitted at round one under max_fix_loops = 2.
+		if got := loopCapOf(t, conn, "check@0"); got != 0 {
+			t.Errorf("check@0 loop_cap = %d after an admitted entry, want 0", got)
+		}
+	})
+
+	t.Run("the max_fix_loops_hard clamp", func(t *testing.T) {
+		conn := exhaustAfterRounds(t, "max_fix_loops = 2\nmax_fix_loops_hard = 4\n", 3, 4)
+
+		if got := loopCapOf(t, conn, "check@4"); got != 4 {
+			t.Errorf("check@4 loop_cap = %d, want the hard clamp 4 "+
+				"(max_fix_loops 2 + 3 grants clamped to max_fix_loops_hard 4)", got)
+		}
+	})
+
+	t.Run("a cluster's max_fix_loops", func(t *testing.T) {
+		conn := mustDB(t)
+		activateInterposed(t, conn,
+			strings.Replace(clusterSrc, "max_fix_loops = 2\n", "max_fix_loops = 3\n", 1))
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "draft@0", "the draft", "")
+		claimAndComplete(t, conn, e, "prd-gate@0", roundReport(0), blockedPayload)
+		driveFixtureRound(t, 1)
+		claimAndComplete(t, conn, e, "prd-fix@1", "the fixed draft", "")
+		claimAndComplete(t, conn, e, "prd-gate@1", roundReport(1), blockedPayload)
+
+		if got := stepStatus(t, conn, "prd-gate@1"); got != db.StepWaitingHuman {
+			t.Fatalf("premise: prd-gate@1 = %q, want the cluster-bound park %q",
+				got, db.StepWaitingHuman)
+		}
+		if got := loopCapOf(t, conn, "prd-gate@1"); got != 1 {
+			t.Errorf("prd-gate@1 loop_cap = %d, want the cluster's bound 1 "+
+				"(under the step's max_fix_loops 3)", got)
+		}
+	})
+}
+
+// exhaustAfterRounds activates exhaustionSrc with bounds in place of its
+// `max_fix_loops = 1`, records grants loop grants for the issue, and runs
+// rounds admitted rounds; check@rounds then routes the refused entry.
+func exhaustAfterRounds(t *testing.T, bounds string, grants, rounds int) *sql.DB {
+	t.Helper()
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSchemaFixture(t, conn, "round-verdict", 1, roundVerdictSchema)
+	src := strings.Replace(exhaustionSrc, "TARGET", workflow.OnFailWaitingHuman, 1)
+	src = strings.Replace(src, "max_fix_loops = 1\n", bounds, 1)
+	runID, issueID := activateInterposed(t, conn, src)
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "opening the grant transaction: %v", err)
+	for range grants {
+		_, err := db.GrantLoopTx(tx, runID, issueID)
+		testsupport.Must(t, err, "granting a loop: %v", err)
+	}
+	testsupport.Must(t, tx.Commit(), "committing the grants")
+
+	e := testEngine()
+	for k := range rounds {
+		claimAndComplete(t, conn, e, fmt.Sprintf("check@%d", k), roundReport(k), unmetPayload)
+		next := fmt.Sprintf("fix@%d", k+1)
+		if !stepExists(t, conn, next) {
+			t.Fatalf("premise: %s was not instantiated; round %d is inside the bound", next, k+1)
+		}
+		driveFixtureRound(t, k+1)
+		claimAndComplete(t, conn, e, next, "the fix", "")
+	}
+	last := fmt.Sprintf("check@%d", rounds)
+	claimAndComplete(t, conn, e, last, roundReport(rounds), unmetPayload)
+	if stepExists(t, conn, fmt.Sprintf("fix@%d", rounds+1)) {
+		t.Fatalf("premise: fix@%d exists; %s's entry must be refused", rounds+1, last)
+	}
+	if got := stepStatus(t, conn, last); got != db.StepWaitingHuman {
+		t.Fatalf("premise: %s = %q, want the loop-bound park %q",
+			last, got, db.StepWaitingHuman)
+	}
+	return conn
+}
+
+// loopCapOf reads the bound stored on instance's row. db.Step does not carry
+// the column, so the test reads it where the loop history writes it.
+func loopCapOf(t *testing.T, conn *sql.DB, instance string) int {
+	t.Helper()
+	var loopCap int
+	err := conn.QueryRow(`SELECT loop_cap FROM steps WHERE id = ?`,
+		mustStep(t, conn, instance).ID).Scan(&loopCap)
+	testsupport.Must(t, err, "reading %s's loop_cap: %v", instance, err)
+	return loopCap
 }
 
 // exhaust runs one issue's loop until `max_fix_loops = 1` refuses the second
