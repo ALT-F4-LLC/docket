@@ -74,6 +74,13 @@ type ReadySteps struct {
 	// resolve themselves as the run progresses and would turn every ordinary
 	// empty offer into a false alarm.
 	UnroutedReason string
+	// Limits is the effective max the scheduler enforces for each class the
+	// offer's Steps carry, and LimitSources names what set each one:
+	// "workflow", "override", or "auto" (ClassCapSource). A class with no
+	// positive max is unbounded and absent from both, the rule Manifest.Limits
+	// follows.
+	Limits       map[string]int
+	LimitSources map[string]string
 }
 
 // NextSteps computes a run's ready steps, reaping expired leases on the way.
@@ -324,13 +331,36 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// with nothing running is otherwise baffling. The rows come from the same
 	// snapshot the predicate counted, so the message cannot name a different set
 	// of reaps from the one that caused the denial.
+	//
+	// The caps come from snap, the snapshot the returned rows were rendered
+	// from, so they describe the classes this offer actually carries.
+	limits, limitSources := offeredClassCaps(snap.ClassCaps(), rows)
 	return &ReadySteps{
 		Steps: rows, Total: total, Reaped: reaped,
 		HeldReason:       ReapHoldReason(sched.UnacknowledgedReaps()),
 		LoopHeldReason:   loopHeld,
 		BudgetHeldReason: budgetHeld,
 		UnroutedReason:   unroutedHeld,
+		Limits:           limits,
+		LimitSources:     limitSources,
 	}, nil
+}
+
+// offeredClassCaps narrows the scheduler's class caps to the classes the
+// offered rows carry, split into ReadySteps' cap and source maps. ClassCaps
+// already omits unbounded classes.
+func offeredClassCaps(caps map[string]ClassCap, rows []model.StepRow) (map[string]int, map[string]string) {
+	limits := make(map[string]int)
+	sources := make(map[string]string)
+	for _, row := range rows {
+		c, ok := caps[row.Class]
+		if !ok {
+			continue
+		}
+		limits[row.Class] = c.Max
+		sources[row.Class] = string(c.Source)
+	}
+	return limits, sources
 }
 
 // driveActionSteps runs every ready action step engine-side, and reports

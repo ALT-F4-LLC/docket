@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"maps"
+	"runtime"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -335,4 +337,98 @@ func TestStepRowCarriesLoopHistory(t *testing.T) {
 				fresh.LoopRoundsRun, fresh.LoopTriggerStep, fresh.LoopLatestVerdict)
 		}
 	})
+}
+
+// TestNextCarriesEachOfferedClassCapAndSource: `next` reports the cap the
+// scheduler enforces for every class its offer carries, with what set it: a
+// numeric override, auto at the integer it resolves to, and the pinned
+// workflow max. An offered class nothing bounds is absent from both maps, and
+// so is a bounded class the offer does not carry.
+func TestNextCarriesEachOfferedClassCapAndSource(t *testing.T) {
+	const src = `
+[pipeline]
+name = "four-classes"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+judge = { max = 3 }
+read = { max = 5 }
+idle = { max = 7 }
+
+[[step]]
+name = "w"
+executor = "x"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "j"
+executor = "x"
+class = "judge"
+emits = "out"
+after = []
+
+[[step]]
+name = "r"
+executor = "x"
+class = "read"
+emits = "out"
+after = []
+
+[[step]]
+name = "f"
+executor = "x"
+class = "free"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(src), "four-classes.toml")
+	run := startRun(t, conn, createIssue(t, conn, "four", "body", "task", nil))
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", "4")
+	testsupport.Must(t, err, "setting the numeric override: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"read", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	answer, err := testEngine().NextSteps(conn, run.ID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+	offered := map[string]bool{}
+	for _, row := range answer.Steps {
+		offered[row.Class] = true
+	}
+	for _, class := range []string{"write", "judge", "read", "free"} {
+		if !offered[class] {
+			t.Fatalf("premise: the offer carries no %s row: %v", class, rowInstances(answer.Steps))
+		}
+	}
+
+	wantLimits := map[string]int{
+		"write": 4,
+		"read":  max(1, runtime.NumCPU()/2),
+		"judge": 3,
+	}
+	wantSources := map[string]string{
+		"write": "override",
+		"read":  "auto",
+		"judge": "workflow",
+	}
+	if !maps.Equal(answer.Limits, wantLimits) {
+		t.Errorf("Limits = %v, want %v", answer.Limits, wantLimits)
+	}
+	if !maps.Equal(answer.LimitSources, wantSources) {
+		t.Errorf("LimitSources = %v, want %v", answer.LimitSources, wantSources)
+	}
+	if n, ok := answer.Limits["free"]; ok {
+		t.Errorf("Limits lists unbounded class free as %d, want no entry", n)
+	}
+	if s, ok := answer.LimitSources["free"]; ok {
+		t.Errorf("LimitSources lists unbounded class free as %q, want no entry", s)
+	}
 }
