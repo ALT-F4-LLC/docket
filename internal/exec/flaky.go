@@ -59,6 +59,17 @@ func RunAttempts(spec Spec, flaky bool, isPass func(Result) bool) ([]Attempt, er
 // recorded outcome rather than the returned error, because the earlier
 // attempts are evidence the caller still has to record.
 func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify func() error) ([]Attempt, *Refusal, error) {
+	return RunSpawnedAttempts(spec, flaky, isPass, verify, Run)
+}
+
+// RunSpawnedAttempts is RunVerifiedAttempts with the process start supplied by
+// the caller: every attempt, the first included, calls spawn(spec) after
+// verify instead of Run. It is how a caller keeps the flaky and refusal rules
+// while choosing how a process starts, for example through RunPinned. The
+// loop never falls back to Run, so a caller's spawn is the only way a process
+// starts here. A spawn error ends the sequence unretried and is returned
+// unchanged, so the declined ordinal is len(attempts).
+func RunSpawnedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify func() error, spawn func(Spec) (Result, error)) ([]Attempt, *Refusal, error) {
 	maxAttempts := 1
 	if flaky {
 		maxAttempts = MaxFlakyAttempts
@@ -71,7 +82,7 @@ func RunVerifiedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify
 				return attempts, &Refusal{Ordinal: i, Err: err}, nil
 			}
 		}
-		res, err := Run(spec)
+		res, err := spawn(spec)
 		if err != nil {
 			// A refusal or a spawn failure is not a flaky failure and is not
 			// retried: re-running something that could not start would produce
