@@ -470,13 +470,16 @@ func TestReworkPacketTakesTheLastAttemptPerGate(t *testing.T) {
 	id := stepIDByInstance(t, conn, "implement@0")
 
 	exitZero, exitOne := 0, 1
+	// A retry re-runs the same argv; a row without one never ran a process and
+	// is not an attempt the routing reduction can supersede.
+	argv := []string{"go", "test", "./..."}
 	rows := []db.GateResultRow{
 		{RunID: run.ID, StepID: id, Gate: "flaky", Ordinal: 0, Exit: &exitOne,
-			Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
+			Argv: argv, Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
 		{RunID: run.ID, StepID: id, Gate: "flaky", Ordinal: 1, Exit: &exitOne,
-			Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
+			Argv: argv, Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
 		{RunID: run.ID, StepID: id, Gate: "flaky", Ordinal: 2, Exit: &exitZero,
-			Verdict: db.GateVerdictPass, CreatedAtMS: nowMS},
+			Argv: argv, Verdict: db.GateVerdictPass, CreatedAtMS: nowMS},
 	}
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)

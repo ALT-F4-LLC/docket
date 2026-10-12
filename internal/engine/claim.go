@@ -986,8 +986,9 @@ func reMintOwnClaim(
 }
 
 // recordedPreGates replays the pre-gate results a claim already recorded, LAST
-// attempt per gate — the same rule attachGateOutcomes applies to the saga's
-// gates, for the same reason: a gate re-run after a resume did not fail twice.
+// attempt per gate: a gate re-run after a resume did not fail twice. This rule
+// is for pre-gates only; attachGateOutcomes reports the saga's gates through
+// the routing reduction (routingGateRows) instead.
 //
 // A ROW KEYED TO ANOTHER TARGET IS NOT THIS CLAIM'S (gates-trust §7.6.2 PG6).
 // A detached run stamps the sha it measured on its rows; one that finished

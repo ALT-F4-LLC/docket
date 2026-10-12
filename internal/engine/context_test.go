@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -681,4 +682,160 @@ func containsAny(haystack string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+// gateOutcomesOver records rows on a step inside a rolled-back transaction and
+// returns the rework packet's gate list for them, so each case reads only its
+// own rows.
+func gateOutcomesOver(t *testing.T, conn *sql.DB, runID, stepID int, rows []db.GateResultRow) []ContextGateOutcome {
+	t.Helper()
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	for _, r := range rows {
+		r.RunID, r.StepID = runID, stepID
+		testsupport.Must(t, db.InsertGateResultTx(tx, r), "InsertGateResultTx: %v", err)
+	}
+	step, err := db.GetStepTx(tx, stepID)
+	testsupport.Must(t, err, "GetStepTx: %v", err)
+	res := &ContextResolution{Routing: "fix-loop"}
+	testsupport.Must(t, attachGateOutcomes(tx, step, res), "attachGateOutcomes: %v", err)
+	return res.Gates
+}
+
+// outcomesOfFailedGates is the (Gate, Verdict, Reason) projection of the gates
+// the routing report names for the same rows.
+func outcomesOfFailedGates(rows []db.GateResultRow) []ContextGateOutcome {
+	var out []ContextGateOutcome
+	for _, g := range failedGatesOverRows(rows) {
+		out = append(out, ContextGateOutcome{Gate: g.Gate, Verdict: g.Verdict, Reason: g.Reason})
+	}
+	return out
+}
+
+// TestAttachGateOutcomesMatchesRoutingOnFenceEarlierLine: a fence gate whose
+// earlier line did not pass routes fail even when its last line passed, so the
+// rework packet must name it with the row the routing report names.
+func TestAttachGateOutcomesMatchesRoutingOnFenceEarlierLine(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	id := stepIDByInstance(t, conn, "implement@0")
+
+	for _, first := range []db.GateResultRow{
+		lineRow(0, db.GateVerdictUnmatched),
+		lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
+	} {
+		t.Run(first.Verdict, func(t *testing.T) {
+			first.CreatedAtMS = nowMS
+			last := lineRow(1, db.GateVerdictPass, "go", "vet", "./...")
+			last.CreatedAtMS = nowMS
+			rows := []db.GateResultRow{first, last}
+
+			got := gateOutcomesOver(t, conn, run.ID, id, rows)
+
+			want := []ContextGateOutcome{{Gate: "checks", Verdict: first.Verdict, Reason: first.Reason}}
+			if !slices.Equal(got, want) {
+				t.Fatalf("gates = %+v, want %+v: the step routed fail on the earlier "+
+					"line, so the packet must say why", got, want)
+			}
+			if routed := outcomesOfFailedGates(rows); !slices.Equal(got, routed) {
+				t.Errorf("gates = %+v, FailedGates = %+v: the packet and the routing "+
+					"report disagree about the same rows", got, routed)
+			}
+		})
+	}
+}
+
+// TestAttachGateOutcomesParityWithFailedGates holds the rework packet to the
+// routing reduction: for the same rows it names the same gates, in ascending
+// name, each with the row FailedGates names.
+func TestAttachGateOutcomesParityWithFailedGates(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	id := stepIDByInstance(t, conn, "implement@0")
+
+	at := func(r db.GateResultRow, gate string, createdAt int64) db.GateResultRow {
+		r.Gate, r.CreatedAtMS = gate, createdAt
+		return r
+	}
+	cases := []struct {
+		name string
+		rows []db.GateResultRow
+		want []ContextGateOutcome
+	}{
+		{
+			name: "fence gate with a failed earlier line and a passing last line",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "go", "test", "./..."), "checks", nowMS),
+				at(lineRow(1, db.GateVerdictPass, "go", "vet", "./..."), "checks", nowMS),
+			},
+			want: []ContextGateOutcome{{Gate: "checks", Verdict: db.GateVerdictFail}},
+		},
+		{
+			name: "fence gate names its first non-pass line",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictPass, "go", "build", "./..."), "checks", nowMS),
+				at(lineRow(1, db.GateVerdictUnmatched), "checks", nowMS),
+				at(lineRow(2, db.GateVerdictFail, "go", "test", "./..."), "checks", nowMS),
+			},
+			want: []ContextGateOutcome{{Gate: "checks", Verdict: db.GateVerdictUnmatched,
+				Reason: "no trust entry matched"}},
+		},
+		{
+			name: "flaky command retried to a pass is omitted",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "go", "test", "./..."), "tests", nowMS),
+				at(lineRow(1, db.GateVerdictPass, "go", "test", "./..."), "tests", nowMS),
+			},
+		},
+		{
+			name: "rerun-gates second execution that passes is omitted",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "go", "test", "./..."), "tests", nowMS),
+				at(lineRow(1, db.GateVerdictPass, "go", "test", "./..."), "tests", nowMS+1),
+			},
+		},
+		{
+			name: "rerun-gates second execution that fails is named",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictPass, "go", "test", "./..."), "tests", nowMS),
+				at(lineRow(1, db.GateVerdictFail, "go", "test", "./..."), "tests", nowMS+1),
+			},
+			want: []ContextGateOutcome{{Gate: "tests", Verdict: db.GateVerdictFail}},
+		},
+		{
+			name: "pre-gate rows are excluded",
+			rows: []db.GateResultRow{
+				{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped, Pre: true,
+					Reason: "the tree under review could not be bound", CreatedAtMS: nowMS},
+				at(lineRow(0, db.GateVerdictPass, "go", "build", "./..."), "build", nowMS),
+			},
+		},
+		{
+			name: "gates are listed in ascending name",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "golangci-lint", "run"), "zeta", nowMS),
+				{Gate: "beta", Ordinal: 0, Verdict: db.GateVerdictSkipped,
+					Reason: "the tree was gone at spawn time", CreatedAtMS: nowMS},
+				at(lineRow(0, db.GateVerdictUnmatched), "alpha", nowMS),
+			},
+			want: []ContextGateOutcome{
+				{Gate: "alpha", Verdict: db.GateVerdictUnmatched, Reason: "no trust entry matched"},
+				{Gate: "beta", Verdict: db.GateVerdictSkipped, Reason: "the tree was gone at spawn time"},
+				{Gate: "zeta", Verdict: db.GateVerdictFail},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gateOutcomesOver(t, conn, run.ID, id, tc.rows)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("gates = %+v, want %+v", got, tc.want)
+			}
+			if routed := outcomesOfFailedGates(tc.rows); !slices.Equal(got, routed) {
+				t.Errorf("gates = %+v, FailedGates = %+v: the packet and the routing "+
+					"report disagree about the same rows", got, routed)
+			}
+		})
+	}
 }

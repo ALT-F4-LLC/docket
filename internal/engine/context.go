@@ -172,9 +172,12 @@ type ContextResolution struct {
 
 // ContextGateOutcome is one non-passing gate as the rework packet carries it.
 //
-// It is the LAST attempt per gate, matching the routing rule (§5.6 F4): a gate
-// that failed twice and passed on the third try did not fail, and a packet that
-// listed all three would invite a reader to conclude otherwise.
+// It is the first non-pass row per gate from the routing reduction
+// (routingGateRows, as failedGatesOverRows reads it), sorted by gate name, so
+// the packet names exactly the gates the step routed on: a command retried to
+// a pass (§5.6 F4) or a gate whose latest rerun-gates execution passed is
+// omitted, and a fence gate whose earlier line failed is named even when its
+// last line passed.
 type ContextGateOutcome struct {
 	Gate string `json:"gate"`
 	// Verdict is `fail`, `unmatched`, or `skipped` — never `pass`, since a
@@ -686,30 +689,13 @@ func attachGateOutcomes(tx *sql.Tx, step *db.Step, res *ContextResolution) error
 		return err
 	}
 
-	// LAST attempt per gate, matching F4's routing rule: a gate that failed
-	// twice and passed on the third try did not fail.
-	last := make(map[string]db.GateResultRow)
-	order := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if r.Pre {
-			continue // PG4: a pre-gate is an input, not a judgment of the step.
-		}
-		prev, seen := last[r.Gate]
-		if !seen {
-			order = append(order, r.Gate)
-		}
-		if !seen || r.Ordinal >= prev.Ordinal {
-			last[r.Gate] = r
-		}
-	}
-
-	for _, gate := range order {
-		r := last[gate]
-		if r.Verdict == db.GateVerdictPass {
-			continue
-		}
+	// The gates the step ROUTED on, from the reduction the routing verdict
+	// reads (routingGateRows via failedGatesOverRows): the first non-pass row
+	// per gate, so a fence gate whose earlier line failed is named even when
+	// its last line passed.
+	for _, g := range failedGatesOverRows(rows) {
 		res.Gates = append(res.Gates, ContextGateOutcome{
-			Gate: r.Gate, Verdict: r.Verdict, Reason: r.Reason,
+			Gate: g.Gate, Verdict: g.Verdict, Reason: g.Reason,
 		})
 	}
 	return nil
