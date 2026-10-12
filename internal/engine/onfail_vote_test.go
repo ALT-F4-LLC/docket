@@ -363,6 +363,7 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 					t.Errorf("issue status = %q after the panel abandoned it — an "+
 						"abandoned issue is not a completed one", got)
 				}
+				assertTriageAbandonedOnce(t, conn, step)
 			}
 		})
 	}
@@ -493,8 +494,65 @@ func TestTriageUnmappedVerdict(t *testing.T) {
 					t.Errorf("issue status = %q after the panel's on_fail abandoned "+
 						"it — an abandoned issue is not a completed one", got)
 				}
+				assertTriageAbandonedOnce(t, conn, step)
 			}
 		})
+	}
+}
+
+// assertTriageAbandonedOnce: a panel's abandonment is ONE ruling about the
+// issue, recorded under the step the panel triaged and carrying the panel's
+// note. A second ruling under the panel's own row is the one the
+// last-ruling-wins readers report, with no reason, in place of the first.
+func assertTriageAbandonedOnce(t *testing.T, conn *sql.DB, triaged *db.Step) {
+	t.Helper()
+	rows, err := conn.Query(
+		`SELECT step_id FROM events WHERE kind = ? AND issue_id = ? ORDER BY seq`,
+		EventIssueAbandoned, triaged.IssueID)
+	testsupport.Must(t, err, "reading issue-abandoned events: %v", err)
+	defer rows.Close()
+	var stepIDs []int
+	for rows.Next() {
+		var id int
+		testsupport.Must(t, rows.Scan(&id), "scanning an issue-abandoned event")
+		stepIDs = append(stepIDs, id)
+	}
+	testsupport.Must(t, rows.Err(), "iterating issue-abandoned events: %v", rows.Err())
+	if len(stepIDs) != 1 || stepIDs[0] != triaged.ID {
+		t.Errorf("issue-abandoned events by step id = %v, want exactly one, "+
+			"by %s (id %d)", stepIDs, triaged.Instance, triaged.ID)
+	}
+
+	abandonedComments := 0
+	for _, body := range engineCommentBodies(t, conn, triaged.IssueID) {
+		if strings.Contains(body, "abandoned the issue.") {
+			abandonedComments++
+		}
+	}
+	if abandonedComments != 1 {
+		t.Errorf("%d engine comments narrate the abandonment, want exactly 1",
+			abandonedComments)
+	}
+
+	disposition, err := LatestIssueDisposition(conn, triaged.IssueID)
+	testsupport.Must(t, err, "LatestIssueDisposition: %v", err)
+	if disposition == nil {
+		t.Fatal("LatestIssueDisposition = nil for an abandoned issue")
+	}
+	if disposition.By != triaged.Instance {
+		t.Errorf("disposition by = %q, want %q — the step the panel ruled on",
+			disposition.By, triaged.Instance)
+	}
+	if !strings.Contains(disposition.Reason, "triage@0") {
+		t.Errorf("disposition reason = %q, want the panel's ruling note",
+			disposition.Reason)
+	}
+
+	issue, err := db.GetIssue(conn, triaged.IssueID)
+	testsupport.Must(t, err, "GetIssue: %v", err)
+	if issue.Resolution != db.IssueResolutionAbandoned {
+		t.Errorf("issue resolution = %q, want %q",
+			issue.Resolution, db.IssueResolutionAbandoned)
 	}
 }
 

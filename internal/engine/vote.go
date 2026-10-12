@@ -790,16 +790,21 @@ func routeVoteStep(
 			return err
 		}
 	}
-	// A panel whose verdict abandoned the issue it triaged reconciles as that
-	// abandonment, not as its own `pass`. The abandonment cascade has already
-	// made every step terminal, so a `pass` reconcile would reach the
-	// completion check and force the abandoned issue `done`, which is what
-	// reconcileIssueAndRun's abandon branch returns early to prevent.
-	issueRouting := routing
+	// A panel whose verdict abandoned the issue it triaged rolls up the run
+	// and nothing else. applyTriageOutcome already reconciled the triaged step
+	// down the abandon branch: the cascade made every step terminal and the
+	// issue's one abandonment ruling is recorded under the triaged step. A
+	// `pass` reconcile here would reach the completion check and force the
+	// abandoned issue `done`; an `abandon-issue` reconcile would record a
+	// second ruling, under the panel, that the last-ruling-wins readers
+	// would report instead of the first.
 	if triaged != nil && triageApplied == workflow.OnFailAbandonIssue {
-		issueRouting = workflow.OnFailAbandonIssue
+		if err := reconcileRun(tx, step.RunID, nowMS); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
-	if err := reconcileIssueAndRun(tx, step, def, spec, issueRouting, nowMS); err != nil {
+	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
 		return err
 	}
 	return tx.Commit()

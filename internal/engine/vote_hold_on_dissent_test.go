@@ -396,6 +396,42 @@ func TestVoteHoldOnDissentUnkeyedIgnoresMalformedSealed(t *testing.T) {
 	assertDissentGatePassed(t, conn)
 }
 
+// TestPassingAbandonOnFailGateCompletesTheIssue: a gate's `on_fail` names
+// what a FAILED tally does. A gate that is no triage panel and passes on an
+// approving tally abandons nothing, so its issue completes like any other.
+func TestPassingAbandonOnFailGateCompletesTheIssue(t *testing.T) {
+	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
+		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
+	seed := mustStep(t, conn, "seed@0")
+	if seed.Status != db.StepDone {
+		t.Fatalf("premise: seed@0 = %q, want %q", seed.Status, db.StepDone)
+	}
+	testsupport.Must(t, e.DriveVoteProposal(conn, proposalID, nowMS),
+		"driving the tally")
+	assertDissentGatePassed(t, conn)
+
+	gate := dissentGateStep(t, conn)
+	issue, err := db.GetIssue(conn, gate.IssueID)
+	testsupport.Must(t, err, "GetIssue: %v", err)
+	if issue.Resolution == db.IssueResolutionAbandoned {
+		t.Errorf("issue resolution = %q after an approving tally, want none",
+			issue.Resolution)
+	}
+	var abandoned int
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE kind = ? AND issue_id = ?`,
+		EventIssueAbandoned, gate.IssueID).Scan(&abandoned),
+		"counting issue-abandoned events")
+	if abandoned != 0 {
+		t.Errorf("%d issue-abandoned events after an approving tally, want 0",
+			abandoned)
+	}
+	if issue.Status != model.StatusDone {
+		t.Errorf("issue status = %q with every step terminal, want %q",
+			issue.Status, model.StatusDone)
+	}
+}
+
 func assertDissentGatePassed(t *testing.T, conn *sql.DB) {
 	t.Helper()
 	gate := dissentGateStep(t, conn)
