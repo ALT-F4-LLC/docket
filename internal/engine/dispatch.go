@@ -56,6 +56,9 @@ type Manifest struct {
 	// count in the manifest, which a chain-deep manifest carrying few issues
 	// per stage under-certifies.
 	Limits map[string]int `json:"limits,omitempty"`
+	// LimitSources names what set each Limits entry, keyed by the same
+	// classes: "workflow", "override", or "auto" (ClassCapSource).
+	LimitSources map[string]string `json:"limit_sources,omitempty"`
 	// StaleTargets rides BESIDE the §11.4 shape for ExpiresMS's reason: a
 	// conductor about to spend review budget on these rows needs the staleness
 	// named (DKT-193). Never a row field — rows are hashed at open and
@@ -347,12 +350,14 @@ func (e *Engine) OpenDispatch(
 		return nil, fmt.Errorf("opening a dispatch: %w", err)
 	}
 
+	limits, limitSources := rowClassLimits(sched, rows)
 	return &Manifest{
 		Dispatch: FormatDispatchID(dispatchID), Run: model.FormatRunID(runID),
 		OpenedSeq: openedSeq, ExpiresMS: expiresMS, Rows: rows,
 		Total:        total,
 		Truncated:    len(rows) < total,
-		Limits:       rowClassLimits(sched, rows),
+		Limits:       limits,
+		LimitSources: limitSources,
 		StaleTargets: e.staleTargets(conn, runID, candidates),
 		BudgetHeld:   budgetHeld,
 		PinDrift:     pinDriftAdvisory(conn, runID),
@@ -711,24 +716,25 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 	return rows, total, steps, nil
 }
 
-// rowClassLimits is Manifest.Limits: the merged `[limits] max` for each class
-// the manifest's rows actually carry. A class with no declared max is omitted —
-// unbounded is what the absence of a `[limits]` entry means, and a zero would
-// read as "no concurrency at all".
-func rowClassLimits(sched *Scheduler, rows []model.StepRow) map[string]int {
-	out := make(map[string]int)
+// rowClassLimits is Manifest.Limits and Manifest.LimitSources: the scheduler's
+// effective cap and its source for each class the manifest's rows actually
+// carry, so both maps always name the same classes. A class with no positive
+// max is omitted — unbounded is what the absence of a `[limits]` entry means,
+// and a zero would read as "no concurrency at all".
+func rowClassLimits(sched *Scheduler, rows []model.StepRow) (map[string]int, map[string]string) {
+	caps := sched.ClassCaps()
+	limits := make(map[string]int)
+	sources := make(map[string]string)
 	for _, r := range rows {
-		if r.Class == "" {
-			continue
-		}
-		if max := sched.Limit(r.Class).Max; max > 0 {
-			out[r.Class] = max
+		if c, ok := caps[r.Class]; ok {
+			limits[r.Class] = c.Max
+			sources[r.Class] = string(c.Source)
 		}
 	}
-	if len(out) == 0 {
-		return nil
+	if len(limits) == 0 {
+		return nil, nil
 	}
-	return out
+	return limits, sources
 }
 
 // laneCompleteCut applies `--limit` by ISSUE rather than by row: it walks the

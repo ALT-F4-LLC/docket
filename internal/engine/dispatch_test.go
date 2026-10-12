@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -496,6 +498,93 @@ func dispatchIDOf(t *testing.T, ref string) int {
 // The property under test is that the limit takes the HIGHEST-PRIORITY rows, not
 // an arbitrary subset — so the test compares a limited manifest against the
 // prefix of the unlimited one rather than against a count.
+// TestManifestCarriesEachClassCapSource: the manifest reports every bounded
+// class's cap beside what set it, a numeric limits.max.<class> as "override",
+// `auto` as "auto", and an unoverridden pinned max as "workflow", so a relay
+// reads the budget the scheduler enforces. An unbounded class is in neither map.
+func TestManifestCarriesEachClassCapSource(t *testing.T) {
+	const src = `
+[pipeline]
+name = "three-cap-sources"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+judge = { max = 3 }
+read = { max = 5 }
+
+[[step]]
+name = "w"
+executor = "x"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "j"
+executor = "x"
+class = "judge"
+emits = "out"
+after = []
+
+[[step]]
+name = "r"
+executor = "x"
+class = "read"
+emits = "out"
+after = []
+
+[[step]]
+name = "f"
+executor = "x"
+class = "free"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(src), "three-cap-sources.toml")
+	run := startRun(t, conn, createIssue(t, conn, "caps", "body", "task", nil))
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", "4")
+	testsupport.Must(t, err, "setting the numeric override: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"read", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	m := openDispatch(t, conn, run.ID, 0, nowMS)
+
+	rowClasses := map[string]bool{}
+	for _, r := range m.Rows {
+		rowClasses[r.Class] = true
+	}
+	for _, class := range []string{"write", "judge", "read", "free"} {
+		if !rowClasses[class] {
+			t.Fatalf("manifest rows carry classes %v, want write, judge, read, "+
+				"and free", rowClasses)
+		}
+	}
+
+	wantLimits := map[string]int{
+		"write": 4,
+		"read":  max(1, runtime.NumCPU()/2),
+		"judge": 3,
+	}
+	wantSources := map[string]string{
+		"write": "override",
+		"read":  "auto",
+		"judge": "workflow",
+	}
+	if !maps.Equal(m.Limits, wantLimits) {
+		t.Errorf("manifest limits = %v, want %v", m.Limits, wantLimits)
+	}
+	if !maps.Equal(m.LimitSources, wantSources) {
+		t.Errorf("manifest limit_sources = %v, want %v", m.LimitSources, wantSources)
+	}
+}
+
 func TestManifestLimitSlicesAfterOrdering(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)
