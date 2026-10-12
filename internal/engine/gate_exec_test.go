@@ -547,8 +547,15 @@ func fencePinGate(script string) GateSpec {
 // on it, then releases the lock and returns what the gate recorded.
 func runTreeGateAcrossHeldLock(t *testing.T, repoRoot string, entry trust.Entry, spec GateSpec, during func()) GateExecution {
 	t.Helper()
+	return runTreeGateAcrossHeldLockAt(t, testRepoPaths(repoRoot), entry, spec, during)
+}
+
+// runTreeGateAcrossHeldLockAt is runTreeGateAcrossHeldLock for paths whose
+// trust identity differs from the shared checkout the gate spawns in.
+func runTreeGateAcrossHeldLockAt(t *testing.T, paths RepoPaths, entry trust.Entry, spec GateSpec, during func()) GateExecution {
+	t.Helper()
 	entry.Tree = true
-	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner := NewExecRunner(paths)
 	runner.LoadStore = sandboxTrust(t, entry)
 
 	lock, err := acquireTreeLock(runner.LockPath, time.Minute)
@@ -652,6 +659,108 @@ func checkPinRecheckUnchangedScriptRuns(t *testing.T, gateFor pinGateSpec) {
 	}
 	if ex.Verdict != VerdictPass {
 		t.Errorf("gate verdict = %q, want %q: %+v", ex.Verdict, VerdictPass, ex.Results)
+	}
+}
+
+// declaredFileName is the repo-relative file a declared-file entry pins.
+const declaredFileName = "pin.txt"
+
+// runDeclaredFileGate runs a pinned tree gate whose entry also pins
+// declaredFileName across a held tree lock on a shared checkout whose
+// trust identity is a different directory: the global-store shape. Both
+// directories hold byte-identical copies of the declared file, so only a
+// check made under the spawn directory can see an edit there. during
+// receives the spawn directory's copy.
+func runDeclaredFileGate(t *testing.T, gateFor pinGateSpec, marker string, during func(spawnCopy string)) (GateExecution, string, string) {
+	t.Helper()
+	shared := t.TempDir()
+	identity := t.TempDir()
+	content := pinScriptHeader + "A\n"
+	for _, dir := range []string{shared, identity} {
+		err := os.WriteFile(filepath.Join(dir, declaredFileName), []byte(content), 0o644)
+		testsupport.Must(t, err, "writing the declared file: %v", err)
+	}
+	script, scriptSum := pinnedScript(t, "/usr/bin/touch "+marker+"\n")
+	entry := pinnedEntry(identity, script, scriptSum)
+	entry.DeclaredFiles = []trust.DeclaredFile{{Path: declaredFileName, SHA256: trustHashOf(content)}}
+	paths := RepoPaths{
+		ExecRoot: shared,
+		Identity: identity,
+		LockPath: filepath.Join(shared, ".docket", "tree.lock"),
+	}
+	spawnCopy := filepath.Join(shared, declaredFileName)
+	ex := runTreeGateAcrossHeldLockAt(t, paths, entry, gateFor(script),
+		func() { during(spawnCopy) })
+	return ex, shared, trustHashOf(content)
+}
+
+// TestGateDeclaredFileRecheckAfterTreeLock: a declared file's copy in the
+// spawn directory changes by one byte while the gate waits for the tree
+// lock. The re-check after the lock refuses the entry and nothing spawns.
+func TestGateDeclaredFileRecheckAfterTreeLock(t *testing.T) {
+	checkDeclaredFileRecheckAfterTreeLock(t, namedPinGate)
+}
+
+// TestFenceGateDeclaredFileRecheckAfterTreeLock is the same drift for a
+// harvested fence line.
+func TestFenceGateDeclaredFileRecheckAfterTreeLock(t *testing.T) {
+	checkDeclaredFileRecheckAfterTreeLock(t, fencePinGate)
+}
+
+func checkDeclaredFileRecheckAfterTreeLock(t *testing.T, gateFor pinGateSpec) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	ex, shared, pinned := runDeclaredFileGate(t, gateFor, marker, func(spawnCopy string) {
+		rewritePinByte(t, spawnCopy)
+	})
+
+	if sentinelExists(t, marker) {
+		t.Error("the gate RAN after its declared file changed in the spawn directory")
+	}
+	if len(ex.Results) != 1 {
+		t.Fatalf("got %d rows, want 1: %+v", len(ex.Results), ex.Results)
+	}
+	row := ex.Results[0]
+	if row.Verdict != VerdictUnmatched || ex.Verdict != VerdictFail {
+		t.Errorf("row verdict %q, gate verdict %q; want %q and %q",
+			row.Verdict, ex.Verdict, VerdictUnmatched, VerdictFail)
+	}
+	if row.Exit != nil {
+		t.Errorf("exit = %d on a gate that spawned nothing, want nil", *row.Exit)
+	}
+	// A Lookup-time refusal carries no entry; this row must come from the
+	// re-check that follows the lock.
+	if row.TrustEntry != "tests" {
+		t.Errorf("the row names entry %q, want %q: the refusal did not come "+
+			"from the post-lock re-check", row.TrustEntry, "tests")
+	}
+	drifted := trustHashOf(pinScriptHeader + "B\n")
+	for _, want := range []string{declaredFileName, shared, pinned, drifted} {
+		if !strings.Contains(row.Reason, want) {
+			t.Errorf("the reason does not name %s: %q", want, row.Reason)
+		}
+	}
+}
+
+// TestGateDeclaredFileUnchangedRuns is the benign half: an entry whose
+// declared file is untouched across a contended lock runs.
+func TestGateDeclaredFileUnchangedRuns(t *testing.T) {
+	checkDeclaredFileUnchangedRuns(t, namedPinGate)
+}
+
+// TestFenceGateDeclaredFileUnchangedRuns is the benign half for a fence line.
+func TestFenceGateDeclaredFileUnchangedRuns(t *testing.T) {
+	checkDeclaredFileUnchangedRuns(t, fencePinGate)
+}
+
+func checkDeclaredFileUnchangedRuns(t *testing.T, gateFor pinGateSpec) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	ex, _, _ := runDeclaredFileGate(t, gateFor, marker, func(string) {})
+
+	if !sentinelExists(t, marker) {
+		t.Errorf("the gate with an unchanged declared file did not run: %+v", ex.Results)
+	}
+	if ex.Verdict != VerdictPass || len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictPass {
+		t.Errorf("gate verdict %q, rows %+v; want one %q row", ex.Verdict, ex.Results, VerdictPass)
 	}
 }
 

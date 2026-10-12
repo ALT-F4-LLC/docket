@@ -175,10 +175,22 @@ func (r *ExecRunner) Execute(_ context.Context, g GateSpec, sc StepContext) (Gat
 		return r.unmatchedGate(g, fmt.Sprintf("the repo path could not be resolved: %v", err)), nil
 	}
 
+	dir := r.spawnDir(sc)
 	if g.Source == "" {
-		return r.runNamedGate(g, sc, store, identity)
+		return r.runNamedGate(g, sc, dir, store, identity)
 	}
-	return r.runFenceGate(g, sc, store, identity)
+	return r.runFenceGate(g, sc, dir, store, identity)
+}
+
+// spawnDir is the directory a gate spawns in, and therefore the root its
+// entry's declared files are hashed under: the step's worktree when one is
+// known, otherwise the shared checkout. Never the trust identity, which names
+// the project rather than the tree the gate reads.
+func (r *ExecRunner) spawnDir(sc StepContext) string {
+	if sc.WorkRoot != "" {
+		return sc.WorkRoot
+	}
+	return r.RepoRoot
 }
 
 // runNamedGate runs a gate whose command is the trust entry's own argv.
@@ -187,14 +199,14 @@ func (r *ExecRunner) Execute(_ context.Context, g GateSpec, sc StepContext) (Gat
 // match is by name and binding, and the stored hash is verified against the
 // stored argv to catch a corrupted or hand-edited file (M3).
 func (r *ExecRunner) runNamedGate(
-	g GateSpec, sc StepContext, store *trust.Store, identity string,
+	g GateSpec, sc StepContext, dir string, store *trust.Store, identity string,
 ) (GateExecution, error) {
-	match := store.Lookup(identity, g.Name, nil)
+	match := store.LookupAt(identity, g.Name, nil, dir)
 	if !match.Matched {
 		return r.unmatchedGate(g, match.Reason), nil
 	}
-	return r.spawnMatched(g, sc, match, 0, func() trust.Match {
-		return store.Lookup(identity, g.Name, nil)
+	return r.spawnMatched(g, sc, dir, match, 0, func() trust.Match {
+		return store.LookupAt(identity, g.Name, nil, dir)
 	})
 }
 
@@ -206,7 +218,7 @@ func (r *ExecRunner) runNamedGate(
 // entry happens to cover. Per-line matching with per-line results makes each
 // line its own decision with its own record.
 func (r *ExecRunner) runFenceGate(
-	g GateSpec, sc StepContext, store *trust.Store, identity string,
+	g GateSpec, sc StepContext, dir string, store *trust.Store, identity string,
 ) (GateExecution, error) {
 	if len(g.Commands) == 0 {
 		return r.unmatchedGate(g,
@@ -257,14 +269,14 @@ func (r *ExecRunner) runFenceGate(
 			continue
 		}
 
-		match := store.Lookup(identity, g.Name, argv)
+		match := store.LookupAt(identity, g.Name, argv, dir)
 		if !match.Matched {
 			fail(match.Reason, trust.ArgvSHA256(argv))
 			continue
 		}
 
-		ex, err := r.spawnMatched(g, sc, match, ordinal, func() trust.Match {
-			return store.Lookup(identity, g.Name, argv)
+		ex, err := r.spawnMatched(g, sc, dir, match, ordinal, func() trust.Match {
+			return store.LookupAt(identity, g.Name, argv, dir)
 		})
 		if err != nil {
 			return GateExecution{}, err
@@ -283,10 +295,10 @@ func (r *ExecRunner) runFenceGate(
 // reason of every row it records, so each attempt and each early refusal of a
 // gate trusted without a content pin says so where its result is read.
 func (r *ExecRunner) spawnMatched(
-	g GateSpec, sc StepContext, match trust.Match, firstOrdinal int,
+	g GateSpec, sc StepContext, dir string, match trust.Match, firstOrdinal int,
 	relookup func() trust.Match,
 ) (GateExecution, error) {
-	ex, err := r.spawnMatchedRows(g, sc, match, firstOrdinal, relookup)
+	ex, err := r.spawnMatchedRows(g, sc, dir, match, firstOrdinal, relookup)
 	if err != nil || match.Warning == "" {
 		return ex, err
 	}
@@ -327,14 +339,19 @@ func pinStillBindsSpawn(entry *trust.Entry, spawned string) error {
 // spawnMatchedRows runs a matched command, taking the tree mutex when the entry
 // declares `tree = true` and recording every flaky attempt individually.
 //
-// relookup repeats the Lookup that produced match against the same store
-// snapshot. It runs before every attempt, after any tree-lock wait, because
-// the content pin (§3.1 argv0_sha256) is checked "before every spawn": the
-// pinned file can change during the lock wait or between flaky attempts, and
-// only the pin half of the Lookup can change its answer. That half re-resolves
-// the entry's argv[0] afresh, so pinStillBindsSpawn runs first.
+// dir is the spawn directory from spawnDir, the same root match's declared
+// files were hashed under.
+//
+// relookup repeats the LookupAt that produced match against the same store
+// snapshot and dir. It runs before every attempt, after any tree-lock wait,
+// because the content pins (§3.1 argv0_sha256 and the entry's declared files)
+// are checked "before every spawn": a pinned file can change during the lock
+// wait or between flaky attempts, and only the pin half of the lookup can
+// change its answer. That narrows the window between the hash and the
+// child's own read of the file; it does not close it. The pin half
+// re-resolves the entry's argv[0] afresh, so pinStillBindsSpawn runs first.
 func (r *ExecRunner) spawnMatchedRows(
-	g GateSpec, sc StepContext, match trust.Match, firstOrdinal int,
+	g GateSpec, sc StepContext, dir string, match trust.Match, firstOrdinal int,
 	relookup func() trust.Match,
 ) (GateExecution, error) {
 	entry := match.Entry
@@ -433,9 +450,8 @@ func (r *ExecRunner) spawnMatchedRows(
 	// `skipped`, not `fail` (DKT-169): nothing ran, so "measured and failed"
 	// would be a false record; the execution verdict stays fail so routing
 	// remains fail-closed.
-	dir := r.RepoRoot
 	if sc.WorkRoot != "" {
-		if info, statErr := os.Stat(sc.WorkRoot); statErr != nil || !info.IsDir() {
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
 			return GateExecution{
 				Verdict: VerdictFail,
 				Results: []GateResultRow{{
@@ -452,7 +468,6 @@ func (r *ExecRunner) spawnMatchedRows(
 				}},
 			}, nil
 		}
-		dir = sc.WorkRoot
 	}
 	// The deadline rides on the spec as well as clamping the timeout above:
 	// a flaky entry re-runs inside exec.RunVerifiedAttempts, and each attempt must
