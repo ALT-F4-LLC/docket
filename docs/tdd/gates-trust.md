@@ -1,6 +1,6 @@
 # TDD: gates, the execution trust model, and the exec runner (stage 4)
 
-Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25; §7.6.2 PG6 detached pre-gate run added — 2026-10-08; §7.6.2 PG6 readiness hold while a detached run is in flight — 2026-10-09; §2.1 residual 1, §3.1, and §3.5 amended for content-pinned absolute `argv[0]` entries — 2026-10-09
+Status: draft, revised per security review — 2026-08-03; §3.6 amended per DKT-81 — 2026-08-08; §3.6 removal order amended per DKT-2198 — 2026-09-15; §7.4 lock scope narrowed to the shared checkout and §7.6.2 PG5 claim-time pre-gate budget added — 2026-09-25; §7.6.2 PG6 detached pre-gate run added — 2026-10-08; §7.6.2 PG6 readiness hold while a detached run is in flight — 2026-10-09; §2.1 residual 1, §3.1, and §3.5 amended for content-pinned absolute `argv[0]` entries — 2026-10-09; §2.1 residual 1, §3.1, T4, and §7.2 M1 amended for the pin-bound spawn per DKT-3802 — 2026-10-12
 (docs/tdd/gates-trust-review.md, verdict SOUND WITH FIXES — F1–F5 folded in; see
 that file's response table for the per-finding
 mapping) · implements docs/design/engine-spec.md **§4 (whole)**
@@ -157,7 +157,7 @@ an operator who runs `docket` in it.
 | T1 | **Malicious-clone execution** (§9 item 6). A cloned repo ships a workflow whose gate runs `curl … \| sh`, or an issue body whose fenced block does. Cloning and running `docket run activate` + a full run must execute nothing. | Trust entries are **user-level only** (§3.1) and never read from the repo. An unmatched gate is **reported `unmatched`, never executed** (§7.3). Repo binding (§3.4) means an entry approved in repo A does not fire in repo B. | §9.2 `TestMaliciousCloneExecutesNothing` + QA `ZH` — the §9 item 6 script, including fenced harvesting |
 | T2 | **Argv injection.** A fenced command or gate argv containing `; rm -rf ~`, `$(…)`, backticks, `&&`, a newline, or a glob must not become multiple commands or expand. | **No shell, ever** (§5.1). `exec.Command(argv[0], argv[1:]...)` with `Args` set explicitly; no `sh -c`, no `os/exec` shell wrapper, no `SHELL` env consultation. Tokenization happens **once**, at `trust add` and at harvest, by a POSIX-ish splitter that performs **no expansion of any kind** (§5.2) | §9.1 `TestNoShellEverInvoked` (argv table incl. every metacharacter) + a source-level guard test (§9.1) asserting `internal/exec` references no shell binary |
 | T3 | **Post-activation fence injection.** An operator approves an issue body at activation; an attacker (or a well-meaning teammate) edits the body afterward to add or alter a fenced command; the gate runs the *new* command. | **Already closed by S3** and this stage depends on it rather than re-solving it: activation snapshots the body, harvests fences from the **snapshot**, and stores each command with its SHA-256 in `run_fences` (engine-spine §5.3 stage 5). §5.4 states exactly how S4 relies on it: the runner receives `GateSpec.Commands` **from the `run_fences` rows**, and **re-verifies each row's stored hash against its stored command before spawning** | §9.2 `TestPostActivationBodyEditCannotInject` — edit the body between activation and the gate, assert the *snapshotted* command runs; plus §9.2's tamper case: a `run_fences` row mutated in the DB is refused, not run |
-| T4 | **TOCTOU between the trust check and the spawn.** The trust file is checked, then the process spawns; a concurrent `trust rm`, a trust-file rewrite, or a symlink swap between the two makes an unapproved command run. | The trust store is **read once into an immutable in-memory snapshot** at the start of the gate stage, and the **matched entry's own argv is what is executed** (§7.2). Matching does not produce a *permission* that is later applied to a command read from elsewhere; it produces **the argv itself**. There is no window because there are not two reads of two different things | §9.1 `TestMatchReturnsTheExecutedArgv` — a match returns the argv, and the runner has no other argv source; §9.2 `TestTrustFileRewriteMidGateDoesNotChangeWhatRuns` |
+| T4 | **TOCTOU between the trust check and the spawn.** The trust file is checked, then the process spawns; a concurrent `trust rm`, a trust-file rewrite, or a symlink swap between the two makes an unapproved command run. | The trust store is **read once into an immutable in-memory snapshot** at the start of the gate stage, and the **matched entry's own argv is what is executed** (§7.2). Matching does not produce a *permission* that is later applied to a command read from elsewhere; it produces **the argv itself**. That closes the race on the trust store. A content-pinned entry (§2.1 residual 1) has a second window: a **symlink flip between the `argv[0]` hash and the spawn**, when the hash and the exec each resolve `argv[0]`. `exec.RunPinned` closes the flip with a **single-resolution path**: `argv[0]` is resolved once, that path is hashed, and that same path is spawned. It runs the same on darwin and linux; a descriptor-bound spawn was rejected because linux can execute a descriptor (`execveat`) and darwin cannot (§2.1 residual 1). A rename over the resolved path between the hash and `execve` stays open (DKT-3919), and no runner calls `RunPinned` yet (§2.1 residual 1, *Adoption*) | §9.1 `TestMatchReturnsTheExecutedArgv` — a match returns the argv, and the runner has no other argv source; §9.2 `TestTrustFileRewriteMidGateDoesNotChangeWhatRuns`; `TestPinnedSpawnSurvivesSymlinkFlip` (`internal/exec/pinned_test.go`) — a goroutine flips a symlinked `argv[0]` between a pinned and an unpinned script across 300 spawns, and no spawn may run the unpinned script |
 | T5 | **Env leakage into gate children.** A gate command inherits the operator's whole environment and exfiltrates it, or — worse — inherits `DOCKET_TOKEN` and uses a live capability to record a forged artifact. | **Allowlist, not denylist** (§5.3): the child environment is constructed from an enumerated set (§5.3's table), plus explicitly-set `DOCKET_*` context vars. **`DOCKET_TOKEN` is excluded by name in addition to being absent from the allowlist** — a belt-and-braces check with its own test, because it is the one variable whose leak converts a code-execution foothold into engine authority | §9.1 `TestGateChildEnvIsExactlyTheAllowlist` (asserts set equality, not membership) + `TestDocketTokenNeverReachesAGateChild` (sets it in the parent, asserts absent in the child) |
 | T6 | **Output-capture bombs.** A gate emits gigabytes on stdout, or never stops emitting, exhausting memory or disk. | Capture is **bounded at a byte cap** (§5.5), read through a counting limited reader that stops consuming after the cap and sets `truncated: true`. The cap is a constant, not config, at this stage. The process is killed by the timeout independently (§5.4) | §9.1 `TestCaptureIsCappedAndFlagged` — a generator writing far past the cap; memory asserted bounded, `truncated` true, the recorded output exactly cap-sized |
 | T7 | **Process escape.** A gate spawns children (a build spawning compilers, a test runner spawning servers); killing the gate on timeout leaves them running, holding the tree, ports, or the mutex's intent. | The child is started in **its own process group** (`Setpgid`), and the timeout kills **the group** (`syscall.Kill(-pgid, …)`), SIGTERM then SIGKILL after a grace period (§5.4) | §9.1 `TestTimeoutKillsTheWholeProcessGroup` — a gate that spawns a long-lived grandchild; assert the grandchild is gone after the timeout |
@@ -194,18 +194,63 @@ residuals are accepted, and each is accepted for a stated reason:
    **symlink-resolved executable** — SHA-256 of the file at
    `filepath.EvalSymlinks(filepath.Abs(argv[0]))`, the same normalization
    §5.2.1 R1/R4 apply — in the entry's `argv0_sha256` (§3.1). Before every
-   spawn the runner re-hashes that resolved file; a hash that differs is
-   **refused** with `verdict = "unmatched"`, no spawn, and a `reason` naming the
-   path and both hashes. For that executable this is prevention, not
-   disclosure: a repo that rewrites `scripts/build.sh` after the operator
-   trusted it by absolute path gets no execution. The **re-pin path** is
-   re-running `docket trust add` for the same name, which replaces the stored
-   hash with the current file's (§3.5). The pin covers the resolved `argv[0]`
-   executable **only**: files it sources or reads, Makefile targets, libraries,
-   and every other input stay this residual. An entry whose `argv[0]` is
-   absolute but that carries no `argv0_sha256` — one written before this
-   amendment — still matches, with a warning naming the entry and the re-pin
-   command.
+   spawn the pin is checked again; a hash that differs is **refused** with
+   `verdict = "unmatched"`, no spawn, and a `reason` naming the path and both
+   hashes. A repo that rewrites `scripts/build.sh` after the operator trusted
+   it by absolute path, and before the spawn's check, gets no execution. A
+   change that races the spawn is bounded only as far as the spawn mechanism
+   below binds it. The **re-pin path** is re-running `docket trust add` for the
+   same name, which replaces the stored hash with the current file's (§3.5).
+   The pin covers the resolved `argv[0]` executable **only**: files it sources
+   or reads, Makefile targets, libraries, and every other input stay this
+   residual. An entry whose `argv[0]` is absolute but that carries no
+   `argv0_sha256` — one written before this amendment — still matches, with a
+   warning naming the entry and the re-pin command.
+
+   **The pin-bound spawn: a single resolution** *(amended 2026-10-12 per
+   DKT-3802)*. The window a pin must close is a **symlink flip between the
+   `argv[0]` hash and the spawn**. When the hash and the exec each resolve
+   `argv[0]` on their own, a link retargeted between the two resolutions lets
+   the pinned file be hashed while another file runs under a pass verdict.
+   `exec.RunPinned` (`internal/exec/pinned.go`) acts on **one resolution**: it
+   resolves `argv[0]` once through `Resolve` (R1–R4), hashes that resolved path
+   with `exec.FileSHA256` (opened `O_NOFOLLOW`, type-checked by `fstat` of the
+   open descriptor), and hands the **same resolved path string** to `Run` as
+   `argv[0]`. Nothing re-derives the path after the hash, so a retargeted link
+   can change which file is hashed, never make the spawn land on a file other
+   than the hashed one. `TestPinnedSpawnSurvivesSymlinkFlip`
+   (`internal/exec/pinned_test.go`) flips a symlinked `argv[0]` between a
+   pinned and an unpinned script across 300 spawns and fails if the unpinned
+   script ever ran.
+
+   *Platform constraints, and why a descriptor-bound spawn was rejected.* The
+   other option was to hash an open descriptor and execute that descriptor, so
+   the executed inode is the hashed one. Linux can execute a descriptor
+   (`execveat` on the hashed descriptor); **darwin cannot**: it has no call
+   that executes a file descriptor. DKT-3802's security review records this as
+   "linux-only execveat on the hashed descriptor (darwin refuses fd exec)", one
+   of four options with "no portable closing mechanism established" (DKT-3919).
+   A descriptor-bound spawn would therefore hold on linux only and leave
+   darwin on a second, path-based spawn. The single-resolution path behaves
+   the same on darwin and linux, so one entry point serves both.
+
+   *What the single resolution does not bind.* It is still a path-based spawn:
+   `execve` walks the resolved path again, and a script's interpreter re-opens
+   it by name. A **rename over** the resolved path, a write into the hashed
+   file, or a directory component swapped for a symlink between the hash and
+   those walks is outside what it binds (`internal/exec/pinned.go:28`). The
+   rename-over is reproduced: of 300 spawns of a compiled binary, 109 passed
+   the pin and 93 of those ran the unpinned file (DKT-3919, open). For an executable a concurrent
+   same-uid process can rename over, the pin **narrows** the window to that
+   case rather than preventing it; the rename-over stays this residual until
+   DKT-3919 closes or bounds it.
+
+   *Adoption.* `RunPinned` is the primitive; no runner calls it yet. Wiring the
+   gate, action, and trust-probe runners onto it is DKT-3822, DKT-3901, and
+   DKT-3902. Until then the gate runner refuses an attempt whose `argv[0]` no
+   longer resolves to the path it will spawn (`pinStillBindsSpawn`,
+   `internal/engine/gate_exec.go`), and its hash and its spawn still act on
+   separate resolutions.
 2. **Self-trust by a misbehaving session** (T9, upstream D14). Accepted by the
    design record; bounded as T9 lists. The one thing this stage adds beyond D14
    is **auditability**: a `trust-added` event (§3.6) means the run's own trail
@@ -295,8 +340,10 @@ operator ruling in docket-groom pass 20261004T003235Z; amends §2.1 residual
 **symlink-resolved executable** — SHA-256 of the bytes at
 `filepath.EvalSymlinks(filepath.Abs(argv[0]))` — and stores it, hex-encoded, as
 `argv0_sha256`. An entry whose `argv[0]` is a bare name has no such key, and a
-hand-edited file that gives it one is a parse error. At every spawn the runner
-re-hashes the same resolved file:
+hand-edited file that gives it one is a parse error. At every spawn the pin is
+checked against the file `argv[0]` resolves to; §2.1 residual 1 states which
+spawn mechanism binds that check to the file that executes, and what it leaves
+unbound:
 
 | Stored `argv0_sha256` | File's current hash | Outcome |
 |---|---|---|
@@ -1284,7 +1331,7 @@ repo identity, gate name, candidate argv) → (matched entry | unmatched reason)
 
 | # | Rule |
 |---|---|
-| M1 | The store is read **once** into an immutable snapshot at the start of the gate stage, and matching runs against that snapshot. **The matched entry's own `argv` is what executes** — matching yields the argv, not a permission applied to an argv from elsewhere. This is T4's closure: there is no second read to race |
+| M1 | The store is read **once** into an immutable snapshot at the start of the gate stage, and matching runs against that snapshot. **The matched entry's own `argv` is what executes** — matching yields the argv, not a permission applied to an argv from elsewhere. This closes T4's race on the trust store: there is no second read of the store. It does not close the **symlink flip between the `argv[0]` hash and the spawn** for a content-pinned entry (§3.1 `argv0_sha256`): that window exists when the pin check and the exec resolve `argv[0]` separately. `exec.RunPinned` binds them to a **single resolution** — resolve once, hash that path, spawn that same path — on darwin and linux alike, chosen over a descriptor-bound spawn, which linux can perform (`execveat`) and darwin cannot, because darwin has no call that executes a descriptor. `TestPinnedSpawnSurvivesSymlinkFlip` holds it. A rename over the resolved path between the hash and `execve` remains §2.1 residual 1 (DKT-3919), and the runner adopts `RunPinned` under DKT-3822 |
 | M2 | Candidate entries are those whose `name` equals the gate name **and** whose binding matches the current repo identity (§3.4 P2). A name that exists only for another repo is `unmatched` with a reason naming that repo |
 | M3 | **A full-argv hash satisfies the match** (§4, verbatim). For a **named** gate (no `source`), the candidate argv *is* the entry's argv, so the match is by name+binding and the hash is verified against the stored `argv_sha256` to catch a corrupted or hand-edited file. For a **fence** gate, the candidate argv is the tokenized fence line, and it must hash-equal the entry's `argv_sha256` — **or**, when and only when `entry.prefix` is true, be element-wise prefixed by the entry's argv (§3.3) |
 | M4 | **Prefix entries match only when the entry opted in.** A full-argv entry never matches by prefix, in either direction. `TestPrefixMatchingRequiresOptIn` asserts both directions |
