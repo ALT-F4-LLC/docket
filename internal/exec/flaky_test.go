@@ -129,8 +129,9 @@ func TestVerifiedAttemptsRefusalIsNeverAPass(t *testing.T) {
 }
 
 // spawnRecorder is a caller-supplied spawn that runs no process: it returns
-// the scripted outcome for each call in turn and logs every call, with the
-// Spec it received, to an order log it shares with the verify hook.
+// the scripted outcome for each call in turn, fails a call beyond the script
+// with errUnscriptedSpawn, and logs every call, with the Spec it received, to
+// an order log it shares with the verify hook.
 type spawnRecorder struct {
 	outcomes []spawnOutcome
 	specs    []Spec
@@ -142,9 +143,14 @@ type spawnOutcome struct {
 	err error
 }
 
+var errUnscriptedSpawn = errors.New("spawn called more times than scripted")
+
 func (s *spawnRecorder) spawn(spec Spec) (Result, error) {
 	*s.log = append(*s.log, "spawn")
 	s.specs = append(s.specs, spec)
+	if len(s.specs) > len(s.outcomes) {
+		return Result{}, errUnscriptedSpawn
+	}
 	o := s.outcomes[len(s.specs)-1]
 	return o.res, o.err
 }
@@ -243,7 +249,7 @@ func TestSpawnedAttemptsUsesTheSuppliedSpawn(t *testing.T) {
 		attempts, refused, err := RunSpawnedAttempts(unrunnableSpec(t), true, ExitZeroIsPass, nil, rec.spawn)
 
 		if !errors.Is(err, spawnErr) {
-			t.Fatalf("want the spawn error returned; got %v", err)
+			t.Errorf("want the spawn error returned; got %v", err)
 		}
 		if len(rec.specs) != 1 || len(attempts) != 0 || refused != nil {
 			t.Errorf("want one spawn, no attempts, no refusal; got %d spawns, %+v, %+v", len(rec.specs), attempts, refused)
