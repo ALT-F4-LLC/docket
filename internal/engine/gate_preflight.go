@@ -84,9 +84,23 @@ type GatePreflight struct {
 // argv check happens at spawn against the entry's own argv, and a preflight
 // that pretended to settle it would tell an operator a gate is ready when it is
 // not, which is worse than saying nothing.
+//
+// Declared files are checked under the invocation's exec root: no step has a
+// worktree yet at activation, so that is the tree a gate would run in. A step
+// worktree that later differs is caught by the spawn-time check, not here.
 func BuildGatePreflight(
 	defs map[int]*workflow.Definition,
 	loadStore func() (*trust.Store, error), identityPath string,
+) ([]GatePreflight, error) {
+	return buildGatePreflightAt(defs, loadStore, identityPath, resolvePaths().ExecRoot)
+}
+
+// buildGatePreflightAt is BuildGatePreflight with the exec root explicit.
+// identityPath is what entries bind to; execRoot is where declared files are
+// hashed. The two differ under a global store and must never be swapped.
+func buildGatePreflightAt(
+	defs map[int]*workflow.Definition,
+	loadStore func() (*trust.Store, error), identityPath, execRoot string,
 ) ([]GatePreflight, error) {
 	// Gate name -> the workflows declaring it. A map because one gate is
 	// commonly declared by several steps of several workflows, and an operator
@@ -134,7 +148,7 @@ func BuildGatePreflight(
 		case identityErr != nil:
 			row.Reason = fmt.Sprintf("the repo path could not be resolved: %v", identityErr)
 		default:
-			m := store.Lookup(identity, name, nil)
+			m := store.LookupAt(identity, name, nil, execRoot)
 			if m.Matched {
 				row.Matched, row.Warning = true, m.Warning
 				if m.Entry != nil {
@@ -263,7 +277,8 @@ func buildGatePreflightTx(tx *sql.Tx, runID int) ([]GatePreflight, error) {
 	if err != nil {
 		return nil, err
 	}
-	return BuildGatePreflight(defs, trust.Load, resolvePaths().Identity)
+	paths := resolvePaths()
+	return buildGatePreflightAt(defs, trust.Load, paths.Identity, paths.ExecRoot)
 }
 
 // HoldPolicy is who will answer a hold this run mints (DKT-266).

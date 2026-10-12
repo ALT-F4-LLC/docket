@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -173,6 +174,66 @@ func TestGatePreflightReportsAStubbedEntry(t *testing.T) {
 	if got.StubReason != reason {
 		t.Errorf("StubReason = %q, want %q", got.StubReason, reason)
 	}
+}
+
+// TestGatePreflightChecksDeclaredFilesUnderTheExecRoot: preflight runs before
+// any step has a worktree, so a gate whose entry declares files resolves only
+// when those files are unchanged under the exec root, the tree a gate without
+// a worktree runs in. The identity the entry binds to never decides it.
+func TestGatePreflightChecksDeclaredFilesUnderTheExecRoot(t *testing.T) {
+	const pinned = "pinned contents\n"
+	setup := func(t *testing.T) (load func() (*trust.Store, error), execRoot, identity string) {
+		t.Helper()
+		execRoot, identity = t.TempDir(), t.TempDir()
+		for _, root := range []string{execRoot, identity} {
+			writeDeclaredFile(t, root, pinned)
+		}
+		argv := []string{"make", "check"}
+		load = sandboxTrust(t, trust.Entry{
+			Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+			Repo:          mustResolve(identity),
+			DeclaredFiles: []trust.DeclaredFile{{Path: declaredFilePath, SHA256: trustHashOf(pinned)}},
+		})
+		return load, execRoot, identity
+	}
+	preflight := func(t *testing.T, load func() (*trust.Store, error), identity, execRoot string) GatePreflight {
+		t.Helper()
+		rows, err := buildGatePreflightAt(
+			preflightDefs(workflow.Gate{Name: "build"}), load, identity, execRoot)
+		testsupport.Must(t, err, "buildGatePreflightAt: %v", err)
+		row, ok := preflightRow(rows, "build")
+		if !ok {
+			t.Fatalf("no row for build: %+v", rows)
+		}
+		return row
+	}
+
+	t.Run("unchanged declared file resolves", func(t *testing.T) {
+		load, execRoot, identity := setup(t)
+		if row := preflight(t, load, identity, execRoot); !row.Matched {
+			t.Errorf("an unchanged declared file does not resolve: %+v", row)
+		}
+	})
+
+	t.Run("exec root drift does not resolve", func(t *testing.T) {
+		load, execRoot, identity := setup(t)
+		writeDeclaredFile(t, execRoot, "rewritten\n")
+		row := preflight(t, load, identity, execRoot)
+		if row.Matched {
+			t.Errorf("a declared file changed under the exec root still resolves: %+v", row)
+		}
+		if !strings.Contains(row.Reason, declaredFilePath) {
+			t.Errorf("the reason does not name %s: %q", declaredFilePath, row.Reason)
+		}
+	})
+
+	t.Run("identity drift does not matter", func(t *testing.T) {
+		load, execRoot, identity := setup(t)
+		writeDeclaredFile(t, identity, "rewritten\n")
+		if row := preflight(t, load, identity, execRoot); !row.Matched {
+			t.Errorf("the preflight hashed the identity root, not the exec root: %+v", row)
+		}
+	})
 }
 
 // TestRenderGatePreflightShowsTheStubReason (DKT-607): a stub WITH a recorded

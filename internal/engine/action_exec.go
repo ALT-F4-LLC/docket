@@ -220,8 +220,10 @@ func (r *ExecActionRunner) runTrustedCommand(
 
 	// A2: candidates are entries whose name equals the action name AND whose
 	// repo binding matches this repo. A candidate argv of nil means "the ENTRY
-	// is the command", exactly as a named gate resolves.
-	match := store.Lookup(identity, a.Name, nil)
+	// is the command", exactly as a named gate resolves. Declared files are
+	// hashed under RepoRoot because that is the action's spawn Dir; the
+	// identity can name a different checkout.
+	match := store.LookupAt(identity, a.Name, nil, r.RepoRoot)
 	if !match.Matched {
 		// A3: NO ENTRY ⇒ `unmatched`. NOTHING SPAWNS, and the step routes per
 		// its effective `on_fail` — the same direction gates take (§6.2 N3),
@@ -230,7 +232,7 @@ func (r *ExecActionRunner) runTrustedCommand(
 	}
 
 	return r.spawnMatched(a, sc, match, func() trust.Match {
-		return store.Lookup(identity, a.Name, nil)
+		return store.LookupAt(identity, a.Name, nil, r.RepoRoot)
 	})
 }
 
@@ -241,7 +243,8 @@ func (r *ExecActionRunner) runTrustedCommand(
 // snapshot. It runs before every attempt, after any tree-lock wait, because
 // the content pin (gates-trust §3.1 argv0_sha256) is checked "before every
 // spawn": the pinned file can change during the lock wait or between flaky
-// attempts, and only the pin half of the Lookup can change its answer.
+// attempts, and only the pin half of the Lookup can change its answer. The
+// same holds for declared files, which it re-hashes under the same root.
 func (r *ExecActionRunner) spawnMatched(
 	a ActionSpec, sc StepContext, match trust.Match, relookup func() trust.Match,
 ) ActionResult {

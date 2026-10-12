@@ -138,7 +138,13 @@ func (e *Engine) reRunnableEntryFor(
 			gate.Name, err), nil
 	}
 
-	match := store.Lookup(identity, gate.Name, nil)
+	// Declared files are hashed in the tree the re-run would spawn in, chosen
+	// as the gate runner chooses it: the step's worktree, else the exec root.
+	root := step.WorkRoot
+	if root == "" {
+		root = runner.RepoRoot
+	}
+	match := store.LookupAt(identity, gate.Name, nil, root)
 	if !match.Matched {
 		// A5.
 		return nil, fmt.Sprintf(

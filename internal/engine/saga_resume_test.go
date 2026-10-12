@@ -3,12 +3,14 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // §9 item 10's gate half, completed (TDD docs/tdd/gates-trust.md §7.5, T12).
@@ -321,6 +323,84 @@ func mustResolve(p string) string {
 		return p
 	}
 	return resolved
+}
+
+// TestResumeChecksDeclaredFilesUnderTheGateSpawnRoot: the resume decision for
+// an interrupted gate whose entry declares files hashes them in the tree the
+// gate will re-run in: the step's worktree when it recorded one, else the
+// exec root. The identity root and the other tree never decide it.
+func TestResumeChecksDeclaredFilesUnderTheGateSpawnRoot(t *testing.T) {
+	const pinned = "pinned contents\n"
+	setup := func(t *testing.T) (e *Engine, repo, identity, workRoot string) {
+		t.Helper()
+		repo, identity, workRoot = t.TempDir(), t.TempDir(), t.TempDir()
+		for _, root := range []string{repo, identity, workRoot} {
+			writeDeclaredFile(t, root, pinned)
+		}
+		argv := []string{"/usr/bin/true"}
+		runner := NewExecRunner(RepoPaths{
+			ExecRoot: repo, Identity: identity,
+			LockPath: filepath.Join(repo, ".docket", "tree.lock"),
+		})
+		runner.LoadStore = sandboxTrust(t, trust.Entry{
+			Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+			Repo: mustResolve(repo), ReRunnable: true,
+			DeclaredFiles: []trust.DeclaredFile{{Path: declaredFilePath, SHA256: trustHashOf(pinned)}},
+		})
+		e = testEngine()
+		e.Gates = runner
+		return e, repo, identity, workRoot
+	}
+	resume := func(t *testing.T, e *Engine, step *db.Step) (*trust.Entry, string) {
+		t.Helper()
+		entry, reason, err := e.reRunnableEntryFor(workflow.Gate{Name: "build"}, step)
+		testsupport.Must(t, err, "reRunnableEntryFor: %v", err)
+		return entry, reason
+	}
+	wantRerun := func(t *testing.T, entry *trust.Entry, reason string) {
+		t.Helper()
+		if entry == nil || !entry.ReRunnable || reason != "" {
+			t.Errorf("entry %+v reason %q, want the re-runnable entry and no reason", entry, reason)
+		}
+	}
+	wantPark := func(t *testing.T, entry *trust.Entry, reason string) {
+		t.Helper()
+		if entry != nil {
+			t.Errorf("entry %+v, want none: the declared file changed where the gate runs", entry)
+		}
+		if !strings.Contains(reason, declaredFilePath) {
+			t.Errorf("the park reason does not name %s: %q", declaredFilePath, reason)
+		}
+	}
+
+	t.Run("worktree drift parks", func(t *testing.T) {
+		e, _, _, workRoot := setup(t)
+		writeDeclaredFile(t, workRoot, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{WorkRoot: workRoot})
+		wantPark(t, entry, reason)
+	})
+
+	t.Run("exec root and identity drift do not matter with a worktree", func(t *testing.T) {
+		e, repo, identity, workRoot := setup(t)
+		writeDeclaredFile(t, repo, "rewritten\n")
+		writeDeclaredFile(t, identity, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{WorkRoot: workRoot})
+		wantRerun(t, entry, reason)
+	})
+
+	t.Run("exec root drift parks without a worktree", func(t *testing.T) {
+		e, repo, _, _ := setup(t)
+		writeDeclaredFile(t, repo, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{})
+		wantPark(t, entry, reason)
+	})
+
+	t.Run("identity drift does not matter without a worktree", func(t *testing.T) {
+		e, _, identity, _ := setup(t)
+		writeDeclaredFile(t, identity, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{})
+		wantRerun(t, entry, reason)
+	})
 }
 
 // hasEventKind reports whether the step has an event of the given kind.

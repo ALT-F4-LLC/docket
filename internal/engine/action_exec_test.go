@@ -1012,3 +1012,140 @@ func TestActionPinRecheckRefusesSymlinkRetarget(t *testing.T) {
 		}
 	})
 }
+
+// declaredFileAction is an action whose trust entry pins scripts/x, laid out
+// across three DISTINCT directories: the exec root the action spawns in, the
+// identity the entry binds to, and a step worktree. Only distinct roots show
+// which one the declared-file check hashed.
+type declaredFileAction struct {
+	repo, identity, workRoot, marker string
+	entry                            trust.Entry
+}
+
+const declaredFilePath = "scripts/x"
+
+func newDeclaredFileAction(t *testing.T) declaredFileAction {
+	t.Helper()
+	d := declaredFileAction{
+		repo: t.TempDir(), identity: t.TempDir(), workRoot: t.TempDir(),
+		marker: filepath.Join(t.TempDir(), "ran"),
+	}
+	const pinned = "pinned contents\n"
+	for _, root := range []string{d.repo, d.identity, d.workRoot} {
+		writeDeclaredFile(t, root, pinned)
+	}
+	script := echoScript(t, t.TempDir(), "action.sh",
+		"/usr/bin/touch "+d.marker+"\n"+actionReplyLine)
+	d.entry = trust.Entry{
+		Name: "declared-action", Argv: []string{script},
+		Repo:          mustResolve(d.identity),
+		DeclaredFiles: []trust.DeclaredFile{{Path: declaredFilePath, SHA256: trustHashOf(pinned)}},
+	}
+	return d
+}
+
+func (d declaredFileAction) runner() *ExecActionRunner {
+	store := &trust.Store{Entries: []trust.Entry{d.entry}}
+	return &ExecActionRunner{
+		RepoRoot:  d.repo,
+		Identity:  d.identity,
+		LockPath:  filepath.Join(d.repo, ".docket", "tree.lock"),
+		LoadStore: func() (*trust.Store, error) { return store, nil },
+	}
+}
+
+func writeDeclaredFile(t *testing.T, root, content string) {
+	t.Helper()
+	path := filepath.Join(root, declaredFilePath)
+	err := os.MkdirAll(filepath.Dir(path), 0o755)
+	testsupport.Must(t, err, "creating %s: %v", filepath.Dir(path), err)
+	err = os.WriteFile(path, []byte(content), 0o644)
+	testsupport.Must(t, err, "writing %s: %v", path, err)
+}
+
+// TestActionChecksDeclaredFilesUnderTheSpawnRoot: the declared-file pin is
+// verified in the directory the action runs in, the exec root, never in the
+// identity the entry binds to nor in a step worktree the action does not run in.
+func TestActionChecksDeclaredFilesUnderTheSpawnRoot(t *testing.T) {
+	run := func(t *testing.T, d declaredFileAction) ActionResult {
+		t.Helper()
+		result, err := d.runner().Run(context.Background(), actionSpec(d.entry.Name),
+			StepContext{Instance: "reconcile@0", WorkRoot: d.workRoot})
+		testsupport.Must(t, err, "Run: %v", err)
+		return result
+	}
+
+	t.Run("unchanged declared file runs", func(t *testing.T) {
+		d := newDeclaredFileAction(t)
+		result := run(t, d)
+		if result.Failed || !sentinelExists(t, d.marker) {
+			t.Errorf("the action with an unchanged declared file did not run: %+v", result.Results)
+		}
+	})
+
+	t.Run("drift in the spawn root refuses", func(t *testing.T) {
+		d := newDeclaredFileAction(t)
+		writeDeclaredFile(t, d.repo, "rewritten\n")
+		result := run(t, d)
+		if sentinelExists(t, d.marker) {
+			t.Error("the action RAN with a declared file that changed in the tree it runs in")
+		}
+		if len(result.Results) != 1 || result.Results[0].Verdict != db.ActionVerdictUnmatched {
+			t.Fatalf("rows = %+v, want one %q row", result.Results, db.ActionVerdictUnmatched)
+		}
+		if !strings.Contains(result.Results[0].Reason, declaredFilePath) {
+			t.Errorf("the reason does not name %s: %q", declaredFilePath, result.Results[0].Reason)
+		}
+	})
+
+	t.Run("drift outside the spawn root does not matter", func(t *testing.T) {
+		d := newDeclaredFileAction(t)
+		writeDeclaredFile(t, d.identity, "rewritten\n")
+		writeDeclaredFile(t, d.workRoot, "rewritten\n")
+		result := run(t, d)
+		if result.Failed || !sentinelExists(t, d.marker) {
+			t.Errorf("the check hashed a tree the action does not run in: %+v", result.Results)
+		}
+	})
+}
+
+// TestActionDeclaredFileRecheckBeforeEachAttempt: a flaky action whose first
+// attempt rewrites its declared file in the spawn root and fails. The
+// re-attempt is not spawned, because the per-attempt re-lookup checks the same
+// root.
+func TestActionDeclaredFileRecheckBeforeEachAttempt(t *testing.T) {
+	markers := t.TempDir()
+	first := filepath.Join(markers, "marker-1")
+	second := filepath.Join(markers, "marker-2")
+	d := newDeclaredFileAction(t)
+	body := fmt.Sprintf(
+		"if [ -e %[1]s ]; then /usr/bin/touch %[2]s; %[4]s exit 0; fi\n"+
+			"/usr/bin/touch %[1]s\n"+
+			"echo rewritten > %[3]s\n"+
+			"exit 1\n",
+		first, second, filepath.Join(d.repo, declaredFilePath),
+		`echo '{"body":"","payload":[]}';`)
+	err := os.WriteFile(d.entry.Argv[0], []byte("#!/bin/sh\n"+body), 0o755)
+	testsupport.Must(t, err, "writing the action script: %v", err)
+	d.entry.Flaky = true
+
+	result, err := d.runner().Run(context.Background(),
+		actionSpec(d.entry.Name), StepContext{Instance: "reconcile@0"})
+	testsupport.Must(t, err, "Run: %v", err)
+
+	if !sentinelExists(t, first) {
+		t.Fatalf("the first attempt did not run: %+v", result.Results)
+	}
+	if sentinelExists(t, second) {
+		t.Error("the re-attempt RAN after its declared file changed")
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("got %d rows, want 2 (the failed run, then the refusal): %+v",
+			len(result.Results), result.Results)
+	}
+	r := result.Results[1]
+	if r.Verdict != db.ActionVerdictUnmatched || !strings.Contains(r.Reason, declaredFilePath) {
+		t.Errorf("row 1 = verdict %q reason %q, want %q naming %s",
+			r.Verdict, r.Reason, db.ActionVerdictUnmatched, declaredFilePath)
+	}
+}
