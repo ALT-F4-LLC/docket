@@ -3,6 +3,9 @@ package cli
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"maps"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -234,5 +237,96 @@ func TestNext_HydratesPostLimitOnly(t *testing.T) {
 	testsupport.Must(t, err, "runNext: %v", err)
 	if strings.Contains(buf.String(), "Second Doc") {
 		t.Errorf("beyond-limit issue's doc leaked into output:\n%s", buf.String())
+	}
+}
+
+// classCapWorkflow offers one root step per class: three bounded by
+// `[limits]` and one, free, that nothing bounds.
+const classCapWorkflow = `
+[pipeline]
+name = "class-caps"
+version = 1
+[match]
+kind = ["task"]
+[limits]
+write = { max = 2 }
+judge = { max = 3 }
+read = { max = 5 }
+[[step]]
+name = "w"
+after = []
+executor = "x"
+class = "write"
+emits = "out"
+[[step]]
+name = "j"
+after = []
+executor = "x"
+class = "judge"
+emits = "out"
+[[step]]
+name = "r"
+after = []
+executor = "x"
+class = "read"
+emits = "out"
+[[step]]
+name = "f"
+after = []
+executor = "x"
+class = "free"
+emits = "out"
+`
+
+// TestNextStepModeReportsClassCapsAndSources: `next --run` under v2 reports,
+// beside items/total/truncated, the cap the scheduler enforces for each
+// bounded class it offers and what set it: a numeric override, auto at the
+// integer it resolves to, and the workflow max. An unbounded class is absent.
+func TestNextStepModeReportsClassCapsAndSources(t *testing.T) {
+	conn := newTestDB(t)
+	registerForRun(t, conn, classCapWorkflow)
+	issueID, err := db.CreateIssue(conn, &model.Issue{
+		Title: "caps", Description: "body",
+		Status: model.StatusBacklog, Priority: model.PriorityNone,
+		Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "creating issue: %v", err)
+	run, err := db.InsertRun(conn, 1, "", 0, model.NowMS())
+	testsupport.Must(t, err, "starting run: %v", err)
+	err = db.AddRunIssue(conn, run.ID, issueID)
+	testsupport.Must(t, err, "adding issue: %v", err)
+	activateHolding(t, conn, run.ID, model.NowMS())
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", "4")
+	testsupport.Must(t, err, "setting the numeric override: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"read", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	data := stepModeEnvelope(t, nextCmdWithDB(conn, 10), run.ID)
+
+	offered := map[string]bool{}
+	for _, row := range data.Items {
+		offered[fmt.Sprint(row["class"])] = true
+	}
+	for _, class := range []string{"write", "judge", "read", "free"} {
+		if !offered[class] {
+			t.Fatalf("premise: the offer carries no %s row: %v", class, data.Items)
+		}
+	}
+
+	wantLimits := map[string]int{
+		"write": 4,
+		"read":  max(1, runtime.NumCPU()/2),
+		"judge": 3,
+	}
+	wantSources := map[string]string{
+		"write": "override",
+		"read":  "auto",
+		"judge": "workflow",
+	}
+	if !maps.Equal(data.Limits, wantLimits) {
+		t.Errorf("limits = %v, want %v", data.Limits, wantLimits)
+	}
+	if !maps.Equal(data.LimitSources, wantSources) {
+		t.Errorf("limit_sources = %v, want %v", data.LimitSources, wantSources)
 	}
 }

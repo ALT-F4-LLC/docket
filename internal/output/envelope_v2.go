@@ -3,6 +3,7 @@ package output
 import (
 	"encoding/json"
 	"io"
+	"maps"
 )
 
 // Collection is implemented by result types that are a list of items, so the
@@ -26,6 +27,14 @@ type Collection interface {
 	CollectionTotal() int
 	// CollectionTruncated reports whether records were dropped by a limit.
 	CollectionTruncated() bool
+}
+
+// CollectionSiblings is implemented by a Collection that reports fields beside
+// items, total and truncated in its v2 envelope. Each returned key becomes a
+// sibling of those three; the three are reserved and a sibling cannot replace
+// them. A Collection without this interface keeps exactly the three keys.
+type CollectionSiblings interface {
+	CollectionSiblings() map[string]any
 }
 
 // collectionEnvelope is the v2 data shape for list results.
@@ -65,13 +74,28 @@ func shapeV2Data(data any) any {
 		if v, ok := items.(Versioned); ok {
 			items = v.VersionedPayload()
 		}
-		data = collectionEnvelope{
+		envelope := collectionEnvelope{
 			Items:     items,
 			Total:     c.CollectionTotal(),
 			Truncated: c.CollectionTruncated(),
 		}
+		data = envelope
+		if s, ok := c.(CollectionSiblings); ok {
+			data = withSiblings(envelope, s.CollectionSiblings())
+		}
 	}
 	return data
+}
+
+// withSiblings flattens envelope and siblings into one object, writing the
+// three envelope keys last so no sibling can shadow them.
+func withSiblings(envelope collectionEnvelope, siblings map[string]any) map[string]any {
+	merged := make(map[string]any, len(siblings)+3)
+	maps.Copy(merged, siblings)
+	merged["items"] = envelope.Items
+	merged["total"] = envelope.Total
+	merged["truncated"] = envelope.Truncated
+	return merged
 }
 
 // writeJSONSuccessV2 writes a v2 success envelope to w, with data in its v2

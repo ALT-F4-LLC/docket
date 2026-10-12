@@ -293,11 +293,13 @@ func activatedRunOverIssues(t *testing.T, conn *sql.DB, count int) int {
 
 // stepCollection is the v2 collection body `next --run` emits: a Collection
 // reshapes to data.{items,total,truncated}, the uniform envelope every list
-// verb carries.
+// verb carries, with the offer's class caps and their sources beside them.
 type stepCollection struct {
-	Items     []map[string]any `json:"items"`
-	Total     int              `json:"total"`
-	Truncated bool             `json:"truncated"`
+	Items        []map[string]any  `json:"items"`
+	Total        int               `json:"total"`
+	Truncated    bool              `json:"truncated"`
+	Limits       map[string]int    `json:"limits"`
+	LimitSources map[string]string `json:"limit_sources"`
 }
 
 // stepModeEnvelope drives `next --run` under v2 and decodes that body.

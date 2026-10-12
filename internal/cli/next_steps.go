@@ -21,8 +21,10 @@ type nextStepsResult struct {
 	Steps []model.StepRow `json:"steps"`
 	Total int             `json:"total"`
 
-	readyTotal int
-	limit      int
+	readyTotal   int
+	limit        int
+	limits       map[string]int
+	limitSources map[string]string
 }
 
 func (r nextStepsResult) CollectionItems() any { return r.Steps }
@@ -31,7 +33,20 @@ func (r nextStepsResult) CollectionTruncated() bool {
 	return output.IsTruncated(r.limit, r.readyTotal, len(r.Steps))
 }
 
-var _ output.Collection = nextStepsResult{}
+// CollectionSiblings reports the offer's class caps under the keys and with
+// the omission rule `dispatch open` uses: a class with no positive max is
+// absent, and an offer with no bounded class carries neither key.
+func (r nextStepsResult) CollectionSiblings() map[string]any {
+	if len(r.limits) == 0 {
+		return nil
+	}
+	return map[string]any{"limits": r.limits, "limit_sources": r.limitSources}
+}
+
+var (
+	_ output.Collection         = nextStepsResult{}
+	_ output.CollectionSiblings = nextStepsResult{}
+)
 
 // issueModeFlags are the filters that mean something in ISSUE mode and nothing
 // in step mode.
@@ -136,6 +151,7 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 	result := nextStepsResult{
 		Steps: ready.Steps, Total: len(ready.Steps),
 		readyTotal: ready.Total, limit: limit,
+		limits: ready.Limits, limitSources: ready.LimitSources,
 	}
 
 	var message string
