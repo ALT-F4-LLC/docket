@@ -118,6 +118,10 @@ disclosure.`,
 	// in the trust file rather than discovered mid-run.
 	cmd.Flags().StringSlice("network", nil,
 		"host this command must reach, e.g. vuln.go.dev (repeatable); declares the need, does not grant access")
+	// --declared-file is a StringArray, not a StringSlice like --network: a
+	// slice flag splits each value on commas, and a file name may contain one.
+	cmd.Flags().StringArray("declared-file", nil,
+		"repo-relative file the command reads, e.g. a sourced script (repeatable); its content is pinned from this checkout")
 	cmd.Flags().Bool("yes", false,
 		"skip the interactive confirmation (the argv is still disclosed)")
 
@@ -185,8 +189,29 @@ type trustAddResult struct {
 	Stub       bool     `json:"stub"`
 	StubReason string   `json:"stub_reason,omitempty"`
 	Timeout    string   `json:"timeout,omitempty"`
-	Idempotent bool     `json:"idempotent"`
-	Warnings   []string `json:"warnings,omitempty"`
+	// DeclaredFiles and DeclaredRoot disclose what the grant content-pins and
+	// which checkout the hashes were taken from.
+	DeclaredFiles []trustDeclaredFileView `json:"declared_files,omitempty"`
+	DeclaredRoot  string                  `json:"declared_root,omitempty"`
+	Idempotent    bool                    `json:"idempotent"`
+	Warnings      []string                `json:"warnings,omitempty"`
+}
+
+// trustDeclaredFileView is trust.DeclaredFile's wire shape.
+type trustDeclaredFileView struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+func declaredFileViews(files []trust.DeclaredFile) []trustDeclaredFileView {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]trustDeclaredFileView, len(files))
+	for i, d := range files {
+		out[i] = trustDeclaredFileView{Path: d.Path, SHA256: d.SHA256}
+	}
+	return out
 }
 
 type trustEntryView struct {
@@ -203,7 +228,10 @@ type trustEntryView struct {
 	Stub       bool     `json:"stub"`
 	StubReason string   `json:"stub_reason,omitempty"`
 	Timeout    string   `json:"timeout,omitempty"`
-	AddedAtMS  int64    `json:"added_at_ms"`
+	// DeclaredFiles is omitted for entries that declare none, so their v1
+	// rows are unchanged.
+	DeclaredFiles []trustDeclaredFileView `json:"declared_files,omitempty"`
+	AddedAtMS     int64                   `json:"added_at_ms"`
 }
 
 type trustListResult struct {
@@ -292,8 +320,13 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 	stubReason, _ := cmd.Flags().GetString("stub-reason")
 	timeout, _ := cmd.Flags().GetString("timeout")
 	network, _ := cmd.Flags().GetStringSlice("network")
+	declared, _ := cmd.Flags().GetStringArray("declared-file")
 
-	repoRoot := ""
+	// The entry binds to Identity, but declared files are hashed in ExecRoot:
+	// the checkout gates run in. In a linked or bare-repo worktree the two
+	// differ, and Identity may hold other bytes or no working files at all.
+	// A --global add has no root; trust.Add refuses it if it declares files.
+	repoRoot, declaredRoot := "", ""
 	if !global {
 		cfg := getCfg(cmd)
 		if cfg == nil {
@@ -301,6 +334,7 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 				output.ErrValidation)
 		}
 		repoRoot = cfg.Identity
+		declaredRoot = cfg.ExecRoot
 	}
 
 	// The grant is EVENT-LOGGED, and the record is written BEFORE the store
@@ -312,8 +346,9 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 		Name: name, Argv: argv, RepoRoot: repoRoot, Global: global,
 		Prefix: prefix, ReRunnable: reRunnable, Tree: tree, Flaky: flaky,
 		Stub: stub, StubReason: stubReason,
-		Timeout: timeout, Network: network, NowMS: time.Now().UnixMilli(),
-		OnChange: recorder.record,
+		Timeout: timeout, Network: network,
+		DeclaredFiles: declared, DeclaredRoot: declaredRoot,
+		NowMS: time.Now().UnixMilli(), OnChange: recorder.record,
 	})
 	if err != nil {
 		return trustCmdError(err)
@@ -339,6 +374,10 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "trusting %s as %q %s\n",
 			exec.RenderArgv(res.Entry.Argv), res.Entry.Name, binding)
+		for _, d := range res.Entry.DeclaredFiles {
+			fmt.Fprintf(os.Stderr, "  pinning %s sha256:%s under %s\n",
+				exec.Render(d.Path), d.SHA256, exec.Render(declaredRoot))
+		}
 		for _, warning := range warnings {
 			fmt.Fprintln(os.Stderr, warning)
 		}
@@ -349,8 +388,13 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 		Repo: res.Entry.Repo, Global: res.Entry.Global, Prefix: res.Entry.Prefix,
 		ReRunnable: res.Entry.ReRunnable, Tree: res.Entry.Tree, Flaky: res.Entry.Flaky,
 		Stub: res.Entry.Stub, StubReason: res.Entry.StubReason,
-		Network: res.Entry.Network,
-		Timeout: res.Entry.Timeout, Idempotent: res.Idempotent, Warnings: warnings,
+		Network:       res.Entry.Network,
+		Timeout:       res.Entry.Timeout,
+		DeclaredFiles: declaredFileViews(res.Entry.DeclaredFiles),
+		Idempotent:    res.Idempotent, Warnings: warnings,
+	}
+	if len(res.Entry.DeclaredFiles) > 0 {
+		data.DeclaredRoot = declaredRoot
 	}
 	msg := fmt.Sprintf("trusted %q", res.Entry.Name)
 	if res.Idempotent {
@@ -401,7 +445,8 @@ func runTrustList(cmd *cobra.Command, args []string) error {
 			Global: e.Global, Prefix: e.Prefix, ReRunnable: e.ReRunnable,
 			Network: e.Network,
 			Tree:    e.Tree, Flaky: e.Flaky, Stub: e.Stub, StubReason: e.StubReason,
-			Timeout: e.Timeout, AddedAtMS: e.AddedAtMS,
+			Timeout: e.Timeout, DeclaredFiles: declaredFileViews(e.DeclaredFiles),
+			AddedAtMS: e.AddedAtMS,
 		})
 	}
 
@@ -522,6 +567,11 @@ func trustFlagSummary(e trustEntryView) string {
 	// declaration an operator is auditing.
 	if len(e.Network) > 0 {
 		out += " network=" + strings.Join(e.Network, ",")
+	}
+	// Each declared path renders escaped and on its own: the names come from
+	// repository content, and a joined list could not show a comma in one.
+	for _, d := range e.DeclaredFiles {
+		out += " declared-file=" + exec.Render(d.Path)
 	}
 	return out
 }
