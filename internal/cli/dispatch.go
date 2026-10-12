@@ -191,10 +191,10 @@ func warnPinDrift(w *output.Writer, drift []engine.PinVerdict, runRef string) {
 // table layouts.
 //
 // The truncation and class-limit lines are the human channel for the
-// envelope's `truncated`/`total` and `limits`: without them an operator reads
-// a cut manifest as the run's whole remaining offer and never sees the
-// engine's per-class concurrency. Classes print sorted so the line is
-// deterministic.
+// envelope's `truncated`/`total`, `limits`, and `limit_sources`: without them
+// an operator reads a cut manifest as the run's whole remaining offer and never
+// sees the engine's per-class concurrency or what set it. Classes print sorted
+// as `<class>=<cap> (<source>)` so the line is deterministic.
 func renderManifest(m *engine.Manifest) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s opened for %s at seq %d, expiring at %d\n",
@@ -211,7 +211,8 @@ func renderManifest(m *engine.Manifest) string {
 		sort.Strings(classes)
 		parts := make([]string, 0, len(classes))
 		for _, class := range classes {
-			parts = append(parts, fmt.Sprintf("%s=%d", class, m.Limits[class]))
+			parts = append(parts, fmt.Sprintf("%s=%d (%s)",
+				class, m.Limits[class], m.LimitSources[class]))
 		}
 		fmt.Fprintf(&b, "class limits: %s\n", strings.Join(parts, " "))
 	}

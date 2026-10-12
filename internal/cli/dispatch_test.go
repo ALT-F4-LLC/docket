@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -302,9 +304,55 @@ class = "beta"
 emits = "result"
 `
 
+// fourCapSourceWorkflow bounds write, judge, and read at the workflow level and
+// leaves free unbounded, so each cap source has a class to land on.
+const fourCapSourceWorkflow = `
+[pipeline]
+name = "four-cap-sources"
+version = 1
+[match]
+kind = ["task"]
+[limits]
+write = { max = 2 }
+judge = { max = 3 }
+read = { max = 5 }
+[[step]]
+name = "w"
+after = []
+executor = "someone"
+class = "write"
+emits = "result"
+[[step]]
+name = "j"
+after = []
+executor = "someone"
+class = "judge"
+emits = "result"
+[[step]]
+name = "r"
+after = []
+executor = "someone"
+class = "read"
+emits = "result"
+[[step]]
+name = "f"
+after = []
+executor = "someone"
+class = "free"
+emits = "result"
+`
+
 // openDispatchCLI activates a run over `issues` task issues bound to src and
 // opens it through runDispatchOpen with --limit, writing to w.
 func openDispatchCLI(t *testing.T, src string, issues, limit int, w *output.Writer) {
+	t.Helper()
+	openDispatchCLIConfigured(t, src, issues, limit, w, nil)
+}
+
+// openDispatchCLIConfigured is openDispatchCLI with configure, when non-nil,
+// run against the database before the dispatch opens.
+func openDispatchCLIConfigured(t *testing.T, src string, issues, limit int,
+	w *output.Writer, configure func(*sql.DB)) {
 	t.Helper()
 	conn := newTestDB(t)
 	registerForRun(t, conn, src)
@@ -321,6 +369,9 @@ func openDispatchCLI(t *testing.T, src string, issues, limit int, w *output.Writ
 	}
 	_, err = engine.Activate(conn, run.ID, engine.ActivateOptions{NowMS: model.NowMS()})
 	testsupport.Must(t, err, "activate: %v", err)
+	if configure != nil {
+		configure(conn)
+	}
 
 	cmd := dispatchCmdWithDB(conn, model.FormatRunID(run.ID))
 	testsupport.Must(t, cmd.Flags().Set("limit", fmt.Sprint(limit)),
@@ -346,15 +397,84 @@ func TestDispatchOpenRendersClassLimits(t *testing.T) {
 	w, buf := bufWriter(false)
 	openDispatchCLI(t, twoClassWorkflow, 1, 0, w)
 
-	const want = "class limits: alpha=1 beta=3"
+	const want = "class limits: alpha=1 (workflow) beta=3 (workflow)"
+	if got := classLimitsLine(buf.String()); got != want {
+		t.Errorf("class-limit line = %q, want %q:\n%s", got, want, buf.String())
+	}
+}
+
+// classLimitsLine is the human render's class-limits line, or "" without one.
+func classLimitsLine(out string) string {
 	var got string
-	for _, line := range strings.Split(buf.String(), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "class limits:") {
 			got = line
 		}
 	}
+	return got
+}
+
+// configureCapSources overrides write with a number and read with `auto`,
+// leaving judge at its workflow max and free unbounded.
+func configureCapSources(t *testing.T) func(*sql.DB) {
+	return func(conn *sql.DB) {
+		testsupport.Must(t, db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", "4"),
+			"setting the numeric override: %v", nil)
+		testsupport.Must(t, db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"read", db.ClassMaxAuto),
+			"setting auto: %v", nil)
+	}
+}
+
+// TestDispatchOpenRendersEachClassCapSource: the human line names each bounded
+// class's cap beside what set it, and an unbounded class is absent.
+func TestDispatchOpenRendersEachClassCapSource(t *testing.T) {
+	w, buf := bufWriter(false)
+	openDispatchCLIConfigured(t, fourCapSourceWorkflow, 1, 0, w, configureCapSources(t))
+
+	want := fmt.Sprintf("class limits: judge=3 (workflow) read=%d (auto) write=4 (override)",
+		max(1, runtime.NumCPU()/2))
+	got := classLimitsLine(buf.String())
 	if got != want {
 		t.Errorf("class-limit line = %q, want %q:\n%s", got, want, buf.String())
+	}
+	if strings.Contains(got, "free") {
+		t.Errorf("class-limit line names unbounded class free: %q", got)
+	}
+}
+
+// TestDispatchOpenJSONCarriesEachClassCapSource: --json=v2 reports each bounded
+// class's cap in `limits` and its source in `limit_sources`, and an unbounded
+// class is in neither map.
+func TestDispatchOpenJSONCarriesEachClassCapSource(t *testing.T) {
+	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
+	openDispatchCLIConfigured(t, fourCapSourceWorkflow, 1, 0, w, configureCapSources(t))
+
+	var env struct {
+		Data struct {
+			Limits       map[string]int    `json:"limits"`
+			LimitSources map[string]string `json:"limit_sources"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("decoding the envelope: %v\n%s", err, buf.String())
+	}
+	wantLimits := map[string]int{
+		"write": 4,
+		"read":  max(1, runtime.NumCPU()/2),
+		"judge": 3,
+	}
+	wantSources := map[string]string{
+		"write": "override",
+		"read":  "auto",
+		"judge": "workflow",
+	}
+	if !maps.Equal(env.Data.Limits, wantLimits) {
+		t.Errorf("limits = %v, want %v:\n%s", env.Data.Limits, wantLimits, buf.String())
+	}
+	if !maps.Equal(env.Data.LimitSources, wantSources) {
+		t.Errorf("limit_sources = %v, want %v:\n%s",
+			env.Data.LimitSources, wantSources, buf.String())
 	}
 }
 
