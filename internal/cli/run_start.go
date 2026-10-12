@@ -172,25 +172,15 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 		return err
 	}
 
-	run, inserted, err := db.InsertRunWithContextIdempotent(conn, getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey)
+	// The roster commits in the insert's own transaction. A replayed key
+	// returns the original run unchanged and ignores this call's --issue list.
+	run, inserted, err := db.InsertRunWithContextIdempotent(conn, getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey, issueIDs...)
 	if err != nil {
 		return runErr(err)
 	}
 
-	// A replayed key returns the original run unchanged: this call's --issue
-	// list describes an attachment that is not happening, and the original
-	// may already have left `planning`.
-	if !inserted {
-		issueIDs = nil
-	}
-	for _, id := range issueIDs {
-		if err := db.AddRunIssue(conn, run.ID, id); err != nil {
-			return runErr(err)
-		}
-	}
-
 	message := fmt.Sprintf("Started %s in %s", run.Ref(), run.Status)
-	if len(issueIDs) > 0 {
+	if inserted && len(issueIDs) > 0 {
 		message = fmt.Sprintf("%s with %d issue(s)", message, len(issueIDs))
 	}
 	w.Success(withRunVersion(run), message)

@@ -357,17 +357,28 @@ func TestRunStartIdempotencyKeyReplaysOriginal(t *testing.T) {
 	}
 }
 
-// startKeyedRun runs `run start --idempotency-key key --issue <issueID>`.
-func startKeyedRun(t *testing.T, conn *sql.DB, key string, issueID int) {
+// startKeyedRun runs `run start --idempotency-key key --issue <issueID>` and
+// returns the ref of the run the command reported.
+func startKeyedRun(t *testing.T, conn *sql.DB, key string, issueID int) string {
 	t.Helper()
 	cmd := runStartCmdWithDB(conn)
 	err := cmd.Flags().Set("idempotency-key", key)
 	testsupport.Must(t, err, "setting --idempotency-key: %v", err)
 	err = cmd.Flags().Set("issue", model.FormatID(issueID))
 	testsupport.Must(t, err, "setting --issue: %v", err)
-	w, _ := bufWriter(true)
+	w, buf := bufWriter(true)
 	err = runRunStart(cmd, w)
 	testsupport.Must(t, err, "run start: %v", err)
+
+	var envelope struct {
+		Data struct {
+			Run string `json:"run"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+	}
+	return envelope.Data.Run
 }
 
 // rosterOf returns the issue ids attached to a run, ascending.
@@ -389,12 +400,18 @@ func TestRunStartIdempotencyKeyReplayIgnoresIssues(t *testing.T) {
 	x := createIssue(t, conn, "x", model.StatusTodo, model.PriorityMedium)
 	y := createIssue(t, conn, "y", model.StatusTodo, model.PriorityMedium)
 
-	startKeyedRun(t, conn, "retry-1", x)
+	original := startKeyedRun(t, conn, "retry-1", x)
+	if original != model.FormatRunID(1) {
+		t.Fatalf("first run start returned run %q, want %q", original, model.FormatRunID(1))
+	}
 	if got := rosterOf(t, conn, 1); !slices.Equal(got, []int{x}) {
 		t.Fatalf("first run start roster = %v, want [%d]", got, x)
 	}
 
-	startKeyedRun(t, conn, "retry-1", y)
+	replayed := startKeyedRun(t, conn, "retry-1", y)
+	if replayed != original {
+		t.Errorf("replay returned run %q, want the original %q", replayed, original)
+	}
 
 	var n int
 	err := conn.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&n)
