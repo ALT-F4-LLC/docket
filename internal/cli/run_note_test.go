@@ -351,9 +351,8 @@ func TestRunNoteAddCLIStdinNoteTakesTokenOnlyFromEnv(t *testing.T) {
 	})
 }
 
-// runNoteEventAuthority reads the authority off the run-note-added event that
-// recorded note id.
-func runNoteEventAuthority(t *testing.T, conn *sql.DB, noteID int) any {
+// runNoteEvent decodes the run-note-added event that recorded note id.
+func runNoteEvent(t *testing.T, conn *sql.DB, noteID int) map[string]any {
 	t.Helper()
 	var data string
 	err := conn.QueryRow(
@@ -363,7 +362,36 @@ func runNoteEventAuthority(t *testing.T, conn *sql.DB, noteID int) any {
 	testsupport.Must(t, err, "reading note %d's event: %v", noteID, err)
 	var payload map[string]any
 	testsupport.Must(t, json.Unmarshal([]byte(data), &payload), "event data %q: %v", data, nil)
-	return payload["authority"]
+	return payload
+}
+
+// runNoteEventAuthority reads the authority off the run-note-added event that
+// recorded note id.
+func runNoteEventAuthority(t *testing.T, conn *sql.DB, noteID int) any {
+	t.Helper()
+	return runNoteEvent(t, conn, noteID)["authority"]
+}
+
+// TestRunNoteAddCLIAttributesTheNoteToThisInvocation: the run-note-added event
+// names the caller's identity and the verb's working directory, so a note
+// cannot be recorded under a defaulted or constant attribution.
+func TestRunNoteAddCLIAttributesTheNoteToThisInvocation(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+
+	cmd := runNoteCmdWithDB(conn)
+	testsupport.Must(t, cmd.Flags().Set("text", "a ruling"), "setting --text: %v", nil)
+	w, buf := bufWriter(true)
+	err := runRunNoteAdd(cmd, model.FormatRunID(runID), w)
+	testsupport.Must(t, err, "run note add: %v", err)
+
+	var env struct {
+		Data struct {
+			Note engine.RunNote `json:"note"`
+		} `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %v\n%s", nil, buf.String())
+	assertRuledByThisInvocation(t, runNoteEvent(t, conn, env.Data.Note.ID), "run-note-added")
 }
 
 // TestRunNoteAddCLIRecordsTheStatedAuthority: --authority operator and
