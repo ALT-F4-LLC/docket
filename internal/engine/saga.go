@@ -1891,15 +1891,33 @@ func failedGatesOverRows(rows []db.GateResultRow) []FailedGate {
 		if r.Verdict == db.GateVerdictPass {
 			continue
 		}
-		// One entry per gate: its first command that did not pass.
+		entry := FailedGate{Gate: r.Gate, Verdict: r.Verdict, Exit: r.Exit, Reason: r.Reason}
+		// One entry per gate, its not-pass command chosen by the precedence the
+		// park-class switch in runRoutingStage uses (skipped, then unmatched, then
+		// fail), so the report names the row the step parked on. Equal rank keeps
+		// the earlier ordinal.
 		if n := len(failed); n > 0 && failed[n-1].Gate == r.Gate {
+			if parkPrecedence(r.Verdict) < parkPrecedence(failed[n-1].Verdict) {
+				failed[n-1] = entry
+			}
 			continue
 		}
-		failed = append(failed, FailedGate{
-			Gate: r.Gate, Verdict: r.Verdict, Exit: r.Exit, Reason: r.Reason,
-		})
+		failed = append(failed, entry)
 	}
 	return failed
+}
+
+// parkPrecedence ranks a not-pass verdict by which park class wins when a step
+// carries several: lower ranks first.
+func parkPrecedence(verdict string) int {
+	switch verdict {
+	case db.GateVerdictSkipped:
+		return 0
+	case db.GateVerdictUnmatched:
+		return 1
+	default:
+		return 2
+	}
 }
 
 // runGate invokes the runner and normalizes its output to rows.

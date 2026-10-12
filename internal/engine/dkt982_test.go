@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -155,25 +156,52 @@ func TestFailedGatesReportsWhatTheRoutingDecidedOn(t *testing.T) {
 // TestFailedGatesNamesAFenceGateWhoseEarlierLineFailed holds the same invariant
 // for a fence gate, whose lines share one gate name: a failing first line
 // followed by a passing last line fails the gate, and the report must say so.
+//
+// A fence gate is reported once, by the line routing parks on: a skipped line
+// outranks an unmatched one, which outranks a fail. Each case checks the
+// reported verdict against the park class the saga derives from
+// verdictOverRows, so the report and the park reason describe the same row.
 func TestFailedGatesNamesAFenceGateWhoseEarlierLineFailed(t *testing.T) {
+	const pinChanged = "the pinned script changed before the re-attempt"
+	skippedVet := db.GateResultRow{Gate: "checks", Ordinal: 1,
+		Verdict: db.GateVerdictSkipped, Argv: []string{"go", "vet", "./..."}}
 	cases := []struct {
 		name        string
-		first       db.GateResultRow
+		rows        []db.GateResultRow
 		wantVerdict string
 		wantExit    *int
+		wantReason  string
 	}{
-		{"first line unmatched", lineRow(0, db.GateVerdictUnmatched),
-			db.GateVerdictUnmatched, nil},
-		{"first line failed", lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
-			db.GateVerdictFail, gateExit(1)},
+		{"first line unmatched", []db.GateResultRow{
+			lineRow(0, db.GateVerdictUnmatched),
+			lineRow(1, db.GateVerdictPass, "go", "vet", "./..."),
+		}, db.GateVerdictUnmatched, nil, "no trust entry matched"},
+		{"first line failed", []db.GateResultRow{
+			lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
+			lineRow(1, db.GateVerdictPass, "go", "vet", "./..."),
+		}, db.GateVerdictFail, gateExit(1), ""},
+		{"fail then skipped", []db.GateResultRow{
+			lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
+			skippedVet,
+		}, db.GateVerdictSkipped, nil, ""},
+		{"fail then unmatched", []db.GateResultRow{
+			lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
+			{Gate: "checks", Ordinal: 1, Verdict: db.GateVerdictUnmatched, Reason: pinChanged},
+		}, db.GateVerdictUnmatched, nil, pinChanged},
+		{"unmatched then skipped", []db.GateResultRow{
+			{Gate: "checks", Ordinal: 0, Verdict: db.GateVerdictUnmatched, Reason: pinChanged},
+			skippedVet,
+		}, db.GateVerdictSkipped, nil, ""},
+		// Different argv, so routing reads two lines rather than one retried
+		// command: the gate is still reported once.
+		{"two failing lines", []db.GateResultRow{
+			lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
+			lineRow(1, db.GateVerdictFail, "go", "vet", "./..."),
+		}, db.GateVerdictFail, gateExit(1), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rows := []db.GateResultRow{
-				tc.first,
-				lineRow(1, db.GateVerdictPass, "go", "vet", "./..."),
-			}
-			failed := failedGatesOverRows(rows)
+			failed := failedGatesOverRows(tc.rows)
 			if len(failed) != 1 || failed[0].Gate != "checks" {
 				t.Fatalf("FailedGates = %+v, want the one gate %q", failed, "checks")
 			}
@@ -185,14 +213,25 @@ func TestFailedGatesNamesAFenceGateWhoseEarlierLineFailed(t *testing.T) {
 				(got.Exit != nil && *got.Exit != *tc.wantExit) {
 				t.Errorf("exit = %v, want %v", got.Exit, tc.wantExit)
 			}
-			if tc.wantVerdict == db.GateVerdictUnmatched && got.Reason == "" {
-				t.Errorf("the unmatched line's reason was not reported")
+			if got.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", got.Reason, tc.wantReason)
 			}
 
-			verdict, _, _ := verdictOverRows(rows)
+			verdict, unmeasured, unmatched := verdictOverRows(tc.rows)
 			if (verdict == VerdictFail) != (len(failed) > 0) {
 				t.Errorf("verdict = %q with %d failed gates — the report and the "+
 					"routing disagree about the same rows", verdict, len(failed))
+			}
+			parkedAs := db.GateVerdictFail
+			switch {
+			case slices.Contains(unmeasured, "checks"):
+				parkedAs = db.GateVerdictSkipped
+			case unmatched:
+				parkedAs = db.GateVerdictUnmatched
+			}
+			if got.Verdict != parkedAs {
+				t.Errorf("reported verdict = %q, but routing parks the gate as %q",
+					got.Verdict, parkedAs)
 			}
 		})
 	}
