@@ -395,6 +395,48 @@ func TestAuthorityRollupCountsRunNotesByTheirAuthority(t *testing.T) {
 	}
 }
 
+// TestRunReportListsEachNoteWithItsAttribution: every run-note-added event
+// becomes one row carrying the actor and cwd its event recorded, in event
+// order, and a note event recorded without either field renders them empty.
+func TestRunReportListsEachNoteWithItsAttribution(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	before, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport before the notes: %v", err)
+	if len(before.NoteRulings) != 0 {
+		t.Fatalf("the run lists notes before any was recorded: %+v", before.NoteRulings)
+	}
+
+	relayBy := Attribution{Actor: "relay-session", Cwd: "/work/relay"}
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, "first ruling", nowMS)
+	testsupport.Must(t, err, "AddRunNote (first): %v", err)
+	second, err := AddRunNote(conn, run.ID, testConductorToken, relayBy,
+		Authority{Kind: AuthorityConductor}, "second ruling", nowMS+1)
+	testsupport.Must(t, err, "AddRunNote (second): %v", err)
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	err = recordEvent(tx, eventRecord{
+		Kind: EventRunNoteAdded, RunID: run.ID,
+		Data: `{"note":999,"text":"recorded before notes carried an attribution"}`, AtMS: nowMS + 2,
+	})
+	testsupport.Must(t, err, "recording an unattributed note: %v", err)
+	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
+
+	after, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport after the notes: %v", err)
+	want := []RunNoteRuling{
+		{Note: first.ID, Authority: AuthorityOperator, Actor: "note-writer", Cwd: "/work/note-writer"},
+		{Note: second.ID, Authority: AuthorityConductor, Actor: "relay-session", Cwd: "/work/relay"},
+		{Note: 999},
+	}
+	if !reflect.DeepEqual(after.NoteRulings, want) {
+		t.Errorf("notes = %+v, want %+v", after.NoteRulings, want)
+	}
+}
+
 // TestRunReportRollsUpVoteMetadata pins DKT-71's read half: the metadata
 // claims cast votes carry — model, effort, spend, whatever a seat asserted —
 // surface in the run report as their own rollup, opaque keys to counted

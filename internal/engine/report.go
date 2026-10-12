@@ -163,6 +163,11 @@ type RunReport struct {
 	// conductor policy routes on and that only a free-text note used to carry.
 	Authorities []AuthorityCount `json:"authorities,omitempty"`
 
+	// NoteRulings is every run note the run recorded, in event order, with who
+	// wrote it and from where. Authorities counts the notes; this names their
+	// writers.
+	NoteRulings []RunNoteRuling `json:"note_rulings,omitempty"`
+
 	Gates       []db.VerdictCount   `json:"gates,omitempty"`
 	GateTrail   []db.ResultTrailRow `json:"gate_trail,omitempty"`
 	Actions     []db.VerdictCount   `json:"actions,omitempty"`
@@ -332,6 +337,18 @@ type StepRuling struct {
 	Event string `json:"event"`
 	Actor string `json:"actor"`
 	Cwd   string `json:"cwd"`
+}
+
+// RunNoteRuling is one run note and its attribution, read from its
+// `run-note-added` event: the note id that joins it to `run note list`, the
+// authority it was recorded under, and the actor and cwd the writer resolved.
+// A note event recorded without attribution keeps its row with those fields
+// empty, because nothing can supply them after the fact.
+type RunNoteRuling struct {
+	Note      int    `json:"note"`
+	Authority string `json:"authority"`
+	Actor     string `json:"actor"`
+	Cwd       string `json:"cwd"`
 }
 
 // AuthorityCount is one row of DKT-1899's rollup: an authority, and how many
@@ -800,6 +817,9 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// DKT-1899: the same rollup narrowed to the resolutions, in the same
 	// transaction for the same reason.
 	if report.Authorities, err = authorityRollupTx(tx, runID); err != nil {
+		return nil, err
+	}
+	if report.NoteRulings, err = runNoteRulingsTx(tx, runID); err != nil {
 		return nil, err
 	}
 
@@ -1814,6 +1834,45 @@ func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
 		if n := counts[authority]; n > 0 {
 			out = append(out, AuthorityCount{Authority: authority, Count: n})
 		}
+	}
+	return out, nil
+}
+
+// runNoteRulingsTx lists the run's notes from their `run-note-added` events, in
+// seq order so two reports of the same rows are byte-identical (R9).
+//
+// Unlike annotateStepRulings, an event with no actor or cwd still yields a
+// row: each note is its own unit, so there is no earlier ruling to fall back
+// to, and dropping the row would hide that the note was recorded at all. A
+// payload that does not parse is skipped (R10).
+func runNoteRulingsTx(tx *sql.Tx, runID int) ([]RunNoteRuling, error) {
+	rows, err := tx.Query(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq`,
+		runID, EventRunNoteAdded)
+	if err != nil {
+		return nil, fmt.Errorf("reading the run's notes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RunNoteRuling
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("reading a run note: %w", err)
+		}
+		var payload struct {
+			Note      int    `json:"note"`
+			Authority string `json:"authority"`
+			Actor     string `json:"actor"`
+			Cwd       string `json:"cwd"`
+		}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			continue
+		}
+		out = append(out, RunNoteRuling(payload))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading the run's notes: %w", err)
 	}
 	return out, nil
 }
