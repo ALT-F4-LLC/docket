@@ -151,9 +151,11 @@ type BackfillRow struct {
 	Quantity float64
 	// Metadata is an optional opaque KV bag merged onto the step's record in the
 	// same transaction as the usage row. Core stores it verbatim and reads no
-	// key in it. It is refused on a step that has not reached a terminal status,
-	// for the reason AnnotateStep refuses one: a live step's record is written
-	// under its holder's token, and a back-fill has none.
+	// key in it. On a step that has not reached a terminal status its usage row
+	// still lands, but the bag is dropped and the step is named on the outcome:
+	// a live step's record is written under its holder's token, and a back-fill
+	// has none. A bag that is not a JSON object refuses the batch whatever the
+	// step's status.
 	Metadata string
 }
 
@@ -196,9 +198,19 @@ type UnclaimedTarget struct {
 	Status   string `json:"status"`
 }
 
+// DroppedMetadataTarget names one back-filled step whose metadata bag was
+// dropped because the step had not reached a terminal status. Status is on the
+// row for the same reason it is on UnclaimedTarget: it says why the bag had
+// nowhere to land.
+type DroppedMetadataTarget struct {
+	Step     string `json:"step"`
+	Instance string `json:"instance"`
+	Status   string `json:"status"`
+}
+
 // BackfillOutcome is what the back-fill did: rows written, steps touched, the
-// source they carry, every row skipped as already recorded, and every target
-// that was never claimed.
+// source they carry, every row skipped as already recorded, every target
+// that was never claimed, and every step whose metadata bag was dropped.
 type BackfillOutcome struct {
 	Written int `json:"written"`
 	Steps   int `json:"steps"`
@@ -212,6 +224,11 @@ type BackfillOutcome struct {
 	// it is on the payload because `Warn` is suppressed in JSON mode and a
 	// conductor runs with `--json`.
 	Unclaimed []UnclaimedTarget `json:"unclaimed,omitempty"`
+	// MetadataDropped names the steps whose bag was dropped. As with Unclaimed,
+	// the usage rows for them are written and this is an advisory, not a
+	// refusal. A step that was reaped for retry lands here and not in
+	// Unclaimed, because a worker did claim it.
+	MetadataDropped []DroppedMetadataTarget `json:"metadata_dropped,omitempty"`
 }
 
 // BackfillUsage records usage for steps whose claimant could not report it.
@@ -269,6 +286,15 @@ type BackfillOutcome struct {
 // that one does not warn — its usage is real, and back-filling it is D2's own
 // documented resolution. Warning on status alone would have fired on the
 // legitimate path and stayed quiet on neither.
+//
+// A BAG ON A LIVE OR PENDING STEP IS DROPPED, NOT REFUSED. A reaped executor's
+// transcript carries usage and a complete model trace, so its back-fill row
+// carries a bag, and the step is pending for retry when the back-fill runs. The
+// refusal this replaced failed the whole batch, wrote nothing, and left the
+// dispatch unclosable. Now the usage row lands, the bag is dropped, and the step
+// is named on the outcome. A bag that is not a JSON object still refuses the
+// batch whatever the step's status, because the shape is a property of the
+// input and not of the step.
 func (e *Engine) BackfillUsage(
 	conn *sql.DB, runID int, rows []BackfillRow, source string,
 	onDuplicate string, nowMS int64,
@@ -338,17 +364,15 @@ func (e *Engine) BackfillUsage(
 	}
 
 	// Metadata is checked before any row is written, so a refused bag leaves the
-	// ledger exactly as it was.
+	// ledger exactly as it was. The shape is checked first, for every bag, so a
+	// malformed bag refuses even when its step would drop it. A bag on a step
+	// that has not finished is dropped here and never merged below. The step is
+	// named once, in row order, however many of its rows carried a bag.
+	dropped := make(map[int]bool)
+	var metadataDropped []DroppedMetadataTarget
 	for _, r := range rows {
 		if r.Metadata == "" {
 			continue
-		}
-		step := steps[r.Step]
-		if !db.StepTerminal(step.Status) {
-			return nil, conflictErr(
-				"step %s is %s; a back-fill's metadata lands on a finished step — "+
-					"a live step's metadata lands with its record",
-				step.Instance, step.Status)
 		}
 		if err := validateMetadataSize(r.Metadata); err != nil {
 			return nil, err
@@ -356,6 +380,16 @@ func (e *Engine) BackfillUsage(
 		if _, err := DecodeMetadataBag(r.Metadata, "metadata"); err != nil {
 			return nil, err
 		}
+		step := steps[r.Step]
+		if db.StepTerminal(step.Status) || dropped[r.Step] {
+			continue
+		}
+		dropped[r.Step] = true
+		metadataDropped = append(metadataDropped, DroppedMetadataTarget{
+			Step:     model.FormatStepID(step.ID),
+			Instance: step.Instance,
+			Status:   step.Status,
+		})
 	}
 
 	for _, r := range rows {
@@ -411,7 +445,7 @@ func (e *Engine) BackfillUsage(
 	// later reader never sees the usage without its observation.
 	bags := make(map[int]string, len(steps))
 	for _, r := range rows {
-		if r.Metadata == "" {
+		if r.Metadata == "" || dropped[r.Step] {
 			continue
 		}
 		step := steps[r.Step]
@@ -452,5 +486,6 @@ func (e *Engine) BackfillUsage(
 	return &BackfillOutcome{
 		Written: written, Steps: len(steps), MetadataMerged: len(bags),
 		Source: source, Skipped: skipped, Unclaimed: unclaimed,
+		MetadataDropped: metadataDropped,
 	}, nil
 }

@@ -161,6 +161,17 @@ func warnUnclaimedTargets(w *output.Writer, unclaimed []engine.UnclaimedTarget) 
 	}
 }
 
+// warnDroppedMetadata renders the advisory for a row whose metadata bag was
+// dropped because its step has not finished. The usage row is recorded, so the
+// line says so, as warnUnclaimedTargets does.
+func warnDroppedMetadata(w *output.Writer, dropped []engine.DroppedMetadataTarget) {
+	for _, d := range dropped {
+		w.Warn("%s (%s) is %s — its metadata was dropped, since metadata lands "+
+			"on a finished step. The usage row is recorded",
+			d.Step, exec.Render(d.Instance), d.Status)
+	}
+}
+
 // warnPinDrift renders DKT-408's advisory, one line per unsound pin, plus the
 // recovery verb — steps reading these refs will refuse at claim/render, and
 // the conductor should learn that before spending a wave, not from it.
@@ -599,6 +610,7 @@ func runDispatchReconcile(
 			sk.Step, exec.Render(sk.Instance), sk.Attempt, sk.Unit)
 	}
 	warnUnclaimedTargets(w, outcome.Backfill.Unclaimed)
+	warnDroppedMetadata(w, outcome.Backfill.MetadataDropped)
 	warnStaleTargets(w, outcome.Verify.StaleTargets)
 
 	var message string
@@ -722,6 +734,13 @@ on work that never ran with nothing to say where it came from. The warning names
 the step so the journal that produced the row can be checked; a step that ran
 and simply could not report — the case this verb exists for — never triggers it.
 
+A row's ` + "`metadata`" + ` on a step that has not finished is DROPPED, not refused: the usage
+row still lands, the step is WARNED ABOUT by name and status on stderr, and it
+appears in a ` + "`metadata_dropped`" + ` array in ` + "`--json`" + `. A reaped executor is the usual
+case: its usage is real, but its step is pending for retry and has no finished
+record for the bag to join. A ` + "`metadata`" + ` value that is not a JSON object still refuses
+the whole batch, whatever the step's status.
+
 ` + "`docket run report`" + ` lists what is already recorded, per step, under
 ` + "`step_usage`" + `: that is the verb to check before re-running.
 
@@ -751,6 +770,11 @@ type backfillOutcome struct {
 	// silence this field exists to end. `omitempty`, so an ordinary back-fill's
 	// payload is byte-identical to what it was.
 	Unclaimed []engine.UnclaimedTarget `json:"unclaimed,omitempty"`
+	// MetadataDropped names the steps whose metadata bag was dropped because
+	// they had not finished. The usage rows for them landed. Like Unclaimed, it
+	// rides the payload because `Warn` is silent in JSON mode. `omitempty`, so
+	// a back-fill without a dropped bag is unchanged.
+	MetadataDropped []engine.DroppedMetadataTarget `json:"metadata_dropped,omitempty"`
 }
 
 func runDispatchBackfillUsage(cmd *cobra.Command, w *output.Writer) error {
@@ -781,12 +805,14 @@ func runDispatchBackfillUsage(cmd *cobra.Command, w *output.Writer) error {
 			sk.Step, exec.Render(sk.Instance), sk.Attempt, sk.Unit)
 	}
 	warnUnclaimedTargets(w, result.Unclaimed)
+	warnDroppedMetadata(w, result.MetadataDropped)
 
 	outcome := &backfillOutcome{
 		Run: model.FormatRunID(runID), Rows: result.Written,
 		Steps: result.Steps, MetadataMerged: result.MetadataMerged,
 		Source: result.Source, Skipped: result.Skipped,
-		Unclaimed: result.Unclaimed,
+		Unclaimed:       result.Unclaimed,
+		MetadataDropped: result.MetadataDropped,
 	}
 
 	var message string

@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -86,5 +89,68 @@ func TestBackfillFromJSONRefusesANonObjectBagInTheEngine(t *testing.T) {
 	testsupport.Must(t, err, "reading usage_ledger: %v", err)
 	if n != 0 {
 		t.Errorf("ledger has %d rows, want 0 — a refused bag must not write", n)
+	}
+}
+
+// liveWaveStep opens the wave and claims its first row without completing it,
+// so the step is non-terminal when the back-fill runs.
+func liveWaveStep(t *testing.T, conn *sql.DB, runID int) int {
+	t.Helper()
+	manifest, err := engine.NewEngine().OpenDispatch(conn, runID, 0, nil, model.NowMS())
+	testsupport.Must(t, err, "dispatch open: %v", err)
+	if len(manifest.Rows) == 0 {
+		t.Fatal("premise: the manifest must have a row to claim")
+	}
+	stepID, err := model.ParseStepID(manifest.Rows[0].Step)
+	testsupport.Must(t, err, "parsing %q: %v", manifest.Rows[0].Step, err)
+	_, err = engine.ClaimStep(conn, stepID, engine.ClaimOptions{
+		Owner: "worker", NowMS: model.NowMS(),
+	})
+	testsupport.Must(t, err, "claim: %v", err)
+	return stepID
+}
+
+// TestBackfillFromJSONDropsALiveStepsBagAndNamesItInThePayload pins the JSON
+// surface: the batch succeeds, and the dropped step is named under
+// metadata_dropped, since a JSON consumer never sees the stderr warning.
+func TestBackfillFromJSONDropsALiveStepsBagAndNamesItInThePayload(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedDispatchRunForCLI(t, conn)
+	stepID := liveWaveStep(t, conn, runID)
+	path := usageJSON(t, fmt.Sprintf(
+		`[{"step":%q,"unit":"tokens","quantity":900,"metadata":{"model_resolved":"x"}}]`,
+		model.FormatStepID(stepID)))
+
+	cmd := backfillCmdWithDB(conn, model.FormatRunID(runID))
+	testsupport.Must(t, cmd.Flags().Set("from-json", path),
+		"setting --from-json: %v", nil)
+	w, buf := bufWriter(true)
+
+	testsupport.Must(t, runDispatchBackfillUsage(cmd, w),
+		"backfill-usage on a live step: %v", nil)
+	if !strings.Contains(buf.String(), `"metadata_dropped"`) {
+		t.Errorf("payload %s does not carry metadata_dropped", buf.String())
+	}
+	if !strings.Contains(buf.String(), model.FormatStepID(stepID)) {
+		t.Errorf("payload %s does not name step %s", buf.String(),
+			model.FormatStepID(stepID))
+	}
+}
+
+// TestWarnDroppedMetadataNamesTheStepOnStderr pins the human surface: the drop
+// is named on stderr with the step's status, and says the usage row is recorded.
+func TestWarnDroppedMetadataNamesTheStepOnStderr(t *testing.T) {
+	stderr := &bytes.Buffer{}
+	w := &output.Writer{Stdout: &bytes.Buffer{}, Stderr: stderr}
+
+	warnDroppedMetadata(w, []engine.DroppedMetadataTarget{{
+		Step: "STEP-9", Instance: "implement@0", Status: "pending",
+	}})
+
+	got := stderr.String()
+	for _, want := range []string{"STEP-9", "pending", "dropped", "recorded"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning %q does not contain %q", got, want)
+		}
 	}
 }
