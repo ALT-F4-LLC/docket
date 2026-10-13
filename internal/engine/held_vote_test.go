@@ -34,7 +34,7 @@ func configureHoldTally(t *testing.T, conn *sql.DB, rule string, voters string) 
 }
 
 // nextRun runs `next --run` over the fixture's run, which is what drives a
-// vote step's lifecycle in production (§8.1 phases 2, 4, and 5).
+// vote step's lifecycle in production.
 func nextRun(t *testing.T, conn *sql.DB, e *Engine) *ReadySteps {
 	t.Helper()
 	ready, err := e.NextSteps(conn, 1, 0, nowMS)
@@ -241,7 +241,7 @@ func TestHeldVoteStillRefusesClaim(t *testing.T) {
 }
 
 // TestHeldVotePassLetsTheComputedValueStand is the approve-computed
-// equivalence (H14): a tally that passes is the same answer `step approve`
+// equivalence: a tally that passes is the same answer `step approve`
 // gives, so the aggregated value stands and the run proceeds.
 func TestHeldVotePassLetsTheComputedValueStand(t *testing.T) {
 	conn := mustDB(t)
@@ -367,7 +367,7 @@ func TestParkedHeldVoteAcceptsReject(t *testing.T) {
 
 	step := heldStep(t, conn, held[0])
 	if step.Status != db.StepDone {
-		t.Fatalf("status = %q after reject, want %q (H14: both verbs record a "+
+		t.Fatalf("status = %q after reject, want %q (both verbs record a "+
 			"decision)", step.Status, db.StepDone)
 	}
 	if routingIs(step.Routing, RoutingPass) {

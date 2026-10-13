@@ -9,20 +9,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket events prune` — engine-spec §3's retention clause as a verb
-// (docs/tdd/events-follow.md §5).
+// `docket events prune` — the event log's retention clause as a verb.
 //
 // THE FIRST DESTRUCTIVE VERB IN THE ENGINE SURFACE. The refusals live in
 // internal/engine (events_prune.go); what lives here is the surface that makes
 // the destruction deliberate: no default target, and no deletion without
 // `--yes`.
 //
-// THE FLAG SET IS WIDER THAN §1'S SPELLING, which writes `docket events prune
-// --before …` and stops. `--before-run`, `--run`, `--dry-run`, and `--yes` are
-// additions, and each is RECORDED as an AMENDMENT rather than made silently —
-// the same class as `events list`, and resolved the same way: the shape
-// §1 and §3 specify is satisfied, and the spelling is recorded. Every addition
-// is in the direction of refusing more.
+// THE FLAG SET IS WIDER THAN THE SUMMARY SPELLING, which writes `docket events
+// prune --before …` and stops. `--before-run`, `--run`, `--dry-run`, and
+// `--yes` are additions, and each is RECORDED rather than made silently — the
+// same class as `events list`, and resolved the same way: the shape is
+// satisfied, and the spelling is recorded. Every addition is in the direction
+// of refusing more.
 
 var eventsPruneCmd = &cobra.Command{
 	Use:   "prune",
@@ -36,9 +35,10 @@ the log's growth, and it refuses more than it accepts:
     deleted. A live run's events are what the engine computes from — its budget
     floor is summed from its claim events, and its saga resumes from its gate
     events — so pruning them would change the run rather than only its record.
-  - Events younger than ` + "`docket config events.retain`" + ` are never deleted. That
-    window defaults to 0, which retains EVERYTHING: prune deletes nothing at all
-    until a retention policy is set.
+  - Without ` + "`--before-run`" + `, events younger than ` + "`docket config events.retain`" + `
+    are never deleted; ` + "`--before-run`" + ` is not held by that window. The window
+    defaults to 0, which imposes no retention window: a prune at 0 is bounded
+    only by ` + "`--before`" + ` or ` + "`--before-run`" + ` and by the live-run refusal above.
 
 Pruning breaks the audit trail that ` + "`docket run report`" + ` reports over. Prune
 whole runs that have finished rather than the oldest events across all of them,
@@ -46,14 +46,17 @@ and the report stays honest for every run it still covers.
 
 A consumer whose cursor falls below what survives is told so — ` + "`GONE`" + `
 (exit 9), naming the seq to resume from — rather than handed a short answer it
-would read as having caught up.`,
+would read as having caught up. Pruning a step's claim event also makes
+` + "`docket step context`" + ` and ` + "`docket step render`" + ` for that step return ` + "`GONE`" + `
+(exit 9): the recorded issue body and scope are read back from that event, so
+there is no seq to resume from.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runEventsPrune(cmd, getWriter(cmd))
 	},
 }
 
-// eventsPruneResult is the verb's answer (P7).
+// eventsPruneResult is the verb's answer.
 //
 // It is NOT a Collection: a prune returns one fact about what happened, not a
 // page of items, and wrapping a scalar answer in `{items, total, truncated}`
@@ -90,7 +93,7 @@ func runEventsPrune(cmd *cobra.Command, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	// P6: A DELETION REQUIRES `--yes`.
+	// A DELETION REQUIRES `--yes`.
 	//
 	// It is required in BOTH modes rather than only under `--json`. The
 	// alternative — prompting a human and requiring the flag only from a script
@@ -141,8 +144,8 @@ func runEventsPrune(cmd *cobra.Command, w *output.Writer) error {
 // because that number is what a consumer sets its cursor to and an operator
 // running this verb is usually about to tell one.
 //
-// It names what the retention window held back whenever it held anything back
-// (P14). An operator who asked to prune below seq 900, pruned 200 events, and
+// It names what the retention window held back whenever it held anything back.
+// An operator who asked to prune below seq 900, pruned 200 events, and
 // was told only "200" would conclude the verb is broken; told "700 held by
 // events.retain", they know it is policy.
 func renderPruneResult(r eventsPruneResult) string {

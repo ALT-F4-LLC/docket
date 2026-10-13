@@ -1,0 +1,50 @@
+# shellcheck shell=bash
+#
+# Sourced by completion gates, never run. The engine commits a step's work
+# before its record-time gate rerun, so the uncommitted tree alone is empty
+# by then; DOCKET_GATE_BASE (exported by the engine to completion gates)
+# names the base of the committed range the gate must also scan.
+#
+# gate_range <gate> <mode> sets GATE_RANGE in the caller's shell to
+# `<sha>..HEAD` when DOCKET_GATE_BASE resolves to a commit, or to "" when it
+# does not. Each mode fixes what an unusable base means:
+#
+#   own-gate  Running as <gate> (DOCKET_GATE=<gate>) fails closed: the
+#             caller exits 2. Any other caller without a usable base (the
+#             ac-commands pre-gate, a `tests` run, a hand run) gets "" and
+#             scans the tree only.
+#   always    Every caller fails closed with exit 2, whatever DOCKET_GATE
+#             names, for a gate that cannot measure anything from the tree
+#             alone.
+#   set-base  As own-gate, except that any other caller given a non-empty
+#             base that does not resolve exits 1 instead of scanning the
+#             tree only. An unset or empty base still yields "".
+
+gate_range() {
+  local gate="$1" mode="$2" base="${DOCKET_GATE_BASE:-}" sha="" failure
+  GATE_RANGE=""
+  case "$mode" in
+    own-gate|always|set-base) ;;
+    *)
+      echo "${gate} FAILED: gate_range: unknown mode '${mode}'." >&2
+      exit 2
+      ;;
+  esac
+  if [ -n "$base" ] && sha=$(git rev-parse --verify --quiet --end-of-options "${base}^{commit}"); then
+    GATE_RANGE="${sha}..HEAD"
+    return 0
+  fi
+  if [ -z "$base" ]; then
+    failure="${gate} FAILED: DOCKET_GATE_BASE is unset; cannot select committed changes."
+  else
+    failure="${gate} FAILED: DOCKET_GATE_BASE '${base}' does not resolve to a commit; cannot select committed changes."
+  fi
+  if [ "$mode" = always ] || [ "${DOCKET_GATE:-}" = "$gate" ]; then
+    echo "$failure" >&2
+    exit 2
+  fi
+  if [ "$mode" = set-base ] && [ -n "$base" ]; then
+    echo "$failure" >&2
+    exit 1
+  fi
+}

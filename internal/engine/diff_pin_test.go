@@ -7,7 +7,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// issue.diff pinning (DKT-75, amending §6.7.1 D1).
+// issue.diff pinning (DKT-75).
 //
 // The diff used to be recomputed at the completion of EVERY executor step,
 // against the live tree at that step's own record time. For read-shaped
@@ -99,7 +99,7 @@ func TestDiffPinsToTheTreeHoldingStep(t *testing.T) {
 }
 
 // TestDiffStillRecordsAtEveryHoldingStep: a definition that declares nothing
-// keeps D1's original behavior — holds_tree defaults to true, so every
+// keeps the original behavior — holds_tree defaults to true, so every
 // executor step still records. Dormancy for existing repos.
 func TestDiffStillRecordsAtEveryHoldingStep(t *testing.T) {
 	conn := mustDB(t)

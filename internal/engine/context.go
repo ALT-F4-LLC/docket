@@ -12,30 +12,38 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The context bundle — engine-spec §11.4's `context`, and the determinism
-// engine-core §8 and §9 item 5 require of it.
+// The context bundle — the step's `context`, and the determinism required of
+// it.
 //
-// ASSEMBLY IS PURE AND SNAPSHOT-PINNED. It reads, and may read, exactly five
-// sources (TDD §6.6):
+// ASSEMBLY IS PURE AND SNAPSHOT-PINNED. It reads, and may read, exactly six
+// sources (five, plus DKT-1079's sixth):
 //
 //  1. the step row and its definition, from the PINNED workflow's `parsed`
 //  2. `run_issues.body_snapshot`   — never the live issue body
 //  3. `run_issues.issue_snapshot`  — title/kind/labels/scope as of activation
-//  4. recorded `artifacts` bodies, resolved per §6.7's input rule
+//  4. recorded `artifacts` bodies, resolved per the input rule — over the
+//     run's table at claim, and over the bindings THAT CLAIM RECORDED
+//     (`step_inputs`) on every read-back of a handed-out step, so the run
+//     moving on cannot re-bind what a step already saw (DKT-1054)
 //  5. `pins` rows (path + hash) — the LIST, not the file contents
+//  6. `run_notes` rows — the standing statements `run note add` recorded
+//     against the run, every one, in insertion order
 //
 // It never reads the working tree, never re-reads a file a pin names, and reads
 // NO LIVE ISSUE FIELD AT ALL: `id` is the run_issues key and every other member
-// of §11.4's `context.issue` comes from a snapshot column.
+// of `context.issue` comes from a snapshot column. The sixth source is in the
+// artifact category, not the issue one: a note is RECORDED RUN STATE, written
+// once by a verb and event-logged, exactly as an artifact is written once at
+// completion — never a live field an `issue edit` can move.
 //
-// The scheduler's live read of `issues.scope_globs` (§6.3 R4) is NOT context
-// assembly and is deliberately outside this file. Two different questions
-// legitimately have two different answers (§5.1.1).
+// The scheduler's live read of `issues.scope_globs` is NOT context assembly
+// and is deliberately outside this file. Two different questions legitimately
+// have two different answers.
 //
 // TestContextAssemblyReadsNoLiveState enforces this at the code level; the
-// golden bundles (§8.3) are the same property at the CLI level.
+// golden bundles are the same property at the CLI level.
 
-// Context is §11.4's `context`, field for field:
+// Context is the step's `context`, field for field:
 //
 //	{ step: <next row>, issue: {id, title, body_snapshot, kind, labels, scope},
 //	  inputs: [{artifact, kind, producer_step, body}], pins: [{path, sha256}],
@@ -45,20 +53,18 @@ type Context struct {
 	Issue  ContextIssue   `json:"issue"`
 	Inputs []ContextInput `json:"inputs"`
 	Pins   []ContextPin   `json:"pins"`
-	// LoopEntry is the ordinal k and the routing that entered it, NULL at k=0
-	// (§6.4). It is a pointer so the wire shape carries `null` rather than a
+	// LoopEntry is the ordinal k and the routing that entered it, NULL at k=0.
+	// It is a pointer so the wire shape carries `null` rather than a
 	// zero-valued object, which a consumer would have to know to ignore.
 	LoopEntry *LoopEntry `json:"loop_entry"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
-	// inside it (genericity.md).
+	// inside it.
 	Metadata map[string]any `json:"metadata,omitempty"`
 	// PreGates carries the results of the step's `pre = true` gates, in
-	// declared order (gates-trust §7.6.3, amendment A5).
+	// declared order, so the results are included in the context bundle.
 	//
 	// PRESENT ONLY WHEN THE STEP DECLARES PRE-GATES — absent, not empty,
-	// otherwise, which is the rule the v6 `lease` object established. §11.4's
-	// `context` line names no member for these while §11.1 requires the results
-	// be "included in the context bundle"; the amendment proposes this name.
+	// otherwise, which is the rule the v6 `lease` object established.
 	PreGates []PreGateResult `json:"pre_gates,omitempty"`
 	// TargetSHA and TargetWorktree are the machine-readable target ref
 	// (DKT-24): the commit the step's resolved `issue.diff` tree stood at, and
@@ -74,6 +80,11 @@ type Context struct {
 	// new sha. Both absent when the resolved diff carries no round record.
 	TargetSHA      string `json:"target_sha,omitempty"`
 	TargetWorktree string `json:"target_worktree,omitempty"`
+	// DiffBase is the commit the resolved `issue.diff` was computed from, read
+	// from the same round record (DKT-3307), so a judge reviewing it knows
+	// the range without rebuilding the diff. Absent for a record that
+	// predates the field.
+	DiffBase string `json:"diff_base,omitempty"`
 	// Resolution is the ruling recorded on THIS STEP that sent it back for
 	// rework — the routing, and the note whoever decided it wrote (DKT-247).
 	//
@@ -90,9 +101,39 @@ type Context struct {
 	// makes easy. Read from `steps.routing`, which holds the CURRENT routing
 	// record for this step alone.
 	//
+	// TWO WRITERS PUT A RULING HERE, and together they are the ONLY reliable
+	// operator-steering channels into a packet (DKT-725): `step resolve --as
+	// retry|rerun-gates -m` leaves the note on the SAME row it re-executes,
+	// and `step resolve --as fix-round -m` stamps it onto the NEW round's
+	// instantiated rows (stampEntryRouting), because the parked row it was
+	// issued against is superseded and renders nothing again. Issue COMMENTS
+	// are not a context source at all — the source rule, by design — and a
+	// mid-run `description` edit never renders either, because
+	// `body_snapshot` froze at activation. `run refresh-body`
+	// (DKT-2291) is that freeze's one explicit exception, and it is a separate
+	// operator act rather than a consequence of the edit.
+	//
 	// nil when the step carries no routing record, so a first-round packet is
 	// byte-identical to what it always was.
 	Resolution *ContextResolution `json:"resolution,omitempty"`
+	// Notes are the run's standing statements (DKT-1079): every `run note
+	// add` recorded against THIS RUN, in insertion order, whichever issue or
+	// step the bundle is for.
+	//
+	// It is the one steering channel that is run-wide rather than
+	// step-scoped. `Resolution` reaches the step a ruling was issued against
+	// (and the round it authorizes), which is right for a ruling about one
+	// step's work and useless for a fact about the whole run — RUN-70's
+	// conductor learned BEFORE DISPATCH that a required gate fails on clean
+	// HEAD, got the operator's disposition, filed the tracking issue, and had
+	// nowhere to put any of it that a packet reads: issue comments are an
+	// audit surface (the source rule, by design), the body froze at
+	// activation, and no step had a routing record yet. The executor
+	// re-derived the failure and filed a duplicate.
+	//
+	// omitempty, so a run with no notes renders every bundle byte-identically
+	// to what it always was.
+	Notes []RunNote `json:"notes,omitempty"`
 }
 
 // ContextResolution is the routing that sent a step back, and its note.
@@ -129,9 +170,12 @@ type ContextResolution struct {
 
 // ContextGateOutcome is one non-passing gate as the rework packet carries it.
 //
-// It is the LAST attempt per gate, matching the routing rule (§5.6 F4): a gate
-// that failed twice and passed on the third try did not fail, and a packet that
-// listed all three would invite a reader to conclude otherwise.
+// It is the first non-pass row per gate from the routing reduction
+// (routingGateRows, as failedGatesOverRows reads it), sorted by gate name, so
+// the packet names exactly the gates the step routed on: a command retried to
+// a pass or a gate whose latest rerun-gates execution passed is
+// omitted, and a fence gate whose earlier line failed is named even when its
+// last line passed.
 type ContextGateOutcome struct {
 	Gate string `json:"gate"`
 	// Verdict is `fail`, `unmatched`, or `skipped` — never `pass`, since a
@@ -143,10 +187,10 @@ type ContextGateOutcome struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// ContextIssue is §11.4's `context.issue`. EVERY field but `id` comes from a
-// snapshot column — that is what makes §9 item 5's mid-run edit immunity hold,
-// and it is why §5.1.1 made title/kind/labels/scope snapshot columns rather
-// than a join against `issues`.
+// ContextIssue is `context.issue`. EVERY field but `id` comes from a snapshot
+// column — that is what makes the bundle immune to mid-run edits, and it is
+// why title/kind/labels/scope are snapshot columns rather than a join against
+// `issues`.
 type ContextIssue struct {
 	ID           string   `json:"id"`
 	Title        string   `json:"title"`
@@ -156,7 +200,7 @@ type ContextIssue struct {
 	Scope        []string `json:"scope"`
 }
 
-// ContextInput is one resolved input artifact, in §11.4's shape.
+// ContextInput is one resolved input artifact, in the bundle's shape.
 type ContextInput struct {
 	Artifact string `json:"artifact"`
 	Kind     string `json:"kind"`
@@ -168,8 +212,8 @@ type ContextInput struct {
 	// when the producing step declared none.
 	//
 	// CARRIED VERBATIM: no re-encoding, no re-validation, no key inspection.
-	// Core validated the shape once, at completion (§6.8 stage 0), and the
-	// schema register is S5's. Re-parsing here would let assembly reject an
+	// Core validated the shape once, at completion, against the schema
+	// register. Re-parsing here would let assembly reject an
 	// artifact the engine already accepted — a packet that fails on data the
 	// ledger holds is a worse failure than the one this field fixes.
 	//
@@ -179,14 +223,14 @@ type ContextInput struct {
 	//
 	// Without it, a step whose contract requires its inputs' structure had only
 	// the prose — and recovering the rest meant reading engine storage directly,
-	// which voids the pinning, the reproducibility, and §6.6's no-live-state
-	// rule that the packet exists to provide.
+	// which voids the pinning, the reproducibility, and the no-live-state rule
+	// that the packet exists to provide.
 	Payload string `json:"payload,omitempty"`
 }
 
-// ContextPin is §11.4's `pins` element. §11.4 gives pins ONE shape, so a
-// workflow pin renders its `path` as `workflow:name@version` rather than
-// growing a second shape (§6.4).
+// ContextPin is one `pins` element. Pins have ONE shape, so a workflow pin
+// renders its `path` as `workflow:name@version` rather than growing a second
+// shape.
 type ContextPin struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -198,7 +242,7 @@ type LoopEntry struct {
 	Routing string `json:"routing"`
 }
 
-// The engine-produced input forms of §6.7.
+// The engine-produced input forms.
 const (
 	inputIssueBody = "issue.body"
 	inputIssueDiff = "issue.diff"
@@ -210,18 +254,261 @@ const (
 	inputGateResults = "gate-results"
 
 	// ArtifactKindIssueDiff is the kind the engine records a computed VCS diff
-	// under (§6.7.1). It is engine-produced rather than step-declared, which is
+	// under. It is engine-produced rather than step-declared, which is
 	// why it is a constant here and not a value read from a definition.
 	ArtifactKindIssueDiff = "issue.diff"
 )
 
-// AssembleContext builds one step's context bundle inside tx.
+// AssembleContext builds one step's context bundle inside tx, resolving its
+// inputs over the run's artifacts AS THEY STAND — the claim-time assembly.
 //
 // It takes a transaction because `step claim` mints the token and assembles the
 // bundle in ONE transaction — "one atomic mediation: an unclaimed executor has
-// nothing, a claimed one has everything" (engine-core §8).
+// nothing, a claimed one has everything".
+//
+// It is the right assembly for a step that has not been handed out: what it
+// returns is what a claim made now would hand over. For a step that HAS been
+// handed out, the answer to "what did this step see" is AssembleRecordedContext.
 func AssembleContext(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+) (*Context, error) {
+	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssue, liveNotes)
+}
+
+// AssembleRecordedContext builds a step's context bundle over the artifacts its
+// claim RECORDED as its inputs (`step_inputs`), instead of the run's current
+// artifact table (DKT-1054).
+//
+// Resolution is a function of run state at assembly time, and run state
+// keeps moving after a step is handed out: the fixture's `fix@1` declares
+// `reconcile.findings`, binds `reconcile@0` at claim (the round that routed
+// it), and then `review@1`, `synthesize@1`, and `reconcile@1` all complete AT
+// ITS OWN ORDINAL. Re-resolving live after that binds `reconcile@1` — an
+// artifact produced by reviewing fix@1's own diff — and reports it as the input
+// fix@1 read. RUN-64's STEP-2992 read exactly that way (and STEP-2974,
+// STEP-3002, and the RUN-53/56/61 passes before it), while `step_inputs` for
+// the same row held ARTIFACT-2709 (`reconcile@0`) the whole time, written by
+// the claim and read by nothing. The same drift moved `issue.diff` — and with
+// it `target_sha` — onto a record superseded after the step ran (a re-pin,
+// DKT-1034, revises a producer's diff in place at the same ordinal).
+//
+// THE RESOLVERS ARE NOT DUPLICATED. This runs the identical assembly over a
+// different artifact set — the recorded rows — so the declared-position order,
+// the engine-produced forms (`issue.body` from the snapshot, an empty
+// `issue.diff`, `gate-results` from the ledger), the prior-round pass, the
+// dedupe, and the target lift are the same code the claim ran. Every recorded
+// artifact was selected by exactly the rule that re-selects it here, and no
+// artifact recorded after the claim is a candidate, so the result is the
+// claim-time bundle: byte-identical inputs, however far the run has moved.
+//
+// Two forms are ledger reads rather than artifact reads and stay so:
+// `<step>.gate-results` and `<step>.vote-record` resolve the producer INSTANCE
+// by the same ordinal rule and serve its recorded rows, which are append-only
+// per instance. A self-declared `<self>.gate-results` therefore carries the
+// step's completion-side gate rows on a read-back that were not yet recorded
+// at claim; that is the one engine-produced input whose read-back can grow.
+func AssembleRecordedContext(
+	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+) (*Context, error) {
+	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssue, recordedNotes)
+}
+
+// artifactSource loads the artifact set one assembly resolves over.
+type artifactSource func(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error)
+
+// liveArtifacts is the run's whole artifact table — the claim's view.
+func liveArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
+	return db.ListRunArtifactsTx(tx, step.RunID)
+}
+
+// recordedArtifacts is the set the step's claim recorded — the read-back's view.
+func recordedArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
+	return db.ListStepInputArtifactsTx(tx, step.ID)
+}
+
+// issueSource corrects the `context.issue` an assembly states, given the one
+// the run-issue row currently holds.
+//
+// It is the artifactSource seam applied to the inputs a refresh can move: the
+// description (`body_snapshot`, DKT-2291) and the scope inside
+// `issue_snapshot` (DKT-869). Both are columns rather than per-step rows, so
+// unlike `step_inputs` there is nothing a claim recorded to read back — and a
+// read-back that took the live columns would report a body or a scope the step
+// was never given the moment `run refresh-body` or `run refresh-scope` ran.
+type issueSource func(tx *sql.Tx, step *db.Step, issue *ContextIssue) error
+
+// liveIssue leaves the columns as they stand — the claim's view.
+func liveIssue(*sql.Tx, *db.Step, *ContextIssue) error { return nil }
+
+// recordedIssue rewinds the body and the scope to the ones the step's claim
+// was given, reconstructed from the refresh ledger.
+//
+// The anchor is the CURRENT ATTEMPT'S CLAIM, `started_ms`, not the step row's
+// `created_at_ms`. Neither refresh can run while any step is `claimed`,
+// `running` or `gated`, so no refresh falls between a claim and its record:
+// the EARLIEST refresh of each kind later than the claim is therefore the one
+// that superseded what this attempt was handed, and its `from` side is that
+// value. No later row can improve on that answer, and the event's `steps` list
+// cannot supply it — a step can appear in that list and still have been handed
+// out before the refresh (a `waiting-human` attempt that already recorded), or
+// be absent from it for two different reasons at once.
+//
+// `started_ms` is stamped in the claim transaction and cleared only by the
+// paths that return a row to `pending` — reap, `resolve --as retry`, triage.
+// That clearing is not the absence of a claim: `attempt` is never reset, and
+// a reaped row can leave `pending` without a new claim — a fix-round's
+// supersede sweep moves it straight to `superseded`, touching neither
+// `attempt` nor `started_ms`. Such a row passes recordedClaim (`attempt > 0`,
+// status terminal) and reaches here with a nil anchor, so the live column is
+// a FALLBACK, not the body or scope its last claim was handed —
+// recordedArtifacts still serves that reaped attempt's `step_inputs`, so the
+// read-back can pair one attempt's artifacts with a later body or scope. A nil
+// anchor means this path, or pre-v16 history.
+//
+// RETENTION: the reconstruction reads refresh rows from the events table,
+// which `events prune` deletes for a terminal run. A prune deletes every event
+// below its boundary, so while this attempt's own `step-claimed` row survives,
+// every refresh row after it survives too. Once a prune covering the run has
+// removed that claim row, a missing refresh row no longer means "no refresh",
+// and the read-back reports the body and scope GONE instead of stating the
+// live columns as what this attempt was handed.
+func recordedIssue(tx *sql.Tx, step *db.Step, issue *ContextIssue) error {
+	if step.StartedMS == nil {
+		return nil
+	}
+	claimedAtMS := *step.StartedMS
+	var claimPruned bool
+	err := tx.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM events
+		                 WHERE kind = ? AND (run_id = ? OR run_id IS NULL))
+		    AND NOT EXISTS (SELECT 1 FROM events
+		                     WHERE kind = ? AND step_id = ? AND at_ms >= ?)`,
+		EventEventsPruned, step.RunID,
+		EventStepClaimed, step.ID, claimedAtMS).Scan(&claimPruned)
+	if err != nil {
+		return fmt.Errorf("reading %s's claim record: %w", step.Instance, err)
+	}
+	if claimPruned {
+		return goneErr(
+			"step %s: its recorded issue body and scope are unavailable — %s's "+
+				"events up to this claim were pruned (`events prune`), and the "+
+				"refreshes the read-back reconstructs from were pruned with them",
+			step.Instance, model.FormatRunID(step.RunID))
+	}
+	if issue.BodySnapshot, err = recordedIssueBody(tx, step, claimedAtMS, issue.BodySnapshot); err != nil {
+		return err
+	}
+	issue.Scope, err = recordedIssueScope(tx, step, claimedAtMS, issue.Scope)
+	return err
+}
+
+// recordedIssueBody is the body the claim at claimedAtMS was given (DKT-2291):
+// the superseding refresh's `from_body`, or the column when none followed.
+func recordedIssueBody(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot string) (string, error) {
+	var refresh struct {
+		FromBody string `json:"from_body"`
+	}
+	found, err := refreshAfterClaim(tx, step, claimedAtMS, EventIssueBodyRefreshed, &refresh)
+	if err != nil || !found {
+		return snapshot, err
+	}
+	return refresh.FromBody, nil
+}
+
+// recordedIssueScope is the scope the claim at claimedAtMS was given (DKT-869):
+// the superseding refresh's `from`, or the snapshot's when none followed.
+func recordedIssueScope(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot []string) ([]string, error) {
+	var refresh struct {
+		From []string `json:"from"`
+	}
+	found, err := refreshAfterClaim(tx, step, claimedAtMS, EventIssueScopeRefreshed, &refresh)
+	if err != nil || !found {
+		return snapshot, err
+	}
+	// An undeclared frozen scope is encoded as `null`; contextIssue states it
+	// as `[]`, and the read-back must not disagree with it on that case.
+	if refresh.From == nil {
+		return []string{}, nil
+	}
+	return refresh.From, nil
+}
+
+// recordedAttachedPaths is the `issue.files` path list a recorded claim was
+// given: the earliest later `issue-files-refreshed` event's `from`, or the
+// snapshot's frozen list when none followed. It shares recordedIssue's anchor,
+// and with no anchor the frozen list is the same fallback.
+func recordedAttachedPaths(conn *sql.DB, step *db.Step) ([]string, error) {
+	frozen, err := frozenAttachedPaths(conn, step.RunID, step.IssueID)
+	if err != nil || step.StartedMS == nil {
+		return frozen, err
+	}
+	var refresh struct {
+		From []string `json:"from"`
+	}
+	found, err := refreshAfterClaim(conn, step, *step.StartedMS, EventIssueFilesRefreshed, &refresh)
+	if err != nil || !found {
+		return frozen, err
+	}
+	return refresh.From, nil
+}
+
+// rowQuerier is the single-row read refreshAfterClaim needs, satisfied by
+// *sql.Tx for context assembly and *sql.DB for packet rendering.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// refreshAfterClaim decodes into `into` the earliest `kind` refresh of the
+// step's issue that followed the claim at claimedAtMS, reporting whether one
+// exists. None means nothing superseded what the claim was handed, so the
+// column still holds it.
+func refreshAfterClaim(
+	q rowQuerier, step *db.Step, claimedAtMS int64, kind string, into any,
+) (bool, error) {
+	var data string
+	err := q.QueryRow(
+		`SELECT data FROM events
+		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
+		  ORDER BY at_ms, seq
+		  LIMIT 1`,
+		kind, step.RunID, step.IssueID, claimedAtMS).Scan(&data)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading %s's %s events: %w", step.Instance, kind, err)
+	}
+	if err := json.Unmarshal([]byte(data), into); err != nil {
+		return false, fmt.Errorf("reading %s's %s events: %w", step.Instance, kind, err)
+	}
+	return true, nil
+}
+
+// recordedClaim reports whether a step's context is the one a claim recorded —
+// the rule by which a read verb picks AssembleRecordedContext over
+// AssembleContext (DKT-1054).
+//
+// A step has a recorded snapshot from the claim that handed it out, and keeps
+// it through everything that attempt becomes: `claimed`, `running`, `gated`,
+// `done`, a gate park, a supersession by `resolve --as fix-round` — all of
+// them are that attempt, and "what did this step see" has one answer for all
+// of them. `attempt` counts claims for the step's whole life (it is never
+// reset), so `attempt > 0` is "was ever handed out".
+//
+// A step back at `pending` is the exception, and it is deliberate: a lapsed
+// lease reaped, or `resolve --as retry`, returns the row to the pool with its
+// old bindings still in the table, and the next claim will record new ones.
+// Until it does, the honest answer to a read is the live one — what THAT claim
+// will hand over — not the bindings of an attempt that is over. A step never
+// claimed (`attempt == 0`: every `action`, `human`, and `vote` step, and every
+// executor step still waiting) has no snapshot, so it reads live too.
+func recordedClaim(step *db.Step) bool {
+	return step.Attempt > 0 && step.Status != db.StepPending
+}
+
+func assembleContext(
+	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+	source artifactSource, issueView issueSource, notesOf noteSource,
 ) (*Context, error) {
 	def := sched.defs[step.WorkflowID]
 	if def == nil {
@@ -240,24 +527,35 @@ func AssembleContext(
 	}
 
 	// Sources 2 and 3: the snapshots. NOTHING below reads the `issues` table.
-	issue, err := contextIssue(tx, step.RunID, step.IssueID)
+	// `linked` is the activation-pinned cross-issue artifact ids (DKT-547),
+	// carried in the issue snapshot and read back with it.
+	issue, linked, err := contextIssue(tx, step.RunID, step.IssueID)
 	if err != nil {
 		return nil, err
 	}
+	// Which description and scope this assembly states (DKT-2291, DKT-869).
+	// It lands before the resolvers because `== REQUEST` and
+	// `== INPUT issue.body` both render the description, so a read-back that
+	// corrected only one of them would reproduce the split packet the refresh
+	// exists to prevent.
+	if err := issueView(tx, step, issue); err != nil {
+		return nil, err
+	}
 
-	// Source 4: the resolved input artifacts. The run's artifact rows are
-	// loaded ONCE and shared with the prior-round pass below — both read the
-	// same snapshot, and the table's bodies scale with the run's whole
-	// recorded output, so a second load doubled exactly the cost this path
-	// pays most of.
+	// Source 4: the resolved input artifacts. The artifact rows are loaded
+	// ONCE — from the run's table for a claim, from the claim's recorded
+	// bindings for a read-back (the source) — and shared with the prior-round
+	// pass below: both read the same snapshot, and the table's bodies scale
+	// with the run's whole recorded output, so a second load doubled exactly
+	// the cost this path pays most of.
 	var artifacts []*db.Artifact
 	if len(spec.Inputs) > 0 || loopReentryEmitter(sched, step, spec) {
-		artifacts, err = db.ListRunArtifactsTx(tx, step.RunID)
+		artifacts, err = source(tx, step)
 		if err != nil {
 			return nil, err
 		}
 	}
-	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts)
+	inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts, linked)
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +590,14 @@ func AssembleContext(
 		return nil, err
 	}
 
+	// Source 6: the run's notes (DKT-1079), read in the same transaction as
+	// everything else so a claimant sees the notes that stood at the moment
+	// its token was minted; a read-back states only those (the source).
+	notes, err := notesOf(tx, step)
+	if err != nil {
+		return nil, err
+	}
+
 	metadata, err := decodeMetadata(step.Metadata)
 	if err != nil {
 		return nil, err
@@ -307,9 +613,63 @@ func AssembleContext(
 	return &Context{
 		Step: row, Issue: *issue, Inputs: inputs, Pins: pins,
 		LoopEntry: loopEntryOf(step), Metadata: metadata,
-		TargetSHA: sha, TargetWorktree: worktree,
-		Resolution: resolution,
+		TargetSHA: sha, TargetWorktree: worktree, DiffBase: resolveDiffBase(inputs),
+		Resolution: resolution, Notes: notes,
 	}, nil
+}
+
+// noteSource resolves the run notes an assembly states.
+//
+// It is the bodySource seam applied to the third input that moves after a
+// claim: notes are append-only run state with no per-step record, so a
+// read-back that took the whole table would report notes added after the
+// claim as guidance the step was given.
+type noteSource func(tx *sql.Tx, step *db.Step) ([]RunNote, error)
+
+// liveNotes is every note the run holds — the claim's view.
+func liveNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
+	return contextNotes(tx, step.RunID)
+}
+
+// recordedNotes is the notes the step's current claim was handed: those
+// recorded at or before its `started_ms`. The claim stamps `started_ms` with
+// the same clock reading its assembly runs at, so a note recorded in that
+// millisecond was already visible to it.
+//
+// A nil anchor falls back to the live notes, by the rule and for the reasons
+// recordedIssueBody documents.
+func recordedNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
+	notes, err := contextNotes(tx, step.RunID)
+	if err != nil || step.StartedMS == nil {
+		return notes, err
+	}
+	var handed []RunNote
+	for _, n := range notes {
+		if n.RecordedAtMS <= *step.StartedMS {
+			handed = append(handed, n)
+		}
+	}
+	return handed, nil
+}
+
+// contextNotes reads the run's notes into the bundle's shape (DKT-1079).
+//
+// nil, not an empty slice, when the run has none: `omitempty` elides either,
+// but a nil keeps the in-memory bundle a test compares field-by-field equal to
+// one assembled before the field existed.
+func contextNotes(tx *sql.Tx, runID int) ([]RunNote, error) {
+	rows, err := db.ListRunNotesTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	out := make([]RunNote, 0, len(rows))
+	for _, n := range rows {
+		out = append(out, runNoteFromRow(n))
+	}
+	return out, nil
 }
 
 // attachGateOutcomes fills a resolution's failing-gate list (DKT-261).
@@ -327,30 +687,13 @@ func attachGateOutcomes(tx *sql.Tx, step *db.Step, res *ContextResolution) error
 		return err
 	}
 
-	// LAST attempt per gate, matching F4's routing rule: a gate that failed
-	// twice and passed on the third try did not fail.
-	last := make(map[string]db.GateResultRow)
-	order := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if r.Pre {
-			continue // PG4: a pre-gate is an input, not a judgment of the step.
-		}
-		prev, seen := last[r.Gate]
-		if !seen {
-			order = append(order, r.Gate)
-		}
-		if !seen || r.Ordinal >= prev.Ordinal {
-			last[r.Gate] = r
-		}
-	}
-
-	for _, gate := range order {
-		r := last[gate]
-		if r.Verdict == db.GateVerdictPass {
-			continue
-		}
+	// The gates the step ROUTED on, from the reduction the routing verdict
+	// reads (routingGateRows via failedGatesOverRows): the first non-pass row
+	// per gate, so a fence gate whose earlier line failed is named even when
+	// its last line passed.
+	for _, g := range failedGatesOverRows(rows) {
 		res.Gates = append(res.Gates, ContextGateOutcome{
-			Gate: r.Gate, Verdict: r.Verdict, Reason: r.Reason,
+			Gate: g.Gate, Verdict: g.Verdict, Reason: g.Reason,
 		})
 	}
 	return nil
@@ -379,9 +722,9 @@ func resolutionOf(step *db.Step) *ContextResolution {
 }
 
 // resolveTarget lifts the round record out of the resolved `issue.diff`
-// input's payload (DKT-24). The FIRST diff input wins: §6.7 resolves one per
-// declaration, and a bundle carrying several describes one tree recorded at
-// one moment — the resolver's ordinal scoping already guarantees that.
+// input's payload (DKT-24). The FIRST diff input wins: resolution yields one
+// per declaration, and a bundle carrying several describes one tree recorded
+// at one moment — the resolver's ordinal scoping already guarantees that.
 func resolveTarget(inputs []ContextInput) (sha, worktree string) {
 	for _, in := range inputs {
 		if in.Kind != ArtifactKindIssueDiff || in.Payload == "" {
@@ -399,13 +742,19 @@ func resolveTarget(inputs []ContextInput) (sha, worktree string) {
 	return "", ""
 }
 
-// contextIssue materializes §11.4's `context.issue` from the two snapshot
+// contextIssue materializes `context.issue` from the two snapshot
 // columns, and from nothing else.
 //
 // `id` is the run_issues key — the one field that is not snapshot-derived, and
 // it cannot drift because an issue's id never changes. Every other field comes
-// from `issue_snapshot`, which activation froze (§5.1.1).
-func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
+// from `issue_snapshot`, which activation froze.
+//
+// The second return is the snapshot's `linked` pin set (DKT-547): declared
+// `issue.linked.<relation>.<kind>` suffix -> artifact ids, as activation
+// resolved and froze them. It rides the same read because it lives in the same
+// column; it is not a member of the wire-shape ContextIssue, because bundle
+// consumers read artifacts through `inputs`, never through `issue`.
+func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, map[string][]int, error) {
 	var (
 		body     sql.NullString
 		snapshot sql.NullString
@@ -415,11 +764,11 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
 		  WHERE run_id = ? AND issue_id = ?`, runID, issueID,
 	).Scan(&body, &snapshot)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("issue %s is not in run %s",
+		return nil, nil, fmt.Errorf("issue %s is not in run %s",
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading the issue snapshot: %w", err)
+		return nil, nil, fmt.Errorf("reading the issue snapshot: %w", err)
 	}
 
 	out := &ContextIssue{
@@ -429,15 +778,17 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
 		Scope:        []string{},
 	}
 
+	var linked map[string][]int
 	if snapshot.String != "" {
 		var frozen struct {
-			Title  string   `json:"title"`
-			Kind   string   `json:"kind"`
-			Labels []string `json:"labels"`
-			Scope  []string `json:"scope"`
+			Title  string           `json:"title"`
+			Kind   string           `json:"kind"`
+			Labels []string         `json:"labels"`
+			Scope  []string         `json:"scope"`
+			Linked map[string][]int `json:"linked"`
 		}
 		if err := json.Unmarshal([]byte(snapshot.String), &frozen); err != nil {
-			return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
+			return nil, nil, fmt.Errorf("reading the issue snapshot for %s: %w",
 				model.FormatID(issueID), err)
 		}
 		out.Title, out.Kind = frozen.Title, frozen.Kind
@@ -447,12 +798,13 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, error) {
 		if frozen.Scope != nil {
 			out.Scope = frozen.Scope
 		}
+		linked = frozen.Linked
 	}
-	return out, nil
+	return out, linked, nil
 }
 
 // contextPins reads the pin LIST — paths and hashes. It never opens a pinned
-// file: §6.6 is explicit that assembly "never re-reads a file a pin names".
+// file: assembly never re-reads a file a pin names.
 // The hash IS the contract; re-reading would make the bundle depend on the
 // working tree, which is exactly what the pin exists to prevent.
 func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
@@ -465,9 +817,9 @@ func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
 		path := p.Ref
 		switch p.Kind {
 		case db.PinKindWorkflow, db.PinKindSchema:
-			// §11.4 gives pins one shape, so a registered-object pin renders its
+			// Pins have one shape, so a registered-object pin renders its
 			// ref into the `path` slot with its KIND as a scheme, rather than
-			// growing a second shape a consumer must branch on (§6.4). A bare
+			// growing a second shape a consumer must branch on. A bare
 			// `aggregate@1` in a slot named `path` would be indistinguishable
 			// from a file someone happened to name that.
 			path = p.Kind + ":" + p.Ref
@@ -478,26 +830,41 @@ func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
 }
 
 // previousRoundInputs binds the PREVIOUS round's artifacts of a loop
-// re-entry step's own emitted kind (DKT-63): review@k reads review@(k-1)'s
-// fanout findings and the reconciled set beside the fix's change-summary,
-// so a re-review judge reads the critique it must answer rather than the
-// loop body's summary of it. RUN-5's re-review judges had only the fix
-// step's own account — the author's summary of the critique of the author's
-// work — and could not tell an answered ask from an ask answered as the fix
-// characterised it, nor compute finding volume across rounds from one side
-// of the exchange.
+// re-entry step's own emitted kind, from the step's OWN LINEAGE (DKT-63,
+// narrowed by DKT-1055): review@k reads review@(k-1)'s fanout findings and
+// the reconciled set beside the fix's change-summary, so a re-review judge
+// reads the critique it must answer rather than the loop body's summary of
+// it. RUN-5's re-review judges had only the fix step's own account — the
+// author's summary of the critique of the author's work — and could not tell
+// an answered ask from an ask answered as the fix characterised it, nor
+// compute finding volume across rounds from one side of the exchange.
 //
 // The rule is structural, read from the pinned definition
 // (loopReentryEmitter): the step is at ordinal > 0, inside the loop closure
 // (the same merged set blockingLoopBodyAbsent consults), and emits a kind —
-// then every DONE same-issue producer at ordinal k-1 contributes its newest
-// artifact of that kind (latestPerProducer, f6b28cc's binding rule), in
-// §6.7's within-input order (sortArtifacts) — the same collapse and the same
-// order every declared input resolves under. "Its own emitted kind" is what
-// keeps this generic: the critique a step answers is definitionally the kind
-// it produces, and core never reads what the kind means. nil when the step
-// is not a re-entry — ordinal 0, an unlooped definition, or a kindless step
-// — so every other packet is byte-identical.
+// then every DONE same-issue producer at ordinal k-1 IN THE STEP'S LINEAGE
+// (previousRoundLineage) contributes its newest artifact of that kind
+// (latestPerProducer, f6b28cc's binding rule), in the within-input order
+// (sortArtifacts) — the same collapse and the same order every declared
+// input resolves under. "Its own emitted kind" is what keeps this generic:
+// the critique a step answers is definitionally the kind it produces, and
+// core never reads what the kind means. nil when the step is not a re-entry
+// — ordinal 0, an unlooped definition, or a kindless step — so every other
+// packet is byte-identical.
+//
+// THE LINEAGE IS NOT EVERY PRODUCER OF THE KIND. DKT-63's first cut matched
+// on kind alone, and in every change workflow `review`, `synthesize`, and
+// `reconcile` all emit `findings` — so synthesize@k received review@(k-1)'s
+// whole raw fanout beside synthesize@(k-1) and reconcile@(k-1), on top of
+// its declared `review.*` (already ordinal-scoped to round k). A
+// security-change round-2 synthesis carried a 263KB packet — four raw judge
+// payloads from the round before, whose digest it was ALSO carrying as
+// reconcile@(k-1)'s aggregate — and spent 2.13M cache-read tokens on it. The
+// previous round a step answers is the prior round of ITS OWN lineage: the
+// same step name (review's own lineage IS the fanout, which is how DKT-63's
+// re-review behaviour survives without a special case) plus the standing set
+// the round's fix acted on. Nothing about this is scopeable from the
+// definition's `inputs`, because the pass is engine-side.
 //
 // `artifacts` is the caller's already-loaded snapshot (AssembleContext loads
 // it once for this and the declared-input pass together).
@@ -507,6 +874,7 @@ func previousRoundInputs(
 	if !loopReentryEmitter(sched, step, spec) {
 		return nil
 	}
+	lineage := previousRoundLineage(sched.defs[step.WorkflowID], step.StepName, spec.Emits)
 
 	var matched []*db.Artifact
 	for _, a := range artifacts {
@@ -515,7 +883,7 @@ func previousRoundInputs(
 			p.Ordinal != step.Ordinal-1 || !recordedProducer(p.Status) {
 			continue
 		}
-		if a.Kind != spec.Emits {
+		if a.Kind != spec.Emits || !lineage[p.StepName] {
 			continue
 		}
 		matched = append(matched, a)
@@ -525,7 +893,55 @@ func previousRoundInputs(
 	return artifactInputs(matched, sched.stepByID)
 }
 
-// artifactInputs renders artifact rows into the §11.4 bundle's input shape —
+// previousRoundLineage is the set of step NAMES whose previous-round
+// artifacts of `kind` a re-entry step `name` reads (DKT-1055): the step's own
+// name, plus the STANDING-SET producers — the steps each `loop = true` body
+// whose `after_loop` chain contains `name` declares as `<step>.<kind>` inputs
+// of this kind, when the named step is itself inside that body's chain.
+//
+// The body's declared inputs are the definition's own statement of what the
+// round was entered to act on: `fix` reads `reconcile.findings`, so the
+// reconciled set is, by construction, the standing set that round k's
+// re-review and re-synthesis annotate against — and the definition says so
+// without core learning what a finding or a reconciliation is. The chain
+// restriction keeps "previous round" honest: only a step that re-runs each
+// round has a round to be previous, and a one-shot upstream producer the body
+// also reads (`implement.change-summary`) is bound by the per-input
+// fallback, not by this pass. Kind is compared per declaration, so a body's
+// `<step>.gate-results` or `<step>.vote-record` never admits that step's
+// artifacts of some other kind.
+//
+// Read per body rather than over the merged closure so a serves-scoped
+// cluster (DKT-544) contributes only its own standing set: a body whose chain
+// does not contain the consumer has nothing to say about what it answers.
+func previousRoundLineage(def *workflow.Definition, name, kind string) map[string]bool {
+	lineage := map[string]bool{name: true}
+	if def == nil {
+		return lineage
+	}
+	for _, body := range def.Steps {
+		if !body.Loop || body.AfterLoop == "" {
+			continue
+		}
+		chain := downstreamClosure(def, []string{body.AfterLoop})
+		if !chain[name] {
+			continue
+		}
+		for _, declared := range body.Inputs {
+			producer, declaredKind, ok := splitInput(declared)
+			if !ok || !chain[producer] {
+				continue
+			}
+			if declaredKind != "*" && declaredKind != kind {
+				continue
+			}
+			lineage[producer] = true
+		}
+	}
+	return lineage
+}
+
+// artifactInputs renders artifact rows into the bundle's input shape —
 // the ONE reading of the artifact -> ContextInput mapping (the "ARTIFACT-%d"
 // name, the producer instance, body beside payload), shared by the
 // declared-input tail and the prior-round pass so the bundle shape cannot
@@ -566,10 +982,11 @@ func artifactInputs(artifacts []*db.Artifact, producers map[int]*db.Step) []Cont
 // share one name across producers — so the key is the triple the bundle
 // renders: which artifact, of which kind, from which producer instance.
 //
-// The kept entry is the FIRST: §6.11 presents inputs in declared order, and a
-// collapse that kept a later occurrence would move an artifact to a position no
-// author wrote. A list with nothing repeated is returned untouched, so every
-// bundle that never had a duplicate is byte-identical to what it always was.
+// The kept entry is the FIRST: the packet presents inputs in declared order,
+// and a collapse that kept a later occurrence would move an artifact to a
+// position no author wrote. A list with nothing repeated is returned
+// untouched, so every bundle that never had a duplicate is byte-identical to
+// what it always was.
 func dedupeInputs(inputs []ContextInput) []ContextInput {
 	type identity struct {
 		artifact string
@@ -608,14 +1025,10 @@ func loopReentryEmitter(sched *Scheduler, step *db.Step, spec *workflow.Step) bo
 	return def != nil && sched.loopClosure(step.WorkflowID, def)[step.StepName]
 }
 
-// loopEntryOf reports the loop iteration a step belongs to, or nil at ordinal 0
-// (§6.4: "`loop_entry` is the ordinal k and the routing that entered it, null
-// at k=0").
+// loopEntryOf reports the loop iteration a step belongs to, or nil at ordinal 0:
+// `loop_entry` is the ordinal k and the routing that entered it, null at k=0.
 //
-// The routing that ENTERED the loop is recorded on the step at instantiation;
-// phase 4 owns loop entry, so at S3 every step is at ordinal 0 and this returns
-// nil. It is written now rather than later so the wire shape lands whole and a
-// dispatcher consuming bundles today is not broken by the field appearing.
+// The routing that ENTERED the loop is recorded on the step at instantiation.
 func loopEntryOf(step *db.Step) *LoopEntry {
 	if step.Ordinal == 0 {
 		return nil
@@ -623,18 +1036,20 @@ func loopEntryOf(step *db.Step) *LoopEntry {
 	return &LoopEntry{Ordinal: step.Ordinal, Routing: step.Routing}
 }
 
-// resolveInputs is §6.7: a step's declared `inputs`, resolved over `done`
+// resolveInputs resolves a step's declared `inputs` over `done`
 // siblings only, ordered by (declared position, sibling index, artifact id) —
 // over an artifact snapshot the caller already loaded (AssembleContext shares
 // one load between this and the prior-round pass).
 //
-// THE ORDER IS NEVER EVENT ORDER. §11.3 (3) says so explicitly for loops and §2
-// says so for fanout joins. "Ordered by artifact id" is trivially satisfiable
+// THE ORDER IS NEVER EVENT ORDER, for loops and for fanout joins alike.
+// "Ordered by artifact id" is trivially satisfiable
 // by accident when insertion order happens to match, so the ordering here is
 // applied explicitly and a test shuffles insertion order to prove it.
+// `linked` is the issue snapshot's activation-pinned cross-issue artifact ids
+// (DKT-547), consulted only for `issue.linked.<relation>.<kind>` entries.
 func resolveInputs(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
-	bodySnapshot string, artifacts []*db.Artifact,
+	bodySnapshot string, artifacts []*db.Artifact, linked map[string][]int,
 ) ([]ContextInput, error) {
 	if len(spec.Inputs) == 0 {
 		return []ContextInput{}, nil
@@ -649,7 +1064,7 @@ func resolveInputs(
 	out := make([]ContextInput, 0, len(spec.Inputs))
 
 	// The OUTER loop is the declared position: `inputs` order is the author's
-	// order and the packet presents them in it (§6.11).
+	// order and the packet presents them in it.
 	for _, declared := range spec.Inputs {
 		switch declared {
 		case inputIssueBody:
@@ -665,6 +1080,29 @@ func resolveInputs(
 			}
 			out = append(out, input)
 			continue
+		case workflow.InputIssueFiles:
+			// `issue.files` (DKT-44) resolves to no ContextInput: an
+			// attachment is a FILE, and the packet already has a section for
+			// files. The renderer reads it there, so the bundle stays what
+			// it is meant to be — run state, no filesystem — and the form is
+			// skipped here only so it never reaches the producer lookup below.
+			continue
+		}
+
+		// `issue.linked.<relation>.<kind>` (DKT-547): an artifact recorded
+		// under ANOTHER issue, resolved through this issue's relations and
+		// pinned by artifact id at activation — assembly only reads the
+		// pinned rows back, never the live cross-issue question.
+		// Checked BEFORE the producer-addressed forms below: the whole
+		// declaration is an engine namespace, and `splitInput` would
+		// otherwise read `issue.linked.<relation>` as a producer step name.
+		if _, _, ok := workflow.LinkedInput(declared); ok {
+			resolved, err := resolveLinkedPinned(tx, step, linked, declared)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, resolved...)
+			continue
 		}
 
 		// `<step>.gate-results` (DKT-77): the producer's RECORDED gate
@@ -675,6 +1113,22 @@ func resolveInputs(
 		// results were sitting in the ledger.
 		if stepName, kind, ok := splitInput(declared); ok && kind == inputGateResults {
 			resolved, err := resolveGateResults(tx, sched, step, stepName)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, resolved...)
+			continue
+		}
+
+		// `<step>.vote-record` (DKT-545): the named vote step's RECORDED
+		// proposal — tally outcome, casts, and rationales — addressable as an
+		// input. The gate-results reasoning applied to the vote machinery:
+		// before this form existed, what a panel actually said reached no
+		// downstream step, so a revise loop entered on concerns had to shell
+		// out to `docket vote show` to learn what to revise.
+		if stepName, kind, ok := splitInput(declared); ok &&
+			kind == workflow.VoteRecordKind {
+			resolved, err := resolveVoteRecords(tx, sched, step, stepName)
 			if err != nil {
 				return nil, err
 			}
@@ -702,13 +1156,12 @@ func resolveInputs(
 	return out, nil
 }
 
-// ResolveInputArtifacts is §6.7 resolved to the ARTIFACT ROWS themselves, for a
-// consumer that needs a field the §11.4 bundle does not carry.
+// ResolveInputArtifacts is input resolution down to the ARTIFACT ROWS, for a
+// consumer that needs a field the bundle does not carry.
 //
 // It exists because the bundle is the WORKER-FACING shape: a `ContextInput` has
-// a `body` and no `payload`, since §11.4 gives an executor the artifact's text
-// and nothing else. The `aggregate` builtin reduces PAYLOADS (§2), so
-// it needs the row.
+// a `body` and no `payload`, since an executor gets the artifact's text and
+// nothing else. The `aggregate` builtin reduces PAYLOADS, so it needs the row.
 //
 // The RULE is not duplicated — both this and resolveInputs walk the same
 // declared-position loop over the same resolveDeclaredInput, so the `done`-only
@@ -736,13 +1189,34 @@ func ResolveInputArtifacts(
 	}
 	def := sched.defs[step.WorkflowID]
 
+	// The activation-pinned cross-issue ids (DKT-547), read lazily: only a
+	// definition declaring the form pays the snapshot read.
+	var linked map[string][]int
+	linkedLoaded := false
+
 	var out []*db.Artifact
 	for _, declared := range spec.Inputs {
-		if declared == inputIssueBody || declared == inputIssueDiff {
+		if declared == inputIssueBody || declared == inputIssueDiff ||
+			declared == workflow.InputIssueFiles {
 			continue
 		}
 		if kind, ok := workflow.LatestKind(declared); ok {
 			out = append(out, resolveLatestOfKind(artifacts, producers, step, kind)...)
+			continue
+		}
+		if _, _, ok := workflow.LinkedInput(declared); ok {
+			if !linkedLoaded {
+				_, linked, err = contextIssue(tx, step.RunID, step.IssueID)
+				if err != nil {
+					return nil, err
+				}
+				linkedLoaded = true
+			}
+			matched, err := linkedArtifacts(tx, step, linked, declared)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, matched...)
 			continue
 		}
 		matched, err := resolveDeclaredInput(artifacts, producers, def, step, declared)
@@ -754,8 +1228,9 @@ func ResolveInputArtifacts(
 	return out, nil
 }
 
-// resolveDeclaredInput is §6.7's rule for ONE `<step>.<kind>` declaration: the
-// `done`-only match, the ordinal scoping, and the within-input sort, in order.
+// resolveDeclaredInput is the input rule for ONE `<step>.<kind>` declaration:
+// the `done`-only match, the ordinal scoping, and the within-input sort, in
+// order.
 //
 // It is the single implementation both resolvers above share. A second copy is
 // exactly what would drift at the first ordinal that mattered.
@@ -791,9 +1266,9 @@ func resolveDeclaredInput(
 }
 
 // resolveLatestOfKind is `issue.latest.<kind>` (DKT-492): the issue's latest
-// recorded ROUND of artifacts of one kind, whoever produced them — §7.4's
+// recorded ROUND of artifacts of one kind, whoever produced them — the
 // ordinal-scoped rule with the producer name erased, exactly as `issue.diff`'s
-// D3 already resolves a kind rather than a step.
+// resolution already binds a kind rather than a step.
 //
 // It exists because a loop BODY cannot reach the live version of the thing it
 // iterates through any named input. A revise step's substrate IS its artifact:
@@ -803,23 +1278,24 @@ func resolveDeclaredInput(
 // inside `after_loop`'s downstream set, which a `loop = true` step can never
 // join (V10/V18: it declares no `after`, and the set is the `after` closure of
 // the `after_loop` target) — while its declared `<author>.<kind>` input falls
-// back per §7.4 to the ordinal-0 draft forever. RUN-39 measured the cost:
+// back to the ordinal-0 draft forever. RUN-39 measured the cost:
 // `revise@2`'s packet carried the round-0 author draft while every finding
 // beside it cited the round-1 revision, so revising the document the packet
 // supplied would have discarded the round it was entered to build on.
 //
 // The fix could NOT be a blanket redirect for the body's stale input:
 // `fix`'s `implement.change-summary` is the SAME declaration shape — a loop
-// body naming a one-shot upstream producer of its own emitted kind — and §7.4
-// pins that input to `implement@0` on purpose (a change-summary is an account
-// of work whose substrate is the TREE; handing `fix` its own prior account as
-// if it were `implement`'s is DKT-12's deliberately excluded case). Whether a
-// body's emitted kind is its substrate or its report is the author's
-// knowledge, not the engine's — so it is declared, per input, by this form.
+// body naming a one-shot upstream producer of its own emitted kind — and the
+// ordinal-scoped rule pins that input to `implement@0` on purpose (a
+// change-summary is an account of work whose substrate is the TREE; handing
+// `fix` its own prior account as if it were `implement`'s is DKT-12's
+// deliberately excluded case). Whether a body's emitted kind is its substrate
+// or its report is the author's knowledge, not the engine's — so it is
+// declared, per input, by this form.
 //
-// Resolution: recorded artifacts of the kind (recordedProducer, §2 as amended
+// Resolution: recorded artifacts of the kind (recordedProducer, as amended
 // by DKT-375), this issue, any producer — then ordinalScoped, latestPerProducer,
-// and §6.7's within-input order, the same pipeline every declared input rides.
+// and the within-input order, the same pipeline every declared input rides.
 //
 // THE CONSUMER'S OWN ARTIFACTS ARE NOT CANDIDATES. At claim the exclusion is
 // vacuous — a just-claimed step has recorded nothing — and that vacuousness is
@@ -862,7 +1338,7 @@ func resolveLatestOfKind(
 // rendered one 21-cluster payload five times, ~95KB of noise per panelist).
 //
 // The key is the producer INSTANCE (step id), never the step name: fanned-out
-// siblings are distinct instances whose artifacts are all inputs under §2's
+// siblings are distinct instances whose artifacts are all inputs under the
 // join rule, and this keeps every one of them.
 func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 	type emitKey struct {
@@ -909,8 +1385,8 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 //  1. the consuming step is downstream of `after_loop` — the loop BODY's own
 //     inputs (e.g. `fix`'s own `implement.change-summary`) must NOT redirect:
 //     `implement` is genuinely upstream of the loop and its ordinal-0 answer
-//     is the right one for `fix` to read (§7.4's `fix@1 -> implement@0`
-//     example is exactly this row, and redirecting it would feed `fix` its
+//     is the right one for `fix` to read (the `fix@1 -> implement@0`
+//     binding is exactly this row, and redirecting it would feed `fix` its
 //     own prior output as if it were `implement`'s);
 //  2. the step is at ordinal > 0 — ordinal 0 has no loop body yet to redirect
 //     to, and every step is at ordinal 0 the first time through;
@@ -920,7 +1396,24 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 //     KIND at exactly this ordinal — the redirect matches by kind, not by
 //     name, because that is the only thing the two producers share: `fix`
 //     does not know it is standing in for `implement`, it only knows it
-//     `emits = "change-summary"` too.
+//     `emits = "change-summary"` too;
+//  5. the DEFINITION names exactly ONE loop body the kind match could mean —
+//     one `loop = true` step that emits the kind AND whose own `after_loop`
+//     chain (the closure of its declared re-entry root) contains the
+//     consuming step. Kind is all conditions 1–4 look at, so when SEVERAL
+//     bodies of the kind re-enter this consumer the match cannot tell which
+//     body stands in for which named producer, and it must not guess: it
+//     refuses, and ordinalScoped's answer stands — the named step's own
+//     earlier artifact, or nothing at all for a step that never ran. RUN-39
+//     measured the guess (DKT-591): spec-doc's review declared six per-lane
+//     `<author>.doc` inputs, one revise body per lane all emitting `doc`,
+//     and the one body that ran satisfied every entry's kind scan — five
+//     SKIPPED authors' inputs each resolved to a step none of them named,
+//     six byte-identical copies per judge. The per-body `after_loop` chain
+//     is what keeps DKT-544's serves-scoped clusters redirecting: two
+//     same-kind bodies whose clusters re-enter DISJOINT chains (`prd-fix`
+//     at `prd-gate`, `design-fix` at `design-gate`) are unambiguous for any
+//     one consumer, because only one body's chain contains it.
 //
 // A LOOP BODY'S OWN INPUTS THEREFORE NEVER REDIRECT, doubly so (DKT-492).
 // Condition 1 excludes the body by construction — a `loop = true` step cannot
@@ -938,20 +1431,17 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 // (resolveLatestOfKind) instead of naming a producer.
 //
 // nil means no redirect applies; the caller keeps ordinalScoped's answer.
+//
+// The `<step>.gate-results` form (resolveGateResults) rides the same rule:
+// the body that stands in for a named producer's ARTIFACT is the body that
+// stands in for its recorded GATES, so conditions 1–3 and 5 are shared
+// through loopRedirectBody, and only condition 4 differs by column.
 func loopProducerRedirect(
 	artifacts []*db.Artifact, producers map[int]*db.Step, def *workflow.Definition,
 	step *db.Step, stepName, kind string, boundOrdinal int,
 ) []*db.Artifact {
-	if def == nil || step.Ordinal == 0 || boundOrdinal >= step.Ordinal {
-		return nil
-	}
-	if !afterLoopDownstream(def)[step.StepName] {
-		return nil
-	}
-	// The named producer must itself be one this loop does not re-run — a
-	// step declared `loop = true` legitimately has fresher instances the
-	// ordinary rule already finds, and redirecting past those would be wrong.
-	if named := workflow.StepByName(def, stepName); named != nil && named.Loop {
+	body := loopRedirectBody(def, step, stepName, kind, boundOrdinal)
+	if body == nil {
 		return nil
 	}
 
@@ -967,8 +1457,7 @@ func loopProducerRedirect(
 		if !recordedProducer(producer.Status) || producer.Ordinal != step.Ordinal {
 			continue
 		}
-		body := workflow.StepByName(def, producer.StepName)
-		if body == nil || !body.Loop {
+		if producer.StepName != body.Name {
 			continue
 		}
 		out = append(out, a)
@@ -976,13 +1465,69 @@ func loopProducerRedirect(
 	return out
 }
 
+// loopRedirectBody answers the definitional half of loopProducerRedirect:
+// WHICH loop body, if any, stands in for the named producer at this step. It
+// is conditions 1, 2, 3 and 5 of that rule — downstream of `after_loop`,
+// ordinal > 0, the named producer's binding stale, exactly one `loop = true`
+// body of `kind` whose `after_loop` chain contains the consumer — with
+// condition 4 (did that body record at this ordinal) left to the caller,
+// because the column it checks differs per input form: an artifact of the
+// kind for `<step>.<kind>`, a recorded or `skipped` instance for
+// `<step>.gate-results`.
+//
+// `kind` is the artifact kind the match is over; `"*"` admits any body.
+// `boundOrdinal` is the ordinal the ordinary rule bound the named producer
+// at, or -1 when it bound nothing.
+//
+// nil means no body stands in and the caller keeps the ordinary answer.
+func loopRedirectBody(
+	def *workflow.Definition, step *db.Step, stepName, kind string, boundOrdinal int,
+) *workflow.Step {
+	if def == nil || step.Ordinal == 0 || boundOrdinal >= step.Ordinal {
+		return nil
+	}
+	if !afterLoopDownstream(def)[step.StepName] {
+		return nil
+	}
+	// The named producer must itself be one this loop does not re-run — a
+	// step declared `loop = true` legitimately has fresher instances the
+	// ordinary rule already finds, and redirecting past those would be wrong.
+	if named := workflow.StepByName(def, stepName); named != nil && named.Loop {
+		return nil
+	}
+
+	// Condition 5: resolve WHICH body the kind match could mean from the
+	// definition alone. Run state cannot answer this — the body that happened
+	// to record at this ordinal is exactly the wrong oracle when several
+	// bodies share the kind and only one ran (DKT-591) — so the candidate set
+	// is definitional: bodies of the kind whose own `after_loop` chain
+	// contains this consumer. Anything but exactly one candidate is a refusal.
+	var body *workflow.Step
+	for _, s := range def.Steps {
+		if !s.Loop || s.AfterLoop == "" {
+			continue
+		}
+		if kind != "*" && workflow.ArtifactKind(s) != kind {
+			continue
+		}
+		if !downstreamClosure(def, []string{s.AfterLoop})[step.StepName] {
+			continue
+		}
+		if body != nil {
+			return nil
+		}
+		body = s
+	}
+	return body
+}
+
 // recordedProducer reports whether an instance in this status has finished the
 // work its artifacts describe, and so may feed a downstream input.
 //
-// §2 says "`done` siblings only", and for every status but one that reading is
-// exact: `pending`/`claimed`/`running`/`gated` are in flight, and `skipped`
-// and `failed-routed` never recorded. `superseded` is the exception, and
-// taking §2 literally over it is DKT-375.
+// The input rule says "`done` siblings only", and for every status but one
+// that reading is exact: `pending`/`claimed`/`running`/`gated` are in flight,
+// and `skipped` and `failed-routed` never recorded. `superseded` is the exception, and
+// taking the rule literally over it is DKT-375.
 //
 // A step reaches `superseded` by exactly two routes, and they are not alike:
 //
@@ -1000,16 +1545,39 @@ func loopProducerRedirect(
 // closed round-1 clusters because `reconcile@2` — the instance whose park
 // routed that very round — was `superseded` rather than `done`.
 //
-// Admitting (1) costs nothing by construction: a swept step has no artifacts.
+// Admitting (1) costs nothing for artifact reads: a swept step has no
+// artifacts. The ledger-form inputs are the exception. For a
+// `<step>.gate-results` or `<step>.vote-record` input, a swept step at ordinal
+// N is a recorded producer, so it pins the resolved ordinal to N and shadows
+// older ordinals. For gate-results that yields an empty array. For vote-record
+// it yields no input, since the swept vote step has no proposal. Both are
+// intended: no panel or check ran that round.
+//
+// A `skipped` producer is excluded here, so an ordinary `<step>.<kind>` input
+// falls back past it to the latest recorded ordinal. The ledger forms treat it
+// as they treat a swept step (ledgerProducer): a skipped instance at ordinal N
+// pins the resolved ordinal to N, gate-results yields an empty array for it,
+// and vote-record yields no input. Falling back would hand the consumer an
+// earlier round's checks or panel objections, which a later round may already
+// have settled. The skipped instance's own ledger is not read: a step skipped
+// by `resolve --as skip` may have recorded rows or opened a proposal before it
+// parked, and the operator moved past them.
 func recordedProducer(status string) bool {
 	return status == db.StepDone || status == db.StepSuperseded
+}
+
+// ledgerProducer reports whether an instance in this status pins the ordinal a
+// `<step>.gate-results` or `<step>.vote-record` input resolves at. It is
+// recordedProducer plus `skipped`; see recordedProducer for why.
+func ledgerProducer(status string) bool {
+	return recordedProducer(status) || status == db.StepSkipped
 }
 
 // matchingArtifacts selects the artifacts a `<step>.<kind>` or `<step>.*` input
 // resolves over: artifacts of the named step, for THIS issue, produced by an
 // instance that RECORDED its work (recordedProducer).
 //
-// The rule (§2, verbatim: "Downstream inputs resolve over `done` siblings
+// The rule ("Downstream inputs resolve over `done` siblings
 // only") is what keeps a join honest: an in-flight sibling's partial artifact
 // is not an input, it is work in progress. `superseded` is admitted beside
 // `done` because it is not in-flight — see recordedProducer for why the
@@ -1038,7 +1606,7 @@ func matchingArtifacts(
 	return out
 }
 
-// ordinalScoped is §7.4 — ordinal-scoped input binding, with the fallback that
+// ordinalScoped is ordinal-scoped input binding, with the fallback that
 // is PER INPUT rather than per step.
 //
 // For a step at ordinal k, one declared input resolves:
@@ -1047,7 +1615,7 @@ func matchingArtifacts(
 //  2. if none, fall back to the HIGHEST ORDINAL < k that has a `done` instance.
 //
 // THE FALLBACK BEING PER-INPUT IS THE WHOLE CLAUSE, and the fixture's `fix` step
-// is why §11.3 (3) says so explicitly. `fix@1` declares
+// is why. `fix@1` declares
 // `["reconcile.findings", "implement.change-summary"]`: `reconcile` re-ran at
 // ordinal 1, so its input binds fresh at 1, while `implement` is upstream of
 // `after_loop` and never re-runs, so its input binds at 0. A per-STEP rule would
@@ -1079,7 +1647,7 @@ func ordinalScoped(
 			// to an earlier instance. Without this, a re-instantiated
 			// `synthesize@1` completing while `verify@0` is still in flight
 			// would leak ordinal-1 findings into an ordinal-0 bundle — and
-			// §9 item 5's byte-identical guarantee would depend on timing.
+			// the bundle's byte-identical guarantee would depend on timing.
 			continue
 		}
 		if producer.Ordinal > best {
@@ -1091,7 +1659,7 @@ func ordinalScoped(
 	}
 
 	// Every artifact AT that ordinal — not just one. A fanned-out producer has
-	// four `done` siblings at the same ordinal and all four are inputs (§2's
+	// four `done` siblings at the same ordinal and all four are inputs (the
 	// join rule), which is what `review.*` resolves to for `synthesize`.
 	out := make([]*db.Artifact, 0, len(matched))
 	for _, a := range matched {
@@ -1102,7 +1670,7 @@ func ordinalScoped(
 	return out, best
 }
 
-// sortArtifacts applies §6.7's within-input order: sibling index, then artifact
+// sortArtifacts applies the within-input order: sibling index, then artifact
 // id. The declared position is the caller's outer loop.
 //
 // A nil sibling index (a step that is not fanned out) sorts before any index, so
@@ -1133,16 +1701,16 @@ func producerInstance(producers map[int]*db.Step, stepID int) string {
 	return ""
 }
 
-// resolveIssueDiff is §6.7.1 D3 and D4.
+// resolveIssueDiff resolves the `issue.diff` input.
 //
-// D3: the input resolves to the HIGHEST-ORDINAL, then highest-id `done`-
-// attributed `issue.diff` artifact for the issue — exactly §7.4's ordinal-scoped
+// The input resolves to the HIGHEST-ORDINAL, then highest-id `done`-
+// attributed `issue.diff` artifact for the issue — exactly the ordinal-scoped
 // rule applied to a kind the engine produces rather than a step does. No special
 // case, which is what makes the fixture's `fix@1 -> review@1` cycle correct
 // without any rule specific to loops: ordinal 1 beats ordinal 0.
 //
-// D4: with no such artifact, the input resolves to an EMPTY diff — never an
-// error, and never a live `git diff`. Assembly reads no live state (§6.6), and
+// With no such artifact, the input resolves to an EMPTY diff — never an
+// error, and never a live `git diff`. Assembly reads no live state, and
 // "empty" is the truthful answer: nothing has changed the tree in this run.
 func resolveIssueDiff(
 	artifacts []*db.Artifact, producers map[int]*db.Step, step *db.Step,
@@ -1156,7 +1724,7 @@ func resolveIssueDiff(
 		}
 		producer := producers[a.StepID]
 
-		// An activation-recorded empty diff (D4) has no producing step. It is a
+		// An activation-recorded empty diff has no producing step. It is a
 		// legitimate candidate at ordinal 0 — it is what a consumer downstream
 		// of no executor step resolves to.
 		ordinal := 0
@@ -1188,8 +1756,8 @@ func resolveIssueDiff(
 	}
 
 	if best == nil {
-		// D4, in its purest form: not even the activation-time empty artifact
-		// exists. The empty diff is still the answer.
+		// The empty fallback in its purest form: not even the activation-time
+		// empty artifact exists. The empty diff is still the answer.
 		return ContextInput{
 			Artifact: inputIssueDiff, Kind: ArtifactKindIssueDiff, Body: "",
 		}, nil
@@ -1209,7 +1777,7 @@ func resolveIssueDiff(
 
 // resolveGateResults is the `<step>.gate-results` form (DKT-77): one input per
 // `done` producer instance, carrying that instance's recorded gate results as
-// a JSON array in the §11.4 `gate result` shape.
+// a JSON array in the bundle's `gate result` shape.
 //
 // The instance selection mirrors artifact resolution exactly — same issue,
 // `done` only, ordinal-scoped with the per-input fallback, siblings ordered by
@@ -1218,13 +1786,30 @@ func resolveIssueDiff(
 // EMPTY ARRAY, not an absent input: "this step ran no checks" is an answer a
 // consumer can act on, while an absent input reads as a resolution failure.
 //
-// The one departure from artifact resolution: the REQUESTING step admits
+// A `skipped` producer departs from artifact resolution (ledgerProducer): it
+// pins the ordinal like a recorded one and contributes an empty array, so the
+// consumer never falls back to an earlier round's results.
+//
+// The other departure from artifact resolution: the REQUESTING step admits
 // itself regardless of status (DKT-12). Its `pre = true` gate rows are
 // committed before context assembly runs, so a self-declared
 // `<self>.gate-results` is the step reading its own claim-time measurements —
 // the done-filter alone would drop the step (`claimed` at assembly) and the
 // input would silently resolve absent. Completion-side rows, not yet recorded
 // at claim, show up as the empty array the previous paragraph promises.
+//
+// The loop rebind applies here as it does to artifacts. Before it did, a
+// consumer downstream of `after_loop` re-entered at ordinal N read
+// `implement@0`'s recorded gates on every round: a verify-ac re-run after a
+// fix round judged the tree `fix@N` produced against the tests `implement@0`
+// ran. The body that stands in for the named producer is
+// the one loopRedirectBody picks for the producer's EMITTED kind — `fix`
+// stands in for `implement`'s gates for the same reason it stands in for its
+// change-summary — and its recorded or `skipped` instances at this ordinal
+// replace the stale binding. A body that recorded no gates at this ordinal,
+// or whose instance was skipped at it, is still the answer: the empty array
+// says "this round ran no checks", which is truer than the previous round's
+// results.
 func resolveGateResults(
 	tx *sql.Tx, sched *Scheduler, step *db.Step, stepName string,
 ) ([]ContextInput, error) {
@@ -1234,13 +1819,17 @@ func resolveGateResults(
 		if s.IssueID != step.IssueID || s.StepName != stepName {
 			continue
 		}
-		if s.Ordinal > step.Ordinal || (!recordedProducer(s.Status) && s.ID != step.ID) {
+		if s.Ordinal > step.Ordinal || (!ledgerProducer(s.Status) && s.ID != step.ID) {
 			continue
 		}
 		if s.Ordinal > best {
 			best = s.Ordinal
 		}
 		candidates = append(candidates, s)
+	}
+
+	if redirect := loopRedirectGateProducers(sched, step, stepName, best); len(redirect) > 0 {
+		candidates, best = redirect, step.Ordinal
 	}
 	if best < 0 {
 		return nil, nil
@@ -1268,9 +1857,12 @@ func resolveGateResults(
 
 	out := make([]ContextInput, 0, len(producers))
 	for _, producer := range producers {
-		rows, err := db.GateResultsForStepTx(tx, producer.ID)
-		if err != nil {
-			return nil, err
+		var rows []db.GateResultRow
+		if producer.Status != db.StepSkipped {
+			var err error
+			if rows, err = db.GateResultsForStepTx(tx, producer.ID); err != nil {
+				return nil, err
+			}
 		}
 		body, err := encodeGateResults(rows)
 		if err != nil {
@@ -1287,9 +1879,62 @@ func resolveGateResults(
 	return out, nil
 }
 
-// encodeGateResults renders recorded rows in the §11.4 `gate result` shape —
-// the same keys a claim response's `pre_gates` carries, so a consumer parses
-// one shape wherever gate results appear.
+// loopRedirectGateProducers is loopProducerRedirect's condition 4 for the
+// gate-results column: the ledger instances of the standing-in loop body at
+// exactly this step's ordinal, for this issue — recorded or `skipped`
+// (ledgerProducer). Which body stands in is loopRedirectBody's answer, asked
+// over the NAMED producer's emitted kind — a producer that emits nothing has
+// no body standing in for it and keeps the ordinary binding.
+//
+// A `skipped` body instance at this ordinal redirects exactly as a recorded
+// one does, and resolveGateResults reads no ledger for it: the consumer's
+// input is that instance with the empty array, saying no checks ran this
+// round against the tree it reads. Admitting recorded instances alone made a
+// skipped `fix@N` return nil here, and a consumer downstream of `after_loop`
+// fell back to the named producer's stale rows — `implement@0`'s round-0
+// checks beside `fix@N`'s tree — the fallback the ledger forms refuse for a
+// skipped producer (recordedProducer).
+//
+// nil means no redirect applies: the body has no recorded or `skipped`
+// instance at this ordinal — none exists, or what exists is in flight or
+// `failed-routed` — and the caller keeps the ordinary binding, as the
+// artifact form does when the body recorded no artifact.
+func loopRedirectGateProducers(
+	sched *Scheduler, step *db.Step, stepName string, boundOrdinal int,
+) []*db.Step {
+	def := sched.defs[step.WorkflowID]
+	if def == nil {
+		return nil
+	}
+	named := workflow.StepByName(def, stepName)
+	if named == nil {
+		return nil
+	}
+	kind := workflow.ArtifactKind(named)
+	if kind == "" {
+		return nil
+	}
+	body := loopRedirectBody(def, step, stepName, kind, boundOrdinal)
+	if body == nil {
+		return nil
+	}
+	var out []*db.Step
+	for _, s := range sched.steps {
+		if s.IssueID != step.IssueID || s.StepName != body.Name {
+			continue
+		}
+		if s.Ordinal != step.Ordinal || !ledgerProducer(s.Status) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// encodeGateResults renders recorded rows in the bundle's `gate result` shape,
+// plus the `stub` and `s3_migrated` flags `docket step gates` carries: a
+// consumer reading a `pass` here instead of re-running the check must be able
+// to tell a placeholder or migrated row from a measurement.
 func encodeGateResults(rows []db.GateResultRow) (string, error) {
 	type wire struct {
 		Gate       string   `json:"gate"`
@@ -1301,14 +1946,19 @@ func encodeGateResults(rows []db.GateResultRow) (string, error) {
 		Truncated  bool     `json:"truncated"`
 		Verdict    string   `json:"verdict"`
 		Pre        bool     `json:"pre,omitempty"`
-		Reason     string   `json:"reason,omitempty"`
+		Stub       bool     `json:"s3_migrated,omitempty"`
+		// StubEntry is never omitted: an absent key would read the same as a
+		// docket too old to carry the flag.
+		StubEntry bool   `json:"stub"`
+		Reason    string `json:"reason,omitempty"`
 	}
 	encoded := make([]wire, 0, len(rows))
 	for _, r := range rows {
 		encoded = append(encoded, wire{
 			Gate: r.Gate, Ordinal: r.Ordinal, Argv: r.Argv, Exit: r.Exit,
 			DurationMS: r.DurationMS, Output: r.Output, Truncated: r.Truncated,
-			Verdict: r.Verdict, Pre: r.Pre, Reason: r.Reason,
+			Verdict: r.Verdict, Pre: r.Pre, Stub: r.Stub, StubEntry: r.StubEntry,
+			Reason: r.Reason,
 		})
 	}
 	body, err := json.Marshal(encoded)
@@ -1320,7 +1970,7 @@ func encodeGateResults(rows []db.GateResultRow) (string, error) {
 
 // splitInput decomposes a `<step>.<kind>` input into its halves. The split is on
 // the LAST dot so a kind containing one (`change-summary.v2`) is not truncated;
-// step names cannot contain a dot (V3).
+// step names cannot contain a dot.
 func splitInput(declared string) (stepName, kind string, ok bool) {
 	i := strings.LastIndex(declared, ".")
 	if i <= 0 || i == len(declared)-1 {
@@ -1330,20 +1980,25 @@ func splitInput(declared string) (stepName, kind string, ok bool) {
 }
 
 // ContextMeta is `step context --meta`'s per-section byte counts — the
-// closure-size record of engine-core §8.
+// closure-size record.
 //
 // It is a SIBLING object rather than a mutation of `context`, so the golden
-// bundles (§8.3) are unaffected by asking for it (§6.4). A `--meta` that
+// bundles are unaffected by asking for it. A `--meta` that
 // spliced counts into the bundle would make the goldens depend on a flag.
 type ContextMeta struct {
 	IssueBytes    int `json:"issue_bytes"`
 	InputsBytes   int `json:"inputs_bytes"`
 	PinsBytes     int `json:"pins_bytes"`
 	MetadataBytes int `json:"metadata_bytes"`
-	TotalBytes    int `json:"total_bytes"`
+	// NotesBytes is the run notes' share (DKT-1079). Counted, because a note
+	// rides EVERY packet of the run: a cap computed without it would let a
+	// bundle exceed its declared limit by exactly the words a dispatcher
+	// added to all of them.
+	NotesBytes int `json:"notes_bytes"`
+	TotalBytes int `json:"total_bytes"`
 	// TemplatePinned reports whether the template a render would use is pinned.
 	// An UNPINNED template is reported so the reproducibility gap is visible
-	// rather than assumed (§6.11.1) — a packet rendered through an unpinned
+	// rather than assumed — a packet rendered through an unpinned
 	// file is reproducible only to the extent the operator chose.
 	TemplatePinned bool `json:"template_pinned"`
 }
@@ -1371,6 +2026,28 @@ func (c *Context) Meta() ContextMeta {
 	for k, v := range c.Metadata {
 		meta.MetadataBytes += len(k) + len(fmt.Sprint(v))
 	}
-	meta.TotalBytes = meta.IssueBytes + meta.InputsBytes + meta.PinsBytes + meta.MetadataBytes
+	for _, n := range c.Notes {
+		meta.NotesBytes += len(n.Text)
+	}
+	meta.TotalBytes = meta.IssueBytes + meta.InputsBytes + meta.PinsBytes +
+		meta.MetadataBytes + meta.NotesBytes
 	return meta
+}
+
+// resolveDiffBase lifts `base` from the same round record resolveTarget reads
+// (DKT-3307): the first `issue.diff` input's payload.
+func resolveDiffBase(inputs []ContextInput) string {
+	for _, in := range inputs {
+		if in.Kind != ArtifactKindIssueDiff || in.Payload == "" {
+			continue
+		}
+		var record struct {
+			Base string `json:"base"`
+		}
+		if json.Unmarshal([]byte(in.Payload), &record) != nil {
+			continue
+		}
+		return record.Base
+	}
+	return ""
 }

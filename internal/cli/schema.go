@@ -23,15 +23,21 @@ document; it never learns what the values mean.
 A registered name@version is frozen, exactly as a workflow is: re-registering
 the same bytes is a success that changes nothing, and re-registering different
 bytes is a CONFLICT. A run pins the schema its payloads are validated against,
-so the bytes cannot be swapped underneath it.`,
+so the bytes cannot be swapped underneath it.
+
+A registered version is never deleted. ` + "`schema deprecate`" + ` retires one
+from service: it stays readable and keeps serving the runs that pinned it, but
+new payload references to it are refused and ` + "`schema list`" + ` hides it
+unless --deprecated is passed.`,
 }
 
 func init() {
 	rootCmd.AddCommand(schemaCmd)
 }
 
-// schemaErr maps a registry failure to its error code, per §4.5's refusal
-// matrix. No new codes: every situation maps to one that already exists.
+// schemaErr maps a registry failure to its error code, per the registry's
+// refusal matrix. No new codes: every situation maps to one that already
+// exists.
 func schemaErr(err error) error {
 	// A schema-DOCUMENT refusal — the ordered_enum annotation rules, or a
 	// document the library will not compile. Payload refusals never reach here:
@@ -41,10 +47,17 @@ func schemaErr(err error) error {
 		return cmdErr(err, output.ErrValidation)
 	}
 	switch {
-	case errors.Is(err, db.ErrSchemaConflict):
+	case errors.Is(err, db.ErrSchemaConflict),
+		errors.Is(err, db.ErrSchemaAlreadyDeprecated),
+		errors.Is(err, errSchemaInUse):
+		// Retiring twice and retiring a version a live workflow still names
+		// are both CONFLICTs: the store's state contradicts the caller's
+		// premise, and the message says which premise.
 		return cmdErr(err, output.ErrConflict)
 	case errors.Is(err, db.ErrSchemaNotFound):
 		return cmdErr(err, output.ErrNotFound)
+	case errors.Is(err, db.ErrSchemaBuiltin):
+		return cmdErr(err, output.ErrValidation)
 	default:
 		return cmdErr(err, output.ErrGeneral)
 	}

@@ -8,7 +8,7 @@ import (
 
 // MID-WAVE LIFECYCLE DRIVING.
 //
-// `next` refuses while a dispatch is open — deliberately (P24) — so for as
+// `next` refuses while a dispatch is open — deliberately — so for as
 // long as a wave runs, nothing used to advance the engine-side lifecycles:
 // a vote step readied by the wave's own recordings sat with no proposal until
 // the NEXT round's `next` opened one, an action step sat ready and unexecuted,
@@ -19,12 +19,12 @@ import (
 // the wave's recordings ready them.
 //
 // The drivers themselves already exist — driveVoteSteps and driveActionSteps
-// (next.go), §8.1's "the first engine invocation that observes the step
-// ready". These entry points make `step record` and the quorum-reaching `vote
+// (next.go), which run on the first engine invocation that observes the step
+// ready. These entry points make `step record` and the quorum-reaching `vote
 // cast` observing invocations too: the verb layer calls DriveRunLifecycles
-// after its own write commits, exactly as `next` and `dispatch open` call the
-// same drivers after theirs. No daemon watches; the lifecycle still advances
-// only when somebody talks to the engine.
+// after its own write commits, and `dispatch open` and `dispatch extend` call
+// it before computing their rows. No daemon watches; the lifecycle still
+// advances only when somebody talks to the engine.
 
 // DriveRunLifecycles advances every engine-run lifecycle a run has ready — the
 // vote phases (open, read, route) and the action steps — to quiescence.
@@ -38,7 +38,7 @@ import (
 // non-converging chain is an engine fault the bound turns from a hang into a
 // finished call.
 //
-// Errors are engine faults, exactly as next.go classifies them: B3 already
+// Errors are engine faults, exactly as next.go classifies them: next already
 // routes a step that cannot run per its `on_fail`, so anything failing here is
 // a database the next verb would hit too, and reporting beats proceeding.
 func (e *Engine) DriveRunLifecycles(conn *sql.DB, runID int, nowMS int64) error {

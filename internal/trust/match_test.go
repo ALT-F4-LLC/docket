@@ -22,7 +22,7 @@ func storeWith(entries ...Entry) *Store {
 	return &Store{Version: FormatVersion, Entries: entries}
 }
 
-// --- The matching table M1–M6 (§7.2) ----------------------------------------
+// --- The matching table -----------------------------------------------------
 
 func TestMatchingTable(t *testing.T) {
 	const thisRepo = "/src/example"
@@ -50,7 +50,7 @@ func TestMatchingTable(t *testing.T) {
 			wantArgv:    []string{"make", "test"},
 		},
 		{
-			// M2: a name that exists only for another repo is unmatched, and
+			// A name that exists only for another repo is unmatched, and
 			// the reason NAMES THAT REPO. This is the moved-repo diagnostic —
 			// without it an operator cannot tell "I moved the repo" from "I am
 			// standing in a clone".
@@ -104,7 +104,7 @@ func TestMatchingTable(t *testing.T) {
 			wantArgv:    []string{"make", "test"},
 		},
 		{
-			// M6: byte-exact on every element. Normalization is a
+			// Byte-exact on every element. Normalization is a
 			// match-widening operation, and every match-widening operation is
 			// an authorization decision.
 			name:        "M6 matching is case-sensitive",
@@ -122,7 +122,7 @@ func TestMatchingTable(t *testing.T) {
 			wantMatched: false,
 		},
 		{
-			// M5: NO ENTRY means unmatched. Never a fallback, never a
+			// NO ENTRY means unmatched. Never a fallback, never a
 			// default-allow, never a "this command looks safe" heuristic.
 			name:        "M5 no entry at all is unmatched with a reason",
 			store:       storeWith(),
@@ -152,7 +152,7 @@ func TestMatchingTable(t *testing.T) {
 				t.Errorf("Argv = %q, want %q", got.Argv, tt.wantArgv)
 			}
 			if !tt.wantMatched {
-				// N2: every unmatched result carries a reason, because the
+				// Every unmatched result carries a reason, because the
 				// four causes need four different remedies.
 				if got.Reason == "" {
 					t.Error("an unmatched result must carry a reason")
@@ -168,8 +168,8 @@ func TestMatchingTable(t *testing.T) {
 	}
 }
 
-// TestPrefixMatchingRequiresOptIn is T10's closure, asserted in BOTH
-// DIRECTIONS as §9.1 requires.
+// TestPrefixMatchingRequiresOptIn asserts that prefix matching requires opt-in,
+// in BOTH DIRECTIONS.
 //
 // The two directions are different bugs. Forward: a full-argv entry must never
 // match a longer candidate, or every entry silently becomes a prefix entry and
@@ -245,7 +245,8 @@ func TestPrefixMatchingIsElementWiseNotStringPrefix(t *testing.T) {
 	}
 }
 
-// TestMatchReturnsTheExecutedArgv is T4's closure, asserted on the TYPE.
+// TestMatchReturnsTheExecutedArgv asserts on the TYPE that a match carries the
+// argv to execute.
 //
 // The TOCTOU shape this forecloses: a matcher that returns a bare boolean
 // produces a PERMISSION, which a caller then applies to an argv it is holding
@@ -294,14 +295,15 @@ func TestMatchReturnsTheExecutedArgv(t *testing.T) {
 		"func IsTrusted(",
 	} {
 		if strings.Contains(goCodeWithoutComments(t, "match.go"), forbidden) {
-			t.Errorf("match.go exposes %q; a boolean answer is the TOCTOU shape T4 forecloses", forbidden)
+			t.Errorf("match.go exposes %q; a boolean answer is the TOCTOU shape the Match type forecloses", forbidden)
 		}
 	}
 }
 
-// --- Repo identity P1–P4 (§3.4) ---------------------------------------------
+// --- Repo identity ----------------------------------------------------------
 
-// TestRepoIdentityResolvesSymlinks is P1.
+// TestRepoIdentityResolvesSymlinks checks that the repo identity is the
+// symlink-resolved path.
 //
 // Without EvalSymlinks, an attacker who can create a symlink in the operator's
 // home makes a fork REPORT the trusted path. Resolving both sides to their real
@@ -365,8 +367,8 @@ func TestTwoCheckoutsAreDistinctIdentities(t *testing.T) {
 	}
 }
 
-// TestMovedRepoUnmatchedReasonNamesTheOldPath is §3.4's recorded cost, with the
-// diagnostic that makes it survivable.
+// TestMovedRepoUnmatchedReasonNamesTheOldPath covers the recorded cost of the
+// repo binding, with the diagnostic that makes it survivable.
 //
 // Moving a repository invalidates its trust entries. That is the CORRECT
 // direction of failure — a moved repo re-earns trust; a hostile clone never
@@ -405,7 +407,8 @@ func TestMovedRepoUnmatchedReasonNamesTheOldPath(t *testing.T) {
 	}
 }
 
-// TestP4MalformedBindingIsRefusedNotMatchedEverywhere is P4 at the matcher.
+// TestP4MalformedBindingIsRefusedNotMatchedEverywhere covers an entry with no
+// binding, at the matcher.
 //
 // An entry with neither binding is refused AT PARSE TIME, so it can never reach
 // the matcher — a file containing one does not load at all. That is stronger
@@ -428,8 +431,9 @@ argv = ["make", "test"]
 	}
 }
 
-// TestGlobalRequiresExplicitOptIn is P3: there is no implicit path to a global
-// entry. A binding is computed for every add that did not ask for global.
+// TestGlobalRequiresExplicitOptIn checks that there is no implicit path to a
+// global entry. A binding is computed for every add that did not ask for
+// global.
 func TestGlobalRequiresExplicitOptIn(t *testing.T) {
 	path := sandbox(t)
 	repo := t.TempDir()

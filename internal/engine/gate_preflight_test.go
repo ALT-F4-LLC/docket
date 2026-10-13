@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -148,9 +149,10 @@ func TestGatePreflightDeduplicatesAcrossDeclarationSites(t *testing.T) {
 func TestGatePreflightReportsAStubbedEntry(t *testing.T) {
 	repoRoot := t.TempDir()
 	argv := []string{"/usr/bin/true"}
+	reason := "no scanner selected yet; removal tracked by DKT-607"
 	load := sandboxTrust(t, trust.Entry{
 		Name: "secret-scan", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
-		Global: true, Stub: true,
+		Global: true, Stub: true, StubReason: reason,
 	})
 
 	rows, err := BuildGatePreflight(
@@ -166,6 +168,108 @@ func TestGatePreflightReportsAStubbedEntry(t *testing.T) {
 		t.Error("a stubbed entry is not reported as a stub; the preflight would " +
 			"read green for a gate that measures nothing")
 	}
+	// DKT-607: the recorded decision rides the row, so an operator (or a
+	// tribunal seat) reading the preflight sees why the stub exists and which
+	// issue tracks removing it, without opening the trust store or a transcript.
+	if got.StubReason != reason {
+		t.Errorf("StubReason = %q, want %q", got.StubReason, reason)
+	}
+}
+
+// TestGatePreflightChecksDeclaredFilesUnderTheExecRoot: preflight runs before
+// any step has a worktree, so a gate whose entry declares files resolves only
+// when those files are unchanged under the exec root, the tree a gate without
+// a worktree runs in. The identity the entry binds to never decides it.
+func TestGatePreflightChecksDeclaredFilesUnderTheExecRoot(t *testing.T) {
+	const pinned = "pinned contents\n"
+	setup := func(t *testing.T) (load func() (*trust.Store, error), execRoot, identity string) {
+		t.Helper()
+		execRoot, identity = t.TempDir(), t.TempDir()
+		for _, root := range []string{execRoot, identity} {
+			writeDeclaredFile(t, root, pinned)
+		}
+		argv := []string{"make", "check"}
+		load = sandboxTrust(t, trust.Entry{
+			Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+			Repo:          mustResolve(identity),
+			DeclaredFiles: []trust.DeclaredFile{{Path: declaredFilePath, SHA256: trustHashOf(pinned)}},
+		})
+		return load, execRoot, identity
+	}
+	preflight := func(t *testing.T, load func() (*trust.Store, error), identity, execRoot string) GatePreflight {
+		t.Helper()
+		rows, err := buildGatePreflightAt(
+			preflightDefs(workflow.Gate{Name: "build"}), load, identity, execRoot)
+		testsupport.Must(t, err, "buildGatePreflightAt: %v", err)
+		row, ok := preflightRow(rows, "build")
+		if !ok {
+			t.Fatalf("no row for build: %+v", rows)
+		}
+		return row
+	}
+
+	t.Run("unchanged declared file resolves", func(t *testing.T) {
+		load, execRoot, identity := setup(t)
+		if row := preflight(t, load, identity, execRoot); !row.Matched {
+			t.Errorf("an unchanged declared file does not resolve: %+v", row)
+		}
+	})
+
+	t.Run("exec root drift does not resolve", func(t *testing.T) {
+		load, execRoot, identity := setup(t)
+		writeDeclaredFile(t, execRoot, "rewritten\n")
+		row := preflight(t, load, identity, execRoot)
+		if row.Matched {
+			t.Errorf("a declared file changed under the exec root still resolves: %+v", row)
+		}
+		if !strings.Contains(row.Reason, declaredFilePath) {
+			t.Errorf("the reason does not name %s: %q", declaredFilePath, row.Reason)
+		}
+	})
+
+	t.Run("identity drift does not matter", func(t *testing.T) {
+		load, execRoot, identity := setup(t)
+		writeDeclaredFile(t, identity, "rewritten\n")
+		if row := preflight(t, load, identity, execRoot); !row.Matched {
+			t.Errorf("the preflight hashed the identity root, not the exec root: %+v", row)
+		}
+	})
+}
+
+// TestRenderGatePreflightShowsTheStubReason (DKT-607): a stub WITH a recorded
+// reason prints it — the documented decision is discoverable from the
+// preflight itself — and a stub WITHOUT one gets the remedy line, because an
+// unexplained stub is indistinguishable from a placeholder somebody forgot.
+func TestRenderGatePreflightShowsTheStubReason(t *testing.T) {
+	t.Run("a recorded reason is printed", func(t *testing.T) {
+		var buf strings.Builder
+		RenderGatePreflight(&buf, []GatePreflight{
+			{Gate: "secret-scan", Matched: true, Entry: "secret-scan", Stub: true,
+				StubReason: "no scanner selected yet; removal tracked by DKT-607"},
+		})
+		out := buf.String()
+		for _, needle := range []string{"STUB", "secret-scan", "DKT-607"} {
+			if !strings.Contains(out, needle) {
+				t.Errorf("the stub note does not mention %q:\n%s", needle, out)
+			}
+		}
+		if strings.Contains(out, "--stub-reason") {
+			t.Errorf("a fully-explained stub still prints the record-a-reason remedy:\n%s", out)
+		}
+	})
+
+	t.Run("an unexplained stub names the remedy", func(t *testing.T) {
+		var buf strings.Builder
+		RenderGatePreflight(&buf, []GatePreflight{
+			{Gate: "sdet-abuse", Matched: true, Entry: "sdet-abuse", Stub: true},
+		})
+		out := buf.String()
+		for _, needle := range []string{"sdet-abuse", "--stub-reason"} {
+			if !strings.Contains(out, needle) {
+				t.Errorf("the unexplained-stub note does not mention %q:\n%s", needle, out)
+			}
+		}
+	})
 }
 
 // TestRenderGatePreflightIsSilentWhenEveryGateResolves.
@@ -199,6 +303,79 @@ func TestRenderGatePreflightNamesTheRemedy(t *testing.T) {
 			t.Errorf("the warning does not mention %q:\n%s", needle, out)
 		}
 	}
+}
+
+// TestPreflightWarnsLegacyPin: an entry with an absolute argv[0] and no content
+// pin resolves, so it is not "missing", but activation still says it runs
+// whatever the file holds and how to pin it.
+func TestPreflightWarnsLegacyPin(t *testing.T) {
+	repoRoot := t.TempDir()
+	pinnedPath, sum := pinnedScript(t, "exit 0\n")
+	pinned := trust.Entry{
+		Name: "build", Argv: []string{pinnedPath},
+		ArgvSHA256: trust.ArgvSHA256([]string{pinnedPath}), Argv0SHA256: sum, Global: true,
+	}
+	relative := trust.Entry{
+		Name: "lint", Argv: []string{"true"},
+		ArgvSHA256: trust.ArgvSHA256([]string{"true"}), Global: true,
+	}
+	legacyArgv := []string{"/usr/bin/true"}
+	legacy := trust.Entry{
+		Name: "tests", Argv: legacyArgv, ArgvSHA256: trust.ArgvSHA256(legacyArgv), Global: true,
+	}
+
+	rows, err := BuildGatePreflight(preflightDefs(
+		workflow.Gate{Name: "build"}, workflow.Gate{Name: "lint"}, workflow.Gate{Name: "tests"},
+	), sandboxTrust(t, pinned, relative, legacy), repoRoot)
+	if err != nil {
+		t.Fatalf("BuildGatePreflight: %v", err)
+	}
+	got, _ := preflightRow(rows, "tests")
+	if !got.Matched || !strings.Contains(got.Warning, legacyPinText) {
+		t.Errorf("the legacy gate's row lacks its warning: %+v", got)
+	}
+	for _, name := range []string{"build", "lint"} {
+		if r, _ := preflightRow(rows, name); !r.Matched || r.Warning != "" {
+			t.Errorf("%s: matched %v, warning %q; want matched with no warning",
+				name, r.Matched, r.Warning)
+		}
+	}
+
+	var buf strings.Builder
+	RenderGatePreflight(&buf, rows)
+	out := buf.String()
+	warningLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "warning:") && strings.Contains(line, "tests") {
+			warningLine = line
+		}
+	}
+	if warningLine == "" {
+		t.Fatalf("no `warning:` line names the legacy gate:\n%s", out)
+	}
+	after := out[strings.Index(out, warningLine)+len(warningLine):]
+	for _, want := range []string{legacyPinText, "docket trust add tests --"} {
+		if !strings.Contains(after, want) {
+			t.Errorf("the warning text after %q lacks %q:\n%s", warningLine, want, out)
+		}
+	}
+
+	t.Run("pinned and relative entries render no warning", func(t *testing.T) {
+		clean, err := BuildGatePreflight(preflightDefs(
+			workflow.Gate{Name: "build"}, workflow.Gate{Name: "lint"},
+		), sandboxTrust(t, pinned, relative), repoRoot)
+		if err != nil {
+			t.Fatalf("BuildGatePreflight: %v", err)
+		}
+		var buf strings.Builder
+		RenderGatePreflight(&buf, clean)
+		if strings.Contains(buf.String(), legacyPinText) {
+			t.Errorf("a pinned or relative roster rendered the legacy warning:\n%s", buf.String())
+		}
+		if buf.String() != "" {
+			t.Errorf("a fully resolved, pinned roster printed:\n%s", buf.String())
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

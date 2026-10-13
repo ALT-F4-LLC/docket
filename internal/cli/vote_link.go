@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
@@ -43,6 +44,10 @@ var voteLinkCmd = &cobra.Command{
 				return cmdErr(fmt.Errorf("link already exists"), output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("linking proposal to issue: %w", err), output.ErrGeneral)
+		}
+		if err := engine.RecordConductorPanelOpened(conn, proposalID); err != nil {
+			return cmdErr(fmt.Errorf("the link recorded, but recording %s's run events failed: %w",
+				model.FormatProposalID(proposalID), err), output.ErrGeneral)
 		}
 
 		result := voteLinkResult{

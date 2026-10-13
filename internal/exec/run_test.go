@@ -17,7 +17,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestNoShellEverInvoked is T2's table.
+// TestNoShellEverInvoked proves no argv element reaches a shell.
 //
 // Every row is an argv element containing a character that a command
 // interpreter would treat as SYNTAX. The assertion is made from the CHILD's
@@ -107,7 +107,7 @@ func TestNoShellEverInvokedPreservesMultipleArguments(t *testing.T) {
 	}
 }
 
-// TestPackageReferencesNoShellBinary is §5.1's SOURCE GUARD.
+// TestPackageReferencesNoShellBinary is the no-interpreter SOURCE GUARD.
 //
 // It is a grep-level check in the same spirit as the no-token-flag guard, and
 // for the same reason: the rule is easy to state and easy to violate
@@ -176,7 +176,7 @@ func codeWithoutComments(t *testing.T, filename string) string {
 	return b.String()
 }
 
-// --- The environment allowlist (§5.3, T5) -----------------------------------
+// --- The environment allowlist -----------------------------------------------
 
 // TestGateChildEnvIsExactlyTheAllowlist asserts SET EQUALITY, not membership.
 //
@@ -185,7 +185,7 @@ func codeWithoutComments(t *testing.T, filename string) string {
 // parent is seeded with fifty hostile variables first, so the test has
 // something real to catch.
 func TestGateChildEnvIsExactlyTheAllowlist(t *testing.T) {
-	// Fifty hostile parent variables, including the ones §5.3 names explicitly.
+	// Fifty hostile parent variables.
 	hostile := []string{
 		"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
 		"GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "NPM_TOKEN", "PYPI_TOKEN",
@@ -294,7 +294,7 @@ func TestGateChildEnvIsExactlyTheAllowlist(t *testing.T) {
 	}
 }
 
-// TestDocketTokenNeverReachesAGateChild is T5's core case.
+// TestDocketTokenNeverReachesAGateChild is the denylist's core case.
 //
 // A capability token in a child converts code execution into ENGINE AUTHORITY:
 // the child could complete a step with a forged artifact under the live lease.
@@ -350,8 +350,8 @@ func TestDocketTokenNeverReachesAGateChild(t *testing.T) {
 
 func TestAllowlistAccessorsReturnCopies(t *testing.T) {
 	// Handing out the package's own slice would let a caller EXTEND the
-	// allowlist by appending to it — precisely the mechanism §5.3 refuses to
-	// ship.
+	// allowlist by appending to it — precisely the mechanism this package
+	// refuses to ship.
 	got := AllowedEnvNames()
 	if len(got) == 0 {
 		t.Fatal("the allowlist must not be empty")
@@ -368,9 +368,9 @@ func TestAllowlistAccessorsReturnCopies(t *testing.T) {
 	}
 }
 
-// --- Timeout and the process-group kill (§5.4, T7) --------------------------
+// --- Timeout and the process-group kill --------------------------------------
 
-// TestTimeoutKillsTheWholeProcessGroup is T7, ASSERTED BY PID.
+// TestTimeoutKillsTheWholeProcessGroup kills the group, ASSERTED BY PID.
 //
 // Testing only the direct child would pass against an implementation that kills
 // the pid rather than the group — the exact bug the rule exists to prevent. So
@@ -388,7 +388,7 @@ func TestTimeoutKillsTheWholeProcessGroup(t *testing.T) {
 	if !res.TimedOut {
 		t.Fatalf("the run must report a timeout; output: %s", res.Output)
 	}
-	// X4: a timed-out command records a FAILURE, not unmatched — it was
+	// A timed-out command records a FAILURE, not unmatched — it was
 	// trusted and it did run; it failed by exceeding its bound.
 	if ExitZeroIsPass(res) {
 		t.Error("a timed-out command must not count as a pass")
@@ -439,7 +439,8 @@ func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
-// TestTimeoutDoesNotHangOnInheritedPipes is X3.
+// TestTimeoutDoesNotHangOnInheritedPipes proves a surviving grandchild cannot
+// hang the runner.
 //
 // The classic hang: a killed child's SURVIVING GRANDCHILD holds the capture
 // pipe's write end open forever, so a runner that waits for EOF never returns.
@@ -469,7 +470,7 @@ func TestTimeoutDoesNotHangOnInheritedPipes(t *testing.T) {
 }
 
 func TestTimeoutIsBoundedByTheSpecAndDefaults(t *testing.T) {
-	// X5: the spec's timeout is used when set. The default is a package
+	// The spec's timeout is used when set. The default is a package
 	// constant, asserted here so a change to it is a deliberate edit.
 	if DefaultTimeout != 5*time.Minute {
 		t.Errorf("DefaultTimeout = %s, want 5m", DefaultTimeout)
@@ -493,9 +494,9 @@ func TestTimeoutIsBoundedByTheSpecAndDefaults(t *testing.T) {
 	}
 }
 
-// --- Capture (§5.5, T6) ------------------------------------------------------
+// --- Capture -----------------------------------------------------------------
 
-// TestCaptureIsCappedAndFlagged is T6.
+// TestCaptureIsCappedAndFlagged proves the capture is capped and flagged.
 //
 // A generator emitting far past the cap must not exhaust memory and must not be
 // able to spin the reader: the writer STOPS CONSUMING at the cap rather than
@@ -513,12 +514,12 @@ func TestCaptureIsCappedAndFlagged(t *testing.T) {
 	if len(res.Output) > CaptureCap {
 		t.Errorf("the recorded output is %d bytes, which exceeds the %d-byte cap", len(res.Output), CaptureCap)
 	}
-	// C3/C4: exactly cap-sized, allowing for the rune-boundary back-off. The
+	// Exactly cap-sized, allowing for the rune-boundary back-off. The
 	// witness emits ASCII, so the back-off should take nothing at all here.
 	if len(res.Output) < CaptureCap-4 {
 		t.Errorf("the recorded output is %d bytes; a truncated capture keeps the FIRST cap bytes (%d)", len(res.Output), CaptureCap)
 	}
-	// C3: the FIRST bytes are kept, not the last. The first bytes of a failing
+	// The FIRST bytes are kept, not the last. The first bytes of a failing
 	// check contain the invocation and the first error.
 	if !strings.HasPrefix(res.Output, "xxx") {
 		t.Errorf("a truncated capture must keep the first bytes; got a prefix of %q", firstN(res.Output, 40))
@@ -526,7 +527,7 @@ func TestCaptureIsCappedAndFlagged(t *testing.T) {
 }
 
 func TestCaptureTruncationDoesNotSplitARune(t *testing.T) {
-	// C4: truncation is backed off to the last valid rune boundary, so a
+	// Truncation is backed off to the last valid rune boundary, so a
 	// multi-byte character split by the cap does not become invalid UTF-8 —
 	// which would, downstream, produce invalid JSON in a run report.
 	w := &captureWriter{}
@@ -563,11 +564,12 @@ func firstN(s string, n int) string {
 	return s[:n]
 }
 
-// TestCaptureInterleavesStdoutAndStderrInWriteOrder is C1.
+// TestCaptureInterleavesStdoutAndStderrInWriteOrder proves one interleaved
+// stream.
 //
 // One interleaved stream in write order is what an operator reading a failed
 // check wants: an error message and the line that produced it belong next to
-// each other. §11.4 has a single output field, so this is the spec's shape.
+// each other. A gate result has a single output field, so this is its shape.
 func TestCaptureInterleavesStdoutAndStderrInWriteOrder(t *testing.T) {
 	spec := witnessSpec(t, "interleave")
 
@@ -636,7 +638,7 @@ func TestRunDoesNotInheritTheParentEnvironmentByDefault(t *testing.T) {
 	}
 }
 
-// --- Flaky re-runs (§5.6, F1–F5) ---------------------------------------------
+// --- Flaky re-runs -----------------------------------------------------------
 
 func TestFlakyReRuns(t *testing.T) {
 	countFile := func(t *testing.T) string {
@@ -669,7 +671,7 @@ func TestFlakyReRuns(t *testing.T) {
 		}
 		assertCount(t, cf, MaxFlakyAttempts)
 
-		// F3: EACH ATTEMPT IS ITS OWN RESULT, with an ASCENDING ordinal.
+		// EACH ATTEMPT IS ITS OWN RESULT, with an ASCENDING ordinal.
 		// Nothing is overwritten and nothing is aggregated.
 		for i, a := range attempts {
 			if a.Ordinal != i {
@@ -683,7 +685,7 @@ func TestFlakyReRuns(t *testing.T) {
 			}
 		}
 
-		// F4: the verdict for routing is the LAST attempt's.
+		// The verdict for routing is the LAST attempt's.
 		last, ok := Verdict(attempts)
 		if !ok {
 			t.Fatal("Verdict must return the last attempt")
@@ -709,7 +711,7 @@ func TestFlakyReRuns(t *testing.T) {
 		}
 		assertCount(t, cf, 2)
 
-		// F4: it passes, and the earlier failure remains recorded as evidence
+		// It passes, and the earlier failure remains recorded as evidence
 		// that the check is flaky.
 		last, _ := Verdict(attempts)
 		if !ExitZeroIsPass(last.Result) {

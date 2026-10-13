@@ -19,13 +19,23 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
+# govulncheck shells out to a binary named `go`, and this toolchain ships the
+# compiler only as go1.26.9 (the name build.sh and tests.sh call). Without a
+# `go` on PATH it reports "no go.mod file", which reads as a repo defect and is
+# not one. A scratch shim named `go` that execs go1.26.9 is placed first on
+# PATH for this gate only.
+shim="$(mktemp -d "${TMPDIR:-/tmp}/vuln-scan-go.XXXXXX")"
+trap 'rm -rf "$shim"' EXIT
+printf '#!/bin/sh\nexec go1.26.9 "$@"\n' > "$shim/go"
+chmod +x "$shim/go"
+export PATH="$shim:$PATH"
 echo "=== vuln-scan: govulncheck ./... ==="
 
 # govulncheck is not vendored. UNAVAILABLE IS A FAILURE, NOT A PASS: the whole
 # point of this gate is that a security-load-bearing change was checked, and
 # "we couldn't check, so carry on" is what makes a control decorative. The
 # engine records an unmatched gate as a failure for exactly this reason
-# (internal/engine/gate_exec.go, N3) and this script agrees with it.
+# (internal/engine/gate_exec.go) and this script agrees with it.
 if ! command -v govulncheck >/dev/null 2>&1; then
   cat >&2 <<'EOF'
 vuln-scan FAILED: govulncheck is not installed.

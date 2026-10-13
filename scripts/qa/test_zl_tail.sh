@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
 # ZL — THE OBSERVABILITY TAIL: `events --follow`, `events prune`, GONE GOING
-# LIVE, AND THE RUN BUDGET VERB (events-follow §4, §5, §7).
+# LIVE, AND THE RUN BUDGET VERB.
 #
-# THIS SECTION COMPLETES THE ENGINE. It is stage 7 of engine-spec §10's seven,
+# THIS SECTION COMPLETES THE ENGINE. It is the last of seven stages,
 # and what it adds is the tail: watching a feed while work happens, forgetting
 # what an operator decides to forget, and moving a cap on a run already in
 # flight.
 #
 # TWO THINGS ARE PROVEN HERE THAT NO EARLIER SECTION COULD PROVE:
 #
-#   1. GONE IS REACHABLE, and reachable ONLY BY PRUNING. S6 shipped the code,
-#      the exit, and the message for a cursor below the retained minimum, and
-#      shipped them unreachable — nothing deleted an event, so `MIN(seq)` was
+#   1. GONE IS REACHABLE, and reachable ONLY BY PRUNING. An earlier stage
+#      shipped the code, the exit, and the message for a cursor below the
+#      retained minimum, and shipped them unreachable — nothing deleted an event, so `MIN(seq)` was
 #      always 1. ZL prunes through the verb and then walks a cursor into the
 #      hole. The Go test asserts the same thing in-process; this asserts it
 #      through the CLI, which is where a consumer meets it.
@@ -28,15 +28,16 @@
 # is the follow, which is bounded by a `timeout` and asserted on its OUTPUT
 # rather than on how long it took.
 #
-# THE STRANGER TEST (§1.1). The fixture is a small print shop again: a job with
+# THE STRANGER TEST. The fixture is a small print shop again: a job with
 # two steps and a cap on what it may cost. An operator watches the job's feed,
 # raises the cap when the estimate turns out to be low, and trims the events of
 # jobs finished long ago. Nothing here mentions a model, a token, or an agent —
 # `--follow` tails a log, `prune` deletes rows, and a budget is a bare number.
 #
-# The section also carries the STAGE-7 DORMANCY proof (§3): prune and follow are
+# The section also carries the STAGE-7 DORMANCY proof: prune and follow are
 # NEW VERBS, so a repo that never runs them sees nothing — and `events list`,
-# which S6 shipped, is byte-identical to itself across the flag's arrival.
+# which an earlier stage shipped, is byte-identical to itself across the
+# flag's arrival.
 
 test_zl_tail() {
   printf "Section ZL: the observability tail — follow, prune, GONE, and the budget verb"
@@ -86,7 +87,7 @@ TOML
   # ZL1 — `events list --follow`: the subscription sees new events and stops.
   # ===========================================================================
   #
-  # The follow runs under `timeout`, which is the Ctrl-C of a script: W6 says an
+  # The follow runs under `timeout`, which is the Ctrl-C of a script: an
   # interrupted follow exits 0, and `timeout` sends the same TERM a person's
   # Ctrl-C sends. Work happens WHILE it runs, in the background, so what the
   # follow prints is a live tail and not a replay of a finished feed.
@@ -106,7 +107,7 @@ TOML
   # THE FOLLOW IS ENDED WITH AN EXPLICIT `kill -TERM`, not with `timeout`.
   # `timeout` is GNU coreutils and is absent on a stock macOS, where this suite
   # also runs — and TERM is a better test anyway: it is the signal a person's
-  # Ctrl-C sends, and W6's claim is precisely that receiving it is not a failure.
+  # Ctrl-C sends, and the claim is precisely that receiving it is not a failure.
   # 500ms is the FLOOR, enforced in PersistentPreRunE for every polling mode —
   # `--follow` reads the same persistent `--interval` `--watch` does, so there
   # is one default and one minimum across every verb that polls.
@@ -149,7 +150,7 @@ TOML
   ZL_FOLLOW_EXIT=$?
   set -e
 
-  # W6: AN INTERRUPTED FOLLOW EXITS 0. Interrupting a follow is how a follow
+  # AN INTERRUPTED FOLLOW EXITS 0. Interrupting a follow is how a follow
   # ends — it is not a failure, and a verb that reported one would make every
   # script wrapping it special-case its own success.
   #
@@ -181,7 +182,7 @@ TOML
   assert_exit "ZL" "ZL1_interval_floor" 3
   assert_json "ZL" "ZL1_interval_floor_code" '.code' "VALIDATION_ERROR"
 
-  # W3: EACH EVENT EXACTLY ONCE. A cursor that failed to advance would reprint
+  # EACH EVENT EXACTLY ONCE. A cursor that failed to advance would reprint
   # the same page every interval, which is the failure a poller is most likely
   # to have and the one a human eyeballing output would not notice.
   local ZL_SEQS ZL_UNIQ
@@ -221,19 +222,19 @@ TOML
   ZL_EVENTS_AFTER_REFUSAL=$(sqlite3 "$ZL/issues.db" "SELECT COUNT(*) FROM events;")
   check_cond "ZL" "ZL2_refusal_deleted_nothing" "the refused prune emptied the events table" [ "$ZL_EVENTS_AFTER_REFUSAL" -gt 0 ]
 
-  # A prune with NO TARGET is refused too (P1): a destructive verb with a
+  # A prune with NO TARGET is refused too: a destructive verb with a
   # default target is how a log gets deleted by a typo.
   run_env "$ZL" events prune --yes --json
   assert_exit "ZL" "ZL2_no_target_refused" 3
   assert_json "ZL" "ZL2_no_target_code" '.code' "VALIDATION_ERROR"
 
   # And a prune WITHOUT `--yes` is refused, in JSON mode, where no prompt could
-  # be answered (P6).
+  # be answered.
   run_env "$ZL" events prune --before 5 --json
   assert_exit "ZL" "ZL2_no_confirmation_refused" 3
 
   # ===========================================================================
-  # ZL3 — THE BUDGET VERB UN-PARKS A BREACHED RUN (§7.4, B24 closed).
+  # ZL3 — THE BUDGET VERB UN-PARKS A BREACHED RUN.
   # ===========================================================================
   #
   # This is the continuation ZI could not write. A fresh run with a cap of 1:
@@ -250,6 +251,8 @@ TOML
   assert_exit "ZL" "ZL3_start" 0
   run_env "$ZL_B" run activate RUN-1 --json
   assert_exit "ZL" "ZL3_activate" 0
+  local ZL_B_CTOK
+  ZL_B_CTOK=$(activation_token)
 
   run_env "$ZL_B" step claim STEP-1 --owner press --json
   assert_exit "ZL" "ZL3_claim_at_cap" 0
@@ -266,9 +269,9 @@ TOML
   run_env "$ZL_B" run status RUN-1 --json
   assert_json "ZL" "ZL3_parked" '.data.run.status' "waiting-human"
 
-  # THE DEAD END S6 DOCUMENTED: resume alone does not help. Asserting it here
-  # is what makes the next step a fix rather than a coincidence.
-  run_env "$ZL_B" run resume RUN-1 --json
+  # THE DEAD END ALREADY DOCUMENTED: resume alone does not help. Asserting it
+  # here is what makes the next step a fix rather than a coincidence.
+  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run resume RUN-1 --json
   assert_exit "ZL" "ZL3_resume" 0
   run_env "$ZL_B" step claim STEP-2 --owner checker --json
   assert_exit "ZL" "ZL3_resume_alone_insufficient" 4
@@ -296,10 +299,11 @@ TOML
   assert_json "ZL" "ZL3_status_untouched" '.data.run.status' "waiting-human"
 
   # So the operator resumes, DELIBERATELY, as the second of two acts.
-  run_env "$ZL_B" run resume RUN-1 --json
+  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run resume RUN-1 --json
   assert_exit "ZL" "ZL3_resume_after_raise" 0
 
-  # AND THE CLAIM NOW COMMITS. This is B24, closed, through the CLI.
+  # AND THE CLAIM NOW COMMITS. The re-pause ZI2 recorded is closed, through the
+  # CLI.
   run_env "$ZL_B" step claim STEP-2 --owner checker --json
   assert_exit "ZL" "ZL3_claim_after_raise" 0
 
@@ -312,7 +316,7 @@ TOML
     check "ZL" "ZL3_budget_event_logged" "PASS"
   else
     check "ZL" "ZL3_budget_event_logged" "FAIL" \
-      "the cap moved with no run-budget-set event: the gap operations.md §4 warned about"
+      "the cap moved with no run-budget-set event"
   fi
 
   # The event carries BOTH numbers, so an auditor need not reconstruct the old
@@ -327,7 +331,7 @@ TOML
   fi
 
   # A TERMINAL run's cap is history (B-3).
-  run_env "$ZL_B" run abandon RUN-1 --reason "done rehearsing" --json
+  DOCKET_TOKEN="$ZL_B_CTOK" run_env "$ZL_B" run abandon RUN-1 --reason "done rehearsing" --authority operator --json
   assert_exit "ZL" "ZL3_abandon" 0
   run_env "$ZL_B" run budget RUN-1 --set 50 --json
   assert_exit "ZL" "ZL3_terminal_refused" 4
@@ -337,7 +341,7 @@ TOML
   # ===========================================================================
   #
   # RUN-1 in $ZL_B is now `abandoned` — terminal — so its events may be pruned.
-  # This is the case operations.md §2 recommends: trim whole runs that have
+  # This is the recommended case: trim whole runs that have
   # finished, rather than the oldest N events across all of them.
 
   local ZL_MIN_BEFORE ZL_CURSOR
@@ -351,7 +355,7 @@ TOML
   # is about to be told its position no longer exists.
   ZL_CURSOR=$((ZL_MIN_BEFORE))
 
-  # A DRY RUN FIRST: it reports and deletes nothing (P5).
+  # A DRY RUN FIRST: it reports and deletes nothing.
   run_env "$ZL_B" events prune --before-run RUN-1 --dry-run --json
   assert_exit "ZL" "ZL4_dry_run" 0
   local ZL_WOULD
@@ -372,7 +376,7 @@ TOML
   ZL_PRUNED=$(echo "$CMD_STDOUT" | jq -r '.data.pruned')
   check_cond "ZL" "ZL4_dry_run_was_accurate" "--dry-run promised $ZL_WOULD and the prune deleted $ZL_PRUNED" [ "$ZL_PRUNED" = "$ZL_WOULD" ]
 
-  # P18: THE PRUNE LEFT ITS OWN EVENT, above everything it deleted. A log that
+  # THE PRUNE LEFT ITS OWN EVENT, above everything it deleted. A log that
   # erased the record of its own erasure would be indistinguishable from a run
   # that made fewer transitions.
   #
@@ -410,8 +414,8 @@ TOML
   # THE HEADLINE: GONE, REACHED THROUGH PRODUCT CODE.
   # ===========================================================================
   #
-  # S6 shipped this code, this exit, and this message and could not reach any of
-  # them: nothing deleted an event, so `MIN(seq)` was always 1. Two prunes have
+  # An earlier stage shipped this code, this exit, and this message and could
+  # not reach any of them: nothing deleted an event, so `MIN(seq)` was always 1. Two prunes have
   # now happened, and the cursor that was valid before either is below the
   # retained minimum.
   run_env "$ZL_B" events list --since "$ZL_CURSOR" --json
@@ -436,7 +440,7 @@ TOML
   assert_exit "ZL" "ZL4_resume_point_is_valid" 0
 
   # ===========================================================================
-  # ZL5 — THE RETENTION BOUNDARY (§5.3).
+  # ZL5 — THE RETENTION BOUNDARY.
   # ===========================================================================
   #
   # `events.retain` protects recent events whatever `--before` says. NOTHING
@@ -452,11 +456,11 @@ TOML
   run_env "$ZL_R" issue create -t "A finished job" -d "for the archive" --json >/dev/null
   run_env "$ZL_R" run start --issue DKT-1 --json >/dev/null
   run_env "$ZL_R" run activate RUN-1 --json >/dev/null
-  run_env "$ZL_R" run abandon RUN-1 --reason "archived" --json >/dev/null
+  DOCKET_TOKEN="$(activation_token)" run_env "$ZL_R" run abandon RUN-1 --reason "archived" --authority operator --json >/dev/null
 
-  # THE DEFAULT IS 0, AND 0 RETAINS EVERYTHING. A retention key defaulting the
-  # other way would make the first prune an operator ever typed delete their
-  # whole log.
+  # THE DEFAULT IS 0, WHICH IMPOSES NO RETENTION WINDOW. A prune at 0 is
+  # bounded only by --before/--before-run and the live-run refusal, not by age.
+  # Nothing is deleted until an operator runs prune with a target.
   run_env "$ZL_R" config get events.retain --json
   assert_exit "ZL" "ZL5_retain_key" 0
   assert_json "ZL" "ZL5_retain_default" '.data.value' "0"
@@ -485,7 +489,7 @@ TOML
   check_cond "ZL" "ZL5_window_released" "clearing the window released nothing" [ "$ZL_PRUNED_R" -gt 0 ]
 
   # ===========================================================================
-  # ZL6 — STAGE-7 DORMANCY (§3).
+  # ZL6 — STAGE-7 DORMANCY.
   # ===========================================================================
   #
   # PRUNE AND FOLLOW ARE NEW VERBS. A repo that never runs them sees nothing —
@@ -529,8 +533,8 @@ TOML
   run_env "$ZL_D" events list --since 0 --json
   assert_exit "ZL" "ZL6_no_gone_without_a_prune" 0
 
-  # D2: `events list` WITHOUT `--follow` is what S6 shipped. The flag's arrival
-  # did not change the verb's shape — same keys, same envelope.
+  # `events list` WITHOUT `--follow` is what an earlier stage shipped. The
+  # flag's arrival did not change the verb's shape — same keys, same envelope.
   local ZL_D_KEYS
   ZL_D_KEYS=$(echo "$CMD_STDOUT" | jq -S -c '[.data.events[0] | keys] | .[0]')
   if printf '%s' "$ZL_D_KEYS" | grep -q '"seq"' \

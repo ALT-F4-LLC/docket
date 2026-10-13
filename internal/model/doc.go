@@ -7,7 +7,7 @@ import (
 )
 
 // DocIDPrefix is the prefix used for doc IDs in display and JSON output.
-// A single global counter is used across all doc types (see TDD §3.3, C2).
+// A single global counter is used across all doc types.
 const DocIDPrefix = "DOC"
 
 // FormatDocID returns the display form of a doc ID, e.g. "DOC-5".
@@ -22,7 +22,7 @@ func ParseDocID(input string) (int, error) {
 }
 
 // Doc represents a tracked design document (TDD, ADR, PRD, etc.). `Type` and
-// `Status` are free-form per TDD §5.4 — no enum validation at the model layer.
+// `Status` are free-form — no enum validation at the model layer.
 type Doc struct {
 	ID int
 	// ProjectID is the v12 tenancy dimension; zero normalizes to the default
@@ -128,7 +128,7 @@ func (r *DocRef) UnmarshalJSON([]byte) error {
 
 // DocRevision is an append-only history row for a Doc. `ChangeKind` is a
 // free-form descriptor: "create", "body", "status", "title", "type", or
-// comma-joined for combined edits (e.g. "status+body") per TDD §5.4 C8.
+// comma-joined for combined edits (e.g. "status+body").
 type DocRevision struct {
 	ID             int
 	DocID          int
@@ -193,7 +193,7 @@ func (r *DocRevision) UnmarshalJSON(data []byte) error {
 }
 
 // DocComment represents a comment on a Doc. Mirrors `model.Comment` (author
-// stored as plain string; DB scan layer wraps with sql.NullString per S5).
+// stored as plain string; DB scan layer wraps with sql.NullString).
 type DocComment struct {
 	ID        int
 	DocID     int

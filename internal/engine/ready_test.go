@@ -2,6 +2,9 @@ package engine
 
 import (
 	"database/sql"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -246,9 +249,9 @@ func TestReadyR3Predecessors(t *testing.T) {
 }
 
 // TestReadyR3SkippedPredecessorSatisfies pins that a `skipped` predecessor does
-// NOT strand its successors. §11.1 makes a false `when` mean the step does not
+// NOT strand its successors. A false `when` means the step does not
 // run, not that everything after it is unschedulable — and expansion creates
-// the skipped row precisely so the `after` edge stays resolvable (§5.3.1).
+// the skipped row precisely so the `after` edge stays resolvable.
 func TestReadyR3SkippedPredecessorSatisfies(t *testing.T) {
 	conn := mustDB(t)
 	run, issue := activatedRun(t, conn)
@@ -368,10 +371,9 @@ func TestReadyR4SameIssueDoesNotSelfExclude(t *testing.T) {
 // TestReadyR5ClassHeadroom falsifies R5 with a `[limits]` max, and pins that
 // core ships NO default: a class with no declared max is unbounded.
 //
-// The serialized-writer behavior engine-core §5 ratifies is produced HERE, by
-// instance config, not by a hardcoded rule — §6.5 is explicit that a hardcoded
-// writer serialization would be instance policy in core and would fail the
-// genericity rule on its face.
+// The serialized-writer behavior is produced HERE, by instance config, not by
+// a hardcoded rule — a hardcoded writer serialization would be instance
+// policy in core and would fail the genericity rule on its face.
 func TestReadyR5ClassHeadroom(t *testing.T) {
 	const src = `
 [pipeline]
@@ -470,9 +472,355 @@ after = []
 	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
 		if ready, cond := sched.Ready(stepNamed(t, sched, "two@0")); !ready {
 			t.Errorf("two@0 blocked by %q with NO [limits] declared — "+
-				"core must ship no class named `write` and no default of 1 "+
-				"(§6.5, genericity.md)", cond)
+				"core must ship no class named `write` and no default of 1", cond)
 		}
+	})
+}
+
+// classCapSrc pins `write` at max 2 across four independent roots, so a cap
+// both below and above the pinned max is observable.
+const classCapSrc = `
+[pipeline]
+name = "capped"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+
+[[step]]
+name = "a"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "b"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "c"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "d"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+`
+
+// classCapRun activates one issue over classCapSrc.
+func classCapRun(t *testing.T, conn *sql.DB) (*model.Run, int) {
+	t.Helper()
+	registerSource(t, conn, []byte(classCapSrc), "capped.toml")
+	issue := createIssue(t, conn, "capped", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	return run, issue
+}
+
+// admittedWrites is the number of `write` steps R5 admits concurrently in a
+// fresh snapshot: it claims the roots one at a time until the next root is
+// refused on headroom, then puts every root back to pending.
+func admittedWrites(t *testing.T, conn *sql.DB, runID, issue int) int {
+	t.Helper()
+	defer execSQL(t, conn, `UPDATE steps SET status = ? WHERE issue_id = ?`,
+		db.StepPending, issue)
+
+	roots := []string{"a@0", "b@0", "c@0", "d@0"}
+	for claimed, next := range roots {
+		var admitted bool
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ready, cond := sched.Ready(stepNamed(t, sched, next))
+			if !ready && cond != CondHeadroom {
+				t.Fatalf("%s blocked by %q, want ready or %q", next, cond, CondHeadroom)
+			}
+			admitted = ready
+		})
+		if !admitted {
+			return claimed
+		}
+		execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = ? AND issue_id = ?`,
+			db.StepClaimed, next, issue)
+	}
+	return len(roots)
+}
+
+// TestClassCapWithoutOverrideIsThePinnedMax: with no limits.max.<class> set,
+// the scheduler's cap is the pinned workflow's `[limits]` max, unchanged.
+func TestClassCapWithoutOverrideIsThePinnedMax(t *testing.T) {
+	conn := mustDB(t)
+	run, issue := classCapRun(t, conn)
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		if got := sched.Limit("write").Max; got != 2 {
+			t.Errorf("Limit(write).Max = %d with no override, want the pinned 2", got)
+		}
+	})
+	if got := admittedWrites(t, conn, run.ID, issue); got != 2 {
+		t.Errorf("admitted %d concurrent writes with no override, want the pinned 2", got)
+	}
+}
+
+// TestClassCapOverrideReplacesThePinnedMax: a numeric limits.max.<class> is
+// the class's cap whether it is below or above the pinned `[limits]` max.
+func TestClassCapOverrideReplacesThePinnedMax(t *testing.T) {
+	for _, n := range []int{1, 3} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			conn := mustDB(t)
+			run, issue := classCapRun(t, conn)
+			err := db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", strconv.Itoa(n))
+			testsupport.Must(t, err, "setting the override: %v", err)
+
+			loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+				if got := sched.Limit("write").Max; got != n {
+					t.Errorf("Limit(write).Max = %d, want the override %d", got, n)
+				}
+				detail := sched.HeadroomDetail(stepNamed(t, sched, "a@0"))
+				if !strings.Contains(detail, "set by config limits.max.write") {
+					t.Errorf("headroom detail does not name the override: %s", detail)
+				}
+			})
+			if got := admittedWrites(t, conn, run.ID, issue); got != n {
+				t.Errorf("admitted %d concurrent writes, want the override %d "+
+					"(pinned max is 2)", got, n)
+			}
+		})
+	}
+}
+
+// TestClassCapOverrideIsReadAtSchedulingTime: changing limits.max.<class>
+// between two snapshots of one active run changes what the next snapshot
+// admits, with the workflow pinned exactly as activation left it.
+func TestClassCapOverrideIsReadAtSchedulingTime(t *testing.T) {
+	conn := mustDB(t)
+	run, issue := classCapRun(t, conn)
+	key := db.KeyClassMaxPrefix + "write"
+
+	for _, step := range []struct {
+		value string
+		want  int
+	}{{"3", 3}, {"1", 1}, {"4", 4}} {
+		err := db.SetConfig(conn, 0, key, step.value)
+		testsupport.Must(t, err, "setting %s=%s: %v", key, step.value, err)
+		if got := admittedWrites(t, conn, run.ID, issue); got != step.want {
+			t.Errorf("after %s=%s the same run admitted %d writes, want %d",
+				key, step.value, got, step.want)
+		}
+	}
+}
+
+// TestClassCapProjectOverrideWinsOverStoreWide: the run's project value beats
+// the store-wide one, GetConfig's resolution order.
+func TestClassCapProjectOverrideWinsOverStoreWide(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := classCapRun(t, conn)
+	if run.ProjectID == 0 {
+		t.Fatal("the fixture run has no project; a project override cannot be told from a store-wide one")
+	}
+	key := db.KeyClassMaxPrefix + "write"
+	testsupport.Must(t, db.SetConfig(conn, 0, key, "3"), "store-wide: %v", nil)
+	testsupport.Must(t, db.SetConfig(conn, run.ProjectID, key, "1"), "project: %v", nil)
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		if got := sched.Limit("write").Max; got != 1 {
+			t.Errorf("Limit(write).Max = %d, want the project's 1 over the store's 3", got)
+		}
+	})
+}
+
+// TestClassCapAutoDerivesFromTheHost: `auto` resolves to half the host's CPUs,
+// never below one.
+func TestClassCapAutoDerivesFromTheHost(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := classCapRun(t, conn)
+	err := db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	want := max(1, runtime.NumCPU()/2)
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		if got := sched.Limit("write").Max; got != want {
+			t.Errorf("Limit(write).Max = %d under auto, want %d", got, want)
+		}
+	})
+}
+
+// TestClassCapsReportEachBoundedClassWithItsSource: the snapshot reports a
+// numeric override as "override", an auto override as "auto" rather than its
+// resolved integer's origin, an unoverridden class at its pinned max as
+// "workflow", and omits a class no `[limits]` row or override bounds.
+func TestClassCapsReportEachBoundedClassWithItsSource(t *testing.T) {
+	const src = `
+[pipeline]
+name = "four-classes"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+judge = { max = 3 }
+read = { max = 5 }
+
+[[step]]
+name = "w"
+executor = "x"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "j"
+executor = "x"
+class = "judge"
+emits = "out"
+after = []
+
+[[step]]
+name = "r"
+executor = "x"
+class = "read"
+emits = "out"
+after = []
+
+[[step]]
+name = "f"
+executor = "x"
+class = "free"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(src), "four-classes.toml")
+	run := startRun(t, conn, createIssue(t, conn, "four", "body", "task", nil))
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", "4")
+	testsupport.Must(t, err, "setting the numeric override: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"read", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	want := map[string]ClassCap{
+		"write": {Max: 4, Source: ClassCapOverride},
+		"read":  {Max: max(1, runtime.NumCPU()/2), Source: ClassCapAuto},
+		"judge": {Max: 3, Source: ClassCapWorkflow},
+	}
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		got := sched.ClassCaps()
+		for class, w := range want {
+			if got[class] != w {
+				t.Errorf("ClassCaps()[%q] = %+v, want %+v", class, got[class], w)
+			}
+		}
+		if c, ok := got["free"]; ok {
+			t.Errorf("ClassCaps() lists unbounded class free as %+v, want no entry", c)
+		}
+		if len(got) != len(want) {
+			t.Errorf("ClassCaps() = %+v, want exactly %+v", got, want)
+		}
+	})
+}
+
+// TestClassInFlightExcludesTriageSuspended pins R5's occupancy for a step
+// suspended on its triage panel: it waits on voters, not a worker, so it holds
+// no slot in its class while the panel deliberates. A gated step whose routing
+// names no panel is still the engine's saga and keeps its slot.
+func TestClassInFlightExcludesTriageSuspended(t *testing.T) {
+	const src = `
+[pipeline]
+name = "limited-triage"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 1 }
+
+[[step]]
+name = "one"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+on_fail = "triage"
+
+[[step]]
+name = "triage"
+after = ["one"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+on_fail = "waiting-human"
+
+[step.on_fail_routes]
+approved = "retry"
+rejected = "abandon-issue"
+
+[[step]]
+name = "two"
+executor = "w"
+class = "write"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(src), "limited-triage.toml")
+
+	issue := createIssue(t, conn, "limited triage", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	setOne := func(routing string) {
+		execSQL(t, conn,
+			`UPDATE steps SET status = ?, routing = ? WHERE instance = ? AND issue_id = ?`,
+			db.StepGated, routing, "one@0", issue)
+	}
+
+	t.Run("a step suspended on its panel holds no slot", func(t *testing.T) {
+		setOne("triage")
+		loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+			if one := stepNamed(t, sched, "one@0"); !suspendedOnPanel(one, "triage") {
+				t.Fatalf("one@0 = %q routing %q; the fixture did not suspend it "+
+					"on its triage panel", one.Status, one.Routing)
+			}
+			two := stepNamed(t, sched, "two@0")
+			if ready, cond := sched.Ready(two); !ready {
+				t.Errorf("two@0 blocked by %q while the only other write step "+
+					"waits on its triage panel: %s", cond, sched.HeadroomDetail(two))
+			}
+			if detail := sched.HeadroomDetail(two); !strings.Contains(detail, "0 claimed/running") {
+				t.Errorf("HeadroomDetail = %q, want 0 claimed/running", detail)
+			}
+		})
+	})
+
+	t.Run("a gated step routed elsewhere keeps its slot", func(t *testing.T) {
+		setOne(workflow.OnFailFixLoop)
+		loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+			ready, cond := sched.Ready(stepNamed(t, sched, "two@0"))
+			if ready {
+				t.Error("two@0 is ready while a gated write step not on a panel " +
+					"fills the class at max = 1")
+			}
+			if cond != CondHeadroom {
+				t.Errorf("blocked by %q, want %q", cond, CondHeadroom)
+			}
+		})
 	})
 }
 
@@ -502,10 +850,10 @@ func TestReadyR6Status(t *testing.T) {
 	}
 }
 
-// TestReadyR7BudgetSeam pins R7's S3 behavior: the check is a seam returning
-// true (§6.3), so it never blocks at this stage.
+// TestReadyR7BudgetSeam pins R7 on a run with no cap: the check returns
+// true, so it never blocks.
 //
-// The test exists so S6's real check has a call site already under test, and so
+// The test exists so the check has a call site under test, and so
 // a reviewer does not read the always-true return as an oversight.
 func TestReadyR7BudgetSeam(t *testing.T) {
 	conn := mustDB(t)
@@ -514,7 +862,7 @@ func TestReadyR7BudgetSeam(t *testing.T) {
 	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
 		if !sched.budgetHeadroom(stepNamed(t, sched, "implement@0")) {
 			t.Error("R7 refused a step on a run with no cap; an unlimited run has " +
-				"headroom by definition (§4.8 B29)")
+				"headroom by definition")
 		}
 	})
 }
@@ -523,7 +871,7 @@ func TestReadyR7BudgetSeam(t *testing.T) {
 // Ordering
 // ---------------------------------------------------------------------------
 
-// TestReadyOrderingIsPriorityThenAge pins §2's "Ordering: priority then age",
+// TestReadyOrderingIsPriorityThenAge pins "Ordering: priority then age",
 // with a TOTAL order: two steps created in the same millisecond — which is the
 // common case, since one expansion writes them all — must still order
 // deterministically, or the topology goldens flap.
@@ -634,7 +982,7 @@ func TestExpiredLeaseIsReapable(t *testing.T) {
 // TestMaxStepDurationReapsPastALiveHeartbeat is the clause that makes
 // `max_step_duration` worth having, and the one an implementation naturally
 // omits: it is a SCHEDULE-TO-CLOSE bound against `started_ms`, "independent of
-// heartbeats — so a runaway executor cannot renew forever" (§11.1).
+// heartbeats — so a runaway executor cannot renew forever".
 //
 // The step here has a lease that is LIVE and freshly extended. It must still be
 // reaped, or the bound is just a second lease timeout.
@@ -685,7 +1033,7 @@ after = []
 		if !sched.Expired(step) {
 			t.Error("a step 60m into a 45m max_step_duration was not reaped " +
 				"despite a live lease — the bound is schedule-to-close and must " +
-				"be independent of heartbeats (§6.3)")
+				"be independent of heartbeats")
 		}
 	})
 
@@ -709,7 +1057,7 @@ after = []
 // answer, because R1 refuses to offer anything until the run is active again.
 //
 // Reaping it is a false positive with teeth: the step returns to `pending`
-// with its lease cleared, its class takes a write-reap hold (§6.4), and the
+// with its lease cleared, its class takes a write-reap hold, and the
 // operator who resolves the park finds work they never lost, undone.
 func TestExpiryIgnoresStepsOfANonActiveRun(t *testing.T) {
 	conn := mustDB(t)
@@ -922,4 +1270,288 @@ func TestMergeLimitsTakesTheTighterBound(t *testing.T) {
 	if got := sources["write"]; got != "bounded@2" {
 		t.Errorf("cap source = %q, want %q", got, "bounded@2")
 	}
+}
+
+// interposeExecutorSrc is standard-change's shape (DKT-2076): the routing
+// step's threshold names an EXECUTOR target, and the routing step's ordinary
+// downstream does not read that target's output.
+const interposeExecutorSrc = `
+[pipeline]
+name = "interpose-executor"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "drain-highs" = "any(status == blocked)" }
+
+[[step]]
+name = "drain-highs"
+after = ["reconcile"]
+executor = "drain-highs"
+emits = "record"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// interposeVoteHoldSrc is the same shape with a VOTE target, the DKT-168 case
+// the restriction must leave untouched.
+const interposeVoteHoldSrc = `
+[pipeline]
+name = "interpose-vote-hold"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "tribunal" = "any(status == blocked)" }
+
+[[step]]
+name = "tribunal"
+after = ["reconcile"]
+type = "vote"
+voters = ["seat-a", "seat-b", "seat-c"]
+vote_rule = "majority"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// interposeHumanHoldSrc is the same shape with a HUMAN target, the other kind
+// openInterposedGates holds for.
+const interposeHumanHoldSrc = `
+[pipeline]
+name = "interpose-human-hold"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "reconcile"
+executor = "reconcile"
+emits = "report"
+threshold = { "signoff" = "any(status == blocked)" }
+
+[[step]]
+name = "signoff"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+
+[[step]]
+name = "verify"
+after = ["reconcile"]
+executor = "verify"
+emits = "record"
+`
+
+// TestInterposedExecutorTargetDoesNotHoldDownstream is DKT-2076: R3's second
+// interposition clause holds a routing step's ordinary downstream only for
+// threshold targets of kind vote or human. An open EXECUTOR target runs beside
+// that downstream rather than ahead of it: nothing downstream reads its output,
+// so the extra level bought a dispatch round and no ordering guarantee.
+func TestInterposedExecutorTargetDoesNotHoldDownstream(t *testing.T) {
+	t.Run("executor target leaves the downstream ready", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeExecutorSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "drain-highs@0"); got != db.StepPending {
+			t.Fatalf("drain-highs@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if !ok {
+				t.Errorf("verify@0 held by %q while an open EXECUTOR target "+
+					"runs; its own predecessors are done and it reads nothing "+
+					"drain-highs emits", cond)
+			}
+		})
+	})
+
+	t.Run("vote target still holds the downstream", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeVoteHoldSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "tribunal@0"); got != db.StepPending {
+			t.Fatalf("tribunal@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("verify@0 ready=%v cond=%q behind an open VOTE gate, "+
+					"want CondGateOpen: DKT-168 is unchanged", ok, cond)
+			}
+		})
+	})
+
+	t.Run("human target still holds the downstream", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, _ := activateInterposed(t, conn, interposeHumanHoldSrc)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "signoff@0"); got != db.StepPending {
+			t.Fatalf("signoff@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "verify@0"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("verify@0 ready=%v cond=%q behind an open HUMAN gate, "+
+					"want CondGateOpen", ok, cond)
+			}
+		})
+	})
+}
+
+// interposedHumanDownstream appends a human gate as the routing step's second
+// ordinary downstream, beside `verify`, to either interposed shape above.
+const interposedHumanDownstream = `
+[[step]]
+name = "approve"
+after = ["reconcile"]
+type = "human"
+on_fail = "skip"
+`
+
+// TestAwaitingDecisionBehindOpenExecutorTarget is DKT-2076's mirror half:
+// AwaitingDecision reads the same openInterposedGates as Ready, so a human
+// gate behind an open EXECUTOR target is a decision whose turn has come, while
+// one behind an open VOTE target still waits (DKT-168). The vote case cannot
+// read the issue as not awaiting: the open vote target is itself awaiting.
+func TestAwaitingDecisionBehindOpenExecutorTarget(t *testing.T) {
+	t.Run("executor target leaves the gate awaiting decision", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn,
+			interposeExecutorSrc+interposedHumanDownstream)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "drain-highs@0"); got != db.StepPending {
+			t.Fatalf("drain-highs@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if !sched.AwaitingDecision(stepNamed(t, sched, "approve@0")) {
+				t.Errorf("approve@0 not awaiting decision while an open " +
+					"EXECUTOR target runs; it holds only for vote or human targets")
+			}
+			if !sched.IssueAwaitingDecision(issue) {
+				t.Errorf("issue %d not awaiting decision with approve@0's "+
+					"turn come", issue)
+			}
+		})
+	})
+
+	t.Run("vote target still holds the gate", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue := activateInterposed(t, conn,
+			interposeVoteHoldSrc+interposedHumanDownstream)
+		e := testEngine()
+
+		claimAndComplete(t, conn, e, "reconcile@0", "blocked finding",
+			`[{"status":"blocked"}]`)
+		if got := stepStatus(t, conn, "tribunal@0"); got != db.StepPending {
+			t.Fatalf("tribunal@0 = %q after being routed to, want pending", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if sched.AwaitingDecision(stepNamed(t, sched, "approve@0")) {
+				t.Errorf("approve@0 awaiting decision behind an open VOTE " +
+					"gate; DKT-168 is unchanged")
+			}
+			// The open vote is itself a decision whose turn has come, so the
+			// issue still reads awaiting; the hold shows as approve@0 being
+			// absent from what carries it.
+			var awaiting []string
+			for _, step := range sched.Steps() {
+				if step.IssueID == issue && sched.AwaitingDecision(step) {
+					awaiting = append(awaiting, step.Instance)
+				}
+			}
+			if !sched.IssueAwaitingDecision(issue) ||
+				len(awaiting) != 1 || awaiting[0] != "tribunal@0" {
+				t.Errorf("issue %d awaiting=%v on %v, want true on "+
+					"[tribunal@0] alone", issue,
+					sched.IssueAwaitingDecision(issue), awaiting)
+			}
+		})
+	})
+}
+
+// TestOnExhaustedVoteTargetHoldsDownstream is the on_exhausted half of R3's
+// interposition clause: a fix-loop exhaustion leaves its routing step terminal
+// `done`, so the hold on the routing step's ordinary downstream is the only
+// thing keeping that downstream behind an undecided panel. exhaustionSrc gives
+// `check` two `after` successors, so whichever one on_exhausted does not name
+// is the ordinary downstream.
+func TestOnExhaustedVoteTargetHoldsDownstream(t *testing.T) {
+	t.Run("an open vote target holds the downstream until it terminalizes", func(t *testing.T) {
+		conn, runID := exhaust(t, "panel")
+		check := mustStep(t, conn, "check@1")
+		if check.Status != db.StepDone || !routingIs(check.Routing, "panel") {
+			t.Fatalf("check@1 = %q routing %q, want done routing panel",
+				check.Status, check.Routing)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			ok, cond := sched.Ready(stepNamed(t, sched, "drain@1"))
+			if ok || cond != CondGateOpen {
+				t.Errorf("drain@1 ready=%v cond=%q while panel@1 is open, "+
+					"want CondGateOpen", ok, cond)
+			}
+		})
+
+		execSQL(t, conn, `UPDATE steps SET status = ? WHERE step_name = 'panel' AND issue_id = ?`,
+			string(db.StepDone), check.IssueID)
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if ok, cond := sched.Ready(stepNamed(t, sched, "drain@1")); !ok {
+				t.Errorf("drain@1 held by %q after every panel instance "+
+					"terminalized", cond)
+			}
+		})
+	})
+
+	t.Run("an open executor target leaves the downstream ready", func(t *testing.T) {
+		conn, runID := exhaust(t, "drain")
+		if got := stepStatus(t, conn, "drain@1"); db.StepTerminal(got) {
+			t.Fatalf("drain@1 = %q, want the executor target still open", got)
+		}
+
+		loadScheduler(t, conn, runID, nowMS, func(sched *Scheduler) {
+			if ok, cond := sched.Ready(stepNamed(t, sched, "panel@1")); !ok {
+				t.Errorf("panel@1 held by %q while an open EXECUTOR "+
+					"on_exhausted target runs; only vote or human targets hold",
+					cond)
+			}
+		})
+	})
 }

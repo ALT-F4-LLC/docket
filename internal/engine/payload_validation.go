@@ -9,16 +9,11 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// validateDeclaredPayload is §4.8's upgrade: `--payload-file` validated against
-// the step's declared `payload = schema@ver`, inside stage 0, BEFORE the
-// artifact records.
+// validateDeclaredPayload validates `--payload-file` against the step's
+// declared `payload = schema@ver`, inside stage 0, BEFORE the artifact records.
 //
-// engine-spine §6.8's stage-0 row promised exactly this — it said "validate
-// payload (shape only at S3 — §6.14; the schema register is S5's)" — and this is
-// the promise kept.
-//
-// C1: a step that declares NO `payload` is unchanged. Shape-only validation, as
-// S3 and S4 did it, and no new refusal exists for it. That is the dormancy claim
+// C1: a step that declares NO `payload` is unchanged. Shape-only validation,
+// and no new refusal exists for it. That is the dormancy claim
 // at the verb: a repo whose definitions declare no payload cannot tell v9 from
 // v8 here.
 func validateDeclaredPayload(
@@ -31,9 +26,9 @@ func validateDeclaredPayload(
 		return nil // C1.
 	}
 
-	// §4.8's "where this does not apply": an `action` step PRODUCES its payload
-	// internally, and that payload is validated at §7.6 — against the step's
-	// declared schema AND `aggregate@1` — rather than here.
+	// An `action` step PRODUCES its payload internally, and that payload is
+	// validated where it is produced — against the step's declared schema AND
+	// `aggregate@1` — rather than here.
 	//
 	// The distinction is who authored the bytes. Stage 0 validates what a WORKER
 	// submitted, and an action step has no worker: whatever artifact a caller
@@ -47,7 +42,7 @@ func validateDeclaredPayload(
 	// C4: an ABSENT payload on a step that declares one is a refusal naming the
 	// schema. A declared payload is a contract; silently recording no payload
 	// would make every threshold over it evaluate against the empty set and
-	// route `pass` (T4) — a silent misroute produced by an omission.
+	// route `pass` — a silent misroute produced by an omission.
 	if len(payload) == 0 {
 		return validationErr(
 			"step %s declares `payload = %q` and no --payload-file was given; "+
@@ -74,11 +69,11 @@ func validateDeclaredPayload(
 }
 
 // pinnedSchema compiles the schema a run PINNED, not the one the registry holds
-// today (§4.7 P4).
+// today.
 //
 // This is the whole reason schemas pin. Reading the live table would make a
-// verdict depend on when `complete` happened to run, and §9 item 5 requires the
-// opposite: the same run at the same pins reaches the same verdict on the same
+// verdict depend on when `complete` happened to run, and determinism requires
+// the opposite: the same run at the same pins reaches the same verdict on the same
 // payload.
 //
 // The pin records `ref` and `sha256`; the BYTES come from the registry row that

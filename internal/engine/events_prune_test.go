@@ -9,9 +9,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// `events prune`'s refusals, which are the verb (docs/tdd/events-follow.md §5.6).
+// `events prune`'s refusals, which are the verb.
 //
-// The tests are weighted the way the design is: one test for what it deletes,
+// The tests are weighted the way the verb is: one test for what it deletes,
 // and the rest for what it will not.
 
 // pruneFixture is a run with events, moved to a terminal status so the prune's
@@ -32,8 +32,8 @@ func eventCount(t *testing.T, conn *sql.DB) int {
 	return n
 }
 
-// TestPruneRefusalMatrix is §5.6's matrix: every way the verb says no, with the
-// code and the reason each one carries.
+// TestPruneRefusalMatrix is the refusal matrix: every way the verb says no,
+// with the code and the reason each one carries.
 //
 // They are ONE TEST because they are one property — a destructive verb refuses
 // unless everything is right — and because a matrix makes the omission of a case
@@ -49,7 +49,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 		says string
 	}{
 		{
-			// P1: no target. "Prune everything" is not expressible, because a
+			// No target. "Prune everything" is not expressible, because a
 			// destructive verb with a default target is how a log gets deleted
 			// by a typo.
 			name: "no target",
@@ -61,7 +61,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 			says: "needs a target",
 		},
 		{
-			// P1: two targets. They name different things — a seq boundary and a
+			// Two targets. They name different things — a seq boundary and a
 			// whole run — so honoring both would mean guessing which was meant.
 			name: "both targets",
 			setup: func(t *testing.T, conn *sql.DB) PruneQuery {
@@ -81,7 +81,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 			says: "must not be negative",
 		},
 		{
-			// §5.2, THE HEADLINE REFUSAL: a run that has not finished.
+			// THE HEADLINE REFUSAL: a run that has not finished.
 			name: "a live run's events",
 			setup: func(t *testing.T, conn *sql.DB) PruneQuery {
 				runID, _ := budgetRun(t, conn, 0)
@@ -148,7 +148,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 	}
 }
 
-// TestRetentionWindowHoldsTheBoundary is §5.3: `events.retain` protects recent
+// TestRetentionWindowHoldsTheBoundary: `events.retain` protects recent
 // events whatever `--before` says, and the answer SAYS SO rather than silently
 // returning a smaller number.
 func TestRetentionWindowHoldsTheBoundary(t *testing.T) {
@@ -179,7 +179,7 @@ func TestRetentionWindowHoldsTheBoundary(t *testing.T) {
 	if result.Pruned != 0 {
 		t.Errorf("the prune deleted %d events inside the retention window", result.Pruned)
 	}
-	// P14: HELD BACK, AND SAID SO. An operator told only "0" would conclude the
+	// HELD BACK, AND SAID SO. An operator told only "0" would conclude the
 	// verb is broken; told that a window held N, they know it is policy.
 	if result.HeldByRetention != before {
 		t.Errorf("held_by_retention = %d, want %d — the answer must name what "+
@@ -202,13 +202,13 @@ func TestRetentionWindowHoldsTheBoundary(t *testing.T) {
 	}
 }
 
-// TestRetentionDefaultRetainsEverything is P13 and D1: the window defaults to 0,
-// and 0 means EVERYTHING IS PROTECTED.
+// TestRetentionDefaultRetainsEverything: the window defaults to 0, and 0
+// means EVERYTHING IS PROTECTED.
 //
 // The direction matters more than the number. A retention key defaulting to
 // "keep nothing" would make the first `events prune --before` an operator ever
-// typed delete their whole log — the opposite of the posture operations.md §2
-// documents, where Docket deletes nothing it was not asked to delete.
+// typed delete their whole log — the opposite of the posture where Docket
+// deletes nothing it was not asked to delete.
 func TestRetentionDefaultRetainsEverything(t *testing.T) {
 	conn := mustDB(t)
 
@@ -238,7 +238,7 @@ func TestRetentionDefaultRetainsEverything(t *testing.T) {
 	}
 }
 
-// TestPruneDeletesOnlyEvents is P16 and P17. The verb's blast radius is one
+// TestPruneDeletesOnlyEvents: the verb's blast radius is one
 // table, and the test asserts it over EVERY OTHER TABLE rather than over the
 // handful a reviewer would think to name.
 func TestPruneDeletesOnlyEvents(t *testing.T) {
@@ -262,21 +262,22 @@ func TestPruneDeletesOnlyEvents(t *testing.T) {
 			continue
 		}
 		if after[table] != n {
-			t.Errorf("%s went from %d rows to %d: the prune reached outside `events` (P16)",
+			t.Errorf("%s went from %d rows to %d: the prune reached outside `events`",
 				table, n, after[table])
 		}
 	}
 }
 
-// TestPruningALiveRunWouldMoveTheFloor is §5.2's ARGUMENT, executed.
+// TestPruningALiveRunWouldMoveTheFloor is the live-run refusal's ARGUMENT,
+// executed.
 //
 // The refusal is not fastidiousness about audit trails. The budget floor is a
-// SUM over a run's `step-claimed` events (§4.3), so deleting them does not lose
-// a record of what the run spent — it changes what the engine BELIEVES the run
+// SUM over a run's `step-claimed` events, so deleting them does not lose a
+// record of what the run spent — it changes what the engine BELIEVES the run
 // spent, downward, which is the direction that lets a capped run overspend.
 //
-// The test proves that by doing the forbidden thing directly, the same way S6's
-// GONE test constructed a state no product path could reach: refuse through the
+// The test proves that by doing the forbidden thing directly, the same way the
+// GONE tests construct a state no product path could reach: refuse through the
 // verb, then delete by hand and watch the number move.
 func TestPruningALiveRunWouldMoveTheFloor(t *testing.T) {
 	conn := mustDB(t)
@@ -294,7 +295,7 @@ func TestPruningALiveRunWouldMoveTheFloor(t *testing.T) {
 
 	// The verb refuses.
 	if _, err := PruneEvents(conn, PruneQuery{Before: maxSeq + 1, NowMS: nowMS}); err == nil {
-		t.Fatal("a live run's events were pruned; §5.2 refuses them")
+		t.Fatal("a live run's events were pruned; the live-run refusal forbids that")
 	}
 	if floor := runFloor(t, conn, runID); floor != floorBefore {
 		t.Errorf("the refused prune moved the floor from %g to %g", floorBefore, floor)
@@ -309,7 +310,7 @@ func TestPruningALiveRunWouldMoveTheFloor(t *testing.T) {
 	}
 }
 
-// TestPruneDryRunWritesNothing is P5: `--dry-run` answers the question without
+// TestPruneDryRunWritesNothing: `--dry-run` answers the question without
 // answering it destructively.
 func TestPruneDryRunWritesNothing(t *testing.T) {
 	conn := mustDB(t)
@@ -344,7 +345,7 @@ func TestPruneDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// TestPruneIsEventLogged is P18: the prune records itself, ABOVE what it
+// TestPruneIsEventLogged: the prune records itself, ABOVE what it
 // deleted.
 //
 // The ordering is the point. An `events-pruned` event with a seq inside the
@@ -371,7 +372,7 @@ func TestPruneIsEventLogged(t *testing.T) {
 		}
 	}
 	if pruneEvent == nil {
-		t.Fatal("the prune wrote no `events-pruned` event (P18)")
+		t.Fatal("the prune wrote no `events-pruned` event")
 	}
 	if pruneEvent.Seq < maxSeq {
 		t.Errorf("the `events-pruned` event is at seq %d, inside the deleted "+
@@ -385,8 +386,7 @@ func TestPruneIsEventLogged(t *testing.T) {
 		}
 	}
 
-	// And it is ATTRIBUTABLE, which is what keeps §9 item 2 checkable over a
-	// log that has been trimmed.
+	// And it is ATTRIBUTABLE, so a trimmed log still says who trimmed it.
 	actor, ok := ActorFor(EventEventsPruned)
 	if !ok || actor != ActorHuman {
 		t.Errorf("`events-pruned` maps to %q; nothing in the engine prunes, so "+
@@ -417,4 +417,215 @@ func allTableCounts(t *testing.T, conn *sql.DB) map[string]int {
 		counts[table] = n
 	}
 	return counts
+}
+
+// bodyRefreshRun activates the two-step body fixture: `before` and `after` are
+// the steps a test claims on either side of a body refresh.
+func bodyRefreshRun(t *testing.T) (conn *sql.DB, runID, issue, before, after int) {
+	t.Helper()
+	conn = mustDB(t)
+	registerSource(t, conn, []byte(bodyInputWorkflow), "bodies.toml")
+	issue = createIssue(t, conn, "amend me", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	before = stepIDOf(t, conn, run.ID, issue, "first@0")
+	after = stepIDOf(t, conn, run.ID, issue, "second@0")
+	return conn, run.ID, issue, before, after
+}
+
+func refreshRunBody(t *testing.T, conn *sql.DB, runID, issue int, body string, atMS int64) {
+	t.Helper()
+	amend(t, conn, issue, body)
+	_, err := RefreshIssueBodyInRun(conn, runID, issue, "operator amended", testBy, testConductorToken, atMS)
+	testsupport.Must(t, err, "refreshing: %v", err)
+}
+
+// recordClaimEvent writes the `step-claimed` row a real claim leaves in the
+// log, keyed to the step's own step_id, so a prune test can watch that row go.
+func recordClaimEvent(t *testing.T, conn *sql.DB, runID, issue int, instance string, atMS int64) {
+	t.Helper()
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = recordEvent(tx, eventRecord{
+		Kind: EventStepClaimed, RunID: runID, Instance: instance, IssueID: issue, AtMS: atMS,
+	})
+	testsupport.Must(t, err, "recording the claim event: %v", err)
+	testsupport.Must(t, tx.Commit(), "committing the claim event")
+}
+
+// claimEventCount counts the `step-claimed` rows naming stepID.
+func claimEventCount(t *testing.T, conn *sql.DB, stepID int) int {
+	t.Helper()
+	var n int
+	err := conn.QueryRow(`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, stepID).Scan(&n)
+	testsupport.Must(t, err, "counting claim events: %v", err)
+	return n
+}
+
+// TestPrunedRunReportsRecordedBodyUnavailable: once a done run's events are
+// pruned, the refresh rows the read-back reconstructs from may be gone, so
+// every claim that preceded the prune reports its body unavailable rather than
+// the live description, whether or not a refresh followed that claim.
+func TestPrunedRunReportsRecordedBodyUnavailable(t *testing.T) {
+	conn, runID, issue, before, after := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	recordClaimEvent(t, conn, runID, issue, "first@0", nowMS)
+	refreshRunBody(t, conn, runID, issue, "body, amended", nowMS+1)
+	recordClaim(t, conn, after, nowMS+2)
+	recordClaimEvent(t, conn, runID, issue, "second@0", nowMS+2)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	steps := map[string]int{
+		"claimed before the refresh": before,
+		"claimed after the refresh":  after,
+	}
+	for name, stepID := range steps {
+		if n := claimEventCount(t, conn, stepID); n != 1 {
+			t.Fatalf("premise: step %s has %d step-claimed row(s) before the "+
+				"prune, want 1", name, n)
+		}
+	}
+
+	_, err := PruneEvents(conn, PruneQuery{BeforeRun: runID, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+
+	for name, stepID := range steps {
+		if n := claimEventCount(t, conn, stepID); n != 0 {
+			t.Errorf("step %s: %d step-claimed row(s) survived the prune, want 0",
+				name, n)
+		}
+		bundle, err := ReadContext(conn, stepID, nowMS+4)
+		if err == nil {
+			t.Errorf("step %s: read-back returned body %q; want it reported "+
+				"unavailable after the prune", name, bundle.Issue.BodySnapshot)
+			continue
+		}
+		if code, _ := CodeOf(err); code != CodeGone {
+			t.Errorf("step %s: error code %q, want %q: %v", name, code, CodeGone, err)
+		}
+		if !strings.Contains(err.Error(), "pruned") {
+			t.Errorf("step %s: error %q does not name the prune", name, err)
+		}
+	}
+}
+
+// TestRecordedBodyUnprunedRunReadsRecordedBody is the same fixture without the
+// prune: each step reads the body its own claim was handed.
+func TestRecordedBodyUnprunedRunReadsRecordedBody(t *testing.T) {
+	conn, runID, issue, before, after := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	amended := "body, amended"
+	refreshRunBody(t, conn, runID, issue, amended, nowMS+1)
+	recordClaim(t, conn, after, nowMS+2)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	if got := recordedBodyOf(t, conn, before); got != "body" {
+		t.Errorf("pre-refresh step read %q, want the refresh row's from_body %q", got, "body")
+	}
+	if got := recordedBodyOf(t, conn, after); got != amended {
+		t.Errorf("post-refresh step read %q, want the refreshed body %q", got, amended)
+	}
+}
+
+// TestPruneBelowAClaimKeepsItsRecordedBody: a `--before` boundary that does not
+// reach a step's claim event leaves every later event, the refresh row
+// included, so that step's read-back is still served.
+func TestPruneBelowAClaimKeepsItsRecordedBody(t *testing.T) {
+	conn, runID, issue, before, _ := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = recordEvent(tx, eventRecord{
+		Kind: EventStepClaimed, RunID: runID, Instance: "first@0", IssueID: issue, AtMS: nowMS,
+	})
+	testsupport.Must(t, err, "recording the claim event: %v", err)
+	testsupport.Must(t, tx.Commit(), "committing the claim event")
+	refreshRunBody(t, conn, runID, issue, "body, amended", nowMS+1)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	var claimSeq int64
+	err = conn.QueryRow(`SELECT seq FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, before).Scan(&claimSeq)
+	testsupport.Must(t, err, "reading the claim seq: %v", err)
+	result, err := PruneEvents(conn, PruneQuery{Before: claimSeq, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+	if result.Pruned == 0 {
+		t.Fatal("the fixture pruned nothing below the claim; the case needs a prune")
+	}
+
+	if got := recordedBodyOf(t, conn, before); got != "body" {
+		t.Errorf("read-back = %q, want the recorded body %q", got, "body")
+	}
+}
+
+// TestRepoWidePruneAboveAClaimReportsRecordedBodyGone: a `--before` prune with
+// no run named writes its `events-pruned` row with a NULL run_id. That row
+// covers every run, so once it has removed a step's claim row the read-back
+// reports the body GONE rather than reading the live columns.
+func TestRepoWidePruneAboveAClaimReportsRecordedBodyGone(t *testing.T) {
+	conn, runID, issue, before, _ := bodyRefreshRun(t)
+	recordClaim(t, conn, before, nowMS)
+	recordClaimEvent(t, conn, runID, issue, "first@0", nowMS)
+	refreshRunBody(t, conn, runID, issue, "body, amended", nowMS+1)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	var claimSeq int64
+	err := conn.QueryRow(`SELECT seq FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, before).Scan(&claimSeq)
+	testsupport.Must(t, err, "reading the claim seq: %v", err)
+	_, err = PruneEvents(conn, PruneQuery{Before: claimSeq + 1, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+
+	if n := claimEventCount(t, conn, before); n != 0 {
+		t.Fatalf("premise: %d step-claimed row(s) survived the prune, want 0", n)
+	}
+	var repoWide int
+	err = conn.QueryRow(`SELECT COUNT(*) FROM events WHERE kind = ? AND run_id IS NULL`,
+		EventEventsPruned).Scan(&repoWide)
+	testsupport.Must(t, err, "counting repo-wide prune rows: %v", err)
+	if repoWide != 1 {
+		t.Fatalf("premise: %d events-pruned row(s) with a NULL run_id, want 1", repoWide)
+	}
+
+	bundle, err := ReadContext(conn, before, nowMS+4)
+	if err == nil {
+		t.Fatalf("read-back returned body %q; want it reported unavailable "+
+			"after the repo-wide prune", bundle.Issue.BodySnapshot)
+	}
+	if code, _ := CodeOf(err); code != CodeGone {
+		t.Errorf("error code %q, want %q: %v", code, CodeGone, err)
+	}
+	if !strings.Contains(err.Error(), "pruned") {
+		t.Errorf("error %q does not name the prune", err)
+	}
+}
+
+// TestPruningAnotherRunKeepsThisRunsRecordedBody: a `--before-run` prune's
+// `events-pruned` row names its run, and covers no other. Run A's step carries
+// no `step-claimed` row, so only the prune row's run scoping keeps a prune of
+// run B from reporting run A's body GONE.
+func TestPruningAnotherRunKeepsThisRunsRecordedBody(t *testing.T) {
+	conn, runA, issueA, stepA, _ := bodyRefreshRun(t)
+	recordClaim(t, conn, stepA, nowMS)
+	amended := "body, amended"
+	refreshRunBody(t, conn, runA, issueA, amended, nowMS+1)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runA)
+
+	issueB := createIssue(t, conn, "other work", "other body", "task", nil)
+	runB := startRun(t, conn, issueB)
+	_, err := activate(conn, runB.ID)
+	testsupport.Must(t, err, "activate run B: %v", err)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runB.ID)
+
+	result, err := PruneEvents(conn, PruneQuery{BeforeRun: runB.ID, NowMS: nowMS + 3})
+	testsupport.Must(t, err, "PruneEvents: %v", err)
+	if result.Pruned == 0 {
+		t.Fatal("premise: pruning run B deleted nothing; the case needs a prune row")
+	}
+
+	if got := recordedBodyOf(t, conn, stepA); got != "body" {
+		t.Errorf("run A's read-back = %q, want its recorded body %q", got, "body")
+	}
 }

@@ -6,8 +6,7 @@ import (
 	"sort"
 )
 
-// Schema is a registered payload schema — one `schemas` row
-// (docs/tdd/payloads-thresholds.md §4.4).
+// Schema is a registered payload schema — one `schemas` row.
 //
 // The shape is `Workflow`'s, deliberately and line for line: name, version,
 // source_path, source_sha256, body, a derived column, created_at_ms,
@@ -30,17 +29,25 @@ type Schema struct {
 	SourcePath   string
 	SourceSHA256 string
 	// Body is the registered document, VERBATIM. It is what a run validates
-	// against (§4.7 P4) and what `schema show --body` emits, so it is retained
-	// rather than reconstructed from a parsed form.
+	// against and what `schema show --body` emits, so it is retained rather
+	// than reconstructed from a parsed form.
 	Body string
-	// Ordered is the §4.3 derived index as stored JSON. It is a CACHE of a pure
-	// function of Body (I2), never a second source of truth.
+	// Ordered is the derived index as stored JSON. It is a CACHE of a pure
+	// function of Body, never a second source of truth.
 	Ordered string
 	// Builtin is 1 on `aggregate@1` and on nothing else. It records where the
 	// bytes came from, not whether a run may use them.
 	Builtin     bool
 	CreatedAtMS int64
 	RowVersion  int
+	// DeprecatedAtMS is when this version was RETIRED FROM SERVICE, or 0 when
+	// it is still in service (v36).
+	//
+	// Retirement is a reference-time filter, not a retraction: a retired row
+	// is never deleted, stays readable by explicit `@version`, and a run that
+	// already pinned it keeps validating payloads against it. The only thing
+	// it stops doing is accepting NEW `payload` references at registration.
+	DeprecatedAtMS int64
 }
 
 // Ref renders the `name@version` identity a run pins.
@@ -48,10 +55,13 @@ func (s *Schema) Ref() string {
 	return fmt.Sprintf("%s@%d", s.Name, s.Version)
 }
 
+// Deprecated reports whether this version has been retired from service.
+func (s *Schema) Deprecated() bool { return s.DeprecatedAtMS > 0 }
+
 // OrderedFields lists the fields the schema declares an order for, sorted.
 //
 // It reads the STORED index rather than re-walking the document: a read verb
-// must not depend on re-parsing bytes, and I2's round-trip check is what keeps
+// must not depend on re-parsing bytes, and the round-trip check is what keeps
 // the two honest.
 func (s *Schema) OrderedFields() []string {
 	var index map[string][]string
@@ -69,11 +79,11 @@ func (s *Schema) OrderedFields() []string {
 // schemaJSON is the wire shape of a registered schema.
 //
 // `source_sha256` rather than a bare `sha256`, matching `workflow`'s wire shape:
-// §4.4's argument is that the two registries must not LOOK different, and a
-// consumer reading both would otherwise have to remember which one spells it
-// which way. `body` is not included — `schema show --body` emits the registered
-// bytes verbatim rather than as a JSON-escaped string, exactly as
-// `workflow show --source` does.
+// the two registries must not LOOK different, and a consumer reading both
+// would otherwise have to remember which one spells it which way. `body` is
+// not included — `schema show --body` emits the registered bytes verbatim
+// rather than as a JSON-escaped string, exactly as `workflow show --source`
+// does.
 type schemaJSON struct {
 	Name          string   `json:"name"`
 	Version       int      `json:"version"`
@@ -120,20 +130,26 @@ type schemaVersionedJSON struct {
 	Builtin       bool     `json:"builtin"`
 	CreatedAtMS   int64    `json:"created_at_ms"`
 	RowVersion    int      `json:"row_version"`
+	// DeprecatedAtMS marks a version retired from service (v36). Omitted while
+	// the version is in service, per the "a field that is not a fact does not
+	// appear" rule, and the same key `workflow`'s v2 shape uses. v2 only: v1
+	// is frozen and never gains fields.
+	DeprecatedAtMS int64 `json:"deprecated_at_ms,omitempty"`
 }
 
 // VersionedPayload implements output.Versioned.
 func (s *Schema) VersionedPayload() any {
 	base := s.wire()
 	return schemaVersionedJSON{
-		Name:          base.Name,
-		Version:       base.Version,
-		SourcePath:    base.SourcePath,
-		SourceSHA256:  base.SourceSHA256,
-		OrderedFields: base.OrderedFields,
-		Builtin:       base.Builtin,
-		CreatedAtMS:   base.CreatedAtMS,
-		RowVersion:    s.RowVersion,
+		Name:           base.Name,
+		Version:        base.Version,
+		SourcePath:     base.SourcePath,
+		SourceSHA256:   base.SourceSHA256,
+		OrderedFields:  base.OrderedFields,
+		Builtin:        base.Builtin,
+		CreatedAtMS:    base.CreatedAtMS,
+		RowVersion:     s.RowVersion,
+		DeprecatedAtMS: s.DeprecatedAtMS,
 	}
 }
 

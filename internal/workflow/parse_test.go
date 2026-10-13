@@ -9,16 +9,16 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// fixturePath is the canonical register-test fixture named in the TDD.
-const fixturePath = "../../docs/design/example-workflow.toml"
+// fixturePath is the canonical register-test fixture.
+const fixturePath = "testdata/example-workflow.toml"
 
 // TestFixtureRegistersClean is the regression guard for the whole validation
 // table: the committed fixture must survive every future edit to it.
 //
 // It exercises fanout, loops, `after_loop`, thresholds, pre-gates, `action`,
-// and `type="human"` in one file — and it is the file that found the §4.3.1
-// defect, where a V11 reading only `emits` rejects an `action` step that names
-// its produced kind in `params.output`.
+// and `type="human"` in one file — and it is the file that found the defect
+// where a V11 reading only `emits` rejects an `action` step that names its
+// produced kind in `params.output`.
 func TestFixtureRegistersClean(t *testing.T) {
 	src, err := os.ReadFile(fixturePath)
 	testsupport.Must(t, err, "reading the fixture: %v", err)
@@ -75,8 +75,8 @@ func TestFixtureRegistersClean(t *testing.T) {
 	}
 }
 
-// TestFixtureHumanStepDeclaresOnFail pins the A4 amendment's edit to the
-// fixture: `commit-gate` carries `on_fail = "fix-loop"`, which is the routing
+// TestFixtureHumanStepDeclaresOnFail pins the fixture's human-step routing:
+// `commit-gate` carries `on_fail = "fix-loop"`, which is the routing
 // the flow actually wants — a rejected commit gate sends the issue back through
 // the fix loop rather than parking it.
 func TestFixtureHumanStepDeclaresOnFail(t *testing.T) {
@@ -108,7 +108,7 @@ func TestEmbeddedTemplatesRegister(t *testing.T) {
 		t.Fatal("no templates are embedded")
 	}
 
-	// The shipped set at this stage (§4.4).
+	// The shipped set at this stage.
 	want := map[string]bool{"standard-dev": true, "parallel-check": true}
 	for _, name := range names {
 		if !want[name] {
@@ -135,12 +135,11 @@ func TestEmbeddedTemplatesRegister(t *testing.T) {
 	}
 }
 
-// TestStandardDevIsTheStrangerTestArtifact pins §4.4's description of the
-// template the §9 item 1 stranger test rests on: two worked steps, one
-// fenced-command gate, no fanout — plus the `loop = true` fix body DKT-196
-// added, without which the template's own `fix-loop` routings superseded work
-// and instantiated nothing. A human-only team gets exactly this by typing one
-// command.
+// TestStandardDevIsTheStrangerTestArtifact pins the shape of the template the
+// stranger test rests on: two worked steps, one fenced-command gate, no fanout
+// — plus the `loop = true` fix body DKT-196 added, without which the
+// template's own `fix-loop` routings superseded work and instantiated nothing.
+// A human-only team gets exactly this by typing one command.
 func TestStandardDevIsTheStrangerTestArtifact(t *testing.T) {
 	src, err := Template("standard-dev")
 	testsupport.Must(t, err, "Template: %v", err)

@@ -160,9 +160,9 @@ emits = "record"
 `
 
 // TestDownstreamWaitsForAnOpenInterposedGate: while the routed-to vote gate is
-// open, the routing step's ordinary downstream is NOT ready — §11.2's
-// "on the gate's own pass execution resumes at the routing step's ordinary
-// downstream", the half DKT-38's latch left out.
+// open, the routing step's ordinary downstream is NOT ready: execution resumes
+// at the routing step's ordinary downstream only on the gate's own pass, the
+// half DKT-38's latch left out.
 func TestDownstreamWaitsForAnOpenInterposedGate(t *testing.T) {
 	conn := mustDB(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")

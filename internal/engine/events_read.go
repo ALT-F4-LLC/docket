@@ -3,47 +3,45 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// THE EVENTS READ SURFACE — engine-spec §11.4's `event` shape, served
-// (docs/tdd/runs-dispatch.md §8).
+// THE EVENTS READ SURFACE — the public `event` shape, served.
 //
-// engine-spec §1's surface line is `docket events --follow [--since SEQ]` and §10
-// splits it: `--since` here, `--follow` at S7. This stage therefore ships
-// `docket events list [--since SEQ]` — see §8.1's argument for the sub-verb, and
-// the amendment it is filed under.
+// The surface line is `docket events --follow [--since SEQ]`, split across two
+// stages: `--since` here, `--follow` later. This stage therefore ships
+// `docket events list [--since SEQ]` as a sub-verb.
 //
 // IT IS A PURE READ. One `SELECT` in one transaction, no reap, no lazy anything.
 // TestReadVerbsWriteNothing asserts the database is byte-identical afterwards,
 // which is what makes an operator polling the feed safe: a read verb that
 // advanced a lease would make observation a scheduling act.
 
-// Event is §11.4's shape, field for field:
+// Event is the public event shape, field for field:
 //
 //	event { seq, at_ms, kind, run?, step?, data }
 //
-// plus `step_id`, which is an ADDITION to that shape and is FILED as an
-// amendment (§8.2 E4). The argument is that the shape is otherwise unjoinable:
-// `step` and `data.instance` both give the HUMAN identity (`name@k#i`), and a
-// consumer following the feed into `step show` needs the id it addresses steps
-// by. Shipping the field and recording the note follows precedent — the spec's
-// silence would otherwise be resolved silently by whoever implemented first.
+// plus `step_id`, which is an ADDITION to that shape. The argument is that the
+// shape is otherwise unjoinable: `step` and `data.instance` both give the HUMAN
+// identity (`name@k#i`), and a consumer following the feed into `step show`
+// needs the id it addresses steps by.
 type Event struct {
 	Seq  int64  `json:"seq"`
 	AtMS int64  `json:"at_ms"`
 	Kind string `json:"kind"`
-	// Run is `RUN-N`, OMITTED WHEN NULL per the `?` in §11.4's shape. A trust
-	// event has no run (gates-trust §3.6) and attributing it to one would be a
-	// fabrication.
+	// Run is `RUN-N`, OMITTED WHEN NULL per the `?` in the shape. A trust
+	// event has no run and attributing it to one would be a fabrication.
 	Run string `json:"run,omitempty"`
 	// Step is the RENDERED INSTANCE IDENTITY (`name@k#i`) — matching every other
-	// wire shape's step rendering — and omitted when NULL (E1).
+	// wire shape's step rendering — and omitted when NULL.
 	Step string `json:"step,omitempty"`
-	// StepID is `STEP-N`: the joinable id (E4, the filed addition).
+	// StepID is `STEP-N`: the joinable id, the addition to the shape.
 	StepID string `json:"step_id,omitempty"`
 	// Issue is `DKT-N`, omitted when the event has none (DKT-74). Instance
 	// labels COLLIDE across issues in one run — two issues on the same
@@ -59,8 +57,8 @@ type Event struct {
 	// and a `RUN-6`, and the ids alone do not say whose. Omitted when empty so a
 	// single-project feed carries no redundant column.
 	Project string `json:"project,omitempty"`
-	// Data is the stored JSON object, VERBATIM. Core never reshapes it (E2);
-	// §7.6's writer already normalized it to an object on the way in.
+	// Data is the stored JSON object, VERBATIM. Core never reshapes it; the
+	// writer already normalized it to an object on the way in.
 	//
 	// It is json.RawMessage rather than a map so the bytes reach `--json`
 	// unaltered: re-marshaling a decoded map would reorder keys and re-escape
@@ -69,24 +67,24 @@ type Event struct {
 }
 
 // EventPage is one `--since` answer, with the truncation contract every list
-// verb carries (E9, E11).
+// verb carries.
 type EventPage struct {
 	Events []Event
 	// Total counts MATCHING events before the slice, so `truncated` is
-	// computable rather than guessed (reliability-delta §4.2).
+	// computable rather than guessed.
 	Total int
 }
 
 // EventQuery is `events list`'s filters.
 type EventQuery struct {
-	// Since returns events with `seq > Since` — STRICTLY GREATER (E5), so a
+	// Since returns events with `seq > Since` — STRICTLY GREATER, so a
 	// consumer stores the last seq it saw and passes it back without re-reading
-	// it. Zero is the default and returns from the beginning (E6).
+	// it. Zero is the default and returns from the beginning.
 	Since int64
 	// RunID filters to one run using `idx_events_run_seq`. Zero is the
-	// repo-wide feed, which is the only place a trust event is visible (E8).
+	// repo-wide feed, which is the only place a trust event is visible.
 	RunID int
-	// Limit applies AFTER ordering (E9). Zero means the caller's default.
+	// Limit applies AFTER ordering. Zero means the caller's default.
 	Limit int
 	// Tail selects the NEWEST N matching events instead of the oldest N.
 	// Zero is off.
@@ -94,13 +92,20 @@ type EventQuery struct {
 	// This is a SELECTION change, not an ordering one. The returned page is
 	// still `seq ASC` — the newest N rows, handed back oldest-first — so a
 	// reader consumes them in the same direction as every other answer and the
-	// last seq is still the cursor to store. E7's "no reverse mode" stands:
+	// last seq is still the cursor to store. "No reverse mode" stands:
 	// what varies is WHICH window of the feed is returned, never its direction.
 	//
 	// Tail is for the mid-incident question ("what just happened"), which the
 	// cursor cannot answer without first paging through the entire history to
 	// reach the end.
 	Tail int
+	// Kind filters to one event kind; empty is every kind. StepID filters to
+	// one step's events by its joinable id; zero is every step. Both are
+	// predicates in the WHERE clause, so they apply BEFORE Limit and Tail and
+	// Total counts only the matches (DKT-3293): a lookup by kind or step
+	// covers the whole trail instead of searching the oldest page.
+	Kind   string
+	StepID int
 	// ProjectID scopes the feed to one project (v12); 0 is the whole store.
 	//
 	// An event's project is its RUN's when it has one, else its ISSUE's, else
@@ -110,12 +115,23 @@ type EventQuery struct {
 	// view, because a scoped feed that hid it would be an audit trail with a
 	// blind spot; one that names another repository belongs to that
 	// repository's trail, not to this one's. See eventFilter.
+	//
+	// IT IS IGNORED WHEN RunID IS SET (DKT-583). A run belongs to exactly ONE
+	// project, so `--run` is ALREADY a project scope — a narrower one. Anding
+	// the invoking project's scope onto it cannot select a meaningful subset:
+	// it either changes nothing (the run is this project's) or empties the page
+	// entirely (the run is a neighbor's), and the second case answered
+	// `{"ok":true,"events":null,"total":0}` for a run with hundreds of events.
+	// A successful empty feed is the WORST available answer — a consumer
+	// polling it waits forever on a run it can see in `run report`, which
+	// resolves a run's project independent of the cwd. `--run` now does the
+	// same, which is the disposition DKT-583 prefers.
 	ProjectID int
 }
 
-// ListEvents serves `events list --since` (§8.3).
+// ListEvents serves `events list --since`.
 //
-// C9 — THE CURSOR RACE — is closed structurally rather than by a lock: the read
+// THE CURSOR RACE is closed structurally rather than by a lock: the read
 // is ONE `SELECT ... WHERE seq > ?` in ONE transaction, and `seq` is
 // `AUTOINCREMENT` and monotonic, so an event inserted while this runs lands
 // ABOVE the cursor and is returned by the NEXT call. No event is ever skipped
@@ -123,7 +139,7 @@ type EventQuery struct {
 // runs inserts against a looping reader and asserts the union is exactly the
 // inserted set — the property stated as a test rather than as a comment.
 //
-// The ordering is `seq ASC`, ALWAYS. There is no reverse mode (E7): a cursor
+// The ordering is `seq ASC`, ALWAYS. There is no reverse mode: a cursor
 // feed that could run backwards is a cursor feed that skips.
 func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
 	tx, err := conn.Begin()
@@ -131,11 +147,11 @@ func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
 		return nil, fmt.Errorf("reading events: %w", err)
 	}
 	// NEVER COMMITTED. The rollback is the mechanism that makes this a read,
-	// the same discipline `dispatch verify` uses (§5.3 P11) — stronger than
+	// the same discipline `dispatch verify` uses — stronger than
 	// "the code has no INSERT", because it also covers anything a helper writes.
 	defer tx.Rollback()
 
-	// E15/E16: the GONE probe comes FIRST, because a cursor below the retained
+	// The GONE probe comes FIRST, because a cursor below the retained
 	// minimum must not be answered with the events that happen to remain. A
 	// short list would tell a consumer it had caught up.
 	if err := checkRetainedMinimumTx(tx, q.Since); err != nil {
@@ -160,8 +176,9 @@ func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
 	// The descending ORDER BY lives in an inner query whose only job is to pick
 	// the window; the outer one restores `seq ASC` before anything is scanned.
 	// The rows a caller sees are therefore ascending in every mode, which is
-	// what E7 protects — a feed that emitted newest-first would invite a
-	// consumer to store the FIRST seq as its cursor and skip everything under it.
+	// what "no reverse mode" protects — a feed that emitted newest-first would
+	// invite a consumer to store the FIRST seq as its cursor and skip
+	// everything under it.
 	// The joins resolve each row's OWNING project (DKT-67): the issue's, for
 	// rendering its id under the right prefix, and the run's-or-issue's, for
 	// naming the project itself. They are LEFT joins throughout because a
@@ -211,7 +228,7 @@ func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
 		); err != nil {
 			return nil, fmt.Errorf("reading an event: %w", err)
 		}
-		// E1: all are OMITTED when NULL, per the `?` in §11.4's shape.
+		// All are OMITTED when NULL, per the `?` in the public event shape.
 		if runID.Valid {
 			e.Run = model.FormatRunID(int(runID.Int64))
 		}
@@ -238,7 +255,7 @@ func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
 	return &EventPage{Events: out, Total: total}, nil
 }
 
-// eventFilter builds the WHERE for E5's strict cursor and E8's run scope.
+// eventFilter builds the WHERE for the strict cursor and the run scope.
 //
 // The cursor clause is present even at `--since 0`, where `seq > 0` matches
 // every row: writing it unconditionally keeps ONE query shape, and the index
@@ -251,7 +268,21 @@ func eventFilter(q EventQuery) (string, []any) {
 		where += ` AND e.run_id = ?`
 		args = append(args, q.RunID)
 	}
-	if q.ProjectID != 0 {
+	if q.Kind != "" {
+		where += ` AND e.kind = ?`
+		args = append(args, q.Kind)
+	}
+	if q.StepID != 0 {
+		where += ` AND e.step_id = ?`
+		args = append(args, q.StepID)
+	}
+	// THE PROJECT SCOPE IS DROPPED UNDER `--run` (DKT-583). A run has exactly
+	// one project, so the run clause above is already that project's scope and
+	// anding a second one on top can only turn a neighbouring project's feed
+	// into an empty page that reports success. `run report`, `step show`, and
+	// `step artifact` all answer for a run outside the invoking project; the
+	// event feed now agrees with them instead of contradicting them silently.
+	if q.ProjectID != 0 && q.RunID == 0 {
 		// Three-way attribution, per the field comment: the run's project,
 		// else the issue's, else store-level. The cursor contract survives
 		// scoping — seq stays monotonic, and a filtered-out neighbor is an
@@ -300,7 +331,7 @@ func eventFilter(q EventQuery) (string, []any) {
 // QUERY with "malformed JSON", so one corrupt `data` cell anywhere in the table
 // would make every scoped `events list` fail outright, and an operator would
 // lose the whole feed over a single bad row. The writer normalizes `data` to a
-// JSON object (§7.6) so this is unreachable through product code, but a
+// JSON object so this is unreachable through product code, but a
 // hand-edited row reaches it, and eventDetail already takes the position that a
 // corrupted row should still render rather than break the read. An unparseable
 // payload names no repository, so it stays visible everywhere — the same answer
@@ -309,23 +340,23 @@ const eventRepoBinding = `NULLIF(COALESCE(
 	CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.repo') END,
 	CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.identity') END), '')`
 
-// checkRetainedMinimumTx is E15 and §8.6.1: GONE when the cursor names events
-// below what the table still holds.
+// checkRetainedMinimumTx answers GONE when the cursor names events below what
+// the table still holds.
 //
 // HOW "A PRUNE HAS OCCURRED" IS KNOWN WITHOUT A PRUNER. The condition is
 // `MIN(seq) > 1`, which in a v10 repo is achievable ONLY by deleting row 1.
-// `seq` is `AUTOINCREMENT` and never reused — §7.6's comment says so and
-// explains why — so `MIN(seq) > 1` is a sound and cheap proxy for "something
-// below your cursor is gone", and it STAYS sound when S7's pruner arrives. No
-// watermark column is needed, and adding one now would store a fact the table
-// already tells us.
+// `seq` is `AUTOINCREMENT` and never reused — recordEvent's comment says so
+// and explains why — so `MIN(seq) > 1` is a sound and cheap proxy for
+// "something below your cursor is gone", and it STAYS sound once the pruner
+// exists. No watermark column is needed, and adding one now would store a
+// fact the table already tells us.
 //
-// E16: THE TRIGGER CANNOT FIRE AT THIS STAGE. Nothing prunes — `events prune` is
-// S7's (§10 stage 7) and no other path deletes an event — so `MIN(seq)` is
-// always 1 in a v10 repo and the condition below is unreachable through any
-// product code path. The SHAPE ships here anyway (E17) because `--since` is the
-// verb that must return it, and a stage that shipped the cursor without its
-// out-of-range answer would ship a verb whose contract S7 has to retrofit.
+// THE TRIGGER CANNOT FIRE AT THIS STAGE. Nothing prunes — `events prune` is a
+// later stage's and no other path deletes an event — so `MIN(seq)` is always 1
+// in a v10 repo and the condition below is unreachable through any product
+// code path. The SHAPE ships here anyway because `--since` is the verb that
+// must return it, and a stage that shipped the cursor without its out-of-range
+// answer would ship a verb whose contract the pruner has to retrofit.
 // TestGoneShapeIsReachableOnlyByPruning constructs the state by deleting rows
 // directly and asserts the code, the exit, and the message.
 func checkRetainedMinimumTx(tx *sql.Tx, since int64) error {
@@ -333,7 +364,7 @@ func checkRetainedMinimumTx(tx *sql.Tx, since int64) error {
 	if err := tx.QueryRow(`SELECT MIN(seq) FROM events`).Scan(&minSeq); err != nil {
 		return fmt.Errorf("reading the retained minimum: %w", err)
 	}
-	// An EMPTY table is not GONE (E15's "and the table is non-empty"). A repo
+	// An EMPTY table is not GONE. A repo
 	// that has never written an event has retained everything it ever had, and
 	// answering GONE would tell a fresh consumer its cursor was stale.
 	if !minSeq.Valid {
@@ -356,15 +387,15 @@ func checkRetainedMinimumTx(tx *sql.Tx, since int64) error {
 		since, minSeq.Int64, minSeq.Int64-1)
 }
 
-// ---- §8.7: the attribution table ------------------------------------------
+// ---- the attribution table ------------------------------------------------
 
-// Actor is one of the FOUR causes engine-spec §9 item 2 requires every
-// transition to be traceable to, verbatim: *"every transition in events
-// traceable to next/gate/threshold/human input."*
+// Actor is one of the FOUR causes the attribution rule requires every
+// transition to be traceable to: every transition in events is traceable to
+// next, a gate, a threshold, or human input.
 //
 // It is a closed enumeration for the same reason the event kinds are: an
 // attribution surface with a free-string actor could answer "some other thing"
-// and item 2's audit would be vacuous.
+// and the attribution audit would be vacuous.
 type Actor string
 
 const (
@@ -378,28 +409,31 @@ const (
 	// status a routing produces.
 	ActorThreshold Actor = "threshold"
 	// ActorHuman is an OPERATOR VERB — including one a harness relays on an
-	// operator's behalf, which is exactly the boundary item 2 exposes.
+	// operator's behalf, which is exactly the boundary the attribution audit
+	// exposes.
 	ActorHuman Actor = "human"
 )
 
-// eventActors maps every kind in the closed set to exactly ONE actor (§8.7's
-// table, complete).
+// eventActors maps every kind in the closed set to exactly ONE actor (the
+// attribution table, complete).
 //
 // TestEveryEventKindHasAnActor asserts one entry per kind, so a stage adding a
 // kind must SAY WHO CAUSES IT or fail a test. That is the mechanism that keeps
-// §9 item 2 checkable as the set grows: the audit is only as good as the
-// attribution, and an unattributed kind would pass an audit that never asked.
+// the attribution rule checkable as the set grows: the audit is only as good
+// as the attribution, and an unattributed kind would pass an audit that never
+// asked.
 //
 // TWO ROWS NEED THEIR SENTENCE:
 //
 //   - `step-claimed` is `human`, NOT `next`. A claim is an EXECUTOR'S act —
 //     `next` offers, something else takes. In the reference instance that
-//     something is a spawned worker, which is precisely the case item 2 checks:
-//     the claim is attributable to the harness's dispatch decision, and the
-//     SCHEDULING decision (which steps were claimable at all) was `next`'s.
-//     Calling it `next` would hide exactly the boundary item 2 exists to expose.
+//     something is a spawned worker, which is precisely the case the audit
+//     checks: the claim is attributable to the harness's dispatch decision,
+//     and the SCHEDULING decision (which steps were claimable at all) was
+//     `next`'s. Calling it `next` would hide exactly the boundary the audit
+//     exists to expose.
 //
-//   - `run-paused` covers the BUDGET BREACH (§4.6 B23), and its actor is `human`
+//   - `run-paused` covers the BUDGET BREACH, and its actor is `human`
 //     even when the engine flips it, because the transition's MEANING is "a
 //     person must now decide". `data.reason` distinguishes `budget` from an
 //     operator's `run pause`, so the trail is unambiguous without a new kind.
@@ -413,7 +447,7 @@ const (
 //     millisecond later was nobody's decision.
 //
 // `dispatch-abandoned` appears once, as `next`. It has two causes — the TTL
-// (P13, the scheduler's) and the explicit verb (P21, an operator's) — and the
+// (the scheduler's) and the explicit verb (an operator's) — and the
 // table maps KINDS rather than occurrences. It is attributed to the actor whose
 // path is AUTOMATIC, because that is the one an auditor cannot otherwise see: an
 // explicit abandon is a command in someone's history, while a TTL abandon
@@ -449,25 +483,39 @@ var eventActors = map[string]Actor{
 	EventStepSuperseded: ActorThreshold,
 	EventStepSkipped:    ActorThreshold,
 	EventStepHeld:       ActorThreshold,
+	// The batch override being SPENT (DKT-546) is `threshold` on
+	// `dispatch-abandoned`'s argument: the kind is attributed to the automatic
+	// path, because that is the one an auditor cannot otherwise see. The
+	// operator's decision is already in the feed as its own `human` kind
+	// (`gate-override-granted`, below); this one records the routing stage
+	// COMPUTING that a standing grant covers this step's failure, and
+	// `data` carries the grant id(s) so the audit walks back to the person.
+	EventStepBatchOverridden: ActorThreshold,
 
 	// Operator verbs, and the harness relaying them.
-	EventRunStarted:       ActorHuman,
-	EventRunActivated:     ActorHuman,
-	EventRunPaused:        ActorHuman,
-	EventRunResumed:       ActorHuman,
-	EventRunAbandoned:     ActorHuman,
-	EventRunDone:          ActorHuman,
-	EventStepClaimed:      ActorHuman,
-	EventStepHeartbeat:    ActorHuman,
-	EventStepRecorded:     ActorHuman,
-	EventStepResolved:     ActorHuman,
-	EventStepApproved:     ActorHuman,
-	EventStepRejected:     ActorHuman,
-	EventIssueAbandoned:   ActorHuman,
-	EventTrustAdded:       ActorHuman,
-	EventTrustRemoved:     ActorHuman,
+	EventRunStarted:     ActorHuman,
+	EventRunActivated:   ActorHuman,
+	EventRunPaused:      ActorHuman,
+	EventRunResumed:     ActorHuman,
+	EventRunAbandoned:   ActorHuman,
+	EventRunDone:        ActorHuman,
+	EventStepClaimed:    ActorHuman,
+	EventStepHeartbeat:  ActorHuman,
+	EventStepRecorded:   ActorHuman,
+	EventStepResolved:   ActorHuman,
+	EventStepApproved:   ActorHuman,
+	EventStepRejected:   ActorHuman,
+	EventIssueAbandoned: ActorHuman,
+	EventTrustAdded:     ActorHuman,
+	EventTrustRemoved:   ActorHuman,
+	// Taking a run's conductor seat is an operator verb, and the only one
+	// that can mint the capability the other operator verbs require
+	// (DKT-2465); its data names the actor and cwd exactly as a trust grant's
+	// does, because a seat taken from inside a wave is what the field is for.
+	EventConductorSeated:  ActorHuman,
 	EventDispatchOpened:   ActorHuman,
 	EventDispatchClosed:   ActorHuman,
+	EventDispatchExtended: ActorHuman,
 	EventReapAcknowledged: ActorHuman,
 	// The spawn carve-out is `human` for the same reason the ack is: nothing
 	// in the engine passes `--deciding-vote`. A person, or the relay acting
@@ -499,12 +547,87 @@ var eventActors = map[string]Actor{
 	// it. The recorded agreement moves only because a person ran `run repin`
 	// with a reason, which is precisely what `human` means in this table.
 	EventRunRepinned: ActorHuman,
+
+	// The batch override being MINTED (DKT-546): nothing in the engine grants
+	// itself standing authority over a gate — a grant exists only because a
+	// person ran `step resolve --as override-pass --batch`, and the event's
+	// purpose is to anchor every later `step-batch-overridden` to that verb.
+	EventGateOverrideGranted: ActorHuman,
+
+	// The stale-target waiver being minted (DKT-742): nothing in the engine
+	// waives its own advisory — a waiver exists only because a person ran
+	// `dispatch waive-target`, and unlike the batch override there is no
+	// "spent" counterpart kind, because applying a waiver changes no step's
+	// state (the advisory is a recomputed read, served by a verb that writes
+	// nothing).
+	EventStaleTargetWaived: ActorHuman,
+
+	// The scope refresh (DKT-869): nothing in the engine re-snapshots a bound
+	// issue — activation writes the blob once and every automatic path,
+	// re-activation included, leaves it alone. It moves only because a person
+	// widened the scope through `issue edit --scope` and then ran `run
+	// refresh-scope` naming the run it should reach, which is precisely what
+	// `human` means in this table.
+	EventIssueScopeRefreshed: ActorHuman,
+
+	// The body refresh (DKT-2291) is the scope refresh's twin and `human` for
+	// the same reason: activation snapshots the body once, every automatic
+	// path leaves it alone, and it moves only because a person ran the
+	// refresh verb naming the run it should reach. Registered here with the
+	// DKT-2541 work because the closed-set tests could not pass without it
+	// (DKT-2544 records the gap).
+	EventIssueBodyRefreshed: ActorHuman,
+
+	// The attachment-list refresh is `human` for the same reason as its scope
+	// and body twins: activation freezes the list once, and it moves only
+	// because a person ran the refresh naming the run it should reach.
+	EventIssueFilesRefreshed: ActorHuman,
+
+	// The issue.diff re-pin (DKT-1034): nothing in the engine re-records a
+	// step's diff after the fact — the routing stage records it once at
+	// completion and every resolution leaves it standing (rerun-gates by
+	// contract, retry by DKT-259's guard, override-pass by recording a pass).
+	// It moves only because a person ran `step resolve --worktree` naming
+	// the checkout the patched tree stands in, which is precisely what
+	// `human` means in this table.
+	EventIssueDiffRepinned: ActorHuman,
+
+	// The run note (DKT-1079): nothing in the engine writes a note — the
+	// packet's other sources are frozen at activation or recorded by the
+	// steps themselves, and a note exists only because a person (or the
+	// dispatcher relaying one) ran `run note add` naming the run it should
+	// reach, which is precisely what `human` means in this table.
+	EventRunNoteAdded: ActorHuman,
+
+	// The config write (DKT-2767): nothing in the engine sets a vote rule's
+	// keys — a value changes only because a person (or the harness relaying
+	// one) ran `config set`, and the event's `changed_by` names who, which
+	// is precisely what `human` means in this table.
+	EventConfigChanged: ActorHuman,
+
+	// The refused close (DKT-2758): it exists only because a person, or the
+	// relay acting for one, ran `dispatch close` — the same actor as the
+	// `dispatch-closed` it failed to become.
+	EventDispatchCloseRefused: ActorHuman,
+
+	// The refused claim (DKT-2776): the same actor as the `step-claimed` it
+	// failed to become — a worker, or the dispatcher acting for one.
+	EventClaimRefused: ActorHuman,
+
+	// The re-mint: the same actor as the `step-claimed` whose lease it re-keys.
+	EventStepReminted: ActorHuman,
+
+	// The conductor's reported facts (DKT-2759): nothing in the engine
+	// observes a re-seat or a deferral; each exists because the conductor
+	// ran `run fact add`, which is precisely what `human` means here.
+	EventVoteReseated: ActorHuman,
+	EventStepDeferred: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,
 // and whether the kind is in the table at all.
 //
-// The second return is not decoration: §9 item 2's audit asks whether EVERY
+// The second return is not decoration: the attribution audit asks whether EVERY
 // event maps, and a lookup that returned `""` for an unknown kind would let the
 // audit read an unattributed event as attributed to nothing in particular.
 func ActorFor(kind string) (Actor, bool) {
@@ -525,7 +648,7 @@ func EventKinds() []string {
 	return out
 }
 
-// ActorCounts rolls the feed up per actor — the report's fifth section (E21).
+// ActorCounts rolls the feed up per actor — the report's fifth section.
 //
 // It is here rather than in the report because the attribution is this file's
 // subject, and a rollup computed beside the table cannot disagree with it.
@@ -539,7 +662,7 @@ func ActorCounts(conn *sql.DB, runID int) (map[Actor]int, error) {
 }
 
 // actorCountsTx is the same rollup inside a caller's transaction, which is where
-// the report needs it: R8's zero-write property comes from the report computing
+// the report needs it: its zero-write property comes from the report computing
 // every section in ONE read-only transaction, and a pool read from inside it
 // would deadlock against the one-connection pool.
 func actorCountsTx(tx *sql.Tx, runID int) (map[Actor]int, error) {
@@ -565,11 +688,11 @@ func actorCountsTx(tx *sql.Tx, runID int) (map[Actor]int, error) {
 			// Unreachable: the writer refuses a kind outside the closed set, so
 			// a row here with no actor means the table and the set disagree —
 			// which TestEveryEventKindHasAnActor exists to catch at build time.
-			// Refusing rather than dropping keeps §9 item 2's audit honest: a
+			// Refusing rather than dropping keeps the attribution audit honest: a
 			// rollup that silently omitted an unattributable event would report
 			// full attribution over a feed that did not have it.
 			return nil, fmt.Errorf(
-				"event kind %q has no actor in the attribution table (§8.7)", kind)
+				"event kind %q has no actor in the attribution table", kind)
 		}
 		counts[actor] += n
 	}
@@ -582,8 +705,8 @@ func actorCountsTx(tx *sql.Tx, runID int) (map[Actor]int, error) {
 // actorReportTx renders the rollup as the report's ordered rows.
 //
 // The order is the FOUR ACTORS' declared order — scheduler, check, routing,
-// operator — rather than by count, because R9 requires a total order and a
-// count-ordered list would reshuffle itself as a run progressed. An actor with
+// operator — rather than by count, because the report requires a total order
+// and a count-ordered list would reshuffle itself as a run progressed. An actor with
 // no events is OMITTED rather than shown as zero: a run with no gates has no
 // gate row, which is the same rule every other section in this document follows.
 func actorReportTx(tx *sql.Tx, runID int) ([]ActorCount, error) {
@@ -618,4 +741,81 @@ func ResolveRunFilter(conn *sql.DB, ref string) (int, error) {
 		return 0, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	return runID, nil
+}
+
+// ResolveStepFilter maps `--step STEP-N` onto a step id, refusing a step that
+// does not exist, for the same reason ResolveRunFilter refuses a missing run:
+// a filter over nothing would answer with a successful empty page. Only the
+// joinable id is accepted, never a `name@k#i` instance label, which collides
+// across issues in one run.
+func ResolveStepFilter(conn *sql.DB, ref string) (int, error) {
+	if ref == "" {
+		return 0, nil
+	}
+	stepID, err := model.ParseStepID(ref)
+	if err != nil {
+		return 0, validationErr("%s is not a step reference (expected STEP-N)", ref)
+	}
+	if _, err := db.GetStep(conn, stepID); err != nil {
+		return 0, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
+	}
+	return stepID, nil
+}
+
+// ValidateEventKind refuses a `--kind` outside the closed set, naming the
+// valid kinds. An unknown kind would otherwise match nothing and read as
+// "no such event happened", the silent miss the filter exists to end.
+func ValidateEventKind(kind string) error {
+	if kind == "" {
+		return nil
+	}
+	if _, ok := eventKinds[kind]; ok {
+		return nil
+	}
+	kinds := EventKinds()
+	sort.Strings(kinds)
+	return validationErr("unknown event kind %q; valid kinds: %s",
+		kind, strings.Join(kinds, ", "))
+}
+
+// ActivationHead is the checkout head the run's LATEST activation recorded on
+// its run-activated event (DKT-3263): the head the shared branch stood at
+// when the run's current roster was bound. Both fields are empty when no
+// activation recorded one (the exec root was not a checkout, or the run
+// activated before heads were recorded) — absence, never a guess.
+type ActivationHead struct {
+	Branch string `json:"branch,omitempty"`
+	Commit string `json:"commit"`
+}
+
+// LatestActivationHead reads ActivationHead for `run status` (DKT-3310). It
+// returns nil when the latest run-activated event carries no commit.
+//
+// It reads the row directly rather than through ListEvents: that is a cursor
+// feed whose GONE probe refuses a zero cursor once anything was pruned, and
+// a status read must not fail because old events were retired.
+func LatestActivationHead(conn *sql.DB, runID int) (*ActivationHead, error) {
+	tx, err := conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("reading the activation head: %w", err)
+	}
+	defer tx.Rollback()
+	var raw string
+	err = tx.QueryRow(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`,
+		runID, EventRunActivated).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the activation head: %w", err)
+	}
+	var data struct {
+		Branch string `json:"head_branch"`
+		Commit string `json:"head_commit"`
+	}
+	if err := json.Unmarshal([]byte(raw), &data); err != nil || data.Commit == "" {
+		return nil, nil
+	}
+	return &ActivationHead{Branch: data.Branch, Commit: data.Commit}, nil
 }

@@ -11,16 +11,16 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// `run budget --set` — B24's loop closed (docs/tdd/events-follow.md §7).
+// `run budget --set` — the breach loop closed.
 
 // TestBudgetRaiseUnparksABreachedRun is THE HEADLINE, and it is the whole
 // argument for the verb existing.
 //
-// S6 left the loop open and said so in two places — a comment at the end of
-// `enforceBudgetTx` and operations.md §4's runbook — both describing the same
-// dead end: a breached run resumes to `active`, the cap has not moved, and the
-// next claim breaches again. This test drives that dead end, applies the verb,
-// and asserts the claim that could not commit now commits.
+// Budget enforcement left the loop open and said so in two places — a comment
+// at the end of `enforceBudgetTx` and the manual-edit runbook — both describing
+// the same dead end: a breached run resumes to `active`, the cap has not moved,
+// and the next claim breaches again. This test drives that dead end, applies
+// the verb, and asserts the claim that could not commit now commits.
 //
 // It also asserts the TRAIL, in order, because the point of event-logging the
 // change is that an auditor reading the run afterwards can see why a run that
@@ -31,7 +31,7 @@ func TestBudgetRaiseUnparksABreachedRun(t *testing.T) {
 	instance := "implement@0"
 	stepID := stepIDByInstance(t, conn, instance)
 
-	// 1. The breach. This is S6's behavior, unchanged.
+	// 1. The breach. This is the existing enforcement, unchanged.
 	if _, err := ClaimStep(conn, stepID,
 		ClaimOptions{Owner: "worker", NowMS: nowMS}); err == nil {
 		t.Fatal("the claim past the cap was admitted")
@@ -42,7 +42,7 @@ func TestBudgetRaiseUnparksABreachedRun(t *testing.T) {
 		t.Fatalf("run is %s after the breach, want %s", run.Status, model.RunWaitingHuman)
 	}
 
-	// 2. THE DEAD END S6 DOCUMENTED: resume alone changes nothing, because the
+	// 2. THE DOCUMENTED DEAD END: resume alone changes nothing, because the
 	// condition has not changed. Asserting it here rather than trusting the
 	// comment is what makes the next step a fix rather than a coincidence.
 	err = db.SetRunStatus(conn, runID, model.RunActive, "", nowMS)
@@ -61,7 +61,7 @@ func TestBudgetRaiseUnparksABreachedRun(t *testing.T) {
 		t.Errorf("the cap is %g, want %g", result.Budget, cost*10)
 	}
 
-	// B-10: THE STATUS DID NOT MOVE. Raising a cap is not restarting a run —
+	// THE STATUS DID NOT MOVE. Raising a cap is not restarting a run —
 	// `waiting-human` means a person decides when work resumes, and a verb that
 	// un-parked as a side effect would take that decision back.
 	//
@@ -75,16 +75,16 @@ func TestBudgetRaiseUnparksABreachedRun(t *testing.T) {
 	testsupport.Must(t, err, "GetRun: %v", err)
 	if run.Status != model.RunWaitingHuman {
 		t.Errorf("the run is %s after a budget change; --set must not move the "+
-			"status (B-10)", run.Status)
+			"status", run.Status)
 	}
 
-	// 4. Resume, and THE CLAIM NOW COMMITS. B24, closed.
+	// 4. Resume, and THE CLAIM NOW COMMITS. The breach loop is closed.
 	err = db.SetRunStatus(conn, runID, model.RunActive, "", nowMS)
 	testsupport.Must(t, err, "SetRunStatus: %v", err)
 	_, err = ClaimStep(conn, stepID,
 		ClaimOptions{Owner: "worker", NowMS: nowMS})
 	testsupport.Must(t, err, "the claim was still refused after the cap was raised: %v — "+
-		"this is the loop B24 left open and DKT-29 closes", err)
+		"this is the loop DKT-29 closes", err)
 
 	// 5. THE TRAIL. `run-paused(budget)` … `run-budget-set(from,to)`, and the
 	// budget event carries both numbers so an auditor does not have to
@@ -110,15 +110,15 @@ func TestBudgetRaiseUnparksABreachedRun(t *testing.T) {
 	}
 	if !sawPause || !sawSet {
 		t.Errorf("the trail is incomplete: pause=%v set=%v — a cap that moved "+
-			"with nothing in the log explaining why is the gap operations.md §4 "+
+			"with nothing in the log explaining why is the gap the runbook "+
 			"warned the manual edit would leave", sawPause, sawSet)
 	}
 }
 
-// TestBudgetLowerTakesEffectAtTheNextClaim is B-2 and B-12: the verb lowers as
+// TestBudgetLowerTakesEffectAtTheNextClaim asserts the verb lowers as
 // well as raises, and lowering below what a run has spent stops it.
 //
-// engine-spec §1 says "raise/lower a live cap". A verb that refused to lower
+// The verb exists to "raise/lower a live cap". A verb that refused to lower
 // would be a verb that half exists — and lowering is the case an operator
 // reaches for when a run is spending faster than expected and they want it to
 // stop at the next boundary rather than be abandoned.
@@ -131,8 +131,8 @@ func TestBudgetLowerTakesEffectAtTheNextClaim(t *testing.T) {
 		ClaimOptions{Owner: "worker", NowMS: nowMS})
 	testsupport.Must(t, err, "the first claim was refused under a generous cap: %v", err)
 
-	// Lower the cap below what has already been spent. THE FLOOR DOES NOT MOVE
-	// (B-15): raising or lowering a cap changes what a run is ALLOWED to spend,
+	// Lower the cap below what has already been spent. THE FLOOR DOES NOT MOVE:
+	// raising or lowering a cap changes what a run is ALLOWED to spend,
 	// never what it has spent, because the floor is a sum over claim events.
 	before, err := GetRunBudget(conn, runID)
 	testsupport.Must(t, err, "GetRunBudget: %v", err)
@@ -144,7 +144,7 @@ func TestBudgetLowerTakesEffectAtTheNextClaim(t *testing.T) {
 	testsupport.Must(t, err, "SetRunBudget: %v", err)
 	if after.Floor != before.Floor {
 		t.Errorf("the floor moved from %g to %g when the cap changed; a cap "+
-			"change cannot un-spend what was spent (B-15)", before.Floor, after.Floor)
+			"change cannot un-spend what was spent", before.Floor, after.Floor)
 	}
 
 	// And the next claim refuses. (`review` is fanned out in this fixture, so
@@ -155,7 +155,7 @@ func TestBudgetLowerTakesEffectAtTheNextClaim(t *testing.T) {
 	}
 }
 
-// TestBudgetSetIsCASGuarded is B-5 through B-8.
+// TestBudgetSetIsCASGuarded asserts the cap write is compare-and-set guarded.
 func TestBudgetSetIsCASGuarded(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 10)
@@ -164,9 +164,9 @@ func TestBudgetSetIsCASGuarded(t *testing.T) {
 	testsupport.Must(t, err, "GetRun: %v", err)
 	stale := run.RowVersion
 
-	// B-7: THE VERSION IS BUMPED WITHOUT `--if-version`.
+	// THE VERSION IS BUMPED WITHOUT `--if-version`.
 	//
-	// operations.md §4's manual runbook made incrementing `row_version` a step
+	// The manual-edit runbook made incrementing `row_version` a step
 	// an operator had to remember, warning that otherwise "a concurrent
 	// --if-version check will pass against a row that changed underneath it".
 	// Making it structural is most of why the verb is better than the edit, so
@@ -179,7 +179,7 @@ func TestBudgetSetIsCASGuarded(t *testing.T) {
 			updated.RowVersion)
 	}
 
-	// B-6: the stale precondition now conflicts.
+	// The stale precondition now conflicts.
 	if _, err := SetRunBudget(conn, runID, 30, "", &stale, nowMS); err == nil {
 		t.Error("a stale --if-version was accepted")
 	} else if !strings.Contains(err.Error(), "version conflict") {
@@ -193,12 +193,12 @@ func TestBudgetSetIsCASGuarded(t *testing.T) {
 	}
 }
 
-// TestBudgetSetRefusals is B-1 and B-3.
+// TestBudgetSetRefusals covers a negative cap and a terminal run.
 func TestBudgetSetRefusals(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 10)
 
-	// B-1: negative. Zero is legal and means unlimited; below zero means
+	// Negative. Zero is legal and means unlimited; below zero means
 	// nothing at all.
 	if _, err := SetRunBudget(conn, runID, -1, "", nil, nowMS); err == nil {
 		t.Error("a negative cap was accepted")
@@ -207,13 +207,13 @@ func TestBudgetSetRefusals(t *testing.T) {
 	}
 
 	// Zero IS accepted, and means unlimited — the meaning the flag has carried
-	// since S3. A verb that refused it would make "remove this run's cap"
+	// all along. A verb that refused it would make "remove this run's cap"
 	// inexpressible.
 	if _, err := SetRunBudget(conn, runID, 0, "", nil, nowMS); err != nil {
 		t.Errorf("a cap of 0 was refused: %v — 0 means unlimited", err)
 	}
 
-	// B-3: a terminal run's cap is history.
+	// A terminal run's cap is history.
 	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
 	if _, err := SetRunBudget(conn, runID, 50, "", nil, nowMS); err == nil {
 		t.Error("a finished run's budget was changed")
@@ -229,12 +229,12 @@ func TestBudgetSetRefusals(t *testing.T) {
 	}
 }
 
-// TestBudgetReadShowsWhatEnforcementCompares is B-4, and the property that
-// makes the read form worth having: it must show the numbers that DECIDE, not a
-// cached approximation of them.
+// TestBudgetReadShowsWhatEnforcementCompares is the read form, and the property
+// that makes the read form worth having: it must show the numbers that DECIDE,
+// not a cached approximation of them.
 //
 // The floor is a SUM over claim events, and `runs.usage_floor` is a cache the
-// report reads and enforcement never does (§4.3). A read verb that consulted the
+// report reads and enforcement never does. A read verb that consulted the
 // cache would answer correctly right up until the moment it mattered — when the
 // cache and the events disagree — so this test poisons the cache and asserts the
 // answer is unchanged, the same technique TestFloorIsNeverReadFromCache uses.
@@ -306,7 +306,7 @@ func TestBudgetVerbWritesOnlyWhatItSays(t *testing.T) {
 		}
 	}
 
-	// DKT-80 (overturning B-13): a cap change that RESOLVES the breach clears
+	// DKT-80: a cap change that RESOLVES the breach clears
 	// the breach record. The history of the breach lives in the `run-paused`
 	// and `run-budget-set` events; the row states what is true now, and after
 	// this raise "spend reached the cap" is no longer it.
@@ -441,7 +441,7 @@ func TestBudgetRaiseWithNoStandingBreachClearsStaleReason(t *testing.T) {
 	// NULL), so the guard that fires on a resolving raise never runs. The
 	// stale sentence from the FIRST raise must not survive naming numbers
 	// that are no longer in force — and the run REMAINS PARKED throughout
-	// (SetRunBudget never touches status, B-10), so the property to prove
+	// (SetRunBudget never touches status), so the property to prove
 	// is not "the reason changed" (a mutant can satisfy that by writing a
 	// DIFFERENT stale sentence) but "the reason names the cap now in force
 	// and still tells a waiting-human operator how to resume".
@@ -453,7 +453,7 @@ func TestBudgetRaiseWithNoStandingBreachClearsStaleReason(t *testing.T) {
 
 	if run.Status != model.RunWaitingHuman {
 		t.Errorf("run.status = %q after the second raise, want %q — SetRunBudget "+
-			"never resumes a parked run (B-10)", run.Status, model.RunWaitingHuman)
+			"never resumes a parked run", run.Status, model.RunWaitingHuman)
 	}
 	if run.Reason == firstReason {
 		t.Errorf("run.reason is still %q after an unrelated later raise; the "+
@@ -498,7 +498,7 @@ func TestBudgetRaiseNeverClearsAnOperatorsOwnPauseReason(t *testing.T) {
 	testsupport.Must(t, err, "GetRun: %v", err)
 	if run.Status != model.RunWaitingHuman {
 		t.Fatalf("run.status = %q after the raise, want %q — SetRunBudget never "+
-			"resumes a parked run (B-10)", run.Status, model.RunWaitingHuman)
+			"resumes a parked run", run.Status, model.RunWaitingHuman)
 	}
 	if run.Reason != operatorReason {
 		t.Errorf("run.reason = %q after an unrelated raise, want the operator's "+

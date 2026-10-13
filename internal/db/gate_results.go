@@ -6,13 +6,13 @@ import (
 	"fmt"
 )
 
-// GateResultRow is one recorded gate execution — §11.4's `gate result` shape as
-// it lives in the v8 table (TDD docs/tdd/gates-trust.md §4.2, §6.1).
+// GateResultRow is one recorded gate execution — the `gate result` shape as
+// it lives in the v8 table.
 //
 // Argv and Exit are POINTERS because NULL is meaningful here and zero is not:
 // an `unmatched` gate never ran, so it has no argv and no exit code. Recording
 // `exit = 0` for a process that does not exist is exactly the confusion the
-// gate-forgery threat (T11) exists to prevent — a zero exit reads as success.
+// gate-forgery threat exists to prevent — a zero exit reads as success.
 // NULL is the honest encoding of "no process existed".
 type GateResultRow struct {
 	ID         int
@@ -27,8 +27,8 @@ type GateResultRow struct {
 	Truncated  bool
 	Verdict    string
 	Pre        bool
-	// Stub is 1 ONLY on rows migrated from an S3 `gate_trail`. Nothing this
-	// stage records sets it, which is what makes the S3->S4 window auditable
+	// Stub is 1 ONLY on rows migrated from the older `gate_trail`. Nothing this
+	// stage records sets it, which is what makes the migration window auditable
 	// after the fact.
 	Stub bool
 	// StubEntry is 1 when the trust entry that authorized this gate declared
@@ -41,15 +41,31 @@ type GateResultRow struct {
 	// asking "did a secret scan actually happen" is asking the second question
 	// only.
 	StubEntry bool
-	// Reason explains an `unmatched` verdict or a timeout (§6.3, amendment A6).
+	// Reason explains an `unmatched` verdict or a timeout.
 	// An unmatched verdict has four distinct causes needing four different
 	// remedies, and without this field they render identically to an operator.
-	Reason      string
+	Reason string
+	// Fingerprint is the SHA-256 of this row's capture with run-varying text
+	// removed (engine.GateFingerprint), computed at record time — the CONTENT
+	// half of the failure signature a batch override grant is keyed on
+	// (DKT-1796). A gate that printed nothing hashes the empty capture, so a
+	// row recorded at v30 or later always carries a value: EMPTY means the row
+	// predates v30 and nothing else.
+	Fingerprint string
+	// TargetSHA is the commit this PRE-gate row was measured against when the
+	// measurement ran OUTSIDE the claim — a detached pre-gate run started when
+	// the step's target was recorded, so a gate longer than the claim's budget
+	// can still hand the claim a complete result. The
+	// claim reuses a recorded row only for the same step and the same target,
+	// and this is the key it matches on. EMPTY on every row the claim itself
+	// records, on every completion-side row, and on every row recorded before
+	// v37: none of those was measured for reuse, and a blank is never a key.
+	TargetSHA   string
 	CreatedAtMS int64
 }
 
 // Gate verdicts as stored. `unmatched` is a FIRST-CLASS outcome, not an error
-// and not a pass: the command was not trusted, so it did not run (§6.2 N1-N4).
+// and not a pass: the command was not trusted, so it did not run.
 const (
 	GateVerdictPass      = "pass"
 	GateVerdictFail      = "fail"
@@ -62,7 +78,7 @@ const (
 // InsertGateResultTx records one gate result.
 //
 // It takes a transaction because the result commits with the saga's stage
-// advance — the subprocess ran OUTSIDE any transaction (engine-spec §6) and
+// advance — the subprocess ran OUTSIDE any transaction and
 // only its recorded fact lands in one.
 func InsertGateResultTx(tx *sql.Tx, r GateResultRow) error {
 	var argv any
@@ -84,19 +100,20 @@ func InsertGateResultTx(tx *sql.Tx, r GateResultRow) error {
 		reason = r.Reason
 	}
 
-	// `stub` is written from the row rather than hardcoded to 0, because the S3
+	// `stub` is written from the row rather than hardcoded to 0, because the
 	// pass-through runner still exists and is still what the saga tests drive.
-	// The REAL runner never sets it (T11, N4) — the guarantee is a property of
+	// The REAL runner never sets it — the guarantee is a property of
 	// what ExecRunner produces, not of what this writer will accept, and
 	// TestRealResultsCarryNoStubField asserts it where it belongs.
 	_, err := tx.Exec(
 		`INSERT INTO gate_results
 		   (run_id, step_id, gate, ordinal, argv, exit, duration_ms, output,
-		    truncated, verdict, pre, stub, stub_entry, reason, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    truncated, verdict, pre, stub, stub_entry, reason, fingerprint,
+		    target_sha, created_at_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.StepID, r.Gate, r.Ordinal, argv, exit, r.DurationMS, r.Output,
 		boolToInt(r.Truncated), r.Verdict, boolToInt(r.Pre), boolToInt(r.Stub),
-		boolToInt(r.StubEntry), reason, r.CreatedAtMS)
+		boolToInt(r.StubEntry), reason, r.Fingerprint, r.TargetSHA, r.CreatedAtMS)
 	if err != nil {
 		return fmt.Errorf("recording the gate result: %w", err)
 	}
@@ -105,7 +122,8 @@ func InsertGateResultTx(tx *sql.Tx, r GateResultRow) error {
 
 const gateResultSelect = `
 SELECT id, run_id, step_id, gate, ordinal, argv, exit, duration_ms,
-       output, truncated, verdict, pre, stub, stub_entry, reason, created_at_ms
+       output, truncated, verdict, pre, stub, stub_entry, reason, fingerprint,
+       target_sha, created_at_ms
   FROM gate_results`
 
 // GateResultsForStep returns every recorded result for a step, in insertion
@@ -122,7 +140,7 @@ func GateResultsForStepTx(tx *sql.Tx, stepID int) ([]GateResultRow, error) {
 
 // NextGateOrdinal returns the ordinal a new result for this step+gate takes.
 //
-// Ordinals are per (step, gate) and ascend, which is what carries §4's
+// Ordinals are per (step, gate) and ascend, which is what carries
 // "flaky-declared re-runs recorded individually": each attempt is its own row,
 // never an overwrite and never an aggregate.
 func NextGateOrdinal(conn *sql.DB, stepID int, gate string) (int, error) {
@@ -141,7 +159,7 @@ func NextGateOrdinal(conn *sql.DB, stepID int, gate string) (int, error) {
 
 // HasGateResult reports whether a step+gate has any recorded result.
 //
-// This is the at-least-once detector (§7.5 A1): a `saga_stage` of `gate:<name>`
+// This is the at-least-once detector: a `saga_stage` of `gate:<name>`
 // with no result row is a started-but-unrecorded gate — a crash between the
 // `gate-started` commit and the result commit.
 func HasGateResult(conn *sql.DB, stepID int, gate string) (bool, error) {
@@ -155,15 +173,15 @@ func HasGateResult(conn *sql.DB, stepID int, gate string) (bool, error) {
 	return exists, nil
 }
 
-// InsertTrustCacheTx records what a run considered trusted, and when (§4.5).
+// InsertTrustCacheTx records what a run considered trusted, and when.
 //
 // IT IS AN AUDIT RECORD, NEVER AN AUTHORIZATION SHORTCUT. Every gate consults
-// the LIVE trust store on every execution (§7.2 M1); nothing is ever executed
+// the LIVE trust store on every execution; nothing is ever executed
 // because a row here says a previous run matched. The opposite implementation is
 // the tempting one and it is a revocation failure: a cache hit that authorized a
 // spawn would make `trust rm` take effect only after the cache cleared.
 //
-// `kind` is TrustKindGate or TrustKindAction (§6.3). It exists so the one
+// `kind` is TrustKindGate or TrustKindAction. It exists so the one
 // question this table answers stays one query when actions start consulting the
 // same store: a second table keyed by the shape of the caller would split it.
 // Every pre-v9 row reads `gate` from the column default, which is what it was.
@@ -202,7 +220,7 @@ func scanGateResults(rows *sql.Rows, err error) ([]GateResultRow, error) {
 			&row.ID, &row.RunID, &row.StepID, &row.Gate, &row.Ordinal, &argv, &exit,
 			&row.DurationMS, &row.Output, &truncated, &row.Verdict, &pre, &stub,
 			&stubEntry,
-			&reason, &row.CreatedAtMS,
+			&reason, &row.Fingerprint, &row.TargetSHA, &row.CreatedAtMS,
 		); err != nil {
 			return GateResultRow{}, fmt.Errorf("reading a gate result: %w", err)
 		}

@@ -27,8 +27,8 @@ import (
 // were executor names — which no operator reading "per-class lease TTL" would
 // think to configure.
 //
-// Core cannot fix this by learning what `read` and `write` mean. engine-spec §2
-// makes the class name INSTANCE POLICY, `writeClassOf` is keyed on the declared
+// Core cannot fix this by learning what `read` and `write` mean. The class name
+// is INSTANCE POLICY, `writeClassOf` is keyed on the declared
 // bound precisely because "a core mechanism keyed on a class NAMED `write`
 // would be unimplementable", and TestNoWriteClassLiteral greps core for the
 // literal. So the fix is to make the mismatch VISIBLE at the moment it is made,

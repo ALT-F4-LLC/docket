@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,23 +15,24 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The real action runner (docs/tdd/payloads-thresholds.md §6.1, §6.2).
+// The real action runner.
 //
-// EVERYTHING SECURITY-RELEVANT HERE IS A CALL INTO S4's GROUP 1, exactly as
-// gate_exec.go's header says of itself. The matcher is internal/trust's, the
-// spawn is internal/exec's, the env allowlist and the containment check are
-// theirs too. This file decides WHEN to call them and WHAT TO RECORD; it
-// re-implements none of them, which is what makes "actions use the same trust
-// path as gates" a fact about the call graph rather than a claim.
+// EVERYTHING SECURITY-RELEVANT HERE IS A CALL INTO THE TRUST AND EXEC
+// PACKAGES, exactly as gate_exec.go's header says of itself. The matcher is
+// internal/trust's, the spawn is internal/exec's, the env allowlist and the
+// containment check are theirs too. This file decides WHEN to call them and
+// WHAT TO RECORD; it re-implements none of them, which is what makes "actions
+// use the same trust path as gates" a fact about the call graph rather than a
+// claim.
 
 // builtinFunc is a computation core performs itself.
 type builtinFunc func(a ActionSpec, sc StepContext) ActionResult
 
-// builtins are the actions core computes itself. There is exactly one, and §2
-// names it: "One is builtin and generic: action = \"aggregate\"".
+// builtins are the actions core computes itself. There is exactly one:
+// "One is builtin and generic: action = \"aggregate\"".
 //
 // The keys come from workflow.BuiltinActions rather than from string literals
-// here, so the register-time rule (V27) and the run-time dispatch cannot
+// here, so the register-time rule and the run-time dispatch cannot
 // disagree about which names are core's.
 var builtins = map[string]builtinFunc{
 	workflow.ActionAggregate: runAggregate,
@@ -40,25 +42,25 @@ var builtins = map[string]builtinFunc{
 // non-builtin, actually spawns.
 type ExecActionRunner struct {
 	// RepoRoot is the working-tree root — the cwd every action runs in and the
-	// containment boundary (gates-trust §5.2.1 R2).
+	// containment boundary.
 	RepoRoot string
-	// Identity is the project identity trust entries bind to (§3.4 P1). It
+	// Identity is the project identity trust entries bind to. It
 	// equals RepoRoot for env/local stores; under the global store it is the
 	// worktree-stable project path.
 	Identity string
 	// LockPath is the tree lockfile serializing this project's tree-declaring
-	// commands (§7.4 / A7).
+	// commands.
 	LockPath string
 	// LoadStore reads the trust store. It is a FIELD so a test can supply a
-	// sandbox store without the package growing a path-taking constructor —
-	// gates-trust §9.5 SB3 forbids one, because every additional way to point
+	// sandbox store without the package growing a path-taking constructor,
+	// which is forbidden because every additional way to point
 	// docket at a trust file is another way for repo content to point it
 	// somewhere.
 	LoadStore func() (*trust.Store, error)
 }
 
-// NewActionRunner builds the real runner. THIS IS THE CONSTRUCTOR SWAP
-// engine-spine §6.13 promised, and §6.4 records honestly what else moved.
+// NewActionRunner builds the real runner. Swapping this one constructor is
+// what replaced the stub runner.
 func NewActionRunner(paths RepoPaths) *ExecActionRunner {
 	return &ExecActionRunner{
 		RepoRoot:  paths.ExecRoot,
@@ -72,7 +74,7 @@ var _ ActionRunner = (*ExecActionRunner)(nil)
 
 // Run computes one action step.
 //
-// B1: RESOLUTION IS BUILTIN FIRST. An action core computes is never looked up
+// RESOLUTION IS BUILTIN FIRST. An action core computes is never looked up
 // in the trust store, so a trust entry cannot shadow a builtin and a builtin
 // cannot be disabled by removing one.
 func (r *ExecActionRunner) Run(
@@ -84,10 +86,10 @@ func (r *ExecActionRunner) Run(
 	return r.runTrustedCommand(ctx, a, sc), nil
 }
 
-// runAggregate is the builtin (§7).
+// runAggregate is the builtin.
 //
-// B2: IT SPAWNS NOTHING, so §6's "no subprocess ever executes inside a
-// transaction" holds trivially for it. B3: a failure — bad params, an
+// IT SPAWNS NOTHING, so "no subprocess ever executes inside a transaction"
+// holds trivially for it. A failure — bad params, an
 // unorderable value — is a STEP failure routed per the step's effective
 // `on_fail`, never an engine error that aborts the saga. A workflow authoring
 // mistake must not wedge a run.
@@ -118,8 +120,8 @@ func runAggregate(a ActionSpec, sc StepContext) ActionResult {
 		return fail("step %s: encoding the aggregate output: %v", sc.Instance, err)
 	}
 
-	// E5: the output is validated against BOTH `aggregate@1` and the step's
-	// declared schema. V30 already made the conjunction's satisfiability a
+	// The output is validated against BOTH `aggregate@1` and the step's
+	// declared schema. Register time already made the conjunction's satisfiability a
 	// register-time question, so a refusal here means the computation produced
 	// something neither document describes — a defect, reported as a step
 	// failure rather than swallowed.
@@ -127,18 +129,37 @@ func runAggregate(a ActionSpec, sc StepContext) ActionResult {
 		return fail("step %s: %v", sc.Instance, err)
 	}
 
+	// `route_at`'s below-floor clusters go to the RECORD (DKT-593): the
+	// builtin's own `action_results` row, where every attempt's trace already
+	// lives. They are fully reduced — value, members, demotion trail — and
+	// they are deliberately NOT in the artifact payload, so the threshold and
+	// every downstream `inputs` reader see only the emitted set. History is
+	// attributed; the loop is not fed.
+	recorded := ""
+	if len(outcome.Recorded) > 0 {
+		encoded, err := json.Marshal(outcome.Recorded)
+		if err != nil {
+			return fail("step %s: encoding the below-floor clusters: %v",
+				sc.Instance, err)
+		}
+		recorded = string(encoded)
+	}
+
 	return ActionResult{
-		Kind:    params.Output,
-		Body:    aggregateBody(sc.Instance, len(outcome.Payload), len(outcome.Held)),
+		Kind: params.Output,
+		Body: aggregateBody(sc.Instance,
+			len(outcome.Payload)+len(outcome.Recorded),
+			len(outcome.Held), len(outcome.Recorded)),
 		Payload: string(payload),
 		Held:    outcome.Held,
 		Results: []ActionResultRow{{
 			Action: a.Name, Verdict: db.ActionVerdictPass, Builtin: true,
+			Output: recorded,
 		}},
 	}
 }
 
-// validateAggregateOutput applies §7.6 E5's conjunction.
+// validateAggregateOutput applies the builtin-and-declared schema conjunction.
 func validateAggregateOutput(payload []byte, declared func([]byte) error) error {
 	builtin, err := aggregateSchema()
 	if err != nil {
@@ -150,7 +171,7 @@ func validateAggregateOutput(payload []byte, declared func([]byte) error) error 
 			schemaAggregateRef, err)
 	}
 	if declared == nil {
-		// V29 guarantees an `aggregate` step declares a schema, so this is
+		// Register time guarantees an `aggregate` step declares a schema, so this is
 		// reachable only from a definition that arrived some other way. Half the
 		// conjunction is better than none.
 		return nil
@@ -167,13 +188,13 @@ func validateAggregateOutput(payload []byte, declared func([]byte) error) error 
 // have to be handled twice inside one error path.
 const schemaAggregateRef = "aggregate@1"
 
-// runTrustedCommand is §6.2: a non-builtin action is a USER-TRUSTED COMMAND,
-// through §4's trust model WITH NO EXCEPTIONS.
+// runTrustedCommand runs a non-builtin action, which is a USER-TRUSTED COMMAND,
+// through the trust model WITH NO EXCEPTIONS.
 //
-// A1/A2: the store is read ONCE into an immutable snapshot and the matched
+// The store is read ONCE into an immutable snapshot and the matched
 // entry's OWN ARGV is what executes, so matching never produces a permission
-// later applied to an argv read from somewhere else (gates-trust T4's TOCTOU
-// window, closed the same way here).
+// later applied to an argv read from somewhere else (the same TOCTOU window
+// gates close).
 func (r *ExecActionRunner) runTrustedCommand(
 	_ context.Context, a ActionSpec, sc StepContext,
 ) ActionResult {
@@ -199,24 +220,37 @@ func (r *ExecActionRunner) runTrustedCommand(
 		return unmatched("the repo path could not be resolved: %v", err)
 	}
 
-	// A2: candidates are entries whose name equals the action name AND whose
+	// Candidates are entries whose name equals the action name AND whose
 	// repo binding matches this repo. A candidate argv of nil means "the ENTRY
-	// is the command", exactly as a named gate resolves.
-	match := store.Lookup(identity, a.Name, nil)
+	// is the command", exactly as a named gate resolves. Declared files are
+	// hashed under RepoRoot because that is the action's spawn Dir; the
+	// identity can name a different checkout.
+	match := store.LookupAt(identity, a.Name, nil, r.RepoRoot)
 	if !match.Matched {
-		// A3: NO ENTRY ⇒ `unmatched`. NOTHING SPAWNS, and the step routes per
-		// its effective `on_fail` — the same direction gates take (§6.2 N3),
+		// NO ENTRY ⇒ `unmatched`. NOTHING SPAWNS, and the step routes per
+		// its effective `on_fail` — the same direction gates take,
 		// because a computation that could not run has not succeeded.
 		return unmatched("%s", match.Reason)
 	}
 
-	return r.spawnMatched(a, sc, match)
+	return r.spawnMatched(a, sc, match, func() trust.Match {
+		return store.LookupAt(identity, a.Name, nil, r.RepoRoot)
+	})
 }
 
 // spawnMatched runs a matched action command and shapes its output into the
-// §6.2 contract.
+// action reply contract.
+//
+// relookup repeats the Lookup that produced match against the same store
+// snapshot. It runs before every attempt, after any tree-lock wait, because
+// the content pin (argv0_sha256) is checked "before every
+// spawn": the pinned file can change during the lock wait or between flaky
+// attempts, and only the pin half of the Lookup can change its answer. The
+// same holds for declared files, which it re-hashes under the same root. A
+// content-pinned entry then spawns through exec.RunPinned, which spawns
+// exactly the path it hashed.
 func (r *ExecActionRunner) spawnMatched(
-	a ActionSpec, sc StepContext, match trust.Match,
+	a ActionSpec, sc StepContext, match trust.Match, relookup func() trust.Match,
 ) ActionResult {
 	entry := match.Entry
 
@@ -227,7 +261,7 @@ func (r *ExecActionRunner) spawnMatched(
 		}
 	}
 
-	// A4: the env allowlist, TERM/CI, DOCKET_REPO, and the DOCKET_TOKEN
+	// The env allowlist, TERM/CI, DOCKET_REPO, and the DOCKET_TOKEN
 	// exclusion with its pre-spawn assertion, unchanged. The token has already
 	// retired by the routing stage, so the exclusion is belt-and-braces here —
 	// which is exactly why it is asserted rather than assumed.
@@ -239,8 +273,8 @@ func (r *ExecActionRunner) spawnMatched(
 		return r.failed(a, fmt.Sprintf("building the child environment: %v", err), match)
 	}
 
-	// A5: argv[0] resolution, exec.ErrDot, and the repo-containment rule
-	// R1-R5, unconditionally and in internal/exec so no path skips them.
+	// argv[0] resolution, exec.ErrDot, and the repo-containment rules run
+	// unconditionally and in internal/exec so no path skips them.
 	entryArgv0 := ""
 	if len(entry.Argv) > 0 {
 		entryArgv0 = entry.Argv[0]
@@ -260,10 +294,18 @@ func (r *ExecActionRunner) spawnMatched(
 		}
 	}
 
+	// A content-pinned entry hands RunPinned its UNRESOLVED argv[0]: RunPinned
+	// resolves it once and spawns the path it hashed, so `resolved` above only
+	// feeds the refusal and the pre-spawn re-check, never the spawned argv.
+	pinned := entry.Argv0SHA256 != "" && filepath.IsAbs(entryArgv0)
+	argv0 := resolved
+	if pinned {
+		argv0 = match.Argv[0]
+	}
 	spec := exec.Spec{
-		Argv: append([]string{resolved}, match.Argv[1:]...),
+		Argv: append([]string{argv0}, match.Argv[1:]...),
 		Dir:  r.RepoRoot, Env: env, Timeout: timeout,
-		// §6.2's stdin half: the §11.4 context object, one JSON document, then
+		// The stdin half: the step context object, one JSON document, then
 		// EOF. SplitStdout separates the structured reply from the diagnostic
 		// stream, because a command that logs to stderr must not corrupt the
 		// document core parses.
@@ -271,23 +313,49 @@ func (r *ExecActionRunner) spawnMatched(
 		SplitStdout: true,
 	}
 
-	// A7: a `tree = true` entry takes the same per-repo flock a tree gate
+	// A `tree = true` entry takes the same per-repo flock a tree gate
 	// takes. A computation that reads the working tree races a build exactly as
 	// a gate does, and the lock is acquired immediately before the spawn and
 	// released immediately after — never held across a database write.
 	if entry.Tree {
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
-			return r.failed(a, lockErr.Error(), match)
+			return r.failed(a, "tree lock not acquired: "+lockErr.Error(), match)
 		}
 		defer lock.release()
 	}
 
-	// A8: flaky re-runs apply and are recorded individually with ascending
+	recheckPin := func() error {
+		if err := pinStillBindsSpawn(entry, resolved); err != nil {
+			return fmt.Errorf("trust entry %q: %w", entry.Name, err)
+		}
+		if again := relookup(); !again.Matched {
+			return errors.New(again.Reason)
+		}
+		return nil
+	}
+
+	// Flaky re-runs apply and are recorded individually with ascending
 	// ordinal. The pass predicate is exit-zero AND a parseable reply — a
 	// command that exits 0 and prints garbage has not produced a result, and
-	// re-running it is exactly what `flaky` is for.
-	attempts, err := exec.RunAttempts(spec, entry.Flaky, actionAttemptIsPass)
+	// re-running it is exactly what `flaky` is for. Every attempt of a
+	// content-pinned entry spawns through exec.RunPinned, so each one runs the
+	// path it hashed. A RunPinned refusal spawned nothing: it is recorded as
+	// the refusal at the declined ordinal, after the attempts that ran.
+	//
+	// The binding covers a symlink retargeted between the hash and the spawn.
+	// A rename over the resolved path, or a write into the hashed file, between
+	// the hash and execve still runs bytes the pin does not name.
+	spawn := exec.Run
+	if pinned {
+		spawn = func(s exec.Spec) (exec.Result, error) {
+			return exec.RunPinned(s, entry.Argv0SHA256, r.RepoRoot, entryArgv0)
+		}
+	}
+	attempts, refusal, err := exec.RunSpawnedAttempts(spec, entry.Flaky, actionAttemptIsPass, recheckPin, spawn)
+	if pinned && errors.Is(err, exec.ErrRefused) {
+		refusal, err = &exec.Refusal{Ordinal: len(attempts), Err: err}, nil
+	}
 	if err != nil {
 		return r.failed(a, fmt.Sprintf("running action %s: %v", a.Name, err), match)
 	}
@@ -312,11 +380,24 @@ func (r *ExecActionRunner) spawnMatched(
 		})
 		last = &attempt
 	}
+	if refusal != nil {
+		// The pin no longer holds, or the pinned spawn refused: nothing spawned
+		// for this ordinal, so the row carries no argv and no exit, like a
+		// Resolve refusal. Nothing ran after it, so it routes.
+		reason := refusal.Err.Error()
+		out.Results = append(out.Results, ActionResultRow{
+			Action: a.Name, Ordinal: refusal.Ordinal, Verdict: db.ActionVerdictUnmatched,
+			Reason: reason, TrustEntry: entry.Name,
+			ArgvSHA256: trust.ArgvSHA256(match.Argv), Prefix: entry.Prefix,
+		})
+		out.Failed, out.Reason = true, reason
+		return out
+	}
 	if last == nil {
 		return r.failed(a, "the command produced no attempts", match)
 	}
 
-	// F4's rule, inherited: the LAST attempt's outcome is the one that routes.
+	// The gate rule, inherited: the LAST attempt's outcome is the one that routes.
 	// A command that passes on attempt 2 passes.
 	if last.Result.Exit != 0 || last.Result.TimedOut {
 		reason := last.Result.Reason
@@ -331,7 +412,7 @@ func (r *ExecActionRunner) spawnMatched(
 	reply, err := parseActionReply(last.Result.Stdout)
 	if err != nil {
 		// The unparseable-stdout case. This output is ATTACKER-INFLUENCED and
-		// reaches a terminal, so it is quoted through gates-trust §5.7's
+		// reaches a terminal, so it is quoted through the gate output
 		// renderer rather than printed raw.
 		reason := err.Error()
 		out.Failed, out.Reason = true, reason
@@ -340,7 +421,7 @@ func (r *ExecActionRunner) spawnMatched(
 		return out
 	}
 
-	// The payload is validated exactly as a worker's is (§4.8): against the
+	// The payload is validated exactly as a worker's is: against the
 	// step's declared schema when it declares one. A failure is a STEP failure
 	// routed per `on_fail`, not a refusal to a caller — there is no caller; the
 	// engine is the caller.
@@ -401,7 +482,7 @@ func actionOutput(res exec.Result) string {
 	return res.Stdout
 }
 
-// actionReply is §6.2's stdout contract: ONE JSON object,
+// actionReply is the action stdout contract: ONE JSON object,
 // `{"body": "<string>", "payload": [ … ]}`.
 //
 // An object rather than "stdout is the payload" because an action that wants to
@@ -417,7 +498,7 @@ type actionReply struct {
 // to "" when absent, `payload` to [].
 //
 // Unknown keys are REFUSED, and a second document after the first is refused
-// too. Both follow V28's discipline: a key the contract does not name is a
+// too. Both follow the params discipline: a key the contract does not name is a
 // declaration the command's author believes core is reading, and saying so is
 // better than dropping it silently.
 func parseActionReply(stdout string) (actionReply, error) {
@@ -454,7 +535,7 @@ func parseActionReply(stdout string) (actionReply, error) {
 }
 
 // actionParseError renders the unparseable-stdout refusal, quoting the first
-// 200 bytes THROUGH gates-trust §5.7's renderer.
+// 200 bytes THROUGH the gate output renderer.
 //
 // The quoting is not cosmetic. This output is attacker-influenced — it is
 // whatever a command printed — and it reaches an operator's terminal in a

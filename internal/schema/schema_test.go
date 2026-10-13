@@ -7,7 +7,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestDefaultDraftIsPinned is §4.1 mitigation 2.
+// TestDefaultDraftIsPinned proves the default draft is pinned.
 //
 // A document with NO `$schema` key is read under the draft this package pins,
 // not under whatever the library's default happens to be this release. The
@@ -41,12 +41,12 @@ func TestDefaultDraftIsPinned(t *testing.T) {
 	}
 }
 
-// TestEmbeddedAggregateSchemaMatchesItsGolden is §7.6 E4.
+// TestEmbeddedAggregateSchemaMatchesItsGolden pins the embedded bytes.
 //
 // `aggregate@1` is seeded into every database at v9 and pinned by every run
 // that binds an `aggregate` step. Editing the embedded bytes therefore does not
 // change the schema those databases hold — it creates a divergence the seed's
-// INSERT OR IGNORE will not correct (U7), and a database must never become
+// INSERT OR IGNORE will not correct, and a database must never become
 // unopenable because a binary changed.
 //
 // So the divergence is caught HERE, at build time: an edit is a deliberate act
@@ -59,16 +59,16 @@ func TestEmbeddedAggregateSchemaMatchesItsGolden(t *testing.T) {
 		t.Fatalf("the embedded %s document changed.\n"+
 			"  golden: %s\n"+
 			"  got:    %s\n"+
-			"A registered name@version is immutable (§4.4): every database seeded "+
+			"A registered name@version is immutable: every database seeded "+
 			"by an earlier build still holds the old bytes, and the seed will not "+
 			"overwrite them. Ship aggregate@2 instead, or restore the document.",
 			AggregateRef(), golden, got)
 	}
 }
 
-// TestTheShippedAggregateSchemaIsUsable proves E1 and E5's half that group 1
-// can prove: the document compiles, requires what §7.6 says it requires, and
-// admits the carried-through keys G3 depends on.
+// TestTheShippedAggregateSchemaIsUsable proves what this package can: the
+// document compiles, requires the keys an aggregate element carries, and
+// admits the carried-through keys.
 func TestTheShippedAggregateSchemaIsUsable(t *testing.T) {
 	reg, err := Aggregate()
 	testsupport.Must(t, err, "the shipped %s document does not compile: %v", AggregateRef(), err)
@@ -76,7 +76,8 @@ func TestTheShippedAggregateSchemaIsUsable(t *testing.T) {
 		t.Errorf("Ref() = %q, want aggregate@1", reg.Ref())
 	}
 
-	// The author's own field key rides through, alongside G3's other keys.
+	// The author's own field key rides through, alongside the other carried
+	// keys.
 	valid := `[{"risk": "medium", "members": ["low","medium","high"], "held": true,
 	            "demoted_from": "high", "operator_resolved": false, "ticket": "AB-12"}]`
 	if err := reg.ValidatePayload([]byte(valid)); err != nil {
@@ -100,14 +101,15 @@ func TestTheShippedAggregateSchemaIsUsable(t *testing.T) {
 	}
 }
 
-// TestTheShippedAggregateSchemaNamesNoInstanceToken is E2, as an assertion
-// rather than as a claim. The genericity gate scans the file (§1.1.1); this
-// makes the same point where a reader of the package will see it.
+// TestTheShippedAggregateSchemaNamesNoInstanceToken states, as an assertion
+// rather than as a claim, that the document names no instance token. The
+// genericity gate scans the file; this makes the same point where a reader of
+// the package will see it.
 func TestTheShippedAggregateSchemaNamesNoInstanceToken(t *testing.T) {
 	body := strings.ToLower(string(AggregateBody()))
-	// The keys the document may name are exactly §2's, plus JSON Schema's own
-	// vocabulary. An instance's field key cannot appear, because it is the
-	// author's.
+	// The keys the document may name are exactly the aggregate's own, plus JSON
+	// Schema's own vocabulary. An instance's field key cannot appear, because
+	// it is the author's.
 	for _, token := range []string{"severity", "risk", "priority", "tier", "findings"} {
 		if strings.Contains(body, token) {
 			t.Errorf("the shipped document names the instance token %q", token)
@@ -115,9 +117,9 @@ func TestTheShippedAggregateSchemaNamesNoInstanceToken(t *testing.T) {
 	}
 }
 
-// TestPayloadRefusalsArePathPrecise is C3's requirement stated against the
-// package that renders it: a refusal names the element and the property, in the
-// notation a worker's payload file is written in.
+// TestPayloadRefusalsArePathPrecise states the refusal requirement against the
+// package that renders it: a refusal names the element and the property, in
+// the notation a worker's payload file is written in.
 func TestPayloadRefusalsArePathPrecise(t *testing.T) {
 	reg, err := Compile("findings", 1, arraySchema(
 		`"risk": {"type": "string", "enum": ["info","low","medium","high","blocker"], "ordered_enum": true}`))
@@ -155,7 +157,7 @@ func TestAnUnparseablePayloadIsRefusedAsOne(t *testing.T) {
 	}
 }
 
-// TestAMalformedSchemaDocumentIsRefusedAtCompile covers §4.5's refusal row: a
+// TestAMalformedSchemaDocumentIsRefusedAtCompile covers the compile refusal: a
 // schema that does not compile is refused at REGISTER, not at first use. A
 // registry that accepted a broken document would surface it hours into a run,
 // on a step whose work is already done.
@@ -205,5 +207,54 @@ func TestTheAnnotationConstrainsNothing(t *testing.T) {
 			t.Errorf("the annotation changed a verdict for %s: annotated=%v plain=%v",
 				doc, annotatedErr, plainErr)
 		}
+	}
+}
+
+// TestRequiredPropertiesAreReadFromTheDocument is what lets a packet state the
+// payload contract without a worker fetching the schema: the keys a payload
+// element must carry, in the author's declared order.
+func TestRequiredPropertiesAreReadFromTheDocument(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "array of objects reads the item schema",
+			body: `{"type": "array", "items": {"type": "object",
+  "properties": {"title": {"type": "string"}, "severity": {"type": "string"}},
+  "required": ["title", "severity"]}}`,
+			want: []string{"title", "severity"},
+		},
+		{
+			name: "object document reads the root",
+			body: `{"type": "object",
+  "properties": {"id": {"type": "string"}, "status": {"type": "string"}},
+  "required": ["id", "status"]}`,
+			want: []string{"id", "status"},
+		},
+		{
+			name: "no required clause yields none",
+			body: `{"type": "array", "items": {"type": "object",
+  "properties": {"note": {"type": "string"}}}}`,
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, err := Compile("req", 1, []byte(tc.body))
+			testsupport.Must(t, err, "compiling: %v", err)
+
+			got := reg.RequiredProperties()
+			if len(got) != len(tc.want) {
+				t.Fatalf("RequiredProperties() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("RequiredProperties() = %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }

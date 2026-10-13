@@ -6,14 +6,16 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/spf13/cobra"
 )
 
 // configEntryList is the v2 collection shape for `docket config get` with no
 // key, so the listing renders as {items,total,truncated} like every other list
-// verb (engine-spec.md §5).
+// verb.
 type configEntryList struct {
 	Entries []db.ConfigEntry `json:"entries"`
 	Total   int              `json:"total"`
@@ -39,6 +41,10 @@ a typo fails here rather than silently storing something nothing reads.
 
   lease.ttl.default    duration   fallback lease TTL
   lease.ttl.<class>    duration   per-class lease TTL; see below for what a class IS
+  limits.max.<class>   integer    class concurrency cap replacing the pinned [limits]
+                       or auto    max, read at every scheduling pass; auto is half
+                                  the host's CPUs (at least 1). Use --global to set
+                                  it for every project on this host
   attempt.max          integer    maximum claims per entity
   budget.default       number     default per-run budget cap; 0 is unlimited
   registration.auto    boolean    auto-register workflows/schemas at run activate; default true
@@ -72,7 +78,12 @@ mid-run.`,
 			projectID = 0
 		}
 
-		if err := db.SetConfig(conn, projectID, key, value); err != nil {
+		// Through the engine rather than db.SetConfig directly (DKT-2767): a
+		// write to a vote-rule key records a `config-changed` event in the
+		// write's own transaction, attributed to the same identity the
+		// activity log uses, so a rewrite of a security-load-bearing key is
+		// detectable even though nothing yet prevents it.
+		if err := engine.SetConfig(conn, projectID, key, value, config.DefaultAuthor()); err != nil {
 			if errors.Is(err, db.ErrUnknownConfigKey) {
 				return cmdErr(err, output.ErrValidation)
 			}

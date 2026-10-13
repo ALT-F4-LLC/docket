@@ -18,15 +18,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// `run report` — R7's genericity line, R8's zero writes, R9's determinism, and
-// R10's any-status rule (TDD §4.10, §10.3).
+// `run report` — the genericity line, zero writes, determinism, and the
+// any-status rule.
 
-// TestReportIsDeterministic is R9: the same rows produce the SAME DOCUMENT,
+// TestReportIsDeterministic asserts the same rows produce the SAME DOCUMENT,
 // byte for byte.
 //
 // Every section is ordered by a total key — id, then name, then value — never by
 // map iteration, for the same golden-stability reason `referencedSchemas` is
-// ordered. This is not a style preference: R7's metadata rollup and R3's status
+// ordered. This is not a style preference: the metadata rollup and the status
 // counts both build Go maps on their way to a list, and a renderer that ranged
 // either would emit a different document on every invocation. An operator
 // diffing two reports of an unchanged run would see noise, and a golden test
@@ -54,7 +54,7 @@ func TestReportIsDeterministic(t *testing.T) {
 		}
 	}
 
-	// And the ordering is the one R9 names, not merely a stable one: units
+	// And the ordering is a total one, not merely a stable one: units
 	// ascend by name.
 	units := first.Budget.Reported
 	if len(units) != 2 {
@@ -66,7 +66,7 @@ func TestReportIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestReadVerbsWriteNothing is R8 and §10.3's standing assertion, for group 1's
+// TestReadVerbsWriteNothing is the standing zero-write assertion, for group 1's
 // rows: `run report` leaves the database BYTE-IDENTICAL.
 //
 // It hashes the file rather than counting rows, because a row count would miss
@@ -123,20 +123,20 @@ func TestReadVerbsWriteNothing(t *testing.T) {
 	}
 	if !sawEffective {
 		t.Error("the report rendered a lapsed claim as still claimed; effective " +
-			"status is computed at read (engine-spec §2)")
+			"status is computed at read")
 	}
 }
 
-// TestMetadataRollupReadsNoKey is R7, mechanically: the implementation contains
-// NO KEY-NAME LITERAL.
+// TestMetadataRollupReadsNoKey asserts, mechanically, that the implementation
+// contains NO KEY-NAME LITERAL.
 //
-// R7 is the genericity line at its thinnest. The rollup groups by key and by
-// value, both as opaque strings, and reports counts — it reports
+// The metadata rollup is the genericity line at its thinnest. It groups by key
+// and by value, both as opaque strings, and reports counts — it reports
 // `{"tier": {"a": 3}}` for exactly the same reason it would report
 // `{"desk": {"front": 3}}`. A rollup that special-cased one key would be core
 // having an opinion about what a workflow author's bag of strings means, and the
 // vocabulary that would arrive through such a key is precisely what
-// docs/design/genericity.md exists to keep out of core.
+// the genericity rule exists to keep out of core.
 //
 // The check parses the source rather than grepping it, so a key name hidden in a
 // switch, a map literal, or a comparison is caught the same as one in an if.
@@ -179,11 +179,11 @@ func TestMetadataRollupReadsNoKey(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Errorf("MetadataRollup contains bare string literals %v; a metadata key "+
 			"named in core would be core deciding what a workflow author's opaque "+
-			"bag means (R7, docs/design/genericity.md)", offenders)
+			"bag means", offenders)
 	}
 }
 
-// TestMetadataRollupIsVerbatimAndUninterpreted is R7's behavioral half: two
+// TestMetadataRollupIsVerbatimAndUninterpreted is the behavioral half: two
 // unrelated vocabularies roll up identically, because the rollup does not know
 // either of them.
 func TestMetadataRollupIsVerbatimAndUninterpreted(t *testing.T) {
@@ -217,8 +217,9 @@ func TestMetadataRollupIsVerbatimAndUninterpreted(t *testing.T) {
 	}
 }
 
-// TestReportWorksOnAnyRunStatus is R10: a report refusing on a non-terminal run
-// would be useless during exactly the run an operator wants to inspect.
+// TestReportWorksOnAnyRunStatus asserts the any-status rule: a report refusing
+// on a non-terminal run would be useless during exactly the run an operator
+// wants to inspect.
 func TestReportWorksOnAnyRunStatus(t *testing.T) {
 	for _, status := range []model.RunStatus{
 		model.RunPlanning, model.RunActive, model.RunWaitingHuman,
@@ -239,10 +240,10 @@ func TestReportWorksOnAnyRunStatus(t *testing.T) {
 	}
 }
 
-// TestReportOnAPlanningRunIsAllZeros is R10's first row, stated separately
-// because "everything zero" is the specific claim: a run that has not activated
-// has no steps, no floor, and no wall clock — and reports none rather than
-// reporting 0 as though it had measured one.
+// TestReportOnAPlanningRunIsAllZeros is the any-status rule's first row, stated
+// separately because "everything zero" is the specific claim: a run that has
+// not activated has no steps, no floor, and no wall clock — and reports none
+// rather than reporting 0 as though it had measured one.
 func TestReportOnAPlanningRunIsAllZeros(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)
@@ -275,8 +276,8 @@ func TestReportOnAPlanningRunIsAllZeros(t *testing.T) {
 //
 // It recomputes the floor through the SAME exported query enforcement runs, and
 // never reads `runs.usage_floor`. A report that read the cache would be
-// publishing a number no decision was made against — and the whole point of §9
-// item 2's audit is that a breach is attributable to the events that caused it.
+// publishing a number no decision was made against — and the whole point of the
+// audit trail is that a breach is attributable to the events that caused it.
 func TestReportFloorAgreesWithEnforcement(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 100)
@@ -295,7 +296,7 @@ func TestReportFloorAgreesWithEnforcement(t *testing.T) {
 	}
 }
 
-// TestReportArtifactIndexCarriesNoBodies is R6: the index names what was
+// TestReportArtifactIndexCarriesNoBodies asserts the index names what was
 // produced and how big it is, NEVER the bytes.
 //
 // A rollup that inlined bodies would turn a status check into a document dump —
@@ -316,8 +317,8 @@ func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 
 	encoded := mustJSON(t, report)
 	if strings.Contains(encoded, body) {
-		t.Error("the report carries an artifact BODY; R6 is an index — id, kind, " +
-			"producer, sha256, bytes")
+		t.Error("the report carries an artifact BODY; it must be an index — id, " +
+			"kind, producer, sha256, bytes")
 	}
 	entry := report.Artifacts[0]
 	if entry.Bytes != len(body) {
@@ -328,7 +329,8 @@ func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 	}
 }
 
-// hashFile hashes a file's bytes — the page-level content check R8 needs.
+// hashFile hashes a file's bytes — the page-level content check the zero-write
+// test needs.
 func hashFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -342,6 +344,99 @@ func mustJSON(t *testing.T, v any) string {
 	out, err := json.Marshal(v)
 	testsupport.Must(t, err, "encoding: %v", err)
 	return string(out)
+}
+
+// TestAuthorityRollupCountsRunNotesByTheirAuthority: a run note counts in the
+// authority rollup under the authority its event recorded, a note recorded
+// before notes carried one counts under none, and every note still counts as
+// a human event in the actor rollup.
+func TestAuthorityRollupCountsRunNotesByTheirAuthority(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	humanEvents := func(report *RunReport) int {
+		for _, row := range report.Actors {
+			if row.Actor == string(ActorHuman) {
+				return row.Count
+			}
+		}
+		return 0
+	}
+	before, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport before the notes: %v", err)
+	if len(before.Authorities) != 0 {
+		t.Fatalf("the run counts authorities before any note: %+v", before.Authorities)
+	}
+
+	for _, kind := range []string{AuthorityOperator, AuthorityConductor} {
+		_, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, Authority{Kind: kind}, "ruled by "+kind, nowMS)
+		testsupport.Must(t, err, "AddRunNote under %s: %v", kind, err)
+	}
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	err = recordEvent(tx, eventRecord{
+		Kind: EventRunNoteAdded, RunID: run.ID,
+		Data: `{"note":999,"text":"recorded before notes carried an authority"}`, AtMS: nowMS,
+	})
+	testsupport.Must(t, err, "recording an authority-less note: %v", err)
+	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
+
+	after, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport after the notes: %v", err)
+	want := []AuthorityCount{
+		{Authority: AuthorityOperator, Count: 1},
+		{Authority: AuthorityConductor, Count: 1},
+	}
+	if !reflect.DeepEqual(after.Authorities, want) {
+		t.Errorf("authorities = %+v, want %+v", after.Authorities, want)
+	}
+	if got, wantHuman := humanEvents(after), humanEvents(before)+3; got != wantHuman {
+		t.Errorf("human events = %d, want %d: every note, authority-less included, "+
+			"counts as a human event", got, wantHuman)
+	}
+}
+
+// TestRunReportListsEachNoteWithItsAttribution: every run-note-added event
+// becomes one row carrying the actor and cwd its event recorded, in event
+// order, and a note event recorded without either field renders them empty.
+func TestRunReportListsEachNoteWithItsAttribution(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	before, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport before the notes: %v", err)
+	if len(before.NoteRulings) != 0 {
+		t.Fatalf("the run lists notes before any was recorded: %+v", before.NoteRulings)
+	}
+
+	relayBy := Attribution{Actor: "relay-session", Cwd: "/work/relay"}
+	first, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, "first ruling", nowMS)
+	testsupport.Must(t, err, "AddRunNote (first): %v", err)
+	second, err := AddRunNote(conn, run.ID, testConductorToken, relayBy,
+		Authority{Kind: AuthorityConductor}, "second ruling", nowMS+1)
+	testsupport.Must(t, err, "AddRunNote (second): %v", err)
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	err = recordEvent(tx, eventRecord{
+		Kind: EventRunNoteAdded, RunID: run.ID,
+		Data: `{"note":999,"text":"recorded before notes carried an attribution"}`, AtMS: nowMS + 2,
+	})
+	testsupport.Must(t, err, "recording an unattributed note: %v", err)
+	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
+
+	after, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport after the notes: %v", err)
+	want := []RunNoteRuling{
+		{Note: first.ID, Authority: AuthorityOperator, Actor: "note-writer", Cwd: "/work/note-writer"},
+		{Note: second.ID, Authority: AuthorityConductor, Actor: "relay-session", Cwd: "/work/relay"},
+		{Note: 999},
+	}
+	if !reflect.DeepEqual(after.NoteRulings, want) {
+		t.Errorf("notes = %+v, want %+v", after.NoteRulings, want)
+	}
 }
 
 // TestRunReportRollsUpVoteMetadata pins DKT-71's read half: the metadata
@@ -451,4 +546,457 @@ func TestRunReportRollsUpVoteUsage(t *testing.T) {
 	if tokens.Quantity != 300 || tokens.Rows != 2 {
 		t.Errorf("tokens rollup = %+v, want 300 across 2 seat reports", tokens)
 	}
+}
+
+// complementarityPayload has one UNIQUE cluster (a scalar severity, one
+// member) and one CORROBORATED cluster (two members) — the exact shape
+// DKT-2452's acceptance criteria names, and low enough on the ladder that
+// neither reaches the fixture's `hold_spread = 2`, so `reconcile` routes
+// straight through with no vote panel to drive first.
+const complementarityPayload = `[
+  {"id":"C-1","severity":"low","member_ids":["a-1"]},
+  {"id":"C-2","severity":["medium","high"],"member_ids":["a-2","b-1"]}
+]`
+
+// TestRunReportRollsUpComplementarity is DKT-2452: the run report gains a
+// section computing, per `aggregate` step, unique versus corroborated
+// cluster counts from `members`' length and the judge-artifact count that fed
+// the round, from `step_inputs` on the producer step (`synthesize`).
+//
+// It reads `members`, not the payload's own `member_ids` — see
+// ClusterComplementarity's doc comment for why: `members` is engine-owned and
+// generic, `member_ids` is the workflow author's own linkage key, and the two
+// agree in length wherever both exist.
+func TestRunReportRollsUpComplementarity(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.Complementarity) != 1 {
+		t.Fatalf("complementarity = %+v, want exactly one aggregate step's row",
+			report.Complementarity)
+	}
+	row := report.Complementarity[0]
+	if row.Instance != "reconcile@0" {
+		t.Errorf("instance = %q, want reconcile@0", row.Instance)
+	}
+	if row.Unique != 1 || row.Corroborated != 1 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/1: %+v",
+			row.Unique, row.Corroborated, row)
+	}
+	wantDist := []MemberCount{{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}}
+	if !reflect.DeepEqual(row.ByMemberCount, wantDist) {
+		t.Errorf("by_member_count = %+v, want %+v", row.ByMemberCount, wantDist)
+	}
+	// The fixture's `synthesize@0` binds `review.*`, fanned out to 4 judges:
+	// that is the round's judge-artifact count, read off `step_inputs` at
+	// synthesize's own claim rather than off reconcile, which is never claimed
+	// and so never gets step_inputs of its own.
+	if row.InputArtifacts != 4 {
+		t.Errorf("input_artifacts = %d, want 4 (the fixture's 4 review seats)",
+			row.InputArtifacts)
+	}
+	if row.PayloadUnreadable {
+		t.Error("payload_unreadable is set on a well-formed round")
+	}
+}
+
+// TestRunReportOmitsComplementarityBeforeAnyRound is the absent case: an
+// aggregate step that has not yet completed contributes no row, never a
+// zeroed one — the same "absence is not a fact" discipline as
+// TestReportOnAPlanningRunIsAllZeros.
+func TestRunReportOmitsComplementarityBeforeAnyRound(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.Complementarity) != 0 {
+		t.Errorf("complementarity = %+v, want none before reconcile runs",
+			report.Complementarity)
+	}
+}
+
+// TestComplementarityOfCountsTheRecordedSplit unit-tests the pure counter
+// directly, over a below-floor set the way `route_at` (DKT-593) produces
+// one: fully reduced clusters that never reach the step's own artifact
+// payload. TestBuiltinRouteAtSplitsTheOutputFromTheRecord already pins that
+// the builtin routes them into the action's own row; this pins that once
+// read back, they count exactly as an emitted cluster of the same member
+// count would.
+func TestComplementarityOfCountsTheRecordedSplit(t *testing.T) {
+	emitted := []map[string]any{
+		{"id": "B", "severity": "blocker", KeyMembers: []any{"blocker"}},
+	}
+	recorded := []map[string]any{
+		{"id": "A", "severity": "low", KeyMembers: []any{"low", "low"}},
+	}
+
+	unique, corroborated, dist := complementarityOf(emitted, recorded)
+	if unique != 1 || corroborated != 1 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/1 across both sets",
+			unique, corroborated)
+	}
+	want := []MemberCount{{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}}
+	if !reflect.DeepEqual(dist, want) {
+		t.Errorf("distribution = %+v, want %+v", dist, want)
+	}
+}
+
+// TestRecordedBelowFloorReadsOnlyTheLastPassingRow pins the retried-aggregate
+// case: two passing `aggregate` rows for one step (ordinals 0 and 1) with
+// different below-floor sets. Only the ordinal-1 set is the round the newest
+// artifact belongs to, so only it is read and counted.
+func TestRecordedBelowFloorReadsOnlyTheLastPassingRow(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+	step := mustStep(t, conn, "reconcile@0")
+
+	first := `[{"id":"OLD-1","members":["p","q","r"]},{"id":"OLD-2","members":["s"]}]`
+	last := `[{"id":"NEW-1","members":["x","y","z"]}]`
+
+	res, err := conn.Exec(`UPDATE action_results SET output = ?
+		 WHERE step_id = ? AND action = 'aggregate' AND ordinal = 0 AND verdict = ?`,
+		first, step.ID, db.ActionVerdictPass)
+	testsupport.Must(t, err, "updating ordinal 0: %v", err)
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("updated %d ordinal-0 aggregate rows, want 1", n)
+	}
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin: %v", err)
+	err = db.InsertActionResultTx(tx, db.ActionResultRow{
+		RunID: step.RunID, StepID: step.ID, Action: "aggregate", Ordinal: 1,
+		Output: last, Verdict: db.ActionVerdictPass, Builtin: true,
+		CreatedAtMS: nowMS,
+	})
+	testsupport.Must(t, err, "inserting ordinal 1: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "commit: %v", err)
+
+	recorded, err := recordedBelowFloor(conn, step.ID)
+	testsupport.Must(t, err, "recordedBelowFloor: %v", err)
+	if len(recorded) != 1 || recorded[0]["id"] != "NEW-1" {
+		t.Errorf("recorded = %+v, want only the ordinal-1 set [NEW-1]", recorded)
+	}
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Complementarity) != 1 {
+		t.Fatalf("complementarity = %+v, want one row", report.Complementarity)
+	}
+	row := report.Complementarity[0]
+	// Emitted C-1 (1 member) and C-2 (2), plus NEW-1 (3) counted once.
+	if row.Unique != 1 || row.Corroborated != 2 {
+		t.Errorf("unique/corroborated = %d/%d, want 1/2", row.Unique, row.Corroborated)
+	}
+	want := []MemberCount{
+		{Members: 1, Clusters: 1}, {Members: 2, Clusters: 1}, {Members: 3, Clusters: 1},
+	}
+	if !reflect.DeepEqual(row.ByMemberCount, want) {
+		t.Errorf("by_member_count = %+v, want %+v", row.ByMemberCount, want)
+	}
+}
+
+// sourceFieldFixture is the committed fixture with one line added to
+// `reconcile`'s params: `source_field = "member_sources"`. Read from disk
+// rather than duplicated by hand, so a change to the fixture's topology
+// cannot silently drift this variant out of sync with it.
+func sourceFieldFixture(t *testing.T) []byte {
+	t.Helper()
+	src, err := os.ReadFile(fixturePath)
+	testsupport.Must(t, err, "reading fixture: %v", err)
+	old := `params = { field = "severity", method = "median", hold_spread = 2, output = "findings" }`
+	replacement := `params = { field = "severity", method = "median", hold_spread = 2, output = "findings", source_field = "member_sources" }`
+	out := strings.Replace(string(src), old, replacement, 1)
+	if out == string(src) {
+		t.Fatalf("fixture no longer contains reconcile's expected params line; "+
+			"update sourceFieldFixture to match:\n%s", src)
+	}
+	return []byte(out)
+}
+
+// sourcePayload has one cluster whose `member_sources` names a single review
+// seat (unique to that seat's executor) and one whose `member_sources` names
+// two DIFFERENT seats (corroborated across two executors) — the exact shape
+// DKT-2462's acceptance criteria names. The fixture's four review seats each
+// declare a distinct `fanout` hint (judge-correctness, judge-architecture,
+// judge-simplicity, judge-testing), so `review@0#0` and `review@0#1` resolve
+// to two different executors, and the test can tell "unique" from
+// "corroborated" apart by more than count alone.
+const sourcePayload = `[
+  {"id":"C-1","severity":"low","member_ids":["a-1"],"member_sources":["review@0#0"]},
+  {"id":"C-2","severity":["medium","high"],"member_ids":["a-2","b-1"],"member_sources":["review@0#0","review@0#1"]}
+]`
+
+// TestRunReportGroupsClustersBySourceField is DKT-2462: once an `aggregate`
+// step declares `source_field`, the run report groups the round's clusters by
+// each distinct value that field names and resolves it to the producing
+// step's executor hint — grouping by an opaque, workflow-named key rather
+// than a literal `member_sources` core would have to know about (the same
+// discipline `route_at` keeps by taking its floor as a value, not assuming a
+// field name).
+func TestRunReportGroupsClustersBySourceField(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerSource(t, conn, sourceFieldFixture(t), fixturePath)
+	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	driveToReconcile(t, conn, e, sourcePayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.SourceAttribution) != 2 {
+		t.Fatalf("source_attribution = %+v, want one row per distinct source",
+			report.SourceAttribution)
+	}
+
+	byInstance := make(map[string]ClusterSourceAttribution, len(report.SourceAttribution))
+	for _, row := range report.SourceAttribution {
+		byInstance[row.Source] = row
+	}
+
+	unique, ok := byInstance["review@0#0"]
+	if !ok {
+		t.Fatalf("no row for review@0#0: %+v", report.SourceAttribution)
+	}
+	if unique.Clusters != 2 {
+		t.Errorf("review@0#0 clusters = %d, want 2 (it fed both C-1 and C-2)",
+			unique.Clusters)
+	}
+	if unique.Executor != "judge-correctness" {
+		t.Errorf("review@0#0 executor = %q, want judge-correctness (fanout[0])",
+			unique.Executor)
+	}
+
+	corroborating, ok := byInstance["review@0#1"]
+	if !ok {
+		t.Fatalf("no row for review@0#1: %+v", report.SourceAttribution)
+	}
+	if corroborating.Clusters != 1 {
+		t.Errorf("review@0#1 clusters = %d, want 1 (only C-2)", corroborating.Clusters)
+	}
+	if corroborating.Executor != "judge-architecture" {
+		t.Errorf("review@0#1 executor = %q, want judge-architecture (fanout[1])",
+			corroborating.Executor)
+	}
+
+	// C-2 names both sources: that is what makes it CORROBORATED in the
+	// executor-attribution sense — two different executors' review seats
+	// contributed to the same cluster, not one seat's finding merged with
+	// itself.
+	if unique.Instance != "reconcile@0" || corroborating.Instance != "reconcile@0" {
+		t.Errorf("instance = %q / %q, want reconcile@0 on both rows",
+			unique.Instance, corroborating.Instance)
+	}
+}
+
+// TestRunReportOmitsSourceAttributionWithoutTheParam is the absent case:
+// `source_field` undeclared (the committed fixture's `reconcile`, unmodified)
+// produces no section at all, matching Recorded's absent-`route_at`
+// convention rather than an empty-but-present list.
+func TestRunReportOmitsSourceAttributionWithoutTheParam(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+	driveToReconcile(t, conn, e, complementarityPayload)
+
+	report, err := LoadRunReport(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+
+	if len(report.SourceAttribution) != 0 {
+		t.Errorf("source_attribution = %+v, want none: reconcile declares no source_field",
+			report.SourceAttribution)
+	}
+}
+
+// TestReportRendersEvidenceLessFindingsAsUnsupported is DKT-2451's report
+// half: every structured finding a panel recorded rides in the document with
+// the evidence it cited, and an entry that cited nothing is marked
+// unsupported out loud rather than left as a row with an absent list.
+func TestReportRendersEvidenceLessFindingsAsUnsupported(t *testing.T) {
+	conn := mustDB(t)
+	runID, proposalID, artifactID := evidenceRun(t, conn)
+	ref := "artifact:" + model.FormatArtifactID(artifactID)
+
+	findings := &model.Findings{
+		Blockers: []model.Finding{{Text: "the test fails on main", Evidence: []string{ref}}},
+		Concerns: []model.Finding{{Text: "naming could be tighter"}},
+	}
+	err := ValidateCastEvidence(conn, proposalID, findings)
+	testsupport.Must(t, err, "ValidateCastEvidence: %v", err)
+	_, err = db.CastVote(conn, &model.Vote{
+		ProposalID: proposalID, VoterName: "alice", VoterRole: "reviewer",
+		Verdict: model.VerdictReject, Confidence: 0.9, DomainRelevance: 0.8,
+		FindingsJSON: findings,
+	})
+	testsupport.Must(t, err, "CastVote: %v", err)
+
+	report, err := LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Findings) != 2 {
+		t.Fatalf("the report carries %d findings, want 2: %s",
+			len(report.Findings), mustJSON(t, report.Findings))
+	}
+	supported, unsupported := report.Findings[0], report.Findings[1]
+	if supported.Kind != FindingBlocker || supported.Unsupported ||
+		len(supported.Evidence) != 1 || supported.Evidence[0] != ref {
+		t.Errorf("the cited finding rendered as %s", mustJSON(t, supported))
+	}
+	if unsupported.Kind != FindingConcern || !unsupported.Unsupported || len(unsupported.Evidence) != 0 {
+		t.Errorf("the evidence-less finding rendered as %s, want unsupported", mustJSON(t, unsupported))
+	}
+	for _, row := range report.Findings {
+		if row.Proposal != model.FormatProposalID(proposalID) || row.Voter != "alice" || row.Role != "reviewer" {
+			t.Errorf("finding row misattributed: %s", mustJSON(t, row))
+		}
+	}
+}
+
+// TestReportWithholdsFindingsWhileTheBallotIsSealed: a SealedOpen proposal's
+// casts are withheld here exactly as in `vote show` (DKT-2447), and appear
+// once the tally closes the ballot.
+func TestReportWithholdsFindingsWhileTheBallotIsSealed(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedVoteGateRun(t, conn)
+	err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "sealing the rule: %v", err)
+	proposalID := openGateProposal(t, conn, testEngine(), runID)
+
+	cast := func(seat string) {
+		t.Helper()
+		_, err := db.CastVote(conn, &model.Vote{
+			ProposalID: proposalID, VoterName: seat, Verdict: model.VerdictApprove,
+			Confidence: 0.9, DomainRelevance: 0.8,
+			FindingsJSON: &model.Findings{Concerns: []model.Finding{{Text: "from " + seat}}},
+		})
+		testsupport.Must(t, err, "CastVote(%s): %v", seat, err)
+	}
+	cast("alice")
+	report, err := LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport: %v", err)
+	if len(report.Findings) != 0 {
+		t.Fatalf("a sealed, still-open ballot leaked %d finding(s) into the report",
+			len(report.Findings))
+	}
+
+	cast("bob")
+	cast("carol")
+	report, err = LoadRunReport(conn, runID, nowMS)
+	testsupport.Must(t, err, "LoadRunReport after the tally: %v", err)
+	if len(report.Findings) != 3 {
+		t.Errorf("after the tally closed the ballot the report carries %d finding(s), want 3",
+			len(report.Findings))
+	}
+}
+
+// TestRunReportSnapshotDoesNotBlockWriters pins that the report's snapshot is a
+// reader: while it is open, another process's write transaction commits
+// without waiting out busy_timeout. A snapshot taken under BEGIN IMMEDIATE
+// would hold the write lock for the whole report, and the writer would fail
+// with SQLITE_BUSY.
+func TestRunReportSnapshotDoesNotBlockWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reporter, err := db.Open(path)
+	testsupport.Must(t, err, "opening the reporter's handle: %v", err)
+	t.Cleanup(func() { reporter.Close() })
+	_, err = reporter.Exec("CREATE TABLE t (x INTEGER)")
+	testsupport.Must(t, err, "creating the table: %v", err)
+
+	writer, err := db.Open(path)
+	testsupport.Must(t, err, "opening the writer's handle: %v", err)
+	t.Cleanup(func() { writer.Close() })
+	_, err = writer.Exec("PRAGMA busy_timeout=50")
+	testsupport.Must(t, err, "shortening busy_timeout: %v", err)
+
+	snapshot, err := beginReadSnapshot(reporter)
+	testsupport.Must(t, err, "opening the snapshot: %v", err)
+	defer snapshot.Rollback()
+	// A deferred BEGIN holds nothing until its first read; read so the
+	// snapshot is really open while the writer runs.
+	var before int
+	err = snapshot.QueryRow("SELECT count(*) FROM t").Scan(&before)
+	testsupport.Must(t, err, "reading in the snapshot: %v", err)
+
+	tx, err := writer.Begin()
+	if err != nil {
+		t.Fatalf("writer's BEGIN while the report snapshot is open: %v", err)
+	}
+	if _, err := tx.Exec("INSERT INTO t (x) VALUES (1)"); err != nil {
+		tx.Rollback()
+		t.Fatalf("writer's INSERT while the report snapshot is open: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("writer's COMMIT while the report snapshot is open: %v", err)
+	}
+
+	var during int
+	err = snapshot.QueryRow("SELECT count(*) FROM t").Scan(&during)
+	testsupport.Must(t, err, "re-reading in the snapshot: %v", err)
+	if during != before {
+		t.Errorf("snapshot saw %d rows after the writer committed, want %d: "+
+			"the report must read one instant", during, before)
+	}
+}
+
+// TestRunStatusAndStepListReadPastAHeldWriteLock pins that `run status` and
+// `step list` load their scheduler snapshot as readers: while another process
+// holds the write lock, both return without waiting out busy_timeout. A
+// snapshot taken under BEGIN IMMEDIATE would queue behind that lock and fail
+// with SQLITE_BUSY.
+func TestRunStatusAndStepListReadPastAHeldWriteLock(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedVoteGateRun(t, conn)
+
+	wantSteps, err := RunStepList(conn, runID, nowMS)
+	testsupport.Must(t, err, "RunStepList before the lock: %v", err)
+	if len(wantSteps) == 0 {
+		t.Fatal("the fixture run has no steps, so the case would prove nothing")
+	}
+	wantCounts, err := EffectiveStatusCounts(conn, runID, nowMS)
+	testsupport.Must(t, err, "EffectiveStatusCounts before the lock: %v", err)
+
+	var path string
+	err = conn.QueryRow("SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&path)
+	testsupport.Must(t, err, "reading the database path: %v", err)
+	writer, err := db.Open(path)
+	testsupport.Must(t, err, "opening the writer's handle: %v", err)
+	t.Cleanup(func() { writer.Close() })
+	lock, err := writer.Begin()
+	testsupport.Must(t, err, "taking the write lock: %v", err)
+	defer lock.Rollback()
+
+	_, err = conn.Exec("PRAGMA busy_timeout=50")
+	testsupport.Must(t, err, "shortening busy_timeout: %v", err)
+
+	t.Run("step list", func(t *testing.T) {
+		got, err := RunStepList(conn, runID, nowMS)
+		if err != nil {
+			t.Fatalf("RunStepList while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantSteps) {
+			t.Errorf("RunStepList under the lock = %s, want %s",
+				mustJSON(t, got), mustJSON(t, wantSteps))
+		}
+	})
+	t.Run("run status", func(t *testing.T) {
+		got, err := EffectiveStatusCounts(conn, runID, nowMS)
+		if err != nil {
+			t.Fatalf("EffectiveStatusCounts while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantCounts) {
+			t.Errorf("EffectiveStatusCounts under the lock = %v, want %v", got, wantCounts)
+		}
+	})
 }

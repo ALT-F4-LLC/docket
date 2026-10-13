@@ -20,7 +20,7 @@ import (
 // touch.
 //
 // Core cannot infer this: classes are opaque strings and core attaches no
-// meaning to `write` or to a judge's name (§6.5's genericity rule). So the
+// meaning to `write` or to a judge's name (the genericity rule). So the
 // instance DECLARES it, and core reads a boolean.
 //
 // The default is TRUE, which is both the conservative answer and every

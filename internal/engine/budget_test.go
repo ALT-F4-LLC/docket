@@ -12,8 +12,8 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// Budgets — the floor, `max(reported, floor)`, the boundary, the breach, R7's
-// agreement with the claim, and D1's dormancy (TDD §4.12).
+// Budgets — the floor, `max(reported, floor)`, the boundary, the breach, the
+// headroom check's agreement with the claim, and budget dormancy.
 //
 // The fixture supplies every cost these tests need, and they are read from it
 // rather than restated: `implement` 1.50, `review` 0.60 PER EXPANDED SIBLING
@@ -23,9 +23,9 @@ import (
 
 // budgetRun activates a run and sets its cap, returning the run id.
 //
-// The cap is written to the RUN ROW because that is where B3 says the effective
-// cap is read from — a test that set `budget.default` instead would be testing
-// B1's second branch while claiming to test the first.
+// The cap is written to the RUN ROW because that is where the effective cap is
+// read from — a test that set `budget.default` instead would be testing the
+// config fallback while claiming to test the run flag.
 func budgetRun(t *testing.T, conn *sql.DB, cap float64) (runID, issueID int) {
 	t.Helper()
 	run, issue := activatedRun(t, conn)
@@ -59,7 +59,7 @@ func claimInstance(t *testing.T, conn *sql.DB, instance string, at int64) *Claim
 }
 
 // expectedCostOf reads a step's stored `expected_cost` — the value the floor
-// accrues (B5), materialized at expansion from the PINNED definition.
+// accrues, materialized at expansion from the PINNED definition.
 func expectedCostOf(t *testing.T, conn *sql.DB, instance string) float64 {
 	t.Helper()
 	var cost float64
@@ -70,11 +70,10 @@ func expectedCostOf(t *testing.T, conn *sql.DB, instance string) float64 {
 }
 
 // ---------------------------------------------------------------------------
-// §4.3 — the floor is a SUM over claim events, one case per B8-B11
+// The floor is a SUM over claim events, one case per accrual rule
 // ---------------------------------------------------------------------------
 
-// TestFloorAccruesPerClaimEvent is B8: a plain claim accrues the step's cost,
-// once.
+// TestFloorAccruesPerClaimEvent: a plain claim accrues the step's cost, once.
 func TestFloorAccruesPerClaimEvent(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 0)
@@ -91,7 +90,7 @@ func TestFloorAccruesPerClaimEvent(t *testing.T) {
 	}
 }
 
-// TestFloorRetriesReAccrue is B9: a reaped step claimed again writes a SECOND
+// TestFloorRetriesReAccrue: a reaped step claimed again writes a SECOND
 // `step-claimed` event and the SUM counts BOTH.
 //
 // Nothing is released on reap, on fail, or on abandon — the work was attempted
@@ -108,7 +107,7 @@ func TestFloorRetriesReAccrue(t *testing.T) {
 	}
 
 	// Force the lease to lapse, then claim again: the reap happens inside the
-	// claim (§6.3's lazy path) and the second claim writes its own event.
+	// claim (the lazy reap) and the second claim writes its own event.
 	execSQL(t, conn, `UPDATE steps SET expires_ms = 1 WHERE instance = 'implement@0'`)
 	claimInstance(t, conn, "implement@0", nowMS+1)
 
@@ -118,9 +117,9 @@ func TestFloorRetriesReAccrue(t *testing.T) {
 	}
 }
 
-// TestFloorFanoutAccruesPerSibling is B7 and the fanout row of §4.12's table:
-// `expected_cost` is PER EXPANDED SIBLING, so four siblings claim four times and
-// accrue four times. No division, no proration — the fixture says so verbatim.
+// TestFloorFanoutAccruesPerSibling: `expected_cost` is PER EXPANDED SIBLING,
+// so four siblings claim four times and accrue four times. No division, no
+// proration — the fixture says so verbatim.
 func TestFloorFanoutAccruesPerSibling(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 0)
@@ -152,7 +151,7 @@ func TestFloorFanoutAccruesPerSibling(t *testing.T) {
 	}
 }
 
-// TestFloorIgnoresUnclaimedSteps is B11: a step that was never claimed
+// TestFloorIgnoresUnclaimedSteps: a step that was never claimed
 // contributes NOTHING, because the accrual is per CLAIM EVENT.
 //
 // It covers the skipped and superseded cases by the same mechanism rather than
@@ -196,13 +195,80 @@ func TestFloorIgnoresUnclaimedSteps(t *testing.T) {
 	}
 }
 
-// TestFloorBoundedByMaxFixLoops is B10 at the fixture's `max_fix_loops = 2`: the
-// floor cannot exceed the arithmetic bound, ever.
+// threePanelSrc declares three vote steps with distinct costs, so a floor that
+// counts any subset of them is distinguishable from every other subset.
+const threePanelSrc = `
+[pipeline]
+name = "three-panels"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "implement"
+executor = "worker"
+emits = "diff"
+expected_cost = 1.0
+
+[[step]]
+name = "panel-skipped"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 2.0
+on_fail = "waiting-human"
+
+[[step]]
+name = "panel-superseded"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 4.0
+on_fail = "waiting-human"
+
+[[step]]
+name = "panel-pending"
+after = ["implement"]
+type = "vote"
+voters = ["seat-a", "seat-b"]
+vote_rule = "majority"
+expected_cost = 8.0
+on_fail = "waiting-human"
+`
+
+// TestFloorIgnoresSkippedAndSupersededVoteRows is the same rule for vote
+// steps: a vote row accrues at materialization, but a skipped or superseded
+// panel is never routed, so it contributes nothing.
+func TestFloorIgnoresSkippedAndSupersededVoteRows(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(threePanelSrc), "three-panels.toml")
+	issue := createIssue(t, conn, "three panels", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'panel-skipped@0'`,
+		db.StepSkipped)
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = 'panel-superseded@0'`,
+		db.StepSuperseded)
+
+	want := expectedCostOf(t, conn, "panel-pending@0")
+	if got := runFloor(t, conn, run.ID); got != want {
+		t.Errorf("floor = %g, want %g (only the pending panel accrues; the "+
+			"skipped 2.0 and superseded 4.0 panels must not)", got, want)
+	}
+}
+
+// TestFloorBoundedByMaxFixLoops checks loop re-accrual at the fixture's
+// `max_fix_loops = 2`: the floor cannot exceed the arithmetic bound, ever.
 //
 // A loop entry is a DIFFERENT step row with its own `expected_cost`, claimed and
 // event-logged independently, so `max_fix_loops` bounds the floor BY
-// CONSTRUCTION — engine-core §7's "bounded loops bound the floor" falling out of
-// §11.3 rather than needing arithmetic of its own. The assertion is therefore
+// CONSTRUCTION — "bounded loops bound the floor" falling out of loop expansion
+// rather than needing arithmetic of its own. The assertion is therefore
 // over what the run CAN instantiate, not over a number this test computes.
 func TestFloorBoundedByMaxFixLoops(t *testing.T) {
 	conn := mustDB(t)
@@ -240,14 +306,15 @@ func TestFloorBoundedByMaxFixLoops(t *testing.T) {
 	}
 }
 
-// TestFloorIsNeverReadFromCache is §4.3's separation, with a POISONED cache.
+// TestFloorIsNeverReadFromCache is the floor/cache separation, with a POISONED
+// cache.
 //
 // `runs.usage_floor` is written beside every accrual as a cache for the report's
 // burn-rate line. If enforcement ever read it, a wrong value there would move a
-// decision — and the whole C4 argument for a SUM over an append-only log would
-// be undone by a stored number sitting beside it. So the test seeds a
-// deliberately wrong value and asserts that enforcement, the refusal, and the
-// breach transition all behave as though it said the truth.
+// decision — and the whole no-lost-update argument for a SUM over an
+// append-only log would be undone by a stored number sitting beside it. So the
+// test seeds a deliberately wrong value and asserts that enforcement, the
+// refusal, and the breach transition all behave as though it said the truth.
 func TestFloorIsNeverReadFromCache(t *testing.T) {
 	conn := mustDB(t)
 	cost := 1.50 // `implement`'s declared cost; asserted below, not assumed
@@ -296,11 +363,11 @@ func TestFloorIsNeverReadFromCache(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §4.4/§4.5 — max(reported, floor) across B12, B13, B17, B18
+// max(reported, floor)
 // ---------------------------------------------------------------------------
 
-// TestSpendIsMaxOfReportedAndFloor walks §4.12's five rows over the snapshot's
-// own arithmetic: reporting nothing, reporting less than the floor, reporting
+// TestSpendIsMaxOfReportedAndFloor walks five cases over the snapshot's own
+// arithmetic: reporting nothing, reporting less than the floor, reporting
 // more, reporting in a unit that is NOT `budget.unit`, and reporting in the one
 // that is.
 //
@@ -316,11 +383,11 @@ func TestSpendIsMaxOfReportedAndFloor(t *testing.T) {
 		why      string
 	}{
 		{"reporting nothing", 4, 0, 4,
-			"B13: a claimant reporting nothing cannot lower a run below its floor"},
+			"a claimant reporting nothing cannot lower a run below its floor"},
 		{"reporting less than the floor", 4, 1, 4,
-			"B13: reported usage can only RAISE the counter"},
+			"reported usage can only RAISE the counter"},
 		{"reporting more than the floor", 4, 9, 9,
-			"B12: the enforced quantity is the larger of the two"},
+			"the enforced quantity is the larger of the two"},
 		{"reporting exactly the floor", 4, 4, 4,
 			"the two agreeing is not a special case"},
 	} {
@@ -333,12 +400,11 @@ func TestSpendIsMaxOfReportedAndFloor(t *testing.T) {
 	}
 }
 
-// TestReportedRestsOnTheFloorWithNoBudgetUnit is B17, and it is §9 item 7's
-// configuration at the unit level: with `budget.unit` at its default, `reported`
-// is 0 and the enforcement rests entirely on the floor.
+// TestReportedRestsOnTheFloorWithNoBudgetUnit: with `budget.unit` at its
+// default, `reported` is 0 and the enforcement rests entirely on the floor.
 //
-// Ledger rows in every other unit are RECORDED and never compared to the cap
-// (B19). Core does not know what a token is; summing `{tokens: 4000,
+// Ledger rows in every other unit are RECORDED and never compared to the cap.
+// Core does not know what a token is; summing `{tokens: 4000,
 // seconds: 12}` to 4012 would be core asserting those add up, and core has no
 // meanings about units.
 func TestReportedRestsOnTheFloorWithNoBudgetUnit(t *testing.T) {
@@ -370,7 +436,7 @@ func TestReportedRestsOnTheFloorWithNoBudgetUnit(t *testing.T) {
 	})
 }
 
-// TestReportedCountsOnlyTheNamedUnit is B18 and B19: setting `budget.unit` makes
+// TestReportedCountsOnlyTheNamedUnit: setting `budget.unit` makes
 // `reported` the sum of THAT unit's rows, and every other unit's rows stay out
 // of the comparison entirely.
 func TestReportedCountsOnlyTheNamedUnit(t *testing.T) {
@@ -398,11 +464,11 @@ func TestReportedCountsOnlyTheNamedUnit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §4.4 B14 — the boundary
+// The boundary
 // ---------------------------------------------------------------------------
 
-// TestBudgetBoundaryIsCrossingNotReaching is B14, at values that stress binary
-// representation.
+// TestBudgetBoundaryIsCrossingNotReaching checks the boundary at values that
+// stress binary representation.
 //
 // "Crossing" is `>`, not `>=`: a cap of 12 and a spend that reaches exactly 12
 // has SPENT its budget and not exceeded it. The float cases are the reason this
@@ -447,9 +513,9 @@ func TestBudgetBoundaryIsCrossingNotReaching(t *testing.T) {
 	}
 }
 
-// TestClaimAtTheCapIsAllowedAndTheNextIsRefused drives B14 through a REAL claim
-// rather than the arithmetic: a cap set to exactly one step's cost admits that
-// step and refuses the next.
+// TestClaimAtTheCapIsAllowedAndTheNextIsRefused drives the boundary through a
+// REAL claim rather than the arithmetic: a cap set to exactly one step's cost
+// admits that step and refuses the next.
 func TestClaimAtTheCapIsAllowedAndTheNextIsRefused(t *testing.T) {
 	conn := mustDB(t)
 	conn2 := conn
@@ -479,10 +545,10 @@ func TestClaimAtTheCapIsAllowedAndTheNextIsRefused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §4.6 — the breach transition
+// The breach transition
 // ---------------------------------------------------------------------------
 
-// TestBreachPausesTheRunWithAReason is B20, B21, and B23 together: the claim is
+// TestBreachPausesTheRunWithAReason: the claim is
 // refused, the run flips to `waiting-human` with a bare-number reason naming no
 // unit, and the event is `run-paused` with `data.reason = "budget"` — an
 // EXISTING closed-set kind, so the set does not widen.
@@ -509,7 +575,7 @@ func TestBreachPausesTheRunWithAReason(t *testing.T) {
 	if facts.BreachReason != want {
 		t.Errorf("breach_reason = %q, want %q", facts.BreachReason, want)
 	}
-	// B21/§1.1: a BARE-NUMBER statement. No currency, no token, no rate — what
+	// A BARE-NUMBER statement. No currency, no token, no rate — what
 	// the number counts is the workflow author's business.
 	for _, leak := range []string{"token", "dollar", "$", "cost in"} {
 		if strings.Contains(strings.ToLower(facts.BreachReason), leak) {
@@ -518,20 +584,26 @@ func TestBreachPausesTheRunWithAReason(t *testing.T) {
 		}
 	}
 
-	// B23: `run-paused`, with the reason in `data`. The kind is the existing
-	// one, so §9 item 2's closed set is unchanged.
-	kind, data := lastRunEvent(t, conn, runID)
-	if kind != EventRunPaused {
-		t.Errorf("the breach wrote a %q event, want %q — a new kind would widen "+
+	// `run-paused`, with the reason in `data`. The kind is the existing one,
+	// so the closed set of event kinds is unchanged. The refused claim's own
+	// `claim-refused` (DKT-2776) follows it; that records the claim, not the
+	// pause, so the pause is read by kind rather than as the last event.
+	if n := countRunEvents(t, conn, runID, EventRunPaused); n != 1 {
+		t.Errorf("the breach wrote %d %q events, want 1 — a new kind would widen "+
 			"the closed set for a transition that is already a pause",
-			kind, EventRunPaused)
+			n, EventRunPaused)
 	}
+	var data string
+	err = conn.QueryRow(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`,
+		runID, EventRunPaused).Scan(&data)
+	testsupport.Must(t, err, "reading the pause event: %v", err)
 	if !strings.Contains(data, `"reason":"budget"`) {
 		t.Errorf("the pause event's data is %q, want it to carry reason=budget", data)
 	}
 }
 
-// TestBreachIsIdempotentUnderConcurrentFlips is B22 and C6: the flip is CAS on
+// TestBreachIsIdempotentUnderConcurrentFlips: the flip is CAS on
 // (run_id, status='active'), so a second invocation that observes the same
 // crossing matches ZERO rows and writes neither a second reason nor a second
 // event.
@@ -555,12 +627,12 @@ func TestBreachIsIdempotentUnderConcurrentFlips(t *testing.T) {
 	}
 }
 
-// TestResumeRePausesAtTheSameCap is B24, stated because "resume immediately
+// TestResumeRePausesAtTheSameCap is stated because "resume immediately
 // re-pauses" reads as a bug and is not one: `run resume` clears nothing, the cap
 // has not moved, so the condition has not changed.
 //
 // Raising the cap is `run start`-time only in v1 — recorded rather than
-// invented here, because §1's surface summary lists no budget mutator.
+// invented here, because the command surface has no budget mutator.
 func TestResumeRePausesAtTheSameCap(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 0.01)
@@ -591,7 +663,7 @@ func TestResumeRePausesAtTheSameCap(t *testing.T) {
 // the run's budget breach, completing AFTER it, must not silently resume the
 // run. `BreachRunBudgetTx` pauses only the RUN row — it parks no step — so
 // `reconcileRun`'s "parked" count reads 0 for a budget-paused run, and without
-// a guard the rollup's default branch (§ "still working, return to active")
+// a guard the rollup's default branch ("still working, return to active")
 // would flip the run back to `active` with no operator verb the moment any
 // other in-flight step routes. That is the exact seq 637/640/643 flap RUN-5
 // hit: run-paused, then a verb-less run-resumed on a pre-pause-claimed step's
@@ -670,16 +742,17 @@ func TestBreachSurvivesAPreBreachStepCompleting(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §4.8 — R7, its agreement with the claim, and D1's dormancy
+// The headroom check, its agreement with the claim, and budget dormancy
 // ---------------------------------------------------------------------------
 
-// TestBudgetR7AndClaimAgree is §4.8's agreement property over a generated matrix
+// TestBudgetR7AndClaimAgree is the agreement property over a generated matrix
 // of (cap, floor, cost).
 //
-// R7 makes a step not APPEAR in `next`; B14 makes a claim REFUSE. They are the
-// same arithmetic at two moments and both are needed — R7 alone would let a
-// relay claim a step it already held a stale `next` row for, and B14 alone would
-// offer steps that cannot be claimed. What must never happen is that they
+// budgetHeadroom makes a step not APPEAR in `next`; the claim's boundary check
+// makes a claim REFUSE. They are the same arithmetic at two moments and both
+// are needed — the headroom check alone would let a relay claim a step it
+// already held a stale `next` row for, and the claim check alone would offer
+// steps that cannot be claimed. What must never happen is that they
 // DISAGREE over one snapshot: a step `next` offers and `claim` refuses is a
 // dispatcher stuck in a loop it cannot diagnose.
 func TestBudgetR7AndClaimAgree(t *testing.T) {
@@ -700,7 +773,7 @@ func TestBudgetR7AndClaimAgree(t *testing.T) {
 				claimAdmits := snap.unlimited() || snap.admits(cost)
 
 				if r7 != claimAdmits {
-					t.Errorf("cap %g, floor %g, cost %g: R7 says %v and the claim "+
+					t.Errorf("cap %g, floor %g, cost %g: budgetHeadroom says %v and the claim "+
 						"says %v — the two must never disagree over one snapshot",
 						cap, floor, cost, r7, claimAdmits)
 				}
@@ -709,14 +782,14 @@ func TestBudgetR7AndClaimAgree(t *testing.T) {
 	}
 }
 
-// TestBudgetDormancyExecutesNoQuery is D1, asserted by COUNTING QUERIES rather
-// than by inspection.
+// TestBudgetDormancyExecutesNoQuery is budget dormancy, asserted by COUNTING
+// QUERIES rather than by inspection.
 //
-// §4.8 B29: `budgetHeadroom` returns true on its first line when the effective
-// cap is 0, and the snapshot's loader declines to query at all in that case. A
-// run started without `--budget` in a repo that never set `budget.default`
-// therefore executes exactly the queries v9 executed — which is the group-1
-// dormancy claim, measured rather than asserted.
+// `budgetHeadroom` returns true on its first line when the effective cap is 0,
+// and the snapshot's loader declines to query at all in that case. A run
+// started without `--budget` in a repo that never set `budget.default`
+// therefore executes exactly the queries v9 executed — the dormancy claim,
+// measured rather than asserted.
 func TestBudgetDormancyExecutesNoQuery(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 0)
@@ -757,13 +830,14 @@ func TestBudgetDormancyExecutesNoQuery(t *testing.T) {
 	})
 }
 
-// TestEffectiveCapIsTheRunRow is B3: the cap a claim enforces is read from the
-// RUN ROW and from nowhere else.
+// TestEffectiveCapIsTheRunRow: the cap a claim enforces is read from the RUN
+// ROW and from nowhere else.
 //
-// B1's second branch is resolved once, at `run start`, which materializes
+// The config fallback is resolved once, at `run start`, which materializes
 // `budget.default` into the row (run_start.go). By the time any claim reads it,
-// the row already carries whichever of the two applied — which is what makes B1
-// and B3 one rule rather than two that could disagree mid-run.
+// the row already carries whichever of the two applied — which is what makes
+// the fallback and the run-row rule one rule rather than two that could
+// disagree mid-run.
 func TestEffectiveCapIsTheRunRow(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -796,9 +870,9 @@ func TestEffectiveCapIsTheRunRow(t *testing.T) {
 	}
 }
 
-// TestBudgetSourceOf is R6's derivation: the source is COMPARED rather than
-// stored, because §2.3's column table adds no `budget_source` and inventing one
-// would be a silent deviation.
+// TestBudgetSourceOf is the report's source derivation: the source is COMPARED
+// rather than stored, because the runs table has no `budget_source` column and
+// inventing one would be a silent deviation.
 func TestBudgetSourceOf(t *testing.T) {
 	for _, tc := range []struct {
 		cap, configDefault float64
@@ -818,9 +892,10 @@ func TestBudgetSourceOf(t *testing.T) {
 	}
 }
 
-// TestCapSetAfterRunStartDoesNotReCapTheRun is B3's consequence, stated because
-// it is surprising: a run started before `budget.default` was set has
-// `runs.budget = 0` stored and stays UNLIMITED even after the default is set.
+// TestCapSetAfterRunStartDoesNotReCapTheRun is the run-row rule's consequence,
+// stated because it is surprising: a run started before `budget.default` was
+// set has `runs.budget = 0` stored and stays UNLIMITED even after the default
+// is set.
 //
 // That is the pinning property applied to budgets, and it is the right answer —
 // a config change must not silently re-cap a live run. `run report` prints the
@@ -834,20 +909,20 @@ func TestCapSetAfterRunStartDoesNotReCapTheRun(t *testing.T) {
 	claimInstance(t, conn, "implement@0", nowMS)
 
 	// Now somebody sets a default. It applies to runs STARTED after it, not to
-	// this one — because this one's row says 0 and B3 reads the row.
+	// this one — because this one's row says 0 and enforcement reads the row.
 	err := db.SetConfig(conn, 0, db.KeyBudgetDefault, "0.01")
 	testsupport.Must(t, err, "setting budget.default: %v", err)
 
 	withBudget(t, conn, runID, func(snap budgetSnapshot) {
 		if !snap.unlimited() {
 			t.Errorf("a mid-flight run gained a cap of %g from a config change; "+
-				"the cap is read from the run row (B3)", snap.cap)
+				"the cap is read from the run row", snap.cap)
 		}
 	})
 }
 
 // ---------------------------------------------------------------------------
-// §4.9 — `--usage` validation, one case per B33/B35/B36
+// `--usage` validation
 // ---------------------------------------------------------------------------
 
 func TestUsageValidation(t *testing.T) {
@@ -866,23 +941,23 @@ func TestUsageValidation(t *testing.T) {
 		{"empty is not a usage record", "", "",
 			"a `complete` without --usage records nothing and refuses nothing"},
 		{"an object of numbers", `{"tokens": 4000, "seconds": 12.5}`, "",
-			"B33's shape"},
+			"an object of non-negative numbers is the accepted shape"},
 		{"zero is a legal quantity", `{"tokens": 0}`, "",
-			"reporting zero is reporting, and B13 makes it harmless"},
+			"reporting zero is reporting, and max(reported, floor) makes it harmless"},
 		{"an array", `[1, 2]`, "must be a JSON object",
-			"B33: any other shape is a VALIDATION_ERROR"},
-		{"a bare number", `4000`, "must be a JSON object", "B33"},
+			"any other shape is a VALIDATION_ERROR"},
+		{"a bare number", `4000`, "must be a JSON object", "any other shape is a VALIDATION_ERROR"},
 		{"a string value", `{"tokens": "4000"}`, `"tokens" must be a number`,
-			"B33 names the offending key rather than failing anonymously"},
+			"the refusal names the offending key rather than failing anonymously"},
 		{"a negative quantity", `{"tokens": -1}`, "must be >= 0",
-			"B35: usage that reduces a total is not usage"},
+			"usage that reduces a total is not usage"},
 		{"a unit name with whitespace", `{"to kens": 1}`,
 			"printable ASCII without whitespace",
-			"B36: a ledger key is rendered into a terminal beside a number"},
+			"a ledger key is rendered into a terminal beside a number"},
 		{"an over-long unit name", `{"` + longName + `": 1}`, "the limit is 64",
-			"B36 names the limit"},
+			"the refusal names the limit"},
 		{"too many units", "{" + strings.Join(manyUnits, ",") + "}",
-			"the limit is 32", "B36 names the limit"},
+			"the limit is 32", "the refusal names the limit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseUsage(tc.raw)
@@ -906,7 +981,8 @@ func TestUsageValidation(t *testing.T) {
 	}
 }
 
-// TestUsageRefusesNonFiniteNumbers is B35's other half. NaN and Inf are not
+// TestUsageRefusesNonFiniteNumbers is the other half of the negative-quantity
+// refusal. NaN and Inf are not
 // expressible in JSON, so they arrive only as the tokens a hand-rolled encoder
 // emits — and either would poison every sum the ledger feeds.
 func TestUsageRefusesNonFiniteNumbers(t *testing.T) {
@@ -918,7 +994,7 @@ func TestUsageRefusesNonFiniteNumbers(t *testing.T) {
 	}
 }
 
-// TestUsageRecordsLedgerRows is B34: one row per key, `source = 'reported'`,
+// TestUsageRecordsLedgerRows: one row per key, `source = 'reported'`,
 // keyed (step_id, attempt, unit) — and the EVENT still carries the blob, because
 // removing it would break the replay property.
 func TestUsageRecordsLedgerRows(t *testing.T) {
@@ -933,7 +1009,7 @@ func TestUsageRecordsLedgerRows(t *testing.T) {
 	if len(totals) != 2 {
 		t.Fatalf("ledger holds %d units, want 2", len(totals))
 	}
-	// Ordered by unit name (R9): `pages` before `sheets`, deterministically.
+	// Ordered by unit name: `pages` before `sheets`, deterministically.
 	if totals[0].Unit != "pages" || totals[1].Unit != "sheets" {
 		t.Errorf("units came back as %s, %s; the rollup orders by a total key",
 			totals[0].Unit, totals[1].Unit)
@@ -951,7 +1027,7 @@ func TestUsageRecordsLedgerRows(t *testing.T) {
 		t.Errorf("source = %q, want %q — a claimant said so", source, db.UsageSourceReported)
 	}
 
-	// The step is marked, so group 2's discrepancy probe has its fast path
+	// The step is marked, so the usage discrepancy probe has its fast path
 	// populated from the moment the ledger exists.
 	var recorded int
 	err = conn.QueryRow(
@@ -1011,16 +1087,6 @@ func runSteps(t *testing.T, conn *sql.DB, runID int) []*db.Step {
 	steps, err := db.ListRunStepsTx(tx, runID)
 	testsupport.Must(t, err, "ListRunStepsTx: %v", err)
 	return steps
-}
-
-// lastRunEvent returns the kind and data of a run's most recent event.
-func lastRunEvent(t *testing.T, conn *sql.DB, runID int) (kind, data string) {
-	t.Helper()
-	err := conn.QueryRow(
-		`SELECT kind, data FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1`,
-		runID).Scan(&kind, &data)
-	testsupport.Must(t, err, "reading the last event of %s: %v", model.FormatRunID(runID), err)
-	return kind, data
 }
 
 // countRunEvents counts a run's events of one kind.

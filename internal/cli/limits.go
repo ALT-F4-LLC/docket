@@ -13,13 +13,13 @@ import (
 // different ways across three verbs: `issue list` and `next` treat it as
 // unlimited (their `limit > 0` guards fail), while `issue log` clamps it to 1
 // via max(limit, 1) — so `issue log --limit -1` silently returns exactly one
-// row for a request that asked for a negative number. engine-spec.md §5 calls
-// for a hard VALIDATION_ERROR on these silent-drop cases.
+// row for a request that asked for a negative number. These silent-drop cases
+// call for a hard VALIDATION_ERROR.
 //
 // The check is v2-only by necessity: raising it under v1 would change the
-// behavior of a workflow-free repo on an existing verb and fail the §9 item 8
-// compatibility criterion. Under v1 all three legacy behaviors are preserved
-// exactly.
+// behavior of a workflow-free repo on an existing verb and fail the
+// workflow-free compatibility criterion. Under v1 all three legacy behaviors
+// are preserved exactly.
 func validateLimit(cmd *cobra.Command, limit int) error {
 	if limit >= 0 {
 		return nil

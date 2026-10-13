@@ -106,6 +106,9 @@ root, not alone.`,
 				}
 			}
 			if w.JSONMode {
+				if err := hydrateIssueAssociations(conn, issue); err != nil {
+					return err
+				}
 				w.Success(withIssueVersion(issue), "")
 			} else {
 				w.Info("Issue %s is already %s", model.FormatID(id), newStatus)
@@ -123,6 +126,10 @@ root, not alone.`,
 		issue, err = db.GetIssue(conn, id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
+		}
+
+		if err := hydrateIssueAssociations(conn, issue); err != nil {
+			return err
 		}
 
 		w.Success(withIssueVersion(issue), fmt.Sprintf("Moved %s: %s \u2192 %s", model.FormatID(id), oldStatus, newStatus))

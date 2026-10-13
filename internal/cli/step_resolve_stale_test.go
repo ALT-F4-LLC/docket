@@ -107,7 +107,7 @@ func TestApproveWithoutAdvisoryKeepsPlainPayload(t *testing.T) {
 	conn := newTestDB(t)
 	activatedRunForNext(t, conn)
 
-	cmd := cmdWithDB(conn)
+	cmd := decideCmdWithDB(conn)
 	outBuf := &bytes.Buffer{}
 	w := &output.Writer{JSONMode: true, Stdout: outBuf, Stderr: &bytes.Buffer{}}
 

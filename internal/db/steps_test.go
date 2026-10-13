@@ -90,7 +90,8 @@ func TestClaimStepMintsTokenAndTakesLease(t *testing.T) {
 	}
 }
 
-// TestClaimStepAgainstLiveLeaseConflicts is R5 of §6.9 at the db layer.
+// TestClaimStepAgainstLiveLeaseConflicts is the live-lease refusal at the db
+// layer.
 func TestClaimStepAgainstLiveLeaseConflicts(t *testing.T) {
 	db, id := stepTestDB(t)
 	now := int64(1_000_000)
@@ -102,9 +103,8 @@ func TestClaimStepAgainstLiveLeaseConflicts(t *testing.T) {
 	}
 }
 
-// TestClaimStepAgainstExpiredLeaseSucceeds is R7 of §6.9: expiry alone
-// re-readies a step, with no operator action and no reaper — the liveness
-// mechanism §9 item 4 rests on.
+// TestClaimStepAgainstExpiredLeaseSucceeds: expiry alone re-readies a step,
+// with no operator action and no reaper — the liveness mechanism.
 func TestClaimStepAgainstExpiredLeaseSucceeds(t *testing.T) {
 	db, id := stepTestDB(t)
 	now := int64(1_000_000)
@@ -176,7 +176,7 @@ func TestConcurrentStepClaims(t *testing.T) {
 	}
 }
 
-// TestStepClaimPredicateIsLoadBearing is §6.16's "mutation test repeated for
+// TestStepClaimPredicateIsLoadBearing is the "mutation test repeated for
 // the step table": rewrite the predicate away and the concurrency guarantee
 // must collapse.
 //
@@ -224,7 +224,7 @@ func TestStepClaimPredicateIsLoadBearing(t *testing.T) {
 	}
 }
 
-// TestLeaseHelpersAreShared is §6.16's "lease helpers shared with issues proven
+// TestLeaseHelpersAreShared is "lease helpers shared with issues proven
 // by asserting both call the same function (no duplicated SQL)".
 //
 // The proof is by function identity rather than by behavior: two independent
@@ -236,7 +236,7 @@ func TestLeaseHelpersAreShared(t *testing.T) {
 	// Each pair is (issue-side method value, step-side method value) taken
 	// from the two leaseTarget values. Identical function pointers mean both
 	// entities execute the same code with a different receiver — the
-	// generalization §6.6 requires, rather than a copy.
+	// generalization the lease contract requires, rather than a copy.
 	pairs := []struct {
 		name         string
 		issue, steps any
@@ -254,7 +254,7 @@ func TestLeaseHelpersAreShared(t *testing.T) {
 		if issueFn.Entry() != stepFn.Entry() {
 			t.Errorf(
 				"%s: issues reach %s but steps reach %s — the lease implementation "+
-					"has been duplicated rather than generalized (TDD §6.6)",
+					"has been duplicated rather than generalized",
 				p.name, issueFn.Name(), stepFn.Name())
 		}
 	}
@@ -270,8 +270,8 @@ func TestLeaseHelpersAreShared(t *testing.T) {
 	}
 }
 
-// TestStepRefusalMatrix is §6.9's R1-R4 at the db layer: the same three
-// sentinels the issue matrix produces, from the same authorize function.
+// TestStepRefusalMatrix is the step refusal matrix at the db layer: the same
+// three sentinels the issue matrix produces, from the same authorize function.
 func TestStepRefusalMatrix(t *testing.T) {
 	now := int64(1_000_000)
 
@@ -325,7 +325,7 @@ func TestStepRefusalMatrix(t *testing.T) {
 	}
 }
 
-// TestGetStepLeaseNeverWrites pins engine-spec §6 "reads never write" for the
+// TestGetStepLeaseNeverWrites pins "reads never write" for the
 // step entity: the read path must not reap, even when the lease has expired.
 func TestGetStepLeaseNeverWrites(t *testing.T) {
 	db, id := stepTestDB(t)
@@ -362,7 +362,7 @@ func TestGetStepLeaseNeverWrites(t *testing.T) {
 	}
 }
 
-// TestSagaStageCASAdvancesExactlyOnce is §6.8's "two concurrent engine
+// TestSagaStageCASAdvancesExactlyOnce is "two concurrent engine
 // invocations resuming the same saga produce exactly one advance". The loser
 // matches zero rows and gets ErrSagaStageMoved — not an error condition, but it
 // must be distinguishable, or a resumer cannot tell "I lost" from "it broke".
@@ -407,7 +407,7 @@ func TestSagaStageCASAdvancesExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestSagaStageRefreshesActivityClock is §6.8's "every stage commit refreshing
+// TestSagaStageRefreshesActivityClock is "every stage commit refreshing
 // the step's activity clock" — the property that lets a long saga survive a
 // heartbeat-based liveness check it is not driving.
 func TestSagaStageRefreshesActivityClock(t *testing.T) {
@@ -441,11 +441,11 @@ func TestSagaStageRefreshesActivityClock(t *testing.T) {
 	}
 }
 
-// TestRetireStepTokenIsTheSameClearAsRelease pins §6.8's hinge: retirement and
-// release are one state change reached by two authorities, so they are one
-// function. A step whose token retired is indistinguishable from an unclaimed
-// one AS FAR AS THE LEASE GOES — which is exactly what makes the saga
-// resumable by any later engine invocation with no owner to wait for.
+// TestRetireStepTokenIsTheSameClearAsRelease pins the saga's hinge:
+// retirement and release are one state change reached by two authorities, so
+// they are one function. A step whose token retired is indistinguishable from
+// an unclaimed one AS FAR AS THE LEASE GOES — which is exactly what makes the
+// saga resumable by any later engine invocation with no owner to wait for.
 func TestRetireStepTokenIsTheSameClearAsRelease(t *testing.T) {
 	db, id := stepTestDB(t)
 	now := int64(1_000_000)
@@ -472,12 +472,12 @@ func TestRetireStepTokenIsTheSameClearAsRelease(t *testing.T) {
 		t.Errorf("attempt = %d after retirement, want 1 — the trail must survive", lease.Attempt)
 	}
 
-	// R9: the retired token no longer authorizes anything.
+	// The retired token no longer authorizes anything.
 	tx2, err := db.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
 	defer tx2.Rollback()
 	if _, err := AuthorizeStepTx(tx2, id, token, now); !errors.Is(err, ErrNotHolder) {
-		t.Errorf("authorize with a retired token = %v, want ErrNotHolder (R9)", err)
+		t.Errorf("authorize with a retired token = %v, want ErrNotHolder", err)
 	}
 }
 
@@ -527,7 +527,7 @@ func TestReapStepDoesNotDoubleCountAttempts(t *testing.T) {
 	}
 }
 
-// TestReadyIsNeverPersisted pins §6.2: `ready` is computed at read time and is
+// TestReadyIsNeverPersisted pins that `ready` is computed at read time and is
 // not a member of the persisted enum. The nine stored statuses are the machine's
 // ten minus this one.
 func TestReadyIsNeverPersisted(t *testing.T) {
@@ -536,11 +536,256 @@ func TestReadyIsNeverPersisted(t *testing.T) {
 		StepWaitingHuman, StepSkipped, StepSuperseded, StepFailedRouted,
 	}
 	if len(persisted) != 9 {
-		t.Fatalf("persisted statuses = %d, want 9 (TDD §6.2)", len(persisted))
+		t.Fatalf("persisted statuses = %d, want 9", len(persisted))
 	}
 	for _, s := range persisted {
 		if s == StepReady {
-			t.Fatalf("%q is in the persisted set, but §6.2 makes it computed-only", StepReady)
+			t.Fatalf("%q is in the persisted set, but it is computed-only", StepReady)
 		}
+	}
+}
+
+// TestLoopHistoryFactsRoundTrip proves the three loop-history facts a
+// fix-loop-exhausted step parks with — rounds run against the cap, the step
+// that triggered the loop, and the latest fix-round verdict — survive one
+// SetStepLoopHistoryTx write and come back on the row's model.StepRow.
+//
+// It writes through the setter directly rather than through the exhaustion
+// routing transaction: the facts are storage here, and the call site inside
+// that transaction is a separate criterion.
+//
+// It also pins the row move the setter promises CAS-guarded readers: one
+// row_version bump and updated_at_ms set to the caller's nowMS.
+func TestLoopHistoryFactsRoundTrip(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = SetStepLoopHistoryTx(tx, id, 3, "judge-correctness@0", "concerns", 2000)
+	testsupport.Must(t, err, "SetStepLoopHistoryTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	row := model.StepRow{
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+	}
+	if row.LoopRoundsRun != 3 {
+		t.Errorf("LoopRoundsRun = %d, want 3", row.LoopRoundsRun)
+	}
+	if row.LoopTriggerStep != "judge-correctness@0" {
+		t.Errorf("LoopTriggerStep = %q, want judge-correctness@0", row.LoopTriggerStep)
+	}
+	if row.LoopLatestVerdict != "concerns" {
+		t.Errorf("LoopLatestVerdict = %q, want concerns", row.LoopLatestVerdict)
+	}
+
+	if step.RowVersion != before.RowVersion+1 {
+		t.Errorf("RowVersion = %d, want %d — CAS-guarded readers must see the row move",
+			step.RowVersion, before.RowVersion+1)
+	}
+	if step.UpdatedAtMS != 2000 {
+		t.Errorf("UpdatedAtMS = %d, want 2000 (the setter's nowMS)", step.UpdatedAtMS)
+	}
+}
+
+// TestLoopHistoryStoresAppliedBound proves the bound-taking setter stores the
+// applied fix-loop bound in steps.loop_cap, and the bound-less setter stores 0
+// over it. The bound differs from roundsRun so a write of the wrong value
+// cannot pass.
+func TestLoopHistoryStoresAppliedBound(t *testing.T) {
+	db, id := stepTestDB(t)
+	readLoopCap := func() int {
+		t.Helper()
+		var loopCap int
+		err := db.QueryRow(`SELECT loop_cap FROM steps WHERE id = ?`, id).Scan(&loopCap)
+		testsupport.Must(t, err, "reading loop_cap: %v", err)
+		return loopCap
+	}
+	write := func(name string, fn func(tx *sql.Tx) error) {
+		t.Helper()
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		defer tx.Rollback()
+		err = fn(tx)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		err = tx.Commit()
+		testsupport.Must(t, err, "Commit: %v", err)
+	}
+
+	write("SetStepLoopHistoryWithCapTx", func(tx *sql.Tx) error {
+		return SetStepLoopHistoryWithCapTx(tx, id, 3, 5, "judge-correctness@0", "concerns", 2000)
+	})
+	if got := readLoopCap(); got != 5 {
+		t.Errorf("loop_cap = %d after the bound-taking write, want the applied bound 5", got)
+	}
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.LoopRoundsRun != 3 {
+		t.Errorf("LoopRoundsRun = %d, want 3", step.LoopRoundsRun)
+	}
+	if step.LoopCap != 5 {
+		t.Errorf("GetStep LoopCap = %d, want the applied bound 5", step.LoopCap)
+	}
+
+	write("SetStepLoopHistoryTx", func(tx *sql.Tx) error {
+		return SetStepLoopHistoryTx(tx, id, 3, "judge-correctness@0", "concerns", 3000)
+	})
+	if got := readLoopCap(); got != 0 {
+		t.Errorf("loop_cap = %d after the bound-less write, want 0 (no recorded cap)", got)
+	}
+	step, err = GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.LoopCap != 0 {
+		t.Errorf("GetStep LoopCap = %d after the bound-less write, want 0", step.LoopCap)
+	}
+}
+
+// TestStepsAuthorityColumnRoundTrips proves the authority a resolution was
+// made under, and the standing grant it names, survive one SetStepAuthorityTx
+// write and come back on the row.
+func TestStepsAuthorityColumnRoundTrips(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+	if before.Authority != "" || before.AuthorityRef != "" {
+		t.Fatalf("an unresolved step carries authority %q/%q, want none",
+			before.Authority, before.AuthorityRef)
+	}
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = SetStepAuthorityTx(tx, id, "standing-grant", "RUN NOTE 54", 2000)
+	testsupport.Must(t, err, "SetStepAuthorityTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Authority != "standing-grant" {
+		t.Errorf("Authority = %q, want standing-grant", step.Authority)
+	}
+	if step.AuthorityRef != "RUN NOTE 54" {
+		t.Errorf("AuthorityRef = %q, want %q — a standing grant must name the "+
+			"authorization it applies", step.AuthorityRef, "RUN NOTE 54")
+	}
+	if step.RowVersion != before.RowVersion+1 {
+		t.Errorf("RowVersion = %d, want %d — CAS-guarded readers must see the row move",
+			step.RowVersion, before.RowVersion+1)
+	}
+}
+
+// TestStepsAuthorityOverwriteClearsRef proves a later ruling replaces the
+// whole authority record: an operator ruling after a standing grant leaves no
+// stale grant reference on the row.
+func TestStepsAuthorityOverwriteClearsRef(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	before, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep before write: %v", err)
+
+	writes := []struct{ authority, ref string }{
+		{"standing-grant", "RUN NOTE 54"},
+		{"operator", ""},
+	}
+	for i, w := range writes {
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		err = SetStepAuthorityTx(tx, id, w.authority, w.ref, int64(2000+i))
+		testsupport.Must(t, err, "SetStepAuthorityTx(%q, %q): %v", w.authority, w.ref, err)
+		err = tx.Commit()
+		testsupport.Must(t, err, "Commit: %v", err)
+	}
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Authority != "operator" {
+		t.Errorf("Authority = %q, want operator", step.Authority)
+	}
+	if step.AuthorityRef != "" {
+		t.Errorf("AuthorityRef = %q, want empty — a stale standing-grant "+
+			"reference survived the operator ruling", step.AuthorityRef)
+	}
+	if step.RowVersion != before.RowVersion+2 {
+		t.Errorf("RowVersion = %d, want %d — each authority write must move the row",
+			step.RowVersion, before.RowVersion+2)
+	}
+}
+
+// TestLoopHistoryFactsAbsentBeforeWrite pins the unwritten reading: a step that
+// never exhausted a loop carries no loop history, so the fields stay at their
+// zero values and serialize away under omitempty.
+func TestLoopHistoryFactsAbsentBeforeWrite(t *testing.T) {
+	db, id := stepTestDB(t)
+
+	step, err := GetStep(db, id)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	row := model.StepRow{
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+	}
+	if row.LoopRoundsRun != 0 || row.LoopTriggerStep != "" || row.LoopLatestVerdict != "" {
+		t.Errorf("unwritten loop history = %d/%q/%q, want 0//",
+			row.LoopRoundsRun, row.LoopTriggerStep, row.LoopLatestVerdict)
+	}
+}
+
+// TestRecordedAtStampsOnlyTheMoveIntoTerminal pins `recorded_at_ms`'s writers:
+// the move into a terminal status stamps it, and neither a non-terminal move,
+// a metadata write, nor a rewrite of an already-terminal row moves it.
+func TestRecordedAtStampsOnlyTheMoveIntoTerminal(t *testing.T) {
+	db, id := stepTestDB(t)
+	write := func(name string, fn func(tx *sql.Tx) error) *Step {
+		t.Helper()
+		tx, err := db.Begin()
+		testsupport.Must(t, err, "Begin: %v", err)
+		defer tx.Rollback()
+		err = fn(tx)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		err = tx.Commit()
+		testsupport.Must(t, err, "Commit: %v", err)
+		step, err := GetStep(db, id)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		return step
+	}
+
+	step := write("running", func(tx *sql.Tx) error {
+		return SetStepStatusTx(tx, id, StepRunning, 1500, 0)
+	})
+	if step.RecordedAtMS != 0 {
+		t.Errorf("after a move to %s, RecordedAtMS = %d, want 0", StepRunning, step.RecordedAtMS)
+	}
+
+	step = write("routing to done", func(tx *sql.Tx) error {
+		return SetStepRoutingTx(tx, id, "next", "", StepDone, "", 2000)
+	})
+	if step.RecordedAtMS != 2000 {
+		t.Errorf("after the move to %s, RecordedAtMS = %d, want 2000", StepDone, step.RecordedAtMS)
+	}
+
+	step = write("metadata", func(tx *sql.Tx) error {
+		return SetStepMetadataTx(tx, id, `{"k":"v"}`, 3000)
+	})
+	if step.RecordedAtMS != 2000 || step.UpdatedAtMS != 3000 {
+		t.Errorf("after a metadata write, RecordedAtMS = %d and UpdatedAtMS = %d, "+
+			"want 2000 and 3000", step.RecordedAtMS, step.UpdatedAtMS)
+	}
+
+	step = write("terminal rewrite", func(tx *sql.Tx) error {
+		return SetStepStatusTx(tx, id, StepSuperseded, 4000, 0)
+	})
+	if step.RecordedAtMS != 2000 {
+		t.Errorf("after a terminal-to-terminal rewrite, RecordedAtMS = %d, want 2000",
+			step.RecordedAtMS)
 	}
 }

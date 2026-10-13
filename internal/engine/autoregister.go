@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -18,9 +19,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// AUTO-REGISTRATION — §9 item 11's machinery (docs/tdd/runs-dispatch.md §9).
+// AUTO-REGISTRATION.
 //
-// engine-spec §2's instance-config lifecycle, verbatim:
+// The instance-config lifecycle:
 //
 //	Instance files live in the repo at `.docket/config/` (`workflows/`,
 //	`schemas/`, `contracts/`, `fragments/`, `templates/`, `policy.toml`) —
@@ -29,15 +30,15 @@ import (
 //	NEVER A MANUAL STEP, and schemas are stable reviewed files, never generated
 //	per-run.
 //
-// "Never a manual step" is the whole requirement, and §9 item 11 is its proof:
-// from `workflow init --template` through a completed run, the only human inputs
-// are conversational approvals. QA section ZK executes that literally and greps
-// the command trace for `workflow register` / `schema register`. Zero hits is
-// the criterion — a rehearsal that merely reaches `done` proves the engine
-// works, while one that reaches `done` with the register verbs PROVEN ABSENT
-// proves item 11.
+// "Never a manual step" is the whole requirement, and its proof is that from
+// `workflow init --template` through a completed run, the only human inputs are
+// conversational approvals. QA section ZK executes that literally and greps the
+// command trace for `workflow register` / `schema register`. Zero hits is the
+// criterion — a rehearsal that merely reaches `done` proves the engine works,
+// while one that reaches `done` with the register verbs PROVEN ABSENT proves
+// the requirement.
 //
-// IT READS AND HASHES; IT EXECUTES NOTHING (§9.5, §1.3). A workflow found in
+// IT READS AND HASHES; IT EXECUTES NOTHING. A workflow found in
 // `.docket/config/workflows/` that declares gates still requires trust entries
 // for those gates, and its fenced commands are still harvested, snapshotted, and
 // matched against the user-level allowlist. A malicious clone that ships
@@ -47,17 +48,17 @@ import (
 // "activation now registers a workflow it found in the repo" is precisely the
 // sentence that sounds like drive-by execution and is not.
 
-// Registration is one file the scan acted on — F21's wire row.
+// Registration is one file the scan acted on — the report's wire row.
 type Registration struct {
 	// Kind is `schema` or `workflow`. The pinned-only files do not appear here;
-	// they are counted (F20's `Pinned` line) rather than listed, because a
+	// they are counted (the report's `Pinned` line) rather than listed, because a
 	// fragment tree can hold hundreds of files and none of them is a decision.
 	Kind    string `json:"kind"`
 	Name    string `json:"name"`
 	Version int    `json:"version"`
 	Path    string `json:"path"`
 	SHA256  string `json:"sha256"`
-	// Outcome is `new` or `unchanged`. F11's identical-bytes case is a SUCCESS
+	// Outcome is `new` or `unchanged`. The identical-bytes case is a SUCCESS
 	// THAT CHANGES NOTHING, and reporting it as `unchanged` rather than omitting
 	// it is what makes re-activation of an unedited repo legible: the operator
 	// sees that the file was considered and found already registered.
@@ -67,12 +68,12 @@ type Registration struct {
 const (
 	// RegistrationKindSchema and RegistrationKindWorkflow are the only two
 	// things core REGISTERS. Everything else under `.docket/config/` is PINNED,
-	// which is exactly what §2 says core does with instance files it does not
-	// understand.
+	// which is what core does with instance files it does not understand.
 	RegistrationKindSchema   = "schema"
 	RegistrationKindWorkflow = "workflow"
 
-	// RegistrationNew and RegistrationUnchanged are F21's `outcome` values.
+	// RegistrationNew and RegistrationUnchanged are the report's `outcome`
+	// values.
 	RegistrationNew       = "new"
 	RegistrationUnchanged = "unchanged"
 )
@@ -81,10 +82,10 @@ const (
 // and what to pin.
 type configScan struct {
 	// registrations are ordered by RegistrationOrder — schemas in full, then
-	// everything else, lexically within each group (F1).
+	// everything else, lexically within each group.
 	paths []string
 	// pins are the content-hash pins for every OTHER file under the config
-	// directory (F4).
+	// directory.
 	pins []db.Pin
 	// roots are the config directories the scan walked, IN PRECEDENCE ORDER
 	// and already canonicalized — the subset of InstanceConfigDirs() that
@@ -92,13 +93,13 @@ type configScan struct {
 	//
 	// They are carried so a declared `packet` entry — which is RELATIVE to a
 	// root — can be mapped onto a pin's ref, which is the path the walk
-	// recorded (§1.2). Deriving them a second time at the point of use would
+	// recorded. Deriving them a second time at the point of use would
 	// mean two places agreeing about where config lives.
 	roots []string
 }
 
 // scanConfigDirs walks EVERY instance-config root, in precedence order, and
-// sorts what they hold into one scan (§9.2).
+// sorts what they hold into one scan.
 //
 // THE UNION IS THE POINT. `~/.docket/config/` carries the shared corpus and
 // `<worktree>/.docket/config/` carries a repository's own additions; a run is
@@ -110,13 +111,14 @@ type configScan struct {
 // That refusal is what makes "first root wins" a deterministic rule at
 // resolution rather than a silent shadowing.
 //
-// F17 IS STILL THE FIRST THING IT DOES, now per root: a root that does not
-// exist is skipped in full, and if NO root exists the scan returns nil and
-// activation executes exactly the statements v9's did. That is D6's dormancy,
-// and it stays structural — "a repo with no `.docket/config/` activates exactly
-// as before" is a QA check (F19) because it is a property of these early exits.
+// THE DORMANCY CHECK IS STILL THE FIRST THING IT DOES, now per root: a root
+// that does not exist is skipped in full, and if NO root exists the scan
+// returns nil and activation executes exactly the statements v9's did. That
+// dormancy stays structural — "a repo with no `.docket/config/` activates
+// exactly as before" is a QA check because it is a property of these early
+// exits.
 //
-// F5: the scan is NON-RECURSIVE within each registry directory and RECURSIVE for
+// The scan is NON-RECURSIVE within each registry directory and RECURSIVE for
 // the pinned ones. A schema in a subdirectory of `schemas/` would break the
 // two-group ordering's determinism argument — there would be no lexical order
 // over a tree that agreed with the flat one — while a fragment three levels deep
@@ -124,7 +126,7 @@ type configScan struct {
 func scanConfigDirs(roots []string) (*configScan, error) {
 	scan := &configScan{}
 
-	// The two registry groups accumulate SEPARATELY across roots, because F2's
+	// The two registry groups accumulate SEPARATELY across roots, because the
 	// order is global: EVERY schema registers before ANY workflow, or a
 	// workflow in the repo root naming a schema from the shared corpus would
 	// refuse on a `payload` that is about to exist.
@@ -157,7 +159,7 @@ func scanConfigDirs(roots []string) (*configScan, error) {
 			filepath.Join(root, "workflows"): true,
 		}
 
-		// F16: ONCE PER ACTIVATION, not once per issue. The walk is here, at the
+		// ONCE PER ACTIVATION, not once per issue. The walk is here, at the
 		// top, and its result is passed down.
 		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -175,16 +177,16 @@ func scanConfigDirs(roots []string) (*configScan, error) {
 					found = append(found, path)
 					return nil
 				}
-				// F6: a file whose extension does not match — `schemas/README.md` —
+				// A file whose extension does not match — `schemas/README.md` —
 				// is SKIPPED SILENTLY IN THE REGISTRY and PINNED like any other
 				// config file. A refusal here would make a README a run-blocker.
 			}
 
-			// F4: everything else is PINNED by content hash and REGISTERED AS
-			// NOTHING. §2 is explicit that this is "how the reference instance pins
-			// its contracts, fragments, and policy WITHOUT CORE KNOWING WHAT THEY
-			// ARE", so core reads bytes, hashes them, records the path, and never
-			// opens the content again.
+			// Everything else is PINNED by content hash and REGISTERED AS
+			// NOTHING. This is how the reference instance pins its contracts,
+			// fragments, and policy WITHOUT CORE KNOWING WHAT THEY ARE, so core
+			// reads bytes, hashes them, records the path, and never opens the
+			// content again.
 			pin, err := filePin(root, path)
 			if err != nil {
 				return err
@@ -207,9 +209,9 @@ func scanConfigDirs(roots []string) (*configScan, error) {
 			return nil, err
 		}
 
-		// F1: THE ORDERING IS NOT RE-IMPLEMENTED. The scan collects paths and
-		// hands them to RegistrationOrder, which S5 landed against this stage's
-		// signature precisely so the ordering contract lives in one place. It is
+		// THE ORDERING IS NOT RE-IMPLEMENTED. The scan collects paths and
+		// hands them to RegistrationOrder, so the ordering contract lives in
+		// one place. It is
 		// applied PER ROOT — lexical within a root — and the two groups are then
 		// concatenated across roots, which is what keeps the global
 		// schemas-before-workflows order while precedence stays root order.
@@ -223,7 +225,7 @@ func scanConfigDirs(roots []string) (*configScan, error) {
 	}
 
 	if len(scan.roots) == 0 {
-		// F17: no root exists ⇒ the scan is skipped entirely.
+		// No root exists ⇒ the scan is skipped entirely.
 		return nil, nil
 	}
 
@@ -246,7 +248,7 @@ func scanConfigDirs(roots []string) (*configScan, error) {
 //
 // The four outcomes:
 //
-//	absent                    skip, silently — dormancy (F17)
+//	absent                    skip, silently — dormancy
 //	a regular file            VALIDATION_ERROR
 //	a symlink to a directory  canonicalize and scan
 //	a symlink resolving to    VALIDATION_ERROR naming the link AND its target
@@ -312,7 +314,24 @@ func resolveConfigRoot(root string) (string, bool, error) {
 // already had that check run for it, and a root that will not resolve simply
 // holds none of the refs it is asked for.
 func instanceConfigRoots() []string {
-	dirs := resolvePaths().InstanceConfigDirs()
+	return configRootsOf(resolvePaths())
+}
+
+// runConfigRoots is instanceConfigRoots for one RUN: the same roots, with the
+// repository side taken from the run's recorded exec root (runExecRoot) rather
+// than the invoking process's cwd. A run's repo-side pins live under the
+// checkout it started in, so a reader asking about that run from anywhere
+// else, such as a non-git directory or another checkout, must look there. A
+// run with no recorded exec root falls back to the invoking process's roots.
+func runConfigRoots(conn *sql.DB, runID int) []string {
+	cfg := *resolvePaths()
+	cfg.ExecRoot = runExecRoot(conn, runID)
+	return configRootsOf(&cfg)
+}
+
+// configRootsOf canonicalizes and deduplicates cfg's instance-config roots.
+func configRootsOf(cfg *config.Config) []string {
+	dirs := cfg.InstanceConfigDirs()
 	out := make([]string, 0, len(dirs))
 	for _, dir := range dirs {
 		if dir == "" {
@@ -337,7 +356,7 @@ func instanceConfigRoots() []string {
 // entitled to answer. Choosing the first root would mean an operator's repo-side
 // edit silently loses to the corpus (or silently wins over it), discovered later
 // as a packet whose contents nobody can account for. Refusing puts the decision
-// where §2 puts every decision: with the human, before the run exists.
+// with the human, before the run exists.
 func pinConflictErr(first, second, ref string) error {
 	return conflictErr(
 		"the instance-config file %q is present in two config roots with "+
@@ -350,7 +369,7 @@ func pinConflictErr(first, second, ref string) error {
 // crossRootConflictErr is collisionErr's cross-root twin: ONE `name@version`
 // defined by two roots with different bytes.
 //
-// The single-root case (F9) is "you edited a registered definition"; this one is
+// The single-root case is "you edited a registered definition"; this one is
 // "the corpus and the repository disagree about what this definition IS", and it
 // names BOTH files because neither is more authoritative than the other and the
 // operator has to look at both to decide.
@@ -365,15 +384,15 @@ func crossRootConflictErr(first, second, name string, version int) error {
 }
 
 // registerScanTx registers what the scan found, IN ORDER, inside activation's
-// fat transaction (F8).
+// fat transaction.
 //
-// F8 IS THE LOAD-BEARING PLACEMENT: this runs INSIDE the transaction, BEFORE
+// THE PLACEMENT IS LOAD-BEARING: this runs INSIDE the transaction, BEFORE
 // binding, so a registration failure refuses the WHOLE activation and writes
 // nothing. Registering-then-failing would leave a repo carrying definitions from
 // a run that never started — and the next activation would then bind against
 // them, which is a run inheriting the debris of a failed one.
 //
-// F7: it reuses the EXISTING register paths — the same validation, the same
+// It reuses the EXISTING register paths — the same validation, the same
 // immutability contract, the same CONFLICT on different bytes. THERE IS NO
 // "AUTO" VARIANT WITH LOOSER RULES, because a looser rule here is a rule that
 // only applies to definitions nobody typed a command for, which is exactly
@@ -436,20 +455,39 @@ func registerScanTx(tx *sql.Tx, projectID int, scan *configScan, nowMS int64) ([
 // registerConfigWorkflowTx, which already word it precisely; a second refusal
 // here would be the same failure reported twice, worse.
 func registryIdentityKey(path string, src []byte) (string, bool) {
+	kind, name, version, ok := configIdentity(path, src)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%s\x00%s@%d", kind, name, version), true
+}
+
+// configIdentity is registryIdentityKey's three parts, unjoined: the KIND a
+// config file registers as, and the NAME and VERSION it registers under.
+//
+// It exists because the cross-project audit (registry_audit.go) needs the
+// version as a NUMBER to compare against a registered one, and re-deriving
+// "where does a config file's identity come from" a second time is exactly how
+// the audit and registration would come to disagree about what the corpus
+// declares. Both callers read it from here, so they cannot.
+//
+// `src` is consulted ONLY for a workflow — a schema's identity is its filename
+// — so a caller auditing a corpus may pass nil for a schema path rather than
+// reading a document it will not parse.
+func configIdentity(path string, src []byte) (kind, name string, version int, ok bool) {
 	if isSchemaConfigPath(path) {
 		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		name, version, err := workflow.ParsePayloadRef(base)
 		if err != nil {
-			return "", false
+			return "", "", 0, false
 		}
-		return fmt.Sprintf("%s\x00%s@%d", RegistrationKindSchema, name, version), true
+		return RegistrationKindSchema, name, version, true
 	}
 	def, err := workflow.Parse(src)
 	if err != nil {
-		return "", false
+		return "", "", 0, false
 	}
-	return fmt.Sprintf("%s\x00%s@%d",
-		RegistrationKindWorkflow, def.Pipeline.Name, def.Pipeline.Version), true
+	return RegistrationKindWorkflow, def.Pipeline.Name, def.Pipeline.Version, true
 }
 
 // registerConfigSchemaTx registers one `.docket/config/schemas/NAME@V.json`.
@@ -473,7 +511,7 @@ func registerConfigSchemaTx(
 				"%q is not one", path, base)
 	}
 
-	// F7: the SAME compilation `schema register` performs. A schema that does
+	// The SAME compilation `schema register` performs. A schema that does
 	// not compile is refused while an author is looking at it, and activation is
 	// when an author is looking at it.
 	compiled, err := schema.Compile(name, version, src)
@@ -518,9 +556,9 @@ func registerConfigWorkflowTx(
 		return Registration{}, validationErr("%s: %v", path, err)
 	}
 
-	// V26 and V21a-V21d/V25a, exactly as `workflow register` runs them (F7).
+	// V26 and V21a-V21d/V25a, exactly as `workflow register` runs them.
 	// THE SCHEMA CHECK IS WHY THE ORDER MATTERS: this refuses a `payload` that
-	// is not registered, and it is the refusal §9.1's F2/F3 pair is about. The
+	// is not registered, and the schemas-first ordering exists to avoid it. The
 	// schemas registered ahead of this loop are what make it pass.
 	if err := workflow.ValidateVoteRules(def, txVoteRuleResolver{tx, projectID}); err != nil {
 		return Registration{}, validationErr("%s: %v", path, err)
@@ -554,35 +592,34 @@ func registerConfigWorkflowTx(
 	}, nil
 }
 
-// collisionErr is F9, F10, F12, and F13: CHANGED BYTES AT AN UNCHANGED
-// `name@version` REFUSES THE WHOLE ACTIVATION, with a conversationally
-// actionable message.
+// collisionErr: CHANGED BYTES AT AN UNCHANGED `name@version` REFUSE THE WHOLE
+// ACTIVATION, with a conversationally actionable message.
 //
-// §9.3 examined four options and chose this one. The argument, briefly, because
-// it will be re-litigated:
+// Of four options, this is the one chosen. The argument, briefly, because it
+// will be re-litigated:
 //
 //   - AUTO-BUMP would mint `name@N+1` from bytes nobody approved as a new
 //     version, so the NEXT run silently binds a definition the operator never
 //     named. Version numbers would stop meaning "the author decided this is a
 //     new version".
 //   - OVERWRITE destroys immutability outright: a run that pinned `name@N` by
-//     hash can no longer reproduce, and §9 item 5 fails on its face.
+//     hash can no longer reproduce.
 //   - IGNORE is the worst of the set — the operator edits a file, activates, and
 //     gets the OLD definition with no message.
 //
-// AGAINST THE ZERO-TOUCH TENET (T9), which is the real tension: T9's zero-touch
+// AGAINST THE ZERO-TOUCH TENET, which is the real tension: zero-touch
 // is about who DOES THE WORK, not about the machine never asking. The prescribed
 // loop is that the session drafts config, the human approves in conversation, and
 // the session runs the commands. A message a session reads, acts on, and brings
 // to the human as "I changed the workflow; it needs a version bump to 2 — okay?"
-// is THAT LOOP WORKING. What T9 forbids is the human hand-editing config or
-// typing `docket workflow register`, and this asks for neither.
+// is THAT LOOP WORKING. What the tenet forbids is the human hand-editing config
+// or typing `docket workflow register`, and this asks for neither.
 //
-// CORE NEVER AUTO-BUMPS because the bump is a DECISION, and §2's division puts
+// CORE NEVER AUTO-BUMPS because the bump is a DECISION, and the engine puts
 // decisions with the human and mechanics with the session. A core that bumped
 // would be making the decision and telling nobody.
 //
-// F13: it is a HARD refusal, not a warning. A warning during a fat transaction
+// It is a HARD refusal, not a warning. A warning during a fat transaction
 // that then proceeds is a warning nobody reads until the run behaves oddly.
 func collisionErr(err error, path, name string, version int) error {
 	if err == nil {
@@ -594,7 +631,7 @@ func collisionErr(err error, path, name string, version int) error {
 
 	registered, current := hashesFromConflict(err)
 
-	// F10: the message names the PATH, BOTH HASHES, the REGISTERED VERSION, and
+	// The message names the PATH, BOTH HASHES, the REGISTERED VERSION, and
 	// the LITERAL EDIT — and states that existing pinned runs are unaffected,
 	// because "your edit is refused" without that sentence reads as "you have
 	// broken something" rather than "this needs a version number".
@@ -652,11 +689,11 @@ func short(sum string) string {
 	return sum[:12] + "…"
 }
 
-// outcomeOf maps the registry's `created` flag onto F21's vocabulary.
+// outcomeOf maps the registry's `created` flag onto the report's vocabulary.
 //
-// F11: identical bytes at the same `name@version` is a SUCCESS THAT CHANGES
+// Identical bytes at the same `name@version` is a SUCCESS THAT CHANGES
 // NOTHING — the existing contract, and the case that makes re-activation of an
-// unedited repo free (C10). Two activations scanning one directory both register
+// unedited repo free. Two activations scanning one directory both register
 // identical bytes and both succeed; the loser changes nothing.
 func outcomeOf(created bool) string {
 	if created {
@@ -665,7 +702,7 @@ func outcomeOf(created bool) string {
 	return RegistrationUnchanged
 }
 
-// filePin hashes one config file for F4's pin.
+// filePin hashes one config file for its content-hash pin.
 //
 // The pin's REF is RELATIVE TO ITS CONFIG ROOT (v12) — `contracts/fix.md`,
 // not the walked absolute path. An absolute ref bound the pin to one checkout:
@@ -682,12 +719,12 @@ func filePin(root, path string) (db.Pin, error) {
 		return db.Pin{}, validationErr("reading the pinned config file %s: %v", path, err)
 	}
 	ref := path
-	if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, ok := configRelativeRef([]string{root}, path); ok {
 		ref = rel
 	}
 	return db.Pin{
 		Kind: db.PinKindFile, Ref: ref, SHA256: workflow.SHA256(src),
-		// Carried in memory for the closure-size arithmetic (§1.5). The
+		// Carried in memory for the closure-size arithmetic. The
 		// bytes are already in hand for the hash, so the size is free here and
 		// would cost a second read at expansion.
 		Bytes: len(src),
@@ -705,22 +742,22 @@ func sortPins(pins []db.Pin) {
 	sort.Slice(pins, func(i, j int) bool { return pins[i].Ref < pins[j].Ref })
 }
 
-// RenderRegistrationReport is F20: the human-mode `Registered` block.
+// RenderRegistrationReport renders the human-mode `Registered` block.
 //
 // One line per file, `<name>@<version>  <path>  (new | unchanged)`, in
 // REGISTRATION ORDER — schemas first, then workflows — followed by a `Pinned`
 // count. The order is the scan's own, not a re-sort, so what an operator reads
 // is the sequence that actually ran.
 //
-// F23: an activation that registered NOTHING prints no block at all — not an
-// empty one — so F17's dormancy is visible in the output. A repo with no
+// An activation that registered NOTHING prints no block at all — not an
+// empty one — so dormancy is visible in the output. A repo with no
 // `.docket/config/` produces exactly the activation output v9 produced.
 //
-// THE PATH AND THE NAME GO THROUGH THE ESCAPER (T18). Both come from the repo's
+// THE PATH AND THE NAME GO THROUGH THE ESCAPER. Both come from the repo's
 // filesystem and a workflow's own `[pipeline] name`, which in a cloned repo are
 // attacker-supplied strings heading for a TERMINAL — the same class as a fence
-// command, and closed the same way. That matters most in exactly the case §9.5
-// is about: a malicious clone whose config directory this block is describing.
+// command, and closed the same way. That matters most for a malicious clone
+// whose config directory this block is describing.
 func RenderRegistrationReport(
 	w interface{ Write([]byte) (int, error) }, regs []Registration, pinned int,
 ) {
@@ -745,7 +782,7 @@ func RenderRegistrationReport(
 //
 // They mirror internal/cli's `schemaResolver` and `voteRuleResolver` exactly —
 // same queries, same refusals, same compilation of stored bytes. The duplication
-// is the transaction, not the logic: F7 requires auto-registration to run the
+// is the transaction, not the logic: auto-registration must run the
 // SAME validation `workflow register` runs, and the only difference is the
 // handle it runs it against.
 //
@@ -766,6 +803,14 @@ func (r txSchemaResolver) Schema(name string, version int) (*workflow.Registered
 	}
 	if err != nil {
 		return nil, err
+	}
+	// A retired version is refused for NEW references (v36), exactly as
+	// internal/cli's schemaResolver refuses it: activation accepts nothing
+	// `workflow register` would refuse. A run that ALREADY pinned the version
+	// is untouched — pins resolve through GetSchemaTx at an
+	// explicit version, which never filters.
+	if row.Deprecated() {
+		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrRetired, name, version)
 	}
 	return schema.Compile(row.Name, row.Version, []byte(row.Body))
 }

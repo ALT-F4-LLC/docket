@@ -8,13 +8,13 @@ import (
 	"strings"
 )
 
-// annotation is the §4.2 annotation key. It is a plain JSON key in the author's
+// annotation is the annotation key. It is a plain JSON key in the author's
 // document and is NEVER registered as a library keyword (O4): core extracts the
 // order itself, by walking the document, so swapping validators changes which
 // documents are accepted and never which values are ordered.
 const annotation = "ordered_enum"
 
-// conservativeAnnotation is the §4.2 direction annotation: it names WHICH END of
+// conservativeAnnotation is the direction annotation: it names WHICH END of
 // the sibling `enum`'s ascending order the author considers the cautious one.
 //
 // It exists because core cannot know which end of a declared order is the bad
@@ -44,11 +44,11 @@ const (
 // the authoring documentation's table.
 var ConservativeEnds = []string{ConservativeUpper, ConservativeLower}
 
-// Index is the §4.3 derived ordered index: each ordered field's declared value
+// Index is the derived ordered index: each ordered field's declared value
 // order, ascending, taken from the `enum` array's DOCUMENT ORDER (O1).
 //
 // The values are held unexported and no method hands them out. That is the
-// point: Position is the only way to learn anything about rank (I3), so there
+// point: Position is the only way to learn anything about rank, so there
 // is no path by which a caller could obtain two indices and compare them
 // itself — which would be the same guess Position exists to refuse.
 type Index struct {
@@ -58,7 +58,7 @@ type Index struct {
 // Position reports a value's index in the field's declared order.
 //
 // The second result is false when the field declares no order AND when the
-// value is not in the order it declares (I4). Those are one answer on purpose:
+// value is not in the order it declares. Those are one answer on purpose:
 // both mean "core cannot rank this", and a caller that could tell them apart
 // would be tempted to handle the second by sorting the value to an end.
 func (ix Index) Position(field, value string) (int, bool) {
@@ -76,8 +76,8 @@ func (ix Index) Position(field, value string) (int, bool) {
 
 // Ordered reports whether the field declares an order at all.
 //
-// It exists for T3's reason string, which must say WHICH of the three
-// unorderable cases it hit (§5 T3), and for `schema list`'s `ordered_fields`.
+// It exists for the threshold refusal's reason string, which must say WHICH of
+// the three unorderable cases it hit, and for `schema list`'s `ordered_fields`.
 // It reports the existence of an order, never a position.
 func (ix Index) Ordered(field string) bool {
 	_, ok := ix.order[field]
@@ -99,7 +99,7 @@ func (ix Index) Fields() []string {
 func (ix Index) Len() int { return len(ix.order) }
 
 // MarshalJSON renders the index as the object stored in `schemas.ordered`.
-// encoding/json sorts map keys, so the stored text is canonical and I2's
+// encoding/json sorts map keys, so the stored text is canonical and the
 // round-trip comparison can be a byte comparison.
 func (ix Index) MarshalJSON() ([]byte, error) {
 	if ix.order == nil {
@@ -118,10 +118,10 @@ func (ix *Index) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// DeriveIndex is §4.3's derivation as a standalone function: schema bytes in,
+// DeriveIndex is the derivation as a standalone function: schema bytes in,
 // ordered index out, nothing else consulted.
 //
-// It is exported because I2 makes the stored copy a CACHE — a QA check
+// It is exported because the stored copy is a CACHE — a QA check
 // re-derives from `schemas.body` and compares against `schemas.ordered` for
 // every registered row, and a derivation that could only be reached through a
 // full Compile would make that check depend on the validator it is meant to be
@@ -153,9 +153,9 @@ func indexFromFields(fields map[string]Field, names []string) Index {
 
 // deriveFields extracts the top-level properties of the ARRAY'S ITEM SCHEMA.
 //
-// O5: only those are indexed. §11.2's grammar is `agg(field op literal)` with a
-// bare field token, so a nested ordered enum is unreachable by any predicate,
-// and indexing it would build a map nothing can query.
+// O5: only those are indexed. The threshold grammar is `agg(field op literal)`
+// with a bare field token, so a nested ordered enum is unreachable by any
+// predicate, and indexing it would build a map nothing can query.
 //
 // A document that is not an array of objects yields no fields. That is not an
 // error: such a schema is registrable and validates payloads perfectly well; it
@@ -211,6 +211,37 @@ func deriveFields(doc any) (map[string]Field, []string) {
 		fields[name] = f
 	}
 	return fields, names
+}
+
+// deriveRequired reads the `required` list of the subschema a payload ELEMENT
+// is written at: an array document's item schema, or the root of any other
+// document.
+//
+// Unlike deriveFields it does not sort: `required` carries no order that means
+// anything, and preserving the author's is what makes the rendered list read
+// like the document they wrote.
+func deriveRequired(doc any) []string {
+	root, ok := doc.(map[string]any)
+	if !ok {
+		return nil
+	}
+	element := root
+	if items, ok := root["items"].(map[string]any); ok {
+		element = items
+	}
+	list, ok := element["required"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		// The metaschema has already refused a non-string entry by the time
+		// Compile reaches here, so this only unwraps the JSON type.
+		if name, ok := item.(string); ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // stringEnum returns a declared `enum` as strings, or nil when it is absent or

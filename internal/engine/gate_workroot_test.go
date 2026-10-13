@@ -102,7 +102,7 @@ func TestGateSpawnsInWorkRootNotExecRoot(t *testing.T) {
 // (they are swept at integration) records an honest failure — it neither runs
 // the gate in the shared checkout in its place (the silent wrong-tree defect
 // again) nor surfaces an engine error, which on the pre-claim path would
-// block the claim PG2/PG3 forbid blocking.
+// block the claim, which a pre-gate failure must never do.
 func TestGateWorkRootGoneFailsClosed(t *testing.T) {
 	repoRoot := t.TempDir()
 	argv, sentinel := witnessCommand(t, repoRoot, "gone-ran")

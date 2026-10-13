@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,16 +16,16 @@ import (
 //
 // It is an ALIAS rather than a second type: the schema package owns what a
 // registered document is, and a copy here would be a second answer to the same
-// question. The alias lets the rules below read as §4.9.2 wrote them.
+// question.
 type Registered = schema.Registered
 
 // SchemaResolver reports what is registered.
 //
 // V21a-V21d and V25a are the only rules that ask a question about the
 // ENVIRONMENT; they take it as a parameter, so `Validate()` stays a pure
-// function of bytes and every other rule with it. V26 (gates-trust §8.2)
-// established this pattern for exactly the same reason, and this follows it
-// rather than inventing a second one.
+// function of bytes and every other rule with it. V26 established this pattern
+// for exactly the same reason, and this follows it rather than inventing a
+// second one.
 //
 // It is what keeps TestFixtureRegistersClean honest: that test exercises
 // Validate over the committed fixture with NO database, and continues to.
@@ -39,10 +40,20 @@ type SchemaResolver interface {
 // sentinel to return rather than a message this package has to pattern-match.
 var ErrNotRegistered = errors.New("schema not registered")
 
-// ValidateSchemas is §4.9.1's cross-validation table: the rules that compare a
+// ErrRetired is what a SchemaResolver returns for a name@version that IS
+// registered but has been retired from service (`docket schema deprecate`).
+//
+// It is a separate sentinel from ErrNotRegistered because the remedies differ:
+// an absent schema is registered, a retired one is restored or the reference
+// is moved to a live version. The row still exists and still serves the runs
+// that pinned it; only NEW references are refused, which is what makes
+// retirement a registration-time filter rather than a retraction.
+var ErrRetired = errors.New("schema retired")
+
+// ValidateSchemas is the cross-validation table: the rules that compare a
 // definition against the schemas it names.
 //
-// §11.2, verbatim: "Fields and literals are validated against the registered
+// The rule, verbatim: "Fields and literals are validated against the registered
 // schema at `workflow register` time." That sentence cannot be satisfied when
 // there is no registered schema, so V25a makes an unregistered reference a HARD
 // refusal here. The alternatives all amount to not validating at register time
@@ -61,10 +72,10 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 		// V29's first half, checked BEFORE the V21d skip: an `aggregate` step
 		// MUST declare a `payload`. Median, max, and min are defined only over
 		// an order, so an aggregate without a declared one is a step that can
-		// never compute — and §11.2's own restriction is the same restriction.
+		// never compute — and the ordered-comparison restriction is the same one.
 		//
-		// This is a deviation from §11.1, which makes `payload` optional, and it
-		// is recorded as an amendment rather than slipped in. The alternative
+		// This deviates from the general rule, which makes `payload` optional,
+		// and it is deliberate rather than slipped in. The alternative
 		// considered and rejected: inferring the order from the schema of the
 		// step the aggregate reads its input from. That is magic — nothing in
 		// the grammar says an action reads its predecessor's payload — it is
@@ -82,16 +93,26 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 			}, def.Pipeline.Name)
 		}
 
-		// V21d: a step with a `threshold` and NO declared `payload` keeps S3
-		// behavior — grammar-only validation, no field check, and T3 at runtime.
-		// NOT an error.
+		// V21d: a step with a `threshold` and NO declared `payload` keeps the
+		// earlier behavior — grammar-only validation, no field check, and the
+		// unorderable refusal at runtime. NOT an error.
 		//
-		// This is the clause that keeps the design honest. Making `payload`
+		// This is the clause that keeps the rule honest. Making `payload`
 		// mandatory wherever a `threshold` appears would be a tidier rule and
-		// would break every S3-era definition, including the committed fixture's
-		// `verify`, whose `any(status == unmet)` needs no schema to be correct
-		// (T1). Equality has never needed an order and still does not.
+		// would break every earlier definition, including the committed
+		// fixture's `verify`, whose `any(status == unmet)` needs no schema to be
+		// correct. Equality has never needed an order and still does not.
 		if step.Payload == "" {
+			if step.VerdictField != "" {
+				return withWorkflow(&Error{
+					Rule: "V50", Step: step.Name, Field: "verdict_field",
+					Message: fmt.Sprintf(
+						"step %q: `verdict_field` names %q, but the step declares "+
+							"no `payload`; a verdict property is checked against "+
+							"the step's pinned schema, and there is none",
+						step.Name, step.VerdictField),
+				}, def.Pipeline.Name)
+			}
 			continue
 		}
 
@@ -104,6 +125,81 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 		}
 		if err := validateAggregateSchema(step, registered); err != nil {
 			return withWorkflow(err, def.Pipeline.Name)
+		}
+		if err := validatePassFloorSchema(step, registered); err != nil {
+			return withWorkflow(err, def.Pipeline.Name)
+		}
+		if err := validateVerdictFieldSchema(step, registered); err != nil {
+			return withWorkflow(err, def.Pipeline.Name)
+		}
+	}
+	return nil
+}
+
+// validateVerdictFieldSchema is V50: a declared `verdict_field` must name a
+// property the step's pinned schema declares. A loop history reading an
+// undeclared property would record an empty verdict on every exhaustion, and
+// the author would learn of the typo only from the park it was meant to explain.
+func validateVerdictFieldSchema(step *Step, registered *Registered) error {
+	if step.VerdictField == "" {
+		return nil
+	}
+	if _, ok := registered.Field(step.VerdictField); !ok {
+		return &Error{
+			Rule: "V50", Step: step.Name, Field: "verdict_field",
+			Message: fmt.Sprintf(
+				"step %q: `verdict_field` names %q, which %s does not "+
+					"declare. Declared fields: %s",
+				step.Name, step.VerdictField, registered.Ref(),
+				describeFields(registered)),
+		}
+	}
+	return nil
+}
+
+// validatePassFloorSchema is V37a (DKT-870): a declared `pass_floor` must be
+// answerable by the step's pinned schema — the field declared and ordered, and
+// `at` a value of that order. It is V28a's discipline applied to the exit bar:
+// a floor is a POSITION in the declared order, a value with no position has no
+// floor to name, and the question is asked at register time rather than at the
+// end of a run, on the routing whose `pass` the floor exists to gate. V37 has
+// already required `field` and `at` to be non-empty and `payload` to be
+// declared; this is the half only the schema can answer.
+func validatePassFloorSchema(step *Step, registered *Registered) error {
+	if step.PassFloor == nil {
+		return nil
+	}
+	declared, ok := registered.Field(step.PassFloor.Field)
+	if !ok {
+		return &Error{
+			Rule: "V37a", Step: step.Name, Field: "pass_floor",
+			Message: fmt.Sprintf(
+				"step %q: `pass_floor.field` names %q, which %s does not "+
+					"declare. Declared fields: %s",
+				step.Name, step.PassFloor.Field, registered.Ref(),
+				describeFields(registered)),
+		}
+	}
+	if !declared.Ordered {
+		return &Error{
+			Rule: "V37a", Step: step.Name, Field: "pass_floor",
+			Message: fmt.Sprintf(
+				"step %q: `pass_floor.field` names %q, but %s declares no "+
+					"`ordered_enum` on it; an exit bar is a position in a "+
+					"declared order, and core does not invent one",
+				step.Name, step.PassFloor.Field, registered.Ref()),
+		}
+	}
+	if !slices.Contains(declared.Enum, step.PassFloor.At) {
+		return &Error{
+			Rule: "V37a", Step: step.Name, Field: "pass_floor",
+			Message: fmt.Sprintf(
+				"step %q: `pass_floor.at` names %q, which is not in the order "+
+					"%s declares for %q (%s); an exit bar is a position in the "+
+					"declared order, and core does not guess one for an unknown "+
+					"value",
+				step.Name, step.PassFloor.At, registered.Ref(),
+				step.PassFloor.Field, quotedList(declared.Enum)),
 		}
 	}
 	return nil
@@ -149,6 +245,28 @@ func validateAggregateSchema(step *Step, registered *Registered) error {
 		}
 	}
 
+	// V28a: `route_at`, when declared, must name a value of the field's
+	// declared order — the routing floor is a POSITION in that order, and a
+	// value with no position has no floor to name (asked at register time
+	// rather than hours into a run). V28 has already required it to be a
+	// non-empty string; this is the half only the schema can answer,
+	// which is why it lives here beside V29 rather than in the pure-bytes
+	// param check.
+	if routeAt, ok := step.Params["route_at"].(string); ok && routeAt != "" {
+		if !slices.Contains(declared.Enum, routeAt) {
+			return &Error{
+				Rule: "V28a", Step: step.Name, Field: "params",
+				Message: fmt.Sprintf(
+					"step %q: `params.route_at` names %q, which is not in the "+
+						"order %s declares for %q (%s); a routing floor is a "+
+						"position in the declared order, and core does not guess "+
+						"one for an unknown value",
+					step.Name, routeAt, registered.Ref(), field,
+					quotedList(declared.Enum)),
+			}
+		}
+	}
+
 	// V30: the conjunction must be SATISFIABLE.
 	return validateAggregateProbe(step, registered, declared)
 }
@@ -157,19 +275,18 @@ func validateAggregateSchema(step *Step, registered *Registered) error {
 // aggregate-shaped document.
 //
 // The aggregate's output is validated at run time against BOTH `aggregate@1`
-// and the step's declared schema (§7.6 E5). An instance schema with
-// `"additionalProperties": false` makes that conjunction unsatisfiable — and the
-// failure would otherwise land at the end of a review fan-out, hours in, on a
-// step whose inputs are already spent. Asking the question at register time
+// and the step's declared schema. An instance schema with
+// `"additionalProperties": false` makes that conjunction unsatisfiable — and
+// the failure would otherwise land at the end of a review fan-out, hours in, on
+// a step whose inputs are already spent. Asking the question at register time
 // costs one validation.
 //
 // THE PROBE INVENTS NOTHING. Every value in it comes from the schema being
 // checked: the reduced value and the members are the field's own declared enum
 // values, and the extra key is drawn from the schema's own declared properties
 // when it has another one. It carries the aggregate output keys and one
-// carried-through G3 key, so the conjunction it tests is the REAL one (review
-// F3) rather than a stripped-down shape that would pass where the real output
-// fails.
+// carried-through key, so the conjunction it tests is the REAL one rather than
+// a stripped-down shape that would pass where the real output fails.
 func validateAggregateProbe(step *Step, registered *Registered, declared schema.Field) error {
 	probe, err := json.Marshal([]any{aggregateProbeElement(registered, declared)})
 	if err != nil {
@@ -221,12 +338,12 @@ func aggregateProbeElement(registered *Registered, declared schema.Field) map[st
 		"members":     []any{value},
 		"held":        false,
 		// `demoted_from` is deliberately ABSENT: it is optional in aggregate@1
-		// and omitted whenever nothing was demoted (D2), so a probe that always
+		// and omitted whenever nothing was demoted, so a probe that always
 		// carried it would test a shape the common case never produces.
 		"operator_resolved": false,
 	}
 
-	// One carried-through G3 key, drawn from the schema's own other declared
+	// One carried-through key, drawn from the schema's own other declared
 	// properties so a `required` sibling does not fail the probe for a reason
 	// that has nothing to do with the conjunction under test. A schema with no
 	// other property gets a synthetic key, which is the case
@@ -297,6 +414,20 @@ func resolveStepSchema(step *Step, resolver SchemaResolver) (*Registered, error)
 				step.Name, step.Payload, step.Payload),
 		}
 	}
+	if errors.Is(err, ErrRetired) {
+		// A retired schema is still registered and still serves the runs
+		// that pinned it, so the refusal names the two ways forward rather
+		// than the register remedy: restore the version, or reference one
+		// that is still in service.
+		return nil, &Error{
+			Rule: "V25a", Step: step.Name, Field: "payload",
+			Message: fmt.Sprintf(
+				"step %q: `payload` names %q, which is registered but retired "+
+					"(deprecated) in this project. Reference a version still in "+
+					"service, or restore it: `docket schema deprecate %s --restore`",
+				step.Name, step.Payload, step.Payload),
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +453,18 @@ func validateStepThresholds(step *Step, registered *Registered) error {
 				Rule: "V21", Step: step.Name, Field: "threshold",
 				Message: fmt.Sprintf("step %q: %v", step.Name, err),
 			}
+		}
+
+		// The reserved `diff.*` family is the engine's own measurement and is
+		// by design never a payload field (DKT-2551): no schema can declare
+		// it, so V21a would refuse it on every payload-declaring step and its
+		// message would tell the author to add `diff.lines` to a schema — the
+		// one thing the design forbids. Its placement and literal are V45 and
+		// V46's, decided in Validate; here it is simply not a schema question.
+		// The match is by exact name (IsDiffField), so `diff.bogus` stays an
+		// undeclared field V21a refuses.
+		if IsDiffField(predicate.Field) {
+			continue
 		}
 
 		field, declared := registered.Field(predicate.Field)

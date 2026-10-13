@@ -13,7 +13,7 @@ import (
 )
 
 // `next --run` — the readiness predicate applied to a whole run, with the one
-// write path a read-shaped verb is allowed (TDD §6.3).
+// write path a read-shaped verb is allowed.
 
 // ReadySteps is one `next --run` answer: the offer — the ready set plus its
 // staged closure (lookahead.go), in stage-major order — and the TRUE total
@@ -21,7 +21,7 @@ import (
 type ReadySteps struct {
 	Steps []model.StepRow
 	// Total is the size of the OFFER (ready rows and staged rows alike)
-	// BEFORE slicing — the v2 truncation contract (reliability-delta §4.2).
+	// BEFORE slicing — the v2 truncation contract.
 	// A post-limit count cannot distinguish "exactly N ready" from "N
 	// returned, many more dropped", which is the silent drop the v2 envelope
 	// exists to close.
@@ -31,7 +31,7 @@ type ReadySteps struct {
 	// so the fact rides out on the result.
 	Reaped []string
 	// HeldReason names the unacknowledged bounded-class reaps holding headroom,
-	// and the flag that clears them (§6.3's closing paragraph, A11's shape).
+	// and the flag that clears them.
 	// "Bounded" is writeClassOf's reading — any class with a finite max, judge
 	// panels included — so the wording must not say "write": a reaped judge
 	// holds its slot for the same reason a reaped writer does, and a message
@@ -42,7 +42,7 @@ type ReadySteps struct {
 	// sees a class that is bounded at 1, no step claimed, and no work offered.
 	// The refusal reports `CondHeadroom` — the existing constant — and this
 	// carries the WHY alongside it. Empty on every run that never reaped a
-	// bounded class, which is D3's dormancy visible on the wire.
+	// bounded class, which is that dormancy visible on the wire.
 	HeldReason string
 	// LoopHeldReason names the rows this offer withheld behind an OPEN loop
 	// body, and the body itself (DKT-61) — the eviction ClaimablePrefix and
@@ -74,11 +74,18 @@ type ReadySteps struct {
 	// resolve themselves as the run progresses and would turn every ordinary
 	// empty offer into a false alarm.
 	UnroutedReason string
+	// Limits is the effective max the scheduler enforces for each class the
+	// offer's Steps carry, and LimitSources names what set each one:
+	// "workflow", "override", or "auto" (ClassCapSource). A class with no
+	// positive max is unbounded and absent from both, the rule Manifest.Limits
+	// follows.
+	Limits       map[string]int
+	LimitSources map[string]string
 }
 
 // NextSteps computes a run's ready steps, reaping expired leases on the way.
 //
-// THIS IS ONE OF THE TWO PLACES A READ-SHAPED VERB MAY WRITE (§6.3: "lazy lease
+// THIS IS ONE OF THE TWO PLACES A READ-SHAPED VERB MAY WRITE ("lazy lease
 // reaping happens here and at claim, and nowhere else"). Every other read verb —
 // `step show`, `step context`, `run status` — computes effective status and
 // writes nothing, exactly as v6 established for issues.
@@ -103,17 +110,16 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	}
 	defer tx.Rollback()
 
-	// ---- P13: the TTL's lazy auto-abandon, BEFORE the refusal is evaluated. -
+	// ---- The TTL's lazy auto-abandon, BEFORE the refusal is evaluated. ------
 	//
-	// This is the one lazy path stage 6 adds, and the one engine-spec §2 names
-	// explicitly ("a dispatch TTL lazily auto-abandoned by `next` (event-logged)").
-	// It runs FIRST because P16 requires the same invocation to answer: a relay
-	// that crashed and came back must not have to poll twice to get work, which
-	// is the same reasoning that puts the reap and the readiness pass in one
-	// transaction.
+	// This is the one lazy path stage 6 adds: a dispatch TTL lazily
+	// auto-abandoned by `next`, event-logged. It runs FIRST because the same
+	// invocation must answer: a relay that crashed and came back must not have
+	// to poll twice to get work, which is the same reasoning that puts the reap
+	// and the readiness pass in one transaction.
 	//
-	// P17 is the deliberate narrowing that lives in what this is NOT: `claim`
-	// does not auto-abandon. Reaping is confined to `next`/`claim` because both
+	// The deliberate narrowing lives in what this is NOT: `claim` does not
+	// auto-abandon. Reaping is confined to `next`/`claim` because both
 	// are scheduling decisions about ONE STEP; a dispatch is about a BATCH, and
 	// expiring one from a single-step verb would let a claim silently unwedge a
 	// run whose relay is still alive.
@@ -131,19 +137,18 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// An expired step returns to `pending` with its lease cleared. `attempt` is
 	// NOT incremented here: the claim that died already incremented it, and the
 	// next claim will increment again, so the trail counts one attempt per
-	// claim for all time (claims-leases §5) — which is exactly what §9 item 4's
-	// "the attempt trail is complete" asks for. What IS counted here is the
-	// OUTCOME: the reap bumps `reaped_claims` (DKT-490), so the row itself says
-	// this spent attempt was a silence, not a failure.
+	// claim for all time, so the attempt trail is complete. What IS counted
+	// here is the OUTCOME: the reap bumps `reaped_claims` (DKT-490), so the row
+	// itself says this spent attempt was a silence, not a failure.
 	//
-	// Stage 6 moved the body into reapExpiredTx, SHARED WITH `dispatch open`,
-	// because §5.2 P5 requires that verb to perform "the same lazy reap `next`
-	// does" — and two scheduling verbs reaping differently is a bug with no
-	// symptom until a manifest disagrees with the `next` that follows it. The
-	// shared body also writes §6.4's `reap_acks` row.
+	// Stage 6 moved the body into reapExpiredTx, SHARED WITH `dispatch open`
+	// and `dispatch close`, because those verbs must perform "the same lazy
+	// reap `next` does" — and scheduling verbs reaping
+	// differently is a bug with no symptom until a manifest disagrees with the
+	// `next` that follows it. The shared body also writes the `reap_acks` row.
 	//
-	// IT RUNS BEFORE THE REFUSAL, and that ordering is required by D1's own
-	// stated resolution rather than being a convenience. §5.8 D1 says the way
+	// IT RUNS BEFORE THE REFUSAL, and that ordering is required by the
+	// discrepancy's stated resolution rather than being a convenience. The way
 	// out of a claimed-but-unrecorded discrepancy is that "the step's TTL
 	// lapses, `next` reaps it, and the discrepancy dissolves". If the refusal
 	// were evaluated first, a step whose lease had lapsed would be reported as a
@@ -160,16 +165,16 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		return nil, err
 	}
 
-	// ---- P24/P25/P26: the refusal. -----------------------------------------
+	// ---- The refusal. ------------------------------------------------------
 	//
-	// engine-core §5: `next` REFUSES while a dispatch is open or while
+	// `next` REFUSES while a dispatch is open or while
 	// discrepancies exist — "relay drift stalls loudly instead of proceeding
 	// around its own mess".
 	//
-	// IT IS A CONFLICT, NOT AN EMPTY READY SET (P26). An empty set means
+	// IT IS A CONFLICT, NOT AN EMPTY READY SET. An empty set means
 	// "nothing to do"; a refusal means "I will not answer until you reconcile".
 	// A relay cannot distinguish those from a zero-length list, and conflating
-	// them is precisely the silent proceeding §2 forbids. The refusal is
+	// them is precisely the silent proceeding the engine forbids. The refusal is
 	// returned before the readiness pass runs, so no partial answer escapes —
 	// and because it returns an error, the reap above is rolled back with it.
 	// That is correct: a refused call must not half-advance the run.
@@ -177,7 +182,7 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		return nil, err
 	}
 
-	// ---- J5's failure half: a completed join that missed its quorum. -------
+	// ---- The join's failure half: a completed join that missed its quorum. -
 	//
 	// It runs BEFORE the readiness pass so a miss resolved here is reflected in
 	// the same call's offer, for the same reason the reap is: a dispatcher
@@ -190,8 +195,8 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// ---- The readiness pass. ----------------------------------------------
 	//
 	// Shared with `dispatch open` (readyRows, dispatch.go) rather than
-	// reimplemented here — P1's one code path. Sharing it also means the
-	// re-derived pass below, after a driver routes something, cannot drift
+	// reimplemented here — one code path. Sharing it also means the
+	// re-derived passes below, after a driver routes something, cannot drift
 	// from this one's ordering, truncation, or staging rules.
 	rows, total, ready, err := readyRows(sched, ttls, limit)
 	if err != nil {
@@ -205,119 +210,172 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 	// The offer now carries STAGED rows — previews of steps this wave's own
 	// recordings will ready — and neither driver may touch one: phase 2's
 	// trigger is "the first engine invocation that OBSERVES THE STEP READY"
-	// (§8.1), and an action driven early would run against inputs that do not
+	// and an action driven early would run against inputs that do not
 	// exist yet. The ready prefix is read off the rendered status rather than
 	// re-asking the predicate, so the drivers act on exactly the set this
-	// response calls ready.
+	// response calls ready — on every pass of the loop below, each of which
+	// re-renders the offer before it drives.
 	ready = readyOnly(rows, ready)
 
-	// ---- The vote lifecycle (gates-trust §8.1 phases 2, 4, and 5). ---------
+	// ---- The engine-run lifecycles, driven to quiescence. ------------------
 	//
-	// AFTER the commit, because the proposal machinery opens its own
-	// transactions and internal/db caps the pool at one connection — calling it
-	// from inside the transaction above would deadlock rather than fail.
+	// AFTER the commit, because the proposal machinery and the action saga
+	// open their own transactions and internal/db caps the pool at one
+	// connection — calling either from inside the transaction above would
+	// deadlock rather than fail.
 	//
-	// `next` is the driver because §8.1 phase 2's trigger is "the first engine
+	// `next` is the driver because phase 2's trigger is "the first engine
 	// invocation that observes the step ready", and this is that invocation.
 	// Nothing is scheduled and no daemon watches: the lifecycle advances when
 	// somebody asks what is ready, which is the same laziness the saga's resume
-	// uses.
-	opened, voteRouted, err := e.driveVoteSteps(
-		conn, defs, pendingVoteSteps(sched), ready, sched.holdTally, nowMS)
-	if err != nil {
-		return nil, err
-	}
-	// The proposal a phase-2 open just created, onto the rows this call already
-	// rendered — the scheduler's snapshot predates it by construction. Keyed by
-	// (issue, instance), not instance alone (DKT-65): two issues' vote steps
-	// can render the identical instance string. Superseded below when a driver
-	// routed something and the whole snapshot is re-derived — this patch is
-	// what a plain phase-2 open (no resolution yet, so no recompute) leaves in
-	// place.
-	for i := range rows {
-		key := voteStepKey{Issue: rows[i].Issue, Instance: rows[i].Instance}
-		if id := opened[key]; id != 0 && rows[i].Proposal == "" {
-			rows[i].Proposal = model.FormatProposalID(id)
-		}
-	}
-
-	// ---- The action lifecycle (§6.15 as amended). ----------------
+	// uses. The action lifecycle rides in the same slot for
+	// the same reason: an action step is the engine's own work, and `next` is
+	// the invocation that observes it ready. A dispatcher never claims one —
+	// `claim` refuses — so if `next` did not drive them, every run in the
+	// fixture would stop dead at `reconcile` with nothing in the system able to
+	// move it.
 	//
-	// The SAME laziness, for the same reason, in the same slot: an action step
-	// is the engine's own work, and `next` is the invocation that observes it
-	// ready. A dispatcher never claims one — `claim` refuses — so if `next` did
-	// not drive them, every run in the fixture would stop dead at `reconcile`
-	// with nothing in the system able to move it.
-	actionRouted, err := e.driveActionSteps(conn, ready, nowMS)
-	if err != nil {
-		return nil, err
-	}
-
-	// ---- DKT-55: read-your-writes. -----------------------------------------
-	//
-	// The rows above are the readiness pass's OWN committed snapshot, taken
-	// before either driver ran (the pool-of-one ordering the vote-lifecycle
-	// comment explains). A driver that actually routed something — a tally
-	// resolved, an action ran — leaves that snapshot stale: it can still say
-	// `ready` for a step this same call just decided, and it cannot show a
-	// step that only became ready because a routed hold un-defered its
-	// aggregate. RUN-4 measured the consequence: a relay misread a decided
-	// gate as undecided and a strict conductor improvised a dispatch to
-	// "force" routing that had already happened.
-	//
-	// Gated on the drivers' own report of whether they routed anything, so the
-	// ordinary call — nothing for either driver to advance — still pays
-	// exactly the one scheduler pass above. The connection-pool cap of 1 rules
-	// out a second pass on EVERY call, not on the routed ones, which is the
-	// distinction this branch exists to make.
+	// A LOOP, for drive.go's reason: routing cascades. An action's routing
+	// readies the action behind it, or a vote step whose ballot phase 2 must
+	// open, and one pass over the first offer's ready prefix left such a step
+	// rendered `ready` with no execution and no proposal until the next poll —
+	// a one-poll gap for a vote row, and for an action row a gap no relay can
+	// close, since nothing but the engine may run one. Each pass drives the
+	// ready prefix of the offer as it stands; a pass that routed anything
+	// re-derives the offer (DKT-55, below) and drives again, until a pass
+	// routes nothing. The pass count is bounded by the run's step count plus
+	// one, as DriveRunLifecycles bounds its own: every routing pass moves at
+	// least one step off `ready`, so a hypothetical non-converging chain is an
+	// engine fault the bound turns from a hang into a finished call. A held
+	// step a pass materializes is outside that count and need not be in it:
+	// nobody decides it inside this call, so it routes nothing. The bound stops
+	// the DRIVING and never the re-derivation, so the rows returned always
+	// postdate the last routing this call performed.
 	loopHeld := sched.LoopHoldReason()
 	budgetHeld := sched.BudgetHoldReason()
 	unroutedHeld := sched.UnroutedHoldReason()
-	if voteRouted || actionRouted {
+	snap := sched
+	for pass := 0; ; pass++ {
+		// ---- The vote lifecycle (phases 2, 4, and 5). -----------------------
+		opened, voteRouted, err := e.driveVoteSteps(
+			conn, defs, pendingVoteSteps(snap), ready, snap.holdTally, nowMS)
+		if err != nil {
+			return nil, err
+		}
+		// The proposal a phase-2 open just created, onto the rows this pass
+		// rendered — the snapshot predates it by construction. Keyed by
+		// (issue, instance), not instance alone (DKT-65): two issues' vote
+		// steps can render the identical instance string. Superseded when the
+		// pass routed something and the whole snapshot is re-derived — this
+		// patch is what a plain phase-2 open (no resolution yet, so no
+		// recompute) leaves in place.
+		for i := range rows {
+			key := voteStepKey{Issue: rows[i].Issue, Instance: rows[i].Instance}
+			if id := opened[key]; id != 0 && rows[i].Proposal == "" {
+				rows[i].Proposal = model.FormatProposalID(id)
+			}
+		}
+
+		// ---- The action lifecycle. -----------------------------------------
+		actionRouted, err := e.driveActionSteps(conn, ready, nowMS)
+		if err != nil {
+			return nil, err
+		}
+		if !voteRouted && !actionRouted {
+			break
+		}
+
+		// ---- DKT-55: read-your-writes. -------------------------------------
+		//
+		// The rows above are the readiness pass's OWN committed snapshot, taken
+		// before either driver ran (the pool-of-one ordering explained above).
+		// A driver that actually routed something — a tally resolved, an
+		// action ran — leaves that snapshot stale: it can still say `ready`
+		// for a step this same call just decided, and it cannot show a step
+		// that only became ready because a routed hold un-defered its
+		// aggregate. RUN-4 measured the consequence: a relay misread a decided
+		// gate as undecided and a strict conductor improvised a dispatch to
+		// "force" routing that had already happened.
+		//
+		// Gated on the drivers' own report of whether they routed anything
+		// (the break above), so the ordinary call — nothing for either driver
+		// to advance — still pays exactly the one scheduler pass above. The
+		// connection-pool cap of 1 rules out a second pass on EVERY call, not
+		// on the routed ones, which is the distinction the break exists to
+		// make.
 		fresh, err := readySnapshot(conn, runID, defs, nowMS)
 		if err != nil {
 			return nil, err
 		}
-		rows, total, _, err = readyRows(fresh, ttls, limit)
+		rows, total, ready, err = readyRows(fresh, ttls, limit)
 		if err != nil {
 			return nil, err
 		}
+		ready = readyOnly(rows, ready)
 		// The re-derived snapshot's own loop and budget holds ride back with
-		// it — the first pass's are stale for the same reason its rows were
+		// it — the previous pass's are stale for the same reason its rows were
 		// (DKT-61, DKT-242, DKT-470).
 		loopHeld = fresh.LoopHoldReason()
 		budgetHeld = fresh.BudgetHoldReason()
 		unroutedHeld = fresh.UnroutedHoldReason()
+		snap = fresh
+		if pass >= len(sched.Steps()) {
+			break
+		}
 	}
 
-	// §6.3's closing paragraph: the refusal reports `CondHeadroom`, and `next`
+	// The refusal reports `CondHeadroom`, and `next`
 	// ADDITIONALLY names the unacknowledged reaps, because a headroom denial
 	// with nothing running is otherwise baffling. The rows come from the same
 	// snapshot the predicate counted, so the message cannot name a different set
 	// of reaps from the one that caused the denial.
+	//
+	// The caps come from snap, the snapshot the returned rows were rendered
+	// from, so they describe the classes this offer actually carries.
+	limits, limitSources := offeredClassCaps(snap.ClassCaps(), rows)
 	return &ReadySteps{
 		Steps: rows, Total: total, Reaped: reaped,
 		HeldReason:       ReapHoldReason(sched.UnacknowledgedReaps()),
 		LoopHeldReason:   loopHeld,
 		BudgetHeldReason: budgetHeld,
 		UnroutedReason:   unroutedHeld,
+		Limits:           limits,
+		LimitSources:     limitSources,
 	}, nil
+}
+
+// offeredClassCaps narrows the scheduler's class caps to the classes the
+// offered rows carry, split into ReadySteps' cap and source maps. ClassCaps
+// already omits unbounded classes.
+func offeredClassCaps(caps map[string]ClassCap, rows []model.StepRow) (map[string]int, map[string]string) {
+	limits := make(map[string]int)
+	sources := make(map[string]string)
+	for _, row := range rows {
+		c, ok := caps[row.Class]
+		if !ok {
+			continue
+		}
+		limits[row.Class] = c.Max
+		sources[row.Class] = string(c.Source)
+	}
+	return limits, sources
 }
 
 // driveActionSteps runs every ready action step engine-side, and reports
 // whether it actually ran one — the DKT-55 signal NextSteps uses to decide
-// whether the rows it already rendered need re-deriving. Every action it
-// drives moves that step's status away from the `ready` its row still
-// claims, so any run through the loop body makes the prior snapshot stale.
+// whether the rows it already rendered need re-deriving and driving again.
+// Every action it drives moves that step's status away from the `ready` its
+// row still claims, so any run through the loop body makes the prior snapshot
+// stale.
 //
 // A step already in the saga is left to the ordinary resume — RunActionStep is
 // idempotent, but skipping the call keeps a `next` over a held step from
-// re-reading a saga that H9 already decided will not advance. Skipped
+// re-reading a saga that already decided it will not advance. Skipped
 // entirely, it reports no route: nothing this call did makes the caller's
 // rows stale.
 //
 // An error here STOPS the loop and fails the call, exactly as the vote driver's
-// does. It is not a step failure being swallowed: B3 already routes an action
+// does. It is not a step failure being swallowed: the saga already routes an action
 // that cannot run per its `on_fail`, so anything reaching here is an engine
 // fault — a database the next step would hit too — and reporting it is more
 // useful than continuing over it.
@@ -335,12 +393,12 @@ func (e *Engine) driveActionSteps(conn *sql.DB, ready []*db.Step, nowMS int64) (
 	return routed, nil
 }
 
-// driveVoteSteps advances vote steps through §8.1's lifecycle.
+// driveVoteSteps advances vote steps through the vote lifecycle.
 //
 // Phase 2 opens a proposal for a step that has none; phase 4 reads the outcome
 // once the proposal leaves `open`; phase 5 routes on it. A step whose proposal
 // is still open is left alone — that is phase 3, waiting on voters, and nothing
-// in core casts for them (§8.4: "No auto-casting").
+// in core casts for them ("No auto-casting").
 //
 // THE TWO HALVES FOLLOW DIFFERENT SETS (DKT-468). Phase 2 follows the OFFER:
 // a ballot opens when the step's turn has come, so it runs only for steps in
@@ -366,11 +424,12 @@ func (e *Engine) driveActionSteps(conn *sql.DB, ready []*db.Step, nowMS int64) (
 // voter needs.
 //
 // It also returns whether phase 5 routed a step — the DKT-55 signal
-// NextSteps uses to decide the rows it already rendered need re-deriving.
-// Opening a proposal (phase 2) does not set it: the row a fresh proposal
-// belongs to is still genuinely ready, and the patch above already carries
-// its id. Only routing does, since it moves the step off `ready` for real
-// and can un-defer an aggregate that readies a step this call never saw.
+// NextSteps uses to decide the rows it already rendered need re-deriving and
+// driving again. Opening a proposal (phase 2) does not set it: the row a
+// fresh proposal belongs to is still genuinely ready, and the patch above
+// already carries its id. Only routing does, since it moves the step off
+// `ready` for real and can un-defer an aggregate that readies a step this
+// call never saw.
 func (e *Engine) driveVoteSteps(
 	conn *sql.DB, defs map[int]*workflow.Definition, candidates, ready []*db.Step,
 	tally holdTally, nowMS int64,
@@ -419,7 +478,19 @@ func (e *Engine) driveVoteSteps(
 		if err != nil {
 			return nil, false, err
 		}
-		if outcome == nil || outcome.Verdict == "" {
+		// A CLOSED proposal carries no verdict but is not still open: it was
+		// retired without a tally. For an ordinary vote step that is the same
+		// no-op it always was, but a panel some step is SUSPENDED behind must
+		// still be routed (DKT-1901) — the suspension may not outlive the panel,
+		// or the step waits on a question nobody can answer.
+		// Narrowed to TRIAGING panels by their declared mapping (V40c requires
+		// one on any panel a step routes to), so every other workflow's closed
+		// proposal stays the no-op it has always been rather than re-routing on
+		// every `next`.
+		closedWithoutTally := outcome != nil &&
+			outcome.Status == model.ProposalStatusClosed &&
+			len(spec.OnFailRoutes) > 0
+		if outcome == nil || (outcome.Verdict == "" && !closedWithoutTally) {
 			continue
 		}
 		if err := routeVoteStep(conn, step, defs[step.WorkflowID], spec, outcome, nowMS); err != nil {
@@ -474,10 +545,10 @@ func pendingVoteSteps(sched *Scheduler) []*db.Step {
 	return out
 }
 
-// stepRow renders one step into §11.4's `next row` shape.
+// stepRow renders one step into the `next` row shape.
 //
 // The step's rendered STATUS is `ready`, computed — never read from the column,
-// which says `pending` (§6.2: "`ready` is computed, never stored as intent").
+// which says `pending` ("`ready` is computed, never stored as intent").
 func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, error) {
 	metadata, err := decodeMetadata(step.Metadata)
 	if err != nil {
@@ -501,7 +572,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		}
 	}
 
-	return model.StepRow{
+	row := model.StepRow{
 		Step:     model.FormatStepID(step.ID),
 		Instance: step.Instance,
 		Issue:    model.FormatID(step.IssueID),
@@ -511,13 +582,14 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		Proposal: proposal,
 		// Human and vote steps carry no executor and the field is omitted for
 		// them, so a dispatcher that spawns on every row cannot spawn a worker
-		// for a gate by reading an empty string as a hint (§6.15).
+		// for a gate by reading an empty string as a hint.
 		Executor: step.Executor,
 		Class:    step.Class,
 		// The issue's frozen labels, so a dispatcher can apply label-keyed
 		// routing policy BEFORE it spawns. Without them every such rule fell
 		// through to its default silently (see model.StepRow.Labels).
 		Labels:  sched.LabelsFor(step.IssueID),
+		Size:    sched.SizeFor(step.IssueID),
 		Attempt: step.Attempt,
 		// The outcome breakdown rides beside the count it explains (DKT-490):
 		// a dispatcher deciding whether to escalate reads how many of those
@@ -525,11 +597,43 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		// — which also counts claims that were merely reaped.
 		FailedAttempts: step.FailedAttempts,
 		ReapedClaims:   step.ReapedClaims,
-		ExpectedCost:   step.ExpectedCost,
-		LeaseTTLS:      int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
-		Status:         db.StepReady,
-		Metadata:       metadata,
-	}, nil
+		// The last claim's own ending (DKT-1279), beside the tally above: a
+		// router deciding how to treat THIS re-offer needs to know whether
+		// the attempt it follows was reaped or failed, not how many of each
+		// this step has ever had.
+		PriorAttemptEnd: step.LastClaimEnd,
+		// The loop history an exhausted fix loop left (model.StepRow's
+		// LoopRoundsRun), zero on every row outside one.
+		LoopRoundsRun:     step.LoopRoundsRun,
+		LoopTriggerStep:   step.LoopTriggerStep,
+		LoopLatestVerdict: step.LoopLatestVerdict,
+		LoopCap:           step.LoopCap,
+		ExpectedCost:      step.ExpectedCost,
+		LeaseTTLS:         int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
+		Status:            db.StepReady,
+		Metadata:          metadata,
+	}
+
+	// Routing — model/effort/variant on an executor row, voter_assignments on
+	// a vote row — rides on a row the run can still OFFER, and only there.
+	// The escalation walk is keyed by recorded failures (FailedAttempts,
+	// plus round hops for a listed round executor), and a `step fail`
+	// recorded after a claim moves that key without the claim itself
+	// changing, so resolving a claimed, running, or finished step here
+	// could diverge from the tier it actually ran under; the routing a
+	// claim ran under is in its claim metadata. A terminal run offers
+	// nothing, so its rows never open the pinned file — a done run stays
+	// readable after the corpus its policy.toml was pinned from has moved on.
+	if step.Status == db.StepPending && !sched.run.Status.Terminal() {
+		policy, err := sched.policy.load()
+		if err != nil {
+			return model.StepRow{}, err
+		}
+		if err := resolveRowRouting(policy, &row); err != nil {
+			return model.StepRow{}, err
+		}
+	}
+	return row, nil
 }
 
 // StepRowFor renders one step's `next row` at its EFFECTIVE status, for the
@@ -573,6 +677,7 @@ type StepListEntry struct {
 	// inventory row too: `step list` is where a caller reconciling this
 	// listing against a `run repin` CONFLICT sees WHICH `ready` rows still
 	// carry an unreaped claim the repin is refusing over.
+	// On a waiting-human run, Scheduler.Expired is false, so this field stays unset.
 	LeaseExpired bool `json:"lease_expired,omitempty"`
 	Attempt      int  `json:"attempt"`
 	// FailedAttempts / ReapedClaims are StepRow's fields of the same name
@@ -580,13 +685,24 @@ type StepListEntry struct {
 	// scanning a run asks "why is this step on attempt 3", and the breakdown
 	// is the answer — how many of those claims failed outright vs were reaped
 	// with nothing measured.
-	FailedAttempts int     `json:"failed_attempts,omitempty"`
-	ReapedClaims   int     `json:"reaped_claims,omitempty"`
-	ExpectedCost   float64 `json:"expected_cost"`
+	FailedAttempts int `json:"failed_attempts,omitempty"`
+	ReapedClaims   int `json:"reaped_claims,omitempty"`
+	// PriorAttemptEnd is StepRow's field of the same name (DKT-1279), on the
+	// inventory row too: how the step's MOST RECENT claim ended, "reaped" or
+	// "failed", never a tally the breakdown above already gives.
+	PriorAttemptEnd string `json:"prior_attempt_end,omitempty"`
+	// ParkClass is why a `waiting-human` row parked, as a closed enum
+	// (DKT-1900). It belongs on the INVENTORY row because `step list` is where
+	// a conductor scanning a run for parked work decides which parks it can
+	// route itself and which need a panel — a question the reason sentence
+	// beside it cannot be asked programmatically. Empty on every row that is
+	// not parked.
+	ParkClass    db.ParkClass `json:"park_class,omitempty"`
+	ExpectedCost float64      `json:"expected_cost"`
 }
 
 // RunStepList answers `docket step list --run RUN-N`: every step of one run,
-// with its EFFECTIVE status (§6.2) and expected cost, in the (issue, id)
+// with its EFFECTIVE status and expected cost, in the (issue, id)
 // order ListRunSteps defines.
 //
 // It exists because no read verb enumerated a run's steps (DKT-54): `run
@@ -602,7 +718,7 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	if err != nil {
 		return nil, err
 	}
-	tx, err := conn.Begin()
+	tx, err := beginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s's steps: %w", model.FormatRunID(runID), err)
 	}
@@ -616,18 +732,20 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	out := make([]StepListEntry, 0, len(steps))
 	for _, step := range steps {
 		out = append(out, StepListEntry{
-			Step:           model.FormatStepID(step.ID),
-			Run:            model.FormatRunID(runID),
-			Instance:       step.Instance,
-			Issue:          model.FormatID(step.IssueID),
-			Kind:           step.Kind,
-			Status:         EffectiveStatus(sched, step),
-			BlockedReason:  BlockedReason(sched, step),
-			LeaseExpired:   sched.Expired(step),
-			Attempt:        step.Attempt,
-			FailedAttempts: step.FailedAttempts,
-			ReapedClaims:   step.ReapedClaims,
-			ExpectedCost:   step.ExpectedCost,
+			Step:            model.FormatStepID(step.ID),
+			Run:             model.FormatRunID(runID),
+			Instance:        step.Instance,
+			Issue:           model.FormatID(step.IssueID),
+			Kind:            step.Kind,
+			Status:          EffectiveStatus(sched, step),
+			BlockedReason:   BlockedReason(sched, step),
+			LeaseExpired:    sched.Expired(step),
+			Attempt:         step.Attempt,
+			FailedAttempts:  step.FailedAttempts,
+			ReapedClaims:    step.ReapedClaims,
+			PriorAttemptEnd: step.LastClaimEnd,
+			ParkClass:       step.ParkClass,
+			ExpectedCost:    step.ExpectedCost,
 		})
 	}
 	return out, nil
@@ -650,7 +768,7 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 		return nil, err
 	}
 	issue := model.FormatID(issueID)
-	var out []StepListEntry
+	out := make([]StepListEntry, 0)
 	for _, runID := range runIDs {
 		rows, err := RunStepList(conn, runID, nowMS)
 		if err != nil {
@@ -665,7 +783,7 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 	return out, nil
 }
 
-// EffectiveStatusCounts rolls one run's steps up by EFFECTIVE status (§6.2),
+// EffectiveStatusCounts rolls one run's steps up by EFFECTIVE status,
 // for `run status` — the same status LoadStepView and RunStepList report, so
 // the rollup can never contradict `step show`/`step list` (DKT-468).
 //
@@ -676,14 +794,14 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 // no way to tell which surface was lying. Neither was — they answered
 // different questions — but two answers to "what is this step's status" is
 // exactly the divergence the effective-status discipline exists to prevent.
-// READ-ONLY, like every §6.2 computation: the transaction is always rolled
+// READ-ONLY, like every effective-status computation: the transaction is always rolled
 // back and no reap runs.
 func EffectiveStatusCounts(conn *sql.DB, runID int, nowMS int64) ([]model.StatusCount, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := conn.Begin()
+	tx, err := beginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"counting %s's step statuses: %w", model.FormatRunID(runID), err)
@@ -708,9 +826,9 @@ func EffectiveStatusCounts(conn *sql.DB, runID int, nowMS int64) ([]model.Status
 	return out, nil
 }
 
-// EffectiveStatus is §6.2's computed status, for any read verb.
+// EffectiveStatus is the computed status, for any read verb.
 //
-// A `pending` step reads as `ready` when the §6.3 predicate holds. A claimed
+// A `pending` step reads as `ready` when the readiness predicate holds. A claimed
 // step whose lease has LAPSED reads as `pending` — the v6 discipline, computed
 // at read and never written back — so "status never lies because nobody called
 // next" is true for steps as it is for leases. NOTHING HERE WRITES.
@@ -738,7 +856,7 @@ func EffectiveStatus(sched *Scheduler, step *db.Step) string {
 // BlockedReason names WHY a step is not `ready`, "" for any step EffectiveStatus
 // does not render `pending` (DKT-470's second fix).
 //
-// EffectiveStatus already asks the §6.3 predicate and keeps only the bool;
+// EffectiveStatus already asks the readiness predicate and keeps only the bool;
 // this asks the same question over the same snapshot and keeps the
 // ReadyCondition instead — the two cannot disagree because they walk the
 // identical branches. Without it, an operator staring at `step show` on a
@@ -786,14 +904,14 @@ func decodeMetadata(stored string) (map[string]any, error) {
 	return out, nil
 }
 
-// ttlConfig is the `docket config` half of §6.4's TTL resolution: the
+// ttlConfig is the `docket config` half of the TTL resolution: the
 // per-class keys and the default, read once per verb rather than per row.
 type ttlConfig struct {
 	perClass map[string]time.Duration
 	fallback time.Duration
 }
 
-// forClass resolves the lease TTL for a step, in §6.4's stated precedence:
+// forClass resolves the lease TTL for a step, in this precedence:
 //
 //  1. the workflow's `[limits] <class>.lease_ttl`
 //  2. `docket config lease.ttl.<class>`
@@ -817,7 +935,7 @@ func (t ttlConfig) forClass(limit workflow.Limit, class string) time.Duration {
 //
 // It resolves through db.LeaseTTL, which already implements the
 // `lease.ttl.<class>` -> `lease.ttl.default` fallback v6 established — so the
-// config half of §6.4's precedence cannot drift from what `issue claim` does.
+// config half of the precedence cannot drift from what `issue claim` does.
 //
 // The per-class values are read ONCE per verb rather than per row: a run with
 // four `review` siblings would otherwise issue four identical config lookups,

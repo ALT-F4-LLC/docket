@@ -51,7 +51,7 @@ func TestRoundDeltaBaseSkipsInheritedIntegration(t *testing.T) {
 	gitRun(t, execRoot, "worktree", "add", "-q", w2)
 	gitRun(t, w2, "commit", "--allow-empty", "-q", "-m", "round 2")
 
-	if got := roundDeltaBase(w2, execRoot, prev); got != sharedHead {
+	if got := roundDeltaBase(w2, execRoot, prev, false); got != sharedHead {
 		t.Errorf("base = %.12s, want the fork point %.12s — prev..HEAD "+
 			"attributes the sibling's commit to this round", got, sharedHead)
 	}
@@ -74,7 +74,7 @@ func TestRoundDeltaBaseKeepsPrevInAPersistedWorktree(t *testing.T) {
 	prev := gitRun(t, w1, "rev-parse", "HEAD")
 	gitRun(t, w1, "commit", "--allow-empty", "-q", "-m", "round 2 in place")
 
-	if got := roundDeltaBase(w1, execRoot, prev); got != prev {
+	if got := roundDeltaBase(w1, execRoot, prev, false); got != prev {
 		t.Errorf("base = %.12s, want prev %.12s — the fork point predates "+
 			"round 1 and would fold its work into this round's delta", got, prev)
 	}
@@ -111,7 +111,7 @@ func TestRoundDeltaBaseAdvancesWhenIntegrationDiverged(t *testing.T) {
 	gitRun(t, execRoot, "worktree", "add", "-q", w2)
 	gitRun(t, w2, "commit", "--allow-empty", "-q", "-m", "round 2")
 
-	if got := roundDeltaBase(w2, execRoot, prev); got != sharedHead {
+	if got := roundDeltaBase(w2, execRoot, prev, false); got != sharedHead {
 		t.Errorf("base = %.12s, want the fork point %.12s — prev %.12s was "+
 			"superseded by the cherry-pick, and prev..HEAD attributes the "+
 			"sibling's commit to this round", got, sharedHead, prev)
@@ -142,7 +142,7 @@ func TestRoundDeltaBaseKeepsPrevInAPersistedWorktreeAfterDivergedIntegration(t *
 	gitRun(t, execRoot, "commit", "--allow-empty", "-q", "-m", "round 1, cherry-picked")
 	gitRun(t, w1, "commit", "--allow-empty", "-q", "-m", "round 2 in place")
 
-	if got := roundDeltaBase(w1, execRoot, prev); got != prev {
+	if got := roundDeltaBase(w1, execRoot, prev, false); got != prev {
 		t.Errorf("base = %.12s, want prev %.12s — the fork point predates "+
 			"round 1 and would fold its work into this round's delta", got, prev)
 	}
@@ -151,10 +151,10 @@ func TestRoundDeltaBaseKeepsPrevInAPersistedWorktreeAfterDivergedIntegration(t *
 // TestRoundDeltaBaseSharedCheckoutKeepsPrev: with no distinct worktree there
 // is no fork point, and the previous round's head remains the base.
 func TestRoundDeltaBaseSharedCheckoutKeepsPrev(t *testing.T) {
-	if got := roundDeltaBase("/same/root", "/same/root", "abc123"); got != "abc123" {
+	if got := roundDeltaBase("/same/root", "/same/root", "abc123", false); got != "abc123" {
 		t.Errorf("base = %q, want prev in the shared checkout", got)
 	}
-	if got := roundDeltaBase("", "/root", "abc123"); got != "abc123" {
+	if got := roundDeltaBase("", "/root", "abc123", false); got != "abc123" {
 		t.Errorf("base = %q, want prev with no dir", got)
 	}
 }

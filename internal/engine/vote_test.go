@@ -16,14 +16,14 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Vote-step execution (TDD docs/tdd/gates-trust.md §8).
+// Vote-step execution.
 //
 // The fixture's `commit-gate` is a human step; the vote path is driven here
 // against a purpose-built definition, because the committed fixture declares no
 // vote step and inventing one in it would change every other test's topology.
 
 // registerVoteRule sets a rule's two config keys, which is what makes it exist
-// (§8.3: "a rule exists iff vote.rule.<name>.threshold is set").
+// (a rule exists iff vote.rule.<name>.threshold is set).
 func registerVoteRule(t *testing.T, conn *sql.DB, name, threshold, criticality string) {
 	t.Helper()
 	err := db.SetConfig(conn, 0, db.VoteRuleThresholdKey(name), threshold)
@@ -34,16 +34,15 @@ func registerVoteRule(t *testing.T, conn *sql.DB, name, threshold, criticality s
 	}
 }
 
-// TestVoteTallyReachesTheExistingFunction is §8's central requirement, asserted
-// by IDENTITY rather than by behavior.
+// TestVoteTallyReachesTheExistingFunction is vote execution's central
+// requirement, asserted by IDENTITY rather than by behavior.
 //
-// engine-core §6 says the existing machinery is "kept and demoted to a gate
-// type", and §8 makes it explicit: CastVote's weighted score, its quorum rule,
-// and its approved/rejected outcome are used UNCHANGED — "not copied, not
-// re-implemented, not parameterized". A behavioral test would pass against a
-// faithful reimplementation, which is exactly the thing forbidden, so this
-// compares the compiled function pointer the engine would reach against the one
-// `docket vote cast` reaches.
+// The existing machinery is "kept and demoted to a gate type", which means
+// CastVote's weighted score, its quorum rule, and its approved/rejected outcome
+// are used UNCHANGED — "not copied, not re-implemented, not parameterized". A
+// behavioral test would pass against a faithful reimplementation, which is
+// exactly the thing forbidden, so this compares the compiled function pointer
+// the engine would reach against the one `docket vote cast` reaches.
 func TestVoteTallyReachesTheExistingFunction(t *testing.T) {
 	// The engine names no tally of its own: it opens a proposal and READS the
 	// status the existing machinery wrote. The proof that no second tally
@@ -59,7 +58,7 @@ func TestVoteTallyReachesTheExistingFunction(t *testing.T) {
 	assertNoTallyArithmeticInVotePath(t)
 }
 
-// TestVoteRuleResolvesFromConfig is §8.3: a rule is a pair of config keys, and
+// TestVoteRuleResolvesFromConfig: a rule is a pair of config keys, and
 // `required_voters` comes from the STEP's voter list rather than from the rule.
 //
 // The split is the point: a rule is about HOW STRICTLY to tally; the step is
@@ -110,7 +109,7 @@ func TestVoteRuleCriticalityDefaults(t *testing.T) {
 	testsupport.Must(t, err, "VoteRuleExists: %v", err)
 	if exists {
 		t.Error("a rule with only a criticality set reports as registered; " +
-			"the threshold is the existence test (§8.3)")
+			"the threshold is the existence test")
 	}
 }
 
@@ -144,7 +143,7 @@ func TestVoteRuleConfigValidation(t *testing.T) {
 	}
 }
 
-// TestVoteProposalIsIdempotentUnderConcurrentInvocations is §8.1 phase 2's
+// TestVoteProposalIsIdempotentUnderConcurrentInvocations is proposal opening's
 // laziness: whichever engine invocation gets there first opens the proposal,
 // and a concurrent second one produces no second proposal.
 func TestVoteProposalIsIdempotentUnderConcurrentInvocations(t *testing.T) {
@@ -301,7 +300,7 @@ func TestLoadVoteProposalsIsScopedPerIssue(t *testing.T) {
 	}
 }
 
-// TestVoteRequiredVotersComesFromTheStep is §8.2: `required_voters` is
+// TestVoteRequiredVotersComesFromTheStep: `required_voters` is
 // len(voters), and the voter hints are OPAQUE — core counts them and never
 // interprets one.
 func TestVoteRequiredVotersComesFromTheStep(t *testing.T) {
@@ -326,7 +325,7 @@ func TestVoteRequiredVotersComesFromTheStep(t *testing.T) {
 	}
 }
 
-// TestVoteOutcomeMapsStatusToVerdict is §8.1 phase 4: approved ⇒ pass,
+// TestVoteOutcomeMapsStatusToVerdict: approved ⇒ pass,
 // rejected ⇒ fail, and still-open ⇒ nothing to route.
 func TestVoteOutcomeMapsStatusToVerdict(t *testing.T) {
 	for _, tc := range []struct {
@@ -336,7 +335,7 @@ func TestVoteOutcomeMapsStatusToVerdict(t *testing.T) {
 		{model.ProposalStatusOpen, ""},
 		{model.ProposalStatusApproved, VerdictPass},
 		{model.ProposalStatusRejected, VerdictFail},
-		// §8.4: a manually committed proposal is observed like any other.
+		// A manually committed proposal is observed like any other.
 		{model.ProposalStatusCommitted, VerdictPass},
 	} {
 		t.Run(string(tc.status), func(t *testing.T) {
@@ -424,7 +423,7 @@ func seedVoteStepInRun(
 	return step
 }
 
-// assertNoTallyArithmeticInVotePath is the structural half of §8's "unchanged"
+// assertNoTallyArithmeticInVotePath is the structural half of the "unchanged"
 // requirement: the engine's vote path must contain NO threshold arithmetic.
 //
 // A behavioral test passes against a faithful reimplementation, which is
@@ -443,7 +442,100 @@ func assertNoTallyArithmeticInVotePath(t *testing.T) {
 	} {
 		if strings.Contains(string(src), forbidden) {
 			t.Errorf("internal/engine/vote.go references %q — the tally is "+
-				"db.CastVote's and must not be re-implemented here (§8)", forbidden)
+				"db.CastVote's and must not be re-implemented here", forbidden)
 		}
+	}
+}
+
+// TestVoteRuleSealedIsResolvedAndStoredAtOpen is DKT-2447: `.sealed` is the
+// rule's third, opt-in dimension. It defaults to false, it resolves beside the
+// threshold, and OpenVoteProposal STORES it on the proposal — so a rule
+// edited after the ballot opened cannot change what a live vote renders.
+func TestVoteRuleSealedIsResolvedAndStoredAtOpen(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.6", "")
+
+	rule, err := resolveVoteRule(conn, 1, "majority")
+	testsupport.Must(t, err, "resolveVoteRule: %v", err)
+	if rule.Sealed {
+		t.Error("a rule with no `.sealed` set resolved sealed; the default is false")
+	}
+
+	err = db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "true")
+	testsupport.Must(t, err, "setting the rule's sealed flag: %v", err)
+	rule, err = resolveVoteRule(conn, 1, "majority")
+	testsupport.Must(t, err, "resolveVoteRule: %v", err)
+	if !rule.Sealed {
+		t.Fatal("`.sealed = true` did not resolve sealed")
+	}
+
+	step, spec := seedVoteStep(t, conn)
+	proposalID, err := OpenVoteProposal(conn, step, spec, nowMS)
+	testsupport.Must(t, err, "OpenVoteProposal: %v", err)
+	proposal, err := db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if !proposal.Sealed || !proposal.SealedOpen() {
+		t.Errorf("proposal opened under a sealed rule reads sealed=%v open=%v, want both true",
+			proposal.Sealed, proposal.SealedOpen())
+	}
+
+	// The flag is a copy taken at open: unsetting the rule afterwards leaves
+	// the live ballot sealed.
+	err = db.SetConfig(conn, 0, db.VoteRuleSealedKey("majority"), "false")
+	testsupport.Must(t, err, "unsetting the rule's sealed flag: %v", err)
+	proposal, err = db.GetProposal(conn, proposalID)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if !proposal.Sealed {
+		t.Error("editing the rule after open changed the proposal's sealed flag")
+	}
+}
+
+// TestVoteRuleSealedConfigValidation: a non-boolean is refused where the
+// operator can see it, at `set` time, in the same way the threshold's range is.
+func TestVoteRuleSealedConfigValidation(t *testing.T) {
+	conn := mustDB(t)
+	for _, tc := range []struct {
+		value   string
+		wantErr bool
+	}{
+		{"true", false}, {"false", false}, {"1", false}, {"0", false},
+		{"yes", true}, {"sealed", true}, {"", true},
+	} {
+		err := db.SetConfig(conn, 0, db.VoteRuleSealedKey("r"), tc.value)
+		if tc.wantErr && err == nil {
+			t.Errorf("SetConfig(.sealed, %q) succeeded, want a refusal", tc.value)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("SetConfig(.sealed, %q): %v", tc.value, err)
+		}
+	}
+}
+
+// TestVoteRuleIgnoresLegacyRosterRow is DKT-2764: `vote.rule.<name>.roster`
+// and `.weighting` are retired, so a rule carries neither, and a legacy row
+// still in the store under the old key changes nothing — a vote step that
+// declares no `roster` routes as open even when the store says `strict`.
+//
+// The row is written straight into `meta` because SetConfig now refuses the
+// key; the store this test models is one written before the retirement.
+func TestVoteRuleIgnoresLegacyRosterRow(t *testing.T) {
+	conn := mustDB(t)
+	fx := seedPinnedVoteStep(t, conn, voteFixture(`executor = "worker"`, ``))
+	_, err := conn.Exec(
+		`INSERT INTO meta (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		"config.vote.rule.majority.roster", "strict")
+	testsupport.Must(t, err, "seeding the legacy row: %v", err)
+
+	rule, err := resolveVoteRule(conn, 1, "majority")
+	testsupport.Must(t, err, "resolveVoteRule: %v", err)
+	if rule.Threshold != 0.6 {
+		t.Errorf("threshold = %v, want 0.6; the legacy row must not disturb the rule", rule.Threshold)
+	}
+
+	_, err = castAs(conn, fx.proposalID, "mallory")
+	testsupport.Must(t, err, "an off-roster cast on a step declaring no roster was refused: %v", err)
+	if n := voteCount(t, conn, fx.proposalID); n != 1 {
+		t.Errorf("the cast left %d vote(s), want 1", n)
 	}
 }

@@ -19,6 +19,16 @@ func (c testCollection) CollectionItems() any      { return c.items }
 func (c testCollection) CollectionTotal() int      { return c.total }
 func (c testCollection) CollectionTruncated() bool { return c.truncated }
 
+// siblingCollection is a Collection that also reports envelope siblings.
+type siblingCollection struct {
+	testCollection
+	siblings map[string]any
+}
+
+func (c siblingCollection) CollectionSiblings() map[string]any { return c.siblings }
+
+// TestV2CollectionEnvelopeShape: a Collection without CollectionSiblings
+// yields exactly items, total and truncated.
 func TestV2CollectionEnvelopeShape(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Writer{
@@ -38,7 +48,7 @@ func TestV2CollectionEnvelopeShape(t *testing.T) {
 		t.Fatalf("data type = %T, want map", raw["data"])
 	}
 
-	// Exactly the three §5 keys, nothing more.
+	// Exactly the three envelope keys, nothing more.
 	for _, key := range []string{"items", "total", "truncated"} {
 		if _, present := data[key]; !present {
 			t.Errorf("v2 data missing %q key", key)
@@ -56,6 +66,37 @@ func TestV2CollectionEnvelopeShape(t *testing.T) {
 	}
 	if items := data["items"].([]any); len(items) != 2 {
 		t.Errorf("items length = %d, want 2", len(items))
+	}
+}
+
+// TestV2CollectionSiblingsBesideEnvelope: a Collection's siblings land beside
+// items, total and truncated, and a sibling naming one of those three does not
+// replace it.
+func TestV2CollectionSiblingsBesideEnvelope(t *testing.T) {
+	var buf bytes.Buffer
+	w := &Writer{
+		JSONMode: true, JSONVersion: JSONV2,
+		Stdout: &buf, Stderr: &bytes.Buffer{},
+	}
+	w.Success(siblingCollection{
+		testCollection: testCollection{items: []string{"a"}, total: 1},
+		siblings:       map[string]any{"limits": map[string]int{"write": 2}, "total": 99},
+	}, "")
+
+	var envelope struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	err := json.Unmarshal(buf.Bytes(), &envelope)
+	testsupport.Must(t, err, "unmarshal: %v", err)
+	if len(envelope.Data) != 4 {
+		t.Errorf("v2 data has %d keys (%v), want items, total, truncated and limits",
+			len(envelope.Data), envelope.Data)
+	}
+	if got := string(envelope.Data["limits"]); got != `{"write":2}` {
+		t.Errorf("limits = %s, want {\"write\":2}", got)
+	}
+	if got := string(envelope.Data["total"]); got != "1" {
+		t.Errorf("total = %s, want the collection's 1, not the sibling's 99", got)
 	}
 }
 

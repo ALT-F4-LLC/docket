@@ -130,9 +130,9 @@ func TestV12RebuildPreservesIdsAndBackfills(t *testing.T) {
 	}
 }
 
-// TestV12PerProjectUniqueness is G5's fix, asserted at the constraint: the
-// same label name and the same workflow name@version coexist across projects
-// and still collide within one.
+// TestV12PerProjectUniqueness is the per-project uniqueness fix, asserted at
+// the constraint: the same label name and the same workflow name@version
+// coexist across projects and still collide within one.
 func TestV12PerProjectUniqueness(t *testing.T) {
 	db := mustOpen(t)
 	if err := Initialize(db); err != nil {

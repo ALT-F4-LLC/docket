@@ -9,13 +9,12 @@ import (
 // `RUN-3` can never be mistaken for a `DKT-3` in an error string or an event.
 const RunIDPrefix = "RUN"
 
-// RunStatus is engine-core §1.1's run machine:
+// RunStatus is the run machine:
 //
 //	planning -> active <-> waiting-human -> done | abandoned
 //
-// All five exist at this stage. The step lifecycle routes into `waiting-human`
-// and `abandoned` in phase 3; what stage 6 adds is the LEDGER ROLLUP, not the
-// statuses.
+// All five exist. The step lifecycle routes into `waiting-human` and
+// `abandoned`; the ledger rollup adds no statuses.
 type RunStatus string
 
 const (
@@ -71,12 +70,12 @@ func ValidateRunStatus(s RunStatus) error {
 }
 
 // Terminal reports whether a run has reached an end state. A terminal run
-// refuses re-activation (RA5) and drops out of `run status --active`.
+// refuses re-activation and drops out of the default `run status` list.
 func (s RunStatus) Terminal() bool {
 	return s == RunDone || s == RunAbandoned
 }
 
-// Run is one `runs` row (TDD §5.1).
+// Run is one `runs` row.
 type Run struct {
 	ID int
 	// ProjectID is the v12 tenancy dimension; zero normalizes to the default
@@ -87,10 +86,10 @@ type Run struct {
 	Request   string
 	Status    RunStatus
 	Reason    string
-	// Budget is `run start --budget N`. It is STORED and enforces nothing
-	// until S6 — accepting it now means the S6 upgrade adds enforcement
-	// rather than a flag, and a flag appearing later would break the
-	// `run start` invocation an S3-era harness scripted.
+	// Budget is `run start --budget N`. It was STORED before anything
+	// enforced it — accepting it early meant the enforcing upgrade added
+	// enforcement rather than a flag, and a flag appearing later would have
+	// broken the `run start` invocation an earlier harness scripted.
 	Budget float64
 	// UsageBudget is the cap over MEASURED usage — what the ledger recorded —
 	// as opposed to Budget, which counts declared expected costs (DKT-238).
@@ -105,7 +104,7 @@ type Run struct {
 	CreatedAtMS   int64
 	UpdatedAtMS   int64
 	RowVersion    int
-	// Execution context (v12, G8): where and on what the run started. Several
+	// Execution context (v12): where and on what the run started. Several
 	// worktrees of one project share a store, and a run that cannot say which
 	// checkout it came from cannot be audited. All empty on runs created
 	// before v12 or outside a checkout.
@@ -208,7 +207,7 @@ func (r *Run) wire() runJSON {
 }
 
 // runVersionedJSON adds the CAS row version, which surfaces under --json=v2
-// only (engine-spec §5) — v1 never consults the Versioned interface.
+// only — v1 never consults the Versioned interface.
 type runVersionedJSON struct {
 	runJSON
 	RowVersion int `json:"row_version"`

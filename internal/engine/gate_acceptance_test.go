@@ -20,17 +20,17 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The remaining §9.2 acceptance cases (TDD docs/tdd/gates-trust.md).
+// The remaining trust acceptance cases.
 //
-// gate_exec_test.go proves §9 item 6 at the runner; these cover the end-to-end
-// shapes, the structural guards, and the flag table.
+// gate_exec_test.go proves the trust criterion at the runner; these cover the
+// end-to-end shapes, the structural guards, and the flag table.
 
-// TestPostActivationBodyEditCannotInject is T3, end to end.
+// TestPostActivationBodyEditCannotInject, end to end.
 //
 // An operator approves an issue body at activation; someone edits the body
 // afterwards to add or alter a fenced command. THE SNAPSHOTTED COMMAND IS WHAT
-// RUNS — S3 harvests from the snapshot, and this stage depends on that rather
-// than re-solving it.
+// RUNS — activation harvests from the snapshot, and the runner depends on that
+// rather than re-solving it.
 func TestPostActivationBodyEditCannotInject(t *testing.T) {
 	conn := mustDB(t)
 	repoRoot := t.TempDir()
@@ -75,10 +75,10 @@ func TestPostActivationBodyEditCannotInject(t *testing.T) {
 	}
 }
 
-// TestRealResultsCarryNoStubField is T11: nothing this stage produces is a
-// stub, and the JSON omits the key entirely rather than emitting `false`.
+// TestRealResultsCarryNoStubField: nothing the real runner produces is a stub,
+// and the JSON omits the key entirely rather than emitting `false`.
 //
-// `stub` means "produced by S3's pass-through". A real result that serialized
+// `stub` means "produced by the pass-through runner". A real result that serialized
 // `stub: false` would still be wrong in a subtler way — it would imply the
 // distinction is live rather than historical.
 func TestRealResultsCarryNoStubField(t *testing.T) {
@@ -96,7 +96,7 @@ func TestRealResultsCarryNoStubField(t *testing.T) {
 	testsupport.Must(t, err, "Execute: %v", err)
 	for _, r := range ex.Results {
 		if r.Stub {
-			t.Errorf("gate %q produced a stubbed result at S4", r.Gate)
+			t.Errorf("gate %q produced a stubbed result from the real runner", r.Gate)
 		}
 	}
 
@@ -110,15 +110,15 @@ func TestRealResultsCarryNoStubField(t *testing.T) {
 	}
 }
 
-// TestReadVerbsNeverExecute is §2.2's structural claim: no read verb reaches
+// TestReadVerbsNeverExecute is a structural claim: no read verb reaches
 // internal/exec.
 //
-// §4 is verbatim that "Read verbs never execute", and this checks it at the
+// Read verbs never execute, and this checks it at the
 // IMPORT GRAPH rather than by driving each verb — a behavioral test only covers
 // the paths it happens to take, while an import a read verb cannot make is a
 // path that cannot exist.
 func TestReadVerbsNeverExecute(t *testing.T) {
-	// The read-shaped verbs named by §2.2, plus the trust reader.
+	// The read-shaped verbs, plus the trust reader.
 	readVerbs := []string{
 		"issue_show.go", "issue_list.go", "issue_log.go", "issue_graph.go",
 		"run_status.go", "workflow_show.go", "workflow_list.go",
@@ -136,7 +136,7 @@ func TestReadVerbsNeverExecute(t *testing.T) {
 		testsupport.Must(t, err, "parsing %s: %v", name, err)
 		for _, imp := range file.Imports {
 			if strings.Contains(imp.Path.Value, "internal/exec") {
-				t.Errorf("%s imports internal/exec; read verbs never execute (§2.2)", name)
+				t.Errorf("%s imports internal/exec; read verbs never execute", name)
 			}
 		}
 	}
@@ -193,9 +193,9 @@ func TestGateResultShapeCarriesNoAgentVocabulary(t *testing.T) {
 	})
 }
 
-// TestReRunnableFlakyMatrix is §7.5's four-way table, one case per row.
+// TestReRunnableFlakyMatrix is the four-way flag table, one case per row.
 //
-// F5 names conflating these two flags as the likely implementation error, so
+// Conflating these two flags is the likely implementation error, so
 // each combination is asserted separately rather than inferred from two
 // independent tests. `flaky` governs re-running WITHIN one gate stage after a
 // failure; `re_runnable` governs re-running AFTER A CRASH.
@@ -237,14 +237,14 @@ func TestReRunnableFlakyMatrix(t *testing.T) {
 				t.Errorf("%d attempts recorded, want %d — `flaky` governs "+
 					"re-running within one stage", len(ex.Results), tc.wantAttempts)
 			}
-			// F3: each attempt is its own row with an ascending ordinal.
+			// Each attempt is its own row with an ascending ordinal.
 			for i, r := range ex.Results {
 				if r.Ordinal != i {
 					t.Errorf("attempt %d has ordinal %d; every attempt is "+
 						"recorded individually", i, r.Ordinal)
 				}
 			}
-			// F4: the verdict is the LAST attempt's.
+			// The verdict is the LAST attempt's.
 			if ex.Verdict != VerdictFail {
 				t.Errorf("verdict = %q, want %q — every attempt failed",
 					ex.Verdict, VerdictFail)
@@ -329,7 +329,7 @@ func fenceGate() workflow.Gate {
 	return workflow.Gate{Name: "checks", Source: "fence:checks"}
 }
 
-// TestActivationReportsFenceTrustStatus is T16: the §7.7 report tells an
+// TestActivationReportsFenceTrustStatus: the activation trust report tells an
 // operator which harvested commands will actually run, BEFORE the run.
 //
 // The gate needs a matching entry regardless, so filing an issue grants
@@ -377,11 +377,11 @@ func TestActivationReportsFenceTrustStatus(t *testing.T) {
 	}
 }
 
-// TestActivationReportEscapesFenceControlBytes is T18 end to end.
+// TestActivationReportEscapesFenceControlBytes, end to end.
 //
 // A fenced command carrying `\x1b[2K\r` would repaint the very line an operator
 // is approving. The report renders it ESCAPED and VISIBLE, while the stored
-// bytes stay exactly what activation hashed — E5, which is what keeps §7.3's
+// bytes stay exactly what activation hashed, which is what keeps the runner's
 // hash verification meaningful.
 func TestActivationReportEscapesFenceControlBytes(t *testing.T) {
 	conn := mustDB(t)
@@ -397,7 +397,7 @@ func TestActivationReportEscapesFenceControlBytes(t *testing.T) {
 		t.Fatalf("got %d reports, want 1", len(reports))
 	}
 
-	// E5: the STORED bytes are unmodified — escaping is a rendering transform.
+	// The STORED bytes are unmodified — escaping is a rendering transform.
 	if reports[0].Command != hostile {
 		t.Error("the report mutated the stored command; escaping happens at " +
 			"the print boundary, so the hash still verifies")
@@ -415,7 +415,7 @@ func TestActivationReportEscapesFenceControlBytes(t *testing.T) {
 		t.Errorf("the escape is not visible in the rendered report: %q", out)
 	}
 
-	// E4: the JSON form carries the RAW bytes, since encoding/json escapes
+	// The JSON form carries the RAW bytes, since encoding/json escapes
 	// controls by contract and the consumer is a program.
 	encoded, err := json.Marshal(reports[0])
 	testsupport.Must(t, err, "Marshal: %v", err)

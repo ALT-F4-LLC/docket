@@ -11,17 +11,17 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// `guard record | spawn` — the two predicates engine-spec §2 assigns to this
-// stage (docs/tdd/runs-dispatch.md §7).
+// `guard record | spawn` — the two dispatch predicates:
 //
-// §2, verbatim: *"`spawn` — proposed rows byte-match the open dispatch and no
-// unacknowledged write reaps; `record` — no unreconciled dispatch."*
+//   - `spawn`: proposed rows byte-match the open dispatch and no
+//     unacknowledged write reaps.
+//   - `record`: no unreconciled dispatch.
 //
-// Both follow guard.go's established §6.12 contract — EXIT 0 ALLOW / EXIT 2 DENY
+// Both follow guard.go's established contract — EXIT 0 ALLOW / EXIT 2 DENY
 // WITH A REASON, independent of the error taxonomy — because a guard's caller
 // tests a boolean rather than mapping a code.
 //
-// THEY WRITE NOTHING, EXCEPT THE ACK (§7.3). `guard record` writes nothing ever;
+// THEY WRITE NOTHING, EXCEPT THE ACK. `guard record` writes nothing ever;
 // `guard spawn` writes ONLY the `reap_acks` update, and only when `--ack-reap` is
 // passed. Neither reaps and neither auto-abandons a dispatch: a guard that
 // mutated scheduling state would make a hook's MERE PRESENCE change a run's
@@ -30,8 +30,8 @@ import (
 
 // GuardRecord answers `docket guard record`: is there no unreconciled dispatch?
 //
-// G2: "unreconciled" is an open dispatch OR any discrepancy (§5.8) — THE SAME
-// TWO PROBES `next` USES (P24/P25), COMPUTED BY THE SAME FUNCTION. That identity
+// "Unreconciled" is an open dispatch OR any discrepancy — THE SAME TWO PROBES
+// `next` USES, COMPUTED BY THE SAME FUNCTION. That identity
 // is the point rather than an economy: a guard and the scheduler disagreeing
 // about whether a run is reconciled would let a harness record into a picture
 // `next` had already refused to extend.
@@ -41,7 +41,7 @@ import (
 // is already wrong. Recording an artifact into that picture is how drift becomes
 // durable.
 //
-// G4: `--run` is OPTIONAL. Without it the guard answers over every non-terminal
+// `--run` is OPTIONAL. Without it the guard answers over every non-terminal
 // run, denying if ANY is unreconciled — matching `guard stop`'s existing
 // all-active-runs shape, so a hook wired once keeps working as runs come and go.
 //
@@ -61,7 +61,7 @@ func GuardRecord(conn *sql.DB, runID, projectID int, nowMS int64) (*GuardVerdict
 			return nil, err
 		}
 		if reason != "" {
-			// G3: the denial names WHICH of the two and the resolution, IN THE
+			// The denial names WHICH of the two and the resolution, IN THE
 			// SAME WORDS `next`'s refusal uses. An operator who has already read
 			// one refusal should not have to learn a second vocabulary for the
 			// same state.
@@ -71,10 +71,10 @@ func GuardRecord(conn *sql.DB, runID, projectID int, nowMS int64) (*GuardVerdict
 	return &GuardVerdict{Allowed: true}, nil
 }
 
-// unreconciledReason is G2's shared computation: the open-dispatch probe and the
+// unreconciledReason is the shared computation: the open-dispatch probe and the
 // discrepancy probe, in `next`'s own order and words.
 //
-// It runs in a transaction it ROLLS BACK unconditionally (G11). The rollback is
+// It runs in a transaction it ROLLS BACK unconditionally. The rollback is
 // the mechanism rather than a cleanup — stronger than "this function has no
 // INSERT", because it also covers anything a helper might write.
 func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
@@ -95,19 +95,19 @@ func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
 		return "", err
 	}
 
-	// THE SAME FUNCTION `next` CALLS. G2 requires the guard and the scheduler to
-	// be unable to disagree, and sharing the code is the only way that stays
+	// THE SAME FUNCTION `next` CALLS. The guard and the scheduler must be
+	// unable to disagree, and sharing the code is the only way that stays
 	// true as either changes.
 	//
-	// G13: this does NOT reap and does NOT auto-abandon, which is the one way
+	// This does NOT reap and does NOT auto-abandon, which is the one way
 	// the guard's answer differs from `next`'s — `next` performs both before it
 	// refuses. The difference is deliberate and it is conservative in the right
 	// direction: the guard may report a state `next` would have cleared, which
 	// costs a hook one denial, while a guard that reaped would have made a
 	// read-shaped hook a scheduling act.
 	if err := refuseIfUnreconciledTx(tx, sched, runID, nowMS); err != nil {
-		// The refusal's MESSAGE becomes the guard's reason, verbatim. That is
-		// G3 mechanically: the guard cannot phrase the state differently from
+		// The refusal's MESSAGE becomes the guard's reason, verbatim. That
+		// keeps the wording identical mechanically: the guard cannot phrase the state differently from
 		// `next` because it does not phrase it at all. A non-refusal error — a
 		// failed read — is propagated as an error, since a guard that reported
 		// "denied" when it could not check would be answering a question it
@@ -121,7 +121,7 @@ func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
 	return "", nil
 }
 
-// guardRunScope resolves G4's optional `--run` into the set of runs to answer
+// guardRunScope resolves the optional `--run` into the set of runs to answer
 // over: the one named, or every non-terminal run.
 //
 // A named run that does not exist is a REFUSAL rather than a vacuous allow. A
@@ -168,12 +168,12 @@ func guardRunScope(conn *sql.DB, runID, projectID int) ([]int, error) {
 
 // SpawnOptions are `guard spawn`'s inputs beyond the run.
 type SpawnOptions struct {
-	// Rows is the JSON array a relay is about to spawn (G6), as raw bytes from
+	// Rows is the JSON array a relay is about to spawn, as raw bytes from
 	// `--rows FILE` or stdin. Nil means the flag was not passed, which is a
-	// DIFFERENT case from an empty array: the first asks only the reap half
-	// (G7), the second proposes spawning nothing.
+	// DIFFERENT case from an empty array: the first asks only the reap half,
+	// the second proposes spawning nothing.
 	Rows []byte
-	// AckSeqs are `--ack-reap SEQ`, repeatable. G10: they are processed BEFORE
+	// AckSeqs are `--ack-reap SEQ`, repeatable. They are processed BEFORE
 	// the predicate, so one invocation both acknowledges and answers — which is
 	// what lets a relay's hook be a single command.
 	AckSeqs []int64
@@ -191,32 +191,40 @@ type SpawnOptions struct {
 	// about a relay spawning a batch the engine never issued, which has
 	// nothing to do with who decides a hold.
 	DecidingVote int
-	NowMS        int64
+	// UsageJoin is `--usage-join` (DKT-3289): the launch claims no step — a
+	// read-only usage join over finished transcripts — so it consumes no
+	// write-class headroom and a reap hold has nothing to protect from it.
+	// Like DecidingVote it relaxes the REAP half only and is event-logged;
+	// unlike it, nothing names a proposal, so the engine enforces the one
+	// thing it can check: a launch that proposes rows is dispatch-bearing
+	// and is denied under the hold.
+	UsageJoin bool
+	NowMS     int64
 }
 
 // GuardSpawn answers `docket guard spawn`: may the relay start this batch?
 //
-// G5 — it allows iff BOTH:
+// It allows iff BOTH:
 //
 //	(a) the proposed rows byte-match the open dispatch, and
 //	(b) no unacknowledged write reaps exist.
 //
-// G7: WITH NO OPEN DISPATCH AND NO `--rows`, (a) IS VACUOUSLY SATISFIED. A
-// harness that does not use dispatch manifests still gets (b) — the reap check —
-// which is the half §2 assigns to this verb BY NAME ("surfaced by `guard
-// spawn`"). Requiring a manifest would make the reap-ack mechanism unavailable
-// to any relay that batches differently, which would be core deciding how a
-// harness must batch.
+// WITH NO OPEN DISPATCH AND NO `--rows`, (a) IS VACUOUSLY SATISFIED. A harness
+// that does not use dispatch manifests still gets (b) — the reap check — which
+// is the half this verb owns BY NAME: unacknowledged reaps are surfaced by
+// `guard spawn`. Requiring a manifest would make the reap-ack mechanism
+// unavailable to any relay that batches differently, which would be core
+// deciding how a harness must batch.
 //
-// G8: WITH `--rows` AND NO OPEN DISPATCH, IT IS A DENIAL, not a vacuous pass.
-// The relay believes it is spawning a batch the engine never issued, and that
+// WITH `--rows` AND NO OPEN DISPATCH, IT IS A DENIAL, not a vacuous pass. The
+// relay believes it is spawning a batch the engine never issued, and that
 // belief is exactly the drift this verb exists to catch.
 //
-// C11'S RESIDUAL, STATED: between this allow and the relay's actual spawn, the
+// THE RESIDUAL, STATED: between this allow and the relay's actual spawn, the
 // dispatch could be abandoned or a lease reaped. THE GUARD IS AN EARLY CHECK,
 // NOT A LOCK, and the real enforcement remains where it has always been —
-// `step claim`'s CAS. This is the same honest bound `guard gate` carries at S3,
-// and it is recorded rather than papered over.
+// `step claim`'s CAS. This is the same honest bound `guard gate` carries, and
+// it is recorded rather than papered over.
 func (e *Engine) GuardSpawn(
 	conn *sql.DB, runID int, opts SpawnOptions,
 ) (*GuardVerdict, error) {
@@ -227,11 +235,13 @@ func (e *Engine) GuardSpawn(
 	if _, err := db.GetRun(conn, runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
+	if opts.UsageJoin && opts.DecidingVote > 0 {
+		return nil, validationErr(usageJoinWithDecidingVote)
+	}
 
-	// G10 / G12: the acks come FIRST and are the ONLY thing this verb writes.
-	// Without `--ack-reap` the transaction below never opens and the verb is a
-	// pure read, which is what §7.3 promises and TestReadVerbsWriteNothing
-	// asserts.
+	// The acks come FIRST and are the ONLY thing this verb writes. Without
+	// `--ack-reap` the transaction below never opens and the verb is a pure
+	// read, which is what TestReadVerbsWriteNothing asserts.
 	if len(opts.AckSeqs) > 0 {
 		if err := applyAcks(conn, runID, opts.AckSeqs, opts.NowMS); err != nil {
 			return nil, err
@@ -245,9 +255,17 @@ func (e *Engine) GuardSpawn(
 		return verdict, err
 	}
 
-	// (b) THE REAP CHECK, which is the half §2 assigns to this verb by name.
-	return spawnReapVerdict(conn, runID, opts.DecidingVote, opts.NowMS)
+	// (b) THE REAP CHECK, which is the half this verb owns by name.
+	// A usage join that proposes rows is not a launch that claims nothing, so
+	// it gets no carve-out (DKT-3289).
+	usageJoin := opts.UsageJoin && opts.Rows == nil
+	return spawnReapVerdict(conn, runID, opts.DecidingVote, usageJoin, opts.NowMS)
 }
+
+// usageJoinWithDecidingVote refuses naming both carve-outs: each relaxes the
+// same reap half for a different reason, and the audit event records one.
+const usageJoinWithDecidingVote = "--usage-join and --deciding-vote are mutually " +
+	"exclusive: a usage join claims nothing and decides nothing"
 
 // decidingVoteCarveOut is DKT-236: the reap hold does not deny the panel that
 // exists to decide it.
@@ -265,7 +283,7 @@ func (e *Engine) GuardSpawn(
 //     bypass with a plausible-looking flag.
 //   - It must be OPEN. A decided proposal is not a decision in progress, so
 //     naming one would let any past vote authorize any future spawn forever.
-//   - It relaxes the REAP half only. Row drift (G6/G8) is a different fact
+//   - It relaxes the REAP half only. Row drift is a different fact
 //     about a different actor and no vote makes it acceptable.
 //
 // The verdict it returns is ALLOWED WITH THE CARVE-OUT NAMED IN ITS REASON, so
@@ -274,17 +292,8 @@ func (e *Engine) GuardSpawn(
 func decidingVoteCarveOut(
 	conn *sql.DB, proposalID int, hold string,
 ) (*GuardVerdict, error) {
-	proposal, err := db.GetProposal(conn, proposalID)
-	if err != nil {
-		return nil, notFoundErr(err,
-			"proposal %s not found; --deciding-vote must name the OPEN proposal "+
-				"this batch exists to decide", model.FormatProposalID(proposalID))
-	}
-	if proposal.Status != model.ProposalStatusOpen {
-		return nil, conflictErr(
-			"proposal %s is %s, not open; --deciding-vote admits a panel that is "+
-				"deciding a live question, and a decided one authorizes nothing",
-			model.FormatProposalID(proposalID), proposal.Status)
+	if err := requireDecidingVote(conn, proposalID); err != nil {
+		return nil, err
 	}
 	return &GuardVerdict{
 		Allowed: true,
@@ -295,11 +304,55 @@ func decidingVoteCarveOut(
 	}, nil
 }
 
-// applyAcks writes A7's CAS in its own transaction.
+// requireDecidingVote is the carve-out's first two clauses — the proposal
+// EXISTS and is OPEN — on their own, so the `--active` path can hold a claimed
+// vote to them even when it admits nothing (the run it names is not served).
+func requireDecidingVote(conn *sql.DB, proposalID int) error {
+	proposal, err := db.GetProposal(conn, proposalID)
+	if err != nil {
+		return notFoundErr(err,
+			"proposal %s not found; --deciding-vote must name the OPEN proposal "+
+				"this batch exists to decide", model.FormatProposalID(proposalID))
+	}
+	if proposal.Status != model.ProposalStatusOpen {
+		return conflictErr(
+			"proposal %s is %s, not open; --deciding-vote admits a panel that is "+
+				"deciding a live question, and a decided one authorizes nothing",
+			model.FormatProposalID(proposalID), proposal.Status)
+	}
+	return nil
+}
+
+// decidingVoteRuns resolves the runs a proposal SERVES: every run holding a
+// step for one of its linked issues.
+//
+// A proposal is linked to issues, never to runs, and an issue's steps are where
+// a run enters the picture — the same edge `step list --issue` walks. The set
+// is not scoped to a project or to live runs; the caller intersects it with the
+// runs it is answering over, which already are.
+func decidingVoteRuns(conn *sql.DB, proposalID int) (map[int]bool, error) {
+	issueIDs, err := db.GetProposalIssues(conn, proposalID)
+	if err != nil {
+		return nil, err
+	}
+	served := make(map[int]bool)
+	for _, issueID := range issueIDs {
+		runIDs, err := db.IssueStepRuns(conn, issueID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range runIDs {
+			served[id] = true
+		}
+	}
+	return served, nil
+}
+
+// applyAcks writes the ack CAS in its own transaction.
 //
 // It is separate from the predicate's read so the ack COMMITS even when the
-// predicate then denies. That is deliberate and it matters for A2's crashed-relay
-// path: a new session acknowledges a reap and is denied for a DIFFERENT reason
+// predicate then denies. That is deliberate and it matters for the
+// crashed-relay path: a new session acknowledges a reap and is denied for a DIFFERENT reason
 // (a second unacknowledged reap, say). If the ack rolled back with the denial,
 // the session would have to re-pass every seq on every attempt, and a relay
 // clearing four reaps one refusal at a time would never converge.
@@ -319,17 +372,18 @@ func applyAcks(conn *sql.DB, runID int, seqs []int64, nowMS int64) error {
 	return nil
 }
 
-// spawnRowsVerdict is G5(a), G6, G7, and G8.
+// spawnRowsVerdict is half (a): the row comparison, its vacuous case, and its
+// no-dispatch denial.
 //
 // It returns a non-nil verdict ONLY on a denial, so the caller falls through to
-// the reap check on the vacuous and matching paths alike. That shape keeps G5's
-// "iff BOTH" true by construction: there is no way to return an ALLOW here and
+// the reap check on the vacuous and matching paths alike. That shape keeps
+// GuardSpawn's "iff BOTH" true by construction: there is no way to return an ALLOW here and
 // skip (b).
 func spawnRowsVerdict(
 	conn *sql.DB, runID int, opts SpawnOptions,
 ) (*GuardVerdict, error) {
 	if opts.Rows == nil {
-		// G7: no proposal, nothing to compare. (a) is vacuously satisfied and
+		// No proposal, nothing to compare. (a) is vacuously satisfied and
 		// the relay still gets (b).
 		return nil, nil
 	}
@@ -344,7 +398,7 @@ func spawnRowsVerdict(
 		return nil, err
 	}
 	if stored == nil {
-		// G8: rows were proposed and no dispatch is open. This is a DENIAL, not
+		// Rows were proposed and no dispatch is open. This is a DENIAL, not
 		// a vacuous pass — the relay believes it is spawning a batch the engine
 		// never issued, which is precisely the drift the manifest exists to
 		// detect.
@@ -355,33 +409,56 @@ func spawnRowsVerdict(
 			model.FormatRunID(runID), len(proposed), model.FormatRunID(runID))}, nil
 	}
 
-	// G6: byte-matching against the STORED manifest, position by position. The
-	// canonical bytes come from the SAME function the manifest was written
-	// with (§5.2 P3), so a match is a match by construction rather than by two
-	// marshalers agreeing. Unlike `dispatch verify` — which recomputes
-	// readiness and compares STAGELESS (DKT-19) — this guard asks whether a
-	// relay is spawning the offered rows VERBATIM, stage included, so any byte
-	// difference is a real drift.
-	if len(proposed) != len(stored) {
-		return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-			"the proposed batch has %d row(s) and the open dispatch has %d; "+
-				"spawn what the manifest offered, or reconcile it first",
-			len(proposed), len(stored))}, nil
+	// Byte-matching against the STORED manifest, EVERY PROPOSED ROW A
+	// STORED ROW. The canonical bytes come from the SAME function the manifest
+	// was written with, so a match is a match by construction rather
+	// than by two marshalers agreeing. Unlike `dispatch verify` — which
+	// recomputes readiness and compares STAGELESS (DKT-19) — this guard asks
+	// whether a relay is spawning OFFERED rows VERBATIM, stage included, so any
+	// byte difference is a real drift.
+	//
+	// MEMBERSHIP RATHER THAN WHOLE-BATCH POSITIONAL EQUALITY (DKT-2071). The
+	// comparison used to require the proposed batch to be the stored list,
+	// same length and same order. `dispatch extend` appends rows to an open
+	// manifest mid-wave, and the relay then launches the APPENDED SUFFIX — a
+	// batch every row of which the engine offered, which the old shape denied
+	// on length alone. The property the guard defends is unchanged and still
+	// exact: a relay may spawn only rows the engine issued, byte for byte. A
+	// duplicate is still a denial, so a stored row cannot be spawned twice
+	// inside one batch.
+	byHash := make(map[string]struct{}, len(stored))
+	byStep := make(map[string]string, len(stored))
+	for _, want := range stored {
+		byHash[want.RowSHA256] = struct{}{}
+		byStep[model.FormatStepID(want.StepID)] = want.RowJSON
 	}
-	for i, want := range stored {
-		raw, sum, err := canonicalRowBytes(proposed[i])
+	seen := make(map[string]struct{}, len(proposed))
+	for i, row := range proposed {
+		raw, sum, err := canonicalRowBytes(row)
 		if err != nil {
 			return nil, err
 		}
-		if sum != want.RowSHA256 {
-			// The DIFFERING BYTES, both sides — the same evidence-not-opinion
-			// discipline `dispatch verify`'s P9 refusal carries. A summary would
-			// be the engine's guess about which field moved.
+		if _, ok := byHash[sum]; !ok {
+			// The DIFFERING BYTES, BOTH SIDES where the manifest has a side to
+			// show — the same evidence-not-opinion discipline `dispatch
+			// verify`'s refusal carries. A summary would be the engine's
+			// guess about which field moved. A proposed row naming a step the
+			// manifest never carried has no counterpart, and the denial says
+			// so rather than printing an unrelated row beside it.
+			manifest, ok := byStep[row.Step]
+			if !ok {
+				manifest = fmt.Sprintf("(no row for %s on the open dispatch)", row.Step)
+			}
 			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-				"proposed row %d does not byte-match the open dispatch\n"+
-					"  manifest: %s\n  proposed: %s",
-				i, want.RowJSON, raw)}, nil
+				"proposed row %d byte-matches no row of the open dispatch\n"+
+					"  manifest: %s\n  proposed: %s", i, manifest, raw)}, nil
 		}
+		if _, dup := seen[sum]; dup {
+			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
+				"proposed row %d repeats a row already in this batch — the "+
+					"manifest offers each row once\n  proposed: %s", i, raw)}, nil
+		}
+		seen[sum] = struct{}{}
 	}
 	return nil, nil
 }
@@ -411,7 +488,7 @@ func parseProposedRows(raw []byte) ([]model.StepRow, error) {
 //
 // "No open dispatch" is a nil result rather than an error because it is a
 // LEGITIMATE STATE this verb must answer about differently depending on whether
-// rows were proposed (G7 vs G8) — mapping it to an error here would make the
+// rows were proposed — mapping it to an error here would make the
 // caller unwrap a sentinel to tell the two apart.
 func storedManifestRows(conn *sql.DB, runID int) ([]db.DispatchRow, error) {
 	tx, err := conn.Begin()
@@ -430,16 +507,16 @@ func storedManifestRows(conn *sql.DB, runID int) ([]db.DispatchRow, error) {
 	return db.ListDispatchRowsTx(tx, open.ID)
 }
 
-// spawnReapVerdict is G5(b) and G9: no unacknowledged write reaps.
+// spawnReapVerdict is half (b): no unacknowledged write reaps.
 //
-// G9: the denial ENUMERATES EACH UNACKNOWLEDGED SEQ AND NAMES `--ack-reap`
-// (A11). That is §2's "surfaced by `guard spawn`", and it is what makes the
+// The denial ENUMERATES EACH UNACKNOWLEDGED SEQ AND NAMES `--ack-reap`. That is
+// what "surfaced by `guard spawn`" means, and it is what makes the
 // mechanism DISCOVERABLE rather than documented — an operator reading the
 // refusal copies the next command out of it. The rendering is ReapHoldReason,
 // shared with `next`'s headroom message, so the two cannot describe the same
 // hold differently.
 func spawnReapVerdict(
-	conn *sql.DB, runID, decidingVote int, nowMS int64,
+	conn *sql.DB, runID, decidingVote int, usageJoin bool, nowMS int64,
 ) (*GuardVerdict, error) {
 	// The hold is read in a transaction this function does not hold open: the
 	// carve-out below opens its own, and the pool is capped at ONE connection.
@@ -449,13 +526,19 @@ func spawnReapVerdict(
 	}
 
 	if len(open) == 0 {
-		// The dormant path (D3): one indexed lookup on a partial index that
+		// The dormant path: one indexed lookup on a partial index that
 		// returns no row. A repo with no `[limits]` never creates a `reap_acks`
 		// row and so never reaches anything below this line.
 		return &GuardVerdict{Allowed: true}, nil
 	}
 
 	hold := ReapHoldReason(open)
+	if usageJoin {
+		if err := recordGuardCarveOut(conn, runID, 0, hold, nowMS); err != nil {
+			return nil, err
+		}
+		return usageJoinVerdict(hold), nil
+	}
 	if decidingVote > 0 {
 		verdict, err := decidingVoteCarveOut(conn, decidingVote, hold)
 		if err != nil {
@@ -470,14 +553,128 @@ func spawnReapVerdict(
 		}
 		return verdict, nil
 	}
-	// The refusal NAMES the carve-out, so an operator reading it can copy the
-	// next command out of it — the same discoverability rule the ack advice
-	// follows.
+	return &GuardVerdict{Allowed: false, Reason: reapHoldDenial(hold)}, nil
+}
+
+// reapHoldDenial renders the refusal both spawn paths share. It NAMES the
+// carve-out, so an operator reading it can copy the next command out of it —
+// the same discoverability rule the ack advice follows.
+func reapHoldDenial(hold string) string {
+	return hold + "; a panel spawned to DECIDE this hold passes " +
+		"--deciding-vote PROPOSAL-N, and a launch that claims no step passes " +
+		"--usage-join"
+}
+
+// usageJoinVerdict is the allow a usage join gets past a hold, with the
+// carve-out named in its reason so the relay's log shows it (DKT-3289).
+func usageJoinVerdict(hold string) *GuardVerdict {
 	return &GuardVerdict{
-		Allowed: false,
-		Reason: hold + "; a panel spawned to DECIDE this hold passes " +
-			"--deciding-vote PROPOSAL-N",
-	}, nil
+		Allowed: true,
+		Reason: "allowed as a usage join: " + hold + " — a launch that claims " +
+			"no step consumes no write-class headroom",
+	}
+}
+
+// GuardSpawnActive answers `docket guard spawn --active`: may every active run
+// in the project accept a spawn right now?
+//
+// DKT-1287: docket-spawn-guard-hook.sh resolved the `run status` list and
+// asked `guard spawn` about `runs[0]` alone, so with two concurrent active
+// runs the OLDER run's reap half went unasked — a hold on it would not have
+// denied the hook at all. This answers (b), the reap half, over EVERY
+// non-terminal run in the project (guardRunScope's own scope), denying if ANY
+// would deny and naming which.
+//
+// IT ANSWERS ONLY THE REAP HALF. GuardSpawn's (a), the row comparison, is a fact about ONE
+// run's open dispatch and ONE proposed batch — there is no reading of "these
+// rows against every active run" that means anything, and a relay spawning
+// against a specific run's manifest already has that run's id to pass via
+// `--run`. `--ack-reap` is the same kind of per-run act and stays on the
+// `--run` path for the same reason.
+//
+// `--deciding-vote` IS NOT: the proposal names its own run. A proposal is
+// linked to issues, and an issue's steps name the runs it serves
+// (decidingVoteRuns), so the carve-out admits the hold of every served run
+// and a run the proposal does not serve denies exactly as it would without
+// the flag. Without this a hook launching a panel had to ask twice — `--active`
+// first, then `--run RUN-N --deciding-vote` with the run parsed off the denial.
+//
+// Runs are checked in guardRunScope's own oldest-first order, so the FIRST
+// denial found names the OLDEST run that would deny.
+//
+// `--usage-join` (DKT-3289) admits the hold of every run: the launch claims
+// no step on any of them, so no run's headroom is at stake.
+func GuardSpawnActive(
+	conn *sql.DB, projectID, decidingVote int, usageJoin bool, nowMS int64,
+) (*GuardVerdict, error) {
+	if usageJoin && decidingVote > 0 {
+		return nil, validationErr(usageJoinWithDecidingVote)
+	}
+	runIDs, err := guardRunScope(conn, 0, projectID)
+	if err != nil {
+		return nil, err
+	}
+	var served map[int]bool
+	if decidingVote > 0 {
+		if served, err = decidingVoteRuns(conn, decidingVote); err != nil {
+			return nil, err
+		}
+	}
+
+	// A carve-out is RECORDED ONLY ONCE EVERY RUN HAS PASSED. The audit event
+	// says a spawn was admitted past a hold, and a later run's denial means no
+	// spawn happens at all — written per run, the event would claim an
+	// admission the verdict then withheld.
+	type carveOut struct {
+		runID        int
+		hold, reason string
+	}
+	var admitted []carveOut
+	for _, id := range runIDs {
+		open, err := openReapHold(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		if len(open) == 0 {
+			continue
+		}
+		hold := ReapHoldReason(open)
+		run := model.FormatRunID(id)
+		if usageJoin {
+			admitted = append(admitted, carveOut{id, hold, run + ": " + usageJoinVerdict(hold).Reason})
+			continue
+		}
+		if decidingVote == 0 {
+			return &GuardVerdict{Allowed: false, Reason: run + ": " + reapHoldDenial(hold)}, nil
+		}
+		if !served[id] {
+			// The vote was claimed against this hold, so it is held to the
+			// carve-out's own clauses before the denial says why it did not
+			// apply: an id nobody created should read as that, not as a
+			// proposal serving the wrong run.
+			if err := requireDecidingVote(conn, decidingVote); err != nil {
+				return nil, err
+			}
+			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
+				"%s: %s; --deciding-vote %s does not apply: it is linked to no "+
+					"issue with a step on %s",
+				run, hold, model.FormatProposalID(decidingVote), run)}, nil
+		}
+		verdict, err := decidingVoteCarveOut(conn, decidingVote, hold)
+		if err != nil {
+			return nil, err
+		}
+		admitted = append(admitted, carveOut{id, hold, run + ": " + verdict.Reason})
+	}
+
+	reasons := make([]string, 0, len(admitted))
+	for _, c := range admitted {
+		if err := recordGuardCarveOut(conn, c.runID, decidingVote, c.hold, nowMS); err != nil {
+			return nil, err
+		}
+		reasons = append(reasons, c.reason)
+	}
+	return &GuardVerdict{Allowed: true, Reason: strings.Join(reasons, "; ")}, nil
 }
 
 // openReapHold reads a run's unacknowledged reaps in its own rolled-back
@@ -497,15 +694,17 @@ func openReapHold(conn *sql.DB, runID int) ([]db.ReapAck, error) {
 
 // recordGuardCarveOut writes the audit row for a spawn admitted past a reap
 // hold — the one case where a missing event and "nothing happened" would say
-// the same thing while meaning opposite things.
+// the same thing while meaning opposite things. A proposalID of 0 is the
+// usage-join carve-out (DKT-3289), which names no proposal.
 func recordGuardCarveOut(
 	conn *sql.DB, runID, proposalID int, hold string, nowMS int64,
 ) error {
-	data, err := json.Marshal(map[string]any{
-		"carve_out": "deciding-vote",
-		"proposal":  model.FormatProposalID(proposalID),
-		"hold":      hold,
-	})
+	fields := map[string]any{"carve_out": "usage-join", "hold": hold}
+	if proposalID > 0 {
+		fields["carve_out"] = "deciding-vote"
+		fields["proposal"] = model.FormatProposalID(proposalID)
+	}
+	data, err := json.Marshal(fields)
 	if err != nil {
 		return fmt.Errorf("recording the spawn carve-out: %w", err)
 	}

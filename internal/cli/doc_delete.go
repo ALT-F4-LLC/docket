@@ -47,8 +47,8 @@ func newDocDeleteCmd() *cobra.Command {
 
 			if !force {
 				// An output-format flag must never double as consent for a
-				// destructive verb (DKT-15's rule; see events_prune.go's P6
-				// comment): without --force, JSON mode and non-interactive human
+				// destructive verb (DKT-15's rule; see events_prune.go's
+				// `--yes` comment): without --force, JSON mode and non-interactive human
 				// mode both refuse, and only a real terminal may confirm.
 				if w.JSONMode || !term.IsTerminal(int(os.Stdin.Fd())) {
 					return cmdErr(fmt.Errorf("deleting %s is destructive; pass --force to confirm", model.FormatDocID(id)), output.ErrValidation)

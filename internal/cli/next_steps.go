@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `next --run` — step mode (TDD §6.3.1, §6.4).
+// `next --run` — step mode.
 
 // nextStepsResult is the step-mode payload. It implements output.Collection so
 // the envelope is uniform with every other list verb: `next --run` is a NEW
@@ -21,8 +21,10 @@ type nextStepsResult struct {
 	Steps []model.StepRow `json:"steps"`
 	Total int             `json:"total"`
 
-	readyTotal int
-	limit      int
+	readyTotal   int
+	limit        int
+	limits       map[string]int
+	limitSources map[string]string
 }
 
 func (r nextStepsResult) CollectionItems() any { return r.Steps }
@@ -31,12 +33,25 @@ func (r nextStepsResult) CollectionTruncated() bool {
 	return output.IsTruncated(r.limit, r.readyTotal, len(r.Steps))
 }
 
-var _ output.Collection = nextStepsResult{}
+// CollectionSiblings reports the offer's class caps under the keys and with
+// the omission rule `dispatch open` uses: a class with no positive max is
+// absent, and an offer with no bounded class carries neither key.
+func (r nextStepsResult) CollectionSiblings() map[string]any {
+	if len(r.limits) == 0 {
+		return nil
+	}
+	return map[string]any{"limits": r.limits, "limit_sources": r.limitSources}
+}
+
+var (
+	_ output.Collection         = nextStepsResult{}
+	_ output.CollectionSiblings = nextStepsResult{}
+)
 
 // issueModeFlags are the filters that mean something in ISSUE mode and nothing
 // in step mode.
 //
-// They are REFUSED rather than silently ignored (§6.3.1). An issue-mode filter
+// They are REFUSED rather than silently ignored. An issue-mode filter
 // that quietly does nothing in step mode is a filter a dispatcher will trust
 // and be wrong about — it would ask for `--priority critical` steps, get every
 // step, and dispatch work it meant to defer.
@@ -75,20 +90,31 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
+	// DKT-564: the issue-mode DEFAULT limit does not apply in step mode. Here
+	// the answer IS a dispatch manifest — the conduct pipeline dispatches it
+	// verbatim — so a cut the caller never asked for strands the remaining
+	// steps un-dispatched, and a caller reading v1 JSON cannot even tell it
+	// happened. A run's ready set is bounded by the run, so returning all of
+	// it is the safe contract. An EXPLICIT --limit is still honoured: a caller
+	// who typed a cut asked for one, and the v2 envelope reports it as
+	// truncated.
+	if !cmd.Flags().Changed("limit") {
+		limit = 0 // 0 means no limit (readyRows)
+	}
 
 	ready, err := engine.NewEngine().NextSteps(conn, runID, limit, model.NowMS())
 	if err != nil {
 		return runErr(err)
 	}
 
-	// Reaping is the one write this read-shaped verb performs (§6.3). Saying so
+	// Reaping is the one write this read-shaped verb performs. Saying so
 	// on stderr keeps it auditable without touching the payload — a JSON
 	// consumer's shape is unchanged, and a human sees why an `attempt` moved.
 	for _, instance := range ready.Reaped {
 		w.Info("reaped an expired lease on %s; it is ready again", instance)
 	}
 
-	// §6.3: a headroom denial with nothing running is baffling, so the hold is
+	// A headroom denial with nothing running is baffling, so the hold is
 	// named on stderr — where the reap already reports itself, and for the same
 	// reason. The PAYLOAD is untouched: a JSON consumer's shape does not change
 	// because a run happens to be holding write headroom.
@@ -125,6 +151,7 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 	result := nextStepsResult{
 		Steps: ready.Steps, Total: len(ready.Steps),
 		readyTotal: ready.Total, limit: limit,
+		limits: ready.Limits, limitSources: ready.LimitSources,
 	}
 
 	var message string

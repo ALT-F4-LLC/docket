@@ -3,19 +3,44 @@
 # doc-validate — a changed doc carries the header this repo's docs carry.
 #
 # Wired as the `doc-validate` gate on docs-only's author step.
-# CLAUDE.md: "design first as docs/tdd/<feature>.md (frontmatter per existing
-# files)". Every doc under docs/ opens with a title line and a `Status:` line
-# naming a state and a date — that is the frontmatter the convention means, and
-# a doc without it is the drift this gate catches.
+# Every doc under docs/ opens with a title line and a `Status:` line naming a
+# state and a date. A doc without that header is the drift this gate catches.
+#
+# TWO WAYS TO NAME THE CHANGE SET, matching self-hygiene.sh:
+#
+#   1. DOCKET_GATE_BASE (the engine). Executors commit before the gate runs,
+#      so the tree is clean and the change is the committed diff
+#      `git diff --name-only $DOCKET_GATE_BASE...HEAD`. Without this mode a
+#      committed docs change reported "no docs changed" and passed unchecked.
+#      The engine leaves the variable UNSET when it has no base, never empty,
+#      so a set-but-empty value fails closed instead of scanning the tree.
+#   2. The working-tree scan (an author by hand, before committing): staged,
+#      unstaged, and untracked files together.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+# Root resolution respects the caller's cwd: the engine spawns gates with Dir
+# set to the step's worktree, so a script-relative cd would diff the shared
+# checkout instead. Outside any git repo, fall back to the script's own root.
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$(dirname "${BASH_SOURCE[0]}")/../..")"
 
-changed=$( { git diff --cached --name-only -- 'docs/*.md'
-             git diff --name-only -- 'docs/*.md'
-             git ls-files --others --exclude-standard -- 'docs/*.md'
-           } | sort -u )
+if [ -n "${DOCKET_GATE_BASE+set}" ]; then
+  if [ -z "$DOCKET_GATE_BASE" ]; then
+    echo "doc-validate FAILED: DOCKET_GATE_BASE is set but empty; refusing to fall" >&2
+    echo "back to the working-tree scan, which would pass a committed worktree" >&2
+    echo "having checked nothing." >&2
+    exit 1
+  fi
+  if ! changed=$(git diff --name-only "$DOCKET_GATE_BASE"...HEAD -- 'docs/*.md'); then
+    echo "doc-validate FAILED: could not collect the change set; nothing was scanned." >&2
+    exit 1
+  fi
+else
+  changed=$( { git diff --cached --name-only -- 'docs/*.md'
+               git diff --name-only -- 'docs/*.md'
+               git ls-files --others --exclude-standard -- 'docs/*.md'
+             } | sort -u )
+fi
 
 if [ -z "$changed" ]; then
   echo "doc-validate: no docs changed"

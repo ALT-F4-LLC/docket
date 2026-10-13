@@ -17,15 +17,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Pre-gates at claim (TDD docs/tdd/gates-trust.md §7.6, T14).
+// Pre-gates at claim.
 //
 // The fixture's `verify` step declares `gates = [{ name = "ac-commands",
 // pre = true }]`, so it is the step every case here claims.
 
-// TestPreGatesUseTheSameTrustPath is T14: an UNTRUSTED pre-gate does not
+// TestPreGatesUseTheSameTrustPath: an UNTRUSTED pre-gate does not
 // execute, and the claim still succeeds with the result recorded `unmatched`.
 //
-// T14 is the "pre-gate as a bypass" threat: pre-gates run at claim, earlier in
+// The threat is "pre-gate as a bypass": pre-gates run at claim, earlier in
 // the lifecycle and on a different code path than the saga's gates, which is
 // exactly the shape an implementation "simplifies" into a trusted path. The
 // only differences the design permits are WHEN they run and WHERE the result
@@ -47,7 +47,7 @@ func TestPreGatesUseTheSameTrustPath(t *testing.T) {
 		Owner: "w", NowMS: nowMS,
 	})
 	testsupport.
-		// PG2: THE CLAIM STILL SUCCEEDS. Refusing it would let an untrusted
+		// THE CLAIM STILL SUCCEEDS. Refusing it would let an untrusted
 		// command block work — a denial of service an issue author should not have.
 		Must(t, err, "an unmatched pre-gate must not refuse the claim: %v", err)
 
@@ -71,7 +71,7 @@ func TestPreGatesUseTheSameTrustPath(t *testing.T) {
 			"tell which of the four causes applies")
 	}
 
-	// It is recorded with `pre = 1`, which is what PG4's read-side filter needs.
+	// It is recorded with `pre = 1`, which is what the read-side filter needs.
 	rows, err := db.GateResultsForStep(conn, stepID)
 	testsupport.Must(t, err, "GateResultsForStep: %v", err)
 	if len(rows) != 1 || !rows[0].Pre {
@@ -79,10 +79,10 @@ func TestPreGatesUseTheSameTrustPath(t *testing.T) {
 	}
 }
 
-// TestFailingPreGateDoesNotRefuseTheClaim is PG3: a pre-gate that RUNS and
+// TestFailingPreGateDoesNotRefuseTheClaim: a pre-gate that RUNS and
 // fails is data, not a refusal.
 //
-// §11.1 calls these "measure-then-judge steps" — the judging is the step's job,
+// These are "measure-then-judge steps" — the judging is the step's job,
 // which is exactly why the failure rides in the bundle rather than blocking.
 func TestFailingPreGateDoesNotRefuseTheClaim(t *testing.T) {
 	conn := mustDB(t)
@@ -117,12 +117,12 @@ func TestFailingPreGateDoesNotRefuseTheClaim(t *testing.T) {
 	}
 }
 
-// TestPreGateResultsAreExcludedFromTheSagaVerdict is PG4: pre-gate results are
+// TestPreGateResultsAreExcludedFromTheSagaVerdict: pre-gate results are
 // INPUTS to the step, not judgments of it.
 //
 // A failing pre-gate must not fail the step's completion — that decision
-// belongs to the step's own artifact and threshold. S3 already excludes `pre`
-// gates from completionGates; this is the read-side counterpart, and without it
+// belongs to the step's own artifact and threshold. completionGates already
+// excludes `pre` gates; this is the read-side counterpart, and without it
 // a measurement would silently become a verdict.
 func TestPreGateResultsAreExcludedFromTheSagaVerdict(t *testing.T) {
 	conn := mustDB(t)
@@ -149,27 +149,32 @@ func TestPreGateResultsAreExcludedFromTheSagaVerdict(t *testing.T) {
 	err = tx.Commit()
 	testsupport.Must(t, err, "Commit: %v", err)
 
-	verdict, unmeasured, err := gateVerdict(conn, stepID)
+	verdict, unmeasured, _, err := gateVerdict(conn, stepID)
 	testsupport.Must(t, err, "gateVerdict: %v", err)
 	if verdict != VerdictPass {
 		t.Errorf("gateVerdict = %q with only a failing PRE-gate recorded, want %q — "+
 			"a pre-gate is a measurement the step consumes, not a judgment of it",
 			verdict, VerdictPass)
 	}
-	// PG4 applies to the unmeasured list too (DKT-254). A pre-gate that could
+	// The exclusion applies to the unmeasured list too (DKT-254). A pre-gate that could
 	// not bind its tree is data for the step's worker; parking the step on it
 	// would be the engine judging the step by an input it was handed.
 	if len(unmeasured) != 0 {
 		t.Errorf("gateVerdict reported %v as unmeasured from PRE-gate rows; "+
-			"PG4 excludes pre-gates from the step's own routing", unmeasured)
+			"pre-gates are excluded from the step's own routing", unmeasured)
 	}
 }
 
-// TestClaimRemainsSingleWinnerAcrossThePreGatePhase is §7.6.1's race: the
+// TestClaimRemainsSingleWinnerAcrossThePreGatePhase is the claim race: the
 // phase split must not weaken mutual exclusion.
 //
 // Exclusion is decided in transaction A and only there. N goroutines claim one
 // step with pre-gates; exactly one wins.
+//
+// The claimants carry DISTINCT owner strings, because that is what distinct
+// claimants are: a same-owner re-claim of a live lease is the caller's own
+// standing claim and re-mints its token rather than competing for it
+// (DKT-1564). TestSameOwnerClaimantsShareOneLease covers that case.
 func TestClaimRemainsSingleWinnerAcrossThePreGatePhase(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -197,7 +202,7 @@ func TestClaimRemainsSingleWinnerAcrossThePreGatePhase(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
-				Owner: "w", NowMS: nowMS,
+				Owner: "w" + strconv.Itoa(i), NowMS: nowMS,
 			})
 			if err == nil {
 				mu.Lock()
@@ -214,7 +219,7 @@ func TestClaimRemainsSingleWinnerAcrossThePreGatePhase(t *testing.T) {
 	}
 }
 
-// TestPreGateWallTimeDoesNotConsumeTheLease is §7.6.1.1 LR1: the caller gets a
+// TestPreGateWallTimeDoesNotConsumeTheLease: the caller gets a
 // FULL lease however long phase 2 took.
 //
 // Without the refresh, the pre-gate's wall time is deducted from a lease the
@@ -246,7 +251,7 @@ func TestPreGateWallTimeDoesNotConsumeTheLease(t *testing.T) {
 	testsupport.Must(t, err, "claim: %v", err)
 
 	// THE ASSERTION: the lease is a full TTL ahead of the claim's own clock,
-	// not eaten by the pre-gate. Both halves fail without LR1.
+	// not eaten by the pre-gate. Both halves fail without the refresh.
 	if claim.LeaseExpiresMS < claimAt+shortTTL {
 		t.Errorf("lease expires at %d, want at least %d (a full TTL) — "+
 			"the pre-gate's wall time was deducted from the caller's lease",
@@ -262,11 +267,11 @@ func TestPreGateWallTimeDoesNotConsumeTheLease(t *testing.T) {
 	}
 }
 
-// TestPreGateGoldenSplit is GD1-GD3 (§7.6.3): a bundle WITHOUT pre-gates omits
-// the member entirely, and one WITH them carries a structurally-asserted array.
+// TestPreGateGoldenSplit: a bundle WITHOUT pre-gates omits the member
+// entirely, and one WITH them carries a structurally-asserted array.
 //
-// GD3 is the argument a reviewer should check hardest, so the test states it:
-// §9 item 5's determinism requires bundles immune to "mid-run issue edits and
+// The split is the argument a reviewer should check hardest, so the test
+// states it: determinism requires bundles immune to "mid-run issue edits and
 // working-tree changes", and a pre-gate exists precisely to MEASURE the working
 // tree at claim time. Requiring its output to be immune would require it to not
 // measure anything. So the golden covers the bundle with `pre_gates` elided,
@@ -276,7 +281,7 @@ func TestPreGateGoldenSplit(t *testing.T) {
 	activatedRun(t, conn)
 	repoRoot := t.TempDir()
 
-	// GD1: a step WITHOUT pre-gates. The member is ABSENT, not empty — the
+	// A step WITHOUT pre-gates. The member is ABSENT, not empty — the
 	// rule the v6 `lease` object established.
 	e := execEngineWithTrust(t, repoRoot, fixtureTrustEntries(repoRoot, true)...)
 	plainID := stepIDByInstance(t, conn, "implement@0")
@@ -293,7 +298,7 @@ func TestPreGateGoldenSplit(t *testing.T) {
 	}
 }
 
-// TestPreGateRecordsBothTheRowAndTheEvent is §7.6.1 phase 2's "exactly as the
+// TestPreGateRecordsBothTheRowAndTheEvent is phase 2's "exactly as the
 // saga's do", asserted on the half that was missing.
 //
 // A pre-gate announced `gate-started` and then recorded its row silently: the
@@ -343,7 +348,7 @@ func TestPreGateRecordsBothTheRowAndTheEvent(t *testing.T) {
 	// gate ever finished, and `docket run report` disagrees with the feed.
 	if !hasEventKind(t, conn, stepID, EventGateRecorded) {
 		t.Error("a recorded pre-gate result wrote no gate-recorded event: the " +
-			"feed shows a gate that started and never closed (§7.6.1 phase 2)")
+			"feed shows a gate that started and never closed")
 	}
 
 	// The ORDER holds here exactly as it does in the saga: the announcement
@@ -362,14 +367,14 @@ func TestPreGateRecordsBothTheRowAndTheEvent(t *testing.T) {
 	}
 
 	// A gate that ran is not a gate that was refused: `gate-unmatched` stays
-	// separate (§6.4), so the added event must not have been bought by
+	// separate, so the added event must not have been bought by
 	// emitting the wrong kind.
 	if hasEventKind(t, conn, stepID, EventGateUnmatched) {
 		t.Error("a matched, passing pre-gate wrote gate-unmatched")
 	}
 }
 
-// TestUnmatchedPreGateKeepsBothItsEvents guards the kind §6.4 keeps separate.
+// TestUnmatchedPreGateKeepsBothItsEvents guards the kind kept separate.
 //
 // `gate-unmatched` and `gate-recorded` are not alternatives — the first says
 // the command was refused, the second says the outcome is now recorded, and an
@@ -400,6 +405,268 @@ func TestUnmatchedPreGateKeepsBothItsEvents(t *testing.T) {
 	}
 }
 
+// TestPreGateEventsMarkTheVerdictThatRoutedNothing is DKT-862's events half.
+//
+// `gate-recorded ... detail=ac-commands exit=2 verdict=fail` said the same
+// thing whether the failure BLOCKED the step or was an advisory input to it —
+// and a pre-gate never routes: it runs at claim, and is kept out of the
+// saga's verdict. On RUN-61 three pre-gate failures sat in the feed beside the
+// `step-routed pass` that contradicted them, and a conductor nearly reported a
+// fix round as burned on one.
+//
+// The assertion is on the STORED PAYLOAD, because that is what both readers
+// see: `events list` renders `data` as sorted key=value pairs and interprets
+// nothing, and `--json` hands the object straight to a program.
+func TestPreGateEventsMarkTheVerdictThatRoutedNothing(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	repoRoot := t.TempDir()
+
+	// A pre-gate that matches and FAILS — RUN-61's shape. `/usr/bin/false`
+	// exits 1, so the row is a `fail` that routed nothing.
+	argv := []string{"/usr/bin/false"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot),
+	})
+	e.Gates = runner
+
+	stepID := advanceToVerify(t, conn, e)
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: "w", NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "an advisory pre-gate failure must not refuse the claim: %v", err)
+
+	data := gateRecordedData(t, conn, stepID, "ac-commands")
+	if data["verdict"] != VerdictFail {
+		t.Fatalf("the pre-gate's gate-recorded verdict = %v, want %q — this "+
+			"case is about a FAILING advisory gate", data["verdict"], VerdictFail)
+	}
+	if data["pre"] != true {
+		t.Errorf("gate-recorded for a pre-gate carries pre = %v, want true; "+
+			"payload %v renders as a blocking failure in `events list`",
+			data["pre"], data)
+	}
+
+	// The marker is not bought by dropping what was already there (DKT-63).
+	if data["detail"] != "ac-commands" {
+		t.Errorf("the gate name left `detail`: %v", data)
+	}
+
+	// AND a BLOCKING gate stays unmarked. `implement@0`'s gates run through
+	// advanceToVerify's pass-through runner and route the step for real, so
+	// their absence of a `pre` key is what makes the pre-gate's presence mean
+	// something rather than being a field every gate event carries.
+	implementID := stepIDByInstance(t, conn, "implement@0")
+	for _, blocking := range []string{"build", "tests"} {
+		// gateRecordedData FATALS on a missing event, which is what keeps this
+		// half from passing vacuously: a payload that carries no `pre` key
+		// because it was never written proves nothing.
+		if _, ok := gateRecordedData(t, conn, implementID, blocking)["pre"]; ok {
+			t.Errorf("gate-recorded for the blocking gate %q carries a pre "+
+				"marker; only a gate that routed nothing may be marked", blocking)
+		}
+	}
+}
+
+// TestGateRecordedEventCarriesStubMarker is DKT-983: a stub-trusted command's
+// pass is already marked stub:true in the trust store, in `gate_results` rows
+// (`step gates --json`), and in `run report` — but the `gate-recorded` EVENT
+// carried none of it, so a stub pass was byte-identical to a real measurement
+// on the event stream. RUN-63 / vorpal.git seq 13052 is this exactly:
+// `gate-recorded ... detail=ac-commands exit=0 pre=true verdict=pass` beside a
+// `step gates --json` that showed `stub=true` for the same record.
+//
+// The assertion is on the STORED PAYLOAD, exactly as
+// TestPreGateEventsMarkTheVerdictThatRoutedNothing's is, because that is what
+// both readers see: `events list` renders `data` as sorted key=value pairs,
+// and `--json` hands the object straight to a program.
+func TestGateRecordedEventCarriesStubMarker(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	repoRoot := t.TempDir()
+
+	// A trust entry that declares `stub = true` (DKT-265): the command that
+	// runs is a placeholder, not the check its name implies.
+	argv := []string{"/usr/bin/true"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Stub: true,
+	})
+	e.Gates = runner
+
+	stepID := advanceToVerify(t, conn, e)
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: "w", NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	// The row already carries it (this is not new — it is the baseline the
+	// event is being brought up to).
+	rows, err := db.GateResultsForStep(conn, stepID)
+	testsupport.Must(t, err, "GateResultsForStep: %v", err)
+	if len(rows) != 1 || !rows[0].StubEntry {
+		t.Fatalf("recorded rows = %+v, want exactly one stub-marked row", rows)
+	}
+
+	data := gateRecordedData(t, conn, stepID, "ac-commands")
+	if data["stub"] != true {
+		t.Errorf("gate-recorded for a stub-trusted gate carries stub = %v, "+
+			"want true; payload %v is indistinguishable from a real measurement "+
+			"on the event stream", data["stub"], data)
+	}
+	// The marker is not bought by dropping what was already there (DKT-63).
+	if data["verdict"] != VerdictPass {
+		t.Errorf("verdict = %v, want %q — the stub marker must not change the "+
+			"outcome it decorates", data["verdict"], VerdictPass)
+	}
+	if data["detail"] != "ac-commands" {
+		t.Errorf("the gate name left `detail`: %v", data)
+	}
+
+	// AND a NON-stub gate stays unmarked: implement@0's gates run through
+	// advanceToVerify's pass-through runner, whose stub marker is a different
+	// field entirely (the legacy S3-migration `Stub`, never set by any live
+	// path) — so their `gate-recorded` events must carry no `stub` key.
+	implementID := stepIDByInstance(t, conn, "implement@0")
+	for _, blocking := range []string{"build", "tests"} {
+		if _, ok := gateRecordedData(t, conn, implementID, blocking)["stub"]; ok {
+			t.Errorf("gate-recorded for the non-stub gate %q carries a stub "+
+				"marker; only a gate whose trust entry declared `stub` may be "+
+				"marked", blocking)
+		}
+	}
+}
+
+// TestPreGatesCarryStubEntry: a claim's `pre_gates` carries the authorizing
+// entry's `stub` declaration, so a step reading its pre-gate verdicts from the
+// bundle can tell a placeholder pass from a measurement. The key is present
+// for a real entry too: an absent key would read the same as a docket too old
+// to carry the flag.
+func TestPreGatesCarryStubEntry(t *testing.T) {
+	for _, stub := range []bool{true, false} {
+		t.Run("stub="+strconv.FormatBool(stub), func(t *testing.T) {
+			conn := mustDB(t)
+			stepID, e := stubTrustedPreGateRun(t, conn, stub)
+			res, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+				Owner: "w", NowMS: nowMS,
+			})
+			testsupport.Must(t, err, "claim: %v", err)
+			assertPreGateStub(t, res.Context.PreGates, stub)
+		})
+	}
+}
+
+// TestRecordedPreGatesCarryStubEntry: a re-minted claim rebuilds `pre_gates`
+// from the stored rows, and carries the same `stub` the fresh claim did.
+func TestRecordedPreGatesCarryStubEntry(t *testing.T) {
+	for _, stub := range []bool{true, false} {
+		t.Run("stub="+strconv.FormatBool(stub), func(t *testing.T) {
+			conn := mustDB(t)
+			stepID, e := stubTrustedPreGateRun(t, conn, stub)
+			owner := ClaimOptions{Owner: "w", RecoverySecret: testRecoverySecret, NowMS: nowMS}
+			_, err := e.ClaimStepWithGates(conn, stepID, owner)
+			testsupport.Must(t, err, "claim: %v", err)
+
+			owner.NowMS = nowMS + 1000
+			again, err := e.ClaimStepWithGates(conn, stepID, owner)
+			testsupport.Must(t, err, "the owner's re-claim: %v", err)
+			if !again.ReMinted {
+				t.Fatal("the owner's re-claim was not a re-mint")
+			}
+			assertPreGateStub(t, again.Context.PreGates, stub)
+		})
+	}
+}
+
+// TestPreGateResultCarriesS3Migrated: a stored S3-migrated row renders
+// `s3_migrated` in the bundle, and a live row omits the key, matching
+// `docket step gates` and the gate-results input.
+func TestPreGateResultCarriesS3Migrated(t *testing.T) {
+	migrated, err := json.Marshal(preGateResultOfRecorded(db.GateResultRow{
+		Gate: "g", Verdict: VerdictPass, Stub: true,
+	}))
+	testsupport.Must(t, err, "marshal: %v", err)
+	if !strings.Contains(string(migrated), `"s3_migrated":true`) {
+		t.Errorf("an S3-migrated row renders %s, want \"s3_migrated\":true", migrated)
+	}
+
+	live, err := json.Marshal(preGateResultOfRecorded(db.GateResultRow{
+		Gate: "g", Verdict: VerdictPass,
+	}))
+	testsupport.Must(t, err, "marshal: %v", err)
+	if strings.Contains(string(live), `"s3_migrated"`) {
+		t.Errorf("a live row renders %s, want no s3_migrated key", live)
+	}
+}
+
+// stubTrustedPreGateRun advances the fixture to `verify@0`, whose
+// `ac-commands` pre-gate is authorized by a trust entry declaring `stub`.
+func stubTrustedPreGateRun(t *testing.T, conn *sql.DB, stub bool) (int, *Engine) {
+	t.Helper()
+	activatedRun(t, conn)
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	e := testEngine()
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Stub: stub,
+	})
+	e.Gates = runner
+	return advanceToVerify(t, conn, e), e
+}
+
+// assertPreGateStub checks the bundle's wire form: the lone `ac-commands`
+// element passes and carries `stub` as a present key with the wanted value.
+func assertPreGateStub(t *testing.T, preGates []PreGateResult, want bool) {
+	t.Helper()
+	body, err := json.Marshal(preGates)
+	testsupport.Must(t, err, "marshal pre_gates: %v", err)
+	var elems []map[string]any
+	testsupport.Must(t, json.Unmarshal(body, &elems), "pre_gates is not an array: %v", nil)
+	if len(elems) != 1 || elems[0]["gate"] != "ac-commands" {
+		t.Fatalf("pre_gates = %s, want the one ac-commands result", body)
+	}
+	if elems[0]["verdict"] != VerdictPass {
+		t.Errorf("pre_gates = %s, want verdict %q", body, VerdictPass)
+	}
+	got, present := elems[0]["stub"]
+	if !present || got != want {
+		t.Errorf("pre_gates = %s, want \"stub\":%v present", body, want)
+	}
+}
+
+// gateRecordedData reads the `gate-recorded` payload for one step's gate, and
+// fails the test when there is none.
+func gateRecordedData(
+	t *testing.T, conn *sql.DB, stepID int, gate string,
+) map[string]any {
+	t.Helper()
+	rows, err := conn.Query(
+		`SELECT data FROM events WHERE step_id = ? AND kind = ? ORDER BY seq`,
+		stepID, EventGateRecorded)
+	testsupport.Must(t, err, "reading gate-recorded events: %v", err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		testsupport.Must(t, rows.Scan(&raw), "scanning a gate-recorded event: %v", nil)
+		var fields map[string]any
+		testsupport.Must(t, json.Unmarshal([]byte(raw), &fields),
+			"the gate event payload is not an object: %v", nil)
+		if fields["detail"] == gate {
+			return fields
+		}
+	}
+	t.Fatalf("no gate-recorded event for gate %q on step %d", gate, stepID)
+	return nil
+}
+
 // advanceToVerify drives the fixture's run until `verify@0` — the step that
 // declares the `ac-commands` pre-gate — is claimable, and returns its id.
 //
@@ -417,7 +684,7 @@ func advanceToVerify(t *testing.T, conn *sql.DB, e *Engine) int {
 		claimAndComplete(t, conn, pass, "review@0#"+strconv.Itoa(i), "findings", "")
 	}
 	claimAndComplete(t, conn, pass, "synthesize@0", "synthesized", "")
-	// `reconcile` is an action step: the engine runs it, no claim (§6.15).
+	// `reconcile` is an action step: the engine runs it, no claim.
 	driveAction(t, conn, pass, "reconcile@0")
 
 	return stepIDByInstance(t, conn, "verify@0")
@@ -682,7 +949,7 @@ func TestSkippedGateParksRatherThanRoutingOnFail(t *testing.T) {
 		{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped},
 		{Gate: "tests", Ordinal: 0, Verdict: db.GateVerdictPass},
 	}
-	verdict, unmeasured := verdictOverRows(rows)
+	verdict, unmeasured, _ := verdictOverRows(rows)
 
 	// The verdict is unchanged: "we couldn't check, so carry on" is what makes
 	// a control decorative, and a skipped gate is still not a pass.
@@ -707,7 +974,7 @@ func TestMeasuredFailureIsNotReportedAsUnmeasured(t *testing.T) {
 		db.GateVerdictFail, db.GateVerdictUnmatched, db.GateVerdictPass,
 	} {
 		t.Run(verdict, func(t *testing.T) {
-			_, unmeasured := verdictOverRows([]db.GateResultRow{
+			_, unmeasured, _ := verdictOverRows([]db.GateResultRow{
 				{Gate: "tests", Ordinal: 0, Verdict: verdict},
 			})
 			if len(unmeasured) != 0 {
@@ -720,20 +987,360 @@ func TestMeasuredFailureIsNotReportedAsUnmeasured(t *testing.T) {
 
 // TestFlakyReRunClearsAnEarlierSkip: the last attempt decides, here too.
 //
-// F4 makes the LAST attempt's verdict the one that routes. A gate that could
+// The LAST attempt's verdict is the one that routes. A gate that could
 // not bind its tree on attempt 0 and measured it fine on attempt 1 has been
-// measured, and parking it would strand a step whose evidence exists.
+// measured, and parking it would strand a step whose evidence exists. A skip
+// ends its execution before any retry, so the measurement after it is a later
+// execution of the gate, recorded at a later time.
 func TestFlakyReRunClearsAnEarlierSkip(t *testing.T) {
-	verdict, unmeasured := verdictOverRows([]db.GateResultRow{
-		{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped},
-		{Gate: "ac-commands", Ordinal: 1, Verdict: db.GateVerdictPass},
+	verdict, unmeasured, _ := verdictOverRows([]db.GateResultRow{
+		{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped, CreatedAtMS: nowMS},
+		{Gate: "ac-commands", Ordinal: 1, Verdict: db.GateVerdictPass, CreatedAtMS: nowMS + 1},
 	})
 	if verdict != VerdictPass {
-		t.Errorf("verdict = %q, want %q — F4 routes on the last attempt",
+		t.Errorf("verdict = %q, want %q — the last attempt routes",
 			verdict, VerdictPass)
 	}
 	if len(unmeasured) != 0 {
 		t.Errorf("unmeasured = %v after a passing re-run; the earlier skip was "+
 			"superseded by a real measurement", unmeasured)
+	}
+}
+
+// Pre-gates learn the base of the tree they measure through DOCKET_GATE_BASE,
+// exactly as completion gates do: a range-shaped pre-gate (copy-verify under
+// ac-commands) otherwise examines an empty range. The witness is the child's
+// own environment — the gate is `printenv DOCKET_GATE_BASE`, so a pass with
+// the expected sha proves the variable arrived, and printenv's exit 1 with no
+// output proves it was absent rather than empty.
+
+// runGateBasePreGate drives the fixture's ac-commands pre-gate as printenv
+// against the given target, with the run's exec root and pinned commit set,
+// and returns the one result.
+func runGateBasePreGate(
+	t *testing.T, execRoot, pinned, targetSHA, workRoot string,
+) PreGateResult {
+	t.Helper()
+	printenvPath, err := exec.LookPath("printenv")
+	if err != nil {
+		t.Skip("printenv is not installed")
+	}
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	argv := []string{printenvPath, "DOCKET_GATE_BASE"}
+	runner := NewExecRunner(testRepoPaths(execRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Global: true,
+	})
+	e := testEngine()
+	e.Gates = runner
+
+	step := preGateStep(t, conn, e)
+	setRunExecRoot(t, conn, step.RunID, execRoot)
+	_, err = conn.Exec(`UPDATE runs SET commit_sha = ? WHERE id = ?`, pinned, step.RunID)
+	testsupport.Must(t, err, "pinning the run's commit: %v", err)
+
+	got, err := runPreGates(conn, e, step,
+		[]workflow.Gate{{Name: "ac-commands", Pre: true}}, targetSHA, workRoot, nowMS)
+	testsupport.Must(t, err, "runPreGates: %v", err)
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1", len(got))
+	}
+	return got[0]
+}
+
+func wantGateBase(t *testing.T, r PreGateResult, want string) {
+	t.Helper()
+	if r.Verdict != VerdictPass {
+		t.Fatalf("verdict = %q (output %q, reason %q), want %q — printenv found "+
+			"no DOCKET_GATE_BASE in the pre-gate's environment",
+			r.Verdict, r.Output, r.Reason, VerdictPass)
+	}
+	if got := strings.TrimSpace(r.Output); got != want {
+		t.Errorf("the pre-gate saw DOCKET_GATE_BASE=%q, want %q", got, want)
+	}
+}
+
+func wantNoGateBase(t *testing.T, r PreGateResult) {
+	t.Helper()
+	if got := strings.TrimSpace(r.Output); got != "" {
+		t.Errorf("the pre-gate saw DOCKET_GATE_BASE=%q, want the variable unset", got)
+	}
+	if r.Verdict != VerdictFail {
+		t.Errorf("verdict = %q, want %q — printenv exits 1 only when the "+
+			"variable is genuinely unset", r.Verdict, VerdictFail)
+	}
+}
+
+// TestPreGateExportsGateBase: a pre-gate bound to a live worktree distinct from
+// the exec root sees that worktree's fork point — not its HEAD, not the shared
+// checkout's later head, and not the pinned run commit.
+func TestPreGateExportsGateBase(t *testing.T) {
+	shared := t.TempDir()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	gitRun(t, shared, "init", "-q")
+	gitRun(t, shared, "commit", "--allow-empty", "-q", "-m", "fork point")
+	fork := gitRun(t, shared, "rev-parse", "HEAD")
+	worktree := filepath.Join(t.TempDir(), "wt")
+	gitRun(t, shared, "worktree", "add", "-q", worktree)
+	gitRun(t, worktree, "commit", "--allow-empty", "-q", "-m", "step work")
+	workHead := gitRun(t, worktree, "rev-parse", "HEAD")
+	gitRun(t, shared, "commit", "--allow-empty", "-q", "-m", "sibling work")
+	sharedHead := gitRun(t, shared, "rev-parse", "HEAD")
+
+	r := runGateBasePreGate(t, shared, sharedHead, workHead, worktree)
+	wantGateBase(t, r, fork)
+}
+
+// TestPreGateGateBaseReconstructed: a pre-gate measuring a reconstruction of a
+// target sha sees the merge-base of that sha and the shared checkout head.
+func TestPreGateGateBaseReconstructed(t *testing.T) {
+	shared := t.TempDir()
+	seedGitRepo(t, shared, "measured.txt", "under review")
+	fork := gitRun(t, shared, "rev-parse", "HEAD")
+	target := gitRun(t, shared, "commit-tree", "HEAD^{tree}", "-p", fork, "-m", "target")
+	gitRun(t, shared, "commit", "--allow-empty", "-q", "-m", "sibling work")
+	pinned := gitRun(t, shared, "rev-parse", "HEAD")
+
+	r := runGateBasePreGate(t, shared, pinned, target, filepath.Join(t.TempDir(), "gone"))
+	if !strings.Contains(r.Reason, "reconstruction") {
+		t.Fatalf("the pre-gate did not measure a reconstruction: %q", r.Reason)
+	}
+	wantGateBase(t, r, fork)
+}
+
+// TestPreGateGateBaseReconstructedUnresolvable: a reconstructed target that
+// shares no history with the shared checkout has no fork point, so the
+// variable is absent — never empty and never the pinned run commit.
+func TestPreGateGateBaseReconstructedUnresolvable(t *testing.T) {
+	shared := t.TempDir()
+	pinned := seedGitRepo(t, shared, "measured.txt", "under review")
+	orphan := gitRun(t, shared, "commit-tree", "HEAD^{tree}", "-m", "orphan")
+
+	r := runGateBasePreGate(t, shared, pinned, orphan, filepath.Join(t.TempDir(), "gone"))
+	if !strings.Contains(r.Reason, "reconstruction") {
+		t.Fatalf("the pre-gate did not measure a reconstruction: %q", r.Reason)
+	}
+	wantNoGateBase(t, r)
+}
+
+// TestPreGateGateBaseAbsentWithoutTarget: with nothing under review the
+// pre-gate measures the shared checkout, which has no fork point to export.
+func TestPreGateGateBaseAbsentWithoutTarget(t *testing.T) {
+	shared := t.TempDir()
+	pinned := seedGitRepo(t, shared, "measured.txt", "shared")
+
+	r := runGateBasePreGate(t, shared, pinned, "", "")
+	wantNoGateBase(t, r)
+}
+
+// A verify claim whose target was retained across a round that recorded no
+// commit measures that retained head, and says so when the shared checkout
+// does not carry it. The target never moves on its own: moving it is the
+// annotate-integration or `--worktree` re-pin verbs' job, and the advisory
+// names both.
+
+const (
+	retainedAnnotateVerb = "docket step annotate --integrated-sha"
+	retainedRepinVerb    = "docket step resolve --as rerun-gates --worktree"
+)
+
+// trustedTruePreGateEngine is an engine whose ac-commands pre-gate is trusted
+// and always passes, so a case's assertions rest on the reason alone.
+func trustedTruePreGateEngine(t *testing.T, repoRoot string) *Engine {
+	t.Helper()
+	argv := []string{"/usr/bin/true"}
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Global: true,
+	})
+	e := testEngine()
+	e.Gates = runner
+	return e
+}
+
+// retainedTargetRun activates the fixture over a real shared checkout and
+// commits implement's change in its own worktree, returning the run's issue,
+// the shared checkout, the worktree, and its head.
+func retainedTargetRun(t *testing.T, conn *sql.DB) (issue int, shared, tree, head string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	shared = gitRepo(t)
+	pinned := gitRun(t, shared, "rev-parse", "HEAD")
+
+	registerFixture(t, conn)
+	issue = createIssue(t, conn, "retained target", "body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "retained-target run", 0, nowMS,
+		db.RunContext{ExecRoot: shared, CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue: %v", err)
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	tree = filepath.Join(t.TempDir(), "wf-implement-a")
+	gitRun(t, shared, "worktree", "add", "-q", tree)
+	writeFile(t, tree, "internal/tracked.txt", "THE CHANGE\n")
+	gitRun(t, tree, "add", "-A")
+	gitRun(t, tree, "commit", "-qm", "the change")
+	return issue, shared, tree, gitRun(t, tree, "rev-parse", "HEAD")
+}
+
+// claimVerifyOverRetainedTarget records implement's commit (attempt 1, parked
+// on a failing gate), lets integrate land it on the shared checkout, retries
+// implement in a worktree forked from the new shared head (attempt 2 commits
+// nothing, so its empty diff is dropped and attempt 1's head is retained),
+// drives the run to verify, and claims it. It returns the claim and the
+// retained head.
+func claimVerifyOverRetainedTarget(
+	t *testing.T, integrate func(shared, headA string),
+) (*ClaimResult, string) {
+	t.Helper()
+	conn := mustDB(t)
+	issue, shared, treeA, headA := retainedTargetRun(t, conn)
+
+	gates := &scriptedGates{fail: true}
+	writer := testEngine()
+	writer.Gates = gates
+	writer.DiffFn = GitDiff
+	writer.HeadFn = sharedCheckoutHead
+
+	implement := stepIDIn(t, conn, issue, "implement@0")
+	claim, err := ClaimStep(conn, implement, ClaimOptions{Owner: "w1", NowMS: nowMS})
+	testsupport.Must(t, err, "claim (attempt 1): %v", err)
+	err = writer.CompleteStep(conn, implement, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change summary"),
+		WorkDir: treeA, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete (attempt 1): %v", err)
+
+	integrate(shared, headA)
+	gates.fail = false
+	err = writer.ResolveStep(conn, implement, ResolveRetry, "redo it on the integrated base", nowMS+1)
+	testsupport.Must(t, err, "resolve --as retry: %v", err)
+
+	treeB := filepath.Join(t.TempDir(), "wf-implement-b")
+	gitRun(t, shared, "worktree", "add", "-q", "--detach", treeB)
+	claim, err = ClaimStep(conn, implement, ClaimOptions{Owner: "w2", NowMS: nowMS + 2})
+	testsupport.Must(t, err, "claim (attempt 2): %v", err)
+	err = writer.CompleteStep(conn, implement, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change was already there"),
+		WorkDir: treeB, NowMS: nowMS + 2,
+	})
+	testsupport.Must(t, err, "complete (attempt 2): %v", err)
+	run := stepRunID(t, conn, implement)
+	if head, _, records := newestIssueDiffTarget(t, conn, run, issue); records != 1 || head != headA {
+		t.Fatalf("the retry left %d issue.diff record(s) naming %s, want 1 naming %s",
+			records, head, headA)
+	}
+
+	// The fixture's review steps hold the tree; an empty diff keeps their
+	// completions from recording an issue.diff over the retained one.
+	pass := testEngine()
+	pass.DiffFn = func(_, _ string, _ []string) (string, error) { return "", nil }
+	for i := range 4 {
+		claimAndComplete(t, conn, pass, "review@0#"+strconv.Itoa(i), "findings", "")
+	}
+	claimAndComplete(t, conn, pass, "synthesize@0", "synthesized", "")
+	driveAction(t, conn, pass, "reconcile@0")
+
+	verify, err := trustedTruePreGateEngine(t, shared).ClaimStepWithGates(conn,
+		stepIDIn(t, conn, issue, "verify@0"),
+		ClaimOptions{Owner: "verifier", NowMS: nowMS + 3})
+	testsupport.Must(t, err, "claim verify: %v", err)
+	if len(verify.Context.PreGates) != 1 {
+		t.Fatalf("the verify claim carries %d pre-gate results, want 1",
+			len(verify.Context.PreGates))
+	}
+	return verify, headA
+}
+
+func stepRunID(t *testing.T, conn *sql.DB, stepID int) int {
+	t.Helper()
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep(%d): %v", stepID, err)
+	return step.RunID
+}
+
+// TestRetainedTargetOffSharedHistoryNamesTheRemedies: the shared checkout took
+// a cherry-pick of the retained head, so the head itself is off its history.
+// The pre-gate still measures the retained head, and its reason says that tree
+// is the retained target and how to move it.
+func TestRetainedTargetOffSharedHistoryNamesTheRemedies(t *testing.T) {
+	verify, headA := claimVerifyOverRetainedTarget(t, func(shared, headA string) {
+		writeFile(t, shared, "internal/sibling.txt", "a sibling issue's work\n")
+		gitRun(t, shared, "add", "-A")
+		gitRun(t, shared, "commit", "-qm", "sibling work")
+		gitRun(t, shared, "cherry-pick", headA)
+	})
+
+	if verify.Context.TargetSHA != headA {
+		t.Errorf("target_sha = %q, want the retained head %s", verify.Context.TargetSHA, headA)
+	}
+	reason := verify.Context.PreGates[0].Reason
+	for _, want := range []string{"retained target", headA, retainedAnnotateVerb, retainedRepinVerb} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the pre-gate reason does not contain %q:\n%s", want, reason)
+		}
+	}
+}
+
+// TestRetainedTargetOnSharedHistoryCarriesNoAdvisory: the shared checkout
+// fast-forwarded to the retained head, so there is nothing to move.
+func TestRetainedTargetOnSharedHistoryCarriesNoAdvisory(t *testing.T) {
+	verify, headA := claimVerifyOverRetainedTarget(t, func(shared, headA string) {
+		gitRun(t, shared, "merge", "-q", "--ff-only", headA)
+	})
+
+	if verify.Context.TargetSHA != headA {
+		t.Errorf("target_sha = %q, want the retained head %s", verify.Context.TargetSHA, headA)
+	}
+	reason := verify.Context.PreGates[0].Reason
+	for _, unwanted := range []string{retainedAnnotateVerb, retainedRepinVerb} {
+		if strings.Contains(reason, unwanted) {
+			t.Errorf("the pre-gate reason names %q for a target the shared checkout "+
+				"carries:\n%s", unwanted, reason)
+		}
+	}
+}
+
+// TestUnintegratedTargetWithoutALaterRoundCarriesNoAdvisory: a target off the
+// shared history is the ordinary state before integration. With no later
+// round that recorded no commit, the target is not retained, and the reason
+// says nothing about moving it.
+func TestUnintegratedTargetWithoutALaterRoundCarriesNoAdvisory(t *testing.T) {
+	conn := mustDB(t)
+	issue, shared, tree, head := retainedTargetRun(t, conn)
+
+	writer := testEngine()
+	writer.DiffFn = GitDiff
+	writer.HeadFn = sharedCheckoutHead
+	implement := stepIDIn(t, conn, issue, "implement@0")
+	claim, err := ClaimStep(conn, implement, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim implement: %v", err)
+	err = writer.CompleteStep(conn, implement, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the change summary"),
+		WorkDir: tree, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "complete implement: %v", err)
+
+	verify, err := db.GetStep(conn, stepIDIn(t, conn, issue, "verify@0"))
+	testsupport.Must(t, err, "GetStep(verify@0): %v", err)
+	got, err := runPreGates(conn, trustedTruePreGateEngine(t, shared), verify,
+		[]workflow.Gate{{Name: "ac-commands", Pre: true}}, head, tree, nowMS)
+	testsupport.Must(t, err, "runPreGates: %v", err)
+	if len(got) != 1 || got[0].Verdict != VerdictPass {
+		t.Fatalf("results = %+v, want one pass", got)
+	}
+	if strings.Contains(got[0].Reason, retainedAnnotateVerb) ||
+		strings.Contains(got[0].Reason, retainedRepinVerb) {
+		t.Errorf("an unintegrated target with no later round carries the "+
+			"retained-target advisory:\n%s", got[0].Reason)
 	}
 }

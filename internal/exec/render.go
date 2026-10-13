@@ -5,9 +5,9 @@ import (
 	"strings"
 )
 
-// Render escapes one attacker-influenced value for display on a TERMINAL
-// (§5.7, T18). It is THE renderer: E2 requires exactly one, used by every
-// human-mode print of the three value classes.
+// Render escapes one attacker-influenced value for display on a TERMINAL. It
+// is THE renderer: there is exactly one, used by every human-mode print of the
+// three value classes.
 //
 // THE ATTACK IT CLOSES is not exotic. Three value classes in this stage are
 // attacker-influenced and printed to the operator: an argv (from a fence line
@@ -27,7 +27,7 @@ import (
 // stored bytes attacks the control directly rather than being a cosmetic bug.
 //
 // THE MECHANISM IS Go's %q — strconv.Quote semantics — NOT control-character
-// stripping (E1). Chosen deliberately: %q is LOSSLESS AND REVERSIBLE, so the
+// stripping. Chosen deliberately: %q is LOSSLESS AND REVERSIBLE, so the
 // operator sees that something odd is present rather than seeing
 // sanitized-but-plausible text with the hostile bytes silently removed.
 // Stripping would render the attack line as `make test  make lint`, which is
@@ -38,7 +38,7 @@ func Render(s string) string {
 }
 
 // RenderArgv escapes an argv for display: each element individually quoted and
-// space-joined (E2).
+// space-joined.
 //
 // Per-element quoting rather than quoting a joined string is what keeps the
 // element boundaries visible — an argument containing a space renders as one
@@ -55,14 +55,14 @@ func RenderArgv(argv []string) string {
 	return strings.Join(parts, " ")
 }
 
-// E5, stated where an implementer will read it: THE STORED BYTES ARE NEVER
+// Stated where an implementer will read it: THE STORED BYTES ARE NEVER
 // MODIFIED. Escaping is a RENDERING transform applied at the print boundary —
 // run_fences.command, gate_results.argv, and a trust entry's argv all keep
 // exactly the bytes that were harvested or approved. Mutating stored bytes
 // would break the fence hash re-verification, which is the one thing that must
 // compare unmodified content.
 //
-// E4, likewise: JSON MODE IS UNTOUCHED and is inherently safe. encoding/json
+// Likewise, JSON MODE IS UNTOUCHED and is inherently safe. encoding/json
 // escapes control bytes by contract, and the consumer is a program that does
 // not interpret them. Quoting on top of JSON encoding would double-escape and
 // corrupt the value a machine consumer reads, so --json output carries the RAW

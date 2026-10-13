@@ -14,8 +14,8 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// hostileValues are the attack strings §5.7 names, each a real way to make a
-// terminal show something other than what the bytes say.
+// hostileValues are the attack strings, each a real way to make a terminal
+// show something other than what the bytes say.
 var hostileValues = []struct {
 	name  string
 	value string
@@ -27,12 +27,13 @@ var hostileValues = []struct {
 	{"bell", "make test\x07"},
 	{"window title", "make test\x1b]0;t\x07"},
 	{"backspace run", "make test\x08\x08\x08\x08lint"},
-	{"C1 control", "make testmake lint"},
+	{"C1 control", "make test\u0085make lint"},
 	{"null", "make test\x00make lint"},
 	{"vertical tab", "make test\vmake lint"},
 }
 
-// TestOperatorFacingRenderingEscapesControlBytes is T18 / §5.7's test.
+// TestOperatorFacingRenderingEscapesControlBytes proves no raw control byte
+// reaches an operator's terminal.
 //
 // THE ASSERTION IS ON THE WRITTEN BYTES, not on the string's appearance — a
 // test that compared strings could pass while raw escapes still reached the
@@ -91,9 +92,9 @@ func assertRenderedSafely(t *testing.T, rendered, original string) {
 	}
 }
 
-// TestRenderIsLosslessAndReversible is E1's specific claim: the mechanism is Go
-// %q, so the ORIGINAL bytes can be recovered from what was displayed. That is
-// what distinguishes escaping from stripping.
+// TestRenderIsLosslessAndReversible proves the mechanism is Go %q, so the
+// ORIGINAL bytes can be recovered from what was displayed. That is what
+// distinguishes escaping from stripping.
 func TestRenderIsLosslessAndReversible(t *testing.T) {
 	for _, hv := range hostileValues {
 		// strconv.Unquote is the exact inverse of the renderer's
@@ -108,7 +109,7 @@ func TestRenderIsLosslessAndReversible(t *testing.T) {
 	}
 }
 
-// TestRenderArgvKeepsElementBoundariesVisible is E2's per-element rule.
+// TestRenderArgvKeepsElementBoundariesVisible proves the per-element rule.
 //
 // Per-element quoting rather than quoting a joined string is what keeps the
 // boundaries visible: an argument containing a space renders as ONE quoted
@@ -126,7 +127,7 @@ func TestRenderArgvKeepsElementBoundariesVisible(t *testing.T) {
 	}
 }
 
-// TestJSONModeCarriesRawBytes is E4.
+// TestJSONModeCarriesRawBytes proves JSON mode carries the raw bytes.
 //
 // JSON mode is UNTOUCHED and is inherently safe: encoding/json escapes control
 // bytes by contract, and the consumer is a program that does not interpret
@@ -175,7 +176,8 @@ func TestJSONModeCarriesRawBytes(t *testing.T) {
 	}
 }
 
-// TestRenderDoesNotModifyStoredBytes is E5.
+// TestRenderDoesNotModifyStoredBytes proves rendering leaves stored bytes
+// unchanged.
 //
 // Escaping is a RENDERING transform applied at the print boundary. Mutating
 // stored bytes would break the fence hash re-verification, which is the one
@@ -195,7 +197,7 @@ func TestRenderDoesNotModifyStoredBytes(t *testing.T) {
 		if before != after {
 			t.Errorf("%s: rendering must not modify the stored bytes", hv.name)
 		}
-		// The stored value still hashes to what it did, so §7.3's
+		// The stored value still hashes to what it did, so the fence hash
 		// re-verification against the stored hash keeps passing.
 		if hex.EncodeToString(before[:]) != hex.EncodeToString(after[:]) {
 			t.Errorf("%s: the stored hash changed across a render", hv.name)
@@ -203,7 +205,7 @@ func TestRenderDoesNotModifyStoredBytes(t *testing.T) {
 	}
 }
 
-// TestNoHumanModePrintBypassesTheRenderer is §5.7's SURFACE GUARD.
+// TestNoHumanModePrintBypassesTheRenderer is the renderer's SURFACE GUARD.
 //
 // The rule is one line to state and one careless print call to violate, which
 // is exactly the shape that needs a mechanical check. Every place this package
@@ -245,9 +247,9 @@ func TestNoHumanModePrintBypassesTheRenderer(t *testing.T) {
 	}
 }
 
-// TestRendererIsTheOnlyOne is E2's "one renderer" clause, asserted
-// structurally: a second escaping implementation is how the two drift apart and
-// one of them stops being applied.
+// TestRendererIsTheOnlyOne asserts the "one renderer" rule structurally: a
+// second escaping implementation is how the two drift apart and one of them
+// stops being applied.
 func TestRendererIsTheOnlyOne(t *testing.T) {
 	code := codeWithoutComments(t, "render.go")
 	if !strings.Contains(code, "strconv.Quote") {

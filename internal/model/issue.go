@@ -146,6 +146,92 @@ func (p Priority) Icon() string {
 	}
 }
 
+// Size represents an operator's estimate of how much work an issue is, as a
+// closed enum rather than free-text labels. It mirrors the brief skill's own
+// Size hint vocabulary (trivial, bounded, needs-design, unknown) plus
+// `small`, so the CLI's closed set and a brief's own sizing language name the
+// same categories.
+//
+// It REPLACES the small/trivial label convention as workflow-routing input
+// (an issue no longer needs `small` or `trivial` labels for small-change or
+// trivial-change to bind — see workflow.Match.SizesAny): the labels remain
+// available for other purposes, but sizing itself is now first-class issue
+// data, set and read through `docket issue create|edit --size` like Priority.
+type Size string
+
+const (
+	SizeTrivial     Size = "trivial"
+	SizeSmall       Size = "small"
+	SizeBounded     Size = "bounded"
+	SizeNeedsDesign Size = "needs-design"
+	SizeUnknown     Size = "unknown"
+	// SizeNone is the dormant default: an issue that declares no size. It is
+	// NOT part of validSizes — ValidateSize refuses it as an explicit
+	// --size value the same way an unrecognized string is refused, so an
+	// operator cannot accidentally set a value that renders as "no size set".
+	// It exists only as the zero value of the Size type and the empty string
+	// the storage layer and the wire format treat as "undeclared".
+	SizeNone Size = ""
+)
+
+var validSizes = []Size{
+	SizeTrivial,
+	SizeSmall,
+	SizeBounded,
+	SizeNeedsDesign,
+	SizeUnknown,
+}
+
+// ValidateSize returns an error if s is not a recognized size, INCLUDING the
+// empty string: unlike Priority (whose "none" is itself a valid value), Size's
+// dormant state is the absence of a --size flag, not a settable value, so
+// there is no size string that means "unset".
+func ValidateSize(s Size) error {
+	for _, v := range validSizes {
+		if s == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid size %q: must be one of %v", s, validSizes)
+}
+
+// Color returns a color name string suitable for terminal rendering, the same
+// per-field convention Priority and Status follow.
+func (s Size) Color() string {
+	switch s {
+	case SizeTrivial:
+		return "gray"
+	case SizeSmall:
+		return "blue"
+	case SizeBounded:
+		return "yellow"
+	case SizeNeedsDesign:
+		return "magenta"
+	case SizeUnknown:
+		return "white"
+	default:
+		return "white"
+	}
+}
+
+// Icon returns a Unicode icon representing the size.
+func (s Size) Icon() string {
+	switch s {
+	case SizeTrivial:
+		return "·"
+	case SizeSmall:
+		return "▫"
+	case SizeBounded:
+		return "▪"
+	case SizeNeedsDesign:
+		return "◆"
+	case SizeUnknown:
+		return "?"
+	default:
+		return ""
+	}
+}
+
 // IssueKind represents the category of an issue.
 type IssueKind string
 
@@ -498,9 +584,8 @@ type Issue struct {
 	UpdatedAt   time.Time
 	// Version is the optimistic-concurrency counter (schema v5). It is
 	// deliberately NOT emitted by MarshalJSON: adding a field to the v1
-	// envelope would break byte-compatibility for every existing verb
-	// (engine-spec.md §9 item 8). Use WithVersion to surface it under
-	// --json=v2.
+	// envelope would break byte-compatibility for every existing verb. Use
+	// WithVersion to surface it under --json=v2.
 	Version int
 	// Lease is the capability lease held on this issue (schema v6), or nil
 	// when unclaimed. Like Version it never reaches the v1 wire format; it
@@ -530,6 +615,12 @@ type Issue struct {
 	// (DKT-245). Following DKT-55's precedent, it reaches the v1 wire WHEN
 	// SET, and only then.
 	Resolution string
+	// Size is the operator's estimate of how much work this issue is
+	// (`issues.size`, schema v34), or SizeNone when undeclared. Following
+	// DKT-55's precedent — the same shape Scope and Resolution already use —
+	// it reaches the v1 wire WHEN SET, and only then: an issue that never
+	// declares a size marshals byte-identically to the pre-Size era.
+	Size Size
 }
 
 // issueJSONV2 is the v2 wire format: the v1 shape plus the CAS version, plus
@@ -545,15 +636,15 @@ type issueJSONV2 struct {
 }
 
 // VersionedIssue wraps an Issue so it marshals with its `version` field, for
-// --json=v2 responses (engine-spec.md §5, "versions in .data").
+// --json=v2 responses, which carry versions in .data.
 type VersionedIssue struct{ Issue }
 
 // MarshalJSON emits the v1 issue shape plus `version`, and `lease` when a
 // lease is held.
 //
 // The lease's `live` flag is computed here, at marshal time, from the current
-// clock — engine-spec.md §2 requires read verbs to render *effective* status
-// with expiry computed at read time and no write. An expired lease therefore
+// clock — read verbs render *effective* status with expiry computed at read
+// time and no write. An expired lease therefore
 // reads as dead the instant it lapses, without anyone having called claim.
 func (v VersionedIssue) MarshalJSON() ([]byte, error) {
 	base, err := v.Issue.marshalJSONStruct()
@@ -615,15 +706,20 @@ type issueJSON struct {
 	// v1 shape, while an abandoned one stops being indistinguishable from a
 	// finished one (DKT-245).
 	Resolution string `json:"resolution,omitempty"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
+	// Size appears ONLY when the issue declares one, the same DKT-55 shape a
+	// third time: an issue with no declared size marshals byte-identically to
+	// the pre-Size era, while a sized one is visible on the default surface
+	// `docket issue show`/`list` already render every other field on.
+	Size      string `json:"size,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // MarshalJSON implements custom JSON serialization for Issue.
-// This is the frozen v1 wire format, with the amendments recorded on issueJSON:
-// `scope` (DKT-55) and `resolution` (DKT-245) are emitted when — and only when
-// — they are set, so the dormant shape stays byte-identical, and `issue` mirrors
-// `id` unconditionally (DKT-452).
+// This is the frozen v1 wire format, with the additions recorded on issueJSON:
+// `scope` (DKT-55), `resolution` (DKT-245), and `size` are emitted when — and
+// only when — they are set, so the dormant shape stays byte-identical, and
+// `issue` mirrors `id` unconditionally (DKT-452).
 func (i Issue) MarshalJSON() ([]byte, error) {
 	j, err := i.marshalJSONStruct()
 	if err != nil {
@@ -665,6 +761,7 @@ func (i Issue) marshalJSONStruct() (issueJSON, error) {
 		Docs:        docs,
 		Scope:       i.Scope,
 		Resolution:  i.Resolution,
+		Size:        string(i.Size),
 		CreatedAt:   i.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   i.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -719,6 +816,17 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	i.Labels = j.Labels
 	i.Files = j.Files
 	i.Scope = j.Scope
+
+	// Size is validated only when present: unlike Priority, whose "none" is
+	// itself a valid value ValidateSize would accept, Size's dormant state is
+	// the KEY BEING ABSENT (DKT-55 shape) — an issue that never declared a
+	// size round-trips with j.Size == "" and must not be refused for it.
+	if j.Size != "" {
+		i.Size = Size(j.Size)
+		if err := ValidateSize(i.Size); err != nil {
+			return err
+		}
+	}
 
 	createdAt, err := time.Parse(time.RFC3339, j.CreatedAt)
 	if err != nil {

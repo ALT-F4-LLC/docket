@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# ZH — THE STRANGER TEST, as a script (gates-trust §9.4, engine-spec §9 item 1).
+# ZH — THE STRANGER TEST, as a script.
 #
-# §9 item 1, verbatim:
+# The acceptance criterion, verbatim:
 #
 #   Stranger test: a human-only demo — a docs-review workflow with two steps,
 #   one fenced-command gate, no agents anywhere — is definable, runnable, and
@@ -20,7 +20,7 @@
 test_zh_stranger() {
   printf "Section ZH: The stranger test — a human-only run, one approval"
 
-  # SB5 (§9.5): a hard abort, not a skip, if the trust sandbox is not in force.
+  # A hard abort, not a skip, if the trust sandbox is not in force.
   # This section WRITES trust entries, and doing that against the operator's
   # real store would modify the machine the suite is auditing.
   assert_trust_sandbox
@@ -66,7 +66,7 @@ test_zh_stranger() {
   assert_exit "ZH" "ZH3_issue" 0
 
   # ---------------------------------------------------------------------------
-  # Step 4: start and activate. The §7.7 report prints the fenced command
+  # Step 4: start and activate. The activation report prints the fenced command
   # VERBATIM and marks it `unmatched` — the operator sees what a run would
   # invoke before it invokes anything.
   # ---------------------------------------------------------------------------
@@ -75,6 +75,10 @@ test_zh_stranger() {
 
   run_env "$ZH" run activate RUN-1
   assert_exit "ZH" "ZH4_activate" 0
+  # The sign-off ticket: human mode prints the conductor capability on its
+  # own line, the last line of stdout (DKT-2465).
+  local ZH_CTOK
+  ZH_CTOK=$(printf '%s' "$CMD_STDOUT" | tail -n 1)
 
   # The report goes to stderr in human mode.
   if printf '%s' "$CMD_STDERR" | grep -q "touch"; then
@@ -164,7 +168,7 @@ test_zh_stranger() {
   local ZH_APPROVE
   ZH_APPROVE=$(sqlite3 "$ZH/issues.db" \
     "SELECT id FROM steps WHERE instance='approve@0';")
-  run_env "$ZH" step approve "STEP-$ZH_APPROVE" --json
+  DOCKET_TOKEN="$ZH_CTOK" run_env "$ZH" step approve "STEP-$ZH_APPROVE" --authority operator --json
   assert_exit "ZH" "ZH7_approve" 0
 
   # ---------------------------------------------------------------------------
@@ -222,10 +226,10 @@ test_zh_stranger() {
   fi
 
   # ---------------------------------------------------------------------------
-  # Step 11: THE ORDERED DEMO (§8.3). The stranger test re-earned over this
-  # stage's headline verb.
+  # Step 11: THE ORDERED DEMO. The stranger test re-earned over this stage's
+  # headline verb.
   #
-  # §1.1 states the sentence a stranger reads:
+  # The sentence a stranger reads:
   #
   #   "I registered a file that says my `risk` field goes low, medium, high.
   #   Now my workflow can say `any(risk >= medium)` and Docket routes on it."
@@ -385,8 +389,8 @@ ZHREVIEWEOF
   rm -rf "$ZH_O" "$ZH_O2"
 
   # ---------------------------------------------------------------------------
-  # Step 10: THE NEGATIVE HALF — §9 item 6 folded into the stranger demo, since
-  # it is the same script with one step removed.
+  # Step 10: THE NEGATIVE HALF — the untrusted-clone case folded into the
+  # stranger demo, since it is the same script with one step removed.
   #
   # A COPY of the repo at a different path, with no `trust add` there. The
   # entry above is bound to the original, so the gate is unmatched and nothing
@@ -400,8 +404,8 @@ ZHREVIEWEOF
   assert_exit "ZH" "ZH10_clone_init" 0
 
   # ---------------------------------------------------------------------------
-  # THE HOSTILE CONFIG DIRECTORY (runs-dispatch §9.5), which is why this check
-  # is EXTENDED at S6 rather than left alone.
+  # THE HOSTILE CONFIG DIRECTORY, which is why this check
+  # is EXTENDED rather than left alone.
   #
   # Auto-registration means activation now READS AND REGISTERS a workflow it
   # found in the repo — and "activation registers a workflow it found in the
@@ -412,9 +416,9 @@ ZHREVIEWEOF
   # reported `unmatched` and NOT EXECUTED, because the trust entry is bound to
   # the ORIGINAL repo and this is a different path.
   #
-  # Without this extension, S6 would widen the attack surface and the existing
-  # check would not notice — it would keep passing over a repo whose only
-  # workflow arrived through a verb the operator typed.
+  # Without this extension, auto-registration would widen the attack surface
+  # and the existing check would not notice — it would keep passing over a repo
+  # whose only workflow arrived through a verb the operator typed.
   # ---------------------------------------------------------------------------
   # The clone ships ONLY its own definition — no scaffolded template beside it.
   # That is both the more honest scenario (a hostile repo carries what its author
@@ -535,9 +539,9 @@ TOML
   fi
 
   # ---------------------------------------------------------------------------
-  # The `trust` refusal matrix, by EXIT CODE and by `.code` — the §6.9-style
-  # table the ZG extensions ask for, placed here because this is the section
-  # that already holds the trust sandbox.
+  # The `trust` refusal matrix, by EXIT CODE and by `.code` — the table the ZG
+  # extensions ask for, placed here because this is the section that already
+  # holds the trust sandbox.
   #
   # Each refusal is followed by a STORE-UNCHANGED assertion, for the same reason
   # ZG14 asserts version-unchanged: A REFUSAL NEVER WRITES. A validation error
@@ -593,7 +597,7 @@ TOML
   fi
 
   # ---------------------------------------------------------------------------
-  # DORMANCY (§9.3, group 2). "A repo with no trusted commands and no workflows
+  # DORMANCY (group 2). "A repo with no trusted commands and no workflows
   # behaves byte-identically on every pre-existing verb."
   #
   # This stage's dormancy claim is DISTINCT from S3's, and the distinction is

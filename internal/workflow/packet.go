@@ -5,8 +5,7 @@ import (
 	"strings"
 )
 
-// PACKET COMPOSITION — the grammar half
-// (docs/tdd/packet-composition.md §1.1).
+// PACKET COMPOSITION — the grammar half.
 //
 // A step's `packet` names the files it needs in its rendered work packet. The
 // engine reads their bytes against the hash activation pinned and hands them to
@@ -122,7 +121,7 @@ func validatePacket(step *Step) error {
 // lexically inside the config directory.
 //
 // The check is lexical rather than filesystem-resolved because Validate is a
-// pure function of bytes (§4.9.2) — it may not consult a disk. That is
+// pure function of bytes — it may not consult a disk. That is
 // sufficient here: the pin check at render refuses anything activation did not
 // pin, so a path that escapes lexically is refused at register with a clear
 // message, and a path that would escape only via a symlink is refused later for

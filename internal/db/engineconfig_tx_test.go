@@ -107,3 +107,68 @@ func TestSplitNameListRoundTrips(t *testing.T) {
 		t.Errorf("second name = %q, want %q", names[1], "bob")
 	}
 }
+
+// TestSetConfigTxReturnsThePriorValue is DKT-2563: the transaction-aware
+// write validates exactly as SetConfig does, upserts inside the caller's
+// transaction, and returns what the same scope row held before — empty on a
+// first write, the first value on an overwrite — while a refused value writes
+// nothing.
+func TestSetConfigTxReturnsThePriorValue(t *testing.T) {
+	conn := mustOpen(t)
+	if err := Initialize(conn); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	key := VoteRuleThresholdKey("majority")
+
+	tx, err := conn.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	prior, err := SetConfigTx(tx, 0, key, "0.6")
+	if err != nil {
+		t.Fatalf("first SetConfigTx: %v", err)
+	}
+	if prior != "" {
+		t.Errorf("first write returned prior %q, want empty (the key was unset)", prior)
+	}
+	prior, err = SetConfigTx(tx, 0, key, "0.8")
+	if err != nil {
+		t.Fatalf("second SetConfigTx: %v", err)
+	}
+	if prior != "0.6" {
+		t.Errorf("second write returned prior %q, want the first value 0.6", prior)
+	}
+
+	// An invalid value is refused with nothing written: the stored value is
+	// still the second write's.
+	if _, err := SetConfigTx(tx, 0, key, "1.5"); err == nil {
+		t.Error("SetConfigTx accepted a threshold above 1")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	entry, err := GetConfig(conn, 0, key)
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if entry.Value != "0.8" || entry.Source != "set" {
+		t.Errorf("stored value = %+v, want 0.8 from set", entry)
+	}
+
+	// SetConfig delegates: the same refusal, and the same write.
+	if err := SetConfig(conn, 0, key, "most"); err == nil {
+		t.Error("SetConfig accepted a non-numeric threshold")
+	}
+	if err := SetConfig(conn, 0, key, "0.7"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	entry, _ = GetConfig(conn, 0, key)
+	if entry.Value != "0.7" {
+		t.Errorf("SetConfig stored %q, want 0.7", entry.Value)
+	}
+}

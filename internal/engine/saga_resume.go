@@ -9,10 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// At-least-once gates and the resume decision (TDD docs/tdd/gates-trust.md
-// §7.5, threat T12, engine-spec §9 item 10).
-//
-// §2, verbatim:
+// At-least-once gates and the resume decision.
 //
 //	Gates are at-least-once: a `gate-started` event precedes each spawn; on
 //	resume, a started-but-unrecorded gate re-runs only if its trust entry is
@@ -24,12 +21,12 @@ import (
 // to run twice. A gate that committed, deployed, or charged something must not
 // be re-run because the engine could not tell whether it finished.
 
-// gateWasStartedButNotRecorded detects A1's state: a `gate-started` event
-// committed for this step+gate, with no `gate_results` row to match it.
+// gateWasStartedButNotRecorded detects the interrupted state: a `gate-started`
+// event committed for this step+gate, with no `gate_results` row to match it.
 //
 // The two halves are both necessary. A `gate-started` with no result is the
 // crash window. A result with no start cannot happen — the event commits first,
-// which is the entire reason the saga orders them that way (§7.5 A1).
+// which is the entire reason the saga orders them that way.
 func gateWasStartedButNotRecorded(conn *sql.DB, step *db.Step, gate string) (bool, error) {
 	var started bool
 	err := conn.QueryRow(
@@ -51,10 +48,10 @@ func gateWasStartedButNotRecorded(conn *sql.DB, step *db.Step, gate string) (boo
 	return !recorded, nil
 }
 
-// resolveInterruptedGate applies §7.5's A2-A6 decision to a
+// resolveInterruptedGate applies the resume decision to a
 // started-but-unrecorded gate.
 //
-// It consults the LIVE trust store (A2), not a cached decision: the question is
+// It consults the LIVE trust store, not a cached decision: the question is
 // what the operator declares about this command NOW, and a revocation between
 // the crash and the resume must take effect.
 func (e *Engine) resolveInterruptedGate(
@@ -65,7 +62,7 @@ func (e *Engine) resolveInterruptedGate(
 		return err
 	}
 
-	// A3: `re_runnable = true` ⇒ the gate re-runs. A `gate-rerun` event
+	// `re_runnable = true` ⇒ the gate re-runs. A `gate-rerun` event
 	// precedes it, so the trail shows BOTH the interrupted attempt's start and
 	// the re-run — an operator reading the feed sees that the command ran
 	// twice, which is what at-least-once actually means.
@@ -90,13 +87,13 @@ func (e *Engine) resolveInterruptedGate(
 		return e.runGateStage(conn, step, gate, stage, nowMS)
 	}
 
-	// A4/A5: `re_runnable = false` (THE DEFAULT), or unmatched at resume ⇒ the
-	// step PARKS. It does not re-run and it does not silently pass.
+	// `re_runnable = false` (THE DEFAULT), or unmatched at resume ⇒ the step
+	// PARKS. It does not re-run and it does not silently pass.
 	//
-	// A5 is worth its own sentence: an unmatched-at-resume gate parks too,
-	// rather than "re-run because we can't tell". Fail-closed is the only
-	// direction available when the question is whether something already
-	// happened.
+	// The unmatched case is worth its own sentence: an unmatched-at-resume
+	// gate parks too, rather than "re-run because we can't tell". Fail-closed
+	// is the only direction available when the question is whether something
+	// already happened.
 	return e.parkInterruptedGate(conn, step, gate, reason, nowMS)
 }
 
@@ -104,9 +101,10 @@ func (e *Engine) resolveInterruptedGate(
 // the resume decision reads the operator's own declaration.
 //
 // A named gate resolves by name and binding. A FENCE gate has no single entry —
-// it is many commands, each matched independently (§7.3) — so it is treated as
-// not re-runnable: re-running a partially-executed block would re-run the lines
-// that already succeeded, which is precisely the double-execution T12 forbids.
+// it is many commands, each matched independently — so it is treated as not
+// re-runnable: re-running a partially-executed block would re-run the lines
+// that already succeeded, which is precisely the double-execution forbidden
+// here.
 func (e *Engine) reRunnableEntryFor(
 	gate workflow.Gate, step *db.Step,
 ) (*trust.Entry, string, error) {
@@ -138,15 +136,21 @@ func (e *Engine) reRunnableEntryFor(
 			gate.Name, err), nil
 	}
 
-	match := store.Lookup(identity, gate.Name, nil)
+	// Declared files are hashed in the tree the re-run would spawn in, chosen
+	// as the gate runner chooses it: the step's worktree, else the exec root.
+	root := step.WorkRoot
+	if root == "" {
+		root = runner.RepoRoot
+	}
+	match := store.LookupAt(identity, gate.Name, nil, root)
 	if !match.Matched {
-		// A5.
+		// Unmatched at resume.
 		return nil, fmt.Sprintf(
 			"gate %q was interrupted after it started, and it is no longer trusted: %s",
 			gate.Name, match.Reason), nil
 	}
 	if !match.Entry.ReRunnable {
-		// A4/A6: the default. The message names the gate, the situation, and
+		// Not re-runnable: the default. The message names the gate, the situation, and
 		// BOTH operator resolutions, because a park with no stated remedy is a
 		// step nobody knows how to unstick.
 		return match.Entry, fmt.Sprintf(
@@ -211,7 +215,13 @@ func (e *Engine) parkInterruptedGate(
 	// The VERDICT rides along (DKT-63) so this reads as a refusal in the feed
 	// rather than as a gate that merely happened. There is no exit code: an
 	// unmatched gate never ran, and `exit=0` here would read as a pass.
-	unmatched, err := gateEventData(gate.Name, VerdictUnmatched, nil)
+	//
+	// `gate.Pre` is read rather than hardcoded false (DKT-862). It IS false on
+	// every reachable call today — this path resolves a completion gate, and
+	// completionGates drops the `pre` ones — but the marker has exactly one
+	// definition, the declaration itself, and a second spelling here is how the
+	// two surfaces would start to disagree again.
+	unmatched, err := gateEventData(gate.Name, VerdictUnmatched, nil, gate.Pre, false)
 	if err != nil {
 		return err
 	}
@@ -222,33 +232,35 @@ func (e *Engine) parkInterruptedGate(
 		return err
 	}
 	if err := db.SetStepRoutingTx(tx, step.ID,
-		routingRecord(workflow.OnFailWaitingHuman, reason),
-		db.StepWaitingHuman, nowMS); err != nil {
+		workflow.OnFailWaitingHuman, reason,
+		db.StepWaitingHuman, db.ParkClassGateUnmatched, nowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
 		Kind: EventStepRouted, RunID: step.RunID, Instance: step.Instance,
-		IssueID: step.IssueID, Data: workflow.OnFailWaitingHuman, AtMS: nowMS,
+		IssueID: step.IssueID,
+		Data:    routingRecord(workflow.OnFailWaitingHuman, reason), AtMS: nowMS,
 	}); err != nil {
 		return err
 	}
 	// THE ISSUE MIRROR AND RUN ROLLUP STILL RUN (DKT-379). This path routes —
 	// it writes the routing column and a `step-routed` event two statements up
-	// — and §6.8 makes reconciliation part of what routing IS, in the same
+	// — and reconciliation is part of what routing IS, in the same
 	// transaction. Leaving it out meant an issue parked ONLY by an interrupted
 	// gate never read `review`: the mirror fires from reconcileIssueAndRun
 	// alone, and this was the one park with nothing downstream left to call it.
 	// The run had the same hole, staying `active` with a parked step in it.
 	//
-	// `spec` is nil, which is exactly right here rather than a shortcut:
-	// skipUnroutedTargets is threshold-target bookkeeping and an interrupted
-	// gate decided no threshold. The completion check inside is false by
-	// construction — the step this call is about is `waiting-human`, which is
-	// not terminal.
+	// `spec` and `def` are nil, which is exactly right here rather than a
+	// shortcut: skipUnroutedTargets is threshold-target bookkeeping and an
+	// interrupted gate decided no threshold, and the `after_fired` cascade
+	// follows a skip this park does not perform. The completion check inside
+	// is false by construction — the step this call is about is
+	// `waiting-human`, which is not terminal.
 	//
 	// This is NOT the saga advancing; see below.
 	if err := reconcileIssueAndRun(
-		tx, step, nil, workflow.OnFailWaitingHuman, nowMS,
+		tx, step, nil, nil, workflow.OnFailWaitingHuman, nowMS,
 	); err != nil {
 		return err
 	}

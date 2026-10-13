@@ -1,13 +1,11 @@
-// Package engine implements run activation — the fat transaction of
-// engine-core §3.2 and engine-spec §2 (TDD docs/tdd/engine-spine.md §5.3).
+// Package engine implements run activation as one transaction.
 //
-// The package carries no agent, model, or LLM vocabulary of any kind
-// (docs/design/genericity.md). It binds workflows to issues by their declared
-// `[match]` predicates, pins what a run must reproduce, freezes the issue state
-// a context bundle will read, harvests the commands an operator approved, and
-// expands the step topology. Every one of those is scheduling, dependency, or
-// packaging work; none of them reads a key inside `params` or `metadata`, and
-// `executor` stays the opaque string §11.1 makes it.
+// The package carries no agent, model, or LLM vocabulary of any kind. It binds
+// workflows to issues by their declared `[match]` predicates, pins what a run
+// must reproduce, freezes the issue state a context bundle will read, harvests
+// the commands an operator approved, and expands the step topology. Every one
+// of those is scheduling, dependency, or packaging work; none of them reads a
+// key inside `params` or `metadata`, and `executor` stays an opaque string.
 package engine
 
 import (
@@ -16,7 +14,7 @@ import (
 )
 
 // ErrorCode classifies an activation failure so the CLI can map it onto the
-// error taxonomy (TDD §5.5) without re-deriving the mapping from the message.
+// error taxonomy without re-deriving the mapping from the message.
 type ErrorCode string
 
 const (
@@ -27,13 +25,20 @@ const (
 	// CodeNotFound is NOT_FOUND (exit 2): a run that does not exist, or a
 	// `--pin` path that is missing or is not a regular file.
 	CodeNotFound ErrorCode = "NOT_FOUND"
-	// CodeConflict is CONFLICT (exit 4): re-activating a terminal run (RA5).
+	// CodeConflict is CONFLICT (exit 4): re-activating a terminal run.
 	CodeConflict ErrorCode = "CONFLICT"
-	// CodeGone is GONE: an `events list --since` cursor below the retained
-	// minimum (docs/tdd/runs-dispatch.md §8.6). No product code path reaches it
-	// at this stage — nothing prunes until S7 — and the SHAPE ships here because
-	// `--since` is the verb that must return it.
+	// CodeGone is GONE: history that `events prune` removed. Two product paths
+	// return it: an `events list --since` cursor below the retained minimum,
+	// and the recorded issue body and scope read-back (recordedIssue in
+	// context.go, reached by step context and step render) when the prune
+	// removed the step's claim event.
 	CodeGone ErrorCode = "GONE"
+	// CodeAuth is AUTH_ERROR (exit 5): a caller presenting a token that is not
+	// the run's conductor capability on one of the operator verbs (DKT-2465).
+	// The same code the lease refusals use for "you do not hold this", and
+	// for the same reason: the answer to a caller with no capability never
+	// says more than that.
+	CodeAuth ErrorCode = "AUTH_ERROR"
 )
 
 // Error is an activation failure carrying its taxonomy code.

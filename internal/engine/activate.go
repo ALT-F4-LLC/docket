@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,22 +21,30 @@ import (
 // ActivateOptions are `docket run activate`'s inputs beyond the run itself.
 type ActivateOptions struct {
 	// FilePins are `--pin PATH` (repeatable): arbitrary operator-supplied
-	// files pinned by path and content hash. engine-spec §2 is explicit that
-	// this is "how the reference instance pins its contracts, fragments, and
-	// policy without core knowing what they are" — so core reads bytes, hashes
+	// files pinned by path and content hash. This is how the reference
+	// instance pins its contracts, fragments, and policy without core knowing
+	// what they are — so core reads bytes, hashes
 	// them, stores the path, and never opens the content again except to serve
 	// `context.pins`.
 	FilePins []string
 	// NowMS is the activation timestamp, injected so a test can pin it and
 	// two activations of the same inputs produce comparable rows.
 	NowMS int64
-	// DryRun computes the whole activation and DISCARDS it (§7.7 S4), so an
+	// DryRun computes the whole activation and DISCARDS it, so an
 	// operator sees what a run would bind and invoke before committing.
 	DryRun bool
 	// Reason is the operator's optional stated reason for activating, recorded
 	// on the run-activated event's data when non-empty — matching `run budget
 	// --set --reason`, `run abandon --reason`, and `step reap --reason`.
 	Reason string
+	// HeadBranch and HeadCommit are the activating checkout's HEAD, read by
+	// the verb through config.GitHead on the configured exec root and
+	// recorded on the run-activated event's data (DKT-3263), so a close
+	// report can range `git log <head_commit>..HEAD` even after the shared
+	// branch is rewritten. Each is omitted when empty: outside a checkout
+	// the head is unknown, never invented.
+	HeadBranch string
+	HeadCommit string
 }
 
 // ActivateResult reports what one activation did, for the verb to render.
@@ -45,7 +54,7 @@ type ActivateResult struct {
 	IssuesBound int
 	// IssuesExpanded is the subset whose phase expanded THIS activation —
 	// phase-1 issues at first activation, newly-unblocked phases at a
-	// re-activation (RA1).
+	// re-activation.
 	IssuesExpanded int
 	StepsCreated   int
 	// ExpectedCostTotal is the run-wide SUM of the steps' expected_cost as
@@ -86,17 +95,45 @@ type ActivateResult struct {
 	// `IssuesBound`'s count was missing — an operator approving a `--dry-run`
 	// needs to know WHAT was bound, not just how many.
 	BoundIssues []BoundIssue
+	// BlockedIssues names, by display id, every bound issue this activation
+	// left UNEXPANDED, each with the in-run depends_on predecessors still
+	// holding it and their status as this activation leaves it (DKT-1180: a
+	// re-activation that expanded nothing carried no field saying why, and the
+	// cause — a predecessor check gating on issues the blocked one had no edge
+	// into — took a source audit to find). Populated identically on a dry run
+	// and a real activation. Nil when every bound issue is expanded, so the
+	// ordinary run carries no key at all rather than an empty one.
+	BlockedIssues []BlockedIssue
+	// ConductorToken is the run's conductor capability, minted by a FIRST
+	// activation and returned here and nowhere else (DKT-2465): only its hash
+	// is stored. Empty on a re-activation, a dry run, and a run conducted
+	// before it activated (the seat's holder already has the token).
+	ConductorToken string
 	// Reactivation reports whether this was a re-activation of an already
 	// `active` run, so the verb can say "expanded 2 new phases" rather than
 	// implying a first activation.
 	Reactivation bool
 	// ContextWarnings names every step whose closure exceeded
-	// `context.warn_bytes` (§5.5). The WARN cap does not refuse — only the
+	// `context.warn_bytes`. The WARN cap does not refuse — only the
 	// ERROR cap does — so these ride out on the result rather than as an
 	// error, and the verb chooses the channel: stderr in human mode, a flag on
 	// the row in JSON mode. Returning them rather than printing them here
 	// keeps the engine free of an output dependency it has no other use for.
 	ContextWarnings []ContextWarning
+	// SourceWarnings names every BOUND workflow whose registered source file
+	// could not be verified against `source_sha256` — and that activation did
+	// not refuse over (DKT-590). Drift on a binding this activation MADE is a
+	// refusal, so it appears here only in the three cases refusing would be
+	// wrong: an unreadable source (the registered bytes still reproduce; only
+	// their provenance is gone), drift under a binding inherited from an
+	// earlier activation (a mid-run edit stays a non-event), and drift
+	// under `registration.auto = false`, where a registry lagging the corpus is
+	// the operator's own standing decision.
+	//
+	// It travels here for ContextWarnings' reason and takes the same stance:
+	// the engine holds no output dependency, and the verb picks the channel —
+	// stderr in human mode, an array in JSON.
+	SourceWarnings []SourceWarning
 	// ScopeWarnings names every issue that declared no scope at all while
 	// binding a workflow whose steps occupy the tree (lintUnscopedHolders).
 	//
@@ -105,25 +142,49 @@ type ActivateResult struct {
 	// and proceeds, and the verb picks the channel — stderr in human mode, an
 	// array in JSON.
 	ScopeWarnings []ScopeWarning
-	// Registered is what auto-registration acted on, in registration order —
-	// schemas first, then workflows (docs/tdd/runs-dispatch.md §9.7 F20/F21).
+	// BindingWarnings names every issue that bound one workflow while its
+	// declared scope lies entirely inside ANOTHER registered workflow's declared
+	// `[match] domain_paths`, and lacks only the labels that other workflow
+	// requires (lintDomainScopeMismatch, DKT-1182).
 	//
-	// F23: an activation that registered nothing leaves this NIL and the verb
-	// prints no `Registered` block — not an empty one — so F17's dormancy is
-	// VISIBLE IN THE OUTPUT rather than merely true underneath it.
+	// It is the exactly-one-WRONG-match signal. Activation refuses zero matches
+	// and refuses several, but a mis-labelled issue matches its wrong workflow
+	// exactly once, which is the one shape the binding rule cannot see — so it
+	// bound, ran, and lost the other pipeline's gates with no output saying so.
+	//
+	// It travels here for ContextWarnings' reason and takes the same stance:
+	// binding on the labels the operator applied is legal and sometimes
+	// deliberate, so this reports and proceeds, and the verb picks the channel.
+	BindingWarnings []BindingWarning
+	// Registered is what auto-registration acted on, in registration order —
+	// schemas first, then workflows.
+	//
+	// An activation that registered nothing leaves this NIL and the verb
+	// prints no `Registered` block — not an empty one — so a repo with no
+	// config directory is VISIBLY DORMANT IN THE OUTPUT rather than merely
+	// dormant underneath it.
 	Registered []Registration
 	// PinsFromConfig counts the files under `.docket/config/` that were pinned
-	// rather than registered (F4). They are counted, not listed: a fragment tree
-	// can hold hundreds of files and none of them is a decision an operator
-	// needs to read before approving.
+	// rather than registered — since DKT-581, only the PACKET CLOSURE the
+	// bound workflows reach (packet entries, their `packet_includes`, and
+	// policy.toml), not every file the scan walked. They are counted, not
+	// listed: a closure can hold dozens of files and none of them is a
+	// decision an operator needs to read before approving.
 	PinsFromConfig int
+	// NewPolicyPin names the policy.toml a RE-ACTIVATION pinned because the
+	// run's pin set held none. Waiting rows resolve model, effort, and variant
+	// against the pinned policy, so from this activation on they adopt a
+	// policy the run did not start under. Nil on a first activation and on a
+	// re-activation that pinned no new policy.toml; an inherited policy pin
+	// keeps its original hash and is never reported here.
+	NewPolicyPin *PolicyPin
 
-	// Fences is the §7.7 trust report: every harvested fenced command and
-	// whether a trust entry authorizes it (gates-trust §7.7, threat T16).
+	// Fences is the trust report: every harvested fenced command and whether
+	// a trust entry authorizes it.
 	//
-	// engine-spec §2 requires activation to surface "what activation will bind
-	// — including every harvested fenced command, verbatim". S3 harvested and
-	// stored; this stage adds the TRUST STATUS, because a verbatim list an
+	// Activation must surface what it will bind, including every harvested
+	// fenced command, verbatim. Harvesting stores the commands; this report
+	// adds the TRUST STATUS, because a verbatim list an
 	// operator cannot act on is only half the mechanism: they need to see which
 	// commands will actually run before the run, not after.
 	Fences []FenceReport
@@ -169,7 +230,13 @@ type ActivateResult struct {
 	preActivationActivatedAtMS *int64
 }
 
-// FenceReport is one harvested command and its trust status (§7.7 S1/S2).
+// PolicyPin is a pinned policy.toml: its config-relative ref and content hash.
+type PolicyPin struct {
+	Ref    string `json:"ref"`
+	SHA256 string `json:"sha256"`
+}
+
+// FenceReport is one harvested command and its trust status.
 type FenceReport struct {
 	Issue string `json:"issue"`
 	Gate  string `json:"gate"`
@@ -177,7 +244,7 @@ type FenceReport struct {
 	// Ordinal is the command's position in body order, which is the order an
 	// operator read it in and the order it will run in.
 	Ordinal int `json:"ordinal"`
-	// Command is the RAW STORED BYTES (§5.7 E4): JSON escaping is
+	// Command is the RAW STORED BYTES: JSON escaping is
 	// encoding/json's job and the consumer is a program. Human-mode rendering
 	// escapes at the print boundary instead, so the stored bytes stay exactly
 	// what was harvested and hashed.
@@ -189,8 +256,8 @@ type FenceReport struct {
 }
 
 // ContextWarning is one step whose closure passed `context.warn_bytes` without
-// reaching `context.error_bytes` — visible before spend, per engine-core §8,
-// and not yet a refusal.
+// reaching `context.error_bytes` — visible before spend, and not yet a
+// refusal.
 type ContextWarning struct {
 	Instance string `json:"instance"`
 	IssueID  string `json:"issue"`
@@ -207,6 +274,31 @@ type ScopeWarning struct {
 	Reason   string `json:"reason"`
 }
 
+// BindingWarning is one issue whose LABELS and whose SCOPE disagree about which
+// pipeline owns it: it bound `BoundWorkflow` on its labels, while every path it
+// declares lies inside `DomainWorkflow`'s declared domain and the only thing
+// keeping it out of that workflow is `MissingLabels` (DKT-1182).
+type BindingWarning struct {
+	IssueID string `json:"issue"`
+	// BoundWorkflow is what activation actually bound, as `name@version` —
+	// named because it is the pipeline that will really run, and an operator
+	// reading only the domain half would not know what they are getting.
+	BoundWorkflow string `json:"bound_workflow"`
+	// DomainWorkflow is the workflow whose `domain_paths` contain the issue's
+	// scope, as `name@version` — the pipeline the paths say should own it.
+	DomainWorkflow string `json:"domain_workflow"`
+	// Scope is the issue's declared scope, verbatim and in declared order, so
+	// the warning carries the evidence rather than asking the reader to go find
+	// what the issue claims to touch.
+	Scope []string `json:"scope"`
+	// MissingLabels names what would move the binding: every `labels_all` entry
+	// the issue lacks, plus the `labels_any` list when it holds none of it.
+	// Never empty — an issue missing nothing already bound the other workflow,
+	// or hit the exactly-one-match refusal.
+	MissingLabels []string `json:"missing_labels"`
+	Reason        string   `json:"reason"`
+}
+
 // BoundIssue names one issue this activation bound, by display id, and the
 // exact workflow@version it bound to (DKT-94: `issues_bound` reported a count
 // with no roster, and the only place bound-issue identity appeared at all was
@@ -219,7 +311,26 @@ type BoundIssue struct {
 	Workflow string `json:"workflow"`
 }
 
-// Activate is the fat transaction (engine-core §3.2, engine-spec §2; TDD §5.3).
+// BlockedIssue is one bound issue an activation did not expand, and why: the
+// in-run depends_on predecessors that are not yet `done` (DKT-1180). It always
+// carries at least one — an issue with no unsatisfied predecessor expands.
+type BlockedIssue struct {
+	IssueID   string          `json:"issue"`
+	BlockedBy []BlockingIssue `json:"blocked_by"`
+}
+
+// BlockingIssue is one unsatisfied predecessor: its display id and the status
+// keeping it unsatisfied — anything but `done`, the one status that releases
+// a successor. Note that `abandon-issue` is not a status: the routing leaves
+// the issue at `todo` with `resolution = abandoned`, so a `todo` predecessor
+// here may be one the run has already given up on, and the successor will
+// then expand only once an operator closes or re-plans it.
+type BlockingIssue struct {
+	IssueID string `json:"issue"`
+	Status  string `json:"status"`
+}
+
+// Activate is the fat transaction.
 //
 // ONE transaction, seven stages in order, each failing the whole activation:
 //
@@ -231,8 +342,8 @@ type BoundIssue struct {
 //  6. Expand phase 1   — lazily, for issues whose predecessors are satisfied
 //  7. Promote and flip — backlog -> todo, run -> active, events written
 //
-// NOTHING EXECUTES INSIDE THIS TRANSACTION (§6: "No subprocess ever executes
-// inside a transaction"). Activation runs no gate, no action, no command. It
+// NOTHING EXECUTES INSIDE THIS TRANSACTION: no subprocess ever executes inside
+// a transaction. Activation runs no gate, no action, no command. It
 // READS files — for pins and their hashes — which is not execution.
 //
 // The transaction being fat is what makes the failure modes clean: a `--pin`
@@ -240,40 +351,46 @@ type BoundIssue struct {
 // and no pins. Pinning is never partial, because a partially-pinned run is a
 // run that cannot reproduce itself and cannot say so.
 func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, error) {
-	// The pin files are read BEFORE the transaction opens. Reading inside it
-	// would hold a write lock across arbitrary filesystem latency for data the
-	// transaction cannot influence — and a missing path is a refusal that
-	// wants to happen before anything is locked, not a rollback.
-	filePins, err := readFilePins(opts.FilePins)
+	// AUTO-REGISTRATION'S SCAN. It reads and hashes files, so it happens
+	// out here, before the transaction opens: holding a write lock across
+	// arbitrary filesystem latency buys nothing, and a malformed file is a
+	// refusal that wants to happen before anything is locked.
+	//
+	// THE ROOT CHECK IS THE FIRST THING IT DOES — one `lstat` PER ROOT, and a
+	// root that is absent is skipped whole. That is what makes "a repo with no
+	// config directory activates exactly as before" a property of the code
+	// rather than an intention, and it is also what lets a repo carry no
+	// `.docket/` at all while still activating against the shared corpus.
+	scan, err := scanConfigDirs(resolvePaths().InstanceConfigDirs())
 	if err != nil {
 		return nil, err
 	}
 
-	// AUTO-REGISTRATION'S SCAN (§9.2). It reads and hashes files, so it happens
-	// out here for readFilePins' reason: holding a write lock across arbitrary
-	// filesystem latency buys nothing, and a malformed file is a refusal that
-	// wants to happen before anything is locked.
-	//
-	// F17 IS THE FIRST THING IT DOES — one `lstat` PER ROOT, and a root that is
-	// absent is skipped whole. That is what makes "a repo with no config
-	// directory activates exactly as before" a property of the code rather than
-	// an intention, and it is also what lets a repo carry no `.docket/` at all
-	// while still activating against the shared corpus.
-	scan, err := scanConfigDirs(resolvePaths().InstanceConfigDirs())
+	// The pin files are read BEFORE the transaction opens for the scan's
+	// reason, and AFTER the scan because their refs are derived against the
+	// roots it resolved: a pin recorded against any other notion of
+	// a root would disagree with every reader. A missing path is a refusal
+	// that wants to happen before anything is locked, not a rollback. A nil
+	// scan (no root exists) means no ref can be config-relative.
+	var roots []string
+	if scan != nil {
+		roots = scan.roots
+	}
+	filePins, err := readFilePins(opts.FilePins, roots)
 	if err != nil {
 		return nil, err
 	}
 
 	// Registered workflows are read outside too, for the same reason: the
 	// candidate set is the whole table and it does not change under us within
-	// one activation. RA2's INHERITED pins are read inside, where they must be
-	// consistent with what gets written.
+	// one activation. A re-activation's INHERITED pins are read inside, where
+	// they must be consistent with what gets written.
 	//
 	// IT IS READ AFTER THE SCAN but the SCAN IS APPLIED INSIDE the transaction,
 	// so this list cannot yet contain what the scan will register. Binding
 	// therefore re-reads the definitions inside activateTx once anything was
 	// registered — see the reload there, which is what makes a workflow
-	// registered by this very activation bindable by it (Z5).
+	// registered by this very activation bindable by it.
 	// The RUN's project scopes everything downstream — which definitions can
 	// bind, which config caps apply, which registry auto-registration writes
 	// into (v12). This is also the first read that can discover the run does
@@ -307,10 +424,10 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 		return nil, err
 	}
 
-	// §7.7 S4: `--dry-run` prints the same report and WRITES NOTHING, so an
-	// operator can see what a run would bind and invoke before committing to
-	// it. This is the "at plan approval the session surfaces" half of §2, made
-	// available as a verb rather than left to the harness.
+	// `--dry-run` prints the same report and WRITES NOTHING, so an operator can
+	// see what a run would bind and invoke before committing to it. This is
+	// what the session surfaces at plan approval, made available as a verb
+	// rather than left to the harness.
 	//
 	// It is implemented by ROLLING BACK the very transaction a real activation
 	// would commit, rather than by a parallel read-only code path. That is the
@@ -381,7 +498,7 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 	}
 	result.Run = run
 
-	// §7.7 S1: the trust report, built AFTER the fat transaction commits —
+	// The trust report, built AFTER the fat transaction commits —
 	// it reads the rows that transaction wrote, and it is a report rather than
 	// a gate, so a failure to build it must not undo an activation that
 	// succeeded.
@@ -428,7 +545,7 @@ func activateTx(
 		return nil, err
 	}
 
-	// RA5: re-activating a terminal run is CONFLICT. A `done` run's topology
+	// Re-activating a terminal run is CONFLICT. A `done` run's topology
 	// is history; a re-activation would append steps to something nothing will
 	// ever schedule.
 	//
@@ -460,9 +577,9 @@ func activateTx(
 				"before re-activating", run.Ref(), run.Ref())
 	}
 
-	// RA4: refused while a dispatch is open. Vacuously true at this stage —
-	// dispatches are S6 — but written as a call so S6 adds a query behind
-	// dispatchOpen rather than a call site here.
+	// Refused while a dispatch is open. Vacuously true today — dispatchOpen
+	// always answers false — but written as a call so a real check adds a
+	// query behind dispatchOpen rather than a call site here.
 	open, err := dispatchOpen(tx, runID)
 	if err != nil {
 		return nil, err
@@ -485,33 +602,38 @@ func activateTx(
 	result.preActivationStatus = run.Status
 	result.preActivationActivatedAtMS = run.ActivatedAtMS
 
-	// ---- Stage 0: AUTO-REGISTER the config directory (§9). ------------------
+	// ---- Stage 0: AUTO-REGISTER the config directory. -----------------------
 	//
-	// F8: INSIDE THE FAT TRANSACTION, BEFORE BINDING. A registration failure
+	// INSIDE THE FAT TRANSACTION, BEFORE BINDING. A registration failure
 	// refuses the whole activation and writes nothing — registering-then-failing
 	// would leave a repo carrying definitions from a run that never started, and
 	// the NEXT activation would bind against that debris.
 	//
-	// F15: A RE-ACTIVATION DOES NOT RE-SCAN. RA2 says the pin set is inherited,
+	// A RE-ACTIVATION DOES NOT RE-SCAN. A re-activation inherits the pin set,
 	// and the same reasoning reaches registration: a config file edited mid-run
 	// must not reach a run already under way. If re-activation re-scanned, an
 	// operator editing a workflow while a run expanded its second phase would
-	// hit F9's collision refusal on a run that was working fine, and the fix
-	// would be to revert their edit. Inheriting makes the edit a non-event —
-	// exactly as a re-registered workflow is already a non-event (RA2).
-	if !reactivation && scan != nil {
-		// registration.auto (default true) gates ONLY this half. An operator
-		// who turns it off is declining silent version adoption, not the
-		// corpus itself — the pinned half below has no version to adopt, so it
-		// keeps running regardless: a project with registration off still
-		// needs the corpus's contracts/fragments/policy.toml to render a
-		// step's `packet`, and the only alternative would be hand-supplying
-		// every one of them via `--pin`.
-		autoRegister, err := db.AutoRegisterEnabledTx(tx, run.ProjectID)
-		if err != nil {
-			return nil, err
-		}
+	// hit the registration collision refusal on a run that was working fine,
+	// and the fix would be to revert their edit. Inheriting makes the edit a
+	// non-event — exactly as a re-registered workflow is already a non-event.
+	// registration.auto (default true) gates ONLY the registering half below. An
+	// operator who turns it off is declining silent version adoption, not the
+	// corpus itself — the pinned half has no version to adopt, so it keeps
+	// running regardless: a project with registration off still needs the
+	// corpus's contracts/fragments/policy.toml to render a step's `packet`, and
+	// the only alternative would be hand-supplying every one of them via
+	// `--pin`.
+	//
+	// It is read HERE, ahead of the scan's own branch, because stage 1's source
+	// check needs the same answer: with adoption declined, a registry that lags
+	// the corpus is the operator's own standing decision rather than an
+	// unexplained divergence, and the two dispositions differ (DKT-590).
+	autoRegister, err := db.AutoRegisterEnabledTx(tx, run.ProjectID)
+	if err != nil {
+		return nil, err
+	}
 
+	if !reactivation && scan != nil {
 		if autoRegister {
 			registered, err := registerScanTx(tx, run.ProjectID, scan, opts.NowMS)
 			if err != nil {
@@ -521,7 +643,7 @@ func activateTx(
 
 			// The definitions list was read before this transaction, so it cannot
 			// contain what the scan just registered. Reloading here is what makes
-			// the zero-touch path work at all (§9.8 Z5): `run activate` must be able
+			// the zero-touch path work at all: `run activate` must be able
 			// to BIND a workflow that this very activation registered, and a stale
 			// candidate list would report "no workflow matches this issue" over a
 			// definition sitting in the same transaction.
@@ -533,11 +655,10 @@ func activateTx(
 			}
 		}
 
-		// F4: the pinned half. These join the pin set below rather than being
-		// written here, so auto-pinned and `--pin` files travel one code path
-		// and RA2's inheritance covers both.
-		filePins = append(filePins, scan.pins...)
-		result.PinsFromConfig = len(scan.pins)
+		// The scan's pinned half lives in stage 3 (DKT-581): its pins join
+		// the pin set FILTERED to the packet closure the bound workflows
+		// reach, and the bindings that define that closure do not exist until
+		// stage 1 has run.
 	}
 
 	runIssues, err := db.ListRunIssuesTx(tx, runID)
@@ -556,11 +677,34 @@ func activateTx(
 
 	// ---- Stage 1: bind. -----------------------------------------------------
 	//
-	// RA3: issues added since activation are bound and snapshotted now. An
+	// Issues added since activation are bound and snapshotted now. An
 	// issue already bound keeps its binding — re-binding would let a workflow
 	// registered mid-run capture an issue the operator already approved into a
 	// different pipeline.
+	// DKT-609's half of binding: the scan this activation already performed,
+	// read back as "which registered NAMES still have a definition on disk".
+	//
+	// It is built from the SAME scan registration uses, so the two cannot
+	// disagree about what a root holds, and it is LAZY — nothing reads a file
+	// unless a refusal below actually names candidates. A re-activation does
+	// not re-scan config, but the scan itself was computed regardless,
+	// so an inherited-binding run annotates from exactly the same facts.
+	//
+	// Laziness is why it sits here rather than beside the scan outside the
+	// transaction: eager would re-read and re-parse every workflow in the
+	// corpus on EVERY activation to answer a question almost none of them ask.
+	// The reads it does perform happen on a refusal path, in a transaction
+	// that is about to roll back and write nothing — the same latitude
+	// activation's other reads get, spent only where an operator is already
+	// receiving an error.
+	origins := newWorkflowOriginIndex(scan)
+
 	bindings := make(map[int]*boundDefinition, len(runIssues))
+	// inherited marks the bindings a PRIOR activation made, which this one is
+	// only re-reading. DKT-590's source check disposes of the two differently —
+	// an edit must not reach a run already under way — so the distinction the
+	// loop already knows is recorded rather than re-derived.
+	inherited := make(map[int]bool, len(runIssues))
 	for _, ri := range runIssues {
 		issue := issues[ri.IssueID]
 		if ri.WorkflowID != nil {
@@ -571,21 +715,37 @@ func activateTx(
 					model.FormatID(ri.IssueID), *ri.WorkflowID)
 			}
 			bindings[ri.IssueID] = bound
+			inherited[ri.IssueID] = true
 			continue
 		}
-		bound, err := bindIssue(issue, definitions)
+		bound, err := bindIssue(issue, definitions, origins)
 		if err != nil {
 			return nil, err
 		}
 		bindings[ri.IssueID] = bound
 	}
 
+	// Binding's INTEGRITY half (DKT-590): does each bound workflow's own
+	// recorded `source_path` still hold the bytes it was registered with?
+	//
+	// It runs HERE — after binding, before anything is pinned or expanded —
+	// because binding is what selects the definitions whose provenance matters,
+	// and because a refusal is worth more before the transaction has computed a
+	// topology than after. A dry run reaches it on this same path and refuses
+	// identically: `--dry-run` is the real activation rolled back, so what it
+	// reports is what a real one would do.
+	sourceWarnings, err := checkBoundSources(runIssues, bindings, inherited, autoRegister)
+	if err != nil {
+		return nil, err
+	}
+	result.SourceWarnings = sourceWarnings
+
 	// Binding's lint half: an issue that holds the tree while declaring nothing
 	// about what it touches.
 	//
-	// R4's first branch is unconditional — "a scope-less issue is never
-	// excluded" (ready.go's scopeConflict, and ClaimablePrefix takes the same
-	// exit) — so such an issue is mutually exclusive with NOTHING, and under
+	// Scope exclusion's first branch is unconditional — "a scope-less issue is
+	// never excluded" (ready.go's scopeConflict, and ClaimablePrefix takes the
+	// same exit) — so such an issue is mutually exclusive with NOTHING, and under
 	// stage-parallel spawning its writer runs beside every other step in the
 	// repository. The state is legal and occasionally intended, which is why
 	// this reports rather than refuses; it is far more often an omission at
@@ -615,23 +775,49 @@ func activateTx(
 	}
 	result.ScopeWarnings = append(result.ScopeWarnings, unresolvable...)
 
+	// The test-sibling lint: a scope naming a production Go file but not its
+	// existing _test.go leaves the writer unable to change the test the fix
+	// needs, which otherwise surfaces only as a parked step and a scope refresh.
+	siblings, err := lintOmittedSiblingTests(tx, runIssues, bindings, run.ExecRoot)
+	if err != nil {
+		return nil, err
+	}
+	result.ScopeWarnings = append(result.ScopeWarnings, siblings...)
+
+	// The label-vs-scope lint (DKT-1182): an issue whose scope says one pipeline
+	// owns it while its labels bound it to another. Binding refuses zero matches
+	// and refuses several; exactly one WRONG match is the shape it structurally
+	// cannot see, and this is the signal that sees it.
+	//
+	// It runs over every bound issue, inherited bindings included, for the
+	// reason the unscoped-holder lint does: the mismatch belongs to the plan,
+	// not to the expansion. It reports and never refuses — the labels an
+	// operator applied are the routing decision, and this only says the paths
+	// disagree with it.
+	bindingWarnings, err := lintDomainScopeMismatch(
+		tx, runIssues, issues, bindings, definitions)
+	if err != nil {
+		return nil, err
+	}
+	result.BindingWarnings = bindingWarnings
+
 	// ---- Stage 2: lint the work DAG. ---------------------------------------
 	//
 	// planner.BuildDAG + TopoSort over the run's issues and their depends_on
 	// relations — reused directly, no adaptation needed at this level, since
 	// the graph is already over issue IDs. A cycle is a VALIDATION_ERROR with
 	// the existing CycleError rendering, which already formats DKT-N.
-	levels, err := lintWorkDAG(tx, issues)
+	dag, err := lintWorkDAG(tx, issues)
 	if err != nil {
 		return nil, err
 	}
 
 	// ---- Stage 3: pin. ------------------------------------------------------
 	//
-	// RA2: the pin set is INHERITED, never recomputed. A re-activation after a
+	// The pin set is INHERITED, never recomputed. A re-activation after a
 	// workflow re-register or a pinned-file edit uses the original rows,
 	// unchanged — if it re-pinned, an in-flight run would silently adopt an
-	// edited workflow, precisely what engine-core §4 forbids.
+	// edited workflow, which pinning exists to prevent.
 	existingPins, err := db.ListPinsTx(tx, runID)
 	if err != nil {
 		return nil, err
@@ -641,6 +827,58 @@ func activateTx(
 		pinned[p.Kind+"\x00"+p.Ref] = struct{}{}
 	}
 
+	// DKT-581: the config scan's pins join the set filtered to the PACKET
+	// CLOSURE the bound workflows reach — each step's `packet` entries with
+	// `{executor}` substituted the way expansion substitutes it, the files
+	// those entries' `packet_includes` declare (transitively), and
+	// `policy.toml` — rather than every file the scan walked. A corpus edit
+	// to a contract no bound step references is then a non-event for this
+	// run's `verify-pins`, which is the whole remedy: 7 of 18 terminal runs
+	// in the measured week were abandoned over drift in files they never
+	// read. `--pin` files are the operator's explicit additions and are
+	// never filtered.
+	//
+	// On a RE-ACTIVATION the closure is recomputed only to cover an issue
+	// added since activation that bound a workflow whose files the original
+	// set never pinned — refs an earlier activation recorded are
+	// dropped first, so pin inheritance is untouched: an edited pinned
+	// file stays at its original hash, and an inherited ref keeps resolving
+	// as present-with-unknown-size in the declared-packet index below.
+	if scan != nil {
+		closure := packetClosurePins(scan, runIssues, bindings)
+		if reactivation {
+			closure = withoutAlreadyPinned(closure, existingPins, scan.roots)
+			for _, p := range closure {
+				if path.Clean(filepath.ToSlash(p.Ref)) == policyPinRef {
+					result.NewPolicyPin = &PolicyPin{Ref: p.Ref, SHA256: p.SHA256}
+				}
+			}
+		} else {
+			result.PinsFromConfig = len(closure)
+		}
+		filePins = append(filePins, closure...)
+	}
+
+	// The scripts the bound workflows' gates execute are pinned too, so a
+	// mid-run edit to one is reported by `verify-pins` instead of silently
+	// changing what a later verify reads. Only trust entries whose argv names
+	// a file under the run's exec root contribute; the rest are reported
+	// there as unpinned. A re-activation keeps the original hash (the insert
+	// below drops a ref already pinned), so an edited script stays drifted.
+	gateDefs := make(map[int]*workflow.Definition, len(runIssues))
+	for i, ri := range runIssues {
+		if bound := bindings[ri.IssueID]; bound != nil && bound.definition != nil {
+			gateDefs[i] = bound.definition
+		}
+	}
+	var projectIdentity string
+	if err := tx.QueryRow(`SELECT identity FROM projects WHERE id = ?`,
+		db.DefaultProjectIDOr(run.ProjectID)).Scan(&projectIdentity); err != nil {
+		return nil, fmt.Errorf("reading the identity of run %s's project: %w", run.Ref(), err)
+	}
+	filePins = append(filePins,
+		gateScriptPins(gateDefs, gatePinStore, projectIdentity, run.ExecRoot)...)
+
 	pins := make([]db.Pin, 0, len(bindings)+len(filePins))
 	for _, ri := range runIssues {
 		bound := bindings[ri.IssueID]
@@ -649,9 +887,9 @@ func activateTx(
 			Ref: bound.workflow.Ref(), SHA256: bound.workflow.SourceSHA256,
 		})
 	}
-	// P1/P5: one pin per schema referenced by any BOUND workflow's steps. A
-	// schema is a registered object, so §2's "version pinning — registered
-	// objects by version" reaches it, and P4 depends on this: validation at
+	// One pin per schema referenced by any BOUND workflow's steps. A schema is
+	// a registered object, and registered objects pin by version; payload
+	// validation depends on this: validation at
 	// `complete` reads the PINNED bytes, never the live table, which is what
 	// makes a verdict a pinned fact rather than an environmental accident.
 	schemaPins, err := schemaPinsFor(tx, run.ProjectID, runID, runIssues, bindings)
@@ -665,7 +903,7 @@ func activateTx(
 		pins = append(pins, p)
 	}
 
-	// The declared-packet index (§1.5, §1.6): path -> size, over FILE
+	// The declared-packet index: path -> size, over FILE
 	// pins only.
 	//
 	// It is built here, from the pin set this activation is about to write,
@@ -674,11 +912,12 @@ func activateTx(
 	// an entry that IS pinned contributes its bytes to the closure so the caps
 	// bind on the real figure.
 	//
-	// Sizes come from the scan that already hashed the file, so no pinned file
-	// is opened twice. A pin inherited from an earlier activation (RA2) carries
-	// no in-memory size, so it is looked up as present-with-unknown-size: the
-	// entry resolves rather than being refused, which keeps re-activation from
-	// rejecting a run that was legal when it started.
+	// Sizes come from the scan that already hashed the file. Include metadata
+	// is read once per file for accounting. A pin inherited from an earlier
+	// activation carries no in-memory size, so it is looked up as
+	// present-with-unknown-size: the entry resolves rather than being refused,
+	// which keeps re-activation from rejecting a run that was legal when it
+	// started.
 	// Keyed by the path DECLARED in a workflow — relative to the config
 	// directory — while a pin's ref is the path the scan walked. The two are
 	// mapped here, once, so the comparison below is a plain lookup and the
@@ -710,7 +949,7 @@ func activateTx(
 	}
 	for _, p := range existingPins {
 		if p.Kind == db.PinKindFile {
-			// An inherited pin (RA2) carries no in-memory size. It is indexed
+			// An inherited pin carries no in-memory size. It is indexed
 			// as present-with-unknown-size so re-activation does not reject a
 			// run that was legal when it started.
 			indexPin(p.Ref, 0)
@@ -721,10 +960,11 @@ func activateTx(
 			indexPin(p.Ref, p.Bytes)
 		}
 	}
+	packetBytes := packetContextSizer(packetPins, configRoots)
 
 	for _, p := range pins {
 		if _, ok := pinned[p.Kind+"\x00"+p.Ref]; ok {
-			continue // RA2: already pinned, at whatever hash the original had.
+			continue // Already pinned, at whatever hash the original had.
 		}
 		if err := db.InsertPinTx(tx, p); err != nil {
 			return nil, err
@@ -746,22 +986,38 @@ func activateTx(
 	}
 
 	// ---- Stages 4-6, per issue. --------------------------------------------
-	expandable := expandableIssues(levels, issues)
+	expandable := expandableIssues(dag)
+	// blocked collects what stage 6 leaves unexpanded, for the roster built
+	// AFTER the loop — after, so a predecessor stage 7 promotes in this same
+	// pass is named at the status this activation commits, not the one it
+	// found.
+	var blocked []*db.RunIssue
 
 	for _, ri := range runIssues {
 		issue := issues[ri.IssueID]
 		bound := bindings[ri.IssueID]
 
 		// Stage 4: snapshot the body AND the four remaining context.issue
-		// fields (§5.1.1). Together these are the SOLE issue state the context
-		// bundle ever reads, which is what §9 item 5's mid-run-edit immunity
-		// rests on. A body-only snapshot fails that test on the title.
+		// fields. Together these are the SOLE issue state the context bundle
+		// ever reads, which is what mid-run-edit immunity rests on. A
+		// body-only snapshot fails that test on the title.
 		//
 		// An already-snapshotted issue is left alone: re-snapshotting at
 		// re-activation would defeat the immunity for every issue already
 		// under way.
 		if ri.BodySnapshot == "" && ri.IssueSnapshot == "" {
-			snapshot, err := issueSnapshot(tx, issue)
+			// The cross-issue bindings (DKT-547): every `issue.linked.
+			// <relation>.<kind>` input the bound workflow declares is resolved
+			// NOW — linked issue(s) by relation, then each one's latest
+			// recorded artifact of the kind — and pinned into the snapshot by
+			// artifact id. A missing relation or artifact refuses the whole
+			// activation, loudly, inside the fat transaction: the binding is
+			// enforced here or it is an issue-body citation nothing checks.
+			linked, err := resolveLinkedInputs(tx, issue, bound.definition)
+			if err != nil {
+				return nil, err
+			}
+			snapshot, err := issueSnapshot(tx, issue, linked)
 			if err != nil {
 				return nil, err
 			}
@@ -781,9 +1037,9 @@ func activateTx(
 
 			// Stage 5: harvest fenced blocks from the SNAPSHOT, for tags the
 			// bound workflow's gates declare. Harvesting at activation is what
-			// makes "post-activation edits cannot inject" true (engine-spec
-			// §4); harvesting from the snapshot rather than the live body is
-			// what makes it true even for an edit that lands mid-activation.
+			// makes "post-activation edits cannot inject" true; harvesting from
+			// the snapshot rather than the live body is what makes it true even
+			// for an edit that lands mid-activation.
 			n, err := harvestFences(tx, runID, ri, bound.definition)
 			if err != nil {
 				return nil, err
@@ -793,15 +1049,19 @@ func activateTx(
 
 		// Stage 6: expand, lazily. Only phase-1 issues — those whose
 		// depends_on predecessors are all satisfied — expand now; later phases
-		// expand when their predecessors complete (phase 3's §6.7).
+		// expand when their predecessors complete.
 		// `expanded_at_ms` records which issues have been expanded, so
 		// expansion is idempotent and re-entrant.
-		if ri.Expanded() || !expandable[ri.IssueID] {
+		if ri.Expanded() {
+			continue
+		}
+		if !expandable[ri.IssueID] {
+			blocked = append(blocked, ri)
 			continue
 		}
 
 		created, warnings, err := expandIssue(
-			tx, run, ri, issue, bound, caps, packetPins, opts.NowMS)
+			tx, run, ri, issue, bound, caps, packetPins, packetBytes, opts.NowMS)
 		if err != nil {
 			return nil, err
 		}
@@ -813,9 +1073,9 @@ func activateTx(
 			return nil, err
 		}
 
-		// Stage 7, per issue: promote via the issue verbs' own vocabulary
-		// (engine-spec §2: "promotion via the issue verbs"). Only `backlog`
-		// moves: an issue an operator already advanced is not walked back.
+		// Stage 7, per issue: promote via the issue verbs' own vocabulary.
+		// Only `backlog` moves: an issue an operator already advanced is not
+		// walked back.
 		if issue.Status == model.StatusBacklog {
 			if err := promoteIssueTx(tx, issue.ID, opts.NowMS); err != nil {
 				return nil, err
@@ -827,7 +1087,31 @@ func activateTx(
 				return nil, err
 			}
 			result.PromotedIssues = append(result.PromotedIssues, model.FormatID(issue.ID))
+			// The in-memory row follows the write, so the blocked roster below
+			// — which reads this very pointer through the DAG — reports the
+			// promoted status rather than the one activation found.
+			issue.Status = model.StatusTodo
 		}
+	}
+
+	// The blocked roster (DKT-1180): every bound issue this activation left
+	// UNEXPANDED, with the in-run predecessors still holding it. Without it, a
+	// re-activation that expands nothing is indistinguishable from one that
+	// had nothing to expand — RUN-76's operator could only report
+	// `issues_expanded: 0` and guess at the cause. Computed identically on a
+	// dry run and a real activation, from the same edges stage 6 decided on.
+	for _, ri := range blocked {
+		predecessors := unsatisfiedPredecessors(dag, ri.IssueID)
+		if len(predecessors) == 0 {
+			continue // unreachable: an issue with none is expandable
+		}
+		entry := BlockedIssue{IssueID: model.FormatID(ri.IssueID)}
+		for _, p := range predecessors {
+			entry.BlockedBy = append(entry.BlockedBy, BlockingIssue{
+				IssueID: model.FormatID(p.ID), Status: string(p.Status),
+			})
+		}
+		result.BlockedIssues = append(result.BlockedIssues, entry)
 	}
 
 	// The run-wide expected-cost sum, read after expansion and inside the
@@ -844,9 +1128,32 @@ func activateTx(
 	if err := setRunActiveTx(tx, runID, reactivation, opts.NowMS); err != nil {
 		return nil, err
 	}
+	// The conductor capability, minted with the run's birth and returned
+	// exactly once (DKT-2465, conductor.go). A re-activation mints nothing —
+	// the conductor holds the token this run was born with, and rotating it
+	// under an expansion would lock that session out — and neither does a dry
+	// run, whose transaction is about to roll back. A run conducted while
+	// still planning keeps the capability its conductor already holds.
+	if !reactivation && !opts.DryRun {
+		token, err := mintConductorTx(tx, runID)
+		if err != nil {
+			return nil, err
+		}
+		result.ConductorToken = token
+	}
 	activatedData := ""
+	activatedFields := map[string]any{}
 	if opts.Reason != "" {
-		data, err := json.Marshal(map[string]any{"reason": opts.Reason})
+		activatedFields["reason"] = opts.Reason
+	}
+	if opts.HeadBranch != "" {
+		activatedFields["head_branch"] = opts.HeadBranch
+	}
+	if opts.HeadCommit != "" {
+		activatedFields["head_commit"] = opts.HeadCommit
+	}
+	if len(activatedFields) > 0 {
+		data, err := json.Marshal(activatedFields)
 		if err != nil {
 			return nil, fmt.Errorf("recording the run-activated event: %w", err)
 		}
@@ -871,7 +1178,7 @@ type boundDefinition struct {
 // loadDefinitions reads every registered workflow and restores its PARSED form
 // from `workflows.parsed` — never by re-parsing `body`.
 //
-// The parsed JSON is the PINNED INTERPRETATION (TDD §4.1): re-parsing the TOML
+// The parsed JSON is the PINNED INTERPRETATION: re-parsing the TOML
 // here would mean a parser change silently re-interpreting a definition a run
 // already pinned, which is the thing version pinning exists to prevent.
 func loadDefinitions(conn *sql.DB, projectID int) ([]*boundDefinition, error) {
@@ -902,7 +1209,7 @@ func loadDefinitions(conn *sql.DB, projectID int) ([]*boundDefinition, error) {
 }
 
 // loadDefinitionsTx is loadDefinitions inside the fat transaction, for the one
-// caller that needs to see what the SAME transaction just registered (§9's Z5).
+// caller that needs to see what the SAME transaction just registered.
 //
 // It shares the restore-from-`parsed` discipline and the candidate ordering with
 // its pool-reading twin, and differs only in the handle — which is the whole
@@ -939,7 +1246,7 @@ func loadDefinitionsTx(tx *sql.Tx, projectID int) ([]*boundDefinition, error) {
 		wf.DeprecatedAtMS = deprecatedAt.Int64
 
 		// The PARSED form, restored — never a re-parse of `body`. The parsed
-		// JSON is the PINNED INTERPRETATION (§4.1): re-parsing here would mean a
+		// JSON is the PINNED INTERPRETATION: re-parsing here would mean a
 		// parser change silently re-interpreting a definition a run already
 		// pinned.
 		def, err := workflow.FromCanonical([]byte(wf.Parsed))
@@ -975,20 +1282,22 @@ func definitionByID(definitions []*boundDefinition, id int) *boundDefinition {
 }
 
 // bindableDefinitions reduces the registered set to the HIGHEST VERSION OF EACH
-// NAME — the candidate set `[match]` is evaluated over (§11.1, as amended
-// 2026-08-05).
+// NAME — the candidate set `[match]` is evaluated over (since 2026-08-05).
 //
 // Superseded versions remain registered, and remain reachable by explicit
 // `@version` and by `definitionByID` for the runs that pinned them. They merely
 // stop participating in BINDING. That distinction is the whole amendment: a
 // version bump is how the retro loop evolves a workflow from run evidence, and
 // before this, the bump wedged the very next activation — both versions of the
-// bumped name matched, and exactly-one-match refused (the M2a toy run).
+// bumped name matched, and exactly-one-match refused (found by a toy run).
 //
 // The resolution deliberately MIRRORS `workflow show NAME` without `@version`
-// (db.GetWorkflow's `ORDER BY version DESC LIMIT 1`). Binding and show
-// disagreeing about what "the" workflow of a name is was the defect; one
-// helper's worth of agreement is asserted directly by
+// (db.GetWorkflow's `deprecated_at_ms IS NULL ... ORDER BY version DESC LIMIT
+// 1`). Binding and show disagreeing about what "the" workflow of a name is
+// was the defect — twice: first two versions of one name both binding while
+// show picked one, then (DKT-616) show resolving a deprecated top version that
+// binding had already retired. One helper's worth of agreement, including the
+// deprecated-top-version case, is asserted directly by
 // TestBindingAgreesWithWorkflowShowResolution.
 //
 // Exactly-one-match therefore applies across NAMES, which is what makes its
@@ -1039,15 +1348,24 @@ func bindableDefinitions(definitions []*boundDefinition) []*boundDefinition {
 // registered version of each workflow name and require EXACTLY ONE to match.
 //
 // Zero or multiple is a VALIDATION_ERROR "naming the issue and the candidate
-// workflows" (§11.1, verbatim). Both halves of that naming matter and both are
+// workflows". Both halves of that naming matter and both are
 // asserted by tests: the issue, so an operator knows which of twenty to fix,
 // and the candidates, so they know whether to narrow a `[match]` or write one.
 //
 // The candidates NAMED are the bindable ones, not every registered row: an
 // error that listed superseded versions would send an operator to edit a
 // definition that could not have bound the issue anyway.
-func bindIssue(issue *model.Issue, definitions []*boundDefinition) (*boundDefinition, error) {
-	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
+//
+// `origins` decorates that candidate set and NEVER CHANGES IT (DKT-609). An
+// orphaned registration still binds — a registration is a row, not a file —
+// so it is still a candidate and still causes the ambiguity; what the
+// annotation adds is which of the named candidates has nothing behind it on
+// disk. It may be nil, and every verdict then reads `unchecked`, which is the
+// pre-DKT-609 message exactly.
+func bindIssue(
+	issue *model.Issue, definitions []*boundDefinition, origins *WorkflowOriginIndex,
+) (*boundDefinition, error) {
+	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels, Size: string(issue.Size)}
 	candidates := bindableDefinitions(definitions)
 
 	var matched []*boundDefinition
@@ -1081,25 +1399,51 @@ func bindIssue(issue *model.Issue, definitions []*boundDefinition) (*boundDefini
 		}
 		return nil, validationErr(
 			"issue %s (kind %s, labels [%s]) matches no registered workflow; "+
-				"candidates considered: %s",
+				"candidates considered: %s%s",
 			model.FormatID(issue.ID), issue.Kind, strings.Join(issue.Labels, " "),
-			refList(candidates))
+			refList(candidates, origins), orphanHint(candidates, origins))
 	default:
 		return nil, validationErr(
 			"issue %s matches %d workflows, and exactly one must match; "+
-				"candidates: %s",
-			model.FormatID(issue.ID), len(matched), refList(matched))
+				"candidates: %s%s",
+			model.FormatID(issue.ID), len(matched), refList(matched, origins),
+			orphanHint(matched, origins))
 	}
 }
 
 // refList renders candidate workflows as `name@version`, in the stable order
-// loadDefinitions established.
-func refList(definitions []*boundDefinition) string {
+// loadDefinitions established, ANNOTATING each one whose name no longer has a
+// definition in any instance-config root (DKT-609).
+//
+// The annotation rides HERE rather than in a parallel renderer so both binding
+// refusals carry it from one place: a rename strands a name, and the refusal
+// that names the stranded registration alongside its replacement is the exact
+// moment the distinction is worth money.
+func refList(definitions []*boundDefinition, origins *WorkflowOriginIndex) string {
 	refs := make([]string, 0, len(definitions))
 	for _, d := range definitions {
-		refs = append(refs, d.workflow.Ref())
+		ref := d.workflow.Ref()
+		if origins.Orphaned(d.workflow.Name) {
+			ref += orphanAnnotation
+		}
+		refs = append(refs, ref)
 	}
 	return strings.Join(refs, ", ")
+}
+
+// orphanHint returns the remedy sentence when at least one named candidate is
+// orphaned, and the empty string otherwise.
+//
+// It is conditional because a refusal between two live definitions is an
+// authoring problem — narrow a `[match]` — and appending a paragraph about
+// deprecation to that one would be advice for a state the repo is not in.
+func orphanHint(definitions []*boundDefinition, origins *WorkflowOriginIndex) string {
+	for _, d := range definitions {
+		if origins.Orphaned(d.workflow.Name) {
+			return orphanRefusalHint
+		}
+	}
+	return ""
 }
 
 // lintUnscopedHolders reports every issue that declares NO SCOPE while binding a
@@ -1113,14 +1457,14 @@ func refList(definitions []*boundDefinition) string {
 // becomes noise, which costs the cases that are real.
 //
 // WHAT "OCCUPIES THE TREE" MEANS: `holds_tree`, because that is the ONLY step
-// property scope exclusion consults. R4 reduces to two facts and no others —
+// property scope exclusion consults. It reduces to two facts and no others —
 // scopeConflict returns early on an empty scope list and again on
 // `!s.holdsTree(step)`, and ClaimablePrefix narrows the offer on the same pair —
 // and Scheduler.holdsTree reads `workflow.Step.HoldsTree` from the pinned
 // definition. Nothing else about a step reaches the exclusion.
 //
 // It is deliberately NOT derived from `class`. Classes are opaque strings and
-// core attaches no meaning to any of them (§6.5's genericity rule; ready.go's
+// core attaches no meaning to any of them (the genericity rule; ready.go's
 // classHeadroom says the same of `[limits]`), so a lint keyed on a class name
 // would be instance policy living in core and would say nothing whatever about a
 // repo that names its classes differently. `holds_tree` is the declaration the
@@ -1139,7 +1483,7 @@ func lintUnscopedHolders(
 			continue
 		}
 
-		// Read LIVE, like the scheduler and unlike the snapshot (§5.1.1): the
+		// Read LIVE, like the scheduler and unlike the snapshot: the
 		// question is what this issue declares now, and an operator who set a
 		// scope after a first activation has fixed the omission this reports.
 		scope, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
@@ -1229,6 +1573,241 @@ func lintUnresolvableScopes(
 	return out, nil
 }
 
+// lintOmittedSiblingTests reports every scope entry naming a literal Go
+// production file F whose sibling F_test.go exists under the run's repository
+// root while no entry of the same scope matches that sibling.
+//
+// Only literal entries are considered: a glob names no particular file, so it
+// has no particular sibling. A scoped file with no existing test is skipped,
+// because there is no test for the scope to have omitted. A run with no
+// recorded exec root is skipped for lintUnresolvableScopes' reason.
+func lintOmittedSiblingTests(
+	tx *sql.Tx, runIssues []*db.RunIssue, bindings map[int]*boundDefinition,
+	execRoot string,
+) ([]ScopeWarning, error) {
+	if execRoot == "" {
+		return nil, nil
+	}
+
+	var out []ScopeWarning
+	for _, ri := range runIssues {
+		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		if err != nil {
+			return nil, fmt.Errorf("reading scope for %s: %w",
+				model.FormatID(ri.IssueID), err)
+		}
+		if raw == "" {
+			continue
+		}
+		var globs []string
+		if err := json.Unmarshal([]byte(raw), &globs); err != nil {
+			continue
+		}
+
+		for _, file := range globs {
+			if strings.ContainsAny(file, "*?[{") ||
+				!strings.HasSuffix(file, ".go") || strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			sibling := strings.TrimSuffix(file, ".go") + "_test.go"
+			info, err := os.Stat(filepath.Join(execRoot, filepath.FromSlash(sibling)))
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if scopeAdmitsPath(globs, sibling) {
+				continue
+			}
+
+			workflowRef := ""
+			if bound := bindings[ri.IssueID]; bound != nil {
+				workflowRef = bound.workflow.Ref()
+			}
+			out = append(out, ScopeWarning{
+				IssueID:  model.FormatID(ri.IssueID),
+				Workflow: workflowRef,
+				Reason: fmt.Sprintf(
+					"scope names %s but not its existing test %s — a fix that must "+
+						"change the test cannot land; add the test to the issue's scope",
+					file, sibling),
+			})
+		}
+	}
+	return out, nil
+}
+
+// scopeAdmitsPath reports whether any scope entry matches the slash-separated
+// path p. Entries match segment by segment under path.Match, with a `**`
+// segment matching zero or more whole segments.
+func scopeAdmitsPath(globs []string, p string) bool {
+	for _, g := range globs {
+		if globSegmentsMatch(strings.Split(g, "/"), strings.Split(p, "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func globSegmentsMatch(glob, segs []string) bool {
+	for len(glob) > 0 {
+		if glob[0] == "**" {
+			for i := 0; i <= len(segs); i++ {
+				if globSegmentsMatch(glob[1:], segs[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(segs) == 0 {
+			return false
+		}
+		if ok, _ := path.Match(glob[0], segs[0]); !ok {
+			return false
+		}
+		glob, segs = glob[1:], segs[1:]
+	}
+	return len(segs) == 0
+}
+
+// lintDomainScopeMismatch reports every issue whose LABELS bound it to one
+// workflow while its declared SCOPE lies entirely inside another registered
+// workflow's declared `[match] domain_paths` (DKT-1182).
+//
+// THE GAP IT CLOSES. Binding requires EXACTLY ONE match and refuses zero or
+// several — but it cannot refuse exactly one WRONG match, because a mis-labelled
+// issue matches its wrong workflow exactly once and there is nothing anomalous
+// for the count to catch. The measured case: an issue scoped entirely to a TUI
+// test file carried `qa` and not `ui`, bound the label-less baseline pipeline
+// instead of the UI one, and silently ran without that pipeline's judge fanout
+// and render/copy gates. Routing is keyed on hand-applied labels while scope is
+// path-derived, so the two can disagree, and until this lint the only thing that
+// noticed was a conductor diffing labels against scope by hand, every batch.
+//
+// IT IS ADVISORY AND CHANGES NO BINDING. The issue stays bound where its labels
+// put it; `domain_paths` never participates in `[match]` evaluation. Making
+// paths ROUTE — scope-derived routing as a first-class rule — is a different and
+// much larger change, deliberately not made here: this reports a disagreement
+// and leaves the decision with the operator, who may legitimately have meant it.
+//
+// THE FOUR CONDITIONS, and why each one is needed to keep the warning worth
+// reading:
+//
+//  1. The issue declares a scope, and EVERY glob of it is inside the other
+//     workflow's domain (ScopeWithinDomain). A partially-overlapping scope is
+//     cross-cutting work, and which pipeline should own it is a judgment this
+//     lint has no basis to make.
+//  2. The other workflow declares a domain at all. The field is dormant until a
+//     corpus author states one, so a corpus that declares none is linted
+//     against nothing and behaves exactly as before.
+//  3. The issue is only a LABEL short of that workflow (workflow.LabelGapFor):
+//     its `kind` is admitted and no `unless_labels` entry fires. A kind
+//     mismatch is not a labelling slip, and an exclusion that fires is the
+//     author saying "not this one" about this very issue — reporting either
+//     would be advice to break a decision somebody made on purpose.
+//  4. It is not the workflow the issue already bound. An issue bound to the
+//     workflow whose domain it sits in is the case working correctly.
+//
+// The candidate set is bindableDefinitions — the same highest-version,
+// non-retired set binding itself evaluated — so the lint can never name a
+// workflow the issue could not have bound even with the labels fixed.
+func lintDomainScopeMismatch(
+	tx *sql.Tx, runIssues []*db.RunIssue, issues map[int]*model.Issue,
+	bindings map[int]*boundDefinition, definitions []*boundDefinition,
+) ([]BindingWarning, error) {
+	candidates := bindableDefinitions(definitions)
+	// Nothing in the corpus states a domain: the lint is dormant, and the read
+	// of every issue's scope below is not worth doing to learn that.
+	domainDeclared := false
+	for _, d := range candidates {
+		if d.definition.Match != nil && len(d.definition.Match.DomainPaths) > 0 {
+			domainDeclared = true
+			break
+		}
+	}
+	if !domainDeclared {
+		return nil, nil
+	}
+
+	var out []BindingWarning
+	for _, ri := range runIssues {
+		bound := bindings[ri.IssueID]
+		issue := issues[ri.IssueID]
+		if bound == nil || issue == nil {
+			continue
+		}
+
+		// Read LIVE, for lintUnscopedHolders' reason: the question is what this
+		// issue declares NOW, so an operator who fixed the scope (or the labels)
+		// after a first activation is not warned about the state they fixed.
+		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		if err != nil {
+			return nil, fmt.Errorf("reading scope for %s: %w",
+				model.FormatID(ri.IssueID), err)
+		}
+		if raw == "" {
+			continue // No scope declared; lintUnscopedHolders owns that case.
+		}
+		var globs []string
+		if err := json.Unmarshal([]byte(raw), &globs); err != nil || len(globs) == 0 {
+			continue
+		}
+
+		subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels, Size: string(issue.Size)}
+		for _, cand := range candidates {
+			if cand == bound || cand.definition.Match == nil {
+				continue
+			}
+			if !ScopeWithinDomain(globs, cand.definition.Match.DomainPaths) {
+				continue
+			}
+			gap, reachable := cand.definition.Match.LabelGapFor(subject)
+			if !reachable || gap.Empty() {
+				continue
+			}
+
+			out = append(out, BindingWarning{
+				IssueID:        model.FormatID(ri.IssueID),
+				BoundWorkflow:  bound.workflow.Ref(),
+				DomainWorkflow: cand.workflow.Ref(),
+				Scope:          globs,
+				MissingLabels:  missingLabelList(gap),
+				Reason: fmt.Sprintf(
+					"bound %s on its labels, but its declared scope lies entirely "+
+						"inside %s's domain (%s) and it %s",
+					bound.workflow.Ref(), cand.workflow.Ref(),
+					strings.Join(cand.definition.Match.DomainPaths, ", "),
+					describeLabelGap(gap)),
+			})
+		}
+	}
+	return out, nil
+}
+
+// missingLabelList flattens a label gap into the flat array the JSON field
+// carries — `labels_all` misses first, then the `labels_any` alternatives, each
+// in the order the workflow declared them.
+func missingLabelList(gap workflow.LabelGap) []string {
+	out := make([]string, 0, len(gap.MissingAll)+len(gap.MissingAny))
+	out = append(out, gap.MissingAll...)
+	out = append(out, gap.MissingAny...)
+	return out
+}
+
+// describeLabelGap renders a gap as the clause an operator has to act on. The
+// two halves are phrased differently because the remedies are: every
+// `labels_all` entry must be added, and any ONE `labels_any` entry is enough.
+func describeLabelGap(gap workflow.LabelGap) string {
+	var parts []string
+	if len(gap.MissingAll) > 0 {
+		parts = append(parts, fmt.Sprintf("lacks the required label(s) [%s]",
+			strings.Join(gap.MissingAll, ", ")))
+	}
+	if len(gap.MissingAny) > 0 {
+		parts = append(parts, fmt.Sprintf("carries none of [%s]",
+			strings.Join(gap.MissingAny, ", ")))
+	}
+	return strings.Join(parts, " and ")
+}
+
 // scopeAnchorExists reports whether one scope entry has an ANCHOR under root:
 // its literal prefix — the part before the first glob metacharacter — exists,
 // or that prefix's parent directory does.
@@ -1251,7 +1830,7 @@ func scopeAnchorExists(root, glob string) bool {
 // treeHolder returns the first step of a definition that OCCUPIES its issue's
 // scope while it runs, or nil when no step does.
 //
-// A nil `holds_tree` reads as TRUE, matching Scheduler.holdsTree and §11.1's
+// A nil `holds_tree` reads as TRUE, matching Scheduler.holdsTree and the
 // materialized default. Registration fills the field in, so nil here means a
 // definition that never passed validation — and the default exists precisely
 // because the missing value must not resolve to the permissive answer.
@@ -1265,9 +1844,12 @@ func treeHolder(def *workflow.Definition) *workflow.Step {
 }
 
 // lintWorkDAG is stage 2: planner.BuildDAG + TopoSort over the run's issues and
-// their depends_on relations, REUSED directly. The returned levels are what
-// stage 6 reads to decide which issues are phase 1.
-func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
+// their depends_on relations, REUSED directly.
+//
+// It returns the DAG itself rather than the topological levels: the levels
+// prove acyclicity and nothing more, while stage 6 needs each issue's OWN
+// predecessor edges (DKT-1180 — see expandableIssues).
+func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) (*planner.DAG, error) {
 	list := make([]*model.Issue, 0, len(issues))
 	for _, issue := range issues {
 		list = append(list, issue)
@@ -1279,8 +1861,8 @@ func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
 		return nil, err
 	}
 
-	levels, err := planner.TopoSort(planner.BuildDAG(list, relations))
-	if err != nil {
+	dag := planner.BuildDAG(list, relations)
+	if _, err := planner.TopoSort(dag); err != nil {
 		var cycle *planner.CycleError
 		if errors.As(err, &cycle) {
 			// The existing rendering already formats DKT-N, which is the right
@@ -1290,65 +1872,65 @@ func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) ([][]int, error) {
 		}
 		return nil, fmt.Errorf("linting the work graph: %w", err)
 	}
-	return levels, nil
+	return dag, nil
 }
 
-// expandableIssues reports which of the run's issues are "phase 1" — those
-// whose depends_on predecessors are all satisfied at activation.
+// expandableIssues reports which of the run's issues may expand NOW — those
+// whose depends_on predecessors are all satisfied.
 //
 // An issue is expandable when every predecessor either is not in the run (an
-// external dependency the run does not schedule) or is already `done`. Level 0
-// of the topological sort is the base case; later levels expand when their
-// predecessors complete, which is phase 3's §6.7.
-func expandableIssues(levels [][]int, issues map[int]*model.Issue) map[int]bool {
-	out := make(map[int]bool, len(issues))
-	if len(levels) == 0 {
-		return out
-	}
-	for _, id := range levels[0] {
-		out[id] = true
-	}
-
-	// A later-level issue whose predecessors are all `done` is expandable too:
-	// a run activated over a graph whose first phase was already finished by
-	// hand should schedule the second, not stall.
-	for level := 1; level < len(levels); level++ {
-		for _, id := range levels[level] {
-			if issuePredecessorsSatisfied(id, levels, level, issues) {
-				out[id] = true
-			}
-		}
+// external dependency the run does not schedule; BuildDAG drops those edges)
+// or is already `done`. An issue with no in-run predecessor is phase 1; a
+// later phase expands at the re-activation after its predecessors complete,
+// and a run activated over a graph whose first phase was already finished by
+// hand schedules the second rather than stalling.
+//
+// The predecessor set is the issue's OWN reverse edges and nothing else
+// (DKT-1180). The earlier reading — every issue in every earlier topological
+// level, "deliberately conservative" — gated a phase on issues it had no edge
+// into: RUN-76's seven-issue chain sat behind a `done` root and an UNRELATED
+// phase-1 sibling that `abandon-issue` had left at `todo` (by design — the
+// routing stops the run's work on an issue and does not close it), so every
+// re-activation expanded nothing, reported nothing, and the run was stuck.
+// planner.FindReady reads the same graph the same way this now does.
+func expandableIssues(dag *planner.DAG) map[int]bool {
+	out := make(map[int]bool, len(dag.Nodes))
+	for id := range dag.Nodes {
+		out[id] = len(unsatisfiedPredecessors(dag, id)) == 0
 	}
 	return out
 }
 
-// issuePredecessorsSatisfied reports whether every earlier-level issue this one
-// could depend on is `done`. It is deliberately conservative: it treats the
-// whole prefix of the topological order as the predecessor set, so an issue
-// expands early only when the phases before it are genuinely complete.
-func issuePredecessorsSatisfied(
-	_ int, levels [][]int, level int, issues map[int]*model.Issue,
-) bool {
-	for earlier := 0; earlier < level; earlier++ {
-		for _, id := range levels[earlier] {
-			if issue, ok := issues[id]; ok && issue.Status != model.StatusDone {
-				return false
-			}
-		}
+// unsatisfiedPredecessors lists the in-run issues still holding one issue's
+// phase back: its direct blockers whose status is not `done`, in ascending id
+// order so a report over them is stable.
+func unsatisfiedPredecessors(dag *planner.DAG, id int) []*model.Issue {
+	node, ok := dag.Nodes[id]
+	if !ok {
+		return nil
 	}
-	return true
+	var out []*model.Issue
+	for blockerID := range node.Reverse {
+		blocker, ok := dag.Nodes[blockerID]
+		if !ok || blocker.Issue.Status == model.StatusDone {
+			continue
+		}
+		out = append(out, blocker.Issue)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
-// issueSnapshot is stage 4's §5.1.1 half: the canonical JSON of
+// issueSnapshot is stage 4's field half: the canonical JSON of
 // {title, kind, labels, scope}, captured at activation.
 //
 // ONE JSON column rather than four discrete ones, because these fields are
 // never queried, filtered, or joined on — they are read back whole, exactly
 // once, to materialize `context.issue` — so discrete columns would buy nothing
-// over a blob while costing a migration every time §11.4's issue shape grows.
+// over a blob while costing a migration every time the issue shape grows.
 //
 // Canonical JSON (sorted keys, labels/scope in stored order) is REQUIRED, not
-// incidental: context bundles are golden-diffed byte for byte (§8.3), so a
+// incidental: context bundles are golden-diffed byte for byte, so a
 // map-iteration-ordered serialization here would make the goldens flap.
 // encoding/json sorts struct fields by declaration and map keys by name, and
 // every slice below preserves its stored order, so the output is a pure
@@ -1358,11 +1940,45 @@ func issuePredecessorsSatisfied(
 // questions legitimately have two different answers: the scheduling check asks
 // "what does this issue touch NOW", so it reads issues.scope_globs live and
 // picks up an operator's mid-run correction; the context bundle asks "what was
-// this issue declared to touch when the run was activated", and §9 item 5
-// requires that answer frozen. Reading live for the bundle would break mid-run
-// edit immunity; freezing the scheduler would ignore a correction that exists
+// this issue declared to touch when the run was activated", and mid-run edit
+// immunity requires that answer frozen. Reading live for the bundle would break
+// that immunity; freezing the scheduler would ignore a correction that exists
 // precisely to prevent a collision.
-func issueSnapshot(tx *sql.Tx, issue *model.Issue) (string, error) {
+// `linked` is the activation-resolved cross-issue pin set (DKT-547): declared
+// `issue.linked.<relation>.<kind>` suffix -> pinned artifact ids. It rides the
+// snapshot because it IS a snapshot — the answer to a question about live
+// state, frozen at activation — and because the snapshot's lifecycle is
+// exactly the pin's: written once at binding, never rewritten at
+// re-activation, read only by context assembly. `omitempty` keeps every
+// snapshot without the form byte-identical to what it always was, which is
+// what the golden bundles require.
+// issueSnapshotFields is the snapshot blob's shape, declared ONCE (DKT-869).
+//
+// Field ORDER is the canonical JSON's key order — encoding/json emits struct
+// fields by declaration — so this declaration is the format, not a convenience
+// view of it. It is a named type rather than an anonymous struct literal
+// because the scope refresh (scope_refresh.go) re-encodes an existing snapshot
+// through the SAME type: two independent literals would drift the moment
+// the issue shape grew a field, and a refresh that dropped a key
+// activation had written would silently truncate a live run's snapshot.
+type issueSnapshotFields struct {
+	Title  string           `json:"title"`
+	Kind   string           `json:"kind"`
+	Labels []string         `json:"labels"`
+	Scope  []string         `json:"scope"`
+	Linked map[string][]int `json:"linked,omitempty"`
+	// Files is the issue's attached path list as of activation, the list
+	// `issue.files` renders. A nil pointer is a snapshot written before the
+	// list was frozen and encodes no key; activation always writes a non-nil
+	// pointer, so an issue with no attachments encodes `"files":[]`.
+	Files *[]string `json:"files,omitempty"`
+	// Size is the issue's declared size as of activation. An issue with no
+	// declared size, and a snapshot written before size was frozen, encode no
+	// key, so those snapshots stay byte-identical.
+	Size string `json:"size,omitempty"`
+}
+
+func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (string, error) {
 	scopeJSON, err := db.IssueScopeGlobsTx(tx, issue.ID)
 	if err != nil {
 		return "", fmt.Errorf("reading scope for %s: %w", model.FormatID(issue.ID), err)
@@ -1382,16 +1998,19 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue) (string, error) {
 		labels = []string{}
 	}
 
-	snapshot := struct {
-		Title  string   `json:"title"`
-		Kind   string   `json:"kind"`
-		Labels []string `json:"labels"`
-		Scope  []string `json:"scope"`
-	}{
+	files, err := db.GetIssueFilesTx(tx, issue.ID)
+	if err != nil {
+		return "", fmt.Errorf("reading attached files for %s: %w", model.FormatID(issue.ID), err)
+	}
+
+	snapshot := issueSnapshotFields{
 		Title:  issue.Title,
 		Kind:   string(issue.Kind),
 		Labels: labels,
 		Scope:  scope,
+		Linked: linked,
+		Files:  &files,
+		Size:   string(issue.Size),
 	}
 
 	out, err := json.Marshal(snapshot)
@@ -1404,9 +2023,7 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue) (string, error) {
 // harvestFences is stage 5: extract fenced blocks from the issue's SNAPSHOT
 // whose tag a bound workflow's gates declare, one row per line, each hashed.
 //
-// Extraction is LITERAL (engine-core §6: "no prose parsing"). Nothing is
-// executed here (§5.6) — but the harvest, the snapshot, and the hash are all
-// real now, which is exactly what makes S4 a pure execution addition.
+// Extraction is LITERAL: no prose parsing. Nothing is executed here.
 func harvestFences(
 	tx *sql.Tx, runID int, ri *db.RunIssue, def *workflow.Definition,
 ) (int, error) {
@@ -1429,15 +2046,13 @@ func harvestFences(
 	return len(fences), nil
 }
 
-// expandIssue is stage 6 for one issue: the pure expansion of §5.3.1, written
-// to `steps`.
+// expandIssue is stage 6 for one issue: the pure expansion, written to `steps`.
 //
-// The context-size check lives here because engine-core §8 puts it here,
-// verbatim: "Oversized context bundles (config caps) are an engine error AT
-// EXPANSION TIME — the fix is a pipeline/contract change, visible before
-// spend." Refusing at expansion is the whole point: an oversized closure
-// discovered at claim time has already cost a dispatcher a round trip, and one
-// discovered at completion has cost the work.
+// The context-size check lives here: oversized context bundles (config caps)
+// are an engine error AT EXPANSION TIME — the fix is a pipeline/contract
+// change, visible before spend. Refusing at expansion is the whole point: an
+// oversized closure discovered at claim time has already cost a dispatcher a
+// round trip, and one discovered at completion has cost the work.
 func expandIssue(
 	tx *sql.Tx,
 	run *model.Run,
@@ -1446,16 +2061,17 @@ func expandIssue(
 	bound *boundDefinition,
 	caps contextLimits,
 	packetPins map[string]int,
+	packetBytes func([]string) int,
 	nowMS int64,
 ) (int, []ContextWarning, error) {
-	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels}
+	subject := workflow.Subject{Kind: string(issue.Kind), Labels: issue.Labels, Size: string(issue.Size)}
 	rows := workflow.Expand(bound.definition, subject, 0)
 
 	var warnings []ContextWarning
 
 	for _, inst := range rows {
 		// A declared packet entry the run did not pin is refused HERE, with the
-		// activation (§1.6). The pin set is what the run may read, so an
+		// activation. The pin set is what the run may read, so an
 		// unpinned entry means the run holds no snapshot of that file — reading
 		// the live tree instead would break the byte-identical property the
 		// whole composition rests on.
@@ -1473,8 +2089,7 @@ func expandIssue(
 			}
 		}
 
-		size := workflow.ContextSize(ri.BodySnapshot, ri.IssueSnapshot, inst,
-			func(path string) int { return packetPins[path] })
+		size := workflow.ContextSize(ri.BodySnapshot, ri.IssueSnapshot, inst, packetBytes)
 
 		// The error cap refuses the whole activation. The transaction is fat,
 		// so this leaves nothing behind — which is the correct outcome for a
@@ -1521,12 +2136,21 @@ func expandIssue(
 		}
 	}
 
+	// A step whose `after_fired` predecessor was just CREATED `skipped` by its
+	// `when` is created skipped with it (DKT-1085), in the same fat
+	// transaction: expansion is the one skip no routing transaction follows,
+	// so the cascade every routing runs (reconcileIssueAndRun) runs here too.
+	if _, err := propagateAfterFiredSkips(
+		tx, run.ID, issue.ID, bound.definition, nowMS,
+	); err != nil {
+		return 0, nil, err
+	}
+
 	return len(rows), warnings, nil
 }
 
 // marshalMetadata serializes a step's opaque KV bag. The engine never reads a
-// key inside it (genericity.md); it is stored as JSON text and returned
-// verbatim.
+// key inside it; it is stored as JSON text and returned verbatim.
 func marshalMetadata(metadata map[string]any) (string, error) {
 	if len(metadata) == 0 {
 		return "", nil
@@ -1539,7 +2163,7 @@ func marshalMetadata(metadata map[string]any) (string, error) {
 }
 
 // contextLimits are the v6 `context.warn_bytes` / `context.error_bytes` config
-// keys (claims-leases §3.3). This stage is their FIRST READER — they shipped at
+// keys. This stage is their FIRST READER — they shipped at
 // v6 so the defaults were pinned before the verbs that consume them.
 type contextLimits struct {
 	warnBytes  int
@@ -1578,14 +2202,28 @@ func intConfig(conn *sql.DB, projectID int, key string) (int, error) {
 }
 
 // readFilePins is stage 3's file half: read each `--pin PATH`, hash it, record
-// the path.
+// a ref every reader can resolve.
 //
 // A path that does not exist or is not a regular file is NOT_FOUND (exit 2),
 // raised BEFORE the transaction opens so a bad pin costs nothing and refuses
 // cleanly. Pinning is never partial: one bad path fails the whole set, because
 // a run pinned to some of what its operator named is a run that cannot
 // reproduce itself and cannot say which part is missing.
-func readFilePins(paths []string) ([]db.Pin, error) {
+//
+// THE REF IS NOT THE PATH AS GIVEN. Readers resolve a file pin two
+// ways — the config-relative ref at each instance-config root, then an
+// absolute path — and never relative to whatever cwd activation happened to
+// run in. So the recorded form is the one the readers will find:
+//
+//	under an instance-config root   the config-relative ref, from any cwd
+//	absolute, outside every root    the path as given; readers honor it
+//	relative, outside every root    VALIDATION_ERROR, nothing written
+//
+// The last row is the refusal the issue asked for: as recorded it could never
+// resolve, so `verify-pins` would report it missing from the first second and
+// every step reading it would refuse with CONFLICT. Naming the absolute form
+// tells the operator what to pass instead.
+func readFilePins(paths []string, roots []string) ([]db.Pin, error) {
 	out := make([]db.Pin, 0, len(paths))
 	for _, path := range paths {
 		info, err := os.Stat(path)
@@ -1603,16 +2241,31 @@ func readFilePins(paths []string) ([]db.Pin, error) {
 		if err != nil {
 			return nil, notFoundErr(err, "reading pin file %s: %v", path, err)
 		}
+
+		ref, ok := configRelativeRef(roots, path)
+		if !ok {
+			if !filepath.IsAbs(path) {
+				abs, aerr := filepath.Abs(path)
+				if aerr != nil {
+					abs = path
+				}
+				return nil, validationErr(
+					"pin path %s is relative and outside every instance-config root, "+
+						"so no reader could resolve it once recorded; pass %s, or a "+
+						"path under an instance-config root", path, abs)
+			}
+			ref = path
+		}
 		out = append(out, db.Pin{
-			Kind: db.PinKindFile, Ref: path, SHA256: workflow.SHA256(content),
+			Kind: db.PinKindFile, Ref: ref, SHA256: workflow.SHA256(content),
 		})
 	}
 	return out, nil
 }
 
-// dispatchOpen is RA4's seam. Dispatches are S6, so this is `false` today —
-// written as a helper rather than an inline `false` so S6 adds a query behind
-// it and the call site in activateTx never moves.
+// dispatchOpen is the open-dispatch refusal's seam. It is `false` today —
+// written as a helper rather than an inline `false` so a real check adds a
+// query behind it and the call site in activateTx never moves.
 func dispatchOpen(_ *sql.Tx, _ int) (bool, error) {
 	return false, nil
 }

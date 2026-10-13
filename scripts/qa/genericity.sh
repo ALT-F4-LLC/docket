@@ -5,7 +5,7 @@
 # Usage:
 #   ./scripts/qa/genericity.sh [--verbose]
 #
-# docs/design/genericity.md, binding on every workflow-engine feature:
+# The rule, binding on every workflow-engine feature:
 #
 #   Core Docket contains zero agent/LLM vocabulary — no node, model, prompt,
 #   brief, severity, or review concepts. Executors are opaque string hints;
@@ -14,13 +14,10 @@
 #
 # CLAUDE.md states the consequence as a PR bar: a PR introducing such
 # vocabulary into core surface fails review by definition. This script is that
-# bar mechanized, per docs/tdd/engine-spine.md §9 — the same discipline as the
-# --token-flag guard test stage 2 established. A rule that depends on a
-# reviewer's memory is a rule that erodes; a rule that runs on every push does
-# not.
-#
-# See docs/spec/review-strategy.md for the rule as a review gate, including the
-# part of it no script can check.
+# bar mechanized — the same discipline as the --token-flag guard test stage 2
+# established. A rule that depends on a reviewer's memory is a rule that
+# erodes; a rule that runs on every push does not. The part of the rule no
+# script can check stays with the reviewer.
 
 set -euo pipefail
 
@@ -34,10 +31,10 @@ cd "$REPO_ROOT"
 
 # --- What this checks, and what it deliberately does not ---------------------
 #
-# CORE SURFACE, per docs/tdd/engine-spine.md §9: flag names, JSON keys, column
-# names, embedded templates, help text, and error strings. Those are what a
-# user reads or a machine parses, and they are what the rule is about. So the
-# check reads STRING LITERALS, STRUCT TAGS, AND TEMPLATES — the surface itself.
+# CORE SURFACE: flag names, JSON keys, column names, embedded templates, help
+# text, and error strings. Those are what a user reads or a machine parses, and
+# they are what the rule is about. So the check reads STRING LITERALS, STRUCT
+# TAGS, AND TEMPLATES — the surface itself.
 #
 # Go INTERNALS are not surface, and scanning them yields only false positives
 # with a strong training effect toward ignoring the check. The three a naive
@@ -48,11 +45,10 @@ cd "$REPO_ROOT"
 #   - `prompt` appears as an interactive CONFIRMATION prompt ("Delete label
 #     X?") — a terminal UI affordance, not a model input.
 #   - `node` appears as the DAG vertex variable in internal/planner, which is
-#     graph vocabulary; engine-spine.md §1.1 lists it among the scheduling
-#     nouns the rule permits.
+#     graph vocabulary, one of the scheduling nouns the rule permits.
 #
 # Renaming any of those would remove no agent vocabulary from anything a user
-# can see. A reviewer reads the rest (review-strategy.md §3).
+# can see. A reviewer reads the rest.
 
 BANNED=(
   model
@@ -62,14 +58,42 @@ BANNED=(
   brief
 )
 
-# `node` is NOT banned: engine-spine.md §1.1 admits it as scheduling
-# vocabulary, and internal/planner's DAG has used it since before the engine
+# `node` is NOT banned: it is admitted scheduling vocabulary, and internal/planner's DAG has used it since before the engine
 # existed. `severity` and `review` are likewise absent — `review` is a
 # pre-existing ISSUE STATUS in core surface (`docket issue move DKT-1 review`),
 # and `severity` is legitimate as an opaque threshold field name (see the
 # fixture exclusion below). What the rule bans is those words as ENGINE
 # CONCEPTS, which is a judgment a reviewer makes. The words above are the ones
 # with no innocent reading in a flag, key, or template.
+
+# --- Admitted forms ----------------------------------------------------------
+#
+# Each entry is "<banned word> <ERE>": a form of that word core surface ships
+# on purpose. Matching is case-sensitive on the surface text. The scan deletes every
+# admitted match from a line before testing the banned word, so an admitted
+# form never shields another use of the word on the same line. Anything not
+# listed, including new prose such as "model routing" in an error string,
+# still fails.
+ADMITTED=(
+  # The run policy's routing key: `model = "..."` in a variant spec, and its
+  # key=value renderings in test and diagnostic text.
+  'model model *= *'
+  # The same key as a persisted JSON field and a TOML field.
+  'model (json|toml):"model[",]'
+  # The routing triple a seat resolves to.
+  'model model(/effort/variant|, effort)'
+  # The MODEL column header of the policy seat table.
+  'model ^"MODEL"$'
+  # Shipped policy help and error text naming the routing key.
+  'model still-forbidden model redirected through'
+  'model no permitted model reachable from'
+  # Exported identifiers of the internal/model package (MVC data model).
+  'model model\.[A-Z]'
+  # The retired config link-farm layout, a design sense of the word.
+  'model link-farm model'
+  # A seat name: the security threat-model step.
+  'model threat-model'
+)
 
 # --- Where core surface lives ------------------------------------------------
 SEARCH_PATHS=(
@@ -79,23 +103,23 @@ SEARCH_PATHS=(
 
 # --- Exclusions --------------------------------------------------------------
 #
-# docs/design/example-workflow.toml is EXCLUDED, and the exclusion is not an
-# oversight to be tidied away later.
+# internal/workflow/testdata/example-workflow.toml is EXCLUDED, and the
+# exclusion is not an oversight to be tidied away later.
 #
 # The fixture legitimately contains `severity` and `status` as FIELD NAMES
 # INSIDE AN INSTANCE'S THRESHOLD PREDICATE STRINGS — `any(severity >= high)`.
-# engine-spec.md §11.2 defines the threshold grammar as `agg(field op literal)`
-# and defines ordered comparisons "only for fields whose registered schema
-# declares ordered_enum". The parser therefore knows the SHAPE
-# `agg(field op literal)` and never what a field MEANS: `severity` is an opaque
-# token until a user registers a schema for it.
+# The threshold grammar is `agg(field op literal)`, and ordered comparisons
+# apply "only for fields whose registered schema declares ordered_enum". The
+# parser therefore knows the SHAPE `agg(field op literal)` and never what a
+# field MEANS: `severity` is an opaque token until a user registers a schema
+# for it.
 #
-# That is the genericity line holding exactly where §11.2 draws it, not a
-# violation of it. Removing this exclusion would "fix" a file that is correct
-# and break the canonical register-test fixture — so it is written here with
-# its reason, per docs/tdd/engine-spine.md §9.
+# That is the genericity line holding exactly where the threshold grammar
+# draws it, not a violation of it. Removing this exclusion would "fix" a file
+# that is correct and break the canonical register-test fixture — so it is
+# written here with its reason.
 EXCLUDE_PATHS=(
-  docs/design/example-workflow.toml
+  internal/workflow/testdata/example-workflow.toml
 )
 
 is_excluded() {
@@ -211,11 +235,59 @@ FIXTURE
 }
 extractor_selftest
 
+# banned_hits prints "<file>: <surface text>" for each line of a surface file
+# ("<file>\t<surface text>" per line) that still contains WORD once every
+# ADMITTED form of WORD is deleted from it. Only the text column is tested:
+# every file under internal/model/ would otherwise match `model` on its own
+# path and the check would report itself.
+banned_hits() {
+  local word="$1" surface="$2"
+  awk -F'\t' -v word="$word" '
+    BEGIN { pattern = "(^|[^A-Za-z0-9_])" tolower(word) "([^A-Za-z0-9_]|$)" }
+    FNR == NR {
+      sep = index($0, " ")
+      if (substr($0, 1, sep - 1) == word) admitted[++n] = substr($0, sep + 1)
+      next
+    }
+    {
+      text = $2
+      for (i = 1; i <= n; i++) gsub(admitted[i], " ", text)
+      if (tolower(text) ~ pattern) printf "%s: %s\n", $1, $2
+    }
+  ' <(printf '%s\n' "${ADMITTED[@]}") "$surface" || true
+}
+
+# --- Admission self-test -----------------------------------------------------
+#
+# A shipped form must be admitted, and a prose use of the word must stay a hit
+# even on a line that also carries an admitted form. FATAL otherwise: an
+# admission list that swallows prose turns the gate green while blind.
+admission_selftest() {
+  local fixture hits
+  fixture=$(mktemp "${TMPDIR:-/tmp}/genericity-admit.XXXXXX")
+  printf '%s\t%s\n' \
+    fixture.go '`json:"model,omitempty"`' \
+    fixture.go '"model=%q has no model routing"' > "$fixture"
+  hits=$(banned_hits model "$fixture")
+  rm -f "$fixture"
+  if printf '%s\n' "$hits" | grep -q 'omitempty'; then
+    printf 'FATAL: admission self-test — the shipped json:"model" tag was\n'
+    printf 'reported; the admitted forms are not being applied\n'
+    exit 1
+  fi
+  if ! printf '%s\n' "$hits" | grep -q 'model routing'; then
+    printf 'FATAL: admission self-test — prose "model routing" was admitted;\n'
+    printf 'an admitted form is shielding the rest of its line\n'
+    exit 1
+  fi
+}
+admission_selftest
+
 # template_lines treats an embedded template as surface in its entirety: every
 # byte is read by the first user to run `workflow init`, comments included.
 #
-# `*.json` gets the SAME treatment as of stage 5 (docs/tdd/payloads-thresholds.md
-# §1.1.1, and it is not optional there). That stage ships the first embedded JSON
+# `*.json` gets the SAME treatment as of stage 5, and it is not optional. That
+# stage ships the first embedded JSON
 # core surface — the `aggregate@1` schema document — and every byte of a shipped
 # schema is read by the first user who runs `docket schema show aggregate@1`. A
 # schema document is surface in exactly the sense this comment already gives for
@@ -242,7 +314,7 @@ pass=0
 found_any=false
 
 printf "=== Genericity check ===\n"
-printf "docs/design/genericity.md, over core surface (strings, tags, templates)\n\n"
+printf "The genericity rule, over core surface (strings, tags, templates)\n\n"
 
 # Collect the surface once, so each banned term is a cheap scan over it.
 #
@@ -282,18 +354,7 @@ SURFACE_COUNT=$(grep -c '' "$SURFACE_FILE")
 printf "scanning %d lines of core surface\n\n" "$SURFACE_COUNT"
 
 for word in "${BANNED[@]}"; do
-  # Match against the surface TEXT only, never the file-path column this script
-  # carries for reporting. Every file under internal/model/ would otherwise
-  # match `model` on its own path and the check would report itself.
-  #
-  # awk splits on the tab separator written above, tests only field 2, and
-  # re-attaches the path for the lines that hit.
-  hits=$(
-    awk -F'\t' -v word="$word" '
-      BEGIN { pattern = "(^|[^A-Za-z0-9_])" tolower(word) "([^A-Za-z0-9_]|$)" }
-      tolower($2) ~ pattern { printf "%s: %s\n", $1, $2 }
-    ' "$SURFACE_FILE" || true
-  )
+  hits=$(banned_hits "$word" "$SURFACE_FILE")
 
   if [ -n "$hits" ]; then
     found_any=true
@@ -317,7 +378,7 @@ printf "\n%d/%d banned terms absent from core surface\n" "$pass" "$((pass + fail
 if [ "$found_any" = true ]; then
   cat <<'EOF'
 
-The genericity rule (docs/design/genericity.md, CLAUDE.md PR bar):
+The genericity rule (CLAUDE.md PR bar):
 
   Core Docket contains zero agent/LLM vocabulary. A PR introducing `model`,
   `prompt`, or `llm` into core surface fails review by definition; metadata KV

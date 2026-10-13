@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // DKT-489 — `step show`/`step list` rendered an expired-but-unreaped claim as
 // bare `ready` while `run repin`'s quiescence guard, reading the raw row,
 // refused with "claimed and mid-flight". BOTH answers are per-spec: the read
-// surface renders §6.2's effective status (the machine's own
+// surface renders the effective status (the machine's own
 // `claimed ──lease expiry──> ready` edge, and `claim` makes it true by
 // reaping lazily — DKT-468 aligned `run status` to exactly this), while the
 // repin guard must count the unreaped claim because an executor that claimed
@@ -70,12 +71,12 @@ func TestExpiredUnreapedClaimIsLabeledOnTheStepSurfaces(t *testing.T) {
 		t.Fatalf("live claim lists status=%q lease_expired=%v, want %q/false",
 			row.Status, row.LeaseExpired, db.StepClaimed)
 	}
-	if _, err := repinRunIn(conn, run.ID, "install", nowMS, []string{root}); err == nil {
+	if _, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root}); err == nil {
 		t.Fatal("repin proceeded under a live claim")
 	}
 
 	// The lease lapses, un-reaped. The rendered status flips to the reap's
-	// answer (`ready`, §6.2 — the discipline DKT-468 pinned), repin still
+	// answer (`ready` — the discipline DKT-468 pinned), repin still
 	// refuses — and the window is now labeled on both step surfaces.
 	late := claim.LeaseExpiresMS + 1
 	view, err = LoadStepView(conn, stepID, late)
@@ -103,7 +104,7 @@ func TestExpiredUnreapedClaimIsLabeledOnTheStepSurfaces(t *testing.T) {
 		t.Errorf("step show JSON %s does not carry lease_expired", raw)
 	}
 
-	_, err = repinRunIn(conn, run.ID, "install", late, []string{root})
+	_, err = repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root})
 	if err == nil {
 		t.Fatal("repin proceeded under an expired-but-unreaped claim; the reap, " +
 			"not the expiry, is when the executor is confirmed gone")
@@ -153,7 +154,7 @@ func TestRepinProceedsOnceAnExpiredClaimIsReaped(t *testing.T) {
 	testsupport.Must(t, err, "claim: %v", err)
 	late := claim.LeaseExpiresMS + 1
 
-	if _, err := repinRunIn(conn, run.ID, "install", late, []string{root}); err == nil {
+	if _, err := repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root}); err == nil {
 		t.Fatal("repin proceeded under an expired-but-unreaped claim")
 	}
 
@@ -172,9 +173,124 @@ func TestRepinProceedsOnceAnExpiredClaimIsReaped(t *testing.T) {
 	}
 
 	// ...and repin now proceeds.
-	outcome, err := repinRunIn(conn, run.ID, "install", late, []string{root})
+	outcome, err := repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root})
 	testsupport.Must(t, err, "repin after the reap: %v", err)
 	if len(outcome.Repinned) != 1 {
 		t.Errorf("repinned %d pin(s) after the reap, want 1", len(outcome.Repinned))
 	}
+}
+
+// TestLapsedClaimIsUnlabeledOnAPausedRun pins the label's ONE exception to the
+// pairing above. `Scheduler.Expired` is suspended off an active run (ready.go),
+// and a run parks with its siblings still claimed, so a `waiting-human` run can
+// hold a lapsed-but-unreaped claim on which both `step show` and `step list --run`
+// render plain `claimed` with no label — while `run repin`, since DKT-1791, does
+// name the lapse there. The asymmetry is deliberate: the label promises the reap
+// `next`/`claim` will perform, and neither reaps anything while the run is parked,
+// so labeling the row would state a reap nobody is going to do. Making the label a
+// bare lease-liveness read instead of an `Expired` read breaks this case.
+func TestLapsedClaimIsUnlabeledOnAPausedRun(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	root := t.TempDir()
+
+	pinAFile(t, conn, run.ID, root, "contracts/dkt1826.md", "OLD\n")
+	testsupport.Must(t, os.WriteFile(
+		filepath.Join(root, "contracts/dkt1826.md"), []byte("NEW\n"), 0o644), "rewrite")
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim := claimInstance(t, conn, "implement@0", nowMS)
+	execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
+		string(model.RunWaitingHuman), run.ID)
+	late := claim.LeaseExpiresMS + 1
+
+	view, err := LoadStepView(conn, stepID, late)
+	testsupport.Must(t, err, "LoadStepView on a paused run: %v", err)
+	if view.Row.LeaseExpired {
+		t.Errorf("a lapsed claim on a paused run is labeled lease_expired; no " +
+			"`next` or `claim` will reap it while the run is parked")
+	}
+	if view.Row.Status != db.StepClaimed {
+		t.Errorf("paused-run lapsed claim renders status=%q, want %q",
+			view.Row.Status, db.StepClaimed)
+	}
+	raw, err := json.Marshal(view.Row)
+	testsupport.Must(t, err, "marshal: %v", err)
+	if strings.Contains(string(raw), "lease_expired") {
+		t.Errorf("paused-run step show JSON %s carries lease_expired", raw)
+	}
+
+	rows, err := RunStepList(conn, run.ID, late)
+	testsupport.Must(t, err, "RunStepList on a paused run: %v", err)
+	if row := stepListRowOf(t, rows, "implement@0"); row.LeaseExpired || row.Status != db.StepClaimed {
+		t.Errorf("paused-run step list renders status=%q lease_expired=%v, want %q/false",
+			row.Status, row.LeaseExpired, db.StepClaimed)
+	}
+
+	// The other half of the pairing, and what makes the silence an exception
+	// rather than agreement: repin does name the lapse on this same row.
+	_, err = repinRunIn(conn, run.ID, "install", testConductorToken, late, []string{root})
+	if err == nil {
+		t.Fatal("repin proceeded under a lapsed claim on a paused run")
+	}
+	if !strings.Contains(err.Error(), "leases have lapsed") {
+		t.Errorf("paused-run repin refusal %q does not name the lapse the step "+
+			"surface is silent about", err)
+	}
+}
+
+// TestStepViewLeaseFieldsAgreeOnAPausedRun pins the view's other two lease
+// reads to the label's run-status scoping above. Off an active run the
+// effective status still renders `claimed` with no label, so Owner and
+// ExpiresMS name the stored lease too; on an active run the effective status
+// reads the lapsed lease as gone, and so do the fields. Suppressing them on
+// lease liveness alone left `step show` printing `claimed`, unlabeled, with no
+// owner on a parked run — three reads of one row, one disagreeing with the
+// other two.
+func TestStepViewLeaseFieldsAgreeOnAPausedRun(t *testing.T) {
+	t.Run("paused run reports the lapsed lease", func(t *testing.T) {
+		conn := mustDB(t)
+		run, _ := activatedRun(t, conn)
+		stepID := stepIDByInstance(t, conn, "implement@0")
+		claim := claimInstance(t, conn, "implement@0", nowMS)
+		execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
+			string(model.RunWaitingHuman), run.ID)
+		late := claim.LeaseExpiresMS + 1
+
+		view, err := LoadStepView(conn, stepID, late)
+		testsupport.Must(t, err, "LoadStepView on a paused run: %v", err)
+		if view.Row.Status != db.StepClaimed || view.Row.LeaseExpired {
+			t.Fatalf("paused-run lapsed claim renders status=%q lease_expired=%v, "+
+				"want %q/false", view.Row.Status, view.Row.LeaseExpired, db.StepClaimed)
+		}
+		if view.Owner != "worker" {
+			t.Errorf("owner = %q on a paused run's lapsed claim, want %q: the row "+
+				"renders `claimed` and unlabeled, so the lease it counts must be named",
+				view.Owner, "worker")
+		}
+		if view.ExpiresMS != claim.LeaseExpiresMS {
+			t.Errorf("expires_ms = %d on a paused run's lapsed claim, want the "+
+				"stored %d", view.ExpiresMS, claim.LeaseExpiresMS)
+		}
+	})
+
+	t.Run("active run reads the lapsed lease as gone", func(t *testing.T) {
+		conn := mustDB(t)
+		activatedRun(t, conn)
+		stepID := stepIDByInstance(t, conn, "implement@0")
+		claim := claimInstance(t, conn, "implement@0", nowMS)
+		late := claim.LeaseExpiresMS + 1
+
+		view, err := LoadStepView(conn, stepID, late)
+		testsupport.Must(t, err, "LoadStepView on an active run: %v", err)
+		if view.Row.Status != db.StepReady || !view.Row.LeaseExpired {
+			t.Fatalf("active-run lapsed claim renders status=%q lease_expired=%v, "+
+				"want %q/true", view.Row.Status, view.Row.LeaseExpired, db.StepReady)
+		}
+		if view.Owner != "" || view.ExpiresMS != 0 {
+			t.Errorf("active-run lapsed claim reports owner=%q expires_ms=%d, want "+
+				"neither: the effective status reads the lease as gone",
+				view.Owner, view.ExpiresMS)
+		}
+	})
 }

@@ -3,6 +3,9 @@ package trust
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +16,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// --- Add/rm semantics (§3.5) ------------------------------------------------
+// --- Add/rm semantics -------------------------------------------------------
 
 func TestAddIsIdempotentForAnIdenticalEntry(t *testing.T) {
 	path := sandbox(t)
@@ -40,7 +43,8 @@ func TestAddIsIdempotentForAnIdenticalEntry(t *testing.T) {
 	}
 }
 
-// TestAddConflictsOnDifferingArgv is §3.5's important row.
+// TestAddConflictsOnDifferingArgv checks that an add with a differing argv is
+// a CONFLICT.
 //
 // A SILENT OVERWRITE would mean a trusted name's meaning can change without the
 // operator ever seeing the old value — the same reasoning that makes a
@@ -184,6 +188,121 @@ func TestOnChangeFailureWritesNothing(t *testing.T) {
 	}
 }
 
+// TestTrustAddRecordsBeforeAFailedPublish pins the add path's half of the
+// record-before-publish order: when the store publish fails, the grant has
+// already been recorded, the add fails loudly, and the store is unchanged. The
+// event log then over-reports authority, which is the tolerated direction; an
+// add that recorded nothing here would mean the record had moved after the
+// publish, where a failed record could leave an unrecorded grant.
+func TestTrustAddRecordsBeforeAFailedPublish(t *testing.T) {
+	path := sandbox(t)
+	repo := t.TempDir()
+
+	_, err := addAt(path, AddRequest{
+		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
+	})
+	testsupport.Must(t, err, "seeding addAt: %v", err)
+
+	sealStoreDir(t, path)
+
+	lintArgv := []string{"make", "lint"}
+	var recorded []Entry
+	_, err = addAt(path, AddRequest{
+		Name: "lint", Argv: lintArgv, RepoRoot: repo,
+		OnChange: func(e Entry) error { recorded = append(recorded, e); return nil },
+	})
+	if err == nil {
+		t.Fatal("an add whose publish cannot land must fail")
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("the grant was recorded %d time(s), want exactly 1 before the failed publish", len(recorded))
+	}
+	if recorded[0].Name != "lint" || recorded[0].ArgvSHA256 != ArgvSHA256(lintArgv) {
+		t.Errorf("the hook must receive the entry being added; got %+v", recorded[0])
+	}
+
+	st, err := loadAt(path)
+	testsupport.Must(t, err, "loadAt: %v", err)
+	if len(st.Entries) != 1 || st.Entries[0].Name != "checks" {
+		t.Errorf("a failed publish must leave the store untouched; got %+v", st.Entries)
+	}
+}
+
+// TestWriteStorePostCreateTempFailureNamesTheStore reaches the Chmod and Write
+// branches of writeStore through the createTemp seam: CreateTemp succeeds, but
+// the temp file it hands back is already closed (Chmod fails with
+// os.ErrClosed) or open read-only (the owner's Chmod succeeds and Write fails
+// with EBADF, the way ENOSPC or EIO would fail it on a real disk). Each error
+// must name the store that did not change, not only the temp file the deferred
+// cleanup has already deleted. Sealing the directory instead would reach
+// CreateTemp or Rename, never these branches.
+//
+// The Sync and Close branches are not runtime-covered and stay read-verified:
+// a concrete *os.File from the createTemp seam cannot fail Sync or Close
+// without first failing Chmod, which runs before them on the same file.
+func TestWriteStorePostCreateTempFailureNamesTheStore(t *testing.T) {
+	reopenReadOnly := func(f *os.File) (*os.File, error) { return os.Open(f.Name()) }
+	handBackClosed := func(f *os.File) (*os.File, error) { return f, nil }
+
+	for _, tc := range []struct {
+		name   string
+		branch string
+		hobble func(closed *os.File) (*os.File, error)
+	}{
+		{name: "chmod", branch: "setting mode on ", hobble: handBackClosed},
+		{name: "write", branch: "writing ", hobble: reopenReadOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := sandbox(t)
+			repo := t.TempDir()
+
+			_, err := addAt(path, AddRequest{
+				Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
+			})
+			testsupport.Must(t, err, "seeding addAt: %v", err)
+			before, err := os.ReadFile(path)
+			testsupport.Must(t, err, "reading the seeded store: %v", err)
+
+			t.Cleanup(func() { createTemp = os.CreateTemp })
+			createTemp = func(dir, pattern string) (*os.File, error) {
+				f, err := os.CreateTemp(dir, pattern)
+				if err != nil {
+					return nil, err
+				}
+				if err := f.Close(); err != nil {
+					return nil, err
+				}
+				return tc.hobble(f)
+			}
+
+			err = writeStore(path, &Store{Version: 1})
+			if err == nil {
+				t.Fatal("a publish whose temp file cannot be prepared must fail")
+			}
+			if !strings.Contains(err.Error(), tc.branch) {
+				t.Fatalf("the injection must reach the %q branch; got: %v", tc.branch, err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("the failure must name the store %s, not only its temp file; got: %v", path, err)
+			}
+			if !errors.Is(err, ErrPublish) {
+				t.Errorf("a publish failure must wrap ErrPublish so the CLI reports GENERAL_ERROR; got: %v", err)
+			}
+
+			after, err := os.ReadFile(path)
+			testsupport.Must(t, err, "reading the store after the failed publish: %v", err)
+			if string(after) != string(before) {
+				t.Errorf("a failed publish must leave the store byte-for-byte unchanged")
+			}
+			leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".trust-*.toml"))
+			testsupport.Must(t, err, "globbing for temp files: %v", err)
+			if len(leftovers) != 0 {
+				t.Errorf("a failed publish must remove its temp file; found %v", leftovers)
+			}
+		})
+	}
+}
+
 // TestOnChangeIsNotCalledWhenNothingChanges pins the idempotence row's other
 // consequence: a re-add of an identical entry writes nothing, so there is
 // nothing to record. A record that fired here would prove neither novelty nor
@@ -261,23 +380,29 @@ func TestRemoveOnChangeSeesTheEntryItRemoves(t *testing.T) {
 			seen.Tree, seen.Network)
 	}
 
-	// The refusal path, same as add: the store keeps the entry.
+	// The refusal path is NOT the same as add (DKT-2198): the removal is
+	// published before the record, so a failing hook fails the verb over an
+	// entry that is already gone. TestTrustRemoveReportsAnUnrecordedRemoval
+	// pins that surviving shape and why it is the safe direction.
 	boom := errors.New("the record could not be written")
-	_, err = removeAt(path, RemoveRequest{
+	removedAnyway, err := removeAt(path, RemoveRequest{
 		Name: "checks", RepoRoot: repoA,
 		OnChange: func(Entry) error { return boom },
 	})
 	if !errors.Is(err, boom) {
 		t.Fatalf("the hook's error must fail the remove; got %v", err)
 	}
+	if !removedAnyway {
+		t.Error("the publish already landed, so the removal must be reported")
+	}
 	st, err := loadAt(path)
 	testsupport.Must(t, err, "loadAt: %v", err)
-	if len(st.Entries) != 1 {
-		t.Errorf("a refused remove must delete nothing; got %+v", st.Entries)
+	if len(st.Entries) != 0 {
+		t.Errorf("the published removal must have taken effect; got %+v", st.Entries)
 	}
 }
 
-// TestPrefixWarningIsEmittedAndNeverSuppressed covers §3.3's over-authorization
+// TestPrefixWarningIsEmittedAndNeverSuppressed covers the over-authorization
 // warning and the rule that `--yes` never silences it.
 //
 // Suppressing the warning is exactly what would make the conversational posture
@@ -332,8 +457,8 @@ func TestPrefixWarningIsEmittedAndNeverSuppressed(t *testing.T) {
 	}
 }
 
-// TestPrefixWarningRendersControlBytesEscaped ties the warning to §5.7: the
-// argv it echoes is attacker-influenced, so it goes through the renderer.
+// TestPrefixWarningRendersControlBytesEscaped: the argv the warning echoes is
+// attacker-influenced, so it goes through the renderer.
 func TestPrefixWarningRendersControlBytesEscaped(t *testing.T) {
 	path := sandbox(t)
 	repo := t.TempDir()
@@ -445,9 +570,10 @@ func TestListShowsThisRepoPlusGlobals(t *testing.T) {
 	}
 }
 
-// --- The locked read-modify-write (§3.5.1, F5) ------------------------------
+// --- The locked read-modify-write -------------------------------------------
 
-// TestConcurrentTrustAddsBothLand is F5's test, in both forms §9.1 requires.
+// TestConcurrentTrustAddsBothLand checks that concurrent adds both land, in
+// both forms.
 //
 // WITHOUT THE LOCK, two concurrent adds interleave as read-A / read-B /
 // write-A / write-B, and B's write SILENTLY DROPS A's entry. The operator sees
@@ -567,8 +693,8 @@ func assertAllEntriesPresent(t *testing.T, path string, n int) {
 	}
 }
 
-// TestHeldLockMakesASecondAddConflict is W5: acquisition blocks, bounded by a
-// short timeout, and exceeding it is a CONFLICT naming the lock path.
+// TestHeldLockMakesASecondAddConflict checks that acquisition blocks, bounded
+// by a short timeout, and exceeding it is a CONFLICT naming the lock path.
 //
 // A trust add is a human-scale operation and the bound is far beyond its honest
 // duration, so a timeout means something is genuinely STUCK rather than merely
@@ -597,7 +723,7 @@ func TestHeldLockMakesASecondAddConflict(t *testing.T) {
 	}
 }
 
-// TestLockfileIntegrityTable is W3: the lockfile is opened with §3.2's
+// TestLockfileIntegrityTable checks that the lockfile is opened with the store's
 // discipline — refuse a symlink, refuse a non-regular file, check the mode.
 //
 // It lives in the user-owned config directory, so the exposure is smaller than
@@ -666,7 +792,8 @@ func TestLockfileIntegrityTable(t *testing.T) {
 	})
 }
 
-// TestLockIsOnASiblingNotTheStore is W2, asserted structurally.
+// TestLockIsOnASiblingNotTheStore asserts structurally that the lock is on a
+// sibling file.
 //
 // Locking trust.toml directly does not work with rename-based writes: the
 // rename REPLACES THE INODE, so the lock the writer holds and the lock the next
@@ -688,9 +815,9 @@ func TestLockIsOnASiblingNotTheStore(t *testing.T) {
 	}
 }
 
-// --- SB4: the poisoned-store guard ------------------------------------------
+// --- The poisoned-store guard -----------------------------------------------
 
-// TestNoTestReadsTheRealTrustStore enforces §9.5's sandbox rule MECHANICALLY.
+// TestNoTestReadsTheRealTrustStore enforces the sandbox rule MECHANICALLY.
 //
 // It points HOME and XDG_CONFIG_HOME at a directory containing a POISONED trust
 // file — an entry that would match a gate no legitimate test approves — and
@@ -749,8 +876,8 @@ global = true
 	}
 }
 
-// TestEveryTestFileSandboxesXDG is SB1 as a source-level guard: a test added
-// later cannot forget.
+// TestEveryTestFileSandboxesXDG enforces the sandbox rule as a source-level
+// guard: a test added later cannot forget.
 //
 // It asserts that every _test.go file in this package which mentions the store
 // path or the add/remove entry points also sets XDG_CONFIG_HOME. The rule is
@@ -776,7 +903,97 @@ func TestEveryTestFileSandboxesXDG(t *testing.T) {
 		// Either the file sandboxes directly, or it uses the sandbox helper
 		// that does.
 		if !strings.Contains(src, "XDG_CONFIG_HOME") && !strings.Contains(src, "sandbox(t)") {
-			t.Errorf("%s touches the trust store but never sandboxes XDG_CONFIG_HOME (§9.5 SB1)", name)
+			t.Errorf("%s touches the trust store but never sandboxes XDG_CONFIG_HOME", name)
 		}
 	}
+}
+
+// TestCreateTempAssignedOnlyAtDeclaration enforces that the createTemp seam is
+// rebound only by tests. Production code may name createTemp in exactly two
+// shapes: its package-level declaration and a call. Any other use (an
+// assignment, a shadowing declaration, taking its address) lets a production
+// edit substitute a temp file that skips writeStore's publish discipline.
+func TestCreateTempAssignedOnlyAtDeclaration(t *testing.T) {
+	t.Run("adversarial control: an assignment in a function body is reported", func(t *testing.T) {
+		src := "package trust\n\nimport \"os\"\n\nvar createTemp = os.CreateTemp\n\nfunc f() { createTemp = nil }\n"
+		violations, err := createTempMisuses("adversarial.go", src)
+		testsupport.Must(t, err, "parsing the adversarial control: %v", err)
+		if len(violations) != 1 {
+			t.Errorf("want exactly 1 violation, got %d: %v", len(violations), violations)
+		}
+	})
+
+	t.Run("benign control: the declaration alone passes despite a comment", func(t *testing.T) {
+		src := "package trust\n\nimport \"os\"\n\n// createTemp = nil\nvar createTemp = os.CreateTemp\n"
+		violations, err := createTempMisuses("benign.go", src)
+		testsupport.Must(t, err, "parsing the benign control: %v", err)
+		if len(violations) != 0 {
+			t.Errorf("want no violations, got %v", violations)
+		}
+	})
+
+	entries, err := os.ReadDir(".")
+	testsupport.Must(t, err, "reading the package directory: %v", err)
+	parsed := 0
+	for _, e := range entries {
+		name := e.Name()
+		// go build ignores _test.go files and names starting with _ or .;
+		// build constraints are deliberately not applied, so every GOOS's
+		// files are checked.
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") ||
+			strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		testsupport.Must(t, err, "reading %s: %v", name, err)
+		violations, err := createTempMisuses(name, src)
+		testsupport.Must(t, err, "parsing %s: %v", name, err)
+		for _, v := range violations {
+			t.Errorf("%s: createTemp is swappable only by tests; production code may only declare or call it", v)
+		}
+		parsed++
+	}
+	if parsed == 0 {
+		t.Fatal("no production Go files found in the package directory; the guard checked nothing")
+	}
+}
+
+// createTempMisuses parses src without comments and returns the position of
+// every createTemp identifier that is neither a package-level var
+// declaration's name nor the function of a call expression.
+func createTempMisuses(filename string, src any) ([]token.Position, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+
+	allowed := map[*ast.Ident]bool{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			for _, name := range spec.(*ast.ValueSpec).Names {
+				allowed[name] = true
+			}
+		}
+	}
+
+	var misuses []token.Position
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok {
+				allowed[id] = true
+			}
+		case *ast.Ident:
+			if n.Name == "createTemp" && !allowed[n] {
+				misuses = append(misuses, fset.Position(n.Pos()))
+			}
+		}
+		return true
+	})
+	return misuses, nil
 }

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# gate-baseref-regression — pins the base-ref mode of secret-scan.sh and
-# self-hygiene.sh, which had zero committed tests before this fix
-# round and a fail-open bug in exactly that mode: an explicit but empty
-# base-ref argument must fail closed rather than silently falling back to the
-# (vacuous, on a clean CI checkout) working-tree scan.
+# gate-baseref-regression — pins the base-ref mode of secret-scan.sh,
+# self-hygiene.sh, and doc-validate.sh. The first two had zero committed tests
+# before this fix round and a fail-open bug in exactly that mode: an explicit
+# but empty base-ref argument must fail closed rather than silently falling
+# back to the (vacuous, on a clean CI checkout) working-tree scan.
+# doc-validate.sh had no base mode at all, so a committed docs change passed
+# as "no docs changed".
 #
 # Runs each gate script against a throwaway git repo shaped like a real PR, so
 # every case here drives the actual entry point CI invokes — not a helper
@@ -50,6 +52,7 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/repo/scripts/qa"
 cp "$REPO_ROOT/scripts/qa/secret-scan.sh" "$WORK/repo/scripts/qa/"
 cp "$REPO_ROOT/scripts/qa/self-hygiene.sh" "$WORK/repo/scripts/qa/"
+cp "$REPO_ROOT/scripts/qa/doc-validate.sh" "$WORK/repo/scripts/qa/"
 
 git -C "$WORK/repo" init -q
 git -C "$WORK/repo" config user.email "qa@example.invalid"
@@ -129,7 +132,7 @@ fi
 # Built from two halves on separate lines rather than one literal, so THIS
 # SCRIPT'S OWN source line never matches the AKIA[0-9A-Z]{16} pattern it is
 # testing — a fixture credential that matches its own detector fails
-# secret-scan on the commit that adds this file (K1). The produced fixture
+# secret-scan on the commit that adds this file. The produced fixture
 # line is byte-identical to the literal at runtime; only the source shape
 # changes.
 AKIA_PREFIX="AKIA"
@@ -153,25 +156,61 @@ if run_scan secret-scan.sh "$BASE" >/dev/null 2>&1; then
   fail "secret-scan.sh \$BASE missed a credential added then removed within the PR (C5)"
 fi
 
-# --- self-hygiene: an internal/cli change with no matching SKILL.md update
-# in the same committed diff must fail, in base-ref mode too. ---------------
+# --- self-hygiene: a committed non-test internal/cli change must be SEEN and
+# NAMED in base-ref mode — exit 0, with the file in the report. The CLI
+# reference lives outside this repository, so there is no co-change to
+# demand; the gate's whole value is that the surface change is stated. -------
 
 mkdir -p "$WORK/repo/internal/cli"
 echo "package cli" > "$WORK/repo/internal/cli/root.go"
 git -C "$WORK/repo" add -A
-git -C "$WORK/repo" commit -q -m "cli surface change, no SKILL.md update"
+git -C "$WORK/repo" commit -q -m "cli surface change"
+CLI_HEAD=$(git -C "$WORK/repo" rev-parse HEAD)
 
-if run_scan self-hygiene.sh "$BASE" >/dev/null 2>&1; then
-  fail "self-hygiene.sh \$BASE passed an internal/cli change with no SKILL.md update"
+H1_OUT="$WORK/h1-hygiene.out"
+if ! run_scan self-hygiene.sh "$BASE" >"$H1_OUT" 2>&1; then
+  fail "self-hygiene.sh \$BASE failed on a committed internal/cli change: $(cat "$H1_OUT")"
+elif ! grep -q "internal/cli/root.go" "$H1_OUT"; then
+  fail "self-hygiene.sh \$BASE did not name the internal/cli file it saw: $(cat "$H1_OUT")"
 fi
 
-mkdir -p "$WORK/repo/skills/docket"
-echo "# SKILL" > "$WORK/repo/skills/docket/SKILL.md"
-git -C "$WORK/repo" add -A
-git -C "$WORK/repo" commit -q -m "update SKILL.md"
+# --- engine mode: DOCKET_GATE_BASE names the same range when no argument is
+# passed. The engine runs this gate on a clean, committed worktree, where the
+# working-tree scan finds nothing — so without this mode every step reported
+# "no changes" whatever the CLI surface did. ---------------------------------
 
-if ! run_scan self-hygiene.sh "$BASE" >/dev/null 2>&1; then
-  fail "self-hygiene.sh \$BASE failed once SKILL.md was updated in the same PR"
+H2_OUT="$WORK/h2-hygiene.out"
+if ! DOCKET_GATE_BASE="$BASE" run_scan self-hygiene.sh >"$H2_OUT" 2>&1; then
+  fail "self-hygiene.sh under DOCKET_GATE_BASE failed on a committed internal/cli change: $(cat "$H2_OUT")"
+elif ! grep -q "internal/cli/root.go" "$H2_OUT"; then
+  fail "self-hygiene.sh under DOCKET_GATE_BASE did not see the committed internal/cli change: $(cat "$H2_OUT")"
+fi
+
+# A set-but-empty DOCKET_GATE_BASE is a caller defect (the engine leaves the
+# variable unset when it has no base) and must fail closed like C1.
+H3_OUT="$WORK/h3-hygiene.out"
+if DOCKET_GATE_BASE="" run_scan self-hygiene.sh >"$H3_OUT" 2>&1; then
+  fail "self-hygiene.sh with an empty DOCKET_GATE_BASE exited 0; must fail closed"
+elif ! grep -q "refusing" "$H3_OUT"; then
+  fail "self-hygiene.sh with an empty DOCKET_GATE_BASE failed for the wrong reason: $(cat "$H3_OUT")"
+fi
+
+# An explicit argument outranks DOCKET_GATE_BASE: HEAD as the base names an
+# empty range even though the env var would name the internal/cli change.
+H4_OUT="$WORK/h4-hygiene.out"
+if ! DOCKET_GATE_BASE="$BASE" run_scan self-hygiene.sh "$CLI_HEAD" >"$H4_OUT" 2>&1; then
+  fail "self-hygiene.sh with an explicit base over DOCKET_GATE_BASE failed: $(cat "$H4_OUT")"
+elif ! grep -q "no changes" "$H4_OUT"; then
+  fail "self-hygiene.sh let DOCKET_GATE_BASE override an explicit base-ref argument: $(cat "$H4_OUT")"
+fi
+
+# DOCKET_SCOPE still narrows the engine-mode change set: a scope that excludes
+# internal/cli reports no changes within scope.
+H5_OUT="$WORK/h5-hygiene.out"
+if ! DOCKET_GATE_BASE="$BASE" DOCKET_SCOPE="docs/**" run_scan self-hygiene.sh >"$H5_OUT" 2>&1; then
+  fail "self-hygiene.sh under DOCKET_GATE_BASE with a non-matching DOCKET_SCOPE failed: $(cat "$H5_OUT")"
+elif ! grep -q "declared scope" "$H5_OUT"; then
+  fail "self-hygiene.sh did not apply DOCKET_SCOPE in engine mode: $(cat "$H5_OUT")"
 fi
 
 # --- K7: a credential landed in the BASE commit itself — before the range
@@ -259,6 +298,75 @@ if run_scan self-hygiene.sh deadbeefdeadbeefdeadbeefdeadbeefdeadbeef >"$C15_OUT"
   fail "self-hygiene.sh with an unreadable base ref exited 0 (C15)"
 elif ! grep -q "nothing was scanned" "$C15_OUT"; then
   fail "self-hygiene.sh with an unreadable base ref gave no diagnostic: $(cat "$C15_OUT")"
+fi
+
+# --- doc-validate: DOCKET_GATE_BASE names the committed change set. These
+# cases come last so their docs commits stay out of every $BASE range above.
+# The tree is clean here. The docs live under a docs/ subdirectory, the path
+# shape the working-tree-only scan missed, which also pins that 'docs/*.md'
+# reaches subdirectories. ---------------------------------------------------
+
+DOC_BASE=$(git -C "$WORK/repo" rev-parse HEAD)
+
+# Unset cases call the script through `env -u`: this regression runs as a
+# standing gate the engine may spawn with DOCKET_GATE_BASE exported, and an
+# inherited value would turn them into base mode.
+run_doc_unset() {
+  (cd "$WORK/repo" && env -u DOCKET_GATE_BASE bash scripts/qa/doc-validate.sh)
+}
+
+D1_OUT="$WORK/d1-doc.out"
+if ! run_doc_unset >"$D1_OUT" 2>&1; then
+  fail "doc-validate.sh with DOCKET_GATE_BASE unset failed on a clean tree: $(cat "$D1_OUT")"
+elif ! grep -q "doc-validate: no docs changed" "$D1_OUT"; then
+  fail "doc-validate.sh with DOCKET_GATE_BASE unset did not report no docs changed: $(cat "$D1_OUT")"
+fi
+
+mkdir -p "$WORK/repo/docs/guide"
+# A valid Status line, so only the title check can trip.
+printf 'Untitled\n\nStatus: draft — 2026-01-01\n' > "$WORK/repo/docs/guide/untitled.md"
+D2_OUT="$WORK/d2-doc.out"
+if run_doc_unset >"$D2_OUT" 2>&1; then
+  fail "doc-validate.sh with DOCKET_GATE_BASE unset passed an uncommitted doc with no '# ' title"
+elif ! grep -q "docs/guide/untitled.md" "$D2_OUT"; then
+  fail "doc-validate.sh with DOCKET_GATE_BASE unset did not name the untitled doc: $(cat "$D2_OUT")"
+fi
+rm -f "$WORK/repo/docs/guide/untitled.md"
+
+printf '# Good\n\nStatus: draft — 2026-01-01\n' > "$WORK/repo/docs/guide/good.md"
+git -C "$WORK/repo" add -A
+git -C "$WORK/repo" commit -q -m "well-formed doc"
+GOOD_HEAD=$(git -C "$WORK/repo" rev-parse HEAD)
+
+D3_OUT="$WORK/d3-doc.out"
+if ! DOCKET_GATE_BASE="$DOC_BASE" run_scan doc-validate.sh >"$D3_OUT" 2>&1; then
+  fail "doc-validate.sh under DOCKET_GATE_BASE failed a committed well-formed doc: $(cat "$D3_OUT")"
+elif ! grep -q "doc-validate: ok" "$D3_OUT"; then
+  fail "doc-validate.sh under DOCKET_GATE_BASE did not check the committed doc: $(cat "$D3_OUT")"
+fi
+
+printf '# Bad\n\nNo status line here.\n' > "$WORK/repo/docs/guide/bad.md"
+git -C "$WORK/repo" add -A
+git -C "$WORK/repo" commit -q -m "malformed doc"
+
+D4_STDOUT="$WORK/d4-doc.stdout"
+D4_STDERR="$WORK/d4-doc.stderr"
+if DOCKET_GATE_BASE="$GOOD_HEAD" run_scan doc-validate.sh >"$D4_STDOUT" 2>"$D4_STDERR"; then
+  fail "doc-validate.sh under DOCKET_GATE_BASE passed a committed doc with no Status line: $(cat "$D4_STDOUT")"
+elif ! grep -q "docs/guide/bad.md" "$D4_STDERR"; then
+  fail "doc-validate.sh under DOCKET_GATE_BASE did not name the malformed doc on stderr: $(cat "$D4_STDERR")"
+elif grep -q "no docs changed" "$D4_STDOUT"; then
+  fail "doc-validate.sh under DOCKET_GATE_BASE reported no docs changed on a committed doc"
+fi
+
+# A set-but-empty DOCKET_GATE_BASE fails closed, as for self-hygiene (H3).
+D5_OUT="$WORK/d5-doc.out"
+if DOCKET_GATE_BASE="" run_scan doc-validate.sh >"$D5_OUT" 2>&1; then
+  fail "doc-validate.sh with an empty DOCKET_GATE_BASE exited 0; must fail closed"
+elif ! grep -q "set but empty" "$D5_OUT"; then
+  fail "doc-validate.sh with an empty DOCKET_GATE_BASE failed for the wrong reason: $(cat "$D5_OUT")"
+elif grep -q "no docs changed" "$D5_OUT"; then
+  fail "doc-validate.sh with an empty DOCKET_GATE_BASE fell back to the working-tree scan"
 fi
 
 if [ "$FAIL" -eq 0 ]; then

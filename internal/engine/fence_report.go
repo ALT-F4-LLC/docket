@@ -10,28 +10,29 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The activation trust report (TDD docs/tdd/gates-trust.md §7.7, threat T16).
+// The activation trust report.
 //
-// §2, verbatim: "At plan approval the session surfaces what activation will
-// bind — including every harvested fenced command, verbatim — so what the human
-// approves is what was actually read, not a summary."
+// At plan approval the session surfaces what activation will bind — including
+// every harvested fenced command, verbatim — so what the human approves is what
+// was actually read, not a summary.
 //
-// T16 is the LIVE-repo case rather than the clone: an attacker who can file an
-// issue writes a fenced command into its body. The gate still needs a matching
-// trust entry, so filing the issue grants nothing — but the operator should see
-// an `unmatched` command BEFORE the run rather than discover it afterwards.
+// The threat is the LIVE-repo case rather than the clone: an attacker who can
+// file an issue writes a fenced command into its body. The gate still needs a
+// matching trust entry, so filing the issue grants nothing — but the operator
+// should see an `unmatched` command BEFORE the run rather than discover it
+// afterwards.
 //
-// IT IS A REPORT, NOT A GATE (S3). Activation SUCCEEDS with unmatched commands:
+// IT IS A REPORT, NOT A GATE. Activation SUCCEEDS with unmatched commands:
 // they simply will not run, and their gates route per `on_fail` when reached.
 // Refusing activation would let an issue author block a run by adding an
-// untrusted fence line — the same denial of service PG2 avoids for pre-gates.
+// untrusted fence line — the same denial of service the pre-gate path avoids.
 
 // BuildFenceReport resolves every harvested fence command against the trust
 // store, for the run's bound issues.
 //
 // The trust store is read ONCE for the whole report, the same snapshot
-// discipline §7.2 M1 applies at the gate: a report assembled from several reads
-// could disagree with itself mid-render.
+// discipline the runner applies at the gate: a report assembled from several
+// reads could disagree with itself mid-render.
 func BuildFenceReport(
 	conn *sql.DB, runID int, loadStore func() (*trust.Store, error), identityPath string,
 ) ([]FenceReport, error) {
@@ -101,11 +102,11 @@ func BuildFenceReport(
 
 // matchFenceCommand resolves one command exactly as the runner will.
 //
-// It tokenizes with the same splitter (§5.2 K2) and matches with the same
-// matcher (§7.2), so the report cannot say `matched` for something the gate
-// will refuse. A report that used a looser check than the runner would be worse
-// than no report: it would tell an operator a command is approved when it is
-// not, which is the opposite of what T16 asks for.
+// It tokenizes with the same splitter and matches with the same matcher, so the
+// report cannot say `matched` for something the gate will refuse. A report that
+// used a looser check than the runner would be worse than no report: it would
+// tell an operator a command is approved when it is not, which is the opposite
+// of what the report is for.
 func matchFenceCommand(
 	store *trust.Store, identity, gate, command string,
 ) (matched bool, entry, reason string) {
@@ -156,14 +157,14 @@ func fenceTag(gate workflow.Gate) (string, bool) {
 	return "", false
 }
 
-// RenderFenceReport writes §7.7 S1's human-mode report.
+// RenderFenceReport writes the human-mode report.
 //
 // "VERBATIM" MEANS EVERY BYTE IS ACCOUNTED FOR, NOT THAT RAW BYTES REACH THE
-// TERMINAL (T18, §5.7). The command and the reason render through the escaping
-// renderer, which is LOSSLESS: a command containing no control bytes renders
-// identically to its stored form, and one that does renders its escapes
-// visibly rather than executing them against the operator's cursor. D14's whole
-// backstop is that what is displayed is what is approved, so any divergence
+// TERMINAL. The command and the reason render through the escaping renderer,
+// which is LOSSLESS: a command containing no control bytes renders identically
+// to its stored form, and one that does renders its escapes visibly rather than
+// executing them against the operator's cursor. The report's whole backstop is
+// that what is displayed is what is approved, so any divergence
 // between the two is an attack on the ratified control, not a cosmetic bug.
 func RenderFenceReport(w interface{ Write([]byte) (int, error) }, reports []FenceReport) {
 	if len(reports) == 0 {

@@ -1,5 +1,5 @@
 {
-  "why": "the shape §4.2 pins: an array of objects, one property declaring an ordered enum",
+  "why": "the pinned shape: an array of objects, one property declaring an ordered enum",
   "schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "array",

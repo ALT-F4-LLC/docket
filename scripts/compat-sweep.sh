@@ -5,8 +5,8 @@
 # Usage:
 #   ./scripts/compat-sweep.sh <baseline-binary> [current-binary]
 #
-# Proves engine-spec.md §9 item 8 for a repo that never uses the new stage's
-# features: "all existing verbs byte-compatible without --json=v2; a
+# Proves, for a repo that never uses the new stage's features, the
+# dormancy bar: "all existing verbs byte-compatible without --json=v2; a
 # workflow-free repo shows no behavioral change on any existing verb."
 #
 # Method: build one fixture database, copy it, run every existing read verb

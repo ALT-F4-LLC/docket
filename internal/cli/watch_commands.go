@@ -31,7 +31,7 @@ var watchEligible = map[string]bool{
 	// the same live-progress question `board` answers for issues.
 	"docket step list": true,
 	// `events list` polls under `--follow` rather than `--watch`, but it uses
-	// the SAME `--interval` (docs/tdd/events-follow.md §4.1 W2). Listing it here
+	// the SAME `--interval`. Listing it here
 	// is what keeps that flag visible on the command and validated by the same
 	// floor — the alternative was a second `--interval` shadowing the
 	// persistent one with its own default and no minimum.

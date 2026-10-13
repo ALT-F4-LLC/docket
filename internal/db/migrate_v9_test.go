@@ -11,18 +11,18 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-// v9Tables are the tables the v9 DDL creates (TDD §4.4, §6.3). Stated here
-// independently of v9Sentinels so the sentinel test cannot pass by both lists
-// drifting together — the same discipline v7Tables and v8Tables apply. Group 1
-// contributed `schemas`; group 2 adds `action_results`.
+// v9Tables are the tables the v9 DDL creates. Stated here independently of
+// v9Sentinels so the sentinel test cannot pass by both lists drifting together
+// — the same discipline v7Tables and v8Tables apply. Group 1 contributed
+// `schemas`; group 2 adds `action_results`.
 var v9Tables = []string{
 	"schemas",
 	"action_results",
 }
 
 // v9Columns are the columns the v9 migration adds to existing tables. Sentinels
-// cannot see these — they are tables — and docs/spec/architecture.md §3.1
-// already says so for v7. Each is probed individually here (§2).
+// cannot see these — they are tables — as was already true for v7. Each is
+// probed individually here.
 //
 // Stated independently of the migration's own v9AddedColumns table, for the
 // reason v9Tables is stated independently of v9Sentinels: a list that derived
@@ -49,11 +49,11 @@ func TestMigrateToV9(t *testing.T) {
 	if v != currentSchemaVersion {
 		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
 	}
-	// The stage pin has MOVED ON: stage 5 shipped v9 and stage 6 ships v10, so
-	// the assertion here is that v9's row still exists in the span rather than
-	// that the span ends at it. The span's own completeness is asserted once, by
-	// TestSchemaSpanIsComplete (runs-dispatch §2.4), which is where a stage-7
-	// author reaching for v11 is stopped.
+	// The stage pin has MOVED ON: later migrations followed v9, so the
+	// assertion here is that v9's row still exists in the span rather than
+	// that the span ends at it. The span's own completeness is asserted once,
+	// by TestSchemaSpanIsComplete, which is where an author reaching for a new
+	// version is stopped.
 	if currentSchemaVersion < 9 {
 		t.Errorf("currentSchemaVersion = %d; v9 is a shipped row of the span",
 			currentSchemaVersion)
@@ -74,10 +74,10 @@ func TestMigrateToV9(t *testing.T) {
 	}
 }
 
-// TestRewindGuardProbesEveryV9Sentinel is §2's obligation, and it derives the
-// table list from the DDL itself: a group that adds a CREATE TABLE to v9DDL and
-// forgets the sentinel fails HERE rather than shipping a database the guard
-// silently declines to repair.
+// TestRewindGuardProbesEveryV9Sentinel is the rewind guard's obligation, and
+// it derives the table list from the DDL itself: a group that adds a CREATE
+// TABLE to v9DDL and forgets the sentinel fails HERE rather than shipping a
+// database the guard silently declines to repair.
 func TestRewindGuardProbesEveryV9Sentinel(t *testing.T) {
 	re := regexp.MustCompile(`(?i)CREATE TABLE IF NOT EXISTS\s+(\w+)`)
 	var created []string
@@ -146,9 +146,9 @@ func migratedToV8(t *testing.T) *sql.DB {
 // columns — so a test starts from a genuine v8 shape.
 //
 // Removing the columns is not fussiness: a fixture that kept `artifacts.stub`
-// would make U3's "the column arrived with the rewind" assertion pass
-// VACUOUSLY, which is the failure mode §2 wrote the column half of the U-table
-// to prevent.
+// would make the rewind test's "the column arrived with the rewind" assertion
+// pass VACUOUSLY, which is the failure mode the column checks exist to
+// prevent.
 func stripV9(t *testing.T, db *sql.DB) {
 	t.Helper()
 	for _, table := range v9Tables {
@@ -167,7 +167,7 @@ func stripV9(t *testing.T, db *sql.DB) {
 	}
 }
 
-// countSchemas is the assertion §3 rests on: v9 seeds EXACTLY ONE row.
+// countSchemas is the dormancy assertion: v9 seeds EXACTLY ONE row.
 func countSchemas(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var n int
@@ -177,7 +177,7 @@ func countSchemas(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// TestMigrateV9U1TrackerShape is U1: this repo's own tracker — stamped 8, every
+// TestMigrateV9U1TrackerShape: this repo's own tracker — stamped 8, every
 // v7/v8 sentinel present, `steps` empty because the tracker has issues but no
 // runs. The tracker is dogfooded across the stage, so this is the shape the
 // operator's own database actually has when a group-1 binary first opens it.
@@ -189,7 +189,7 @@ func TestMigrateV9U1TrackerShape(t *testing.T) {
 		t.Fatalf("counting steps: %v", err)
 	}
 	if steps != 0 {
-		t.Fatalf("fixture has %d steps, want 0 (U1 is the no-runs shape)", steps)
+		t.Fatalf("fixture has %d steps, want 0 (the tracker is the no-runs shape)", steps)
 	}
 
 	if err := Migrate(db); err != nil {
@@ -202,7 +202,7 @@ func TestMigrateV9U1TrackerShape(t *testing.T) {
 		}
 	}
 
-	// `schemas` holds the one builtin row and NOTHING ELSE. §3's dormancy claim
+	// `schemas` holds the one builtin row and NOTHING ELSE. The dormancy claim
 	// names this number rather than claiming zero, which would have been the
 	// flattering statement rather than the true one.
 	if n := countSchemas(t, db); n != 1 {
@@ -229,10 +229,9 @@ func TestMigrateV9U1TrackerShape(t *testing.T) {
 	}
 }
 
-// TestMigrateV9U2PopulatedRunKeepsItsArtifactBytes is U2 and §6.3 S2 together:
-// a populated database migrates, every artifact keeps its bytes, and the S3/S4
-// stubbed action artifacts gain `stub = 1` with their `{"stub":true,…}` wrapper
-// UNMODIFIED.
+// TestMigrateV9U2PopulatedRunKeepsItsArtifactBytes: a populated database
+// migrates, every artifact keeps its bytes, and the pre-v9 stubbed action
+// artifacts gain `stub = 1` with their `{"stub":true,…}` wrapper UNMODIFIED.
 //
 // Rewriting the wrapper would destroy the evidence that a computation did not
 // run, which is the entire reason the marker exists.
@@ -279,7 +278,7 @@ func TestMigrateV9U2PopulatedRunKeepsItsArtifactBytes(t *testing.T) {
 }
 
 // seedArtifact writes one artifact row directly, because the point is to
-// reproduce what an S3/S4-era binary STORED rather than what today's writers
+// reproduce what a pre-v9 binary STORED rather than what today's writers
 // produce.
 func seedArtifact(t *testing.T, db *sql.DB, kind, payload string) int {
 	t.Helper()
@@ -306,8 +305,8 @@ func seedArtifact(t *testing.T, db *sql.DB, kind, payload string) int {
 	return int(id)
 }
 
-// TestMigrateV9U3RewindsWhenASentinelIsAbsent is U3: the group-1-partial
-// dogfood shape, which is exactly the v7 and v8 trap a third time.
+// TestMigrateV9U3RewindsWhenASentinelIsAbsent: the group-1-partial dogfood
+// shape, which is exactly the v7 and v8 trap a third time.
 //
 // A database stamped 9 with a v9 sentinel missing is NOT trusted: the guard
 // rewinds to 8 and re-runs, and the database ends complete INCLUDING the
@@ -322,7 +321,7 @@ func TestMigrateV9U3RewindsWhenASentinelIsAbsent(t *testing.T) {
 	}
 
 	// The trap: the stamp still says 9. The group-1 shape is reconstructed
-	// exactly — table dropped, columns removed, stamp AT 9 (§2).
+	// exactly — table dropped, columns removed, stamp AT 9.
 	//
 	// The stamp is set rather than merely left alone because Migrate now runs on
 	// to v10: the shape under test is a v9-era binary's, and reading a 10 here
@@ -354,7 +353,7 @@ func TestMigrateV9U3RewindsWhenASentinelIsAbsent(t *testing.T) {
 	}
 }
 
-// TestMigrateV9U4ReRunsOverAMissingColumn is U4's group-1 row: the column half,
+// TestMigrateV9U4ReRunsOverAMissingColumn is the group-1 column half,
 // proven INDEPENDENTLY of the table half.
 //
 // The rewind guard probes tables, so a database whose table is present and whose
@@ -385,7 +384,7 @@ func TestMigrateV9U4ReRunsOverAMissingColumn(t *testing.T) {
 	}
 }
 
-// TestMigrateV9U5IsIdempotent is U5: the migration run twice against a
+// TestMigrateV9U5IsIdempotent: the migration run twice against a
 // populated database duplicates nothing.
 func TestMigrateV9U5IsIdempotent(t *testing.T) {
 	db := migratedToV8(t)
@@ -418,10 +417,10 @@ func TestMigrateV9U5IsIdempotent(t *testing.T) {
 	}
 }
 
-// TestMigrateV9U6FromTheV4Baseline is U6: the committed fixture migrates 4->9 in
-// ONE pass, and the v9 structures are asserted present BEFORE any golden diff is
-// trusted — engine-spine §3's rule, because a golden diff against a database
-// that failed to migrate passes vacuously.
+// TestMigrateV9U6FromTheV4Baseline: the committed fixture migrates 4->9 in ONE
+// pass, and the v9 structures are asserted present BEFORE any golden diff is
+// trusted, because a golden diff against a database that failed to migrate
+// passes vacuously.
 func TestMigrateV9U6FromTheV4Baseline(t *testing.T) {
 	src := filepath.Join("..", "..", "scripts", "qa", "fixtures", "v4-baseline.db")
 	if _, err := os.Stat(src); err != nil {
@@ -470,7 +469,7 @@ func TestMigrateV9U6FromTheV4Baseline(t *testing.T) {
 	}
 }
 
-// TestMigrateV9U4GroupTwoColumnsArrive is U4's group-2 row: the columns
+// TestMigrateV9U4GroupTwoColumnsArrive is the group-2 column check: the columns
 // `trust_cache.kind` and `steps.materialized` arrive, EXISTING ROWS ARE INTACT,
 // and each reads the default that preserves what it already meant.
 //
@@ -532,7 +531,7 @@ func TestMigrateV9U4GroupTwoColumnsArrive(t *testing.T) {
 	}
 }
 
-// TestActionResultsAreEmptyOnAFreshDatabase is §3's group-2 dormancy claim at
+// TestActionResultsAreEmptyOnAFreshDatabase is the group-2 dormancy claim at
 // the storage layer: `action_results` exists and holds nothing until an action
 // step actually runs.
 func TestActionResultsAreEmptyOnAFreshDatabase(t *testing.T) {
@@ -598,7 +597,7 @@ func TestActionResultsRecordEveryAttempt(t *testing.T) {
 		t.Fatalf("read %d rows, want 3", len(got))
 	}
 	if got[0].Argv != nil || got[0].Exit != nil {
-		t.Error("a builtin recorded an argv or an exit; it spawns nothing (B2), " +
+		t.Error("a builtin recorded an argv or an exit; it spawns nothing, " +
 			"and a zero exit on something that did not run reads as success")
 	}
 	if !got[0].Builtin {
@@ -672,7 +671,7 @@ func seedRunAndStep(t *testing.T, db *sql.DB) (runID, stepID int) {
 	return int(rid), int(sid)
 }
 
-// TestMigrateV9U7DivergentBuiltinIsLeftAlone is U7: a database whose
+// TestMigrateV9U7DivergentBuiltinIsLeftAlone: a database whose
 // `aggregate@1` row carries a DIFFERENT hash than the embedded bytes is neither
 // overwritten nor refused.
 //
@@ -715,9 +714,10 @@ func TestMigrateV9U7DivergentBuiltinIsLeftAlone(t *testing.T) {
 	}
 }
 
-// TestS3RegisteredWorkflowsSurviveTheUpgrade is §4.9.3's rule, proven where it
-// could break: the migration does not re-validate a single row of `workflows`,
-// and no verb ever revisits a registered definition's validity.
+// TestS3RegisteredWorkflowsSurviveTheUpgrade is the no-retroactive-validation
+// rule, proven where it could break: the migration does not re-validate a
+// single row of `workflows`, and no verb ever revisits a registered
+// definition's validity.
 //
 // The argument, in the order that decides it:
 //
@@ -735,9 +735,9 @@ func TestMigrateV9U7DivergentBuiltinIsLeftAlone(t *testing.T) {
 func TestS3RegisteredWorkflowsSurviveTheUpgrade(t *testing.T) {
 	db := migratedToV8(t)
 
-	// An S3-era definition: `payload` passed V25's SHAPE check when nothing
+	// A pre-v9 definition: `payload` passed the SHAPE check when nothing
 	// could resolve the name, and no schema is registered for it. Registering
-	// this file again after v9 is refused (V25a); the ROW must not be.
+	// this file again after v9 is refused; the ROW must not be.
 	const s3Era = `{"pipeline":{"name":"s3-era","version":1},` +
 		`"steps":[{"name":"a","executor":"x","emits":"k","payload":"findings@1"}]}`
 
@@ -747,7 +747,7 @@ func TestS3RegisteredWorkflowsSurviveTheUpgrade(t *testing.T) {
 		 VALUES ('s3-era', 1, 's3-era.toml', 'the-s3-hash', 'the s3 bytes', ?, 1, 1)`,
 		s3Era)
 	if err != nil {
-		t.Fatalf("seeding the S3-era workflow: %v", err)
+		t.Fatalf("seeding the pre-v9 workflow: %v", err)
 	}
 	wfID, _ := res.LastInsertId()
 
@@ -782,7 +782,7 @@ func TestS3RegisteredWorkflowsSurviveTheUpgrade(t *testing.T) {
 	}
 
 	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate v8->v9 over an S3-era registration: %v", err)
+		t.Fatalf("Migrate v8->v9 over a pre-v9 registration: %v", err)
 	}
 
 	// The ROW is untouched, byte for byte and version for version.

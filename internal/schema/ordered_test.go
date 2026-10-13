@@ -9,8 +9,8 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// arraySchema wraps item properties in the §4.2 shape, so a table row states
-// only the property under test.
+// arraySchema wraps item properties in the array-of-objects shape, so a table
+// row states only the property under test.
 func arraySchema(properties string) []byte {
 	return []byte(`{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -24,7 +24,7 @@ func arraySchema(properties string) []byte {
 func TestOrderedEnumAnnotation(t *testing.T) {
 	cases := []struct {
 		name string
-		// clause is the §4.2 row the case exercises.
+		// clause is the annotation rule the case exercises.
 		clause     string
 		properties string
 		// wantErr is a substring of the refusal, or "" when the document is
@@ -162,7 +162,7 @@ func TestOrderIsTheEnumArraysDocumentOrder(t *testing.T) {
 	}
 }
 
-// TestPosition is I1-I4: the only ordering API, and every way it can decline.
+// TestPosition covers the only ordering API, and every way it can decline.
 func TestPosition(t *testing.T) {
 	reg, err := Compile("case", 1, arraySchema(
 		`"risk": {"type": "string", "enum": ["low","medium","high"], "ordered_enum": true},
@@ -190,7 +190,7 @@ func TestPosition(t *testing.T) {
 				t.Fatalf("Position(%q, %q) ok = %v, want %v", tc.field, tc.value, ok, tc.wantOK)
 			}
 			if !tc.wantOK {
-				// I4, stated as an assertion: an unorderable value is not
+				// Stated as an assertion: an unorderable value is not
 				// sorted to an end and not treated as smallest. The int result
 				// is meaningless when ok is false, and a caller that read it
 				// anyway would be inventing exactly the fallback this clause
@@ -209,7 +209,7 @@ func TestPosition(t *testing.T) {
 
 // TestDeclaredFieldsAreTheItemSchemasTopLevelProperties is O5 from the other
 // side: the field table a threshold predicate is validated against holds
-// exactly what §11.2's bare field token can name.
+// exactly what a threshold predicate's bare field token can name.
 func TestDeclaredFieldsAreTheItemSchemasTopLevelProperties(t *testing.T) {
 	reg, err := Compile("case", 1, arraySchema(
 		`"risk": {"type": "string", "enum": ["low","high"], "ordered_enum": true},
@@ -369,7 +369,7 @@ func TestConservativeEndAnnotation(t *testing.T) {
 
 // TestConservativeEndDoesNotChangeTheStoredIndex is the compatibility clause.
 //
-// `schemas.ordered` is a CACHE of the ordered index (I2) and its stored shape is
+// `schemas.ordered` is a CACHE of the ordered index and its stored shape is
 // compared byte-for-byte by the corpus round-trip. A direction is derived onto
 // the FIELD TABLE and never onto the index, so adding one to a document leaves
 // every stored row and every re-derivation identical — which is why DKT-267
@@ -391,7 +391,7 @@ func TestConservativeEndDoesNotChangeTheStoredIndex(t *testing.T) {
 	if string(plainIndex) != string(directedIndex) {
 		t.Errorf("the stored ordered index changed when a direction was declared:\n"+
 			"  without: %s\n  with:    %s\n"+
-			"I2 makes the stored index a cache of the ORDER; a direction is not "+
+			"The stored index is a cache of the ORDER; a direction is not "+
 			"part of the order and must not enter it.", plainIndex, directedIndex)
 	}
 }

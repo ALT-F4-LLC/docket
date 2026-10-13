@@ -1,8 +1,12 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,8 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// PACKET COMPOSITION — the resolution half
-// (docs/tdd/packet-composition.md §1.2, §1.3).
+// PACKET COMPOSITION — the resolution half.
 //
 // The engine resolves a step's declared packet files to their BYTES, verified
 // against the hash activation recorded, and hands them to the template. Before
@@ -37,7 +40,7 @@ func writeFixture(t *testing.T, root, name, body string) string {
 	return path
 }
 
-// TestPacketFrontmatter is §1.3: the engine reads ONE declared-includes key and
+// TestPacketFrontmatter pins that the engine reads ONE declared-includes key and
 // ignores every other.
 //
 // This is the concession the design review approved, and its boundary is the
@@ -133,7 +136,7 @@ func TestPacketFrontmatter(t *testing.T) {
 	}
 }
 
-// TestPacketFrontmatterIgnoresRetiringKey is §1.3.1's INTERIM, as a proven
+// TestPacketFrontmatterIgnoresRetiringKey is the INTERIM rule, as a proven
 // property rather than a hope.
 //
 // The corpus currently declares fragment relationships under a different key,
@@ -157,12 +160,12 @@ func TestPacketFrontmatterIgnoresRetiringKey(t *testing.T) {
 	}
 }
 
-// TestPacketIncludesAreOneLevelDeep is §1.3's hard stop, asserted explicitly so
+// TestPacketIncludesAreOneLevelDeep is the depth hard stop, asserted explicitly so
 // it is a tested property rather than an implementation accident.
 //
 // Unbounded recursion would need cycle detection and a depth cap, and every
 // level makes the closure size harder for an author to predict at the moment
-// the caps need it predictable. One level matches engine-core §8 exactly: the
+// the caps need it predictable. One level matches the packet's structure exactly: the
 // file, and the files it declares.
 func TestPacketIncludesAreOneLevelDeep(t *testing.T) {
 	root := t.TempDir()
@@ -172,7 +175,7 @@ func TestPacketIncludesAreOneLevelDeep(t *testing.T) {
 		"---\npacket_includes:\n  - fragments/deeper.md\n---\nMIDDLE\n")
 	writeFixture(t, root, "fragments/deeper.md", "DEEPEST\n")
 
-	files, err := resolvePacketFiles(testPinSet(t, root,
+	files, err := resolvePacketFiles("RUN-1", testPinSet(t, root,
 		"checklists/proofing.md", "fragments/house-style.md", "fragments/deeper.md"),
 		[]string{root}, []string{"checklists/proofing.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
@@ -188,7 +191,7 @@ func TestPacketIncludesAreOneLevelDeep(t *testing.T) {
 	}
 }
 
-// TestPacketIncludesDedupe is §1.4: a file reachable twice is inlined ONCE, at
+// TestPacketIncludesDedupe pins de-duplication: a file reachable twice is inlined ONCE, at
 // its first position. Repeating it would inflate the closure for no gain.
 func TestPacketIncludesDedupe(t *testing.T) {
 	root := t.TempDir()
@@ -198,7 +201,7 @@ func TestPacketIncludesDedupe(t *testing.T) {
 		"---\npacket_includes:\n  - fragments/shared.md\n---\nB\n")
 	writeFixture(t, root, "fragments/shared.md", "SHARED\n")
 
-	files, err := resolvePacketFiles(testPinSet(t, root,
+	files, err := resolvePacketFiles("RUN-1", testPinSet(t, root,
 		"checklists/a.md", "checklists/b.md", "fragments/shared.md"),
 		[]string{root}, []string{"checklists/a.md", "checklists/b.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
@@ -221,7 +224,7 @@ func TestPacketIncludesDedupe(t *testing.T) {
 	}
 }
 
-// TestPacketResolutionLadder is §1.2 — the four states of a declared entry.
+// TestPacketResolutionLadder is the resolution ladder — the four states of a declared entry.
 //
 // The first three rows are templateSource's ladder applied to a second class of
 // file. The fourth differs, and the difference is the point: an unpinned
@@ -234,7 +237,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 		root := t.TempDir()
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 		files, err := resolvePacketFiles(
-			testPinSet(t, root, "checklists/a.md"), []string{root}, []string{"checklists/a.md"})
+			"RUN-1", testPinSet(t, root, "checklists/a.md"),
+			[]string{root}, []string{"checklists/a.md"})
 		testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 		if len(files) != 1 || strings.TrimSpace(files[0].Body) != "BODY" {
 			t.Errorf("files = %+v, want the file's bytes inlined", files)
@@ -252,7 +256,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 
 		writeFixture(t, root, "checklists/a.md", "EDITED\n")
 
-		_, err := resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		_, err := resolvePacketFiles(
+			"RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("an edited file resolved, want CONFLICT")
 		}
@@ -271,7 +276,7 @@ func TestPacketResolutionLadder(t *testing.T) {
 		err := os.Remove(filepath.Join(root, "checklists/a.md"))
 		testsupport.Must(t, err, "removing the fixture: %v", err)
 
-		_, err = resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		_, err = resolvePacketFiles("RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		if code, _ := CodeOf(err); code != CodeNotFound {
 			t.Errorf("code = %q (err %v), want %q", code, err, CodeNotFound)
 		}
@@ -281,7 +286,9 @@ func TestPacketResolutionLadder(t *testing.T) {
 		root := t.TempDir()
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 
-		_, err := resolvePacketFiles(map[string]string{}, []string{root}, []string{"checklists/a.md"})
+		_, err := resolvePacketFiles(
+			"RUN-1", map[string]string{}, []string{root},
+			[]string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("an unpinned file was read, want a refusal")
 		}
@@ -296,15 +303,16 @@ func TestPacketResolutionLadder(t *testing.T) {
 			"---\npacket_includes:\n  - fragments/missing.md\n---\nA\n")
 
 		_, err := resolvePacketFiles(
-			testPinSet(t, root, "checklists/a.md"), []string{root}, []string{"checklists/a.md"})
+			"RUN-1", testPinSet(t, root, "checklists/a.md"),
+			[]string{root}, []string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("a dangling include was skipped — that is DKT-70's failure signature")
 		}
 	})
 }
 
-// TestPacketResolutionIsDeterministic is R9 through the assembler: same inputs,
-// byte-identical output, so the §9-item-5 goldens do not flap.
+// TestPacketResolutionIsDeterministic is determinism through the assembler:
+// same inputs, byte-identical output, so the goldens do not flap.
 func TestPacketResolutionIsDeterministic(t *testing.T) {
 	root := t.TempDir()
 	writeFixture(t, root, "checklists/a.md",
@@ -316,7 +324,8 @@ func TestPacketResolutionIsDeterministic(t *testing.T) {
 
 	var first string
 	for i := 0; i < 16; i++ {
-		files, err := resolvePacketFiles(pins, []string{root}, []string{"checklists/a.md"})
+		files, err := resolvePacketFiles(
+			"RUN-1", pins, []string{root}, []string{"checklists/a.md"})
 		testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 		var b strings.Builder
 		for _, f := range files {
@@ -407,5 +416,178 @@ func TestRenderStepAsNamesTheResolvedExecutor(t *testing.T) {
 	testsupport.Must(t, err, "RenderStepAs(\"\"): %v", err)
 	if same.Packet != plain.Packet {
 		t.Error("RenderStepAs with no override differs from RenderStep")
+	}
+}
+
+// attachedStep activates an `issue.files` run whose exec root is root, with
+// paths attached to its issue, and returns the store, the step, and a spec
+// declaring the form.
+func attachedStep(
+	t *testing.T, root string, paths []string,
+) (*sql.DB, *db.Step, *workflow.Step) {
+	t.Helper()
+	conn := mustDB(t)
+	activateIssueFilesRun(t, conn, root, paths)
+	step, err := db.GetStep(conn, stepIDByInstance(t, conn, "transcribe@0"))
+	testsupport.Must(t, err, "GetStep: %v", err)
+	return conn, step, &workflow.Step{Inputs: []string{workflow.InputIssueFiles}}
+}
+
+// TestIssueAttachmentFilesRefusesAnEscapingPath: an attachment that is
+// absolute, starts with `~`, or has a `..` segment is refused before any read,
+// so a row naming a host file outside the run's checkout cannot inline it.
+// The escape target exists, so an unguarded read of the `..` rows succeeds.
+func TestIssueAttachmentFilesRefusesAnEscapingPath(t *testing.T) {
+	for _, path := range []string{
+		"../escape.txt",
+		"docs/../../escape.txt",
+		"/etc/passwd",
+		"~/escape.txt",
+	} {
+		t.Run(path, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "root")
+			writeFixture(t, base, "escape.txt", "ESCAPED host bytes\n")
+			conn, step, spec := attachedStep(t, root, []string{path})
+
+			out, err := issueAttachmentFiles(conn, step, spec)
+			if err == nil {
+				t.Fatalf("issueAttachmentFiles accepted %q; got %+v", path, out)
+			}
+			if code, ok := CodeOf(err); !ok || code != CodeValidation {
+				t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, path) {
+				t.Errorf("refusal does not name %q:\n  %s", path, msg)
+			}
+			if !strings.Contains(msg, "not a relative path inside") &&
+				!strings.Contains(msg, "escapes") {
+				t.Errorf("refusal lacks the containment wording:\n  %s", msg)
+			}
+			if strings.Contains(msg, "could not read") {
+				t.Errorf("refusal comes from a read, not the guard:\n  %s", msg)
+			}
+			if out != nil {
+				t.Errorf("refusal returned files: %+v", out)
+			}
+		})
+	}
+}
+
+// TestIssueAttachmentFilesInlinesContainedPath: a relative path inside the
+// run's checkout still arrives with its bytes and their sha256 unchanged.
+func TestIssueAttachmentFilesInlinesContainedPath(t *testing.T) {
+	root := t.TempDir()
+	body := "contained attachment body\n"
+	writeFixture(t, root, "docs/notes.md", body)
+	conn, step, spec := attachedStep(t, root, []string{"docs/notes.md"})
+
+	got, err := issueAttachmentFiles(conn, step, spec)
+	testsupport.Must(t, err, "issueAttachmentFiles: %v", err)
+
+	digest := sha256.Sum256([]byte(body))
+	want := []PacketFile{{
+		Path: "docs/notes.md", SHA256: hex.EncodeToString(digest[:]), Body: body,
+	}}
+	if !slices.Equal(got, want) {
+		t.Errorf("issueAttachmentFiles = %+v, want %+v", got, want)
+	}
+}
+
+// TestIssueAttachmentFilesRefusesASymlinkOutOfTheRoot: an attached path with no
+// `..` passes the lexical guard, but a symlink inside the run's checkout that
+// resolves outside it is refused, whether the escape is a relative or absolute
+// final component or an intermediate directory, and none of the target's bytes
+// reach the error or the returned files.
+func TestIssueAttachmentFilesRefusesASymlinkOutOfTheRoot(t *testing.T) {
+	const sentinel = "ESCAPED host bytes via symlink\n"
+	cases := []struct {
+		name   string
+		attach string
+		// link returns the symlink's path relative to the checkout and its
+		// target, given base, the checkout's parent, which holds escape.txt.
+		link func(base string) (path, target string)
+	}{{
+		name:   "relative_final_component",
+		attach: "docs/link.md",
+		link: func(string) (string, string) {
+			return "docs/link.md", "../../escape.txt"
+		},
+	}, {
+		name:   "absolute_target",
+		attach: "docs/abslink.md",
+		link: func(base string) (string, string) {
+			return "docs/abslink.md", filepath.Join(base, "escape.txt")
+		},
+	}, {
+		name:   "directory_component",
+		attach: "docs/dirlink/escape.txt",
+		link: func(string) (string, string) {
+			return "docs/dirlink", "../.."
+		},
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "root")
+			writeFixture(t, base, "escape.txt", sentinel)
+			testsupport.Must(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755), "mkdir: %v", nil)
+			linkPath, target := tc.link(base)
+			testsupport.Must(t,
+				os.Symlink(target, filepath.Join(root, linkPath)),
+				"symlink: %v", nil)
+			// An unguarded read must reach the sentinel, so a refusal below is
+			// containment and not a missing fixture.
+			if escaped, err := os.ReadFile(filepath.Join(root, tc.attach)); err != nil ||
+				string(escaped) != sentinel {
+				t.Fatalf("fixture %s does not reach the sentinel: %q, %v",
+					tc.attach, escaped, err)
+			}
+			conn, step, spec := attachedStep(t, root, []string{tc.attach})
+
+			out, err := issueAttachmentFiles(conn, step, spec)
+			if err == nil {
+				t.Fatalf("issueAttachmentFiles followed the escaping symlink; got %+v", out)
+			}
+			if code, ok := CodeOf(err); !ok || code != CodeValidation {
+				t.Errorf("CodeOf(err) = %q, want %q", code, CodeValidation)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.attach) {
+				t.Errorf("refusal does not name %s:\n  %s", tc.attach, msg)
+			}
+			if strings.Contains(msg, strings.TrimSpace(sentinel)) {
+				t.Errorf("refusal carries the escaped target's bytes:\n  %s", msg)
+			}
+			if out != nil {
+				t.Errorf("refusal returned files: %+v", out)
+			}
+		})
+	}
+}
+
+// TestIssueAttachmentFilesInlinesASymlinkInsideTheRoot: a symlink whose target
+// stays inside the run's checkout still inlines its target's bytes, under the
+// attached alias path.
+func TestIssueAttachmentFilesInlinesASymlinkInsideTheRoot(t *testing.T) {
+	root := t.TempDir()
+	body := "real attachment body\n"
+	writeFixture(t, root, "real.md", body)
+	testsupport.Must(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755), "mkdir: %v", nil)
+	testsupport.Must(t,
+		os.Symlink("../real.md", filepath.Join(root, "docs", "alias.md")),
+		"symlink: %v", nil)
+	conn, step, spec := attachedStep(t, root, []string{"docs/alias.md"})
+
+	got, err := issueAttachmentFiles(conn, step, spec)
+	testsupport.Must(t, err, "issueAttachmentFiles: %v", err)
+
+	digest := sha256.Sum256([]byte(body))
+	want := []PacketFile{{
+		Path: "docs/alias.md", SHA256: hex.EncodeToString(digest[:]), Body: body,
+	}}
+	if !slices.Equal(got, want) {
+		t.Errorf("issueAttachmentFiles = %+v, want %+v", got, want)
 	}
 }

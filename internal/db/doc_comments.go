@@ -163,7 +163,7 @@ func ListAllDocComments(db *sql.DB, projectID int) ([]*model.DocComment, error) 
 }
 
 // scanDocCommentFrom scans a single doc_comments row from any scanner. Author
-// is stored as sql.NullString and projected to a plain string per S5.
+// is stored as sql.NullString and projected to a plain string.
 func scanDocCommentFrom(s scanner) (*model.DocComment, error) {
 	var c model.DocComment
 	var author sql.NullString

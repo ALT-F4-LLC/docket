@@ -1,25 +1,23 @@
-// Package workflow implements the workflow-definition grammar of
-// docs/design/engine-spec.md §11.1, its register-time validation table, and the
-// DAG lints over a definition's `after` topology (TDD docs/tdd/engine-spine.md
-// §4.2-§4.3.3).
+// Package workflow implements the workflow-definition grammar, its
+// register-time validation table, and the DAG lints over a definition's
+// `after` topology.
 //
-// The package carries no agent, model, or LLM vocabulary of any kind
-// (docs/design/genericity.md). `executor` is an opaque string the engine uses
-// only as a map key for `class` lookup; `params` and `metadata` are opaque KV
-// bags stored as JSON and returned verbatim. Nothing here reads a key inside
-// them.
+// The package carries no agent, model, or LLM vocabulary of any kind.
+// `executor` is an opaque string the engine uses only as a map key for `class`
+// lookup; `params` and `metadata` are opaque KV bags stored as JSON and
+// returned verbatim. Nothing here reads a key inside them.
 package workflow
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
-// Definition is a parsed workflow definition — the §11.1 grammar, field for
-// field.
+// Definition is a parsed workflow definition — the grammar, field for field.
 type Definition struct {
 	Pipeline Pipeline         `toml:"pipeline" json:"pipeline"`
 	Match    *Match           `toml:"match" json:"match,omitempty"`
@@ -27,72 +25,325 @@ type Definition struct {
 	Steps    []*Step          `toml:"step" json:"steps"`
 }
 
-// Pipeline is the §11.1 `[pipeline]` table.
+// Pipeline is the `[pipeline]` table.
 type Pipeline struct {
 	Name        string `toml:"name" json:"name"`
 	Version     int    `toml:"version" json:"version"`
 	Description string `toml:"description" json:"description,omitempty"`
 }
 
-// Match is the §11.1 `[match]` table — the binding rule, evaluated at run
+// Match is the `[match]` table — the binding rule, evaluated at run
 // activation (stage 2 owns the evaluation; this stage parses and validates it).
 type Match struct {
 	Kind         []string `toml:"kind" json:"kind,omitempty"`
 	LabelsAny    []string `toml:"labels_any" json:"labels_any,omitempty"`
 	LabelsAll    []string `toml:"labels_all" json:"labels_all,omitempty"`
 	UnlessLabels []string `toml:"unless_labels" json:"unless_labels,omitempty"`
+	// SizesAny binds on the issue's declared model.Size (schema v34): the
+	// issue's size must be one of this list, the same "any of these"
+	// semantics labels_any gives labels. It is the engine-side replacement
+	// for a workflow binding on the small/trivial LABEL convention — a
+	// small-change-shaped workflow declares `sizes_any = ["small"]` instead
+	// of `labels_any = ["small"]`, so routing reads first-class issue data
+	// rather than a label a workflow author chose for an unrelated reason.
+	//
+	// Declaring it is optional and a workflow that omits it binds on kind and
+	// labels exactly as it did before this clause existed — `omitempty` keeps
+	// the canonical form of every definition that never declares one
+	// byte-identical to what it always was.
+	SizesAny []string `toml:"sizes_any" json:"sizes_any,omitempty"`
+	// DomainPaths declares the path globs this workflow's domain OCCUPIES —
+	// "work under these paths is this pipeline's business" (DKT-1182).
+	//
+	// IT IS ADVISORY AND BINDS NOTHING. `Matches` does not read it, and no
+	// amount of scope agreement makes a workflow bind an issue whose labels do
+	// not select it: routing stays keyed on `kind` and labels exactly as the
+	// grammar specifies. The one consumer is activation's binding lint
+	// (engine.lintDomainScopeMismatch), which reports an issue whose declared
+	// scope lies ENTIRELY inside this domain while its labels bound it
+	// somewhere else — the exactly-one-WRONG-match case that the exactly-one
+	// rule structurally cannot see, since a mis-labelled issue matches its
+	// wrong workflow exactly once and activation has nothing to refuse.
+	//
+	// The measured case: an issue scoped entirely to a TUI test file carried
+	// `qa` and not `ui`, so it bound the label-less baseline pipeline instead of
+	// the UI one and silently lost that pipeline's judge fanout and render
+	// gates. Nothing in the binding rule could have noticed; the only check was
+	// a conductor diffing every issue's labels against its scope by hand.
+	//
+	// Declaring it is optional and a workflow that omits it is linted against
+	// nothing — the field is dormant until a corpus author states a domain, and
+	// `omitempty` keeps the canonical form of every definition that never
+	// declares one byte-identical to what it always was.
+	DomainPaths []string `toml:"domain_paths" json:"domain_paths,omitempty"`
 }
 
 // Limit is one `[limits]` entry: an executor class's concurrency and timing
-// bounds. §11.1 allows a bare int as shorthand for `max`, so the TOML form is
-// decoded by hand (see decodeLimits) and this struct is the normalized shape.
+// bounds. The grammar allows a bare int as shorthand for `max`, so the TOML
+// form is decoded by hand (see decodeLimits) and this struct is the normalized
+// shape.
 type Limit struct {
 	Max             int    `json:"max,omitempty"`
 	LeaseTTL        string `json:"lease_ttl,omitempty"`
 	MaxStepDuration string `json:"max_step_duration,omitempty"`
 }
 
-// Gate is one entry of a step's `gates` list. §11.1 admits two spellings — a
-// bare string naming a trusted gate, or an inline table — and both normalize to
-// this one shape in the parsed form so downstream code never branches on which
-// the author wrote.
+// Gate is one entry of a step's `gates` list. The grammar admits two spellings
+// — a bare string naming a trusted gate, or an inline table — and both
+// normalize to this one shape in the parsed form so downstream code never
+// branches on which the author wrote.
 type Gate struct {
 	Name   string `json:"name"`
 	Source string `json:"source,omitempty"`
 	Pre    bool   `json:"pre"`
 }
 
-// Step is one §11.1 `[[step]]`, carrying every row of that table.
+// PassFloor is a step's `pass_floor = { field, at }` table (DKT-870): the
+// author's exit bar on a `pass` routing. Both values are OPAQUE TOKENS — a
+// payload property name and a value of that property's declared order — read
+// by position exactly as `route_at`'s value is, and by nothing else.
+type PassFloor struct {
+	Field string `toml:"field" json:"field"`
+	At    string `toml:"at" json:"at"`
+}
+
+// Step is one `[[step]]`, carrying every row of that table.
 type Step struct {
-	Name        string            `toml:"name" json:"name"`
-	Executor    string            `toml:"executor" json:"executor,omitempty"`
-	Action      string            `toml:"action" json:"action,omitempty"`
-	Type        string            `toml:"type" json:"type,omitempty"`
-	Fanout      []string          `toml:"fanout" json:"fanout,omitempty"`
-	Class       string            `toml:"class" json:"class,omitempty"`
-	Emits       string            `toml:"emits" json:"emits,omitempty"`
-	Payload     string            `toml:"payload" json:"payload,omitempty"`
-	Voters      []string          `toml:"voters" json:"voters,omitempty"`
-	VoteRule    string            `toml:"vote_rule" json:"vote_rule,omitempty"`
+	Name     string   `toml:"name" json:"name"`
+	Executor string   `toml:"executor" json:"executor,omitempty"`
+	Action   string   `toml:"action" json:"action,omitempty"`
+	Type     string   `toml:"type" json:"type,omitempty"`
+	Fanout   []string `toml:"fanout" json:"fanout,omitempty"`
+	Class    string   `toml:"class" json:"class,omitempty"`
+	Emits    string   `toml:"emits" json:"emits,omitempty"`
+	Payload  string   `toml:"payload" json:"payload,omitempty"`
+	Voters   []string `toml:"voters" json:"voters,omitempty"`
+	VoteRule string   `toml:"vote_rule" json:"vote_rule,omitempty"`
+	// Reviews names the step whose produced work this vote step judges
+	// (DKT-2468). It is the declared link `recuse = "executor"` reads: the
+	// executor hint of the named step is the party that may not cast here.
+	// Register-time validated (V44) like `voters`/`vote_rule`: the name must
+	// be a step of this workflow and not the vote step itself. Unset means
+	// no declared producer, and a recusal with nothing to compare against is
+	// a no-op.
+	Reviews string `toml:"reviews" json:"reviews,omitempty"`
+	// Roster, Weighting and Recuse are a vote step's AUTHORIZATION switches
+	// (DKT-2562): who may cast, what a cast is worth, and who is excluded.
+	// They live on the step, pinned at activation with `voters`, rather than
+	// in engine config, because `docket config set` has no per-caller
+	// identity and a party constrained by a rule could otherwise rewrite the
+	// rule before casting (operator decision, 2026-09-23).
+	//
+	// Each is valid only on a `type = "vote"` step (V43). Each is `omitempty`
+	// and Validate writes no default into it, for the reason AfterFired
+	// states: the pinned form of every definition that never declares one
+	// must stay byte-identical, or an idempotent re-register reads as a
+	// CONFLICT. The defaults — open, declared, none — are the effective-value
+	// accessors below, and each is exactly today's behavior.
+	Roster      string            `toml:"roster" json:"roster,omitempty"`
+	Weighting   string            `toml:"weighting" json:"weighting,omitempty"`
+	Recuse      string            `toml:"recuse" json:"recuse,omitempty"`
 	After       []string          `toml:"after" json:"after"`
 	Inputs      []string          `toml:"inputs" json:"inputs,omitempty"`
 	Gates       []Gate            `toml:"-" json:"gates,omitempty"`
 	Params      map[string]any    `toml:"params" json:"params,omitempty"`
 	MinSiblings *int              `toml:"min_siblings" json:"min_siblings,omitempty"`
 	Threshold   map[string]string `toml:"threshold" json:"threshold,omitempty"`
-	OnFail      string            `toml:"on_fail" json:"on_fail,omitempty"`
-	Loop        bool              `toml:"loop" json:"loop"`
-	AfterLoop   string            `toml:"after_loop" json:"after_loop,omitempty"`
-	MaxAttempts *int              `toml:"max_attempts" json:"max_attempts,omitempty"`
+	// OnFailRoutes is the triage mapping a vote step declares when some step's
+	// `on_fail` names it (DKT-1901): the routing each tally outcome applies to
+	// the FAILED step that routed here, keyed `approved`/`rejected`.
+	//
+	// It lives on the VOTE step, not beside the `on_fail` that names it, because
+	// the keys are the vote's own outcome vocabulary — one panel declares what
+	// its verdicts mean once, and every step routing to it inherits that meaning
+	// rather than restating it. A workflow whose panels mean different things
+	// declares different panels, which is the distinction the mapping is for.
+	//
+	// Values are the resolution vocabulary (`retry`, `fix-round`,
+	// `abandon-issue`, `waiting-human`), NOT the `on_fail` vocabulary: the
+	// outcome is applied to a step that already failed, so what the panel
+	// chooses among is what an operator resolving that park could have chosen.
+	// `waiting-human` is the panel declining to decide, which parks the failed
+	// step for an operator exactly as today's default does.
+	//
+	// The vote step's OWN `on_fail` remains the human backstop: a tally that
+	// fails or misses quorum decided nothing, routes the vote step per that
+	// `on_fail`, and leaves the failed step suspended for an operator (V40c).
+	OnFailRoutes map[string]string `toml:"on_fail_routes" json:"on_fail_routes,omitempty"`
+	// AfterFired names predecessors this step runs ONLY IF THEY FIRED
+	// (DKT-1085). When every instance of a named step ends `skipped` — an
+	// interposed gate its threshold routed elsewhere, a false `when`,
+	// an `on_fail = "skip"` routing, an operator's `--as skip` — this step is
+	// terminalized `skipped` in the SAME transaction, and the skip cascades
+	// through every step declaring `after_fired` on it in turn.
+	//
+	// It is a SECOND predecessor list beside `after`, never a replacement:
+	// `after` keeps its exact meaning (done OR skipped releases the join),
+	// and every entry here must also appear in `after` (V39a), so readiness
+	// already orders the step behind the gate and "did it fire?" is settled
+	// before the step could ever be ready. The corpus case: a `drain-highs`
+	// executor that should run after `security-vote` APPROVED a round, and not
+	// on a round where reconcile never routed to the vote at all. `when`
+	// cannot say it — it reads issue kind and labels only (V22) — and
+	// `threshold` cannot: a second step-name routing beside the vote would
+	// fire first and skip it.
+	//
+	// `omitempty`, so the pinned form of every definition that never declares
+	// it is byte-identical to what it was — an idempotent re-register must not
+	// read as a CONFLICT (canonical.go).
+	AfterFired []string `toml:"after_fired" json:"after_fired,omitempty"`
+	// PassFloor refuses a `pass` routing that would exit with declared-floor
+	// work still standing (DKT-870): when this step's routing resolves to
+	// `pass` but its recorded payload holds an element whose `field` value
+	// sits AT OR ABOVE `at`'s position in the step's pinned schema order —
+	// and that element is neither `held` nor `operator_resolved` — the step
+	// parks `waiting-human` instead of exiting.
+	//
+	// It exists because a threshold reads whatever field its author chose,
+	// and a routing step's self-reported disposition can contradict its own
+	// recorded evidence: RUN-58's reconcile routed `pass` and the loop exited
+	// with all 16 clusters open, SIX at the order's high position, none held
+	// and none operator-resolved — "converged" in the ledger meaning
+	// "dispositioned". The floor is the author's declaration of the exit bar,
+	// exactly as `route_at` is the author's declaration of the routing floor:
+	// `field` and `at` are opaque tokens compared only by position in the
+	// declared order, so core still holds no opinion about
+	// severities.
+	//
+	// `held` and `operator_resolved` elements are exempt because both already
+	// carry a decision channel: a held cluster gates the step for an operator,
+	// and a resolved one records the operator's acceptance. The park names
+	// `--as override-pass` (exit as recorded) and `--as fix-round` (buy a
+	// round instead) as the ways out. Requires `payload` (V37) — without a
+	// pinned order there is no position to compare — and the floor's own
+	// coherence against that schema is V37a's, at register time.
+	PassFloor *PassFloor `toml:"pass_floor" json:"pass_floor,omitempty"`
+	// VerdictField names the payload property that carries this step's round
+	// verdict: an OPAQUE TOKEN read exactly as `pass_floor.field` is. A
+	// fix-loop exhaustion copies that property's string value from the
+	// step's newest recorded payload into the loop history; with none
+	// declared, the history records no verdict, because core reserves no
+	// payload property name for one. Its presence in the step's pinned
+	// schema is V50's, at register time.
+	VerdictField string `toml:"verdict_field" json:"verdict_field,omitempty"`
+	OnFail       string `toml:"on_fail" json:"on_fail,omitempty"`
+	Loop         bool   `toml:"loop" json:"loop"`
+	AfterLoop    string `toml:"after_loop" json:"after_loop,omitempty"`
+	// Serves scopes a `loop = true` body to the steps whose `fix-loop`
+	// routings it answers (DKT-544): on a `fix-loop`
+	// routed by a step named here, this body instantiates and its
+	// `after_loop` root joins the sweep/re-instantiation set; on one routed
+	// by any other step, this body is not part of the entry at all.
+	//
+	// OMITTED MEANS SERVES EVERY TRIGGER — the backward-compatible reading.
+	// A workflow with no `serves` anywhere therefore has exactly one loop
+	// cluster spanning every body and every `after_loop` root, which is
+	// the original single-construct behavior, byte for byte.
+	//
+	// Valid only on `loop = true` steps (V35); every entry must name a step
+	// that can actually route `fix-loop` (V35), and every step that can must
+	// be served by at least one body (V17c).
+	Serves      []string `toml:"serves" json:"serves,omitempty"`
+	MaxAttempts *int     `toml:"max_attempts" json:"max_attempts,omitempty"`
 	// MaxFixLoops bounds EVERY `fix-loop` routing on the issue -- threshold,
-	// rejected vote, or rejected human gate alike (see engine.EnterLoop). The
-	// only way past it is a tracked operator grant (`fix-round`), never a skip.
-	MaxFixLoops  *int           `toml:"max_fix_loops" json:"max_fix_loops,omitempty"`
-	ExpectedCost *float64       `toml:"expected_cost" json:"expected_cost,omitempty"`
-	When         string         `toml:"when" json:"when,omitempty"`
-	Metadata     map[string]any `toml:"metadata" json:"metadata,omitempty"`
+	// gate-failure or attempt-exhaustion `on_fail`, rejected vote, rejected
+	// human gate, and quorum miss alike (see engine.EnterLoop; DKT-587). It is
+	// ONE workflow-wide bound over ONE issue-level counter: whichever
+	// non-cluster step declares it, every routing source moves the same
+	// counter, so the bound cannot depend on which step happened to route.
+	//
+	// HOW THE COUNT IS COMPUTED: each admitted entry increments
+	// the issue's counter FIRST and the new value is that entry's 1-indexed
+	// loop ordinal; an entry whose new count EXCEEDS the bound is refused --
+	// the counter is put back, nothing is instantiated, and the routing step
+	// parks `waiting-human`. `max_fix_loops = N` therefore admits exactly N
+	// loop entries (ordinals 1..N) and refuses the N+1th, from any mix of
+	// routing sources. Zero or absent means unbounded.
+	//
+	// Declared on a `serves`-scoped loop body it is instead that CLUSTER's
+	// round bound: it bounds entries triggered by the
+	// steps the body serves — counted as the distinct ordinals holding the
+	// cluster's scoped bodies, checked INDEPENDENTLY of and ADDITIVELY under
+	// the issue-level ceiling, which stays whatever a non-cluster step
+	// declares. A cluster bound never raises or lowers the issue-level one;
+	// each refuses on its own arithmetic, and both admit exactly their
+	// declared number of rounds.
+	//
+	// The only way past either bound is a tracked operator grant — `docket
+	// step resolve --as fix-round` (DKT-237) — never a skip. Each grant
+	// records `loop_grants + 1` on the issue's run row and enters the round in
+	// the same transaction: the effective issue-level bound becomes declared +
+	// grants, and the authorized entry also skips the cluster bound and the
+	// non-convergence refusal, because the operator who granted it has
+	// answered the question those refusals ask. A third completed ordinal
+	// under `max_fix_loops = 2` is therefore the signature of a recorded
+	// grant, not of the counter differing by entry path.
+	MaxFixLoops *int `toml:"max_fix_loops" json:"max_fix_loops,omitempty"`
+	// MaxFixLoopsHard is the opt-in ceiling MaxFixLoops may be extended to on
+	// this step. It is declared only beside a positive `max_fix_loops` and
+	// never below it (V48); equal to it declares that the bound admits no
+	// extensions. The engine reads it in three places:
+	//
+	//  1. A triage panel's `fix-round` approval is checked first
+	//     (applyTriageFixRound via extensionPastHardCap): when the issue's
+	//     next loop ordinal would exceed `max_fix_loops_hard`, no grant is
+	//     recorded and the step parks `waiting-human`, whatever `on_exhausted`
+	//     says. This bounds panel-minted (vote) rounds.
+	//  2. An unauthorized automatic fix-loop entry has its bound clamped to
+	//     `max_fix_loops_hard` when declared + grants would exceed it, so a
+	//     recorded grant cannot carry an automatic round past the hard cap.
+	//  3. An operator's `docket step resolve --as fix-round` is not bounded by
+	//     it: that entry is authorized and is admitted past the hard cap, as
+	//     it is past `max_fix_loops`.
+	MaxFixLoopsHard *int `toml:"max_fix_loops_hard" json:"max_fix_loops_hard,omitempty"`
+	// OnExhausted is where a `fix-loop` routing goes when the next ordinal
+	// would exceed the bound above (DKT-1902). `waiting-human` — the default,
+	// and what every workflow got before this key existed — parks for an
+	// operator; `abandon-issue` stops the run's work on the issue; a
+	// `type = "vote"` step name opens that panel's proposal, which is how an
+	// author declares a loop-extension vote under a hard ceiling; an executor
+	// step name runs that step, so the file-and-stop default can run
+	// machine-side.
+	//
+	// It is the exhaustion's routing, not a second bound: the arithmetic
+	// MaxFixLoops describes is unchanged, and this says only what happens once
+	// it refuses. The shared store's 36 exhaustions on 2026-09-07 were
+	// answered by an operator 34 different ways — another round 17 times, an
+	// override-pass 10, a skip 4 — which is the work a workflow could not
+	// declare while the park was unconditional.
+	//
+	// The step names sit OUTSIDE the closed vocabulary exactly as `on_fail`
+	// reads them (OnFailTarget), so a named step is an INTERPOSED TARGET
+	// (InterposedTargets): the readiness latch releases it on the recorded
+	// routing and the unrouted siblings skip, with no second projection.
+	// Declarable only where the exhaustion can actually happen — on a step
+	// that routes `fix-loop` and under a declared bound (V41).
+	OnExhausted string `toml:"on_exhausted" json:"on_exhausted,omitempty"`
+	// MaxStalledRounds parks a `fix-loop` entry when this step — a routing
+	// step, i.e. one that can route `fix-loop` — has recorded that many
+	// CONSECUTIVE rounds without its routed payload's element count ever
+	// falling below the smallest count any earlier round recorded (DKT-870).
+	//
+	// It is the author's declaration of the non-convergence signal the corpus
+	// already reads by hand: a fix loop that is converging shrinks the standing
+	// set it routes each round, and one whose volume stays flat is churning.
+	// RUN-51 held 8-12 clusters across TEN rounds (~271k + ~251k output tokens
+	// spent on the last two alone) and RUN-50 held 7-10 across six; both ended
+	// only by operator action, because nothing engine-visible read the plateau.
+	// The count is of PAYLOAD ELEMENTS — packaging vocabulary, like `held` —
+	// so core never learns what a cluster or a severity is.
+	//
+	// The refusal takes the non-convergence park's exact shape (engine.EnterLoop,
+	// DKT-340/DKT-589): nothing superseded, nothing instantiated, the counter
+	// restored, `waiting-human` naming `--as fix-round` as the way out, and an
+	// authorized entry skips it. Zero or absent means the check never fires —
+	// the same opt-in reading `hold_spread = 0` has.
+	MaxStalledRounds *int           `toml:"max_stalled_rounds" json:"max_stalled_rounds,omitempty"`
+	ExpectedCost     *float64       `toml:"expected_cost" json:"expected_cost,omitempty"`
+	When             string         `toml:"when" json:"when,omitempty"`
+	Metadata         map[string]any `toml:"metadata" json:"metadata,omitempty"`
 	// HoldsTree reports whether this step OCCUPIES its issue's scope while it
-	// runs — the question scope exclusion (R4) is actually asking.
+	// runs — the question scope exclusion is actually asking.
 	//
 	// DEFAULT TRUE, which is the conservative answer and the behavior every
 	// workflow had before this field existed: a step is assumed to touch the
@@ -101,8 +352,8 @@ type Step struct {
 	// wrong `true` only delays a step.
 	//
 	// CORE ATTACHES NO MEANING TO A CLASS NAME. It does not know that `write`
-	// writes or that a judge reads — classes are opaque strings (§6.5's
-	// genericity rule), so the exemption must be DECLARED, never inferred.
+	// writes or that a judge reads — classes are opaque strings (the genericity
+	// rule), so the exemption must be DECLARED, never inferred.
 	// That is the whole reason this is a field: the instance knows its judges
 	// only read the tree, and that its `synthesize` step reads recorded
 	// payloads and never opens a file at all, and it says so here.
@@ -112,7 +363,7 @@ type Step struct {
 	HoldsTree *bool `toml:"holds_tree" json:"holds_tree,omitempty"`
 	// Packet is the files this step declares it needs in its rendered work
 	// packet, in DECLARED ORDER — which is the order the assembler inlines
-	// them in (docs/tdd/packet-composition.md §1.1).
+	// them in.
 	//
 	// CORE ATTACHES NO MEANING TO ANY ENTRY. They are paths relative to the
 	// instance-config directory; the engine reads their bytes, verifies them
@@ -121,7 +372,7 @@ type Step struct {
 	// and never derives a path it was not given.
 	//
 	// An entry may carry the `{executor}` token, which substitutes that
-	// SIBLING's resolved executor hint (§1.1.1). That is the whole of the
+	// SIBLING's resolved executor hint. That is the whole of the
 	// mechanism: a fanout step is one step whose siblings carry different
 	// hints, so a literal entry serves them all identically and only the token
 	// lets one step declare per-sibling files. The instance authors the mapping
@@ -139,10 +390,10 @@ type Step struct {
 // opposed to omitting it. See the field comment for why the difference matters.
 func (s *Step) HasAfter() bool { return s.hasAfter }
 
-// The four step classes of §11.1's "exactly one of" rule. `class` here means
-// the kind of step, which is distinct from the `class` FIELD (the
-// concurrency-accounting key) — §11.1 uses the word for both and this package
-// keeps them apart by name.
+// The four step classes of the grammar's "exactly one of" rule. `class` here
+// means the kind of step, which is distinct from the `class` FIELD (the
+// concurrency-accounting key) — the grammar uses the word for both and this
+// package keeps them apart by name.
 const (
 	ClassExecutor = "executor"
 	ClassAction   = "action"
@@ -150,7 +401,7 @@ const (
 	ClassFanout   = "fanout"
 )
 
-// StepClass reports which of the four §11.1 alternatives this step declares, or
+// StepClass reports which of the four alternatives this step declares, or
 // "" when it declares none or more than one (V5 reports both cases).
 func (s *Step) StepClass() string {
 	var classes []string
@@ -173,9 +424,9 @@ func (s *Step) StepClass() string {
 }
 
 // EffectiveOnFail is the routing a failure actually takes: the declared
-// `on_fail`, else §11.1's default. V13 evaluates this rather than the declared
-// value, which is what makes explicit `on_fail` mandatory on `type="human"`
-// steps (V13a, TDD §4.3.2) — a human step that declares nothing HAS the
+// `on_fail`, else the grammar's default. V13 evaluates this rather than the
+// declared value, which is what makes explicit `on_fail` mandatory on
+// `type="human"` steps (V13a) — a human step that declares nothing HAS the
 // forbidden `waiting-human` routing, silently.
 //
 // V13a extends the same requirement to `type="vote"` steps, where the default
@@ -191,7 +442,7 @@ func (s *Step) EffectiveOnFail() string {
 	return OnFailWaitingHuman
 }
 
-// The §11.1 `on_fail` vocabulary — closed (engine-core §4).
+// The `on_fail` vocabulary — closed.
 const (
 	OnFailFixLoop      = "fix-loop"
 	OnFailWaitingHuman = "waiting-human"
@@ -205,7 +456,76 @@ var onFailValues = []string{
 	OnFailFixLoop, OnFailWaitingHuman, OnFailSkip, OnFailAbandonIssue,
 }
 
-// The §11.1 `type` vocabulary.
+// OnFailTarget is the vote step a failure routes to, or "" when `on_fail` is
+// one of the closed vocabulary's own values (DKT-1901).
+//
+// The vocabulary stays closed and the step names sit OUTSIDE it, exactly as
+// `threshold` already reads: a routing that is not a known verb is a step name.
+// V40 makes the name resolve to a `type="vote"` step in the same workflow, so
+// every reader downstream of validation may treat a non-empty answer as one.
+func (s *Step) OnFailTarget() string {
+	if s.OnFail == "" || slices.Contains(onFailValues, s.OnFail) {
+		return ""
+	}
+	return s.OnFail
+}
+
+// onExhaustedValues is the closed half of the `on_exhausted` vocabulary, in
+// declaration order. It is `on_fail`'s minus `fix-loop` and `skip`: the loop
+// that just refused another round cannot answer its own exhaustion with one,
+// and a `skip` would drop the routing step's undecided verdict silently.
+var onExhaustedValues = []string{OnFailWaitingHuman, OnFailAbandonIssue}
+
+// EffectiveOnExhausted is where this step's fix-loop exhaustion routes —
+// `waiting-human` when the step declares nothing, which is the unconditional
+// park every workflow had before the key existed.
+func (s *Step) EffectiveOnExhausted() string {
+	if s.OnExhausted != "" {
+		return s.OnExhausted
+	}
+	return OnFailWaitingHuman
+}
+
+// OnExhaustedTarget is the step a fix-loop exhaustion routes to, or "" when
+// `on_exhausted` is one of the closed vocabulary's own values — OnFailTarget's
+// reading, for the same reason: a routing that is not a known verb is a step
+// name. V41 makes the name resolve to a vote or executor step of the same
+// workflow, so every reader downstream of validation may treat a non-empty
+// answer as one.
+func (s *Step) OnExhaustedTarget() string {
+	if s.OnExhausted == "" || slices.Contains(onExhaustedValues, s.OnExhausted) {
+		return ""
+	}
+	return s.OnExhausted
+}
+
+// The tally outcomes an `on_fail_routes` mapping may key on — the vote's own
+// verdict vocabulary, which is binary: a proposal either reached its
+// threshold or it did not.
+const (
+	VoteOutcomeApproved = "approved"
+	VoteOutcomeRejected = "rejected"
+)
+
+// voteOutcomeKeys is that vocabulary in declaration order, for V40a.
+var voteOutcomeKeys = []string{VoteOutcomeApproved, VoteOutcomeRejected}
+
+// The routings an `on_fail_routes` value may name — the resolution vocabulary
+// an operator disposing of the same park chooses among, minus the ones that
+// would assert a verdict about work nobody re-read (`override-pass`, `skip`).
+const (
+	TriageRetry        = "retry"
+	TriageFixRound     = "fix-round"
+	TriageAbandonIssue = OnFailAbandonIssue
+	TriageWaitingHuman = OnFailWaitingHuman
+)
+
+// triageRoutings is that vocabulary in declaration order, for V40b.
+var triageRoutings = []string{
+	TriageRetry, TriageFixRound, TriageAbandonIssue, TriageWaitingHuman,
+}
+
+// The `type` vocabulary.
 const (
 	TypeHuman = "human"
 	TypeVote  = "vote"
@@ -278,9 +598,9 @@ type rawStep struct {
 	Gates []any     `toml:"gates"`
 }
 
-// rejectUndecoded turns BurntSushi's undecoded-key report into the strict-mode
-// error §4.2 requires. Keys under `[[step]]` are attributed to their step by
-// name, so the author is told where to look rather than just what to look for.
+// rejectUndecoded turns BurntSushi's undecoded-key report into a strict-mode
+// error. Keys under `[[step]]` are attributed to their step by name, so the
+// author is told where to look rather than just what to look for.
 func rejectUndecoded(md toml.MetaData, raw rawDefinition) error {
 	undecoded := md.Undecoded()
 	if len(undecoded) == 0 {
@@ -313,7 +633,7 @@ func rejectUndecoded(md toml.MetaData, raw rawDefinition) error {
 }
 
 // handDecodedPrefixes are the values this package decodes by hand rather than
-// through struct tags, because their §11.1 shapes do not map to a single Go
+// through struct tags, because their grammar shapes do not map to a single Go
 // type: `gates` admits a string or a table, `limits` admits an int or a table,
 // and `params`/`metadata` are opaque KV bags the engine never reads into.
 //
@@ -384,8 +704,8 @@ func attributeStepKey(md toml.MetaData, key string, steps []rawStep) (step, fiel
 	return name, field, true
 }
 
-// normalizeGates collapses §11.1's two gate spellings into one shape: a bare
-// string becomes {name, source: "", pre: false}.
+// normalizeGates collapses the grammar's two gate spellings into one shape: a
+// bare string becomes {name, source: "", pre: false}.
 func normalizeGates(step string, raw []any) ([]Gate, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -467,7 +787,7 @@ func gateFromTable(step string, t map[string]any) (Gate, error) {
 	return gate, nil
 }
 
-// decodeLimits normalizes §11.1's `[limits]` shorthand: a bare int is `max`.
+// decodeLimits normalizes the `[limits]` shorthand: a bare int is `max`.
 func decodeLimits(raw map[string]any) (map[string]Limit, error) {
 	if len(raw) == 0 {
 		return nil, nil

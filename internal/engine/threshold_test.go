@@ -1,10 +1,13 @@
 package engine
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -23,12 +26,12 @@ func payloadSet(t *testing.T, raw string) []map[string]any {
 	return out
 }
 
-// evalOne evaluates a single-routing threshold with NO resolver — the S3 shape,
-// which is T3 case (i): a step declaring no `payload`.
+// evalOne evaluates a single-routing threshold with NO resolver — the
+// schema-less shape, which is T3 case (i): a step declaring no `payload`.
 //
-// Every S3-era case below still calls it, and that is the point: the survival
-// suite is not a re-implementation of the old table, it IS the old table,
-// evaluated by the new engine with nothing passed in.
+// Every schema-less case below still calls it, and that is the point: the
+// survival suite is not a re-implementation of the old table, it IS the old
+// table, evaluated by the new engine with nothing passed in.
 func evalOne(t *testing.T, predicate, raw string) ThresholdResult {
 	t.Helper()
 	return evalWith(t, nil, predicate, raw)
@@ -95,10 +98,10 @@ var severityOrder = fakeOrder{
 }
 
 // ---------------------------------------------------------------------------
-// T1 — equality evaluates at S3
+// T1 — equality evaluates without a schema
 // ---------------------------------------------------------------------------
 
-// TestThresholdT1Equality is §6.14 T1: `==` and `!=` compare as strings after
+// TestThresholdT1Equality is T1: `==` and `!=` compare as strings after
 // JSON scalar normalization. No schema is required to know whether two values
 // are the same value.
 func TestThresholdT1Equality(t *testing.T) {
@@ -120,7 +123,7 @@ func TestThresholdT1Equality(t *testing.T) {
 			predicate: "any(status == unmet)",
 			payloads:  `[{"status":"met"},{"status":"met"}]`,
 			want:      RoutingPass,
-			why:       "§11.2: no match ⇒ pass",
+			why:       "no match ⇒ pass",
 		},
 		{
 			name:      "all equality holds",
@@ -161,7 +164,7 @@ func TestThresholdT1Equality(t *testing.T) {
 				t.Errorf("routing = %q, want %q — %s", result.Routing, tc.want, tc.why)
 			}
 			if result.Parked {
-				t.Error("an equality comparison parked; T1 makes it evaluable at S3")
+				t.Error("an equality comparison parked; T1 makes it evaluable without a schema")
 			}
 		})
 	}
@@ -246,12 +249,12 @@ func TestThresholdT1NullNeverEqualsAnything(t *testing.T) {
 // T2/T3 — ordered comparisons do not evaluate, and are never guessed
 // ---------------------------------------------------------------------------
 
-// TestThresholdT3ParksOnAnOrderedComparison is §6.14 T3: an ordered comparison
+// TestThresholdT3ParksOnAnOrderedComparison is T3: an ordered comparison
 // ACTUALLY ATTEMPTED against a schema-less field parks `waiting-human` with a
 // recorded reason.
 //
 // The reason must name the step, the routing key, the predicate verbatim, and
-// the cause — asserted by substring, per §6.16 — so an operator resolving the
+// the cause — asserted by substring — so an operator resolving the
 // park can see exactly what could not be decided.
 func TestThresholdT3ParksOnAnOrderedComparison(t *testing.T) {
 	for _, op := range []string{">=", ">", "<=", "<"} {
@@ -270,9 +273,9 @@ func TestThresholdT3ParksOnAnOrderedComparison(t *testing.T) {
 			}
 
 			// "which stage 5 supplies" is GONE from this list, and its removal
-			// is T3's own instruction rather than a relaxed assertion: stage 5
-			// has shipped, and a message promising a future stage after that
-			// stage has landed is worse than no message. What replaces it — the
+			// is T3's own instruction rather than a relaxed assertion: schema
+			// support has shipped, and a message promising a future feature after
+			// it has landed is worse than no message. What replaces it — the
 			// remedy that is now actually available — is asserted by
 			// TestT3NamesWhichOfItsThreeCases below.
 			for _, want := range []string{
@@ -280,7 +283,6 @@ func TestThresholdT3ParksOnAnOrderedComparison(t *testing.T) {
 				workflow.OnFailFixLoop,     // the routing key
 				"severity " + op + " high", // the predicate, verbatim
 				"ordered_enum",             // the cause
-				"§11.2",                    // the spec reference
 				"declares no `payload`",    // WHICH of the three cases
 			} {
 				if !strings.Contains(result.Reason, want) {
@@ -337,7 +339,7 @@ func TestThresholdNeverGuessesAnOrder(t *testing.T) {
 // T4 — the empty set, evaluated BEFORE T3
 // ---------------------------------------------------------------------------
 
-// TestThresholdT4EmptySet is §6.14 T4: the ordinary mathematical convention.
+// TestThresholdT4EmptySet is T4: the ordinary mathematical convention.
 func TestThresholdT4EmptySet(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -376,17 +378,17 @@ func TestThresholdT4EmptySet(t *testing.T) {
 	}
 }
 
-// TestThresholdT4PrecedesT3 is THE clause that makes S3 runnable, and the exact
-// case phase 4's QA loop depends on.
+// TestThresholdT4PrecedesT3 is THE clause that keeps an empty result set
+// runnable, and the exact case the fixture's QA loop depends on.
 //
 // `any(severity >= high)` over an EMPTY payload set must return FALSE — not
 // park. T4 short-circuits the aggregation before the ordered comparison is ever
 // attempted, so no guess is made and no park occurs. This is the fixture's
-// `reconcile` step at S3: its stub payload is empty (§6.13), so it flows through
+// `reconcile` step: its stub payload is empty, so it flows through
 // legally.
 //
 // If T3 were evaluated first this would park, the fixture's loop would never
-// reach `verify`, and phase 4's QA would deadlock — so the ordering is asserted
+// reach `verify`, and the QA loop would deadlock — so the ordering is asserted
 // directly rather than inferred from the loop passing.
 func TestThresholdT4PrecedesT3(t *testing.T) {
 	result := evalOne(t, "any(severity >= high)", "")
@@ -417,8 +419,8 @@ func TestThresholdT4PrecedesT3(t *testing.T) {
 // Ordering and the no-match default
 // ---------------------------------------------------------------------------
 
-// TestThresholdFirstMatchWins is §11.2's "evaluated top-to-bottom, first match
-// routes", over a multi-routing table — the fixture's `verify` shape.
+// TestThresholdFirstMatchWins is the grammar's "evaluated top-to-bottom, first
+// match routes", over a multi-routing table — the fixture's `verify` shape.
 func TestThresholdFirstMatchWins(t *testing.T) {
 	threshold := map[string]string{
 		workflow.OnFailFixLoop:      "any(status == unmet)",
@@ -426,8 +428,8 @@ func TestThresholdFirstMatchWins(t *testing.T) {
 	}
 	order := ThresholdOrder(threshold)
 
-	// `fix-loop` is first in §11.2's sequence, so a payload matching BOTH routes
-	// there.
+	// `fix-loop` is first in the closed sequence, so a payload matching BOTH
+	// routes there.
 	both := payloadSet(t, `[{"status":"unmet"},{"status":"unverifiable"}]`)
 	result, err := EvaluateThreshold("verify@0", threshold, order, both, nil)
 	testsupport.Must(t, err, "EvaluateThreshold: %v", err)
@@ -449,7 +451,7 @@ func TestThresholdFirstMatchWins(t *testing.T) {
 	result, err = EvaluateThreshold("verify@0", threshold, order, neither, nil)
 	testsupport.Must(t, err, "EvaluateThreshold: %v", err)
 	if result.Routing != RoutingPass {
-		t.Errorf("routing = %q, want %q (§11.2: no match ⇒ pass)",
+		t.Errorf("routing = %q, want %q (no match ⇒ pass)",
 			result.Routing, RoutingPass)
 	}
 }
@@ -480,7 +482,7 @@ func TestThresholdOrderIsTotalAndStable(t *testing.T) {
 		}
 	}
 
-	// The closed vocabulary comes first, in §11.2's own sequence.
+	// The closed vocabulary comes first, in its specified sequence.
 	want := []string{workflow.OnFailFixLoop, workflow.OnFailWaitingHuman, RoutingPass}
 	for i, routing := range want {
 		if first[i] != routing {
@@ -544,7 +546,7 @@ func TestParsePredicateSharesTheValidationGrammar(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// T2 — ordered comparisons come alive, over a USER-REGISTERED order (§5)
+// T2 — ordered comparisons come alive, over a USER-REGISTERED order
 // ---------------------------------------------------------------------------
 
 // TestThresholdT2EvaluatesOverPosition is the sentence this whole stage exists
@@ -651,8 +653,8 @@ func TestThresholdT2EvaluatesOverPosition(t *testing.T) {
 	}
 }
 
-// TestThresholdT2IsIndependentOfPayloadOrder is §9 item 5 at the threshold: the
-// same members in any input order reach the same verdict.
+// TestThresholdT2IsIndependentOfPayloadOrder is order independence at the
+// threshold: the same members in any input order reach the same verdict.
 func TestThresholdT2IsIndependentOfPayloadOrder(t *testing.T) {
 	permutations := []string{
 		`[{"severity":"low"},{"severity":"high"},{"severity":"info"}]`,
@@ -668,7 +670,7 @@ func TestThresholdT2IsIndependentOfPayloadOrder(t *testing.T) {
 	}
 }
 
-// TestT3NamesWhichOfItsThreeCases is §5 T3 narrowed: the park survives, and the
+// TestT3NamesWhichOfItsThreeCases is T3 narrowed: the park survives, and the
 // reason says WHICH of the three it was, because the three need three different
 // remedies — register a schema, add an `ordered_enum`, or fix a value.
 func TestT3NamesWhichOfItsThreeCases(t *testing.T) {
@@ -719,7 +721,7 @@ func TestT3NamesWhichOfItsThreeCases(t *testing.T) {
 			}
 			// And no message promises a stage that has shipped.
 			if strings.Contains(result.Reason, "stage 5 supplies") {
-				t.Error("the reason still promises stage 5, which has landed")
+				t.Error("the reason still promises schema support, which has landed")
 			}
 		})
 	}
@@ -733,7 +735,7 @@ func TestT3NamesWhichOfItsThreeCases(t *testing.T) {
 	}
 }
 
-// TestOrderedComparisonNeverGuesses is §5's named obligation: every operator,
+// TestOrderedComparisonNeverGuesses is the named obligation: every operator,
 // driven against a field that is ordered, unordered, and absent. The unordered
 // and absent cases must PARK rather than produce a verdict.
 //
@@ -772,13 +774,14 @@ func TestOrderedComparisonNeverGuesses(t *testing.T) {
 	}
 }
 
-// TestS3ThresholdSemanticsAreUnchangedForSchemalessFields is §5's survival
-// suite: the full S3 case table, re-run against the S5 evaluator with an EMPTY
-// resolver, asserting identical results.
+// TestS3ThresholdSemanticsAreUnchangedForSchemalessFields is the survival
+// suite: the full schema-less case table, re-run against the schema-aware
+// evaluator with an EMPTY resolver, asserting identical results.
 //
 // The table is restated here rather than referenced because that is what makes
-// it a survival suite: if the S3 tests above were edited into agreement with a
-// changed evaluator, this one would still hold the original answers.
+// it a survival suite: if the schema-less tests above were edited into
+// agreement with a changed evaluator, this one would still hold the original
+// answers.
 func TestS3ThresholdSemanticsAreUnchangedForSchemalessFields(t *testing.T) {
 	cases := []struct {
 		predicate string
@@ -786,7 +789,7 @@ func TestS3ThresholdSemanticsAreUnchangedForSchemalessFields(t *testing.T) {
 		want      string
 		parked    bool
 	}{
-		// T1, verbatim from S3.
+		// T1, verbatim from the schema-less table.
 		{"any(status == unmet)", `[{"status":"met"},{"status":"unmet"}]`,
 			workflow.OnFailFixLoop, false},
 		{"any(status == unmet)", `[{"status":"met"}]`, RoutingPass, false},
@@ -821,21 +824,21 @@ func TestS3ThresholdSemanticsAreUnchangedForSchemalessFields(t *testing.T) {
 	for _, tc := range cases {
 		got := evalOne(t, tc.predicate, tc.payloads)
 		if got.Routing != tc.want || got.Parked != tc.parked {
-			t.Errorf("%s over %q: routing = %q parked = %v, want %q/%v — an S3 "+
-				"semantic changed for a schema-less field",
+			t.Errorf("%s over %q: routing = %q parked = %v, want %q/%v — a schema-less "+
+				"semantic changed",
 				tc.predicate, tc.payloads, got.Routing, got.Parked,
 				tc.want, tc.parked)
 		}
 	}
 
-	// The reason's S3 wording survives MINUS its removed tail, asserted by
-	// prefix exactly as §5 specifies.
+	// The reason's original wording survives MINUS its removed tail, asserted
+	// by prefix.
 	parked := evalOne(t, "any(severity >= high)", `[{"severity":"low"}]`)
 	const prefix = `threshold "fix-loop" on step step@0 requires an ordered ` +
 		`comparison (severity >= high); ordered comparisons need a registered ` +
-		`ordered_enum schema (engine-spec §11.2)`
+		`ordered_enum schema`
 	if !strings.HasPrefix(parked.Reason, prefix) {
-		t.Errorf("the S3 reason wording did not survive:\n got %q\nwant prefix %q",
+		t.Errorf("the original reason wording did not survive:\n got %q\nwant prefix %q",
 			parked.Reason, prefix)
 	}
 }
@@ -887,10 +890,168 @@ func TestT1IsSchemaTypedForDeclaredFields(t *testing.T) {
 		})
 	}
 
-	// And the schema-less reading of the same case is the S3 one: `1.50` and
-	// `1.5` are different STRINGS, which is what T1 said before a type existed.
+	// And the schema-less reading of the same case is the original one: `1.50`
+	// and `1.5` are different STRINGS, which is what T1 said before a type
+	// existed.
 	if got := evalOne(t, "any(score == 1.50)", `[{"score":1.5}]`); got.Routing != RoutingPass {
 		t.Errorf("the schema-less reading changed: routed %q, want %q",
 			got.Routing, RoutingPass)
 	}
+}
+
+// commitAndRouteConcernGate tallies concernParkSrc's gate over the given casts
+// with no dissent hold, commits the approved proposal by hand before routing
+// runs, then routes it and returns the gate step.
+func commitAndRouteConcernGate(t *testing.T, verdicts ...model.Verdict) (*db.Step, string) {
+	t.Helper()
+	conn, e, proposalID := castDissentGate(t, concernParkSrc, "", verdicts...)
+	commitDissentGate(t, conn, proposalID)
+	err := e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the committed tally: %v", err)
+	return dissentGateStep(t, conn), stepStatus(t, conn, "gate@0")
+}
+
+// A committed proposal was an approved tally first, so committing it before
+// routing runs must not skip the threshold the approved tally would meet.
+// TestVoteThresholdParkKeepsThresholdClass is the approved twin.
+func TestVoteThresholdRoutesCommittedProposal(t *testing.T) {
+	gate, status := commitAndRouteConcernGate(t,
+		model.VerdictApproveWithConcerns, model.VerdictApprove, model.VerdictApprove)
+
+	if !strings.HasPrefix(gate.Routing, workflow.OnFailWaitingHuman) {
+		t.Errorf("gate@0 routing = %q, want the threshold's %q",
+			gate.Routing, workflow.OnFailWaitingHuman)
+	}
+	if status != db.StepWaitingHuman {
+		t.Errorf("gate@0 status = %q, want %q", status, db.StepWaitingHuman)
+	}
+	if gate.ParkClass != db.ParkClassThresholdRouted {
+		t.Errorf("gate@0 park_class = %q, want %q", gate.ParkClass, db.ParkClassThresholdRouted)
+	}
+	// The routing record names the commit, not the approval it superseded.
+	if !strings.Contains(gate.Routing, "committed, and threshold") ||
+		strings.Contains(gate.Routing, "approved, and threshold") {
+		t.Errorf("gate@0 routing = %q, want a reason naming %q, not %q",
+			gate.Routing, "committed, and threshold", "approved, and threshold")
+	}
+}
+
+// A committed proposal whose casts match no predicate passes, as an approved
+// one does: the threshold is evaluated, not assumed to match.
+func TestVoteThresholdCommittedNoMatchPasses(t *testing.T) {
+	gate, status := commitAndRouteConcernGate(t,
+		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
+
+	if !strings.HasPrefix(gate.Routing, RoutingPass) {
+		t.Errorf("gate@0 routing = %q, want %q", gate.Routing, RoutingPass)
+	}
+	if status != db.StepDone {
+		t.Errorf("gate@0 status = %q, want %q", status, db.StepDone)
+	}
+	if gate.ParkClass == db.ParkClassThresholdRouted {
+		t.Errorf("gate@0 park_class = %q, want no threshold park", gate.ParkClass)
+	}
+}
+
+// thresholdTriageSrc is triageSrc with a `threshold` on the panel whose
+// `fix-loop` predicate matches every approved cast set below. The mapping is
+// filled in so an approved panel retries the step it triaged.
+func thresholdTriageSrc() string {
+	src := strings.Replace(triageSrc, "APPROVED", workflow.TriageRetry, 1)
+	src = strings.Replace(src, "REJECTED", workflow.TriageAbandonIssue, 1)
+	return strings.Replace(src, "on_fail = \"waiting-human\"\n",
+		"on_fail = \"waiting-human\"\n"+
+			"threshold = { \"fix-loop\" = 'any(verdict == approve)' }\n", 1)
+}
+
+// routeThresholdTriagePanel drives implement@0 into thresholdTriageSrc's
+// panel, tallies the panel approved, optionally commits the proposal before
+// routing runs, and then routes it.
+func routeThresholdTriagePanel(t *testing.T, commit bool) *sql.DB {
+	t.Helper()
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(thresholdTriageSrc()), "triage-lane.toml")
+	issue := createIssue(t, conn, "triaged", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	e := testEngine()
+	e.Gates = failingGates{}
+	claimAndComplete(t, conn, e, "implement@0", "the candidate", "")
+	err = e.DriveRunLifecycles(conn, run.ID, nowMS)
+	testsupport.Must(t, err, "driving after the failed record: %v", err)
+
+	proposalID, err := findVoteProposal(conn, mustStep(t, conn, "triage@0"))
+	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+	if proposalID == 0 {
+		t.Fatal("no proposal opened for triage@0")
+	}
+	castSeat(t, conn, proposalID, "seat-a", model.VerdictApprove, "")
+	castSeat(t, conn, proposalID, "seat-b", model.VerdictApprove, "")
+	if commit {
+		commitDissentGate(t, conn, proposalID) // fatals unless the tally approved
+	}
+	err = e.DriveVoteProposal(conn, proposalID, nowMS)
+	testsupport.Must(t, err, "driving the tally: %v", err)
+	return conn
+}
+
+// TestVoteThresholdSkipsTriagePanel: a triage panel is never asked its own
+// `threshold`, approved or committed. An approved panel takes the triage arm
+// before the threshold arm; a committed one skips that arm, because
+// triageDecided excludes `committed`, so only the threshold arm's own
+// triaged == nil conjunct keeps it out. Without it the matched `fix-loop`
+// enters a loop on the panel's behalf, minting fix@1 and superseding review@0
+// for a panel releaseUntriaged then writes `skipped`.
+func TestVoteThresholdSkipsTriagePanel(t *testing.T) {
+	assertNoThresholdRouting := func(t *testing.T, conn *sql.DB) {
+		t.Helper()
+		panel := mustStep(t, conn, "triage@0")
+		if panel.ParkClass == db.ParkClassThresholdRouted {
+			t.Errorf("triage@0 park_class = %q, want no threshold park", panel.ParkClass)
+		}
+		if routingIs(panel.Routing, workflow.OnFailFixLoop) {
+			t.Errorf("triage@0 routing = %q, want no threshold `fix-loop`", panel.Routing)
+		}
+		if stepExists(t, conn, "fix@1") {
+			t.Error("fix@1 exists — the panel's threshold opened a fix round")
+		}
+		if got := stepStatus(t, conn, "review@0"); got != db.StepPending {
+			t.Errorf("review@0 status = %q, want %q — a fix round superseded it",
+				got, db.StepPending)
+		}
+	}
+
+	t.Run("an approved panel applies its mapping", func(t *testing.T) {
+		conn := routeThresholdTriagePanel(t, false)
+		assertNoThresholdRouting(t, conn)
+		if got := stepStatus(t, conn, "triage@0"); got != db.StepDone {
+			t.Errorf("triage@0 status = %q, want %q", got, db.StepDone)
+		}
+		step := mustStep(t, conn, "implement@0")
+		if !routingIs(step.Routing, ResolveRetry) || step.Status != db.StepPending {
+			t.Errorf("implement@0 = %q %q, want the mapped %q, %q",
+				step.Status, step.Routing, ResolveRetry, db.StepPending)
+		}
+	})
+
+	// A committed outcome is outside the mapping's vocabulary, so the panel
+	// closes `skipped` and its own `on_fail` disposes of implement@0
+	// (TestCommittedTriagePanelEventsMatchSkippedRow). This case pins that the
+	// threshold adds nothing to that disposition.
+	t.Run("a committed panel is released by its on_fail", func(t *testing.T) {
+		conn := routeThresholdTriagePanel(t, true)
+		assertNoThresholdRouting(t, conn)
+		if got := stepStatus(t, conn, "triage@0"); got != db.StepSkipped {
+			t.Errorf("triage@0 status = %q, want %q", got, db.StepSkipped)
+		}
+		step := mustStep(t, conn, "implement@0")
+		if step.Status != db.StepWaitingHuman ||
+			step.ParkClass != db.ParkClassTriageUndecided {
+			t.Errorf("implement@0 = %q %q, want %q %q from the panel's on_fail",
+				step.Status, step.ParkClass, db.StepWaitingHuman, db.ParkClassTriageUndecided)
+		}
+	})
 }

@@ -20,7 +20,7 @@ func renderRows(rows []StepInstance) string {
 	return b.String()
 }
 
-// TestExpansionIsDeterministic is §5.3.1's central obligation, asserted
+// TestExpansionIsDeterministic is expansion's central obligation, asserted
 // directly: expansion is a pure function of (issue kind, labels, pipeline
 // definition @ pinned version), so the fixture expands to byte-identical rows
 // every time.
@@ -46,7 +46,7 @@ func TestExpansionIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestExpandFanoutIsInDeclaredHintOrder is the §5.3.1 fanout rule: one row per
+// TestExpandFanoutIsInDeclaredHintOrder is the fanout rule: one row per
 // hint, `#0..#n-1`, in the order the `fanout` array declares — the index is the
 // POSITION in that array, never a map iteration.
 func TestExpandFanoutIsInDeclaredHintOrder(t *testing.T) {
@@ -86,7 +86,7 @@ func TestExpandFanoutIsInDeclaredHintOrder(t *testing.T) {
 	}
 }
 
-// TestExpandWhenFalseCreatesSkipped is §11.1's "step is skipped when false",
+// TestExpandWhenFalseCreatesSkipped is "step is skipped when false",
 // and the reason it is stated as a CREATED row rather than an omission: a
 // downstream `after` must stay resolvable and the topology must be identical
 // regardless of the predicate's value.
@@ -136,11 +136,11 @@ func TestExpandWhenFalseCreatesSkipped(t *testing.T) {
 	// Stated as its own assertion, because "omitted" is the bug this rule
 	// exists to prevent and a status check alone would not catch it.
 	if statusOf(notHeld, "maybe") == "<absent>" {
-		t.Error("a when-false step was OMITTED; §11.1 requires it created `skipped`")
+		t.Error("a when-false step was OMITTED; it must be created `skipped`")
 	}
 }
 
-// TestExpandOmitsLoopSteps is §11.3 (3): `loop = true` steps are "excluded from
+// TestExpandOmitsLoopSteps: `loop = true` steps are "excluded from
 // ordinary expansion" and instantiate at loop entry, which is phase 4's.
 func TestExpandOmitsLoopSteps(t *testing.T) {
 	def := mustParseFixture(t)
@@ -159,7 +159,7 @@ func TestExpandOmitsLoopSteps(t *testing.T) {
 	for _, r := range rows {
 		if slices.Contains(loopSteps, r.Name) {
 			t.Errorf("expansion created %q at ordinal 0; `loop = true` steps are "+
-				"excluded from ordinary expansion (§11.3 (3))", r.Instance)
+				"excluded from ordinary expansion", r.Instance)
 		}
 	}
 
@@ -185,7 +185,7 @@ func TestExpandOmitsLoopSteps(t *testing.T) {
 	}
 }
 
-// TestExpandThresholdInterposedStepIsPending is §11.2's interposed gate: a step
+// TestExpandThresholdInterposedStepIsPending is the interposed gate: a step
 // reachable only by a threshold step-name routing IS created, in status
 // `pending`, and simply never becomes ready unless routed to.
 // TestInterposedStepsClassifiesByTargetNotReachability is DKT-38's
@@ -263,13 +263,13 @@ func TestExpandThresholdInterposedStepIsPending(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("the threshold-interposed step was not created; §11.2 requires it " +
+		t.Error("the threshold-interposed step was not created; it must be " +
 			"created `pending` so a routing has something to interpose")
 	}
 }
 
 // TestExpandStepKinds pins the `kind` column's vocabulary against the four
-// §11.1 alternatives. A fanout step's siblings are `executor` rows: `fanout`
+// declared alternatives. A fanout step's siblings are `executor` rows: `fanout`
 // says how many, not what kind.
 func TestExpandStepKinds(t *testing.T) {
 	def := &Definition{
@@ -338,7 +338,7 @@ func TestExpandClassDefaultsToExecutor(t *testing.T) {
 	}
 }
 
-// TestRenderAndParseInstanceRoundTrip pins §11.3's identity format in both
+// TestRenderAndParseInstanceRoundTrip pins the identity format in both
 // directions. The rendered form is the step's PUBLIC identity — it appears in
 // wire shapes, events, and error strings — so a reader that re-derived the
 // format by hand is how the two drift.
@@ -380,7 +380,7 @@ func TestRenderAndParseInstanceRoundTrip(t *testing.T) {
 	}
 }
 
-// TestArtifactKindPerStepClass asserts TDD §4.3.1 row by row. Getting this
+// TestArtifactKindPerStepClass asserts the kind table row by row. Getting this
 // wrong rejects the canonical fixture: `fix` declares
 // `inputs = ["reconcile.findings", ...]` and `reconcile` is an ACTION step with
 // no `emits` — it names its kind in `params.output`.
@@ -412,5 +412,60 @@ func TestArtifactKindPerStepClass(t *testing.T) {
 	def := mustParseFixture(t)
 	if got := ArtifactKind(StepByName(def, "reconcile")); got != "findings" {
 		t.Errorf("fixture `reconcile` artifact kind = %q, want \"findings\" from params.output", got)
+	}
+}
+
+// TestExpandOrdinalScopesOnFailPanelsToClusterBodies pins which `on_fail`
+// panels re-instantiate at a loop ordinal: only those named by a `loop = true`
+// body in the entered cluster. A body serving another trigger, and a non-loop
+// step, name panels that stay at their existing ordinal.
+func TestExpandOrdinalScopesOnFailPanelsToClusterBodies(t *testing.T) {
+	def := &Definition{
+		Pipeline: Pipeline{Name: "clusters", Version: 1},
+		Steps: []*Step{
+			{Name: "implement", Executor: "writer", Emits: "change", After: []string{},
+				OnFail: "triage-r"},
+			{Name: "verify-a", Executor: "verifier", Emits: "report-a",
+				After: []string{"implement"}},
+			{Name: "verify-b", Executor: "verifier", Emits: "report-b",
+				After: []string{"implement"}},
+			{Name: "fix-a", Executor: "fixer", Emits: "change", Loop: true,
+				Serves: []string{"verify-a"}, OnFail: "triage-a"},
+			{Name: "fix-b", Executor: "fixer", Emits: "change", Loop: true,
+				Serves: []string{"verify-b"}, OnFail: "triage-b"},
+			{Name: "triage-a", Type: TypeVote},
+			{Name: "triage-b", Type: TypeVote},
+			{Name: "triage-r", Type: TypeVote},
+		},
+	}
+	bodies := map[string]bool{"fix-a": true}
+
+	rows := ExpandOrdinal(def, Subject{Kind: "task"}, 1, bodies, nil)
+
+	instances := make(map[string]bool)
+	for _, r := range rows {
+		instances[r.Instance] = true
+	}
+	if !instances["fix-a@1"] {
+		t.Errorf("fix-a@1 absent; the entered cluster's body instantiates at the ordinal")
+	}
+	if !instances["triage-a@1"] {
+		t.Errorf("triage-a@1 absent; the panel an in-cluster body's on_fail names " +
+			"instantiates with it")
+	}
+	if instances["fix-b@1"] {
+		t.Errorf("fix-b@1 present; a body serving another trigger is not re-run")
+	}
+	if instances["triage-b@1"] {
+		t.Errorf("triage-b@1 present; a panel named only by an out-of-cluster body " +
+			"must stay at its existing ordinal")
+	}
+	if instances["triage-r@1"] {
+		t.Errorf("triage-r@1 present; a panel named only by a non-loop step must " +
+			"stay at its existing ordinal")
+	}
+	if len(rows) != 2 {
+		t.Errorf("ExpandOrdinal produced %d rows, want 2 (fix-a@1, triage-a@1):\n%s",
+			len(rows), renderRows(rows))
 	}
 }

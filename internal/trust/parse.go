@@ -2,6 +2,7 @@ package trust
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -15,15 +16,15 @@ type rawStore struct {
 	Entries []Entry `toml:"entry"`
 }
 
-// parse decodes a trust file STRICTLY (§3.1).
+// parse decodes a trust file STRICTLY.
 //
-// Unknown keys are a hard error, exactly as workflow parsing is strict
-// (engine-spine §4.2). The reasoning is specific rather than stylistic: a
-// typo'd `re_runable` silently defaulting to false would turn a re-runnable
-// gate into a waiting-human park; a typo'd `global` defaulting to false is the
-// safe direction, but a typo'd `prefix` is NOT — it would silently widen or
-// narrow an authorization. A parser that is strict about one key and lax about
-// another is a parser nobody can reason about.
+// Unknown keys are a hard error, exactly as workflow parsing is strict. The
+// reasoning is specific rather than stylistic: a typo'd `re_runable` silently
+// defaulting to false would turn a re-runnable gate into a waiting-human park;
+// a typo'd `global` defaulting to false is the safe direction, but a typo'd
+// `prefix` is NOT — it would silently widen or narrow an authorization. A
+// parser that is strict about one key and lax about another is a parser nobody
+// can reason about.
 func parse(data []byte, path string) (*Store, error) {
 	var raw rawStore
 	md, err := toml.Decode(string(data), &raw)
@@ -69,7 +70,7 @@ func validateEntry(e Entry, idx int, path string) error {
 		return fmt.Errorf("%w: %s in %s has an empty argv; an entry must name a command", ErrParse, where, path)
 	}
 
-	// P4: an entry with NEITHER repo NOR global is a MALFORMED FILE, never
+	// An entry with NEITHER repo NOR global is a MALFORMED FILE, never
 	// "matches everything". A missing binding failing open would make a
 	// hand-edited file a bypass — the single most valuable edit an attacker who
 	// reached this file could make, and the cheapest one to refuse.
@@ -84,8 +85,16 @@ func validateEntry(e Entry, idx int, path string) error {
 		return fmt.Errorf("%w: %s in %s sets both global = true and repo = %q; an entry binds to one repo or to all, never both", ErrParse, where, path, e.Repo)
 	}
 
+	// A stub_reason on a non-stub entry is contradictory (DKT-607). Refusing is
+	// the closed direction, same as global+repo above: honoring the reason
+	// would imply the entry is a stub the flag denies, and dropping it would
+	// silently discard a key the operator wrote.
+	if e.StubReason != "" && !e.Stub {
+		return fmt.Errorf("%w: %s in %s has a stub_reason but stub is not true; a reason describes a stub, so set stub = true or remove stub_reason", ErrParse, where, path)
+	}
+
 	// The stored hash must describe the stored argv. This catches a corrupted
-	// or hand-edited file (M3): an operator who edits `argv` without recomputing
+	// or hand-edited file: an operator who edits `argv` without recomputing
 	// the hash gets a refusal rather than an entry whose two halves disagree.
 	if e.ArgvSHA256 != "" {
 		if want := ArgvSHA256(e.Argv); e.ArgvSHA256 != want {
@@ -93,11 +102,79 @@ func validateEntry(e Entry, idx int, path string) error {
 		}
 	}
 
+	// A content pin is optional, so an entry written before pinning existed
+	// still loads. When present it must be one the add path could have written:
+	// only an absolute argv[0] is pinned, and the value is a SHA-256 in the
+	// encoding Lookup compares against byte for byte.
+	if e.Argv0SHA256 != "" {
+		if !filepath.IsAbs(e.Argv[0]) {
+			return fmt.Errorf("%w: %s in %s has argv0_sha256, but its argv[0] %q is not an absolute path; only an absolute argv[0] is content-pinned", ErrParse, where, path, e.Argv[0])
+		}
+		if !isLowerHexSHA256(e.Argv0SHA256) {
+			return fmt.Errorf("%w: %s in %s has argv0_sha256 %q, which is not 64 lowercase hex characters", ErrParse, where, path, e.Argv0SHA256)
+		}
+	}
+
+	if len(e.DeclaredFiles) > 0 {
+		if e.Global {
+			return fmt.Errorf("%w: %s in %s is global but declares files; declared files bind to one repository, so a global entry cannot pin them", ErrParse, where, path)
+		}
+		paths := make([]string, len(e.DeclaredFiles))
+		for i, d := range e.DeclaredFiles {
+			if !isLowerHexSHA256(d.SHA256) {
+				return fmt.Errorf("%w: %s in %s has declared file %q with sha256 %q, which is not 64 lowercase hex characters", ErrParse, where, path, d.Path, d.SHA256)
+			}
+			paths[i] = d.Path
+		}
+		if err := checkDeclaredPaths(paths); err != nil {
+			return fmt.Errorf("%w: %s in %s: %v", ErrParse, where, path, err)
+		}
+	}
+
 	return nil
 }
 
+// checkDeclaredPaths admits only paths that name one file under a root
+// unambiguously: non-empty, relative, already in filepath.Clean form, not the
+// root itself, never climbing out with "..", and each listed once. Clean form
+// is what makes the rest checkable as a string: "./a", "a//b", and "a/../b"
+// all fail it, so the ".." test only has to look at the leading component.
+func checkDeclaredPaths(paths []string) error {
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		switch {
+		case p == "":
+			return fmt.Errorf("a declared file path is empty")
+		case filepath.IsAbs(p):
+			return fmt.Errorf("declared file %q is absolute; declared files are repo-relative", p)
+		case filepath.Clean(p) != p:
+			return fmt.Errorf("declared file %q is not in clean form; write it as %q", p, filepath.Clean(p))
+		case p == ".":
+			return fmt.Errorf("declared file %q names the root, not a file", p)
+		case p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)):
+			return fmt.Errorf("declared file %q climbs out of the root", p)
+		case seen[p]:
+			return fmt.Errorf("declared file %q is listed more than once", p)
+		}
+		seen[p] = true
+	}
+	return nil
+}
+
+func isLowerHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // rejectUndecoded turns BurntSushi's undecoded-key report into the strict-mode
-// error §3.1 requires, in the same shape internal/workflow's parser uses.
+// error, in the same shape internal/workflow's parser uses.
 func rejectUndecoded(md toml.MetaData, path string) error {
 	undecoded := md.Undecoded()
 	if len(undecoded) == 0 {

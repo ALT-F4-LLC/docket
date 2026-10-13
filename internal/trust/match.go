@@ -1,21 +1,27 @@
 package trust
 
-import "fmt"
+import (
+	"fmt"
+	"path/filepath"
 
-// Match is the result of a trust lookup (§7.2).
+	"github.com/ALT-F4-LLC/docket/internal/exec"
+)
+
+// Match is the result of a trust lookup.
 //
-// THE TYPE IS T4'S CLOSURE. There is deliberately no API in this package that
-// returns a bare boolean "is this trusted?", because such an API produces a
-// PERMISSION that a caller then applies to an argv it holds separately — and
-// between the permission and the spawn, that argv can be anything. A Match
-// carries THE ARGV THAT MUST BE EXECUTED, so there is no second source for a
-// caller to get wrong and no window for a concurrent rewrite to exploit.
+// THE TYPE CLOSES THE CHECK-THEN-USE GAP. There is deliberately no API in this
+// package that returns a bare boolean "is this trusted?", because such an API
+// produces a PERMISSION that a caller then applies to an argv it holds
+// separately — and between the permission and the spawn, that argv can be
+// anything. A Match carries THE ARGV THAT MUST BE EXECUTED, so there is no
+// second source for a caller to get wrong and no window for a concurrent
+// rewrite to exploit.
 //
 // TestMatchReturnsTheExecutedArgv asserts exactly this shape.
 type Match struct {
 	// Matched reports whether an entry authorized the candidate. When false,
 	// NOTHING MAY BE EXECUTED: the caller records verdict = "unmatched" and
-	// never touches the process table (N1).
+	// never touches the process table.
 	Matched bool
 	// Argv is the argv to execute, and the ONLY argv the caller may execute.
 	// It is the matched entry's own argv for a named gate, or the candidate
@@ -24,33 +30,116 @@ type Match struct {
 	// Entry is the entry that matched, carrying the flags the runner needs:
 	// Timeout, Flaky, Tree, ReRunnable. Nil when Matched is false.
 	Entry *Entry
-	// Reason explains an unmatched result (§6.3). An unmatched verdict has at
+	// Reason explains an unmatched result. An unmatched verdict has at
 	// least four distinct causes and each needs a DIFFERENT remedy — no entry
 	// needs `trust add`; bound elsewhere needs `trust add` here or a moved repo
 	// restored; prefix not opted in needs a different flag; an unparseable
 	// fence line needs an issue-body edit. Without a reason all four render
 	// identically and the operator is left hunting.
 	Reason string
+	// Warning accompanies a match the operator should still act on: an entry
+	// with an absolute argv[0] but no content pin, which predates pinning and
+	// executes whatever bytes the file holds now. Empty otherwise.
+	Warning string
 }
 
 // Lookup matches a candidate argv for a gate name against an immutable store
-// snapshot, in the current repo (§7.2 M1–M6).
+// snapshot, in the current repo, then holds the selected entry to its content
+// pin (argv0_sha256).
 //
-// Purity is the point: (snapshot, repo identity, gate name, candidate argv) →
-// (matched entry | unmatched reason), with no I/O. The store was read ONCE into
-// the snapshot at the start of the gate stage, so there is no second read to
-// race.
+// The argv half is pure: (snapshot, repo identity, gate name, candidate argv)
+// → (matched entry | unmatched reason). The store was read ONCE into the
+// snapshot at the start of the gate stage, so there is no second read of it to
+// race. The pin half is the one read Lookup makes: it hashes the file a pinned
+// absolute argv[0] resolves to, at every lookup, because a pin checked once at
+// load would let the file change for the rest of the stage.
 //
 // candidateArgv is nil for a NAMED gate — the entry's own argv is the command,
 // so the match is by name and binding. It is the tokenized fence line for a
 // FENCE gate, which must additionally hash-equal the entry (or be element-wise
 // prefixed by it, when and only when the entry opted in).
+//
+// An entry that declares files is REFUSED here: Lookup has no root to hash
+// them under, and matching without the check would hand a caller an executable
+// argv whose sourced files nobody verified. Only LookupAt can match it.
 func (s *Store) Lookup(repoIdentity, gate string, candidateArgv []string) Match {
+	m := s.matchArgv(repoIdentity, gate, candidateArgv)
+	if !m.Matched {
+		return m
+	}
+	if len(m.Entry.DeclaredFiles) > 0 {
+		return Match{Reason: fmt.Sprintf("gate %q: the trust entry pins declared files, which are verified only against the root the gate runs in, and this lookup was given no root; nothing runs", gate)}
+	}
+	return checkContentPin(gate, m)
+}
+
+// LookupAt is Lookup for a caller that knows the root the gate will spawn in:
+// the argv rules and the argv[0] pin apply unchanged, and then every declared
+// file of the selected entry is re-hashed under root. An entry with no
+// declared files matches exactly as it does through Lookup.
+func (s *Store) LookupAt(repoIdentity, gate string, candidateArgv []string, root string) Match {
+	m := s.matchArgv(repoIdentity, gate, candidateArgv)
+	if !m.Matched {
+		return m
+	}
+	m = checkContentPin(gate, m)
+	if !m.Matched {
+		return m
+	}
+	return checkDeclaredFiles(gate, m, root)
+}
+
+// checkDeclaredFiles holds a match to its entry's declared-file pins under
+// root. It is separate from checkContentPin because that check returns early
+// for a bare-name argv[0], and a `make` entry is exactly the one whose
+// sourced files need the pin.
+func checkDeclaredFiles(gate string, m Match, root string) Match {
+	for _, d := range m.Entry.DeclaredFiles {
+		current, err := declaredFileSHA256(root, d.Path)
+		if err != nil {
+			return Match{Reason: fmt.Sprintf("gate %q: cannot verify the content pin of declared file %s: %v", gate, d.Path, err)}
+		}
+		if current != d.SHA256 {
+			return Match{Reason: fmt.Sprintf("gate %q: declared file %s under %s changed since it was trusted (pinned sha256 %s, now %s); if the change is intended, re-run `docket trust add` for this gate with the entry's existing flags and declared files", gate, d.Path, root, d.SHA256, current)}
+		}
+	}
+	return m
+}
+
+// checkContentPin applies the content-pin rules to a match the argv rules already
+// made. It runs once on the selected entry rather than inside each branch, so
+// a named gate, an exact fence line, and a prefix fence line are held to the
+// same file: all three execute the entry's argv[0].
+func checkContentPin(gate string, m Match) Match {
+	argv0 := m.Entry.Argv[0]
+	if !filepath.IsAbs(argv0) {
+		return m
+	}
+	repin := fmt.Sprintf("re-run `docket trust add %s -- %s` with the entry's existing flags", gate, exec.RenderArgv(m.Entry.Argv))
+
+	if m.Entry.Argv0SHA256 == "" {
+		m.Warning = fmt.Sprintf("gate %q: the trust entry for %s has no content pin, so whatever that file holds now runs; to pin it, %s", gate, argv0, repin)
+		return m
+	}
+
+	resolved, current, err := argv0ContentSHA256(argv0)
+	if err != nil {
+		return Match{Reason: fmt.Sprintf("gate %q: cannot verify the content pin of %s: %v", gate, argv0, err)}
+	}
+	if current != m.Entry.Argv0SHA256 {
+		return Match{Reason: fmt.Sprintf("gate %q: %s changed since it was trusted (pinned argv0_sha256 %s, now %s); if the change is intended, %s", gate, resolved, m.Entry.Argv0SHA256, current, repin)}
+	}
+	return m
+}
+
+// matchArgv is Lookup's argv half: the matching rules over the snapshot, with
+// no I/O.
+func (s *Store) matchArgv(repoIdentity, gate string, candidateArgv []string) Match {
 	if s == nil {
 		return Match{Reason: unmatchedNoEntry(gate)}
 	}
 
-	// M2: candidate entries are those whose name equals the gate name AND
+	// Candidate entries are those whose name equals the gate name AND
 	// whose binding matches the current repo identity.
 	var boundElsewhere []string
 	var prefixNotOptedIn bool
@@ -66,7 +155,7 @@ func (s *Store) Lookup(repoIdentity, gate string, candidateArgv []string) Match 
 		}
 
 		if !bindingMatches(e, repoIdentity) {
-			// Remembered for the diagnostic: §3.4's moved-repo case is the one
+			// Remembered for the diagnostic: the moved-repo case is the one
 			// an operator actually hits, and "unmatched" with no explanation
 			// sends them hunting. Naming the bound path tells them at once
 			// whether they moved the repo or are standing in a clone.
@@ -75,11 +164,11 @@ func (s *Store) Lookup(repoIdentity, gate string, candidateArgv []string) Match 
 		}
 		boundHere = true
 
-		// M1: THE MATCHED ENTRY'S OWN ARGV IS WHAT EXECUTES.
+		// THE MATCHED ENTRY'S OWN ARGV IS WHAT EXECUTES.
 		if candidateArgv == nil {
 			// A named gate. The entry IS the command. The stored hash is
 			// verified against the stored argv to catch a corrupted or
-			// hand-edited file (M3) — validateEntry already did this at parse
+			// hand-edited file — validateEntry already did this at parse
 			// time, so reaching here with a mismatch is impossible; the check
 			// is repeated because the cost is one hash and the failure mode it
 			// guards is executing an argv the operator did not approve.
@@ -90,16 +179,16 @@ func (s *Store) Lookup(repoIdentity, gate string, candidateArgv []string) Match 
 		}
 
 		// A fence gate: the candidate argv is the tokenized fence line.
-		// M3: it must hash-equal the entry's argv_sha256 ...
+		// It must hash-equal the entry's argv_sha256 ...
 		if ArgvSHA256(candidateArgv) == ArgvSHA256(e.Argv) {
 			return Match{Matched: true, Argv: append([]string(nil), e.Argv...), Entry: e}
 		}
 
 		// ... OR, when and ONLY when the entry opted in, be element-wise
-		// prefixed by the entry's argv (M4).
+		// prefixed by the entry's argv.
 		if isElementWisePrefix(e.Argv, candidateArgv) {
 			if !e.Prefix {
-				// M4: a full-argv entry NEVER matches by prefix. Recorded for
+				// A full-argv entry NEVER matches by prefix. Recorded for
 				// the diagnostic rather than silently skipped, because "prefix
 				// not opted in" has its own remedy.
 				prefixNotOptedIn = true
@@ -109,7 +198,7 @@ func (s *Store) Lookup(repoIdentity, gate string, candidateArgv []string) Match 
 		}
 	}
 
-	// M5: NO ENTRY ⇒ UNMATCHED. Never a fallback, never a default-allow, never
+	// NO ENTRY ⇒ UNMATCHED. Never a fallback, never a default-allow, never
 	// a "the command looks safe" heuristic. Core has no opinion about which
 	// commands are safe; that is the operator's decision and the entire point
 	// of the file.
@@ -145,12 +234,12 @@ func unmatchedNoEntry(gate string) string {
 	return fmt.Sprintf("gate %q: no trust entry; approve it with `docket trust add` if you intend to run it", gate)
 }
 
-// bindingMatches is P2: an entry matches the current repo iff entry.repo
+// bindingMatches reports whether an entry matches the current repo iff entry.repo
 // STRING-EQUALS the current identity, or entry.global is true.
 //
 // Both sides are already symlink-resolved absolute paths — RepoIdentity
 // resolves the current one and Add resolves the stored one — so string equality
-// is the whole comparison. M6 applies: byte-exact, no normalization. Every
+// is the whole comparison: byte-exact, no normalization. Every
 // match-widening operation is an authorization decision, and one made by a
 // helper function nobody reviewed as one is the worst kind.
 func bindingMatches(e *Entry, repoIdentity string) bool {
@@ -160,10 +249,9 @@ func bindingMatches(e *Entry, repoIdentity string) bool {
 	return e.Repo != "" && e.Repo == repoIdentity
 }
 
-// isElementWisePrefix reports whether prefix is an ELEMENT-WISE prefix of argv
-// (§3.3).
+// isElementWisePrefix reports whether prefix is an ELEMENT-WISE prefix of argv.
 //
-// ELEMENT-WISE, NEVER STRING-PREFIX, is stated in the spec because the wrong
+// ELEMENT-WISE, NEVER STRING-PREFIX, is stated here because the wrong
 // reading is both easy and dangerous: a string-prefix comparison would let
 // ["make"] match ["make-release","--prod"], authorizing a command the operator
 // never saw. Here, ["make"] matches ["make","test"] and ["make","anything"] but
@@ -173,7 +261,7 @@ func isElementWisePrefix(prefix, argv []string) bool {
 		return false
 	}
 	for i, p := range prefix {
-		// M6: case-sensitive and byte-exact on every element.
+		// Case-sensitive and byte-exact on every element.
 		if argv[i] != p {
 			return false
 		}

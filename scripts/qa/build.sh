@@ -10,7 +10,7 @@
 # scans the core surface, `secret-scan` looks for credentials — each is its own
 # gate so one failure surfaces as one failure.
 #
-# go1.26.6 rather than `go`: that is the binary this toolchain provides under
+# go1.26.9 rather than `go`: that is the binary this toolchain provides under
 # the name the other gates already use (see ac-commands.sh), and a gate naming
 # a command the environment lacks records "unmatched" and teaches nobody
 # anything.
@@ -23,9 +23,9 @@ set -euo pipefail
 # at the shared tree. Outside any git repo, fall back to the script's own root.
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$(dirname "${BASH_SOURCE[0]}")/../..")"
 
-echo "=== build: go1.26.6 build ./... ==="
+echo "=== build: go build ./... ==="
 
-if ! go1.26.6 build ./... 2>&1; then
+if ! go build ./... 2>&1; then
   cat >&2 <<'EOF'
 
 build FAILED: the tree does not compile.

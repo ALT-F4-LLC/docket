@@ -7,8 +7,7 @@ import (
 	"sort"
 )
 
-// The `aggregate` builtin's register-time rules — V27's action clause and V28
-// (docs/tdd/payloads-thresholds.md §7.1).
+// The `aggregate` builtin's register-time rules — V27's action clause and V28.
 //
 // The vocabulary lives HERE rather than in internal/engine because both need it
 // and the engine imports this package: a register-time rule and a run-time
@@ -16,16 +15,16 @@ import (
 // rename, and the disagreement would read as "my trusted `aggregate` command
 // never ran".
 
-// ActionAggregate is the one builtin engine-spec §2 names: "One is builtin and
-// generic: action = "aggregate"".
+// ActionAggregate is the one builtin: "One is builtin and generic: action =
+// "aggregate"".
 const ActionAggregate = "aggregate"
 
 // BuiltinActions are the action names core COMPUTES ITSELF. There is exactly
-// one, and every other action name is a user-trusted command (§6.2).
+// one, and every other action name is a user-trusted command.
 var BuiltinActions = []string{ActionAggregate}
 
 // ReservedActions are the action names core RESERVES — the names that resolve
-// builtin-first and therefore never consult the trust store (§6.1 B1).
+// builtin-first and therefore never consult the trust store.
 //
 // It is a separate list from BuiltinActions on purpose. The two are equal today
 // and TestReservedActionsAreAllImplemented asserts it; the moment they are not,
@@ -34,18 +33,18 @@ var BuiltinActions = []string{ActionAggregate}
 // operator's command under a name core intends to take.
 var ReservedActions = []string{ActionAggregate}
 
-// AggregateParamKeys are the four keys §7.1's table declares, in its own order.
-// V28's "no other keys" is checked against exactly this list.
-var AggregateParamKeys = []string{"field", "method", "hold_spread", "output"}
+// AggregateParamKeys are the six keys the builtin declares, in their declared
+// order. V28's "no other keys" is checked against exactly this list.
+var AggregateParamKeys = []string{"field", "method", "hold_spread", "output", "route_at", "source_field"}
 
-// AggregateMethods is the closed reduction vocabulary, in §2's order.
+// AggregateMethods is the closed reduction vocabulary, in its declared order.
 var AggregateMethods = []string{"median", "max", "min"}
 
 // validateAction is V27's action clause and V28, over one step.
 //
 // It runs for every `action` step, builtin or not: V27 applies to the name and
 // V28 only to `aggregate`, because core reads no key of a non-builtin action's
-// params (§6.2) and validating a bag it never opens would be inventing a
+// params and validating a bag it never opens would be inventing a
 // contract for someone else's command.
 func validateAction(step *Step) error {
 	if step.StepClass() != ClassAction {
@@ -78,12 +77,12 @@ func validateAction(step *Step) error {
 
 // validateAggregateInputs is V31: `aggregate` requires a non-empty `inputs`.
 //
-// The builtin's input IS its declared `inputs` artifacts (engine-spec §2, as
-// amended), so an aggregate that declares none can never compute —
-// it would reduce over an empty set, produce an empty payload, hold nothing,
-// and pass its threshold vacuously. That is V29's spirit applied to the DATA
-// side: a step whose declaration makes its own computation impossible is a
-// register-time refusal, not a run that quietly succeeds at nothing.
+// The builtin's input IS its declared `inputs` artifacts, so an aggregate that
+// declares none can never compute — it would reduce over an empty set, produce
+// an empty payload, hold nothing, and pass its threshold vacuously. That is
+// V29's spirit applied to the DATA side: a step whose declaration makes its own
+// computation impossible is a register-time refusal, not a run that quietly
+// succeeds at nothing.
 //
 // It is checked BEFORE the params, so an author who declared no input hears
 // about the missing input rather than about a `method` typo they can only fix
@@ -104,7 +103,8 @@ func validateAggregateInputs(step *Step) error {
 }
 
 // validateAggregateParams is V28: `aggregate` requires `field`, `method`, and
-// `output`; `hold_spread` is an integer >= 0 when present; and NO OTHER KEYS.
+// `output`; `hold_spread` is an integer >= 0 when present; `route_at` and
+// `source_field` are non-empty strings when present; and NO OTHER KEYS.
 //
 // The discipline is every V-rule's. A typo'd `method = "medain"` is otherwise
 // discovered hours into a run, on a step whose inputs are already spent — and an
@@ -146,7 +146,7 @@ func validateAggregateParams(step *Step) error {
 	}
 
 	// `output` is already V11's — an action step must declare it — and is
-	// restated here so an `aggregate` step's four params are checked as one
+	// restated here so an `aggregate` step's params are checked as one
 	// table rather than two halves an author has to assemble.
 	if out, _ := step.Params["output"].(string); out == "" {
 		return fail("params",
@@ -158,6 +158,31 @@ func validateAggregateParams(step *Step) error {
 		if !ok || hold < 0 {
 			return fail("params",
 				"`params.hold_spread` must be an integer >= 0, got %v", raw)
+		}
+	}
+
+	// `route_at` is optional; when present it must be a non-empty string. WHICH
+	// strings it may name is the declared order's business, and the order lives
+	// in the step's registered schema — so the membership check is V28a's, in
+	// ValidateSchemas, beside V29's order check. This clause is pure bytes and
+	// stays here with V27, V28, and V31.
+	if raw, present := step.Params["route_at"]; present {
+		if s, ok := raw.(string); !ok || s == "" {
+			return fail("params",
+				"`params.route_at` must be a non-empty string naming a value of "+
+					"`params.field`'s declared order, got %v", raw)
+		}
+	}
+
+	// `source_field` is optional; when present it must be a non-empty string.
+	// Unlike `route_at` it names no value of a declared order — it names a
+	// PROPERTY, read back per-element by the run report (DKT-2462) — so there
+	// is no V28a-style order-membership check for ValidateSchemas to make.
+	if raw, present := step.Params["source_field"]; present {
+		if s, ok := raw.(string); !ok || s == "" {
+			return fail("params",
+				"`params.source_field` must be a non-empty string naming a "+
+					"property of each input element, got %v", raw)
 		}
 	}
 	return nil

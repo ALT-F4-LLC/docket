@@ -2,9 +2,9 @@ package engine
 
 import "testing"
 
-// TestScopeIntersection is §6.5's S2 table, with the exact globs the TDD names
-// as explicit cases plus the conservative direction stated as an assertion
-// rather than a comment.
+// TestScopeIntersection is S2's table, with the globs S2 names as explicit
+// cases plus the conservative direction stated as an assertion rather than a
+// comment.
 func TestScopeIntersection(t *testing.T) {
 	cases := []struct {
 		name string
@@ -16,13 +16,13 @@ func TestScopeIntersection(t *testing.T) {
 			name: "a directory tree contains a file in it",
 			a:    "internal/db/**", b: "internal/db/leases.go",
 			want: true,
-			why:  "the TDD names this pair as intersecting",
+			why:  "a tree contains every file beneath it",
 		},
 		{
 			name: "sibling trees do not intersect",
 			a:    "internal/db/**", b: "internal/cli/**",
 			want: false,
-			why:  "the TDD names this pair as NOT intersecting",
+			why:  "sibling trees share no path",
 		},
 		{
 			name: "a leading wildcard intersects everything",
@@ -56,7 +56,7 @@ func TestScopeIntersection(t *testing.T) {
 		},
 		{
 			name: "a single-star tree intersects a file beneath it",
-			a:    "docs/*", b: "docs/design/engine-spec.md",
+			a:    "docs/*", b: "docs/guide/spec.md",
 			want: true,
 		},
 		{
@@ -73,7 +73,7 @@ func TestScopeIntersection(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Symmetric, per S4: exclusion is not directional.
+			// Symmetric: exclusion is not directional.
 			if got := globsIntersect(tc.a, tc.b); got != tc.want {
 				t.Errorf("globsIntersect(%q, %q) = %v, want %v — %s",
 					tc.a, tc.b, got, tc.want, tc.why)
@@ -87,7 +87,7 @@ func TestScopeIntersection(t *testing.T) {
 }
 
 // TestScopelessNeverExcludes is S1, stated in both directions: an issue with no
-// declared scope neither excludes nor is excluded (engine-core §5).
+// declared scope neither excludes nor is excluded.
 //
 // This is the DORMANCY case as much as a scheduling one — every pre-existing
 // issue carries NULL — so a regression here would make a workflow-free repo's
@@ -145,7 +145,7 @@ func TestScopeListsIntersectOnAnyPair(t *testing.T) {
 // added later defaults to non-excluding, and the failure mode of getting it
 // wrong is a silent double-claim on one working tree — the exact thing scope
 // exists to prevent. `gated` is the interesting non-excluding case: its
-// artifact has recorded and its token retired (§6.8), so the work against the
+// artifact has recorded and its token retired, so the work against the
 // tree is over even though the step is not terminal.
 func TestOnlyClaimedAndRunningExclude(t *testing.T) {
 	cases := []struct {
@@ -165,7 +165,7 @@ func TestOnlyClaimedAndRunningExclude(t *testing.T) {
 	}
 
 	if len(cases) != 9 {
-		t.Fatalf("enumerated %d statuses, want the 9 persisted ones (§6.2)", len(cases))
+		t.Fatalf("enumerated %d statuses, want the 9 persisted ones", len(cases))
 	}
 
 	for _, tc := range cases {

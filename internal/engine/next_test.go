@@ -1,11 +1,15 @@
 package engine
 
 import (
+	"encoding/json"
+	"maps"
+	"runtime"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // DKT-55/DKT-80: `next` must never answer with a snapshot that disagrees
@@ -126,6 +130,110 @@ func TestNextDoesNotRecomputeWhenNothingRouted(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// `next` drives engine-run lifecycles to quiescence
+// ---------------------------------------------------------------------------
+
+// The three tests below are dispatch_test.go's cascade trio asked of `next`,
+// over the same fixtures: an action step whose routing readies a second action
+// step and a vote step. One pass over the first offer's ready prefix drove
+// `reduce@0`, then re-rendered the offer with `rereduce@0` as a ready action
+// row nothing but the engine can run and `poll@0` as a ready vote row with no
+// ballot — each stranded until the next poll. `next` now drives the
+// re-rendered offer again until a pass routes nothing.
+
+// TestNextDrivesACascadedActionStep: the second action has run inside the
+// same call, and the answer carries no ready action row for it.
+func TestNextDrivesACascadedActionStep(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	answer, err := e.NextSteps(conn, runID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+
+	if got := stepStatus(t, conn, "rereduce@0"); got != db.StepDone {
+		t.Errorf("rereduce@0 is %q after one next, want %q — reduce@0's routing "+
+			"readied it inside the same call", got, db.StepDone)
+	}
+	for _, row := range answer.Steps {
+		if row.Instance == "rereduce@0" && row.Kind == workflow.ClassAction &&
+			row.Status == db.StepReady {
+			t.Errorf("the answer carries rereduce@0 as a ready action row; " +
+				"no relay will ever execute it")
+		}
+	}
+}
+
+// TestNextOpensACascadedVoteProposal: the vote step the routing readied has
+// its ballot open by the time the call answers, and its row says which.
+func TestNextOpensACascadedVoteProposal(t *testing.T) {
+	e := testEngine()
+	conn, runID := cascadeRun(t, e)
+	approveDecide(t, conn, e)
+
+	answer, err := e.NextSteps(conn, runID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+
+	poll, err := db.GetStep(conn, stepIDByInstance(t, conn, "poll@0"))
+	testsupport.Must(t, err, "reading poll@0: %v", err)
+	id, err := findVoteProposal(conn, poll)
+	testsupport.Must(t, err, "finding poll@0's proposal: %v", err)
+	if id == 0 {
+		t.Fatal("poll@0 has no proposal after the next that readied it")
+	}
+	proposal, err := db.GetProposal(conn, id)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if proposal.Status != model.ProposalStatusOpen {
+		t.Errorf("poll@0's proposal is %q, want %q — phase 2 opens a ballot, "+
+			"nothing in this call casts on it", proposal.Status, model.ProposalStatusOpen)
+	}
+	var pollRow *model.StepRow
+	for i := range answer.Steps {
+		if answer.Steps[i].Instance == "poll@0" {
+			pollRow = &answer.Steps[i]
+		}
+	}
+	if pollRow == nil {
+		t.Fatalf("the answer %v carries no poll@0", instancesIn(answer))
+	}
+	if pollRow.Status != db.StepReady {
+		t.Errorf("poll@0 row status = %q, want %q", pollRow.Status, db.StepReady)
+	}
+	if want := model.FormatProposalID(id); pollRow.Proposal != want {
+		t.Errorf("poll@0 row proposal = %q, want %q", pollRow.Proposal, want)
+	}
+}
+
+// TestNextRunsAnUncascadedActionOnce: with one ready action whose routing
+// readies nothing engine-run, the call executes it exactly once — the
+// re-derived pass finds it routed and drives nothing.
+func TestNextRunsAnUncascadedActionOnce(t *testing.T) {
+	conn := mustDB(t)
+	registerFixtureSchema(t, conn)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(extendDrivesSrc), "extend-drives.toml")
+	issue := createIssue(t, conn, "uncascaded", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+	counter := countActions(e)
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	approveDecide(t, conn, e)
+
+	_, err = e.NextSteps(conn, run.ID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+
+	if got := counter.runs["reduce@0"]; got != 1 {
+		t.Errorf("reduce@0 ran %d times during next, want 1", got)
+	}
+	if len(counter.runs) != 1 {
+		t.Errorf("actions run = %v, want only reduce@0", counter.runs)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // DKT-54: the run-scoped step inventory
 // ---------------------------------------------------------------------------
 
@@ -186,5 +294,166 @@ func TestRunStepListEnumeratesTheRun(t *testing.T) {
 	_, err = RunStepList(conn, 999, nowMS)
 	if err == nil {
 		t.Error("RunStepList(absent run) returned no error")
+	}
+}
+
+// TestStepRowCarriesLoopHistory pins the projection half of the loop-history
+// fields: a step whose history db.SetStepLoopHistoryWithCapTx wrote must show
+// all four values on the row StepRowFor renders (the row behind `next`,
+// `dispatch open`, `step show`, and claim context), and a step with none must
+// show zero values and serialize without loop_cap. The columns alone disclose
+// nothing to a reader. The cap differs from the rounds so a projection of the
+// wrong column cannot pass.
+func TestStepRowCarriesLoopHistory(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	id := stepIDByInstance(t, conn, "implement@0")
+
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = db.SetStepLoopHistoryWithCapTx(tx, id, 3, 5, "review@0#0", "needs-fix", nowMS)
+	testsupport.Must(t, err, "SetStepLoopHistoryWithCapTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	ttls, err := loadTTLConfig(conn, run.ID)
+	testsupport.Must(t, err, "loadTTLConfig: %v", err)
+
+	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
+		row, err := StepRowFor(sched, stepNamed(t, sched, "implement@0"), ttls)
+		testsupport.Must(t, err, "StepRowFor(implement@0): %v", err)
+		if row.LoopRoundsRun != 3 {
+			t.Errorf("loop_rounds_run = %d, want 3", row.LoopRoundsRun)
+		}
+		if row.LoopTriggerStep != "review@0#0" {
+			t.Errorf("loop_trigger_step = %q, want %q", row.LoopTriggerStep, "review@0#0")
+		}
+		if row.LoopLatestVerdict != "needs-fix" {
+			t.Errorf("loop_latest_verdict = %q, want %q", row.LoopLatestVerdict, "needs-fix")
+		}
+		if row.LoopCap != 5 {
+			t.Errorf("loop_cap = %d, want the written cap 5", row.LoopCap)
+		}
+
+		fresh, err := StepRowFor(sched, stepNamed(t, sched, "review@0#0"), ttls)
+		testsupport.Must(t, err, "StepRowFor(review@0#0): %v", err)
+		if fresh.LoopRoundsRun != 0 || fresh.LoopTriggerStep != "" ||
+			fresh.LoopLatestVerdict != "" || fresh.LoopCap != 0 {
+			t.Errorf("row without loop history = (%d, %q, %q, cap %d), want zero values",
+				fresh.LoopRoundsRun, fresh.LoopTriggerStep, fresh.LoopLatestVerdict,
+				fresh.LoopCap)
+		}
+
+		exhaustedJSON := marshalStepRowKeys(t, row)
+		if got, ok := exhaustedJSON["loop_cap"]; !ok || string(got) != "5" {
+			t.Errorf("exhausted row JSON loop_cap = %s (present %v), want 5", got, ok)
+		}
+		if got, ok := marshalStepRowKeys(t, fresh)["loop_cap"]; ok {
+			t.Errorf("fresh row JSON carries loop_cap = %s, want the key omitted", got)
+		}
+	})
+}
+
+func marshalStepRowKeys(t *testing.T, row model.StepRow) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(row)
+	testsupport.Must(t, err, "marshal StepRow: %v", err)
+	var keys map[string]json.RawMessage
+	err = json.Unmarshal(raw, &keys)
+	testsupport.Must(t, err, "unmarshal StepRow JSON: %v", err)
+	return keys
+}
+
+// TestNextCarriesEachOfferedClassCapAndSource: `next` reports the cap the
+// scheduler enforces for every class its offer carries, with what set it: a
+// numeric override, auto at the integer it resolves to, and the pinned
+// workflow max. An offered class nothing bounds is absent from both maps, and
+// so is a bounded class the offer does not carry.
+func TestNextCarriesEachOfferedClassCapAndSource(t *testing.T) {
+	const src = `
+[pipeline]
+name = "four-classes"
+version = 1
+
+[match]
+kind = ["task"]
+
+[limits]
+write = { max = 2 }
+judge = { max = 3 }
+read = { max = 5 }
+idle = { max = 7 }
+
+[[step]]
+name = "w"
+executor = "x"
+class = "write"
+emits = "out"
+after = []
+
+[[step]]
+name = "j"
+executor = "x"
+class = "judge"
+emits = "out"
+after = []
+
+[[step]]
+name = "r"
+executor = "x"
+class = "read"
+emits = "out"
+after = []
+
+[[step]]
+name = "f"
+executor = "x"
+class = "free"
+emits = "out"
+after = []
+`
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(src), "four-classes.toml")
+	run := startRun(t, conn, createIssue(t, conn, "four", "body", "task", nil))
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", "4")
+	testsupport.Must(t, err, "setting the numeric override: %v", err)
+	err = db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"read", db.ClassMaxAuto)
+	testsupport.Must(t, err, "setting auto: %v", err)
+
+	answer, err := testEngine().NextSteps(conn, run.ID, 0, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+	offered := map[string]bool{}
+	for _, row := range answer.Steps {
+		offered[row.Class] = true
+	}
+	for _, class := range []string{"write", "judge", "read", "free"} {
+		if !offered[class] {
+			t.Fatalf("premise: the offer carries no %s row: %v", class, rowInstances(answer.Steps))
+		}
+	}
+
+	wantLimits := map[string]int{
+		"write": 4,
+		"read":  max(1, runtime.NumCPU()/2),
+		"judge": 3,
+	}
+	wantSources := map[string]string{
+		"write": "override",
+		"read":  "auto",
+		"judge": "workflow",
+	}
+	if !maps.Equal(answer.Limits, wantLimits) {
+		t.Errorf("Limits = %v, want %v", answer.Limits, wantLimits)
+	}
+	if !maps.Equal(answer.LimitSources, wantSources) {
+		t.Errorf("LimitSources = %v, want %v", answer.LimitSources, wantSources)
+	}
+	if n, ok := answer.Limits["free"]; ok {
+		t.Errorf("Limits lists unbounded class free as %d, want no entry", n)
+	}
+	if s, ok := answer.LimitSources["free"]; ok {
+		t.Errorf("LimitSources lists unbounded class free as %q, want no entry", s)
 	}
 }

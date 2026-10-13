@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// Step statuses expansion can assign. The full ten-status machine is phase 3's
-// (TDD §6.2); expansion writes only these three, and `ready` is never among
-// them because `ready` is COMPUTED at read time, never stored as intent.
+// Step statuses expansion can assign. The full ten-status machine is phase
+// 3's; expansion writes only these three, and `ready` is never among them
+// because `ready` is COMPUTED at read time, never stored as intent.
 const (
 	StatusPending = "pending"
 	StatusSkipped = "skipped"
@@ -16,9 +16,9 @@ const (
 
 // StepInstance is one expanded step row, before it is written. It carries the
 // decomposed identity (name/ordinal/sibling) AND the rendered `instance`
-// string, because §11.3 makes the rendered form the step's public identity —
-// it appears in wire shapes, events, and error strings — and a stored rendering
-// cannot drift from a formatting helper someone edits later.
+// string, because the rendered form is the step's public identity — it appears
+// in wire shapes, events, and error strings — and a stored rendering cannot
+// drift from a formatting helper someone edits later.
 type StepInstance struct {
 	Name         string
 	Ordinal      int
@@ -32,7 +32,7 @@ type StepInstance struct {
 	ExpectedCost float64
 	Metadata     map[string]any
 	// Packet is the step's declared packet files with `{executor}` already
-	// substituted FOR THIS SIBLING (§1.1.1).
+	// substituted FOR THIS SIBLING.
 	//
 	// Substitution happens at expansion rather than at render because a fanout
 	// step is one step whose siblings carry different hints: resolving here is
@@ -41,7 +41,7 @@ type StepInstance struct {
 	Packet []string
 }
 
-// RenderInstance renders the §11.3 step identity `name@k#i`. The `#i` suffix is
+// RenderInstance renders the step identity `name@k#i`. The `#i` suffix is
 // absent when the step is not fanned out.
 func RenderInstance(name string, ordinal int, sibling *int) string {
 	if sibling == nil {
@@ -50,27 +50,26 @@ func RenderInstance(name string, ordinal int, sibling *int) string {
 	return fmt.Sprintf("%s@%d#%d", name, ordinal, *sibling)
 }
 
-// Expand is the pure function of engine-core §2: "Expansion is a pure function
-// of (issue kind, labels, pipeline definitions @ pinned version). Same issue,
-// same pipeline version => identical steps, every time."
+// Expand is a pure function: "Expansion is a pure function of (issue kind,
+// labels, pipeline definitions @ pinned version). Same issue, same pipeline
+// version => identical steps, every time."
 //
-// It produces, deterministically (TDD §5.3.1):
+// It produces, deterministically:
 //
 //   - one row per non-`loop` [[step]], at ordinal 0, named `name@0`;
 //   - for a `fanout` step, one row per hint — `name@0#0 .. name@0#n-1`, in
 //     DECLARED HINT ORDER, the index being the position in the `fanout` array
 //     and never a map iteration;
 //   - steps whose `when` is false created with status `skipped`, NOT omitted —
-//     §11.1 says "step is skipped when false", and a CREATED skipped step is
+//     the rule is "step is skipped when false", and a CREATED skipped step is
 //     what makes a downstream `after` resolvable and the topology identical
 //     regardless of the predicate's value;
-//   - `loop = true` steps NOT created (§11.3 (3): "excluded from ordinary
-//     expansion");
+//   - `loop = true` steps NOT created ("excluded from ordinary expansion");
 //   - steps named as a `threshold` step-name routing target CREATED, in
-//     status `pending` — §11.2's interposed gate. The engine's readiness
-//     latch (R3's interposition clause) is what keeps one unready until a
-//     routing predecessor's recorded routing names it, and a routing that
-//     resolves anywhere else terminalizes it `skipped`.
+//     status `pending` — the interposed gate. The engine's readiness latch is
+//     what keeps one unready until a routing predecessor's recorded routing
+//     names it, and a routing that resolves anywhere else terminalizes it
+//     `skipped`.
 //
 // Determinism is the property this function exists to have, and the one a
 // careless edit breaks: it walks def.Steps and step.Fanout, both slices in
@@ -82,7 +81,7 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 	out := make([]StepInstance, 0, len(def.Steps))
 
 	for _, step := range def.Steps {
-		// (3) of §11.3: loop bodies instantiate at loop entry, not here.
+		// Loop bodies instantiate at loop entry, not here.
 		if step.Loop {
 			continue
 		}
@@ -92,32 +91,61 @@ func Expand(def *Definition, s Subject, ordinal int) []StepInstance {
 	return out
 }
 
-// ExpandOrdinal is expansion at a LOOP ORDINAL — §11.3 clauses (3) and (4),
-// the counterpart of Expand's ordinary expansion at ordinal 0.
+// ExpandOrdinal is expansion at a LOOP ORDINAL — loop entry and the
+// `after_loop` re-instantiation, the counterpart of Expand's ordinary expansion
+// at ordinal 0.
 //
-// Two sets of steps instantiate at ordinal k, and only these two:
+// Three sets of steps instantiate at ordinal k, and only these three:
 //
-//   - clause (3): `loop = true` steps, which ordinary expansion excludes
-//     ("excluded from ordinary expansion ... instantiate at ordinal k");
-//   - clause (4): the `after_loop` step AND ITS DOWNSTREAM CHAIN
+//   - the SERVING `loop = true` steps, supplied as `bodies` — the triggering
+//     step's cluster (LoopBodiesFor), which is every body when no `serves` is
+//     declared anywhere;
+//   - the cluster's `after_loop` roots AND THEIR DOWNSTREAM CHAIN
 //     ("`after_loop` and its downstream chain re-instantiate at ordinal k"),
 //     supplied as `downstream` because the chain is a property of the
-//     definition's shape that the caller already computed for the sweep.
+//     definition's shape that the caller already computed for the sweep;
+//   - every step an instantiated body can interpose (InterposedTargets: its
+//     threshold step-name routings, its `on_fail` panel, its `on_exhausted`
+//     target), when that body's `when` holds. A body routing at ordinal k
+//     opens its target AT ordinal k, and a target left at ordinal 0 resolves
+//     its routing predecessor at ordinal 0 or below, so it would never see
+//     that routing. Derived here rather than supplied: the sweep never reads
+//     it, and a target the body did not route to is skipped by the routing
+//     itself. A body expanded `skipped` never runs and so never routes; a
+//     target only it named would stay pending and hold the after_loop root.
+//
+// The first two sets are the CALLER's, computed for the entry's triggering
+// step, so the instantiation and the supersede sweep read one answer to "what
+// does this cluster re-run" rather than two that can drift.
 //
 // EVERYTHING ELSE IS LEFT AT ITS EXISTING ORDINAL. `implement` is upstream of
-// `after_loop`: it does not re-run, its artifact is not reproduced, and §7.4's
+// `after_loop`: it does not re-run, its artifact is not reproduced, and the
 // per-input fallback exists precisely so a step at ordinal k can still bind it.
+// A body OUTSIDE the triggering cluster is likewise left alone — its rounds are
+// its own triggers' to mint (DKT-544).
 //
 // Sharing Expand's per-step body is the point. The status/class/fanout/metadata
 // rules are applied by one function for both ordinals, so ordinal 1's topology
 // cannot drift from ordinal 0's — a second implementation of "one row per hint,
 // in declared order" is exactly how it would.
-func ExpandOrdinal(def *Definition, s Subject, ordinal int, downstream map[string]bool) []StepInstance {
-	out := make([]StepInstance, 0, len(def.Steps))
-
+func ExpandOrdinal(
+	def *Definition, s Subject, ordinal int, bodies, downstream map[string]bool,
+) []StepInstance {
+	targets := make(map[string]bool)
 	for _, step := range def.Steps {
-		// Clause (3) or clause (4); a step in neither set does not re-instantiate.
-		if !step.Loop && !downstream[step.Name] {
+		if step.Loop && bodies[step.Name] && WhenHolds(step.When, s) {
+			for _, target := range InterposedTargets(step) {
+				targets[target] = true
+			}
+		}
+	}
+
+	out := make([]StepInstance, 0, len(def.Steps))
+	for _, step := range def.Steps {
+		// Clause (3), clause (4), or a body's interposed target; any other
+		// step does not re-instantiate.
+		if !(step.Loop && bodies[step.Name]) && !downstream[step.Name] &&
+			!targets[step.Name] {
 			continue
 		}
 		out = append(out, expandStep(step, s, ordinal)...)
@@ -126,10 +154,30 @@ func ExpandOrdinal(def *Definition, s Subject, ordinal int, downstream map[strin
 	return out
 }
 
+// ServesTrigger reports whether a step's loop-cluster declaration covers a
+// triggering step name. An empty `serves` covers EVERY trigger — the
+// backward-compatible reading under which a workflow with no `serves`
+// anywhere has one cluster spanning every body and root.
+func ServesTrigger(step *Step, trigger string) bool {
+	return len(step.Serves) == 0 || slices.Contains(step.Serves, trigger)
+}
+
+// LoopBodiesFor is the set of `loop = true` step names serving one trigger —
+// loop entry scoped to the step whose routing entered the loop.
+func LoopBodiesFor(def *Definition, trigger string) map[string]bool {
+	out := make(map[string]bool)
+	for _, step := range def.Steps {
+		if step.Loop && ServesTrigger(step, trigger) {
+			out[step.Name] = true
+		}
+	}
+	return out
+}
+
 // ExpandStepAt renders ONE named step's instance rows at an ordinal — the same
 // rows ExpandOrdinal would have produced for it, and nothing else.
 //
-// It exists for §11.3 (2)'s repair case: a step superseded at ordinal k-1 whose
+// It exists for the repair case: a step superseded at ordinal k-1 whose
 // successor the ordinal-k expansion did not produce has to be created before
 // the transaction closes, and creating it means expanding exactly one step. The
 // caller cannot reach for ExpandOrdinal there, because ExpandOrdinal always
@@ -161,7 +209,7 @@ func expandStep(step *Step, s Subject, ordinal int) []StepInstance {
 
 	class := step.Class
 	if class == "" {
-		// §11.1 `class`: "default = executor value". V23 records the rule; the
+		// `class` is "default = executor value". V23 records the rule; the
 		// default is applied HERE rather than at parse so `parsed` stores what
 		// the author wrote and the engine derives the rest — a defaulted value
 		// baked into the pinned form would make a later change to the defaulting
@@ -188,7 +236,7 @@ func expandStep(step *Step, s Subject, ordinal int) []StepInstance {
 	}
 
 	// One sibling per hint, in declared order. The hint is the sibling's
-	// executor: `fanout` is "[executor hints]" (§11.1) and each sibling is an
+	// executor: `fanout` is "[executor hints]" and each sibling is an
 	// instance of one step differing only in which hint it carries.
 	out := make([]StepInstance, 0, len(step.Fanout))
 	for i, hint := range step.Fanout {
@@ -209,7 +257,7 @@ func expandStep(step *Step, s Subject, ordinal int) []StepInstance {
 	return out
 }
 
-// stepKind maps a step's §11.1 "exactly one of" alternative to the `kind`
+// stepKind maps a step's "exactly one of" alternative to the `kind`
 // column's vocabulary: 'executor' | 'action' | 'human' | 'vote'. A fanout step
 // is an executor step expanded per hint, so its siblings are `executor` rows —
 // `fanout` describes how many, not what kind.
@@ -227,11 +275,11 @@ func stepKind(step *Step) string {
 	}
 }
 
-// expectedCost is §11.1's `expected_cost`, default 0. It is stored on the row
-// and emitted on `next` rows at this stage but ENFORCES NOTHING — S6 owns the
-// budget floor. Storing it now keeps the wire shape whole: a later stage adding
-// a field to `next` rows would be a compat event for dispatchers already
-// consuming them.
+// expectedCost is the step's `expected_cost`, default 0. It is stored on the
+// row and emitted on `next` rows at this stage but ENFORCES NOTHING — a later
+// stage owns the budget floor. Storing it now keeps the wire shape whole: a
+// later stage adding a field to `next` rows would be a compat event for
+// dispatchers already consuming them.
 func expectedCost(step *Step) float64 {
 	if step.ExpectedCost == nil {
 		return 0
@@ -240,14 +288,14 @@ func expectedCost(step *Step) float64 {
 }
 
 // InterposedSteps returns the step names some `threshold` routes to by name —
-// §11.2's interposed gates.
+// the interposed gates.
 //
 // The test is BEING NAMED AS A ROUTING TARGET, never `after`-reachability.
 // V8 forces every non-first step to declare `after`, so a real-world
 // interposed gate declares `after = [routing-step]` (the canonical shape: it
 // anchors the gate in the topology and gives the staged closure its stage) —
 // an unreachability test would classify every such gate as ordinary and hand
-// it R3's plain readiness, which is exactly DKT-38's every-run panel seating.
+// it plain readiness, which is exactly DKT-38's every-run panel seating.
 // The set is computed from the definition rather than stored, so it cannot
 // drift from the thresholds that define it.
 //
@@ -293,15 +341,36 @@ func ThresholdTargets(threshold map[string]string) []string {
 	return out
 }
 
-// RoutingPredecessors returns the names of the steps whose `threshold` routes
-// to `name`, in declaration order — the steps whose recorded routing decides
-// whether the interposed gate `name` ever becomes ready. Empty for a step no
-// threshold names, which is what makes ordinary steps invisible to the
-// readiness latch.
+// InterposedTargets returns every step this one can interpose as a conditional
+// gate: its `threshold` step-name routings, the triage panel its `on_fail`
+// names (DKT-1901), and the step its `on_exhausted` names (DKT-1902). Sorted,
+// and free of duplicates when several name the same step.
+//
+// It is ONE function because the two are one concept — a successor that runs
+// only if this step's routing selects it — and every reader must agree about
+// the set. A reader seeing only the threshold half opens or skips the wrong
+// gates: the readiness latch would hold a panel nobody can route to, and
+// skipUnroutedTargets would leave a panel `pending` on the passing lane, which
+// blocks the issue forever.
+func InterposedTargets(step *Step) []string {
+	out := ThresholdTargets(step.Threshold)
+	for _, target := range []string{step.OnFailTarget(), step.OnExhaustedTarget()} {
+		if target != "" && !slices.Contains(out, target) {
+			out = append(out, target)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// RoutingPredecessors returns the names of the steps that can interpose `name`,
+// in declaration order — the steps whose recorded routing decides whether the
+// interposed gate `name` ever becomes ready. Empty for a step nothing names,
+// which is what makes ordinary steps invisible to the readiness latch.
 func RoutingPredecessors(def *Definition, name string) []string {
 	var out []string
 	for _, step := range def.Steps {
-		if slices.Contains(ThresholdTargets(step.Threshold), name) {
+		if slices.Contains(InterposedTargets(step), name) {
 			out = append(out, step.Name)
 		}
 	}
@@ -309,30 +378,34 @@ func RoutingPredecessors(def *Definition, name string) []string {
 }
 
 // ContextSize is the byte size of the closure an expanded step would carry —
-// the engine-core §8 measurement the caps in §5.5 are compared against.
+// the measurement the context caps are compared against.
 //
 // At this stage the closure is the issue snapshot plus the step's own metadata:
 // input artifacts do not exist until steps complete (phase 3), so an expansion-
 // time measurement is necessarily of what activation itself froze. That is the
-// right thing to measure here: engine-core §8 puts the check "at expansion
-// time — the fix is a pipeline/contract change, visible before spend", and the
-// body snapshot is the part an oversized issue makes oversized.
-// packetBytes reports the size of one declared packet file, or 0 when the run
-// pinned no such path. It is a function rather than a map so activation can
-// answer from whatever it already holds without building an index per step.
+// right thing to measure here: the check belongs "at expansion time — the fix
+// is a pipeline/contract change, visible before spend", and the body snapshot
+// is the part an oversized issue makes oversized.
+// packetBytes reports the size of the declared packet files and their rendered
+// includes, counting each ref once. Activation supplies the resolver's file
+// selection rules and pinned byte counts without coupling expansion to disk.
+//
+// Attachments a step reads through the `issue.files` entry in inst.Inputs are
+// deliberately NOT summed. They are read live when the packet renders, so
+// expansion has no bytes to count, and they are uncapped. Do not add them here.
 func ContextSize(
-	bodySnapshot, issueSnapshot string, inst StepInstance, packetBytes func(string) int,
+	bodySnapshot, issueSnapshot string, inst StepInstance, packetBytes func([]string) int,
 ) int {
 	n := len(bodySnapshot) + len(issueSnapshot) + len(inst.Instance)
 	for k, v := range inst.Metadata {
 		n += len(k) + len(fmt.Sprint(v))
 	}
 
-	// The declared packet files count toward the closure (§1.5).
+	// The declared packet files and their includes count toward the closure.
 	//
-	// THIS IS NOT OPTIONAL BOOKKEEPING. engine-core §8 records closure size on
-	// the step as the honest cost figure, and §11.1's caps refuse an oversized
-	// closure AT EXPANSION TIME — "the fix is a pipeline/contract change,
+	// THIS IS NOT OPTIONAL BOOKKEEPING. Closure size is recorded on the step
+	// as the honest cost figure, and the caps refuse an oversized closure AT
+	// EXPANSION TIME — "the fix is a pipeline/contract change,
 	// visible before spend, not a silent 107KB spawn". Inlining file bodies
 	// without counting them would leave the recorded figure understating real
 	// cost and the caps no longer binding, which is exactly the failure that
@@ -342,14 +415,12 @@ func ContextSize(
 	// refusal is activation's (a declared entry must be pinned), and a size
 	// helper that also enforced existence would put one rule in two places.
 	if packetBytes != nil {
-		for _, entry := range inst.Packet {
-			n += len(entry) + packetBytes(entry)
-		}
+		n += packetBytes(inst.Packet)
 	}
 	return n
 }
 
-// ArtifactKind reports the artifact kind a step produces, per TDD §4.3.1. It is
+// ArtifactKind reports the artifact kind a step produces. It is
 // exported because activation and phase 3's input resolution both need it and
 // must agree — the kind comes from a DIFFERENT field per step class, and two
 // readers deriving it independently is how they drift.
@@ -370,7 +441,7 @@ func ArtifactKind(step *Step) string {
 	}
 }
 
-// StepByName finds a step in a definition by its §11.1 `name`, which V4 made
+// StepByName finds a step in a definition by its `name`, which V4 made
 // unique within the workflow.
 func StepByName(def *Definition, name string) *Step {
 	for _, step := range def.Steps {

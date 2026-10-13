@@ -262,6 +262,15 @@ func newVoteCastCmd() *cobra.Command {
 				findingsJSON = &f
 			}
 
+			// Evidence references are resolved against the proposal's run BEFORE
+			// the cast records (DKT-2451): a cast has no amend path, and a
+			// reference that resolves against nothing must refuse here, by
+			// name, rather than land as a citation nobody can follow. Findings
+			// citing nothing pass through untouched, exactly as before.
+			if err := engine.ValidateCastEvidence(conn, proposalID, findingsJSON); err != nil {
+				return runErr(err)
+			}
+
 			// Validate ranges.
 			if confidence < 0.0 || confidence > 1.0 {
 				return cmdErr(fmt.Errorf("--confidence must be in [0.0, 1.0]"), output.ErrValidation)
@@ -332,8 +341,26 @@ func newVoteCastCmd() *cobra.Command {
 				Usage:           usage,
 			}
 
-			result, err := db.CastVote(conn, vote)
+			// The engine's cast path (engine/vote_cast.go) reads the vote
+			// step's pinned `roster`, `weighting` and `recuse` before the
+			// existing tally runs: a name off a strict roster or the reviewed
+			// step's own executor is refused here as VALIDATION_ERROR with no
+			// vote written, and an equal-weighted step tallies every cast the
+			// same. An ad-hoc proposal enforces nothing and tallies as before.
+			result, err := engine.CastVote(conn, vote)
+			// A result beside the error is a cast that COMMITTED, followed by
+			// a panel-event write that failed (engine.CastVote). The cast
+			// stands and a retry would be refused, so it routes and prints
+			// like any other, and the invocation still fails naming what did
+			// not land — never as the refusal a cast with no result gets.
+			var afterCommit error
+			if err != nil && result != nil {
+				afterCommit, err = err, nil
+			}
 			if err != nil {
+				if _, ok := engine.CodeOf(err); ok {
+					return runErr(err)
+				}
 				if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
 					return e
 				}
@@ -346,16 +373,20 @@ func newVoteCastCmd() *cobra.Command {
 			// The cast that reaches quorum finalizes the proposal
 			// (db.CastVote), and the vote STEP standing behind it — if this
 			// is a run's vote-step ballot and not an ad-hoc one — must then
-			// ROUTE, §8.1 phases 4 and 5. `next` cannot do it mid-wave (it
-			// refuses while a dispatch is open), so the deciding cast is the
+			// ROUTE. `next` cannot do it mid-wave (it refuses while a dispatch
+			// is open), so the deciding cast is the
 			// observing invocation (engine/drive.go): downstream staged rows
 			// become claimable the moment this verb returns.
 			if result.QuorumReached {
 				e := engine.NewEngine()
 				if err := e.DriveVoteProposal(conn, proposalID, model.NowMS()); err != nil {
-					return cmdErr(fmt.Errorf(
-						"the vote recorded and the proposal decided, but "+
-							"routing the vote step failed: %w", err), output.ErrGeneral)
+					if afterCommit != nil {
+						afterCommit = fmt.Errorf("%w; routing the vote step also failed: %v", afterCommit, err)
+					} else {
+						return cmdErr(fmt.Errorf(
+							"the vote recorded and the proposal decided, but "+
+								"routing the vote step failed: %w", err), output.ErrGeneral)
+					}
 				}
 			}
 
@@ -376,6 +407,13 @@ func newVoteCastCmd() *cobra.Command {
 				WeightedScore:  result.WeightedScore,
 			}
 
+			// One report, not a success followed by an error: in JSON mode
+			// that would put two documents on stdout.
+			if afterCommit != nil {
+				w.PartialFailure(data, msg, afterCommit, output.ErrGeneral)
+				return &reportedFailure{Code: output.ErrGeneral}
+			}
+
 			w.Success(data, msg)
 
 			return nil
@@ -388,14 +426,19 @@ func newVoteCastCmd() *cobra.Command {
 	cmd.Flags().Float64("confidence", 0, "Confidence 0.0-1.0")
 	cmd.Flags().Float64("domain-relevance", 0, "Domain relevance 0.0-1.0")
 	cmd.Flags().String("findings", "", "Review findings (use \"-\" for stdin)")
-	cmd.Flags().String("findings-json", "", "Structured findings JSON (use \"-\" for stdin)")
+	cmd.Flags().String("findings-json", "",
+		"Structured findings JSON: {\"blockers\": [...], \"concerns\": [...], "+
+			"\"suggestions\": [...]}. An entry is a string, or {\"text\": ..., "+
+			"\"evidence\": [\"artifact:ARTIFACT-N\", \"gate:<name>\"]} citing what it "+
+			"rests on; every reference must resolve in the run the proposal was "+
+			"opened for, or the cast is refused (use \"-\" for stdin)")
 	cmd.Flags().String("summary", "", "Review summary (use \"-\" for stdin)")
 	cmd.Flags().String("summary-file", "",
 		"Read the review summary from PATH (alternative to --summary; use when "+
 			"stdin already feeds --findings)")
 	cmd.Flags().String("metadata", "",
-		"Opaque JSON object claiming what cast this vote — worked example in "+
-			"skills/docket/SKILL.md; unverified, visible to anyone who can list "+
+		"Opaque JSON object claiming what cast this vote — see the docket skill for a "+
+			"worked example; unverified, visible to anyone who can list "+
 			"processes, and then stored and exported verbatim, so treat it as public")
 	cmd.Flags().String("usage", "",
 		`This seat's own spend report: {"unit": n, ...}, recorded per seat in `+
@@ -479,7 +522,7 @@ func parseVoteMetadata(raw string) (map[string]any, error) {
 }
 
 // parseVoteUsage decodes a seat's --usage spend report through db.ParseUsage
-// — the SAME B33/B35/B36 rules the step ledger's writer applies, one
+// — the SAME rules the step ledger's writer applies, one
 // implementation for both flags — into the map shape model.Vote carries.
 // db.CastVote re-checks the numeric rules beside the insert; this parse
 // exists so a refusal reaches the operator as VALIDATION_ERROR naming the

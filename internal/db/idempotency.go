@@ -101,6 +101,38 @@ func LookupIdempotencyKeysTx(tx *sql.Tx, scope, prefix string) (map[string]int, 
 	return out, nil
 }
 
+// LookupIdempotencyKeys is LookupIdempotencyKeysTx through the POOL, for a
+// reader that holds no transaction — the run report's rollup phase, which
+// deliberately reads everything it can before its snapshot opens (DKT-584's
+// reap-ack attribution). Same query, same escaping; two spellings of one scan
+// would drift at the first key family that mattered.
+func LookupIdempotencyKeys(db *sql.DB, scope, prefix string) (map[string]int, error) {
+	rows, err := db.Query(
+		`SELECT key, entity_id FROM idempotency_keys
+		  WHERE scope = ? AND key LIKE ? ESCAPE '\'`,
+		scope, escapeLike(prefix)+"%")
+	if err != nil {
+		return nil, fmt.Errorf("looking up idempotency keys: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]int{}
+	for rows.Next() {
+		var (
+			key      string
+			entityID int
+		)
+		if err := rows.Scan(&key, &entityID); err != nil {
+			return nil, fmt.Errorf("scanning an idempotency key: %w", err)
+		}
+		out[key] = entityID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("looking up idempotency keys: %w", err)
+	}
+	return out, nil
+}
+
 // escapeLike neutralizes LIKE's wildcards in a literal prefix.
 func escapeLike(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
@@ -166,10 +198,10 @@ func beginIdempotentCreate(db *sql.DB, scope, idempotencyKey string) (existingID
 // makes a concurrent duplicate a database constraint rather than an
 // application-level check.
 //
-// created_at_ms and seq are millisecond-resolution and monotonic per
-// engine-spec.md §5. They live here, in a table created at v5, and never on a
-// pre-existing column — mutating an existing timestamp format would break
-// byte-compatibility for every existing verb.
+// created_at_ms and seq are millisecond-resolution and monotonic. They live
+// here, in a table created at v5, and never on a pre-existing column —
+// mutating an existing timestamp format would break byte-compatibility for
+// every existing verb.
 func RecordIdempotencyKeyTx(tx *sql.Tx, scope, key string, entityID int) error {
 	nowMS := time.Now().UTC().UnixMilli()
 

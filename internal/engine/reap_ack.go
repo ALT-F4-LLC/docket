@@ -11,17 +11,14 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// THE WRITE-REAP ACKNOWLEDGMENT — engine-spec §2's last scheduling sentence, and
-// §9 item 10's deferred half (docs/tdd/runs-dispatch.md §6).
-//
-// engine-spec §2, verbatim:
+// THE WRITE-REAP ACKNOWLEDGMENT. The scheduling rule it implements:
 //
 //	Reaping a write-class lease additionally holds write headroom until the
 //	relay acknowledges the `reaped` event (surfaced by `guard spawn`) — the DB
 //	fence is not a tree fence; a wedged writer must be confirmed gone before a
 //	successor writes.
 //
-// THE HAZARD, CONCRETELY (§6.1). A write-class step's lease lapses. The engine
+// THE HAZARD, CONCRETELY. A write-class step's lease lapses. The engine
 // believes the executor is dead and returns the step to `ready`. But the lease is
 // a DATABASE fence — nothing about it stops a still-running process from writing
 // to the working tree. If a successor write-class step starts while the
@@ -32,57 +29,57 @@ import (
 // a process it did not start, so it refuses to pretend the DB fence is a tree
 // fence: it holds the headroom and requires somebody — a new relay session, or a
 // person typing — to supply the one fact core cannot observe. That is the honest
-// division, and A2 is what makes it survivable: THE ACK NEVER REQUIRES THE DEAD
+// division, and what makes it survivable is that THE ACK NEVER REQUIRES THE DEAD
 // RELAY, because the relay may be the thing that died and an ack only a corpse
 // can give is a permanent wedge.
 
-// writeClassOf is §6.5's TRANSLATION, and it is the whole reason this mechanism
+// writeClassOf is the TRANSLATION, and it is the whole reason this mechanism
 // is generic: *write-class* means A CLASS WHOSE EFFECTIVE `[limits] max` IS
 // FINITE.
 //
-// engine-core §5 says "write-class lease". engine-spec §2 says the reference
-// instance's config "sets its write class to 1 — serialization is INSTANCE
-// POLICY, not core behavior". A core mechanism keyed on a class NAMED `write`
-// would therefore be unimplementable: the name is the instance's to choose, and
-// core never learns it.
+// The scheduling rule says "write-class lease", and the reference instance's
+// config "sets its write class to 1 — serialization is INSTANCE POLICY, not
+// core behavior". A core mechanism keyed on a class NAMED `write` would
+// therefore be unimplementable: the name is the instance's to choose, and core
+// never learns it.
 //
 // Keying on the DECLARED BOUND is the only reading available, and it produces
 // exactly the reference instance's behavior for exactly its configuration. The
-// reasoning is engine-core §5's own argument for why writers serialize — "gates
-// computed on a shared mutable tree race even across disjoint scopes" — and the
-// instance expresses that by bounding the class. A class the author left
-// unbounded is a class the author declared safe to parallelize (a read fan-out),
-// and holding headroom on it would contradict "read-only fan-outs parallelize
-// freely".
+// reasoning is the same argument for why writers serialize — "gates computed on
+// a shared mutable tree race even across disjoint scopes" — and the instance
+// expresses that by bounding the class. A class the author left unbounded is a
+// class the author declared safe to parallelize (a read fan-out), and holding
+// headroom on it would contradict "read-only fan-outs parallelize freely".
 //
-// A20/A21 fall straight out: a finite `max` gets ack rows and the hold; no `max`
-// gets neither, and `next` behaves exactly as it did at S5. A22 —
-// TestNoWriteClassLiteral — greps the implementation for the string, in the
-// shape of the existing genericity guards.
+// The consequences fall straight out: a finite `max` gets ack rows and the hold;
+// no `max` gets neither, and `next` behaves exactly as it did before this
+// mechanism. TestNoWriteClassLiteral greps the implementation for the string, in
+// the shape of the existing genericity guards.
 //
-// This is A SPEC READING AND IT IS RECORDED AS ONE (§6.5), not filed as a
-// deviation: §2 already tells us the class name is instance policy.
+// This is A SPEC READING AND IT IS RECORDED AS ONE, not filed as a deviation:
+// the class name is instance policy.
 func (s *Scheduler) writeClassOf(class string) bool {
 	limit, ok := s.limits[class]
 	return ok && limit.Max > 0
 }
 
-// reapExpiredTx is `next`'s and `dispatch open`'s SHARED reap: the lease write,
-// the `lease-reaped` event, and — A16 — the `reap_acks` row, ALL IN THE CALLER'S
-// TRANSACTION.
+// reapExpiredTx is the SHARED reap of `next`, `dispatch open` and
+// `dispatch close`: the lease write, the `lease-reaped` event, and
+// the `reap_acks` row, ALL IN THE CALLER'S TRANSACTION.
 //
-// It is one function rather than two similar loops because the two scheduling
+// It is one function rather than three similar loops because the scheduling
 // verbs reaping differently is a bug with no symptom until a manifest disagrees
-// with the `next` that follows it. §5.2 P5 requires `dispatch open` to perform
-// "the same lazy reap `next` does", and sharing the code is how that stays true.
+// with the `next` that follows it. `dispatch open` must perform "the same lazy
+// reap `next` does", and `dispatch close` must perform it too, before its own
+// discrepancy probe; sharing the code is how that stays true.
 //
-// A17: `reaped_seq` is the seq of the `lease-reaped` event written by THIS reap,
+// `reaped_seq` is the seq of the `lease-reaped` event written by THIS reap,
 // read back with `last_insert_rowid()` in the same transaction — so the ack row
 // and the event it acknowledges are inserted together or not at all. An ack row
 // pointing at an event that never committed would be an unacknowledgeable hold,
-// which is the wedge A2 exists to forbid.
+// which is the permanent wedge the ack must never create.
 //
-// A18: a class with no declared `max` inserts NOTHING. That is D3's dormancy,
+// A class with no declared `max` inserts NOTHING. That is the dormant path,
 // and it is structural: a repo with no `[limits]` never creates a `reap_acks`
 // row and therefore never holds anything.
 func reapExpiredTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]string, error) {
@@ -101,14 +98,14 @@ func reapExpiredTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]stri
 
 // reapOneTx reaps ONE step: the row reset, the event, and — for a bounded
 // class — the acknowledgment hold, in the caller's transaction. It is shared
-// by the lazy expiry reap above and by ForceReapStep (DKT-83), so a forced
+// by the lazy expiry reap above and by ForceReapStepWith (DKT-83), so a forced
 // reap cannot drift from an expiry's consequences: same event kind, same
 // headroom hold, same snapshot reflection.
 //
 // `data` rides in the `lease-reaped` event when non-empty; the expiry path
-// passes none, and the forced path records who-said-so and why — which is how
-// a reader distinguishes them, the same data.reason discipline that separates
-// a budget pause from an operator's.
+// passes none, and the forced path records who-said-so (`actor`/`cwd`,
+// DKT-2450) and why — which is how a reader distinguishes them, the same
+// data.reason discipline that separates a budget pause from an operator's.
 func reapOneTx(
 	tx *sql.Tx, sched *Scheduler, runID int, step *db.Step, data string, nowMS int64,
 ) error {
@@ -130,13 +127,13 @@ func reapOneTx(
 			return err
 		}
 
-		// A16's other half: the ack row, ONLY for a class with a finite bound.
+		// The other half: the ack row, ONLY for a class with a finite bound.
 		if sched.writeClassOf(step.Class) {
 			seq, err := lastEventSeqTx(tx)
 			if err != nil {
 				return err
 			}
-			// A19: created UNACKNOWLEDGED. Nothing here sets `acked_at_ms`; the
+			// Created UNACKNOWLEDGED. Nothing here sets `acked_at_ms`; the
 			// hold is live from this instant until somebody names this seq.
 			if err := db.InsertReapAckTx(tx, db.ReapAck{
 				RunID: runID, StepID: step.ID, Class: step.Class, ReapedSeq: seq,
@@ -147,7 +144,7 @@ func reapOneTx(
 			// THE HOLD IS LIVE IN THIS INVOCATION, not the next one. The
 			// snapshot was loaded before this reap, so the row just inserted is
 			// not in it — and the readiness pass that follows would offer a
-			// SUCCESSOR write-class step that the hold forbids. W3 is precisely
+			// SUCCESSOR write-class step that the hold forbids. This is precisely
 			// this case: `next` reaps the writer and must offer the reaped step
 			// itself while offering no OTHER write-class step, in the same
 			// answer. Reflecting the insert here is the same discipline the reap
@@ -162,18 +159,40 @@ func reapOneTx(
 
 		// Reflect the reap in the loaded snapshot, so the readiness pass sees
 		// the step it just freed rather than the row it read a moment ago —
-		// the counter too, so the offer this same call renders carries the
-		// reap it performed.
+		// the counter too, and the last-claim-end this same call's offer
+		// renders (DKT-1279): `next` offers the reaped step in the SAME answer
+		// that performed the reap, and that row must say "reaped" without a
+		// second read of the row this transaction just wrote.
 		step.Status = db.StepPending
 		step.Owner, step.TokenHash, step.ExpiresMS = "", "", 0
 		step.StartedMS = nil
 		step.ReapedClaims++
+		step.LastClaimEnd = db.ClaimEndReaped
+		// The same reflection for the pre-gate hold: the holds were probed
+		// while this step was claimed, so it was no candidate; the readiness
+		// pass that follows must see its lock.
+		if err := sched.refreshDetachedPreGateHold(tx, step); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// ForceReapStep is `docket step reap` (DKT-83): an operator or relay that has
-// ESTABLISHED an executor is dead clears its claim now, instead of waiting
+// ForceReapOptions are `step reap`'s inputs.
+type ForceReapOptions struct {
+	// Reason is `--reason`, REQUIRED: the assertion that the holder is gone.
+	Reason string
+	// By is who asserted it and from where. REQUIRED: an empty field refuses
+	// the reap before anything is written (see Attribution).
+	By Attribution
+	// Token is the run's conductor capability (DKT-2465, conductor.go):
+	// required on a bound run, ignored on an unbound one.
+	Token string
+	NowMS int64
+}
+
+// ForceReapStepWith is `docket step reap` (DKT-83): an operator or relay that
+// has ESTABLISHED an executor is dead clears its claim now, instead of waiting
 // out the full lease TTL.
 //
 // Liveness was TTL-only, and the TTL cannot be sized right in both
@@ -183,18 +202,36 @@ func reapOneTx(
 // start — the write-reap acknowledgment says so — but the RELAY that spawned
 // the executor can, and this verb is the channel for what it observed.
 //
-// TOKEN-FREE, like approve/resolve: the authority is repository access plus
-// the assertion, recorded with `--reason`, that the holder is gone. It is not
-// an eviction primitive a bystander reaches casually — a forced reap of a
-// LIVE worker has exactly the risks a lease expiry has, which is why every
-// consequence is the expiry reap's own: same event kind (`lease-reaped`, with
-// `data.forced` and the reason distinguishing it), same write-class headroom
-// hold, same return of the step to the pool.
-func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
+// NO LEASE TOKEN — the holder's own token is exactly what a reap cannot
+// require, since the premise is that the holder is dead. What the verb
+// requires instead is the RUN's conductor capability (DKT-2465, conductor.go),
+// plus the assertion, recorded with `--reason`, that the holder is gone: the
+// relay that spawned the executor holds the capability, the executor it is
+// reaping never did, and a sibling executor cannot clear a claim it merely
+// wants out of its way. It is not an eviction primitive a bystander reaches
+// casually — a forced reap of a LIVE worker has exactly the risks a lease
+// expiry has, which is why every SCHEDULING consequence is the expiry reap's
+// own: same event kind (`lease-reaped`, with `data.forced` and the reason
+// distinguishing it), same write-class headroom hold, same return of the step
+// to the pool.
+//
+// The one deliberate divergence is the ATTEMPT BUDGET (DKT-585): a reap
+// carrying `data.forced` does not count the reaped attempt against
+// `max_attempts`, because the verb's premise is that the holder died before
+// an executor could fail — see the exemption below, and
+// db.ExemptStepAttemptFromBudgetTx for why it is a +1 nudge of the base and
+// never a touch of `attempt` itself.
+func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
+	reason, nowMS := opts.Reason, opts.NowMS
 	if reason == "" {
 		return validationErr(
 			"--reason is required: a forced reap asserts the holder is gone, " +
 				"and somebody will ask on whose word")
+	}
+	// ...and the answer is recorded (DKT-2450), not left for the asker to
+	// reconstruct from wall-clock.
+	if err := opts.By.require("step reap"); err != nil {
+		return err
 	}
 
 	step, err := db.GetStep(conn, stepID)
@@ -202,6 +239,11 @@ func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
+		return err
+	}
+	// The conductor capability, before the lease is even inspected: a caller
+	// without it learns that the step exists and nothing else (DKT-2465).
+	if err := authorizeConductor(conn, step.RunID, opts.Token, "step reap"); err != nil {
 		return err
 	}
 	if step.Status != db.StepClaimed && step.Status != db.StepRunning {
@@ -235,11 +277,27 @@ func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 		}
 	}
 
-	data, err := json.Marshal(map[string]any{"forced": true, "reason": reason})
+	data, err := rulingData(opts.By, map[string]any{"forced": true, "reason": reason})
 	if err != nil {
 		return fmt.Errorf("recording the forced reap: %w", err)
 	}
-	if err := reapOneTx(tx, sched, step.RunID, target, string(data), nowMS); err != nil {
+	if err := reapOneTx(tx, sched, step.RunID, target, data, nowMS); err != nil {
+		return err
+	}
+	// A forced reap does not consume the attempt budget (DKT-585). The claim
+	// already spent an `attempt` when it was minted — the counter increments at
+	// claim, and ReapStepTx rightly leaves it alone — but the SPEND is a relay's
+	// assertion that the holder died, not a measurement that an executor
+	// failed, so the exhaustion math (`attempt - attempt_base` against
+	// `max_attempts`, the `step fail` branch) must not count it.
+	//
+	// This lives HERE and not in reapOneTx, per ReapStepTx's own mechanism/
+	// classification split: the shared reap is mechanism, and the two callers
+	// classify differently. An ordinary TTL expiry may still be an executor
+	// that went unresponsive under its own load — a judgment the expiry path
+	// keeps charging for, unchanged — while the forced path carries an explicit
+	// assertion (`data.forced`, `--reason`) that no executor ever got to work.
+	if err := db.ExemptStepAttemptFromBudgetTx(tx, step.ID, nowMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -248,17 +306,17 @@ func ForceReapStep(conn *sql.DB, stepID int, reason string, nowMS int64) error {
 	return nil
 }
 
-// ackReapsTx applies a verb's `--ack-reap SEQ` flags (A7-A10).
+// ackReapsTx applies a verb's `--ack-reap SEQ` flags.
 //
 // The three outcomes are DISTINGUISHED rather than collapsed:
 //
-//   - A7: a real, unacknowledged reap of this run is acknowledged, CAS on
-//     `acked_at_ms IS NULL` (C7) — so two relays acking the same seq in the same
+//   - A real, unacknowledged reap of this run is acknowledged, CAS on
+//     `acked_at_ms IS NULL` — so two relays acking the same seq in the same
 //     millisecond produce one acknowledgment and one no-op, not two.
-//   - A10: an already-acknowledged seq is a SUCCESS THAT CHANGES NOTHING, so a
+//   - An already-acknowledged seq is a SUCCESS THAT CHANGES NOTHING, so a
 //     relay retrying its hook does not fail. It writes no second event either:
 //     the transition already happened and the feed records it once.
-//   - A9: a seq that is not a reap, or not this run's, is VALIDATION_ERROR
+//   - A seq that is not a reap, or not this run's, is VALIDATION_ERROR
 //     NAMING THE SEQ. This is the forgery point — an ack must name a real reap,
 //     and the run scope is half of that: an ack naming another run's reap is a
 //     forgery in exactly the way naming a non-reap is.
@@ -275,7 +333,7 @@ func ackReapsTx(tx *sql.Tx, runID int, seqs []int64, ackedBy string, nowMS int64
 					"must name the `seq` of a `lease-reaped` event for this run",
 				seq, model.FormatRunID(runID))
 		case db.AckAlreadyDone:
-			// A10: idempotent. Nothing to write and nothing to report — the row
+			// Idempotent. Nothing to write and nothing to report — the row
 			// already says what this call would have made it say.
 			continue
 		}
@@ -308,17 +366,17 @@ func ackReapsTx(tx *sql.Tx, runID int, seqs []int64, ackedBy string, nowMS int64
 }
 
 // loadReapHold reads the run's unacknowledged reaps into the scheduler's
-// snapshot — A12's predicate, evaluated INSIDE the readiness transaction.
+// snapshot — the hold predicate, evaluated INSIDE the readiness transaction.
 //
-// A13: THIS IS A PREDICATE OVER ROWS, NOT A STORED "held" FLAG. C8 is the
-// argument: a flag written at reap time and cleared at ack time has a window
-// between the two writes in which a concurrent reader sees the wrong answer. A
-// predicate over the rows has no window — the rows either exist unacknowledged
-// at the instant of the snapshot or they do not.
+// THIS IS A PREDICATE OVER ROWS, NOT A STORED "held" FLAG. A flag written at
+// reap time and cleared at ack time has a window between the two writes in
+// which a concurrent reader sees the wrong answer. A predicate over the rows has
+// no window — the rows either exist unacknowledged at the instant of the
+// snapshot or they do not.
 //
-// D3's dormancy is one indexed lookup on `idx_reap_acks_open`, a PARTIAL index
-// on `acked_at_ms IS NULL`, returning no row and short-circuiting before any
-// class arithmetic (§6.6).
+// The dormant path is one indexed lookup on `idx_reap_acks_open`, a PARTIAL
+// index on `acked_at_ms IS NULL`, returning no row and short-circuiting before
+// any class arithmetic.
 func loadReapHold(tx *sql.Tx, runID int) (map[string]int, []db.ReapAck, error) {
 	open, err := db.UnacknowledgedReapsTx(tx, runID)
 	if err != nil {
@@ -326,7 +384,7 @@ func loadReapHold(tx *sql.Tx, runID int) (map[string]int, []db.ReapAck, error) {
 	}
 	if len(open) == 0 {
 		// The dormant path is the first one, by construction — the same shape
-		// loadBudget uses for D1.
+		// loadBudget uses for its own dormant path.
 		return nil, nil, nil
 	}
 	byClass := make(map[string]int, len(open))
@@ -340,7 +398,7 @@ func loadReapHold(tx *sql.Tx, runID int) (map[string]int, []db.ReapAck, error) {
 // hold, so the readiness pass that follows sees it.
 //
 // It mutates the snapshot rather than re-querying for the reason LoadScheduler
-// exists at all (§6.3): readiness answers every step against ONE state of the
+// exists at all: readiness answers every step against ONE state of the
 // world, and a re-query mid-pass could answer two steps against two different
 // holds. What this transaction wrote is knowable without asking the database
 // again, so it is applied directly.
@@ -352,23 +410,23 @@ func (s *Scheduler) holdReap(ack db.ReapAck) {
 	s.openReaps = append(s.openReaps, ack)
 }
 
-// unacknowledgedReapsInClass is what `classHeadroom` folds in (A15).
+// unacknowledgedReapsInClass is what `classHeadroom` folds in.
 //
 // AN UNACKNOWLEDGED REAP OCCUPIES A SLOT IN ITS CLASS — which is exactly what
 // "holds write headroom" says. With `[limits] write = { max = 1 }`, one
 // unacknowledged reap makes `inFlight = 1`, `1 < 1` is false, and no write-class
 // step is ready.
 //
-// WHY THE FOLD RATHER THAN AN R8. Because it IS headroom. The predicate answers
-// "how many things may write to this tree right now", and a lapsed-but-
-// unconfirmed writer is one of them. A separate ReadyCondition would be two
-// mechanisms answering one question, and they would disagree the first time
-// somebody changed one. TestReapHoldIsHeadroom asserts the fold by proving a
-// class with `max = 2` and one unacknowledged reap still admits ONE step —
-// which a separate blocking condition would not.
-// A REAP DOES NOT HOLD AGAINST THE STEP IT REAPED. W3 is explicit: "the reaped
-// step ITSELF is offered (it returned to the pool) but no OTHER write-class step
-// is — the hold occupies the one slot."
+// WHY THE FOLD RATHER THAN AN EIGHTH READINESS CLAUSE. Because it IS headroom.
+// The predicate answers "how many things may write to this tree right now", and
+// a lapsed-but-unconfirmed writer is one of them. A separate ReadyCondition
+// would be two mechanisms answering one question, and they would disagree the
+// first time somebody changed one. TestReapHoldIsHeadroom asserts the fold by
+// proving a class with `max = 2` and one unacknowledged reap still admits ONE
+// step — which a separate blocking condition would not.
+// A REAP DOES NOT HOLD AGAINST THE STEP IT REAPED. The reaped step ITSELF is
+// offered (it returned to the pool) but no OTHER write-class step is — the hold
+// occupies the one slot.
 //
 // The exclusion is required by the arithmetic rather than being a softening of
 // it. With `max = 1`, counting the hold against its own step would make
@@ -377,7 +435,7 @@ func (s *Scheduler) holdReap(ack db.ReapAck) {
 // first time a lease lapsed, with the ONLY step that could clear the hold being
 // the one the hold forbade.
 //
-// It is also the right meaning. The hazard (§6.1) is TWO processes editing one
+// It is also the right meaning. The hazard is TWO processes editing one
 // tree: the possibly-alive writer, and a SUCCESSOR started beside it. Re-offering
 // the same step to a claimant that will do the same work is the retry the lease
 // mechanism exists to enable, and the `attempt` trail records it. What the hold
@@ -400,21 +458,21 @@ func (s *Scheduler) unacknowledgedReapsInClass(class string, stepID int) int {
 
 // UnacknowledgedReaps exposes the snapshot's open reaps for the REFUSAL MESSAGE.
 //
-// A headroom denial with nothing running is otherwise baffling (§6.3's closing
-// paragraph), so `next`'s human output additionally names the unacknowledged
-// reaps and the flag that clears them. The rows come from the same snapshot the
-// predicate used, so the message cannot name a different set of reaps from the
-// one that caused the denial.
+// A headroom denial with nothing running is otherwise baffling, so `next`'s
+// human output additionally names the unacknowledged reaps and the flag that
+// clears them. The rows come from the same snapshot the predicate used, so the
+// message cannot name a different set of reaps from the one that caused the
+// denial.
 func (s *Scheduler) UnacknowledgedReaps() []db.ReapAck { return s.openReaps }
 
-// ReapHoldReason renders A11's guidance: each seq, and the exact flag to pass.
+// ReapHoldReason renders the hold's guidance: each seq, and the exact flag to pass.
 //
-// It NAMES THE FLAG rather than describing it, because §2's "surfaced by `guard
+// It NAMES THE FLAG rather than describing it, because "surfaced by `guard
 // spawn`" is what makes the mechanism discoverable rather than documented — an
 // operator reading the refusal should be able to copy the next command out of
 // it.
 //
-// The `guard spawn` entry point lands in GROUP 3 (§6.2's table); this group
+// The `guard spawn` entry point lands in a later group; this group
 // ships `dispatch open --ack-reap`, which is the NEW RELAY's path and is what
 // makes the mechanism complete without group 3. The text names both because the
 // hold is what it is regardless of which verb clears it, and a message that
@@ -434,4 +492,54 @@ func ReapHoldReason(reaps []db.ReapAck) string {
 	b.WriteString(" — confirm the previous holder is gone, then acknowledge with " +
 		"`dispatch open --ack-reap <seq>` (or `guard spawn --ack-reap <seq>`)")
 	return b.String()
+}
+
+// ackSameDispatchReapsTx is DKT-3286: a reconciled close acknowledges, as
+// `dispatch-close`, every open reap the engine can prove belonged to that
+// close's own wave — the reap was NOT forced, and the claim it ended was taken
+// after the dispatch opened, on a step the dispatch's manifest carries.
+//
+// The engine establishes both facts from its own records, which is what a
+// panel convened for such a reap could not do: the holder was this wave's,
+// and the wave is over. A forced reap keeps its hold (somebody asserted the
+// holder was gone, and that assertion is what a panel reviews), and so does a
+// claim admitted under any other dispatch.
+func ackSameDispatchReapsTx(tx *sql.Tx, runID int, open *db.Dispatch, nowMS int64) error {
+	reaps, err := db.UnacknowledgedReapsTx(tx, runID)
+	if err != nil {
+		return err
+	}
+	var seqs []int64
+	for _, r := range reaps {
+		var data string
+		if err := tx.QueryRow(`SELECT data FROM events WHERE seq = ?`, r.ReapedSeq).
+			Scan(&data); err != nil {
+			return fmt.Errorf("reading reap %d: %w", r.ReapedSeq, err)
+		}
+		var payload struct {
+			Forced bool `json:"forced"`
+		}
+		// An unreadable payload is not proof of a plain expiry, so it holds.
+		if json.Unmarshal([]byte(data), &payload) != nil || payload.Forced {
+			continue
+		}
+		var admitted bool
+		if err := tx.QueryRow(
+			`SELECT EXISTS(
+			   SELECT 1 FROM dispatch_rows dr
+			    WHERE dr.dispatch_id = ? AND dr.step_id = ?)
+			 AND COALESCE((SELECT MAX(seq) FROM events
+			                WHERE kind = ? AND step_id = ? AND seq < ?), 0) > ?`,
+			open.ID, r.StepID, EventStepClaimed, r.StepID, r.ReapedSeq, open.OpenedSeq,
+		).Scan(&admitted); err != nil {
+			return fmt.Errorf("reading reap %d's claim: %w", r.ReapedSeq, err)
+		}
+		if admitted {
+			seqs = append(seqs, r.ReapedSeq)
+		}
+	}
+	if len(seqs) == 0 {
+		return nil
+	}
+	return ackReapsTx(tx, runID, seqs, db.AckByDispatchClose, nowMS)
 }

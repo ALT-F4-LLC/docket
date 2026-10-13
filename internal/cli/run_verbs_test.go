@@ -12,7 +12,7 @@ import (
 // `docket run list` used to fall through to the help text and exit 0, which
 // reads as "there are no runs" rather than "that verb does not exist". The
 // error must both REFUSE and name where to go instead: the actual surface is
-// `run status --active`, which nobody guesses from a help listing.
+// `run status`, which nobody guesses from a help listing.
 func TestUnknownRunVerbNamesTheIntendedVerb(t *testing.T) {
 	parent := &cobra.Command{Use: "run"}
 	for _, name := range []string{"status", "activate", "report", "start"} {
@@ -25,7 +25,7 @@ func TestUnknownRunVerbNamesTheIntendedVerb(t *testing.T) {
 			t.Fatal("unknownRunVerb(list) = nil, want an error")
 		}
 		got := err.Error()
-		for _, want := range []string{`"list"`, "run status --active"} {
+		for _, want := range []string{`"list"`, `"run status"`} {
 			if !strings.Contains(got, want) {
 				t.Errorf("error %q missing %q", got, want)
 			}

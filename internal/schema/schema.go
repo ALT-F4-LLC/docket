@@ -1,15 +1,15 @@
 // Package schema is payload validation plus the `ordered_enum` annotation and
-// the derived ordered-field index (docs/tdd/payloads-thresholds.md §4.2, §4.3).
+// the derived ordered-field index.
 //
 // THIS IS THE PACKAGE WHERE CORE LEARNS ORDER WITHOUT MEANING. It knows that
 // `enum[i]` precedes `enum[i+1]` because a user's registered document said so.
 // It does not know which end is "worse", "higher", or "better", it holds no
 // table of known fields, and it has no default order and no fallback ordering:
 // a field with no declared order is not orderable, and Position says so rather
-// than guessing (§4.3 I3, I4).
+// than guessing.
 //
 // It is PURE — no database, no engine, no filesystem beyond the one embedded
-// document (§7.6). Every decision is a function of the registered bytes.
+// document. Every decision is a function of the registered bytes.
 package schema
 
 import (
@@ -31,7 +31,7 @@ import (
 const resourceURL = "docket:///payload-schema"
 
 // pinnedDraft is the default draft a document with no `$schema` key is read
-// under (§4.1 mitigation 2).
+// under.
 //
 // It is set EXPLICITLY rather than left to the library's own default, because
 // a library default that changed in a patch release would re-interpret every
@@ -46,8 +46,8 @@ var pinnedDraft = jsonschema.Draft2020
 //
 // It maps to VALIDATION_ERROR (exit 3) at `docket schema register`.
 type Error struct {
-	// Rule is the §4.2 clause, when one decided it ("O1".."O5"), or empty for a
-	// compile failure the library reported.
+	// Rule is the annotation rule, when one decided it ("O1".."O5"), or empty
+	// for a compile failure the library reported.
 	Rule string
 	// Path is the property path within the schema document, rendered as
 	// `items.properties.severity`.
@@ -62,8 +62,8 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s: %s", e.Path, e.Message)
 }
 
-// Field is one top-level property of the item schema — what §11.2's grammar can
-// name with its bare field token (§4.2 O5).
+// Field is one top-level property of the item schema — what a threshold
+// predicate can name with its bare field token (O5).
 //
 // The values are the AUTHOR'S. Nothing here interprets them: `Type` is the
 // declared JSON type so a literal can be checked as parseable, `Enum` is the
@@ -92,26 +92,27 @@ type Field struct {
 // Registered is a compiled schema document: the bytes as registered, the
 // derived ordered index, the declared fields, and the compiled validator.
 //
-// The bytes are retained because they are what a run pins (§4.7 P4) and what a
-// refusal quotes. Everything else is derived from them, once (§4.3 I1).
+// The bytes are retained because they are what a run pins and what a refusal
+// quotes. Everything else is derived from them, once.
 type Registered struct {
 	Name    string
 	Version int
 	// Body is the registered document, VERBATIM. Idempotency and pinning are
 	// decided on these bytes, so a re-serialization would be a different
-	// registration (§4.4).
+	// registration.
 	Body []byte
-	// Ordered is the §4.3 derived index. It is a cache of a pure function of
-	// Body, never a second source of truth (I2).
+	// Ordered is the derived index. It is a cache of a pure function of
+	// Body, never a second source of truth.
 	Ordered Index
 
 	fields   map[string]Field
 	names    []string
+	required []string
 	compiled *jsonschema.Schema
 }
 
-// Compile parses a schema document, checks the §4.2 annotation rules, compiles
-// it as ordinary JSON Schema, and derives the ordered index.
+// Compile parses a schema document, checks the annotation rules, compiles it
+// as ordinary JSON Schema, and derives the ordered index.
 //
 // The library validates the document as ORDINARY JSON SCHEMA: `ordered_enum` is
 // not registered as a custom keyword, so the validator never sees it (O4).
@@ -150,6 +151,7 @@ func Compile(name string, version int, body []byte) (*Registered, error) {
 		Ordered:  indexFromFields(fields, names),
 		fields:   fields,
 		names:    names,
+		required: deriveRequired(doc),
 		compiled: compiled,
 	}, nil
 }
@@ -159,13 +161,13 @@ func (r *Registered) Ref() string {
 	return fmt.Sprintf("%s@%d", r.Name, r.Version)
 }
 
-// Position is THE ONLY ordering API (§4.3 I3). It reports a value's index in
-// the field's declared order, and whether the field is ordered at all.
+// Position is THE ONLY ordering API. It reports a value's index in the field's
+// declared order, and whether the field is ordered at all.
 //
 // There is deliberately no Less(a, b): a comparison of two values of a field
 // with no declared order is UNREPRESENTABLE rather than merely discouraged,
-// which is what makes engine-spine §6.14's T3 a property of the type instead of
-// a rule a caller has to remember.
+// which is what makes refusing to order an unordered field a property of the
+// type instead of a rule a caller has to remember.
 func (r *Registered) Position(field, value string) (int, bool) {
 	return r.Ordered.Position(field, value)
 }
@@ -200,6 +202,19 @@ func (r *Registered) ValidateMember(field, value string) error {
 	return nil
 }
 
+// RequiredProperties lists the keys the document declares REQUIRED of a payload
+// element, in the author's declared order.
+//
+// It reads the same subschema FieldNames does — an array document's item
+// schema, or the root of an object document — because that is the level a
+// payload element is written at. A document declaring none returns none: the
+// caller states no contract rather than inventing one.
+func (r *Registered) RequiredProperties() []string {
+	out := make([]string, len(r.required))
+	copy(out, r.required)
+	return out
+}
+
 // FieldNames lists the declared top-level properties, in document order.
 func (r *Registered) FieldNames() []string {
 	out := make([]string, len(r.names))
@@ -207,7 +222,7 @@ func (r *Registered) FieldNames() []string {
 	return out
 }
 
-// PayloadError is the §4.8 C2/C3 refusal: path-precise lines, capped.
+// PayloadError is the payload refusal: path-precise lines, capped.
 type PayloadError struct {
 	// Ref is the `name@version` the payload was validated against.
 	Ref string
@@ -217,7 +232,7 @@ type PayloadError struct {
 	More int
 }
 
-// maxPayloadErrors is C3's cap. A worker's log is not improved by a hundred
+// maxPayloadErrors is the refusal's line cap. A worker's log is not improved by a hundred
 // lines, and the count is reported so the operator knows the list is partial.
 const maxPayloadErrors = 5
 

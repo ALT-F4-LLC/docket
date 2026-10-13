@@ -19,10 +19,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// findingsSchema is the §4.2 shape: an array of objects, one property declaring
-// an ordered enum. `severity` is an INSTANCE TOKEN in test data, exactly as
-// engine-spine §1.1 recorded the fixture's own — the registry never learns what
-// it means, only that its values run in the order the author wrote them.
+// findingsSchema is the findings shape: an array of objects, one property
+// declaring an ordered enum. `severity` is an INSTANCE TOKEN in test data,
+// exactly as the fixture records its own — the registry never learns what it
+// means, only that its values run in the order the author wrote them.
 const findingsSchema = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "array",
@@ -134,7 +134,7 @@ func TestSchemaRegisterLandsInTheCallersProject(t *testing.T) {
 	}
 }
 
-// TestSchemaRegisterIsIdempotentOnIdenticalBytes is §4.4's second outcome: the
+// TestSchemaRegisterIsIdempotentOnIdenticalBytes is the idempotent outcome: the
 // same bytes again are a success that inserts nothing and does not bump
 // row_version — or `--if-version` would fail for a caller that changed nothing.
 func TestSchemaRegisterIsIdempotentOnIdenticalBytes(t *testing.T) {
@@ -162,7 +162,7 @@ func TestSchemaRegisterIsIdempotentOnIdenticalBytes(t *testing.T) {
 	}
 }
 
-// TestSchemaRefusalMatrix is §4.5's refusal table, by error code. The codes are
+// TestSchemaRefusalMatrix is the refusal table, by error code. The codes are
 // what a harness branches on, so each is asserted rather than "an error was
 // returned".
 func TestSchemaRefusalMatrix(t *testing.T) {
@@ -279,7 +279,7 @@ func TestSchemaRefusalMatrix(t *testing.T) {
 	}
 }
 
-// TestSchemaConflictNamesBothHashes is §4.4's CONFLICT row: an operator needs to
+// TestSchemaConflictNamesBothHashes is the CONFLICT row: an operator needs to
 // know WHICH bytes are registered and which they just handed over, or the only
 // remedy is to guess.
 func TestSchemaConflictNamesBothHashes(t *testing.T) {
@@ -306,7 +306,7 @@ func TestSchemaConflictNamesBothHashes(t *testing.T) {
 	}
 }
 
-// TestSchemaListIsACollection is §4.5's list row: a Collection envelope under
+// TestSchemaListIsACollection is the list row: a Collection envelope under
 // v2, per the `workflow list` precedent, with a total a limit cannot distort.
 func TestSchemaListIsACollection(t *testing.T) {
 	conn := newTestDB(t)
@@ -359,7 +359,7 @@ func TestSchemaListV1CarriesNoRowVersion(t *testing.T) {
 	}
 }
 
-// TestSchemaShowBodyIsTheRegisteredBytes is §4.5's `--body` row: what a run
+// TestSchemaShowBodyIsTheRegisteredBytes is the `--body` row: what a run
 // validates against, byte for byte, not a re-serialization.
 func TestSchemaShowBodyIsTheRegisteredBytes(t *testing.T) {
 	conn := newTestDB(t)
@@ -383,7 +383,7 @@ func TestSchemaShowBodyIsTheRegisteredBytes(t *testing.T) {
 	}
 }
 
-// TestTheBuiltinIsVisibleAndMarked is §3's honesty clause made observable: v9
+// TestTheBuiltinIsVisibleAndMarked is the honesty clause made observable: v9
 // seeds exactly one row, and an operator can see both that it is there and that
 // it came from the binary.
 func TestTheBuiltinIsVisibleAndMarked(t *testing.T) {

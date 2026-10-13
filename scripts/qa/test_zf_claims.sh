@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Section ZF: claims, leases, capability tokens, and engine config
 #
-# Covers stage 2 of the graph-engine design (docs/design/engine-spec.md §2
-# "Steps, claims, capabilities", §4 token transport, §11.4 claim wire shape;
-# TDD docs/tdd/claims-leases.md).
+# Covers stage 2 of the graph engine: steps, claims, capabilities, token
+# transport, and the claim wire shape.
 #
-# ZF3 is the §9.3 concurrency race and ZF4 is the §9.4 kill-a-claimer proof.
+# ZF3 is the concurrency race and ZF4 is the kill-a-claimer proof.
 # Both run real processes: db.Open caps the connection pool at one, so only
 # separate processes exercise SQLite's cross-process locking — which is what a
 # racing dispatcher actually hits.
@@ -21,7 +20,7 @@ test_zf_claims() {
   ZF_ID="DKT-$ZF_NUM"
 
   # ---------------------------------------------------------------------------
-  # ZF1: claim mints a token and returns the §11.4 response shape.
+  # ZF1: claim mints a token and returns the claim response shape.
   # ---------------------------------------------------------------------------
 
   run issue claim "$ZF_ID" --owner ci-runner --ttl 5m --json
@@ -41,7 +40,7 @@ test_zf_claims() {
   assert_exit "ZF" "ZF1_v2_conflict" 4
 
   # ---------------------------------------------------------------------------
-  # ZF2: the §9.3 refusal matrix, R1-R8. Every row proven by exit code AND by
+  # ZF2: the refusal matrix, R1-R8. Every row proven by exit code AND by
   # the machine-readable code, then by a version-unchanged assertion.
   # ---------------------------------------------------------------------------
 
@@ -104,7 +103,7 @@ test_zf_claims() {
   assert_exit "ZF" "ZF2_released_token_dead" 5
 
   # ---------------------------------------------------------------------------
-  # ZF3: §9.3 racing dispatchers — N concurrent claims, exactly one winner,
+  # ZF3: racing dispatchers — N concurrent claims, exactly one winner,
   # N-1 CONFLICTs, and no lost updates.
   # ---------------------------------------------------------------------------
 
@@ -167,7 +166,7 @@ test_zf_claims() {
   rm -rf "$RACE_DIR"
 
   # ---------------------------------------------------------------------------
-  # ZF4: §9.4 half — kill a claimer mid-work. Lease expiry ALONE re-readies the
+  # ZF4: kill a claimer mid-work. Lease expiry ALONE re-readies the
   # issue, with a complete attempt trail.
   # ---------------------------------------------------------------------------
 
@@ -215,7 +214,7 @@ test_zf_claims() {
   perl -e 'select(undef,undef,undef,1.3)'
 
   # A read reports the lease dead without writing: effective status, computed
-  # from expires_ms at read time (§2, §6).
+  # from expires_ms at read time.
   run issue show "$KILL_ID" --json=v2
   assert_json "ZF" "ZF4_expiry_alone" ".data.lease.live" "false"
   assert_json "ZF" "ZF4_owner_retained" ".data.lease.owner" "doomed-worker"
@@ -240,7 +239,7 @@ test_zf_claims() {
   DOCKET_TOKEN="$KILL_TOKEN" run issue heartbeat "$KILL_ID" --json
   assert_exit "ZF" "ZF4_dead_token_gone" 5
 
-  # ZF4b: reads never write (§6). The strongest available form of this: snapshot
+  # ZF4b: reads never write. The strongest available form of this: snapshot
   # the database file, run every read verb against an EXPIRED lease — the case
   # that would tempt an implementation to reap — and require the file to come
   # back byte-identical.

@@ -11,12 +11,11 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// `docket events prune` — engine-spec §3's retention clause, implemented
-// (docs/tdd/events-follow.md §5).
+// `docket events prune` — the event log's retention clause, implemented.
 //
 // THIS IS THE FIRST DESTRUCTIVE VERB IN THE ENGINE SURFACE, and everything
-// interesting about it is what it REFUSES to delete. §3 names both refusals in
-// one sentence:
+// interesting about it is what it REFUSES to delete. The retention rule names
+// both refusals in one sentence:
 //
 //	`events prune` refuses events of non-terminal runs and never crosses the
 //	artifact-retention boundary
@@ -26,29 +25,29 @@ import (
 // needs to know which.
 //
 // WHAT IT DELETES: rows in `events`. Nothing else — no artifact, no step, no
-// run, no usage row, no dispatch row (P16). It does not VACUUM (P17):
-// reclaiming file space is a decision made against a backup, and a verb that
-// rewrote the whole database as a side effect of trimming a log would be a
-// surprise with a different risk profile.
+// run, no usage row, no dispatch row. It does not VACUUM: reclaiming file
+// space is a decision made against a backup, and a verb that rewrote the whole
+// database as a side effect of trimming a log would be a surprise with a
+// different risk profile.
 
 // PruneQuery is one prune's target and its clock.
 //
-// EXACTLY ONE OF Before / BeforeRun IS SET (P1). A destructive verb with a
-// default target is how a log gets deleted by a typo, so "prune everything" is
-// not expressible: the caller must name a boundary or a run.
+// EXACTLY ONE OF Before / BeforeRun IS SET. A destructive verb with a default
+// target is how a log gets deleted by a typo, so "prune everything" is not
+// expressible: the caller must name a boundary or a run.
 type PruneQuery struct {
-	// Before deletes events with `seq < Before` — STRICTLY LESS (P2), so
+	// Before deletes events with `seq < Before` — STRICTLY LESS, so
 	// `--before N` and a cursor at `N-1` name the same boundary, which is the
 	// convention every other seq comparison in this feed already follows.
 	Before int64
-	// BeforeRun deletes every event of one run, whatever its seq (P3). It is the
-	// form operations.md §2 recommends — trim whole runs that reached a terminal
-	// status, rather than the oldest N events across all of them, so the report
-	// stays honest for every run still covered.
+	// BeforeRun deletes every event of one run, whatever its seq. It is the
+	// preferred form — trim whole runs that reached a terminal status, rather
+	// than the oldest N events across all of them, so the report stays honest
+	// for every run still covered.
 	BeforeRun int
-	// RunID narrows Before to one run (P4). Zero is every run.
+	// RunID narrows Before to one run. Zero is every run.
 	RunID int
-	// DryRun computes the answer and deletes nothing (P5).
+	// DryRun computes the answer and deletes nothing.
 	DryRun bool
 	// NowMS is the transaction's clock, used for the retention boundary and for
 	// the `events-pruned` event's timestamp. It is passed IN rather than read
@@ -57,7 +56,7 @@ type PruneQuery struct {
 	NowMS int64
 }
 
-// PruneResult is what a prune did, or would have done (P7).
+// PruneResult is what a prune did, or would have done.
 //
 // It reports the NEW RETAINED MINIMUM alongside the count so a consumer can set
 // its cursor without a second call — which matters because the call that
@@ -66,20 +65,20 @@ type PruneResult struct {
 	Pruned          int   `json:"pruned"`
 	RetainedMinimum int64 `json:"retained_minimum"`
 	DryRun          bool  `json:"dry_run,omitempty"`
-	// HeldByRetention counts rows the boundary protected (P14). It is reported
+	// HeldByRetention counts rows the boundary protected. It is reported
 	// rather than silently subtracted: an operator who asked to prune 900 events
 	// and pruned 200 must be told a policy held back the other 700, or they will
 	// conclude the verb is broken.
 	HeldByRetention int `json:"held_by_retention,omitempty"`
 	// LiveRuns names the non-terminal runs that blocked the prune, for the
-	// refusal message (P9).
+	// refusal message.
 	LiveRuns []string `json:"-"`
 }
 
 // PruneEvents is the whole verb: validate, refuse, delete, log — in ONE
 // transaction.
 //
-// THE REFUSAL PREDICATES ARE EVALUATED INSIDE THE DELETE'S TRANSACTION (F3), so
+// THE REFUSAL PREDICATES ARE EVALUATED INSIDE THE DELETE'S TRANSACTION, so
 // the set refused and the set deleted are computed over one snapshot. A run that
 // reaches `done` between a check and a delete does not widen what was deleted:
 // it prunes on the next call, having been a live run for the whole of this one.
@@ -113,15 +112,15 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 
 	where, args := pruneFilter(q)
 
-	// REFUSAL 1 (§5.2): events of non-terminal runs are never deleted.
+	// REFUSAL 1: events of non-terminal runs are never deleted.
 	if err := refuseLiveRunsTx(tx, where, args); err != nil {
 		return nil, err
 	}
 
-	// REFUSAL 2 (§5.3): the retention boundary.
+	// REFUSAL 2: the retention boundary.
 	//
-	// It CLAMPS rather than refuses outright (P14) — a `--before` reaching past
-	// the window prunes what it may and reports what it could not — because the
+	// It CLAMPS rather than refuses outright — a `--before` reaching past the
+	// window prunes what it may and reports what it could not — because the
 	// boundary is a standing policy rather than a mistake in the command. A
 	// refusal would make an operator compute the boundary themselves before
 	// every prune, which is the arithmetic the policy exists to do for them.
@@ -157,7 +156,7 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 		return nil, fmt.Errorf("pruning events: %w", err)
 	}
 
-	// P18: the prune writes ONE EVENT OF ITS OWN, in the same transaction, AFTER
+	// The prune writes ONE EVENT OF ITS OWN, in the same transaction, AFTER
 	// the delete. Its `seq` is therefore above everything it removed, so the
 	// record of the deletion survives the deletion — and a consumer that hits
 	// GONE and resumes at the new minimum reads, as its first event, the
@@ -187,7 +186,7 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 	}, nil
 }
 
-// validatePruneTarget is P1: exactly one target, and it must be sane.
+// validatePruneTarget enforces exactly one target, and it must be sane.
 func validatePruneTarget(q PruneQuery) error {
 	switch {
 	case q.Before == 0 && q.BeforeRun == 0:
@@ -232,22 +231,30 @@ func pruneFilter(q PruneQuery) (string, []any) {
 	return where, args
 }
 
-// refuseLiveRunsTx is §5.2: an event belonging to a run that is not `done` or
-// `abandoned` is never deleted.
+// refuseLiveRunsTx enforces that an event belonging to a run that is not
+// `done` or `abandoned` is never deleted.
 //
-// IT REFUSES RATHER THAN SKIPPING (P9). A prune that quietly retained half its
+// IT REFUSES RATHER THAN SKIPPING. A prune that quietly retained half its
 // range would leave an operator believing space was reclaimed and a consumer
 // believing a boundary had moved — and the second of those is the failure GONE
 // exists to prevent, arriving through the back door.
 //
 // WHY NON-TERMINAL IS THE LINE. A live run's events are LOAD-BEARING, not merely
-// interesting: the budget floor is a SUM over its `step-claimed` events (§4.3 of
-// runs-dispatch), and the saga's resume path reads `gate-started` events to
-// decide whether a gate already ran. Pruning a live run's log would not lose an
+// interesting: the budget floor is a SUM over its `step-claimed` events, and
+// the saga's resume path reads `gate-started` events to decide whether a gate
+// already ran. Pruning a live run's log would not lose an
 // audit trail — it would change what the engine COMPUTES, silently, in the
 // direction of running a gate twice and letting a run spend past its cap.
 //
-// Events with NO RUN — trust grants — pass this check (P11). There is no run
+// A TERMINAL run's events are not unused either: they are deletable because
+// what still reads them detects the loss. The recorded body read-back
+// (recordedIssueBody in context.go) reconstructs the description a handed-out
+// step was given from the run's `issue-body-refreshed` rows. When a prune has
+// removed a step's claim event, and with it any refresh row the read-back
+// needs, that read-back reports the recorded body unavailable (GONE) rather
+// than stating the live description as the body the step was handed.
+//
+// Events with NO RUN — trust grants — pass this check. There is no run
 // whose liveness could forbid them, and refusing them would make the repo-wide
 // feed unprunable forever.
 func refuseLiveRunsTx(tx *sql.Tx, where string, args []any) error {
@@ -290,8 +297,8 @@ func refuseLiveRunsTx(tx *sql.Tx, where string, args []any) error {
 		strings.Join(live, ", "))
 }
 
-// countHeldByRetentionTx counts the rows the boundary protects, so P14's answer
-// can name them.
+// countHeldByRetentionTx counts the rows the boundary protects, so the
+// result can name them.
 func countHeldByRetentionTx(tx *sql.Tx, where string, args []any, cutoff int64) (int, error) {
 	var held int
 	err := tx.QueryRow(

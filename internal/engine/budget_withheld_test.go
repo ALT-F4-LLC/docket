@@ -56,8 +56,8 @@ func TestBudgetWithholdingIsReported(t *testing.T) {
 // TestNoBudgetHoldWhenNothingIsWithheld keeps the field dormant.
 //
 // The contract HeldReason and LoopHeldReason set is "empty whenever nothing
-// was withheld", so a run with no cap — B29's dormancy — must carry no new
-// field on the wire. A hold string that appeared on every offer would be
+// was withheld", so a run with no cap — a dormant budget — must carry no
+// new field on the wire. A hold string that appeared on every offer would be
 // noise, and noise is what makes a real hold get skimmed past.
 func TestNoBudgetHoldWhenNothingIsWithheld(t *testing.T) {
 	conn := mustDB(t)

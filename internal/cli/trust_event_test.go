@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -19,7 +21,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// §3.6's event as an AUDIT TRAIL (DKT-81).
+// The trust event as an AUDIT TRAIL (DKT-81).
 //
 // EVERY TEST HERE DRIVES THE REAL VERB, through cobra, with a real store and a
 // real database. The properties are about the ORDER of two writes to two files
@@ -28,7 +30,7 @@ import (
 // order — which is the half that had the defect.
 //
 // XDG_CONFIG_HOME AND HOME ARE REDIRECTED IN EVERY TEST, per the trust package's
-// own SB1: a test that wrote to the operator's real ~/.config/docket/trust.toml
+// own rule: a test that wrote to the operator's real ~/.config/docket/trust.toml
 // would grant trust on the machine running it.
 
 // trustRepo builds an isolated store plus a repository whose database exists,
@@ -59,7 +61,7 @@ func trustRepo(t *testing.T) (string, *config.Config) {
 	return repo, cfg
 }
 
-// trustNoRepo is the same isolation WITHOUT a database, which is the case §3.5
+// trustNoRepo is the same isolation WITHOUT a database, which is the case that
 // keeps working: the store is user-level and managing it requires no repository.
 func trustNoRepo(t *testing.T) (string, *config.Config) {
 	t.Helper()
@@ -173,18 +175,43 @@ func TestTrustAddEventCarriesEveryFlag(t *testing.T) {
 		// reader unable to tell "not a stub" from "this docket does not record
 		// stubs".
 		"stub": false,
+		// EMPTY, and asserted rather than skipped, same reasoning: an add that
+		// recorded no stub rationale (DKT-607) must show an empty reason, not a
+		// missing key a reader cannot tell from "this docket does not record
+		// reasons".
+		"stub_reason": "",
+		// EMPTY for a bare-name argv[0], which carries no content pin, and
+		// asserted rather than skipped: an absent key would read the same as a
+		// payload from a docket that never recorded pins.
+		"argv0_sha256": "",
 	}
 	want["kind"] = engine.EventTrustAdded
+	assertExactTrustPayload(t, got, want)
 
-	// `actor` and `cwd` (DKT-263) are ENVIRONMENT-DERIVED, so they belong to the
-	// key set without belonging to the value table: pinning "Erik Reinert" here
-	// would assert the machine the suite happens to run on. Their values are
-	// TestTrustEventNamesWhoGrantedIt's business; what this test owns is that
-	// they are part of the exact shape a consumer reads.
+	// THE ARGV ITSELF NEVER RIDES ALONG. The hash identifies the command;
+	// the arguments must not land in a feed a run report renders.
+	raw, err := json.Marshal(got)
+	testsupport.Must(t, err, "re-marshaling: %v", err)
+	if strings.Contains(string(raw), "./scan") {
+		t.Errorf("the event body contains the argv: %s", raw)
+	}
+}
+
+// assertExactTrustPayload checks a trust event's key set in both directions and
+// every value in want. A missing key is a property the trail cannot show; an
+// unexpected one is a payload drifting from the shape consumers read.
+//
+// `actor` and `cwd` (DKT-263) are ENVIRONMENT-DERIVED, so they belong to the
+// key set without belonging to the value table: pinning "Erik Reinert" here
+// would assert the machine the suite happens to run on. Their values are
+// TestTrustEventNamesWhoGrantedIt's business; what this helper owns is that
+// they are part of the exact shape a consumer reads.
+func assertExactTrustPayload(t *testing.T, got, want map[string]any) {
+	t.Helper()
 	derived := map[string]bool{"actor": true, "cwd": true}
 	for key := range derived {
 		if _, present := got[key]; !present {
-			t.Errorf("the event omits %q; a grant widens what code may execute, "+
+			t.Errorf("the event omits %q; a trust change alters what code may execute, "+
 				"so its trail must name who did it (DKT-263)", key)
 		}
 	}
@@ -204,14 +231,6 @@ func TestTrustAddEventCarriesEveryFlag(t *testing.T) {
 			continue
 		}
 		t.Errorf("the event carries an unexpected key %q", key)
-	}
-
-	// THE ARGV ITSELF NEVER RIDES ALONG (§3.6). The hash identifies the command;
-	// the arguments must not land in a feed a run report renders.
-	raw, err := json.Marshal(got)
-	testsupport.Must(t, err, "re-marshaling: %v", err)
-	if strings.Contains(string(raw), "./scan") {
-		t.Errorf("the event body contains the argv: %s", raw)
 	}
 }
 
@@ -237,14 +256,157 @@ func TestTrustRemoveEventCarriesTheRemovedFlags(t *testing.T) {
 	if removed["kind"] != engine.EventTrustRemoved {
 		t.Fatalf("the second event is %v, want %s", removed["kind"], engine.EventTrustRemoved)
 	}
-	if removed["tree"] != true {
-		t.Errorf("the removal does not record that the entry carried tree; got %#v", removed["tree"])
+	assertExactTrustPayload(t, removed, map[string]any{
+		"kind":        engine.EventTrustRemoved,
+		"name":        "scan",
+		"argv_sha256": trust.ArgvSHA256([]string{"go", "run", "./scan"}),
+		"repo":        mustRepoIdentity(t, cfg),
+		"global":      false,
+		"prefix":      false,
+		"re_runnable": false,
+		"tree":        true,
+		"flaky":       false,
+		"network":     []any{"vuln.go.dev"},
+		"timeout":     "",
+		"stub":        false,
+		"stub_reason": "",
+		// EMPTY for a bare-name argv[0], and asserted rather than skipped: a
+		// revocation that dropped the key would read the same as one from a
+		// docket that never recorded pins.
+		"argv0_sha256": "",
+	})
+}
+
+// TestTrustRemoveEventCarriesArgv0Pin: a revocation names the bytes it
+// revoked. The removal's pin is the file's own hash and the one the add
+// recorded, so the pair reads as the grant and its withdrawal.
+func TestTrustRemoveEventCarriesArgv0Pin(t *testing.T) {
+	_, cfg := trustRepo(t)
+	script := writeScript(t, "#!/bin/sh\nexit 0\n")
+	pin := fileSHA256(t, script)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", script)
+	testsupport.Must(t, err, "trust add: %v", err)
+	err = runTrustVerb(t, cfg, newTrustRmCmd(), "checks")
+	testsupport.Must(t, err, "trust rm: %v", err)
+
+	events := trustEvents(t, cfg)
+	if len(events) != 2 {
+		t.Fatalf("got %d trust events, want the add and the remove", len(events))
 	}
-	if !sameJSON(t, removed["network"], []any{"vuln.go.dev"}) {
-		t.Errorf("the removal does not record the revoked hosts; got %#v", removed["network"])
+	added, removed := events[0], events[1]
+	if removed["kind"] != engine.EventTrustRemoved {
+		t.Fatalf("the second event is %v, want %s", removed["kind"], engine.EventTrustRemoved)
 	}
-	if removed["argv_sha256"] != trust.ArgvSHA256([]string{"go", "run", "./scan"}) {
-		t.Errorf("the removal names the wrong argv hash: %#v", removed["argv_sha256"])
+	if removed["argv0_sha256"] != pin {
+		t.Errorf("the removal's argv0_sha256 = %#v, want the script's %q",
+			removed["argv0_sha256"], pin)
+	}
+	if removed["argv0_sha256"] != added["argv0_sha256"] {
+		t.Errorf("the removal's argv0_sha256 = %#v, want the add event's %#v",
+			removed["argv0_sha256"], added["argv0_sha256"])
+	}
+}
+
+// writeScript writes an absolute-path script into a temp dir and returns its
+// path. Its bytes are what a trust add pins.
+func writeScript(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "check.sh")
+	err := os.WriteFile(path, []byte(body), 0o700)
+	testsupport.Must(t, err, "writing %s: %v", path, err)
+	return path
+}
+
+// fileSHA256 hashes a file's bytes independently of the trust package, so a
+// shared bug in its hasher cannot make the assertion self-confirming.
+func fileSHA256(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	testsupport.Must(t, err, "reading %s: %v", path, err)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestTrustAddEventCarriesArgv0Pin: the event names the bytes the grant
+// approved, and it is the same pin the store holds for that grant.
+func TestTrustAddEventCarriesArgv0Pin(t *testing.T) {
+	_, cfg := trustRepo(t)
+	script := writeScript(t, "#!/bin/sh\nexit 0\n")
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", script)
+	testsupport.Must(t, err, "trust add: %v", err)
+
+	entries := trustEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("got %d trust entries, want the one add", len(entries))
+	}
+	stored := entries[0].Argv0SHA256
+	if stored == "" {
+		t.Fatal("the stored entry carries no content pin for an absolute argv[0]")
+	}
+
+	events := trustEvents(t, cfg)
+	if len(events) != 1 {
+		t.Fatalf("got %d trust events, want exactly the one add", len(events))
+	}
+	if events[0]["argv0_sha256"] != stored {
+		t.Errorf("the event's argv0_sha256 = %#v, want the stored pin %q",
+			events[0]["argv0_sha256"], stored)
+	}
+}
+
+// TestRepinEventShowsChangedContentHash: a re-pin after the script changed is
+// distinguishable in the trail from a duplicate add. Both events name the same
+// command, and only the content pin shows that the approved bytes changed.
+func TestRepinEventShowsChangedContentHash(t *testing.T) {
+	_, cfg := trustRepo(t)
+	script := writeScript(t, "#!/bin/sh\nexit 0\n")
+	args := []string{"checks", "--", script}
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), args...)
+	testsupport.Must(t, err, "first add: %v", err)
+	firstHash := fileSHA256(t, script)
+
+	err = os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o700)
+	testsupport.Must(t, err, "changing the script: %v", err)
+	changedHash := fileSHA256(t, script)
+
+	err = runTrustVerb(t, cfg, newTrustAddCmd(), args...)
+	testsupport.Must(t, err, "re-pin add: %v", err)
+
+	events := trustEvents(t, cfg)
+	if len(events) != 2 {
+		t.Fatalf("got %d trust events, want the add and the re-pin", len(events))
+	}
+	first, second := events[0], events[1]
+	for i, e := range events {
+		if e["kind"] != engine.EventTrustAdded {
+			t.Errorf("event %d is %v, want %s", i, e["kind"], engine.EventTrustAdded)
+		}
+	}
+	if first["argv_sha256"] != second["argv_sha256"] {
+		t.Errorf("the re-pin names a different command: %#v then %#v",
+			first["argv_sha256"], second["argv_sha256"])
+	}
+	if first["argv0_sha256"] != firstHash {
+		t.Errorf("the first event's argv0_sha256 = %#v, want the original file's %q",
+			first["argv0_sha256"], firstHash)
+	}
+	if second["argv0_sha256"] != changedHash {
+		t.Errorf("the re-pin event's argv0_sha256 = %#v, want the changed file's %q",
+			second["argv0_sha256"], changedHash)
+	}
+	if first["argv0_sha256"] == second["argv0_sha256"] {
+		t.Errorf("both events carry argv0_sha256 %#v; the re-pin is indistinguishable from a duplicate add",
+			first["argv0_sha256"])
+	}
+
+	// A third add over unchanged bytes is idempotent and records nothing.
+	err = runTrustVerb(t, cfg, newTrustAddCmd(), args...)
+	testsupport.Must(t, err, "identical re-add: %v", err)
+	if events := trustEvents(t, cfg); len(events) != 2 {
+		t.Errorf("got %d trust events after an identical re-add, want still 2", len(events))
 	}
 }
 
@@ -342,7 +504,7 @@ func TestTrustAddFailsWhenTheEventCannotBeRecorded(t *testing.T) {
 }
 
 // TestTrustAddOutsideARepoSaysNothingWasRecorded: the verb still works — the
-// store is user-level (§3.5) and requiring a database to manage it would mean
+// store is user-level and requiring a database to manage it would mean
 // someone who installed docket could not approve a command until they created a
 // tracker — but it SAYS the change went unrecorded rather than leaving the
 // operator to assume a trail exists.
@@ -350,7 +512,7 @@ func TestTrustAddOutsideARepoSaysNothingWasRecorded(t *testing.T) {
 	_, cfg := trustNoRepo(t)
 
 	// The disclosure rides in the RESULT, not only on a stream, so a machine
-	// consumer sees it too — the same reason §3.3's over-authorization warning
+	// consumer sees it too — the same reason the over-authorization warning
 	// is in the payload rather than on stderr alone.
 	cmd := newTrustAddCmd()
 	cmd.Flags().String("json", "", "")
@@ -588,12 +750,116 @@ func TestTrustAddStubEventSaysTheAssuranceIsHollow(t *testing.T) {
 	}
 }
 
+// TestTrustAddRefusesWhenTheCwdCannotBeResolved is DKT-595's CLI half: inside a
+// repo, a grant whose working directory cannot be read is REFUSED, with nothing
+// written to either file.
+//
+// This reverses the recorder's original call — degrade cwd to "" and write the
+// event anyway — because the 2026-08-19 batch showed what the degraded shape is
+// worth: privilege widened and a ledger that could not say by whom or from
+// where. The refusal rides the same OnChange-hook abort as a failed event
+// write, so the store mutation does not land either.
+//
+// The failure arrives through the `getwd` seam rather than by deleting the
+// process's cwd, because the real thing is not portably reproducible: on
+// darwin, getcwd answers from the kernel's name cache even after the directory
+// is unlinked, so the deleted-cwd version of this test asserts nothing there.
+func TestTrustAddRefusesWhenTheCwdCannotBeResolved(t *testing.T) {
+	_, cfg := trustRepo(t)
+	stubGetwdFailure(t)
+
+	runErr := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
+	if runErr == nil {
+		t.Fatal("the add succeeded with an unresolvable cwd; an unattributable grant must be refused")
+	}
+	// The failure reads as the unrecorded-change one (CmdError does not
+	// unwrap, so the taxonomy code and the message are the assertable surface,
+	// the same surface a caller sees).
+	if !strings.Contains(runErr.Error(), "not recorded") {
+		t.Errorf("the refusal does not say the change went unrecorded: %v", runErr)
+	}
+	if code := errorCodeOf(t, runErr); code != output.ErrGeneral {
+		t.Errorf("the refusal is %s, want GENERAL_ERROR — the argv was fine, and a VALIDATION code would send the operator to fix it: %v", code, runErr)
+	}
+
+	// NOTHING LANDED: not the entry, not the event. The refusal runs inside
+	// trust.Add's hook, ahead of the store write, exactly like a failed record.
+	if entries := trustEntries(t); len(entries) != 0 {
+		t.Errorf("the grant landed anyway: %+v", entries)
+	}
+	if events := trustEvents(t, cfg); len(events) != 0 {
+		t.Errorf("a refused grant left %d event(s): %+v", len(events), events)
+	}
+}
+
+// TestTrustRmFailsLoudlyWhenTheCwdCannotBeResolved: an unattributable
+// revocation still fails the verb, but on this verb the store is published
+// BEFORE the record (DKT-2198), so the entry is already gone when attribution
+// fails. The requirement here is that the failure SAYS so — an operator told
+// only "not recorded" would re-run a removal that already took effect.
+func TestTrustRmFailsLoudlyWhenTheCwdCannotBeResolved(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
+	testsupport.Must(t, err, "trust add: %v", err)
+
+	stubGetwdFailure(t)
+	runErr := runTrustVerb(t, cfg, newTrustRmCmd(), "checks")
+	if runErr == nil {
+		t.Fatal("the removal succeeded with an unresolvable cwd; an unattributable revocation must be refused")
+	}
+	if !strings.Contains(runErr.Error(), "was removed from the trust store") {
+		t.Errorf("the failure must say the entry WAS removed and only the record failed: %v", runErr)
+	}
+	if code := errorCodeOf(t, runErr); code != output.ErrGeneral {
+		t.Errorf("the failure is %s, want GENERAL_ERROR: %v", code, runErr)
+	}
+	if entries := trustEntries(t); len(entries) != 0 {
+		t.Errorf("the publish already landed, so the entry must be gone: %+v", entries)
+	}
+	// The trail keeps showing the entry as trusted, which OVER-reports
+	// authority. That is the safe direction: a reader is conservative, never
+	// permissively told a live grant is gone.
+	if events := trustEvents(t, cfg); len(events) != 1 {
+		t.Errorf("got %d events, want only the original add: %+v", len(events), events)
+	}
+}
+
+// TestTrustAddOutsideARepoWorksWithAnUnreadableCwd pins the refusal's SCOPE:
+// outside a repo there is no event log, the recorder warns-and-continues, and
+// an unreadable cwd changes none of that — the recorder never
+// reaches cwd resolution on that path. DKT-595 hardens the trail where one
+// exists; it does not make managing the user-level store require one.
+func TestTrustAddOutsideARepoWorksWithAnUnreadableCwd(t *testing.T) {
+	_, cfg := trustNoRepo(t)
+	stubGetwdFailure(t)
+
+	runErr := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
+	testsupport.Must(t, runErr, "trust add outside a repo must still work with an unreadable cwd: %v", runErr)
+	if entries := trustEntries(t); len(entries) != 1 {
+		t.Fatalf("the entry was not written; got %+v", entries)
+	}
+}
+
+// stubGetwdFailure makes the recorder's cwd resolution fail for one test, the
+// way a deleted or unsearchable working directory would, restoring os.Getwd
+// afterwards. See the `getwd` seam's comment for why the real failure cannot be
+// staged portably.
+func stubGetwdFailure(t *testing.T) {
+	t.Helper()
+	saved := getwd
+	getwd = func() (string, error) {
+		return "", errors.New("getwd: no such file or directory")
+	}
+	t.Cleanup(func() { getwd = saved })
+}
+
 // TestReAddFlippingStubConflicts: `stub` joins the conflict set.
 //
 // A silent flip in either direction is the failure. Turning it OFF converts
 // every future hollow pass into one that reads as real; turning it ON does the
 // reverse. Either way the store would show only that something of that name was
-// re-approved — which is precisely the shape §3.6's flag-carrying payload
+// re-approved — which is precisely the shape the flag-carrying payload
 // exists to prevent.
 func TestReAddFlippingStubConflicts(t *testing.T) {
 	_, cfg := trustRepo(t)
@@ -612,5 +878,80 @@ func TestReAddFlippingStubConflicts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stub") {
 		t.Errorf("the conflict does not name `stub`: %v", err)
+	}
+}
+
+// TestStubReasonTravelsWithTheGrant is DKT-607: a stub's WHY — and the issue
+// tracking its removal — is recorded once at add time and then reaches every
+// surface the stub itself reaches: the store, the grant event, and (proven in
+// the engine package) the activation gate preflight. Before this, the decision
+// that a gate stays a stub lived only in tribunal transcripts.
+func TestStubReasonTravelsWithTheGrant(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	reason := "no scanner selected yet; removal tracked by DKT-607"
+	err := runTrustVerb(t, cfg, newTrustAddCmd(),
+		"secret-scan", "--stub", "--stub-reason", reason, "--", "/usr/bin/true")
+	testsupport.Must(t, err, "trust add --stub --stub-reason: %v", err)
+
+	events := trustEvents(t, cfg)
+	if len(events) != 1 {
+		t.Fatalf("got %d trust events, want the one add", len(events))
+	}
+	if events[0]["stub_reason"] != reason {
+		t.Errorf("the event's stub_reason = %#v, want %q — the trail must carry "+
+			"the documented decision, not only the hollowness", events[0]["stub_reason"], reason)
+	}
+
+	entries := trustEntries(t)
+	if len(entries) != 1 || entries[0].StubReason != reason {
+		t.Errorf("the stored entry does not carry the reason; got %+v", entries)
+	}
+}
+
+// TestStubReasonRequiresStub: a reason describes a stub, so supplying one on a
+// real check is a contradiction and is refused as VALIDATION — one of the two
+// flags is a mistake, and guessing which would either hide a hollow check or
+// hollow a real one.
+func TestStubReasonRequiresStub(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(),
+		"secret-scan", "--stub-reason", "tracked by DKT-607", "--", "/usr/bin/true")
+	if err == nil {
+		t.Fatal("--stub-reason without --stub succeeded; a reason on a non-stub entry is a contradiction")
+	}
+	if code := errorCodeOf(t, err); code != output.ErrValidation {
+		t.Errorf("the refusal is %s, want VALIDATION: %v", code, err)
+	}
+	if entries := trustEntries(t); len(entries) != 0 {
+		t.Errorf("the refused add landed anyway: %+v", entries)
+	}
+	if events := trustEvents(t, cfg); len(events) != 0 {
+		t.Errorf("a refused add left %d event(s)", len(events))
+	}
+}
+
+// TestReAddChangingStubReasonConflicts: the reason joins the conflict set. It
+// IS the documented decision, and a re-add that silently rewrote or erased it
+// would swap one decision for another with the store showing only that
+// something of that name was re-approved.
+func TestReAddChangingStubReasonConflicts(t *testing.T) {
+	_, cfg := trustRepo(t)
+
+	err := runTrustVerb(t, cfg, newTrustAddCmd(),
+		"scan", "--stub", "--stub-reason", "tracked by DKT-607", "--", "make", "test")
+	testsupport.Must(t, err, "trust add: %v", err)
+
+	err = runTrustVerb(t, cfg, newTrustAddCmd(),
+		"scan", "--stub", "--", "make", "test")
+	if err == nil {
+		t.Fatal("re-adding without the reason succeeded; erasing the documented decision must conflict")
+	}
+	if code := errorCodeOf(t, err); code != output.ErrConflict {
+		t.Errorf("the refusal is %v, want %v", code, output.ErrConflict)
+	}
+	if !strings.Contains(err.Error(), "stub_reason") {
+		t.Errorf("the conflict does not name `stub_reason`: %v", err)
 	}
 }

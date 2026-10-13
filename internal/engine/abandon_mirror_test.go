@@ -186,6 +186,143 @@ func TestAbandonmentDoesNotCompleteTheIssue(t *testing.T) {
 	}
 }
 
+// The abandon cascades stamp `recorded_at_ms` on every step they terminalize,
+// because the usage grace's wave-end clock (latestExecutorRecordMS) reads that
+// column for every terminal executor step with attempt > 0. A cascaded step
+// left at 0 drops out of the clock and shortens the wave's usage grace.
+
+// TestAbandonIssueInRunStampsTheCascadedStepsRecordTime: the operator verb's
+// cascade stamps the abandon time on a claimed attempt-1 step and leaves an
+// already-terminal sibling's record time alone.
+func TestAbandonIssueInRunStampsTheCascadedStepsRecordTime(t *testing.T) {
+	conn := mustDB(t)
+	run, issue := activatedRun(t, conn)
+	e := testEngine()
+
+	claimAndComplete(t, conn, e, "implement@0", "the change summary", "")
+	claimInstance(t, conn, "review@0#0", nowMS)
+
+	held := stepByInstance(t, conn, "review@0#0")
+	if held.Attempt != 1 || db.StepTerminal(held.Status) {
+		t.Fatalf("premise: review@0#0 attempt %d status %q, want a live attempt 1",
+			held.Attempt, held.Status)
+	}
+	finishedBefore := stepByInstance(t, conn, "implement@0").RecordedAtMS
+	if finishedBefore == 0 {
+		t.Fatal("premise: implement@0 completed with recorded_at_ms 0")
+	}
+
+	abandonAt := nowMS + 1_000
+	_, err := AbandonIssueInRun(conn, run.ID, issue, "stopping the issue", abandonAt)
+	testsupport.Must(t, err, "AbandonIssueInRun: %v", err)
+
+	requireCascadeStamp(t, conn, "review@0#0", abandonAt)
+	if got := stepByInstance(t, conn, "implement@0").RecordedAtMS; got != finishedBefore {
+		t.Errorf("implement@0 recorded_at_ms = %d after the abandon, want its "+
+			"original %d — the cascade must skip terminal steps", got, finishedBefore)
+	}
+}
+
+// abandonRoutingFixtureSrc has three independent steps, so one can finish, one
+// can be held mid-attempt, and one can exhaust into `abandon-issue` at once.
+const abandonRoutingFixtureSrc = `
+[pipeline]
+name = "abandon-routing-fixture"
+version = 1
+
+[match]
+kind = ["task"]
+
+[[step]]
+name = "finished"
+executor = "w"
+emits = "change-summary"
+after = []
+
+[[step]]
+name = "held"
+executor = "w"
+emits = "change-summary"
+after = []
+
+[[step]]
+name = "quits"
+executor = "w"
+emits = "change-summary"
+after = []
+max_attempts = 1
+on_fail = "abandon-issue"
+`
+
+// TestAbandonRoutingStampsTheCascadedSiblingsRecordTime: a step exhausting
+// into `on_fail = "abandon-issue"` reaches abandonIssue through the
+// reconciliation, and that cascade stamps the routing time on a claimed
+// attempt-1 sibling and leaves an already-terminal sibling's record time alone.
+func TestAbandonRoutingStampsTheCascadedSiblingsRecordTime(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(abandonRoutingFixtureSrc), "abandon-routing.toml")
+	issue := createIssue(t, conn, "abandon routing", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	claimAndComplete(t, conn, e, "finished@0", "the change summary", "")
+	claimInstance(t, conn, "held@0", nowMS)
+
+	held := stepByInstance(t, conn, "held@0")
+	if held.Attempt != 1 || db.StepTerminal(held.Status) {
+		t.Fatalf("premise: held@0 attempt %d status %q, want a live attempt 1",
+			held.Attempt, held.Status)
+	}
+	finishedBefore := stepByInstance(t, conn, "finished@0").RecordedAtMS
+	if finishedBefore == 0 {
+		t.Fatal("premise: finished@0 completed with recorded_at_ms 0")
+	}
+
+	failAt := nowMS + 1_000
+	quits := claimInstance(t, conn, "quits@0", failAt)
+	testsupport.Must(t, e.FailStep(conn, stepIDByInstance(t, conn, "quits@0"),
+		quits.Token, "giving up", "", failAt), "FailStep quits@0")
+
+	after, err := db.GetIssue(conn, issue)
+	testsupport.Must(t, err, "GetIssue: %v", err)
+	if after.Resolution != db.IssueResolutionAbandoned {
+		t.Fatalf("premise: resolution = %q, want %q — the failure did not "+
+			"route abandon-issue", after.Resolution, db.IssueResolutionAbandoned)
+	}
+
+	requireCascadeStamp(t, conn, "held@0", failAt)
+	if got := stepByInstance(t, conn, "finished@0").RecordedAtMS; got != finishedBefore {
+		t.Errorf("finished@0 recorded_at_ms = %d after the abandon, want its "+
+			"original %d — the cascade must skip terminal steps", got, finishedBefore)
+	}
+}
+
+// requireCascadeStamp fails unless the cascade terminalized the step and
+// stamped its record time with the abandon's clock.
+func requireCascadeStamp(t *testing.T, conn *sql.DB, instance string, at int64) {
+	t.Helper()
+	step := stepByInstance(t, conn, instance)
+	if step.Status != db.StepFailedRouted {
+		t.Fatalf("premise: %s = %q after the abandon, want the cascade's %q",
+			instance, step.Status, db.StepFailedRouted)
+	}
+	if step.RecordedAtMS != at {
+		t.Errorf("%s recorded_at_ms = %d, want the abandon time %d — a "+
+			"cascaded attempt-1 step must still advance the wave-end clock",
+			instance, step.RecordedAtMS, at)
+	}
+}
+
+// stepByInstance reads a step's stored row by its rendered identity.
+func stepByInstance(t *testing.T, conn *sql.DB, instance string) *db.Step {
+	t.Helper()
+	step, err := db.GetStep(conn, stepIDByInstance(t, conn, instance))
+	testsupport.Must(t, err, "GetStep %s: %v", instance, err)
+	return step
+}
+
 // issueVersion reads the issue row's optimistic-concurrency version.
 func issueVersion(t *testing.T, conn *sql.DB, issueID int) int {
 	t.Helper()

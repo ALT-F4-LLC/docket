@@ -58,7 +58,7 @@ func TestClaimMintsTokenAndTakesLease(t *testing.T) {
 	}
 }
 
-// TestClaimStoresOnlyTheHash is the §4 hash-at-rest proof: a stolen database
+// TestClaimStoresOnlyTheHash is the hash-at-rest proof: a stolen database
 // file must yield no live capability.
 func TestClaimStoresOnlyTheHash(t *testing.T) {
 	db, id := leaseTestDB(t)
@@ -118,7 +118,7 @@ func TestClaimAgainstLiveLeaseConflicts(t *testing.T) {
 	}
 }
 
-// TestClaimAgainstExpiredLeaseSucceeds is the §9 item 4 core: lease expiry
+// TestClaimAgainstExpiredLeaseSucceeds is the liveness core: lease expiry
 // alone re-readies the entity, and the attempt trail records both claims.
 func TestClaimAgainstExpiredLeaseSucceeds(t *testing.T) {
 	db, id := leaseTestDB(t)
@@ -180,7 +180,7 @@ func TestHeartbeatExtendsLease(t *testing.T) {
 	}
 }
 
-// TestRefusalMatrix walks the §9.3 matrix over the lease-mediated verbs. Each
+// TestRefusalMatrix walks the refusal matrix over the lease-mediated verbs. Each
 // case asserts the sentinel that maps to exactly one CLI error code.
 func TestRefusalMatrix(t *testing.T) {
 	now := int64(1_000_000)
@@ -322,7 +322,7 @@ func TestReleaseClearsLeaseAndKeepsAttempt(t *testing.T) {
 	}
 }
 
-// TestConcurrentClaims is the in-process half of the §9.3 race proof: N
+// TestConcurrentClaims is the in-process half of the race proof: N
 // goroutines claim one issue and exactly one wins.
 //
 // The out-of-process half lives in the QA suite, because db.Open caps the pool
@@ -437,7 +437,7 @@ func TestClaimPredicateIsLoadBearing(t *testing.T) {
 	}
 }
 
-// TestGetIssueLeaseNeverWrites pins engine-spec §6 "reads never write": the
+// TestGetIssueLeaseNeverWrites pins "reads never write": the
 // read path must not reap, even when the lease it reads has expired.
 func TestGetIssueLeaseNeverWrites(t *testing.T) {
 	db, id := leaseTestDB(t)
@@ -471,7 +471,7 @@ func TestGetIssueLeaseNeverWrites(t *testing.T) {
 }
 
 // TestUnclaimedIssuesAreOutsideTheMechanism is the dormancy proof at the
-// semantic level (engine-spec §9 item 8): a lease-ending verb on an unclaimed
+// semantic level: a lease-ending verb on an unclaimed
 // issue needs no token and refuses nothing.
 func TestUnclaimedIssueMutationNeedsNoToken(t *testing.T) {
 	db, id := leaseTestDB(t)
@@ -492,7 +492,7 @@ func TestUnclaimedIssueMutationNeedsNoToken(t *testing.T) {
 	}
 }
 
-// TestLeaseEndingVerbRefusesNonHolder proves the §9.3 "unclaimed worker cannot
+// TestLeaseEndingVerbRefusesNonHolder proves the "unclaimed worker cannot
 // record" guarantee at the verb level: a bystander cannot evict a live holder.
 func TestLeaseEndingVerbRefusesNonHolder(t *testing.T) {
 	db, id := leaseTestDB(t)

@@ -112,7 +112,7 @@ on_fail = "waiting-human"
 	assertBreakdown("after the failure", 2, 1, 1)
 
 	// Claim 3 expires and the NEXT CLAIM reaps it lazily — the other reap
-	// path (§6.3 confines reaping to next and claim), same counter.
+	// path (reaping happens only in next and claim), same counter.
 	claim3, err := ClaimStep(conn, id, ClaimOptions{Owner: "w3", NowMS: late + 1})
 	testsupport.Must(t, err, "claim 3: %v", err)
 	assertBreakdown("after claim 3", 3, 1, 1)

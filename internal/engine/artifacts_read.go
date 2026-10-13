@@ -33,7 +33,7 @@ import (
 // list and then fetch without re-deriving anything.
 type StepArtifact struct {
 	// Artifact is the ARTIFACT-N reference, matching the run report's
-	// artifact index (R6) so the two surfaces name the same thing the same
+	// artifact index so the two surfaces name the same thing the same
 	// way.
 	Artifact string `json:"artifact"`
 	Kind     string `json:"kind"`
@@ -46,7 +46,7 @@ type StepArtifact struct {
 	// asking for a body that may be up to db.ArtifactMaxBytes.
 	Bytes        int `json:"bytes"`
 	PayloadBytes int `json:"payload_bytes,omitempty"`
-	// Stub marks an artifact the S3/S4 stub runner produced — a computation
+	// Stub marks an artifact the stub runner produced — a computation
 	// that did not actually run. `omitempty` matches the db.Artifact rule: an
 	// artifact from a real run serializes with no `stub` key at all.
 	Stub bool `json:"stub,omitempty"`

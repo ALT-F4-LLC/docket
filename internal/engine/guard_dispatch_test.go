@@ -13,13 +13,13 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// `guard record | spawn` — §7's exact predicates.
+// `guard record | spawn` — the exact predicates.
 
 // ---------------------------------------------------------------------------
-// G1-G4 — `guard record`
+// `guard record`
 // ---------------------------------------------------------------------------
 
-// TestGuardRecordAllowsAReconciledRun is G1's positive case: with no open
+// TestGuardRecordAllowsAReconciledRun is the positive case: with no open
 // dispatch and no discrepancy, the guard allows.
 //
 // It matters that this is the ORDINARY state. A guard that denied by default
@@ -35,7 +35,7 @@ func TestGuardRecordAllowsAReconciledRun(t *testing.T) {
 	}
 }
 
-// TestGuardRecordDeniesAnOpenDispatch is G1 and G3: an open manifest is
+// TestGuardRecordDeniesAnOpenDispatch: an open manifest is
 // unreconciled, and the denial names it in `next`'s own words.
 func TestGuardRecordDeniesAnOpenDispatch(t *testing.T) {
 	conn := mustDB(t)
@@ -45,14 +45,14 @@ func TestGuardRecordDeniesAnOpenDispatch(t *testing.T) {
 	verdict, err := GuardRecord(conn, runID, 0, nowMS)
 	testsupport.Must(t, err, "GuardRecord: %v", err)
 	if verdict.Allowed {
-		t.Fatal("G1: a run with an open dispatch was allowed to record")
+		t.Fatal("a run with an open dispatch was allowed to record")
 	}
 	if !strings.Contains(verdict.Reason, manifest.Dispatch) {
 		t.Errorf("the denial %q does not name the open dispatch %s",
 			verdict.Reason, manifest.Dispatch)
 	}
 
-	// G2/G3: THE SAME WORDS `next` USES. The guard and the scheduler compute
+	// THE SAME WORDS `next` USES. The guard and the scheduler compute
 	// the state with one function, so they cannot describe it differently — and
 	// this asserts the sharing rather than trusting it.
 	_, nextErr := NewEngine().NextSteps(conn, runID, 0, nowMS)
@@ -65,38 +65,144 @@ func TestGuardRecordDeniesAnOpenDispatch(t *testing.T) {
 	}
 }
 
-// TestGuardRecordDeniesADiscrepancy is G2's other half: a discrepancy is
-// unreconciled even with NO dispatch open.
+// TestGuardRecordDeniesADiscrepancy is the other half of "unreconciled": a
+// discrepancy is unreconciled even with NO dispatch open.
 //
-// D6 is why: discrepancies are a property of the RUN, not of the manifest — a
-// relay that never opened a dispatch can still leave a claimed step unrecorded.
+// Discrepancies are a property of the RUN, not of the manifest — a relay that
+// never opened a dispatch can still leave a claimed step unrecorded.
+//
+// It also pins the two claimed-but-unrecorded advice branches through the one
+// caller that can show them apart. The guard does not reap, which makes it the
+// only renderer of that discrepancy that does NOT, so a lease already past its
+// expiry survives to be reported here — and the exits that fit a live lease
+// ("wait for it to lapse", `dispatch abandon`) are wrong on it, while the cheap
+// correct act, letting `next` reap it, is the one they leave out. `step reap`
+// carries over to the lapsed branch for one reason: a co-occurring
+// missing-usage discrepancy makes `next` refuse too, and then it is the only
+// verb that clears the discrepancy directly.
 func TestGuardRecordDeniesADiscrepancy(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
 
-	claim := claimInstance(t, conn, "implement@0", nowMS)
-	_ = claim
+	grace := dispatchGraceMS(t, conn)
+	claimInstance(t, conn, "implement@0", nowMS)
 
-	// Past `dispatch.grace` with no record: D1, claimed-but-unrecorded. The
+	// Past `dispatch.grace` with no record: claimed-but-unrecorded. The
 	// clock is ADVANCED rather than slept, following the repo's TTL discipline —
 	// the refusal under test is "the clock says this lapsed", which needs no
 	// actual waiting and would flake on a loaded runner if it did.
-	at := nowMS + dispatchGraceMS(t, conn) + 1
+	//
+	// Default `lease.ttl.default` equals `dispatch.grace`, so this instant is
+	// past the lease's expiry too: the ORDINARY lapsed-lease state.
+	at := nowMS + grace + 1
 
 	verdict, err := GuardRecord(conn, runID, 0, at)
 	testsupport.Must(t, err, "GuardRecord: %v", err)
 	if verdict.Allowed {
-		t.Fatal("G2: a run with a claimed-but-unrecorded step was allowed to record")
+		t.Fatal("a run with a claimed-but-unrecorded step was allowed to record")
 	}
-	// G3: the denial carries the RESOLUTION, because §2 enumerates the
-	// resolutions and a refusal without the way out makes reconciliation a
-	// documentation lookup rather than an operator's act.
+	// The denial carries the RESOLUTION, because a refusal without the way out
+	// makes reconciliation a documentation lookup rather than an operator's act.
 	if !strings.Contains(verdict.Reason, "lease expiry") {
-		t.Errorf("the denial %q does not name D1's resolution", verdict.Reason)
+		t.Errorf("the denial %q does not name the claimed-but-unrecorded resolution", verdict.Reason)
+	}
+	if strings.Contains(verdict.Reason, "wait for it to lapse") {
+		t.Errorf("the denial %q tells the operator to wait for an expiry already "+
+			"past; the guard does not reap, so it can report a LAPSED lease",
+			verdict.Reason)
+	}
+	// The rendered expiry comes from the STORED row, not from this test's own
+	// `nowMS + grace` arithmetic: the message interpolates `step.ExpiresMS`, so
+	// recomputing it here would let the assertion agree with a message that had
+	// stopped reporting the lease at all.
+	var stepExpiresMS int64
+	err = conn.QueryRow(
+		`SELECT expires_ms FROM steps WHERE run_id = ? AND instance = 'implement@0'`,
+		runID).Scan(&stepExpiresMS)
+	testsupport.Must(t, err, "reading the claimed step's expires_ms: %v", err)
+
+	// The lapsed branch must name the verbs that actually dissolve it. `next` is
+	// the one that reaps and dissolves with no side effect; `step reap` is the
+	// fallback that clears a compound unrecorded-plus-missing-usage state, where
+	// `next` refuses too. The
+	// backticks matter: bare "next" also occurs as ordinary English.
+	assertLapsedExits(t, verdict.Reason, stepExpiresMS)
+
+	// The branch shares the REAP's boundary. `Scheduler.Expired` reaps on
+	// `Lease.Live`, which is `expires_ms > now`, so at the expiry instant
+	// exactly the lease is already gone and the live-lease exits would promise a
+	// wait for a lapse that has happened. Default `lease.ttl.default` equals
+	// `dispatch.grace`, so `nowMS + grace` is both the discrepancy's own boundary and that
+	// instant — the one place a `>=` here would read differently from the reap.
+	verdict, err = GuardRecord(conn, runID, 0, nowMS+grace)
+	testsupport.Must(t, err, "GuardRecord: %v", err)
+	if verdict.Allowed {
+		t.Fatal("at exactly the grace boundary the claimed-but-unrecorded step was allowed")
+	}
+	if strings.Contains(verdict.Reason, "wait for it to lapse") {
+		t.Errorf("at the expiry instant the reap already fires, but the denial %q "+
+			"still offers the live-lease exits", verdict.Reason)
+	}
+	assertLapsedExits(t, verdict.Reason, stepExpiresMS)
+
+	// The live-lease branch, on the same probe: a lease whose TTL outlasts the
+	// grace is still held when the discrepancy fires, and there the live-lease exits are the
+	// correct ones.
+	second := dispatchRun(t, conn)
+	var stepID int
+	err = conn.QueryRow(
+		`SELECT id FROM steps WHERE run_id = ? AND instance = 'implement@0'`,
+		second).Scan(&stepID)
+	testsupport.Must(t, err, "finding the second run's step: %v", err)
+	_, err = ClaimStep(conn, stepID,
+		ClaimOptions{Owner: "worker", TTLOverride: 4 * grace, NowMS: nowMS})
+	testsupport.Must(t, err, "claiming with a long TTL: %v", err)
+
+	verdict, err = GuardRecord(conn, second, 0, at)
+	testsupport.Must(t, err, "GuardRecord: %v", err)
+	if verdict.Allowed {
+		t.Fatal("a claimed-but-unrecorded step under a live lease was allowed to record")
+	}
+	for _, want := range []string{"wait for it to lapse", "step reap", "dispatch abandon"} {
+		if !strings.Contains(verdict.Reason, want) {
+			t.Errorf("the live-lease denial %q does not offer %q", verdict.Reason, want)
+		}
 	}
 }
 
-// TestGuardRecordWithoutRunAnswersOverEveryRun is G4: `--run` is OPTIONAL, and
+// assertLapsedExits pins the exits the claimed-but-unrecorded denial offers on
+// a LAPSED lease.
+//
+// `next` reaps the lapsed lease and dissolves the discrepancy on its own, and
+// `step reap` clears the compound unrecorded-plus-missing-usage state directly — the one case where
+// `next` refuses as well. `dispatch close` is NOT an exit here: with no open
+// dispatch it refuses outright unless `--accept-missing-usage` is passed, so
+// naming it sends the operator into an error rather than out of the refusal.
+//
+// It also pins the message's CONTENT, not only its keywords: the expiry it
+// renders and the sentence saying what `next` does with it. `expiresMS` is the
+// claimed step's stored `expires_ms`, which is what the message interpolates,
+// and it is asserted joined to "lapsed at" rather than alone — a bare
+// epoch-millisecond number could match some other field, while the phrase can
+// only come from the lapsed branch's own Sprintf.
+func assertLapsedExits(t *testing.T, reason string, expiresMS int64) {
+	t.Helper()
+	for _, want := range []string{
+		"`next`", "step reap",
+		fmt.Sprintf("lapsed at %d", expiresMS),
+		"reaps it before probing",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the lapsed-lease denial %q does not offer %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "dispatch close") {
+		t.Errorf("the lapsed-lease denial %q offers `dispatch close`, which "+
+			"refuses in this state instead of dissolving the discrepancy", reason)
+	}
+}
+
+// TestGuardRecordWithoutRunAnswersOverEveryRun: `--run` is OPTIONAL, and
 // without it the guard denies if ANY non-terminal run is unreconciled.
 //
 // That shape matches `guard stop`'s, so a hook wired once keeps working as runs
@@ -125,7 +231,7 @@ func TestGuardRecordWithoutRunAnswersOverEveryRun(t *testing.T) {
 	verdict, err = GuardRecord(conn, 0, 0, nowMS)
 	testsupport.Must(t, err, "GuardRecord over every run: %v", err)
 	if verdict.Allowed {
-		t.Fatal("G4: one unreconciled run did not deny the all-runs guard")
+		t.Fatal("one unreconciled run did not deny the all-runs guard")
 	}
 	if !strings.Contains(verdict.Reason, model.FormatRunID(run.ID)) {
 		t.Errorf("the denial %q does not name the unreconciled run %s",
@@ -159,15 +265,15 @@ func TestGuardRecordRefusesAnUnknownRun(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// G5-G10 — `guard spawn`
+// `guard spawn`
 // ---------------------------------------------------------------------------
 
-// TestGuardSpawnVacuousWithoutManifest is G7: with NO open dispatch and NO
-// `--rows`, the row half is vacuously satisfied and the reap half still answers.
+// TestGuardSpawnVacuousWithoutManifest: with NO open dispatch and NO `--rows`,
+// the row half is vacuously satisfied and the reap half still answers.
 //
 // This is the case that makes the reap-ack mechanism available to a relay that
 // batches its own way. Requiring a manifest would have been core deciding how a
-// harness must batch, which is exactly the instance policy §2 keeps out.
+// harness must batch, which is exactly the instance policy core keeps out.
 func TestGuardSpawnVacuousWithoutManifest(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
@@ -175,11 +281,11 @@ func TestGuardSpawnVacuousWithoutManifest(t *testing.T) {
 	verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{NowMS: nowMS})
 	testsupport.Must(t, err, "GuardSpawn: %v", err)
 	if !verdict.Allowed {
-		t.Errorf("G7: a relay with no manifest and no reaps was denied: %s", verdict.Reason)
+		t.Errorf("a relay with no manifest and no reaps was denied: %s", verdict.Reason)
 	}
 }
 
-// TestGuardSpawnMatchesTheManifest is G5(a) and G6: the proposed rows byte-match
+// TestGuardSpawnMatchesTheManifest is half (a): the proposed rows byte-match
 // the open dispatch, position by position.
 func TestGuardSpawnMatchesTheManifest(t *testing.T) {
 	conn := mustDB(t)
@@ -194,15 +300,15 @@ func TestGuardSpawnMatchesTheManifest(t *testing.T) {
 	})
 	testsupport.Must(t, err, "GuardSpawn: %v", err)
 	if !verdict.Allowed {
-		t.Errorf("G6: rows taken verbatim from the manifest did not match: %s",
+		t.Errorf("rows taken verbatim from the manifest did not match: %s",
 			verdict.Reason)
 	}
 }
 
-// TestGuardSpawnDeniesAlteredRows is G5(a)'s negative: a row the relay changed
-// is a denial, and the denial shows BOTH SIDES' BYTES.
+// TestGuardSpawnDeniesAlteredRows is half (a)'s negative: a row the relay
+// changed is a denial, and the denial shows BOTH SIDES' BYTES.
 //
-// The evidence rather than a summary, for `dispatch verify` P9's reason: a
+// The evidence rather than a summary, for `dispatch verify`'s reason: a
 // computed description would be the engine's opinion about which field moved.
 func TestGuardSpawnDeniesAlteredRows(t *testing.T) {
 	conn := mustDB(t)
@@ -223,22 +329,112 @@ func TestGuardSpawnDeniesAlteredRows(t *testing.T) {
 	})
 	testsupport.Must(t, err, "GuardSpawn: %v", err)
 	if verdict.Allowed {
-		t.Fatal("G5(a): an altered row was allowed to spawn")
+		t.Fatal("an altered row was allowed to spawn")
 	}
 	for _, want := range []string{"not-what-was-offered@0", manifest.Rows[0].Instance} {
 		if !strings.Contains(verdict.Reason, want) {
-			t.Errorf("the denial %q does not show %q; P9 wants the differing BYTES, "+
+			t.Errorf("the denial %q does not show %q; a denial shows the differing BYTES, "+
 				"both sides", verdict.Reason, want)
 		}
 	}
 }
 
-// TestGuardSpawnDeniesRowsWithNoManifest is G8: `--rows` with no open dispatch
-// is a DENIAL, not a vacuous pass.
+// TestGuardSpawnRowsAcceptsAppendedSuffix is DKT-2071: `dispatch extend`
+// appends rows to an OPEN manifest mid-wave, and the relay then launches the
+// APPENDED SUFFIX alone — every row of which the engine offered. The guard used
+// to require the proposed batch to be the whole stored list, same length and
+// same order, so it denied that launch on length before comparing a byte.
+//
+// The property it defends is unchanged and still exact: a relay may spawn only
+// rows the engine issued, byte for byte. Membership is what expresses that; the
+// length equality was a stricter accident of the pre-extend world, in which the
+// manifest never grew.
+func TestGuardSpawnRowsAcceptsAppendedSuffix(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	driveToVerify(t, conn, e, 0)
+	opened := openDispatch(t, conn, run.ID, 0, nowMS)
+	if len(opened.Rows) == 0 {
+		t.Fatal("the opened manifest is empty; the test's premise is broken")
+	}
+	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
+
+	x := extendDispatch(t, conn, run.ID, nowMS)
+	if len(x.Rows) == 0 {
+		t.Fatal("the extend appended nothing; the test's premise is broken")
+	}
+
+	// The suffix alone: exactly what the relay launches after an extend.
+	suffix, err := json.Marshal(x.Rows)
+	testsupport.Must(t, err, "marshaling the appended rows: %v", err)
+	verdict, err := e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: suffix, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if !verdict.Allowed {
+		t.Errorf("the appended suffix was denied: %s — every one of those rows "+
+			"is a row this engine appended to the open manifest", verdict.Reason)
+	}
+
+	// And a row the manifest never carried is still a denial, so the relaxation
+	// did not turn the guard into a pass.
+	altered := make([]model.StepRow, len(x.Rows))
+	copy(altered, x.Rows)
+	altered[0].Instance = "not-what-was-offered@0"
+	forged, err := json.Marshal(altered)
+	testsupport.Must(t, err, "marshaling: %v", err)
+	verdict, err = e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: forged, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if verdict.Allowed {
+		t.Error("an altered row rode in on a subset match; membership must " +
+			"still be byte-exact")
+	}
+	// That row's STEP is unchanged, so the manifest has a counterpart to print
+	// and the denial shows both sides' bytes.
+	if !strings.Contains(verdict.Reason, x.Rows[0].Step) {
+		t.Errorf("the denial %q does not show the manifest's own row for %s — a "+
+			"refusal shows the differing bytes, not a report that two rows differ",
+			verdict.Reason, x.Rows[0].Step)
+	}
+
+	// A proposed row naming a step the manifest NEVER carried has no
+	// counterpart, and the denial must say so rather than printing an unrelated
+	// row beside it. Only a row whose STEP is absent reaches that branch: the
+	// altered row above keeps its step and so takes the has-counterpart path.
+	orphan := make([]model.StepRow, 1)
+	orphan[0] = x.Rows[0]
+	orphan[0].Step = model.FormatStepID(999999)
+	unknown, err := json.Marshal(orphan)
+	testsupport.Must(t, err, "marshaling: %v", err)
+	verdict, err = e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: unknown, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if verdict.Allowed {
+		t.Fatal("a row naming a step absent from the manifest was allowed")
+	}
+	if !strings.Contains(verdict.Reason, "no row for "+orphan[0].Step) {
+		t.Errorf("the denial %q does not name the missing counterpart; a relay "+
+			"reading it cannot tell a row whose BYTES drifted from one the "+
+			"manifest never offered at all", verdict.Reason)
+	}
+
+	// A duplicate of one offered row is a denial too: the manifest offers each
+	// row once, and a batch that spawned one row twice would double-launch it.
+	doubled, err := json.Marshal([]model.StepRow{x.Rows[0], x.Rows[0]})
+	testsupport.Must(t, err, "marshaling: %v", err)
+	verdict, err = e.GuardSpawn(conn, run.ID, SpawnOptions{Rows: doubled, NowMS: nowMS})
+	testsupport.Must(t, err, "GuardSpawn: %v", err)
+	if verdict.Allowed {
+		t.Error("a batch repeating one manifest row was allowed; each offered " +
+			"row may be spawned once")
+	}
+}
+
+// TestGuardSpawnDeniesRowsWithNoManifest: `--rows` with no open dispatch is a
+// DENIAL, not a vacuous pass.
 //
 // The relay believes it is spawning a batch the engine never issued, and that
 // belief is exactly the drift this verb exists to catch. Passing it because
-// there was nothing to compare against would be the silent proceeding §2 forbids.
+// there was nothing to compare against would be silent proceeding.
 func TestGuardSpawnDeniesRowsWithNoManifest(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
@@ -253,7 +449,7 @@ func TestGuardSpawnDeniesRowsWithNoManifest(t *testing.T) {
 	})
 	testsupport.Must(t, err, "GuardSpawn: %v", err)
 	if verdict.Allowed {
-		t.Fatal("G8: rows proposed against no manifest were allowed; the relay " +
+		t.Fatal("rows proposed against no manifest were allowed; the relay " +
 			"believes it is spawning a batch the engine never issued")
 	}
 	if !strings.Contains(verdict.Reason, "no open dispatch") {
@@ -261,8 +457,8 @@ func TestGuardSpawnDeniesRowsWithNoManifest(t *testing.T) {
 	}
 }
 
-// TestGuardSpawnW4AndW6 completes §6.6's W-table: the two rows group 2 deferred
-// because `guard spawn` is group 3's verb.
+// TestGuardSpawnW4AndW6 covers the two reap-ack cases that belong to
+// `guard spawn`.
 //
 // W4: `guard spawn` with an unacknowledged reap is DENIED, naming the seq and
 // the flag. W6: with `--ack-reap SEQ` it is ALLOWED, the row is acknowledged,
@@ -272,8 +468,8 @@ func TestGuardSpawnW4AndW6(t *testing.T) {
 	runID := serializedRun(t, conn)
 	at, seq := reapOneWriter(t, conn, runID)
 
-	// W4: denied, exit 2, reason naming the seq and `--ack-reap`. A11 is what
-	// makes the mechanism DISCOVERABLE rather than documented — an operator
+	// W4: denied, exit 2, reason naming the seq and `--ack-reap`. Naming them
+	// is what makes the mechanism DISCOVERABLE rather than documented — an operator
 	// copies the next command out of the refusal.
 	verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{NowMS: at})
 	testsupport.Must(t, err, "GuardSpawn: %v", err)
@@ -286,7 +482,7 @@ func TestGuardSpawnW4AndW6(t *testing.T) {
 		}
 	}
 
-	// W6: acknowledged and allowed, in ONE invocation (G10) — which is what lets
+	// W6: acknowledged and allowed, in ONE invocation — which is what lets
 	// a relay's hook be a single command.
 	verdict, err = NewEngine().GuardSpawn(conn, runID, SpawnOptions{
 		AckSeqs: []int64{seq}, NowMS: at,
@@ -299,30 +495,87 @@ func TestGuardSpawnW4AndW6(t *testing.T) {
 		t.Errorf("W6: %d reaps remain unacknowledged after the ack", len(acks))
 	}
 
-	// A8: `acked_by` records the VERB and the entry point, never a user
+	// `acked_by` records the VERB and the entry point, never a user
 	// identity — core has no identity model.
 	var ackedBy string
 	err = conn.QueryRow(
 		`SELECT acked_by FROM reap_acks WHERE reaped_seq = ?`, seq).Scan(&ackedBy)
 	testsupport.Must(t, err, "reading acked_by: %v", err)
 	if ackedBy != db.AckByGuardSpawn {
-		t.Errorf("acked_by is %q, want %q — A8 records the verb", ackedBy, db.AckByGuardSpawn)
+		t.Errorf("acked_by is %q, want %q — acked_by records the verb", ackedBy, db.AckByGuardSpawn)
 	}
 
-	// W7: write-class steps flow again.
+	// Write-class steps flow again.
 	answer, err := NewEngine().NextSteps(conn, runID, 0, at)
 	testsupport.Must(t, err, "next after the ack: %v", err)
 	if !contains(instancesIn(answer), "one@0") {
-		t.Errorf("W7: write-class work did not resume after the ack (%v)",
+		t.Errorf("write-class work did not resume after the ack (%v)",
 			instancesIn(answer))
 	}
 }
 
-// TestGuardSpawnAckIsIdempotentAndUnforgeable is W8 and W9 through this verb's
-// entry point.
+// TestGuardSpawnActiveDeniesTheOlderRunWithAHold is DKT-1287 AC1: with two
+// active runs where only the older would deny, `guard spawn --active` denies,
+// naming the older run — not `runs[0]` alone, which is what
+// docket-spawn-guard-hook.sh resolved before this existed, leaving a second
+// concurrent run's reap hold unasked.
+func TestGuardSpawnActiveDeniesTheOlderRunWithAHold(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(writeLimitedSrc), "serialized.toml")
+
+	olderIssue := createIssue(t, conn, "older", "body", "task", nil)
+	older := startRun(t, conn, olderIssue)
+	_, err := activate(conn, older.ID)
+	testsupport.Must(t, err, "activate the older run: %v", err)
+
+	newerIssue := createIssue(t, conn, "newer", "body", "task", nil)
+	newer := startRun(t, conn, newerIssue)
+	_, err = activate(conn, newer.ID)
+	testsupport.Must(t, err, "activate the newer run: %v", err)
+
+	// Only the OLDER run holds an unacknowledged write reap.
+	reapOneWriter(t, conn, older.ID)
+
+	verdict, err := GuardSpawnActive(conn, 0, 0, false, nowMS)
+	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
+	if verdict.Allowed {
+		t.Fatal("AC1: an unacknowledged reap on the older run did not deny --active")
+	}
+	if !strings.Contains(verdict.Reason, model.FormatRunID(older.ID)) {
+		t.Errorf("the denial %q does not name the older run %s",
+			verdict.Reason, model.FormatRunID(older.ID))
+	}
+	if strings.Contains(verdict.Reason, model.FormatRunID(newer.ID)) {
+		t.Errorf("the denial %q wrongly names the newer, unheld run %s",
+			verdict.Reason, model.FormatRunID(newer.ID))
+	}
+}
+
+// TestGuardSpawnActiveAllowsWhenNoActiveRunHoldsAReap is --active's ordinary
+// case: two active runs, neither holding a reap, allow.
+func TestGuardSpawnActiveAllowsWhenNoActiveRunHoldsAReap(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(writeLimitedSrc), "serialized.toml")
+
+	for _, name := range []string{"first", "second"} {
+		issue := createIssue(t, conn, name, "body", "task", nil)
+		run := startRun(t, conn, issue)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate %s: %v", name, err)
+	}
+
+	verdict, err := GuardSpawnActive(conn, 0, 0, false, nowMS)
+	testsupport.Must(t, err, "GuardSpawnActive: %v", err)
+	if !verdict.Allowed {
+		t.Errorf("two unheld active runs were denied: %s", verdict.Reason)
+	}
+}
+
+// TestGuardSpawnAckIsIdempotentAndUnforgeable checks idempotence and forgery
+// through this verb's entry point.
 //
-// W8: a second ack of the same seq is a SUCCESS THAT CHANGES NOTHING, so a relay
-// retrying its hook does not fail. W9: a bogus seq is a VALIDATION_ERROR — the
+// A second ack of the same seq is a SUCCESS THAT CHANGES NOTHING, so a relay
+// retrying its hook does not fail. A bogus seq is a VALIDATION_ERROR — the
 // forgery point, since an ack must name a REAL reap.
 func TestGuardSpawnAckIsIdempotentAndUnforgeable(t *testing.T) {
 	conn := mustDB(t)
@@ -333,35 +586,35 @@ func TestGuardSpawnAckIsIdempotentAndUnforgeable(t *testing.T) {
 		verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{
 			AckSeqs: []int64{seq}, NowMS: at,
 		})
-		testsupport.Must(t, err, "W8: ack %d failed: %v", i+1, err)
+		testsupport.Must(t, err, "ack %d failed: %v", i+1, err)
 		if !verdict.Allowed {
-			t.Fatalf("W8: ack %d denied: %s", i+1, verdict.Reason)
+			t.Fatalf("ack %d denied: %s", i+1, verdict.Reason)
 		}
 	}
 
-	// W9: a seq that names no reap of this run. The message names the SEQ, so an
+	// A seq that names no reap of this run. The message names the SEQ, so an
 	// operator who mistyped can see what they typed.
 	_, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{
 		AckSeqs: []int64{999999}, NowMS: at,
 	})
 	if err == nil {
-		t.Fatal("W9: a bogus seq was accepted; an ack must name a real reap")
+		t.Fatal("a bogus seq was accepted; an ack must name a real reap")
 	}
 	if code, _ := CodeOf(err); code != CodeValidation {
-		t.Errorf("W9: the refusal is %q, want VALIDATION_ERROR", code)
+		t.Errorf("the refusal is %q, want VALIDATION_ERROR", code)
 	}
 	if !strings.Contains(err.Error(), "999999") {
-		t.Errorf("W9: the refusal %q does not name the seq", err.Error())
+		t.Errorf("the refusal %q does not name the seq", err.Error())
 	}
 }
 
 // ---------------------------------------------------------------------------
-// G11-G13 — what the guards write
+// What the guards write
 // ---------------------------------------------------------------------------
 
-// TestGuardsWriteNothing extends §10.3's standing assertion to group 3's rows:
-// `guard record` and `guard spawn` WITHOUT `--ack-reap` leave the database
-// byte-identical.
+// TestGuardsWriteNothing extends the read-verbs-write-nothing assertion to
+// the guards: `guard record` and `guard spawn` WITHOUT `--ack-reap` leave the
+// database byte-identical.
 //
 // It hashes the FILE rather than counting rows, for TestReadVerbsWriteNothing's
 // reason: a row count would miss exactly the writes that matter — a reaped
@@ -369,7 +622,7 @@ func TestGuardSpawnAckIsIdempotentAndUnforgeable(t *testing.T) {
 //
 // The fixture holds a LAPSED lease and an EXPIRED dispatch on purpose. Those are
 // the two writes a guard is most likely to make by accident, because `next`
-// makes both: G13 says neither guard reaps and neither auto-abandons, and this
+// makes both: neither guard reaps and neither auto-abandons, and this
 // is that clause with something to catch.
 func TestGuardsWriteNothing(t *testing.T) {
 	dir := t.TempDir()
@@ -403,13 +656,13 @@ func TestGuardsWriteNothing(t *testing.T) {
 	_, err = conn.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	testsupport.Must(t, err, "checkpointing after the guards: %v", err)
 	if after := hashFile(t, path); after != before {
-		t.Error("a guard changed the database; G11-G13 make both pure reads — " +
+		t.Error("a guard changed the database; both are pure reads — " +
 			"neither reaps and neither auto-abandons, because a hook's mere " +
 			"presence must not change a run's behavior")
 	}
 
-	// And the dispatch is STILL OPEN afterwards, which is G13 stated positively:
-	// the guard reported a state it did not resolve.
+	// And the dispatch is STILL OPEN afterwards, which is that rule stated
+	// positively: the guard reported a state it did not resolve.
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
 	defer tx.Rollback()
@@ -418,7 +671,7 @@ func TestGuardsWriteNothing(t *testing.T) {
 	}
 }
 
-// TestGuardSpawnWritesOnlyTheAck is G12: `guard spawn` writes ONLY the
+// TestGuardSpawnWritesOnlyTheAck: `guard spawn` writes ONLY the
 // `reap_acks` update, and only when `--ack-reap` is passed.
 //
 // The positive half of the previous test: the one write the verb IS allowed to
@@ -438,20 +691,20 @@ func TestGuardSpawnWritesOnlyTheAck(t *testing.T) {
 
 	// The ack landed.
 	if acks := openReapsOf(t, conn, runID); len(acks) != 0 {
-		t.Errorf("G12: the ack did not land; %d reaps remain unacknowledged", len(acks))
+		t.Errorf("the ack did not land; %d reaps remain unacknowledged", len(acks))
 	}
 	// And NOTHING ELSE moved: no step was reaped, claimed, or re-statused by a
 	// verb whose only permitted write is one column on one `reap_acks` row.
 	if after := stepStateFingerprint(t, conn, runID); after != stepsBefore {
-		t.Errorf("G12: `guard spawn --ack-reap` changed step state:\n before %s\n after  %s",
+		t.Errorf("`guard spawn --ack-reap` changed step state:\n before %s\n after  %s",
 			stepsBefore, after)
 	}
 }
 
 // dispatchGraceMS reads the configured grace window through the same accessor
 // the engine uses, so a test's clock arithmetic follows a config change rather
-// than restating a default that could drift from it. (`dispatchTTLMS` is group
-// 2's, in dispatch_test.go, and does the same for the TTL.)
+// than restating a default that could drift from it. (`dispatchTTLMS`, in
+// dispatch_test.go, does the same for the TTL.)
 func dispatchGraceMS(t *testing.T, conn *sql.DB) int64 {
 	t.Helper()
 	tx, err := conn.Begin()

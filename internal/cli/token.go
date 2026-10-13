@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +17,8 @@ const TokenEnvVar = "DOCKET_TOKEN"
 
 // readToken returns the capability token for a lease-mediated verb.
 //
-// Accepted channels, in precedence order (engine-spec.md §4: "Tokens pass via
-// env/stdin, never argv"):
+// Accepted channels, in precedence order (tokens pass via env/stdin, never
+// argv):
 //
 //  1. the DOCKET_TOKEN environment variable
 //  2. stdin, when DOCKET_TOKEN is unset and stdin is not a terminal
@@ -57,14 +58,44 @@ func readToken(stdin io.Reader) (string, error) {
 // the lease check only if a live lease is actually present.
 //
 // This is what keeps a lease-ending verb byte-compatible on an unclaimed
-// issue — the overwhelmingly common case, and the one engine-spec.md §9 item 8
-// is about.
+// issue — the overwhelmingly common case, and the one the compatibility
+// criterion is about.
 func optionalToken(stdin io.Reader) string {
 	tok, err := readToken(stdin)
 	if err != nil {
 		return ""
 	}
 	return tok
+}
+
+// conductorToken returns the token to present for run `runID` on a
+// conductor-gated verb, one whose engine path checks the run's conductor capability
+// (authorizeConductor/authorizeConductorTx) (DKT-2465).
+//
+// NOTHING IS READ UNLESS THE RUN IS BOUND to a conductor capability, for
+// tokenForClose's reason exactly: the stdin fallback drains its reader to EOF,
+// and an agent whose inherited stdin pipe never closes would hang forever on
+// a run that needs no token at all — every run activated before the
+// capability existed. The look here is advisory: the authoritative check runs
+// inside the verb's own transaction, and a run bound after this read refuses
+// the empty token there rather than being ruled on without one.
+func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
+	hash, err := db.RunConductorHash(conn, runID)
+	if err != nil || hash == "" {
+		return ""
+	}
+	return optionalToken(stdin)
+}
+
+// stepConductorToken is conductorToken for a verb addressed by STEP-N: the
+// step's run is what the capability is bound to. A step that does not exist
+// yields "" and leaves the NOT_FOUND to the engine, which owns that refusal.
+func stepConductorToken(conn *sql.DB, stepID int, stdin io.Reader) string {
+	step, err := db.GetStep(conn, stepID)
+	if err != nil {
+		return ""
+	}
+	return conductorToken(conn, step.RunID, stdin)
 }
 
 // errMissingToken names both accepted channels, since a caller that supplied
@@ -79,9 +110,8 @@ func errMissingToken() error {
 	)
 }
 
-// leaseError maps a lease refusal to its CLI error code, per the refusal matrix
-// in docs/tdd/claims-leases.md §4 (engine-spec.md §9 item 3). Anything else
-// passes through unchanged, as casError does.
+// leaseError maps a lease refusal to its CLI error code, per the lease refusal
+// matrix. Anything else passes through unchanged, as casError does.
 //
 // The error texts never echo the presented token: a token that leaks into a
 // log line or a CI transcript is a live capability.

@@ -5,12 +5,12 @@ import (
 	"fmt"
 )
 
-// COMPLETION METADATA (docs/tdd/completion-metadata.md).
+// COMPLETION METADATA.
 //
 // `step complete --metadata` was accepted, reported success, and dropped. Every
 // other part of the path already existed and was correct: the flag parsed, the
 // option field was declared and documented as "opaque KV merged onto the step's
-// own", the column existed, and the R7 rollup read it correctly and
+// own", the column existed, and the `run report` rollup read it correctly and
 // generically. What was absent was the one write connecting them — nothing read
 // `opts.Metadata`, so zero steps in any database carried metadata and the
 // rollup was starved rather than wrong.
@@ -25,10 +25,11 @@ import (
 // TestMergeMetadataReadsNoKey. A merge that special-cased one key would be core
 // having an opinion about what a workflow author's bag of strings means.
 
-// MetadataMaxBytes caps one completion's `--metadata` bag.
+// MetadataMaxBytes caps one `--metadata` bag, on every verb that takes one —
+// `claim`, `complete`, `fail`, `annotate`.
 //
 // The bag is opaque, so nothing else bounds it. Without a cap a worker can push
-// an artifact-sized body into a column the R7 rollup groups BY DISTINCT VALUE,
+// an artifact-sized body into a column the rollup groups BY DISTINCT VALUE,
 // turning a report into a wall of unique multi-kilobyte strings — a slow,
 // silent degradation of the one read surface this path exists to feed.
 //
@@ -57,7 +58,7 @@ const MetadataMaxBytes = 16 << 10
 // is what makes that a matter of adding a flag rather than a mechanism.
 //
 // Determinism: `encoding/json` marshals map keys in sorted order, so the stored
-// text is stable regardless of the order keys arrived in and R9's goldens do
+// text is stable regardless of the order keys arrived in and the goldens do
 // not flap on Go map iteration order.
 func mergeMetadata(definition, completion string) (string, error) {
 	// Nothing to merge: the step keeps its definition bag, byte-identical. This
@@ -102,7 +103,7 @@ func mergeMetadata(definition, completion string) (string, error) {
 // reading the bag: a KV bag with no keys has nothing to merge and nothing for
 // the rollup to group by. db.MetadataRollup already SKIPS a non-object row at
 // read time, and that tolerance exists for rows written before any writer
-// validated them (R10: a read verb that refused because one row held odd bytes
+// validated them (a read verb that refused because one row held odd bytes
 // would be useless during exactly the run an operator wants to inspect). It is
 // not a licence to write such rows now — refusing at the write end is what
 // keeps the tolerance from becoming the norm.
@@ -181,7 +182,17 @@ func validateFailMetadataSize(raw string) error {
 	return validateMetadataSizeWithRemedy(raw, "the note")
 }
 
-// validateMetadataSizeWithRemedy is the shared cap check both verbs' size
+// validateClaimMetadataSize is `claim`'s cap check, the same MetadataMaxBytes
+// measured the same way (DKT-592). The remedy differs again because the
+// channels do: a claim records nothing but the bag, so the only place bulk
+// detail can go is the completion this claim is the start of — and naming
+// `--artifact-file` outright would send a dispatcher looking for a flag `step
+// claim` does not have.
+func validateClaimMetadataSize(raw string) error {
+	return validateMetadataSizeWithRemedy(raw, "the artifact or the payload at completion")
+}
+
+// validateMetadataSizeWithRemedy is the shared cap check the verbs' size
 // validators call — one size limit, one message shape, remedy text supplied
 // by the caller because only the caller knows which channels its verb offers.
 func validateMetadataSizeWithRemedy(raw, remedy string) error {

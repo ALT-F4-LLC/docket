@@ -34,7 +34,7 @@ func newImportCmd() *cobra.Command {
 		RunE:  runImport,
 	}
 	cmd.Flags().Bool("merge", false,
-		"Import into a non-empty project; colliding ids are remapped, nothing is dropped")
+		"Import into a non-empty project; this project's own rows are skipped, ids colliding with another project's rows are remapped, nothing is dropped")
 	cmd.Flags().Bool("replace", false,
 		"Replace THIS PROJECT's data with the import file (destructive)")
 	cmd.Flags().Bool("yes", false,
@@ -81,7 +81,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		// --replace is destructive in every output mode, so --yes is
 		// required unconditionally: an output-format flag, or whether a
 		// terminal happens to be attached, must never double as consent
-		// (DKT-15). See events_prune.go's P6 comment for the same rule
+		// (DKT-15). See events_prune.go's `--yes` comment for the same rule
 		// applied to another destructive verb.
 		if !yes {
 			return cmdErr(fmt.Errorf("--replace deletes THIS PROJECT's existing data; pass --yes to confirm"), output.ErrValidation)

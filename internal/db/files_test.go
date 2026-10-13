@@ -154,6 +154,39 @@ func TestGetIssueFilesSorted(t *testing.T) {
 	}
 }
 
+func TestGetIssueFilesTxSortedAndNeverNil(t *testing.T) {
+	db := mustOpen(t)
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
+
+	attached := mustCreateIssue(t, db, "tx-sorted-test")
+	bare := mustCreateIssue(t, db, "tx-empty-test")
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+
+	for _, fp := range []string{"z.go", "a.go"} {
+		_, err := InsertIssueFileMapping(tx, attached, fp)
+		testsupport.Must(t, err, "InsertIssueFileMapping %q: %v", fp, err)
+	}
+
+	files, err := GetIssueFilesTx(tx, attached)
+	testsupport.Must(t, err, "GetIssueFilesTx: %v", err)
+	if len(files) != 2 || files[0] != "a.go" || files[1] != "z.go" {
+		t.Errorf("GetIssueFilesTx = %v, want [a.go z.go]", files)
+	}
+
+	empty, err := GetIssueFilesTx(tx, bare)
+	testsupport.Must(t, err, "GetIssueFilesTx empty: %v", err)
+	if empty == nil {
+		t.Fatal("GetIssueFilesTx returned nil for an issue with no attachments, want a non-nil empty slice")
+	}
+	if len(empty) != 0 {
+		t.Errorf("GetIssueFilesTx empty = %v, want []", empty)
+	}
+}
+
 func TestSetIssueFiles(t *testing.T) {
 	db := mustOpen(t)
 	err := Initialize(db)

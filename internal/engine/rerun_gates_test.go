@@ -187,8 +187,8 @@ func TestRerunGatesRefusesAStepWithNoCompletionGates(t *testing.T) {
 // TestRetryLeavesNoLiveLease pins the invariant DKT-259's accounting half rests
 // on: a step returned to `pending` is a step NOBODY HOLDS.
 //
-// `claimPredicate` claims only against `owner IS NULL OR owner = ” OR
-// expires_ms <= now`, so `pending` with a live lease is a step the scheduler
+// `claimPredicate` claims only against a null or empty `owner` or
+// `expires_ms <= now`, so `pending` with a live lease is a step the scheduler
 // offers and no claimant can take — while the original holder's token still
 // works, letting a re-execution record without re-claiming and land on the
 // first execution's attempt number.
@@ -414,7 +414,7 @@ func TestReworkPacketCarriesTheFailingGates(t *testing.T) {
 
 // TestReworkPacketOmitsPassingAndPreGates.
 //
-// PG4: a pre-gate is an INPUT to the step, not a judgment of it, so it must not
+// A pre-gate is an INPUT to the step, not a judgment of it, so it must not
 // appear in the list of reasons the step came back. And a gate that passed is
 // not a reason at all — listing it would invite a classifier to weigh it.
 func TestReworkPacketOmitsPassingAndPreGates(t *testing.T) {
@@ -458,7 +458,7 @@ func TestReworkPacketOmitsPassingAndPreGates(t *testing.T) {
 	}
 }
 
-// TestReworkPacketTakesTheLastAttemptPerGate is F4's rule, applied here.
+// TestReworkPacketTakesTheLastAttemptPerGate applies the last-attempt rule here.
 //
 // A gate that failed twice and passed on the third try DID NOT FAIL. A packet
 // listing all three attempts would invite a classifier to conclude the opposite
@@ -470,13 +470,16 @@ func TestReworkPacketTakesTheLastAttemptPerGate(t *testing.T) {
 	id := stepIDByInstance(t, conn, "implement@0")
 
 	exitZero, exitOne := 0, 1
+	// A retry re-runs the same argv; a row without one never ran a process and
+	// is not an attempt the routing reduction can supersede.
+	argv := []string{"go", "test", "./..."}
 	rows := []db.GateResultRow{
 		{RunID: run.ID, StepID: id, Gate: "flaky", Ordinal: 0, Exit: &exitOne,
-			Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
+			Argv: argv, Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
 		{RunID: run.ID, StepID: id, Gate: "flaky", Ordinal: 1, Exit: &exitOne,
-			Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
+			Argv: argv, Verdict: db.GateVerdictFail, CreatedAtMS: nowMS},
 		{RunID: run.ID, StepID: id, Gate: "flaky", Ordinal: 2, Exit: &exitZero,
-			Verdict: db.GateVerdictPass, CreatedAtMS: nowMS},
+			Argv: argv, Verdict: db.GateVerdictPass, CreatedAtMS: nowMS},
 	}
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
@@ -492,6 +495,6 @@ func TestReworkPacketTakesTheLastAttemptPerGate(t *testing.T) {
 
 	if len(res.Gates) != 0 {
 		t.Errorf("gates = %+v; the last attempt PASSED, so this gate is not a "+
-			"reason the step came back (F4)", res.Gates)
+			"reason the step came back", res.Gates)
 	}
 }

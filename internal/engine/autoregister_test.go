@@ -12,7 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// AUTO-REGISTRATION — §9's F1-F23.
+// AUTO-REGISTRATION.
 
 // configRepo builds a repo whose `.docket/` directory is the one activation will
 // scan, and returns the connection and the config root to write files into.
@@ -54,7 +54,7 @@ func writeConfigFile(t *testing.T, configDir, rel, body string) string {
 }
 
 // autoWorkflowSrc is a definition that matches a `task` issue and declares no
-// payload — the simple case, for the F14/F17/F20 rows.
+// payload — the simple case, for the idempotency, dormancy, and report tests.
 const autoWorkflowSrc = `
 [pipeline]
 name = "auto-dev"
@@ -71,7 +71,7 @@ after = []
 `
 
 // payloadWorkflowSrc declares a `payload`, so its registration REQUIRES the
-// schema to be registered first. This is F2's subject: it is the file that
+// schema to be registered first. It is the file that
 // cannot register unless the ordering holds.
 const payloadWorkflowSrc = `
 [pipeline]
@@ -99,10 +99,10 @@ const riskSchemaSrc = `{
 }`
 
 // ---------------------------------------------------------------------------
-// F1-F3 — the ordering, and the test that makes it mean something
+// The ordering, and the test that makes it mean something
 // ---------------------------------------------------------------------------
 
-// TestActivationAutoRegistersConfigDirectory is §9's headline: activation
+// TestActivationAutoRegistersConfigDirectory is the headline: activation
 // registers what it finds, with no register verb ever invoked.
 func TestActivationAutoRegistersConfigDirectory(t *testing.T) {
 	conn, configDir := configRepo(t)
@@ -138,7 +138,7 @@ func TestActivationAutoRegistersConfigDirectory(t *testing.T) {
 	}
 }
 
-// TestAutoRegistrationOrdersSchemasFirst is F2's BEHAVIORAL half, and it is the
+// TestAutoRegistrationOrdersSchemasFirst is the ordering's BEHAVIORAL half, and it is the
 // reason `TestSchemasRegisterBeforeWorkflows` could finally lose its skip.
 //
 // A workflow that names a schema in the SAME config tree registers second, so
@@ -157,7 +157,7 @@ func TestAutoRegistrationOrdersSchemasFirst(t *testing.T) {
 	run := startRun(t, conn, issue)
 
 	result, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "F2: activation failed, which is what a lexical-across-everything "+
+	testsupport.Must(t, err, "activation failed, which is what a lexical-across-everything "+
 		"order would produce — the workflow's `payload` would name an "+
 		"unregistered schema: %v", err)
 
@@ -167,7 +167,7 @@ func TestAutoRegistrationOrdersSchemasFirst(t *testing.T) {
 	// THE ORDER IS IN THE REPORT, so the property is observable rather than
 	// merely inferred from the success.
 	if result.Registered[0].Kind != RegistrationKindSchema {
-		t.Errorf("registered %s first; F2 registers SCHEMAS IN FULL before workflows",
+		t.Errorf("registered %s first; activation registers SCHEMAS IN FULL before workflows",
 			result.Registered[0].Kind)
 	}
 	if result.Registered[1].Kind != RegistrationKindWorkflow {
@@ -175,11 +175,11 @@ func TestAutoRegistrationOrdersSchemasFirst(t *testing.T) {
 	}
 }
 
-// TestAutoRegistrationWrongOrderFails is F3 — THE NEGATIVE TWIN, without which
-// F2 is a tautology.
+// TestAutoRegistrationWrongOrderFails is THE NEGATIVE TWIN, without which the
+// ordering test is a tautology.
 //
 // It registers the same two files MANUALLY in the wrong order and asserts the
-// workflow is refused. Without this, F2 could pass because the refusal does not
+// workflow is refused. Without this, the ordering test could pass because the refusal does not
 // exist rather than because the order avoids it.
 func TestAutoRegistrationWrongOrderFails(t *testing.T) {
 	conn, _ := configRepo(t)
@@ -192,83 +192,96 @@ func TestAutoRegistrationWrongOrderFails(t *testing.T) {
 	_, err = registerConfigWorkflowTx(tx, 1, "workflows/a-payload.toml",
 		[]byte(payloadWorkflowSrc), nowMS)
 	if err == nil {
-		t.Fatal("F3: a workflow whose `payload` names an unregistered schema was " +
-			"accepted; the refusal F2's ordering avoids does not exist, which " +
-			"would make F2 prove nothing")
+		t.Fatal("a workflow whose `payload` names an unregistered schema was " +
+			"accepted; the refusal the ordering avoids does not exist, which " +
+			"would make the ordering test prove nothing")
 	}
 	if code, _ := CodeOf(err); code != CodeValidation {
-		t.Errorf("F3: the refusal is %q, want VALIDATION_ERROR", code)
+		t.Errorf("the refusal is %q, want VALIDATION_ERROR", code)
 	}
 	if !strings.Contains(err.Error(), "risk@1") {
-		t.Errorf("F3: the refusal %q does not name the missing schema", err.Error())
+		t.Errorf("the refusal %q does not name the missing schema", err.Error())
 	}
 }
 
 // ---------------------------------------------------------------------------
-// F4-F6 — what is registered, what is pinned, what is skipped
+// What is registered, what is pinned, what is skipped
 // ---------------------------------------------------------------------------
 
-// TestAutoRegistrationPinsWhatItDoesNotUnderstand is F4, F5, and F6 together.
+// TestAutoRegistrationPinsWhatItDoesNotUnderstand covers registering, pinning,
+// and skipping together, under DKT-581's closure rule.
 //
-// Only the two registries are REGISTERED. Everything else under
-// `.docket/config/` is PINNED — which is exactly what §2 says core does with
-// instance files it does not understand: "arbitrary operator-supplied file pins
-// … which is how the reference instance pins its contracts, fragments, and
-// policy WITHOUT CORE KNOWING WHAT THEY ARE".
+// Only the two registries are REGISTERED. What else gets PINNED is the packet
+// CLOSURE the bound workflows reach — each step's `packet` entries, the files
+// their `packet_includes` frontmatter declares, and `policy.toml` — which is
+// still the engine's stance ("core pins the instance's contracts, fragments,
+// and policy WITHOUT KNOWING WHAT THEY ARE"), narrowed to what the run can
+// actually read. A config file NOTHING reaches is not pinned at all, so a
+// corpus edit to it cannot drift this run's pins.
 func TestAutoRegistrationPinsWhatItDoesNotUnderstand(t *testing.T) {
 	conn, configDir := configRepo(t)
-	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml",
+		autoWorkflowSrc+"packet = [\"contracts/api.md\"]\n")
 	writeConfigFile(t, configDir, "policy.toml", "spawn = \"whatever the instance means\"\n")
-	// F5: the pinned directories are scanned RECURSIVELY — a fragment three
-	// levels deep is just a file to hash.
+	// The pinned directories are scanned RECURSIVELY — a fragment three
+	// levels deep is just a file to hash, reachable here through the
+	// contract's own `packet_includes`.
 	writeConfigFile(t, configDir, "fragments/a/b/deep.md", "a fragment\n")
-	writeConfigFile(t, configDir, "contracts/api.md", "a contract\n")
-	// F6: a non-matching extension inside a REGISTRY directory is skipped
-	// silently there and pinned like any other file. A refusal would make a
-	// README a run-blocker.
+	writeConfigFile(t, configDir, "contracts/api.md",
+		"---\npacket_includes:\n  - fragments/a/b/deep.md\n---\na contract\n")
+	// A non-matching extension inside a REGISTRY directory is skipped
+	// silently there. A refusal would make a README a run-blocker — and since
+	// nothing references it, DKT-581 leaves it unpinned too.
 	writeConfigFile(t, configDir, "workflows/README.md", "how to edit these\n")
 
 	issue := createIssue(t, conn, "pinned", "body", "task", nil)
 	run := startRun(t, conn, issue)
 
 	result, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "F6: a README in workflows/ blocked the run: %v", err)
+	testsupport.Must(t, err, "a README in workflows/ blocked the run: %v", err)
 
 	if len(result.Registered) != 1 {
 		t.Fatalf("registered %d files, want only the workflow: %+v",
 			len(result.Registered), result.Registered)
 	}
-	// The four non-registry files: policy.toml, the deep fragment, the
-	// contract, and the README.
-	if result.PinsFromConfig != 4 {
-		t.Errorf("pinned %d config files, want 4 (policy, fragment, contract, README)",
+	// The closure: policy.toml, the declared contract, and the fragment its
+	// `packet_includes` reaches. NOT the README nothing references.
+	if result.PinsFromConfig != 3 {
+		t.Errorf("pinned %d config files, want 3 (policy, contract, included fragment)",
 			result.PinsFromConfig)
 	}
 
 	// The pins are RECORDED, so `context.pins` can serve them and a run can say
 	// what it reproduced against.
 	pins := pinsByKind(t, conn, run.ID, db.PinKindFile)
-	var sawFragment bool
+	var sawFragment, sawREADME bool
 	for _, p := range pins {
 		if strings.HasSuffix(p.Ref, filepath.Join("fragments", "a", "b", "deep.md")) {
 			sawFragment = true
 		}
+		if strings.HasSuffix(p.Ref, "README.md") {
+			sawREADME = true
+		}
 	}
 	if !sawFragment {
-		t.Error("F5: a fragment three levels deep was not pinned; the pinned " +
-			"directories are scanned recursively")
+		t.Error("a fragment three levels deep was not pinned; the closure " +
+			"walks `packet_includes` into recursively-scanned directories")
+	}
+	if sawREADME {
+		t.Error("DKT-581: a config file nothing references was pinned; a corpus " +
+			"edit to it would drift this run's pins for no reason")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// F9-F13 — the collision refusal
+// The collision refusal
 // ---------------------------------------------------------------------------
 
-// TestChangedBytesAtSameVersionRefusesActivation is F9, F10, F12, and F13.
+// TestChangedBytesAtSameVersionRefusesActivation pins the collision refusal.
 //
-// §9.3 chose (a) REFUSE over auto-bump, overwrite, and ignore. This asserts the
-// refusal AND its message, because F10's message is the whole reason (a) is
-// compatible with the zero-touch tenet: a session reads it, acts on it, and
+// The engine chose REFUSE over auto-bump, overwrite, and ignore. This asserts
+// the refusal AND its message, because the message is the whole reason REFUSE
+// is compatible with the zero-touch tenet: a session reads it, acts on it, and
 // brings "it needs a version bump to 2 — okay?" to the human.
 func TestChangedBytesAtSameVersionRefusesActivation(t *testing.T) {
 	conn, configDir := configRepo(t)
@@ -280,8 +293,7 @@ func TestChangedBytesAtSameVersionRefusesActivation(t *testing.T) {
 	testsupport.Must(t, err, "the first activation: %v", err)
 
 	// EDIT THE FILE WITHOUT BUMPING THE VERSION — the ordinary consequence of
-	// editing a workflow, and the question §2's auto-registration sentence
-	// leaves open.
+	// editing a workflow, and the question auto-registration alone leaves open.
 	edited := strings.Replace(autoWorkflowSrc, `executor = "w"`, `executor = "x"`, 1)
 	err = os.WriteFile(path, []byte(edited), 0o644)
 	testsupport.Must(t, err, "editing: %v", err)
@@ -290,35 +302,35 @@ func TestChangedBytesAtSameVersionRefusesActivation(t *testing.T) {
 	secondRun := startRun(t, conn, second)
 	_, err = activate(conn, secondRun.ID)
 	if err == nil {
-		t.Fatal("F9/F12: changed bytes at an unchanged name@version were accepted; " +
+		t.Fatal("changed bytes at an unchanged name@version were accepted; " +
 			"core must never auto-bump, overwrite, or silently use the " +
 			"registered bytes")
 	}
 	if code, _ := CodeOf(err); code != CodeConflict {
-		t.Errorf("F9: the refusal is %q, want CONFLICT", code)
+		t.Errorf("the refusal is %q, want CONFLICT", code)
 	}
 
-	// F10: the message names the PATH, BOTH HASHES, the REGISTERED VERSION, the
+	// The message names the PATH, BOTH HASHES, the REGISTERED VERSION, the
 	// LITERAL EDIT, and states that pinned runs are unaffected.
 	msg := err.Error()
 	for _, want := range []string{
 		"auto-dev.toml", "sha256:", "auto-dev@1", "version to 2", "unaffected",
 	} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("F10: the refusal does not mention %q:\n%s", want, msg)
+			t.Errorf("the refusal does not mention %q:\n%s", want, msg)
 		}
 	}
 
-	// F13: it is a HARD refusal — the activation wrote NOTHING. A warning that
+	// It is a HARD refusal — the activation wrote NOTHING. A warning that
 	// proceeded is one nobody reads until the run behaves oddly.
 	run, err := db.GetRun(conn, secondRun.ID)
 	testsupport.Must(t, err, "reading the run: %v", err)
 	if run.Status == model.RunActive {
-		t.Error("F8/F13: the run activated despite the collision; the refusal " +
+		t.Error("the run activated despite the collision; the refusal " +
 			"must roll back the whole fat transaction")
 	}
 
-	// AND THE FIRST RUN IS UNAFFECTED, which is the sentence F10's message
+	// AND THE FIRST RUN IS UNAFFECTED, which is the sentence the refusal message
 	// makes and this asserts is true.
 	if _, err := db.GetRun(conn, firstRun.ID); err != nil {
 		t.Errorf("the already-pinned run was disturbed: %v", err)
@@ -326,11 +338,11 @@ func TestChangedBytesAtSameVersionRefusesActivation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F14-F16 — idempotency, and the re-activation that must not re-scan
+// Idempotency, and the re-activation that must not re-scan
 // ---------------------------------------------------------------------------
 
-// TestUnchangedBytesReRegisterFreely is F11 and F14 (C10): identical bytes at
-// the same `name@version` is a SUCCESS THAT CHANGES NOTHING.
+// TestUnchangedBytesReRegisterFreely: identical bytes at the same
+// `name@version` is a SUCCESS THAT CHANGES NOTHING.
 //
 // This is the case that makes re-activation of an unedited repo free, and the
 // one that makes two activations racing over one directory both succeed.
@@ -346,7 +358,7 @@ func TestUnchangedBytesReRegisterFreely(t *testing.T) {
 	second := createIssue(t, conn, "second", "body", "task", nil)
 	secondRun := startRun(t, conn, second)
 	result, err := activate(conn, secondRun.ID)
-	testsupport.Must(t, err, "F11: re-registering identical bytes failed: %v", err)
+	testsupport.Must(t, err, "re-registering identical bytes failed: %v", err)
 
 	if len(result.Registered) != 1 {
 		t.Fatalf("registered %d files, want the one workflow", len(result.Registered))
@@ -364,17 +376,17 @@ func TestUnchangedBytesReRegisterFreely(t *testing.T) {
 		`SELECT COUNT(*) FROM workflows WHERE name = 'auto-dev'`).Scan(&n)
 	testsupport.Must(t, err, "counting: %v", err)
 	if n != 1 {
-		t.Errorf("%d rows for auto-dev; F12 forbids minting a version nobody chose", n)
+		t.Errorf("%d rows for auto-dev; activation must not mint a version nobody chose", n)
 	}
 }
 
-// TestReactivationDoesNotRescan is F15, and §9.4 calls it "important and easy to
-// get wrong".
+// TestReactivationDoesNotRescan pins a rule that is important and easy to get
+// wrong.
 //
 // If re-activation re-scanned, an operator editing a workflow while a run
-// expanded its second phase would hit F9's refusal on a run that was working
+// expanded its second phase would hit the collision refusal on a run that was working
 // fine, and the fix would be to revert their edit. Inheriting the pin set makes
-// the edit A NON-EVENT — exactly as a re-registered workflow already is (RA2).
+// the edit A NON-EVENT — exactly as a re-registered workflow already is.
 func TestReactivationDoesNotRescan(t *testing.T) {
 	conn, configDir := configRepo(t)
 	path := writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
@@ -384,21 +396,21 @@ func TestReactivationDoesNotRescan(t *testing.T) {
 	_, err := activate(conn, run.ID)
 	testsupport.Must(t, err, "the first activation: %v", err)
 
-	// A MID-RUN EDIT, without a version bump — the exact edit F9 refuses on a
+	// A MID-RUN EDIT, without a version bump — the exact edit refused on a
 	// FIRST activation.
 	edited := strings.Replace(autoWorkflowSrc, `executor = "w"`, `executor = "x"`, 1)
 	err = os.WriteFile(path, []byte(edited), 0o644)
 	testsupport.Must(t, err, "editing: %v", err)
 
 	result, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "F15: re-activation hit the collision refusal on a run that was "+
+	testsupport.Must(t, err, "re-activation hit the collision refusal on a run that was "+
 		"working fine; a mid-run edit must be invisible to a run already "+
 		"under way: %v", err)
 
 	if !result.Reactivation {
 		t.Fatal("premise: the second activation must be a re-activation")
 	}
-	// F15: NO re-scan means NO registrations reported.
+	// NO re-scan means NO registrations reported.
 	if len(result.Registered) != 0 {
 		t.Errorf("a re-activation registered %d files; it must inherit rather than "+
 			"re-scan", len(result.Registered))
@@ -412,16 +424,16 @@ func TestReactivationDoesNotRescan(t *testing.T) {
 	).Scan(&body)
 	testsupport.Must(t, err, "reading the registered body: %v", err)
 	if strings.Contains(body, `executor = "x"`) {
-		t.Error("F15: the mid-run edit reached the registered definition")
+		t.Error("the mid-run edit reached the registered definition")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// F17-F19 — dormancy
+// Dormancy
 // ---------------------------------------------------------------------------
 
-// TestNoConfigDirectoryActivatesUnchanged is F17 and F18, and it is D6's
-// dormancy proof at the Go level. F19's byte-diff twin is in QA.
+// TestNoConfigDirectoryActivatesUnchanged is the dormancy proof at the Go
+// level. Its byte-diff twin is in QA.
 //
 // "A repo with no `.docket/config/` activates exactly as before" — the scan is
 // skipped IN FULL after one `stat`, and the activation executes exactly the
@@ -439,7 +451,7 @@ func TestNoConfigDirectoryActivatesUnchanged(t *testing.T) {
 	result, err := activate(conn, run.ID)
 	testsupport.Must(t, err, "activate: %v", err)
 
-	// F23: no registrations, so the verb prints no `Registered` block — the
+	// No registrations, so the verb prints no `Registered` block — the
 	// dormancy is VISIBLE IN THE OUTPUT rather than merely true underneath it.
 	if len(result.Registered) != 0 {
 		t.Errorf("a repo with no config directory registered %d files",
@@ -456,7 +468,7 @@ func TestNoConfigDirectoryActivatesUnchanged(t *testing.T) {
 	}
 }
 
-// TestEmptyConfigDirectoryRegistersNothing is F18: present but empty ⇒ the scan
+// TestEmptyConfigDirectoryRegistersNothing: present but empty ⇒ the scan
 // finds nothing and registers nothing.
 func TestEmptyConfigDirectoryRegistersNothing(t *testing.T) {
 	conn, _ := configRepo(t)
@@ -474,10 +486,10 @@ func TestEmptyConfigDirectoryRegistersNothing(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F20-F23 — the report
+// The report
 // ---------------------------------------------------------------------------
 
-// TestDryRunReportsRegistrationsAndWritesNothing is F22, which is what makes the
+// TestDryRunReportsRegistrationsAndWritesNothing pins what makes the
 // zero-touch loop REVIEWABLE: the session runs `run activate --dry-run --json`,
 // shows the human "this will register auto-dev@1 and run these commands", the
 // human says yes, the session activates.
@@ -508,17 +520,17 @@ func TestDryRunReportsRegistrationsAndWritesNothing(t *testing.T) {
 	err = conn.QueryRow(`SELECT COUNT(*) FROM workflows`).Scan(&n)
 	testsupport.Must(t, err, "counting: %v", err)
 	if n != 0 {
-		t.Errorf("F22: the dry run registered %d workflows; it must write nothing", n)
+		t.Errorf("the dry run registered %d workflows; it must write nothing", n)
 	}
 }
 
-// TestRegistrationReportRendersNothingWhenNothingRegistered is F23: an
+// TestRegistrationReportRendersNothingWhenNothingRegistered: an
 // activation that registered nothing prints NO block, not an empty one.
 func TestRegistrationReportRendersNothingWhenNothingRegistered(t *testing.T) {
 	var b strings.Builder
 	RenderRegistrationReport(&b, nil, 0)
 	if b.String() != "" {
-		t.Errorf("F23: an empty registration set rendered %q; the dormancy must "+
+		t.Errorf("an empty registration set rendered %q; the dormancy must "+
 			"be visible as ABSENCE", b.String())
 	}
 
@@ -529,12 +541,12 @@ func TestRegistrationReportRendersNothingWhenNothingRegistered(t *testing.T) {
 	out := b.String()
 	for _, want := range []string{"auto-dev", "new", "pinned 2"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("F20: the block does not mention %q:\n%s", want, out)
+			t.Errorf("the block does not mention %q:\n%s", want, out)
 		}
 	}
 }
 
-// TestRegistrationReportEscapesUntrustedNames is §9.5's rendering half.
+// TestRegistrationReportEscapesUntrustedNames is the hostile-clone rendering check.
 //
 // The path and the workflow name come from a CLONED REPO's filesystem and its
 // own `[pipeline] name` — attacker-supplied strings heading for a terminal. A
@@ -549,11 +561,11 @@ func TestRegistrationReportEscapesUntrustedNames(t *testing.T) {
 
 	out := b.String()
 	if strings.Contains(out, "\x1b") {
-		t.Error("a raw escape byte reached the rendered report; T18 requires the " +
-			"rendering to be what is approved")
+		t.Error("a raw escape byte reached the rendered report; the " +
+			"rendering must be what is approved")
 	}
 	if !strings.Contains(out, `\x1b`) {
-		t.Errorf("the escape was not rendered visibly (lossless, per T18):\n%s", out)
+		t.Errorf("the escape was not rendered visibly (lossless):\n%s", out)
 	}
 }
 
@@ -618,16 +630,18 @@ func TestAutoRegisterDisabledDoesNotAdoptANewVersion(t *testing.T) {
 // leave it needing every one of them hand-supplied via --pin.
 func TestAutoRegisterDisabledStillPinsTheConfigDirectory(t *testing.T) {
 	conn, configDir := configRepo(t)
-	writeConfigFile(t, configDir, "workflows/auto-dev.toml", autoWorkflowSrc)
+	// The bound workflow DECLARES the contract, so it is in DKT-581's pin
+	// closure — the pinning this test proves survives the toggle.
+	src := autoWorkflowSrc + "packet = [\"contracts/note.md\"]\n"
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml", src)
 	writeConfigFile(t, configDir, "contracts/note.md", "a pinned fragment, not a registry file")
 
 	err := db.SetConfig(conn, 0, db.KeyAutoRegister, "false")
 	testsupport.Must(t, err, "SetConfig: %v", err)
 
 	// With registration off, an operator registers by hand — the same path
-	// `workflow register` runs, exactly as F7 requires auto-registration
-	// itself to.
-	registerSource(t, conn, []byte(autoWorkflowSrc), "auto-dev.toml")
+	// `workflow register` runs, which auto-registration must also run.
+	registerSource(t, conn, []byte(src), "auto-dev.toml")
 
 	issue := createIssue(t, conn, "pin check", "body", "task", nil)
 	run := startRun(t, conn, issue)

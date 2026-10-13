@@ -12,23 +12,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket events list --since` — the §11.4 event shape as a read surface
-// (docs/tdd/runs-dispatch.md §8).
+// `docket events list --since` — the event wire shape as a read surface.
 //
-// WHY `events list` AND NOT BARE `docket events` (§8.1). engine-spec §1's
-// summary writes the verb as `docket events --follow [--since SEQ]`, which reads
-// as a bare verb with flags. Shipping the read half as bare `docket events` would
-// mean S7's `--follow` changes the DEFAULT behavior of an existing verb — or
-// worse, that `docket events` with no flags means "list" now and something else
-// later. `events list` is chosen, with bare `docket events` printing help, so S7
-// adds `events --follow` over the same rows without redefining anything.
+// WHY `events list` AND NOT BARE `docket events`. The verb's summary spelling
+// is `docket events --follow [--since SEQ]`, which reads as a bare verb with
+// flags. Shipping the read half as bare `docket events` would mean a later
+// `--follow` changes the DEFAULT behavior of an existing verb — or worse, that
+// `docket events` with no flags means "list" now and something else later.
+// `events list` is chosen, with bare `docket events` printing help, so
+// `--follow` can land over the same rows without redefining anything.
 //
-// That is a NOMINAL DEVIATION from §1's rendering and it is RECORDED,
+// That is a NOMINAL DEVIATION from the summary spelling and it is RECORDED,
 // not made silently — the same class as the `step`/`issue` subject-key
 // note, and resolved the same way: the shape is satisfied, the spelling is
 // recorded.
 
-// eventsDefaultLimit is E9's default page size.
+// eventsDefaultLimit is the default page size.
 //
 // A default exists at all because this is a CURSOR feed: a consumer polling it
 // wants a bounded page and a `total` telling it whether to poll again
@@ -62,10 +61,22 @@ transition's own opaque payload, carried verbatim.
 Without --run the feed is repo-wide, which is the only place events that belong
 to no run — trust grants — are visible.
 
+--run names ONE run and is answered wherever that run lives: a run in another
+project returns that run's events rather than an empty page, matching
+` + "`run report`" + ` and ` + "`step show`" + `. A run that does not exist is refused.
+
 --tail N returns the NEWEST N events instead of the oldest N, for the
 mid-incident question "what just happened". They still arrive oldest-first, so
 the last seq is still the cursor to store. --tail and --since are mutually
 exclusive: one jumps to the end of the feed, the other walks it forward.
+
+--kind KIND and --step STEP-N filter BEFORE --limit and --tail, and total
+counts only the matches, so a lookup by kind or step covers the whole trail
+rather than the oldest page. An unknown kind is refused with the valid kinds;
+a step that does not exist is not found.
+
+With --follow, --tail N is the STARTING CURSOR: the stream opens with the newest
+N and then follows live, instead of replaying the whole retained history first.
 
 Human mode escapes stored strings on their way to the terminal; --json carries
 the raw bytes, because the consumer there is a program.`,
@@ -78,9 +89,9 @@ the raw bytes, because the consumer there is a program.`,
 	},
 }
 
-// eventsListResult is a Collection (E11), so `--json=v2` yields
+// eventsListResult is a Collection, so `--json=v2` yields
 // `{items, total, truncated}` uniformly with every other list verb, and v1 is
-// the bare array (E12).
+// the bare array.
 type eventsListResult struct {
 	Events []engine.Event `json:"events"`
 	Total  int            `json:"total"`
@@ -100,6 +111,13 @@ var _ output.Collection = eventsListResult{}
 // eventsProjectScope resolves the feed's project scope (v12): the invoking
 // project by default, the whole store under --all-projects. Store-level
 // events — trust changes — appear either way; see EventQuery.ProjectID.
+//
+// IT IS NOT THE WHOLE STORY UNDER `--run` (DKT-583). ListEvents IGNORES this
+// scope when the query names a run, because a run belongs to one project and
+// the run filter is therefore already the narrower scope — scoping again could
+// only answer a neighbour's run with a successful EMPTY feed. The decision
+// lives in the engine so `--follow`, which shares this helper, cannot drift
+// away from `list`.
 func eventsProjectScope(cmd *cobra.Command) int {
 	if all, _ := cmd.Flags().GetBool("all-projects"); all {
 		return 0
@@ -114,6 +132,48 @@ func (p eventsListPayload) MarshalJSON() ([]byte, error) {
 		return []byte("[]"), nil
 	}
 	return json.Marshal(p.events)
+}
+
+// eventsTailFlag reads and validates `--tail` for BOTH entry points.
+//
+// It is shared rather than duplicated because `--follow` starts its stream at
+// the tail (DKT-752): if the two paths validated the flag separately, one of
+// them would eventually accept a combination the other refuses, and the pair
+// that matters most — `--tail` with `--since` — is precisely the one whose
+// meaning is undefined.
+func eventsTailFlag(cmd *cobra.Command) (int, error) {
+	tail, _ := cmd.Flags().GetInt("tail")
+	if tail < 0 {
+		return 0, cmdErr(
+			fmt.Errorf("--tail must not be negative: %d", tail), output.ErrValidation)
+	}
+	// `--tail` answers "what just happened" and `--since` answers "what have I
+	// not seen". Combining them reads as a cursor but silently skips whatever
+	// falls between the cursor and the tail window, so it is refused rather
+	// than served with a plausible-looking short page.
+	if tail > 0 && cmd.Flags().Changed("since") {
+		return 0, cmdErr(
+			fmt.Errorf("--tail and --since are mutually exclusive: "+
+				"--since walks the feed forward, --tail jumps to its end"),
+			output.ErrValidation)
+	}
+	return tail, nil
+}
+
+// eventsPredicateFlags reads `--kind` and `--step` for BOTH entry points, for
+// the reason eventsTailFlag is shared: a filter one path validated and the
+// other did not would let `--follow` answer a lookup `list` refuses.
+func eventsPredicateFlags(cmd *cobra.Command) (kind string, stepID int, err error) {
+	kind, _ = cmd.Flags().GetString("kind")
+	if err := engine.ValidateEventKind(kind); err != nil {
+		return "", 0, runErr(err)
+	}
+	stepRef, _ := cmd.Flags().GetString("step")
+	stepID, err = engine.ResolveStepFilter(getDB(cmd), stepRef)
+	if err != nil {
+		return "", 0, runErr(err)
+	}
+	return kind, stepID, nil
 }
 
 func runEventsList(cmd *cobra.Command, w *output.Writer) error {
@@ -132,20 +192,13 @@ func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 		limit = eventsDefaultLimit
 	}
 
-	tail, _ := cmd.Flags().GetInt("tail")
-	if tail < 0 {
-		return cmdErr(
-			fmt.Errorf("--tail must not be negative: %d", tail), output.ErrValidation)
+	tail, err := eventsTailFlag(cmd)
+	if err != nil {
+		return err
 	}
-	// `--tail` answers "what just happened" and `--since` answers "what have I
-	// not seen". Combining them reads as a cursor but silently skips whatever
-	// falls between the cursor and the tail window, so it is refused rather
-	// than served with a plausible-looking short page.
-	if tail > 0 && cmd.Flags().Changed("since") {
-		return cmdErr(
-			fmt.Errorf("--tail and --since are mutually exclusive: "+
-				"--since walks the feed forward, --tail jumps to its end"),
-			output.ErrValidation)
+	kind, stepID, err := eventsPredicateFlags(cmd)
+	if err != nil {
+		return err
 	}
 
 	runRef, _ := cmd.Flags().GetString("run")
@@ -156,6 +209,7 @@ func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 
 	page, err := engine.ListEvents(conn, engine.EventQuery{
 		Since: since, RunID: runID, Limit: limit, Tail: tail,
+		Kind: kind, StepID: stepID,
 		ProjectID: eventsProjectScope(cmd),
 	})
 	if err != nil {
@@ -182,14 +236,14 @@ func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 	return nil
 }
 
-// renderEventList is E13: one line per event, `seq  at  kind  run  issue
+// renderEventList renders one line per event, `seq  at  kind  run  issue
 // instance detail`, columns aligned.
 //
-// EVERY STORED STRING GOES THROUGH exec.Render (§8.5, gates-trust §5.7 T18).
+// EVERY STORED STRING GOES THROUGH exec.Render.
 // `data` carries `--usage` blobs, gate names, and operator-supplied abandon
 // reasons — attacker-influenced text on its way to a TERMINAL, which interprets
 // control bytes. `--json` carries the RAW bytes, because encoding/json escapes
-// them by contract and the consumer there is a program (E4 of that section).
+// them by contract and the consumer there is a program.
 //
 // The kind and the run are NOT escaped: both are core's own closed vocabulary
 // (the event set, and `RUN-N`), so there is no untrusted byte to escape and
@@ -244,7 +298,7 @@ func dashIfEmpty(s string) string {
 	return s
 }
 
-// eventDetail renders `data` compactly for the human line (E13).
+// eventDetail renders `data` compactly for the human line.
 //
 // It drops `instance`, which the writer merges into every step-shaped event's
 // payload and which the `step` column already shows — repeating it would take a
@@ -261,8 +315,8 @@ func eventDetail(data json.RawMessage) string {
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
-		// Unreachable through the writer, which normalizes `data` to an object
-		// (§7.6). Reachable through a hand-edited row, and rendering the raw
+		// Unreachable through the writer, which normalizes `data` to an object.
+		// Reachable through a hand-edited row, and rendering the raw
 		// bytes is a better answer than dropping the line: an operator looking
 		// at a corrupted feed should see that it is corrupted.
 		return string(data)
@@ -288,7 +342,8 @@ func eventDetail(data json.RawMessage) string {
 func init() {
 	eventsListCmd.Flags().Int64(
 		"since", 0, "Return events with seq strictly greater than this cursor")
-	eventsListCmd.Flags().String("run", "", "Filter to one run (RUN-N)")
+	eventsListCmd.Flags().String(
+		"run", "", "Filter to one run (RUN-N), in whichever project owns it")
 	eventsListCmd.Flags().Bool(
 		"all-projects", false,
 		"Show every project's events instead of this project's (store-level events show either way)")
@@ -296,13 +351,19 @@ func init() {
 	// have I not seen", which to reach the END of a long feed means paging
 	// through all of it first. The rows still arrive oldest-first.
 	eventsListCmd.Flags().Int(
-		"tail", 0, "Return the newest N events (still oldest-first); excludes --since")
+		"tail", 0,
+		"Return the newest N events (still oldest-first); with --follow, start the stream "+
+			"there; excludes --since")
 	eventsListCmd.Flags().Int(
 		"limit", 0, fmt.Sprintf("Maximum events to return (default %d)", eventsDefaultLimit))
+	eventsListCmd.Flags().String(
+		"kind", "", "Return only events of this kind, matched before --limit and --tail")
+	eventsListCmd.Flags().String(
+		"step", "", "Return only this step's events (STEP-N), matched before --limit and --tail")
 
-	// `--follow` (docs/tdd/events-follow.md §4). engine-spec §1 writes the verb
-	// as `docket events --follow [--since SEQ]`; the flag lands on `list`
-	// because that is where the rows are (§8.1's sub-verb argument).
+	// `--follow`. The verb's summary spelling is `docket events --follow
+	// [--since SEQ]`; the flag lands on `list` because that is where the rows
+	// are.
 	eventsListCmd.Flags().Bool(
 		"follow", false, "Poll for new events and print them as they arrive (Ctrl-C to stop)")
 

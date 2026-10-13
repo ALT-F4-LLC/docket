@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Threshold predicates — the §11.2 grammar, PARSED.
+// Threshold predicates — the grammar, PARSED.
 //
 // V21 validates the shape at register time; this decomposes the same string
 // into its parts for evaluation. Both go through predicateShape, so the grammar
@@ -16,17 +16,16 @@ import (
 //
 // Nothing here knows what a field MEANS. `severity`, `status`, and `x` are
 // opaque tokens; the aggregation and the operator are core mechanics and the
-// field and literal are instance data (docs/design/genericity.md). That is the
-// genericity line exactly where §11.2 draws it.
+// field and literal are instance data. That is the genericity line.
 
-// Aggregations of §11.2: `agg ∈ {any, all, count>=n}`.
+// Aggregations: `agg ∈ {any, all, count>=n}`.
 const (
 	AggAny   = "any"
 	AggAll   = "all"
 	AggCount = "count"
 )
 
-// Operators of §11.2: `op ∈ {==, !=, >=, >, <=, <}`.
+// Operators: `op ∈ {==, !=, >=, >, <=, <}`.
 const (
 	OpEQ = "=="
 	OpNE = "!="
@@ -43,20 +42,20 @@ type Predicate struct {
 	// Count is n for `count>=n`, and 0 otherwise.
 	Count int
 	// Field is the payload field name — an opaque token until its schema
-	// registers at S5.
+	// registers.
 	Field string
 	// Op is one of the six operators.
 	Op string
 	// Literal is the right-hand value, verbatim as written.
 	Literal string
 	// Source is the predicate string as the author wrote it, kept so a refusal
-	// can quote it back verbatim rather than re-render it (§6.14 T3 requires
-	// the predicate in the reason string).
+	// can quote it back verbatim rather than re-render it: the reason string
+	// must carry the predicate.
 	Source string
 }
 
 // Ordered reports whether the operator is an ORDERED comparison — the ones
-// §11.2 defines "only for fields whose registered schema declares
+// defined "only for fields whose registered schema declares
 // `ordered_enum`". Equality is not ordered: knowing whether two values are the
 // same value requires no schema.
 func (p Predicate) Ordered() bool {
@@ -67,7 +66,37 @@ func (p Predicate) Ordered() bool {
 	return false
 }
 
-// ParsePredicate decomposes a §11.2 predicate string.
+// The reserved `diff.*` family (DKT-2063): the engine's own measurement of the
+// change a tree-holding step recorded, addressable from a threshold predicate
+// like a payload field but never declared by a payload schema.
+//
+// The names live HERE rather than in the engine because the validator must
+// know them (V45-V47 and the V21a exemption) and internal/engine imports this
+// package, not the reverse — the same reason VoteCastFields is here. The engine
+// evaluates over them; this package decides at register time that a predicate
+// naming them can mean something.
+const (
+	DiffFieldLines = "diff.lines"
+	DiffFieldFiles = "diff.files"
+	DiffFieldEmpty = "diff.empty"
+)
+
+// DiffFields is the closed reserved vocabulary — exactly these three names. A
+// lookalike such as `diff.bogus` is an ordinary undeclared field, so a match
+// here is by name and never by prefix.
+var DiffFields = []string{DiffFieldLines, DiffFieldFiles, DiffFieldEmpty}
+
+// IsDiffField reports whether a predicate field is one of the reserved
+// `diff.*` names.
+func IsDiffField(field string) bool {
+	switch field {
+	case DiffFieldLines, DiffFieldFiles, DiffFieldEmpty:
+		return true
+	}
+	return false
+}
+
+// ParsePredicate decomposes a predicate string.
 //
 // It returns an error only for a string V21 would already have rejected, so a
 // registered definition never produces one — but the check stays, because a

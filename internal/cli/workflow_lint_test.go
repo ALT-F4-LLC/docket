@@ -14,16 +14,17 @@ import (
 // `docket workflow lint` — DKT-38: the register-path validation, reachable
 // without a persistent write.
 
-// lintSource writes src to a temp file and lints it, returning the error and
-// the JSON the verb printed.
-func lintSource(t *testing.T, conn *sql.DB, src string) (error, string) {
+// lintSource writes src to a temp file and lints it, returning the JSON the verb
+// printed and the error.
+func lintSource(t *testing.T, conn *sql.DB, src string) (string, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "wf.toml")
 	err := os.WriteFile(path, []byte(src), 0o644)
 	testsupport.Must(t, err, "writing the definition: %v", err)
 	cmd := cmdWithDB(conn)
 	w, buf := bufWriter(true)
-	return runWorkflowLint(cmd, []string{path}, w), buf.String()
+	err = runWorkflowLint(cmd, []string{path}, w)
+	return buf.String(), err
 }
 
 func countWorkflows(t *testing.T, conn *sql.DB) int {
@@ -39,7 +40,7 @@ func countWorkflows(t *testing.T, conn *sql.DB) int {
 func TestWorkflowLintValidatesWithoutWriting(t *testing.T) {
 	conn := newTestDB(t)
 
-	err, out := lintSource(t, conn, minimalWorkflow)
+	out, err := lintSource(t, conn, minimalWorkflow)
 	testsupport.Must(t, err, "lint: %v", err)
 	if countWorkflows(t, conn) != 0 {
 		t.Fatal("lint registered the definition; it must write nothing")
@@ -56,7 +57,7 @@ func TestWorkflowLintRefusesWhatRegisterRefuses(t *testing.T) {
 
 	// A step with no `after` (and not first) is the classic validation miss.
 	invalid := strings.Replace(minimalWorkflow, "after = [\"first\"]\n", "", 1)
-	err, _ := lintSource(t, conn, invalid)
+	_, err := lintSource(t, conn, invalid)
 	if err == nil {
 		t.Fatal("lint accepted a definition register would refuse")
 	}
@@ -76,13 +77,13 @@ func TestWorkflowLintReportsRegistrationOutcome(t *testing.T) {
 	conn := newTestDB(t)
 	testsupport.Must(t, registerSource(t, conn, minimalWorkflow), "register")
 
-	err, out := lintSource(t, conn, minimalWorkflow)
+	out, err := lintSource(t, conn, minimalWorkflow)
 	testsupport.Must(t, err, "lint of unchanged bytes: %v", err)
 	if !strings.Contains(out, `"registration":"unchanged"`) {
 		t.Errorf("output %q does not report unchanged", out)
 	}
 
-	err, _ = lintSource(t, conn, minimalWorkflow+"\n# edited\n")
+	_, err = lintSource(t, conn, minimalWorkflow+"\n# edited\n")
 	if err == nil {
 		t.Fatal("lint passed an edit at a frozen name@version; activation " +
 			"would refuse the whole run over exactly this")

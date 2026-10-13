@@ -1,0 +1,901 @@
+package engine
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
+)
+
+// DKT-1564 — a claim that commits its lease must never end without handing the
+// token over.
+//
+// RUN-90 stranded two verify steps: the claim transaction committed, the
+// `step-claimed` event landed, and the process then exited 1 with no token
+// anywhere. Every recovery verb needs that token, so the only exits were the
+// full TTL and an operator-gated reap — one ack-reap panel per occurrence.
+
+// failingGateRunner is the post-commit failure injected at the one seam the
+// incident implicates: phase 2 runs after transaction A committed, and
+// runPreGates propagates a runner error straight out of the claim.
+type failingGateRunner struct{ err error }
+
+func (f failingGateRunner) Run(context.Context, GateSpec, StepContext) (GateResult, error) {
+	return GateResult{}, f.err
+}
+
+// TestPreGateFailureAfterCommitStillDeliversTheToken is AC1: a pre-gate phase
+// that fails AFTER the lease committed returns the token with the failure
+// rather than instead of it.
+//
+// The step is legitimately claimed — the CAS was won, the accrual event is
+// written — so the honest outcome is the claim plus the bad news, not a bare
+// refusal that leaves a live lease nobody can end.
+func TestPreGateFailureAfterCommitStillDeliversTheToken(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	e := testEngine()
+	stepID := advanceToVerify(t, conn, e)
+
+	e.Gates = failingGateRunner{err: errors.New("database is locked (5) (SQLITE_BUSY)")}
+
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: "wave:STEP-1", NowMS: nowMS,
+	})
+	if err == nil {
+		t.Fatal("a failing pre-gate phase reported success; the failure must still surface")
+	}
+
+	var incomplete *IncompleteClaimError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want an *IncompleteClaimError carrying the token "+
+			"— without it the caller holds a committed lease it cannot end", err, err)
+	}
+	if !strings.Contains(incomplete.Error(), "SQLITE_BUSY") {
+		t.Errorf("err = %q, want the underlying pre-gate failure preserved",
+			incomplete.Error())
+	}
+	if incomplete.Result == nil || incomplete.Result.Token == "" {
+		t.Fatalf("the incomplete claim carries no token: %+v", incomplete.Result)
+	}
+
+	// The decisive assertion: the token is LIVE against the committed lease,
+	// not merely a non-empty string. This is what `step reap`, `step fail` and
+	// `step complete` all require.
+	if err := db.AuthorizeStepRead(
+		conn, stepID, incomplete.Result.Token, nowMS); err != nil {
+		t.Errorf("the carried token does not authorize the lease it was minted "+
+			"for: %v", err)
+	}
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepClaimed {
+		t.Errorf("status = %q, want %q — transaction A committed and the claim stands",
+			step.Status, db.StepClaimed)
+	}
+	if step.Owner != "wave:STEP-1" {
+		t.Errorf("owner = %q, want the claimant that committed", step.Owner)
+	}
+}
+
+// TestSameOwnerReclaimReMintsTheStrandedToken is AC2: the executor whose own
+// claim stranded re-claims and is handed a working token, instead of waiting
+// out the lease or costing a reap panel.
+//
+// The owner string is per-step (`wave:STEP-N`), so a live lease held under the
+// caller's own owner is the caller's own stranded claim and nobody else's.
+func TestSameOwnerReclaimReMintsTheStrandedToken(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	first, err := ClaimStep(conn, stepID, ClaimOptions{
+		Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "the first claim: %v", err)
+
+	// The same owner, well inside the lease window — the retry a stranded
+	// executor makes.
+	second, err := ClaimStep(conn, stepID, ClaimOptions{
+		Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim inside the lease window was refused: %v", err)
+	if second.Token == "" {
+		t.Fatal("the re-claim returned no token")
+	}
+	if err := db.AuthorizeStepRead(conn, stepID, second.Token, nowMS+1000); err != nil {
+		t.Errorf("the re-minted token does not authorize the lease: %v", err)
+	}
+
+	// The re-mint REPLACES the previous token: one lease, one live capability.
+	if db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000) == nil {
+		t.Error("the stranded claim's token still authorizes; a re-mint that leaves " +
+			"two live tokens on one lease is two claimants by another name")
+	}
+
+	// It is NOT a new claim: no attempt spent, no second accrual event.
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Attempt != first.Attempt {
+		t.Errorf("attempt = %d after the re-mint, want %d — a re-mint of the "+
+			"caller's own lease is not a retry", step.Attempt, first.Attempt)
+	}
+	if second.Attempt != first.Attempt {
+		t.Errorf("the re-mint reported attempt %d, want %d",
+			second.Attempt, first.Attempt)
+	}
+	var claimed int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, stepID).Scan(&claimed)
+	testsupport.Must(t, err, "counting step-claimed events: %v", err)
+	if claimed != 1 {
+		t.Errorf("%d step-claimed events for one claim, want 1 — the budget floor "+
+			"sums these, so a second one bills the run twice", claimed)
+	}
+}
+
+// TestSameOwnerClaimantsShareOneLease pins what mutual exclusion means once a
+// same-owner re-claim re-mints (DKT-1564).
+//
+// "Exactly one success response" no longer holds for callers presenting the
+// SAME owner string: they are, by the re-mint's premise, one claimant asking
+// twice. What still holds — and is what mutual exclusion is actually protecting
+// — is that the step carries ONE live capability, ONE attempt, and ONE accrual
+// however many of them ask.
+func TestSameOwnerClaimantsShareOneLease(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	const claimants = 6
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		tokens []string
+	)
+	for range claimants {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := ClaimStep(conn, stepID, ClaimOptions{
+				Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS,
+			})
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			tokens = append(tokens, result.Token)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	live := 0
+	for _, token := range tokens {
+		if db.AuthorizeStepRead(conn, stepID, token, nowMS) == nil {
+			live++
+		}
+	}
+	if live != 1 {
+		t.Errorf("%d of %d issued tokens authorize the lease, want exactly 1 — "+
+			"one lease carries one live capability", live, len(tokens))
+	}
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Attempt != 1 {
+		t.Errorf("attempt = %d, want 1 — only the CAS winner took a claim", step.Attempt)
+	}
+
+	var claimed int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, stepID).Scan(&claimed)
+	testsupport.Must(t, err, "counting step-claimed events: %v", err)
+	if claimed != 1 {
+		t.Errorf("%d step-claimed events, want 1 — the budget floor sums these", claimed)
+	}
+}
+
+// TestReclaimByAnotherOwnerIsStillRefused keeps the mutual-exclusion guarantee
+// the re-mint sits next to: a DIFFERENT owner is refused exactly as before.
+func TestReclaimByAnotherOwnerIsStillRefused(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	_, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "wave:STEP-1", NowMS: nowMS})
+	testsupport.Must(t, err, "the first claim: %v", err)
+
+	_, err = ClaimStep(conn, stepID, ClaimOptions{
+		Owner: "wave:STEP-2", NowMS: nowMS + 1000,
+	})
+	if err == nil {
+		t.Fatal("a second owner claimed a live lease; exactly one claimant wins")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("code = %q, want %q", code, CodeConflict)
+	}
+}
+
+// TestRenderedReclaimReMintsForItsOwnOwner runs AC2 through `claim --render`,
+// which is the form the wave actually issues and the form both RUN-90 steps
+// died on.
+//
+// It is a distinct case from the plain claim: ClaimStepRendered validates the
+// packet BEFORE taking the lease (DKT-804), so on a retry that preflight runs
+// against a step that is already `claimed`. A refusal there would put the
+// re-mint out of reach on the one invocation that needs it.
+func TestRenderedReclaimReMintsForItsOwnOwner(t *testing.T) {
+	conn, configDir := configRepo(t)
+	writeConfigFile(t, configDir, "workflows/auto-dev.toml",
+		autoWorkflowSrc+"packet = [\"contracts/w.md\"]\n")
+	writeConfigFile(t, configDir, "contracts/w.md", "the declared contract\n")
+
+	issue := createIssue(t, conn, "the stranded retry", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	opts := ClaimOptions{Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS}
+
+	first, _, err := NewEngine().ClaimStepRendered(conn, stepID, opts, "", "")
+	testsupport.Must(t, err, "the first rendered claim: %v", err)
+
+	// The retry, with the token from the first call never captured.
+	opts.NowMS = nowMS + 1000
+	second, packet, err := NewEngine().ClaimStepRendered(conn, stepID, opts, "", "")
+	testsupport.Must(t, err,
+		"the stranded executor's rendered re-claim was refused: %v", err)
+	if !second.ReMinted {
+		t.Error("the rendered re-claim reported a fresh claim, not a re-mint")
+	}
+	if err := db.AuthorizeStepRead(conn, stepID, second.Token, nowMS+1000); err != nil {
+		t.Errorf("the re-minted token does not authorize the lease: %v", err)
+	}
+	if db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000) == nil {
+		t.Error("the stranded token still authorizes after the re-mint")
+	}
+	// The packet is the point of --render: a re-mint that returned no packet
+	// would hand the executor a token and no contract to execute against.
+	if packet == nil || !strings.Contains(packet.Packet, "the declared contract") {
+		t.Errorf("the re-mint returned no usable packet: %+v", packet)
+	}
+}
+
+// TestReclaimAfterTheTokenRetiresIsRefused is the re-mint's boundary: the
+// branch keys on a LIVE lease, and a token that retired at `step complete` is
+// not one.
+//
+// Retirement clears owner, hash and expiry together (clearLeaseTx), so the
+// guard holds through the owner check alone; this pins the BEHAVIOR rather
+// than that mechanism, so a future change to either cannot quietly re-key a
+// dead lease.
+func TestReclaimAfterTheTokenRetiresIsRefused(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	e := testEngine()
+	claimAndComplete(t, conn, e, "implement@0", "summary", "")
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	_, err := ClaimStep(conn, stepID, ClaimOptions{
+		Owner: "wave:STEP-1", NowMS: nowMS,
+	})
+	if err == nil {
+		t.Fatal("a recorded step was re-claimed; its token retired at completion")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+	}
+}
+
+// parkedGateRunner is a trusted runner whose every execution parks until the
+// test releases it, so a claim can be held inside its pre-gate phase: the
+// lease is committed and no pre-gate row is recorded yet.
+type parkedGateRunner struct {
+	*ExecRunner
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p parkedGateRunner) Execute(
+	ctx context.Context, g GateSpec, sc StepContext,
+) (GateExecution, error) {
+	p.entered <- struct{}{}
+	<-p.release
+	return p.ExecRunner.Execute(ctx, g, sc)
+}
+
+// TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord pins the boundary
+// between a stranded claim and one whose pre-gate phase is still running.
+//
+// While the phase runs, the same owner's re-claim must not re-mint: the new
+// token would replace the hash the original claim's lease refresh is keyed
+// on, and the re-minted bundle would carry no gate results because none are
+// recorded yet. Once the rows are recorded, the re-claim re-mints and the
+// bundle replays them.
+func TestSameOwnerReclaimDuringPreGatesIsRefusedUntilRowsRecord(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(selfGateResultsWorkflow), "selfgateresults.toml")
+	issue := createIssue(t, conn, "a re-claim during pre-gates", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	inner := NewExecRunner(testRepoPaths(repoRoot))
+	inner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot),
+	})
+	runner := parkedGateRunner{
+		ExecRunner: inner,
+		entered:    make(chan struct{}, 1),
+		release:    make(chan struct{}),
+	}
+	released := false
+	releaseGate := func() {
+		if !released {
+			released = true
+			close(runner.release)
+		}
+	}
+	t.Cleanup(releaseGate)
+
+	e := testEngine()
+	e.Gates = runner
+	stepID := stepIDByInstance(t, conn, "verify@0")
+	const owner = "wave:STEP-1"
+
+	type claimOutcome struct {
+		result *ClaimResult
+		err    error
+	}
+	original := make(chan claimOutcome, 1)
+	go func() {
+		result, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+			Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
+		})
+		original <- claimOutcome{result, err}
+	}()
+	<-runner.entered
+
+	before, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	_, err = e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
+	})
+	if err == nil {
+		t.Fatal("a same-owner re-claim re-minted while the pre-gate phase was running")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+	}
+	if !strings.Contains(err.Error(), "pre-gate phase") {
+		t.Errorf("err = %q, want it to name the in-flight pre-gate phase", err.Error())
+	}
+
+	after, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if after.TokenHash != before.TokenHash {
+		t.Error("the refused re-claim re-keyed the lease the running claim holds")
+	}
+
+	releaseGate()
+	first := <-original
+	testsupport.Must(t, first.err,
+		"the original claim failed after its pre-gate phase finished: %v", first.err)
+	if err := db.AuthorizeStepRead(conn, stepID, first.result.Token, nowMS+1000); err != nil {
+		t.Errorf("the original claim's token does not authorize its lease: %v", err)
+	}
+	assertOwnPreGateInput(t, "original claim bundle", first.result.Context)
+
+	rows, err := db.GateResultsForStep(conn, stepID)
+	testsupport.Must(t, err, "GateResultsForStep: %v", err)
+	if len(rows) != 1 || !rows[0].Pre || rows[0].Gate != "ac-commands" {
+		t.Errorf("recorded gate rows = %+v, want the one pre-gate row", rows)
+	}
+
+	reMinted, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 2000,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim after the pre-gate rows recorded was refused: %v", err)
+	if !reMinted.ReMinted {
+		t.Error("the re-claim after the pre-gate phase was not a re-mint")
+	}
+	if reMinted.Attempt != first.result.Attempt {
+		t.Errorf("the re-mint reported attempt %d, want %d",
+			reMinted.Attempt, first.result.Attempt)
+	}
+	if len(reMinted.Context.PreGates) == 0 {
+		t.Error("the re-minted bundle carries no pre-gate results")
+	}
+	assertOwnPreGateInput(t, "re-minted bundle", reMinted.Context)
+}
+
+// TestSameOwnerReclaimBeforeTransactionBCommitsIsRefused pins the window
+// between the last pre-gate row committing and transaction B committing.
+//
+// Every declared pre-gate has a row there, so a row count cannot tell the
+// window from a settled claim. A re-mint inside it would replace the token
+// hash transaction B's lease refresh is keyed on, and the original claim
+// would fail as lost. The re-claim must be a retryable CONFLICT that leaves
+// the lease alone; once transaction B commits, the same re-claim re-mints.
+func TestSameOwnerReclaimBeforeTransactionBCommitsIsRefused(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(selfGateResultsWorkflow), "selfgateresults.toml")
+	issue := createIssue(t, conn, "a re-claim before transaction B", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	repoRoot := t.TempDir()
+	argv := []string{"/usr/bin/true"}
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot),
+	})
+	e := testEngine()
+	e.Gates = runner
+	stepID := stepIDByInstance(t, conn, "verify@0")
+	const owner = "wave:STEP-1"
+
+	var (
+		inWindowErr error
+		hookRan     bool
+	)
+	claimHookAfterPreGates = func(id int) {
+		claimHookAfterPreGates = nil
+		hookRan = true
+
+		before, err := db.GetStep(conn, id)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		rows, err := db.GateResultsForStep(conn, id)
+		testsupport.Must(t, err, "GateResultsForStep: %v", err)
+		if len(rows) != 1 || !rows[0].Pre {
+			t.Errorf("rows inside the window = %+v, want the one recorded pre-gate row", rows)
+		}
+
+		_, inWindowErr = e.ClaimStepWithGates(conn, id, ClaimOptions{
+			Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
+		})
+
+		after, err := db.GetStep(conn, id)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		if after.TokenHash != before.TokenHash {
+			t.Error("the in-window re-claim re-keyed the lease transaction B refreshes")
+		}
+	}
+	t.Cleanup(func() { claimHookAfterPreGates = nil })
+
+	first, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
+	})
+	if !hookRan {
+		t.Fatal("the claim never reached the window after its pre-gates")
+	}
+	if inWindowErr == nil {
+		t.Error("a same-owner re-claim re-minted before transaction B committed")
+	} else if code, _ := CodeOf(inWindowErr); code != CodeConflict {
+		t.Errorf("in-window code = %q, want %q — err = %q",
+			code, CodeConflict, inWindowErr.Error())
+	}
+	testsupport.Must(t, err, "the original claim failed after the in-window re-claim: %v", err)
+	if err := db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000); err != nil {
+		t.Errorf("the original claim's token does not authorize its lease: %v", err)
+	}
+	if len(first.Context.PreGates) == 0 {
+		t.Error("the original claim's bundle carries no pre-gate results")
+	}
+	assertOwnPreGateInput(t, "original claim bundle", first.Context)
+
+	reMinted, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 2000,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim after transaction B committed was refused: %v", err)
+	if !reMinted.ReMinted {
+		t.Error("the re-claim after transaction B was not a re-mint")
+	}
+	if reMinted.Attempt != first.Attempt {
+		t.Errorf("the re-mint reported attempt %d, want %d", reMinted.Attempt, first.Attempt)
+	}
+	if len(reMinted.Context.PreGates) == 0 {
+		t.Error("the re-minted bundle carries no pre-gate results")
+	}
+	assertOwnPreGateInput(t, "re-minted bundle", reMinted.Context)
+}
+
+// TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires pins that the
+// pre-gate phase marker belongs to one lease. A claim that fails before
+// transaction B commits leaves the marker behind; once its lease expires, a
+// fresh claim reaps it and succeeds, and that claim settles normally.
+func TestUnsettledClaimDoesNotBlockAClaimAfterItsLeaseExpires(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	e := testEngine()
+	stepID := advanceToVerify(t, conn, e)
+	const owner = "wave:STEP-1"
+	const ttlMS = 1000
+
+	e.Gates = failingGateRunner{err: errors.New("the pre-gate runner failed")}
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, TTLOverride: ttlMS, NowMS: nowMS,
+	})
+	var incomplete *IncompleteClaimError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want the claim to fail before transaction B", err, err)
+	}
+
+	// The precondition this test names: the failed claim left the marker
+	// behind on a lease it still holds.
+	stale, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "reading the step after the failed claim: %v", err)
+	if stale.ClaimPhase != db.ClaimPhasePreGates {
+		t.Fatalf("claim phase = %q, want %q left by the failed claim",
+			stale.ClaimPhase, db.ClaimPhasePreGates)
+	}
+	if stale.Owner != owner || stale.ExpiresMS <= nowMS {
+		t.Fatalf("lease = owner %q expires %d, want a live lease held by %q at %d",
+			stale.Owner, stale.ExpiresMS, owner, nowMS)
+	}
+
+	e.Gates = PassThroughRunner{}
+	later := nowMS + ttlMS + 1
+	fresh, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: later,
+	})
+	testsupport.Must(t, err,
+		"a claim after the unsettled lease expired was refused: %v", err)
+	if fresh.ReMinted {
+		t.Error("the claim after expiry re-minted the expired lease instead of taking a new one")
+	}
+	if fresh.Attempt != incomplete.Result.Attempt+1 {
+		t.Errorf("attempt = %d, want %d", fresh.Attempt, incomplete.Result.Attempt+1)
+	}
+
+	again, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: later + 1,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim of the settled fresh claim was refused: %v", err)
+	if !again.ReMinted {
+		t.Error("the re-claim of the settled fresh claim was not a re-mint")
+	}
+}
+
+// TestTransactionBFailureRefusesReclaimUntilTheLeaseExpires pins the recovery
+// boundary when transaction B fails after the pre-gate rows are recorded.
+//
+// The lease refresh aborts, so the claim returns its token as an incomplete
+// claim and leaves the pre-gate phase marker behind. A same-owner re-claim
+// inside the lease is a CONFLICT that leaves the lease alone; once the lease
+// expires, the same owner takes a fresh claim at the next attempt.
+func TestTransactionBFailureRefusesReclaimUntilTheLeaseExpires(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+
+	e := testEngine()
+	stepID := advanceToVerify(t, conn, e)
+	const owner = "wave:STEP-1"
+	const ttlMS = 1000
+
+	// The trigger lives in transaction B, so its rollback drops it again.
+	claimHookBeforeRefresh = func(tx *sql.Tx, _ int) {
+		claimHookBeforeRefresh = nil
+		_, err := tx.Exec(`CREATE TRIGGER fail_lease_refresh
+			BEFORE UPDATE OF activity_ms ON steps
+			BEGIN SELECT RAISE(ABORT, 'the lease refresh failed'); END`)
+		testsupport.Must(t, err, "installing the lease-refresh trigger: %v", err)
+	}
+	t.Cleanup(func() { claimHookBeforeRefresh = nil })
+
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, TTLOverride: ttlMS, NowMS: nowMS,
+	})
+	var incomplete *IncompleteClaimError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want an *IncompleteClaimError from transaction B", err, err)
+	}
+	if !strings.Contains(incomplete.Error(), "the lease refresh failed") {
+		t.Errorf("err = %q, want the injected lease-refresh failure", incomplete.Error())
+	}
+	if incomplete.Result == nil || incomplete.Result.Token == "" {
+		t.Fatalf("the incomplete claim carries no token: %+v", incomplete.Result)
+	}
+
+	rows, err := db.GateResultsForStep(conn, stepID)
+	testsupport.Must(t, err, "GateResultsForStep: %v", err)
+	if len(rows) != 1 || !rows[0].Pre {
+		t.Fatalf("rows after transaction B failed = %+v, want the one recorded pre-gate row", rows)
+	}
+
+	before, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if before.ClaimPhase != db.ClaimPhasePreGates {
+		t.Fatalf("claim phase = %q, want %q left by the failed transaction B",
+			before.ClaimPhase, db.ClaimPhasePreGates)
+	}
+
+	_, err = e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + ttlMS/2,
+	})
+	if err == nil {
+		t.Fatal("a same-owner re-claim inside the lease re-minted a claim whose transaction B failed")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+	}
+	if !strings.Contains(err.Error(), "pre-gate phase") {
+		t.Errorf("err = %q, want it to name the pre-gate phase", err.Error())
+	}
+	after, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if after.TokenHash != before.TokenHash {
+		t.Error("the refused re-claim re-keyed the lease")
+	}
+
+	fresh, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{
+		Owner: owner, NowMS: nowMS + ttlMS + 1,
+	})
+	testsupport.Must(t, err,
+		"a same-owner claim after the stranded lease expired was refused: %v", err)
+	if fresh.ReMinted {
+		t.Error("the claim after expiry re-minted the expired lease instead of taking a new one")
+	}
+	if fresh.Attempt != incomplete.Result.Attempt+1 {
+		t.Errorf("attempt = %d, want %d", fresh.Attempt, incomplete.Result.Attempt+1)
+	}
+}
+
+// The recovery secrets a claimant presents in the tests below. Synthetic,
+// never a real credential.
+const (
+	testRecoverySecret  = "recovery-secret-of-the-first-claim"
+	wrongRecoverySecret = "recovery-secret-somebody-guessed"
+)
+
+// stepRemintedEvents decodes the step-reminted events written for a step.
+func stepRemintedEvents(t *testing.T, conn *sql.DB, stepID int) []map[string]any {
+	t.Helper()
+	rows, err := conn.Query(
+		`SELECT data FROM events WHERE kind = ? AND step_id = ? ORDER BY seq`,
+		EventStepReminted, stepID)
+	testsupport.Must(t, err, "querying step-reminted events: %v", err)
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var raw string
+		err := rows.Scan(&raw)
+		testsupport.Must(t, err, "scanning a step-reminted event: %v", err)
+		var data map[string]any
+		err = json.Unmarshal([]byte(raw), &data)
+		testsupport.Must(t, err, "decoding a step-reminted event: %v", err)
+		out = append(out, data)
+	}
+	testsupport.Must(t, rows.Err(), "reading step-reminted events: %v", rows.Err())
+	return out
+}
+
+// TestSameOwnerReclaimWithTheRecoverySecretReMintsAndRecordsIt pins that a
+// re-mint on a lease claimed with a recovery secret needs that secret: a
+// wrong one is refused, the right one re-keys the lease and leaves one
+// step-reminted event naming the owner and the attempt.
+func TestSameOwnerReclaimWithTheRecoverySecretReMintsAndRecordsIt(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	const owner = "wave:STEP-1"
+
+	first, err := ClaimStep(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "the first claim: %v", err)
+
+	_, err = ClaimStep(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: wrongRecoverySecret, NowMS: nowMS + 500,
+	})
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Fatalf("a re-claim with the wrong recovery secret: err = %v, want CONFLICT", err)
+	}
+
+	second, err := ClaimStep(conn, stepID, ClaimOptions{
+		Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
+	})
+	testsupport.Must(t, err,
+		"a same-owner re-claim presenting the recovery secret was refused: %v", err)
+	if !second.ReMinted {
+		t.Error("the re-claim reported a fresh claim, not a re-mint")
+	}
+	if err := db.AuthorizeStepRead(conn, stepID, second.Token, nowMS+1000); err != nil {
+		t.Errorf("the re-minted token does not authorize the lease: %v", err)
+	}
+	if db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000) == nil {
+		t.Error("the first claim's token still authorizes after the re-mint")
+	}
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Attempt != first.Attempt || second.Attempt != first.Attempt {
+		t.Errorf("attempt = %d (reported %d) after the re-mint, want %d",
+			step.Attempt, second.Attempt, first.Attempt)
+	}
+
+	var claimed int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
+		EventStepClaimed, stepID).Scan(&claimed)
+	testsupport.Must(t, err, "counting step-claimed events: %v", err)
+	if claimed != 1 {
+		t.Errorf("%d step-claimed events, want 1 — a re-mint accrues nothing", claimed)
+	}
+
+	reminted := stepRemintedEvents(t, conn, stepID)
+	if len(reminted) != 1 {
+		t.Fatalf("%d step-reminted events, want exactly 1", len(reminted))
+	}
+	if reminted[0]["owner"] != owner {
+		t.Errorf("step-reminted owner = %v, want %q", reminted[0]["owner"], owner)
+	}
+	if reminted[0]["attempt"] != float64(first.Attempt) {
+		t.Errorf("step-reminted attempt = %v, want %d", reminted[0]["attempt"], first.Attempt)
+	}
+}
+
+// TestSameOwnerReclaimWithoutTheRecoverySecretIsRefused pins that the owner
+// string alone no longer re-keys a lease claimed with a recovery secret. A
+// re-claim with no secret or a wrong one is CONFLICT and leaves the lease as
+// it was: the holder's token still authorizes, attempt and row_version do not
+// move, and no step-reminted event is written. Neither secret appears in the
+// refusal.
+func TestSameOwnerReclaimWithoutTheRecoverySecretIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, secret string
+	}{
+		{"no secret", ""},
+		{"wrong secret", wrongRecoverySecret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			activatedRun(t, conn)
+			stepID := stepIDByInstance(t, conn, "implement@0")
+			const owner = "wave:STEP-1"
+
+			first, err := ClaimStep(conn, stepID, ClaimOptions{
+				Owner: owner, RecoverySecret: testRecoverySecret, NowMS: nowMS,
+			})
+			testsupport.Must(t, err, "the first claim: %v", err)
+			before, err := db.GetStep(conn, stepID)
+			testsupport.Must(t, err, "GetStep: %v", err)
+
+			result, err := ClaimStep(conn, stepID, ClaimOptions{
+				Owner: owner, RecoverySecret: tc.secret, NowMS: nowMS + 1000,
+			})
+			if err == nil {
+				t.Fatalf("the re-claim succeeded (re-minted %v); want CONFLICT", result.ReMinted)
+			}
+			if code, _ := CodeOf(err); code != CodeConflict {
+				t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+			}
+			if strings.Contains(err.Error(), testRecoverySecret) ||
+				strings.Contains(err.Error(), wrongRecoverySecret) {
+				t.Errorf("the refusal discloses a recovery secret: %q", err.Error())
+			}
+
+			if err := db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000); err != nil {
+				t.Errorf("the holder's token stopped authorizing after a refused re-claim: %v", err)
+			}
+			after, err := db.GetStep(conn, stepID)
+			testsupport.Must(t, err, "GetStep: %v", err)
+			if after.Attempt != before.Attempt {
+				t.Errorf("attempt = %d, want %d", after.Attempt, before.Attempt)
+			}
+			if after.RowVersion != before.RowVersion {
+				t.Errorf("row_version = %d, want %d — a refusal writes nothing",
+					after.RowVersion, before.RowVersion)
+			}
+			if after.TokenHash != before.TokenHash {
+				t.Error("the refused re-claim re-keyed the lease")
+			}
+			if n := len(stepRemintedEvents(t, conn, stepID)); n != 0 {
+				t.Errorf("%d step-reminted events after a refused re-claim, want 0", n)
+			}
+		})
+	}
+}
+
+// TestSameOwnerReclaimOfALeaseWithNoRecoveryHashIsRefused pins that a lease
+// whose first claim stored no recovery hash cannot be re-keyed by its owner
+// string, whether or not the re-claim presents a secret: there is nothing to
+// prove the secret against. The refusal is CONFLICT, says the lease was taken
+// without a recovery secret, leaves the lease as it was, writes no
+// step-reminted or further step-claimed event, and does not echo the
+// presented secret.
+func TestSameOwnerReclaimOfALeaseWithNoRecoveryHashIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, secret string
+	}{
+		{"null hash no secret", ""},
+		{"null hash with secret", wrongRecoverySecret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			activatedRun(t, conn)
+			stepID := stepIDByInstance(t, conn, "implement@0")
+			const owner = "wave:STEP-1"
+
+			first, err := ClaimStep(conn, stepID, ClaimOptions{Owner: owner, NowMS: nowMS})
+			testsupport.Must(t, err, "the first claim: %v", err)
+			var recoveryHash sql.NullString
+			err = conn.QueryRow(
+				`SELECT recovery_hash FROM steps WHERE id = ?`, stepID).Scan(&recoveryHash)
+			testsupport.Must(t, err, "reading recovery_hash: %v", err)
+			if recoveryHash.Valid {
+				t.Fatalf("recovery_hash = %q after a secretless claim, want NULL", recoveryHash.String)
+			}
+			before, err := db.GetStep(conn, stepID)
+			testsupport.Must(t, err, "GetStep: %v", err)
+
+			result, err := ClaimStep(conn, stepID, ClaimOptions{
+				Owner: owner, RecoverySecret: tc.secret, NowMS: nowMS + 1000,
+			})
+			if err == nil {
+				t.Fatalf("the re-claim succeeded (re-minted %v); want CONFLICT", result.ReMinted)
+			}
+			if code, _ := CodeOf(err); code != CodeConflict {
+				t.Errorf("code = %q, want %q — err = %q", code, CodeConflict, err.Error())
+			}
+			if !strings.Contains(err.Error(), "without a recovery secret") {
+				t.Errorf("the refusal does not say the lease holds no recovery secret: %q", err.Error())
+			}
+			if tc.secret != "" && strings.Contains(err.Error(), tc.secret) {
+				t.Errorf("the refusal discloses the presented secret: %q", err.Error())
+			}
+
+			if err := db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000); err != nil {
+				t.Errorf("the holder's token stopped authorizing after a refused re-claim: %v", err)
+			}
+			after, err := db.GetStep(conn, stepID)
+			testsupport.Must(t, err, "GetStep: %v", err)
+			if after.Attempt != before.Attempt {
+				t.Errorf("attempt = %d, want %d", after.Attempt, before.Attempt)
+			}
+			if after.RowVersion != before.RowVersion {
+				t.Errorf("row_version = %d, want %d — a refusal writes nothing",
+					after.RowVersion, before.RowVersion)
+			}
+			if after.TokenHash != before.TokenHash {
+				t.Error("the refused re-claim re-keyed the lease")
+			}
+			if n := len(stepRemintedEvents(t, conn, stepID)); n != 0 {
+				t.Errorf("%d step-reminted events after a refused re-claim, want 0", n)
+			}
+			var claimed int
+			err = conn.QueryRow(
+				`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
+				EventStepClaimed, stepID).Scan(&claimed)
+			testsupport.Must(t, err, "counting step-claimed events: %v", err)
+			if claimed != 1 {
+				t.Errorf("%d step-claimed events, want 1", claimed)
+			}
+		})
+	}
+}

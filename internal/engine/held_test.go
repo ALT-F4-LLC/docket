@@ -15,7 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The held-cluster lifecycle — docs/tdd/payloads-thresholds.md §7.7, H1–H20.
+// The held-cluster lifecycle.
 //
 // The fixture's `reconcile` is the subject throughout: `hold_spread = 2` over
 // `findings@1`'s five-value order, driven by a `synthesize` payload whose
@@ -40,13 +40,13 @@ const unheldPayload = `[
 //
 // THE CLUSTERED PAYLOAD IS RECORDED ON `synthesize@0` AND NOWHERE ELSE. The
 // fixture's `reconcile` declares `inputs = ["synthesize.findings"]`, and the
-// builtin's input is the payloads of the artifacts that declaration names
-// (§2) — so recording it upstream is the whole of what a caller does.
+// builtin's input is the payloads of the artifacts that declaration names —
+// so recording it upstream is the whole of what a caller does.
 //
 // NOTHING CLAIMS `reconcile@0`. It is an action step; `claim` refuses it, and
 // the engine runs it. That is why this helper's last line is a drive rather
 // than a completion: a helper that could hand-feed an action step would be the
-// claim+complete shim D13 forbids, written in a test file.
+// forbidden claim+complete shim, written in a test file.
 func driveToReconcile(t *testing.T, conn *sql.DB, e *Engine, payload string) {
 	t.Helper()
 	claimAndComplete(t, conn, e, "implement@0", "summary", "")
@@ -84,8 +84,8 @@ func heldStep(t *testing.T, conn *sql.DB, instance string) *db.Step {
 	return step
 }
 
-// TestHeldStepIsMaterialized covers H1–H4 and H7: the identity, the kind, the
-// row, and the idempotency.
+// TestHeldStepIsMaterialized covers the identity, the kind, the row, and the
+// idempotency.
 func TestHeldStepIsMaterialized(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -93,23 +93,23 @@ func TestHeldStepIsMaterialized(t *testing.T) {
 
 	driveToReconcile(t, conn, e, clusteredPayload)
 
-	// H1/H2: `<step>-held` at the routing step's OWN ordinal, with NO sibling
-	// index — §11.1's exactly-one-of rule means an action step is never fanned
+	// `<step>-held` at the routing step's OWN ordinal, with NO sibling
+	// index — the exactly-one-of rule means an action step is never fanned
 	// out, so there is no second instance for a hold to belong to.
 	held := heldStep(t, conn, "reconcile-held@0#0")
 
 	if held.Kind != workflow.TypeHuman {
-		t.Errorf("kind = %q, want %q (H3)", held.Kind, workflow.TypeHuman)
+		t.Errorf("kind = %q, want %q", held.Kind, workflow.TypeHuman)
 	}
 	if !held.Materialized {
 		t.Error("materialized = 0; the column is what tells a reader a declared " +
-			"question from a computed one (H4)")
+			"question from a computed one")
 	}
 	if held.Status != db.StepPending {
 		t.Errorf("status = %q, want %q", held.Status, db.StepPending)
 	}
 	if held.SiblingIndex != nil {
-		t.Errorf("sibling_index = %v, want NULL (H2)", *held.SiblingIndex)
+		t.Errorf("sibling_index = %v, want NULL", *held.SiblingIndex)
 	}
 	if held.Executor != "" {
 		t.Errorf("executor = %q; a human step has none", held.Executor)
@@ -119,10 +119,10 @@ func TestHeldStepIsMaterialized(t *testing.T) {
 	if routing.RunID != held.RunID || routing.IssueID != held.IssueID ||
 		routing.WorkflowID != held.WorkflowID {
 		t.Error("the materialized step does not inherit run/issue/workflow from " +
-			"its routing step (H4)")
+			"its routing step")
 	}
 
-	// H4: created in the SAME transaction that records the artifact and enters
+	// Created in the SAME transaction that records the artifact and enters
 	// the `held` stage — so the artifact carrying `held: true` and the step that
 	// can resolve it are never observable apart.
 	if routing.SagaStage != db.SagaHeld {
@@ -141,11 +141,11 @@ func TestHeldStepIsMaterialized(t *testing.T) {
 	// The event, so a `type="human"` step nobody declared does not appear with
 	// nothing explaining where it came from.
 	if !hasEventKind(t, conn, routing.ID, EventStepHeld) {
-		t.Error("no step-held event; §9 item 2 requires every transition be " +
+		t.Error("no step-held event; every transition must be " +
 			"attributable")
 	}
 
-	// H7: a resumed saga that re-enters the branch finds it and does not
+	// A resumed saga that re-enters the branch finds it and does not
 	// duplicate.
 	err = e.ResumeSaga(conn, routing.ID, nowMS)
 	testsupport.Must(t, err, "resume: %v", err)
@@ -155,11 +155,11 @@ func TestHeldStepIsMaterialized(t *testing.T) {
 		Scan(&count)
 	testsupport.Must(t, err, "counting: %v", err)
 	if count != 1 {
-		t.Errorf("%d materialized steps after a resume, want exactly one (H7)", count)
+		t.Errorf("%d materialized steps after a resume, want exactly one", count)
 	}
 }
 
-// TestHeldStepIsReadyImmediately is H6: R1/R2/R6 apply, R3 is vacuous, and
+// TestHeldStepIsReadyImmediately: R1/R2/R6 apply, R3 is vacuous, and
 // R4/R5 do not apply to a human step.
 //
 // So it is ready the moment it exists — which is correct: the question it asks
@@ -173,11 +173,11 @@ func TestHeldStepIsReadyImmediately(t *testing.T) {
 	ready := readyInstances(t, conn)
 	if !contains(ready, "reconcile-held@0#0") {
 		t.Errorf("ready set is %v; the materialized step must be offered "+
-			"immediately (H6)", ready)
+			"immediately", ready)
 	}
 }
 
-// TestHeldBlocksEveryDownstreamStep is H8, the clause the whole design rests
+// TestHeldBlocksEveryDownstreamStep pins the clause the whole design rests
 // on: the routing step does not route while held, its status stays `gated` —
 // non-terminal — so every downstream successor fails R3 and nothing proceeds.
 //
@@ -207,7 +207,7 @@ func TestHeldBlocksEveryDownstreamStep(t *testing.T) {
 	}
 }
 
-// TestResumeWhileHeldAdvancesNothing is H9: `held` is "no advance", so every
+// TestResumeWhileHeldAdvancesNothing: `held` is "no advance", so every
 // later `next`/`claim`/`complete` costs one read and changes nothing rather
 // than spinning against the database.
 func TestResumeWhileHeldAdvancesNothing(t *testing.T) {
@@ -255,8 +255,8 @@ func TestResumeWhileHeldAdvancesNothing(t *testing.T) {
 	}
 }
 
-// TestApproveResolvesAndRoutes is §7.7.3's approve row, and H10's "exactly
-// once, AFTER resolution".
+// TestApproveResolvesAndRoutes is a hold's approve row: routing happens
+// "exactly once, AFTER resolution".
 //
 // The threshold — `any(severity >= high)` over a user-registered order — routes
 // `fix-loop` for real. That is the sentence this whole stage exists to make
@@ -274,7 +274,7 @@ func TestApproveResolvesAndRoutes(t *testing.T) {
 	// (2) the materialized step ⇒ done, with a step-approved event.
 	held = heldStep(t, conn, "reconcile-held@0#0")
 	if held.Status != db.StepDone {
-		t.Errorf("the materialized step is %q, want %q (H14)", held.Status, db.StepDone)
+		t.Errorf("the materialized step is %q, want %q", held.Status, db.StepDone)
 	}
 	if !hasEventKind(t, conn, held.ID, EventStepApproved) {
 		t.Error("no step-approved event")
@@ -289,7 +289,7 @@ func TestApproveResolvesAndRoutes(t *testing.T) {
 	payloads := artifactPayloads(t, conn, routing.ID)
 	if len(payloads) < 2 {
 		t.Fatalf("the routing step has %d payloads; approval records a NEW "+
-			"artifact rather than annotating the old one (H13)", len(payloads))
+			"artifact rather than annotating the old one", len(payloads))
 	}
 	resolved := payloads[len(payloads)-1]
 	for i, element := range resolved {
@@ -301,7 +301,7 @@ func TestApproveResolvesAndRoutes(t *testing.T) {
 		}
 	}
 
-	// H13: the ORIGINAL is still addressable, unmodified.
+	// The ORIGINAL is still addressable, unmodified.
 	original := payloads[len(payloads)-2]
 	for _, element := range original {
 		if held, _ := element[KeyHeld].(bool); held {
@@ -369,7 +369,7 @@ func TestApproveRoutesFixLoopOverAUserRegisteredOrder(t *testing.T) {
 	}
 }
 
-// TestRejectRoutesPerOnFailWithoutAnArtifact is §7.7.3's reject row.
+// TestRejectRoutesPerOnFailWithoutAnArtifact is a hold's reject row.
 func TestRejectRoutesPerOnFailWithoutAnArtifact(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -403,7 +403,7 @@ func TestRejectRoutesPerOnFailWithoutAnArtifact(t *testing.T) {
 	held = heldStep(t, conn, "reconcile-held@0#0")
 	if held.Status != db.StepDone {
 		t.Errorf("the materialized step is %q, want %q — it recorded a decision, "+
-			"which is what a gate does (H14)", held.Status, db.StepDone)
+			"which is what a gate does", held.Status, db.StepDone)
 	}
 	if !hasEventKind(t, conn, held.ID, EventStepRejected) {
 		t.Error("no step-rejected event")
@@ -421,7 +421,7 @@ func TestRejectRoutesPerOnFailWithoutAnArtifact(t *testing.T) {
 		t.Errorf("the routing step's saga is %q, want complete", routing.SagaStage)
 	}
 
-	// H14's V13 note: the park is on a DIFFERENT step, resolvable by
+	// The V13 note: the park is on a DIFFERENT step, resolvable by
 	// `step resolve` — not a step parking on its own decision.
 	if routing.Status != db.StepWaitingHuman {
 		t.Errorf("the routing step is %q, want %q", routing.Status, db.StepWaitingHuman)
@@ -431,7 +431,7 @@ func TestRejectRoutesPerOnFailWithoutAnArtifact(t *testing.T) {
 	}
 }
 
-// TestDoubleApproveIsConflict is H16: approve/reject on a materialized step
+// TestDoubleApproveIsConflict: approve/reject on a materialized step
 // whose routing step is not in `held` is CONFLICT naming both steps.
 func TestDoubleApproveIsConflict(t *testing.T) {
 	conn := mustDB(t)
@@ -458,12 +458,12 @@ func TestDoubleApproveIsConflict(t *testing.T) {
 	}
 }
 
-// TestGuardStopDeniesWhileHeld is H11 AS REVISED (payloads-thresholds-review
-// F1, operator decision 2026-08-03).
+// TestGuardStopDeniesWhileHeld pins the stop rule AS REVISED (operator decision
+// 2026-08-03).
 //
 // A held cluster blocks `stop` exactly as a declared `type="human"` gate
-// awaiting approval does, which is H12's consistency argument applied in both
-// directions. Stopping requires resolving or abandoning — the harness surfaces
+// awaiting approval does, which is the run rollup's consistency argument
+// applied in both directions. Stopping requires resolving or abandoning — the harness surfaces
 // the open decision rather than stopping around it.
 func TestGuardStopDeniesWhileHeld(t *testing.T) {
 	conn := mustDB(t)
@@ -477,22 +477,23 @@ func TestGuardStopDeniesWhileHeld(t *testing.T) {
 		t.Fatal("guard stop ALLOWED while a held cluster was open. An earlier " +
 			"draft exempted it; the operator's decision is that a held cluster " +
 			"blocks stop exactly as a declared human gate does, because the " +
-			"materialized step is `pending` and §6.12 denies on any pending step.")
+			"materialized step is `pending` and guard stop denies on any pending step.")
 	}
-	// H11's SUBSTANCE, asserted against the predicate's own input rather than
-	// against the reason string — which names at most three instances, so a
-	// substring check would be testing the truncation.
+	// The denial's SUBSTANCE, asserted against the predicate's own input
+	// rather than against the reason string — which names at most three
+	// instances, so a substring check would be testing the truncation.
 	//
-	// The block comes from a `pending` human step under §6.12's EXISTING rule.
+	// The block comes from a `pending` human step under guard stop's EXISTING
+	// rule.
 	// There is no new exemption and no new rule: a held cluster blocks stop
 	// exactly as a declared human gate awaiting approval does.
 	held := heldStep(t, conn, "reconcile-held@0#0")
 	if !blocksStop(held.Status) {
-		t.Errorf("the materialized step is %q, which does not block stop; H11's "+
+		t.Errorf("the materialized step is %q, which does not block stop; the "+
 			"denial would then be coming from somewhere else", held.Status)
 	}
 
-	// H12: the run rollup is UNCHANGED — a held routing step is `gated` and its
+	// The run rollup is UNCHANGED — a held routing step is `gated` and its
 	// materialized step is `pending`, so the run stays `active`. Two kinds of
 	// open human decision that rolled up differently would be a bug waiting for
 	// a report to expose.
@@ -501,7 +502,7 @@ func TestGuardStopDeniesWhileHeld(t *testing.T) {
 		Scan(&status)
 	testsupport.Must(t, err, "reading the run: %v", err)
 	if status != "active" {
-		t.Errorf("the run is %q while held, want active (H12)", status)
+		t.Errorf("the run is %q while held, want active", status)
 	}
 
 	// And once resolved it stops blocking — so the denial above came from the
@@ -514,8 +515,8 @@ func TestGuardStopDeniesWhileHeld(t *testing.T) {
 	}
 }
 
-// blocksStop mirrors §6.12's pending-work set, so the assertion above is about
-// the same statuses `guard stop` queries rather than about its message.
+// blocksStop mirrors guard stop's pending-work set, so the assertion above is
+// about the same statuses `guard stop` queries rather than about its message.
 func blocksStop(status string) bool {
 	switch status {
 	case db.StepPending, db.StepClaimed, db.StepRunning, db.StepGated:
@@ -559,7 +560,7 @@ func TestNoHoldWhenNothingTrips(t *testing.T) {
 	}
 }
 
-// TestHeldStepsParticipateInCompletion is H19, proven rather than assumed:
+// TestHeldStepsParticipateInCompletion proves rather than assumes it:
 // `issueStepsComplete` groups by step_name and takes the highest ordinal per
 // name, so a materialized step neither blocks completion after it is resolved
 // nor is skipped while it is open.
@@ -581,9 +582,9 @@ func TestHeldStepsParticipateInCompletion(t *testing.T) {
 	}
 }
 
-// TestMaterializedStepResolvesFromThePinnedDefinition is H5: the synthesized
+// TestMaterializedStepResolvesFromThePinnedDefinition: the synthesized
 // spec is a PURE FUNCTION of the pinned bytes plus the reserved suffix, so
-// nothing unpinned enters a run and §9 item 5's determinism is untouched.
+// nothing unpinned enters a run and expansion stays deterministic.
 func TestMaterializedStepResolvesFromThePinnedDefinition(t *testing.T) {
 	def, err := workflow.Load([]byte(`
 [pipeline]
@@ -626,7 +627,7 @@ loop = true
 	if len(spec.After) != 0 || !spec.HasAfter() {
 		t.Error("the synthesized spec must declare `after = []` explicitly: an " +
 			"empty declared `after` is a ROOT declaration (V10), which is what " +
-			"H6 says this step is")
+			"this step is")
 	}
 	if len(spec.Gates) != 0 || len(spec.Threshold) != 0 {
 		t.Error("the synthesized spec declares gates or a threshold; it produces " +
@@ -650,11 +651,11 @@ loop = true
 	}
 }
 
-// TestLoopSupersedesAnOpenHold is H17 and H18 together.
+// TestLoopSupersedesAnOpenHold covers the sweep and re-instantiation together.
 //
-// H17: the materialized step is in its routing step's lineage, so a loop entry
+// The materialized step is in its routing step's lineage, so a loop entry
 // sweeps it — an open held question from a superseded ordinal must not survive
-// to block ordinal k+1. H18: re-instantiation never CREATES one, because
+// to block ordinal k+1. Re-instantiation never CREATES one, because
 // ExpandOrdinal walks the pinned definition and a materialized step is not in
 // it; a hold at ordinal k+1 happens only if that ordinal's computation trips
 // `hold_spread` again.
@@ -681,7 +682,7 @@ func TestLoopSupersedesAnOpenHold(t *testing.T) {
 			"the sweep", after.Status)
 	}
 
-	// H18: no held step at ordinal 1 — nothing has computed there yet.
+	// No held step at ordinal 1 — nothing has computed there yet.
 	var count int
 	err = conn.QueryRow(
 		`SELECT COUNT(*) FROM steps WHERE instance = 'reconcile-held@1'`).
@@ -689,12 +690,12 @@ func TestLoopSupersedesAnOpenHold(t *testing.T) {
 	testsupport.Must(t, err, "counting: %v", err)
 	if count != 0 {
 		t.Error("re-instantiation created a held step; ExpandOrdinal walks the " +
-			"PINNED definition, and a materialized step is not in it (H18)")
+			"PINNED definition, and a materialized step is not in it")
 	}
 }
 
-// TestUnresolvedHoldIsSweptByALoopEntry is H17's own case: an OPEN hold at a
-// superseded ordinal becomes `superseded`, terminal and event-logged.
+// TestUnresolvedHoldIsSweptByALoopEntry is the sweep's own case: an OPEN hold
+// at a superseded ordinal becomes `superseded`, terminal and event-logged.
 func TestUnresolvedHoldIsSweptByALoopEntry(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -718,17 +719,18 @@ func TestUnresolvedHoldIsSweptByALoopEntry(t *testing.T) {
 	testsupport.Must(t, err, "StepDefinitionsTx: %v", err)
 	routing, err := db.GetStepTx(tx, routingID)
 	testsupport.Must(t, err, "GetStepTx: %v", err)
-	swept, err := supersedeSweep(tx, routing, defs[routing.WorkflowID], 1, nowMS)
+	swept, err := supersedeSweep(tx, routing,
+		afterLoopDownstreamFor(defs[routing.WorkflowID], routing.StepName), 1, nowMS)
 	testsupport.Must(t, err, "supersedeSweep: %v", err)
 	if !contains(swept, "reconcile-held@0#0") {
 		t.Errorf("the sweep did not reach the materialized step: %v.\n\n"+
-			"H17: it is in its routing step's lineage, and an open held question "+
+			"It is in its routing step's lineage, and an open held question "+
 			"from a superseded ordinal must not survive to block ordinal k+1.",
 			swept)
 	}
 }
 
-// TestStaleLineageHoldIsInert is H20: the aggregate still records its artifact
+// TestStaleLineageHoldIsInert: the aggregate still records its artifact
 // and its `action_results` row — history is attributed — and it neither
 // materializes a held step nor gates anything, because nothing downstream of it
 // will run.
@@ -782,7 +784,7 @@ func TestStaleLineageHoldIsInert(t *testing.T) {
 		nil, &materialized)
 	if materialized != 0 {
 		t.Errorf("%d materialized steps from a STALE lineage; nothing "+
-			"downstream of it will run, so there is nothing to gate (H20)",
+			"downstream of it will run, so there is nothing to gate",
 			materialized)
 	}
 
@@ -844,7 +846,7 @@ func artifactPayloads(t *testing.T, conn *sql.DB, stepID int) [][]map[string]any
 	return out
 }
 
-// TestRoutingTransactionSpansFour is §6.4's "what does NOT move": the routing
+// TestRoutingTransactionSpansFour pins what does NOT move: the routing
 // stage is still ONE transaction over the step, the issue mirror, the run, and
 // the events — and adding the `held` branch did not split it.
 //
@@ -912,7 +914,7 @@ func TestRoutingTransactionSpansFour(t *testing.T) {
 // TestRetryRefusesOnAHoldRejectedPark is AC-1 and AC-2.
 //
 // A rejected hold routes the ROUTING step per its effective `on_fail`,
-// skipping the threshold (§7.7.3), and for the fixture that is
+// skipping the threshold, and for the fixture that is
 // `waiting-human`. `retry` cannot move that park: it resets the attempt
 // counter, and the attempt counter was never what blocked it — `heldDecision`
 // re-reads the same terminal `reconcile-held@0#0`, sees a non-pass routing, and
@@ -1057,8 +1059,8 @@ func TestRetryStillWorksOnAnOrdinaryPark(t *testing.T) {
 //
 // A run report showed ARTIFACT-71 and ARTIFACT-81 both as `findings` from
 // `reconcile@0` — same sha256, same 79 bytes — and the issue read it as a
-// duplicate write from dispatch close. It is NOT a duplicate: H13 records the
-// operator's resolution as its OWN artifact rather than annotating the
+// duplicate write from dispatch close. It is NOT a duplicate: approval records
+// the operator's resolution as its OWN artifact rather than annotating the
 // original, deliberately. DKT-70 added the `supersedes` pointer to say which
 // of the two records a computation and which records a decision; DKT-112 then
 // retired the shared hash itself — the sha256 now covers body AND payload, so
@@ -1079,8 +1081,8 @@ func TestResolutionArtifactSupersedesTheOriginal(t *testing.T) {
 	artifacts, err := db.ListStepArtifacts(conn, routing.ID)
 	testsupport.Must(t, err, "listing the routing step's artifacts: %v", err)
 	if len(artifacts) < 2 {
-		t.Fatalf("the routing step has %d artifacts; H13 records the resolution "+
-			"as its own record", len(artifacts))
+		t.Fatalf("the routing step has %d artifacts; approval records the "+
+			"resolution as its own record", len(artifacts))
 	}
 
 	original := artifacts[len(artifacts)-2]

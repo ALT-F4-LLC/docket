@@ -33,6 +33,7 @@ type PlanFilters struct {
 	Statuses   []string
 	Labels     []string
 	Priorities []string
+	Sizes      []string
 	Types      []string
 	Assignee   string
 	RootID     *int
@@ -53,6 +54,7 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 	statusSet := filter.ToStringSet(filters.Statuses)
 	labelSet := filter.ToStringSet(filters.Labels)
 	prioritySet := filter.ToStringSet(filters.Priorities)
+	sizeSet := filter.ToStringSet(filters.Sizes)
 	typeSet := filter.ToStringSet(filters.Types)
 
 	levels, err := TopoSort(dag)
@@ -92,6 +94,13 @@ func GeneratePlan(dag *DAG, filters PlanFilters) (*Plan, error) {
 			// Apply priority filter.
 			if len(prioritySet) > 0 {
 				if _, ok := prioritySet[string(issue.Priority)]; !ok {
+					continue
+				}
+			}
+
+			// Apply size filter.
+			if len(sizeSet) > 0 {
+				if _, ok := sizeSet[string(issue.Size)]; !ok {
 					continue
 				}
 			}
@@ -237,10 +246,10 @@ func priorityRank(p model.Priority) int { return PriorityRank(p) }
 // priority.
 //
 // It is exported for the engine's step-readiness ordering, which is "priority
-// then age" over the STEP's issue (engine-spec §2; TDD §6.3). The engine reuses
-// this function rather than defining its own so `next --run` and `next` cannot
-// disagree about what "higher priority" means — a second definition would drift
-// the first time a priority level was added or reordered.
+// then age" over the STEP's issue. The engine reuses this function rather than
+// defining its own so `next --run` and `next` cannot disagree about what
+// "higher priority" means — a second definition would drift the first time a
+// priority level was added or reordered.
 func PriorityRank(p model.Priority) int {
 	switch p {
 	case model.PriorityCritical:

@@ -16,6 +16,9 @@ var runStatusCmd = &cobra.Command{
 	Short: "Show a run, or list runs",
 	Long: `Show one run's status and step rollup, or list runs when given no ID.
 
+The list shows only runs that are not done or abandoned — the work an operator
+can still act on. ` + "`--all`" + ` widens it to every run the project has recorded.
+
 READ-ONLY. This verb computes effective status and WRITES NOTHING — status
 never lies just because nobody ran a scheduling command, and a read that
 mutated would make "I only looked at it" untrue.`,
@@ -38,9 +41,13 @@ type runStatusResult struct {
 	// replaced must warn before a conduct session attaches and dispatches
 	// anything, not after a wave discovers it from render CONFLICTs.
 	PinDrift []engine.PinVerdict `json:"pin_drift,omitempty"`
+	// ActivationHead is the checkout head the latest activation recorded
+	// (DKT-3310), so an operator reads it without the events verb. Absent
+	// when no activation recorded one.
+	ActivationHead *engine.ActivationHead `json:"activation_head,omitempty"`
 }
 
-// pinJSON is §11.4's `pins` element: `{path, sha256}` for a file pin, and the
+// pinJSON is the `pins` wire element: `{path, sha256}` for a file pin, and the
 // same shape carrying `name@version` for a workflow pin. `kind` distinguishes
 // them so a consumer never has to guess from the ref's shape.
 type pinJSON struct {
@@ -54,26 +61,45 @@ type pinJSON struct {
 // into it — the rollup is about the run, not part of it.
 func (r runStatusResult) VersionedPayload() any {
 	return struct {
-		Run      any                 `json:"run"`
-		Issues   int                 `json:"issues"`
-		Steps    []model.StatusCount `json:"steps,omitempty"`
-		Pins     []pinJSON           `json:"pins,omitempty"`
-		PinDrift []engine.PinVerdict `json:"pin_drift,omitempty"`
+		Run            any                    `json:"run"`
+		Issues         int                    `json:"issues"`
+		Steps          []model.StatusCount    `json:"steps,omitempty"`
+		Pins           []pinJSON              `json:"pins,omitempty"`
+		PinDrift       []engine.PinVerdict    `json:"pin_drift,omitempty"`
+		ActivationHead *engine.ActivationHead `json:"activation_head,omitempty"`
 	}{
-		Run:      model.VersionedRun{Run: *r.Run},
-		Issues:   r.Issues,
-		Steps:    r.Steps,
-		Pins:     r.Pins,
-		PinDrift: r.PinDrift,
+		Run:            model.VersionedRun{Run: *r.Run},
+		Issues:         r.Issues,
+		Steps:          r.Steps,
+		Pins:           r.Pins,
+		PinDrift:       r.PinDrift,
+		ActivationHead: r.ActivationHead,
 	}
 }
 
-// runListResult is a Collection (reliability-delta §4.1), so v2 renders
+// runListResult is a Collection, so v2 renders
 // {items, total, truncated}. Total comes from a COUNT(*) that ignores LIMIT.
 type runListResult struct {
 	Runs  []*model.Run `json:"runs"`
 	Total int          `json:"total"`
 	limit int
+}
+
+// newRunListResult builds the list result with an empty collection rendered as
+// `[]`, never `null`.
+//
+// db.ListRuns returns a nil slice when nothing matches, and encoding/json
+// renders a nil slice as `null`. The v2 Collection path never showed it — its
+// items go through runListPayload — but the v1 dialect marshals this struct
+// directly, so a project with no non-terminal run printed `"runs":null` and a
+// reader iterating `.data.runs[]` failed on it. `step list --issue` settled the
+// rule for an empty collection: it is `[]`, and the normalization lives where
+// the result is built so no marshaling path can miss it.
+func newRunListResult(runs []*model.Run, total, limit int) runListResult {
+	if runs == nil {
+		runs = []*model.Run{}
+	}
+	return runListResult{Runs: runs, Total: total, limit: limit}
 }
 
 func (r runListResult) CollectionItems() any { return runListPayload{runs: r.Runs} }
@@ -85,13 +111,13 @@ func (r runListResult) CollectionTruncated() bool {
 func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
 
-	activeOnly, _ := cmd.Flags().GetBool("active")
+	all, _ := cmd.Flags().GetBool("all")
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	if len(args) == 1 {
-		if activeOnly {
+		if all {
 			return cmdErr(
-				fmt.Errorf("--active filters a list; it does not apply to a single run"),
+				fmt.Errorf("--all widens a list; it does not apply to a single run"),
 				output.ErrValidation)
 		}
 		return showOneRun(cmd, args[0], w)
@@ -103,13 +129,13 @@ func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	runs, total, err := db.ListRuns(conn, db.RunListOptions{
 		ProjectID:  getProjectID(cmd),
-		ActiveOnly: activeOnly, Limit: limit,
+		ActiveOnly: !all, Limit: limit,
 	})
 	if err != nil {
 		return runErr(err)
 	}
 
-	result := runListResult{Runs: runs, Total: total, limit: limit}
+	result := newRunListResult(runs, total, limit)
 	var message string
 	if !w.JSONMode {
 		message = renderRunList(runs)
@@ -135,7 +161,7 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 	if err != nil {
 		return runErr(err)
 	}
-	// EFFECTIVE counts (§6.2), exactly as this verb's contract states — the
+	// EFFECTIVE counts, exactly as this verb's contract states — the
 	// same computation `step show`/`step list` render, so the rollup and a
 	// step read taken at the same moment cannot disagree (DKT-468). The raw
 	// GROUP BY this replaced counted a lapsed-lease claim as `claimed` while
@@ -149,7 +175,12 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	result := runStatusResult{Run: run, Issues: len(runIssues), Steps: steps}
+	head, err := engine.LatestActivationHead(conn, runID)
+	if err != nil {
+		return runErr(err)
+	}
+
+	result := runStatusResult{Run: run, Issues: len(runIssues), Steps: steps, ActivationHead: head}
 	for _, p := range pins {
 		result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
 	}
@@ -203,6 +234,13 @@ func renderRunStatus(r runStatusResult) string {
 		fmt.Fprintf(&b, "Request: %s\n", requestSummary(r.Run.Request))
 	}
 	fmt.Fprintf(&b, "Issues: %d\n", r.Issues)
+	if h := r.ActivationHead; h != nil {
+		if h.Branch != "" {
+			fmt.Fprintf(&b, "Activation head: %s (%s)\n", h.Commit, h.Branch)
+		} else {
+			fmt.Fprintf(&b, "Activation head: %s\n", h.Commit)
+		}
+	}
 
 	if len(r.Steps) > 0 {
 		var parts []string
@@ -253,7 +291,7 @@ func requestSummary(s string) string {
 }
 
 func init() {
-	runStatusCmd.Flags().Bool("active", false, "List only runs that are not done or abandoned")
+	runStatusCmd.Flags().Bool("all", false, "List every run, including done and abandoned ones")
 	runStatusCmd.Flags().Int("limit", 50, "Maximum number of results")
 	runCmd.AddCommand(runStatusCmd)
 }

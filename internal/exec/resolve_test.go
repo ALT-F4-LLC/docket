@@ -26,7 +26,8 @@ func plantBinary(t *testing.T, dir, name string) string {
 	return path
 }
 
-// TestArgv0NeverResolvesIntoTheRepoByName is T17 / §5.2.1's table.
+// TestArgv0NeverResolvesIntoTheRepoByName refuses every way a command name
+// can resolve to a binary inside the repository.
 //
 // Each row is a DISTINCT WAY IN, which is why the fix is worth a table rather
 // than a single case. The sentinel is what makes the refusal rows meaningful:
@@ -84,7 +85,7 @@ func TestArgv0NeverResolvesIntoTheRepoByName(t *testing.T) {
 		_ = planted
 	})
 
-	// (b) THE SAME BINARY trusted by its ABSOLUTE PATH runs (R4). The escape
+	// (b) THE SAME BINARY trusted by its ABSOLUTE PATH runs. The escape
 	//     hatch is proven OPEN, so repo-owned scripts stay usable: the operator
 	//     trusted THAT FILE, not a name that happened to resolve to it.
 	t.Run("b_absolute_path_entry_is_permitted", func(t *testing.T) {
@@ -116,7 +117,7 @@ func TestArgv0NeverResolvesIntoTheRepoByName(t *testing.T) {
 	})
 
 	// (c) A PATH directory OUTSIDE the repo holding a SYMLINK into the repo.
-	//     R1's one-indirection variant: resolving symlinks is required, not
+	//     The one-indirection variant: resolving symlinks is required, not
 	//     cosmetic — a check on the unresolved path would wave this through.
 	t.Run("c_symlink_from_outside_PATH_into_the_repo_is_refused", func(t *testing.T) {
 		repo := realTempDir(t)
@@ -138,7 +139,7 @@ func TestArgv0NeverResolvesIntoTheRepoByName(t *testing.T) {
 		}
 	})
 
-	// (d) A repo root reached THROUGH A SYMLINK is still refused (R2): the
+	// (d) A repo root reached THROUGH A SYMLINK is still refused: the
 	//     same normalization runs on both sides, so a symlinked checkout does
 	//     not defeat the comparison.
 	t.Run("d_symlinked_repo_root_is_still_refused", func(t *testing.T) {
@@ -226,7 +227,8 @@ func realTempDir(t *testing.T) string {
 	return dir
 }
 
-// TestArgv0IsNotResolvedAgainstTheWorkingDirectory is T15.
+// TestArgv0IsNotResolvedAgainstTheWorkingDirectory refuses a command name
+// that resolves against the working directory.
 //
 // A repo that ships ./make must not win. Go's exec.ErrDot exists precisely for
 // this, and the runner treats it as a HARD REFUSAL rather than something to
@@ -277,17 +279,17 @@ func TestResolveRefusesAnEmptyOrMissingCommand(t *testing.T) {
 	}
 }
 
-// TestContainmentCheckIsUnconditional is R5: the check applies to named gates,
-// fence gates, and pre-gates alike, because it lives in Resolve and there is
-// only one Resolve. A path that skipped it would have to be a second
-// resolution function, and there is not one.
+// TestContainmentCheckIsUnconditional proves the containment check applies to
+// named gates, fence gates, and pre-gates alike, because it lives in Resolve
+// and there is only one Resolve. A path that skipped it would have to be a
+// second resolution function, and there is not one.
 func TestContainmentCheckIsUnconditional(t *testing.T) {
 	code := codeWithoutComments(t, "resolve.go")
 
 	// LookPath is called exactly once in the package, inside Resolve, and the
 	// containment test follows it. Two call sites would be two policies.
 	if n := strings.Count(code, "LookPath"); n != 1 {
-		t.Errorf("LookPath appears %d times in resolve.go; there must be exactly one resolution path (R5)", n)
+		t.Errorf("LookPath appears %d times in resolve.go; there must be exactly one resolution path", n)
 	}
 
 	for _, other := range []string{"run.go", "flaky.go"} {

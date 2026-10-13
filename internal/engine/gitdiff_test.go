@@ -64,7 +64,7 @@ func writeFile(t *testing.T, dir, rel, body string) {
 	testsupport.Must(t, err, "writing %s: %v", rel, err)
 }
 
-// inRepo runs GitDiff against the repo BY DIRECTORY — the G7 fix's shape: the
+// inRepo runs GitDiff against the repo BY DIRECTORY — the fix's shape: the
 // engine passes the recorded worktree (or the invoking checkout's root), so
 // the diff never depends on the process cwd. The cwd stays wherever the test
 // harness put it, which is itself part of what this asserts.

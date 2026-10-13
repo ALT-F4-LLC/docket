@@ -107,7 +107,7 @@ func GetIssueFiles(db *sql.DB, issueID int) ([]string, error) {
 }
 
 // scanFilePath scans a single file_path column. Shared by GetIssueFiles and
-// queryFilePaths (*sql.DB and *sql.Tx read the same shape).
+// GetIssueFilesTx (*sql.DB and *sql.Tx read the same shape).
 func scanFilePath(r *sql.Rows) (string, error) {
 	var fp string
 	if err := r.Scan(&fp); err != nil {
@@ -126,7 +126,7 @@ func SetIssueFiles(db *sql.DB, issueID int, filePaths []string, changedBy string
 	defer tx.Rollback()
 
 	// Get old files for activity logging.
-	oldFiles, err := queryFilePaths(tx, issueID)
+	oldFiles, err := GetIssueFilesTx(tx, issueID)
 	if err != nil {
 		return err
 	}
@@ -228,18 +228,23 @@ func ListAllIssueFileMappings(db *sql.DB, projectID int) ([]model.IssueFileMappi
 	return mappings, nil
 }
 
-// queryFilePaths returns file paths for an issue within a transaction.
-func queryFilePaths(tx *sql.Tx, issueID int) ([]string, error) {
+// GetIssueFilesTx is GetIssueFiles inside a transaction: the issue's attached
+// paths sorted by file_path. The result is never nil; an issue with no
+// attachments yields an empty slice, so callers can encode it as a JSON [].
+func GetIssueFilesTx(tx *sql.Tx, issueID int) ([]string, error) {
 	rows, err := tx.Query(
 		`SELECT file_path FROM issue_files WHERE issue_id = ? ORDER BY file_path`,
 		issueID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("querying existing files: %w", err)
+		return nil, fmt.Errorf("querying issue files: %w", err)
 	}
-	files, err := scanRows(rows, "file rows", scanFilePath)
+	files, err := scanRows(rows, "issue files", scanFilePath)
 	if err != nil {
 		return nil, err
+	}
+	if files == nil {
+		files = []string{}
 	}
 	return files, nil
 }

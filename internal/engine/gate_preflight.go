@@ -56,16 +56,26 @@ type GatePreflight struct {
 	// check — an operator reading a green preflight should not have to open the
 	// trust store to learn which they have.
 	Stub bool `json:"stub,omitempty"`
+	// StubReason is the resolving entry's recorded reason for being a stub —
+	// why the decision was made and which issue tracks replacing it (DKT-607).
+	// It rides here so the documented decision is discoverable from the
+	// preflight itself, not only from a tribunal transcript or the trust file.
+	// Empty when the entry recorded none, which the renderer calls out.
+	StubReason string `json:"stub_reason,omitempty"`
 	// Reason explains an unmatched gate, verbatim from the matcher, so the
 	// preflight and the mid-run diagnostic say the same thing.
 	Reason string `json:"reason,omitempty"`
+	// Warning is the matcher's warning for a matched gate, verbatim: today an
+	// entry with an absolute argv[0] and no content pin, which runs whatever
+	// that file holds when the gate fires.
+	Warning string `json:"warning,omitempty"`
 }
 
 // BuildGatePreflight resolves every gate the run's bound workflows declare
 // against the trust store.
 //
 // The store is read ONCE for the whole report, the same snapshot discipline
-// §7.2 M1 applies at the gate and the fence report applies to itself: a report
+// the runner applies at the gate and the fence report applies to itself: a report
 // assembled from several reads could disagree with itself mid-render.
 //
 // A gate is looked up BY NAME WITH A NIL ARGV, which is exactly what
@@ -74,9 +84,23 @@ type GatePreflight struct {
 // argv check happens at spawn against the entry's own argv, and a preflight
 // that pretended to settle it would tell an operator a gate is ready when it is
 // not, which is worse than saying nothing.
+//
+// Declared files are checked under the invocation's exec root: no step has a
+// worktree yet at activation, so that is the tree a gate would run in. A step
+// worktree that later differs is caught by the spawn-time check, not here.
 func BuildGatePreflight(
 	defs map[int]*workflow.Definition,
 	loadStore func() (*trust.Store, error), identityPath string,
+) ([]GatePreflight, error) {
+	return buildGatePreflightAt(defs, loadStore, identityPath, resolvePaths().ExecRoot)
+}
+
+// buildGatePreflightAt is BuildGatePreflight with the exec root explicit.
+// identityPath is what entries bind to; execRoot is where declared files are
+// hashed. The two differ under a global store and must never be swapped.
+func buildGatePreflightAt(
+	defs map[int]*workflow.Definition,
+	loadStore func() (*trust.Store, error), identityPath, execRoot string,
 ) ([]GatePreflight, error) {
 	// Gate name -> the workflows declaring it. A map because one gate is
 	// commonly declared by several steps of several workflows, and an operator
@@ -124,11 +148,12 @@ func BuildGatePreflight(
 		case identityErr != nil:
 			row.Reason = fmt.Sprintf("the repo path could not be resolved: %v", identityErr)
 		default:
-			m := store.Lookup(identity, name, nil)
+			m := store.LookupAt(identity, name, nil, execRoot)
 			if m.Matched {
-				row.Matched = true
+				row.Matched, row.Warning = true, m.Warning
 				if m.Entry != nil {
-					row.Entry, row.Stub = m.Entry.Name, m.Entry.Stub
+					row.Entry, row.Stub, row.StubReason =
+						m.Entry.Name, m.Entry.Stub, m.Entry.StubReason
 				}
 			} else {
 				row.Reason = m.Reason
@@ -160,6 +185,10 @@ func sortedKeys(set map[string]bool) []string {
 // run, so it is not a warning — but "secret-scan will execute /usr/bin/true"
 // is a fact about this run's assurance that belongs beside the roster the
 // operator is approving (DKT-265).
+//
+// A gate whose match carries a warning gets its own `warning:` line, whether
+// or not it is also a stub: it resolves and will run, but the operator has
+// something to act on before it does.
 func RenderGatePreflight(w interface{ Write([]byte) (int, error) }, rows []GatePreflight) {
 	var missing, stubs []GatePreflight
 	for _, r := range rows {
@@ -191,9 +220,35 @@ func RenderGatePreflight(w interface{ Write([]byte) (int, error) }, rows []GateP
 		fmt.Fprintf(w,
 			"\nnote: %d declared gate(s) resolve to a STUB entry and will measure nothing:\n",
 			len(stubs))
+		// A stub WITH a recorded reason is a documented decision, printed where
+		// the stub itself is printed (DKT-607) — the decision must be
+		// discoverable here, not only in a tribunal transcript. One WITHOUT a
+		// reason gets the remedy line below, because a stub nobody can explain
+		// from this output is indistinguishable from a placeholder somebody
+		// forgot.
+		unexplained := false
 		for _, r := range stubs {
 			fmt.Fprintf(w, "  %s  (entry %s)\n",
 				exec.Render(r.Gate), exec.Render(r.Entry))
+			if r.StubReason != "" {
+				fmt.Fprintf(w, "      stub reason: %s\n", exec.Render(r.StubReason))
+			} else {
+				unexplained = true
+			}
+		}
+		if unexplained {
+			fmt.Fprintf(w,
+				"  A stub without a recorded reason: say why and what tracks fixing it with "+
+					"`docket trust rm <name>` then `docket trust add <name> -- <argv> --stub "+
+					"--stub-reason \"<why; tracking issue>\"`.\n")
+		}
+	}
+
+	for _, r := range rows {
+		if r.Matched && r.Warning != "" {
+			fmt.Fprintf(w, "\nwarning: declared gate %s (declared by %s) resolves with a warning:\n",
+				exec.Render(r.Gate), exec.Render(joinList(r.Workflows)))
+			fmt.Fprintf(w, "      %s\n", exec.Render(r.Warning))
 		}
 	}
 }
@@ -222,7 +277,8 @@ func buildGatePreflightTx(tx *sql.Tx, runID int) ([]GatePreflight, error) {
 	if err != nil {
 		return nil, err
 	}
-	return BuildGatePreflight(defs, trust.Load, resolvePaths().Identity)
+	paths := resolvePaths()
+	return buildGatePreflightAt(defs, trust.Load, paths.Identity, paths.ExecRoot)
 }
 
 // HoldPolicy is who will answer a hold this run mints (DKT-266).

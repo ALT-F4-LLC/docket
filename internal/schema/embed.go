@@ -7,9 +7,9 @@ import (
 	"fmt"
 )
 
-// AggregateName and AggregateVersion identify the one schema Docket ships
-// (§7.6). It is the ONLY builtin: everything else in the registry got there
-// because a user registered it.
+// AggregateName and AggregateVersion identify the one schema Docket ships. It
+// is the ONLY builtin: everything else in the registry got there because a
+// user registered it.
 const (
 	AggregateName    = "aggregate"
 	AggregateVersion = 1
@@ -22,10 +22,10 @@ const (
 // is embedded rather than read from disk so a run's validation cannot depend on
 // a file an operator can edit.
 //
-// It NAMES NO INSTANCE TOKEN (E2). It cannot: the reduced value's key is the
+// It NAMES NO INSTANCE TOKEN. It cannot: the reduced value's key is the
 // author's field, which is exactly why `additionalProperties` is true. The
-// genericity gate scans it, per §1.1.1, as the first embedded `*.json` core
-// surface — every byte of a shipped schema is read by the first user who runs
+// genericity gate scans it as the first embedded `*.json` core surface —
+// every byte of a shipped schema is read by the first user who runs
 // `docket schema show aggregate@1`.
 //
 //go:embed schemas/aggregate@1.json

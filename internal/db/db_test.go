@@ -328,7 +328,7 @@ func TestDB_PinnedToSingleConnection(t *testing.T) {
 
 	if got := db.Stats().MaxOpenConnections; got != 1 {
 		t.Errorf("MaxOpenConnections = %d, want 1 "+
-			"(load-bearing for the single-writer invariant — see TDD §5.4)", got)
+			"(load-bearing for the single-writer invariant)", got)
 	}
 }
 

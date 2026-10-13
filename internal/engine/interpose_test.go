@@ -9,8 +9,8 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// Threshold interposition (DKT-38, engine-spec §11.2): a step named as a
-// `threshold` step-name routing target is a GATE the routing chooses — it
+// Threshold interposition (DKT-38): a step named as a `threshold` step-name
+// routing target is a GATE the routing chooses — it
 // becomes ready only when a routing predecessor's recorded routing names it,
 // and a routing that resolves anywhere else terminalizes it `skipped` in the
 // same transaction. Before this, the target behaved as an ordinary `after`

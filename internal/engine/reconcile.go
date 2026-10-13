@@ -11,7 +11,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The issue mirror and the run rollup — the second and third quarters of §6.8's
+// The issue mirror and the run rollup — the second and third quarters of the
 // routing transaction ("update step, issue mirror, run, events — ONE
 // transaction spanning all four").
 //
@@ -38,11 +38,23 @@ import (
 // reconcileIssueAndRun updates the issue and the run after a step routes,
 // INSIDE the caller's routing transaction. `spec` is the routed step's pinned
 // spec (nil when the caller has none), consulted for its threshold's
-// interposed targets and nothing else.
-func reconcileIssueAndRun(tx *sql.Tx, step *db.Step, spec *workflow.Step, routing string, nowMS int64) error {
+// interposed targets and nothing else; `def` is the issue's pinned definition
+// (nil likewise), consulted for the `after_fired` cascade and nothing else.
+func reconcileIssueAndRun(
+	tx *sql.Tx, step *db.Step, def *workflow.Definition, spec *workflow.Step,
+	routing string, nowMS int64,
+) error {
 	// BEFORE the completion check: an unrouted gate left `pending` is exactly
 	// what issueStepsComplete must not still be counting (DKT-38).
 	if err := skipUnroutedTargets(tx, step, spec, routing, nowMS); err != nil {
+		return err
+	}
+	// And the `after_fired` cascade behind whatever this transaction skipped
+	// (DKT-1085) — the gate above, an `on_fail = "skip"` routing, an operator's
+	// `--as skip` — for the same reason and in the same place: a successor left
+	// `pending` is exactly what the completion check must not still count, and
+	// "skipped in the same transaction as the gate" is the whole contract.
+	if _, err := propagateAfterFiredSkips(tx, step.RunID, step.IssueID, def, nowMS); err != nil {
 		return err
 	}
 
@@ -74,8 +86,7 @@ func reconcileIssueAndRun(tx *sql.Tx, step *db.Step, spec *workflow.Step, routin
 	}
 
 	// The issue's own completion is evaluated over HIGHEST-ORDINAL INSTANCES
-	// ONLY (§11.3), which phase 4's loops make a real distinction rather than
-	// the trivial one it was at S3.
+	// ONLY, which loops make a real distinction rather than a trivial one.
 	complete, err := issueStepsComplete(tx, step.RunID, step.IssueID)
 	if err != nil {
 		return err
@@ -105,7 +116,7 @@ func reconcileIssueAndRun(tx *sql.Tx, step *db.Step, spec *workflow.Step, routin
 // is still open (a later sibling may route to the target), and that sibling's
 // own reconcile re-runs this check. Only `done` siblings' routings count as
 // having routed-to: an on_fail routing never produces `done` naming a target,
-// and a superseded lineage's late routing is inert by §7.3 (3) — the same two
+// and a superseded lineage's late routing is inert — the same two
 // readings routedTo makes, so the latch and the skip cannot disagree.
 //
 // A `retry` resolution reads as a non-terminal sibling (the row returned to
@@ -117,7 +128,7 @@ func skipUnroutedTargets(
 	if spec == nil {
 		return nil
 	}
-	targets := workflow.ThresholdTargets(spec.Threshold)
+	targets := workflow.InterposedTargets(spec)
 	if len(targets) == 0 {
 		return nil
 	}
@@ -316,7 +327,7 @@ func reflectIssueStatus(tx *sql.Tx, step *db.Step, routing string, nowMS int64) 
 //
 //  2. Any non-terminal MATERIALIZED step — an open hold (DKT-380). A held step
 //     is minted `type=human` and `pending`, never `waiting-human`, and its
-//     routing step sits `gated` (H8) so nothing downstream of it can advance.
+//     routing step sits `gated` so nothing downstream of it can advance.
 //     The issue is blocked on a human by construction: the hold exists
 //     precisely because the computation refused to decide. Counting the status
 //     alone left the whole fixture's hold path reading `in-progress`, which is
@@ -394,7 +405,7 @@ func issueAwaitingDecisionTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool,
 }
 
 // issueStepsComplete reports whether every step of an issue has reached a
-// terminal status — evaluated over HIGHEST-ORDINAL INSTANCES ONLY (§11.3).
+// terminal status — evaluated over HIGHEST-ORDINAL INSTANCES ONLY.
 //
 // `waiting-human` is NOT terminal here and must not be: an issue parked on an
 // operator's decision is not finished, and treating it as such would let a run
@@ -411,7 +422,7 @@ func issueAwaitingDecisionTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool,
 // blocking completion. `commit-gate@0` left `superseded` by a loop entry is not
 // the highest instance of `commit-gate` once `commit-gate@1` exists, so it is
 // not consulted; and were it consulted, `superseded` is terminal anyway. Both
-// halves of §11.3's completion rule — ignore lower ordinals, and prior
+// halves of the completion rule — ignore lower ordinals, and prior
 // instances stay immutable and addressable — fall out of the same query.
 func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
 	var pending int
@@ -434,17 +445,28 @@ func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
 // completeIssue moves an issue to `done` through the SAME column and the same
 // activity trail an ordinary `issue close` writes.
 //
-// `updated_at` stays RFC3339 TEXT — the never-mutate rule (reliability-delta
-// §2.1). Rewriting it to epoch-ms would change what every existing verb emits
-// and break §9 item 8, which is why v7's own timestamps are separate `_ms`
-// columns rather than a migration of this one.
+// `updated_at` stays RFC3339 TEXT — the never-mutate rule. Rewriting it to
+// epoch-ms would change what every existing verb emits, which is why v7's own
+// timestamps are separate `_ms` columns rather than a migration of this one.
+//
+// The transition clears `resolution`: an `abandoned` left by an earlier run no
+// longer describes an issue this run finished. The `status != done` guard keeps
+// an abandonment recorded AFTER completion (DKT-245) from being erased.
 func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
 
+	prior, resolution, err := db.IssueStatusResolutionTx(tx, step.IssueID)
+	if err != nil {
+		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)
+	}
+	if db.DoneTransitionClearsResolution(prior, model.StatusDone, false) {
+		resolution = ""
+	}
+
 	res, err := tx.Exec(
-		`UPDATE issues SET status = ?, updated_at = ?, version = version + 1
+		`UPDATE issues SET status = ?, resolution = ?, updated_at = ?, version = version + 1
 		  WHERE id = ? AND status != ?`,
-		model.StatusDone, now, step.IssueID, model.StatusDone,
+		model.StatusDone, resolution, now, step.IssueID, model.StatusDone,
 	)
 	if err != nil {
 		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)
@@ -460,7 +482,7 @@ func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	_, err = tx.Exec(
 		`INSERT INTO activity_log (issue_id, field_changed, old_value, new_value, changed_by, created_at)
 		 VALUES (?, 'status', ?, ?, '', ?)`,
-		step.IssueID, model.StatusInProgress, model.StatusDone, now,
+		step.IssueID, prior, model.StatusDone, now,
 	)
 	if err != nil {
 		return fmt.Errorf("recording completion of %s: %w", model.FormatID(step.IssueID), err)
@@ -469,7 +491,7 @@ func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 		fmt.Sprintf("%s completed the issue.", step.Instance), nowMS)
 }
 
-// abandonIssue is the `abandon-issue` routing (§11.1): the issue leaves the run
+// abandonIssue is the `abandon-issue` routing: the issue leaves the run
 // unfinished, with the reason recorded.
 //
 // The issue's own status is NOT forced to a terminal value. `abandon-issue`
@@ -505,11 +527,11 @@ func abandonIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 		model.FormatID(step.IssueID), step.Instance))
 	_, err := tx.Exec(
 		`UPDATE steps
-		    SET status = ?, routing = ?, updated_at_ms = ?,
+		    SET status = ?, routing = ?, updated_at_ms = ?, recorded_at_ms = ?,
 		        row_version = row_version + 1
 		  WHERE run_id = ? AND issue_id = ? AND id != ?
 		    AND status NOT IN (?, ?, ?, ?)`,
-		db.StepFailedRouted, cascade, nowMS, step.RunID, step.IssueID, step.ID,
+		db.StepFailedRouted, cascade, nowMS, nowMS, step.RunID, step.IssueID, step.ID,
 		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
 	)
 	if err != nil {
@@ -544,27 +566,51 @@ func abandonIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 }
 
 // reconcileRun rolls the run up: `done` when every step is terminal,
-// `waiting-human` when any step is parked on a decision.
+// `waiting-human` when a park on a decision is all that is left.
 //
-// The ORDER of the two checks matters. A run with one parked step and every
+// A PARK IS THE ISSUE'S, NOT THE RUN'S. A step parked `waiting-human` holds
+// its own issue (R2b, ready.go) and nothing else: while any other issue still
+// has unfinished steps the run stays `active` and keeps offering them. The
+// run reads `waiting-human` only once every unfinished step belongs to a
+// parked issue — the moment there is genuinely nothing a claimant could take.
+// Before this, one step's park rolled up to the run and R1 refused every
+// claim: RUN-90 parked eleven times, each on a single issue's verify, and
+// 1372 of its 1656 dispatched rows never launched. Unexpanded issues are
+// deliberately NOT counted as unparked work: an issue expands when its
+// predecessors complete, so one still unexpanded is waiting on unfinished
+// work that this count already covers, or on a parked issue, and neither is
+// a row anyone could claim.
+//
+// The ORDER of the checks matters. A run with one parked step and every
 // other step finished is NOT done — it is waiting — so the park is checked
 // first. Checking `done` first would let a run whose last unfinished step is
-// parked read as complete, which is the failure mode §6.12's `guard stop`
+// parked read as complete, which is the failure mode `guard stop`
 // exists to catch and should never have to.
 func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 	var (
 		parked     int
 		unfinished int
+		// unparkedWork is the unfinished steps of issues holding no parked
+		// step: exactly the rows R2b still admits while a park stands.
+		unparkedWork int
 	)
 	err := tx.QueryRow(
 		`SELECT
 		   SUM(CASE WHEN status = ? THEN 1 ELSE 0 END),
-		   SUM(CASE WHEN status NOT IN (?, ?, ?, ?) THEN 1 ELSE 0 END)
+		   SUM(CASE WHEN status NOT IN (?, ?, ?, ?) THEN 1 ELSE 0 END),
+		   COALESCE(SUM(CASE WHEN status NOT IN (?, ?, ?, ?, ?)
+		                      AND issue_id NOT IN (
+		                        SELECT issue_id FROM steps
+		                         WHERE run_id = ? AND status = ?)
+		                     THEN 1 ELSE 0 END), 0)
 		 FROM steps WHERE run_id = ?`,
 		db.StepWaitingHuman,
 		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		db.StepWaitingHuman,
+		runID, db.StepWaitingHuman,
 		runID,
-	).Scan(&parked, &unfinished)
+	).Scan(&parked, &unfinished, &unparkedWork)
 	if err != nil {
 		return fmt.Errorf("rolling up run %s: %w", model.FormatRunID(runID), err)
 	}
@@ -582,7 +628,7 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 	}
 
 	switch {
-	case parked > 0:
+	case parked > 0 && unparkedWork == 0:
 		return setRunStatusTx(tx, runID, model.RunWaitingHuman, EventRunPaused, nowMS)
 	case unfinished == 0 && unexpanded == 0:
 		// A run-level park does NOT hold this branch, and the guard below is
@@ -594,9 +640,11 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 		// is that no FURTHER work starts, which R1 and the guard below deliver.
 		return setRunStatusTx(tx, runID, model.RunDone, EventRunDone, nowMS)
 	default:
-		// Still working. A run previously parked and now unblocked returns to
-		// `active` — otherwise resolving the park would leave the run in
-		// `waiting-human` forever and R1 would refuse every remaining step.
+		// Still working — including a run whose parked steps sit beside other
+		// issues' unfinished work, which lands here rather than above. A run
+		// previously parked and now unblocked returns to `active` — otherwise
+		// resolving the park would leave the run in `waiting-human` forever
+		// and R1 would refuse every remaining step.
 		//
 		// EXCEPT when the park was decided at the RUN LEVEL rather than by a
 		// step. `parked` above counts STEPS, and a run-level pause parks none:
@@ -621,10 +669,10 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 		//
 		// Ending a run-level park is an OPERATOR decision — `run resume`, or
 		// for a breach a cap raise via `run budget --set` that resolves it and
-		// releases the hold with it (DKT-80, docs/tdd/runs-dispatch.md
-		// B24/B25/B26) — and this automatic rollup must not make that decision
-		// on the run's behalf. A run currently at `waiting-human` with an
-		// origin therefore stays parked here: no status write, no event.
+		// releases the hold with it (DKT-80) — and this automatic rollup must
+		// not make that decision on the run's behalf. A run currently at
+		// `waiting-human` with an origin therefore stays parked here: no status
+		// write, no event.
 		//
 		// A STEP-parked run is untouched by this. Its origin is empty, the
 		// `parked > 0` case above wrote its pause, and resolving the park
@@ -653,8 +701,8 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 //
 // The no-op guard is what keeps the event ledger meaningful: without it, every
 // step completion in a long run would emit a `run-resumed` for a run that never
-// paused, and §9 item 2's "every transition is attributable" would be checking
-// a table of non-transitions.
+// paused, and the rule that "every transition is attributable" would be
+// checking a table of non-transitions.
 func setRunStatusTx(
 	tx *sql.Tx, runID int, status model.RunStatus, event string, nowMS int64,
 ) error {

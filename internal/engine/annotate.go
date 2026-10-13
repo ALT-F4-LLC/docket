@@ -22,7 +22,7 @@ import (
 // a FINISHED step's metadata, event-logged, no token — the lease retired with
 // the artifact, and this is an operator-side act about the record, not a
 // completion. The bag is opaque to core exactly as `--metadata` at complete
-// is (genericity.md): the engine stores what it is handed and interprets no
+// is: the engine stores what it is handed and interprets no
 // key inside it.
 
 // AnnotateStep merges opaque metadata onto a finished step's record.

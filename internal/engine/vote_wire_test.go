@@ -40,8 +40,8 @@ func TestVoteStepRowCarriesVotersAndProposal(t *testing.T) {
 
 	driveToReconcile(t, conn, e, clusteredPayload)
 
-	// The FIRST answer already carries the proposal: this call is the one that
-	// opens it (§8.1 phase 2), and reporting it a poll later would show a vote
+	// opens it, and reporting it a poll later would show a vote with no ballot
+	// to cast on.
 	// with no ballot to cast on.
 	row := voteRow(t, nextRun(t, conn, e).Steps, "reconcile-held@0#0")
 	if row.Kind != workflow.TypeVote {

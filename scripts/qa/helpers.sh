@@ -25,17 +25,17 @@ setup() {
   export DOCKET_PATH="$QA_DIR/db"
   mkdir -p "$DOCKET_PATH"
 
-  # THE SANDBOX RULE (gates-trust §9.5 SB2). Every QA section inherits a
-  # throwaway XDG_CONFIG_HOME, whether or not it touches the trust store, so a
-  # section added later CANNOT FORGET. Without it, `docket trust add` in any
-  # section would write entries into the operator's own
-  # ~/.config/docket/trust.toml — a QA run that modifies the machine it is
-  # auditing, which is the failure SB5 aborts on rather than skips.
+  # THE SANDBOX RULE. Every QA section inherits a throwaway XDG_CONFIG_HOME,
+  # whether or not it touches the trust store, so a section added later CANNOT
+  # FORGET. Without it, `docket trust add` in any section would write entries
+  # into the operator's own ~/.config/docket/trust.toml — a QA run that modifies
+  # the machine it is auditing, which is the failure assert_trust_sandbox
+  # aborts on rather than skips.
   export XDG_CONFIG_HOME="$QA_DIR/xdg"
   mkdir -p "$XDG_CONFIG_HOME"
 }
 
-# assert_trust_sandbox is SB5: a HARD ABORT, not a skip, when the trust sandbox
+# assert_trust_sandbox is a HARD ABORT, not a skip, when the trust sandbox
 # is not in force.
 #
 # It is an abort because the failure mode is not a missing test result — it is a
@@ -44,7 +44,7 @@ setup() {
 assert_trust_sandbox() {
   if [ -z "${XDG_CONFIG_HOME:-}" ]; then
     printf "FATAL: XDG_CONFIG_HOME is unset; refusing to run a trust section\n" >&2
-    printf "       against the operator's real trust store (§9.5 SB5).\n" >&2
+    printf "       against the operator's real trust store.\n" >&2
     exit 1
   fi
   case "$XDG_CONFIG_HOME" in
@@ -52,7 +52,7 @@ assert_trust_sandbox() {
     *)
       printf "FATAL: XDG_CONFIG_HOME (%s) is not under QA_DIR (%s);\n" \
         "$XDG_CONFIG_HOME" "$QA_DIR" >&2
-      printf "       refusing to run a trust section against it (§9.5 SB5).\n" >&2
+      printf "       refusing to run a trust section against it.\n" >&2
       exit 1
       ;;
   esac
@@ -97,6 +97,27 @@ run_stdin() {
   CMD_STDOUT=$(cat "$tmpout")
   CMD_STDERR=$(cat "$tmperr")
   rm -f "$tmpout" "$tmperr"
+}
+
+# The conductor capability (DKT-2465): the seven operator verbs — step
+# approve/reject/resolve/reap, run pause/resume/abandon — require the run's
+# token on a bound run, and every run this binary activates is bound at
+# birth. A section that drives a run through those verbs holds the token the
+# way a conductor session does.
+#
+# activation_token — the token the LAST run_env activation returned, read
+# from its envelope (`conductor_token`, a first activation only).
+activation_token() {
+  printf '%s' "$CMD_STDOUT" | jq -r '.data.conductor_token // empty'
+}
+
+# conductor_of DIR RUN-N — take the run's seat the way a fresh session does
+# and print the fresh token. It records a `conductor-seated` event, so a
+# section asserting an exact event sequence captures the activation's token
+# instead.
+conductor_of() {
+  local dp="$1" run="$2"
+  DOCKET_PATH="$dp" "$DOCKET" run conduct "$run" --json=v2 2>/dev/null | jq -r '.data.token'
 }
 
 # Run with a custom DOCKET_PATH.

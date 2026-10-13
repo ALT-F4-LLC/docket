@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #
-# ZJ — DISPATCH, `next`'s REFUSAL, AND THE WRITE-REAP ACKNOWLEDGMENT
-# (runs-dispatch §5, §6, §9.2).
+# ZJ — DISPATCH, `next`'s REFUSAL, AND THE WRITE-REAP ACKNOWLEDGMENT.
 #
-# TWO HEADLINES, both engine-spec §9 acceptance criteria, verbatim:
+# TWO HEADLINES, both engine acceptance criteria, verbatim:
 #
 #   9. Dispatch recovery: kill the relay with a dispatch open — TTL auto-abandon
 #      (or an explicit `dispatch abandon`) restores `next`; nothing is lost or
@@ -13,22 +12,22 @@
 #      reap is acknowledged.
 #
 # Item 9 is executed LITERALLY, BOTH ARMS: arm A recovers through the TTL, arm B
-# through the explicit verb. Item 10's gate half was proven at S4 (gates-trust
-# §9.2); the reap half is here, which completes it.
+# through the explicit verb. Item 10's gate half was proven at stage 4; the
+# reap half is here, which completes it.
 #
-# "THE CLOCK ADVANCED" IS NOT A `sleep` (§5.9). The section sets `dispatch.ttl`
+# "THE CLOCK ADVANCED" IS NOT A `sleep`. The section sets `dispatch.ttl`
 # and the lease TTL to small values through `docket config` and drives the clock
 # by CONFIGURATION rather than by waiting — following the repo's existing
 # TTL-flake discipline. Nothing here sleeps.
 #
-# THE STRANGER TEST (§1.1). The fixture is a print shop: two press operators who
+# THE STRANGER TEST. The fixture is a print shop: two press operators who
 # must not run the press at the same time, and two proofreaders who may work in
 # parallel. `[limits] press = { max = 1 }` is the whole of the serialization, and
 # what "write-class" means to core is exactly "a class the author bounded". No
 # model, no agent, no token — a batch dispatcher is a person or a script that
 # starts workers, and this section reads as a shop-floor recovery drill.
 #
-# The section also carries the GROUP-2 DORMANCY proof (§3): a run that never
+# The section also carries the GROUP-2 DORMANCY proof: a run that never
 # opens a dispatch, and never reaps a bounded class, behaves exactly as group 1's.
 
 test_zj_dispatch() {
@@ -43,10 +42,10 @@ test_zj_dispatch() {
   # ---------------------------------------------------------------------------
   # THE FIXTURE: a print shop.
   #
-  # `press` is bounded at 1 — that is the instance policy engine-spec §2 says
-  # serialization IS, and it is the only thing that makes a class "write-class"
-  # to core (§6.5 A20). `proof` is unbounded, so it fans out freely and A6's
-  # narrowness has something to be narrow about.
+  # `press` is bounded at 1 — serialization IS that instance policy, and it is
+  # the only thing that makes a class "write-class" to core. `proof` is
+  # unbounded, so it fans out freely and the bound's narrowness has something
+  # to be narrow about.
   # ---------------------------------------------------------------------------
   ZJ_WF="$ZJ/printshop.toml"
   cat >"$ZJ_WF" <<'TOML'
@@ -102,14 +101,15 @@ TOML
   run_env "$ZJ" config set dispatch.ttl 100h --json
   assert_exit "ZJ" "ZJ0_ttl_set" 0
 
-  # `dispatch.grace` is long throughout: D1 is exercised by the Go tests at its
-  # boundary, and a short grace here would make every claimed step in this
-  # section a discrepancy, refusing `next` for a reason no arm is testing.
+  # `dispatch.grace` is long throughout: the grace check is exercised by the
+  # Go tests at its boundary, and a short grace here would make every claimed
+  # step in this section a discrepancy, refusing `next` for a reason no arm is
+  # testing.
   run_env "$ZJ" config set dispatch.grace 100h --json
   assert_exit "ZJ" "ZJ0_grace_set" 0
 
   # ===========================================================================
-  # §9 ITEM 9, ARM A — TTL auto-abandon restores `next`
+  # ITEM 9, ARM A — TTL auto-abandon restores `next`
   # ===========================================================================
 
   run_env "$ZJ" issue create -t "Print the spring catalogue" -d "500 copies" --json
@@ -118,6 +118,8 @@ TOML
   assert_exit "ZJ" "ZJ1_start" 0
   run_env "$ZJ" run activate RUN-1 --json
   assert_exit "ZJ" "ZJ1_activate" 0
+  local ZJ_CTOK
+  ZJ_CTOK=$(activation_token)
 
   # --- K1: open a dispatch over a real ready set; `verify` passes. -----------
   run_env "$ZJ" dispatch open --run RUN-1 --json
@@ -137,7 +139,7 @@ TOML
 
   # --- K2: `next --run` is REFUSED, and the reason names the dispatch. ------
   #
-  # P26: a CONFLICT, not an empty list. A relay cannot tell "nothing to do"
+  # A CONFLICT, not an empty list. A relay cannot tell "nothing to do"
   # from "I will not answer" if both arrive as a zero-length array.
   run_env "$ZJ" next --run RUN-1 --json
   assert_exit "ZJ" "ZJ1_K2_refused" 4
@@ -149,15 +151,15 @@ TOML
 
   # --- K3: past the TTL, `next` auto-abandons AND answers in ONE call. ------
   #
-  # THE CRASH IS SIMULATED BY THE TTL, not by sleeping (§5.9).
+  # THE CRASH IS SIMULATED BY THE TTL, not by sleeping.
   #
-  # A manifest's expiry is PINNED AT OPEN TIME — `expires_ms` is a stored column
-  # (P12), so shortening `dispatch.ttl` afterward does not retroactively expire
+  # A manifest's expiry is PINNED AT OPEN TIME — `expires_ms` is a stored column,
+  # so shortening `dispatch.ttl` afterward does not retroactively expire
   # a live manifest. That is the correct behavior and it shapes this arm: the
   # K1/K2 manifest is retired explicitly, the TTL is shortened, and a FRESH
   # manifest is opened which is born already past its expiry. That fresh
   # manifest is the crashed relay's.
-  run_env "$ZJ" dispatch abandon --run RUN-1 --reason "end of the K1/K2 arm" --json
+  DOCKET_TOKEN="$ZJ_CTOK" run_env "$ZJ" dispatch abandon --run RUN-1 --reason "end of the K1/K2 arm" --json
   assert_exit "ZJ" "ZJ1_K3_retire_live_manifest" 0
 
   run_env "$ZJ" config set dispatch.ttl 1ms --json
@@ -166,8 +168,8 @@ TOML
   # The staged closure raised a manifest's expiry floor to the SUM of its
   # stages' lease TTLs (stagedLeaseSumMS) — a doomed manifest needs the lease
   # TTL shortened too, or the floor keeps it alive past the 1ms dispatch.ttl.
-  # Restored right after the doomed open: the expiry is pinned at open time
-  # (P12), and later arms claim under the ordinary lease.
+  # Restored right after the doomed open: the expiry is pinned at open time,
+  # and later arms claim under the ordinary lease.
   run_env "$ZJ" config set lease.ttl.default 1ms --json
   assert_exit "ZJ" "ZJ1_K3_lease_short" 0
 
@@ -179,15 +181,15 @@ TOML
   run_env "$ZJ" config set lease.ttl.default 15m --json
   assert_exit "ZJ" "ZJ1_K3_lease_restored" 0
 
-  # P16 is the assertion that matters: the relay that crashed and came back
+  # This is the assertion that matters: the relay that crashed and came back
   # does not poll twice. ONE invocation abandons the expired manifest AND
   # returns the ready set.
   run_env "$ZJ" next --run RUN-1 --json
   assert_exit "ZJ" "ZJ1_K3_answers" 0
   assert_json_array_min "ZJ" "ZJ1_K3_same_invocation" '.data.steps' 1
 
-  # The dispatch is `abandoned` with reason=ttl, and the abandon is EVENT-LOGGED
-  # — which engine-spec §2 requires by name ("event-logged").
+  # The dispatch is `abandoned` with reason=ttl, and the abandon is
+  # EVENT-LOGGED, a requirement stated by name.
   local ZJ_STATUS ZJ_REASON ZJ_DOOMED_ID
   ZJ_DOOMED_ID=${ZJ_DOOMED#DISPATCH-}
   ZJ_STATUS=$(sqlite3 "$ZJ/issues.db" "SELECT status FROM dispatches WHERE id = $ZJ_DOOMED_ID;")
@@ -223,7 +225,7 @@ TOML
   check_cond "ZJ" "ZJ1_K5_nothing_lost" "manifest was $ZJ_MANIFEST; after recovery $ZJ_AFTER" [ "$ZJ_AFTER" = "$ZJ_MANIFEST" ]
 
   # ===========================================================================
-  # §9 ITEM 9, ARM B — the EXPLICIT `dispatch abandon` restores `next`
+  # ITEM 9, ARM B — the EXPLICIT `dispatch abandon` restores `next`
   # ===========================================================================
   #
   # K4 runs from K2's state: a dispatch open, `next` refusing. The TTL is
@@ -239,7 +241,7 @@ TOML
   assert_exit "ZJ" "ZJ2_refused" 4
 
   # --- K4: abandon with a reason; `next` answers immediately. ---------------
-  run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died" --json
+  DOCKET_TOKEN="$ZJ_CTOK" run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died" --json
   assert_exit "ZJ" "ZJ2_K4_abandon" 0
   assert_json "ZJ" "ZJ2_K4_status" '.data.status' "abandoned"
 
@@ -261,7 +263,7 @@ TOML
 
   # --- K7: a step claimed BEFORE the crash completes normally afterward. ----
   #
-  # This is P28 as a drill: the dispatch is open, an executor claims anyway
+  # This is a drill: the dispatch is open, an executor claims anyway
   # (a dispatch is not a lock), the relay "dies", and the executor finishes.
   run_env "$ZJ" dispatch open --run RUN-1 --json
   assert_exit "ZJ" "ZJ3_open" 0
@@ -272,11 +274,11 @@ TOML
   ZJ_TOKEN=$(echo "$CMD_STDOUT" | jq -r '.data.token')
 
   # The relay dies; an operator retires its manifest.
-  run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died mid-batch" --json
+  DOCKET_TOKEN="$ZJ_CTOK" run_env "$ZJ" dispatch abandon --run RUN-1 --reason "relay died mid-batch" --json
   assert_exit "ZJ" "ZJ3_K7_abandon" 0
 
   # The executor finishes. Its usage is recorded, because a relay that
-  # dispatches is accountable for it (§5.8 D2).
+  # dispatches is accountable for it.
   printf 'the printed sheets\n' >"$ZJ/sheets.txt"
   DOCKET_TOKEN="$ZJ_TOKEN" run_env "$ZJ" step complete STEP-1 \
     --artifact-file "$ZJ/sheets.txt" --usage '{"sheets":500}' --json
@@ -287,7 +289,7 @@ TOML
   #
   # The count is grouped by (step, KIND) rather than by step alone, because a
   # step legitimately carries more than one artifact: the one it emitted, plus
-  # the engine-computed `issue.diff` that engine-spec §11.1 snapshots when its
+  # the engine-computed `issue.diff` the engine snapshots when its
   # producing step completed. Grouping by step alone would report that pair as a
   # duplicate — which would be this assertion misreading the schema rather than
   # catching a double execution.
@@ -315,11 +317,11 @@ TOML
   check_cond "ZJ" "ZJ3_K6_nothing_double_executed" "$ZJ_DOUBLE step(s) were claimed more than once" [ "$ZJ_DOUBLE" = "0" ]
 
   # ===========================================================================
-  # §9 ITEM 10's REAP HALF — W1-W9 minus the guard-spawn rows
+  # ITEM 10's REAP HALF — W1-W9 minus the guard-spawn rows
   # ===========================================================================
   #
   # W4 and W6 are adapted to `dispatch open --ack-reap`, this group's entry
-  # point (§11's group-2 row); group 3 adds the `guard spawn` rows.
+  # point; group 3 adds the `guard spawn` rows.
   #
   # A fresh run, so the hold is the only thing in play.
 
@@ -332,6 +334,8 @@ TOML
   assert_exit "ZJ" "ZJ4_start" 0
   run_env "$ZJ" run activate RUN-2 --json
   assert_exit "ZJ" "ZJ4_activate" 0
+  local ZJ_CTOK2
+  ZJ_CTOK2=$(activation_token)
 
   # --- W1: the baseline. Both press steps exist; the press is bounded at 1. --
   run_env "$ZJ" next --run RUN-2 --json
@@ -356,7 +360,7 @@ TOML
   run_env "$ZJ" next --run RUN-2 --json
   assert_exit "ZJ" "ZJ4_W2_reap" 0
 
-  # The reap is event-logged AND leaves an UNACKNOWLEDGED ack row (A16, A19).
+  # The reap is event-logged AND leaves an UNACKNOWLEDGED ack row.
   local ZJ_REAPED ZJ_ACKS
   ZJ_REAPED=$(sqlite3 "$ZJ/issues.db" \
     "SELECT COUNT(*) FROM events WHERE run_id = 2 AND kind = 'lease-reaped';")
@@ -388,7 +392,7 @@ TOML
     | jq -r "[.data.steps[] | select(.class == \"press\") | .step] | sort | join(\",\")")
   check_cond "ZJ" "ZJ4_W3_only_the_reaped_step" "press steps offered: [$ZJ_OFFERED_PRESS]; want only the reaped $ZJ_PRESS_STEP" [ "$ZJ_OFFERED_PRESS" = "$ZJ_PRESS_STEP" ]
 
-  # --- W5 / A6: read-class steps in the SAME run are still offered. ---------
+  # --- W5: read-class steps in the SAME run are still offered. --------------
   #
   # The hold is NARROW: it holds press headroom, not the whole run. A reaped
   # writer must not stop a fan-out that never touches the press.
@@ -396,8 +400,8 @@ TOML
   ZJ_PROOF=$(echo "$CMD_STDOUT" | jq -r '[.data.steps[] | select(.class == "proof")] | length')
   check_cond "ZJ" "ZJ4_W5_unbounded_class_flows" "$ZJ_PROOF proof-class steps offered under a press hold, want 2" [ "$ZJ_PROOF" = "2" ]
 
-  # A11's discoverability: the denial NAMES the seq and the flag, on stderr.
-  # A headroom denial with nothing running is otherwise baffling (§6.3), and an
+  # Discoverability: the denial NAMES the seq and the flag, on stderr.
+  # A headroom denial with nothing running is otherwise baffling, and an
   # operator should be able to copy the next command out of the message.
   #
   # It is asserted in HUMAN MODE, because the hold rides on stderr exactly where
@@ -420,7 +424,7 @@ TOML
   fi
   assert_stderr_contains "ZJ" "ZJ4_W3_names_the_instance" "print-run@0"
 
-  # --- W9: an ack of a bogus seq is refused (A9 — the forgery point). -------
+  # --- W9: an ack of a bogus seq is refused (the forgery point). -----------
   run_env "$ZJ" dispatch open --run RUN-2 --ack-reap 999999 --json
   assert_exit "ZJ" "ZJ4_W9_bogus_refused" 3
   assert_json "ZJ" "ZJ4_W9_code" '.code' "VALIDATION_ERROR"
@@ -447,15 +451,15 @@ TOML
     "SELECT COALESCE(acked_by, '') FROM reap_acks WHERE run_id = 2;")
   check_cond "ZJ" "ZJ4_W6_acked_by_the_verb" "acked_by = '$ZJ_ACKED_BY', want 'dispatch-open' — the VERB, never an identity" [ "$ZJ_ACKED_BY" = "dispatch-open" ]
 
-  # A3: the release is ATTRIBUTABLE. §9 item 2 requires every transition to be
-  # traceable, and a successor becoming claimable IS a transition.
+  # The release is ATTRIBUTABLE. Every transition must be traceable, and a
+  # successor becoming claimable IS a transition.
   local ZJ_ACK_EV
   ZJ_ACK_EV=$(sqlite3 "$ZJ/issues.db" \
     "SELECT COUNT(*) FROM events WHERE run_id = 2 AND kind = 'reap-acknowledged';")
   check_cond "ZJ" "ZJ4_W6_ack_event" "$ZJ_ACK_EV reap-acknowledged events, want 1" [ "$ZJ_ACK_EV" = "1" ]
 
   # --- W8: a SECOND ack of the same seq succeeds and changes nothing. -------
-  run_env "$ZJ" dispatch abandon --run RUN-2 --json
+  DOCKET_TOKEN="$ZJ_CTOK2" run_env "$ZJ" dispatch abandon --run RUN-2 --json
   assert_exit "ZJ" "ZJ4_W8_clear_dispatch" 0
   run_env "$ZJ" dispatch open --run RUN-2 --ack-reap "$ZJ_SEQ" --json
   assert_exit "ZJ" "ZJ4_W8_second_ack_succeeds" 0
@@ -465,7 +469,7 @@ TOML
   check_cond "ZJ" "ZJ4_W8_idempotent" "a second ack produced $ZJ_ACK_EV events, want the original 1 — A10 makes it a no-op" [ "$ZJ_ACK_EV" = "1" ]
 
   # --- W7: write-class steps flow again. -----------------------------------
-  run_env "$ZJ" dispatch abandon --run RUN-2 --json
+  DOCKET_TOKEN="$ZJ_CTOK2" run_env "$ZJ" dispatch abandon --run RUN-2 --json
   assert_exit "ZJ" "ZJ4_W7_clear" 0
 
   # The lease goes back to a workable length first. `lease.ttl.press` was 1ms so
@@ -490,14 +494,14 @@ TOML
   check_cond "ZJ" "ZJ4_W7_press_flows_again" "no press-class step offered after the ack; the hold did not release" [ "$ZJ_PRESS" -ge 1 ]
 
   # ===========================================================================
-  # ZJ5 — THE GROUP-2 DORMANCY PROOF (§3's per-group table)
+  # ZJ5 — THE GROUP-2 DORMANCY PROOF
   # ===========================================================================
   #
   # "A run that never opens a dispatch produces a byte-identical `next`
   # transcript; a run with no write-class reap likewise; `dispatches` empty."
   #
-  # This is the assertion the 2026-08-03 review fix to §5.8 D2 exists to make
-  # true. A run driven to completion WITHOUT `--usage` and WITHOUT a dispatch
+  # This is the assertion the 2026-08-03 review fix to the missing-usage check
+  # exists to make true. A run driven to completion WITHOUT `--usage` and WITHOUT a dispatch
   # must never be refused — which is what keeps ZK's solo rehearsal and ZH's
   # stranger demo green.
 
@@ -532,7 +536,7 @@ TOML
 
   # THE DORMANCY ASSERTION: `next` answers rather than refusing. A step
   # completed with no usage in a run no relay ever drove has nobody owing
-  # usage, so D2 does not fire.
+  # usage, so the missing-usage check does not fire.
   run_env "$ZJ_D" next --run RUN-1 --json
   assert_exit "ZJ" "ZJ5_no_refusal_without_dispatch" 0
 

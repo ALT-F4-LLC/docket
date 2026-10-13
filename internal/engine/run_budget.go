@@ -10,16 +10,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// `docket run budget RUN-N --set N` — engine-spec §1's budget line
-// (docs/tdd/events-follow.md §7).
+// `docket run budget RUN-N --set N` — raise or lower a live cap.
 //
-// THIS VERB CLOSES B24. Stage 6 recorded the gap in two places and could not
-// close it: a comment at the end of `enforceBudgetTx` ("nothing here clears the
-// cap, so a `run resume` returns the run to `active` and the very next claim
-// reaches this same refusal … Raising it is `run start`-time only in v1"), and a
-// runbook section in operations.md §4 that told an operator to raise a cap with
-// `sqlite3` and reminded them to bump `row_version` by hand. Both were correct
-// descriptions of a missing verb. This is the verb.
+// THIS VERB CLOSES THE BREACH LOOP. Budget enforcement recorded the gap in two
+// places and could not close it: a comment at the end of `enforceBudgetTx`
+// ("nothing here clears the cap, so a `run resume` returns the run to `active`
+// and the very next claim reaches this same refusal … Raising it is `run
+// start`-time only in v1"), and a runbook section that told an operator to
+// raise a cap with `sqlite3` and reminded them to bump `row_version` by hand.
+// Both were correct descriptions of a missing verb. This is the verb.
 //
 // WHAT IT DOES NOT DO IS MOST OF THE DESIGN. It does not change the run's
 // status, does not re-scan for parked steps, does not sweep anything, and does
@@ -35,7 +34,7 @@ import (
 // mistaking an operator's own pause reason for its own text.
 const budgetChangeReasonPrefix = "budget: cap changed from "
 
-// RunBudget is the read form's answer (B-4): the effective cap and the numbers
+// RunBudget is the read form's answer: the effective cap and the numbers
 // it is compared against.
 //
 // It carries the SAME quantities `run report` shows, computed the same way, so
@@ -63,9 +62,9 @@ type RunBudget struct {
 
 // SetRunBudget writes a run's cap, event-logged, in one transaction.
 //
-// `budget` is the new cap; ZERO MEANS UNLIMITED (B-1), the meaning the flag has
-// carried since S3 and the one `budgetSnapshot.unlimited()` enforces. Raising
-// and lowering are the same operation (B-2) — engine-spec §1 says "raise/lower a
+// `budget` is the new cap; ZERO MEANS UNLIMITED, the meaning the flag has
+// always carried and the one `budgetSnapshot.unlimited()` enforces. Raising
+// and lowering are the same operation — the verb exists to "raise/lower a
 // live cap", and a verb that refused to lower would be a verb that half exists.
 func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
 	if budget < 0 {
@@ -84,7 +83,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 
-	// B-3: a terminal run's cap is HISTORY. Editing it would change what a
+	// A terminal run's cap is HISTORY. Editing it would change what a
 	// finished run's report says it was allowed to spend, retroactively, which
 	// is a different verb from the one this is — and one nobody asked for.
 	if run.Status.Terminal() {
@@ -153,14 +152,13 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 		}
 	}
 
-	// B-EV: event-logged, in the SAME transaction as the write.
+	// Event-logged, in the SAME transaction as the write.
 	//
-	// §7.3 argues the kind at length; the short form is that no existing kind
-	// anchors "the cap moved". A run that breached at one number and later
-	// admitted a claim at another must have something in its trail explaining
-	// the difference, or the log stops being the run's complete account of
-	// itself — which is precisely what operations.md §4 warned the manual edit
-	// would do ("it bypasses the event log").
+	// No existing kind anchors "the cap moved". A run that breached at one
+	// number and later admitted a claim at another must have something in its
+	// trail explaining the difference, or the log stops being the run's
+	// complete account of itself — which is precisely what the manual-edit
+	// runbook warned the edit would do ("it bypasses the event log").
 	//
 	// `from` and `to` both ride, because the interesting question about a cap
 	// change is the delta and a log carrying only the new value would make an
@@ -187,7 +185,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 		return nil, err
 	}
 
-	// B-10: THE STATUS IS NOT TOUCHED.
+	// THE STATUS IS NOT TOUCHED.
 	//
 	// A breached run is `waiting-human` and stays so until `run resume`. That is
 	// what `waiting-human` means — a person must decide — and a verb that
@@ -206,7 +204,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 	return answer, nil
 }
 
-// GetRunBudget is the read form (B-4).
+// GetRunBudget is the read form.
 func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
 	tx, err := conn.Begin()
 	if err != nil {
@@ -228,7 +226,7 @@ func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
 // It recomputes the floor and the reported usage through the SAME helpers
 // enforcement and the report use (RunFloorTx, db.ReportedUsageTx), rather than
 // reading `runs.usage_floor`. That column is a cache for the report and is never
-// read by anything that decides (§4.3) — and this verb's whole purpose is to
+// read by anything that decides — and this verb's whole purpose is to
 // inform a decision about the number enforcement will compare, so it must show
 // the number enforcement will compare.
 func runBudgetTx(tx *sql.Tx, runID int) (*RunBudget, error) {

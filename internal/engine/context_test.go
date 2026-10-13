@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,12 +38,12 @@ func stepIDByInstance(t *testing.T, conn *sql.DB, instance string) int {
 	return id
 }
 
-// TestContextAssemblyReadsNoLiveState is §6.6's enforcement at the code level,
-// and the single most load-bearing test of this phase.
+// TestContextAssemblyReadsNoLiveState enforces snapshot-only assembly at the
+// code level, and is the single most load-bearing test of this phase.
 //
 // It runs assembly twice with the ISSUES TABLE and the WORKING TREE mutated in
 // between, and requires byte-identical output. Each snapshotted field is ALSO
-// asserted individually, per §8.3, so a partial snapshot fails on the specific
+// asserted individually, so a partial snapshot fails on the specific
 // field it missed rather than on an opaque whole-bundle diff — "an
 // implementation reading a live field just for the title" is the single most
 // likely way this AC breaks.
@@ -95,7 +96,7 @@ func TestContextAssemblyReadsNoLiveState(t *testing.T) {
 			before, after)
 	}
 
-	// ---- Each field, individually (§8.3). ---------------------------------
+	// ---- Each field, individually. ----------------------------------------
 	var second Context
 	err = json.Unmarshal([]byte(after), &second)
 	testsupport.Must(t, err, "unmarshal: %v", err)
@@ -123,7 +124,7 @@ func TestContextAssemblyReadsNoLiveState(t *testing.T) {
 	if len(second.Issue.Scope) != 1 || second.Issue.Scope[0] != "internal/original/**" {
 		t.Errorf("context.issue.scope = %v, want the snapshotted "+
 			"[internal/original/**] — an operator's mid-run scope correction "+
-			"changes SCHEDULING (§6.3 R4), never the bundle", second.Issue.Scope)
+			"changes SCHEDULING, never the bundle", second.Issue.Scope)
 	}
 }
 
@@ -144,8 +145,8 @@ func TestContextAssemblyIsRepeatable(t *testing.T) {
 	}
 }
 
-// TestContextReadWritesNothing pins that `step context` is a pure read (§6.3:
-// every read verb computes effective status with ZERO writes).
+// TestContextReadWritesNothing pins that `step context` is a pure read:
+// every read verb computes effective status with ZERO writes.
 //
 // The step here has an EXPIRED lease — the state a reaping implementation is
 // most tempted to fix on the way past. Reads may not reap.
@@ -208,7 +209,7 @@ func TestContextReadWritesNothing(t *testing.T) {
 	_ = issue
 }
 
-// TestContextPinsAreListedNotRead is §6.6's fifth source, stated exactly: the
+// TestContextPinsAreListedNotRead pins the pin source, stated exactly: the
 // bundle carries the pin LIST — path and hash — and assembly never opens the
 // file. Re-reading would make the bundle depend on the working tree, which is
 // the thing the pin exists to prevent.
@@ -249,7 +250,7 @@ func TestContextPinsAreListedNotRead(t *testing.T) {
 		if p.Path == pinned {
 			sawFile = true
 		}
-		// §11.4 gives pins ONE shape, so a workflow pin renders into the same
+		// Pins have ONE shape, so a workflow pin renders into the same
 		// `path` slot with a scheme rather than growing a second shape.
 		if p.Path == "workflow:standard-change@1" {
 			sawWorkflow = true
@@ -269,7 +270,7 @@ func TestContextPinsAreListedNotRead(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.7 — input resolution
+// Input resolution
 // ---------------------------------------------------------------------------
 
 // recordArtifact inserts an artifact attributed to a step instance.
@@ -290,8 +291,8 @@ func recordArtifact(t *testing.T, conn *sql.DB, runID int, stepID int, kind, bod
 	return id
 }
 
-// TestInputResolutionIgnoresInsertionOrder is §6.7's ordering rule, tested the
-// way the TDD requires: by SHUFFLING insertion order.
+// TestInputResolutionIgnoresInsertionOrder pins the ordering rule, tested by
+// SHUFFLING insertion order.
 //
 // "Ordered by artifact id" is trivially satisfiable by accident when insertion
 // order happens to match, so an unshuffled test proves nothing. Here the four
@@ -380,7 +381,7 @@ func TestInputResolutionCollapsesSupersededEmits(t *testing.T) {
 	}
 }
 
-// TestInputResolutionIsDoneOnly pins §2's "downstream inputs resolve over
+// TestInputResolutionIsDoneOnly pins "downstream inputs resolve over
 // `done` siblings only". An in-flight sibling's artifact is work in progress,
 // not an input — including it would let a join consume a partial result.
 func TestInputResolutionIsDoneOnly(t *testing.T) {
@@ -451,7 +452,7 @@ func TestIssueBodyResolvesToTheSnapshot(t *testing.T) {
 	}
 }
 
-// TestIssueDiffD4EmptyFallback is §6.7.1 D4: with no `issue.diff` artifact yet,
+// TestIssueDiffD4EmptyFallback: with no `issue.diff` artifact yet,
 // the input resolves to an EMPTY diff — not an error, and NOT a live `git diff`.
 //
 // "Empty" is the truthful answer: nothing has changed the tree in this run.
@@ -462,7 +463,7 @@ func TestIssueDiffD4EmptyFallback(t *testing.T) {
 	// `review` consumes issue.diff and nothing has produced one.
 	reviewID := stepIDByInstance(t, conn, "review@0#0")
 	bundle, err := ReadContext(conn, reviewID, nowMS)
-	testsupport.Must(t, err, "ReadContext: %v — D4 requires a fallback, not an error", err)
+	testsupport.Must(t, err, "ReadContext: %v — the missing diff requires a fallback, not an error", err)
 
 	var found bool
 	for _, in := range bundle.Inputs {
@@ -471,17 +472,17 @@ func TestIssueDiffD4EmptyFallback(t *testing.T) {
 		}
 		found = true
 		if in.Body != "" {
-			t.Errorf("issue.diff body = %q, want empty (D4)", in.Body)
+			t.Errorf("issue.diff body = %q, want empty", in.Body)
 		}
 	}
 	if !found {
-		t.Errorf("no issue.diff input resolved; D4 requires an empty artifact, "+
+		t.Errorf("no issue.diff input resolved; want an empty artifact, "+
 			"not an omission. inputs = %d", len(bundle.Inputs))
 	}
 	_ = run
 }
 
-// TestIssueDiffD3PicksHighestOrdinal is §6.7.1 D3, and the clause that makes
+// TestIssueDiffD3PicksHighestOrdinal pins the clause that makes
 // the fixture's `fix@1 -> review@1` cycle correct WITHOUT any rule specific to
 // loops: ordinal 1 beats ordinal 0.
 //
@@ -528,8 +529,8 @@ func TestIssueDiffD3PicksHighestOrdinal(t *testing.T) {
 			continue
 		}
 		if in.Body != "DIFF AT ORDINAL 1" {
-			t.Errorf("issue.diff = %q, want the ordinal-1 artifact — D3 resolves "+
-				"highest-ordinal first, and the ordinal-0 artifact has the "+
+			t.Errorf("issue.diff = %q, want the ordinal-1 artifact — resolution takes the "+
+				"highest ordinal first, and the ordinal-0 artifact has the "+
 				"HIGHER id here precisely so an id-only rule fails", in.Body)
 		}
 		if in.ProducerStep != "fix@1" {
@@ -614,7 +615,7 @@ func TestBundleOmitsTheTargetRefWithoutARoundRecord(t *testing.T) {
 }
 
 // TestSplitInputTakesTheLastDot pins the decomposition: a kind containing a dot
-// must not be truncated. Step names cannot contain one (V3), so the last dot is
+// must not be truncated. Step names cannot contain one, so the last dot is
 // unambiguously the separator.
 func TestSplitInputTakesTheLastDot(t *testing.T) {
 	cases := []struct {
@@ -638,9 +639,9 @@ func TestSplitInputTakesTheLastDot(t *testing.T) {
 	}
 }
 
-// TestContextMetaIsASiblingNotAMutation pins §6.4's `--meta` rule: the byte
+// TestContextMetaIsASiblingNotAMutation pins the `--meta` rule: the byte
 // counts are a SIBLING object, so asking for them does not change the bundle
-// the goldens compare (§8.3). A `--meta` that spliced counts in would make the
+// the goldens compare. A `--meta` that spliced counts in would make the
 // goldens depend on a flag.
 func TestContextMetaIsASiblingNotAMutation(t *testing.T) {
 	conn := mustDB(t)
@@ -681,4 +682,160 @@ func containsAny(haystack string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+// gateOutcomesOver records rows on a step inside a rolled-back transaction and
+// returns the rework packet's gate list for them, so each case reads only its
+// own rows.
+func gateOutcomesOver(t *testing.T, conn *sql.DB, runID, stepID int, rows []db.GateResultRow) []ContextGateOutcome {
+	t.Helper()
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	for _, r := range rows {
+		r.RunID, r.StepID = runID, stepID
+		testsupport.Must(t, db.InsertGateResultTx(tx, r), "InsertGateResultTx: %v", err)
+	}
+	step, err := db.GetStepTx(tx, stepID)
+	testsupport.Must(t, err, "GetStepTx: %v", err)
+	res := &ContextResolution{Routing: "fix-loop"}
+	testsupport.Must(t, attachGateOutcomes(tx, step, res), "attachGateOutcomes: %v", err)
+	return res.Gates
+}
+
+// outcomesOfFailedGates is the (Gate, Verdict, Reason) projection of the gates
+// the routing report names for the same rows.
+func outcomesOfFailedGates(rows []db.GateResultRow) []ContextGateOutcome {
+	var out []ContextGateOutcome
+	for _, g := range failedGatesOverRows(rows) {
+		out = append(out, ContextGateOutcome{Gate: g.Gate, Verdict: g.Verdict, Reason: g.Reason})
+	}
+	return out
+}
+
+// TestAttachGateOutcomesMatchesRoutingOnFenceEarlierLine: a fence gate whose
+// earlier line did not pass routes fail even when its last line passed, so the
+// rework packet must name it with the row the routing report names.
+func TestAttachGateOutcomesMatchesRoutingOnFenceEarlierLine(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	id := stepIDByInstance(t, conn, "implement@0")
+
+	for _, first := range []db.GateResultRow{
+		lineRow(0, db.GateVerdictUnmatched),
+		lineRow(0, db.GateVerdictFail, "go", "test", "./..."),
+	} {
+		t.Run(first.Verdict, func(t *testing.T) {
+			first.CreatedAtMS = nowMS
+			last := lineRow(1, db.GateVerdictPass, "go", "vet", "./...")
+			last.CreatedAtMS = nowMS
+			rows := []db.GateResultRow{first, last}
+
+			got := gateOutcomesOver(t, conn, run.ID, id, rows)
+
+			want := []ContextGateOutcome{{Gate: "checks", Verdict: first.Verdict, Reason: first.Reason}}
+			if !slices.Equal(got, want) {
+				t.Fatalf("gates = %+v, want %+v: the step routed fail on the earlier "+
+					"line, so the packet must say why", got, want)
+			}
+			if routed := outcomesOfFailedGates(rows); !slices.Equal(got, routed) {
+				t.Errorf("gates = %+v, FailedGates = %+v: the packet and the routing "+
+					"report disagree about the same rows", got, routed)
+			}
+		})
+	}
+}
+
+// TestAttachGateOutcomesParityWithFailedGates holds the rework packet to the
+// routing reduction: for the same rows it names the same gates, in ascending
+// name, each with the row FailedGates names.
+func TestAttachGateOutcomesParityWithFailedGates(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	id := stepIDByInstance(t, conn, "implement@0")
+
+	at := func(r db.GateResultRow, gate string, createdAt int64) db.GateResultRow {
+		r.Gate, r.CreatedAtMS = gate, createdAt
+		return r
+	}
+	cases := []struct {
+		name string
+		rows []db.GateResultRow
+		want []ContextGateOutcome
+	}{
+		{
+			name: "fence gate with a failed earlier line and a passing last line",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "go", "test", "./..."), "checks", nowMS),
+				at(lineRow(1, db.GateVerdictPass, "go", "vet", "./..."), "checks", nowMS),
+			},
+			want: []ContextGateOutcome{{Gate: "checks", Verdict: db.GateVerdictFail}},
+		},
+		{
+			name: "fence gate names its first non-pass line",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictPass, "go", "build", "./..."), "checks", nowMS),
+				at(lineRow(1, db.GateVerdictUnmatched), "checks", nowMS),
+				at(lineRow(2, db.GateVerdictFail, "go", "test", "./..."), "checks", nowMS),
+			},
+			want: []ContextGateOutcome{{Gate: "checks", Verdict: db.GateVerdictUnmatched,
+				Reason: "no trust entry matched"}},
+		},
+		{
+			name: "flaky command retried to a pass is omitted",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "go", "test", "./..."), "tests", nowMS),
+				at(lineRow(1, db.GateVerdictPass, "go", "test", "./..."), "tests", nowMS),
+			},
+		},
+		{
+			name: "rerun-gates second execution that passes is omitted",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "go", "test", "./..."), "tests", nowMS),
+				at(lineRow(1, db.GateVerdictPass, "go", "test", "./..."), "tests", nowMS+1),
+			},
+		},
+		{
+			name: "rerun-gates second execution that fails is named",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictPass, "go", "test", "./..."), "tests", nowMS),
+				at(lineRow(1, db.GateVerdictFail, "go", "test", "./..."), "tests", nowMS+1),
+			},
+			want: []ContextGateOutcome{{Gate: "tests", Verdict: db.GateVerdictFail}},
+		},
+		{
+			name: "pre-gate rows are excluded",
+			rows: []db.GateResultRow{
+				{Gate: "ac-commands", Ordinal: 0, Verdict: db.GateVerdictSkipped, Pre: true,
+					Reason: "the tree under review could not be bound", CreatedAtMS: nowMS},
+				at(lineRow(0, db.GateVerdictPass, "go", "build", "./..."), "build", nowMS),
+			},
+		},
+		{
+			name: "gates are listed in ascending name",
+			rows: []db.GateResultRow{
+				at(lineRow(0, db.GateVerdictFail, "golangci-lint", "run"), "zeta", nowMS),
+				{Gate: "beta", Ordinal: 0, Verdict: db.GateVerdictSkipped,
+					Reason: "the tree was gone at spawn time", CreatedAtMS: nowMS},
+				at(lineRow(0, db.GateVerdictUnmatched), "alpha", nowMS),
+			},
+			want: []ContextGateOutcome{
+				{Gate: "alpha", Verdict: db.GateVerdictUnmatched, Reason: "no trust entry matched"},
+				{Gate: "beta", Verdict: db.GateVerdictSkipped, Reason: "the tree was gone at spawn time"},
+				{Gate: "zeta", Verdict: db.GateVerdictFail},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gateOutcomesOver(t, conn, run.ID, id, tc.rows)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("gates = %+v, want %+v", got, tc.want)
+			}
+			if routed := outcomesOfFailedGates(tc.rows); !slices.Equal(got, routed) {
+				t.Errorf("gates = %+v, FailedGates = %+v: the packet and the routing "+
+					"report disagree about the same rows", got, routed)
+			}
+		})
+	}
 }

@@ -375,7 +375,7 @@ func TestDispatchOpenCapsSameClassOffer(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // DKT-47 — the offer's BUDGET half. The scope and class tests above prove the
-// set is claimable against R4 and R5; these prove it against R7/B14. RUN-2's
+// set is claimable against R4 and R5; these prove it against R7. RUN-2's
 // DISPATCH-20 offered nine executor rows that each fit the remaining headroom
 // alone but summed past it together: the first claim advanced the floor, the
 // claim-side projection paused the run, and every other spawned executor died

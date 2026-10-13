@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,10 +13,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// Engine configuration keys (engine-spec.md §1: "engine defaults: lease TTLs
-// per class, attempt caps, budget default, context caps"). Values live in the
-// meta table, prefixed so they cannot collide with schema_version or any other
-// internal key.
+// Engine configuration keys: lease TTLs per class, attempt caps, budget
+// default, context caps. Values live in the meta table, prefixed so they cannot
+// collide with schema_version or any other internal key.
 const (
 	metaConfigPrefix = "config."
 
@@ -23,25 +23,28 @@ const (
 	// own entry.
 	KeyLeaseTTLDefault = "lease.ttl.default"
 	// KeyLeaseTTLPrefix is the per-class TTL namespace: lease.ttl.<class>.
-	// The class is an opaque string — core never interprets its value
-	// (engine-spec.md §11.1 [limits]).
+	// The class is an opaque string — core never interprets its value.
 	KeyLeaseTTLPrefix = "lease.ttl."
-	// KeyAttemptMax caps retries per entity (engine-spec.md §11.1
-	// max_attempts).
+	// KeyClassMaxPrefix is the per-class concurrency cap namespace:
+	// limits.max.<class>. A set value replaces the pinned workflows' merged
+	// `[limits]` max for that class. The scheduler reads it on every snapshot,
+	// never pins it, so a run moved to a different host follows that host's
+	// value. Unset leaves the pinned max in force.
+	KeyClassMaxPrefix = "limits.max."
+	// KeyAttemptMax caps retries per entity (`max_attempts`).
 	KeyAttemptMax = "attempt.max"
 	// KeyBudgetDefault is the per-run budget cap; 0 means unlimited.
 	// Enforcement lands with runs; the key exists now so the default is
 	// pinned before the verbs that read it.
 	KeyBudgetDefault = "budget.default"
-	// KeyBudgetUnit names WHICH recorded usage unit the run cap counts
-	// (docs/tdd/runs-dispatch.md §4.5 B16). Empty — the default and the only
-	// value core ships — means `reported` is 0 and the cap rests on the
-	// declared-cost floor alone.
+	// KeyBudgetUnit names WHICH recorded usage unit the run cap counts. Empty —
+	// the default and the only value core ships — means `reported` is 0 and
+	// the cap rests on the declared-cost floor alone.
 	//
 	// A config key rather than a workflow field because the cap is a run-level
-	// control (engine-spec §11.3), so the unit it counts is run-level too.
-	// Putting it on a step would let two steps in one run disagree about what
-	// the run's budget means.
+	// control, so the unit it counts is run-level too. Putting it on a step
+	// would let two steps in one run disagree about what the run's budget
+	// means.
 	KeyBudgetUnit = "budget.unit"
 	// KeyUsageBudgetDefault is the default cap over MEASURED usage — the
 	// second budget dimension (DKT-238); 0 means unlimited.
@@ -57,21 +60,20 @@ const (
 	// no unit has nothing to count, so it enforces nothing.
 	//
 	// Deliberately distinct from budget.unit. That key names the unit whose
-	// reported total may RAISE the declared-cost spend (B16's max); this one
-	// names the unit the measured cap is taken over. Sharing one key would
-	// make an operator setting a token unit for one dimension silently arm the
-	// other.
+	// reported total may RAISE the declared-cost spend; this one names the
+	// unit the measured cap is taken over. Sharing one key would make an
+	// operator setting a token unit for one dimension silently arm the other.
 	KeyUsageBudgetUnit = "budget.usage.unit"
 	// KeyDispatchTTL is how long a dispatch manifest stays open before `next`
-	// auto-abandons it (docs/tdd/runs-dispatch.md §4.11, §5.5 P12).
+	// auto-abandons it.
 	//
-	// It is engine-side rather than instance policy for the reason §11.3 gives
+	// It is engine-side rather than instance policy for the reason that holds
 	// for every other enforced number: the expiry is what keeps a crashed relay
 	// from wedging a run, and a bound only a live relay could set would be a
 	// bound the crash case never gets.
 	KeyDispatchTTL = "dispatch.ttl"
 	// KeyDispatchGrace is how long a claimed step may go unrecorded before it
-	// counts as a dispatch discrepancy (§5.8 D1).
+	// counts as a dispatch discrepancy.
 	//
 	// It is DELIBERATELY a different key from `lease.ttl.default` even though
 	// both measure silence. A lease TTL decides when the engine takes work back;
@@ -84,40 +86,70 @@ const (
 	KeyContextErrorBytes = "context.error_bytes"
 
 	// KeyEventsRetain is the RETENTION WINDOW: how long an event must have
-	// existed before `events prune` may delete it
-	// (docs/tdd/events-follow.md §5.3 P12).
+	// existed before `events prune` may delete it.
 	//
-	// It is engine-spec §3's "artifact-retention boundary", implemented as the
-	// one window a future artifact GC would also read. §3 lists prune and
-	// "artifact GC per run-retention config" as one lifecycle, and no artifact
-	// GC ships at stage 7 — so read literally there would be no boundary to
-	// cross. Implementing it as this window means the GC inherits a boundary
-	// already enforced rather than one retrofitted, and the reading can only
-	// ever REFUSE MORE than the literal one would.
+	// It is the "artifact-retention boundary", implemented as the one window a
+	// future artifact GC would also read. Prune and "artifact GC per
+	// run-retention config" are one lifecycle, and no artifact GC ships — so
+	// read literally there would be no boundary to cross. Implementing it as
+	// this window means the GC inherits a boundary already enforced rather
+	// than one retrofitted, and the reading can only ever REFUSE MORE than the
+	// literal one would.
 	//
-	// THE READING IS RECORDED AS AN AMENDMENT rather than made silently,
-	// including the objection a reviewer would raise — that a key spelled
-	// `events.retain` governing only events is not what "artifact-retention"
-	// names.
+	// THE READING IS DELIBERATE, and it carries a known objection: a key
+	// spelled `events.retain` governing only events is not what
+	// "artifact-retention" names.
 	//
-	// The default is "0", which means RETAIN EVERYTHING: prune refuses every
-	// event until an operator states a policy. That is the dormant posture —
-	// Docket deletes nothing an operator did not ask it to delete.
+	// The default is "0", which imposes NO RETENTION WINDOW: prune at 0 is
+	// bounded only by its `--before` or `--before-run` target and the live-run
+	// refusal, not by age. That is the dormant posture — nothing is deleted
+	// until an operator runs prune with a target.
 	KeyEventsRetain = "events.retain"
 
 	// KeyVoteRulePrefix is the named-threshold-configuration namespace:
-	// vote.rule.<name>.threshold and vote.rule.<name>.criticality
-	// (gates-trust §8.3).
+	// vote.rule.<name>.threshold, vote.rule.<name>.criticality,
+	// vote.rule.<name>.sealed and vote.rule.<name>.hold_on_dissent.
 	//
 	// A workflow's `type="vote"` step names a rule rather than passing flags,
 	// because a step cannot pass flags. The <name> is an OPAQUE string exactly
 	// as lease.ttl.<class>'s class is, and this reuses the config machinery
 	// rather than adding a table: a rule "exists" iff its `.threshold` is set.
 	KeyVoteRulePrefix = "vote.rule."
-	// KeyVoteRuleThresholdSuffix and KeyVoteRuleCriticalitySuffix complete a
-	// rule's two keys.
-	KeyVoteRuleThresholdSuffix   = ".threshold"
-	KeyVoteRuleCriticalitySuffix = ".criticality"
+	// KeyVoteRuleThresholdSuffix, KeyVoteRuleCriticalitySuffix,
+	// KeyVoteRuleSealedSuffix and KeyVoteRuleHoldOnDissentSuffix complete a
+	// rule's four keys.
+	//
+	// `.sealed` is opt-in and defaults to false: a sealed rule opens proposals
+	// whose casts the read verbs withhold (verdict, weights, findings, summary)
+	// until the tally closes the proposal, so a seat reading the ballot cannot
+	// anchor on a sibling's verdict. It is a RENDERING rule only — the tally
+	// and the one-cast-per-voter constraint never consult it.
+	//
+	// `.hold_on_dissent` is opt-in and defaults to false (DKT-2449): under a
+	// keyed rule an APPROVED tally that carries at least one `reject` parks
+	// the vote step for the operator instead of passing. The tally itself is
+	// untouched — the weighted mean is still db.CastVote's — and the park is
+	// strictly additive: it displaces a `pass` and never a fail route.
+	KeyVoteRuleThresholdSuffix     = ".threshold"
+	KeyVoteRuleCriticalitySuffix   = ".criticality"
+	KeyVoteRuleSealedSuffix        = ".sealed"
+	KeyVoteRuleHoldOnDissentSuffix = ".hold_on_dissent"
+
+	// retiredVoteRuleRosterSuffix and retiredVoteRuleWeightingSuffix are the
+	// two vote-rule keys DKT-2448 registered and DKT-2764 RETIRED. Who may
+	// cast and what a cast is worth are AUTHORIZATION decisions, and a config
+	// key carries none: `docket config set` has no per-caller identity, so a
+	// seat constrained by a rule could rewrite the rule before casting. Both
+	// switches now live on the vote step (`roster`, `weighting` in the
+	// `[[step]]` table), pinned at activation with `voters`.
+	//
+	// The suffixes survive only so `config set` can refuse them BY NAME and
+	// point at the field that replaced each — a key that stopped existing
+	// would otherwise refuse as "unknown", and an operator who read the old
+	// docs would not learn where the switch went. Nothing reads a stored
+	// value under either key; a legacy row is inert.
+	retiredVoteRuleRosterSuffix    = ".roster"
+	retiredVoteRuleWeightingSuffix = ".weighting"
 
 	// KeyVoteHoldRule and KeyVoteHoldVoters configure how a MATERIALIZED HELD
 	// step is decided: by one operator (the default) or by a tally.
@@ -140,13 +172,24 @@ const (
 	// whichever pipeline held, so who answers it is a project-level policy.
 	KeyVoteHoldRule   = "vote.hold.rule"
 	KeyVoteHoldVoters = "vote.hold.voters"
+	// KeyVoteHoldCost is the declared `expected_cost` a MATERIALIZED HELD vote
+	// step is minted with (DKT-584). An engine-minted held ballot has no
+	// `[[step]]` table to declare a cost in, so it carried 0 by construction —
+	// and since a vote step's declared cost accrues to the budget floor at
+	// materialization, that made every held panel invisible to the floor.
+	//
+	// Default "0", which is EXACTLY the prior behavior: a held ballot accrues
+	// nothing until an instance states what its panels cost. It applies only
+	// when a hold is minted as `vote` (both vote.hold.* keys set); a hold
+	// minted `human` is one operator's decision, not a panel's spend.
+	KeyVoteHoldCost = "vote.hold.cost"
 
-	// KeyAutoRegister toggles §9's auto-registration: whether `run activate`
+	// KeyAutoRegister toggles auto-registration: whether `run activate`
 	// registers a workflow/schema it finds in an instance-config root
 	// (~/.docket/config, <repo>/.docket/config) on its own, or leaves that to
 	// an explicit `workflow register` / `schema register`.
 	//
-	// DEFAULT TRUE — auto-registration is the zero-touch behavior §9 exists
+	// DEFAULT TRUE — auto-registration is the zero-touch behavior it exists
 	// for, and an operator who wants it off states that, rather than every
 	// operator who wants it (the common case) opting in project by project.
 	//
@@ -188,18 +231,18 @@ const (
 	// existing proposal machinery already understands.
 	KindCriticality
 	// KindRetentionWindow is a duration that may also be ZERO, where zero means
-	// "retain everything" rather than "retain nothing"
-	// (docs/tdd/events-follow.md §5.3 P13).
+	// "no retention window": prune holds back no event by age.
 	//
 	// It is a separate kind from KindDuration because that one rejects zero —
 	// correctly, since a zero lease TTL would expire a claim the instant it was
-	// made. Here zero is the DEFAULT and the safe end of the range: a retention
-	// window nobody set must protect every event, not expose every event.
+	// made. Here zero is the DEFAULT: a window nobody set adds no age boundary,
+	// and prune's explicit target and live-run refusal still bound what it
+	// deletes.
 	KindRetentionWindow
 	// KindUnitName is an OPAQUE unit name, or empty. Core never enumerates
 	// units and never has a default one, so the only validation possible is the
 	// shape a name must have to be usable as a ledger key — the same caps
-	// `--usage` applies to the names it records (§4.9 B36): at most 64 bytes,
+	// `--usage` applies to the names it records: at most 64 bytes,
 	// printable ASCII, no whitespace. Anything beyond that would be core
 	// deciding which units exist.
 	KindUnitName
@@ -222,12 +265,19 @@ const (
 	// every other kind — a reader that needs the parsed bool calls ParseBool
 	// itself, the same way a reader of KindDuration calls ParseDuration.
 	KindBool
+	// KindClassMax is a positive integer or ClassMaxAuto: a class's
+	// concurrency cap, where zero or a negative number would admit nothing.
+	KindClassMax
 )
 
+// ClassMaxAuto is the limits.max.<class> value that derives the cap from the
+// host's CPU count when the scheduler reads it.
+const ClassMaxAuto = "auto"
+
 // NameMaxBytes caps an opaque name stored in config or recorded in a ledger,
-// per §1.3's security note: such a name is attacker-controlled text that lands
-// in a ledger and in a report. ONE number for every opaque-name validator, so
-// two of them cannot drift apart.
+// because such a name is attacker-controlled text that lands in a ledger and in
+// a report. ONE number for every opaque-name validator, so two of them cannot
+// drift apart.
 const NameMaxBytes = 64
 
 // UnitNameMaxBytes is NameMaxBytes under the name `--usage`'s validator has
@@ -258,7 +308,7 @@ func validateName(noun, name string) error {
 	return nil
 }
 
-// ValidateUnitName is B36's shape rule for a unit name, shared by
+// ValidateUnitName is the shape rule for a unit name, shared by
 // `--usage`'s parser and `docket config set budget.unit`.
 //
 // `tokens`, `pages`, and `sheets` are equally valid: core has no list.
@@ -318,10 +368,9 @@ type ConfigSpec struct {
 
 // engineConfigSpecs is the known-key set with core's default values.
 //
-// These defaults are CORE's, not the reference instance's. engine-spec.md §8 is
-// explicit that its numbers are instance data and that "core ships with no
-// opinions here", so they are chosen as neutral engineering values rather than
-// copied. Rationale per key is in docs/tdd/claims-leases.md §3.3.
+// These defaults are CORE's, not the reference instance's. Their numbers are
+// instance data and core ships with no opinions here, so they are chosen as
+// neutral engineering values rather than copied.
 var engineConfigSpecs = []ConfigSpec{
 	{
 		Key:     KeyLeaseTTLDefault,
@@ -345,7 +394,7 @@ var engineConfigSpecs = []ConfigSpec{
 		Key:  KeyBudgetUnit,
 		Kind: KindUnitName,
 		// Empty is the default AND the only value core ships. The doc line says
-		// exactly what §4.5 argues, and it passes the stranger test on its face:
+		// exactly that, and it passes the stranger test on its face:
 		// a team tracking a documentation sprint reads it and understands that
 		// leaving it alone means their cap counts declared costs.
 		Default: "",
@@ -381,14 +430,15 @@ var engineConfigSpecs = []ConfigSpec{
 		Kind:    KindDuration,
 		Default: "15m",
 		Doc: "How long a claimed step may go unrecorded before it counts as a " +
-			"dispatch discrepancy",
+			"dispatch discrepancy, and how long after a run's newest step record " +
+			"its unbilled steps stay usage-pending rather than missing",
 	},
 	{
 		Key:     KeyEventsRetain,
 		Kind:    KindRetentionWindow,
 		Default: "0",
 		Doc: "How long events are protected from `events prune`; 0 (the default) " +
-			"retains everything",
+			"imposes no retention window",
 	},
 	{
 		Key:  KeyVoteHoldRule,
@@ -407,6 +457,14 @@ var engineConfigSpecs = []ConfigSpec{
 		Default: "",
 		Doc: "Comma-separated voters on a materialized held step. Empty (the " +
 			"default) mints held steps as `human` for one operator to decide",
+	},
+	{
+		Key:     KeyVoteHoldCost,
+		Kind:    KindNonNegativeNumber,
+		Default: "0",
+		Doc: "Declared expected_cost a materialized held VOTE step is minted " +
+			"with, accrued to the run's budget floor at materialization. 0 " +
+			"(the default) accrues nothing, the prior behavior",
 	},
 	{
 		Key:     KeyAutoRegister,
@@ -454,9 +512,18 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 		}, nil
 	}
 
-	// vote.rule.<name>.threshold / .criticality (gates-trust §8.3), matched
-	// dynamically for the same reason the per-class TTL is: <name> is an
-	// opaque string, so the set of valid keys is open by design.
+	if class, ok := strings.CutPrefix(key, KeyClassMaxPrefix); ok && class != "" {
+		return ConfigSpec{
+			Key:  key,
+			Kind: KindClassMax,
+			Doc: fmt.Sprintf("Concurrency cap for class %q, replacing the "+
+				"pinned [limits] max; %q derives it from the host's CPUs", class, ClassMaxAuto),
+		}, nil
+	}
+
+	// vote.rule.<name>.threshold / .criticality / .sealed / .hold_on_dissent,
+	// matched dynamically for the same reason the per-class TTL is: <name> is
+	// an opaque string, so the set of valid keys is open by design.
 	if rest, ok := strings.CutPrefix(key, KeyVoteRulePrefix); ok {
 		if name, found := strings.CutSuffix(rest, KeyVoteRuleThresholdSuffix); found && name != "" {
 			return ConfigSpec{
@@ -473,6 +540,44 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 				Doc:     fmt.Sprintf("Criticality for vote rule %q", name),
 			}, nil
 		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleSealedSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether proposals opened under vote rule %q "+
+					"withhold their casts from the read verbs until the tally "+
+					"closes them; false (the default) renders every cast as it lands", name),
+			}, nil
+		}
+		// The two RETIRED identity keys (DKT-2764) refuse by name, pointing
+		// at the vote-step field that replaced each. They fall under
+		// ErrUnknownConfigKey so the CLI reports them as VALIDATION_ERROR
+		// exactly as any other key it does not know.
+		if name, found := strings.CutSuffix(rest, retiredVoteRuleRosterSuffix); found && name != "" {
+			return ConfigSpec{}, fmt.Errorf(
+				"%w: %q is retired; who may cast is declared on the vote step "+
+					"itself, `roster = \"strict\"` in its [[step]] table, pinned at "+
+					"activation — a config key carries no authorization",
+				ErrUnknownConfigKey, key)
+		}
+		if name, found := strings.CutSuffix(rest, retiredVoteRuleWeightingSuffix); found && name != "" {
+			return ConfigSpec{}, fmt.Errorf(
+				"%w: %q is retired; what a cast is worth is declared on the vote "+
+					"step itself, `weighting = \"equal\"` in its [[step]] table, "+
+					"pinned at activation — a config key carries no authorization",
+				ErrUnknownConfigKey, key)
+		}
+		if name, found := strings.CutSuffix(rest, KeyVoteRuleHoldOnDissentSuffix); found && name != "" {
+			return ConfigSpec{
+				Key:     key,
+				Kind:    KindBool,
+				Default: "false",
+				Doc: fmt.Sprintf("Whether an APPROVED tally under vote rule %q "+
+					"that carries at least one reject parks its step for the "+
+					"operator; false (the default) routes it as before", name),
+			}, nil
+		}
 	}
 
 	return ConfigSpec{}, fmt.Errorf("%w: %q (known keys: %s)",
@@ -481,14 +586,17 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 
 // KnownConfigKeys lists the fixed keys, plus the open-ended patterns.
 func KnownConfigKeys() []string {
-	keys := make([]string, 0, len(engineConfigSpecs)+3)
+	keys := make([]string, 0, len(engineConfigSpecs)+6)
 	for _, spec := range engineConfigSpecs {
 		keys = append(keys, spec.Key)
 	}
 	keys = append(keys,
 		KeyLeaseTTLPrefix+"<class>",
+		KeyClassMaxPrefix+"<class>",
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleThresholdSuffix,
 		KeyVoteRulePrefix+"<name>"+KeyVoteRuleCriticalitySuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleSealedSuffix,
+		KeyVoteRulePrefix+"<name>"+KeyVoteRuleHoldOnDissentSuffix,
 	)
 	return keys
 }
@@ -544,7 +652,7 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 			return fmt.Errorf("%s: %w", spec.Key, err)
 		}
 	case KindRetentionWindow:
-		// "0" is the documented way to say "retain everything", so it is parsed
+		// "0" is the documented way to say "no retention window", so it is parsed
 		// before the duration parser gets it — `time.ParseDuration("0")` happens
 		// to accept a bare zero, but relying on that would make the key's
 		// contract depend on a parser's tolerance.
@@ -554,12 +662,12 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 		d, err := time.ParseDuration(value)
 		if err != nil {
 			return fmt.Errorf(
-				"%s must be a duration such as \"720h\", or 0 to retain everything: %w",
+				"%s must be a duration such as \"720h\", or 0 for no retention window: %w",
 				spec.Key, err)
 		}
 		if d < 0 {
 			return fmt.Errorf(
-				"%s must not be negative, got %q — 0 retains everything",
+				"%s must not be negative, got %q — 0 imposes no retention window",
 				spec.Key, value)
 		}
 	case KindUnitName:
@@ -590,12 +698,101 @@ func ValidateConfigValue(spec ConfigSpec, value string) error {
 			return fmt.Errorf(
 				"%s must be a boolean (true/false), got %q", spec.Key, value)
 		}
+	case KindClassMax:
+		if value == ClassMaxAuto {
+			return nil
+		}
+		if _, err := parseClassMax(spec.Key, value); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// VoteRuleThresholdKey and VoteRuleCriticalityKey build a rule's two keys, so
-// the string concatenation lives in one place rather than at every reader.
+// parseClassMax reads a numeric limits.max.<class> value: an integer >= 1.
+func parseClassMax(key, value string) (int, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a positive integer or %q, got %q",
+			key, ClassMaxAuto, value)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("%s must be >= 1, got %d", key, n)
+	}
+	return n, nil
+}
+
+// ClassMaxOverridesTx resolves every set limits.max.<class> inside the
+// scheduler's snapshot transaction, keyed by class, in one statement however
+// many classes a run names. A project's override wins over the store-wide
+// value, GetConfig's order. A class absent from the map keeps its pinned
+// `[limits]` max.
+//
+// ClassMaxAuto resolves here, at read time, to half the host's logical CPUs
+// and never below one, so the value tracks whichever host runs the scheduler;
+// its entry keeps Auto set so a report can say the cap was derived.
+func ClassMaxOverridesTx(tx *sql.Tx, projectID int) (map[string]ClassMaxOverride, error) {
+	storePrefix := metaConfigPrefix + KeyClassMaxPrefix
+	projectPrefix := projectConfigKey(projectID, KeyClassMaxPrefix)
+	rows, err := tx.Query(
+		`SELECT key, value FROM meta
+		  WHERE substr(key, 1, ?) = ? OR (? != 0 AND substr(key, 1, ?) = ?)
+		  ORDER BY key`,
+		len(storePrefix), storePrefix,
+		projectID, len(projectPrefix), projectPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("reading class caps: %w", err)
+	}
+	defer rows.Close()
+
+	stored := map[string]string{}
+	overridden := map[string]bool{}
+	for rows.Next() {
+		var metaKey, value string
+		if err := rows.Scan(&metaKey, &value); err != nil {
+			return nil, fmt.Errorf("reading a class cap: %w", err)
+		}
+		if class, ok := strings.CutPrefix(metaKey, projectPrefix); ok && projectID != 0 {
+			stored[class] = value
+			overridden[class] = true
+		} else if class, ok := strings.CutPrefix(metaKey, storePrefix); ok && !overridden[class] {
+			stored[class] = value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading class caps: %w", err)
+	}
+
+	caps := make(map[string]ClassMaxOverride, len(stored))
+	for class, value := range stored {
+		if value == ClassMaxAuto {
+			caps[class] = ClassMaxOverride{Max: autoClassMax(runtime.NumCPU()), Auto: true}
+			continue
+		}
+		n, err := parseClassMax(KeyClassMaxPrefix+class, value)
+		if err != nil {
+			return nil, err
+		}
+		caps[class] = ClassMaxOverride{Max: n}
+	}
+	return caps, nil
+}
+
+// ClassMaxOverride is one resolved limits.max.<class> value: the cap, and
+// whether it came from ClassMaxAuto rather than a number.
+type ClassMaxOverride struct {
+	Max  int
+	Auto bool
+}
+
+// autoClassMax is ClassMaxAuto's formula.
+func autoClassMax(cpus int) int {
+	return max(1, cpus/2)
+}
+
+// VoteRuleThresholdKey, VoteRuleCriticalityKey, VoteRuleSealedKey and
+// VoteRuleHoldOnDissentKey build a rule's four keys, so the string
+// concatenation lives in one place rather than at every reader.
 func VoteRuleThresholdKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleThresholdSuffix
 }
@@ -604,9 +801,17 @@ func VoteRuleCriticalityKey(rule string) string {
 	return KeyVoteRulePrefix + rule + KeyVoteRuleCriticalitySuffix
 }
 
+func VoteRuleSealedKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleSealedSuffix
+}
+
+func VoteRuleHoldOnDissentKey(rule string) string {
+	return KeyVoteRulePrefix + rule + KeyVoteRuleHoldOnDissentSuffix
+}
+
 // VoteRuleExists reports whether a rule is registered.
 //
-// A rule EXISTS IFF its threshold is set (§8.3). Criticality has a default, so
+// A rule EXISTS IFF its threshold is set. Criticality has a default, so
 // it cannot be the existence test: a rule with only a criticality set would
 // tally at no threshold at all.
 func VoteRuleExists(db *sql.DB, projectID int, rule string) (bool, error) {
@@ -618,10 +823,10 @@ func VoteRuleExists(db *sql.DB, projectID int, rule string) (bool, error) {
 }
 
 // VoteRuleExistsTx and RegisteredVoteRulesTx are the two above inside a
-// CALLER'S transaction, for S6's auto-registration (docs/tdd/runs-dispatch.md
-// §9.2 F7/F8): the scan validates a workflow's `vote_rule` references with the
-// SAME rules `workflow register` applies, and it does so inside activation's fat
-// transaction, where a pool read would deadlock against the one-connection pool.
+// CALLER'S transaction, for auto-registration: the scan validates a
+// workflow's `vote_rule` references with the SAME rules `workflow register`
+// applies, and it does so inside activation's fat transaction, where a pool
+// read would deadlock against the one-connection pool.
 //
 // They read `meta` directly rather than going through GetConfig, because a
 // vote rule's key is DYNAMIC (`vote.rule.<name>.threshold`) and has no spec row
@@ -743,28 +948,68 @@ func effectiveConfigProject(projectID int, key string) int {
 // SetConfig stores a validated engine-configuration value. A non-zero
 // projectID writes the project's override; zero writes the store-wide
 // default every project falls back to.
+//
+// It is SetConfigTx in a transaction of its own; the validation, the key
+// shape and the upsert are that function's, stated once.
 func SetConfig(db *sql.DB, projectID int, key, value string) error {
-	spec, err := LookupConfigSpec(key)
+	tx, err := db.Begin()
 	if err != nil {
+		return fmt.Errorf("storing config %s: %w", key, err)
+	}
+	defer tx.Rollback()
+	if _, err := SetConfigTx(tx, projectID, key, value); err != nil {
 		return err
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("storing config %s: %w", key, err)
+	}
+	return nil
+}
+
+// SetConfigTx is SetConfig inside a CALLER'S transaction (DKT-2563), and it
+// returns the value the SAME scope row held before the write — empty when the
+// key was unset at that scope.
+//
+// It exists so a write to a security-load-bearing key can be recorded in the
+// same transaction as the write itself: the config-changed event carries the
+// prior and the new value, and an event committed separately from the write
+// it describes could survive a write that rolled back, or vice versa. The
+// prior value is read here, under the transaction, rather than by the caller
+// through GetConfig — a pool read from inside a transaction deadlocks against
+// internal/db's single connection, the same constraint GetConfigTx exists for.
+//
+// "Prior" is the row at THIS scope (the project's override, or the store-wide
+// default), not the effective value GetConfig would resolve: the event
+// describes what the write replaced, and a project override replaces nothing
+// store-wide.
+func SetConfigTx(tx *sql.Tx, projectID int, key, value string) (prior string, err error) {
+	spec, err := LookupConfigSpec(key)
+	if err != nil {
+		return "", err
+	}
 	if err := ValidateConfigValue(spec, value); err != nil {
-		return err
+		return "", err
 	}
 
 	metaKey := metaConfigPrefix + key
 	if projectID = effectiveConfigProject(projectID, key); projectID != 0 {
 		metaKey = projectConfigKey(projectID, key)
 	}
-	_, err = db.Exec(
+
+	err = tx.QueryRow(`SELECT value FROM meta WHERE key = ?`, metaKey).Scan(&prior)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("reading the prior value of config %s: %w", key, err)
+	}
+
+	_, err = tx.Exec(
 		`INSERT INTO meta (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		metaKey, value,
 	)
 	if err != nil {
-		return fmt.Errorf("storing config %s: %w", key, err)
+		return "", fmt.Errorf("storing config %s: %w", key, err)
 	}
-	return nil
+	return prior, nil
 }
 
 // ConfigEntry is one key's effective value and where it came from.
@@ -862,8 +1107,9 @@ func GetConfigTx(tx *sql.Tx, projectID int, key string) (ConfigEntry, error) {
 }
 
 // ListConfig returns every fixed key's effective value for one project, plus
-// every per-class TTL that has been explicitly set — store-wide or as a
-// project override, the override winning. Sorted for deterministic output.
+// every per-class TTL and class cap that has been explicitly set — store-wide
+// or as a project override, the override winning. Sorted for deterministic
+// output.
 func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 	entries := make([]ConfigEntry, 0, len(engineConfigSpecs))
 	for _, spec := range engineConfigSpecs {
@@ -874,9 +1120,9 @@ func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 		entries = append(entries, entry)
 	}
 
-	// Explicitly-set class TTLs, from the store-wide namespace first and the
-	// project namespace second so an override replaces its fallback.
-	classTTLs := map[string]ConfigEntry{}
+	// Explicitly-set per-class keys, from the store-wide namespace first and
+	// the project namespace second so an override replaces its fallback.
+	classEntries := map[string]ConfigEntry{}
 	collect := func(pattern, trimPrefix string) error {
 		rows, err := db.Query(
 			`SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key`, pattern)
@@ -893,33 +1139,35 @@ func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 			if key == KeyLeaseTTLDefault {
 				continue // already listed among the fixed keys
 			}
-			classTTLs[key] = ConfigEntry{Key: key, Value: value, Source: "set"}
+			classEntries[key] = ConfigEntry{Key: key, Value: value, Source: "set"}
 		}
 		return rows.Err()
 	}
-	if err := collect(metaConfigPrefix+KeyLeaseTTLPrefix+"%", metaConfigPrefix); err != nil {
-		return nil, err
-	}
-	if projectID != 0 {
-		prefix := fmt.Sprintf("%sp%d.", metaConfigPrefix, projectID)
-		if err := collect(prefix+KeyLeaseTTLPrefix+"%", prefix); err != nil {
+	for _, family := range []string{KeyLeaseTTLPrefix, KeyClassMaxPrefix} {
+		if err := collect(metaConfigPrefix+family+"%", metaConfigPrefix); err != nil {
 			return nil, err
+		}
+		if projectID != 0 {
+			prefix := fmt.Sprintf("%sp%d.", metaConfigPrefix, projectID)
+			if err := collect(prefix+family+"%", prefix); err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	keys := make([]string, 0, len(classTTLs))
-	for k := range classTTLs {
+	keys := make([]string, 0, len(classEntries))
+	for k := range classEntries {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		entries = append(entries, classTTLs[k])
+		entries = append(entries, classEntries[k])
 	}
 	return entries, nil
 }
 
-// EventsRetain resolves the retention window, with 0 meaning "retain
-// everything" (docs/tdd/events-follow.md §5.3).
+// EventsRetain resolves the retention window, with 0 meaning "no retention
+// window".
 //
 // It returns the DURATION rather than a cutoff timestamp, because the caller
 // computes the cutoff inside the prune's own transaction against that
@@ -945,8 +1193,9 @@ func EventsRetain(db *sql.DB) (time.Duration, error) {
 
 // AutoRegisterEnabledTx resolves KeyAutoRegister inside a CALLER'S
 // transaction — activation's own, since that is the only place this reads
-// (§9's scan runs inside activateTx, and a pool read there would deadlock
-// against the one-connection pool exactly as VoteRuleExistsTx's doc explains).
+// (the auto-registration scan runs inside activateTx, and a pool read there
+// would deadlock against the one-connection pool exactly as
+// VoteRuleExistsTx's doc explains).
 //
 // The parse cannot fail on a value that reached storage: SetConfig already
 // ran it through ValidateConfigValue's KindBool case, which is the same

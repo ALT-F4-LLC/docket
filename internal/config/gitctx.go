@@ -23,7 +23,7 @@ type gitContext struct {
 	// bare-repo layout (repo.git with worktree subdirectories) resolves to the
 	// bare directory itself.
 	//
-	// This stays a FILESYSTEM PATH deliberately, for internal/trust's §3.4 P1
+	// This stays a FILESYSTEM PATH deliberately, for internal/trust's
 	// reason: remote URLs and root commits are repo-controlled and survive a
 	// hostile clone; where the repository sits on the operator's disk is not
 	// and does not.

@@ -9,7 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestFenceSplitterExpandsNothing is §5.2 K2's table.
+// TestFenceSplitterExpandsNothing proves the splitter expands nothing.
 //
 // The splitter is the ONE piece of new parsing this stage adds to a security
 // path, so its NON-GOALS are tested as hard as its goals: every metacharacter
@@ -139,7 +139,7 @@ func TestFenceSplitterRefusesUnterminatedQuotes(t *testing.T) {
 }
 
 // TestFenceSplitterRefusalRendersControlBytes ties the splitter's reason to
-// §5.7: a hostile fence line's bytes must not reach a terminal raw.
+// the renderer: a hostile fence line's bytes must not reach a terminal raw.
 func TestFenceSplitterRefusalRendersControlBytes(t *testing.T) {
 	_, err := Split("make test\x1b[2K\r \"unterminated")
 	if err == nil {

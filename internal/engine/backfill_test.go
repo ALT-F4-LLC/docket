@@ -6,15 +6,16 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // The usage back-fill verb, and the wedge it retires.
 //
-// docs/tdd/usage-backfill-wedge.md. E-3 (no back-fill verb), E-4 (acceptance
-// cannot clear D2), and E-12 (the D2 refusal starves action steps) are one
-// defect: usage that was measured had no way into the ledger, so D2 correctly
-// and permanently reported a gap the engine gave nobody a way to close.
+// Three symptoms — no back-fill verb, acceptance that cannot clear D2, and a
+// D2 refusal that starves action steps — are one defect: usage that was
+// measured had no way into the ledger, so D2 correctly and permanently
+// reported a gap the engine gave nobody a way to close.
 
 // completeWithoutUsage claims a step and completes it with NO `--usage`, which
 // is what an executor that cannot know its own spend does.
@@ -47,7 +48,7 @@ func usageRowsFor(t *testing.T, conn *sql.DB, stepID int) []db.UsageRow {
 	return out
 }
 
-// TestBackfillRetiresTheD2Wedge is §4.1 — RUN-3's exact shape, end to end, and
+// TestBackfillRetiresTheD2Wedge is RUN-3's exact shape, end to end, and
 // the regression that would have caught the run-ending wedge.
 //
 // An executor completes without `--usage`; `next` refuses forever because D2's
@@ -69,17 +70,19 @@ func TestBackfillRetiresTheD2Wedge(t *testing.T) {
 	// D2 is the subject, and it must be the ONLY thing refusing.
 	//
 	// ABANDON, not `close --accept-missing-usage`. This line used to close
-	// with the acceptance flag and then assert that D2 still stood — E-4, the
+	// with the acceptance flag and then assert that D2 still stood — the
 	// finding that acceptance cleared the manifest and not the block. DKT-315
 	// fixed that: the acceptance now settles the accepted steps, so closing
 	// that way would retire the very discrepancy the back-fill is here to
 	// retire. `abandon` retires the manifest and accepts nothing, which is
 	// exactly the state this test needs.
-	_, err := e.AbandonDispatch(conn, runID, "clearing the manifest", nowMS)
+	_, err := abandonAsConductor(conn, e, runID, "clearing the manifest", nowMS)
 	testsupport.Must(t, err, "dispatch abandon: %v", err)
 
-	// D2 stands: the step ran and reported nothing, and nobody has accepted it.
-	_, err = e.NextSteps(conn, runID, 0, nowMS)
+	// D2 stands once the grace lapses: the step ran and reported nothing,
+	// and nobody has accepted it.
+	past := nowMS + graceMS(t, conn) + 1
+	_, err = e.NextSteps(conn, runID, 0, past)
 	if err == nil {
 		t.Fatal("`next` answered despite a missing-usage discrepancy; this " +
 			"test's premise is that it refuses")
@@ -89,14 +92,14 @@ func TestBackfillRetiresTheD2Wedge(t *testing.T) {
 			err, DiscrepancyMissingUsage)
 	}
 
-	// E-3: the back-fill carries the relay's measured usage into the ledger.
+	// The back-fill carries the relay's measured usage into the ledger.
 	_, err = e.BackfillUsage(conn, runID, []BackfillRow{
 		{Step: implID, Unit: "tokens", Quantity: 48211},
 	}, "", "", nowMS)
 	testsupport.Must(t, err, "backfill-usage: %v", err)
 
-	// E-12: `next` answers, and the action step the refusal was starving is
-	// driven in its existing slot — no reordering (§1.5).
+	// `next` answers, and the action step the refusal was starving is
+	// driven in its existing slot — no reordering.
 	answer, err := e.NextSteps(conn, runID, 0, nowMS)
 	testsupport.Must(t, err, "`next` still refuses after the back-fill: %v — the ledger "+
 		"now holds the usage D2 was asking for", err)
@@ -126,7 +129,7 @@ func TestBackfillUsageSurvivesDispatchAbandon(t *testing.T) {
 	completeWithoutUsage(t, conn, e, implID)
 
 	// The wave is operator-stopped: abandon, not close.
-	_, err := e.AbandonDispatch(conn, runID, "operator stopped the wave", nowMS)
+	_, err := abandonAsConductor(conn, e, runID, "operator stopped the wave", nowMS)
 	testsupport.Must(t, err, "dispatch abandon: %v", err)
 
 	// The usage the relay measured before the abandon still lands.
@@ -147,7 +150,7 @@ func TestBackfillUsageSurvivesDispatchAbandon(t *testing.T) {
 
 // TestBackfillWritesTheLedgerRow pins the row the verb writes, including the
 // source that keeps a relay's reconstruction distinguishable from a claimant's
-// self-report (§1.3.2).
+// self-report.
 func TestBackfillWritesTheLedgerRow(t *testing.T) {
 	conn := mustDB(t)
 	e := testEngine()
@@ -167,13 +170,13 @@ func TestBackfillWritesTheLedgerRow(t *testing.T) {
 		t.Fatalf("wrote %d ledger rows, want 2 (one per unit)", len(rows))
 	}
 
-	// The step's RECORDED attempt (§1.3.1) — one claim happened, so 1.
+	// The step's RECORDED attempt — one claim happened, so 1.
 	for _, r := range rows {
 		if r.Attempt != 1 {
 			t.Errorf("unit %q landed at attempt %d, want 1 — the back-fill "+
 				"targets the step's recorded attempt", r.Unit, r.Attempt)
 		}
-		// §1.3.2: NEVER the empty string, which InsertUsageRowTx would default
+		// NEVER the empty string, which InsertUsageRowTx would default
 		// to "reported" — labelling a relay's reconstruction as a claimant's
 		// own report and destroying the distinction `source` exists for.
 		if r.Source == "" || r.Source == db.UsageSourceReported {
@@ -193,7 +196,7 @@ func TestBackfillWritesTheLedgerRow(t *testing.T) {
 }
 
 // TestBackfillSourceOverride pins that --source overrides the default and is
-// carried verbatim — core enumerates no sources (§1.4).
+// carried verbatim — core enumerates no sources.
 func TestBackfillSourceOverride(t *testing.T) {
 	conn := mustDB(t)
 	e := testEngine()
@@ -232,8 +235,8 @@ func TestBackfillRefusesADoubleBackfill(t *testing.T) {
 		t.Fatal("a second back-fill of the same (step, attempt, unit) " +
 			"succeeded; the unique key must refuse it rather than merge")
 	}
-	// The refusal is PHRASED, not raw SQLite text — §2's rule that a refusal
-	// names its way out. A relay re-running after a partial failure reads this.
+	// The refusal is PHRASED, not raw SQLite text, because a refusal must
+	// name its way out. A relay re-running after a partial failure reads this.
 	if code, ok := CodeOf(err); !ok || code != CodeConflict {
 		t.Errorf("the refusal has code %q, want CONFLICT", code)
 	}
@@ -247,7 +250,7 @@ func TestBackfillRefusesADoubleBackfill(t *testing.T) {
 	}
 }
 
-// TestBackfillIsAllOrNothing pins §1.3's one-transaction rule: a batch with one
+// TestBackfillIsAllOrNothing pins the one-transaction rule: a batch with one
 // bad row writes NOTHING, so a half-applied back-fill cannot leave a dispatch
 // that is neither closable nor honestly re-runnable.
 func TestBackfillIsAllOrNothing(t *testing.T) {
@@ -305,7 +308,211 @@ func TestBackfillRefusesAStepOfAnotherRun(t *testing.T) {
 	}
 }
 
-// TestBackfillLeavesOtherStepsRefusing is the other half of §4.2's last bullet:
+// ---- DKT-993: the never-claimed target -------------------------------------
+//
+// Harness RUN-66's conductor back-filled a wave journal whose join heuristic had
+// misattributed probe-agent tokens. The rows landed on STEP-3146 (`design-qa@1`,
+// `pending`, never claimed) and on a superseded step, and the engine took them
+// in silence — so `run report` showed spend on steps that never ran, with
+// nothing in the store saying where it came from.
+//
+// THE CONTRACT IS WARN-AND-RECORD. The row still lands (core cannot know that a
+// step which never claimed cost nothing, and enumerating which steps may have
+// cost would be core holding an opinion about how a relay measures its own
+// work); what ends is the silence.
+
+// TestBackfillNamesANeverClaimedTarget is the acceptance case verbatim: a row
+// against a `pending`, never-claimed step is REPORTED, naming the step and its
+// status — and is still recorded.
+func TestBackfillNamesANeverClaimedTarget(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	runID := dispatchRun(t, conn)
+	openDispatch(t, conn, runID, 0, nowMS)
+
+	// `verify@0` is downstream of everything and has never been offered, let
+	// alone claimed — RUN-66's `design-qa@1` shape. The premise is ASSERTED
+	// rather than assumed: if the fixture ever pre-claims this step, the test
+	// must fail here and not silently stop testing anything.
+	verifyID := stepIDByInstance(t, conn, "verify@0")
+	step, err := db.GetStep(conn, verifyID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepPending || step.Attempt != 0 {
+		t.Fatalf("premise: verify@0 is %q at attempt %d, want %q at attempt 0",
+			step.Status, step.Attempt, db.StepPending)
+	}
+
+	out, err := e.BackfillUsage(conn, runID, []BackfillRow{
+		{Step: verifyID, Unit: "cache_creation", Quantity: 8724},
+	}, "wave-journal:wf_68b7e3e1-abe", "", nowMS)
+	testsupport.Must(t, err, "backfill-usage: %v", err)
+
+	// Reported, by name and by status.
+	if len(out.Unclaimed) != 1 {
+		t.Fatalf("Unclaimed = %+v, want exactly one entry — the row landed on a "+
+			"step no worker ever claimed and the engine must say so", out.Unclaimed)
+	}
+	got := out.Unclaimed[0]
+	if got.Step != model.FormatStepID(verifyID) {
+		t.Errorf("the advisory names step %q, want %q — an instance repeats "+
+			"across issues and cannot be acted on alone",
+			got.Step, model.FormatStepID(verifyID))
+	}
+	if got.Instance != "verify@0" {
+		t.Errorf("the advisory names instance %q, want %q", got.Instance, "verify@0")
+	}
+	if got.Status != db.StepPending {
+		t.Errorf("the advisory reports status %q, want %q — the status is the "+
+			"whole diagnostic: it says the step has not run YET",
+			got.Status, db.StepPending)
+	}
+
+	// And the row IS recorded: warn-and-record, not reject.
+	if out.Written != 1 {
+		t.Errorf("Written = %d, want 1 — the advisory does not withhold the row",
+			out.Written)
+	}
+	rows := usageRowsFor(t, conn, verifyID)
+	if len(rows) != 1 || rows[0].Quantity != 8724 {
+		t.Fatalf("usage_ledger rows = %+v, want the one 8724 row; the contract "+
+			"is warn-and-record", rows)
+	}
+	if rows[0].Source != "wave-journal:wf_68b7e3e1-abe" {
+		t.Errorf("source = %q, want the given source verbatim", rows[0].Source)
+	}
+}
+
+// TestBackfillIsQuietForAClaimedTarget is the "existing valid back-fills
+// unchanged" half. The verb exists for a step that RAN and could not report its
+// own spend; that step must never draw the advisory.
+func TestBackfillIsQuietForAClaimedTarget(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	runID := dispatchRun(t, conn)
+	openDispatch(t, conn, runID, 0, nowMS)
+
+	implID := stepIDByInstance(t, conn, "implement@0")
+	completeWithoutUsage(t, conn, e, implID)
+
+	out, err := e.BackfillUsage(conn, runID, []BackfillRow{
+		{Step: implID, Unit: "tokens", Quantity: 48211},
+	}, "", "", nowMS)
+	testsupport.Must(t, err, "backfill-usage: %v", err)
+
+	if len(out.Unclaimed) != 0 {
+		t.Fatalf("Unclaimed = %+v on a claimed, completed step, want none — a "+
+			"warning on the verb's own reason for existing is noise that "+
+			"teaches conductors to ignore it", out.Unclaimed)
+	}
+}
+
+// TestBackfillNamesASupersededSweptTarget covers the evidence's second step
+// (STEP-3158, `verify-tribunal@1`, superseded).
+//
+// The loop's supersede sweep takes `pending` instances ONLY, so a swept step is
+// a never-claimed step: it warns by the same clause, and its `superseded` status
+// rides the advisory so an operator can tell it from a step merely waiting.
+func TestBackfillNamesASupersededSweptTarget(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	// A real fix-loop entry, through the engine: `commit@0` is downstream of
+	// `after_loop` and unclaimed, so the sweep supersedes it.
+	driveToVerify(t, conn, e, 0)
+	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
+
+	commitID := stepIDByInstance(t, conn, "commit@0")
+	step, err := db.GetStep(conn, commitID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepSuperseded || step.Attempt != 0 {
+		t.Fatalf("premise: commit@0 is %q at attempt %d, want %q at attempt 0",
+			step.Status, step.Attempt, db.StepSuperseded)
+	}
+
+	out, err := e.BackfillUsage(conn, run.ID, []BackfillRow{
+		{Step: commitID, Unit: "cache_read", Quantity: 8336},
+	}, "", "", nowMS)
+	testsupport.Must(t, err, "backfill-usage: %v", err)
+
+	if len(out.Unclaimed) != 1 || out.Unclaimed[0].Status != db.StepSuperseded {
+		t.Fatalf("Unclaimed = %+v, want one entry reporting %q",
+			out.Unclaimed, db.StepSuperseded)
+	}
+	if rows := usageRowsFor(t, conn, commitID); len(rows) != 1 {
+		t.Errorf("usage_ledger rows = %+v, want the one row; the contract is "+
+			"warn-and-record", rows)
+	}
+}
+
+// TestBackfillIsQuietForASupersededStepThatRan is the discrimination the status
+// alone could not make, and the reason the predicate is the CLAIM.
+//
+// `step resolve --as fix-round` supersedes the step it authorizes a round for —
+// a step that claimed, ran, and spent. Its usage is real, and back-filling it is
+// D2's own documented resolution, so warning on `superseded` as a status would
+// have fired on the legitimate path.
+func TestBackfillIsQuietForASupersededStepThatRan(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	e := testEngine()
+
+	driveToVerify(t, conn, e, 0)
+	claimAndComplete(t, conn, e, "verify@0", "report", unverifiablePayload)
+
+	verifyID := stepIDByInstance(t, conn, "verify@0")
+	testsupport.Must(t, e.ResolveStep(conn, verifyID, ResolveFixRound,
+		"one more round", nowMS), "resolve --as fix-round: %v", nil)
+
+	step, err := db.GetStep(conn, verifyID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepSuperseded || step.Attempt == 0 {
+		t.Fatalf("premise: verify@0 is %q at attempt %d, want %q at a nonzero "+
+			"attempt", step.Status, step.Attempt, db.StepSuperseded)
+	}
+
+	out, err := e.BackfillUsage(conn, run.ID, []BackfillRow{
+		{Step: verifyID, Unit: "tokens", Quantity: 1200},
+	}, "", "", nowMS)
+	testsupport.Must(t, err, "backfill-usage: %v", err)
+
+	if len(out.Unclaimed) != 0 {
+		t.Fatalf("Unclaimed = %+v for a superseded step that CLAIMED and ran, "+
+			"want none — its spend is real and this is D2's own way out",
+			out.Unclaimed)
+	}
+}
+
+// TestBackfillNamesEachUnclaimedTargetOnce pins the advisory's shape on a batch:
+// one entry per STEP (not per row), in the order the batch named them, so two
+// identical batches produce identical output.
+func TestBackfillNamesEachUnclaimedTargetOnce(t *testing.T) {
+	conn := mustDB(t)
+	e := testEngine()
+	runID := dispatchRun(t, conn)
+	openDispatch(t, conn, runID, 0, nowMS)
+
+	implID := stepIDByInstance(t, conn, "implement@0")
+	completeWithoutUsage(t, conn, e, implID)
+	verifyID := stepIDByInstance(t, conn, "verify@0")
+
+	out, err := e.BackfillUsage(conn, runID, []BackfillRow{
+		{Step: verifyID, Unit: "input", Quantity: 18},
+		{Step: implID, Unit: "tokens", Quantity: 4000},
+		{Step: verifyID, Unit: "output", Quantity: 7},
+	}, "", "", nowMS)
+	testsupport.Must(t, err, "backfill-usage: %v", err)
+
+	if len(out.Unclaimed) != 1 || out.Unclaimed[0].Instance != "verify@0" {
+		t.Fatalf("Unclaimed = %+v, want exactly one entry for verify@0 — two "+
+			"rows against one step are one problem", out.Unclaimed)
+	}
+	if out.Written != 3 {
+		t.Errorf("Written = %d, want 3", out.Written)
+	}
+}
+
+// TestBackfillLeavesOtherStepsRefusing is the other half of the scoping rule:
 // D2 goes quiet for exactly the back-filled steps, not for the run at large.
 func TestBackfillLeavesOtherStepsRefusing(t *testing.T) {
 	conn := mustDB(t)
@@ -315,7 +522,7 @@ func TestBackfillLeavesOtherStepsRefusing(t *testing.T) {
 
 	implID := stepIDByInstance(t, conn, "implement@0")
 	completeWithoutUsage(t, conn, e, implID)
-	_, err := e.CloseDispatch(conn, runID, true, nowMS)
+	_, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
 	testsupport.Must(t, err, "close: %v", err)
 
 	// Back-fill implement, then complete ANOTHER step without usage. The run

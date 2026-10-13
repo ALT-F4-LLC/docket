@@ -9,7 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// Input payloads reach the packet (docs/tdd/input-payloads.md).
+// Input payloads reach the packet.
 //
 // An artifact has two halves: `body` is prose, `payload` is the structured half
 // validated at completion and stored in its own column. Both were recorded and
@@ -17,7 +17,7 @@ import (
 // field. A synthesize-class step whose contract requires clusters to carry
 // their input severities unchanged received prose with the structure stripped,
 // and the executor recovered it by opening a copy of the database directly —
-// voiding the pinning, the reproducibility, and §6.6's no-live-state rule that
+// voiding the pinning, the reproducibility, and the no-live-state rule that
 // the packet exists to provide.
 
 // producedWithPayload records an artifact carrying both halves and marks its
@@ -172,7 +172,7 @@ func TestPayloadSurvivesConcatenationHazards(t *testing.T) {
 	}
 }
 
-// TestInputsBytesCountsPayloads pins §1.2: the context cap must see payload
+// TestInputsBytesCountsPayloads pins that the context cap must see payload
 // bytes, or a bundle could exceed its declared cap while reporting that it did
 // not. The cap's honesty is the reason the field exists.
 func TestInputsBytesCountsPayloads(t *testing.T) {
@@ -198,7 +198,7 @@ func TestInputsBytesCountsPayloads(t *testing.T) {
 // governed by the SAME rule as the half beside it, which is the property that
 // matters here.
 //
-// §6.6's "assembly reads no live state" is about ISSUE and TREE state — the
+// "Assembly reads no live state" is about ISSUE and TREE state — the
 // title, body, labels, scope, and pinned files, all snapshotted at activation
 // and covered by TestContextAssemblyReadsNoLiveState. Artifact rows are a
 // different category: they are written once, at completion, and read back as

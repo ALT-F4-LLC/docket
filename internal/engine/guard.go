@@ -9,19 +9,19 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// `guard stop|gate` — TDD §6.12.
+// `guard stop|gate`.
 //
 // Both are deterministic predicates over engine state, and both answer with
-// EXIT 0 ALLOW / EXIT 2 DENY WITH REASON (§2).
+// EXIT 0 ALLOW / EXIT 2 DENY WITH REASON.
 //
 // Exit 2 collides numerically with NOT_FOUND's exit 2, and THAT IS INTENTIONAL
-// AND SPECIFIED. §2 defines the guard contract as "exit 0/2 + reason",
+// AND SPECIFIED. The guard contract is "exit 0/2 + reason",
 // INDEPENDENT of the error taxonomy, because guards are hook predicates whose
 // caller tests a boolean — not CLI verbs whose caller maps a code. This is
 // recorded here because a reviewer will otherwise read it as a taxonomy
 // violation; it is the spec's own contract.
 //
-// `guard record|spawn` are stage 6's and live in guard_dispatch.go, beside the
+// `guard record|spawn` live in guard_dispatch.go, beside the
 // dispatch state they are predicates over. They share GuardVerdict and the exit
 // contract; what they do not share is a file, because their subject is the
 // manifest rather than the step graph.
@@ -37,7 +37,7 @@ type GuardVerdict struct {
 
 // GuardStop answers `docket guard stop`: is the machine done working?
 //
-// The base rule (§6.12): a step in `claimed`/`running`/`gated`/`pending` for
+// The base rule: a step in `claimed`/`running`/`gated`/`pending` for
 // an active AND DISPATCHED run blocks a stop. Four refinements narrow it to
 // steps a stop would actually interfere with:
 //
@@ -48,20 +48,31 @@ type GuardVerdict struct {
 //
 //   - A `waiting-human` step does NOT block — a run parked on a person is
 //     waiting for something a stop cannot interfere with.
+//
 //   - A VOTE step whose proposal is OPEN does not block (DKT-107): its panel
 //     decides out-of-session, and yielding the turn is exactly how a session
 //     waits for it — the deny was a toll paid at every turn-end for as long
 //     as a panel deliberated. The exemption ends with the proposal: a decided
 //     proposal leaves a dispatchable step, which blocks again until `next`
 //     routes it. The same reading covers a `gated` routing step whose every
-//     unresolved held cluster is such a vote.
-//   - A `pending` step waiting only on its predecessors does not block on its
-//     own: whatever it waits on either blocks in its place or is exempt for a
-//     reason that covers the whole chain. Any other unreadiness — headroom, a
-//     paused run, a budget stop, an unacknowledged reap — still blocks, since
-//     those name work or acknowledgment the session owes before stopping.
-//     (A held cluster awaiting ONE OPERATOR still denies: the materialized
-//     human step is pending and ready, per H11's decided semantics.)
+//     unresolved held cluster is such a vote, and a `gated` step suspended on
+//     its triage panel while that panel's proposal is open.
+//
+//   - A `pending` step waiting only on its predecessors, or waiting because
+//     the RUN ITSELF is `waiting-human` (paused), does not block on its own
+//     (DKT-1845): a paused run is the run-level version of the same
+//     wait-on-a-person exemption a `waiting-human` STEP already gets, and a
+//     step that never started is not work a stop interferes with. The same
+//     holds for a step held because its ISSUE is parked on a person
+//     (CondIssueParked): that condition precedes CondPredecessors, so a
+//     parked step's successors report the park rather than their unfinished
+//     predecessor. Any other
+//     unreadiness — headroom, a budget stop, an unacknowledged reap — still
+//     blocks, since those name work or acknowledgment the session owes before
+//     stopping. (A held cluster awaiting ONE OPERATOR still denies: the
+//     materialized human step is pending and ready. A `claimed`/`running` step still denies even while its run
+//     is paused — `run pause` honors in-flight completes rather than killing
+//     them, so the machine may still have a live worker to interrupt.)
 //
 // projectID scopes the question to one project's runs; 0 answers over every
 // project — the same contract as RunListOptions.ProjectID. Scoping exists
@@ -85,8 +96,8 @@ func GuardStop(conn *sql.DB, projectID int, nowMS int64) (*GuardVerdict, error) 
 	// momentum.
 	//
 	// The probe is the `dispatches` TABLE, not the `dispatch-opened` EVENT the
-	// ask names. Both record the same fact — it is the same existence check D2
-	// uses for "a run no relay drove has nobody owing usage" — but events are
+	// ask names. Both record the same fact — it is the same existence check
+	// RunEverDispatchedTx uses for "a run no relay drove has nobody owing usage" — but events are
 	// prunable (`events prune`) and dispatch rows are not deleted by anything,
 	// so a long-lived run whose early events had been trimmed would read as
 	// never-dispatched and stop blocking exactly when it mattered most.
@@ -185,14 +196,16 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 		case db.StepClaimed, db.StepRunning:
 			blocked = true
 		case db.StepGated:
-			blocked = !gatedOnOpenVotes(sched, step, openVotes)
+			blocked = !gatedOnOpenVotes(sched, step, openVotes) &&
+				!suspendedOnOpenPanel(sched, step, openVotes)
 		case db.StepPending:
 			if openVotes[step.ID] {
 				break
 			}
 			ready, cond := sched.Ready(step)
 			blocked = ready ||
-				(cond != CondPredecessors && cond != CondIssueDeps)
+				(cond != CondPredecessors && cond != CondIssueDeps &&
+					cond != CondRunActive && cond != CondIssueParked)
 		}
 		if blocked {
 			out = append(out, step.Instance+" ("+step.Status+")")
@@ -242,7 +255,8 @@ func openVoteSteps(tx *sql.Tx, sched *Scheduler) (map[int]bool, error) {
 //
 // A gated step with NO unresolved holds is dispatchable — its saga resumes
 // under the next engine invocation — so it blocks. One with an unresolved
-// HUMAN hold blocks through H11's decided semantics, and the mixed case
+// HUMAN hold blocks, because its materialized human step is ready, and the
+// mixed case
 // blocks with it.
 func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) bool {
 	heldName := workflow.HeldStepName(step.StepName)
@@ -265,8 +279,25 @@ func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) b
 	return unresolved > 0
 }
 
-// GuardGate answers `docket guard gate --step NAME`: does a PASSED gate step of
-// that name exist for the active run?
+// suspendedOnOpenPanel reports whether a gated step is suspended on its triage
+// panel (suspendedOnPanel) while that panel's proposal is still open. Once the
+// proposal is decided the verdict still has to be applied, which is `next`'s
+// work, so the step blocks again.
+func suspendedOnOpenPanel(sched *Scheduler, step *db.Step, openVotes map[int]bool) bool {
+	for _, panel := range sched.steps {
+		if !openVotes[panel.ID] || panel.IssueID != step.IssueID ||
+			panel.Ordinal != step.Ordinal {
+			continue
+		}
+		if suspendedOnPanel(step, panel.StepName) {
+			return true
+		}
+	}
+	return false
+}
+
+// GuardGate answers `docket guard gate --step NAME [--run RUN-N]`: does a
+// PASSED gate step of that name exist?
 //
 // "Passed" is `done` with a `pass` routing — the state `step approve` produces
 // on a human gate, and the state a tallied approval produces on a vote gate. A
@@ -279,15 +310,36 @@ func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) b
 // several voters instead of one — silently stopped matching, and every hook
 // checking that gate started denying with "no such step" while the gate itself
 // sat approved. That is the strictness comment's own concern inverted: the
-// decision WAS made, by the machinery §8 exists to run, and the guard was the
+// decision WAS made, by the vote machinery, and the guard was the
 // only thing that could not see it. A tallied pass IS a decision, so it counts;
 // nothing else about the test loosened, and a vote still open reads `pending`
 // here and denies exactly as an unapproved human gate does.
 //
-// projectID scopes the search to one project's runs; 0 answers over every
-// project (see GuardStop). An approval is a decision about ONE project's gate,
-// so a same-named gate in another project must not answer for it.
-func GuardGate(conn *sql.DB, stepName string, projectID int) (*GuardVerdict, error) {
+// WHICH RUNS ANSWER is the caller's choice, and the two forms ask different
+// questions:
+//
+//   - runID names ONE run, and only that run's gate can answer. An approval is
+//     a decision about one run's change, so another run's approval says nothing
+//     about this one. This is the form for a caller that knows which run it is
+//     acting under — an executor's brief carries its step id, and `step show`
+//     resolves the run from it. The named run is exempt from project scoping
+//     (naming a run is naming intent, as `guard record` reads it); a run that
+//     does not exist is a NOT_FOUND refusal rather than a denial or an allow,
+//     because a typo in a hook must not read as either; and a run that has
+//     ended denies outright, since its gates authorized work that is over.
+//
+//   - runID 0 answers over EVERY active run in scope, allowing on the first
+//     approved gate of that name. The reading is cross-run by construction: one
+//     run's approval opens the gate for every caller in the project until that
+//     run finishes, including a caller working under a second run whose own
+//     gate is still undecided. The form exists for callers with no run context
+//     — an operator session's hook cannot know which run a git write belongs
+//     to — and a hook that has a run should scope instead.
+//
+// projectID scopes the unscoped search to one project's runs; 0 answers over
+// every project (see GuardStop). An approval is a decision about ONE project's
+// gate, so a same-named gate in another project must not answer for it.
+func GuardGate(conn *sql.DB, stepName string, runID, projectID int) (*GuardVerdict, error) {
 	if stepName == "" {
 		return nil, validationErr("--step is required: name the gate to check")
 	}
@@ -297,7 +349,24 @@ func GuardGate(conn *sql.DB, stepName string, projectID int) (*GuardVerdict, err
 	  WHERE r.status NOT IN ('done', 'abandoned')
 	    AND s.step_name = ? AND s.kind IN (?, ?)`
 	args := []any{stepName, workflow.TypeHuman, workflow.TypeVote}
-	if projectID != 0 {
+	subject := fmt.Sprintf("gate %q", stepName)
+	searched := "any active run"
+	switch {
+	case runID != 0:
+		run, err := db.GetRun(conn, runID)
+		if err != nil {
+			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
+		}
+		if run.Status.Terminal() {
+			return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
+				"run %s is %s; its gates authorize nothing further",
+				model.FormatRunID(runID), run.Status)}, nil
+		}
+		query += ` AND s.run_id = ?`
+		args = append(args, runID)
+		subject += " in " + model.FormatRunID(runID)
+		searched = model.FormatRunID(runID)
+	case projectID != 0:
 		query += ` AND r.project_id = ?`
 		args = append(args, projectID)
 	}
@@ -338,11 +407,11 @@ func GuardGate(conn *sql.DB, stepName string, projectID int) (*GuardVerdict, err
 		return &GuardVerdict{Allowed: true}, nil
 	case found:
 		return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-			"gate %q is %s, not approved", stepName, state)}, nil
+			"%s is %s, not approved", subject, state)}, nil
 	default:
 		return &GuardVerdict{Allowed: false, Reason: fmt.Sprintf(
-			"no `type=\"human\"` or `type=\"vote\"` step named %q in any active run",
-			stepName)}, nil
+			"no `type=\"human\"` or `type=\"vote\"` step named %q in %s",
+			stepName, searched)}, nil
 	}
 }
 

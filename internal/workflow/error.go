@@ -4,7 +4,7 @@ import "strings"
 
 // Error is a register-time failure: a grammar error, a validation-table row
 // (V1-V25 incl. V13a), or a lint (L1-L4). Every one maps to VALIDATION_ERROR
-// (exit 3) at the CLI boundary (TDD §4.5).
+// (exit 3) at the CLI boundary.
 //
 // Rule carries the documented rule ID. It is what
 // TestValidationTableIsComplete asserts set equality over, so every rule the
@@ -32,7 +32,7 @@ func (e *Error) Error() string {
 
 // withWorkflow stamps the workflow name onto an error raised before the name
 // was known to the caller. Every register-time error names the workflow, the
-// step, and the offending field (TDD §4.3).
+// step, and the offending field.
 func withWorkflow(err error, name string) error {
 	if e, ok := err.(*Error); ok && e.Workflow == "" {
 		e.Workflow = name

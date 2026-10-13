@@ -3,24 +3,26 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// §9 item 10's gate half, completed (TDD docs/tdd/gates-trust.md §7.5, T12).
+// Crash-at-gate-boundary resume, with gates that really execute.
 //
-// engine-spine §6.16 proved crash-at-every-boundary with STUBBED gates: the
-// saga resumed, but nothing had run, so "never double-runs" was vacuously true.
+// The saga tests prove crash-at-every-boundary with STUBBED gates: the saga
+// resumes, but nothing runs, so "never double-runs" is vacuously true there.
 // These tests complete it with gates that really execute, and the witness is a
 // COUNTER FILE the gate appends to — the filesystem, not a row the engine wrote
 // about itself.
 
 // sandboxTrust points a runner at a throwaway store and returns a loader for it
-// (§9.5 SB1: no test may touch the operator's real trust store).
+// (no test may touch the operator's real trust store).
 func sandboxTrust(t *testing.T, entries ...trust.Entry) func() (*trust.Store, error) {
 	t.Helper()
 	return func() (*trust.Store, error) {
@@ -57,8 +59,8 @@ func (r *countingRunner) Execute(ctx context.Context, g GateSpec, sc StepContext
 	return r.inner.Execute(ctx, g, sc)
 }
 
-// TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable is §9 item 10's gate
-// half, at EVERY saga boundary and for BOTH values of the flag.
+// TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable is the crash-resume proof
+// for gates, at EVERY saga boundary and for BOTH values of the flag.
 //
 // The crash is placed where at-least-once actually creates its window: after
 // the `gate-started` event commits and before the result does. A test that
@@ -111,7 +113,7 @@ func TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable(t *testing.T) {
 
 			// Simulate the crash window on the FIRST gate: delete its recorded
 			// result while leaving its `gate-started` event in place. That is
-			// exactly A1's started-but-unrecorded state, reconstructed.
+			// exactly the started-but-unrecorded state, reconstructed.
 			firstGate := "build"
 			_, err = conn.Exec(
 				`DELETE FROM gate_results WHERE step_id = ? AND gate = ?`,
@@ -121,7 +123,7 @@ func TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable(t *testing.T) {
 			// The resume point is the stage BEFORE the gate: `saga_stage` names
 			// the last gate RECORDED, so `recorded` is the state in which
 			// `build` is the gate about to run. Combined with build's surviving
-			// `gate-started` event and its deleted result, that is exactly A1's
+			// `gate-started` event and its deleted result, that is exactly the
 			// started-but-unrecorded shape.
 			_, err = conn.Exec(
 				`UPDATE steps SET saga_stage = ?, status = 'gated', routing = NULL
@@ -150,7 +152,7 @@ func TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable(t *testing.T) {
 			}
 
 			if !tc.reRunnable {
-				// A4: the park NAMES the gate and the situation, so an operator
+				// The park NAMES the gate and the situation, so an operator
 				// has something to act on.
 				if !strings.Contains(final.Routing, firstGate) {
 					t.Errorf("the park reason does not name the gate: %q", final.Routing)
@@ -159,7 +161,7 @@ func TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable(t *testing.T) {
 					t.Errorf("the park reason does not state the remedy: %q", final.Routing)
 				}
 			} else {
-				// A3: the re-run is announced, so the trail shows the command
+				// The re-run is announced, so the trail shows the command
 				// ran twice rather than hiding it.
 				if !hasEventKind(t, conn, stepID, EventGateRerun) {
 					t.Error("a re-run happened with no gate-rerun event; the trail " +
@@ -170,7 +172,7 @@ func TestCrashAtGateBoundaryNeverDoubleRunsNonRerunnable(t *testing.T) {
 	}
 }
 
-// TestUnmatchedAtResumeParks is A5: a gate that is no longer trusted when the
+// TestUnmatchedAtResumeParks: a gate that is no longer trusted when the
 // resume happens parks, rather than re-running "because we can't tell".
 //
 // This is the revocation case — `trust rm` between the crash and the resume —
@@ -207,7 +209,7 @@ func TestUnmatchedAtResumeParks(t *testing.T) {
 		  WHERE id = ?`, db.SagaRecorded, stepID)
 	testsupport.Must(t, err, "rewinding the saga stage: %v", err)
 
-	// The `gate-started` event must exist for A1 to fire.
+	// The `gate-started` event must exist for the interrupted-gate check to fire.
 	if !hasEventKind(t, conn, stepID, EventGateStarted) {
 		t.Fatal("no gate-started event; the crash window cannot be reconstructed")
 	}
@@ -218,7 +220,7 @@ func TestUnmatchedAtResumeParks(t *testing.T) {
 	final, err := db.GetStep(conn, stepID)
 	testsupport.Must(t, err, "GetStep: %v", err)
 	if final.Status != db.StepWaitingHuman {
-		t.Errorf("status = %q, want %q — an unmatched-at-resume gate parks (A5)",
+		t.Errorf("status = %q, want %q — an unmatched-at-resume gate parks",
 			final.Status, db.StepWaitingHuman)
 	}
 	if !strings.Contains(final.Routing, "no longer trusted") {
@@ -227,14 +229,13 @@ func TestUnmatchedAtResumeParks(t *testing.T) {
 	}
 }
 
-// TestSagaStageBoundariesUnchanged is §7.1's checkable claim: swapping the gate
+// TestSagaStageBoundariesUnchanged is a checkable claim: swapping the gate
 // runner did not move the saga.
 //
-// engine-spine §5.6 promised "S4 changes one constructor call and nothing
-// else", and gates-trust §7.1 records honestly the four places more moves. What
-// must NOT have moved is the saga's own shape — its stage sequence — and this
-// compares that sequence against the S3 golden rather than taking the claim on
-// faith.
+// Swapping to the real gate runner changes one constructor call, though a few
+// other places move with it. What must NOT have moved is the saga's own shape —
+// its stage sequence — and this compares that sequence against a golden rather
+// than taking the claim on faith.
 func TestSagaStageBoundariesUnchanged(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -263,7 +264,7 @@ func TestSagaStageBoundariesUnchanged(t *testing.T) {
 		stages = append(stages, data)
 	}
 
-	// THE S3 GOLDEN: the fixture's five gates, in declared order, each entered
+	// THE GOLDEN: the fixture's five gates, in declared order, each entered
 	// exactly once. `pre` gates are excluded — they run at claim, not here.
 	want := []string{"build", "tests", "scope", "self-hygiene", "secret-scan"}
 	if len(stages) != len(want) {
@@ -276,9 +277,9 @@ func TestSagaStageBoundariesUnchanged(t *testing.T) {
 		}
 	}
 
-	// THE STAGE VOCABULARY, extended by EXACTLY ONE (§6.4 M-b).
+	// THE STAGE VOCABULARY, extended by EXACTLY ONE.
 	//
-	// `held` is the stage payloads-thresholds adds, and it is a DEFERRAL of
+	// `held` is the stage thresholds add, and it is a DEFERRAL of
 	// routing rather than a new position in the sequence: a step reaches it
 	// INSTEAD OF routing and leaves it BY routing, so every stage above still
 	// means what it meant. The set is compared rather than counted, because a
@@ -288,8 +289,8 @@ func TestSagaStageBoundariesUnchanged(t *testing.T) {
 		db.SagaRecorded, db.SagaRouting, db.SagaHeld, db.SagaGatePrefix,
 	}
 	if len(stageVocabulary) != 4 {
-		t.Errorf("the saga's stage vocabulary is %v; S4 had three and stage 5 "+
-			"adds `held` and nothing else", stageVocabulary)
+		t.Errorf("the saga's stage vocabulary is %v; it had three before `held` "+
+			"and must gain nothing else", stageVocabulary)
 	}
 	for _, stage := range stageVocabulary {
 		if stage == "" {
@@ -321,6 +322,84 @@ func mustResolve(p string) string {
 		return p
 	}
 	return resolved
+}
+
+// TestResumeChecksDeclaredFilesUnderTheGateSpawnRoot: the resume decision for
+// an interrupted gate whose entry declares files hashes them in the tree the
+// gate will re-run in: the step's worktree when it recorded one, else the
+// exec root. The identity root and the other tree never decide it.
+func TestResumeChecksDeclaredFilesUnderTheGateSpawnRoot(t *testing.T) {
+	const pinned = "pinned contents\n"
+	setup := func(t *testing.T) (e *Engine, repo, identity, workRoot string) {
+		t.Helper()
+		repo, identity, workRoot = t.TempDir(), t.TempDir(), t.TempDir()
+		for _, root := range []string{repo, identity, workRoot} {
+			writeDeclaredFile(t, root, pinned)
+		}
+		argv := []string{"/usr/bin/true"}
+		runner := NewExecRunner(RepoPaths{
+			ExecRoot: repo, Identity: identity,
+			LockPath: filepath.Join(repo, ".docket", "tree.lock"),
+		})
+		runner.LoadStore = sandboxTrust(t, trust.Entry{
+			Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+			Repo: mustResolve(repo), ReRunnable: true,
+			DeclaredFiles: []trust.DeclaredFile{{Path: declaredFilePath, SHA256: trustHashOf(pinned)}},
+		})
+		e = testEngine()
+		e.Gates = runner
+		return e, repo, identity, workRoot
+	}
+	resume := func(t *testing.T, e *Engine, step *db.Step) (*trust.Entry, string) {
+		t.Helper()
+		entry, reason, err := e.reRunnableEntryFor(workflow.Gate{Name: "build"}, step)
+		testsupport.Must(t, err, "reRunnableEntryFor: %v", err)
+		return entry, reason
+	}
+	wantRerun := func(t *testing.T, entry *trust.Entry, reason string) {
+		t.Helper()
+		if entry == nil || !entry.ReRunnable || reason != "" {
+			t.Errorf("entry %+v reason %q, want the re-runnable entry and no reason", entry, reason)
+		}
+	}
+	wantPark := func(t *testing.T, entry *trust.Entry, reason string) {
+		t.Helper()
+		if entry != nil {
+			t.Errorf("entry %+v, want none: the declared file changed where the gate runs", entry)
+		}
+		if !strings.Contains(reason, declaredFilePath) {
+			t.Errorf("the park reason does not name %s: %q", declaredFilePath, reason)
+		}
+	}
+
+	t.Run("worktree drift parks", func(t *testing.T) {
+		e, _, _, workRoot := setup(t)
+		writeDeclaredFile(t, workRoot, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{WorkRoot: workRoot})
+		wantPark(t, entry, reason)
+	})
+
+	t.Run("exec root and identity drift do not matter with a worktree", func(t *testing.T) {
+		e, repo, identity, workRoot := setup(t)
+		writeDeclaredFile(t, repo, "rewritten\n")
+		writeDeclaredFile(t, identity, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{WorkRoot: workRoot})
+		wantRerun(t, entry, reason)
+	})
+
+	t.Run("exec root drift parks without a worktree", func(t *testing.T) {
+		e, repo, _, _ := setup(t)
+		writeDeclaredFile(t, repo, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{})
+		wantPark(t, entry, reason)
+	})
+
+	t.Run("identity drift does not matter without a worktree", func(t *testing.T) {
+		e, _, identity, _ := setup(t)
+		writeDeclaredFile(t, identity, "rewritten\n")
+		entry, reason := resume(t, e, &db.Step{})
+		wantRerun(t, entry, reason)
+	})
 }
 
 // hasEventKind reports whether the step has an event of the given kind.

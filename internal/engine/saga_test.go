@@ -22,14 +22,14 @@ import (
 // prove immunity from.
 //
 // THE GATE RUNNER IS STUBBED FOR A SHARPER REASON, and it is worth stating
-// because the swap to the real runner (gates-trust §7.1) is what made it
+// because the swap to the real runner is what made it
 // necessary. These tests are about the SAGA — its stage table, its transaction
 // boundaries, its routing — and their fixture declares gates (`build`, `tests`,
 // `secret-scan`, …) purely as saga stages to traverse. Under the real runner
 // those gates are correctly `unmatched` in a sandbox with no trust entries, so
 // every one of them fails the step and routes it to `waiting-human` before the
 // saga property under test is ever reached. That is the ENGINE BEHAVING
-// CORRECTLY — an unmatched gate is a failure (§6.2 N3) — and pinning it here
+// CORRECTLY — an unmatched gate is a failure — and pinning it here
 // would be testing the trust model in the wrong file.
 //
 // So the saga tests keep the pass-through, and the trust model is proven where
@@ -126,13 +126,13 @@ func TestSagaHappyPath(t *testing.T) {
 	}
 
 	// The fixture's `implement` declares five gates; every one has a recorded
-	// result. At v8 those rows live in `gate_results`, not in the trail JSON
-	// (gates-trust §4.3 G3, M-a) — this test moved its reader with them.
+	// result. At v8 those rows live in `gate_results`, not in the trail JSON —
+	// this test moved its reader with them.
 	//
 	// They are STUBBED because this test drives the pass-through runner
 	// (see testEngine): the stub marker is what lets an operator tell a gate
 	// that ran from one that did not, and it is exactly what the real runner
-	// never sets (T11, N4).
+	// never sets.
 	results, err := db.GateResultsForStep(conn, step.ID)
 	testsupport.Must(t, err, "reading gate results: %v", err)
 	if len(results) != 5 {
@@ -163,13 +163,13 @@ func TestSagaHappyPath(t *testing.T) {
 	if !sawSummary {
 		t.Error("no change-summary artifact recorded")
 	}
-	// D1: the diff is recomputed at every EXECUTOR step's completion.
+	// The diff is recomputed at every EXECUTOR step's completion.
 	if !sawDiff {
-		t.Error("no issue.diff artifact recorded at an executor step's completion (D1)")
+		t.Error("no issue.diff artifact recorded at an executor step's completion")
 	}
 }
 
-// TestTokenRetiresExactlyAtStageOne is §6.8's HINGE, asserted in both
+// TestTokenRetiresExactlyAtStageOne is the saga's HINGE, asserted in both
 // directions: before stage 1 commits the token is required, and after it the
 // step has no lease at all.
 func TestTokenRetiresExactlyAtStageOne(t *testing.T) {
@@ -205,7 +205,7 @@ func TestTokenRetiresExactlyAtStageOne(t *testing.T) {
 	}
 }
 
-// TestCompleteTwiceIsAuthError is R9, the token-retirement proof at the verb
+// TestCompleteTwiceIsAuthError is the token-retirement proof at the verb
 // level: a worker that completes twice — a plausible retry after a dropped
 // response — gets AUTH_ERROR on the second call rather than recording a
 // duplicate artifact.
@@ -228,7 +228,7 @@ func TestCompleteTwiceIsAuthError(t *testing.T) {
 	// The saga is CLOSED, so the second call re-enters stage 0 and is refused.
 	err = e.CompleteStep(conn, stepID, opts)
 	if !errors.Is(err, db.ErrNotHolder) {
-		t.Errorf("second complete = %v, want ErrNotHolder (AUTH_ERROR, R9)", err)
+		t.Errorf("second complete = %v, want ErrNotHolder (AUTH_ERROR)", err)
 	}
 
 	after, err := db.ListRunArtifacts(conn, run.ID)
@@ -239,9 +239,9 @@ func TestCompleteTwiceIsAuthError(t *testing.T) {
 	}
 }
 
-// TestCrashAtEveryStageBoundary is §9 item 10 and the reason the saga exists in
-// this shape: for EACH resume point, a crash after that stage's commit must be
-// recoverable by any later engine invocation, with exactly-once advance.
+// TestCrashAtEveryStageBoundary is the reason the saga exists in this shape:
+// for EACH resume point, a crash after that stage's commit must be recoverable
+// by any later engine invocation, with exactly-once advance.
 //
 // The crash is simulated by driving the saga one stage at a time and abandoning
 // it — which is what a `kill -9` between two transactions leaves behind — then
@@ -343,7 +343,7 @@ func TestCrashAtEveryStageBoundary(t *testing.T) {
 	}
 }
 
-// TestConcurrentResumesAdvanceOnce is §6.8's CAS guarantee at the saga level:
+// TestConcurrentResumesAdvanceOnce is the CAS guarantee at the saga level:
 // two engine invocations resuming the same saga produce exactly one advance per
 // stage, so the gate trail has no duplicates.
 func TestConcurrentResumesAdvanceOnce(t *testing.T) {
@@ -394,7 +394,7 @@ func TestConcurrentResumesAdvanceOnce(t *testing.T) {
 	}
 }
 
-// TestEveryStageRefreshesActivity is §6.8's "every stage commit refreshing the
+// TestEveryStageRefreshesActivity is "every stage commit refreshing the
 // step's activity clock", at the saga level rather than the db one.
 func TestEveryStageRefreshesActivity(t *testing.T) {
 	conn := mustDB(t)
@@ -432,8 +432,9 @@ func TestEveryStageRefreshesActivity(t *testing.T) {
 	}
 }
 
-// TestArtifactOverCapIsRefused is R12, and the refusal WRITES NOTHING —
-// asserted by a version-unchanged check, as §6.9 requires of every refusal.
+// TestArtifactOverCapIsRefused is the artifact size cap, and the refusal
+// WRITES NOTHING — asserted by a version-unchanged check, as every refusal
+// requires.
 func TestArtifactOverCapIsRefused(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -474,11 +475,11 @@ func TestArtifactOverCapIsRefused(t *testing.T) {
 	}
 }
 
-// TestMalformedPayloadIsRefused is §6.8 stage 0's shape validation: a payload
+// TestMalformedPayloadIsRefused is stage 0's shape validation: a payload
 // must be a JSON array of objects, which is what a threshold aggregates over.
 //
-// The SCHEMA is S5's. This asserts the shape check exists and the field check
-// does NOT — an unknown field must pass at S3.
+// The SCHEMA is checked separately. This asserts the shape check exists and
+// checks no fields — an unknown field must pass it.
 func TestMalformedPayloadIsRefused(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -501,14 +502,13 @@ func TestMalformedPayloadIsRefused(t *testing.T) {
 	}
 
 	// An unknown FIELD passes: field validation against a registered schema is
-	// S5's by §1's scope table, and checking it here would mean inventing the
-	// schema language S5 is specified to define.
+	// not the shape check's job.
 	if err := e.CompleteStep(conn, stepID, CompleteOptions{
 		Token: claim.Token, Artifact: []byte("body"),
 		Payload: []byte(`[{"anything": "at all", "nested": {"ok": true}}]`), NowMS: nowMS,
 	}); err != nil {
-		t.Errorf("a payload with unregistered fields was refused at S3: %v — "+
-			"field validation is S5's", err)
+		t.Errorf("a payload with unregistered fields was refused: %v — "+
+			"field validation is not the shape check's", err)
 	}
 }
 

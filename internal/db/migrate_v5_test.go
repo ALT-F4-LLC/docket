@@ -45,7 +45,7 @@ func TestMigrateToV5(t *testing.T) {
 	if v != currentSchemaVersion {
 		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
 	}
-	// The stage pin moved to TestMigrateToV6 when stage 2 shipped v6. What
+	// The stage pin moved to TestMigrateToV6 when v6 shipped. What
 	// this test still guards is that v5's structures survive every later
 	// migration — a v5 obligation does not expire because v6 exists.
 	if currentSchemaVersion < 5 {
@@ -183,7 +183,7 @@ func TestMigrateV5DefensiveRewind(t *testing.T) {
 
 // Existing timestamp columns must keep their RFC3339 TEXT format. Millisecond
 // timestamps belong only in tables created at v5+ — rewriting an existing
-// column would change every existing verb's output (engine-spec §9 item 8).
+// column would change every existing verb's output.
 func TestV5DoesNotMutateExistingTimestampFormats(t *testing.T) {
 	db := mustOpen(t)
 	if err := Initialize(db); err != nil {

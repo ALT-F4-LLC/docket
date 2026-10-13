@@ -20,7 +20,7 @@ func init() {
 	rootCmd.AddCommand(workflowCmd)
 }
 
-// workflowErr maps a register-time failure to its error code, per the §4.5
+// workflowErr maps a register-time failure to its error code, per the register
 // taxonomy. No new codes: every situation maps to one that already exists.
 func workflowErr(err error) error {
 	var we *workflow.Error

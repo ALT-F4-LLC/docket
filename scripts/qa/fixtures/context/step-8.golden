@@ -29,15 +29,16 @@
     },
     {
       "path": "schema:findings@1",
-      "sha256": "d72bc7ab64252d06e5c3ee2a6e8462768294a44d18ca73159dc9a1c800a95c0a"
+      "sha256": "42bd0033f895a31ce7f093d24cdf5e997d58526471e30cc0902729d72e3230bf"
     },
     {
       "path": "workflow:standard-change@1",
-      "sha256": "99fb14ea90982cd209d0d2ca0648077f0ed131db8a1a048d83b2cf6683f20ac2"
+      "sha256": "8cfa22e93d8a8bdb4a1a07c1a0ccaa1c9f8279a3eeeece2b88cc7ddc4a1faeab"
     }
   ],
   "step": {
     "attempt": 0,
+    "blocked_reason": "an `after` predecessor is not done",
     "class": "verify-ac",
     "executor": "verify-ac",
     "expected_cost": 0.5,

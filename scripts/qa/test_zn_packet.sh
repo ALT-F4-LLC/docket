@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# ZN — PACKET COMPOSITION: DECLARED FILES REACH THE PACKET
-# (docs/tdd/packet-composition.md).
+# ZN — PACKET COMPOSITION: DECLARED FILES REACH THE PACKET.
 #
 # THIS SECTION IS THE LITERAL INVERSE OF THE ORIGINAL OBSERVATION, which
 # recorded that the shipped template emits
@@ -10,22 +9,22 @@
 #   <path>  <sha256>
 #
 # — A PATH AND A CHECKSUM, NEVER THE BYTES AT THAT PATH. An executor received a
-# filename for the document it was supposed to work from, and engine-core §8's
-# own property ("nothing in it is optional — no pointers, no 'read if needed'")
-# was inverted by the thing that shipped.
+# filename for the document it was supposed to work from, and the packet's own
+# property ("nothing in it is optional — no pointers, no 'read if needed'") was
+# inverted by the thing that shipped.
 #
 # So the headline assertion is that a rendered packet CONTAINS THE FILE'S BODY
 # TEXT. The Go tests prove the resolution ladder and the frontmatter rules; this
 # proves the wire, through the same verbs an instance uses.
 #
-# IT ALSO PROVES F1 — the defect the first design draft could not express. A
+# IT ALSO PROVES the defect the first design draft could not express. A
 # `fanout` step is ONE step whose siblings carry different hints, so a literal
 # entry serves them all identically. Both variants are executed here:
 #
 #   divergent — `{executor}` substitution, one file per sibling
 #   shared    — a literal entry, every sibling reading the same file
 #
-# THE STRANGER TEST (§1.1). The fixture is a print shop: proofreaders working
+# THE STRANGER TEST. The fixture is a print shop: proofreaders working
 # from checklists, one of which declares a shared house-style fragment. No
 # agents anywhere; the packet is "here is your job, and here is the checklist
 # you work from" — which is what a person would want too.
@@ -33,7 +32,7 @@
 test_zn_packet() {
   printf "Section ZN: Packet composition (DKT-70)"
 
-  # SB5: this section activates runs against a config directory, so the sandbox
+  # This section activates runs against a config directory, so the sandbox
   # is asserted before anything runs.
   assert_trust_sandbox
 
@@ -145,7 +144,7 @@ TOML
   fi
 
   # ===========================================================================
-  # N2 — F1, ARM A: divergent siblings resolve to DIFFERENT files
+  # N2 — ARM A: divergent siblings resolve to DIFFERENT files
   # ===========================================================================
   #
   # One step, two siblings, two hints, two files. A literal entry could not do
@@ -174,7 +173,7 @@ TOML
   fi
 
   # ===========================================================================
-  # N3 — F1, ARM B: a hint family SHARES one literal entry
+  # N3 — ARM B: a hint family SHARES one literal entry
   # ===========================================================================
   #
   # The `spec-author-<axis>` shape, genericized. Both siblings of `sign-off`
@@ -271,14 +270,14 @@ TOML
   fi
 
   # ===========================================================================
-  # N6 — INPUT PAYLOADS REACH THE PACKET (docs/tdd/input-payloads.md)
+  # N6 — INPUT PAYLOADS REACH THE PACKET
   # ===========================================================================
   #
   # An artifact has two halves: `body` is prose, `payload` is the structured
   # half. Both were recorded and resolved; only the prose reached the packet.
   # A step whose contract requires its inputs' structure had to recover it by
   # opening a copy of the database directly — which voids the pinning, the
-  # reproducibility, and §6.6's no-live-state rule the packet exists to give.
+  # reproducibility, and the no-live-state rule the packet exists to give.
   #
   # THE STRANGER TEST: the proofreader records notes AND a count of defects per
   # page. The binder downstream needs the counts, not the prose about them.

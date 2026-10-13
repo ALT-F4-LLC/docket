@@ -15,9 +15,12 @@ var schemaShowCmd = &cobra.Command{
 	Short: "Show a registered payload schema",
 	Long: `Show a registered payload schema.
 
-Omitting @version selects the highest registered version. --body emits the
-stored document verbatim — the exact bytes that were registered and hashed, and
-the exact bytes a run validates its payloads against.`,
+Omitting @version selects the highest registered version still in service;
+retired (deprecated) versions are skipped, and a name whose every version is
+retired is reported as not found. An explicit @version still resolves a retired
+version, because retirement never deletes. --body emits the stored document
+verbatim — the exact bytes that were registered and hashed, and the exact bytes
+a run validates its payloads against.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaShow(cmd, args, getWriter(cmd))
@@ -80,6 +83,13 @@ func renderSchemaShow(s *model.Schema) string {
 	}
 	if s.Builtin {
 		b.WriteString("builtin: shipped with docket\n")
+	}
+	// A retired version renders as retired, for `workflow show`'s reason: the
+	// summary of a version new workflows may no longer reference must not be
+	// indistinguishable from one they may.
+	if s.Deprecated() {
+		b.WriteString("status: DEPRECATED — retired from service, still " +
+			"readable and still validating payloads for runs that pinned it\n")
 	}
 
 	fields := s.OrderedFields()
