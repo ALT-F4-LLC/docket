@@ -59,6 +59,11 @@ func issueFilesCheckout(t *testing.T) string {
 		{"init", "-q"},
 		{"config", "user.email", "test@example.com"},
 		{"config", "user.name", "test"},
+		// No detached gc or maintenance may outlive the commit and race the
+		// TempDir cleanup under .git/objects.
+		{"config", "gc.auto", "0"},
+		{"config", "gc.autoDetach", "false"},
+		{"config", "maintenance.auto", "false"},
 	} {
 		c := exec.Command("git", cmd...)
 		c.Dir = root
