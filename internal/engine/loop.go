@@ -12,10 +12,10 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Loop semantics — TDD §7.2-§7.4, engine-spec §11.3 clause by clause.
+// Loop semantics, clause by clause.
 //
-// §11.3 is normative and short enough to hold in one's head, which is why this
-// file implements it clause by clause rather than as one procedure:
+// The loop rule is normative and short enough to hold in one's head, which is
+// why this file implements it clause by clause rather than as one procedure:
 //
 //	(1) on `fix-loop` routing, the ISSUE's loop counter increments; exceeding
 //	    `max_fix_loops` routes `waiting-human` instead.
@@ -32,8 +32,8 @@ import (
 // instances remain immutable and addressable — `superseded` is a status, not a
 // deletion.
 //
-// THERE IS NO OTHER LOOP CONSTRUCT (§11.3, final sentence). A `threshold`
-// routing to a step name is an interposed gate (§11.2) and is handled entirely
+// THERE IS NO OTHER LOOP CONSTRUCT. A `threshold` routing to a step name is
+// an interposed gate and is handled entirely
 // by ordinary expansion — it never reaches this file and never touches
 // `loop_count`. That is the distinction a reader should carry away: one of these
 // re-instantiates a chain at a new ordinal, the other makes an already-expanded
@@ -78,7 +78,7 @@ type LoopOutcome struct {
 // moved (so a concurrent verify's late `pass` was not even stale), and the
 // issue closed `done` carrying the reproduced blocker the vote had caught.
 //
-// A stale lineage's routing is recorded but INERT (§7.3 (3)), so it enters no
+// A stale lineage's routing is recorded but INERT, so it enters no
 // loop and the routing passes through unchanged. The returned outcome is nil
 // when no loop entry happened; when one did, the returned routing is the
 // outcome's — entered stays `fix-loop`, bounded becomes `waiting-human` — and
@@ -132,7 +132,7 @@ func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 // exhausted is the refused loop entry's outcome: where the exhaustion routes,
 // and the loop history the routing transaction records (DKT-1902).
 //
-// THE ROUTING IS THE AUTHOR'S (`on_exhausted`, §11.3 (1)). Before this, every
+// THE ROUTING IS THE AUTHOR'S (`on_exhausted`). Before this, every
 // exhaustion parked `waiting-human` and a workflow could say nothing about it —
 // in the shared store on 2026-09-07 an operator answered 36 of those parks by
 // hand, 17 by buying another round and one issue by round after round to
@@ -322,7 +322,7 @@ func newestIssueDiffUpTo(tx *sql.Tx, step *db.Step, ordinal int) (hash, body str
 // verify emits `ac-report` and the issue describes the symptom as "the same
 // criterion ids at the same statuses" — but "criterion", "id" and "status" are
 // the workflow author's vocabulary, not core's, exactly as `severity` and
-// `finding` are (genericity.md, and roundMovedNothing's own reasoning). Core
+// `finding` are (see roundMovedNothing's own reasoning). Core
 // reads the kind the step's OWN `emits`/`params.output` declares —
 // workflow.ArtifactKind, the same resolution `complete` used to record it and
 // input resolution uses to bind it — and compares the recorded sha256, which
@@ -446,7 +446,7 @@ type stalledVolume struct {
 // the same shape rule the threshold's read uses (parsePayload), its length
 // taken and nothing else read. That is the engine-visible rendering of the
 // corpus's "standing-cluster volume" — one element per cluster is exactly what
-// the routed payload is (§7.6) — reached without core learning what a cluster
+// the routed payload is — reached without core learning what a cluster
 // is. The read is scoped (run, issue, step name, kind) for newestStepEmit's
 // reason: another producer's payload of the same kind says nothing about what
 // THIS trigger keeps routing.
@@ -546,13 +546,13 @@ func volumeStalled(
 // transaction.
 //
 // It is called ONLY when a routing resolved to `fix-loop` on a step whose
-// lineage is live (see StaleLineage). The whole of §11.3 happens here, in one
+// lineage is live (see StaleLineage). The whole loop rule happens here, in one
 // transaction with the step update that triggered it, because a partial loop
 // entry — a counter raised with no bodies instantiated, or bodies instantiated
 // twice — is not a state any later pass can repair without guessing.
 //
-// WHICH step routed decides WHICH CLUSTER enters (§11.3 cluster scoping,
-// DKT-544): the serving `loop = true` bodies, their `after_loop` roots'
+// WHICH step routed decides WHICH CLUSTER enters (cluster scoping, DKT-544):
+// the serving `loop = true` bodies, their `after_loop` roots'
 // downstream, and any per-cluster round bound are all read for the TRIGGERING
 // step's name — a `fix-loop` from `verify` and one from `reconcile` produce
 // identical effects exactly when the same bodies serve both, which is always
@@ -582,11 +582,10 @@ func EnterLoop(
 // they just paid for (DKT-725). It is stamped onto the round's freshly
 // instantiated rows as their entering routing record, which is the ONE channel
 // that reliably reaches a new round's rendered packet: issue comments are not
-// a context source at all (§6.6's five-source rule), and a mid-run
-// `description` edit never renders either, because `body_snapshot` is frozen
-// at activation (§9 item 5's mid-run edit immunity). Before this stamp, the
-// note died on the SUPERSEDED park's row — RUN-51's fix@9 rendered zero bytes
-// of the judge-converged remedy the operator recorded when authorizing it.
+// a context source at all, and a mid-run `description` edit never renders
+// either, because `body_snapshot` is frozen at activation. Before this stamp,
+// the note died on the SUPERSEDED park's row — RUN-51's fix@9 rendered zero
+// bytes of the judge-converged remedy the operator recorded when authorizing it.
 func EnterLoopAuthorized(
 	tx *sql.Tx, step *db.Step, def *workflow.Definition, note string, nowMS int64,
 ) (*LoopOutcome, error) {
@@ -597,10 +596,10 @@ func enterLoop(
 	tx *sql.Tx, step *db.Step, def *workflow.Definition, authorized bool,
 	note string, nowMS int64,
 ) (*LoopOutcome, error) {
-	// The TRIGGER is the routing step's name, and it selects the cluster
-	// (§11.3 cluster scoping): the serving bodies, the scoped sweep set, and
-	// the per-cluster bound are all read for it. A materialized `<step>-held`
-	// name maps back to its routing step first (H17), because the definition
+	// The TRIGGER is the routing step's name, and it selects the cluster: the
+	// serving bodies, the scoped sweep set, and the per-cluster bound are all
+	// read for it. A materialized `<step>-held` name maps back to its routing
+	// step first, because the definition
 	// declares clusters over its own names and a held row routes on its
 	// routing step's behalf.
 	trigger := step.StepName
@@ -645,7 +644,7 @@ func enterLoop(
 		max, bound = hard, "max_fix_loops_hard"
 	}
 	if max > 0 && count > max {
-		// BOUNDED. §11.3 (1): "exceeding `max_fix_loops` routes `waiting-human`
+		// BOUNDED: "exceeding `max_fix_loops` routes `waiting-human`
 		// instead".
 		//
 		// Nothing is superseded and nothing is instantiated — this is not a loop
@@ -654,7 +653,7 @@ func enterLoop(
 		//
 		// AND THE COUNTER IS PUT BACK, which is the half a refusal that merely
 		// returns gets wrong. `loop_count` is not a tally of attempts; it names
-		// THE ISSUE'S CURRENT ORDINAL, and the whole of §11.3 (2)'s inert half
+		// THE ISSUE'S CURRENT ORDINAL, and the loop rule's inert half
 		// reads it that way — StaleLineage calls every step below it a
 		// superseded lineage "because a later loop entry replaced the work it is
 		// part of". A refusal replaced nothing and created no ordinal, so a
@@ -688,7 +687,7 @@ func enterLoop(
 		return exhausted(tx, step, def, trigger, count-1, count-1, max, reason, nowMS)
 	}
 
-	// THE CLUSTER'S OWN BOUND (§11.3 cluster scoping, DKT-544). A
+	// THE CLUSTER'S OWN BOUND (cluster scoping, DKT-544). A
 	// `max_fix_loops` declared on a `serves`-scoped body bounds ITS cluster's
 	// rounds, under the issue-level ceiling above — several independent
 	// quality gates can then carry different retry budgets without sharing
@@ -859,8 +858,8 @@ func enterLoop(
 	// it. The two clauses are written above as two passes over two different
 	// inputs — the sweep filters step ROWS, the instantiation walks the
 	// DEFINITION — and they agree today only because `downstream` is handed to
-	// both. That agreement is a property of the current code, not of §11.3, and
-	// the failure it guards against is silent: a step swept with nothing to
+	// both. That agreement is a property of the current code, not of the loop
+	// rule, and the failure it guards against is silent: a step swept with nothing to
 	// succeed it is work the run will never do, and because `superseded` is
 	// terminal and completion reads highest-ordinal instances only, the issue
 	// COMPLETES without it. DKT-78's `verify-ac` is the step that class of gap
@@ -897,12 +896,12 @@ func enterLoop(
 	return out, nil
 }
 
-// maxFixLoops reads the definition's `max_fix_loops` (§11.1).
+// maxFixLoops reads the definition's `max_fix_loops`.
 //
 // It is a WORKFLOW-level bound read off whichever step declares it, because
-// §11.3 makes the counter the ISSUE's: one issue, one count, one bound. The
-// fixture declares it on `reconcile`, but a workflow whose `verify` drives the
-// loop must be bounded by the same number — a per-step reading would let the
+// the loop rule makes the counter the ISSUE's: one issue, one count, one bound.
+// The fixture declares it on `reconcile`, but a workflow whose `verify` drives
+// the loop must be bounded by the same number — a per-step reading would let the
 // bound depend on which step happened to route, which is not a bound at all.
 //
 // A `serves`-scoped loop body's declaration is NOT this bound: it is that
@@ -988,7 +987,7 @@ func scopedClusterBodies(def *workflow.Definition, trigger string) []string {
 
 // clusterMaxFixLoops reads the per-cluster round bound for one trigger: the
 // smallest positive `max_fix_loops` declared on a `serves`-scoped body serving
-// it (§11.3 cluster scoping, DKT-544). Zero means the cluster declares no
+// it (cluster scoping, DKT-544). Zero means the cluster declares no
 // bound of its own and only the issue-level ceiling applies.
 //
 // The SMALLEST when several bodies declare one, for the same reason a bound
@@ -1044,7 +1043,8 @@ func clusterRoundsUsed(tx *sql.Tx, step *db.Step, bodies []string) (int, error) 
 	return rounds, nil
 }
 
-// supersedeSweep is §7.3, exactly, over the TRIGGERING CLUSTER's set.
+// supersedeSweep is the supersede rule, exactly, over the TRIGGERING
+// CLUSTER's set.
 //
 // On loop entry at ordinal k-1 -> k: every instance of the entering cluster's
 // `after_loop` downstream set (`downstream`, computed by the caller for the
@@ -1055,7 +1055,7 @@ func clusterRoundsUsed(tx *sql.Tx, step *db.Step, bodies []string) (int, error) 
 // cluster's chain keeps its current instances, exactly as a branch parallel to
 // the loop always has (DKT-540).
 //
-// The status table (§7.7) is the specification and is worth stating as one:
+// The status table is the specification and is worth stating as one:
 //
 //	pending        -> superseded   (unclaimed)
 //	ready          -> superseded   (COMPUTED, never stored — a step that is
@@ -1071,7 +1071,7 @@ func clusterRoundsUsed(tx *sql.Tx, step *db.Step, bodies []string) (int, error) 
 //	failed-routed  -> left alone   (terminal)
 //	superseded     -> left alone   (terminal; already swept by an earlier entry)
 //
-// `waiting-human` is the row most easily got wrong. It is not terminal (§6.8's
+// `waiting-human` is the row most easily got wrong. It is not terminal (the run
 // rollup depends on that) and it is not claimed, so a sweep written as "not
 // terminal and not claimed" would supersede it — silently discarding a question
 // an operator was asked. The sweep is therefore written as an explicit
@@ -1109,13 +1109,13 @@ func supersedeSweep(
 			rows.Close()
 			return nil, fmt.Errorf("reading a supersede candidate: %w", err)
 		}
-		// Only the `after_loop` downstream set (§7.3 (1)).
+		// Only the `after_loop` downstream set.
 		name, _, _, err := workflow.ParseInstance(instance)
 		if err != nil {
 			rows.Close()
 			return nil, err
 		}
-		// H17: a MATERIALIZED `<step>-held@k` is in its routing step's lineage,
+		// A MATERIALIZED `<step>-held@k` is in its routing step's lineage,
 		// so it sweeps exactly as any other non-terminal instance downstream of
 		// `after_loop` does. Its name is not in the definition — expansion never
 		// wrote it — so it is mapped back to the routing step it belongs to
@@ -1127,7 +1127,7 @@ func supersedeSweep(
 		if !downstream[name] && !heldStepBelongsToDownstream(name, downstream) {
 			continue
 		}
-		// Only NOT-YET-CLAIMED instances (§7.3 (2)). `pending` is the whole
+		// Only NOT-YET-CLAIMED instances. `pending` is the whole
 		// test: `ready` is computed and never stored, so a computed-ready step
 		// is a `pending` row and sweeps here correctly.
 		if status != db.StepPending {
@@ -1170,7 +1170,7 @@ func supersedeSweep(
 	return out, nil
 }
 
-// afterLoopDownstream computes §7.3 (1)'s MERGED set: every `after_loop` root
+// afterLoopDownstream computes the MERGED supersede set: every `after_loop` root
 // and every step transitively `after` one — the union over every cluster.
 //
 // The traversal is over the DEFINITION, not over expanded rows, because the set
@@ -1196,7 +1196,7 @@ func afterLoopDownstream(def *workflow.Definition) map[string]bool {
 
 // afterLoopDownstreamFor is afterLoopDownstream scoped to one triggering step:
 // the closure over only the `after_loop` roots declared by steps SERVING that
-// trigger (§11.3 cluster scoping). With no `serves` declared anywhere, every
+// trigger (cluster scoping). With no `serves` declared anywhere, every
 // declarer serves every trigger and this is afterLoopDownstream exactly.
 func afterLoopDownstreamFor(def *workflow.Definition, trigger string) map[string]bool {
 	var roots []string
@@ -1252,7 +1252,7 @@ func downstreamClosure(def *workflow.Definition, roots []string) map[string]bool
 //
 // Steps NOT in either set are not re-instantiated. `implement` is the example
 // worth holding onto: it is upstream of `after_loop`, it never re-runs, and its
-// artifact stays bound at ordinal 0 — which is exactly why §7.4's fallback is
+// artifact stays bound at ordinal 0 — which is exactly why the ordinal fallback is
 // per-input rather than per-step. Another cluster's bodies and chain are
 // likewise untouched: their rounds are their own triggers' to mint.
 func instantiateOrdinal(
@@ -1262,7 +1262,7 @@ func instantiateOrdinal(
 	// The issue's subject, for `when` predicates — read from the SNAPSHOT, so a
 	// re-instantiation at ordinal k evaluates the same predicate against the
 	// same facts activation froze. Reading the live issue here would make a
-	// mid-run label edit change the topology of ordinal 1, breaking §9 item 5's
+	// mid-run label edit change the topology of ordinal 1, breaking activation's
 	// determinism for exactly the runs that loop.
 	subject, err := snapshotSubject(tx, step.RunID, step.IssueID)
 	if err != nil {
@@ -1272,7 +1272,7 @@ func instantiateOrdinal(
 	// Clause (3) instantiates the serving `loop = true` steps; clause (4)
 	// re-instantiates the cluster's `after_loop` chain. workflow.ExpandOrdinal
 	// applies both rules and nothing else, so the ordering and the fanout
-	// indices are the same pure function ordinary expansion uses (§5.3.1) — a
+	// indices are the same pure function ordinary expansion uses — a
 	// second implementation here is how ordinal 1's topology would drift from
 	// ordinal 0's.
 	rows := workflow.ExpandOrdinal(def, subject, ordinal, bodies, downstream)
@@ -1295,7 +1295,7 @@ func instantiateOrdinal(
 // resolutionOf renders it as the packet's `== RESOLUTION` section (DKT-247's
 // own-row scoping intact — the note was recorded FOR these rows, at their
 // minting), and loopEntryOf reports it as the bundle's `loop_entry.routing`,
-// which finally matches §11.3's "the routing that entered it".
+// which finally matches the loop rule's "the routing that entered it".
 //
 // A `pending` row carrying a routing record is the DKT-247 retry shape
 // exactly — human.go returns a ruled-on step to `pending` with its note in
@@ -1380,7 +1380,7 @@ func writeInstances(
 // the run can do nothing about, which trades starvation for a wedge.
 //
 // A MATERIALIZED held step maps back to its routing step before the lookup, the
-// same mapping the sweep used to take it (H17). Its name is not in the
+// same mapping the sweep used to take it. Its name is not in the
 // definition, so expansion never writes one at the new ordinal and there is
 // nothing to repair: its successor IS its routing step's new instance, which is
 // what the mapped lookup asks about.
@@ -1483,7 +1483,7 @@ func restoreLoopCount(tx *sql.Tx, step *db.Step, raised int) error {
 }
 
 // snapshotSubject reads the `when`-predicate subject from the issue snapshot
-// activation froze (§5.1.1).
+// activation froze.
 func snapshotSubject(tx *sql.Tx, runID, issueID int) (workflow.Subject, error) {
 	ri, err := db.GetRunIssueTx(tx, runID, issueID)
 	if err != nil {
@@ -1492,7 +1492,7 @@ func snapshotSubject(tx *sql.Tx, runID, issueID int) (workflow.Subject, error) {
 	return subjectFromSnapshot(ri.IssueSnapshot)
 }
 
-// resolveQuorumMisses applies J5's failure routing: a fanned-out step whose
+// resolveQuorumMisses applies the join's failure routing: a fanned-out step whose
 // join completed with fewer than `min_siblings` results routes per its
 // `on_fail`.
 //
@@ -1586,7 +1586,7 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 	return nil
 }
 
-// StaleLineage is the INERT half of §11.3 (2), and §7.3 (3) exactly.
+// StaleLineage is the INERT half of the supersede rule, exactly.
 //
 // A step whose ordinal is below its issue's current `loop_count` belongs to a
 // superseded lineage: a later loop entry replaced the work it is part of. It
@@ -1627,7 +1627,7 @@ func StaleLineage(tx *sql.Tx, step *db.Step) (bool, error) {
 	}
 
 	// A materialized held step maps back to its routing step before the
-	// lookup, the same mapping the sweep uses (H17): its name is not in the
+	// lookup, the same mapping the sweep uses: its name is not in the
 	// definition, so expansion never writes one at a later ordinal — its
 	// successor IS its routing step's later instance.
 	name := step.StepName
@@ -1650,8 +1650,8 @@ func StaleLineage(tx *sql.Tx, step *db.Step) (bool, error) {
 // HighestOrdinals returns, per step NAME, the highest ordinal that has an
 // instance for this issue.
 //
-// It is the basis of §11.3's "issue completion is evaluated over highest-ordinal
-// instances only". Per NAME rather than one number for the issue, because the
+// It is the basis of the loop rule's "issue completion is evaluated over
+// highest-ordinal instances only". Per NAME rather than one number for the issue, because the
 // two differ exactly where it matters: after a loop entry, `implement` has
 // instances only at ordinal 0 while `review` has them at 0 and 1, and a single
 // issue-wide maximum would rule `implement@0` out of the completion check and

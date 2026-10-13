@@ -14,10 +14,10 @@ import (
 
 // DKT-2465: the seven operator verbs bind to the run's conductor capability.
 //
-// The claims-leases §4.0 rows, proven at the engine seam so they hold for
-// every writer: R9 (bound run, no token) is VALIDATION_ERROR, R10 (bound run,
-// wrong token) is AUTH_ERROR, R11 (unbound run) is allowed exactly as before,
-// R12 (`run conduct` on a terminal run) is CONFLICT — and every refusal writes
+// The refusal rows, proven at the engine seam so they hold for every writer:
+// a bound run with no token is VALIDATION_ERROR, a bound run with a wrong
+// token is AUTH_ERROR, an unbound run is allowed exactly as before, and
+// `run conduct` on a terminal run is CONFLICT — and every refusal writes
 // nothing: no event, no row_version bump.
 
 // boundRun activates the fixture and returns the capability the activation
@@ -222,7 +222,7 @@ var conductorVerbs = []conductorVerb{
 }
 
 // TestOperatorVerbsRequireTheConductorCapability: on a bound run each verb
-// refuses a missing token (R9) and a wrong one (R10) without writing, then
+// refuses a missing token and a wrong one without writing, then
 // succeeds with the token activation returned.
 func TestOperatorVerbsRequireTheConductorCapability(t *testing.T) {
 	for _, verb := range conductorVerbs {
@@ -250,7 +250,7 @@ func TestOperatorVerbsRequireTheConductorCapability(t *testing.T) {
 	}
 }
 
-// TestUnboundRunStaysOpenToTheOperatorVerbs is R11: a run activated before
+// TestUnboundRunStaysOpenToTheOperatorVerbs: a run activated before
 // the capability existed asks for nothing, so a migrated store's runs in
 // flight keep working exactly as they did.
 func TestUnboundRunStaysOpenToTheOperatorVerbs(t *testing.T) {
@@ -315,7 +315,7 @@ func TestConductRunRotatesTheCapability(t *testing.T) {
 
 // TestConductRunBindsAnUnboundRunAndRefusesATerminalOne covers the two ends:
 // a legacy run is bound by its first conduct (rotated = false), and a run
-// that has ended has nothing left to conduct (R12).
+// that has ended has nothing left to conduct.
 func TestConductRunBindsAnUnboundRunAndRefusesATerminalOne(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := boundRun(t, conn)

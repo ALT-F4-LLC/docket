@@ -13,9 +13,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Held clusters — docs/tdd/payloads-thresholds.md §7.7.
+// Held clusters.
 //
-// engine-spec §2 gives this one sentence:
+// The engine's contract for a hold is one sentence:
 //
 //	When `hold_spread` trips, the engine materializes a `type=human` step named
 //	`<step>-held` gating the routing step.
@@ -24,11 +24,11 @@ import (
 // exists and with nothing new: the routing step's saga stops at a `held` stage,
 // its status stays `gated` — which is NON-TERMINAL — so every downstream
 // successor fails R3 and nothing proceeds. No new status, no synthetic `after`
-// edge, no second readiness rule (H8).
+// edge, no second readiness rule.
 //
 // The materialized step is the one row in a run that expansion did not write,
 // and its spec is a pure function of the PINNED definition plus the reserved
-// suffix (H5), so §9 item 5's determinism is untouched.
+// suffix, so expansion stays deterministic.
 
 // holdTally is the instance's configured answer to "who decides a hold?" —
 // `vote.hold.rule` and `vote.hold.voters`, resolved for one run's project.
@@ -131,11 +131,11 @@ func (t holdTally) heldStepCost() float64 {
 
 // heldStepKind is the kind a materialized held step is MINTED as.
 //
-// H3 says `human` "in every respect the verbs can observe", and that stays the
-// default. A configured tally mints `vote` instead, and the kind is what
-// PERSISTS: every later read of that step — the spec synthesis, `approve`, the
-// vote driver — asks the row rather than the config, so a roster edited or
-// removed mid-run cannot retype a question already asked.
+// A held step is `human` "in every respect the verbs can observe", and that
+// stays the default. A configured tally mints `vote` instead, and the kind is
+// what PERSISTS: every later read of that step — the spec synthesis,
+// `approve`, the vote driver — asks the row rather than the config, so a
+// roster edited or removed mid-run cannot retype a question already asked.
 func (t holdTally) heldStepKind() string {
 	if t.configured() {
 		return workflow.TypeVote
@@ -146,7 +146,7 @@ func (t holdTally) heldStepKind() string {
 // heldStepInstance renders the materialized step's instance identity: the
 // routing step's own name plus `-held`, at the routing step's OWN ordinal.
 //
-// No sibling index, ever (H2). §11.1's exactly-one-of rule means an `action`
+// No sibling index, ever. The exactly-one-of rule means an `action`
 // step is never fanned out, so there is no second instance for a hold to belong
 // to and an index would encode a distinction that cannot exist.
 //
@@ -171,7 +171,7 @@ func heldStepInstance(step *db.Step) string {
 // silently reattach an operator's answer to a different cluster.
 //
 // This uses `#` — the same sibling-index separator fanout uses — deliberately.
-// H2 says a hold has no sibling index because an action step is never fanned
+// A hold has no sibling index because an action step is never fanned
 // out, and that reasoning is about the ROUTING step having one instance. The
 // clusters inside its payload are a different axis, and they are genuinely
 // plural, so they get the notation the codebase already uses for "several of
@@ -180,7 +180,7 @@ func heldClusterInstance(step *db.Step, element int) string {
 	return fmt.Sprintf("%s#%d", heldStepInstance(step), element)
 }
 
-// enterHeld is H4: the materialized step is created in the SAME TRANSACTION
+// enterHeld creates the materialized step in the SAME TRANSACTION
 // that records the aggregate's artifact and enters the `held` stage.
 //
 // One transaction, or a crash leaves a held payload with nobody able to resolve
@@ -202,7 +202,7 @@ func enterHeld(tx *sql.Tx, step *db.Step, held []int, tally holdTally, nowMS int
 
 	// THE ISSUE MIRROR RUNS (DKT-380). A hold is an issue blocked on a human
 	// decision, which is exactly what `review` reports — but this path never
-	// routes (H8: the routing step stays `gated` and the decision is DEFERRED),
+	// routes (the routing step stays `gated` and the decision is DEFERRED),
 	// so reconcileIssueAndRun is never called and nothing recomputed the
 	// mirror. The whole hold path read `in-progress`: the status for work in
 	// flight, of which there is none until someone decides.
@@ -229,7 +229,7 @@ func materializeHeldCluster(
 ) error {
 	instance := heldClusterInstance(step, element)
 
-	// H7: at most one step per (run, issue, step, ordinal, cluster), enforced
+	// At most one step per (run, issue, step, ordinal, cluster), enforced
 	// by the existing UNIQUE(run_id, issue_id, instance) index. A resumed saga
 	// that re-enters this branch finds it and does not duplicate.
 	exists, err := heldStepExists(tx, step, instance)
@@ -245,7 +245,7 @@ func materializeHeldCluster(
 		StepName: workflow.HeldStepName(step.StepName),
 		Ordinal:  step.Ordinal,
 		Instance: instance,
-		// H3: `human` in every respect the verbs can observe — approve and
+		// `human` in every respect the verbs can observe — approve and
 		// reject apply, `claim` refuses with CONFLICT naming the class, and
 		// `next --run` offers it with no executor. A configured tally mints
 		// `vote` instead, and the difference is confined to WHO ANSWERS FIRST:
@@ -257,7 +257,7 @@ func materializeHeldCluster(
 		// `vote.hold.cost` so the panel is visible to the budget floor at
 		// materialization; a `human` hold stays at 0, the prior row exactly.
 		ExpectedCost: tally.heldStepCost(),
-		// H4: the flag that tells a reader a declared question from a
+		// The flag that tells a reader a declared question from a
 		// computed one.
 		Materialized: true,
 	}, nowMS)
@@ -444,7 +444,7 @@ func heldStepExists(tx *sql.Tx, step *db.Step, instance string) (bool, error) {
 // and if so whether it was approved.
 //
 // "Resolved" is the materialized step reaching a terminal status, which
-// approve and reject both produce (H14). "Approved" is `done` with a `pass`
+// approve and reject both produce. "Approved" is `done` with a `pass`
 // routing — exactly the state `step approve` writes, and exactly the test
 // `guard gate` already applies to a declared human gate. A step that reached
 // `done` by any other route did not receive an approval.
@@ -490,8 +490,8 @@ func heldDecision(conn *sql.DB, step *db.Step) (resolved, approved bool, err err
 }
 
 // heldClusterRow is one row of a materialized hold's own steps — the whole-hold
-// row (H2's identity) and every per-cluster row (H2's plural sibling), as read
-// by heldClusterRows.
+// row (the hold's identity) and every per-cluster row (its plural sibling), as
+// read by heldClusterRows.
 type heldClusterRow struct {
 	instance string
 	status   string
@@ -668,13 +668,12 @@ func (r heldResolution) applies(i int) bool {
 	return r.Element < 0 || r.Element == i
 }
 
-// resolveHeldPayload is §7.7.3's approve half: a NEW artifact of the same kind
-// on the ROUTING step, whose payload is the held one with every
+// resolveHeldPayload is the approve half of a hold decision: a NEW artifact of
+// the same kind on the ROUTING step, whose payload is the held one with every
 // previously-held element carrying `"operator_resolved": true`.
 //
-// ARTIFACTS STAY IMMUTABLE (engine-core §1.4). Approval records a new artifact
-// rather than annotating the old one, which is the same rule a step re-run
-// follows: what the engine computed and what the operator accepted are two
+// ARTIFACTS STAY IMMUTABLE. Approval records a new artifact rather than
+// annotating the old one, which is the same rule a step re-run follows: what the engine computed and what the operator accepted are two
 // records, not one overwritten one. The held payload remains addressable
 // forever.
 //
@@ -768,7 +767,7 @@ func resolveHeldPayload(
 	if err != nil {
 		return fmt.Errorf("encoding the resolved payload: %w", err)
 	}
-	// SUPERSEDES the artifact it was computed from (v15, DKT-70). H13's
+	// SUPERSEDES the artifact it was computed from (v15, DKT-70). The
 	// two-record trail is deliberate and stays; the pointer says which of the
 	// two records a computation and which records a decision.
 	//
@@ -902,11 +901,11 @@ func routingStepOf(conn *sql.DB, held *db.Step) (*db.Step, error) {
 	return db.GetStep(conn, id)
 }
 
-// decideMaterializedStep is §7.7.3 — M-c's branch, and the only place
-// `approve`/`reject` resolve ANOTHER step's saga.
+// decideMaterializedStep is M-c's branch, and the only place `approve`/`reject`
+// resolve ANOTHER step's saga.
 //
-// Neither verb takes a LEASE token (H15), per §2: a human gate is resolved by
-// an operator who never claimed it. Both require the run's conductor
+// Neither verb takes a LEASE token: a human gate is resolved by an
+// operator who never claimed it. Both require the run's conductor
 // capability, checked by DecideStepWith before this is reached (DKT-2465).
 func (e *Engine) decideMaterializedStep(
 	conn *sql.DB, held *db.Step, opts DecideOptions,
@@ -941,7 +940,7 @@ func (e *Engine) decideMaterializedStep(
 		res.Field, res.Mirrors = field, mirrors
 	}
 
-	// H16: approve/reject on a materialized step whose routing step is NOT in
+	// Approve/reject on a materialized step whose routing step is NOT in
 	// `held` — a double approve, a resumed race — is CONFLICT naming both
 	// steps. The saga advance below is CAS-guarded on the same stage, so the
 	// loser writes nothing even if it gets past this read.
@@ -962,7 +961,7 @@ func (e *Engine) decideMaterializedStep(
 	}
 	defer tx.Rollback()
 
-	// H14: the materialized step ends `done` on BOTH approve and reject — it
+	// The materialized step ends `done` on BOTH approve and reject — it
 	// recorded a decision, which is what a gate does. The CONSEQUENCE lands on
 	// the routing step, which is also why V13's rule is not violated when that
 	// step's `on_fail` is `waiting-human`: the park is on a DIFFERENT step,
@@ -991,7 +990,7 @@ func (e *Engine) decideMaterializedStep(
 	}
 	if approve {
 		// AFTER the routing above, so this cluster's own verdict is visible to
-		// the per-cluster read. Still the same transaction: §7.7.3's rule that
+		// the per-cluster read. Still the same transaction: the rule that
 		// approval records its artifact atomically with the decision is
 		// unchanged, only the order within the transaction moved.
 		if err := resolveHeldPayload(tx, routingStep, res, nowMS); err != nil {
@@ -1020,8 +1019,8 @@ func (e *Engine) decideMaterializedStep(
 	}
 
 	// The routing step's saga resumes from `held` and routes. It is a SEPARATE
-	// transaction on purpose: the routing stage owns its own four-table commit
-	// (§2), and folding it into this one would put the decision and its
+	// transaction on purpose: the routing stage owns its own four-table commit,
+	// and folding it into this one would put the decision and its
 	// consequences in a transaction whose boundaries neither stage specifies.
 	// A crash between the two leaves a resolved question and an unrouted step,
 	// which the next `next`/`claim`/`complete` finishes — which is exactly what
@@ -1105,7 +1104,7 @@ func saganame(stage string) string {
 }
 
 // materializedSpec resolves a step's spec, synthesizing one for a materialized
-// held step (H5).
+// held step.
 //
 // Every `spec == nil` site routes through this instead of erroring, because a
 // materialized step is REAL — readiness asks about it, the saga's resume asks
@@ -1227,7 +1226,7 @@ func readyStaleTargetCandidates(
 }
 
 // heldStepsFor lists the materialized held steps of one issue below an ordinal,
-// for the loop's supersede sweep (H17).
+// for the loop's supersede sweep.
 //
 // The sweep walks instance NAMES against the `after_loop` downstream set, and a
 // materialized name is not in the definition — so it is mapped back to the

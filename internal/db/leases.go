@@ -8,8 +8,8 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// Lease refusal sentinels. Each maps to exactly one CLI error code, per the
-// refusal matrix in docs/tdd/claims-leases.md §4 (engine-spec.md §9 item 3).
+// Lease refusal sentinels. Each maps to exactly one CLI error code in the
+// refusal matrix.
 var (
 	// ErrLeaseHeld means a live lease is held by someone else — the claim
 	// race's loser. Surfaced as CONFLICT (exit 4).
@@ -44,21 +44,21 @@ var (
 // (TestClaimPredicateIsLoadBearing) proves it does.
 const claimPredicate = `(owner IS NULL OR owner = '' OR expires_ms <= ?)`
 
-// leaseTarget parameterizes the lease implementation over the TABLE it leases
-// (TDD §6.6). v6 shipped these helpers against `issues`; v7 leases `steps` with
-// the same names, types, and nullability (TDD §2's lease-field reuse contract),
-// so the SQL is GENERALIZED rather than copied.
+// leaseTarget parameterizes the lease implementation over the TABLE it
+// leases. v6 shipped these helpers against `issues`; v7 leases `steps` with the
+// same names, types, and nullability (the lease-field reuse contract), so the
+// SQL is GENERALIZED rather than copied.
 //
 // The copy is what this type exists to prevent. A second implementation of
 // claimPredicate against `steps` would be a second place for the refusal matrix
 // to live, and the two would drift the first time one of them was fixed — which
-// is precisely why §6.9's step-level matrix is the S2 matrix with verbs
+// is precisely why the step-level matrix is the issue matrix with verbs
 // substituted rather than a matrix of its own. TestLeaseHelpersAreShared asserts
 // both entities reach the same function.
 //
 // `versionColumn` is the one genuine difference between the two tables:
 // `issues` carries the v5 CAS column as `version`, `steps` as `row_version`
-// (reliability-delta §6.1's naming, which v7 adopted for every new entity).
+// (the naming v7 adopted for every new entity).
 // Nothing else differs, and nothing else may: a target needing a second
 // exception would mean the reuse contract had been broken somewhere upstream.
 type leaseTarget struct {
@@ -111,7 +111,7 @@ func (t leaseTarget) claim(
 
 // claimTx is the claim's transaction body, separated so a caller that needs
 // the claim and something else to commit together — `step claim`, which mints
-// the token and assembles the context bundle in ONE transaction (§6.6) — shares
+// the token and assembles the context bundle in ONE transaction — shares
 // this exact SQL rather than restating it.
 func (t leaseTarget) claimTx(
 	tx *sql.Tx, id int, owner, hash string, expiresMS, nowMS int64,
@@ -159,8 +159,8 @@ func (t leaseTarget) claimTx(
 	}, nil
 }
 
-// getLease reads a lease without writing anything. Reads never write
-// (engine-spec.md §6); liveness is computed by the caller via Lease.Live.
+// getLease reads a lease without writing anything. Reads never write;
+// liveness is computed by the caller via Lease.Live.
 func (t leaseTarget) getLease(db *sql.DB, id int) (*model.Lease, error) {
 	return t.scan(db.QueryRow(
 		`SELECT owner, token_hash, expires_ms, attempt FROM `+t.table+` WHERE id = ?`, id,
@@ -200,7 +200,7 @@ func (t leaseTarget) scan(row *sql.Row) (*model.Lease, error) {
 
 // authorize verifies that token holds a LIVE lease, inside tx. It is the single
 // gate every lease-mediated mutating verb passes through, for BOTH entities —
-// which is why §6.9's step matrix cannot drift from §4's issue matrix.
+// which is why the step matrix cannot drift from the issue matrix.
 func (t leaseTarget) authorize(tx *sql.Tx, id int, token string, nowMS int64) (*model.Lease, error) {
 	lease, err := t.getLeaseTx(tx, id)
 	if err != nil {
@@ -215,9 +215,9 @@ func (t leaseTarget) authorize(tx *sql.Tx, id int, token string, nowMS int64) (*
 // authorizeRead is authorize over a lease read OUTSIDE any transaction.
 //
 // It exists for one caller: a refusal that must precede a write transaction and
-// must still be an AUTH_ERROR rather than a content error (payloads-thresholds
-// §4.8 C6 — "authorization precedes content, always, or an unauthenticated
-// caller learns the schema by probing it"). It is ADVISORY: the authoritative
+// must still be an AUTH_ERROR rather than a content error: authorization
+// precedes content, always, or an unauthenticated caller learns the schema by
+// probing it. It is ADVISORY: the authoritative
 // check is still the in-transaction one, which is what a concurrent release or
 // expiry races against.
 func (t leaseTarget) authorizeRead(db *sql.DB, id int, token string, nowMS int64) error {
@@ -298,7 +298,7 @@ func (t leaseTarget) release(db *sql.DB, id int, token string, nowMS int64) (*mo
 
 // clearLeaseTx drops the lease fields, leaving attempt intact.
 //
-// This is also the STEP saga's token retirement (§6.8 stage 1): the token
+// This is also the STEP saga's token retirement: the token
 // retires when the artifact records, which is this operation, in the artifact's
 // own transaction. Retirement and release are the same state change — no
 // owner, no hash, no expiry — reached by two different authorities, so they are
@@ -318,14 +318,13 @@ func (t leaseTarget) clearLeaseTx(tx *sql.Tx, id int) error {
 
 // ClaimIssue takes a lease on an issue and returns the minted capability
 // token. It is one CAS transaction: exactly one of N concurrent claimants
-// wins, and the losers get ErrLeaseHeld (engine-core.md §5).
+// wins, and the losers get ErrLeaseHeld.
 //
-// Expiry is reaped lazily, here and only here (engine-spec.md §6: "lazy lease
-// reaping confined to next/claim; reads never write"). The `expires_ms <= now`
+// Expiry is reaped lazily, here and only here (lazy lease reaping confined to
+// next/claim; reads never write). The `expires_ms <= now`
 // disjunct IS the reaping — there is no reaper, no background pass, and no
 // write from any read path. An expired lease is therefore re-claimable with no
-// operator action beyond the claim itself, which is the liveness mechanism
-// engine-spec.md §9 item 4 requires.
+// operator action beyond the claim itself, which is the liveness mechanism.
 //
 // attempt increments on every winning claim, including the one that replaces a
 // holder that died mid-work. That is the complete attempt trail: it counts
@@ -336,7 +335,7 @@ func ClaimIssue(db *sql.DB, id int, owner string, ttlMS int64, nowMS int64) (tok
 
 // GetIssueLease reads an issue's lease without writing anything.
 //
-// Reads never write (engine-spec.md §6). Liveness is computed from ExpiresMS by
+// Reads never write. Liveness is computed from ExpiresMS by
 // the caller via Lease.Live; nothing here reaps.
 func GetIssueLease(db *sql.DB, id int) (*model.Lease, error) {
 	return leaseIssues.getLease(db, id)
@@ -350,8 +349,7 @@ func getIssueLeaseTx(tx *sql.Tx, id int) (*model.Lease, error) {
 
 // HeartbeatIssue extends a live lease held by token, and returns the new
 // expiry. Any tool activity in the holder's session can drive this, so a
-// working holder keeps its lease and a wedged or dead one lets it lapse
-// (engine-core.md §5 "Leases").
+// working holder keeps its lease and a wedged or dead one lets it lapse.
 //
 // attempt and owner are untouched: a heartbeat is not a new claim.
 func HeartbeatIssue(db *sql.DB, id int, token string, ttlMS int64, nowMS int64) (*model.Lease, error) {
@@ -375,14 +373,13 @@ func clearLeaseTx(tx *sql.Tx, id int) error {
 // may or may not be live, and ends the lease when the caller is the holder.
 //
 // This is the guard for terminal verbs (`issue close`), which end a lease as a
-// side effect the way a step's token retires when its artifact records
-// (engine-spec.md §2).
+// side effect the way a step's token retires when its artifact records.
 //
 // The dormancy rule is here, in the first branch: an issue with no LIVE lease
 // is outside the mechanism entirely. No token is required, nothing is refused,
 // and behavior is exactly what it was at v5. The token check fires only when a
-// live lease exists — which is what makes engine-spec.md §9 item 8 hold for a
-// repo that never claims.
+// live lease exists — which is what keeps the dormancy guarantee for a repo
+// that never claims.
 func AuthorizeLeaseMutation(tx *sql.Tx, id int, token string, nowMS int64) error {
 	lease, err := getIssueLeaseTx(tx, id)
 	if err != nil {

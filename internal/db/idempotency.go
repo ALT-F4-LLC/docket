@@ -198,10 +198,10 @@ func beginIdempotentCreate(db *sql.DB, scope, idempotencyKey string) (existingID
 // makes a concurrent duplicate a database constraint rather than an
 // application-level check.
 //
-// created_at_ms and seq are millisecond-resolution and monotonic per
-// engine-spec.md §5. They live here, in a table created at v5, and never on a
-// pre-existing column — mutating an existing timestamp format would break
-// byte-compatibility for every existing verb.
+// created_at_ms and seq are millisecond-resolution and monotonic. They live
+// here, in a table created at v5, and never on a pre-existing column —
+// mutating an existing timestamp format would break byte-compatibility for
+// every existing verb.
 func RecordIdempotencyKeyTx(tx *sql.Tx, scope, key string, entityID int) error {
 	nowMS := time.Now().UTC().UnixMilli()
 

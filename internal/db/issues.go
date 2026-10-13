@@ -583,12 +583,12 @@ func UpdateIssueCASNote(db *sql.DB, id int, updates map[string]interface{}, chan
 // UpdateIssueCASLease is UpdateIssueCAS for a verb that ends a lease: when the
 // issue carries a LIVE lease, the caller must hold it (token) and the lease is
 // cleared as part of the same transaction — the issue-level analog of a step's
-// token retiring when its artifact records (engine-spec.md §2).
+// token retiring when its artifact records.
 //
 // When no live lease exists the token is ignored entirely and behavior is
 // exactly UpdateIssueCAS's. That is the dormancy guarantee: an unclaimed issue
 // is outside the lease mechanism, so a repo that never claims sees no change on
-// any verb (engine-spec.md §9 item 8).
+// any verb.
 func UpdateIssueCASLease(db *sql.DB, id int, updates map[string]interface{}, changedBy string, ifVersion *int, token string) error {
 	return updateIssueCASLease(db, id, updates, changedBy, ifVersion, &token, "")
 }
@@ -1007,9 +1007,9 @@ func scanIssueFrom(s scanner) (*model.Issue, error) {
 
 	// The lease is attached only when one is actually held. An unclaimed issue
 	// carries a nil Lease, so nothing about its rendering changes at any JSON
-	// version — the dormancy guarantee at the read path (engine-spec.md §9
-	// item 8). Liveness is NOT computed here: it is derived per read from
-	// ExpiresMS at marshal time, and nothing on this path writes.
+	// version — the dormancy guarantee at the read path. Liveness is NOT
+	// computed here: it is derived per read from ExpiresMS at marshal time,
+	// and nothing on this path writes.
 	if owner.Valid && owner.String != "" {
 		i.Lease = &model.Lease{
 			Owner:     owner.String,
@@ -1251,7 +1251,7 @@ func CountBySize(db *sql.DB, projectID int) (map[string]int, error) {
 //
 // Doc tables and the pre-existing proposals/votes/proposal_issues tables are
 // included; prior to v4 the latter three were silently omitted, which broke
-// `--replace` import on any DB containing proposals (TDD §5.4 S4 / R7).
+// `--replace` import on any DB containing proposals.
 func ClearAllData(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {

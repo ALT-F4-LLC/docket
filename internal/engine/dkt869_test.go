@@ -71,7 +71,7 @@ func TestRefreshReachesTheAlreadyCreatedStep(t *testing.T) {
 	stillFrozen, err := RenderStep(conn, stepID, "", nowMS)
 	testsupport.Must(t, err, "rendering after the widen: %v", err)
 	if stillFrozen.Packet != before.Packet {
-		t.Fatalf("the widen alone changed the packet; §9 item 5's edit "+
+		t.Fatalf("the widen alone changed the packet; edit "+
 			"immunity requires the refresh to be a separate act:\n%s",
 			stillFrozen.Packet)
 	}
@@ -398,7 +398,7 @@ func TestRefreshRecordsTheDiscontinuity(t *testing.T) {
 		t.Errorf("event payload steps = %v, want the reached instance", payload.Steps)
 	}
 
-	// §9 item 2: the kind is attributable, and it is a person's act.
+	// The kind is attributable, and it is a person's act.
 	actor, ok := ActorFor(EventIssueScopeRefreshed)
 	if !ok || actor != ActorHuman {
 		t.Errorf("ActorFor(%s) = %v/%v, want ActorHuman",

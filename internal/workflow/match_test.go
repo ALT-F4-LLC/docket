@@ -29,7 +29,7 @@ func mustParseFixture(t *testing.T) *Definition {
 	return def
 }
 
-// TestMatchMatrix is the §5.7 obligation: the `[match]` predicate matrix —
+// TestMatchMatrix is the `[match]` predicate matrix —
 // kind/labels_any/labels_all/unless_labels in every combination, including
 // unless_labels beating labels_any, and absent clauses matching anything.
 func TestMatchMatrix(t *testing.T) {
@@ -590,7 +590,7 @@ func TestTemplateFenceTags(t *testing.T) {
 	}
 }
 
-// TestHarvestFencesIsLiteralAndTagScoped is the §5.7 fence obligation:
+// TestHarvestFencesIsLiteralAndTagScoped is the fence obligation:
 // multiple blocks, multiple tags, stable ordinals, and — the load-bearing half
 // — a block whose tag no workflow declares is NOT harvested. Harvesting every
 // fenced block would make any code sample in an issue body a candidate
@@ -657,7 +657,7 @@ func TestHarvestFencesIsLiteralAndTagScoped(t *testing.T) {
 	}
 }
 
-// TestHarvestFencesIsVerbatim pins the "no prose parsing" rule (engine-core §6):
+// TestHarvestFencesIsVerbatim pins the "no prose parsing" rule:
 // the block's lines are taken byte for byte. A command an operator approved at
 // plan time is the command that runs — anything trimmed, reflowed, or
 // interpreted makes the approval a summary rather than the thing itself.

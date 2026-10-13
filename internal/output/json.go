@@ -11,25 +11,22 @@ type ErrorCode string
 // Error code constants.
 //
 // The taxonomy is extended once, here, for every verb the workflow engine will
-// add (engine-spec.md §5). The first four codes and their exit numbers predate
-// that extension and are never renumbered — exit codes are the most widely
+// add. The first four codes and their exit numbers predate that extension and
+// are never renumbered — exit codes are the most widely
 // depended-upon part of a CLI contract. New codes only ever append.
 //
 // AUTH_ERROR, STALE_LEASE, TIMEOUT, and UNTRUSTED have no emitter yet; they are
 // declared now so the taxonomy is frozen before the verbs that raise them exist.
 //
-// GONE arrives at stage 6 (docs/tdd/runs-dispatch.md §8.6). Two product paths
-// return it: `events list --since` below the retained minimum, and the recorded
-// issue body and scope read-back that `docket step context` and `docket step
-// render` reach when `events prune` removed the step's claim event. It APPENDS at exit 9 rather than
-// taking the exit 6 that TDD's E14 names. E14's number was already spent:
-// STALE_LEASE has held exit 6 since the reliability delta and EMITS TODAY
+// GONE: two product paths return it: `events list --since` below the retained
+// minimum, and the recorded issue body and scope read-back that `docket step
+// context` and `docket step render` reach when `events prune` removed the
+// step's claim event. It APPENDS at exit 9 rather than taking exit 6, which
+// was already spent: STALE_LEASE holds exit 6 and EMITS TODAY
 // (`issue heartbeat`, `token`), so the two codes would be indistinguishable to
 // the one consumer an exit code exists for — a script testing `$?`, as opposed
 // to one reading `.code` from the envelope. The rule stated three lines above
 // is the one that decides it: "New codes only ever append."
-//
-// A RECORDED AMENDMENT notes the divergence rather than resolving it silently.
 const (
 	ErrGeneral    ErrorCode = "GENERAL_ERROR"
 	ErrNotFound   ErrorCode = "NOT_FOUND"
@@ -43,10 +40,10 @@ const (
 	// return it: an `events list --since` cursor below the retained minimum, and
 	// the recorded issue body and scope read-back reached by `docket step
 	// context` and `docket step render` when the prune removed the step's claim
-	// event. The read RETURNS THIS RATHER THAN SILENTLY SKIPPING (engine-spec
-	// §3): a consumer that received a short list, or a context without the
-	// recorded body, would believe it had the full history. Restarting from the
-	// retained minimum applies to the cursor only, not to a context read.
+	// event. The read RETURNS THIS RATHER THAN SILENTLY SKIPPING: a consumer
+	// that received a short list, or a context without the recorded body,
+	// would believe it had the full history. Restarting from the retained
+	// minimum applies to the cursor only, not to a context read.
 	ErrGone ErrorCode = "GONE"
 )
 

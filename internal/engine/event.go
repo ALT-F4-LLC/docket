@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// The event seam (TDD §7.6). Every transition writes an event, in the
+// The event seam. Every transition writes an event, in the
 // transaction that performs it.
 //
 // PHASE 4 SWITCHED THIS ON. Phases 2 and 3 wrote through the seam while it was
@@ -20,15 +20,16 @@ import (
 // in the order the code actually executes — not in whatever order someone
 // auditing after the fact got to them.
 
-// The CLOSED SET of event kinds (§7.6). Phases 2 and 3 named the kinds they
+// The CLOSED SET of event kinds. Phases 2 and 3 named the kinds they
 // emit; phase 4 completes the set with the two loop/join kinds and enforces it.
 //
-// §9 item 2 — "every transition is attributable to `next`, a gate, a threshold,
-// or human input" — is checkable only because this set is closed. A call site
-// passing a bare string literal would put a kind outside the set into the table
-// and make the check vacuous, so the writer REFUSES a kind that is not one of
-// these (see eventKinds and recordEvent), and TestEventKindsAreAClosedSet
-// enumerates the constants against the writer's own table.
+// The attribution rule — every transition is attributable to `next`, a gate, a
+// threshold, or human input — is checkable only because this set is closed. A
+// call site passing a bare string literal would put a kind outside the set into
+// the table and make the check vacuous, so the writer REFUSES a kind that is
+// not one of these (see eventKinds and recordEvent), and
+// TestEventKindsAreAClosedSet enumerates the constants against the writer's
+// own table.
 const (
 	EventRunStarted     = "run-started"
 	EventRunActivated   = "run-activated"
@@ -46,10 +47,10 @@ const (
 	// worked"), not two kinds artificially split by which edge produced it.
 	// `issue-review` is the other direction: a gate/vote step of the issue
 	// parked `waiting-human`, so an operator or voter is now who the issue is
-	// waiting on. Both earn their place on §9 item 2's argument like every kind
+	// waiting on. Both earn their place on the attribution argument like every kind
 	// above: the issue mirror moving is a transition, and before this change
 	// nothing recorded it — `in-progress` and `review` were validated and
-	// rendered but never written (engine-spec §2).
+	// rendered but never written.
 	EventIssueInProgress = "issue-in-progress"
 	EventIssueReview     = "issue-review"
 
@@ -76,18 +77,18 @@ const (
 	EventLoopEntered   = "loop-entered"
 	EventJoinCompleted = "join-completed"
 
-	// Gate and trust kinds (stage 4, gates-trust §6.4). The closed set gains
-	// exactly four, and they are listed in the TDD so §9 item 2's check keeps
-	// passing rather than silently widening.
+	// Gate and trust kinds (stage 4). The closed set gains exactly four, and
+	// they are listed here so the attribution check keeps passing rather than
+	// silently widening.
 	//
 	// `gate-unmatched` is SEPARATE from `gate-recorded` so an operator
 	// following the feed sees a refusal to execute as its own event, rather
 	// than as a result they must open and inspect. `gate-rerun` precedes each
-	// flaky re-run (§5.6) for the same at-least-once observability reason
+	// flaky re-run for the same at-least-once observability reason
 	// `gate-started` exists.
 	//
 	// `trust-added` / `trust-removed` are what make the self-trust residual
-	// (T9) auditable: a session that grants itself a command mid-run leaves the
+	// auditable: a session that grants itself a command mid-run leaves the
 	// grant in the run's own trail, so a retro can find it. They carry the
 	// ARGV HASH, never the argv — a trusted command's arguments must not land
 	// in an event feed a run report renders.
@@ -96,50 +97,44 @@ const (
 	EventTrustAdded    = "trust-added"
 	EventTrustRemoved  = "trust-removed"
 
-	// Vote-step lifecycle kinds (gates-trust §8.1 phases 2 and 4).
+	// Vote-step lifecycle kinds.
 	//
-	// RECORDED AMENDMENT: §6.4 of that TDD enumerates "exactly four" kinds this
-	// stage adds and does not list these two, while §8.1's own lifecycle table
-	// requires both by name ("writes a `vote-opened` event", "writes a
-	// `vote-tallied` event with the score"). The two sections of one document
-	// disagree; §8.1 is the operative requirement because it specifies
-	// behavior, and §6.4's count is bookkeeping that did not travel with it.
-	// So the closed set gains SIX at this stage, not four, and the deviation is
-	// filed rather than made silently.
+	// The vote lifecycle requires both by name: opening a vote writes a
+	// `vote-opened` event, and tallying writes a `vote-tallied` event with the
+	// score. So the closed set gains SIX at stage 4, not four.
 	//
-	// They earn their place on the same argument §6.4 makes for
-	// `gate-unmatched`: a vote opening and a vote tallying are transitions an
-	// operator follows in the feed, and §9 item 2 requires every transition be
+	// They earn their place on the same argument that keeps `gate-unmatched`:
+	// a vote opening and a vote tallying are transitions an operator follows in
+	// the feed, and the attribution rule requires every transition be
 	// attributable. Without them a proposal appears with nothing explaining
 	// which step opened it.
 	EventVoteOpened  = "vote-opened"
 	EventVoteTallied = "vote-tallied"
 
-	// The held-cluster kind (stage 5, payloads-thresholds §7.7).
+	// The held-cluster kind (stage 5).
 	//
 	// The closed set gains exactly ONE, and it earns its place on the same
-	// argument every kind above earns it: §9 item 2 requires every transition
-	// to be attributable, and materializing a `<step>-held` question is a
+	// argument every kind above earns it: the attribution rule requires every
+	// transition to be attributable, and materializing a `<step>-held` question is a
 	// transition an operator follows in the feed. Without it a gate step nobody
 	// declared appears in a run with nothing explaining where it came from.
 	//
 	// The resolution needs no new kind whichever way the hold was minted.
 	// `step-approved`/`step-rejected` already say what an operator did to a
 	// gate, and a human-minted hold is a human gate in every respect the verbs
-	// can observe (H3). A VOTE-MINTED hold reports through the vote kinds while
+	// can observe. A VOTE-MINTED hold reports through the vote kinds while
 	// the tally runs (`vote-opened`, `vote-tallied`, `step-routed`), and through
 	// the same approve/reject kinds once a failed tally parks it for an
 	// operator — so every one of its transitions is already attributable to the
 	// party that made it.
 	EventStepHeld = "step-held"
 
-	// Dispatch kinds (stage 6 group 2, docs/tdd/runs-dispatch.md §5).
+	// Dispatch kinds (stage 6 group 2).
 	//
-	// The closed set gains exactly THREE, and each is a transition §9 item 2
-	// requires to be attributable. `dispatch-abandoned` is named by engine-spec
-	// §2 VERBATIM — "a dispatch TTL lazily auto-abandoned by `next`
-	// (event-logged)" — so it is the one kind here the spec asks for by
-	// implication rather than the TDD choosing.
+	// The closed set gains exactly THREE, and each is a transition the
+	// attribution rule requires to be attributable. A dispatch whose TTL lapses
+	// is lazily auto-abandoned by `next`, and that abandonment is event-logged
+	// as `dispatch-abandoned`.
 	//
 	// `dispatch-closed` and `dispatch-abandoned` are SEPARATE kinds rather than
 	// one `dispatch-ended` with a reason, for the same argument that keeps
@@ -148,8 +143,8 @@ const (
 	// as different events, not as one event they have to open and inspect. The
 	// two mean opposite things about whether the relay's work is accounted for.
 	//
-	// `dispatch-abandoned` carries `data.reason` — `ttl` for P14's lazy path,
-	// `abandoned` for P21's explicit one — so the feed distinguishes a crashed
+	// `dispatch-abandoned` carries `data.reason` — `ttl` for the lazy TTL path,
+	// `abandoned` for the explicit one — so the feed distinguishes a crashed
 	// relay's manifest expiring from an operator retiring it.
 	EventDispatchOpened    = "dispatch-opened"
 	EventDispatchClosed    = "dispatch-closed"
@@ -165,44 +160,44 @@ const (
 	// were computed at, the same fact `opened_seq` records for the open.
 	EventDispatchExtended = "dispatch-extended"
 
-	// The write-reap acknowledgment kind (§6.2).
+	// The write-reap acknowledgment kind.
 	//
-	// It earns its place on A3: "the ack must be ATTRIBUTABLE" is a requirement
-	// of the mechanism, and §9 item 2 requires every transition to be traceable.
-	// Releasing write headroom is a transition — a successor becomes claimable
-	// that was not — and without this kind the release would appear in the feed
-	// as nothing at all, with the run simply starting to offer write-class work
-	// again for no recorded reason.
+	// It earns its place because the ack must be ATTRIBUTABLE: that is a
+	// requirement of the mechanism, and the attribution rule requires every
+	// transition to be traceable. Releasing write headroom is a transition — a
+	// successor becomes claimable that was not — and without this kind the
+	// release would appear in the feed as nothing at all, with the run simply
+	// starting to offer write-class work again for no recorded reason.
 	//
-	// It carries `data.acked_by`, which is the VERB (A8: `guard-spawn` |
+	// It carries `data.acked_by`, which is the VERB (`guard-spawn` |
 	// `dispatch-open`) and never a user identity, because core has no identity
 	// model.
 	EventReapAcknowledged = "reap-acknowledged"
 
-	// Stage 7's two kinds (docs/tdd/events-follow.md §6, §7.3).
+	// Stage 7's two kinds.
 	//
 	// `events-pruned` earns its place on the argument every kind above earns it
-	// — §9 item 2 requires every transition to be attributable — plus one that
-	// is specific to it: THE PRUNE IS THE ONE TRANSITION THAT DESTROYS
+	// — the attribution rule requires every transition to be attributable —
+	// plus one that is specific to it: THE PRUNE IS THE ONE TRANSITION THAT DESTROYS
 	// EVIDENCE. The record that it happened is the only thing standing between
 	// a trimmed log and a log that looks like it was never written, and a prune
 	// leaving no event would be indistinguishable from a run that simply made
 	// fewer transitions. Its `seq` is above everything it deleted, so the record
 	// of the deletion survives the deletion.
 	//
-	// `run-budget-set` is the kind S6's reasoning did NOT already cover. That
-	// stage refused a `budget-breached` kind on the grounds that `run-paused`
+	// `run-budget-set` is the kind earlier reasoning did NOT already cover. A
+	// `budget-breached` kind was refused on the grounds that `run-paused`
 	// already anchors the fact; the counter does not apply here, because no
 	// existing kind anchors "the cap moved". Without it, a run that breached at
 	// 12 and later admitted a claim at 20 would have a trail with nothing
-	// explaining the difference — the exact gap operations.md §4 warned about
-	// when the only way to raise a cap was to edit the database.
+	// explaining the difference — the gap that existed when the only way to
+	// raise a cap was to edit the database.
 	EventEventsPruned = "events-pruned"
 	EventRunBudgetSet = "run-budget-set"
 
 	// The post-completion annotation kind (DKT-35).
 	//
-	// It earns its place on §9 item 2's argument like every kind above:
+	// It earns its place on the attribution argument like every kind above:
 	// merging metadata onto a finished step's record is a mutation of the run
 	// record, and a record that changed with no event would be evidence that
 	// rewrote itself. The event carries the annotation verbatim, so what was
@@ -211,7 +206,7 @@ const (
 
 	// The tenancy kind (DKT-61).
 	//
-	// It earns its place on §9 item 2's argument, extended one step: a project
+	// It earns its place on the attribution argument, extended one step: a project
 	// row is the thing every other row is attributed TO, so a project that
 	// appears with no event is a hole underneath the whole attribution chain.
 	// Every issue, run, and step in the store says which project it belongs to,
@@ -230,7 +225,7 @@ const (
 
 	// The repin kind (DKT-408).
 	//
-	// It earns its place on §9 item 2's argument in the form `events-pruned`
+	// It earns its place on the attribution argument in the form `events-pruned`
 	// made famous: a repin MOVES THE RUN'S RECORDED AGREEMENT. The `pins` rows
 	// are what every packet, render, and payload validation verifies bytes
 	// against, and after a repin they no longer say what completed steps
@@ -245,7 +240,7 @@ const (
 
 	// The spawn carve-out kind (DKT-236).
 	//
-	// It earns its place on §9 item 2's argument in its sharpest form: this
+	// It earns its place on the attribution argument in its sharpest form: this
 	// event records a hold being STEPPED PAST. Without it, a spawn admitted
 	// over an open reap hold is indistinguishable in the record from a spawn
 	// nothing was holding — the one case where "no event" and "nothing
@@ -259,7 +254,7 @@ const (
 
 	// The batch gate-override kinds (DKT-546).
 	//
-	// Both earn their place on §9 item 2's argument in the `spawn-admitted`
+	// Both earn their place on the attribution argument in the `spawn-admitted`
 	// form: each records a park being STEPPED PAST on standing authority.
 	// `gate-override-granted` is the authority being minted — one operator
 	// ruling that a gate's failure signature is environmental for the rest of
@@ -273,7 +268,7 @@ const (
 	EventGateOverrideGranted = "gate-override-granted"
 	EventStepBatchOverridden = "step-batch-overridden"
 
-	// The stale-target waiver being minted (DKT-742) — the same §9 item 2
+	// The stale-target waiver being minted (DKT-742) — the same attribution
 	// argument as `gate-override-granted`: a warning that stops appearing is
 	// otherwise indistinguishable in the record from a warning that stopped
 	// being true, and this kind is what says an operator ruled rather than
@@ -413,7 +408,7 @@ const (
 // It is derived from the constants above by hand rather than by reflection
 // because a test asserts the two agree (TestEventKindsAreAClosedSet): a
 // generated set could never disagree with itself, and would therefore prove
-// nothing about a constant someone adds without thinking about §9 item 2.
+// nothing about a constant someone adds without thinking about attribution.
 var eventKinds = map[string]bool{
 	EventRunStarted: true, EventRunActivated: true, EventRunPaused: true,
 	EventRunResumed: true, EventRunAbandoned: true, EventRunDone: true,
@@ -459,34 +454,34 @@ var eventKinds = map[string]bool{
 // switching the seam on edited this function and nothing else — every call site
 // already handled the error an INSERT can produce.
 //
-// The arguments are the §11.4 `event` shape minus `seq`, which SQLite assigns:
+// The arguments are the public `event` shape minus `seq`, which SQLite assigns:
 // `kind` from the closed set, the run it belongs to, the step instance when
 // there is one, and an opaque `data` payload.
 //
-// `seq` is INTEGER PRIMARY KEY AUTOINCREMENT (§7.1), so it is monotonic and
-// NEVER REUSED — including after a delete. That is what makes S7's `--since`
+// `seq` is INTEGER PRIMARY KEY AUTOINCREMENT, so it is monotonic and
+// NEVER REUSED — including after a delete. That is what makes the `--since`
 // cursor sound: with a plain rowid, deleting the newest event would let the
 // next insert reuse its number and a consumer holding that cursor would skip
 // the replacement. Monotonic-in-practice is not the same property as monotonic.
 func recordEvent(tx *sql.Tx, e eventRecord) error {
-	// The closed set, enforced (§7.6). A kind outside it is a programming
+	// The closed set, enforced. A kind outside it is a programming
 	// error — a literal that got past the constants — and refusing it here is
-	// what keeps §9 item 2's check from being vacuous. It fails the
+	// what keeps the attribution check from being vacuous. It fails the
 	// TRANSACTION, which for a transition means the transition does not happen:
 	// an unattributable state change is worse than a refused one.
 	if !eventKinds[e.Kind] {
 		return fmt.Errorf(
-			"event kind %q is not in the closed set (§7.6); add it to the "+
+			"event kind %q is not in the closed set; add it to the "+
 				"constants and to eventKinds, or use an existing kind", e.Kind)
 	}
 
 	// The step is addressed by its rendered `name@k#i` identity at every call
-	// site, because that is the identity §11.3 makes public and the one the
+	// site, because that is the identity made public and the one the
 	// wire shapes and error strings carry. The TABLE stores `step_id`, so the
 	// resolution happens here — once — rather than at sixteen call sites.
 	//
 	// The lookup runs in the CALLER'S transaction, so a step inserted and
-	// event-logged in one transaction (expansion's `step-skipped`, §5.3.1)
+	// event-logged in one transaction (expansion's `step-skipped`)
 	// resolves against the uncommitted row. A lookup through the pool would
 	// both miss that row and deadlock: internal/db caps the pool at one
 	// connection.
@@ -547,7 +542,7 @@ func recordEvent(tx *sql.Tx, e eventRecord) error {
 // The clamp is here, in the writer, rather than at the call sites that were
 // caught, because the defect is a CLASS: any future caller holding a stale
 // clock reintroduces it, and a fix applied to two call sites would prove nothing
-// about the third. `seq` remains the ordering of record (§7.1); this makes
+// about the third. `seq` remains the ordering of record; this makes
 // `at_ms` agree with it instead of quietly contradicting it.
 //
 // The anchor is the LAST EVENT BY SEQ, not MAX(at_ms): with the clamp in place
@@ -581,11 +576,10 @@ func monotonicAtMS(tx *sql.Tx, atMS int64) (int64, error) {
 //
 // The call sites pass `Data` as whatever that transition's detail is — a gate
 // name, a routing, a `--usage` blob — because that is the natural thing to pass
-// and the engine never reads it back (genericity.md: "execution metadata is an
-// opaque KV bag"). But §11.4's `event` shape puts `data` in a JSON envelope and
-// the column defaults to `'{}'`, so a bare `pass` written verbatim would leave
-// the column holding invalid JSON that every S6/S7 consumer would have to
-// special-case. Normalizing HERE keeps the sixteen call sites simple and the
+// and the engine never reads it back: execution metadata is an opaque KV bag.
+// But the public `event` shape puts `data` in a JSON envelope and the column
+// defaults to `'{}'`, so a bare `pass` written verbatim would leave the column
+// holding invalid JSON that every feed consumer would have to special-case. Normalizing HERE keeps the sixteen call sites simple and the
 // column's contract true.
 //
 // Three cases, in order:
@@ -689,8 +683,8 @@ type eventRecord struct {
 	//
 	// It is optional because the seam's contract is that phase 4 changed the
 	// body and no call site — and the sixteen existing sites pass no clock.
-	// Ordering does not depend on it in any case: `seq` is the order (§7.1,
-	// §11.4), and `at_ms` is the human-readable when. A caller that has a
+	// Ordering does not depend on it in any case: `seq` is the order,
+	// and `at_ms` is the human-readable when. A caller that has a
 	// meaningful `nowMS` — every routing transaction does — sets it so the
 	// event agrees with the row it describes.
 	//
@@ -706,7 +700,7 @@ type eventRecord struct {
 // the wall clock.
 //
 // The fallback reads the clock rather than storing 0. An event stamped 0 would
-// render as 1970 in every consumer S6 and S7 build, which is a worse answer
+// render as 1970 in every feed consumer, which is a worse answer
 // than a millisecond of drift from the transaction's own `nowMS`.
 func (e eventRecord) atMS() int64 {
 	if e.AtMS != 0 {
@@ -715,15 +709,15 @@ func (e eventRecord) atMS() int64 {
 	return time.Now().UnixMilli()
 }
 
-// TrustGrant is what a trust entry AUTHORIZES, in the shape gates-trust §3.6
-// records: "the gate name, the argv hash …, the repo binding, and the flags".
+// TrustGrant is what a trust entry AUTHORIZES: the gate name, the argv hash,
+// the repo binding, and the flags.
 //
-// IT HAS NO ARGV FIELD, and that absence is load-bearing. §3.6 forbids the argv
-// itself in the event body, so the type a caller must fill in cannot carry one —
-// which is also why this is declared here rather than reusing the store's entry
-// type. That type holds the argv one field access away from the event writer,
-// and a mapping written by hand at the call site is where the hash discipline
-// stays visible.
+// IT HAS NO ARGV FIELD, and that absence is load-bearing. The argv itself is
+// forbidden in the event body, so the type a caller must fill in cannot carry
+// one — which is also why this is declared here rather than reusing the
+// store's entry type. That type holds the argv one field access away from the
+// event writer, and a mapping written by hand at the call site is where the
+// hash discipline stays visible.
 //
 // EVERY BEHAVIOR-AFFECTING PROPERTY IS A FIELD. A grant that recorded only the
 // name and the hash left the two flags that widen what a command may do — `tree`
@@ -791,7 +785,7 @@ type TrustGrant struct {
 	Cwd string
 }
 
-// RecordTrustEvent writes a `trust-added` / `trust-removed` event (§3.6).
+// RecordTrustEvent writes a `trust-added` / `trust-removed` event.
 //
 // It is exported because the trust CLI is where a grant happens, and the CLI is
 // outside this package. It takes the ARGV HASH rather than the argv, and the
@@ -803,7 +797,8 @@ type TrustGrant struct {
 // user-level act that may happen with no run in flight at all — attributing it
 // to an arbitrary run would be a fabrication. What makes it useful is the
 // TIMESTAMP: a run whose trail brackets this event is a run during which the
-// grant happened, which is exactly the retro question T9's residual raises.
+// grant happened, which is exactly the retro question the self-trust residual
+// raises.
 //
 // IT ALSO RECORDS WHO (DKT-263). The timestamp answers "during which run", and
 // that was always the smaller half of the question — bracketing wall-clock

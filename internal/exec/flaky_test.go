@@ -173,7 +173,7 @@ var (
 
 // TestSpawnedAttemptsUsesTheSuppliedSpawn pins the loop's contract: each
 // attempt goes through the caller's spawn, with the caller's Spec, after the
-// verify hook, under the same F1/F2/F3 and refusal rules RunVerifiedAttempts
+// verify hook, under the same flaky-retry and refusal rules RunVerifiedAttempts
 // follows.
 func TestSpawnedAttemptsUsesTheSuppliedSpawn(t *testing.T) {
 	refusal := errors.New("the pinned file changed")

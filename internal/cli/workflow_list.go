@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// workflowListResult is a Collection (reliability-delta §4.1), so v2 renders
+// workflowListResult is a Collection, so v2 renders
 // {items, total, truncated}. Total comes from a COUNT(*) that ignores LIMIT, so
 // it is already the true pre-limit count and truncation is directly computable.
 type workflowListResult struct {

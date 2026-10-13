@@ -16,7 +16,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// --- Add/rm semantics (§3.5) ------------------------------------------------
+// --- Add/rm semantics -------------------------------------------------------
 
 func TestAddIsIdempotentForAnIdenticalEntry(t *testing.T) {
 	path := sandbox(t)
@@ -43,7 +43,8 @@ func TestAddIsIdempotentForAnIdenticalEntry(t *testing.T) {
 	}
 }
 
-// TestAddConflictsOnDifferingArgv is §3.5's important row.
+// TestAddConflictsOnDifferingArgv checks that an add with a differing argv is
+// a CONFLICT.
 //
 // A SILENT OVERWRITE would mean a trusted name's meaning can change without the
 // operator ever seeing the old value — the same reasoning that makes a
@@ -401,7 +402,7 @@ func TestRemoveOnChangeSeesTheEntryItRemoves(t *testing.T) {
 	}
 }
 
-// TestPrefixWarningIsEmittedAndNeverSuppressed covers §3.3's over-authorization
+// TestPrefixWarningIsEmittedAndNeverSuppressed covers the over-authorization
 // warning and the rule that `--yes` never silences it.
 //
 // Suppressing the warning is exactly what would make the conversational posture
@@ -456,8 +457,8 @@ func TestPrefixWarningIsEmittedAndNeverSuppressed(t *testing.T) {
 	}
 }
 
-// TestPrefixWarningRendersControlBytesEscaped ties the warning to §5.7: the
-// argv it echoes is attacker-influenced, so it goes through the renderer.
+// TestPrefixWarningRendersControlBytesEscaped: the argv the warning echoes is
+// attacker-influenced, so it goes through the renderer.
 func TestPrefixWarningRendersControlBytesEscaped(t *testing.T) {
 	path := sandbox(t)
 	repo := t.TempDir()
@@ -569,9 +570,10 @@ func TestListShowsThisRepoPlusGlobals(t *testing.T) {
 	}
 }
 
-// --- The locked read-modify-write (§3.5.1, F5) ------------------------------
+// --- The locked read-modify-write -------------------------------------------
 
-// TestConcurrentTrustAddsBothLand is F5's test, in both forms §9.1 requires.
+// TestConcurrentTrustAddsBothLand checks that concurrent adds both land, in
+// both forms.
 //
 // WITHOUT THE LOCK, two concurrent adds interleave as read-A / read-B /
 // write-A / write-B, and B's write SILENTLY DROPS A's entry. The operator sees
@@ -691,8 +693,8 @@ func assertAllEntriesPresent(t *testing.T, path string, n int) {
 	}
 }
 
-// TestHeldLockMakesASecondAddConflict is W5: acquisition blocks, bounded by a
-// short timeout, and exceeding it is a CONFLICT naming the lock path.
+// TestHeldLockMakesASecondAddConflict checks that acquisition blocks, bounded
+// by a short timeout, and exceeding it is a CONFLICT naming the lock path.
 //
 // A trust add is a human-scale operation and the bound is far beyond its honest
 // duration, so a timeout means something is genuinely STUCK rather than merely
@@ -721,7 +723,7 @@ func TestHeldLockMakesASecondAddConflict(t *testing.T) {
 	}
 }
 
-// TestLockfileIntegrityTable is W3: the lockfile is opened with §3.2's
+// TestLockfileIntegrityTable checks that the lockfile is opened with the store's
 // discipline — refuse a symlink, refuse a non-regular file, check the mode.
 //
 // It lives in the user-owned config directory, so the exposure is smaller than
@@ -790,7 +792,8 @@ func TestLockfileIntegrityTable(t *testing.T) {
 	})
 }
 
-// TestLockIsOnASiblingNotTheStore is W2, asserted structurally.
+// TestLockIsOnASiblingNotTheStore asserts structurally that the lock is on a
+// sibling file.
 //
 // Locking trust.toml directly does not work with rename-based writes: the
 // rename REPLACES THE INODE, so the lock the writer holds and the lock the next
@@ -812,9 +815,9 @@ func TestLockIsOnASiblingNotTheStore(t *testing.T) {
 	}
 }
 
-// --- SB4: the poisoned-store guard ------------------------------------------
+// --- The poisoned-store guard -----------------------------------------------
 
-// TestNoTestReadsTheRealTrustStore enforces §9.5's sandbox rule MECHANICALLY.
+// TestNoTestReadsTheRealTrustStore enforces the sandbox rule MECHANICALLY.
 //
 // It points HOME and XDG_CONFIG_HOME at a directory containing a POISONED trust
 // file — an entry that would match a gate no legitimate test approves — and
@@ -873,8 +876,8 @@ global = true
 	}
 }
 
-// TestEveryTestFileSandboxesXDG is SB1 as a source-level guard: a test added
-// later cannot forget.
+// TestEveryTestFileSandboxesXDG enforces the sandbox rule as a source-level
+// guard: a test added later cannot forget.
 //
 // It asserts that every _test.go file in this package which mentions the store
 // path or the add/remove entry points also sets XDG_CONFIG_HOME. The rule is
@@ -900,7 +903,7 @@ func TestEveryTestFileSandboxesXDG(t *testing.T) {
 		// Either the file sandboxes directly, or it uses the sandbox helper
 		// that does.
 		if !strings.Contains(src, "XDG_CONFIG_HOME") && !strings.Contains(src, "sandbox(t)") {
-			t.Errorf("%s touches the trust store but never sandboxes XDG_CONFIG_HOME (§9.5 SB1)", name)
+			t.Errorf("%s touches the trust store but never sandboxes XDG_CONFIG_HOME", name)
 		}
 	}
 }

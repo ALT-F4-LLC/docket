@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# ZI — BUDGETS, THE FLOOR, AND `run report` (runs-dispatch §4, §9.2).
+# ZI — BUDGETS, THE FLOOR, AND `run report`.
 #
-# THE HEADLINE IS engine-spec §9 item 7, verbatim:
+# THE HEADLINE IS the budget acceptance criterion, verbatim:
 #
 #   Budget: with reporting disabled, the run still pauses at the cap from the
 #   floor.
@@ -14,13 +14,13 @@
 # accrued the floor from facts it produced itself: one `step-claimed` event per
 # claim, each carrying the step's declared `expected_cost`.
 #
-# THE STRANGER TEST ON THE HEADLINE FEATURE (§1.1). The team here is tracking a
+# THE STRANGER TEST ON THE HEADLINE FEATURE. The team here is tracking a
 # documentation sprint: every step declares a cost of 1, the cap is a count of
 # steps, and the run pauses for a person once that many have been claimed. No
 # model, no token, no agent — a budget is a number and a cap is a number, and
 # what they count is the workflow author's business.
 #
-# The section also covers the group-1 DORMANCY proof (§3): a run with no budget
+# The section also covers the group-1 DORMANCY proof: a run with no budget
 # executes the queries v9 executed, and `next` is byte-identical.
 
 test_zi_budget() {
@@ -72,10 +72,10 @@ TOML
   assert_json "ZI" "ZI0_register_name" '.data.name' "doc-sprint"
 
   # ---------------------------------------------------------------------------
-  # ZI1 — §9 ITEM 7. Zero `--usage` anywhere; the floor alone reaches the cap.
+  # ZI1 — THE HEADLINE. Zero `--usage` anywhere; the floor alone reaches the cap.
   #
   # The cap is 1: `draft` costs 1, so the first claim lands EXACTLY ON IT and is
-  # allowed (B14 — crossing is `>`, not `>=`: a budget reached is spent, not
+  # allowed (crossing is `>`, not `>=`: a budget reached is spent, not
   # exceeded). The next claim would cross, and pauses the run.
   # ---------------------------------------------------------------------------
   run_env "$ZI" issue create -t "Write the getting-started page" -d "a body" --json
@@ -98,8 +98,8 @@ TOML
   ZI_TOKEN=$(echo "$CMD_STDOUT" | jq -r '.data.token')
 
   # Complete it with NO --usage. This is "reporting disabled": the claimant
-  # says nothing about what it spent, which is the default and the case §9
-  # item 7 is about.
+  # says nothing about what it spent, which is the default and the case the
+  # headline is about.
   printf 'the drafted page\n' >"$ZI/draft.txt"
   DOCKET_TOKEN="$ZI_TOKEN" run_env "$ZI" step complete STEP-1 \
     --artifact-file "$ZI/draft.txt" --json
@@ -116,8 +116,8 @@ TOML
   assert_exit "ZI" "ZI1_status" 0
   assert_json "ZI" "ZI1_paused_at_cap" '.data.run.status' "waiting-human"
 
-  # And the reason is a BARE-NUMBER statement naming no unit (B21, §1.1's
-  # second leak): "budget: spend N of cap M reached at <instance>".
+  # And the reason is a BARE-NUMBER statement naming no unit:
+  # "budget: spend N of cap M reached at <instance>".
   local ZI_REASON
   ZI_REASON=$(echo "$CMD_STDOUT" | jq -r '.data.run.reason')
   case "$ZI_REASON" in
@@ -132,7 +132,7 @@ TOML
   # above would prove nothing about the floor.
   local ZI_LEDGER
   ZI_LEDGER=$(sqlite3 "$ZI/issues.db" "SELECT COUNT(*) FROM usage_ledger;")
-  check_cond "ZI" "ZI1_ledger_empty" "the ledger holds $ZI_LEDGER rows; §9 item 7 requires reporting to be off" [ "$ZI_LEDGER" = "0" ]
+  check_cond "ZI" "ZI1_ledger_empty" "the ledger holds $ZI_LEDGER rows; reporting must be off for this case" [ "$ZI_LEDGER" = "0" ]
 
   # And the floor that paused it came from CLAIM EVENTS, not from a counter.
   local ZI_CLAIMS
@@ -141,14 +141,14 @@ TOML
   check_cond "ZI" "ZI1_floor_from_events" "expected exactly 1 step-claimed event, found $ZI_CLAIMS" [ "$ZI_CLAIMS" = "1" ]
 
   # The pause is event-logged as `run-paused` with reason=budget — an EXISTING
-  # closed-set kind (B23), so §9 item 2's set does not widen for this stage.
+  # closed-set kind, so the event-kind set does not widen for this stage.
   local ZI_PAUSE
   ZI_PAUSE=$(sqlite3 "$ZI/issues.db" \
     "SELECT COUNT(*) FROM events WHERE kind = 'run-paused' AND data LIKE '%\"reason\":\"budget\"%';")
   check_cond "ZI" "ZI1_pause_event" "expected one run-paused event carrying reason=budget, found $ZI_PAUSE" [ "$ZI_PAUSE" = "1" ]
 
   # ---------------------------------------------------------------------------
-  # ZI2 — B24: `run resume` clears nothing, and the run RE-PAUSES.
+  # ZI2 — `run resume` clears nothing, and the run RE-PAUSES.
   #
   # This reads as a bug and is not one: the cap has not moved, so the condition
   # has not changed. Raising a cap mid-run has no verb in v1 — recorded
@@ -172,7 +172,7 @@ TOML
   assert_json "ZI" "ZI3_report_run" '.data.run.run' "RUN-1"
   assert_json "ZI" "ZI3_report_status" '.data.run.status' "waiting-human"
 
-  # R2: the cap, its SOURCE (R6's line — the answer to "why didn't it stop?"),
+  # The cap, its SOURCE (the answer to "why didn't it stop?"),
   # the floor, and max(reported, floor).
   assert_json "ZI" "ZI3_report_cap" '.data.budget.cap' "1"
   assert_json "ZI" "ZI3_report_cap_source" '.data.budget.cap_source' "run"
@@ -184,13 +184,13 @@ TOML
   # object: a field that is not a fact does not appear.
   assert_json_null "ZI" "ZI3_report_no_units" '.data.budget.reported'
 
-  # R3: effective step statuses, and R6: the artifact INDEX — never the bodies.
+  # Effective step statuses, and the artifact INDEX — never the bodies.
   assert_json_exists "ZI" "ZI3_report_steps" '.data.steps'
   assert_json_exists "ZI" "ZI3_report_artifacts" '.data.artifacts'
   assert_json_null "ZI" "ZI3_report_no_bodies" '.data.artifacts[0].body'
   assert_json "ZI" "ZI3_report_artifact_kind" '.data.artifacts[0].kind' "draft"
 
-  # R8: THE REPORT WRITES NOTHING. Hash the database, report twice, hash again.
+  # THE REPORT WRITES NOTHING. Hash the database, report twice, hash again.
   # A row count would miss an in-place update — a reaped lease, a bumped
   # attempt — which is exactly the write a read verb makes by accident.
   local ZI_HASH_BEFORE ZI_HASH_AFTER
@@ -202,14 +202,14 @@ TOML
   ZI_HASH_AFTER=$(shasum -a 256 "$ZI/issues.db" | cut -d' ' -f1)
   check_cond "ZI" "ZI3_report_writes_nothing" "the database changed across two reports" [ "$ZI_HASH_BEFORE" = "$ZI_HASH_AFTER" ]
 
-  # R9: DETERMINISTIC GIVEN THE SAME ROWS. Every section orders by a total key
+  # DETERMINISTIC GIVEN THE SAME ROWS. Every section orders by a total key
   # rather than by map iteration, so two reports of an unchanged run agree.
   #
   # The WALL CLOCK and the burn rate derived from it are excluded, and that is
   # not a weakening of the claim: they are measurements of elapsed time, which
-  # genuinely differs between two invocations a moment apart. R9 is about the
-  # ORDERING of a document over fixed rows — the property that would break
-  # silently if a rollup ranged a Go map — and the Go test pins the clock to
+  # genuinely differs between two invocations a moment apart. Determinism is
+  # about the ORDERING of a document over fixed rows — the property that would
+  # break silently if a rollup ranged a Go map — and the Go test pins the clock to
   # assert the whole document byte for byte.
   local ZI_R1 ZI_R2 ZI_STRIP
   ZI_STRIP='del(.data.wall_clock_ms) | del(.data.budget.burn_rate)'
@@ -253,7 +253,7 @@ TOML
   assert_json "ZI" "ZI4_qty_second" '.data.budget.reported[1].quantity' "2"
 
   # With no `budget.unit` set, NOTHING reported is compared to a cap: the spend
-  # rests on the floor alone (B17), which is §9 item 7's configuration. One
+  # rests on the floor alone, which is the headline's configuration. One
   # claim so far on this run, at a declared cost of 1.
   assert_json "ZI" "ZI4_spend_is_floor" '.data.budget.spend' "1"
   assert_json "ZI" "ZI4_floor" '.data.budget.floor' "1"
@@ -261,7 +261,7 @@ TOML
   # not appear.
   assert_json_null "ZI" "ZI4_no_unit_named" '.data.budget.budget_unit'
 
-  # `--usage` VALIDATION (B33, B35, B36), each refusal naming what it refused.
+  # `--usage` VALIDATION, each refusal naming what it refused.
   local ZI_SID2 ZI_TK3
   ZI_SID2=$(sqlite3 "$ZI/issues.db" \
     "SELECT id FROM steps WHERE run_id = 2 AND step_name = 'proofread';")
@@ -294,9 +294,9 @@ TOML
   assert_json "ZI" "ZI5_unit_named" '.data.budget.budget_unit' "pages"
   # Both steps have now been claimed, so the floor is 2. Four pages were
   # reported, which EXCEEDS it, and max(reported, floor) takes the larger —
-  # reported usage can only RAISE the counter (B13). `sheets` is recorded and
+  # reported usage can only RAISE the counter. `sheets` is recorded and
   # NEVER compared, because core has no opinion about whether it and `pages`
-  # are commensurable (B19).
+  # are commensurable.
   assert_json "ZI" "ZI5_floor_from_two_claims" '.data.budget.floor' "2"
   assert_json "ZI" "ZI5_spend_is_reported" '.data.budget.spend' "4"
 
@@ -304,7 +304,7 @@ TOML
   assert_exit "ZI" "ZI5_unset_unit" 0
 
   # ---------------------------------------------------------------------------
-  # ZI6 — GROUP-1 DORMANCY (§3, D1). A run with NO budget in a repo with no
+  # ZI6 — GROUP-1 DORMANCY. A run with NO budget in a repo with no
   # default: `next` behaves exactly as it did before this stage.
   #
   # The claim is byte-identity, so it is asserted as byte-identity: the same
@@ -358,13 +358,13 @@ TOML
     "SELECT name FROM sqlite_master WHERE type='table' AND name='usage_ledger';")
   check_cond "ZI" "ZI7_ledger_table" "usage_ledger is absent" [ "$ZI_TABLE" = "usage_ledger" ]
 
-  # The v10 columns the sentinels cannot see (§2.3).
+  # The v10 columns the sentinels cannot see.
   local ZI_COLS
   ZI_COLS=$(sqlite3 "$ZI/issues.db" \
     "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name IN ('usage_floor','breach_reason');")
   check_cond "ZI" "ZI7_run_columns" "runs carries $ZI_COLS of the 2 budget columns v10 adds" [ "$ZI_COLS" = "2" ]
 
-  # THE CACHE IS NOT THE FLOOR (§4.3). Poison `runs.usage_floor` and confirm the
+  # THE CACHE IS NOT THE FLOOR. Poison `runs.usage_floor` and confirm the
   # report publishes the number the QUERY produces, not the one in the column.
   sqlite3 "$ZI/issues.db" "UPDATE runs SET usage_floor = 999 WHERE id = 1;"
   run_env "$ZI" run report RUN-1 --json

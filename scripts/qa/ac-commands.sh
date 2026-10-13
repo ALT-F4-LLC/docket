@@ -13,7 +13,7 @@
 # the gate verdict from the exit status (gate_exec.go), so a failing check
 # records `fail` instead of a `pass` verdict sitting on top of a captured body
 # full of nonzero exits. A failing pre-gate still cannot refuse the claim —
-# pregate.go's PG2/PG3 carry the failure into the bundle as data — so the
+# pregate.go carries the failure into the bundle as data — so the
 # verifier sees an honest verdict and the step still runs.
 
 set -euo pipefail

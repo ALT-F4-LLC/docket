@@ -13,18 +13,18 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// THE WRITE-REAP ACKNOWLEDGMENT — §6's W1-W9 table, minus the two guard-spawn
-// rows that group 3 adds (§11's group-2 row).
+// THE WRITE-REAP ACKNOWLEDGMENT, minus the two guard-spawn cases that group 3
+// adds.
 //
-// W4 and W6 are adapted to `dispatch open --ack-reap`, which is THIS group's
+// The ack cases are adapted to `dispatch open --ack-reap`, which is THIS group's
 // entry point and the one a NEW relay taking over from a crashed one uses. That
 // is what makes the mechanism complete and usable without group 3: the ack has
 // two entry points writing the same row, and the batch path ships here.
 
-// writeLimitedSrc is W1's workflow: a bounded class with two steps in it.
+// writeLimitedSrc is the baseline workflow: a bounded class with two steps in it.
 //
 // The class is called `write` because that is what the reference instance calls
-// it — and the point of §6.5 is that CORE NEVER READS THE NAME. What makes these
+// it — and the point is that CORE NEVER READS THE NAME. What makes these
 // steps hold headroom is `max = 1`, and TestNoWriteClassLiteral asserts core
 // contains no such literal.
 const writeLimitedSrc = `
@@ -99,7 +99,7 @@ func instancesIn(answer *ReadySteps) []string {
 	return out
 }
 
-// reapOneWriter drives W2: claim the first write-class step, let its lease
+// reapOneWriter drives the reap: claim the first write-class step, let its lease
 // lapse, and run `next` to reap it. It returns the instant used and the reap's
 // event seq.
 func reapOneWriter(t *testing.T, conn *sql.DB, runID int) (at int64, seq int64) {
@@ -119,7 +119,7 @@ func reapOneWriter(t *testing.T, conn *sql.DB, runID int) (at int64, seq int64) 
 
 	acks := openReapsOf(t, conn, runID)
 	if len(acks) != 1 {
-		t.Fatalf("W2: %d unacknowledged reaps after reaping a bounded class, want 1", len(acks))
+		t.Fatalf("%d unacknowledged reaps after reaping a bounded class, want 1", len(acks))
 	}
 	return at, acks[0].ReapedSeq
 }
@@ -181,8 +181,8 @@ func TestPausedRunReapsNothingThroughNext(t *testing.T) {
 // TestD1ResolutionStillHoldsOnAnActiveRun is AC3, and the regression
 // the run-status guard most plausibly causes.
 //
-// §5.8 D1 says a claimed-but-unrecorded step is resolved by lease expiry: "the
-// step's TTL lapses, `next` reaps it, and the discrepancy dissolves". That
+// Discrepancy D1, a claimed-but-unrecorded step, is resolved by lease expiry:
+// "the step's TTL lapses, `next` reaps it, and the discrepancy dissolves". That
 // resolution is only true because the reap at next.go runs BEFORE the refusal.
 // If the guard had been written to consult run status in a way that made the
 // reap conditional on something the refusal path changes, the ordinary path —
@@ -218,20 +218,19 @@ func TestD1ResolutionStillHoldsOnAnActiveRun(t *testing.T) {
 		t.Errorf("%d lease-reaped events, want 1", n)
 	}
 	if !contains(instancesIn(answer), "one@0") {
-		t.Errorf("the reaped step was not re-offered (%v); W3 requires the step "+
-			"the reap freed to be offered again", instancesIn(answer))
+		t.Errorf("the reaped step was not re-offered (%v); the step "+
+			"the reap freed must be offered again", instancesIn(answer))
 	}
 }
 
 // ---------------------------------------------------------------------------
-// W1-W3, W5 — the hold
+// The hold
 // ---------------------------------------------------------------------------
 
-// TestReapedWriterGainsNoSuccessor is §9 item 10's second half, named as §6.6
-// names it: "a reaped write-class step cannot gain a successor until the reap is
-// acknowledged".
+// TestReapedWriterGainsNoSuccessor asserts the rule as named: "a reaped
+// write-class step cannot gain a successor until the reap is acknowledged".
 //
-// It covers W1, W2, W3, and W5 in one scenario, because they are one scenario:
+// It covers four cases in one scenario, because they are one scenario:
 // the baseline, the reap, the hold, and the read fan-out that must survive it.
 func TestReapedWriterGainsNoSuccessor(t *testing.T) {
 	conn := mustDB(t)
@@ -239,17 +238,16 @@ func TestReapedWriterGainsNoSuccessor(t *testing.T) {
 
 	at, seq := reapOneWriter(t, conn, runID)
 	if seq <= 0 {
-		t.Fatalf("W2: the ack row names seq %d, which is not an event", seq)
+		t.Fatalf("the ack row names seq %d, which is not an event", seq)
 	}
 
-	// W2's other half: the reap is event-logged, and the ack row is created
-	// UNACKNOWLEDGED (A19).
+	// The reap is event-logged, and the ack row is created UNACKNOWLEDGED.
 	if n := eventKindCount(t, conn, runID, EventLeaseReaped); n != 1 {
 		t.Errorf("%d lease-reaped events, want 1", n)
 	}
 	acks := openReapsOf(t, conn, runID)
 	if acks[0].AckedAtMS != nil {
-		t.Error("A19: the ack row must be created unacknowledged")
+		t.Error("the ack row must be created unacknowledged")
 	}
 	if acks[0].Class != "write" {
 		t.Errorf("the ack row names class %q, want the reaped step's class", acks[0].Class)
@@ -259,25 +257,25 @@ func TestReapedWriterGainsNoSuccessor(t *testing.T) {
 	testsupport.Must(t, err, "next after the reap: %v", err)
 	offered := instancesIn(answer)
 
-	// W3: the reaped step ITSELF is offered — it returned to the pool — but no
+	// The reaped step ITSELF is offered — it returned to the pool — but no
 	// OTHER write-class step is, because the hold occupies the one slot.
 	if !contains(offered, "one@0") {
-		t.Errorf("W3: the reaped step is not offered (%v); it returned to the "+
+		t.Errorf("the reaped step is not offered (%v); it returned to the "+
 			"pool and the hold is about its SUCCESSORS", offered)
 	}
 
-	// W5: read-class steps in the same run are STILL OFFERED (A6). The hold is
+	// Read-class steps in the same run are STILL OFFERED. The hold is
 	// narrow — it holds write headroom, not the whole run — because read-only
 	// fan-outs parallelize freely and a reaped writer must not stop them.
 	for _, instance := range []string{"read-a@0", "read-b@0"} {
 		if !contains(offered, instance) {
-			t.Errorf("W5/A6: %s is not offered (%v); the hold must be NARROW, or "+
+			t.Errorf("%s is not offered (%v); the hold must be NARROW, or "+
 				"a reaped writer stops a run's read fan-out", instance, offered)
 		}
 	}
 
 	// And the refusal EXPLAINS itself: a headroom denial with nothing running is
-	// baffling unless the message names the reaps and the flag (§6.3).
+	// baffling unless the message names the reaps and the flag.
 	if answer.HeldReason == "" {
 		t.Error("`next` reported no held reason while holding headroom")
 	}
@@ -288,7 +286,7 @@ func TestReapedWriterGainsNoSuccessor(t *testing.T) {
 	}
 }
 
-// TestReapHoldBlocksTheSuccessor is W3's negative half, isolated.
+// TestReapHoldBlocksTheSuccessor is the hold's negative half, isolated.
 //
 // `two@0` declares `after = ["one"]`, so it is not ready until `one` is done —
 // which means the scenario above cannot show the hold blocking it. This one
@@ -310,24 +308,24 @@ func TestReapHoldBlocksTheSuccessor(t *testing.T) {
 	answer, err := NewEngine().NextSteps(conn, runID, 0, at)
 	testsupport.Must(t, err, "next: %v", err)
 	if contains(instancesIn(answer), "two@0") {
-		t.Fatalf("W3: the successor was offered while a reap is unacknowledged "+
+		t.Fatalf("the successor was offered while a reap is unacknowledged "+
 			"(%v). The DB fence is not a tree fence — a wedged writer must be "+
 			"confirmed gone before a successor writes", instancesIn(answer))
 	}
 
-	// W7: acknowledge, and write-class steps flow again.
+	// Acknowledge, and write-class steps flow again.
 	ackVia(t, conn, runID, seq, at)
 
 	answer, err = NewEngine().NextSteps(conn, runID, 0, at)
 	testsupport.Must(t, err, "next after the ack: %v", err)
 	if !contains(instancesIn(answer), "two@0") {
-		t.Errorf("W7: the successor is still withheld after the ack (%v)",
+		t.Errorf("the successor is still withheld after the ack (%v)",
 			instancesIn(answer))
 	}
 }
 
 // ackVia acknowledges through THIS GROUP's entry point, `dispatch open
-// --ack-reap` (W4/W6 as §11's group-2 row adapts them).
+// --ack-reap`.
 //
 // The dispatch it opens is abandoned immediately: this helper is about the ack,
 // and leaving a manifest open would make every subsequent `next` refuse for a
@@ -341,13 +339,13 @@ func ackVia(t *testing.T, conn *sql.DB, runID int, seq int64, at int64) {
 }
 
 // ---------------------------------------------------------------------------
-// W6, W8, W9 — the ack's semantics
+// The ack's semantics
 // ---------------------------------------------------------------------------
 
-// TestAckRecordsWhoAcknowledged is W6 and A8: the row is acknowledged and
+// TestAckRecordsWhoAcknowledged asserts the row is acknowledged and
 // `acked_by` records the VERB.
 //
-// A8 is explicit that `acked_by` is never a user identity, because core has no
+// `acked_by` is never a user identity, because core has no
 // identity model. The assertion is therefore that the value is one of the two
 // verb names, not that it identifies anybody.
 func TestAckRecordsWhoAcknowledged(t *testing.T) {
@@ -374,14 +372,14 @@ func TestAckRecordsWhoAcknowledged(t *testing.T) {
 		t.Error("acked_at_ms is NULL on an acknowledged row")
 	}
 
-	// A3: the acknowledgment is ATTRIBUTABLE — releasing write headroom is a
-	// transition, and §9 item 2 requires every transition to be traceable.
+	// The acknowledgment is ATTRIBUTABLE — releasing write headroom is a
+	// transition, and every transition must be traceable.
 	if n := eventKindCount(t, conn, runID, EventReapAcknowledged); n != 1 {
 		t.Errorf("%d reap-acknowledged events, want 1", n)
 	}
 }
 
-// TestSecondAckIsASuccessThatChangesNothing is W8 and A10.
+// TestSecondAckIsASuccessThatChangesNothing asserts a repeated ack is idempotent.
 //
 // Idempotency is what lets a relay retry its hook without failing. The test
 // asserts the SECOND ack writes no second event as well as not failing: a
@@ -399,12 +397,12 @@ func TestSecondAckIsASuccessThatChangesNothing(t *testing.T) {
 	ackVia(t, conn, runID, seq, at)
 
 	if after := eventKindCount(t, conn, runID, EventReapAcknowledged); after != before {
-		t.Errorf("a second ack wrote %d more events; A10 makes it a success that "+
+		t.Errorf("a second ack wrote %d more events; it must be a success that "+
 			"CHANGES NOTHING", after-before)
 	}
 }
 
-// TestAckOfABogusSeqIsRefused is W9 and A9 — the FORGERY POINT.
+// TestAckOfABogusSeqIsRefused covers the FORGERY POINT.
 //
 // An ack must name a real reap. The run scope is half of the same clause: an ack
 // naming another run's reap is a forgery in exactly the way naming a non-reap
@@ -417,7 +415,7 @@ func TestAckOfABogusSeqIsRefused(t *testing.T) {
 	// A seq that is not a reap at all.
 	_, err := NewEngine().OpenDispatch(conn, runID, 0, []int64{999_999}, at)
 	if err == nil {
-		t.Fatal("W9: an ack of a seq that names no reap succeeded")
+		t.Fatal("an ack of a seq that names no reap succeeded")
 	}
 	if code, ok := CodeOf(err); !ok || code != CodeValidation {
 		t.Errorf("the refusal has code %q, want VALIDATION_ERROR", code)
@@ -434,7 +432,7 @@ func TestAckOfABogusSeqIsRefused(t *testing.T) {
 	testsupport.Must(t, err, "activating the second run: %v", err)
 	_, err = NewEngine().OpenDispatch(conn, otherRun.ID, 0, []int64{realSeq}, at)
 	if err == nil {
-		t.Fatal("A9: a run acknowledged ANOTHER run's reap — the run scope is " +
+		t.Fatal("a run acknowledged ANOTHER run's reap — the run scope is " +
 			"what stops a relay clearing a hold on a run it is not driving")
 	}
 	if code, ok := CodeOf(err); !ok || code != CodeValidation {
@@ -449,11 +447,10 @@ func TestAckOfABogusSeqIsRefused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A12-A15 — the hold IS headroom
+// The hold IS headroom
 // ---------------------------------------------------------------------------
 
-// TestReapHoldIsHeadroom is §6.3's named assertion, and it proves the FOLD
-// rather than the block.
+// TestReapHoldIsHeadroom proves the FOLD rather than the block.
 //
 // A class with `max = 2` and ONE unacknowledged reap still admits ONE step. A
 // separate `ReadyCondition` — the design this rejects — would block the class
@@ -536,12 +533,12 @@ after = []
 	}
 }
 
-// TestUnboundedClassGetsNoAckRowAndNoHold is A18 and A21 — D3's dormancy.
+// TestUnboundedClassGetsNoAckRowAndNoHold covers the dormant path.
 //
 // A class with no declared `max` is a class the author declared safe to
 // parallelize. It gets NO ack row and NO hold, and `next` behaves exactly as it
-// did at S5. That is what makes a repo with no `[limits]` see none of this
-// mechanism at all.
+// did before this mechanism. That is what makes a repo with no `[limits]` see
+// none of this mechanism at all.
 func TestUnboundedClassGetsNoAckRowAndNoHold(t *testing.T) {
 	const src = `
 [pipeline]
@@ -581,42 +578,41 @@ after = []
 		t.Fatal("premise: the lapsed lease must have been reaped")
 	}
 
-	// A18: NO ROW. The reap happened; the ledger stayed empty.
+	// NO ROW. The reap happened; the ledger stayed empty.
 	var n int
 	err = conn.QueryRow(`SELECT COUNT(*) FROM reap_acks`).Scan(&n)
 	testsupport.Must(t, err, "counting reap_acks: %v", err)
 	if n != 0 {
-		t.Errorf("%d reap_acks rows for an UNBOUNDED class; A18 inserts nothing, "+
+		t.Errorf("%d reap_acks rows for an UNBOUNDED class; it must insert nothing, "+
 			"which is what makes a repo with no [limits] see none of this", n)
 	}
-	// A21: and nothing is held — both steps are offered.
+	// And nothing is held — both steps are offered.
 	if answer.HeldReason != "" {
 		t.Errorf("an unbounded class reported a hold: %q", answer.HeldReason)
 	}
 	if !contains(instancesIn(answer), "two@0") {
-		t.Errorf("A21: the sibling is withheld in an unbounded class (%v)",
+		t.Errorf("the sibling is withheld in an unbounded class (%v)",
 			instancesIn(answer))
 	}
 }
 
 // ---------------------------------------------------------------------------
-// A22 — the genericity guard
+// The genericity guard
 // ---------------------------------------------------------------------------
 
-// TestNoWriteClassLiteral is §6.5 A22 and §10.3's standing assertion.
+// TestNoWriteClassLiteral is a standing genericity assertion.
 //
 // Core never reads the string `"write"`. The mechanism is keyed on the DECLARED
-// BOUND, because engine-spec §2 says the class name is instance policy — so a
-// core mechanism keyed on the name would be unimplementable, and one that
-// happened to work for a class called `write` would be instance policy living in
-// core.
+// BOUND, because the class name is instance policy — so a core mechanism keyed
+// on the name would be unimplementable, and one that happened to work for a
+// class called `write` would be instance policy living in core.
 //
 // It greps the IMPLEMENTATION in the shape of the existing genericity guards:
 // the non-test sources of this package, where a literal would actually change
 // behavior. Comments are stripped first, because the word appears throughout
-// them — quoting engine-core §5's "write-class lease" is exactly how the
-// argument gets recorded, and a guard that forbade discussing the spec would be
-// a guard nobody could keep.
+// them — quoting the rule's "write-class lease" is exactly how the argument
+// gets recorded, and a guard that forbade discussing the spec would be a guard
+// nobody could keep.
 func TestNoWriteClassLiteral(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	testsupport.Must(t, err, "reading the package directory: %v", err)
@@ -632,9 +628,9 @@ func TestNoWriteClassLiteral(t *testing.T) {
 		for i, line := range strings.Split(stripComments(string(src)), "\n") {
 			if strings.Contains(line, `"write"`) {
 				t.Errorf(`%s:%d contains the literal "write". Core ships no class `+
-					`by that name: engine-spec §2 makes the class name INSTANCE `+
+					`by that name: the class name is INSTANCE `+
 					`POLICY, so the write-reap hold is keyed on a finite [limits] `+
-					`max (§6.5 A20-A22) and never on a string. Line: %s`,
+					`max and never on a string. Line: %s`,
 					name, i+1, strings.TrimSpace(line))
 			}
 		}

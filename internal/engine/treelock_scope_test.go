@@ -13,8 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
-// The tree mutex guards the SHARED CHECKOUT, not every tree of the project
-// (TDD docs/tdd/gates-trust.md §7.4 L2, as amended).
+// The tree mutex guards the SHARED CHECKOUT, not every tree of the project.
 //
 // Keyed per project, every `tree = true` gate of a wave — records in distinct
 // worktrees, claim-time pre-gates in scratch reconstructions — queued on one

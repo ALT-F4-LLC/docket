@@ -9,9 +9,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The `aggregate` builtin — docs/tdd/payloads-thresholds.md §7.2–§7.6.
+// The `aggregate` builtin.
 //
-// engine-spec §2, verbatim, is the specification:
+// The specification:
 //
 //	One is builtin and generic: `action = "aggregate"` with
 //	`params = { field, method = median|max|min, hold_spread, output, route_at }`
@@ -22,16 +22,16 @@ import (
 // BY NOTHING ELSE. `field` is a key to look up; the values under it are opaque
 // tokens whose only property core knows is where the author put them. There is
 // no table of known fields, no default order, and no fallback: a value with no
-// position is a step failure naming it (G4), never a guess.
+// position is a step failure naming it, never a guess.
 //
 // This file is PURE. It takes a payload set, a resolver, and params; it returns
 // a payload set or an error. No database, no clock, no process table — which is
-// what makes §9 item 5's determinism a property of the function rather than of
-// the environment it ran in.
+// what makes the aggregate's determinism a property of the function rather
+// than of the environment it ran in.
 
-// Aggregate params, as §7.1's table names them. Core reads exactly these six
-// keys of the opaque bag and V28 refuses any other, so "the engine ignored my
-// param" is a register-time sentence rather than a run-time mystery.
+// Aggregate params. Core reads exactly these six keys of the opaque bag and
+// register time refuses any other, so "the engine ignored my param" is a
+// register-time sentence rather than a run-time mystery.
 const (
 	ParamField      = "field"
 	ParamMethod     = "method"
@@ -47,29 +47,29 @@ const (
 	// ParamSourceField names a property of each input element holding an
 	// array of opaque source labels (DKT-2462) — a step ref such as
 	// `review@0#0` naming the artifact a member came from. Core reads this key
-	// ONLY to know which OTHER key to read: G3 already carries an array under
-	// any such name through to Aggregate's output untouched, so this param
-	// adds no reduction behavior of its own. It exists so the run report can
-	// group clusters by producing executor without core hardcoding a
-	// corpus-owned name like `member_sources` — the same reason `route_at`
+	// ONLY to know which OTHER key to read: carry-through already moves an
+	// array under any such name through to Aggregate's output untouched, so
+	// this param adds no reduction behavior of its own. It exists so the run
+	// report can group clusters by producing executor without core hardcoding
+	// a corpus-owned name like `member_sources` — the same reason `route_at`
 	// takes its floor as a value rather than assuming a field name.
 	ParamSourceField = "source_field"
 )
 
-// The three reductions of §7.3. There are exactly three because §2 names
-// exactly three; each addition would be core acquiring an opinion about what is
-// worth computing (§13).
+// The three reductions. There are exactly three because the specification
+// names exactly three; each addition would be core acquiring an opinion about
+// what is worth computing.
 const (
 	MethodMedian = "median"
 	MethodMax    = "max"
 	MethodMin    = "min"
 )
 
-// AggregateMethods is the closed vocabulary, in §2's own order, for V28's error
-// message and for SKILL.md's table.
+// AggregateMethods is the closed vocabulary, in the specification's own order,
+// for the register-time error message and for SKILL.md's table.
 var AggregateMethods = []string{MethodMedian, MethodMax, MethodMin}
 
-// Output keys of the aggregate's own payload (§7.6). They are STATISTICS AND
+// Output keys of the aggregate's own payload. They are STATISTICS AND
 // PACKAGING vocabulary: `members` is a cluster's inputs, `held` is whether the
 // spread reached the bound, `demoted_from` is a position in the declared order
 // that was not the result, and `operator_resolved` is whether a person accepted
@@ -97,10 +97,10 @@ const (
 )
 
 // coreOwnedKeys are the output keys ONLY core writes: aggregate@1's four and
-// the three hold resolution adds. G3's carry-through skips them, so a key of
+// the three hold resolution adds. The carry-through skips them, so a key of
 // this name in an emitted element is always core's own statement — a reader
 // such as clusterTop can trust `demoted_from`'s presence to mean "this
-// reduction demoted", which is what D2 promises of the emitted object.
+// reduction demoted", which is what the emitted object promises.
 //
 // RUN-90's incident showed the cost of not excluding them: a producer key
 // literally named `demoted_from` rode through verbatim under `max` (which
@@ -114,14 +114,15 @@ var coreOwnedKeys = map[string]bool{
 // aggregateSchema compiles the shipped `aggregate@1` document, once.
 //
 // It is compiled from the EMBEDDED bytes rather than read from the registry.
-// The registry's row is what a run PINS and what `schema show` prints (§7.6 E3),
-// and U7 deliberately leaves a divergent pre-existing row alone so a database
-// never becomes unopenable because a binary changed — so the registry is not a
-// safe source for the document this binary validates against. The two agreeing
-// is TestEmbeddedAggregateSchemaMatchesItsGolden's business, at build time.
+// The registry's row is what a run PINS and what `schema show` prints, and
+// auto-registration deliberately leaves a divergent pre-existing row alone so
+// a database never becomes unopenable because a binary changed — so the
+// registry is not a safe source for the document this binary validates
+// against. The two agreeing is TestEmbeddedAggregateSchemaMatchesItsGolden's
+// business, at build time.
 var aggregateSchema = sync.OnceValues(schema.Aggregate)
 
-// AggregateParams is the validated form of §7.1's table.
+// AggregateParams is the validated form of the aggregate params.
 type AggregateParams struct {
 	Field      string
 	Method     string
@@ -132,7 +133,7 @@ type AggregateParams struct {
 	// has.
 	RouteAt string
 	// SourceField is the property name the run report groups clusters by, or
-	// "" when the step declares none. Aggregate itself never reads it — G3's
+	// "" when the step declares none. Aggregate itself never reads it — the
 	// verbatim carry-through already moves whatever key this names — it rides
 	// on AggregateParams purely so complementarityRollup can find it without
 	// re-parsing the step's raw params.
@@ -141,15 +142,15 @@ type AggregateParams struct {
 
 // AggregateOutcome is one aggregation's result.
 type AggregateOutcome struct {
-	// Payload is the output payload, one element per emitted cluster (§7.6).
+	// Payload is the output payload, one element per emitted cluster.
 	// Without `route_at` that is one element per input element; with it, only
 	// the clusters whose reduced value's position reached the floor.
 	Payload []map[string]any
 	// Held indexes the PAYLOAD elements whose spread tripped `hold_spread`. It
-	// is a list rather than a count because §7.7's materialization has to be
+	// is a list rather than a count because held materialization has to be
 	// able to say WHICH clusters are open, and a count cannot. The indices are
 	// positions in Payload — the payload the artifact records and held
-	// resolution re-reads (H2a) — which coincide with input positions whenever
+	// resolution re-reads — which coincide with input positions whenever
 	// `route_at` is absent.
 	Held []int
 	// Recorded holds the clusters `route_at` routed below the floor (DKT-593):
@@ -162,12 +163,12 @@ type AggregateOutcome struct {
 	Recorded []map[string]any
 }
 
-// ParseAggregateParams reads §7.1's six keys out of the opaque bag: `field`,
-// `method`, `hold_spread`, `output`, `route_at` (the routing floor), and
-// `source_field` (the per-element source-labels key name).
+// ParseAggregateParams reads the six aggregate keys out of the opaque bag:
+// `field`, `method`, `hold_spread`, `output`, `route_at` (the routing floor),
+// and `source_field` (the per-element source-labels key name).
 //
 // It is the ONE place core reads inside `params`, and it reads exactly the keys
-// §2 names. The same rules run at register time (V28) so a typo'd
+// the specification names. The same rules run at register time so a typo'd
 // `method = "medain"` is refused before a run spends the inputs it would have
 // aggregated; this exists as well because a definition can reach the engine
 // through a database restored from elsewhere.
@@ -202,7 +203,7 @@ func ParseAggregateParams(params map[string]any) (AggregateParams, error) {
 	}
 
 	// `hold_spread` tolerates the same int/int64/float64/json.Number shapes
-	// V28's register-time check does (workflow.AsInteger — one coercion switch
+	// the register-time check does (workflow.AsInteger — one coercion switch
 	// for both the register-time and run-time reads of this param, rather than
 	// two that can drift).
 	hold := 0
@@ -219,8 +220,8 @@ func ParseAggregateParams(params map[string]any) (AggregateParams, error) {
 
 	// `route_at` is optional; present, it must be a non-empty string. WHETHER
 	// the value has a position is the declared order's question and is asked in
-	// Aggregate, where the resolver is — the same split V28/V28a make at
-	// register time.
+	// Aggregate, where the resolver is — the same split the register-time
+	// checks make.
 	routeAt, err := stringParam(params, ParamRouteAt)
 	if err != nil {
 		return out, err
@@ -232,7 +233,7 @@ func ParseAggregateParams(params map[string]any) (AggregateParams, error) {
 
 	// `source_field` is optional; present, it must be a non-empty string. Core
 	// never validates that the name exists on any element — it is read back,
-	// per element, only by the report (R10: a read verb does not refuse a run
+	// per element, only by the report (a read verb does not refuse a run
 	// over one odd payload).
 	sourceField, err := stringParam(params, ParamSourceField)
 	if err != nil {
@@ -243,7 +244,7 @@ func ParseAggregateParams(params map[string]any) (AggregateParams, error) {
 			"a property of each input element", ParamSourceField)
 	}
 
-	// V28's "no other keys". An unread key is a declaration the author believes
+	// "No other keys". An unread key is a declaration the author believes
 	// is doing something; saying so at register time is the whole discipline.
 	for key := range params {
 		switch key {
@@ -263,23 +264,23 @@ func ParseAggregateParams(params map[string]any) (AggregateParams, error) {
 }
 
 // Aggregate reduces each input element's cluster to a single value of the same
-// field (§7.2–§7.5).
+// field.
 //
 // EACH ELEMENT OF THE INPUT PAYLOAD IS ONE CLUSTER. `params` carries no grouping
 // key because clustering is the JUDGED half and reconciliation is the COMPUTED
-// half (engine-core §6) — so the grouping arrives in the payload, as an array
-// under the field, and G2 makes a scalar there a one-member cluster.
+// half — so the grouping arrives in the payload, as an array under the field,
+// and a scalar there is a one-member cluster.
 //
-// G2 is the property that makes the machinery safe to adopt: over a flat,
-// unclustered payload `aggregate` is the IDENTITY. Every value passes through,
-// nothing is held, nothing is demoted, and the threshold sees exactly what it
-// would have seen without the action — so an operator can introduce clustering
-// later without a behavior cliff.
+// The one-member rule is the property that makes the machinery safe to adopt:
+// over a flat, unclustered payload `aggregate` is the IDENTITY. Every value
+// passes through, nothing is held, nothing is demoted, and the threshold sees
+// exactly what it would have seen without the action — so an operator can
+// introduce clustering later without a behavior cliff.
 func Aggregate(
 	payloads []map[string]any, params AggregateParams, order OrderResolver,
 ) (*AggregateOutcome, error) {
 	if order == nil || !order.Ordered(params.Field) {
-		// V29 makes this unreachable through `workflow register`. It is
+		// Register time makes this unreachable through `workflow register`. It is
 		// reachable from a restored database, and it is a refusal rather than a
 		// guess: median, max, and min are defined ONLY over an order.
 		return nil, fmt.Errorf(
@@ -290,9 +291,10 @@ func Aggregate(
 
 	// `route_at` resolves to a POSITION, once, before any cluster is read. A
 	// value the declared order does not name is a step failure naming it —
-	// V28a makes this unreachable through `workflow register`, and it is
-	// reachable from a restored database, where it follows G4's discipline: no
-	// position, no guess. -1 means no floor; every cluster is emitted.
+	// register time makes this unreachable through `workflow register`, and it
+	// is reachable from a restored database, where it follows the member-value
+	// discipline: no position, no guess. -1 means no floor; every cluster is
+	// emitted.
 	routeFloor := -1
 	if params.RouteAt != "" {
 		pos, ok := order.Position(params.Field, params.RouteAt)
@@ -324,7 +326,7 @@ func Aggregate(
 		top := positions[len(positions)-1]
 		reduced := members[taken.at]
 
-		// §7.4: spread is DISTANCE IN THE DECLARED ORDER, never a count of
+		// Spread is DISTANCE IN THE DECLARED ORDER, never a count of
 		// distinct values and never a value difference — so {low, high} and
 		// {low, medium, high} are both spread 2. The comparison is `>=`, and
 		// `hold_spread = 0` (the default, and the absent case) NEVER holds, so a
@@ -333,7 +335,7 @@ func Aggregate(
 		spread := top.rank - positions[0].rank
 		held := params.HoldSpread > 0 && spread >= params.HoldSpread
 
-		// G3: every OTHER key of the element is carried through verbatim. Core
+		// Every OTHER key of the element is carried through verbatim. Core
 		// does not read them, and dropping them would strip an instance's own
 		// identifiers from the very payload a downstream step consumes.
 		//
@@ -357,10 +359,11 @@ func Aggregate(
 		result[KeyHeld] = held
 		result[KeyOperatorResolved] = false
 
-		// D1/D2: demoted when the computed value's position is STRICTLY BELOW
-		// its maximum member's, recording the value that was not taken. Absent —
+		// Demoted when the computed value's position is STRICTLY BELOW its
+		// maximum member's, recording the value that was not taken. Absent —
 		// omitted from the object, never an empty string — when nothing was.
-		// D3 falls out of this rather than being written separately: `max` takes
+		// Per-method behavior falls out of this rather than being written
+		// separately: `max` takes
 		// the top position and so never demotes, `min` demotes whenever the
 		// members differ, and `median` demotes on any cluster whose upper half
 		// is non-trivial.
@@ -390,7 +393,7 @@ func Aggregate(
 		out.Payload = append(out.Payload, result)
 		if held {
 			// The index is the element's position in the EMITTED payload — the
-			// payload the artifact records and H2a's `<step>-held@k#i` suffix
+			// payload the artifact records and the `<step>-held@k#i` suffix
 			// addresses — which is `i` exactly whenever no cluster was routed
 			// below the floor.
 			out.Held = append(out.Held, len(out.Payload)-1)
@@ -400,7 +403,7 @@ func Aggregate(
 	return out, nil
 }
 
-// reductionIndex is §7.3's table, over member positions sorted ascending.
+// reductionIndex is the reduction table, over member positions sorted ascending.
 //
 //	min     m[0]
 //	max     m[len-1]
@@ -416,7 +419,7 @@ func Aggregate(
 // which is an opinion about severities baked into a statistics function — wrong
 // and invisible for a ripeness or a confidence enum. `(len-1)/2` is the
 // standard lower median for ordinal data where no arithmetic mean exists, and
-// it is order-independent, which §9 item 5 requires.
+// it is order-independent, which determinism requires.
 //
 // WHAT CHANGED (DKT-267) IS WHO IS ASKED, NOT WHAT CORE BELIEVES. An order can
 // know its own bad end even when core cannot, so a schema may declare
@@ -468,7 +471,7 @@ func positionsOf(
 	for i, member := range members {
 		rank, ok := order.Position(field, member)
 		if !ok {
-			// G4: a member value not present in the declared order is a step
+			// A member value not present in the declared order is a step
 			// failure naming the value and the field. NOT sorted to an end and
 			// NOT ignored.
 			return nil, fmt.Errorf(
@@ -487,7 +490,7 @@ func positionsOf(
 	return out, nil
 }
 
-// clusterMembers reads one element's members (§7.2 G1/G2/G5).
+// clusterMembers reads one element's members.
 func clusterMembers(element map[string]any, field string, index int) ([]string, error) {
 	raw, present := element[field]
 	if !present || raw == nil {
@@ -498,7 +501,7 @@ func clusterMembers(element map[string]any, field string, index int) ([]string, 
 
 	switch v := raw.(type) {
 	case []any:
-		// G5: an empty members array is a step failure naming the element index.
+		// An empty members array is a step failure naming the element index.
 		// An empty cluster has no median, and inventing one — null? the lowest? —
 		// is exactly the kind of guess this stage exists to refuse.
 		if len(v) == 0 {
@@ -516,7 +519,7 @@ func clusterMembers(element map[string]any, field string, index int) ([]string, 
 		}
 		return members, nil
 	default:
-		// G2: a scalar is a ONE-MEMBER cluster. The median/max/min of one value
+		// A scalar is a ONE-MEMBER cluster. The median/max/min of one value
 		// is that value, the spread is 0, nothing is held, nothing is demoted —
 		// the identity property.
 		s, err := memberValue(raw)
@@ -531,7 +534,7 @@ func clusterMembers(element map[string]any, field string, index int) ([]string, 
 // its values in.
 //
 // A composite member is a step failure rather than a rendering: `["a","b"]` as
-// a member of a cluster of clusters is a shape §7.2 does not define, and
+// a member of a cluster of clusters is a shape the builtin does not define, and
 // flattening it would be core deciding what the author meant.
 func memberValue(raw any) (string, error) {
 	switch raw.(type) {

@@ -2,8 +2,7 @@ package engine
 
 import "strings"
 
-// Scope non-overlap — R4 of the readiness predicate (TDD §6.5, engine-core §5's
-// mutual exclusion).
+// Scope non-overlap — R4 of the readiness predicate (mutual exclusion).
 //
 // Scope is a list of path GLOBS an issue declares (`issues.scope_globs`). Two
 // steps conflict iff their issues' scope globs intersect, and a step whose
@@ -11,8 +10,7 @@ import "strings"
 
 // ScopesIntersect reports whether two scope-glob LISTS conflict.
 //
-// S1: an empty or absent list never excludes and is never excluded
-// (engine-core §5: "Scope-less issues declare `scope = []` and never exclude").
+// S1: an empty or absent list never excludes and is never excluded.
 // This is the dormancy case as well as the common one — every pre-existing
 // issue carries NULL — so it is the first branch rather than a special case
 // buried in the loop.
@@ -140,7 +138,7 @@ func literalPrefix(glob string) string {
 // on scope would make two steps in one scope permanently unschedulable, since
 // each would be waiting on the other's status to change.
 //
-// A `gated` step is deliberately NOT here: by §6.8 its artifact has recorded
+// A `gated` step is deliberately NOT here: its artifact has recorded
 // and its token has retired, so the work against the tree is done and only the
 // engine-owned saga remains.
 func stepExcludesScope(status string) bool {

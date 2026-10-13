@@ -16,7 +16,7 @@ import (
 //
 // DKT-741 established the freeze and it STANDS: `run_issues.issue_snapshot` is
 // written once at activation stage 4, the packet's `context.issue.scope` and
-// the recorded `issue.diff` scope both read it (§5.1.1, §6.6, §6.7.1 D1), and
+// the recorded `issue.diff` scope both read it, and
 // nothing in the engine rewrites it. What DKT-741 also decided — that no verb
 // would ever refresh it, and that an authorized widen must be spent by
 // abandoning the issue and re-planning it — is what RUN-52 (VPL-434) then
@@ -34,7 +34,8 @@ import (
 // abandoned instead.
 //
 // So the freeze keeps its default and gains an explicit, refusable, recorded
-// exception. Four properties are what make it not a hole in §9 item 5:
+// exception. Four properties are what make it not a hole in mid-run edit
+// immunity:
 //
 //  1. IT CARRIES NO SCOPE OF ITS OWN. The refresh reads `issues.scope_globs`
 //     and copies it verbatim; there is no `--scope` here and there must never
@@ -43,7 +44,7 @@ import (
 //     already declared through the one gate scope widening has always had. The
 //     authorization for what lands is, exactly, the authorization for the
 //     widen — and a refresh with no widen behind it has nothing to copy and is
-//     refused (D4 below).
+//     refused (below).
 //  2. NO STEP STRADDLES IT. It refuses while any of the issue's steps is
 //     `claimed`, `running`, or `gated`, and while a dispatch is open — the
 //     repin quiescence rule (repin.go), applied to the other frozen premise. A
@@ -113,7 +114,7 @@ var refreshBlockingStepStatuses = []string{
 // issue. A `step refresh-scope STEP-N` would name one step and silently move
 // its siblings' scope too, which is a blast radius the argument no longer
 // matches — and it would let two steps of one issue disagree about scope
-// inside one dispatch, which is the drift D2 exists to prevent.
+// inside one dispatch, which is the drift the quiescence rule exists to prevent.
 //
 // On a bound run it requires the conductor capability (DKT-2465) as `token`:
 // `issue edit --scope` is ungated, so without this check an executor could
@@ -182,14 +183,14 @@ func RefreshIssueScopeInRun(
 		return nil, err
 	}
 
-	// D1: the value comes from the column `--scope` writes, and from nowhere
+	// The value comes from the column `--scope` writes, and from nowhere
 	// else. This verb takes no globs.
 	live, err := liveIssueScopeTx(tx, issueID)
 	if err != nil {
 		return nil, err
 	}
 
-	// D4, the gate: without a widen recorded through `issue edit --scope`
+	// The gate: without a widen recorded through `issue edit --scope`
 	// there is nothing this verb is authorized to make real. Refusing rather
 	// than no-opping keeps the ledger honest — an `issue-scope-refreshed`
 	// event that refreshed nothing is a ruling that ruled nothing, and a
@@ -205,7 +206,7 @@ func RefreshIssueScopeInRun(
 			model.FormatID(issueID))
 	}
 
-	// D2: quiescence, per issue for the steps and per run for the dispatch.
+	// Quiescence, per issue for the steps and per run for the dispatch.
 	steps, err := refreshableSteps(tx, runID, issueID, run.Ref())
 	var straddle *refreshStraddleError
 	var terminal *refreshAllTerminalError
@@ -248,7 +249,7 @@ func RefreshIssueScopeInRun(
 		return nil, err
 	}
 
-	// D4: one event, carrying both scopes, the steps it reaches, and why.
+	// One event, carrying both scopes, the steps it reaches, and why.
 	data, err := rulingData(by, map[string]any{
 		"issue": model.FormatID(issueID), "reason": reason,
 		"from": frozen, "to": live, "steps": steps,
@@ -395,7 +396,7 @@ func decodeSnapshotScope(snapshot string) ([]string, error) {
 //
 // It decodes into `issueSnapshotFields` — the same type activation encodes
 // with — so the canonical key order is the one type's declaration order in both
-// directions, and a field added to §11.4's issue shape lands in both paths at
+// directions, and a field added to the issue shape lands in both paths at
 // once. TestRefreshedSnapshotIsByteIdenticalApartFromScope pins the round trip.
 //
 // An unknown key in the stored blob would be DROPPED by this round trip, which

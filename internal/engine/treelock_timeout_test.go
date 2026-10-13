@@ -92,8 +92,7 @@ func TestTreeLockTimeoutRecordsSkipped(t *testing.T) {
 		t.Errorf("the reason does not name the lock wait: %q", row.Reason)
 	}
 	// Nothing ran, so the fields that describe a process must stay empty: a
-	// zero exit on a gate that never spawned is the confusion T11 exists to
-	// prevent.
+	// zero exit on a gate that never spawned would read as a pass.
 	if row.Exit != nil {
 		t.Errorf("exit = %d on a gate that never spawned, want NULL", *row.Exit)
 	}

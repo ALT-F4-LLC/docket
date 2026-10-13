@@ -15,18 +15,18 @@ var (
 	ErrStepNotFound = errors.New("step not found")
 
 	// ErrSagaStageMoved means a saga stage's CAS guard matched zero rows:
-	// another engine invocation advanced the saga first (TDD §6.8, "resume is
+	// another engine invocation advanced the saga first ("resume is
 	// lazy and idempotent"). It is not a failure — the loser re-reads and
 	// either finds the work done or advances the next stage — so no CLI verb
 	// maps it to an exit code; the saga driver handles it internally.
 	ErrSagaStageMoved = errors.New("saga stage already advanced")
 )
 
-// The nine PERSISTED step statuses (TDD §6.2). `ready` is the tenth member of
-// the MACHINE and is deliberately absent here: it is computed at read time by
-// the §6.3 predicate and never stored as intent, exactly as v6's effective
-// lease status is. Both numbers are stated in the TDD because the enum's size
-// and the machine's size are different questions.
+// The nine PERSISTED step statuses. `ready` is the tenth member of the MACHINE
+// and is deliberately absent here: it is computed at read time by the
+// readiness predicate and never stored as intent, exactly as v6's effective
+// lease status is. Both numbers are stated because the enum's size and the
+// machine's size are different questions.
 const (
 	StepPending      = "pending"
 	StepClaimed      = "claimed"
@@ -38,7 +38,7 @@ const (
 	StepSuperseded   = "superseded"
 	StepFailedRouted = "failed-routed"
 
-	// StepReady is the COMPUTED status a read verb renders when the §6.3
+	// StepReady is the COMPUTED status a read verb renders when the readiness
 	// predicate holds. It is a rendering value, never a column value, and
 	// TestReadyIsNeverPersisted asserts nothing writes it.
 	StepReady = "ready"
@@ -77,8 +77,8 @@ const (
 // is derived by reading a reason string, and none is inferred at read time.
 type ParkClass string
 
-// The park classes. Each is produced by exactly one routing decision, named in
-// docs/design/engine-spec.md beside it.
+// The park classes. Each is produced by exactly one routing decision, named
+// beside it.
 //
 // `paused` is deliberately ABSENT. It is a RUN status and is never written to
 // `steps.status` (see StepOffScheduler's note), so no routing transaction can
@@ -172,7 +172,7 @@ func StepOffScheduler(status string) bool {
 	return StepTerminal(status) || status == StepWaitingHuman
 }
 
-// Saga stages (TDD §6.8). The value stored in `steps.saga_stage` is the RESUME
+// Saga stages. The value stored in `steps.saga_stage` is the RESUME
 // POINT: the stage that has committed, so the next engine invocation knows
 // which one to run next. NULL means "not in the saga" — either never entered or
 // complete.
@@ -184,16 +184,16 @@ const (
 	// SagaRouting is the last stage's resume point: gates are all recorded and
 	// routing is what remains.
 	SagaRouting = "routing"
-	// SagaHeld is the stage an `aggregate` step enters when `hold_spread` trips
-	// (payloads-thresholds §7.7 H8). Its artifact is recorded and its
-	// `<step>-held` question is open; its routing is DEFERRED until an operator
-	// resolves that question.
+	// SagaHeld is the stage an `aggregate` step enters when `hold_spread`
+	// trips. Its artifact is recorded and its `<step>-held` question is open;
+	// its routing is DEFERRED until an operator resolves that question.
 	//
 	// It is a stage rather than a status because "gating the routing step" is a
 	// DEFERRAL OF ROUTING, and the machinery for deferring a saga already
 	// exists. The step's status stays `gated` — non-terminal — so every
-	// downstream successor fails R3 and nothing proceeds: no new status, no
-	// synthetic `after` edge, no second readiness rule.
+	// downstream successor fails the predecessors-done clause and nothing
+	// proceeds: no new status, no synthetic `after` edge, no second readiness
+	// rule.
 	SagaHeld = "held"
 	// SagaGatePrefix prefixes a per-gate resume point, `gate:<name>`.
 	SagaGatePrefix = "gate:"
@@ -218,7 +218,7 @@ type Step struct {
 	Attempt      int
 	// AttemptBase is the attempt count the retry budget counts FROM (v16,
 	// DKT-86/DKT-90). `attempt` is monotonic for the step's whole life — it is
-	// the usage ledger's key half and §11.4's "claims made against this step,
+	// the usage ledger's key half and the "claims made against this step,
 	// ever" — so `step resolve --as retry` refreshes the budget by moving this
 	// base to the current attempt instead of zeroing the counter. Exhaustion
 	// compares Attempt-AttemptBase against MaxAttempts.
@@ -283,17 +283,17 @@ type Step struct {
 	ContextBytes      int
 	// Materialized reports a step the ENGINE minted rather than one the pinned
 	// definition declares — the `<step>-held` human step a tripped `hold_spread`
-	// creates (payloads-thresholds §7.7 H4). Its spec is synthesized from the
+	// creates. Its spec is synthesized from the
 	// pinned bytes, so nothing unpinned enters a run; the column exists so a
 	// reader can tell a declared question from a computed one.
 	Materialized bool
 	// UsageRecorded is the v10 column group 1 writes on every `--usage` and
-	// group 2's discrepancy probe reads (§2.3, §5.8 D2). It is the LEDGER'S OWN
+	// group 2's discrepancy probe reads. It is the LEDGER'S OWN
 	// answer to "did this step report", written in the recording transaction, so
 	// the probe needs no join per step.
 	UsageRecorded bool
 	// WorkRoot is the checkout the step's work happened in — recorded at
-	// complete/record via --worktree (v12, G8), read by the diff stage so a
+	// complete/record via --worktree (v12), read by the diff stage so a
 	// resumed saga diffs the tree the work touched, not the resumer's cwd.
 	WorkRoot    string
 	CreatedAtMS int64
@@ -326,8 +326,8 @@ const ClaimPhasePreGates = "pre-gates"
 func (s *Step) Ref() string { return model.FormatStepID(s.ID) }
 
 // Lease returns the step's lease, for the same effective-status computation
-// issues use. A step and an issue carry the same lease columns by contract
-// (TDD §2), so they share the model type as well as the SQL.
+// issues use. A step and an issue carry the same lease columns by contract, so
+// they share the model type as well as the SQL.
 func (s *Step) Lease() *model.Lease {
 	return &model.Lease{
 		Owner: s.Owner, TokenHash: s.TokenHash,
@@ -337,7 +337,7 @@ func (s *Step) Lease() *model.Lease {
 
 // InSaga reports whether the step is mid-saga — recorded but not yet routed.
 // Such a step needs NO lease to advance: the token retired at stage 1, so any
-// later engine invocation may resume it (§6.8).
+// later engine invocation may resume it.
 func (s *Step) InSaga() bool { return s.SagaStage != "" }
 
 const stepFullSelect = `
@@ -365,7 +365,7 @@ func GetStepTx(tx *sql.Tx, id int) (*Step, error) {
 
 // ListRunSteps reads every step of a run, ordered by (issue, id) — creation
 // order within an issue, which is declaration order, which is what the topology
-// goldens compare against (§8.3).
+// goldens compare against.
 func ListRunSteps(db *sql.DB, runID int) ([]*Step, error) {
 	return scanSteps(db.Query(stepFullSelect+` WHERE run_id = ? ORDER BY issue_id, id`, runID))
 }
@@ -389,11 +389,11 @@ func IssueStepRuns(db *sql.DB, issueID int) ([]int, error) {
 
 // ListRunStepsTx is ListRunSteps inside a transaction — the reader for the
 // transaction-side questions asked about a whole run, which must see one
-// consistent snapshot of it. The readiness predicate asks R3 (predecessors
-// done) and R4 (scope non-overlap), which are questions about the same set of
-// rows at the same instant; repinQuiescenceGuard asks whether any step could
-// straddle a moving agreement, which is the same instant's question about the
-// same rows.
+// consistent snapshot of it. The readiness predicate asks whether
+// predecessors are done and whether scopes overlap, which are questions about
+// the same set of rows at the same instant; repinQuiescenceGuard asks whether
+// any step could straddle a moving agreement, which is the same instant's
+// question about the same rows.
 func ListRunStepsTx(tx *sql.Tx, runID int) ([]*Step, error) {
 	return scanSteps(tx.Query(stepFullSelect+` WHERE run_id = ? ORDER BY issue_id, id`, runID))
 }
@@ -408,7 +408,7 @@ func ListIssueStepsTx(tx *sql.Tx, runID, issueID int) ([]*Step, error) {
 }
 
 // ListActiveRunSteps reads the steps of every non-terminal run — `guard stop`'s
-// reader (§6.12) and the scope-conflict check's, since a claimed step in ANOTHER
+// reader and the scope-conflict check's, since a claimed step in ANOTHER
 // active run excludes just as surely as one in this run.
 func ListActiveRunSteps(db *sql.DB) ([]*Step, error) {
 	return scanSteps(db.Query(
@@ -501,12 +501,12 @@ func scanOneStep(s rowScannerFor) (*Step, error) {
 }
 
 // ClaimStepTx takes a lease on a step inside the caller's transaction, through
-// the SAME generalized implementation issues use (TDD §6.6).
+// the SAME generalized implementation issues use.
 //
 // It is transaction-scoped rather than standalone because `step claim` must
-// mint the token and assemble the §11.4 context bundle in ONE transaction — "an
-// unclaimed executor has nothing, a claimed one has everything" (engine-core
-// §8) — so the caller owns the transaction and this is one statement inside it.
+// mint the token and assemble the context bundle in ONE transaction — "an
+// unclaimed executor has nothing, a claimed one has everything" — so the
+// caller owns the transaction and this is one statement inside it.
 func ClaimStepTx(
 	tx *sql.Tx, id int, owner string, ttlMS, nowMS int64,
 ) (token string, lease *model.Lease, err error) {
@@ -543,8 +543,7 @@ func ClaimStepWithRecoveryTx(
 }
 
 // RefreshClaimLeaseTx recomputes a live claim's `expires_ms` from the caller's
-// own time, guarded by the claim identity (TDD docs/tdd/gates-trust.md
-// §7.6.1.1 LR1/LR2).
+// own time, guarded by the claim identity.
 //
 // WHY IT EXISTS: a claim with pre-gates runs subprocesses between the CAS and
 // the response, and all of that wall time would otherwise be deducted from a
@@ -556,7 +555,7 @@ func ClaimStepWithRecoveryTx(
 // IT IS A HEARTBEAT BY ANOTHER NAME, NOT A SECOND AUTHORIZATION. The guard is
 // the token hash transaction A wrote: the claimant still holds the CAS, which
 // is exactly the condition the lease model already sanctions for extending a
-// live claim. It can only FAIL, never award a claim (LR4), so the single-winner
+// live claim. It can only FAIL, never award a claim, so the single-winner
 // property is untouched — a claim lost during phase 2 matches zero rows here
 // and the caller gets CONFLICT in the ordinary way.
 //
@@ -646,7 +645,7 @@ func ClaimStep(db *sql.DB, id int, owner string, ttlMS, nowMS int64) (string, *m
 	return leaseSteps.claim(db, id, owner, ttlMS, nowMS)
 }
 
-// GetStepLease reads a step's lease without writing anything (§6.3: reads never
+// GetStepLease reads a step's lease without writing anything (reads never
 // write).
 func GetStepLease(db *sql.DB, id int) (*model.Lease, error) {
 	return leaseSteps.getLease(db, id)
@@ -658,30 +657,30 @@ func HeartbeatStep(db *sql.DB, id int, token string, ttlMS, nowMS int64) (*model
 	return leaseSteps.heartbeat(db, id, token, ttlMS, nowMS)
 }
 
-// AuthorizeStepTx is §6.8 stage 0's holder check and §6.9's R1-R4 in one call:
-// the token must hold a LIVE lease on the step. It is leaseSteps.authorize,
-// exported under a name the saga reads naturally.
+// AuthorizeStepTx is the saga's stage-0 holder check and the step refusal
+// matrix in one call: the token must hold a LIVE lease on the step. It is
+// leaseSteps.authorize, exported under a name the saga reads naturally.
 func AuthorizeStepTx(tx *sql.Tx, id int, token string, nowMS int64) (*model.Lease, error) {
 	return leaseSteps.authorize(tx, id, token, nowMS)
 }
 
 // AuthorizeStepRead is AuthorizeStepTx's predicate over a READ, for the one
 // caller that must refuse a non-holder before opening a write transaction:
-// stage 0's payload validation (payloads-thresholds §4.8 C6). It shares the
+// stage 0's payload validation. It shares the
 // predicate rather than restating it, so the two cannot disagree, and it is
 // ADVISORY — AuthorizeStepTx remains the authority.
 func AuthorizeStepRead(db *sql.DB, id int, token string, nowMS int64) error {
 	return leaseSteps.authorizeRead(db, id, token, nowMS)
 }
 
-// RetireStepTokenTx is §6.8 stage 1's hinge: the token retires when the
+// RetireStepTokenTx is the saga's stage-1 hinge: the token retires when the
 // artifact records.
 //
 // Retirement is the same state change as release — no owner, no hash, no
 // expiry — so it is the shared clearLeaseTx rather than a second UPDATE that
 // must agree with it. What differs is the AUTHORITY: release is the holder
 // giving the lease back, retirement is the engine taking ownership of a saga
-// that no longer needs one. After this commits, `complete` is AUTH_ERROR (R9)
+// that no longer needs one. After this commits, `complete` is AUTH_ERROR
 // and any engine invocation may resume the saga.
 func RetireStepTokenTx(tx *sql.Tx, id int) error {
 	return leaseSteps.clearLeaseTx(tx, id)
@@ -705,7 +704,7 @@ var recordedAtOnTerminalEntry = `recorded_at_ms = CASE
 // bumping the CAS column and refreshing `updated_at_ms`. A move into a
 // terminal status also stamps `recorded_at_ms`.
 //
-// `activityMS` refreshes the saga's activity clock when non-zero — §6.8's
+// `activityMS` refreshes the saga's activity clock when non-zero —
 // "every stage commit refreshing the step's activity clock". Passing 0 leaves
 // it alone, which is what a non-saga transition wants.
 func SetStepStatusTx(tx *sql.Tx, id int, status string, nowMS, activityMS int64) error {
@@ -734,7 +733,7 @@ func SetStepStatusTx(tx *sql.Tx, id int, status string, nowMS, activityMS int64)
 }
 
 // StartStepTx stamps `started_ms` — the schedule-to-close clock
-// `max_step_duration` is evaluated against (§6.3).
+// `max_step_duration` is evaluated against.
 //
 // It is set at CLAIM, not at first heartbeat, and only when NULL. That is what
 // makes the bound schedule-to-close rather than activity-to-close: a runaway
@@ -765,7 +764,7 @@ func ClearStepStartTx(tx *sql.Tx, id int) error {
 }
 
 // AdvanceSagaTx moves a step's saga stage under a CAS guard on the CURRENT
-// stage — §6.8's "each stage's transaction is WHERE saga_stage = <expected>
+// stage — "each stage's transaction is WHERE saga_stage = <expected>
 // CAS-guarded, so two concurrent engine invocations resuming the same saga
 // produce exactly one advance".
 //
@@ -804,9 +803,9 @@ func AdvanceSagaTx(tx *sql.Tx, id int, from, to string, nowMS int64) error {
 	return nil
 }
 
-// SetStepGateTrailTx records the accumulated gate results (TDD §6.1's
-// `gate_trail`, the recorded storage-location deviation: §11.4's `gate
-// result` shape rides here until v8's `gate_results` table).
+// SetStepGateTrailTx records the accumulated gate results in `gate_trail`, the
+// storage-location deviation: the `gate result` shape rides here until v8's
+// `gate_results` table.
 func SetStepGateTrailTx(tx *sql.Tx, id int, trail string, nowMS int64) error {
 	_, err := tx.Exec(
 		`UPDATE steps SET gate_trail = ?, activity_ms = ?, updated_at_ms = ?,
@@ -1008,10 +1007,10 @@ func SetStepMetadataTx(tx *sql.Tx, id int, metadata string, nowMS int64) error {
 // status back to `pending`, `started_ms` cleared, `attempt` LEFT ALONE.
 //
 // attempt already counted this try — it incremented at claim — so incrementing
-// again here would double-count a single death. §6.3's "returning them to ready
-// with attempt++" is satisfied by the claim's own increment: the trail records
-// one attempt per claim, for all time (claims-leases §5), which is exactly what
-// §9 item 4's "attempt trail is complete" asks for.
+// again here would double-count a single death. "Returning them to ready with
+// attempt++" is satisfied by the claim's own increment: the trail records one
+// attempt per claim, for all time, which is what a complete attempt trail asks
+// for.
 //
 // It is MECHANISM, not classification: `step fail`'s below-the-budget branch
 // shares it to return a failed step to the pool, so the outcome counters
@@ -1021,8 +1020,8 @@ func SetStepMetadataTx(tx *sql.Tx, id int, metadata string, nowMS int64) error {
 // would classify a failure as a reap at exactly the call site that knows
 // better.
 //
-// This is one of the two places a lease write may happen (§6.3: "lazy reaping
-// confined to next/claim"). No read verb reaches it.
+// This is one of the two places a lease write may happen (lazy reaping is
+// confined to next/claim). No read verb reaches it.
 func ReapStepTx(tx *sql.Tx, id int, nowMS int64) error {
 	_, err := tx.Exec(
 		`UPDATE steps
@@ -1127,12 +1126,12 @@ func MarkStepClaimReapedTx(tx *sql.Tx, id int, nowMS int64) error {
 }
 
 // ResetStepRetryBudgetTx refreshes a step instance's retry budget — `step
-// resolve --as retry` (§2: "retry = attempts reset") — by moving `attempt_base`
+// resolve --as retry` (retry resets attempts) — by moving `attempt_base`
 // to the current attempt. Exhaustion compares `attempt - attempt_base` against
 // `max_attempts`, so the budget reads zero-spent from here on.
 //
 // `attempt` ITSELF IS NEVER RESET (DKT-86, DKT-90). It is the usage ledger's
-// key half (`UNIQUE(step_id, attempt, unit)`) and §11.4's "claims made against
+// key half (`UNIQUE(step_id, attempt, unit)`) and the "claims made against
 // this step, ever": zeroing it here made a retried step's next claim re-mint an
 // attempt number the ledger had already recorded, and the re-execution's
 // genuinely distinct usage became permanently unrecordable through `dispatch
@@ -1140,9 +1139,9 @@ func MarkStepClaimReapedTx(tx *sql.Tx, id int, nowMS int64) error {
 // the base column is what lets one column serve as neither's lie.
 //
 // This is still a DIFFERENT counter from the issue-level `attempt` v6 declared
-// monotonic, on a different entity, and claims-leases §5 anticipated exactly
-// this: the step's budget is live against `max_attempts`, the issue's trail is
-// permanent. Both statements stay true because they are about different rows.
+// monotonic, on a different entity: the step's budget is live against
+// `max_attempts`, the issue's trail is permanent. Both statements stay true
+// because they are about different rows.
 func ResetStepRetryBudgetTx(tx *sql.Tx, id int, nowMS int64) error {
 	_, err := tx.Exec(
 		`UPDATE steps SET attempt_base = attempt, updated_at_ms = ?,
@@ -1204,13 +1203,13 @@ type Artifact struct {
 	StepID int
 	Kind   string
 	Body   string
-	// Payload is the structured half, validated for SHAPE only at S3 (§6.8
-	// stage 0); the schema register is S5's. It is JSON text or "".
+	// Payload is the structured half, validated for SHAPE at stage 0; schema
+	// validation is the schema register's. It is JSON text or "".
 	Payload string
 	SHA256  string
-	// Stub is 1 ONLY on artifacts the S3/S4 stub action runner produced, and it
-	// is `omitempty` for the reason gate_results' own marker is: a result THIS
-	// stage produces serializes with no `stub` key at all (§6.3 S4).
+	// Stub is 1 ONLY on artifacts the pre-v9 stub action runner produced, and
+	// it is `omitempty` for the reason gate_results' own marker is: a result
+	// THIS stage produces serializes with no `stub` key at all.
 	//
 	// NOTHING WRITTEN FROM NOW ON SETS IT. The column exists so a migrated
 	// artifact stays distinguishable forever — the migration marks the rows
@@ -1222,7 +1221,7 @@ type Artifact struct {
 	// (v15, DKT-70).
 	//
 	// A held cluster's resolution records a new artifact rather than annotating
-	// the old one (H13). It shares the original's `kind`; its body is
+	// the old one. It shares the original's `kind`; its body is
 	// regenerated from the resolved payload and its `sha256` covers body and
 	// payload both (DKT-112), so two links of the chain never share a content
 	// address while their payloads differ.
@@ -1234,13 +1233,13 @@ type Artifact struct {
 	CreatedAtMS int64
 }
 
-// ArtifactMaxBytes is §3's explicit cap. An artifact over it is a
+// ArtifactMaxBytes is the explicit artifact size cap. An artifact over it is a
 // VALIDATION_ERROR naming the size and the cap — a refusal rather than a
 // truncation, because a silently truncated artifact is one a downstream step
 // consumes as if it were whole.
 const ArtifactMaxBytes = 1 << 20
 
-// InsertArtifactTx records one artifact inside the caller's transaction — §6.8
+// InsertArtifactTx records one artifact inside the caller's transaction — saga
 // stage 1, alongside the token's retirement, because "the token retires when
 // the artifact records" is one commit or it is not the hinge it is specified
 // to be.
@@ -1267,7 +1266,7 @@ SELECT id, run_id, step_id, kind, body, payload, sha256, stub, supersedes, creat
   FROM artifacts`
 
 // ListRunArtifacts reads a run's artifacts ordered by id — the tie-break
-// §6.7's resolution order ends on, so the read order and the resolution order
+// the input resolution order ends on, so the read order and the resolution order
 // agree without a second sort.
 func ListRunArtifacts(db *sql.DB, runID int) ([]*Artifact, error) {
 	return scanArtifacts(db.Query(artifactSelect+` WHERE run_id = ? ORDER BY id`, runID))
@@ -1340,7 +1339,7 @@ func scanArtifacts(rows *sql.Rows, err error) ([]*Artifact, error) {
 }
 
 // InsertStepInputTx records that a step consumed an artifact at a declared
-// position — the resolution §6.7 computed, MATERIALIZED.
+// position — the input resolution, MATERIALIZED.
 //
 // The record exists because resolution is a function of run state at ASSEMBLY
 // time, and run state moves: a later ordinal's artifact would re-resolve the
@@ -1382,7 +1381,7 @@ func ClearStepInputsTx(tx *sql.Tx, stepID int) error {
 // (DKT-1054).
 //
 // It is the artifact rows themselves, not the (position, artifact) pairs,
-// because the reader re-runs §6.7's resolution over exactly this set: the
+// because the reader re-runs the input resolution over exactly this set: the
 // declared-position order, the engine-produced forms that bind no artifact
 // (`issue.body`, an empty `issue.diff`, `gate-results`), and the within-input
 // sort all come from the same code the claim ran, so a replayed bundle has

@@ -16,15 +16,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// COMPLETION METADATA (docs/tdd/completion-metadata.md).
+// COMPLETION METADATA.
 //
 // `step complete --metadata` was accepted, reported success, and dropped: the
 // flag parsed, the option field existed and documented a merge, the column
-// existed, and the R7 rollup read it correctly — but nothing in the engine ever
+// existed, and the `run report` rollup read it correctly — but nothing in the engine ever
 // read `opts.Metadata`. Zero steps in any database carried metadata.
 //
-// The tests below are written against the merge (§1.2), the cap (§1.1.1), and
-// the §6.9 refusal-writes-nothing property that places validation before the
+// The tests below are written against the merge, the cap, and the
+// refusal-writes-nothing property that places validation before the
 // transaction opens.
 //
 // GENERICITY: every bag in this file uses NEUTRAL keys — `desk`, `tier`,
@@ -61,9 +61,9 @@ func TestCompleteMetadataIsPersisted(t *testing.T) {
 	}
 }
 
-// TestCompleteMetadataMergesOverDefinition is §1.2: the definition's bag
+// TestCompleteMetadataMergesOverDefinition pins the merge: the definition's bag
 // survives, the worker's keys are added, and a key in both takes the WORKER's
-// value. `saga.go` has promised this merge in a comment since S3.
+// value. `saga.go` has promised this merge in a comment since stage 3.
 func TestCompleteMetadataMergesOverDefinition(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -119,7 +119,7 @@ func TestCompleteWithoutMetadataLeavesDefinitionBag(t *testing.T) {
 	}
 }
 
-// TestCompleteMetadataNestedValueIsReplacedWholesale is §1.2's shallow-merge
+// TestCompleteMetadataNestedValueIsReplacedWholesale is the shallow-merge
 // clause. Values are OPAQUE: a nested object is a value, not a subtree to
 // descend into. Deep-merging would be core having an opinion about the
 // structure of an instance's bag.
@@ -152,8 +152,8 @@ func TestCompleteMetadataNestedValueIsReplacedWholesale(t *testing.T) {
 	}
 }
 
-// TestCompleteMetadataRefusals is §1.1's validation ladder. Every refusal is
-// pre-transaction, so each case also asserts §6.9's property: nothing written,
+// TestCompleteMetadataRefusals is the validation ladder. Every refusal is
+// pre-transaction, so each case also asserts that nothing is written,
 // `row_version` unmoved, no artifact recorded.
 func TestCompleteMetadataRefusals(t *testing.T) {
 	cases := []struct {
@@ -194,7 +194,7 @@ func TestCompleteMetadataRefusals(t *testing.T) {
 				t.Errorf("err = %q, want it to mention %q", err.Error(), tc.wantIn)
 			}
 
-			// §6.9: a refusal before the transaction writes NOTHING.
+			// A refusal before the transaction writes NOTHING.
 			if after := stepRowVersion(t, conn, stepID); after != before {
 				t.Errorf("row_version moved %d -> %d on a refusal", before, after)
 			}
@@ -216,11 +216,11 @@ func TestCompleteMetadataRefusals(t *testing.T) {
 	}
 }
 
-// TestCompleteMetadataCap is §1.1.1, the cap's own test.
+// TestCompleteMetadataCap is the cap's own test.
 //
 // The boundary is INCLUSIVE and asserted in both directions so an off-by-one
 // cannot pass silently, and the message must name both numbers plus the remedy
-// — R12's phrasing style, because an operator needs to know what to do next.
+// — the engine's refusal phrasing style, because an operator needs to know what to do next.
 func TestCompleteMetadataCap(t *testing.T) {
 	// A bag of exactly MetadataMaxBytes bytes: {"desk":"aaa…"}.
 	const envelope = `{"desk":""}`
@@ -304,8 +304,8 @@ func TestCompleteMetadataCap(t *testing.T) {
 	})
 }
 
-// TestCompleteMetadataDoesNotDoubleApply is R9 at the metadata level: a second
-// `complete` is refused, so the merge runs at most once per attempt.
+// TestCompleteMetadataDoesNotDoubleApply is idempotence at the metadata level:
+// a second `complete` is refused, so the merge runs at most once per attempt.
 func TestCompleteMetadataDoesNotDoubleApply(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -323,14 +323,14 @@ func TestCompleteMetadataDoesNotDoubleApply(t *testing.T) {
 	first := rawStepMetadata(t, conn, stepID)
 
 	if err := e.CompleteStep(conn, stepID, opts); !errors.Is(err, db.ErrNotHolder) {
-		t.Errorf("second complete = %v, want ErrNotHolder (R9)", err)
+		t.Errorf("second complete = %v, want ErrNotHolder", err)
 	}
 	if got := rawStepMetadata(t, conn, stepID); got != first {
 		t.Errorf("metadata changed on the refused second complete: %q -> %q", first, got)
 	}
 }
 
-// TestMergeMetadata is the pure function `fail --metadata` reuses (§1.6). It knows
+// TestMergeMetadata is the pure function `fail --metadata` reuses. It knows
 // nothing about sagas, transactions, or which verb called it — which is what
 // makes `fail --metadata` parity a matter of adding a flag rather than a
 // mechanism.
@@ -374,7 +374,7 @@ func TestMergeMetadata(t *testing.T) {
 	}
 }
 
-// TestMergeMetadataIsDeterministic is R9 through the merge: the stored text is
+// TestMergeMetadataIsDeterministic is determinism through the merge: the stored text is
 // stable regardless of the order keys arrived in, so goldens do not flap on Go
 // map iteration order.
 func TestMergeMetadataIsDeterministic(t *testing.T) {
@@ -407,7 +407,7 @@ func TestMergeMetadataReadsNoKey(t *testing.T) {
 	testsupport.Must(t, err, "reading metadata.go: %v", err)
 	lowered := strings.ToLower(string(source))
 
-	// docs/design/genericity.md's banned set, plus the recorded routing keys,
+	// The genericity banned set, plus the recorded routing keys,
 	// each split so no banned term appears as a literal.
 	banned := []string{
 		"mod" + "el", "pro" + "mpt", "ll" + "m", "age" + "nt", "bri" + "ef",
@@ -454,7 +454,7 @@ func TestFailMetadataIsPersisted(t *testing.T) {
 	}
 }
 
-// TestFailMetadataMergesOverDefinition is complete's §1.2 merge, exercised
+// TestFailMetadataMergesOverDefinition is complete's merge, exercised
 // through fail: the definition's bag survives, the worker's keys are added,
 // and a key in both takes the worker's value.
 func TestFailMetadataMergesOverDefinition(t *testing.T) {
@@ -546,7 +546,7 @@ func TestFailMetadataRefusals(t *testing.T) {
 				t.Errorf("err = %q, want it to mention %q", err.Error(), tc.wantIn)
 			}
 
-			// §6.9: a refusal before the transaction writes NOTHING.
+			// A refusal before the transaction writes NOTHING.
 			if after := stepRowVersion(t, conn, stepID); after != before {
 				t.Errorf("row_version moved %d -> %d on a refusal", before, after)
 			}
@@ -563,7 +563,7 @@ func TestFailMetadataRefusals(t *testing.T) {
 
 // TestFailMetadataCap mirrors TestCompleteMetadataCap: the same 16KiB cap
 // established for `complete` applies to `fail`, unchanged — but the remedy names
-// `fail`'s own channel (C14): `step fail` has no `--artifact-file` or
+// `fail`'s own channel: `step fail` has no `--artifact-file` or
 // `--payload-file`, so pointing at either would send an operator looking for
 // a flag this verb does not offer.
 func TestFailMetadataCap(t *testing.T) {
@@ -589,7 +589,7 @@ func TestFailMetadataCap(t *testing.T) {
 		}
 	}
 	// `fail` offers no artifact or payload channel, so the remedy must not
-	// point at either (C14).
+	// point at either.
 	for _, mustNotContain := range []string{"artifact-file", "payload-file"} {
 		if strings.Contains(err.Error(), mustNotContain) {
 			t.Errorf("err = %q names a flag `step fail` does not offer (%q)",
@@ -602,12 +602,11 @@ func TestFailMetadataCap(t *testing.T) {
 	}
 }
 
-// TestFailMetadataSurvivesIntoRetry is docs/tdd/completion-metadata.md §1.6's
-// open question, answered: a failed attempt's metadata survives into the
-// retry, last-write-wins, same as completion's overlay semantics. A worker
-// that reports why it failed has produced the most valuable metadata in the
-// run, and discarding it at retry would lose exactly the diagnostic an
-// operator wants.
+// TestFailMetadataSurvivesIntoRetry answers an open question: a failed
+// attempt's metadata survives into the retry, last-write-wins, same as
+// completion's overlay semantics. A worker that reports why it failed has
+// produced the most valuable metadata in the run, and discarding it at retry
+// would lose exactly the diagnostic an operator wants.
 //
 // THE REAL RETRY, under E-8's claims-only attempt counting: `implement@0`
 // declares `max_attempts = 2`, and a claim alone brings `attempt` to 1 — so
@@ -660,7 +659,7 @@ func TestFailMetadataSurvivesIntoRetry(t *testing.T) {
 }
 
 // TestFailMetadataReachesTheReportRollup is the AC that a failed step's
-// metadata is visible in `run report --json` through the existing R7 rollup,
+// metadata is visible in `run report --json` through the existing rollup,
 // alongside completions. No new rollup, no new report section:
 // db.MetadataRollup already reads `steps.metadata` regardless of the step's
 // terminal status, so this proves the WRITE path needs no read-side change.
@@ -695,7 +694,7 @@ func TestFailMetadataReachesTheReportRollup(t *testing.T) {
 	}
 }
 
-// TestFailValidatesMetadataBeforeTheTransactionOpens is C6: a runtime
+// TestFailValidatesMetadataBeforeTheTransactionOpens pins placement: a runtime
 // assertion over the ROW cannot pin this property, because `human.go`'s
 // `FailStep` runs entirely under `defer tx.Rollback()` — any write a
 // refused call made INSIDE the transaction is undone identically whether
@@ -709,7 +708,7 @@ func TestFailMetadataReachesTheReportRollup(t *testing.T) {
 // that FailStep's calls to validateFailMetadataSize and DecodeMetadataBag
 // appear before its call to conn.Begin(). Moving either call after
 // conn.Begin() — even though authorize itself has no side effect today —
-// makes this fail, which is the placement guarantee stageZero's C5 makes
+// makes this fail, which is the placement guarantee stageZero makes
 // and `fail` must mirror.
 func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 	fset := token.NewFileSet()
@@ -765,7 +764,7 @@ func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 	}
 }
 
-// CLAIM METADATA (docs/tdd/completion-metadata.md §1.7, DKT-592).
+// CLAIM METADATA (DKT-592).
 //
 // The bag a dispatcher knows at claim time was reaching the row only through
 // `complete`, so the steps that failed or crashed — the ones an operator most
@@ -845,7 +844,7 @@ func TestClaimMetadataSurvivesTheReap(t *testing.T) {
 	})
 	testsupport.Must(t, err, "claim: %v", err)
 
-	// The holder is gone. The lazy reap fires on the next claim (§6.3).
+	// The holder is gone. The lazy reap fires on the next claim.
 	const after = nowMS + 60_000
 	_, err = ClaimStep(conn, stepID, ClaimOptions{
 		Owner: "worker-2", NowMS: after,
@@ -896,7 +895,7 @@ func TestClaimThenCompleteCarriesEveryKey(t *testing.T) {
 	}
 }
 
-// TestClaimMetadataMergesOverDefinition is §1.2's merge, exercised through
+// TestClaimMetadataMergesOverDefinition is the merge, exercised through
 // claim: a definition-only key survives, the dispatcher's keys are added, and a
 // key in both takes the DISPATCHER's value.
 func TestClaimMetadataMergesOverDefinition(t *testing.T) {
@@ -970,7 +969,7 @@ func TestClaimMetadataIsInTheContextBundle(t *testing.T) {
 
 // TestClaimMetadataReachesTheReportRollup is the AC in the surface the defect
 // was observed in: a step that was claimed and then FAILED shows its
-// dispatch-time keys in `run report`'s R7 rollup. No read-side change — the
+// dispatch-time keys in `run report`'s rollup. No read-side change — the
 // rollup already reads the column regardless of the step's status.
 func TestClaimMetadataReachesTheReportRollup(t *testing.T) {
 	conn := mustDB(t)
@@ -1005,7 +1004,7 @@ func TestClaimMetadataReachesTheReportRollup(t *testing.T) {
 	}
 }
 
-// TestClaimMetadataRefusals is §1.1's validation ladder on the claim side.
+// TestClaimMetadataRefusals is the validation ladder on the claim side.
 // Every refusal is pre-transaction, and on THIS path that has an extra edge:
 // the claim's transaction performs the lazy reap and the CAS, so a refusal
 // that ran inside it would consume an attempt. Each case asserts the step is
@@ -1044,7 +1043,7 @@ func TestClaimMetadataRefusals(t *testing.T) {
 				t.Errorf("err = %q, want it to mention %q", err.Error(), tc.wantIn)
 			}
 
-			// §6.9: a refusal before the transaction writes NOTHING — no claim,
+			// A refusal before the transaction writes NOTHING — no claim,
 			// no attempt, no status move.
 			if after := stepRowVersion(t, conn, stepID); after != before {
 				t.Errorf("row_version moved %d -> %d on a refusal", before, after)
@@ -1067,7 +1066,7 @@ func TestClaimMetadataRefusals(t *testing.T) {
 	}
 }
 
-// TestClaimMetadataCap is §1.1.1 on the claim side. Same constant, same
+// TestClaimMetadataCap is the cap on the claim side. Same constant, same
 // inclusive boundary asserted in both directions, and a message naming both
 // numbers — with the remedy this verb can actually offer (a claim has no
 // artifact or payload channel of its own; its completion does).

@@ -150,7 +150,7 @@ type showResultV2 struct {
 // version and lease under --json=v2 only. The v1 marshaler below is frozen.
 //
 // The lease's `live` flag is computed here from the current clock, per read:
-// engine-spec.md §2 requires effective status at read time with no write, so
+// effective status is computed at read time with no write, so
 // an expired lease reads as dead without anyone having called claim.
 func (s showResult) VersionedPayload() any {
 	base, err := s.marshalJSONStruct()

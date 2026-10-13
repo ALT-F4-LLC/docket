@@ -214,7 +214,7 @@ func TestStageNeedsNoClassHeuristic(t *testing.T) {
 // stage anything behind it.
 //
 // The distinction is the whole design. Core assigns no meaning to a class name
-// (§6.5) — `write` is the reference instance's word, not core's — so a rule
+// — `write` is the reference instance's word, not core's — so a rule
 // keyed on the name would be exactly the dispatcher heuristic staging exists to
 // replace, moved one layer down. `holds_tree` is the author's own statement
 // about the tree, which is the fact the ordering actually depends on: a step

@@ -16,16 +16,16 @@ import (
 //
 // It is an ALIAS rather than a second type: the schema package owns what a
 // registered document is, and a copy here would be a second answer to the same
-// question. The alias lets the rules below read as §4.9.2 wrote them.
+// question.
 type Registered = schema.Registered
 
 // SchemaResolver reports what is registered.
 //
 // V21a-V21d and V25a are the only rules that ask a question about the
 // ENVIRONMENT; they take it as a parameter, so `Validate()` stays a pure
-// function of bytes and every other rule with it. V26 (gates-trust §8.2)
-// established this pattern for exactly the same reason, and this follows it
-// rather than inventing a second one.
+// function of bytes and every other rule with it. V26 established this pattern
+// for exactly the same reason, and this follows it rather than inventing a
+// second one.
 //
 // It is what keeps TestFixtureRegistersClean honest: that test exercises
 // Validate over the committed fixture with NO database, and continues to.
@@ -50,10 +50,10 @@ var ErrNotRegistered = errors.New("schema not registered")
 // retirement a registration-time filter rather than a retraction.
 var ErrRetired = errors.New("schema retired")
 
-// ValidateSchemas is §4.9.1's cross-validation table: the rules that compare a
+// ValidateSchemas is the cross-validation table: the rules that compare a
 // definition against the schemas it names.
 //
-// §11.2, verbatim: "Fields and literals are validated against the registered
+// The rule, verbatim: "Fields and literals are validated against the registered
 // schema at `workflow register` time." That sentence cannot be satisfied when
 // there is no registered schema, so V25a makes an unregistered reference a HARD
 // refusal here. The alternatives all amount to not validating at register time
@@ -72,10 +72,10 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 		// V29's first half, checked BEFORE the V21d skip: an `aggregate` step
 		// MUST declare a `payload`. Median, max, and min are defined only over
 		// an order, so an aggregate without a declared one is a step that can
-		// never compute — and §11.2's own restriction is the same restriction.
+		// never compute — and the ordered-comparison restriction is the same one.
 		//
-		// This is a deviation from §11.1, which makes `payload` optional, and it
-		// is recorded as an amendment rather than slipped in. The alternative
+		// This deviates from the general rule, which makes `payload` optional,
+		// and it is deliberate rather than slipped in. The alternative
 		// considered and rejected: inferring the order from the schema of the
 		// step the aggregate reads its input from. That is magic — nothing in
 		// the grammar says an action reads its predecessor's payload — it is
@@ -93,15 +93,15 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 			}, def.Pipeline.Name)
 		}
 
-		// V21d: a step with a `threshold` and NO declared `payload` keeps S3
-		// behavior — grammar-only validation, no field check, and T3 at runtime.
-		// NOT an error.
+		// V21d: a step with a `threshold` and NO declared `payload` keeps the
+		// earlier behavior — grammar-only validation, no field check, and the
+		// unorderable refusal at runtime. NOT an error.
 		//
-		// This is the clause that keeps the design honest. Making `payload`
+		// This is the clause that keeps the rule honest. Making `payload`
 		// mandatory wherever a `threshold` appears would be a tidier rule and
-		// would break every S3-era definition, including the committed fixture's
-		// `verify`, whose `any(status == unmet)` needs no schema to be correct
-		// (T1). Equality has never needed an order and still does not.
+		// would break every earlier definition, including the committed
+		// fixture's `verify`, whose `any(status == unmet)` needs no schema to be
+		// correct. Equality has never needed an order and still does not.
 		if step.Payload == "" {
 			if step.VerdictField != "" {
 				return withWorkflow(&Error{
@@ -247,9 +247,9 @@ func validateAggregateSchema(step *Step, registered *Registered) error {
 
 	// V28a: `route_at`, when declared, must name a value of the field's
 	// declared order — the routing floor is a POSITION in that order, and a
-	// value with no position has no floor to name (G4's discipline, asked at
-	// register time rather than hours into a run). V28 has already required it
-	// to be a non-empty string; this is the half only the schema can answer,
+	// value with no position has no floor to name (asked at register time
+	// rather than hours into a run). V28 has already required it to be a
+	// non-empty string; this is the half only the schema can answer,
 	// which is why it lives here beside V29 rather than in the pure-bytes
 	// param check.
 	if routeAt, ok := step.Params["route_at"].(string); ok && routeAt != "" {
@@ -275,19 +275,18 @@ func validateAggregateSchema(step *Step, registered *Registered) error {
 // aggregate-shaped document.
 //
 // The aggregate's output is validated at run time against BOTH `aggregate@1`
-// and the step's declared schema (§7.6 E5). An instance schema with
-// `"additionalProperties": false` makes that conjunction unsatisfiable — and the
-// failure would otherwise land at the end of a review fan-out, hours in, on a
-// step whose inputs are already spent. Asking the question at register time
+// and the step's declared schema. An instance schema with
+// `"additionalProperties": false` makes that conjunction unsatisfiable — and
+// the failure would otherwise land at the end of a review fan-out, hours in, on
+// a step whose inputs are already spent. Asking the question at register time
 // costs one validation.
 //
 // THE PROBE INVENTS NOTHING. Every value in it comes from the schema being
 // checked: the reduced value and the members are the field's own declared enum
 // values, and the extra key is drawn from the schema's own declared properties
 // when it has another one. It carries the aggregate output keys and one
-// carried-through G3 key, so the conjunction it tests is the REAL one (review
-// F3) rather than a stripped-down shape that would pass where the real output
-// fails.
+// carried-through key, so the conjunction it tests is the REAL one rather than
+// a stripped-down shape that would pass where the real output fails.
 func validateAggregateProbe(step *Step, registered *Registered, declared schema.Field) error {
 	probe, err := json.Marshal([]any{aggregateProbeElement(registered, declared)})
 	if err != nil {
@@ -339,12 +338,12 @@ func aggregateProbeElement(registered *Registered, declared schema.Field) map[st
 		"members":     []any{value},
 		"held":        false,
 		// `demoted_from` is deliberately ABSENT: it is optional in aggregate@1
-		// and omitted whenever nothing was demoted (D2), so a probe that always
+		// and omitted whenever nothing was demoted, so a probe that always
 		// carried it would test a shape the common case never produces.
 		"operator_resolved": false,
 	}
 
-	// One carried-through G3 key, drawn from the schema's own other declared
+	// One carried-through key, drawn from the schema's own other declared
 	// properties so a `required` sibling does not fail the probe for a reason
 	// that has nothing to do with the conjunction under test. A schema with no
 	// other property gets a synthetic key, which is the case

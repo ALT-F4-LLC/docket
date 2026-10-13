@@ -292,7 +292,7 @@ func migrateV2ToV3(tx *sql.Tx) error {
 }
 
 // migrateV3ToV4 creates the docs, doc_revisions, doc_comments, doc_issue_links,
-// and proposal_docs tables (TDD docket-doc-cli §5.1).
+// and proposal_docs tables.
 func migrateV3ToV4(tx *sql.Tx) error {
 	const ddl = `
 CREATE TABLE IF NOT EXISTS docs (
@@ -352,7 +352,7 @@ CREATE INDEX IF NOT EXISTS idx_proposal_docs_doc_id ON proposal_docs(doc_id);
 }
 
 // versionedTables are the existing mutable entities that carry a CAS `version`
-// column as of v5 (engine-spec.md §3, §5). Ordered for deterministic migration.
+// column as of v5. Ordered for deterministic migration.
 var versionedTables = []string{"issues", "docs", "proposals", "labels"}
 
 // hasColumn reports whether a table already has the named column. ALTER TABLE
@@ -367,15 +367,14 @@ func hasColumn(tx *sql.Tx, table, column string) (bool, error) {
 	return rows.Next(), rows.Err()
 }
 
-// migrateV4ToV5 adds optimistic-concurrency and idempotency support
-// (engine-spec.md §5, TDD docs/tdd/reliability-delta.md §2.1):
+// migrateV4ToV5 adds optimistic-concurrency and idempotency support:
 //
 //   - a `version` CAS column on each existing mutable entity, backfilled to 1
 //   - an `idempotency_keys` table for create-verb replay
 //
 // Additive only. Existing column formats are never mutated: `created_at` and
 // `updated_at` stay RFC3339 TEXT, because rewriting them to epoch-ms would
-// change every existing verb's output and break v4 compatibility (§9 item 8).
+// change every existing verb's output and break v4 compatibility.
 // Millisecond timestamps and the monotonic `seq` therefore appear only in the
 // new table.
 func migrateV4ToV5(tx *sql.Tx) error {
@@ -415,13 +414,13 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_keys_seq ON idempotency_keys(seq);
 }
 
 // leaseColumns are the v6 lease fields, in migration order. They live on
-// `issues` now and will be carried verbatim by the steps table when steps land
-// (engine-spec.md §10 stage 2: "on issues and steps-to-be"), so the lease
-// helpers written against them are reused rather than reimplemented.
+// `issues` now and will be carried verbatim by the steps table when steps land,
+// so the lease helpers written against them are reused rather than
+// reimplemented.
 //
 // `expires_ms` is milliseconds because it is a NEW column. Existing column
 // formats are never mutated — `created_at`/`updated_at` stay RFC3339 TEXT —
-// since rewriting them would change every existing verb's output (§9 item 8).
+// since rewriting them would change every existing verb's output.
 var leaseColumns = []struct{ name, ddl string }{
 	{"owner", `ALTER TABLE issues ADD COLUMN owner TEXT`},
 	{"token_hash", `ALTER TABLE issues ADD COLUMN token_hash TEXT`},
@@ -429,9 +428,7 @@ var leaseColumns = []struct{ name, ddl string }{
 	{"attempt", `ALTER TABLE issues ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0`},
 }
 
-// migrateV5ToV6 adds lease and capability-token fields to issues
-// (engine-spec.md §2 "Steps, claims, capabilities", engine-core.md §5;
-// TDD docs/tdd/claims-leases.md §2.1).
+// migrateV5ToV6 adds lease and capability-token fields to issues.
 //
 // Only `token_hash` is stored, never the token itself: the token is returned
 // exactly once at claim, so a stolen database file yields no live capability.
@@ -463,7 +460,7 @@ func migrateV5ToV6(tx *sql.Tx) error {
 }
 
 // v7Sentinels are the tables the v7 DDL creates. The rewind guard probes ALL of
-// them, not just the first (TDD docs/tdd/engine-spine.md §2).
+// them, not just the first.
 //
 // v7 ships as ONE migration function assembled across four phases: the version
 // stamp moves to 7 in phase 1 while migrateV6ToV7 keeps growing through phase 4.
@@ -488,20 +485,19 @@ var v7Sentinels = []string{
 	"events",
 }
 
-// v7DDL is the v7 schema, assembled across the stage's four phases. Phase 1
-// (TDD §4.1) contributed the `workflows` table; phase 2 (§5.1) adds `runs`,
-// `run_issues`, `pins`, `run_fences`, and `steps`; phase 3 (§6.1) adds
-// `artifacts` and `step_inputs`; phase 4 (§7.1) adds `events` and extends
-// v7Sentinels alongside.
+// v7DDL is the v7 schema, assembled across four phases. Phase 1 contributed
+// the `workflows` table; phase 2 adds `runs`, `run_issues`, `pins`,
+// `run_fences`, and `steps`; phase 3 adds `artifacts` and `step_inputs`; phase
+// 4 adds `events` and extends v7Sentinels alongside.
 //
-// `steps` lands with phase 2 rather than phase 3 because activation's stage 6
-// EXPANDS into it (§5.3.1) — the rows exist and are inspectable before any
-// verb claims one. Phase 3 adds the columns' readers and the step verb family,
-// not the table.
+// `steps` lands with phase 2 rather than phase 3 because activation's
+// expansion stage EXPANDS into it — the rows exist and are inspectable before
+// any verb claims one. Phase 3 adds the columns' readers and the step verb
+// family, not the table.
 //
 // Every timestamp column created at v7 is `_ms INTEGER` epoch-milliseconds and
-// no existing column's format is touched (reliability-delta §2.1): the
-// never-mutate rule is what keeps engine-spec §9 item 8 true.
+// no existing column's format is touched: the never-mutate rule is what keeps
+// every existing verb's output byte-compatible.
 const v7DDL = `
 CREATE TABLE IF NOT EXISTS workflows (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -642,27 +638,26 @@ CREATE INDEX IF NOT EXISTS idx_steps_issue ON steps(issue_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_step ON artifacts(step_id);
 `
 
-// migrateV6ToV7 creates the workflow-engine tables (engine-spec.md §2, §11.1;
-// TDD docs/tdd/engine-spine.md §4.1).
+// migrateV6ToV7 creates the workflow-engine tables.
 //
 // `version` and `row_version` are two different numbers and are named apart on
 // purpose: `version` is the workflow author's [pipeline].version — the number
-// runs pin — while `row_version` is the CAS column every mutable entity carries
-// (reliability-delta §6.1). Collapsing them would make --if-version mean "the
-// workflow definition version", which a re-register must never silently bump.
+// runs pin — while `row_version` is the CAS column every mutable entity
+// carries. Collapsing them would make --if-version mean "the workflow
+// definition version", which a re-register must never silently bump.
 //
 // Additive and dormant: v7 creates new tables and touches no existing one, so a
 // repo with zero rows in `workflows` reads byte-identically to v6 on every
-// pre-existing verb (§3).
+// pre-existing verb.
 func migrateV6ToV7(tx *sql.Tx) error {
 	if _, err := tx.Exec(v7DDL); err != nil {
 		return fmt.Errorf("migrating v6 to v7: %w", err)
 	}
 
-	// `issues.scope_globs` is the one touch v7 makes to an existing table
-	// (TDD §5.1). It is a new NULLABLE column — NULL on every pre-existing row
-	// and on every row an unmodified `issue create` writes — so a repo that
-	// never declares a scope reads byte-identically to v6.
+	// `issues.scope_globs` is the one touch v7 makes to an existing table. It
+	// is a new NULLABLE column — NULL on every pre-existing row and on every
+	// row an unmodified `issue create` writes — so a repo that never declares
+	// a scope reads byte-identically to v6.
 	//
 	// It cannot ride in v7DDL: ALTER TABLE ADD COLUMN is not idempotent in
 	// SQLite, so the migration probes first and stays re-runnable, exactly as
@@ -674,7 +669,7 @@ func migrateV6ToV7(tx *sql.Tx) error {
 	// They differ in cardinality, in semantics (actual vs. intended), and in
 	// matching rule (equality vs. glob intersection). Overloading issue_files
 	// would make `plan` output depend on scope declarations for repos that
-	// never activate a workflow — an engine-spec §9 item 8 violation.
+	// never activate a workflow, breaking their byte-compatibility.
 	exists, err := hasColumn(tx, "issues", "scope_globs")
 	if err != nil {
 		return fmt.Errorf("migrating v6 to v7: %w", err)
@@ -685,13 +680,13 @@ func migrateV6ToV7(tx *sql.Tx) error {
 		}
 	}
 
-	// `run_issues.loop_count` is phase 4's column (TDD §7.1). It probes for the
-	// same reason `scope_globs` does — ADD COLUMN is not idempotent — and it
-	// lives on `run_issues` rather than on `steps` because §11.3 (1) makes the
-	// counter THE ISSUE'S ("the issue's loop counter"), not the step's: one
-	// issue loops, and every instance the loop creates is attributed to that one
-	// count. A per-step counter would make `max_fix_loops` mean something
-	// different for each instance and could not bound the loop at all.
+	// `run_issues.loop_count` is phase 4's column. It probes for the same
+	// reason `scope_globs` does — ADD COLUMN is not idempotent — and it lives
+	// on `run_issues` rather than on `steps` because the counter is THE
+	// ISSUE'S, not the step's: one issue loops, and every instance the loop
+	// creates is attributed to that one count. A per-step counter would make
+	// `max_fix_loops` mean something different for each instance and could
+	// not bound the loop at all.
 	//
 	// It is NOT a sentinel: sentinels are tables, and the rewind guard probes
 	// `events` for this phase's slice. A database that reaches this line has
@@ -712,14 +707,13 @@ func migrateV6ToV7(tx *sql.Tx) error {
 }
 
 // v8Sentinels are the tables the v8 DDL creates. The rewind guard probes ALL of
-// them, for the reason v7Sentinels states and this stage re-earns (TDD
-// docs/tdd/gates-trust.md §4.1, §4.4 U3).
+// them, for the reason v7Sentinels states and v8 re-earns.
 //
-// v8 ships as ONE migration function sliced across the stage's two commit
-// groups: group 1 is pure Go with no DDL at all, and the stamp moves to 8 in
-// group 2. So the operator's own dogfood tracker is migrated by whatever binary
-// happens to be built between the two — U3's row is that shape exactly, and it
-// is not hypothetical.
+// v8 ships as ONE migration function sliced across two commit groups: group 1
+// is pure Go with no DDL at all, and the stamp moves to 8 in group 2. So the
+// operator's own dogfood tracker is migrated by whatever binary happens to be
+// built between the two — the rewind test's shape exactly, and it is not
+// hypothetical.
 //
 // TestRewindGuardProbesEverySentinel asserts one entry per table the v8 DDL
 // creates, so an omission fails a test rather than shipping a half-migrated
@@ -729,12 +723,12 @@ var v8Sentinels = []string{
 	"trust_cache",
 }
 
-// v8DDL is the v8 schema: §11.4's `gate result` shape as a table, and the
-// trust-cache audit record (TDD §4.2, §4.5).
+// v8DDL is the v8 schema: the `gate result` shape as a table, and the
+// trust-cache audit record.
 //
 // Additive and dormant: v8 creates new tables and touches no existing one, so a
 // repo that never runs a gate reads byte-identically to v7 on every pre-existing
-// verb (§9.3).
+// verb.
 const v8DDL = `
 CREATE TABLE IF NOT EXISTS gate_results (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -775,8 +769,8 @@ CREATE TABLE IF NOT EXISTS trust_cache (
 `
 
 // migrateV7ToV8 creates `gate_results` and `trust_cache` and backfills the
-// S3-era `steps.gate_trail` into the new table (TDD §4.2, §4.3 — this migration
-// is the recorded exit condition for the storage-location deviation).
+// pre-v8 `steps.gate_trail` into the new table. This migration is the exit
+// condition for the storage-location deviation.
 //
 // The backfill's five clauses, each load-bearing:
 //
@@ -786,21 +780,20 @@ CREATE TABLE IF NOT EXISTS trust_cache (
 // than a fabricated `now`.
 //
 // G2: every migrated row is stamped `stub = 1`. Every result in a `gate_trail`
-// was produced by S3's PassThroughRunner, which is the only thing that ever
+// was produced by the PassThroughRunner, which is the only thing that ever
 // wrote one, so the stamp is a FACT rather than a guess. This is what keeps the
-// gate-forgery audit (T11) true across the version boundary: a green result that
+// gate-forgery audit true across the version boundary: a green result that
 // never ran a process stays distinguishable from one that did, forever.
 //
 // G3: `steps.gate_trail` is RETAINED, not dropped. The never-mutate rule
-// (reliability-delta §2.1) forbids destructive column changes, SQLite's DROP
-// COLUMN would rewrite the table, and the column is this migration's own
-// evidence. It stops being WRITTEN at v8; TestGateTrailIsNotWrittenAtV8 asserts
-// that.
+// forbids destructive column changes, SQLite's DROP COLUMN would rewrite the
+// table, and the column is this migration's own evidence. It stops being
+// WRITTEN at v8; TestGateTrailIsNotWrittenAtV8 asserts that.
 //
 // G4: idempotent. The UNIQUE(step_id, gate, ordinal) index is created BEFORE the
 // backfill and the backfill uses INSERT OR IGNORE, so re-running duplicates
 // nothing. This is not optional: the v8 rewind guard can re-run this migration
-// against a partially-migrated database BY DESIGN (§4.1).
+// against a partially-migrated database BY DESIGN.
 //
 // G5: a `gate_trail` that fails to parse is NOT a migration failure. The row is
 // skipped and one `gate_results` row records the parse failure in `reason` with
@@ -848,7 +841,7 @@ func migrateV7ToV8(tx *sql.Tx) error {
 	return nil
 }
 
-// migratedGateResult is the §11.4 `gate result` shape as the S3 trail stored it.
+// migratedGateResult is the `gate result` shape as the pre-v8 trail stored it.
 // It is declared HERE, in the db package, rather than imported from the engine:
 // a migration must read the bytes that were written at the time, and coupling it
 // to a live struct means a future field change silently reinterprets history.
@@ -912,16 +905,16 @@ func backfillGateTrail(tx *sql.Tx, stepID, runID int, trail string, updatedMS in
 }
 
 // v9Sentinels are the tables the v9 DDL creates. The rewind guard probes ALL of
-// them, for the reason v7Sentinels states and this stage re-earns a third time
-// (TDD docs/tdd/payloads-thresholds.md §2, §4.4.1 U3).
+// them, for the reason v7Sentinels states and v9 re-earns a third time.
 //
-// v9 ships as ONE migration function sliced across the stage's two commit
-// groups: the stamp moves to 9 in GROUP 1 — which needs `schemas` — and does not
-// move again, while migrateV8ToV9 keeps growing through group 2. So a database
+// v9 ships as ONE migration function sliced across two commit groups: the
+// stamp moves to 9 in GROUP 1 — which needs `schemas` — and does not move
+// again, while migrateV8ToV9 keeps growing through group 2. So a database
 // migrated by a group-1 build, INCLUDING this repo's own dogfooded tracker, is
-// stamped 9 with `schemas` present and group 2's tables absent. That is U3's
-// shape exactly, and it is not hypothetical: the operator's tracker is migrated
-// by whichever binary happens to be built between the groups.
+// stamped 9 with `schemas` present and group 2's tables absent. That is the
+// rewind test's shape exactly, and it is not hypothetical: the operator's
+// tracker is migrated by whichever binary happens to be built between the
+// groups.
 //
 // The list therefore GROWS WITH THE GROUPS, exactly as v7Sentinels grew across
 // its four phases: a group that adds a table to v9DDL adds it here in the same
@@ -932,24 +925,25 @@ func backfillGateTrail(tx *sql.Tx, stepID, runID int, trail string, updatedMS in
 // The COLUMN half is the part sentinels cannot see. v9 adds `artifacts.stub`
 // in group 1, and `trust_cache.kind` and `steps.materialized` in group 2, each
 // behind a hasColumn probe; they arrive only because the rewind re-runs the
-// WHOLE migration. §4.4.1's U-table proves each column's arrival independently.
+// WHOLE migration. The migration tests prove each column's arrival
+// independently.
 var v9Sentinels = []string{
 	"schemas",
 	"action_results",
 }
 
-// v9DDL is the v9 schema, assembled across the stage's two commit groups. Group
-// 1 (TDD §4.4) contributes `schemas`; group 2 (§6.3) adds `action_results`.
+// v9DDL is the v9 schema, assembled across two commit groups. Group 1
+// contributes `schemas`; group 2 adds `action_results`.
 //
 // `action_results` is `gate_results` FOR ACTIONS, deliberately: same shape, same
 // `ordinal` semantics for flaky re-runs, same `reason` discipline. The
 // alternative — recording nothing and leaving the routing reason as the only
-// trace — makes an `unmatched` action invisible in exactly the way gates-trust
-// T11's audit argument says it must not be, and makes a failed computation
-// indistinguishable from a failed threshold in a run report. `argv` and `exit`
-// are NULLABLE because a builtin and an unmatched action never touched the
-// process table, and a zero exit on something that did not execute is the exact
-// confusion the nullability exists to prevent.
+// trace — makes an `unmatched` action invisible to an audit of the run, which
+// it must not be, and makes a failed computation indistinguishable from a
+// failed threshold in a run report. `argv` and `exit` are NULLABLE because a
+// builtin and an unmatched action never touched the process table, and a zero
+// exit on something that did not execute is the exact confusion the
+// nullability exists to prevent.
 //
 // The `schemas` shape is `workflows`, deliberately and LINE FOR LINE: name,
 // version, source_path, source_sha256, body, a derived column (`parsed` there,
@@ -960,12 +954,12 @@ var v9Sentinels = []string{
 // Additive and dormant: v9 creates a new table and seeds exactly ONE row — the
 // builtin `aggregate@1`, which nothing reads unless an `aggregate` action runs
 // and which is visible only through the NEW `schema list|show` verbs. No
-// pre-existing verb reads `schemas`, so the byte-compat claim (§3) is untouched.
+// pre-existing verb reads `schemas`, so the byte-compat claim is untouched.
 // Claiming "zero rows" would have been the flattering statement rather than the
 // true one.
 //
 // Every timestamp column created at v9 is `_ms INTEGER` epoch-milliseconds and
-// no existing column's format is touched (reliability-delta §2.1).
+// no existing column's format is touched.
 const v9DDL = `
 CREATE TABLE IF NOT EXISTS schemas (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1005,9 +999,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_action_results_identity
 `
 
 // v9AddedColumns are the columns v9 adds to tables that already existed — the
-// half the sentinels cannot see (TDD §2, §4.4, §6.3).
+// half the sentinels cannot see.
 //
-// They are a table rather than three inline blocks so the U-table's
+// They are a table rather than three inline blocks so the tests'
 // per-column assertions and this list cannot drift: a group that adds a column
 // adds one row here, and TestMigrateV9GroupTwoColumnsArrive iterates the same
 // set the migration does.
@@ -1021,17 +1015,17 @@ var v9AddedColumns = []struct{ table, column, ddl string }{
 }
 
 // migrateV8ToV9 creates the payload-schema registry, seeds the one builtin
-// document, and adds v9's columns (TDD §4.4, §6.3 S2).
+// document, and adds v9's columns.
 //
 // It RE-VALIDATES NOTHING. No row of `workflows` is revisited and no verb ever
-// revisits a registered definition's validity (§4.9.3): a registered
+// revisits a registered definition's validity: a registered
 // name@version is a historical fact — THESE BYTES WERE REGISTERED — not a live
 // claim that they still satisfy today's rules. Retroactive invalidation would
 // break the pinning property outright: if a migration could render a pinned
 // definition illegal, upgrading the binary would stop an in-flight run, which is
 // a strictly worse failure than the one re-validation would catch. What
 // re-validation would have caught is caught anyway, at the only moment it
-// matters — T3 parks an unorderable comparison with a reason rather than
+// matters — an unorderable comparison parks with a reason rather than
 // guessing.
 func migrateV8ToV9(tx *sql.Tx) error {
 	if _, err := tx.Exec(v9DDL); err != nil {
@@ -1067,14 +1061,14 @@ func migrateV8ToV9(tx *sql.Tx) error {
 	return seedBuiltinSchemas(tx)
 }
 
-// markStubbedArtifacts is §6.3 S2's migration half: the S3/S4 stubbed action
-// artifacts gain `stub = 1` and their BYTES ARE NEVER REWRITTEN.
+// markStubbedArtifacts is the stub marker's migration half: the pre-v9 stubbed
+// action artifacts gain `stub = 1` and their BYTES ARE NEVER REWRITTEN.
 //
 // The `{"stub":true,"payload":[…]}` wrapper stays exactly as it was written.
 // Rewriting it would destroy the evidence that a computation did not run, which
-// is the entire reason the marker exists (gates-trust §4.3 G2's argument,
-// applied to artifacts) — and the never-mutate rule (reliability-delta §2.1)
-// forbids it independently.
+// is the entire reason the marker exists (the same argument as the gate
+// backfill's G2, applied to artifacts) — and the never-mutate rule forbids it
+// independently.
 //
 // The probe is a LIKE over the stored text rather than a JSON parse: the
 // migration must read the bytes that were written at the time, and every writer
@@ -1089,13 +1083,12 @@ func markStubbedArtifacts(tx *sql.Tx) error {
 	return nil
 }
 
-// seedBuiltinSchemas registers `aggregate@1` from the embedded document
-// (TDD §7.6 E3).
+// seedBuiltinSchemas registers `aggregate@1` from the embedded document.
 //
 // INSERT OR IGNORE, for two reasons that are one reason: the rewind guard
-// re-runs this migration BY DESIGN, so a second pass must duplicate nothing
-// (U5); and a database whose `aggregate@1` row diverges from the embedded bytes
-// is LEFT ALONE (U7). A database must never become unopenable because a binary
+// re-runs this migration BY DESIGN, so a second pass must duplicate nothing;
+// and a database whose `aggregate@1` row diverges from the embedded bytes is
+// LEFT ALONE. A database must never become unopenable because a binary
 // changed — the divergence is caught at build time instead, by
 // TestEmbeddedAggregateSchemaMatchesItsGolden.
 //
@@ -1133,17 +1126,16 @@ func seedBuiltinSchemas(tx *sql.Tx) error {
 }
 
 // v10Sentinels are the tables the v10 DDL creates. The rewind guard probes ALL
-// of them, for the reason v7Sentinels states and this stage re-earns a fourth
-// time (TDD docs/tdd/runs-dispatch.md §2.2).
+// of them, for the reason v7Sentinels states and v10 re-earns a fourth time.
 //
-// v10 ships as ONE migration function sliced across the stage's THREE commit
-// groups — the widest span yet. The stamp moves to 10 in GROUP 1 — which needs
+// v10 ships as ONE migration function sliced across THREE commit groups — the
+// widest span yet. The stamp moves to 10 in GROUP 1 — which needs
 // `usage_ledger` — and does not move again, while migrateV9ToV10 keeps growing
 // through groups 2 and 3. So a database migrated by a group-1 build, INCLUDING
 // this repo's own dogfooded tracker, is stamped 10 with `usage_ledger` present
-// and the later groups' tables absent. That is U2's shape exactly, and it is
-// not hypothetical: the operator's tracker is migrated by whichever binary
-// happens to be built between the groups.
+// and the later groups' tables absent. That is the rewind test's shape
+// exactly, and it is not hypothetical: the operator's tracker is migrated by
+// whichever binary happens to be built between the groups.
 //
 // The list therefore GROWS WITH THE GROUPS, exactly as v7Sentinels grew across
 // its four phases and v9Sentinels across its two: a group that adds a table to
@@ -1156,17 +1148,17 @@ func seedBuiltinSchemas(tx *sql.Tx) error {
 // The COLUMN half is the part sentinels cannot see. v10 adds `runs.usage_floor`,
 // `runs.breach_reason`, and `steps.usage_recorded` in group 1, each behind a
 // hasColumn probe; they arrive only because the rewind re-runs the WHOLE
-// migration. §2.4's U-table proves each column's arrival independently, and U3
-// states plainly what a sentinel probe cannot catch.
+// migration. The migration tests prove each column's arrival independently,
+// and state plainly what a sentinel probe cannot catch.
 var v10Sentinels = []string{
 	"usage_ledger",
-	// Group 2 (TDD §2.2's table): the manifest, its ordered rows, and the
-	// write-reap acknowledgment ledger. They are listed HERE, in the commit
-	// that adds them to v10DDL, because a group-1 binary has already stamped
-	// this repo's tracker at 10 — U2 exactly — and without these entries the
+	// Group 2: the manifest, its ordered rows, and the write-reap
+	// acknowledgment ledger. They are listed HERE, in the commit that adds
+	// them to v10DDL, because a group-1 binary has already stamped this repo's
+	// tracker at 10 — the rewind test's shape — and without these entries the
 	// rewind guard would look at that database, see `usage_ledger`, conclude
-	// v10 is complete, and leave a group-2 binary running against a schema with
-	// no `dispatches` table.
+	// v10 is complete, and leave a group-2 binary running against a schema
+	// with no `dispatches` table.
 	"dispatches",
 	"dispatch_rows",
 	"reap_acks",
@@ -1180,67 +1172,69 @@ var v10Sentinels = []string{
 // absent and would rewind every database on every open, forever. The probe is a
 // different query, so the list it reads is a different list.
 //
-// WHY IT IS NEEDED AT ALL — U2, discovered against the operator's own tracker.
-// Group 3 adds no table, so the table sentinels were all present in a database a
-// group-2 binary had already stamped 10; the rewind never fired, the migration
-// never re-ran, and `idx_events_seq` never arrived. The unfiltered events feed
-// would then scan rather than seek, silently, on exactly the database that gets
-// dogfooded through the stage. `CREATE INDEX IF NOT EXISTS` in the DDL is not
-// enough on its own: the DDL only executes when something decides to run the
-// migration, and the sentinel probe is that decision.
+// WHY IT IS NEEDED AT ALL — the rewind case, discovered against the
+// operator's own tracker. Group 3 adds no table, so the table sentinels were
+// all present in a database a group-2 binary had already stamped 10; the
+// rewind never fired, the migration never re-ran, and `idx_events_seq` never
+// arrived. The unfiltered events feed would then scan rather than seek,
+// silently, on exactly the database that gets dogfooded. `CREATE INDEX IF NOT
+// EXISTS` in the DDL is not enough on its own: the DDL only executes when
+// something decides to run the migration, and the sentinel probe is that
+// decision.
 var v10IndexSentinels = []string{
 	// The unfiltered `events list --since` feed scans by seq alone, and
 	// `idx_events_run_seq` cannot serve a query with no run in it.
 	"idx_events_seq",
 }
 
-// v10DDL is the v10 schema, assembled across the stage's three commit groups.
-// Group 1 (TDD §3.1) contributes `usage_ledger` and its run index; group 2
-// contributes `dispatches`, `dispatch_rows`, and `reap_acks`.
+// v10DDL is the v10 schema, assembled across three commit groups. Group 1
+// contributes `usage_ledger` and its run index; group 2 contributes
+// `dispatches`, `dispatch_rows`, and `reap_acks`.
 //
-// THE GROUP-2 SHAPE DECISIONS, each per §3.1's own paragraph:
+// THE GROUP-2 SHAPE DECISIONS:
 //
 //   - `idx_dispatches_one_open` is a PARTIAL UNIQUE INDEX, and it — not a
-//     check-then-insert — is what makes C1 true. Two relays calling
+//     check-then-insert — is what guards the open race. Two relays calling
 //     `dispatch open` in the same millisecond both compute a ready set and both
 //     INSERT; SQLite admits exactly one, the loser's transaction fails, and the
 //     loser's computation is DISCARDED rather than merged. A merge would produce
-//     a manifest neither relay saw. §2 says "exactly one dispatch open per run
-//     (CAS/unique index)", and this is that index.
+//     a manifest neither relay saw. The rule is "exactly one dispatch open per
+//     run (CAS/unique index)", and this is that index.
 //   - `dispatch_rows` stores BOTH `row_json` and `row_sha256`. `verify` is
-//     "byte-equality on rows" (§11.4), so the bytes must be there to compare
+//     "byte-equality on rows", so the bytes must be there to compare
 //     against; the hash rides beside them as the pair's integrity check —
 //     `verify` refuses when the stored bytes no longer hash to it — and as
 //     the spawn guard's verbatim comparison key. The bytes are what lets a
 //     refusal SHOW the operator the differing row instead of reporting
 //     "they differ".
-//   - `reap_acks.reaped_seq` is UNIQUE and references the EVENT. §2 says the
+//   - `reap_acks.reaped_seq` is UNIQUE and references the EVENT. The
 //     relay acknowledges "the `reaped` event", so the event's `seq` is the ack's
-//     identity. That makes the ack idempotent for free (C7) and makes a forged
+//     identity. That makes the ack idempotent for free and makes a forged
 //     ack impossible to construct without naming a real reap.
 //   - `idx_reap_acks_open` is partial on `acked_at_ms IS NULL`, which is what
-//     makes D3's dormancy structural: the hold predicate is one indexed lookup
-//     that returns no row on a database where nothing was ever reaped.
+//     makes the reap-ack dormancy structural: the hold predicate is one
+//     indexed lookup that returns no row on a database where nothing was ever
+//     reaped.
 //
 // `usage_ledger` is keyed `UNIQUE(step_id, attempt, unit)`, NOT by step alone.
 // A step that is reaped and re-claimed produces a SECOND attempt with its own
 // usage; summing over a step-unique key would silently overwrite the first
 // attempt's numbers, and the report's attempt trail would show two attempts and
 // one attempt's usage. The `attempt` column is what makes "retries re-accrue"
-// (engine-core §7) true on the REPORTED side as well as the floor side.
+// true on the REPORTED side as well as the floor side.
 //
 // `unit` is an OPAQUE STRING and `quantity` a bare number. Core never
-// enumerates units, never has a default unit, and never converts between them
-// (§1.1). `source` exists because engine-core §7 says "source recorded"
-// verbatim; core writes `'reported'` and no verb at this stage writes any other
-// value, so a harness back-filling from its own journal can record its own
-// source later without a migration.
+// enumerates units, never has a default unit, and never converts between
+// them. `source` exists because the ledger records its source; core writes
+// `'reported'` and no verb at this stage writes any other value, so a harness
+// back-filling from its own journal can record its own source later without a
+// migration.
 //
 // Additive and dormant: v10 creates a table and seeds NOTHING. No pre-existing
-// verb reads `usage_ledger`, so the byte-compat claim (§3) is untouched.
+// verb reads `usage_ledger`, so the byte-compat claim is untouched.
 //
 // Every timestamp column created at v10 is `_ms INTEGER` epoch-milliseconds and
-// no existing column's format is touched (reliability-delta §2.1).
+// no existing column's format is touched.
 const v10DDL = `
 CREATE TABLE IF NOT EXISTS usage_ledger (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1312,9 +1306,9 @@ CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq);
 `
 
 // v10AddedColumns are the columns v10 adds to tables that already existed — the
-// half the sentinels cannot see (TDD §2.3).
+// half the sentinels cannot see.
 //
-// They are a table rather than inline blocks so the U-table's per-column
+// They are a table rather than inline blocks so the tests' per-column
 // assertions and this list cannot drift: a group that adds a column adds one
 // row here, and the migration iterates the same set the tests do.
 //
@@ -1323,7 +1317,7 @@ CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq);
 //
 //   - `runs.usage_floor` defaults to 0 because every pre-v10 run accrued
 //     nothing, so 0 is its TRUE floor rather than a placeholder. It is a CACHE
-//     FOR THE REPORT ONLY and is never the enforcement input (§4.3) — the floor
+//     FOR THE REPORT ONLY and is never the enforcement input — the floor
 //     that decides is a SUM over claim events, computed in the deciding
 //     transaction, and TestFloorIsNeverReadFromCache asserts the separation by
 //     poisoning this column.
@@ -1449,7 +1443,7 @@ var v12AddedColumns = []struct{ table, column, ddl string }{
 	{"runs", "project_id",
 		`ALTER TABLE runs ADD COLUMN project_id INTEGER NOT NULL DEFAULT 1`},
 
-	// Execution context (G8). Runs record where and on what they started —
+	// Execution context. Runs record where and on what they started —
 	// several worktrees of one project share a store, and a record that cannot
 	// say which checkout it came from cannot be audited. Steps record where
 	// the WORK happened (`--worktree` on complete/record), which is also what
@@ -1625,13 +1619,12 @@ func migrateV11ToV12(tx *sql.Tx) error {
 // or `votes.effort` column (or a `--model`/`--effort` flag) trips it exactly
 // as a v10-style single-line `ALTER TABLE ... ADD COLUMN model` does. The
 // repo already has the answer for data shaped like this: `steps.metadata`
-// (schema.go's `steps` DDL) is the same opaque KV bag, and
-// docs/tdd/completion-metadata.md's alternative D states it in words —
-// "`--metadata` bags can carry their own provenance keys opaquely, which is
-// precisely what the KV bag is for". A seat that wants to record which model
-// and effort level cast its vote writes
-// `{"model_resolved":"...","effort_resolved":"..."}` into `--metadata`; core
-// never reads those keys, exactly as it never reads a step's.
+// (schema.go's `steps` DDL) is the same opaque KV bag: "`--metadata` bags can
+// carry their own provenance keys opaquely, which is precisely what the KV bag
+// is for". A seat that wants to record which model and effort level cast its
+// vote writes `{"model_resolved":"...","effort_resolved":"..."}` into
+// `--metadata`; core never reads those keys, exactly as it never reads a
+// step's.
 //
 // `metadata` defaults to NULL because every pre-v13 vote asserted nothing
 // about what cast it, and NULL is that vote's true, unenriched state — not a
@@ -1653,7 +1646,7 @@ var v13AddedColumns = []struct{ table, column, ddl string }{
 // probe kind v11 and v12 need and for the same reason: v13 adds no table and
 // no index, so a database stamped 13 by a binary built mid-change carries
 // every v12 sentinel, the rewind never fires, and `votes.metadata` never
-// arrives — the exact U3 trap v11ColumnSentinels documents.
+// arrives — the exact column trap v11ColumnSentinels documents.
 var v13ColumnSentinels = []struct{ table, column string }{
 	{"votes", "metadata"},
 }
@@ -1703,7 +1696,7 @@ func migrateV13ToV14(tx *sql.Tx) error {
 // naming the artifact this one REVISES (DKT-70).
 //
 // A held cluster's resolution records a NEW artifact rather than annotating the
-// old one — H13, deliberately: what the engine computed and what the operator
+// old one, deliberately: what the engine computed and what the operator
 // accepted are two records, and rewriting the first would destroy the evidence
 // of what was actually held. The two share a `kind`, and they share a `sha256`
 // too, because the BODY is unchanged and only the structured payload gains the
@@ -1770,7 +1763,7 @@ func migrateV14ToV15(tx *sql.Tx) error {
 // first").
 //
 // `attempt_base` splits the counters: `attempt` is now MONOTONIC for the
-// step's whole life (claims made, ever — the meaning §11.4's `next` row always
+// step's whole life (claims made, ever — the meaning the `next` row always
 // documented), and retry resets the BUDGET by setting `attempt_base = attempt`
 // so exhaustion compares `attempt - attempt_base` against `max_attempts`.
 // DEFAULT 0 makes every pre-v16 row read exactly as it did: no retry has ever
@@ -2004,12 +1997,12 @@ var v20ColumnSentinels = []struct{ table, column string }{
 // concludes a secret scan happened.
 //
 // IT IS NOT `stub`, AND THE TWO MUST NOT BE CONFLATED. The existing
-// `gate_results.stub` means "this row was migrated from an S3 `gate_trail`" — a
-// fact about which era of this codebase produced the row, set by the migration
-// and by nothing the real runner does. `stub_entry` means "the command that ran
-// was a placeholder" — a fact about the assurance. A single column carrying
-// both would answer neither question, which is the same erasure DKT-258 files
-// against the run report's status column.
+// `gate_results.stub` means "this row was migrated from a pre-v8
+// `gate_trail`" — a fact about which era of this codebase produced the row,
+// set by the migration and by nothing the real runner does. `stub_entry`
+// means "the command that ran was a placeholder" — a fact about the assurance.
+// A single column carrying both would answer neither question, which is the
+// same erasure DKT-258 files against the run report's status column.
 var v21AddedColumns = []struct{ table, column, ddl string }{
 	{"gate_results", "stub_entry",
 		`ALTER TABLE gate_results ADD COLUMN stub_entry INTEGER NOT NULL DEFAULT 0`},
@@ -2906,7 +2899,7 @@ func migrateV35ToV36(tx *sql.Tx) error {
 // two tables.
 //
 // `target_sha` on `gate_results` is the commit a pre-gate result was measured
-// against when it was measured OUTSIDE the claim (gates-trust §7.6.2 PG6).
+// against when it was measured OUTSIDE the claim.
 //
 // A pre-gate that cannot finish inside the claim's budget runs detached,
 // before the claim, against the step's resolved target sha. The claim reuses
@@ -3305,7 +3298,7 @@ func migrateV12ToV13(tx *sql.Tx) error {
 	return nil
 }
 
-// migrateV9ToV10 creates the usage ledger and adds v10's columns (TDD §3.1).
+// migrateV9ToV10 creates the usage ledger and adds v10's columns.
 //
 // It RE-VALIDATES NOTHING and BACK-FILLS NOTHING. A run that completed before
 // v10 has no ledger rows and no floor, and inventing either would be the
@@ -3395,7 +3388,7 @@ func Migrate(db *sql.DB) error {
 		}
 	}
 
-	// Same defensive guard for v4 (TDD §5.1 S10): if stamped >=4 but the docs
+	// Same defensive guard for v4: if stamped >=4 but the docs
 	// table is absent, rewind to v3 and re-run. v4 DDL uses IF NOT EXISTS.
 	if version >= 4 {
 		var hasDocs bool
@@ -3445,11 +3438,11 @@ func Migrate(db *sql.DB) error {
 		}
 	}
 
-	// The v8 guard, the same shape as v7's and for the same reason (TDD §4.1,
-	// §4.4 U3): stamped >= 8 with ANY v8 sentinel absent rewinds to 7 and
-	// re-runs. The v8 migration is CREATE TABLE IF NOT EXISTS plus an
-	// INSERT OR IGNORE backfill (G4), so re-running it against a
-	// partially-migrated database adds what is missing and duplicates nothing.
+	// The v8 guard, the same shape as v7's and for the same reason: stamped
+	// >= 8 with ANY v8 sentinel absent rewinds to 7 and re-runs. The v8
+	// migration is CREATE TABLE IF NOT EXISTS plus an INSERT OR IGNORE
+	// backfill (G4), so re-running it against a partially-migrated database
+	// adds what is missing and duplicates nothing.
 	if version >= 8 {
 		for _, table := range v8Sentinels {
 			exists, err := tableExists(db, table)
@@ -3463,12 +3456,12 @@ func Migrate(db *sql.DB) error {
 		}
 	}
 
-	// The v9 guard, the same shape as v7's and v8's and for the same reason
-	// (TDD docs/tdd/payloads-thresholds.md §2, §4.4.1 U3): stamped >= 9 with ANY
-	// v9 sentinel absent rewinds to 8 and re-runs. The v9 migration is CREATE
-	// TABLE IF NOT EXISTS, a hasColumn-probed ALTER, an idempotent UPDATE, and
-	// an INSERT OR IGNORE seed, so re-running it against a partially-migrated
-	// database adds what is missing and duplicates nothing.
+	// The v9 guard, the same shape as v7's and v8's and for the same reason:
+	// stamped >= 9 with ANY v9 sentinel absent rewinds to 8 and re-runs. The
+	// v9 migration is CREATE TABLE IF NOT EXISTS, a hasColumn-probed ALTER, an
+	// idempotent UPDATE, and an INSERT OR IGNORE seed, so re-running it
+	// against a partially-migrated database adds what is missing and
+	// duplicates nothing.
 	//
 	// This is the group-1/group-2 trap made harmless: `schemas` ships in group 1
 	// and `action_results` in group 2, and the operator's own tracker is
@@ -3487,11 +3480,11 @@ func Migrate(db *sql.DB) error {
 	}
 
 	// The v10 guard, the same shape as v7's, v8's and v9's and for the same
-	// reason (TDD docs/tdd/runs-dispatch.md §2.2, §2.4 U2): stamped >= 10 with
-	// ANY v10 sentinel absent rewinds to 9 and re-runs. The v10 migration is
-	// CREATE TABLE IF NOT EXISTS plus hasColumn-probed ALTERs throughout, so
-	// re-running it against a partially-migrated database adds what is missing
-	// and touches nothing else.
+	// reason: stamped >= 10 with ANY v10 sentinel absent rewinds to 9 and
+	// re-runs. The v10 migration is CREATE TABLE IF NOT EXISTS plus
+	// hasColumn-probed ALTERs throughout, so re-running it against a
+	// partially-migrated database adds what is missing and touches nothing
+	// else.
 	//
 	// This is the group-1/2/3 trap made harmless, at its widest: `usage_ledger`
 	// ships in group 1 and the dispatch tables in group 2, and the operator's own

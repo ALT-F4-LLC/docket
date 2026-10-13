@@ -10,17 +10,17 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// BUDGETS — engine-core §7, implemented clause by clause (TDD §4).
+// BUDGETS.
 //
-// The load-bearing decision of this whole file is §4.3: THE FLOOR IS NOT A
-// STORED COUNTER, IT IS A QUERY OVER THE EVENT LOG. Everything else follows
-// from it — the concurrency property (C4: a SUM over an append-only log has no
+// The load-bearing decision of this whole file: THE FLOOR IS NOT A STORED
+// COUNTER, IT IS A QUERY OVER THE EVENT LOG. Everything else follows from it
+// — the concurrency property (a SUM over an append-only log has no
 // read-modify-write, so there is no lost update to defend against), the
-// engine-owned-facts argument (§7's floor rests on "facts the engine itself
-// produced", and `step-claimed` events ARE those facts), the audit trail (§9
-// item 2: a breach attributable to seventeen claim events is one an operator can
-// read; a breach attributable to a counter is attributable to nothing), and
-// replay (engine-core §9 reconstructs "costing what" from the log alone).
+// engine-owned-facts argument (the floor rests on "facts the engine itself
+// produced", and `step-claimed` events ARE those facts), the audit trail (a
+// breach attributable to seventeen claim events is one an operator can read;
+// a breach attributable to a counter is attributable to nothing), and replay
+// (the log alone reconstructs "costing what").
 //
 // `runs.usage_floor` exists and is written beside every accrual, but it is a
 // CACHE FOR THE REPORT and is never read by enforcement.
@@ -32,28 +32,28 @@ import (
 // taken over.
 //
 // It is loaded ONCE PER LoadScheduler, for the reason the Scheduler is a value
-// at all (§4.8 B31): R3, R4, R5, and now R7 are questions about the same rows at
-// the same instant. A predicate that re-queried the floor between clauses could
-// answer two steps against two different floors and offer a batch that cannot
-// all be claimed.
+// at all: the readiness clauses, budget headroom included, are questions about
+// the same rows at the same instant. A predicate that re-queried the floor
+// between clauses could answer two steps against two different floors and
+// offer a batch that cannot all be claimed.
 type budgetSnapshot struct {
-	// cap is the effective cap. ZERO MEANS UNLIMITED at both levels (B2) — the
-	// flag's documented meaning since S3, unchanged.
+	// cap is the effective cap. ZERO MEANS UNLIMITED at both levels — the
+	// flag's documented meaning, unchanged.
 	cap float64
-	// source names where the cap came from, for the report's R6 line. An
+	// source names where the cap came from, for the report's budget line. An
 	// operator asking "why didn't it stop?" gets the answer from the report
 	// rather than from the source.
 	source BudgetSource
 	// unit is `budget.unit`: which recorded usage unit the cap counts. Empty —
 	// the default and the only value core ships — means the cap rests on the
-	// floor alone (B17).
+	// floor alone.
 	unit string
-	// floor is §4.3's SUM over the run's `step-claimed` events, computed inside
+	// floor is the SUM over the run's `step-claimed` events, computed inside
 	// the transaction that loaded this snapshot.
 	floor float64
-	// reported is the ledger sum for `unit`, or 0 when no unit is named (B16,
-	// B17). Core NEVER sums across units: that would be core asserting two
-	// opaque units are commensurable, which is an opinion about what they mean.
+	// reported is the ledger sum for `unit`, or 0 when no unit is named. Core
+	// NEVER sums across units: that would be core asserting two opaque units
+	// are commensurable, which is an opinion about what they mean.
 	reported float64
 
 	// usageCap is the SECOND dimension: a cap over MEASURED usage rather than
@@ -104,25 +104,26 @@ func (b budgetSnapshot) usageAdmits() bool {
 	return b.usageSpend <= b.usageCap
 }
 
-// BudgetSource names where an effective cap came from — the report's R6 line
-// (§4.10 R2) and nothing else. It is scheduling vocabulary: a flag, a config
-// key, or neither.
+// BudgetSource names where an effective cap came from — the report's budget
+// line and nothing else. It is scheduling vocabulary: a flag, a config key, or
+// neither.
 type BudgetSource string
 
 const (
-	// BudgetFromRun is `run start --budget N` (B1's first branch).
+	// BudgetFromRun is `run start --budget N`.
 	BudgetFromRun BudgetSource = "run"
-	// BudgetFromConfig is `docket config budget.default` (B1's second branch).
+	// BudgetFromConfig is `docket config budget.default`, used when no
+	// `--budget` was given.
 	BudgetFromConfig BudgetSource = "config"
-	// BudgetUnlimited is B1's third branch: 0 at both levels.
+	// BudgetUnlimited is neither: 0 at both levels.
 	BudgetUnlimited BudgetSource = "unlimited"
 )
 
-// spend is the enforced quantity: `max(reported, floor)` (B12).
+// spend is the enforced quantity: `max(reported, floor)`.
 //
-// REPORTED USAGE CAN ONLY RAISE THE COUNTER (B13). That is what `max` means, and
-// it is why a claimant reporting `0` — or nothing at all — cannot lower a run
-// below its floor. §9 item 7's whole proof is this one line.
+// REPORTED USAGE CAN ONLY RAISE THE COUNTER. That is what `max` means, and it
+// is why a claimant reporting `0` — or nothing at all — cannot lower a run
+// below its floor. That guarantee rests on this one line.
 func (b budgetSnapshot) spend() float64 {
 	if b.reported > b.floor {
 		return b.reported
@@ -130,12 +131,13 @@ func (b budgetSnapshot) spend() float64 {
 	return b.floor
 }
 
-// unlimited reports B1's third branch. It is a method rather than an inline
-// comparison so D1's dormancy has ONE definition: every path that must not query
-// asks the same question.
+// unlimited reports that no cap applies: 0 at both levels. It is a method
+// rather than an inline comparison so budget dormancy has ONE definition:
+// every path that must not query asks the same question.
 func (b budgetSnapshot) unlimited() bool { return b.cap <= 0 }
 
-// admits answers B14: would claiming a step of this cost CROSS the cap?
+// admits answers the boundary question: would claiming a step of this cost
+// CROSS the cap?
 //
 // "Crossing" is `>`, not `>=`. A cap of 12 and a spend that reaches exactly 12
 // has SPENT its budget and not exceeded it, so a claim landing exactly on the
@@ -161,34 +163,35 @@ func (b budgetSnapshot) admits(cost float64) bool {
 
 // loadBudget builds the snapshot inside the caller's transaction.
 //
-// B29's dormancy is enforced HERE as well as at the predicate: with an effective
-// cap of 0, NEITHER the floor query NOR the ledger query executes. A run started
+// Dormancy is enforced HERE as well as at the predicate: with an effective cap
+// of 0, NEITHER the floor query NOR the ledger query executes. A run started
 // without `--budget` in a repo that never set `budget.default` therefore runs
-// exactly the queries v9 ran, which is D1 — and the assertion is a counting
-// driver in the test rather than an inspection of this comment.
+// exactly the queries v9 ran — and the assertion is a counting driver in the
+// test rather than an inspection of this comment.
 //
-// THE CAP IS READ FROM THE RUN ROW AND FROM NOWHERE ELSE (B3). It is not
-// re-read from config mid-run: a config change must not silently re-cap a live
-// run, for the same reason a re-registered workflow does not reach one (RA2,
-// engine-spine §5.4).
+// THE CAP IS READ FROM THE RUN ROW AND FROM NOWHERE ELSE. It is not re-read
+// from config mid-run: a config change must not silently re-cap a live run,
+// for the same reason a re-registered workflow does not reach one.
 //
-// B1's second branch — "else `docket config budget.default` when non-zero" — is
-// therefore resolved at `run start`, which materializes the default INTO the
-// row. That is what makes B3 and B1 one rule rather than two that disagree: by
-// the time any claim reads it, the row already carries whichever of the two
-// applied, and the run's cap cannot move underneath it.
+// The config fallback — "else `docket config budget.default` when non-zero" —
+// is therefore resolved at `run start`, which materializes the default INTO the
+// row. That is what makes the fallback and the run-row rule one rule rather
+// than two that disagree: by the time any claim reads it, the row already
+// carries whichever of the two applied, and the run's cap cannot move
+// underneath it.
 //
-// The consequence B3 states plainly: a run started before `budget.default` was
+// The consequence, stated plainly: a run started before `budget.default` was
 // set has 0 stored and stays UNLIMITED even after the default is set. That is
 // the pinning property applied to budgets, and it is surprising enough that
-// `run report` prints the effective cap AND where it came from (R6), so an
-// operator asking "why didn't it stop?" gets the answer from a read verb.
-// The SOURCE is not stored. §2.3's column table adds no `budget_source`, and
+// `run report` prints the effective cap AND where it came from, so an operator
+// asking "why didn't it stop?" gets the answer from a read verb.
+// The SOURCE is not stored. The runs table has no `budget_source` column, and
 // inventing one would be a silent deviation — so the report derives it by
 // comparing the stored cap to the config default it would have been given
 // (BudgetSourceOf). That comparison can be wrong in exactly one harmless way: a
 // run whose `--budget` happened to equal the default reads as `config`. Both
-// answers name a number the operator can act on, which is what R6 is for.
+// answers name a number the operator can act on, which is what the report line
+// is for.
 func loadBudget(tx *sql.Tx, run *model.Run) (budgetSnapshot, error) {
 	snap := budgetSnapshot{cap: run.Budget, source: BudgetFromRun}
 
@@ -212,7 +215,7 @@ func loadBudget(tx *sql.Tx, run *model.Run) (budgetSnapshot, error) {
 	}
 
 	if snap.cap <= 0 {
-		// D1: unlimited in the DECLARED dimension. No floor query and no
+		// Dormant: unlimited in the DECLARED dimension. No floor query and no
 		// per-unit ledger read run from here — the measured dimension above
 		// carries its own numbers and its own dormancy.
 		return budgetSnapshot{
@@ -244,11 +247,12 @@ func loadBudget(tx *sql.Tx, run *model.Run) (budgetSnapshot, error) {
 	return snap, nil
 }
 
-// BudgetSourceOf names where a run's stored cap came from — R6's line.
+// BudgetSourceOf names where a run's stored cap came from — the report's
+// budget line.
 //
-// It COMPARES rather than reads a stored source, because §2.3 adds no
-// `budget_source` column and inventing one would be a silent deviation from the
-// column table this stage ratified. The comparison is exact in every case that
+// It COMPARES rather than reads a stored source, because the runs table has no
+// `budget_source` column and inventing one would be a silent deviation from
+// the ratified schema. The comparison is exact in every case that
 // matters and ambiguous in exactly one that does not: a run whose `--budget`
 // happened to equal the config default reads as `config`. Both answers name the
 // same number, and the number is what an operator asking "why didn't it stop?"
@@ -264,7 +268,7 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 	}
 }
 
-// RunFloorTx is §4.3, plus DKT-584's vote-step accrual:
+// RunFloorTx is the floor query, plus DKT-584's vote-step accrual:
 //
 //	  SELECT COALESCE(SUM(s.expected_cost), 0)
 //	    FROM events e JOIN steps s ON s.id = e.step_id
@@ -273,37 +277,36 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 //	    FROM steps WHERE run_id = ? AND kind = 'vote'
 //	     AND status NOT IN ('skipped', 'superseded')
 //
-// THE SECOND SUM IS DKT-584. A vote step is unclaimable by construction
-// (§6.15), so it can never write the `step-claimed` event the first sum counts
+// THE SECOND SUM IS DKT-584. A vote step is unclaimable by construction, so
+// it can never write the `step-claimed` event the first sum counts
 // — which made a declared `expected_cost` on a `type="vote"` step inert: the
 // author stated what the panel would cost and the floor could not see it
 // (RUN-34 ran 40.6% of its output tokens through seats the budget never saw).
 // A vote step therefore accrues AT MATERIALIZATION — the step row's existence
 // is the engine-owned fact, written at expansion (or when the engine mints a
 // held ballot), exactly as the claim event is for executor work. It accrues
-// once per row: a loop's next ordinal is a new row and re-accrues (B10's
-// analogue), and a materialized held ballot accrues the configured
-// `vote.hold.cost`. The reservation side is adjusted to match — see
-// reservableCost: a vote step's cost is already IN the floor, so R7 and the
-// offer must not reserve it a second time.
+// once per row: a loop's next ordinal is a new row and re-accrues (the
+// analogue of loop entries re-accruing), and a materialized held ballot
+// accrues the configured `vote.hold.cost`. The reservation side is adjusted to
+// match — see reservableCost: a vote step's cost is already IN the floor, so
+// the headroom check and the offer must not reserve it a second time.
 //
-// Every clause of §4.3's table falls out of this query rather than needing its
-// own code:
+// Every floor rule falls out of this query rather than needing its own code:
 //
-//   - B9, retries re-accrue: a reaped step claimed again writes a SECOND
+//   - Retries re-accrue: a reaped step claimed again writes a SECOND
 //     `step-claimed` event, and the SUM counts both. Nothing is released on
 //     reap, on fail, or on abandon — the work was attempted and the attempt is
 //     what cost something.
-//   - B10, loop entries re-accrue: a `fix` step at ordinal 1 is a DIFFERENT step
+//   - Loop entries re-accrue: a `fix` step at ordinal 1 is a DIFFERENT step
 //     row with its own `expected_cost`, claimed and event-logged independently.
-//     `max_fix_loops` therefore bounds the floor BY CONSTRUCTION, which is
-//     engine-core §7's "bounded loops bound the floor" arriving from §11.3
-//     rather than from arithmetic here.
-//   - B11, a superseded, skipped, or never-claimed step contributes nothing: the
+//     `max_fix_loops` therefore bounds the floor BY CONSTRUCTION: "bounded
+//     loops bound the floor" arrives from loop expansion rather than from
+//     arithmetic here.
+//   - A superseded, skipped, or never-claimed step contributes nothing: the
 //     accrual is per CLAIM EVENT, and a step never claimed produced none. A
 //     vote row accrues at materialization instead, so the second sum excludes
 //     skipped and superseded rows: a panel that is never routed costs nothing.
-//   - B5, the value accrued is the STEP ROW's `expected_cost`, materialized at
+//   - The value accrued is the STEP ROW's `expected_cost`, materialized at
 //     expansion from the pinned definition and never re-read from the live
 //     `workflows` table. A run pins its definitions; its floor is computed from
 //     what it pinned. DKT-867 adds ONE exception, per claim rather than per
@@ -313,8 +316,8 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 //     only the fallback. The event is still the engine-owned fact — the scaled
 //     number was committed WITH the claim, in the same append-only log the
 //     floor has always summed — so replay, audit, and the no-lost-update
-//     property (C4) are untouched. Events of non-terminal runs are unprunable
-//     (§3), so enforcement can never lose a live run's scaled accruals.
+//     property are untouched. Events of non-terminal runs are unprunable, so
+//     enforcement can never lose a live run's scaled accruals.
 //
 // It is exported because `run report` computes the same number from outside this
 // package and the two must not be able to disagree — a report that recomputed
@@ -353,10 +356,10 @@ func RunFloorTx(tx *sql.Tx, runID int) (float64, error) {
 // number `spend() + cost <= cap` adds on top of the snapshot.
 //
 // A vote step's declared cost is already in the floor the moment its row
-// exists (RunFloorTx's second sum, DKT-584), so reserving it again at R7 or in
-// the offer would count the same declaration twice and refuse a claimable
-// batch a correct arithmetic admits. Every other step's cost accrues at claim,
-// so it is reserved here exactly as before.
+// exists (RunFloorTx's second sum, DKT-584), so reserving it again at the
+// headroom check or in the offer would count the same declaration twice and
+// refuse a claimable batch a correct arithmetic admits. Every other step's
+// cost accrues at claim, so it is reserved here exactly as before.
 func reservableCost(step *db.Step) float64 {
 	if step.Kind == workflow.TypeVote {
 		return 0
@@ -382,9 +385,8 @@ func reservableCost(step *db.Step) float64 {
 // millions of tokens only ever answers the second); (2) making the token
 // ledger the DECLARED cap's currency would require core to own a
 // token-to-cap-unit conversion per variant — a pricing table keyed by model
-// names, which the genericity rule (docs/design/genericity.md) forbids
-// outright and which redesigns the whole ledger for a defect that is narrower
-// than that.
+// names, which the genericity rule forbids outright and which redesigns the
+// whole ledger for a defect that is narrower than that.
 //
 // What IS taken is the variant-aware declared cost, placed where genericity
 // allows it: the party that RESOLVES a step to a variant is the dispatcher, at
@@ -403,7 +405,7 @@ func reservableCost(step *db.Step) float64 {
 // finite number. Zero means UNSET (the flag was never passed) and is valid; an
 // explicit zero is refused at the CLI, because a free escalated claim would
 // let a dispatcher erase an accrual the workflow author declared — the same
-// direction B13 forbids for reported usage.
+// direction `max(reported, floor)` forbids for reported usage.
 func validateCostMultiplier(m float64) error {
 	if m == 0 {
 		return nil
@@ -415,14 +417,14 @@ func validateCostMultiplier(m float64) error {
 	return nil
 }
 
-// `--usage` — recorded, capped, opaque (§4.9).
+// `--usage` — recorded, capped, opaque.
 //
 // WHAT CORE NEVER DOES WITH THESE NUMBERS: interpret them, convert them,
 // rate-limit on them, or route on them. They sum in the report and, when
 // `budget.unit` names one, they participate in `max()`. That is the whole
 // contract.
 
-// parseUsage is B33, B35, and B36, delegated to db.ParseUsage — the single
+// parseUsage is `--usage` validation, delegated to db.ParseUsage — the single
 // implementation the vote ledger's `--usage` shares (DKT-95) — with the
 // refusal re-raised as this surface's VALIDATION_ERROR naming this surface's
 // flag (db's refusals name only the offending key or value).
@@ -434,18 +436,18 @@ func parseUsage(raw string) ([]db.UsageRow, error) {
 	return rows, nil
 }
 
-// recordUsageTx writes one `complete`'s `--usage` into the ledger (B34).
+// recordUsageTx writes one `complete`'s `--usage` into the ledger.
 //
 // The EVENT still carries the blob (`step-recorded`'s `data`), unchanged: this
 // stage ADDS ledger rows rather than moving the usage into them. Removing it
-// from the event would break the replay property — engine-core §9 reconstructs a
-// run's history "costing what" from the log, and a log that dropped the numbers
+// from the event would break the replay property — a run's history "costing
+// what" is reconstructed from the log, and a log that dropped the numbers
 // could not.
 //
-// `source` is `reported` because a claimant said so. engine-core §7's "the
-// reference harness back-fills from its dispatch journal, source recorded"
-// describes that harness's practice, not a core surface: no verb at this stage
-// writes any other value.
+// `source` is `reported` because a claimant said so. "The reference harness
+// back-fills from its dispatch journal, source recorded" describes that
+// harness's practice, not a core surface: no verb at this stage writes any
+// other value.
 func recordUsageTx(tx *sql.Tx, step *db.Step, raw string, nowMS int64) error {
 	rows, err := parseUsage(raw)
 	if err != nil {
@@ -470,7 +472,7 @@ func recordUsageTx(tx *sql.Tx, step *db.Step, raw string, nowMS int64) error {
 // writer of that column and it is a cache for the report's burn-rate line: the
 // number it stores is the same query enforcement runs, so a report and a breach
 // never disagree — but enforcement never READS it, so a poisoned cache changes
-// no decision (§4.3, §3.2).
+// no decision.
 func cacheRunFloorTx(tx *sql.Tx, runID int) error {
 	floor, err := RunFloorTx(tx, runID)
 	if err != nil {
@@ -479,25 +481,25 @@ func cacheRunFloorTx(tx *sql.Tx, runID int) error {
 	return db.CacheRunFloorTx(tx, runID, floor)
 }
 
-// budgetHeadroom is R7 — engine-spine §6.3's seam, now the real check (§4.8).
+// budgetHeadroom is the budget readiness clause.
 //
-// B29: it returns true ON ITS FIRST LINE when the effective cap is 0, and the
-// snapshot's own loader has already declined to query in that case, so D1's
+// It returns true ON ITS FIRST LINE when the effective cap is 0, and the
+// snapshot's own loader has already declined to query in that case, so budget
 // dormancy is structural rather than a fast path someone could reorder away.
 //
-// B30: otherwise it answers B14's arithmetic over the scheduler's snapshot —
-// would claiming THIS step cross the cap?
+// Otherwise it answers the boundary arithmetic over the scheduler's snapshot
+// — would claiming THIS step cross the cap?
 //
-// R7's POSITION IN THE CONJUNCTION DOES NOT MOVE. It stays last, per §6.3's
-// stated ordering rationale (cheapest and most global first, most local last),
-// and budget is the most local of all: it is the only clause whose answer
-// depends on the specific step's cost.
+// ITS POSITION IN THE READINESS CONJUNCTION DOES NOT MOVE. It stays last, per
+// the conjunction's ordering rationale (cheapest and most global first, most
+// local last), and budget is the most local of all: it is the only clause
+// whose answer depends on the specific step's cost.
 func (s *Scheduler) budgetHeadroom(step *db.Step) bool {
 	// The cost reserved is reservableCost, not ExpectedCost: a vote step's
 	// declared cost already sits in the floor (DKT-584), and reserving it here
 	// too would refuse the step for its own accrual.
 	//
-	// R7 reserves the DECLARED cost by construction: the offer cannot know
+	// The offer reserves the DECLARED cost by construction: the offer cannot know
 	// which variant a dispatcher will resolve the step to, so the claim path
 	// re-checks with the dispatcher-declared scaled cost via budgetAdmits
 	// (DKT-867).
@@ -558,11 +560,11 @@ func (s *Scheduler) UsageBudget() (cap, spend float64, unit string, armed bool) 
 		s.budget.usageArmed()
 }
 
-// BudgetBreachReason is B21's shape:
+// BudgetBreachReason is the breach reason's shape:
 //
 //	budget: spend <N> of cap <M> reached at <instance>
 //
-// A BARE-NUMBER STATEMENT NAMING NO UNIT (§1.1's second leak, closed). There is
+// A BARE-NUMBER STATEMENT NAMING NO UNIT. There is
 // no currency, no token, and no rate: `--budget 12` means "stop when the accrued
 // number reaches 12", and what the number counts is the workflow author's
 // business. `%g` renders 12 as "12" and 12.5 as "12.5" rather than padding
@@ -586,19 +588,21 @@ func UsageBudgetBreachReason(spend, cap float64, unit, instance string) string {
 		unit, spend, cap, instance)
 }
 
-// enforceBudgetTx is B14, B15, B20, and B22 in one function, called from inside
-// the claim's transaction (C5).
+// enforceBudgetTx is the claim-time boundary check, the refusal, and the
+// breach transition in one function, called from inside the claim's
+// transaction.
 //
 // THE CHECK AND THE ACCRUAL ARE THE SAME TRANSACTION AS THE CLAIM'S CAS. There
 // is no window in which a claim is authorized and the cap is then crossed by
 // another: a claim that would cross does not commit, and the serialization is
 // SQLite's rather than ours.
 //
-// The RELATIONSHIP TO R7, stated because it looks like duplication: R7 makes a
-// step not APPEAR in `next`; this makes a claim REFUSE. They are the same
-// arithmetic at two moments and both are needed — R7 alone would let a relay
-// claim a step it already held a stale `next` row for, and this alone would
-// offer steps that cannot be claimed. TestBudgetR7AndClaimAgree asserts they
+// The RELATIONSHIP TO budgetHeadroom, stated because it looks like
+// duplication: budgetHeadroom makes a step not APPEAR in `next`; this makes a
+// claim REFUSE. They are the same arithmetic at two moments and both are
+// needed — budgetHeadroom alone would let a relay claim a step it already
+// held a stale `next` row for, and this alone would offer steps that cannot be
+// claimed. TestBudgetR7AndClaimAgree asserts they
 // never disagree over one snapshot.
 //
 // It returns the refusal, having ALREADY flipped the run, so the caller commits
@@ -629,7 +633,7 @@ func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *db.Step, cost float64, 
 			sched.budget.spend(), sched.budget.cap, step.Instance)
 	}
 
-	// B22: the flip is CAS on (run_id, status='active') (C6). A concurrent
+	// The flip is CAS on (run_id, status='active'). A concurrent
 	// invocation that already flipped it matches zero rows and writes neither a
 	// second reason nor a second event — the transition is idempotent because
 	// the guard is the status itself rather than a flag we maintain.
@@ -638,10 +642,10 @@ func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *db.Step, cost float64, 
 		return err
 	}
 	if flipped {
-		// B23: the event is `run-paused` with `data.reason = "budget"` — an
+		// The event is `run-paused` with `data.reason = "budget"` — an
 		// EXISTING closed-set kind, so the set does not widen. A new
 		// `budget-breached` kind would say the same thing in a word only this
-		// mechanism uses, and §9 item 2's attribution table would gain a row for
+		// mechanism uses, and the event attribution table would gain a row for
 		// a transition that is already attributable as a pause.
 		if err := recordEvent(tx, eventRecord{
 			Kind: EventRunPaused, RunID: step.RunID,
@@ -652,11 +656,11 @@ func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *db.Step, cost float64, 
 		}
 	}
 
-	// B24 lives in what this does NOT do: nothing here clears the cap, so a
-	// `run resume` returns the run to `active` and the very next claim reaches
-	// this same refusal. That reads as a bug and is not one — the cap has not
-	// moved, so the condition has not changed. Raising it is `run start`-time
-	// only in v1 (B25).
+	// Resume behavior lives in what this does NOT do: nothing here clears the
+	// cap, so a `run resume` returns the run to `active` and the very next
+	// claim reaches this same refusal. That reads as a bug and is not one — the
+	// cap has not moved, so the condition has not changed. Raising it is `run
+	// start`-time only in v1.
 	return conflictErr(
 		"step %s is not ready to claim: %s (%s)",
 		step.Instance, CondBudget, reason)

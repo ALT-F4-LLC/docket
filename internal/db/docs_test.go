@@ -107,7 +107,7 @@ func TestUpdateDoc_AppendsRevisionOnStatusChange(t *testing.T) {
 	if revs[1].ChangeKind != "status" {
 		t.Errorf("ChangeKind = %q, want status", revs[1].ChangeKind)
 	}
-	// Body is duplicated from the prior revision (metadata-only edit, TDD §5.4 C8).
+	// Body is duplicated from the prior revision (metadata-only edit).
 	if revs[1].Body != "v1" {
 		t.Errorf("revs[1].Body = %q, want v1 (duplicated from prior)", revs[1].Body)
 	}
@@ -227,10 +227,10 @@ func TestUpdateDoc_NotFound(t *testing.T) {
 	}
 }
 
-// --- ListDocsWithCounts — single-JOIN strategy (S1) ---
+// --- ListDocsWithCounts — single-JOIN strategy ---
 
 func TestListDocsWithCounts_NoNPlusOne(t *testing.T) {
-	// TDD §5.4 S1 — must be a single statement, no per-row sub-selects.
+	// Must be a single statement, no per-row sub-selects.
 	// We assert this by running EXPLAIN QUERY PLAN against the SQL the
 	// function uses and verifying it touches docs and doc_revisions exactly
 	// once each as JOIN partners. If a future refactor introduces N+1
@@ -390,7 +390,7 @@ func TestListDocsWithCounts_OffsetWithoutLimitSkipsRows(t *testing.T) {
 	}
 }
 
-// --- GetDocRevision (TDD §3.3 Q1 semantics) ---
+// --- GetDocRevision ---
 
 func TestGetDocRevision(t *testing.T) {
 	db := mustInitAndMigrate(t)
@@ -442,7 +442,7 @@ func TestGetDocRevision_DocNotFound(t *testing.T) {
 	}
 }
 
-// --- DeleteDoc + cascade behaviour (AC9) ---
+// --- DeleteDoc + cascade behaviour ---
 
 func TestDeleteDoc_CascadesRevisions(t *testing.T) {
 	db := mustInitAndMigrate(t)

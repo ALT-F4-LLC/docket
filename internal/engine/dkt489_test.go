@@ -15,7 +15,7 @@ import (
 // DKT-489 — `step show`/`step list` rendered an expired-but-unreaped claim as
 // bare `ready` while `run repin`'s quiescence guard, reading the raw row,
 // refused with "claimed and mid-flight". BOTH answers are per-spec: the read
-// surface renders §6.2's effective status (the machine's own
+// surface renders the effective status (the machine's own
 // `claimed ──lease expiry──> ready` edge, and `claim` makes it true by
 // reaping lazily — DKT-468 aligned `run status` to exactly this), while the
 // repin guard must count the unreaped claim because an executor that claimed
@@ -76,7 +76,7 @@ func TestExpiredUnreapedClaimIsLabeledOnTheStepSurfaces(t *testing.T) {
 	}
 
 	// The lease lapses, un-reaped. The rendered status flips to the reap's
-	// answer (`ready`, §6.2 — the discipline DKT-468 pinned), repin still
+	// answer (`ready` — the discipline DKT-468 pinned), repin still
 	// refuses — and the window is now labeled on both step surfaces.
 	late := claim.LeaseExpiresMS + 1
 	view, err = LoadStepView(conn, stepID, late)

@@ -90,7 +90,8 @@ func TestClaimStepMintsTokenAndTakesLease(t *testing.T) {
 	}
 }
 
-// TestClaimStepAgainstLiveLeaseConflicts is R5 of §6.9 at the db layer.
+// TestClaimStepAgainstLiveLeaseConflicts is the live-lease refusal at the db
+// layer.
 func TestClaimStepAgainstLiveLeaseConflicts(t *testing.T) {
 	db, id := stepTestDB(t)
 	now := int64(1_000_000)
@@ -102,9 +103,8 @@ func TestClaimStepAgainstLiveLeaseConflicts(t *testing.T) {
 	}
 }
 
-// TestClaimStepAgainstExpiredLeaseSucceeds is R7 of §6.9: expiry alone
-// re-readies a step, with no operator action and no reaper — the liveness
-// mechanism §9 item 4 rests on.
+// TestClaimStepAgainstExpiredLeaseSucceeds: expiry alone re-readies a step,
+// with no operator action and no reaper — the liveness mechanism.
 func TestClaimStepAgainstExpiredLeaseSucceeds(t *testing.T) {
 	db, id := stepTestDB(t)
 	now := int64(1_000_000)
@@ -176,7 +176,7 @@ func TestConcurrentStepClaims(t *testing.T) {
 	}
 }
 
-// TestStepClaimPredicateIsLoadBearing is §6.16's "mutation test repeated for
+// TestStepClaimPredicateIsLoadBearing is the "mutation test repeated for
 // the step table": rewrite the predicate away and the concurrency guarantee
 // must collapse.
 //
@@ -224,7 +224,7 @@ func TestStepClaimPredicateIsLoadBearing(t *testing.T) {
 	}
 }
 
-// TestLeaseHelpersAreShared is §6.16's "lease helpers shared with issues proven
+// TestLeaseHelpersAreShared is "lease helpers shared with issues proven
 // by asserting both call the same function (no duplicated SQL)".
 //
 // The proof is by function identity rather than by behavior: two independent
@@ -236,7 +236,7 @@ func TestLeaseHelpersAreShared(t *testing.T) {
 	// Each pair is (issue-side method value, step-side method value) taken
 	// from the two leaseTarget values. Identical function pointers mean both
 	// entities execute the same code with a different receiver — the
-	// generalization §6.6 requires, rather than a copy.
+	// generalization the lease contract requires, rather than a copy.
 	pairs := []struct {
 		name         string
 		issue, steps any
@@ -254,7 +254,7 @@ func TestLeaseHelpersAreShared(t *testing.T) {
 		if issueFn.Entry() != stepFn.Entry() {
 			t.Errorf(
 				"%s: issues reach %s but steps reach %s — the lease implementation "+
-					"has been duplicated rather than generalized (TDD §6.6)",
+					"has been duplicated rather than generalized",
 				p.name, issueFn.Name(), stepFn.Name())
 		}
 	}
@@ -270,8 +270,8 @@ func TestLeaseHelpersAreShared(t *testing.T) {
 	}
 }
 
-// TestStepRefusalMatrix is §6.9's R1-R4 at the db layer: the same three
-// sentinels the issue matrix produces, from the same authorize function.
+// TestStepRefusalMatrix is the step refusal matrix at the db layer: the same
+// three sentinels the issue matrix produces, from the same authorize function.
 func TestStepRefusalMatrix(t *testing.T) {
 	now := int64(1_000_000)
 
@@ -325,7 +325,7 @@ func TestStepRefusalMatrix(t *testing.T) {
 	}
 }
 
-// TestGetStepLeaseNeverWrites pins engine-spec §6 "reads never write" for the
+// TestGetStepLeaseNeverWrites pins "reads never write" for the
 // step entity: the read path must not reap, even when the lease has expired.
 func TestGetStepLeaseNeverWrites(t *testing.T) {
 	db, id := stepTestDB(t)
@@ -362,7 +362,7 @@ func TestGetStepLeaseNeverWrites(t *testing.T) {
 	}
 }
 
-// TestSagaStageCASAdvancesExactlyOnce is §6.8's "two concurrent engine
+// TestSagaStageCASAdvancesExactlyOnce is "two concurrent engine
 // invocations resuming the same saga produce exactly one advance". The loser
 // matches zero rows and gets ErrSagaStageMoved — not an error condition, but it
 // must be distinguishable, or a resumer cannot tell "I lost" from "it broke".
@@ -407,7 +407,7 @@ func TestSagaStageCASAdvancesExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestSagaStageRefreshesActivityClock is §6.8's "every stage commit refreshing
+// TestSagaStageRefreshesActivityClock is "every stage commit refreshing
 // the step's activity clock" — the property that lets a long saga survive a
 // heartbeat-based liveness check it is not driving.
 func TestSagaStageRefreshesActivityClock(t *testing.T) {
@@ -441,11 +441,11 @@ func TestSagaStageRefreshesActivityClock(t *testing.T) {
 	}
 }
 
-// TestRetireStepTokenIsTheSameClearAsRelease pins §6.8's hinge: retirement and
-// release are one state change reached by two authorities, so they are one
-// function. A step whose token retired is indistinguishable from an unclaimed
-// one AS FAR AS THE LEASE GOES — which is exactly what makes the saga
-// resumable by any later engine invocation with no owner to wait for.
+// TestRetireStepTokenIsTheSameClearAsRelease pins the saga's hinge:
+// retirement and release are one state change reached by two authorities, so
+// they are one function. A step whose token retired is indistinguishable from
+// an unclaimed one AS FAR AS THE LEASE GOES — which is exactly what makes the
+// saga resumable by any later engine invocation with no owner to wait for.
 func TestRetireStepTokenIsTheSameClearAsRelease(t *testing.T) {
 	db, id := stepTestDB(t)
 	now := int64(1_000_000)
@@ -472,12 +472,12 @@ func TestRetireStepTokenIsTheSameClearAsRelease(t *testing.T) {
 		t.Errorf("attempt = %d after retirement, want 1 — the trail must survive", lease.Attempt)
 	}
 
-	// R9: the retired token no longer authorizes anything.
+	// The retired token no longer authorizes anything.
 	tx2, err := db.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
 	defer tx2.Rollback()
 	if _, err := AuthorizeStepTx(tx2, id, token, now); !errors.Is(err, ErrNotHolder) {
-		t.Errorf("authorize with a retired token = %v, want ErrNotHolder (R9)", err)
+		t.Errorf("authorize with a retired token = %v, want ErrNotHolder", err)
 	}
 }
 
@@ -527,7 +527,7 @@ func TestReapStepDoesNotDoubleCountAttempts(t *testing.T) {
 	}
 }
 
-// TestReadyIsNeverPersisted pins §6.2: `ready` is computed at read time and is
+// TestReadyIsNeverPersisted pins that `ready` is computed at read time and is
 // not a member of the persisted enum. The nine stored statuses are the machine's
 // ten minus this one.
 func TestReadyIsNeverPersisted(t *testing.T) {
@@ -536,11 +536,11 @@ func TestReadyIsNeverPersisted(t *testing.T) {
 		StepWaitingHuman, StepSkipped, StepSuperseded, StepFailedRouted,
 	}
 	if len(persisted) != 9 {
-		t.Fatalf("persisted statuses = %d, want 9 (TDD §6.2)", len(persisted))
+		t.Fatalf("persisted statuses = %d, want 9", len(persisted))
 	}
 	for _, s := range persisted {
 		if s == StepReady {
-			t.Fatalf("%q is in the persisted set, but §6.2 makes it computed-only", StepReady)
+			t.Fatalf("%q is in the persisted set, but it is computed-only", StepReady)
 		}
 	}
 }

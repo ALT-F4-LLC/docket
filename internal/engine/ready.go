@@ -14,11 +14,11 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The readiness predicate — TDD §6.3, engine-core §5 and §1.3 as a conjunction.
+// The readiness predicate, as a conjunction.
 //
 // A step is ready iff ALL of R1-R7 hold. Each is a named method below rather
 // than a clause in one long boolean, so a test can falsify exactly one and the
-// refusal (§6.9 R8) can NAME the condition that failed — a dispatcher told only
+// refusal can NAME the condition that failed — a dispatcher told only
 // "not ready" cannot diagnose itself.
 
 // ReadyCondition identifies one clause of the predicate, so a refusal names it.
@@ -50,8 +50,8 @@ const (
 	CondUnrouted ReadyCondition = "no threshold has routed to this interposed step"
 	// CondGateOpen is R3's SECOND interposition clause (DKT-168), the half
 	// DKT-38 left out: a predecessor's threshold names an interposed gate,
-	// and that gate has not resolved. §11.2: "on the gate's own pass execution
-	// resumes at the routing step's ordinary downstream" — so until the gate
+	// and that gate has not resolved. On the gate's own pass, execution
+	// resumes at the routing step's ordinary downstream — so until the gate
 	// is terminal (routed to and tallied, or skipped because the routing chose
 	// against it), the routing step's ordinary downstream waits. Without this,
 	// a verify sharing a stage with a still-open security-vote was claimable
@@ -64,10 +64,9 @@ const (
 	CondHeadroom ReadyCondition = "no concurrency headroom in its class"
 	// CondStatus is R6: the step is `pending` and `when` did not skip it.
 	CondStatus ReadyCondition = "the step is not pending"
-	// CondBudget is R7: budget headroom exists. S6 owns the check; at S3 the
-	// seam returns true (§6.3), so this constant exists but never fires yet.
+	// CondBudget is R7: budget headroom exists.
 	CondBudget ReadyCondition = "no budget headroom"
-	// CondPreGatePending is the pre-gate hold (gates-trust §7.6.2 PG6): a
+	// CondPreGatePending is the pre-gate hold: a
 	// detached run is measuring this step's pre-gates against the target its
 	// claim would resolve, and still holds the (step, target) in-flight lock.
 	// The claim never waits on that run, so a claim admitted now would run
@@ -151,14 +150,14 @@ type Scheduler struct {
 	nowMS        int64
 	stepByID     map[int]*db.Step
 	// budget is R7's half of the snapshot, loaded once for the same reason the
-	// rest is (§4.8 B31): R3, R4, R5 and now R7 are questions about the same
-	// rows at the same instant. With an effective cap of 0 it is loaded WITHOUT
-	// executing a query at all, which is D1's dormancy (§4.8 B29).
+	// rest is: R3, R4, R5 and R7 are questions about the same rows at the
+	// same instant. With an effective cap of 0 it is loaded WITHOUT executing
+	// a query at all, which keeps an uncapped run dormant.
 	budget budgetSnapshot
-	// reapHold is A12's predicate, materialized once per snapshot for the same
-	// reason the budget is: readiness must answer every step against ONE state
+	// reapHold is the write-reap hold's predicate, materialized once per
+	// snapshot for the same reason the budget is: readiness must answer every step against ONE state
 	// of the world. It counts UNACKNOWLEDGED reaps per class, and it is nil on
-	// the dormant path — a run with nothing reaped never allocates it (D3).
+	// the dormant path — a run with nothing reaped never allocates it.
 	reapHold map[string]int
 	// policy is the run's pinned policy.toml, read lazily by the first
 	// rendered row that needs routing (stepRow) and never by readiness
@@ -167,7 +166,7 @@ type Scheduler struct {
 	policy *runPolicy
 	// openReaps are the rows behind reapHold, kept so the REFUSAL can name the
 	// same reaps the predicate counted. A headroom denial with nothing running
-	// is baffling unless the message names why (§6.3).
+	// is baffling unless the message names why.
 	openReaps []db.ReapAck
 	// holdTally is the project's configured decider for MATERIALIZED held
 	// steps, loaded with the rest of the snapshot so every spec this scheduler
@@ -194,8 +193,8 @@ type Scheduler struct {
 	// often is waste this removes. Populated lazily via loopClosure, not
 	// eagerly here, because most snapshots involve no loop step at all.
 	loopClosureCache map[int]map[string]bool
-	// preGateHolds is the pre-gate hold's half of the snapshot (gates-trust
-	// §7.6.2 PG6, CondPreGatePending): the pending pre-gated steps whose
+	// preGateHolds is the pre-gate hold's half of the snapshot
+	// (CondPreGatePending): the pending pre-gated steps whose
 	// detached run holds its (step, target) in-flight lock at this instant,
 	// keyed by step id to the target sha the lock is keyed to. Loaded with
 	// the rest of the snapshot (loadDetachedPreGateHolds, pregate_detached.go)
@@ -221,7 +220,7 @@ func (s *Scheduler) loopClosure(workflowID int, def *workflow.Definition) map[st
 }
 
 // issueFacts is the per-issue state readiness needs: the LIVE scope (R4 reads
-// it live by design — §5.1.1 — so an operator's mid-run correction takes
+// it live by design, so an operator's mid-run correction takes
 // effect), the priority for ordering, and whether the issue's own
 // dependencies are satisfied.
 type issueFacts struct {
@@ -260,8 +259,8 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 
 	facts := make(map[int]*issueFacts, len(runIssues))
 	// Labels and size come from the FROZEN snapshot activation wrote, not from
-	// a live join — the same source and the same reason as the context bundle
-	// (§6.6). Routing is a context question, so a mid-run relabel or resize
+	// a live join — the same source and the same reason as the context bundle.
+	// Routing is a context question, so a mid-run relabel or resize
 	// must not silently change how an already-scheduled step routes. Contrast `scope_globs` in
 	// loadIssueFacts, read live on purpose because it answers a scheduling
 	// question instead. No extra query: ListRunIssuesTx already carries it.
@@ -318,7 +317,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		foreignScopes[holder.IssueID] = globs
 	}
 
-	// R7's snapshot, in the same transaction as the rest of it (§4.8 B31). With
+	// R7's snapshot, in the same transaction as the rest of it. With
 	// an effective cap of 0 this executes NO query beyond the config read that
 	// establishes the cap is 0 — see loadBudget — so a run without a budget in a
 	// repo without a default is byte-identical to v9's scheduling path.
@@ -327,10 +326,10 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		return nil, err
 	}
 
-	// A12's half of the snapshot, in the same transaction and for the same
-	// reason (§6.3): the hold is a question about the same rows at the same
-	// instant as R5, which folds it in. On a database where nothing was ever
-	// reaped this is one lookup on a partial index that returns no row (D3).
+	// The write-reap hold's half of the snapshot, in the same transaction and
+	// for the same reason: the hold is a question about the same rows at the
+	// same instant as R5, which folds it in. On a database where nothing was ever
+	// reaped this is one lookup on a partial index that returns no row.
 	reapHold, openReaps, err := loadReapHold(tx, runID)
 	if err != nil {
 		return nil, err
@@ -396,7 +395,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 // and deliberately so: the scheduler asks "what does this issue touch NOW", so
 // an operator's mid-run scope correction — which exists precisely to prevent a
 // collision — takes effect immediately. The CONTEXT BUNDLE asks a different
-// question and reads the snapshot (§6.6); the two answers legitimately differ.
+// question and reads the snapshot; the two answers legitimately differ.
 func loadIssueFacts(tx *sql.Tx, issueID int) (*issueFacts, error) {
 	var (
 		priority string
@@ -514,7 +513,7 @@ func issueDependenciesSatisfiedTx(tx *sql.Tx, issueID int) (bool, error) {
 
 // foreignHoldingStepsTx reads the claimed/running steps of every OTHER active
 // run IN THE SAME PROJECT. A scope is held against the whole repository, not
-// against one run, so a step claimed elsewhere excludes here (§6.5 S3) — but
+// against one run, so a step claimed elsewhere excludes here (S3) — but
 // only within the project (v12): scope globs are literal path prefixes with no
 // repo qualifier, so without the project predicate `internal/**` in one
 // repository would block `internal/**` in every other repository sharing the
@@ -693,7 +692,7 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 
 	// R6: the step's status is `pending`. A `skipped` step (its `when` was
 	// false at expansion) is excluded here, since expansion CREATES it skipped
-	// rather than omitting it (§5.3.1) — which is what keeps a downstream
+	// rather than omitting it — which is what keeps a downstream
 	// `after` resolvable.
 	//
 	// R6 is evaluated before R2-R5 despite its number because the other
@@ -754,7 +753,7 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 		return false, CondHeadroom
 	}
 
-	// The pre-gate hold (gates-trust §7.6.2 PG6), after every clause that
+	// The pre-gate hold, after every clause that
 	// describes the step's place in the run and BEFORE the budget: a step
 	// that every clause above admits, whose pre-gates a detached run is
 	// measuring right now, waits for that run's complete result rather than
@@ -774,7 +773,7 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 		return false, CondPreGatePending
 	}
 
-	// R7: budget headroom — S6's, a seam returning true at S3 (§6.3). Last,
+	// R7: budget headroom. Last,
 	// so a CondBudget refusal means every other condition held (claim.go).
 	if !s.budgetHeadroom(step) {
 		return false, CondBudget
@@ -828,7 +827,7 @@ func (s *Scheduler) IssueAwaitingDecision(issueID int) bool {
 	return false
 }
 
-// predecessorsDone is R3, and with it the fanout JOIN rules J1-J5 (§7.5, §2).
+// predecessorsDone is R3, and with it the fanout JOIN rules J1-J5.
 //
 //	J1  a fanned-out step joins when EVERY sibling is terminal
 //	    (done | skipped | superseded | failed-routed)
@@ -844,14 +843,14 @@ func (s *Scheduler) IssueAwaitingDecision(issueID int) bool {
 // ENDED — and a join waiting for it to be `done` would wait forever. J2 falls
 // out of the same test rather than being written separately: `waiting-human` is
 // not terminal, so the join does not advance, and the issue is parked exactly
-// as §2 says. Writing J2 as its own branch would be writing the same condition
+// as J2 says. Writing J2 as its own branch would be writing the same condition
 // twice and inviting the two to disagree.
 func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return false
 	}
-	// H5/H6: a materialized held step gets its SYNTHESIZED spec, which
+	// A materialized held step gets its SYNTHESIZED spec, which
 	// declares no `after` — so R3 is vacuous and it is ready the moment it
 	// exists. That is correct: the question it asks is already answered by data
 	// on disk, so there is nothing for it to wait on.
@@ -913,8 +912,8 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 // answers over: those at the step's OWN ordinal when there are any, otherwise
 // those at the HIGHEST ordinal below it.
 //
-// This is §7.4's rule applied to `after` edges rather than to `inputs`, and it
-// is required by the same fact about loops: re-instantiation covers the
+// This is the `inputs` ordinal rule applied to `after` edges, and it is
+// required by the same fact about loops: re-instantiation covers the
 // `after_loop` chain only, so a step at ordinal k routinely declares `after` a
 // step that exists at ordinal 0 alone. The fixture makes it concrete —
 // `review@1` declares `after = ["implement"]`, and `implement` is upstream of
@@ -965,7 +964,7 @@ func predecessorInstancesIn(steps []*db.Step, step *db.Step, predName string) []
 // The recorded routing is read from `done` instances only: a step-name routing
 // is the one routing that produces `done` (statusForRouting), and a superseded
 // or failed-routed predecessor's late routing is the ledger's record of an
-// INERT decision (§7.3 (3)) — opening a gate on it would give a stale lineage
+// INERT decision — opening a gate on it would give a stale lineage
 // the downstream effect the supersede exists to remove. Instances resolve by
 // predecessorInstances' own ordinal rule, so a gate at ordinal k is opened by
 // ITS ordinal's routing, falling back exactly where re-instantiation did not
@@ -1148,10 +1147,10 @@ func (s *Scheduler) QuorumMisses() []*db.Step {
 // would be incoherent if this one counted more broadly.
 //
 // THE MATERIALIZED DEFAULT IS NOT A QUORUM. Registration fills `min_siblings`
-// with `len(fanout)` when the author declared none (§11.1 "default = all"), so
+// with `len(fanout)` when the author declared none ("default = all"), so
 // reading the stored value at face value would impose "every sibling must be
 // `done`" on every ordinary fanout — and the fixture's `review`, with one
-// `skipped` sibling, would deadlock. §11.1's default means "the ordinary join",
+// `skipped` sibling, would deadlock. The default means "the ordinary join",
 // which is J1's every-sibling-TERMINAL rule and is already enforced above.
 //
 // A quorum is therefore checked only when the declaration is a REAL one: below
@@ -1196,7 +1195,7 @@ func instancesAt(steps []*db.Step, issueID int, name string, ordinal int) []*db.
 // scopeConflict is R4: does this step's issue scope intersect the scope of any
 // claimed or running step?
 //
-// S4: computed FRESH on every call, stored nowhere. Exclusion is symmetric, so
+// Computed FRESH on every call, stored nowhere. Exclusion is symmetric, so
 // the comparison is over scope lists rather than over any recorded claim.
 func (s *Scheduler) scopeConflict(step *db.Step) bool {
 	facts := s.issues[step.IssueID]
@@ -1255,24 +1254,22 @@ func (s *Scheduler) foreignScope(issueID int) []string {
 // classHeadroom is R5: the step's class has room under `[limits] max`.
 //
 // A class with no declared `max` is UNBOUNDED. Core ships no default of 1 and
-// no class named `write`: engine-spec §2 is explicit that "the reference
-// instance's config sets its write class to 1 — serialization is INSTANCE
-// POLICY, not core behavior", and a hardcoded writer serialization here would
-// be instance policy living in core, failing the genericity rule on its face
-// (§6.5).
+// no class named `write`: the reference instance's config sets its write
+// class to 1 — serialization is INSTANCE POLICY, not core behavior — and a
+// hardcoded writer serialization here would be instance policy living in
+// core, failing the genericity rule on its face.
 //
-// A15, STAGE 6: THE WRITE-REAP HOLD IS FOLDED IN HERE rather than added as an
-// R8. An unacknowledged reap OCCUPIES A SLOT in its class, which is exactly
-// what engine-spec §2's "holds write headroom" says — so the arithmetic gains a
-// term and the predicate gains no clause. The alternative, a separate
+// THE WRITE-REAP HOLD IS FOLDED IN HERE rather than added as an R8. An
+// unacknowledged reap OCCUPIES A SLOT in its class — it holds write headroom —
+// so the arithmetic gains a term and the predicate gains no clause. The alternative, a separate
 // ReadyCondition, would be two mechanisms answering one question ("how many
 // things may write to this tree right now"), and the two would disagree the
 // first time somebody changed one of them.
 func (s *Scheduler) classHeadroom(step *db.Step) bool {
 	limit, ok := s.limits[step.Class]
 	if !ok || limit.Max <= 0 {
-		// A21: an unbounded class gets neither ack rows nor the hold, and
-		// scheduling behaves exactly as it did at S5. The return is BEFORE the
+		// An unbounded class gets neither ack rows nor the hold, and
+		// scheduling behaves exactly as it did before the hold. The return is BEFORE the
 		// hold is consulted, so an unbounded class cannot be held even if a row
 		// somehow named it.
 		return true
@@ -1284,10 +1281,10 @@ func (s *Scheduler) classHeadroom(step *db.Step) bool {
 // shared by the predicate, the offer's rationing (ClaimablePrefix), and the
 // refusal's arithmetic (HeadroomDetail) so the three cannot disagree about
 // what occupies a slot — the same single-definition discipline that folded the
-// reap hold into headroom rather than adding an R8 (A15).
+// reap hold into headroom rather than adding a clause.
 //
 // The sum is PER STEP, not per class: the reap-hold term excludes a hold on
-// the step itself (W3 re-offers the reaped step), so two steps of one class
+// the step itself (the reaped step is re-offered), so two steps of one class
 // can legitimately see different occupancy.
 func (s *Scheduler) classInFlight(step *db.Step) int {
 	inFlight := 0
@@ -1309,7 +1306,7 @@ func (s *Scheduler) classInFlight(step *db.Step) int {
 	}
 	// The stage-6 term: a lapsed-but-unconfirmed writer is a thing that may
 	// still be writing to the tree, so it counts as in flight — against every
-	// step of its class EXCEPT the one it reaped, which W3 requires to be
+	// step of its class EXCEPT the one it reaped, which must be
 	// re-offered.
 	inFlight += s.unacknowledgedReapsInClass(step.Class, step.ID)
 	return inFlight
@@ -1358,15 +1355,15 @@ func (s *Scheduler) HeadroomDetail(step *db.Step) string {
 	return detail
 }
 
-// budgetHeadroom is R7. The seam engine-spine §6.3 left returning `true` is now
-// the real check, and it lives in budget.go beside the arithmetic it shares with
-// the claim's enforcement — the call site in Ready never moved, which is what
+// budgetHeadroom is R7. The seam that once returned `true` is now the real
+// check, and it lives in budget.go beside the arithmetic it shares with the
+// claim's enforcement — the call site in Ready never moved, which is what
 // the seam was written as a method for.
 
 // Expired reports whether a step's lease should be reaped: either the lease
 // lapsed, or the step passed `max_step_duration` measured from `started_ms`.
 //
-// The second half is the one that matters and is easy to omit. §11.1 makes
+// The second half is the one that matters and is easy to omit. The spec makes
 // `max_step_duration` a SCHEDULE-TO-CLOSE bound evaluated against `started_ms`,
 // "independent of heartbeats — so a runaway executor cannot renew forever". A
 // step past it is reaped even with a live lease and a fresh heartbeat, which is
@@ -1384,8 +1381,8 @@ func (s *Scheduler) HeadroomDetail(step *db.Step) string {
 //
 // This is a SUSPENSION, not an exemption. Nothing here writes `expires_ms`, so
 // a step whose lease lapsed during a pause is reaped by the first `next` after
-// the run returns to `active` — which is what preserves D1 (next.go's reap
-// ordering) and `max_step_duration` alike, both of which are statements about
+// the run returns to `active` — which is what preserves next.go's reap
+// ordering and `max_step_duration` alike, both of which are statements about
 // runs the engine is actually scheduling. Deliberately NOT implemented by
 // extending leases on resume: that would need a writer on the paused path, and
 // the reap is already lazy, so there is nothing to fix at resume time.
@@ -1426,7 +1423,7 @@ func leaseLapsed(step *db.Step, nowMS int64) bool {
 	return lease.Held() && !lease.Live(nowMS)
 }
 
-// SortSteps orders a ready set by PRIORITY THEN AGE (§2: "Ordering: priority
+// SortSteps orders a ready set by PRIORITY THEN AGE ("Ordering: priority
 // then age").
 //
 // Priority is the ISSUE's, ranked by planner.PriorityRank — the same ranking
@@ -1617,7 +1614,7 @@ func (s *Scheduler) LoopHoldReason() string {
 // reason=budget headroom X < cost Y".
 //
 // Same contract as LoopHoldReason and HeldReason: empty whenever nothing was
-// withheld, so a run with no cap — B29's dormancy — carries no new field on
+// withheld, so a run with no cap — dormant — carries no new field on
 // the wire. A withheld step is not refused and not failed; it is simply not
 // offered yet, and the difference between that and "there is no work" is the
 // whole reason this string exists.
@@ -1823,7 +1820,7 @@ func (s *Scheduler) grantScope(step *db.Step, granted map[int][]string) {
 // row THIS OFFER has already admitted?
 //
 // Unlimited rations nothing — `unlimited()` is checked first, so the dormant
-// path (D1) never runs this arithmetic. Otherwise the check is the snapshot's
+// path never runs this arithmetic. Otherwise the check is the snapshot's
 // own `spend() + cost <= cap`, widened by `admittedCost`: the same "check
 // before consuming" discipline `offerHeadroom` and `scopeAdmits` already keep
 // (the doc comment above `claimablePass` states it once for all three). The

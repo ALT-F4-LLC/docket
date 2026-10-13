@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Section ZE: v5 migration, CAS --if-version, and idempotency keys
 #
-# Covers the storage half of the reliability delta (docs/design/engine-spec.md
-# §5; TDD docs/tdd/reliability-delta.md): the v4→v5 migration, version CAS
-# columns, --if-version on mutating verbs, versions in .data under v2, and
-# idempotency keys on create verbs.
+# Covers the storage half of the reliability delta: the v4→v5 migration,
+# version CAS columns, --if-version on mutating verbs, versions in .data under
+# v2, and idempotency keys on create verbs.
 #
-# ZE1 is the engine-spec §9.8 fixture proof — it re-runs at every future stage.
+# ZE1 is the fixture proof — it re-runs at every future stage.
 
 test_ze_cas_migration() {
   printf "Section ZE: CAS and v5 Migration"
@@ -14,7 +13,7 @@ test_ze_cas_migration() {
   local FIXTURE="$SCRIPT_DIR/qa/fixtures/v4-baseline.db"
 
   # ---------------------------------------------------------------------------
-  # ZE1: §9.8 — a v4 DB opens, migrates to v5, and reads identically.
+  # ZE1: a v4 DB opens, migrates to v5, and reads identically.
   # ---------------------------------------------------------------------------
 
   if [ ! -f "$FIXTURE" ]; then

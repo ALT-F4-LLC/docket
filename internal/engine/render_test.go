@@ -12,10 +12,10 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
-// §6.11 and §6.11.1 — rendering, and the pinned-template verification.
+// Rendering, and the pinned-template verification.
 
 // TestRenderUsesTheShippedDefault pins that the embedded template renders a
-// packet with the framing §6.11 requires: run/issue/step ids, scope, the input
+// packet with the required framing: run/issue/step ids, scope, the input
 // artifacts labeled in declared order, the pin list with hashes, and the output
 // instruction.
 func TestRenderUsesTheShippedDefault(t *testing.T) {
@@ -48,7 +48,7 @@ func TestRenderUsesTheShippedDefault(t *testing.T) {
 }
 
 // TestDefaultTemplateCarriesNoInstanceVocabulary is the genericity rule applied
-// to the packet layout (§6.11: "packet layout is core mechanics; packet content
+// to the packet layout ("packet layout is core mechanics; packet content
 // is instance data").
 //
 // The scripted gate checks the template's bytes too, but this asserts the
@@ -62,7 +62,7 @@ func TestDefaultTemplateCarriesNoInstanceVocabulary(t *testing.T) {
 	result, err := RenderStep(conn, stepID, "", nowMS)
 	testsupport.Must(t, err, "RenderStep: %v", err)
 
-	// The banned vocabulary of docs/design/genericity.md, as CONCEPTS the
+	// The genericity rule's banned vocabulary, as CONCEPTS the
 	// layout might introduce. The fixture legitimately supplies `implement` and
 	// `judge-*` as opaque executor values, so this checks the FRAMING the
 	// template itself emits — the lines it writes, not the data it interpolates.
@@ -89,7 +89,7 @@ func TestDefaultTemplateCarriesNoInstanceVocabulary(t *testing.T) {
 	for _, term := range bannedVocabulary(t) {
 		if strings.Contains(joined, term) {
 			t.Errorf("the packet's FRAMING carries a banned term (%q) — packet "+
-				"layout is core surface (§6.11, genericity.md):\n%s", term, joined)
+				"layout is core surface:\n%s", term, joined)
 		}
 	}
 }
@@ -126,16 +126,17 @@ func bannedVocabulary(t *testing.T) []string {
 	return out
 }
 
-// TestPinnedTemplateDriftIsRefused is §6.11.1, and the hole it closes.
+// TestPinnedTemplateDriftIsRefused is the pinned-template check, and the hole it
+// closes.
 //
 // Without this check a post-activation edit to a pinned template silently
 // changes every packet the run renders from then on, WHILE `step context` stays
-// byte-identical — so the §9-item-5 determinism goldens keep passing and the
+// byte-identical — so the determinism goldens keep passing and the
 // thing actually handed to a worker has changed. That is the one gap in the
 // reproducibility story.
 //
 // The test edits a pinned template between two renders and requires the second
-// to refuse. Its shape is §8.3's golden-sensitivity check, for the same reason:
+// to refuse. Its shape is the golden-sensitivity check's, for the same reason:
 // a verification that cannot fail is not a verification.
 func TestPinnedTemplateDriftIsRefused(t *testing.T) {
 	conn := mustDB(t)
@@ -180,7 +181,7 @@ func TestPinnedTemplateDriftIsRefused(t *testing.T) {
 	// bytes and an --if-version mismatch.
 	code, ok := CodeOf(err)
 	if !ok || code != CodeConflict {
-		t.Errorf("code = %v, want CONFLICT (§6.11.1)", code)
+		t.Errorf("code = %v, want CONFLICT", code)
 	}
 
 	// BOTH hashes are named, because an operator needs to know whether to
@@ -222,9 +223,9 @@ func hasTwoHashes(msg string) bool {
 	return len(found) >= 2 && found[0] != found[1]
 }
 
-// TestAbsentPinnedTemplateIsNotFound is §6.11.1's third row: the pin says the
-// run depends on the file, so its absence is a missing dependency (NOT_FOUND,
-// exit 2) rather than a bad request.
+// TestAbsentPinnedTemplateIsNotFound is templateSource's third row: the pin
+// says the run depends on the file, so its absence is a missing dependency
+// (NOT_FOUND, exit 2) rather than a bad request.
 func TestAbsentPinnedTemplateIsNotFound(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)
@@ -247,16 +248,16 @@ func TestAbsentPinnedTemplateIsNotFound(t *testing.T) {
 		t.Fatal("an absent pinned template rendered")
 	}
 	if code, _ := CodeOf(err); code != CodeNotFound {
-		t.Errorf("code = %v, want NOT_FOUND (§6.11.1)", code)
+		t.Errorf("code = %v, want NOT_FOUND", code)
 	}
 	if !strings.Contains(err.Error(), "pinned") {
 		t.Errorf("the refusal does not say the file was pinned: %v", err)
 	}
 }
 
-// TestUnpinnedTemplateRendersUnverifiedAndSaysSo is §6.11.1's fourth row: the
-// packet is reproducible only to the extent the operator chose, and the gap is
-// REPORTED rather than assumed.
+// TestUnpinnedTemplateRendersUnverifiedAndSaysSo is templateSource's fourth
+// row: the packet is reproducible only to the extent the operator chose, and
+// the gap is REPORTED rather than assumed.
 func TestUnpinnedTemplateRendersUnverifiedAndSaysSo(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -473,8 +474,7 @@ func assertContractDegraded(t *testing.T, packet string) {
 // is ONE monotonic, 0-based, spent-count column, and every surface — the
 // ready-steps row `next --run` reads, the rendered packet header, and a
 // subsequent `step show`-equivalent read — reports the SAME column, just
-// sampled at different moments relative to a claim. See
-// docs/tdd/attempt-numbering.md.
+// sampled at different moments relative to a claim.
 func TestAttemptNumberingPreAndPostClaim(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)

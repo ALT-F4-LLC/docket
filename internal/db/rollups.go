@@ -11,10 +11,10 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// Run-scoped rollups for `run report` (docs/tdd/runs-dispatch.md §4.10).
+// Run-scoped rollups for `run report`.
 //
 // EVERY QUERY HERE ORDERS BY A TOTAL KEY — id, then name, then value — never by
-// map iteration (R9). The report is deterministic given the same rows, for the
+// map iteration. The report is deterministic given the same rows, for the
 // same golden-stability reason `referencedSchemas` is ordered: a rollup that
 // ranged a Go map would produce a different document on every invocation, and
 // an operator diffing two reports would see noise.
@@ -47,8 +47,8 @@ type VerdictCount struct {
 	// partitioning with them, because it describes WHEN the row was produced,
 	// not what it decided.
 	//
-	// It matters because a pre-gate NEVER ROUTES: §11.1 runs it at claim, with
-	// its results carried into the step's context bundle, and PG4 excludes it
+	// It matters because a pre-gate NEVER ROUTES: it runs at claim, with
+	// its results carried into the step's context bundle, and is excluded
 	// from the saga's verdict. Without this count `ac-commands: pass 0, fail 1`
 	// read identically whether the failure blocked the step or was an advisory
 	// input to it — RUN-61 had three such rows and a conductor nearly reported
@@ -60,12 +60,12 @@ type VerdictCount struct {
 	Pre int `json:"pre"`
 }
 
-// GateRollup counts a run's gate results per gate name (R4).
+// GateRollup counts a run's gate results per gate name.
 func GateRollup(db *sql.DB, runID int) ([]VerdictCount, error) {
 	return verdictRollup(db, `gate_results`, `gate`, `stub_entry`, `pre`, runID)
 }
 
-// ActionRollup is the same rollup over `action_results` (R5).
+// ActionRollup is the same rollup over `action_results`.
 //
 // The same shape, deliberately: gates and actions are the two execution seams
 // and their results carry the same verdict vocabulary, so a reader who
@@ -132,8 +132,8 @@ func verdictRollup(
 		})
 }
 
-// ResultTrailRow is one step's one result — the per-step trail R4 and R5 carry
-// beside their counts.
+// ResultTrailRow is one step's one result — the per-step trail the gate and
+// action rollups carry beside their counts.
 //
 // StepID and Issue joined on (DKT-77): instance names collide across issues in
 // one run — two issues running the same workflow both have an `implement@0` —
@@ -164,7 +164,8 @@ func tailOf(s string) string {
 	return "…" + s[len(s)-trailOutputTail:]
 }
 
-// GateTrail is R4's per-step trail, and ActionTrail is R5's.
+// GateTrail is the gate rollup's per-step trail, and ActionTrail is the action
+// rollup's.
 func GateTrail(db *sql.DB, runID int) ([]ResultTrailRow, error) {
 	return resultTrail(db, `gate_results`, `gate`, runID)
 }
@@ -212,7 +213,7 @@ func resultTrail(db *sql.DB, table, subject string, runID int) ([]ResultTrailRow
 		})
 }
 
-// MetadataRollup is R7: step `metadata` keys rolled up to their distinct values
+// MetadataRollup rolls step `metadata` keys up to their distinct values
 // with counts, VERBATIM AND UNINTERPRETED.
 //
 // THIS IS THE GENERICITY LINE AT ITS THINNEST, so it is worth stating what the
@@ -228,7 +229,7 @@ func resultTrail(db *sql.DB, table, subject string, runID int) ([]ResultTrailRow
 // author's bag of strings means.
 //
 // The nesting is key -> value -> count, and both levels are returned SORTED so
-// R9's determinism holds through a two-level structure that a naive
+// the report's determinism holds through a two-level structure that a naive
 // implementation would emit in map order.
 func MetadataRollup(db *sql.DB, runID int) ([]MetadataKeyRollup, error) {
 	rows, err := db.Query(
@@ -464,7 +465,7 @@ func rollupMetadataRows(rows *sql.Rows) ([]MetadataKeyRollup, error) {
 			// failing the report. The bag is opaque and was never validated as
 			// JSON at write time by anything this report can rely on, and a
 			// read verb that refused because one row held odd bytes would be
-			// useless during exactly the run an operator wants to inspect (R10).
+			// useless during exactly the run an operator wants to inspect.
 			continue
 		}
 		for key, value := range bag {
@@ -528,7 +529,7 @@ func RenderMetadataValue(v any) string {
 }
 
 // sortedMapKeys orders one map level. Both levels of the rollup go through it,
-// so R9's determinism holds through a two-level structure a naive
+// so the report's determinism holds through a two-level structure a naive
 // implementation would emit in map order.
 func sortedMapKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
@@ -615,7 +616,7 @@ type SilentVoteSeatRow struct {
 // SilentVoteSeatsFor enumerates the casts VoteUsageCoverageFor counts as
 // silent, through the SAME membership builder — so the list and the count it
 // explains cannot disagree about which casts belong to the run. Ordered by
-// (proposal, voter): a total key, per R9.
+// (proposal, voter): a total key, so the report stays deterministic.
 func SilentVoteSeatsFor(db *sql.DB, scope, prefix string, extraIDs ...int) ([]SilentVoteSeatRow, error) {
 	clause, args := proposalMembership(scope, prefix, extraIDs)
 	rows, err := db.Query(

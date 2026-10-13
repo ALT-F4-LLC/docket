@@ -16,10 +16,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket events list --follow` — the polling subscription
-// (docs/tdd/events-follow.md §4).
+// `docket events list --follow` — the polling subscription.
 //
-// THERE IS NO DAEMON (engine-spec §7, engine-core §10). Nothing is registered,
+// THERE IS NO DAEMON. Nothing is registered,
 // nothing is notified, and no process outlives the command. `--follow` is
 // `events list` on a ticker, with a cursor that advances between cycles — which
 // is the entire difference between it and the verb it extends.
@@ -31,16 +30,16 @@ import (
 // shape this verb wants (internal/cli/next.go). Rebuilding it here would be a
 // second loop to keep in agreement with the first.
 
-// THE POLL PERIOD IS `--interval`, THE PERSISTENT ROOT FLAG (W2). It defaults
+// THE POLL PERIOD IS `--interval`, THE PERSISTENT ROOT FLAG. It defaults
 // to 2s and has a 500ms floor, both defined once in root.go and shared with
 // `--watch`. This file deliberately declares no interval flag of its own: a
 // second one would shadow the global with its own default and bypass its
 // minimum, which is two flags of one name disagreeing about what they mean.
 
-// runEventsFollow is W1: the same ListEvents call, once per tick, with the
+// runEventsFollow is the same ListEvents call, once per tick, with the
 // cursor carried between cycles.
 //
-// THE CURSOR ADVANCES TO THE LAST SEQ ACTUALLY RETURNED (W3) — never to
+// THE CURSOR ADVANCES TO THE LAST SEQ ACTUALLY RETURNED — never to
 // MAX(seq), never to a clock. That is what makes the cross-cycle property hold:
 // an event inserted while a cycle was reading lands above the cursor the cycle
 // set, so the next cycle returns it. Advancing to anything the read did not
@@ -89,7 +88,7 @@ func runEventsFollow(cmd *cobra.Command) error {
 	jsonMode, jsonVersion := jsonModeOf(cmd)
 	quietMode, _ := cmd.Flags().GetBool("quiet")
 
-	// Ctrl-C ends a follow (W6). Interrupting is how this verb terminates
+	// Ctrl-C ends a follow. Interrupting is how this verb terminates
 	// normally, so the signal cancels the context and RunWatch returns nil —
 	// exit 0, not a failure.
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -117,9 +116,9 @@ func runEventsFollow(cmd *cobra.Command) error {
 // followOptions is one follow's inputs.
 //
 // The loop takes this rather than a *cobra.Command so the property tests can
-// drive it directly — W3's cursor discipline and W8's termination are behaviors
-// of the LOOP, and a test that had to spawn a process to observe them would be
-// testing the process instead.
+// drive it directly — the cursor discipline and the GONE termination are
+// behaviors of the LOOP, and a test that had to spawn a process to observe them
+// would be testing the process instead.
 type followOptions struct {
 	conn        *sql.DB
 	query       engine.EventQuery
@@ -131,7 +130,7 @@ type followOptions struct {
 	stderr      io.Writer
 }
 
-// followEvents is the loop itself: §4's clauses, one per comment below.
+// followEvents is the loop itself: its rules, one per comment below.
 func followEvents(ctx context.Context, opts followOptions) error {
 	// cursor is the follow's state. It lives here rather than inside the
 	// per-cycle closure because it is the ONE thing that must survive a cycle.
@@ -149,14 +148,14 @@ func followEvents(ctx context.Context, opts followOptions) error {
 	// whole feed, not a window above a cursor, so a second tailed read would
 	// re-print the same newest N every interval and never advance. So the first
 	// cycle selects the newest N, the cursor advances over what it returned by
-	// the ordinary W3 rule, and every cycle after it is a plain `--since` read.
+	// the ordinary cursor rule, and every cycle after it is a plain `--since` read.
 	//
 	// A first cycle that returns NOTHING leaves the cursor at Since (0 — `--tail`
 	// and `--since` are mutually exclusive), which is correct: an empty feed has
 	// nothing to skip past, and whatever is written next lands above 0.
 	tail := opts.query.Tail
 
-	// fatal carries a TERMINAL condition out of the loop (W8).
+	// fatal carries a TERMINAL condition out of the loop.
 	//
 	// It exists because RunWatch tolerates two errors before giving up — the
 	// right policy for a transient failure, and the wrong one for GONE. A cursor
@@ -166,7 +165,7 @@ func followEvents(ctx context.Context, opts followOptions) error {
 	// follow stops on the FIRST one, with one message.
 	var fatal error
 
-	// followCtx is cancelled either by a signal (W6) or by the fatal path above.
+	// followCtx is cancelled either by a signal or by the fatal path above.
 	followCtx, endFollow := context.WithCancel(ctx)
 	defer endFollow()
 
@@ -175,7 +174,7 @@ func followEvents(ctx context.Context, opts followOptions) error {
 		JSONMode:    opts.jsonMode,
 		JSONVersion: opts.jsonVersion,
 		QuietMode:   opts.quietMode,
-		// W4: IsTTY IS FALSE UNCONDITIONALLY, and that is the deliberate
+		// IsTTY IS FALSE UNCONDITIONALLY, and that is the deliberate
 		// departure from `next --watch`.
 		//
 		// RunWatch clears the screen between cycles only when IsTTY && !JSONMode.
@@ -210,7 +209,7 @@ func followEvents(ctx context.Context, opts followOptions) error {
 			return err
 		}
 
-		// W3: advance only over what this read produced.
+		// Advance only over what this read produced.
 		if n := len(page.Events); n > 0 {
 			cursor = page.Events[n-1].Seq
 		}
@@ -251,10 +250,10 @@ func followEvents(ctx context.Context, opts followOptions) error {
 		return nil
 	})
 
-	// W8: GONE mid-follow TERMINATES THE FOLLOW.
+	// GONE mid-follow TERMINATES THE FOLLOW.
 	//
 	// The alternative — resetting the cursor to the new retained minimum and
-	// carrying on — is precisely the silent skip engine-spec §3 forbids
+	// carrying on — is precisely the silent skip the feed contract forbids
 	// ("returns GONE rather than silently skipping"). A follower that resumed
 	// would print a feed with a hole in it and no indication there was one. It
 	// exits with the code, and the message names the seq to resume from, so an

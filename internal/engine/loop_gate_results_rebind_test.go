@@ -117,7 +117,8 @@ func driveGateRebindRoundZero(t *testing.T, conn *sql.DB, e *Engine) {
 	}
 }
 
-// recordedGate is the one field of the §11.4 shape these tests route on.
+// recordedGate is the one field of the recorded gate-result shape these tests
+// route on.
 type recordedGate struct {
 	Gate    string `json:"gate"`
 	Verdict string `json:"verdict"`

@@ -18,16 +18,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// PACKET COMPOSITION — the resolution half
-// (docs/tdd/packet-composition.md §1.2, §1.3, §1.4).
+// PACKET COMPOSITION — the resolution half.
 //
-// engine-core §8 enumerates the assembled packet: framing header, THE STEP'S
-// DECLARED FILE AT ITS PINNED VERSION, THE FILES ITS FRONTMATTER DECLARES, the
-// input artifacts, the output instruction. Items 2 and 3 were absent entirely —
-// `== PINNED` emitted a path and a checksum, so an executor received a filename
-// for the document it was supposed to work from, and §8's own property ("nothing
-// in it is optional — no pointers, no 'read if needed'") was inverted by the
-// shipped template.
+// The assembled packet is: framing header, THE STEP'S DECLARED FILE AT ITS
+// PINNED VERSION, THE FILES ITS FRONTMATTER DECLARES, the input artifacts, the
+// output instruction. Items 2 and 3 were absent entirely — `== PINNED` emitted
+// a path and a checksum, so an executor received a filename for the document
+// it was supposed to work from, and the packet's own property ("nothing in it
+// is optional — no pointers, no 'read if needed'") was inverted by the shipped
+// template.
 //
 // ASSEMBLY STAYS SNAPSHOT-PINNED. Bytes are admitted only when they hash to what
 // activation recorded, so "same step => same packet, byte-identical, even
@@ -73,9 +72,9 @@ const packetFrontmatterFence = "---"
 
 // resolvePacketFiles resolves a step's declared entries to verified bytes.
 //
-// Order is fully determined (§1.4): declared order, and after each entry
+// Order is fully determined: declared order, and after each entry
 // immediately its own includes in declared order. Deterministic and stable,
-// which R9 requires and the §9-item-5 goldens assert.
+// which determinism requires and the goldens assert.
 //
 // De-duplication: a file reachable twice — declared directly and via an include,
 // or via two includes — is inlined ONCE, at its first position. Repeating it
@@ -84,8 +83,8 @@ const packetFrontmatterFence = "---"
 // DEPTH IS EXACTLY ONE. Includes do not themselves include. That is a hard stop
 // rather than a limitation to lift later: unbounded recursion needs cycle
 // detection and a depth cap, and every level makes the closure size harder for
-// an author to predict at the moment the §11.1 caps need it predictable. One
-// level matches engine-core §8's structure precisely — the file, and the files
+// an author to predict at the moment the caps need it predictable. One
+// level matches the packet's structure precisely — the file, and the files
 // it declares.
 //
 // A declared entry is RELATIVE to an instance-config root, while a pin's ref is
@@ -155,7 +154,7 @@ func walkPacketFiles(entries []string, visit func(string) ([]string, error)) err
 	return nil
 }
 
-// readPinnedPacketFile is §1.2's ladder for one file.
+// readPinnedPacketFile is the resolution ladder for one file.
 //
 //	pinned, bytes match    inlined
 //	pinned, bytes differ   CONFLICT (exit 4), BOTH hashes named
@@ -168,7 +167,7 @@ func walkPacketFiles(entries []string, visit func(string) ([]string, error)) err
 // packet entry is chosen at AUTHORING time and pinned at activation, so an
 // unpinned one means the file was not in the config directory when the run
 // activated — reading the live tree would break the byte-identical property
-// outright. Refusing is the only answer consistent with §8's Properties clause.
+// outright. Refusing is the only answer consistent with the packet's no-pointers property.
 //
 // That row's MESSAGE then splits by whether the ref resolves on disk (DKT-818):
 // a ref nothing ever wrote needs writing, while one sitting under a config root

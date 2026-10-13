@@ -124,7 +124,7 @@ func TestTalliedVoteEventNamesScoreAndBallotsSeparately(t *testing.T) {
 }
 
 // TestTalliedVoteEventWithoutAScoreSaysSo: a proposal finalized with no
-// weighted score (an operator's manual commit, §8.4) still labels both fields
+// weighted score (an operator's manual commit) still labels both fields
 // rather than printing a bare parenthesis.
 func TestTalliedVoteEventWithoutAScoreSaysSo(t *testing.T) {
 	conn := mustDB(t)

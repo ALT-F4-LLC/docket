@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-// v8Tables are the tables the v8 DDL creates (TDD docs/tdd/gates-trust.md §4.2,
-// §4.5). Stated here independently of v8Sentinels so the sentinel test cannot
-// pass by both lists drifting together — the same discipline v7Tables applies.
+// v8Tables are the tables the v8 DDL creates. Stated here independently of
+// v8Sentinels so the sentinel test cannot pass by both lists drifting together
+// — the same discipline v7Tables applies.
 var v8Tables = []string{
 	"gate_results",
 	"trust_cache",
@@ -34,10 +34,10 @@ func TestMigrateToV8(t *testing.T) {
 	if v != currentSchemaVersion {
 		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
 	}
-	// The stage pin moved with stage 5: v8's own assertion lived here while S4
-	// was the head stage, and S5 ships v9 (payloads-thresholds §2). The pin now
-	// lives in migrate_v9_test.go's TestMigrateToV9; what this test still owes is
-	// that the v8 STRUCTURES survive a migration that now runs past them.
+	// The stage pin moved with v9: v8's own assertion lived here while v8 was
+	// the head schema. The pin now lives in migrate_v9_test.go's
+	// TestMigrateToV9; what this test still owes is that the v8 STRUCTURES
+	// survive a migration that now runs past them.
 	if currentSchemaVersion < 8 {
 		t.Errorf("currentSchemaVersion = %d; v8 structures are still required",
 			currentSchemaVersion)
@@ -57,10 +57,10 @@ func TestMigrateToV8(t *testing.T) {
 	}
 }
 
-// TestRewindGuardProbesEveryV8Sentinel is §4.1's obligation, and it derives the
-// table list from the DDL itself: a later edit that adds a CREATE TABLE to v8DDL
-// and forgets the sentinel fails HERE rather than shipping a database that the
-// guard silently declines to repair.
+// TestRewindGuardProbesEveryV8Sentinel is the rewind guard's obligation, and
+// it derives the table list from the DDL itself: a later edit that adds a
+// CREATE TABLE to v8DDL and forgets the sentinel fails HERE rather than
+// shipping a database that the guard silently declines to repair.
 func TestRewindGuardProbesEveryV8Sentinel(t *testing.T) {
 	re := regexp.MustCompile(`(?i)CREATE TABLE IF NOT EXISTS\s+(\w+)`)
 	var created []string
@@ -94,7 +94,7 @@ func TestRewindGuardProbesEveryV8Sentinel(t *testing.T) {
 }
 
 // stampVersion forces the recorded schema version, so a test can construct the
-// half-migrated shapes U3 and U4 describe.
+// half-migrated shapes the rewind tests describe.
 func stampVersion(t *testing.T, db *sql.DB, v int) {
 	t.Helper()
 	if _, err := db.Exec(
@@ -127,7 +127,7 @@ func migratedToV7(t *testing.T) *sql.DB {
 
 // seedTrailStep inserts a run and a step carrying the given gate_trail bytes,
 // returning the step id. It writes the columns directly because the point is to
-// reproduce what an S3-era binary STORED, not what today's writers produce.
+// reproduce what a pre-v8 binary STORED, not what today's writers produce.
 func seedTrailStep(t *testing.T, db *sql.DB, trail string, updatedMS int64) (runID, stepID int) {
 	t.Helper()
 
@@ -170,7 +170,7 @@ func seedTrailStep(t *testing.T, db *sql.DB, trail string, updatedMS int64) (run
 	return int(rid), int(sid)
 }
 
-// TestMigrateV8U1TrackerShape is U1: this repo's own tracker — stamped 7, every
+// TestMigrateV8U1TrackerShape: this repo's own tracker — stamped 7, every
 // v7 sentinel present, `steps` empty because the tracker has issues but no runs.
 // The tracker is dogfooded across the stage, so this is the shape the operator's
 // own database actually has when the group-2 binary first opens it.
@@ -182,7 +182,7 @@ func TestMigrateV8U1TrackerShape(t *testing.T) {
 		t.Fatalf("counting steps: %v", err)
 	}
 	if steps != 0 {
-		t.Fatalf("fixture has %d steps, want 0 (U1 is the no-runs shape)", steps)
+		t.Fatalf("fixture has %d steps, want 0 (the tracker is the no-runs shape)", steps)
 	}
 
 	if err := Migrate(db); err != nil {
@@ -203,9 +203,9 @@ func TestMigrateV8U1TrackerShape(t *testing.T) {
 	}
 }
 
-// TestMigrateV8U2BackfillsTheTrail is U2 and the G1/G2/G3 clauses together: a
-// populated trail becomes one row per element, in order, every row stamped
-// `stub = 1`, and the trail column KEEPS its original bytes.
+// TestMigrateV8U2BackfillsTheTrail: a populated trail becomes one row per
+// element, in order, every row stamped `stub = 1`, and the trail column KEEPS
+// its original bytes.
 func TestMigrateV8U2BackfillsTheTrail(t *testing.T) {
 	db := migratedToV7(t)
 
@@ -241,7 +241,7 @@ func TestMigrateV8U2BackfillsTheTrail(t *testing.T) {
 	} {
 		r := got[i]
 		if r.Ordinal != i {
-			t.Errorf("row %d: ordinal = %d, want %d (G1 is array order)", i, r.Ordinal, i)
+			t.Errorf("row %d: ordinal = %d, want %d (ordinal is array order)", i, r.Ordinal, i)
 		}
 		if r.Gate != want.gate {
 			t.Errorf("row %d: gate = %q, want %q", i, r.Gate, want.gate)
@@ -264,18 +264,18 @@ func TestMigrateV8U2BackfillsTheTrail(t *testing.T) {
 		if r.Verdict != want.verdict {
 			t.Errorf("row %d: verdict = %q, want %q", i, r.Verdict, want.verdict)
 		}
-		// G2: the stamp is a FACT — every trail result came from S3's
+		// The stamp is a FACT — every trail result came from the pre-v8
 		// pass-through runner, which is the only thing that ever wrote one.
 		if !r.Stub {
-			t.Errorf("row %d: stub = false, want true (G2 stamps every migrated row)", i)
+			t.Errorf("row %d: stub = false, want true (every migrated row is stamped)", i)
 		}
-		// The step's updated_at_ms is the honest approximation (G1).
+		// The step's updated_at_ms is the honest approximation.
 		if r.CreatedAtMS != 777 {
 			t.Errorf("row %d: created_at_ms = %d, want 777", i, r.CreatedAtMS)
 		}
 	}
 
-	// G3: the trail column is RETAINED, byte-identical. It is the migration's
+	// The trail column is RETAINED, byte-identical. It is the migration's
 	// own evidence, and the never-mutate rule forbids dropping it.
 	var kept string
 	if err := db.QueryRow(
@@ -287,8 +287,8 @@ func TestMigrateV8U2BackfillsTheTrail(t *testing.T) {
 	}
 }
 
-// TestMigrateV8U3RewindsWhenGateResultsAbsent is U3 — the row that exists
-// because of the v7 lesson. Stamped 8 with `gate_results` missing is exactly the
+// TestMigrateV8U3RewindsWhenGateResultsAbsent is the case that exists because
+// of the v7 lesson. Stamped 8 with `gate_results` missing is exactly the
 // group-2-partial dogfood shape, and a guard that trusted the stamp would leave
 // that database permanently incomplete.
 func TestMigrateV8U3RewindsWhenGateResultsAbsent(t *testing.T) {
@@ -311,9 +311,9 @@ func TestMigrateV8U3RewindsWhenGateResultsAbsent(t *testing.T) {
 	}
 }
 
-// TestMigrateV8U4RewindsWhenTrustCacheAbsent is U4: the same rewind, driven by
-// the OTHER sentinel. Probing only the first table would pass U3 and fail here,
-// which is why the guard probes the full set.
+// TestMigrateV8U4RewindsWhenTrustCacheAbsent: the same rewind, driven by the
+// OTHER sentinel. Probing only the first table would pass the gate_results
+// rewind test and fail here, which is why the guard probes the full set.
 func TestMigrateV8U4RewindsWhenTrustCacheAbsent(t *testing.T) {
 	db := migratedToV7(t)
 	if err := Migrate(db); err != nil {
@@ -334,7 +334,7 @@ func TestMigrateV8U4RewindsWhenTrustCacheAbsent(t *testing.T) {
 	}
 }
 
-// TestMigrateV8U5IsIdempotent is U5 and G4: re-running the backfill against an
+// TestMigrateV8U5IsIdempotent: re-running the backfill against an
 // already-migrated database duplicates nothing. Idempotence is not optional —
 // the rewind guard re-runs this migration against a partially-migrated database
 // by design.
@@ -363,7 +363,7 @@ func TestMigrateV8U5IsIdempotent(t *testing.T) {
 	}
 
 	if len(first) != len(second) {
-		t.Errorf("re-running the migration changed the row count: %d -> %d (G4)",
+		t.Errorf("re-running the migration changed the row count: %d -> %d",
 			len(first), len(second))
 	}
 	if len(second) != 1 {
@@ -371,10 +371,10 @@ func TestMigrateV8U5IsIdempotent(t *testing.T) {
 	}
 }
 
-// TestMigrateV8U6FromTheV4Baseline is U6: the committed fixture migrates 4->8 in
-// ONE pass, and the v8 structures are asserted present BEFORE any golden diff is
-// trusted — engine-spine §3's rule, because a golden diff against a database
-// that failed to migrate passes vacuously.
+// TestMigrateV8U6FromTheV4Baseline: the committed fixture migrates 4->8 in ONE
+// pass, and the v8 structures are asserted present BEFORE any golden diff is
+// trusted, because a golden diff against a database that failed to migrate
+// passes vacuously.
 func TestMigrateV8U6FromTheV4Baseline(t *testing.T) {
 	src := filepath.Join("..", "..", "scripts", "qa", "fixtures", "v4-baseline.db")
 	if _, err := os.Stat(src); err != nil {
@@ -413,7 +413,7 @@ func TestMigrateV8U6FromTheV4Baseline(t *testing.T) {
 	}
 }
 
-// TestMigrateV8U7MalformedTrail is U7 and G5: a trail that does not parse is
+// TestMigrateV8U7MalformedTrail: a trail that does not parse is
 // RECORDED, not fatal. A migration that aborted on one malformed JSON blob would
 // make the database unopenable — the failure belongs where an operator sees it.
 func TestMigrateV8U7MalformedTrail(t *testing.T) {
@@ -421,7 +421,7 @@ func TestMigrateV8U7MalformedTrail(t *testing.T) {
 	_, stepID := seedTrailStep(t, db, `{"not":"an array"`, 42)
 
 	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate must succeed despite a malformed trail (G5): %v", err)
+		t.Fatalf("Migrate must succeed despite a malformed trail: %v", err)
 	}
 
 	got, err := GateResultsForStep(db, stepID)
@@ -443,10 +443,10 @@ func TestMigrateV8U7MalformedTrail(t *testing.T) {
 	}
 }
 
-// TestGateTrailIsNotWrittenAtV8 is G3's other half: the column is retained, but
-// nothing at v8 WRITES it. The assertion is source-level because the property is
-// about which writer the runner reaches, and a runtime assertion would only
-// cover the paths a test happened to drive.
+// TestGateTrailIsNotWrittenAtV8 is the retention rule's other half: the column
+// is retained, but nothing at v8 WRITES it. The assertion is source-level
+// because the property is about which writer the runner reaches, and a runtime
+// assertion would only cover the paths a test happened to drive.
 func TestGateTrailIsNotWrittenAtV8(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "engine", "saga.go"))
 	if err != nil {
@@ -454,14 +454,14 @@ func TestGateTrailIsNotWrittenAtV8(t *testing.T) {
 	}
 	if strings.Contains(string(src), "SetStepGateTrailTx") {
 		t.Error("saga.go still calls SetStepGateTrailTx; at v8 the runner writes " +
-			"gate_results (G3)")
+			"gate_results")
 	}
 }
 
-// TestUnmatchedGateResultStoresNulls is §4.2's field-shape decision, which is a
+// TestUnmatchedGateResultStoresNulls is the field-shape decision, which is a
 // security property rather than a nicety: `argv` and `exit` are NULL on an
 // unmatched result, not `[]` and `0`. A zero exit code on a gate that never ran
-// is exactly the confusion T11 exists to prevent.
+// is exactly the confusion the gate-forgery threat model exists to prevent.
 func TestUnmatchedGateResultStoresNulls(t *testing.T) {
 	db := mustOpen(t)
 	if err := Initialize(db); err != nil {
@@ -507,8 +507,8 @@ func TestUnmatchedGateResultStoresNulls(t *testing.T) {
 	if len(got) != 1 || got[0].Exit != nil || got[0].Argv != nil {
 		t.Errorf("round-tripped result = %+v, want nil Argv and nil Exit", got[0])
 	}
-	// N4: nothing this stage records is a stub.
+	// Nothing this stage records is a stub.
 	if got[0].Stub {
-		t.Error("stub = true on a result this stage recorded; stub means S3 pass-through")
+		t.Error("stub = true on a result this stage recorded; stub means pre-v8 pass-through")
 	}
 }

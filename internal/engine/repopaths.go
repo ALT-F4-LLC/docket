@@ -7,8 +7,8 @@ import (
 // RepoPaths carries the per-project execution facts a runner needs.
 //
 // The three fields USED TO BE ONE VALUE — the parent of the .docket store
-// stood in for all of them, which §3.4 P1 called "so a gate's binding check
-// and its cwd cannot disagree". A store shared by every project is exactly
+// stood in for all of them, so a gate's binding check and its cwd could not
+// disagree. A store shared by every project is exactly
 // what breaks that identity apart: where a command runs (ExecRoot), which
 // project authorized it (Identity), and which lockfile serializes its tree
 // (LockPath) are separate facts once the store no longer lives inside the
@@ -17,13 +17,13 @@ import (
 // sees byte-identical behavior.
 type RepoPaths struct {
 	// ExecRoot is the cwd every gate and action runs in, and the containment
-	// boundary for their binaries (§5.2.1 R2/R3).
+	// boundary for their binaries.
 	ExecRoot string
-	// Identity is what trust entries bind to (§3.4 P1) — the project, not the
+	// Identity is what trust entries bind to — the project, not the
 	// checkout.
 	Identity string
 	// LockPath is the tree-mutex lockfile serializing this project's
-	// tree-declaring gates (§7.4).
+	// tree-declaring gates.
 	LockPath string
 }
 

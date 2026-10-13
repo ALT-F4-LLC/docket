@@ -18,7 +18,7 @@ import (
 // executor brief forbids cd-ing out), so ExecRoot there resolves to the
 // worktree itself — the same tree `dir` names — reproducing the identical
 // empty-diff bug one level deeper. The fix reads the base from the RUN's own
-// exec root, captured once at `run start` (db.RunContext, G8) and immune to
+// exec root, captured once at `run start` (db.RunContext) and immune to
 // where `step record` happens to run from.
 
 // TestRunExecRootPrefersTheRunsRecordedExecRoot pins runExecRoot's own

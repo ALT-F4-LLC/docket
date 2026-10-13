@@ -22,11 +22,11 @@ import (
 //
 // Core validates that a reference RESOLVES. It never opens the artifact's
 // payload or the gate's output to judge whether the evidence supports the
-// finding — that would be payload interpretation, which
-// docs/design/genericity.md keeps out of core. A resolved reference means
-// "this thing exists in this run, and a reader can go look"; the run report
-// renders an entry that cites nothing as unsupported, so the two are
-// distinguishable in the record without core holding an opinion about either.
+// finding — that would be payload interpretation, which stays out of core. A
+// resolved reference means "this thing exists in this run, and a reader can go
+// look"; the run report renders an entry that cites nothing as unsupported, so
+// the two are distinguishable in the record without core holding an opinion
+// about either.
 //
 // THE RUN IS RESOLVED POSITIVELY OR NOT AT ALL. A proposal joins a run through
 // one of the two idempotency-key families the engine mints — a vote step's

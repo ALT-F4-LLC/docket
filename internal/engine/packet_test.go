@@ -15,8 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// PACKET COMPOSITION — the resolution half
-// (docs/tdd/packet-composition.md §1.2, §1.3).
+// PACKET COMPOSITION — the resolution half.
 //
 // The engine resolves a step's declared packet files to their BYTES, verified
 // against the hash activation recorded, and hands them to the template. Before
@@ -41,7 +40,7 @@ func writeFixture(t *testing.T, root, name, body string) string {
 	return path
 }
 
-// TestPacketFrontmatter is §1.3: the engine reads ONE declared-includes key and
+// TestPacketFrontmatter pins that the engine reads ONE declared-includes key and
 // ignores every other.
 //
 // This is the concession the design review approved, and its boundary is the
@@ -137,7 +136,7 @@ func TestPacketFrontmatter(t *testing.T) {
 	}
 }
 
-// TestPacketFrontmatterIgnoresRetiringKey is §1.3.1's INTERIM, as a proven
+// TestPacketFrontmatterIgnoresRetiringKey is the INTERIM rule, as a proven
 // property rather than a hope.
 //
 // The corpus currently declares fragment relationships under a different key,
@@ -161,12 +160,12 @@ func TestPacketFrontmatterIgnoresRetiringKey(t *testing.T) {
 	}
 }
 
-// TestPacketIncludesAreOneLevelDeep is §1.3's hard stop, asserted explicitly so
+// TestPacketIncludesAreOneLevelDeep is the depth hard stop, asserted explicitly so
 // it is a tested property rather than an implementation accident.
 //
 // Unbounded recursion would need cycle detection and a depth cap, and every
 // level makes the closure size harder for an author to predict at the moment
-// the caps need it predictable. One level matches engine-core §8 exactly: the
+// the caps need it predictable. One level matches the packet's structure exactly: the
 // file, and the files it declares.
 func TestPacketIncludesAreOneLevelDeep(t *testing.T) {
 	root := t.TempDir()
@@ -192,7 +191,7 @@ func TestPacketIncludesAreOneLevelDeep(t *testing.T) {
 	}
 }
 
-// TestPacketIncludesDedupe is §1.4: a file reachable twice is inlined ONCE, at
+// TestPacketIncludesDedupe pins de-duplication: a file reachable twice is inlined ONCE, at
 // its first position. Repeating it would inflate the closure for no gain.
 func TestPacketIncludesDedupe(t *testing.T) {
 	root := t.TempDir()
@@ -225,7 +224,7 @@ func TestPacketIncludesDedupe(t *testing.T) {
 	}
 }
 
-// TestPacketResolutionLadder is §1.2 — the four states of a declared entry.
+// TestPacketResolutionLadder is the resolution ladder — the four states of a declared entry.
 //
 // The first three rows are templateSource's ladder applied to a second class of
 // file. The fourth differs, and the difference is the point: an unpinned
@@ -312,8 +311,8 @@ func TestPacketResolutionLadder(t *testing.T) {
 	})
 }
 
-// TestPacketResolutionIsDeterministic is R9 through the assembler: same inputs,
-// byte-identical output, so the §9-item-5 goldens do not flap.
+// TestPacketResolutionIsDeterministic is determinism through the assembler:
+// same inputs, byte-identical output, so the goldens do not flap.
 func TestPacketResolutionIsDeterministic(t *testing.T) {
 	root := t.TempDir()
 	writeFixture(t, root, "checklists/a.md",

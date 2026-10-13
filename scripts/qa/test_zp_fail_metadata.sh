@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# ZP — `step fail --metadata` PARITY WITH `step complete --metadata`
-# (docs/tdd/completion-metadata.md §1.6).
+# ZP — `step fail --metadata` PARITY WITH `step complete --metadata`.
 #
 # An earlier fix landed `complete`'s metadata write; this section proves `fail`
 # shares it. The headline assertion is the fail-side mirror of ZM's: a bag reported
@@ -11,7 +10,7 @@
 #
 # genericity.sh scans `internal` and `cmd` only (`SEARCH_PATHS` in that
 # script) — nothing under `scripts/` is scanned. The prior ZO section's
-# header claimed otherwise; this header makes no such claim (C11).
+# header claimed otherwise; this header makes no such claim.
 #
 # THE STRANGER TEST. Same print-shop fixture as ZM: a press run that jammed is
 # reported failed, and the desk that ran it is recorded via `--metadata` for
@@ -131,7 +130,7 @@ TOML
   # N2 — A REFUSAL WRITES NOTHING AND SPENDS NO ATTEMPT
   # ===========================================================================
   #
-  # §6.9's property at the CLI: validation happens BEFORE the transaction
+  # The refusal property at the CLI: validation happens BEFORE the transaction
   # opens, so a rejected failure leaves the step exactly as it was — still
   # failable on the same token, with its claim budget untouched.
 
@@ -163,7 +162,7 @@ TOML
   assert_exit "ZP" "ZP2_fails_after_refusal" 0
 
   # ===========================================================================
-  # N3 — THE CAP, AT THE CLI, WITH A REMEDY `fail` ACTUALLY OFFERS (C14)
+  # N3 — THE CAP, AT THE CLI, WITH A REMEDY `fail` ACTUALLY OFFERS
   # ===========================================================================
 
   run_env "$ZP" issue create -t "Print the autumn catalogue" -d "100 copies" --json
@@ -201,7 +200,7 @@ TOML
   fi
 
   # ===========================================================================
-  # N4 — SURVIVES INTO A RETRY, through an OPERATOR-REACHABLE seed (C10)
+  # N4 — SURVIVES INTO A RETRY, through an OPERATOR-REACHABLE seed
   # ===========================================================================
   #
   # The definition-side bag is seeded by the WORKFLOW'S OWN declared
@@ -234,7 +233,7 @@ TOML
   fi
 
   # The definition's tier survived the failure's merge, and the worker's desk
-  # was added — the operator-reachable proof of the merge (C10).
+  # was added — the operator-reachable proof of the merge.
   ZP_ROWS=$(sqlite3 "$ZP/issues.db" "SELECT metadata FROM steps WHERE id = 4;")
   if echo "$ZP_ROWS" | grep -q '"tier":"standard"' && echo "$ZP_ROWS" | grep -q '"desk":"front"'; then
     check "ZP" "ZP4_merge_over_declared_metadata" "PASS"

@@ -47,7 +47,7 @@ type runStatusResult struct {
 	ActivationHead *engine.ActivationHead `json:"activation_head,omitempty"`
 }
 
-// pinJSON is §11.4's `pins` element: `{path, sha256}` for a file pin, and the
+// pinJSON is the `pins` wire element: `{path, sha256}` for a file pin, and the
 // same shape carrying `name@version` for a workflow pin. `kind` distinguishes
 // them so a consumer never has to guess from the ref's shape.
 type pinJSON struct {
@@ -77,7 +77,7 @@ func (r runStatusResult) VersionedPayload() any {
 	}
 }
 
-// runListResult is a Collection (reliability-delta §4.1), so v2 renders
+// runListResult is a Collection, so v2 renders
 // {items, total, truncated}. Total comes from a COUNT(*) that ignores LIMIT.
 type runListResult struct {
 	Runs  []*model.Run `json:"runs"`
@@ -161,7 +161,7 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 	if err != nil {
 		return runErr(err)
 	}
-	// EFFECTIVE counts (§6.2), exactly as this verb's contract states — the
+	// EFFECTIVE counts, exactly as this verb's contract states — the
 	// same computation `step show`/`step list` render, so the rollup and a
 	// step read taken at the same moment cannot disagree (DKT-468). The raw
 	// GROUP BY this replaced counted a lapsed-lease claim as `claimed` while

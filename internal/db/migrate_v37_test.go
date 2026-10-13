@@ -4,10 +4,10 @@ import (
 	"testing"
 )
 
-// v37 — the detached pre-gate target column (gates-trust §7.6.2 PG6) and the
-// proposal's pinned hold-on-dissent flag. The column form's one obligation:
-// each column arrives on a migrated store, and the rewind guard converges a
-// store stamped 37 without it. There is deliberately NO back-fill to test —
+// v37 — the detached pre-gate target column and the proposal's pinned
+// hold-on-dissent flag. The column form's one obligation: each column arrives
+// on a migrated store, and the rewind guard converges a store stamped 37
+// without it. There is deliberately NO back-fill to test —
 // no existing row was measured by a detached run, so every one reads the
 // empty string, which is never matched as a key; and no existing proposal
 // pinned a hold, so every one reads false. The behavior the columns exist for

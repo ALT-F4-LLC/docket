@@ -153,7 +153,7 @@ func TestUsageByStepListsTheLedgerRowByRow(t *testing.T) {
 			"it (DKT-241)", len(report.StepUsage))
 	}
 	// Ordered by a total key, so two reports of the same rows agree byte for
-	// byte (R9).
+	// byte.
 	if report.StepUsage[0].Unit != "input_tokens" {
 		t.Errorf("rows are not in (step, attempt, unit) order: %+v", report.StepUsage)
 	}

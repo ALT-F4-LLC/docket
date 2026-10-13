@@ -18,8 +18,8 @@ import (
 // attempts show a survivorship wall at 14.4 minutes — a population truncated by
 // a timer, not by work finishing.
 //
-// Core CANNOT fix this by learning what `read` and `write` mean: engine-spec §2
-// makes the class name instance policy, writeClassOf is keyed on the declared
+// Core CANNOT fix this by learning what `read` and `write` mean: the class
+// name is instance policy, writeClassOf is keyed on the declared
 // bound precisely because a mechanism keyed on a class named `write` would be
 // unimplementable, and TestNoWriteClassLiteral greps core for the literal. So
 // the fix makes the mismatch visible where it is made.

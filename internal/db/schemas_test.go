@@ -46,7 +46,7 @@ func migratedDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// TestInsertSchemaThreeOutcomes is §4.4's immutability table, verbatim in
+// TestInsertSchemaThreeOutcomes is the immutability table, verbatim in
 // behavior with `InsertWorkflow`'s. Two registries with the same contract that
 // behaved differently would be two implementations of one rule.
 func TestInsertSchemaThreeOutcomes(t *testing.T) {
@@ -131,9 +131,8 @@ func TestGetSchemaWithoutAVersionTakesTheHighest(t *testing.T) {
 	}
 }
 
-// TestListSchemasReportsTheTrueTotal is the Collection contract
-// (reliability-delta §4.1): the total ignores the limit, so truncation is
-// computable rather than guessed.
+// TestListSchemasReportsTheTrueTotal is the Collection contract: the total
+// ignores the limit, so truncation is computable rather than guessed.
 func TestListSchemasReportsTheTrueTotal(t *testing.T) {
 	db := migratedDB(t)
 	for _, v := range []int{1, 2, 3} {

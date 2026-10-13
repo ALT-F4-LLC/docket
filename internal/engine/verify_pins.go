@@ -135,7 +135,7 @@ func (r *PinReport) Sound() bool {
 // rewriting.
 //
 // IT IS A READ, AND IT IS THE ONLY PLACE THE WHOLE SET IS COMPARED. Context
-// assembly must never do this: §6.6 is explicit that assembly "never re-reads a
+// assembly must never do this: assembly "never re-reads a
 // file a pin names", because the hash IS the contract and re-reading would make
 // a bundle depend on the working tree. This verb is the deliberate opposite —
 // it asks about the tree, on purpose, and writes nothing.

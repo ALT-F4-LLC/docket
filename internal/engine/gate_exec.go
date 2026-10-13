@@ -16,45 +16,43 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The real gate runner (TDD docs/tdd/gates-trust.md §7.1–§7.3).
+// The real gate runner.
 //
-// S3's PassThroughRunner returned a stubbed pass without touching the process
-// table. This is the implementation that runs things, and the saga is unchanged
-// around it: engine-spine §5.6's promise — "S4 changes one constructor call" —
-// holds for the saga, and §7.1's table records honestly the four places more
-// moves (result persistence, the verdict reader, the claim restructure, and
-// vote steps).
+// PassThroughRunner returns a stubbed pass without touching the process table.
+// This is the implementation that runs things, and the saga is unchanged
+// around it: the promise that swapping runners changes one constructor call
+// holds for the saga. Four other places did move: result persistence, the
+// verdict reader, the claim restructure, and vote steps.
 //
 // EVERYTHING SECURITY-RELEVANT HERE IS A CALL INTO GROUP 1. The matcher is
 // internal/trust's, the spawn is internal/exec's, the env allowlist and the
 // containment check are theirs too. This file decides WHEN to call them and
 // WHAT TO RECORD; it re-implements none of them, which is what keeps the
-// pre-gate path (§7.6.2 PG1) provably identical to the saga's.
+// pre-gate path provably identical to the saga's.
 
 // ExecRunner is the GateRunner that actually executes.
 type ExecRunner struct {
-	// RepoRoot is the working-tree root — the cwd every gate runs in (§5.1)
-	// and the containment boundary (§5.2.1 R2).
+	// RepoRoot is the working-tree root — the cwd every gate runs in — and
+	// the containment boundary.
 	RepoRoot string
-	// Identity is the project identity trust entries bind to (§3.4 P1). It
+	// Identity is the project identity trust entries bind to. It
 	// equals RepoRoot for env/local stores; under the global store it is the
 	// worktree-stable project path, which is what lets two checkouts of one
 	// repository match the same entries.
 	Identity string
-	// LockPath is the tree lockfile serializing this project's tree gates
-	// (§7.4).
+	// LockPath is the tree lockfile serializing this project's tree gates.
 	LockPath string
 	// LoadStore reads the trust store. It is a FIELD so a test can supply a
 	// sandbox store without the package growing a path-taking constructor —
-	// §9.5 SB3 forbids one, because every additional way to point docket at a
+	// one is forbidden, because every additional way to point docket at a
 	// trust file is another way for repo content to point it somewhere.
 	LoadStore func() (*trust.Store, error)
 	// NowMS stamps results. Injected so a test is not at the mercy of a clock.
 	NowMS func() int64
 }
 
-// NewExecRunner builds the real runner. THIS IS THE CONSTRUCTOR SWAP §7.1
-// promised: NewEngine names it instead of PassThroughRunner, and the saga does
+// NewExecRunner builds the real runner. THIS IS THE PROMISED CONSTRUCTOR
+// SWAP: NewEngine names it instead of PassThroughRunner, and the saga does
 // not change around it.
 func NewExecRunner(paths RepoPaths) *ExecRunner {
 	return &ExecRunner{
@@ -69,8 +67,8 @@ func NewExecRunner(paths RepoPaths) *ExecRunner {
 var _ GateRunner = (*ExecRunner)(nil)
 
 // GateExecution is what one gate produced: one or more attempt records, since a
-// fence gate matches PER LINE (§7.3 step 4) and a flaky command records each
-// attempt individually (§5.6 F3).
+// fence gate matches PER LINE and a flaky command records each attempt
+// individually.
 type GateExecution struct {
 	// Results are the rows to record, in execution order.
 	Results []GateResultRow
@@ -78,12 +76,12 @@ type GateExecution struct {
 	Verdict string
 }
 
-// GateResultRow is one result this runner produced, in §11.4's shape plus the
-// `reason` amendment (A6) and the `pre` marker.
+// GateResultRow is one result this runner produced, in the `gate result` shape
+// plus `reason` and the `pre` marker.
 //
 // Argv and Exit are POINTERS because an unmatched gate never ran: NULL is the
 // honest encoding of "no process existed", and a zero exit on a gate that did
-// not execute is the exact confusion T11 exists to prevent.
+// not execute is the exact confusion this encoding exists to prevent.
 type GateResultRow struct {
 	Gate       string
 	Ordinal    int
@@ -100,11 +98,11 @@ type GateResultRow struct {
 	ArgvSHA256 string
 	// Prefix records that a prefix entry authorized it.
 	Prefix bool
-	// Pre marks a pre-gate result (§7.6): an input to the step rather than a
-	// judgment of it, and excluded from the saga's verdict by PG4.
+	// Pre marks a pre-gate result: an input to the step rather than a
+	// judgment of it, and excluded from the saga's verdict.
 	Pre bool
-	// Stub is 1 ONLY for results the S3 pass-through produced. NOTHING THIS
-	// RUNNER PRODUCES SETS IT (T11, N4) — the field survives so a migrated S3
+	// Stub is 1 ONLY for results the pass-through produced. NOTHING THIS
+	// RUNNER PRODUCES SETS IT — the field survives so a migrated pass-through
 	// row stays distinguishable forever, and so the fakes tests build on the
 	// old seam keep recording honestly.
 	Stub bool
@@ -121,7 +119,7 @@ type GateResultRow struct {
 	// produced the row. A row can be either, both, or neither.
 	StubEntry bool
 	// TargetSHA keys a PRE-gate row measured by a detached run to the commit
-	// it measured (§7.6.2 PG6), so a claim reuses it for that target only. The
+	// it measured, so a claim reuses it for that target only. The
 	// runner never sets it: the detached phase stamps its rows after the
 	// measurement, exactly as the claim path stamps Pre. Empty everywhere
 	// else.
@@ -131,9 +129,9 @@ type GateResultRow struct {
 // Run executes one gate: match, then spawn only what matched.
 //
 // The ORDER is the security property. Matching happens against an immutable
-// store snapshot read ONCE (M1), and the matched entry's OWN ARGV is what
-// executes — matching does not produce a permission that is later applied to an
-// argv read from somewhere else, so there is no TOCTOU window (T4).
+// store snapshot read ONCE, and the matched entry's OWN ARGV is what executes
+// — matching does not produce a permission that is later applied to an argv
+// read from somewhere else, so there is no TOCTOU window.
 func (r *ExecRunner) Run(ctx context.Context, g GateSpec, sc StepContext) (GateResult, error) {
 	ex, err := r.Execute(ctx, g, sc)
 	if err != nil {
@@ -159,13 +157,13 @@ func (r *ExecRunner) Run(ctx context.Context, g GateSpec, sc StepContext) (GateR
 // Execute is Run's full-fidelity form: it returns every row to record rather
 // than collapsing to one.
 func (r *ExecRunner) Execute(_ context.Context, g GateSpec, sc StepContext) (GateExecution, error) {
-	// M1: ONE read, into an immutable snapshot. Every match for this gate runs
+	// ONE read, into an immutable snapshot. Every match for this gate runs
 	// against these bytes. A concurrent `trust rm` or a trust-file rewrite
 	// cannot change what this gate executes, because there is no second read.
 	store, err := r.LoadStore()
 	if err != nil {
 		// A store that cannot be read is not an empty allowlist — an empty
-		// allowlist is a MISSING file (§3.2), which is a different fact. A
+		// allowlist is a MISSING file, which is a different fact. A
 		// malformed or unsafe store fails closed with the reason.
 		return r.unmatchedGate(g, fmt.Sprintf("the trust store could not be read: %v", err)), nil
 	}
@@ -197,7 +195,7 @@ func (r *ExecRunner) spawnDir(sc StepContext) string {
 //
 // The candidate argv is nil: for a named gate the ENTRY IS the command, so the
 // match is by name and binding, and the stored hash is verified against the
-// stored argv to catch a corrupted or hand-edited file (M3).
+// stored argv to catch a corrupted or hand-edited file.
 func (r *ExecRunner) runNamedGate(
 	g GateSpec, sc StepContext, dir string, store *trust.Store, identity string,
 ) (GateExecution, error) {
@@ -212,7 +210,7 @@ func (r *ExecRunner) runNamedGate(
 
 // runFenceGate runs the harvested fence lines, EACH MATCHED INDEPENDENTLY.
 //
-// §7.3 step 4's independence is the anti-pattern's opposite: an implementation
+// Per-line independence is the anti-pattern's opposite: an implementation
 // that matched the block as a unit, or that ran the matched lines and silently
 // skipped the rest, would let an attacker append a line to a body that a prefix
 // entry happens to cover. Per-line matching with per-line results makes each
@@ -231,7 +229,7 @@ func (r *ExecRunner) runFenceGate(
 
 	// fail is the three near-identical "unmatched" outcomes below, factored to
 	// ONE recording site: append the row at the current ordinal, advance the
-	// ordinal, and mark the gate FAILED for routing (N3: "we couldn't check, so
+	// ordinal, and mark the gate FAILED for routing ("we couldn't check, so
 	// carry on" is what makes a control decorative). `argvSHA` is "" for the two
 	// cases that never reached a parsed argv to hash (the hash-mismatch and the
 	// split-failure branches).
@@ -246,10 +244,10 @@ func (r *ExecRunner) runFenceGate(
 	}
 
 	for i, command := range g.Commands {
-		// §7.3 step 3: re-verify the stored hash against the stored command
-		// BEFORE spawning. S3's snapshot closes "the body cannot inject"; this
-		// closes "the row cannot be swapped". A database write is out of §2's
-		// trust boundary, but it costs one hash to detect anyway.
+		// Re-verify the stored hash against the stored command BEFORE
+		// spawning. The activation snapshot closes "the body cannot inject";
+		// this closes "the row cannot be swapped". A database write is outside
+		// the trust boundary, but it costs one hash to detect anyway.
 		if i < len(g.CommandHashes) && g.CommandHashes[i] != "" {
 			if workflow.SHA256([]byte(command)) != g.CommandHashes[i] {
 				fail(fmt.Sprintf(
@@ -260,7 +258,7 @@ func (r *ExecRunner) runFenceGate(
 			}
 		}
 
-		// K2: tokenized ONCE, at execution, by a splitter that performs NO
+		// Tokenized ONCE, at execution, by a splitter that performs NO
 		// expansion of any kind. A `$` is a literal dollar sign here.
 		argv, err := exec.Split(command)
 		if err != nil {
@@ -313,7 +311,7 @@ func (r *ExecRunner) spawnMatched(
 // file argv[0] resolves to now, while the spawn runs the path resolved
 // earlier, so a symlinked component retargeted in between would let the pin
 // hash one file while another runs. Pins exist only on absolute argv[0],
-// which Resolve's R4 normalized to spawned. It runs before every attempt,
+// which Resolve's absolute-path exception normalized to spawned. It runs before every attempt,
 // ahead of the pin's own re-lookup.
 func pinStillBindsSpawn(entry *trust.Entry, spawned string) error {
 	argv0 := ""
@@ -344,7 +342,7 @@ func pinStillBindsSpawn(entry *trust.Entry, spawned string) error {
 //
 // relookup repeats the LookupAt that produced match against the same store
 // snapshot and dir. It runs before every attempt, after any tree-lock wait,
-// because the content pins (§3.1 argv0_sha256 and the entry's declared files)
+// because the content pins (argv0_sha256 and the entry's declared files)
 // are checked "before every spawn": a pinned file can change during the lock
 // wait or between flaky attempts, and only the pin half of the lookup can
 // change its answer. That narrows the window between the hash and the
@@ -362,12 +360,12 @@ func (r *ExecRunner) spawnMatchedRows(
 		}
 	}
 
-	// THE CLAIM'S PRE-GATE BUDGET (§7.6.2 PG5). On the pre-claim path the
+	// THE CLAIM'S PRE-GATE BUDGET. On the pre-claim path the
 	// whole phase is bounded so the claim returns inside the executor's tool
 	// timeout: this gate gets what remains of the budget, or nothing. A
 	// budget already spent records `skipped` — nothing spawned, nothing
 	// measured, the same shape as a lock that never came free — and the
-	// claim still succeeds, because PG2/PG3 say a pre-gate never blocks work.
+	// claim still succeeds, because a pre-gate never blocks work.
 	entryTimeout := timeout
 	if !sc.Deadline.IsZero() {
 		remaining := time.Until(sc.Deadline)
@@ -393,7 +391,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	}
 
 	// The MATCHED entry's own declaration is what reaches the child,
-	// the same discipline §7.2 M1 applies to argv: the entry that authorized
+	// the same discipline the store snapshot applies to argv: the entry that authorized
 	// the command is the entry that configures it, so there is no window in
 	// which one entry's permission is applied to another's requirements.
 	env, err := exec.BuildEnv(exec.EnvPolicy{
@@ -412,7 +410,7 @@ func (r *ExecRunner) spawnMatchedRows(
 		return GateExecution{}, err
 	}
 
-	// §5.2.1 R5: the containment check is unconditional and lives in
+	// The containment check is unconditional and lives in
 	// internal/exec, so no path skips it — named gates, fence gates, and
 	// pre-gates all reach it through Resolve.
 	entryArgv0 := ""
@@ -456,7 +454,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	// touched. A worktree that is already gone (they are swept at integration)
 	// records an honest refusal rather than silently measuring the shared
 	// checkout — and rather than an engine error, which on the pre-claim path
-	// would block the claim PG2/PG3 forbid blocking. The ROW's verdict is
+	// would block a claim that pre-gates must never block. The ROW's verdict is
 	// `skipped`, not `fail` (DKT-169): nothing ran, so "measured and failed"
 	// would be a false record; the execution verdict stays fail so routing
 	// remains fail-closed.
@@ -484,22 +482,22 @@ func (r *ExecRunner) spawnMatchedRows(
 	// see what is left of the budget, not a fresh copy of the first clamp.
 	spec := exec.Spec{Argv: argv, Dir: dir, Env: env, Timeout: timeout, Deadline: sc.Deadline}
 
-	// L3: the lock is acquired IMMEDIATELY BEFORE the spawn and released
+	// The lock is acquired IMMEDIATELY BEFORE the spawn and released
 	// IMMEDIATELY AFTER, outside every transaction and never held across a
 	// database write.
 	//
-	// ONLY A GATE ON THE SHARED CHECKOUT TAKES IT (L2). The mutex exists so
+	// ONLY A GATE ON THE SHARED CHECKOUT TAKES IT. The mutex exists so
 	// two builds cannot race one tree; a gate measuring a step's own worktree
 	// or a pre-gate's scratch reconstruction has that tree to itself, and
 	// serializing it against every other worktree's gate on one per-project
 	// lock is what queued a wave's records behind each other until the
 	// 5m bound expired and parked correct work as unmeasured. Two gates on
 	// the SAME isolated worktree are not serialized either; that tree has one
-	// step behind it, and the trade is accepted in §7.4.
+	// step behind it, and the trade is accepted.
 	if entry.Tree && sharesCheckout(dir, r.RepoRoot) {
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
-			// L4/L7: the serialization the gate requires cannot be provided, so
+			// The serialization the gate requires cannot be provided, so
 			// it does not run unserialized. Nothing spawned and no tree was
 			// read, which is the vanished-worktree fact above wearing a
 			// different cause, so it takes the same shape (DKT-91): the ROW is
@@ -594,7 +592,7 @@ func (r *ExecRunner) spawnMatchedRows(
 			ArgvSHA256: trust.ArgvSHA256(match.Argv),
 			Prefix:     entry.Prefix,
 		})
-		// F4: the verdict for routing is the LAST attempt's. A gate that passes
+		// The verdict for routing is the LAST attempt's. A gate that passes
 		// on attempt 2 passes; one that fails all three fails.
 		out.Verdict = verdict
 	}
@@ -824,7 +822,7 @@ func networkAwareReason(reason string, entry *trust.Entry, verdict string) strin
 // unmatchedGate is the whole-gate refusal: nothing spawned, one recorded row.
 func (r *ExecRunner) unmatchedGate(g GateSpec, reason string) GateExecution {
 	return GateExecution{
-		// N3: unmatched is a FAILURE for routing, never a pass and never a skip.
+		// Unmatched is a FAILURE for routing, never a pass and never a skip.
 		// A workflow whose check cannot run has not passed its check.
 		Verdict: VerdictFail,
 		Results: []GateResultRow{{

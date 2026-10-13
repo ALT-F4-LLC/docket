@@ -11,7 +11,7 @@ const (
 	// JSONV1 is the original envelope: {ok, data, message}, where data is the
 	// command's own result shape. Frozen — never change its output.
 	JSONV1
-	// JSONV2 is the uniform envelope (engine-spec.md §5): collection results
+	// JSONV2 is the uniform envelope: collection results
 	// render as {items, total, truncated}.
 	JSONV2
 )

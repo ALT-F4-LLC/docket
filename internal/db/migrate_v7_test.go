@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// v7Tables are the tables the v7 DDL creates, in the shape TDD §4.1, §5.1, and
-// §6.1 specify. Phase 1 contributed `workflows`; phase 2 adds the activation
-// slice; phase 3 adds the step lifecycle's `artifacts` and `step_inputs`;
-// phase 4 (§7.1) adds `events`, alongside v7DDL and v7Sentinels.
+// v7Tables are the tables the v7 DDL creates. Phase 1 contributed
+// `workflows`; phase 2 adds the activation slice; phase 3 adds the step
+// lifecycle's `artifacts` and `step_inputs`; phase 4 adds `events`, alongside
+// v7DDL and v7Sentinels.
 var v7Tables = []string{
 	"workflows",
 	"runs", "run_issues", "pins", "run_fences", "steps",
@@ -35,10 +35,10 @@ func TestMigrateToV7(t *testing.T) {
 	if v != currentSchemaVersion {
 		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
 	}
-	// The stage pin moved with stage 4: v7's own assertion lived here while S3
-	// was the head stage, and S4 ships v8 (gates-trust §4.1). The pin now lives
-	// in migrate_v8_test.go's TestMigrateToV8; what this test still owes is that
-	// the v7 STRUCTURES survive a migration that now runs past them.
+	// The stage pin moved with v8: v7's own assertion lived here while v7 was
+	// the head schema. The pin now lives in migrate_v8_test.go's
+	// TestMigrateToV8; what this test still owes is that the v7 STRUCTURES
+	// survive a migration that now runs past them.
 	if currentSchemaVersion < 7 {
 		t.Errorf("currentSchemaVersion = %d; v7 structures are still required",
 			currentSchemaVersion)
@@ -59,7 +59,7 @@ func TestMigrateToV7(t *testing.T) {
 		}
 	}
 
-	// The one touch v7 makes to an existing table (TDD §5.1).
+	// The one touch v7 makes to an existing table.
 	if !hasIssueColumn(t, db, "scope_globs") {
 		t.Error("issues.scope_globs missing after migration")
 	}
@@ -135,7 +135,7 @@ func hasIssueColumn(t *testing.T, db *sql.DB, column string) bool {
 }
 
 // TestMigrateV7UpgradesAPhase1Database is the group-1 -> group-2 upgrade path,
-// proven rather than assumed (TDD §2, §5.7).
+// proven rather than assumed.
 //
 // A database migrated by the PHASE-1 build is stamped 7 and carries `workflows`
 // alone: the stamp moved at phase 1 while migrateV6ToV7 kept growing. That is
@@ -222,7 +222,7 @@ func TestMigrateV7UpgradesAPhase1Database(t *testing.T) {
 }
 
 // TestMigrateV7UpgradesAPhase3Database is the group-3 -> group-4 upgrade path,
-// proven rather than assumed (TDD §2, §7.1).
+// proven rather than assumed.
 //
 // It is the phase-1 test's situation one phase later and with a sharper edge. A
 // database migrated by the PHASE-3 build is stamped 7 and has every table
@@ -380,12 +380,13 @@ func hasColumn2(t *testing.T, db *sql.DB, table, column string) bool {
 	return exists
 }
 
-// TestRewindGuardProbesEverySentinel is the guard TDD §2 requires: one sentinel
-// per table the v7 DDL creates. v7 ships as ONE migration assembled across four
-// phases, so a phase that adds a table without extending v7Sentinels would
-// leave the guard blind to a database this build stamped 7 and half-migrated —
-// including this repo's own dogfood tracker. That failure is silent until
-// activation hits a missing table, so it is caught here instead.
+// TestRewindGuardProbesEverySentinel is the rewind guard's contract: one
+// sentinel per table the v7 DDL creates. v7 ships as ONE migration assembled
+// across four phases, so a phase that adds a table without extending
+// v7Sentinels would leave the guard blind to a database this build stamped 7
+// and half-migrated — including this repo's own dogfood tracker. That failure
+// is silent until activation hits a missing table, so it is caught here
+// instead.
 func TestRewindGuardProbesEverySentinel(t *testing.T) {
 	// Derive the table names from the DDL itself rather than restating them:
 	// a phase that adds a CREATE TABLE and forgets the sentinel fails here.
@@ -486,9 +487,10 @@ func TestMigrateV6ToV7IsIdempotent(t *testing.T) {
 	}
 }
 
-// TestMigrateV6ToV7Dormancy is the §3 phase-1 obligation at the storage layer:
-// v7 adds tables and touches no existing one, so a pre-v7 row survives byte for
-// byte and the workflows table is empty on a repo that never registered one.
+// TestMigrateV6ToV7Dormancy is the phase-1 dormancy obligation at the storage
+// layer: v7 adds tables and touches no existing one, so a pre-v7 row survives
+// byte for byte and the workflows table is empty on a repo that never
+// registered one.
 func TestMigrateV6ToV7Dormancy(t *testing.T) {
 	db := mustOpen(t)
 	if err := Initialize(db); err != nil {
@@ -544,7 +546,7 @@ func TestMigrateV6ToV7Dormancy(t *testing.T) {
 	}
 
 	// And the one new COLUMN on an existing table is NULL on the pre-existing
-	// row — the §3 phase-2 dormancy obligation at the storage layer. A default
+	// row — the phase-2 dormancy obligation at the storage layer. A default
 	// of '[]' here would make every issue read as "scope declared, empty",
 	// which is a different fact from "no scope declared".
 	var scope sql.NullString
@@ -555,7 +557,7 @@ func TestMigrateV6ToV7Dormancy(t *testing.T) {
 		t.Errorf("issues.scope_globs = %q on a pre-v7 row, want NULL", scope.String)
 	}
 
-	// `run_issues.loop_count` exists and defaults to 0 (TDD §7.1). Unlike
+	// `run_issues.loop_count` exists and defaults to 0. Unlike
 	// `scope_globs` its NOT NULL DEFAULT 0 is correct rather than a lie: an
 	// issue that has entered no loops has entered zero of them, where an issue
 	// that declared no scope has NOT declared an empty one.

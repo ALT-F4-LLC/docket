@@ -16,13 +16,13 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestNoCgoInTheModuleGraph is §4.1's binding constraint, mechanized.
+// TestNoCgoInTheModuleGraph is the no-cgo constraint, mechanized.
 //
 // CGO STAYS OFF. That is a repo fact, not a preference: the module already
 // takes `modernc.org/sqlite` — a pure-Go SQLite — precisely so the binary
 // cross-compiles and the Vorpal build stays hermetic. A JSON Schema validator
 // that pulled in cgo would undo that for a feature that needs none of it, and
-// §4.1 says the choice is VOID if it does.
+// the choice is VOID if it does.
 //
 // THE SUBJECT IS THE MODULE GRAPH, NOT THE STANDARD LIBRARY, and the distinction
 // is the whole guard. `net`, `os/user`, and `runtime/cgo` carry cgo sources on
@@ -31,7 +31,7 @@ import (
 // Reporting them would be reporting the thing that already works. A DEPENDENCY
 // bearing cgo is the failure — it has no pure-Go fallback to swap in.
 //
-// §4.1 says as much in its own words: "no package sets CGO_ENABLED-dependent
+// The constraint, in its own words: "no package sets CGO_ENABLED-dependent
 // build constraints BEYOND WHAT v8 ALREADY HAD".
 //
 // The child runs with CGO_ENABLED=1 FORCED, so the answer does not depend on the
@@ -74,7 +74,7 @@ func TestNoCgoInTheModuleGraph(t *testing.T) {
 	if len(offenders) > 0 {
 		sort.Strings(offenders)
 		t.Fatalf("cgo entered the MODULE GRAPH via: %s\n"+
-			"§4.1: a validator that introduces a cgo-bearing transitive dependency "+
+			"A validator that introduces a cgo-bearing transitive dependency "+
 			"VOIDS the choice — the constraint decides, not the shortlist.",
 			strings.Join(offenders, ", "))
 	}
@@ -123,8 +123,8 @@ func listCgoFiles(t *testing.T, goBin, root string, args ...string) map[string]i
 var rankVocabulary = regexp.MustCompile(
 	`(?i)^(less|greater|compare|cmp|rank|precedes|before|after|higher|lower|indexof|order(of)?|worse|severer)$`)
 
-// TestNoComparisonAPIBypassesPosition is §4.10's source-level guard, in the
-// family of gates-trust §5.1's no-shell check.
+// TestNoComparisonAPIBypassesPosition is the source-level ordering guard, in
+// the family of internal/exec's no-shell check.
 //
 // Two assertions, both about the same rule — ORDER COMES FROM Position OR NOT
 // AT ALL:
@@ -136,7 +136,7 @@ var rankVocabulary = regexp.MustCompile(
 //  2. internal/engine never reads a declared enum's VALUES. It asks Position
 //     for a rank. An engine that reached into `Field.Enum` and compared indices
 //     itself would be re-implementing the ordering rule outside the one place
-//     the rule is written, and I4's no-fallback clause would be one careless
+//     the rule is written, and the no-fallback rule would be one careless
 //     `slices.Index` away from being untrue.
 //
 // Comments are stripped before the source is read, because the prose that
@@ -154,7 +154,7 @@ func TestNoComparisonAPIBypassesPosition(t *testing.T) {
 		})
 		if len(offenders) > 0 {
 			t.Errorf("a second ordering API exists alongside Position:\n  %s\n"+
-				"I3: Position is the ONLY ordering API, so that comparing two values "+
+				"Position is the ONLY ordering API, so that comparing two values "+
 				"of a field with no declared order is unrepresentable rather than "+
 				"merely discouraged.", strings.Join(offenders, "\n  "))
 		}
@@ -180,7 +180,7 @@ func TestNoComparisonAPIBypassesPosition(t *testing.T) {
 		})
 		if len(offenders) > 0 {
 			t.Errorf("the engine reads a declared order's values directly:\n  %s\n"+
-				"Every comparison goes through Position (I3); nothing else may "+
+				"Every comparison goes through Position; nothing else may "+
 				"decide what precedes what.", strings.Join(offenders, "\n  "))
 		}
 	})

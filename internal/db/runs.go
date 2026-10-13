@@ -16,16 +16,17 @@ var (
 	ErrRunNotFound = errors.New("run not found")
 )
 
-// InsertRun creates a run in `planning` — `docket run start` (TDD §5.2).
+// InsertRun creates a run in `planning` — `docket run start`.
 //
-// `budget` is STORED and enforces nothing until S6. Accepting it now means the
-// S6 upgrade adds enforcement rather than a flag: a flag appearing later would
-// break the `run start` invocation an S3-era harness scripted.
+// `budget` was STORED before anything enforced it. Accepting it early meant
+// the enforcing upgrade added enforcement rather than a flag: a flag appearing
+// later would have broken the `run start` invocation an earlier harness
+// scripted.
 func InsertRun(db *sql.DB, projectID int, request string, budget float64, nowMS int64) (*model.Run, error) {
 	return InsertRunWithContext(db, projectID, request, budget, nowMS, RunContext{})
 }
 
-// RunContext is the execution context stamped on a run at creation (G8):
+// RunContext is the execution context stamped on a run at creation:
 // which checkout, on which branch and commit, on which machine. Empty fields
 // record as empty — a run started outside a checkout has no branch, and
 // inventing one would make the record an opinion.
@@ -173,8 +174,8 @@ type RunListOptions struct {
 }
 
 // ListRuns returns runs newest first, and the TRUE total before the limit —
-// the Collection contract (reliability-delta §4.1) needs a total a limit
-// cannot distort, so truncation is computable rather than guessed.
+// the Collection contract needs a total a limit cannot distort, so truncation
+// is computable rather than guessed.
 func ListRuns(db *sql.DB, opts RunListOptions) ([]*model.Run, int, error) {
 	var clauses []string
 	var args []any
@@ -214,7 +215,7 @@ func ListRuns(db *sql.DB, opts RunListOptions) ([]*model.Run, int, error) {
 }
 
 // SetRunStatus moves a run's status and stamps `updated_at_ms`, bumping the CAS
-// column. `reason` records why a run is parked or abandoned (engine-core §1.1);
+// column. `reason` records why a run is parked or abandoned;
 // passing "" leaves the existing reason alone rather than clearing it, so a
 // resume does not erase why the run was paused.
 func SetRunStatus(db *sql.DB, id int, status model.RunStatus, reason string, nowMS int64) error {
@@ -345,24 +346,23 @@ func RunPauseOriginTx(tx *sql.Tx, id int) (model.RunPauseOrigin, error) {
 	return model.RunPauseOrigin(origin.String), nil
 }
 
-// SetRunBudgetTx writes a run's cap — `docket run budget --set`
-// (docs/tdd/events-follow.md §7.2).
+// SetRunBudgetTx writes a run's cap — `docket run budget --set`.
 //
-// IT ALWAYS BUMPS `row_version`, whether or not a precondition was given (B-7).
-// Before this verb existed, operations.md §4's runbook told an operator to raise
+// IT ALWAYS BUMPS `row_version`, whether or not a precondition was given.
+// Before this verb existed, the runbook told an operator to raise
 // a cap with `sqlite3` and reminded them to increment the column by hand — "or a
 // concurrent `--if-version` check will pass against a row that changed
 // underneath it". Making that structural rather than a step somebody remembers
 // is most of why the verb is better than the edit.
 //
-// `ifVersion` is the optimistic-concurrency precondition (B-6): non-nil means
+// `ifVersion` is the optimistic-concurrency precondition: non-nil means
 // the UPDATE also requires that version, and a mismatch affects zero rows and
 // becomes ErrVersionConflict. That is the same shape every other CAS verb uses,
 // so `--if-version` behaves identically here and there.
 //
 // It runs in the CALLER'S transaction because the write and its event are one
 // fact: a cap that moved with nothing in the log explaining why is exactly the
-// gap operations.md §4 warned about when the manual edit was the only option.
+// gap the runbook warned about when the manual edit was the only option.
 func SetRunBudgetTx(tx *sql.Tx, runID int, budget float64, ifVersion *int, nowMS int64) error {
 	query := `UPDATE runs SET budget = ?, updated_at_ms = ?,
 	                 row_version = row_version + 1
@@ -440,14 +440,14 @@ type RunIssue struct {
 	BodySHA256    string
 	IssueSnapshot string
 	ExpandedAtMS  *int64
-	// LoopCount is the ISSUE's loop counter (§11.3 (1), TDD §7.1). It lives here
-	// rather than on `steps` because the spec says "the issue's loop counter":
-	// one issue loops, and `max_fix_loops` bounds that one number.
+	// LoopCount is the ISSUE's loop counter. It lives here rather than on
+	// `steps` because the counter belongs to the issue: one issue loops, and
+	// `max_fix_loops` bounds that one number.
 	LoopCount int
 }
 
 // Expanded reports whether this issue's phase has been expanded. Re-activation
-// expands ONLY issues for which this is false (RA1), which is what makes
+// expands ONLY issues for which this is false, which is what makes
 // expansion idempotent and re-entrant.
 func (ri *RunIssue) Expanded() bool { return ri.ExpandedAtMS != nil }
 
@@ -524,7 +524,7 @@ func BindRunIssueTx(tx *sql.Tx, ri *RunIssue) error {
 // fact. The scope refresh is not that fact: it re-reads exactly one field of an
 // already-frozen snapshot and must leave `workflow_id`, `body_snapshot`, and
 // `body_sha256` untouched — a refresh that re-bound the workflow, or rewrote
-// the description snapshot from the live issue, would smuggle §9 item 5's
+// the description snapshot from the live issue, would smuggle the run's
 // mid-run edit immunity out through a verb that says it is about scope.
 //
 // A miss is a caller error rather than a no-op: the row was read moments ago
@@ -573,8 +573,8 @@ func SetRunIssueBodyTx(tx *sql.Tx, runID, issueID int, body, sha string) error {
 	return nil
 }
 
-// MarkExpandedTx stamps an issue as expanded — stage 6's record that this
-// issue's phase is done, so re-activation (RA1) skips it.
+// MarkExpandedTx stamps an issue as expanded — the record that this
+// issue's phase is done, so re-activation skips it.
 func MarkExpandedTx(tx *sql.Tx, runID, issueID int, nowMS int64) error {
 	_, err := tx.Exec(
 		`UPDATE run_issues SET expanded_at_ms = ? WHERE run_id = ? AND issue_id = ?`,
@@ -607,7 +607,7 @@ func GetRunIssueTx(tx *sql.Tx, runID, issueID int) (*RunIssue, error) {
 }
 
 // IncrementLoopCountTx raises the issue's loop counter by one and returns the
-// NEW value (§11.3 (1)).
+// NEW value.
 //
 // The read-back is in the same statement's transaction rather than a separate
 // SELECT so the value returned is the one this UPDATE wrote. Two concurrent
@@ -676,19 +676,19 @@ func GrantLoopTx(tx *sql.Tx, runID, issueID int) (int, error) {
 	return LoopGrantsTx(tx, runID, issueID)
 }
 
-// Pin kinds (TDD §5.1). `workflow` pins a registered `name@version` by its
-// source hash; `file` pins an arbitrary operator-supplied path by its content
-// hash — "how the reference instance pins its contracts, fragments, and policy
-// without core knowing what they are" (engine-spec §2). Core reads bytes,
-// hashes them, stores the path, and never opens the content again.
+// Pin kinds. `workflow` pins a registered `name@version` by its source hash;
+// `file` pins an arbitrary operator-supplied path by its content hash — "how
+// the reference instance pins its contracts, fragments, and policy without
+// core knowing what they are". Core reads bytes, hashes them, stores the path,
+// and never opens the content again.
 const (
 	PinKindWorkflow = "workflow"
 	PinKindFile     = "file"
-	// PinKindSchema pins a registered payload schema by its source hash
-	// (docs/tdd/payloads-thresholds.md §4.7 P1). A schema is a registered
-	// object, and §2's pinning clause is "registered objects by version" —
-	// therefore it pins. What a run validates its payloads against is a fact
-	// about the run, not about the table's current contents.
+	// PinKindSchema pins a registered payload schema by its source hash. A
+	// schema is a registered object, and the pinning rule is "registered
+	// objects by version" — therefore it pins. What a run validates its
+	// payloads against is a fact about the run, not about the table's current
+	// contents.
 	PinKindSchema = "schema"
 )
 
@@ -701,7 +701,7 @@ type Pin struct {
 	// Bytes is the pinned content's size, carried IN MEMORY ONLY during
 	// activation — it is not a column and is not persisted.
 	//
-	// It exists so the closure-size arithmetic (§1.5) can count a
+	// It exists so the closure-size arithmetic can count a
 	// declared packet file without opening it a second time: the activation
 	// scan already read the bytes to hash them, and re-reading at expansion
 	// would both cost an extra pass and open a window where the two reads
@@ -725,7 +725,7 @@ func InsertPinTx(tx *sql.Tx, p Pin) error {
 }
 
 // ListPins returns a run's pins, ordered so the set is stable across reads —
-// `context.pins` is golden-diffed byte for byte (§8.3), so an unordered read
+// `context.pins` is golden-diffed byte for byte, so an unordered read
 // would make the goldens flap.
 func ListPins(db *sql.DB, runID int) ([]Pin, error) {
 	rows, err := db.Query(
@@ -738,9 +738,9 @@ func ListPins(db *sql.DB, runID int) ([]Pin, error) {
 	return scanRows(rows, "pins", scanPin)
 }
 
-// ListPinsTx is ListPins inside a transaction — RA2's reader. Re-activation
-// INHERITS the pin set rather than recomputing it, so an in-flight run cannot
-// silently adopt an edited workflow (engine-core §4).
+// ListPinsTx is ListPins inside a transaction — re-activation's reader.
+// Re-activation INHERITS the pin set rather than recomputing it, so an
+// in-flight run cannot silently adopt an edited workflow.
 func ListPinsTx(tx *sql.Tx, runID int) ([]Pin, error) {
 	rows, err := tx.Query(
 		`SELECT run_id, kind, ref, sha256 FROM pins WHERE run_id = ? ORDER BY kind, ref`,
@@ -762,7 +762,7 @@ func scanPin(r *sql.Rows) (Pin, error) {
 	return p, nil
 }
 
-// RunFence is one harvested fenced command (TDD §5.1).
+// RunFence is one harvested fenced command.
 type RunFence struct {
 	RunID   int
 	IssueID int
@@ -773,7 +773,7 @@ type RunFence struct {
 }
 
 // InsertFenceTx records one harvested command. Harvesting happens at
-// ACTIVATION so "post-activation edits cannot inject" (engine-spec §4) — the
+// ACTIVATION so post-activation edits cannot inject — the
 // hash is of the command as it read when the operator approved the plan.
 func InsertFenceTx(tx *sql.Tx, f RunFence) error {
 	_, err := tx.Exec(
@@ -829,7 +829,7 @@ type StepRow struct {
 	Metadata     string
 	ContextBytes int
 	// Materialized marks a step the engine minted rather than one expansion
-	// read out of the pinned definition (payloads-thresholds §7.7 H4). Ordinary
+	// read out of the pinned definition. Ordinary
 	// expansion never sets it, so every row activation writes reads 0.
 	Materialized bool
 	CreatedAtMS  int64
@@ -837,8 +837,8 @@ type StepRow struct {
 
 // InsertStepTx writes one expanded step. The UNIQUE(run_id, issue_id, instance)
 // index is the loop/fanout correctness guard — two rows claiming the same
-// identity is the bug §11.3 exists to prevent — so a duplicate is an error
-// here rather than a silently-ignored insert.
+// identity is the bug instance naming exists to prevent — so a duplicate is an
+// error here rather than a silently-ignored insert.
 func InsertStepTx(tx *sql.Tx, s StepRow, nowMS int64) error {
 	_, err := tx.Exec(
 		`INSERT INTO steps

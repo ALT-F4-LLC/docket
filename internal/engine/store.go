@@ -74,7 +74,7 @@ func issueTx(tx *sql.Tx, id int) (*model.Issue, error) {
 }
 
 // issueLabelsTx reads an issue's label names, sorted. The order is stable
-// because the snapshot is canonical JSON that gets golden-diffed (§8.3): a
+// because the snapshot is canonical JSON that gets golden-diffed: a
 // label list in join order would make the goldens flap on an unrelated insert.
 func issueLabelsTx(tx *sql.Tx, issueID int) ([]string, error) {
 	rows, err := tx.Query(
@@ -144,10 +144,10 @@ func relationsAmongTx(tx *sql.Tx, issues []*model.Issue) ([]model.Relation, erro
 
 // promoteIssueTx is stage 7's per-issue half: `backlog -> todo`, via the same
 // column and the same activity trail an ordinary `issue move` writes
-// (engine-spec §2: "promotion via the issue verbs").
+// (promotion goes through the issue verbs).
 //
 // `updated_at` stays RFC3339 TEXT, because that is what every existing verb
-// emits and rewriting it to epoch-ms would change their output (§9 item 8's
+// emits and rewriting it to epoch-ms would change their output (the
 // never-mutate rule). The CAS `version` bumps, so a concurrent writer holding a
 // stale version fails rather than clobbering the promotion.
 func promoteIssueTx(tx *sql.Tx, issueID int, nowMS int64) error {
@@ -281,7 +281,7 @@ func releaseAbandonedIssueTx(tx *sql.Tx, issueID int, nowMS int64) (bool, error)
 
 // reflectIssueOnClaim is claim's half of DKT-294: the FIRST claim against a
 // `todo` issue flips it to `in-progress`, in the SAME transaction the claim
-// itself commits in (engine-spec: "the issue mirror ... one transaction").
+// itself commits in (the issue mirror shares one transaction).
 //
 // The activity-trail comment is UNCONDITIONAL on every claim, not gated on the
 // flip: a second, third, or tenth step claimed against an issue already

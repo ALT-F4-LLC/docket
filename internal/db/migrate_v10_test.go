@@ -11,10 +11,10 @@ import (
 	"testing"
 )
 
-// v10Tables are the tables the v10 DDL creates (TDD docs/tdd/runs-dispatch.md
-// §3.1). Stated here independently of v10Sentinels so the sentinel test cannot
-// pass by both lists drifting together — the same discipline v7Tables, v8Tables,
-// and v9Tables apply. Group 1 contributes `usage_ledger`; groups 2 and 3 append.
+// v10Tables are the tables the v10 DDL creates. Stated here independently of
+// v10Sentinels so the sentinel test cannot pass by both lists drifting together
+// — the same discipline v7Tables, v8Tables, and v9Tables apply. Group 1
+// contributes `usage_ledger`; groups 2 and 3 append.
 var v10Tables = []string{
 	"usage_ledger",
 	"dispatches",
@@ -23,8 +23,8 @@ var v10Tables = []string{
 }
 
 // v10Columns are the columns the v10 migration adds to existing tables.
-// Sentinels cannot see these — they are tables — which is exactly what §2.4's U3
-// row says out loud rather than papering over.
+// Sentinels cannot see these — they are tables — which the column-half test
+// says out loud rather than papering over.
 //
 // Stated independently of the migration's own v10AddedColumns table, for the
 // reason v10Tables is stated independently of v10Sentinels: a list that derived
@@ -59,10 +59,11 @@ func TestMigrateToV10(t *testing.T) {
 	}
 	// The indexes are asserted BY NAME rather than left to the table check,
 	// because two of them carry semantics no table probe can see:
-	// `idx_dispatches_one_open` is the partial UNIQUE index that IS C1, and
-	// `idx_reap_acks_open` is the partial index that makes D3's dormancy one
-	// lookup. A migration that created the tables and dropped either would leave
-	// a schema whose shape looked right and whose guarantees were gone.
+	// `idx_dispatches_one_open` is the partial UNIQUE index that IS the open
+	// race guard, and `idx_reap_acks_open` is the partial index that makes the
+	// reap-ack dormancy one lookup. A migration that created the tables and
+	// dropped either would leave a schema whose shape looked right and whose
+	// guarantees were gone.
 	for _, index := range []string{
 		"idx_usage_ledger_run",
 		"idx_dispatches_one_open",
@@ -79,14 +80,12 @@ func TestMigrateToV10(t *testing.T) {
 	}
 }
 
-// TestSchemaSpanIsComplete is §2.4's tripwire, and it is NOT a tautology check.
+// TestSchemaSpanIsComplete is a tripwire, and it is NOT a tautology check.
 //
-// docs/tdd/reliability-delta.md §2 ratified a v5–v10 span and ratified that
-// stage 7 "reuses stage 6's tables and adds no version". Stages 4, 5, and 6 were
-// built on that arithmetic. A stage-7 author who reaches for v11 without filing
-// an amendment against that section fails HERE, with the section named, rather
-// than discovering after the fact that a ratified table had been quietly
-// extended.
+// The planned span was v5–v10; every version past it is a recorded addition,
+// listed below. An author who reaches for a new version without recording why
+// fails HERE rather than discovering after the fact that a settled table had
+// been quietly extended.
 //
 // It also asserts the migration map has one entry per version 2..10 with NO
 // GAPS, because a missing entry turns Migrate's loop into a runtime error on a
@@ -112,21 +111,19 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// recorded-at clock (2026-10-10), the step resolution authority
 	// (2026-10-10), the claim phase (2026-10-10), the run-note
 	// authority (2026-10-10), the step recovery hash (2026-10-10), and the
-	// fix-loop cap (2026-10-11) — each recorded in
-	// docs/tdd/reliability-delta.md §2 under
-	// its own heading, with the reason it needed a version and the argument
-	// that it leaves the ratified v5-v10 arithmetic untouched.
+	// fix-loop cap (2026-10-11) — each one needed a version and leaves the
+	// v5-v10 arithmetic untouched.
 	//
 	// The tripwire itself is UNCHANGED IN PURPOSE. It still fails the next
-	// author who reaches for a version without filing an amendment first —
-	// this test firing is exactly how v11 through v23 came to be documented
-	// rather than discovered afterwards. Raising the number without editing
-	// that section is the move it exists to stop.
+	// author who reaches for a version without recording it first — this
+	// test firing is exactly how v11 through v23 came to be documented rather
+	// than discovered afterwards. Raising the number without adding the new
+	// version and its reason to the list above is the move it exists to stop.
 	if currentSchemaVersion != 44 {
-		t.Errorf("currentSchemaVersion = %d, want 44 — the span of "+
-			"docs/tdd/reliability-delta.md §2 ends at v44 (the fix-loop "+
-			"cap). Moving past 44 needs an amendment against that "+
-			"section, per docs/design/amendments.md", currentSchemaVersion)
+		t.Errorf("currentSchemaVersion = %d, want 44 — the recorded schema "+
+			"span ends at v44 (the fix-loop cap). Moving past 44 means "+
+			"recording the new version and the reason it needs one in "+
+			"this test's span list first", currentSchemaVersion)
 	}
 
 	for v := 2; v <= currentSchemaVersion; v++ {
@@ -141,11 +138,11 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	}
 }
 
-// TestRewindGuardProbesEveryV10Sentinel is §2.2's obligation, and it derives the
-// table list from the DDL itself: a group that adds a CREATE TABLE to v10DDL and
-// forgets the sentinel fails HERE rather than shipping a database the guard
-// silently declines to repair. This stage slices v10 across THREE groups, so the
-// window in which that mistake is possible is the widest yet.
+// TestRewindGuardProbesEveryV10Sentinel is the rewind guard's obligation, and
+// it derives the table list from the DDL itself: a group that adds a CREATE
+// TABLE to v10DDL and forgets the sentinel fails HERE rather than shipping a
+// database the guard silently declines to repair. v10 is sliced across THREE
+// groups, so the window in which that mistake is possible is the widest yet.
 func TestRewindGuardProbesEveryV10Sentinel(t *testing.T) {
 	re := regexp.MustCompile(`(?i)CREATE TABLE IF NOT EXISTS\s+(\w+)`)
 	var created []string
@@ -202,9 +199,9 @@ func TestRewindGuardProbesEveryV10Sentinel(t *testing.T) {
 	}
 }
 
-// TestRewindGuardRepairsAGroup2StampedDatabase is U2 for the group-3 case, and
-// it is a REGRESSION TEST: the state it constructs was found on the operator's
-// own dogfooded tracker, not imagined.
+// TestRewindGuardRepairsAGroup2StampedDatabase is the rewind for the group-3
+// case, and it is a REGRESSION TEST: the state it constructs was found on the
+// operator's own dogfooded tracker, not imagined.
 //
 // THE SHAPE OF THE BUG. Group 3 adds no table. So a database that a group-2
 // binary stamped 10 has every TABLE sentinel present, the rewind guard concludes
@@ -297,7 +294,7 @@ func migratedToV9(t *testing.T) *sql.DB {
 //
 // Removing the columns is not fussiness: a fixture that kept `runs.usage_floor`
 // would make "the column arrived with the rewind" pass VACUOUSLY, which is the
-// failure mode §2.3's column half exists to prevent.
+// failure mode the column checks exist to prevent.
 // stampSchemaVersion forces the recorded schema version, so a test can
 // reconstruct a past ERA rather than inheriting whatever the current ladder
 // climbed to. Needed once the ladder grew past the version under test.
@@ -329,8 +326,8 @@ func stripV10(t *testing.T, db *sql.DB) {
 	}
 }
 
-// countLedgerRows is the assertion §3's group-1 dormancy row rests on: v10 seeds
-// NOTHING, so the ledger is empty until a `--usage` actually records.
+// countLedgerRows is the assertion the group-1 dormancy check rests on: v10
+// seeds NOTHING, so the ledger is empty until a `--usage` actually records.
 func countLedgerRows(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var n int
@@ -340,7 +337,7 @@ func countLedgerRows(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// TestMigrateV10U1TrackerShape is U1: this repo's own tracker — stamped 9, every
+// TestMigrateV10U1TrackerShape: this repo's own tracker — stamped 9, every
 // v7/v8/v9 sentinel present, `steps` empty because the tracker has issues but no
 // runs. The tracker is dogfooded across the stage, so this is the shape the
 // operator's own database actually has when a group-1 binary first opens it, and
@@ -353,7 +350,7 @@ func TestMigrateV10U1TrackerShape(t *testing.T) {
 		t.Fatalf("counting steps: %v", err)
 	}
 	if steps != 0 {
-		t.Fatalf("fixture has %d steps, want 0 (U1 is the no-runs shape)", steps)
+		t.Fatalf("fixture has %d steps, want 0 (the tracker is the no-runs shape)", steps)
 	}
 
 	// The pre-migration facts the upgrade must not disturb: every v9 table is
@@ -401,8 +398,8 @@ func TestMigrateV10U1TrackerShape(t *testing.T) {
 	}
 }
 
-// TestMigrateV10U2RewindsWhenASentinelIsAbsent is U2: the group-1-partial
-// dogfood shape, which is the v7, v8, and v9 trap a fourth time.
+// TestMigrateV10U2RewindsWhenASentinelIsAbsent: the group-1-partial dogfood
+// shape, which is the v7, v8, and v9 trap a fourth time.
 //
 // A database stamped 10 with a v10 sentinel missing is NOT trusted: the guard
 // rewinds to 9 and re-runs, and the database ends complete INCLUDING the
@@ -417,7 +414,7 @@ func TestMigrateV10U2RewindsWhenASentinelIsAbsent(t *testing.T) {
 	}
 
 	// The trap: the stamp still says 10. The pre-group shape is reconstructed
-	// exactly — tables dropped, columns removed, stamp left at 10 (§2.2).
+	// exactly — tables dropped, columns removed, stamp left at 10.
 	//
 	// The stamp is set back to 10 EXPLICITLY rather than inherited from
 	// Migrate, because the ladder now continues past 10 (v11) and this
@@ -447,12 +444,13 @@ func TestMigrateV10U2RewindsWhenASentinelIsAbsent(t *testing.T) {
 	}
 }
 
-// TestMigrateV10U2GroupOneToGroupTwoDogfoodShape is U2 at the EXACT intermediate
-// state group 2 creates, rather than at the synthetic all-tables-gone shape.
+// TestMigrateV10U2GroupOneToGroupTwoDogfoodShape is the rewind at the EXACT
+// intermediate state group 2 creates, rather than at the synthetic
+// all-tables-gone shape.
 //
-// §2.1 warns that three commit groups mean TWO intermediate states in which the
-// operator's own dogfooded tracker can sit, stamped 10 with only part of v10
-// present. This is the first of them, and it is not hypothetical: the tracker was
+// Three commit groups mean TWO intermediate states in which the operator's own
+// dogfooded tracker can sit, stamped 10 with only part of v10 present. This is
+// the first of them, and it is not hypothetical: the tracker was
 // migrated by a group-1 binary at commit 55c983b, so every database this repo's
 // author touched between that commit and this one has `usage_ledger` and no
 // `dispatches`.
@@ -486,7 +484,7 @@ func TestMigrateV10U2GroupOneToGroupTwoDogfoodShape(t *testing.T) {
 	stampSchemaVersion(t, db, 10)
 	if v, err := SchemaVersion(db); err != nil || v != 10 {
 		t.Fatalf("premise: schema_version = %d (err %v), want 10 — the stamp moved "+
-			"in group 1 and does not move again (§2.1)", v, err)
+			"in group 1 and does not move again", v, err)
 	}
 
 	if err := Migrate(db); err != nil {
@@ -507,7 +505,7 @@ func TestMigrateV10U2GroupOneToGroupTwoDogfoodShape(t *testing.T) {
 		}
 	}
 	// And group 1's own work is untouched — the re-run is CREATE TABLE IF NOT
-	// EXISTS plus hasColumn-probed ALTERs throughout (§2.2), so it adds what is
+	// EXISTS plus hasColumn-probed ALTERs throughout, so it adds what is
 	// missing and touches nothing else.
 	for _, col := range v10Columns {
 		if !columnExists(t, db, col.table, col.column) {
@@ -522,15 +520,16 @@ func TestMigrateV10U2GroupOneToGroupTwoDogfoodShape(t *testing.T) {
 	}
 }
 
-// TestMigrateV10U3ColumnHalfIsNotSeenBySentinels is U3, and it asserts the
-// HONEST statement rather than a flattering one: a database whose tables are all
-// present but whose column is missing is NOT repaired by the sentinel probe,
-// because sentinels are tables.
+// TestMigrateV10U3ColumnHalfIsNotSeenBySentinels asserts the HONEST statement
+// rather than a flattering one: a database whose tables are all present but
+// whose column is missing is NOT repaired by the sentinel probe, because
+// sentinels are tables.
 //
-// That shape is impossible in practice — the tables and the columns land in one
-// transaction — and reachable only by a hand-edit. U3 exists to record which
-// mechanism covers the column half: U2's rewind, not the probe. A test that
-// claimed otherwise would be documenting a guarantee the code does not make.
+// That shape is impossible in practice — the tables and the columns land in
+// one transaction — and reachable only by a hand-edit. This test exists to
+// record which mechanism covers the column half: the rewind, not the probe. A
+// test that claimed otherwise would be documenting a guarantee the code does
+// not make.
 func TestMigrateV10U3ColumnHalfIsNotSeenBySentinels(t *testing.T) {
 	db := mustOpen(t)
 	if err := Initialize(db); err != nil {
@@ -552,15 +551,15 @@ func TestMigrateV10U3ColumnHalfIsNotSeenBySentinels(t *testing.T) {
 	if columnExists(t, db, "runs", "breach_reason") {
 		t.Error("runs.breach_reason arrived from a sentinel probe; sentinels are " +
 			"TABLES and cannot see a column. If this now passes, the guard grew a " +
-			"column probe and §2.3's U3 row needs rewriting rather than this test " +
+			"column probe and this test needs rewriting rather than " +
 			"quietly flipping")
 	}
 }
 
-// TestMigrateV10U4FromTheV4Baseline is U4: the committed fixture migrates 4->10
-// in ONE pass, and the v10 structures are asserted present BEFORE any golden
-// diff is trusted — engine-spine §3's rule, because a golden diff against a
-// database that failed to migrate passes vacuously.
+// TestMigrateV10U4FromTheV4Baseline: the committed fixture migrates 4->10 in
+// ONE pass, and the v10 structures are asserted present BEFORE any golden diff
+// is trusted, because a golden diff against a database that failed to migrate
+// passes vacuously.
 func TestMigrateV10U4FromTheV4Baseline(t *testing.T) {
 	src := filepath.Join("..", "..", "scripts", "qa", "fixtures", "v4-baseline.db")
 	if _, err := os.Stat(src); err != nil {
@@ -654,10 +653,10 @@ func TestMigrateV10IsIdempotent(t *testing.T) {
 	}
 }
 
-// TestUsageLedgerIsKeyedByAttempt is §3.1's first shape decision, proven: the
-// unique key is (step_id, attempt, unit), so a reaped-and-reclaimed step's
-// SECOND attempt records its own usage beside the first rather than overwriting
-// it.
+// TestUsageLedgerIsKeyedByAttempt is the ledger's first shape decision,
+// proven: the unique key is (step_id, attempt, unit), so a reaped-and-reclaimed
+// step's SECOND attempt records its own usage beside the first rather than
+// overwriting it.
 //
 // A step-unique key would silently lose the first attempt's numbers, and the
 // report's attempt trail would then show two attempts and one attempt's usage —

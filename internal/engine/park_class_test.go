@@ -295,7 +295,7 @@ func TestParkClassIsDerivedFromEngineFacts(t *testing.T) {
 	})
 
 	// A rejected hold parks the ROUTING step, never the materialized one: the
-	// held step ends `done` on both answers (H14) because it recorded a
+	// held step ends `done` on both answers because it recorded a
 	// decision, and the consequence lands on the step whose routing was
 	// deferred. The class is read from that decision, not from the note.
 	t.Run(string(db.ParkClassHeldRejected), func(t *testing.T) {

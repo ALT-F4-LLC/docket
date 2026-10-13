@@ -24,7 +24,7 @@ import (
 // WHAT CORE COMPARES IS BYTES, NOT CRITERIA. The issue describes the symptom as
 // "the same criterion ids at the same statuses", but `criterion`, `id` and
 // `status` are the workflow author's vocabulary — core no more parses them than
-// it parses `severity` (genericity.md, roundMovedNothing's own reasoning). The
+// it parses `severity` (roundMovedNothing's own reasoning). The
 // engine reads the kind the routing step's OWN `emits` declares and compares
 // the recorded artifact fingerprints. These tests therefore drive the CANONICAL
 // fixture, whose `verify` emits `ac-report`, and one interposed fixture whose

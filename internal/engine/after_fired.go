@@ -12,10 +12,10 @@ import (
 // `after_fired` (DKT-1085): a step that runs ONLY IF a named predecessor fired.
 //
 // The gap it closes. An interposed gate — a step some `threshold` routes to by
-// name (§11.2) — ends `skipped` on every round its routing step resolved
-// elsewhere (skipUnroutedTargets), and `skipped` is terminal, so an ordinary
+// name — ends `skipped` on every round its routing step resolved elsewhere
+// (skipUnroutedTargets), and `skipped` is terminal, so an ordinary
 // `after = ["security-vote"]` successor is released by the skip exactly as by
-// an approval (J1). `when` reads issue kind and labels only (V22) and cannot
+// an approval. `when` reads issue kind and labels only (V22) and cannot
 // say "the gate fired"; a second step-name routing beside the vote on the same
 // threshold would be evaluated first (ThresholdOrder sorts step targets) and
 // skip the vote itself. The corpus's `drain-highs` therefore ran on every
@@ -24,11 +24,11 @@ import (
 //
 // The rule. A step declaring `after_fired = [g, ...]` is terminalized
 // `skipped` when any named predecessor DID NOT FIRE — every instance of it, at
-// the ordinal R3 resolves (predecessorInstancesIn), ended `skipped` — and it
-// is skipped IN THE SAME TRANSACTION as the predecessor's own skip. The
-// propagation is transitive by construction: the sweep runs to a fixed point,
-// so a step declaring `after_fired` on a step this pass skipped is skipped by
-// the next pass, in the same transaction, however deep the chain.
+// the ordinal `after` readiness resolves (predecessorInstancesIn), ended
+// `skipped` — and it is skipped IN THE SAME TRANSACTION as the predecessor's
+// own skip. The propagation is transitive by construction: the sweep runs to a
+// fixed point, so a step declaring `after_fired` on a step this pass skipped is
+// skipped by the next pass, in the same transaction, however deep the chain.
 //
 // WHY the predecessor's whole instance set. For a single-instance predecessor
 // the two readings coincide. For a fanout, "the step fired" means some
@@ -48,21 +48,22 @@ import (
 //   - resolveQuorumMisses (loop.go), the one routing path that terminalizes a
 //     threshold-bearing step without reconciling;
 //   - expandIssue (activate.go), where a false `when` CREATES a step skipped
-//     (§5.3.1) and its `after_fired` successors must be created skipped with
-//     it. Loop re-instantiation needs no fourth call: every loop entry commits
-//     inside a routing transaction that ends in one of the first two.
+//     and its `after_fired` successors must be created skipped with it. Loop
+//     re-instantiation needs no fourth call: every loop entry commits inside
+//     a routing transaction that ends in one of the first two.
 //
 // WHAT it does not do. It never touches a step that has left `pending` — a
 // claimed, running, gated, parked, or terminal step has already answered the
 // question — and it consults no readiness clause: V39a requires every
-// `after_fired` entry to also appear in `after`, so R3 already holds the step
-// behind its gate and the sweep only ever decides a step whose predecessor is
-// terminal. `after` itself is untouched (done OR skipped still releases a
-// join); this is an additive second list, not a new reading of the first.
+// `after_fired` entry to also appear in `after`, so `after` readiness already
+// holds the step behind its gate and the sweep only ever decides a step whose
+// predecessor is terminal. `after` itself is untouched (done OR skipped still
+// releases a join); this is an additive second list, not a new reading of the
+// first.
 //
 // DORMANT UNLESS DECLARED. A definition with no `after_fired` anywhere costs
 // no query at all — the same discipline the budget and reap-hold snapshots
-// keep (§4.8 B29) — so a routing on a workflow that never heard of the key is
+// keep — so a routing on a workflow that never heard of the key is
 // byte-identical to what it was.
 
 // propagateAfterFiredSkips terminalizes `skipped`, to a fixed point, every
@@ -122,15 +123,15 @@ func propagateAfterFiredSkips(
 }
 
 // unfiredPredecessor names the first `after_fired` predecessor of a step that
-// did not fire — every instance R3 resolves for it ended `skipped` — rendered
-// as its instances for the event, or "" when each named predecessor fired, is
-// still open, or has no instance yet.
+// did not fire — every instance `after` readiness resolves for it ended
+// `skipped` — rendered as its instances for the event, or "" when each named
+// predecessor fired, is still open, or has no instance yet.
 //
 // A predecessor with no instance at or below the step's ordinal has not been
 // expanded (a loop body not yet entered): nothing is decided, so nothing is
 // skipped. An instance in any non-`skipped` status — including a pending or
 // running one — means the predecessor fired or may still fire, and the step
-// waits exactly as R3 makes it wait.
+// waits exactly as `after` readiness makes it wait.
 func unfiredPredecessor(steps []*db.Step, step *db.Step, names []string) string {
 	for _, name := range names {
 		instances := predecessorInstancesIn(steps, step, name)

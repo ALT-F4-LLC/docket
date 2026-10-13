@@ -14,9 +14,9 @@ import (
 // and hashing are computed.
 //
 // Argv is taken VERBATIM. At the CLI boundary the operator's own shell has
-// already tokenized (§5.2 K1), and docket stores those tokens — no splitting,
-// no globbing, no expansion. That is what makes argv injection closed at the
-// point of entry rather than patched at the point of execution.
+// already tokenized, and docket stores those tokens — no splitting, no
+// globbing, no expansion. That is what makes argv injection closed at the point
+// of entry rather than patched at the point of execution.
 type AddRequest struct {
 	Name       string
 	Argv       []string
@@ -49,7 +49,7 @@ type AddRequest struct {
 	// and BEFORE the store is written. A non-nil error aborts the add with
 	// NOTHING written.
 	//
-	// WHY THE HOOK EXISTS. §3.6's event is the only record that a grant
+	// WHY THE HOOK EXISTS. The trust event is the only record that a grant
 	// happened, and a record written AFTER the store — the shape this had —
 	// leaves a granted entry with no trace of the grant whenever the write of
 	// the record fails. An auditor reads that absence as "no grant happened",
@@ -103,23 +103,24 @@ type RemoveRequest struct {
 }
 
 // AddResult reports what an Add did, so a caller can render the disclosure
-// (§3.5) without re-deriving it.
+// without re-deriving it.
 type AddResult struct {
 	// Entry is the entry as written (or as already present, when Idempotent).
 	Entry Entry
 	// Idempotent is true when an identical entry already existed and nothing
 	// was written.
 	Idempotent bool
-	// Warnings carries the --prefix over-authorization warning (§3.3) and the
-	// re-pin disclosure (§3.5). They are NEVER suppressed — not by --yes, not
+	// Warnings carries the --prefix over-authorization warning and the
+	// re-pin disclosure. They are NEVER suppressed — not by --yes, not
 	// by anything. Suppressing them is exactly what would make the
 	// conversational posture unsafe.
 	Warnings []string
 }
 
-// Add writes one entry, holding W1's lock across the whole read-modify-write.
+// Add writes one entry, holding the store lock across the whole
+// read-modify-write.
 //
-// The sequence is exactly W1's: acquire, RE-READ the store from disk, apply the
+// The sequence is exactly: acquire, RE-READ the store from disk, apply the
 // change, temp-write, rename, release. The re-read after acquiring is the point
 // — a snapshot taken before the lock is a snapshot that may already be stale.
 func Add(req AddRequest) (*AddResult, error) {
@@ -130,7 +131,7 @@ func Add(req AddRequest) (*AddResult, error) {
 	return addAt(path, req)
 }
 
-// addAt is the path-taking form, unexported per SB3.
+// addAt is the path-taking form, unexported like loadAt.
 func addAt(path string, req AddRequest) (*AddResult, error) {
 	entry, warnings, err := buildEntry(req)
 	if err != nil {
@@ -147,7 +148,7 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 	}
 	defer lock.release()
 
-	// W1: re-read UNDER the lock. Everything before this point may be stale.
+	// Re-read UNDER the lock. Everything before this point may be stale.
 	st, err := loadAt(path)
 	if err != nil {
 		return nil, err
@@ -172,7 +173,7 @@ func addAt(path string, req AddRequest) (*AddResult, error) {
 			// same command with the same flags is not a change.
 			return &AddResult{Entry: *existing, Idempotent: true, Warnings: warnings}, nil
 		}
-		// The RE-PIN (§3.5): same command, flags, and declared paths, but a
+		// The RE-PIN: same command, flags, and declared paths, but a
 		// pinned file now holds different bytes, or the entry predates
 		// pinning. Re-running the add is the operator approving those bytes,
 		// so it is a change: recorded, written, and disclosed with both hashes.
@@ -214,7 +215,7 @@ func Remove(req RemoveRequest) (bool, error) {
 	return removeAt(path, req)
 }
 
-// removeAt is the path-taking form, unexported per SB3.
+// removeAt is the path-taking form, unexported like loadAt.
 func removeAt(path string, req RemoveRequest) (bool, error) {
 	var repo string
 	if !req.Global {
@@ -256,7 +257,7 @@ func removeAt(path string, req RemoveRequest) (bool, error) {
 }
 
 // List returns the entries visible from a repo: those bound to it, plus every
-// global one. It is a pure read and takes NO LOCK (W4).
+// global one. It is a pure read and takes NO LOCK.
 func (s *Store) List(repoIdentity string) []Entry {
 	var out []Entry
 	for _, e := range s.Entries {
@@ -299,7 +300,7 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 		AddedAtMS:  req.NowMS,
 	}
 
-	// §3.1's content pin. An absolute argv[0] names one file, and the operator
+	// The content pin. An absolute argv[0] names one file, and the operator
 	// is approving its current bytes. A file that cannot be hashed refuses the
 	// add: an absolute entry written without a pin would read as a legacy one
 	// and match whatever the file later holds.
@@ -329,7 +330,7 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 		}
 	}
 
-	// P3: global requires the explicit flag; there is no implicit path to it.
+	// Global requires the explicit flag; there is no implicit path to it.
 	if !req.Global {
 		repo, err := RepoIdentity(req.RepoRoot)
 		if err != nil {
@@ -340,7 +341,7 @@ func buildEntry(req AddRequest) (Entry, []string, error) {
 
 	var warnings []string
 	if req.Prefix {
-		// §3.3's over-authorization warning. It names the repo because the
+		// The over-authorization warning. It names the repo because the
 		// blast radius is repo-scoped, and it says what to do instead.
 		scope := fmt.Sprintf("in repo %s", e.Repo)
 		if e.Global {
@@ -379,7 +380,7 @@ func findEntryIndex(st *Store, name, repo string, global bool) int {
 	return -1
 }
 
-// entriesEquivalent decides §3.5's idempotence row: an add of an IDENTICAL argv
+// entriesEquivalent decides idempotence: an add of an IDENTICAL argv
 // and IDENTICAL flags is a no-op success.
 //
 // Every field that changes behavior is compared. AddedAtMS is deliberately not:
@@ -387,10 +388,11 @@ func findEntryIndex(st *Store, name, repo string, global bool) int {
 // and treating a differing timestamp as a conflict would make idempotence
 // unreachable.
 // NETWORK IS COMPARED, and its absence here was a hole. The declared host list
-// changes what the child may reach and is exactly the property §3.6's trail
-// exists to expose; leaving it out meant an add that asked for new egress at an
-// existing name reported "already trusted", wrote nothing, and returned exit 0 —
-// the operator's requested change silently discarded under a success message.
+// changes what the child may reach and is exactly the property the trust event
+// trail exists to expose; leaving it out meant an add that asked for new egress
+// at an existing name reported "already trusted", wrote nothing, and returned
+// exit 0 — the operator's requested change silently discarded under a success
+// message.
 func entriesEquivalent(a, b Entry) bool {
 	return len(entryChanges(a, b)) == 0
 }
@@ -486,7 +488,7 @@ func declaredPaths(files []DeclaredFile) []string {
 	return paths
 }
 
-// ensureStoreDir creates the config directory 0700 (I5).
+// ensureStoreDir creates the config directory 0700.
 func ensureStoreDir(dir string) error {
 	if err := os.MkdirAll(dir, storeDirMode); err != nil {
 		return fmt.Errorf("creating the trust store directory %s: %w", dir, err)
@@ -500,13 +502,13 @@ func ensureStoreDir(dir string) error {
 // must not run in parallel.
 var createTemp = os.CreateTemp
 
-// writeStore is I5's atomic publish: a temp file in the SAME directory, created
+// writeStore is the atomic publish: a temp file in the SAME directory, created
 // O_EXCL with mode 0600, then renamed over the target.
 //
 // Same directory because rename is only atomic within a filesystem. O_EXCL so a
 // pre-planted temp file is not written through. The rename is what makes a
 // reader either see the whole old file or the whole new one, never a partial
-// write — which is also why the read path needs no lock (W4).
+// write — which is also why the read path needs no lock.
 func writeStore(path string, st *Store) error {
 	data, err := encode(st)
 	if err != nil {

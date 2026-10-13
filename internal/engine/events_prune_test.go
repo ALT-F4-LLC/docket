@@ -9,9 +9,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// `events prune`'s refusals, which are the verb (docs/tdd/events-follow.md §5.6).
+// `events prune`'s refusals, which are the verb.
 //
-// The tests are weighted the way the design is: one test for what it deletes,
+// The tests are weighted the way the verb is: one test for what it deletes,
 // and the rest for what it will not.
 
 // pruneFixture is a run with events, moved to a terminal status so the prune's
@@ -32,8 +32,8 @@ func eventCount(t *testing.T, conn *sql.DB) int {
 	return n
 }
 
-// TestPruneRefusalMatrix is §5.6's matrix: every way the verb says no, with the
-// code and the reason each one carries.
+// TestPruneRefusalMatrix is the refusal matrix: every way the verb says no,
+// with the code and the reason each one carries.
 //
 // They are ONE TEST because they are one property — a destructive verb refuses
 // unless everything is right — and because a matrix makes the omission of a case
@@ -49,7 +49,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 		says string
 	}{
 		{
-			// P1: no target. "Prune everything" is not expressible, because a
+			// No target. "Prune everything" is not expressible, because a
 			// destructive verb with a default target is how a log gets deleted
 			// by a typo.
 			name: "no target",
@@ -61,7 +61,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 			says: "needs a target",
 		},
 		{
-			// P1: two targets. They name different things — a seq boundary and a
+			// Two targets. They name different things — a seq boundary and a
 			// whole run — so honoring both would mean guessing which was meant.
 			name: "both targets",
 			setup: func(t *testing.T, conn *sql.DB) PruneQuery {
@@ -81,7 +81,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 			says: "must not be negative",
 		},
 		{
-			// §5.2, THE HEADLINE REFUSAL: a run that has not finished.
+			// THE HEADLINE REFUSAL: a run that has not finished.
 			name: "a live run's events",
 			setup: func(t *testing.T, conn *sql.DB) PruneQuery {
 				runID, _ := budgetRun(t, conn, 0)
@@ -148,7 +148,7 @@ func TestPruneRefusalMatrix(t *testing.T) {
 	}
 }
 
-// TestRetentionWindowHoldsTheBoundary is §5.3: `events.retain` protects recent
+// TestRetentionWindowHoldsTheBoundary: `events.retain` protects recent
 // events whatever `--before` says, and the answer SAYS SO rather than silently
 // returning a smaller number.
 func TestRetentionWindowHoldsTheBoundary(t *testing.T) {
@@ -179,7 +179,7 @@ func TestRetentionWindowHoldsTheBoundary(t *testing.T) {
 	if result.Pruned != 0 {
 		t.Errorf("the prune deleted %d events inside the retention window", result.Pruned)
 	}
-	// P14: HELD BACK, AND SAID SO. An operator told only "0" would conclude the
+	// HELD BACK, AND SAID SO. An operator told only "0" would conclude the
 	// verb is broken; told that a window held N, they know it is policy.
 	if result.HeldByRetention != before {
 		t.Errorf("held_by_retention = %d, want %d — the answer must name what "+
@@ -202,13 +202,13 @@ func TestRetentionWindowHoldsTheBoundary(t *testing.T) {
 	}
 }
 
-// TestRetentionDefaultRetainsEverything is P13 and D1: the window defaults to 0,
-// and 0 means EVERYTHING IS PROTECTED.
+// TestRetentionDefaultRetainsEverything: the window defaults to 0, and 0
+// means EVERYTHING IS PROTECTED.
 //
 // The direction matters more than the number. A retention key defaulting to
 // "keep nothing" would make the first `events prune --before` an operator ever
-// typed delete their whole log — the opposite of the posture operations.md §2
-// documents, where Docket deletes nothing it was not asked to delete.
+// typed delete their whole log — the opposite of the posture where Docket
+// deletes nothing it was not asked to delete.
 func TestRetentionDefaultRetainsEverything(t *testing.T) {
 	conn := mustDB(t)
 
@@ -238,7 +238,7 @@ func TestRetentionDefaultRetainsEverything(t *testing.T) {
 	}
 }
 
-// TestPruneDeletesOnlyEvents is P16 and P17. The verb's blast radius is one
+// TestPruneDeletesOnlyEvents: the verb's blast radius is one
 // table, and the test asserts it over EVERY OTHER TABLE rather than over the
 // handful a reviewer would think to name.
 func TestPruneDeletesOnlyEvents(t *testing.T) {
@@ -262,21 +262,22 @@ func TestPruneDeletesOnlyEvents(t *testing.T) {
 			continue
 		}
 		if after[table] != n {
-			t.Errorf("%s went from %d rows to %d: the prune reached outside `events` (P16)",
+			t.Errorf("%s went from %d rows to %d: the prune reached outside `events`",
 				table, n, after[table])
 		}
 	}
 }
 
-// TestPruningALiveRunWouldMoveTheFloor is §5.2's ARGUMENT, executed.
+// TestPruningALiveRunWouldMoveTheFloor is the live-run refusal's ARGUMENT,
+// executed.
 //
 // The refusal is not fastidiousness about audit trails. The budget floor is a
-// SUM over a run's `step-claimed` events (§4.3), so deleting them does not lose
-// a record of what the run spent — it changes what the engine BELIEVES the run
+// SUM over a run's `step-claimed` events, so deleting them does not lose a
+// record of what the run spent — it changes what the engine BELIEVES the run
 // spent, downward, which is the direction that lets a capped run overspend.
 //
-// The test proves that by doing the forbidden thing directly, the same way S6's
-// GONE test constructed a state no product path could reach: refuse through the
+// The test proves that by doing the forbidden thing directly, the same way the
+// GONE tests construct a state no product path could reach: refuse through the
 // verb, then delete by hand and watch the number move.
 func TestPruningALiveRunWouldMoveTheFloor(t *testing.T) {
 	conn := mustDB(t)
@@ -294,7 +295,7 @@ func TestPruningALiveRunWouldMoveTheFloor(t *testing.T) {
 
 	// The verb refuses.
 	if _, err := PruneEvents(conn, PruneQuery{Before: maxSeq + 1, NowMS: nowMS}); err == nil {
-		t.Fatal("a live run's events were pruned; §5.2 refuses them")
+		t.Fatal("a live run's events were pruned; the live-run refusal forbids that")
 	}
 	if floor := runFloor(t, conn, runID); floor != floorBefore {
 		t.Errorf("the refused prune moved the floor from %g to %g", floorBefore, floor)
@@ -309,7 +310,7 @@ func TestPruningALiveRunWouldMoveTheFloor(t *testing.T) {
 	}
 }
 
-// TestPruneDryRunWritesNothing is P5: `--dry-run` answers the question without
+// TestPruneDryRunWritesNothing: `--dry-run` answers the question without
 // answering it destructively.
 func TestPruneDryRunWritesNothing(t *testing.T) {
 	conn := mustDB(t)
@@ -344,7 +345,7 @@ func TestPruneDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// TestPruneIsEventLogged is P18: the prune records itself, ABOVE what it
+// TestPruneIsEventLogged: the prune records itself, ABOVE what it
 // deleted.
 //
 // The ordering is the point. An `events-pruned` event with a seq inside the
@@ -371,7 +372,7 @@ func TestPruneIsEventLogged(t *testing.T) {
 		}
 	}
 	if pruneEvent == nil {
-		t.Fatal("the prune wrote no `events-pruned` event (P18)")
+		t.Fatal("the prune wrote no `events-pruned` event")
 	}
 	if pruneEvent.Seq < maxSeq {
 		t.Errorf("the `events-pruned` event is at seq %d, inside the deleted "+
@@ -385,8 +386,7 @@ func TestPruneIsEventLogged(t *testing.T) {
 		}
 	}
 
-	// And it is ATTRIBUTABLE, which is what keeps §9 item 2 checkable over a
-	// log that has been trimmed.
+	// And it is ATTRIBUTABLE, so a trimmed log still says who trimmed it.
 	actor, ok := ActorFor(EventEventsPruned)
 	if !ok || actor != ActorHuman {
 		t.Errorf("`events-pruned` maps to %q; nothing in the engine prunes, so "+

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# ZM — COMPLETION METADATA REACHES THE STEP
-# (docs/tdd/completion-metadata.md).
+# ZM — COMPLETION METADATA REACHES THE STEP.
 #
 # THIS SECTION IS THE LITERAL INVERSE OF THE ORIGINAL REPRODUCTION, which
 # recorded, through the CLI:
@@ -12,7 +11,7 @@
 #   null
 #
 # Exit 0, and the bag gone. The flag parsed, the option field existed and
-# documented a merge, the column existed, and the R7 rollup read that column
+# documented a merge, the column existed, and the report rollup read that column
 # correctly — but nothing in the engine read the option, so ZERO steps in ANY
 # database carried metadata. The failure was SILENT, which is what made it
 # expensive: an instance emitting its bag correctly observed nothing and
@@ -22,7 +21,7 @@
 # completion — the exact query that returned `null`, through the same verbs, at
 # the same layer. The Go tests prove the merge; this proves the WIRE.
 #
-# THE STRANGER TEST (§1.1). The fixture is a print shop, as ZJ's is: a person
+# THE STRANGER TEST. The fixture is a print shop, as ZJ's is: a person
 # runs a press, a person records which desk did the work and whether it needed
 # rework. The bag's keys are `desk` and `rework` — the reference instance's own
 # routing keys are INSTANCE DATA and must never appear in core, and
@@ -92,7 +91,7 @@ TOML
   assert_exit "ZM" "ZM1_report" 0
   assert_json_exists "ZM" "ZM1_report_metadata_present" '.data.metadata'
 
-  # R7 is key -> distinct value -> count, both levels sorted. `desk` sorts
+  # The rollup is key -> distinct value -> count, both levels sorted. `desk` sorts
   # before `rework`, so the nesting is addressable without a search.
   assert_json "ZM" "ZM1_rollup_key" '.data.metadata[0].key' "desk"
   assert_json "ZM" "ZM1_rollup_value" '.data.metadata[0].values[0].value' "front"
@@ -109,7 +108,7 @@ TOML
   # M2 — A REFUSAL WRITES NOTHING, and the step survives it
   # ===========================================================================
   #
-  # §6.9's property at the CLI: validation happens BEFORE the transaction
+  # The refusal property at the CLI: validation happens BEFORE the transaction
   # opens, so a rejected completion leaves the step exactly as it was — still
   # claimable, still completable. A worker that fat-fingers its bag loses the
   # round trip and nothing else.

@@ -89,7 +89,7 @@ func TestParkTextIsNotTheFinalWord(t *testing.T) {
 	if !strings.Contains(line, "Stop HRN-301") {
 		t.Errorf("the resolution on %q quotes none of the ruling", line)
 	}
-	// exec.Render IS strconv.Quote (§5.7), so a caller that also applied %q
+	// exec.Render IS strconv.Quote, so a caller that also applied %q
 	// would hand the operator their own words as `"\"…\""`.
 	if strings.Contains(line, `\"`) {
 		t.Errorf("the annotation double-quotes the ruling:\n  %s", line)
@@ -431,8 +431,8 @@ func TestFullyReportedRunListsNoSilentSeats(t *testing.T) {
 
 // The section rendered `ac-commands: pass 0, fail 1` whether the failure
 // BLOCKED the step or was an advisory input to it. A `pre = true` gate never
-// routes — §11.1 runs it at claim, PG4 keeps it out of the saga's verdict — so
-// on RUN-61 three of them failed and every step routed on its executor's own
+// routes — the engine runs it at claim and keeps it out of the saga's verdict —
+// so on RUN-61 three of them failed and every step routed on its executor's own
 // verdict anyway. Only `step show` carried the marker, and a conductor reading
 // this document nearly reported a fix round as burned on a gate artifact.
 
@@ -523,10 +523,10 @@ func TestActionsTallyIsUnaffected(t *testing.T) {
 	}
 }
 
-// TestStepUsageCoverageNamesSilentSteps is D7's rendering: the steps the
-// report lists as still owing usage appear under "Step usage" as Coverage and
-// Silent lines, the vote section's shape, so the done-report check can read
-// them the way it reads silent seats.
+// TestStepUsageCoverageNamesSilentSteps: the steps the report lists as still
+// owing usage appear under "Step usage" as Coverage and Silent lines, the vote
+// section's shape, so the done-report check can read them the way it reads
+// silent seats.
 func TestStepUsageCoverageNamesSilentSteps(t *testing.T) {
 	r := &engine.RunReport{
 		Run: &model.Run{ID: 90, Status: model.RunActive},

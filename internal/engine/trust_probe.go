@@ -237,8 +237,8 @@ func spawnProbeGate(match trust.Match, repoRoot string, spec dexec.Spec) (dexec.
 }
 
 // lookupProbeEntry holds one roster entry to the same Lookup the record-time
-// gate path makes, so the probe refuses a drifted content pin (§3.1
-// argv0_sha256) with its reason and returns the argv that must execute. The
+// with its reason and returns the argv that must execute. The pin that
+// authorizes the spawn is checked again by spawnProbeGate.
 // pin that authorizes the spawn is checked again by spawnProbeGate.
 //
 // The snapshot holds only this entry, so Lookup cannot select a different

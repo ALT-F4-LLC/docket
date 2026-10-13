@@ -187,9 +187,9 @@ func TestAbandonmentDoesNotCompleteTheIssue(t *testing.T) {
 }
 
 // The abandon cascades stamp `recorded_at_ms` on every step they terminalize,
-// because D7's wave-end clock (latestExecutorRecordMS) reads that column for
-// every terminal executor step with attempt > 0. A cascaded step left at 0
-// drops out of the clock and shortens the wave's usage grace.
+// because the usage grace's wave-end clock (latestExecutorRecordMS) reads that
+// column for every terminal executor step with attempt > 0. A cascaded step
+// left at 0 drops out of the clock and shortens the wave's usage grace.
 
 // TestAbandonIssueInRunStampsTheCascadedStepsRecordTime: the operator verb's
 // cascade stamps the abandon time on a claimed attempt-1 step and leaves an

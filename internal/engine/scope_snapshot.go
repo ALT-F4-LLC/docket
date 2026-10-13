@@ -14,21 +14,21 @@ import (
 //
 // `docket issue edit --scope` writes `issues.scope_globs` and nothing else.
 // That column is the LIVE scope, and exactly one consumer reads it live: the
-// scheduler's mutual-exclusion check (§6.3 R4, loadIssueFacts), which asks
+// scheduler's mutual-exclusion check (R4, loadIssueFacts), which asks
 // "what does this issue touch NOW" so an operator's correction takes effect
 // against collisions immediately.
 //
 // EVERY OTHER CONSUMER READS THE ACTIVATION SNAPSHOT, and does so by design:
 //
 //   - the context bundle's `issue.scope` — the scope a rendered packet's brief
-//     carries — comes from `run_issues.issue_snapshot` (§5.1.1, §6.6's
-//     five-source rule). Assembly reads NO live issue field at all, and
+//     carries — comes from `run_issues.issue_snapshot` (the five-source
+//     rule). Assembly reads NO live issue field at all, and
 //     TestContextAssemblyReadsNoLiveState enforces that at the code level.
-//   - the recorded `issue.diff` is computed over snapshotScope (§6.7.1 D1),
+//   - the recorded `issue.diff` is computed over snapshotScope,
 //     the same frozen blob, so a step's recorded diff cannot depend on an edit
 //     made after the run was activated.
 //
-// This is §9 item 5's mid-run edit immunity — the same invariant that keeps a
+// This is mid-run edit immunity — the same invariant that keeps a
 // `description` edit out of an already-activated packet (DKT-725) — and it is
 // what makes a packet reproducible from the ledger. So `issue edit --scope`
 // still re-snapshots NOTHING: an edit that reached a live step by itself would
@@ -99,7 +99,7 @@ func ScopeEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 		}
 		warnings = append(warnings, fmt.Sprintf(
 			"%s is bound into %s, which froze its scope at activation as %s "+
-				"(§5.1.1) — the %d step(s) still live there will render that "+
+				"— the %d step(s) still live there will render that "+
 				"frozen scope in their packets and record their diffs over it, "+
 				"NOT the %s you just wrote. The live column does take effect "+
 				"for scheduling's mutual-exclusion check, and for nothing else. "+
@@ -151,7 +151,7 @@ func DescriptionEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 		}
 		warnings = append(warnings, fmt.Sprintf(
 			"%s is bound into %s, which froze its description at activation "+
-				"(§5.1.1) — the %d step(s) still live there will render that "+
+				"— the %d step(s) still live there will render that "+
 				"frozen description as their packets' REQUEST and issue.body, "+
 				"NOT the description you just wrote. To make the amendment "+
 				"reach this run's remaining work, refresh its snapshot — "+
@@ -181,7 +181,7 @@ type frozenBinding struct {
 // mid-run edit advisories fire on.
 //
 // The rows are drained before returning, so a caller may query again: the
-// engine's pool is single-connection (§4.8's SQLite writer discipline), and a
+// engine's pool is single-connection (the SQLite writer discipline), and a
 // query issued while this cursor was open would wait forever for the
 // connection the walk holds.
 func frozenBindingsWithLiveSteps(conn *sql.DB, issueID int) ([]frozenBinding, error) {

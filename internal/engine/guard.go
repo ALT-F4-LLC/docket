@@ -9,19 +9,19 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// `guard stop|gate` — TDD §6.12.
+// `guard stop|gate`.
 //
 // Both are deterministic predicates over engine state, and both answer with
-// EXIT 0 ALLOW / EXIT 2 DENY WITH REASON (§2).
+// EXIT 0 ALLOW / EXIT 2 DENY WITH REASON.
 //
 // Exit 2 collides numerically with NOT_FOUND's exit 2, and THAT IS INTENTIONAL
-// AND SPECIFIED. §2 defines the guard contract as "exit 0/2 + reason",
+// AND SPECIFIED. The guard contract is "exit 0/2 + reason",
 // INDEPENDENT of the error taxonomy, because guards are hook predicates whose
 // caller tests a boolean — not CLI verbs whose caller maps a code. This is
 // recorded here because a reviewer will otherwise read it as a taxonomy
 // violation; it is the spec's own contract.
 //
-// `guard record|spawn` are stage 6's and live in guard_dispatch.go, beside the
+// `guard record|spawn` live in guard_dispatch.go, beside the
 // dispatch state they are predicates over. They share GuardVerdict and the exit
 // contract; what they do not share is a file, because their subject is the
 // manifest rather than the step graph.
@@ -37,7 +37,7 @@ type GuardVerdict struct {
 
 // GuardStop answers `docket guard stop`: is the machine done working?
 //
-// The base rule (§6.12): a step in `claimed`/`running`/`gated`/`pending` for
+// The base rule: a step in `claimed`/`running`/`gated`/`pending` for
 // an active AND DISPATCHED run blocks a stop. Four refinements narrow it to
 // steps a stop would actually interfere with:
 //
@@ -63,14 +63,14 @@ type GuardVerdict struct {
 //     (DKT-1845): a paused run is the run-level version of the same
 //     wait-on-a-person exemption a `waiting-human` STEP already gets, and a
 //     step that never started is not work a stop interferes with. The same
-//     holds for a step held because its ISSUE is parked on a person (R2b):
-//     R2b precedes R3, so a parked step's successors report the park rather
-//     than their unfinished predecessor. Any other
+//     holds for a step held because its ISSUE is parked on a person
+//     (CondIssueParked): that condition precedes CondPredecessors, so a
+//     parked step's successors report the park rather than their unfinished
+//     predecessor. Any other
 //     unreadiness — headroom, a budget stop, an unacknowledged reap — still
 //     blocks, since those name work or acknowledgment the session owes before
 //     stopping. (A held cluster awaiting ONE OPERATOR still denies: the
-//     materialized human step is pending and ready, per H11's decided
-//     semantics. A `claimed`/`running` step still denies even while its run
+//     materialized human step is pending and ready. A `claimed`/`running` step still denies even while its run
 //     is paused — `run pause` honors in-flight completes rather than killing
 //     them, so the machine may still have a live worker to interrupt.)
 //
@@ -96,8 +96,8 @@ func GuardStop(conn *sql.DB, projectID int, nowMS int64) (*GuardVerdict, error) 
 	// momentum.
 	//
 	// The probe is the `dispatches` TABLE, not the `dispatch-opened` EVENT the
-	// ask names. Both record the same fact — it is the same existence check D2
-	// uses for "a run no relay drove has nobody owing usage" — but events are
+	// ask names. Both record the same fact — it is the same existence check
+	// RunEverDispatchedTx uses for "a run no relay drove has nobody owing usage" — but events are
 	// prunable (`events prune`) and dispatch rows are not deleted by anything,
 	// so a long-lived run whose early events had been trimmed would read as
 	// never-dispatched and stop blocking exactly when it mattered most.
@@ -255,7 +255,8 @@ func openVoteSteps(tx *sql.Tx, sched *Scheduler) (map[int]bool, error) {
 //
 // A gated step with NO unresolved holds is dispatchable — its saga resumes
 // under the next engine invocation — so it blocks. One with an unresolved
-// HUMAN hold blocks through H11's decided semantics, and the mixed case
+// HUMAN hold blocks, because its materialized human step is ready, and the
+// mixed case
 // blocks with it.
 func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) bool {
 	heldName := workflow.HeldStepName(step.StepName)
@@ -309,7 +310,7 @@ func suspendedOnOpenPanel(sched *Scheduler, step *db.Step, openVotes map[int]boo
 // several voters instead of one — silently stopped matching, and every hook
 // checking that gate started denying with "no such step" while the gate itself
 // sat approved. That is the strictness comment's own concern inverted: the
-// decision WAS made, by the machinery §8 exists to run, and the guard was the
+// decision WAS made, by the vote machinery, and the guard was the
 // only thing that could not see it. A tallied pass IS a decision, so it counts;
 // nothing else about the test loosened, and a vote still open reads `pending`
 // here and denies exactly as an unapproved human gate does.

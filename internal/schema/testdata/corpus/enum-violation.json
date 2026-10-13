@@ -1,5 +1,5 @@
 {
-  "why": "§4.8 C3's own example: the refusal names the element, the property, the value given, and the values accepted",
+  "why": "the refusal names the element, the property, the value given, and the values accepted",
   "schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "array",

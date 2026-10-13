@@ -21,7 +21,7 @@ import (
 //
 // The engine already pins policy.toml's bytes at activation — it lands in
 // the generic file-pin bucket scanConfigDirs gives every instance-config file
-// it does not otherwise register (autoregister.go F4) — so THIS is the parser
+// it does not otherwise register (autoregister.go) — so THIS is the parser
 // with authority: policyForRun (policy_resolve.go) reads the pinned bytes
 // back and verifies them against the hash activation recorded, the same
 // ladder readPinnedPacketFile uses for every other pinned instance file.

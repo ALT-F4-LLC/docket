@@ -584,9 +584,8 @@ type Issue struct {
 	UpdatedAt   time.Time
 	// Version is the optimistic-concurrency counter (schema v5). It is
 	// deliberately NOT emitted by MarshalJSON: adding a field to the v1
-	// envelope would break byte-compatibility for every existing verb
-	// (engine-spec.md §9 item 8). Use WithVersion to surface it under
-	// --json=v2.
+	// envelope would break byte-compatibility for every existing verb. Use
+	// WithVersion to surface it under --json=v2.
 	Version int
 	// Lease is the capability lease held on this issue (schema v6), or nil
 	// when unclaimed. Like Version it never reaches the v1 wire format; it
@@ -637,15 +636,15 @@ type issueJSONV2 struct {
 }
 
 // VersionedIssue wraps an Issue so it marshals with its `version` field, for
-// --json=v2 responses (engine-spec.md §5, "versions in .data").
+// --json=v2 responses, which carry versions in .data.
 type VersionedIssue struct{ Issue }
 
 // MarshalJSON emits the v1 issue shape plus `version`, and `lease` when a
 // lease is held.
 //
 // The lease's `live` flag is computed here, at marshal time, from the current
-// clock — engine-spec.md §2 requires read verbs to render *effective* status
-// with expiry computed at read time and no write. An expired lease therefore
+// clock — read verbs render *effective* status with expiry computed at read
+// time and no write. An expired lease therefore
 // reads as dead the instant it lapses, without anyone having called claim.
 func (v VersionedIssue) MarshalJSON() ([]byte, error) {
 	base, err := v.Issue.marshalJSONStruct()
@@ -717,7 +716,7 @@ type issueJSON struct {
 }
 
 // MarshalJSON implements custom JSON serialization for Issue.
-// This is the frozen v1 wire format, with the amendments recorded on issueJSON:
+// This is the frozen v1 wire format, with the additions recorded on issueJSON:
 // `scope` (DKT-55), `resolution` (DKT-245), and `size` are emitted when — and
 // only when — they are set, so the dormant shape stays byte-identical, and
 // `issue` mirrors `id` unconditionally (DKT-452).

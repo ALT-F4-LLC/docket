@@ -12,7 +12,7 @@ import (
 )
 
 // schemaReference is one `payload` declaration, remembered with the step that
-// made it so a refusal can name where to look (P2).
+// made it so a refusal can name where to look.
 type schemaReference struct {
 	ref      string
 	workflow string
@@ -20,13 +20,13 @@ type schemaReference struct {
 }
 
 // schemaPinsFor builds the `pins` rows for every schema a run's bound workflows
-// reference (TDD §4.7 P1, P5).
+// reference.
 //
 // The hash comes from the ROW, not from the reference: `ref` says which schema,
-// `sha256` says which bytes, and the pair is what makes P4's "two runs of the
+// `sha256` says which bytes, and the pair is what makes "two runs of the
 // same issue at the same pins reach the same verdict on the same payload" true.
 //
-// P2: a referenced schema that is not registered is a VALIDATION_ERROR naming
+// A referenced schema that is not registered is a VALIDATION_ERROR naming
 // the workflow, the step, and the schema. That is unreachable through
 // `workflow register` — V25a refuses it there — and reachable through a database
 // restored from elsewhere, which is the same reasoning ParsePredicate keeps its
@@ -43,7 +43,8 @@ func schemaPinsFor(
 		name, version, err := workflow.ParsePayloadRef(reference.ref)
 		if err != nil {
 			// Unreachable through `workflow register` (V25 checks the shape) and
-			// reachable through a restored database, exactly as P2's case is.
+			// reachable through a restored database, exactly as the unregistered
+			// case is.
 			return nil, validationErr(
 				"workflow %s, step %q: `payload` %q is not a `name@version` reference",
 				reference.workflow, reference.step, reference.ref)
@@ -72,7 +73,7 @@ func schemaPinsFor(
 // in a DETERMINISTIC order: run issues in their existing order, then each
 // definition's steps in declaration order.
 //
-// Determinism matters because the pins are golden-diffed (§9.5): an order that
+// Determinism matters because the pins are golden-diffed: an order that
 // varied with map iteration would make the golden flap on nothing.
 func referencedSchemas(
 	runIssues []*db.RunIssue,
@@ -105,7 +106,7 @@ func referencedSchemas(
 
 // stepSchemaRefs is which schemas ONE step brings into the pin set.
 //
-// P5: the builtin pins like any other referenced schema. That it ships in the
+// The builtin pins like any other referenced schema. That it ships in the
 // binary changes where its bytes came from, not whether a run records what it
 // used — and a run that cannot say which `aggregate@1` it computed against is a
 // run that cannot explain its own output.
@@ -121,22 +122,21 @@ func stepSchemaRefs(step *workflow.Step) []string {
 }
 
 // RegistrationOrder sorts config files into the order auto-registration must
-// apply (TDD §4.6).
+// apply.
 //
 // **Schemas register in full before workflows.** A workflow that names a schema
 // which is not registered yet is a hard VALIDATION_ERROR at `workflow register`
-// — the only reading under which §11.2's "validated against the registered
+// — the only reading under which "validated against the registered
 // schema at register time" is true — so the zero-touch path never reaches that
 // refusal only because the ORDER guarantees it cannot. That is a contract, not
-// luck, and it is written here, in the stage that creates the dependency,
-// because S6 would otherwise discover it as a bug.
+// luck, and it is written here, beside the code that creates the dependency.
 //
 // Within each group the order is lexical by path, for determinism.
 //
-// The DIRECTORY SCAN that feeds this landed at S6 in autoregister.go,
-// against this signature. F1 requires the scan to hand its paths here rather
-// than re-implement the ordering, so this stays the ONE definition of what the
-// order is — and F2/F3 in autoregister_test.go assert the behavior it buys:
+// The DIRECTORY SCAN that feeds this lives in autoregister.go. The scan hands
+// its paths here rather than re-implement the ordering, so this stays the ONE
+// definition of what the order is — and autoregister_test.go asserts the
+// behavior it buys:
 // activation over a config tree holding a workflow and the schema it names
 // SUCCEEDS, which it could not if the order were lexical across everything.
 func RegistrationOrder(paths []string) []string {
@@ -155,7 +155,7 @@ func RegistrationOrder(paths []string) []string {
 // isSchemaConfigPath reports whether a config path is a schema document.
 //
 // It classifies by DIRECTORY — `.docket/config/schemas/` — rather than by
-// extension, because §2's config lifecycle names the directories and a
+// extension, because the config lifecycle names the directories and a
 // `policy.toml` beside a `workflows/` tree would otherwise sort by suffix into
 // the wrong half.
 func isSchemaConfigPath(path string) bool {

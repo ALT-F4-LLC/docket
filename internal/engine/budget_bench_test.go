@@ -10,11 +10,11 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The measurements docs/spec/performance.md publishes (TDD §12.2).
+// The measurements docs/spec/performance.md publishes.
 //
 // They are BENCHMARKS RATHER THAN ASSERTIONS on purpose. A test that failed at
 // some millisecond threshold would fail on a loaded CI runner and tell nobody
-// anything about the shape of the cost; what §4.3's argument needs is the
+// anything about the shape of the cost; what the floor's argument needs is the
 // SHAPE — the floor query is a SUM over an indexed join, so it should grow
 // linearly in claim events with a small constant, and if it ever grows
 // otherwise the numbers in performance.md are where that shows up.
@@ -22,8 +22,8 @@ import (
 // The stated fallback, recorded before it is needed: a cache CHECKED AGAINST
 // the query — the query still runs, the cache is asserted to match, a mismatch
 // is a hard error — never a cache REPLACING it. Recording it now keeps a future
-// optimization from quietly becoming C4, the lost update the floor's whole
-// design avoids.
+// optimization from quietly becoming the lost update the floor's whole design
+// avoids.
 
 // benchSeedDB opens a shared in-memory store, migrates it, and seeds the one
 // run / workflow / issue every benchmark here builds on — the steps stay with
@@ -124,9 +124,9 @@ func benchFloor(b *testing.B, n int) {
 	}
 }
 
-// BenchmarkFloorQuery10/100/1000 are §12.2's first row: the floor query at
-// three log sizes. It runs ONCE PER CLAIM, so its growth is the number §4.3's
-// cost argument rests on.
+// BenchmarkFloorQuery10/100/1000 measure the floor query at three log sizes.
+// It runs ONCE PER CLAIM, so its growth is the number the floor's cost
+// argument rests on.
 func BenchmarkFloorQuery10(b *testing.B)   { benchFloor(b, 10) }
 func BenchmarkFloorQuery100(b *testing.B)  { benchFloor(b, 100) }
 func BenchmarkFloorQuery1000(b *testing.B) { benchFloor(b, 1000) }
@@ -205,10 +205,10 @@ func BenchmarkClaimablePrefix10(b *testing.B)   { benchPrefix(b, 10) }
 func BenchmarkClaimablePrefix100(b *testing.B)  { benchPrefix(b, 100) }
 func BenchmarkClaimablePrefix1000(b *testing.B) { benchPrefix(b, 1000) }
 
-// BenchmarkRunReport50Steps is §12.2's second row: the rollup an operator
-// POLLS. Its cost matters differently from the floor's — a report is called by
-// a person or a dashboard rather than once per claim — but a verb somebody
-// refreshes should not be the expensive thing in a run.
+// BenchmarkRunReport50Steps measures the rollup an operator POLLS. Its cost
+// matters differently from the floor's — a report is called by a person or a
+// dashboard rather than once per claim — but a verb somebody refreshes should
+// not be the expensive thing in a run.
 func BenchmarkRunReport50Steps(b *testing.B) {
 	conn, runID := benchFloorDB(b, 50)
 	defer conn.Close()

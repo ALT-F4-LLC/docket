@@ -18,23 +18,23 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// TestNoTrustPathSurface is T8's surface guard, EXTENDED to the CLI as
-// internal/trust's own copy said group 2 would (gates-trust §3.1, §9.1).
+// TestNoTrustPathSurface is the trust package's surface guard, EXTENDED to the
+// CLI.
 //
-// THE RULE: no flag and no config key may name a trust-file path. §3.1's
-// resolution table has exactly two rows — $XDG_CONFIG_HOME/docket/trust.toml,
-// else $HOME/.config/docket/trust.toml — and states "There is no third source."
+// THE RULE: no flag and no config key may name a trust-file path. The store
+// path resolves from exactly two sources — $XDG_CONFIG_HOME/docket/trust.toml,
+// else $HOME/.config/docket/trust.toml — and there is no third source.
 //
 // The reason is direct and is why this is a mechanical guard rather than a
 // convention: every additional way to point docket at a trust file is another
 // way for REPO CONTENT — a checked-in .envrc, a direnv hook, a Makefile — to
 // point it at a file the repo controls. That is the whole of the malicious-clone
-// threat (T1) reopening through a flag somebody added for convenience.
+// threat reopening through a flag somebody added for convenience.
 //
-// Group 1 could only check the trust package's own surface, because the package
-// was unreachable from any command. Now the verbs exist, so this walks the
-// COBRA TREE — every command, every flag, including the ones this stage added —
-// and the config-key registry.
+// The trust package's own guard could only check its own surface, because the
+// package was unreachable from any command. Now the verbs exist, so this walks
+// the COBRA TREE — every command, every flag, including the trust verbs — and
+// the config-key registry.
 func TestNoTrustPathSurface(t *testing.T) {
 	// A path-shaped name for the trust store, in any of the spellings someone
 	// would reach for. `--trust-file` is the obvious one; the rest are the
@@ -66,7 +66,7 @@ func TestNoTrustPathSurface(t *testing.T) {
 		})
 	})
 
-	// The config-key registry, the other half of §3.1's "no config key".
+	// The config-key registry, the other half of "no config key".
 	for _, key := range db.KnownConfigKeys() {
 		for _, bad := range banned {
 			if strings.Contains(strings.ToLower(key), bad) {
@@ -76,7 +76,7 @@ func TestNoTrustPathSurface(t *testing.T) {
 	}
 
 	for _, offense := range offenses {
-		t.Errorf("%s names a trust-file path; §3.1 admits no source for the "+
+		t.Errorf("%s names a trust-file path; the resolution admits no source for the "+
 			"store path other than XDG_CONFIG_HOME, because every additional "+
 			"one lets repo content choose the trust file", offense)
 	}
@@ -98,10 +98,10 @@ func TestNoTrustPathSurface(t *testing.T) {
 	}
 }
 
-// TestTrustVerbsSkipTheDatabase pins §3.5's other structural property: the
+// TestTrustVerbsSkipTheDatabase pins the other structural property: the
 // trust store is USER-LEVEL, so managing it does not require a repository.
 //
-// `trust list` and `trust rm` outside a repo work and write no event (§3.6). If
+// `trust list` and `trust rm` outside a repo work and write no event. If
 // these verbs demanded a database, a stranger who installed docket could not
 // inspect their own allowlist until they created a tracker.
 func TestTrustVerbsSkipTheDatabase(t *testing.T) {

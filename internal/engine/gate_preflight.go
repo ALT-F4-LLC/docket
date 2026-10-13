@@ -75,7 +75,7 @@ type GatePreflight struct {
 // against the trust store.
 //
 // The store is read ONCE for the whole report, the same snapshot discipline
-// §7.2 M1 applies at the gate and the fence report applies to itself: a report
+// the runner applies at the gate and the fence report applies to itself: a report
 // assembled from several reads could disagree with itself mid-render.
 //
 // A gate is looked up BY NAME WITH A NIL ARGV, which is exactly what

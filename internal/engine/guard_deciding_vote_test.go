@@ -137,7 +137,7 @@ func TestDecidingVoteIsNarrow(t *testing.T) {
 		runID := dispatchRun(t, conn)
 		id := openProposal(t, conn, "unrelated")
 
-		// Rows proposed against no open dispatch is G8's denial — a fact about
+		// Rows proposed against no open dispatch are denied — a fact about
 		// a relay spawning a batch the engine never issued, which no vote
 		// makes acceptable.
 		verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{

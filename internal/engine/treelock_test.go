@@ -13,11 +13,11 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// The tree mutex (TDD docs/tdd/gates-trust.md §7.4, threat T13).
+// The tree mutex.
 //
-// §4: "Gates that touch the working tree declare `tree = true` and serialize on
-// an engine-held per-repo mutex — parallel read-step completions never race a
-// build."
+// The rule: "Gates that touch the working tree declare `tree = true` and
+// serialize on an engine-held per-repo mutex — parallel read-step completions
+// never race a build."
 
 // treeLockRepo builds a repo root with a .docket directory for the lockfile.
 func treeLockRepo(t *testing.T) (repoRoot, docketDir string) {
@@ -29,7 +29,7 @@ func treeLockRepo(t *testing.T) (repoRoot, docketDir string) {
 	return repoRoot, docketDir
 }
 
-// TestTreeGatesSerialize is T13: two concurrent `tree = true` holders never
+// TestTreeGatesSerialize: two concurrent `tree = true` holders never
 // overlap.
 //
 // Each records the interval it held the lock; the assertion is that no two
@@ -84,11 +84,11 @@ func TestTreeGatesSerialize(t *testing.T) {
 	}
 }
 
-// TestNonTreeGatesRunConcurrently is L6's converse: a gate that does NOT
+// TestNonTreeGatesRunConcurrently is the converse: a gate that does NOT
 // declare `tree` takes no lock at all.
 //
 // Without it the suite could not tell "the mutex works" from "everything is
-// serialized", and engine-core §5's read-only fan-out parallelism — the proven
+// serialized", and read-only fan-out parallelism — the proven
 // win — would be silently lost.
 func TestNonTreeGatesRunConcurrently(t *testing.T) {
 	repoRoot, docketDir := treeLockRepo(t)
@@ -116,11 +116,11 @@ func TestNonTreeGatesRunConcurrently(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Error("a gate without `tree = true` blocked on the tree mutex; " +
-			"non-tree gates must take no lock (L6)")
+			"non-tree gates must take no lock")
 	}
 }
 
-// TestTreeLockReleasedOnProcessDeath is L1's whole reason for choosing flock
+// TestTreeLockReleasedOnProcessDeath is the whole reason for choosing flock
 // over a lockfile-with-a-pid: the kernel releases it when the fd closes,
 // INCLUDING on SIGKILL.
 //
@@ -167,11 +167,11 @@ func TestTreeLockReleasedOnProcessDeath(t *testing.T) {
 	// The kernel released it. A second acquisition succeeds immediately, with
 	// no stale-lock detection anywhere in the path.
 	lock, err := acquireTreeLock(filepath.Join(docketDir, "tree.lock"), 5*time.Second)
-	testsupport.Must(t, err, "the tree mutex was not released by process death (L1): %v", err)
+	testsupport.Must(t, err, "the tree mutex was not released by process death: %v", err)
 	lock.release()
 }
 
-// TestTreeLockRefusesNonRegularFile is L7's table.
+// TestTreeLockRefusesNonRegularFile is the lockfile integrity table.
 //
 // `.docket/tree.lock` sits INSIDE the repository, so it is repo-shippable
 // content: a hostile repo can commit it as a symlink — to ~/.ssh/config, to a

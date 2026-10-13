@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// schemaListResult is a Collection (reliability-delta §4.1), so v2 renders
+// schemaListResult is a Collection, so v2 renders
 // {items, total, truncated}. Total comes from a COUNT(*) that ignores LIMIT.
 type schemaListResult struct {
 	Schemas []*model.Schema `json:"schemas"`

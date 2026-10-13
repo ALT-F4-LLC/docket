@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #
-# ZK — THE ZERO-TOUCH REHEARSAL, THE EVENTS READ SURFACE, AND THE TWO GUARDS
-# (runs-dispatch §7, §8, §9, §9.8).
+# ZK — THE ZERO-TOUCH REHEARSAL, THE EVENTS READ SURFACE, AND THE TWO GUARDS.
 #
-# TWO HEADLINES, both engine-spec §9 acceptance criteria, verbatim:
+# TWO HEADLINES, both engine acceptance criteria, verbatim:
 #
 #   2. Zero model-made scheduling decisions in a full run: every transition in
 #      events traceable to next/gate/threshold/human input.
@@ -23,22 +22,22 @@
 # ITEM 2 IS AN AUDIT OVER A COMPLETED RUN, now checkable end-to-end because the
 # events read surface exists: the section drives a run to `done`, lists every
 # event through `events list`, and asserts that each kind maps to one of the four
-# actors and that no kind is outside the closed set. That is §8.7's attribution
+# actors and that no kind is outside the closed set. That is the attribution
 # table, executed rather than argued.
 #
-# THE STRANGER TEST (§1.1). The fixture is a print shop's proofing sheet: a
+# THE STRANGER TEST. The fixture is a print shop's proofing sheet: a
 # person runs the checks, a person approves. No model, no agent, no prompt —
 # `executor` is a role name and the whole rehearsal reads as "we wrote down how
 # we work, and the tracker followed it".
 #
-# The section also carries the GROUP-3 DORMANCY proof (§3): `events list` and
+# The section also carries the GROUP-3 DORMANCY proof: `events list` and
 # both guards add no output to any existing verb, and A REPO WITH NO
-# `.docket/config/` ACTIVATES BYTE-IDENTICALLY (F17/F19).
+# `.docket/config/` ACTIVATES BYTE-IDENTICALLY.
 
 test_zk_zerotouch() {
   printf "Section ZK: Zero-touch, the events read surface, and the guards"
 
-  # SB5: this section grants trust (Z3), so the sandbox is asserted before
+  # This section grants trust (Z3), so the sandbox is asserted before
   # anything runs. A hard abort, never a skip — a skip would report "fine" while
   # writing into the operator's real trust store.
   assert_trust_sandbox
@@ -111,11 +110,11 @@ test_zk_zerotouch() {
   check_cond "ZK" "ZK_Z2_not_harvested_yet" "$ZK_FENCES fences before activation" [ "$ZK_FENCES" = "0" ]
 
   # ---------------------------------------------------------------------------
-  # Z3 — THE ONE TRUST GRANT. The single human-authorized act, matching §4's
+  # Z3 — THE ONE TRUST GRANT. The single human-authorized act, matching the
   # conversational posture: a person says yes to a specific command, once.
   #
   # The trust store is SHARED ACROSS QA SECTIONS (one XDG_CONFIG_HOME per run,
-  # per SB2), and section ZH has already granted the name `checks` for ITS
+  # set in setup), and section ZH has already granted the name `checks` for ITS
   # sentinel path. The gate's tag comes from the shipped template and this
   # section must use that template verbatim (Z1/Z10), so the name cannot be
   # varied — the stale entry is removed first, which is exactly the recovery the
@@ -131,8 +130,8 @@ test_zk_zerotouch() {
 
   # ---------------------------------------------------------------------------
   # Z4/Z5 — START AND ACTIVATE. Activation AUTO-REGISTERS standard-dev@1,
-  # reports it (F20/F21), harvests the fence, binds, expands, and promotes — all
-  # in one command, with no register verb anywhere.
+  # reports it, harvests the fence, binds, expands, and promotes — all in one
+  # command, with no register verb anywhere.
   # ---------------------------------------------------------------------------
   zk_run run start --issue DKT-1 --json
   assert_exit "ZK" "ZK_Z4_start" 0
@@ -146,7 +145,7 @@ test_zk_zerotouch() {
   local ZK_CTOK
   ZK_CTOK=$(activation_token)
 
-  # F21: the `registered` array, with the outcome.
+  # The `registered` array, with the outcome.
   assert_json "ZK" "ZK_Z5_registered_len" "(.data.registered | length)" "1"
   assert_json "ZK" "ZK_Z5_registered_kind" ".data.registered[0].kind" "workflow"
   assert_json "ZK" "ZK_Z5_registered_name" ".data.registered[0].name" "standard-dev"
@@ -224,7 +223,7 @@ test_zk_zerotouch() {
   # ---------------------------------------------------------------------------
   local ZK_REGISTER_HITS
   ZK_REGISTER_HITS=$(grep -cE '^docket (workflow|schema) register' "$ZK_TRACE" || true)
-  check_cond "ZK" "ZK_Z9_no_manual_registration" "$ZK_REGISTER_HITS manual register invocation(s) in the trace; §9 item 11 requires zero" [ "$ZK_REGISTER_HITS" = "0" ]
+  check_cond "ZK" "ZK_Z9_no_manual_registration" "$ZK_REGISTER_HITS manual register invocation(s) in the trace; zero-touch requires zero" [ "$ZK_REGISTER_HITS" = "0" ]
 
   # The trace is NON-EMPTY and actually holds the rehearsal, so the zero above
   # is the zero of a search that ran rather than of a file nobody wrote to.
@@ -237,7 +236,7 @@ test_zk_zerotouch() {
   # ---------------------------------------------------------------------------
   local ZK_WF_HASH_AFTER
   ZK_WF_HASH_AFTER=$(shasum "$ZK_WF" | cut -d' ' -f1)
-  check_cond "ZK" "ZK_Z10_config_unedited" "the workflow file changed during the rehearsal; §9 item 11 forbids hand-edited config" [ "$ZK_WF_HASH_BEFORE" = "$ZK_WF_HASH_AFTER" ]
+  check_cond "ZK" "ZK_Z10_config_unedited" "the workflow file changed during the rehearsal; zero-touch forbids hand-edited config" [ "$ZK_WF_HASH_BEFORE" = "$ZK_WF_HASH_AFTER" ]
 
   # ---------------------------------------------------------------------------
   # Z11 — THE HUMAN-SHAPED INPUTS, ENUMERATED.
@@ -267,7 +266,7 @@ test_zk_zerotouch() {
   fi
 
   # ---------------------------------------------------------------------------
-  # §9 ITEM 2 — THE FULL ATTRIBUTION AUDIT OVER THE COMPLETED RUN.
+  # ITEM 2 — THE FULL ATTRIBUTION AUDIT OVER THE COMPLETED RUN.
   #
   # "Every transition in events traceable to next/gate/threshold/human input."
   # Now checkable END-TO-END through the read surface: every event the run
@@ -275,7 +274,7 @@ test_zk_zerotouch() {
   #
   # The actor table lives in internal/engine/event_read.go and is asserted
   # complete by TestEveryEventKindHasAnActor; this is the same claim executed
-  # over REAL EVENTS FROM A REAL RUN, which is what §9 item 2 asks for.
+  # over REAL EVENTS FROM A REAL RUN, which is what item 2 asks for.
   # ---------------------------------------------------------------------------
   zk_run events list --run RUN-1 --limit 500 --json
   assert_exit "ZK" "ZK_A1_events_list" 0
@@ -291,7 +290,7 @@ test_zk_zerotouch() {
   fi
 
   # THE CLOSED SET AND THE ATTRIBUTION, over every kind the run produced. The
-  # actor list is restated here as the FOUR CAUSES §9 item 2 names — this is the
+  # actor list is restated here as the FOUR CAUSES item 2 names — this is the
   # acceptance criterion's own vocabulary, not a copy of the implementation's
   # table, so a kind that drifted into a fifth category fails here.
   local ZK_KINDS ZK_UNATTRIBUTED
@@ -314,7 +313,7 @@ test_zk_zerotouch() {
       *) ZK_UNATTRIBUTED="$ZK_UNATTRIBUTED $kind" ;;
     esac
   done
-  check_cond "ZK" "ZK_A2_every_kind_attributable" "event kind(s) outside the four causes §9 item 2 names:$ZK_UNATTRIBUTED" [ -z "$ZK_UNATTRIBUTED" ]
+  check_cond "ZK" "ZK_A2_every_kind_attributable" "event kind(s) outside the four causes item 2 names:$ZK_UNATTRIBUTED" [ -z "$ZK_UNATTRIBUTED" ]
 
   # The audit is NOT VACUOUS: the run produced several distinct kinds spanning
   # more than one actor. A run with one kind would pass the loop above while
@@ -323,7 +322,7 @@ test_zk_zerotouch() {
   ZK_KIND_COUNT=$(printf '%s\n' "$ZK_KINDS" | grep -c . || true)
   check_cond "ZK" "ZK_A2_audit_nonvacuous" "the completed run produced only $ZK_KIND_COUNT distinct event kinds" [ "$ZK_KIND_COUNT" -ge 4 ]
 
-  # The report's per-actor rollup agrees with the feed, so §9 item 2's answer is
+  # The report's per-actor rollup agrees with the feed, so item 2's answer is
   # readable without leaving `run report`.
   zk_run run report RUN-1 --json
   assert_exit "ZK" "ZK_A3_report" 0
@@ -338,18 +337,18 @@ test_zk_zerotouch() {
   fi
 
   # ---------------------------------------------------------------------------
-  # THE CURSOR CONTRACT (§8.3), over the completed run's real feed.
+  # THE CURSOR CONTRACT, over the completed run's real feed.
   # ---------------------------------------------------------------------------
   zk_run events list --run RUN-1 --limit 2 --json
   local ZK_FIRST_SEQ ZK_SECOND_SEQ
   ZK_FIRST_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.events[0].seq')
   ZK_SECOND_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.events[1].seq')
 
-  # E9: `total` counts matching events BEFORE the slice, so truncation is
+  # `total` counts matching events BEFORE the slice, so truncation is
   # computable rather than guessed.
   assert_json "ZK" "ZK_C1_total_undistorted" ".data.total" "$ZK_TABLE_TOTAL"
 
-  # E5: STRICTLY greater. A consumer stores the last seq it saw and passes it
+  # The cursor is STRICTLY greater. A consumer stores the last seq it saw and passes it
   # back WITHOUT re-reading it.
   zk_run events list --run RUN-1 --since "$ZK_FIRST_SEQ" --limit 1 --json
   local ZK_AFTER_SEQ
@@ -362,7 +361,7 @@ test_zk_zerotouch() {
   assert_exit "ZK" "ZK_C3_caught_up_exit" 0
   assert_json "ZK" "ZK_C3_caught_up_empty" "(.data.events | length)" "0"
 
-  # E4: the shape is JOINABLE. `step_id` addresses a step the way every
+  # The shape is JOINABLE. `step_id` addresses a step the way every
   # other verb does, so a consumer can follow the feed into `step show`.
   zk_run events list --run RUN-1 --limit 500 --json
   local ZK_STEP_ID
@@ -375,13 +374,13 @@ test_zk_zerotouch() {
       "no event carried a step_id; the shape is unjoinable"
   fi
 
-  # E12/E11: the v2 envelope is the uniform Collection shape.
+  # The v2 envelope is the uniform Collection shape.
   zk_run events list --run RUN-1 --limit 1 --json=v2
   assert_json "ZK" "ZK_C5_v2_keys" "(.data | keys | sort | join(\",\"))" "items,total,truncated"
   assert_json "ZK" "ZK_C5_v2_truncated" ".data.truncated" "true"
 
   # ---------------------------------------------------------------------------
-  # THE GUARDS (§7), over the completed run.
+  # THE GUARDS, over the completed run.
   #
   # Both allow: nothing is unreconciled, and no reap is unacknowledged. That is
   # the ORDINARY state, and a guard that denied by default would be one every
@@ -393,24 +392,23 @@ test_zk_zerotouch() {
   zk_run guard spawn --run RUN-1
   assert_exit "ZK" "ZK_G2_spawn_allows" 0
 
-  # G4: without `--run`, the guard answers over every non-terminal run — the
+  # Without `--run`, the guard answers over every non-terminal run — the
   # `guard stop` shape, so a hook wired once keeps working as runs come and go.
   zk_run guard record
   assert_exit "ZK" "ZK_G3_record_all_runs" 0
 
-  # G8: `--rows` with no open dispatch is a DENIAL (exit 2), not a vacuous pass.
+  # `--rows` with no open dispatch is a DENIAL (exit 2), not a vacuous pass.
   # The relay believes it is spawning a batch the engine never issued.
   printf '[{"step":"STEP-1","instance":"check@0"}]\n' >"$ZK/proposed.json"
   zk_run guard spawn --run RUN-1 --rows "$ZK/proposed.json"
   assert_exit "ZK" "ZK_G4_rows_without_manifest_denied" 2
 
-  # The denial's REASON rides the error channel under --json, which is where
-  # §6.12 puts it.
+  # The denial's REASON rides the error channel under --json.
   zk_run guard spawn --run RUN-1 --rows "$ZK/proposed.json" --json
   assert_json "ZK" "ZK_G5_denial_ok_false" ".ok" "false"
 
   # ---------------------------------------------------------------------------
-  # GROUP-3 DORMANCY (§3): the read verb and the guards add NO OUTPUT to any
+  # GROUP-3 DORMANCY: the read verb and the guards add NO OUTPUT to any
   # existing verb.
   # ---------------------------------------------------------------------------
   local ZK_SHOW_BEFORE ZK_SHOW_AFTER ZK_NEXT_BEFORE ZK_NEXT_AFTER
@@ -438,7 +436,7 @@ test_zk_zerotouch() {
   # ---------------------------------------------------------------------------
   # F17/F19 — A REPO WITH NO `.docket/config/` ACTIVATES BYTE-IDENTICALLY.
   #
-  # This is the group-3 dormancy proof §3 names: the scan `stat`s the directory
+  # This is the group-3 dormancy proof: the scan `stat`s the directory
   # once, and an absent one skips it in full. The comparison is against an
   # activation of the SAME workflow registered MANUALLY, so the only difference
   # between the two repos is where the definition came from.
@@ -497,13 +495,13 @@ test_zk_zerotouch() {
 
   # ---------------------------------------------------------------------------
   # Z12 — THE SCHEMA VARIANT. The rehearsal again with a config directory
-  # holding BOTH a schema and a workflow that names it, proving F2's ordering
+  # holding BOTH a schema and a workflow that names it, proving the ordering
   # END-TO-END: activation SUCCEEDS, which it could not if the workflow
   # registered first.
   #
   # The workflow's filename sorts BEFORE the schema's, so a
-  # lexical-across-everything order would register it first and hit §4.6 (a)'s
-  # refusal. That the file is named `a-assess.toml` is the whole test.
+  # lexical-across-everything order would register it first and hit the
+  # refusal for a workflow naming a schema not yet registered. That the file is named `a-assess.toml` is the whole test.
   # ---------------------------------------------------------------------------
   local ZK_S
   ZK_S=$(qa_mktemp_d)
@@ -544,14 +542,14 @@ TOML
   run_env "$ZK_S" run activate RUN-1 --json
   assert_exit "ZK" "ZK_Z12_activate" 0
 
-  # F2, END-TO-END: two registrations, THE SCHEMA FIRST. If the order were
+  # END-TO-END: two registrations, THE SCHEMA FIRST. If the order were
   # lexical across everything, `a-assess.toml` would have registered before
   # `sheet@1.json` and been refused for naming an unregistered payload.
   assert_json "ZK" "ZK_Z12_registered_len" "(.data.registered | length)" "2"
   assert_json "ZK" "ZK_Z12_schema_first" ".data.registered[0].kind" "schema"
-  # `name` and `version` are SEPARATE fields in F21's row, so the reference
-  # `sheet@1` appears as its two parts rather than as one string — which is what
-  # lets a consumer address the schema without re-parsing a ref.
+  # `name` and `version` are SEPARATE fields in a `registered` row, so the
+  # reference `sheet@1` appears as its two parts rather than as one string —
+  # which is what lets a consumer address the schema without re-parsing a ref.
   assert_json "ZK" "ZK_Z12_schema_name" ".data.registered[0].name" "sheet"
   assert_json "ZK" "ZK_Z12_schema_version" ".data.registered[0].version" "1"
   assert_json "ZK" "ZK_Z12_workflow_second" ".data.registered[1].kind" "workflow"

@@ -164,7 +164,7 @@ func TestDispatchOpenReportsTruncation(t *testing.T) {
 // TestNextSharesTheLaneCompleteCut is AC5. `next --run` and `dispatch open`
 // share readyRows, so the lane-complete cut must reach both: a cut applied in
 // `dispatch open` alone would make the manifest stop describing the `next`
-// answer it freezes (P1), and a relay comparing the two would see rows in one
+// answer it freezes, and a relay comparing the two would see rows in one
 // and not the other. Asserted by step id at the same limit.
 func TestNextSharesTheLaneCompleteCut(t *testing.T) {
 	const limit = 12

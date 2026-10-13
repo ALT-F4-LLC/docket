@@ -8,7 +8,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// lintCase is one row of the §4.3.3 lint table. Cases with no `wants` are the
+// lintCase is one row of the lint table. Cases with no `wants` are the
 // negative half — a definition that must NOT trip the lint, which is where the
 // exceptions live.
 type lintCase struct {
@@ -189,7 +189,7 @@ func TestLintTableIsComplete(t *testing.T) {
 	}
 }
 
-// TestCycleRendersStepNames is §4.6's explicit requirement, asserted on its
+// TestCycleRendersStepNames is an explicit requirement, asserted on its
 // own: a 3-step cycle reports step names, never DKT-N. planner.CycleError
 // renders its IDs through model.FormatID, so the workflow layer must map the
 // dense indices back before reporting — a FormatID-shaped rendering difference
@@ -236,7 +236,7 @@ emits = "k"
 }
 
 // TestL2ExceptionThresholdInterposedStep is the exception that matters most:
-// §11.2 says routing to a step name "interposes that declared,
+// Routing to a step name "interposes that declared,
 // otherwise-unreached step as a successor gate", so being unreached in the
 // ordinary topology is LEGITIMATE for such a step. A naive reachability lint
 // rejects the reference instance's own security workflow.
@@ -271,7 +271,7 @@ on_fail = "skip"
 	}
 }
 
-// TestL2ExceptionLoopStep is the other exception: §11.3 (3) excludes
+// TestL2ExceptionLoopStep is the other exception: expansion excludes
 // `loop = true` steps from ordinary expansion, so they are not orphans either.
 func TestL2ExceptionLoopStep(t *testing.T) {
 	def, err := Parse([]byte(`
@@ -389,7 +389,7 @@ emits = "k"
 	}
 }
 
-// TestL4ExceptsLoopSteps: a loop step's inputs bind per §11.3 (3) within its
+// TestL4ExceptsLoopSteps: a loop step's inputs bind within its
 // ordinal, falling back to the highest earlier ordinal per input, so its
 // producers need not precede it in the ordinary topology. The committed fixture
 // depends on this — `fix` takes `reconcile.findings` while being excluded from

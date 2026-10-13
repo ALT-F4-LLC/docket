@@ -81,7 +81,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		// --replace is destructive in every output mode, so --yes is
 		// required unconditionally: an output-format flag, or whether a
 		// terminal happens to be attached, must never double as consent
-		// (DKT-15). See events_prune.go's P6 comment for the same rule
+		// (DKT-15). See events_prune.go's `--yes` comment for the same rule
 		// applied to another destructive verb.
 		if !yes {
 			return cmdErr(fmt.Errorf("--replace deletes THIS PROJECT's existing data; pass --yes to confirm"), output.ErrValidation)

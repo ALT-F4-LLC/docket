@@ -164,7 +164,7 @@ func TestActivateWarnsWhenTheSourceFileIsGone(t *testing.T) {
 	}
 }
 
-// TestReactivationWarnsRatherThanRefusingOnAnInheritedBinding is RA2/F15 held
+// TestReactivationWarnsRatherThanRefusingOnAnInheritedBinding is RA2 held
 // intact: a workflow edited after a run bound it must not reach that run, and
 // must not stop it either. Refusing here would wedge every in-flight run the
 // moment its workflow was superseded — the ordinary retro-loop bump leaves the

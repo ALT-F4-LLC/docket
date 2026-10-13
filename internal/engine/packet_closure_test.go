@@ -231,7 +231,7 @@ func TestClosureCoversHintsLoopBodiesAndSkippedSteps(t *testing.T) {
 // after a mid-run edit.
 func TestReactivationPinsANewlyBoundWorkflowsClosure(t *testing.T) {
 	conn, dir := configRepo(t)
-	// Both workflows are registered by the FIRST activation's scan (F15: a
+	// Both workflows are registered by the FIRST activation's scan (a
 	// re-activation never re-scans), but only auto-dev binds then, so only
 	// its contract is in the first closure.
 	writeConfigFile(t, dir, "workflows/auto-dev.toml",

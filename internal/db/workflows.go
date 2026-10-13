@@ -16,7 +16,7 @@ var (
 	//
 	// A registered name@version is frozen: re-registering identical bytes is
 	// an idempotent success, and re-registering different bytes is this. The
-	// version pinning engine-core §4 requires ("editing a pipeline never
+	// version pinning the engine requires ("editing a pipeline never
 	// changes an in-flight run") is worth nothing if the pinned bytes can be
 	// swapped underneath a run.
 	ErrWorkflowConflict = errors.New("workflow already registered with different content")
@@ -29,7 +29,7 @@ var (
 // InsertWorkflow registers a definition, or returns the existing row when the
 // same bytes are already registered at that `name@version`.
 //
-// The three outcomes, per §4.1:
+// The three outcomes:
 //
 //   - no row at name@version              -> insert, created = true
 //   - a row with the SAME source_sha256   -> return it, created = false
@@ -57,17 +57,17 @@ func InsertWorkflow(db *sql.DB, wf *model.Workflow, nowMS int64) (stored *model.
 
 // InsertWorkflowTx is InsertWorkflow inside a CALLER'S transaction.
 //
-// It exists for S6's auto-registration, which runs inside activation's FAT
-// TRANSACTION (docs/tdd/runs-dispatch.md §9.2 F8): a registration failure must
-// refuse the whole activation and write nothing, and a registration that
-// committed on its own could not be rolled back with the binding that followed
-// it. It is also the only correct shape against a one-connection pool — the
-// self-committing version would deadlock if called from inside a transaction.
+// It exists for auto-registration, which runs inside activation's FAT
+// TRANSACTION: a registration failure must refuse the whole activation and
+// write nothing, and a registration that committed on its own could not be
+// rolled back with the binding that followed it. It is also the only correct
+// shape against a one-connection pool — the self-committing version would
+// deadlock if called from inside a transaction.
 //
-// The three outcomes and the immutability contract are §4.1's, unchanged: this
-// is the SAME body InsertWorkflow ran, lifted so both callers share it rather
-// than a second path drifting from the first (F7: "no `auto` variant with looser
-// rules").
+// The three outcomes and the immutability contract are unchanged: this is
+// the SAME body InsertWorkflow ran, lifted so both callers share it rather
+// than a second path drifting from the first: no `auto` variant with looser
+// rules.
 func InsertWorkflowTx(
 	tx *sql.Tx, wf *model.Workflow, nowMS int64,
 ) (stored *model.Workflow, created bool, err error) {
@@ -152,9 +152,9 @@ type WorkflowListOptions struct {
 }
 
 // ListWorkflows returns registered workflows, newest registration first, and
-// the TRUE total before the limit — the Collection contract (reliability-delta
-// §4.1) requires a total that a limit cannot distort, so truncation is
-// computable rather than guessed.
+// the TRUE total before the limit — the Collection contract requires a total
+// that a limit cannot distort, so truncation is computable rather than
+// guessed.
 func ListWorkflows(db *sql.DB, opts WorkflowListOptions) ([]*model.Workflow, int, error) {
 	var clauses []string
 	var args []any

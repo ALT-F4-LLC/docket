@@ -130,7 +130,7 @@ func parseLedgerSince(raw string) (sinceRun int, sinceMS int64, label string, er
 
 // renderExecutorLedger is the human-mode document. Hints and voter names are
 // stored, author-supplied strings on their way to a terminal, so they go
-// through exec.Render (R11); the column labels are core's own.
+// through exec.Render; the column labels are core's own.
 func renderExecutorLedger(r reportExecutorsResult) string {
 	if !render.ColorsEnabled() {
 		return renderPlainExecutorLedger(r)

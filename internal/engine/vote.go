@@ -12,10 +12,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Vote-step execution (TDD docs/tdd/gates-trust.md §8), deferred to this stage
-// by engine-spine §1's own scope table.
+// Vote-step execution.
 //
-// engine-core §6, verbatim:
+// The design, verbatim:
 //
 //	Votes. Docket's existing proposal/vote machinery is kept and demoted to a
 //	gate type: a `type="vote"` step creates a proposal, fans out the configured
@@ -40,7 +39,7 @@ type VoteOutcome struct {
 	Status model.ProposalStatus
 	// Verdict maps that status onto the gate verdict routing consumes:
 	// approved => pass, rejected => fail. It is empty while the proposal is
-	// still open, which is phase 3 and means "nothing to route yet".
+	// still open, which means "nothing to route yet".
 	Verdict string
 	// Score is the weighted score the existing tally computed, when there is
 	// one.
@@ -83,10 +82,10 @@ func voteStepKeyOf(step *db.Step) voteStepKey {
 	return voteStepKey{Issue: model.FormatID(step.IssueID), Instance: step.Instance}
 }
 
-// voteIdempotencyKey derives phase 2's key from the run, the step's issue, and
-// the step instance.
+// voteIdempotencyKey derives OpenVoteProposal's key from the run, the step's
+// issue, and the step instance.
 //
-// §8.1: "CreateProposalIdempotent with a key derived from (run, step instance)
+// "CreateProposalIdempotent with a key derived from (run, step instance)
 // makes a double-invocation produce one proposal". The instance rather than the
 // step name, because a loop's second ordinal is a DIFFERENT vote about
 // different work and must open its own proposal. The issue is ADDED (DKT-65,
@@ -191,8 +190,8 @@ func parseVoteStepKey(prefix, key string) (voteStepKey, bool) {
 	return voteStepKey{Issue: model.FormatID(issueID), Instance: instance}, true
 }
 
-// OpenVoteProposal is §8.1 phase 2: the first engine invocation that observes a
-// ready vote step without a proposal creates one.
+// OpenVoteProposal opens the proposal: the first engine invocation that
+// observes a ready vote step without a proposal creates one.
 //
 // LAZY AND IDEMPOTENT, following the saga's own discipline: the proposal is
 // created by whichever invocation gets there first, and the idempotency key
@@ -234,8 +233,8 @@ func OpenVoteProposal(
 		Threshold:     rule.Threshold,
 		Sealed:        rule.Sealed,
 		HoldOnDissent: rule.HoldOnDissent,
-		// §8.2: required_voters is len(voters), NOT a config value. A rule is
-		// about HOW STRICTLY TO TALLY; the step is about WHO CASTS, and §11.1
+		// required_voters is len(voters), NOT a config value. A rule is about
+		// HOW STRICTLY TO TALLY; the step is about WHO CASTS, and the grammar
 		// puts the voter list on the step.
 		//
 		// The voter hints themselves are OPAQUE: core never interprets one,
@@ -270,8 +269,8 @@ func OpenVoteProposal(
 	return proposalID, nil
 }
 
-// ReadVoteOutcome is §8.1 phase 4: the first engine invocation after the
-// proposal leaves `open` observes its status.
+// ReadVoteOutcome reads the decided outcome: the first engine invocation after
+// the proposal leaves `open` observes its status.
 //
 // It READS. The tally happened inside db.CastVote when the last voter cast, and
 // this does not recompute it — recomputing would be a second implementation of
@@ -327,14 +326,14 @@ func readVoteProposalOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) 
 	}
 	switch proposal.Status {
 	case model.ProposalStatusApproved, model.ProposalStatusCommitted:
-		// §8.4: an operator committing a proposal manually sets its final
+		// An operator committing a proposal manually sets its final
 		// outcome, and this read observes the resulting status like any other.
 		// No special case.
 		out.Verdict = VerdictPass
 	case model.ProposalStatusRejected:
 		out.Verdict = VerdictFail
 	default:
-		// Still open: phase 3, waiting on voters. Nothing to route.
+		// Still open: waiting on voters. Nothing to route.
 		out.Verdict = ""
 	}
 	return out, nil
@@ -383,7 +382,7 @@ func VoteProposalRun(conn *sql.DB, proposalID int) (int, bool, error) {
 	return runID, ok, nil
 }
 
-// voteRule is a resolved threshold configuration (§8.3).
+// voteRule is a resolved threshold configuration.
 type voteRule struct {
 	Threshold   float64
 	Criticality model.Criticality
@@ -521,7 +520,7 @@ func voteTallyDetail(conn *sql.DB, outcome *VoteOutcome) (string, error) {
 		score, len(votes), outcome.Required), nil
 }
 
-// routeVoteStep is §8.1 phase 5: the ordinary routing transaction, over the
+// routeVoteStep is the ordinary routing transaction, over the
 // verdict the tally produced.
 //
 // It is DELIBERATELY the same shape as a human gate's decision (human.go's
@@ -538,7 +537,7 @@ func voteTallyDetail(conn *sql.DB, outcome *VoteOutcome) (string, error) {
 // reason V13 states about human gates: parking would make the step wait on the
 // resolution of the thing that just rejected it. V13 and V13a are written
 // against `type="human"` ONLY, so the grammar does not enforce that here — a
-// declared vote step omitting `on_fail` inherits §11.1's `waiting-human`
+// declared vote step omitting `on_fail` inherits the grammar's `waiting-human`
 // default and parks. Recorded rather than assumed away, because this comment
 // previously claimed a guarantee the validator does not make.
 //
@@ -582,7 +581,7 @@ func routeVoteStep(
 	routing := RoutingPass
 	concernReason := ""
 	var concernClass db.ParkClass
-	// §8.4's commit is accepted only from approved and casting closes at the
+	// A manual commit is accepted only from approved and casting closes at the
 	// tally, so a committed proposal carries the approved tally's cast set and
 	// is routed as one.
 	approvedTally := outcome.Status == model.ProposalStatusApproved ||
@@ -638,7 +637,7 @@ func routeVoteStep(
 	// already moved `routing`; and a `threshold` match on `fix-loop` or
 	// `waiting-human` keeps its own routing for the same reason.
 	//
-	// A COMMITTED proposal is parked exactly as an APPROVED one is: §8.4's
+	// A COMMITTED proposal is parked exactly as an APPROVED one is: a manual
 	// commit is accepted only from approved, so its cast set is the approved
 	// tally's, and a commit landing before routing runs (a paused run holds
 	// routing indefinitely) must not pass a dissent the rule asked to see.
@@ -660,9 +659,9 @@ func routeVoteStep(
 	}
 
 	// A MATERIALIZED held step that PASSED resolves its cluster's payload in
-	// the same transaction as the decision, which is §7.7.3's rule for
+	// the same transaction as the decision, which is the rule for
 	// `approve` and is the same rule here: a tally that passes IS the
-	// approve-computed answer (H14), so it must leave the same record. Without
+	// approve-computed answer, so it must leave the same record. Without
 	// it the cluster would route as decided and the payload would still read
 	// `held` with nothing saying anyone had endorsed it — the boolean DKT-84
 	// exists to make meaningful, absent entirely.
@@ -731,7 +730,7 @@ func routeVoteStep(
 	status := statusForRouting(routing)
 
 	// A triage panel whose outcome the mapping has no key for (an operator's
-	// manual commit, §8.4, or a decided verdict `on_fail_routes` does not
+	// manual commit, or a decided verdict `on_fail_routes` does not
 	// name) is disposed of by releaseUntriaged below, which writes its row
 	// `skipped` and records that as its event. Writing or announcing a routing
 	// for it here would contradict that row.
@@ -773,7 +772,7 @@ func routeVoteStep(
 	// A REJECTION IS A DECISION and applies its mapped routing: the panel read
 	// the failure and declined to endorse the work, which is exactly one of the
 	// two verdicts the mapping is keyed on. An outcome the mapping has no
-	// routing for — an operator's manual commit (§8.4), or a verdict
+	// routing for — an operator's manual commit, or a verdict
 	// `on_fail_routes` does not name — is disposed of by this vote step's own
 	// `on_fail` instead, rather than this guessing which routing was meant.
 	if triaged != nil {

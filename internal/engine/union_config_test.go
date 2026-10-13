@@ -133,8 +133,9 @@ func TestRepoRootActivatesWithNoSharedConfig(t *testing.T) {
 // The union, and its ordering
 // ---------------------------------------------------------------------------
 
-// TestUnionRegistersDisjointRootsSchemasFirst is F2's ordering carried ACROSS
-// roots, and the fixture is arranged so root order alone cannot pass it.
+// TestUnionRegistersDisjointRootsSchemasFirst is the schemas-first ordering
+// carried ACROSS roots, and the fixture is arranged so root order alone cannot
+// pass it.
 //
 // The WORKFLOW is in the shared root, which is scanned FIRST, and the SCHEMA it
 // names is in the repository root, scanned second. An implementation that

@@ -18,15 +18,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// `run report` — R7's genericity line, R8's zero writes, R9's determinism, and
-// R10's any-status rule (TDD §4.10, §10.3).
+// `run report` — the genericity line, zero writes, determinism, and the
+// any-status rule.
 
-// TestReportIsDeterministic is R9: the same rows produce the SAME DOCUMENT,
+// TestReportIsDeterministic asserts the same rows produce the SAME DOCUMENT,
 // byte for byte.
 //
 // Every section is ordered by a total key — id, then name, then value — never by
 // map iteration, for the same golden-stability reason `referencedSchemas` is
-// ordered. This is not a style preference: R7's metadata rollup and R3's status
+// ordered. This is not a style preference: the metadata rollup and the status
 // counts both build Go maps on their way to a list, and a renderer that ranged
 // either would emit a different document on every invocation. An operator
 // diffing two reports of an unchanged run would see noise, and a golden test
@@ -54,7 +54,7 @@ func TestReportIsDeterministic(t *testing.T) {
 		}
 	}
 
-	// And the ordering is the one R9 names, not merely a stable one: units
+	// And the ordering is a total one, not merely a stable one: units
 	// ascend by name.
 	units := first.Budget.Reported
 	if len(units) != 2 {
@@ -66,7 +66,7 @@ func TestReportIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestReadVerbsWriteNothing is R8 and §10.3's standing assertion, for group 1's
+// TestReadVerbsWriteNothing is the standing zero-write assertion, for group 1's
 // rows: `run report` leaves the database BYTE-IDENTICAL.
 //
 // It hashes the file rather than counting rows, because a row count would miss
@@ -123,20 +123,20 @@ func TestReadVerbsWriteNothing(t *testing.T) {
 	}
 	if !sawEffective {
 		t.Error("the report rendered a lapsed claim as still claimed; effective " +
-			"status is computed at read (engine-spec §2)")
+			"status is computed at read")
 	}
 }
 
-// TestMetadataRollupReadsNoKey is R7, mechanically: the implementation contains
-// NO KEY-NAME LITERAL.
+// TestMetadataRollupReadsNoKey asserts, mechanically, that the implementation
+// contains NO KEY-NAME LITERAL.
 //
-// R7 is the genericity line at its thinnest. The rollup groups by key and by
-// value, both as opaque strings, and reports counts — it reports
+// The metadata rollup is the genericity line at its thinnest. It groups by key
+// and by value, both as opaque strings, and reports counts — it reports
 // `{"tier": {"a": 3}}` for exactly the same reason it would report
 // `{"desk": {"front": 3}}`. A rollup that special-cased one key would be core
 // having an opinion about what a workflow author's bag of strings means, and the
 // vocabulary that would arrive through such a key is precisely what
-// docs/design/genericity.md exists to keep out of core.
+// the genericity rule exists to keep out of core.
 //
 // The check parses the source rather than grepping it, so a key name hidden in a
 // switch, a map literal, or a comparison is caught the same as one in an if.
@@ -179,11 +179,11 @@ func TestMetadataRollupReadsNoKey(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Errorf("MetadataRollup contains bare string literals %v; a metadata key "+
 			"named in core would be core deciding what a workflow author's opaque "+
-			"bag means (R7, docs/design/genericity.md)", offenders)
+			"bag means", offenders)
 	}
 }
 
-// TestMetadataRollupIsVerbatimAndUninterpreted is R7's behavioral half: two
+// TestMetadataRollupIsVerbatimAndUninterpreted is the behavioral half: two
 // unrelated vocabularies roll up identically, because the rollup does not know
 // either of them.
 func TestMetadataRollupIsVerbatimAndUninterpreted(t *testing.T) {
@@ -217,8 +217,9 @@ func TestMetadataRollupIsVerbatimAndUninterpreted(t *testing.T) {
 	}
 }
 
-// TestReportWorksOnAnyRunStatus is R10: a report refusing on a non-terminal run
-// would be useless during exactly the run an operator wants to inspect.
+// TestReportWorksOnAnyRunStatus asserts the any-status rule: a report refusing
+// on a non-terminal run would be useless during exactly the run an operator
+// wants to inspect.
 func TestReportWorksOnAnyRunStatus(t *testing.T) {
 	for _, status := range []model.RunStatus{
 		model.RunPlanning, model.RunActive, model.RunWaitingHuman,
@@ -239,10 +240,10 @@ func TestReportWorksOnAnyRunStatus(t *testing.T) {
 	}
 }
 
-// TestReportOnAPlanningRunIsAllZeros is R10's first row, stated separately
-// because "everything zero" is the specific claim: a run that has not activated
-// has no steps, no floor, and no wall clock — and reports none rather than
-// reporting 0 as though it had measured one.
+// TestReportOnAPlanningRunIsAllZeros is the any-status rule's first row, stated
+// separately because "everything zero" is the specific claim: a run that has
+// not activated has no steps, no floor, and no wall clock — and reports none
+// rather than reporting 0 as though it had measured one.
 func TestReportOnAPlanningRunIsAllZeros(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)
@@ -275,8 +276,8 @@ func TestReportOnAPlanningRunIsAllZeros(t *testing.T) {
 //
 // It recomputes the floor through the SAME exported query enforcement runs, and
 // never reads `runs.usage_floor`. A report that read the cache would be
-// publishing a number no decision was made against — and the whole point of §9
-// item 2's audit is that a breach is attributable to the events that caused it.
+// publishing a number no decision was made against — and the whole point of the
+// audit trail is that a breach is attributable to the events that caused it.
 func TestReportFloorAgreesWithEnforcement(t *testing.T) {
 	conn := mustDB(t)
 	runID, _ := budgetRun(t, conn, 100)
@@ -295,7 +296,7 @@ func TestReportFloorAgreesWithEnforcement(t *testing.T) {
 	}
 }
 
-// TestReportArtifactIndexCarriesNoBodies is R6: the index names what was
+// TestReportArtifactIndexCarriesNoBodies asserts the index names what was
 // produced and how big it is, NEVER the bytes.
 //
 // A rollup that inlined bodies would turn a status check into a document dump —
@@ -316,8 +317,8 @@ func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 
 	encoded := mustJSON(t, report)
 	if strings.Contains(encoded, body) {
-		t.Error("the report carries an artifact BODY; R6 is an index — id, kind, " +
-			"producer, sha256, bytes")
+		t.Error("the report carries an artifact BODY; it must be an index — id, " +
+			"kind, producer, sha256, bytes")
 	}
 	entry := report.Artifacts[0]
 	if entry.Bytes != len(body) {
@@ -328,7 +329,8 @@ func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 	}
 }
 
-// hashFile hashes a file's bytes — the page-level content check R8 needs.
+// hashFile hashes a file's bytes — the page-level content check the zero-write
+// test needs.
 func hashFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -590,10 +592,10 @@ func TestRunReportRollsUpComplementarity(t *testing.T) {
 	if !reflect.DeepEqual(row.ByMemberCount, wantDist) {
 		t.Errorf("by_member_count = %+v, want %+v", row.ByMemberCount, wantDist)
 	}
-	// The fixture's `synthesize@0` binds `review.*`, fanned out to 4 judges
-	// (§7.5's example): that is the round's judge-artifact count, read off
-	// `step_inputs` at synthesize's own claim rather than off reconcile, which
-	// is never claimed and so never gets step_inputs of its own.
+	// The fixture's `synthesize@0` binds `review.*`, fanned out to 4 judges:
+	// that is the round's judge-artifact count, read off `step_inputs` at
+	// synthesize's own claim rather than off reconcile, which is never claimed
+	// and so never gets step_inputs of its own.
 	if row.InputArtifacts != 4 {
 		t.Errorf("input_artifacts = %d, want 4 (the fixture's 4 review seats)",
 			row.InputArtifacts)

@@ -10,15 +10,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// The usage back-fill (docs/tdd/usage-backfill-wedge.md).
+// The usage back-fill.
 //
-// engine-core §7 promises that a relay "back-fills from its dispatch journal,
-// source recorded". The ledger was built for it — `usage_ledger.source` exists
-// precisely "so a harness back-filling from its own journal can record its own
-// source later without a migration" (internal/db/usage.go) — and the verb was
-// the one piece never written. Its absence is what made D2's refusal permanent:
-// usage that had been measured had no way in, so the probe correctly and
-// forever reported a gap nobody could close.
+// A relay back-fills from its dispatch journal, source recorded. The ledger
+// was built for it — `usage_ledger.source` exists precisely "so a harness
+// back-filling from its own journal can record its own source later without
+// a migration" (internal/db/usage.go) — and the verb was the one piece never
+// written. Its absence is what made D2's refusal permanent: usage that had
+// been measured had no way in, so the probe correctly and forever reported a
+// gap nobody could close.
 //
 // THE STATE THAT WAS MISSING IS USAGE, NOT ACCEPTANCE. That is why this is the
 // fix rather than a step-scoped acceptance flag: a flag would teach the probe
@@ -345,7 +345,7 @@ func (e *Engine) BackfillUsage(
 			// The ledger's (step, attempt, unit) key firing means this unit was
 			// ALREADY recorded for this attempt — by an earlier back-fill or by
 			// the claimant itself. It is phrased rather than passed through as
-			// raw SQLite text, on §2's rule that a refusal names its way out:
+			// raw SQLite text, because a refusal must name its way out:
 			// merging silently would hide a double-count of real spend.
 			if errors.Is(err, db.ErrUsageAlreadyRecorded) {
 				// --on-duplicate=skip: this row is already in the ledger, so
@@ -376,7 +376,7 @@ func (e *Engine) BackfillUsage(
 		written++
 	}
 
-	// The fast path D2's probe reads (§2.3). Marked once per step rather than
+	// The fast path D2's probe reads. Marked once per step rather than
 	// once per row.
 	for id := range steps {
 		if err := db.MarkStepUsageRecordedTx(tx, id); err != nil {

@@ -10,14 +10,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket run budget RUN-N [--set N]` — engine-spec §1's budget line
-// (docs/tdd/events-follow.md §7).
+// `docket run budget RUN-N [--set N]`.
 //
 // The verb that was missing. A run that breached its cap parked at
 // `waiting-human`; `run resume` returned it to `active` and the very next claim
-// breached again, because the cap had not moved. Until this stage the only
+// breached again, because the cap had not moved. Until this verb the only
 // answers were "abandon the run and start a new one" or an `sqlite3` UPDATE
-// performed at the operator's own risk (operations.md §4).
+// performed at the operator's own risk.
 
 var runBudgetCmd = &cobra.Command{
 	Use:   "budget RUN-N",

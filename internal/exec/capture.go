@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 )
 
-// CaptureCap is §5.5 C2's bound: 256 KiB.
+// CaptureCap is the capture bound: 256 KiB.
 //
 // A PACKAGE CONSTANT, not config. It is NOT the context bundle's error-bytes
 // knob — that governs a different thing with a different consumer, and reusing
@@ -13,16 +13,16 @@ import (
 const CaptureCap = 256 * 1024
 
 // captureWriter collects a child's output into one interleaved stream, bounded
-// at the cap (§5.5).
+// at the cap.
 //
-// C1: stdout and stderr are captured into ONE INTERLEAVED STREAM, in write
-// order, which is what an operator reading a failed check wants — an error
-// message and the line that produced it belong next to each other. §11.4 has a
-// single `output` field, so this is the spec's shape rather than a choice.
+// stdout and stderr are captured into ONE INTERLEAVED STREAM, in write order,
+// which is what an operator reading a failed check wants — an error message and
+// the line that produced it belong next to each other. A `gate result` has a
+// single `output` field, so this is its shape rather than a choice.
 //
-// C2: reaching the cap sets truncated and the writer STOPS CONSUMING. It does
-// not keep reading and discarding: a check that emits forever must not be able
-// to spin the reader, which is the difference between a bounded capture and a
+// Reaching the cap sets truncated and the writer STOPS CONSUMING. It does not
+// keep reading and discarding: a check that emits forever must not be able to
+// spin the reader, which is the difference between a bounded capture and a
 // bounded-memory busy loop.
 type captureWriter struct {
 	mu sync.Mutex
@@ -50,7 +50,7 @@ func (w *captureWriter) Write(p []byte) (int, error) {
 	}
 
 	if len(p) > remaining {
-		// C3: a truncated capture keeps the FIRST cap bytes, not the last. The
+		// A truncated capture keeps the FIRST cap bytes, not the last. The
 		// first bytes of a failing check contain the invocation and the first
 		// error; the last contain a summary that is usually reproducible from
 		// the first. Stated because the opposite is a defensible choice, and a
@@ -66,7 +66,7 @@ func (w *captureWriter) Write(p []byte) (int, error) {
 
 // result returns the captured output and whether it was truncated.
 //
-// C4: truncation is byte-exact and then BACKED OFF TO THE LAST VALID RUNE
+// Truncation is byte-exact and then BACKED OFF TO THE LAST VALID RUNE
 // BOUNDARY, so a multi-byte character split by the cap does not become an
 // invalid UTF-8 sequence — which would, downstream, produce invalid JSON in a
 // run report.

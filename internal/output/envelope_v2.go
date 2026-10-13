@@ -7,8 +7,7 @@ import (
 )
 
 // Collection is implemented by result types that are a list of items, so the
-// v2 envelope can render them uniformly as {items, total, truncated}
-// (engine-spec.md §5).
+// v2 envelope can render them uniformly as {items, total, truncated}.
 //
 // Total is the number of matching records BEFORE any limit is applied — that
 // is the whole point of reporting it separately from len(items). A result whose
@@ -51,9 +50,8 @@ func IsTruncated(limit, total, returned int) bool {
 }
 
 // Versioned is implemented by payloads that carry an optimistic-concurrency
-// version. Under v2 the value is surfaced as `version` in .data
-// (engine-spec.md §5); v1 never consults this interface, so the version stays
-// invisible there.
+// version. Under v2 the value is surfaced as `version` in .data; v1 never
+// consults this interface, so the version stays invisible there.
 type Versioned interface {
 	// VersionedPayload returns the value to marshal in place of the receiver,
 	// carrying its version field.

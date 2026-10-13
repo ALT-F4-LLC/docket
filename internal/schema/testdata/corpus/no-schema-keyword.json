@@ -1,5 +1,5 @@
 {
-  "why": "§4.1 mitigation 2: a document with no $schema is read as 2020-12, where dependentRequired asserts rather than being an unknown annotation",
+  "why": "a document with no $schema is read as 2020-12, where dependentRequired asserts rather than being an unknown annotation",
   "schema": {
     "type": "array",
     "items": {

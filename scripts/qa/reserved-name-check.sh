@@ -14,7 +14,7 @@
 # downstream reader treats it as settled fact.
 #
 # It checks NAMES ONLY. Whether a spec's contents are well-formed is
-# `doc-validate`'s question, and citation grounding is `citation-check`'s.
+# `doc-validate`'s question.
 
 set -euo pipefail
 

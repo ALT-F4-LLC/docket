@@ -41,7 +41,7 @@ import (
 // Both knobs are OPT-IN (absent means the engine behaves exactly as before)
 // and both are positional: field names and floor values are opaque tokens
 // compared only by position in the pinned schema's order, so core learns
-// nothing about severities (genericity.md).
+// nothing about severities.
 
 // floorWorkflowSrc is the RUN-58 shape as a workflow: the routing step's
 // threshold reads `status`, so a payload whose elements are open at `high`

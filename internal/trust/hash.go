@@ -10,16 +10,16 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
 
-// CanonicalArgv returns the canonical encoding of an argv (§3.3): the JSON
+// CanonicalArgv returns the canonical encoding of an argv: the JSON
 // encoding of the string list, with no whitespace.
 //
 // JSON RATHER THAN A DELIMITER-JOINED STRING, because NO DELIMITER IS SAFE. An
 // argument containing a NUL is impossible, but one containing a newline, a
 // space, or any chosen separator is trivial — and a join-then-hash scheme makes
 // ["a b"] and ["a","b"] collide. That collision is an argv-injection primitive
-// in the matcher itself, which is exactly the class of bug T2 is about: it
-// would let an operator who approved one command find a different one
-// authorized. TestCanonicalArgvHashDoesNotCollide is the test that matters.
+// in the matcher itself: it would let an operator who approved one command
+// find a different one authorized. TestCanonicalArgvHashDoesNotCollide is the
+// test that matters.
 func CanonicalArgv(argv []string) string {
 	// A nil argv and an empty argv canonicalize identically, to "[]", which is
 	// correct: neither names a program and neither can ever match a candidate.
@@ -45,7 +45,7 @@ func ArgvSHA256(argv []string) string {
 
 // argv0ContentSHA256 hashes the file an absolute argv[0] names, returning the
 // symlink-resolved path it read and the hex-encoded SHA-256 of its bytes. The
-// resolution is exec.NormalizePath, the same one R1/R4 use to decide which file
+// resolution is exec.NormalizePath, the same one exec uses to decide which file
 // executes, and the hash is exec.FileSHA256, the one hasher exec.RunPinned
 // verifies with, so the pin trust add stores and the check Lookup makes cannot
 // disagree with the spawn about which bytes a pin names.

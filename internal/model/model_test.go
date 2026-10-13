@@ -323,9 +323,9 @@ func TestParseRelationDirection(t *testing.T) {
 		{"specified_by", "", false, true},
 		{"", "", false, true},
 		// DKT-1077: the vocabulary this parser accepts must stay the one
-		// RelationDirectionTokens() names and docs/design/engine-spec.md
-		// enumerates, so a workflow's `issue.linked.related_to.<kind>` is
-		// refused rather than silently resolving to relates_to.
+		// RelationDirectionTokens() names, so a workflow's
+		// `issue.linked.related_to.<kind>` is refused rather than silently
+		// resolving to relates_to.
 		{"related_to", "", false, true},
 		{"related-to", "", false, true},
 	}

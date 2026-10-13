@@ -14,9 +14,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// A COUNTING sql.DB WRAPPER (TDD §4.12).
+// A COUNTING sql.DB WRAPPER.
 //
-// §4.12 asks for D1's dormancy to be "asserted by a counting `sql.DB` wrapper
+// Budget dormancy must be "asserted by a counting `sql.DB` wrapper
 // rather than by inspection", and that distinction is the whole reason this
 // file exists. A test that read `loadBudget` and observed an early return would
 // pass forever after someone moved the query above it; a test that COUNTS the
@@ -134,9 +134,9 @@ func registerCounting(t *testing.T, match func(string) bool) (*countingDriver, *
 	return d, conn
 }
 
-// TestBudgetDormancyRunsNoBudgetQuery is D1, COUNTED.
+// TestBudgetDormancyRunsNoBudgetQuery is budget dormancy, COUNTED.
 //
-// §4.8 B29: `budgetHeadroom` returns true on its first line when the effective
+// `budgetHeadroom` returns true on its first line when the effective
 // cap is 0, and `loadBudget` declines to query at all in that case. So a run
 // started without `--budget` in a repo that never set `budget.default` executes
 // exactly the queries v9 executed — the group-1 dormancy claim, measured.
@@ -163,9 +163,9 @@ func TestBudgetDormancyRunsNoBudgetQuery(t *testing.T) {
 	claimInstance(t, conn, "implement@0", nowMS)
 
 	if n := counter.total(); n != 0 {
-		t.Errorf("an unbudgeted run executed %d budget queries, want 0 — D1's "+
+		t.Errorf("an unbudgeted run executed %d budget queries, want 0 — budget "+
 			"dormancy is that the query does not run, not that its result is "+
-			"ignored (§4.8 B29). The queries were:\n%s",
+			"ignored. The queries were:\n%s",
 			n, strings.Join(counter.matchedQueries(), "\n---\n"))
 	}
 
@@ -183,7 +183,7 @@ func TestBudgetDormancyRunsNoBudgetQuery(t *testing.T) {
 }
 
 // TestRunReportQueryCount is the number docs/spec/performance.md publishes for
-// R8's read-only rollup — the verb an operator polls.
+// the run report's read-only rollup — the verb an operator polls.
 //
 // It counts every statement rather than a subset: a report that grew a query
 // per step would still pass a threshold test on a small fixture, and the point

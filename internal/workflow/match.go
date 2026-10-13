@@ -24,16 +24,16 @@ type Subject struct {
 }
 
 // Matches reports whether an issue satisfies this workflow's `[match]` clause
-// — the binding rule of engine-spec §11.1, evaluated at activation.
+// — the binding rule, evaluated at activation.
 //
 // An ABSENT workflow-level `[match]` matches anything: a workflow that
 // declares no binding rule is a candidate for every issue, and exactly-one-match
-// (TDD §5.3 stage 1) then does the refusing. That is the spec's shape, not a
-// convenience — "zero or multiple matches is a VALIDATION_ERROR naming the
-// issue and the candidate workflows" only means something if a match-less
-// workflow participates in the count.
+// then does the refusing. That is the intended shape, not a convenience —
+// "zero or multiple matches is a VALIDATION_ERROR naming the issue and the
+// candidate workflows" only means something if a match-less workflow
+// participates in the count.
 //
-// The five clauses, per §11.1 and TDD §5.3 stage 1 (sizes_any since v34):
+// The five clauses (sizes_any since v34):
 //
 //   - `kind`          — the issue's kind is in the list; an absent list matches any
 //   - `labels_any`    — the lists intersect
@@ -146,9 +146,9 @@ func (m *Match) LabelGapFor(s Subject) (LabelGap, bool) {
 // WhenHolds evaluates a step's `when` predicate against an issue.
 //
 // An empty `when` holds: a step that declares no condition is unconditional.
-// The grammar is §11.1's, validated at register time by V22 and re-parsed here
-// against the SAME regexps — whenShape for a clause, whenConnective for the
-// joins — so a predicate that registered cannot fail to evaluate.
+// The grammar is validated at register time by V22 and re-parsed here against
+// the SAME regexps — whenShape for a clause, whenConnective for the joins — so
+// a predicate that registered cannot fail to evaluate.
 //
 // Clauses are joined by `and` (every one must hold) or by `or` (at least one
 // must), never both in one predicate: V22 refuses a mix, because the grammar
@@ -163,7 +163,7 @@ func (m *Match) LabelGapFor(s Subject) (LabelGap, bool) {
 // homogeneous-`and` predicate instead of needing the mix V22 refuses.
 //
 // A false `when` does not omit the step: expansion creates it with status
-// `skipped` (§5.3.1), which is what keeps a downstream `after` resolvable and
+// `skipped`, which is what keeps a downstream `after` resolvable and
 // the topology identical regardless of the predicate's value.
 func WhenHolds(when string, s Subject) bool {
 	if strings.TrimSpace(when) == "" {
@@ -265,8 +265,8 @@ func whenList(body string) []string {
 }
 
 // unquote strips the optional quotes around a predicate literal, so
-// `kind == "bug"` and `kind == bug` mean the same thing. §11.1's examples use
-// both spellings.
+// `kind == "bug"` and `kind == bug` mean the same thing. Both spellings are in
+// use.
 func unquote(v string) string {
 	v = strings.TrimSpace(v)
 	if len(v) >= 2 {
@@ -296,13 +296,13 @@ func subset(want, have []string) bool {
 }
 
 // fenceTags returns every fence tag this definition's gates declare, sorted and
-// deduplicated — the `<tag>` of a `source = "fence:<tag>"` gate (§11.1).
+// deduplicated — the `<tag>` of a `source = "fence:<tag>"` gate.
 //
-// Activation harvests ONLY declared tags (TDD §5.3 stage 5): a fenced block
-// whose tag no bound workflow declares is not harvested at all. That is the
-// trust boundary doing its job — harvesting every fenced block would make any
-// code sample in an issue body a candidate command, which is precisely what
-// declaring the tag exists to prevent.
+// Activation harvests ONLY declared tags: a fenced block whose tag no bound
+// workflow declares is not harvested at all. That is the trust boundary doing
+// its job — harvesting every fenced block would make any code sample in an
+// issue body a candidate command, which is precisely what declaring the tag
+// exists to prevent.
 func (d *Definition) FenceTags() []string {
 	seen := make(map[string]struct{})
 	for _, step := range d.Steps {
@@ -335,7 +335,7 @@ type Fence struct {
 }
 
 // HarvestFences extracts fenced code blocks from an issue body whose info-string
-// tag is in `tags` (engine-core §6; TDD §5.3 stage 5).
+// tag is in `tags`.
 //
 // Extraction is LITERAL — "no prose parsing". The block's lines are taken
 // verbatim, one Fence per line, and nothing interprets, trims, or reflows them.

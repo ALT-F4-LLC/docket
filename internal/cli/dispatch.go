@@ -17,8 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket dispatch open|close|verify|abandon` — engine-spec §1's surface line,
-// engine-spec §2's scheduling block (docs/tdd/runs-dispatch.md §5).
+// `docket dispatch open|close|verify|abandon`.
 //
 // A dispatch is a FROZEN COPY OF ONE `next` ANSWER. It is not a lock: the steps
 // in it stay `pending` and any claimant may still claim them. What it buys is
@@ -183,7 +182,7 @@ func warnPinDrift(w *output.Writer, drift []engine.PinVerdict, runRef string) {
 	}
 }
 
-// renderManifest is the human view of §11.4's `dispatch` shape.
+// renderManifest is the human view of the `dispatch` wire shape.
 //
 // It reuses render.RenderStepRows for the rows themselves, so a manifest and the
 // `next` answer it froze LOOK the same as well as being byte-identical — an
@@ -344,12 +343,13 @@ func runDispatchVerify(cmd *cobra.Command, w *output.Writer) error {
 	return nil
 }
 
-// mismatchConflict is P9's refusal, rendered once for both the verbs that can
-// raise it (`dispatch verify` and `dispatch close --backfill-from`).
+// mismatchConflict is the manifest-mismatch refusal, rendered once for both the
+// verbs that can raise it (`dispatch verify` and `dispatch close
+// --backfill-from`).
 //
 // The differing BYTES, both sides, escaped on their way to a terminal: a
 // manifest row carries an executor hint and a metadata bag, which are
-// workflow-author strings and therefore untrusted text (gates-trust §5.7 R11).
+// workflow-author strings and therefore untrusted text.
 //
 // The per-row summary rides ABOVE the refusal (DKT-243). The refusal itself
 // still names the first offending row and shows its bytes — unchanged — but a
@@ -612,7 +612,7 @@ func runDispatchReconcile(
 // reconcileErr maps a staged failure onto the taxonomy.
 //
 // A verify-stage MISMATCH is the one refusal whose diagnostic cannot be
-// rebuilt from the error text — P9's evidence is the differing bytes and
+// rebuilt from the error text — its evidence is the differing bytes and
 // DKT-243's verdict block, both carried on the result — so it is rendered
 // through the same function `dispatch verify` renders it with, with the stage
 // named in front. Every other stage failure keeps its own message and its own
@@ -672,7 +672,7 @@ var dispatchBackfillUsageCmd = &cobra.Command{
 	Short: "Record usage for steps whose claimant could not report it",
 	Long: `Record usage a relay measured but the claimant could not report itself.
 
-engine-core §7's back-fill: a relay that measured its own spawns carries those
+The back-fill: a relay that measured its own spawns carries those
 numbers into the ledger, with the source recorded. Usage otherwise rides only on
 ` + "`step complete --usage`" + `, which a claimant that cannot observe its own
 consumption has no way to supply — leaving the ledger empty and the
@@ -1039,10 +1039,10 @@ func dispatchRunID(cmd *cobra.Command) (int, error) {
 	return parseRunFlag(ref)
 }
 
-// ackSeqs parses the repeatable `--ack-reap SEQ` flag (§6.2).
+// ackSeqs parses the repeatable `--ack-reap SEQ` flag.
 //
 // A non-numeric value is refused HERE rather than reaching the engine, so the
-// error names the flag the user typed. The engine's own refusal (A9) is about a
+// error names the flag the user typed. The engine's own refusal is about a
 // seq that names no reap, which is a different mistake with a different fix.
 func ackSeqs(cmd *cobra.Command) ([]int64, error) {
 	raw, _ := cmd.Flags().GetInt64Slice("ack-reap")

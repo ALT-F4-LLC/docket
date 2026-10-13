@@ -74,7 +74,7 @@ func runWorkflowRegister(cmd *cobra.Command, args []string, w *output.Writer) er
 		return registerWorkflowAcrossProjects(cmd, w, conn, def, src, path, targets)
 	}
 
-	// V26 (gates-trust §8.2) and V21a-V21d/V25a (§4.9): vote rules and schemas,
+	// V26 and V21a-V21d/V25a: vote rules and schemas,
 	// resolved against THIS project's registry. See validateWorkflowEnvironment.
 	if err := validateWorkflowEnvironment(conn, def, getProjectID(cmd)); err != nil {
 		return workflowErr(err)
@@ -125,10 +125,9 @@ func workflowRow(
 // validateWorkflowEnvironment runs the two checks that ask a question about a
 // PROJECT rather than about the bytes.
 //
-// V26 (gates-trust §8.2): every `vote_rule` names a REGISTERED threshold
-// configuration. V21a-V21d and V25a (§4.9): threshold fields and literals
-// cross-validated against the REGISTERED schema, per §11.2's "validated against
-// the registered schema at `workflow register` time". Both run here rather than
+// V26: every `vote_rule` names a REGISTERED threshold configuration. V21a-V21d
+// and V25a: threshold fields and literals cross-validated against the
+// REGISTERED schema at `workflow register` time. Both run here rather than
 // inside workflow.Validate, which stays pure and holds no database handle.
 //
 // The order — Validate, then vote rules, then schemas — is deliberate: an

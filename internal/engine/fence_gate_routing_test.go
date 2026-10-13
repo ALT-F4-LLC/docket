@@ -11,8 +11,8 @@ import (
 )
 
 // A fence completion gate records every harvested line as its own row under one
-// gate name, with ascending ordinals. Each line is its own decision (§7.3 step
-// 4), so the gate passes only when every line's last attempt passed. These
+// gate name, with ascending ordinals. Each line is its own decision, so the
+// gate passes only when every line's last attempt passed. These
 // tests put the failing line FIRST: a reduction that read only the gate's
 // highest ordinal would see the passing last line and route the step as pass.
 
@@ -77,8 +77,8 @@ func TestFenceGateFailsWhenAnEarlierLineFailed(t *testing.T) {
 	}
 }
 
-// F3/F4: a flaky line's retries share its argv and follow it directly, and the
-// last attempt is the one that routes.
+// A flaky line's retries share its argv and follow it directly, and the last
+// attempt is the one that routes.
 func TestFlakyRetryOfOneFenceLineStillPasses(t *testing.T) {
 	rows := []db.GateResultRow{
 		lineRow(0, db.GateVerdictFail, "go", "test", "./..."),

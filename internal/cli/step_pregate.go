@@ -13,7 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 )
 
-// `step pregate` — the detached pre-gate run (gates-trust §7.6.2 PG6).
+// `step pregate` — the detached pre-gate run.
 //
 // The engine launches it; an operator has no ordinary reason to. It is hidden
 // rather than absent because the engine's launch IS a re-execution of this

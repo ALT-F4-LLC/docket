@@ -326,7 +326,7 @@ func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
 }
 
 // holdCapable reports whether a step's completion can HOLD instead of routing:
-// an `aggregate` action declaring `hold_spread` (§7.7.1 H1). The declaration's
+// an `aggregate` action declaring `hold_spread`. The declaration's
 // PRESENCE is the test — whether it trips is knowable only from the payloads
 // at routing time, and conditional marks the possibility, not the outcome.
 func (s *Scheduler) holdCapable(step *db.Step) bool {
@@ -386,13 +386,13 @@ func (s *Scheduler) stageableFrom(cand *db.Step, member map[int]bool) bool {
 	if cond != CondPredecessors && cond != CondGateOpen {
 		return false
 	}
-	// An UNACKNOWLEDGED reap holds a slot in the candidate's bounded class
-	// (A15), and nothing a wave executes clears it — the hold ends when a
+	// An UNACKNOWLEDGED reap holds a slot in the candidate's bounded class,
+	// and nothing a wave executes clears it — the hold ends when a
 	// relay ACKNOWLEDGES the reap, an act outside the offer's own execution.
 	// A staged row behind that hold would be a promise the wave cannot keep:
 	// its claim refuses on R5 however many predecessors record. The reaped
-	// step itself is unaffected (the hold never counts against it — W3's
-	// re-offer) because it reaches here as READY, through the branch above.
+	// step itself is unaffected (the hold never counts against it, so it is
+	// re-offered) because it reaches here as READY, through the branch above.
 	if limit, bounded := s.limits[cand.Class]; bounded && limit.Max > 0 {
 		if s.unacknowledgedReapsInClass(cand.Class, cand.ID) > 0 {
 			return false

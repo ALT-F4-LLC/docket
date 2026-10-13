@@ -62,7 +62,7 @@ func InsertStaleTargetWaiverTx(tx *sql.Tx, w StaleTargetWaiver) (int, error) {
 // insertion order.
 //
 // It reads on the pooled connection because its one consumer — staleTargets —
-// runs OUTSIDE every transaction by design (§6: no subprocess inside one),
+// runs OUTSIDE every transaction by design (no subprocess inside one),
 // exactly as batchOverrideCover reads grants.
 func StaleTargetWaiversForRun(conn *sql.DB, runID int) ([]StaleTargetWaiver, error) {
 	rows, err := conn.Query(

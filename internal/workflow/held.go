@@ -2,21 +2,20 @@ package workflow
 
 import "strings"
 
-// The materialized held step's identity and its synthesized spec
-// (docs/tdd/payloads-thresholds.md §7.7.1 H1, H5).
+// The materialized held step's identity and its synthesized spec.
 //
 // A held step is the one row in a run that expansion did not write. It exists
-// because §2 says a tripped `hold_spread` "materializes a `type=human` step
-// named `<step>-held` gating the routing step" — and the question it asks is
-// about a computation the engine performed, so no author could have declared it.
+// because a tripped `hold_spread` "materializes a `type=human` step named
+// `<step>-held` gating the routing step" — and the question it asks is about a
+// computation the engine performed, so no author could have declared it.
 //
 // NOTHING UNPINNED ENTERS A RUN. The spec below is a PURE FUNCTION of the pinned
-// definition plus the suffix, so §9 item 5's determinism is untouched: two runs
-// at the same pins that hold the same cluster materialize the same step.
+// definition plus the suffix, so determinism is untouched: two runs at the same
+// pins that hold the same cluster materialize the same step.
 
-// HeldSuffix is the reserved step-name suffix (§7.7.1 H1). V27 refuses a
-// declared step name ending in it, so a definition cannot collide with an
-// identity the engine mints.
+// HeldSuffix is the reserved step-name suffix. V27 refuses a declared step
+// name ending in it, so a definition cannot collide with an identity the
+// engine mints.
 //
 // It is a constant shared by the validator, the materializer, and the loop
 // sweep rather than three string literals: a reservation enforced in one place
@@ -49,22 +48,22 @@ func RoutingStepNameOf(name string) (string, bool) {
 }
 
 // MaterializedHeldStep synthesizes the spec of `<step>-held` from the PINNED
-// definition (§7.7.1 H5).
+// definition.
 //
 // Kind `human`, no `after`, no gates, no threshold, and `on_fail` inherited from
 // the routing step. Each is decided rather than defaulted:
 //
-//   - `human` because §2 says so, and because approve/reject are the verbs that
-//     resolve it.
-//   - no `after`: R3 is vacuous, which is what makes it ready the moment it
-//     exists — correct, because the question it asks is already answered by data
-//     on disk (H6).
+//   - `human` because a tripped `hold_spread` materializes a `type=human`
+//     step, and because approve/reject are the verbs that resolve it.
+//   - no `after`: readiness is vacuous, which is what makes it ready the moment
+//     it exists — correct, because the question it asks is already answered by
+//     data on disk.
 //   - no gates and no threshold: it produces no artifact and judges no result.
 //     A gate on a question about a computation would be a check of the
 //     operator, not of the work.
 //   - `on_fail` from the routing step so V13a's "a human step declares on_fail
 //     explicitly" is satisfied by derivation. The rejection's CONSEQUENCE lands
-//     on the routing step (H14), and taking its routing is what makes `reject`
+//     on the routing step, and taking its routing is what makes `reject`
 //     mean "route the aggregate per its own on_fail" rather than inventing a
 //     second policy.
 //
@@ -94,7 +93,7 @@ func MaterializedHeldStep(def *Definition, name string) *Step {
 //     there is no `[[step]]` table to carry them.
 //   - `on_fail` is `waiting-human` rather than the routing step's, because a
 //     failed tally is NOT the same answer as a rejection. A rejection is a
-//     decision, and it routes the aggregate per its own `on_fail` (H14). A
+//     decision, and it routes the aggregate per its own `on_fail`. A
 //     tally that did not reach its threshold decided nothing — it declined to
 //     endorse the computed value — and the question then belongs to the
 //     operator, so the step PARKS and waits for one.
@@ -148,7 +147,7 @@ func materializedHeldStep(def *Definition, name string) *Step {
 		Name:   name,
 		OnFail: parent.EffectiveOnFail(),
 		// `after = []` explicitly, not omitted: an empty declared `after` is a
-		// ROOT declaration (V10), which is exactly what H6 says this step is.
+		// ROOT declaration (V10), which is exactly what this step is.
 		After:    []string{},
 		hasAfter: true,
 	}

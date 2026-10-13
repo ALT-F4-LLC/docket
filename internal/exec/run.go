@@ -69,25 +69,25 @@ func Run(spec Spec) (Result, error) {
 		cmd.Env = []string{}
 	}
 
-	// X1: the child LEADS ITS OWN PROCESS GROUP, so the timeout can signal the
+	// The child LEADS ITS OWN PROCESS GROUP, so the timeout can signal the
 	// group rather than one pid.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// C1: both streams write into the same capped writer, which is what
+	// Both streams write into the same capped writer, which is what
 	// interleaves them in write order.
 	capture := &captureWriter{}
 
-	// X3: ONE os.Pipe, owned by this function, shared by both streams.
+	// ONE os.Pipe, owned by this function, shared by both streams.
 	//
 	// cmd.StdoutPipe() is deliberately NOT used. Its documented contract is
 	// that cmd.Wait() closes the pipe, which races the copy goroutine — and
 	// worse, it would take the close out of this function's hands at exactly
-	// the moment X3 needs to force it. Owning the fds means the read loop can
-	// be bounded by the deadline: a killed child's SURVIVING GRANDCHILD holds
-	// the write end open forever, and a wait-on-EOF there is the classic hang
-	// this stage must not ship.
+	// the moment the timeout needs to force it. Owning the fds means the read
+	// loop can be bounded by the deadline: a killed child's SURVIVING
+	// GRANDCHILD holds the write end open forever, and a wait-on-EOF there is
+	// the classic hang this stage must not ship.
 	//
-	// A single pipe for both streams is also what makes C1's interleaving
+	// A single pipe for both streams is also what makes the interleaving
 	// exact: the kernel orders the writes, rather than two readers racing to
 	// append to a shared buffer.
 	pr, pw, err := os.Pipe()
@@ -104,8 +104,8 @@ func Run(spec Spec) (Result, error) {
 	// Two owned pipes rather than an io.MultiWriter: assigning a non-*os.File
 	// writer makes os/exec create a pipe and a copy goroutine of its own, and
 	// cmd.Wait() then waits for that goroutine — which is exactly the
-	// unbounded-EOF hang X3 exists to avoid, reintroduced through a different
-	// door.
+	// unbounded-EOF hang the owned pipe exists to avoid, reintroduced through a
+	// different door.
 	var (
 		outCapture = capture
 		opr, opw   *os.File
@@ -161,7 +161,7 @@ func Run(spec Spec) (Result, error) {
 	// The parent's copy of every write end is closed IMMEDIATELY after the fork,
 	// and its copy of the stdin READ end with them. The child holds its own;
 	// keeping ours open would mean the read end never sees EOF even after the
-	// child exits, which is the same hang X3 is about, self-inflicted.
+	// child exits, which is the same unbounded-EOF hang, self-inflicted.
 	pw.Close()
 	if opw != nil {
 		opw.Close()
@@ -235,7 +235,7 @@ func Run(spec Spec) (Result, error) {
 
 	case <-time.After(timeout):
 		timedOut = true
-		// X2: signal THE GROUP, not the pid. The negative pgid is what reaches
+		// Signal THE GROUP, not the pid. The negative pgid is what reaches
 		// a build's compilers and a test runner's servers. SIGTERM first, so a
 		// well-behaved process can flush and exit cleanly.
 		_ = syscall.Kill(-pgid, syscall.SIGTERM)
@@ -244,7 +244,7 @@ func Run(spec Spec) (Result, error) {
 		case runErr = <-waited:
 			// Exited on the TERM.
 		case <-time.After(killGrace):
-			// X2: then SIGKILL the group. Nothing survives this that the
+			// Then SIGKILL the group. Nothing survives this that the
 			// kernel can reach.
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 			select {
@@ -256,7 +256,7 @@ func Run(spec Spec) (Result, error) {
 			}
 		}
 
-		// X3: the read end is CLOSED after the kill, and the runner does NOT
+		// The read end is CLOSED after the kill, and the runner does NOT
 		// block waiting for grandchildren that inherited the write end. The
 		// close is what unblocks io.Copy; without it a surviving grandchild
 		// holding the write end open would keep the drain goroutine — and
@@ -266,7 +266,7 @@ func Run(spec Spec) (Result, error) {
 			opr.Close()
 		}
 
-		// X4: the reason names the timeout AND the limit, so an operator can
+		// The reason names the timeout AND the limit, so an operator can
 		// tell "this check is slow" from "this check hangs".
 		reason = fmt.Sprintf("the command exceeded its %s timeout and its process group was killed", timeout)
 	}
@@ -275,9 +275,9 @@ func Run(spec Spec) (Result, error) {
 	output, truncated := capture.result()
 
 	// The structured stream is capped by the SAME rule the diagnostic one is: a
-	// reply something intends to parse is not exempt from §5.5's bound, and a
-	// truncated one is reported truncated rather than handed on as though it
-	// were whole.
+	// reply something intends to parse is not exempt from the capture bound,
+	// and a truncated one is reported truncated rather than handed on as though
+	// it were whole.
 	var stdout string
 	if spec.SplitStdout {
 		var outTruncated bool

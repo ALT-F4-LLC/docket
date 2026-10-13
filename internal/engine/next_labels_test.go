@@ -46,7 +46,7 @@ func TestNextRowCarriesIssueLabels(t *testing.T) {
 		t.Fatal("next offered no rows")
 	}
 
-	// Labels are snapshotted SORTED (§5.1.1), so the order is asserted.
+	// Labels are snapshotted SORTED, so the order is asserted.
 	want := []string{"doc:tdd", "spec-doc"}
 	for _, row := range rows {
 		if len(row.Labels) != len(want) {
@@ -64,7 +64,7 @@ func TestNextRowCarriesIssueLabels(t *testing.T) {
 // TestNextRowLabelsAreFrozenAtActivation pins WHICH source the field reads.
 //
 // Labels come from `run_issues.issue_snapshot`, never a live join against
-// `issues` — the same discipline the context bundle keeps (§6.6). A relabel
+// `issues` — the same discipline the context bundle keeps. A relabel
 // after activation must not change how an already-scheduled step routes, or a
 // run's routing would depend on when a dispatcher happened to ask.
 //

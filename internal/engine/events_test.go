@@ -17,22 +17,23 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// Events written — TDD §7.6, §7.7.
+// Events written.
 //
 // Three obligations: every transition writes exactly one event of the expected
 // kind, `seq` is strictly increasing across concurrent writers, and the kinds
 // are drawn ONLY from the closed set.
 //
-// No read verb exists (§10 puts `events list --since` at stage 6), so these
-// read the table with SQL directly — deliberately, rather than shipping a read
-// surface now that would freeze a shape S6 is specified to define.
+// No read verb existed when these were written (`events list --since` came at
+// stage 6), so these read the table with SQL directly — deliberately, rather
+// than shipping a read surface early that would freeze a shape stage 6 was to
+// define.
 
 // ---------------------------------------------------------------------------
 // The closed set
 // ---------------------------------------------------------------------------
 
-// TestEventKindsAreAClosedSet is §7.7's guard test: it enumerates the constants
-// and asserts no other literal reaches the writer.
+// TestEventKindsAreAClosedSet is the closed-set guard test: it enumerates the
+// constants and asserts no other literal reaches the writer.
 //
 // The two halves matter separately. The first — every Event* constant is in
 // `eventKinds` — catches a phase that adds a kind and forgets to admit it, so
@@ -40,8 +41,9 @@ import (
 // every `eventKinds` entry has a constant — catches the reverse: a string
 // admitted to the set that no constant names, which is how a literal gets in.
 //
-// §9 item 2 ("every transition is attributable") is checkable only because this
-// set is closed, and it is closed only because both directions hold.
+// The attribution rule ("every transition is attributable") is checkable only
+// because this set is closed, and it is closed only because both directions
+// hold.
 func TestEventKindsAreAClosedSet(t *testing.T) {
 	constants := eventKindConstants(t)
 
@@ -66,16 +68,15 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		}
 	}
 
-	// And the set matches the spec's enumeration exactly. Restating the list
-	// here is the point: it is the one place the code is checked against the
-	// document rather than against itself, so a kind renamed on both sides
-	// still fails.
+	// And the set matches this enumeration exactly. Restating the list here is
+	// the point: it is the one place the code is checked against an
+	// independent list rather than against itself, so a kind renamed on both
+	// sides still fails.
 	//
-	// The first 24 are engine-spine §7.6's; six are stage 4's and one is stage
-	// 5's. Each addition is enumerated by the TDD that made it, precisely so
-	// this check keeps passing rather than silently widening — a stage that
-	// grew the set without naming its additions in its own TDD would make §9
-	// item 2 vacuous.
+	// The first 24 are the original set; six are stage 4's and one is stage
+	// 5's. Each addition is enumerated here, precisely so this check keeps
+	// passing rather than silently widening — a stage that grew the set
+	// without naming its additions would make the attribution rule vacuous.
 	for _, kind := range []string{
 		"run-started", "run-activated", "run-paused", "run-resumed",
 		"run-abandoned", "run-done", "step-ready", "step-claimed",
@@ -87,29 +88,28 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// The live-status mirror's other two writes (DKT-294) — TWO. Neither
 		// `in-progress` nor `review` was ever written before this change, though
 		// both were long validated and rendered; these are the transitions that
-		// make the issue mirror match what §9 item 2 already required of it.
+		// make the issue mirror match what the attribution rule already required
+		// of it.
 		"issue-in-progress", "issue-review",
 
-		// gates-trust §6.4 plus §8.1 — SIX, not the four §6.4 counts. The
-		// contradiction between those two sections is recorded as an amendment.
+		// Stage 4's gate, trust, and vote kinds — SIX.
 		"gate-unmatched", "gate-rerun", "trust-added", "trust-removed",
 		"vote-opened", "vote-tallied",
 
-		// payloads-thresholds §7.7 — ONE. Materializing a `<step>-held`
-		// question is a transition, and §9 item 2 requires every transition be
-		// attributable; without it a `type="human"` step nobody declared
+		// Stage 5's held-cluster kind — ONE. Materializing a `<step>-held`
+		// question is a transition, and the attribution rule requires every
+		// transition be attributable; without it a `type="human"` step nobody declared
 		// appears in a run with nothing explaining where it came from. Its
 		// RESOLUTION needs no new kind: `step-approved` and `step-rejected`
 		// already say what an operator did to a human gate, and a materialized
-		// one is a human gate in every respect the verbs can observe (H3).
+		// one is a human gate in every respect the verbs can observe.
 		"step-held",
 
-		// runs-dispatch §5 and §6, commit group 2 — FOUR. Three are the
+		// Stage 6's dispatch kinds, commit group 2 — FOUR. Three are the
 		// dispatch lifecycle and one is the write-reap acknowledgment.
 		//
-		// `dispatch-abandoned` is the only kind in the whole set that
-		// engine-spec §2 requires by implication rather than a TDD choosing it:
-		// "a dispatch TTL lazily auto-abandoned by `next` (event-logged)".
+		// `dispatch-abandoned` records a dispatch whose TTL lapsed being
+		// lazily auto-abandoned by `next`.
 		//
 		// `dispatch-closed` and `dispatch-abandoned` are separate rather than
 		// one kind with a reason, on `gate-unmatched`'s argument: an operator
@@ -117,8 +117,8 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// different events, since they mean opposite things about whether the
 		// relay's work is accounted for.
 		//
-		// `reap-acknowledged` earns its place on A3 — the ack must be
-		// ATTRIBUTABLE — and on §9 item 2: releasing write headroom IS a
+		// `reap-acknowledged` earns its place because the ack must be
+		// ATTRIBUTABLE, and on the attribution rule: releasing write headroom IS a
 		// transition (a successor becomes claimable that was not), and without
 		// this kind the release would appear in the feed as nothing at all.
 		//
@@ -132,15 +132,15 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		"dispatch-opened", "dispatch-closed", "dispatch-abandoned",
 		"dispatch-extended", "reap-acknowledged",
 
-		// Stage 7's two (docs/tdd/events-follow.md §6, §7.3).
+		// Stage 7's two.
 		//
 		// `events-pruned` earns its place on an argument no earlier kind could
 		// make: the prune is the one transition that DESTROYS EVIDENCE, so the
 		// record that it happened is all that distinguishes a trimmed log from
 		// a run that made fewer transitions.
 		//
-		// `run-budget-set` is the kind S6's own reasoning did not cover. That
-		// stage refused `budget-breached` because `run-paused` already anchors
+		// `run-budget-set` is the kind stage 6's own reasoning did not cover.
+		// That stage refused `budget-breached` because `run-paused` already anchors
 		// it; nothing anchors "the cap moved", and without this kind a run that
 		// breached at one number and later admitted a claim at another would
 		// have a trail with nothing explaining the difference.
@@ -272,13 +272,13 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		"vote-reseated", "step-deferred",
 	} {
 		if !eventKinds[kind] {
-			t.Errorf("the spec names %q but eventKinds does not contain it", kind)
+			t.Errorf("the enumeration names %q but eventKinds does not contain it", kind)
 		}
 	}
 	if len(eventKinds) != 59 {
-		t.Errorf("eventKinds has %d entries; §7.6 plus gates-trust §6.4/§8.1, "+
-			"payloads-thresholds §7.7, runs-dispatch §5/§6, events-follow "+
-			"§6/§7.3, DKT-35's annotation kind, DKT-61's tenancy kind, "+
+		t.Errorf("eventKinds has %d entries; the original set plus stage 4, "+
+			"stage 5, stage 6, stage 7, "+
+			"DKT-35's annotation kind, DKT-61's tenancy kind, "+
 			"DKT-236's spawn carve-out, DKT-294's live-status mirror, "+
 			"DKT-408's repin kind, DKT-546's batch-override pair, "+
 			"DKT-742's stale-target waiver kind, DKT-869's scope-refresh "+
@@ -320,8 +320,9 @@ func TestWriterRefusesAKindOutsideTheClosedSet(t *testing.T) {
 // One event per transition
 // ---------------------------------------------------------------------------
 
-// TestEveryStepStatusChangeHasAProducingEvent is §9 item 2 at the unit level:
-// drive a full run and require that each transition produced its event.
+// TestEveryStepStatusChangeHasAProducingEvent is the attribution rule at the
+// unit level: drive a full run and require that each transition produced its
+// event.
 //
 // It is the same claim the QA section makes over the CLI, asserted here where a
 // missing event is attributable to the transition that failed to write it
@@ -343,8 +344,8 @@ func TestEveryStepStatusChangeHasAProducingEvent(t *testing.T) {
 	assertEventCount(t, conn, EventStepRouted, 1)
 
 	// `implement` declares five gates, and each spawn is PRECEDED by a
-	// `gate-started` (§2, §7.6) — which is what makes the at-least-once gate
-	// discipline observable before S4 supplies a real spawn.
+	// `gate-started` — which is what makes the at-least-once gate
+	// discipline observable before stage 4 supplies a real spawn.
 	assertEventCount(t, conn, EventGateStarted, 5)
 	assertEventCount(t, conn, EventGateRecorded, 5)
 
@@ -352,7 +353,8 @@ func TestEveryStepStatusChangeHasAProducingEvent(t *testing.T) {
 	assertEventsAreAttributed(t, conn, run.ID)
 }
 
-// TestGateStartedPrecedesEachGateSpawn is §7.6's explicit ordering claim.
+// TestGateStartedPrecedesEachGateSpawn is the writer's explicit ordering
+// claim.
 //
 // The `gate-started` event commits BEFORE the runner is invoked, so a crash
 // between the two leaves a started-but-unrecorded gate — the state a resume must
@@ -414,12 +416,12 @@ func TestLoopTransitionsWriteTheirEvents(t *testing.T) {
 	assertEventCount(t, conn, EventStepSuperseded, 2)
 }
 
-// TestEventDataIsAlwaysAJSONObject is the column's contract (§11.4's `event`
+// TestEventDataIsAlwaysAJSONObject is the column's contract (the public `event`
 // shape puts `data` in an envelope).
 //
 // Call sites pass bare details — a gate name, a routing — because that is the
 // natural thing to pass and the engine never reads them back. Normalizing in
-// the writer is what keeps `data` parseable for every S6/S7 consumer without
+// the writer is what keeps `data` parseable for every feed consumer without
 // making sixteen call sites construct JSON.
 func TestEventDataIsAlwaysAJSONObject(t *testing.T) {
 	conn := mustDB(t)
@@ -457,13 +459,13 @@ func TestEventDataIsAlwaysAJSONObject(t *testing.T) {
 // seq is strictly increasing
 // ---------------------------------------------------------------------------
 
-// TestSeqIsStrictlyIncreasingUnderConcurrentWriters is §7.7's concurrency
-// obligation.
+// TestSeqIsStrictlyIncreasingUnderConcurrentWriters is the seq column's
+// concurrency obligation.
 //
 // `seq` is INTEGER PRIMARY KEY AUTOINCREMENT, which SQLite guarantees is
 // monotonic and never reused. The test writes from several goroutines at once
 // and requires the resulting sequence to be strictly increasing with no
-// duplicates — the property S7's `--since` cursor depends on, and the one a
+// duplicates — the property the `--since` cursor depends on, and the one a
 // `MAX(seq) + 1` implementation would lose under exactly this load.
 func TestSeqIsStrictlyIncreasingUnderConcurrentWriters(t *testing.T) {
 	conn := mustDB(t)
@@ -530,13 +532,13 @@ func TestSeqIsStrictlyIncreasingUnderConcurrentWriters(t *testing.T) {
 }
 
 // TestSeqIsNeverReusedAfterDeletion is the AUTOINCREMENT half, and the reason
-// §7.1 specifies it rather than a plain rowid.
+// the schema specifies it rather than a plain rowid.
 //
 // With a plain INTEGER PRIMARY KEY, SQLite reuses the highest rowid after the
 // row holding it is deleted. A consumer holding `--since = N` would then never
 // see the replacement event, because its `seq` is one it has already passed.
 // AUTOINCREMENT is the difference between a `seq` that is monotonic and one
-// that merely usually is — and S7 ships a `prune` verb, so deletion is not
+// that merely usually is — and stage 7 ships a `prune` verb, so deletion is not
 // hypothetical.
 func TestSeqIsNeverReusedAfterDeletion(t *testing.T) {
 	conn := mustDB(t)
@@ -562,13 +564,13 @@ func TestSeqIsNeverReusedAfterDeletion(t *testing.T) {
 
 	first := writeEvent()
 
-	// Delete the newest event — what `events prune` will do at S7.
+	// Delete the newest event — what `events prune` does.
 	execSQL(t, conn, `DELETE FROM events WHERE seq = ?`, first)
 
 	second := writeEvent()
 	if second <= first {
 		t.Errorf("seq %d was reused after deleting %d; AUTOINCREMENT must never "+
-			"reuse a number, or an S7 --since cursor would skip the replacement",
+			"reuse a number, or a --since cursor would skip the replacement",
 			second, first)
 	}
 }
@@ -580,10 +582,10 @@ func TestSeqIsNeverReusedAfterDeletion(t *testing.T) {
 // TestEventTailShips is where a three-stage succession ENDS, and the ending is
 // as deliberate as the deferral was.
 //
-// The lineage: at S3 this file asserted no event read verb shipped at all
-// (`TestNoEventReadVerbShips`), because §10 puts `events list --since` at stage
-// 6 and an early read verb would have frozen a wire shape S6 was specified to
-// define. At S6 the guard MOVED rather than disappeared
+// The lineage: at stage 3 this file asserted no event read verb shipped at all
+// (`TestNoEventReadVerbShips`), because `events list --since` belonged to stage
+// 6 and an early read verb would have frozen a wire shape stage 6 was to
+// define. At stage 6 the guard MOVED rather than disappeared
 // (`TestNoEventFollowVerbShips`): the read shipped, and `--follow`/`prune` were
 // asserted absent for one more stage, on the same argument one stage later.
 //
@@ -595,7 +597,7 @@ func TestSeqIsNeverReusedAfterDeletion(t *testing.T) {
 // Inverting rather than deleting keeps the property the succession was
 // protecting. A deleted guard leaves nothing behind that would notice if the
 // tail were later removed or quietly reduced to a stub; this one fails if the
-// verb that S3, S4, S5, and S6 all deferred to stage 7 ever stops shipping.
+// verb that stages 3 through 6 all deferred to stage 7 ever stops shipping.
 func TestEventTailShips(t *testing.T) {
 	// The verb is spread over three files now that it has three halves, so the
 	// guard reads the DIRECTORY's events sources rather than one filename. Its
@@ -620,7 +622,7 @@ func TestEventTailShips(t *testing.T) {
 
 	for _, shipped := range []string{"follow", "prune"} {
 		if !strings.Contains(stripped.String(), shipped) {
-			t.Errorf("the events verb does not name %q outside a comment; §10 "+
+			t.Errorf("the events verb does not name %q outside a comment; "+
 				"stage 7 IS the observability tail, and three earlier stages "+
 				"deferred to it", shipped)
 		}

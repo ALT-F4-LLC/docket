@@ -21,7 +21,7 @@ import (
 // `route_at`'s exact discipline (aggregate.go) — so core acquires no opinion
 // about severities: a workflow whose order ranks ripeness or confidence gets
 // the identical check. `held` and `operator_resolved` are the engine's own
-// packaging vocabulary (§7.6), and elements carrying either are exempt because
+// packaging vocabulary, and elements carrying either are exempt because
 // both already route through a decision channel: a held cluster gates the step
 // for an operator, and a resolved one records the operator's acceptance — the
 // approved-hold resume must not re-park on the decision it just received.
@@ -78,7 +78,7 @@ func passFloorStanding(
 
 // flagged reads one of the aggregate's boolean packaging keys off an element.
 // Only an explicit JSON `true` counts: the keys are the engine's own output
-// vocabulary (§7.6), absent on payloads no aggregate produced, and absence of
+// vocabulary, absent on payloads no aggregate produced, and absence of
 // a decision is not a decision.
 func flagged(element map[string]any, key string) bool {
 	v, _ := element[key].(bool)

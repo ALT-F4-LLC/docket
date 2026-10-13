@@ -12,17 +12,16 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// RuleIDs is the register-time validation table, by ID, in documented order —
-// engine-spine §4.3 as payloads-thresholds §4.9.1 extends it. It is the
-// authority TestValidationTableIsComplete asserts set equality against — never a
-// count, which is exactly the assertion that breaks when a rule is split
-// (V13/V13a are one check and two author-facing errors; V21 is now one grammar
-// rule and four cross-validation rules).
+// RuleIDs is the register-time validation table, by ID, in documented order.
+// It is the authority TestValidationTableIsComplete asserts set equality
+// against — never a count, which is exactly the assertion that breaks when a
+// rule is split (V13/V13a are one check and two author-facing errors; V21 is
+// now one grammar rule and four cross-validation rules).
 //
 // V21a-V21d, V25a, V28a, V29, V30, V37a, and V50 are the SCHEMA-AWARE half and
 // live in ValidateSchemas rather than in Validate: they are the only rules that
 // ask a question about the environment, and Validate stays a pure function of
-// bytes (§4.9.2). V27, V28, and V31 are decisions about bytes and stay here.
+// bytes. V27, V28, and V31 are decisions about bytes and stay here.
 var RuleIDs = []string{
 	"V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10",
 	// V12 was the `on_fail` closed-vocabulary rule. DKT-1901 reads a value
@@ -65,7 +64,7 @@ type VoteRuleResolver interface {
 	RuleSetElsewhere(rule string) (projects int, value string, err error)
 }
 
-// ValidateVoteRules is V26 (gates-trust §8.2): a `vote_rule` naming an
+// ValidateVoteRules is V26: a `vote_rule` naming an
 // unregistered threshold configuration is a VALIDATION_ERROR at
 // `workflow register`, naming the rule and listing the registered ones.
 //
@@ -128,14 +127,14 @@ func ValidateVoteRules(def *Definition, resolver VoteRuleResolver) error {
 	return nil
 }
 
-// LintIDs are the register-time DAG lints of TDD §4.3.3.
+// LintIDs are the register-time DAG lints.
 var LintIDs = []string{"L1", "L2", "L3", "L4"}
 
-// Validate applies the §4.3 table to a parsed definition, in rule order, and
-// returns the first violation. Every error names the workflow, the step, and
-// the offending field.
+// Validate applies the validation table to a parsed definition, in rule order,
+// and returns the first violation. Every error names the workflow, the step,
+// and the offending field.
 //
-// Defaults from the §11.1 default column are applied here, not at parse: a
+// Defaults from the grammar's default column are applied here, not at parse: a
 // default is a semantic decision (V23's `class` = `executor`, `min_siblings` =
 // len(fanout)) and applying it during decoding would erase the difference
 // between "the author wrote this" and "the grammar supplied it" — which V8 and
@@ -234,7 +233,7 @@ func validateSteps(def *Definition) error {
 		// V27: the `-held` suffix is RESERVED. It is checked here, with V4,
 		// because it is a rule about the name itself: a declared step named
 		// `reconcile-held` would collide with the identity a tripped
-		// `hold_spread` mints for `reconcile` (§7.7.1 H1), and the collision
+		// `hold_spread` mints for `reconcile`, and the collision
 		// would surface as a UNIQUE violation mid-run rather than as a sentence
 		// at register.
 		if strings.HasSuffix(step.Name, HeldSuffix) {
@@ -336,10 +335,10 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
-	// V7: emits required on executor steps. §4.3.1: required for executors,
+	// V7: emits required on executor steps: required for executors,
 	// optional on fanout steps that declare it, absent on action/human/vote —
-	// the spec makes it required only for executors and this says exactly that
-	// and no more.
+	// the grammar makes it required only for executors and this says exactly
+	// that and no more.
 	if class == ClassExecutor && step.Emits == "" {
 		return &Error{
 			Rule: "V7", Step: step.Name, Field: "emits",
@@ -459,7 +458,7 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 	// V39a: every `after_fired` entry also appears in `after`. `after_fired`
 	// asks whether a predecessor FIRED, and the answer exists only once that
 	// predecessor is terminal — which is exactly what an `after` edge waits
-	// for (R3). An entry `after` did not name would let the step become ready
+	// for. An entry `after` did not name would let the step become ready
 	// while the gate was still open, run, and be too late to skip. A
 	// `loop = true` step declares no `after` (V18) and so no `after_fired`
 	// either: its ordering comes from loop entry.
@@ -482,8 +481,8 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		return err
 	}
 
-	// V32 and V33: the declared packet files' shape, and the executor token's
-	// precondition (docs/tdd/packet-composition.md §1.6). Both are
+	// precondition. Both are decisions about BYTES, so they live here rather
+	// than in ValidateSchemas.
 	// decisions about BYTES, so they live here rather than in ValidateSchemas.
 	if err := validatePacket(step); err != nil {
 		return err
@@ -584,11 +583,11 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 	}
 
 	// V13a: on_fail is required, explicitly, on EVERY GATE STEP — `type="human"`
-	// and `type="vote"` alike — the corollary of V13 over the EFFECTIVE value
-	// (§4.3.2).
+	// and `type="vote"` alike — the corollary of V13 over the EFFECTIVE value.
 	//
-	// Silence is not neutral, because §11.1's default IS `waiting-human`: a gate
-	// that declares nothing HAS a routing its author never chose. That was
+	// Silence is not neutral, because the grammar's default IS
+	// `waiting-human`: a gate that declares nothing HAS a routing its author
+	// never chose. That was
 	// already stated for human gates; it is stated for vote gates now because a
 	// declared vote step omitting `on_fail` parked on a failed tally, and an
 	// author who meant `fix-loop` could not tell by reading the step. The
@@ -785,7 +784,7 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
-	// V35: `serves` declares a loop CLUSTER (§11.3 cluster scoping, DKT-544)
+	// V35: `serves` declares a loop CLUSTER (DKT-544)
 	// and every part of the declaration must be coherent at register time:
 	// only a `loop = true` body has fix-loop routings to serve, an entry must
 	// name a step of this workflow, and the named step must be able to route
@@ -918,7 +917,7 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 	// declared `at`'s (DKT-870), and a position exists only in the order a
 	// pinned `payload` schema declares — a floor with no schema can never
 	// position anything and is an inert declaration. Whether the field IS
-	// ordered and `at` IS in its order is V37a's, beside the schema (§4.9.1).
+	// ordered and `at` IS in its order is V37a's, beside the schema.
 	if step.PassFloor != nil {
 		if step.PassFloor.Field == "" || step.PassFloor.At == "" {
 			return &Error{
@@ -953,9 +952,9 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 		}
 	}
 
-	// V25: payload matches name@version shape. SHAPE ONLY at this stage — the
-	// schema register does not exist until S5, so there is nothing to resolve
-	// the name against yet (§6.14).
+	// V25: payload matches name@version shape. SHAPE ONLY — Validate does not
+	// consult the schema register, so there is nothing to resolve the name
+	// against here.
 	if step.Payload != "" && !PayloadShape.MatchString(step.Payload) {
 		return &Error{
 			Rule: "V25", Step: step.Name, Field: "payload",
@@ -969,7 +968,7 @@ func validateStep(def *Definition, step *Step, index int, byName map[string]*Ste
 }
 
 // producedKind resolves the artifact kind a step actually produces, per step
-// class (TDD §4.3.1). The kind itself is ArtifactKind's — expand.go and this
+// class. The kind itself is ArtifactKind's — expand.go and this
 // package must agree on which field the kind comes from, and two readers
 // deriving it independently is how they drift.
 //
@@ -982,7 +981,7 @@ func producedKind(step *Step) (kind string, produces bool) {
 	return ArtifactKind(step), step.StepClass() != ClassType
 }
 
-// inputShape matches the §11.1 `inputs` grammar: `<step>.<kind>`, `<step>.*`,
+// inputShape matches the `inputs` grammar: `<step>.<kind>`, `<step>.*`,
 // `issue.body`, or `issue.diff`.
 var inputShape = regexp.MustCompile(`^([A-Za-z0-9_.-]+)\.([A-Za-z0-9_-]+|\*)$`)
 
@@ -1059,10 +1058,10 @@ func LinkedInput(input string) (relation, kind string, ok bool) {
 	return relation, kind, true
 }
 
-// PayloadShape matches §11.1's `schema@ver`.
+// PayloadShape matches the grammar's `schema@ver`.
 //
 // It is EXPORTED and shared rather than restated, because `docket schema
-// register` accepts the same grammar (TDD §4.5): the shape a workflow
+// register` accepts the same grammar: the shape a workflow
 // REFERENCES and the shape a registry ACCEPTS cannot be allowed to drift, and
 // two regexps in two packages are exactly how they would.
 var PayloadShape = regexp.MustCompile(`^[A-Za-z0-9_-]+@[0-9]+$`)
@@ -1090,7 +1089,7 @@ func ParsePayloadRef(ref string) (name string, version int, err error) {
 // validateInputs is V11: entries match the declared shapes, the named step
 // exists, and a `<step>.<kind>` names a kind that step actually produces.
 //
-// It also enforces the PRODUCER side of the same table (TDD §6.13): an `action`
+// It also enforces the PRODUCER side of the same table: an `action`
 // step must declare `params.output`. That is V5's neighbourhood but a distinct
 // check, and it rides here because V11 is where the produced-kind table is
 // enforced — a step whose produced kind is empty can never satisfy V11 for any
@@ -1119,7 +1118,7 @@ func validateInputs(step *Step, byName map[string]*Step) error {
 		// the live version of the thing it iterates: the body is structurally
 		// outside `after_loop`'s downstream set (V10/V18: it cannot declare
 		// `after`), so the loop-producer redirect never rebinds its inputs,
-		// and a declared `<author>.<kind>` falls back per §7.4 to the
+		// and a declared `<author>.<kind>` falls back to the
 		// ordinal-0 draft forever. The kind must be one some step produces:
 		// an issue can hold artifacts of no other kind, so anything else is a
 		// typo caught now rather than an input resolving to nothing on every
@@ -1297,7 +1296,7 @@ func anyStepProduces(byName map[string]*Step, kind string) bool {
 	return false
 }
 
-// thresholdRoutings are the §11.2 non-step routings.
+// thresholdRoutings are the non-step threshold routings.
 var thresholdRoutings = []string{OnFailFixLoop, OnFailWaitingHuman, "pass"}
 
 // VoteCastField* are the addressable fields of one CAST in a vote step's
@@ -1322,7 +1321,7 @@ const (
 // builder must produce exactly these keys and no reader may drift from it.
 var VoteCastFields = []string{VoteCastFieldVote, VoteCastFieldVerdict, VoteCastFieldVoter}
 
-// predicateShape matches the §11.2 grammar `agg(field op literal)`.
+// predicateShape matches the threshold grammar `agg(field op literal)`.
 var predicateShape = regexp.MustCompile(
 	`^\s*(any|all|count>=\d+)\s*\(\s*([A-Za-z0-9_.-]+)\s*(==|!=|>=|>|<=|<)\s*(\S+?)\s*\)\s*$`)
 
@@ -1351,9 +1350,9 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 
 		// V21: the predicate parses as agg(field op literal). At this stage
 		// predicates parse GRAMMATICALLY only — the field and the literal are
-		// opaque tokens until their payload schema registers at S5. The
-		// grammar knows `agg(field op literal)`, never what a field means,
-		// which is the genericity line holding exactly where §11.2 draws it.
+		// opaque tokens until their payload schema registers. The grammar
+		// knows `agg(field op literal)`, never what a field means, which is the
+		// genericity line holding exactly where the grammar draws it.
 		if !predicateShape.MatchString(step.Threshold[routing]) {
 			return &Error{
 				Rule: "V21", Step: step.Name, Field: "threshold",
@@ -1389,9 +1388,9 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 		//     engine-produced like `when`'s kind/labels (V22), so any other
 		//     field would silently never match.
 		//   - ordered operators are refused. Casts have no registered schema,
-		//     and §11.2 defines ordered comparisons only over `ordered_enum`
-		//     fields — the comparison would be a guaranteed T3 park on every
-		//     evaluation, which is a misdeclaration and not a choice.
+		//     and the grammar defines ordered comparisons only over
+		//     `ordered_enum` fields — the comparison would be a guaranteed park
+		//     on every evaluation, which is a misdeclaration and not a choice.
 		if step.Type == TypeVote {
 			if !slices.Contains(thresholdRoutings, routing) {
 				return &Error{
@@ -1411,7 +1410,7 @@ func validateThreshold(step *Step, byName map[string]*Step) error {
 							"operator %q, but a vote step's threshold evaluates "+
 							"over casts, which have no registered schema — "+
 							"ordered comparisons are defined only over "+
-							"`ordered_enum` fields (engine-spec §11.2); use == or !=",
+							"`ordered_enum` fields; use == or !=",
 						step.Name, step.Threshold[routing], pred.Op),
 				}
 			}
@@ -1526,10 +1525,9 @@ func validateDiffPredicate(step *Step, pred Predicate) error {
 	return nil
 }
 
-// whenShape matches the §11.1 `when` grammar: a predicate over the issue's
-// `kind` or `labels` only (engine-core §4: "conditions (predicates over issue
-// kind/labels only)"). Nothing else is addressable — a `when` over a status or
-// an assignee is a validation error, not a silently-false predicate.
+// whenShape matches the `when` grammar: a predicate over the issue's `kind` or
+// `labels` only. Nothing else is addressable — a `when` over a status or an
+// assignee is a validation error, not a silently-false predicate.
 //
 // Two clause forms:
 //
@@ -1621,7 +1619,7 @@ func validateWhen(step *Step) error {
 	return nil
 }
 
-// The two connectives of the §11.1 `when` grammar.
+// The two connectives of the `when` grammar.
 const (
 	WhenAnd = "and"
 	WhenOr  = "or"
@@ -1633,7 +1631,8 @@ const (
 // the one place the connective vocabulary is spelled, for the same reason
 // whenShape is the one place the clause shape is: validate and evaluate must
 // split a predicate identically or a definition that registered could evaluate
-// as something else (predicate.go, on §11.2's single-regex discipline).
+// as something else (predicate.go, on the threshold grammar's single-regex
+// discipline).
 var whenConnective = regexp.MustCompile(`\s+(and|or)\s+`)
 
 // splitWhen breaks a `when` expression into its clauses and reports which
@@ -1713,8 +1712,8 @@ func validateLimits(def *Definition) error {
 	return nil
 }
 
-// applyDefaults materializes the §11.1 default column into the parsed form, so
-// the stored `parsed` JSON is the pinned INTERPRETATION rather than a
+// applyDefaults materializes the grammar's default column into the parsed
+// form, so the stored `parsed` JSON is the pinned INTERPRETATION rather than a
 // re-derivation every reader has to repeat identically.
 //
 // V23 lives here: `class` defaults to the `executor` value.
@@ -1725,22 +1724,21 @@ func applyDefaults(def *Definition) {
 			step.Class = step.Executor
 		}
 
-		// on_fail default = waiting-human (§11.1). V13/V13a guarantee this
+		// on_fail default = waiting-human. V13/V13a guarantee this
 		// default is never reached on a type="human" step.
 		if step.OnFail == "" {
 			step.OnFail = OnFailWaitingHuman
 		}
 
-		// min_siblings default = all (§11.1 "default = all").
+		// min_siblings default = all.
 		if step.MinSiblings == nil && len(step.Fanout) > 0 {
 			n := len(step.Fanout)
 			step.MinSiblings = &n
 		}
 
-		// expected_cost default = 0 (§11.1). Parsed, validated, stored, and
-		// emitted on `next` rows at this stage, but enforcing nothing — S6
-		// owns the budget floor. Materializing the default now keeps the wire
-		// shape whole.
+		// expected_cost default = 0. Parsed, validated, stored, and emitted on
+		// `next` rows, but enforcing nothing here. Materializing the default
+		// keeps the wire shape whole.
 		if step.ExpectedCost == nil {
 			zero := 0.0
 			step.ExpectedCost = &zero

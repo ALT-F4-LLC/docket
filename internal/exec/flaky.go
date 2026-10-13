@@ -1,12 +1,12 @@
 package exec
 
-// MaxFlakyAttempts is F2's bound: a flaky command that FAILS re-runs up to 2
-// additional times, so 3 attempts total. A package constant, like the timeout
-// and the capture cap and for the same reason.
+// MaxFlakyAttempts is the re-run bound: a flaky command that FAILS re-runs up
+// to 2 additional times, so 3 attempts total. A package constant, like the
+// timeout and the capture cap and for the same reason.
 const MaxFlakyAttempts = 3
 
 // Attempt is one execution of a command inside a single gate stage, carrying
-// the ordinal that makes F3's "recorded individually" concrete. Every Attempt
+// the ordinal that makes "recorded individually" concrete. Every Attempt
 // is a process that ran; a declined spawn is a Refusal, never an Attempt.
 type Attempt struct {
 	// Ordinal is the re-run index: 0, 1, 2. It becomes the ordinal column on
@@ -25,24 +25,24 @@ type Refusal struct {
 }
 
 // RunAttempts executes a command, re-running it on failure when and only when
-// the operator declared it flaky (§5.6).
+// the operator declared it flaky.
 //
-// F1: ONLY a flaky-declared command re-runs. A command not declared flaky runs
+// ONLY a flaky-declared command re-runs. A command not declared flaky runs
 // EXACTLY ONCE per gate stage — there is no retry-on-failure by default,
 // because a retry the operator did not ask for turns a deterministic failing
 // check into an intermittent one.
 //
-// F3: EVERY ATTEMPT IS ITS OWN RESULT, with an ascending ordinal. Nothing is
+// EVERY ATTEMPT IS ITS OWN RESULT, with an ascending ordinal. Nothing is
 // overwritten and nothing is aggregated. That is what "recorded individually"
 // means and it is the point: a check that passes on the third try is a fact the
 // operator should be able to see, not one an averaging step hides.
 //
-// F5: `flaky` is NOT `re_runnable`, and conflating them is the likely
+// `flaky` is NOT `re_runnable`, and conflating them is the likely
 // implementation error. `flaky` governs re-running WITHIN ONE GATE STAGE after
 // a failure — this function. `re_runnable` governs re-running AFTER A CRASH,
 // when the engine does not know whether the previous attempt ran at all — that
-// is the saga's decision in group 2, and nothing here reads it. A command may
-// be either, both, or neither.
+// is the saga's decision, and nothing here reads it. A command may be either,
+// both, or neither.
 //
 // isPass decides what counts as success. It is a parameter rather than a
 // hardcoded `exit == 0` because the pass/fail mapping is the engine's decision,
@@ -91,7 +91,7 @@ func RunSpawnedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify 
 		}
 		attempts = append(attempts, Attempt{Ordinal: i, Result: res})
 
-		// F2: stop at the first pass.
+		// Stop at the first pass.
 		if isPass(res) {
 			break
 		}
@@ -99,7 +99,7 @@ func RunSpawnedAttempts(spec Spec, flaky bool, isPass func(Result) bool, verify 
 	return attempts, nil, nil
 }
 
-// Verdict returns the attempt whose result decides routing (F4): THE LAST ONE.
+// Verdict returns the attempt whose result decides routing: THE LAST ONE.
 //
 // A command that passes on attempt 2 passes; one that fails all three fails.
 // The earlier attempts remain recorded — they are the evidence that the check
@@ -112,9 +112,9 @@ func Verdict(attempts []Attempt) (Attempt, bool) {
 }
 
 // ExitZeroIsPass is the ordinary pass predicate: exit 0 passes, anything else
-// fails. A timeout fails through the same door — X4 records a timed-out command
-// as a failure, NOT as unmatched, because the command was trusted and did run;
-// it failed by exceeding its bound.
+// fails. A timeout fails through the same door — a timed-out command is
+// recorded as a failure, NOT as unmatched, because the command was trusted and
+// did run; it failed by exceeding its bound.
 func ExitZeroIsPass(r Result) bool {
 	return r.Exit == 0 && !r.TimedOut
 }

@@ -249,9 +249,9 @@ func TestReadyR3Predecessors(t *testing.T) {
 }
 
 // TestReadyR3SkippedPredecessorSatisfies pins that a `skipped` predecessor does
-// NOT strand its successors. §11.1 makes a false `when` mean the step does not
+// NOT strand its successors. A false `when` means the step does not
 // run, not that everything after it is unschedulable — and expansion creates
-// the skipped row precisely so the `after` edge stays resolvable (§5.3.1).
+// the skipped row precisely so the `after` edge stays resolvable.
 func TestReadyR3SkippedPredecessorSatisfies(t *testing.T) {
 	conn := mustDB(t)
 	run, issue := activatedRun(t, conn)
@@ -371,10 +371,9 @@ func TestReadyR4SameIssueDoesNotSelfExclude(t *testing.T) {
 // TestReadyR5ClassHeadroom falsifies R5 with a `[limits]` max, and pins that
 // core ships NO default: a class with no declared max is unbounded.
 //
-// The serialized-writer behavior engine-core §5 ratifies is produced HERE, by
-// instance config, not by a hardcoded rule — §6.5 is explicit that a hardcoded
-// writer serialization would be instance policy in core and would fail the
-// genericity rule on its face.
+// The serialized-writer behavior is produced HERE, by instance config, not by
+// a hardcoded rule — a hardcoded writer serialization would be instance
+// policy in core and would fail the genericity rule on its face.
 func TestReadyR5ClassHeadroom(t *testing.T) {
 	const src = `
 [pipeline]
@@ -473,8 +472,7 @@ after = []
 	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
 		if ready, cond := sched.Ready(stepNamed(t, sched, "two@0")); !ready {
 			t.Errorf("two@0 blocked by %q with NO [limits] declared — "+
-				"core must ship no class named `write` and no default of 1 "+
-				"(§6.5, genericity.md)", cond)
+				"core must ship no class named `write` and no default of 1", cond)
 		}
 	})
 }
@@ -852,10 +850,10 @@ func TestReadyR6Status(t *testing.T) {
 	}
 }
 
-// TestReadyR7BudgetSeam pins R7's S3 behavior: the check is a seam returning
-// true (§6.3), so it never blocks at this stage.
+// TestReadyR7BudgetSeam pins R7 on a run with no cap: the check returns
+// true, so it never blocks.
 //
-// The test exists so S6's real check has a call site already under test, and so
+// The test exists so the check has a call site under test, and so
 // a reviewer does not read the always-true return as an oversight.
 func TestReadyR7BudgetSeam(t *testing.T) {
 	conn := mustDB(t)
@@ -864,7 +862,7 @@ func TestReadyR7BudgetSeam(t *testing.T) {
 	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
 		if !sched.budgetHeadroom(stepNamed(t, sched, "implement@0")) {
 			t.Error("R7 refused a step on a run with no cap; an unlimited run has " +
-				"headroom by definition (§4.8 B29)")
+				"headroom by definition")
 		}
 	})
 }
@@ -873,7 +871,7 @@ func TestReadyR7BudgetSeam(t *testing.T) {
 // Ordering
 // ---------------------------------------------------------------------------
 
-// TestReadyOrderingIsPriorityThenAge pins §2's "Ordering: priority then age",
+// TestReadyOrderingIsPriorityThenAge pins "Ordering: priority then age",
 // with a TOTAL order: two steps created in the same millisecond — which is the
 // common case, since one expansion writes them all — must still order
 // deterministically, or the topology goldens flap.
@@ -984,7 +982,7 @@ func TestExpiredLeaseIsReapable(t *testing.T) {
 // TestMaxStepDurationReapsPastALiveHeartbeat is the clause that makes
 // `max_step_duration` worth having, and the one an implementation naturally
 // omits: it is a SCHEDULE-TO-CLOSE bound against `started_ms`, "independent of
-// heartbeats — so a runaway executor cannot renew forever" (§11.1).
+// heartbeats — so a runaway executor cannot renew forever".
 //
 // The step here has a lease that is LIVE and freshly extended. It must still be
 // reaped, or the bound is just a second lease timeout.
@@ -1035,7 +1033,7 @@ after = []
 		if !sched.Expired(step) {
 			t.Error("a step 60m into a 45m max_step_duration was not reaped " +
 				"despite a live lease — the bound is schedule-to-close and must " +
-				"be independent of heartbeats (§6.3)")
+				"be independent of heartbeats")
 		}
 	})
 
@@ -1059,7 +1057,7 @@ after = []
 // answer, because R1 refuses to offer anything until the run is active again.
 //
 // Reaping it is a false positive with teeth: the step returns to `pending`
-// with its lease cleared, its class takes a write-reap hold (§6.4), and the
+// with its lease cleared, its class takes a write-reap hold, and the
 // operator who resolves the park finds work they never lost, undone.
 func TestExpiryIgnoresStepsOfANonActiveRun(t *testing.T) {
 	conn := mustDB(t)

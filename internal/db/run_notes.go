@@ -55,7 +55,7 @@ func InsertRunNoteTx(tx *sql.Tx, n RunNote) (int, error) {
 //
 // It takes a transaction because its main consumer is context assembly, which
 // reads every source inside the claim's own transaction so a claimant sees
-// one consistent run state (engine-core §8's "one atomic mediation").
+// one consistent run state: one atomic mediation.
 func ListRunNotesTx(tx *sql.Tx, runID int) ([]RunNote, error) {
 	rows, err := tx.Query(
 		`SELECT id, run_id, text, authority, created_at_ms

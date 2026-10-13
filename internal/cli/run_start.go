@@ -101,9 +101,9 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 		issueIDs = append(issueIDs, id)
 	}
 
-	// B1's second branch, resolved HERE rather than at every claim: an omitted
+	// The default branch, resolved HERE rather than at every claim: an omitted
 	// `--budget` takes `docket config budget.default`, and the resolved number is
-	// what the row stores. That is what makes B3 true — the cap a claim enforces
+	// what the row stores. That is what makes this hold: the cap a claim enforces
 	// is read from the run row and from nowhere else, so a config change after
 	// `run start` cannot silently re-cap a live run.
 	//
@@ -155,7 +155,7 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 		usageBudget = fallback
 	}
 
-	// The run records where and on what it started (G8): the invoking
+	// The run records where and on what it started: the invoking
 	// checkout's root, its branch and commit, and the machine. Best-effort —
 	// outside a checkout the fields record empty rather than invented.
 	runCtx := db.RunContext{UsageBudget: usageBudget}

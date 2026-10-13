@@ -12,10 +12,10 @@ import (
 // were expanded from, keyed by workflow id.
 //
 // It restores from `workflows.parsed`, never by re-parsing `body` — the parsed
-// JSON is the PINNED INTERPRETATION (TDD §4.1). Re-parsing the TOML here would
+// JSON is the PINNED INTERPRETATION. Re-parsing the TOML here would
 // mean a parser change silently re-interpreting a definition a run already
 // pinned, which is the thing version pinning exists to prevent. That rule
-// applies with more force at S3 than at activation: activation happens once,
+// applies with more force here than at activation: activation happens once,
 // but every readiness computation, every context assembly, and every routing
 // decision for the life of the run comes through here.
 //
@@ -79,7 +79,7 @@ func addBoundDefinitions(conn *sql.DB, runID int, out map[int]*workflow.Definiti
 	return rows.Err()
 }
 
-// stepSpec returns the §11.1 definition of one step, from its run's pinned
+// stepSpec returns the definition of one step, from its run's pinned
 // workflow. A step whose definition is missing is a corrupted run rather than a
 // recoverable state — the workflow row is referenced by a foreign key — so the
 // caller treats a nil result as an error rather than a default.

@@ -7,15 +7,13 @@ import (
 	"strings"
 )
 
-// Workflow is a registered workflow definition — one `workflows` row
-// (docs/tdd/engine-spine.md §4.1).
+// Workflow is a registered workflow definition — one `workflows` row.
 //
 // Version and RowVersion are two different numbers and are named apart on
-// purpose. Version is the author's `[pipeline].version` from engine-spec §11.1
-// — the number runs pin. RowVersion is the CAS column every mutable entity
-// carries (reliability-delta §6.1). Collapsing them would make `--if-version`
-// mean "the workflow definition version", which a re-register must never
-// silently bump.
+// purpose. Version is the author's `[pipeline].version` — the number runs
+// pin. RowVersion is the CAS column every mutable entity carries. Collapsing
+// them would make `--if-version` mean "the workflow definition version",
+// which a re-register must never silently bump.
 type Workflow struct {
 	ID int
 	// ProjectID is the v12 tenancy dimension; zero normalizes to the default
@@ -255,7 +253,7 @@ func (w *Workflow) wire() workflowJSON {
 }
 
 // workflowVersionedJSON adds the CAS row version, which surfaces under
-// --json=v2 only (engine-spec §5) — v1 never consults the Versioned interface,
+// --json=v2 only — v1 never consults the Versioned interface,
 // so the row version stays invisible there.
 //
 // The fields are restated rather than embedded: `version` is already taken by

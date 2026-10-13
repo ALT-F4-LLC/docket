@@ -48,7 +48,7 @@ func TestV2CollectionEnvelopeShape(t *testing.T) {
 		t.Fatalf("data type = %T, want map", raw["data"])
 	}
 
-	// Exactly the three §5 keys, nothing more.
+	// Exactly the three envelope keys, nothing more.
 	for _, key := range []string{"items", "total", "truncated"} {
 		if _, present := data[key]; !present {
 			t.Errorf("v2 data missing %q key", key)

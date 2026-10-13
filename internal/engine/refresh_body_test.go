@@ -180,7 +180,7 @@ func TestRefreshBodyCopiesLiveDescription(t *testing.T) {
 }
 
 // TestRefreshBodyRefusesWhileStepsStraddle is AC2 — DKT-869's quiescence rule
-// (D2) applied to the body. A step holding a packet rendered under the frozen
+// applied to the body. A step holding a packet rendered under the frozen
 // description must not record its artifact under the amended one: that is the
 // one combination that would falsify a step's own provenance.
 func TestRefreshBodyRefusesWhileStepsStraddle(t *testing.T) {

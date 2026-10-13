@@ -11,7 +11,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// declaredPayloadWorkflow is the §4.8 subject: one step that declares a
+// declaredPayloadWorkflow is the subject: one step that declares a
 // `payload`, one that does not, so C1 and C2 are exercised against the same run.
 const declaredPayloadWorkflow = `
 [pipeline]
@@ -70,7 +70,7 @@ func completeWithPayload(
 	})
 }
 
-// assertRefusedCleanly is the assertion every §6.9 refusal carries: a
+// assertRefusedCleanly is the assertion every refusal carries: a
 // VALIDATION_ERROR wrote nothing, so `row_version` has not moved and no artifact
 // exists.
 func assertRefusedCleanly(t *testing.T, conn *sql.DB, instance string, versionBefore int) {
@@ -97,7 +97,7 @@ func assertRefusedCleanly(t *testing.T, conn *sql.DB, instance string, versionBe
 }
 
 // TestPayloadC1SchemalessStepIsUnchanged is C1: a step that declares no
-// `payload` keeps S3/S4 behavior exactly — shape-only validation, and no new
+// `payload` keeps its prior behavior exactly — shape-only validation, and no new
 // refusal exists for it.
 func TestPayloadC1SchemalessStepIsUnchanged(t *testing.T) {
 	// A payload NO schema would accept records fine, because the step declares
@@ -130,7 +130,7 @@ func TestPayloadC1SchemalessStepIsUnchanged(t *testing.T) {
 			t.Fatal("a non-array payload was accepted on a schema-less step")
 		}
 		if !strings.Contains(err.Error(), "JSON array of objects") {
-			t.Errorf("refusal = %v, want the S3 shape message", err)
+			t.Errorf("refusal = %v, want the shape message", err)
 		}
 		assertRefusedCleanly(t, conn, "note@0", before)
 	})
@@ -297,7 +297,7 @@ func assertCode(t *testing.T, err error, want ErrorCode) {
 	}
 }
 
-// TestPayloadValidationReadsThePinnedBytes is P4 proven at the verb: the schema
+// TestPayloadValidationReadsThePinnedBytes proves pinning at the verb: the schema
 // a `complete` validates against is the one the RUN pinned, not the one the
 // registry holds now.
 //
@@ -341,7 +341,7 @@ func TestAValidPayloadRecords(t *testing.T) {
 	testsupport.Must(t, err, "listing artifacts: %v", err)
 
 	// The step's own `emits` kind. A completed step also records the snapshotted
-	// `issue.diff` (§6.7.1 D1), which is not what this assertion is about.
+	// `issue.diff`, which is not what this assertion is about.
 	var recorded []string
 	for _, a := range artifacts {
 		if a.Kind != "report" {

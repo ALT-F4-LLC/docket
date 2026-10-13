@@ -9,10 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// At-least-once gates and the resume decision (TDD docs/tdd/gates-trust.md
-// §7.5, threat T12, engine-spec §9 item 10).
-//
-// §2, verbatim:
+// At-least-once gates and the resume decision.
 //
 //	Gates are at-least-once: a `gate-started` event precedes each spawn; on
 //	resume, a started-but-unrecorded gate re-runs only if its trust entry is
@@ -24,12 +21,12 @@ import (
 // to run twice. A gate that committed, deployed, or charged something must not
 // be re-run because the engine could not tell whether it finished.
 
-// gateWasStartedButNotRecorded detects A1's state: a `gate-started` event
-// committed for this step+gate, with no `gate_results` row to match it.
+// gateWasStartedButNotRecorded detects the interrupted state: a `gate-started`
+// event committed for this step+gate, with no `gate_results` row to match it.
 //
 // The two halves are both necessary. A `gate-started` with no result is the
 // crash window. A result with no start cannot happen — the event commits first,
-// which is the entire reason the saga orders them that way (§7.5 A1).
+// which is the entire reason the saga orders them that way.
 func gateWasStartedButNotRecorded(conn *sql.DB, step *db.Step, gate string) (bool, error) {
 	var started bool
 	err := conn.QueryRow(
@@ -51,10 +48,10 @@ func gateWasStartedButNotRecorded(conn *sql.DB, step *db.Step, gate string) (boo
 	return !recorded, nil
 }
 
-// resolveInterruptedGate applies §7.5's A2-A6 decision to a
+// resolveInterruptedGate applies the resume decision to a
 // started-but-unrecorded gate.
 //
-// It consults the LIVE trust store (A2), not a cached decision: the question is
+// It consults the LIVE trust store, not a cached decision: the question is
 // what the operator declares about this command NOW, and a revocation between
 // the crash and the resume must take effect.
 func (e *Engine) resolveInterruptedGate(
@@ -65,7 +62,7 @@ func (e *Engine) resolveInterruptedGate(
 		return err
 	}
 
-	// A3: `re_runnable = true` ⇒ the gate re-runs. A `gate-rerun` event
+	// `re_runnable = true` ⇒ the gate re-runs. A `gate-rerun` event
 	// precedes it, so the trail shows BOTH the interrupted attempt's start and
 	// the re-run — an operator reading the feed sees that the command ran
 	// twice, which is what at-least-once actually means.
@@ -90,13 +87,13 @@ func (e *Engine) resolveInterruptedGate(
 		return e.runGateStage(conn, step, gate, stage, nowMS)
 	}
 
-	// A4/A5: `re_runnable = false` (THE DEFAULT), or unmatched at resume ⇒ the
-	// step PARKS. It does not re-run and it does not silently pass.
+	// `re_runnable = false` (THE DEFAULT), or unmatched at resume ⇒ the step
+	// PARKS. It does not re-run and it does not silently pass.
 	//
-	// A5 is worth its own sentence: an unmatched-at-resume gate parks too,
-	// rather than "re-run because we can't tell". Fail-closed is the only
-	// direction available when the question is whether something already
-	// happened.
+	// The unmatched case is worth its own sentence: an unmatched-at-resume
+	// gate parks too, rather than "re-run because we can't tell". Fail-closed
+	// is the only direction available when the question is whether something
+	// already happened.
 	return e.parkInterruptedGate(conn, step, gate, reason, nowMS)
 }
 
@@ -104,9 +101,10 @@ func (e *Engine) resolveInterruptedGate(
 // the resume decision reads the operator's own declaration.
 //
 // A named gate resolves by name and binding. A FENCE gate has no single entry —
-// it is many commands, each matched independently (§7.3) — so it is treated as
-// not re-runnable: re-running a partially-executed block would re-run the lines
-// that already succeeded, which is precisely the double-execution T12 forbids.
+// it is many commands, each matched independently — so it is treated as not
+// re-runnable: re-running a partially-executed block would re-run the lines
+// that already succeeded, which is precisely the double-execution forbidden
+// here.
 func (e *Engine) reRunnableEntryFor(
 	gate workflow.Gate, step *db.Step,
 ) (*trust.Entry, string, error) {
@@ -146,13 +144,13 @@ func (e *Engine) reRunnableEntryFor(
 	}
 	match := store.LookupAt(identity, gate.Name, nil, root)
 	if !match.Matched {
-		// A5.
+		// Unmatched at resume.
 		return nil, fmt.Sprintf(
 			"gate %q was interrupted after it started, and it is no longer trusted: %s",
 			gate.Name, match.Reason), nil
 	}
 	if !match.Entry.ReRunnable {
-		// A4/A6: the default. The message names the gate, the situation, and
+		// Not re-runnable: the default. The message names the gate, the situation, and
 		// BOTH operator resolutions, because a park with no stated remedy is a
 		// step nobody knows how to unstick.
 		return match.Entry, fmt.Sprintf(
@@ -247,7 +245,7 @@ func (e *Engine) parkInterruptedGate(
 	}
 	// THE ISSUE MIRROR AND RUN ROLLUP STILL RUN (DKT-379). This path routes —
 	// it writes the routing column and a `step-routed` event two statements up
-	// — and §6.8 makes reconciliation part of what routing IS, in the same
+	// — and reconciliation is part of what routing IS, in the same
 	// transaction. Leaving it out meant an issue parked ONLY by an interrupted
 	// gate never read `review`: the mirror fires from reconcileIssueAndRun
 	// alone, and this was the one park with nothing downstream left to call it.

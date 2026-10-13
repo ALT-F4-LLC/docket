@@ -57,7 +57,7 @@ func TestIsGuardCmd(t *testing.T) {
 // Execute() produces one.
 //
 // Before the fix every guard verb exited 2 in a directory with no `.docket`,
-// and 2 is also the DENY code (§6.12). A hook wired as
+// and 2 is also the DENY code. A hook wired as
 // `docket guard stop || exit` therefore denied in every non-docket repo —
 // observed blocking a mid-bootstrap turn-end before init had run.
 //

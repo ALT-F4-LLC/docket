@@ -15,12 +15,12 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Rendering — TDD §6.11 and §6.11.1.
+// Rendering.
 //
 // `step render` formats the context bundle into a work packet through a
 // template: the shipped generic default, or `--template F`.
 //
-// PACKET LAYOUT IS CORE MECHANICS; PACKET CONTENT IS INSTANCE DATA (§2). The
+// PACKET LAYOUT IS CORE MECHANICS; PACKET CONTENT IS INSTANCE DATA. The
 // default template below emits framing (run/issue/step ids, scope), the input
 // artifacts each delimited and labeled in DECLARED order, the pinned-file list
 // with hashes, and the output instruction — and it names NO instance concept.
@@ -28,7 +28,7 @@ import (
 //
 // WHAT A PACKET DRAWS FROM — the exhaustive list, for anyone deciding where
 // to put words they need a worker to read (DKT-725). A packet is the context
-// bundle (§6.6's five sources: the pinned step definition, the issue's
+// bundle (five sources: the pinned step definition, the issue's
 // ACTIVATION-FROZEN body_snapshot and issue_snapshot, recorded input
 // artifacts, and the pin list — plus DKT-1079's sixth, the run's recorded
 // notes, rendered as `== RUN NOTE N` beside the request) plus the step's
@@ -40,7 +40,7 @@ import (
 //   - issue COMMENTS never render. They are an audit surface, not a context
 //     source, and no template can reach them.
 //   - a mid-run `description` edit never renders. The packet reads
-//     `body_snapshot`, frozen at activation — §9 item 5's edit immunity.
+//     `body_snapshot`, frozen at activation — the body's edit immunity.
 //   - a mid-run `--scope` edit never renders either, and for the same reason:
 //     the brief's `scope:` line reads `issue_snapshot`, and so does the scope
 //     the step's `issue.diff` is recorded over (DKT-741). There is no verb
@@ -69,10 +69,10 @@ var defaultPacket string
 // describes inputs.
 type packetData struct {
 	*Context
-	// Emits is the artifact kind the step must produce (§4.3.1).
+	// Emits is the artifact kind the step must produce.
 	Emits string
 	// PayloadSchema is `payload`'s `schema@ver`, or "" — carried so the packet
-	// can state the contract even though the SCHEMA REGISTER is S5's.
+	// can state the contract to the worker.
 	PayloadSchema string
 	// PayloadRequired is the keys that schema declares required of a payload
 	// element, read from the bytes the run PINNED.
@@ -83,7 +83,7 @@ type packetData struct {
 	// a worker acts on, so they travel with the ref.
 	PayloadRequired []string
 	// Files are the step's declared packet files, resolved in declared order
-	// with each entry followed by its own declared includes (§1.4).
+	// with each entry followed by its own declared includes.
 	//
 	// Core attaches no meaning to any entry: the path, the hash, and the bytes
 	// are handed to the template, and the TEMPLATE decides how they appear.
@@ -106,7 +106,7 @@ type RenderResult struct {
 	Template string `json:"template"`
 	// TemplatePinned reports whether the template's bytes are pinned by the run.
 	// It rides on the result so `--meta` can report an UNPINNED template and the
-	// reproducibility gap is VISIBLE rather than assumed (§6.11.1) — a packet
+	// reproducibility gap is VISIBLE rather than assumed — a packet
 	// rendered through an unpinned file is reproducible only to the extent the
 	// operator chose.
 	TemplatePinned bool `json:"template_pinned"`
@@ -215,10 +215,9 @@ func RenderStepAs(
 		Context: bundle,
 		Files:   files,
 		Emits:   workflow.ArtifactKind(spec),
-		// `payload` names a `schema@ver` (§11.1). Carrying it is not the same as
-		// VALIDATING against it: the schema register lands at S5, and the packet
-		// stating the contract is what lets a worker satisfy it before the
-		// engine can check it.
+		// `payload` names a `schema@ver`. Carrying it is not the same as
+		// VALIDATING against it: the packet stating the contract is what lets
+		// a worker satisfy it before the engine can check it.
 		PayloadSchema:   spec.Payload,
 		PayloadRequired: required,
 		Gates:           packetGates(spec),
@@ -263,12 +262,12 @@ func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) 
 }
 
 // templateSource resolves the template's bytes, VERIFYING A PINNED PATH against
-// its recorded hash (§6.11.1).
+// its recorded hash.
 //
 // This closes the one hole in the reproducibility story. `--template F` reads a
 // file AT RENDER TIME, but activation may have pinned that path. Without a
 // check, a post-activation edit silently changes every packet the run renders
-// from then on, while `step context` stays byte-identical — so the §9-item-5
+// from then on, while `step context` stays byte-identical — so the
 // determinism goldens keep passing and the thing actually handed to a worker
 // has changed.
 //
@@ -280,7 +279,7 @@ func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) 
 //
 // The refusal is CONFLICT and not VALIDATION_ERROR because the REQUEST is
 // well-formed: the state disagrees with the pin. That is the same reading as a
-// re-register with differing bytes (§4.5) and an `--if-version` mismatch, so
+// re-register with differing bytes and an `--if-version` mismatch, so
 // the taxonomy stays consistent and no new code is introduced.
 func templateSource(
 	conn *sql.DB, runID int, path string,

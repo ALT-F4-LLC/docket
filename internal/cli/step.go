@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The `docket step` verb family — TDD §6.10.
+// The `docket step` verb family.
 
 var stepCmd = &cobra.Command{
 	Use:   "step",
@@ -46,7 +46,7 @@ Read verbs here compute effective status and WRITE NOTHING. Only ` + "`next`" + 
 // stepErr maps an engine or lease failure to its CLI error code.
 //
 // It composes the two existing mappings rather than restating either:
-// leaseError owns the S2 refusal matrix (which §6.9 reuses verbatim at step
+// leaseError owns the issue lease refusal matrix (reused verbatim at step
 // level), and runErr owns the engine taxonomy. A third mapping here is exactly
 // how the step matrix would drift from the issue one.
 func stepErr(err error, label string) error {
@@ -206,7 +206,7 @@ claimed.`,
 		render, _ := cmd.Flags().GetBool("render")
 		if render {
 			// `claim --render` returns the packet instead of the bundle, in the
-			// same call (§6.11) — and the render is part of the claim SAGA
+			// same call — and the render is part of the claim SAGA
 			// (DKT-804): a packet that cannot render refuses BEFORE the lease
 			// is taken, so a validation failure leaves the step claimable
 			// rather than stranding it claimed with no token issued.
@@ -221,8 +221,8 @@ claimed.`,
 		}
 
 		// The gate-bearing claim: a step's `pre = true` gates run HERE, at
-		// claim, with their results in the returned bundle (§11.1, §7.6). A
-		// step with no pre-gates takes the identical single-transaction path.
+		// claim, with their results in the returned bundle. A step with no
+		// pre-gates takes the identical single-transaction path.
 		result, err := engine.NewEngine().ClaimStepWithGates(conn, id, claimOpts)
 		if err != nil {
 			return emitIncompleteClaim(w, err, label)
@@ -301,12 +301,12 @@ func emitIncompleteClaim(w *output.Writer, err error, label string) error {
 	return emitClaimOutcome(w, incomplete.Result, nil, incomplete)
 }
 
-// claimStepResponse is §11.4's `claim response`, VERBATIM:
+// claimStepResponse is the `claim response` wire shape, VERBATIM:
 // `{ step, token, lease_expires_ms, context }`.
 //
 // This is the shape a deviation was recorded against at issue level, and it
-// is why that deviation CLOSES here (§6.4.1): the subject key is `step` and the
-// context bundle is present, exactly as the spec was written.
+// is why that deviation CLOSES here: the subject key is `step` and the
+// context bundle is present.
 type claimStepResponse struct {
 	Step           string          `json:"step"`
 	Token          string          `json:"token"`
@@ -329,8 +329,7 @@ type claimStepResponse struct {
 	rowVersion int
 }
 
-// claimStepResponseV2 adds the CAS version and the attempt, per
-// reliability-delta §6.3.
+// claimStepResponseV2 adds the CAS version and the attempt.
 type claimStepResponseV2 struct {
 	Step           string          `json:"step"`
 	Token          string          `json:"token"`
@@ -722,7 +721,7 @@ did: priority none, kind task, no labels.`,
 		}
 
 		// --worktree names the checkout the WORK happened in, for a conductor
-		// recording on behalf of an executor elsewhere (G7/G8). Normalized to
+		// recording on behalf of an executor elsewhere. Normalized to
 		// absolute so a resumed saga in another cwd still resolves it.
 		workDir, _ := cmd.Flags().GetString("worktree")
 		if workDir != "" {
@@ -841,7 +840,7 @@ type recordedStepPayload struct {
 // failedGateClause renders one failed gate: `self-hygiene failed (exit 2)`.
 //
 // A gate that never ran says so instead of borrowing an exit code it does not
-// have — `unmatched (no exit)`, never `exit 0`, which reads as a pass (T11).
+// have — `unmatched (no exit)`, never `exit 0`, which reads as a pass.
 func failedGateClause(g engine.FailedGate) string {
 	verdict := g.Verdict
 	if verdict == db.GateVerdictFail {
@@ -1122,7 +1121,7 @@ tally and routes to the identical place; no second ballot opens and no cast
 changes. Reach for ` + "`fix-round`" + `, which authorizes another round of work on
 the reported problem and mints a fresh vote at a new ordinal — a NEW proposal —
 or for ` + "`override-pass`" + `, ` + "`skip`" + `, or ` + "`abandon-issue`" + `. ` + "`retry`" + `
-stays available on a vote whose proposal is still open, which is the case R11's
+stays available on a vote whose proposal is still open, which is the case its
 exception exists for: a quorum that never arrives.
 
 THE -m NOTE IS THE STEERING CHANNEL. A note on ` + "`retry`" + ` or ` + "`rerun-gates`" + `
@@ -2046,7 +2045,7 @@ spend plus pending expected costs against the cap. Step ids are one
 store-wide sequence shared across projects, so id arithmetic cannot
 enumerate a run; this verb is the supported way (DKT-54).
 
-Status is EFFECTIVE (§6.2), computed at read exactly as ` + "`step show`" + `
+Status is EFFECTIVE, computed at read exactly as ` + "`step show`" + `
 computes it: a lapsed lease reads as pending, a pending step whose
 predicate holds reads as ready — and a lapsed-but-unreaped claim is labeled
 lease_expired: true, since run repin still counts it as mid-flight until

@@ -6,20 +6,19 @@ import (
 	"fmt"
 )
 
-// ActionResultRow is one recorded action execution — the `action result` shape
-// of docs/tdd/payloads-thresholds.md §6.3, recorded as an amendment.
+// ActionResultRow is one recorded action execution — the `action result` shape.
 //
 // IT IS `GateResultRow` FOR ACTIONS, deliberately and field for field. The
 // alternative — recording nothing and leaving the routing reason as the only
-// trace — makes an `unmatched` action invisible in exactly the way gates-trust
-// T11's audit argument says it must not be, and makes a failed computation
-// indistinguishable from a failed threshold in a run report. Same shape, same
-// ordinal semantics, same reason discipline, so `run report` (S6) reads one
-// pattern twice rather than two patterns once.
+// trace — makes an `unmatched` action invisible to an audit of the run, which
+// it must not be, and makes a failed computation indistinguishable from a
+// failed threshold in a run report. Same shape, same ordinal semantics, same
+// reason discipline, so `run report` reads one pattern twice rather than two
+// patterns once.
 //
 // Argv and Exit are POINTERS for the reason they are on a gate result: a
-// builtin spawns nothing (§6.1 B2) and an unmatched action never ran (§6.2 A3),
-// so NULL is the honest encoding of "no process existed". A zero exit on
+// builtin spawns nothing and an unmatched action never ran, so NULL is the
+// honest encoding of "no process existed". A zero exit on
 // something that did not execute reads as success.
 type ActionResultRow struct {
 	ID     int
@@ -36,7 +35,7 @@ type ActionResultRow struct {
 	Truncated  bool
 	Verdict    string
 	// Builtin marks a result core computed itself. It is the field that lets an
-	// operator tell `aggregate` — which consults no trust store, by B1 — from a
+	// operator tell `aggregate` — which consults no trust store — from a
 	// user-trusted command that happened to succeed.
 	Builtin bool
 	// Reason explains an `unmatched` verdict, a refusal, or a failure, for the
@@ -47,14 +46,14 @@ type ActionResultRow struct {
 
 // Action verdicts as stored, mirroring the gate vocabulary exactly. `unmatched`
 // is a FIRST-CLASS outcome: the action name matched no trust entry, so nothing
-// ran — which is neither a pass nor an error (§6.2 A3).
+// ran — which is neither a pass nor an error.
 const (
 	ActionVerdictPass      = "pass"
 	ActionVerdictFail      = "fail"
 	ActionVerdictUnmatched = "unmatched"
 )
 
-// Trust-cache kinds (§6.3). `trust_cache` gains a `kind` column rather than a
+// Trust-cache kinds. `trust_cache` gains a `kind` column rather than a
 // second table: the table answers "what did this run consider trusted, and
 // when", and splitting that answer by the SHAPE OF THE CALLER would make the
 // one question two queries.
@@ -66,7 +65,7 @@ const (
 // InsertActionResultTx records one action result.
 //
 // It takes a transaction because the result commits with the routing stage's
-// own writes — the subprocess ran OUTSIDE any transaction (engine-spec §6) and
+// own writes — the subprocess ran OUTSIDE any transaction and
 // only its recorded fact lands in one.
 func InsertActionResultTx(tx *sql.Tx, r ActionResultRow) error {
 	var argv any
@@ -111,10 +110,10 @@ func ActionResultsForStep(conn *sql.DB, stepID int) ([]ActionResultRow, error) {
 // NextActionOrdinalTx returns the ordinal a new result for this step+action
 // takes.
 //
-// Ordinals are per (step, action) and ascend, carrying §4's "flaky-declared
-// re-runs recorded individually" (A8) and, with it, the resume case: a routing
-// stage re-entered after a crash must not collide with the interrupted
-// attempt's row, which the UNIQUE(step_id, action, ordinal) index would refuse.
+// Ordinals are per (step, action) and ascend, so flaky-declared re-runs are
+// recorded individually. The same holds for the resume case: a routing stage
+// re-entered after a crash must not collide with the interrupted attempt's
+// row, which the UNIQUE(step_id, action, ordinal) index would refuse.
 func NextActionOrdinalTx(tx *sql.Tx, stepID int, action string) (int, error) {
 	var next sql.NullInt64
 	err := tx.QueryRow(

@@ -9,18 +9,17 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Threshold evaluation — engine-spine §6.14 as payloads-thresholds §5 upgrades
-// it, clause by clause against that section's own table and no other.
+// Threshold evaluation, clause by clause.
 //
-// §11.2 gives the grammar and one hard restriction: ordered comparisons are
+// The threshold grammar carries one hard restriction: ordered comparisons are
 // defined ONLY for fields whose registered schema declares `ordered_enum`.
-// Schemas register HERE, at S5, so the four clauses read:
+// With schemas registered, the four clauses read:
 //
 //	T1  equality (== / !=) evaluates. UNCHANGED for schema-less fields — as
 //	    strings after JSON scalar normalization. For a DECLARED field the
 //	    comparison is schema-typed: a string enum by value identity, a
 //	    number/integer numerically, a boolean as a boolean
-//	T2  ordered operators EVALUATE, over Position (§4.3 I3), for fields whose
+//	T2  ordered operators EVALUATE, over Position (I3), for fields whose
 //	    pinned schema declares `ordered_enum`. `a >= b` is
 //	    `Position(field, a) >= Position(field, b)`, and there is no other
 //	    definition
@@ -42,11 +41,11 @@ import (
 //
 // THE ORDER IS THE USER'S, AND IT ARRIVES AS A PARAMETER. The resolver is
 // threaded through rather than read from a package-level variable — the same
-// purity discipline §4.9.2 applies to `Validate` — which is what lets the table
+// purity discipline `Validate` follows — which is what lets the table
 // tests run without a database, and what makes "no schema" a value a caller
 // passes rather than a state the package remembers.
 
-// RoutingPass is §11.2's default: no threshold matches ⇒ pass.
+// RoutingPass is the grammar's default: no threshold matches ⇒ pass.
 const RoutingPass = "pass"
 
 // The reserved `diff.*` family (DKT-2063).
@@ -79,11 +78,11 @@ const (
 // values the reserved `diff.*` family evaluates over.
 //
 // A nil *DiffFacts is "this step holds no tree", and every `diff.*` predicate
-// is then an ordinary unknown field — the S5 behavior, untouched. An ABSENT
-// round record is a different fact and is a non-nil zero value: no change was
-// measured, so Lines and Files are 0 and Empty is true. The two must not
-// collapse, because `any(diff.empty == false)` has to be decided (false) for a
-// step that recorded nothing, not left to the no-such-field path.
+// is then an ordinary unknown field — the schema-less behavior, untouched. An
+// ABSENT round record is a different fact and is a non-nil zero value: no
+// change was measured, so Lines and Files are 0 and Empty is true. The two must
+// not collapse, because `any(diff.empty == false)` has to be decided (false)
+// for a step that recorded nothing, not left to the no-such-field path.
 type DiffFacts struct {
 	// Lines is added plus removed content lines.
 	Lines int
@@ -94,7 +93,7 @@ type DiffFacts struct {
 }
 
 // OrderResolver reports what the step's PINNED payload schema declares about a
-// field (§5, §4.3).
+// field.
 //
 // It is deliberately narrow. Position is the only ordering API — there is no
 // Less(a, b) a caller could invoke on a field with no declared order — so the
@@ -105,16 +104,16 @@ type DiffFacts struct {
 // or a boolean.
 //
 // A nil OrderResolver is the step-declares-no-`payload` case, and it is the
-// exact S3 behavior — which is what makes the survival suite a re-run of the S3
-// table with nothing passed in.
+// exact schema-less behavior — which is what makes the survival suite a re-run
+// of the schema-less table with nothing passed in.
 type OrderResolver interface {
 	// Position reports a value's index in the field's declared order, and
-	// whether the field is ordered AND the value is in that order (§4.3 I4).
+	// whether the field is ordered AND the value is in that order (I4).
 	Position(field, value string) (int, bool)
 	// Ordered reports whether the field declares an order at all.
 	Ordered(field string) bool
 	// FieldType is the field's declared JSON `type`, or "" when the field
-	// declares none or is not declared at all. Both fall back to S3's string
+	// declares none or is not declared at all. Both fall back to the string
 	// comparison, which is correct: a schema that constrains nothing has said
 	// the value may be anything.
 	FieldType(field string) string
@@ -139,13 +138,13 @@ type ThresholdResult struct {
 	Reason string
 	// Parked reports a T3 park, distinguishing "routed to waiting-human because
 	// a predicate SAID SO" from "parked because a comparison was undecidable".
-	// Both end at `waiting-human`; only one is a gap S5 closes.
+	// Both end at `waiting-human`; only one is a gap schemas close.
 	Parked bool
 }
 
 // EvaluateThreshold applies a step's `threshold` table to a payload set.
 //
-// Routings are evaluated TOP TO BOTTOM, FIRST MATCH ROUTES (§11.2). "Top to
+// Routings are evaluated TOP TO BOTTOM, FIRST MATCH ROUTES. "Top to
 // bottom" over a Go map needs a defined order, and the order is the DECLARED
 // one — recovered from the definition's routing sequence — because a map's
 // range order varies per run and a first-match rule over a varying order is a
@@ -205,29 +204,29 @@ func EvaluateThresholdOverDiff(
 		}
 	}
 
-	// §11.2: no match ⇒ pass.
+	// No match ⇒ pass.
 	return ThresholdResult{Routing: RoutingPass}, nil
 }
 
 // T3's three sub-cases, as the reason an operator reads.
 //
-// The S3 wording is kept for (i) MINUS its "which stage 5 supplies" tail, and
-// the tail is removed in the commit that supplies it: a message promising a
-// future stage after that stage has shipped is worse than no message. What
-// replaces it is the remedy that is now actually available.
+// The original wording is kept for (i) MINUS a tail that promised schema
+// support in a later change: a message promising a future feature after it has
+// shipped is worse than no message. What replaces it is the remedy that is now
+// actually available.
 const (
 	whyNoPayloadSchema = "ordered comparisons need a registered ordered_enum " +
-		"schema (engine-spec §11.2), and this step declares no `payload`"
+		"schema, and this step declares no `payload`"
 	whyFieldNotOrdered = "ordered comparisons need a registered ordered_enum " +
-		"schema (engine-spec §11.2), and the step's declared schema carries no " +
+		"schema, and the step's declared schema carries no " +
 		"`ordered_enum` on this field"
 )
 
-// whyValueUnordered is T3 case (iii) and §4.3 I4: a value present in the
+// whyValueUnordered is T3 case (iii) and I4: a value present in the
 // payload but ABSENT from the declared order.
 //
 // It is not sorted to an end and not treated as smallest. Payload validation at
-// `complete` (§4.8) makes this unreachable for a validated payload; it is
+// `complete` makes this unreachable for a validated payload; it is
 // reachable for a payload recorded before the schema was declared, which is
 // precisely when guessing would be worst.
 func whyValueUnordered(field, value string) string {
@@ -268,7 +267,7 @@ func evaluate(
 	// Over zero payloads the aggregation short-circuits without ever consulting
 	// the predicate, so an ordered comparison over an empty set is decided
 	// (false for `any`) rather than parked. This is what lets the fixture's
-	// `reconcile` step — whose stub payload is empty at S3 (§6.13) — flow
+	// `reconcile` step — whose stub payload is empty — flow
 	// through `any(severity >= high)` without the engine guessing anything
 	// about severities.
 	if len(payloads) == 0 {
@@ -419,7 +418,7 @@ func evaluateDiff(p workflow.Predicate, facts DiffFacts) (bool, string, error) {
 	return compareCounts(p.Op, got, want), "", nil
 }
 
-// compareCounts applies any §11.2 operator to two INTEGERS.
+// compareCounts applies any threshold operator to two INTEGERS.
 //
 // It is separate from comparePositions because the two compare different
 // things: positions are ranks in a user's declared order and carry equality
@@ -463,7 +462,7 @@ func comparePositions(op string, got, want int) bool {
 	return false
 }
 
-// aggregate applies §11.2's aggregation to a match count.
+// aggregate applies the threshold aggregation to a match count.
 //
 // It is one function for the ordered and the equality paths so the two cannot
 // disagree about what `all` means over a set with absent values.
@@ -484,11 +483,11 @@ func aggregate(p workflow.Predicate, count, total int) bool {
 // so this path never parks and never consults an order.
 //
 // UNCHANGED FOR SCHEMA-LESS FIELDS: string comparison after JSON scalar
-// normalization, exactly as S3 did it. For a field whose pinned schema declares
-// a `type`, the comparison is schema-typed — which changes the verdict in
-// exactly the cases where the two readings genuinely differ, and nowhere else:
-// `count == 1.0` against `{"count": 1}` is a numeric equality an author means
-// and string normalization misses.
+// normalization, exactly as before schemas existed. For a field whose pinned
+// schema declares a `type`, the comparison is schema-typed — which changes the
+// verdict in exactly the cases where the two readings genuinely differ, and
+// nowhere else: `count == 1.0` against `{"count": 1}` is a numeric equality an
+// author means and string normalization misses.
 //
 // The `null` rule is the one that surprises: null is NEVER equal to anything,
 // INCLUDING null. That is deliberate and is stated in T1 — a missing field and
@@ -526,7 +525,7 @@ func compareEquality(
 // A type the schema declares but whose literal does not parse falls back to the
 // string comparison rather than erroring: V21b refuses such a literal at
 // register time, so reaching here means a definition arrived some other way,
-// and S3's answer is the conservative one.
+// and the string comparison is the conservative answer.
 func sameValue(p workflow.Predicate, value any, schema OrderResolver) (bool, error) {
 	normalized, err := normalizeScalar(value)
 	if err != nil {
@@ -586,7 +585,7 @@ func normalizeScalar(value any) (string, error) {
 }
 
 // predicateBody renders a predicate's inner `field op literal` for the T3
-// reason string, matching the §6.14 example's `(severity >= high)` spelling.
+// reason string, in the `(severity >= high)` spelling.
 func predicateBody(p workflow.Predicate) string {
 	return fmt.Sprintf("%s %s %s", p.Field, p.Op, p.Literal)
 }
@@ -594,7 +593,7 @@ func predicateBody(p workflow.Predicate) string {
 // ThresholdOrder returns a step's threshold routings in DECLARED order.
 //
 // TOML tables decode into Go maps, which lose declaration order, so the order
-// is reconstructed deterministically: the §11.2 non-step routings first in
+// is reconstructed deterministically: the non-step routings first in
 // their specified sequence, then step-name routings sorted. That is not the
 // author's literal file order — TOML cannot give it back — but it IS a total,
 // reproducible order, which is what first-match-routes actually requires. Two
@@ -605,7 +604,7 @@ func ThresholdOrder(threshold map[string]string) []string {
 	}
 
 	var out []string
-	// The closed vocabulary first, in §11.2's own sequence.
+	// The closed vocabulary first, in its specified sequence.
 	for _, routing := range []string{
 		workflow.OnFailFixLoop, workflow.OnFailWaitingHuman, RoutingPass,
 	} {

@@ -16,7 +16,7 @@ import (
 // rather than the fact.
 //
 // Exit is a pointer because NULL is meaningful: an unmatched gate never ran,
-// so it has no exit code, and 0 would read as success (T11).
+// so it has no exit code, and 0 would read as success.
 type stepGateResult struct {
 	Gate       string   `json:"gate"`
 	Ordinal    int      `json:"ordinal"`

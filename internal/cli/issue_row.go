@@ -116,8 +116,8 @@ func summarizeIssues(issues []*model.Issue) []issueRow {
 
 // summarizeIssuesV2 is summarizeIssues with each row's version and lease. The
 // lease's `live` flag is computed at nowMS, per read, the way
-// model.VersionedIssue computes it (engine-spec.md §2: effective status at
-// read time, no write).
+// model.VersionedIssue computes it (effective status at read time, no
+// write).
 func summarizeIssuesV2(issues []*model.Issue, nowMS int64) []issueRowV2 {
 	rows := make([]issueRowV2, 0, len(issues))
 	for _, i := range issues {

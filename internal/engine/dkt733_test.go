@@ -26,7 +26,7 @@ func TestSilentVoteSeatsNameTheirSeatingPath(t *testing.T) {
 	configureHoldTally(t, conn, "dkt733-panel", "seat-a,seat-b")
 	driveToReconcile(t, conn, e, clusteredPayload)
 	// The first invocation that observes the held vote step ready opens its
-	// proposal (§8.1 phase 2).
+	// proposal.
 	nextRun(t, conn, e)
 	held := heldInstances(t, conn)
 	if len(held) == 0 {

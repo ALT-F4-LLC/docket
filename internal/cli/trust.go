@@ -17,13 +17,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket trust` — the user-level allowlist of commands docket may execute
-// (docs/design/engine-spec.md §4, docs/tdd/gates-trust.md §3.5).
+// `docket trust` — the user-level allowlist of commands docket may execute.
 //
 // THE STORE IS NEVER REPO-SHIPPED AND NEVER REPO-POINTED. There is no
 // --trust-file flag, no DOCKET_TRUST_FILE env var, no config key, and no
 // repo-local path: the store is $XDG_CONFIG_HOME/docket/trust.toml or
-// $HOME/.config/docket/trust.toml and nothing else (§3.1). Every additional way
+// $HOME/.config/docket/trust.toml and nothing else. Every additional way
 // to point docket at a trust file is another way for repo content — a
 // checked-in .envrc, a direnv hook, a Makefile — to point it at a file the repo
 // controls. TestNoTrustPathSurface walks the Cobra tree and the config-key
@@ -174,7 +173,7 @@ the conservative direction.`,
 //
 // Warnings ride in the response under --json rather than only on stderr,
 // because a machine consumer must see the over-authorization warning too — it
-// is never suppressed by --yes or by --json (§3.3).
+// is never suppressed by --yes or by --json.
 type trustAddResult struct {
 	Name       string   `json:"name"`
 	Argv       []string `json:"argv"`
@@ -338,7 +337,7 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// The grant is EVENT-LOGGED, and the record is written BEFORE the store
-	// (§3.6, see trustEventRecorder): a store that gained an entry can never be
+	// (see trustEventRecorder): a store that gained an entry can never be
 	// a store whose grant went unrecorded.
 	recorder := &trustEventRecorder{cmd: cmd, kind: engine.EventTrustAdded}
 
@@ -358,13 +357,13 @@ func runTrustAdd(cmd *cobra.Command, args []string) error {
 	// both are things the operator must see, and neither is suppressible.
 	warnings := append(res.Warnings, recorder.notes()...)
 
-	// THE DISCLOSURE, ON EVERY ADD. --yes suppresses the PROMPT, never this
-	// (§3.5): the harness's own command-permission prompt is D14's human
-	// backstop, and what makes that backstop work is the argv being visible.
+	// THE DISCLOSURE, ON EVERY ADD. --yes suppresses the PROMPT, never this:
+	// the harness's own command-permission prompt is the human backstop, and
+	// what makes that backstop work is the argv being visible.
 	// Anything docket prints is defense in depth on top of it; anything docket
 	// HIDES would erode it.
 	//
-	// The argv renders through the escaping renderer (§5.7 E3): a fence line an
+	// The argv renders through the escaping renderer: a fence line an
 	// issue author wrote can carry terminal escapes that repaint the very line
 	// the operator is approving, so what is displayed must be what is stored.
 	if !w.JSONMode {
@@ -459,7 +458,7 @@ func runTrustList(cmd *cobra.Command, args []string) error {
 			if e.Global {
 				binding = "(global)"
 			}
-			// The argv renders escaped (§5.7 E3) — it is content an operator
+			// The argv renders escaped — it is content an operator
 			// may have pasted from an issue body.
 			flags := trustFlagSummary(e)
 			fmt.Printf("%-20s %s  %s%s\n", e.Name, exec.RenderArgv(e.Argv), binding, flags)
@@ -584,14 +583,14 @@ func trustFlagSummary(e trustEntryView) string {
 // this guards (DKT-595) is worth the seam.
 var getwd = os.Getwd
 
-// errTrustUnrecorded marks the failure to write §3.6's event, so the taxonomy
-// can tell it from the store failures around it: nothing is wrong with the
-// operator's request, and telling them it was invalid would send them to fix an
-// argv that was fine.
+// errTrustUnrecorded marks the failure to write the trust event, so the
+// taxonomy can tell it from the store failures around it: nothing is wrong with
+// the operator's request, and telling them it was invalid would send them to
+// fix an argv that was fine.
 var errTrustUnrecorded = errors.New("the trust change was not recorded")
 
 // trustEventRecorder writes the trust-added / trust-removed event, as the hook
-// trust.Add and trust.Remove run under their lock (§3.6): BEFORE the store is
+// trust.Add and trust.Remove run under their lock: BEFORE the store is
 // written for an add, and AFTER it is published for a removal. Both orders
 // serve one invariant — the surviving partial failure must never let the trail
 // claim less authority than the store grants — which points opposite ways for
@@ -616,9 +615,9 @@ var errTrustUnrecorded = errors.New("the trust change was not recorded")
 // this same hook, and RecordTrustEvent itself refuses an empty actor or cwd
 // from any writer.
 //
-// OUTSIDE A REPO THE VERB STILL WORKS. The store is user-level (§3.5): requiring
+// OUTSIDE A REPO THE VERB STILL WORKS. The store is user-level: requiring
 // a database to manage it would mean someone who installed docket could not
-// approve a command until they created a tracker. What §3.6 buys there is
+// approve a command until they created a tracker. What the event buys there is
 // nothing, so the recorder SAYS SO rather than leaving the operator to assume a
 // trail exists — the same reasoning that makes the argv disclosure
 // unsuppressible.

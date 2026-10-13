@@ -95,7 +95,7 @@ func runWorkflowInit(cmd *cobra.Command, args []string, w *output.Writer) error 
 		"template": name,
 		"path":     path,
 	}
-	// The message names ACTIVATION, not a register verb. §9 item 11's zero-touch
+	// The message names ACTIVATION, not a register verb. The zero-touch
 	// criterion is that `workflow register` is never invoked on the path from a
 	// template to a completed run, and a success message telling an operator to
 	// run it would be the one place the product itself asked for the manual step

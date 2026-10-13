@@ -61,7 +61,7 @@ func TestOptionalTokenIsEmptyWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestNoTokenFlag is the §4 transport guard: tokens pass via env or stdin,
+// TestNoTokenFlag is the token transport guard: tokens pass via env or stdin,
 // never argv.
 //
 // It walks the live command tree rather than grepping source, so it catches a
@@ -90,14 +90,14 @@ func TestNoTokenFlag(t *testing.T) {
 
 	if len(offenders) > 0 {
 		t.Errorf("token-bearing flags found: %v; tokens must pass via %s or stdin "+
-			"only (engine-spec.md §4) — argv is world-readable via ps",
+			"only — argv is world-readable via ps",
 			offenders, TokenEnvVar)
 	}
 }
 
-// TestClaimVerbsExist pins the stage's verb surface, and equally pins what it
-// does NOT ship: complete/fail belong to steps at stage 3, where their saga
-// semantics are specified.
+// TestClaimVerbsExist pins the issue claim verb surface, and equally pins what it
+// does NOT ship: complete/fail belong to steps, where their saga semantics
+// live.
 func TestClaimVerbsExist(t *testing.T) {
 	present := map[string]bool{}
 	for _, sub := range issueCmd.Commands() {
@@ -111,7 +111,7 @@ func TestClaimVerbsExist(t *testing.T) {
 	}
 	for _, verb := range []string{"complete", "fail"} {
 		if present[verb] {
-			t.Errorf("issue %s exists; the saga verbs belong to steps at stage 3", verb)
+			t.Errorf("issue %s exists; the saga verbs belong to steps", verb)
 		}
 	}
 }

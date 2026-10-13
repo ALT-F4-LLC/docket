@@ -165,10 +165,10 @@ type activateResult struct {
 	// activation, or drift while `registration.auto` is false. `omitempty`, so
 	// the ordinary run whose sources all verify carries no key at all.
 	SourceWarnings []engine.SourceWarning `json:"source_warnings,omitempty"`
-	// Fences is §7.7 S2's array: the same data the human report renders,
-	// carrying the RAW stored command bytes — encoding/json escapes controls
-	// by contract and the consumer is a program, so quoting on top would
-	// double-escape the value a machine reads (§5.7 E4).
+	// Fences is the fenced-command array: the same data the human report
+	// renders, carrying the RAW stored command bytes — encoding/json escapes
+	// controls by contract and the consumer is a program, so quoting on top
+	// would double-escape the value a machine reads.
 	Fences []engine.FenceReport `json:"fences,omitempty"`
 	// GatePreflight is DKT-255's array: every DECLARED gate and whether a trust
 	// entry resolves it here. `omitempty`, so a run whose workflows declare no
@@ -180,15 +180,15 @@ type activateResult struct {
 	// absent key would make "one operator decides" indistinguishable from a
 	// docket too old to report it, which is the exact ambiguity this closes.
 	HoldPolicy engine.HoldPolicy `json:"hold_policy"`
-	// Registered is F21's array, ALONGSIDE `fences`: what auto-registration
-	// acted on, as {kind, name, version, path, sha256, outcome}.
+	// Registered sits ALONGSIDE `fences`: what auto-registration acted on, as
+	// {kind, name, version, path, sha256, outcome}.
 	//
-	// F23: it is `omitempty`, so an activation that registered nothing carries
-	// no key rather than an empty array — which is F17's dormancy visible in the
-	// output, and the same "a field that is not a fact does not appear" rule the
-	// report's optional sections follow.
+	// It is `omitempty`, so an activation that registered nothing carries no
+	// key rather than an empty array — which is auto-registration's dormancy
+	// visible in the output, and the same "a field that is not a fact does not
+	// appear" rule the report's optional sections follow.
 	Registered []engine.Registration `json:"registered,omitempty"`
-	// PinsFromConfig counts what the scan pinned rather than registered (F4).
+	// PinsFromConfig counts what the scan pinned rather than registered.
 	PinsFromConfig int `json:"pins_from_config,omitempty"`
 	// NewPolicyPin is the policy.toml a re-activation pinned because the run
 	// held none, which waiting rows adopt from here on. `omitempty`, so a
@@ -252,7 +252,8 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		Reason:   reason,
 	}
 	// The activating checkout's head rides on the run-activated event
-	// (DKT-3263), read the same best-effort way `run start` records G8.
+	// (DKT-3263), read the same best-effort way `run start` records its
+	// execution context.
 	if cfg := getCfg(cmd); cfg != nil && cfg.ExecRoot != "" {
 		opts.HeadBranch, opts.HeadCommit = config.GitHead(cfg.ExecRoot)
 	}
@@ -299,7 +300,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// On the warning channel because the refusing case never gets here —
 	// activation returns a CONFLICT for drift under a binding it just made —
 	// so what reaches this loop is provenance that no longer resolves, or an
-	// edit RA2 deliberately keeps out of a run already under way.
+	// edit deliberately kept out of a run already under way.
 	for _, warning := range result.SourceWarnings {
 		w.Warn("workflow %s: %s", warning.Workflow, warning.Reason)
 	}
@@ -315,12 +316,12 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			"under; waiting rows %s it", pinned, pin.Ref, pin.SHA256, adopt)
 	}
 
-	// §7.7 S1: every harvested fenced command, verbatim, with its trust status
+	// Every harvested fenced command, verbatim, with its trust status
 	// — so an operator sees `unmatched` commands BEFORE the run rather than
-	// after. It renders through the escaping renderer (T18): the bytes are
+	// after. It renders through the escaping renderer: the bytes are
 	// content an issue author wrote, and a command carrying terminal escapes
 	// must show up as escapes rather than repaint the line being approved.
-	// F20: the `Registered` block goes ABOVE the fences, because that is the
+	// The `Registered` block goes ABOVE the fences, because that is the
 	// order an operator reads them in — what this activation adopted, then what
 	// it will invoke. Both are on stderr in human mode for the same reason: they
 	// are a report about the activation, not its result.

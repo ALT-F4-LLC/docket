@@ -17,8 +17,8 @@ const TokenEnvVar = "DOCKET_TOKEN"
 
 // readToken returns the capability token for a lease-mediated verb.
 //
-// Accepted channels, in precedence order (engine-spec.md §4: "Tokens pass via
-// env/stdin, never argv"):
+// Accepted channels, in precedence order (tokens pass via env/stdin, never
+// argv):
 //
 //  1. the DOCKET_TOKEN environment variable
 //  2. stdin, when DOCKET_TOKEN is unset and stdin is not a terminal
@@ -58,8 +58,8 @@ func readToken(stdin io.Reader) (string, error) {
 // the lease check only if a live lease is actually present.
 //
 // This is what keeps a lease-ending verb byte-compatible on an unclaimed
-// issue — the overwhelmingly common case, and the one engine-spec.md §9 item 8
-// is about.
+// issue — the overwhelmingly common case, and the one the compatibility
+// criterion is about.
 func optionalToken(stdin io.Reader) string {
 	tok, err := readToken(stdin)
 	if err != nil {
@@ -110,9 +110,8 @@ func errMissingToken() error {
 	)
 }
 
-// leaseError maps a lease refusal to its CLI error code, per the refusal matrix
-// in docs/tdd/claims-leases.md §4 (engine-spec.md §9 item 3). Anything else
-// passes through unchanged, as casError does.
+// leaseError maps a lease refusal to its CLI error code, per the lease refusal
+// matrix. Anything else passes through unchanged, as casError does.
 //
 // The error texts never echo the presented token: a token that leaks into a
 // log line or a CI transcript is a live capability.

@@ -10,13 +10,13 @@ import (
 )
 
 // Schema registration sentinels. They mirror the workflow ones exactly, because
-// the two registries have the same immutability contract (TDD §4.4) and a
-// caller mapping errors to exit codes should not have to learn it twice.
+// the two registries have the same immutability contract and a caller mapping
+// errors to exit codes should not have to learn it twice.
 var (
 	// ErrSchemaConflict means `name@version` is already registered with
 	// DIFFERENT bytes. Surfaced as CONFLICT (exit 4), naming both hashes.
 	//
-	// Why a conflict and not an overwrite: engine-core §4's pinning property —
+	// Why a conflict and not an overwrite: the pinning property —
 	// "editing a pipeline never changes an in-flight run" — is worth nothing if
 	// the pinned bytes can be swapped underneath the run. A schema decides
 	// whether a worker's payload is ACCEPTED, so a mutable findings@1 means a
@@ -31,7 +31,7 @@ var (
 // InsertSchema registers a schema document, or returns the existing row when
 // the same bytes are already registered at that `name@version`.
 //
-// The three outcomes are `InsertWorkflow`'s, verbatim in behavior (§4.4):
+// The three outcomes are `InsertWorkflow`'s, verbatim in behavior:
 //
 //   - no row at name@version               -> insert, created = true
 //   - a row with the SAME source_sha256    -> return it, created = false
@@ -40,7 +40,7 @@ var (
 // Idempotency is decided on the CONTENT HASH, not on a normalized form: two
 // documents that validate identically but differ in whitespace or key order are
 // different registered bytes, because `source_sha256` is what pins refer to
-// (§4.7) and what a run reproduces against.
+// and what a run reproduces against.
 func InsertSchema(db *sql.DB, s *model.Schema, nowMS int64) (stored *model.Schema, created bool, err error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -59,11 +59,11 @@ func InsertSchema(db *sql.DB, s *model.Schema, nowMS int64) (stored *model.Schem
 }
 
 // InsertSchemaTx is InsertSchema inside a CALLER'S transaction — the schema
-// half of what S6's auto-registration needs (docs/tdd/runs-dispatch.md §9.2 F8).
+// half of what activation's auto-registration needs.
 //
 // It mirrors InsertWorkflowTx exactly, because the two registries have the same
 // immutability contract and a caller should not have to learn it twice. The
-// reason both are needed inside a transaction is F8's: auto-registration runs in
+// reason both are needed inside a transaction: auto-registration runs in
 // activation's fat transaction, so a failure refuses the whole activation and
 // leaves no definitions behind from a run that never started.
 func InsertSchemaTx(
@@ -137,7 +137,7 @@ func GetSchema(db *sql.DB, projectID int, name string, version int) (*model.Sche
 
 // GetSchemaTx is GetSchema at an exact version, inside a transaction. It is
 // what activation's pin stage reads, so the hash it records and the row it
-// checked are the same read (§4.7 P1).
+// checked are the same read.
 func GetSchemaTx(tx *sql.Tx, projectID int, name string, version int) (*model.Schema, error) {
 	return getSchemaTx(tx, projectID, name, version)
 }
@@ -158,8 +158,7 @@ type SchemaListOptions struct {
 }
 
 // ListSchemas returns registered schemas and the TRUE total before the limit —
-// the Collection contract (reliability-delta §4.1) requires a total a limit
-// cannot distort.
+// the Collection contract requires a total a limit cannot distort.
 func ListSchemas(db *sql.DB, opts SchemaListOptions) ([]*model.Schema, int, error) {
 	var clauses []string
 	var args []any

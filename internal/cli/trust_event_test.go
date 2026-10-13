@@ -21,7 +21,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// §3.6's event as an AUDIT TRAIL (DKT-81).
+// The trust event as an AUDIT TRAIL (DKT-81).
 //
 // EVERY TEST HERE DRIVES THE REAL VERB, through cobra, with a real store and a
 // real database. The properties are about the ORDER of two writes to two files
@@ -30,7 +30,7 @@ import (
 // order — which is the half that had the defect.
 //
 // XDG_CONFIG_HOME AND HOME ARE REDIRECTED IN EVERY TEST, per the trust package's
-// own SB1: a test that wrote to the operator's real ~/.config/docket/trust.toml
+// own rule: a test that wrote to the operator's real ~/.config/docket/trust.toml
 // would grant trust on the machine running it.
 
 // trustRepo builds an isolated store plus a repository whose database exists,
@@ -61,7 +61,7 @@ func trustRepo(t *testing.T) (string, *config.Config) {
 	return repo, cfg
 }
 
-// trustNoRepo is the same isolation WITHOUT a database, which is the case §3.5
+// trustNoRepo is the same isolation WITHOUT a database, which is the case that
 // keeps working: the store is user-level and managing it requires no repository.
 func trustNoRepo(t *testing.T) (string, *config.Config) {
 	t.Helper()
@@ -188,7 +188,7 @@ func TestTrustAddEventCarriesEveryFlag(t *testing.T) {
 	want["kind"] = engine.EventTrustAdded
 	assertExactTrustPayload(t, got, want)
 
-	// THE ARGV ITSELF NEVER RIDES ALONG (§3.6). The hash identifies the command;
+	// THE ARGV ITSELF NEVER RIDES ALONG. The hash identifies the command;
 	// the arguments must not land in a feed a run report renders.
 	raw, err := json.Marshal(got)
 	testsupport.Must(t, err, "re-marshaling: %v", err)
@@ -504,7 +504,7 @@ func TestTrustAddFailsWhenTheEventCannotBeRecorded(t *testing.T) {
 }
 
 // TestTrustAddOutsideARepoSaysNothingWasRecorded: the verb still works — the
-// store is user-level (§3.5) and requiring a database to manage it would mean
+// store is user-level and requiring a database to manage it would mean
 // someone who installed docket could not approve a command until they created a
 // tracker — but it SAYS the change went unrecorded rather than leaving the
 // operator to assume a trail exists.
@@ -512,7 +512,7 @@ func TestTrustAddOutsideARepoSaysNothingWasRecorded(t *testing.T) {
 	_, cfg := trustNoRepo(t)
 
 	// The disclosure rides in the RESULT, not only on a stream, so a machine
-	// consumer sees it too — the same reason §3.3's over-authorization warning
+	// consumer sees it too — the same reason the over-authorization warning
 	// is in the payload rather than on stderr alone.
 	cmd := newTrustAddCmd()
 	cmd.Flags().String("json", "", "")
@@ -826,8 +826,8 @@ func TestTrustRmFailsLoudlyWhenTheCwdCannotBeResolved(t *testing.T) {
 }
 
 // TestTrustAddOutsideARepoWorksWithAnUnreadableCwd pins the refusal's SCOPE:
-// outside a repo there is no event log, the recorder warns-and-continues
-// (§3.5), and an unreadable cwd changes none of that — the recorder never
+// outside a repo there is no event log, the recorder warns-and-continues, and
+// an unreadable cwd changes none of that — the recorder never
 // reaches cwd resolution on that path. DKT-595 hardens the trail where one
 // exists; it does not make managing the user-level store require one.
 func TestTrustAddOutsideARepoWorksWithAnUnreadableCwd(t *testing.T) {
@@ -859,7 +859,7 @@ func stubGetwdFailure(t *testing.T) {
 // A silent flip in either direction is the failure. Turning it OFF converts
 // every future hollow pass into one that reads as real; turning it ON does the
 // reverse. Either way the store would show only that something of that name was
-// re-approved — which is precisely the shape §3.6's flag-carrying payload
+// re-approved — which is precisely the shape the flag-carrying payload
 // exists to prevent.
 func TestReAddFlippingStubConflicts(t *testing.T) {
 	_, cfg := trustRepo(t)

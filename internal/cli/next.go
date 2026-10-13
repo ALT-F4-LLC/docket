@@ -47,7 +47,7 @@ var nextCmd = &cobra.Command{
 	},
 }
 
-// runNext dispatches between the two modes of `next` (TDD §6.3.1).
+// runNext dispatches between the two modes of `next`.
 //
 // `docket next` WITHOUT --run is the existing issue-mode verb, BYTE-IDENTICAL:
 // runNextIssues below is the pre-phase-3 body, MOVED and not edited, so the
@@ -224,7 +224,7 @@ func init() {
 	nextCmd.Flags().StringSliceP("label", "l", nil, "Filter by label (repeatable)")
 	nextCmd.Flags().StringSliceP("type", "T", nil, "Filter by type (repeatable)")
 	nextCmd.Flags().Int("limit", 10, "Maximum number of results (issue mode; with --run the full ready set is returned unless --limit is passed)")
-	// --run switches `next` into STEP mode (TDD §6.3.1). Without it the verb
+	// --run switches `next` into STEP mode. Without it the verb
 	// is exactly what it was: a workflow-free repo never passes this flag and
 	// never leaves the issue-mode path.
 	nextCmd.Flags().String("run", "", "Show ready STEPS of this run instead of ready issues")

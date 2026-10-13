@@ -5,7 +5,7 @@
 # Usage:
 #   ./scripts/qa/genericity.sh [--verbose]
 #
-# docs/design/genericity.md, binding on every workflow-engine feature:
+# The rule, binding on every workflow-engine feature:
 #
 #   Core Docket contains zero agent/LLM vocabulary — no node, model, prompt,
 #   brief, severity, or review concepts. Executors are opaque string hints;
@@ -14,13 +14,10 @@
 #
 # CLAUDE.md states the consequence as a PR bar: a PR introducing such
 # vocabulary into core surface fails review by definition. This script is that
-# bar mechanized, per docs/tdd/engine-spine.md §9 — the same discipline as the
-# --token-flag guard test stage 2 established. A rule that depends on a
-# reviewer's memory is a rule that erodes; a rule that runs on every push does
-# not.
-#
-# See docs/spec/review-strategy.md for the rule as a review gate, including the
-# part of it no script can check.
+# bar mechanized — the same discipline as the --token-flag guard test stage 2
+# established. A rule that depends on a reviewer's memory is a rule that
+# erodes; a rule that runs on every push does not. The part of the rule no
+# script can check stays with the reviewer.
 
 set -euo pipefail
 
@@ -34,10 +31,10 @@ cd "$REPO_ROOT"
 
 # --- What this checks, and what it deliberately does not ---------------------
 #
-# CORE SURFACE, per docs/tdd/engine-spine.md §9: flag names, JSON keys, column
-# names, embedded templates, help text, and error strings. Those are what a
-# user reads or a machine parses, and they are what the rule is about. So the
-# check reads STRING LITERALS, STRUCT TAGS, AND TEMPLATES — the surface itself.
+# CORE SURFACE: flag names, JSON keys, column names, embedded templates, help
+# text, and error strings. Those are what a user reads or a machine parses, and
+# they are what the rule is about. So the check reads STRING LITERALS, STRUCT
+# TAGS, AND TEMPLATES — the surface itself.
 #
 # Go INTERNALS are not surface, and scanning them yields only false positives
 # with a strong training effect toward ignoring the check. The three a naive
@@ -48,11 +45,10 @@ cd "$REPO_ROOT"
 #   - `prompt` appears as an interactive CONFIRMATION prompt ("Delete label
 #     X?") — a terminal UI affordance, not a model input.
 #   - `node` appears as the DAG vertex variable in internal/planner, which is
-#     graph vocabulary; engine-spine.md §1.1 lists it among the scheduling
-#     nouns the rule permits.
+#     graph vocabulary, one of the scheduling nouns the rule permits.
 #
 # Renaming any of those would remove no agent vocabulary from anything a user
-# can see. A reviewer reads the rest (review-strategy.md §3).
+# can see. A reviewer reads the rest.
 
 BANNED=(
   model
@@ -62,8 +58,7 @@ BANNED=(
   brief
 )
 
-# `node` is NOT banned: engine-spine.md §1.1 admits it as scheduling
-# vocabulary, and internal/planner's DAG has used it since before the engine
+# `node` is NOT banned: it is admitted scheduling vocabulary, and internal/planner's DAG has used it since before the engine
 # existed. `severity` and `review` are likewise absent — `review` is a
 # pre-existing ISSUE STATUS in core surface (`docket issue move DKT-1 review`),
 # and `severity` is legitimate as an opaque threshold field name (see the
@@ -74,8 +69,7 @@ BANNED=(
 # --- Admitted forms ----------------------------------------------------------
 #
 # Each entry is "<banned word> <ERE>": a form of that word core surface ships
-# on purpose, per the "Admitted forms" section of docs/design/genericity.md.
-# Matching is case-sensitive on the surface text. The scan deletes every
+# on purpose. Matching is case-sensitive on the surface text. The scan deletes every
 # admitted match from a line before testing the banned word, so an admitted
 # form never shields another use of the word on the same line. Anything not
 # listed, including new prose such as "model routing" in an error string,
@@ -109,23 +103,23 @@ SEARCH_PATHS=(
 
 # --- Exclusions --------------------------------------------------------------
 #
-# docs/design/example-workflow.toml is EXCLUDED, and the exclusion is not an
-# oversight to be tidied away later.
+# internal/workflow/testdata/example-workflow.toml is EXCLUDED, and the
+# exclusion is not an oversight to be tidied away later.
 #
 # The fixture legitimately contains `severity` and `status` as FIELD NAMES
 # INSIDE AN INSTANCE'S THRESHOLD PREDICATE STRINGS — `any(severity >= high)`.
-# engine-spec.md §11.2 defines the threshold grammar as `agg(field op literal)`
-# and defines ordered comparisons "only for fields whose registered schema
-# declares ordered_enum". The parser therefore knows the SHAPE
-# `agg(field op literal)` and never what a field MEANS: `severity` is an opaque
-# token until a user registers a schema for it.
+# The threshold grammar is `agg(field op literal)`, and ordered comparisons
+# apply "only for fields whose registered schema declares ordered_enum". The
+# parser therefore knows the SHAPE `agg(field op literal)` and never what a
+# field MEANS: `severity` is an opaque token until a user registers a schema
+# for it.
 #
-# That is the genericity line holding exactly where §11.2 draws it, not a
-# violation of it. Removing this exclusion would "fix" a file that is correct
-# and break the canonical register-test fixture — so it is written here with
-# its reason, per docs/tdd/engine-spine.md §9.
+# That is the genericity line holding exactly where the threshold grammar
+# draws it, not a violation of it. Removing this exclusion would "fix" a file
+# that is correct and break the canonical register-test fixture — so it is
+# written here with its reason.
 EXCLUDE_PATHS=(
-  docs/design/example-workflow.toml
+  internal/workflow/testdata/example-workflow.toml
 )
 
 is_excluded() {
@@ -292,8 +286,8 @@ admission_selftest
 # template_lines treats an embedded template as surface in its entirety: every
 # byte is read by the first user to run `workflow init`, comments included.
 #
-# `*.json` gets the SAME treatment as of stage 5 (docs/tdd/payloads-thresholds.md
-# §1.1.1, and it is not optional there). That stage ships the first embedded JSON
+# `*.json` gets the SAME treatment as of stage 5, and it is not optional. That
+# stage ships the first embedded JSON
 # core surface — the `aggregate@1` schema document — and every byte of a shipped
 # schema is read by the first user who runs `docket schema show aggregate@1`. A
 # schema document is surface in exactly the sense this comment already gives for
@@ -320,7 +314,7 @@ pass=0
 found_any=false
 
 printf "=== Genericity check ===\n"
-printf "docs/design/genericity.md, over core surface (strings, tags, templates)\n\n"
+printf "The genericity rule, over core surface (strings, tags, templates)\n\n"
 
 # Collect the surface once, so each banned term is a cheap scan over it.
 #
@@ -384,7 +378,7 @@ printf "\n%d/%d banned terms absent from core surface\n" "$pass" "$((pass + fail
 if [ "$found_any" = true ]; then
   cat <<'EOF'
 
-The genericity rule (docs/design/genericity.md, CLAUDE.md PR bar):
+The genericity rule (CLAUDE.md PR bar):
 
   Core Docket contains zero agent/LLM vocabulary. A PR introducing `model`,
   `prompt`, or `llm` into core surface fails review by definition; metadata KV

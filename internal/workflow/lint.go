@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 )
 
-// Lint applies the §4.3.3 DAG lints L1-L4 to a validated definition.
+// Lint applies the DAG lints L1-L4 to a validated definition.
 //
 // planner.BuildDAG and planner.TopoSort are REUSED, not duplicated: a
 // workflow's `after` edges form a DAG over step names exactly as `depends_on`
@@ -112,8 +112,8 @@ func lintTopology(def *Definition) error {
 
 	// L3: at least one root exists. A root is a step with no `after` — either
 	// an explicit `after = []` or the first-step exemption. `loop = true`
-	// steps are excluded from ordinary expansion (§11.3 (3)), so one cannot
-	// serve as the root of the ordinary topology.
+	// steps are excluded from ordinary expansion, so one cannot serve as the
+	// root of the ordinary topology.
 	roots := rootSteps(def)
 	if len(roots) == 0 {
 		return &Error{
@@ -147,11 +147,11 @@ func rootSteps(def *Definition) []*Step {
 }
 
 // lintReachability is L2. Its exception list is the load-bearing detail:
-// §11.2 says routing to a step name "interposes that declared,
-// otherwise-unreached step as a successor gate", so "unreached" is a
-// LEGITIMATE state for such a step — a naive reachability lint would reject
-// the reference instance's own security workflow. `loop = true` steps are
-// excluded from ordinary expansion by §11.3 (3) and are likewise not orphans.
+// routing to a step name "interposes that declared, otherwise-unreached step
+// as a successor gate", so "unreached" is a LEGITIMATE state for such a step —
+// a naive reachability lint would reject the reference instance's own security
+// workflow. `loop = true` steps are excluded from ordinary expansion and are
+// likewise not orphans.
 func lintReachability(def *Definition, g *stepGraph, roots []*Step) error {
 	reached := make(map[string]bool, len(def.Steps))
 	var walk func(name string)
@@ -204,7 +204,7 @@ func lintReachability(def *Definition, g *stepGraph, roots []*Step) error {
 }
 
 // thresholdInterposedSteps collects the steps some threshold routes to by
-// name. §11.2: such a step "becomes ready next, and on its pass execution
+// name. Such a step "becomes ready next, and on its pass execution
 // resumes at the routing step's ordinary downstream" — it is reached by
 // routing, so being unreached in the `after` topology is legitimate for it.
 // One classification, shared with expansion and the engine's readiness latch:
@@ -222,9 +222,9 @@ func thresholdInterposedSteps(def *Definition) map[string]bool {
 // predecessors (transitively `after`), so an input can never resolve to an
 // artifact that does not exist yet.
 //
-// `loop = true` steps are excepted: their inputs bind per §11.3 (3) within
-// their ordinal, falling back to the highest earlier ordinal per input, so
-// their producers are not required to precede them in the ordinary topology.
+// `loop = true` steps are excepted: their inputs bind within their ordinal,
+// falling back to the highest earlier ordinal per input, so their producers are
+// not required to precede them in the ordinary topology.
 func lintInputOrdering(def *Definition, g *stepGraph) error {
 	for _, step := range def.Steps {
 		if step.Loop {
@@ -238,7 +238,7 @@ func lintInputOrdering(def *Definition, g *stepGraph) error {
 			}
 			// `issue.latest.<kind>` names no producer step: it resolves over
 			// whatever the issue has recorded by the consumer's ordinal,
-			// falling back per §7.4 — resolving to nothing is a legal answer,
+			// falling back per input — resolving to nothing is a legal answer,
 			// so there is no "artifact that does not exist yet" for L4 to
 			// guard against. Without this skip the shape below would read
 			// `issue.latest` as a step name and refuse every non-loop

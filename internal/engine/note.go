@@ -18,8 +18,8 @@ import (
 // A fact about the WHOLE RUN had no channel at all. RUN-70's conductor
 // gate-probed before dispatch, found `tests` failing on clean HEAD, asked the
 // operator, got "file issue, override-pass", filed DKT-1075 — and dispatched
-// packets that carried none of it, because issue comments never render
-// (§6.6), the issue body froze at activation, and no step had a routing
+// packets that carried none of it, because issue comments never render,
+// the issue body froze at activation, and no step had a routing
 // record yet. The executor stashed, re-ran the suite, re-derived the same
 // failure, and filed DKT-1076: a duplicate the conductor then spent three more
 // calls closing.

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The detached pre-gate launcher (gates-trust §7.6.2 PG6) re-executes this
+// The detached pre-gate launcher re-executes this
 // binary, so what it composes is asserted on the command itself, with the
 // spawn replaced: a test that let it start would run the test suite again,
 // detached, which is exactly the hazard that keeps the launcher out of every

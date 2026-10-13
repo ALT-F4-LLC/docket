@@ -30,7 +30,7 @@ import (
 // doubt the body beside it.
 //
 // So the body gets the same explicit, refusable, recorded exception, with the
-// same four properties that make it not a hole in §9 item 5:
+// same four properties that make it not a hole in the body's edit immunity:
 //
 //  1. IT CARRIES NO BODY OF ITS OWN. The refresh reads `issues.description` and
 //     copies it verbatim; there is no `--body` here and there must never be

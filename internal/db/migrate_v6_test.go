@@ -24,7 +24,7 @@ func TestMigrateToV6(t *testing.T) {
 	if v != currentSchemaVersion {
 		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
 	}
-	// v6 is no longer the terminal version — stage 3 ships v7 — but the v6
+	// v6 is no longer the terminal version — v7 followed it — but the v6
 	// structures must survive every later migration, which is what this
 	// assertion now guards. The stage pin lives with the current stage's test
 	// (TestMigrateToV7).
@@ -84,7 +84,7 @@ func TestMigrateV5ToV6IsIdempotent(t *testing.T) {
 	}
 }
 
-// TestMigrateV5ToV6Dormancy is the §9 item 8 obligation at the storage layer:
+// TestMigrateV5ToV6Dormancy is the dormancy obligation at the storage layer:
 // rows that predate v6 come through unclaimed, so nothing about them reads
 // differently.
 func TestMigrateV5ToV6Dormancy(t *testing.T) {

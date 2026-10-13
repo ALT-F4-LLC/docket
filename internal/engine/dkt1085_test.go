@@ -13,7 +13,7 @@ import (
 // DKT-1085: `after_fired` — "run me only if the gate fired".
 //
 // An interposed gate ends `skipped` on every round its routing step resolved
-// elsewhere, `skipped` is terminal, and R3 releases an `after` successor on
+// elsewhere, `skipped` is terminal, and an `after` successor is released on
 // ANY terminal predecessor — so `after = ["security-vote"]` ran the corpus's
 // `drain-highs` on skipped-vote rounds too (3 of 81 measured, one spawn each
 // for an empty report). `after_fired = ["security-vote"]` is the declaration
@@ -246,7 +246,7 @@ func TestAfterFiredFollowsAnOnFailSkip(t *testing.T) {
 }
 
 // afterFiredWhenSrc skips the gate at EXPANSION: its `when` is false for an
-// issue without the label, so activation creates it `skipped` (§5.3.1) — and
+// issue without the label, so activation creates it `skipped` — and
 // must create its `after_fired` successor skipped with it, in the fat
 // transaction, before any step has run.
 const afterFiredWhenSrc = `

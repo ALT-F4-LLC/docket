@@ -17,15 +17,16 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Detached pre-gate runs (TDD docs/tdd/gates-trust.md §7.6.2 PG6).
+// Detached pre-gate runs.
 //
-// PG5 bounds the claim's whole pre-gate phase at 60s so `docket step claim`
+// The claim's whole pre-gate phase is bounded at 60s so `docket step claim`
 // returns inside the executor's 120s tool timeout. A gate that needs longer —
 // this repository's own ac-commands runs the full test suite for about three
 // minutes — can therefore never hand the claim a complete result: every claim
 // cut it off at the budget and recorded the cut, and a verify step whose
 // evidence IS that gate's exit had nothing to verify with. Raising the budget
-// would undo PG5; narrowing the gate would measure less. Neither is the fix.
+// would undo the claim bound; narrowing the gate would measure less. Neither
+// is the fix.
 //
 // THE SHAPE. The sha a verify step's pre-gates measure first exists when a
 // tree-holding step's routing stage records its `issue.diff` round record
@@ -41,7 +42,7 @@ import (
 // rows keyed by (step, target sha). The claim finds them
 // (reusableDetachedPreGates) and serves them instead of spawning; a target
 // that moved, a run still in flight, or a run that measured nothing leaves the
-// claim on its PG5 path, unchanged. The claim never waits.
+// claim on its budgeted path, unchanged. The claim never waits.
 //
 // WHY THE TARGET IS RECONSTRUCTED EVEN WHEN A WORKTREE STILL STANDS. The row
 // is keyed by the sha, so the sha is what it measures: a live worktree may
@@ -65,8 +66,8 @@ import (
 //
 // THE SCHEDULER HOLDS THE STEP WHILE THE RUN IS IN FLIGHT. The claim never
 // waits, so a claim that arrives while the child is still measuring runs the
-// gate on its PG5 path and records the cut — the exact row this file exists
-// to replace, and for a verify step whose evidence IS that gate's exit, no
+// gate on its budgeted path and records the cut — the exact row this file
+// exists to replace, and for a verify step whose evidence IS that gate's exit, no
 // evidence at all. So a pending pre-gated step whose (step, target) lock is
 // held right now is not ready (ready.go, CondPreGatePending): `next` and
 // `dispatch open` do not offer it, the staged closure does not stage it, and a
@@ -172,8 +173,8 @@ type detachedPreGateCandidate struct {
 //
 // Best-effort by construction: it runs after a committed completion and
 // returns nothing, because housekeeping must not stand between a step and the
-// completion it already has. A launch that fails leaves the claim on its PG5
-// path, which is where it was before this file existed.
+// completion it already has. A launch that fails leaves the claim on its
+// budgeted path, which is where it was before this file existed.
 func (e *Engine) startDetachedPreGates(conn *sql.DB, runID int, nowMS int64) {
 	if LaunchDetachedPreGates == nil {
 		return
@@ -577,7 +578,7 @@ func detachedPreGateWanted(
 
 // reusableDetachedPreGates finds, per gate, the one complete detached result
 // for this step and this exact target: the row the claim serves instead of
-// spawning (§7.6.2 PG6). Nothing is read for a step with no target sha —
+// spawning. Nothing is read for a step with no target sha —
 // such a step measures a tree, never a key.
 func reusableDetachedPreGates(
 	conn *sql.DB, stepID int, gates []workflow.Gate, targetSHA string,
@@ -660,7 +661,7 @@ func detachedPreGateLockPath(stepID int, targetSHA string) string {
 // holdDetachedPreGateLock takes the in-flight lock, or reports that another
 // run holds it. The open is the tree lock's (openTreeLockFile): O_NOFOLLOW, a
 // regular file or a refusal, the directory created when missing — the lock
-// lives in repo-shippable space for a local store, so §7.4 L7's discipline
+// lives in repo-shippable space for a local store, so the same discipline
 // applies to it as well.
 func holdDetachedPreGateLock(path string) (lock *os.File, held bool, err error) {
 	file, err := openTreeLockFile(path)

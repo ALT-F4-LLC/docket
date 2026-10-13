@@ -7,7 +7,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// D7 — usage pending.
+// Usage pending.
 //
 // The relay measures a wave's spend from agent transcripts AFTER the wave
 // returns, and D2 used to refuse `next` and `close` the instant a step
@@ -33,7 +33,7 @@ func TestFreshlyRecordedStepIsUsagePending(t *testing.T) {
 
 	if ds := discrepanciesAt(t, conn, runID, fresh); containsKind(ds, DiscrepancyMissingUsage) {
 		t.Errorf("a step recorded this instant is already a %s discrepancy (%v); "+
-			"D7 gives the relay `dispatch.grace` to back-fill it",
+			"the grace gives the relay `dispatch.grace` to back-fill it",
 			DiscrepancyMissingUsage, ds)
 	}
 	if ds := discrepanciesAt(t, conn, runID, lastInside); containsKind(ds, DiscrepancyMissingUsage) {
@@ -41,7 +41,7 @@ func TestFreshlyRecordedStepIsUsagePending(t *testing.T) {
 	}
 	if ds := discrepanciesAt(t, conn, runID, past); !containsKind(ds, DiscrepancyMissingUsage) {
 		t.Errorf("at the grace the unbilled step is still not a discrepancy (%v); "+
-			"D7 defers D2, it does not retire it", ds)
+			"the grace defers D2, it does not retire it", ds)
 	}
 
 	// The close reconciles inside the window, and `next` answers after it:
@@ -93,7 +93,7 @@ func TestUsageGraceIsMeasuredFromTheWaveEnd(t *testing.T) {
 	inside := lastRecord + grace - 1
 	if ds := discrepanciesAt(t, conn, runID, inside); containsKind(ds, DiscrepancyMissingUsage) {
 		t.Errorf("inside the grace of the wave's LAST record, an early step is a %s "+
-			"discrepancy (%v); D7 measures from the wave end, not the step's own record",
+			"discrepancy (%v); the grace measures from the wave end, not the step's own record",
 			DiscrepancyMissingUsage, ds)
 	}
 	outcome, err := e.CloseDispatch(conn, runID, false, IntegrationSkip{}, inside)
@@ -115,7 +115,7 @@ func TestUsageGraceIsMeasuredFromTheWaveEnd(t *testing.T) {
 	for _, want := range []string{early, late} {
 		if !contains(missing, want) {
 			t.Errorf("past the wave-end grace, %s is not a missing-usage discrepancy "+
-				"(%v); D7 defers D2, it does not retire it", want, ds)
+				"(%v); the grace defers D2, it does not retire it", want, ds)
 		}
 	}
 

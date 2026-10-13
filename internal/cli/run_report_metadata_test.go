@@ -124,9 +124,9 @@ func TestFailedStepsHalfBagIsAttributable(t *testing.T) {
 	}
 }
 
-// TestStepMetadataLineIsDeterministic is R9 through a map-valued field: two
-// renders of one report are byte-identical. A bare range over the bag would
-// emit a different document per invocation.
+// TestStepMetadataLineIsDeterministic proves determinism through a map-valued
+// field: two renders of one report are byte-identical. A bare range over the
+// bag would emit a different document per invocation.
 func TestStepMetadataLineIsDeterministic(t *testing.T) {
 	first := renderPlainRunReport(tieredRunReport())
 	for i := 0; i < 20; i++ {
@@ -153,9 +153,10 @@ func TestReportWithoutStepBagsIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestUnreadableBagSaysSoInTheDocument keeps R10's tolerance from reading as an
-// absence: bytes that do not decode are reported as such, not skipped into a
-// silence a reader would take for "the dispatcher recorded nothing".
+// TestUnreadableBagSaysSoInTheDocument keeps the report's tolerance from
+// reading as an absence: bytes that do not decode are reported as such, not
+// skipped into a silence a reader would take for "the dispatcher recorded
+// nothing".
 func TestUnreadableBagSaysSoInTheDocument(t *testing.T) {
 	report := tieredRunReport()
 	report.Attempts[0].Metadata = nil

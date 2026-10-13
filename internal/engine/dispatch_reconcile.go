@@ -41,10 +41,10 @@ import (
 //
 // The three could not share one transaction even if that were wanted:
 // VerifyDispatch's stale-target pass shells out to git and must therefore run
-// with no transaction open (§6, no subprocess inside a transaction), and its
+// with no transaction open (no subprocess inside a transaction), and its
 // read-only-by-rollback property is the mechanism that makes it a verify at
 // all. Nesting it inside a writing transaction would destroy the very property
-// P11 is.
+// verify depends on.
 const (
 	// StageBackfill is stage 1: the usage rows the wave measured.
 	StageBackfill = "backfill"
@@ -68,8 +68,9 @@ type StageError struct {
 	Err error
 	// Verify and Mismatch are set ONLY on a verify-stage row mismatch, which
 	// is the one refusal a caller cannot render from the error text alone:
-	// P9's diagnostic is the differing BYTES of both renderings plus DKT-243's
-	// per-row verdict block, and those live on the result, not in a message.
+	// the verify diagnostic is the differing BYTES of both renderings plus
+	// DKT-243's per-row verdict block, and those live on the result, not in a
+	// message.
 	// Carrying them here is what lets the reconcile path print the identical
 	// refusal `dispatch verify` prints rather than a summary of it.
 	Verify   *VerifyResult

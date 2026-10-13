@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket run report` — the ledger rollup (engine-core §1.1, §3.5).
+// `docket run report` — the ledger rollup.
 //
 // BUILT ON THE `internal/cli/stats.go` PATTERN, which is the repo's existing
 // rollup verb: a flat result struct with JSON tags, one loader, a `renderXxx`
@@ -102,11 +102,11 @@ func (r runReportResult) VersionedPayload() any {
 
 // renderRunReport is the human-mode document.
 //
-// EVERY STORED STRING GOES THROUGH exec.Render (R11, gates-trust §5.7): gate and
-// action names, metadata values, artifact kinds, breach reasons, and step
-// instances are all attacker-influenced text on its way to a TERMINAL, and a TTY
+// EVERY STORED STRING GOES THROUGH exec.Render: gate and action names,
+// metadata values, artifact kinds, breach reasons, and step instances are all
+// attacker-influenced text on its way to a TERMINAL, and a TTY
 // interprets control bytes. `--json` carries the RAW bytes — encoding/json
-// escapes them by contract and the consumer is a program (E4).
+// escapes them by contract and the consumer is a program.
 func renderRunReport(r *engine.RunReport) string {
 	if !render.ColorsEnabled() {
 		return renderPlainRunReport(r)
@@ -118,7 +118,7 @@ func renderRunReport(r *engine.RunReport) string {
 
 	var b strings.Builder
 
-	// R1: the run.
+	// The run.
 	b.WriteString(section.Render("Run") + "\n")
 	fmt.Fprintf(&b, "  %s %s\n", label.Render("Run:"), value.Render(r.Run.Ref()))
 	fmt.Fprintf(&b, "  %s %s\n", label.Render("Status:"), value.Render(string(r.Run.Status)))
@@ -134,7 +134,7 @@ func renderRunReport(r *engine.RunReport) string {
 			value.Render(formatDurationMS(r.WallClockMS)))
 	}
 
-	// R2: the budget.
+	// The budget.
 	b.WriteString("\n" + section.Render("Budget") + "\n")
 	writeBudgetLines(&b, r.Budget, func(k, v string) {
 		fmt.Fprintf(&b, "  %s %s\n", label.Render(k), value.Render(v))
@@ -177,9 +177,9 @@ func renderPlainRunReport(r *engine.RunReport) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// writeBudgetLines emits R2's numbers through the caller's line writer, so the
-// styled and plain renderers cannot disagree about WHICH numbers appear or in
-// what order — only about how they look.
+// writeBudgetLines emits the budget numbers through the caller's line writer,
+// so the styled and plain renderers cannot disagree about WHICH numbers appear
+// or in what order — only about how they look.
 func writeBudgetLines(b *strings.Builder, budget engine.RunBudgetReport, line func(k, v string)) {
 	cap := "unlimited"
 	if budget.Cap > 0 {
@@ -199,7 +199,7 @@ func writeBudgetLines(b *strings.Builder, budget engine.RunBudgetReport, line fu
 	}
 	for _, u := range budget.Reported {
 		// The unit is stored, opaque, and claimant-supplied — so it is rendered
-		// through the escaper like every other stored string (R11).
+		// through the escaper like every other stored string.
 		line("Reported "+exec.Render(u.Unit)+":", fmt.Sprintf("%g", u.Quantity))
 	}
 	// The MEASURED dimension (DKT-238), when a run armed it. Its own lines,
@@ -230,8 +230,8 @@ func writeBudgetLines(b *strings.Builder, budget engine.RunBudgetReport, line fu
 	}
 }
 
-// writeReportSections emits R3 through R7. Shared for the same reason
-// writeBudgetLines is: two renderers, one definition of the document.
+// writeReportSections emits every section after the budget. Shared for the
+// same reason writeBudgetLines is: two renderers, one definition of the document.
 func writeReportSections(
 	b *strings.Builder, r *engine.RunReport,
 	header func(title string), line func(k, v string),
@@ -357,11 +357,10 @@ func writeReportSections(
 		}
 	}
 
-	// E21's section (docs/tdd/runs-dispatch.md §8.7), folded into R3's
-	// neighborhood because it is a count over the run's transitions rather than
+	// The attribution section: a count over the run's transitions rather than
 	// over its steps.
 	//
-	// It is §9 item 2 published as a number: "every transition traceable to
+	// It publishes a guarantee as a number: "every transition traceable to
 	// next/gate/threshold/human input" is a claim an operator can check here
 	// without leaving the report, and `events list` is where they go for the
 	// individual rows if a count looks wrong.
@@ -429,7 +428,7 @@ func writeReportSections(
 			line("Coverage:", detail)
 			// The identity behind the count, one aimable line per seat: the
 			// proposal is what `vote backfill-usage` takes. Voter and role are
-			// stored, caster-supplied text on its way to a terminal (R11).
+			// stored, caster-supplied text on its way to a terminal.
 			for _, s := range r.SilentVoteSeats {
 				who := exec.Render(s.Voter)
 				if s.Role != "" {
@@ -458,11 +457,11 @@ func writeReportSections(
 				exec.Render(u.Instance), u.Attempt,
 				exec.Render(u.Unit), u.Quantity, exec.Render(u.Source)))
 		}
-		// The steps still owing, asked without D2's grace (D7) — the vote
+		// The steps still owing, asked without the close-time grace — the vote
 		// section's Coverage/Silent shape, for the same reason: a run's last
 		// wave has no later close to refuse over an unbilled step, so the
 		// report is where its silence has to show before the run is called
-		// done. Instances are stored text on their way to a terminal (R11).
+		// done. Instances are stored text on their way to a terminal.
 		if n := len(r.MissingUsage); n > 0 {
 			line("Coverage:", fmt.Sprintf(
 				"%d claimed step(s) reported NOTHING, so their spend is missing "+
@@ -485,7 +484,7 @@ func writeReportSections(
 // would otherwise read identically, and the whole point of the section is
 // that a reader can tell a reproduced finding from an asserted one. Text,
 // voter, role, and every reference are stored, caster-supplied strings on
-// their way to a terminal (R11); the kind is core's own vocabulary and is not
+// their way to a terminal; the kind is core's own vocabulary and is not
 // escaped.
 func writeFindings(
 	findings []engine.CastFinding, header func(title string), line func(k, v string),
@@ -516,7 +515,7 @@ func writeFindings(
 // silentSeatPathCounts renders the silent seats' seating paths with counts —
 // `conversational-gate: 8, vote-step: 4` — for the coverage line (DKT-733).
 // Sorted by path name: a total order, so two renders of one run are
-// byte-identical (R9). Empty when there is nothing to attribute.
+// byte-identical. Empty when there is nothing to attribute.
 func silentSeatPathCounts(seats []engine.SilentVoteSeat) string {
 	if len(seats) == 0 {
 		return ""
@@ -556,8 +555,8 @@ func silentSeatPathCounts(seats []engine.SilentVoteSeat) string {
 // more distinct issues among them and every line carries its issue.
 //
 // The pair is quoted TOGETHER rather than as two quoted tokens: both halves
-// are stored text on their way to a terminal and must go through exec.Render
-// (R11), and `"HRN-300 verify@2":` keeps the label reading as one name where
+// are stored text on their way to a terminal and must go through exec.Render,
+// and `"HRN-300 verify@2":` keeps the label reading as one name where
 // `"HRN-300" "verify@2":` reads as two columns that happen to be adjacent.
 //
 // It returns the NAME WITHOUT the trailing colon, and the two sections that
@@ -606,7 +605,7 @@ func writePinnedWorkflows(
 	header("Pinned workflows")
 	for _, w := range rows {
 		// The name is a workflow author's opaque string on its way to a
-		// terminal, so both refs go through the escaper (R11).
+		// terminal, so both refs go through the escaper.
 		current := exec.Render(fmt.Sprintf("%s@%d", w.Name, w.CurrentVersion))
 		var detail string
 		switch {
@@ -787,7 +786,7 @@ func writeMetadataRollup(
 			parts = append(parts, fmt.Sprintf("%s %d", exec.Render(v.Value), v.Count))
 		}
 		// The KEY is escaped too. It is a workflow author's opaque string,
-		// and core has no list of which keys exist — R7's whole point.
+		// and core has no list of which keys exist.
 		line(exec.Render(key.Key)+":", strings.Join(parts, ", "))
 	}
 }
@@ -814,7 +813,7 @@ func writeMetadataRollup(
 // rollup those two rows were indistinguishable, which is why drift concentrated
 // in failures read as no drift at all.
 //
-// NO KEY IS NAMED HERE (docs/design/genericity.md, R7). The section prints
+// NO KEY IS NAMED HERE. The section prints
 // whatever keys a bag holds, sorted, and never compares two of them: `a=1, b=2`
 // on one line is all core does, and what that pair MEANS is the workflow
 // author's business.
@@ -842,7 +841,7 @@ func writeStepMetadata(
 				"decode as an object; `docket step show` has the raw bytes")
 			continue
 		}
-		// Sorted keys, so two renders of one run are byte-identical (R9) — a
+		// Sorted keys, so two renders of one run are byte-identical — a
 		// bare map range would emit a different document per invocation.
 		keys := make([]string, 0, len(a.Metadata))
 		for k := range a.Metadata {
@@ -852,7 +851,7 @@ func writeStepMetadata(
 		parts := make([]string, 0, len(keys))
 		for _, k := range keys {
 			// Both halves are a workflow author's opaque strings on their way to
-			// a TERMINAL (R11), and the value goes through db's own renderer so
+			// a TERMINAL, and the value goes through db's own renderer so
 			// this section and the rollup above spell one value identically.
 			parts = append(parts, fmt.Sprintf("%s=%s",
 				exec.Render(k), exec.Render(db.RenderMetadataValue(a.Metadata[k]))))
@@ -906,8 +905,8 @@ func writeVerdicts(
 			}
 		}
 		// THE PRE MARKER RIDES ON THE NAME (DKT-862), because a pre-gate's
-		// numbers are not the same KIND of fact as a blocking gate's: §11.1
-		// runs it at claim as an input to the step, and PG4 keeps it out of the
+		// numbers are not the same KIND of fact as a blocking gate's: the engine
+		// runs it at claim as an input to the step and keeps it out of the
 		// saga's verdict, so `fail 1` here did not route anything. This section
 		// rendered the two identically, and on RUN-61 a conductor reading it
 		// nearly reported a fix round as burned on an advisory failure.

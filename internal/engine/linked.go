@@ -24,14 +24,13 @@ import (
 // design-qa instances across 3 runs all relying on prose.
 //
 // RESOLUTION IS ACTIVATION'S, NOT ASSEMBLY'S. Context assembly is pure and
-// snapshot-pinned (§6.6): it may not read live state, and "the linked issue's
+// snapshot-pinned: it may not read live state, and "the linked issue's
 // latest artifact" is live state — a later run on that issue would change the
 // answer mid-run. So activation resolves the relation and the artifact ONCE,
 // while it snapshots everything else about the issue, and records the resolved
 // ARTIFACT IDS in the issue's `issue_snapshot` under a `linked` key. Artifact
-// rows are never mutated (reliability-delta §2.1), so an id is a content pin
-// exactly as a `pins` row's hash is — assembly reads the pinned rows by id and
-// never asks the live question. And because re-activation never re-snapshots
+// rows are never mutated, so an id is a content pin exactly as a `pins` row's
+// hash is — assembly reads the pinned rows by id and never asks the live question. And because re-activation never re-snapshots
 // (RA2's reasoning), the binding cannot drift under a run already under way.
 //
 // FAILURE IS LOUD, AT ACTIVATION, per the acceptance criteria: a declared

@@ -94,8 +94,8 @@ func TestWorkflowRegisterSucceeds(t *testing.T) {
 	}
 }
 
-// TestWorkflowRegisterRefusalMatrix walks §4.5 by error code. Exit codes are
-// derived from the code, so asserting the code asserts both.
+// TestWorkflowRegisterRefusalMatrix walks the refusal matrix by error code.
+// Exit codes are derived from the code, so asserting the code asserts both.
 func TestWorkflowRegisterRefusalMatrix(t *testing.T) {
 	t.Run("validation failure is VALIDATION_ERROR", func(t *testing.T) {
 		conn := newTestDB(t)

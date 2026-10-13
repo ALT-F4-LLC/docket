@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// allowedEnv is §5.3's table: the ONLY parent variables a child may inherit.
+// allowedEnv is the table of the ONLY parent variables a child may inherit.
 //
 // ALLOWLIST, NEVER DENYLIST. The child environment is CONSTRUCTED, so a
 // variable is present only because this list names it. A denylist would fail
@@ -24,7 +24,7 @@ import (
 //	USER, LOGNAME            tools that stamp output with a user name
 //	SHELL                    passed but NEVER consulted by docket — some tools
 //	                         read it for informational output. Docket invokes
-//	                         no interpreter regardless (§5.1)
+//	                         no interpreter regardless
 //	LANG, LC_ALL, LC_CTYPE   text encoding; absent, tools produce mojibake or
 //	                         refuse non-ASCII paths
 //	TZ                       timestamp rendering in a check's own output
@@ -51,7 +51,7 @@ var allowedEnv = []string{
 }
 
 // deniedEnv names variables that must NEVER reach a child, in addition to
-// being absent from the allowlist (§5.3).
+// being absent from the allowlist.
 //
 // DOCKET_TOKEN is the core case. A capability token in a child converts code
 // execution into ENGINE AUTHORITY: the child could complete a step with a
@@ -73,7 +73,7 @@ var allowedEnv = []string{
 // need it), and a WELL-KNOWN location under it is constructible by any child
 // that wants to, so the denial cannot stop a hostile TRUSTED command. That is
 // the standing posture, not an oversight: trust entries are the boundary for
-// hostile code (§2), a hostile trusted command's blast radius was always the
+// hostile code, a hostile trusted command's blast radius was always the
 // operator's whole account, and OS-level sandboxing of children — not env
 // shaping — is the mechanism that would shrink it.
 var deniedEnv = []string{
@@ -209,7 +209,7 @@ var ephemeralCaches = []struct{ Name, Subdir string }{
 	{"STATICCHECK_CACHE", "staticcheck"},
 }
 
-// BuildEnv constructs the child environment (§5.3).
+// BuildEnv constructs the child environment.
 //
 // The parent environment is read here and NOWHERE ELSE in this package, which
 // is what makes TestGateChildEnvIsExactlyTheAllowlist's set-equality assertion
@@ -228,7 +228,7 @@ func BuildEnv(p EnvPolicy) ([]string, error) {
 		}
 	}
 
-	// Set by docket, not inherited (§5.3's second table).
+	// Set by docket, not inherited.
 	//
 	// TERM is `dumb` rather than inherited because a check's output is
 	// CAPTURED, not displayed: an inherited TERM makes tools emit ANSI escapes
@@ -302,7 +302,7 @@ func BuildEnv(p EnvPolicy) ([]string, error) {
 		}
 	}
 
-	// THE BELT-AND-BRACES CHECK (T5). The allowlist above already excludes
+	// THE BELT-AND-BRACES CHECK. The allowlist above already excludes
 	// every denied name, so this can only fire if a future edit adds one to the
 	// table or a construction bug duplicates a parent variable in. It fails
 	// HARD rather than filtering, because a constructed set that contains a
@@ -337,7 +337,8 @@ func assertNoDeniedVars(env []string) error {
 // AllowedEnvNames returns the allowlist, sorted, for tests and for the
 // operator-facing documentation of what a child receives. It returns a COPY:
 // handing out the package's own slice would let a caller extend the allowlist
-// by appending to it, which is precisely the mechanism §5.3 refuses to ship.
+// by appending to it, which is precisely the mechanism this package refuses
+// to ship.
 func AllowedEnvNames() []string {
 	out := append([]string(nil), allowedEnv...)
 	sort.Strings(out)
@@ -352,6 +353,6 @@ func DeniedEnvNames() []string {
 // There is NO WAY to extend the allowlist at this stage — no flag, no config
 // key, no trust-entry field. A check that needs a credential is a use case this
 // stage does not serve, and adding the escape hatch before there is a real
-// requirement means shipping the mechanism that undoes the control. §10 records
-// the shape a future amendment would take: a per-entry env_passthrough list,
-// never global, with the names visible in `trust list`.
+// requirement means shipping the mechanism that undoes the control. A future
+// amendment would take the shape of a per-entry env_passthrough list, never
+// global, with the names visible in `trust list`.

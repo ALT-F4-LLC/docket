@@ -3,10 +3,8 @@
 # doc-validate — a changed doc carries the header this repo's docs carry.
 #
 # Wired as the `doc-validate` gate on docs-only's author step.
-# CLAUDE.md: "design first as docs/tdd/<feature>.md (frontmatter per existing
-# files)". Every doc under docs/ opens with a title line and a `Status:` line
-# naming a state and a date — that is the frontmatter the convention means, and
-# a doc without it is the drift this gate catches.
+# Every doc under docs/ opens with a title line and a `Status:` line naming a
+# state and a date. A doc without that header is the drift this gate catches.
 #
 # TWO WAYS TO NAME THE CHANGE SET, matching self-hygiene.sh:
 #

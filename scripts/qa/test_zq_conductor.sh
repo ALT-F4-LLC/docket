@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 #
-# ZQ — THE CONDUCTOR CAPABILITY (DKT-2465; docs/tdd/claims-leases.md §4.0,
-# docs/tdd/reliability-delta.md §2's v29 amendment).
+# ZQ — THE CONDUCTOR CAPABILITY (DKT-2465).
 #
 # The seven operator verbs — step approve, step reject, step resolve, step
 # reap, run pause, run resume, run abandon — used to be token-free: "the
 # authority is repository access". This section is the process-level proof of
 # the new posture, the integration test the issue's acceptance names: a run's
 # first activation mints the capability and returns it ONCE; a caller without
-# it is refused on every verb (R9: none supplied, exit 3; R10: wrong, exit 5)
+# it is refused on every verb (none supplied, exit 3; wrong, exit 5)
 # and writes nothing; the holder is not; `run conduct` re-mints it and retires
-# the standing one; and a terminal run refuses the seat (R12, exit 4).
+# the standing one; and a terminal run refuses the seat (exit 4).
 #
 # THE STRANGER TEST. The fixture is a print shop again: a press run, then a
 # proof-reader's sign-off (a `type="human"` gate). The desk that activated the
@@ -96,8 +95,8 @@ TOML
   # ---------------------------------------------------------------------------
   # ZQ3: THE REFUSALS. An executor sharing the checkout — or anyone else
   # without the ticket — is refused on every verb, before anything is
-  # written. R9: no token at all is VALIDATION_ERROR naming both channels and
-  # the recovery verb. R10: a wrong token is AUTH_ERROR, and the refusal never
+  # written. No token at all is VALIDATION_ERROR naming both channels and
+  # the recovery verb. A wrong token is AUTH_ERROR, and the refusal never
   # echoes what was presented.
   # ---------------------------------------------------------------------------
   local ZQ_V_BEFORE ZQ_V_AFTER
@@ -199,7 +198,7 @@ TOML
   # ---------------------------------------------------------------------------
   # ZQ6: the sign-off lands under the current ticket via STDIN — the other
   # accepted channel — which reconciles this single-gate run to done. A
-  # terminal run then refuses the seat (R12).
+  # terminal run then refuses the seat.
   # ---------------------------------------------------------------------------
   DOCKET_PATH="$ZQ" run_stdin "$ZQ_TOKEN2" step approve STEP-2 --note "looks right" --authority operator --json=v2
   assert_exit "ZQ" "ZQ6_approve_via_stdin" 0
@@ -214,7 +213,7 @@ TOML
   assert_json "ZQ" "ZQ6_conduct_terminal_code" '.code' "CONFLICT"
 
   # ---------------------------------------------------------------------------
-  # ZQ7: R11 — a run activated before the capability existed asks for nothing.
+  # ZQ7: a run activated before the capability existed asks for nothing.
   # Simulated by clearing the hash, which is exactly what a migrated pre-v29
   # row holds; the verbs behave on it as they always did.
   # ---------------------------------------------------------------------------

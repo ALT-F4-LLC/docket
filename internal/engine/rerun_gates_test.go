@@ -414,7 +414,7 @@ func TestReworkPacketCarriesTheFailingGates(t *testing.T) {
 
 // TestReworkPacketOmitsPassingAndPreGates.
 //
-// PG4: a pre-gate is an INPUT to the step, not a judgment of it, so it must not
+// A pre-gate is an INPUT to the step, not a judgment of it, so it must not
 // appear in the list of reasons the step came back. And a gate that passed is
 // not a reason at all — listing it would invite a classifier to weigh it.
 func TestReworkPacketOmitsPassingAndPreGates(t *testing.T) {
@@ -458,7 +458,7 @@ func TestReworkPacketOmitsPassingAndPreGates(t *testing.T) {
 	}
 }
 
-// TestReworkPacketTakesTheLastAttemptPerGate is F4's rule, applied here.
+// TestReworkPacketTakesTheLastAttemptPerGate applies the last-attempt rule here.
 //
 // A gate that failed twice and passed on the third try DID NOT FAIL. A packet
 // listing all three attempts would invite a classifier to conclude the opposite
@@ -495,6 +495,6 @@ func TestReworkPacketTakesTheLastAttemptPerGate(t *testing.T) {
 
 	if len(res.Gates) != 0 {
 		t.Errorf("gates = %+v; the last attempt PASSED, so this gate is not a "+
-			"reason the step came back (F4)", res.Gates)
+			"reason the step came back", res.Gates)
 	}
 }

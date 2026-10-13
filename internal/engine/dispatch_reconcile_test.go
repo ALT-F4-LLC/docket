@@ -29,7 +29,7 @@ func TestReconcileRunsAllThreeStages(t *testing.T) {
 	completeWithoutUsage(t, conn, e, implID)
 
 	// The premise: without the back-fill the step is OWING. A plain close no
-	// longer refuses over a freshly recorded step (D7 gives it
+	// longer refuses over a freshly recorded step (the grace gives it
 	// `dispatch.grace`), so the ungraced view is where the debt shows; past
 	// the grace the close would refuse as it always did.
 	if _, err := e.CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS+graceMS(t, conn)+1); err == nil {

@@ -5,18 +5,20 @@ import (
 	"time"
 )
 
-// The gate seam (TDD §5.6). The rule it encodes:
+// The gate seam. The rule it encodes:
 //
-//	At S3, everything about gates is real except the subprocess.
+//	With the pass-through runner, everything about gates is real except the
+//	subprocess.
 //
 // Parsed and stored gates, `pre` ordering, fence harvesting, the snapshot and
 // its hash, the saga's gate stage, the `gate-started` event, the recorded
 // result, resume-after-crash re-entry, and routing over the verdict are ALL
-// real at this stage. S4 adds the spawn, the trust matching, argv resolution,
-// and capture — and it changes one constructor call, because the saga is
-// written against this interface and nothing else.
+// real without a spawn. The real runner adds the spawn, the trust matching,
+// argv resolution, and capture — and it changes one constructor call, because
+// the saga is written against this interface and nothing else.
 
-// GateSpec is one gate to run, normalized from §11.1's two spellings.
+// GateSpec is one gate to run, normalized from the workflow's two gate
+// spellings.
 type GateSpec struct {
 	// Name is the trusted gate name.
 	Name string
@@ -25,25 +27,25 @@ type GateSpec struct {
 	// file. Core reads the tag; what the commands mean is never its business.
 	Source string
 	// Pre marks a gate that runs at claim, with its results included in the
-	// context bundle, rather than in order inside `complete` (§11.1).
+	// context bundle, rather than in order inside `complete`.
 	Pre bool
 	// Commands are the harvested fence lines, verbatim, for a `fence:` gate.
 	// They are carried rather than re-read so what runs is what was hashed at
-	// activation — a post-activation edit cannot inject (engine-spec §4).
+	// activation — a post-activation edit cannot inject.
 	Commands []string
 	// CommandHashes are the SHA-256s activation stored alongside each command,
 	// positionally aligned with Commands.
 	//
-	// S4 re-verifies each one against its stored command BEFORE spawning
-	// (gates-trust §7.3 step 3). S3's snapshot already closes "the issue body
-	// cannot inject"; this closes the narrower "the stored row cannot be
-	// swapped". A direct database write is outside §2's trust boundary, but it
-	// costs one hash to detect and a mismatch is refused rather than run.
+	// The real runner re-verifies each one against its stored command BEFORE
+	// spawning. The activation snapshot already closes "the issue body cannot
+	// inject"; this closes the narrower "the stored row cannot be swapped". A
+	// direct database write is outside the trust boundary, but it costs one
+	// hash to detect and a mismatch is refused rather than run.
 	CommandHashes []string
 }
 
 // StepContext is the step a gate runs for. It is deliberately thin at this
-// stage: the pass-through runner reads none of it, and S4's real runner needs
+// stage: the pass-through runner reads none of it, and the real runner needs
 // the identity and the working directory, not the closure.
 type StepContext struct {
 	Instance string
@@ -125,11 +127,11 @@ type StepContext struct {
 	FilePins map[string]string
 }
 
-// GateResult is one gate's outcome, in §11.4's `gate result` shape.
+// GateResult is one gate's outcome, in the `gate result` shape.
 //
-// `Stub` is the field that makes the S3->S4 window safe. Every result this
-// stage records carries `stub: true`, so an operator inspecting a run can tell
-// a stubbed gate from a real one. A silent pass-through that looked identical
+// `Stub` is the field that makes the pass-through window safe. Every result the
+// pass-through records carries `stub: true`, so an operator inspecting a run
+// can tell a stubbed gate from a real one. A silent pass-through that looked identical
 // to a real pass would be a trap for exactly the window where gates are
 // specified but not yet executed — a green run would read as gate coverage it
 // does not have.
@@ -144,14 +146,14 @@ type GateResult struct {
 	Stub       bool     `json:"stub,omitempty"`
 }
 
-// Gate verdicts, per §11.4.
+// Gate verdicts.
 const (
 	VerdictPass = "pass"
 	VerdictFail = "fail"
-	// VerdictUnmatched is a FIRST-CLASS OUTCOME, added at S4 (gates-trust §6.2).
+	// VerdictUnmatched is a FIRST-CLASS OUTCOME, added with the real runner.
 	//
-	// §4, verbatim: "each must match a trust entry … or it is NOT EXECUTED and
-	// reported as unmatched." It is not a pass, not a skip, and not an error
+	// Each command must match a trust entry, or it is NOT EXECUTED and is
+	// reported as unmatched. It is not a pass, not a skip, and not an error
 	// that aborts the run: the step routes per its `on_fail`, because a
 	// workflow whose check cannot run has not passed its check. The opposite
 	// reading — "we couldn't check, so carry on" — is precisely what makes a
@@ -168,14 +170,14 @@ const (
 	VerdictSkipped = "skipped"
 )
 
-// GateRunner executes one gate and returns its result. S3 ships
-// PassThroughRunner; S4 ships the real one. The saga is written against this
-// interface, so S4 changes one constructor call and nothing else.
+// GateRunner executes one gate and returns its result. PassThroughRunner and
+// the real runner both implement it. The saga is written against this
+// interface, so swapping runners changes one constructor call and nothing else.
 type GateRunner interface {
 	Run(ctx context.Context, g GateSpec, sc StepContext) (GateResult, error)
 }
 
-// PassThroughRunner is the S3 implementation: it returns a passing, stubbed
+// PassThroughRunner is the stub implementation: it returns a passing, stubbed
 // result WITHOUT TOUCHING THE PROCESS TABLE.
 //
 // Two consequences are asserted as tests, and stated here so neither is
@@ -186,9 +188,9 @@ type GateRunner interface {
 type PassThroughRunner struct{}
 
 // Run returns `{verdict: "pass", exit: 0, stub: true}`. It never spawns
-// anything: §6's "No subprocess ever executes inside a transaction" holds
-// trivially here, and it will still hold at S4 because the saga's gate stage is
-// its own transaction-free stage.
+// anything: "no subprocess ever executes inside a transaction" holds trivially
+// here, and it still holds for the real runner because the saga's gate stage
+// is its own transaction-free stage.
 func (PassThroughRunner) Run(_ context.Context, g GateSpec, _ StepContext) (GateResult, error) {
 	return GateResult{
 		Gate:    g.Name,
@@ -199,5 +201,5 @@ func (PassThroughRunner) Run(_ context.Context, g GateSpec, _ StepContext) (Gate
 }
 
 // compile-time proof the stub satisfies the seam, so a change to the interface
-// breaks here rather than at the S4 swap.
+// breaks here rather than at the runner swap.
 var _ GateRunner = PassThroughRunner{}

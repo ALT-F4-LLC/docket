@@ -130,7 +130,7 @@ type integrationCandidate struct {
 // is asked of git again.
 //
 // It runs inside the caller's transaction; the git questions run only after
-// it ends (§6: no subprocess inside one) — the same split
+// it ends (no subprocess inside one) — the same split
 // staleTargetCandidates/staleTargets already use for the identical reason.
 func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integrationCandidate, error) {
 	artifacts, err := db.ListRunArtifactsTx(tx, runID)
@@ -368,7 +368,7 @@ func (e *Engine) integrationVerdict(
 	}
 	candidates, err := integrationCandidatesTx(tx, sched, runID)
 	// NEVER COMMITTED: this pass only reads, and the git questions below must
-	// run with no transaction open (§6).
+	// run with no transaction open.
 	tx.Rollback()
 	if err != nil {
 		return nil, nil, err

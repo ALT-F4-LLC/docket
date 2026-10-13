@@ -11,10 +11,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket guard` — TDD §6.12.
+// `docket guard`.
 //
 // Guards are HOOK PREDICATES, not ordinary verbs, and their contract is
-// different: EXIT 0 ALLOW / EXIT 2 DENY WITH REASON (§2), independent of the
+// different: EXIT 0 ALLOW / EXIT 2 DENY WITH REASON, independent of the
 // error taxonomy.
 //
 // Exit 2 collides numerically with NOT_FOUND's exit 2, and that is INTENTIONAL
@@ -329,7 +329,7 @@ func guardProjectScope(cmd *cobra.Command) int {
 	return getProjectID(cmd)
 }
 
-// optionalRunFlag resolves the OPTIONAL `--run` of `guard record` (G4) and
+// optionalRunFlag resolves the OPTIONAL `--run` of `guard record` and
 // `guard gate`.
 //
 // An absent flag is run 0, meaning "every non-terminal run" — matching `guard
@@ -360,10 +360,10 @@ func requiredRunFlag(cmd *cobra.Command) (int, error) {
 	return parseRunFlag(ref)
 }
 
-// readProposedRows reads `--rows FILE`, or stdin for "-" (G6).
+// readProposedRows reads `--rows FILE`, or stdin for "-".
 //
 // It returns nil when the flag is absent, which the engine distinguishes from an
-// empty array: the first asks only the reap half (G7), the second proposes
+// empty array: the first asks only the reap half, the second proposes
 // spawning nothing and is compared against the manifest like any other batch.
 func readProposedRows(cmd *cobra.Command) ([]byte, error) {
 	path, _ := cmd.Flags().GetString("rows")
@@ -388,7 +388,7 @@ func readProposedRows(cmd *cobra.Command) ([]byte, error) {
 
 // guardResult is the allow payload. A denial does not use it: it goes out
 // through the error channel so the JSON envelope carries the reason in `error`,
-// which is where §6.12 puts it.
+// which is where a denial belongs.
 type guardResult struct {
 	Allowed bool `json:"allowed"`
 }
@@ -402,8 +402,8 @@ func emitGuard(cmd *cobra.Command, verdict *engine.GuardVerdict) error {
 	}
 
 	// The denial rides the error channel, which puts the reason on stderr in
-	// human mode and into the envelope's `error` under --json — exactly where
-	// §6.12 puts it — and exits 2 via the code above.
+	// human mode and into the envelope's `error` under --json, and exits 2 via
+	// the code above.
 	return cmdErr(fmt.Errorf("%s", verdict.Reason), output.ErrNotFound)
 }
 
@@ -417,7 +417,7 @@ func init() {
 			"Answer over every project's runs, not just the current project's")
 	}
 
-	// `gate`'s and `record`'s --run are OPTIONAL (G4) and `spawn`'s is
+	// `gate`'s and `record`'s --run are OPTIONAL and `spawn`'s is
 	// required unless --active is given (DKT-1287), so they are registered
 	// separately rather than in a shared loop — a loop would hide exactly the
 	// difference that matters.

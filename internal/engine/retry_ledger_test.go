@@ -166,7 +166,7 @@ on_fail = "waiting-human"
 	testsupport.Must(t, err, "fail after retry: %v", err)
 	if got := stepStatus(t, conn, "flaky@0"); got != db.StepPending {
 		t.Errorf("status = %q after the first post-retry failure, want %q — "+
-			"§2's \"retry resets attempts\" is exactly this budget refresh",
+			"\"retry resets attempts\" is exactly this budget refresh",
 			got, db.StepPending)
 	}
 }

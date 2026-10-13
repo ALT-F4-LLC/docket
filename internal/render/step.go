@@ -13,7 +13,7 @@ import (
 // issue and run it belongs to, an opaque executor hint, an opaque class, a
 // retry count, a cost, and a TTL. Nothing names an instance concept, and the
 // genericity gate (scripts/qa/genericity.sh) checks these bytes like any other
-// core surface (§6.11, docs/design/genericity.md).
+// core surface.
 
 // RenderStepRows renders a `next --run` result as a table.
 func RenderStepRows(rows []model.StepRow) string {
@@ -49,7 +49,7 @@ func RenderStepRows(rows []model.StepRow) string {
 
 // RenderStepDetail renders one step for `step show`.
 //
-// The status shown is the EFFECTIVE one (§6.2) — computed at read, never
+// The status shown is the EFFECTIVE one — computed at read, never
 // written back — so a step whose lease lapsed reads as pending here even though
 // the row still carries the stale owner.
 func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string, expiresMS int64) string {
@@ -135,7 +135,7 @@ func RenderStepDetail(row model.StepRow, routing, sagaStage string, owner string
 	if routing != "" {
 		fmt.Fprintf(&b, "  routing:   %s\n", routing)
 	}
-	// A step mid-saga is engine-owned and needs no lease to advance (§6.8);
+	// A step mid-saga is engine-owned and needs no lease to advance;
 	// showing the resume point is how an operator sees that rather than
 	// wondering why an unclaimed step is not `done`.
 	if sagaStage != "" {

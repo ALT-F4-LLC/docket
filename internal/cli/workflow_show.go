@@ -174,7 +174,7 @@ func stepSiblings(step *workflow.Step) int {
 //
 // `expected_cost` is PER EXPANDED SIBLING: expansion copies the declared value
 // onto every sibling row, and each sibling claims separately, so the budget
-// floor accrues it once per sibling (internal/engine/budget.go §4.3 sums the
+// floor accrues it once per sibling (internal/engine/budget.go sums the
 // per-claim events). A four-hint step declaring 0.60 therefore contributes 2.40.
 func stepExpectedCost(step *workflow.Step) float64 {
 	if step.ExpectedCost == nil {
@@ -189,7 +189,7 @@ func stepExpectedCost(step *workflow.Step) float64 {
 // does not show costs".
 //
 // A declared `expected_cost = 0` renders as `cost=-` too: registration
-// materializes the §11.1 default into the parsed form (applyDefaults), so an
+// materializes the default into the parsed form (applyDefaults), so an
 // absent field and an explicit zero are the same stored value by the time this
 // reads it, and both contribute nothing to the floor.
 func describeStepCost(step *workflow.Step) string {
@@ -206,7 +206,7 @@ func describeStepCost(step *workflow.Step) string {
 		out = fmt.Sprintf("cost=%.2f x%d = %.2f", declared, n, declared*float64(n))
 	}
 	// A `loop` step is not expanded at ordinal 0 at all: it instantiates once
-	// per loop entry (§11.3 (3)). The total counts one entry, which is the
+	// per loop entry. The total counts one entry, which is the
 	// floor — every additional fix round costs this much again.
 	if step.Loop {
 		out += " per loop entry"
@@ -253,7 +253,7 @@ func renderMatch(m *workflow.Match) string {
 	return b.String()
 }
 
-// describeStepClass renders which of the four §11.1 alternatives a step
+// describeStepClass renders which of the four class alternatives a step
 // declares, with its opaque hint. The hint is echoed, never interpreted.
 func describeStepClass(step *workflow.Step) string {
 	switch step.StepClass() {

@@ -19,7 +19,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The complete saga — TDD §6.8. §2 verbatim is the specification:
+// The complete saga. The specification:
 //
 //	`complete` is the specified saga — artifact+payload validation → gates
 //	one-by-one → routing — with panel-hardened semantics: THE TOKEN RETIRES
@@ -34,7 +34,7 @@ import (
 //	0      null          authorize holder; validate artifact size/shape;
 //	                     validate the payload against the step's declared
 //	                     `payload = schema@ver`, from the run's PINNED
-//	                     bytes (§4.8)                                   token REQUIRED
+//	                     bytes                                          token REQUIRED
 //	1      recorded      insert artifact; RETIRE THE TOKEN; status ->
 //	                     gated; refresh activity_ms                     last needing it
 //	2..N   gate:<name>   one gate: write gate-started, run it OUTSIDE
@@ -64,16 +64,16 @@ type CompleteOptions struct {
 	// WorkDir is `--worktree`: the checkout the work actually happened in.
 	// Persisted on the step at stage 0 and read by the diff stage, so a
 	// conductor recording on behalf of an executor in another worktree
-	// captures THAT tree rather than its own (G7/G8). Empty means "the
+	// captures THAT tree rather than its own. Empty means "the
 	// invoking checkout", resolved at diff time.
 	WorkDir string
 	// Artifact is the body from --artifact-file.
 	Artifact []byte
 	// Payload is the JSON from --payload-file, or nil.
 	Payload []byte
-	// Usage is `--usage`. It is STORED and ENFORCES NOTHING until S6 — the same
-	// reasoning as `--budget`: the wire shape is §11.4's and it lands whole, so
-	// the S6 upgrade adds enforcement rather than a flag.
+	// Usage is `--usage`. It is STORED and ENFORCES NOTHING here — the same
+	// reasoning as `--budget`: the wire shape lands whole, so enforcement is
+	// added later rather than a flag.
 	Usage string
 	// Metadata is `--metadata`, opaque KV merged onto the step's own.
 	Metadata string
@@ -91,16 +91,16 @@ type CompleteOptions struct {
 
 // Engine carries the two execution seams and drives the saga.
 //
-// The runners are fields rather than package-level values precisely so S4 and
-// S5 swap them by constructing a different Engine — "one constructor call and
-// nothing else" (§5.6, §6.13).
+// The runners are fields rather than package-level values precisely so a
+// caller swaps them by constructing a different Engine — one constructor call
+// and nothing else.
 type Engine struct {
 	Gates   GateRunner
 	Actions ActionRunner
-	// DiffFn computes an issue's VCS diff over its snapshotted scope (§6.7.1
-	// D1). It is a field so a test can supply a deterministic one: the real
-	// implementation shells out to git, which is THE ONE declared VCS coupling
-	// (engine-spec §7), and a test that invoked it would depend on the working
+	// DiffFn computes an issue's VCS diff over its snapshotted scope. It is a
+	// field so a test can supply a deterministic one: the real implementation
+	// shells out to git, which is THE ONE declared VCS coupling, and a test
+	// that invoked it would depend on the working
 	// tree it is supposed to prove immunity from.
 	DiffFn func(dir, base string, scope []string) (string, error)
 	// HeadFn resolves a checkout's current HEAD commit, for the round-delta
@@ -188,20 +188,17 @@ type Engine struct {
 	beforeCloseCAS func(tx *sql.Tx, dispatchID int)
 }
 
-// NewEngine builds the S5 engine: the REAL gate runner, the REAL action runner,
-// and the real git diff.
+// NewEngine builds the production engine: the REAL gate runner, the REAL action
+// runner, and the real git diff.
 //
-// THIS IS THE CONSTRUCTOR SWAP engine-spine §6.13 promised — "the saga is
-// written against the interface, so S5 changes one constructor call and nothing
-// else". The promise holds FOR THE SEAM'S INVOCATION: `runRoutingStage` calls
+// THIS IS THE CONSTRUCTOR SWAP: the saga is written against the interface, so
+// switching to the real runners changes one constructor call and nothing else.
+// That holds FOR THE SEAM'S INVOCATION: `runRoutingStage` calls
 // `e.Actions.Run(...)` outside every transaction with a fully-populated
-// ActionSpec, and that call site is where it always was.
-//
-// docs/tdd/payloads-thresholds.md §6.4 records honestly the four places more
-// moves — the seam's return shape (M-a), the routing stage's `held` branch
-// (M-b), DecideStepWith's materialized branch (M-c), and stage 0's schema
-// validation with the threshold's resolver (M-d). None deviates from an
-// engine-spec line, so the note is not an amendment.
+// ActionSpec, and that call site is where it always was. Four other places
+// move with it: the seam's return shape, the routing stage's `held` branch,
+// DecideStepWith's materialized branch, and stage 0's schema validation with
+// the threshold's resolver.
 //
 // The repo root is resolved HERE rather than passed by every call site, so the
 // four `internal/cli` callers are genuinely unchanged. A repo that cannot be
@@ -252,10 +249,10 @@ func (e *Engine) CompleteStep(conn *sql.DB, stepID int, opts CompleteOptions) er
 }
 
 // RunActionStep enters an action step's saga ENGINE-SIDE — no claim, no token,
-// no worker artifact (§6.15 as amended).
+// no worker artifact.
 //
 // It is the other half of `claim` refusing an action step. Action steps are the
-// engine's deterministic half (AC-2): the saga computes the builtin from the
+// engine's deterministic half: the saga computes the builtin from the
 // step's declared `inputs`, records the artifact the computation produced, and
 // routes. Nothing a worker could supply belongs in that sequence, which is why
 // there is no stage-0 equivalent here rather than a stage 0 with its checks
@@ -328,29 +325,29 @@ func (e *Engine) enterActionSaga(conn *sql.DB, step *db.Step, nowMS int64) error
 func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) error {
 	// ---- Validation, BEFORE the transaction opens. -------------------------
 	//
-	// R12: an artifact over the cap is refused by size, naming both numbers. A
+	// An artifact over the cap is refused by size, naming both numbers. A
 	// refusal that happens before anything is locked costs nothing and writes
-	// nothing — which is what the version-unchanged assertions of §6.9 check.
+	// nothing — which is what the version-unchanged assertions check.
 	if len(opts.Artifact) > db.ArtifactMaxBytes {
 		return validationErr(
 			"artifact is %d bytes, over the %d-byte cap; reduce it or record a "+
 				"reference instead", len(opts.Artifact), db.ArtifactMaxBytes)
 	}
 
-	// The metadata cap, measured on the RAW INPUT
-	// (docs/tdd/completion-metadata.md §1.1.1). It sits with R12's artifact cap
+	// The metadata cap, measured on the RAW INPUT. It sits with the artifact cap
 	// and for the same reason: a size refusal costs nothing and writes nothing.
 	//
-	// The ORDER of the two content checks is fixed here as C5 fixes R12's and
-	// the schema's — an operator debugging an oversized input should not get a
-	// different message depending on which check happened to run first.
+	// The ORDER of the two content checks is fixed here, as the artifact cap's
+	// order against the schema is fixed below — an operator debugging an
+	// oversized input should not get a different message depending on which
+	// check happened to run first.
 	if err := validateMetadataSize(opts.Metadata); err != nil {
 		return err
 	}
 
-	// Gaps take R12's cap each, and an EMPTY gap refuses: recording "something
-	// is out of scope here" with no content is the evaporating-residue failure
-	// this channel exists to end (DKT-72).
+	// Gaps take the artifact cap each, and an EMPTY gap refuses: recording
+	// "something is out of scope here" with no content is the
+	// evaporating-residue failure this channel exists to end (DKT-72).
 	for i, gap := range opts.Gaps {
 		if len(gap) > db.ArtifactMaxBytes {
 			return validationErr(
@@ -364,10 +361,9 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		}
 	}
 
-	// Shape validation, unchanged from S3: a payload must be a JSON array of
-	// objects, which is the shape a threshold aggregates over. For a step that
-	// declares NO `payload` this is still the whole of it (§4.8 C1) — no new
-	// refusal exists for such a step.
+	// Shape validation: a payload must be a JSON array of objects, which is the
+	// shape a threshold aggregates over. For a step that declares NO `payload`
+	// this is the whole of it — no other refusal exists for such a step.
 	if _, err := parsePayload(opts.Payload); err != nil {
 		return err
 	}
@@ -390,7 +386,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 			step.Instance, step.StepName)
 	}
 
-	// C6: AUTHORIZATION PRECEDES CONTENT, ALWAYS. A non-holder must not learn
+	// AUTHORIZATION PRECEDES CONTENT, ALWAYS. A non-holder must not learn
 	// the schema by probing it, so the holder is checked here — before any
 	// schema is consulted — and again inside the transaction, which stays the
 	// authority. The read is advisory and the write-side check is unchanged;
@@ -399,15 +395,15 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
-	// C2-C5: the declared payload schema. Still before the transaction opens,
-	// so a refusal writes nothing and leaves `row_version` where it was — the
-	// assertion every refusal in §6.9 carries.
+	// The declared payload schema. Still before the transaction opens, so a
+	// refusal writes nothing and leaves `row_version` where it was — the
+	// assertion every refusal test carries.
 	//
-	// C5 pins the ORDER of the two content checks: R12's size cap above, then
-	// the schema. Both are pre-transaction, and fixing the sequence is what
-	// makes the error a 2 MiB invalid payload produces stable — an operator
-	// debugging one should not get a different message depending on which check
-	// happened to run first.
+	// The ORDER of the two content checks is fixed: the artifact size cap
+	// above, then the schema. Both are pre-transaction, and fixing the
+	// sequence is what makes the error a 2 MiB invalid payload produces stable
+	// — an operator debugging one should not get a different message depending
+	// on which check happened to run first.
 	if err := validateDeclaredPayload(conn, step, spec, opts.Payload); err != nil {
 		return err
 	}
@@ -418,10 +414,10 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	}
 	defer tx.Rollback()
 
-	// R1-R4 and R9, from the SHARED authorize (§6.6): the same three-way
-	// refusal issues use, so the step matrix cannot drift from the issue one.
-	// R9 falls out of this for free: a step past stage 1 has no lease, so a
-	// second `complete` presents a token that holds nothing — AUTH_ERROR.
+	// The lease refusals, from the SHARED authorize: the same three-way refusal
+	// issues use, so the step matrix cannot drift from the issue one. A second
+	// `complete` is refused for free: a step past stage 1 has no lease, so it
+	// presents a token that holds nothing — AUTH_ERROR.
 	if _, err := db.AuthorizeStepTx(tx, step.ID, opts.Token, opts.NowMS); err != nil {
 		return err
 	}
@@ -442,7 +438,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
-	// The declared worktree persists WITH the artifact (G8), because the saga
+	// The declared worktree persists WITH the artifact, because the saga
 	// resumes lazily: the diff stage may run under a later invocation from a
 	// different cwd entirely, and only a persisted fact survives that gap. The
 	// in-memory copy keeps THIS invocation's diff correct too.
@@ -531,14 +527,14 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
-	// `--usage` ALSO lands in the ledger (§4.9 B34). The event above keeps
+	// `--usage` ALSO lands in the ledger. The event above keeps
 	// carrying the blob — removing it would break the replay property — and
 	// this stage adds the rows the report sums and `max(reported, floor)` reads
 	// when `budget.unit` names a unit.
 	//
 	// In THIS transaction, with the artifact and the event, because the three
 	// are one fact: a step that recorded an artifact and no ledger row would
-	// look to group 2's discrepancy probe exactly like a relay that forgot to
+	// look to the discrepancy probe exactly like a relay that forgot to
 	// report.
 	if err := recordUsageTx(tx, step, opts.Usage, opts.NowMS); err != nil {
 		return err
@@ -757,9 +753,9 @@ func (e *Engine) ResumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 			if advanced {
 				// The routing stage this call committed may have recorded an
 				// `issue.diff` round record, which is the moment a downstream
-				// step's pre-gate target first exists (gates-trust §7.6.2
-				// PG6). Best-effort, outside every transaction, after the
-				// saga is closed: nothing here can fail a completed step.
+				// step's pre-gate target first exists. Best-effort, outside every
+				// transaction, after the saga is closed: nothing here can fail a
+				// completed step.
 				e.startDetachedPreGates(conn, step.RunID, nowMS)
 			}
 			return nil // Complete.
@@ -790,7 +786,7 @@ func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, err
 	if err != nil {
 		return false, err
 	}
-	// H5: a materialized held step's spec is SYNTHESIZED from the pinned
+	// A materialized held step's spec is SYNTHESIZED from the pinned
 	// definition rather than found in it, so every `spec == nil` site routes
 	// through this resolver instead of erroring.
 	tally, err := loadHoldTally(conn, step.RunID)
@@ -803,7 +799,7 @@ func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, err
 			step.Instance, step.StepName)
 	}
 
-	// H9: `held` is "NO ADVANCE" until the question is answered. Every later
+	// `held` is "NO ADVANCE" until the question is answered. Every later
 	// `next`/`claim`/`complete` invocation therefore costs one read and changes
 	// nothing, rather than spinning against the database.
 	if step.SagaStage == db.SagaHeld {
@@ -814,7 +810,7 @@ func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, err
 		if !resolved {
 			return false, nil
 		}
-		// H10: the threshold is evaluated EXACTLY ONCE, after resolution. The
+		// The threshold is evaluated EXACTLY ONCE, after resolution. The
 		// alternative — route now over the unheld subset, re-route after —
 		// requires UN-ROUTING, and there is no un-route: a `fix-loop` entry
 		// supersedes instances and increments a counter.
@@ -825,9 +821,9 @@ func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, err
 
 	switch {
 	case gate != nil:
-		// §7.5 A1: a gate whose `gate-started` committed but whose result did
+		// A gate whose `gate-started` committed but whose result did
 		// not is a STARTED-BUT-UNRECORDED gate — the crash window
-		// at-least-once creates. Detectable exactly as A1 says: this stage is
+		// at-least-once creates. Detectable directly: this stage is
 		// the one about to run, and it already has a `gate-started` event with
 		// no result row to match.
 		//
@@ -851,7 +847,7 @@ func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, err
 // nextSagaStage decides which stage comes after the step's current one.
 //
 // The gate ORDER is the definition's declared order, and `pre` gates are
-// excluded: §11.1 makes a `pre` gate run at CLAIM with its results in the
+// excluded: a `pre` gate runs at CLAIM with its results in the
 // context bundle, not in sequence inside `complete`.
 func nextSagaStage(step *db.Step, spec *workflow.Step) (stage string, gate *workflow.Gate) {
 	gates := completionGates(spec)
@@ -902,18 +898,15 @@ func completionGates(spec *workflow.Step) []workflow.Gate {
 
 // runGateStage is stages 2..N. THE TRANSACTION BOUNDARIES ARE THE POINT.
 //
-// §6's "no subprocess ever executes inside a transaction" is structural here:
+// "No subprocess ever executes inside a transaction" is structural here:
 // the stage commits its `gate-started` event, CLOSES THE TRANSACTION, invokes
-// the runner, then opens a NEW transaction to record the result. At S3 the
-// runner does nothing, but the boundaries are already where S4 needs them —
-// which is the entire reason for landing the saga now rather than with the
-// gates that will use it.
+// the runner, then opens a NEW transaction to record the result.
 func (e *Engine) runGateStage(
 	conn *sql.DB, step *db.Step, gate workflow.Gate, stage string, nowMS int64,
 ) error {
 	// ---- Transaction A: announce the spawn. --------------------------------
 	//
-	// §2: "a `gate-started` event precedes each spawn". It commits BEFORE the
+	// A `gate-started` event precedes each spawn. It commits BEFORE the
 	// runner is invoked, so the at-least-once discipline is observable: a crash
 	// between here and the result leaves a started-but-unrecorded gate, which
 	// is exactly the state a resume must handle and can only see if this
@@ -984,9 +977,9 @@ func (e *Engine) runGateStage(
 	}
 	defer txB.Rollback()
 
-	// M-a: results land in `gate_results` (v8), not in the `steps.gate_trail`
-	// JSON blob. That migration IS the recorded exit condition, and the
-	// trail column stops being written here (G3) while keeping its old bytes.
+	// Results land in `gate_results` (v8), not in the `steps.gate_trail` JSON
+	// blob. That migration IS the recorded exit condition, and the trail
+	// column stops being written here while keeping its old bytes.
 	if err := recordGateRows(txB, step, gate.Name, rows, nowMS); err != nil {
 		return err
 	}
@@ -1015,7 +1008,7 @@ func (e *Engine) enterRouting(conn *sql.DB, step *db.Step, nowMS int64) error {
 }
 
 // runRoutingStage is stage N+1: ONE TRANSACTION SPANNING step, issue mirror,
-// run, and events (§2).
+// run, and events.
 //
 // The four are one transaction because they are one fact — this step ended this
 // way — and a partial commit is a run whose step says `done` while its issue
@@ -1026,8 +1019,8 @@ func (e *Engine) runRoutingStage(
 ) error {
 	// ---- Outside the transaction: the two subprocess-shaped computations. --
 	//
-	// §6.7.1 D1 puts the diff computation HERE, before the transaction opens,
-	// because it is a git subprocess and §6 forbids one inside a transaction.
+	// The diff computation runs HERE, before the transaction opens, because
+	// it is a git subprocess and none may run inside a transaction.
 	// The artifact INSERT is inside.
 	var (
 		diffBody    string
@@ -1052,20 +1045,20 @@ func (e *Engine) runRoutingStage(
 		diffFacts *DiffFacts
 	)
 	if isExecutorStep(step) && stepHoldsTree(spec) {
-		// D1 as amended by DKT-75: recomputed at the completion of every
+		// Since DKT-75 the diff is recomputed at the completion of every
 		// executor step THAT HOLDS THE TREE — the same `holds_tree`
 		// declaration scope exclusion consults, and the only step property
 		// that says "this step changed what a diff would show". Recomputing at
-		// every executor completion was the defect the amendment closes:
+		// every executor completion was the defect this closes:
 		// read-shaped fanout siblings each re-diffed the LIVE tree at their
 		// own record time, so a diff taken after the change was committed came
 		// out empty and one taken beside a sibling's in-flight probe carried
 		// the probe (36 of RUN-5's 71 issue.diff artifacts hashed empty).
 		//
-		// A non-holding step records nothing and its consumers resolve D3 to
-		// the artifact the last HOLDING step recorded — the reviewed object,
+		// A non-holding step records nothing and its consumers resolve to the
+		// artifact the last HOLDING step recorded — the reviewed object,
 		// pinned at the moment the change existed, byte-identical for every
-		// sibling. D2 still excludes action/human/vote steps: they change no
+		// sibling. Action/human/vote steps are still excluded: they change no
 		// tree either.
 		var err error
 		diffBody, diffPayload, err = e.computeIssueDiff(conn, step)
@@ -1193,7 +1186,7 @@ func (e *Engine) runRoutingStage(
 		}
 	}
 
-	// §5: the order the threshold evaluates under, and the validator an action's
+	// The order the threshold evaluates under, and the validator an action's
 	// output is checked against, both come from the schema the run PINNED. They
 	// are resolved ONCE here and threaded into both consumers, so a step cannot
 	// aggregate under one document and route under another.
@@ -1205,11 +1198,11 @@ func (e *Engine) runRoutingStage(
 	// RESUMING FROM A HOLD, the action does NOT re-run. Its artifact and its
 	// `action_results` rows are already recorded, and recomputing would produce
 	// a second result — possibly a second hold — for a question an operator has
-	// just answered. This is the other half of H10's "exactly once".
+	// just answered. This is the other half of "evaluated exactly once".
 	resumedFromHold := step.SagaStage == db.SagaHeld
 
 	// The action seam, also outside every transaction: the real runner may spawn
-	// a user-trusted command, and §6's "no subprocess ever executes inside a
+	// a user-trusted command, and "no subprocess ever executes inside a
 	// transaction" is a property of THIS boundary rather than of the runner.
 	var action *ActionResult
 	if step.Kind == workflow.ClassAction && !resumedFromHold {
@@ -1247,9 +1240,9 @@ func (e *Engine) runRoutingStage(
 	}
 
 	// evaluate applies the threshold. It is a closure rather than a value
-	// because a HELD step must not evaluate it at all (H10) — except on a stale
+	// because a HELD step must not evaluate it at all — except on a stale
 	// lineage, where the routing is recorded for the ledger and nothing is
-	// materialized (H20), and where the evaluation therefore happens inside the
+	// materialized, and where the evaluation therefore happens inside the
 	// transaction that decided the lineage was stale. It is pure, so calling it
 	// there costs nothing and races nothing.
 	evaluate := func() (string, string, error) {
@@ -1350,7 +1343,7 @@ func (e *Engine) runRoutingStage(
 			routing, reason = RoutingPass, cover.reason()
 		}
 	case action != nil && action.Failed:
-		// B3: a builtin's bad params or an unorderable value, and a trusted
+		// A builtin's bad params or an unorderable value, and a trusted
 		// command's non-zero exit or unmatched name, are STEP failures routed
 		// per the step's effective `on_fail` — never engine errors that abort
 		// the saga. A workflow authoring mistake must not wedge a run.
@@ -1360,7 +1353,7 @@ func (e *Engine) runRoutingStage(
 		// Deferred. Decided inside the transaction, once the lineage is known.
 	default:
 		if resumedFromHold {
-			// §7.7.3: `reject` routes the ROUTING step per its effective
+			// `reject` routes the ROUTING step per its effective
 			// `on_fail`, SKIPPING THE THRESHOLD. `approve` falls through to the
 			// threshold, which now sees the resolved payload — `stepPayloads`
 			// already reads the step's latest artifact, so it arrives with no
@@ -1399,7 +1392,7 @@ func (e *Engine) runRoutingStage(
 	}
 	defer tx.Rollback()
 
-	// §11.3 (2)'s inert half, evaluated INSIDE the transaction that would apply
+	// The stale-lineage check, evaluated INSIDE the transaction that would apply
 	// the effects — the ordinal and the issue's `loop_count` must be read under
 	// the same lock that a concurrent loop entry would take, or the check races
 	// the thing it is checking.
@@ -1409,7 +1402,7 @@ func (e *Engine) runRoutingStage(
 	}
 
 	// The action's artifact and per-attempt records land FIRST, before any
-	// routing effect in this transaction — H4's "one transaction, or a crash
+	// routing effect in this transaction — "one transaction, or a crash
 	// leaves a held payload with nobody able to resolve it" for the holding
 	// path, and, for the routing path, what makes the CURRENT round visible to
 	// the loop-entry evidence reads (DKT-870): an action step's artifact used
@@ -1427,7 +1420,7 @@ func (e *Engine) runRoutingStage(
 		if !stale {
 			return enterHeld(tx, step, action.Held, tally, nowMS)
 		}
-		// H20: a STALE-LINEAGE hold is inert exactly as a stale-lineage routing
+		// A STALE-LINEAGE hold is inert exactly as a stale-lineage routing
 		// is. The aggregate still records its artifact and its `action_results`
 		// row — history is attributed — and it neither materializes a held step
 		// nor gates anything, because nothing downstream of it will run.
@@ -1516,7 +1509,7 @@ func (e *Engine) runRoutingStage(
 		}
 	}
 
-	// A `fix-loop` routing from a LIVE lineage is the loop entry (§11.3). It
+	// A `fix-loop` routing from a LIVE lineage is the loop entry. It
 	// runs before the step's own status is written so its outcome — entered, or
 	// bounded to `waiting-human` — decides that status. applyFixLoop re-reads
 	// StaleLineage inside the same transaction, so the outer guard is only an
@@ -1546,10 +1539,10 @@ func (e *Engine) runRoutingStage(
 		}
 	}
 
-	// THE ROUTING IS RECORDED EITHER WAY (§7.3 (3): "records the routing on the
-	// step for the ledger"). A superseded lineage's step still finished, still
-	// decided something, and the ledger still attributes it — what a stale
-	// lineage loses is its DOWNSTREAM EFFECT, not its history.
+	// THE ROUTING IS RECORDED EITHER WAY, on the step for the ledger. A
+	// superseded lineage's step still finished, still decided something, and
+	// the ledger still attributes it — what a stale lineage loses is its
+	// DOWNSTREAM EFFECT, not its history.
 	if err := db.SetStepRoutingTx(
 		tx, step.ID, routing, reason, status, class, nowMS); err != nil {
 		return err
@@ -1566,8 +1559,8 @@ func (e *Engine) runRoutingStage(
 	// A batch-covered pass spends operator authority, so it is attributed like
 	// the resolution it stands in for (DKT-546): the covering grants' counters
 	// move and the feed records which grants decided this step — in this same
-	// transaction, and BEFORE the stale guard, because §7.3 (3) records a stale
-	// lineage's routing for the ledger too, and an override the ledger carries
+	// transaction, and BEFORE the stale guard, because a stale lineage's
+	// routing is recorded for the ledger too, and an override the ledger carries
 	// must name its authority either way.
 	if cover != nil {
 		if err := db.CoverGateOverrideGrantsTx(tx, cover.grantIDs); err != nil {
@@ -1582,7 +1575,7 @@ func (e *Engine) runRoutingStage(
 		}
 	}
 
-	// ---- The inert guard (§7.3 (3), §11.3 (2)). ---------------------------
+	// ---- The inert guard. --------------------------------------------------
 	//
 	// "no supersede, no re-expansion, no issue status change, no loop
 	// increment". The first, second, and fourth were skipped above by not
@@ -1630,7 +1623,7 @@ func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
 // computeIssueDiff is the diff half of the routing stage: the `issue.diff`
 // body and round-record payload for step's tree as it stands NOW, computed
 // exactly as a completion records it. It runs a git subprocess, so it belongs
-// OUTSIDE every transaction (§6) — the caller inserts the artifact inside its
+// OUTSIDE every transaction — the caller inserts the artifact inside its
 // own.
 //
 // It is ONE implementation on purpose (DKT-1034). The operator re-pin
@@ -1641,8 +1634,8 @@ func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
 // same tree contains.
 //
 // The tree that gets diffed is the step's RECORDED worktree when one was
-// declared, else the invoking checkout's root — never the bare process cwd
-// (G7): a saga resumed from another directory, or a conductor recording an
+// declared, else the invoking checkout's root — never the bare process cwd:
+// a saga resumed from another directory, or a conductor recording an
 // executor's work, must capture the tree the work touched. The re-pin passes a
 // step whose WorkRoot is the checkout being pinned.
 //
@@ -1689,14 +1682,14 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	return body, payload, nil
 }
 
-// isExecutorStep reports whether a step's completion recomputes the issue diff
-// (§6.7.1 D1/D2). Fanout siblings and `loop = true` instances count: they are
-// executor steps that change the tree.
+// isExecutorStep reports whether a step's completion recomputes the issue
+// diff. Fanout siblings and `loop = true` instances count: they are executor
+// steps that change the tree.
 func isExecutorStep(step *db.Step) bool {
 	return step.Kind == workflow.ClassExecutor
 }
 
-// statusForRouting maps a routing to the step status it produces (§6.2).
+// statusForRouting maps a routing to the step status it produces.
 func statusForRouting(routing string) string {
 	switch routing {
 	case workflow.OnFailWaitingHuman:
@@ -1708,12 +1701,12 @@ func statusForRouting(routing string) string {
 	case RoutingPass:
 		return db.StepDone
 	case workflow.OnFailFixLoop:
-		// The loop ENTRY is phase 4's (§11.3). At S3 the step itself is done —
-		// its work recorded and its routing decided — and what phase 4 adds is
+		// The loop ENTRY is applyFixLoop's. The step itself is done — its
+		// work recorded and its routing decided — and what the loop adds is
 		// the instantiation the routing calls for, not a different status here.
 		return db.StepDone
 	}
-	// A step-name routing interposes that step as a successor gate (§11.2); the
+	// A step-name routing interposes that step as a successor gate; the
 	// routing step itself is done.
 	return db.StepDone
 }
@@ -1728,13 +1721,13 @@ func routingRecord(routing, reason string) string {
 // gateVerdict reads the step's recorded results and reports the overall
 // verdict. Any failing gate fails the step: gates are conjunctive.
 //
-// M-b: this reads `gate_results` (v8) rather than the trail JSON, and it knows
-// the `unmatched` verdict, which N3 makes a FAILURE for routing — not a pass
+// This reads `gate_results` (v8) rather than the trail JSON, and it knows
+// the `unmatched` verdict, which is a FAILURE for routing — not a pass
 // and not a skip.
 //
-// PG4: pre-gate rows are EXCLUDED. They are inputs to the step, not judgments
-// of it — §11.1 calls them "measure-then-judge steps", and the judging is the
-// step's job. S3 already excludes `pre` gates from completionGates; this is the
+// Pre-gate rows are EXCLUDED. They are inputs to the step, not judgments
+// of it — they make "measure-then-judge steps", and the judging is the
+// step's job. completionGates already excludes `pre` gates; this is the
 // read-side counterpart.
 //
 // It returns the UNMEASURED gates alongside the verdict (DKT-254). `skipped`
@@ -1786,10 +1779,10 @@ func verdictOverRows(rows []db.GateResultRow) (string, []string, bool) {
 // routing rows passes.
 //
 // One gate can record several commands: a fence gate records each harvested
-// line as its own row under the gate's name (§7.3 step 4), so an earlier line
-// that failed or never ran is not superseded by a later line that passed.
-// Ordinals also carry flaky re-runs (§5.6 F3), and F4 makes a command's LAST
-// attempt the one that routes. exec.RunVerifiedAttempts retries only after a
+// line as its own row under the gate's name, so an earlier line that failed or
+// never ran is not superseded by a later line that passed. Ordinals also carry
+// flaky re-runs, and a command's LAST attempt is the one that routes.
+// exec.RunVerifiedAttempts retries only after a
 // `fail` and records the retry directly after it with the same argv, so a row
 // is superseded exactly when it is a `fail` and the next row runs the same
 // non-nil argv. A row with no argv never ran a process and is never superseded.
@@ -1802,7 +1795,7 @@ func verdictOverRows(rows []db.GateResultRow) (string, []string, bool) {
 // identifies the execution holding the gate's highest ordinal. Two executions
 // recorded in the same millisecond read as one, which can only fail the gate.
 //
-// Pre-gate rows are excluded per PG4: they are inputs to the step, not
+// Pre-gate rows are excluded: they are inputs to the step, not
 // judgments of it. The routing verdict, FailedGates, and the batch override
 // cover all read this one reduction, so the gates a caller REPORTS or COVERS
 // are, by construction, the rows the saga ROUTED on (DKT-982).
@@ -1810,7 +1803,7 @@ func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
 	byGate := make(map[string][]db.GateResultRow)
 	for _, r := range rows {
 		if r.Pre {
-			continue // PG4
+			continue // a pre-gate row is an input, not a verdict
 		}
 		byGate[r.Gate] = append(byGate[r.Gate], r)
 	}
@@ -1862,7 +1855,7 @@ func unsupersededAttempts(execution []db.GateResultRow) []db.GateResultRow {
 //
 // Exit is a pointer for db.GateResultRow's reason exactly — an `unmatched` gate
 // never ran, and rendering `exit 0` for a process that does not exist reads as
-// a pass (T11).
+// a pass.
 type FailedGate struct {
 	Gate    string `json:"gate"`
 	Verdict string `json:"verdict"`
@@ -1933,7 +1926,7 @@ func parkPrecedence(verdict string) int {
 //
 // A runner that implements the richer GateExecution shape (the real one)
 // reports every attempt; one that implements only the seam's single-result
-// interface (the S3 pass-through, and the fakes tests build on it) reports one.
+// interface (the pass-through, and the fakes tests build on it) reports one.
 // Both are recorded the same way, which is what lets a test swap in a
 // spawn-counting or witness runner without the saga knowing.
 func runGate(runner GateRunner, spec GateSpec, sc StepContext) ([]GateResultRow, error) {
@@ -1966,7 +1959,7 @@ type gateExecutor interface {
 // audit row alongside.
 //
 // Ordinals continue from what the step already recorded, so a resumed gate's
-// re-run does not collide with the interrupted attempt's row (§7.5 A3) and the
+// re-run does not collide with the interrupted attempt's row and the
 // UNIQUE(step_id, gate, ordinal) index holds.
 func recordGateRows(
 	tx *sql.Tx, step *db.Step, gate string, rows []GateResultRow, nowMS int64,
@@ -1998,7 +1991,7 @@ func recordGateRows(
 			return err
 		}
 
-		// The trust decision is recorded as an AUDIT FACT (§4.5): what this run
+		// The trust decision is recorded as an AUDIT FACT: what this run
 		// considered trusted, and when. It is never consulted to authorize a
 		// spawn — a cache hit that could authorize would make `trust rm` take
 		// effect only after the cache cleared, which is a revocation failure.
@@ -2017,7 +2010,7 @@ func recordGateRows(
 // recordGateEvents writes the events that accompany one gate's recorded
 // results: the per-row exceptions, then the `gate-recorded` that closes it.
 //
-// §6.4: a refusal to execute gets its OWN event, so an operator following the
+// A refusal to execute gets its OWN event, so an operator following the
 // feed sees it as an event rather than as a result they must open and inspect.
 // `gate-rerun` marks each flaky re-run (ordinal > 0) for the same at-least-once
 // observability reason `gate-started` exists.
@@ -2026,11 +2019,11 @@ func recordGateRows(
 // The pre-gate path recorded its rows and emitted only `gate-unmatched`, so
 // every pre-gate that passed announced a `gate-started` and then closed with
 // nothing at all — a started-but-never-recorded gate in the feed, which is
-// indistinguishable from the crash `gate-started` exists to make visible. §7.6.1
-// phase 2 requires a pre-gate commit "its own `gate-started`/result commit
-// exactly as the saga's do", and PG1 forbids a pre-gate-specific path anywhere.
-// A shared writer is the only shape in which "exactly as the saga's" cannot
-// quietly stop being true again.
+// indistinguishable from the crash `gate-started` exists to make visible. A
+// pre-gate must commit its own `gate-started`/result commit exactly as the
+// saga's do, with no pre-gate-specific path anywhere. A shared writer is the
+// only shape in which "exactly as the saga's" cannot quietly stop being true
+// again.
 func recordGateEvents(
 	tx *sql.Tx, step *db.Step, gate string, rows []GateResultRow,
 ) error {
@@ -2093,7 +2086,7 @@ func recordGateEvents(
 // from that one row.
 //
 // `stub` reads StubEntry — the matched trust entry's own `stub` declaration
-// (DKT-265) — not the legacy S3-migration `Stub` field. StubEntry is what
+// (DKT-265) — not the legacy `Stub` field. StubEntry is what
 // `gate_results` (`step gates --json`) and `run report` already render as
 // `stub`, and DKT-983 asks this event to say what those surfaces already say.
 func gateOutcome(rows []GateResultRow) (verdict string, exit *int, pre, stub bool) {
@@ -2140,8 +2133,8 @@ func nonPassPrecedence(verdict string) int {
 // never ran, and `exit=0` on a gate that was refused execution would read as a
 // pass.
 //
-// `pre` MARKS THE VERDICTS THAT ROUTED NOTHING (DKT-862). A §11.1 pre-gate runs
-// at claim as an input to the step, and PG4 keeps its result out of the saga's
+// `pre` MARKS THE VERDICTS THAT ROUTED NOTHING (DKT-862). A pre-gate runs
+// at claim as an input to the step, and its result stays out of the saga's
 // verdict — so `gate-recorded ... verdict=fail` on a pre-gate was reporting a
 // failure that never blocked anything, in bytes identical to one that did. On
 // RUN-61 three such rows appeared in the feed beside the `step-routed` that
@@ -2165,7 +2158,7 @@ func nonPassPrecedence(verdict string) int {
 // for a stub was byte-identical to a real measurement. It is ABSENT rather
 // than `stub=false` for the same reason `pre` is: the marker's presence is the
 // whole signal. The caller passes StubEntry (the trust entry's own `stub`
-// declaration), never the legacy S3-migration `Stub` field — StubEntry is
+// declaration), never the legacy `Stub` field — StubEntry is
 // what every other stub-aware surface already reads.
 func gateEventData(gate, verdict string, exit *int, pre, stub bool) (string, error) {
 	fields := map[string]any{"detail": gate}
@@ -2242,24 +2235,25 @@ func stepPayloads(
 	return parsePayload([]byte(payload.String))
 }
 
-// inputPayloads is the builtin action's INPUT CHANNEL (§2, amended): the
-// concatenated payloads of the step's declared `inputs` artifacts, resolved per
-// §6.7 — `done` instances only, in declared order, ordinal-scoped at loops.
+// inputPayloads is the builtin action's INPUT CHANNEL: the concatenated
+// payloads of the step's declared `inputs` artifacts, resolved by the input
+// rule — `done` instances only, in declared order, ordinal-scoped at loops.
 //
 // It resolves through ResolveInputArtifacts rather than reimplementing the rule. The
 // resolver is the sole authority on which artifacts an input names, and the
-// loop-ordinal fallback it applies per input (§7.4) is exactly the machinery an
+// loop-ordinal fallback it applies per input is exactly the machinery an
 // aggregate inside a loop depends on; a second implementation would be a second
 // answer, and the two would diverge at the first ordinal that mattered.
 //
-// It reads the artifact ROWS rather than the §11.4 bundle, because the bundle
-// is the worker-facing shape: a `ContextInput` carries the artifact's `body`
-// and no `payload`, and the builtin reduces payloads. Both go through the same
-// resolveDeclaredInput, so there is still exactly one copy of the §6.7 rule.
+// It reads the artifact ROWS rather than the context bundle, because the
+// bundle is the worker-facing shape: a `ContextInput` carries the artifact's
+// `body` and no `payload`, and the builtin reduces payloads. Both go through
+// the same resolveDeclaredInput, so there is still exactly one copy of the
+// input rule.
 //
 // The transaction is READ-ONLY and rolled back — a scheduler snapshot is what
 // the `done`-only rule needs to be consistent, and this path has nothing to
-// commit. It runs OUTSIDE the routing transaction, before the runner, for §6's
+// commit. It runs OUTSIDE the routing transaction, before the runner, for the
 // no-subprocess-inside-a-transaction reason the context bundle is read here too.
 //
 // AN INPUT WITH AN EMPTY PAYLOAD CONTRIBUTES NOTHING AND IS NOT AN ERROR. Most
@@ -2313,12 +2307,11 @@ func inputPayloads(conn *sql.DB, step *db.Step, nowMS int64) ([]map[string]any, 
 	return out, nil
 }
 
-// parsePayload is §6.8 stage 0's SHAPE-ONLY validation: a payload must be a
-// JSON array of objects, which is the shape a threshold aggregates over.
+// parsePayload is stage 0's SHAPE-ONLY validation: a payload must be a JSON
+// array of objects, which is the shape a threshold aggregates over.
 //
-// The SCHEMA — field existence, types, ordered_enum — is S5's per §1's scope
-// table. Validating fields here would mean inventing the schema language S5 is
-// specified to define, and pinning it before its design.
+// The SCHEMA — field existence, types, ordered_enum — is checked separately,
+// by validateDeclaredPayload against the run's pinned schema.
 func parsePayload(raw []byte) ([]map[string]any, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -2328,10 +2321,10 @@ func parsePayload(raw []byte) ([]map[string]any, error) {
 		return payloads, nil
 	}
 
-	// S3 (§6.3): ONE documented tolerance. An object with exactly the keys
-	// `{stub, payload}` is unwrapped and its `payload` used.
+	// ONE documented tolerance. An object with exactly the keys `{stub,
+	// payload}` is unwrapped and its `payload` used.
 	//
-	// It exists to READ HISTORY. The S3/S4 stub runner wrapped every action
+	// It exists to READ HISTORY. The legacy stub runner wrapped every action
 	// artifact that way, and the migration deliberately does NOT rewrite those
 	// bytes — rewriting them would destroy the evidence that a computation did
 	// not run, which is the entire reason the marker exists. So the reader
@@ -2347,7 +2340,7 @@ func parsePayload(raw []byte) ([]map[string]any, error) {
 	return payloads, nil
 }
 
-// unwrapStubPayload reads the S3/S4 `{"stub":true,"payload":[…]}` wrapper.
+// unwrapStubPayload reads the legacy `{"stub":true,"payload":[…]}` wrapper.
 //
 // EXACTLY those two keys. A wider tolerance would start unwrapping objects a
 // worker meant as data, and the shape is historical rather than a format
@@ -2374,8 +2367,8 @@ func unwrapStubPayload(raw []byte) ([]map[string]any, bool) {
 
 // runAction assembles the ActionSpec and invokes the seam.
 //
-// The §11.4 context bundle is read HERE, before the runner, because assembling
-// it needs a transaction and §6 forbids a subprocess inside one. A bundle that
+// The context bundle is read HERE, before the runner, because assembling it
+// needs a transaction and no subprocess may run inside one. A bundle that
 // cannot be assembled is not fatal: a trusted command receives an empty stdin
 // and can still run, which is a better outcome than wedging a routing stage over
 // a read.
@@ -2397,8 +2390,8 @@ func (e *Engine) runAction(
 	// The step's id rides here too (DKT-1186) so every StepContext core builds
 	// names the step it describes. It does NOT reach an action child as
 	// DOCKET_STEP: an action's environment is deliberately the allowlist plus
-	// DOCKET_REPO and nothing else (gates-trust A4), and an action needs no
-	// reach-back — §11.4's context object is handed to it on stdin, inputs and
+	// DOCKET_REPO and nothing else, and an action needs no reach-back — the
+	// context object is handed to it on stdin, inputs and
 	// all, which is precisely what a gate lacked and had to go asking for.
 	sc := StepContext{
 		Instance: step.Instance, RunID: step.RunID, IssueID: step.IssueID,
@@ -2428,15 +2421,15 @@ func declaredPayloadValidator(
 	registered, err := pinnedSchema(conn, step.RunID, spec.Payload)
 	if err != nil {
 		// The refusal is deferred into the validator rather than returned:
-		// a step whose pinned schema cannot be read must FAIL ITS ACTION (B3),
+		// a step whose pinned schema cannot be read must FAIL ITS ACTION,
 		// not abort the saga.
 		return func([]byte) error { return err }
 	}
 	return registered.ValidatePayload
 }
 
-// actionContext renders the §11.4 context bundle for a trusted command's stdin,
-// exactly as `docket step context --json` emits it (§6.2).
+// actionContext renders the context bundle for a trusted command's stdin,
+// exactly as `docket step context --json` emits it.
 //
 // It is the SAME assembler `step context` uses, called rather than reproduced:
 // two renderings of one bundle would drift, and a command written against the
@@ -2482,7 +2475,7 @@ func recordActionRows(
 			return err
 		}
 
-		// The trust decision is recorded as an AUDIT FACT (§4.5), never an
+		// The trust decision is recorded as an AUDIT FACT, never an
 		// authorization shortcut: every action consults the live store on every
 		// execution, for the revocation reason that rule gives.
 		if r.ArgvSHA256 != "" {
@@ -2505,17 +2498,16 @@ func recordActionRows(
 // failed).
 //
 // Every attempt is recorded whatever the outcome, so an `unmatched` action is
-// visible rather than inferable from a routing reason (§6.3). NO ARTIFACT ON
-// FAILURE (§6.2): a computation that did not run has not produced a result to
-// record, and writing an empty one would make a failed action
-// indistinguishable downstream from a successful empty one. S2: the payload
-// recorded is the PLAIN ARRAY — the S3/S4 `{"stub":true,…}` wrapper is
-// history, never written again, and never rewritten where it already exists,
-// which is why the marker rides in `artifacts.stub` (0 on a real result)
-// instead.
+// visible rather than inferable from a routing reason. NO ARTIFACT ON FAILURE:
+// a computation that did not run has not produced a result to record, and
+// writing an empty one would make a failed action indistinguishable downstream
+// from a successful empty one. The payload recorded is the PLAIN ARRAY — the
+// legacy `{"stub":true,…}` wrapper is history, never written again, and never
+// rewritten where it already exists, which is why the marker rides in
+// `artifacts.stub` (0 on a real result) instead.
 //
-// Called inside the caller's own transaction — H4's "one transaction, or a
-// crash leaves a held payload with nobody able to resolve it" holds for both
+// Called inside the caller's own transaction — "one transaction, or a crash
+// leaves a held payload with nobody able to resolve it" holds for both
 // callers, holding or not.
 func recordActionResult(tx *sql.Tx, step *db.Step, action *ActionResult, nowMS int64) error {
 	if err := recordActionRows(tx, step, action.Results, nowMS); err != nil {
@@ -2533,7 +2525,7 @@ func recordActionResult(tx *sql.Tx, step *db.Step, action *ActionResult, nowMS i
 }
 
 // snapshotScope reads an issue's SNAPSHOTTED scope — the scope the diff is
-// computed over (§6.7.1 D1), frozen at activation (§5.1.1). Reading the live
+// computed over, frozen at activation. Reading the live
 // scope here would make the recorded diff depend on a mid-run edit.
 func snapshotScope(conn *sql.DB, runID, issueID int) ([]string, error) {
 	var snapshot sql.NullString
@@ -2557,14 +2549,14 @@ func snapshotScope(conn *sql.DB, runID, issueID int) ([]string, error) {
 }
 
 // subjectFromSnapshot reads the `when`-predicate subject — kind and labels —
-// from the issue snapshot activation froze (§5.1.1).
+// from the issue snapshot activation froze.
 //
 // It is the loop's counterpart to snapshotScope, and it reads the snapshot for
 // the same reason: a re-instantiation at ordinal k must evaluate `when` against
 // the facts activation froze, not against the live issue. Reading live here
 // would let a mid-run label edit change ordinal 1's topology while ordinal 0's
 // stayed as expanded — two ordinals of one workflow disagreeing about which
-// steps exist, and §9 item 5's determinism broken for exactly the runs that
+// steps exist, and expansion determinism broken for exactly the runs that
 // loop.
 func subjectFromSnapshot(snapshot string) (workflow.Subject, error) {
 	if snapshot == "" {
@@ -2581,18 +2573,18 @@ func subjectFromSnapshot(snapshot string) (workflow.Subject, error) {
 }
 
 // GitDiff computes a diff over the given path globs. THIS IS THE ONE DECLARED
-// VCS COUPLING (engine-spec §7), and it is confined to this function.
+// VCS COUPLING, and it is confined to this function.
 //
-// It runs OUTSIDE any transaction, always (§6.7.1 D1). A failure is not fatal to
+// It runs OUTSIDE any transaction, always. A failure is not fatal to
 // the saga: a repository that is not a git checkout, or a scope matching
 // nothing, yields an empty diff rather than wedging a run. The engine's job is
 // to record what the tree says, and "nothing" is a truthful answer.
 //
-// The D5 hazard engine-spine.md §6.7.1 recorded — "a process recording a step
-// on behalf of work done somewhere else captures ITS OWN tree, silently" — is
-// closed by the dir argument: the saga passes the step's recorded worktree
-// (`--worktree` at complete/record), falling back to the invoking checkout's
-// root. An empty dir keeps the old cwd behavior for callers that have neither.
+// The hazard of a process recording a step on behalf of work done somewhere
+// else capturing ITS OWN tree, silently, is closed by the dir argument: the
+// saga passes the step's recorded worktree (`--worktree` at complete/record),
+// falling back to the invoking checkout's root. An empty dir keeps the old cwd
+// behavior for callers that have neither.
 //
 // base is the commit-ish `dir`'s tree is compared against, empty meaning
 // `HEAD` (dir's own tip). DKT-11: a `--worktree`-recorded step commits its
@@ -2787,8 +2779,8 @@ func rawDiff(dir, base string, paths []string) (string, error) {
 
 // runExecRoot resolves the checkout `sharedCheckoutHead` should read HEAD
 // from — see GitDiff's doc for the DKT-11 rationale this exists to close one
-// level deeper: the RUN's own exec root, captured once at `run start` (G8,
-// db.RunContext), never `resolvePaths().ExecRoot` (this invocation's own
+// level deeper: the RUN's own exec root, captured once at `run start`
+// (db.RunContext), never `resolvePaths().ExecRoot` (this invocation's own
 // cwd, which under `step record --worktree` is the worktree itself — the
 // same tree `dir` names). A run whose exec root was never recorded (started
 // before this field existed, or outside a checkout) falls back to the
@@ -2822,7 +2814,7 @@ func runGateScriptPins(conn *sql.DB, runID int) (string, map[string]string, erro
 
 // runDiffBase resolves the commit GitDiff's base should compare against for
 // step's run: the run's own commit_sha, PINNED ONCE at `docket run start`
-// (G8, db.RunContext, populated via config.GitHead at internal/cli/run_start.go)
+// (db.RunContext, populated via config.GitHead at internal/cli/run_start.go)
 // — never a live HEAD read taken at record time.
 //
 // DKT-20: a live read drifts with the checkout it reads. Late in a long run
@@ -3901,11 +3893,11 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 // for a trusted gate.
 //
 // The commands are read from `run_fences`, which activation harvested and
-// hashed FROM THE SNAPSHOT (§5.3 stage 5) — so what runs is what the operator
-// approved, and a post-activation body edit cannot inject (engine-spec §4).
-// It returns the stored SHA-256 alongside each command so the runner can
-// re-verify it before spawning (§7.3 step 3): S3's snapshot closes "the body
-// cannot inject", and the hash check closes "the stored row cannot be swapped".
+// hashed FROM THE SNAPSHOT — so what runs is what the operator approved, and a
+// post-activation body edit cannot inject. It returns the stored SHA-256
+// alongside each command so the runner can re-verify it before spawning: the
+// snapshot closes "the body cannot inject", and the hash check closes "the
+// stored row cannot be swapped".
 func gateCommands(
 	conn *sql.DB, step *db.Step, gate workflow.Gate,
 ) (commands, hashes []string, err error) {

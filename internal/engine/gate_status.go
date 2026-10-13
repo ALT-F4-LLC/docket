@@ -133,7 +133,7 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 		}
 	}
 
-	// §11.1: voter entries are OPAQUE — this counts and matches them by name
+	// Voter entries are OPAQUE — this counts and matches them by name
 	// and never interprets one.
 	//
 	// A seat's verdict is withheld while the proposal is sealed and still

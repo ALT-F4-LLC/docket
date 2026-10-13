@@ -48,7 +48,7 @@ import (
 //     a `run-repinned` event per changed ref (old sha -> new sha), so the
 //     agreement a completed step worked under stays recoverable from the trail
 //     even after the current agreement moves. The event log is already the
-//     package's history mechanism (§9 item 2); a parallel pin-history table
+//     package's history mechanism; a parallel pin-history table
 //     would be a second source of the same fact.
 //
 // DROPPING A REF THAT NO LONGER RESOLVES (DKT-582). "Adopt current disk bytes"

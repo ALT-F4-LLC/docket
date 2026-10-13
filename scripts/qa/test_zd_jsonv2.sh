@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Section ZD: --json=v2 envelopes, truncation flags, and flag compatibility
 #
-# Covers the stage-1 reliability delta (docs/design/engine-spec.md §5, TDD
-# docs/tdd/reliability-delta.md): the --json Bool→String surgery, the uniform
-# {items,total,truncated} envelope, explicit truncation flags, and the hard
-# VALIDATION_ERROR on the silent-drop cases.
+# Covers the stage-1 reliability delta: the --json Bool→String surgery, the
+# uniform {items,total,truncated} envelope, explicit truncation flags, and the
+# hard VALIDATION_ERROR on the silent-drop cases.
 #
-# The dormancy bar (engine-spec.md §9 item 8) is the point of most of these
-# checks: every existing verb stays byte-compatible without --json=v2.
+# The dormancy bar is the point of most of these checks: every existing verb
+# stays byte-compatible without --json=v2.
 
 test_zd_jsonv2() {
   printf "Section ZD: JSON v2 Envelopes"
@@ -66,7 +65,7 @@ test_zd_jsonv2() {
   check_cond "ZD" "ZD5_nonempty" "v1 output was empty" [ -n "$V1_BARE" ]
 
   # ---------------------------------------------------------------------------
-  # v2 envelope shape: {items,total,truncated} (engine-spec.md §5).
+  # v2 envelope shape: {items,total,truncated}.
   # ---------------------------------------------------------------------------
 
   # ZD6: issue list v2 carries exactly the three envelope keys.

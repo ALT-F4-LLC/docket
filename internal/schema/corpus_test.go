@@ -10,14 +10,14 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// corpusCase is one testdata/corpus file (§4.1 mitigation 1).
+// corpusCase is one testdata/corpus file.
 type corpusCase struct {
 	Why      string          `json:"why"`
 	Schema   json.RawMessage `json:"schema"`
 	Document json.RawMessage `json:"document"`
 	Valid    bool            `json:"valid"`
 	// Failures, when set, is how many leaf failures the document produces
-	// BEFORE C3's five-line cap. It exists so the cap has something to cap.
+	// BEFORE the five-line cap. It exists so the cap has something to cap.
 	Failures        int    `json:"failures"`
 	MessageContains string `json:"message_contains"`
 }
@@ -49,7 +49,7 @@ func loadCorpus(t *testing.T) map[string]corpusCase {
 	return out
 }
 
-// TestCorpus is THE RENOVATE GATE (§4.1). A validator bump that changes a
+// TestCorpus is THE RENOVATE GATE. A validator bump that changes a
 // verdict — or the wording of a refusal a worker reads — turns red here rather
 // than in production, on a `complete` that used to be accepted.
 func TestCorpus(t *testing.T) {
@@ -79,7 +79,7 @@ func TestCorpus(t *testing.T) {
 					c.MessageContains, err.Error())
 			}
 			if c.Failures > 0 {
-				// C3: at most five lines, then the count of what was dropped.
+				// At most five lines, then the count of what was dropped.
 				if len(perr.Lines) != maxPayloadErrors {
 					t.Errorf("rendered %d lines, want the %d-line cap",
 						len(perr.Lines), maxPayloadErrors)
@@ -95,7 +95,7 @@ func TestCorpus(t *testing.T) {
 	}
 }
 
-// TestOrderedIndexRoundTrips is I2: the stored index is a CACHE of a pure
+// TestOrderedIndexRoundTrips proves the stored index is a CACHE of a pure
 // function of the registered bytes, never a second source of truth.
 //
 // derive -> store -> read back -> re-derive must agree, for every corpus

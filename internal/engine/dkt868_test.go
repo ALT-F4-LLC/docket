@@ -26,8 +26,8 @@ import (
 // differs from the request. That remedy is not available to core and must not
 // be made available. Deciding that two values "differ" in a way worth an event
 // requires core to know WHICH keys are the request and the resolution, which is
-// R7's line (db.MetadataRollup's comment, TestMetadataRollupReadsNoKey) and
-// docs/design/genericity.md's whole subject — and the vocabulary it would carry
+// the line core does not cross (db.MetadataRollup's comment,
+// TestMetadataRollupReadsNoKey) — and the vocabulary it would carry
 // is the vocabulary scripts/qa/genericity.sh bans from core surface by name.
 // The event set is closed besides (event.go), and admits kinds for TRANSITIONS
 // CORE PERFORMS; a dispatcher resolving a step to a variant is not one core
@@ -231,7 +231,7 @@ func TestUnescalatedRunReportsAsBefore(t *testing.T) {
 	}
 }
 
-// TestStepMetadataIsVerbatimAndUninterpreted is R7 held through the new
+// TestStepMetadataIsVerbatimAndUninterpreted holds that line through the new
 // section: two unrelated vocabularies arrive identically, because core does not
 // know either of them, and a non-string value is neither coerced nor dropped.
 func TestStepMetadataIsVerbatimAndUninterpreted(t *testing.T) {
@@ -272,7 +272,7 @@ func TestStepMetadataIsVerbatimAndUninterpreted(t *testing.T) {
 	}
 }
 
-// TestUnreadableStepBagIsNotSilence is R10's tolerance, made legible. A stored
+// TestUnreadableStepBagIsNotSilence makes the decode tolerance legible. A stored
 // bag that does not decode must not fail the report — a read verb that refused
 // over one odd cell is useless during exactly the run an operator wants to
 // inspect — and must not vanish either, because on a PER-STEP row an absent bag

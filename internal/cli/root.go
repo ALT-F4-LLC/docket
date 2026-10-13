@@ -140,7 +140,7 @@ var rootCmd = &cobra.Command{
 		}
 		// The detached pre-gate hold's lock directory, fixed from this same
 		// resolution so no scheduler snapshot resolves it under its own
-		// transaction's write lock (gates-trust §7.6.2 PG6).
+		// transaction's write lock.
 		engine.PrimeDetachedPreGateLockDir(cfg)
 
 		ctx := context.WithValue(cmd.Context(), cfgKey, cfg)
@@ -155,9 +155,9 @@ var rootCmd = &cobra.Command{
 			}
 		}
 		// The interval floor applies to EVERY polling mode, not only `--watch`.
-		// `events list --follow` polls on the same flag (events-follow.md §4.1),
-		// and a floor that checked one mode and not the other would let the same
-		// number be legal or illegal depending on which flag turned the loop on.
+		// `events list --follow` polls on the same flag, and a floor that
+		// checked one mode and not the other would let the same number be legal
+		// or illegal depending on which flag turned the loop on.
 		if follow, _ := cmd.Flags().GetBool("follow"); watchMode || follow {
 			interval, _ := cmd.Flags().GetDuration("interval")
 			if interval < 500*time.Millisecond {
@@ -456,7 +456,7 @@ func Execute() int {
 	// The detached pre-gate launcher is installed HERE, in the binary's real
 	// entry, and nowhere else: it re-executes this process's own executable,
 	// which under `go test` is the test binary. An engine or CLI test that
-	// completes a step must never find it installed (gates-trust §7.6.2 PG6).
+	// completes a step must never find it installed.
 	engine.LaunchDetachedPreGates = launchDetachedPreGates
 	if err := rootCmd.Execute(); err != nil {
 		// PersistentPreRunE already wrote this invocation's output and asked

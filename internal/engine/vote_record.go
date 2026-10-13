@@ -28,7 +28,7 @@ import (
 //
 //   - a vote step's `threshold` table, evaluated over the CAST SET after an
 //     APPROVED tally — the executor threshold's exact evaluator
-//     (EvaluateThreshold, §6.14 T1/T4) over engine-built cast payloads, with
+//     (EvaluateThreshold, T1/T4) over engine-built cast payloads, with
 //     the same first-match-routes order and the same no-match ⇒ pass default.
 //     A rejected tally still routes per `on_fail`, untouched; a step declaring
 //     no threshold behaves exactly as before.
@@ -50,7 +50,7 @@ import (
 //
 //   - a REJECTED tally routes per `on_fail`, exactly as before — the threshold
 //     asks "was the approval clean", which is not a question about a rejection.
-//   - a COMMITTED proposal is asked it like an approved one: §8.4's commit is
+//   - a COMMITTED proposal is asked it like an approved one: a manual commit is
 //     accepted only from approved, so its cast set is the approved tally's.
 //
 // The schema resolver is nil — casts have no registered payload schema — which

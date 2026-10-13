@@ -9,27 +9,27 @@ import (
 	"time"
 )
 
-// The tree mutex (TDD docs/tdd/gates-trust.md §7.4, threat T13).
+// The tree mutex.
 //
-// §4, verbatim: "Gates that touch the working tree declare `tree = true` and
+// The rule: "Gates that touch the working tree declare `tree = true` and
 // serialize on an engine-held per-repo mutex — parallel read-step completions
 // never race a build."
 //
-// IT CANNOT BE THE DATABASE TRANSACTION, and the spec's own rules say why:
-// gates run OUTSIDE transactions (engine-spec §6, "No subprocess ever executes
-// inside a transaction"). A transaction held across a subprocess would also
+// IT CANNOT BE THE DATABASE TRANSACTION, and the engine's own rules say why:
+// gates run OUTSIDE transactions ("No subprocess ever executes inside a
+// transaction"). A transaction held across a subprocess would also
 // serialize every unrelated engine operation for the duration of a build, and
 // would be released by a crash BEFORE the subprocess it was protecting had
 // exited.
 //
 // The mechanism is an OS-level advisory file lock on `.docket/tree.lock`.
-// flock(2) is chosen over a lockfile-with-a-pid for ONE property (L1): the
+// flock(2) is chosen over a lockfile-with-a-pid for ONE property: the
 // kernel releases an flock when the fd closes, INCLUDING on SIGKILL. A
 // pid-file scheme would need stale-lock detection, which needs deciding whether
-// a pid is alive — the "probe-once death evidence" doctrine engine-core §5
+// a pid is alive — the "probe-once death evidence" doctrine the engine
 // retires.
 //
-// WHICH TREES TAKE IT (L2, as amended). The lock guards the SHARED CHECKOUT:
+// WHICH TREES TAKE IT. The lock guards the SHARED CHECKOUT:
 // the one tree several steps' gates can be measuring at once. A gate that runs
 // in a step's own `--worktree`, or in a pre-gate's scratch reconstruction,
 // takes no lock at all — that tree has one step behind it, and keying every
@@ -42,12 +42,12 @@ import (
 
 // treeLockPollInterval bounds how often a blocked acquisition retries. flock's
 // blocking mode cannot be given a deadline directly, so the lock is taken
-// non-blocking on a poll — which is what lets L4 bound the wait by the gate's
+// non-blocking on a poll — which is what lets the wait be bounded by the gate's
 // own timeout instead of hanging forever.
 const treeLockPollInterval = 10 * time.Millisecond
 
 // inProcessTreeLocks serializes tree gates WITHIN one process, keyed by the
-// lockfile path (L2, L5) — one file, one mutex, whether the file is a repo's
+// lockfile path — one file, one mutex, whether the file is a repo's
 // own `.docket/tree.lock` or a per-project lock under the global store.
 //
 // BOTH LOCKS ARE REQUIRED, and this is the clause an implementation drops.
@@ -69,8 +69,8 @@ type treeLock struct {
 	mutex *sync.Mutex
 }
 
-// acquireTreeLock takes the per-project tree mutex, blocking up to timeout
-// (L4). The lockfile path comes from config.TreeLockPath: a repo-resident
+// acquireTreeLock takes the per-project tree mutex, blocking up to timeout.
+// The lockfile path comes from config.TreeLockPath: a repo-resident
 // `.docket/tree.lock` for env/local stores, a per-project file under the
 // global store's `locks/` otherwise.
 //
@@ -123,14 +123,14 @@ func acquireTreeLock(path string, timeout time.Duration) (*treeLock, error) {
 	}
 }
 
-// openTreeLockFile opens the lockfile with §3.2's integrity discipline (L7).
+// openTreeLockFile opens the lockfile with the trust file's integrity
+// discipline.
 //
 // `.docket/tree.lock` SITS INSIDE THE REPOSITORY, so it is repo-shippable
 // content: a hostile repo can commit it as a SYMLINK — to ~/.ssh/config, to a
 // device node, to a FIFO — and an ordinary open would follow it. O_NOFOLLOW
 // refuses the symlink at the syscall, and the Lstat refuses every other
-// non-regular file with the identical language §3.2 I1 established for the
-// trust file.
+// non-regular file with the identical language the trust file's open uses.
 //
 // The blast radius is small on its own — an flock on a file the operator can
 // already open is DoS-shaped, not an execution or disclosure path — and it is
@@ -199,8 +199,9 @@ func lockMutexBefore(mu *sync.Mutex, deadline time.Time) bool {
 
 // release drops the flock and the in-process mutex.
 //
-// The flock is released by CLOSING THE FD, which is also what makes L1 hold
-// under SIGKILL: a crashed engine leaves no stale lock for anyone to clear.
+// The flock is released by CLOSING THE FD, which is also what makes the lock
+// release under SIGKILL: a crashed engine leaves no stale lock for anyone to
+// clear.
 func (l *treeLock) release() {
 	if l == nil {
 		return

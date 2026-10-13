@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The three status-moving verbs of engine-core §1.1's machine:
+// The three status-moving verbs of the run status machine:
 //
 //	planning -> active <-> waiting-human -> done | abandoned
 //

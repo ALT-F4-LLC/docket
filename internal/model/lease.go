@@ -13,14 +13,13 @@ import (
 // encoded to a 64-character string.
 const TokenBytes = 32
 
-// Lease is a capability-mediated hold on an entity (engine-core.md §5:
-// "Claims are capabilities"). A claim mints a token and takes a lease; the
+// Lease is a capability-mediated hold on an entity: claims are
+// capabilities. A claim mints a token and takes a lease; the
 // holder renews it by heartbeating; expiry without release returns the entity
 // to the unclaimed pool and is the liveness mechanism.
 //
 // The fields mirror the v6 columns exactly, and are shaped for the steps table
-// to reuse verbatim (engine-spec.md §10 stage 2). Nothing here is
-// issue-specific — a lease is a lease.
+// to reuse verbatim. Nothing here is issue-specific — a lease is a lease.
 type Lease struct {
 	// Owner identifies the holder. Empty means unclaimed.
 	Owner string
@@ -31,7 +30,7 @@ type Lease struct {
 	ExpiresMS int64
 	// Attempt counts claims made against the entity, ever. It is monotonic:
 	// never decremented, never reset, so the trail of a died-mid-work holder
-	// survives its replacement (engine-spec.md §9 item 4).
+	// survives its replacement.
 	Attempt int
 }
 
@@ -40,9 +39,9 @@ func (l *Lease) Held() bool { return l != nil && l.Owner != "" }
 
 // Live reports whether the lease is held AND unexpired at nowMS.
 //
-// This is computed per read and never written back: engine-spec.md §2 requires
-// read verbs to render *effective* status with lease expiry computed at read
-// time, and §6 confines every lease write to claim. An expired lease therefore
+// This is computed per read and never written back: read verbs render
+// *effective* status with lease expiry computed at read time, and every lease
+// write is confined to claim. An expired lease therefore
 // reads as dead the instant it lapses, even though the row still carries the
 // stale owner until someone claims it — status never lies just because nobody
 // called claim.
@@ -52,7 +51,7 @@ func (l *Lease) Live(nowMS int64) bool {
 
 // leaseJSON is the v2 wire shape for a lease. It is emitted only under
 // --json=v2 and only when a lease is held, so v1 output and unclaimed-entity
-// output stay byte-identical to v5 (engine-spec.md §9 item 8).
+// output stay byte-identical to v5.
 type leaseJSON struct {
 	Owner     string `json:"owner"`
 	ExpiresMS int64  `json:"expires_ms"`
@@ -77,8 +76,8 @@ func (l *Lease) LeaseWire(nowMS int64) any {
 
 // MintToken generates a capability token and returns it with its hash.
 //
-// crypto/rand specifically: engine-core.md §5 requires a token "not derivable
-// from ids", and a math/rand token is derivable from the seed. A read error is
+// crypto/rand specifically: a token must not be derivable from ids, and a
+// math/rand token is derivable from the seed. A read error is
 // a hard failure with no fallback path — a fallback is exactly how a weak
 // token reaches production.
 func MintToken() (token, hash string, err error) {

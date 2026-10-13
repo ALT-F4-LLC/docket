@@ -178,8 +178,8 @@ type SourceWarning struct {
 //     trust entry, a context bundle over the warn cap — where proceeding is
 //     legitimate and often intended. Drift is not one of those.
 //
-//   - A binding INHERITED from an earlier activation only WARNS. RA2 and F15
-//     are explicit that a config file edited mid-run must not reach a run
+//   - A binding INHERITED from an earlier activation only WARNS. RA2 is
+//     explicit that a config file edited mid-run must not reach a run
 //     already under way — the pin set is inherited and nothing is re-scanned —
 //     and refusing here would break exactly that guarantee in its most ordinary
 //     form: bumping a workflow to a new version leaves the OLD version's

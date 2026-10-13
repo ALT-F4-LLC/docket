@@ -136,7 +136,7 @@ func pinnedWorkflowStaleness(
 			// A ref that does not parse as `name@version` is not a workflow pin
 			// this diff can speak about. It is REPORTED BY `verify-pins` (which
 			// calls it missing) and skipped here rather than failing the whole
-			// report: R10 says the report works on a run in any state, and a
+			// report: the report works on a run in any state, and a
 			// rollup that refused would be unavailable during exactly the
 			// incident that produced the odd row.
 			continue
@@ -177,7 +177,7 @@ func pinnedWorkflowStaleness(
 		}
 		out = append(out, row)
 	}
-	// A TOTAL order (R9), by the ref the run holds, so two reports of one
+	// A TOTAL order, by the ref the run holds, so two reports of one
 	// unchanged run are byte-identical.
 	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
 	return out, nil

@@ -19,8 +19,8 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// A1–A8 of docs/tdd/payloads-thresholds.md §6.2: a non-builtin action is a
-// USER-TRUSTED COMMAND, through §4's trust model with no exceptions.
+// A non-builtin action is a USER-TRUSTED COMMAND, through the trust model with
+// no exceptions.
 //
 // The claim these tests exist to make checkable is not "actions are safe" — it
 // is "actions are safe FOR THE SAME REASON GATES ARE", which is a fact about
@@ -31,7 +31,7 @@ import (
 //
 // Every entry's binding is rewritten to the RESOLVED repo identity, because
 // that is what the matcher compares against and the comparison is byte-exact by
-// design (M6): a temp dir on macOS is `/var/...` while its identity is
+// design: a temp dir on macOS is `/var/...` while its identity is
 // `/private/var/...`, and a test that stored the unresolved path would exercise
 // the binding refusal rather than the behavior it means to.
 func actionRunner(t *testing.T, repo string, entries ...trust.Entry) *ExecActionRunner {
@@ -60,7 +60,7 @@ func actionSpec(name string) ActionSpec {
 }
 
 // echoScript writes an executable shell script OUTSIDE the repo — the
-// containment rule (A5/R1-R5) refuses argv[0] resolved into it — and returns
+// containment rule refuses argv[0] resolved into it — and returns
 // its path.
 func echoScript(t *testing.T, dir, name, body string) string {
 	t.Helper()
@@ -118,9 +118,9 @@ func TestActionsUseTheSameTrustPath(t *testing.T) {
 		return true
 	})
 	for _, want := range []string{
-		"exec.Resolve",            // A5: argv[0] resolution and repo containment
-		"exec.BuildEnv",           // A4: the env allowlist and the token exclusion
-		"exec.RunSpawnedAttempts", // A6/A8 and the per-spawn pin re-check
+		"exec.Resolve",            // argv[0] resolution and repo containment
+		"exec.BuildEnv",           // the env allowlist and the token exclusion
+		"exec.RunSpawnedAttempts", // flaky attempts and the per-spawn pin re-check
 		"exec.RunPinned",          // a pinned entry spawns the file it hashed
 		"trust.RepoIdentity",
 		"trust.ArgvSHA256",
@@ -132,12 +132,12 @@ func TestActionsUseTheSameTrustPath(t *testing.T) {
 	}
 }
 
-// TestNoStubActionRunnerRemains is §6.3 S1: the stub is DELETED, with its
+// TestNoStubActionRunnerRemains asserts the stub is DELETED, with its
 // constructor call.
 //
-// A source-level guard rather than a comment, in the family of gates-trust
-// §5.1's: the stub's whole purpose was to make the S3→S5 window auditable, and
-// a stub that survived past the stage that replaced it would let a green run
+// A source-level guard rather than a comment, in the family of the gate stub
+// guard: the stub's whole purpose was to make the pre-runner window auditable,
+// and a stub that survived past the stage that replaced it would let a green run
 // read as computation coverage it does not have.
 func TestNoStubActionRunnerRemains(t *testing.T) {
 	entries, err := os.ReadDir(".")
@@ -153,14 +153,14 @@ func TestNoStubActionRunnerRemains(t *testing.T) {
 		// The identifier, assembled rather than written whole so this guard's
 		// own source does not trip it.
 		if strings.Contains(string(src), "Stub"+"Runner") {
-			t.Errorf("%s still names the stub action runner; S1 deletes it with "+
+			t.Errorf("%s still names the stub action runner; it is deleted with "+
 				"its constructor call", name)
 		}
 	}
 }
 
-// TestUnmatchedActionRoutesPerOnFail is A3, with a WITNESS proving nothing
-// spawned.
+// TestUnmatchedActionRoutesPerOnFail: an unmatched action fails the step, with
+// a WITNESS proving nothing spawned.
 //
 // The witness is the point. "No entry ⇒ unmatched" is easy to implement as "run
 // it anyway and record unmatched", and the two are indistinguishable from the
@@ -185,7 +185,7 @@ func TestUnmatchedActionRoutesPerOnFail(t *testing.T) {
 
 	if !result.Failed {
 		t.Error("an unmatched action did not fail the step; a computation that " +
-			"could not run has not succeeded (A3, §6.2 N3)")
+			"could not run has not succeeded")
 	}
 	if len(result.Results) != 1 ||
 		result.Results[0].Verdict != db.ActionVerdictUnmatched {
@@ -204,7 +204,7 @@ func TestUnmatchedActionRoutesPerOnFail(t *testing.T) {
 	}
 }
 
-// TestActionStdinCarriesTheStepContext is §6.2's stdin half: the §11.4 context
+// TestActionStdinCarriesTheStepContext is the stdin half: the step context
 // object, one JSON document, then EOF.
 func TestActionStdinCarriesTheStepContext(t *testing.T) {
 	repo := t.TempDir()
@@ -299,9 +299,9 @@ func TestActionReplyDefaults(t *testing.T) {
 	}
 }
 
-// TestUnparseableStdoutIsRenderedThroughTheEscaper is §6.2's last row: this
-// output is ATTACKER-INFLUENCED and reaches a terminal, so it is quoted through
-// gates-trust §5.7's renderer rather than printed raw.
+// TestUnparseableStdoutIsRenderedThroughTheEscaper: unparseable stdout is
+// ATTACKER-INFLUENCED and reaches a terminal, so it is quoted through
+// the gate output renderer rather than printed raw.
 //
 // A raw quote here would let a command's stdout move an operator's cursor,
 // clear their screen, or hide the rest of the reason — which is exactly what
@@ -334,7 +334,7 @@ func TestUnparseableStdoutIsRenderedThroughTheEscaper(t *testing.T) {
 	}
 	// The quote is capped, so a command cannot fill a terminal by printing.
 	if len(result.Reason) > 600 {
-		t.Errorf("the quoted output is %d bytes; §6.2 caps it at 200",
+		t.Errorf("the quoted output is %d bytes; the quote is capped at 200",
 			len(result.Reason))
 	}
 }
@@ -375,10 +375,10 @@ func TestActionNonZeroExitRoutesPerOnFail(t *testing.T) {
 	}
 }
 
-// TestActionPayloadIsValidatedAgainstTheDeclaredSchema is §6.2's last clause:
-// a non-builtin action's payload is validated exactly as a worker's is, and a
-// failure is a STEP failure routed per `on_fail` — not a refusal to a caller,
-// because there is no caller; the engine is the caller.
+// TestActionPayloadIsValidatedAgainstTheDeclaredSchema: a non-builtin action's
+// payload is validated exactly as a worker's is, and a failure is a STEP
+// failure routed per `on_fail` — not a refusal to a caller, because there is
+// no caller; the engine is the caller.
 func TestActionPayloadIsValidatedAgainstTheDeclaredSchema(t *testing.T) {
 	repo := t.TempDir()
 	outside := t.TempDir()
@@ -414,8 +414,8 @@ func TestActionPayloadIsValidatedAgainstTheDeclaredSchema(t *testing.T) {
 	}
 }
 
-// TestDocketTokenNeverReachesAnActionChild is A4's assertion rather than its
-// assumption.
+// TestDocketTokenNeverReachesAnActionChild asserts the token exclusion rather
+// than assuming it.
 //
 // The token has already retired by the routing stage, so the exclusion is
 // belt-and-braces here — which is exactly why it is asserted: a control that is
@@ -454,7 +454,7 @@ func TestDocketTokenNeverReachesAnActionChild(t *testing.T) {
 	}
 }
 
-// TestFlakyActionRecordsEveryAttempt is A8: `flaky` re-runs apply and are
+// TestFlakyActionRecordsEveryAttempt: `flaky` re-runs apply and are
 // recorded INDIVIDUALLY with ascending ordinal.
 //
 // The pass predicate for an action is exit-zero AND a parseable reply, which is
@@ -505,7 +505,7 @@ echo '{"body":"eventually","payload":[]}'
 	}
 }
 
-// TestTreeActionSerializesLikeATreeGate is A7: an entry declaring `tree = true`
+// TestTreeActionSerializesLikeATreeGate: an entry declaring `tree = true`
 // takes the SAME per-repo flock a tree gate takes.
 //
 // A computation that reads the working tree races a build exactly as a gate
@@ -546,7 +546,7 @@ func TestTreeActionSerializesLikeATreeGate(t *testing.T) {
 			"serialization it declared was not provided")
 	}
 	if _, statErr := os.Stat(witness); statErr == nil {
-		t.Fatal("THE COMMAND RAN unserialized. L4/L7: a computation whose " +
+		t.Fatal("THE COMMAND RAN unserialized. A computation whose " +
 			"declared serialization cannot be provided fails rather than racing.")
 	}
 	held.release()
@@ -616,7 +616,7 @@ func TestActionTreeLockTimeoutReasonNamesTheTimeout(t *testing.T) {
 	}
 }
 
-// TestActionRunnerResolvesBuiltinFirst is B1: an action core computes is never
+// TestActionRunnerResolvesBuiltinFirst: an action core computes is never
 // looked up in the trust store, so an entry cannot shadow a builtin and
 // removing one cannot disable it.
 func TestActionRunnerResolvesBuiltinFirst(t *testing.T) {
@@ -626,8 +626,8 @@ func TestActionRunnerResolvesBuiltinFirst(t *testing.T) {
 	script := echoScript(t, outside, "shadow.sh",
 		fmt.Sprintf("touch %q; echo '{\"payload\":[]}'", witness))
 
-	// An entry named exactly like the builtin. V27 reserves the name at
-	// register time; this proves the run-time half.
+	// An entry named exactly like the builtin. Register time reserves the name;
+	// this proves the run-time half.
 	runner := actionRunner(t, repo, trust.Entry{
 		Name: workflow.ActionAggregate, Argv: []string{script}, Repo: repo,
 	})
@@ -646,7 +646,7 @@ func TestActionRunnerResolvesBuiltinFirst(t *testing.T) {
 	}
 	if _, err := os.Stat(witness); err == nil {
 		t.Fatal("A TRUST ENTRY SHADOWED THE BUILTIN. Resolution is builtin-first " +
-			"(B1), which is why V27 reserves the name rather than letting an " +
+			"which is why register time reserves the name rather than letting an " +
 			"operator wonder why their command never ran.")
 	}
 	if !strings.Contains(result.Payload, `"high"`) {
@@ -654,8 +654,8 @@ func TestActionRunnerResolvesBuiltinFirst(t *testing.T) {
 	}
 }
 
-// TestActionResultCarriesNoStubMarker is S1/S2's other half: nothing this
-// runner produces sets the retired marker, on any path.
+// TestActionResultCarriesNoStubMarker is the stub removal's other half:
+// nothing this runner produces sets the retired marker, on any path.
 func TestActionResultCarriesNoStubMarker(t *testing.T) {
 	repo := t.TempDir()
 	runner := actionRunner(t, repo)
@@ -668,10 +668,10 @@ func TestActionResultCarriesNoStubMarker(t *testing.T) {
 	}
 }
 
-// TestWrappedStubPayloadsStillRead is §6.3 S3: `parsePayload` keeps ONE
+// TestWrappedStubPayloadsStillRead: `parsePayload` keeps ONE
 // documented tolerance, and it exists to read HISTORY.
 //
-// The migration deliberately does not rewrite the S3/S4 wrapper — doing so
+// The migration deliberately does not rewrite the old stub wrapper — doing so
 // would destroy the evidence that a computation did not run — so a v8-era
 // artifact must still be readable by a threshold today.
 func TestWrappedStubPayloadsStillRead(t *testing.T) {
@@ -711,8 +711,8 @@ func TestWrappedStubPayloadsStillRead(t *testing.T) {
 	}
 }
 
-// TestStubIsNotWrittenAtV9 is S2 and S4 at the storage layer: a result this
-// stage records leaves `artifacts.stub` at 0 and carries no `stub` key.
+// TestStubIsNotWrittenAtV9 is the stub removal at the storage layer: a result
+// this stage records leaves `artifacts.stub` at 0 and carries no `stub` key.
 func TestStubIsNotWrittenAtV9(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
@@ -735,7 +735,7 @@ func TestStubIsNotWrittenAtV9(t *testing.T) {
 		t.Error("a v9-written artifact carries stub = 1")
 	}
 
-	// S4: `omitempty`, so the key is absent from the serialized form entirely.
+	// `omitempty`, so the key is absent from the serialized form entirely.
 	encoded, err := json.Marshal(db.Artifact{Kind: "findings"})
 	testsupport.Must(t, err, "marshalling: %v", err)
 	if strings.Contains(string(encoded), "stub") {
@@ -901,8 +901,8 @@ func TestPinnedFlakyActionStopsAtMaxAttempts(t *testing.T) {
 		db.ActionVerdictFail, db.ActionVerdictFail, db.ActionVerdictFail)
 }
 
-// TestPinnedActionNotFlakyRunsOnce: F1 holds for a content-pinned entry, so a
-// failing pinned action not declared flaky runs exactly once.
+// TestPinnedActionNotFlakyRunsOnce: a failing content-pinned action not
+// declared flaky runs exactly once.
 func TestPinnedActionNotFlakyRunsOnce(t *testing.T) {
 	result, runs := runCountingPinnedAction(t, false, "exit 1\n")
 

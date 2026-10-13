@@ -35,8 +35,9 @@ func init() {
 	rootCmd.AddCommand(schemaCmd)
 }
 
-// schemaErr maps a registry failure to its error code, per §4.5's refusal
-// matrix. No new codes: every situation maps to one that already exists.
+// schemaErr maps a registry failure to its error code, per the registry's
+// refusal matrix. No new codes: every situation maps to one that already
+// exists.
 func schemaErr(err error) error {
 	// A schema-DOCUMENT refusal — the ordered_enum annotation rules, or a
 	// document the library will not compile. Payload refusals never reach here:

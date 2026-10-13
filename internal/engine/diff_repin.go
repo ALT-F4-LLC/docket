@@ -68,13 +68,13 @@ type IssueDiffRepin struct {
 }
 
 // prepareIssueDiffRepin computes the re-pin OUTSIDE any transaction (it is a
-// git subprocess, §6) and refuses everything it can before the caller opens
+// git subprocess) and refuses everything it can before the caller opens
 // one. spec is the step's pinned definition, nil for a materialized step.
 func (e *Engine) prepareIssueDiffRepin(
 	conn *sql.DB, step *db.Step, spec *workflow.Step, worktree string,
 ) (*IssueDiffRepin, error) {
-	// Only a tree-holding executor step records an issue.diff (§6.7.1 D1/D2
-	// as amended by DKT-75), so only one has a record to re-pin. A
+	// Only a tree-holding executor step records an issue.diff (as amended by
+	// DKT-75), so only one has a record to re-pin. A
 	// materialized held step (nil spec), a vote, an action, and a
 	// `holds_tree = false` reader all resolve their diff from someone else's
 	// record; re-pinning here would revise a record nothing downstream reads.

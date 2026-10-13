@@ -17,7 +17,7 @@ import (
 
 // interposeOverridePassSrc pairs a threshold-interposed VOTE step (the
 // corpus's own shape, and the one that reproduces RUN-36/VPL-153: a `type =
-// "vote"` step stays resolvable however it is currently routed, §6.10's
+// "vote"` step stays resolvable however it is currently routed, the routing
 // exception, which is what lets an operator retry it back to `pending` after
 // it was skipped) with a routing step that parks on its own failure —
 // `override-pass` is the resolution reached for from that park.
@@ -143,7 +143,7 @@ func TestOverridePassStillBypassesTheThreshold(t *testing.T) {
 
 // TestUnroutedVoteAfterRetryReportsBlockedReason is the second fix's exact
 // scenario: an interposed vote already skipped by an override-pass, then
-// retried by an operator trying to recover it (§6.10's exception lets a
+// retried by an operator trying to recover it (the routing exception lets a
 // `type="vote"` step resolve however it is currently routed). The retry
 // returns it to `pending`, but the routing predecessor already recorded
 // `pass` — permanently — so it will NEVER become ready. Before the fix

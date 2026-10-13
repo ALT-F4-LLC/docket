@@ -264,7 +264,7 @@ func TestExecutorLedgerWindow(t *testing.T) {
 	}
 }
 
-// TestExecutorLedgerWritesNothing is R8 for this verb: the database is
+// TestExecutorLedgerWritesNothing proves this verb is read-only: the database is
 // byte-identical after the read, the same page-level check `run report`
 // keeps — a ledger that reaped a lease on its way past would make "I only
 // looked at it" untrue.

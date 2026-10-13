@@ -28,29 +28,28 @@ func indefiniteArticle(word string) string {
 	}
 }
 
-// Human and vote steps, and the `waiting-human` resolutions — TDD §6.15, §6.10.
+// Human and vote steps, and the `waiting-human` resolutions.
 //
 // `type="human"` and `type="vote"` steps NEVER claim, never mint a token, and
 // never run the saga: the saga's stage 0 authorizes a holder, and these steps
-// have none. Their path through the §6.2 machine is short:
+// have none. Their path through the status machine is short:
 //
 //	human  pending -> ready (computed) -> approve ⇒ done
 //	                                   -> reject  ⇒ routed per EFFECTIVE on_fail
 //	vote   pending -> ready -> PARKS at S3; only `step resolve` moves it
 //
-// Vote EXECUTION is deferred to S4 explicitly (§1's scope table). §2 drives
-// votes as gates, and the gate machinery lands at stage 4 — so splitting votes
-// from gates would ship half a feature. What S3 owns is V14, expansion, and the
+// Vote EXECUTION is deferred explicitly. The engine drives votes as
+// gates, and the gate machinery lands at stage 4 — so splitting votes from
+// gates would ship half a feature. What S3 owns is V14, expansion, and the
 // park.
 
-// The `step resolve --as` vocabulary (§6.10, §2).
+// The `step resolve --as` vocabulary.
 const (
-	// ResolveRetry RESETS THE RETRY BUDGET for the step instance (§2: "retry =
+	// ResolveRetry RESETS THE RETRY BUDGET for the step instance ("retry =
 	// attempts reset") by moving `attempt_base` to the current attempt —
 	// `attempt` itself stays monotonic, because it is the usage ledger's key
 	// half (DKT-86/DKT-90). This is a different counter from the issue-level
-	// `attempt` v6 declared monotonic — claims-leases §5 anticipated exactly
-	// this. The step's is a live retry budget against `max_attempts`; the
+	// `attempt` v6 declared monotonic. The step's is a live retry budget against `max_attempts`; the
 	// issue's is a permanent trail. Both statements stay true because they are
 	// about different rows.
 	ResolveRetry = "retry"
@@ -145,7 +144,7 @@ type DecideOptions struct {
 	NowMS int64
 }
 
-// DecideStepWith is `step approve` and `step reject` — §6.10's human-gate
+// DecideStepWith is `step approve` and `step reject` — the human-gate
 // verbs.
 //
 // NO LEASE TOKEN: a human gate is never claimed, so there is no lease to
@@ -235,7 +234,7 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 			step.Instance, indefiniteArticle(step.Kind), step.Kind)
 	}
 
-	// M-c (§6.4, §7.7.3): a MATERIALIZED held step resumes ANOTHER step's saga,
+	// M-c: a MATERIALIZED held step resumes ANOTHER step's saga,
 	// which the S3 path had no reason to do. It is branched here rather than
 	// folded in below because the consequence lands somewhere else entirely:
 	// approving a declared gate finishes that gate, and approving a held
@@ -382,7 +381,7 @@ type ResolveOutcome struct {
 	Repin *IssueDiffRepin `json:"issue_diff_repin,omitempty"`
 }
 
-// ResolveStepWith is every `step resolve` shape — §6.10's `waiting-human`
+// ResolveStepWith is every `step resolve` shape — the `waiting-human`
 // resolutions, `--batch` (DKT-546), `--drop-interposed` (DKT-861), and
 // `--worktree` (DKT-1034) — and reports the outcome the step row does not
 // carry.
@@ -524,7 +523,7 @@ func (e *Engine) resolveStep(
 	// refused rather than accepted as a silent no-op.
 	//
 	// The mechanism: a rejected hold routes the ROUTING step per its effective
-	// `on_fail`, skipping the threshold (§7.7.3). `retry` resets the attempt
+	// `on_fail`, skipping the threshold. `retry` resets the attempt
 	// counter and re-runs the aggregate — but the attempt counter was never
 	// what blocked it. `heldDecision` re-reads the SAME materialized
 	// `reconcile-held@N` step, which is still terminal with a non-pass
@@ -758,8 +757,8 @@ func (e *Engine) resolveStep(
 	}
 
 	// THE RE-PIN IS COMPUTED HERE, LAST BEFORE THE TRANSACTION (DKT-1034): it
-	// is a git subprocess, which §6 keeps outside every transaction, and it is
-	// the most expensive refusal in this function, so every cheaper one above
+	// is a git subprocess, which the engine keeps outside every transaction, and
+	// it is the most expensive refusal in this function, so every cheaper one above
 	// gets its say first. The artifact it produces lands INSIDE the
 	// resolution's transaction below — a re-pin without its resolution would
 	// move the reviewed object under a step still parked, and a resolution
@@ -972,7 +971,7 @@ func (e *Engine) resolveStep(
 
 	// A re-pin moved the target every downstream pre-gate measures, and this
 	// commit is where the new sha first exists; the same point the routing
-	// stage's own round record is reacted to (gates-trust §7.6.2 PG6).
+	// stage's own round record is reacted to.
 	if repin != nil && !repin.Unchanged {
 		e.startDetachedPreGates(conn, step.RunID, nowMS)
 	}
@@ -1002,7 +1001,7 @@ func (e *Engine) resolveStep(
 // evaluate the threshold at all. For a step with no threshold, or a threshold
 // with no step-name routing target, that generic pass IS the right answer and
 // there is nothing to warn about. For a step whose threshold interposes
-// another step (§11.2's "route to a step name"), it is a silent bypass: the
+// another step ("route to a step name"), it is a silent bypass: the
 // interposed step is unconditionally skipped as soon as this resolution
 // commits (reconcile.go's skipUnroutedTargets), REGARDLESS of whether the
 // threshold's condition was actually met. RUN-36/VPL-153 hit exactly this —
@@ -1060,14 +1059,14 @@ func overridePassInterposedWarning(instance string, spec *workflow.Step) string 
 // FailStep is `step fail` — the explicit-failure counterpart to `complete`.
 //
 // It consumes an attempt and routes per `on_fail` when attempts are EXHAUSTED,
-// per the status machine (§6.2: "attempts exhausted ⇒ waiting-human", via the
+// per the status machine ("attempts exhausted ⇒ waiting-human", via the
 // step's effective routing). Below the limit the step returns to `pending` and
 // is re-offered, which is the ordinary retry path.
 //
 // metadata is `--metadata` (parity with `complete`'s): the same
 // opaque KV bag, merged over the step's own with the same mergeMetadata and
 // written with the same db.SetStepMetadataTx stageZero uses — a shared write
-// path, not a duplicated one. It SURVIVES INTO A RETRY (§1.6): a failed
+// path, not a duplicated one. It SURVIVES INTO A RETRY: a failed
 // attempt's bag merges into the step's row like any other, so the next
 // attempt's completion or failure overlays on top of it. A worker that
 // reports why it failed has produced the most valuable metadata in the run,
@@ -1098,7 +1097,7 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	// The same cap and shape checks stageZero applies to `--metadata`,
 	// pre-transaction so a refusal writes nothing and consumes no attempt.
 	// The remedy differs from stageZero's because the channels differ: `fail`
-	// offers no `--artifact-file`/`--payload-file` (C14).
+	// offers no `--artifact-file`/`--payload-file`.
 	if err := validateFailMetadataSize(metadata); err != nil {
 		return err
 	}
@@ -1134,8 +1133,8 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	}
 
 	// `attempt` IS NOT BUMPED HERE. It counts CLAIMS, and the claim that led to
-	// this failure already counted itself (claims-leases §5: "claims made
-	// against this issue, ever"; §6.3's re-offer "with attempt++" is satisfied
+	// this failure already counted itself ("claims made
+	// against this issue, ever"; the re-offer "with attempt++" is satisfied
 	// by the re-claim's own increment). `ReapStepTx` states the same rule from
 	// the other side — attempt is left alone on reap because "incrementing
 	// again here would double-count a single death".
@@ -1344,7 +1343,7 @@ func commit(tx *sql.Tx, err error) error {
 	return tx.Commit()
 }
 
-// HeartbeatStep extends a live lease held by token (§6.10). It does not touch
+// HeartbeatStep extends a live lease held by token. It does not touch
 // `attempt`: a heartbeat is not a new claim.
 func HeartbeatStep(
 	conn *sql.DB, stepID int, token string, nowMS int64,

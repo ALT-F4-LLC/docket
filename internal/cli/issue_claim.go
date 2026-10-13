@@ -11,14 +11,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// claimResponse is the issue-level analog of engine-spec.md §11.4's claim
-// response `{ step, token, lease_expires_ms, context }`.
+// claimResponse is the issue-level analog of the step claim response
+// `{ step, token, lease_expires_ms, context }`.
 //
-// The subject key is `issue` rather than `step` — a nominal deviation recorded
-// in docs/tdd/claims-leases.md §3.1. `context` is absent:
-// §11.4 defines it over step, artifact, and pin concepts that do not exist
-// until steps land, and emitting a degenerate shape now would freeze something
-// that must then change.
+// The subject key is `issue` rather than `step` — a recorded nominal
+// deviation. `context` is absent: it is defined over step, artifact, and pin
+// concepts that do not exist until steps land, and emitting a degenerate shape
+// now would freeze something that must then change.
 //
 // Token is the ONLY place the plaintext token ever appears. It is returned
 // exactly once, here, and never read back from storage — only its hash is
@@ -35,8 +34,8 @@ type claimResponse struct {
 	attempt int
 }
 
-// claimResponseV2 adds the CAS version and the attempt count, per
-// reliability-delta §6.3: a claim is a mutation and advances the version.
+// claimResponseV2 adds the CAS version and the attempt count: a claim is a
+// mutation and advances the version.
 type claimResponseV2 struct {
 	Issue          string `json:"issue"`
 	Token          string `json:"token"`

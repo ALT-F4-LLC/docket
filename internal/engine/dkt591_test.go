@@ -219,7 +219,7 @@ func TestSkippedProducerInputDoesNotBindAnotherBodysDoc(t *testing.T) {
 		}
 	}
 	// The five skipped lanes resolve to nothing, so exactly ONE doc input
-	// survives: lane A's own draft, bound by §7.4's per-input fallback.
+	// survives: lane A's own draft, bound by the per-input fallback.
 	if len(docs) != 1 || docs[0] != "author-a@0" {
 		t.Errorf("the bundle binds doc inputs from %v, want exactly "+
 			"[author-a@0] — a skipped author's input resolves to NOTHING",

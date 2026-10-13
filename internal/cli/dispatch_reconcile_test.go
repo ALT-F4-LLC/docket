@@ -79,9 +79,9 @@ func TestDispatchCloseBackfillFromRunsAllThreeStages(t *testing.T) {
 	stepID := waveWithUnreportedUsage(t, conn, runID)
 
 	// The premise: the step is OWING usage. A flagless close no longer
-	// refuses over a step recorded seconds ago (D7 gives it `dispatch.grace`),
-	// so the run report's ungraced view is what makes the back-fill stage
-	// observable: listed before, gone after.
+	// refuses over a step recorded seconds ago (the grace gives it
+	// `dispatch.grace`), so the run report's ungraced view is what makes the
+	// back-fill stage observable: listed before, gone after.
 	before, err := engine.LoadRunReport(conn, runID, model.NowMS())
 	testsupport.Must(t, err, "run report before the reconcile: %v", err)
 	if len(before.MissingUsage) != 1 || before.MissingUsage[0].Step != model.FormatStepID(stepID) {

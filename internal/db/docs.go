@@ -12,12 +12,11 @@ import (
 
 // ErrValidation is returned when an input fails a validation precondition that
 // the DB layer enforces (e.g., negative revision number). CLI surfaces map this
-// to output.ErrValidation. See TDD docket-doc-cli §6.4.
+// to output.ErrValidation.
 var ErrValidation = errors.New("validation")
 
-// Change-kind enum values for doc_revisions.change_kind. Free-form descriptor
-// per TDD §5.1 / §5.4 C8. Combined edits join multiple kinds with "+", e.g.
-// "status+body".
+// Change-kind enum values for doc_revisions.change_kind. Free-form descriptor.
+// Combined edits join multiple kinds with "+", e.g. "status+body".
 const (
 	docChangeKindCreate = "create"
 	docChangeKindBody   = "body"
@@ -29,7 +28,6 @@ const (
 // docBodyEqual compares two doc bodies for equality after stripping trailing
 // newlines. Mirrors the convention used by internal/cli/issue_edit.go:54 so
 // that "no-op" edits (whitespace-only at end) do not append a revision.
-// See TDD §4.4 / §5.4 C6.
 func docBodyEqual(a, b string) bool {
 	return strings.TrimRight(a, "\n") == strings.TrimRight(b, "\n")
 }
@@ -60,7 +58,7 @@ var validDocSortFields = map[string]bool{
 }
 
 // DocSummary is a row from ListDocsWithCounts: a Doc plus the JOIN-derived
-// revision count and current revision number. Returned shape per TDD §6.3.
+// revision count and current revision number.
 type DocSummary struct {
 	Doc             *model.Doc
 	RevisionsCount  int
@@ -197,7 +195,7 @@ func ListDocs(db *sql.DB, opts DocListOptions) ([]*model.Doc, int, error) {
 }
 
 // listDocsWithCountsBaseSQL is the single-query body used by ListDocsWithCounts
-// and by tests that EXPLAIN it to verify the JOIN strategy (TDD §5.4 S1, hard
+// and by tests that EXPLAIN it to verify the JOIN strategy (hard
 // constraint — must remain a single statement with no per-row sub-selects).
 // Filters / ORDER / LIMIT are appended at call time.
 const listDocsWithCountsBaseSQL = `SELECT d.id, d.type, d.status, d.title, d.body, d.author, d.created_at, d.updated_at,
@@ -207,8 +205,8 @@ FROM docs d
 LEFT JOIN doc_revisions r ON r.doc_id = d.id`
 
 // ListDocsWithCounts returns DocSummary rows including JOIN-derived
-// revisions_count and current_revision in a single query (TDD §5.4 S1 — no
-// N+1). Returns total count (before limit) as the second value.
+// revisions_count and current_revision in a single query (no N+1). Returns
+// total count (before limit) as the second value.
 func ListDocsWithCounts(db *sql.DB, opts DocListOptions) ([]*DocSummary, int, error) {
 	whereSQL, args, err := buildDocWhere(opts, "d.")
 	if err != nil {
@@ -286,7 +284,7 @@ func ListDocsWithCounts(db *sql.DB, opts DocListOptions) ([]*DocSummary, int, er
 
 // DocUpdate is the set of fields UpdateDoc may change. Nil pointers mean
 // "leave unchanged"; non-nil with the current value is detected as a no-op
-// (body equality additionally applies trailing-newline trimming — C6).
+// (body equality additionally applies trailing-newline trimming).
 type DocUpdate struct {
 	Title  *string
 	Body   *string
@@ -299,10 +297,10 @@ type DocUpdate struct {
 // appends one revision row capturing the combined change_kind. Returns the
 // new revision number (0 if no revision appended because nothing changed).
 //
-// Per TDD §5.4 C8, every persisted field change appends one revision; the
-// change_kind is comma-joined ("+" separator) for multi-field edits. Body
-// equality uses strings.TrimRight(s, "\n") so trailing-newline-only edits
-// are no-ops and do NOT append a revision (C6).
+// Every persisted field change appends one revision; the change_kind is
+// comma-joined ("+" separator) for multi-field edits. Body equality uses
+// strings.TrimRight(s, "\n") so trailing-newline-only edits are no-ops and do
+// NOT append a revision.
 //
 // Returns ErrNotFound if id does not exist.
 func UpdateDoc(db *sql.DB, id int, upd DocUpdate) (int, error) {
@@ -376,9 +374,9 @@ func UpdateDoc(db *sql.DB, id int, upd DocUpdate) (int, error) {
 	return rev, nil
 }
 
-// GetDocRevision returns revision rev of the doc with the given ID. Per TDD
-// §3.3 / §6.3 (Q1): rev < 0 → ErrValidation; rev > MAX → ErrNotFound. rev == 0
-// is treated as "the current revision" (the most-recent one).
+// GetDocRevision returns revision rev of the doc with the given ID: rev < 0 →
+// ErrValidation; rev > MAX → ErrNotFound. rev == 0 is treated as "the current
+// revision" (the most-recent one).
 func GetDocRevision(db *sql.DB, docID, rev int) (*model.DocRevision, error) {
 	if rev < 0 {
 		return nil, fmt.Errorf("%w: revision number must be >= 0, got %d", ErrValidation, rev)
@@ -484,7 +482,7 @@ func DeleteDoc(db *sql.DB, id int, cascade bool) error {
 }
 
 // InsertDocWithID inserts a doc row with a caller-supplied ID, skipping if the
-// ID already exists. Mirrors InsertIssueWithID (TDD §5.3 round-trip helpers).
+// ID already exists. Mirrors InsertIssueWithID (round-trip helpers).
 // Must be called within an existing transaction. Returns true if inserted.
 func InsertDocWithID(tx *sql.Tx, doc *model.Doc) (bool, error) {
 	res, err := tx.Exec(
@@ -615,7 +613,7 @@ func getDocTx(tx *sql.Tx, id int) (*model.Doc, error) {
 }
 
 // scanDocFrom scans a single doc from any scanner. Author is stored as
-// sql.NullString and projected to a plain string per S5 (mirrors comments.go).
+// sql.NullString and projected to a plain string (mirrors comments.go).
 func scanDocFrom(s scanner) (*model.Doc, error) {
 	var d model.Doc
 	var author sql.NullString

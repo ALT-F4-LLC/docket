@@ -11,9 +11,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// §6.15's lifecycle, pinned.
+// The human, vote, and action step lifecycle, pinned.
 
-// TestApproveMovesAHumanStepToDone is §6.15's human row, first half.
+// TestApproveMovesAHumanStepToDone is the human row, first half.
 func TestApproveMovesAHumanStepToDone(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -36,8 +36,8 @@ func TestApproveMovesAHumanStepToDone(t *testing.T) {
 	}
 }
 
-// TestRejectRoutesPerEffectiveOnFailAndNeverWaitingHuman is §6.15's second
-// half, and the reason V13a exists.
+// TestRejectRoutesPerEffectiveOnFailAndNeverWaitingHuman is the human row's
+// second half, and the reason V13a exists.
 //
 // The fixture's `commit-gate` declares `on_fail = "fix-loop"` explicitly. A
 // reject must route THERE — never `waiting-human`, which would park the issue
@@ -157,12 +157,12 @@ on_fail = "waiting-human"
 	}
 }
 
-// TestClaimRefusesHumanVoteAndActionSteps is §6.15's "none of the three is
+// TestClaimRefusesHumanVoteAndActionSteps pins "none of the three is
 // offered as executor work", asserted as a test rather than left to the reader.
 //
 // The `action` row carries the weight: an action step that
 // could be claimed is a relay a dispatcher would write to copy a predecessor's
-// payload onto it, which is the claim+complete shim D13 forbids. The refusal is
+// payload onto it, which is the forbidden claim+complete shim. The refusal is
 // what makes that unwritable rather than merely discouraged.
 func TestClaimRefusesHumanVoteAndActionSteps(t *testing.T) {
 	const src = `
@@ -244,10 +244,10 @@ params = { field = "severity", method = "median", output = "findings" }
 	}
 }
 
-// TestVoteStepParksAndOnlyResolveMovesIt is §6.15's vote row: at S3 a ready
+// TestVoteStepParksAndOnlyResolveMovesIt is the vote row: at S3 a ready
 // vote step is offered, claimable by nothing, and moved only by `step resolve`.
 //
-// Vote EXECUTION is deferred to S4 explicitly (§1's scope table), so this
+// Vote EXECUTION is deferred explicitly, so this
 // asserts the park is real rather than that voting works.
 func TestVoteStepParksAndOnlyResolveMovesIt(t *testing.T) {
 	const src = `
@@ -294,7 +294,7 @@ on_fail = "skip"
 		t.Errorf("the vote step moved to %q without any verb advancing it", got)
 	}
 
-	// `step resolve` is the one thing that does (§6.15).
+	// `step resolve` is the one thing that does.
 	err = e.ResolveStep(conn, id, ResolveSkip, "not needed", nowMS)
 	testsupport.Must(t, err, "resolve --as skip on a vote step: %v — it is the operator's "+
 		"only way past one at S3, and refusing would deadlock the run", err)
@@ -320,7 +320,7 @@ func TestResolveRefusesAnUnparkedStep(t *testing.T) {
 	}
 }
 
-// TestResolveRetryResetsAttemptsAndClearsTheSaga pins §6.10's retry semantics,
+// TestResolveRetryResetsAttemptsAndClearsTheSaga pins retry semantics,
 // including the saga clear that a naive implementation omits: a retry re-does
 // the work, so a half-finished saga from the previous try must not resume.
 //
@@ -361,7 +361,7 @@ func TestResolveRetryResetsAttemptsAndClearsTheSaga(t *testing.T) {
 			"(step, attempt, unit) key (DKT-86)", after.Attempt)
 	}
 	if after.AttemptBase != 2 {
-		t.Errorf("attempt_base = %d after retry, want 2 — §2's \"retry resets "+
+		t.Errorf("attempt_base = %d after retry, want 2 — \"retry resets "+
 			"attempts\" is the budget counting fresh from here", after.AttemptBase)
 	}
 	if after.Status != db.StepPending {
@@ -377,7 +377,7 @@ func TestResolveRetryResetsAttemptsAndClearsTheSaga(t *testing.T) {
 	}
 }
 
-// TestFailBelowMaxAttemptsReturnsToThePool pins §6.10's `step fail` below the
+// TestFailBelowMaxAttemptsReturnsToThePool pins `step fail` below the
 // limit: the step returns to the pool and is re-offered.
 //
 // `attempt` COUNTS CLAIMS — and ONLY claims. A step with `max_attempts = 3`
@@ -556,10 +556,9 @@ func TestFailRequiresTheToken(t *testing.T) {
 // TestAttemptCountsClaimsNotClaimsPlusFailures is E-8's regression spine — the
 // RUN-3 judges' probe, made permanent.
 //
-// `attempt` COUNTS CLAIMS. claims-leases §5 states the invariant in the table
-// itself ("claims made against this issue, ever") and again in prose ("`attempt`
-// increments on that claim … every claim ever made is counted"), and
-// engine-core's status machine draws the retry edge as `attempt++ < max` taken
+// `attempt` COUNTS CLAIMS: "claims made against this issue, ever"; `attempt`
+// increments on that claim and every claim ever made is counted. The status
+// machine draws the retry edge as `attempt++ < max` taken
 // at the RE-CLAIM. `ReapStepTx`'s own comment says the same thing from the other
 // side: attempt is "LEFT ALONE" on reap because "incrementing again here would
 // double-count a single death".
@@ -601,7 +600,7 @@ on_fail = "waiting-human"
 	testsupport.Must(t, err, "GetStep after first claim: %v", err)
 	if step.Attempt != 1 {
 		t.Fatalf("attempt = %d after ONE claim, want 1 — the claim is what "+
-			"counts an attempt (claims-leases §5)", step.Attempt)
+			"counts an attempt", step.Attempt)
 	}
 
 	err = e.FailStep(conn, id, claim.Token, "first try failed", "", nowMS)

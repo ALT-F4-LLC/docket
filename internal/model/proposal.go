@@ -347,7 +347,7 @@ type Vote struct {
 	Summary         string
 	// Metadata is the casting seat's own opaque KV bag — e.g. which model and
 	// effort level cast the vote (DKT-71). Core never reads a key inside it,
-	// exactly like a step's metadata (docs/tdd/completion-metadata.md): it is
+	// exactly like a step's metadata: it is
 	// a claim the seat makes about itself, not a fact core verifies.
 	Metadata map[string]any
 	// MetadataUnreadable is set by the read path when the stored bag exists

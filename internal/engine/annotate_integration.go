@@ -174,7 +174,7 @@ func (e *Engine) AnnotateIntegration(
 				"commit a recorded one landed as", step.Instance, sha)
 	}
 
-	// The git questions, OUTSIDE any transaction (§6). Nothing below runs on a
+	// The git questions, OUTSIDE any transaction. Nothing below runs on a
 	// sha the shared branch does not carry.
 	execRoot := runExecRoot(conn, step.RunID)
 	if e == nil || e.IsAncestorFn == nil {
@@ -255,8 +255,8 @@ func (e *Engine) AnnotateIntegration(
 	}
 
 	// The integrated sha is now the target every downstream pre-gate
-	// measures, and this commit is where it first exists (gates-trust §7.6.2
-	// PG6) — the same reaction the routing stage's own round record gets.
+	// measures, and this commit is where it first exists — the same reaction
+	// the routing stage's own round record gets.
 	if !repin.Unchanged {
 		e.startDetachedPreGates(conn, step.RunID, nowMS)
 	}

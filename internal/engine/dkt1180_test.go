@@ -24,8 +24,7 @@ import (
 // sibling in any non-terminal status gated the whole next phase. Moving the
 // sibling to `backlog` — the reporter's attempted workaround — changed nothing,
 // because `backlog` is not `done` either. An issue's predecessors are its own
-// depends_on edges (engine-spine §6.3 R2, and planner.FindReady's reading of
-// the same graph), and nothing else.
+// depends_on edges (planner.FindReady reads the same graph), and nothing else.
 
 // dependsOn seeds `source depends_on target`, the row `issue link` writes.
 func dependsOn(t *testing.T, conn *sql.DB, source, target int) {

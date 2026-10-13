@@ -19,9 +19,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
-// §9 item 6 — the trust proof (TDD docs/tdd/gates-trust.md §9.2, threat T1).
-//
-// engine-spec §9 item 6, verbatim:
+// The trust proof. The acceptance criterion:
 //
 //	Trust: a cloned malicious repo cannot cause execution without a prior local
 //	`trust add` (proof includes fenced-command harvesting); unmatched commands
@@ -49,14 +47,14 @@ func sentinelExists(t *testing.T, path string) bool {
 	return err == nil
 }
 
-// TestMaliciousCloneExecutesNothing is §9.2's script, step by step.
+// TestMaliciousCloneExecutesNothing is the trust proof's script, step by step.
 //
 // Steps 1-5: a repo whose gate is a witness command, NO trust entries, and the
 // assertion that the sentinel does not exist.
 // Steps 6-7: `trust add` the named gate only; its sentinel appears and nothing
 // else does — trust is per-command, not per-repo-blanket.
 // Step 8: the clone half — trust granted in the ORIGINAL does not fire in a
-// COPY at a different path, which is §3.4's argument mechanized.
+// COPY at a different path, which is the path-binding argument mechanized.
 func TestMaliciousCloneExecutesNothing(t *testing.T) {
 	repoRoot := t.TempDir()
 	namedArgv, namedSentinel := witnessCommand(t, repoRoot, "named-ran")
@@ -101,7 +99,7 @@ func TestMaliciousCloneExecutesNothing(t *testing.T) {
 		if r.Reason == "" {
 			t.Error("an unmatched gate carries no reason")
 		}
-		// N3: unmatched is a FAILURE for routing, never a pass.
+		// Unmatched is a FAILURE for routing, never a pass.
 		if ex.Verdict != VerdictFail {
 			t.Errorf("gate verdict = %q, want %q — an unmatched gate fails the step",
 				ex.Verdict, VerdictFail)
@@ -141,7 +139,7 @@ func TestMaliciousCloneExecutesNothing(t *testing.T) {
 	// ---- Step 8: THE CLONE HALF. -------------------------------------------
 	//
 	// A second checkout at a DIFFERENT path. The entry above is bound to the
-	// original, so it does not match here — §3.4's whole argument, and the
+	// original, so it does not match here — the whole argument, and the
 	// reason the binding is the absolute filesystem path rather than a git
 	// remote or a root commit, both of which a clone carries with it.
 	cloneRoot := t.TempDir()
@@ -165,7 +163,7 @@ func TestMaliciousCloneExecutesNothing(t *testing.T) {
 		t.Errorf("the clone's gate is %q, want %q",
 			cloned.Results[0].Verdict, VerdictUnmatched)
 	}
-	// §3.4's diagnostic: the reason names the repo the entry IS bound to, so
+	// The diagnostic: the reason names the repo the entry IS bound to, so
 	// an operator hunting a moved repo is told where to look rather than left
 	// to guess between four causes of `unmatched`.
 	if !strings.Contains(cloned.Results[0].Reason, identity) {
@@ -195,10 +193,10 @@ func TestGlobalEntryMatchesAnyRepo(t *testing.T) {
 	}
 }
 
-// TestRunFenceHashTamperIsRefused is §7.3 step 3: a `run_fences` row altered
-// after activation is NOT executed.
+// TestRunFenceHashTamperIsRefused: a `run_fences` row altered after activation
+// is NOT executed.
 //
-// S3's snapshot closes "the issue body cannot inject"; this closes the narrower
+// The activation snapshot closes "the issue body cannot inject"; this closes the narrower
 // "the stored row cannot be swapped". A direct database write is outside the
 // trust boundary, but it costs one hash to detect and a mismatch is refused
 // rather than run.
@@ -245,7 +243,7 @@ func TestRunFenceHashTamperIsRefused(t *testing.T) {
 	}
 }
 
-// TestPerLineFenceMatchingIsIndependent is §7.3 step 4: a fence block with
+// TestPerLineFenceMatchingIsIndependent: a fence block with
 // several lines produces one result PER LINE, each its own decision.
 //
 // The anti-pattern this rules out is matching the block as a unit, or running
@@ -278,14 +276,14 @@ func TestPerLineFenceMatchingIsIndependent(t *testing.T) {
 	if sentinelExists(t, badSentinel) {
 		t.Error("the untrusted line RAN; each line must match independently")
 	}
-	// The gate fails because one line was unmatched (N3).
+	// The gate fails because one line was unmatched.
 	if ex.Verdict != VerdictFail {
 		t.Errorf("gate verdict = %q, want %q — an unmatched line fails the gate",
 			ex.Verdict, VerdictFail)
 	}
 }
 
-// TestTrustFileRewriteMidGateDoesNotChangeWhatRuns is T4: the store is read
+// TestTrustFileRewriteMidGateDoesNotChangeWhatRuns: the store is read
 // ONCE into an immutable snapshot, and the matched entry's OWN argv is what
 // executes.
 //
@@ -326,7 +324,7 @@ func TestTrustFileRewriteMidGateDoesNotChangeWhatRuns(t *testing.T) {
 	}
 	if sentinelExists(t, swappedSentinel) {
 		t.Error("a SECOND read of the trust store changed what executed; the " +
-			"store must be read once into an immutable snapshot (M1)")
+			"store must be read once into an immutable snapshot")
 	}
 	if calls != 1 {
 		t.Errorf("the runner read the trust store %d times for one gate, want 1 — "+
@@ -335,7 +333,7 @@ func TestTrustFileRewriteMidGateDoesNotChangeWhatRuns(t *testing.T) {
 }
 
 // trustHashOf is the SHA-256 a harvested command carries — the same hash
-// activation stored, computed the same way §7.3's verification recomputes it.
+// activation stored, computed the same way the runner's verification recomputes it.
 func trustHashOf(command string) string {
 	sum := sha256.Sum256([]byte(command))
 	return hex.EncodeToString(sum[:])

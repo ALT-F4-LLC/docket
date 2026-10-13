@@ -94,7 +94,7 @@ func TestResolveEnvNormalizesRelativePath(t *testing.T) {
 	}
 }
 
-// TestResolveFindsLocalStoreFromSubdir is the G3 half the old resolver lacked:
+// TestResolveFindsLocalStoreFromSubdir is the half the old resolver lacked:
 // a repo-local store is discovered from anywhere inside the repository, not
 // only from its root.
 func TestResolveFindsLocalStoreFromSubdir(t *testing.T) {
@@ -353,7 +353,7 @@ func TestLocalAtMirrorsResolution(t *testing.T) {
 	}
 }
 
-// TestGlobalStoreCoexistsWithExistingContent is G12: on this machine
+// TestGlobalStoreCoexistsWithExistingContent: on this machine
 // ~/.docket already carries a vorpal-managed contracts/fragments library the
 // binary never reads. The global store must land BESIDE that content — the
 // directory existing without issues.db reads as "not yet initialized", never

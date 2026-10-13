@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# ZO — THE USAGE BACK-FILL RETIRES THE D2 WEDGE
-# (docs/tdd/usage-backfill-wedge.md).
+# ZO — THE USAGE BACK-FILL RETIRES THE USAGE-ROWS-MISSING WEDGE.
 #
 # THIS SECTION IS THE INVERSE OF RUN-3'S RUN-ENDING WEDGE. That run recorded,
 # through the CLI:
@@ -14,8 +13,8 @@
 #   ✘ Error: ... usage-rows-missing ...                      # forever
 #
 # Acceptance let the CLOSE succeed — its real contract — and could not clear the
-# discrepancy, because D2 is computed from `steps.usage_recorded` and never
-# reads `close_reason`. Every later `next` recomputed the same refusal from the
+# discrepancy, because the discrepancy is computed from `steps.usage_recorded`
+# and never reads `close_reason`. Every later `next` recomputed the same refusal from the
 # same column, so no step was ever offered again and the run's builtin action
 # steps (driven only from `next`) starved. RUN-3 ended there.
 #
@@ -24,7 +23,7 @@
 # refused forever, through the same verbs, at the same layer. The Go tests prove
 # the transaction; this proves the WIRE.
 #
-# THE STRANGER TEST (§1.1). The fixture is a print shop, as ZM's is: a press
+# THE STRANGER TEST. The fixture is a print shop, as ZM's is: a press
 # operator runs a job, and the shop's own dispatcher — not the operator — knows
 # how many sheets were consumed, because the operator cannot see the counter.
 # That is exactly the shape the back-fill exists for. Units here are `sheets`,
@@ -76,8 +75,8 @@ TOML
   # closed under acceptance, does NOT refuse (DKT-315).
   # ===========================================================================
   #
-  # D2 applies only to runs that ever dispatched, so the manifest is what makes
-  # the relay accountable for the step's usage.
+  # The discrepancy check applies only to runs that ever dispatched, so the
+  # manifest is what makes the relay accountable for the step's usage.
 
   run_env "$ZO" dispatch open --run RUN-1 --json
   assert_exit "ZO" "ZO1_dispatch_open" 0
@@ -99,10 +98,10 @@ TOML
   run_env "$ZO" dispatch close --run RUN-1 --accept-missing-usage --json
   assert_exit "ZO" "ZO1_close_accepts" 0
 
-  # E-4, AT THE WIRE: DKT-315 made `--accept-missing-usage` SETTLE the accepted
-  # steps (writes `usage_recorded`, the same fast path D2 probes) rather than
-  # only recording the acceptance in the close event — so `next` answers
-  # immediately, with no back-fill required. This is the assertion that would
+  # AT THE WIRE: DKT-315 made `--accept-missing-usage` SETTLE the accepted
+  # steps (writes `usage_recorded`, the same fast path the discrepancy check
+  # probes) rather than only recording the acceptance in the close event — so
+  # `next` answers immediately, with no back-fill required. This is the assertion that would
   # have caught RUN-3/RUN-14/RUN-32's wedge before the fix; it now proves the
   # wedge is gone at the wire, not just in the Go transaction tests.
   run_env "$ZO" next --run RUN-1 --json
@@ -125,13 +124,13 @@ TOML
   ZO_ROWS=$(sqlite3 "$ZO/issues.db" "SELECT COUNT(*) FROM usage_ledger;")
   check_cond "ZO" "ZO2_ledger_written" "expected 1 ledger row, found $ZO_ROWS" [ "$ZO_ROWS" = "1" ]
 
-  # §1.3.2: the source is written EXPLICITLY, so a relay's reconstruction is
+  # The source is written EXPLICITLY, so a relay's reconstruction is
   # never mistaken for the claimant's own report. An empty source would have
   # fallen through InsertUsageRowTx's default to "reported".
   ZO_SOURCE=$(sqlite3 "$ZO/issues.db" "SELECT source FROM usage_ledger LIMIT 1;")
   check_cond "ZO" "ZO2_source_is_explicit" "source is '$ZO_SOURCE', want 'backfilled' — 'reported' means a claimant said so" [ "$ZO_SOURCE" = "backfilled" ]
 
-  # §1.3.1: the row lands on the step's RECORDED attempt (one claim ⇒ 1).
+  # The row lands on the step's RECORDED attempt (one claim ⇒ 1).
   ZO_ROWS=$(sqlite3 "$ZO/issues.db" "SELECT attempt FROM usage_ledger LIMIT 1;")
   check_cond "ZO" "ZO2_recorded_attempt" "attempt is $ZO_ROWS, want 1" [ "$ZO_ROWS" = "1" ]
 
@@ -158,8 +157,8 @@ TOML
     --step STEP-1 --unit sheets --quantity 300
   assert_exit "ZO" "ZO3_double_backfill_refused" 4
   assert_stderr_contains "ZO" "ZO3_refusal_is_phrased" "already has"
-  # The refusal must NOT leak SQLite's own text — §2's rule is that a refusal
-  # names its way out, and "UNIQUE constraint failed" names a table instead.
+  # The refusal must NOT leak SQLite's own text — a refusal must name its way
+  # out, and "UNIQUE constraint failed" names a table instead.
   if echo "$CMD_STDERR" | grep -q "UNIQUE constraint"; then
     check "ZO" "ZO3_refusal_hides_sqlite" "FAIL" \
       "the refusal leaks raw SQLite text: $CMD_STDERR"

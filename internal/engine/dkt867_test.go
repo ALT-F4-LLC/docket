@@ -21,10 +21,10 @@ import (
 // variant, at claim time — declares the scaling (`step claim
 // --cost-multiplier`), and the claim checks the SCALED cost at the cap and
 // records it in its own `step-claimed` event, which RunFloorTx sums in place
-// of the step row's declaration. Core learns no variant vocabulary
-// (genericity.md): it learns a number, from the one party positioned to know
-// it. The ledger-reading remedy DKT-867 also named is NOT taken here — its
-// safe form already exists as DKT-238's measured usage cap, and folding token
+// of the step row's declaration. Core learns no variant vocabulary: it learns
+// a number, from the one party positioned to know it. The ledger-reading
+// remedy DKT-867 also named is NOT taken here — its safe form already exists
+// as DKT-238's measured usage cap, and folding token
 // counts into the declared cap's `max()` is the incomparability trap
 // budgetSnapshot.usageCap documents.
 //
@@ -143,7 +143,7 @@ func TestEscalatedClaimIsRefusedAtTheCap(t *testing.T) {
 		t.Errorf("the refusal does not name the budget: %v", err)
 	}
 
-	// The refusal and the pause are one fact (B20), same as every breach.
+	// The refusal and the pause are one fact, same as every breach.
 	run, err := db.GetRun(conn, runID)
 	testsupport.Must(t, err, "GetRun: %v", err)
 	if run.Status != model.RunWaitingHuman {
@@ -158,7 +158,7 @@ func TestEscalatedClaimIsRefusedAtTheCap(t *testing.T) {
 	}
 }
 
-// TestEscalatedRetryReAccruesItsOwnCost is B9's re-accrual made variant-aware
+// TestEscalatedRetryReAccruesItsOwnCost is retry re-accrual made variant-aware
 // — the DOT-846 shape: a cheap first attempt, then an escalated retry of the
 // SAME step. Each claim accrues what ITS dispatcher declared, so the retry's
 // hop lands in the floor at its real price.
@@ -187,7 +187,7 @@ func TestEscalatedRetryReAccruesItsOwnCost(t *testing.T) {
 // TestCheaperVariantAdmitsWhereDeclaredWouldRefuse is the multiplier's other
 // direction: a cap the DECLARED cost would cross admits a claim the
 // dispatcher routed to a cheaper variant, and the floor records the honest
-// smaller number. Budget is §6.3's last clause, so nothing else can hide
+// smaller number. Budget is the readiness check's last clause, so nothing else can hide
 // behind the fall-through.
 func TestCheaperVariantAdmitsWhereDeclaredWouldRefuse(t *testing.T) {
 	conn := mustDB(t)

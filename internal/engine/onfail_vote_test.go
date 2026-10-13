@@ -370,7 +370,7 @@ func TestExecutorFailureRoutesToVoteStep(t *testing.T) {
 }
 
 // TestCommittedTriagePanelEventsMatchSkippedRow: an operator's manual commit
-// (§8.4) is an outcome the triage mapping has no key for, so the panel closes
+// is an outcome the triage mapping has no key for, so the panel closes
 // `skipped` and its own `on_fail` disposes of the step it was asked about.
 // Every event recorded for the panel must agree with that row: a `pass`
 // routing event beside a `skipped` row tells an event consumer the panel

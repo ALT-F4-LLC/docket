@@ -6,7 +6,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestForeignHoldersStayWithinTheProject is G6's scheduler half: scope globs
+// TestForeignHoldersStayWithinTheProject is the scheduler half: scope globs
 // are literal path prefixes with no repo qualifier, so the foreign-holder set
 // must be bounded by the project or `internal/**` in one repository would
 // exclude `internal/**` in every other repository sharing the store.

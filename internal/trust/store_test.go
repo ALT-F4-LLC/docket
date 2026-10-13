@@ -10,13 +10,13 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// THE SANDBOX RULE (§9.5 SB1) is binding on every test in this package: each
-// one sets XDG_CONFIG_HOME to a t.TempDir(), so NO TEST CAN READ OR WRITE THE
+// THE SANDBOX RULE is binding on every test in this package: each one sets
+// XDG_CONFIG_HOME to a t.TempDir(), so NO TEST CAN READ OR WRITE THE
 // OPERATOR'S REAL TRUST STORE. A test that touched it would not merely be
 // wrong — it would modify the machine it is auditing.
 //
 // sandbox returns the store path inside a fresh sandbox and points both
-// XDG_CONFIG_HOME and HOME at it. HOME is set too because §3.1's fallback row
+// XDG_CONFIG_HOME and HOME at it. HOME is set too because the fallback path
 // reads it, so a bug that ignored XDG would otherwise silently reach the real
 // ~/.config.
 func sandbox(t *testing.T) string {
@@ -51,7 +51,7 @@ argv = ["make", "test"]
 repo = "/src/example"
 `
 
-// --- Store path resolution (§3.1) -------------------------------------------
+// --- Store path resolution --------------------------------------------------
 
 func TestStorePathHonorsXDGConfigHome(t *testing.T) {
 	dir := t.TempDir()
@@ -67,7 +67,7 @@ func TestStorePathHonorsXDGConfigHome(t *testing.T) {
 }
 
 func TestStorePathFallsBackToHomeConfig(t *testing.T) {
-	// Row 2 of §3.1's table: XDG unset (or empty) falls back to $HOME/.config.
+	// XDG unset (or empty) falls back to $HOME/.config.
 	// Both spellings are covered because an empty-but-set variable is the case
 	// a naive os.Getenv check gets wrong.
 	for _, tc := range []struct {
@@ -92,14 +92,14 @@ func TestStorePathFallsBackToHomeConfig(t *testing.T) {
 	}
 }
 
-// TestNoTrustPathSurface is T8's surface guard, in the family of the
+// TestNoTrustPathSurface is the trust-path surface guard, in the family of the
 // no-token-flag guard: NO FLAG AND NO CONFIG KEY MAY NAME A TRUST-FILE PATH.
 //
 // At group 1 the trust package is unreachable from any command, so the check
 // runs against this package's own exported surface — the place a path-taking
-// entry point would have to appear first. §3.1 SB3 is the rule: the store path
-// is computed from the environment, and the path-taking constructor is
-// UNEXPORTED and used only by this package's tests. Group 2 extends this guard
+// entry point would have to appear first. The rule: the store path is computed
+// from the environment, and the path-taking constructor is UNEXPORTED and used
+// only by this package's tests. Group 2 extends this guard
 // to walk the Cobra tree when the CLI verbs exist.
 //
 // The reason a third source is refused is direct: every additional way to point
@@ -116,7 +116,7 @@ func TestNoTrustPathSurface(t *testing.T) {
 	// The environment is consulted for exactly ONE variable name.
 	for _, banned := range []string{"DOCKET_TRUST_FILE", "DOCKET_TRUST", "--trust-file", "trust_file", "trust.path"} {
 		if strings.Contains(code, banned) {
-			t.Errorf("store.go names %q in code; §3.1 admits no source for the store path other than XDG_CONFIG_HOME", banned)
+			t.Errorf("store.go names %q in code; nothing but XDG_CONFIG_HOME may supply the store path", banned)
 		}
 	}
 
@@ -127,25 +127,25 @@ func TestNoTrustPathSurface(t *testing.T) {
 		t.Error("store.go must resolve the store path from XDG_CONFIG_HOME")
 	}
 
-	// Exported path-taking constructors are the shape SB3 forbids. loadAt,
-	// addAt, and removeAt are lowercase precisely so no caller outside this
+	// Exported path-taking constructors are forbidden. loadAt, addAt, and
+	// removeAt are lowercase precisely so no caller outside this
 	// package can open a store anywhere it likes.
 	for _, exported := range []string{"func LoadAt(", "func OpenAt(", "func LoadFrom(", "func AddAt(", "func RemoveAt("} {
 		for _, file := range []string{"store.go", "add.go"} {
 			b, err := os.ReadFile(file)
 			testsupport.Must(t, err, "reading %s: %v", file, err)
 			if strings.Contains(string(b), exported) {
-				t.Errorf("%s exports %q; the path-taking constructor must stay unexported (SB3)", file, exported)
+				t.Errorf("%s exports %q; the path-taking constructor must stay unexported", file, exported)
 			}
 		}
 	}
 }
 
-// --- Integrity I1–I5 (§3.2) --------------------------------------------------
+// --- Integrity --------------------------------------------------------------
 
-// TestTrustStoreRefusesUnsafePermissions is §3.2's table. Each row is refused,
-// and each error NAMES THE PATH — a refusal that does not say which file is a
-// refusal an operator cannot act on.
+// TestTrustStoreRefusesUnsafePermissions covers the integrity checks. Each row
+// is refused, and each error NAMES THE PATH — a refusal that does not say which
+// file is a refusal an operator cannot act on.
 func TestTrustStoreRefusesUnsafePermissions(t *testing.T) {
 	t.Run("I1_symlink", func(t *testing.T) {
 		path := sandbox(t)
@@ -251,8 +251,8 @@ func assertIntegrityRefusal(t *testing.T, err error, wantPath, wantDetail string
 	}
 }
 
-// TestMissingTrustFileIsAnEmptyAllowlist is §3.2's closing rule and the state
-// the malicious-clone proof starts from.
+// TestMissingTrustFileIsAnEmptyAllowlist covers the missing-file rule and the
+// state the malicious-clone proof starts from.
 //
 // A MISSING TRUST FILE IS NOT AN ERROR. It is an empty allowlist: every gate is
 // unmatched, nothing executes, and a run reports what it would have needed.
@@ -281,7 +281,7 @@ func TestMissingTrustFileIsAnEmptyAllowlist(t *testing.T) {
 }
 
 func TestStoreCreationUsesRestrictiveModes(t *testing.T) {
-	// I5: the directory is created 0700 and the file 0600.
+	// The directory is created 0700 and the file 0600.
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
@@ -306,7 +306,7 @@ func TestStoreCreationUsesRestrictiveModes(t *testing.T) {
 	}
 }
 
-// --- Parse strictness (§3.1) -------------------------------------------------
+// --- Parse strictness -------------------------------------------------------
 
 func TestParseStrictness(t *testing.T) {
 	tests := []struct {
@@ -348,7 +348,7 @@ repo = "/src/example"
 			wantErr: "version 0",
 		},
 		{
-			// P4: an entry with NEITHER repo NOR global is a malformed file,
+			// An entry with NEITHER repo NOR global is a malformed file,
 			// never "matches everything". A missing binding failing open would
 			// make a hand-edited file a bypass.
 			name: "entry with neither repo nor global",
@@ -511,7 +511,7 @@ stub = true
 	}
 }
 
-// --- The canonical-argv hash (§3.3) -----------------------------------------
+// --- The canonical-argv hash ------------------------------------------------
 
 // TestCanonicalArgvHashDoesNotCollide is THE ONE THAT MATTERS.
 //

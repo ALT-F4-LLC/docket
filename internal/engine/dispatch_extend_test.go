@@ -13,7 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// `dispatch extend` — DKT-2071's append (docs/tdd/runs-dispatch.md §5.10).
+// `dispatch extend` — DKT-2071's append.
 //
 // A fix round is minted at the RECORD TIME of the step whose routing chose
 // `fix-loop`, never at `next`, so before this verb every loop round started in
@@ -272,7 +272,7 @@ func TestDispatchExtendRecordsTheLatestSeqOnEachExtend(t *testing.T) {
 	}
 }
 
-// TestDispatchExtendRefusesAnExpiredManifest is §5.10's expiry invariant:
+// TestDispatchExtendRefusesAnExpiredManifest is the expiry invariant:
 // extending a lapsed manifest would push its expiry back out and resurrect a
 // batch the TTL had already given up on, which is the wedge `dispatch abandon`
 // exists to avoid. Its mutant — dropping the refusal — extends one instead.
@@ -313,8 +313,8 @@ func TestDispatchExtendRefusesAnExpiredManifest(t *testing.T) {
 }
 
 // TestDispatchExtendReapsLapsedLeasesAndReportsTheHold is the extend half of
-// P5's lazy reap, and A11's hold on top of it. `ExtendDispatch` runs the SAME
-// shared reap every scheduling verb runs, so a lapsed lease is freed by the
+// the lazy reap, and the reap-ack hold on top of it. `ExtendDispatch` runs the
+// SAME shared reap every scheduling verb runs, so a lapsed lease is freed by the
 // extend itself — and on a BOUNDED class that reap leaves an unacknowledged
 // `reap_acks` row which denies the next `guard spawn --active`.
 //

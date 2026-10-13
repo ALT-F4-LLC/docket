@@ -9,11 +9,11 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// Dispatch manifests and the write-reap acknowledgment ledger — the storage half
-// of docs/tdd/runs-dispatch.md §5 and §6.
+// Dispatch manifests and the write-reap acknowledgment ledger — the storage
+// half of dispatch.
 //
 // NOTHING IN HERE INTERPRETS A ROW'S CONTENT. `row_json` is stored and compared
-// as BYTES, `class` is the opaque string §11.1 makes it, and `close_reason` is a
+// as BYTES, `class` is an opaque string, and `close_reason` is a
 // short engine-authored word. The scheduling meaning lives in internal/engine;
 // this file is the rows and their CAS.
 
@@ -33,17 +33,17 @@ const (
 // Close reasons core writes. They are a small closed vocabulary because
 // `run report` and `events list` render them, and a free-text reason from the
 // engine's own paths would make the feed inconsistent with itself. A caller's
-// `--reason` on `abandon` rides in the EVENT's data, not here (P21).
+// `--reason` on `abandon` rides in the EVENT's data, not here.
 const (
-	// CloseReasonTTL is P14's lazy auto-abandon: the manifest outlived
+	// CloseReasonTTL is the lazy auto-abandon: the manifest outlived
 	// `dispatch.ttl` and `next` retired it.
 	CloseReasonTTL = "ttl"
-	// CloseReasonReconciled is the ordinary `dispatch close` (P18).
+	// CloseReasonReconciled is the ordinary `dispatch close`.
 	CloseReasonReconciled = "reconciled"
-	// CloseReasonAcceptedMissingUsage is P19: closed over missing-usage
+	// CloseReasonAcceptedMissingUsage: closed over missing-usage
 	// discrepancies, with the acceptance RECORDED rather than implied.
 	CloseReasonAcceptedMissingUsage = "accepted-missing-usage"
-	// CloseReasonOperator is `dispatch abandon` driven by a person (P21).
+	// CloseReasonOperator is `dispatch abandon` driven by a person.
 	CloseReasonOperator = "abandoned"
 )
 
@@ -57,7 +57,7 @@ type Dispatch struct {
 	RunID  int
 	Status string
 	// OpenedSeq is the event seq at open time — the manifest's place in the log,
-	// and §6's boundary for "reaps this relay has not yet seen" (P2).
+	// and the boundary for "reaps this relay has not yet seen".
 	OpenedSeq int64
 	// ExtendedSeq is the event seq of the manifest's LATEST `dispatch extend`,
 	// beside OpenedSeq because the two are one manifest's place in the log:
@@ -74,7 +74,7 @@ type Dispatch struct {
 	RowVersion  int
 }
 
-// Expired reports whether the manifest has outlived its TTL (P12).
+// Expired reports whether the manifest has outlived its TTL.
 //
 // It is a method on the row rather than a query so the ONE definition of expiry
 // serves the lazy abandon, the refusal's message, and any read verb that renders
@@ -99,13 +99,13 @@ type DispatchRow struct {
 	RowSHA256 string
 }
 
-// InsertDispatchTx opens a manifest, and C1 IS THE INSERT.
+// InsertDispatchTx opens a manifest, and the race guard IS THE INSERT.
 //
 // `idx_dispatches_one_open` is a partial UNIQUE index on (run_id) WHERE
 // status='open', so two relays racing produce one row and one constraint
 // violation — never a check-then-insert's window, in which both SELECT no open
 // dispatch and both then INSERT one. The loser gets ErrDispatchAlreadyOpen and
-// its whole computation is DISCARDED rather than merged (§5.4).
+// its whole computation is DISCARDED rather than merged.
 func InsertDispatchTx(tx *sql.Tx, runID int, openedSeq, expiresMS, nowMS int64) (int, error) {
 	res, err := tx.Exec(
 		`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
@@ -127,7 +127,7 @@ func InsertDispatchTx(tx *sql.Tx, runID int, openedSeq, expiresMS, nowMS int64) 
 	return int(id), nil
 }
 
-// ErrDispatchAlreadyOpen is C1's loser — the CONFLICT of P6.
+// ErrDispatchAlreadyOpen is the open race's loser — a CONFLICT.
 var ErrDispatchAlreadyOpen = errors.New("a dispatch is already open for this run")
 
 // InsertDispatchRowTx stores one manifest row at its position.
@@ -175,8 +175,8 @@ func ExtendDispatchTx(tx *sql.Tx, id int, expiresMS, extendedSeq int64) (bool, e
 
 // OpenDispatchTx reads the run's open manifest, or ErrNoOpenDispatch.
 //
-// It is the probe P24 runs and the one D2 asks about, so it is ONE query with
-// one definition of "open": the status the partial index keys on.
+// Every open-manifest probe goes through it, so it is ONE query with one
+// definition of "open": the status the partial index keys on.
 func OpenDispatchTx(tx *sql.Tx, runID int) (*Dispatch, error) {
 	return scanDispatch(tx.QueryRow(
 		`SELECT id, run_id, status, opened_seq, extended_seq, expires_ms,
@@ -218,7 +218,7 @@ func scanDispatch(row *sql.Row) (*Dispatch, error) {
 
 // ListDispatchRowsTx reads a manifest's rows IN POSITION ORDER.
 //
-// The order is the manifest (P1: "records the resulting rows in order"), so it
+// The order is the manifest (it records the resulting rows in order), so it
 // is an ORDER BY rather than an insertion-order assumption: `verify` compares
 // position by position, and a row set that came back in rowid order would make
 // the comparison depend on how SQLite happened to store them.
@@ -238,11 +238,11 @@ func ListDispatchRowsTx(tx *sql.Tx, dispatchID int) ([]DispatchRow, error) {
 	})
 }
 
-// CloseDispatchTx is C2: close and abandon are both CAS on (id, status='open').
+// CloseDispatchTx: close and abandon are both CAS on (id, status='open').
 //
 // It reports whether it MOVED the row. A close racing the TTL abandon matches
 // zero rows and learns so, which is what lets the caller report `CONFLICT`
-// naming what actually happened rather than "not open" (P22) — the loser needs
+// naming what actually happened rather than "not open" — the loser needs
 // to know WHY, and the row it then reads says.
 func CloseDispatchTx(tx *sql.Tx, id int, status, reason string, nowMS int64) (bool, error) {
 	res, err := tx.Exec(
@@ -262,14 +262,14 @@ func CloseDispatchTx(tx *sql.Tx, id int, status, reason string, nowMS int64) (bo
 	return n > 0, nil
 }
 
-// RunEverDispatchedTx answers §5.8 D2's SCOPE as the 2026-08-03 review fixed it:
-// has this run EVER opened a dispatch?
+// RunEverDispatchedTx answers the usage check's SCOPE: has this run EVER
+// opened a dispatch?
 //
 // The question is deliberately about HISTORY rather than about an open manifest.
 // A relay that ever dispatched is accountable for every step of that run,
-// including the ones it spawned outside a manifest — which is the drift D6
-// exists to catch. A run no relay ever drove has nobody owing usage, which is
-// what keeps a solo rehearsal and a human-only demo refusal-free.
+// including the ones it spawned outside a manifest — which is the drift the
+// check exists to catch. A run no relay ever drove has nobody owing usage,
+// which is what keeps a solo rehearsal and a human-only demo refusal-free.
 //
 // It reads the `dispatches` table rather than the event log because the row
 // outlives nothing: a dispatch that was opened and closed leaves its row, and
@@ -285,15 +285,16 @@ func RunEverDispatchedTx(tx *sql.Tx, runID int) (bool, error) {
 	return exists, nil
 }
 
-// DispatchTTLTx and DispatchGraceTx resolve §4.11's two durations inside the
-// caller's transaction, for the reason configValueTx exists: internal/db caps
-// the pool at ONE connection, so a pool read from inside an open transaction
-// deadlocks rather than failing.
+// DispatchTTLTx and DispatchGraceTx resolve the two dispatch durations inside
+// the caller's transaction, for the reason configValueTx exists: internal/db
+// caps the pool at ONE connection, so a pool read from inside an open
+// transaction deadlocks rather than failing.
 func DispatchTTLTx(tx *sql.Tx, projectID int) (time.Duration, error) {
 	return durationConfigTx(tx, projectID, KeyDispatchTTL)
 }
 
-// DispatchGraceTx is D1's window: how long a claimed step may go unrecorded.
+// DispatchGraceTx is the grace window: how long a claimed step may go
+// unrecorded.
 func DispatchGraceTx(tx *sql.Tx, projectID int) (time.Duration, error) {
 	return durationConfigTx(tx, projectID, KeyDispatchGrace)
 }
@@ -310,7 +311,7 @@ func durationConfigTx(tx *sql.Tx, projectID int, key string) (time.Duration, err
 	return d, nil
 }
 
-// ---- The write-reap acknowledgment ledger (§6.4) ---------------------------
+// ---- The write-reap acknowledgment ledger ----------------------------------
 
 // ReapAck is one unacknowledged-or-acknowledged reap.
 type ReapAck struct {
@@ -319,9 +320,9 @@ type ReapAck struct {
 	StepID   int
 	Class    string
 	Instance string
-	// ReapedSeq is the `seq` of the `lease-reaped` event this ack is OF. §2 says
-	// the relay acknowledges "the `reaped` event", so the event's seq is the
-	// ack's identity — which makes the ack idempotent for free (C7) and a forged
+	// ReapedSeq is the `seq` of the `lease-reaped` event this ack is OF. The
+	// relay acknowledges "the `reaped` event", so the event's seq is the
+	// ack's identity — which makes the ack idempotent for free and a forged
 	// ack impossible to construct without naming a real reap.
 	ReapedSeq   int64
 	AckedAtMS   *int64
@@ -329,26 +330,26 @@ type ReapAck struct {
 	CreatedAtMS int64
 }
 
-// Acknowledgers — A8's closed set. The value records the acknowledging VERB
+// Acknowledgers — a closed set. The value records the acknowledging VERB
 // and never a user identity, because core has no identity model.
 const (
-	// AckByGuardSpawn is `guard spawn --ack-reap`, group 3's entry point.
+	// AckByGuardSpawn is `guard spawn --ack-reap`.
 	AckByGuardSpawn = "guard-spawn"
-	// AckByDispatchOpen is `dispatch open --ack-reap`, this group's.
+	// AckByDispatchOpen is `dispatch open --ack-reap`.
 	AckByDispatchOpen = "dispatch-open"
 	// AckByDispatchClose is a reconciled `dispatch close` acknowledging a
 	// NON-FORCED reap of a claim admitted under that same dispatch
-	// (DKT-3286, runs-dispatch §6.2 A8). Abandon, forced reaps, and claims
-	// from another dispatch keep the hold.
+	// (DKT-3286). Abandon, forced reaps, and claims from another dispatch keep
+	// the hold.
 	AckByDispatchClose = "dispatch-close"
 )
 
 // InsertReapAckTx records a reap as unacknowledged, in the reap's own
-// transaction (A16, A19).
+// transaction.
 //
-// The caller is responsible for A16's OTHER half — calling this only for a class
-// whose `[limits] max` is finite — because that decision needs the scheduler's
-// merged limits, which the storage layer does not have and must not guess at.
+// The caller is responsible for calling this only for a class whose `[limits]
+// max` is finite, because that decision needs the scheduler's merged limits,
+// which the storage layer does not have and must not guess at.
 func InsertReapAckTx(tx *sql.Tx, ack ReapAck, nowMS int64) error {
 	_, err := tx.Exec(
 		`INSERT INTO reap_acks (run_id, step_id, class, reaped_seq, created_at_ms)
@@ -371,10 +372,10 @@ func InsertReapAckTx(tx *sql.Tx, ack ReapAck, nowMS int64) error {
 
 // UnacknowledgedReapsTx lists a run's outstanding reaps, oldest first.
 //
-// It is the query behind A12's predicate AND behind the human-readable reason
-// `next` prints, so the two cannot name different rows: a headroom denial with
-// nothing running is baffling unless the same rows that caused it are the ones
-// reported.
+// It is the query behind the headroom predicate AND behind the human-readable
+// reason `next` prints, so the two cannot name different rows: a headroom
+// denial with nothing running is baffling unless the same rows that caused it
+// are the ones reported.
 //
 // The `instance` join is for the MESSAGE. The predicate needs only the class,
 // but a refusal that named `STEP-7` rather than `implement@0` would make an
@@ -403,32 +404,33 @@ func UnacknowledgedReapsTx(tx *sql.Tx, runID int) ([]ReapAck, error) {
 		})
 }
 
-// AckReapResult is what an acknowledgment did, so the caller can tell A10's
-// idempotent success from A9's forgery refusal without re-querying.
+// AckReapResult is what an acknowledgment did, so the caller can tell an
+// idempotent success from a forgery refusal without re-querying.
 type AckReapResult int
 
 const (
 	// AckRecorded is the first acknowledgment of a real reap.
 	AckRecorded AckReapResult = iota
-	// AckAlreadyDone is A10: a second ack of the same seq succeeds and changes
+	// AckAlreadyDone: a second ack of the same seq succeeds and changes
 	// nothing, so a relay retrying its hook does not fail.
 	AckAlreadyDone
-	// AckNoSuchReap is A9: the seq names no unacknowledged-or-acknowledged reap
+	// AckNoSuchReap: the seq names no unacknowledged-or-acknowledged reap
 	// of this run. The caller raises VALIDATION_ERROR — an ack must name a real
 	// reap, and this is the forgery point.
 	AckNoSuchReap
 )
 
-// AckReapTx is A7: CAS on `acked_at_ms IS NULL` for the row whose `reaped_seq`
+// AckReapTx is a CAS on `acked_at_ms IS NULL` for the row whose `reaped_seq`
 // matches, SCOPED TO THE RUN.
 //
-// The run scope is A9's other half and it is not incidental: an ack naming
-// another run's reap is a forgery in exactly the way naming a non-reap is, and a
-// CAS without the scope would let a relay clear a hold on a run it is not
-// driving.
+// The run scope is the forgery refusal's other half and it is not incidental:
+// an ack naming another run's reap is a forgery in exactly the way naming a
+// non-reap is, and a CAS without the scope would let a relay clear a hold on a
+// run it is not driving.
 //
-// The three-way return is what makes A10 and A9 distinguishable. A CAS that
-// matched zero rows means EITHER already-acknowledged OR no-such-reap, and those
+// The three-way return is what makes already-done and no-such-reap
+// distinguishable. A CAS that matched zero rows means EITHER
+// already-acknowledged OR no-such-reap, and those
 // need opposite answers — one is a success, the other is a refusal — so the
 // existence probe runs on the zero-rows path rather than being inferred.
 func AckReapTx(tx *sql.Tx, runID int, seq int64, ackedBy string, nowMS int64) (AckReapResult, error) {

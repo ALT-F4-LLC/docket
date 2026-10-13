@@ -12,23 +12,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `docket events list --since` — the §11.4 event shape as a read surface
-// (docs/tdd/runs-dispatch.md §8).
+// `docket events list --since` — the event wire shape as a read surface.
 //
-// WHY `events list` AND NOT BARE `docket events` (§8.1). engine-spec §1's
-// summary writes the verb as `docket events --follow [--since SEQ]`, which reads
-// as a bare verb with flags. Shipping the read half as bare `docket events` would
-// mean S7's `--follow` changes the DEFAULT behavior of an existing verb — or
-// worse, that `docket events` with no flags means "list" now and something else
-// later. `events list` is chosen, with bare `docket events` printing help, so S7
-// adds `events --follow` over the same rows without redefining anything.
+// WHY `events list` AND NOT BARE `docket events`. The verb's summary spelling
+// is `docket events --follow [--since SEQ]`, which reads as a bare verb with
+// flags. Shipping the read half as bare `docket events` would mean a later
+// `--follow` changes the DEFAULT behavior of an existing verb — or worse, that
+// `docket events` with no flags means "list" now and something else later.
+// `events list` is chosen, with bare `docket events` printing help, so
+// `--follow` can land over the same rows without redefining anything.
 //
-// That is a NOMINAL DEVIATION from §1's rendering and it is RECORDED,
+// That is a NOMINAL DEVIATION from the summary spelling and it is RECORDED,
 // not made silently — the same class as the `step`/`issue` subject-key
 // note, and resolved the same way: the shape is satisfied, the spelling is
 // recorded.
 
-// eventsDefaultLimit is E9's default page size.
+// eventsDefaultLimit is the default page size.
 //
 // A default exists at all because this is a CURSOR feed: a consumer polling it
 // wants a bounded page and a `total` telling it whether to poll again
@@ -90,9 +89,9 @@ the raw bytes, because the consumer there is a program.`,
 	},
 }
 
-// eventsListResult is a Collection (E11), so `--json=v2` yields
+// eventsListResult is a Collection, so `--json=v2` yields
 // `{items, total, truncated}` uniformly with every other list verb, and v1 is
-// the bare array (E12).
+// the bare array.
 type eventsListResult struct {
 	Events []engine.Event `json:"events"`
 	Total  int            `json:"total"`
@@ -237,14 +236,14 @@ func runEventsList(cmd *cobra.Command, w *output.Writer) error {
 	return nil
 }
 
-// renderEventList is E13: one line per event, `seq  at  kind  run  issue
+// renderEventList renders one line per event, `seq  at  kind  run  issue
 // instance detail`, columns aligned.
 //
-// EVERY STORED STRING GOES THROUGH exec.Render (§8.5, gates-trust §5.7 T18).
+// EVERY STORED STRING GOES THROUGH exec.Render.
 // `data` carries `--usage` blobs, gate names, and operator-supplied abandon
 // reasons — attacker-influenced text on its way to a TERMINAL, which interprets
 // control bytes. `--json` carries the RAW bytes, because encoding/json escapes
-// them by contract and the consumer there is a program (E4 of that section).
+// them by contract and the consumer there is a program.
 //
 // The kind and the run are NOT escaped: both are core's own closed vocabulary
 // (the event set, and `RUN-N`), so there is no untrusted byte to escape and
@@ -299,7 +298,7 @@ func dashIfEmpty(s string) string {
 	return s
 }
 
-// eventDetail renders `data` compactly for the human line (E13).
+// eventDetail renders `data` compactly for the human line.
 //
 // It drops `instance`, which the writer merges into every step-shaped event's
 // payload and which the `step` column already shows — repeating it would take a
@@ -316,8 +315,8 @@ func eventDetail(data json.RawMessage) string {
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
-		// Unreachable through the writer, which normalizes `data` to an object
-		// (§7.6). Reachable through a hand-edited row, and rendering the raw
+		// Unreachable through the writer, which normalizes `data` to an object.
+		// Reachable through a hand-edited row, and rendering the raw
 		// bytes is a better answer than dropping the line: an operator looking
 		// at a corrupted feed should see that it is corrupted.
 		return string(data)
@@ -362,9 +361,9 @@ func init() {
 	eventsListCmd.Flags().String(
 		"step", "", "Return only this step's events (STEP-N), matched before --limit and --tail")
 
-	// `--follow` (docs/tdd/events-follow.md §4). engine-spec §1 writes the verb
-	// as `docket events --follow [--since SEQ]`; the flag lands on `list`
-	// because that is where the rows are (§8.1's sub-verb argument).
+	// `--follow`. The verb's summary spelling is `docket events --follow
+	// [--since SEQ]`; the flag lands on `list` because that is where the rows
+	// are.
 	eventsListCmd.Flags().Bool(
 		"follow", false, "Poll for new events and print them as they arrive (Ctrl-C to stop)")
 

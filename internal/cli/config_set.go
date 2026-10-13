@@ -15,7 +15,7 @@ import (
 
 // configEntryList is the v2 collection shape for `docket config get` with no
 // key, so the listing renders as {items,total,truncated} like every other list
-// verb (engine-spec.md §5).
+// verb.
 type configEntryList struct {
 	Entries []db.ConfigEntry `json:"entries"`
 	Total   int              `json:"total"`

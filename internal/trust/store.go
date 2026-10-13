@@ -1,14 +1,13 @@
-// Package trust is the user-level allowlist of commands Docket may execute
-// (docs/design/engine-spec.md §4, docs/tdd/gates-trust.md §3).
+// Package trust is the user-level allowlist of commands Docket may execute.
 //
 // The package is PURE: no database, no engine, no CLI. A file, a parser, a
-// matcher, and a writer. That purity is what makes §9.1's unit tables possible
+// matcher, and a writer. That purity is what makes its unit tables possible
 // without building a run, and it is why the security-sensitive mechanism can be
 // reviewed on its own.
 //
 // The one sentence that governs everything here: trust entries are USER-LEVEL
 // and are never read from a repository. An adversary with write access to the
-// store or to the docket binary has already won and is out of scope (§2); the
+// store or to the docket binary has already won and is out of scope; the
 // adversary this package defends against is hostile REPOSITORY CONTENT — a
 // cloned repo, a pulled branch, an issue body someone else wrote — reaching an
 // operator who runs docket in it.
@@ -23,11 +22,10 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
 
-// Entry is one trusted command, in §3.1's shape.
+// Entry is one trusted command, in the trust file's shape.
 //
 // An entry names a COMMAND, not a role: there is no slot in this struct for who
-// or what will run it, which is the genericity rule holding by construction
-// (§1.1).
+// or what will run it, which is the genericity rule holding by construction.
 type Entry struct {
 	// Name is the gate name a workflow references. It is an OPAQUE string:
 	// nothing in this package interprets it, there is no registry of known
@@ -35,10 +33,10 @@ type Entry struct {
 	Name string `toml:"name"`
 	// Argv is the resolved argv; NEVER a shell string. argv[0] is the program.
 	Argv []string `toml:"argv"`
-	// ArgvSHA256 is the hash of the canonical argv (§3.3), hex-encoded. It is
+	// ArgvSHA256 is the hash of the canonical argv, hex-encoded. It is
 	// stored so a hand-edited or corrupted file is caught rather than obeyed.
 	ArgvSHA256 string `toml:"argv_sha256"`
-	// Argv0SHA256 pins the CONTENT of an absolute argv[0] (§3.1): the
+	// Argv0SHA256 pins the CONTENT of an absolute argv[0]: the
 	// hex-encoded SHA-256 of the symlink-resolved file, taken at add time and
 	// re-checked by Lookup. Empty for a bare-name argv[0], which is never
 	// pinned, and for an entry written before pinning existed, which matches
@@ -52,23 +50,23 @@ type Entry struct {
 	// entry never declares files: with no repository bound, any repo holding
 	// the same bytes would satisfy the pin.
 	DeclaredFiles []DeclaredFile `toml:"declared_files,omitempty"`
-	// Repo is the repo binding (§3.4) — the absolute, symlink-resolved path of
+	// Repo is the repo binding — the absolute, symlink-resolved path of
 	// the directory containing the repo's .docket store. Empty when Global.
 	Repo string `toml:"repo"`
 	// Global makes the entry apply in any repo. It requires an explicit
-	// --global at add time (P3); there is no way to get it implicitly.
+	// --global at add time; there is no way to get it implicitly.
 	Global bool `toml:"global"`
-	// Prefix opts the entry into prefix matching (§3.3). Explicit opt-in only:
-	// a full-argv entry NEVER matches by prefix, in either direction (M4).
+	// Prefix opts the entry into prefix matching. Explicit opt-in only:
+	// a full-argv entry NEVER matches by prefix, in either direction.
 	Prefix bool `toml:"prefix"`
-	// ReRunnable declares the command safe to re-run after a crash (§7.5).
+	// ReRunnable declares the command safe to re-run after a crash.
 	// It is the operator's assertion about their own command; core never
 	// infers idempotence.
 	ReRunnable bool `toml:"re_runnable"`
 	// Tree declares that the command touches the working tree, so it
-	// serializes on the per-repo mutex (§7.4).
+	// serializes on the per-repo mutex.
 	Tree bool `toml:"tree"`
-	// Flaky declares that re-runs are recorded individually (§5.6). It names a
+	// Flaky declares that re-runs are recorded individually. It names a
 	// property of a PROCESS — that it does not always produce the same exit
 	// code on the same input — and is declared by the operator, never inferred.
 	Flaky bool `toml:"flaky"`
@@ -159,18 +157,19 @@ func (e Entry) NeedsNetwork() bool { return len(e.Network) > 0 }
 
 // Store is an immutable in-memory snapshot of the trust file.
 //
-// Immutability is T4's closure and is not an implementation convenience: the
-// store is read ONCE at the start of a gate stage, and the matched entry's own
-// argv is what executes (§7.2 M1). Matching does not produce a permission that
-// is later applied to a command read from somewhere else, so there is no window
-// between the check and the spawn in which anything can be swapped.
+// Immutability closes the check-then-use gap and is not an implementation
+// convenience: the store is read ONCE at the start of a gate stage, and the
+// matched entry's own argv is what executes. Matching does not produce a
+// permission that is later applied to a command read from somewhere else, so
+// there is no window between the check and the spawn in which anything can be
+// swapped.
 //
 // The inputs outside the snapshot are the file a pinned absolute argv[0] names
-// (§3.1) and an entry's declared files under the root LookupAt is given. Each
-// lookup re-hashes them, which narrows the window between that hash and the
-// spawn but does not close it.
+// and an entry's declared files under the root LookupAt is given. Each lookup
+// re-hashes them, which narrows the window between that hash and the spawn but
+// does not close it.
 type Store struct {
-	// Version is the file format version (§3.1). An unknown version is a hard
+	// Version is the file format version. An unknown version is a hard
 	// refusal, never a best-effort parse.
 	Version int
 	// Entries are the trusted commands, in file order.
@@ -182,31 +181,30 @@ type Store struct {
 // FormatVersion is the only trust-file version this build understands.
 const FormatVersion = 1
 
-// storeDirMode and storeFileMode are I5's creation modes: the directory 0700
-// and the file 0600, so a trust file is never group- or world-readable.
+// storeDirMode and storeFileMode are the creation modes: the directory 0700 and
+// the file 0600, so a trust file is never group- or world-readable.
 //
-// I2 is stricter than "not world-writable" on purpose. A trust file readable by
-// group is an inventory of the operator's approved commands and the repos they
-// work in — modest, but there is no reason to publish it.
+// The file mode is stricter than "not world-writable" on purpose. A trust file
+// readable by group is an inventory of the operator's approved commands and the
+// repos they work in — modest, but there is no reason to publish it.
 const (
 	storeDirMode  os.FileMode = 0o700
 	storeFileMode os.FileMode = 0o600
 )
 
-// ErrIntegrity is returned when the store fails one of §3.2's I1–I4 checks.
+// ErrIntegrity is returned when the store fails one of the integrity checks.
 // Callers map it to VALIDATION_ERROR (exit 3); the wrapped message always names
 // the path and what was wrong, and states the fix rather than only the
 // complaint.
 var ErrIntegrity = errors.New("trust store integrity")
 
 // ErrParse is returned when the store exists and is readable but does not
-// parse: an unknown version, an unknown key, or a malformed binding (P4).
+// parse: an unknown version, an unknown key, or a malformed binding.
 var ErrParse = errors.New("trust store parse")
 
 // ErrConflict is returned by Add when a name+repo already holds a DIFFERENT
-// argv or flags (§3.5). It is a CONFLICT (exit 4), never a silent overwrite:
-// a trusted name's meaning must not change without the operator seeing the old
-// value.
+// argv or flags. It is a CONFLICT (exit 4), never a silent overwrite: a trusted
+// name's meaning must not change without the operator seeing the old value.
 var ErrConflict = errors.New("trust entry conflict")
 
 // ErrPublish wraps every writeStore failure (CreateTemp, Chmod, Write, Sync,
@@ -215,17 +213,17 @@ var ErrConflict = errors.New("trust entry conflict")
 // fail the same way. Its text is the prefix of each publish failure's message.
 var ErrPublish = errors.New("publishing the trust store")
 
-// StorePath resolves the trust file's location per §3.1's two-row table.
+// StorePath resolves the trust file's location from XDG_CONFIG_HOME, falling
+// back to $HOME/.config.
 //
 // THERE IS NO THIRD SOURCE. No --trust-file flag, no DOCKET_TRUST_FILE env var,
-// no repo-local path, no config key. This is T8's mechanism: every additional
-// way to point docket at a trust file is another way for repo content — a
-// checked-in .envrc, a direnv hook, a Makefile — to point it at a file the repo
-// controls.
+// no repo-local path, no config key. Every additional way to point docket at a
+// trust file is another way for repo content — a checked-in .envrc, a direnv
+// hook, a Makefile — to point it at a file the repo controls.
 //
 // XDG_CONFIG_HOME is honored because it is the platform convention and because
-// the tests need it (§9.5 SB1): every test sets it to a sandbox directory, so
-// no test can read or write the operator's real store.
+// the tests need it: every test sets it to a sandbox directory, so no test can
+// read or write the operator's real store.
 func StorePath() (string, error) {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "docket", "trust.toml"), nil
@@ -239,10 +237,10 @@ func StorePath() (string, error) {
 
 // Load reads and returns an immutable snapshot of the trust store.
 //
-// A MISSING TRUST FILE IS NOT AN ERROR (§3.2). It is an empty allowlist: every
-// gate is unmatched, nothing executes, and a run of a gate-bearing workflow
-// reports what it would have needed. That is the correct default for a tool a
-// stranger just installed, and it is the state §9 item 6's proof starts from.
+// A MISSING TRUST FILE IS NOT AN ERROR. It is an empty allowlist: every gate is
+// unmatched, nothing executes, and a run of a gate-bearing workflow reports
+// what it would have needed. That is the correct default for a tool a stranger
+// just installed.
 func Load() (*Store, error) {
 	path, err := StorePath()
 	if err != nil {
@@ -252,9 +250,9 @@ func Load() (*Store, error) {
 }
 
 // loadAt is the path-taking constructor. It is UNEXPORTED and used only by this
-// package and its own tests — SB3's clause. There is no way to open a store at
-// an arbitrary path from outside the package, which is the same decision that
-// serves T8 (no --trust-file flag) and the sandbox rule.
+// package and its own tests. There is no way to open a store at an arbitrary
+// path from outside the package, which is the same decision that rules out a
+// --trust-file flag, and it keeps tests inside the sandbox rule.
 func loadAt(path string) (*Store, error) {
 	if err := checkIntegrity(path); err != nil {
 		return nil, err
@@ -276,17 +274,17 @@ func loadAt(path string) (*Store, error) {
 	return st, nil
 }
 
-// checkIntegrity runs §3.2's I1–I4 against the store path and its containing
-// directory, BEFORE parsing. Checked on every read and every write, because a
-// file that became a symlink between two operations is exactly the swap the
-// checks exist to catch.
+// checkIntegrity runs the integrity checks against the store path and its
+// containing directory, BEFORE parsing. Checked on every read and every write,
+// because a file that became a symlink between two operations is exactly the
+// swap the checks exist to catch.
 //
-// A missing file passes: it is the empty allowlist, and I5 governs its
-// creation instead.
+// A missing file passes: it is the empty allowlist, and ensureStoreDir and
+// writeStore govern its creation instead.
 func checkIntegrity(path string) error {
-	// I1: the file, if it exists, is a REGULAR FILE — not a symlink, not a
-	// FIFO, not a directory. Lstat, not Stat, because Stat follows the symlink
-	// this check exists to refuse.
+	// The file, if it exists, is a REGULAR FILE — not a symlink, not a FIFO,
+	// not a directory. Lstat, not Stat, because Stat follows the symlink this
+	// check exists to refuse.
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -303,10 +301,9 @@ func checkIntegrity(path string) error {
 	return checkDirIntegrity(filepath.Dir(path))
 }
 
-// checkFileIntegrity is I1–I3 over an existing file: regular, 0600, owned by
-// the calling uid.
+// checkFileIntegrity checks an existing file: regular, 0600, owned by the
+// calling uid.
 func checkFileIntegrity(path string, info os.FileInfo) error {
-	// I1.
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%w: %s is a symlink, not a regular file; the trust store is never a symlink because a link into a repository would let repo content grant itself execution", ErrIntegrity, path)
 	}
@@ -314,12 +311,12 @@ func checkFileIntegrity(path string, info os.FileInfo) error {
 		return fmt.Errorf("%w: %s is %s, not a regular file", ErrIntegrity, path, exec.DescribeMode(info.Mode()))
 	}
 
-	// I2: mode is exactly 0600 — no group or world bits, read or write.
+	// The mode is exactly 0600 — no group or world bits, read or write.
 	if perm := info.Mode().Perm(); perm != storeFileMode {
 		return fmt.Errorf("%w: %s has mode %04o, but the trust store must be %04o; fix it with: chmod 600 %s", ErrIntegrity, path, perm, storeFileMode, path)
 	}
 
-	// I3: owned by the calling uid.
+	// Owned by the calling uid.
 	owner, ok := fileOwner(info)
 	if ok && owner != os.Getuid() {
 		return fmt.Errorf("%w: %s is owned by uid %d, but docket is running as uid %d; the trust store must be owned by the calling user", ErrIntegrity, path, owner, os.Getuid())
@@ -327,15 +324,15 @@ func checkFileIntegrity(path string, info os.FileInfo) error {
 	return nil
 }
 
-// checkDirIntegrity is I4: the containing directory is owned by the calling uid
-// and is not group- or world-writable. A writable parent means anyone in the
-// group can replace the trust file wholesale, which makes I1–I3 on the file
-// itself decorative.
+// checkDirIntegrity checks that the containing directory is owned by the
+// calling uid and is not group- or world-writable. A writable parent means
+// anyone in the group can replace the trust file wholesale, which makes the
+// checks on the file itself decorative.
 func checkDirIntegrity(dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No config directory yet; I5 creates it 0700.
+			// No config directory yet; ensureStoreDir creates it 0700.
 			return nil
 		}
 		return fmt.Errorf("%w: cannot stat %s: %v", ErrIntegrity, dir, err)

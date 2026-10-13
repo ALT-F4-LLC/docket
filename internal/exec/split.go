@@ -13,7 +13,7 @@ import (
 // an operator meant by an unbalanced quote is guessing at what command to run.
 var ErrUnterminatedQuote = errors.New("unterminated quote")
 
-// Split tokenizes ONE harvested line into an argv (§5.2 K2).
+// Split tokenizes ONE harvested line into an argv.
 //
 // This is the one piece of new parsing this stage adds to a security path, so
 // its NON-GOALS are pinned as hard as its goals. The splitter handles exactly
@@ -79,7 +79,7 @@ func Split(line string) ([]string, error) {
 			// `$` inside double quotes stays a literal `$`, because this
 			// splitter has no variable expansion to perform. A POSIX shell
 			// would expand it; that difference is deliberate and is the whole
-			// point of K2.
+			// point of this splitter.
 			started = true
 			j := i + 1
 			for j < len(runes) && runes[j] != '"' {

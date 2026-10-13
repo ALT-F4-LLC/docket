@@ -178,7 +178,7 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	// DKT-741: the write above landed on `issues.scope_globs` and reached
 	// no already-activated run — packets and recorded diffs read the
-	// activation snapshot (§5.1.1), and no EDIT refreshes it (DKT-869's
+	// activation snapshot, and no EDIT refreshes it (DKT-869's
 	// `run refresh-scope` is a separate, explicitly-named second act, which
 	// is what the advisory now points at). Named AFTER the write because
 	// the answer is a property of the run's frozen snapshot, which the

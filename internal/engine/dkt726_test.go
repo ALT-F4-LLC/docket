@@ -29,7 +29,7 @@ func TestRetryRefusesOnADecidedVoteStep(t *testing.T) {
 	for _, status := range []model.ProposalStatus{
 		model.ProposalStatusRejected,
 		model.ProposalStatusApproved,
-		// §8.4's manual commit is a decision like any other.
+		// A manual commit is a decision like any other.
 		model.ProposalStatusCommitted,
 	} {
 		t.Run(string(status), func(t *testing.T) {
@@ -92,7 +92,7 @@ func TestRetryRefusesOnADecidedVoteStep(t *testing.T) {
 // TestRetryStillWorksOnAnUndecidedVoteStep is the other half, and the one the
 // narrow condition exists to protect.
 //
-// R11 offers a resolution on a vote step WHATEVER its status precisely so a run
+// The engine offers a resolution on a vote step WHATEVER its status precisely so a run
 // is not hostage to a quorum that never arrives. A refusal keyed to "this is a
 // vote step" rather than "its proposal is decided" would take the least
 // destructive verb away from exactly that case. Both shapes of undecided are
@@ -141,7 +141,7 @@ func TestRetryStillWorksOnAnUndecidedVoteStep(t *testing.T) {
 // TestReadStepVoteOutcomeMatchesTheSpecKeyedReader pins the refactor DKT-726
 // needed: the step-keyed entry point is the SAME read as ReadVoteOutcome, not a
 // second one that could drift. `step resolve` reaches it without a pinned spec
-// — R11 offers a resolution before the definition is loaded, and a materialized
+// — the engine offers a resolution before the definition is loaded, and a materialized
 // step's minted name is never declared — so the two must agree everywhere they
 // both apply.
 func TestReadStepVoteOutcomeMatchesTheSpecKeyedReader(t *testing.T) {

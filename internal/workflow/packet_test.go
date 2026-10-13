@@ -7,8 +7,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// PACKET COMPOSITION — the grammar half
-// (docs/tdd/packet-composition.md §1.1, §1.6).
+// PACKET COMPOSITION — the grammar half.
 //
 // `packet` is an optional list of file references a step declares it needs in
 // its rendered work packet. CORE ATTACHES NO MEANING TO ANY ENTRY: they are
@@ -257,7 +256,7 @@ packet = ["checklists/approval.md"]
 	}
 }
 
-// TestSubstitutePacketEntry is the substitution itself (§1.1.1): DUMB STRING
+// TestSubstitutePacketEntry is the substitution itself: DUMB STRING
 // REPLACEMENT and nothing else.
 //
 // Core does not know `checklists/` from any other directory, cannot fall back
@@ -288,8 +287,8 @@ func TestSubstitutePacketEntry(t *testing.T) {
 	}
 }
 
-// TestPacketExpandsPerSibling is F1 at the expansion layer — the defect the
-// first draft of the design could not express.
+// TestPacketExpandsPerSibling asserts per-sibling packets at the expansion
+// layer — the case an earlier draft could not express.
 //
 // A `fanout` step is ONE step whose siblings each carry a different hint. A
 // literal entry therefore serves every sibling identically, and only the token

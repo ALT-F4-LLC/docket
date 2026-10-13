@@ -34,26 +34,25 @@ func ParseStepID(s string) (int, error) {
 	return parseRefID(s, StepIDPrefix, "step")
 }
 
-// StepRow is engine-spec §11.4's `next row`, field for field:
+// StepRow is the `next row`, field for field:
 //
 //	{ step, issue, run, executor, class, attempt, expected_cost,
 //	  lease_ttl_s, metadata }
 //
-// `Instance` is the ONE addition, and it is a recorded amendment (TDD
-// §10 A1): §11.4 names no field for the rendered `name@k#i` identity that §11.3
-// makes the step's public name. The amendment proposes §11.4 name it
-// explicitly; until then the field is additive and changes no semantics.
+// `Instance` is the ONE addition: the base row names no field for the
+// rendered `name@k#i` identity that is the step's public name. The field is
+// additive and changes no semantics.
 //
 // `Kind` likewise rides here so a dispatcher can tell an executor step from a
-// human gate BEFORE spawning a worker for one (§6.15: "a dispatcher that spawns
-// on every next row must not spawn a worker for a gate").
+// human gate BEFORE spawning a worker for one: a dispatcher that spawns on
+// every next row must not spawn a worker for a gate.
 type StepRow struct {
 	Step     string `json:"step"`
 	Instance string `json:"instance"`
 	Issue    string `json:"issue"`
 	Run      string `json:"run"`
 	Kind     string `json:"kind"`
-	// Executor is the opaque hint (§11.1). It is absent on human and vote
+	// Executor is the opaque hint. It is absent on human and vote
 	// steps, which carry none — the wire shape says so by omission rather than
 	// by an empty string a dispatcher might dispatch on.
 	Executor string `json:"executor,omitempty"`
@@ -87,7 +86,7 @@ type StepRow struct {
 	// learn who had not voted without reading the definition off disk — which
 	// is the pinned artifact it is not supposed to need.
 	//
-	// The entries are OPAQUE (§11.1): core counts them and never interprets one.
+	// The entries are OPAQUE: core counts them and never interprets one.
 	Voters []string `json:"voters,omitempty"`
 	// Model, Effort, and Variant are resolved from the run's pinned
 	// policy.toml, present on an executor-class row (Executor set) the run
@@ -143,10 +142,9 @@ type StepRow struct {
 	// first time reads 0. A rendered packet (`claim --render`) reads the SAME
 	// column AFTER the claim's increment has committed, so the packet for that
 	// identical claim reads 1. There are not two counters or two bases; it is
-	// one column sampled at two different moments. See
-	// docs/tdd/attempt-numbering.md (DKT-64) before wiring any threshold
-	// (e.g. "escalate when attempt > N") against this field — get the
-	// pre-/post-claim read timing right first.
+	// one column sampled at two different moments. Before wiring any
+	// threshold (e.g. "escalate when attempt > N") against this field, get
+	// the pre-/post-claim read timing right (DKT-64).
 	Attempt int `json:"attempt"`
 	// FailedAttempts and ReapedClaims are the OUTCOME breakdown of the claims
 	// Attempt counts (DKT-490): FailedAttempts is how many ended in an
@@ -188,7 +186,7 @@ type StepRow struct {
 	// exactly as before.
 	PriorAttemptEnd string  `json:"prior_attempt_end,omitempty"`
 	ExpectedCost    float64 `json:"expected_cost"`
-	// LeaseTTLS is SECONDS, per §11.4's `_s` suffix. Resolved from the
+	// LeaseTTLS is SECONDS, per its `_s` suffix. Resolved from the
 	// workflow's [limits] for the step's class, then `lease.ttl.<class>`, then
 	// `lease.ttl.default`.
 	LeaseTTLS int `json:"lease_ttl_s"`
@@ -219,7 +217,7 @@ type StepRow struct {
 	// Until this field existed the ordering lived only in dispatcher
 	// convention — a writers-first partition keyed on `class`, in a script
 	// outside this repo. That is a correctness property resting on a heuristic
-	// core never stated: core assigns no meaning to a class name (§6.5), so a
+	// core never stated: core assigns no meaning to a class name, so a
 	// dispatcher reading one is guessing, and any dispatcher that guessed
 	// differently reviewed the wrong tree silently.
 	//
@@ -273,12 +271,12 @@ type StepRow struct {
 	// trace a reader could test, and the globs are what make that testable
 	// without a second query per issue. Absent when the issue declares none.
 	Scope []string `json:"scope,omitempty"`
-	// Status is the EFFECTIVE status (§6.2) — `ready` when the §6.3 predicate
+	// Status is the EFFECTIVE status — `ready` when the readiness predicate
 	// holds, which is never a stored value — or `staged` on an offer row
 	// carried ahead of its readiness (db.StepStaged): every row this offer
 	// scheduled at a lower stage must complete before this one is claimable.
 	Status string `json:"status"`
-	// BlockedReason names the §6.3 clause holding a `pending` step back from
+	// BlockedReason names the readiness clause holding a `pending` step back from
 	// `ready`, "" for any other status (DKT-470). It is what `step show`/`step
 	// list` were missing for a step whose stall has no future event that
 	// resolves it — an interposed step named by a threshold that already
@@ -289,7 +287,7 @@ type StepRow struct {
 	// LeaseExpired marks the EXPIRED-BUT-UNREAPED window (DKT-489): the stored
 	// row is still `claimed` — nothing has reaped it — but its lease lapsed (or
 	// `max_step_duration` passed), so `Status` above already renders the reap's
-	// answer (`ready`/`pending`, §6.2) while `run repin` still counts the claim
+	// answer (`ready`/`pending`) while `run repin` still counts the claim
 	// as mid-flight, exactly as its quiescence guard must (the executor that
 	// claimed under the current pins may still be writing until the reap
 	// actually lands). Both surfaces are right — `claim` on such a step reaps
@@ -340,7 +338,7 @@ type StepRow struct {
 	// written without a recorded bound.
 	LoopCap int `json:"loop_cap,omitempty"`
 	// Metadata is the definition's opaque KV, verbatim. Core never reads a key
-	// inside it (genericity.md).
+	// inside it.
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 

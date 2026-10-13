@@ -13,15 +13,13 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// The usage ledger and the budget columns v10 added
-// (docs/tdd/runs-dispatch.md §3.1, §4).
+// The usage ledger and the budget columns v10 added.
 //
 // EVERY NUMBER IN HERE IS OPAQUE. `unit` is whatever the caller wrote —
 // `tokens`, `seconds`, `pages`, `sheets` — and core never enumerates units,
 // never has a default unit, and never converts between them. The sums below are
 // PER-UNIT for exactly that reason: a sum across units would be core deciding
-// they are commensurable, which is an opinion about what they mean
-// (docs/design/genericity.md).
+// they are commensurable, which is an opinion about what they mean.
 
 // UsageRow is one `usage_ledger` row: what a step reported, in one unit, on one
 // attempt.
@@ -31,7 +29,7 @@ type UsageRow struct {
 	Attempt  int
 	Unit     string
 	Quantity float64
-	// Source is engine-core §7's "source recorded". Core writes
+	// Source records where the usage came from. Core writes
 	// UsageSourceReported and nothing else at this stage; the column exists so a
 	// harness back-filling from its own journal can record its own source later
 	// without a migration.
@@ -108,8 +106,8 @@ func InsertUsageRowTx(tx *sql.Tx, row UsageRow, nowMS int64) error {
 	return nil
 }
 
-// MarkStepUsageRecordedTx sets `steps.usage_recorded` — the fast path group 2's
-// discrepancy probe reads (§2.3).
+// MarkStepUsageRecordedTx sets `steps.usage_recorded` — the fast path group
+// 2's discrepancy probe reads.
 //
 // Group 1 writes it so the column is populated from the moment the ledger
 // exists: a probe that arrived later and found the column empty on steps that
@@ -133,10 +131,10 @@ func MarkStepUsageRecordedTx(tx *sql.Tx, stepID int) error {
 	return nil
 }
 
-// ReportedUsageTx sums the ledger for ONE unit — B16's `reported`.
+// ReportedUsageTx sums the ledger for ONE unit — the run cap's `reported`.
 //
-// One unit, never all of them. §4.5's whole argument is that summing
-// `{tokens: 4000, seconds: 12}` to 4012 would be core asserting those add up.
+// One unit, never all of them: summing `{tokens: 4000, seconds: 12}` to 4012
+// would be core asserting those add up.
 func ReportedUsageTx(tx *sql.Tx, runID int, unit string) (float64, error) {
 	var total float64
 	err := tx.QueryRow(
@@ -150,7 +148,7 @@ func ReportedUsageTx(tx *sql.Tx, runID int, unit string) (float64, error) {
 	return total, nil
 }
 
-// UnitTotal is one unit's rollup for the report (R2's reported-per-unit line).
+// UnitTotal is one unit's rollup for the report's reported-per-unit line.
 type UnitTotal struct {
 	Unit     string  `json:"unit"`
 	Quantity float64 `json:"quantity"`
@@ -159,7 +157,7 @@ type UnitTotal struct {
 
 // UsageByUnit rolls the run's ledger up per unit, ordered by unit name.
 //
-// ORDERED BY A TOTAL KEY, never by map iteration (R9): the report is
+// ORDERED BY A TOTAL KEY, never by map iteration: the report is
 // deterministic given the same rows, for the same golden-stability reason
 // `referencedSchemas` is ordered.
 func UsageByUnit(db *sql.DB, runID int) ([]UnitTotal, error) {
@@ -201,7 +199,7 @@ type StepUsageRow struct {
 // from any read verb, and conductors hand-filtered batches by trial and error
 // (DKT-241). The rollup is still the headline; this is the detail behind it.
 //
-// ORDERED BY A TOTAL KEY (R9), like UsageByUnit and for the same reason: two
+// ORDERED BY A TOTAL KEY, like UsageByUnit and for the same reason: two
 // reports of the same rows must be byte-identical.
 func UsageByStep(db *sql.DB, runID int) ([]StepUsageRow, error) {
 	rows, err := db.Query(
@@ -229,10 +227,10 @@ func UsageByStep(db *sql.DB, runID int) ([]StepUsageRow, error) {
 		})
 }
 
-// BreachRunBudgetTx is B20 and B22: the run flips `active -> waiting-human` with
+// BreachRunBudgetTx flips the run `active -> waiting-human` with
 // its reason, CAS-guarded on the status it is moving FROM.
 //
-// The CAS is the whole mechanism (C6). Two invocations that both observe the cap
+// The CAS is the whole mechanism. Two invocations that both observe the cap
 // crossed both call this; exactly one matches a row, and the loser writes
 // neither a second reason nor — because the caller keys the event on this
 // return — a second event. The guard is the STATUS ITSELF rather than a flag we
@@ -273,11 +271,11 @@ func BreachRunBudgetTx(tx *sql.Tx, runID int, reason string, nowMS int64) (bool,
 
 // CacheRunFloorTx writes `runs.usage_floor`.
 //
-// IT IS A CACHE FOR THE REPORT AND NOTHING ELSE (§4.3, §3.2). No enforcement
-// path reads it: the floor that decides is a SUM over claim events, computed
-// inside the deciding transaction, because a stored running total is a
-// read-modify-write and a read-modify-write is the one shape C4 has no defense
-// against. TestFloorIsNeverReadFromCache poisons this column and asserts every
+// IT IS A CACHE FOR THE REPORT AND NOTHING ELSE. No enforcement path reads
+// it: the floor that decides is a SUM over claim events, computed inside the
+// deciding transaction, because a stored running total is a read-modify-write
+// and a read-modify-write is the one shape with no defense against concurrent
+// writers.
 // decision behaves as though it said the truth.
 //
 // It does NOT bump `row_version`: the cache is a derived number, not a state
@@ -333,9 +331,9 @@ func RunBudgetFactsTx(tx *sql.Tx, runID int) (RunBudgetFacts, error) {
 // `row_version` is not bumped here: every caller runs inside a transaction
 // that already bumped it for the cap write itself.
 func ClearRunBreachTx(tx *sql.Tx, runID int, newReason string, nowMS int64) error {
-	// The BUDGET's hold on the run goes with the breach record (DKT-305). B26
-	// has always said a breach-resolving cap raise is one of the two things
-	// that moves a run out of a breach — the other being `run resume` — and
+	// The BUDGET's hold on the run goes with the breach record (DKT-305). The
+	// rule has always been that a breach-resolving cap raise is one of the two
+	// things that moves a run out of a breach — the other being `run resume` — and
 	// before `pause_origin` existed the rollup enforced that by reading
 	// `breach_reason` itself, so clearing it here re-enabled the automatic
 	// resume. Clearing the origin keeps that exactly as it was.
@@ -412,7 +410,7 @@ func RunBudgetFactsFor(db *sql.DB, runID int) (RunBudgetFacts, error) {
 // configValueTx reads one config key INSIDE a transaction.
 //
 // It exists because the budget snapshot is loaded in the deciding transaction
-// (§4.8 B31) and internal/db caps the connection pool at ONE connection: a pool
+// and internal/db caps the connection pool at ONE connection: a pool
 // read from inside an open transaction deadlocks permanently rather than
 // failing. Every other config reader takes a *sql.DB and runs before a
 // transaction opens; this one is for the readers that cannot.
@@ -444,8 +442,8 @@ func configValueTx(tx *sql.Tx, projectID int, key string) (string, error) {
 	return spec.Default, nil
 }
 
-// BudgetDefaultTx is B1's second branch: the config cap, read in the deciding
-// transaction. 0 means unlimited (B2).
+// BudgetDefaultTx is the config cap, read in the deciding transaction. 0 means
+// unlimited.
 func BudgetDefaultTx(tx *sql.Tx, projectID int) (float64, error) {
 	value, err := configValueTx(tx, projectID, KeyBudgetDefault)
 	if err != nil {
@@ -458,13 +456,11 @@ func BudgetDefaultTx(tx *sql.Tx, projectID int) (float64, error) {
 	return n, nil
 }
 
-// BudgetUnitTx is B16's resolution: WHICH recorded usage unit the run cap
-// counts.
+// BudgetUnitTx resolves WHICH recorded usage unit the run cap counts.
 //
 // Empty — the default and the only value core ships — means `reported` is 0 and
-// the enforcement rests entirely on the floor (B17). That is the honest default
-// and it is exactly §9 item 7's configuration: with reporting disabled, the run
-// still pauses at the cap from the floor.
+// the enforcement rests entirely on the floor. That is the honest default:
+// with reporting disabled, the run still pauses at the cap from the floor.
 func BudgetUnitTx(tx *sql.Tx, projectID int) (string, error) {
 	return configValueTx(tx, projectID, KeyBudgetUnit)
 }
@@ -475,7 +471,7 @@ func UsageBudgetUnitTx(tx *sql.Tx, projectID int) (string, error) {
 	return configValueTx(tx, projectID, KeyUsageBudgetUnit)
 }
 
-// StepAttemptsFor reports each step's attempt count for the report's R3 line,
+// StepAttemptsFor reports each step's attempt count for the report,
 // keyed by step id.
 func StepAttemptsFor(db *sql.DB, runID int) (map[int]int, error) {
 	rows, err := db.Query(
@@ -503,7 +499,7 @@ func StepAttemptsFor(db *sql.DB, runID int) (map[int]int, error) {
 
 // SortedUnits orders unit names for a deterministic rendering. It is here rather
 // than at the call site so every renderer of an opaque-unit map orders it the
-// same way (R9), whatever the map carries beside the names.
+// same way, whatever the map carries beside the names.
 func SortedUnits[V any](byUnit map[string]V) []string {
 	units := make([]string, 0, len(byUnit))
 	for u := range byUnit {
@@ -513,16 +509,16 @@ func SortedUnits[V any](byUnit map[string]V) []string {
 	return units
 }
 
-// UsageUnitsMax is B36's first cap: at most 32 units per report.
+// UsageUnitsMax is the first cap: at most 32 units per report.
 //
 // The caps exist because `--usage` is ATTACKER-CONTROLLED JSON FROM A CLAIMANT
-// (§1.3) that lands in a ledger and in a report — bytes going to a terminal. A
+// that lands in a ledger and in a report — bytes going to a terminal. A
 // claimant that could write ten thousand units would make every subsequent
 // `run report` on that run unreadable, which is a denial of the verb an operator
 // reaches for when something has gone wrong.
 const UsageUnitsMax = 32
 
-// ParseUsage is B33, B35, and B36: `--usage '{"unit": n, …}'` parsed as a JSON
+// ParseUsage parses `--usage '{"unit": n, …}'` as a JSON
 // object of string -> number, capped, with every refusal NAMING what it
 // refused. It is the ONE implementation of the usage-report contract: the step
 // ledger's writer (`step complete --usage`, via the engine) and the vote
@@ -531,7 +527,7 @@ const UsageUnitsMax = 32
 //
 // It returns the units in SORTED ORDER so a call's ledger rows land in a
 // deterministic order — the same total-key discipline the report's rendering
-// uses (R9), applied at the writer so two identical calls produce identical row
+// uses, applied at the writer so two identical calls produce identical row
 // ids.
 //
 // Refusals are plain errors naming only the offending key or value, never a
@@ -560,14 +556,14 @@ func ParseUsage(raw string) ([]UsageRow, error) {
 		}
 
 		// Decoded per key so `{"tokens": "40"}` is refused NAMING "tokens" —
-		// B33 says any other shape is a VALIDATION_ERROR naming the offending
+		// any other shape is a VALIDATION_ERROR naming the offending
 		// key, and one decode of the whole object would name nothing.
 		var quantity float64
 		if err := json.Unmarshal(parsed[unit], &quantity); err != nil {
 			return nil, fmt.Errorf(
 				"%q must be a number, got %s", unit, parsed[unit])
 		}
-		// B35: any FINITE NON-NEGATIVE float. Negative is refused because
+		// Any FINITE NON-NEGATIVE float. Negative is refused because
 		// "usage" that reduces a total is not usage — it is an edit to a record
 		// of what happened — and NaN/Inf are refused by the same check because
 		// either would poison every sum the ledger feeds.

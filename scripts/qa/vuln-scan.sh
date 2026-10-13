@@ -35,7 +35,7 @@ echo "=== vuln-scan: govulncheck ./... ==="
 # point of this gate is that a security-load-bearing change was checked, and
 # "we couldn't check, so carry on" is what makes a control decorative. The
 # engine records an unmatched gate as a failure for exactly this reason
-# (internal/engine/gate_exec.go, N3) and this script agrees with it.
+# (internal/engine/gate_exec.go) and this script agrees with it.
 if ! command -v govulncheck >/dev/null 2>&1; then
   cat >&2 <<'EOF'
 vuln-scan FAILED: govulncheck is not installed.

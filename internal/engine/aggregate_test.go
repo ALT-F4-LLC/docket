@@ -8,7 +8,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// The `aggregate` table — docs/tdd/payloads-thresholds.md §9.2.
+// The `aggregate` table.
 //
 // Every case runs against `severityOrder`, the five-value order declared by
 // threshold_test.go's fake resolver. That order is INSTANCE DATA: core computes
@@ -41,7 +41,7 @@ func reducedValue(t *testing.T, out *AggregateOutcome, i int) string {
 	return v
 }
 
-// TestAggregateMedian is §7.3's median, including the even-count rule an
+// TestAggregateMedian is the median, including the even-count rule an
 // implementer would most likely get wrong.
 //
 // `m[(len-1)/2]` is the LOWER of the two central values, and the argument is not
@@ -83,7 +83,7 @@ func TestAggregateMedian(t *testing.T) {
 	}
 }
 
-// TestAggregateMaxAndMin covers the other two reductions, including D3's "max
+// TestAggregateMaxAndMin covers the other two reductions, including "max
 // never demotes".
 func TestAggregateMaxAndMin(t *testing.T) {
 	const members = `[{"severity":["low","medium","high"]}]`
@@ -95,7 +95,7 @@ func TestAggregateMaxAndMin(t *testing.T) {
 	}
 	if _, present := max.Payload[0][KeyDemotedFrom]; present {
 		t.Error("`max` recorded a demotion; it takes the top position and so " +
-			"never demotes (D3)")
+			"never demotes")
 	}
 
 	min, err := aggregateOver(t, members, medianParams(MethodMin, 0), severityOrder)
@@ -105,11 +105,11 @@ func TestAggregateMaxAndMin(t *testing.T) {
 	}
 	if min.Payload[0][KeyDemotedFrom] != "high" {
 		t.Errorf("min demoted_from = %v, want high — `min` demotes whenever the "+
-			"members differ (D3)", min.Payload[0][KeyDemotedFrom])
+			"members differ", min.Payload[0][KeyDemotedFrom])
 	}
 }
 
-// TestAggregateIsOrderIndependent is §7.3 clause 4 and §9 item 5: the same
+// TestAggregateIsOrderIndependent: the same
 // members in any input order give the same result.
 func TestAggregateIsOrderIndependent(t *testing.T) {
 	permutations := []string{
@@ -134,7 +134,7 @@ func TestAggregateIsOrderIndependent(t *testing.T) {
 	}
 }
 
-// TestAggregateScalarFieldIsTheIdentity is G2, the property that makes the
+// TestAggregateScalarFieldIsTheIdentity is the property that makes the
 // machinery safe to adopt.
 //
 // Over a flat, unclustered payload — every element with a scalar field —
@@ -170,7 +170,7 @@ func TestAggregateScalarFieldIsTheIdentity(t *testing.T) {
 	}
 }
 
-// TestAggregateSpreadIsDistanceInTheDeclaredOrder is §7.4: spread is the
+// TestAggregateSpreadIsDistanceInTheDeclaredOrder: spread is the
 // distance between the extreme members' POSITIONS, never a count of distinct
 // values and never a value difference.
 func TestAggregateSpreadIsDistanceInTheDeclaredOrder(t *testing.T) {
@@ -192,7 +192,7 @@ func TestAggregateSpreadIsDistanceInTheDeclaredOrder(t *testing.T) {
 	}
 }
 
-// TestAggregateHoldBoundary is §7.4's `>=` boundary and its off switch.
+// TestAggregateHoldBoundary is the hold `>=` boundary and its off switch.
 func TestAggregateHoldBoundary(t *testing.T) {
 	// positions 1 and 3: spread 2.
 	const raw = `[{"severity":["low","high"]}]`
@@ -223,8 +223,8 @@ func TestAggregateHoldBoundary(t *testing.T) {
 	}
 }
 
-// TestAggregateDemotionTrail is §7.5 D1/D2, with the absence asserted as KEY
-// ABSENCE rather than as an empty string.
+// TestAggregateDemotionTrail is the demotion trail, with the absence asserted
+// as KEY ABSENCE rather than as an empty string.
 //
 // The distinction matters on the wire: `demoted_from: ""` claims a demotion to
 // nothing, where an omitted key says there was none. `aggregate@1` makes the
@@ -267,7 +267,7 @@ func TestAggregateDemotionTrail(t *testing.T) {
 	}
 }
 
-// TestAggregateCarriesEveryOtherKeyThrough is G3: every other key of the input
+// TestAggregateCarriesEveryOtherKeyThrough: every other key of the input
 // element survives verbatim.
 //
 // Core does not read them — that is the genericity rule — and dropping them
@@ -292,7 +292,7 @@ func TestAggregateCarriesEveryOtherKeyThrough(t *testing.T) {
 	}
 }
 
-// TestAggregateFailures is §7.2's G4/G5 and B3: each is a step failure with a
+// TestAggregateFailures: each failure is a step failure with a
 // reason, never a silent guess and never an engine error that wedges the run.
 func TestAggregateFailures(t *testing.T) {
 	cases := []struct {
@@ -352,12 +352,13 @@ func TestAggregateFailures(t *testing.T) {
 	}
 }
 
-// TestAggregateRefusesAnUnorderedField is the runtime half of V29: an aggregate
-// over a field with no declared order refuses rather than reducing.
+// TestAggregateRefusesAnUnorderedField is the runtime half of the register-time
+// ordered-field check: an aggregate over a field with no declared order refuses
+// rather than reducing.
 //
-// V29 makes this unreachable through `workflow register`. It is reachable from
-// a database restored from elsewhere, and it is a refusal because median, max,
-// and min are defined ONLY over an order.
+// Register time makes this unreachable through `workflow register`. It is
+// reachable from a database restored from elsewhere, and it is a refusal
+// because median, max, and min are defined ONLY over an order.
 func TestAggregateRefusesAnUnorderedField(t *testing.T) {
 	for name, order := range map[string]OrderResolver{
 		"no schema at all": nil,
@@ -378,10 +379,10 @@ func TestAggregateRefusesAnUnorderedField(t *testing.T) {
 	}
 }
 
-// TestAggregateOutputSatisfiesTheShippedSchema is §7.6 E1/E5's run-time half:
-// what the builtin produces validates against `aggregate@1`.
+// TestAggregateOutputSatisfiesTheShippedSchema is the schema check's run-time
+// half: what the builtin produces validates against `aggregate@1`.
 //
-// The conjunction with the step's declared schema is V30's register-time
+// The conjunction with the step's declared schema is a register-time
 // question; this is the other half — that the document the engine actually
 // writes is the document the shipped schema describes.
 func TestAggregateOutputSatisfiesTheShippedSchema(t *testing.T) {
@@ -399,7 +400,7 @@ func TestAggregateOutputSatisfiesTheShippedSchema(t *testing.T) {
 	testsupport.Must(t, err, "the aggregate's own output does not satisfy its shipped "+
 		"schema:\n%v\n%s", err, encoded)
 
-	// And the shape is the one §7.6 documents, key by key.
+	// And the shape is the one `aggregate@1` documents, key by key.
 	var elements []map[string]any
 	err = json.Unmarshal(encoded, &elements)
 	testsupport.Must(t, err, "decoding: %v", err)
@@ -420,8 +421,8 @@ func TestAggregateOutputSatisfiesTheShippedSchema(t *testing.T) {
 	}
 }
 
-// TestParseAggregateParams is §7.1's table at run time — the same rules V28
-// applies at register, because a definition can reach the engine through a
+// TestParseAggregateParams is the params table at run time — the same rules
+// register time applies, because a definition can reach the engine through a
 // database restored from elsewhere.
 func TestParseAggregateParams(t *testing.T) {
 	good := map[string]any{
@@ -575,7 +576,7 @@ func TestAggregateConservativeEndLeavesTheOtherReductionsAlone(t *testing.T) {
 	testsupport.Must(t, err, "median: %v", err)
 	if _, present := median.Payload[0][KeyDemotedFrom]; present {
 		t.Errorf("median recorded demoted_from = %v; the upward tie-break TOOK "+
-			"the top position, so there is no value that was not taken (D1/D2)",
+			"the top position, so there is no value that was not taken",
 			median.Payload[0][KeyDemotedFrom])
 	}
 }
@@ -686,12 +687,12 @@ func TestAggregateRouteAtFloor(t *testing.T) {
 	}
 }
 
-// TestAggregateRouteAtUnknownValueRefuses is G4's discipline applied to the
-// floor: a `route_at` value the declared order does not name has no position,
-// and core refuses naming it rather than guessing an end.
+// TestAggregateRouteAtUnknownValueRefuses is the member-value discipline
+// applied to the floor: a `route_at` value the declared order does not name
+// has no position, and core refuses naming it rather than guessing an end.
 //
-// V28a makes this unreachable through `workflow register`; it is reachable
-// from a database restored from elsewhere.
+// Register time makes this unreachable through `workflow register`; it is
+// reachable from a database restored from elsewhere.
 func TestAggregateRouteAtUnknownValueRefuses(t *testing.T) {
 	_, err := aggregateOver(t, `[{"severity":"low"}]`,
 		routeAtParams(MethodMedian, 0, "urgent"), severityOrder)
@@ -708,7 +709,7 @@ func TestAggregateRouteAtUnknownValueRefuses(t *testing.T) {
 // TestAggregateRouteAtAbsentIsANoOp is the backward-compatibility half of
 // DKT-593: with no `route_at`, the outcome is BYTE-FOR-BYTE the one the
 // builtin has always produced — nothing recorded, every cluster emitted at
-// its input position, and G2's identity property untouched.
+// its input position, and the scalar identity property untouched.
 func TestAggregateRouteAtAbsentIsANoOp(t *testing.T) {
 	// Scalars and clusters, a hold, a demotion — every feature at once, so a
 	// floor leaking into the absent case has the widest surface to show on.
@@ -743,7 +744,7 @@ func TestAggregateRouteAtAbsentIsANoOp(t *testing.T) {
 // exactly what the hold refuses to trust — the operator resolving the hold
 // may accept a different one. Held indices address the EMITTED payload, since
 // that is the payload the artifact records and `<step>-held@k#i` resolves
-// against (H2a).
+// against.
 func TestAggregateRouteAtNeverRoutesAHeldCluster(t *testing.T) {
 	// Cluster 0 reduces to info, below the floor, not held -> recorded.
 	// Cluster 1 reduces to low (median of {low,high}), below the floor, but

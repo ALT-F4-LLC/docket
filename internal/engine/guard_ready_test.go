@@ -14,15 +14,15 @@ import (
 // status is `ready`. The reported sequence — activate a run, never dispatch
 // it, ask the guard — allows a stop because of DKT-71's exemption for a run
 // nothing has ever happened to, not because `ready` is missing from
-// stopBlockers's switch. `ready` is a COMPUTED status (§6.2,
-// TestReadyIsNeverPersisted): the column stays `pending`, and the `pending`
+// stopBlockers's switch. `ready` is a COMPUTED status
+// (TestReadyIsNeverPersisted): the column stays `pending`, and the `pending`
 // arm asks the scheduler's predicate, so a ready step blocks the moment its
 // run has been dispatched. This test pins that by name, so the next reader
 // who sees `ready` in `step list` and `allowed` from the guard finds the
 // dispatch requirement instead of a missing case.
 
 // TestGuardStopDeniesAReadyStepOnceDispatched proves the step under test is
-// ready by the §6.3 predicate — a test that never saw readiness would pass
+// ready by the scheduler's predicate — a test that never saw readiness would pass
 // against a guard that blocks on every pending step — then shows the same
 // step allows a stop before dispatch and denies after it.
 func TestGuardStopDeniesAReadyStepOnceDispatched(t *testing.T) {

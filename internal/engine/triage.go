@@ -81,7 +81,7 @@ func triageRouter(conn *sql.DB, panel *db.Step, def *workflow.Definition) (*db.S
 //
 // `gated` is the suspension: the status the step already carries out of the
 // gate stage, and exactly the shape a HELD routing step wears while a
-// materialized gate answers for it (§7.7.3). Non-terminal, so nothing
+// materialized gate answers for it. Non-terminal, so nothing
 // downstream is released; not parked, so neither R2b nor the run rollup holds
 // the lane while the panel sits.
 //
@@ -432,8 +432,8 @@ func triageVerdict(outcome *VoteOutcome) string {
 //
 // A proposal still `open`, one `closed` without a tally, and one `committed` by
 // an operator's manual outcome are all excluded. The first two reached no
-// verdict. The third reached one outside this vocabulary — §8.4's commit sets a
-// FinalOutcome string the mapping has no key for — and guessing which of two
+// verdict. The third reached one outside this vocabulary — a manual commit sets
+// a FinalOutcome string the mapping has no key for — and guessing which of two
 // keys it meant would apply a routing nobody chose.
 func triageDecided(outcome *VoteOutcome) bool {
 	return outcome.Status == model.ProposalStatusApproved ||

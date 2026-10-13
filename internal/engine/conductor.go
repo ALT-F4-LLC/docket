@@ -26,9 +26,8 @@ import (
 // scrub (exec.deniedEnv). It is minted at the run's FIRST ACTIVATION and
 // returned once in that response, and re-minted by `run conduct`. On a bound
 // run it is required by every verb whose engine path calls authorizeConductor
-// or authorizeConductorTx; docs/design/engine-spec.md carries the canonical
-// enumeration. An executor is never handed it, so the documented path refuses
-// it the way `step record` refuses an unclaimed worker.
+// or authorizeConductorTx. An executor is never handed it, so the documented
+// path refuses it the way `step record` refuses an unclaimed worker.
 //
 // TWO POSTURES ARE DELIBERATE AND STATED:
 //
@@ -78,12 +77,11 @@ func AuthorizeConductor(conn *sql.DB, runID int, token, verb string) error {
 	return authorizeConductor(conn, runID, token, verb)
 }
 
-// checkConductor is the refusal matrix, in the lease matrix's shape
-// (claims-leases §4): no capability minted → allow; none supplied → the R1
-// VALIDATION_ERROR naming both channels; wrong → the R3 AUTH_ERROR. The
-// messages never echo the presented token, and both name the recovery verb,
-// because the caller most likely to hit them is a fresh session driving a run
-// it did not activate.
+// checkConductor is the refusal matrix, in the lease matrix's shape: no
+// capability minted → allow; none supplied → a VALIDATION_ERROR naming both
+// channels; wrong → an AUTH_ERROR. The messages never echo the presented
+// token, and both name the recovery verb, because the caller most likely to
+// hit them is a fresh session driving a run it did not activate.
 func checkConductor(hash, token string, runID int, verb string) error {
 	if hash == "" {
 		return nil

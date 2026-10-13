@@ -25,8 +25,9 @@ func activatedRunForNext(t *testing.T, conn *sql.DB) int {
 	return runID
 }
 
-// TestNextIssueModeByteIdentical is §6.3.1's proof at the unit level: `next`
-// WITHOUT --run produces exactly what it produced before step mode existed.
+// TestNextIssueModeByteIdentical is the byte-identity proof at the unit level:
+// `next` WITHOUT --run produces exactly what it produced before step mode
+// existed.
 //
 // The comparison is against output captured from the same code path with the
 // flag absent, byte for byte, in both JSON and human mode — the same discipline
@@ -90,9 +91,9 @@ func TestNextIssueModeByteIdentical(t *testing.T) {
 	}
 }
 
-// TestNextStepModeRefusesIssueFilters is §6.3.1's refusal: an issue-mode filter
-// that silently did nothing in step mode is a filter a dispatcher will trust
-// and be wrong about.
+// TestNextStepModeRefusesIssueFilters is the issue-filter refusal: an
+// issue-mode filter that silently did nothing in step mode is a filter a
+// dispatcher will trust and be wrong about.
 //
 // Each flag is asserted individually, and the message must NAME --run as the
 // conflict — a refusal that says only "invalid combination" leaves the caller
@@ -161,8 +162,8 @@ func TestNextStepModeAllFiltersNamedAtOnce(t *testing.T) {
 	}
 }
 
-// TestNextStepModeWireShape pins §11.4's `next row`, field for field, plus the
-// two recorded additions: `instance` (§10 A1) and `kind`.
+// TestNextStepModeWireShape pins the `next row` wire shape, field for field,
+// plus the two recorded additions: `instance` and `kind`.
 func TestNextStepModeWireShape(t *testing.T) {
 	conn := newTestDB(t)
 	runID := activatedRunForNext(t, conn)
@@ -188,7 +189,7 @@ func TestNextStepModeWireShape(t *testing.T) {
 	}
 
 	row := envelope.Data.Steps[0]
-	// §11.4: { step, issue, run, executor, class, attempt, expected_cost,
+	// { step, issue, run, executor, class, attempt, expected_cost,
 	//          lease_ttl_s, metadata } — plus instance, kind, status.
 	for _, key := range []string{
 		"step", "instance", "issue", "run", "kind", "executor", "class",
@@ -205,7 +206,7 @@ func TestNextStepModeWireShape(t *testing.T) {
 	if row["instance"] != "first@0" {
 		t.Errorf("instance = %v, want first@0", row["instance"])
 	}
-	// `ready` is COMPUTED (§6.2): the stored column says `pending`.
+	// `ready` is COMPUTED: the stored column says `pending`.
 	if row["status"] != db.StepReady {
 		t.Errorf("status = %v, want the computed %q", row["status"], db.StepReady)
 	}
@@ -221,7 +222,7 @@ func TestNextStepModeWireShape(t *testing.T) {
 	}
 }
 
-// TestNextStepModeHumanStepCarriesNoExecutor is §6.15's dispatcher guard at the
+// TestNextStepModeHumanStepCarriesNoExecutor is the dispatcher guard at the
 // wire level: a `type=human` step is OFFERED — a dispatcher needs to know the
 // run is waiting on a person — but carries no executor hint, so a dispatcher
 // that spawns on every row cannot spawn a worker for a gate.
@@ -261,7 +262,7 @@ func TestNextStepModeHumanStepCarriesNoExecutor(t *testing.T) {
 	// Omitted entirely, not emitted as "": a dispatcher must not be able to
 	// read an empty string as a hint.
 	if _, present := row["executor"]; present {
-		t.Errorf("a human step carries an `executor` key (%v); §6.15 requires none",
+		t.Errorf("a human step carries an `executor` key (%v); a human step must carry none",
 			row["executor"])
 	}
 }
@@ -327,9 +328,8 @@ func stepModeEnvelope(t *testing.T, cmd *cobra.Command, runID int) stepCollectio
 
 // TestNextStepModeTruncationContract pins the v2 truncation contract: the
 // pre-limit total rides in the envelope so a limited call cannot silently drop
-// work (reliability-delta §4.2). The limit is set EXPLICITLY — since DKT-564
-// step mode ignores the issue-mode default, so a cut only happens when the
-// caller asked for one.
+// work. The limit is set EXPLICITLY — since DKT-564 step mode ignores the
+// issue-mode default, so a cut only happens when the caller asked for one.
 func TestNextStepModeTruncationContract(t *testing.T) {
 	conn := newTestDB(t)
 

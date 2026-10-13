@@ -38,12 +38,12 @@ func stepIDByInstance(t *testing.T, conn *sql.DB, instance string) int {
 	return id
 }
 
-// TestContextAssemblyReadsNoLiveState is §6.6's enforcement at the code level,
-// and the single most load-bearing test of this phase.
+// TestContextAssemblyReadsNoLiveState enforces snapshot-only assembly at the
+// code level, and is the single most load-bearing test of this phase.
 //
 // It runs assembly twice with the ISSUES TABLE and the WORKING TREE mutated in
 // between, and requires byte-identical output. Each snapshotted field is ALSO
-// asserted individually, per §8.3, so a partial snapshot fails on the specific
+// asserted individually, so a partial snapshot fails on the specific
 // field it missed rather than on an opaque whole-bundle diff — "an
 // implementation reading a live field just for the title" is the single most
 // likely way this AC breaks.
@@ -96,7 +96,7 @@ func TestContextAssemblyReadsNoLiveState(t *testing.T) {
 			before, after)
 	}
 
-	// ---- Each field, individually (§8.3). ---------------------------------
+	// ---- Each field, individually. ----------------------------------------
 	var second Context
 	err = json.Unmarshal([]byte(after), &second)
 	testsupport.Must(t, err, "unmarshal: %v", err)
@@ -124,7 +124,7 @@ func TestContextAssemblyReadsNoLiveState(t *testing.T) {
 	if len(second.Issue.Scope) != 1 || second.Issue.Scope[0] != "internal/original/**" {
 		t.Errorf("context.issue.scope = %v, want the snapshotted "+
 			"[internal/original/**] — an operator's mid-run scope correction "+
-			"changes SCHEDULING (§6.3 R4), never the bundle", second.Issue.Scope)
+			"changes SCHEDULING, never the bundle", second.Issue.Scope)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestContextAssemblyIsRepeatable(t *testing.T) {
 	}
 }
 
-// TestContextReadWritesNothing pins that `step context` is a pure read (§6.3:
-// every read verb computes effective status with ZERO writes).
+// TestContextReadWritesNothing pins that `step context` is a pure read:
+// every read verb computes effective status with ZERO writes.
 //
 // The step here has an EXPIRED lease — the state a reaping implementation is
 // most tempted to fix on the way past. Reads may not reap.
@@ -209,7 +209,7 @@ func TestContextReadWritesNothing(t *testing.T) {
 	_ = issue
 }
 
-// TestContextPinsAreListedNotRead is §6.6's fifth source, stated exactly: the
+// TestContextPinsAreListedNotRead pins the pin source, stated exactly: the
 // bundle carries the pin LIST — path and hash — and assembly never opens the
 // file. Re-reading would make the bundle depend on the working tree, which is
 // the thing the pin exists to prevent.
@@ -250,7 +250,7 @@ func TestContextPinsAreListedNotRead(t *testing.T) {
 		if p.Path == pinned {
 			sawFile = true
 		}
-		// §11.4 gives pins ONE shape, so a workflow pin renders into the same
+		// Pins have ONE shape, so a workflow pin renders into the same
 		// `path` slot with a scheme rather than growing a second shape.
 		if p.Path == "workflow:standard-change@1" {
 			sawWorkflow = true
@@ -270,7 +270,7 @@ func TestContextPinsAreListedNotRead(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.7 — input resolution
+// Input resolution
 // ---------------------------------------------------------------------------
 
 // recordArtifact inserts an artifact attributed to a step instance.
@@ -291,8 +291,8 @@ func recordArtifact(t *testing.T, conn *sql.DB, runID int, stepID int, kind, bod
 	return id
 }
 
-// TestInputResolutionIgnoresInsertionOrder is §6.7's ordering rule, tested the
-// way the TDD requires: by SHUFFLING insertion order.
+// TestInputResolutionIgnoresInsertionOrder pins the ordering rule, tested by
+// SHUFFLING insertion order.
 //
 // "Ordered by artifact id" is trivially satisfiable by accident when insertion
 // order happens to match, so an unshuffled test proves nothing. Here the four
@@ -381,7 +381,7 @@ func TestInputResolutionCollapsesSupersededEmits(t *testing.T) {
 	}
 }
 
-// TestInputResolutionIsDoneOnly pins §2's "downstream inputs resolve over
+// TestInputResolutionIsDoneOnly pins "downstream inputs resolve over
 // `done` siblings only". An in-flight sibling's artifact is work in progress,
 // not an input — including it would let a join consume a partial result.
 func TestInputResolutionIsDoneOnly(t *testing.T) {
@@ -452,7 +452,7 @@ func TestIssueBodyResolvesToTheSnapshot(t *testing.T) {
 	}
 }
 
-// TestIssueDiffD4EmptyFallback is §6.7.1 D4: with no `issue.diff` artifact yet,
+// TestIssueDiffD4EmptyFallback: with no `issue.diff` artifact yet,
 // the input resolves to an EMPTY diff — not an error, and NOT a live `git diff`.
 //
 // "Empty" is the truthful answer: nothing has changed the tree in this run.
@@ -463,7 +463,7 @@ func TestIssueDiffD4EmptyFallback(t *testing.T) {
 	// `review` consumes issue.diff and nothing has produced one.
 	reviewID := stepIDByInstance(t, conn, "review@0#0")
 	bundle, err := ReadContext(conn, reviewID, nowMS)
-	testsupport.Must(t, err, "ReadContext: %v — D4 requires a fallback, not an error", err)
+	testsupport.Must(t, err, "ReadContext: %v — the missing diff requires a fallback, not an error", err)
 
 	var found bool
 	for _, in := range bundle.Inputs {
@@ -472,17 +472,17 @@ func TestIssueDiffD4EmptyFallback(t *testing.T) {
 		}
 		found = true
 		if in.Body != "" {
-			t.Errorf("issue.diff body = %q, want empty (D4)", in.Body)
+			t.Errorf("issue.diff body = %q, want empty", in.Body)
 		}
 	}
 	if !found {
-		t.Errorf("no issue.diff input resolved; D4 requires an empty artifact, "+
+		t.Errorf("no issue.diff input resolved; want an empty artifact, "+
 			"not an omission. inputs = %d", len(bundle.Inputs))
 	}
 	_ = run
 }
 
-// TestIssueDiffD3PicksHighestOrdinal is §6.7.1 D3, and the clause that makes
+// TestIssueDiffD3PicksHighestOrdinal pins the clause that makes
 // the fixture's `fix@1 -> review@1` cycle correct WITHOUT any rule specific to
 // loops: ordinal 1 beats ordinal 0.
 //
@@ -529,8 +529,8 @@ func TestIssueDiffD3PicksHighestOrdinal(t *testing.T) {
 			continue
 		}
 		if in.Body != "DIFF AT ORDINAL 1" {
-			t.Errorf("issue.diff = %q, want the ordinal-1 artifact — D3 resolves "+
-				"highest-ordinal first, and the ordinal-0 artifact has the "+
+			t.Errorf("issue.diff = %q, want the ordinal-1 artifact — resolution takes the "+
+				"highest ordinal first, and the ordinal-0 artifact has the "+
 				"HIGHER id here precisely so an id-only rule fails", in.Body)
 		}
 		if in.ProducerStep != "fix@1" {
@@ -615,7 +615,7 @@ func TestBundleOmitsTheTargetRefWithoutARoundRecord(t *testing.T) {
 }
 
 // TestSplitInputTakesTheLastDot pins the decomposition: a kind containing a dot
-// must not be truncated. Step names cannot contain one (V3), so the last dot is
+// must not be truncated. Step names cannot contain one, so the last dot is
 // unambiguously the separator.
 func TestSplitInputTakesTheLastDot(t *testing.T) {
 	cases := []struct {
@@ -639,9 +639,9 @@ func TestSplitInputTakesTheLastDot(t *testing.T) {
 	}
 }
 
-// TestContextMetaIsASiblingNotAMutation pins §6.4's `--meta` rule: the byte
+// TestContextMetaIsASiblingNotAMutation pins the `--meta` rule: the byte
 // counts are a SIBLING object, so asking for them does not change the bundle
-// the goldens compare (§8.3). A `--meta` that spliced counts in would make the
+// the goldens compare. A `--meta` that spliced counts in would make the
 // goldens depend on a flag.
 func TestContextMetaIsASiblingNotAMutation(t *testing.T) {
 	conn := mustDB(t)

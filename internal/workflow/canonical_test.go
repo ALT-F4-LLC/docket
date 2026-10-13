@@ -34,7 +34,7 @@ func TestCanonicalRoundTrips(t *testing.T) {
 //
 // This is not a nicety. Map iteration order leaking into `parsed` would make
 // the same file serialize differently on re-register, so an IDENTICAL
-// re-register would compare unequal — and the idempotent-success path (§4.1)
+// re-register would compare unequal — and the idempotent-success path
 // would report CONFLICT instead. `params`, `metadata`, `threshold`, and
 // `limits` are all maps, so the risk is real on the fixture specifically.
 func TestCanonicalIsByteStable(t *testing.T) {
@@ -86,7 +86,7 @@ func TestCanonicalHashIsStable(t *testing.T) {
 	}
 }
 
-// TestCanonicalPreservesDefaults: the defaults §11.1 declares are materialized
+// TestCanonicalPreservesDefaults: the declared defaults are materialized
 // into `parsed`, so every reader sees one interpretation rather than
 // re-deriving it identically and independently.
 func TestCanonicalPreservesDefaults(t *testing.T) {

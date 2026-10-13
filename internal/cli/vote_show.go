@@ -13,7 +13,7 @@ import (
 )
 
 // voteShowResult composes a proposal with its votes and linked issues
-// into a single flat JSON object matching the TDD contract.
+// into a single flat JSON object.
 type voteShowResult struct {
 	Proposal     *model.Proposal `json:"-"`
 	Votes        []*model.Vote   `json:"-"`

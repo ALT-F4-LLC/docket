@@ -14,10 +14,10 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The loop table — TDD §7.7, one case per §7.2 row.
+// The loop table, one case per loop rule.
 //
-// The fixture's loop is driven at `verify`, not at `reconcile`, and §7.7's QA
-// table says why: `reconcile`'s threshold is `any(severity >= high)` over an
+// The fixture's loop is driven at `verify`, not at `reconcile`, because
+// `reconcile`'s threshold is `any(severity >= high)` over an
 // EMPTY stub payload, which T4 short-circuits to false before the ordered
 // comparison is attempted. `verify`'s is `any(status == unmet)` — an equality
 // operator, live at S3 per T1 — over a payload a caller supplies. These tests
@@ -45,11 +45,11 @@ func roundReport(ordinal int) string {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3 identity: instance rendering
+// Identity: instance rendering
 // ---------------------------------------------------------------------------
 
 // TestInstanceRenderingAcrossOrdinalsAndFanout covers all four combinations of
-// (ordinal 0/n) × (fanned/not) — §7.2's first row.
+// (ordinal 0/n) × (fanned/not) — the loop table's first row.
 //
 // The `#i` suffix is ABSENT when the step is not fanned out, which is the half
 // a formatter that always appended an index would get wrong: `implement@0#0`
@@ -98,10 +98,10 @@ func TestInstanceRenderingAcrossOrdinalsAndFanout(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3 (1): the counter, and the bound
+// The counter, and the bound
 // ---------------------------------------------------------------------------
 
-// TestLoopCountIncrementsPerEntry is §11.3 (1)'s first half: a `fix-loop`
+// TestLoopCountIncrementsPerEntry is the bound's first half: a `fix-loop`
 // routing raises the ISSUE's counter.
 func TestLoopCountIncrementsPerEntry(t *testing.T) {
 	conn := mustDB(t)
@@ -122,14 +122,14 @@ func TestLoopCountIncrementsPerEntry(t *testing.T) {
 		t.Errorf("verify@0 routing = %q, want %q", got, workflow.OnFailFixLoop)
 	}
 
-	// The counter is the ISSUE's (§11.3 (1)), so it lives on run_issues and not
+	// The counter is the ISSUE's, so it lives on run_issues and not
 	// on the step that routed.
 	if got := loopCount(t, conn, run.ID, issue); got != 1 {
 		t.Errorf("run_issues.loop_count = %d, want 1", got)
 	}
 }
 
-// TestLoopsAreBoundedByConstruction is §11.3 (1)'s second half and §7.2's
+// TestLoopsAreBoundedByConstruction is the bound's second half and the
 // "loops are bounded by construction" row: with `max_fix_loops = 2`, a THIRD
 // entry is impossible however many times routing fires.
 //
@@ -177,15 +177,15 @@ func TestLoopsAreBoundedByConstruction(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3 (2) / §7.3: the supersede sweep
+// The supersede sweep
 // ---------------------------------------------------------------------------
 
-// TestSupersedeSweepStatusTable is §7.7's "supersede table": for each PERSISTED
+// TestSupersedeSweepStatusTable is the "supersede table": for each PERSISTED
 // status, whether a downstream instance below the new ordinal is superseded or
 // left alone.
 //
-// Nine persisted statuses (§6.2 — `ready` is computed, never stored), plus the
-// computed-ready row §7.7 asks for separately. The table is the specification;
+// Nine persisted statuses (`ready` is computed, never stored), plus the
+// computed-ready row, tested separately. The table is the specification;
 // stating it as data rather than as prose is what makes a future edit to the
 // sweep fail on the row it changed.
 func TestSupersedeSweepStatusTable(t *testing.T) {
@@ -199,7 +199,7 @@ func TestSupersedeSweepStatusTable(t *testing.T) {
 		{db.StepRunning, false, "a running instance finishes; its routing is inert"},
 		{db.StepGated, false, "the saga owns it; killing it mid-saga would strand the artifact"},
 		{db.StepWaitingHuman, false, "an operator's open question is not the loop's to close"},
-		{db.StepDone, false, "terminal, immutable, and addressable (§11.3)"},
+		{db.StepDone, false, "terminal, immutable, and addressable"},
 		{db.StepSkipped, false, "terminal"},
 		{db.StepFailedRouted, false, "terminal"},
 		{db.StepSuperseded, false, "terminal; an earlier entry already swept it"},
@@ -213,7 +213,7 @@ func TestSupersedeSweepStatusTable(t *testing.T) {
 			// `commit-gate@0` forced to the status under test. The order matters
 			// for the `waiting-human` row: a parked step holds its whole issue
 			// (R2b) — and, once nothing unparked is left, rolls the RUN up to
-			// `waiting-human` (§6.8) so R1 refuses too — so forcing the status
+			// `waiting-human` so R1 refuses too — so forcing the status
 			// before the claim would fail on the setup rather than on the
 			// sweep. The completion does not re-check readiness; the sweep it
 			// triggers is what the row is about.
@@ -249,11 +249,11 @@ func TestSupersedeSweepStatusTable(t *testing.T) {
 	}
 }
 
-// TestSupersedeSweepTakesAComputedReadyInstance is §7.7's extra row: a step that
+// TestSupersedeSweepTakesAComputedReadyInstance is the supersede table's extra row: a step that
 // is COMPUTED ready at sweep time must be superseded like any other unclaimed
 // instance.
 //
-// `ready` is never stored (§6.2), so such a step is a `pending` row that the
+// `ready` is never stored, so such a step is a `pending` row that the
 // predicate happens to answer true for. A sweep keyed off a stored `ready`
 // would find none and silently skip exactly the instances most likely to be
 // picked up by the next `next` — the ones a loop entry most needs to stop.
@@ -292,7 +292,7 @@ func TestSupersedeSweepTakesAComputedReadyInstance(t *testing.T) {
 }
 
 // TestSupersedeSweepIsScopedToAfterLoopDownstream proves the sweep's SET is
-// §7.3 (1)'s and not "everything below the ordinal".
+// `after_loop`'s downstream and not "everything below the ordinal".
 //
 // `implement` is upstream of `after_loop = "review"`. It is `done`, so the
 // status rule would leave it alone anyway — the sharper case is that a sweep
@@ -308,7 +308,7 @@ func TestSupersedeSweepIsScopedToAfterLoopDownstream(t *testing.T) {
 	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
 
 	// Upstream of after_loop: untouched, and still `done` — prior instances
-	// remain immutable (§11.3).
+	// remain immutable.
 	if got := stepStatus(t, conn, "implement@0"); got != db.StepDone {
 		t.Errorf("implement@0 = %q; it is upstream of after_loop and must not be swept", got)
 	}
@@ -322,7 +322,7 @@ func TestSupersedeSweepIsScopedToAfterLoopDownstream(t *testing.T) {
 	}
 }
 
-// TestPriorArtifactsRemainAddressableAfterSupersede is §7.2's "prior instances
+// TestPriorArtifactsRemainAddressableAfterSupersede is the "prior instances
 // and artifacts remain immutable and addressable" row.
 //
 // `superseded` is A STATUS, NOT A DELETION. The distinction matters for the
@@ -362,11 +362,10 @@ func TestPriorArtifactsRemainAddressableAfterSupersede(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §7.3 (3): the inert half
+// The inert half
 // ---------------------------------------------------------------------------
 
-// TestStaleLineageRoutingIsInert is §7.3's named test, and the subtle half of
-// §11.3 (2).
+// TestStaleLineageRoutingIsInert is the subtle half of the supersede rule.
 //
 // A slow `verify@0` that was CLAIMED before the sweep — so the sweep left it
 // alone — completes after `fix@1` has started. Its routing is recorded for the
@@ -414,7 +413,7 @@ func TestStaleLineageRoutingIsInert(t *testing.T) {
 	}
 
 	// But the routing IS recorded — "records the routing on the step for the
-	// ledger" (§7.3 (3)). Inert means no downstream effect, not unrecorded.
+	// ledger". Inert means no downstream effect, not unrecorded.
 	if got := stepRouting(t, conn, "verify@0"); got != workflow.OnFailFixLoop {
 		t.Errorf("verify@0 routing = %q, want it recorded as %q",
 			got, workflow.OnFailFixLoop)
@@ -429,17 +428,17 @@ func TestStaleLineageRoutingIsInert(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3 (3) / §7.4: ordinal-scoped input binding
+// Ordinal-scoped input binding
 // ---------------------------------------------------------------------------
 
-// TestOrdinalScopedInputBindingFallsBackPerInput is §7.4's central case, and
+// TestOrdinalScopedInputBindingFallsBackPerInput is the binding rule's central case, and
 // the fixture's `fix` step exactly.
 //
 // `fix@1` declares `["reconcile.findings", "implement.change-summary"]`.
 // `reconcile` re-ran at ordinal 1, so that input binds FRESH at ordinal 1;
 // `implement` is upstream of `after_loop` and never re-runs, so its input falls
 // back to ordinal 0. TWO INPUTS OF ONE STEP, BOUND AT DIFFERENT ORDINALS —
-// which is why §11.3 (3) says "per input" and why a per-step rule cannot be
+// which is why the binding rule says "per input" and why a per-step rule cannot be
 // right about both.
 func TestOrdinalScopedInputBindingFallsBackPerInput(t *testing.T) {
 	conn := mustDB(t)
@@ -472,7 +471,7 @@ func TestOrdinalScopedInputBindingFallsBackPerInput(t *testing.T) {
 	assertInputOrdinal(t, inputs, "implement", 0)
 }
 
-// TestOrdinalScopedInputBindingPrefersItsOwnOrdinal is §7.4 (1): among `done`
+// TestOrdinalScopedInputBindingPrefersItsOwnOrdinal pins the first preference: among `done`
 // instances, the step's OWN ordinal wins over any earlier one.
 //
 // The fallback exists for inputs with nothing at ordinal k; it must not fire
@@ -549,10 +548,10 @@ func TestLoopReentryRebindsInputToLoopProducer(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3 (4): re-instantiation
+// Re-instantiation
 // ---------------------------------------------------------------------------
 
-// TestAfterLoopChainReinstantiatesAtOrdinalK is §11.3 (4): when the loop's gates
+// TestAfterLoopChainReinstantiatesAtOrdinalK pins re-instantiation: when the loop's gates
 // pass, `after_loop` AND ITS TRANSITIVE DOWNSTREAM re-instantiate at ordinal k.
 //
 // The transitive half is the one a naive implementation drops. Re-instantiating
@@ -584,13 +583,13 @@ func TestAfterLoopChainReinstantiatesAtOrdinalK(t *testing.T) {
 	}
 
 	// UPSTREAM of after_loop is NOT re-instantiated: `implement` does not re-run,
-	// which is exactly what makes §7.4's per-input fallback necessary.
+	// which is exactly what makes the per-input fallback necessary.
 	if stepExists(t, conn, "implement@1") {
 		t.Error("implement@1 exists; it is upstream of after_loop and must not re-instantiate")
 	}
 }
 
-// TestReinstantiatedStepsRerunGatesAndThresholds is §11.3 (4)'s tail: "gates
+// TestReinstantiatedStepsRerunGatesAndThresholds is re-instantiation's tail: "gates
 // re-run; thresholds re-apply".
 //
 // A re-instantiated step is a FRESH instance — no gate trail, no routing, no
@@ -634,12 +633,11 @@ func TestReinstantiatedStepsRerunGatesAndThresholds(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3: completion over highest-ordinal instances only
+// Completion over highest-ordinal instances only
 // ---------------------------------------------------------------------------
 
-// TestCompletionIgnoresLowerOrdinals is §7.7's completion row, stated as the TDD
-// states it: an issue with a `done` `verify@0` and a `pending` `verify@1` is NOT
-// complete.
+// TestCompletionIgnoresLowerOrdinals is the completion row: an issue with a
+// `done` `verify@0` and a `pending` `verify@1` is NOT complete.
 //
 // The rule cuts both ways, and both halves are asserted here: a lower ordinal's
 // `done` does not COUNT TOWARD completion, and a lower ordinal's `superseded`
@@ -685,7 +683,7 @@ func TestSupersededLineageDoesNotBlockCompletion(t *testing.T) {
 	claimAndComplete(t, conn, e, "synthesize@1", "synthesis", "")
 	driveAction(t, conn, e, "reconcile@1")
 	claimAndComplete(t, conn, e, "verify@1", "report", metPayload)
-	// `commit-gate` is `type="human"`: it is approved, not claimed (§6.15).
+	// `commit-gate` is `type="human"`: it is approved, not claimed.
 	err := e.DecideStep(conn, stepIDByInstance(t, conn, "commit-gate@1"),
 		true, "", nowMS)
 	testsupport.Must(t, err, "approve commit-gate@1: %v", err)
@@ -704,11 +702,11 @@ func TestSupersededLineageDoesNotBlockCompletion(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3: "There is no other loop construct"
+// "There is no other loop construct"
 // ---------------------------------------------------------------------------
 
-// TestThresholdStepNameRoutingIsNotALoop is §7.2's last row: a `threshold`
-// routing to a STEP NAME is an interposed gate (§11.2), not a loop, and does
+// TestThresholdStepNameRoutingIsNotALoop is the loop table's last row: a `threshold`
+// routing to a STEP NAME is an interposed gate, not a loop, and does
 // not touch `loop_count`.
 //
 // The two are easy to conflate — both are thresholds routing somewhere other
@@ -787,10 +785,9 @@ func driveToVerify(t *testing.T, conn *sql.DB, e *Engine, ordinal int) {
 	}
 	completeReviewFanout(t, conn, e, ordinal)
 	claimAndComplete(t, conn, e, fmt.Sprintf("synthesize@%d", ordinal), "the synthesis", "")
-	// `reconcile` is an ACTION step: the ENGINE runs it, no claim (§6.15 as
-	// amended). `synthesize` recorded no payload here, so the
-	// aggregate reduces an empty input set and T4 short-circuits its threshold
-	// to `pass` (§6.14) — which is what every caller of this helper wants.
+	// `reconcile` is an ACTION step: the ENGINE runs it, no claim.
+	// `synthesize` recorded no payload here, so the aggregate reduces an empty input set and T4 short-circuits its threshold
+	// to `pass` — which is what every caller of this helper wants.
 	driveAction(t, conn, e, fmt.Sprintf("reconcile@%d", ordinal))
 }
 
@@ -925,7 +922,7 @@ func assertInputOrdinal(t *testing.T, inputs []ContextInput, stepName string, wa
 			continue
 		}
 		if ordinal != want {
-			t.Errorf("input from %s bound at ordinal %d, want %d (per-input fallback, §7.4)",
+			t.Errorf("input from %s bound at ordinal %d, want %d (per-input fallback)",
 				in.ProducerStep, ordinal, want)
 		}
 		return

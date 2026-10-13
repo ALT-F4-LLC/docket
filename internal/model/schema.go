@@ -6,8 +6,7 @@ import (
 	"sort"
 )
 
-// Schema is a registered payload schema — one `schemas` row
-// (docs/tdd/payloads-thresholds.md §4.4).
+// Schema is a registered payload schema — one `schemas` row.
 //
 // The shape is `Workflow`'s, deliberately and line for line: name, version,
 // source_path, source_sha256, body, a derived column, created_at_ms,
@@ -30,11 +29,11 @@ type Schema struct {
 	SourcePath   string
 	SourceSHA256 string
 	// Body is the registered document, VERBATIM. It is what a run validates
-	// against (§4.7 P4) and what `schema show --body` emits, so it is retained
-	// rather than reconstructed from a parsed form.
+	// against and what `schema show --body` emits, so it is retained rather
+	// than reconstructed from a parsed form.
 	Body string
-	// Ordered is the §4.3 derived index as stored JSON. It is a CACHE of a pure
-	// function of Body (I2), never a second source of truth.
+	// Ordered is the derived index as stored JSON. It is a CACHE of a pure
+	// function of Body, never a second source of truth.
 	Ordered string
 	// Builtin is 1 on `aggregate@1` and on nothing else. It records where the
 	// bytes came from, not whether a run may use them.
@@ -62,7 +61,7 @@ func (s *Schema) Deprecated() bool { return s.DeprecatedAtMS > 0 }
 // OrderedFields lists the fields the schema declares an order for, sorted.
 //
 // It reads the STORED index rather than re-walking the document: a read verb
-// must not depend on re-parsing bytes, and I2's round-trip check is what keeps
+// must not depend on re-parsing bytes, and the round-trip check is what keeps
 // the two honest.
 func (s *Schema) OrderedFields() []string {
 	var index map[string][]string
@@ -80,11 +79,11 @@ func (s *Schema) OrderedFields() []string {
 // schemaJSON is the wire shape of a registered schema.
 //
 // `source_sha256` rather than a bare `sha256`, matching `workflow`'s wire shape:
-// §4.4's argument is that the two registries must not LOOK different, and a
-// consumer reading both would otherwise have to remember which one spells it
-// which way. `body` is not included — `schema show --body` emits the registered
-// bytes verbatim rather than as a JSON-escaped string, exactly as
-// `workflow show --source` does.
+// the two registries must not LOOK different, and a consumer reading both
+// would otherwise have to remember which one spells it which way. `body` is
+// not included — `schema show --body` emits the registered bytes verbatim
+// rather than as a JSON-escaped string, exactly as `workflow show --source`
+// does.
 type schemaJSON struct {
 	Name          string   `json:"name"`
 	Version       int      `json:"version"`

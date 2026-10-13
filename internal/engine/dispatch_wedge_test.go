@@ -57,7 +57,7 @@ func TestRanWithoutReportingIsStillADiscrepancy(t *testing.T) {
 	finishWithoutUsage(t, conn, "implement@0")
 
 	// Probed past the grace: recorded less than `dispatch.grace` ago the step
-	// is usage PENDING (D7), and this test is about one that stayed unbilled.
+	// is usage PENDING, and this test is about one that stayed unbilled.
 	var found bool
 	for _, d := range discrepanciesAt(t, conn, runID, nowMS+1000+graceMS(t, conn)+1) {
 		if d.Kind == DiscrepancyMissingUsage {

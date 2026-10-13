@@ -32,7 +32,7 @@ import (
 // WHERE THE ORDERING LIVED BEFORE. In dispatcher convention: a writers-first
 // partition keyed on `row.class == "write"`, in a script outside this
 // repository. That is a correctness property resting on a string core assigns
-// no meaning to (§6.5 — classes are opaque, and the reference instance's `write`
+// no meaning to (classes are opaque, and the reference instance's `write`
 // is INSTANCE POLICY). Any dispatcher that partitioned differently, or not at
 // all, got pre-fix reviews with no error and no event.
 //
@@ -103,7 +103,7 @@ func (s *Scheduler) precedesInSet(earlier, later *db.Step) bool {
 
 	// `later` is in the re-review the loop re-enters at: the `after_loop`
 	// target itself, or anything transitively `after` it. Reusing
-	// afterLoopDownstream is deliberate — it is the same §7.3 (1) set the loop
+	// afterLoopDownstream is deliberate — it is the same set the loop
 	// machinery supersedes on re-entry, so "what the loop re-runs" has ONE
 	// definition rather than two that can drift.
 	return s.loopClosure(earlier.WorkflowID, def)[later.StepName]

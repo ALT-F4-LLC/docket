@@ -13,10 +13,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// Engine configuration keys (engine-spec.md §1: "engine defaults: lease TTLs
-// per class, attempt caps, budget default, context caps"). Values live in the
-// meta table, prefixed so they cannot collide with schema_version or any other
-// internal key.
+// Engine configuration keys: lease TTLs per class, attempt caps, budget
+// default, context caps. Values live in the meta table, prefixed so they cannot
+// collide with schema_version or any other internal key.
 const (
 	metaConfigPrefix = "config."
 
@@ -24,8 +23,7 @@ const (
 	// own entry.
 	KeyLeaseTTLDefault = "lease.ttl.default"
 	// KeyLeaseTTLPrefix is the per-class TTL namespace: lease.ttl.<class>.
-	// The class is an opaque string — core never interprets its value
-	// (engine-spec.md §11.1 [limits]).
+	// The class is an opaque string — core never interprets its value.
 	KeyLeaseTTLPrefix = "lease.ttl."
 	// KeyClassMaxPrefix is the per-class concurrency cap namespace:
 	// limits.max.<class>. A set value replaces the pinned workflows' merged
@@ -33,22 +31,20 @@ const (
 	// never pins it, so a run moved to a different host follows that host's
 	// value. Unset leaves the pinned max in force.
 	KeyClassMaxPrefix = "limits.max."
-	// KeyAttemptMax caps retries per entity (engine-spec.md §11.1
-	// max_attempts).
+	// KeyAttemptMax caps retries per entity (`max_attempts`).
 	KeyAttemptMax = "attempt.max"
 	// KeyBudgetDefault is the per-run budget cap; 0 means unlimited.
 	// Enforcement lands with runs; the key exists now so the default is
 	// pinned before the verbs that read it.
 	KeyBudgetDefault = "budget.default"
-	// KeyBudgetUnit names WHICH recorded usage unit the run cap counts
-	// (docs/tdd/runs-dispatch.md §4.5 B16). Empty — the default and the only
-	// value core ships — means `reported` is 0 and the cap rests on the
-	// declared-cost floor alone.
+	// KeyBudgetUnit names WHICH recorded usage unit the run cap counts. Empty —
+	// the default and the only value core ships — means `reported` is 0 and
+	// the cap rests on the declared-cost floor alone.
 	//
 	// A config key rather than a workflow field because the cap is a run-level
-	// control (engine-spec §11.3), so the unit it counts is run-level too.
-	// Putting it on a step would let two steps in one run disagree about what
-	// the run's budget means.
+	// control, so the unit it counts is run-level too. Putting it on a step
+	// would let two steps in one run disagree about what the run's budget
+	// means.
 	KeyBudgetUnit = "budget.unit"
 	// KeyUsageBudgetDefault is the default cap over MEASURED usage — the
 	// second budget dimension (DKT-238); 0 means unlimited.
@@ -64,21 +60,20 @@ const (
 	// no unit has nothing to count, so it enforces nothing.
 	//
 	// Deliberately distinct from budget.unit. That key names the unit whose
-	// reported total may RAISE the declared-cost spend (B16's max); this one
-	// names the unit the measured cap is taken over. Sharing one key would
-	// make an operator setting a token unit for one dimension silently arm the
-	// other.
+	// reported total may RAISE the declared-cost spend; this one names the
+	// unit the measured cap is taken over. Sharing one key would make an
+	// operator setting a token unit for one dimension silently arm the other.
 	KeyUsageBudgetUnit = "budget.usage.unit"
 	// KeyDispatchTTL is how long a dispatch manifest stays open before `next`
-	// auto-abandons it (docs/tdd/runs-dispatch.md §4.11, §5.5 P12).
+	// auto-abandons it.
 	//
-	// It is engine-side rather than instance policy for the reason §11.3 gives
+	// It is engine-side rather than instance policy for the reason that holds
 	// for every other enforced number: the expiry is what keeps a crashed relay
 	// from wedging a run, and a bound only a live relay could set would be a
 	// bound the crash case never gets.
 	KeyDispatchTTL = "dispatch.ttl"
 	// KeyDispatchGrace is how long a claimed step may go unrecorded before it
-	// counts as a dispatch discrepancy (§5.8 D1).
+	// counts as a dispatch discrepancy.
 	//
 	// It is DELIBERATELY a different key from `lease.ttl.default` even though
 	// both measure silence. A lease TTL decides when the engine takes work back;
@@ -91,21 +86,19 @@ const (
 	KeyContextErrorBytes = "context.error_bytes"
 
 	// KeyEventsRetain is the RETENTION WINDOW: how long an event must have
-	// existed before `events prune` may delete it
-	// (docs/tdd/events-follow.md §5.3 P12).
+	// existed before `events prune` may delete it.
 	//
-	// It is engine-spec §3's "artifact-retention boundary", implemented as the
-	// one window a future artifact GC would also read. §3 lists prune and
-	// "artifact GC per run-retention config" as one lifecycle, and no artifact
-	// GC ships at stage 7 — so read literally there would be no boundary to
-	// cross. Implementing it as this window means the GC inherits a boundary
-	// already enforced rather than one retrofitted, and the reading can only
-	// ever REFUSE MORE than the literal one would.
+	// It is the "artifact-retention boundary", implemented as the one window a
+	// future artifact GC would also read. Prune and "artifact GC per
+	// run-retention config" are one lifecycle, and no artifact GC ships — so
+	// read literally there would be no boundary to cross. Implementing it as
+	// this window means the GC inherits a boundary already enforced rather
+	// than one retrofitted, and the reading can only ever REFUSE MORE than the
+	// literal one would.
 	//
-	// THE READING IS RECORDED AS AN AMENDMENT rather than made silently,
-	// including the objection a reviewer would raise — that a key spelled
-	// `events.retain` governing only events is not what "artifact-retention"
-	// names.
+	// THE READING IS DELIBERATE, and it carries a known objection: a key
+	// spelled `events.retain` governing only events is not what
+	// "artifact-retention" names.
 	//
 	// The default is "0", which imposes NO RETENTION WINDOW: prune at 0 is
 	// bounded only by its `--before` or `--before-run` target and the live-run
@@ -115,8 +108,7 @@ const (
 
 	// KeyVoteRulePrefix is the named-threshold-configuration namespace:
 	// vote.rule.<name>.threshold, vote.rule.<name>.criticality,
-	// vote.rule.<name>.sealed and vote.rule.<name>.hold_on_dissent
-	// (gates-trust §8.3).
+	// vote.rule.<name>.sealed and vote.rule.<name>.hold_on_dissent.
 	//
 	// A workflow's `type="vote"` step names a rule rather than passing flags,
 	// because a step cannot pass flags. The <name> is an OPAQUE string exactly
@@ -192,12 +184,12 @@ const (
 	// minted `human` is one operator's decision, not a panel's spend.
 	KeyVoteHoldCost = "vote.hold.cost"
 
-	// KeyAutoRegister toggles §9's auto-registration: whether `run activate`
+	// KeyAutoRegister toggles auto-registration: whether `run activate`
 	// registers a workflow/schema it finds in an instance-config root
 	// (~/.docket/config, <repo>/.docket/config) on its own, or leaves that to
 	// an explicit `workflow register` / `schema register`.
 	//
-	// DEFAULT TRUE — auto-registration is the zero-touch behavior §9 exists
+	// DEFAULT TRUE — auto-registration is the zero-touch behavior it exists
 	// for, and an operator who wants it off states that, rather than every
 	// operator who wants it (the common case) opting in project by project.
 	//
@@ -239,8 +231,7 @@ const (
 	// existing proposal machinery already understands.
 	KindCriticality
 	// KindRetentionWindow is a duration that may also be ZERO, where zero means
-	// "no retention window": prune holds back no event by age
-	// (docs/tdd/events-follow.md §5.3 P13).
+	// "no retention window": prune holds back no event by age.
 	//
 	// It is a separate kind from KindDuration because that one rejects zero —
 	// correctly, since a zero lease TTL would expire a claim the instant it was
@@ -251,7 +242,7 @@ const (
 	// KindUnitName is an OPAQUE unit name, or empty. Core never enumerates
 	// units and never has a default one, so the only validation possible is the
 	// shape a name must have to be usable as a ledger key — the same caps
-	// `--usage` applies to the names it records (§4.9 B36): at most 64 bytes,
+	// `--usage` applies to the names it records: at most 64 bytes,
 	// printable ASCII, no whitespace. Anything beyond that would be core
 	// deciding which units exist.
 	KindUnitName
@@ -284,9 +275,9 @@ const (
 const ClassMaxAuto = "auto"
 
 // NameMaxBytes caps an opaque name stored in config or recorded in a ledger,
-// per §1.3's security note: such a name is attacker-controlled text that lands
-// in a ledger and in a report. ONE number for every opaque-name validator, so
-// two of them cannot drift apart.
+// because such a name is attacker-controlled text that lands in a ledger and in
+// a report. ONE number for every opaque-name validator, so two of them cannot
+// drift apart.
 const NameMaxBytes = 64
 
 // UnitNameMaxBytes is NameMaxBytes under the name `--usage`'s validator has
@@ -317,7 +308,7 @@ func validateName(noun, name string) error {
 	return nil
 }
 
-// ValidateUnitName is B36's shape rule for a unit name, shared by
+// ValidateUnitName is the shape rule for a unit name, shared by
 // `--usage`'s parser and `docket config set budget.unit`.
 //
 // `tokens`, `pages`, and `sheets` are equally valid: core has no list.
@@ -377,10 +368,9 @@ type ConfigSpec struct {
 
 // engineConfigSpecs is the known-key set with core's default values.
 //
-// These defaults are CORE's, not the reference instance's. engine-spec.md §8 is
-// explicit that its numbers are instance data and that "core ships with no
-// opinions here", so they are chosen as neutral engineering values rather than
-// copied. Rationale per key is in docs/tdd/claims-leases.md §3.3.
+// These defaults are CORE's, not the reference instance's. Their numbers are
+// instance data and core ships with no opinions here, so they are chosen as
+// neutral engineering values rather than copied.
 var engineConfigSpecs = []ConfigSpec{
 	{
 		Key:     KeyLeaseTTLDefault,
@@ -404,7 +394,7 @@ var engineConfigSpecs = []ConfigSpec{
 		Key:  KeyBudgetUnit,
 		Kind: KindUnitName,
 		// Empty is the default AND the only value core ships. The doc line says
-		// exactly what §4.5 argues, and it passes the stranger test on its face:
+		// exactly that, and it passes the stranger test on its face:
 		// a team tracking a documentation sprint reads it and understands that
 		// leaving it alone means their cap counts declared costs.
 		Default: "",
@@ -531,8 +521,7 @@ func LookupConfigSpec(key string) (ConfigSpec, error) {
 		}, nil
 	}
 
-	// vote.rule.<name>.threshold / .criticality / .sealed / .hold_on_dissent
-	// (gates-trust §8.3),
+	// vote.rule.<name>.threshold / .criticality / .sealed / .hold_on_dissent,
 	// matched dynamically for the same reason the per-class TTL is: <name> is
 	// an opaque string, so the set of valid keys is open by design.
 	if rest, ok := strings.CutPrefix(key, KeyVoteRulePrefix); ok {
@@ -822,7 +811,7 @@ func VoteRuleHoldOnDissentKey(rule string) string {
 
 // VoteRuleExists reports whether a rule is registered.
 //
-// A rule EXISTS IFF its threshold is set (§8.3). Criticality has a default, so
+// A rule EXISTS IFF its threshold is set. Criticality has a default, so
 // it cannot be the existence test: a rule with only a criticality set would
 // tally at no threshold at all.
 func VoteRuleExists(db *sql.DB, projectID int, rule string) (bool, error) {
@@ -834,10 +823,10 @@ func VoteRuleExists(db *sql.DB, projectID int, rule string) (bool, error) {
 }
 
 // VoteRuleExistsTx and RegisteredVoteRulesTx are the two above inside a
-// CALLER'S transaction, for S6's auto-registration (docs/tdd/runs-dispatch.md
-// §9.2 F7/F8): the scan validates a workflow's `vote_rule` references with the
-// SAME rules `workflow register` applies, and it does so inside activation's fat
-// transaction, where a pool read would deadlock against the one-connection pool.
+// CALLER'S transaction, for auto-registration: the scan validates a
+// workflow's `vote_rule` references with the SAME rules `workflow register`
+// applies, and it does so inside activation's fat transaction, where a pool
+// read would deadlock against the one-connection pool.
 //
 // They read `meta` directly rather than going through GetConfig, because a
 // vote rule's key is DYNAMIC (`vote.rule.<name>.threshold`) and has no spec row
@@ -1178,7 +1167,7 @@ func ListConfig(db *sql.DB, projectID int) ([]ConfigEntry, error) {
 }
 
 // EventsRetain resolves the retention window, with 0 meaning "no retention
-// window" (docs/tdd/events-follow.md §5.3).
+// window".
 //
 // It returns the DURATION rather than a cutoff timestamp, because the caller
 // computes the cutoff inside the prune's own transaction against that
@@ -1204,8 +1193,9 @@ func EventsRetain(db *sql.DB) (time.Duration, error) {
 
 // AutoRegisterEnabledTx resolves KeyAutoRegister inside a CALLER'S
 // transaction — activation's own, since that is the only place this reads
-// (§9's scan runs inside activateTx, and a pool read there would deadlock
-// against the one-connection pool exactly as VoteRuleExistsTx's doc explains).
+// (the auto-registration scan runs inside activateTx, and a pool read there
+// would deadlock against the one-connection pool exactly as
+// VoteRuleExistsTx's doc explains).
 //
 // The parse cannot fail on a value that reached storage: SetConfig already
 // ran it through ValidateConfigValue's KindBool case, which is the same

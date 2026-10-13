@@ -15,7 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// The §6.9 refusal matrix AT THE CLI BOUNDARY.
+// The step refusal matrix AT THE CLI BOUNDARY.
 //
 // internal/engine and internal/db already test the behavior; what these assert
 // is the MAPPING — that each engine or lease failure reaches the operator as
@@ -171,7 +171,7 @@ func TestStepErrDoesNotSwallowUnknownErrors(t *testing.T) {
 	}
 }
 
-// TestEveryStepVerbIsRegistered guards the surface §6.10 specifies. A verb
+// TestEveryStepVerbIsRegistered guards the specified step surface. A verb
 // missing from the tree is a documented capability that does not exist, and
 // SKILL.md's table would be describing something no operator can run.
 func TestEveryStepVerbIsRegistered(t *testing.T) {
@@ -203,7 +203,7 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 		// integration mints, most of all. Opaque KV merged onto the finished
 		// step's metadata, event-logged.
 		"annotate",
-		// `pregate` (gates-trust §7.6.2 PG6): the detached pre-gate run the
+		// `pregate`: the detached pre-gate run the
 		// engine launches as a re-execution of this binary when a step's
 		// target is first recorded. HIDDEN — it is the engine's argv, not an
 		// operator's verb — but it is surface this binary answers to, so it is
@@ -218,28 +218,26 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 
 	for _, verb := range want {
 		if !have[verb] {
-			t.Errorf("`docket step %s` is not registered, but §6.10 specifies it", verb)
+			t.Errorf("`docket step %s` is not registered, but the step surface requires it", verb)
 		}
 	}
 	if len(have) != len(want) {
-		t.Errorf("the step surface has %d verbs, §6.10 specifies %d — an extra "+
+		t.Errorf("the step surface has %d verbs, want %d — an extra "+
 			"verb is surface nobody documented", len(have), len(want))
 	}
 }
 
-// TestGuardVerbsAreRegistered is the same guard for §6.12, and it is now the
-// COMPLETE guard surface.
+// TestGuardVerbsAreRegistered is the same guard for `docket guard`, and it is
+// now the COMPLETE guard surface.
 //
-// Until S6 this test additionally pinned that `record`/`spawn` were ABSENT:
-// engine-spec §10 assigns them to stage 6 ("Guard verbs land with their
-// underlying features — `stop`/`gate` at stage 3, `record`/`spawn` at stage 6"),
-// and shipping them early would have frozen a shape that stage was meant to
-// define. That guard did its job; the two verbs landed with the dispatch
-// mechanics they are predicates over, and the absence assertion is replaced by
-// the presence one.
+// This test once also pinned that `record`/`spawn` were ABSENT: guard verbs
+// land with their underlying features, and shipping those two early would
+// have frozen a shape their stage was meant to define. That guard did its job;
+// the two verbs landed with the dispatch mechanics they are predicates over,
+// and the absence assertion is replaced by the presence one.
 //
 // The exact-count check is what keeps this a boundary rather than a checklist:
-// §2's surface names FOUR guards, so a fifth is surface nobody documented.
+// the surface names FOUR guards, so a fifth is surface nobody documented.
 func TestGuardVerbsAreRegistered(t *testing.T) {
 	want := []string{"stop", "gate", "record", "spawn"}
 
@@ -250,16 +248,16 @@ func TestGuardVerbsAreRegistered(t *testing.T) {
 
 	for _, verb := range want {
 		if !have[verb] {
-			t.Errorf("`docket guard %s` is not registered, but §2 specifies it", verb)
+			t.Errorf("`docket guard %s` is not registered, but the guard surface requires it", verb)
 		}
 	}
 	if len(have) != len(want) {
-		t.Errorf("the guard surface has %d verbs, §2 specifies %d — an extra "+
+		t.Errorf("the guard surface has %d verbs, want %d — an extra "+
 			"guard is surface nobody documented", len(have), len(want))
 	}
 }
 
-// TestNoTokenFlagOnStepVerbs extends the S2 guard to the new surface.
+// TestNoTokenFlagOnStepVerbs extends TestNoTokenFlag to the step surface.
 //
 // Tokens pass via env or stdin, NEVER argv: argv is world-readable through
 // `ps` on a shared host, so a --token flag would defeat the capability model
@@ -389,7 +387,7 @@ func TestStepRecordNamesTheFailedGateAndItsExit(t *testing.T) {
 
 // TestStepRecordNamesEveryFailedGate covers the plural case and the gate that
 // never ran: `unmatched` has no exit code, and printing `exit 0` for a process
-// that did not exist would read as a pass (T11).
+// that did not exist would read as a pass.
 func TestStepRecordNamesEveryFailedGate(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -473,7 +471,7 @@ func TestStepRecordKeepsItsSuccessLineWhenGatesPass(t *testing.T) {
 	seedGateRows(t, conn, stepID, db.StepDone,
 		db.GateResultRow{Gate: "build", Verdict: db.GateVerdictPass, Exit: intPtr(0)},
 		// A PRE-gate that failed is an input to the step, not a judgment of it
-		// (PG4) — it routed nothing, so it must not turn a clean record into a
+		// — it routed nothing, so it must not turn a clean record into a
 		// reported failure.
 		db.GateResultRow{Gate: "pre-scan", Verdict: db.GateVerdictFail,
 			Exit: intPtr(3), Pre: true})

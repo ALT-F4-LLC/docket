@@ -22,7 +22,7 @@ func nextCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 	cmd.Flags().StringSlice("label", nil, "")
 	cmd.Flags().StringSlice("type", nil, "")
 	cmd.Flags().Int("limit", limit, "")
-	// --run is the phase-3 mode switch (TDD §6.3.1). It is registered here so
+	// --run is the phase-3 mode switch. It is registered here so
 	// runNext's dispatch resolves; every issue-mode test leaves it UNSET, which
 	// is exactly the state a workflow-free repo is always in.
 	cmd.Flags().String("run", "", "")

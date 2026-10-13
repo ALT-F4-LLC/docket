@@ -16,15 +16,15 @@ type rawStore struct {
 	Entries []Entry `toml:"entry"`
 }
 
-// parse decodes a trust file STRICTLY (§3.1).
+// parse decodes a trust file STRICTLY.
 //
-// Unknown keys are a hard error, exactly as workflow parsing is strict
-// (engine-spine §4.2). The reasoning is specific rather than stylistic: a
-// typo'd `re_runable` silently defaulting to false would turn a re-runnable
-// gate into a waiting-human park; a typo'd `global` defaulting to false is the
-// safe direction, but a typo'd `prefix` is NOT — it would silently widen or
-// narrow an authorization. A parser that is strict about one key and lax about
-// another is a parser nobody can reason about.
+// Unknown keys are a hard error, exactly as workflow parsing is strict. The
+// reasoning is specific rather than stylistic: a typo'd `re_runable` silently
+// defaulting to false would turn a re-runnable gate into a waiting-human park;
+// a typo'd `global` defaulting to false is the safe direction, but a typo'd
+// `prefix` is NOT — it would silently widen or narrow an authorization. A
+// parser that is strict about one key and lax about another is a parser nobody
+// can reason about.
 func parse(data []byte, path string) (*Store, error) {
 	var raw rawStore
 	md, err := toml.Decode(string(data), &raw)
@@ -70,7 +70,7 @@ func validateEntry(e Entry, idx int, path string) error {
 		return fmt.Errorf("%w: %s in %s has an empty argv; an entry must name a command", ErrParse, where, path)
 	}
 
-	// P4: an entry with NEITHER repo NOR global is a MALFORMED FILE, never
+	// An entry with NEITHER repo NOR global is a MALFORMED FILE, never
 	// "matches everything". A missing binding failing open would make a
 	// hand-edited file a bypass — the single most valuable edit an attacker who
 	// reached this file could make, and the cheapest one to refuse.
@@ -94,7 +94,7 @@ func validateEntry(e Entry, idx int, path string) error {
 	}
 
 	// The stored hash must describe the stored argv. This catches a corrupted
-	// or hand-edited file (M3): an operator who edits `argv` without recomputing
+	// or hand-edited file: an operator who edits `argv` without recomputing
 	// the hash gets a refusal rather than an entry whose two halves disagree.
 	if e.ArgvSHA256 != "" {
 		if want := ArgvSHA256(e.Argv); e.ArgvSHA256 != want {
@@ -174,7 +174,7 @@ func isLowerHexSHA256(s string) bool {
 }
 
 // rejectUndecoded turns BurntSushi's undecoded-key report into the strict-mode
-// error §3.1 requires, in the same shape internal/workflow's parser uses.
+// error, in the same shape internal/workflow's parser uses.
 func rejectUndecoded(md toml.MetaData, path string) error {
 	undecoded := md.Undecoded()
 	if len(undecoded) == 0 {

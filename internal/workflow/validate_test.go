@@ -13,7 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// validationCase is one row of the §4.3 validation table, as a test.
+// validationCase is one row of the validation table, as a test.
 //
 // `rule` is the documented rule ID and is the authority
 // TestValidationTableIsComplete checks set equality against. `wants` are
@@ -30,7 +30,7 @@ type validationCase struct {
 	// environment, so its cases supply that environment here rather than
 	// forcing every other row to carry a database.
 	resolver VoteRuleResolver
-	// schemas is set on V21a-V21d and V25a's rows — §4.9.1's cross-validation
+	// schemas is set on V21a-V21d and V25a's rows — the cross-validation
 	// table, which asks the same kind of environment question V26 does and gets
 	// the same treatment: a fake resolver in the row, and Validate left pure.
 	schemas SchemaResolver
@@ -114,7 +114,7 @@ func twoStepPipeline(bTail string) string {
 // validationCases covers V1-V25 including V13a — 26 rules across 25 numbered
 // IDs. V13 and V13a are separate cases with distinct messages: V13 feeds a
 // human step an explicit `on_fail = "waiting-human"`, V13a feeds one that
-// declares no `on_fail` at all (§4.3.2).
+// declares no `on_fail` at all.
 var validationCases = []validationCase{
 	{
 		rule: "V1", name: "pipeline name missing",
@@ -745,7 +745,7 @@ type = "human"
 	},
 	{
 		// V13a's other half: a DECLARED vote step must state its `on_fail` too.
-		// Silence inherits §11.1's `waiting-human`, so the step parks on a
+		// Silence inherits the grammar's `waiting-human`, so the step parks on a
 		// failed tally — which may be exactly right (escalate to an operator) or
 		// exactly wrong (the author meant `fix-loop`), and nothing in the step
 		// says which.
@@ -783,7 +783,7 @@ vote_rule = "majority"
 		wants: []string{`"v"`, "`voters`", "required"},
 	},
 	{
-		// V26 (gates-trust §8.2): the rule NAMED must exist. V14 already
+		// V26: the rule NAMED must exist. V14 already
 		// requires `vote_rule` to be present; this is the other half — a
 		// workflow that cannot possibly tally should not register, which is
 		// the discipline every V-rule follows.
@@ -1261,7 +1261,7 @@ params = { field = "risk", method = "median", output = "k" }
 		wants:   []string{`"a"`, "closed@1", "members", "aggregate@1"},
 	},
 	{
-		// V31: the builtin's input IS its declared `inputs` (§2), so an
+		// V31: the builtin's input IS its declared `inputs`, so an
 		// aggregate that declares none can never compute — it would reduce an
 		// empty set, produce an empty payload, and pass its threshold vacuously.
 		// Everything else about this step is valid, so the refusal is genuinely
@@ -1281,8 +1281,7 @@ params = { field = "risk", method = "median", output = "k" }
 		wants:   []string{`"a"`, "inputs", "aggregate"},
 	},
 	{
-		// V32 is `packet`'s SHAPE rule
-		// (docs/tdd/packet-composition.md §1.6). An entry escaping the
+		// V32 is `packet`'s SHAPE rule. An entry escaping the
 		// instance-config directory is refused at register, naming the step
 		// and the field — the file's EXISTENCE is deliberately NOT checked
 		// here, so a workflow stays registerable before its corpus lands.
@@ -1471,7 +1470,7 @@ threshold = { "seed" = "any(vote == approve-with-concerns)" }
 	},
 	{
 		// V36: casts have no registered schema, so an ordered comparison
-		// would be a guaranteed T3 park on every evaluation.
+		// would be a guaranteed park on every evaluation.
 		rule: "V36", name: "vote threshold with an ordered operator",
 		src: `
 [pipeline]
@@ -2328,7 +2327,7 @@ func TestValidationTableIsComplete(t *testing.T) {
 	}
 }
 
-// TestV13AndV13aAreDistinct pins the §4.3.2 argument: the two rules produce two
+// TestV13AndV13aAreDistinct pins why the two rules are split: they produce two
 // different author-facing messages, so a human step that omitted `on_fail` is
 // not told "your reject routing is waiting-human" about a field it never wrote.
 func TestV13AndV13aAreDistinct(t *testing.T) {
@@ -2427,7 +2426,7 @@ emits = "k"
 	})
 }
 
-// TestDefaults covers the §11.1 default column, asserted per field (§4.6).
+// TestDefaults covers the grammar's default column, asserted per field.
 func TestDefaults(t *testing.T) {
 	src := `
 [pipeline]
@@ -2497,8 +2496,8 @@ emits = "k"
 	}
 }
 
-// TestStrictDecoding covers §4.2: an unknown key at each level is an error, and
-// a step-level key names its step.
+// TestStrictDecoding covers strict decoding: an unknown key at each level is
+// an error, and a step-level key names its step.
 func TestStrictDecoding(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -2598,7 +2597,7 @@ gates = [{ name = "g", prefix = true }]
 	}
 }
 
-// TestGateSpellingsNormalize covers §4.2: both §11.1 gate spellings land in one
+// TestGateSpellingsNormalize covers both gate spellings: they land in one
 // shape, so downstream code never branches on which the author wrote.
 func TestGateSpellingsNormalize(t *testing.T) {
 	def, err := Load([]byte(`
@@ -2624,7 +2623,7 @@ gates = ["plain", { name = "fenced", source = "fence:ac", pre = true }]
 	}
 }
 
-// TestLimitsShorthand covers §11.1's bare-int form.
+// TestLimitsShorthand covers the `[limits]` bare-int form.
 func TestLimitsShorthand(t *testing.T) {
 	def, err := Load([]byte(`
 [pipeline]
@@ -2648,9 +2647,9 @@ emits = "k"
 	}
 }
 
-// TestProducedKindPerStepClass asserts every row of §4.3.1. Getting this wrong
-// rejects the canonical fixture, which is why the table is pinned rather than
-// inferred.
+// TestProducedKindPerStepClass asserts every row of the produced-kind table.
+// Getting this wrong rejects the canonical fixture, which is why the table is
+// pinned rather than inferred.
 func TestProducedKindPerStepClass(t *testing.T) {
 	def, err := Load([]byte(`
 [pipeline]
@@ -2703,8 +2702,9 @@ on_fail = "skip"
 	}
 }
 
-// TestInputsFromAHumanStepIsRejected is §4.3.1's corollary: a step that
-// produces nothing has nothing for an `inputs` reference to resolve to.
+// TestInputsFromAHumanStepIsRejected is the produced-kind table's corollary: a
+// step that produces nothing has nothing for an `inputs` reference to resolve
+// to.
 func TestInputsFromAHumanStepIsRejected(t *testing.T) {
 	_, err := Load([]byte(`
 [pipeline]
@@ -2759,8 +2759,8 @@ inputs = ["act.findings"]
 	testsupport.Must(t, err, "an action step's params.output must satisfy inputs: %v", err)
 }
 
-// TestFixtureCrossValidatesAgainstTheQASchemas is §8.2's replacement for the
-// no-schemas variant, and it is the whole point of the fixture edit.
+// TestFixtureCrossValidatesAgainstTheQASchemas replaces the no-schemas variant,
+// and it is the whole point of the fixture edit.
 //
 // The committed fixture now declares `payload = "findings@1"` on `reconcile`,
 // because V29 requires it: an `aggregate` step reduces by median over an order,
@@ -2769,7 +2769,8 @@ inputs = ["act.findings"]
 // ZG registers — rather than against a resolver with nothing in it.
 //
 // `TestFixtureRegistersClean` (pure, no resolver) is unaffected and still runs:
-// Validate stays a function of bytes, which is exactly what §4.9.2's seam buys.
+// Validate stays a function of bytes, which is exactly what the ValidateSchemas
+// seam buys.
 func TestFixtureCrossValidatesAgainstTheQASchemas(t *testing.T) {
 	def := loadFixture(t)
 
@@ -2845,7 +2846,7 @@ func TestFixtureKeepsV21dsSchemalessThreshold(t *testing.T) {
 // loadFixture reads and parses the committed register-test fixture.
 func loadFixture(t *testing.T) *Definition {
 	t.Helper()
-	src, err := os.ReadFile(filepath.Join("..", "..", "docs", "design", "example-workflow.toml"))
+	src, err := os.ReadFile(filepath.Join("testdata", "example-workflow.toml"))
 	if err != nil {
 		t.Skipf("fixture unavailable: %v", err)
 	}
@@ -2941,7 +2942,7 @@ func TestLinkedInputParser(t *testing.T) {
 	}
 }
 
-// TestReRegisteringAnS3FileIsRefused is §4.9.3's honest consequence, stated
+// TestReRegisteringAnS3FileIsRefused is an honest consequence, stated
 // rather than hidden.
 //
 // An S3-era definition whose file is re-registered VERBATIM after this stage may

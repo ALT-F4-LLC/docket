@@ -21,7 +21,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The `run` verbs' exit codes and machine-readable codes, per the §5.5
+// The `run` verbs' exit codes and machine-readable codes, per the error
 // taxonomy. The engine's own behavior is tested in internal/engine; what these
 // assert is the CLI boundary — that each engine failure reaches the operator as
 // the RIGHT code, since an error taxonomy that degrades to "general error" at
@@ -786,7 +786,7 @@ func TestRunActivateDryRunProjectsRatherThanCommits(t *testing.T) {
 // no key at all.
 //
 // `runWorkflow` declares no `holds_tree`, so both its steps hold the tree by
-// §11.1's default, and `seedRun`'s issue declares no scope — which is the RUN-5
+// default, and `seedRun`'s issue declares no scope — which is the RUN-5
 // shape exactly, arrived at without anyone choosing it.
 func TestRunActivateCarriesScopeWarnings(t *testing.T) {
 	t.Run("the JSON payload carries the array", func(t *testing.T) {
@@ -1133,7 +1133,7 @@ func TestRunActivateHumanModeRendersContextWarnings(t *testing.T) {
 	}
 }
 
-// TestRunActivateErrorCodes is the §5.5 taxonomy at the CLI boundary. Each
+// TestRunActivateErrorCodes is the error taxonomy at the CLI boundary. Each
 // engine failure must arrive as its own code — an error that degraded to
 // "general error" here is one no script can branch on.
 func TestRunActivateErrorCodes(t *testing.T) {
@@ -1227,7 +1227,7 @@ func TestRunActivateErrorCodes(t *testing.T) {
 
 // TestRunStatusCountsIssuesAddedAfterActivation is DKT-103: an issue attached
 // to an ACTIVE run via `run issue add` and bound/expanded/promoted by a
-// re-activation (RA3) must be counted by `run status` — the roster surface
+// re-activation must be counted by `run status` — the roster surface
 // must agree with the event log and the step table, or `docket run status`
 // undercounts a run with live steps against an issue nobody can see.
 func TestRunStatusCountsIssuesAddedAfterActivation(t *testing.T) {
@@ -1408,7 +1408,7 @@ func TestRunStatusListDefaultsToNonTerminalRuns(t *testing.T) {
 	})
 }
 
-// TestRunLifecycleTransitions walks the §1.1 machine and asserts that an
+// TestRunLifecycleTransitions walks the run status machine and asserts that an
 // ILLEGAL transition is REFUSED rather than silently applied. A no-op success
 // would let a harness believe it had quiesced a run that never was active.
 func TestRunLifecycleTransitions(t *testing.T) {

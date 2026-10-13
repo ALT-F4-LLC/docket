@@ -15,8 +15,8 @@ import (
 )
 
 // DKT-1054: `step context` on a step that has been handed out replays the
-// bindings its claim RECORDED (`step_inputs`), instead of re-resolving §6.7
-// over the run's current artifact table.
+// bindings its claim RECORDED (`step_inputs`), instead of re-resolving its
+// inputs over the run's current artifact table.
 //
 // The claim always wrote the table; nothing read it. So a completed `fix@1`
 // — which bound `reconcile@0` at claim, the round that routed it — read back

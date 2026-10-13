@@ -11,7 +11,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// Fanout joins J1-J5 — TDD §7.5, engine-spec §2 verbatim.
+// Fanout joins J1-J5.
 //
 //	J1  a fanned-out step joins when EVERY sibling is terminal
 //	    (done | skipped | superseded | failed-routed)
@@ -193,7 +193,7 @@ func TestInputsResolveOverDoneSiblingsOnly(t *testing.T) {
 	// Counted by PRODUCER rather than by artifact: `synthesize` declares
 	// `inputs = ["review.*"]`, and `*` matches every kind each sibling
 	// produced — its own `findings` plus the engine-computed `issue.diff`
-	// (§6.7.1 D1 recomputes the diff at every executor step's completion). The
+	// (the diff is recomputed at every executor step's completion). The
 	// question J3 asks is which SIBLINGS contributed, not how many rows they
 	// produced between them.
 	producers := make(map[string]bool)
@@ -247,7 +247,7 @@ func TestOnFailAppliesPerSibling(t *testing.T) {
 // J5: min_siblings, and NO EARLY CANCEL
 // ---------------------------------------------------------------------------
 
-// TestQuorumJoinDoesNotCancelEarly is J5's explicit case, and §7.5 names it as
+// TestQuorumJoinDoesNotCancelEarly is J5's explicit case, the one called
 // "the clause an optimizer breaks".
 //
 // A four-way fanout with `min_siblings = 2` and two early `done` siblings must

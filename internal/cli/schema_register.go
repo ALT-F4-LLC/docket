@@ -50,7 +50,7 @@ func runSchemaRegister(cmd *cobra.Command, args []string, w *output.Writer) erro
 	conn := getDB(cmd)
 	ref, path := args[0], args[1]
 
-	// `name@version` is an ARGUMENT, not two flags — §1's surface line is
+	// `name@version` is an ARGUMENT, not two flags — the surface line is
 	// `docket schema register name@v schema.json`. The grammar is
 	// internal/workflow's own PayloadShape, shared rather than restated, so what
 	// a workflow may REFERENCE and what the registry ACCEPTS cannot drift.

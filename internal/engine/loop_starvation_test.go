@@ -11,7 +11,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The starvation cases of §11.3 — the ones about a downstream step that never
+// The loop starvation cases — the ones about a downstream step that never
 // gets to run, rather than about the rows a loop entry writes.
 //
 // The fixture below is `example-workflow.toml`'s shape reduced to the part
@@ -26,8 +26,8 @@ import (
 //
 //	(1) a loop ENTRY supersedes the pending `verify-ac` before it ran, which is
 //	    correct only because the entry instantiates its successor in the same
-//	    transaction (§11.3 (4)); and
-//	(2) a loop entry REFUSED BY THE BOUND (§11.3 (1)) instantiates nothing —
+//	    transaction (re-instantiation); and
+//	(2) a loop entry REFUSED BY THE BOUND instantiates nothing —
 //	    so the final ordinal's `verify-ac` is the last one there will ever be,
 //	    and everything about the run's ending depends on that ordinal still
 //	    being live.
@@ -110,7 +110,7 @@ func enterLoopAt(t *testing.T, conn *sql.DB, e *Engine, ordinal int) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3 (2) + (4): supersede implies a successor
+// Supersede implies a successor
 // ---------------------------------------------------------------------------
 
 // TestSupersedeInstantiatesTheSuccessorOfEveryPendingItTakes is the invariant
@@ -147,8 +147,8 @@ func TestSupersedeInstantiatesTheSuccessorOfEveryPendingItTakes(t *testing.T) {
 // not merely present.
 //
 // A `verify-ac@1` that exists but can never satisfy R3 is starvation with a row
-// to point at. Its predecessor `assess` re-instantiates at ordinal 1 (§11.3
-// (4)), so the successor becomes ready the moment ordinal 1's chain reaches it
+// to point at. Its predecessor `assess` re-instantiates at ordinal 1,
+// so the successor becomes ready the moment ordinal 1's chain reaches it
 // — which is what makes superseding the ordinal-0 instance a deferral rather
 // than a discard.
 func TestSupersededSuccessorBecomesReachable(t *testing.T) {
@@ -267,7 +267,7 @@ func countIssueSteps(t *testing.T, conn *sql.DB, issueID int) int {
 	return n
 }
 
-// TestSupersedeRepairSkipsMaterializedNames is the guard's H17 case: a
+// TestSupersedeRepairSkipsMaterializedNames is the guard's held-step case: a
 // materialized `<step>-held` name is mapped back to its routing step before the
 // lookup, so a held question superseded from an earlier ordinal does not cause
 // a held row to be minted at the new one.
@@ -314,12 +314,12 @@ func TestSupersedeRepairSkipsMaterializedNames(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §11.3 (1): the bound, and what it leaves behind
+// The bound, and what it leaves behind
 // ---------------------------------------------------------------------------
 
 // TestBoundedEntryLeavesTheFinalOrdinalLive is DKT-78's starvation.
 //
-// A bounded entry instantiates NOTHING (§11.3 (1): it "is not a loop entry, it
+// A bounded entry instantiates NOTHING (it "is not a loop entry, it
 // is a park"), so the ordinal it was refused at is the last one that will ever
 // exist — and every step of that ordinal, `verify-ac` included, is the only
 // instance of itself the run will ever have. The counter must therefore not
@@ -461,7 +461,7 @@ func TestBoundedEntryRoutesTheFinalOrdinalVerify(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// staleLineage answers §11.3 (2)'s inert half for one instance, in a
+// staleLineage answers the supersede rule's inert half for one instance, in a
 // transaction of its own — the predicate reads the issue's `loop_count`, so
 // asking it is a database question and not a scheduler one.
 func staleLineage(t *testing.T, conn *sql.DB, instance string) bool {
@@ -484,7 +484,7 @@ func staleLineage(t *testing.T, conn *sql.DB, instance string) bool {
 //
 // A MATERIALIZED held step is mapped back to the routing step it belongs to
 // before the lookup, the same mapping the sweep uses to take it in the first
-// place (H17): its name is not in the definition, so expansion never writes one
+// place: its name is not in the definition, so expansion never writes one
 // at the new ordinal, and its successor is its routing step's new instance.
 func assertSupersededHaveSuccessors(t *testing.T, conn *sql.DB, issueID, ordinal int) {
 	t.Helper()

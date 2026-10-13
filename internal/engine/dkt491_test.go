@@ -218,7 +218,7 @@ func TestReReviewPacketInlinesTheRevisedDocOnce(t *testing.T) {
 }
 
 // TestReReviewBundleBindsTheRevisedDocOnce is the same fact one layer down: the
-// §11.4 bundle `step context` serves carries one entry per DISTINCT artifact,
+// bundle `step context` serves carries one entry per DISTINCT artifact,
 // so a dispatcher reading the bundle pays the duplicate no more than a rendered
 // packet does. Its `--meta` byte count is measured off this list, and a bundle
 // deduplicated only at render would keep reporting the inflated figure.

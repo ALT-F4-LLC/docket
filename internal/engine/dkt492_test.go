@@ -22,7 +22,7 @@ import (
 // `loop = true` step declares no `after` (V10/V18) and the set is the `after`
 // closure of the `after_loop` target — and at the moment its own inputs
 // resolve, no ordinal-k body artifact exists yet. Entry count never mattered.
-// A blanket redirect for the body would break §7.4's pinned
+// A blanket redirect for the body would break the pinned
 // `fix@1 -> implement@0` case (TestOrdinalScopedInputBindingFallsBackPerInput),
 // so the live document is reached by declaring it: `issue.latest.<kind>`, the
 // issue's latest recorded round of one kind, whoever produced it.
@@ -288,7 +288,7 @@ func TestReviseRerenderExcludesItsOwnEmit(t *testing.T) {
 // TestLoopBodyDeclaredInputStillBindsTheNamedProducer pins the OTHER half of
 // the acceptance: a loop body's declared `<author>.<kind>` input is untouched
 // by DKT-492 and still binds the named producer's ordinal-0 artifact per
-// §7.4's fallback — the documented behavior `fix`'s `implement.change-summary`
+// the per-input fallback — the documented behavior `fix`'s `implement.change-summary`
 // depends on (DKT-12 deliberately excludes the body from the redirect). The
 // multi-lane DKT-491 fixture declares exactly that shape on `revise-a`, so a
 // second loop entry is where a blanket redirect would show up as a regression.
@@ -320,7 +320,7 @@ func TestLoopBodyDeclaredInputStillBindsTheNamedProducer(t *testing.T) {
 	if docs[0].ProducerStep != "author-a@0" || docs[0].Body != authoredDoc {
 		t.Errorf("revise-a@2's declared author-a.doc bound %q from %q, want the "+
 			"authored draft from author-a@0 — a declared producer name resolves "+
-			"per §7.4 and never redirects for the loop body", docs[0].Body,
+			"through the per-input fallback and never redirects for the loop body", docs[0].Body,
 			docs[0].ProducerStep)
 	}
 }

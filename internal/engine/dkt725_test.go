@@ -13,8 +13,8 @@ import (
 // rejection the operator authorized another fix round and recorded the
 // judge-converged remedy as an issue COMMENT; the resulting fix@9 packet
 // (STEP-2489) carried zero bytes of it. Comments are not a context source
-// (§6.6's five-source rule), a mid-run description edit never renders either
-// (`body_snapshot` froze at activation, §9 item 5), and the `fix-round` note
+// (the five-source rule), a mid-run description edit never renders either
+// (`body_snapshot` froze at activation), and the `fix-round` note
 // itself died on the SUPERSEDED park's row — DKT-247's == RESOLUTION section
 // is scoped to a step's own routing record, and the new round's rows had none.
 //

@@ -15,7 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// The action seam's three asserted consequences (§6.13), plus the register-time
+// The action seam's three asserted consequences, plus the register-time
 // rule that `params.output` is mandatory.
 
 // TestActionRecordsARealArtifact is the seam's first consequence, now that the
@@ -23,7 +23,7 @@ import (
 // the DECLARED kind — which is what makes downstream `inputs` resolution against
 // it work, and is exactly what the fixture's `fix` step needs.
 //
-// The stub's two markers are gone with it (§6.3 S1/S2): the payload is the PLAIN
+// The stub's two markers are gone with it: the payload is the PLAIN
 // ARRAY, and `artifacts.stub` reads 0. What replaces them as the audit record is
 // an `action_results` row, which says more than a boolean could — that core
 // computed this itself, and that it passed.
@@ -59,7 +59,7 @@ func TestActionRecordsARealArtifact(t *testing.T) {
 			"(params.output); it recorded %d artifacts overall", len(artifacts))
 	}
 
-	// S2: the PLAIN ARRAY. Nothing this stage writes carries the S3/S4 wrapper.
+	// The PLAIN ARRAY. Nothing this stage writes carries the old stub wrapper.
 	var payload []map[string]any
 	err = json.Unmarshal([]byte(found.Payload), &payload)
 	testsupport.Must(t, err, "the action payload is not a plain array: %v (payload = %s)",
@@ -71,10 +71,10 @@ func TestActionRecordsARealArtifact(t *testing.T) {
 	}
 	if found.Stub {
 		t.Error("artifacts.stub is set on a computation that actually ran; the " +
-			"column exists for MIGRATED S3/S4 rows and nothing writes it now")
+			"column exists for MIGRATED stub rows and nothing writes it now")
 	}
 
-	// The audit record §6.3 requires, in place of the marker it retired.
+	// The audit record, in place of the marker it retired.
 	rows, err := db.ActionResultsForStep(conn, reconcileID)
 	testsupport.Must(t, err, "ActionResultsForStep: %v", err)
 	if len(rows) != 1 {
@@ -84,25 +84,24 @@ func TestActionRecordsARealArtifact(t *testing.T) {
 		t.Errorf("the recorded result is %+v, want a passing builtin", rows[0])
 	}
 	if rows[0].Argv != nil || rows[0].Exit != nil {
-		t.Error("the builtin recorded an argv or an exit; it spawned nothing (B2)")
+		t.Error("the builtin recorded an argv or an exit; it spawned nothing")
 	}
 	_ = issue
 }
 
-// TestReconcileRoutesPassByT4ShortCircuit is the assertion §7.7 step 4 asks for
-// DIRECTLY, so a future change to T4 breaks THIS test rather than making the
+// TestReconcileRoutesPassByT4ShortCircuit asserts the empty-set short-circuit
+// DIRECTLY, so a future change to it breaks THIS test rather than making the
 // whole phase-4 loop fail mysteriously.
 //
 // The fixture's `reconcile` carries `threshold = { "fix-loop" = "any(severity
 // >= high)" }`. Its ORDER IS NOW LIVE — `findings@1` declares it — so the
 // comparison would evaluate if there were anything to evaluate it over. There
 // is not: `synthesize` recorded no payload here, so the aggregate reduces zero
-// clusters, T4 short-circuits `any` to false before the `>=` is attempted, and
-// §11.2's "no match ⇒ pass" applies.
+// clusters, `any` short-circuits to false over the empty set before the `>=`
+// is attempted, and "no match ⇒ pass" applies.
 //
-// That is the case an action step with no result set must still route through
-// (§5 T4's own words), and it is why the aggregate's empty output is not a
-// failure.
+// That is the case an action step with no result set must still route
+// through, and it is why the aggregate's empty output is not a failure.
 func TestReconcileRoutesPassByT4ShortCircuit(t *testing.T) {
 	conn := mustDB(t)
 	activatedRun(t, conn)
@@ -121,10 +120,11 @@ func TestReconcileRoutesPassByT4ShortCircuit(t *testing.T) {
 	if step.Routing != RoutingPass {
 		t.Errorf("reconcile@0 routed %q, want %q.\n\n"+
 			"Its threshold is an ORDERED comparison (any(severity >= high)) over "+
-			"an EMPTY result set, so T4 short-circuits `any` to false before the "+
-			"`>=` is attempted. If this fails, either T4 no longer precedes the "+
-			"comparison or the aggregate no longer yields an empty payload over "+
-			"no clusters — and the QA loop cannot reach `verify`.",
+			"an EMPTY result set, so `any` short-circuits to false before the "+
+			"`>=` is attempted. If this fails, either the empty-set "+
+			"short-circuit no longer precedes the comparison or the aggregate "+
+			"no longer yields an empty payload over no clusters — and the QA "+
+			"loop cannot reach `verify`.",
 			step.Routing, RoutingPass)
 	}
 	if step.Status != db.StepWaitingHuman && step.Status != db.StepDone {
@@ -136,12 +136,12 @@ func TestReconcileRoutesPassByT4ShortCircuit(t *testing.T) {
 	}
 }
 
-// TestBuiltinSpawnsNoProcess is §6.1 B2: a builtin SPAWNS NOTHING.
+// TestBuiltinSpawnsNoProcess: a builtin SPAWNS NOTHING.
 //
-// The rule matters structurally rather than as an optimization: §6's "no
+// The rule matters structurally rather than as an optimization: "no
 // subprocess ever executes inside a transaction" holds TRIVIALLY for a builtin,
 // so the action stage's position — outside the routing transaction, exactly
-// where S3 put it — needs no argument for the aggregate path.
+// where it has always been — needs no argument for the aggregate path.
 func TestBuiltinSpawnsNoProcess(t *testing.T) {
 	before := childProcessCount(t)
 
@@ -149,7 +149,7 @@ func TestBuiltinSpawnsNoProcess(t *testing.T) {
 		RepoRoot: t.TempDir(),
 		LoadStore: func() (*trust.Store, error) {
 			t.Error("the builtin consulted the trust store; resolution is " +
-				"builtin-first and a builtin never looks one up (B1)")
+				"builtin-first and a builtin never looks one up")
 			return &trust.Store{}, nil
 		},
 	}
@@ -194,7 +194,7 @@ func TestBuiltinRouteAtSplitsTheOutputFromTheRecord(t *testing.T) {
 	runner := &ExecActionRunner{
 		RepoRoot: t.TempDir(),
 		LoadStore: func() (*trust.Store, error) {
-			t.Error("the builtin consulted the trust store (B1)")
+			t.Error("the builtin consulted the trust store")
 			return &trust.Store{}, nil
 		},
 	}
@@ -291,9 +291,9 @@ func childProcessCount(t *testing.T) int {
 	return n
 }
 
-// TestActionWithoutOutputFailsRegister is §6.13's register-time rule:
-// `params.output` is the step's PRODUCED KIND (§4.3.1), so an action step
-// without it can never satisfy V11 for a downstream consumer.
+// TestActionWithoutOutputFailsRegister is the register-time rule:
+// `params.output` is the step's PRODUCED KIND, so an action step
+// without it can never satisfy a downstream consumer's `inputs`.
 func TestActionWithoutOutputFailsRegister(t *testing.T) {
 	const src = `
 [pipeline]
@@ -320,13 +320,13 @@ params = { field = "severity" }
 }
 
 // TestActionSeamMirrorsTheGateSeam pins that the two seams have the same shape,
-// which is what makes "S5 changes one constructor call" true for actions as
-// §5.6 makes it true for gates.
+// which is what makes "the real runner is one constructor call" true for
+// actions as it is for gates.
 func TestActionSeamMirrorsTheGateSeam(t *testing.T) {
 	e := NewEngine()
 
-	// BOTH SEAMS ARE NOW REAL. S4 swapped the gate runner; this stage swaps the
-	// action runner, and the shape being mirrored is what matters: both are
+	// BOTH SEAMS ARE NOW REAL. The gate runner and the action runner were both
+	// swapped, and the shape being mirrored is what matters: both are
 	// interface fields assigned in one constructor, which is the "one
 	// constructor call" property this test exists to pin.
 	if _, ok := e.Gates.(*ExecRunner); !ok {
@@ -347,7 +347,7 @@ func TestActionSeamMirrorsTheGateSeam(t *testing.T) {
 	}
 }
 
-// recordingRunner is a non-stub runner, standing in for S5's.
+// recordingRunner is a non-stub runner, standing in for the real one.
 type recordingRunner struct{}
 
 func (recordingRunner) Run(context.Context, ActionSpec, StepContext) (ActionResult, error) {

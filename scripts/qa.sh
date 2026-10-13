@@ -175,11 +175,10 @@ fi
 
 # --- Standing gates ----------------------------------------------------------
 #
-# The genericity rule (docs/design/genericity.md, CLAUDE.md's PR bar) runs on
-# every push rather than depending on a reviewer's memory — the same discipline
-# as the --token-flag guard test (docs/tdd/engine-spine.md §9). It scans core
-# surface only, and is skipped when a single section was requested, since it is
-# a whole-repo check rather than a section's.
+# The genericity rule (CLAUDE.md's PR bar) runs on every push rather than
+# depending on a reviewer's memory — the same discipline as the --token-flag
+# guard test. It scans core surface only, and is skipped when a single section
+# was requested, since it is a whole-repo check rather than a section's.
 #
 # copy-verify, render-verify, and the CI-wiring gate-baseref-regression run
 # here for the same reason: each is a whole-repo, diff-independent check, not
@@ -219,7 +218,7 @@ if [ -z "$SECTION" ]; then
   run_gate "RV" "RV_render_coverage" "render-verify gate" \
     "render-verify.sh" 'MISSING|raw ANSI escape'
 
-  # gate-baseref-regression pins the CI wiring itself (findings C1/C2/C5):
+  # gate-baseref-regression pins the CI wiring itself:
   # it runs the base-ref mode of secret-scan.sh/self-hygiene.sh through their
   # real entry points.
   run_gate "BR" "BR_baseref_mode" "gate-baseref-regression" \

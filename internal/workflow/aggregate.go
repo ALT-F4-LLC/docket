@@ -7,8 +7,7 @@ import (
 	"sort"
 )
 
-// The `aggregate` builtin's register-time rules — V27's action clause and V28
-// (docs/tdd/payloads-thresholds.md §7.1).
+// The `aggregate` builtin's register-time rules — V27's action clause and V28.
 //
 // The vocabulary lives HERE rather than in internal/engine because both need it
 // and the engine imports this package: a register-time rule and a run-time
@@ -16,16 +15,16 @@ import (
 // rename, and the disagreement would read as "my trusted `aggregate` command
 // never ran".
 
-// ActionAggregate is the one builtin engine-spec §2 names: "One is builtin and
-// generic: action = "aggregate"".
+// ActionAggregate is the one builtin: "One is builtin and generic: action =
+// "aggregate"".
 const ActionAggregate = "aggregate"
 
 // BuiltinActions are the action names core COMPUTES ITSELF. There is exactly
-// one, and every other action name is a user-trusted command (§6.2).
+// one, and every other action name is a user-trusted command.
 var BuiltinActions = []string{ActionAggregate}
 
 // ReservedActions are the action names core RESERVES — the names that resolve
-// builtin-first and therefore never consult the trust store (§6.1 B1).
+// builtin-first and therefore never consult the trust store.
 //
 // It is a separate list from BuiltinActions on purpose. The two are equal today
 // and TestReservedActionsAreAllImplemented asserts it; the moment they are not,
@@ -34,18 +33,18 @@ var BuiltinActions = []string{ActionAggregate}
 // operator's command under a name core intends to take.
 var ReservedActions = []string{ActionAggregate}
 
-// AggregateParamKeys are the six keys §7.1's table declares, in its own
+// AggregateParamKeys are the six keys the builtin declares, in their declared
 // order. V28's "no other keys" is checked against exactly this list.
 var AggregateParamKeys = []string{"field", "method", "hold_spread", "output", "route_at", "source_field"}
 
-// AggregateMethods is the closed reduction vocabulary, in §2's order.
+// AggregateMethods is the closed reduction vocabulary, in its declared order.
 var AggregateMethods = []string{"median", "max", "min"}
 
 // validateAction is V27's action clause and V28, over one step.
 //
 // It runs for every `action` step, builtin or not: V27 applies to the name and
 // V28 only to `aggregate`, because core reads no key of a non-builtin action's
-// params (§6.2) and validating a bag it never opens would be inventing a
+// params and validating a bag it never opens would be inventing a
 // contract for someone else's command.
 func validateAction(step *Step) error {
 	if step.StepClass() != ClassAction {
@@ -78,12 +77,12 @@ func validateAction(step *Step) error {
 
 // validateAggregateInputs is V31: `aggregate` requires a non-empty `inputs`.
 //
-// The builtin's input IS its declared `inputs` artifacts (engine-spec §2, as
-// amended), so an aggregate that declares none can never compute —
-// it would reduce over an empty set, produce an empty payload, hold nothing,
-// and pass its threshold vacuously. That is V29's spirit applied to the DATA
-// side: a step whose declaration makes its own computation impossible is a
-// register-time refusal, not a run that quietly succeeds at nothing.
+// The builtin's input IS its declared `inputs` artifacts, so an aggregate that
+// declares none can never compute — it would reduce over an empty set, produce
+// an empty payload, hold nothing, and pass its threshold vacuously. That is
+// V29's spirit applied to the DATA side: a step whose declaration makes its own
+// computation impossible is a register-time refusal, not a run that quietly
+// succeeds at nothing.
 //
 // It is checked BEFORE the params, so an author who declared no input hears
 // about the missing input rather than about a `method` typo they can only fix

@@ -91,19 +91,19 @@ func TestFailedGatesReportsWhatTheRoutingDecidedOn(t *testing.T) {
 	exit := func(n int) *int { return &n }
 
 	rows := []db.GateResultRow{
-		// A gate declared flaky: failed, then passed. F4 makes the last attempt
+		// A gate declared flaky: failed, then passed. The last attempt is
 		// the one that routes, so this must NOT be reported.
 		// Every attempt records the argv it ran.
 		{Gate: "flaky", Ordinal: 0, Verdict: db.GateVerdictFail, Exit: exit(1),
 			Argv: []string{"go", "test", "./..."}},
 		{Gate: "flaky", Ordinal: 1, Verdict: db.GateVerdictPass, Exit: exit(0),
 			Argv: []string{"go", "test", "./..."}},
-		// A pre-gate that failed. PG4: an input to the step, not a judgment of
+		// A pre-gate that failed. It is an input to the step, not a judgment of
 		// it, and it routed nothing.
 		{Gate: "pre-scan", Ordinal: 0, Verdict: db.GateVerdictFail, Exit: exit(9), Pre: true},
 		{Gate: "build", Ordinal: 0, Verdict: db.GateVerdictPass, Exit: exit(0)},
 		{Gate: "self-hygiene", Ordinal: 0, Verdict: db.GateVerdictFail, Exit: exit(2)},
-		// Never ran: no exit code exists, and 0 would read as a pass (T11).
+		// Never ran: no exit code exists, and 0 would read as a pass.
 		{Gate: "audit", Ordinal: 0, Verdict: db.GateVerdictUnmatched,
 			Reason: "no trust entry matched"},
 		{Gate: "coverage", Ordinal: 0, Verdict: db.GateVerdictSkipped,

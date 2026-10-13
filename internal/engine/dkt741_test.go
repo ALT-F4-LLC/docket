@@ -18,7 +18,7 @@ import (
 // authorized widen was unexecutable and the run paid a
 // `run abandon --issue` plus a full re-plan to get a fresh snapshot.
 //
-// The freeze is CORRECT and stays (§5.1.1, §6.6, §9 item 5): both the packet's
+// The freeze is CORRECT and stays: both the packet's
 // `context.issue.scope` and the recorded `issue.diff` scope read the
 // activation snapshot, and re-snapshotting for a live step would let two steps
 // of one run render two different scopes and record diffs over two different
@@ -74,7 +74,7 @@ func TestScopeEditDoesNotReachAnActivatedPacket(t *testing.T) {
 	after, err := RenderStep(conn, stepID, "", nowMS)
 	testsupport.Must(t, err, "rendering after the widen: %v", err)
 	if after.Packet != before.Packet {
-		t.Errorf("the packet changed after a mid-run scope edit; §9 item 5's "+
+		t.Errorf("the packet changed after a mid-run scope edit; "+
 			"edit immunity requires it not to:\nbefore:\n%s\nafter:\n%s",
 			before.Packet, after.Packet)
 	}

@@ -20,9 +20,9 @@ import (
 )
 
 // A pre-gate longer than the claim's budget is measured AHEAD of the claim
-// and served to it (TDD docs/tdd/gates-trust.md §7.6.2 PG6).
+// and served to it.
 //
-// PG5's 60s budget keeps `docket step claim` inside the executor's tool
+// The claim's 60s budget keeps `docket step claim` inside the executor's tool
 // timeout, and it cut the ac-commands pre-gate — the full test suite, about
 // three minutes — short on every verify step, so the gate-results the verify
 // packet carried never held the evidence the step was there to judge. The
@@ -623,7 +623,7 @@ func offeredAs(next *ReadySteps, instance string) string {
 }
 
 // TestDetachedPreGateInFlightHoldsTheStepUntilItsResultLands is the hold's
-// acceptance case (§7.6.2 PG6, the scheduler's half). While another process
+// acceptance case (the scheduler's half). While another process
 // holds verify@0's (step, target) in-flight lock, the step that every other
 // clause admits is not ready: Ready names CondPreGatePending, `next` offers
 // it neither ready nor staged, and the `step show` surface carries the
@@ -742,8 +742,8 @@ func TestDetachedPreGateInFlightHoldsTheStepUntilItsResultLands(t *testing.T) {
 // TestNoDetachedLockLeavesReadinessAndTheClaimUnchanged is the hold's other
 // half: a step whose pre-gates resolve a target but whose detached run never
 // launched — no lockfile exists — is ready exactly as before, and its claim
-// runs the gate on PG5's path and records the budget's one row, keyed to no
-// target, as a claim with no detached result to serve does.
+// runs the gate on the budgeted path and records the budget's one row, keyed
+// to no target, as a claim with no detached result to serve does.
 //
 // The budget starts before the tree under review is bound, so which row it
 // leaves depends on when it runs out. Spent while the gate runs, it cuts the
@@ -835,7 +835,7 @@ func noDetachedLockClaim(t *testing.T, budget time.Duration, accept []string) {
 }
 
 // TestClaimWhileDetachedRunInFlightIsRefusedWithoutWaiting: the claim
-// re-checks readiness itself (R8), so a claim that arrives while the lock is
+// re-checks readiness itself, so a claim that arrives while the lock is
 // held is refused — naming the condition, inside the claim's bound, with
 // nothing spawned, nothing recorded, and the step still pending — rather than
 // waiting on the lock or running the gate on the budgeted path.

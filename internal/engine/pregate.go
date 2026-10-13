@@ -11,13 +11,12 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Pre-gates — claim-time execution (TDD docs/tdd/gates-trust.md §7.6, T14).
+// Pre-gates — claim-time execution.
 //
-// §11.1, verbatim: "`pre = true` gates run at claim with results included in
-// the context bundle (measure-then-judge steps); the rest run in order inside
-// `complete`."
+// `pre = true` gates run at claim with results included in the context bundle
+// (measure-then-judge steps); the rest run in order inside `complete`.
 //
-// THE SAME TRUST MODEL, NO EXCEPTIONS (§7.6.2 PG1). A pre-gate resolves through
+// THE SAME TRUST MODEL, NO EXCEPTIONS. A pre-gate resolves through
 // the identical matcher, the identical env allowlist, the identical timeout and
 // process-group kill, the identical capture, and the identical tree mutex. There
 // is no pre-gate-specific path in internal/exec or internal/trust, and that is
@@ -157,7 +156,7 @@ func stepTargetRef(
 }
 
 // claimPreGateBudget bounds the claim's whole pre-gate phase — reconstruction,
-// lock waits, and every gate's execution together (§7.6.2 PG5).
+// lock waits, and every gate's execution together.
 //
 // WHY A BUDGET, AND WHY THIS ONE. `docket step claim` runs pre-gates
 // synchronously, and an executor runs the claim under a 120s tool timeout: a
@@ -181,18 +180,18 @@ var claimPreGateBudget = 60 * time.Second
 // moment this function starts so the reconstruction below spends from the
 // same purse the gates do. Each gate's timeout is clamped to what remains;
 // a gate whose turn comes with nothing left records `skipped`. The claim
-// still succeeds either way (PG2/PG3) — the bound changes when the claim
+// still succeeds either way — the bound changes when the claim
 // returns, never whether it does.
 //
-// PG2/PG3: neither an unmatched pre-gate nor a FAILING one refuses the claim.
+// Neither an unmatched pre-gate nor a FAILING one refuses the claim.
 // The result rides in the bundle and the step's worker sees that its
 // measurement did not run, or ran and failed. Refusing the claim would let an
 // untrusted or failing command BLOCK WORK, which is a denial of service an
-// issue author should not have — and §11.1's "measure-then-judge" says the
+// issue author should not have — and "measure-then-judge" says the
 // judging is the step's job, which is exactly why the failure is data rather
 // than a refusal.
 //
-// A GATE MEASURED AHEAD OF THE CLAIM IS SERVED, NOT RE-RUN (§7.6.2 PG6). A
+// A GATE MEASURED AHEAD OF THE CLAIM IS SERVED, NOT RE-RUN. A
 // detached run started when the step's target was recorded may already hold a
 // complete result for this step and this exact target sha
 // (pregate_detached.go); the claim returns those rows and spawns nothing for
@@ -297,9 +296,9 @@ type preGateMeasurement struct {
 	workRoot  string
 	scratch   scratchTree
 	targetSHA string
-	// deadline is the claim budget's end on the claim path (§7.6.2 PG5) and
+	// deadline is the claim budget's end on the claim path and
 	// ZERO on the detached path, where the entry's own timeout is the only
-	// bound (PG6).
+	// bound.
 	deadline time.Time
 	// detached keys the recorded rows to targetSHA and says so in their
 	// reason, so a claim can find them and a reader can tell them from rows
@@ -325,10 +324,10 @@ var errPreGateRecordDeclined = errors.New(
 // measurePreGate runs ONE pre-gate — announce, spawn, mark, record — and
 // returns the rows it recorded.
 //
-// It is the one body both the claim's phase 2 and a detached run execute: PG1
-// forbids a pre-gate-specific path, and the detached run must not become a
-// detached-specific one either. What differs between the two callers is the
-// bound and the key on the row, and both arrive in m.
+// It is the one body both the claim's phase 2 and a detached run execute: the
+// trust model forbids a pre-gate-specific path, and the detached run must not
+// become a detached-specific one either. What differs between the two callers
+// is the bound and the key on the row, and both arrive in m.
 func measurePreGate(
 	conn *sql.DB, e *Engine, step *db.Step, gate workflow.Gate,
 	m preGateMeasurement, nowMS int64,
@@ -392,7 +391,7 @@ func measurePreGate(
 		}}
 	} else {
 		// The announcement precedes the spawn here for the same
-		// at-least-once reason it does in the saga (§7.5 A1).
+		// at-least-once reason it does in the saga.
 		if err := announcePreGate(conn, step, gate.Name, nowMS); err != nil {
 			return nil, err
 		}
@@ -402,7 +401,7 @@ func measurePreGate(
 		}
 	}
 
-	// Mark every row as a pre-gate result BEFORE recording, so PG4's
+	// Mark every row as a pre-gate result BEFORE recording, so the
 	// read-side filter has something to filter on.
 	for i := range rows {
 		rows[i].Pre = true
@@ -415,7 +414,7 @@ func measurePreGate(
 				rows[i].Reason, scratchNote(m.targetSHA, m.scratch.Dir))
 		}
 		// A row measured ahead of the claim is keyed to its target and says
-		// so (§7.6.2 PG6): the key is what a claim matches on, the note is
+		// so: the key is what a claim matches on, the note is
 		// what tells a reader why the row carries no claim-time bound.
 		if m.detached {
 			rows[i].TargetSHA = m.targetSHA
@@ -440,7 +439,7 @@ func measurePreGate(
 // when the tree under review cannot be bound (DKT-254 mode 1).
 //
 // NO `gate-started` EVENT IS EMITTED. That announcement exists because a spawn
-// is about to happen and might not report back (§7.5 A1's at-least-once
+// is about to happen and might not report back (the at-least-once
 // reason); here nothing is going to spawn, and announcing a start that is
 // immediately followed by a skip would put a gate in the feed that never ran.
 //
@@ -603,10 +602,10 @@ func recordPreGateRowsIf(
 	if err := recordGateRows(tx, step, gate, rows, nowMS); err != nil {
 		return false, err
 	}
-	// The SAME event writer the saga's gates use (§7.6.1 phase 2, PG1). This
+	// The SAME event writer the saga's gates use. This
 	// path once emitted `gate-unmatched` alone, which left a passing pre-gate
 	// announced by `gate-started` and closed by nothing — and dropped
-	// `gate-rerun` for the flaky attempts §7.5 A3 records at ordinal > 0.
+	// `gate-rerun` for the flaky attempts recorded at ordinal > 0.
 	if err := recordGateEvents(tx, step, gate, rows); err != nil {
 		return false, err
 	}
@@ -616,13 +615,13 @@ func recordPreGateRowsIf(
 	return true, nil
 }
 
-// PreGateResult is a §11.4-shaped gate result as it rides in the context
-// bundle (§7.6.3, amendment A5).
+// PreGateResult is a gate result as it rides in the context
+// bundle.
 //
 // It is a distinct type from the row because the BUNDLE's shape is a wire
 // contract: `argv` and `exit` are pointers so an unmatched pre-gate serializes
 // them as null rather than as `[]` and `0`, which is the same honesty the table
-// enforces (§4.2).
+// enforces.
 type PreGateResult struct {
 	Gate       string   `json:"gate"`
 	Argv       []string `json:"argv"`
@@ -652,7 +651,7 @@ func preGateResultOf(r GateResultRow) PreGateResult {
 
 // preGateResultOfRecorded is preGateResultOf for a row read back from the
 // ledger: a re-minted claim's replay (recordedPreGates) and a detached result
-// the claim serves (§7.6.2 PG6) both render stored rows in the bundle's shape.
+// the claim serves both render stored rows in the bundle's shape.
 func preGateResultOfRecorded(r db.GateResultRow) PreGateResult {
 	return PreGateResult{
 		Gate: r.Gate, Argv: r.Argv, Exit: r.Exit, DurationMS: r.DurationMS,
@@ -662,8 +661,7 @@ func preGateResultOfRecorded(r db.GateResultRow) PreGateResult {
 }
 
 // refreshed2ExpiresMS is the lease the caller actually receives after the
-// refresh: a FULL ttl ahead of transaction B's own time, not of the CAS's
-// (§7.6.1.1 LR1).
+// refresh: a FULL ttl ahead of transaction B's own time, not of the CAS's.
 func refreshed2ExpiresMS(nowMS, ttlMS int64) int64 {
 	return nowMS + ttlMS
 }

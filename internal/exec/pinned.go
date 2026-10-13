@@ -19,7 +19,7 @@ var ErrPinMismatch = errors.New("content pin mismatch")
 // pin (a hex SHA-256) names, and spawns exactly the file it hashed.
 //
 // spec.Argv[0] is the UNRESOLVED argv[0]. RunPinned resolves it once, through
-// Resolve (R1–R4 with repoRoot and entryArgv0), hashes the resolved path, and
+// Resolve (with repoRoot and entryArgv0), hashes the resolved path, and
 // hands that same path string to Run as argv[0]. Nothing re-derives the path
 // from spec.Argv[0] after the hash, so a symlink on the way to the executable
 // that is retargeted mid-call can only change which file is hashed, never make

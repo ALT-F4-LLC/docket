@@ -214,7 +214,7 @@ var createCmd = &cobra.Command{
 		// Scope is written after the insert rather than through CreateIssue,
 		// so the create path an unmodified `issue create` takes is unchanged:
 		// a repo that never declares a scope executes exactly the v6 code and
-		// leaves scope_globs NULL (§3 phase-2 dormancy).
+		// leaves scope_globs NULL.
 		if inserted {
 			if err := applyScope(cmd, conn, id); err != nil {
 				return err

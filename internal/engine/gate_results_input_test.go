@@ -77,7 +77,7 @@ func TestGateResultsResolveAsAnInput(t *testing.T) {
 		t.Fatal("review's context carries no gate-results input")
 	}
 
-	// The body is the §11.4 `gate result` shape, parsed rather than
+	// The body is the `gate result` shape, parsed rather than
 	// re-grepped: the recorded gate, its verdict, and its exit are what a
 	// consumer routes on instead of re-running the check.
 	var results []struct {

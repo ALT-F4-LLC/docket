@@ -83,15 +83,15 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 }
 
-// runErr maps an activation failure to its error code, per the §5.5 taxonomy.
+// runErr maps an activation failure to its error code in the taxonomy.
 //
 // engine.Error carries its own code, so the mapping is a lookup rather than a
 // guess at the message — an error taxonomy inferred from strings is one that
 // silently reclassifies itself when a message is reworded.
 //
-// S6 adds the ONE new code the taxonomy has gained since it was frozen: GONE,
-// for a cursor below the retained minimum (docs/tdd/runs-dispatch.md §8.6).
-// Every other situation still maps to a code that already existed.
+// GONE, for a cursor below the retained minimum, is the ONE new code the
+// taxonomy has gained since it was frozen. Every other situation still maps to
+// a code that already existed.
 func runErr(err error) error {
 	if code, ok := engine.CodeOf(err); ok {
 		switch code {

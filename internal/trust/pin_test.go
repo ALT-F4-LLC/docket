@@ -14,7 +14,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// --- Content pins on an absolute argv[0] (§3.1 argv0_sha256) -----------------
+// --- Content pins on an absolute argv[0] ------------------------------------
 
 // writeScript writes body to dir/name, executable, and returns the file's
 // symlink-resolved absolute path: the path a pin reason must name.
@@ -65,7 +65,7 @@ func (f pinFixture) lookup(t *testing.T, gate string, candidate []string) Match 
 	return st.Lookup(f.identity, gate, candidate)
 }
 
-// TestContentPinMismatch is the enforcement row of §3.1's pin table: one
+// TestContentPinMismatch is the enforcement row of the content pin: one
 // changed byte in a pinned script refuses every match branch, and the reason
 // names the resolved path and both hashes so the operator can see what moved.
 func TestContentPinMismatch(t *testing.T) {
@@ -167,7 +167,7 @@ func TestContentPinFailsClosedOnAnUnreadableTarget(t *testing.T) {
 	}
 }
 
-// TestRepinAfterIntendedChange is §3.5's re-pin row: re-running the same add
+// TestRepinAfterIntendedChange covers the re-pin: re-running the same add
 // after an intended change replaces the stored hash, records the change through
 // OnChange before the write, and the next lookup matches.
 func TestRepinAfterIntendedChange(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 )
 
-// lockTimeout is W5's bound on acquisition.
+// lockTimeout bounds lock acquisition.
 //
 // A `trust add` is a human-scale operation and 5s is far beyond its honest
 // duration, so a timeout means something is genuinely STUCK rather than merely
@@ -29,9 +29,9 @@ type storeLock struct {
 	f *os.File
 }
 
-// acquireLock takes W1's exclusive flock for the store at path.
+// acquireLock takes the exclusive flock for the store at path.
 //
-// WHY A LOCK AT ALL (§3.5.1): I5's temp-file-plus-rename makes each WRITE
+// WHY A LOCK AT ALL: the temp-file-plus-rename publish makes each WRITE
 // atomic, but it does NOT make the READ-MODIFY-WRITE atomic — and `trust add`
 // and `trust rm` are exactly that. Two concurrent adds of different names
 // interleave as read-A / read-B / write-A / write-B, and B's write SILENTLY
@@ -46,7 +46,7 @@ type storeLock struct {
 func acquireLock(path string) (*storeLock, error) {
 	lockPath := path + ".lock"
 
-	// W3: the lockfile is opened with §3.2's integrity discipline. It lives in
+	// The lockfile is opened with the store's integrity discipline. It lives in
 	// the user-owned config directory, so the exposure is smaller than the
 	// repo-resident tree lock's — but it is the same rule, and stating it once
 	// here means an implementer does not have to decide.
@@ -55,7 +55,7 @@ func acquireLock(path string) (*storeLock, error) {
 	}
 
 	// O_NOFOLLOW: refuse to follow a symlink at the lock path, for the same
-	// reason I1 refuses one at the store path.
+	// reason the integrity check refuses one at the store path.
 	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, storeFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("%w: opening the lock file %s: %v", ErrIntegrity, lockPath, err)
@@ -73,7 +73,7 @@ func acquireLock(path string) (*storeLock, error) {
 		}
 		if time.Now().After(deadline) {
 			f.Close()
-			// W5: a CONFLICT naming the lock path, so the operator knows what
+			// A CONFLICT naming the lock path, so the operator knows what
 			// to look for rather than only that something failed.
 			return nil, fmt.Errorf("%w: another `docket trust` is in progress; the lock %s was still held after %s", ErrConflict, lockPath, lockTimeout)
 		}
@@ -97,14 +97,14 @@ func (l *storeLock) release() {
 	_ = l.f.Close()
 }
 
-// checkLockfileIntegrity is W3: refuse a non-regular existing file, and check
-// owner and mode as I1–I4 check the store.
+// checkLockfileIntegrity refuses a non-regular existing file, and checks owner
+// and mode as the integrity checks do for the store.
 //
-// W2 explains why the lock is on a SIBLING trust.toml.lock rather than on
-// trust.toml itself: locking the store file directly does not work with
-// rename-based writes, because the rename REPLACES THE INODE — the lock the
-// writer holds and the lock the next writer takes end up on different files and
-// exclude nothing. The sibling's inode is stable.
+// The lock is on a SIBLING trust.toml.lock rather than on trust.toml itself:
+// locking the store file directly does not work with rename-based writes,
+// because the rename REPLACES THE INODE — the lock the writer holds and the
+// lock the next writer takes end up on different files and exclude nothing.
+// The sibling's inode is stable.
 func checkLockfileIntegrity(lockPath string) error {
 	info, err := os.Lstat(lockPath)
 	if err != nil {

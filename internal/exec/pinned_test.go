@@ -24,7 +24,7 @@ import (
 type pinnedFixture struct {
 	pinned, unpinned, link, marker string
 	// repoRoot is deliberately NOT the scripts' directory, so a mid-Resolve
-	// flip cannot fall into R3's containment refusal and stand in for the pin
+	// flip cannot fall into Resolve's containment refusal and stand in for the pin
 	// refusal under test.
 	repoRoot string
 	pin      string

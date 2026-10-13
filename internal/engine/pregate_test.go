@@ -17,15 +17,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// Pre-gates at claim (TDD docs/tdd/gates-trust.md §7.6, T14).
+// Pre-gates at claim.
 //
 // The fixture's `verify` step declares `gates = [{ name = "ac-commands",
 // pre = true }]`, so it is the step every case here claims.
 
-// TestPreGatesUseTheSameTrustPath is T14: an UNTRUSTED pre-gate does not
+// TestPreGatesUseTheSameTrustPath: an UNTRUSTED pre-gate does not
 // execute, and the claim still succeeds with the result recorded `unmatched`.
 //
-// T14 is the "pre-gate as a bypass" threat: pre-gates run at claim, earlier in
+// The threat is "pre-gate as a bypass": pre-gates run at claim, earlier in
 // the lifecycle and on a different code path than the saga's gates, which is
 // exactly the shape an implementation "simplifies" into a trusted path. The
 // only differences the design permits are WHEN they run and WHERE the result
@@ -47,7 +47,7 @@ func TestPreGatesUseTheSameTrustPath(t *testing.T) {
 		Owner: "w", NowMS: nowMS,
 	})
 	testsupport.
-		// PG2: THE CLAIM STILL SUCCEEDS. Refusing it would let an untrusted
+		// THE CLAIM STILL SUCCEEDS. Refusing it would let an untrusted
 		// command block work — a denial of service an issue author should not have.
 		Must(t, err, "an unmatched pre-gate must not refuse the claim: %v", err)
 
@@ -71,7 +71,7 @@ func TestPreGatesUseTheSameTrustPath(t *testing.T) {
 			"tell which of the four causes applies")
 	}
 
-	// It is recorded with `pre = 1`, which is what PG4's read-side filter needs.
+	// It is recorded with `pre = 1`, which is what the read-side filter needs.
 	rows, err := db.GateResultsForStep(conn, stepID)
 	testsupport.Must(t, err, "GateResultsForStep: %v", err)
 	if len(rows) != 1 || !rows[0].Pre {
@@ -79,10 +79,10 @@ func TestPreGatesUseTheSameTrustPath(t *testing.T) {
 	}
 }
 
-// TestFailingPreGateDoesNotRefuseTheClaim is PG3: a pre-gate that RUNS and
+// TestFailingPreGateDoesNotRefuseTheClaim: a pre-gate that RUNS and
 // fails is data, not a refusal.
 //
-// §11.1 calls these "measure-then-judge steps" — the judging is the step's job,
+// These are "measure-then-judge steps" — the judging is the step's job,
 // which is exactly why the failure rides in the bundle rather than blocking.
 func TestFailingPreGateDoesNotRefuseTheClaim(t *testing.T) {
 	conn := mustDB(t)
@@ -117,12 +117,12 @@ func TestFailingPreGateDoesNotRefuseTheClaim(t *testing.T) {
 	}
 }
 
-// TestPreGateResultsAreExcludedFromTheSagaVerdict is PG4: pre-gate results are
+// TestPreGateResultsAreExcludedFromTheSagaVerdict: pre-gate results are
 // INPUTS to the step, not judgments of it.
 //
 // A failing pre-gate must not fail the step's completion — that decision
-// belongs to the step's own artifact and threshold. S3 already excludes `pre`
-// gates from completionGates; this is the read-side counterpart, and without it
+// belongs to the step's own artifact and threshold. completionGates already
+// excludes `pre` gates; this is the read-side counterpart, and without it
 // a measurement would silently become a verdict.
 func TestPreGateResultsAreExcludedFromTheSagaVerdict(t *testing.T) {
 	conn := mustDB(t)
@@ -156,16 +156,16 @@ func TestPreGateResultsAreExcludedFromTheSagaVerdict(t *testing.T) {
 			"a pre-gate is a measurement the step consumes, not a judgment of it",
 			verdict, VerdictPass)
 	}
-	// PG4 applies to the unmeasured list too (DKT-254). A pre-gate that could
+	// The exclusion applies to the unmeasured list too (DKT-254). A pre-gate that could
 	// not bind its tree is data for the step's worker; parking the step on it
 	// would be the engine judging the step by an input it was handed.
 	if len(unmeasured) != 0 {
 		t.Errorf("gateVerdict reported %v as unmeasured from PRE-gate rows; "+
-			"PG4 excludes pre-gates from the step's own routing", unmeasured)
+			"pre-gates are excluded from the step's own routing", unmeasured)
 	}
 }
 
-// TestClaimRemainsSingleWinnerAcrossThePreGatePhase is §7.6.1's race: the
+// TestClaimRemainsSingleWinnerAcrossThePreGatePhase is the claim race: the
 // phase split must not weaken mutual exclusion.
 //
 // Exclusion is decided in transaction A and only there. N goroutines claim one
@@ -219,7 +219,7 @@ func TestClaimRemainsSingleWinnerAcrossThePreGatePhase(t *testing.T) {
 	}
 }
 
-// TestPreGateWallTimeDoesNotConsumeTheLease is §7.6.1.1 LR1: the caller gets a
+// TestPreGateWallTimeDoesNotConsumeTheLease: the caller gets a
 // FULL lease however long phase 2 took.
 //
 // Without the refresh, the pre-gate's wall time is deducted from a lease the
@@ -251,7 +251,7 @@ func TestPreGateWallTimeDoesNotConsumeTheLease(t *testing.T) {
 	testsupport.Must(t, err, "claim: %v", err)
 
 	// THE ASSERTION: the lease is a full TTL ahead of the claim's own clock,
-	// not eaten by the pre-gate. Both halves fail without LR1.
+	// not eaten by the pre-gate. Both halves fail without the refresh.
 	if claim.LeaseExpiresMS < claimAt+shortTTL {
 		t.Errorf("lease expires at %d, want at least %d (a full TTL) — "+
 			"the pre-gate's wall time was deducted from the caller's lease",
@@ -267,11 +267,11 @@ func TestPreGateWallTimeDoesNotConsumeTheLease(t *testing.T) {
 	}
 }
 
-// TestPreGateGoldenSplit is GD1-GD3 (§7.6.3): a bundle WITHOUT pre-gates omits
-// the member entirely, and one WITH them carries a structurally-asserted array.
+// TestPreGateGoldenSplit: a bundle WITHOUT pre-gates omits the member
+// entirely, and one WITH them carries a structurally-asserted array.
 //
-// GD3 is the argument a reviewer should check hardest, so the test states it:
-// §9 item 5's determinism requires bundles immune to "mid-run issue edits and
+// The split is the argument a reviewer should check hardest, so the test
+// states it: determinism requires bundles immune to "mid-run issue edits and
 // working-tree changes", and a pre-gate exists precisely to MEASURE the working
 // tree at claim time. Requiring its output to be immune would require it to not
 // measure anything. So the golden covers the bundle with `pre_gates` elided,
@@ -281,7 +281,7 @@ func TestPreGateGoldenSplit(t *testing.T) {
 	activatedRun(t, conn)
 	repoRoot := t.TempDir()
 
-	// GD1: a step WITHOUT pre-gates. The member is ABSENT, not empty — the
+	// A step WITHOUT pre-gates. The member is ABSENT, not empty — the
 	// rule the v6 `lease` object established.
 	e := execEngineWithTrust(t, repoRoot, fixtureTrustEntries(repoRoot, true)...)
 	plainID := stepIDByInstance(t, conn, "implement@0")
@@ -298,7 +298,7 @@ func TestPreGateGoldenSplit(t *testing.T) {
 	}
 }
 
-// TestPreGateRecordsBothTheRowAndTheEvent is §7.6.1 phase 2's "exactly as the
+// TestPreGateRecordsBothTheRowAndTheEvent is phase 2's "exactly as the
 // saga's do", asserted on the half that was missing.
 //
 // A pre-gate announced `gate-started` and then recorded its row silently: the
@@ -348,7 +348,7 @@ func TestPreGateRecordsBothTheRowAndTheEvent(t *testing.T) {
 	// gate ever finished, and `docket run report` disagrees with the feed.
 	if !hasEventKind(t, conn, stepID, EventGateRecorded) {
 		t.Error("a recorded pre-gate result wrote no gate-recorded event: the " +
-			"feed shows a gate that started and never closed (§7.6.1 phase 2)")
+			"feed shows a gate that started and never closed")
 	}
 
 	// The ORDER holds here exactly as it does in the saga: the announcement
@@ -367,14 +367,14 @@ func TestPreGateRecordsBothTheRowAndTheEvent(t *testing.T) {
 	}
 
 	// A gate that ran is not a gate that was refused: `gate-unmatched` stays
-	// separate (§6.4), so the added event must not have been bought by
+	// separate, so the added event must not have been bought by
 	// emitting the wrong kind.
 	if hasEventKind(t, conn, stepID, EventGateUnmatched) {
 		t.Error("a matched, passing pre-gate wrote gate-unmatched")
 	}
 }
 
-// TestUnmatchedPreGateKeepsBothItsEvents guards the kind §6.4 keeps separate.
+// TestUnmatchedPreGateKeepsBothItsEvents guards the kind kept separate.
 //
 // `gate-unmatched` and `gate-recorded` are not alternatives — the first says
 // the command was refused, the second says the outcome is now recorded, and an
@@ -409,7 +409,7 @@ func TestUnmatchedPreGateKeepsBothItsEvents(t *testing.T) {
 //
 // `gate-recorded ... detail=ac-commands exit=2 verdict=fail` said the same
 // thing whether the failure BLOCKED the step or was an advisory input to it —
-// and a pre-gate never routes: §11.1 runs it at claim, PG4 keeps it out of the
+// and a pre-gate never routes: it runs at claim, and is kept out of the
 // saga's verdict. On RUN-61 three pre-gate failures sat in the feed beside the
 // `step-routed pass` that contradicted them, and a conductor nearly reported a
 // fix round as burned on one.
@@ -684,7 +684,7 @@ func advanceToVerify(t *testing.T, conn *sql.DB, e *Engine) int {
 		claimAndComplete(t, conn, pass, "review@0#"+strconv.Itoa(i), "findings", "")
 	}
 	claimAndComplete(t, conn, pass, "synthesize@0", "synthesized", "")
-	// `reconcile` is an action step: the engine runs it, no claim (§6.15).
+	// `reconcile` is an action step: the engine runs it, no claim.
 	driveAction(t, conn, pass, "reconcile@0")
 
 	return stepIDByInstance(t, conn, "verify@0")
@@ -987,7 +987,7 @@ func TestMeasuredFailureIsNotReportedAsUnmeasured(t *testing.T) {
 
 // TestFlakyReRunClearsAnEarlierSkip: the last attempt decides, here too.
 //
-// F4 makes the LAST attempt's verdict the one that routes. A gate that could
+// The LAST attempt's verdict is the one that routes. A gate that could
 // not bind its tree on attempt 0 and measured it fine on attempt 1 has been
 // measured, and parking it would strand a step whose evidence exists. A skip
 // ends its execution before any retry, so the measurement after it is a later
@@ -998,7 +998,7 @@ func TestFlakyReRunClearsAnEarlierSkip(t *testing.T) {
 		{Gate: "ac-commands", Ordinal: 1, Verdict: db.GateVerdictPass, CreatedAtMS: nowMS + 1},
 	})
 	if verdict != VerdictPass {
-		t.Errorf("verdict = %q, want %q — F4 routes on the last attempt",
+		t.Errorf("verdict = %q, want %q — the last attempt routes",
 			verdict, VerdictPass)
 	}
 	if len(unmeasured) != 0 {

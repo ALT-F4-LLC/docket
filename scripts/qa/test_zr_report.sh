@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# ZR — THE CROSS-RUN LEDGER (DKT-2453; docs/tdd/runs-dispatch.md §4.10's
-# amendment).
+# ZR — THE CROSS-RUN LEDGER (DKT-2453).
 #
 # `report executors` reads the whole window of runs and groups what became of
 # each executor hint's steps and each voter name's panels. This section is the

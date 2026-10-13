@@ -36,8 +36,8 @@ import (
 // received, and returns the trust argv plus the file it will write.
 //
 // `/bin/sh <script>` rather than the script's own execute bit: the trust
-// entry's argv[0] is what R4 authorizes, and /bin/sh is unambiguously outside
-// any repository.
+// entry's argv[0] is what the entry authorizes, and /bin/sh is unambiguously
+// outside any repository.
 func scratchGateScript(t *testing.T, body string) (argv []string, out string) {
 	t.Helper()
 	dir := t.TempDir()

@@ -35,8 +35,8 @@ type unlinkResult struct {
 // normalized form the refusal message already echoes back — resolves to the
 // canonical type (DKT-1073). The tolerance stops at the command line on
 // purpose: the JSON wire format (model.Relation.UnmarshalJSON) and the workflow
-// `issue.linked.<relation>.<kind>` vocabulary enumerated in
-// docs/design/engine-spec.md stay exactly the canonical token set (DKT-1077).
+// `issue.linked.<relation>.<kind>` vocabulary stay exactly the canonical token
+// set (DKT-1077).
 func parseRelationTypeArg(arg string) (model.RelationType, error) {
 	if strings.ReplaceAll(strings.TrimSpace(arg), "-", "_") == "related_to" {
 		return model.RelationRelatesTo, nil

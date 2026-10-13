@@ -81,7 +81,7 @@ func pinsByKind(t *testing.T, conn *sql.DB, runID int, kind string) []db.Pin {
 	return out
 }
 
-// TestActivatePinsReferencedSchemas is P1: one `pins` row per schema referenced
+// TestActivatePinsReferencedSchemas pins one `pins` row per schema referenced
 // by a bound workflow's steps, at the registry's own hash.
 func TestActivatePinsReferencedSchemas(t *testing.T) {
 	conn := mustDB(t)
@@ -106,7 +106,7 @@ func TestActivatePinsReferencedSchemas(t *testing.T) {
 	}
 }
 
-// TestActivateRefusesAnUnregisteredSchema is P2. It is unreachable through
+// TestActivateRefusesAnUnregisteredSchema covers a case unreachable through
 // `workflow register` (V25a refuses it there) and reachable through a database
 // restored from elsewhere — simulated here by deleting the row after
 // registration, which is the only way to reach the state the check exists for.
@@ -143,10 +143,10 @@ func TestActivateRefusesAnUnregisteredSchema(t *testing.T) {
 	}
 }
 
-// TestReActivationInheritsSchemaPins is P3: a schema registered mid-run does not
-// enter a live run. RA2 says the pin set is inherited, never recomputed, and a
-// schema is subject to that rule for the reason a workflow is — the acceptance
-// criteria a run validates against must not change under it.
+// TestReActivationInheritsSchemaPins: a schema registered mid-run does not
+// enter a live run. Re-activation inherits the pin set, never recomputes it,
+// and a schema is subject to that rule for the reason a workflow is — the
+// acceptance criteria a run validates against must not change under it.
 func TestReActivationInheritsSchemaPins(t *testing.T) {
 	conn := mustDB(t)
 	registerSource(t, conn, []byte(payloadWorkflow), "pinned-payloads.toml")
@@ -177,7 +177,7 @@ func TestReActivationInheritsSchemaPins(t *testing.T) {
 	}
 }
 
-// TestTheBuiltinPinsWhenAnAggregateStepIsBound is P5: `aggregate@1` pins like
+// TestTheBuiltinPinsWhenAnAggregateStepIsBound: `aggregate@1` pins like
 // any other referenced schema. A run that cannot say which `aggregate@1` it
 // computed against is a run that cannot explain its own output.
 func TestTheBuiltinPinsWhenAnAggregateStepIsBound(t *testing.T) {
@@ -217,9 +217,10 @@ func TestTheBuiltinPinsWhenAnAggregateStepIsBound(t *testing.T) {
 	}
 }
 
-// TestAWorkflowWithNoPayloadDeclarationsPinsNoUserSchema is the dormancy half
-// (§3): a definition that names no schema and no aggregate brings nothing into
-// the pin set, so the pin table of a schema-less run is what it was at S4.
+// TestAWorkflowWithNoPayloadDeclarationsPinsNoUserSchema is the dormancy half:
+// a definition that names no schema and no aggregate brings nothing into the
+// pin set, so the pin table of a schema-less run is what it was before schemas
+// existed.
 func TestAWorkflowWithNoPayloadDeclarationsPinsNoUserSchema(t *testing.T) {
 	conn := mustDB(t)
 	registerSource(t, conn, []byte(`
@@ -245,7 +246,7 @@ emits = "result"
 	}
 }
 
-// TestSchemaPinsAreDeterministic is what §9.5's goldens rest on: the same
+// TestSchemaPinsAreDeterministic is what the goldens rest on: the same
 // inputs produce the same pin rows, in the same order, every time. An order
 // that varied with map iteration would make the golden flap on nothing.
 func TestSchemaPinsAreDeterministic(t *testing.T) {
@@ -275,19 +276,15 @@ func TestSchemaPinsAreDeterministic(t *testing.T) {
 	}
 }
 
-// TestSchemasRegisterBeforeWorkflows is §4.6's ordering contract, NO LONGER
-// PENDING.
-//
-// S5 wrote it against the helper's signature and skipped, because the behavior
-// it ultimately asserts — that ACTIVATION auto-registers the config directory in
-// this order — had nothing to drive yet. S6 supplies the directory scan,
-// so the skip is gone and the ordering is asserted over the real sort.
+// TestSchemasRegisterBeforeWorkflows is the registration ordering contract,
+// asserted over the real sort.
 //
 // THE BEHAVIORAL HALF LIVES IN autoregister_test.go, not here, because it needs
-// an activated run: TestAutoRegistrationOrdersSchemasFirst is F2, and
-// TestAutoRegistrationWrongOrderFails is F3's negative twin — the one that makes
-// F2 mean something by proving the refusal it avoids actually exists. This test
-// keeps its original subject: the SORT, over paths, in isolation.
+// an activated run: TestAutoRegistrationOrdersSchemasFirst asserts the order,
+// and TestAutoRegistrationWrongOrderFails is its negative twin — the one that
+// makes the first mean something by proving the refusal it avoids actually
+// exists. This test keeps its original subject: the SORT, over paths, in
+// isolation.
 func TestSchemasRegisterBeforeWorkflows(t *testing.T) {
 	got := RegistrationOrder([]string{
 		".docket/config/workflows/standard-dev.toml",
@@ -299,7 +296,7 @@ func TestSchemasRegisterBeforeWorkflows(t *testing.T) {
 	want := []string{
 		// Schemas in full, lexically, BEFORE anything else. A workflow whose
 		// schema is in the same tree therefore always registers second, and the
-		// zero-touch path never reaches §4.6 (a)'s refusal.
+		// zero-touch path never reaches the unregistered-schema refusal.
 		".docket/config/schemas/aaa.json",
 		".docket/config/schemas/risk.json",
 		".docket/config/policy.toml",

@@ -14,40 +14,39 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// `run report` — the ledger rollup (engine-core §1.1, §3.5; TDD §4.10).
+// `run report` — the ledger rollup.
 //
-// THE REPORT WRITES NOTHING (R8). It computes effective status at read —
-// engine-spec §2's "read verbs render effective status … no write" — and opens
-// a transaction it ROLLS BACK unconditionally. `TestReadVerbsWriteNothing`
-// snapshots the database's page-level content before and after, which is the
-// mechanical form of that promise: a report that reaped a lease would make "I
-// only looked at it" untrue, and would let polling a rollup advance an attempt
-// counter.
+// THE REPORT WRITES NOTHING. It computes effective status at read — "read verbs
+// render effective status … no write" — and opens a transaction it ROLLS BACK
+// unconditionally. `TestReadVerbsWriteNothing` snapshots the database's
+// page-level content before and after, which is the mechanical form of that
+// promise: a report that reaped a lease would make "I only looked at it"
+// untrue, and would let polling a rollup advance an attempt counter.
 //
-// IT WORKS ON A RUN IN ANY STATUS (R10), including `planning` — everything zero
+// IT WORKS ON A RUN IN ANY STATUS, including `planning` — everything zero
 // — and `abandoned` — the trail up to abandonment. A report that refused on a
 // non-terminal run would be useless during exactly the run an operator wants to
 // inspect.
 
-// RunBudgetReport is R2: the budget section.
+// RunBudgetReport is the budget section.
 //
 // Every number here is BARE. There is no currency, no token, and no rate: what
-// the numbers count is the workflow author's business (§1.1's second leak,
-// closed), and the report's job is to publish them so an instance can compute
-// its own policy — a warn threshold, say — from a read verb (B27, B28).
+// the numbers count is the workflow author's business, and the report's job is
+// to publish them so an instance can compute its own policy — a warn
+// threshold, say — from a read verb.
 type RunBudgetReport struct {
-	// Cap is the effective cap, and Source is where it came from — R6's line,
-	// which exists because B3's pinning property is surprising: a run started
+	// Cap is the effective cap, and Source is where it came from — a line that
+	// exists because the cap's pinning property is surprising: a run started
 	// before `budget.default` was set stays unlimited after. An operator asking
 	// "why didn't it stop?" reads the answer here rather than in the source.
 	Cap    float64 `json:"cap"`
 	Source string  `json:"cap_source"`
-	// Floor is §4.3's SUM over claim events — recomputed here, through the same
+	// Floor is the SUM over claim events — recomputed here, through the same
 	// query enforcement runs, never read from `runs.usage_floor`. The cache
 	// exists for the burn-rate line's convenience and a report that read it
 	// would be publishing a number no decision was made against.
 	Floor float64 `json:"floor"`
-	// Reported is per-unit and NEVER summed across units (B19, §4.5): summing
+	// Reported is per-unit and NEVER summed across units: summing
 	// {tokens: 4000, seconds: 12} to 4012 would be core asserting those add up.
 	Reported []db.UnitTotal `json:"reported,omitempty"`
 	// Unit is `budget.unit` — which of the above, if any, the cap counts.
@@ -56,7 +55,7 @@ type RunBudgetReport struct {
 	Spend float64 `json:"spend"`
 	// BurnRate is floor per wall-clock hour. It is published and NOT projected:
 	// core does not predict when a run will breach, because that is a policy
-	// computation over a published number (§14).
+	// computation over a published number.
 	BurnRate float64 `json:"burn_rate"`
 	// BreachReason is set only on a run a budget actually paused.
 	BreachReason string `json:"breach_reason,omitempty"`
@@ -94,7 +93,7 @@ const VoteUsageExcludedNote = "vote_usage is excluded from reported and spend: "
 	"land in the separate vote_usage ledger; a vote step's declared " +
 	"expected_cost accrues to the floor instead"
 
-// RunReport is the whole document — R1 through R7, in that order.
+// RunReport is the whole document.
 type RunReport struct {
 	Run *model.Run `json:"run"`
 	// WallClockMS is activation -> now, or activation -> the terminal
@@ -127,12 +126,12 @@ type RunReport struct {
 	// analysts assembled by hand from event seqs and step ids.
 	PinEpochs []PinEpoch `json:"pin_epochs,omitempty"`
 
-	// Steps is R3: the count by EFFECTIVE status, computed at read.
+	// Steps is the count by EFFECTIVE status, computed at read.
 	Steps []model.StatusCount `json:"steps,omitempty"`
-	// Attempts is R3's other half: per-step attempts, ordered by instance.
+	// Attempts is the other half: per-step attempts, ordered by instance.
 	Attempts []StepAttempt `json:"attempts,omitempty"`
 
-	// Issues is R3's issue-level half (DKT-403): the TERMINAL RULINGS an
+	// Issues is the issue-level half (DKT-403): the TERMINAL RULINGS an
 	// operator made about whole issues, which the step sections cannot carry.
 	//
 	// A step's row says how that step ended. It does not say that the question
@@ -146,19 +145,19 @@ type RunReport struct {
 	// re-asked two decisions the operator had already made.
 	Issues []IssueDisposition `json:"issues,omitempty"`
 
-	// Actors is E21 (docs/tdd/runs-dispatch.md §8.7): the per-actor event
-	// counts, folded into R3's neighborhood.
+	// Actors is the per-actor event counts.
 	//
-	// It publishes §9 item 2's answer as a NUMBER rather than as an argument.
-	// "Every transition in events traceable to next/gate/threshold/human input"
-	// is checkable from this section alone: the four counts sum to the run's
-	// event total, and an event attributable to nothing would make them not.
+	// It publishes the traceability rule's answer as a NUMBER rather than as an
+	// argument. "Every transition in events traceable to
+	// next/gate/threshold/human input" is checkable from this section alone:
+	// the four counts sum to the run's event total, and an event attributable
+	// to nothing would make them not.
 	// The events read surface is where an auditor goes for the individual rows;
 	// this is the rollup that says whether they need to.
 	Actors []ActorCount `json:"actors,omitempty"`
 
 	// Authorities is DKT-1899: the run's resolutions and run notes counted by
-	// the authority they were made under. E21's Actors answers WHAT CAUSED a transition;
+	// the authority they were made under. Actors answers WHAT CAUSED a transition;
 	// this answers, for the human ones, WHAT ENTITLED it — the distinction the
 	// conductor policy routes on and that only a free-text note used to carry.
 	Authorities []AuthorityCount `json:"authorities,omitempty"`
@@ -173,7 +172,7 @@ type RunReport struct {
 	Actions     []db.VerdictCount   `json:"actions,omitempty"`
 	ActionTrail []db.ResultTrailRow `json:"action_trail,omitempty"`
 
-	// Artifacts is R6: the INDEX — id, kind, producer instance, sha256, bytes.
+	// Artifacts is the INDEX — id, kind, producer instance, sha256, bytes.
 	// NEVER THE BODIES. A rollup that inlined artifact bodies would turn a
 	// status check into a document dump, and the bodies are one `step context`
 	// away for anyone who wants them.
@@ -188,7 +187,7 @@ type RunReport struct {
 	// show: `aggregate` has always written `members` on every cluster, and
 	// nothing before this read it back.
 	//
-	// It reads `members` (engine-owned, §7.6), never the author's own
+	// It reads `members` (engine-owned), never the author's own
 	// `member_ids` linkage key: `members`' length already equals
 	// `member_ids`'s wherever both exist (findings-cluster@3 declares them in
 	// the same arrival order), and `members` is ALSO defined on a
@@ -212,7 +211,7 @@ type RunReport struct {
 	// nil, matching Recorded's absent-parameter convention.
 	SourceAttribution []ClusterSourceAttribution `json:"source_attribution,omitempty"`
 
-	// Metadata is R7, the genericity line at its thinnest: keys to distinct
+	// Metadata is the genericity line at its thinnest: keys to distinct
 	// values with counts, verbatim and uninterpreted.
 	Metadata []db.MetadataKeyRollup `json:"metadata,omitempty"`
 
@@ -289,7 +288,7 @@ type RunReport struct {
 	// three sessions. `omitempty`, so a run whose ledger is empty is unchanged.
 	StepUsage []db.StepUsageRow `json:"step_usage,omitempty"`
 
-	// MissingUsage is D2 asked WITHOUT its grace (D7): every claimed step that
+	// MissingUsage is D2 asked WITHOUT its grace: every claimed step that
 	// reached a terminal status and has no ledger row, however recently.
 	// `next` and `dispatch close` give such a step `dispatch.grace` to be
 	// back-filled, so a relay that launches its usage join beside the close
@@ -358,8 +357,8 @@ type RunNoteRuling struct {
 // resolutions, how many an operator decided, how many applied a standing
 // authorization, and how many the conductor made on its own reproduction. The
 // order is the three values' DECLARED order, not by count, for ActorCount's
-// R9 reason, and an authority with no resolutions is omitted rather than shown
-// as zero.
+// determinism reason, and an authority with no resolutions is omitted rather
+// than shown as zero.
 //
 // Resolutions recorded BEFORE this field existed carry no authority and are
 // counted under none of the three: an uncountable resolution is exactly what
@@ -370,11 +369,11 @@ type AuthorityCount struct {
 	Count     int    `json:"count"`
 }
 
-// ActorCount is one row of E21's rollup: a cause, and how many of the run's
+// ActorCount is one row of the per-actor rollup: a cause, and how many of the run's
 // transitions it accounts for.
 //
 // The actor is a string on the wire rather than an enum, matching every other
-// count row in this document, and the ORDER is a total one (§4.10 R9) so two
+// count row in this document, and the ORDER is a total one so two
 // reports of the same rows are byte-identical.
 type ActorCount struct {
 	Actor string `json:"actor"`
@@ -471,7 +470,7 @@ type StepAttempt struct {
 	// and in a rollup that half-bag is indistinguishable from a completed
 	// step's, so drift concentrated in failures reads as no drift at all.
 	//
-	// CORE READS NO KEY HERE, as everywhere (docs/design/genericity.md, R7). It
+	// CORE READS NO KEY HERE, as everywhere. It
 	// publishes the bag; what a pair of keys MEANS — a tier, a variant, a desk
 	// — stays the workflow author's business, and the consumer does the
 	// comparison core must not learn how to make.
@@ -484,7 +483,7 @@ type StepAttempt struct {
 	//
 	// The bag is NOT re-validated here: a read verb that refused because one
 	// row held odd bytes would be useless during exactly the run an operator
-	// wants to inspect (R10), which is why db.MetadataRollup skips such a row
+	// wants to inspect, which is why db.MetadataRollup skips such a row
 	// too. This row says so out loud rather than skipping silently, because a
 	// per-step row IS the row — there are no other rows to carry the fact.
 	MetadataUnreadable bool `json:"metadata_unreadable,omitempty"`
@@ -524,7 +523,7 @@ type IssueDisposition struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// ArtifactIndexEntry is R6's row: what was produced, by whom, and how big —
+// ArtifactIndexEntry is one index row: what was produced, by whom, and how big —
 // never the body.
 //
 // Executor and Issue attribute the producer (DKT-79): `producer` alone is the
@@ -570,7 +569,7 @@ type ClusterComplementarity struct {
 	// in common") — how much of the round agreed rather than merely occurred.
 	Corroborated int `json:"corroborated"`
 	// ByMemberCount is Unique and Corroborated's own detail, ordered by
-	// member count ascending (a total key, R9): every cluster this round
+	// member count ascending (a total key): every cluster this round
 	// reduced, grouped by how many members it had.
 	ByMemberCount []MemberCount `json:"by_member_count,omitempty"`
 	// InputArtifacts is how many artifacts fed the step whose output this
@@ -584,9 +583,9 @@ type ClusterComplementarity struct {
 	// restored database is not required to have run today's validation.
 	InputArtifacts int `json:"input_artifacts"`
 	// PayloadUnreadable marks a step whose aggregate output does not decode
-	// as the array of objects §7.6 promises, so an absent row is never read
+	// as the array of objects `aggregate` promises, so an absent row is never read
 	// as "this round produced nothing" (the same discipline MetadataUnreadable
-	// states). The bag is not re-validated here (R10): a read verb that
+	// states). The bag is not re-validated here: a read verb that
 	// refused over one odd artifact would be useless during exactly the run
 	// an operator wants to inspect.
 	PayloadUnreadable bool `json:"payload_unreadable,omitempty"`
@@ -605,7 +604,7 @@ type ClusterSourceAttribution struct {
 	// Executor is the hint the named step declared, when Source resolves to a
 	// step instance in this run. Empty when it does not resolve — a source
 	// naming a step outside this run, or a value that is not a step ref at
-	// all — kept rather than dropped (R10), since an unresolved source is
+	// all — kept rather than dropped, since an unresolved source is
 	// still a fact about the round.
 	Executor string `json:"executor,omitempty"`
 	// Clusters is how many of the round's clusters this source contributed a
@@ -626,7 +625,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	}
 	report := &RunReport{Run: run}
 
-	// ---- R2's config-and-rollup half, BEFORE any transaction opens. --------
+	// ---- The budget's config-and-rollup half, BEFORE any transaction opens.
 	//
 	// internal/db caps the connection pool at ONE connection, so a pool read
 	// from inside an open transaction deadlocks permanently rather than
@@ -718,7 +717,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		return nil, err
 	}
 
-	// ---- R1/R2/R3, over ONE consistent snapshot. ---------------------------
+	// ---- Run, budget, and steps, over ONE consistent snapshot. ------------
 	//
 	// The scheduler is loaded for the same reason every other read verb loads
 	// it: effective status is a question about a set of rows at one instant, and
@@ -729,7 +728,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		return nil, fmt.Errorf("beginning the report: %w", err)
 	}
 	// Rolled back unconditionally: this path has nothing to commit, and the
-	// rollback is the STRUCTURAL guarantee of R8 rather than a convention
+	// rollback is the STRUCTURAL zero-write guarantee rather than a convention
 	// someone could edit away.
 	defer tx.Rollback()
 
@@ -740,7 +739,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 
 	report.WallClockMS = wallClockMS(run, nowMS)
 
-	// D7's ungraced question, in the same snapshot as the statuses that say
+	// The ungraced question, in the same snapshot as the statuses that say
 	// which steps ran: what is still owing NOW, the freshly recorded included.
 	ungraced, err := discrepanciesGracedTx(tx, sched, runID, nowMS, false)
 	if err != nil {
@@ -753,19 +752,19 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	}
 
 	cap, floor, reportedInUnit, spend, _, unit := sched.Budget()
-	// AN UNLIMITED RUN'S SNAPSHOT DELIBERATELY QUERIED NOTHING (D1), so the
+	// AN UNLIMITED RUN'S SNAPSHOT DELIBERATELY QUERIED NOTHING, so the
 	// report computes what it needs here instead.
 	//
 	// This is the one place that wants these numbers regardless of whether
 	// anything is enforcing against them: "how much has this run declared it
 	// spent, and what would its cap have counted" are fair questions about a run
 	// with no cap, and answering them is what lets an instance compute its own
-	// policy from a read verb (B27).
+	// policy from a read verb.
 	//
 	// The `budget.unit` read is NOT the enforcement path re-reading config
-	// mid-run (B3): nothing here decides anything. It labels which of the
-	// per-unit numbers already in the report a cap would compare, which is R6's
-	// job.
+	// mid-run: nothing here decides anything. It labels which of the
+	// per-unit numbers already in the report a cap would compare, which is the
+	// cap source line's job.
 	if sched.budget.unlimited() {
 		floor, err = RunFloorTx(tx, runID)
 		if err != nil {
@@ -806,7 +805,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		return nil, err
 	}
 
-	// E21: the per-actor rollup, computed in this same read-only transaction so
+	// The per-actor rollup, computed in this same read-only transaction so
 	// it describes the same instant every other section does.
 	actors, err := actorReportTx(tx, runID)
 	if err != nil {
@@ -846,7 +845,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	}
 
 	// The transaction is rolled back by the deferred call and never committed:
-	// there is nothing to commit, and R8's zero-write property is that
+	// there is nothing to commit, and the zero-write property is that
 	// structural fact rather than a convention.
 	return report, nil
 }
@@ -897,7 +896,7 @@ func burnRate(floor float64, wallClockMS int64) float64 {
 	return floor / (float64(wallClockMS) / float64(3_600_000))
 }
 
-// effectiveStepFacts is R3: the count by EFFECTIVE status, and per-step
+// effectiveStepFacts is the count by EFFECTIVE status, and per-step
 // attempts.
 //
 // Effective, not stored. A `pending` step whose predicate holds counts as
@@ -925,7 +924,7 @@ func effectiveStepFacts(sched *Scheduler) ([]model.StatusCount, []StepAttempt) {
 		// DKT-868: the step's own bag rides with its status.
 		//
 		// TOLERANT, NOT SILENT. A stored bag that does not decode leaves
-		// `Metadata` nil and sets the flag beside it — the R10 tolerance
+		// `Metadata` nil and sets the flag beside it — the same tolerance
 		// db.MetadataRollup already applies to the same column (a read verb must
 		// not refuse because one row holds odd bytes), without the rollup's
 		// freedom to drop the row and let the other rows carry the answer.
@@ -939,7 +938,7 @@ func effectiveStepFacts(sched *Scheduler) ([]model.StatusCount, []StepAttempt) {
 		attempts = append(attempts, row)
 	}
 
-	// Ordered by a TOTAL key at both levels (R9): statuses by name, attempts by
+	// Ordered by a TOTAL key at both levels: statuses by name, attempts by
 	// step id. Ranging the map would emit a different document per invocation.
 	statuses := make([]string, 0, len(counts))
 	for status := range counts {
@@ -1000,7 +999,7 @@ func issueDispositionsTx(tx *sql.Tx, runID int) ([]IssueDisposition, error) {
 		return nil, nil
 	}
 
-	// A TOTAL order (R9), by issue id, so two reports of the same rows are
+	// A TOTAL order, by issue id, so two reports of the same rows are
 	// byte-identical. Event order would do for one run and reshuffle the moment
 	// a replay landed the same facts in a different sequence.
 	ids := make([]int, 0, len(byIssue))
@@ -1066,7 +1065,7 @@ func scanAbandonRulings(rows *sql.Rows, err error) ([]abandonRuling, error) {
 			return nil, fmt.Errorf("reading an issue disposition: %w", err)
 		}
 		// The payload is core's OWN, written by the two abandon paths — but a
-		// malformed one is NOT worth failing a read verb over. R10 says the
+		// malformed one is NOT worth failing a read verb over. The
 		// report works on a run in any state, and a report that refused here
 		// would be unavailable during exactly the incident that produced the
 		// bad row. An unparseable payload costs the reason line and nothing
@@ -1141,7 +1140,7 @@ func abandonNote(routing string) string {
 //
 // It walks every step rather than every artifact because the question is
 // "what did THIS ROUND of clustering produce", and an aggregate step that
-// hit route_at (DKT-593) or a hold resolution (H13) leaves that answer split
+// hit route_at (DKT-593) or a hold resolution leaves that answer split
 // across more than one place: the step's own newest artifact (superseded
 // ones excluded — a resolution records a NEW artifact of the same kind
 // rather than editing the old one) and, when route_at routed clusters below
@@ -1161,7 +1160,7 @@ func complementarityRollup(
 
 	var out []ClusterComplementarity
 	for _, s := range steps {
-		// A materialized held/vote step (H5) has no entry in the pinned
+		// A materialized held/vote step has no entry in the pinned
 		// definition; StepByName returns nil for it, and it is never itself
 		// an aggregate step — the hold it carries is the RESOLUTION of one.
 		def := defs[s.WorkflowID]
@@ -1176,7 +1175,7 @@ func complementarityRollup(
 		if err != nil {
 			// V28/V28a already refuse this at register time; a row that
 			// still fails here belongs to a database restored from
-			// elsewhere. Not this report's failure to surface (R10) — the
+			// elsewhere. Not this report's failure to surface — the
 			// row is simply omitted, exactly as an aggregate step with no
 			// clusters yet would be.
 			continue
@@ -1192,7 +1191,7 @@ func complementarityRollup(
 		}
 		if !ok {
 			// Never claimed a cluster yet — an aggregate step with no
-			// completed round. An absent row, not a zeroed one (R10's
+			// completed round. An absent row, not a zeroed one (the
 			// "reads as nothing happened" trap MetadataUnreadable also
 			// guards against).
 			continue
@@ -1278,7 +1277,7 @@ func recordedBelowFloor(conn *sql.DB, stepID int) ([]map[string]any, error) {
 // corroborated (more than one) clusters, and the full distribution, over the
 // union of a round's emitted and below-floor clusters.
 //
-// It reads `members` (KeyMembers, §7.6) — the engine's own record of a
+// It reads `members` (KeyMembers) — the engine's own record of a
 // cluster's inputs — never the payload's other keys. A cluster with no
 // readable `members` array (a malformed record; `aggregate` always writes
 // one) contributes to neither count nor the distribution, the same
@@ -1490,7 +1489,7 @@ func runStepExecutorsByInstance(conn *sql.DB, runID int) (map[string]string, err
 	return out, nil
 }
 
-// artifactIndex is R6: what was produced, never the bodies.
+// artifactIndex is what was produced, never the bodies.
 func artifactIndex(conn *sql.DB, runID int) ([]ArtifactIndexEntry, error) {
 	artifacts, err := db.ListRunArtifacts(conn, runID)
 	if err != nil {
@@ -1627,7 +1626,7 @@ func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat,
 // transaction opens (the one-connection rule LoadRunReport states). Proposals
 // ascend by id and casts by voter name within one, and entries keep their
 // findings' own order (blockers, concerns, suggestions, each as cast): a total
-// key, per R9, since a voter casts once per proposal.
+// key, since a voter casts once per proposal.
 //
 // A SealedOpen proposal contributes nothing: the ballot is still secret, and
 // this verb must not be the one read surface that leaks what a seat found
@@ -1757,14 +1756,14 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 		}
 	}
 
-	// A TOTAL order (R9): the ids feed a parameterized IN whose bound values
+	// A TOTAL order: the ids feed a parameterized IN whose bound values
 	// participate in query text equality for no engine, but a deterministic
 	// argument list keeps two reports byte-identical in any future trace.
 	sort.Ints(ids)
 	return ids, nil
 }
 
-// configuredBudgetDefault reads `budget.default` for R6's source derivation.
+// configuredBudgetDefault reads `budget.default` for the cap source derivation.
 func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 	entry, err := db.GetConfig(conn, projectID, db.KeyBudgetDefault)
 	if err != nil {
@@ -1793,7 +1792,7 @@ func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 // rule, which answers a different question about a different unit.
 //
 // A payload that does not parse, or that carries no authority, is SKIPPED: a
-// malformed row is not worth failing a read verb over (R10), and a resolution
+// malformed row is not worth failing a read verb over, and a resolution
 // recorded before the field existed is genuinely uncountable — reporting it
 // under a guessed authority would restore the ambiguity this ends.
 func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
@@ -1839,12 +1838,12 @@ func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
 }
 
 // runNoteRulingsTx lists the run's notes from their `run-note-added` events, in
-// seq order so two reports of the same rows are byte-identical (R9).
+// seq order so two reports of the same rows are byte-identical.
 //
 // Unlike annotateStepRulings, an event with no actor or cwd still yields a
 // row: each note is its own unit, so there is no earlier ruling to fall back
 // to, and dropping the row would hide that the note was recorded at all. A
-// payload that does not parse is skipped (R10).
+// payload that does not parse is skipped.
 func runNoteRulingsTx(tx *sql.Tx, runID int) ([]RunNoteRuling, error) {
 	rows, err := tx.Query(
 		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq`,
@@ -1915,7 +1914,7 @@ func annotateStepRulings(tx *sql.Tx, runID int, attempts []StepAttempt) error {
 			Cwd    string `json:"cwd"`
 		}
 		// Core's own payload, and a malformed one is not worth failing a read
-		// verb over (R10): it costs this step's annotation and nothing else.
+		// verb over: it costs this step's annotation and nothing else.
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			continue
 		}

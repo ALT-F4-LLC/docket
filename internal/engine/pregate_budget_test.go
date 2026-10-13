@@ -10,15 +10,14 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
-// The claim's pre-gate phase is bounded as a whole (TDD
-// docs/tdd/gates-trust.md §7.6.2 PG5).
+// The claim's pre-gate phase is bounded as a whole.
 //
 // An executor runs `docket step claim` under a 120s tool timeout. A claim
 // whose pre-gates ran to their entries' 5m timeouts outlived it: the harness
 // backgrounded the command, the token was never read, and the lease it
 // minted needed a forced reap and an acknowledgment panel. The budget is the
-// documented bound the claim returns within, and PG2/PG3 still hold: the
-// claim succeeds with the cut-short measurement recorded as data.
+// documented bound the claim returns within, and the claim still never fails
+// on a pre-gate: it succeeds with the cut-short measurement recorded as data.
 
 // shrinkClaimBudget sets the budget for one test and restores it after.
 func shrinkClaimBudget(t *testing.T, budget time.Duration) {
@@ -61,7 +60,7 @@ func TestClaimReturnsWithinThePreGateBudget(t *testing.T) {
 	if elapsed > 5*time.Second {
 		t.Errorf("the claim took %s against a %s pre-gate budget", elapsed, claimPreGateBudget)
 	}
-	// AND IT SUCCEEDED: PG2/PG3 — the bound changes when the claim returns,
+	// AND IT SUCCEEDED: the bound changes when the claim returns,
 	// not whether.
 	if claim.Token == "" {
 		t.Fatal("the claim returned no token")

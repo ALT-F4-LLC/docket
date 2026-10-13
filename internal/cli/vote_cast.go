@@ -373,8 +373,8 @@ func newVoteCastCmd() *cobra.Command {
 			// The cast that reaches quorum finalizes the proposal
 			// (db.CastVote), and the vote STEP standing behind it — if this
 			// is a run's vote-step ballot and not an ad-hoc one — must then
-			// ROUTE, §8.1 phases 4 and 5. `next` cannot do it mid-wave (it
-			// refuses while a dispatch is open), so the deciding cast is the
+			// ROUTE. `next` cannot do it mid-wave (it refuses while a dispatch
+			// is open), so the deciding cast is the
 			// observing invocation (engine/drive.go): downstream staged rows
 			// become claimable the moment this verb returns.
 			if result.QuorumReached {
@@ -522,7 +522,7 @@ func parseVoteMetadata(raw string) (map[string]any, error) {
 }
 
 // parseVoteUsage decodes a seat's --usage spend report through db.ParseUsage
-// — the SAME B33/B35/B36 rules the step ledger's writer applies, one
+// — the SAME rules the step ledger's writer applies, one
 // implementation for both flags — into the map shape model.Vote carries.
 // db.CastVote re-checks the numeric rules beside the insert; this parse
 // exists so a refusal reaches the operator as VALIDATION_ERROR naming the

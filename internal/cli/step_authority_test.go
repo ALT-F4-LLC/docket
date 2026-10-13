@@ -338,7 +338,7 @@ func TestRunReportTalliesAuthority(t *testing.T) {
 	}
 
 	// The rows are in the values' DECLARED order, so two reports of the same
-	// run are byte-identical (R9).
+	// run are byte-identical.
 	var order []string
 	for _, row := range report.Authorities {
 		order = append(order, row.Authority)

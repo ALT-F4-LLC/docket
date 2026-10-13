@@ -17,21 +17,21 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// The `--follow` loop's properties (docs/tdd/events-follow.md §4.3).
+// The `--follow` loop's properties.
 //
 // EVERY TEST HERE DRIVES followEvents DIRECTLY rather than spawning a process.
-// W3's cursor discipline and W8's termination are behaviors of the LOOP, and a
-// test that had to read a subprocess's stdout would be observing the shell
+// The cursor discipline and the GONE termination are behaviors of the LOOP, and
+// a test that had to read a subprocess's stdout would be observing the shell
 // between it and the property.
 //
 // NOTHING HERE SLEEPS TO MAKE AN ASSERTION TRUE. The interval is set small and
 // the loop is stopped by CANCELLING ITS CONTEXT once the events it was supposed
-// to see have arrived — the repo's standing TTL-flake discipline (§5.9 of
-// runs-dispatch), applied to a poller.
+// to see have arrived — the repo's standing TTL-flake discipline, applied to a
+// poller.
 
 // followTrustEvent writes one event with no run, which is the cheapest event the
 // writer will accept: `events.run_id` is nullable and a trust grant legitimately
-// has none (gates-trust §3.6). The feed under test is repo-wide, so what these
+// has none. The feed under test is repo-wide, so what these
 // rows MEAN does not matter — only that they are events with ascending seqs.
 func followTrustEvent(t *testing.T, conn *sql.DB, name string) {
 	t.Helper()
@@ -114,14 +114,13 @@ func followOpts(conn *sql.DB, stdout, stderr *syncBuffer) followOptions {
 	}
 }
 
-// TestFollowSeesNewEventsAndStops is §4.3's headline, and the one the work order
-// names: a follow starts, a writer inserts events, the follow prints them, the
-// context is cancelled, and the call returns having printed EACH NEW EVENT
-// EXACTLY ONCE.
+// TestFollowSeesNewEventsAndStops is the headline property: a follow starts, a
+// writer inserts events, the follow prints them, the context is cancelled, and
+// the call returns having printed EACH NEW EVENT EXACTLY ONCE.
 //
 // The three assertions are separable and all three matter: it SAW the events
 // (a follow that printed nothing would satisfy "never duplicates"), it printed
-// each ONCE (the cursor advanced), and it STOPPED (W6 — cancellation is how a
+// each ONCE (the cursor advanced), and it STOPPED (cancellation is how a
 // follow ends, and a loop that ignored its context would hang the test rather
 // than fail it).
 func TestFollowSeesNewEventsAndStops(t *testing.T) {
@@ -153,9 +152,9 @@ func TestFollowSeesNewEventsAndStops(t *testing.T) {
 
 	select {
 	case err := <-done:
-		testsupport.Must(t, err, "a cancelled follow returned %v; W6 makes Ctrl-C exit 0", err)
+		testsupport.Must(t, err, "a cancelled follow returned %v; Ctrl-C must exit 0", err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("the follow did not return after its context was cancelled (W6)")
+		t.Fatal("the follow did not return after its context was cancelled")
 	}
 
 	seqs := followSeqs(t, stdout.String())
@@ -163,7 +162,7 @@ func TestFollowSeesNewEventsAndStops(t *testing.T) {
 		t.Fatalf("the follow printed %d events, want %d", len(seqs), 2+live)
 	}
 
-	// EXACTLY ONCE, and in order. Both fall out of W3's cursor, and a failure of
+	// EXACTLY ONCE, and in order. Both fall out of the cursor rule, and a failure of
 	// either is a failure of the same clause.
 	seen := make(map[int64]bool, len(seqs))
 	for i, seq := range seqs {
@@ -178,10 +177,12 @@ func TestFollowSeesNewEventsAndStops(t *testing.T) {
 	}
 }
 
-// TestFollowCursorNeverRepeatsOrSkips extends E10's property ACROSS CYCLES.
+// TestFollowCursorNeverRepeatsOrSkips extends the cursor's property ACROSS
+// CYCLES.
 //
-// S6 proved it for one call: an insert landing during a read is returned by the
-// next call. A follow makes "the next call" automatic, so the property becomes
+// `events list` proves it for one call: an insert landing during a read is
+// returned by the next call. A follow makes "the next call" automatic, so the
+// property becomes
 // the union over every cycle being exactly the inserted set. That is the
 // difference between a cursor that is sound and a poller that is sound.
 func TestFollowCursorNeverRepeatsOrSkips(t *testing.T) {
@@ -193,8 +194,8 @@ func TestFollowCursorNeverRepeatsOrSkips(t *testing.T) {
 
 	var stdout, stderr syncBuffer
 	// A small limit forces MULTIPLE CYCLES to drain the backlog, which is the
-	// case W5 describes: a follower starting far behind catches up over several
-	// cycles rather than in one page.
+	// case of a follower starting far behind: it catches up over several cycles
+	// rather than in one page.
 	opts := followOpts(conn, &stdout, &stderr)
 	opts.query.Limit = 7
 
@@ -371,13 +372,13 @@ func TestFollowTailOnAnEmptyFeedStillFollows(t *testing.T) {
 	}
 }
 
-// TestFollowStopsOnGone is W8, the clause that keeps `--follow` honest about a
+// TestFollowStopsOnGone is the clause that keeps `--follow` honest about a
 // prune: a cursor that falls below the retained minimum TERMINATES the follow
 // with GONE rather than resuming at the new minimum.
 //
 // Resuming is the tempting behavior — the follow could simply carry on from
-// what survives — and it is exactly the silent skip engine-spec §3 forbids: the
-// consumer would receive a feed with a hole in it and no indication there was
+// what survives — and it is exactly the silent skip the feed contract forbids:
+// the consumer would receive a feed with a hole in it and no indication there was
 // one.
 func TestFollowStopsOnGone(t *testing.T) {
 	conn := newTestDB(t)
@@ -404,8 +405,8 @@ func TestFollowStopsOnGone(t *testing.T) {
 	// Let it establish itself, and stay behind, before the ground moves.
 	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 2 })
 
-	// PRUNE THROUGH PRODUCT CODE, not by hand. That is the whole point of this
-	// stage: at S6 the only way to reach GONE was a DELETE in a test.
+	// PRUNE THROUGH PRODUCT CODE, not by hand. Before PruneEvents existed, the
+	// only way to reach GONE was a DELETE in a test.
 	if _, err := engine.PruneEvents(conn, engine.PruneQuery{
 		Before: 10, NowMS: time.Now().UnixMilli(),
 	}); err != nil {
@@ -420,12 +421,12 @@ func TestFollowStopsOnGone(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the follow kept polling after its cursor fell below the retained " +
-			"minimum: W8 requires it to stop rather than silently skip")
+			"minimum: it must stop rather than silently skip")
 	}
 }
 
-// TestFollowWritesNothing is W7. Reading a log cannot advance a run, and a
-// follow reads it repeatedly — so the property S6 asserted for one read is
+// TestFollowWritesNothing: reading a log cannot advance a run, and a follow
+// reads it repeatedly — so the property `events list` asserts for one read is
 // asserted here for MANY, which is the case that could plausibly differ: a
 // per-cycle bookkeeping write would pass a one-shot test and fail this one.
 //
@@ -461,7 +462,7 @@ func TestFollowWritesNothing(t *testing.T) {
 	after := tableCounts(t, conn)
 	for table, n := range before {
 		if after[table] != n {
-			t.Errorf("%s went from %d rows to %d while a follow ran: a read verb wrote (W7)",
+			t.Errorf("%s went from %d rows to %d while a follow ran: a read verb wrote",
 				table, n, after[table])
 		}
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// `next --run` — step mode (TDD §6.3.1, §6.4).
+// `next --run` — step mode.
 
 // nextStepsResult is the step-mode payload. It implements output.Collection so
 // the envelope is uniform with every other list verb: `next --run` is a NEW
@@ -51,7 +51,7 @@ var (
 // issueModeFlags are the filters that mean something in ISSUE mode and nothing
 // in step mode.
 //
-// They are REFUSED rather than silently ignored (§6.3.1). An issue-mode filter
+// They are REFUSED rather than silently ignored. An issue-mode filter
 // that quietly does nothing in step mode is a filter a dispatcher will trust
 // and be wrong about — it would ask for `--priority critical` steps, get every
 // step, and dispatch work it meant to defer.
@@ -107,14 +107,14 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	// Reaping is the one write this read-shaped verb performs (§6.3). Saying so
+	// Reaping is the one write this read-shaped verb performs. Saying so
 	// on stderr keeps it auditable without touching the payload — a JSON
 	// consumer's shape is unchanged, and a human sees why an `attempt` moved.
 	for _, instance := range ready.Reaped {
 		w.Info("reaped an expired lease on %s; it is ready again", instance)
 	}
 
-	// §6.3: a headroom denial with nothing running is baffling, so the hold is
+	// A headroom denial with nothing running is baffling, so the hold is
 	// named on stderr — where the reap already reports itself, and for the same
 	// reason. The PAYLOAD is untouched: a JSON consumer's shape does not change
 	// because a run happens to be holding write headroom.

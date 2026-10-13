@@ -65,7 +65,7 @@ type ExecutorLedgerOptions struct {
 }
 
 // ExecutorLedger is the whole document: the runs read and one row per
-// identity, each list ordered by its name (a total key, R9).
+// identity, each list ordered by its name (a total key).
 type ExecutorLedger struct {
 	Runs      int                 `json:"runs"`
 	Executors []ExecutorLedgerRow `json:"executors"`
@@ -178,7 +178,7 @@ func LoadExecutorLedger(conn *sql.DB, opts ExecutorLedgerOptions) (*ExecutorLedg
 		return nil, err
 	}
 	// ListRuns is newest-first; the ledger walks oldest-first so the run set
-	// behind every count is read in one fixed order (R9).
+	// behind every count is read in one fixed order.
 	sort.Slice(runs, func(i, j int) bool { return runs[i].ID < runs[j].ID })
 
 	admitted := make([]int, 0, len(runs))
@@ -306,7 +306,7 @@ func ledgerRulings(
 			Forced bool   `json:"forced"`
 		}
 		// Core's own payload; a malformed row costs one count, not the read
-		// (R10), the tolerance annotateStepRulings extends to the same rows.
+		// — the tolerance annotateStepRulings extends to the same rows.
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			continue
 		}

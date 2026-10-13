@@ -34,8 +34,8 @@ import (
 // its last two levels), file names, line numbers, the words around an elided
 // value, and line order.
 //
-// The exact rules, in the order normalizeGateOutput applies them, which
-// docs/tdd/reliability-delta.md states as the contract:
+// The exact rules, in the order normalizeGateOutput applies them, are the
+// contract:
 //
 //  1. ANSI CSI/OSC escape sequences are removed.
 //  2. Carriage returns are dropped and trailing horizontal whitespace on each

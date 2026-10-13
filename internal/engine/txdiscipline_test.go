@@ -51,7 +51,7 @@ import (
 //
 // Tracking the commit matters, and getting it wrong makes the guard useless in
 // the noisy direction: `runGateStage` legitimately commits, runs a gate OUTSIDE
-// any transaction (which is §6's whole point), and opens a second transaction;
+// any transaction (which is the whole point), and opens a second transaction;
 // `Activate` legitimately re-reads through the pool after committing. A
 // position-only check flags both and gets itself disabled.
 func TestNoPoolReadsInsideTransactions(t *testing.T) {

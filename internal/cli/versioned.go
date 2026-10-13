@@ -8,8 +8,7 @@ import (
 )
 
 // issuePayload wraps a single issue so it marshals with its CAS `version`
-// field under --json=v2 and without it under v1 (engine-spec.md §5,
-// "versions in .data").
+// field under --json=v2 and without it under v1 ("versions in .data").
 //
 // The version rides on the wrapper rather than on model.Issue's MarshalJSON
 // because that marshaler is the frozen v1 wire format — adding a field there
