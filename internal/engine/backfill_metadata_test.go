@@ -30,7 +30,7 @@ func TestBackfillMetadataLandsWithItsUsage(t *testing.T) {
 	})
 	testsupport.Must(t, err, "complete: %v", err)
 
-	_, err = e.BackfillUsage(conn, runID, []BackfillRow{{
+	out, err := e.BackfillUsage(conn, runID, []BackfillRow{{
 		Step: implID, Unit: "tokens", Quantity: 1200,
 		Metadata: `{"model_resolved":"claude-opus-5-5","effort_resolved":"unknown"}`,
 	}}, "", "", nowMS)
@@ -38,6 +38,10 @@ func TestBackfillMetadataLandsWithItsUsage(t *testing.T) {
 
 	if rows := usageRowsFor(t, conn, implID); len(rows) != 1 {
 		t.Fatalf("wrote %d ledger rows, want 1", len(rows))
+	}
+	if out.MetadataMerged != 1 {
+		t.Errorf("MetadataMerged = %d, want 1 — one step's record took a bag",
+			out.MetadataMerged)
 	}
 	bag := stepMetadata(t, conn, implID)
 	if got := bag["model_resolved"]; got != "claude-opus-5-5" {
@@ -85,6 +89,10 @@ func TestBackfillMetadataAfterSkippedDuplicate(t *testing.T) {
 	if len(out.Skipped) != 1 {
 		t.Fatalf("skipped %d rows, want 1 — the duplicate usage row must be "+
 			"reported, not silently dropped", len(out.Skipped))
+	}
+	if out.MetadataMerged != 1 {
+		t.Errorf("MetadataMerged = %d, want 1 — the bag merges even when its "+
+			"usage row is skipped", out.MetadataMerged)
 	}
 	if rows := usageRowsFor(t, conn, implID); len(rows) != 1 {
 		t.Fatalf("ledger has %d rows, want 1 — the skipped duplicate must not "+

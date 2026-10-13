@@ -200,10 +200,13 @@ type UnclaimedTarget struct {
 // source they carry, every row skipped as already recorded, and every target
 // that was never claimed.
 type BackfillOutcome struct {
-	Written int          `json:"written"`
-	Steps   int          `json:"steps"`
-	Source  string       `json:"source"`
-	Skipped []SkippedRow `json:"skipped,omitempty"`
+	Written int `json:"written"`
+	Steps   int `json:"steps"`
+	// MetadataMerged counts the steps whose record took a back-fill metadata
+	// bag. Zero when no row carried one.
+	MetadataMerged int          `json:"metadata_merged"`
+	Source         string       `json:"source"`
+	Skipped        []SkippedRow `json:"skipped,omitempty"`
 	// Unclaimed names the targets no worker ever held. The rows for them ARE
 	// written — see BackfillUsage — so this is an advisory, not a refusal, and
 	// it is on the payload because `Warn` is suppressed in JSON mode and a
@@ -447,7 +450,7 @@ func (e *Engine) BackfillUsage(
 		return nil, fmt.Errorf("committing the back-fill: %w", err)
 	}
 	return &BackfillOutcome{
-		Written: written, Steps: len(steps), Source: source, Skipped: skipped,
-		Unclaimed: unclaimed,
+		Written: written, Steps: len(steps), MetadataMerged: len(bags),
+		Source: source, Skipped: skipped, Unclaimed: unclaimed,
 	}, nil
 }

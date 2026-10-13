@@ -653,12 +653,23 @@ func reconcileRows(cmd *cobra.Command, path string) ([]engine.BackfillRow, error
 	return backfillRowsFromJSON(cmd, path)
 }
 
+// metadataMergedNote is the human clause for steps whose record took a bag.
+// Empty when none did, so a back-fill without metadata prints what it always
+// printed.
+func metadataMergedNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; merged metadata onto %d step(s)", n)
+}
+
 // renderReconcileOutcome is the human view: one line per stage, in the order
 // they ran, each reusing the wording its standalone verb prints.
 func renderReconcileOutcome(o *engine.ReconcileOutcome) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Back-filled %d usage row(s) across %d step(s) as %q\n",
-		o.Backfill.Written, o.Backfill.Steps, o.Backfill.Source)
+	fmt.Fprintf(&b, "Back-filled %d usage row(s) across %d step(s) as %q%s\n",
+		o.Backfill.Written, o.Backfill.Steps, o.Backfill.Source,
+		metadataMergedNote(o.Backfill.MetadataMerged))
 	fmt.Fprintf(&b, "%s verified: the manifest matches the current ready set (%s)\n",
 		o.Verify.Dispatch, verdictTally(o.Verify.Rows))
 	b.WriteString(renderCloseOutcome(o.Close))
@@ -725,10 +736,12 @@ not core's opinion to hold.`,
 // backfillOutcome is what the verb reports: the run, the rows written, and the
 // source they carry.
 type backfillOutcome struct {
-	Run    string `json:"run"`
-	Rows   int    `json:"rows"`
-	Steps  int    `json:"steps"`
-	Source string `json:"source"`
+	Run   string `json:"run"`
+	Rows  int    `json:"rows"`
+	Steps int    `json:"steps"`
+	// MetadataMerged counts the steps whose record took a metadata bag.
+	MetadataMerged int    `json:"metadata_merged"`
+	Source         string `json:"source"`
 	// Skipped names the rows --on-duplicate=skip passed over. `omitempty`, so
 	// the default refusing mode's payload is unchanged.
 	Skipped []engine.SkippedRow `json:"skipped,omitempty"`
@@ -771,14 +784,16 @@ func runDispatchBackfillUsage(cmd *cobra.Command, w *output.Writer) error {
 
 	outcome := &backfillOutcome{
 		Run: model.FormatRunID(runID), Rows: result.Written,
-		Steps: result.Steps, Source: result.Source, Skipped: result.Skipped,
+		Steps: result.Steps, MetadataMerged: result.MetadataMerged,
+		Source: result.Source, Skipped: result.Skipped,
 		Unclaimed: result.Unclaimed,
 	}
 
 	var message string
 	if !w.JSONMode {
 		message = fmt.Sprintf("Back-filled %d usage row(s) across %d step(s) "+
-			"as %q", outcome.Rows, outcome.Steps, outcome.Source)
+			"as %q%s", outcome.Rows, outcome.Steps, outcome.Source,
+			metadataMergedNote(outcome.MetadataMerged))
 	}
 	w.Success(outcome, message)
 	return nil
