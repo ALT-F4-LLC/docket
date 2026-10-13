@@ -149,6 +149,12 @@ type BackfillRow struct {
 	Step     int
 	Unit     string
 	Quantity float64
+	// Metadata is an optional opaque KV bag merged onto the step's record in the
+	// same transaction as the usage row. Core stores it verbatim and reads no
+	// key in it. It is refused on a step that has not reached a terminal status,
+	// for the reason AnnotateStep refuses one: a live step's record is written
+	// under its holder's token, and a back-fill has none.
+	Metadata string
 }
 
 // OnDuplicateRefuse and OnDuplicateSkip are `--on-duplicate`'s two settings.
@@ -328,6 +334,27 @@ func (e *Engine) BackfillUsage(
 		}
 	}
 
+	// Metadata is checked before any row is written, so a refused bag leaves the
+	// ledger exactly as it was.
+	for _, r := range rows {
+		if r.Metadata == "" {
+			continue
+		}
+		step := steps[r.Step]
+		if !db.StepTerminal(step.Status) {
+			return nil, conflictErr(
+				"step %s is %s; a back-fill's metadata lands on a finished step — "+
+					"a live step's metadata lands with its record",
+				step.Instance, step.Status)
+		}
+		if err := validateMetadataSize(r.Metadata); err != nil {
+			return nil, err
+		}
+		if _, err := DecodeMetadataBag(r.Metadata, "metadata"); err != nil {
+			return nil, err
+		}
+	}
+
 	for _, r := range rows {
 		if r.Unit == "" {
 			return nil, validationErr("step %s: --unit is required; core has no "+
@@ -374,6 +401,38 @@ func (e *Engine) BackfillUsage(
 			return nil, err
 		}
 		written++
+	}
+
+	// Metadata merges onto each step's bag in row order, one event per row
+	// carrying a bag. The bag and the spend move in one transaction, so a
+	// later reader never sees the usage without its observation.
+	bags := make(map[int]string, len(steps))
+	for _, r := range rows {
+		if r.Metadata == "" {
+			continue
+		}
+		step := steps[r.Step]
+		base, ok := bags[r.Step]
+		if !ok {
+			base = step.Metadata
+		}
+		next, err := mergeMetadata(base, r.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		bags[r.Step] = next
+		if err := recordEvent(tx, eventRecord{
+			Kind: EventStepAnnotated, RunID: step.RunID,
+			Instance: step.Instance, IssueID: step.IssueID,
+			Data: r.Metadata, AtMS: nowMS,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	for id, bag := range bags {
+		if err := db.SetStepMetadataTx(tx, id, bag, nowMS); err != nil {
+			return nil, err
+		}
 	}
 
 	// The fast path D2's probe reads. Marked once per step rather than

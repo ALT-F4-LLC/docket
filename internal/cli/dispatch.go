@@ -490,7 +490,7 @@ the dispatch row — those two verbs refuse on exactly the same conditions.
 --backfill-from PATH closes a wave in ONE invocation: it back-fills the usage in
 PATH, verifies the manifest, and closes it, refusing at whichever stage fails
 with that stage named. PATH is the same JSON array ` + "`backfill-usage --from-json`" + `
-reads — [{"step","unit","quantity"}, ...] — and "-" reads stdin.
+reads — [{"step","unit","quantity"}, ...], each row optionally carrying a "metadata" object — and "-" reads stdin.
 
   docket dispatch close --run RUN-44 --backfill-from usage.json
 
@@ -861,9 +861,10 @@ func backfillRowsFromJSON(cmd *cobra.Command, path string) ([]engine.BackfillRow
 	}
 
 	var wire []struct {
-		Step     string  `json:"step"`
-		Unit     string  `json:"unit"`
-		Quantity float64 `json:"quantity"`
+		Step     string          `json:"step"`
+		Unit     string          `json:"unit"`
+		Quantity float64         `json:"quantity"`
+		Metadata json.RawMessage `json:"metadata"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return nil, cmdErr(fmt.Errorf(
@@ -878,8 +879,14 @@ func backfillRowsFromJSON(cmd *cobra.Command, path string) ([]engine.BackfillRow
 			return nil, cmdErr(fmt.Errorf("row %d: invalid step ID %q: %w",
 				i, r.Step, err), output.ErrValidation)
 		}
+		// An absent or null `metadata` is no bag; anything else reaches the engine,
+		// which refuses a non-object.
+		var bag string
+		if len(r.Metadata) > 0 && string(r.Metadata) != "null" {
+			bag = string(r.Metadata)
+		}
 		out = append(out, engine.BackfillRow{
-			Step: id, Unit: r.Unit, Quantity: r.Quantity,
+			Step: id, Unit: r.Unit, Quantity: r.Quantity, Metadata: bag,
 		})
 	}
 	return out, nil
@@ -1084,7 +1091,7 @@ func init() {
 	// SAME flags `backfill-usage` declares, with the same defaults, because
 	// they configure the same stage; they are inert without `--backfill-from`.
 	dispatchCloseCmd.Flags().String("backfill-from", "",
-		`Back-fill this JSON array of {"step","unit","quantity"}, verify, `+
+		`Back-fill this JSON array of {"step","unit","quantity"} (optional "metadata" per row), verify, `+
 			`then close, in one invocation; "-" reads stdin`)
 	dispatchCloseCmd.Flags().String("on-duplicate", "refuse",
 		"With --backfill-from: what to do with a row whose (step, attempt, "+
@@ -1106,7 +1113,7 @@ func init() {
 	dispatchBackfillUsageCmd.Flags().Float64Slice("quantity", nil,
 		"Quantity for the matching --step and --unit (repeatable)")
 	dispatchBackfillUsageCmd.Flags().String("from-json", "",
-		`JSON array of {"step","unit","quantity"}; "-" reads stdin`)
+		`JSON array of {"step","unit","quantity"} with an optional "metadata" object per row, merged onto a finished step; "-" reads stdin`)
 	dispatchBackfillUsageCmd.Flags().String("on-duplicate", "refuse",
 		"What to do with a row whose (step, attempt, unit) is already "+
 			"recorded: refuse the batch, or skip that row and report it")
