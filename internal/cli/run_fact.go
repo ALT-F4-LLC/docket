@@ -21,8 +21,10 @@ so a retro reading the store can count them.
 
 Two kinds exist. ` + "`vote-reseated`" + ` records a vote seat the conductor re-spawned;
 ` + "`step-deferred`" + ` records a step it held back, with the cause ` + "`budget`" + ` or ` + "`chain`" + `.
-The engine records a ` + "`chain`" + ` deferral itself when ` + "`dispatch close`" + ` runs, so filing
-one returns that record instead of writing a second.
+` + "`dispatch close`" + ` records a ` + "`chain`" + ` deferral itself behind a predecessor a wave attempted,
+and filing that one returns the engine's record instead of writing a second. The engine
+misses a row behind a predecessor skipped before its claim, so keep filing every
+` + "`chain`" + ` deferral.
 A hand-resolved cherry-pick has no kind here: its record is the ` + "`step-annotated`" + `
 event that ` + "`step annotate --integrated-sha`" + ` writes.`,
 }

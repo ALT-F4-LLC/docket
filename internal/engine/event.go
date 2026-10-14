@@ -396,9 +396,11 @@ const (
 	// EventVoteReseated and EventStepDeferred (DKT-2759) are facts the
 	// conductor reports through `run fact add`: a vote seat it re-spawned,
 	// and a step it held back on budget or behind a chain (the cause rides in
-	// data). Both carry the actor and cwd that reported them. A chain
-	// deferral is also derived by `dispatch close` itself (`data.source` is
-	// "engine", `data.dispatch` names the manifest), so it needs no filing.
+	// data). Both carry the actor and cwd that reported them. `dispatch
+	// close` also derives a chain deferral (`data.source` is "engine",
+	// `data.dispatch` names the manifest) behind a predecessor a wave
+	// attempted. A predecessor skipped before its claim leaves no event, so
+	// the conductor keeps filing every chain deferral.
 	EventVoteReseated = "vote-reseated"
 	EventStepDeferred = "step-deferred"
 )

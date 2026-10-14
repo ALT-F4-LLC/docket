@@ -156,6 +156,41 @@ func TestRunFactChainReturnsTheEngineRecord(t *testing.T) {
 	}
 }
 
+// TestRunFactChainWritesBehindAPredecessorNeverClaimed: a stage-1 row skipped
+// before its claim leaves no event, so the engine records no chain fact behind
+// it and the conductor's filing must be written.
+func TestRunFactChainWritesBehindAPredecessorNeverClaimed(t *testing.T) {
+	conn := mustDB(t)
+	runID, _, token := runFactRun(t, conn)
+	m := openDispatch(t, conn, runID, 0, nowMS)
+	var stagedID int
+	for _, r := range m.Rows {
+		if r.Status == db.StepStaged {
+			id, err := model.ParseStepID(r.Step)
+			testsupport.Must(t, err, "parsing %q: %v", r.Step, err)
+			stagedID = id
+			break
+		}
+	}
+	if stagedID == 0 {
+		t.Skip("fixture offers no staged row")
+	}
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS)
+	testsupport.Must(t, err, "close: %v", err)
+	if n := chainFacts(t, conn, runID); n != 0 {
+		t.Fatalf("%d engine chain facts with no predecessor attempted, want 0", n)
+	}
+
+	_, err = RecordRunFact(conn, RunFactOptions{
+		RunID: runID, Kind: RunFactStepDeferred, StepID: stagedID, Cause: DeferralChain,
+		Reason: "skipped-chain-dead", By: factBy, Token: token, NowMS: nowMS + 1,
+	})
+	testsupport.Must(t, err, "run fact add --cause chain: %v", err)
+	if n := eventKindCount(t, conn, runID, EventStepDeferred); n != 1 {
+		t.Errorf("%d step-deferred events, want the conductor's one", n)
+	}
+}
+
 // TestRunFactChainWritesWhenALaterDispatchHasNoEngineRecord: an engine fact
 // from an earlier dispatch does not cover a conductor filing for a later one.
 func TestRunFactChainWritesWhenALaterDispatchHasNoEngineRecord(t *testing.T) {
