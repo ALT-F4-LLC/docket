@@ -15,15 +15,16 @@ const FactSourceEngine = "engine"
 
 // chainDeferredRows returns the manifest rows a closing dispatch left
 // chain-deferred: still pending, behind an earlier-stage row of the same issue
-// whose step did not settle (done, skipped, superseded). A wave launches an
-// issue's stages in order and stops the issue's lane at the first stage that
-// fails, parks, or conflicts, so every later stage of that issue goes unlaunched
-// and is re-offered next dispatch. A row held back on budget has no such
-// predecessor, which is what separates the two causes.
+// whose step was attempted in this dispatch (attempted) and did not settle
+// (done, skipped, superseded). A wave launches an issue's stages in order and
+// stops the issue's lane at the first stage that fails, parks, or conflicts, so
+// every later stage of that issue goes unlaunched and is re-offered next
+// dispatch. A predecessor never attempted was held back by the budget or a run
+// park, which is a different cause the conductor files.
 //
 // Rows at stage 0 are unstaged and carry no ordering, so they never qualify.
 func chainDeferredRows(
-	rows []db.DispatchRow, steps []*db.Step,
+	rows []db.DispatchRow, steps []*db.Step, attempted map[int]bool,
 ) ([]*db.Step, error) {
 	status := make(map[int]string, len(steps))
 	byID := make(map[int]*db.Step, len(steps))
@@ -50,7 +51,7 @@ func chainDeferredRows(
 			continue
 		}
 		for _, prior := range manifest {
-			if prior.issue != row.issue || prior.stage >= row.stage {
+			if prior.issue != row.issue || prior.stage >= row.stage || !attempted[prior.step] {
 				continue
 			}
 			if st := status[prior.step]; st != db.StepDone && st != db.StepSkipped &&
@@ -69,13 +70,18 @@ func chainDeferredRows(
 // step and dispatch is not recorded again. The cause `budget` stays
 // conductor-filed: the engine does not observe a budget hold.
 func recordChainDeferralsTx(
-	tx *sql.Tx, runID, dispatchID int, steps []*db.Step, nowMS int64,
+	tx *sql.Tx, runID int, open *db.Dispatch, steps []*db.Step, nowMS int64,
 ) error {
+	dispatchID := open.ID
 	rows, err := db.ListDispatchRowsTx(tx, dispatchID)
 	if err != nil {
 		return err
 	}
-	deferred, err := chainDeferredRows(rows, steps)
+	attempted, err := attemptedSince(tx, runID, open.OpenedSeq)
+	if err != nil {
+		return err
+	}
+	deferred, err := chainDeferredRows(rows, steps, attempted)
 	if err != nil {
 		return err
 	}
@@ -114,8 +120,35 @@ func recordChainDeferralsTx(
 	return nil
 }
 
-// engineChainFact returns the latest engine-derived chain deferral recorded for
-// the step, if any, as the fact `run fact add` would have returned.
+// attemptedSince returns the steps of the run that saw a claim, a refused
+// claim, a failure, or a reap after the manifest opened: the evidence a wave
+// tried the step rather than holding it back.
+func attemptedSince(tx *sql.Tx, runID int, openedSeq int64) (map[int]bool, error) {
+	rows, err := tx.Query(
+		`SELECT DISTINCT step_id FROM events
+		  WHERE run_id = ? AND seq > ? AND step_id IS NOT NULL
+		    AND kind IN (?, ?, ?, ?)`,
+		runID, openedSeq, EventStepClaimed, EventClaimRefused, EventStepFailed,
+		EventLeaseReaped)
+	if err != nil {
+		return nil, fmt.Errorf("reading the steps attempted in the dispatch: %w", err)
+	}
+	defer rows.Close()
+	out := map[int]bool{}
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("reading an attempted step: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// engineChainFact returns the engine-derived chain deferral recorded for the
+// step by the run's most recently closed dispatch, if any, as the fact `run
+// fact add` would have returned. A fact from an earlier dispatch does not
+// cover a later one, so it is not returned.
 func engineChainFact(tx *sql.Tx, runID, stepID int) (*RunFact, bool, error) {
 	var (
 		seq  int64
@@ -126,8 +159,13 @@ func engineChainFact(tx *sql.Tx, runID, stepID int) (*RunFact, bool, error) {
 		  WHERE run_id = ? AND step_id = ? AND kind = ?
 		    AND json_extract(data, '$.cause') = ?
 		    AND json_extract(data, '$.source') = ?
+		    AND json_extract(data, '$.dispatch') = (
+		        SELECT 'DISPATCH-' || id FROM dispatches
+		         WHERE run_id = ? AND status = ?
+		         ORDER BY closed_at_ms DESC, id DESC LIMIT 1)
 		  ORDER BY seq DESC LIMIT 1`,
-		runID, stepID, EventStepDeferred, DeferralChain, FactSourceEngine).Scan(&seq, &data)
+		runID, stepID, EventStepDeferred, DeferralChain, FactSourceEngine,
+		runID, db.DispatchClosed).Scan(&seq, &data)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}

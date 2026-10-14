@@ -2183,7 +2183,7 @@ func (e *Engine) closeDispatch(
 		// learns WHY rather than being told "not open".
 		return nil, lostTheCloseRace(tx, open.ID)
 	}
-	if err := recordChainDeferralsTx(tx, runID, open.ID, sched.Steps(), nowMS); err != nil {
+	if err := recordChainDeferralsTx(tx, runID, open, sched.Steps(), nowMS); err != nil {
 		return nil, err
 	}
 
