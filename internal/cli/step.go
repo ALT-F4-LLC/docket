@@ -650,13 +650,20 @@ interprets, converts, or routes on them. They sum per unit in ` + "`run report`"
 the one named by ` + "`docket config budget.unit`" + `, if any, is the one the run's cap
 counts.
 
-A GATE THAT FAILED IS NAMED ON STDOUT. The gates run inside this verb, so when
-one of them does not pass, the line printed here is the only report the caller
-gets: ` + "`gate self-hygiene failed (exit 2); STEP-N parked waiting-human`" + `, with
-the failure glyph rather than the success checkmark. --json carries the same
-rows as ` + "`failed_gates`" + ` beside the step, and the envelope stays a success
-envelope — the RECORDING succeeded; its subject did not. A record whose gates
-all passed prints the one-line success it always has.
+THE GATES RUN DETACHED. Once the artifact records, this verb launches a hidden
+` + "`step resume`" + ` child (own session, no terminal) that runs the gates and routing,
+then readies any vote or action step the completion unblocked. This verb returns
+at once with the line ` + "`Recorded, gates and routing running detached:`" + `, so a
+caller never holds its turn open for a gate. The result is NOT in this output:
+read the step's terminal state with ` + "`docket step show STEP-N --json`" + ` (status,
+and ` + "`docket step gates STEP-N`" + ` for a failed gate's captured output) and do
+not run a gate of your own after recording. When no detached run can start
+(no launcher, no lock directory, or a failed launch) the saga runs inline and
+a gate that failed is named on stdout —
+` + "`gate self-hygiene failed (exit 2); STEP-N parked waiting-human`" + `, with the
+failure glyph — and carried as ` + "`failed_gates`" + ` in --json, beside a success
+envelope: the RECORDING succeeded; its subject did not. An inline record whose
+gates all passed prints the one-line success it always has.
 
 --gap-file (repeatable) records an out-of-scope problem the work surfaced: an
 auxiliary artifact of kind ` + "`gap`" + ` beside the step's declared emit, plus a
@@ -731,11 +738,13 @@ did: priority none, kind task, no labels.`,
 		}
 
 		var gapIssues []string
+		var pending bool
 		e := engine.NewEngine()
 		err = e.CompleteStep(conn, id, engine.CompleteOptions{
 			Token: token, WorkDir: workDir, Artifact: artifact, Payload: payload,
 			Usage: usage, Metadata: metadata,
-			Gaps: gaps, GapIssues: &gapIssues, NowMS: model.NowMS(),
+			Gaps: gaps, GapIssues: &gapIssues, Pending: &pending,
+			NowMS: model.NowMS(),
 		})
 		if err != nil {
 			return stepErr(err, stepLabel(id))
@@ -755,6 +764,14 @@ did: priority none, kind task, no labels.`,
 			}
 		}
 
+		if pending {
+			verb := "Recorded, gates and routing running detached:"
+			if len(gapIssues) > 0 {
+				verb = fmt.Sprintf("Recorded, gaps filed as %s; gates and routing running detached:",
+					strings.Join(gapIssues, ", "))
+			}
+			return emitStepState(w, conn, id, verb)
+		}
 		return emitRecordState(w, conn, id, gapIssues)
 	},
 }
@@ -2009,7 +2026,7 @@ func init() {
 	for _, sub := range []*cobra.Command{
 		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
 		stepApproveCmd, stepRejectCmd, stepResolveCmd, stepReapCmd, stepHoldCmd,
-		stepAnnotateCmd, stepPreGateCmd,
+		stepAnnotateCmd, stepPreGateCmd, stepResumeCmd,
 		stepShowCmd, stepListCmd, stepContextCmd, stepRenderCmd,
 		stepArtifactsCmd, stepArtifactCmd,
 	} {

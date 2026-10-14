@@ -458,6 +458,7 @@ func Execute() int {
 	// which under `go test` is the test binary. An engine or CLI test that
 	// completes a step must never find it installed.
 	engine.LaunchDetachedPreGates = launchDetachedPreGates
+	engine.LaunchDetachedSaga = launchDetachedSaga
 	if err := rootCmd.Execute(); err != nil {
 		// PersistentPreRunE already wrote this invocation's output and asked
 		// to stop before RunE. Not a failure: exit 0, render nothing.

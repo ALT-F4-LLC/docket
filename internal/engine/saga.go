@@ -86,7 +86,10 @@ type CompleteOptions struct {
 	// from Gaps — the caller's channel for telling the operator where the
 	// residue landed.
 	GapIssues *[]string
-	NowMS     int64
+	// Pending, when non-nil, is set true when the gates and routing were
+	// handed to a detached run instead of running inside this call.
+	Pending *bool
+	NowMS   int64
 }
 
 // Engine carries the two execution seams and drives the saga.
@@ -242,6 +245,18 @@ func (e *Engine) CompleteStep(conn *sql.DB, stepID int, opts CompleteOptions) er
 	if !step.InSaga() {
 		if err := e.stageZero(conn, step, opts); err != nil {
 			return err
+		}
+		// Stage 1 is committed and the token retired: the step is
+		// engine-owned. The gates run in a detached child so the recording
+		// turn returns promptly (DKT-3977). A launch that fails, or no
+		// launcher at all, runs the saga inline, as it always did.
+		if LaunchDetachedSaga != nil && detachedSagaLockPath(stepID) != "" {
+			if err := LaunchDetachedSaga(stepID); err == nil {
+				if opts.Pending != nil {
+					*opts.Pending = true
+				}
+				return nil
+			}
 		}
 	}
 
@@ -735,6 +750,17 @@ func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, 
 // saga produce exactly one advance; the loser matches zero rows, re-reads, and
 // either finds the work done or advances what is now current.
 func (e *Engine) ResumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
+	// A detached run is advancing this step: a second resumer would read its
+	// started-but-unrecorded gate as an interrupted one.
+	if sagaHeldElsewhere(stepID) {
+		return nil
+	}
+	return e.resumeSaga(conn, stepID, nowMS)
+}
+
+// resumeSaga is ResumeSaga without the detached-run probe — the detached run's
+// own entry, which holds the lock it would otherwise find.
+func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 	// A bounded loop rather than `for {}`: the saga has a finite stage count
 	// (one per gate, plus routing), and a runaway here would spin against the
 	// database. The bound is generous — no definition has thousands of gates —
