@@ -617,9 +617,9 @@ var eventActors = map[string]Actor{
 	// The re-mint: the same actor as the `step-claimed` whose lease it re-keys.
 	EventStepReminted: ActorHuman,
 
-	// The conductor's reported facts (DKT-2759): nothing in the engine
-	// observes a re-seat or a deferral; each exists because the conductor
-	// ran `run fact add`, which is precisely what `human` means here.
+	// The conductor's reported facts (DKT-2759): each exists because the
+	// conductor ran `run fact add`, or, for a chain deferral the engine
+	// derives, because `dispatch close` ran — an operator verb either way.
 	EventVoteReseated: ActorHuman,
 	EventStepDeferred: ActorHuman,
 }

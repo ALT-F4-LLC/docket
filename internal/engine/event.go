@@ -393,10 +393,12 @@ const (
 	// not, leaves no trace. It carries the step, the owner, and the attempt.
 	EventStepReminted = "step-reminted"
 
-	// EventVoteReseated and EventStepDeferred (DKT-2759) are facts only the
-	// conductor observes, recorded through `run fact add`: a vote seat it
-	// re-spawned, and a step it held back on budget or behind a chain (the
-	// cause rides in data). Both carry the actor and cwd that reported them.
+	// EventVoteReseated and EventStepDeferred (DKT-2759) are facts the
+	// conductor reports through `run fact add`: a vote seat it re-spawned,
+	// and a step it held back on budget or behind a chain (the cause rides in
+	// data). Both carry the actor and cwd that reported them. A chain
+	// deferral is also derived by `dispatch close` itself (`data.source` is
+	// "engine", `data.dispatch` names the manifest), so it needs no filing.
 	EventVoteReseated = "vote-reseated"
 	EventStepDeferred = "step-deferred"
 )

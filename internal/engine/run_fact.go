@@ -143,6 +143,15 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 	if err := authorizeConductorTx(tx, opts.RunID, opts.Token, "run fact add"); err != nil {
 		return nil, err
 	}
+	if opts.Kind == RunFactStepDeferred && opts.Cause == DeferralChain {
+		// The engine records a chain deferral when the dispatch closes; filing
+		// it again would double-count it.
+		if prior, ok, err := engineChainFact(tx, opts.RunID, opts.StepID); err != nil {
+			return nil, err
+		} else if ok {
+			return prior, nil
+		}
+	}
 	if err := recordEvent(tx, record); err != nil {
 		return nil, err
 	}
