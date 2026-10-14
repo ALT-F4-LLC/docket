@@ -12,7 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// `step resume` — the detached completion saga (DKT-3977).
+// `step resume` — the detached completion saga.
 //
 // `step record` launches it the moment the artifact records, so the gates and
 // routing run outside the recording turn. Hidden for the reason `step pregate`

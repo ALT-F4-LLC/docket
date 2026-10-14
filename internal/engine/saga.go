@@ -248,9 +248,13 @@ func (e *Engine) CompleteStep(conn *sql.DB, stepID int, opts CompleteOptions) er
 		}
 		// Stage 1 is committed and the token retired: the step is
 		// engine-owned. The gates run in a detached child so the recording
-		// turn returns promptly (DKT-3977). A launch that fails, or no
-		// launcher at all, runs the saga inline, as it always did.
-		if LaunchDetachedSaga != nil && detachedSagaLockPath(stepID) != "" {
+		// turn returns promptly. Only a step with completion gates detaches:
+		// without one there is nothing slow to hand off, and an inline
+		// routing keeps downstream vote and action steps ready the moment
+		// the record returns. A launch that fails, or no launcher at all,
+		// runs the saga inline, as it always did.
+		if LaunchDetachedSaga != nil && detachedSagaLockPath(stepID) != "" &&
+			e.hasCompletionGates(conn, stepID) {
 			if err := LaunchDetachedSaga(stepID); err == nil {
 				if opts.Pending != nil {
 					*opts.Pending = true

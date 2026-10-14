@@ -209,7 +209,7 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 		// operator's verb — but it is surface this binary answers to, so it is
 		// counted here rather than exempted by its flag.
 		"pregate",
-		// `resume` (DKT-3977): the detached completion saga `step record`
+		// `resume`: the detached completion saga `step record`
 		// launches so the gates run outside the recording turn. HIDDEN for
 		// the same reason as `pregate`.
 		"resume",

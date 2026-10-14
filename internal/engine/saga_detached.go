@@ -9,7 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// The detached saga (DKT-3977).
+// The detached saga.
 //
 // `step record` used to run the completion gates inside the recording turn, so
 // an executor's turn outlived the prompt cache for as long as the slowest gate.
@@ -101,4 +101,24 @@ func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (Detache
 	}
 	run.Outcome = DetachedSagaRan
 	return run, nil
+}
+
+// hasCompletionGates reports whether the recorded step declares a gate that
+// runs inside the saga. A step whose spec cannot be resolved reports false, so
+// it runs inline.
+func (e *Engine) hasCompletionGates(conn *sql.DB, stepID int) bool {
+	step, err := db.GetStep(conn, stepID)
+	if err != nil {
+		return false
+	}
+	defs, err := StepDefinitions(conn, step.RunID)
+	if err != nil {
+		return false
+	}
+	tally, err := loadHoldTally(conn, step.RunID)
+	if err != nil {
+		return false
+	}
+	spec := materializedSpec(defs[step.WorkflowID], step, tally)
+	return spec != nil && len(completionGates(spec)) > 0
 }

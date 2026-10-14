@@ -9,7 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// DKT-3977 — the completion gates run in a detached child, not inside the
+// The completion gates run in a detached child, not inside the
 // recording turn. These tests inject the launcher, so no process starts.
 
 // installDetachedSagaLauncher sets the launcher for one test and restores it.
@@ -166,5 +166,38 @@ func TestHeldSagaLockKeepsOtherResumersOut(t *testing.T) {
 	testsupport.Must(t, e.ResumeSaga(conn, stepID, nowMS), "ResumeSaga: %v", nil)
 	if n := gateRowCount(t, conn, stepID); n == 0 {
 		t.Error("no gate rows once the lock was released; the saga should resume")
+	}
+}
+
+// A step with no completion gate has nothing slow to hand off, so it records
+// inline even with a launcher installed: its routing, and the downstream vote
+// and action steps it readies, are done when the record returns.
+func TestGatelessStepRecordsInlineWithALauncher(t *testing.T) {
+	withDetachedPreGateLockDir(t)
+	conn := mustDB(t)
+	_, _ = activatedRun(t, conn)
+
+	claimAndComplete(t, conn, testEngine(), "implement@0", "summary", "")
+
+	var launched int
+	installDetachedSagaLauncher(t, func(int) error { launched++; return nil })
+
+	stepID := stepIDByInstance(t, conn, "review@0#0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	var pending bool
+	err = testEngine().CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("summary"), Pending: &pending, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "record: %v", err)
+
+	if pending || launched != 0 {
+		t.Errorf("pending=%v launched=%d, want an inline record with no launch", pending, launched)
+	}
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.InSaga() {
+		t.Error("saga still open after a gate-less record")
 	}
 }
