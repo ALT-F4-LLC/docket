@@ -201,3 +201,55 @@ func TestGatelessStepRecordsInlineWithALauncher(t *testing.T) {
 		t.Error("saga still open after a gate-less record")
 	}
 }
+
+// A detached run that died leaves its step mid-saga. `next` finishes it once
+// the step is past the launch grace and no run holds its lock; a fresh step, or
+// one whose lock is held, is left to its child.
+func TestNextResumesAStrandedSaga(t *testing.T) {
+	withDetachedPreGateLockDir(t)
+	conn, e, stepID, record := detachedSagaWorld(t, "dkt3977-stranded.toml")
+	installDetachedSagaLauncher(t, func(int) error { return nil }) // the child never runs
+	testsupport.Must(t, record(nil), "record: %v", nil)
+	runID := mustRunOf(t, conn, stepID)
+
+	age := func() {
+		execSQL(t, conn, `UPDATE steps SET updated_at_ms = ? WHERE id = ?`,
+			nowMS-2*strandedSagaGraceMS, stepID)
+	}
+	open := func() bool {
+		step, err := db.GetStep(conn, stepID)
+		testsupport.Must(t, err, "GetStep: %v", err)
+		return step.InSaga()
+	}
+
+	execSQL(t, conn, `UPDATE steps SET updated_at_ms = ? WHERE id = ?`, nowMS, stepID)
+	_, err := e.NextSteps(conn, runID, 10, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+	if !open() {
+		t.Fatal("next resumed a saga inside the launch grace; the child may still be starting")
+	}
+
+	age()
+	path := detachedSagaLockPath(stepID)
+	lock, _, err := holdDetachedPreGateLock(path)
+	testsupport.Must(t, err, "taking the lock: %v", err)
+	_, err = e.NextSteps(conn, runID, 10, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+	if !open() {
+		t.Fatal("next resumed a saga whose lock a live run holds")
+	}
+	releaseDetachedPreGateLock(lock, path)
+
+	_, err = e.NextSteps(conn, runID, 10, nowMS)
+	testsupport.Must(t, err, "NextSteps: %v", err)
+	if open() {
+		t.Error("next left a stranded saga open")
+	}
+}
+
+func mustRunOf(t *testing.T, conn *sql.DB, stepID int) int {
+	t.Helper()
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	return step.RunID
+}

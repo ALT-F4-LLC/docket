@@ -104,6 +104,12 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		return nil, err
 	}
 
+	// A detached saga run that died leaves its step mid-saga; finish it before
+	// the readiness pass reads the run, outside the transaction below.
+	if err := e.ResumeStrandedSagas(conn, runID, nowMS); err != nil {
+		return nil, err
+	}
+
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("beginning next: %w", err)

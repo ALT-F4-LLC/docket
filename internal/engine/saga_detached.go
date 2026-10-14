@@ -7,6 +7,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // The detached saga.
@@ -121,4 +122,65 @@ func (e *Engine) hasCompletionGates(conn *sql.DB, stepID int) bool {
 	}
 	spec := materializedSpec(defs[step.WorkflowID], step, tally)
 	return spec != nil && len(completionGates(spec)) > 0
+}
+
+// strandedSagaGraceMS is how long a step may sit mid-saga with no detached run
+// holding its lock before `next` takes it over: well past the launch-to-lock
+// window of a child that is merely starting, so only a child that died leaves a
+// step this old.
+const strandedSagaGraceMS = 30_000
+
+// ResumeStrandedSagas finishes the sagas a dead detached run left behind. A
+// child killed mid-saga leaves a recorded step in a gate stage with no lock
+// held and nothing else to advance it; the next scheduling call does. It runs
+// only where a launcher is installed (the real binary), so a store that never
+// detaches behaves exactly as before. Held and action sagas have their own
+// resume paths and are left alone. Each step is resumed under its saga lock,
+// so a live child and the sweep never both run a gate.
+func (e *Engine) ResumeStrandedSagas(conn *sql.DB, runID int, nowMS int64) error {
+	if LaunchDetachedSaga == nil {
+		return nil
+	}
+	rows, err := conn.Query(
+		`SELECT id FROM steps
+		  WHERE run_id = ? AND saga_stage IS NOT NULL AND saga_stage NOT IN ('', ?)
+		    AND kind != ? AND updated_at_ms < ?`,
+		runID, db.SagaHeld, workflow.ClassAction, nowMS-strandedSagaGraceMS)
+	if err != nil {
+		return fmt.Errorf("listing stranded sagas: %w", err)
+	}
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("listing stranded sagas: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("listing stranded sagas: %w", err)
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		path := detachedSagaLockPath(id)
+		if path == "" {
+			continue
+		}
+		lock, held, err := holdDetachedPreGateLock(path)
+		if err != nil {
+			return err
+		}
+		if held {
+			continue
+		}
+		err = e.resumeSaga(conn, id, nowMS)
+		releaseDetachedPreGateLock(lock, path)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
