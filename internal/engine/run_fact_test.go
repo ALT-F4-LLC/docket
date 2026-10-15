@@ -86,6 +86,69 @@ func TestRunFactRecordsEachKind(t *testing.T) {
 	}
 }
 
+func stepDeferredCount(t *testing.T, conn *sql.DB, runID, stepID int) int {
+	t.Helper()
+	n := 0
+	for _, e := range factEvents(t, conn, runID, EventStepDeferred) {
+		if e.StepID == model.FormatStepID(stepID) {
+			n++
+		}
+	}
+	return n
+}
+
+func fileChainDeferral(t *testing.T, conn *sql.DB, runID, stepID int, token, reason string,
+	at int64) *RunFact {
+	t.Helper()
+	fact, err := RecordRunFact(conn, RunFactOptions{
+		RunID: runID, Kind: RunFactStepDeferred, StepID: stepID, Cause: DeferralChain,
+		Reason: reason, By: factBy, Token: token, NowMS: at,
+	})
+	testsupport.Must(t, err, "run fact add --cause chain: %v", err)
+	return fact
+}
+
+// TestRunFactChainRefilingReturnsTheConductorsFirstFact: with no engine fact
+// for the step, filing the same chain deferral twice writes one event, and the
+// second call returns the first fact.
+func TestRunFactChainRefilingReturnsTheConductorsFirstFact(t *testing.T) {
+	conn := mustDB(t)
+	runID, _, token := runFactRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	first := fileChainDeferral(t, conn, runID, stepID, token, "skipped-chain-dead", nowMS)
+	second := fileChainDeferral(t, conn, runID, stepID, token, "filed again", nowMS+1)
+
+	if n := chainFacts(t, conn, runID); n != 0 {
+		t.Fatalf("premise: %d engine chain facts, want 0", n)
+	}
+	if n := stepDeferredCount(t, conn, runID, stepID); n != 1 {
+		t.Errorf("%d step-deferred events for the step, want 1", n)
+	}
+	if *second != *first {
+		t.Errorf("second filing returned %+v, want the first fact %+v", *second, *first)
+	}
+}
+
+// TestRunFactChainRefilingAfterALaterDispatchCloseIsWritten: a conductor chain
+// fact covers refilings only until the run's next dispatch closes; a deferral
+// filed after that close is a new event.
+func TestRunFactChainRefilingAfterALaterDispatchCloseIsWritten(t *testing.T) {
+	conn := mustDB(t)
+	runID, _, token := runFactRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	fileChainDeferral(t, conn, runID, stepID, token, "skipped-chain-dead", nowMS)
+	openDispatch(t, conn, runID, 0, nowMS+1)
+	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS+1)
+	testsupport.Must(t, err, "close: %v", err)
+	fileChainDeferral(t, conn, runID, stepID, token, "skipped-chain-dead", nowMS+2)
+
+	if n := stepDeferredCount(t, conn, runID, stepID); n != 2 {
+		t.Errorf("%d step-deferred events for the step, want 2: one per dispatch window", n)
+	}
+}
+
 // TestRunFactRequiresTheConductorCapability is DKT-2759 criterion 3: on a
 // bound run, reporting any fact with no token is VALIDATION_ERROR and with a
 // wrong token AUTH_ERROR, and no event of that kind is written.

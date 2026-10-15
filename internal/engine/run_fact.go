@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -144,9 +145,15 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 		return nil, err
 	}
 	if opts.Kind == RunFactStepDeferred && opts.Cause == DeferralChain {
-		// The engine records a chain deferral when the dispatch closes; filing
-		// it again would double-count it.
+		// The engine records a chain deferral when the dispatch closes, and the
+		// conductor may already have filed one since; filing it again would
+		// double-count it.
 		if prior, ok, err := engineChainFact(tx, opts.RunID, opts.StepID); err != nil {
+			return nil, err
+		} else if ok {
+			return prior, nil
+		}
+		if prior, ok, err := conductorChainFact(tx, opts.RunID, opts.StepID); err != nil {
 			return nil, err
 		} else if ok {
 			return prior, nil
@@ -162,4 +169,47 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 		return nil, fmt.Errorf("recording the run fact: %w", err)
 	}
 	return fact, nil
+}
+
+// conductorChainFact returns the first conductor-filed chain deferral for the
+// step recorded after the run's most recently closed dispatch closed, if any.
+// The window opens at that close's `dispatch-closed` event seq, so a deferral
+// filed for a later dispatch is a new fact; with no dispatch closed, any prior
+// filing covers the step.
+func conductorChainFact(tx *sql.Tx, runID, stepID int) (*RunFact, bool, error) {
+	var (
+		seq  int64
+		data string
+	)
+	err := tx.QueryRow(
+		`SELECT seq, data FROM events
+		  WHERE run_id = ? AND step_id = ? AND kind = ?
+		    AND json_extract(data, '$.cause') = ?
+		    AND json_extract(data, '$.source') IS NULL
+		    AND seq > COALESCE((
+		        SELECT MAX(seq) FROM events
+		         WHERE run_id = ? AND kind = ?
+		           AND json_extract(data, '$.dispatch') = (
+		               SELECT 'DISPATCH-' || id FROM dispatches
+		                WHERE run_id = ? AND status = ?
+		                ORDER BY closed_at_ms DESC, id DESC LIMIT 1)), 0)
+		  ORDER BY seq LIMIT 1`,
+		runID, stepID, EventStepDeferred, DeferralChain,
+		runID, EventDispatchClosed, runID, db.DispatchClosed).Scan(&seq, &data)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("reading the conductor's chain deferral: %w", err)
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(data), &body); err != nil {
+		return nil, false, fmt.Errorf("reading the conductor's chain deferral: %w", err)
+	}
+	return &RunFact{
+		Run: model.FormatRunID(runID), Kind: EventStepDeferred, Seq: seq,
+		Step: model.FormatStepID(stepID), Cause: DeferralChain, Reason: body.Reason,
+	}, true, nil
 }
