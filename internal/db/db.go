@@ -62,6 +62,11 @@ func Open(dbPath string) (*sql.DB, error) {
 		}
 	}
 
+	if err := checkStoredSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return db, nil
 }
 
@@ -77,6 +82,24 @@ func Open(dbPath string) (*sql.DB, error) {
 // must issue no write inside the snapshot.
 func BeginReadSnapshot(conn *sql.DB) (*sql.Tx, error) {
 	return conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+}
+
+// checkStoredSchema applies Migrate's newer-schema refusal at open, so a caller
+// that reads the store without migrating it is refused too. A store with no
+// meta table is new and has nothing to check yet.
+func checkStoredSchema(db *sql.DB) error {
+	hasMeta, err := tableExists(db, "meta")
+	if err != nil {
+		return fmt.Errorf("probing for the meta table: %w", err)
+	}
+	if !hasMeta {
+		return nil
+	}
+	version, err := SchemaVersion(db)
+	if err != nil {
+		return err
+	}
+	return refuseNewerSchema(version)
 }
 
 // OpenReader opens a SEPARATE connection to the same database file, for
