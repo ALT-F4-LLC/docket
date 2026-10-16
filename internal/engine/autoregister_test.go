@@ -92,9 +92,12 @@ after = []
 const riskSchemaSrc = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "risk@1",
-  "type": "object",
-  "properties": {
-    "level": { "type": "string" }
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "level": { "type": "string" }
+    }
   }
 }`
 

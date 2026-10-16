@@ -512,11 +512,14 @@ test_zk_zerotouch() {
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "sheet@1",
-  "type": "object",
-  "properties": {
-    "defects": { "type": "integer" }
-  },
-  "required": ["defects"]
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "defects": { "type": "integer" }
+    },
+    "required": ["defects"]
+  }
 }
 JSON
 
