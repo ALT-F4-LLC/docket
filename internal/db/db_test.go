@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +244,89 @@ func TestMigrateNoOpAtLatestVersion(t *testing.T) {
 
 	err = Migrate(db)
 	testsupport.Must(t, err, "second Migrate failed: %v", err)
+}
+
+// assertNewerSchemaRefusal checks that err refuses a store at stored and names
+// both the stored and the supported version.
+func assertNewerSchemaRefusal(t *testing.T, err error, stored int) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("store at schema_version %d was accepted, want a refusal", stored)
+	}
+	for _, want := range []string{strconv.Itoa(stored), strconv.Itoa(currentSchemaVersion)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name version %s", err, want)
+		}
+	}
+}
+
+// migratedStoreFile creates an on-disk store migrated to currentSchemaVersion
+// and returns its path with the connection closed, so a test can reopen it.
+func migratedStoreFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	db, err := Open(path)
+	testsupport.Must(t, err, "Open: %v", err)
+	defer db.Close()
+	err = Initialize(db)
+	testsupport.Must(t, err, "Initialize: %v", err)
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate: %v", err)
+	return path
+}
+
+func TestMigrateRefusesNewerSchema(t *testing.T) {
+	db := mustOpen(t)
+	err := Initialize(db)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate failed: %v", err)
+	newer := currentSchemaVersion + 1
+	stampSchemaVersion(t, db, newer)
+
+	assertNewerSchemaRefusal(t, Migrate(db), newer)
+
+	v, err := SchemaVersion(db)
+	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
+	if v != newer {
+		t.Errorf("schema_version = %d after refused Migrate, want %d unchanged", v, newer)
+	}
+}
+
+func TestOpenRefusesNewerSchema(t *testing.T) {
+	path := migratedStoreFile(t)
+	newer := currentSchemaVersion + 1
+	db, err := Open(path)
+	testsupport.Must(t, err, "Open at current schema: %v", err)
+	stampSchemaVersion(t, db, newer)
+	db.Close()
+
+	reopened, openErr := Open(path)
+	if reopened != nil {
+		reopened.Close()
+	}
+	assertNewerSchemaRefusal(t, openErr, newer)
+
+	migrateDB := mustOpen(t)
+	err = Initialize(migrateDB)
+	testsupport.Must(t, err, "Initialize failed: %v", err)
+	err = Migrate(migrateDB)
+	testsupport.Must(t, err, "Migrate failed: %v", err)
+	stampSchemaVersion(t, migrateDB, newer)
+	migrateErr := Migrate(migrateDB)
+	if migrateErr == nil || openErr.Error() != migrateErr.Error() {
+		t.Errorf("Open refusal %q differs from Migrate refusal %v", openErr, migrateErr)
+	}
+}
+
+func TestOpenAcceptsStoreAtCurrentSchema(t *testing.T) {
+	path := migratedStoreFile(t)
+
+	db, err := Open(path)
+	testsupport.Must(t, err, "reopening a store at the current schema: %v", err)
+	defer db.Close()
+	err = Migrate(db)
+	testsupport.Must(t, err, "Migrate at the current schema failed: %v", err)
 }
 
 // docV4Tables lists the five tables that v3→v4 must create.

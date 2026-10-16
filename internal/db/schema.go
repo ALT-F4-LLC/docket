@@ -3367,11 +3367,27 @@ func hasColumnDB(db *sql.DB, table, column string) (bool, error) {
 	return rows.Next(), rows.Err()
 }
 
+// refuseNewerSchema rejects a store stamped by a newer binary. This binary
+// cannot know what a later migration changed, so reading or writing that store
+// risks silent corruption.
+func refuseNewerSchema(stored int) error {
+	if stored > currentSchemaVersion {
+		return fmt.Errorf(
+			"store schema version %d is newer than this binary supports (%d); upgrade docket to open it",
+			stored, currentSchemaVersion)
+	}
+	return nil
+}
+
 // Migrate checks the current schema version and applies any pending migrations
-// sequentially. It is a no-op when already at the latest version.
+// sequentially. It is a no-op when already at the latest version, and refuses a
+// store whose version is newer than this binary's.
 func Migrate(db *sql.DB) error {
 	version, err := SchemaVersion(db)
 	if err != nil {
+		return err
+	}
+	if err := refuseNewerSchema(version); err != nil {
 		return err
 	}
 
