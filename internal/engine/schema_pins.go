@@ -31,6 +31,9 @@ type schemaReference struct {
 // `workflow register` — V25a refuses it there — and reachable through a database
 // restored from elsewhere, which is the same reasoning ParsePredicate keeps its
 // own error for.
+//
+// A referenced schema whose root `type` excludes "array", or whose stored body
+// no longer compiles, is refused the same way.
 func schemaPinsFor(
 	tx *sql.Tx,
 	projectID int,
@@ -59,6 +62,23 @@ func schemaPinsFor(
 		}
 		if err != nil {
 			return nil, err
+		}
+
+		// V25b, applied again here because a workflow registered before it
+		// existed never passed it: a root that excludes arrays refuses every
+		// payload record accepts.
+		compiled, err := schema.Compile(registered.Name, registered.Version, []byte(registered.Body))
+		if err != nil {
+			return nil, validationErr(
+				"workflow %s, step %q declares `payload = %q`, whose registered body does not compile: %v",
+				reference.workflow, reference.step, reference.ref, err)
+		}
+		if !compiled.RootAdmitsArray() {
+			return nil, validationErr(
+				"workflow %s, step %q declares `payload = %q`, whose root `type` excludes \"array\"; "+
+					"a recorded payload is a JSON array of objects, so this step could never record. "+
+					"Register a version whose root is `\"type\": \"array\"` and reference it",
+				reference.workflow, reference.step, reference.ref)
 		}
 
 		pins = append(pins, db.Pin{

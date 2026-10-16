@@ -143,6 +143,68 @@ func TestActivateRefusesAnUnregisteredSchema(t *testing.T) {
 	}
 }
 
+// TestActivateRefusesANonArrayRootSchema covers a workflow registered before
+// V25b existed: registerSource skips ValidateSchemas, so the bound workflow
+// names a schema whose root `type` excludes "array" and activation is the
+// only remaining check before every record of that step fails.
+func TestActivateRefusesANonArrayRootSchema(t *testing.T) {
+	for name, rootType := range map[string]string{
+		"string": `"object"`,
+		"list":   `["object", "null"]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn := mustDB(t)
+			registerSource(t, conn, []byte(payloadWorkflow), "pinned-payloads.toml")
+			registerSchemaFixture(t, conn, "findings", 1, strings.Replace(
+				pinFindingsSchema, `"type": "array"`, `"type": `+rootType, 1))
+
+			issue := createIssue(t, conn, "pins an object-root schema", "a body", "task", nil)
+			run := startRun(t, conn, issue)
+
+			_, err := activate(conn, run.ID)
+			if err == nil {
+				t.Fatal("expected activation to refuse a schema whose root excludes arrays")
+			}
+			for _, want := range []string{"pinned-payloads@1", "assess", "findings@1", "array"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal does not name %q: %v", want, err)
+				}
+			}
+			if n := countRows(t, conn, "pins"); n != 0 {
+				t.Errorf("pins holds %d rows after a refused activation, want 0", n)
+			}
+		})
+	}
+}
+
+// TestActivateRefusesAStoredSchemaThatDoesNotCompile: the root check needs a
+// compiled document, so a stored body that no longer compiles (reachable only
+// through a database edited or restored from elsewhere) is refused with the
+// same coordinates as an unregistered one.
+func TestActivateRefusesAStoredSchemaThatDoesNotCompile(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(payloadWorkflow), "pinned-payloads.toml")
+	registerSchemaFixture(t, conn, "findings", 1, pinFindingsSchema)
+	_, err := conn.Exec(`UPDATE schemas SET body = 'not json' WHERE name = 'findings'`)
+	testsupport.Must(t, err, "corrupting the schema body: %v", err)
+
+	issue := createIssue(t, conn, "pins a corrupt schema", "a body", "task", nil)
+	run := startRun(t, conn, issue)
+
+	_, err = activate(conn, run.ID)
+	if err == nil {
+		t.Fatal("expected activation to refuse a stored schema that does not compile")
+	}
+	for _, want := range []string{"pinned-payloads@1", "assess", "findings@1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+	if n := countRows(t, conn, "pins"); n != 0 {
+		t.Errorf("pins holds %d rows after a refused activation, want 0", n)
+	}
+}
+
 // TestReActivationInheritsSchemaPins: a schema registered mid-run does not
 // enter a live run. Re-activation inherits the pin set, never recomputes it,
 // and a schema is subject to that rule for the reason a workflow is — the
