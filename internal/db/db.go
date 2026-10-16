@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -62,6 +63,20 @@ func Open(dbPath string) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+// BeginReadSnapshot opens a read snapshot as a deferred BEGIN, for a
+// transaction that only reads and is always rolled back.
+//
+// The handle's plain Begin is BEGIN IMMEDIATE, which would hold the write lock
+// for the whole read — a scheduler load on a large run, or a full report — and
+// could outlast another process's busy_timeout. ReadOnly makes the driver
+// issue a deferred BEGIN instead: the snapshot never upgrades to a write, so
+// the stale-snapshot hazard the immediate lock exists to prevent cannot arise
+// here, and writers proceed. The driver does not enforce ReadOnly, so a caller
+// must issue no write inside the snapshot.
+func BeginReadSnapshot(conn *sql.DB) (*sql.Tx, error) {
+	return conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 }
 
 // OpenReader opens a SEPARATE connection to the same database file, for

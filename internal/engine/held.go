@@ -1206,7 +1206,7 @@ func (e *Engine) HeldResolutionStaleTargets(
 func readyStaleTargetCandidates(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) ([]targetCandidate, error) {
-	tx, err := beginReadSnapshot(conn)
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the post-resolution ready set: %w", err)
 	}

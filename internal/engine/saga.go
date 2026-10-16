@@ -2297,7 +2297,7 @@ func inputPayloads(conn *sql.DB, step *db.Step, nowMS int64) ([]map[string]any, 
 		return nil, err
 	}
 
-	tx, err := beginReadSnapshot(conn)
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning the input read: %w", err)
 	}

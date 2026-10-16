@@ -724,7 +724,7 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	if err != nil {
 		return nil, err
 	}
-	tx, err := beginReadSnapshot(conn)
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s's steps: %w", model.FormatRunID(runID), err)
 	}
@@ -807,7 +807,7 @@ func EffectiveStatusCounts(conn *sql.DB, runID int, nowMS int64) ([]model.Status
 	if err != nil {
 		return nil, err
 	}
-	tx, err := beginReadSnapshot(conn)
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"counting %s's step statuses: %w", model.FormatRunID(runID), err)
