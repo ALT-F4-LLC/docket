@@ -481,7 +481,8 @@ func (e *Engine) resolveStep(
 	// a `vote` step waits on ITS VOTERS, and nobody but them can advance it.
 	// `step resolve` is explicitly the operator's way past one — the run must
 	// not be hostage to a quorum that never arrives — so it is offered whatever
-	// the step's status.
+	// the step's status, short of `superseded` (refused inside the transaction
+	// below).
 	resolvable := step.Status == db.StepWaitingHuman || step.Kind == workflow.TypeVote
 	if !resolvable {
 		return validationErr(
@@ -775,6 +776,21 @@ func (e *Engine) resolveStep(
 		return fmt.Errorf("beginning the resolution: %w", err)
 	}
 	defer tx.Rollback()
+
+	// R11's vote exception ends where a fix round has superseded the step: the
+	// round answers the question, and resolving again would grant another loop
+	// and mint another round over it. Read inside the transaction so a second
+	// resolution racing the first sees the status the first one committed.
+	current, err := db.GetStepTx(tx, step.ID)
+	if err != nil {
+		return err
+	}
+	if current.Kind == workflow.TypeVote && current.Status == db.StepSuperseded {
+		return conflictErr(
+			"step %s is %s: a fix round already answers it, so it cannot be "+
+				"resolved again; resolve the round's own steps instead",
+			step.Instance, current.Status)
+	}
 
 	var routing, status string
 	switch as {

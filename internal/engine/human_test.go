@@ -320,6 +320,62 @@ func TestResolveRefusesAnUnparkedStep(t *testing.T) {
 	}
 }
 
+// TestResolveFixRoundRepeated pins the edge of R11's vote exception: a vote
+// step stays resolvable while its voters still owe it an answer, and stops
+// being resolvable once a fix round has superseded it. Repeating the verb on
+// the superseded step must not grant another loop or mint another round.
+func TestResolveFixRoundRepeated(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(voteLoopSrc), "vote-loop.toml")
+	issue := createIssue(t, conn, "voted", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
+		"driving after the record")
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepPending {
+		t.Fatalf("premise: gate@0 = %q, want an open vote at %q", got, db.StepPending)
+	}
+	gateID := stepIDByInstance(t, conn, "gate@0")
+
+	testsupport.Must(t,
+		e.ResolveStep(conn, gateID, ResolveFixRound, "first", nowMS),
+		"resolve --as fix-round on a pending vote step")
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepSuperseded {
+		t.Fatalf("gate@0 = %q after the first fix-round, want %q", got, db.StepSuperseded)
+	}
+
+	for _, note := range []string{"second", "third"} {
+		err := e.ResolveStep(conn, gateID, ResolveFixRound, note, nowMS)
+		if err == nil {
+			t.Errorf("the %s fix-round on a superseded vote step was accepted", note)
+			continue
+		}
+		if code, _ := CodeOf(err); code != CodeConflict {
+			t.Errorf("the %s fix-round: code = %v, want %v (%v)", note, code, CodeConflict, err)
+		}
+	}
+
+	if got := loopCount(t, conn, run.ID, issue); got != 1 {
+		t.Errorf("loop_count = %d after one accepted fix-round, want 1", got)
+	}
+	if got := loopGrants(t, conn, run.ID, issue); got != 1 {
+		t.Errorf("loop_grants = %d after one accepted fix-round, want 1", got)
+	}
+	var fixRows int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM steps WHERE run_id = ? AND step_name = 'fix'`,
+		run.ID).Scan(&fixRows)
+	testsupport.Must(t, err, "counting fix rows: %v", err)
+	if fixRows != 1 {
+		t.Errorf("fix rows = %d after one accepted fix-round, want 1", fixRows)
+	}
+}
+
 // TestResolveRetryResetsAttemptsAndClearsTheSaga pins retry semantics,
 // including the saga clear that a naive implementation omits: a retry re-does
 // the work, so a half-finished saga from the previous try must not resume.
