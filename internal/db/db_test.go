@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -48,6 +49,75 @@ func TestOpenSetsBusyTimeout(t *testing.T) {
 	testsupport.Must(t, err, "querying busy_timeout: %v", err)
 	if timeout != 5000 {
 		t.Errorf("busy_timeout = %d, want 5000", timeout)
+	}
+}
+
+// TestReadSnapshotDoesNotBlockWriter pins that BeginReadSnapshot takes no write
+// lock: while a snapshot is open on one handle, a write transaction on another
+// handle to the same file commits well inside busy_timeout, and the snapshot
+// still reads the instant it opened at. A snapshot opened as BEGIN IMMEDIATE
+// would hold the write lock, and the writer would wait out its busy_timeout,
+// missing the deadline.
+func TestReadSnapshotDoesNotBlockWriter(t *testing.T) {
+	const writerDeadline = time.Second
+
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader, err := Open(path)
+	testsupport.Must(t, err, "opening the reader's handle: %v", err)
+	t.Cleanup(func() { reader.Close() })
+	_, err = reader.Exec("CREATE TABLE t (x INTEGER)")
+	testsupport.Must(t, err, "creating the table: %v", err)
+
+	writer, err := Open(path)
+	testsupport.Must(t, err, "opening the writer's handle: %v", err)
+	t.Cleanup(func() { writer.Close() })
+	var busyTimeoutMS int64
+	err = writer.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeoutMS)
+	testsupport.Must(t, err, "reading the writer's busy_timeout: %v", err)
+	if busyTimeout := time.Duration(busyTimeoutMS) * time.Millisecond; writerDeadline >= busyTimeout {
+		t.Fatalf("deadline %v is not shorter than busy_timeout %v, so a blocked writer "+
+			"would not miss it", writerDeadline, busyTimeout)
+	}
+
+	snapshot, err := BeginReadSnapshot(reader)
+	testsupport.Must(t, err, "opening the snapshot: %v", err)
+	defer snapshot.Rollback()
+	// A deferred BEGIN holds nothing until its first read; read so the
+	// snapshot is really open while the writer runs.
+	var before int
+	err = snapshot.QueryRow("SELECT count(*) FROM t").Scan(&before)
+	testsupport.Must(t, err, "reading in the snapshot: %v", err)
+
+	committed := make(chan error, 1)
+	go func() {
+		tx, err := writer.Begin()
+		if err != nil {
+			committed <- err
+			return
+		}
+		if _, err := tx.Exec("INSERT INTO t (x) VALUES (1)"); err != nil {
+			tx.Rollback()
+			committed <- err
+			return
+		}
+		committed <- tx.Commit()
+	}()
+
+	select {
+	case err := <-committed:
+		testsupport.Must(t, err, "writer's transaction while the snapshot is open: %v", err)
+	case <-time.After(writerDeadline):
+		snapshot.Rollback()
+		<-committed
+		t.Fatalf("writer did not commit within %v while the snapshot was open: "+
+			"the snapshot holds the write lock", writerDeadline)
+	}
+
+	var during int
+	err = snapshot.QueryRow("SELECT count(*) FROM t").Scan(&during)
+	testsupport.Must(t, err, "re-reading in the snapshot: %v", err)
+	if during != before {
+		t.Errorf("snapshot saw %d rows after the writer committed, want %d", during, before)
 	}
 }
 

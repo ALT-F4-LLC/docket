@@ -44,8 +44,8 @@ import (
 // says exactly which function and which call.
 //
 // The check: within a function, the region between a transaction opener
-// (`conn.Begin()`, `conn.BeginTx()`, or a package helper returning *sql.Tx,
-// such as beginReadSnapshot) and the matching `Commit()` is a LIVE
+// (`conn.Begin()`, `conn.BeginTx()`, `db.BeginReadSnapshot()`, or a package
+// helper returning *sql.Tx) and the matching `Commit()` is a LIVE
 // TRANSACTION, and no call inside that region may touch the pool — neither
 // directly (`conn.Query`) nor by passing `conn` to a helper that might.
 //
@@ -96,8 +96,8 @@ type poolRead struct {
 // commits (the read-only paths, which rely on `defer tx.Rollback()`).
 type liveRegion struct{ from, to token.Pos }
 
-// txOpenerHelpers names the package functions that return a *sql.Tx, such as
-// beginReadSnapshot. Calling one opens a transaction as conn.Begin does.
+// txOpenerHelpers names the package functions that return a *sql.Tx. Calling
+// one opens a transaction as conn.Begin does.
 func txOpenerHelpers(files map[string]*ast.File) map[string]bool {
 	openers := map[string]bool{}
 	for _, file := range files {
@@ -131,7 +131,7 @@ func isSQLTxPointer(expr ast.Expr) bool {
 
 // poolReadsInsideTransactions returns every pool-taking call inside a
 // live-transaction region of fn. A region opens at conn.Begin, conn.BeginTx,
-// or a call to one of txOpeners.
+// db.BeginReadSnapshot, or a call to one of txOpeners.
 func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []poolRead {
 	// Collect the Begin and Commit positions in source order.
 	var begins, commits []token.Pos
@@ -153,7 +153,8 @@ func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []
 			return true
 		}
 		switch {
-		case ident.Name == "conn" && (sel.Sel.Name == "Begin" || sel.Sel.Name == "BeginTx"):
+		case ident.Name == "conn" && (sel.Sel.Name == "Begin" || sel.Sel.Name == "BeginTx"),
+			ident.Name == "db" && sel.Sel.Name == "BeginReadSnapshot":
 			begins = append(begins, call.Pos())
 		case strings.HasPrefix(ident.Name, "tx") && sel.Sel.Name == "Commit":
 			commits = append(commits, call.Pos())
@@ -264,6 +265,11 @@ func TestPoolReadsInsideTransactionsOpeners(t *testing.T) {
 			name:     "conn.BeginTx",
 			body:     "tx, _ := conn.BeginTx(ctx, nil)\nconn.QueryRow(\"q\")\ntx.Commit()",
 			wantLine: 2, wantCall: "conn.QueryRow",
+		},
+		{
+			name:     "db.BeginReadSnapshot",
+			body:     "tx, _ := db.BeginReadSnapshot(conn)\ndefer tx.Rollback()\nlookup(conn)",
+			wantLine: 3, wantCall: "lookup",
 		},
 		{
 			name:     "package helper returning *sql.Tx",
