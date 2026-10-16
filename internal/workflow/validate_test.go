@@ -74,6 +74,30 @@ func registeredRisk() SchemaResolver {
 	return fakeSchemas{documents: map[string]string{"risk-report@1": riskSchema}}
 }
 
+// rootTypeCase is a V25b row: step "a" of workflow "p" declares `payload =
+// "shape@1"`, registered as `body`. A refused row must name the workflow, the
+// step, and the ref, because the record-time refusals it prevents never do.
+func rootTypeCase(name, body string, refused bool) validationCase {
+	tc := validationCase{
+		rule: "V25b", name: name,
+		src: `
+[pipeline]
+name = "p"
+version = 1
+[[step]]
+name = "a"
+executor = "x"
+emits = "k"
+payload = "shape@1"
+`,
+		schemas: fakeSchemas{documents: map[string]string{"shape@1": body}},
+	}
+	if refused {
+		tc.wants = []string{"workflow p", `"a"`, "shape@1", "JSON array"}
+	}
+	return tc
+}
+
 // fakeVoteRules is V26's environment: the set of registered rule names.
 type fakeVoteRules struct {
 	registered []string
@@ -1039,6 +1063,12 @@ payload = "absent@3"
 		schemas: registeredRisk(),
 		wants:   []string{`"a"`, "absent@3", "not registered", "docket schema register"},
 	},
+	rootTypeCase("an object root is refused", `{"type": "object", "required": ["answer"]}`, true),
+	rootTypeCase("a string root is refused", `{"type": "string"}`, true),
+	rootTypeCase("a type list without array is refused", `{"type": ["object", "null"]}`, true),
+	rootTypeCase("an array root registers clean", `{"type": "array", "items": {"type": "object"}}`, false),
+	rootTypeCase("a type list containing array registers clean", `{"type": ["array", "null"]}`, false),
+	rootTypeCase("an untyped root registers clean", `{"items": {"type": "object"}}`, false),
 	{
 		rule: "V21a", name: "threshold names a field the schema does not declare",
 		src: `

@@ -120,6 +120,9 @@ func ValidateSchemas(def *Definition, resolver SchemaResolver) error {
 		if err != nil {
 			return withWorkflow(err, def.Pipeline.Name)
 		}
+		if err := validatePayloadRoot(step, registered); err != nil {
+			return withWorkflow(err, def.Pipeline.Name)
+		}
 		if err := validateStepThresholds(step, registered); err != nil {
 			return withWorkflow(err, def.Pipeline.Name)
 		}
@@ -432,6 +435,25 @@ func resolveStepSchema(step *Step, resolver SchemaResolver) (*Registered, error)
 		return nil, err
 	}
 	return registered, nil
+}
+
+// validatePayloadRoot is V25b: the declared schema's root must admit a JSON
+// array. Record accepts only an array of objects before the schema runs, so a
+// root that excludes arrays refuses every payload record lets through, and the
+// step could never record.
+func validatePayloadRoot(step *Step, registered *Registered) error {
+	if registered.RootAdmitsArray() {
+		return nil
+	}
+	return &Error{
+		Rule: "V25b", Step: step.Name, Field: "payload",
+		Message: fmt.Sprintf(
+			"step %q: `payload` names %s, whose root `type` excludes \"array\". "+
+				"A recorded payload must be a JSON array of objects, so this step "+
+				"could never record. Register a version whose root is "+
+				"`\"type\": \"array\"` with the element schema under `items`",
+			step.Name, registered.Ref()),
+	}
 }
 
 // validateStepThresholds is V21a-V21c over one step's predicates.

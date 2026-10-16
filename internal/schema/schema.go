@@ -105,10 +105,11 @@ type Registered struct {
 	// Body, never a second source of truth.
 	Ordered Index
 
-	fields   map[string]Field
-	names    []string
-	required []string
-	compiled *jsonschema.Schema
+	fields          map[string]Field
+	names           []string
+	required        []string
+	rootAdmitsArray bool
+	compiled        *jsonschema.Schema
 }
 
 // Compile parses a schema document, checks the annotation rules, compiles it
@@ -145,15 +146,43 @@ func Compile(name string, version int, body []byte) (*Registered, error) {
 
 	fields, names := deriveFields(doc)
 	return &Registered{
-		Name:     name,
-		Version:  version,
-		Body:     body,
-		Ordered:  indexFromFields(fields, names),
-		fields:   fields,
-		names:    names,
-		required: deriveRequired(doc),
-		compiled: compiled,
+		Name:            name,
+		Version:         version,
+		Body:            body,
+		Ordered:         indexFromFields(fields, names),
+		fields:          fields,
+		names:           names,
+		required:        deriveRequired(doc),
+		rootAdmitsArray: deriveRootAdmitsArray(doc),
+		compiled:        compiled,
 	}, nil
+}
+
+// RootAdmitsArray reports whether the document's root `type` admits a JSON
+// array. A recorded payload is always an array of objects before it reaches
+// ValidatePayload, so a document whose root excludes arrays can never be
+// satisfied by one.
+//
+// Only a declared root `type` is read: an untyped root admits an array, and a
+// root built from `$ref`, `allOf`, or `anyOf` is not analysed.
+func (r *Registered) RootAdmitsArray() bool {
+	return r.rootAdmitsArray
+}
+
+// deriveRootAdmitsArray reads the root `type` keyword, a string or a list of
+// strings by the metaschema Compile has already applied.
+func deriveRootAdmitsArray(doc any) bool {
+	root, ok := doc.(map[string]any)
+	if !ok {
+		return true
+	}
+	switch declared := root["type"].(type) {
+	case string:
+		return declared == "array"
+	case []any:
+		return slices.Contains(declared, any("array"))
+	}
+	return true
 }
 
 // Ref renders the `name@version` identity a run pins.
