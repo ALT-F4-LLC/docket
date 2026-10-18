@@ -707,6 +707,10 @@ type Pin struct {
 	// would both cost an extra pass and open a window where the two reads
 	// disagree.
 	Bytes int
+	// Content is the pinned file's bytes, persisted so a store opened on
+	// another machine renders the same packet. Nil for a pin recorded
+	// without its bytes, including every pin from before schema v45.
+	Content []byte
 }
 
 // InsertPinTx records a pin. `INSERT OR IGNORE` on the UNIQUE(run_id, kind, ref)
@@ -715,8 +719,8 @@ type Pin struct {
 // to it.
 func InsertPinTx(tx *sql.Tx, p Pin) error {
 	_, err := tx.Exec(
-		`INSERT OR IGNORE INTO pins (run_id, kind, ref, sha256) VALUES (?, ?, ?, ?)`,
-		p.RunID, p.Kind, p.Ref, p.SHA256,
+		`INSERT OR IGNORE INTO pins (run_id, kind, ref, sha256, content) VALUES (?, ?, ?, ?, ?)`,
+		p.RunID, p.Kind, p.Ref, p.SHA256, p.Content,
 	)
 	if err != nil {
 		return fmt.Errorf("pinning %s %s: %w", p.Kind, p.Ref, err)
@@ -729,7 +733,7 @@ func InsertPinTx(tx *sql.Tx, p Pin) error {
 // would make the goldens flap.
 func ListPins(db *sql.DB, runID int) ([]Pin, error) {
 	rows, err := db.Query(
-		`SELECT run_id, kind, ref, sha256 FROM pins WHERE run_id = ? ORDER BY kind, ref`,
+		`SELECT run_id, kind, ref, sha256, content FROM pins WHERE run_id = ? ORDER BY kind, ref`,
 		runID,
 	)
 	if err != nil {
@@ -743,7 +747,7 @@ func ListPins(db *sql.DB, runID int) ([]Pin, error) {
 // in-flight run cannot silently adopt an edited workflow.
 func ListPinsTx(tx *sql.Tx, runID int) ([]Pin, error) {
 	rows, err := tx.Query(
-		`SELECT run_id, kind, ref, sha256 FROM pins WHERE run_id = ? ORDER BY kind, ref`,
+		`SELECT run_id, kind, ref, sha256, content FROM pins WHERE run_id = ? ORDER BY kind, ref`,
 		runID,
 	)
 	if err != nil {
@@ -756,7 +760,7 @@ func ListPinsTx(tx *sql.Tx, runID int) ([]Pin, error) {
 // *sql.Tx read the same table through the same shape).
 func scanPin(r *sql.Rows) (Pin, error) {
 	var p Pin
-	if err := r.Scan(&p.RunID, &p.Kind, &p.Ref, &p.SHA256); err != nil {
+	if err := r.Scan(&p.RunID, &p.Kind, &p.Ref, &p.SHA256, &p.Content); err != nil {
 		return Pin{}, fmt.Errorf("reading pin: %w", err)
 	}
 	return p, nil

@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 44
+const currentSchemaVersion = 45
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -214,6 +214,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	42: migrateV41ToV42,
 	43: migrateV42ToV43,
 	44: migrateV43ToV44,
+	45: migrateV44ToV45,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3251,6 +3252,43 @@ func migrateV43ToV44(tx *sql.Tx) error {
 	return nil
 }
 
+// v45AddedColumns is v45's whole schema change: `content` on `pins`, the
+// pinned file's bytes, so a store opened on another machine can render the
+// same packet without that machine's checkout. NULL means the pin was
+// recorded without its bytes.
+var v45AddedColumns = []struct{ table, column, ddl string }{
+	{"pins", "content",
+		`ALTER TABLE pins ADD COLUMN content BLOB`},
+}
+
+// v45ColumnSentinels are the columns the rewind guard probes, the v44 form:
+// v45 adds no table and no index, so a database stamped 45 by a binary built
+// mid-change carries every v44 sentinel and `content` never arrives.
+var v45ColumnSentinels = []struct{ table, column string }{
+	{"pins", "content"},
+}
+
+// migrateV44ToV45 adds `pins.content`. It back-fills nothing: the bytes a
+// pre-v45 pin hashed are gone, and reading the file now could store content
+// that no longer matches the pinned hash. It probes before the ALTER, so it
+// stays re-runnable.
+func migrateV44ToV45(tx *sql.Tx) error {
+	for _, col := range v45AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v44 to v45: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v44 to v45: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -4152,6 +4190,23 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 43
+				break
+			}
+		}
+	}
+
+	// The v45 guard, in the same COLUMN form as v44 and for its reason: v45
+	// adds one column and no table, so a database stamped 45 by a binary built
+	// mid-change carries every v44 sentinel and `pins.content` never arrives.
+	if version >= 45 {
+		for _, col := range v45ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v45 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 44
 				break
 			}
 		}
