@@ -1,0 +1,2045 @@
+// The v1 daemon API. docs/design/connect-api-v1.md records the design: the
+// package and version rule, the RPC and message naming scheme, how the
+// CLI's JSON envelopes relate to these messages, and the codegen command.
+syntax = "proto3";
+
+package docket.v1;
+
+option go_package = "github.com/ALT-F4-LLC/docket/internal/gen/docket/v1;docketv1";
+
+// DocketService serves every store-backed CLI verb as one unary RPC, plus
+// Handshake. An RPC name is the verb's command path in PascalCase: each path
+// segment, and each hyphen-separated word inside a segment, capitalized and
+// concatenated (`issue comment add` is IssueCommentAdd, `dispatch
+// backfill-usage` is DispatchBackfillUsage).
+service DocketService {
+  // Handshake is the one RPC with no CLI verb. A client calls it first to
+  // learn the daemon's build and API major before issuing any verb.
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  rpc Board(BoardRequest) returns (BoardResponse);
+
+  rpc ConfigGet(ConfigGetRequest) returns (ConfigGetResponse);
+  rpc ConfigSet(ConfigSetRequest) returns (ConfigSetResponse);
+
+  rpc DispatchAbandon(DispatchAbandonRequest) returns (DispatchAbandonResponse);
+  rpc DispatchBackfillUsage(DispatchBackfillUsageRequest) returns (DispatchBackfillUsageResponse);
+  rpc DispatchClose(DispatchCloseRequest) returns (DispatchCloseResponse);
+  rpc DispatchExtend(DispatchExtendRequest) returns (DispatchExtendResponse);
+  rpc DispatchOpen(DispatchOpenRequest) returns (DispatchOpenResponse);
+  rpc DispatchVerify(DispatchVerifyRequest) returns (DispatchVerifyResponse);
+  rpc DispatchWaiveTarget(DispatchWaiveTargetRequest) returns (DispatchWaiveTargetResponse);
+
+  rpc DocCommentAdd(DocCommentAddRequest) returns (DocCommentAddResponse);
+  rpc DocCommentList(DocCommentListRequest) returns (DocCommentListResponse);
+  rpc DocCreate(DocCreateRequest) returns (DocCreateResponse);
+  rpc DocDelete(DocDeleteRequest) returns (DocDeleteResponse);
+  rpc DocEdit(DocEditRequest) returns (DocEditResponse);
+  rpc DocLinkAdd(DocLinkAddRequest) returns (DocLinkAddResponse);
+  rpc DocLinkRemove(DocLinkRemoveRequest) returns (DocLinkRemoveResponse);
+  rpc DocList(DocListRequest) returns (DocListResponse);
+  rpc DocShow(DocShowRequest) returns (DocShowResponse);
+
+  rpc Doctor(DoctorRequest) returns (DoctorResponse);
+
+  rpc EventsList(EventsListRequest) returns (EventsListResponse);
+  rpc EventsPrune(EventsPruneRequest) returns (EventsPruneResponse);
+
+  rpc Export(ExportRequest) returns (ExportResponse);
+
+  rpc GateStatus(GateStatusRequest) returns (GateStatusResponse);
+
+  rpc GuardGate(GuardGateRequest) returns (GuardGateResponse);
+  rpc GuardRecord(GuardRecordRequest) returns (GuardRecordResponse);
+  rpc GuardSpawn(GuardSpawnRequest) returns (GuardSpawnResponse);
+  rpc GuardStop(GuardStopRequest) returns (GuardStopResponse);
+
+  rpc Import(ImportRequest) returns (ImportResponse);
+
+  rpc IssueClaim(IssueClaimRequest) returns (IssueClaimResponse);
+  rpc IssueClose(IssueCloseRequest) returns (IssueCloseResponse);
+  rpc IssueCommentAdd(IssueCommentAddRequest) returns (IssueCommentAddResponse);
+  rpc IssueCommentList(IssueCommentListRequest) returns (IssueCommentListResponse);
+  rpc IssueCreate(IssueCreateRequest) returns (IssueCreateResponse);
+  rpc IssueDelete(IssueDeleteRequest) returns (IssueDeleteResponse);
+  rpc IssueEdit(IssueEditRequest) returns (IssueEditResponse);
+  rpc IssueFileAdd(IssueFileAddRequest) returns (IssueFileAddResponse);
+  rpc IssueFileList(IssueFileListRequest) returns (IssueFileListResponse);
+  rpc IssueFileRemove(IssueFileRemoveRequest) returns (IssueFileRemoveResponse);
+  rpc IssueGraph(IssueGraphRequest) returns (IssueGraphResponse);
+  rpc IssueHeartbeat(IssueHeartbeatRequest) returns (IssueHeartbeatResponse);
+  rpc IssueLabelAdd(IssueLabelAddRequest) returns (IssueLabelAddResponse);
+  rpc IssueLabelDelete(IssueLabelDeleteRequest) returns (IssueLabelDeleteResponse);
+  rpc IssueLabelList(IssueLabelListRequest) returns (IssueLabelListResponse);
+  rpc IssueLabelRm(IssueLabelRmRequest) returns (IssueLabelRmResponse);
+  rpc IssueLinkAdd(IssueLinkAddRequest) returns (IssueLinkAddResponse);
+  rpc IssueLinkList(IssueLinkListRequest) returns (IssueLinkListResponse);
+  rpc IssueLinkRemove(IssueLinkRemoveRequest) returns (IssueLinkRemoveResponse);
+  rpc IssueList(IssueListRequest) returns (IssueListResponse);
+  rpc IssueLog(IssueLogRequest) returns (IssueLogResponse);
+  rpc IssueMove(IssueMoveRequest) returns (IssueMoveResponse);
+  rpc IssueRelease(IssueReleaseRequest) returns (IssueReleaseResponse);
+  rpc IssueReopen(IssueReopenRequest) returns (IssueReopenResponse);
+  rpc IssueShow(IssueShowRequest) returns (IssueShowResponse);
+
+  rpc Next(NextRequest) returns (NextResponse);
+
+  rpc PinShow(PinShowRequest) returns (PinShowResponse);
+
+  rpc Plan(PlanRequest) returns (PlanResponse);
+
+  rpc PolicyResolve(PolicyResolveRequest) returns (PolicyResolveResponse);
+
+  rpc ProjectDelete(ProjectDeleteRequest) returns (ProjectDeleteResponse);
+  rpc ProjectList(ProjectListRequest) returns (ProjectListResponse);
+  rpc ProjectSetPrefix(ProjectSetPrefixRequest) returns (ProjectSetPrefixResponse);
+
+  rpc RegistryAudit(RegistryAuditRequest) returns (RegistryAuditResponse);
+
+  rpc ReportExecutors(ReportExecutorsRequest) returns (ReportExecutorsResponse);
+
+  rpc RunAbandon(RunAbandonRequest) returns (RunAbandonResponse);
+  rpc RunActivate(RunActivateRequest) returns (RunActivateResponse);
+  rpc RunBudget(RunBudgetRequest) returns (RunBudgetResponse);
+  rpc RunConduct(RunConductRequest) returns (RunConductResponse);
+  rpc RunFactAdd(RunFactAddRequest) returns (RunFactAddResponse);
+  rpc RunIssueAdd(RunIssueAddRequest) returns (RunIssueAddResponse);
+  rpc RunIssueRemove(RunIssueRemoveRequest) returns (RunIssueRemoveResponse);
+  rpc RunNoteAdd(RunNoteAddRequest) returns (RunNoteAddResponse);
+  rpc RunNoteList(RunNoteListRequest) returns (RunNoteListResponse);
+  rpc RunPause(RunPauseRequest) returns (RunPauseResponse);
+  rpc RunRefreshBody(RunRefreshBodyRequest) returns (RunRefreshBodyResponse);
+  rpc RunRefreshFiles(RunRefreshFilesRequest) returns (RunRefreshFilesResponse);
+  rpc RunRefreshScope(RunRefreshScopeRequest) returns (RunRefreshScopeResponse);
+  rpc RunRepin(RunRepinRequest) returns (RunRepinResponse);
+  rpc RunReport(RunReportRequest) returns (RunReportResponse);
+  rpc RunResume(RunResumeRequest) returns (RunResumeResponse);
+  rpc RunStart(RunStartRequest) returns (RunStartResponse);
+  rpc RunStatus(RunStatusRequest) returns (RunStatusResponse);
+  rpc RunVerifyPins(RunVerifyPinsRequest) returns (RunVerifyPinsResponse);
+
+  rpc SchemaDeprecate(SchemaDeprecateRequest) returns (SchemaDeprecateResponse);
+  rpc SchemaList(SchemaListRequest) returns (SchemaListResponse);
+  rpc SchemaRegister(SchemaRegisterRequest) returns (SchemaRegisterResponse);
+  rpc SchemaShow(SchemaShowRequest) returns (SchemaShowResponse);
+
+  rpc Stats(StatsRequest) returns (StatsResponse);
+
+  rpc StepAnnotate(StepAnnotateRequest) returns (StepAnnotateResponse);
+  rpc StepApprove(StepApproveRequest) returns (StepApproveResponse);
+  rpc StepArtifact(StepArtifactRequest) returns (StepArtifactResponse);
+  rpc StepArtifacts(StepArtifactsRequest) returns (StepArtifactsResponse);
+  rpc StepClaim(StepClaimRequest) returns (StepClaimResponse);
+  rpc StepComplete(StepCompleteRequest) returns (StepCompleteResponse);
+  rpc StepContext(StepContextRequest) returns (StepContextResponse);
+  rpc StepFail(StepFailRequest) returns (StepFailResponse);
+  rpc StepGates(StepGatesRequest) returns (StepGatesResponse);
+  rpc StepHeartbeat(StepHeartbeatRequest) returns (StepHeartbeatResponse);
+  rpc StepHold(StepHoldRequest) returns (StepHoldResponse);
+  rpc StepList(StepListRequest) returns (StepListResponse);
+  rpc StepReap(StepReapRequest) returns (StepReapResponse);
+  rpc StepReject(StepRejectRequest) returns (StepRejectResponse);
+  rpc StepRender(StepRenderRequest) returns (StepRenderResponse);
+  rpc StepResolve(StepResolveRequest) returns (StepResolveResponse);
+  rpc StepShow(StepShowRequest) returns (StepShowResponse);
+
+  rpc VoteBackfillUsage(VoteBackfillUsageRequest) returns (VoteBackfillUsageResponse);
+  rpc VoteCast(VoteCastRequest) returns (VoteCastResponse);
+  rpc VoteClose(VoteCloseRequest) returns (VoteCloseResponse);
+  rpc VoteCommit(VoteCommitRequest) returns (VoteCommitResponse);
+  rpc VoteCreate(VoteCreateRequest) returns (VoteCreateResponse);
+  rpc VoteLink(VoteLinkRequest) returns (VoteLinkResponse);
+  rpc VoteList(VoteListRequest) returns (VoteListResponse);
+  rpc VoteResult(VoteResultRequest) returns (VoteResultResponse);
+  rpc VoteShow(VoteShowRequest) returns (VoteShowResponse);
+  rpc VoteUnlink(VoteUnlinkRequest) returns (VoteUnlinkResponse);
+
+  rpc WorkflowDeprecate(WorkflowDeprecateRequest) returns (WorkflowDeprecateResponse);
+  rpc WorkflowLint(WorkflowLintRequest) returns (WorkflowLintResponse);
+  rpc WorkflowList(WorkflowListRequest) returns (WorkflowListResponse);
+  rpc WorkflowRegister(WorkflowRegisterRequest) returns (WorkflowRegisterResponse);
+  rpc WorkflowShow(WorkflowShowRequest) returns (WorkflowShowResponse);
+}
+
+// ErrorDetail rides as the first detail of every Connect error the daemon
+// returns. `code` is the CLI's error code (GENERAL_ERROR, NOT_FOUND,
+// VALIDATION_ERROR, CONFLICT, AUTH_ERROR, STALE_LEASE, TIMEOUT, UNTRUSTED,
+// GONE), from which the client derives both the envelope's `code` and the
+// process exit status. A failure that still carries a report attaches the
+// RPC's own response message as a second detail.
+message ErrorDetail {
+  string code = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Shared entities. Field names and scalar forms follow the `data` objects the
+// CLI emits under --json=v2, so the client renders either envelope version
+// from these messages without consulting the store.
+// ---------------------------------------------------------------------------
+
+message Lease {
+  string owner = 1;
+  int64 expires_ms = 2;
+  int32 attempt = 3;
+}
+
+// ScopeGlobs distinguishes "no scope declared" (field absent) from "declared
+// to touch nothing" (present, empty globs).
+message ScopeGlobs {
+  repeated string globs = 1;
+}
+
+message DocRef {
+  string id = 1;
+  string type = 2;
+  string title = 3;
+  string status = 4;
+}
+
+message Issue {
+  string id = 1;
+  string parent_id = 2;
+  string title = 3;
+  string description = 4;
+  string status = 5;
+  string priority = 6;
+  string kind = 7;
+  string assignee = 8;
+  repeated string labels = 9;
+  repeated string files = 10;
+  repeated DocRef docs = 11;
+  string created_at = 12;
+  string updated_at = 13;
+  int32 version = 14;
+  Lease lease = 15;
+  ScopeGlobs scope = 16;
+  string resolution = 17;
+  string size = 18;
+}
+
+message Comment {
+  int32 id = 1;
+  string issue_id = 2;
+  string body = 3;
+  string author = 4;
+  string created_at = 5;
+}
+
+message Activity {
+  int32 id = 1;
+  string issue_id = 2;
+  string field_changed = 3;
+  string old_value = 4;
+  string new_value = 5;
+  string changed_by = 6;
+  string created_at = 7;
+}
+
+message Label {
+  int32 id = 1;
+  string name = 2;
+  string color = 3;
+  int32 issue_count = 4;
+}
+
+message Relation {
+  int32 id = 1;
+  string source_issue_id = 2;
+  string target_issue_id = 3;
+  string relation_type = 4;
+  string created_at = 5;
+}
+
+message Doc {
+  string id = 1;
+  string type = 2;
+  string status = 3;
+  string title = 4;
+  string body = 5;
+  string author = 6;
+  string created_at = 7;
+  string updated_at = 8;
+  repeated DocRevision revisions = 9;
+  repeated string linked_issues = 10;
+}
+
+message DocRevision {
+  int32 id = 1;
+  string doc_id = 2;
+  int32 revision_number = 3;
+  string body = 4;
+  string change_kind = 5;
+  string author = 6;
+  string created_at = 7;
+}
+
+message DocComment {
+  int32 id = 1;
+  string doc_id = 2;
+  string body = 3;
+  string author = 4;
+  string created_at = 5;
+}
+
+message Project {
+  int32 id = 1;
+  string identity = 2;
+  string name = 3;
+  string prefix = 4;
+  int64 created_at_ms = 5;
+}
+
+message Run {
+  string id = 1;
+  string request = 2;
+  string status = 3;
+  string reason = 4;
+  double budget = 5;
+  double usage_budget = 6;
+  optional int64 activated_at_ms = 7;
+  int64 created_at_ms = 8;
+  int64 updated_at_ms = 9;
+  int32 version = 10;
+  string exec_root = 11;
+  string branch = 12;
+  string commit_sha = 13;
+  string hostname = 14;
+  repeated string issues = 15;
+  repeated StatusCount steps = 16;
+}
+
+message StatusCount {
+  string status = 1;
+  int32 count = 2;
+}
+
+message IssueRunDisposition {
+  string run_id = 1;
+  string disposition = 2;
+  string by = 3;
+  string reason = 4;
+  int64 at_ms = 5;
+}
+
+message VoterAssignment {
+  string voter = 1;
+  string model = 2;
+  string effort = 3;
+  string variant = 4;
+}
+
+// StepRow is one step as `next --run`, a dispatch manifest, and a context
+// bundle present it.
+message StepRow {
+  string step = 1;
+  string instance = 2;
+  string issue = 3;
+  string run = 4;
+  string kind = 5;
+  string executor = 6;
+  string class = 7;
+  repeated string labels = 8;
+  string size = 9;
+  repeated string voters = 10;
+  string model = 11;
+  string effort = 12;
+  string variant = 13;
+  repeated VoterAssignment voter_assignments = 14;
+  string proposal = 15;
+}
+
+// Step is a step at its effective status, as `step show` and `step list`
+// present it.
+message Step {
+  StepRow row = 1;
+  string status = 2;
+  int32 attempt = 3;
+  int32 failed_attempts = 4;
+  Lease lease = 5;
+  string worktree = 6;
+  string integrated_sha = 7;
+  string metadata_json = 8;
+  double expected_cost = 9;
+  double accrued_cost = 10;
+  int32 version = 11;
+}
+
+message GateResult {
+  string gate = 1;
+  string command = 2;
+  string status = 3;
+  int32 exit_code = 4;
+  int64 duration_ms = 5;
+  string output = 6;
+  string target_sha = 7;
+  bool pre = 8;
+  int64 recorded_at_ms = 9;
+}
+
+// Artifact bodies are the producer's text; payload_json is the
+// schema-validated payload document, opaque to the transport.
+message Artifact {
+  string id = 1;
+  string step = 2;
+  string kind = 3;
+  string body = 4;
+  string payload_json = 5;
+  string schema = 6;
+  int64 created_at_ms = 7;
+}
+
+message ContextInput {
+  string name = 1;
+  string kind = 2;
+  string artifact = 3;
+  string body = 4;
+  string payload_json = 5;
+}
+
+message ContextPin {
+  string path = 1;
+  string sha256 = 2;
+  string body = 3;
+}
+
+message LoopEntry {
+  int32 k = 1;
+  string routing = 2;
+}
+
+// StepContextBundle is a step's context bundle: everything a claimant needs,
+// assembled at claim.
+message StepContextBundle {
+  StepRow step = 1;
+  Issue issue = 2;
+  repeated ContextInput inputs = 3;
+  repeated ContextPin pins = 4;
+  LoopEntry loop_entry = 5;
+  string metadata_json = 6;
+  repeated GateResult pre_gates = 7;
+  string target_sha = 8;
+  string target_worktree = 9;
+  string diff_base = 10;
+  string resolution = 11;
+}
+
+message Event {
+  int64 seq = 1;
+  string kind = 2;
+  string run = 3;
+  string step = 4;
+  string issue = 5;
+  string payload_json = 6;
+  int64 at_ms = 7;
+}
+
+message RunNote {
+  int32 ordinal = 1;
+  string authority = 2;
+  string text = 3;
+  int64 created_at_ms = 4;
+}
+
+message Manifest {
+  string id = 1;
+  string run = 2;
+  string status = 3;
+  repeated StepRow rows = 4;
+  int64 opened_at_ms = 5;
+  int64 closed_at_ms = 6;
+}
+
+message PinVerdict {
+  string path = 1;
+  string pinned_sha256 = 2;
+  string current_sha256 = 3;
+  string verdict = 4;
+}
+
+message Finding {
+  string severity = 1;
+  string title = 2;
+  string file = 3;
+  int32 line = 4;
+  string detail = 5;
+}
+
+message Proposal {
+  string id = 1;
+  string description = 2;
+  string criticality = 3;
+  string status = 4;
+  int32 required_voters = 5;
+  double threshold = 6;
+  optional double weighted_score = 7;
+  string created_by = 8;
+  string created_at = 9;
+  string updated_at = 10;
+  string rationale = 11;
+  repeated string domain_tags = 12;
+  repeated string files_changed = 13;
+  string final_outcome = 14;
+  optional string escalation_reason = 15;
+  bool sealed = 16;
+  repeated string linked_issues = 17;
+  repeated Vote votes = 18;
+  int32 version = 19;
+}
+
+message Vote {
+  int32 id = 1;
+  string proposal_id = 2;
+  string voter_name = 3;
+  string voter_role = 4;
+  string verdict = 5;
+  double confidence = 6;
+  double domain_relevance = 7;
+  string findings = 8;
+  repeated Finding findings_json = 9;
+  string summary = 10;
+  string metadata_json = 11;
+  string created_at = 12;
+}
+
+message Schema {
+  string name = 1;
+  int32 version = 2;
+  string source_path = 3;
+  string source_sha256 = 4;
+  string body = 5;
+  bool builtin = 6;
+  bool deprecated = 7;
+  int64 created_at_ms = 8;
+  int32 row_version = 9;
+}
+
+message Workflow {
+  string name = 1;
+  int32 version = 2;
+  string description = 3;
+  string source_path = 4;
+  string source_sha256 = 5;
+  string body = 6;
+  bool deprecated = 7;
+  int64 created_at_ms = 8;
+  int32 row_version = 9;
+}
+
+// UsageRow is one measured-usage row a relay backfills for a step or voter.
+message UsageRow {
+  string step = 1;
+  string voter = 2;
+  string unit = 3;
+  double quantity = 4;
+}
+
+// IssueFilter carries the list filters `issue list`, `next`, `plan`, `board`,
+// and `export` share.
+message IssueFilter {
+  repeated string status = 1;
+  repeated string priority = 2;
+  repeated string label = 3;
+  repeated string type = 4;
+  repeated string size = 5;
+  string assignee = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
+
+message HandshakeRequest {
+  string client_version = 1;
+  uint32 api_major = 2;
+}
+
+message HandshakeResponse {
+  // daemon_version is the daemon's build version string, the value
+  // `docket version` prints for the daemon binary.
+  string daemon_version = 1;
+  string daemon_commit = 2;
+  string daemon_build_date = 3;
+  uint32 api_major = 4;
+  int32 store_schema_version = 5;
+  string store_path = 6;
+}
+
+// ---------------------------------------------------------------------------
+// board, config
+// ---------------------------------------------------------------------------
+
+message BoardRequest {
+  IssueFilter filter = 1;
+  bool expand = 2;
+  bool with_body = 3;
+}
+
+message BoardColumn {
+  string status = 1;
+  repeated Issue issues = 2;
+}
+
+message BoardResponse {
+  repeated BoardColumn columns = 1;
+}
+
+message ConfigGetRequest {
+  string key = 1;
+  bool global = 2;
+}
+
+message ConfigValue {
+  string key = 1;
+  string value = 2;
+  string source = 3;
+}
+
+message ConfigGetResponse {
+  repeated ConfigValue values = 1;
+}
+
+message ConfigSetRequest {
+  string key = 1;
+  string value = 2;
+  bool global = 3;
+}
+
+message ConfigSetResponse {
+  ConfigValue value = 1;
+}
+
+// ---------------------------------------------------------------------------
+// dispatch
+// ---------------------------------------------------------------------------
+
+message DispatchAbandonRequest {
+  string run = 1;
+  string reason = 2;
+  string token = 3;
+}
+
+message DispatchAbandonResponse {
+  Manifest manifest = 1;
+}
+
+message DispatchBackfillUsageRequest {
+  string run = 1;
+  repeated UsageRow rows = 2;
+  string source = 3;
+  string on_duplicate = 4;
+}
+
+message DispatchBackfillUsageResponse {
+  int32 recorded = 1;
+  int32 skipped = 2;
+}
+
+message DispatchCloseRequest {
+  string run = 1;
+  bool accept_missing_usage = 2;
+  repeated UsageRow backfill_rows = 3;
+  string on_duplicate = 4;
+  string skip_integration_check = 5;
+  string source = 6;
+  string token = 7;
+}
+
+message DispatchCloseResponse {
+  Manifest manifest = 1;
+  repeated string missing_usage = 2;
+  int32 metadata_merged = 3;
+}
+
+message DispatchExtendRequest {
+  string run = 1;
+}
+
+message DispatchExtendResponse {
+  Manifest manifest = 1;
+  repeated StepRow added = 2;
+}
+
+message DispatchOpenRequest {
+  string run = 1;
+  int32 limit = 2;
+  repeated int64 ack_reap = 3;
+}
+
+message DispatchOpenResponse {
+  Manifest manifest = 1;
+  repeated PinVerdict pin_drift = 2;
+  repeated string stale_targets = 3;
+}
+
+message DispatchVerifyRequest {
+  string run = 1;
+}
+
+message RowVerdict {
+  string step = 1;
+  string verdict = 2;
+  StepRow manifest_row = 3;
+  StepRow current_row = 4;
+}
+
+message DispatchVerifyResponse {
+  bool match = 1;
+  repeated RowVerdict rows = 2;
+}
+
+message DispatchWaiveTargetRequest {
+  string run = 1;
+  repeated string step = 2;
+  string target = 3;
+  string note = 4;
+  string token = 5;
+}
+
+message DispatchWaiveTargetResponse {
+  repeated string waived = 1;
+}
+
+// ---------------------------------------------------------------------------
+// doc
+// ---------------------------------------------------------------------------
+
+message DocCommentAddRequest {
+  string doc = 1;
+  string message = 2;
+}
+
+message DocCommentAddResponse {
+  DocComment comment = 1;
+}
+
+message DocCommentListRequest {
+  string doc = 1;
+}
+
+message DocCommentListResponse {
+  repeated DocComment items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message DocCreateRequest {
+  string title = 1;
+  string description = 2;
+  string type = 3;
+  string status = 4;
+}
+
+message DocCreateResponse {
+  Doc doc = 1;
+}
+
+message DocDeleteRequest {
+  string doc = 1;
+  bool cascade = 2;
+  bool force = 3;
+}
+
+message DocDeleteResponse {
+  string id = 1;
+  repeated string unlinked = 2;
+}
+
+message DocEditRequest {
+  string doc = 1;
+  optional string title = 2;
+  optional string description = 3;
+  optional string type = 4;
+  optional string status = 5;
+}
+
+message DocEditResponse {
+  Doc doc = 1;
+}
+
+message DocLinkAddRequest {
+  string doc = 1;
+  string issue = 2;
+}
+
+message DocLinkAddResponse {
+  string doc = 1;
+  string issue = 2;
+}
+
+message DocLinkRemoveRequest {
+  string doc = 1;
+  string issue = 2;
+}
+
+message DocLinkRemoveResponse {
+  string doc = 1;
+  string issue = 2;
+}
+
+message DocListRequest {
+  repeated string status = 1;
+  repeated string type = 2;
+  string author = 3;
+  string sort = 4;
+  int32 limit = 5;
+  bool with_body = 6;
+}
+
+message DocListResponse {
+  repeated Doc items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message DocShowRequest {
+  string doc = 1;
+  optional int32 rev = 2;
+}
+
+message DocShowResponse {
+  Doc doc = 1;
+}
+
+// ---------------------------------------------------------------------------
+// doctor, events, export, import
+// ---------------------------------------------------------------------------
+
+message DoctorRequest {
+  string run = 1;
+  string source = 2;
+}
+
+message DoctorCheck {
+  string name = 1;
+  string status = 2;
+  string detail = 3;
+}
+
+message DoctorResponse {
+  repeated DoctorCheck checks = 1;
+  bool ok = 2;
+}
+
+message EventsListRequest {
+  int64 since = 1;
+  int32 limit = 2;
+  string run = 3;
+}
+
+message EventsListResponse {
+  repeated Event items = 1;
+  int64 next_cursor = 2;
+  int32 total = 3;
+  bool truncated = 4;
+}
+
+message EventsPruneRequest {
+  int64 before = 1;
+  bool dry_run = 2;
+}
+
+message EventsPruneResponse {
+  int64 pruned = 1;
+  int64 retained_min_seq = 2;
+}
+
+message ExportRequest {
+  string format = 1;
+  IssueFilter filter = 2;
+}
+
+// ExportResponse carries the rendered export document; the client writes it
+// to --file or stdout, so the daemon never writes a client path.
+message ExportResponse {
+  string format = 1;
+  string document = 2;
+}
+
+// ImportRequest carries the export document's content. The client reads the
+// file it names; the daemon never opens a client path.
+message ImportRequest {
+  string document = 1;
+  bool merge = 2;
+  bool replace = 3;
+  bool yes = 4;
+}
+
+message ImportResponse {
+  int32 issues = 1;
+  int32 comments = 2;
+  int32 labels = 3;
+  int32 relations = 4;
+  int32 docs = 5;
+}
+
+// ---------------------------------------------------------------------------
+// gate, guard
+// ---------------------------------------------------------------------------
+
+message GateStatusRequest {
+  string step = 1;
+}
+
+message GateStatusResponse {
+  string step = 1;
+  string outcome = 2;
+  string tally = 3;
+  repeated string missing_seats = 4;
+}
+
+// GuardDecision is a guard predicate's answer: allow, or deny with the
+// reason a hook surfaces.
+message GuardDecision {
+  bool allow = 1;
+  string reason = 2;
+}
+
+message GuardGateRequest {
+  string step = 1;
+  string run = 2;
+  bool all_projects = 3;
+}
+
+message GuardGateResponse {
+  GuardDecision decision = 1;
+}
+
+message GuardRecordRequest {
+  string run = 1;
+  bool all_projects = 2;
+}
+
+message GuardRecordResponse {
+  GuardDecision decision = 1;
+}
+
+message GuardSpawnRequest {
+  string run = 1;
+  bool active = 2;
+  repeated StepRow rows = 3;
+  repeated int64 ack_reap = 4;
+  string deciding_vote = 5;
+  bool usage_join = 6;
+  bool all_projects = 7;
+}
+
+message GuardSpawnResponse {
+  GuardDecision decision = 1;
+}
+
+message GuardStopRequest {
+  string run = 1;
+  bool all_projects = 2;
+}
+
+message GuardStopResponse {
+  GuardDecision decision = 1;
+}
+
+// ---------------------------------------------------------------------------
+// issue
+// ---------------------------------------------------------------------------
+
+message IssueClaimRequest {
+  string issue = 1;
+  string owner = 2;
+  optional int64 ttl_ms = 3;
+  string class = 4;
+}
+
+message IssueClaimResponse {
+  string issue = 1;
+  string token = 2;
+  int64 lease_expires_ms = 3;
+  int32 attempt = 4;
+  int32 version = 5;
+}
+
+message IssueCloseRequest {
+  string issue = 1;
+  // token is required only while a live lease is held on the issue.
+  string token = 2;
+}
+
+message IssueCloseResponse {
+  Issue issue = 1;
+}
+
+message IssueCommentAddRequest {
+  string issue = 1;
+  string message = 2;
+}
+
+message IssueCommentAddResponse {
+  Comment comment = 1;
+}
+
+message IssueCommentListRequest {
+  string issue = 1;
+}
+
+message IssueCommentListResponse {
+  repeated Comment items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message IssueCreateRequest {
+  string title = 1;
+  string description = 2;
+  string status = 3;
+  string priority = 4;
+  string type = 5;
+  string assignee = 6;
+  string parent = 7;
+  string size = 8;
+  repeated string label = 9;
+  repeated string file = 10;
+}
+
+message IssueCreateResponse {
+  Issue issue = 1;
+}
+
+message IssueDeleteRequest {
+  string issue = 1;
+  bool cascade = 2;
+  bool orphan = 3;
+  bool force = 4;
+}
+
+message IssueDeleteResponse {
+  repeated string deleted = 1;
+  repeated string orphaned = 2;
+}
+
+message IssueEditRequest {
+  string issue = 1;
+  optional string title = 2;
+  optional string description = 3;
+  optional string status = 4;
+  optional string priority = 5;
+  optional string type = 6;
+  optional string assignee = 7;
+  optional string parent = 8;
+  optional string size = 9;
+  repeated string file = 10;
+}
+
+message IssueEditResponse {
+  Issue issue = 1;
+}
+
+message IssueFileAddRequest {
+  string issue = 1;
+  repeated string paths = 2;
+}
+
+message IssueFileAddResponse {
+  string issue = 1;
+  repeated string files = 2;
+}
+
+message IssueFileListRequest {
+  string issue = 1;
+}
+
+message IssueFileListResponse {
+  string issue = 1;
+  repeated string files = 2;
+}
+
+message IssueFileRemoveRequest {
+  string issue = 1;
+  repeated string paths = 2;
+}
+
+message IssueFileRemoveResponse {
+  string issue = 1;
+  repeated string files = 2;
+}
+
+message IssueGraphRequest {
+  string issue = 1;
+  int32 depth = 2;
+  string direction = 3;
+  bool mermaid = 4;
+}
+
+message GraphEdge {
+  string source = 1;
+  string target = 2;
+  string relation_type = 3;
+}
+
+message IssueGraphResponse {
+  string root = 1;
+  repeated Issue nodes = 2;
+  repeated GraphEdge edges = 3;
+  string mermaid = 4;
+}
+
+message IssueHeartbeatRequest {
+  string issue = 1;
+  optional int64 ttl_ms = 2;
+  string class = 3;
+  string token = 4;
+}
+
+message IssueHeartbeatResponse {
+  string issue = 1;
+  int64 lease_expires_ms = 2;
+}
+
+message IssueLabelAddRequest {
+  string issue = 1;
+  repeated string labels = 2;
+  string color = 3;
+}
+
+message IssueLabelAddResponse {
+  Issue issue = 1;
+}
+
+message IssueLabelDeleteRequest {
+  string label = 1;
+  bool force = 2;
+}
+
+message IssueLabelDeleteResponse {
+  string label = 1;
+  int32 detached = 2;
+}
+
+message IssueLabelListRequest {}
+
+message IssueLabelListResponse {
+  repeated Label items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message IssueLabelRmRequest {
+  string issue = 1;
+  repeated string labels = 2;
+}
+
+message IssueLabelRmResponse {
+  Issue issue = 1;
+}
+
+message IssueLinkAddRequest {
+  string issue = 1;
+  string relation = 2;
+  string target = 3;
+}
+
+message IssueLinkAddResponse {
+  Relation relation = 1;
+}
+
+message IssueLinkListRequest {
+  string issue = 1;
+}
+
+message IssueLinkListResponse {
+  repeated Relation items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message IssueLinkRemoveRequest {
+  string issue = 1;
+  string relation = 2;
+  string target = 3;
+}
+
+message IssueLinkRemoveResponse {
+  Relation relation = 1;
+}
+
+message IssueListRequest {
+  IssueFilter filter = 1;
+  string parent = 2;
+  bool roots = 3;
+  bool tree = 4;
+  bool all = 5;
+  string sort = 6;
+  int32 limit = 7;
+  bool with_body = 8;
+}
+
+message IssueListResponse {
+  repeated Issue items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message IssueLogRequest {
+  string issue = 1;
+  int32 limit = 2;
+}
+
+message IssueLogResponse {
+  repeated Activity items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message IssueMoveRequest {
+  string issue = 1;
+  string status = 2;
+  string project = 3;
+  string note = 4;
+}
+
+message IssueMoveResponse {
+  Issue issue = 1;
+}
+
+message IssueReleaseRequest {
+  string issue = 1;
+  string token = 2;
+}
+
+message IssueReleaseResponse {
+  string issue = 1;
+}
+
+message IssueReopenRequest {
+  string issue = 1;
+}
+
+message IssueReopenResponse {
+  Issue issue = 1;
+}
+
+message IssueShowRequest {
+  repeated string issues = 1;
+}
+
+message IssueShowDetail {
+  Issue issue = 1;
+  repeated Issue children = 2;
+  repeated Relation relations = 3;
+  repeated Comment comments = 4;
+  IssueRunDisposition disposition = 5;
+}
+
+message IssueShowResponse {
+  repeated IssueShowDetail issues = 1;
+}
+
+// ---------------------------------------------------------------------------
+// next, pin, plan, policy, project, registry, report
+// ---------------------------------------------------------------------------
+
+message NextRequest {
+  IssueFilter filter = 1;
+  string run = 2;
+  int32 limit = 3;
+  bool with_body = 4;
+}
+
+// NextResponse holds ready issues, or, with `run` set, the run's ready step
+// rows.
+message NextResponse {
+  repeated Issue issues = 1;
+  repeated StepRow steps = 2;
+  int32 total = 3;
+  bool truncated = 4;
+}
+
+message PinShowRequest {
+  string run = 1;
+  string path = 2;
+}
+
+message PinShowResponse {
+  string path = 1;
+  string sha256 = 2;
+  bytes content = 3;
+}
+
+message PlanRequest {
+  IssueFilter filter = 1;
+  string root = 2;
+  bool with_body = 3;
+}
+
+message PlanPhase {
+  int32 phase = 1;
+  repeated Issue issues = 2;
+}
+
+message PlanResponse {
+  repeated PlanPhase phases = 1;
+  repeated string blocked = 2;
+}
+
+message PolicyResolveRequest {
+  string run = 1;
+  repeated string seats = 2;
+  string size = 3;
+  repeated string label = 4;
+}
+
+message PolicyResolveResponse {
+  repeated VoterAssignment seats = 1;
+}
+
+message ProjectDeleteRequest {
+  string project = 1;
+}
+
+message ProjectDeleteResponse {
+  Project project = 1;
+}
+
+message ProjectListRequest {}
+
+message ProjectListResponse {
+  repeated Project items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message ProjectSetPrefixRequest {
+  string prefix = 1;
+}
+
+message ProjectSetPrefixResponse {
+  Project project = 1;
+}
+
+message RegistryAuditRequest {
+  string project = 1;
+}
+
+message RegistryDrift {
+  string project = 1;
+  string kind = 2;
+  string name = 3;
+  int32 version = 4;
+  string drift = 5;
+}
+
+message RegistryAuditResponse {
+  repeated RegistryDrift drift = 1;
+}
+
+message ReportExecutorsRequest {
+  string since = 1;
+  bool all_projects = 2;
+}
+
+message ExecutorRollup {
+  string executor = 1;
+  int32 routings = 2;
+  int32 rulings = 3;
+  int32 reaps = 4;
+  int32 corroborated_clusters = 5;
+}
+
+message ReportExecutorsResponse {
+  repeated ExecutorRollup executors = 1;
+  repeated ExecutorRollup voters = 2;
+}
+
+// ---------------------------------------------------------------------------
+// run
+// ---------------------------------------------------------------------------
+
+message RunAbandonRequest {
+  string run = 1;
+  string reason = 2;
+  // issue, when set, stops only that issue's work in the run.
+  string issue = 3;
+  string token = 4;
+}
+
+message RunAbandonResponse {
+  Run run = 1;
+  repeated string worktrees = 2;
+}
+
+message RunActivateRequest {
+  string run = 1;
+  bool dry_run = 2;
+  repeated string pin = 3;
+  string reason = 4;
+}
+
+message RunActivateResponse {
+  Run run = 1;
+  repeated PinVerdict pins = 2;
+  int32 steps = 3;
+}
+
+message RunBudgetRequest {
+  string run = 1;
+  optional double set = 2;
+  string reason = 3;
+}
+
+message RunBudgetResponse {
+  string run = 1;
+  double budget = 2;
+  double accrued = 3;
+  double usage_budget = 4;
+}
+
+message RunConductRequest {
+  string run = 1;
+}
+
+message RunConductResponse {
+  string run = 1;
+  string token = 2;
+}
+
+message RunFactAddRequest {
+  string run = 1;
+  string kind = 2;
+  string proposal = 3;
+  string voter = 4;
+  string step = 5;
+  string cause = 6;
+  string reason = 7;
+  string token = 8;
+}
+
+message RunFactAddResponse {
+  Event event = 1;
+}
+
+message RunIssueAddRequest {
+  string run = 1;
+  repeated string issues = 2;
+}
+
+message RunIssueAddResponse {
+  Run run = 1;
+}
+
+message RunIssueRemoveRequest {
+  string run = 1;
+  repeated string issues = 2;
+}
+
+message RunIssueRemoveResponse {
+  Run run = 1;
+}
+
+message RunNoteAddRequest {
+  string run = 1;
+  string authority = 2;
+  // text is the note body; the client reads --file into it.
+  string text = 3;
+  string token = 4;
+}
+
+message RunNoteAddResponse {
+  RunNote note = 1;
+}
+
+message RunNoteListRequest {
+  string run = 1;
+}
+
+message RunNoteListResponse {
+  repeated RunNote items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message RunPauseRequest {
+  string run = 1;
+  string reason = 2;
+  string token = 3;
+}
+
+message RunPauseResponse {
+  Run run = 1;
+}
+
+message RunRefreshBodyRequest {
+  string run = 1;
+  string issue = 2;
+  string reason = 3;
+  string token = 4;
+}
+
+message RunRefreshBodyResponse {
+  string run = 1;
+  string issue = 2;
+  repeated string steps = 3;
+}
+
+message RunRefreshFilesRequest {
+  string run = 1;
+  string issue = 2;
+  string reason = 3;
+  string token = 4;
+}
+
+message RunRefreshFilesResponse {
+  string run = 1;
+  string issue = 2;
+  repeated string steps = 3;
+}
+
+message RunRefreshScopeRequest {
+  string run = 1;
+  string issue = 2;
+  string reason = 3;
+  string token = 4;
+}
+
+message RunRefreshScopeResponse {
+  string run = 1;
+  string issue = 2;
+  repeated string steps = 3;
+}
+
+message RunRepinRequest {
+  string run = 1;
+  string reason = 2;
+  repeated string drop = 3;
+  bool drop_unresolvable = 4;
+  string token = 5;
+}
+
+message RunRepinResponse {
+  string run = 1;
+  repeated PinVerdict repinned = 2;
+  repeated string dropped = 3;
+}
+
+message RunReportRequest {
+  string run = 1;
+}
+
+message RunReportResponse {
+  Run run = 1;
+  repeated Step steps = 2;
+  repeated GateResult gates = 3;
+  repeated Artifact artifacts = 4;
+  double accrued_cost = 5;
+  double measured_usage = 6;
+}
+
+message RunResumeRequest {
+  string run = 1;
+  string reason = 2;
+  string token = 3;
+}
+
+message RunResumeResponse {
+  Run run = 1;
+}
+
+message RunStartRequest {
+  // request is the run's request text; the client reads --request-file into
+  // it.
+  string request = 1;
+  repeated string issues = 2;
+  optional double budget = 3;
+  optional double usage_budget = 4;
+}
+
+message RunStartResponse {
+  Run run = 1;
+}
+
+// RunStatusRequest with `run` empty lists runs.
+message RunStatusRequest {
+  string run = 1;
+  bool all = 2;
+  int32 limit = 3;
+}
+
+message RunStatusResponse {
+  repeated Run items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message RunVerifyPinsRequest {
+  string run = 1;
+}
+
+message RunVerifyPinsResponse {
+  string run = 1;
+  repeated PinVerdict pins = 2;
+  bool clean = 3;
+}
+
+// ---------------------------------------------------------------------------
+// schema, stats
+// ---------------------------------------------------------------------------
+
+message SchemaDeprecateRequest {
+  string name = 1;
+  int32 version = 2;
+}
+
+message SchemaDeprecateResponse {
+  Schema schema = 1;
+}
+
+message SchemaListRequest {
+  string name = 1;
+  bool deprecated = 2;
+  int32 limit = 3;
+}
+
+message SchemaListResponse {
+  repeated Schema items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+// SchemaRegisterRequest carries the schema document; the client reads the
+// file it names and sends source_path for provenance only.
+message SchemaRegisterRequest {
+  string name = 1;
+  int32 version = 2;
+  string body = 3;
+  string source_path = 4;
+}
+
+message SchemaRegisterResponse {
+  Schema schema = 1;
+}
+
+message SchemaShowRequest {
+  string name = 1;
+  optional int32 version = 2;
+  bool body = 3;
+}
+
+message SchemaShowResponse {
+  Schema schema = 1;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+  int32 total = 1;
+  repeated StatusCount by_status = 2;
+  repeated StatusCount by_priority = 3;
+  repeated StatusCount by_type = 4;
+  repeated StatusCount by_label = 5;
+}
+
+// ---------------------------------------------------------------------------
+// step
+// ---------------------------------------------------------------------------
+
+message StepAnnotateRequest {
+  string step = 1;
+  string metadata_json = 2;
+  string integrated_sha = 3;
+  string token = 4;
+}
+
+message StepAnnotateResponse {
+  Step step = 1;
+}
+
+message StepApproveRequest {
+  string step = 1;
+  string note = 2;
+  string value = 3;
+  string authority = 4;
+  string authority_ref = 5;
+  string token = 6;
+}
+
+message StepApproveResponse {
+  Step step = 1;
+}
+
+message StepArtifactRequest {
+  string artifact = 1;
+  bool payload = 2;
+}
+
+message StepArtifactResponse {
+  Artifact artifact = 1;
+}
+
+message StepArtifactsRequest {
+  string step = 1;
+}
+
+// StepArtifactsResponse lists a step's artifacts with bodies and payloads
+// left empty.
+message StepArtifactsResponse {
+  repeated Artifact items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message StepClaimRequest {
+  string step = 1;
+  string owner = 2;
+  optional int64 ttl_ms = 3;
+  string metadata_json = 4;
+  optional double cost_multiplier = 5;
+  // recovery_secret is mandatory: the server rejects a claim whose
+  // recovery_secret is empty, stores only its hash, and re-mints the token
+  // of a held lease only for a re-claim presenting the same secret.
+  string recovery_secret = 6;
+  bool render = 7;
+  string template = 8;
+  string executor = 9;
+}
+
+message StepClaimResponse {
+  string step = 1;
+  string token = 2;
+  int64 lease_expires_ms = 3;
+  StepContextBundle context = 4;
+  string packet = 5;
+  string claim_error = 6;
+  bool re_minted = 7;
+  int32 attempt = 8;
+  int32 version = 9;
+}
+
+// StepCompleteRequest carries the artifact itself. The client reads
+// --artifact-file, --payload-file, and each --gap-file and sends their
+// content; worktree stays a path because the engine runs gates in it.
+message StepCompleteRequest {
+  string step = 1;
+  string artifact = 2;
+  string payload_json = 3;
+  repeated string gaps = 4;
+  string worktree = 5;
+  string metadata_json = 6;
+  string usage_json = 7;
+  string token = 8;
+}
+
+message StepCompleteResponse {
+  Step step = 1;
+  // detached is true when the step's gates and routing run after the
+  // response, so `step` shows the recorded state rather than the outcome.
+  bool detached = 2;
+  repeated GateResult failed_gates = 3;
+}
+
+message StepContextRequest {
+  string step = 1;
+  bool live = 2;
+  bool meta = 3;
+}
+
+message StepContextResponse {
+  StepContextBundle context = 1;
+}
+
+message StepFailRequest {
+  string step = 1;
+  string note = 2;
+  string metadata_json = 3;
+  string token = 4;
+}
+
+message StepFailResponse {
+  Step step = 1;
+}
+
+message StepGatesRequest {
+  string step = 1;
+  repeated string gate = 2;
+  bool full = 3;
+}
+
+message StepGatesResponse {
+  repeated GateResult items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message StepHeartbeatRequest {
+  string step = 1;
+  string token = 2;
+}
+
+message StepHeartbeatResponse {
+  string step = 1;
+  int64 lease_expires_ms = 2;
+}
+
+message StepHoldRequest {
+  string step = 1;
+  string reason = 2;
+  string authority = 3;
+  string authority_ref = 4;
+  string token = 5;
+}
+
+message StepHoldResponse {
+  Step step = 1;
+}
+
+message StepListRequest {
+  string run = 1;
+  string issue = 2;
+}
+
+message StepListResponse {
+  repeated Step items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message StepReapRequest {
+  string step = 1;
+  string reason = 2;
+  string token = 3;
+}
+
+message StepReapResponse {
+  Step step = 1;
+}
+
+message StepRejectRequest {
+  string step = 1;
+  string note = 2;
+  string authority = 3;
+  string authority_ref = 4;
+  string token = 5;
+}
+
+message StepRejectResponse {
+  Step step = 1;
+}
+
+message StepRenderRequest {
+  string step = 1;
+  string template = 2;
+  string executor = 3;
+}
+
+message StepRenderResponse {
+  string step = 1;
+  string packet = 2;
+}
+
+message StepResolveRequest {
+  string step = 1;
+  string as = 2;
+  string note = 3;
+  string worktree = 4;
+  bool batch = 5;
+  bool drop_interposed = 6;
+  string authority = 7;
+  string authority_ref = 8;
+  string token = 9;
+}
+
+message StepResolveResponse {
+  repeated Step steps = 1;
+}
+
+message StepShowRequest {
+  repeated string steps = 1;
+}
+
+message StepShowResponse {
+  repeated Step steps = 1;
+}
+
+// ---------------------------------------------------------------------------
+// vote
+// ---------------------------------------------------------------------------
+
+message VoteBackfillUsageRequest {
+  string proposal = 1;
+  repeated UsageRow rows = 2;
+  string source = 3;
+}
+
+message VoteBackfillUsageResponse {
+  int32 recorded = 1;
+  int32 skipped = 2;
+}
+
+message VoteCastRequest {
+  string proposal = 1;
+  string voter = 2;
+  string role = 3;
+  string verdict = 4;
+  double confidence = 5;
+  double domain_relevance = 6;
+  string findings = 7;
+  string findings_json = 8;
+  string summary = 9;
+  string metadata_json = 10;
+  string usage_json = 11;
+}
+
+message VoteCastResponse {
+  Vote vote = 1;
+  Proposal proposal = 2;
+}
+
+message VoteCloseRequest {
+  string proposal = 1;
+  string reason = 2;
+}
+
+message VoteCloseResponse {
+  Proposal proposal = 1;
+}
+
+message VoteCommitRequest {
+  string proposal = 1;
+  string outcome = 2;
+  string escalation_reason = 3;
+  string token = 4;
+}
+
+message VoteCommitResponse {
+  Proposal proposal = 1;
+}
+
+message VoteCreateRequest {
+  string description = 1;
+  string rationale = 2;
+  string criticality = 3;
+  int32 voters = 4;
+  optional double threshold = 5;
+  bool sealed = 6;
+  string created_by = 7;
+  repeated string domain_tags = 8;
+  repeated string files_changed = 9;
+  string escalation_reason = 10;
+}
+
+message VoteCreateResponse {
+  Proposal proposal = 1;
+}
+
+message VoteLinkRequest {
+  string proposal = 1;
+  string issue = 2;
+}
+
+message VoteLinkResponse {
+  string proposal = 1;
+  string issue = 2;
+}
+
+message VoteListRequest {
+  string status = 1;
+  string criticality = 2;
+  string domain_tag = 3;
+  bool all = 4;
+  int32 limit = 5;
+}
+
+message VoteListResponse {
+  repeated Proposal items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message VoteResultRequest {
+  string proposal = 1;
+}
+
+message VoteResultResponse {
+  string proposal = 1;
+  string outcome = 2;
+  optional double weighted_score = 3;
+  double threshold = 4;
+  int32 cast = 5;
+  int32 required = 6;
+}
+
+message VoteShowRequest {
+  string proposal = 1;
+}
+
+message VoteShowResponse {
+  Proposal proposal = 1;
+}
+
+message VoteUnlinkRequest {
+  string proposal = 1;
+  string issue = 2;
+}
+
+message VoteUnlinkResponse {
+  string proposal = 1;
+  string issue = 2;
+}
+
+// ---------------------------------------------------------------------------
+// workflow
+// ---------------------------------------------------------------------------
+
+message WorkflowDeprecateRequest {
+  string name = 1;
+  int32 version = 2;
+}
+
+message WorkflowDeprecateResponse {
+  Workflow workflow = 1;
+}
+
+// WorkflowLintRequest carries the definition's TOML; the client reads the
+// file it names and sends source_path for provenance only.
+message WorkflowLintRequest {
+  string body = 1;
+  string source_path = 2;
+  bool all_projects = 3;
+}
+
+message LintFinding {
+  string severity = 1;
+  string message = 2;
+  string location = 3;
+}
+
+message WorkflowLintResponse {
+  bool ok = 1;
+  repeated LintFinding findings = 2;
+}
+
+message WorkflowListRequest {
+  string name = 1;
+  bool deprecated = 2;
+  bool orphans = 3;
+  int32 limit = 4;
+}
+
+message WorkflowListResponse {
+  repeated Workflow items = 1;
+  int32 total = 2;
+  bool truncated = 3;
+}
+
+message WorkflowRegisterRequest {
+  string body = 1;
+  string source_path = 2;
+}
+
+message WorkflowRegisterResponse {
+  Workflow workflow = 1;
+}
+
+message WorkflowShowRequest {
+  string name = 1;
+  optional int32 version = 2;
+  bool source = 3;
+}
+
+message WorkflowShowResponse {
+  Workflow workflow = 1;
+}
