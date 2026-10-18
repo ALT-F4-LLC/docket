@@ -210,6 +210,143 @@ func TestResolveGlobalSharesIdentityAcrossWorktrees(t *testing.T) {
 	}
 }
 
+// seededRepo creates a git repository with one commit, so worktrees can be
+// added to it, and returns its canonical path.
+func seededRepo(t *testing.T) string {
+	t.Helper()
+	repo := canon(t, t.TempDir())
+	gitInit(t, repo)
+	mustGit(t, repo, "commit", "--allow-empty", "-m", "seed")
+	return repo
+}
+
+// writeFile writes body to path, creating its parent directories.
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertUnanchoredAt checks that resolving from dir kept none of the trusted
+// repository's facts: the identity and exec root are dir itself, unanchored.
+func assertUnanchoredAt(t *testing.T, dir, trusted string) {
+	t.Helper()
+	cfg := resolveAt(t, dir, "", t.TempDir())
+	if cfg.Identity == trusted {
+		t.Fatalf("Identity = %q: a foreign directory resolved the trusted repository's identity", cfg.Identity)
+	}
+	if cfg.Anchored {
+		t.Errorf("Anchored = true; a directory git does not register for the repository must not anchor")
+	}
+	if cfg.Identity != dir || cfg.ExecRoot != dir {
+		t.Errorf("Identity/ExecRoot = %q/%q, want both the cwd %q", cfg.Identity, cfg.ExecRoot, dir)
+	}
+}
+
+// TestForeignGitPointer: a directory outside the repository whose .git points
+// into the repository's gitdir is not one of its checkouts, so it must not
+// resolve the repository's identity, which is what trust entries bind to.
+func TestForeignGitPointer(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	trusted := seededRepo(t)
+
+	t.Run(".git file pointing at the repository's gitdir", func(t *testing.T) {
+		foreign := canon(t, t.TempDir())
+		writeFile(t, filepath.Join(foreign, ".git"), "gitdir: "+filepath.Join(trusted, ".git")+"\n")
+		assertUnanchoredAt(t, foreign, trusted)
+	})
+
+	t.Run(".git file pointing at a registered worktree's admin dir", func(t *testing.T) {
+		linked := filepath.Join(canon(t, t.TempDir()), "linked")
+		mustGit(t, trusted, "worktree", "add", linked)
+		foreign := canon(t, t.TempDir())
+		admin := filepath.Join(trusted, ".git", "worktrees", "linked")
+		writeFile(t, filepath.Join(foreign, ".git"), "gitdir: "+admin+"\n")
+		assertUnanchoredAt(t, foreign, trusted)
+	})
+
+	t.Run(".git directory whose commondir names the repository's gitdir", func(t *testing.T) {
+		foreign := canon(t, t.TempDir())
+		gitDir := filepath.Join(foreign, ".git")
+		writeFile(t, filepath.Join(gitDir, "HEAD"), "ref: refs/heads/main\n")
+		writeFile(t, filepath.Join(gitDir, "commondir"), filepath.Join(trusted, ".git")+"\n")
+		for _, sub := range []string{"refs", "objects"} {
+			if err := os.MkdirAll(filepath.Join(gitDir, sub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		assertUnanchoredAt(t, foreign, trusted)
+	})
+}
+
+// TestMissingBackLinkDropsGitContext: when a registered worktree's back-link
+// cannot be read, the check fails closed rather than keeping the identity.
+func TestMissingBackLinkDropsGitContext(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	trusted := seededRepo(t)
+	linked := filepath.Join(canon(t, t.TempDir()), "linked")
+	mustGit(t, trusted, "worktree", "add", linked)
+	if err := os.Remove(filepath.Join(trusted, ".git", "worktrees", "linked", "gitdir")); err != nil {
+		t.Fatal(err)
+	}
+	assertUnanchoredAt(t, linked, trusted)
+}
+
+// TestLinkedWorktreeOutsideIdentityRoot: a worktree git registered under the
+// common dir keeps the repository's identity wherever it sits on disk, with
+// either back-link spelling git writes.
+func TestLinkedWorktreeOutsideIdentityRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cases := map[string][]string{
+		"absolute back-link": nil,
+		"relative back-link": {"--relative-paths"},
+	}
+	for name, flags := range cases {
+		t.Run(name, func(t *testing.T) {
+			trusted := seededRepo(t)
+			sibling := filepath.Join(canon(t, t.TempDir()), "sibling")
+			args := append(append([]string{"worktree", "add"}, flags...), sibling)
+			mustGit(t, trusted, args...)
+
+			cfg := resolveAt(t, sibling, "", t.TempDir())
+			if cfg.Identity != trusted || cfg.ExecRoot != sibling || !cfg.Anchored {
+				t.Errorf("Identity/ExecRoot/Anchored = %q/%q/%v, want %q/%q/true",
+					cfg.Identity, cfg.ExecRoot, cfg.Anchored, trusted, sibling)
+			}
+		})
+	}
+}
+
+// TestBareLayoutExecRoot: in a bare-repository layout every checkout is a
+// worktree of repo.git, none of them the identity root, and each resolves to
+// the bare directory's identity with its own exec root.
+func TestBareLayoutExecRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	source := seededRepo(t)
+	bare := filepath.Join(canon(t, t.TempDir()), "repo.git")
+	mustGit(t, source, "clone", "-q", "--bare", source, bare)
+	main := filepath.Join(bare, "main")
+	mustGit(t, bare, "worktree", "add", main)
+
+	cfg := resolveAt(t, main, "", t.TempDir())
+	if cfg.Identity != bare || cfg.ExecRoot != main || !cfg.Anchored {
+		t.Errorf("Identity/ExecRoot/Anchored = %q/%q/%v, want %q/%q/true",
+			cfg.Identity, cfg.ExecRoot, cfg.Anchored, bare, main)
+	}
+}
+
 // TestInstanceConfigDirsPerSource pins the ROOT LISTS, which are the whole
 // contract the scanner and the packet resolver share.
 //

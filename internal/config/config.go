@@ -70,8 +70,9 @@ type Config struct {
 	//
 	// It is true for the env and local stores — a `.docket` directory is an act
 	// of intent, and its parent is the project by construction — and for the
-	// global store only INSIDE a git worktree, where the identity is the
-	// repository's own common directory.
+	// global store only INSIDE a git worktree the repository registered as its
+	// own (see lookupGit), where the identity is that repository's common
+	// directory.
 	//
 	// Outside a repository the global store still fills Identity with the cwd,
 	// because a project row already bound to that path must keep resolving; but
