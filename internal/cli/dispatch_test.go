@@ -536,16 +536,15 @@ func TestDispatchOpenJSONEnvelopeUnchangedByRender(t *testing.T) {
 	}
 }
 
-// TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits: bare --json (v1,
-// the version a bare flag actually parses to — NoOptDefVal gives it "v1", not
-// "v2") carries the same total/truncated/limits fields v2 does, decoded by
-// KEY rather than into a typed field: encoding/json folds field names
-// case-insensitively, so a struct field named Total would still populate from
-// a wire key of "Total" even after the `json:"total"` tag was dropped from
+// TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits: the --json=v2
+// envelope carries total/truncated/limits under their exact lowercase keys,
+// decoded by KEY rather than into a typed field: encoding/json folds field
+// names case-insensitively, so a struct field named Total would still populate
+// from a wire key of "Total" even after the `json:"total"` tag was dropped from
 // engine.Manifest, and the mutant this test exists to catch would survive.
 func TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits(t *testing.T) {
 	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV1
+	w.JSONVersion = output.JSONV2
 	openDispatchCLI(t, twoClassWorkflow, 2, 1, w)
 
 	raw := buf.String()

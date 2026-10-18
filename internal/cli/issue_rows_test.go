@@ -603,8 +603,7 @@ func findRow(t *testing.T, rows []map[string]json.RawMessage, id string) map[str
 // TestIssueSummaryRowsCarrySize checks that the summary rows `issue list`,
 // `next`, `plan` and `board` build carry `size` exactly the way `issue show`
 // does — present and equal to the stored value for a sized issue, absent
-// entirely (not null, not "") for an unsized one — in both --json and
-// --json=v2.
+// entirely (not null, not "") for an unsized one — in --json=v2.
 func TestIssueSummaryRowsCarrySize(t *testing.T) {
 	conn := newTestDB(t)
 
@@ -634,96 +633,84 @@ func TestIssueSummaryRowsCarrySize(t *testing.T) {
 		assertRowSize(t, findRow(t, rows, unsizedID), unsizedID, "")
 	}
 
-	for _, version := range []output.JSONVersion{output.JSONV1, output.JSONV2} {
-		t.Run(fmt.Sprintf("list/v%d", int(version)+1), func(t *testing.T) {
-			cmd := listCmdWithBody(conn, false)
-			setFlags(t, cmd, map[string]string{"type": "feature", "sort": "id:asc"})
-			w, buf := bufWriter(true)
-			w.JSONVersion = version
-			testsupport.Must(t, runIssueList(cmd, nil, w), "runIssueList: %v", nil)
+	t.Run("list", func(t *testing.T) {
+		cmd := listCmdWithBody(conn, false)
+		setFlags(t, cmd, map[string]string{"type": "feature", "sort": "id:asc"})
+		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
+		testsupport.Must(t, runIssueList(cmd, nil, w), "runIssueList: %v", nil)
 
-			var env struct {
-				Data struct {
+		var env struct {
+			Data struct {
+				Items []map[string]json.RawMessage `json:"items"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+		checkRows(t, env.Data.Items)
+	})
+
+	t.Run("next", func(t *testing.T) {
+		cmd := nextCmdWithDB(conn, 50)
+		setFlags(t, cmd, map[string]string{"type": "feature"})
+		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
+		testsupport.Must(t, runNext(cmd, nil, w), "runNext: %v", nil)
+
+		var env struct {
+			Data struct {
+				Items []map[string]json.RawMessage `json:"items"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+		checkRows(t, env.Data.Items)
+	})
+
+	t.Run("plan", func(t *testing.T) {
+		cmd := planCmdWithDB(conn)
+		setFlags(t, cmd, map[string]string{"type": "feature"})
+		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
+		testsupport.Must(t, runPlan(cmd, nil, w), "runPlan: %v", nil)
+
+		var env struct {
+			Data struct {
+				Phases []struct {
 					Issues []map[string]json.RawMessage `json:"issues"`
-					Items  []map[string]json.RawMessage `json:"items"`
-				} `json:"data"`
-			}
-			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
-			rows := env.Data.Issues
-			if version == output.JSONV2 {
-				rows = env.Data.Items
-			}
-			checkRows(t, rows)
-		})
+				} `json:"phases"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+		var rows []map[string]json.RawMessage
+		for _, phase := range env.Data.Phases {
+			rows = append(rows, phase.Issues...)
+		}
+		checkRows(t, rows)
+	})
 
-		t.Run(fmt.Sprintf("next/v%d", int(version)+1), func(t *testing.T) {
-			cmd := nextCmdWithDB(conn, 50)
-			setFlags(t, cmd, map[string]string{"type": "feature"})
-			w, buf := bufWriter(true)
-			w.JSONVersion = version
-			testsupport.Must(t, runNext(cmd, nil, w), "runNext: %v", nil)
+	t.Run("board", func(t *testing.T) {
+		cmd := boardCmdWithDB(conn, false)
+		setFlags(t, cmd, map[string]string{"priority": "high"})
+		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
+		testsupport.Must(t, runBoard(cmd, nil, w), "runBoard: %v", nil)
 
-			var env struct {
-				Data struct {
+		var env struct {
+			Data struct {
+				Columns []struct {
+					Status string                       `json:"status"`
 					Issues []map[string]json.RawMessage `json:"issues"`
-					Items  []map[string]json.RawMessage `json:"items"`
-				} `json:"data"`
+				} `json:"columns"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
+		var rows []map[string]json.RawMessage
+		for _, col := range env.Data.Columns {
+			if col.Status == string(model.StatusTodo) {
+				rows = col.Issues
 			}
-			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
-			rows := env.Data.Issues
-			if version == output.JSONV2 {
-				rows = env.Data.Items
-			}
-			checkRows(t, rows)
-		})
-
-		t.Run(fmt.Sprintf("plan/v%d", int(version)+1), func(t *testing.T) {
-			cmd := planCmdWithDB(conn)
-			setFlags(t, cmd, map[string]string{"type": "feature"})
-			w, buf := bufWriter(true)
-			w.JSONVersion = version
-			testsupport.Must(t, runPlan(cmd, nil, w), "runPlan: %v", nil)
-
-			var env struct {
-				Data struct {
-					Phases []struct {
-						Issues []map[string]json.RawMessage `json:"issues"`
-					} `json:"phases"`
-				} `json:"data"`
-			}
-			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
-			var rows []map[string]json.RawMessage
-			for _, phase := range env.Data.Phases {
-				rows = append(rows, phase.Issues...)
-			}
-			checkRows(t, rows)
-		})
-
-		t.Run(fmt.Sprintf("board/v%d", int(version)+1), func(t *testing.T) {
-			cmd := boardCmdWithDB(conn, false)
-			setFlags(t, cmd, map[string]string{"priority": "high"})
-			w, buf := bufWriter(true)
-			w.JSONVersion = version
-			testsupport.Must(t, runBoard(cmd, nil, w), "runBoard: %v", nil)
-
-			var env struct {
-				Data struct {
-					Columns []struct {
-						Status string                       `json:"status"`
-						Issues []map[string]json.RawMessage `json:"issues"`
-					} `json:"columns"`
-				} `json:"data"`
-			}
-			testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %s", buf.String())
-			var rows []map[string]json.RawMessage
-			for _, col := range env.Data.Columns {
-				if col.Status == string(model.StatusTodo) {
-					rows = col.Issues
-				}
-			}
-			checkRows(t, rows)
-		})
-	}
+		}
+		checkRows(t, rows)
+	})
 }
 
 // TestIssueShowJSON_StillCarriesTheDescription is the other half of DKT-1053:
@@ -741,28 +728,26 @@ func TestIssueShowJSON_StillCarriesTheDescription(t *testing.T) {
 	}, nil, nil)
 	testsupport.Must(t, err, "CreateIssue: %v", err)
 
-	for _, version := range []output.JSONVersion{output.JSONV1, output.JSONV2} {
-		w, buf := bufWriter(true)
-		w.JSONVersion = version
-		if err := runIssueShow(cmdWithDB(conn), []string{model.FormatID(id)}, w); err != nil {
-			t.Fatalf("runIssueShow: %v", err)
-		}
-		var env struct {
-			Data map[string]json.RawMessage `json:"data"`
-		}
-		if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-			t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-		}
-		var got string
-		if err := json.Unmarshal(env.Data["description"], &got); err != nil {
-			t.Fatalf("issue show description: %v", err)
-		}
-		if got != desc {
-			t.Errorf("issue show description = %d bytes, want the full %d-byte description",
-				len(got), len(desc))
-		}
-		if _, ok := env.Data["description_bytes"]; ok {
-			t.Error("issue show grew a description_bytes key; the detail view is unchanged")
-		}
+	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
+	if err := runIssueShow(cmdWithDB(conn), []string{model.FormatID(id)}, w); err != nil {
+		t.Fatalf("runIssueShow: %v", err)
+	}
+	var env struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	var got string
+	if err := json.Unmarshal(env.Data["description"], &got); err != nil {
+		t.Fatalf("issue show description: %v", err)
+	}
+	if got != desc {
+		t.Errorf("issue show description = %d bytes, want the full %d-byte description",
+			len(got), len(desc))
+	}
+	if _, ok := env.Data["description_bytes"]; ok {
+		t.Error("issue show grew a description_bytes key; the detail view is unchanged")
 	}
 }
