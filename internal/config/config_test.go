@@ -1,10 +1,13 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
 // The resolution tests below chdir into temp directories, so each one states
@@ -379,6 +382,97 @@ func TestGlobalStoreCoexistsWithExistingContent(t *testing.T) {
 	}
 	if body, err := os.ReadFile(marker); err != nil || string(body) != "existing" {
 		t.Errorf("resolution disturbed pre-existing ~/.docket content: %q, %v", body, err)
+	}
+}
+
+// writeClientConfig writes body as the client config under a sandboxed
+// XDG_CONFIG_HOME, inside a 0700 docket directory, with the given file mode.
+func writeClientConfig(t *testing.T, body string, mode os.FileMode) string {
+	t.Helper()
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	dir := filepath.Join(xdg, "docket")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "client.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod after the write: WriteFile's mode is filtered by the umask.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const sampleClientConfig = `version = 1
+default_profile = "work"
+
+[profile.work]
+url = "https://docket.example.invalid:8443"
+`
+
+// TestLoadClientConfigRequiresPrivateMode: the client config lives next to the
+// trust file and is held to its integrity rules. A group- or world-readable
+// file is refused with the trust package's integrity error; 0600 loads.
+func TestLoadClientConfigRequiresPrivateMode(t *testing.T) {
+	path := writeClientConfig(t, sampleClientConfig, 0o644)
+
+	trustPath, err := trust.StorePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ClientConfigPath(); err != nil || got != path || filepath.Dir(got) != filepath.Dir(trustPath) {
+		t.Fatalf("ClientConfigPath = %q, %v; want %q beside the trust file %q", got, err, path, trustPath)
+	}
+
+	if _, err := LoadClientConfig(); !errors.Is(err, trust.ErrIntegrity) {
+		t.Fatalf("mode 0644: LoadClientConfig err = %v, want the integrity error", err)
+	}
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cc, err := LoadClientConfig()
+	if err != nil {
+		t.Fatalf("mode 0600: LoadClientConfig: %v", err)
+	}
+	if cc.DefaultProfile != "work" || cc.Profiles["work"].URL != "https://docket.example.invalid:8443" {
+		t.Errorf("loaded %+v, want default_profile work with its url", cc)
+	}
+}
+
+// TestLoadClientConfigMissingIsEmpty: no file is no configuration, not an
+// error — the client then falls back to the local socket.
+func TestLoadClientConfigMissingIsEmpty(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cc, err := LoadClientConfig()
+	if err != nil {
+		t.Fatalf("LoadClientConfig with no file: %v", err)
+	}
+	if cc.DefaultProfile != "" || len(cc.Profiles) != 0 {
+		t.Errorf("loaded %+v from no file, want the empty configuration", cc)
+	}
+}
+
+// TestLoadClientConfigRefusesMalformed: the file is parsed strictly, like the
+// trust file, so a typo is an error instead of a silent default.
+func TestLoadClientConfigRefusesMalformed(t *testing.T) {
+	cases := map[string]string{
+		"unknown key":              "version = 1\ndefault_profle = \"work\"\n",
+		"unknown version":          "version = 2\n",
+		"default names no profile": "version = 1\ndefault_profile = \"work\"\n",
+		"profile without url":      "version = 1\n[profile.work]\n",
+		"url not http or https":    "version = 1\n[profile.work]\nurl = \"ftp://docket.example.invalid\"\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			writeClientConfig(t, body, 0o600)
+			if _, err := LoadClientConfig(); !errors.Is(err, ErrClientConfigParse) {
+				t.Errorf("LoadClientConfig err = %v, want ErrClientConfigParse", err)
+			}
+		})
 	}
 }
 

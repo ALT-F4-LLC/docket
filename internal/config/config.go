@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	osexec "os/exec"
 	"os/user"
@@ -12,7 +15,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/ALT-F4-LLC/docket/internal/exec"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
 const dbFileName = "issues.db"
@@ -328,6 +334,101 @@ func (c *Config) Exists() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// ClientConfigVersion is the only client-config format version this build
+// understands.
+const ClientConfigVersion = 1
+
+// ErrClientConfigParse is returned when the client config exists and passes
+// the integrity checks but does not parse: invalid TOML, an unknown key or
+// version, or a profile that cannot be used. Integrity failures wrap
+// trust.ErrIntegrity instead.
+var ErrClientConfigParse = errors.New("client config parse")
+
+// ClientConfig is the user-level client configuration: which daemon servers
+// the client knows by name. It holds no secret; the bearer token comes from
+// the environment, and which profile and daemon project a checkout uses comes
+// from the user-level link file.
+type ClientConfig struct {
+	// Version is the format version; anything but ClientConfigVersion is
+	// refused.
+	Version int `toml:"version"`
+	// DefaultProfile names the profile used when no flag, environment
+	// variable, or link entry selects one. Empty means the local daemon
+	// socket.
+	DefaultProfile string `toml:"default_profile"`
+	// Profiles are the named servers, one [profile.<name>] table each.
+	Profiles map[string]ServerProfile `toml:"profile"`
+	// Path is where the configuration was read from, for diagnostics.
+	Path string `toml:"-"`
+}
+
+// ServerProfile is one named daemon server.
+type ServerProfile struct {
+	// URL is the daemon's http or https base URL.
+	URL string `toml:"url"`
+}
+
+// ClientConfigPath returns the client config's location: client.toml in the
+// same directory as the trust file, resolved by the trust package so the two
+// can never drift apart. Like the trust file it has no repository-local or
+// flag-selected alternative.
+func ClientConfigPath() (string, error) {
+	trustPath, err := trust.StorePath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(trustPath), "client.toml"), nil
+}
+
+// LoadClientConfig reads the client config after the trust file's integrity
+// checks pass on it: a regular file of mode 0600 owned by the calling user, in
+// a directory that only that user can write. A missing file is the empty
+// configuration.
+func LoadClientConfig() (*ClientConfig, error) {
+	path, err := ClientConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := trust.CheckPrivateFile(path, "the client config"); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &ClientConfig{Version: ClientConfigVersion, Path: path}, nil
+		}
+		return nil, fmt.Errorf("reading the client config %s: %w", path, err)
+	}
+	return parseClientConfig(data, path)
+}
+
+// parseClientConfig decodes the client config strictly: an unknown key is an
+// error, as in the trust file, so a typo never falls back to a default.
+func parseClientConfig(data []byte, path string) (*ClientConfig, error) {
+	var cc ClientConfig
+	md, err := toml.Decode(string(data), &cc)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s is not valid TOML: %v", ErrClientConfigParse, path, err)
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		return nil, fmt.Errorf("%w: %s has unknown key %q", ErrClientConfigParse, path, undecoded[0].String())
+	}
+	if cc.Version != ClientConfigVersion {
+		return nil, fmt.Errorf("%w: %s declares version %d, but this build understands version %d only", ErrClientConfigParse, path, cc.Version, ClientConfigVersion)
+	}
+	for name, p := range cc.Profiles {
+		u, err := url.Parse(p.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("%w: %s profile %q has url %q; it must be an http or https URL with a host", ErrClientConfigParse, path, name, p.URL)
+		}
+	}
+	if _, ok := cc.Profiles[cc.DefaultProfile]; cc.DefaultProfile != "" && !ok {
+		return nil, fmt.Errorf("%w: %s sets default_profile %q, but no [profile.%s] table exists", ErrClientConfigParse, path, cc.DefaultProfile, cc.DefaultProfile)
+	}
+	cc.Path = path
+	return &cc, nil
 }
 
 var (

@@ -254,7 +254,7 @@ func Load() (*Store, error) {
 // path from outside the package, which is the same decision that rules out a
 // --trust-file flag, and it keeps tests inside the sandbox rule.
 func loadAt(path string) (*Store, error) {
-	if err := checkIntegrity(path); err != nil {
+	if err := CheckPrivateFile(path, "the trust store"); err != nil {
 		return nil, err
 	}
 
@@ -274,14 +274,20 @@ func loadAt(path string) (*Store, error) {
 	return st, nil
 }
 
-// checkIntegrity runs the integrity checks against the store path and its
-// containing directory, BEFORE parsing. Checked on every read and every write,
-// because a file that became a symlink between two operations is exactly the
-// swap the checks exist to catch.
+// CheckPrivateFile runs the trust store's integrity checks against path and its
+// containing directory, BEFORE parsing: the file, if present, is a regular
+// file of mode 0600 owned by the calling uid, and the directory is owned by
+// the calling uid and not group- or world-writable. Failures wrap ErrIntegrity
+// and name the file as what. Checked on every read and every write, because a
+// file that became a symlink between two operations is exactly the swap the
+// checks exist to catch.
 //
-// A missing file passes: it is the empty allowlist, and ensureStoreDir and
-// writeStore govern its creation instead.
-func checkIntegrity(path string) error {
+// It is exported so the other user-level files beside the trust store are
+// held to the same rules rather than a copy of them.
+//
+// A missing file passes: for the trust store it is the empty allowlist, and
+// ensureStoreDir and writeStore govern its creation instead.
+func CheckPrivateFile(path, what string) error {
 	// The file, if it exists, is a REGULAR FILE — not a symlink, not a FIFO,
 	// not a directory. Lstat, not Stat, because Stat follows the symlink this
 	// check exists to refuse.
@@ -295,7 +301,7 @@ func checkIntegrity(path string) error {
 		return fmt.Errorf("%w: cannot stat %s: %v", ErrIntegrity, path, err)
 	}
 
-	if err := checkFileIntegrity(path, info); err != nil {
+	if err := checkFileIntegrity(path, what, info); err != nil {
 		return err
 	}
 	return checkDirIntegrity(filepath.Dir(path))
@@ -303,9 +309,9 @@ func checkIntegrity(path string) error {
 
 // checkFileIntegrity checks an existing file: regular, 0600, owned by the
 // calling uid.
-func checkFileIntegrity(path string, info os.FileInfo) error {
+func checkFileIntegrity(path, what string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: %s is a symlink, not a regular file; the trust store is never a symlink because a link into a repository would let repo content grant itself execution", ErrIntegrity, path)
+		return fmt.Errorf("%w: %s is a symlink, not a regular file; %s is never a symlink because a link into a repository would let repo content control it", ErrIntegrity, path, what)
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%w: %s is %s, not a regular file", ErrIntegrity, path, exec.DescribeMode(info.Mode()))
@@ -313,13 +319,13 @@ func checkFileIntegrity(path string, info os.FileInfo) error {
 
 	// The mode is exactly 0600 — no group or world bits, read or write.
 	if perm := info.Mode().Perm(); perm != storeFileMode {
-		return fmt.Errorf("%w: %s has mode %04o, but the trust store must be %04o; fix it with: chmod 600 %s", ErrIntegrity, path, perm, storeFileMode, path)
+		return fmt.Errorf("%w: %s has mode %04o, but %s must be %04o; fix it with: chmod 600 %s", ErrIntegrity, path, perm, what, storeFileMode, path)
 	}
 
 	// Owned by the calling uid.
 	owner, ok := fileOwner(info)
 	if ok && owner != os.Getuid() {
-		return fmt.Errorf("%w: %s is owned by uid %d, but docket is running as uid %d; the trust store must be owned by the calling user", ErrIntegrity, path, owner, os.Getuid())
+		return fmt.Errorf("%w: %s is owned by uid %d, but docket is running as uid %d; %s must be owned by the calling user", ErrIntegrity, path, owner, os.Getuid(), what)
 	}
 	return nil
 }
@@ -341,7 +347,7 @@ func checkDirIntegrity(dir string) error {
 		return fmt.Errorf("%w: %s is not a directory", ErrIntegrity, dir)
 	}
 	if perm := info.Mode().Perm(); perm&0o022 != 0 {
-		return fmt.Errorf("%w: %s has mode %04o and is group- or world-writable, so anyone with access could replace the trust store; fix it with: chmod 700 %s", ErrIntegrity, dir, perm, dir)
+		return fmt.Errorf("%w: %s has mode %04o and is group- or world-writable, so anyone with access could replace the files in it; fix it with: chmod 700 %s", ErrIntegrity, dir, perm, dir)
 	}
 	owner, ok := fileOwner(info)
 	if ok && owner != os.Getuid() {
