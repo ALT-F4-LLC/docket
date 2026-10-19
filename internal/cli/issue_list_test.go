@@ -270,59 +270,46 @@ func assertErrCode(t *testing.T, err error, want output.ErrorCode) {
 }
 
 // TestIssueListPrimaryKeyAlias is DKT-452's other half: every `issue list` row
-// carries the id under `id` and `issue` alike, under v1 (`.data.issues[]`) and
-// v2 (`.data.items[]`) both. The RUN-37 conductor that guessed wrong on `issue
-// show` repeated the same guess across list rows, so a fix that reached only
-// the detail view would have left the more-printed surface wrong.
+// (`.data.items[]`) carries the id under `id` and `issue` alike. The RUN-37
+// conductor that guessed wrong on `issue show` repeated the same guess across
+// list rows, so a fix that reached only the detail view would have left the
+// more-printed surface wrong.
 func TestIssueListPrimaryKeyAlias(t *testing.T) {
-	tests := []struct {
-		name     string
-		version  output.JSONVersion
-		itemsKey string
-	}{
-		{"v1", output.JSONV1, "issues"},
-		{"v2", output.JSONV2, "items"},
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "listed", model.StatusTodo, model.PriorityHigh)
+
+	buf := &bytes.Buffer{}
+	w := &output.Writer{
+		JSONMode:    true,
+		JSONVersion: output.JSONV2,
+		Stdout:      buf,
+		Stderr:      &bytes.Buffer{},
+	}
+	testsupport.Must(t, runIssueList(listCmdWithDB(conn), nil, w),
+		"runIssueList: %v", nil)
+
+	var env struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\n%s", err, buf.String())
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(env.Data["items"], &rows); err != nil {
+		t.Fatalf("unmarshal items: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 1 {
+		t.Fatalf("items = %d rows, want 1\n%s", len(rows), buf.String())
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			conn := newTestDB(t)
-			issueID := createIssue(t, conn, "listed", model.StatusTodo, model.PriorityHigh)
-
-			buf := &bytes.Buffer{}
-			w := &output.Writer{
-				JSONMode:    true,
-				JSONVersion: tt.version,
-				Stdout:      buf,
-				Stderr:      &bytes.Buffer{},
-			}
-			testsupport.Must(t, runIssueList(listCmdWithDB(conn), nil, w),
-				"runIssueList: %v", nil)
-
-			var env struct {
-				Data map[string]json.RawMessage `json:"data"`
-			}
-			if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-				t.Fatalf("unmarshal envelope: %v\n%s", err, buf.String())
-			}
-			var rows []map[string]json.RawMessage
-			if err := json.Unmarshal(env.Data[tt.itemsKey], &rows); err != nil {
-				t.Fatalf("unmarshal %s: %v\n%s", tt.itemsKey, err, buf.String())
-			}
-			if len(rows) != 1 {
-				t.Fatalf("%s = %d rows, want 1\n%s", tt.itemsKey, len(rows), buf.String())
-			}
-
-			want := `"` + model.FormatID(issueID) + `"`
-			for _, key := range []string{"id", "issue"} {
-				got, ok := rows[0][key]
-				if !ok {
-					t.Fatalf("row has no %q key; keys = %v", key, keysOf(rows[0]))
-				}
-				if string(got) != want {
-					t.Errorf("row.%s = %s, want %s", key, got, want)
-				}
-			}
-		})
+	want := `"` + model.FormatID(issueID) + `"`
+	for _, key := range []string{"id", "issue"} {
+		got, ok := rows[0][key]
+		if !ok {
+			t.Fatalf("row has no %q key; keys = %v", key, keysOf(rows[0]))
+		}
+		if string(got) != want {
+			t.Errorf("row.%s = %s, want %s", key, got, want)
+		}
 	}
 }

@@ -66,15 +66,15 @@ func followSeqs(t *testing.T, out string) []int64 {
 		}
 		var envelope struct {
 			Data struct {
-				Events []struct {
+				Items []struct {
 					Seq int64 `json:"seq"`
-				} `json:"events"`
+				} `json:"items"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
 			t.Fatalf("a follow cycle emitted invalid JSON: %v\nline: %s", err, line)
 		}
-		for _, e := range envelope.Data.Events {
+		for _, e := range envelope.Data.Items {
 			seqs = append(seqs, e.Seq)
 		}
 	}
@@ -108,7 +108,7 @@ func followOpts(conn *sql.DB, stdout, stderr *syncBuffer) followOptions {
 		query:       engine.EventQuery{Limit: eventsDefaultLimit},
 		interval:    5 * time.Millisecond,
 		jsonMode:    true,
-		jsonVersion: output.JSONV1,
+		jsonVersion: output.JSONV2,
 		stdout:      stdout,
 		stderr:      stderr,
 	}
