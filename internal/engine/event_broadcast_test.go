@@ -60,7 +60,11 @@ func TestBroadcastPublishDoesNotBlockOnUndrainedSubscriber(t *testing.T) {
 	for range 3 {
 		publishWithin(t, &b)
 	}
-	<-wake
+	select {
+	case <-wake:
+	case <-time.After(broadcastDeadline):
+		t.Fatalf("the subscriber was not woken within %s of a publish", broadcastDeadline)
+	}
 	select {
 	case <-wake:
 		t.Fatal("three publishes left more than one pending wake")
