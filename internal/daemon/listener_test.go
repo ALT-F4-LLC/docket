@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
 // testKeyPair writes a self-signed certificate for 127.0.0.1 and its key into
@@ -252,6 +254,169 @@ func TestListenHTTPSRefusesMismatchedKeyPair(t *testing.T) {
 		srv.Shutdown(context.Background())
 		t.Fatal("ListenHTTPS started with a key that does not match the certificate")
 	}
+}
+
+// fakeResolver answers lookups from a fixed table and errors on any other
+// host, standing in for DNS and the hosts file.
+type fakeResolver map[string][]netip.Addr
+
+func (f fakeResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+	addrs, ok := f[host]
+	if !ok {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	return addrs, nil
+}
+
+func addrs(ss ...string) []netip.Addr {
+	out := make([]netip.Addr, len(ss))
+	for i, s := range ss {
+		out[i] = netip.MustParseAddr(s)
+	}
+	return out
+}
+
+// startLoopbackDaemon serves handler on a plaintext listener for listen and
+// returns its base URL.
+func startLoopbackDaemon(t *testing.T, listen string, resolver Resolver, handler http.Handler) (*Server, string) {
+	t.Helper()
+	srv, err := ListenLoopbackHTTP(context.Background(), listen, resolver, handler)
+	if err != nil {
+		t.Fatalf("ListenLoopbackHTTP(%q): %v", listen, err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve() }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+		if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve returned %v, want http.ErrServerClosed", err)
+		}
+	})
+	return srv, "http://" + srv.Addr().String()
+}
+
+// TestLoopbackHTTPRefusesNonLoopbackResolution: a plaintext listener starts
+// only when every address its host resolves to is loopback. The decision is
+// made on the resolved addresses, so a name that reads as local but resolves
+// off-host is refused.
+func TestLoopbackHTTPRefusesNonLoopbackResolution(t *testing.T) {
+	resolver := fakeResolver{
+		"localhost":  addrs("10.0.0.5"),
+		"daemon.lan": addrs("192.168.1.20"),
+		"mixed.test": addrs("127.0.0.1", "10.0.0.5"),
+		"empty.test": nil,
+		"0.0.0.0":    addrs("0.0.0.0"),
+		"::":         addrs("::"),
+	}
+	for _, listen := range []string{
+		"localhost:0",
+		"daemon.lan:0",
+		"mixed.test:0",
+		"empty.test:0",
+		"unresolvable.test:0",
+		"0.0.0.0:0",
+		"[::]:0",
+		":0",
+	} {
+		t.Run(listen, func(t *testing.T) {
+			srv, err := ListenLoopbackHTTP(context.Background(), listen, resolver, countingHandler(new(atomic.Int32)))
+			if err == nil {
+				srv.Shutdown(context.Background())
+				t.Fatalf("started a plaintext listener on %s, bound %s", listen, srv.Addr())
+			}
+		})
+	}
+}
+
+// TestLoopbackHTTPStartsOnLoopbackResolution: a host that resolves only to
+// loopback starts, bound to the checked address rather than the name.
+func TestLoopbackHTTPStartsOnLoopbackResolution(t *testing.T) {
+	resolver := fakeResolver{
+		"local.test":  addrs("127.0.0.1"),
+		"mapped.test": addrs("::ffff:127.0.0.1"),
+	}
+	for _, listen := range []string{"local.test:0", "mapped.test:0"} {
+		t.Run(listen, func(t *testing.T) {
+			srv, _ := startLoopbackDaemon(t, listen, resolver, countingHandler(new(atomic.Int32)))
+			host, _, err := net.SplitHostPort(srv.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if host != "127.0.0.1" {
+				t.Fatalf("bound %s, want 127.0.0.1", host)
+			}
+		})
+	}
+}
+
+// TestLoopbackHTTPExemptsBearerButNotConductor: on a loopback listener a
+// request needs no bearer, and a valid bearer confers no conductor authority;
+// only the conductor credential admits a conductor-gated operation.
+func TestLoopbackHTTPExemptsBearerButNotConductor(t *testing.T) {
+	bearer := testSecret(t)
+	conductorToken := testSecret(t)
+	var open, gated atomic.Int32
+	mux := http.NewServeMux()
+	mux.Handle("/", countingHandler(&open))
+	mux.Handle("/gated", requireConductor(model.HashToken(conductorToken), countingHandler(&gated)))
+	_, base := startLoopbackDaemon(t, "local.test:0", fakeResolver{"local.test": addrs("127.0.0.1")}, mux)
+	client := &http.Client{Timeout: 5 * time.Second}
+	t.Cleanup(client.CloseIdleConnections)
+
+	if resp := get(t, client, base+"/", ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("no bearer on loopback: status = %d, want 200", resp.StatusCode)
+	}
+	if n := open.Load(); n != 1 {
+		t.Fatalf("the open handler ran %d times, want 1", n)
+	}
+
+	denied := map[string]http.Header{
+		"valid bearer only":           {"Authorization": {"Bearer " + bearer}},
+		"conductor token as a bearer": {"Authorization": {"Bearer " + conductorToken}},
+		"wrong conductor token":       {"Authorization": {"Bearer " + bearer}, ConductorTokenHeader: {testSecret(t)}},
+		"no credential":               {},
+	}
+	for name, header := range denied {
+		t.Run(name, func(t *testing.T) {
+			resp := do(t, client, base+"/gated", header)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", resp.StatusCode)
+			}
+		})
+	}
+	if n := gated.Load(); n != 0 {
+		t.Fatalf("the gated operation ran %d times without the conductor credential, want 0", n)
+	}
+
+	resp := do(t, client, base+"/gated", http.Header{
+		"Authorization":      {"Bearer " + bearer},
+		ConductorTokenHeader: {conductorToken},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("with the conductor credential: status = %d, want 200", resp.StatusCode)
+	}
+	if n := gated.Load(); n != 1 {
+		t.Fatalf("the gated operation ran %d times, want 1", n)
+	}
+}
+
+func do(t *testing.T, client *http.Client, url string, header http.Header) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header = header
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	resp.Body.Close()
+	return resp
 }
 
 // TestHTTPSListenerEmptySecretAdmitsNothing: a daemon config with an empty
