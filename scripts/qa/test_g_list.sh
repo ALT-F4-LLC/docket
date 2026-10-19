@@ -42,6 +42,7 @@ test_g_list() {
 
   run issue list --json --limit 2
   assert_exit "G" "G10" 0
+  assert_json "G" "G10_items_array" ".data.items | type" "array"
   assert_json_array_max "G" "G10" ".data.items" 2
 
   run issue list

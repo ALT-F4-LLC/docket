@@ -1646,11 +1646,11 @@ TOML
     "no \`type=\"human\"\` or \`type=\"vote\"\` step"
 
   # ---------------------------------------------------------------------------
-  # ZG18: phase-3 dormancy — an ACTIVATED run's issues read stably under
-  # --json and leak no step internals in human mode.
+  # ZG18: an ACTIVATED run's issues read stably under bare --json (v2), and
+  # neither that payload nor human mode carries step internals.
   #
-  # Step and lease data may surface only in the JSON envelope. This is the
-  # phase's own dormancy proof: a stopped stage is a dormant stage.
+  # The issue verbs expose the issue and its own lease; step rows belong to
+  # `next --run` and the `step` verbs.
   # ---------------------------------------------------------------------------
 
   local ZG_D1 ZG_D2
@@ -1660,6 +1660,16 @@ TOML
   ZG_D2="$CMD_STDOUT"
   check_cond "ZG" "ZG18_json_nonempty" "issue show --json was empty" [ -n "$ZG_D1" ]
   check_cond "ZG" "ZG18_json_stable" "issue show --json is not stable" [ "$ZG_D1" = "$ZG_D2" ]
+
+  # No step vocabulary reaches the issue show payload.
+  local ZG_LEAK=""
+  local ZG_TERM
+  for ZG_TERM in '"step"' '"instance"' '"lease_ttl_s"' '"saga_stage"' '"routing"'; do
+    case "$ZG_D1" in
+      *"$ZG_TERM"*) ZG_LEAK="$ZG_LEAK $ZG_TERM" ;;
+    esac
+  done
+  check_cond "ZG" "ZG18_no_step_leak_json" "issue show --json leaked:$ZG_LEAK" [ -z "$ZG_LEAK" ]
 
   # Human mode leaks no step internals — with one DKT-294 carve-out. The
   # live-status mirror's activity-trail comment ("implement@0 claimed.") is a CORE comment, always
@@ -2243,8 +2253,9 @@ ZGT3EOF
     "$ZG_D4_ROWS non-tenancy events in a repo that never registered a workflow" \
     [ "$ZG_D4_ROWS" = "0" ]
 
-  # Existing verbs over the LOOPED run: `issue show` at v1 and in human mode
-  # carries no loop, ordinal, or event vocabulary. `next` (issue mode) likewise.
+  # Existing verbs over the LOOPED run: `issue show` under bare --json (v2) and
+  # in human mode carries no loop, ordinal, or event vocabulary. `next` (issue
+  # mode) likewise. The v2 envelope adds version and lease, never step state.
   local ZG_D4_SHOW ZG_D4_HUMAN ZG_D4_NEXT
   run_env "$ZG_L" issue show DKT-1 --json;  ZG_D4_SHOW="$CMD_STDOUT"
   run_env "$ZG_L" issue show DKT-1;         ZG_D4_HUMAN="$CMD_STDOUT"
@@ -2252,7 +2263,7 @@ ZGT3EOF
 
   local ZG_D4_LEAK=""
   for ZG_D4_WORD in loop_count loop-entered superseded ordinal events seq; do
-    printf '%s' "$ZG_D4_SHOW"  | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK show-v1:$ZG_D4_WORD"
+    printf '%s' "$ZG_D4_SHOW"  | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK show-json:$ZG_D4_WORD"
     printf '%s' "$ZG_D4_HUMAN" | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK show-human:$ZG_D4_WORD"
     printf '%s' "$ZG_D4_NEXT"  | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK next:$ZG_D4_WORD"
   done

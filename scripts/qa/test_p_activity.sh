@@ -42,6 +42,7 @@ test_p_activity() {
   assert_exit "P" "P10" 0
 
   # P11: limit works (at most 2 entries)
+  assert_json "P" "P11_items_array" ".data.items | type" "array"
   assert_json_array_max "P" "P11" ".data.items" 2
 
   # P12: log for non-existent issue returns exit code 2

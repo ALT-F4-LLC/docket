@@ -305,7 +305,8 @@ test_zf_claims() {
   fi
 
   # ---------------------------------------------------------------------------
-  # ZF6: dormancy — an issue that is never claimed is unchanged everywhere.
+  # ZF6: lease visibility — a claimed issue shows its lease under bare --json,
+  # and an issue that is never claimed emits no lease key.
   # ---------------------------------------------------------------------------
 
   # Bare --json is v2, so a claimed issue carries its lease and version.

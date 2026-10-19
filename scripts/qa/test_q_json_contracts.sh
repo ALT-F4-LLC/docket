@@ -95,6 +95,7 @@ test_q_json_contracts() {
   assert_json_exists "Q" "Q14" ".data.items"
   assert_json_exists "Q" "Q14" ".data.total"
   assert_json_exists "Q" "Q14" ".data.truncated"
+  assert_json_array_min "Q" "Q14" ".data.items" 1
   assert_json_all "Q" "Q14" ".data.items" ".issue_id == \"DKT-$Q_ISSUE_ID\""
 
   # Q15: stats contract

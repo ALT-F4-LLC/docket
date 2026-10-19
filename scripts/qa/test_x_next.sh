@@ -74,6 +74,7 @@ test_x_next() {
   # X6: Limit flag works.
   run next --json --limit 1
   assert_exit "X" "X6" 0
+  assert_json "X" "X6_items_array" ".data.items | type" "array"
   assert_json_array_max "X" "X6_limit" ".data.items" 1
 
   # X7: Status filter works (filter to only todo issues; our issues are backlog).
@@ -81,15 +82,15 @@ test_x_next() {
   assert_exit "X" "X7" 0
   # All returned issues should have status "todo".
   local TODO_ONLY
-  TODO_ONLY=$(echo "$CMD_STDOUT" | jq '[.data.items[] | select(.status != "todo")] | length' 2>/dev/null || echo "0")
-  check_cond "X" "X7_status" "expected only todo issues when filtering by status" [ "$TODO_ONLY" -eq 0 ]
+  TODO_ONLY=$(echo "$CMD_STDOUT" | jq '[.data.items[] | select(.status != "todo")] | length' 2>/dev/null || echo "unreadable")
+  check_cond "X" "X7_status" "expected only todo issues when filtering by status, got $TODO_ONLY non-todo" [ "$TODO_ONLY" = "0" ]
 
   # X8: Priority filter works.
   run next --json -p critical
   assert_exit "X" "X8" 0
   local CRIT_ONLY
-  CRIT_ONLY=$(echo "$CMD_STDOUT" | jq '[.data.items[] | select(.priority != "critical")] | length' 2>/dev/null || echo "0")
-  check_cond "X" "X8_priority" "expected only critical issues when filtering by priority" [ "$CRIT_ONLY" -eq 0 ]
+  CRIT_ONLY=$(echo "$CMD_STDOUT" | jq '[.data.items[] | select(.priority != "critical")] | length' 2>/dev/null || echo "unreadable")
+  check_cond "X" "X8_priority" "expected only critical issues when filtering by priority, got $CRIT_ONLY non-critical" [ "$CRIT_ONLY" = "0" ]
 
   # X9: Invalid status filter (exit 3).
   run next --json -s invalid
