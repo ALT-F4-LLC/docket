@@ -588,7 +588,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 func readySnapshot(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) (*Scheduler, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the ready snapshot: %w", err)
 	}
@@ -989,7 +989,7 @@ func (e *Engine) verifyDispatchTx(
 		return nil, nil, nil, err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("verifying a dispatch: %w", err)
 	}
@@ -2467,7 +2467,7 @@ func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
 // openDispatchID reads the run's open dispatch id, if any, in a rolled-back
 // transaction of its own.
 func openDispatchID(conn *sql.DB, runID int) (int, bool) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return 0, false
 	}

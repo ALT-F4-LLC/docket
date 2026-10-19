@@ -357,7 +357,7 @@ func (e *Engine) integrationVerdict(
 	// from inside the transaction below would deadlock rather than fail.
 	execRoot := runExecRoot(conn, runID)
 
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("checking integration: %w", err)
 	}

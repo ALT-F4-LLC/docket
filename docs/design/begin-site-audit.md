@@ -1,6 +1,6 @@
 # Begin site audit
 
-Status: Current — 2026-10-16
+Status: Current — 2026-10-18
 
 Every non-test `Begin` and `BeginTx` call site, classified as read or write.
 The row set is the output of this command, one row per matched line:
@@ -10,7 +10,7 @@ git grep -nE '\.(Begin|BeginTx)\(' -- '*.go' ':!*_test.go'
 ```
 
 `git grep -cE` with the same pattern and pathspecs prints per-file counts that
-sum to the row count below (101).
+sum to the row count below (97).
 
 ## Why this matters
 
@@ -27,9 +27,10 @@ takes no write lock. It is safe only for a transaction that issues no write.
 - **write**: the transaction commits a write: an insert, update, delete, reap,
   lease change, or event append.
 
-The seven existing callers of `db.BeginReadSnapshot` (`claim.go` two,
-`held.go` one, `next.go` two, `report.go` one, `saga.go` one) already open
-read snapshots. They do not match the pattern and are not rows.
+The eleven existing callers of `db.BeginReadSnapshot` (`claim.go` two,
+`dispatch.go` three, `dispatch_integration.go` one, `held.go` one, `next.go`
+two, `report.go` one, `saga.go` one) already open read snapshots. They do not
+match the pattern and are not rows.
 
 `internal/engine/claim.go:322` is a comment that names `conn.Begin()`. It
 matches the pattern, so it is a row; it refers to the claim's write
@@ -87,13 +88,9 @@ transaction at line 361.
 | internal/engine/config_change.go:39 | SetConfig | write | writes config and its event |
 | internal/engine/dispatch.go:223 | Engine.OpenDispatch | write | inserts a dispatch and its rows |
 | internal/engine/dispatch.go:446 | Engine.ExtendDispatch | write | extends a dispatch |
-| internal/engine/dispatch.go:591 | readySnapshot | read | loads the scheduler, rolled back |
-| internal/engine/dispatch.go:992 | Engine.verifyDispatchTx | read | recomputes rows, never committed |
 | internal/engine/dispatch.go:2000 | recordCloseRefused | write | appends a refusal event |
 | internal/engine/dispatch.go:2042 | Engine.closeDispatch | write | closes a dispatch |
 | internal/engine/dispatch.go:2254 | Engine.AbandonDispatchWith | write | abandons a dispatch |
-| internal/engine/dispatch.go:2470 | openDispatchID | read | reads the open dispatch id, rolled back |
-| internal/engine/dispatch_integration.go:360 | Engine.integrationVerdict | read | reads integration candidates, rolled back |
 | internal/engine/event.go:874 | RecordTrustEvent | write | appends a trust event |
 | internal/engine/event.go:1095 | RecordProjectRegisteredEvent | write | appends a registration event |
 | internal/engine/events_prune.go:100 | PruneEvents | write | deletes events |
@@ -141,4 +138,4 @@ transaction at line 361.
 | internal/engine/vote_panel.go:100 | recordPanelRunEvents | write | appends panel events |
 | internal/engine/waive.go:91 | Engine.WaiveStaleTargets | write | waives stale targets |
 
-Totals: 15 read, 86 write, 101 rows.
+Totals: 11 read, 86 write, 97 rows.
