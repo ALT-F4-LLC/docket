@@ -221,7 +221,7 @@ func detachedPreGateCandidates(
 		return nil, nil
 	}
 
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +536,7 @@ func stepStillWantsDetachedPreGate(
 	conn *sql.DB, step *db.Step, defs map[int]*workflow.Definition,
 	targetSHA string, nowMS int64,
 ) (string, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return "", err
 	}

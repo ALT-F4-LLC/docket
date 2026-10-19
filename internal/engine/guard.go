@@ -174,7 +174,7 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 		return nil, err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning guard read: %w", err)
 	}

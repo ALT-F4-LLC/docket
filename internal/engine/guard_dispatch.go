@@ -83,7 +83,7 @@ func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
 		return "", err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return "", fmt.Errorf("checking whether %s is reconciled: %w",
 			model.FormatRunID(runID), err)
@@ -491,7 +491,7 @@ func parseProposedRows(raw []byte) ([]model.StepRow, error) {
 // rows were proposed — mapping it to an error here would make the
 // caller unwrap a sentinel to tell the two apart.
 func storedManifestRows(conn *sql.DB, runID int) ([]db.DispatchRow, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the open dispatch: %w", err)
 	}
@@ -680,7 +680,7 @@ func GuardSpawnActive(
 // openReapHold reads a run's unacknowledged reaps in its own rolled-back
 // transaction, so the caller holds none while it decides.
 func openReapHold(conn *sql.DB, runID int) ([]db.ReapAck, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading unacknowledged reaps: %w", err)
 	}

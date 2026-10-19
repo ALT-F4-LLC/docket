@@ -10,7 +10,7 @@ git grep -nE '\.(Begin|BeginTx)\(' -- '*.go' ':!*_test.go'
 ```
 
 `git grep -cE` with the same pattern and pathspecs prints per-file counts that
-sum to the row count below (93).
+sum to the row count below (87).
 
 ## Why this matters
 
@@ -27,9 +27,10 @@ takes no write lock. It is safe only for a transaction that issues no write.
 - **write**: the transaction commits a write: an insert, update, delete, reap,
   lease change, or event append.
 
-The fifteen existing callers of `db.BeginReadSnapshot` (`claim.go` two,
+The twenty-one existing callers of `db.BeginReadSnapshot` (`claim.go` two,
 `dispatch.go` three, `dispatch_integration.go` one, `events_read.go` three,
-`held.go` one, `next.go` two, `report.go` one, `run_budget.go` one, `saga.go`
+`guard.go` one, `guard_dispatch.go` three, `held.go` one, `next.go` two,
+`pregate_detached.go` two, `report.go` one, `run_budget.go` one, `saga.go`
 one) already open read snapshots. They do not match the pattern and are not
 rows.
 
@@ -95,11 +96,7 @@ transaction at line 361.
 | internal/engine/event.go:874 | RecordTrustEvent | write | appends a trust event |
 | internal/engine/event.go:1095 | RecordProjectRegisteredEvent | write | appends a registration event |
 | internal/engine/events_prune.go:100 | PruneEvents | write | deletes events |
-| internal/engine/guard.go:177 | stopBlockers | read | loads the scheduler, rolled back |
-| internal/engine/guard_dispatch.go:86 | unreconciledReason | read | reads dispatch reconciliation, rolled back |
 | internal/engine/guard_dispatch.go:360 | applyAcks | write | acknowledges reaps |
-| internal/engine/guard_dispatch.go:494 | storedManifestRows | read | reads dispatch rows, rolled back |
-| internal/engine/guard_dispatch.go:683 | openReapHold | read | reads open reap acks, rolled back |
 | internal/engine/guard_dispatch.go:711 | recordGuardCarveOut | write | appends a carve-out event |
 | internal/engine/held.go:958 | Engine.decideMaterializedStep | write | resolves a held step |
 | internal/engine/hold.go:58 | HoldStep | write | holds a step |
@@ -110,8 +107,6 @@ transaction at line 361.
 | internal/engine/note.go:118 | AddRunNote | write | inserts a run note |
 | internal/engine/pregate.go:553 | announcePreGate | write | appends a pre-gate event |
 | internal/engine/pregate.go:587 | recordPreGateRowsIf | write | inserts pre-gate results |
-| internal/engine/pregate_detached.go:224 | detachedPreGateCandidates | read | loads the scheduler, rolled back |
-| internal/engine/pregate_detached.go:539 | stepStillWantsDetachedPreGate | read | rereads one step, rolled back |
 | internal/engine/reap_ack.go:260 | ForceReapStepWith | write | force-reaps a step |
 | internal/engine/refresh_body.go:98 | RefreshIssueBodyInRun | write | refreshes a pinned issue body |
 | internal/engine/refresh_files.go:66 | RefreshIssueFilesInRun | write | refreshes pinned issue files |
@@ -135,4 +130,4 @@ transaction at line 361.
 | internal/engine/vote_panel.go:100 | recordPanelRunEvents | write | appends panel events |
 | internal/engine/waive.go:91 | Engine.WaiveStaleTargets | write | waives stale targets |
 
-Totals: 7 read, 86 write, 93 rows.
+Totals: 1 read, 86 write, 87 rows.
