@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5/stdlib"
 )
@@ -37,7 +38,14 @@ func open(ctx context.Context, dsn, passwordFile string, readVersion versionRead
 	versionNum, err := readVersion(ctx, db)
 	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("reading postgres server version: %w", err)
+		// The pgx connect error holds the config, password included, in
+		// exported fields, so only its text, with the password scrubbed,
+		// reaches the caller.
+		msg := err.Error()
+		if cfg.Password != "" {
+			msg = strings.ReplaceAll(msg, cfg.Password, "[redacted]")
+		}
+		return nil, fmt.Errorf("reading postgres server version: %s", msg)
 	}
 	if versionNum < minServerVersionNum {
 		db.Close()

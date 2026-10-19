@@ -3,9 +3,13 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestPgstoreOpenVersionCheck(t *testing.T) {
@@ -47,5 +51,64 @@ func TestPgstoreOpenVersionCheck(t *testing.T) {
 			t.Fatalf("Open against DOCKET_TEST_POSTGRES_DSN: %v", err)
 		}
 		db.Close()
+	})
+}
+
+func TestPgstoreOpenRedactsCredentials(t *testing.T) {
+	isolatePGEnv(t)
+	const sentinel = "S3NTINEL-pw"
+	const unreachable = "host=127.0.0.1 port=1 user=docket dbname=docket sslmode=disable connect_timeout=2"
+
+	for name, c := range map[string]struct{ dsn, passwordFile string }{
+		"password in url userinfo": {
+			dsn: "postgres://docket:" + sentinel + "@127.0.0.1:1/docket?sslmode=disable&connect_timeout=2",
+		},
+		"password in key/value form": {
+			dsn: unreachable + " password=" + sentinel,
+		},
+		"password pgx cannot redact": {
+			dsn: "host=127.0.0.1 port=1 password=S3NTINEL " + sentinel + " connect_timeout=2",
+		},
+		"password file holding the sentinel": {
+			dsn:          unreachable,
+			passwordFile: writePasswordFile(t, sentinel+"\n", 0o600),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			db, err := Open(ctx, c.dsn, c.passwordFile)
+			if err == nil {
+				db.Close()
+				t.Fatal("Open connected to an unreachable address")
+			}
+			if strings.Contains(err.Error(), "S3NTINEL") {
+				t.Fatalf("Open error carries the password: %q", err)
+			}
+			if c.passwordFile != "" && !strings.Contains(err.Error(), "reading postgres server version") {
+				t.Fatalf("Open error %q is not a connection failure; the password file never reached the connect", err)
+			}
+			var connectErr *pgconn.ConnectError
+			var parseErr *pgconn.ParseConfigError
+			if errors.As(err, &connectErr) || errors.As(err, &parseErr) {
+				t.Fatalf("Open error %q wraps a pgx error whose fields hold the password or DSN", err)
+			}
+		})
+	}
+
+	t.Run("driver error echoing the file's password", func(t *testing.T) {
+		echoPassword := func(context.Context, *sql.DB) (int, error) {
+			return 0, errors.New("server said: password " + sentinel + " rejected")
+		}
+
+		db, err := open(context.Background(), unreachable, writePasswordFile(t, sentinel+"\n", 0o600), echoPassword)
+		if err == nil {
+			db.Close()
+			t.Fatal("open succeeded although reading the server version failed")
+		}
+		if strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("open error carries the password the driver echoed: %q", err)
+		}
 	})
 }
