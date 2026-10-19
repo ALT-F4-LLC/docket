@@ -341,8 +341,8 @@ func jsonVersionOf(cmd *cobra.Command) output.JSONVersion {
 	if err != nil {
 		return output.JSONNone
 	}
-	// --format json is an alias for --json=v2. An explicit --json=false
-	// wins, so the alias never overrides a caller who turned JSON off.
+	// --format json is an alias for --json=v2. --json=false and --json=0
+	// read the same as an absent --json, so they do not suppress the alias.
 	if version == output.JSONNone && formatIsJSON(cmd) {
 		return output.JSONV2
 	}

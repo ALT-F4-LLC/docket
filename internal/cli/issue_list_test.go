@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -338,9 +339,9 @@ func TestIssueListJSONV1IsRejected(t *testing.T) {
 	if !strings.Contains(msg, "v2") {
 		t.Errorf("refusal does not name v2: %q", msg)
 	}
-	for _, other := range []string{"v1", "v3"} {
-		if strings.Contains(msg, other) {
-			t.Errorf("refusal names dialect %q: %q", other, msg)
+	for _, dialect := range regexp.MustCompile(`v[0-9]+`).FindAllString(msg, -1) {
+		if dialect != "v2" {
+			t.Errorf("refusal names dialect %q: %q", dialect, msg)
 		}
 	}
 }
