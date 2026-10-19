@@ -708,7 +708,7 @@ func TestVoteCastReportsCommittedCastWhenPanelEventsFail(t *testing.T) {
 		_, ref := panelProposalWithFailingEvents(t, conn)
 
 		stdout := captureStdout(t)
-		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "seat-1", "--json", "v1"}, base...)...)
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "seat-1", "--json", "v2"}, base...)...)
 		raw := stdout()
 		assertReportedGeneral(t, err)
 		var envelope struct {

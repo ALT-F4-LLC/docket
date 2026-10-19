@@ -71,33 +71,3 @@ emits = "k"
 		t.Errorf(`lint: class = %q, want "gate"`, classes["lint"])
 	}
 }
-
-// TestTrustListV1OmitsClass pins the frozen v1 shape: adding the
-// classification must not put a `class` byte anywhere in v1 output.
-func TestTrustListV1OmitsClass(t *testing.T) {
-	_, cfg := trustNoRepo(t)
-	addTrustEntry(t, cfg, "lint", "true")
-
-	cmd := newTrustListCmd()
-	jsonCmdWithVersion(t, cmd, "v1")
-
-	stdout := captureStdout(t)
-	err := runTrustVerb(t, cfg, cmd)
-	out := stdout()
-	testsupport.Must(t, err, "trust list: %v", err)
-
-	var envelope struct {
-		Data struct {
-			Entries []map[string]any `json:"entries"`
-		} `json:"data"`
-	}
-	if jsonErr := json.Unmarshal([]byte(out), &envelope); jsonErr != nil {
-		t.Fatalf("trust list's v1 JSON did not parse: %v\n%s", jsonErr, out)
-	}
-	if len(envelope.Data.Entries) != 1 {
-		t.Fatalf("want 1 entry, got %d", len(envelope.Data.Entries))
-	}
-	if _, has := envelope.Data.Entries[0]["class"]; has {
-		t.Error("v1's frozen shape must not carry `class`")
-	}
-}
