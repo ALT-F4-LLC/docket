@@ -100,7 +100,7 @@ const packetFrontmatterFence = "---"
 // entry living in the shared root resolves identically from any cwd, including a
 // linked worktree that carries no `.docket/` of its own.
 func resolvePacketFiles(
-	runRef string, pins map[string]string, roots []string, entries []string,
+	runRef string, pins map[string]db.Pin, roots []string, entries []string,
 ) ([]PacketFile, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -161,6 +161,12 @@ func walkPacketFiles(entries []string, visit func(string) ([]string, error)) err
 //	pinned, file absent    NOT_FOUND (exit 2) — the pin says the run needs it
 //	NOT PINNED             VALIDATION_ERROR — the run holds no snapshot
 //
+// The bytes are the pin's STORED content whenever activation recorded it, so
+// the source file can be edited or deleted without changing the packet, and a
+// store opened on another machine renders the same one. Only a pin stored
+// without its bytes (every pin from before schema v45) reads the file from
+// the config roots. Either way the bytes must hash to the pin.
+//
 // The last row is where this ladder DIFFERS from `templateSource`'s, and the
 // difference is deliberate. An unpinned `--template F` renders unverified and
 // reports the gap, because the operator chose that file at render time. A
@@ -174,7 +180,7 @@ func walkPacketFiles(entries []string, visit func(string) ([]string, error)) err
 // needs a run whose pin set includes it. Same code, same refusal — a true
 // sentence about which of the two it is.
 func readPinnedPacketFile(
-	runRef string, pins map[string]string, roots []string, ref string,
+	runRef string, pins map[string]db.Pin, roots []string, ref string,
 ) (body, hash string, err error) {
 	candidates := make([]string, 0, len(roots))
 	for _, root := range roots {
@@ -186,11 +192,11 @@ func readPinnedPacketFile(
 	// Runs activated before the change recorded the full walked path, so the
 	// absolute form is honored second, at each root; a legacy run keeps
 	// resolving in the checkout it was activated in.
-	pinnedHash, pinned := pins[ref]
+	pin, pinned := pins[ref]
 	if !pinned {
 		for _, full := range candidates {
-			if h, ok := pins[full]; ok {
-				pinnedHash, pinned = h, true
+			if p, ok := pins[full]; ok {
+				pin, pinned = p, true
 				break
 			}
 		}
@@ -223,33 +229,14 @@ func readPinnedPacketFile(
 				"a new run to pin it", ref, pinSetOwner(runRef))
 	}
 
-	// FIRST ROOT THAT HOLDS IT WINS, and the hash check below then applies to
-	// that file. Falling through to a later root on a hash mismatch would let a
-	// stale copy stand in for an edited one and turn the CONFLICT into a
-	// silently different packet.
 	var content []byte
-	var missing error
-	var found bool
-	for _, full := range candidates {
-		read, rerr := os.ReadFile(full)
-		if rerr == nil {
-			content, found = read, true
-			break
+	if pin.Content.Valid {
+		content = []byte(pin.Content.String)
+	} else {
+		content, err = readPacketFileFromRoots(ref, candidates)
+		if err != nil {
+			return "", "", err
 		}
-		if errors.Is(rerr, os.ErrNotExist) {
-			missing = rerr
-			continue
-		}
-		return "", "", fmt.Errorf("reading packet file %s: %w", ref, rerr)
-	}
-	if !found {
-		if missing == nil {
-			missing = os.ErrNotExist
-		}
-		// The pin says the run depends on this file. Its absence is a
-		// missing dependency, not a bad request.
-		return "", "", notFoundErr(missing,
-			"packet file %q is pinned by this run but is no longer on disk", ref)
 	}
 
 	// A pin recorded before this stage carries no hash to compare against
@@ -257,14 +244,48 @@ func readPinnedPacketFile(
 	// legal when the run started, and re-activation must not reject a run for
 	// gaining a check it predates.
 	got := sha256Hex(content)
-	if pinnedHash != "" && got != pinnedHash {
+	if pin.SHA256 != "" && got != pin.SHA256 {
 		// Never a warning, never a silent re-pin. Both hashes are named because
 		// an operator needs to know whether to restore the file or re-activate.
+		if pin.Content.Valid {
+			return "", "", conflictErr(
+				"packet file %q's stored bytes do not match this run's pin: pinned %s, "+
+					"stored %s; start a new run to pin it again", ref, pin.SHA256, got)
+		}
 		return "", "", conflictErr(
 			"packet file %q has changed since this run pinned it: pinned %s, on disk "+
-				"%s; restore the file or start a new run", ref, pinnedHash, got)
+				"%s; restore the file or start a new run", ref, pin.SHA256, got)
 	}
 	return string(content), got, nil
+}
+
+// readPacketFileFromRoots reads a pin stored without its bytes from the first
+// candidate path that holds it.
+//
+// FIRST ROOT THAT HOLDS IT WINS, and the caller's hash check then applies to
+// that file. Falling through to a later root on a hash mismatch would let a
+// stale copy stand in for an edited one and turn the CONFLICT into a silently
+// different packet.
+func readPacketFileFromRoots(ref string, candidates []string) ([]byte, error) {
+	var missing error
+	for _, full := range candidates {
+		content, err := os.ReadFile(full)
+		if err == nil {
+			return content, nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			missing = err
+			continue
+		}
+		return nil, fmt.Errorf("reading packet file %s: %w", ref, err)
+	}
+	if missing == nil {
+		missing = os.ErrNotExist
+	}
+	// The pin says the run depends on this file. Its absence is a missing
+	// dependency, not a bad request.
+	return nil, notFoundErr(missing,
+		"packet file %q is pinned by this run but is no longer on disk", ref)
 }
 
 // parsePacketFrontmatter reads the one declared-includes key and returns the
@@ -429,9 +450,15 @@ func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	body, _, err := readPinnedPacketFile(
-		runRef, packetPinsForRun(pins),
-		instanceConfigRoots(), ref)
+	// The file is read from the config roots, verified against the pin, rather
+	// than from the stored bytes, so a working tree that drifted since
+	// activation still refuses here as `pin drift`.
+	onDisk := packetFilePins(pins)
+	for pinRef, pin := range onDisk {
+		pin.Content = sql.NullString{}
+		onDisk[pinRef] = pin
+	}
+	body, _, err := readPinnedPacketFile(runRef, onDisk, instanceConfigRoots(), ref)
 	if err != nil {
 		if code, ok := CodeOf(err); ok && code == CodeConflict {
 			return "", conflictErr("pin drift: %s", err.Error())
@@ -444,10 +471,22 @@ func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
 // sha256Hex is workflow.SHA256, named locally so this file reads as one story.
 func sha256Hex(content []byte) string { return workflow.SHA256(content) }
 
-// packetPinsForRun indexes a run's FILE pins by ref, for the resolver to verify
-// against. Registered-object pins are excluded: a workflow or schema pin names
-// a version, not a path, and a packet entry naming one would be a path
+// packetFilePins indexes a run's FILE pins by ref, for the resolver to read
+// and verify. Registered-object pins are excluded: a workflow or schema pin
+// names a version, not a path, and a packet entry naming one would be a path
 // collision rather than a reference.
+func packetFilePins(pins []db.Pin) map[string]db.Pin {
+	out := make(map[string]db.Pin, len(pins))
+	for _, p := range pins {
+		if p.Kind == db.PinKindFile {
+			out[p.Ref] = p
+		}
+	}
+	return out
+}
+
+// packetPinsForRun indexes a run's FILE pins' hashes by ref, the baseline the
+// gate runner checks pinned gate scripts against.
 func packetPinsForRun(pins []db.Pin) map[string]string {
 	out := make(map[string]string, len(pins))
 	for _, p := range pins {
@@ -491,7 +530,7 @@ func stepPacketFiles(
 	}
 
 	return resolvePacketFiles(
-		model.FormatRunID(step.RunID), packetPinsForRun(pins),
+		model.FormatRunID(step.RunID), packetFilePins(pins),
 		instanceConfigRoots(), entries)
 }
 

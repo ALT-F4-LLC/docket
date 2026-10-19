@@ -252,7 +252,7 @@ func TestPacketResolutionLadder(t *testing.T) {
 		root := t.TempDir()
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 		pins := testPinSet(t, root, "checklists/a.md")
-		pinnedHash := pins["checklists/a.md"]
+		pinnedHash := pins[filepath.Join(root, "checklists/a.md")].SHA256
 
 		writeFixture(t, root, "checklists/a.md", "EDITED\n")
 
@@ -287,7 +287,7 @@ func TestPacketResolutionLadder(t *testing.T) {
 		writeFixture(t, root, "checklists/a.md", "BODY\n")
 
 		_, err := resolvePacketFiles(
-			"RUN-1", map[string]string{}, []string{root},
+			"RUN-1", map[string]db.Pin{}, []string{root},
 			[]string{"checklists/a.md"})
 		if err == nil {
 			t.Fatal("an unpinned file was read, want a refusal")
@@ -309,6 +309,62 @@ func TestPacketResolutionLadder(t *testing.T) {
 			t.Fatal("a dangling include was skipped — that is DKT-70's failure signature")
 		}
 	})
+}
+
+// TestPacketRendersFromPersistedPinBytes: once activation has stored a packet
+// file's bytes, the packet renders from the store, so deleting the source file
+// leaves the rendered packet byte-identical.
+func TestPacketRendersFromPersistedPinBytes(t *testing.T) {
+	conn, shared, _ := unionRepo(t)
+	writeConfigFile(t, shared, "workflows/auto-dev.toml", packetWorkflow("contracts/fix.md"))
+	source := writeConfigFile(t, shared, "contracts/fix.md", "the pinned contract\n")
+
+	issue := createIssue(t, conn, "persisted packet", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	before, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "RenderStep before the delete: %v", err)
+	if !strings.Contains(before.Packet, "the pinned contract") {
+		t.Fatalf("premise: the packet does not inline the pinned file:\n%s", before.Packet)
+	}
+
+	err = os.Remove(source)
+	testsupport.Must(t, err, "deleting the pinned source file: %v", err)
+
+	after, err := RenderStep(conn, stepID, "", nowMS)
+	testsupport.Must(t, err, "RenderStep after the source file was deleted: %v", err)
+	if after.Packet != before.Packet {
+		t.Errorf("the packet changed after the source file was deleted:\nbefore:\n%s\nafter:\n%s",
+			before.Packet, after.Packet)
+	}
+}
+
+// TestPacketPersistedBytesHashMismatchConflicts: stored bytes that do not hash
+// to the recorded pin are a CONFLICT naming both hashes, never inlined.
+func TestPacketPersistedBytesHashMismatchConflicts(t *testing.T) {
+	const ref = "checklists/a.md"
+	pinnedHash := sha256Hex([]byte("BODY\n"))
+	storedHash := sha256Hex([]byte("TAMPERED\n"))
+	pins := map[string]db.Pin{ref: {
+		Kind: db.PinKindFile, Ref: ref, SHA256: pinnedHash,
+		Content: sql.NullString{String: "TAMPERED\n", Valid: true},
+	}}
+
+	_, err := resolvePacketFiles("RUN-1", pins, []string{t.TempDir()}, []string{ref})
+	if err == nil {
+		t.Fatal("persisted bytes that miss the pin hash resolved, want CONFLICT")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("code = %q (err %v), want %q", code, err, CodeConflict)
+	}
+	for _, hash := range []string{pinnedHash, storedHash} {
+		if !strings.Contains(err.Error(), hash) {
+			t.Errorf("err = %q, want it to name %s", err.Error(), hash)
+		}
+	}
 }
 
 // TestPacketResolutionIsDeterministic is determinism through the assembler:
@@ -343,21 +399,21 @@ func TestPacketResolutionIsDeterministic(t *testing.T) {
 	}
 }
 
-// testPinSet hashes the named fixtures the way activation would, producing the
-// path -> hash map the resolver verifies against.
+// testPinSet hashes the named fixtures into the ref -> pin map the resolver
+// verifies against, in the legacy shape: keyed by the FULL path and stored
+// without bytes, so the resolver reads each file from disk.
 //
-// It is keyed by the FULL path, as the activation scan's pin refs are: the
-// declared entry is relative to the config directory, and the resolver joins
-// the two. Keying this helper the same way is what keeps it an honest stand-in
-// for the real pin set rather than a shape that only these tests accept.
-func testPinSet(t *testing.T, root string, names ...string) map[string]string {
+// The declared entry is relative to the config directory, and the resolver
+// joins the two. Keying this helper the same way is what keeps it an honest
+// stand-in for a real legacy pin set rather than a shape only these tests accept.
+func testPinSet(t *testing.T, root string, names ...string) map[string]db.Pin {
 	t.Helper()
-	pins := make(map[string]string, len(names))
+	pins := make(map[string]db.Pin, len(names))
 	for _, name := range names {
 		full := filepath.Join(root, name)
 		body, err := os.ReadFile(full)
 		testsupport.Must(t, err, "reading fixture %s: %v", name, err)
-		pins[full] = sha256Hex(body)
+		pins[full] = db.Pin{Kind: db.PinKindFile, Ref: full, SHA256: sha256Hex(body)}
 	}
 	return pins
 }

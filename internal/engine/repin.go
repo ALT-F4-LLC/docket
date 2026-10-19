@@ -416,8 +416,10 @@ func repinRunOptsIn(
 		// rather than of the caller's timing. A pin that moved between the
 		// disk walk and this write hits zero rows and the whole repin rolls
 		// back, instead of overwriting an agreement this verb never inspected.
+		// The stored bytes are the OLD agreement's, so they are cleared with it:
+		// the repinned ref reads its adopted bytes from disk, as an added one does.
 		res, err := tx.Exec(
-			`UPDATE pins SET sha256 = ? WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
+			`UPDATE pins SET sha256 = ?, content = NULL WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
 			c.NewSHA256, runID, c.Kind, c.Ref, c.OldSHA256,
 		)
 		if err != nil {

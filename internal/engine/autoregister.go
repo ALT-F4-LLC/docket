@@ -724,6 +724,7 @@ func filePin(root, path string) (db.Pin, error) {
 	}
 	return db.Pin{
 		Kind: db.PinKindFile, Ref: ref, SHA256: workflow.SHA256(src),
+		Content: sql.NullString{String: string(src), Valid: true},
 		// Carried in memory for the closure-size arithmetic. The
 		// bytes are already in hand for the hash, so the size is free here and
 		// would cost a second read at expansion.

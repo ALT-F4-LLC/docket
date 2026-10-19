@@ -2258,6 +2258,7 @@ func readFilePins(paths []string, roots []string) ([]db.Pin, error) {
 		}
 		out = append(out, db.Pin{
 			Kind: db.PinKindFile, Ref: ref, SHA256: workflow.SHA256(content),
+			Content: sql.NullString{String: string(content), Valid: true},
 		})
 	}
 	return out, nil

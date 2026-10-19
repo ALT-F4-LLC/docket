@@ -2500,8 +2500,9 @@ after = []
 //
 // This is a CHARACTERIZATION test: it pins today's registration lifetime. It
 // does not claim this is safe in general — a config file a run's PACKET
-// declares does NOT survive deletion (readPinnedPacketFile fails NOT_FOUND);
-// this test is scoped to workflow registration specifically, one layer over.
+// declares, pinned without its bytes, does NOT survive deletion
+// (readPinnedPacketFile fails NOT_FOUND); this test is scoped to workflow
+// registration specifically, one layer over.
 //
 // The assertion that makes this non-vacuous: the SECOND activation registers
 // NOTHING (the file is genuinely gone from the scan) and STILL binds. A test

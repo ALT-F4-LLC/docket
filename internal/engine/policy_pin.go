@@ -37,7 +37,7 @@ func policyForRun(conn *sql.DB, runID int) (*policyDoc, error) {
 // list pins no policy.toml, the parsed document otherwise, and the read
 // error verbatim when the pinned file cannot be read.
 func policyFromPins(runID int, pins []db.Pin) (*policyDoc, error) {
-	pinned := packetPinsForRun(pins)
+	pinned := packetFilePins(pins)
 	if _, ok := pinned[policyPinRef]; !ok {
 		return nil, nil
 	}

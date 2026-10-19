@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -195,14 +193,15 @@ func TestOpenDispatchIsDormantWithNoPinnedPolicy(t *testing.T) {
 }
 
 // TestPinnedPolicyIsOpenedOnlyToRouteAnOffer: the policy file is read by the
-// first rendered row that needs routing and by nothing else. Deleting it
-// after activation leaves the inventory verbs and every terminal run's rows
-// readable, while the scheduling verb that would route against it refuses.
+// first rendered row that needs routing and by nothing else. Corrupting its
+// stored bytes after activation leaves the inventory verbs and every terminal
+// run's rows readable, while the scheduling verb that would route against it
+// refuses.
 func TestPinnedPolicyIsOpenedOnlyToRouteAnOffer(t *testing.T) {
 	conn, dir := configRepo(t)
 	registerVoteRule(t, conn, "majority", "0.5", "")
 	writeConfigFile(t, dir, "workflows/policy-fixture.toml", policyFixtureWorkflow)
-	policyPath := writeConfigFile(t, dir, "policy.toml", policyFixtureTOML)
+	writeConfigFile(t, dir, "policy.toml", policyFixtureTOML)
 	issue := createIssue(t, conn, "policy fixture", "a body", "task", nil)
 	run := startRun(t, conn, issue)
 	_, err := activate(conn, run.ID)
@@ -212,13 +211,18 @@ func TestPinnedPolicyIsOpenedOnlyToRouteAnOffer(t *testing.T) {
 	testsupport.Must(t, err, "next: %v", err)
 	id := workStepID(t, next.Steps)
 
-	testsupport.Must(t, os.Remove(policyPath), "removing %s", filepath.Base(policyPath))
+	res, err := conn.Exec(`UPDATE pins SET content = ? WHERE run_id = ? AND ref = ?`,
+		[]byte("corrupted\n"), run.ID, policyPinRef)
+	testsupport.Must(t, err, "corrupting the stored policy bytes: %v", err)
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("corrupted %d pin rows, want the one policy.toml pin", n)
+	}
 
 	if _, err := RunStepList(conn, run.ID, nowMS); err != nil {
 		t.Errorf("step list opened the pinned policy: %v", err)
 	}
 	if _, err := testEngine().NextSteps(conn, run.ID, 0, nowMS); err == nil {
-		t.Error("next --run offered rows it could not route: the pinned policy.toml is gone")
+		t.Error("next --run offered rows it could not route: the pinned policy.toml is unreadable")
 	}
 	if _, err := LoadStepView(conn, id, nowMS); err == nil {
 		t.Error("step show rendered an offerable row without its pinned policy")
