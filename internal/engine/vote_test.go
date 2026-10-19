@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -297,6 +298,102 @@ func TestLoadVoteProposalsIsScopedPerIssue(t *testing.T) {
 	}
 	if got := proposals[voteStepKeyOf(stepB)]; got != idB {
 		t.Errorf("loadVoteProposalsTx[issue B] = %d, want %d", got, idB)
+	}
+}
+
+// TestVoteProposalReplayWithChangedFieldsReturnsExisting: a replay of one step
+// instance whose rebuilt proposal carries a different voter count and a
+// different Rationale returns the proposal the first call opened, and leaves
+// that proposal as it was opened.
+func TestVoteProposalReplayWithChangedFieldsReturnsExisting(t *testing.T) {
+	conn, panel, spec, firstID := openedTriagePanel(t)
+	opened, err := db.GetProposal(conn, firstID)
+	testsupport.Must(t, err, "reading the opened proposal: %v", err)
+
+	changeTriageEvidence(t, conn, panel, "the replay's gate output")
+	replaySpec := *spec
+	replaySpec.Voters = append(slices.Clone(spec.Voters), "seat-c")
+
+	replayID, err := OpenVoteProposal(conn, panel, &replaySpec, nowMS)
+	if err != nil {
+		t.Fatalf("replaying %s with a changed voter count and Rationale: %v",
+			panel.Instance, err)
+	}
+	if replayID != firstID {
+		t.Errorf("replay returned proposal %d, want the existing %d", replayID, firstID)
+	}
+
+	after, err := db.GetProposal(conn, firstID)
+	testsupport.Must(t, err, "reading the proposal after the replay: %v", err)
+	if after.RequiredVoters != opened.RequiredVoters || after.Rationale != opened.Rationale {
+		t.Errorf("the replay rewrote the proposal: required_voters %d -> %d, "+
+			"rationale changed %v", opened.RequiredVoters, after.RequiredVoters,
+			after.Rationale != opened.Rationale)
+	}
+	var proposals int
+	err = conn.QueryRow(`SELECT COUNT(*) FROM proposals`).Scan(&proposals)
+	testsupport.Must(t, err, "counting proposals: %v", err)
+	if proposals != 1 {
+		t.Errorf("%d proposals exist after the replay, want 1", proposals)
+	}
+}
+
+// TestVoteProposalReplayIgnoresTriageEvidence: the triage evidence appended to
+// Rationale and the order of spec.Voters both change between replays of one
+// step instance, so neither may enter the proposal-create fingerprint.
+func TestVoteProposalReplayIgnoresTriageEvidence(t *testing.T) {
+	conn, panel, spec, firstID := openedTriagePanel(t)
+
+	changeTriageEvidence(t, conn, panel, "a later attempt's gate output")
+	replaySpec := *spec
+	replaySpec.Voters = slices.Clone(spec.Voters)
+	slices.Reverse(replaySpec.Voters)
+
+	replayID, err := OpenVoteProposal(conn, panel, &replaySpec, nowMS)
+	if err != nil {
+		t.Fatalf("replaying %s with new triage evidence and reordered voters: %v",
+			panel.Instance, err)
+	}
+	if replayID != firstID {
+		t.Errorf("replay returned proposal %d, want the existing %d", replayID, firstID)
+	}
+}
+
+// openedTriagePanel drives the triage fixture until triage@0 has opened its
+// proposal, and returns the panel, its pinned spec, and that proposal's id.
+func openedTriagePanel(t *testing.T) (*sql.DB, *db.Step, *workflow.Step, int) {
+	t.Helper()
+	conn, run, _ := triageRun(t, "retry", "abandon-issue")
+	panel := mustStep(t, conn, "triage@0")
+	firstID, err := findVoteProposal(conn, panel)
+	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+	if firstID == 0 {
+		t.Fatal("triage@0 opened no proposal; the fixture proves nothing")
+	}
+	defs, err := StepDefinitions(conn, run.ID)
+	testsupport.Must(t, err, "StepDefinitions: %v", err)
+	spec := workflow.StepByName(defs[panel.WorkflowID], panel.StepName)
+	if spec == nil || len(spec.Voters) < 2 {
+		t.Fatalf("triage spec = %+v, want a vote step with at least two voters", spec)
+	}
+	return conn, panel, spec, firstID
+}
+
+// changeTriageEvidence rewrites the triaged step's gate output so the
+// Rationale a replay rebuilds differs from the one the proposal was opened
+// with, and fails the test if it does not.
+func changeTriageEvidence(t *testing.T, conn *sql.DB, panel *db.Step, output string) {
+	t.Helper()
+	before, err := triageEvidence(conn, panel)
+	testsupport.Must(t, err, "triageEvidence: %v", err)
+	triaged := mustStep(t, conn, "implement@0")
+	_, err = conn.Exec(`UPDATE gate_results SET output = ? WHERE step_id = ?`,
+		output, triaged.ID)
+	testsupport.Must(t, err, "rewriting implement@0's gate output: %v", err)
+	after, err := triageEvidence(conn, panel)
+	testsupport.Must(t, err, "triageEvidence: %v", err)
+	if after == before || !strings.Contains(after, output) {
+		t.Fatalf("triage evidence did not change; it reads %q", after)
 	}
 }
 
