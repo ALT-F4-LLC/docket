@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -30,8 +31,8 @@ type doctorResultJSON struct {
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor [--run RUN-N] [--source PATH]",
-	Short: "Seven read-only environment checks in one call",
-	Long: `Answer the seven checks a conductor clears by hand before the first
+	Short: "Eight read-only environment checks in one call",
+	Long: `Answer the checks a conductor clears by hand before the first
 dispatch of an attach, in one call instead of seven read-only agents: (1) cwd
 is the git toplevel; (2) the store opens read-write from this seat; (3) the cwd
 resolves to a registered project — REPORTED, never registered by this verb, so
@@ -40,7 +41,9 @@ an unbound repository reads FAIL here instead of being bound by the asking;
 --source's ` + "`src/user/docket/{config,bin}`" + `; (5) ` + "`run verify-pins`" + ` for --run, or
 SKIP without it; (6) symlinks under ` + "`<cwd>/.docket/config`" + ` — debris from the
 retired link-farm model, whether or not they still resolve; (7) a report of
-detached worktrees homed under a scratch-shaped path.
+detached worktrees homed under a scratch-shaped path; (8) whether
+` + "`DOCKET_POSTGRES_DSN`" + ` is configured, without printing the DSN, its username, or
+its password, and without connecting.
 
 READ-ONLY, and it WRITES NOTHING — no lease reap, no re-pin, no migration, no
 project registration — beyond what any read verb performs.
@@ -54,8 +57,8 @@ SKIP, or WARN.
 clean report that quietly checked six things instead of seven. --source
 omitted does the same to the install-drift check alone.
 
-The stragglers check (7) never moves ` + "`clean`" + ` — it is a report, not a
-verdict; reclaiming a straggler worktree is ` + "`git worktree prune`" + `'s job, not
+The stragglers (7) and postgres (8) checks never move ` + "`clean`" + ` — they are
+reports, not verdicts; reclaiming a straggler worktree is ` + "`git worktree prune`" + `'s job, not
 this verb's.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -97,6 +100,7 @@ func runDoctor(cmd *cobra.Command, w *output.Writer) error {
 			Check: c.Check, Verdict: string(c.Verdict), Detail: c.Detail,
 		})
 	}
+	result.Checks = append(result.Checks, postgresCheck(config.PostgresFromEnv().DSN))
 
 	var message string
 	if !w.JSONMode {
@@ -104,6 +108,17 @@ func runDoctor(cmd *cobra.Command, w *output.Writer) error {
 	}
 	w.Success(result, message)
 	return nil
+}
+
+// postgresCheck reports whether a PostgreSQL DSN is configured. Its detail is
+// one of two constants and never derives from the DSN: even the redacted form
+// carries the username, and the DSN may embed a password by misconfiguration.
+func postgresCheck(dsn config.PostgresDSN) doctorCheckJSON {
+	detail := "not configured"
+	if dsn.IsSet() {
+		detail = "configured; DSN withheld"
+	}
+	return doctorCheckJSON{Check: "postgres", Verdict: string(engine.DoctorOK), Detail: detail}
 }
 
 func renderDoctor(r doctorResultJSON) string {

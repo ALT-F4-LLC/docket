@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -66,11 +67,12 @@ func seededDBPath(t *testing.T) string {
 	return dbPath
 }
 
-// TestDoctorEnvelopeShapesTheSevenChecks drives the real command against an
+// TestDoctorEnvelopeShapesTheEightChecks drives the real command against an
 // empty in-memory store outside a git repository, and asserts the wire shape
-// AC1 promises: seven rows, each carrying check/verdict/detail, plus clean and
+// AC1 promises: eight rows, each carrying check/verdict/detail, plus clean and
 // skipped.
-func TestDoctorEnvelopeShapesTheSevenChecks(t *testing.T) {
+func TestDoctorEnvelopeShapesTheEightChecks(t *testing.T) {
+	t.Setenv(config.PostgresDSNEnv, "")
 	conn := newTestDB(t)
 	cfg := &config.Config{DBPath: seededDBPath(t)}
 	w, buf := bufWriter(true)
@@ -85,7 +87,7 @@ func TestDoctorEnvelopeShapesTheSevenChecks(t *testing.T) {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
 
-	want := []string{"seat", "store", "project", "install-drift", "pins", "link-farm", "stragglers"}
+	want := []string{"seat", "store", "project", "install-drift", "pins", "link-farm", "stragglers", "postgres"}
 	if len(envelope.Data.Checks) != len(want) {
 		t.Fatalf("checks = %v, want %d rows", envelope.Data.Checks, len(want))
 	}
@@ -113,6 +115,69 @@ func TestDoctorEnvelopeShapesTheSevenChecks(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "clean: false") {
 		t.Errorf("human output %q does not report clean: false", out.String())
+	}
+}
+
+// TestDoctorReportsPostgresStateWithoutTheDSN seeds a DSN carrying a userinfo
+// secret and a password query parameter, and asserts that both output modes
+// carry the postgres state row while neither secret, the username, the
+// database name, nor the DSN itself appears anywhere in the output.
+func TestDoctorReportsPostgresStateWithoutTheDSN(t *testing.T) {
+	userinfoSecret := "userinfo-" + strings.Repeat("s3", 4)
+	querySecret := "query-" + strings.Repeat("q9", 4)
+	dsn := (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword("doctoruser", userinfoSecret),
+		Host:     "127.0.0.1:1",
+		Path:     "/doctordb",
+		RawQuery: url.Values{"password": {querySecret}, "sslmode": {"disable"}}.Encode(),
+	}).String()
+	t.Setenv(config.PostgresDSNEnv, dsn)
+
+	conn := newTestDB(t)
+	cfg := &config.Config{DBPath: seededDBPath(t)}
+
+	jsonW, jsonOut := bufWriter(true)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), jsonW), "doctor (json): %v", nil)
+	var envelope doctorEnvelope
+	if err := json.Unmarshal(jsonOut.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, jsonOut.String())
+	}
+	var row string
+	for _, c := range envelope.Data.Checks {
+		if c.Check == "postgres" {
+			row = c.Verdict + " " + c.Detail
+		}
+	}
+	if row != "OK configured; DSN withheld" {
+		t.Errorf("postgres row = %q, want %q", row, "OK configured; DSN withheld")
+	}
+
+	textW, textOut := bufWriter(false)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), textW), "doctor (human): %v", nil)
+	if !strings.Contains(textOut.String(), "configured; DSN withheld") {
+		t.Errorf("human output lacks the postgres state line:\n%s", textOut.String())
+	}
+
+	for mode, out := range map[string]string{"json": jsonOut.String(), "human": textOut.String()} {
+		for _, secret := range []string{dsn, userinfoSecret, querySecret, "doctoruser", "doctordb"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("%s output contains %q:\n%s", mode, secret, out)
+			}
+		}
+	}
+}
+
+// TestDoctorReportsAnUnsetPostgresDSN pins the benign state: no DSN in the
+// environment reads as not configured, and the row never moves clean.
+func TestDoctorReportsAnUnsetPostgresDSN(t *testing.T) {
+	t.Setenv(config.PostgresDSNEnv, "")
+	conn := newTestDB(t)
+	cfg := &config.Config{DBPath: seededDBPath(t)}
+	w, buf := bufWriter(false)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), w), "doctor: %v", nil)
+	if !strings.Contains(buf.String(), "postgres       OK    not configured") {
+		t.Errorf("human output lacks the not-configured postgres line:\n%s", buf.String())
 	}
 }
 
