@@ -43,8 +43,8 @@ func TestMigrateToV45KeepsPreExistingPinsWithNullContent(t *testing.T) {
 		t.Errorf("pre-v45 pin read back as %s@%s, want contracts/implement.md@b52312cc",
 			p.Ref, p.SHA256)
 	}
-	if pins[0].Content != nil {
-		t.Errorf("pre-v45 pin content = %q, want nil", pins[0].Content)
+	if pins[0].Content.Valid {
+		t.Errorf("pre-v45 pin content = %+v, want not Valid", pins[0].Content)
 	}
 	var nullContent bool
 	if err := db.QueryRow(`SELECT content IS NULL FROM pins WHERE run_id = ?`,

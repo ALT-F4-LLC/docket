@@ -708,9 +708,11 @@ type Pin struct {
 	// disagree.
 	Bytes int
 	// Content is the pinned file's bytes, persisted so a store opened on
-	// another machine renders the same packet. Nil for a pin recorded
-	// without its bytes, including every pin from before schema v45.
-	Content []byte
+	// another machine renders the same packet. It is not Valid for a pin
+	// recorded without its bytes, including every pin from before schema v45;
+	// a Valid empty String is an empty file. A string rather than []byte keeps
+	// Pin comparable with ==.
+	Content sql.NullString
 }
 
 // InsertPinTx records a pin. `INSERT OR IGNORE` on the UNIQUE(run_id, kind, ref)
@@ -718,9 +720,15 @@ type Pin struct {
 // rather than a conflict — a run pins a workflow once, however many issues bind
 // to it.
 func InsertPinTx(tx *sql.Tx, p Pin) error {
+	// Bound as []byte so the column holds a BLOB, never TEXT: pinned files
+	// need not be valid UTF-8.
+	var content []byte
+	if p.Content.Valid {
+		content = []byte(p.Content.String)
+	}
 	_, err := tx.Exec(
 		`INSERT OR IGNORE INTO pins (run_id, kind, ref, sha256, content) VALUES (?, ?, ?, ?, ?)`,
-		p.RunID, p.Kind, p.Ref, p.SHA256, p.Content,
+		p.RunID, p.Kind, p.Ref, p.SHA256, content,
 	)
 	if err != nil {
 		return fmt.Errorf("pinning %s %s: %w", p.Kind, p.Ref, err)
