@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 45
+const currentSchemaVersion = 46
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -225,6 +225,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	43: migrateV42ToV43,
 	44: migrateV43ToV44,
 	45: migrateV44ToV45,
+	46: migrateV45ToV46,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3299,6 +3300,30 @@ func migrateV44ToV45(tx *sql.Tx) error {
 	return nil
 }
 
+// v46DDL creates the event low watermark: one row holding the highest pruned
+// event seq, 0 when nothing was pruned. GONE detection reads it instead of
+// MIN(seq), because MIN(seq) > 1 also follows from seq values that were
+// allocated and never committed. The seed treats every seq below the lowest
+// surviving row as pruned, which is what MIN(seq) detection assumed before v46.
+const v46DDL = `
+CREATE TABLE IF NOT EXISTS event_low_watermark (
+	id  INTEGER PRIMARY KEY CHECK (id = 1),
+	seq INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO event_low_watermark (id, seq)
+	SELECT 1, COALESCE(MIN(seq) - 1, 0) FROM events;
+`
+
+// migrateV45ToV46 creates and seeds the event low watermark. CREATE IF NOT
+// EXISTS and INSERT OR IGNORE keep it re-runnable.
+func migrateV45ToV46(tx *sql.Tx) error {
+	if _, err := tx.Exec(v46DDL); err != nil {
+		return fmt.Errorf("migrating v45 to v46: %w", err)
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -4219,6 +4244,18 @@ func Migrate(db *sql.DB) error {
 				version = 44
 				break
 			}
+		}
+	}
+
+	// The v46 guard probes the table v46 creates: a database stamped 46 by a
+	// binary built mid-change has no watermark for GONE detection to read.
+	if version >= 46 {
+		exists, err := tableExists(db, "event_low_watermark")
+		if err != nil {
+			return fmt.Errorf("probing event_low_watermark for the v46 guard: %w", err)
+		}
+		if !exists {
+			version = 45
 		}
 	}
 

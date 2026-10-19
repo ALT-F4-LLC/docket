@@ -111,17 +111,18 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// recorded-at clock (2026-10-10), the step resolution authority
 	// (2026-10-10), the claim phase (2026-10-10), the run-note
 	// authority (2026-10-10), the step recovery hash (2026-10-10), the
-	// fix-loop cap (2026-10-11), and the pinned file bytes (2026-10-18) — each
-	// one needed a version and leaves the v5-v10 arithmetic untouched.
+	// fix-loop cap (2026-10-11), the pinned file bytes (2026-10-18), and the
+	// event low watermark (2026-10-18) — each one needed a version and leaves
+	// the v5-v10 arithmetic untouched.
 	//
 	// The tripwire itself is UNCHANGED IN PURPOSE. It still fails the next
 	// author who reaches for a version without recording it first — this
 	// test firing is exactly how v11 through v23 came to be documented rather
 	// than discovered afterwards. Raising the number without adding the new
 	// version and its reason to the list above is the move it exists to stop.
-	if currentSchemaVersion != 45 {
-		t.Errorf("currentSchemaVersion = %d, want 45 — the recorded schema "+
-			"span ends at v45 (the pinned file bytes). Moving past 45 means "+
+	if currentSchemaVersion != 46 {
+		t.Errorf("currentSchemaVersion = %d, want 46 — the recorded schema "+
+			"span ends at v46 (the event low watermark). Moving past 46 means "+
 			"recording the new version and the reason it needs one in "+
 			"this test's span list first", currentSchemaVersion)
 	}

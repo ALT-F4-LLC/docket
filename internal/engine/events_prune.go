@@ -173,6 +173,9 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 		}
 	}
 
+	if err := raiseEventLowWatermarkTx(tx); err != nil {
+		return nil, err
+	}
 	min, err := retainedMinimumTx(tx)
 	if err != nil {
 		return nil, err
@@ -311,20 +314,28 @@ func countHeldByRetentionTx(tx *sql.Tx, where string, args []any, cutoff int64) 
 	return held, nil
 }
 
-// retainedMinimumTx reports the lowest seq that survives, which is what a
-// consumer's cursor must not fall below.
-//
-// An EMPTY table reports 0, which is the same thing `--since 0` means: start
-// from the beginning. A repo whose every event was pruned has nothing to skip.
+// retainedMinimumTx reports the lowest seq no prune has deleted, the
+// watermark plus 1, which is what a consumer's cursor must not fall below.
 func retainedMinimumTx(tx *sql.Tx) (int64, error) {
-	var min sql.NullInt64
-	if err := tx.QueryRow(`SELECT MIN(seq) FROM events`).Scan(&min); err != nil {
-		return 0, fmt.Errorf("reading the retained minimum: %w", err)
+	watermark, err := eventLowWatermarkTx(tx)
+	if err != nil {
+		return 0, err
 	}
-	if !min.Valid {
-		return 0, nil
+	return watermark + 1, nil
+}
+
+// raiseEventLowWatermarkTx moves the watermark up to just below the lowest
+// surviving seq. It never lowers it, and leaves it alone when no event
+// survives.
+func raiseEventLowWatermarkTx(tx *sql.Tx) error {
+	if _, err := tx.Exec(
+		`UPDATE event_low_watermark
+		    SET seq = MAX(seq, (SELECT MIN(seq) - 1 FROM events))
+		  WHERE id = 1 AND EXISTS (SELECT 1 FROM events)`,
+	); err != nil {
+		return fmt.Errorf("raising the event low watermark: %w", err)
 	}
-	return min.Int64, nil
+	return nil
 }
 
 // prunedEventData is the `events-pruned` payload: what was asked for, and what

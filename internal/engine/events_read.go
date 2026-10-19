@@ -340,51 +340,38 @@ const eventRepoBinding = `NULLIF(COALESCE(
 	CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.repo') END,
 	CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.identity') END), '')`
 
-// checkRetainedMinimumTx answers GONE when the cursor names events below what
-// the table still holds.
+// checkRetainedMinimumTx answers GONE when the cursor names events a prune
+// deleted, that is, when it sits below the event low watermark.
 //
-// HOW "A PRUNE HAS OCCURRED" IS KNOWN WITHOUT A PRUNER. The condition is
-// `MIN(seq) > 1`, which in a v10 repo is achievable ONLY by deleting row 1.
-// `seq` is `AUTOINCREMENT` and never reused — recordEvent's comment says so
-// and explains why — so `MIN(seq) > 1` is a sound and cheap proxy for
-// "something below your cursor is gone", and it STAYS sound once the pruner
-// exists. No watermark column is needed, and adding one now would store a
-// fact the table already tells us.
-//
-// THE TRIGGER CANNOT FIRE AT THIS STAGE. Nothing prunes — `events prune` is a
-// later stage's and no other path deletes an event — so `MIN(seq)` is always 1
-// in a v10 repo and the condition below is unreachable through any product
-// code path. The SHAPE ships here anyway because `--since` is the verb that
-// must return it, and a stage that shipped the cursor without its out-of-range
-// answer would ship a verb whose contract the pruner has to retrofit.
-// TestGoneShapeIsReachableOnlyByPruning constructs the state by deleting rows
-// directly and asserts the code, the exit, and the message.
+// The watermark, not MIN(seq), is the evidence of a prune: a seq gap left by
+// allocated-but-uncommitted values raises MIN(seq) without deleting anything,
+// and an empty table with a zero watermark has lost nothing.
 func checkRetainedMinimumTx(tx *sql.Tx, since int64) error {
-	var minSeq sql.NullInt64
-	if err := tx.QueryRow(`SELECT MIN(seq) FROM events`).Scan(&minSeq); err != nil {
-		return fmt.Errorf("reading the retained minimum: %w", err)
+	watermark, err := eventLowWatermarkTx(tx)
+	if err != nil {
+		return err
 	}
-	// An EMPTY table is not GONE. A repo
-	// that has never written an event has retained everything it ever had, and
-	// answering GONE would tell a fresh consumer its cursor was stale.
-	if !minSeq.Valid {
-		return nil
-	}
-	if minSeq.Int64 <= 1 {
-		return nil
-	}
-	// The cursor is below the retained minimum when the events it asks for
-	// START below what remains. `since + 1` is the first seq this call would
-	// return, and the comparison is against that rather than against `since`
-	// itself, because a cursor sitting exactly ON the retained minimum has
-	// missed nothing — it read that event and is asking for what follows.
-	if since+1 >= minSeq.Int64 {
+	// A cursor exactly ON the watermark has missed nothing: every seq up to
+	// and including it was pruned, and it asks for what follows.
+	if since >= watermark {
 		return nil
 	}
 	return goneErr(
 		"events at seq > %d are below the retained minimum (%d): they no longer "+
 			"exist and cannot be replayed; resume from seq %d, accepting the gap",
-		since, minSeq.Int64, minSeq.Int64-1)
+		since, watermark+1, watermark)
+}
+
+// eventLowWatermarkTx reads the highest pruned event seq, 0 when nothing was
+// pruned.
+func eventLowWatermarkTx(tx *sql.Tx) (int64, error) {
+	var watermark int64
+	if err := tx.QueryRow(
+		`SELECT seq FROM event_low_watermark WHERE id = 1`,
+	).Scan(&watermark); err != nil {
+		return 0, fmt.Errorf("reading the event low watermark: %w", err)
+	}
+	return watermark, nil
 }
 
 // ---- the attribution table ------------------------------------------------
