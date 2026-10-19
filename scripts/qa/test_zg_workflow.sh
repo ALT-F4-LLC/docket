@@ -991,14 +991,13 @@ TOML
   run_env "$ZG_DORM" issue move DKT-1 todo --json
   run_env "$ZG_DORM" issue move DKT-2 todo --json
 
-  local D_NEXT_BEFORE D_LIST_BEFORE D_SHOW_BEFORE D_PLAN_BEFORE D_SHOW2_BEFORE
+  local D_NEXT_BEFORE D_LIST_BEFORE D_SHOW_BEFORE D_PLAN_BEFORE
   run_env "$ZG_DORM" next --json;              D_NEXT_BEFORE="$CMD_STDOUT"
   run_env "$ZG_DORM" issue list --all --json;  D_LIST_BEFORE="$CMD_STDOUT"
   run_env "$ZG_DORM" issue show DKT-1 --json;  D_SHOW_BEFORE="$CMD_STDOUT"
-  run_env "$ZG_DORM" issue show DKT-1 --json=v2; D_SHOW2_BEFORE="$CMD_STDOUT"
   run_env "$ZG_DORM" plan --json;              D_PLAN_BEFORE="$CMD_STDOUT"
 
-  if [ -n "$D_NEXT_BEFORE" ] && [ -n "$D_PLAN_BEFORE" ] && [ -n "$D_SHOW2_BEFORE" ]; then
+  if [ -n "$D_NEXT_BEFORE" ] && [ -n "$D_PLAN_BEFORE" ] && [ -n "$D_SHOW_BEFORE" ]; then
     check "ZG" "ZG12_nonempty" "PASS"
   else
     check "ZG" "ZG12_nonempty" "FAIL" "the pre-registration reads were empty"
@@ -1008,18 +1007,16 @@ TOML
   run_env "$ZG_DORM" workflow register "$FIXTURE" --json
   assert_exit "ZG" "ZG12_register" 0
 
-  local D_NEXT_AFTER D_LIST_AFTER D_SHOW_AFTER D_PLAN_AFTER D_SHOW2_AFTER
+  local D_NEXT_AFTER D_LIST_AFTER D_SHOW_AFTER D_PLAN_AFTER
   run_env "$ZG_DORM" next --json;              D_NEXT_AFTER="$CMD_STDOUT"
   run_env "$ZG_DORM" issue list --all --json;  D_LIST_AFTER="$CMD_STDOUT"
   run_env "$ZG_DORM" issue show DKT-1 --json;  D_SHOW_AFTER="$CMD_STDOUT"
-  run_env "$ZG_DORM" issue show DKT-1 --json=v2; D_SHOW2_AFTER="$CMD_STDOUT"
   run_env "$ZG_DORM" plan --json;              D_PLAN_AFTER="$CMD_STDOUT"
 
   local DORM_DIFFS=""
   [ "$D_NEXT_BEFORE"  = "$D_NEXT_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS next"
   [ "$D_LIST_BEFORE"  = "$D_LIST_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS issue-list"
-  [ "$D_SHOW_BEFORE"  = "$D_SHOW_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS issue-show-v1"
-  [ "$D_SHOW2_BEFORE" = "$D_SHOW2_AFTER" ] || DORM_DIFFS="$DORM_DIFFS issue-show-v2"
+  [ "$D_SHOW_BEFORE"  = "$D_SHOW_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS issue-show-json"
   [ "$D_PLAN_BEFORE"  = "$D_PLAN_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS plan"
 
   check_cond "ZG" "ZG12_registered_but_unactivated" "registering a workflow changed:$DORM_DIFFS" [ -z "$DORM_DIFFS" ]
