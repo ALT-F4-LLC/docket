@@ -56,9 +56,9 @@ func stepTestDB(t *testing.T) (*sql.DB, int) {
 	return db, stepID
 }
 
-// TestClaimStepMintsTokenAndTakesLease is the step-level analog of
-// TestClaimMintsTokenAndTakesLease, proving the generalized helper behaves
-// identically against `steps`.
+// TestClaimStepMintsTokenAndTakesLease is the step-level analog of the
+// TestStoreContract ClaimMintsTokenAndTakesLease case, proving the generalized
+// helper behaves identically against `steps`.
 func TestClaimStepMintsTokenAndTakesLease(t *testing.T) {
 	db, id := stepTestDB(t)
 	now := int64(1_000_000)

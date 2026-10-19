@@ -141,10 +141,16 @@ func contractCASEmptyUpdateStillChecksPrecondition(t *testing.T, st store.Store)
 	}
 }
 
+// The table name is spliced into SQL, so only allowlisted names may reach the
+// query. "issues AS i" names an existing row's version and would read it if
+// the allowlist were bypassed, so its rejection pins the allowlist itself.
 func contractGetVersionRejectsUnversionedTable(t *testing.T, st store.Store) {
-	createContractIssue(t, st, "cas subject")
+	id := createContractIssue(t, st, "cas subject")
 
 	if _, err := st.GetVersion("comments", 1); err == nil {
 		t.Error("expected an error for a table with no version column")
+	}
+	if v, err := st.GetVersion("issues AS i", id); err == nil {
+		t.Errorf("GetVersion(%q) = %d, want an error for a name outside the allowlist", "issues AS i", v)
 	}
 }
