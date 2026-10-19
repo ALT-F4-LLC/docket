@@ -9,6 +9,14 @@ import (
 	"testing"
 )
 
+// TestPgMigrate016030SchemaParity compares the ported schema with
+// testdata/schema_v30.json, dumped from a SQLite database migrated to v30.
+// That fixture holds six columns that SQLite migrations after v30 add:
+// steps.park_reason (v32), steps.park_class (v33), issues.size (v34), and
+// steps.loop_rounds_run, loop_trigger_step and loop_latest_verdict (v35).
+// SQLite's creation DDL is written in current shape, so a database built and
+// migrated to v30 already has them, and the PostgreSQL v1/v7 port mirrors
+// that DDL. Both sides carry them, so the comparison keeps them.
 func TestPgMigrate016030SchemaParity(t *testing.T) {
 	ctx := context.Background()
 	db := emptyTestSchema(t)

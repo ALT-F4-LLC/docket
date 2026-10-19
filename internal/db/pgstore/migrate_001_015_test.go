@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // sqliteToPostgresType maps the SQLite declared types in the schema fixtures
@@ -260,14 +262,10 @@ func TestMigrateV8BackfillsGateTrail(t *testing.T) {
 // connection uses a fresh schema, dropped when the test ends, so each test
 // starts from an empty database. It connects through the driver rather than
 // Open: the migrations, not the DSN policy, are under test, and the test DSN
-// may carry a password.
+// may carry a password. Without a DSN it skips locally and fails under CI.
 func emptyTestSchema(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DOCKET_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("DOCKET_TEST_POSTGRES_DSN is unset; skipping the PostgreSQL migration check")
-	}
-	cfg, err := pgx.ParseConfig(dsn)
+	cfg, err := pgx.ParseConfig(testsupport.PostgresDSN(t))
 	if err != nil {
 		t.Fatalf("parsing DOCKET_TEST_POSTGRES_DSN: %v", err)
 	}
