@@ -1,10 +1,14 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/trust"
@@ -526,13 +530,21 @@ func TestGlobalStoreCoexistsWithExistingContent(t *testing.T) {
 // XDG_CONFIG_HOME, inside a 0700 docket directory, with the given file mode.
 func writeClientConfig(t *testing.T, body string, mode os.FileMode) string {
 	t.Helper()
+	return writeUserConfigFile(t, "client.toml", body, mode)
+}
+
+// writeUserConfigFile writes body as the named user-level config file under a
+// sandboxed XDG_CONFIG_HOME, inside a 0700 docket directory, with the given
+// file mode.
+func writeUserConfigFile(t *testing.T, name, body string, mode os.FileMode) string {
+	t.Helper()
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	dir := filepath.Join(xdg, "docket")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "client.toml")
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -608,6 +620,114 @@ func TestLoadClientConfigRefusesMalformed(t *testing.T) {
 			writeClientConfig(t, body, 0o600)
 			if _, err := LoadClientConfig(); !errors.Is(err, ErrClientConfigParse) {
 				t.Errorf("LoadClientConfig err = %v, want ErrClientConfigParse", err)
+			}
+		})
+	}
+}
+
+// testBearerSecret is a synthetic 64-character secret drawn at runtime, so no
+// credential-shaped literal is committed.
+func testBearerSecret(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+func daemonConfigBody(secretLine string) string {
+	return "version = 1\n" +
+		"listen = \"0.0.0.0:8443\"\n" +
+		"tls_cert_file = \"/etc/docket/cert.pem\"\n" +
+		"tls_key_file = \"/etc/docket/key.pem\"\n" +
+		secretLine + "\n"
+}
+
+// TestLoadDaemonConfigReadsPrivateFile: the daemon config sits beside the
+// trust file under its integrity rules, and its secret is usable for
+// comparison but never printed.
+func TestLoadDaemonConfigReadsPrivateFile(t *testing.T) {
+	secret := testBearerSecret(t)
+	path := writeUserConfigFile(t, "daemon.toml", daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret)), 0o644)
+
+	trustPath, err := trust.StorePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DaemonConfigPath(); err != nil || got != path || filepath.Dir(got) != filepath.Dir(trustPath) {
+		t.Fatalf("DaemonConfigPath = %q, %v; want %q beside the trust file %q", got, err, path, trustPath)
+	}
+
+	if _, err := LoadDaemonConfig(); !errors.Is(err, trust.ErrIntegrity) {
+		t.Fatalf("mode 0644: LoadDaemonConfig err = %v, want the integrity error", err)
+	}
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dc, err := LoadDaemonConfig()
+	if err != nil {
+		t.Fatalf("mode 0600: LoadDaemonConfig: %v", err)
+	}
+	if dc.Listen != "0.0.0.0:8443" || dc.TLSCertFile != "/etc/docket/cert.pem" || dc.TLSKeyFile != "/etc/docket/key.pem" {
+		t.Errorf("loaded %+v, want the listen address and TLS paths from the file", dc)
+	}
+	if !dc.BearerSecret.Matches(secret) {
+		t.Error("the loaded secret does not match the configured value")
+	}
+	if dc.BearerSecret.Matches(secret[:len(secret)-1]+"x") || dc.BearerSecret.Matches("") {
+		t.Error("the loaded secret matches a value other than the configured one")
+	}
+	if printed := fmt.Sprintf("%v %+v %#v %s", dc, *dc, *dc, dc.BearerSecret); strings.Contains(printed, secret) {
+		t.Errorf("formatting the daemon config printed the secret: %s", printed)
+	}
+}
+
+// TestLoadDaemonConfigMissingRefusesStart: unlike the client config, no file
+// is not an empty configuration; a daemon with no secret must not start.
+func TestLoadDaemonConfigMissingRefusesStart(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if dc, err := LoadDaemonConfig(); err == nil {
+		t.Fatalf("LoadDaemonConfig with no file = %+v, want an error", dc)
+	}
+}
+
+// TestZeroBearerSecretMatchesNothing: a secret that was never configured
+// admits no request, including one presenting an empty token.
+func TestZeroBearerSecretMatchesNothing(t *testing.T) {
+	var zero BearerSecret
+	if zero.Matches("") {
+		t.Error("the zero BearerSecret matches the empty token")
+	}
+}
+
+// TestLoadDaemonConfigRefusesMalformed: the file is parsed strictly, and a
+// refused secret is never echoed in the error.
+func TestLoadDaemonConfigRefusesMalformed(t *testing.T) {
+	secret := testBearerSecret(t)
+	valid := daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret))
+	cases := map[string]string{
+		"unknown key":         valid + "bearer_secert = \"x\"\n",
+		"unknown version":     strings.Replace(valid, "version = 1", "version = 2", 1),
+		"no listen":           strings.Replace(valid, "listen = \"0.0.0.0:8443\"\n", "", 1),
+		"listen without port": strings.Replace(valid, "0.0.0.0:8443", "0.0.0.0", 1),
+		"no cert":             strings.Replace(valid, "tls_cert_file = \"/etc/docket/cert.pem\"\n", "", 1),
+		"no key":              strings.Replace(valid, "tls_key_file = \"/etc/docket/key.pem\"\n", "", 1),
+		"no secret":           daemonConfigBody(""),
+		"empty secret":        daemonConfigBody(`bearer_secret = ""`),
+		"short secret":        daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret[:31])),
+		"secret with space":   daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret[:20]+" "+secret[20:])),
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			writeUserConfigFile(t, "daemon.toml", body, 0o600)
+			_, err := LoadDaemonConfig()
+			if !errors.Is(err, ErrDaemonConfigParse) {
+				t.Fatalf("LoadDaemonConfig err = %v, want ErrDaemonConfigParse", err)
+			}
+			if strings.Contains(err.Error(), secret[:20]) {
+				t.Errorf("error %q echoes the secret", err)
 			}
 		})
 	}
