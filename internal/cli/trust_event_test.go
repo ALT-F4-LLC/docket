@@ -516,7 +516,7 @@ func TestTrustAddOutsideARepoSaysNothingWasRecorded(t *testing.T) {
 	// is in the payload rather than on stderr alone.
 	cmd := newTrustAddCmd()
 	cmd.Flags().String("json", "", "")
-	err := cmd.Flags().Set("json", "v1")
+	err := cmd.Flags().Set("json", "v2")
 	testsupport.Must(t, err, "setting --json: %v", err)
 
 	stdout := captureStdout(t)
@@ -559,7 +559,7 @@ func TestIdempotentReAddOutsideARepoSaysNothing(t *testing.T) {
 
 	cmd := newTrustAddCmd()
 	cmd.Flags().String("json", "", "")
-	err = cmd.Flags().Set("json", "v1")
+	err = cmd.Flags().Set("json", "v2")
 	testsupport.Must(t, err, "setting --json: %v", err)
 
 	stdout := captureStdout(t)

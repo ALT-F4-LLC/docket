@@ -29,7 +29,7 @@ func TestIssueCreateEchoesAppliedLabels(t *testing.T) {
 	testsupport.Must(t, createCmd.Flags().Set("label", "security-load-bearing,routing"), "set --label")
 	// --json is the root's persistent flag; jsonVersionOf finds it through
 	// InheritedFlags, so it has to be set where it actually lives.
-	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 	t.Cleanup(func() {
 		_ = createCmd.Flags().Set("label", "")
 		_ = createCmd.Flags().Set("title", "")
@@ -103,7 +103,7 @@ func TestIssueCreateReplayWritesNothing(t *testing.T) {
 	resetCreateFlags()
 	t.Cleanup(resetCreateFlags)
 
-	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 	testsupport.Must(t, createCmd.Flags().Set("idempotency-key", "K"), "set --idempotency-key")
 
 	create := func(title, scope string) string {
@@ -208,7 +208,7 @@ func TestIssueCreateReplayOfKeyRecordedElsewhereLeavesIssue(t *testing.T) {
 
 	create := func(key, scope string) int {
 		t.Helper()
-		testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+		testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 		testsupport.Must(t, createCmd.Flags().Set("idempotency-key", key), "set --idempotency-key")
 		testsupport.Must(t, createCmd.Flags().Set("title", "via cli"), "set --title")
 		testsupport.Must(t, createCmd.Flags().Set("scope", scope), "set --scope")
@@ -276,7 +276,7 @@ func TestIssueCreateWithoutKeyStoresScope(t *testing.T) {
 	resetCreateFlags()
 	t.Cleanup(resetCreateFlags)
 
-	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 	testsupport.Must(t, createCmd.Flags().Set("title", "keyless"), "set --title")
 	testsupport.Must(t, createCmd.Flags().Set("scope", "a/**"), "set --scope")
 
