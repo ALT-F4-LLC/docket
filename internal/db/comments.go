@@ -1,7 +1,10 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -17,10 +20,16 @@ func CreateComment(db *sql.DB, comment *model.Comment) (int, error) {
 }
 
 // CreateCommentIdempotent is CreateComment with an optional idempotency key.
-// A repeat call with the same key returns the original comment id and inserts
-// nothing; the key is recorded in the same transaction as the insert.
+// A repeat call with the same key and the same issue, author and body returns
+// the original comment id and inserts nothing; the same key with different
+// content returns an error wrapping ErrConflict that names the key. The key and
+// its fingerprint are recorded in the same transaction as the insert.
 func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey string) (int, error) {
-	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeIssueComment, idempotencyKey)
+	fingerprint, err := commentFingerprint(comment)
+	if err != nil {
+		return 0, err
+	}
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeIssueComment, idempotencyKey, fingerprint)
 	if err != nil {
 		return 0, err
 	}
@@ -67,7 +76,7 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 	}
 
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeIssueComment, idempotencyKey, int(id64)); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeIssueComment, idempotencyKey, fingerprint, int(id64)); err != nil {
 			return 0, err
 		}
 	}
@@ -77,6 +86,18 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 	}
 
 	return int(id64), nil
+}
+
+// commentFingerprint identifies a comment request by its issue, author and
+// body: the content a retry repeats. The fields are JSON-encoded before
+// hashing so no two distinct requests share an encoding.
+func commentFingerprint(comment *model.Comment) (string, error) {
+	encoded, err := json.Marshal([]any{comment.IssueID, comment.Author, comment.Body})
+	if err != nil {
+		return "", fmt.Errorf("fingerprinting comment request: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // EngineAuthor is the fixed Author value for comments the engine writes

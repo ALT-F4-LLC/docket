@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -122,6 +123,9 @@ var commentAddCmd = &cobra.Command{
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("issue %s", args[0])); e != nil {
 				return e
+			}
+			if errors.Is(err, db.ErrConflict) {
+				return cmdErr(err, output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
 		}
