@@ -29,20 +29,20 @@ test_p_activity() {
   run issue log "$ACT_ID" --json
   assert_exit "P" "P7" 0
 
-  # P8: JSON entries array has >= 5 entries
-  assert_json_array_min "P" "P8" ".data.entries" 5
+  # P8: JSON items array has >= 5 entries
+  assert_json_array_min "P" "P8" ".data.items" 5
 
-  # P9: JSON issue_id matches the formatted ID
+  # P9: every entry's issue_id matches the formatted ID
   local FORMATTED_ID
   FORMATTED_ID="DKT-${ACT_ID}"
-  assert_json "P" "P9" ".data.issue_id" "$FORMATTED_ID"
+  assert_json_all "P" "P9" ".data.items" ".issue_id == \"$FORMATTED_ID\""
 
   # P10: log with --limit 2 returns success
   run issue log "$ACT_ID" --limit 2 --json
   assert_exit "P" "P10" 0
 
   # P11: limit works (at most 2 entries)
-  assert_json_array_max "P" "P11" ".data.entries" 2
+  assert_json_array_max "P" "P11" ".data.items" 2
 
   # P12: log for non-existent issue returns exit code 2
   run issue log 99999 --json

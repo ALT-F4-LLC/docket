@@ -126,7 +126,7 @@ test_zh_stranger() {
   # ---------------------------------------------------------------------------
   run_env "$ZH" next --run RUN-1 --json
   assert_exit "ZH" "ZH6_next" 0
-  assert_json "ZH" "ZH6_next_instance" '.data.steps[0].instance' "check@0"
+  assert_json "ZH" "ZH6_next_instance" '.data.items[0].instance' "check@0"
 
   local ZH_TOKEN
   run_env "$ZH" step claim STEP-1 --owner reviewer --json
@@ -470,7 +470,7 @@ TOML
   # is reading and hashing, and the trust posture is unchanged by it.
   run_env "$ZH_CLONE" next --run RUN-1 --json
   local ZH_EVIL_STEP
-  ZH_EVIL_STEP=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].step')
+  ZH_EVIL_STEP=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].step')
   run_env "$ZH_CLONE" step claim "$ZH_EVIL_STEP" --owner whoever --json
   local ZH_EVIL_TOKEN
   ZH_EVIL_TOKEN=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.token')

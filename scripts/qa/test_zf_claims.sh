@@ -308,10 +308,10 @@ test_zf_claims() {
   # ZF6: dormancy — an issue that is never claimed is unchanged everywhere.
   # ---------------------------------------------------------------------------
 
-  # v1 never carries a lease, even for a claimed issue.
+  # Bare --json is v2, so a claimed issue carries its lease and version.
   run issue show "$KILL_ID" --json
-  assert_json_null "ZF" "ZF6_v1_no_lease" ".data.lease"
-  assert_json_null "ZF" "ZF6_v1_no_version" ".data.version"
+  assert_json_exists "ZF" "ZF6_bare_lease" ".data.lease"
+  assert_json_exists "ZF" "ZF6_bare_version" ".data.version"
 
   # An unclaimed issue emits no lease key at all under v2 — not "lease": null.
   run issue show "$UNCLAIMED_ID" --json=v2

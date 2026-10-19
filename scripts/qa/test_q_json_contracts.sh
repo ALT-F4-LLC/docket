@@ -37,7 +37,7 @@ test_q_json_contracts() {
 
   run issue list --json
   assert_exit "Q" "Q5" 0
-  assert_json_exists "Q" "Q5" ".data.issues"
+  assert_json_exists "Q" "Q5" ".data.items"
   assert_json_exists "Q" "Q5" ".data.total"
 
   run issue show "$Q_ISSUE_ID" --json
@@ -92,9 +92,10 @@ test_q_json_contracts() {
   # Q14: log contract
   run issue log "$Q_ISSUE_ID" --json
   assert_exit "Q" "Q14" 0
-  assert_json_exists "Q" "Q14" ".data.issue_id"
-  assert_json_exists "Q" "Q14" ".data.entries"
+  assert_json_exists "Q" "Q14" ".data.items"
   assert_json_exists "Q" "Q14" ".data.total"
+  assert_json_exists "Q" "Q14" ".data.truncated"
+  assert_json_all "Q" "Q14" ".data.items" ".issue_id == \"DKT-$Q_ISSUE_ID\""
 
   # Q15: stats contract
   run stats --json
@@ -115,7 +116,7 @@ test_q_json_contracts() {
   # Q17: next contract
   run next --json
   assert_exit "Q" "Q17" 0
-  assert_json_exists "Q" "Q17" ".data.issues"
+  assert_json_exists "Q" "Q17" ".data.items"
   assert_json_exists "Q" "Q17" ".data.total"
 
   # Q18: plan contract

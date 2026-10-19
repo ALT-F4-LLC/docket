@@ -168,7 +168,7 @@ test_zk_zerotouch() {
   assert_exit "ZK" "ZK_Z6_next" 0
 
   local ZK_STEP
-  ZK_STEP=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].step')
+  ZK_STEP=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].step')
   zk_run step claim "$ZK_STEP" --owner press-operator --json
   assert_exit "ZK" "ZK_Z6_claim" 0
 
@@ -198,14 +198,14 @@ test_zk_zerotouch() {
   # ---------------------------------------------------------------------------
   zk_run next --run RUN-1 --json
   local ZK_HUMAN
-  ZK_HUMAN=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].step')
+  ZK_HUMAN=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].step')
 
   DOCKET_TOKEN="$ZK_CTOK" zk_run step approve "$ZK_HUMAN" --authority operator --json
   assert_exit "ZK" "ZK_Z7_approve" 0
 
   zk_run next --run RUN-1 --json
   assert_exit "ZK" "ZK_Z8_next_empty" 0
-  assert_json "ZK" "ZK_Z8_no_work_left" "(.data.steps | length)" "0"
+  assert_json "ZK" "ZK_Z8_no_work_left" "(.data.items | length)" "0"
 
   zk_run run status RUN-1 --json
   assert_exit "ZK" "ZK_Z8_status" 0
@@ -294,7 +294,7 @@ test_zk_zerotouch() {
   # acceptance criterion's own vocabulary, not a copy of the implementation's
   # table, so a kind that drifted into a fifth category fails here.
   local ZK_KINDS ZK_UNATTRIBUTED
-  ZK_KINDS=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.events[].kind' | sort -u)
+  ZK_KINDS=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[].kind' | sort -u)
   ZK_UNATTRIBUTED=""
   local kind
   for kind in $ZK_KINDS; do
@@ -341,8 +341,8 @@ test_zk_zerotouch() {
   # ---------------------------------------------------------------------------
   zk_run events list --run RUN-1 --limit 2 --json
   local ZK_FIRST_SEQ ZK_SECOND_SEQ
-  ZK_FIRST_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.events[0].seq')
-  ZK_SECOND_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.events[1].seq')
+  ZK_FIRST_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].seq')
+  ZK_SECOND_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[1].seq')
 
   # `total` counts matching events BEFORE the slice, so truncation is
   # computable rather than guessed.
@@ -352,20 +352,20 @@ test_zk_zerotouch() {
   # back WITHOUT re-reading it.
   zk_run events list --run RUN-1 --since "$ZK_FIRST_SEQ" --limit 1 --json
   local ZK_AFTER_SEQ
-  ZK_AFTER_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.events[0].seq')
+  ZK_AFTER_SEQ=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].seq')
   check_cond "ZK" "ZK_C2_cursor_strict" "--since $ZK_FIRST_SEQ returned seq $ZK_AFTER_SEQ, want $ZK_SECOND_SEQ" [ "$ZK_AFTER_SEQ" = "$ZK_SECOND_SEQ" ]
 
   # A cursor past the end is an EMPTY PAGE, not an error: a consumer that has
   # caught up must be able to poll without handling a refusal.
   zk_run events list --run RUN-1 --since 100000 --json
   assert_exit "ZK" "ZK_C3_caught_up_exit" 0
-  assert_json "ZK" "ZK_C3_caught_up_empty" "(.data.events | length)" "0"
+  assert_json "ZK" "ZK_C3_caught_up_empty" "(.data.items | length)" "0"
 
   # The shape is JOINABLE. `step_id` addresses a step the way every
   # other verb does, so a consumer can follow the feed into `step show`.
   zk_run events list --run RUN-1 --limit 500 --json
   local ZK_STEP_ID
-  ZK_STEP_ID=$(printf '%s' "$CMD_STDOUT" | jq -r '[.data.events[] | select(.step_id != null)][0].step_id')
+  ZK_STEP_ID=$(printf '%s' "$CMD_STDOUT" | jq -r '[.data.items[] | select(.step_id != null)][0].step_id')
   if [ -n "$ZK_STEP_ID" ] && [ "$ZK_STEP_ID" != "null" ]; then
     zk_run step show "$ZK_STEP_ID" --json
     assert_exit "ZK" "ZK_C4_step_id_joins" 0

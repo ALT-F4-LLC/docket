@@ -186,7 +186,7 @@ TOML
   # returns the ready set.
   run_env "$ZJ" next --run RUN-1 --json
   assert_exit "ZJ" "ZJ1_K3_answers" 0
-  assert_json_array_min "ZJ" "ZJ1_K3_same_invocation" '.data.steps' 1
+  assert_json_array_min "ZJ" "ZJ1_K3_same_invocation" '.data.items' 1
 
   # The dispatch is `abandoned` with reason=ttl, and the abandon is
   # EVENT-LOGGED, a requirement stated by name.
@@ -221,7 +221,7 @@ TOML
   # same instances. Opening a dispatch never claimed anything, so recovery
   # returns the steps intact rather than reconstructing them.
   local ZJ_AFTER
-  ZJ_AFTER=$(echo "$CMD_STDOUT" | jq -c '[.data.steps[].instance] | sort')
+  ZJ_AFTER=$(echo "$CMD_STDOUT" | jq -c '[.data.items[].instance] | sort')
   check_cond "ZJ" "ZJ1_K5_nothing_lost" "manifest was $ZJ_MANIFEST; after recovery $ZJ_AFTER" [ "$ZJ_AFTER" = "$ZJ_MANIFEST" ]
 
   # ===========================================================================
@@ -247,7 +247,7 @@ TOML
 
   run_env "$ZJ" next --run RUN-1 --json
   assert_exit "ZJ" "ZJ2_K4_next_answers" 0
-  assert_json_array_min "ZJ" "ZJ2_K4_rows" '.data.steps' 1
+  assert_json_array_min "ZJ" "ZJ2_K4_rows" '.data.items' 1
 
   # The operator's free text rides in the EVENT's opaque data, never in the
   # engine's short `close_reason` vocabulary — so `close_reason` stays a value
@@ -345,13 +345,13 @@ TOML
   # later stage (the class's one slot holds per stage, not per offer).
   local ZJ_PRESS
   ZJ_PRESS=$(echo "$CMD_STDOUT" \
-    | jq -r '[.data.steps[] | select(.class == "press" and .status == "ready")] | length')
+    | jq -r '[.data.items[] | select(.class == "press" and .status == "ready")] | length')
   check_cond "ZJ" "ZJ4_W1_one_press_step" "$ZJ_PRESS ready press-class steps offered at baseline, want 1" [ "$ZJ_PRESS" = "1" ]
 
   # --- W2: claim the press step, let its lease lapse, and reap it. ----------
   local ZJ_PRESS_STEP
   ZJ_PRESS_STEP=$(echo "$CMD_STDOUT" \
-    | jq -r '[.data.steps[] | select(.class == "press")][0].step')
+    | jq -r '[.data.items[] | select(.class == "press")][0].step')
 
   run_env "$ZJ" step claim "$ZJ_PRESS_STEP" --owner press-b --json
   assert_exit "ZJ" "ZJ4_W2_claim" 0
@@ -389,7 +389,7 @@ TOML
 
   local ZJ_OFFERED_PRESS
   ZJ_OFFERED_PRESS=$(echo "$CMD_STDOUT" \
-    | jq -r "[.data.steps[] | select(.class == \"press\") | .step] | sort | join(\",\")")
+    | jq -r "[.data.items[] | select(.class == \"press\") | .step] | sort | join(\",\")")
   check_cond "ZJ" "ZJ4_W3_only_the_reaped_step" "press steps offered: [$ZJ_OFFERED_PRESS]; want only the reaped $ZJ_PRESS_STEP" [ "$ZJ_OFFERED_PRESS" = "$ZJ_PRESS_STEP" ]
 
   # --- W5: read-class steps in the SAME run are still offered. --------------
@@ -397,7 +397,7 @@ TOML
   # The hold is NARROW: it holds press headroom, not the whole run. A reaped
   # writer must not stop a fan-out that never touches the press.
   local ZJ_PROOF
-  ZJ_PROOF=$(echo "$CMD_STDOUT" | jq -r '[.data.steps[] | select(.class == "proof")] | length')
+  ZJ_PROOF=$(echo "$CMD_STDOUT" | jq -r '[.data.items[] | select(.class == "proof")] | length')
   check_cond "ZJ" "ZJ4_W5_unbounded_class_flows" "$ZJ_PROOF proof-class steps offered under a press hold, want 2" [ "$ZJ_PROOF" = "2" ]
 
   # Discoverability: the denial NAMES the seq and the flag, on stderr.
@@ -490,7 +490,7 @@ TOML
 
   run_env "$ZJ" next --run RUN-2 --json
   assert_exit "ZJ" "ZJ4_W7_next" 0
-  ZJ_PRESS=$(echo "$CMD_STDOUT" | jq -r '[.data.steps[] | select(.class == "press")] | length')
+  ZJ_PRESS=$(echo "$CMD_STDOUT" | jq -r '[.data.items[] | select(.class == "press")] | length')
   check_cond "ZJ" "ZJ4_W7_press_flows_again" "no press-class step offered after the ack; the hold did not release" [ "$ZJ_PRESS" -ge 1 ]
 
   # ===========================================================================
@@ -522,9 +522,9 @@ TOML
   run_env "$ZJ_D" next --run RUN-1 --json
   assert_exit "ZJ" "ZJ5_next_before" 0
   local ZJ_D_BEFORE ZJ_D_STEP
-  ZJ_D_BEFORE=$(echo "$CMD_STDOUT" | jq -c '.data.steps')
+  ZJ_D_BEFORE=$(echo "$CMD_STDOUT" | jq -c '.data.items')
   ZJ_D_STEP=$(echo "$CMD_STDOUT" \
-    | jq -r '[.data.steps[] | select(.class == "press")][0].step')
+    | jq -r '[.data.items[] | select(.class == "press")][0].step')
 
   run_env "$ZJ_D" step claim "$ZJ_D_STEP" --owner solo --json
   assert_exit "ZJ" "ZJ5_claim" 0
@@ -557,7 +557,7 @@ TOML
   # completed — never by a field this stage added.
   local ZJ_D_KEYS_BEFORE ZJ_D_KEYS_AFTER
   ZJ_D_KEYS_BEFORE=$(echo "$ZJ_D_BEFORE" | jq -S -c '[.[0] | keys] | .[0]')
-  ZJ_D_KEYS_AFTER=$(echo "$CMD_STDOUT" | jq -S -c '[.data.steps[0] | keys] | .[0]')
+  ZJ_D_KEYS_AFTER=$(echo "$CMD_STDOUT" | jq -S -c '[.data.items[0] | keys] | .[0]')
   check_cond "ZJ" "ZJ5_row_shape_unchanged" "next row keys changed: $ZJ_D_KEYS_BEFORE -> $ZJ_D_KEYS_AFTER" [ "$ZJ_D_KEYS_BEFORE" = "$ZJ_D_KEYS_AFTER" ]
 
   rm -rf "$ZJ" "$ZJ_D"
