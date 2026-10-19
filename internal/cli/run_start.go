@@ -173,8 +173,12 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 	}
 
 	// The roster commits in the insert's own transaction. A replayed key
-	// returns the original run unchanged and ignores this call's --issue list.
+	// returns the original run unchanged; a key reused with a different
+	// request, budget, context or --issue list is a conflict.
 	run, inserted, err := db.InsertRunWithContextIdempotent(conn, getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey, issueIDs...)
+	if errors.Is(err, db.ErrConflict) {
+		return cmdErr(err, output.ErrConflict)
+	}
 	if err != nil {
 		return runErr(err)
 	}

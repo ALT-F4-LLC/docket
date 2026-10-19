@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -312,15 +313,32 @@ func TestBudgetZeroIsDocumentedAsUnlimited(t *testing.T) {
 	}
 }
 
-// TestRunStartIdempotencyKeyReplaysOriginal covers DKT-416's acceptance
-// criterion: repeating `run start` with the same --idempotency-key returns
-// the original run rather than creating a duplicate — the same
-// replay-protection `issue create` and `doc create` already give the other
-// create verbs. A --budget that differs on the replay must not overwrite the
-// original either; a hit returns the entity UNCHANGED, matching
-// CreateIssueIdempotent/CreateDocIdempotent (they never compare params, they
-// just return the original on any repeat of the key).
-func TestRunStartIdempotencyKeyReplaysOriginal(t *testing.T) {
+// assertRunStartKeyConflict: err is CONFLICT, exit 4, naming key, and the
+// store still holds only the original run.
+func assertRunStartKeyConflict(t *testing.T, conn *sql.DB, err error, key string) {
+	t.Helper()
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrConflict {
+		t.Fatalf("run start reusing %q with different content returned %v, want CONFLICT", key, err)
+	}
+	if got := output.ExitCodeForError(cmdError.Code); got != 4 {
+		t.Errorf("exit code = %d, want 4", got)
+	}
+	if !strings.Contains(err.Error(), key) {
+		t.Errorf("conflict %q does not name the key %q", err, key)
+	}
+	var n int
+	err = conn.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&n)
+	testsupport.Must(t, err, "counting runs: %v", err)
+	if n != 1 {
+		t.Errorf("run count = %d, want 1 — the rejected reuse created a run", n)
+	}
+}
+
+// TestRunStartKeyReuseWithDifferentBudgetIsConflict: repeating `run start`
+// with the same --idempotency-key but a different --budget is CONFLICT
+// (exit 4) naming the key, and leaves the original run unchanged.
+func TestRunStartKeyReuseWithDifferentBudgetIsConflict(t *testing.T) {
 	conn := newTestDB(t)
 
 	cmd := runStartCmdWithDB(conn)
@@ -332,34 +350,24 @@ func TestRunStartIdempotencyKeyReplaysOriginal(t *testing.T) {
 	err = runRunStart(cmd, w)
 	testsupport.Must(t, err, "first run start: %v", err)
 
-	// The retry carries a DIFFERENT budget, to prove the replay returns the
-	// original row rather than re-applying the new call's parameters.
 	cmd2 := runStartCmdWithDB(conn)
 	err = cmd2.Flags().Set("idempotency-key", "retry-1")
 	testsupport.Must(t, err, "setting --idempotency-key: %v", err)
 	err = cmd2.Flags().Set("budget", "99")
 	testsupport.Must(t, err, "setting --budget: %v", err)
 	w2, _ := bufWriter(true)
-	err = runRunStart(cmd2, w2)
-	testsupport.Must(t, err, "replayed run start: %v", err)
-
-	var n int
-	err = conn.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&n)
-	testsupport.Must(t, err, "counting runs: %v", err)
-	if n != 1 {
-		t.Errorf("run count = %d, want 1 — the replay created a duplicate", n)
-	}
+	assertRunStartKeyConflict(t, conn, runRunStart(cmd2, w2), "retry-1")
 
 	run, err := db.GetRun(conn, 1)
 	testsupport.Must(t, err, "reading run: %v", err)
 	if run.Budget != 12.5 {
-		t.Errorf("budget = %g, want 12.5 (the replay's --budget=99 must not overwrite the original)", run.Budget)
+		t.Errorf("budget = %g, want 12.5 (the rejected --budget=99 must not overwrite the original)", run.Budget)
 	}
 }
 
-// startKeyedRun runs `run start --idempotency-key key --issue <issueID>` and
-// returns the ref of the run the command reported.
-func startKeyedRun(t *testing.T, conn *sql.DB, key string, issueID int) string {
+// runKeyedRunStart runs `run start --idempotency-key key --issue <issueID>`
+// and returns the command's JSON output.
+func runKeyedRunStart(t *testing.T, conn *sql.DB, key string, issueID int) ([]byte, error) {
 	t.Helper()
 	cmd := runStartCmdWithDB(conn)
 	err := cmd.Flags().Set("idempotency-key", key)
@@ -368,6 +376,14 @@ func startKeyedRun(t *testing.T, conn *sql.DB, key string, issueID int) string {
 	testsupport.Must(t, err, "setting --issue: %v", err)
 	w, buf := bufWriter(true)
 	err = runRunStart(cmd, w)
+	return buf.Bytes(), err
+}
+
+// startKeyedRun runs `run start --idempotency-key key --issue <issueID>` and
+// returns the ref of the run the command reported.
+func startKeyedRun(t *testing.T, conn *sql.DB, key string, issueID int) string {
+	t.Helper()
+	out, err := runKeyedRunStart(t, conn, key, issueID)
 	testsupport.Must(t, err, "run start: %v", err)
 
 	var envelope struct {
@@ -375,8 +391,8 @@ func startKeyedRun(t *testing.T, conn *sql.DB, key string, issueID int) string {
 			Run string `json:"run"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
-		t.Fatalf("decoding envelope %s: %v", buf.String(), err)
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		t.Fatalf("decoding envelope %s: %v", out, err)
 	}
 	return envelope.Data.Run
 }
@@ -393,9 +409,9 @@ func rosterOf(t *testing.T, conn *sql.DB, runID int) []int {
 	return ids
 }
 
-// A replay returns the original run unchanged, so its --issue list describes
-// an attachment that is not happening: only the first call's issue joins.
-func TestRunStartIdempotencyKeyReplayIgnoresIssues(t *testing.T) {
+// The same key with the same --issue list replays the original run; with a
+// different --issue list it is a conflict that attaches nothing.
+func TestRunStartIdempotencyKeyReplayMatchesIssues(t *testing.T) {
 	conn := newTestDB(t)
 	x := createIssue(t, conn, "x", model.StatusTodo, model.PriorityMedium)
 	y := createIssue(t, conn, "y", model.StatusTodo, model.PriorityMedium)
@@ -408,34 +424,29 @@ func TestRunStartIdempotencyKeyReplayIgnoresIssues(t *testing.T) {
 		t.Fatalf("first run start roster = %v, want [%d]", got, x)
 	}
 
-	replayed := startKeyedRun(t, conn, "retry-1", y)
+	replayed := startKeyedRun(t, conn, "retry-1", x)
 	if replayed != original {
 		t.Errorf("replay returned run %q, want the original %q", replayed, original)
 	}
 
-	var n int
-	err := conn.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&n)
-	testsupport.Must(t, err, "counting runs: %v", err)
-	if n != 1 {
-		t.Errorf("run count = %d, want 1 — the replay created a duplicate", n)
-	}
+	_, err := runKeyedRunStart(t, conn, "retry-1", y)
+	assertRunStartKeyConflict(t, conn, err, "retry-1")
 	if got := rosterOf(t, conn, 1); !slices.Equal(got, []int{x}) {
-		t.Errorf("roster after replay = %v, want [%d] — the replay's --issue attached to the original run", got, x)
+		t.Errorf("roster after the rejected reuse = %v, want [%d]", got, x)
 	}
 }
 
-// A replay against a run that has left `planning` must not attach issues to
-// it either; the run's roster and status stay as they were.
+// A replay against a run that has left `planning` returns it as it is; the
+// run's roster and status stay as they were.
 func TestRunStartIdempotencyKeyReplayLeavesNonPlanningRunUnchanged(t *testing.T) {
 	conn := newTestDB(t)
 	x := createIssue(t, conn, "x", model.StatusTodo, model.PriorityMedium)
-	z := createIssue(t, conn, "z", model.StatusTodo, model.PriorityMedium)
 
 	startKeyedRun(t, conn, "retry-1", x)
 	err := db.SetRunStatus(conn, 1, model.RunDone, "", model.NowMS())
 	testsupport.Must(t, err, "finishing run: %v", err)
 
-	startKeyedRun(t, conn, "retry-1", z)
+	startKeyedRun(t, conn, "retry-1", x)
 
 	if got := rosterOf(t, conn, 1); !slices.Equal(got, []int{x}) {
 		t.Errorf("roster after replay = %v, want [%d]", got, x)

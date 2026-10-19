@@ -1,10 +1,15 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -51,19 +56,23 @@ func InsertRunWithContext(db *sql.DB, projectID int, request string, budget floa
 // InsertRunWithContextIdempotent is InsertRunWithContext with an optional
 // idempotency key — `docket run start --idempotency-key`.
 //
-// A repeat call with the same key returns the ORIGINAL run unchanged with
-// inserted=false and creates nothing, the same create-verb replay-protection
-// pattern
-// CreateIssueIdempotent, CreateDocIdempotent, and CreateProposalIdempotent use
-// (internal/db/idempotency.go): a `run start` that commits but dies before its
-// response must be safe to retry, or the key protects nothing. The key record
-// and the insert commit in the SAME transaction, so a crash between them
-// cannot orphan either. The roster (issueIDs, one run_issues row each) commits
-// in that same transaction, so a replay finds the roster the original call
-// wrote; a replay's own issueIDs are ignored, like its other parameters.
-// inserted tells the caller whether this call created the run.
+// A repeat call with the same key and the same request content returns the
+// ORIGINAL run unchanged with inserted=false and creates nothing, the same
+// create-verb replay-protection pattern CreateIssueIdempotent and
+// CreateDocIdempotent use (internal/db/idempotency.go): a `run start` that
+// commits but dies before its response must be safe to retry, or the key
+// protects nothing. The same key with different content returns an error
+// wrapping ErrConflict that names the key. The key record and the insert
+// commit in the SAME transaction, so a crash between them cannot orphan
+// either. The roster (issueIDs, one run_issues row each) commits in that same
+// transaction, so a replay finds the roster the original call wrote. inserted
+// tells the caller whether this call created the run.
 func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, budget float64, nowMS int64, ctx RunContext, idempotencyKey string, issueIDs ...int) (run *model.Run, inserted bool, err error) {
-	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeRunStart, idempotencyKey)
+	fingerprint, err := runStartFingerprint(projectID, request, budget, ctx, issueIDs)
+	if err != nil {
+		return nil, false, err
+	}
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeRunStart, idempotencyKey, fingerprint)
 	if err != nil {
 		return nil, false, err
 	}
@@ -101,7 +110,7 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 	}
 
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeRunStart, idempotencyKey, id); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeRunStart, idempotencyKey, fingerprint, id); err != nil {
 			return nil, false, err
 		}
 	}
@@ -112,6 +121,26 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 
 	run, err = GetRun(db, id)
 	return run, true, err
+}
+
+// runStartFingerprint is the SHA-256 of a run start's request content: the
+// project, request, budget, context and roster. The roster is a set, so its
+// ids are sorted and deduplicated. The start time is not content: a retry
+// starts later than the call it repeats. Budgets are encoded as strings
+// because JSON has no form for the infinities a budget flag accepts.
+func runStartFingerprint(projectID int, request string, budget float64, ctx RunContext, issueIDs []int) (string, error) {
+	roster := slices.Compact(slices.Sorted(slices.Values(issueIDs)))
+	formatBudget := func(b float64) string { return strconv.FormatFloat(b, 'g', -1, 64) }
+	encoded, err := json.Marshal([]any{
+		projectOrDefault(projectID), request, formatBudget(budget),
+		formatBudget(ctx.UsageBudget), ctx.ExecRoot, ctx.Branch, ctx.CommitSHA, ctx.Hostname,
+		roster,
+	})
+	if err != nil {
+		return "", fmt.Errorf("fingerprinting the run start: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // runSelect names the columns in a fixed order so every scan agrees.

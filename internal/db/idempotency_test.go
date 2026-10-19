@@ -57,37 +57,182 @@ func TestIdempotentCreateReplaysOriginal(t *testing.T) {
 	}
 }
 
+// secondProject returns a project other than the default one. The first
+// identity claims the unclaimed default row, so the second inserts a new one.
+func secondProject(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	_, err := EnsureProject(db, "first-identity", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+	id, err := EnsureProject(db, "second-identity", "second", 1)
+	testsupport.Must(t, err, "creating a second project: %v", err)
+	if id == DefaultProjectID {
+		t.Fatalf("second project resolved to the default project %d", id)
+	}
+	return id
+}
+
+func countRuns(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&n)
+	testsupport.Must(t, err, "counting runs: %v", err)
+	return n
+}
+
 // TestInsertRunIdempotentReplaysOriginal mirrors
-// TestIdempotentCreateReplaysOriginal for `run start` (DKT-416): a retried
-// call with the same key returns the ORIGINAL run and inserts nothing, even
-// when the retry's own parameters differ — matching CreateIssueIdempotent and
-// CreateDocIdempotent, which never compare params and simply return the
-// original entity on any repeat of the key.
+// TestIdempotentCreateReplaysOriginal for `run start`: a retried call with the
+// same key and the same request content returns the ORIGINAL run with
+// inserted=false and inserts nothing. The retry starts later, so the start
+// time is not part of the request content.
 func TestInsertRunIdempotentReplaysOriginal(t *testing.T) {
 	db := newIdemDB(t)
+	issueID, err := CreateIssue(db, probeIssue(), nil, nil)
+	testsupport.Must(t, err, "creating issue: %v", err)
+	ctx := RunContext{ExecRoot: "/repo", Branch: "main", CommitSHA: "abc", Hostname: "h", UsageBudget: 3}
 
 	first, _, err := InsertRunWithContextIdempotent(
-		db, 0, "first request", 10, model.NowMS(), RunContext{}, "run-key-1")
+		db, 0, "request", 10, 1000, ctx, "run-key-1", issueID)
 	testsupport.Must(t, err, "first run start: %v", err)
-	second, _, err := InsertRunWithContextIdempotent(
-		db, 0, "different request", 99, model.NowMS(), RunContext{}, "run-key-1")
+	second, inserted, err := InsertRunWithContextIdempotent(
+		db, 0, "request", 10, 2000, ctx, "run-key-1", issueID)
 	testsupport.Must(t, err, "replay: %v", err)
 
+	if inserted {
+		t.Error("replay of an existing key reported inserted=true")
+	}
 	if first.ID != second.ID {
 		t.Errorf("replay returned run %d, want the original %d", second.ID, first.ID)
 	}
-	if second.Budget != 10 {
-		t.Errorf("replay budget = %g, want the original 10 (the replay must not overwrite it)", second.Budget)
+	if second.CreatedAtMS != 1000 {
+		t.Errorf("replay created_at_ms = %d, want the original 1000", second.CreatedAtMS)
 	}
-	if second.Request != "first request" {
-		t.Errorf("replay request = %q, want the original %q", second.Request, "first request")
+	if n := countRuns(t, db); n != 1 {
+		t.Errorf("run count = %d, want 1 — the replay inserted a duplicate", n)
+	}
+}
+
+// TestInsertRunIdempotentRejectsChangedContent: reusing a key with any
+// different piece of request content (request, budget, project, context or
+// issue ids) is a conflict naming the key, and creates nothing.
+func TestInsertRunIdempotentRejectsChangedContent(t *testing.T) {
+	type request struct {
+		project  int
+		text     string
+		budget   float64
+		ctx      RunContext
+		issueIDs []int
+	}
+	cases := []struct {
+		name   string
+		change func(r *request, otherProject, otherIssue int)
+	}{
+		{"request", func(r *request, _, _ int) { r.text = "other request" }},
+		{"budget", func(r *request, _, _ int) { r.budget = 99 }},
+		{"project", func(r *request, p, _ int) { r.project = p }},
+		{"usage budget", func(r *request, _, _ int) { r.ctx.UsageBudget = 7 }},
+		{"exec root", func(r *request, _, _ int) { r.ctx.ExecRoot = "/elsewhere" }},
+		{"commit", func(r *request, _, _ int) { r.ctx.CommitSHA = "def" }},
+		{"issue ids", func(r *request, _, i int) { r.issueIDs = []int{i} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newIdemDB(t)
+			issueID, err := CreateIssue(db, probeIssue(), nil, nil)
+			testsupport.Must(t, err, "creating issue: %v", err)
+			otherIssue, err := CreateIssue(db, probeIssue(), nil, nil)
+			testsupport.Must(t, err, "creating other issue: %v", err)
+			otherProject := secondProject(t, db)
+
+			original := request{
+				text: "request", budget: 10, issueIDs: []int{issueID},
+				ctx: RunContext{ExecRoot: "/repo", Branch: "main", CommitSHA: "abc", Hostname: "h", UsageBudget: 3},
+			}
+			start := func(r request) (*model.Run, error) {
+				run, _, err := InsertRunWithContextIdempotent(
+					db, r.project, r.text, r.budget, 1000, r.ctx, "run-key", r.issueIDs...)
+				return run, err
+			}
+			_, err = start(original)
+			testsupport.Must(t, err, "first run start: %v", err)
+
+			changed := original
+			tc.change(&changed, otherProject, otherIssue)
+			_, err = start(changed)
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("reuse with a different %s returned %v, want an ErrConflict", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "run-key") {
+				t.Errorf("conflict %q does not name the key", err)
+			}
+			if n := countRuns(t, db); n != 1 {
+				t.Errorf("run count = %d, want 1 — the rejected reuse created a run", n)
+			}
+		})
+	}
+}
+
+// TestCreateDocIdempotentReplaysOriginal: the same key with the same doc
+// content returns the original doc and inserts nothing.
+func TestCreateDocIdempotentReplaysOriginal(t *testing.T) {
+	db := newIdemDB(t)
+	doc := func() *model.Doc {
+		return &model.Doc{Title: "t", Type: "adr", Status: "draft", Body: "b", Author: "a"}
 	}
 
-	var n int
-	err = db.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&n)
-	testsupport.Must(t, err, "counting runs: %v", err)
-	if n != 1 {
-		t.Errorf("run count = %d, want 1 — the replay inserted a duplicate", n)
+	first, err := CreateDocIdempotent(db, doc(), "doc-key")
+	testsupport.Must(t, err, "first doc create: %v", err)
+	second, err := CreateDocIdempotent(db, doc(), "doc-key")
+	testsupport.Must(t, err, "replay: %v", err)
+
+	if second != first {
+		t.Errorf("replay returned doc %d, want the original %d", second, first)
+	}
+	docs, _, err := ListDocs(db, DocListOptions{})
+	testsupport.Must(t, err, "ListDocs: %v", err)
+	if len(docs) != 1 {
+		t.Errorf("doc count = %d, want 1 — the replay inserted a duplicate", len(docs))
+	}
+}
+
+// TestCreateDocIdempotentRejectsChangedContent: reusing a key with any
+// different doc field is a conflict naming the key, and creates nothing.
+func TestCreateDocIdempotentRejectsChangedContent(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(d *model.Doc, otherProject int)
+	}{
+		{"title", func(d *model.Doc, _ int) { d.Title = "other" }},
+		{"type", func(d *model.Doc, _ int) { d.Type = "tdd" }},
+		{"status", func(d *model.Doc, _ int) { d.Status = "accepted" }},
+		{"body", func(d *model.Doc, _ int) { d.Body = "other body" }},
+		{"author", func(d *model.Doc, _ int) { d.Author = "someone else" }},
+		{"project", func(d *model.Doc, p int) { d.ProjectID = p }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newIdemDB(t)
+			otherProject := secondProject(t, db)
+			original := model.Doc{Title: "t", Type: "adr", Status: "draft", Body: "b", Author: "a"}
+
+			first := original
+			_, err := CreateDocIdempotent(db, &first, "doc-key")
+			testsupport.Must(t, err, "first doc create: %v", err)
+
+			changed := original
+			tc.change(&changed, otherProject)
+			_, err = CreateDocIdempotent(db, &changed, "doc-key")
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("reuse with a different %s returned %v, want an ErrConflict", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "doc-key") {
+				t.Errorf("conflict %q does not name the key", err)
+			}
+			docs, _, err := ListDocs(db, DocListOptions{})
+			testsupport.Must(t, err, "ListDocs: %v", err)
+			if len(docs) != 1 {
+				t.Errorf("doc count = %d, want 1 — the rejected reuse created a doc", len(docs))
+			}
+		})
 	}
 }
 
@@ -149,7 +294,7 @@ func TestInsertRunIdempotentCommitsRosterWithRun(t *testing.T) {
 	}
 
 	replay, inserted, err := InsertRunWithContextIdempotent(
-		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-roster")
+		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-roster", first, second)
 	testsupport.Must(t, err, "replay: %v", err)
 	if inserted {
 		t.Error("replay of an existing key reported inserted=true")

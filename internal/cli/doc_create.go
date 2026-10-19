@@ -128,6 +128,9 @@ var docCreateCmd = &cobra.Command{
 		}
 
 		id, err := db.CreateDocIdempotent(conn, &doc, idempotencyKey)
+		if errors.Is(err, db.ErrConflict) {
+			return cmdErr(err, output.ErrConflict)
+		}
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating doc: %w", err), output.ErrGeneral)
 		}
