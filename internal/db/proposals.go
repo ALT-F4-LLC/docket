@@ -1,7 +1,9 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,20 +34,11 @@ func CreateProposal(db *sql.DB, p *model.Proposal) (int, error) {
 }
 
 // CreateProposalIdempotent is CreateProposal with an optional idempotency key.
-// A repeat call with the same key returns the original proposal id and inserts
-// nothing. Unlike the plain path this runs in a transaction, so the insert and
-// the key record commit together.
+// A repeat call with the same key and the same caller-supplied content returns
+// the original proposal id and inserts nothing; the same key with different
+// content returns an error wrapping ErrConflict. The insert and the key record
+// commit in one transaction.
 func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey string) (int, error) {
-	if idempotencyKey != "" {
-		existingID, found, err := LookupIdempotencyKey(db, ScopeVoteCreate, idempotencyKey)
-		if err != nil {
-			return 0, err
-		}
-		if found {
-			return existingID, nil
-		}
-	}
-
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	domainTagsJSON, err := json.Marshal(p.DomainTags)
@@ -58,9 +51,16 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 		return 0, fmt.Errorf("marshaling files_changed: %w", err)
 	}
 
-	tx, err := db.Begin()
+	fingerprint, err := proposalCreateFingerprint(p)
 	if err != nil {
-		return 0, fmt.Errorf("beginning transaction: %w", err)
+		return 0, err
+	}
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeVoteCreate, idempotencyKey, fingerprint)
+	if err != nil {
+		return 0, err
+	}
+	if hit {
+		return existingID, nil
 	}
 	defer tx.Rollback()
 
@@ -96,7 +96,7 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 	id := int(id64)
 
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeVoteCreate, idempotencyKey, id); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeVoteCreate, idempotencyKey, fingerprint, id); err != nil {
 			return 0, err
 		}
 	}
@@ -106,6 +106,41 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 	}
 
 	return id, nil
+}
+
+// proposalCreateFingerprint is the SHA-256 of the caller-supplied content of a
+// proposal create. It leaves out the fields the store or a later tally owns
+// (ID, Status, WeightedScore, CreatedAt, UpdatedAt, FinalOutcome,
+// EscalationReason) and Rationale and RequiredVoters, so a replay that differs
+// only in those still returns the original proposal. A nil and an empty list
+// are the same request.
+func proposalCreateFingerprint(p *model.Proposal) (string, error) {
+	domainTags, filesChanged := p.DomainTags, p.FilesChanged
+	if len(domainTags) == 0 {
+		domainTags = nil
+	}
+	if len(filesChanged) == 0 {
+		filesChanged = nil
+	}
+	content, err := json.Marshal(struct {
+		ProjectID     int      `json:"project_id"`
+		Description   string   `json:"description"`
+		Criticality   string   `json:"criticality"`
+		Threshold     float64  `json:"threshold"`
+		CreatedBy     string   `json:"created_by"`
+		DomainTags    []string `json:"domain_tags"`
+		FilesChanged  []string `json:"files_changed"`
+		Sealed        bool     `json:"sealed"`
+		HoldOnDissent bool     `json:"hold_on_dissent"`
+	}{
+		projectOrDefault(p.ProjectID), p.Description, string(p.Criticality), p.Threshold,
+		p.CreatedBy, domainTags, filesChanged, p.Sealed, p.HoldOnDissent,
+	})
+	if err != nil {
+		return "", fmt.Errorf("fingerprinting the proposal create: %w", err)
+	}
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // proposalQuerier is the read surface GetProposal/GetProposalVotes need,

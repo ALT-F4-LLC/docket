@@ -1,7 +1,9 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,31 +105,30 @@ func CreateIssue(db *sql.DB, issue *model.Issue, labels []string, files []string
 
 // CreateIssueIdempotent is CreateIssue with an optional idempotency key.
 //
-// When idempotencyKey is non-empty and was already used for this scope, the
-// original issue's id is returned with inserted=false and nothing is inserted —
-// a retried create after a dropped response must succeed, not fail. inserted
-// is true only when this call created the issue, so a caller that writes more
-// after the insert keys on it rather than on a lookup of its own, which another
-// process could race. The key record and the insert commit in the SAME
-// transaction, so a crash between them cannot orphan either.
+// When idempotencyKey is non-empty and was already used for this scope with
+// the same request content, the original issue's id is returned with
+// inserted=false and nothing is inserted — a retried create after a dropped
+// response must succeed, not fail. The same key with different content returns
+// an error wrapping ErrConflict. inserted is true only when this call created
+// the issue, so a caller that writes more after the insert keys on it rather
+// than on a lookup of its own, which another process could race. The key
+// record and the insert commit in the SAME transaction, so a crash between
+// them cannot orphan either.
 func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, files []string, idempotencyKey string) (int, bool, error) {
-	if idempotencyKey != "" {
-		existingID, found, err := LookupIdempotencyKey(db, ScopeIssueCreate, idempotencyKey)
-		if err != nil {
-			return 0, false, err
-		}
-		if found {
-			return existingID, false, nil
-		}
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	tx, err := db.Begin()
+	fingerprint, err := issueCreateFingerprint(issue, labels, files)
 	if err != nil {
-		return 0, false, fmt.Errorf("beginning transaction: %w", err)
+		return 0, false, err
+	}
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeIssueCreate, idempotencyKey, fingerprint)
+	if err != nil {
+		return 0, false, err
+	}
+	if hit {
+		return existingID, false, nil
 	}
 	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339)
 
 	projectID := projectOrDefault(issue.ProjectID)
 	res, err := tx.Exec(
@@ -196,7 +197,7 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 	// Same transaction as the insert: a crash between the two would otherwise
 	// leave a created issue whose key is unrecorded, so the retry duplicates.
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeIssueCreate, idempotencyKey, id); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeIssueCreate, idempotencyKey, fingerprint, id); err != nil {
 			return 0, false, err
 		}
 	}
@@ -206,6 +207,31 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 	}
 
 	return id, true, nil
+}
+
+// issueCreateFingerprint is the SHA-256 of an issue create's request content:
+// title, description, kind, priority, labels and files, in the order given. A
+// nil and an empty list are the same request.
+func issueCreateFingerprint(issue *model.Issue, labels, files []string) (string, error) {
+	if len(labels) == 0 {
+		labels = nil
+	}
+	if len(files) == 0 {
+		files = nil
+	}
+	content, err := json.Marshal(struct {
+		Title       string   `json:"title"`
+		Description string   `json:"description"`
+		Kind        string   `json:"kind"`
+		Priority    string   `json:"priority"`
+		Labels      []string `json:"labels"`
+		Files       []string `json:"files"`
+	}{issue.Title, issue.Description, string(issue.Kind), string(issue.Priority), labels, files})
+	if err != nil {
+		return "", fmt.Errorf("fingerprinting the issue create: %w", err)
+	}
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // issueColumns is the column list every issue SELECT uses, in the exact order

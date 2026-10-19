@@ -230,6 +230,9 @@ var voteCreateCmd = &cobra.Command{
 		}
 
 		id, err := db.CreateProposalIdempotent(conn, &proposal, idempotencyKey)
+		if errors.Is(err, db.ErrConflict) {
+			return cmdErr(err, output.ErrConflict)
+		}
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating proposal: %w", err), output.ErrGeneral)
 		}

@@ -202,6 +202,9 @@ var createCmd = &cobra.Command{
 		}
 
 		id, inserted, err := db.CreateIssueIdempotent(conn, &issue, labelFlag, fileFlag, idempotencyKey)
+		if errors.Is(err, db.ErrConflict) {
+			return cmdErr(err, output.ErrConflict)
+		}
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
 		}

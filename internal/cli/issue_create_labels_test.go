@@ -146,7 +146,8 @@ func TestIssueCreateReplayWritesNothing(t *testing.T) {
 	activityBefore, err := db.CountActivity(conn, id)
 	testsupport.Must(t, err, "CountActivity: %v", err)
 
-	replayID := create("replayed", "b/**")
+	// Same title: a different title under K is a conflict, not a replay.
+	replayID := create("original", "b/**")
 	if replayID != firstID {
 		t.Fatalf("replay under the same key returned %s, want the earlier issue %s", replayID, firstID)
 	}
@@ -210,7 +211,8 @@ func TestIssueCreateReplayOfKeyRecordedElsewhereLeavesIssue(t *testing.T) {
 		t.Helper()
 		testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 		testsupport.Must(t, createCmd.Flags().Set("idempotency-key", key), "set --idempotency-key")
-		testsupport.Must(t, createCmd.Flags().Set("title", "via cli"), "set --title")
+		// The seeded title, so the replay under K matches its fingerprint.
+		testsupport.Must(t, createCmd.Flags().Set("title", "recorded elsewhere"), "set --title")
 		testsupport.Must(t, createCmd.Flags().Set("scope", scope), "set --scope")
 		restore := captureStdout(t)
 		runErr := createCmd.RunE(createCmd, nil)

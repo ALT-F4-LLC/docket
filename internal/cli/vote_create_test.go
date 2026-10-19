@@ -135,6 +135,29 @@ func TestVoteCreateReplaysCallerKeys(t *testing.T) {
 	}
 }
 
+// TestVoteCreateReportsKeyReuseAsConflict: a key reused with a different
+// description is CONFLICT, exit 4, with a message naming the key.
+func TestVoteCreateReportsKeyReuseAsConflict(t *testing.T) {
+	conn := newVoteCreateStore(t)
+	const key = "reused-key"
+
+	err := runVoteCreate(t, "--description", "first", "--voters", "1", "--idempotency-key", key)
+	testsupport.Must(t, err, "first vote create: %v", err)
+
+	err = runVoteCreate(t, "--description", "second", "--voters", "1", "--idempotency-key", key)
+	code := codeOf(t, err)
+	if code != output.ErrConflict || output.ExitCodeForError(code) != 4 {
+		t.Fatalf("reuse with a different description returned code %s (exit %d), want %s (exit 4)",
+			code, output.ExitCodeForError(code), output.ErrConflict)
+	}
+	if !strings.Contains(err.Error(), key) {
+		t.Errorf("conflict %q does not name the key %q", err, key)
+	}
+	if n := countProposals(t, conn); n != 1 {
+		t.Errorf("proposals = %d after the conflict, want 1", n)
+	}
+}
+
 // TestVoteStepAdoptsNoPlantedProposal: a caller who runs `vote create` with a
 // step's vote-step key before phase 2 does not get the step to adopt their
 // ballot. The engine opens its own proposal, created by "docket" at the step
