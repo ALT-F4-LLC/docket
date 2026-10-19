@@ -76,9 +76,16 @@ var allowedEnv = []string{
 // hostile code, a hostile trusted command's blast radius was always the
 // operator's whole account, and OS-level sandboxing of children — not env
 // shaping — is the mechanism that would shrink it.
+//
+// DOCKET_BEARER_TOKEN and DOCKET_BEARER_TOKEN_FILE carry the client credential
+// for a remote daemon (defined in internal/config, which this package cannot
+// import). A child has no use for it, and a gate's captured output is
+// persisted, so a child that dumps its environment would publish it.
 var deniedEnv = []string{
 	"DOCKET_TOKEN",
 	"DOCKET_PATH",
+	"DOCKET_BEARER_TOKEN",
+	"DOCKET_BEARER_TOKEN_FILE",
 }
 
 // networkEnv names the variables forwarded ONLY to a child whose trust entry
