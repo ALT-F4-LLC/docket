@@ -320,28 +320,30 @@ func TestIssueListBareJSONSelectsV2(t *testing.T) {
 }
 
 // TestIssueListJSONV1IsRejected: the v1 dialect is gone, and the refusal
-// points at the one dialect that remains.
+// points at the one dialect that remains. It runs the built binary because
+// the refusal an operator sees, its rendering and its exit code, comes from
+// the package Execute, which rootCmd.Execute alone does not run.
 func TestIssueListJSONV1IsRejected(t *testing.T) {
-	newVoteCreateStore(t)
+	bin := buildDocketBinary(t)
+	repo := t.TempDir()
+	if _, stderr, code := runDocket(t, bin, repo, "init"); code != 0 {
+		t.Fatalf("init failed: %s", stderr)
+	}
 
-	out, err := runIssueListThroughRoot(t, "--json=v1")
-	if err == nil {
-		t.Fatalf("--json=v1 succeeded; want a refusal:\n%s", out)
+	stdout, stderr, code := runDocket(t, bin, repo, "issue", "list", "--json=v1")
+	if code != 3 {
+		t.Errorf("exit = %d, want 3 VALIDATION_ERROR\nstdout: %s\nstderr: %s",
+			code, stdout, stderr)
 	}
-	ce, ok := err.(*CmdError)
-	if !ok {
-		t.Fatalf("error is %T, want *CmdError: %v", err, err)
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing: a refused dialect lists nothing", stdout)
 	}
-	if code := output.ExitCodeForError(ce.Code); code == 0 {
-		t.Errorf("exit code = 0, want non-zero (%v)", err)
+	if !strings.Contains(stderr, "v2") {
+		t.Errorf("refusal does not name v2: %q", stderr)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "v2") {
-		t.Errorf("refusal does not name v2: %q", msg)
-	}
-	for _, dialect := range regexp.MustCompile(`v[0-9]+`).FindAllString(msg, -1) {
+	for _, dialect := range regexp.MustCompile(`v[0-9]+`).FindAllString(stderr, -1) {
 		if dialect != "v2" {
-			t.Errorf("refusal names dialect %q: %q", dialect, msg)
+			t.Errorf("refusal names dialect %q: %q", dialect, stderr)
 		}
 	}
 }
