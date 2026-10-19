@@ -1,0 +1,1557 @@
+[
+  {
+    "table": "action_results",
+    "column": "action",
+    "type": "TEXT"
+  },
+  {
+    "table": "action_results",
+    "column": "argv",
+    "type": "TEXT"
+  },
+  {
+    "table": "action_results",
+    "column": "builtin",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "duration_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "exit",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "ordinal",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "output",
+    "type": "TEXT"
+  },
+  {
+    "table": "action_results",
+    "column": "reason",
+    "type": "TEXT"
+  },
+  {
+    "table": "action_results",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "truncated",
+    "type": "INTEGER"
+  },
+  {
+    "table": "action_results",
+    "column": "verdict",
+    "type": "TEXT"
+  },
+  {
+    "table": "activity_log",
+    "column": "changed_by",
+    "type": "TEXT"
+  },
+  {
+    "table": "activity_log",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "activity_log",
+    "column": "field_changed",
+    "type": "TEXT"
+  },
+  {
+    "table": "activity_log",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "activity_log",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "activity_log",
+    "column": "new_value",
+    "type": "TEXT"
+  },
+  {
+    "table": "activity_log",
+    "column": "old_value",
+    "type": "TEXT"
+  },
+  {
+    "table": "artifacts",
+    "column": "body",
+    "type": "TEXT"
+  },
+  {
+    "table": "artifacts",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "artifacts",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "artifacts",
+    "column": "kind",
+    "type": "TEXT"
+  },
+  {
+    "table": "artifacts",
+    "column": "payload",
+    "type": "TEXT"
+  },
+  {
+    "table": "artifacts",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "artifacts",
+    "column": "sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "artifacts",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "artifacts",
+    "column": "stub",
+    "type": "INTEGER"
+  },
+  {
+    "table": "artifacts",
+    "column": "supersedes",
+    "type": "INTEGER"
+  },
+  {
+    "table": "comments",
+    "column": "author",
+    "type": "TEXT"
+  },
+  {
+    "table": "comments",
+    "column": "body",
+    "type": "TEXT"
+  },
+  {
+    "table": "comments",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "comments",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "comments",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "dispatch_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "instance",
+    "type": "TEXT"
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "position",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "row_json",
+    "type": "TEXT"
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "row_sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "close_reason",
+    "type": "TEXT"
+  },
+  {
+    "table": "dispatches",
+    "column": "closed_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "expires_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "opened_seq",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "row_version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "dispatches",
+    "column": "status",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_comments",
+    "column": "author",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_comments",
+    "column": "body",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_comments",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_comments",
+    "column": "doc_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "doc_comments",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "doc_issue_links",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_issue_links",
+    "column": "doc_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "doc_issue_links",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "doc_revisions",
+    "column": "author",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_revisions",
+    "column": "body",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_revisions",
+    "column": "change_kind",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_revisions",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "doc_revisions",
+    "column": "doc_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "doc_revisions",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "doc_revisions",
+    "column": "revision_number",
+    "type": "INTEGER"
+  },
+  {
+    "table": "docs",
+    "column": "author",
+    "type": "TEXT"
+  },
+  {
+    "table": "docs",
+    "column": "body",
+    "type": "TEXT"
+  },
+  {
+    "table": "docs",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "docs",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "docs",
+    "column": "project_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "docs",
+    "column": "status",
+    "type": "TEXT"
+  },
+  {
+    "table": "docs",
+    "column": "title",
+    "type": "TEXT"
+  },
+  {
+    "table": "docs",
+    "column": "type",
+    "type": "TEXT"
+  },
+  {
+    "table": "docs",
+    "column": "updated_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "docs",
+    "column": "version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "events",
+    "column": "at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "events",
+    "column": "data",
+    "type": "TEXT"
+  },
+  {
+    "table": "events",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "events",
+    "column": "kind",
+    "type": "TEXT"
+  },
+  {
+    "table": "events",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "events",
+    "column": "seq",
+    "type": "INTEGER"
+  },
+  {
+    "table": "events",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "argv",
+    "type": "TEXT"
+  },
+  {
+    "table": "gate_results",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "duration_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "exit",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "gate",
+    "type": "TEXT"
+  },
+  {
+    "table": "gate_results",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "ordinal",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "output",
+    "type": "TEXT"
+  },
+  {
+    "table": "gate_results",
+    "column": "pre",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "reason",
+    "type": "TEXT"
+  },
+  {
+    "table": "gate_results",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "stub",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "stub_entry",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "truncated",
+    "type": "INTEGER"
+  },
+  {
+    "table": "gate_results",
+    "column": "verdict",
+    "type": "TEXT"
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "entity_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "key",
+    "type": "TEXT"
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "scope",
+    "type": "TEXT"
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "seq",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issue_files",
+    "column": "file_path",
+    "type": "TEXT"
+  },
+  {
+    "table": "issue_files",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issue_labels",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issue_labels",
+    "column": "label_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issue_relations",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "issue_relations",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issue_relations",
+    "column": "relation_type",
+    "type": "TEXT"
+  },
+  {
+    "table": "issue_relations",
+    "column": "source_issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issue_relations",
+    "column": "target_issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issues",
+    "column": "assignee",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "attempt",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issues",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "description",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "expires_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issues",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issues",
+    "column": "kind",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "owner",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "parent_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issues",
+    "column": "priority",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "project_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "issues",
+    "column": "resolution",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "scope_globs",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "size",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "status",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "title",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "token_hash",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "updated_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "issues",
+    "column": "version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "labels",
+    "column": "color",
+    "type": "TEXT"
+  },
+  {
+    "table": "labels",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "labels",
+    "column": "name",
+    "type": "TEXT"
+  },
+  {
+    "table": "labels",
+    "column": "project_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "labels",
+    "column": "version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "meta",
+    "column": "key",
+    "type": "TEXT"
+  },
+  {
+    "table": "meta",
+    "column": "value",
+    "type": "TEXT"
+  },
+  {
+    "table": "pins",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "pins",
+    "column": "kind",
+    "type": "TEXT"
+  },
+  {
+    "table": "pins",
+    "column": "ref",
+    "type": "TEXT"
+  },
+  {
+    "table": "pins",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "pins",
+    "column": "sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "projects",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "projects",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "projects",
+    "column": "identity",
+    "type": "TEXT"
+  },
+  {
+    "table": "projects",
+    "column": "name",
+    "type": "TEXT"
+  },
+  {
+    "table": "projects",
+    "column": "prefix",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposal_docs",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposal_docs",
+    "column": "doc_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposal_docs",
+    "column": "proposal_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposal_issues",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposal_issues",
+    "column": "proposal_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposals",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "created_by",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "criticality",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "description",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "domain_tags",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "escalation_reason",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "files_changed",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "final_outcome",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposals",
+    "column": "project_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposals",
+    "column": "rationale",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "required_voters",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposals",
+    "column": "status",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "threshold",
+    "type": "REAL"
+  },
+  {
+    "table": "proposals",
+    "column": "updated_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "proposals",
+    "column": "version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "proposals",
+    "column": "weighted_score",
+    "type": "REAL"
+  },
+  {
+    "table": "reap_acks",
+    "column": "acked_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "reap_acks",
+    "column": "acked_by",
+    "type": "TEXT"
+  },
+  {
+    "table": "reap_acks",
+    "column": "class",
+    "type": "TEXT"
+  },
+  {
+    "table": "reap_acks",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "reap_acks",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "reap_acks",
+    "column": "reaped_seq",
+    "type": "INTEGER"
+  },
+  {
+    "table": "reap_acks",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "reap_acks",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_fences",
+    "column": "command",
+    "type": "TEXT"
+  },
+  {
+    "table": "run_fences",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_fences",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_fences",
+    "column": "ordinal",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_fences",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_fences",
+    "column": "sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "run_fences",
+    "column": "tag",
+    "type": "TEXT"
+  },
+  {
+    "table": "run_issues",
+    "column": "body_sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "run_issues",
+    "column": "body_snapshot",
+    "type": "TEXT"
+  },
+  {
+    "table": "run_issues",
+    "column": "expanded_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_issues",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_issues",
+    "column": "issue_snapshot",
+    "type": "TEXT"
+  },
+  {
+    "table": "run_issues",
+    "column": "loop_count",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_issues",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "run_issues",
+    "column": "workflow_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "runs",
+    "column": "activated_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "runs",
+    "column": "branch",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "breach_reason",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "budget",
+    "type": "REAL"
+  },
+  {
+    "table": "runs",
+    "column": "commit_sha",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "runs",
+    "column": "exec_root",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "hostname",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "runs",
+    "column": "pause_origin",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "project_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "runs",
+    "column": "reason",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "request",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "row_version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "runs",
+    "column": "status",
+    "type": "TEXT"
+  },
+  {
+    "table": "runs",
+    "column": "updated_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "runs",
+    "column": "usage_budget",
+    "type": "REAL"
+  },
+  {
+    "table": "runs",
+    "column": "usage_floor",
+    "type": "REAL"
+  },
+  {
+    "table": "schemas",
+    "column": "body",
+    "type": "TEXT"
+  },
+  {
+    "table": "schemas",
+    "column": "builtin",
+    "type": "INTEGER"
+  },
+  {
+    "table": "schemas",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "schemas",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "schemas",
+    "column": "name",
+    "type": "TEXT"
+  },
+  {
+    "table": "schemas",
+    "column": "ordered",
+    "type": "TEXT"
+  },
+  {
+    "table": "schemas",
+    "column": "project_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "schemas",
+    "column": "row_version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "schemas",
+    "column": "source_path",
+    "type": "TEXT"
+  },
+  {
+    "table": "schemas",
+    "column": "source_sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "schemas",
+    "column": "version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "step_inputs",
+    "column": "artifact_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "step_inputs",
+    "column": "position",
+    "type": "INTEGER"
+  },
+  {
+    "table": "step_inputs",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "activity_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "attempt",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "class",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "context_bytes",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "executor",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "expected_cost",
+    "type": "REAL"
+  },
+  {
+    "table": "steps",
+    "column": "expires_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "failed_attempts",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "gate_trail",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "instance",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "issue_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "kind",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "last_claim_end",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "loop_latest_verdict",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "loop_rounds_run",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "loop_trigger_step",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "materialized",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "max_attempts",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "metadata",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "ordinal",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "owner",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "park_class",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "park_reason",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "reaped_claims",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "routing",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "row_version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "saga_stage",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "sibling_index",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "started_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "status",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "step_name",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "token_hash",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "updated_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "usage_recorded",
+    "type": "INTEGER"
+  },
+  {
+    "table": "steps",
+    "column": "work_root",
+    "type": "TEXT"
+  },
+  {
+    "table": "steps",
+    "column": "workflow_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "trust_cache",
+    "column": "argv_sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "trust_cache",
+    "column": "at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "trust_cache",
+    "column": "entry_name",
+    "type": "TEXT"
+  },
+  {
+    "table": "trust_cache",
+    "column": "gate",
+    "type": "TEXT"
+  },
+  {
+    "table": "trust_cache",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "trust_cache",
+    "column": "kind",
+    "type": "TEXT"
+  },
+  {
+    "table": "trust_cache",
+    "column": "matched",
+    "type": "INTEGER"
+  },
+  {
+    "table": "trust_cache",
+    "column": "prefix",
+    "type": "INTEGER"
+  },
+  {
+    "table": "trust_cache",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "attempt",
+    "type": "INTEGER"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "quantity",
+    "type": "REAL"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "run_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "source",
+    "type": "TEXT"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "step_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "usage_ledger",
+    "column": "unit",
+    "type": "TEXT"
+  },
+  {
+    "table": "vote_usage",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "vote_usage",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "vote_usage",
+    "column": "quantity",
+    "type": "REAL"
+  },
+  {
+    "table": "vote_usage",
+    "column": "unit",
+    "type": "TEXT"
+  },
+  {
+    "table": "vote_usage",
+    "column": "vote_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "votes",
+    "column": "confidence",
+    "type": "REAL"
+  },
+  {
+    "table": "votes",
+    "column": "created_at",
+    "type": "TEXT"
+  },
+  {
+    "table": "votes",
+    "column": "domain_relevance",
+    "type": "REAL"
+  },
+  {
+    "table": "votes",
+    "column": "findings",
+    "type": "TEXT"
+  },
+  {
+    "table": "votes",
+    "column": "findings_json",
+    "type": "TEXT"
+  },
+  {
+    "table": "votes",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "votes",
+    "column": "metadata",
+    "type": "TEXT"
+  },
+  {
+    "table": "votes",
+    "column": "proposal_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "votes",
+    "column": "summary",
+    "type": "TEXT"
+  },
+  {
+    "table": "votes",
+    "column": "verdict",
+    "type": "TEXT"
+  },
+  {
+    "table": "votes",
+    "column": "voter_name",
+    "type": "TEXT"
+  },
+  {
+    "table": "votes",
+    "column": "voter_role",
+    "type": "TEXT"
+  },
+  {
+    "table": "workflows",
+    "column": "body",
+    "type": "TEXT"
+  },
+  {
+    "table": "workflows",
+    "column": "created_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "workflows",
+    "column": "deprecated_at_ms",
+    "type": "INTEGER"
+  },
+  {
+    "table": "workflows",
+    "column": "description",
+    "type": "TEXT"
+  },
+  {
+    "table": "workflows",
+    "column": "id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "workflows",
+    "column": "name",
+    "type": "TEXT"
+  },
+  {
+    "table": "workflows",
+    "column": "parsed",
+    "type": "TEXT"
+  },
+  {
+    "table": "workflows",
+    "column": "project_id",
+    "type": "INTEGER"
+  },
+  {
+    "table": "workflows",
+    "column": "row_version",
+    "type": "INTEGER"
+  },
+  {
+    "table": "workflows",
+    "column": "source_path",
+    "type": "TEXT"
+  },
+  {
+    "table": "workflows",
+    "column": "source_sha256",
+    "type": "TEXT"
+  },
+  {
+    "table": "workflows",
+    "column": "version",
+    "type": "INTEGER"
+  }
+]
