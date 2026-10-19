@@ -206,7 +206,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 
 // GetRunBudget is the read form.
 func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the budget: %w", err)
 	}

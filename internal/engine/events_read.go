@@ -142,7 +142,7 @@ type EventQuery struct {
 // The ordering is `seq ASC`, ALWAYS. There is no reverse mode: a cursor
 // feed that could run backwards is a cursor feed that skips.
 func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
 	}
@@ -653,7 +653,7 @@ func EventKinds() []string {
 // It is here rather than in the report because the attribution is this file's
 // subject, and a rollup computed beside the table cannot disagree with it.
 func ActorCounts(conn *sql.DB, runID int) (map[Actor]int, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("counting events by kind: %w", err)
 	}
@@ -795,7 +795,7 @@ type ActivationHead struct {
 // feed whose GONE probe refuses a zero cursor once anything was pruned, and
 // a status read must not fail because old events were retired.
 func LatestActivationHead(conn *sql.DB, runID int) (*ActivationHead, error) {
-	tx, err := conn.Begin()
+	tx, err := db.BeginReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the activation head: %w", err)
 	}

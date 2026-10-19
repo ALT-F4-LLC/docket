@@ -86,6 +86,80 @@ func TestRolledBackReadsPassAHeldWriteLock(t *testing.T) {
 	})
 }
 
+// TestEventAndBudgetReadsPassAHeldWriteLock pins that the event feed, the
+// per-actor rollup, the activation-head read, and the run-budget read open as
+// readers: while another process holds the write lock, each returns what it
+// returned before the lock instead of queueing behind it until busy_timeout.
+func TestEventAndBudgetReadsPassAHeldWriteLock(t *testing.T) {
+	conn := mustDB(t)
+	runID := activatedVoteGateRun(t, conn)
+
+	wantEvents, err := ListEvents(conn, EventQuery{RunID: runID})
+	testsupport.Must(t, err, "ListEvents before the lock: %v", err)
+	if len(wantEvents.Events) == 0 {
+		t.Fatal("ListEvents before the lock returned no events; the scenario needs the activation trail")
+	}
+	wantActors, err := ActorCounts(conn, runID)
+	testsupport.Must(t, err, "ActorCounts before the lock: %v", err)
+	wantHead, err := LatestActivationHead(conn, runID)
+	testsupport.Must(t, err, "LatestActivationHead before the lock: %v", err)
+	wantBudget, err := GetRunBudget(conn, runID)
+	testsupport.Must(t, err, "GetRunBudget before the lock: %v", err)
+
+	var path string
+	err = conn.QueryRow("SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&path)
+	testsupport.Must(t, err, "reading the database path: %v", err)
+	writer, err := db.Open(path)
+	testsupport.Must(t, err, "opening the writer's handle: %v", err)
+	t.Cleanup(func() { writer.Close() })
+	lock, err := writer.Begin()
+	testsupport.Must(t, err, "taking the write lock: %v", err)
+	defer lock.Rollback()
+
+	_, err = conn.Exec("PRAGMA busy_timeout=50")
+	testsupport.Must(t, err, "shortening busy_timeout: %v", err)
+
+	t.Run("list events", func(t *testing.T) {
+		got, err := ListEvents(conn, EventQuery{RunID: runID})
+		if err != nil {
+			t.Fatalf("ListEvents while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantEvents) {
+			t.Errorf("ListEvents under the lock = %s, want %s",
+				mustJSON(t, got), mustJSON(t, wantEvents))
+		}
+	})
+	t.Run("actor counts", func(t *testing.T) {
+		got, err := ActorCounts(conn, runID)
+		if err != nil {
+			t.Fatalf("ActorCounts while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantActors) {
+			t.Errorf("ActorCounts under the lock = %v, want %v", got, wantActors)
+		}
+	})
+	t.Run("latest activation head", func(t *testing.T) {
+		got, err := LatestActivationHead(conn, runID)
+		if err != nil {
+			t.Fatalf("LatestActivationHead while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantHead) {
+			t.Errorf("LatestActivationHead under the lock = %s, want %s",
+				mustJSON(t, got), mustJSON(t, wantHead))
+		}
+	})
+	t.Run("run budget", func(t *testing.T) {
+		got, err := GetRunBudget(conn, runID)
+		if err != nil {
+			t.Fatalf("GetRunBudget while another process holds the write lock: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantBudget) {
+			t.Errorf("GetRunBudget under the lock = %s, want %s",
+				mustJSON(t, got), mustJSON(t, wantBudget))
+		}
+	})
+}
+
 // TestDispatchReadsPassAHeldWriteLock pins that the dispatch verbs' rolled-back
 // reads — the ready snapshot, the verify recomputation, the open-dispatch id
 // lookup, and the integration candidate read — open as readers: while another
