@@ -371,3 +371,133 @@ func TestConnectAutoStartsAbsentDaemon(t *testing.T) {
 		t.Errorf("a successful auto-start left a backoff marker: %v", err)
 	}
 }
+
+func foreignUID() uint32 { return uint32(os.Geteuid()) + 1 }
+
+func TestListenerClosesConnectionFromForeignUIDAndKeepsAccepting(t *testing.T) {
+	shortRuntimeBase(t)
+	ep := mustEndpoint(t, newStoreDir(t))
+	var lookups atomic.Int32
+	ep.lookupPeerUID = func(net.Conn) (uint32, error) {
+		if lookups.Add(1) == 1 {
+			return foreignUID(), nil
+		}
+		return uint32(os.Geteuid()), nil
+	}
+
+	ln, err := Listen(ep)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			close(accepted)
+			return
+		}
+		accepted <- conn
+	}()
+
+	foreign, err := net.Dial("unix", ep.SocketPath())
+	if err != nil {
+		t.Fatalf("dial as the foreign peer: %v", err)
+	}
+	defer foreign.Close()
+	foreign.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = foreign.Read(make([]byte, 1))
+	var netErr net.Error
+	if err == nil || (errors.As(err, &netErr) && netErr.Timeout()) {
+		t.Fatalf("foreign-uid conn read err = %v, want the server to have closed it", err)
+	}
+
+	owner, err := net.Dial("unix", ep.SocketPath())
+	if err != nil {
+		t.Fatalf("dial as the owner: %v", err)
+	}
+	defer owner.Close()
+	served, ok := <-accepted
+	if !ok {
+		t.Fatal("Accept failed instead of returning the owner's conn")
+	}
+	defer served.Close()
+	if _, err := served.Write([]byte{'k'}); err != nil {
+		t.Fatalf("write to the accepted conn: %v", err)
+	}
+	owner.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if _, err := owner.Read(buf); err != nil || buf[0] != 'k' {
+		t.Fatalf("Accept returned a conn other than the owner's: read %q, err %v", buf, err)
+	}
+}
+
+// recordingConn counts the bytes written to it and whether it was closed.
+type recordingConn struct {
+	net.Conn
+	written atomic.Int64
+	closed  atomic.Bool
+}
+
+func (c *recordingConn) Write(p []byte) (int, error) {
+	c.written.Add(int64(len(p)))
+	return len(p), nil
+}
+
+func (c *recordingConn) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func TestConnectRefusesForeignUIDDaemonWithoutWriting(t *testing.T) {
+	foreign := func(net.Conn) (uint32, error) { return foreignUID(), nil }
+	cases := []struct {
+		name       string
+		lookup     func(net.Conn) (uint32, error)
+		firstDial  error
+		wantSpawns int32
+	}{
+		{name: "first dial", lookup: foreign},
+		{name: "redial after auto-start", lookup: foreign, firstDial: syscall.ECONNREFUSED, wantSpawns: 1},
+		{name: "non-Unix conn under the kernel lookup"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shortRuntimeBase(t)
+			ep := mustEndpoint(t, newStoreDir(t))
+			ep.lookupPeerUID = tc.lookup
+
+			rec := &recordingConn{}
+			var dials atomic.Int32
+			dial := func(context.Context, string, string) (net.Conn, error) {
+				if dials.Add(1) == 1 && tc.firstDial != nil {
+					return nil, tc.firstDial
+				}
+				return rec, nil
+			}
+			var spawns atomic.Int32
+			spawn := func(context.Context, Endpoint) error {
+				spawns.Add(1)
+				return nil
+			}
+
+			conn, err := Connect(context.Background(), ep, dial, spawn)
+			if err == nil {
+				conn.Write([]byte("lease-token"))
+				t.Error("Connect to a daemon of another uid returned no error")
+			} else if conn != nil {
+				t.Error("Connect returned a conn alongside its refusal")
+			}
+			if n := rec.written.Load(); n != 0 {
+				t.Errorf("%d bytes written to the foreign daemon, want 0", n)
+			}
+			if !rec.closed.Load() {
+				t.Error("the refused conn was left open")
+			}
+			if n := spawns.Load(); n != tc.wantSpawns {
+				t.Errorf("spawned %d times, want %d", n, tc.wantSpawns)
+			}
+		})
+	}
+}

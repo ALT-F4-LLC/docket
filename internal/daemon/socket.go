@@ -40,6 +40,9 @@ var (
 type Endpoint struct {
 	dir  string
 	name string
+	// lookupPeerUID reads the uid at the other end of a socket conn. Nil means
+	// the kernel's credential lookup; tests set it to impersonate another uid.
+	lookupPeerUID func(net.Conn) (uint32, error)
 }
 
 // NewEndpoint verifies (creating it when absent) the per-user runtime dir and
@@ -59,6 +62,32 @@ func NewEndpoint(storeDir string) (Endpoint, error) {
 
 // SocketPath is where the store's daemon listens.
 func (e Endpoint) SocketPath() string { return filepath.Join(e.dir, e.name+".sock") }
+
+// checkPeer refuses a conn unless the process at its other end runs as this
+// process's euid. A failed lookup, including on a conn that is not a Unix
+// socket, is a refusal.
+func (e Endpoint) checkPeer(conn net.Conn) error {
+	lookup := e.lookupPeerUID
+	if lookup == nil {
+		lookup = kernelPeerUID
+	}
+	uid, err := lookup(conn)
+	if err != nil {
+		return err
+	}
+	if want := uint32(os.Geteuid()); uid != want {
+		return fmt.Errorf("peer runs as uid %d, not %d", uid, want)
+	}
+	return nil
+}
+
+func kernelPeerUID(conn net.Conn) (uint32, error) {
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return 0, fmt.Errorf("peer credentials: %T is not a Unix socket conn", conn)
+	}
+	return peerUID(unixConn)
+}
 
 func (e Endpoint) lockPath() string    { return filepath.Join(e.dir, e.name+".lock") }
 func (e Endpoint) backoffPath() string { return filepath.Join(e.dir, e.name+".backoff") }
@@ -122,7 +151,8 @@ func ensureRuntimeDir() (string, error) {
 // lifetime, which is what keeps a store to one daemon.
 type Listener struct {
 	net.Listener
-	lock *os.File
+	lock     *os.File
+	endpoint Endpoint
 }
 
 // Listen takes the store's lock, removes a stale socket left by a dead
@@ -150,7 +180,23 @@ func Listen(e Endpoint) (*Listener, error) {
 		lock.Close()
 		return nil, err
 	}
-	return &Listener{Listener: ln, lock: lock}, nil
+	return &Listener{Listener: ln, lock: lock, endpoint: e}, nil
+}
+
+// Accept returns the next connection from a peer running as this process's
+// euid. It closes and skips any other connection, so a rejected peer never
+// ends serving; only the socket's own errors are returned.
+func (l *Listener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if l.endpoint.checkPeer(conn) == nil {
+			return conn, nil
+		}
+		conn.Close()
+	}
 }
 
 // Close stops listening, which unlinks the socket, then releases the lock.
@@ -168,13 +214,17 @@ type SpawnFunc func(ctx context.Context, e Endpoint) error
 // no daemon is listening and spawn is non-nil, it auto-starts one and redials.
 // A failed auto-start leaves a backoff marker; until it expires, Connect
 // returns ErrBackoff instead of spawning again. A nil dial uses net.Dialer.
+// Connect closes, unwritten, any conn whose listener runs as another uid.
 func Connect(ctx context.Context, e Endpoint, dial DialFunc, spawn SpawnFunc) (net.Conn, error) {
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
 	}
 	conn, err := dialBounded(ctx, dial, e.SocketPath())
-	if err == nil || spawn == nil || !daemonAbsent(err) {
-		return conn, err
+	if err == nil {
+		return e.verifiedDaemon(conn)
+	}
+	if spawn == nil || !daemonAbsent(err) {
+		return nil, err
 	}
 	if backingOff(e.backoffPath()) {
 		return nil, fmt.Errorf("%w: %w", ErrBackoff, err)
@@ -185,6 +235,14 @@ func Connect(ctx context.Context, e Endpoint, dial DialFunc, spawn SpawnFunc) (n
 	conn, err = dialBounded(ctx, dial, e.SocketPath())
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("dial auto-started daemon: %w", err), markBackoff(e.backoffPath()))
+	}
+	return e.verifiedDaemon(conn)
+}
+
+func (e Endpoint) verifiedDaemon(conn net.Conn) (net.Conn, error) {
+	if err := e.checkPeer(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("refusing daemon socket %s: %w", e.SocketPath(), err)
 	}
 	return conn, nil
 }
