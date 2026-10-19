@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 46
+const currentSchemaVersion = 47
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -226,6 +226,7 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	44: migrateV43ToV44,
 	45: migrateV44ToV45,
 	46: migrateV45ToV46,
+	47: migrateV46ToV47,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3324,6 +3325,42 @@ func migrateV45ToV46(tx *sql.Tx) error {
 	return nil
 }
 
+// v47AddedColumns is v47's whole schema change: `fingerprint` on
+// `idempotency_keys`, a digest of the request a key was first recorded for, so
+// a key reused with different content is rejected rather than replayed. NULL
+// means the key was recorded without one.
+var v47AddedColumns = []struct{ table, column, ddl string }{
+	{"idempotency_keys", "fingerprint",
+		`ALTER TABLE idempotency_keys ADD COLUMN fingerprint TEXT`},
+}
+
+// v47ColumnSentinels are the columns the rewind guard probes, the v45 form:
+// v47 adds no table and no index, so a database stamped 47 by a binary built
+// mid-change carries every v46 sentinel and `fingerprint` never arrives.
+var v47ColumnSentinels = []struct{ table, column string }{
+	{"idempotency_keys", "fingerprint"},
+}
+
+// migrateV46ToV47 adds `idempotency_keys.fingerprint`. It back-fills nothing:
+// the request a pre-v47 key was recorded for is gone, so its fingerprint
+// cannot be derived. It probes before the ALTER, so it stays re-runnable.
+func migrateV46ToV47(tx *sql.Tx) error {
+	for _, col := range v47AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v46 to v47: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v46 to v47: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -4256,6 +4293,24 @@ func Migrate(db *sql.DB) error {
 		}
 		if !exists {
 			version = 45
+		}
+	}
+
+	// The v47 guard, in the COLUMN form of v45 and for its reason: v47 adds one
+	// column and no table, so a database stamped 47 by a binary built
+	// mid-change carries every v46 sentinel and `idempotency_keys.fingerprint`
+	// never arrives.
+	if version >= 47 {
+		for _, col := range v47ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v47 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 46
+				break
+			}
 		}
 	}
 

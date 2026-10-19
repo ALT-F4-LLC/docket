@@ -2,7 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"errors"
+	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -354,4 +358,233 @@ func TestIdempotencySeqIsMonotonic(t *testing.T) {
 	if n != 3 {
 		t.Errorf("recorded %d keys, want 3", n)
 	}
+}
+
+// fingerprintScope is a scope no create verb uses, so these tests exercise the
+// fingerprint helpers directly rather than through any one verb.
+const fingerprintScope = "test.fingerprint"
+
+// createFingerprinted is the shape every fingerprint-aware create verb takes:
+// begin, replay on a hit, otherwise insert an entity and record the key in the
+// same transaction. The entity is a probe_entities row when that table exists,
+// else the fixed id 42.
+func createFingerprinted(db *sql.DB, key, fingerprint string) (int, error) {
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, fingerprintScope, key, fingerprint)
+	if err != nil {
+		return 0, err
+	}
+	if hit {
+		return existingID, nil
+	}
+	defer tx.Rollback()
+
+	id := 42
+	var hasProbe bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master
+	                        WHERE type='table' AND name='probe_entities')`).Scan(&hasProbe); err != nil {
+		return 0, err
+	}
+	if hasProbe {
+		res, err := tx.Exec(`INSERT INTO probe_entities DEFAULT VALUES`)
+		if err != nil {
+			return 0, err
+		}
+		id64, err := res.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		id = int(id64)
+	}
+	if err := recordIdempotencyKeyFingerprintTx(tx, fingerprintScope, key, fingerprint, id); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+func storedFingerprint(t *testing.T, db *sql.DB, scope, key string) sql.NullString {
+	t.Helper()
+	var fp sql.NullString
+	err := db.QueryRow(`SELECT fingerprint FROM idempotency_keys WHERE scope = ? AND key = ?`,
+		scope, key).Scan(&fp)
+	testsupport.Must(t, err, "reading fingerprint of %s/%s: %v", scope, key, err)
+	return fp
+}
+
+// TestMigrateIdempotencyFingerprint: a store from before the fingerprint column
+// upgrades cleanly, and a key it already recorded reads NULL and still replays.
+func TestMigrateIdempotencyFingerprint(t *testing.T) {
+	db := newIdemDB(t)
+
+	// A v46 store: the column absent, the stamp one back, and a key recorded
+	// in the v46 shape.
+	mustExec(t, db, `ALTER TABLE idempotency_keys DROP COLUMN fingerprint`)
+	mustExec(t, db, `UPDATE meta SET value = '46' WHERE key = 'schema_version'`)
+	mustExec(t, db, `INSERT INTO idempotency_keys (scope, key, entity_id, created_at_ms, seq)
+	                 VALUES (?, 'old-key', 7, 1, 1)`, fingerprintScope)
+
+	err := Migrate(db)
+	testsupport.Must(t, err, "Migrate from v46: %v", err)
+	if v, _ := SchemaVersion(db); v != currentSchemaVersion {
+		t.Errorf("schema_version after migrating from v46 = %d, want %d", v, currentSchemaVersion)
+	}
+	if exists, err := hasColumnDB(db, "idempotency_keys", "fingerprint"); err != nil || !exists {
+		t.Fatalf("idempotency_keys.fingerprint missing after migrating from v46 (err %v)", err)
+	}
+	if fp := storedFingerprint(t, db, fingerprintScope, "old-key"); fp.Valid {
+		t.Errorf("pre-migration key reads fingerprint %q, want NULL", fp.String)
+	}
+
+	id, err := createFingerprinted(db, "old-key", "fp-any")
+	testsupport.Must(t, err, "replaying the pre-migration key: %v", err)
+	if id != 7 {
+		t.Errorf("pre-migration key replayed entity %d, want 7", id)
+	}
+}
+
+// TestIdempotencyFingerprintRewindGuard drops the column while leaving the
+// stamp current and asserts Migrate converges it.
+func TestIdempotencyFingerprintRewindGuard(t *testing.T) {
+	db := newIdemDB(t)
+
+	mustExec(t, db, `ALTER TABLE idempotency_keys DROP COLUMN fingerprint`)
+	err := Migrate(db)
+	testsupport.Must(t, err, "re-running Migrate on the stamped store: %v", err)
+	if exists, err := hasColumnDB(db, "idempotency_keys", "fingerprint"); err != nil || !exists {
+		t.Fatalf("the rewind guard did not converge idempotency_keys.fingerprint (err %v)", err)
+	}
+}
+
+// TestIdempotencyMismatch: the same key with the same fingerprint replays the
+// recorded entity; with a different fingerprint it is a conflict naming the key.
+func TestIdempotencyMismatch(t *testing.T) {
+	db := newIdemDB(t)
+
+	first, err := createFingerprinted(db, "key-1", "fp-a")
+	testsupport.Must(t, err, "first create: %v", err)
+	if fp := storedFingerprint(t, db, fingerprintScope, "key-1"); !fp.Valid || fp.String != "fp-a" {
+		t.Errorf("recorded fingerprint = %+v, want fp-a", fp)
+	}
+
+	replay, err := createFingerprinted(db, "key-1", "fp-a")
+	testsupport.Must(t, err, "same-fingerprint replay: %v", err)
+	if replay != first {
+		t.Errorf("same-fingerprint replay returned %d, want the recorded %d", replay, first)
+	}
+
+	_, err = createFingerprinted(db, "key-1", "fp-b")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("different-fingerprint reuse returned %v, want an ErrConflict", err)
+	}
+	if !strings.Contains(err.Error(), "key-1") {
+		t.Errorf("conflict %q does not name the key key-1", err)
+	}
+	if fp := storedFingerprint(t, db, fingerprintScope, "key-1"); fp.String != "fp-a" {
+		t.Errorf("fingerprint after the rejected reuse = %q, want fp-a unchanged", fp.String)
+	}
+}
+
+// TestIdempotencyLegacyNull: a key recorded without a fingerprint matches any
+// fingerprint and stays NULL after the replay.
+func TestIdempotencyLegacyNull(t *testing.T) {
+	db := newIdemDB(t)
+
+	tx, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = RecordIdempotencyKeyTx(tx, fingerprintScope, "legacy", 9)
+	testsupport.Must(t, err, "RecordIdempotencyKeyTx: %v", err)
+	err = tx.Commit()
+	testsupport.Must(t, err, "Commit: %v", err)
+
+	id, err := createFingerprinted(db, "legacy", "fp-new")
+	testsupport.Must(t, err, "fingerprinted replay of a legacy key: %v", err)
+	if id != 9 {
+		t.Errorf("legacy key replayed entity %d, want 9", id)
+	}
+	if fp := storedFingerprint(t, db, fingerprintScope, "legacy"); fp.Valid {
+		t.Errorf("legacy key fingerprint = %q after replay, want NULL (no backfill)", fp.String)
+	}
+}
+
+// TestIdempotencyConcurrent races callers sharing one key, each on its own
+// connection as separate processes would be. Equal fingerprints converge on one
+// entity; differing fingerprints yield one success and conflicts for the rest,
+// never a raw constraint error.
+func TestIdempotencyConcurrent(t *testing.T) {
+	const callers = 8
+
+	race := func(t *testing.T, fingerprintOf func(i int) string) (ids []int, errs []error, entities int) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "idem.db")
+		setup, err := Open(path)
+		testsupport.Must(t, err, "Open: %v", err)
+		defer setup.Close()
+		err = Initialize(setup)
+		testsupport.Must(t, err, "Initialize: %v", err)
+		err = Migrate(setup)
+		testsupport.Must(t, err, "Migrate: %v", err)
+		mustExec(t, setup, `CREATE TABLE probe_entities (id INTEGER PRIMARY KEY AUTOINCREMENT)`)
+
+		handles := make([]*sql.DB, callers)
+		for i := range handles {
+			h, err := Open(path)
+			testsupport.Must(t, err, "Open caller %d: %v", i, err)
+			defer h.Close()
+			handles[i] = h
+		}
+
+		ids = make([]int, callers)
+		errs = make([]error, callers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				ids[i], errs[i] = createFingerprinted(handles[i], "shared", fingerprintOf(i))
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		err = setup.QueryRow(`SELECT COUNT(*) FROM probe_entities`).Scan(&entities)
+		testsupport.Must(t, err, "counting entities: %v", err)
+		return ids, errs, entities
+	}
+
+	t.Run("equal fingerprints", func(t *testing.T) {
+		ids, errs, entities := race(t, func(int) string { return "fp-same" })
+		for i, err := range errs {
+			if err != nil {
+				t.Errorf("caller %d: %v", i, err)
+			}
+		}
+		for i, id := range ids {
+			if id != ids[0] {
+				t.Errorf("caller %d got entity %d, caller 0 got %d", i, id, ids[0])
+			}
+		}
+		if entities != 1 {
+			t.Errorf("created %d entities, want 1", entities)
+		}
+	})
+
+	t.Run("differing fingerprints", func(t *testing.T) {
+		_, errs, entities := race(t, func(i int) string { return "fp-" + string(rune('a'+i)) })
+		successes := 0
+		for i, err := range errs {
+			switch {
+			case err == nil:
+				successes++
+			case !errors.Is(err, ErrConflict):
+				t.Errorf("caller %d: %v, want nil or an ErrConflict", i, err)
+			}
+		}
+		if successes != 1 {
+			t.Errorf("%d callers succeeded, want exactly 1", successes)
+		}
+		if entities != 1 {
+			t.Errorf("created %d entities, want 1", entities)
+		}
+	})
 }

@@ -191,6 +191,59 @@ func beginIdempotentCreate(db *sql.DB, scope, idempotencyKey string) (existingID
 	return 0, false, tx, nil
 }
 
+// beginIdempotentCreateFingerprinted is beginIdempotentCreate for a caller that
+// fingerprints its request, so a key reused with different content is rejected
+// instead of replaying an entity created for other content.
+//
+// The lookup runs inside the transaction it opens. Open's _txlock=immediate
+// makes Begin take the write lock, so the check and the caller's insert form
+// one critical section: a concurrent call with the same key waits, then sees
+// the committed record and replays or rejects it instead of hitting the
+// primary key.
+//
+// hit reports a recorded key whose fingerprint matches: the caller returns
+// existingID unchanged. A recorded fingerprint of NULL predates fingerprints
+// and matches any fingerprint; it is not backfilled. A different recorded
+// fingerprint returns an error wrapping ErrConflict that names the key. On a
+// hit or an error tx is nil. Otherwise the caller owns tx: insert into it,
+// call recordIdempotencyKeyFingerprintTx when idempotencyKey is non-empty, and
+// Commit.
+func beginIdempotentCreateFingerprinted(db *sql.DB, scope, idempotencyKey, fingerprint string) (existingID int, hit bool, tx *sql.Tx, err error) {
+	tx, err = db.Begin()
+	if err != nil {
+		return 0, false, nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	if idempotencyKey == "" {
+		return 0, false, tx, nil
+	}
+
+	var recorded sql.NullString
+	err = tx.QueryRow(
+		`SELECT entity_id, fingerprint FROM idempotency_keys WHERE scope = ? AND key = ?`,
+		scope, idempotencyKey,
+	).Scan(&existingID, &recorded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, tx, nil
+	}
+	tx.Rollback()
+	if err != nil {
+		return 0, false, nil, fmt.Errorf("looking up idempotency key: %w", err)
+	}
+	if recorded.Valid && recorded.String != fingerprint {
+		return 0, false, nil, fmt.Errorf(
+			"%w: idempotency key %q was already used for a different %s request",
+			ErrConflict, idempotencyKey, scope)
+	}
+	return existingID, true, nil, nil
+}
+
+// recordIdempotencyKeyFingerprintTx is RecordIdempotencyKeyTx that also stores
+// the request's fingerprint, for callers that began with
+// beginIdempotentCreateFingerprinted.
+func recordIdempotencyKeyFingerprintTx(tx *sql.Tx, scope, key, fingerprint string, entityID int) error {
+	return recordIdempotencyKey(tx, scope, key, sql.NullString{String: fingerprint, Valid: true}, entityID)
+}
+
 // RecordIdempotencyKeyTx records (scope, key) -> entityID inside tx.
 //
 // It MUST be called in the same transaction as the insert it protects, so a
@@ -202,7 +255,14 @@ func beginIdempotentCreate(db *sql.DB, scope, idempotencyKey string) (existingID
 // here, in a table created at v5, and never on a pre-existing column —
 // mutating an existing timestamp format would break byte-compatibility for
 // every existing verb.
+//
+// The key is recorded without a fingerprint, so any later fingerprinted call
+// replays it.
 func RecordIdempotencyKeyTx(tx *sql.Tx, scope, key string, entityID int) error {
+	return recordIdempotencyKey(tx, scope, key, sql.NullString{}, entityID)
+}
+
+func recordIdempotencyKey(tx *sql.Tx, scope, key string, fingerprint sql.NullString, entityID int) error {
 	nowMS := time.Now().UTC().UnixMilli()
 
 	var nextSeq int64
@@ -213,9 +273,9 @@ func RecordIdempotencyKeyTx(tx *sql.Tx, scope, key string, entityID int) error {
 	}
 
 	_, err := tx.Exec(
-		`INSERT INTO idempotency_keys (scope, key, entity_id, created_at_ms, seq)
-		 VALUES (?, ?, ?, ?, ?)`,
-		scope, key, entityID, nowMS, nextSeq,
+		`INSERT INTO idempotency_keys (scope, key, entity_id, created_at_ms, seq, fingerprint)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		scope, key, entityID, nowMS, nextSeq, fingerprint,
 	)
 	if err != nil {
 		return fmt.Errorf("recording idempotency key: %w", err)
