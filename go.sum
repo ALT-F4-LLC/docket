@@ -1,3 +1,5 @@
+connectrpc.com/connect v1.21.1 h1:h2kacdlzXpZU2OQFSv98xkjYXNUSr/ptxmGVbS/+CRM=
+connectrpc.com/connect v1.21.1/go.mod h1:fhMcVJ5w6r/yTYhnkEbW6+sIF7OZ5Ay7KYgmfebh2ek=
 github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260915234803-77ac6ad903ae h1:/h5Xsysh2iyYlrlMldWhTfW007rpKnRkSUfE3CNLJzo=
 github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260915234803-77ac6ad903ae/go.mod h1:eX2BvvlxMURTuqBeo2gFWlw8k346qR30nVPNDwNi3Zs=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=

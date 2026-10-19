@@ -13,7 +13,7 @@
 # `docket trust list`. That is why the compile gate owns the name `build` and
 # the binary build is `make bin`.
 
-.PHONY: bin test lint vet install clean demo \
+.PHONY: bin test lint vet install clean proto demo \
         build tests qa-test self-hygiene doc-validate citation-check secret-scan \
         vuln-scan sdet-abuse tdd-preflight reserved-name-check \
         render-verify copy-verify ac-commands \
@@ -50,6 +50,20 @@ install:
 
 clean:
 	rm -rf ./bin/
+
+# proto — regenerate the Connect API's Go messages and Connect stubs from
+# proto/ into internal/api/docketv1. Needs protoc, protoc-gen-go, and
+# protoc-gen-connect-go on PATH; the output is committed, so `go build` needs
+# none of them. The M options place the generated package under internal/api,
+# overriding the go_package the .proto file declares.
+API_MODULE := github.com/ALT-F4-LLC/docket/internal/api
+API_GO_PKG := Mdocket/v1/docket.proto=$(API_MODULE)/docketv1
+
+proto:
+	protoc --proto_path=proto \
+		--go_out=internal/api --go_opt=module=$(API_MODULE) --go_opt=$(API_GO_PKG) \
+		--connect-go_out=internal/api --connect-go_opt=module=$(API_MODULE) --connect-go_opt=$(API_GO_PKG) \
+		$(shell find proto -name '*.proto')
 
 demo: bin
 	@command -v vhs >/dev/null 2>&1 || { echo "vhs is required: brew install vhs"; exit 1; }
