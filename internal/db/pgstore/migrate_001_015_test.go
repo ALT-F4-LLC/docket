@@ -47,18 +47,22 @@ var jsonColumns = []string{
 	"workflows.parsed",
 }
 
+// schemaColumn is one column of a schema fixture or of information_schema.
+// Nullable is false for a NOT NULL column and for a primary-key column, which
+// PostgreSQL makes NOT NULL and SQLite enforces as such only for its rowid.
 type schemaColumn struct {
-	Table  string `json:"table"`
-	Column string `json:"column"`
-	Type   string `json:"type"`
+	Table    string `json:"table"`
+	Column   string `json:"column"`
+	Type     string `json:"type"`
+	Nullable bool   `json:"nullable"`
 }
 
 func TestMigrateV15SchemaParity(t *testing.T) {
 	ctx := context.Background()
 	db := emptyTestSchema(t)
 
-	if err := Migrate(ctx, db); err != nil {
-		t.Fatalf("Migrate on an empty database: %v", err)
+	if err := applyMigrations(ctx, db, 0, 15); err != nil {
+		t.Fatalf("migrating an empty database to version 15: %v", err)
 	}
 	assertSchemaVersion(t, db, 15)
 
@@ -330,7 +334,7 @@ func expectedColumns(t *testing.T, fixturePath string) []schemaColumn {
 			pgType = "jsonb"
 			delete(unmatchedJSON, key)
 		}
-		want = append(want, schemaColumn{Table: c.Table, Column: c.Column, Type: pgType})
+		want = append(want, schemaColumn{Table: c.Table, Column: c.Column, Type: pgType, Nullable: c.Nullable})
 	}
 	if len(unmatchedJSON) > 0 {
 		t.Fatalf("jsonColumns names columns %s lacks: %v", fixturePath, unmatchedJSON)
@@ -341,7 +345,7 @@ func expectedColumns(t *testing.T, fixturePath string) []schemaColumn {
 
 func readColumns(t *testing.T, db *sql.DB) []schemaColumn {
 	t.Helper()
-	rows, err := db.Query(`SELECT c.table_name, c.column_name, c.data_type
+	rows, err := db.Query(`SELECT c.table_name, c.column_name, c.data_type, c.is_nullable = 'YES'
 		FROM information_schema.columns c
 		JOIN information_schema.tables tb
 		  ON tb.table_schema = c.table_schema AND tb.table_name = c.table_name
@@ -353,7 +357,7 @@ func readColumns(t *testing.T, db *sql.DB) []schemaColumn {
 	var cols []schemaColumn
 	for rows.Next() {
 		var c schemaColumn
-		if err := rows.Scan(&c.Table, &c.Column, &c.Type); err != nil {
+		if err := rows.Scan(&c.Table, &c.Column, &c.Type, &c.Nullable); err != nil {
 			t.Fatal(err)
 		}
 		cols = append(cols, c)
@@ -441,12 +445,12 @@ func columnDiff(want, got []schemaColumn) string {
 	var b strings.Builder
 	for _, c := range want {
 		if !slices.Contains(got, c) {
-			fmt.Fprintf(&b, "  missing %s.%s %s\n", c.Table, c.Column, c.Type)
+			fmt.Fprintf(&b, "  missing %s.%s %s nullable=%t\n", c.Table, c.Column, c.Type, c.Nullable)
 		}
 	}
 	for _, c := range got {
 		if !slices.Contains(want, c) {
-			fmt.Fprintf(&b, "  extra   %s.%s %s\n", c.Table, c.Column, c.Type)
+			fmt.Fprintf(&b, "  extra   %s.%s %s nullable=%t\n", c.Table, c.Column, c.Type, c.Nullable)
 		}
 	}
 	return b.String()
