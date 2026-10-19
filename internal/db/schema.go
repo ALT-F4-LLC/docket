@@ -168,6 +168,16 @@ func SchemaVersion(db *sql.DB) (int, error) {
 	return v, nil
 }
 
+// LatestSchemaVersion returns the highest version the migrations map can
+// migrate a SQLite database to.
+func LatestSchemaVersion() int {
+	latest := 0
+	for v := range migrations {
+		latest = max(latest, v)
+	}
+	return latest
+}
+
 // migrations is a list of migration functions keyed by the version they migrate TO.
 // For example, migrations[2] migrates from version 1 to version 2.
 var migrations = map[int]func(tx *sql.Tx) error{
