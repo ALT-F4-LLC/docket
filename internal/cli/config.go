@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -23,6 +24,9 @@ type configInfo struct {
 	StoreSource   string `json:"store_source"`
 	ExecRoot      string `json:"exec_root"`
 	Identity      string `json:"identity"`
+	// PostgresDSN is the redacted DSN; the raw value never enters configInfo.
+	PostgresDSN          string `json:"postgres_dsn"`
+	PostgresPasswordFile string `json:"postgres_password_file"`
 }
 
 var configCmd = &cobra.Command{
@@ -38,6 +42,7 @@ func runConfig(cmd *cobra.Command, args []string, w *output.Writer) error {
 	cfg := getCfg(cmd)
 
 	docketPathEnv := os.Getenv("DOCKET_PATH")
+	postgres := config.PostgresFromEnv()
 
 	exists, err := cfg.Exists()
 	if err != nil {
@@ -57,6 +62,9 @@ func runConfig(cmd *cobra.Command, args []string, w *output.Writer) error {
 			StoreSource:   string(cfg.Source),
 			ExecRoot:      cfg.ExecRoot,
 			Identity:      cfg.Identity,
+
+			PostgresDSN:          postgres.DSN.Redacted(),
+			PostgresPasswordFile: postgres.PasswordFile,
 		}
 
 		w.Success(info, formatConfigHuman(info, true))
@@ -91,6 +99,9 @@ func runConfig(cmd *cobra.Command, args []string, w *output.Writer) error {
 		StoreSource:   string(cfg.Source),
 		ExecRoot:      cfg.ExecRoot,
 		Identity:      cfg.Identity,
+
+		PostgresDSN:          postgres.DSN.Redacted(),
+		PostgresPasswordFile: postgres.PasswordFile,
 	}
 
 	w.Success(info, formatConfigHuman(info, false))
@@ -154,6 +165,8 @@ func formatConfigHuman(info configInfo, notFound bool) string {
 	lines += fmt.Sprintf("  %s   %s\n", keyStyle.Render("Store source:"), valStyle.Render(info.StoreSource))
 	lines += fmt.Sprintf("  %s      %s\n", keyStyle.Render("Exec root:"), valStyle.Render(info.ExecRoot))
 	lines += fmt.Sprintf("  %s       %s\n", keyStyle.Render("Project:"), valStyle.Render(info.Identity))
+	lines += fmt.Sprintf("  %s   %s\n", keyStyle.Render("Postgres DSN:"), valStyle.Render(formatEnvValue(info.PostgresDSN)))
+	lines += fmt.Sprintf("  %s  %s\n", keyStyle.Render("Password file:"), valStyle.Render(formatEnvValue(info.PostgresPasswordFile)))
 
 	envVal := formatEnvValue(info.DocketPathEnv)
 	lines += fmt.Sprintf("  %s    %s", keyStyle.Render("DOCKET_PATH:"), valStyle.Render(envVal))
@@ -176,6 +189,8 @@ func formatConfigPlain(info configInfo, notFound bool) string {
 	lines += fmt.Sprintf("Store source:    %s\n", info.StoreSource)
 	lines += fmt.Sprintf("Exec root:       %s\n", info.ExecRoot)
 	lines += fmt.Sprintf("Project:         %s\n", info.Identity)
+	lines += fmt.Sprintf("Postgres DSN:    %s\n", formatEnvValue(info.PostgresDSN))
+	lines += fmt.Sprintf("Password file:   %s\n", formatEnvValue(info.PostgresPasswordFile))
 	lines += fmt.Sprintf("DOCKET_PATH:     %s", formatEnvValue(info.DocketPathEnv))
 
 	return lines
