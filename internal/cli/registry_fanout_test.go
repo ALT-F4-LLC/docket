@@ -109,6 +109,7 @@ func registerAcross(
 ) (registryFanoutReport, error) {
 	t.Helper()
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runWorkflowRegister(
 		fanoutCmd(conn, project, all), []string{writeWorkflowFile(t, src)}, w)
 	return fanoutReportOf(t, buf.Bytes()), err
@@ -285,6 +286,7 @@ func TestWorkflowDeprecateAllProjectsRetiresEverywhere(t *testing.T) {
 	}
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runWorkflowDeprecate(fanoutCmd(conn, "", true), []string{"release@7"}, w)
 	testsupport.Must(t, err, "deprecate --all-projects: %v", err)
 
@@ -317,6 +319,7 @@ func TestWorkflowDeprecateAllProjectsReportsMixedOutcomes(t *testing.T) {
 	testsupport.Must(t, err, "pre-retiring in one project: %v", err)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runWorkflowDeprecate(fanoutCmd(conn, "", true), []string{"release@7"}, w)
 	if err == nil {
 		t.Fatal("a sweep meeting two refusals exited 0")
@@ -362,6 +365,7 @@ func TestWorkflowRestoreAllProjectsKeepsTheIdempotencyAsymmetry(t *testing.T) {
 	testsupport.Must(t, cmd.Flags().Set("restore", "true"), "setting --restore")
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	// The third project never registered it, so the sweep still exits non-zero.
 	if err := runWorkflowDeprecate(cmd, []string{"release@7"}, w); err == nil {
 		t.Fatal("a restore over a project with no such row exited 0")
@@ -396,6 +400,7 @@ func TestSchemaRegisterAllProjectsLandsInEveryRegistry(t *testing.T) {
 	testsupport.Must(t, err, "seeding the conflicting schema: %v", err)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runSchemaRegister(fanoutCmd(conn, "", true),
 		[]string{"findings@1", writeSchema(t, findingsSchema)}, w)
 	if err == nil {
@@ -427,6 +432,7 @@ func TestRegistryFanoutRefusesBothFlags(t *testing.T) {
 	threeProjects(t, conn)
 
 	w, _ := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runWorkflowRegister(fanoutCmd(conn, "two.git", true),
 		[]string{writeWorkflowFile(t, minimalWorkflow)}, w)
 	if err == nil {
@@ -445,6 +451,7 @@ func TestRegistryFanoutRefusesAnUnknownProject(t *testing.T) {
 	threeProjects(t, conn)
 
 	w, _ := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runWorkflowRegister(fanoutCmd(conn, "no-such-repo", false),
 		[]string{writeWorkflowFile(t, minimalWorkflow)}, w)
 	if err == nil {
@@ -467,6 +474,7 @@ func TestRegistryWritesWithoutFlagsKeepTheirPayload(t *testing.T) {
 	conn := newTestDB(t)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	testsupport.Must(t, runWorkflowRegister(fanoutCmd(conn, "", false),
 		[]string{writeWorkflowFile(t, minimalWorkflow)}, w), "plain register")
 

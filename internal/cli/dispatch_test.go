@@ -48,6 +48,7 @@ func TestDispatchVerifyCLIEqualExitsClean(t *testing.T) {
 	testsupport.Must(t, err, "dispatch open: %v", err)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runDispatchVerify(dispatchCmdWithDB(conn, runRef), w)
 	testsupport.Must(t, err, "dispatch verify: %v", err)
 
@@ -87,6 +88,7 @@ func TestDispatchVerifyCLIConflictRendersRowsAndExitCode(t *testing.T) {
 	testsupport.Must(t, err, "claim: %v", err)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runDispatchVerify(dispatchCmdWithDB(conn, runRef), w)
 	if err == nil {
 		t.Fatal("a claimed manifest row verified clean")
@@ -135,11 +137,15 @@ func backfillCmdWithDB(conn *sql.DB, runRef string) *cobra.Command {
 }
 
 // stderrWriter is bufWriter with the warning channel visible: DKT-993's whole
-// subject is what reaches stderr, and bufWriter discards it.
+// subject is what reaches stderr, and bufWriter discards it. JSON mode renders
+// the v2 envelope.
 func stderrWriter(jsonMode bool) (*output.Writer, *bytes.Buffer, *bytes.Buffer) {
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	return &output.Writer{JSONMode: jsonMode, Stdout: stdout, Stderr: stderr},
-		stdout, stderr
+	w := &output.Writer{JSONMode: jsonMode, Stdout: stdout, Stderr: stderr}
+	if jsonMode {
+		w.JSONVersion = output.JSONV2
+	}
+	return w, stdout, stderr
 }
 
 // pendingStepID returns a step of the run that nothing has ever claimed —

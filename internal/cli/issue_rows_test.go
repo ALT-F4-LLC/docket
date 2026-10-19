@@ -199,6 +199,7 @@ func TestIssueListJSON_IsSummaryRows(t *testing.T) {
 	cmd := listCmdWithBody(conn, false)
 	setFlags(t, cmd, map[string]string{"type": "feature", "status": "todo", "sort": "id:asc"})
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runIssueList(cmd, nil, w); err != nil {
 		t.Fatalf("runIssueList: %v", err)
 	}
@@ -209,8 +210,8 @@ func TestIssueListJSON_IsSummaryRows(t *testing.T) {
 
 	var env struct {
 		Data struct {
-			Issues []map[string]json.RawMessage `json:"issues"`
-			Total  int                          `json:"total"`
+			Items []map[string]json.RawMessage `json:"items"`
+			Total int                          `json:"total"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
@@ -219,7 +220,7 @@ func TestIssueListJSON_IsSummaryRows(t *testing.T) {
 	if env.Data.Total != 11 {
 		t.Errorf("total = %d, want 11", env.Data.Total)
 	}
-	assertSummaryRows(t, env.Data.Issues, descriptions, 11)
+	assertSummaryRows(t, env.Data.Items, descriptions, 11)
 
 	// The description is absent, not emptied: no row may smuggle it back.
 	if strings.Contains(buf.String(), "the conductor dispatched the wave") {
@@ -237,42 +238,43 @@ func TestIssueListJSON_WithBodyRestoresDescriptions(t *testing.T) {
 	cmd := listCmdWithBody(conn, true)
 	setFlags(t, cmd, map[string]string{"type": "feature", "status": "todo", "sort": "id:asc"})
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runIssueList(cmd, nil, w); err != nil {
 		t.Fatalf("runIssueList --with-body: %v", err)
 	}
 
 	var env struct {
 		Data struct {
-			Issues []map[string]json.RawMessage `json:"issues"`
+			Items []map[string]json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	assertFullRows(t, env.Data.Issues, descriptions, 11)
+	assertFullRows(t, env.Data.Items, descriptions, 11)
 	if buf.Len() < 4096 {
 		t.Errorf("--with-body output = %d bytes; the descriptions did not come back", buf.Len())
 	}
 
-	// The full row is model.Issue's own marshaler, byte for byte: what this
-	// verb printed by default before DKT-1053.
+	// The full row is model.VersionedIssue's own marshaler, byte for byte: the
+	// whole issue plus its CAS version, not a summary projection.
 	issues, _, err := db.ListIssues(conn, db.ListOptions{
 		ProjectID: db.DefaultProjectID, Types: []string{"feature"},
 		Statuses: []string{"todo"}, Sort: "id", SortDir: "asc", Limit: 50,
 	})
 	testsupport.Must(t, err, "ListIssues: %v", err)
 	testsupport.Must(t, db.HydrateDocs(conn, issues), "HydrateDocs: %v", err)
-	want, err := json.Marshal(issues)
+	want, err := json.Marshal(model.WithVersion(issues))
 	testsupport.Must(t, err, "Marshal: %v", err)
 	var got struct {
 		Data struct {
-			Issues json.RawMessage `json:"issues"`
+			Items json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &got), "unmarshal: %v", nil)
-	if !bytes.Equal(bytes.TrimSpace(got.Data.Issues), want) {
-		t.Errorf("--with-body rows are not model.Issue's v1 marshaling:\n got %s\nwant %s",
-			got.Data.Issues, want)
+	if !bytes.Equal(bytes.TrimSpace(got.Data.Items), want) {
+		t.Errorf("--with-body rows are not model.VersionedIssue's marshaling:\n got %s\nwant %s",
+			got.Data.Items, want)
 	}
 }
 
@@ -296,25 +298,26 @@ func TestIssueListJSON_SummaryRowKeepsConditionalKeys(t *testing.T) {
 
 	cmd := listCmdWithBody(conn, false)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runIssueList(cmd, nil, w); err != nil {
 		t.Fatalf("runIssueList: %v", err)
 	}
 
 	var env struct {
 		Data struct {
-			Issues []struct {
+			Items []struct {
 				ID       string          `json:"id"`
 				ParentID *string         `json:"parent_id"`
 				Labels   []string        `json:"labels"`
 				Scope    json.RawMessage `json:"scope"`
-			} `json:"issues"`
+			} `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
 	var found bool
-	for _, row := range env.Data.Issues {
+	for _, row := range env.Data.Items {
 		switch row.ID {
 		case model.FormatID(child):
 			found = true
@@ -349,19 +352,20 @@ func TestIssueListJSON_EmptyIsAnArray(t *testing.T) {
 	for _, withBody := range []bool{false, true} {
 		cmd := listCmdWithBody(conn, withBody)
 		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
 		if err := runIssueList(cmd, nil, w); err != nil {
 			t.Fatalf("runIssueList (with-body=%v): %v", withBody, err)
 		}
 		var env struct {
 			Data struct {
-				Issues json.RawMessage `json:"issues"`
+				Items json.RawMessage `json:"items"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 			t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 		}
-		if got := string(env.Data.Issues); got != "[]" {
-			t.Errorf("issues (with-body=%v) = %s, want []", withBody, got)
+		if got := string(env.Data.Items); got != "[]" {
+			t.Errorf("items (with-body=%v) = %s, want []", withBody, got)
 		}
 	}
 }
@@ -433,22 +437,23 @@ func TestNextJSON_IsSummaryRows(t *testing.T) {
 		cmd.Flags().Bool("with-body", withBody, "")
 		setFlags(t, cmd, map[string]string{"type": "feature"})
 		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
 		if err := runNext(cmd, nil, w); err != nil {
 			t.Fatalf("runNext (with-body=%v): %v", withBody, err)
 		}
 		var env struct {
 			Data struct {
-				Issues []map[string]json.RawMessage `json:"issues"`
+				Items []map[string]json.RawMessage `json:"items"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 			t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 		}
 		if withBody {
-			assertFullRows(t, env.Data.Issues, descriptions, 11)
+			assertFullRows(t, env.Data.Items, descriptions, 11)
 			continue
 		}
-		assertSummaryRows(t, env.Data.Issues, descriptions, 11)
+		assertSummaryRows(t, env.Data.Items, descriptions, 11)
 		if buf.Len() >= 4096 {
 			t.Errorf("next -T feature --json = %d bytes, want < 4096", buf.Len())
 		}
@@ -466,6 +471,7 @@ func TestPlanJSON_IsSummaryRows(t *testing.T) {
 		cmd.Flags().Bool("with-body", withBody, "")
 		setFlags(t, cmd, map[string]string{"type": "feature"})
 		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
 		if err := runPlan(cmd, nil, w); err != nil {
 			t.Fatalf("runPlan (with-body=%v): %v", withBody, err)
 		}
@@ -509,6 +515,7 @@ func TestBoardJSON_IsSummaryRows(t *testing.T) {
 		cmd := boardCmdWithDB(conn, withBody)
 		setFlags(t, cmd, map[string]string{"priority": "high"})
 		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
 		if err := runBoard(cmd, nil, w); err != nil {
 			t.Fatalf("runBoard (with-body=%v): %v", withBody, err)
 		}
