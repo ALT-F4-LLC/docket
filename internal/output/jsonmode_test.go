@@ -10,7 +10,8 @@ import (
 
 // TestParseJSONMode covers the full accepted-value table. The boolean
 // spellings matter: --json was a Bool flag before v2, so --json=true and
-// --json=false parsed successfully then and must keep doing so.
+// --json=false parsed successfully then and must keep doing so. The v1
+// dialect is retired and rejected.
 func TestParseJSONMode(t *testing.T) {
 	tests := []struct {
 		raw     string
@@ -18,9 +19,9 @@ func TestParseJSONMode(t *testing.T) {
 		wantErr bool
 	}{
 		{"", JSONNone, false},
-		{"v1", JSONV1, false},
-		{"true", JSONV1, false},
-		{"1", JSONV1, false},
+		{"v1", JSONNone, true},
+		{"true", JSONV2, false},
+		{"1", JSONV2, false},
 		{"v2", JSONV2, false},
 		{"false", JSONNone, false},
 		{"0", JSONNone, false},
@@ -39,34 +40,6 @@ func TestParseJSONMode(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("ParseJSONMode(%q) = %v, want %v", tt.raw, got, tt.want)
 		}
-	}
-}
-
-// TestBareJSONIsByteIdenticalToV1 is the compatibility guard for the most
-// compat-sensitive edit in the program: converting --json from Bool to String.
-// A bare --json (NoOptDefVal "v1") must produce exactly what the Bool flag
-// produced.
-func TestBareJSONIsByteIdenticalToV1(t *testing.T) {
-	data := map[string]any{"key": "val", "n": 3}
-
-	// What the Bool-era flag produced: New(true, false) -> v1 envelope.
-	var legacy bytes.Buffer
-	legacyWriter := &Writer{JSONMode: true, Stdout: &legacy, Stderr: &bytes.Buffer{}}
-	legacyWriter.Success(data, "done")
-
-	// What a bare --json produces now.
-	version, err := ParseJSONMode("v1")
-	testsupport.Must(t, err, "ParseJSONMode(v1): %v", err)
-	var current bytes.Buffer
-	currentWriter := &Writer{
-		JSONMode: true, JSONVersion: version,
-		Stdout: &current, Stderr: &bytes.Buffer{},
-	}
-	currentWriter.Success(data, "done")
-
-	if legacy.String() != current.String() {
-		t.Errorf("bare --json output drifted from v1:\n legacy = %q\ncurrent = %q",
-			legacy.String(), current.String())
 	}
 }
 

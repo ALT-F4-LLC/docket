@@ -11,6 +11,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func listCmdWithDB(conn *sql.DB) *cobra.Command {
@@ -266,6 +267,81 @@ func assertErrCode(t *testing.T, err error, want output.ErrorCode) {
 	}
 	if ce.Code != want {
 		t.Errorf("error code = %v, want %v (%v)", ce.Code, want, err)
+	}
+}
+
+// runIssueListThroughRoot drives `docket issue list <jsonArg>` through the
+// real root command, so the --json flag's registration and parsing are what
+// pick the envelope. Cobra keeps flag values across Execute calls, so every
+// changed flag goes back to its default afterwards.
+func runIssueListThroughRoot(t *testing.T, jsonArg string) (string, error) {
+	t.Helper()
+	rootCmd.SetArgs([]string{"issue", "list", jsonArg})
+	defer func() {
+		rootCmd.SetArgs(nil)
+		reset := func(f *pflag.Flag) {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+		listCmd.Flags().Visit(reset)
+		rootCmd.PersistentFlags().Visit(reset)
+	}()
+	stdout := captureStdout(t)
+	err := rootCmd.Execute()
+	return stdout(), err
+}
+
+// TestIssueListBareJSONSelectsV2 pins the default dialect: bare --json, and
+// the Bool-era spellings --json=true and --json=1, all emit the v2 envelope.
+func TestIssueListBareJSONSelectsV2(t *testing.T) {
+	for _, arg := range []string{"--json", "--json=true", "--json=1"} {
+		t.Run(arg, func(t *testing.T) {
+			newVoteCreateStore(t)
+
+			out, err := runIssueListThroughRoot(t, arg)
+			testsupport.Must(t, err, "issue list %s: %v", arg, err)
+
+			var env struct {
+				Data map[string]json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(out), &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v\n%s", err, out)
+			}
+			var items []json.RawMessage
+			if err := json.Unmarshal(env.Data["items"], &items); err != nil || items == nil {
+				t.Errorf(".data.items is not an array (err %v):\n%s", err, out)
+			}
+			if got := string(env.Data["total"]); got != "0" {
+				t.Errorf(".data.total = %q, want 0:\n%s", got, out)
+			}
+		})
+	}
+}
+
+// TestIssueListJSONV1IsRejected: the v1 dialect is gone, and the refusal
+// points at the one dialect that remains.
+func TestIssueListJSONV1IsRejected(t *testing.T) {
+	newVoteCreateStore(t)
+
+	out, err := runIssueListThroughRoot(t, "--json=v1")
+	if err == nil {
+		t.Fatalf("--json=v1 succeeded; want a refusal:\n%s", out)
+	}
+	ce, ok := err.(*CmdError)
+	if !ok {
+		t.Fatalf("error is %T, want *CmdError: %v", err, err)
+	}
+	if code := output.ExitCodeForError(ce.Code); code == 0 {
+		t.Errorf("exit code = 0, want non-zero (%v)", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "v2") {
+		t.Errorf("refusal does not name v2: %q", msg)
+	}
+	for _, other := range []string{"v1", "v3"} {
+		if strings.Contains(msg, other) {
+			t.Errorf("refusal names dialect %q: %q", other, msg)
+		}
 	}
 }
 

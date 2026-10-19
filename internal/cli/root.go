@@ -301,16 +301,14 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	// --json is a string flag with NoOptDefVal so a bare --json still behaves
-	// like the Bool flag it used to be: it takes the value "v1" and emits the
-	// byte-identical v1 envelope. --json=v2 selects the uniform envelope.
-	// See internal/output.ParseJSONMode for the accepted values.
+	// --json is a string flag with NoOptDefVal so a bare --json still parses
+	// like the Bool flag it used to be: it takes the value "v2" and emits the
+	// uniform envelope. See internal/output.ParseJSONMode for the accepted values.
 	rootCmd.PersistentFlags().String("json", "", "Output in JSON format (--json, or --json=v2)")
-	rootCmd.PersistentFlags().Lookup("json").NoOptDefVal = "v1"
+	rootCmd.PersistentFlags().Lookup("json").NoOptDefVal = "v2"
 	// --format is the conventional spelling operators reach for first, and
-	// guessing it cost a retry against `unknown flag`. It selects v2:
-	// a caller writing --format json today wants the current envelope, and v1
-	// stays reachable by its own explicit spelling for the scripts frozen on it.
+	// guessing it cost a retry against `unknown flag`. It selects v2, the
+	// same envelope as --json.
 	rootCmd.PersistentFlags().String(
 		"format", "", "Output format: json (alias for --json=v2)")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "Suppress non-essential output")
@@ -343,9 +341,8 @@ func jsonVersionOf(cmd *cobra.Command) output.JSONVersion {
 	if err != nil {
 		return output.JSONNone
 	}
-	// --format json is an alias for --json=v2. An explicit --json
-	// wins, so a caller who spells out --json=v1 --format=json gets v1 rather
-	// than having the alias silently upgrade their envelope.
+	// --format json is an alias for --json=v2. An explicit --json=false
+	// wins, so the alias never overrides a caller who turned JSON off.
 	if version == output.JSONNone && formatIsJSON(cmd) {
 		return output.JSONV2
 	}
