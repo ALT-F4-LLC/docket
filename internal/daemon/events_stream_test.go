@@ -46,6 +46,9 @@ func appendEvents(t *testing.T, conn *sql.DB, n int) []int64 {
 	return seqs
 }
 
+// The engine's broadcast is the notifier a served stream waits on.
+var _ AppendNotifier = (*engine.EventBroadcast)(nil)
+
 // doorbell is a faithful stand-in for the in-process broadcast: Subscribe
 // hands out a one-slot wake channel, and ring wakes every subscriber without
 // blocking. subscribed receives once per Subscribe, so a test can wait for a
