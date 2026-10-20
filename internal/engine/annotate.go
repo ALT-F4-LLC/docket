@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // Post-completion annotation (DKT-35).
@@ -31,7 +31,7 @@ import (
 // metadata lands with its record (`step complete --metadata`), under its
 // holder's token, and a side channel into an in-flight record would bypass
 // exactly that authorization.
-func AnnotateStep(conn *sql.DB, stepID int, metadata string, nowMS int64) (*db.Step, error) {
+func AnnotateStep(conn *sql.DB, stepID int, metadata string, nowMS int64) (*store.Step, error) {
 	if metadata == "" {
 		return nil, validationErr("--metadata is required; an annotation with no content records nothing")
 	}
@@ -42,14 +42,15 @@ func AnnotateStep(conn *sql.DB, stepID int, metadata string, nowMS int64) (*db.S
 		return nil, err
 	}
 
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	st := store.StoreOn(conn)
+	step, err := st.GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !db.StepTerminal(step.Status) {
+	if !store.StepTerminal(step.Status) {
 		return nil, conflictErr(
 			"step %s is %s; annotate applies to a finished step — a live step's "+
 				"metadata lands with its record", step.Instance, step.Status)
@@ -66,7 +67,7 @@ func AnnotateStep(conn *sql.DB, stepID int, metadata string, nowMS int64) (*db.S
 	}
 	defer tx.Rollback()
 
-	if err := db.SetStepMetadataTx(tx, step.ID, merged, nowMS); err != nil {
+	if err := store.TxOn(tx).SetStepMetadataTx(step.ID, merged, nowMS); err != nil {
 		return nil, err
 	}
 	// The event carries the annotation VERBATIM: the record of what was added
@@ -82,7 +83,7 @@ func AnnotateStep(conn *sql.DB, stepID int, metadata string, nowMS int64) (*db.S
 		return nil, fmt.Errorf("annotating %s: %w", step.Instance, err)
 	}
 
-	updated, err := db.GetStep(conn, stepID)
+	updated, err := st.GetStep(stepID)
 	if err != nil {
 		return nil, err
 	}
