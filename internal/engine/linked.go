@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -199,7 +199,7 @@ func latestArtifactOfKind(tx *sql.Tx, issueID int, kind string) (int, error) {
 		   JOIN steps s ON s.id = a.step_id
 		  WHERE s.issue_id = ? AND a.kind = ? AND s.status IN (?, ?)
 		  ORDER BY a.id DESC LIMIT 1`,
-		issueID, kind, db.StepDone, db.StepSuperseded).Scan(&id)
+		issueID, kind, store.StepDone, store.StepSuperseded).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -235,7 +235,7 @@ func formatIDList(ids []int) string {
 // resolving to nothing would silently reopen the unenforced-citation gap this
 // form exists to close.
 func resolveLinkedPinned(
-	tx *sql.Tx, step *db.Step, linked map[string][]int, declared string,
+	tx *sql.Tx, step *store.Step, linked map[string][]int, declared string,
 ) ([]ContextInput, error) {
 	ids, ok := linked[linkedSuffix(declared)]
 	if !ok {
@@ -286,17 +286,18 @@ func resolveLinkedPinned(
 // ResolveInputArtifacts' reading, sharing the pinned-id lookup so the two
 // resolvers cannot disagree about which artifacts a declaration binds.
 func linkedArtifacts(
-	tx *sql.Tx, step *db.Step, linked map[string][]int, declared string,
-) ([]*db.Artifact, error) {
+	tx *sql.Tx, step *store.Step, linked map[string][]int, declared string,
+) ([]*store.Artifact, error) {
 	ids, ok := linked[linkedSuffix(declared)]
 	if !ok {
 		return nil, fmt.Errorf(
 			"step %s: input %q was not pinned at activation — the issue "+
 				"snapshot holds no resolution for it", step.Instance, declared)
 	}
-	out := make([]*db.Artifact, 0, len(ids))
+	stx := store.TxOn(tx)
+	out := make([]*store.Artifact, 0, len(ids))
 	for _, id := range ids {
-		a, err := db.GetArtifactTx(tx, id)
+		a, err := stx.GetArtifactTx(id)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"reading pinned artifact %d for %s: %w", id, step.Instance, err)

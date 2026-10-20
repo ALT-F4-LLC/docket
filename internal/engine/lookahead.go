@@ -3,8 +3,8 @@ package engine
 import (
 	"sort"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -52,7 +52,7 @@ import (
 // lifecycles the moment a recording readies them (record.go's driver), so a
 // mid-wave gate opens its proposal, a quorum cast routes it, and a mid-chain
 // action runs engine-side — all without a `next` in between. A staged row's
-// rendered status is db.StepStaged, never `ready`: the wire does not lie
+// rendered status is store.StepStaged, never `ready`: the wire does not lie
 // about claimability, and a dispatcher that filters on `ready` simply ignores
 // the closure and behaves exactly as before.
 //
@@ -78,13 +78,13 @@ import (
 
 // offerEntry is one offered step with its wave level.
 type offerEntry struct {
-	step *db.Step
+	step *store.Step
 	// stage is the wave level: a dispatcher must not start this row until
 	// every row of a lower stage in the same offer has completed. Stage 0 is
 	// the claimable-now cohort.
 	stage int
 	// staged reports the row is offered AHEAD of its own readiness — rendered
-	// db.StepStaged, not claimable until the lower stages record. False for
+	// store.StepStaged, not claimable until the lower stages record. False for
 	// every row ClaimablePrefix admitted, including loop-staged ready rows,
 	// which remain claimable at any moment exactly as before (stage.go's
 	// "core enforces nothing" contract is unchanged for them).
@@ -106,7 +106,7 @@ type offerEntry struct {
 // stage levels over the offer's own edges, then per-stage cohort packing.
 // `admitted` is ClaimablePrefix's output — the co-claimable stage-0-and-loop
 // cohort — and rides through unchanged in membership and claimability.
-func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
+func (s *Scheduler) lookaheadOffer(admitted []*store.Step) []offerEntry {
 	entries := make([]offerEntry, 0, len(admitted))
 	member := make(map[int]bool, len(admitted))
 	var cost float64
@@ -126,9 +126,9 @@ func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
 	// stage a bumped row lands in — is deterministic and fair the same way
 	// ClaimablePrefix's greed is: the oldest eligible row wins every tie.
 	if s.run != nil && s.run.Status == model.RunActive {
-		var candidates []*db.Step
+		var candidates []*store.Step
 		for _, step := range s.steps {
-			if step.Status != db.StepPending || member[step.ID] {
+			if step.Status != store.StepPending || member[step.ID] {
 				continue
 			}
 			// A human step never joins a later stage: the wave has no verb
@@ -329,7 +329,7 @@ func (s *Scheduler) lookaheadOffer(admitted []*db.Step) []offerEntry {
 // an `aggregate` action declaring `hold_spread`. The declaration's
 // PRESENCE is the test — whether it trips is knowable only from the payloads
 // at routing time, and conditional marks the possibility, not the outcome.
-func (s *Scheduler) holdCapable(step *db.Step) bool {
+func (s *Scheduler) holdCapable(step *store.Step) bool {
 	if step.Kind != workflow.ClassAction {
 		return false
 	}
@@ -349,7 +349,7 @@ func (s *Scheduler) holdCapable(step *db.Step) bool {
 // some step of its pinned definition routes to it by name (DKT-38). A
 // materialized step's minted name is never declared, so it answers false
 // without a special case.
-func (s *Scheduler) thresholdGated(step *db.Step) bool {
+func (s *Scheduler) thresholdGated(step *store.Step) bool {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return false
@@ -373,7 +373,7 @@ func (s *Scheduler) thresholdGated(step *db.Step) bool {
 // knowable only at join time, and the claim's own R3 re-check is the authority
 // if it is missed — the staged row simply never becomes claimable, which is
 // the ordinary failure path.
-func (s *Scheduler) stageableFrom(cand *db.Step, member map[int]bool) bool {
+func (s *Scheduler) stageableFrom(cand *store.Step, member map[int]bool) bool {
 	ok, cond := s.Ready(cand)
 	if ok {
 		return true
@@ -414,7 +414,7 @@ func (s *Scheduler) stageableFrom(cand *db.Step, member map[int]bool) bool {
 			return false
 		}
 		for _, pred := range sibs {
-			if db.StepTerminal(pred.Status) {
+			if store.StepTerminal(pred.Status) {
 				continue
 			}
 			if !member[pred.ID] || pred.Kind == workflow.TypeHuman {
@@ -497,7 +497,7 @@ func (s *Scheduler) dependencyFloor(e *offerEntry, entries []offerEntry, final m
 // STAGED entry that are themselves in the offer — the rows whose recordings
 // are what make the entry claimable. `stageOf` is consulted only for
 // membership, so Phase B and Phase C read one definition of "in the offer".
-func (s *Scheduler) offerPredecessors(step *db.Step, stageOf map[int]int) []*db.Step {
+func (s *Scheduler) offerPredecessors(step *store.Step, stageOf map[int]int) []*store.Step {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return nil
@@ -506,10 +506,10 @@ func (s *Scheduler) offerPredecessors(step *db.Step, stageOf map[int]int) []*db.
 	if spec == nil {
 		return nil
 	}
-	var out []*db.Step
+	var out []*store.Step
 	for _, predName := range spec.After {
 		for _, pred := range s.predecessorInstances(step, predName) {
-			if db.StepTerminal(pred.Status) {
+			if store.StepTerminal(pred.Status) {
 				continue
 			}
 			if _, in := stageOf[pred.ID]; in {
@@ -545,7 +545,7 @@ func (s *Scheduler) offerPredecessors(step *db.Step, stageOf map[int]int) []*db.
 // the caller's SCOPE WINS precedence applies within a stage as well as across
 // stages. A fit answers "" and 0.
 func (s *Scheduler) cohortFits(
-	step *db.Step, k int, classCount map[int]map[string]int, scopeHeld map[int]map[int][]string,
+	step *store.Step, k int, classCount map[int]map[string]int, scopeHeld map[int]map[int][]string,
 ) (string, int) {
 	if scope := s.foreignScope(step.IssueID); len(scope) > 0 && s.holdsTree(step) {
 		// Sorted, so a stage held by several intersecting issues names the same
@@ -574,7 +574,7 @@ func (s *Scheduler) cohortFits(
 // placements pack around it. Ready rows charge too: a staged row must not
 // share a stage-1 slot a loop-staged judge already occupies.
 func (s *Scheduler) chargeCohort(
-	step *db.Step, k int, classCount map[int]map[string]int, scopeHeld map[int]map[int][]string,
+	step *store.Step, k int, classCount map[int]map[string]int, scopeHeld map[int]map[int][]string,
 ) {
 	if classCount[k] == nil {
 		classCount[k] = map[string]int{}
@@ -598,7 +598,7 @@ func (s *Scheduler) chargeCohort(
 // sortsBefore is SortSteps' (priority, age, id) order as a pairwise predicate,
 // for sorts that interleave it with stage — one definition of the within-stage
 // order, shared with the slice sort SortSteps performs.
-func (s *Scheduler) sortsBefore(a, b *db.Step) bool {
+func (s *Scheduler) sortsBefore(a, b *store.Step) bool {
 	pa, pb := s.priorityOf(a), s.priorityOf(b)
 	if pa != pb {
 		return pa < pb
