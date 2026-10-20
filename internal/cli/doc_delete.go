@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -27,7 +27,7 @@ func newDocDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := getWriter(cmd)
-			conn := getDB(cmd)
+			st := store.StoreOn(getDB(cmd))
 
 			cascade, _ := cmd.Flags().GetBool("cascade")
 			force, _ := cmd.Flags().GetBool("force")
@@ -37,7 +37,7 @@ func newDocDeleteCmd() *cobra.Command {
 				return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
 			}
 
-			doc, err := db.GetDoc(conn, id)
+			doc, err := st.GetDoc(id)
 			if err != nil {
 				if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
 					return e
@@ -74,11 +74,11 @@ func newDocDeleteCmd() *cobra.Command {
 				}
 			}
 
-			if err := db.DeleteDoc(conn, id, cascade); err != nil {
+			if err := st.DeleteDoc(id, cascade); err != nil {
 				if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
 					return e
 				}
-				if errors.Is(err, db.ErrConflict) {
+				if errors.Is(err, store.ErrConflict) {
 					return cmdErr(err, output.ErrConflict)
 				}
 				return cmdErr(fmt.Errorf("deleting doc: %w", err), output.ErrGeneral)
