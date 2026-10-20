@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // Terminal transitions close what they orphan (DKT-262).
@@ -88,8 +88,9 @@ func reapAckRunOf(key string) (int, bool) {
 // closing them because a run happened to finish would be the engine disposing
 // of a question nobody asked it to hold.
 func closeRunProposalsTx(tx *sql.Tx, runID int, reason string) (int, error) {
-	keys, err := db.LookupIdempotencyKeysTx(
-		tx, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	stx := store.TxOn(tx)
+	keys, err := stx.LookupIdempotencyKeysTx(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
 	if err != nil {
 		return 0, err
 	}
@@ -100,7 +101,7 @@ func closeRunProposalsTx(tx *sql.Tx, runID int, reason string) (int, error) {
 	for _, id := range keys {
 		ids = append(ids, id)
 	}
-	return db.CloseOpenProposalsTx(tx, ids, reason)
+	return stx.CloseOpenProposalsTx(ids, reason)
 }
 
 // closeReapAckProposalTx closes the ballot an acknowledged reap was convened to
@@ -116,15 +117,16 @@ func closeRunProposalsTx(tx *sql.Tx, runID int, reason string) (int, error) {
 // acknowledged with no panel ever convened, so "no proposal under this key" is
 // the ordinary case rather than a problem to report.
 func closeReapAckProposalTx(tx *sql.Tx, runID int, seq int64) error {
-	id, found, err := db.LookupIdempotencyKeyTx(
-		tx, db.ScopeVoteCreate, ReapAckProposalKey(runID, seq))
+	stx := store.TxOn(tx)
+	id, found, err := stx.LookupIdempotencyKeyTx(
+		store.ScopeVoteCreate, ReapAckProposalKey(runID, seq))
 	if err != nil {
 		return err
 	}
 	if !found {
 		return nil
 	}
-	_, err = db.CloseOpenProposalsTx(tx, []int{id}, fmt.Sprintf(
+	_, err = stx.CloseOpenProposalsTx([]int{id}, fmt.Sprintf(
 		"the reap at seq %d was acknowledged directly by an operator, so this "+
 			"ballot's question was settled out of band; it was never decided",
 		seq))
@@ -143,15 +145,16 @@ func closeReapAckProposalTx(tx *sql.Tx, runID int, seq int64) error {
 func closeStepProposalTx(
 	tx *sql.Tx, runID, issueID int, instance, reason string,
 ) error {
-	id, found, err := db.LookupIdempotencyKeyTx(
-		tx, db.ScopeVoteCreate, voteIdempotencyKey(runID, issueID, instance))
+	stx := store.TxOn(tx)
+	id, found, err := stx.LookupIdempotencyKeyTx(
+		store.ScopeVoteCreate, voteIdempotencyKey(runID, issueID, instance))
 	if err != nil {
 		return err
 	}
 	if !found {
 		return nil
 	}
-	_, err = db.CloseOpenProposalsTx(tx, []int{id}, reason)
+	_, err = stx.CloseOpenProposalsTx([]int{id}, reason)
 	return err
 }
 

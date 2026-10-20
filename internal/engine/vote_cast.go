@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -17,7 +17,7 @@ import (
 // `weighting`, `recuse` — and activation pins them with `voters`
 // (workflow/vote_policy.go). This file is where the cast path READS them: it
 // resolves the proposal back to the pinned vote step, refuses a cast the step
-// excludes, and hands db.CastVoteWeighted the weighting the step chose.
+// excludes, and hands the store's CastVoteWeighted the weighting the step chose.
 //
 // The switches live on the step and not in engine config because `docket
 // config set` has no per-caller identity: a seat constrained by a rule could
@@ -42,7 +42,7 @@ import (
 // A refusal is a VALIDATION_ERROR, raised BEFORE the transaction opens, so a
 // refused cast writes no vote row. The db sentinels (ErrNotFound, ErrConflict)
 // come back unwrapped from the tally, as they always did.
-func CastVote(conn *sql.DB, vote *model.Vote) (*db.CastVoteResult, error) {
+func CastVote(conn *sql.DB, vote *model.Vote) (*store.CastVoteResult, error) {
 	// DKT-3290: a verdict that carries concerns carries its rationale. A seat
 	// whose summary file write was refused passed `--summary ""`, and the gate
 	// recorded an approve-with-concerns with nothing saying what concerned it.
@@ -60,7 +60,7 @@ func CastVote(conn *sql.DB, vote *model.Vote) (*db.CastVoteResult, error) {
 	if err := policy.authorize(vote.VoterName); err != nil {
 		return nil, err
 	}
-	result, err := db.CastVoteWeighted(conn, vote, policy.equalWeighting())
+	result, err := store.StoreOn(conn).CastVoteWeighted(vote, policy.equalWeighting())
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,8 @@ type castPolicy struct {
 // workflow; the workflow's stored `parsed` form names the step. Nothing is
 // re-parsed from TOML and nothing is read from engine config.
 func castPolicyOf(conn *sql.DB, proposalID int) (castPolicy, error) {
-	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, proposalID)
+	st := store.StoreOn(conn)
+	key, found, err := st.IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {
 		return castPolicy{}, fmt.Errorf("resolving the vote step of %s: %w",
 			model.FormatProposalID(proposalID), err)
@@ -119,12 +120,12 @@ func castPolicyOf(conn *sql.DB, proposalID int) (castPolicy, error) {
 		return unenforced, nil
 	}
 
-	steps, err := db.ListRunSteps(conn, runID)
+	steps, err := st.ListRunSteps(runID)
 	if err != nil {
 		return castPolicy{}, fmt.Errorf("reading the steps of %s for %s: %w",
 			model.FormatRunID(runID), model.FormatProposalID(proposalID), err)
 	}
-	var step *db.Step
+	var step *store.Step
 	for _, s := range steps {
 		if voteStepKeyOf(s) == want {
 			step = s
