@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The usage back-fill.
@@ -83,7 +83,7 @@ func (e *Engine) BackfillVoteUsage(
 			model.FormatProposalID(proposalID), err)
 	}
 	if proposalCount == 0 {
-		return notFoundErr(db.ErrNotFound, "proposal %s not found",
+		return notFoundErr(store.ErrNotFound, "proposal %s not found",
 			model.FormatProposalID(proposalID))
 	}
 
@@ -116,8 +116,9 @@ func (e *Engine) BackfillVoteUsage(
 		seats[r.Voter] = voteID
 	}
 
+	st := store.TxOn(tx)
 	for _, r := range rows {
-		if err := db.ValidateUnitName(r.Unit); err != nil {
+		if err := store.ValidateUnitName(r.Unit); err != nil {
 			return validationErr("voter %q: %s", r.Voter, err)
 		}
 		if math.IsNaN(r.Quantity) || math.IsInf(r.Quantity, 0) || r.Quantity < 0 {
@@ -125,9 +126,9 @@ func (e *Engine) BackfillVoteUsage(
 				"voter %q, unit %q: quantity must be a finite non-negative "+
 					"number, got %g", r.Voter, r.Unit, r.Quantity)
 		}
-		if err := db.InsertVoteUsageTx(
-			tx, seats[r.Voter], r.Unit, r.Quantity, source, nowMS); err != nil {
-			if errors.Is(err, db.ErrUsageAlreadyRecorded) {
+		if err := st.InsertVoteUsageTx(
+			seats[r.Voter], r.Unit, r.Quantity, source, nowMS); err != nil {
+			if errors.Is(err, store.ErrUsageAlreadyRecorded) {
 				return conflictErr(
 					"seat %q already has %q usage recorded on %s; a back-fill "+
 						"adds to the ledger and never overwrites it",
@@ -327,16 +328,17 @@ func (e *Engine) BackfillUsage(
 		return nil, fmt.Errorf("beginning the back-fill: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
 	// Every named step is resolved and checked against the run BEFORE anything
 	// is written, so a batch naming one wrong step refuses without having
 	// written the rows that preceded it in the list.
-	steps := make(map[int]*db.Step, len(rows))
+	steps := make(map[int]*store.Step, len(rows))
 	for _, r := range rows {
 		if _, seen := steps[r.Step]; seen {
 			continue
 		}
-		step, err := db.GetStepTx(tx, r.Step)
+		step, err := st.GetStepTx(r.Step)
 		if err != nil {
 			return nil, notFoundErr(err, "step %s not found",
 				model.FormatStepID(r.Step))
@@ -381,7 +383,7 @@ func (e *Engine) BackfillUsage(
 			return nil, err
 		}
 		step := steps[r.Step]
-		if db.StepTerminal(step.Status) || dropped[r.Step] {
+		if store.StepTerminal(step.Status) || dropped[r.Step] {
 			continue
 		}
 		dropped[r.Step] = true
@@ -398,7 +400,7 @@ func (e *Engine) BackfillUsage(
 				"default unit", model.FormatStepID(r.Step))
 		}
 		step := steps[r.Step]
-		if err := db.InsertUsageRowTx(tx, db.UsageRow{
+		if err := st.InsertUsageRowTx(store.UsageRow{
 			RunID:    runID,
 			StepID:   r.Step,
 			Attempt:  step.Attempt,
@@ -411,7 +413,7 @@ func (e *Engine) BackfillUsage(
 			// the claimant itself. It is phrased rather than passed through as
 			// raw SQLite text, because a refusal must name its way out:
 			// merging silently would hide a double-count of real spend.
-			if errors.Is(err, db.ErrUsageAlreadyRecorded) {
+			if errors.Is(err, store.ErrUsageAlreadyRecorded) {
 				// --on-duplicate=skip: this row is already in the ledger, so
 				// there is nothing to add and nothing to overwrite. The batch
 				// carries on and the skip is REPORTED, never silent — a
@@ -467,7 +469,7 @@ func (e *Engine) BackfillUsage(
 		}
 	}
 	for id, bag := range bags {
-		if err := db.SetStepMetadataTx(tx, id, bag, nowMS); err != nil {
+		if err := st.SetStepMetadataTx(id, bag, nowMS); err != nil {
 			return nil, err
 		}
 	}
@@ -475,7 +477,7 @@ func (e *Engine) BackfillUsage(
 	// The fast path D2's probe reads. Marked once per step rather than
 	// once per row.
 	for id := range steps {
-		if err := db.MarkStepUsageRecordedTx(tx, id); err != nil {
+		if err := st.MarkStepUsageRecordedTx(id); err != nil {
 			return nil, err
 		}
 	}
