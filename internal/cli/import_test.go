@@ -690,7 +690,7 @@ func runImportCmd(t *testing.T, conn *sql.DB, filePath string, jsonMode bool, re
 
 	args := []string{filePath}
 	if jsonMode {
-		// The real --json is a string flag with NoOptDefVal "v2" (root.go),
+		// The real --json is a string flag with NoOptDefVal "v1" (root.go),
 		// so a bare "--json" is legal there; this ad-hoc flag has no such
 		// default, and a bare "--json" would swallow the next argv token as
 		// its value instead.
