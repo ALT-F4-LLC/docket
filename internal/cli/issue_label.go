@@ -11,10 +11,10 @@ import (
 	"github.com/charmbracelet/lipgloss/table"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -56,17 +56,18 @@ var labelAddCmd = &cobra.Command{
 			}
 		}
 
-		if err := db.AddLabelsToIssue(conn, id, labelNames, color, author); err != nil {
+		st := store.StoreOn(conn)
+		if err := st.AddLabelsToIssue(id, labelNames, color, author); err != nil {
 			if e := notFound(err, fmt.Sprintf("issue %s", args[0])); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrLabelColorConflict) {
+			if errors.Is(err, store.ErrLabelColorConflict) {
 				return cmdErr(fmt.Errorf("label already exists with a different color"), output.ErrValidation)
 			}
 			return cmdErr(fmt.Errorf("adding labels: %w", err), output.ErrGeneral)
 		}
 
-		labels, err := db.GetIssueLabelObjects(conn, id)
+		labels, err := st.GetIssueLabelObjects(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
 		}
@@ -103,17 +104,18 @@ var labelRmCmd = &cobra.Command{
 			}
 		}
 
-		if err := db.RemoveLabelsFromIssue(conn, id, labelNames, author); err != nil {
+		st := store.StoreOn(conn)
+		if err := st.RemoveLabelsFromIssue(id, labelNames, author); err != nil {
 			if e := notFound(err, "issue or label"); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrNotAttached) {
+			if errors.Is(err, store.ErrNotAttached) {
 				return cmdErr(fmt.Errorf("label is not attached to %s", model.FormatID(id)), output.ErrValidation)
 			}
 			return cmdErr(fmt.Errorf("removing labels: %w", err), output.ErrGeneral)
 		}
 
-		labels, err := db.GetIssueLabelObjects(conn, id)
+		labels, err := st.GetIssueLabelObjects(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
 		}
@@ -131,7 +133,7 @@ var labelListCmd = &cobra.Command{
 		w := getWriter(cmd)
 		conn := getDB(cmd)
 
-		labels, err := db.ListAllLabels(conn, getProjectID(cmd))
+		labels, err := store.StoreOn(conn).ListAllLabels(getProjectID(cmd))
 		if err != nil {
 			return cmdErr(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
 		}
@@ -210,7 +212,8 @@ var labelDeleteCmd = &cobra.Command{
 		name := args[0]
 		force, _ := cmd.Flags().GetBool("force")
 
-		label, err := db.GetLabelByName(conn, getProjectID(cmd), name)
+		st := store.StoreOn(conn)
+		label, err := st.GetLabelByName(getProjectID(cmd), name)
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("label %q", name)); e != nil {
 				return e
@@ -253,7 +256,7 @@ var labelDeleteCmd = &cobra.Command{
 		}
 
 		author := config.DefaultAuthor()
-		affectedIDs, err := db.DeleteLabel(conn, label.ID, name, author)
+		affectedIDs, err := st.DeleteLabel(label.ID, name, author)
 		if err != nil {
 			return cmdErr(fmt.Errorf("deleting label: %w", err), output.ErrGeneral)
 		}

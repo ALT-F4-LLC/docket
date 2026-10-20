@@ -7,10 +7,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -37,12 +37,13 @@ var fileAddCmd = &cobra.Command{
 			return err
 		}
 
+		st := store.StoreOn(conn)
 		filePaths := args[1:]
-		if err := db.AttachFiles(conn, id, filePaths, config.DefaultAuthor()); err != nil {
+		if err := st.AttachFiles(id, filePaths, config.DefaultAuthor()); err != nil {
 			return cmdErr(fmt.Errorf("attaching files: %w", err), output.ErrGeneral)
 		}
 
-		files, err := db.GetIssueFiles(conn, id)
+		files, err := st.GetIssueFiles(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 		}
@@ -70,12 +71,13 @@ var fileRemoveCmd = &cobra.Command{
 			return err
 		}
 
+		st := store.StoreOn(conn)
 		filePaths := args[1:]
-		if err := db.DetachFiles(conn, id, filePaths, config.DefaultAuthor()); err != nil {
+		if err := st.DetachFiles(id, filePaths, config.DefaultAuthor()); err != nil {
 			return cmdErr(fmt.Errorf("removing files: %w", err), output.ErrGeneral)
 		}
 
-		files, err := db.GetIssueFiles(conn, id)
+		files, err := st.GetIssueFiles(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 		}
@@ -102,7 +104,7 @@ var fileListCmd = &cobra.Command{
 			return err
 		}
 
-		files, err := db.GetIssueFiles(conn, id)
+		files, err := store.StoreOn(conn).GetIssueFiles(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 		}

@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/tree"
 	"github.com/spf13/cobra"
@@ -68,7 +68,8 @@ func runIssueGraph(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	// Fetch all directional relations for graph traversal.
-	allRelations, err := db.GetAllDirectionalRelations(conn)
+	st := store.StoreOn(conn)
+	allRelations, err := st.GetAllDirectionalRelations()
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
 	}
@@ -96,7 +97,7 @@ func runIssueGraph(cmd *cobra.Command, args []string, w *output.Writer) error {
 	for nodeID := range visited {
 		visitedIDs = append(visitedIDs, nodeID)
 	}
-	issueMap, err := db.GetIssuesByIDs(conn, visitedIDs)
+	issueMap, err := st.GetIssuesByIDs(visitedIDs)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching issues: %w", err), output.ErrGeneral)
 	}

@@ -5,9 +5,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -58,7 +58,7 @@ which tells the holder to claim again rather than that it was never trusted.`,
 		}
 
 		label := fmt.Sprintf("issue %s", model.FormatID(id))
-		lease, err := db.HeartbeatIssue(conn, id, token, ttl.Milliseconds(), model.NowMS())
+		lease, err := store.StoreOn(conn).HeartbeatIssue(id, token, ttl.Milliseconds(), model.NowMS())
 		if err != nil {
 			if e := leaseError(err, label); e != nil {
 				return e
