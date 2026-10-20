@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -78,9 +78,9 @@ var docListCmd = &cobra.Command{
 }
 
 func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
-	types, _ := cmd.Flags().GetStringSlice("type")
+	types, _:= cmd.Flags().GetStringSlice("type")
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	author, _ := cmd.Flags().GetString("author")
 	sortFlag, _ := cmd.Flags().GetString("sort")
@@ -91,7 +91,7 @@ func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return err
 	}
 
-	opts := db.DocListOptions{
+	opts := store.DocListOptions{
 		ProjectID: getProjectID(cmd),
 		Types:     types,
 		Statuses:  statuses,
@@ -107,7 +107,7 @@ func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
-	summaries, total, err := db.ListDocsWithCounts(conn, opts)
+	summaries, total, err := st.ListDocsWithCounts(opts)
 	if err != nil {
 		return cmdErr(fmt.Errorf("listing docs: %w", err), output.ErrGeneral)
 	}
