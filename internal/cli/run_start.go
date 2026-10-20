@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -40,6 +40,7 @@ from that ("why didn't it stop?") is answered by a read verb.`,
 
 func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 	conn := getDB(cmd)
+	st := store.StoreOn(conn)
 
 	requestFile, _ := cmd.Flags().GetString("request-file")
 	budget, _ := cmd.Flags().GetFloat64("budget")
@@ -80,8 +81,8 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 		if err != nil {
 			return cmdErr(fmt.Errorf("invalid issue ID %q: %w", ref, err), output.ErrValidation)
 		}
-		issueProject, err := db.IssueProjectID(conn, id)
-		if errors.Is(err, db.ErrNotFound) {
+		issueProject, err := st.IssueProjectID(id)
+		if errors.Is(err, store.ErrNotFound) {
 			return cmdErr(
 				fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
 		}
@@ -112,15 +113,15 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 	// impossible to say on a project with a non-zero default: the explicit
 	// unlimited silently became the default's cap.
 	if !cmd.Flags().Changed("budget") {
-		entry, err := db.GetConfig(conn, getProjectID(cmd), db.KeyBudgetDefault)
+		entry, err := st.GetConfig(getProjectID(cmd), store.KeyBudgetDefault)
 		if err != nil {
-			return cmdErr(fmt.Errorf("reading %s: %w", db.KeyBudgetDefault, err),
+			return cmdErr(fmt.Errorf("reading %s: %w", store.KeyBudgetDefault, err),
 				output.ErrGeneral)
 		}
 		fallback, err := strconv.ParseFloat(entry.Value, 64)
 		if err != nil {
 			return cmdErr(
-				fmt.Errorf("%s is %q, which is not a number", db.KeyBudgetDefault, entry.Value),
+				fmt.Errorf("%s is %q, which is not a number", store.KeyBudgetDefault, entry.Value),
 				output.ErrValidation)
 		}
 		budget = fallback
@@ -140,16 +141,16 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 			output.ErrValidation)
 	}
 	if !cmd.Flags().Changed("usage-budget") {
-		entry, err := db.GetConfig(conn, getProjectID(cmd), db.KeyUsageBudgetDefault)
+		entry, err := st.GetConfig(getProjectID(cmd), store.KeyUsageBudgetDefault)
 		if err != nil {
-			return cmdErr(fmt.Errorf("reading %s: %w", db.KeyUsageBudgetDefault, err),
+			return cmdErr(fmt.Errorf("reading %s: %w", store.KeyUsageBudgetDefault, err),
 				output.ErrGeneral)
 		}
 		fallback, err := strconv.ParseFloat(entry.Value, 64)
 		if err != nil {
 			return cmdErr(
 				fmt.Errorf("%s is %q, which is not a number",
-					db.KeyUsageBudgetDefault, entry.Value),
+					store.KeyUsageBudgetDefault, entry.Value),
 				output.ErrValidation)
 		}
 		usageBudget = fallback
@@ -158,7 +159,7 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 	// The run records where and on what it started: the invoking
 	// checkout's root, its branch and commit, and the machine. Best-effort —
 	// outside a checkout the fields record empty rather than invented.
-	runCtx := db.RunContext{UsageBudget: usageBudget}
+	runCtx := store.RunContext{UsageBudget: usageBudget}
 	if cfg := getCfg(cmd); cfg != nil {
 		runCtx.ExecRoot = cfg.ExecRoot
 		runCtx.Branch, runCtx.CommitSHA = config.GitHead(cfg.ExecRoot)
@@ -175,8 +176,8 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 	// The roster commits in the insert's own transaction. A replayed key
 	// returns the original run unchanged; a key reused with a different
 	// request, budget, context or --issue list is a conflict.
-	run, inserted, err := db.InsertRunWithContextIdempotent(conn, getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey, issueIDs...)
-	if errors.Is(err, db.ErrConflict) {
+	run, inserted, err := st.InsertRunWithContextIdempotent(getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey, issueIDs...)
+	if errors.Is(err, store.ErrConflict) {
 		return cmdErr(err, output.ErrConflict)
 	}
 	if err != nil {
