@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The CONDUCTOR CAPABILITY (DKT-2465).
@@ -51,7 +51,7 @@ var ErrNotConductor = errors.New("not the run's conductor")
 
 // authorizeConductorTx is the check inside a verb's own transaction.
 func authorizeConductorTx(tx *sql.Tx, runID int, token, verb string) error {
-	hash, err := db.RunConductorHashTx(tx, runID)
+	hash, err := store.TxOn(tx).RunConductorHashTx(runID)
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,7 @@ func authorizeConductorTx(tx *sql.Tx, runID int, token, verb string) error {
 // writes; a `run conduct` racing it can only retire a token the ruling was
 // about to use, which is the rotation doing its job.
 func authorizeConductor(conn *sql.DB, runID int, token, verb string) error {
-	hash, err := db.RunConductorHash(conn, runID)
+	hash, err := store.StoreOn(conn).RunConductorHash(runID)
 	if err != nil {
 		return err
 	}
@@ -144,9 +144,10 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 		return nil, fmt.Errorf("conducting %s: %w", model.FormatRunID(runID), err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -157,7 +158,7 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 			run.Ref(), run.Status)
 	}
 
-	standing, err := db.RunConductorHashTx(tx, runID)
+	standing, err := st.RunConductorHashTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +166,7 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 	if err != nil {
 		return nil, err
 	}
-	if err := db.SetRunConductorHashTx(tx, runID, hash); err != nil {
+	if err := st.SetRunConductorHashTx(runID, hash); err != nil {
 		return nil, err
 	}
 
@@ -191,7 +192,8 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 // capability its conductor holds. Returns the token, or "" when nothing was
 // minted.
 func mintConductorTx(tx *sql.Tx, runID int) (string, error) {
-	standing, err := db.RunConductorHashTx(tx, runID)
+	st := store.TxOn(tx)
+	standing, err := st.RunConductorHashTx(runID)
 	if err != nil {
 		return "", err
 	}
@@ -202,7 +204,7 @@ func mintConductorTx(tx *sql.Tx, runID int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := db.SetRunConductorHashTx(tx, runID, hash); err != nil {
+	if err := st.SetRunConductorHashTx(runID, hash); err != nil {
 		return "", err
 	}
 	return token, nil
