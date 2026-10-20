@@ -80,7 +80,7 @@ var docListCmd = &cobra.Command{
 func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	st := store.StoreOn(getDB(cmd))
 
-	types, _:= cmd.Flags().GetStringSlice("type")
+	types, _ := cmd.Flags().GetStringSlice("type")
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	author, _ := cmd.Flags().GetString("author")
 	sortFlag, _ := cmd.Flags().GetString("sort")
