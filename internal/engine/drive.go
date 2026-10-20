@@ -3,7 +3,7 @@ package engine
 import (
 	"database/sql"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // MID-WAVE LIFECYCLE DRIVING.
@@ -55,7 +55,7 @@ func (e *Engine) DriveRunLifecycles(conn *sql.DB, runID int, nowMS int64) error 
 		if err != nil {
 			return err
 		}
-		var ready []*db.Step
+		var ready []*store.Step
 		for _, step := range sched.Steps() {
 			if ok, _ := sched.Ready(step); ok {
 				ready = append(ready, step)
@@ -89,7 +89,7 @@ func (e *Engine) DriveRunLifecycles(conn *sql.DB, runID int, nowMS int64) error 
 // ad-hoc, operator-created ballot bound to no step; there is nothing to
 // route, and the call is a no-op rather than an error.
 func (e *Engine) DriveVoteProposal(conn *sql.DB, proposalID int, nowMS int64) error {
-	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, proposalID)
+	key, found, err := store.StoreOn(conn).IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {
 		return err
 	}
@@ -105,8 +105,13 @@ func (e *Engine) DriveVoteProposal(conn *sql.DB, proposalID int, nowMS int64) er
 
 // runStepCount bounds DriveRunLifecycles' cascade (see its doc comment).
 func runStepCount(conn *sql.DB, runID int) (int, error) {
-	var n int
-	err := conn.QueryRow(
-		`SELECT COUNT(*) FROM steps WHERE run_id = ?`, runID).Scan(&n)
-	return n, err
+	counts, err := store.StoreOn(conn).StepStatusCounts(runID)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, c := range counts {
+		n += c.Count
+	}
+	return n, nil
 }
