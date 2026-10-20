@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -67,7 +67,7 @@ func idempotencyKeyOf(cmd *cobra.Command) (string, error) {
 // notFound rather than re-implementing its db.ErrNotFound check. Anything
 // else passes through unchanged.
 func casError(err error, label string) error {
-	if errors.Is(err, db.ErrVersionConflict) {
+	if errors.Is(err, store.ErrVersionConflict) {
 		return cmdErr(
 			fmt.Errorf("%s was modified by another writer (version mismatch)", label),
 			output.ErrConflict,

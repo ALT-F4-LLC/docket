@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // exportCollection binds one collection of the export document to everything
@@ -55,7 +55,7 @@ type exportCollection struct {
 func collection[T any](
 	name string,
 	field func(*model.ExportData) *[]T,
-	list func(*sql.DB, int) ([]T, error),
+	list func(store.Store, int) ([]T, error),
 	describe func(T) string,
 	insert func(*sql.Tx, T) (bool, error),
 ) exportCollection {
@@ -69,7 +69,7 @@ func collection[T any](
 func collectionWithFixup[T any](
 	name string,
 	field func(*model.ExportData) *[]T,
-	list func(*sql.DB, int) ([]T, error),
+	list func(store.Store, int) ([]T, error),
 	describe func(T) string,
 	insert func(*sql.Tx, T) (bool, error),
 	afterInsert func(*sql.Tx, []T) error,
@@ -77,7 +77,7 @@ func collectionWithFixup[T any](
 	return exportCollection{
 		name: name,
 		fetch: func(conn *sql.DB, projectID int, data *model.ExportData) error {
-			rows, err := list(conn, projectID)
+			rows, err := list(store.StoreOn(conn), projectID)
 			if err != nil {
 				return err
 			}
@@ -130,9 +130,11 @@ var exportCollections = []exportCollection{
 	collection(
 		"labels",
 		func(data *model.ExportData) *[]*model.Label { return &data.Labels },
-		db.ListAllLabelsRaw,
+		store.Store.ListAllLabelsRaw,
 		func(label *model.Label) string { return fmt.Sprintf("label %q", label.Name) },
-		db.InsertLabelWithID,
+		func(tx *sql.Tx, label *model.Label) (bool, error) {
+			return store.TxOn(tx).InsertLabelWithID(label)
+		},
 	),
 
 	// Issues carry a self-referential parent_id, so a child whose parent sorts
@@ -142,7 +144,7 @@ var exportCollections = []exportCollection{
 	collectionWithFixup(
 		"issues",
 		func(data *model.ExportData) *[]*model.Issue { return &data.Issues },
-		db.ListAllIssues,
+		store.Store.ListAllIssues,
 		func(issue *model.Issue) string { return fmt.Sprintf("issue %s", model.FormatID(issue.ID)) },
 		insertIssueWithoutParent,
 		reattachIssueParents,
@@ -151,7 +153,7 @@ var exportCollections = []exportCollection{
 	collection(
 		"label mappings",
 		func(data *model.ExportData) *[]model.IssueLabelMapping { return &data.IssueLabelMappings },
-		db.ListAllIssueLabelMappings,
+		store.Store.ListAllIssueLabelMappings,
 		func(m model.IssueLabelMapping) string {
 			return fmt.Sprintf("issue-label mapping (issue=%d, label=%d)", m.IssueID, m.LabelID)
 		},
@@ -165,14 +167,14 @@ var exportCollections = []exportCollection{
 			if err != nil || !ok {
 				return false, err
 			}
-			return db.InsertIssueLabelMapping(tx, m.IssueID, m.LabelID)
+			return store.TxOn(tx).InsertIssueLabelMapping(m.IssueID, m.LabelID)
 		},
 	),
 
 	collection(
 		"file mappings",
 		func(data *model.ExportData) *[]model.IssueFileMapping { return &data.IssueFileMappings },
-		db.ListAllIssueFileMappings,
+		store.Store.ListAllIssueFileMappings,
 		func(m model.IssueFileMapping) string {
 			return fmt.Sprintf("issue-file mapping (issue=%d, file=%q)", m.IssueID, m.FilePath)
 		},
@@ -181,109 +183,123 @@ var exportCollections = []exportCollection{
 			if err != nil || !ok {
 				return false, err
 			}
-			return db.InsertIssueFileMapping(tx, m.IssueID, m.FilePath)
+			return store.TxOn(tx).InsertIssueFileMapping(m.IssueID, m.FilePath)
 		},
 	),
 
 	collection(
 		"comments",
 		func(data *model.ExportData) *[]*model.Comment { return &data.Comments },
-		db.ListAllComments,
+		store.Store.ListAllComments,
 		func(c *model.Comment) string { return fmt.Sprintf("comment %d", c.ID) },
-		db.InsertCommentWithID,
+		func(tx *sql.Tx, c *model.Comment) (bool, error) {
+			return store.TxOn(tx).InsertCommentWithID(c)
+		},
 	),
 
 	collection(
 		"relations",
 		func(data *model.ExportData) *[]model.Relation { return &data.Relations },
-		db.GetAllRelations,
+		store.Store.GetAllRelations,
 		func(rel model.Relation) string { return fmt.Sprintf("relation %d", rel.ID) },
 		func(tx *sql.Tx, rel model.Relation) (bool, error) {
-			return db.InsertRelationWithID(tx, &rel)
+			return store.TxOn(tx).InsertRelationWithID(&rel)
 		},
 	),
 
 	collection(
 		"activity log",
 		func(data *model.ExportData) *[]*model.Activity { return &data.ActivityLog },
-		db.ListAllActivity,
+		store.Store.ListAllActivity,
 		func(a *model.Activity) string { return fmt.Sprintf("activity %d", a.ID) },
-		db.InsertActivityWithID,
+		func(tx *sql.Tx, a *model.Activity) (bool, error) {
+			return store.TxOn(tx).InsertActivityWithID(a)
+		},
 	),
 
 	collection(
 		"proposals",
 		func(data *model.ExportData) *[]*model.Proposal { return &data.Proposals },
-		db.ListAllProposals,
+		store.Store.ListAllProposals,
 		func(p *model.Proposal) string { return fmt.Sprintf("proposal %s", model.FormatProposalID(p.ID)) },
-		db.InsertProposalWithID,
+		func(tx *sql.Tx, p *model.Proposal) (bool, error) {
+			return store.TxOn(tx).InsertProposalWithID(p)
+		},
 	),
 
 	collection(
 		"votes",
 		func(data *model.ExportData) *[]*model.Vote { return &data.Votes },
-		db.ListAllVotes,
+		store.Store.ListAllVotes,
 		func(v *model.Vote) string { return fmt.Sprintf("vote %d", v.ID) },
-		db.InsertVoteWithID,
+		func(tx *sql.Tx, v *model.Vote) (bool, error) {
+			return store.TxOn(tx).InsertVoteWithID(v)
+		},
 	),
 
 	collection(
 		"proposal-issue links",
 		func(data *model.ExportData) *[]model.ProposalIssueLink { return &data.ProposalIssues },
-		db.ListAllProposalIssues,
+		store.Store.ListAllProposalIssues,
 		func(l model.ProposalIssueLink) string {
 			return fmt.Sprintf("proposal-issue link (proposal=%d, issue=%d)", l.ProposalID, l.IssueID)
 		},
 		func(tx *sql.Tx, l model.ProposalIssueLink) (bool, error) {
-			return db.InsertProposalIssueLink(tx, l.ProposalID, l.IssueID)
+			return store.TxOn(tx).InsertProposalIssueLink(l.ProposalID, l.IssueID)
 		},
 	),
 
 	collection(
 		"docs",
 		func(data *model.ExportData) *[]*model.Doc { return &data.Docs },
-		db.ListAllDocs,
+		store.Store.ListAllDocs,
 		func(doc *model.Doc) string { return fmt.Sprintf("doc %s", model.FormatDocID(doc.ID)) },
-		db.InsertDocWithID,
+		func(tx *sql.Tx, doc *model.Doc) (bool, error) {
+			return store.TxOn(tx).InsertDocWithID(doc)
+		},
 	),
 
 	collection(
 		"doc revisions",
 		func(data *model.ExportData) *[]*model.DocRevision { return &data.DocRevisions },
-		db.ListAllDocRevisions,
+		store.Store.ListAllDocRevisions,
 		func(rev *model.DocRevision) string { return fmt.Sprintf("doc revision %d", rev.ID) },
-		db.InsertDocRevisionWithID,
+		func(tx *sql.Tx, rev *model.DocRevision) (bool, error) {
+			return store.TxOn(tx).InsertDocRevisionWithID(rev)
+		},
 	),
 
 	collection(
 		"doc comments",
 		func(data *model.ExportData) *[]*model.DocComment { return &data.DocComments },
-		db.ListAllDocComments,
+		store.Store.ListAllDocComments,
 		func(c *model.DocComment) string { return fmt.Sprintf("doc comment %d", c.ID) },
-		db.InsertDocCommentWithID,
+		func(tx *sql.Tx, c *model.DocComment) (bool, error) {
+			return store.TxOn(tx).InsertDocCommentWithID(c)
+		},
 	),
 
 	collection(
 		"doc-issue links",
 		func(data *model.ExportData) *[]model.DocIssueLink { return &data.DocIssueLinks },
-		db.ListAllDocIssueLinks,
+		store.Store.ListAllDocIssueLinks,
 		func(l model.DocIssueLink) string {
 			return fmt.Sprintf("doc-issue link (doc=%d, issue=%d)", l.DocID, l.IssueID)
 		},
 		func(tx *sql.Tx, l model.DocIssueLink) (bool, error) {
-			return db.InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt)
+			return store.TxOn(tx).InsertDocIssueLink(l.DocID, l.IssueID, l.CreatedAt)
 		},
 	),
 
 	collection(
 		"proposal-doc links",
 		func(data *model.ExportData) *[]model.ProposalDocLink { return &data.ProposalDocs },
-		db.ListAllProposalDocs,
+		store.Store.ListAllProposalDocs,
 		func(l model.ProposalDocLink) string {
 			return fmt.Sprintf("proposal-doc link (proposal=%d, doc=%d)", l.ProposalID, l.DocID)
 		},
 		func(tx *sql.Tx, l model.ProposalDocLink) (bool, error) {
-			return db.InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt)
+			return store.TxOn(tx).InsertProposalDocLink(l.ProposalID, l.DocID, l.CreatedAt)
 		},
 	),
 }
@@ -312,7 +328,7 @@ func rowsExist(tx *sql.Tx, pairs ...any) (bool, error) {
 func insertIssueWithoutParent(tx *sql.Tx, issue *model.Issue) (bool, error) {
 	parentID := issue.ParentID
 	issue.ParentID = nil
-	inserted, err := db.InsertIssueWithID(tx, issue)
+	inserted, err := store.TxOn(tx).InsertIssueWithID(issue)
 	issue.ParentID = parentID
 	return inserted, err
 }
