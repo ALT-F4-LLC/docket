@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -101,8 +101,9 @@ func RefreshIssueBodyInRun(
 	}
 	defer tx.Rollback()
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -194,19 +195,19 @@ func RefreshIssueBodyInRun(
 	case err != nil:
 		return nil, err
 	}
-	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
+	if open, err := st.OpenDispatchTx(runID); err == nil {
 		return nil, conflictErr(
 			"a dispatch is open for %s (%s, expiring at %d); close or abandon "+
 				"it before refreshing — its manifest was offered under the "+
 				"frozen description, and a relay spawning from it would claim "+
 				"rows whose packets no longer ask what the manifest's reader saw",
 			run.Ref(), FormatDispatchID(open.ID), open.ExpiresMS)
-	} else if !errors.Is(err, db.ErrNoOpenDispatch) {
+	} else if !errors.Is(err, store.ErrNoOpenDispatch) {
 		return nil, err
 	}
 
 	from, to := ri.BodySHA256, workflow.SHA256([]byte(live))
-	if err := db.SetRunIssueBodyTx(tx, runID, issueID, live, to); err != nil {
+	if err := st.SetRunIssueBodyTx(runID, issueID, live, to); err != nil {
 		return nil, err
 	}
 
@@ -248,7 +249,7 @@ func liveIssueBodyTx(tx *sql.Tx, issueID int) (string, error) {
 	err := tx.QueryRow(
 		`SELECT description FROM issues WHERE id = ?`, issueID).Scan(&description)
 	if err == sql.ErrNoRows {
-		return "", notFoundErr(db.ErrNotFound, "issue %s not found",
+		return "", notFoundErr(store.ErrNotFound, "issue %s not found",
 			model.FormatID(issueID))
 	}
 	if err != nil {

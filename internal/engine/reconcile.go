@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -41,7 +41,7 @@ import (
 // interposed targets and nothing else; `def` is the issue's pinned definition
 // (nil likewise), consulted for the `after_fired` cascade and nothing else.
 func reconcileIssueAndRun(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, spec *workflow.Step,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, spec *workflow.Step,
 	routing string, nowMS int64,
 ) error {
 	// BEFORE the completion check: an unrouted gate left `pending` is exactly
@@ -123,7 +123,7 @@ func reconcileIssueAndRun(
 // `pending`) and correctly defers; a `waiting-human` park defers the same way
 // until an operator's resolution re-enters here with a terminal routing.
 func skipUnroutedTargets(
-	tx *sql.Tx, step *db.Step, spec *workflow.Step, routing string, nowMS int64,
+	tx *sql.Tx, step *store.Step, spec *workflow.Step, routing string, nowMS int64,
 ) error {
 	if spec == nil {
 		return nil
@@ -150,7 +150,7 @@ func skipUnroutedTargets(
 			return err
 		}
 		for _, g := range gates {
-			if err := db.SetStepStatusTx(tx, g.id, db.StepSkipped, nowMS, nowMS); err != nil {
+			if err := store.TxOn(tx).SetStepStatusTx(g.id, store.StepSkipped, nowMS, nowMS); err != nil {
 				return err
 			}
 			if err := recordEvent(tx, eventRecord{
@@ -171,7 +171,7 @@ func skipUnroutedTargets(
 // reports which targets a `done` sibling's recorded routing names. `joined` is
 // false while any sibling is non-terminal — the choice is still open.
 func targetRoutings(
-	tx *sql.Tx, step *db.Step, targets []string,
+	tx *sql.Tx, step *store.Step, targets []string,
 ) (routed map[string]bool, joined bool, err error) {
 	rows, err := tx.Query(
 		`SELECT status, routing FROM steps
@@ -190,10 +190,10 @@ func targetRoutings(
 		if err := rows.Scan(&status, &recorded); err != nil {
 			return nil, false, fmt.Errorf("reading a sibling of %s: %w", step.Instance, err)
 		}
-		if !db.StepTerminal(status) {
+		if !store.StepTerminal(status) {
 			return nil, false, nil
 		}
-		if status != db.StepDone {
+		if status != store.StepDone {
 			continue
 		}
 		for _, target := range targets {
@@ -217,12 +217,12 @@ type pendingGate struct {
 // routing step's ordinal: the gate this ordinal's routing decided against,
 // plus any straggler a loop sweep left behind. Higher ordinals belong to
 // routings that have not happened yet.
-func pendingTargetInstances(tx *sql.Tx, step *db.Step, target string) ([]pendingGate, error) {
+func pendingTargetInstances(tx *sql.Tx, step *store.Step, target string) ([]pendingGate, error) {
 	rows, err := tx.Query(
 		`SELECT id, instance FROM steps
 		  WHERE run_id = ? AND issue_id = ? AND step_name = ?
 		    AND status = ? AND ordinal <= ?`,
-		step.RunID, step.IssueID, target, db.StepPending, step.Ordinal,
+		step.RunID, step.IssueID, target, store.StepPending, step.Ordinal,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("reading unrouted target %q: %w", target, err)
@@ -264,7 +264,7 @@ func pendingTargetInstances(tx *sql.Tx, step *db.Step, target string) ([]pending
 // is exactly as notable as the first, and the issue may already be
 // `in-progress` when it happens (a straight `verify -> fix-loop` that was never
 // parked at all).
-func reflectIssueStatus(tx *sql.Tx, step *db.Step, routing string, nowMS int64) error {
+func reflectIssueStatus(tx *sql.Tx, step *store.Step, routing string, nowMS int64) error {
 	if routing == workflow.OnFailFixLoop {
 		if err := commentEngineEvent(tx, step.IssueID, fmt.Sprintf(
 			"%s did not pass review; starting another round.", step.Instance), nowMS); err != nil {
@@ -357,8 +357,8 @@ func issueAwaitingReviewTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool, e
 		`SELECT COUNT(*) FROM steps
 		  WHERE run_id = ? AND issue_id = ?
 		    AND (status = ? OR (materialized = 1 AND status NOT IN (?, ?, ?, ?)))`,
-		runID, issueID, db.StepWaitingHuman,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		runID, issueID, store.StepWaitingHuman,
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
 	).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("checking %s for parked steps: %w", model.FormatID(issueID), err)
@@ -383,7 +383,7 @@ func issueAwaitingDecisionTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool,
 		`SELECT COUNT(*) FROM steps
 		  WHERE run_id = ? AND issue_id = ? AND status = ?
 		    AND materialized = 0 AND kind IN (?, ?)`,
-		runID, issueID, db.StepPending, workflow.TypeHuman, workflow.TypeVote,
+		runID, issueID, store.StepPending, workflow.TypeHuman, workflow.TypeVote,
 	).Scan(&candidates)
 	if err != nil {
 		return false, fmt.Errorf(
@@ -434,7 +434,7 @@ func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
 		                        AND h.step_name = s.step_name)
 		    AND s.status NOT IN (?, ?, ?, ?)`,
 		runID, issueID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
 	).Scan(&pending)
 	if err != nil {
 		return false, fmt.Errorf("counting unfinished steps: %w", err)
@@ -452,14 +452,14 @@ func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
 // The transition clears `resolution`: an `abandoned` left by an earlier run no
 // longer describes an issue this run finished. The `status != done` guard keeps
 // an abandonment recorded AFTER completion (DKT-245) from being erased.
-func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
+func completeIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
 	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
 
-	prior, resolution, err := db.IssueStatusResolutionTx(tx, step.IssueID)
+	prior, resolution, err := store.TxOn(tx).IssueStatusResolutionTx(step.IssueID)
 	if err != nil {
 		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)
 	}
-	if db.DoneTransitionClearsResolution(prior, model.StatusDone, false) {
+	if store.DoneTransitionClearsResolution(prior, model.StatusDone, false) {
 		resolution = ""
 	}
 
@@ -498,7 +498,7 @@ func completeIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 // says this RUN stops working on it, which is a statement about the run; an
 // operator may still triage the issue by hand, and closing it here would take
 // that decision away from them.
-func abandonIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
+func abandonIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
 	// Every not-yet-terminal step of the issue stops, AND EACH ONE RECORDS WHY
 	// (DKT-258).
 	//
@@ -531,8 +531,8 @@ func abandonIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 		        row_version = row_version + 1
 		  WHERE run_id = ? AND issue_id = ? AND id != ?
 		    AND status NOT IN (?, ?, ?, ?)`,
-		db.StepFailedRouted, cascade, nowMS, nowMS, step.RunID, step.IssueID, step.ID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		store.StepFailedRouted, cascade, nowMS, nowMS, step.RunID, step.IssueID, step.ID,
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
 	)
 	if err != nil {
 		return fmt.Errorf("abandoning %s: %w", model.FormatID(step.IssueID), err)
@@ -542,7 +542,7 @@ func abandonIssue(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	// recorded on the row is the RESOLUTION (DKT-245). Without it the only
 	// trace was an event, and an issue whose fix step had completed kept
 	// rendering "✔ done" for work a review reproduced as not fixing anything.
-	if err := db.SetIssueResolutionTx(tx, step.IssueID, db.IssueResolutionAbandoned); err != nil {
+	if err := store.TxOn(tx).SetIssueResolutionTx(step.IssueID, store.IssueResolutionAbandoned); err != nil {
 		return err
 	}
 
@@ -604,11 +604,11 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 		                         WHERE run_id = ? AND status = ?)
 		                     THEN 1 ELSE 0 END), 0)
 		 FROM steps WHERE run_id = ?`,
-		db.StepWaitingHuman,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
-		db.StepWaitingHuman,
-		runID, db.StepWaitingHuman,
+		store.StepWaitingHuman,
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
+		store.StepWaitingHuman,
+		runID, store.StepWaitingHuman,
 		runID,
 	).Scan(&parked, &unfinished, &unparkedWork)
 	if err != nil {
@@ -679,7 +679,7 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 		// returns it to `active` right here — without which every step-level
 		// park would need an operator to type `run resume` for a decision the
 		// engine made and the engine already unmade.
-		origin, err := db.RunPauseOriginTx(tx, runID)
+		origin, err := store.TxOn(tx).RunPauseOriginTx(runID)
 		if err != nil {
 			return err
 		}
