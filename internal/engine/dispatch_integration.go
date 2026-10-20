@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -133,11 +133,11 @@ type integrationCandidate struct {
 // it ends (no subprocess inside one) — the same split
 // staleTargetCandidates/staleTargets already use for the identical reason.
 func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integrationCandidate, error) {
-	artifacts, err := db.ListRunArtifactsTx(tx, runID)
+	artifacts, err := store.TxOn(tx).ListRunArtifactsTx(runID)
 	if err != nil {
 		return nil, err
 	}
-	own := make(map[int]*db.Artifact, len(artifacts))
+	own := make(map[int]*store.Artifact, len(artifacts))
 	for _, a := range artifacts {
 		if a.Kind != ArtifactKindIssueDiff {
 			continue
@@ -157,10 +157,10 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 
 	var out []integrationCandidate
 	for _, step := range sched.Steps() {
-		if !sched.writeClassOf(step.Class) || !db.StepTerminal(step.Status) {
+		if !sched.writeClassOf(step.Class) || !store.StepTerminal(step.Status) {
 			continue
 		}
-		if step.Status == db.StepSkipped || abandoned[step.IssueID] {
+		if step.Status == store.StepSkipped || abandoned[step.IssueID] {
 			continue
 		}
 		a, ok := own[step.ID]
@@ -353,11 +353,11 @@ func (e *Engine) integrationVerdict(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, skipReason string, nowMS int64,
 ) (*IntegrationCheck, []UnintegratedStep, error) {
 	// Read BEFORE the transaction opens: runExecRoot is its own pool read
-	// (db.GetRun), and the pool is capped at one connection, so a call to it
+	// (Store.GetRun), and the pool is capped at one connection, so a call to it
 	// from inside the transaction below would deadlock rather than fail.
 	execRoot := runExecRoot(conn, runID)
 
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("checking integration: %w", err)
 	}
