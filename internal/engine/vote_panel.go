@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // A CONDUCTOR PANEL'S DELIBERATION ON THE RUN'S EVENT TRAIL (DKT-3303).
@@ -46,7 +46,7 @@ func RecordConductorPanelOpened(conn *sql.DB, proposalID int) error {
 // onto every run that attributes it. The caller passes only a step-less
 // panel: a vote step's own proposal is announced by its step, and CastVote
 // settles step-boundness before the vote commits.
-func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *db.CastVoteResult) error {
+func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *store.CastVoteResult) error {
 	runs, err := conductorPanelRuns(conn, proposalID)
 	if err != nil || len(runs) == 0 {
 		return err
@@ -77,12 +77,12 @@ func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *db.CastVot
 // is the run report's attribution rule (conversationalRunProposalIDs), asked
 // from the panel's side. A vote step's own proposal has none here: its step
 // already announces it.
-func conductorPanelRuns(conn *sql.DB, proposalID int) ([]db.ProposalRunLink, error) {
+func conductorPanelRuns(conn *sql.DB, proposalID int) ([]store.ProposalRunLink, error) {
 	stepBound, err := IsVoteStepProposal(conn, proposalID)
 	if err != nil || stepBound {
 		return nil, err
 	}
-	runs, err := linkedPanelAttributions(conn, db.ProposalRunLinkFilter{ProposalID: proposalID})
+	runs, err := linkedPanelAttributions(conn, store.ProposalRunLinkFilter{ProposalID: proposalID})
 	if err != nil {
 		return nil, fmt.Errorf("finding the runs of %s: %w",
 			model.FormatProposalID(proposalID), err)
@@ -95,7 +95,7 @@ func conductorPanelRuns(conn *sql.DB, proposalID int) ([]db.ProposalRunLink, err
 // is non-empty. The existence check shares the write-locked transaction
 // (internal/db opens every Begin immediate) with the write, so neither a later
 // cast nor a concurrent one opens the panel a second time.
-func recordPanelRunEvents(conn *sql.DB, run db.ProposalRunLink, proposalID int, tally string) error {
+func recordPanelRunEvents(conn *sql.DB, run store.ProposalRunLink, proposalID int, tally string) error {
 	pid := model.FormatProposalID(proposalID)
 	tx, err := conn.Begin()
 	if err != nil {
