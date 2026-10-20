@@ -92,7 +92,7 @@ docket issue list --json -s todo -s in-progress
 
 ## AI Agent Integration
 
-Every command supports `--json` for structured, machine-readable output. All JSON responses use a consistent envelope:
+Every command supports `--json` for structured, machine-readable output. All JSON responses use a consistent envelope, v2 only (a bare `--json` and `--json=v2` both select it):
 
 **Success:** `{"ok": true, "data": { ... }, "message": "..."}`
 

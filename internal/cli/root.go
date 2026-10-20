@@ -304,7 +304,7 @@ func init() {
 	// --json is a string flag with NoOptDefVal so a bare --json still parses
 	// like the Bool flag it used to be: it takes the value "v2" and emits the
 	// uniform envelope. See internal/output.ParseJSONMode for the accepted values.
-	rootCmd.PersistentFlags().String("json", "", "Output in JSON format (--json, or --json=v2)")
+	rootCmd.PersistentFlags().String("json", "", "Output in JSON format, v2 only (--json or --json=v2)")
 	rootCmd.PersistentFlags().Lookup("json").NoOptDefVal = "v2"
 	// --format is the conventional spelling operators reach for first, and
 	// guessing it cost a retry against `unknown flag`. It selects v2, the
