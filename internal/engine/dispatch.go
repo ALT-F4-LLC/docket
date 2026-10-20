@@ -2423,6 +2423,28 @@ func refuseIfUnreconciledTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64
 	return refuseIfDiscrepanciesTx(tx, sched, runID, nowMS)
 }
 
+// refuseIfUnreconciledSnapshot is refuseIfUnreconciledTx for a caller holding
+// no transaction: it loads the scheduler and runs both probes in one read
+// snapshot, which it ROLLS BACK unconditionally. The rollback is the mechanism
+// rather than a cleanup — stronger than "this function has no INSERT",
+// because it also covers anything a helper might write.
+func refuseIfUnreconciledSnapshot(
+	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
+) error {
+	tx, err := db.BeginReadSnapshot(conn)
+	if err != nil {
+		return fmt.Errorf("checking whether %s is reconciled: %w",
+			model.FormatRunID(runID), err)
+	}
+	defer tx.Rollback()
+
+	sched, err := LoadScheduler(tx, runID, defs, nowMS)
+	if err != nil {
+		return err
+	}
+	return refuseIfUnreconciledTx(tx, sched, runID, nowMS)
+}
+
 // refuseIfDiscrepanciesTx is the discrepancy half on its own, so `next` and
 // `dispatch open` cannot disagree about whether a run is blocked (DKT-315).
 //

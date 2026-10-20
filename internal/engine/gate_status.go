@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -116,7 +116,8 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 			return nil, fmt.Errorf(
 				"parsing proposal %q on %s: %w", view.Row.Proposal, model.FormatStepID(stepID), err)
 		}
-		proposal, err := db.GetProposal(conn, proposalID)
+		st := store.StoreOn(conn)
+		proposal, err := st.GetProposal(proposalID)
 		if err != nil {
 			return nil, fmt.Errorf("reading proposal %s: %w", view.Row.Proposal, err)
 		}
@@ -124,7 +125,7 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 		result.Tally = &GateTally{WeightedScore: proposal.WeightedScore, Threshold: proposal.Threshold}
 		sealedOpen = proposal.SealedOpen()
 
-		votes, err := db.GetProposalVotes(conn, proposalID)
+		votes, err := st.GetProposalVotes(proposalID)
 		if err != nil {
 			return nil, fmt.Errorf("reading votes on %s: %w", view.Row.Proposal, err)
 		}
@@ -177,7 +178,7 @@ func voteGateOutcome(status model.ProposalStatus) GateOutcome {
 // `pass` routing is approved, still short of `done` is open, and `done` by
 // any other routing is a decision that was not a pass — rejected.
 func humanGateOutcome(status, routing string) GateOutcome {
-	if status != db.StepDone {
+	if status != store.StepDone {
 		return GateOutcomeOpen
 	}
 	if routingIs(routing, RoutingPass) {

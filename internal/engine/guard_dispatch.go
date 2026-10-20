@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `guard record | spawn` — the two dispatch predicates:
@@ -73,31 +73,15 @@ func GuardRecord(conn *sql.DB, runID, projectID int, nowMS int64) (*GuardVerdict
 
 // unreconciledReason is the shared computation: the open-dispatch probe and the
 // discrepancy probe, in `next`'s own order and words.
-//
-// It runs in a transaction it ROLLS BACK unconditionally. The rollback is
-// the mechanism rather than a cleanup — stronger than "this function has no
-// INSERT", because it also covers anything a helper might write.
 func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return "", err
 	}
 
-	tx, err := db.BeginReadSnapshot(conn)
-	if err != nil {
-		return "", fmt.Errorf("checking whether %s is reconciled: %w",
-			model.FormatRunID(runID), err)
-	}
-	defer tx.Rollback()
-
-	sched, err := LoadScheduler(tx, runID, defs, nowMS)
-	if err != nil {
-		return "", err
-	}
-
-	// THE SAME FUNCTION `next` CALLS. The guard and the scheduler must be
-	// unable to disagree, and sharing the code is the only way that stays
-	// true as either changes.
+	// THE SAME PROBES `next` RUNS, through refuseIfUnreconciledTx. The guard
+	// and the scheduler must be unable to disagree, and sharing the code is
+	// the only way that stays true as either changes.
 	//
 	// This does NOT reap and does NOT auto-abandon, which is the one way
 	// the guard's answer differs from `next`'s — `next` performs both before it
@@ -105,7 +89,7 @@ func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
 	// direction: the guard may report a state `next` would have cleared, which
 	// costs a hook one denial, while a guard that reaped would have made a
 	// read-shaped hook a scheduling act.
-	if err := refuseIfUnreconciledTx(tx, sched, runID, nowMS); err != nil {
+	if err := refuseIfUnreconciledSnapshot(conn, runID, defs, nowMS); err != nil {
 		// The refusal's MESSAGE becomes the guard's reason, verbatim. That
 		// keeps the wording identical mechanically: the guard cannot phrase the state differently from
 		// `next` because it does not phrase it at all. A non-refusal error — a
@@ -131,37 +115,22 @@ func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
 // projectID filters the every-non-terminal-run enumeration only; a named run is
 // returned regardless of project (see GuardRecord).
 func guardRunScope(conn *sql.DB, runID, projectID int) ([]int, error) {
+	st := store.StoreOn(conn)
 	if runID != 0 {
-		if _, err := db.GetRun(conn, runID); err != nil {
+		if _, err := st.GetRun(runID); err != nil {
 			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 		}
 		return []int{runID}, nil
 	}
 
-	query := `SELECT id FROM runs WHERE status NOT IN ('done', 'abandoned')`
-	var args []any
-	if projectID != 0 {
-		query += ` AND project_id = ?`
-		args = append(args, projectID)
-	}
-	query += ` ORDER BY id`
-
-	rows, err := conn.Query(query, args...)
+	runs, _, err := st.ListRuns(store.RunListOptions{ProjectID: projectID, ActiveOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("reading active runs: %w", err)
 	}
-	defer rows.Close()
-
-	var out []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("reading an active run: %w", err)
-		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading active runs: %w", err)
+	// ListRuns is newest first; the guard answers oldest first.
+	out := make([]int, len(runs))
+	for i, run := range runs {
+		out[len(runs)-1-i] = run.ID
 	}
 	return out, nil
 }
@@ -232,7 +201,7 @@ func (e *Engine) GuardSpawn(
 		return nil, validationErr(
 			"--run is required: name the run whose batch is being spawned")
 	}
-	if _, err := db.GetRun(conn, runID); err != nil {
+	if _, err := store.StoreOn(conn).GetRun(runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if opts.UsageJoin && opts.DecidingVote > 0 {
@@ -308,7 +277,7 @@ func decidingVoteCarveOut(
 // EXISTS and is OPEN — on their own, so the `--active` path can hold a claimed
 // vote to them even when it admits nothing (the run it names is not served).
 func requireDecidingVote(conn *sql.DB, proposalID int) error {
-	proposal, err := db.GetProposal(conn, proposalID)
+	proposal, err := store.StoreOn(conn).GetProposal(proposalID)
 	if err != nil {
 		return notFoundErr(err,
 			"proposal %s not found; --deciding-vote must name the OPEN proposal "+
@@ -331,13 +300,14 @@ func requireDecidingVote(conn *sql.DB, proposalID int) error {
 // is not scoped to a project or to live runs; the caller intersects it with the
 // runs it is answering over, which already are.
 func decidingVoteRuns(conn *sql.DB, proposalID int) (map[int]bool, error) {
-	issueIDs, err := db.GetProposalIssues(conn, proposalID)
+	st := store.StoreOn(conn)
+	issueIDs, err := st.GetProposalIssues(proposalID)
 	if err != nil {
 		return nil, err
 	}
 	served := make(map[int]bool)
 	for _, issueID := range issueIDs {
-		runIDs, err := db.IssueStepRuns(conn, issueID)
+		runIDs, err := st.IssueStepRuns(issueID)
 		if err != nil {
 			return nil, err
 		}
@@ -363,7 +333,7 @@ func applyAcks(conn *sql.DB, runID int, seqs []int64, nowMS int64) error {
 	}
 	defer tx.Rollback()
 
-	if err := ackReapsTx(tx, runID, seqs, db.AckByGuardSpawn, nowMS); err != nil {
+	if err := ackReapsTx(tx, runID, seqs, store.AckByGuardSpawn, nowMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -490,21 +460,21 @@ func parseProposedRows(raw []byte) ([]model.StepRow, error) {
 // LEGITIMATE STATE this verb must answer about differently depending on whether
 // rows were proposed — mapping it to an error here would make the
 // caller unwrap a sentinel to tell the two apart.
-func storedManifestRows(conn *sql.DB, runID int) ([]db.DispatchRow, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+func storedManifestRows(conn *sql.DB, runID int) ([]store.DispatchRow, error) {
+	snap, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("reading the open dispatch: %w", err)
 	}
-	defer tx.Rollback()
+	defer snap.Rollback()
 
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err := snap.OpenDispatchTx(runID)
 	if err != nil {
-		if strings.Contains(err.Error(), db.ErrNoOpenDispatch.Error()) {
+		if strings.Contains(err.Error(), store.ErrNoOpenDispatch.Error()) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return db.ListDispatchRowsTx(tx, open.ID)
+	return snap.ListDispatchRowsTx(open.ID)
 }
 
 // spawnReapVerdict is half (b): no unacknowledged write reaps.
@@ -679,17 +649,13 @@ func GuardSpawnActive(
 
 // openReapHold reads a run's unacknowledged reaps in its own rolled-back
 // transaction, so the caller holds none while it decides.
-func openReapHold(conn *sql.DB, runID int) ([]db.ReapAck, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+func openReapHold(conn *sql.DB, runID int) ([]store.ReapAck, error) {
+	snap, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("reading unacknowledged reaps: %w", err)
 	}
-	defer tx.Rollback()
-	_, open, err := loadReapHold(tx, runID)
-	if err != nil {
-		return nil, err
-	}
-	return open, nil
+	defer snap.Rollback()
+	return snap.UnacknowledgedReapsTx(runID)
 }
 
 // recordGuardCarveOut writes the audit row for a spawn admitted past a reap
