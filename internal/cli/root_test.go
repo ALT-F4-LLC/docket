@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,18 @@ func TestCheckDaemonURLRefusesNonLoopbackPlaintext(t *testing.T) {
 		if err := checkDaemonURL(context.Background(), raw, testDaemonResolver); err == nil {
 			t.Errorf("checkDaemonURL(%q) = nil, want a refusal", raw)
 		}
+	}
+}
+
+// TestCheckDaemonURLRefusalRedactsPassword: a refusal names the URL, but never
+// the password a URL's userinfo carries.
+func TestCheckDaemonURLRefusalRedactsPassword(t *testing.T) {
+	err := checkDaemonURL(context.Background(), "http://user:hunter2@remote.test:8080", testDaemonResolver)
+	if err == nil {
+		t.Fatal("checkDaemonURL = nil, want a refusal")
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("refusal %q echoes the URL's password", err)
 	}
 }
 

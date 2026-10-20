@@ -443,31 +443,32 @@ func checkDaemonURL(ctx context.Context, rawURL string, resolver daemonHostResol
 	if err != nil {
 		return fmt.Errorf("daemon URL %q: %w", rawURL, err)
 	}
+	shown := u.Redacted()
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("daemon URL %q has no host", rawURL)
+		return fmt.Errorf("daemon URL %q has no host", shown)
 	}
 	switch u.Scheme {
 	case "https":
 		return nil
 	case "http":
 	default:
-		return fmt.Errorf("daemon URL %q: scheme %q is not http or https", rawURL, u.Scheme)
+		return fmt.Errorf("daemon URL %q: scheme %q is not http or https", shown, u.Scheme)
 	}
 
 	var resolved []netip.Addr
 	if literal, err := netip.ParseAddr(host); err == nil {
 		resolved = []netip.Addr{literal}
 	} else if resolved, err = resolver.LookupNetIP(ctx, "ip", host); err != nil {
-		return fmt.Errorf("daemon URL %q: resolving %q: %w", rawURL, host, err)
+		return fmt.Errorf("daemon URL %q: resolving %q: %w", shown, host, err)
 	}
 	if len(resolved) == 0 {
-		return fmt.Errorf("daemon URL %q: %q resolves to no address", rawURL, host)
+		return fmt.Errorf("daemon URL %q: %q resolves to no address", shown, host)
 	}
 	for _, addr := range resolved {
 		if !addr.Unmap().IsLoopback() {
 			return fmt.Errorf("daemon URL %q: plaintext http is allowed only to loopback, and %q resolves to %s; use https",
-				rawURL, host, addr)
+				shown, host, addr)
 		}
 	}
 	return nil
