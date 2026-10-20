@@ -1,13 +1,12 @@
 package cli
 
 import (
-	"database/sql"
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -79,7 +78,7 @@ itself.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		id, err := issueArg(args[0])
 		if err != nil {
@@ -96,13 +95,13 @@ itself.`,
 
 		class, _ := cmd.Flags().GetString("class")
 
-		ttl, err := resolveTTL(cmd, conn, class)
+		ttl, err := resolveTTL(cmd, st, class)
 		if err != nil {
 			return err
 		}
 
 		label := fmt.Sprintf("issue %s", model.FormatID(id))
-		token, lease, err := db.ClaimIssue(conn, id, owner, ttl.Milliseconds(), model.NowMS())
+		token, lease, err := st.ClaimIssue(id, owner, ttl.Milliseconds(), model.NowMS())
 		if err != nil {
 			if e := leaseError(err, label); e != nil {
 				return e
@@ -110,7 +109,7 @@ itself.`,
 			return cmdErr(fmt.Errorf("claiming issue: %w", err), output.ErrGeneral)
 		}
 
-		version, err := db.GetVersion(conn, "issues", id)
+		version, err := st.GetVersion("issues", id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("reading issue version: %w", err), output.ErrGeneral)
 		}
@@ -147,7 +146,7 @@ itself.`,
 
 // resolveTTL returns the lease TTL: an explicit --ttl wins, else the effective
 // per-class configuration (which falls back to lease.ttl.default).
-func resolveTTL(cmd *cobra.Command, conn *sql.DB, class string) (time.Duration, error) {
+func resolveTTL(cmd *cobra.Command, st store.Store, class string) (time.Duration, error) {
 	if cmd.Flags().Changed("ttl") {
 		ttl, err := cmd.Flags().GetDuration("ttl")
 		if err != nil {
@@ -162,7 +161,7 @@ func resolveTTL(cmd *cobra.Command, conn *sql.DB, class string) (time.Duration, 
 		return ttl, nil
 	}
 
-	ttl, err := db.LeaseTTL(conn, getProjectID(cmd), class)
+	ttl, err := st.LeaseTTL(getProjectID(cmd), class)
 	if err != nil {
 		return 0, cmdErr(fmt.Errorf("resolving lease TTL: %w", err), output.ErrGeneral)
 	}

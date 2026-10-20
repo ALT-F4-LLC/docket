@@ -7,9 +7,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 
 	"github.com/spf13/cobra"
 )
@@ -42,17 +42,17 @@ var initCmd = &cobra.Command{
 		if exists {
 			w.Warn("Database already exists at %s", cfg.DBPath)
 
-			conn, err := db.Open(cfg.DBPath)
+			st, err := store.OpenSQLite(cfg.DBPath)
 			if err != nil {
 				return cmdErr(fmt.Errorf("opening database: %w", err), output.ErrGeneral)
 			}
-			defer conn.Close()
+			defer st.Close()
 
-			if err := db.Migrate(conn); err != nil {
+			if err := st.Migrate(); err != nil {
 				return cmdErr(fmt.Errorf("migrating database: %w", err), output.ErrGeneral)
 			}
 
-			schemaVersion, err := db.SchemaVersion(conn)
+			schemaVersion, err := st.SchemaVersion()
 			if err != nil {
 				return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
 			}
@@ -78,21 +78,21 @@ var initCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("creating directory: %w", err), output.ErrGeneral)
 		}
 
-		conn, err := db.Open(cfg.DBPath)
+		st, err := store.OpenSQLite(cfg.DBPath)
 		if err != nil {
 			return cmdErr(fmt.Errorf("opening database: %w", err), output.ErrGeneral)
 		}
-		defer conn.Close()
+		defer st.Close()
 
-		if err := db.Initialize(conn); err != nil {
+		if err := st.Initialize(); err != nil {
 			return cmdErr(fmt.Errorf("initializing schema: %w", err), output.ErrGeneral)
 		}
 
-		if err := db.Migrate(conn); err != nil {
+		if err := st.Migrate(); err != nil {
 			return cmdErr(fmt.Errorf("migrating schema: %w", err), output.ErrGeneral)
 		}
 
-		schemaVersion, err := db.SchemaVersion(conn)
+		schemaVersion, err := st.SchemaVersion()
 		if err != nil {
 			return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
 		}
