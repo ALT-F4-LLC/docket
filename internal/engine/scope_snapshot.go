@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The mid-run scope widen, and why there is no verb that performs it (DKT-741).
@@ -220,12 +220,12 @@ func frozenBindingsWithLiveSteps(conn *sql.DB, issueID int) ([]frozenBinding, er
 	return bindings, rows.Err()
 }
 
-// terminalStepStatuses is db.StepTerminal's membership, as the SQL above needs
+// terminalStepStatuses is store.StepTerminal's membership, as the SQL above needs
 // it. It is derived from the constants rather than spelled as literals so a
 // tenth status added to the machine cannot go stale here — TestStepTerminal
 // StatusesMatchesStepTerminal pins the two together.
 var terminalStepStatuses = []string{
-	db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+	store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
 }
 
 func terminalStepStatusArgs() []any {

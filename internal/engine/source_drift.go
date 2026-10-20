@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -203,7 +203,7 @@ type SourceWarning struct {
 // version, or refused under F9 on changed bytes at an unchanged version, so a
 // bound workflow whose file disagrees is a divergence no one has ruled on.
 func checkBoundSources(
-	runIssues []*db.RunIssue, bindings map[int]*boundDefinition, inherited map[int]bool,
+	runIssues []*store.RunIssue, bindings map[int]*boundDefinition, inherited map[int]bool,
 	autoRegister bool,
 ) ([]SourceWarning, error) {
 	// One check per distinct bound workflow, in first-bound order, so the
