@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -47,7 +47,7 @@ type RunBudgetReport struct {
 	Floor float64 `json:"floor"`
 	// Reported is per-unit and NEVER summed across units: summing
 	// {tokens: 4000, seconds: 12} to 4012 would be core asserting those add up.
-	Reported []db.UnitTotal `json:"reported,omitempty"`
+	Reported []store.UnitTotal `json:"reported,omitempty"`
 	// Unit is `budget.unit` — which of the above, if any, the cap counts.
 	Unit string `json:"budget_unit,omitempty"`
 	// Spend is `max(reported, floor)`: the quantity the cap is compared to.
@@ -166,10 +166,10 @@ type RunReport struct {
 	// writers.
 	NoteRulings []RunNoteRuling `json:"note_rulings,omitempty"`
 
-	Gates       []db.VerdictCount   `json:"gates,omitempty"`
-	GateTrail   []db.ResultTrailRow `json:"gate_trail,omitempty"`
-	Actions     []db.VerdictCount   `json:"actions,omitempty"`
-	ActionTrail []db.ResultTrailRow `json:"action_trail,omitempty"`
+	Gates       []store.VerdictCount   `json:"gates,omitempty"`
+	GateTrail   []store.ResultTrailRow `json:"gate_trail,omitempty"`
+	Actions     []store.VerdictCount   `json:"actions,omitempty"`
+	ActionTrail []store.ResultTrailRow `json:"action_trail,omitempty"`
 
 	// Artifacts is the INDEX — id, kind, producer instance, sha256, bytes.
 	// NEVER THE BODIES. A rollup that inlined artifact bodies would turn a
@@ -212,14 +212,14 @@ type RunReport struct {
 
 	// Metadata is the genericity line at its thinnest: keys to distinct
 	// values with counts, verbatim and uninterpreted.
-	Metadata []db.MetadataKeyRollup `json:"metadata,omitempty"`
+	Metadata []store.MetadataKeyRollup `json:"metadata,omitempty"`
 
 	// VoteMetadata is the same rollup over CAST VOTES (DKT-71): every
 	// `--metadata` claim the run's vote-step proposals collected. Vote seats
 	// are the one spend the usage ledger cannot see — a vote step is never
 	// claimed — so this is where tribunal routing and cost claims become
 	// verifiable from the run document.
-	VoteMetadata []db.MetadataKeyRollup `json:"vote_metadata,omitempty"`
+	VoteMetadata []store.MetadataKeyRollup `json:"vote_metadata,omitempty"`
 
 	// VoteUsage is DKT-95: the seats' own spend reports, summed per unit —
 	// UsageByUnit's question asked of the casts, from the vote_usage ledger
@@ -227,7 +227,7 @@ type RunReport struct {
 	// 0). Beside VoteMetadata, this is what makes tribunal cost measurable
 	// from the run document instead of an absent zero awaiting an operator's
 	// backfill.
-	VoteUsage []db.UnitTotal `json:"vote_usage,omitempty"`
+	VoteUsage []store.UnitTotal `json:"vote_usage,omitempty"`
 
 	// VoteUsageCoverage is how many seat-casts reported their spend (DKT-257).
 	//
@@ -242,7 +242,7 @@ type RunReport struct {
 	// Core cannot supply the missing numbers — it cannot observe a
 	// conductor-side seat's spend — but it can stop the silence from looking
 	// like a zero.
-	VoteUsageCoverage db.VoteUsageCoverage `json:"vote_usage_coverage"`
+	VoteUsageCoverage store.VoteUsageCoverage `json:"vote_usage_coverage"`
 
 	// SilentVoteSeats is the identity behind VoteUsageCoverage.Silent
 	// (DKT-733): each cast that reported no spend — which seat, on which
@@ -285,7 +285,7 @@ type RunReport struct {
 	// WHICH steps already have usage — could be answered from no read verb at
 	// all, and conductors hand-filtered batches by trial and error across
 	// three sessions. `omitempty`, so a run whose ledger is empty is unchanged.
-	StepUsage []db.StepUsageRow `json:"step_usage,omitempty"`
+	StepUsage []store.StepUsageRow `json:"step_usage,omitempty"`
 
 	// MissingUsage is D2 asked WITHOUT its grace: every claimed step that
 	// reached a terminal status and has no ledger row, however recently.
@@ -613,7 +613,7 @@ type ClusterSourceAttribution struct {
 
 // LoadRunReport builds the document. IT WRITES NOTHING.
 func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
-	run, err := db.GetRun(conn, runID)
+	run, err := store.StoreOn(conn).GetRun(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -629,8 +629,8 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// internal/db caps the connection pool at ONE connection, so a pool read
 	// from inside an open transaction deadlocks permanently rather than
 	// failing. This function keeps every pool read above the
-	// db.BeginReadSnapshot call, and TestNoPoolReadsInsideTransactions covers
-	// the db.BeginReadSnapshot region, so a pool read moved below it fails
+	// store.BeginSQLiteReadSnapshot call, and TestNoPoolReadsInsideTransactions
+	// covers that region, so a pool read moved below it fails
 	// that test. A rollback that silently failed would leave the transaction
 	// open and turn the next of these into the deadlock.
 	//
@@ -641,31 +641,31 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	reported, err := db.UsageByUnit(conn, runID)
+	reported, err := store.StoreOn(conn).UsageByUnit(runID)
 	if err != nil {
 		return nil, err
 	}
-	facts, err := db.RunBudgetFactsFor(conn, runID)
+	facts, err := store.StoreOn(conn).RunBudgetFactsFor(runID)
 	if err != nil {
 		return nil, err
 	}
-	if report.Gates, err = db.GateRollup(conn, runID); err != nil {
+	if report.Gates, err = store.StoreOn(conn).GateRollup(runID); err != nil {
 		return nil, err
 	}
-	if report.GateTrail, err = db.GateTrail(conn, runID); err != nil {
+	if report.GateTrail, err = store.StoreOn(conn).GateTrail(runID); err != nil {
 		return nil, err
 	}
-	if report.Actions, err = db.ActionRollup(conn, runID); err != nil {
+	if report.Actions, err = store.StoreOn(conn).ActionRollup(runID); err != nil {
 		return nil, err
 	}
-	if report.ActionTrail, err = db.ActionTrail(conn, runID); err != nil {
+	if report.ActionTrail, err = store.StoreOn(conn).ActionTrail(runID); err != nil {
 		return nil, err
 	}
-	if report.Metadata, err = db.MetadataRollup(conn, runID); err != nil {
+	if report.Metadata, err = store.StoreOn(conn).MetadataRollup(runID); err != nil {
 		return nil, err
 	}
-	if report.VoteMetadata, err = db.VoteMetadataRollup(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
+	if report.VoteMetadata, err = store.StoreOn(conn).VoteMetadataRollup(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
 		return nil, err
 	}
 	// DKT-584: the vote-step key family alone missed every panel the run's
@@ -678,13 +678,13 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	if report.VoteUsage, err = db.VoteUsageRollup(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+	if report.VoteUsage, err = store.StoreOn(conn).VoteUsageRollup(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID),
 		extraProposalIDs...); err != nil {
 		return nil, err
 	}
-	if report.VoteUsageCoverage, err = db.VoteUsageCoverageFor(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+	if report.VoteUsageCoverage, err = store.StoreOn(conn).VoteUsageCoverageFor(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID),
 		extraProposalIDs...); err != nil {
 		return nil, err
 	}
@@ -695,7 +695,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if report.Findings, err = castFindings(conn, runID, extraProposalIDs); err != nil {
 		return nil, err
 	}
-	if report.StepUsage, err = db.UsageByStep(conn, runID); err != nil {
+	if report.StepUsage, err = store.StoreOn(conn).UsageByStep(runID); err != nil {
 		return nil, err
 	}
 	if report.Artifacts, err = artifactIndex(conn, runID); err != nil {
@@ -722,7 +722,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// it: effective status is a question about a set of rows at one instant, and
 	// a report that re-read between sections could count one step twice under
 	// two statuses.
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning the report: %w", err)
 	}
@@ -769,12 +769,12 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		if err != nil {
 			return nil, err
 		}
-		unit, err = db.BudgetUnitTx(tx, sched.run.ProjectID)
+		unit, err = store.TxOn(tx).BudgetUnitTx(sched.run.ProjectID)
 		if err != nil {
 			return nil, err
 		}
 		if unit != "" {
-			reportedInUnit, err = db.ReportedUsageTx(tx, runID, unit)
+			reportedInUnit, err = store.TxOn(tx).ReportedUsageTx(runID, unit)
 			if err != nil {
 				return nil, err
 			}
@@ -1133,12 +1133,12 @@ func abandonNote(routing string) string {
 func complementarityRollup(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
 ) ([]ClusterComplementarity, error) {
-	steps, err := db.ListRunSteps(conn, runID)
+	steps, err := store.StoreOn(conn).ListRunSteps(runID)
 	if err != nil {
 		return nil, err
 	}
 
-	byName := make(map[string][]*db.Step, len(steps))
+	byName := make(map[string][]*store.Step, len(steps))
 	for _, s := range steps {
 		byName[s.StepName] = append(byName[s.StepName], s)
 	}
@@ -1215,11 +1215,11 @@ func complementarityRollup(
 func latestAggregatePayload(
 	conn *sql.DB, stepID int, kind string,
 ) (payload []map[string]any, ok bool, err error) {
-	artifacts, err := db.ListStepArtifacts(conn, stepID)
+	artifacts, err := store.StoreOn(conn).ListStepArtifacts(stepID)
 	if err != nil {
 		return nil, false, err
 	}
-	var newest *db.Artifact
+	var newest *store.Artifact
 	for _, a := range artifacts {
 		if a.Kind == kind {
 			newest = a
@@ -1243,7 +1243,7 @@ func latestAggregatePayload(
 // latestAggregatePayload applies to the artifact: a retried step's earlier
 // rows describe rounds the newest artifact superseded.
 func recordedBelowFloor(conn *sql.DB, stepID int) ([]map[string]any, error) {
-	outputs, err := db.ActionOutputsFor(conn, stepID, workflow.ActionAggregate)
+	outputs, err := store.StoreOn(conn).ActionOutputsFor(stepID, workflow.ActionAggregate)
 	if err != nil {
 		return nil, err
 	}
@@ -1308,7 +1308,7 @@ func complementarityOf(sets ...[]map[string]any) (unique, corroborated int, dist
 // freshly validated workflow, but a restored database is not guaranteed to
 // have passed today's validation.
 func producerInputCount(
-	conn *sql.DB, spec *workflow.Step, issueID int, byName map[string][]*db.Step,
+	conn *sql.DB, spec *workflow.Step, issueID int, byName map[string][]*store.Step,
 ) (int, error) {
 	seen := make(map[string]bool)
 	total := 0
@@ -1322,7 +1322,7 @@ func producerInputCount(
 			if producer.IssueID != issueID {
 				continue
 			}
-			n, err := db.StepInputCount(conn, producer.ID)
+			n, err := store.StoreOn(conn).StepInputCount(producer.ID)
 			if err != nil {
 				return 0, err
 			}
@@ -1340,7 +1340,7 @@ func producerInputCount(
 func sourceAttributionRollup(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
 ) ([]ClusterSourceAttribution, error) {
-	steps, err := db.ListRunSteps(conn, runID)
+	steps, err := store.StoreOn(conn).ListRunSteps(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -1476,7 +1476,7 @@ func runStepExecutorsByInstance(conn *sql.DB, runID int) (map[string]string, err
 
 // artifactIndex is what was produced, never the bodies.
 func artifactIndex(conn *sql.DB, runID int) ([]ArtifactIndexEntry, error) {
-	artifacts, err := db.ListRunArtifacts(conn, runID)
+	artifacts, err := store.StoreOn(conn).ListRunArtifacts(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -1571,14 +1571,15 @@ type SilentVoteSeat struct {
 // keyed or run-named — is a conversational gate (the extraIDs' two halves,
 // per conversationalRunProposalIDs).
 func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat, error) {
-	rows, err := db.SilentVoteSeatsFor(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID), extraIDs...)
+	st := store.StoreOn(conn)
+	rows, err := st.SilentVoteSeatsFor(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID), extraIDs...)
 	if err != nil || len(rows) == 0 {
 		return nil, err
 	}
 
-	keyed, err := db.LookupIdempotencyKeys(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	keyed, err := st.LookupIdempotencyKeys(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1617,8 +1618,9 @@ func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat,
 // this verb must not be the one read surface that leaks what a seat found
 // before the tally closes. Its rows appear once the status leaves `open`.
 func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error) {
-	keyed, err := db.LookupIdempotencyKeys(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	st := store.StoreOn(conn)
+	keyed, err := st.LookupIdempotencyKeys(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1640,7 +1642,7 @@ func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error
 
 	var out []CastFinding
 	for _, id := range ids {
-		proposal, err := db.GetProposal(conn, id)
+		proposal, err := st.GetProposal(id)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s for its findings: %w",
 				model.FormatProposalID(id), err)
@@ -1648,7 +1650,7 @@ func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error
 		if proposal.SealedOpen() {
 			continue
 		}
-		votes, err := db.GetProposalVotes(conn, id)
+		votes, err := st.GetProposalVotes(id)
 		if err != nil {
 			return nil, fmt.Errorf("reading the casts of %s for their findings: %w",
 				model.FormatProposalID(id), err)
@@ -1700,8 +1702,9 @@ func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error
 // test, so an overlap would be harmless but a second spelling of that family
 // would not.
 func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
-	keyed, err := db.LookupIdempotencyKeys(
-		conn, db.ScopeVoteCreate, reapAckRunPrefix(runID))
+	st := store.StoreOn(conn)
+	keyed, err := st.LookupIdempotencyKeys(
+		store.ScopeVoteCreate, reapAckRunPrefix(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1714,7 +1717,7 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 		}
 	}
 
-	named, err := db.ProposalIDsNaming(conn, model.FormatRunID(runID))
+	named, err := st.ProposalIDsNaming(model.FormatRunID(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1730,7 +1733,7 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 	// activation-to-terminal window, is the run's too — the structured link
 	// is the attribution, where the text form above relies on the conductor
 	// having written the run id.
-	linked, err := linkedPanelAttributions(conn, db.ProposalRunLinkFilter{RunID: runID})
+	linked, err := linkedPanelAttributions(conn, store.ProposalRunLinkFilter{RunID: runID})
 	if err != nil {
 		return nil, err
 	}
@@ -1750,9 +1753,9 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 
 // configuredBudgetDefault reads `budget.default` for the cap source derivation.
 func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
-	entry, err := db.GetConfig(conn, projectID, db.KeyBudgetDefault)
+	entry, err := store.StoreOn(conn).GetConfig(projectID, store.KeyBudgetDefault)
 	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", db.KeyBudgetDefault, err)
+		return 0, fmt.Errorf("reading %s: %w", store.KeyBudgetDefault, err)
 	}
 	var value float64
 	if _, err := fmt.Sscanf(entry.Value, "%g", &value); err != nil {
@@ -1942,7 +1945,7 @@ func annotateStepRulings(tx *sql.Tx, runID int, attempts []StepAttempt) error {
 func annotateVoteOutcomes(
 	tx *sql.Tx, runID int, sched *Scheduler, attempts []StepAttempt,
 ) error {
-	voteSteps := make(map[string]*db.Step)
+	voteSteps := make(map[string]*store.Step)
 	for _, step := range sched.Steps() {
 		if step.Kind == workflow.TypeVote {
 			voteSteps[model.FormatStepID(step.ID)] = step
@@ -1952,8 +1955,9 @@ func annotateVoteOutcomes(
 		return nil
 	}
 
-	keys, err := db.LookupIdempotencyKeysTx(
-		tx, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	st := store.TxOn(tx)
+	keys, err := st.LookupIdempotencyKeysTx(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
 	if err != nil {
 		return err
 	}
@@ -1968,7 +1972,7 @@ func annotateVoteOutcomes(
 	for _, id := range keys {
 		ids = append(ids, id)
 	}
-	statuses, err := db.ProposalStatusesTx(tx, ids)
+	statuses, err := st.ProposalStatusesTx(ids)
 	if err != nil {
 		return err
 	}
@@ -1997,8 +2001,8 @@ func annotateVoteOutcomes(
 // falls inside the run's activation-to-terminal window. The window keeps a
 // panel about the same issue under an earlier or later run out of this one.
 // It returns the matching links, narrowed by filter.
-func linkedPanelAttributions(conn *sql.DB, filter db.ProposalRunLinkFilter) ([]db.ProposalRunLink, error) {
-	links, err := db.ProposalRunLinks(conn, filter)
+func linkedPanelAttributions(conn *sql.DB, filter store.ProposalRunLinkFilter) ([]store.ProposalRunLink, error) {
+	links, err := store.StoreOn(conn).ProposalRunLinks(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -2007,7 +2011,7 @@ func linkedPanelAttributions(conn *sql.DB, filter db.ProposalRunLinkFilter) ([]d
 		ok       bool
 	}
 	windows := make(map[int]window)
-	var out []db.ProposalRunLink
+	var out []store.ProposalRunLink
 	for _, link := range links {
 		w, cached := windows[link.RunID]
 		if !cached {
