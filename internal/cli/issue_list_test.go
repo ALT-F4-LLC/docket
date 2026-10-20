@@ -319,11 +319,11 @@ func TestIssueListBareJSONSelectsV2(t *testing.T) {
 	}
 }
 
-// TestIssueListJSONV1IsRejected: the v1 dialect is gone, and the refusal
-// points at the one dialect that remains. It runs the built binary because
-// the refusal an operator sees, its rendering and its exit code, comes from
-// the package Execute, which rootCmd.Execute alone does not run.
-func TestIssueListJSONV1IsRejected(t *testing.T) {
+// TestIssueListRejectsRetiredJSONDialect: the v1 dialect is gone, and the
+// refusal points at the one dialect that remains. It runs the built binary
+// because the refusal an operator sees, its rendering and its exit code, comes
+// from the package Execute, which rootCmd.Execute alone does not run.
+func TestIssueListRejectsRetiredJSONDialect(t *testing.T) {
 	bin := buildDocketBinary(t)
 	repo := t.TempDir()
 	if _, stderr, code := runDocket(t, bin, repo, "init"); code != 0 {

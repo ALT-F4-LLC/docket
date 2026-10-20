@@ -11,7 +11,7 @@ import (
 
 // TestNoGetBoolJSON guards the --json Bool→String conversion.
 //
-// --json is a string flag (with NoOptDefVal "v1"). pflag's GetBool on a string
+// --json is a string flag (with NoOptDefVal "v2"). pflag's GetBool on a string
 // flag returns (false, error), and every call site in this package discards the
 // error with `_`. So a reintroduced GetBool("json") does not fail loudly — it
 // silently returns false and drops that command out of JSON mode entirely.
