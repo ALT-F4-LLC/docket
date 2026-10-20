@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -84,7 +84,7 @@ type LoopOutcome struct {
 // outcome's — entered stays `fix-loop`, bounded becomes `waiting-human` — and
 // the caller re-derives the step's status from it.
 func applyFixLoop(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, routing string, nowMS int64,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, routing string, nowMS int64,
 ) (string, *LoopOutcome, error) {
 	if routing != workflow.OnFailFixLoop {
 		return routing, nil, nil
@@ -112,7 +112,7 @@ func applyFixLoop(
 // applyFixLoop that can park routes through here, so the refusal's wording
 // stays free to change without moving a classification: a park is bounded or
 // stalled because of what EnterLoop measured, not because a sentence says so.
-func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
+func loopBoundClass(outcome *LoopOutcome) (store.ParkClass, bool) {
 	if outcome == nil || outcome.Entered {
 		return "", false
 	}
@@ -124,9 +124,9 @@ func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 		return "", false
 	}
 	if outcome.Stalled {
-		return db.ParkClassLoopStalled, true
+		return store.ParkClassLoopStalled, true
 	}
-	return db.ParkClassLoopBound, true
+	return store.ParkClassLoopBound, true
 }
 
 // exhausted is the refused loop entry's outcome: where the exhaustion routes,
@@ -152,7 +152,7 @@ func loopBoundClass(outcome *LoopOutcome) (db.ParkClass, bool) {
 // recover. Written in the SAME transaction as the routing decision, so no
 // reader ever sees an exhaustion whose history has not landed yet.
 func exhausted(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, trigger string,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, trigger string,
 	ordinal, roundsRun, loopCap int, reason string, nowMS int64,
 ) (*LoopOutcome, error) {
 	routing := workflow.OnFailWaitingHuman
@@ -164,8 +164,8 @@ func exhausted(
 	if err != nil {
 		return nil, err
 	}
-	if err := db.SetStepLoopHistoryWithCapTx(
-		tx, step.ID, roundsRun, loopCap, step.Instance, verdict, nowMS,
+	if err := store.TxOn(tx).SetStepLoopHistoryWithCapTx(
+		step.ID, roundsRun, loopCap, step.Instance, verdict, nowMS,
 	); err != nil {
 		return nil, err
 	}
@@ -185,7 +185,7 @@ func exhausted(
 // It never substitutes the routing token. `fix-loop` is how the round was
 // routed, which the refusal already implies; a reader of the loop history asks
 // what the round concluded.
-func recordedVerdict(tx *sql.Tx, step *db.Step, spec *workflow.Step) (string, error) {
+func recordedVerdict(tx *sql.Tx, step *store.Step, spec *workflow.Step) (string, error) {
 	if spec == nil || spec.VerdictField == "" {
 		return "", nil
 	}
@@ -234,7 +234,7 @@ func recordedVerdict(tx *sql.Tx, step *db.Step, spec *workflow.Step) (string, er
 // operator a park they have to reason about and undo. The same direction
 // `issueHasRecordedChange` fails in, for the same reason: the guard must not
 // act on absence of evidence.
-func roundMovedNothing(tx *sql.Tx, step *db.Step, count int) (bool, error) {
+func roundMovedNothing(tx *sql.Tx, step *store.Step, count int) (bool, error) {
 	// count is the ordinal about to be entered, so `count-1` just ran and
 	// `count-2` is what it built on. At count = 1 there is no prior round to
 	// compare against: ordinal 0 is the original work, not a repeat of it.
@@ -284,7 +284,7 @@ func roundMovedNothing(tx *sql.Tx, step *db.Step, count int) (bool, error) {
 // Newest-first by artifact id, matching every other "the latest artifact wins"
 // read in the engine: a re-claimed step completing a second time records again,
 // and the last record is the one that describes the tree.
-func newestIssueDiffUpTo(tx *sql.Tx, step *db.Step, ordinal int) (hash, body string, err error) {
+func newestIssueDiffUpTo(tx *sql.Tx, step *store.Step, ordinal int) (hash, body string, err error) {
 	if ordinal < 0 {
 		return "", "", nil
 	}
@@ -349,7 +349,7 @@ func newestIssueDiffUpTo(tx *sql.Tx, step *db.Step, ordinal int) (hash, body str
 // "newest strictly below" so a cluster whose routing step skipped an ordinal
 // still compares against the last verdict it actually reached.
 func routingVerdictUnchanged(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, trigger string,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, trigger string,
 ) (bool, int, error) {
 	if step.Ordinal < 1 {
 		return false, 0, nil
@@ -399,7 +399,7 @@ func routingVerdictUnchanged(
 // because it recorded no conclusion at all — and parking a loop on that is
 // roundMovedNothing's degenerate-diff failure in a new place.
 func newestStepEmit(
-	tx *sql.Tx, step *db.Step, name, kind string, lo, hi int,
+	tx *sql.Tx, step *store.Step, name, kind string, lo, hi int,
 ) (string, int, error) {
 	if hi < lo || hi < 0 {
 		return "", 0, nil
@@ -465,7 +465,7 @@ type stalledVolume struct {
 // artifact, a payload with no bytes, and unparseable bytes are all absent
 // measurements, never flat ones — a guard must not act on absence of evidence.
 func volumeStalled(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, trigger string,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, trigger string,
 ) (*stalledVolume, error) {
 	spec := workflow.StepByName(def, trigger)
 	if spec == nil || spec.MaxStalledRounds == nil || *spec.MaxStalledRounds <= 0 {
@@ -560,7 +560,7 @@ func volumeStalled(
 // either way: every cluster's entries share one ordinal sequence and one
 // global ceiling.
 func EnterLoop(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, nowMS int64,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, nowMS int64,
 ) (*LoopOutcome, error) {
 	return enterLoop(tx, step, def, false, "", nowMS)
 }
@@ -587,13 +587,13 @@ func EnterLoop(
 // the note died on the SUPERSEDED park's row — RUN-51's fix@9 rendered zero
 // bytes of the judge-converged remedy the operator recorded when authorizing it.
 func EnterLoopAuthorized(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, note string, nowMS int64,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, note string, nowMS int64,
 ) (*LoopOutcome, error) {
 	return enterLoop(tx, step, def, true, note, nowMS)
 }
 
 func enterLoop(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition, authorized bool,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition, authorized bool,
 	note string, nowMS int64,
 ) (*LoopOutcome, error) {
 	// The TRIGGER is the routing step's name, and it selects the cluster: the
@@ -615,7 +615,7 @@ func enterLoop(
 	// two concurrent routings cannot both read the same pre-increment value and
 	// both conclude they are loop k+1. `max_fix_loops` bounding nothing is the
 	// failure mode "loops are bounded by construction" exists to exclude.
-	count, err := db.IncrementLoopCountTx(tx, step.RunID, step.IssueID)
+	count, err := store.TxOn(tx).IncrementLoopCountTx(step.RunID, step.IssueID)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +625,7 @@ func enterLoop(
 	// decision about one issue, recorded on its own row, so the declared
 	// policy stays what the author wrote for every other issue the workflow
 	// matches.
-	grants, err := db.LoopGrantsTx(tx, step.RunID, step.IssueID)
+	grants, err := store.TxOn(tx).LoopGrantsTx(step.RunID, step.IssueID)
 	if err != nil {
 		return nil, err
 	}
@@ -951,12 +951,12 @@ func issueBoundStep(def *workflow.Definition) *workflow.Step {
 // bounds rounds: a panel approving a round the soft cap already admits spends
 // no extension. An operator's `fix-round` never asks, so it is admitted past
 // the cap exactly as it is past the soft bound.
-func extensionPastHardCap(tx *sql.Tx, step *db.Step, def *workflow.Definition) (string, error) {
+func extensionPastHardCap(tx *sql.Tx, step *store.Step, def *workflow.Definition) (string, error) {
 	hard := maxFixLoopsHard(def)
 	if hard <= 0 {
 		return "", nil
 	}
-	ri, err := db.GetRunIssueTx(tx, step.RunID, step.IssueID)
+	ri, err := store.TxOn(tx).GetRunIssueTx(step.RunID, step.IssueID)
 	if err != nil {
 		return "", err
 	}
@@ -1021,7 +1021,7 @@ func clusterMaxFixLoops(def *workflow.Definition, trigger string) int {
 // Bodies SHARED between clusters (one `serves` list naming several triggers)
 // are counted wherever they ran: a shared body's round is a real round of every
 // cluster it serves, which is the conservative reading of a budget.
-func clusterRoundsUsed(tx *sql.Tx, step *db.Step, bodies []string) (int, error) {
+func clusterRoundsUsed(tx *sql.Tx, step *store.Step, bodies []string) (int, error) {
 	if len(bodies) == 0 {
 		return 0, nil
 	}
@@ -1077,7 +1077,7 @@ func clusterRoundsUsed(tx *sql.Tx, step *db.Step, bodies []string) (int, error) 
 // an operator was asked. The sweep is therefore written as an explicit
 // unclaimed-and-pending test rather than as a negation.
 func supersedeSweep(
-	tx *sql.Tx, step *db.Step, downstream map[string]bool, ordinal int, nowMS int64,
+	tx *sql.Tx, step *store.Step, downstream map[string]bool, ordinal int, nowMS int64,
 ) ([]string, error) {
 	if len(downstream) == 0 {
 		return nil, nil
@@ -1130,7 +1130,7 @@ func supersedeSweep(
 		// Only NOT-YET-CLAIMED instances. `pending` is the whole
 		// test: `ready` is computed and never stored, so a computed-ready step
 		// is a `pending` row and sweeps here correctly.
-		if status != db.StepPending {
+		if status != store.StepPending {
 			continue
 		}
 		sweep = append(sweep, candidate{id: id, instance: instance})
@@ -1143,7 +1143,7 @@ func supersedeSweep(
 
 	out := make([]string, 0, len(sweep))
 	for _, c := range sweep {
-		if err := db.SetStepStatusTx(tx, c.id, db.StepSuperseded, nowMS, nowMS); err != nil {
+		if err := store.TxOn(tx).SetStepStatusTx(c.id, store.StepSuperseded, nowMS, nowMS); err != nil {
 			return nil, err
 		}
 		if err := recordEvent(tx, eventRecord{
@@ -1256,7 +1256,7 @@ func downstreamClosure(def *workflow.Definition, roots []string) map[string]bool
 // per-input rather than per-step. Another cluster's bodies and chain are
 // likewise untouched: their rounds are their own triggers' to mint.
 func instantiateOrdinal(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition,
 	bodies, downstream map[string]bool, ordinal int, nowMS int64,
 ) ([]string, error) {
 	// The issue's subject, for `when` predicates — read from the SNAPSHOT, so a
@@ -1309,7 +1309,7 @@ func instantiateOrdinal(
 // the ledger. Every row in `instances` was written by THIS transaction's
 // expansion, so reading them back inside it is consistent by construction.
 func stampEntryRouting(
-	tx *sql.Tx, step *db.Step, instances []string, note string, nowMS int64,
+	tx *sql.Tx, step *store.Step, instances []string, note string, nowMS int64,
 ) error {
 	for _, instance := range instances {
 		var (
@@ -1324,11 +1324,11 @@ func stampEntryRouting(
 		if err != nil {
 			return fmt.Errorf("stamping the fix-round note on %s: %w", instance, err)
 		}
-		if status != db.StepPending {
+		if status != store.StepPending {
 			continue
 		}
-		if err := db.SetStepRoutingTx(
-			tx, id, workflow.OnFailFixLoop, note, db.StepPending, "", nowMS,
+		if err := store.TxOn(tx).SetStepRoutingTx(
+			id, workflow.OnFailFixLoop, note, store.StepPending, "", nowMS,
 		); err != nil {
 			return err
 		}
@@ -1337,7 +1337,7 @@ func stampEntryRouting(
 }
 
 func writeInstances(
-	tx *sql.Tx, step *db.Step, rows []workflow.StepInstance, nowMS int64,
+	tx *sql.Tx, step *store.Step, rows []workflow.StepInstance, nowMS int64,
 ) ([]string, error) {
 	out := make([]string, 0, len(rows))
 	for _, inst := range rows {
@@ -1345,7 +1345,7 @@ func writeInstances(
 		if err != nil {
 			return nil, err
 		}
-		err = db.InsertStepTx(tx, db.StepRow{
+		err = store.TxOn(tx).InsertStepTx(store.StepRow{
 			RunID: step.RunID, IssueID: step.IssueID, WorkflowID: step.WorkflowID,
 			StepName: inst.Name, Ordinal: inst.Ordinal, SiblingIndex: inst.SiblingIndex,
 			Instance: inst.Instance, Kind: inst.Kind, Executor: inst.Executor,
@@ -1385,7 +1385,7 @@ func writeInstances(
 // nothing to repair: its successor IS its routing step's new instance, which is
 // what the mapped lookup asks about.
 func ensureSupersededHaveSuccessors(
-	tx *sql.Tx, step *db.Step, def *workflow.Definition,
+	tx *sql.Tx, step *store.Step, def *workflow.Definition,
 	superseded []string, ordinal int, nowMS int64,
 ) ([]string, error) {
 	if len(superseded) == 0 {
@@ -1471,7 +1471,7 @@ func stepNamesAtOrdinal(tx *sql.Tx, runID, issueID, ordinal int) (map[string]boo
 // lands on the value the caller actually read. The two are the same under the
 // single-writer transaction this runs in; the absolute form stays right if that
 // ever stops being true, and says plainly which ordinal the issue is left at.
-func restoreLoopCount(tx *sql.Tx, step *db.Step, raised int) error {
+func restoreLoopCount(tx *sql.Tx, step *store.Step, raised int) error {
 	_, err := tx.Exec(
 		`UPDATE run_issues SET loop_count = ? WHERE run_id = ? AND issue_id = ?`,
 		raised-1, step.RunID, step.IssueID)
@@ -1485,7 +1485,7 @@ func restoreLoopCount(tx *sql.Tx, step *db.Step, raised int) error {
 // snapshotSubject reads the `when`-predicate subject from the issue snapshot
 // activation froze.
 func snapshotSubject(tx *sql.Tx, runID, issueID int) (workflow.Subject, error) {
-	ri, err := db.GetRunIssueTx(tx, runID, issueID)
+	ri, err := store.TxOn(tx).GetRunIssueTx(runID, issueID)
 	if err != nil {
 		return workflow.Subject{}, err
 	}
@@ -1537,13 +1537,13 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 		// The miss is this park's cause; a spent bound is a narrower one that
 		// supersedes it, because the operator's remedy differs — a join below
 		// quorum needs the siblings, a bounded loop needs authorization.
-		class := db.ParkClassJoinMissed
+		class := store.ParkClassJoinMissed
 		if bound, ok := loopBoundClass(loop); ok {
 			class = bound
 		}
 
-		if err := db.SetStepRoutingTx(
-			tx, step.ID, routing, reason, statusForRouting(routing), class, nowMS,
+		if err := store.TxOn(tx).SetStepRoutingTx(
+			step.ID, routing, reason, statusForRouting(routing), class, nowMS,
 		); err != nil {
 			return err
 		}
@@ -1573,7 +1573,7 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 		}
 		for _, row := range cascade {
 			if loaded := sched.stepByID[row.ID]; loaded != nil {
-				loaded.Status = db.StepSkipped
+				loaded.Status = store.StepSkipped
 			}
 		}
 
@@ -1617,8 +1617,8 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 // one for every step a loop entry actually superseded, so the two readings
 // agree wherever the sweep reached — and disagree only where it never did,
 // which is precisely where the routing must stay live.
-func StaleLineage(tx *sql.Tx, step *db.Step) (bool, error) {
-	ri, err := db.GetRunIssueTx(tx, step.RunID, step.IssueID)
+func StaleLineage(tx *sql.Tx, step *store.Step) (bool, error) {
+	ri, err := store.TxOn(tx).GetRunIssueTx(step.RunID, step.IssueID)
 	if err != nil {
 		return false, err
 	}
