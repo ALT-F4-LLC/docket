@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -43,6 +43,7 @@ root, not alone.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		conn := getDB(cmd)
+		st := store.StoreOn(conn)
 
 		id, err := issueArg(args[0])
 		if err != nil {
@@ -98,7 +99,7 @@ root, not alone.`,
 			// must still record --note, since the two-verb form it replaces
 			// would have.
 			if ifVersion != nil || note != "" {
-				if err := db.UpdateIssueCASNote(conn, id, nil, config.DefaultAuthor(), ifVersion, note); err != nil {
+				if err := st.UpdateIssueCASNote(id, nil, config.DefaultAuthor(), ifVersion, note); err != nil {
 					if e := casError(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
 						return e
 					}
@@ -116,14 +117,14 @@ root, not alone.`,
 			return nil
 		}
 
-		if err := db.UpdateIssueCASNote(conn, id, map[string]interface{}{"status": string(newStatus)}, config.DefaultAuthor(), ifVersion, note); err != nil {
+		if err := st.UpdateIssueCASNote(id, map[string]interface{}{"status": string(newStatus)}, config.DefaultAuthor(), ifVersion, note); err != nil {
 			if e := casError(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
 				return e
 			}
 			return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
 		}
 
-		issue, err = db.GetIssue(conn, id)
+		issue, err = st.GetIssue(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}
@@ -149,16 +150,16 @@ func moveIssueToProject(cmd *cobra.Command, id int, target string) error {
 		return err
 	}
 
-	ids, err := db.MoveIssueProject(conn, id, project.ID, config.DefaultAuthor(), time.Now().UnixMilli())
+	ids, err := store.StoreOn(conn).MoveIssueProject(id, project.ID, config.DefaultAuthor(), time.Now().UnixMilli())
 	switch {
-	case errors.Is(err, db.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound):
 		return cmdErr(fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
-	case errors.Is(err, db.ErrIssueHasParent):
+	case errors.Is(err, store.ErrIssueHasParent):
 		return cmdErr(fmt.Errorf(
 			"issue %s has a parent; a sub-issue migrates with its root — migrate "+
 				"the root, or reparent with `issue edit --parent none` first",
 			model.FormatID(id)), output.ErrValidation)
-	case errors.Is(err, db.ErrIssueInRun):
+	case errors.Is(err, store.ErrIssueInRun):
 		return cmdErr(fmt.Errorf(
 			"issue %s (or one of its sub-issues) belongs to a run; a run's records "+
 				"are project-scoped and would be stranded", model.FormatID(id)),

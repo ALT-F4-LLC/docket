@@ -7,10 +7,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/dustin/go-humanize"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -46,6 +46,7 @@ var logCmd = &cobra.Command{
 
 func runIssueLog(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
+	st := store.StoreOn(conn)
 
 	id, err := issueArg(args[0])
 	if err != nil {
@@ -64,12 +65,12 @@ func runIssueLog(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// validateLimit has already rejected negatives under v2.
 	limit = max(limit, 1)
 
-	activity, err := db.GetActivity(conn, id, limit)
+	activity, err := st.GetActivity(id, limit)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
 	}
 
-	entryTotal, err := db.CountActivity(conn, id)
+	entryTotal, err := st.CountActivity(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("counting activity: %w", err), output.ErrGeneral)
 	}
