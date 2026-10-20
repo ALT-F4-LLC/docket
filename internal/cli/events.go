@@ -85,7 +85,9 @@ the raw bytes, because the consumer there is a program.`,
 		if follow, _ := cmd.Flags().GetBool("follow"); follow {
 			return runEventsFollow(cmd)
 		}
-		return runEventsList(cmd, getWriter(cmd))
+		return watchable(cmd, args, func(cmd *cobra.Command, _ []string, w *output.Writer) error {
+			return runEventsList(cmd, w)
+		})
 	},
 }
 
@@ -365,7 +367,7 @@ func init() {
 	// [--since SEQ]`; the flag lands on `list` because that is where the rows
 	// are.
 	eventsListCmd.Flags().Bool(
-		"follow", false, "Poll for new events and print them as they arrive (Ctrl-C to stop)")
+		"follow", false, "Stream new events and print them as they arrive (Ctrl-C to stop)")
 
 	// `--interval` IS NOT DECLARED HERE. It already exists as a PERSISTENT root
 	// flag serving `--watch`, with a 500ms floor enforced in PersistentPreRunE
@@ -374,9 +376,9 @@ func init() {
 	// with different validation — two flags of one name, one of which silently
 	// bypasses the other's floor.
 	//
-	// So `events list` joins `watchEligible` instead, and `--follow` reads the
-	// flag that was already there. The poll period therefore has ONE definition,
-	// one default, and one minimum, across every verb that polls.
+	// So `events list` joins `watchEligible` instead: `--watch` polls on the
+	// flag, and `--follow` uses it as its stream's wake period. The period
+	// therefore has ONE definition, one default, and one minimum.
 
 	eventsCmd.AddCommand(eventsListCmd)
 	rootCmd.AddCommand(eventsCmd)
