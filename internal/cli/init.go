@@ -34,6 +34,14 @@ var initCmd = &cobra.Command{
 			cfg = config.LocalAt(cwd)
 		}
 
+		clientPath, created, err := ensureClientConfig()
+		if err != nil {
+			return userConfigCmdError(err)
+		}
+		if created {
+			w.Info("Client config created at %s", clientPath)
+		}
+
 		exists, err := cfg.Exists()
 		if err != nil {
 			return cmdErr(fmt.Errorf("checking database: %w", err), output.ErrGeneral)
@@ -121,6 +129,26 @@ var initCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// ensureClientConfig creates the client config with no profiles when none
+// exists, and reports whether it did. An existing file is left untouched,
+// unread, so a client config problem never blocks initializing a store.
+func ensureClientConfig() (path string, created bool, err error) {
+	path, err = config.ClientConfigPath()
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return path, false, nil
+	} else if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("checking the client config %s: %w", path, err)
+	}
+	empty := config.ClientConfig{Version: config.ClientConfigVersion}
+	if err := writePrivateTOML(path, "the client config", empty); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
 }
 
 func init() {

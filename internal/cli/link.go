@@ -73,7 +73,7 @@ func runProjectLink(cmd *cobra.Command, args []string) error {
 
 	client, err := config.LoadClientConfig()
 	if err != nil {
-		return linkCmdError(err)
+		return userConfigCmdError(err)
 	}
 	if _, ok := client.Profiles[profile]; profile != "" && !ok {
 		return cmdErr(fmt.Errorf("profile %q is not defined: %s has no [profile.%s] table", profile, client.Path, profile),
@@ -83,11 +83,11 @@ func runProjectLink(cmd *cobra.Command, args []string) error {
 	path := filepath.Join(filepath.Dir(client.Path), "links.toml")
 	links, err := loadLinkFile(path)
 	if err != nil {
-		return linkCmdError(err)
+		return userConfigCmdError(err)
 	}
 	links.Links[cfg.Identity] = linkEntry{Profile: profile, ProjectID: projectID}
-	if err := writeLinkFile(path, links); err != nil {
-		return linkCmdError(err)
+	if err := writePrivateTOML(path, "the link file", links); err != nil {
+		return userConfigCmdError(err)
 	}
 
 	target := profile
@@ -135,23 +135,25 @@ func loadLinkFile(path string) (*linkFile, error) {
 	return &lf, nil
 }
 
-// writeLinkFile publishes the link file atomically: the directory is created
-// 0700, and a 0600 temp file in it is synced and renamed over the target, so
-// a reader sees the whole old file or the whole new one.
-func writeLinkFile(path string, lf *linkFile) error {
+// writePrivateTOML publishes a user-level TOML file (the link file, the client
+// config) atomically under the trust file's integrity rules: the directory is
+// created 0700, and a 0600 temp file in it is synced and renamed over the
+// target, so a reader sees the whole old file or the whole new one. what names
+// the file in errors.
+func writePrivateTOML(path, what string, v any) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
 	// Checked again at write time: the directory may have been created or
 	// replaced since the read.
-	if err := trust.CheckPrivateFile(path, "the link file"); err != nil {
+	if err := trust.CheckPrivateFile(path, what); err != nil {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(dir, ".links-*.toml")
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
 	if err != nil {
-		return fmt.Errorf("writing the link file %s: %w", path, err)
+		return fmt.Errorf("writing %s %s: %w", what, path, err)
 	}
 	tmpPath := tmp.Name()
 	defer func() {
@@ -160,27 +162,27 @@ func writeLinkFile(path string, lf *linkFile) error {
 	}()
 
 	if err := tmp.Chmod(0o600); err != nil {
-		return fmt.Errorf("writing the link file %s: %w", path, err)
+		return fmt.Errorf("writing %s %s: %w", what, path, err)
 	}
-	if err := toml.NewEncoder(tmp).Encode(lf); err != nil {
-		return fmt.Errorf("writing the link file %s: %w", path, err)
+	if err := toml.NewEncoder(tmp).Encode(v); err != nil {
+		return fmt.Errorf("writing %s %s: %w", what, path, err)
 	}
 	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("writing the link file %s: %w", path, err)
+		return fmt.Errorf("writing %s %s: %w", what, path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("writing the link file %s: %w", path, err)
+		return fmt.Errorf("writing %s %s: %w", what, path, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("writing the link file %s: %w", path, err)
+		return fmt.Errorf("writing %s %s: %w", what, path, err)
 	}
 	return nil
 }
 
-// linkCmdError maps a client-config or link-file failure onto the error
+// userConfigCmdError maps a client-config or link-file failure onto the error
 // taxonomy: a file that fails its integrity checks or does not parse is the
 // operator's to fix (VALIDATION_ERROR); a filesystem refusal is not.
-func linkCmdError(err error) error {
+func userConfigCmdError(err error) error {
 	switch {
 	case errors.Is(err, trust.ErrIntegrity),
 		errors.Is(err, config.ErrClientConfigParse),

@@ -51,6 +51,14 @@ a typo fails here rather than silently storing something nothing reads.
   context.warn_bytes   integer    context size that triggers a warning
   context.error_bytes  integer    context size that triggers an error
 
+One client key is written to the client config, client.toml in the user
+config directory ($XDG_CONFIG_HOME/docket, default ~/.config/docket), not to
+the database:
+
+  default_profile      profile    the [profile.<name>] table used when nothing
+                                  else selects one; "" means the local daemon
+                                  socket
+
 A CLASS IS A STEP'S class FIELD, AND IT DEFAULTS TO THE EXECUTOR NAME.
 A step that declares no class carries its executor's name in that column, so
 lease.ttl.read binds nothing unless your steps actually declare class = "read".
@@ -68,6 +76,10 @@ mid-run.`,
 		conn := getDB(cmd)
 
 		key, value := args[0], args[1]
+
+		if key == clientDefaultProfileKey {
+			return setClientDefaultProfile(cmd, value)
+		}
 
 		// Project-scoped by default (v12): the value applies to this project
 		// and no other. --global writes the store-wide default every project
@@ -126,6 +138,11 @@ nothing.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
+
+		if len(args) == 1 && args[0] == clientDefaultProfileKey {
+			return getClientDefaultProfile(cmd)
+		}
+
 		st := store.StoreOn(getDB(cmd))
 
 		projectID := getProjectID(cmd)
@@ -205,6 +222,63 @@ func formatConfigEntries(entries []store.ConfigEntry) string {
 		}
 	}
 	return b.String()
+}
+
+// clientDefaultProfileKey is the one key `config set` and `config get` route to
+// the client config file instead of the database.
+const clientDefaultProfileKey = "default_profile"
+
+// refuseGlobalForClientKey refuses --global on a client key: the client config is
+// per-user, not per-project, so the flag has nothing to select.
+func refuseGlobalForClientKey(cmd *cobra.Command) error {
+	if global, _ := cmd.Flags().GetBool("global"); global {
+		return cmdErr(fmt.Errorf("%s is a client config key, not a project setting; --global does not apply", clientDefaultProfileKey),
+			output.ErrValidation)
+	}
+	return nil
+}
+
+// setClientDefaultProfile updates default_profile in the client config file in
+// place, keeping its path, mode 0600, and every other setting. The value must
+// name a [profile.<name>] table, or be empty for the local daemon socket, so
+// the file still loads afterwards.
+func setClientDefaultProfile(cmd *cobra.Command, profile string) error {
+	if err := refuseGlobalForClientKey(cmd); err != nil {
+		return err
+	}
+	client, err := config.LoadClientConfig()
+	if err != nil {
+		return userConfigCmdError(err)
+	}
+	if _, ok := client.Profiles[profile]; profile != "" && !ok {
+		return cmdErr(fmt.Errorf("profile %q is not defined: %s has no [profile.%s] table", profile, client.Path, profile),
+			output.ErrValidation)
+	}
+	client.DefaultProfile = profile
+	if err := writePrivateTOML(client.Path, "the client config", client); err != nil {
+		return userConfigCmdError(err)
+	}
+	getWriter(cmd).Success(store.ConfigEntry{Key: clientDefaultProfileKey, Value: profile, Source: "set"},
+		fmt.Sprintf("Set %s = %s in %s", clientDefaultProfileKey, profile, client.Path))
+	return nil
+}
+
+// getClientDefaultProfile reads default_profile from the client config file.
+// An empty value is the local daemon socket, reported with source "default".
+func getClientDefaultProfile(cmd *cobra.Command) error {
+	if err := refuseGlobalForClientKey(cmd); err != nil {
+		return err
+	}
+	client, err := config.LoadClientConfig()
+	if err != nil {
+		return userConfigCmdError(err)
+	}
+	entry := store.ConfigEntry{Key: clientDefaultProfileKey, Value: client.DefaultProfile, Source: "set"}
+	if entry.Value == "" {
+		entry.Source = "default"
+	}
+	getWriter(cmd).Success(entry, configValueForHuman(entry))
+	return nil
 }
 
 func init() {
