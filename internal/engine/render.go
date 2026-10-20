@@ -9,8 +9,8 @@ import (
 	"os"
 	"text/template"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -154,7 +154,7 @@ func RenderStepAs(
 		bundle.Step.Executor = executor
 	}
 
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +290,7 @@ func templateSource(
 		return defaultPacket, "default", true, nil
 	}
 
-	pins, err := db.ListPins(conn, runID)
+	pins, err := store.StoreOn(conn).ListPins(runID)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -305,7 +305,7 @@ func templateSource(
 	}
 	var pinnedHash string
 	for _, p := range pins {
-		if p.Kind == db.PinKindFile && wanted[p.Ref] {
+		if p.Kind == store.PinKindFile && wanted[p.Ref] {
 			pinnedHash = p.SHA256
 			break
 		}

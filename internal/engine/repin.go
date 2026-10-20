@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // REPIN — the recovery half of the pin story (DKT-408).
@@ -196,8 +196,8 @@ func repinRunOptsIn(
 	// refuses cleanly rather than reporting drift it would then refuse to fix.
 	// It is re-checked inside the transaction below; this read exists for the
 	// error, not for the guarantee.
-	run, err := db.GetRun(conn, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := store.StoreOn(conn).GetRun(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -269,7 +269,7 @@ func repinRunOptsIn(
 			// so there is no reading of "unreferenced" that could justify
 			// retiring one. --drop-unresolvable leaves them to the refusal
 			// below rather than quietly widening its own meaning.
-			if v.Kind != db.PinKindFile {
+			if v.Kind != store.PinKindFile {
 				if named {
 					return nil, validationErr(
 						"--drop %s names a %s pin; only file pins can be dropped — a "+
@@ -396,7 +396,7 @@ func repinRunOptsIn(
 
 	// The guards re-run against the transaction's snapshot: everything below
 	// holds at the moment the agreement moves, not merely when the verb began.
-	fresh, err := db.GetRunTx(tx, runID)
+	fresh, err := store.TxOn(tx).GetRunTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +577,7 @@ func closureAdditions(
 			continue
 		}
 		adds = append(adds, RepinChange{
-			Kind: db.PinKindFile, Ref: u.ref,
+			Kind: store.PinKindFile, Ref: u.ref,
 			OldSHA256: "", NewSHA256: u.sha256,
 			Path: u.path, Added: true,
 		})
@@ -621,7 +621,8 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 	// claimed step's packet was rendered under the old agreement, and its later
 	// renders and its completion would land under the new one — the exact
 	// straddle that would falsify its provenance the moment it recorded.
-	steps, err := db.ListRunStepsTx(tx, runID)
+	st := store.TxOn(tx)
+	steps, err := st.ListRunStepsTx(runID)
 	if err != nil {
 		return fmt.Errorf("collecting %s's claimed steps: %w", runRef, err)
 	}
@@ -640,7 +641,7 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 	// live, which understates what a reap would clear but never misdirects.
 	var live, lapsed []string
 	for _, step := range steps {
-		if step.Status != db.StepClaimed {
+		if step.Status != store.StepClaimed {
 			continue
 		}
 		if leaseLapsed(step, nowMS) {
@@ -683,12 +684,12 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 	// A manifest is a frozen copy of one `next` answer. Repinning under an open
 	// one would hand its relay rows whose packets no longer mean what the
 	// manifest's reader saw at open time.
-	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
+	if open, err := st.OpenDispatchTx(runID); err == nil {
 		return conflictErr(
 			"a dispatch is open for %s (%s, expiring at %d); close or abandon it "+
 				"before repinning — its manifest was offered under the current pins",
 			runRef, FormatDispatchID(open.ID), open.ExpiresMS)
-	} else if !errors.Is(err, db.ErrNoOpenDispatch) {
+	} else if !errors.Is(err, store.ErrNoOpenDispatch) {
 		return err
 	}
 
@@ -700,7 +701,7 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 	if err := tx.QueryRow(
 		`SELECT COUNT(*) FROM steps
 		  WHERE run_id = ? AND status NOT IN (?, ?, ?, ?)`,
-		runID, db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		runID, store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
 	).Scan(&remaining); err != nil {
 		return fmt.Errorf("counting %s's remaining steps: %w", runRef, err)
 	}
