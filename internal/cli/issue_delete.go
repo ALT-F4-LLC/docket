@@ -1,15 +1,14 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -25,7 +24,7 @@ var deleteCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		force, _ := cmd.Flags().GetBool("force")
 		orphan, _ := cmd.Flags().GetBool("orphan")
@@ -50,7 +49,7 @@ var deleteCmd = &cobra.Command{
 			return cmdErr(err, output.ErrValidation)
 		}
 
-		issue, err := db.GetIssue(conn, id)
+		issue, err := st.GetIssue(id)
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
 				return e
@@ -58,14 +57,14 @@ var deleteCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 		}
 
-		subIssues, err := db.GetSubIssues(conn, id)
+		subIssues, err := st.GetSubIssues(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("checking sub-issues: %w", err), output.ErrGeneral)
 		}
 
 		// No sub-issues: simple delete.
 		if len(subIssues) == 0 {
-			if err := db.DeleteIssue(conn, id); err != nil {
+			if err := st.DeleteIssue(id); err != nil {
 				return cmdErr(fmt.Errorf("deleting issue: %w", err), output.ErrGeneral)
 			}
 			w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s: %s", model.FormatID(id), issue.Title))
@@ -74,11 +73,11 @@ var deleteCmd = &cobra.Command{
 
 		// Sub-issues exist: handle based on flags.
 		if force {
-			return doCascadeDelete(w, conn, id, issue.Title, len(subIssues))
+			return doCascadeDelete(w, st, id, issue.Title, len(subIssues))
 		}
 
 		if orphan {
-			return doOrphanDelete(w, conn, id, issue.Title, len(subIssues))
+			return doOrphanDelete(w, st, id, issue.Title, len(subIssues))
 		}
 
 		// JSON mode requires explicit flag when sub-issues exist.
@@ -114,9 +113,9 @@ var deleteCmd = &cobra.Command{
 
 		switch choice {
 		case "cascade":
-			return doCascadeDelete(w, conn, id, issue.Title, len(subIssues))
+			return doCascadeDelete(w, st, id, issue.Title, len(subIssues))
 		case "orphan":
-			return doOrphanDelete(w, conn, id, issue.Title, len(subIssues))
+			return doOrphanDelete(w, st, id, issue.Title, len(subIssues))
 		case "cancel":
 			w.Info("Cancelled.")
 		}
@@ -125,19 +124,19 @@ var deleteCmd = &cobra.Command{
 	},
 }
 
-func doCascadeDelete(w *output.Writer, conn *sql.DB, id int, title string, subCount int) error {
-	if err := db.CascadeDeleteIssue(conn, id); err != nil {
+func doCascadeDelete(w *output.Writer, st store.Store, id int, title string, subCount int) error {
+	if err := st.CascadeDeleteIssue(id); err != nil {
 		return cmdErr(fmt.Errorf("cascade deleting issue: %w", err), output.ErrGeneral)
 	}
 	w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s: %s (and %d sub-issue(s))", model.FormatID(id), title, subCount))
 	return nil
 }
 
-func doOrphanDelete(w *output.Writer, conn *sql.DB, id int, title string, subCount int) error {
-	if err := db.OrphanSubIssues(conn, id, config.DefaultAuthor()); err != nil {
+func doOrphanDelete(w *output.Writer, st store.Store, id int, title string, subCount int) error {
+	if err := st.OrphanSubIssues(id, config.DefaultAuthor()); err != nil {
 		return cmdErr(fmt.Errorf("orphaning sub-issues: %w", err), output.ErrGeneral)
 	}
-	if err := db.DeleteIssue(conn, id); err != nil {
+	if err := st.DeleteIssue(id); err != nil {
 		return cmdErr(fmt.Errorf("deleting issue: %w", err), output.ErrGeneral)
 	}
 	w.Success(deleteResult{ID: model.FormatID(id)}, fmt.Sprintf("Deleted %s: %s (orphaned %d sub-issue(s))", model.FormatID(id), title, subCount))

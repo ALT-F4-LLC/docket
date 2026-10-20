@@ -8,10 +8,10 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -54,6 +54,7 @@ issue with live steps in a live run.`,
 // assert the warning somewhere other than where an operator reads it.
 func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
+	st := store.StoreOn(conn)
 
 	id, err := issueArg(args[0])
 	if err != nil {
@@ -134,7 +135,7 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	if cmd.Flags().Changed("file") {
 		fileFlag, _ := cmd.Flags().GetStringSlice("file")
-		if err := db.SetIssueFiles(conn, id, fileFlag, config.DefaultAuthor()); err != nil {
+		if err := st.SetIssueFiles(id, fileFlag, config.DefaultAuthor()); err != nil {
 			return cmdErr(fmt.Errorf("setting files: %w", err), output.ErrGeneral)
 		}
 		filesChanged = true
@@ -155,7 +156,7 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 			if newParentID == id {
 				return cmdErr(fmt.Errorf("cannot set parent to self"), output.ErrValidation)
 			}
-			isCycle, err := db.IsDescendant(conn, id, newParentID)
+			isCycle, err := st.IsDescendant(id, newParentID)
 			if err != nil {
 				return cmdErr(fmt.Errorf("checking for cycles: %w", err), output.ErrGeneral)
 			}
@@ -199,7 +200,7 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	if len(updates) == 0 && !filesChanged && !scopeChanged {
 		if w.JSONMode {
-			issue, err := db.GetIssue(conn, id)
+			issue, err := st.GetIssue(id)
 			if err != nil {
 				return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 			}
@@ -219,7 +220,7 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	if len(updates) > 0 || ifVersion != nil {
-		if err := db.UpdateIssueCAS(conn, id, updates, config.DefaultAuthor(), ifVersion); err != nil {
+		if err := st.UpdateIssueCAS(id, updates, config.DefaultAuthor(), ifVersion); err != nil {
 			if e := casError(err, fmt.Sprintf("issue %s", args[0])); e != nil {
 				return e
 			}
@@ -238,7 +239,7 @@ func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
 		warnings = append(warnings, descriptionWarnings...)
 	}
 
-	updated, err := db.GetIssue(conn, id)
+	updated, err := st.GetIssue(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 	}

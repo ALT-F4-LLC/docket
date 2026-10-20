@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -119,18 +119,19 @@ var commentAddCmd = &cobra.Command{
 			return err
 		}
 
-		commentID, err := db.CreateCommentIdempotent(conn, &comment, idempotencyKey)
+		st := store.StoreOn(conn)
+		commentID, err := st.CreateCommentIdempotent(&comment, idempotencyKey)
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("issue %s", args[0])); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrConflict) {
+			if errors.Is(err, store.ErrConflict) {
 				return cmdErr(err, output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
 		}
 
-		created, err := db.GetComment(conn, commentID)
+		created, err := st.GetComment(commentID)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching created comment: %w", err), output.ErrGeneral)
 		}
