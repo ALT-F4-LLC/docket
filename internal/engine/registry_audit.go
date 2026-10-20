@@ -7,8 +7,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // CROSS-PROJECT REGISTRY DRIFT (DKT-614): auto-registration adopts the corpus's
@@ -302,7 +302,8 @@ type RegistryAuditOptions struct {
 func AuditRegistries(
 	conn *sql.DB, index *CorpusIndex, opts RegistryAuditOptions,
 ) (*RegistryAudit, error) {
-	projects, err := db.ListProjects(conn)
+	st := store.StoreOn(conn)
+	projects, err := st.ListProjects()
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
 	}
@@ -312,7 +313,7 @@ func AuditRegistries(
 		if opts.ProjectID != 0 && p.ID != opts.ProjectID {
 			continue
 		}
-		one, err := auditProject(conn, index, p)
+		one, err := auditProject(st, index, p)
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +334,7 @@ type registered struct {
 }
 
 func auditProject(
-	conn *sql.DB, index *CorpusIndex, p *model.Project,
+	st store.Store, index *CorpusIndex, p *model.Project,
 ) (*ProjectRegistryAudit, error) {
 	out := &ProjectRegistryAudit{
 		ProjectID: p.ID, Project: p.Name, Prefix: p.Prefix, Identity: p.Identity,
@@ -344,7 +345,7 @@ func auditProject(
 	// asking what the registry HOLDS. An orphan whose versions were all retired
 	// last week is a finished cleanup, and reporting it as finished is more use
 	// than not reporting it at all.
-	workflows, _, err := db.ListWorkflows(conn, db.WorkflowListOptions{ProjectID: p.ID})
+	workflows, _, err := st.ListWorkflows(store.WorkflowListOptions{ProjectID: p.ID})
 	if err != nil {
 		return nil, fmt.Errorf("listing workflows for project %d: %w", p.ID, err)
 	}
@@ -354,7 +355,7 @@ func auditProject(
 	}
 	out.Compared += classify(out, index, RegistrationKindWorkflow, byName)
 
-	schemas, _, err := db.ListSchemas(conn, db.SchemaListOptions{ProjectID: p.ID})
+	schemas, _, err := st.ListSchemas(store.SchemaListOptions{ProjectID: p.ID})
 	if err != nil {
 		return nil, fmt.Errorf("listing schemas for project %d: %w", p.ID, err)
 	}

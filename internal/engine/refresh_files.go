@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The mid-run attachment-list refresh: the scope refresh's exception
@@ -69,8 +69,9 @@ func RefreshIssueFilesInRun(
 	}
 	defer tx.Rollback()
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -117,7 +118,7 @@ func RefreshIssueFilesInRun(
 	}
 	frozen := *snapshot.Files
 
-	live, err := db.GetIssueFilesTx(tx, issueID)
+	live, err := st.GetIssueFilesTx(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the live attachment list for %s: %w",
 			model.FormatID(issueID), err)
@@ -158,7 +159,7 @@ func RefreshIssueFilesInRun(
 	case err != nil:
 		return nil, err
 	}
-	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
+	if open, err := st.OpenDispatchTx(runID); err == nil {
 		return nil, conflictErr(
 			"a dispatch is open for %s (%s, expiring at %d); close or abandon "+
 				"it before refreshing — its manifest was offered under the "+
@@ -166,7 +167,7 @@ func RefreshIssueFilesInRun(
 				"claim rows whose packets no longer carry what the manifest's "+
 				"reader saw",
 			run.Ref(), FormatDispatchID(open.ID), open.ExpiresMS)
-	} else if !errors.Is(err, db.ErrNoOpenDispatch) {
+	} else if !errors.Is(err, store.ErrNoOpenDispatch) {
 		return nil, err
 	}
 
@@ -175,7 +176,7 @@ func RefreshIssueFilesInRun(
 	if err != nil {
 		return nil, fmt.Errorf("serializing the refreshed snapshot: %w", err)
 	}
-	if err := db.SetRunIssueSnapshotTx(tx, runID, issueID, string(refreshed)); err != nil {
+	if err := st.SetRunIssueSnapshotTx(runID, issueID, string(refreshed)); err != nil {
 		return nil, err
 	}
 
