@@ -1,15 +1,14 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -61,6 +60,7 @@ same flag.`,
 
 func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
+	st := store.StoreOn(conn)
 
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
@@ -145,8 +145,8 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		if err != nil {
 			return cmdErr(err, output.ErrValidation)
 		}
-		run, err := db.GetRun(conn, id)
-		if errors.Is(err, db.ErrRunNotFound) {
+		run, err := st.GetRun(id)
+		if errors.Is(err, store.ErrRunNotFound) {
 			return cmdErr(fmt.Errorf("run %s not found", model.FormatRunID(id)),
 				output.ErrNotFound)
 		}
@@ -160,7 +160,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		// with a project that does not own the issues, and under a machine-global
 		// store the run being read is routinely another project's.
 		if run.ProjectID != 0 && run.ProjectID != projectID {
-			project, err := db.GetProject(conn, run.ProjectID)
+			project, err := st.GetProject(run.ProjectID)
 			if err != nil {
 				return cmdErr(fmt.Errorf("reading the run's project: %w", err),
 					output.ErrGeneral)
@@ -176,7 +176,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		all = true
 	}
 
-	opts := db.ListOptions{
+	opts := store.ListOptions{
 		ProjectID:   projectID,
 		RunID:       runID,
 		Statuses:    statuses,
@@ -208,12 +208,12 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
-	issues, total, err := db.ListIssues(conn, opts)
+	issues, total, err := st.ListIssues(opts)
 	if err != nil {
 		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
 	}
 
-	if err := db.HydrateDocs(conn, issues); err != nil {
+	if err := st.HydrateDocs(issues); err != nil {
 		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
@@ -252,7 +252,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 			for id := range missingParentIDs {
 				ids = append(ids, id)
 			}
-			parentMap, err = db.GetIssuesByIDs(conn, ids)
+			parentMap, err = st.GetIssuesByIDs(ids)
 			if err != nil {
 				return cmdErr(fmt.Errorf("fetching parent issues: %w", err), output.ErrGeneral)
 			}
@@ -283,7 +283,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 			for id := range parentIDSet {
 				parentIDs = append(parentIDs, id)
 			}
-			batchProgress, err := db.GetBatchSubIssueProgress(conn, parentIDs)
+			batchProgress, err := st.GetBatchSubIssueProgress(parentIDs)
 			if err != nil {
 				return cmdErr(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
 			}
@@ -300,7 +300,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	if !w.JSONMode {
 		switch {
 		case len(issues) == 0:
-			message = emptyListState(conn, opts, all)
+			message = emptyListState(st, opts, all)
 		case treeMode:
 			message = render.RenderTable(issues, true)
 		default:
@@ -320,7 +320,7 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 // nothing is OPEN. Read as store damage, it cost a --all round trip to
 // disprove (DKT-246). When done issues are being hidden, say so and name the
 // flag that shows them.
-func emptyListState(conn *sql.DB, opts db.ListOptions, all bool) string {
+func emptyListState(st store.Store, opts store.ListOptions, all bool) string {
 	// A roster that came back empty is a fact about the RUN, not about the
 	// store, and "create one with: docket issue create" is advice for a
 	// different situation entirely (DKT-405).
@@ -334,7 +334,7 @@ func emptyListState(conn *sql.DB, opts db.ListOptions, all bool) string {
 		withDone := opts
 		withDone.IncludeDone = true
 		withDone.Limit = 1
-		if _, total, err := db.ListIssues(conn, withDone); err == nil && total > 0 {
+		if _, total, err := st.ListIssues(withDone); err == nil && total > 0 {
 			return render.EmptyState(
 				fmt.Sprintf("No open issues found (%s hidden).", pluralIssues(total)),
 				"Include them with: docket issue list --all",
