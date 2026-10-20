@@ -12,10 +12,10 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -86,7 +86,7 @@ type configScan struct {
 	paths []string
 	// pins are the content-hash pins for every OTHER file under the config
 	// directory.
-	pins []db.Pin
+	pins []store.Pin
 	// roots are the config directories the scan walked, IN PRECEDENCE ORDER
 	// and already canonicalized — the subset of InstanceConfigDirs() that
 	// actually exists.
@@ -135,7 +135,7 @@ func scanConfigDirs(roots []string) (*configScan, error) {
 	// Pins are deduplicated by REF — the config-relative path a `packet` entry
 	// declares — not by absolute path, since the whole point is that two roots
 	// can offer the same ref.
-	pinnedRef := make(map[string]db.Pin)
+	pinnedRef := make(map[string]store.Pin)
 	pinnedFrom := make(map[string]string)
 
 	for _, configured := range roots {
@@ -524,7 +524,7 @@ func registerConfigSchemaTx(
 	}
 
 	sum := workflow.SHA256(src)
-	_, created, err := db.InsertSchemaTx(tx, &model.Schema{
+	_, created, err := store.TxOn(tx).InsertSchemaTx(&model.Schema{
 		ProjectID: projectID,
 		Name:      name, Version: version,
 		SourcePath: path, SourceSHA256: sum,
@@ -560,10 +560,11 @@ func registerConfigWorkflowTx(
 	// THE SCHEMA CHECK IS WHY THE ORDER MATTERS: this refuses a `payload` that
 	// is not registered, and the schemas-first ordering exists to avoid it. The
 	// schemas registered ahead of this loop are what make it pass.
-	if err := workflow.ValidateVoteRules(def, txVoteRuleResolver{tx, projectID}); err != nil {
+	st := store.TxOn(tx)
+	if err := workflow.ValidateVoteRules(def, txVoteRuleResolver{st, projectID}); err != nil {
 		return Registration{}, validationErr("%s: %v", path, err)
 	}
-	if err := workflow.ValidateSchemas(def, txSchemaResolver{tx, projectID}); err != nil {
+	if err := workflow.ValidateSchemas(def, txSchemaResolver{st, projectID}); err != nil {
 		return Registration{}, validationErr("%s: %v", path, err)
 	}
 
@@ -573,7 +574,7 @@ func registerConfigWorkflowTx(
 	}
 
 	sum := workflow.SHA256(src)
-	_, created, err := db.InsertWorkflowTx(tx, &model.Workflow{
+	_, created, err := st.InsertWorkflowTx(&model.Workflow{
 		ProjectID:   projectID,
 		Name:        def.Pipeline.Name,
 		Version:     def.Pipeline.Version,
@@ -625,7 +626,7 @@ func collisionErr(err error, path, name string, version int) error {
 	if err == nil {
 		return nil
 	}
-	if !errors.Is(err, db.ErrWorkflowConflict) && !errors.Is(err, db.ErrSchemaConflict) {
+	if !errors.Is(err, store.ErrWorkflowConflict) && !errors.Is(err, store.ErrSchemaConflict) {
 		return err
 	}
 
@@ -713,17 +714,17 @@ func outcomeOf(created bool) string {
 // entry already declares, so entry and ref finally speak the same language.
 // A path outside the root keeps its walked form — refusing would make an odd
 // symlink a run-blocker for files core deliberately does not understand.
-func filePin(root, path string) (db.Pin, error) {
+func filePin(root, path string) (store.Pin, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
-		return db.Pin{}, validationErr("reading the pinned config file %s: %v", path, err)
+		return store.Pin{}, validationErr("reading the pinned config file %s: %v", path, err)
 	}
 	ref := path
 	if rel, ok := configRelativeRef([]string{root}, path); ok {
 		ref = rel
 	}
-	return db.Pin{
-		Kind: db.PinKindFile, Ref: ref, SHA256: workflow.SHA256(src),
+	return store.Pin{
+		Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256(src),
 		Content: sql.NullString{String: string(src), Valid: true},
 		// Carried in memory for the closure-size arithmetic. The
 		// bytes are already in hand for the hash, so the size is free here and
@@ -739,7 +740,7 @@ func filePin(root, path string) (db.Pin, error) {
 // (scanConfigDirs' `pinnedRef` map) before they ever reach `scan.pins`, so no
 // two pins here can compare equal and there is no tie for stability to
 // preserve.
-func sortPins(pins []db.Pin) {
+func sortPins(pins []store.Pin) {
 	sort.Slice(pins, func(i, j int) bool { return pins[i].Ref < pins[j].Ref })
 }
 
@@ -791,15 +792,15 @@ func RenderRegistrationReport(
 // parse, because V21a-V21d ask about the document's declared fields and their
 // orders, and the registered bytes are the only authority on those.
 type txSchemaResolver struct {
-	tx *sql.Tx
+	tx store.ReadTx
 	// projectID scopes resolution: a workflow's `payload` reference resolves
 	// against ITS project's registry (plus builtins), never a neighbor's.
 	projectID int
 }
 
 func (r txSchemaResolver) Schema(name string, version int) (*workflow.Registered, error) {
-	row, err := db.GetSchemaTx(r.tx, r.projectID, name, version)
-	if errors.Is(err, db.ErrSchemaNotFound) {
+	row, err := r.tx.GetSchemaTx(r.projectID, name, version)
+	if errors.Is(err, store.ErrSchemaNotFound) {
 		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrNotRegistered, name, version)
 	}
 	if err != nil {
@@ -817,20 +818,20 @@ func (r txSchemaResolver) Schema(name string, version int) (*workflow.Registered
 }
 
 type txVoteRuleResolver struct {
-	tx *sql.Tx
+	tx store.ReadTx
 	// projectID scopes rule resolution (v12): the run's project sees its own
 	// rules plus the store-wide ones.
 	projectID int
 }
 
 func (r txVoteRuleResolver) VoteRuleExists(rule string) (bool, error) {
-	return db.VoteRuleExistsTx(r.tx, r.projectID, rule)
+	return r.tx.VoteRuleExistsTx(r.projectID, rule)
 }
 
 func (r txVoteRuleResolver) RuleSetElsewhere(rule string) (int, string, error) {
-	return db.VoteRuleSetElsewhereTx(r.tx, r.projectID, rule)
+	return r.tx.VoteRuleSetElsewhereTx(r.projectID, rule)
 }
 
 func (r txVoteRuleResolver) RegisteredVoteRules() ([]string, error) {
-	return db.RegisteredVoteRulesTx(r.tx, r.projectID)
+	return r.tx.RegisteredVoteRulesTx(r.projectID)
 }
