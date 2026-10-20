@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -110,12 +110,12 @@ func runWorkflowLint(cmd *cobra.Command, args []string, w *output.Writer) error 
 }
 
 // lintConflictError is lint's CONFLICT: the message an author reads, unwrapping
-// to db.ErrWorkflowConflict so workflowErr and the fan-out classify it exactly
+// to store.ErrWorkflowConflict so workflowErr and the fan-out classify it exactly
 // as a register conflict without changing the words.
 type lintConflictError struct{ msg string }
 
 func (e *lintConflictError) Error() string { return e.msg }
-func (e *lintConflictError) Unwrap() error { return db.ErrWorkflowConflict }
+func (e *lintConflictError) Unwrap() error { return store.ErrWorkflowConflict }
 
 // lintVerdict is one project's answer: the environment checks, then what a
 // real register there would do (`new` or `unchanged`), or the refusal.
@@ -146,9 +146,9 @@ func lintVerdict(
 	// bumped file always leaves the superseded version's recorded path holding
 	// different bytes.
 	sum := workflow.SHA256(src)
-	existing, err := db.GetWorkflow(conn, projectID, def.Pipeline.Name, def.Pipeline.Version)
+	existing, err := store.StoreOn(conn).GetWorkflow(projectID, def.Pipeline.Name, def.Pipeline.Version)
 	switch {
-	case errors.Is(err, db.ErrWorkflowNotFound):
+	case errors.Is(err, store.ErrWorkflowNotFound):
 		// Free slot; a register would insert.
 		return outcomeNew, nil
 	case err != nil:
