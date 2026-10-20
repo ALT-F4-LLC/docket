@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -339,4 +340,71 @@ func synthesizedPoolReads(t *testing.T, body string) ([]poolRead, func(token.Pos
 	return poolReadsInsideTransactions(fn, openers), func(pos token.Pos) int {
 		return fset.Position(pos).Line - bodyStart
 	}
+}
+
+const internalDBImportPath = "github.com/ALT-F4-LLC/docket/internal/db"
+
+// TestEngineReachesStorageOnlyThroughStore pins the store migration: no
+// non-test file in this package imports internal/db, so storage access goes
+// through internal/store. Without the import, a db.BeginReadSnapshot call
+// cannot compile either.
+func TestEngineReachesStorageOnlyThroughStore(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	testsupport.Must(t, err, "listing the package: %v", err)
+
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if importsInternalDB(t, name, nil) {
+			t.Errorf("%s imports %s; reach storage through internal/store instead",
+				name, internalDBImportPath)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no non-test Go files found; this guard would pass vacuously")
+	}
+}
+
+// TestImportsInternalDBDetectsTheImport is the positive control for the guard
+// above: it flags the import in every spelling Go allows.
+func TestImportsInternalDBDetectsTheImport(t *testing.T) {
+	cases := []struct {
+		name    string
+		imports string
+		want    bool
+	}{
+		{"plain", `import "` + internalDBImportPath + `"`, true},
+		{"aliased", `import sqlitedb "` + internalDBImportPath + `"`, true},
+		{"grouped", "import (\n\t\"fmt\"\n\t\"" + internalDBImportPath + "\"\n)", true},
+		{"store only", `import "github.com/ALT-F4-LLC/docket/internal/store"`, false},
+		{"subpackage", `import "` + internalDBImportPath + `/pgstore"`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "package p\n\n" + tc.imports + "\n"
+			if got := importsInternalDB(t, "synthetic.go", src); got != tc.want {
+				t.Errorf("importsInternalDB = %v, want %v for:\n%s", got, tc.want, src)
+			}
+		})
+	}
+}
+
+// importsInternalDB reports whether the Go file name (read from src when it is
+// non-nil, else from disk) imports internal/db.
+func importsInternalDB(t *testing.T, name string, src any) bool {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), name, src, parser.ImportsOnly)
+	testsupport.Must(t, err, "parsing %s: %v", name, err)
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		testsupport.Must(t, err, "unquoting %s in %s: %v", imp.Path.Value, name, err)
+		if path == internalDBImportPath {
+			return true
+		}
+	}
+	return false
 }
