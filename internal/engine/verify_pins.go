@@ -9,9 +9,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -204,11 +204,12 @@ func verifyPinsClosedIn(conn *sql.DB, runID int, roots []string) (*PinReport, er
 // the thing under test, and a check that could only run against the process's
 // real config directories could not be tested at all.
 func verifyPinsIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
-	pins, err := db.ListPins(conn, runID)
+	st := store.StoreOn(conn)
+	pins, err := st.ListPins(runID)
 	if err != nil {
 		return nil, err
 	}
-	projectID, err := db.RunProjectID(conn, runID)
+	projectID, err := st.RunProjectID(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -224,12 +225,12 @@ func verifyPinsIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
 	for _, p := range pins {
 		v := PinVerdict{Kind: p.Kind, Ref: p.Ref, Pinned: p.SHA256}
 		switch p.Kind {
-		case db.PinKindFile:
+		case store.PinKindFile:
 			verifyFilePin(&v, roots, p)
-		case db.PinKindSchema:
-			verifySchemaPin(conn, &v, projectID, p)
-		case db.PinKindWorkflow:
-			verifyWorkflowPin(conn, &v, projectID, p)
+		case store.PinKindSchema:
+			verifySchemaPin(st, &v, projectID, p)
+		case store.PinKindWorkflow:
+			verifyWorkflowPin(st, &v, projectID, p)
 		default:
 			// An unknown kind is reported, never silently passed: the honest
 			// answer to "is this sound" is "there is something here I cannot
@@ -259,7 +260,7 @@ func verifyPinsIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
 // verifyFilePin resolves a file ref the way the packet resolver does — the
 // config-relative ref at each root, then the legacy absolute form — so this
 // check and the refusal it predicts agree about which file is meant.
-func verifyFilePin(v *PinVerdict, roots []string, p db.Pin) {
+func verifyFilePin(v *PinVerdict, roots []string, p store.Pin) {
 	candidates := make([]string, 0, len(roots)+1)
 	if filepath.IsAbs(p.Ref) {
 		// A run activated before v12 pinned the full walked path.
@@ -295,13 +296,13 @@ func verifyFilePin(v *PinVerdict, roots []string, p db.Pin) {
 
 // verifySchemaPin checks a registered payload schema against the registry, the
 // same comparison `pinnedSchema` makes before validating a payload.
-func verifySchemaPin(conn *sql.DB, v *PinVerdict, projectID int, p db.Pin) {
+func verifySchemaPin(st store.Store, v *PinVerdict, projectID int, p store.Pin) {
 	name, version, err := workflow.ParsePayloadRef(p.Ref)
 	if err != nil {
 		v.Status = PinMissing
 		return
 	}
-	row, err := db.GetSchema(conn, projectID, name, version)
+	row, err := st.GetSchema(projectID, name, version)
 	if err != nil {
 		v.Status = PinMissing
 		return
@@ -319,13 +320,13 @@ func verifySchemaPin(conn *sql.DB, v *PinVerdict, projectID int, p db.Pin) {
 }
 
 // verifyWorkflowPin checks a registered definition against the registry.
-func verifyWorkflowPin(conn *sql.DB, v *PinVerdict, projectID int, p db.Pin) {
+func verifyWorkflowPin(st store.Store, v *PinVerdict, projectID int, p store.Pin) {
 	name, version, err := workflow.ParsePayloadRef(p.Ref)
 	if err != nil {
 		v.Status = PinMissing
 		return
 	}
-	row, err := db.GetWorkflow(conn, projectID, name, version)
+	row, err := st.GetWorkflow(projectID, name, version)
 	if err != nil {
 		v.Status = PinMissing
 		return
