@@ -15,6 +15,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -834,7 +835,7 @@ func TestReportRendersEvidenceLessFindingsAsUnsupported(t *testing.T) {
 		Blockers: []model.Finding{{Text: "the test fails on main", Evidence: []string{ref}}},
 		Concerns: []model.Finding{{Text: "naming could be tighter"}},
 	}
-	err := ValidateCastEvidence(conn, proposalID, findings)
+	err := ValidateCastEvidence(store.StoreOn(conn), proposalID, findings)
 	testsupport.Must(t, err, "ValidateCastEvidence: %v", err)
 	_, err = db.CastVote(conn, &model.Vote{
 		ProposalID: proposalID, VoterName: "alice", VoterRole: "reviewer",

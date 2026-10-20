@@ -13,6 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -267,7 +268,7 @@ func newVoteCastCmd() *cobra.Command {
 			// reference that resolves against nothing must refuse here, by
 			// name, rather than land as a citation nobody can follow. Findings
 			// citing nothing pass through untouched, exactly as before.
-			if err := engine.ValidateCastEvidence(conn, proposalID, findingsJSON); err != nil {
+			if err := engine.ValidateCastEvidence(store.StoreOn(conn), proposalID, findingsJSON); err != nil {
 				return runErr(err)
 			}
 
