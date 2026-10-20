@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -38,14 +38,14 @@ var voteResultCmd = &cobra.Command{
 
 // runVoteResult contains the query + render + output logic for vote result.
 func runVoteResult(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	proposalID, err := model.ParseProposalID(args[0])
 	if err != nil {
 		return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
 	}
 
-	proposal, err := db.GetProposal(conn, proposalID)
+	proposal, err := st.GetProposal(proposalID)
 	if err != nil {
 		if e := notFound(err, fmt.Sprintf("proposal %s", args[0])); e != nil {
 			return e
@@ -53,7 +53,7 @@ func runVoteResult(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching proposal: %w", err), output.ErrGeneral)
 	}
 
-	votes, err := db.GetProposalVotes(conn, proposalID)
+	votes, err := st.GetProposalVotes(proposalID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
 	}

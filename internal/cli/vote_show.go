@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -119,14 +119,14 @@ var voteShowCmd = &cobra.Command{
 
 // runVoteShow contains the query + render + output logic for vote show.
 func runVoteShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	id, err := model.ParseProposalID(args[0])
 	if err != nil {
 		return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
 	}
 
-	proposal, err := db.GetProposal(conn, id)
+	proposal, err := st.GetProposal(id)
 	if err != nil {
 		if e := notFound(err, fmt.Sprintf("proposal %s", args[0])); e != nil {
 			return e
@@ -134,17 +134,17 @@ func runVoteShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching proposal: %w", err), output.ErrGeneral)
 	}
 
-	votes, err := db.GetProposalVotes(conn, id)
+	votes, err := st.GetProposalVotes(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
 	}
 
-	linkedIssues, err := db.GetProposalIssues(conn, id)
+	linkedIssues, err := st.GetProposalIssues(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
 	}
 
-	linkedDocs, err := db.GetProposalDocs(conn, id)
+	linkedDocs, err := st.GetProposalDocs(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
