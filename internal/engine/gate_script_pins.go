@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -241,12 +241,12 @@ func matchedGateArgv(
 func gateScriptPins(
 	defs map[int]*workflow.Definition,
 	loadStore func() (*trust.Store, error), projectIdentity, execRoot string,
-) []db.Pin {
+) []store.Pin {
 	names := declaredGateNames(defs)
 	if len(names) == 0 {
 		return nil
 	}
-	store, err := loadStore()
+	trusted, err := loadStore()
 	if err != nil {
 		return nil
 	}
@@ -254,10 +254,10 @@ func gateScriptPins(
 	// closed direction, so it is not an error here.
 	identity, _ := gateTrustIdentity(projectIdentity)
 
-	var pins []db.Pin
+	var pins []store.Pin
 	seen := map[string]bool{}
 	for _, name := range names {
-		argv, _ := matchedGateArgv(store, identity, name)
+		argv, _ := matchedGateArgv(trusted, identity, name)
 		for _, file := range repoLocalGateFiles(argv, execRoot) {
 			if seen[file] {
 				continue
@@ -267,8 +267,8 @@ func gateScriptPins(
 				continue
 			}
 			seen[file] = true
-			pins = append(pins, db.Pin{
-				Kind: db.PinKindFile, Ref: file, SHA256: workflow.SHA256(content),
+			pins = append(pins, store.Pin{
+				Kind: store.PinKindFile, Ref: file, SHA256: workflow.SHA256(content),
 			})
 		}
 	}
@@ -296,7 +296,7 @@ func gateVerdicts(
 	if len(names) == 0 {
 		return out
 	}
-	store, err := loadStore()
+	trusted, err := loadStore()
 	if err != nil {
 		for _, name := range names {
 			out = append(out, GateVerdict{
@@ -310,13 +310,13 @@ func gateVerdicts(
 
 	pinned := map[string]string{}
 	for _, p := range pins {
-		if p.Kind == db.PinKindFile {
+		if p.Kind == store.PinKindFile {
 			pinned[p.Ref] = p.Pinned
 		}
 	}
 	goneRootsListed := false
 	for _, name := range names {
-		argv, unmatched := matchedGateArgv(store, identity, name)
+		argv, unmatched := matchedGateArgv(trusted, identity, name)
 		if argv == nil {
 			reason := "unmatched: " + unmatched
 			if identityErr != nil {
@@ -515,7 +515,7 @@ type stepWorkRoot struct {
 // executedCopyVerdict already compare those trees, and a step row would
 // repeat theirs. A root that no longer exists is kept under its recorded
 // spelling and marked gone, so its absence is reported rather than skipped.
-func stepWorkRoots(steps []*db.Step, execRoot, invokingRoot string) []stepWorkRoot {
+func stepWorkRoots(steps []*store.Step, execRoot, invokingRoot string) []stepWorkRoot {
 	covered := map[string]bool{}
 	for _, root := range []string{execRoot, invokingRoot} {
 		if root != "" {
@@ -615,15 +615,16 @@ func verifyGateScripts(
 	if err != nil {
 		return err
 	}
-	run, err := db.GetRun(conn, runID)
+	st := store.StoreOn(conn)
+	run, err := st.GetRun(runID)
 	if err != nil {
 		return err
 	}
-	project, err := db.GetProject(conn, db.DefaultProjectIDOr(run.ProjectID))
+	project, err := st.GetProject(store.DefaultProjectIDOr(run.ProjectID))
 	if err != nil {
 		return err
 	}
-	steps, err := db.ListRunSteps(conn, runID)
+	steps, err := st.ListRunSteps(runID)
 	if err != nil {
 		return err
 	}
