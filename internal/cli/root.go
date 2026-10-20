@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"os"
 	"time"
 
@@ -422,6 +424,53 @@ func jsonModeOf(cmd *cobra.Command) (bool, output.JSONVersion) {
 func getWriter(cmd *cobra.Command) *output.Writer {
 	quietMode, _ := cmd.Flags().GetBool("quiet")
 	return output.NewWithVersion(jsonVersionOf(cmd), quietMode)
+}
+
+// daemonHostResolver resolves a daemon host to the addresses checkDaemonURL
+// judges. *net.Resolver satisfies it.
+type daemonHostResolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+// checkDaemonURL refuses a daemon URL that would send requests in plaintext
+// off this host. An https URL is accepted wherever it points. An http URL is
+// accepted only when every address its host resolves to is loopback: the
+// resolved addresses decide, not the host string, so "localhost" mapped to a
+// remote address is refused. Any other scheme, a missing host, or a failed or
+// empty resolution is refused.
+func checkDaemonURL(ctx context.Context, rawURL string, resolver daemonHostResolver) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("daemon URL %q: %w", rawURL, err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("daemon URL %q has no host", rawURL)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+	default:
+		return fmt.Errorf("daemon URL %q: scheme %q is not http or https", rawURL, u.Scheme)
+	}
+
+	var resolved []netip.Addr
+	if literal, err := netip.ParseAddr(host); err == nil {
+		resolved = []netip.Addr{literal}
+	} else if resolved, err = resolver.LookupNetIP(ctx, "ip", host); err != nil {
+		return fmt.Errorf("daemon URL %q: resolving %q: %w", rawURL, host, err)
+	}
+	if len(resolved) == 0 {
+		return fmt.Errorf("daemon URL %q: %q resolves to no address", rawURL, host)
+	}
+	for _, addr := range resolved {
+		if !addr.Unmap().IsLoopback() {
+			return fmt.Errorf("daemon URL %q: plaintext http is allowed only to loopback, and %q resolves to %s; use https",
+				rawURL, host, addr)
+		}
+	}
+	return nil
 }
 
 func getCfg(cmd *cobra.Command) *config.Config {
