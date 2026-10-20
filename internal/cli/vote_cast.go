@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -365,7 +364,7 @@ func newVoteCastCmd() *cobra.Command {
 				if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
 					return e
 				}
-				if errors.Is(err, db.ErrConflict) {
+				if errors.Is(err, store.ErrConflict) {
 					return cmdErr(fmt.Errorf("conflict: voter %q has already voted on %s, or proposal is already finalized", voter, model.FormatProposalID(proposalID)), output.ErrConflict)
 				}
 				return cmdErr(fmt.Errorf("casting vote: %w", err), output.ErrGeneral)
@@ -514,10 +513,10 @@ func parseVoteMetadata(raw string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--metadata cannot be re-encoded: %w", err)
 	}
-	if len(encoded) > db.VoteMetadataMaxBytes {
+	if len(encoded) > store.VoteMetadataMaxBytes {
 		return nil, fmt.Errorf(
 			"--metadata encodes to %d bytes, over the %d-byte cap; record the detail in --findings instead",
-			len(encoded), db.VoteMetadataMaxBytes)
+			len(encoded), store.VoteMetadataMaxBytes)
 	}
 	return bag, nil
 }
@@ -530,7 +529,7 @@ func parseVoteMetadata(raw string) (map[string]any, error) {
 // flag, before any transaction opens. Empty means the seat reports nothing,
 // and nothing is written.
 func parseVoteUsage(raw string) (map[string]float64, error) {
-	rows, err := db.ParseUsage(raw)
+	rows, err := store.ParseUsage(raw)
 	if err != nil {
 		return nil, fmt.Errorf("--usage: %w", err)
 	}
