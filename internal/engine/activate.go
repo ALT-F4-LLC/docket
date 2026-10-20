@@ -11,9 +11,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -395,8 +395,8 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 	// bind, which config caps apply, which registry auto-registration writes
 	// into (v12). This is also the first read that can discover the run does
 	// not exist, so it owns the NOT_FOUND taxonomy the tx used to apply.
-	projectID, err := db.RunProjectID(conn, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	projectID, err := store.StoreOn(conn).RunProjectID(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -471,7 +471,7 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 		// and `ProjectedStatus`/`ProjectedActivatedAtMS` carry what committing
 		// would change them to (identical to the committed pair when nothing
 		// would change, e.g. re-activating an already-active run).
-		run, rerr := db.GetRunTx(tx, runID)
+		run, rerr := store.TxOn(tx).GetRunTx(runID)
 		if rerr != nil {
 			return nil, fmt.Errorf("reading the run: %w", rerr)
 		}
@@ -492,7 +492,7 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 	}
 
 	// Re-read outside the transaction so the caller renders committed state.
-	run, err := db.GetRun(conn, runID)
+	run, err := store.StoreOn(conn).GetRun(runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading activated run: %w", err)
 	}
@@ -532,13 +532,14 @@ func activateTx(
 	tx *sql.Tx,
 	runID int,
 	definitions []*boundDefinition,
-	filePins []db.Pin,
+	filePins []store.Pin,
 	caps contextLimits,
 	scan *configScan,
 	opts ActivateOptions,
 ) (*ActivateResult, error) {
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -628,7 +629,7 @@ func activateTx(
 	// check needs the same answer: with adoption declined, a registry that lags
 	// the corpus is the operator's own standing decision rather than an
 	// unexplained divergence, and the two dispositions differ (DKT-590).
-	autoRegister, err := db.AutoRegisterEnabledTx(tx, run.ProjectID)
+	autoRegister, err := st.AutoRegisterEnabledTx(run.ProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -661,7 +662,7 @@ func activateTx(
 		// stage 1 has run.
 	}
 
-	runIssues, err := db.ListRunIssuesTx(tx, runID)
+	runIssues, err := st.ListRunIssuesTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -818,7 +819,7 @@ func activateTx(
 	// workflow re-register or a pinned-file edit uses the original rows,
 	// unchanged — if it re-pinned, an in-flight run would silently adopt an
 	// edited workflow, which pinning exists to prevent.
-	existingPins, err := db.ListPinsTx(tx, runID)
+	existingPins, err := st.ListPinsTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -873,17 +874,17 @@ func activateTx(
 	}
 	var projectIdentity string
 	if err := tx.QueryRow(`SELECT identity FROM projects WHERE id = ?`,
-		db.DefaultProjectIDOr(run.ProjectID)).Scan(&projectIdentity); err != nil {
+		store.DefaultProjectIDOr(run.ProjectID)).Scan(&projectIdentity); err != nil {
 		return nil, fmt.Errorf("reading the identity of run %s's project: %w", run.Ref(), err)
 	}
 	filePins = append(filePins,
 		gateScriptPins(gateDefs, gatePinStore, projectIdentity, run.ExecRoot)...)
 
-	pins := make([]db.Pin, 0, len(bindings)+len(filePins))
+	pins := make([]store.Pin, 0, len(bindings)+len(filePins))
 	for _, ri := range runIssues {
 		bound := bindings[ri.IssueID]
-		pins = append(pins, db.Pin{
-			RunID: runID, Kind: db.PinKindWorkflow,
+		pins = append(pins, store.Pin{
+			RunID: runID, Kind: store.PinKindWorkflow,
 			Ref: bound.workflow.Ref(), SHA256: bound.workflow.SourceSHA256,
 		})
 	}
@@ -948,7 +949,7 @@ func activateTx(
 		// Not under any config root; not addressable as a packet entry.
 	}
 	for _, p := range existingPins {
-		if p.Kind == db.PinKindFile {
+		if p.Kind == store.PinKindFile {
 			// An inherited pin carries no in-memory size. It is indexed
 			// as present-with-unknown-size so re-activation does not reject a
 			// run that was legal when it started.
@@ -956,7 +957,7 @@ func activateTx(
 		}
 	}
 	for _, p := range filePins {
-		if p.Kind == db.PinKindFile {
+		if p.Kind == store.PinKindFile {
 			indexPin(p.Ref, p.Bytes)
 		}
 	}
@@ -966,7 +967,7 @@ func activateTx(
 		if _, ok := pinned[p.Kind+"\x00"+p.Ref]; ok {
 			continue // Already pinned, at whatever hash the original had.
 		}
-		if err := db.InsertPinTx(tx, p); err != nil {
+		if err := st.InsertPinTx(p); err != nil {
 			return nil, err
 		}
 		pinned[p.Kind+"\x00"+p.Ref] = struct{}{}
@@ -991,7 +992,7 @@ func activateTx(
 	// AFTER the loop — after, so a predecessor stage 7 promotes in this same
 	// pass is named at the status this activation commits, not the one it
 	// found.
-	var blocked []*db.RunIssue
+	var blocked []*store.RunIssue
 
 	for _, ri := range runIssues {
 		issue := issues[ri.IssueID]
@@ -1026,7 +1027,7 @@ func activateTx(
 			ri.BodySnapshot = issue.Description
 			ri.BodySHA256 = workflow.SHA256([]byte(issue.Description))
 			ri.IssueSnapshot = snapshot
-			if err := db.BindRunIssueTx(tx, ri); err != nil {
+			if err := st.BindRunIssueTx(ri); err != nil {
 				return nil, err
 			}
 			result.IssuesBound++
@@ -1069,7 +1070,7 @@ func activateTx(
 		result.IssuesExpanded++
 		result.ContextWarnings = append(result.ContextWarnings, warnings...)
 
-		if err := db.MarkExpandedTx(tx, runID, ri.IssueID, opts.NowMS); err != nil {
+		if err := st.MarkExpandedTx(runID, ri.IssueID, opts.NowMS); err != nil {
 			return nil, err
 		}
 
@@ -1182,7 +1183,7 @@ type boundDefinition struct {
 // here would mean a parser change silently re-interpreting a definition a run
 // already pinned, which is the thing version pinning exists to prevent.
 func loadDefinitions(conn *sql.DB, projectID int) ([]*boundDefinition, error) {
-	workflows, _, err := db.ListWorkflows(conn, db.WorkflowListOptions{ProjectID: projectID})
+	workflows, _, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{ProjectID: projectID})
 	if err != nil {
 		return nil, fmt.Errorf("reading registered workflows: %w", err)
 	}
@@ -1221,7 +1222,7 @@ func loadDefinitionsTx(tx *sql.Tx, projectID int) ([]*boundDefinition, error) {
 		`SELECT id, name, version, description, source_path, source_sha256,
 		        body, parsed, created_at_ms, row_version, deprecated_at_ms
 		   FROM workflows WHERE project_id = ? ORDER BY name ASC, version DESC`,
-		db.DefaultProjectIDOr(projectID))
+		store.DefaultProjectIDOr(projectID))
 	if err != nil {
 		return nil, fmt.Errorf("reading registered workflows: %w", err)
 	}
@@ -1470,7 +1471,7 @@ func orphanHint(definitions []*boundDefinition, origins *WorkflowOriginIndex) st
 // repo that names its classes differently. `holds_tree` is the declaration the
 // instance already makes for exactly this question.
 func lintUnscopedHolders(
-	tx *sql.Tx, runIssues []*db.RunIssue, bindings map[int]*boundDefinition,
+	tx *sql.Tx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 ) ([]ScopeWarning, error) {
 	var out []ScopeWarning
 	for _, ri := range runIssues {
@@ -1486,7 +1487,7 @@ func lintUnscopedHolders(
 		// Read LIVE, like the scheduler and unlike the snapshot: the
 		// question is what this issue declares now, and an operator who set a
 		// scope after a first activation has fixed the omission this reports.
-		scope, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		scope, err := store.TxOn(tx).IssueScopeGlobsTx(ri.IssueID)
 		if err != nil {
 			return nil, fmt.Errorf("reading scope for %s: %w",
 				model.FormatID(ri.IssueID), err)
@@ -1524,7 +1525,7 @@ func lintUnscopedHolders(
 // against, and guessing from the process cwd would make the answer depend on
 // where the operator happened to stand.
 func lintUnresolvableScopes(
-	tx *sql.Tx, runIssues []*db.RunIssue, bindings map[int]*boundDefinition,
+	tx *sql.Tx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 	execRoot string,
 ) ([]ScopeWarning, error) {
 	if execRoot == "" {
@@ -1533,7 +1534,7 @@ func lintUnresolvableScopes(
 
 	var out []ScopeWarning
 	for _, ri := range runIssues {
-		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		raw, err := store.TxOn(tx).IssueScopeGlobsTx(ri.IssueID)
 		if err != nil {
 			return nil, fmt.Errorf("reading scope for %s: %w",
 				model.FormatID(ri.IssueID), err)
@@ -1582,7 +1583,7 @@ func lintUnresolvableScopes(
 // because there is no test for the scope to have omitted. A run with no
 // recorded exec root is skipped for lintUnresolvableScopes' reason.
 func lintOmittedSiblingTests(
-	tx *sql.Tx, runIssues []*db.RunIssue, bindings map[int]*boundDefinition,
+	tx *sql.Tx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 	execRoot string,
 ) ([]ScopeWarning, error) {
 	if execRoot == "" {
@@ -1591,7 +1592,7 @@ func lintOmittedSiblingTests(
 
 	var out []ScopeWarning
 	for _, ri := range runIssues {
-		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		raw, err := store.TxOn(tx).IssueScopeGlobsTx(ri.IssueID)
 		if err != nil {
 			return nil, fmt.Errorf("reading scope for %s: %w",
 				model.FormatID(ri.IssueID), err)
@@ -1710,7 +1711,7 @@ func globSegmentsMatch(glob, segs []string) bool {
 // non-retired set binding itself evaluated — so the lint can never name a
 // workflow the issue could not have bound even with the labels fixed.
 func lintDomainScopeMismatch(
-	tx *sql.Tx, runIssues []*db.RunIssue, issues map[int]*model.Issue,
+	tx *sql.Tx, runIssues []*store.RunIssue, issues map[int]*model.Issue,
 	bindings map[int]*boundDefinition, definitions []*boundDefinition,
 ) ([]BindingWarning, error) {
 	candidates := bindableDefinitions(definitions)
@@ -1738,7 +1739,7 @@ func lintDomainScopeMismatch(
 		// Read LIVE, for lintUnscopedHolders' reason: the question is what this
 		// issue declares NOW, so an operator who fixed the scope (or the labels)
 		// after a first activation is not warned about the state they fixed.
-		raw, err := db.IssueScopeGlobsTx(tx, ri.IssueID)
+		raw, err := store.TxOn(tx).IssueScopeGlobsTx(ri.IssueID)
 		if err != nil {
 			return nil, fmt.Errorf("reading scope for %s: %w",
 				model.FormatID(ri.IssueID), err)
@@ -1979,7 +1980,8 @@ type issueSnapshotFields struct {
 }
 
 func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (string, error) {
-	scopeJSON, err := db.IssueScopeGlobsTx(tx, issue.ID)
+	st := store.TxOn(tx)
+	scopeJSON, err := st.IssueScopeGlobsTx(issue.ID)
 	if err != nil {
 		return "", fmt.Errorf("reading scope for %s: %w", model.FormatID(issue.ID), err)
 	}
@@ -1998,7 +2000,7 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (str
 		labels = []string{}
 	}
 
-	files, err := db.GetIssueFilesTx(tx, issue.ID)
+	files, err := st.GetIssueFilesTx(issue.ID)
 	if err != nil {
 		return "", fmt.Errorf("reading attached files for %s: %w", model.FormatID(issue.ID), err)
 	}
@@ -2025,7 +2027,7 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (str
 //
 // Extraction is LITERAL: no prose parsing. Nothing is executed here.
 func harvestFences(
-	tx *sql.Tx, runID int, ri *db.RunIssue, def *workflow.Definition,
+	tx *sql.Tx, runID int, ri *store.RunIssue, def *workflow.Definition,
 ) (int, error) {
 	tags := def.FenceTags()
 	if len(tags) == 0 {
@@ -2034,7 +2036,7 @@ func harvestFences(
 
 	fences := workflow.HarvestFences(ri.BodySnapshot, tags)
 	for _, f := range fences {
-		err := db.InsertFenceTx(tx, db.RunFence{
+		err := store.TxOn(tx).InsertFenceTx(store.RunFence{
 			RunID: runID, IssueID: ri.IssueID,
 			Tag: f.Tag, Ordinal: f.Ordinal, Command: f.Command,
 			SHA256: workflow.SHA256([]byte(f.Command)),
@@ -2056,7 +2058,7 @@ func harvestFences(
 func expandIssue(
 	tx *sql.Tx,
 	run *model.Run,
-	ri *db.RunIssue,
+	ri *store.RunIssue,
 	issue *model.Issue,
 	bound *boundDefinition,
 	caps contextLimits,
@@ -2114,7 +2116,7 @@ func expandIssue(
 			return 0, nil, err
 		}
 
-		err = db.InsertStepTx(tx, db.StepRow{
+		err = store.TxOn(tx).InsertStepTx(store.StepRow{
 			RunID: run.ID, IssueID: issue.ID, WorkflowID: bound.workflow.ID,
 			StepName: inst.Name, Ordinal: inst.Ordinal, SiblingIndex: inst.SiblingIndex,
 			Instance: inst.Instance, Kind: inst.Kind, Executor: inst.Executor,
@@ -2178,11 +2180,11 @@ func (c contextLimits) Warn(size int) bool {
 }
 
 func contextCaps(conn *sql.DB, projectID int) (contextLimits, error) {
-	warn, err := intConfig(conn, projectID, db.KeyContextWarnBytes)
+	warn, err := intConfig(conn, projectID, store.KeyContextWarnBytes)
 	if err != nil {
 		return contextLimits{}, err
 	}
-	errorBytes, err := intConfig(conn, projectID, db.KeyContextErrorBytes)
+	errorBytes, err := intConfig(conn, projectID, store.KeyContextErrorBytes)
 	if err != nil {
 		return contextLimits{}, err
 	}
@@ -2190,7 +2192,7 @@ func contextCaps(conn *sql.DB, projectID int) (contextLimits, error) {
 }
 
 func intConfig(conn *sql.DB, projectID int, key string) (int, error) {
-	entry, err := db.GetConfig(conn, projectID, key)
+	entry, err := store.StoreOn(conn).GetConfig(projectID, key)
 	if err != nil {
 		return 0, fmt.Errorf("reading %s: %w", key, err)
 	}
@@ -2223,8 +2225,8 @@ func intConfig(conn *sql.DB, projectID int, key string) (int, error) {
 // resolve, so `verify-pins` would report it missing from the first second and
 // every step reading it would refuse with CONFLICT. Naming the absolute form
 // tells the operator what to pass instead.
-func readFilePins(paths []string, roots []string) ([]db.Pin, error) {
-	out := make([]db.Pin, 0, len(paths))
+func readFilePins(paths []string, roots []string) ([]store.Pin, error) {
+	out := make([]store.Pin, 0, len(paths))
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -2256,8 +2258,8 @@ func readFilePins(paths []string, roots []string) ([]db.Pin, error) {
 			}
 			ref = path
 		}
-		out = append(out, db.Pin{
-			Kind: db.PinKindFile, Ref: ref, SHA256: workflow.SHA256(content),
+		out = append(out, store.Pin{
+			Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256(content),
 			Content: sql.NullString{String: string(content), Valid: true},
 		})
 	}
