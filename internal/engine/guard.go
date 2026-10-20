@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -175,7 +174,7 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 		return nil, err
 	}
 
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning guard read: %w", err)
 	}

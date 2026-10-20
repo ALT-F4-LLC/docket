@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -85,8 +84,9 @@ func loadHoldTally(conn *sql.DB, runID int) (holdTally, error) {
 }
 
 // loadHoldTallyTx is loadHoldTally inside a caller's transaction, for the
-// scheduler's snapshot (see db.GetConfigTx for why a pool read cannot be used
-// there). The project id is already loaded by the caller that has the run.
+// scheduler's snapshot, where a pool read would deadlock against the single
+// connection the snapshot holds. The project id is already loaded by the
+// caller that has the run.
 func loadHoldTallyTx(tx *sql.Tx, projectID int) (holdTally, error) {
 	stx := store.TxOn(tx)
 	rule, err := stx.GetConfigTx(projectID, store.KeyVoteHoldRule)
@@ -1210,7 +1210,7 @@ func (e *Engine) HeldResolutionStaleTargets(
 func readyStaleTargetCandidates(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) ([]targetCandidate, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the post-resolution ready set: %w", err)
 	}
