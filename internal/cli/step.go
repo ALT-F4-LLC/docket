@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -53,7 +53,7 @@ func stepErr(err error, label string) error {
 	if e := leaseError(err, label); e != nil {
 		return e
 	}
-	if errors.Is(err, db.ErrStepNotFound) {
+	if errors.Is(err, store.ErrStepNotFound) {
 		return cmdErr(fmt.Errorf("%s not found", label), output.ErrNotFound)
 	}
 	return runErr(err)
@@ -756,7 +756,7 @@ did: priority none, kind task, no labels.`,
 		// dispatch is open, so the recording verb is the observing invocation
 		// (engine/drive.go) — this is what lets one wave carry a staged
 		// `judges -> gate -> reconcile -> report` chain end to end.
-		if step, readErr := db.GetStep(conn, id); readErr == nil {
+		if step, readErr := store.StoreOn(conn).GetStep(id); readErr == nil {
 			if err := e.DriveRunLifecycles(conn, step.RunID, model.NowMS()); err != nil {
 				return cmdErr(fmt.Errorf(
 					"the step recorded, but driving the run's engine-side "+
@@ -860,7 +860,7 @@ type recordedStepPayload struct {
 // have — `unmatched (no exit)`, never `exit 0`, which reads as a pass.
 func failedGateClause(g engine.FailedGate) string {
 	verdict := g.Verdict
-	if verdict == db.GateVerdictFail {
+	if verdict == store.GateVerdictFail {
 		verdict = "failed"
 	}
 	if g.Exit == nil {
@@ -873,7 +873,7 @@ func failedGateClause(g engine.FailedGate) string {
 // "waiting-human" is the status, and "parked" is what it MEANS to the executor
 // reading the line, which is the half that was missing.
 func recordedStepClause(step, status string) string {
-	if status == db.StepWaitingHuman {
+	if status == store.StepWaitingHuman {
 		return fmt.Sprintf("%s parked waiting-human", step)
 	}
 	return fmt.Sprintf("%s recorded (%s)", step, status)
@@ -916,7 +916,7 @@ Requires the capability token.`,
 		// A failure that exhausted attempts ROUTES, and routing can ready
 		// engine-run steps mid-wave exactly as a completion can — same hook,
 		// same reasoning as `step record`'s (engine/drive.go).
-		if step, readErr := db.GetStep(conn, id); readErr == nil {
+		if step, readErr := store.StoreOn(conn).GetStep(id); readErr == nil {
 			if err := e.DriveRunLifecycles(conn, step.RunID, model.NowMS()); err != nil {
 				return cmdErr(fmt.Errorf(
 					"the failure recorded, but driving the run's engine-side "+
@@ -1324,7 +1324,7 @@ type stepDetailPayload struct {
 	ParkReason string `json:"park_reason,omitempty"`
 	// ParkClass is the same park in the closed vocabulary a conductor routes on
 	// (DKT-1900); ParkReason beside it is what a person reads.
-	ParkClass db.ParkClass `json:"park_class,omitempty"`
+	ParkClass store.ParkClass `json:"park_class,omitempty"`
 	// Authority is what entitled the step's resolution, spelled as the ruling
 	// event spells it. AuthorityRef is present only for a standing grant.
 	Authority    string `json:"authority,omitempty"`
