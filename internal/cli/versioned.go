@@ -7,157 +7,97 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// issuePayload wraps a single issue so it marshals with its CAS `version`
-// field under --json=v2 and without it under v1 ("versions in .data").
-//
-// The version rides on the wrapper rather than on model.Issue's MarshalJSON
-// because that marshaler is the frozen v1 wire format — adding a field there
-// would change every existing verb's output.
-type issuePayload struct{ issue *model.Issue }
-
-// MarshalJSON emits the v1 issue shape (the wrapper is transparent under v1).
-func (p issuePayload) MarshalJSON() ([]byte, error) { return p.issue.MarshalJSON() }
-
-// VersionedPayload implements output.Versioned: under v2 the issue marshals
-// with its version.
-func (p issuePayload) VersionedPayload() any {
-	return model.VersionedIssue{Issue: *p.issue}
-}
-
-// withIssueVersion wraps a single issue for emission. Safe on nil.
+// withIssueVersion renders a single issue with its CAS `version` (and its lease
+// when one is held) in .data. Safe on nil.
 func withIssueVersion(issue *model.Issue) any {
 	if issue == nil {
 		return nil
 	}
-	return issuePayload{issue: issue}
+	return model.VersionedIssue{Issue: *issue}
 }
 
-// runPayload wraps a single run for the same reason issuePayload wraps an
-// issue: model.Run's MarshalJSON is the v1 wire format, and the CAS row version
-// rides on the wrapper so v1 output is untouched.
-type runPayload struct{ run *model.Run }
-
-// MarshalJSON emits the v1 run shape (the wrapper is transparent under v1).
-func (p runPayload) MarshalJSON() ([]byte, error) { return p.run.MarshalJSON() }
-
-// VersionedPayload implements output.Versioned.
-func (p runPayload) VersionedPayload() any {
-	return model.VersionedRun{Run: *p.run}
-}
-
-// withRunVersion wraps a single run for emission. Safe on nil.
+// withRunVersion renders a single run with its CAS row version. Safe on nil.
 func withRunVersion(run *model.Run) any {
 	if run == nil {
 		return nil
 	}
-	return runPayload{run: run}
+	return model.VersionedRun{Run: *run}
 }
 
-// runAbandonPayload is `run abandon`'s response: the run under v1, and under
-// v2 the run plus its `worktrees` — the checkouts the run's steps recorded
-// that no close will ever sweep now (DKT-116). v1 stays byte-identical to the
-// pre-DKT-116 shape; the fact rides the v2 payload, the event, and the
-// message.
+// versionedRunWith renders a run with its version plus one sibling key beside
+// the run's own fields. model.VersionedRun has its own MarshalJSON, which an
+// embedding struct would inherit and so drop the sibling; the key is spliced
+// into the encoded object instead.
+func versionedRunWith(run *model.Run, key string, value any) ([]byte, error) {
+	raw, err := json.Marshal(model.VersionedRun{Run: *run})
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	fields[key] = encoded
+	return json.Marshal(fields)
+}
+
+// runAbandonPayload is `run abandon`'s response: the versioned run plus its
+// `worktrees`, the checkouts the run's steps recorded that no close will ever
+// sweep now (DKT-116). The key is present only when there are any.
 type runAbandonPayload struct {
 	run       *model.Run
 	worktrees []string
 }
 
-// MarshalJSON emits the v1 run shape (the wrapper is transparent under v1).
-func (p runAbandonPayload) MarshalJSON() ([]byte, error) { return p.run.MarshalJSON() }
-
-// VersionedPayload implements output.Versioned: the v2 run shape, with
-// `worktrees` beside it when there are any.
-func (p runAbandonPayload) VersionedPayload() any {
-	versioned := model.VersionedRun{Run: *p.run}
+func (p runAbandonPayload) MarshalJSON() ([]byte, error) {
 	if len(p.worktrees) == 0 {
-		return versioned
+		return json.Marshal(model.VersionedRun{Run: *p.run})
 	}
-	raw, err := json.Marshal(versioned)
-	if err != nil {
-		return versioned
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return versioned
-	}
-	m["worktrees"] = p.worktrees
-	return m
+	return versionedRunWith(p.run, "worktrees", p.worktrees)
 }
 
 // runResumePayload is `run resume`'s response when the run's pins no longer
-// match disk (DKT-408): the frozen v1 run shape untouched, and under v2 the
-// run plus `pin_drift` — the same v1/v2 split runAbandonPayload uses for its
-// worktrees, for the same reason. The drift also rides the human message, so
-// neither channel resumes a wedged run silently.
+// match disk (DKT-408): the versioned run plus `pin_drift`, present only when
+// something drifted. The drift also rides the human message, so neither
+// channel resumes a wedged run silently.
 type runResumePayload struct {
 	run      *model.Run
 	pinDrift []engine.PinVerdict
 }
 
-// MarshalJSON emits the v1 run shape (the wrapper is transparent under v1).
-func (p runResumePayload) MarshalJSON() ([]byte, error) { return p.run.MarshalJSON() }
-
-// VersionedPayload implements output.Versioned: the v2 run shape, with
-// `pin_drift` beside it when there is any.
-func (p runResumePayload) VersionedPayload() any {
-	versioned := model.VersionedRun{Run: *p.run}
+func (p runResumePayload) MarshalJSON() ([]byte, error) {
 	if len(p.pinDrift) == 0 {
-		return versioned
+		return json.Marshal(model.VersionedRun{Run: *p.run})
 	}
-	raw, err := json.Marshal(versioned)
-	if err != nil {
-		return versioned
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return versioned
-	}
-	m["pin_drift"] = p.pinDrift
-	return m
+	return versionedRunWith(p.run, "pin_drift", p.pinDrift)
 }
 
-// abandonIssuePayload is `run abandon --issue`'s response wrapper, for the
-// same v1/v2 split: the outcome's frozen shape under v1, plus `worktrees`
-// under v2 (DKT-116).
+// abandonIssuePayload is `run abandon --issue`'s response: the outcome plus
+// `worktrees` when there are any (DKT-116). The outcome itself tags Worktrees
+// json:"-", so the key is added here.
 type abandonIssuePayload struct{ outcome *engine.AbandonIssueOutcome }
 
-// MarshalJSON emits the v1 outcome shape (Worktrees is json:"-" there).
 func (p abandonIssuePayload) MarshalJSON() ([]byte, error) {
-	return json.Marshal(*p.outcome)
-}
-
-// VersionedPayload implements output.Versioned.
-func (p abandonIssuePayload) VersionedPayload() any {
-	return struct {
+	return json.Marshal(struct {
 		engine.AbandonIssueOutcome
 		Worktrees []string `json:"worktrees,omitempty"`
-	}{*p.outcome, p.outcome.Worktrees}
+	}{*p.outcome, p.outcome.Worktrees})
 }
 
-// runListPayload wraps a slice of runs so the v2 collection envelope reaches
-// each item's row version. The envelope consults output.Versioned on the items
-// CONTAINER rather than on every element, so a bare []*Run would render v1
-// items inside a v2 envelope.
-type runListPayload struct{ runs []*model.Run }
-
-// MarshalJSON emits the v1 array shape.
-func (p runListPayload) MarshalJSON() ([]byte, error) {
-	if p.runs == nil {
-		return []byte("[]"), nil
-	}
-	return json.Marshal(p.runs)
-}
-
-// VersionedPayload implements output.Versioned for a list of runs.
-func (p runListPayload) VersionedPayload() any {
-	return model.RunsWithVersion(p.runs)
-}
-
-// issueListPayload wraps a slice of issues for the same purpose.
+// issueListPayload wraps a slice of issues so a collection envelope reaches
+// each item's version: the envelope consults output.Versioned on the items
+// CONTAINER rather than on every element, so a bare []*Issue would render its
+// items without one.
+//
+// Its own MarshalJSON is the unversioned array, which is what a payload that
+// nests it as an ordinary field (a `board` column) emits.
 type issueListPayload struct{ issues []*model.Issue }
 
-// MarshalJSON emits the v1 array shape.
+// MarshalJSON emits the unversioned issue array. Never null.
 func (p issueListPayload) MarshalJSON() ([]byte, error) {
 	if p.issues == nil {
 		return []byte("[]"), nil

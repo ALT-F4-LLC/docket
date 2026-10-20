@@ -56,9 +56,9 @@ type pinJSON struct {
 	SHA256 string `json:"sha256"`
 }
 
-// MarshalJSON on the wrapper keeps the run's own v1 shape nested under `run`,
-// so a consumer reads one document rather than a run with rollup fields spliced
-// into it — the rollup is about the run, not part of it.
+// VersionedPayload nests the versioned run under `run`, so a consumer reads one
+// document rather than a run with rollup fields spliced into it — the rollup is
+// about the run, not part of it.
 func (r runStatusResult) VersionedPayload() any {
 	return struct {
 		Run            any                    `json:"run"`
@@ -89,12 +89,11 @@ type runListResult struct {
 // `[]`, never `null`.
 //
 // db.ListRuns returns a nil slice when nothing matches, and encoding/json
-// renders a nil slice as `null`. The v2 Collection path never showed it — its
-// items go through runListPayload — but the v1 dialect marshals this struct
-// directly, so a project with no non-terminal run printed `"runs":null` and a
-// reader iterating `.data.runs[]` failed on it. `step list --issue` settled the
-// rule for an empty collection: it is `[]`, and the normalization lives where
-// the result is built so no marshaling path can miss it.
+// renders a nil slice as `null`. The collection envelope's items never are,
+// but a writer that marshals this struct directly would print `"runs":null`,
+// and a reader iterating `.data.runs[]` fails on it. `step list --issue`
+// settled the rule for an empty collection: it is `[]`, and the normalization
+// lives where the result is built so no marshaling path can miss it.
 func newRunListResult(runs []*model.Run, total, limit int) runListResult {
 	if runs == nil {
 		runs = []*model.Run{}
@@ -102,7 +101,7 @@ func newRunListResult(runs []*model.Run, total, limit int) runListResult {
 	return runListResult{Runs: runs, Total: total, limit: limit}
 }
 
-func (r runListResult) CollectionItems() any { return runListPayload{runs: r.Runs} }
+func (r runListResult) CollectionItems() any { return model.RunsWithVersion(r.Runs) }
 func (r runListResult) CollectionTotal() int { return r.Total }
 func (r runListResult) CollectionTruncated() bool {
 	return output.IsTruncated(r.limit, r.Total, len(r.Runs))

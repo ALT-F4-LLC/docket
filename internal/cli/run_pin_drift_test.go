@@ -142,35 +142,31 @@ func TestRunResumeWarnsOnPinDrift(t *testing.T) {
 	}
 }
 
-// TestRunResumePayloadCarriesPinDriftUnderV2 pins the JSON channel: v1 stays
-// the frozen bare-run shape, v2 rides `pin_drift` beside the run — the same
-// split runAbandonPayload uses for worktrees.
-func TestRunResumePayloadCarriesPinDriftUnderV2(t *testing.T) {
+// TestRunResumePayloadCarriesPinDrift pins the JSON channel: `pin_drift` rides
+// beside the versioned run — the same shape runAbandonPayload uses for
+// worktrees.
+func TestRunResumePayloadCarriesPinDrift(t *testing.T) {
 	run := &model.Run{ID: 7, Status: model.RunActive}
 	drift := []engine.PinVerdict{{
 		Kind: "file", Ref: "contracts/a.md", Status: engine.PinChanged,
 		Pinned: "aaa", Found: "bbb",
 	}}
-	payload := runResumePayload{run: run, pinDrift: drift}
 
-	v1, err := json.Marshal(payload)
-	testsupport.Must(t, err, "v1 marshal: %v", err)
-	if strings.Contains(string(v1), "pin_drift") {
-		t.Errorf("v1 payload grew a pin_drift key; that shape is frozen: %s", v1)
-	}
-
-	v2, err := json.Marshal(payload.VersionedPayload())
-	testsupport.Must(t, err, "v2 marshal: %v", err)
-	for _, want := range []string{`"pin_drift"`, `"contracts/a.md"`, `"aaa"`, `"bbb"`} {
-		if !strings.Contains(string(v2), want) {
-			t.Errorf("v2 payload missing %s: %s", want, v2)
+	drifted, err := json.Marshal(runResumePayload{run: run, pinDrift: drift})
+	testsupport.Must(t, err, "marshal: %v", err)
+	for _, want := range []string{`"pin_drift"`, `"contracts/a.md"`, `"aaa"`, `"bbb"`, `"row_version"`} {
+		if !strings.Contains(string(drifted), want) {
+			t.Errorf("payload missing %s: %s", want, drifted)
 		}
 	}
 
-	// And with no drift, v2 is the plain versioned run.
-	plain, err := json.Marshal(runResumePayload{run: run}.VersionedPayload())
-	testsupport.Must(t, err, "plain v2 marshal: %v", err)
+	// And with no drift, the payload is the plain versioned run.
+	plain, err := json.Marshal(runResumePayload{run: run})
+	testsupport.Must(t, err, "plain marshal: %v", err)
 	if strings.Contains(string(plain), "pin_drift") {
-		t.Errorf("a sound resume's v2 payload carries pin_drift: %s", plain)
+		t.Errorf("a sound resume's payload carries pin_drift: %s", plain)
+	}
+	if !strings.Contains(string(plain), `"row_version"`) {
+		t.Errorf("a sound resume's payload lacks the run version: %s", plain)
 	}
 }

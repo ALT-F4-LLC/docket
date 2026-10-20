@@ -71,23 +71,16 @@ type showResultJSON struct {
 	LinkedProposals []string         `json:"linked_proposals"`
 	Comments        []*model.Comment `json:"comments"`
 	Activity        []model.Activity `json:"activity"`
-	// Scope reaches v1 WHEN DECLARED (DKT-55 amendment): nil emits no key, so
-	// a scope-less issue's v1 output stays byte-identical to the frozen shape.
+	// Scope appears WHEN DECLARED (DKT-55 amendment): nil emits no key.
 	// showResultV2 shadows this with its always-present tri-state field.
 	Scope *[]string `json:"scope,omitempty"`
-	// Resolution reaches v1 WHEN SET, the same DKT-55 shape and for the same
-	// reason: an unresolved issue's output stays byte-identical, while an
-	// abandoned one stops being indistinguishable from a finished one
-	// (DKT-245).
+	// Resolution appears WHEN SET, so an abandoned issue is distinguishable
+	// from a finished one (DKT-245).
 	Resolution string `json:"resolution,omitempty"`
-	// Size reaches v1 WHEN SET, the same DKT-55 shape a third time: an issue
-	// with no declared size stays byte-identical to the pre-Size output.
+	// Size appears WHEN SET.
 	Size string `json:"size,omitempty"`
-	// RunDisposition reaches v1 WHEN A RUN ABANDONED ITS WORK, the same DKT-55
-	// shape for the third time: an issue no run gave up on emits no key and
-	// keeps the frozen v1 output byte-identical, while an abandoned one stops
-	// forcing its reader through `events list` to learn which run stopped, when
-	// and why (DKT-404).
+	// RunDisposition appears WHEN A RUN ABANDONED ITS WORK, so a reader learns
+	// which run stopped, when and why without `events list` (DKT-404).
 	RunDisposition *runDispositionJSON `json:"run_disposition,omitempty"`
 }
 
@@ -125,8 +118,8 @@ func runDispositionWire(d *model.IssueRunDisposition) *runDispositionJSON {
 	}
 }
 
-// showResultV2 is the v2 payload: the v1 flattened shape plus the CAS version,
-// plus the lease when one is held.
+// showResultV2 is the single-issue payload: the flattened shape plus the CAS
+// version, plus the lease when one is held.
 //
 // Lease is omitempty so an unclaimed issue emits no `lease` key at all — the
 // field appears exactly when there is a lease to report.
@@ -147,17 +140,13 @@ type showResultV2 struct {
 }
 
 // VersionedPayload implements output.Versioned, surfacing the issue's CAS
-// version and lease under --json=v2 only. The v1 marshaler below is frozen.
+// version and lease when a single issue is shown.
 //
 // The lease's `live` flag is computed here from the current clock, per read:
 // effective status is computed at read time with no write, so
 // an expired lease reads as dead without anyone having called claim.
 func (s showResult) VersionedPayload() any {
-	base, err := s.marshalJSONStruct()
-	if err != nil {
-		// Fall back to the v1 shape; the marshaler will surface the error.
-		return s
-	}
+	base := s.wire()
 	version := 0
 	var lease any
 	if s.Issue != nil {
@@ -184,15 +173,13 @@ func (s showResult) VersionedPayload() any {
 	}
 }
 
+// MarshalJSON emits the flattened shape without version or lease: each element
+// of a batch `issue show` array marshals through it.
 func (s showResult) MarshalJSON() ([]byte, error) {
-	j, err := s.marshalJSONStruct()
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(j)
+	return json.Marshal(s.wire())
 }
 
-func (s showResult) marshalJSONStruct() (showResultJSON, error) {
+func (s showResult) wire() showResultJSON {
 	i := s.Issue
 
 	labels := i.Labels
@@ -258,10 +245,9 @@ func (s showResult) marshalJSONStruct() (showResultJSON, error) {
 		j.ParentID = &pid
 	}
 
-	// DKT-55: a DECLARED scope reaches v1. A declared-but-empty scope must
-	// marshal as `[]`, not be collapsed into absence, so the pointer is taken
-	// from a non-nil slice; an undeclared scope stays a nil pointer and emits
-	// no key at all.
+	// DKT-55: a declared-but-empty scope must marshal as `[]`, not be collapsed
+	// into absence, so the pointer is taken from a non-nil slice; an undeclared
+	// scope stays a nil pointer and emits no key at all.
 	if s.ScopeDeclared {
 		globs := s.Scope
 		if globs == nil {
@@ -270,7 +256,7 @@ func (s showResult) marshalJSONStruct() (showResultJSON, error) {
 		j.Scope = &globs
 	}
 
-	return j, nil
+	return j
 }
 
 var showCmd = &cobra.Command{
