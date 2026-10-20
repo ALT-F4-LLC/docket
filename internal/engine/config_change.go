@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // CONFIG WRITES TO SECURITY-LOAD-BEARING KEYS ARE RECORDED (DKT-2767).
@@ -26,7 +26,7 @@ import (
 // criticality, sealed, hold_on_dissent — still shapes how a tally decides, and
 // that is what this records.
 
-// SetConfig is the engine's config write: db.SetConfigTx plus, for a vote-rule
+// SetConfig is the engine's config write: the store's SetConfigTx plus, for a vote-rule
 // key, the `config-changed` event, committed together or not at all.
 //
 // `changedBy` is the identity the activity log attributes issue edits to
@@ -42,11 +42,11 @@ func SetConfig(conn *sql.DB, projectID int, key, value, changedBy string) error 
 	}
 	defer tx.Rollback()
 
-	prior, err := db.SetConfigTx(tx, projectID, key, value)
+	prior, err := store.TxOn(tx).SetConfigTx(projectID, key, value)
 	if err != nil {
 		return err
 	}
-	if strings.HasPrefix(key, db.KeyVoteRulePrefix) {
+	if strings.HasPrefix(key, store.KeyVoteRulePrefix) {
 		if err := recordConfigChange(tx, projectID, key, prior, value, changedBy); err != nil {
 			return err
 		}
