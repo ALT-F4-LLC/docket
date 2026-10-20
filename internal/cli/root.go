@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -207,12 +207,13 @@ var rootCmd = &cobra.Command{
 			)
 		}
 
-		conn, err := db.Open(cfg.DBPath)
+		conn, err := store.OpenSQLiteDB(cfg.DBPath)
 		if err != nil {
 			return fmt.Errorf("failed to open database: %w", err)
 		}
 
-		if err := db.Migrate(conn); err != nil {
+		st := store.StoreOn(conn)
+		if err := st.Migrate(); err != nil {
 			return fmt.Errorf("failed to migrate database: %w", err)
 		}
 
@@ -228,7 +229,7 @@ var rootCmd = &cobra.Command{
 		// command formats an id: `VOR-42` and `DKT-42` are the same issue —
 		// the number is the global identity — but the board reads in the
 		// project's own voice.
-		if prefix, err := db.ProjectPrefix(conn, projectID); err == nil {
+		if prefix, err := st.ProjectPrefix(projectID); err == nil {
 			model.SetDisplayPrefix(prefix)
 		}
 
@@ -236,7 +237,7 @@ var rootCmd = &cobra.Command{
 		// prefixes some project holds (DKT-110): `AMS-2` round-trips from a
 		// cross-project listing, while `ANSI-16` — an id-shaped term no
 		// project owns — is refused instead of silently resolving issue 16.
-		if prefixes, err := db.AllProjectPrefixes(conn); err == nil {
+		if prefixes, err := st.AllProjectPrefixes(); err == nil {
 			model.SetKnownProjectPrefixes(prefixes)
 		}
 
@@ -258,26 +259,27 @@ var rootCmd = &cobra.Command{
 		// deep inside engine code — activate, reconcile, and every other
 		// fat-transaction verb format ids into their result and error messages
 		// WHILE their transaction is open, and that transaction already holds
-		// conn's one pooled connection (db.Open caps it at one). Resolving
-		// through conn there self-deadlocks: database/sql has no second
-		// connection to hand the query, and the query is what the open
-		// transaction is waiting on to finish. db.OpenReader's own connection
-		// never contends with it.
+		// conn's one pooled connection (store.OpenSQLiteDB caps it at one).
+		// Resolving through conn there self-deadlocks: database/sql has no
+		// second connection to hand the query, and the query is what the open
+		// transaction is waiting on to finish. store.OpenSQLiteReaderDB's own
+		// connection never contends with it.
 		//
 		// Not concurrency-guarded, for the same reason SetDisplayPrefix is not:
 		// these are per-invocation constants installed before any command runs,
 		// and rendering happens on the command's own goroutine.
-		readerDB, err := db.OpenReader(cfg.DBPath)
+		readerDB, err := store.OpenSQLiteReaderDB(cfg.DBPath)
 		if err != nil {
 			return fmt.Errorf("failed to open reader database connection: %w", err)
 		}
 
+		ownerStore := store.StoreOn(readerDB)
 		owners := map[int]string{}
 		model.SetIssueOwnerPrefixResolver(func(id int) string {
 			if prefix, ok := owners[id]; ok {
 				return prefix
 			}
-			prefix, err := db.IssueOwnerPrefix(readerDB, id)
+			prefix, err := ownerStore.IssueOwnerPrefix(id)
 			if err != nil {
 				prefix = ""
 			}
@@ -494,7 +496,7 @@ func getProjectID(cmd *cobra.Command) int {
 	if id, ok := cmd.Context().Value(projectKey).(int); ok && id != 0 {
 		return id
 	}
-	return db.DefaultProjectID
+	return store.DefaultProjectID
 }
 
 // Execute runs the root command and returns an exit code.

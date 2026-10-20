@@ -1,14 +1,13 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -53,14 +52,14 @@ exist. Abandon the run instead if its shape is wrong.`,
 
 // resolveRunIssueArgs parses `RUN-N DKT-N...` and loads the run.
 func resolveRunIssueArgs(cmd *cobra.Command, args []string) (*model.Run, []int, error) {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	runID, err := model.ParseRunID(args[0])
 	if err != nil {
 		return nil, nil, cmdErr(err, output.ErrValidation)
 	}
-	run, err := db.GetRun(conn, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := st.GetRun(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, nil, cmdErr(
 			fmt.Errorf("run %s not found", model.FormatRunID(runID)), output.ErrNotFound)
 	}
@@ -89,8 +88,8 @@ type runIssueSet struct {
 	Issues []string `json:"issues"`
 }
 
-func runIssueAnswer(conn *sql.DB, run *model.Run) (runIssueSet, error) {
-	attached, err := db.ListRunIssues(conn, run.ID)
+func runIssueAnswer(st store.Store, run *model.Run) (runIssueSet, error) {
+	attached, err := st.ListRunIssues(run.ID)
 	if err != nil {
 		return runIssueSet{}, err
 	}
@@ -103,6 +102,7 @@ func runIssueAnswer(conn *sql.DB, run *model.Run) (runIssueSet, error) {
 
 func runRunIssueAdd(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
+	st := store.StoreOn(conn)
 	run, issueIDs, err := resolveRunIssueArgs(cmd, args)
 	if err != nil {
 		return err
@@ -128,8 +128,8 @@ func runRunIssueAdd(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// downstream. `issue move --project` already refuses while a run holds an
 	// issue for exactly this reason; the invariant is enforced at both edges.
 	for _, id := range issueIDs {
-		issueProject, err := db.IssueProjectID(conn, id)
-		if errors.Is(err, db.ErrNotFound) {
+		issueProject, err := st.IssueProjectID(id)
+		if errors.Is(err, store.ErrNotFound) {
 			return cmdErr(
 				fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
 		}
@@ -150,12 +150,12 @@ func runRunIssueAdd(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	for _, id := range issueIDs {
-		if err := db.AddRunIssue(conn, run.ID, id); err != nil {
+		if err := st.AddRunIssue(run.ID, id); err != nil {
 			return runErr(err)
 		}
 	}
 
-	answer, err := runIssueAnswer(conn, run)
+	answer, err := runIssueAnswer(st, run)
 	if err != nil {
 		return cmdErr(err, output.ErrGeneral)
 	}
@@ -169,7 +169,7 @@ func runRunIssueAdd(cmd *cobra.Command, args []string, w *output.Writer) error {
 }
 
 func runRunIssueRemove(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 	run, issueIDs, err := resolveRunIssueArgs(cmd, args)
 	if err != nil {
 		return err
@@ -185,7 +185,7 @@ func runRunIssueRemove(cmd *cobra.Command, args []string, w *output.Writer) erro
 
 	// Membership is checked for the WHOLE set first, so `remove A TYPO` cannot
 	// detach A and then refuse.
-	attached, err := db.ListRunIssues(conn, run.ID)
+	attached, err := st.ListRunIssues(run.ID)
 	if err != nil {
 		return cmdErr(err, output.ErrGeneral)
 	}
@@ -202,12 +202,12 @@ func runRunIssueRemove(cmd *cobra.Command, args []string, w *output.Writer) erro
 	}
 
 	for _, id := range issueIDs {
-		if err := db.RemoveRunIssue(conn, run.ID, id); err != nil {
+		if err := st.RemoveRunIssue(run.ID, id); err != nil {
 			return runErr(err)
 		}
 	}
 
-	answer, err := runIssueAnswer(conn, run)
+	answer, err := runIssueAnswer(st, run)
 	if err != nil {
 		return cmdErr(err, output.ErrGeneral)
 	}
