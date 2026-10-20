@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +17,7 @@ var reopenCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		conn := getDB(cmd)
+		st := store.StoreOn(conn)
 
 		id, err := issueArg(args[0])
 		if err != nil {
@@ -49,14 +50,14 @@ var reopenCmd = &cobra.Command{
 		// back on the board, so "the machine abandoned this" is no longer the
 		// current fact about it (DKT-245).
 		fields := map[string]interface{}{"status": "backlog", "resolution": ""}
-		if err := db.UpdateIssueCAS(conn, id, fields, config.DefaultAuthor(), ifVersion); err != nil {
+		if err := st.UpdateIssueCAS(id,fields, config.DefaultAuthor(), ifVersion); err != nil {
 			if e := casError(err, fmt.Sprintf("issue %s", model.FormatID(id))); e != nil {
 				return e
 			}
 			return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
 		}
 
-		issue, err = db.GetIssue(conn, id)
+		issue, err = st.GetIssue(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}

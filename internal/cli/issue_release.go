@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +49,7 @@ issue to the pool; releasing does it now and without waiting out the TTL.`,
 		}
 
 		label := fmt.Sprintf("issue %s", model.FormatID(id))
-		lease, err := db.ReleaseIssue(conn, id, token, model.NowMS())
+		lease, err := store.StoreOn(conn).ReleaseIssue(id, token, model.NowMS())
 		if err != nil {
 			if e := leaseError(err, label); e != nil {
 				return e
