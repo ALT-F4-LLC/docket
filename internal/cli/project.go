@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -52,9 +52,7 @@ var projectListCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		projects, err := db.ListProjects(conn)
+		projects, err := store.StoreOn(getDB(cmd)).ListProjects()
 		if err != nil {
 			return cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
 		}
@@ -104,7 +102,7 @@ messages and other projects' run records never go stale.
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		prefix := strings.ToUpper(strings.TrimSpace(args[0]))
 		if err := model.ValidateProjectPrefix(prefix); err != nil {
@@ -118,12 +116,12 @@ messages and other projects' run records never go stale.
 		// report, so a shared one makes every id in the store ambiguous about
 		// who owns it — which is exactly what happened when registration wrote
 		// a hardcoded DKT for every row.
-		holder, err := db.PrefixHolder(conn, prefix, projectID)
+		holder, err := st.PrefixHolder(prefix, projectID)
 		if err != nil {
 			return cmdErr(err, output.ErrGeneral)
 		}
 		if holder != 0 {
-			other, gerr := db.GetProject(conn, holder)
+			other, gerr := st.GetProject(holder)
 			name := fmt.Sprintf("project %d", holder)
 			if gerr == nil {
 				name = fmt.Sprintf("%q (%s)", other.Name, other.Identity)
@@ -134,7 +132,7 @@ messages and other projects' run records never go stale.
 				prefix, name), output.ErrConflict)
 		}
 
-		if err := db.SetProjectPrefix(conn, projectID, prefix); err != nil {
+		if err := st.SetProjectPrefix(projectID, prefix); err != nil {
 			return cmdErr(fmt.Errorf("setting the prefix: %w", err), output.ErrGeneral)
 		}
 
@@ -142,7 +140,7 @@ messages and other projects' run records never go stale.
 		// confirmation below is the first output that should carry it.
 		model.SetDisplayPrefix(prefix)
 
-		project, err := db.GetProject(conn, projectID)
+		project, err := st.GetProject(projectID)
 		if err != nil {
 			return cmdErr(fmt.Errorf("re-reading the project: %w", err), output.ErrGeneral)
 		}
@@ -190,15 +188,16 @@ issues with 'docket issue move --project'.`,
 			return err
 		}
 
-		if err := db.DeleteProject(conn, target.ID); err != nil {
+		st := store.StoreOn(conn)
+		if err := st.DeleteProject(target.ID); err != nil {
 			switch {
-			case errors.Is(err, db.ErrProjectIsDefault):
+			case errors.Is(err, store.ErrProjectIsDefault):
 				return cmdErr(fmt.Errorf(
 					"project %q is the default project and cannot be deleted: "+
 						"every pre-tenancy row in this store belongs to it",
 					target.Name), output.ErrValidation)
-			case errors.Is(err, db.ErrProjectInUse):
-				counts, cerr := db.ProjectRefCounts(conn, target.ID)
+			case errors.Is(err, store.ErrProjectInUse):
+				counts, cerr := st.ProjectRefCounts(target.ID)
 				if cerr != nil {
 					return cmdErr(cerr, output.ErrGeneral)
 				}
@@ -249,7 +248,7 @@ issues with 'docket issue move --project'.`,
 // typed however it is typed — but an EXACT match wins outright, so two rows
 // differing only in case each still resolve by their own spelling.
 func resolveProjectRef(conn *sql.DB, ref string) (*model.Project, error) {
-	projects, err := db.ListProjects(conn)
+	projects, err := store.StoreOn(conn).ListProjects()
 	if err != nil {
 		return nil, cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
 	}

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -34,7 +34,7 @@ import (
 //
 //  2. THE VERB MUST NOT BE A READ. Reading is observation; observation that
 //     creates rows is not observation. An unregistered project resolves to
-//     db.UnregisteredProjectID for a read, which matches no rows — so a read
+//     store.UnregisteredProjectID for a read, which matches no rows — so a read
 //     from a repository docket has never seen answers "nothing here", which is
 //     true, rather than answering with some other project's contents.
 //
@@ -152,13 +152,15 @@ func resolveInvocationProject(
 	// dimension entirely: it means "this store is not multi-tenant", and the
 	// default row is the whole store.
 	if cfg.Identity == "" {
-		return db.DefaultProjectID, nil
+		return store.DefaultProjectID, nil
 	}
+
+	st := store.StoreOn(conn)
 
 	// THE LOOKUP COMES FIRST, unconditionally. Whatever is already registered
 	// keeps resolving — including rows minted by the defect this guards against,
 	// which must stay reachable so they can be inspected and deleted.
-	id, found, err := db.LookupProject(conn, cfg.Identity)
+	id, found, err := st.LookupProject(cfg.Identity)
 	if err != nil {
 		return 0, fmt.Errorf("resolving the project: %w", err)
 	}
@@ -168,7 +170,7 @@ func resolveInvocationProject(
 
 	// Part 2: a read observes, and finds nothing here to observe.
 	if !commandMayRegisterProject(cmd) {
-		return db.UnregisteredProjectID, nil
+		return store.UnregisteredProjectID, nil
 	}
 
 	// Part 1: an unanchored identity never registers.
@@ -187,12 +189,12 @@ func resolveInvocationProject(
 					"store there with `docket init --local`",
 				commandPath(cmd), cwd), output.ErrValidation)
 		}
-		return db.UnregisteredProjectID, nil
+		return store.UnregisteredProjectID, nil
 	}
 
 	name := filepath.Base(cfg.Identity)
 	nowMS := time.Now().UnixMilli()
-	id, created, err := db.EnsureProjectCreated(conn, cfg.Identity, name, nowMS)
+	id, created, err := st.EnsureProjectCreated(cfg.Identity, name, nowMS)
 	if err != nil {
 		return 0, fmt.Errorf("resolving the project: %w", err)
 	}
@@ -204,7 +206,7 @@ func resolveInvocationProject(
 		// unattributed row — but it is reported, because a silently missing
 		// registration event is the exact gap this kind was added to close.
 		cwd, _ := os.Getwd()
-		prefix, _ := db.ProjectPrefix(conn, id)
+		prefix, _ := st.ProjectPrefix(id)
 		if err := engine.RecordProjectRegisteredEvent(conn, engine.ProjectRegistration{
 			ID: id, Name: name, Identity: cfg.Identity,
 			Cwd: cwd, Verb: commandPath(cmd), Prefix: prefix,
