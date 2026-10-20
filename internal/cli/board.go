@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -35,7 +35,7 @@ var boardCmd = &cobra.Command{
 }
 
 func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
@@ -56,7 +56,7 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 		}
 	}
 
-	opts := db.ListOptions{
+	opts := store.ListOptions{
 		ProjectID:   getProjectID(cmd),
 		Priorities:  priorities,
 		Sizes:       sizes,
@@ -65,7 +65,7 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 		IncludeDone: true,
 	}
 
-	issues, _, err := db.ListIssues(conn, opts)
+	issues, _, err := st.ListIssues(opts)
 	if err != nil {
 		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
 	}
@@ -111,7 +111,7 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 	for i, issue := range issues {
 		parentIDs[i] = issue.ID
 	}
-	batchProgress, err := db.GetBatchSubIssueProgress(conn, parentIDs)
+	batchProgress, err := st.GetBatchSubIssueProgress(parentIDs)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
 	}

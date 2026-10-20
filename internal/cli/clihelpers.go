@@ -11,9 +11,9 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
@@ -70,7 +70,7 @@ func issueArg(source string) (int, error) {
 	return id, nil
 }
 
-// notFound re-wraps db.ErrNotFound as the NOT_FOUND error every call site
+// notFound re-wraps store.ErrNotFound as the NOT_FOUND error every call site
 // reports with its own label, and returns nil for any other error so the
 // caller's existing fallback (typically a generic ErrGeneral wrap) still
 // applies unchanged.
@@ -85,7 +85,7 @@ func issueArg(source string) (int, error) {
 //	}
 //	return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 func notFound(err error, label string) error {
-	if errors.Is(err, db.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
 		return cmdErr(fmt.Errorf("%s not found", label), output.ErrNotFound)
 	}
 	return nil
@@ -97,7 +97,7 @@ func notFound(err error, label string) error {
 // for anything else. label matches whatever text each call site already
 // passed to notFound, so error text is unchanged at every site.
 func getIssueOrErr(conn *sql.DB, id int, label string) (*model.Issue, error) {
-	issue, err := db.GetIssue(conn, id)
+	issue, err := store.StoreOn(conn).GetIssue(id)
 	if err != nil {
 		if e := notFound(err, label); e != nil {
 			return nil, e
@@ -111,7 +111,7 @@ func getIssueOrErr(conn *sql.DB, id int, label string) (*model.Issue, error) {
 // has one, always with the numeric id — names are display-only, so the id is
 // what an operator can act on (`docket project list` speaks both).
 func projectLabel(conn *sql.DB, id int) string {
-	if p, err := db.GetProject(conn, id); err == nil && p.Name != "" {
+	if p, err := store.StoreOn(conn).GetProject(id); err == nil && p.Name != "" {
 		return fmt.Sprintf("project %q (id %d)", p.Name, p.ID)
 	}
 	return fmt.Sprintf("project %d", id)
@@ -166,25 +166,27 @@ func parseRunFlag(ref string) (int, error) {
 }
 
 // hydrateIssueAssociations fills an issue's labels, files, and docs from their
-// join tables. db.GetIssue reads the issues row alone, so a struct straight
+// join tables. GetIssue reads the issues row alone, so a struct straight
 // out of it renders "labels":[] no matter what is linked — which reads as a
 // silent drop when the caller just supplied -l (DKT-240). Every command that
 // renders a refetched issue as its result payload runs this first, so what is
 // echoed back is what is stored.
 func hydrateIssueAssociations(conn *sql.DB, issue *model.Issue) error {
-	labels, err := db.GetIssueLabels(conn, issue.ID)
+	st := store.StoreOn(conn)
+
+	labels, err := st.GetIssueLabels(issue.ID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
 	}
 	issue.Labels = labels
 
-	files, err := db.GetIssueFiles(conn, issue.ID)
+	files, err := st.GetIssueFiles(issue.ID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 	}
 	issue.Files = files
 
-	if err := db.HydrateDocs(conn, []*model.Issue{issue}); err != nil {
+	if err := st.HydrateDocs([]*model.Issue{issue}); err != nil {
 		return cmdErr(fmt.Errorf("fetching docs: %w", err), output.ErrGeneral)
 	}
 	return nil
