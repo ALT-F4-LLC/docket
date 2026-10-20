@@ -6,10 +6,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -51,12 +51,12 @@ var voteCommitCmd = &cobra.Command{
 			}
 		}
 
-		err = db.CommitProposal(conn, proposalID, outcome, escalationReason)
+		err = store.StoreOn(conn).CommitProposal(proposalID, outcome, escalationReason)
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrConflict) {
+			if errors.Is(err, store.ErrConflict) {
 				return cmdErr(err, output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("committing proposal: %w", err), output.ErrGeneral)
