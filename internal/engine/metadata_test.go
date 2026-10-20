@@ -698,7 +698,7 @@ func TestFailMetadataReachesTheReportRollup(t *testing.T) {
 // assertion over the ROW cannot pin this property, because `human.go`'s
 // `FailStep` runs entirely under `defer tx.Rollback()` — any write a
 // refused call made INSIDE the transaction is undone identically whether
-// the validation ran before `conn.Begin()` or immediately after it, so
+// the validation ran before `store.BeginSQLiteTx()` or immediately after it, so
 // `row_version` alone cannot tell the two placements apart (this is why
 // TestFailMetadataRefusals's row_version check is necessary but not
 // SUFFICIENT for this property).
@@ -706,8 +706,8 @@ func TestFailMetadataReachesTheReportRollup(t *testing.T) {
 // So this is a SOURCE-POSITION check, the same shape as
 // TestNoPoolReadsInsideTransactions: it parses human.go's AST and asserts
 // that FailStep's calls to validateFailMetadataSize and DecodeMetadataBag
-// appear before its call to conn.Begin(). Moving either call after
-// conn.Begin() — even though authorize itself has no side effect today —
+// appear before its call to store.BeginSQLiteTx(). Moving either call after
+// store.BeginSQLiteTx() — even though authorize itself has no side effect today —
 // makes this fail, which is the placement guarantee stageZero makes
 // and `fail` must mirror.
 func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
@@ -736,7 +736,7 @@ func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 					decodePos = call.Pos()
 				}
 			case *ast.SelectorExpr:
-				if ident, ok := fn.X.(*ast.Ident); ok && ident.Name == "conn" && fn.Sel.Name == "Begin" {
+				if ident, ok := fn.X.(*ast.Ident); ok && ident.Name == "store" && fn.Sel.Name == "BeginSQLiteTx" {
 					beginPos = call.Pos()
 				}
 			}
@@ -746,7 +746,7 @@ func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 	})
 
 	if beginPos == token.NoPos {
-		t.Fatal("FailStep no longer calls conn.Begin() — this test needs updating, not deleting")
+		t.Fatal("FailStep no longer calls store.BeginSQLiteTx() — this test needs updating, not deleting")
 	}
 	if sizePos == token.NoPos {
 		t.Fatal("FailStep no longer calls validateFailMetadataSize")
@@ -755,11 +755,11 @@ func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 		t.Fatal("FailStep no longer calls DecodeMetadataBag")
 	}
 	if sizePos > beginPos {
-		t.Error("validateFailMetadataSize runs AFTER conn.Begin() — a refusal " +
+		t.Error("validateFailMetadataSize runs AFTER store.BeginSQLiteTx() — a refusal " +
 			"would happen inside the transaction, invisible to a row_version check")
 	}
 	if decodePos > beginPos {
-		t.Error("DecodeMetadataBag runs AFTER conn.Begin() — a refusal would " +
+		t.Error("DecodeMetadataBag runs AFTER store.BeginSQLiteTx() — a refusal would " +
 			"happen inside the transaction, invisible to a row_version check")
 	}
 }

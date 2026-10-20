@@ -279,7 +279,7 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 		event = EventStepRejected
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return fmt.Errorf("beginning the decision: %w", err)
 	}
@@ -772,7 +772,7 @@ func (e *Engine) resolveStep(
 		}
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return fmt.Errorf("beginning the resolution: %w", err)
 	}
@@ -1123,7 +1123,7 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 		return err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return fmt.Errorf("beginning the failure: %w", err)
 	}

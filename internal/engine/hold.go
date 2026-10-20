@@ -55,7 +55,7 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 		return err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return fmt.Errorf("holding %s: %w", step.Instance, err)
 	}

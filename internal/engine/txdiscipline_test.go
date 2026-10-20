@@ -44,7 +44,8 @@ import (
 // says exactly which function and which call.
 //
 // The check: within a function, the region between a transaction opener
-// (`conn.Begin()`, `conn.BeginTx()`, `db.BeginReadSnapshot()`, or a package
+// (`conn.Begin()`, `conn.BeginTx()`, `db.BeginReadSnapshot()`,
+// `store.BeginSQLiteTx()`, `store.BeginSQLiteReadSnapshot()`, or a package
 // helper returning *sql.Tx) and the matching `Commit()` is a LIVE
 // TRANSACTION, and no call inside that region may touch the pool — neither
 // directly (`conn.Query`) nor by passing `conn` to a helper that might.
@@ -131,7 +132,8 @@ func isSQLTxPointer(expr ast.Expr) bool {
 
 // poolReadsInsideTransactions returns every pool-taking call inside a
 // live-transaction region of fn. A region opens at conn.Begin, conn.BeginTx,
-// db.BeginReadSnapshot, or a call to one of txOpeners.
+// db.BeginReadSnapshot, store.BeginSQLiteTx, store.BeginSQLiteReadSnapshot,
+// or a call to one of txOpeners.
 func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []poolRead {
 	// Collect the Begin and Commit positions in source order.
 	var begins, commits []token.Pos
@@ -154,7 +156,8 @@ func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []
 		}
 		switch {
 		case ident.Name == "conn" && (sel.Sel.Name == "Begin" || sel.Sel.Name == "BeginTx"),
-			ident.Name == "db" && sel.Sel.Name == "BeginReadSnapshot":
+			ident.Name == "db" && sel.Sel.Name == "BeginReadSnapshot",
+			ident.Name == "store" && (sel.Sel.Name == "BeginSQLiteTx" || sel.Sel.Name == "BeginSQLiteReadSnapshot"):
 			begins = append(begins, call.Pos())
 		case strings.HasPrefix(ident.Name, "tx") && sel.Sel.Name == "Commit":
 			commits = append(commits, call.Pos())
@@ -269,6 +272,16 @@ func TestPoolReadsInsideTransactionsOpeners(t *testing.T) {
 		{
 			name:     "db.BeginReadSnapshot",
 			body:     "tx, _ := db.BeginReadSnapshot(conn)\ndefer tx.Rollback()\nlookup(conn)",
+			wantLine: 3, wantCall: "lookup",
+		},
+		{
+			name:     "store.BeginSQLiteTx",
+			body:     "tx, _ := store.BeginSQLiteTx(conn)\nconn.QueryRow(\"q\")\ntx.Commit()",
+			wantLine: 2, wantCall: "conn.QueryRow",
+		},
+		{
+			name:     "store.BeginSQLiteReadSnapshot",
+			body:     "tx, _ := store.BeginSQLiteReadSnapshot(conn)\ndefer tx.Rollback()\nlookup(conn)",
 			wantLine: 3, wantCall: "lookup",
 		},
 		{
