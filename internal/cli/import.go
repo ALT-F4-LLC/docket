@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -89,7 +89,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 	} else if !merge {
 		// Default mode: require an empty PROJECT — under the shared store,
 		// another project's issues are not "existing data" for this one.
-		count, err := db.CountIssues(conn, getProjectID(cmd))
+		count, err := store.StoreOn(conn).CountIssues(getProjectID(cmd))
 		if err != nil {
 			return cmdErr(fmt.Errorf("checking database: %w", err), output.ErrGeneral)
 		}
@@ -182,7 +182,7 @@ func doImport(conn *sql.DB, export *model.ExportData, replace bool, projectID in
 		// Replace clears THIS PROJECT's data, never the store's: under the
 		// shared store, "replace everything" scoped any wider would destroy
 		// projects the operator was not looking at.
-		if err := db.ClearProjectDataTx(tx, projectID); err != nil {
+		if err := store.TxOn(tx).ClearProjectDataTx(projectID); err != nil {
 			return nil, fmt.Errorf("clearing project data: %w", err)
 		}
 	}
