@@ -15,7 +15,7 @@ import (
 // latestSchemaVersion is the highest version the PostgreSQL migrations reach.
 // The version numbers are the SQLite store's: version N here has the tables
 // and columns of a fresh SQLite database migrated to N.
-const latestSchemaVersion = 30
+const latestSchemaVersion = 47
 
 // migrations are keyed by the version they migrate TO, as in the SQLite store.
 // Version 1 is the SQLite schemaDDL, which creates its tables in their current
@@ -57,6 +57,23 @@ var migrations = map[int]func(context.Context, *sql.Tx) error{
 	28: execMigration(v28DDL),
 	29: execMigration(v29DDL),
 	30: execMigration(v30DDL),
+	31: execMigration(v31DDL),
+	32: execMigration(v32DDL),
+	33: execMigration(v33DDL),
+	34: execMigration(v34DDL),
+	35: execMigration(v35DDL),
+	36: execMigration(v36DDL),
+	37: execMigration(v37DDL),
+	38: execMigration(v38DDL),
+	39: execMigration(v39DDL),
+	40: execMigration(v40DDL),
+	41: execMigration(v41DDL),
+	42: execMigration(v42DDL),
+	43: execMigration(v43DDL),
+	44: execMigration(v44DDL),
+	45: execMigration(v45DDL),
+	46: execMigration(v46DDL),
+	47: execMigration(v47DDL),
 }
 
 // Migrate brings the database from the version its meta table records (0 when

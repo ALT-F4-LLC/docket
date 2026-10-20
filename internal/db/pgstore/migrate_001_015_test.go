@@ -26,6 +26,7 @@ var sqliteToPostgresType = map[string]string{
 	"INTEGER": "bigint",
 	"TEXT":    "text",
 	"REAL":    "double precision",
+	"BLOB":    "bytea",
 }
 
 // jsonColumns are the TEXT columns whose every writer stores a JSON document;

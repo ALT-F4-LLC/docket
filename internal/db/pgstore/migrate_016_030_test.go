@@ -21,8 +21,8 @@ func TestPgMigrate016030SchemaParity(t *testing.T) {
 	ctx := context.Background()
 	db := emptyTestSchema(t)
 
-	if err := Migrate(ctx, db); err != nil {
-		t.Fatalf("Migrate on an empty database: %v", err)
+	if err := applyMigrations(ctx, db, 0, 30); err != nil {
+		t.Fatalf("migrating an empty database to version 30: %v", err)
 	}
 	assertSchemaVersion(t, db, 30)
 
@@ -302,8 +302,8 @@ func TestPgMigrate016030NewTablesIndexesAndDefaults(t *testing.T) {
 	ctx := context.Background()
 	db := emptyTestSchema(t)
 
-	if err := Migrate(ctx, db); err != nil {
-		t.Fatalf("Migrate on an empty database: %v", err)
+	if err := applyMigrations(ctx, db, 0, 30); err != nil {
+		t.Fatalf("migrating an empty database to version 30: %v", err)
 	}
 	tables := []string{"gate_override_grants", "stale_target_waivers", "run_notes"}
 
