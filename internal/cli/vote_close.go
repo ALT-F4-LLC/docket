@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -63,11 +63,11 @@ it.`,
 				model.FormatProposalID(proposalID)), output.ErrConflict)
 		}
 
-		if err := db.CloseProposal(conn, proposalID, reason); err != nil {
+		if err := store.StoreOn(conn).CloseProposal(proposalID, reason); err != nil {
 			if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrConflict) {
+			if errors.Is(err, store.ErrConflict) {
 				return cmdErr(err, output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("closing proposal: %w", err), output.ErrGeneral)
