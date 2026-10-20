@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -71,7 +71,7 @@ type IssueDiffRepin struct {
 // git subprocess) and refuses everything it can before the caller opens
 // one. spec is the step's pinned definition, nil for a materialized step.
 func (e *Engine) prepareIssueDiffRepin(
-	conn *sql.DB, step *db.Step, spec *workflow.Step, worktree string,
+	conn *sql.DB, step *store.Step, spec *workflow.Step, worktree string,
 ) (*IssueDiffRepin, error) {
 	// Only a tree-holding executor step records an issue.diff (as amended by
 	// DKT-75), so only one has a record to re-pin. A
@@ -176,7 +176,7 @@ func (e *Engine) prepareIssueDiffRepin(
 // applyIssueDiffRepin records a prepared re-pin inside the resolution's
 // transaction: the step's worktree, the superseding artifact, and the event.
 func applyIssueDiffRepin(
-	tx *sql.Tx, step *db.Step, repin *IssueDiffRepin, as string, nowMS int64,
+	tx *sql.Tx, step *store.Step, repin *IssueDiffRepin, as string, nowMS int64,
 ) error {
 	// The named checkout becomes the step's RECORDED worktree, exactly as
 	// `step record --worktree` persists it (stageZero): a rerun-gates resumed
@@ -202,7 +202,7 @@ func applyIssueDiffRepin(
 	}
 	// The same row shape the routing stage records (runRoutingStage), plus
 	// DKT-70's pointer at the record this one revises.
-	id, err := db.InsertArtifactTx(tx, db.Artifact{
+	id, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: ArtifactKindIssueDiff,
 		Body: repin.body, Payload: repin.payload,
 		SHA256:     workflow.SHA256([]byte(repin.body)),
@@ -242,12 +242,12 @@ func applyIssueDiffRepin(
 // pointer says "this revises that" (DKT-70), and a step revises its own
 // record. Whether the issue's newest diff belongs to this step or to another
 // is the resolver's question, answered by ordinal and id as always.
-func stepLatestIssueDiff(conn *sql.DB, stepID int) (*db.Artifact, error) {
-	artifacts, err := db.ListStepArtifacts(conn, stepID)
+func stepLatestIssueDiff(conn *sql.DB, stepID int) (*store.Artifact, error) {
+	artifacts, err := store.StoreOn(conn).ListStepArtifacts(stepID)
 	if err != nil {
 		return nil, err
 	}
-	var latest *db.Artifact
+	var latest *store.Artifact
 	for _, a := range artifacts {
 		if a.Kind != ArtifactKindIssueDiff {
 			continue

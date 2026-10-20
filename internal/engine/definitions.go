@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -88,7 +88,7 @@ func addBoundDefinitions(conn *sql.DB, runID int, out map[int]*workflow.Definiti
 // materializedSpec. Its zero value is the default, and a caller holding a
 // DECLARED step is unaffected by it.
 func stepSpec(
-	defs map[int]*workflow.Definition, step *db.Step, tally holdTally,
+	defs map[int]*workflow.Definition, step *store.Step, tally holdTally,
 ) *workflow.Step {
 	def := defs[step.WorkflowID]
 	if def == nil {
