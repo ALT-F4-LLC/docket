@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -59,10 +59,10 @@ import (
 // here means the definition arrived without passing register-time validation
 // (a restored database), and the park is the honest answer.
 func evaluateVoteThreshold(
-	conn *sql.DB, step *db.Step, spec *workflow.Step, proposalID int,
+	conn *sql.DB, step *store.Step, spec *workflow.Step, proposalID int,
 	status model.ProposalStatus,
 ) (ThresholdResult, error) {
-	votes, err := db.GetProposalVotes(conn, proposalID)
+	votes, err := store.StoreOn(conn).GetProposalVotes(proposalID)
 	if err != nil {
 		return ThresholdResult{}, fmt.Errorf(
 			"reading the casts of %s for its threshold: %w",
@@ -103,7 +103,8 @@ func evaluateVoteThreshold(
 // Both reads are pooled, so this is called from OUTSIDE routeVoteStep's
 // transaction, like every other read there.
 func dissentHold(conn *sql.DB, proposalID int) (string, error) {
-	proposal, err := db.GetProposal(conn, proposalID)
+	st := store.StoreOn(conn)
+	proposal, err := st.GetProposal(proposalID)
 	if err != nil {
 		return "", fmt.Errorf(
 			"reading %s for its dissent hold: %w",
@@ -113,7 +114,7 @@ func dissentHold(conn *sql.DB, proposalID int) (string, error) {
 		return "", nil
 	}
 
-	votes, err := db.GetProposalVotes(conn, proposalID)
+	votes, err := st.GetProposalVotes(proposalID)
 	if err != nil {
 		return "", fmt.Errorf(
 			"reading the casts of %s for its dissent hold: %w",
@@ -183,9 +184,9 @@ func voteCastPayloads(votes []*model.Vote) []map[string]any {
 // resolved past before the tally closed the ballot — contributes the sealed
 // projection: who cast and how many, nothing of what (DKT-2447).
 func resolveVoteRecords(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, stepName string,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, stepName string,
 ) ([]ContextInput, error) {
-	var candidates []*db.Step
+	var candidates []*store.Step
 	best := -1
 	for _, s := range sched.steps {
 		if s.IssueID != step.IssueID || s.StepName != stepName ||
@@ -204,7 +205,7 @@ func resolveVoteRecords(
 		return nil, nil
 	}
 
-	producers := make([]*db.Step, 0, len(candidates))
+	producers := make([]*store.Step, 0, len(candidates))
 	for _, s := range candidates {
 		if s.Ordinal == best {
 			producers = append(producers, s)
@@ -224,13 +225,14 @@ func resolveVoteRecords(
 		return producers[i].ID < producers[j].ID
 	})
 
+	stx := store.TxOn(tx)
 	out := make([]ContextInput, 0, len(producers))
 	for _, producer := range producers {
-		if producer.Status == db.StepSkipped {
+		if producer.Status == store.StepSkipped {
 			continue
 		}
-		proposalID, found, err := db.LookupIdempotencyKeyTx(
-			tx, db.ScopeVoteCreate,
+		proposalID, found, err := stx.LookupIdempotencyKeyTx(
+			store.ScopeVoteCreate,
 			voteIdempotencyKey(producer.RunID, producer.IssueID, producer.Instance))
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -239,12 +241,12 @@ func resolveVoteRecords(
 		if !found {
 			continue
 		}
-		proposal, err := db.GetProposalTx(tx, proposalID)
+		proposal, err := stx.GetProposalTx(proposalID)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"reading the proposal of %s: %w", producer.Instance, err)
 		}
-		votes, err := db.GetProposalVotesTx(tx, proposalID)
+		votes, err := stx.GetProposalVotesTx(proposalID)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"reading the casts of %s: %w", producer.Instance, err)
