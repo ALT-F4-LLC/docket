@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -47,10 +47,10 @@ import (
 // verdictOverRows routes on (routingGateRows), so a flaky command that failed
 // twice and passed third is not failing, and a fence gate contributes one row
 // for every line that did not pass.
-func failingCompletionRows(rows []db.GateResultRow) []db.GateResultRow {
-	var failing []db.GateResultRow
+func failingCompletionRows(rows []store.GateResultRow) []store.GateResultRow {
+	var failing []store.GateResultRow
 	for _, r := range routingGateRows(rows) {
-		if r.Verdict != db.GateVerdictPass {
+		if r.Verdict != store.GateVerdictPass {
 			failing = append(failing, r)
 		}
 	}
@@ -89,7 +89,7 @@ func failingCompletionRows(rows []db.GateResultRow) []db.GateResultRow {
 // pads its real failure past the cap hashes equal to the grant. The flag is
 // the only evidence the capture is not the whole failure, so such a step parks
 // for a human even when every other field matches.
-func grantMatches(g db.GateOverrideGrant, r db.GateResultRow) bool {
+func grantMatches(g store.GateOverrideGrant, r store.GateResultRow) bool {
 	if r.Truncated {
 		return false
 	}
@@ -167,16 +167,17 @@ func joinGrantIDs(ids []int) string {
 // reads on the pooled connection because the routing stage calls it before its
 // transaction opens, exactly as gateVerdict reads.
 func batchOverrideCover(
-	conn *sql.DB, step *db.Step, spec *workflow.Step,
+	conn *sql.DB, step *store.Step, spec *workflow.Step,
 ) (*batchCover, error) {
-	grants, err := db.GateOverrideGrantsForRun(conn, step.RunID)
+	st := store.StoreOn(conn)
+	grants, err := st.GateOverrideGrantsForRun(step.RunID)
 	if err != nil {
 		return nil, err
 	}
 	if len(grants) == 0 {
 		return nil, nil
 	}
-	rows, err := db.GateResultsForStep(conn, step.ID)
+	rows, err := st.GateResultsForStep(step.ID)
 	if err != nil {
 		return nil, err
 	}
