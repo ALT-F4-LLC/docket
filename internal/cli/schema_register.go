@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -95,8 +95,8 @@ func runSchemaRegister(cmd *cobra.Command, args []string, w *output.Writer) erro
 			cmd, w, conn, name, version, path, src, string(ordered), targets)
 	}
 
-	stored, created, err := db.InsertSchema(
-		conn, schemaRow(name, version, path, src, string(ordered), getProjectID(cmd)),
+	stored, created, err := store.StoreOn(conn).InsertSchema(
+		schemaRow(name, version, path, src, string(ordered), getProjectID(cmd)),
 		model.NowMS())
 	if err != nil {
 		return schemaErr(err)
@@ -154,9 +154,11 @@ func registerSchemaAcrossProjects(
 		Scope:     fanoutScope(cmd),
 	}
 
+	st := store.StoreOn(conn)
+
 	for _, target := range targets {
-		stored, created, err := db.InsertSchema(
-			conn, schemaRow(name, version, path, src, ordered, target.ID), model.NowMS())
+		stored, created, err := st.InsertSchema(
+			schemaRow(name, version, path, src, ordered, target.ID), model.NowMS())
 		if err != nil {
 			report.Results = append(report.Results,
 				registryFailureResult(target, err, schemaErr))

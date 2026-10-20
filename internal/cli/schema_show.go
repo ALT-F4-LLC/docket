@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -38,7 +38,7 @@ func runSchemaShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(err, output.ErrValidation)
 	}
 
-	s, err := db.GetSchema(conn, getProjectID(cmd), name, version)
+	s, err := store.StoreOn(conn).GetSchema(getProjectID(cmd), name, version)
 	if err != nil {
 		return schemaErr(describeMissingSchema(err, args[0]))
 	}
@@ -68,8 +68,8 @@ func runSchemaShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 // describeMissingSchema turns the storage sentinel into an operator-facing
 // message naming what was asked for.
 func describeMissingSchema(err error, ref string) error {
-	if err == db.ErrSchemaNotFound {
-		return fmt.Errorf("%w: %s is not registered", db.ErrSchemaNotFound, ref)
+	if err == store.ErrSchemaNotFound {
+		return fmt.Errorf("%w: %s is not registered", store.ErrSchemaNotFound, ref)
 	}
 	return err
 }
