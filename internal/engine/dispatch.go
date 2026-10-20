@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -225,18 +225,19 @@ func (e *Engine) OpenDispatch(
 		return nil, fmt.Errorf("opening a dispatch: %w", err)
 	}
 	defer tx.Rollback()
+	stx := store.TxOn(tx)
 
-	projectID, err := db.RunProjectIDTx(tx, runID)
+	projectID, err := stx.RunProjectIDTx(runID)
 	if err != nil {
 		return nil, err
 	}
-	ttl, err := db.DispatchTTLTx(tx, projectID)
+	ttl, err := stx.DispatchTTLTx(projectID)
 	if err != nil {
 		return nil, err
 	}
 
 	// The acks, before anything reads headroom.
-	if err := ackReapsTx(tx, runID, ackSeqs, db.AckByDispatchOpen, nowMS); err != nil {
+	if err := ackReapsTx(tx, runID, ackSeqs, store.AckByDispatchOpen, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -307,10 +308,10 @@ func (e *Engine) OpenDispatch(
 	}
 	expiresMS := nowMS + ttlMS
 
-	dispatchID, err := db.InsertDispatchTx(tx, runID, openedSeq, expiresMS, nowMS)
+	dispatchID, err := stx.InsertDispatchTx(runID, openedSeq, expiresMS, nowMS)
 	if err != nil {
 		if isAlreadyOpen(err) {
-			open, readErr := db.OpenDispatchTx(tx, runID)
+			open, readErr := stx.OpenDispatchTx(runID)
 			if readErr != nil {
 				return nil, conflictErr(
 					"a dispatch is already open for %s", model.FormatRunID(runID))
@@ -329,7 +330,7 @@ func (e *Engine) OpenDispatch(
 		if err != nil {
 			return nil, fmt.Errorf("rendering manifest row %s: %w", row.Instance, err)
 		}
-		if err := db.InsertDispatchRowTx(tx, dispatchID, db.DispatchRow{
+		if err := stx.InsertDispatchRowTx(dispatchID, store.DispatchRow{
 			Position: i, StepID: stepID, Instance: row.Instance,
 			RowJSON: raw, RowSHA256: sum,
 		}); err != nil {
@@ -448,8 +449,9 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 		return nil, fmt.Errorf("extending a dispatch: %w", err)
 	}
 	defer tx.Rollback()
+	stx := store.TxOn(tx)
 
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err := stx.OpenDispatchTx(runID)
 	if err != nil {
 		return nil, noOpenDispatchErr(err, runID)
 	}
@@ -459,7 +461,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 				"open a new manifest", FormatDispatchID(open.ID), open.ExpiresMS)
 	}
 
-	stored, err := db.ListDispatchRowsTx(tx, open.ID)
+	stored, err := stx.ListDispatchRowsTx(open.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +511,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 		if err != nil {
 			return nil, err
 		}
-		if err := db.InsertDispatchRowTx(tx, open.ID, db.DispatchRow{
+		if err := stx.InsertDispatchRowTx(open.ID, store.DispatchRow{
 			Position: nextPosition, StepID: stepID, Instance: row.Instance,
 			RowJSON: raw, RowSHA256: sum,
 		}); err != nil {
@@ -535,7 +537,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 	// holding the dispatch row must be able to see. Only the expiry is
 	// conditional on the append, and it is conditional by arithmetic —
 	// stagedLeaseSumMS of no rows is zero.
-	moved, err := db.ExtendDispatchTx(tx, open.ID, expiresMS, extendedSeq)
+	moved, err := stx.ExtendDispatchTx(open.ID, expiresMS, extendedSeq)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +590,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 func readySnapshot(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) (*Scheduler, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the ready snapshot: %w", err)
 	}
@@ -599,13 +601,13 @@ func readySnapshot(
 
 // isAlreadyOpen reports the loser of a concurrent open.
 func isAlreadyOpen(err error) bool {
-	return err != nil && strings.Contains(err.Error(), db.ErrDispatchAlreadyOpen.Error())
+	return err != nil && strings.Contains(err.Error(), store.ErrDispatchAlreadyOpen.Error())
 }
 
 // alreadyOpenMessage is the open refusal: it NAMES the open dispatch's id and
 // its expiry, because a relay told only "a dispatch is open" cannot tell whether
 // waiting for the TTL is a strategy.
-func alreadyOpenMessage(open *db.Dispatch) string {
+func alreadyOpenMessage(open *store.Dispatch) string {
 	return fmt.Sprintf(
 		"a dispatch is already open for %s: %s, expiring at %d — close it, "+
 			"abandon it, or wait for the TTL",
@@ -641,8 +643,8 @@ func stagedLeaseSumMS(rows []model.StepRow) int64 {
 	return sum
 }
 
-func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, int, []*db.Step, error) {
-	var ready []*db.Step
+func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, int, []*store.Step, error) {
+	var ready []*store.Step
 	for _, step := range sched.Steps() {
 		if ok, _ := sched.Ready(step); ok {
 			ready = append(ready, step)
@@ -681,7 +683,7 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 	entries = laneCompleteCut(entries, limit)
 
 	rows := make([]model.StepRow, 0, len(entries))
-	steps := make([]*db.Step, 0, len(entries))
+	steps := make([]*store.Step, 0, len(entries))
 	for _, e := range entries {
 		row, err := stepRow(sched, e.step, ttls)
 		if err != nil {
@@ -700,16 +702,16 @@ func readyRows(sched *Scheduler, ttls ttlConfig, limit int) ([]model.StepRow, in
 		}
 		row.Scope = sched.foreignScope(e.step.IssueID)
 		if e.staged {
-			row.Status = db.StepStaged
+			row.Status = store.StepStaged
 		}
 		rows = append(rows, row)
 		steps = append(steps, e.step)
 	}
 
-	// `steps` (the limited, index-aligned []*db.Step behind `rows`) travels
+	// `steps` (the limited, index-aligned []*store.Step behind `rows`) travels
 	// back to the caller so `next`'s drive passes act on the SAME set this
 	// pipeline admitted (DKT-105). Callers that drive lifecycles must take the
-	// READY rows only (rows[i].Status == db.StepReady): a staged step's lifecycle
+	// READY rows only (rows[i].Status == store.StepReady): a staged step's lifecycle
 	// belongs to the `step record` that readies it, not to the offer that
 	// previewed it.
 	return rows, total, steps, nil
@@ -792,10 +794,10 @@ func laneCompleteCut(entries []offerEntry, limit int) []offerEntry {
 // `ready` — the set the lifecycle drivers may act on. It reads the rendered
 // status rather than re-asking the predicate so a driver and the response it
 // rides in cannot disagree about which rows were ready.
-func readyOnly(rows []model.StepRow, steps []*db.Step) []*db.Step {
-	out := make([]*db.Step, 0, len(steps))
+func readyOnly(rows []model.StepRow, steps []*store.Step) []*store.Step {
+	out := make([]*store.Step, 0, len(steps))
 	for i, row := range rows {
-		if row.Status == db.StepReady {
+		if row.Status == store.StepReady {
 			out = append(out, steps[i])
 		}
 	}
@@ -871,7 +873,7 @@ const (
 // another reason.
 func issueParkHeld(s *Scheduler, stepID int) bool {
 	step := s.stepByID[stepID]
-	if step == nil || step.Status != db.StepPending {
+	if step == nil || step.Status != store.StepPending {
 		return false
 	}
 	facts := s.issues[step.IssueID]
@@ -931,12 +933,12 @@ type RowMismatch struct {
 // INSERT", because it also covers anything a helper might write.
 //
 // DKT-10: a stored row whose step has since reached a TERMINAL status
-// (`db.StepTerminal`) is skipped rather than compared. `step record`/`step
+// (`store.StepTerminal`) is skipped rather than compared. `step record`/`step
 // fail` retiring a step — or the step reaching `skipped`/`superseded` any
 // other way — is exactly what a dispatch promises will keep happening while it
 // is open (a manifest is not a lock), so that step's absence from the
 // recomputed ready set is the expected effect of the batch working, not a
-// conflict shaped like one. The predicate is `db.StepTerminal`, the SAME one
+// conflict shaped like one. The predicate is `store.StepTerminal`, the SAME one
 // `missingUsage` reads to ask a related question — the classification
 // itself is new to `verify`, not a line `discrepanciesTx`/`CloseDispatch`
 // already drew: their split is by DISCREPANCY KIND, not terminal-vs-not, and
@@ -989,18 +991,18 @@ func (e *Engine) verifyDispatchTx(
 		return nil, nil, nil, err
 	}
 
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("verifying a dispatch: %w", err)
 	}
 	// NEVER COMMITTED. The rollback is the mechanism, not a cleanup.
 	defer tx.Rollback()
 
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err := store.TxOn(tx).OpenDispatchTx(runID)
 	if err != nil {
 		return nil, nil, nil, noOpenDispatchErr(err, runID)
 	}
-	stored, err := db.ListDispatchRowsTx(tx, open.ID)
+	stored, err := store.TxOn(tx).ListDispatchRowsTx(open.ID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1029,8 +1031,8 @@ func (e *Engine) verifyDispatchTx(
 		computedByStep[step.ID] = computed[i]
 	}
 	// statusByStep, not a map of whole steps: the only question asked of it is
-	// `db.StepOffScheduler` on one status, and a miss (empty string) answers
-	// that predicate `false` — the same fallthrough a comma-ok `*db.Step` guard
+	// `store.StepOffScheduler` on one status, and a miss (empty string) answers
+	// that predicate `false` — the same fallthrough a comma-ok `*store.Step` guard
 	// produced, with no guard needed to get there.
 	statusByStep := make(map[int]string, len(sched.Steps()))
 	for _, step := range sched.Steps() {
@@ -1078,7 +1080,7 @@ func (e *Engine) verifyDispatchTx(
 			Position: i, Step: model.FormatStepID(want.StepID),
 			Instance: want.Instance,
 		}
-		if db.StepOffScheduler(statusByStep[want.StepID]) {
+		if store.StepOffScheduler(statusByStep[want.StepID]) {
 			verdict.Verdict = RowRecorded
 			result.Rows = append(result.Rows, verdict)
 			continue
@@ -1188,8 +1190,8 @@ func comparableVerifyBytes(stored, current model.StepRow) (string, string, error
 	stored.Bump, current.Bump = "", ""
 	stored.BumpIssue, current.BumpIssue = "", ""
 	stored.Scope, current.Scope = nil, nil
-	if stored.Status == db.StepStaged || current.Status == db.StepStaged {
-		stored.Status, current.Status = db.StepReady, db.StepReady
+	if stored.Status == store.StepStaged || current.Status == store.StepStaged {
+		stored.Status, current.Status = store.StepReady, store.StepReady
 		stored.Proposal, current.Proposal = "", ""
 	}
 	_, wantSum, err := canonicalRowBytes(stored)
@@ -1220,17 +1222,17 @@ type targetCandidate struct {
 // It runs INSIDE the caller's transaction — resolution is snapshot reads —
 // and shells out to nothing; the git question is the caller's, afterward.
 func staleTargetCandidates(
-	tx *sql.Tx, sched *Scheduler, runID int, steps []*db.Step,
+	tx *sql.Tx, sched *Scheduler, runID int, steps []*store.Step,
 ) ([]targetCandidate, error) {
 	var out []targetCandidate
-	var artifacts []*db.Artifact
+	var artifacts []*store.Artifact
 	for _, step := range steps {
 		spec := materializedSpec(sched.defs[step.WorkflowID], step, sched.holdTally)
 		if spec == nil || !consumesIssueDiff(spec) {
 			continue
 		}
 		if artifacts == nil {
-			loaded, err := db.ListRunArtifactsTx(tx, runID)
+			loaded, err := store.TxOn(tx).ListRunArtifactsTx(runID)
 			if err != nil {
 				return nil, err
 			}
@@ -1350,11 +1352,11 @@ func (e *Engine) staleTargets(
 	}
 	// The run's standing waivers (DKT-742), loaded lazily: only a judge about
 	// to warn pays the read, and a failed read waives nothing.
-	var waivers []db.StaleTargetWaiver
+	var waivers []store.StaleTargetWaiver
 	waiversLoaded := false
 	waived := func(instance, sha string) bool {
 		if !waiversLoaded {
-			waivers, _ = db.StaleTargetWaiversForRun(conn, runID)
+			waivers, _ = store.StoreOn(conn).StaleTargetWaiversForRun(runID)
 			waiversLoaded = true
 		}
 		for _, w := range waivers {
@@ -1445,7 +1447,7 @@ func (e *Engine) staleTargets(
 // case-insensitive prefix of (>= 7 hex chars, enforced at the verb). Prefix
 // rather than equality because the advisory the operator copies the sha from
 // renders it at 12 characters; case-insensitive because git itself is.
-func waiverCovers(w db.StaleTargetWaiver, instance, sha string) bool {
+func waiverCovers(w store.StaleTargetWaiver, instance, sha string) bool {
 	return w.StepInstance == instance &&
 		strings.HasPrefix(strings.ToLower(sha), strings.ToLower(w.TargetSHA))
 }
@@ -1541,7 +1543,7 @@ func staleTargetAbsentReason(sha, sharedHead string) string {
 
 // noOpenDispatchErr maps the storage sentinel onto the taxonomy once.
 func noOpenDispatchErr(err error, runID int) error {
-	if strings.Contains(err.Error(), db.ErrNoOpenDispatch.Error()) {
+	if strings.Contains(err.Error(), store.ErrNoOpenDispatch.Error()) {
 		return conflictErr("no dispatch is open for %s", model.FormatRunID(runID))
 	}
 	return err
@@ -1604,7 +1606,7 @@ func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Di
 func discrepanciesGracedTx(
 	tx *sql.Tx, sched *Scheduler, runID int, nowMS int64, usageGrace bool,
 ) ([]Discrepancy, error) {
-	grace, err := db.DispatchGraceTx(tx, sched.run.ProjectID)
+	grace, err := store.TxOn(tx).DispatchGraceTx(sched.run.ProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1667,7 +1669,7 @@ func discrepanciesGracedTx(
 		if !runActive {
 			break
 		}
-		if step.Status != db.StepClaimed && step.Status != db.StepRunning {
+		if step.Status != store.StepClaimed && step.Status != store.StepRunning {
 			continue
 		}
 		activity := stepActivityMS(step)
@@ -1712,7 +1714,7 @@ func discrepanciesGracedTx(
 	// The probe is skipped ENTIRELY when the run never dispatched, so the
 	// dormancy is one indexed existence check rather than a per-step scan that
 	// happens to find nothing.
-	dispatched, err := db.RunEverDispatchedTx(tx, runID)
+	dispatched, err := store.TxOn(tx).RunEverDispatchedTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -1791,7 +1793,7 @@ func discrepanciesGracedTx(
 func latestExecutorRecordMS(sched *Scheduler, activatedMS int64) int64 {
 	var latest int64
 	for _, step := range sched.Steps() {
-		if !db.StepTerminal(step.Status) || step.Attempt == 0 {
+		if !store.StepTerminal(step.Status) || step.Attempt == 0 {
 			continue
 		}
 		switch step.Kind {
@@ -1810,10 +1812,10 @@ func latestExecutorRecordMS(sched *Scheduler, activatedMS int64) int64 {
 
 // missingUsage is D2's predicate over one step, with D3 and D5 each as a
 // named branch rather than a clause in one condition.
-func missingUsage(step *db.Step, activatedMS int64) bool {
+func missingUsage(step *store.Step, activatedMS int64) bool {
 	// D2 asks about steps that REACHED A TERMINAL STATUS. A step still running
 	// owes nothing yet.
-	if !db.StepTerminal(step.Status) {
+	if !store.StepTerminal(step.Status) {
 		return false
 	}
 
@@ -1874,7 +1876,7 @@ func missingUsage(step *db.Step, activatedMS int64) bool {
 // It falls back to `updated_at_ms` when a step has no activity stamp, because a
 // step with no heartbeat has still been touched — and treating a missing stamp
 // as 0 would make every such step instantly, permanently past grace.
-func stepActivityMS(step *db.Step) int64 {
+func stepActivityMS(step *store.Step) int64 {
 	if step.ActivityMS != nil && *step.ActivityMS > 0 {
 		return *step.ActivityMS
 	}
@@ -2051,8 +2053,8 @@ func (e *Engine) closeDispatch(
 		}
 	}
 
-	open, err := db.OpenDispatchTx(tx, runID)
-	noOpen := err != nil && strings.Contains(err.Error(), db.ErrNoOpenDispatch.Error())
+	open, err := store.TxOn(tx).OpenDispatchTx(runID)
+	noOpen := err != nil && strings.Contains(err.Error(), store.ErrNoOpenDispatch.Error())
 	switch {
 	case err == nil:
 	case noOpen && acceptMissingUsage:
@@ -2119,9 +2121,9 @@ func (e *Engine) closeDispatch(
 			subject, len(blocking), DiscrepancyReason(blocking))
 	}
 
-	reason := db.CloseReasonReconciled
+	reason := store.CloseReasonReconciled
 	if len(accepted) > 0 {
-		reason = db.CloseReasonAcceptedMissingUsage
+		reason = store.CloseReasonAcceptedMissingUsage
 	}
 
 	instances, err := settleAcceptedTx(tx, accepted)
@@ -2153,7 +2155,7 @@ func (e *Engine) closeDispatch(
 			return nil, fmt.Errorf("recording the acceptance: %w", err)
 		}
 		return &CloseOutcome{
-			Run: model.FormatRunID(runID), Status: db.DispatchClosed,
+			Run: model.FormatRunID(runID), Status: store.DispatchClosed,
 			Reason: reason, Accepted: instances, Integration: integration,
 		}, nil
 	}
@@ -2171,7 +2173,7 @@ func (e *Engine) closeDispatch(
 	if e.beforeCloseCAS != nil {
 		e.beforeCloseCAS(tx, open.ID)
 	}
-	moved, err := closeDispatchTx(tx, open.ID, runID, db.DispatchClosed, reason,
+	moved, err := closeDispatchTx(tx, open.ID, runID, store.DispatchClosed, reason,
 		EventDispatchClosed, map[string]any{"accepted": instances, "integration": integration},
 		"recording the close", nowMS)
 	if err != nil {
@@ -2192,7 +2194,7 @@ func (e *Engine) closeDispatch(
 	}
 	return &CloseOutcome{
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
-		Status: db.DispatchClosed, Reason: reason, Accepted: instances,
+		Status: store.DispatchClosed, Reason: reason, Accepted: instances,
 		Integration: integration,
 	}, nil
 }
@@ -2227,7 +2229,7 @@ func settleAcceptedTx(tx *sql.Tx, accepted []Discrepancy) ([]string, error) {
 			return nil, fmt.Errorf(
 				"accepting missing usage on %q: %w", d.Step, err)
 		}
-		if err := db.MarkStepUsageRecordedTx(tx, id); err != nil {
+		if err := store.TxOn(tx).MarkStepUsageRecordedTx(id); err != nil {
 			return nil, err
 		}
 		out = append(out, fmt.Sprintf("%s %s", d.Step, d.Instance))
@@ -2261,7 +2263,7 @@ func (e *Engine) AbandonDispatchWith(
 		return nil, err
 	}
 
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err := store.TxOn(tx).OpenDispatchTx(runID)
 	if err != nil {
 		return nil, noOpenDispatchErr(err, runID)
 	}
@@ -2274,8 +2276,8 @@ func (e *Engine) AbandonDispatchWith(
 	if reason != "" {
 		payload["detail"] = reason
 	}
-	moved, err := closeDispatchTx(tx, open.ID, runID, db.DispatchAbandoned,
-		db.CloseReasonOperator, EventDispatchAbandoned, payload,
+	moved, err := closeDispatchTx(tx, open.ID, runID, store.DispatchAbandoned,
+		store.CloseReasonOperator, EventDispatchAbandoned, payload,
 		"recording the abandon", nowMS)
 	if err != nil {
 		return nil, err
@@ -2289,7 +2291,7 @@ func (e *Engine) AbandonDispatchWith(
 	}
 	return &CloseOutcome{
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
-		Status: db.DispatchAbandoned, Reason: db.CloseReasonOperator,
+		Status: store.DispatchAbandoned, Reason: store.CloseReasonOperator,
 	}, nil
 }
 
@@ -2320,9 +2322,9 @@ type AbandonDispatchOptions struct {
 // dispatch has no row, the lookup returns nothing, and `next` proceeds exactly
 // as group 1's did.
 func autoAbandonExpiredDispatchTx(tx *sql.Tx, runID int, nowMS int64) error {
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err := store.TxOn(tx).OpenDispatchTx(runID)
 	if err != nil {
-		if strings.Contains(err.Error(), db.ErrNoOpenDispatch.Error()) {
+		if strings.Contains(err.Error(), store.ErrNoOpenDispatch.Error()) {
 			return nil
 		}
 		return err
@@ -2335,8 +2337,8 @@ func autoAbandonExpiredDispatchTx(tx *sql.Tx, runID int, nowMS int64) error {
 	// `moved` comes back false and closeDispatchTx returns a nil error for it,
 	// which is exactly the "nothing to write" outcome this caller wants — unlike
 	// CloseDispatch/AbandonDispatchWith, which report the lost race as a conflict.
-	_, err = closeDispatchTx(tx, open.ID, runID, db.DispatchAbandoned,
-		db.CloseReasonTTL, EventDispatchAbandoned, map[string]any{},
+	_, err = closeDispatchTx(tx, open.ID, runID, store.DispatchAbandoned,
+		store.CloseReasonTTL, EventDispatchAbandoned, map[string]any{},
 		"recording the TTL abandon", nowMS)
 	return err
 }
@@ -2360,7 +2362,7 @@ func closeDispatchTx(
 	tx *sql.Tx, dispatchID, runID int, status, reason, eventKind string,
 	payload map[string]any, errContext string, nowMS int64,
 ) (moved bool, err error) {
-	moved, err = db.CloseDispatchTx(tx, dispatchID, status, reason, nowMS)
+	moved, err = store.TxOn(tx).CloseDispatchTx(dispatchID, status, reason, nowMS)
 	if err != nil {
 		return false, err
 	}
@@ -2397,7 +2399,7 @@ func refuseIfUnreconciledTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64
 	// THREE WAYS OUT. A refusal that named the state without the exits would
 	// make recovery a documentation lookup, and the whole recovery design is
 	// that a stalled run tells an operator how to unstall it.
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err := store.TxOn(tx).OpenDispatchTx(runID)
 	switch {
 	case err == nil:
 		return conflictErr(
@@ -2407,7 +2409,7 @@ func refuseIfUnreconciledTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64
 				"auto-abandon it",
 			model.FormatRunID(runID), FormatDispatchID(open.ID), open.ExpiresMS,
 			model.FormatRunID(runID), model.FormatRunID(runID))
-	case strings.Contains(err.Error(), db.ErrNoOpenDispatch.Error()):
+	case strings.Contains(err.Error(), store.ErrNoOpenDispatch.Error()):
 		// The dormant path: no dispatch was ever opened for this run, so the
 		// probe was one indexed lookup that returned no row.
 	default:
@@ -2431,7 +2433,7 @@ func refuseIfUnreconciledTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64
 func refuseIfUnreconciledSnapshot(
 	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) error {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return fmt.Errorf("checking whether %s is reconciled: %w",
 			model.FormatRunID(runID), err)
@@ -2477,7 +2479,7 @@ func refuseIfDiscrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int6
 // open", because the loser's next act depends on which one happened: a TTL
 // abandon means the batch was never reconciled, and a close means it was.
 func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
-	current, err := db.GetDispatchTx(tx, dispatchID)
+	current, err := store.TxOn(tx).GetDispatchTx(dispatchID)
 	if err != nil {
 		return conflictErr("%s is no longer open", FormatDispatchID(dispatchID))
 	}
@@ -2489,12 +2491,12 @@ func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
 // openDispatchID reads the run's open dispatch id, if any, in a rolled-back
 // transaction of its own.
 func openDispatchID(conn *sql.DB, runID int) (int, bool) {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return 0, false
 	}
 	defer tx.Rollback()
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err := tx.OpenDispatchTx(runID)
 	if err != nil {
 		return 0, false
 	}
