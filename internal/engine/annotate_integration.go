@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -129,8 +129,8 @@ func (e *Engine) AnnotateIntegration(
 		return nil, err
 	}
 
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -141,7 +141,7 @@ func (e *Engine) AnnotateIntegration(
 	if err := authorizeConductor(conn, step.RunID, token, "step annotate --integrated-sha"); err != nil {
 		return nil, err
 	}
-	if !db.StepTerminal(step.Status) {
+	if !store.StepTerminal(step.Status) {
 		return nil, conflictErr(
 			"step %s is %s; annotate applies to a finished step — a live step's "+
 				"metadata lands with its record", step.Instance, step.Status)
@@ -238,7 +238,7 @@ func (e *Engine) AnnotateIntegration(
 			return nil, err
 		}
 	}
-	if err := db.SetStepMetadataTx(tx, step.ID, merged, nowMS); err != nil {
+	if err := store.TxOn(tx).SetStepMetadataTx(step.ID, merged, nowMS); err != nil {
 		return nil, err
 	}
 	// The annotation VERBATIM, as every annotation is logged: what was added
@@ -297,9 +297,9 @@ func integrationMetadata(sha, metadata string) (string, error) {
 // `--worktree` re-pin both write (applyIssueDiffRepin), minus that re-pin's
 // worktree rewrite: the resolved commit lives on the shared branch, and the
 // step's declared worktree stays what its executor recorded.
-func recordIntegrationRepinTx(tx *sql.Tx, step *db.Step, repin *IssueDiffRepin, nowMS int64) error {
+func recordIntegrationRepinTx(tx *sql.Tx, step *store.Step, repin *IssueDiffRepin, nowMS int64) error {
 	supersedes := repin.supersededID
-	id, err := db.InsertArtifactTx(tx, db.Artifact{
+	id, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: ArtifactKindIssueDiff,
 		Body: repin.body, Payload: repin.payload,
 		SHA256:     workflow.SHA256([]byte(repin.body)),

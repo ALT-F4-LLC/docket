@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -72,22 +72,23 @@ import (
 // snapshot (resolveQuorumMisses) can mirror the change into it.
 func propagateAfterFiredSkips(
 	tx *sql.Tx, runID, issueID int, def *workflow.Definition, nowMS int64,
-) ([]*db.Step, error) {
+) ([]*store.Step, error) {
 	if !declaresAfterFired(def) {
 		return nil, nil
 	}
-	steps, err := db.ListIssueStepsTx(tx, runID, issueID)
+	st := store.TxOn(tx)
+	steps, err := st.ListIssueStepsTx(runID, issueID)
 	if err != nil {
 		return nil, err
 	}
 
-	var skipped []*db.Step
+	var skipped []*store.Step
 	// Each pass either skips at least one more row or stops, so the bound is
 	// the step count — the same argument downstreamClosure (loop.go) makes.
 	for {
 		changed := false
 		for _, step := range steps {
-			if step.Status != db.StepPending || step.Materialized {
+			if step.Status != store.StepPending || step.Materialized {
 				continue
 			}
 			spec := workflow.StepByName(def, step.StepName)
@@ -98,7 +99,7 @@ func propagateAfterFiredSkips(
 			if unfired == "" {
 				continue
 			}
-			if err := db.SetStepStatusTx(tx, step.ID, db.StepSkipped, nowMS, nowMS); err != nil {
+			if err := st.SetStepStatusTx(step.ID, store.StepSkipped, nowMS, nowMS); err != nil {
 				return nil, err
 			}
 			if err := recordEvent(tx, eventRecord{
@@ -112,7 +113,7 @@ func propagateAfterFiredSkips(
 			// Reflected in the loaded rows so the next pass — and the caller's
 			// snapshot, which shares nothing with these rows but is repaired
 			// from the returned set — sees the skip this pass just wrote.
-			step.Status = db.StepSkipped
+			step.Status = store.StepSkipped
 			skipped = append(skipped, step)
 			changed = true
 		}
@@ -132,7 +133,7 @@ func propagateAfterFiredSkips(
 // skipped. An instance in any non-`skipped` status — including a pending or
 // running one — means the predecessor fired or may still fire, and the step
 // waits exactly as `after` readiness makes it wait.
-func unfiredPredecessor(steps []*db.Step, step *db.Step, names []string) string {
+func unfiredPredecessor(steps []*store.Step, step *store.Step, names []string) string {
 	for _, name := range names {
 		instances := predecessorInstancesIn(steps, step, name)
 		if len(instances) == 0 {
@@ -141,7 +142,7 @@ func unfiredPredecessor(steps []*db.Step, step *db.Step, names []string) string 
 		fired := false
 		rendered := make([]string, 0, len(instances))
 		for _, inst := range instances {
-			if inst.Status != db.StepSkipped {
+			if inst.Status != store.StepSkipped {
 				fired = true
 				break
 			}
