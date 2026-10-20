@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -97,7 +97,7 @@ func runWorkflowDeprecate(cmd *cobra.Command, args []string, w *output.Writer) e
 	}
 
 	if restore {
-		wf, err := db.RestoreWorkflow(conn, getProjectID(cmd), name, version)
+		wf, err := store.StoreOn(conn).RestoreWorkflow(getProjectID(cmd), name, version)
 		if err != nil {
 			return workflowErr(describeMissingWorkflow(err, args[0]))
 		}
@@ -105,9 +105,9 @@ func runWorkflowDeprecate(cmd *cobra.Command, args []string, w *output.Writer) e
 		return nil
 	}
 
-	wf, err := db.DeprecateWorkflow(conn, getProjectID(cmd), name, version, model.NowMS())
+	wf, err := store.StoreOn(conn).DeprecateWorkflow(getProjectID(cmd), name, version, model.NowMS())
 	if err != nil {
-		if errors.Is(err, db.ErrWorkflowAlreadyDeprecated) {
+		if errors.Is(err, store.ErrWorkflowAlreadyDeprecated) {
 			return cmdErr(fmt.Errorf("%s is already deprecated", args[0]),
 				output.ErrConflict)
 		}
@@ -125,7 +125,7 @@ func runWorkflowDeprecate(cmd *cobra.Command, args []string, w *output.Writer) e
 // what the operator would have seen standing in that checkout. The sentinels
 // stay wrapped, since the classifier and the report both match on them.
 func describeDeprecateFailure(err error, ref string) error {
-	if errors.Is(err, db.ErrWorkflowAlreadyDeprecated) {
+	if errors.Is(err, store.ErrWorkflowAlreadyDeprecated) {
 		return fmt.Errorf("%s is already deprecated: %w", ref, err)
 	}
 	return describeMissingWorkflow(err, ref)
@@ -135,9 +135,9 @@ func describeDeprecateFailure(err error, ref string) error {
 // both directions of the verb.
 //
 // RESTORE IS IDEMPOTENT AND DEPRECATE IS NOT, and the report keeps that
-// asymmetry visible rather than smoothing it: db.RestoreWorkflow returns the
+// asymmetry visible rather than smoothing it: RestoreWorkflow returns the
 // row unchanged when it was never retired (reported as already-binding, a
-// success), while db.DeprecateWorkflow refuses a second retirement (reported as
+// success), while DeprecateWorkflow refuses a second retirement (reported as
 // already-deprecated, a failure carrying CONFLICT). Both readings are the
 // single-project behavior, per project, which is the criterion — a sweep must
 // not turn one project's refusal into another's silence.
@@ -152,6 +152,7 @@ func deprecateWorkflowAcrossProjects(
 	report := &registryFanoutReport{
 		Operation: operation, Subject: ref, Scope: fanoutScope(cmd),
 	}
+	st := store.StoreOn(conn)
 
 	for _, target := range targets {
 		var (
@@ -162,7 +163,7 @@ func deprecateWorkflowAcrossProjects(
 		if restore {
 			// The pre-state decides which success this is; RestoreWorkflow
 			// itself returns the same row either way.
-			before, lookupErr := db.GetWorkflow(conn, target.ID, name, version)
+			before, lookupErr := st.GetWorkflow(target.ID, name, version)
 			if lookupErr != nil {
 				report.Results = append(report.Results, registryFailureResult(
 					target, describeDeprecateFailure(lookupErr, ref), workflowErr))
@@ -172,10 +173,10 @@ func deprecateWorkflowAcrossProjects(
 			if before.Deprecated() {
 				outcome = outcomeRestored
 			}
-			wf, err = db.RestoreWorkflow(conn, target.ID, name, version)
+			wf, err = st.RestoreWorkflow(target.ID, name, version)
 		} else {
 			outcome = outcomeDeprecated
-			wf, err = db.DeprecateWorkflow(conn, target.ID, name, version, model.NowMS())
+			wf, err = st.DeprecateWorkflow(target.ID, name, version, model.NowMS())
 		}
 		if err != nil {
 			report.Results = append(report.Results, registryFailureResult(
