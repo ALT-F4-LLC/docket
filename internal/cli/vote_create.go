@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -229,8 +229,9 @@ var voteCreateCmd = &cobra.Command{
 			)
 		}
 
-		id, err := db.CreateProposalIdempotent(conn, &proposal, idempotencyKey)
-		if errors.Is(err, db.ErrConflict) {
+		st := store.StoreOn(conn)
+		id, err := st.CreateProposalIdempotent(&proposal, idempotencyKey)
+		if errors.Is(err, store.ErrConflict) {
 			return cmdErr(err, output.ErrConflict)
 		}
 		if err != nil {
@@ -238,7 +239,7 @@ var voteCreateCmd = &cobra.Command{
 		}
 
 		// Refetch to get full object with timestamps.
-		created, err := db.GetProposal(conn, id)
+		created, err := st.GetProposal(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching created proposal: %w", err), output.ErrGeneral)
 		}
