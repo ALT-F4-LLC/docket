@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -77,7 +77,7 @@ func preClaimGates(spec *workflow.Step) []workflow.Gate {
 // It runs inside the claim's transaction A, where the resolver's snapshot
 // reads belong; the paths it returns are consumed outside it.
 func preGateTarget(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, spec *workflow.Step,
 ) (sha, worktree string, err error) {
 	if step.WorkRoot != "" {
 		// The step's own recorded worktree wins, and it settles the question:
@@ -85,7 +85,7 @@ func preGateTarget(
 		// inputs resolve to.
 		return "", step.WorkRoot, nil
 	}
-	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
+	artifacts, err := store.TxOn(tx).ListRunArtifactsTx(step.RunID)
 	if err != nil {
 		return "", "", err
 	}
@@ -98,8 +98,8 @@ func preGateTarget(
 // stale-target check (DKT-193) consumes the sha half. The artifact snapshot is
 // passed in so a caller iterating a whole manifest loads the table once.
 func resolvedTargetFor(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
-	artifacts []*db.Artifact,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, spec *workflow.Step,
+	artifacts []*store.Artifact,
 ) (sha, worktree string, err error) {
 	if spec == nil || len(spec.Inputs) == 0 {
 		return "", "", nil
@@ -138,7 +138,7 @@ func resolvedTargetFor(
 // the two verbs would disagree about a completed step's target the moment a
 // later round — or a re-pin of its producer's diff — recorded a newer one.
 func stepTargetRef(
-	tx *sql.Tx, sched *Scheduler, step *db.Step,
+	tx *sql.Tx, sched *Scheduler, step *store.Step,
 ) (sha, worktree string, err error) {
 	spec := materializedSpec(sched.defs[step.WorkflowID], step, sched.holdTally)
 	if spec == nil || !consumesIssueDiff(spec) {
@@ -201,7 +201,7 @@ var claimPreGateBudget = 60 * time.Second
 // run that measured nothing, or a run still in flight leaves the gate on the
 // budgeted path below, unchanged. The claim never waits on a detached run.
 func runPreGates(
-	conn *sql.DB, e *Engine, step *db.Step, gates []workflow.Gate,
+	conn *sql.DB, e *Engine, step *store.Step, gates []workflow.Gate,
 	targetSHA, workRoot string, nowMS int64,
 ) ([]PreGateResult, error) {
 	out := make([]PreGateResult, 0, len(gates))
@@ -329,7 +329,7 @@ var errPreGateRecordDeclined = errors.New(
 // become a detached-specific one either. What differs between the two callers
 // is the bound and the key on the row, and both arrive in m.
 func measurePreGate(
-	conn *sql.DB, e *Engine, step *db.Step, gate workflow.Gate,
+	conn *sql.DB, e *Engine, step *store.Step, gate workflow.Gate,
 	m preGateMeasurement, nowMS int64,
 ) ([]GateResultRow, error) {
 	commands, hashes, err := gateCommands(conn, step, gate)
@@ -449,7 +449,7 @@ func measurePreGate(
 // not be bound" can tell an assurance from an absence. Recording nothing would
 // leave the bundle looking like a step that declared no pre-gates at all.
 func recordUnbindablePreGate(
-	conn *sql.DB, step *db.Step, gate workflow.Gate,
+	conn *sql.DB, step *store.Step, gate workflow.Gate,
 	targetSHA, worktree string, nowMS int64,
 ) ([]GateResultRow, error) {
 	rows := []GateResultRow{{
@@ -471,7 +471,7 @@ func recordUnbindablePreGate(
 // head; the sentence tells the operator that this is the tree measured and
 // which verbs move the target on purpose.
 func retainedTargetAdvisory(
-	conn *sql.DB, e *Engine, step *db.Step, targetSHA string,
+	conn *sql.DB, e *Engine, step *store.Step, targetSHA string,
 ) (string, error) {
 	if targetSHA == "" || e == nil || e.IsAncestorFn == nil {
 		return "", nil
@@ -499,16 +499,17 @@ func retainedTargetAdvisory(
 //
 // A holding step records its declared artifact before its own issue.diff, so
 // the round that produced the target never counts against it.
-func retainedAcrossNoCommitRound(conn *sql.DB, step *db.Step, targetSHA string) (bool, error) {
-	artifacts, err := db.ListRunArtifacts(conn, step.RunID)
+func retainedAcrossNoCommitRound(conn *sql.DB, step *store.Step, targetSHA string) (bool, error) {
+	st := store.StoreOn(conn)
+	artifacts, err := st.ListRunArtifacts(step.RunID)
 	if err != nil {
 		return false, err
 	}
-	steps, err := db.ListRunSteps(conn, step.RunID)
+	steps, err := st.ListRunSteps(step.RunID)
 	if err != nil {
 		return false, err
 	}
-	issueSteps := make(map[int]*db.Step, len(steps))
+	issueSteps := make(map[int]*store.Step, len(steps))
 	for _, s := range steps {
 		if s.IssueID == step.IssueID {
 			issueSteps[s.ID] = s
@@ -549,7 +550,7 @@ func retainedAcrossNoCommitRound(conn *sql.DB, step *db.Step, targetSHA string) 
 }
 
 // announcePreGate commits the `gate-started` event before the spawn.
-func announcePreGate(conn *sql.DB, step *db.Step, gate string, nowMS int64) error {
+func announcePreGate(conn *sql.DB, step *store.Step, gate string, nowMS int64) error {
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("announcing pre-gate %s: %w", gate, err)
@@ -569,7 +570,7 @@ func announcePreGate(conn *sql.DB, step *db.Step, gate string, nowMS int64) erro
 
 // recordPreGateRows commits one pre-gate's results in their own transaction.
 func recordPreGateRows(
-	conn *sql.DB, step *db.Step, gate string, rows []GateResultRow, nowMS int64,
+	conn *sql.DB, step *store.Step, gate string, rows []GateResultRow, nowMS int64,
 ) error {
 	_, err := recordPreGateRowsIf(conn, step, gate, rows, nowMS, nil)
 	return err
@@ -581,7 +582,7 @@ func recordPreGateRows(
 // guard's reads and the insert are one step against every other writer — a
 // claim cannot commit between the two.
 func recordPreGateRowsIf(
-	conn *sql.DB, step *db.Step, gate string, rows []GateResultRow, nowMS int64,
+	conn *sql.DB, step *store.Step, gate string, rows []GateResultRow, nowMS int64,
 	guard func(tx *sql.Tx) (bool, error),
 ) (bool, error) {
 	tx, err := conn.Begin()
@@ -652,7 +653,7 @@ func preGateResultOf(r GateResultRow) PreGateResult {
 // preGateResultOfRecorded is preGateResultOf for a row read back from the
 // ledger: a re-minted claim's replay (recordedPreGates) and a detached result
 // the claim serves both render stored rows in the bundle's shape.
-func preGateResultOfRecorded(r db.GateResultRow) PreGateResult {
+func preGateResultOfRecorded(r store.GateResultRow) PreGateResult {
 	return PreGateResult{
 		Gate: r.Gate, Argv: r.Argv, Exit: r.Exit, DurationMS: r.DurationMS,
 		Output: r.Output, Truncated: r.Truncated, Verdict: r.Verdict,
