@@ -3,12 +3,12 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/filter"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -63,7 +63,7 @@ func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 }
 
 func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
@@ -100,7 +100,7 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	// Fetch all non-done issues for DAG construction.
-	allIssues, _, err := db.ListIssues(conn, db.ListOptions{
+	allIssues, _, err := st.ListIssues(store.ListOptions{
 		ProjectID:   getProjectID(cmd),
 		IncludeDone: false,
 		Limit:       0, // no limit — need all for DAG
@@ -110,7 +110,7 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	// Fetch all directional relations (blocks / depends_on).
-	relations, err := db.GetAllDirectionalRelations(conn)
+	relations, err := st.GetAllDirectionalRelations()
 	if err != nil {
 		return cmdErr(fmt.Errorf("loading relations: %w", err), output.ErrGeneral)
 	}
@@ -137,7 +137,7 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 		ready = ready[:limit]
 	}
 
-	if err := db.HydrateDocs(conn, ready); err != nil {
+	if err := st.HydrateDocs(ready); err != nil {
 		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
