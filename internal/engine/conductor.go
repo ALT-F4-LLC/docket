@@ -41,7 +41,8 @@ import (
 //     forever. That makes the mechanism TAMPER-EVIDENT rather than
 //     tamper-proof: a caller that takes the seat retires the standing token,
 //     so the standing conductor's next ruling refuses AUTH_ERROR, and the
-//     `conductor-seated` event names the taker's actor and cwd. A harness that
+//     `conductor-seated` event names the taker's actor and cwd, and the token
+//     name and peer address the daemon observed. A harness that
 //     keys callers keeps its executors off `run conduct` rather than off every
 //     gated verb.
 
@@ -111,8 +112,33 @@ type ConductOptions struct {
 	// By is who is taking the seat and from where. REQUIRED, exactly as on a
 	// ruling: the event is the whole audit trail of a token-free verb that
 	// mints authority, so an unattributed one must not be written.
-	By    Attribution
-	NowMS int64
+	By Attribution
+	// Caller is what the daemon observed about the request. The zero value is
+	// a caller with no daemon-observed identity: the Unix socket, or a direct
+	// store write.
+	Caller DaemonCaller
+	NowMS  int64
+}
+
+// DaemonCaller is the identity the daemon observed on a request, as opposed
+// to Attribution's self-reported actor and cwd. TokenName names the token
+// that authenticated an HTTP request; PeerAddr is the remote address the
+// HTTP listener saw. A Unix-socket request carries neither.
+type DaemonCaller struct {
+	TokenName string
+	PeerAddr  string
+}
+
+// addTo writes the caller onto an event's field map. `peer_addr` is always
+// written, empty for a caller the daemon saw no address for; `token_name` is
+// present only when a token authenticated the request, so a socket seat never
+// reads as token-authenticated.
+func (c DaemonCaller) addTo(fields map[string]any) map[string]any {
+	fields["peer_addr"] = c.PeerAddr
+	if c.TokenName != "" {
+		fields["token_name"] = c.TokenName
+	}
+	return fields
 }
 
 // ConductResult is what the verb returns: the token, ONCE.
@@ -171,7 +197,7 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 	}
 
 	rotated := standing != ""
-	data, err := rulingData(opts.By, map[string]any{"rotated": rotated})
+	data, err := rulingData(opts.By, opts.Caller.addTo(map[string]any{"rotated": rotated}))
 	if err != nil {
 		return nil, fmt.Errorf("recording the conductor seat: %w", err)
 	}
