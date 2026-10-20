@@ -3,7 +3,7 @@ package engine
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -76,7 +76,7 @@ import (
 // This clause still stands on its own reasoning rather than leaning on that
 // guarantee: the argument above is about which tree a step writes, not about
 // which rows were admitted together.
-func (s *Scheduler) precedesInSet(earlier, later *db.Step) bool {
+func (s *Scheduler) precedesInSet(earlier, later *store.Step) bool {
 	if earlier.IssueID != later.IssueID {
 		return false
 	}
@@ -147,7 +147,7 @@ func (s *Scheduler) precedesInSet(earlier, later *db.Step) bool {
 // the sole caller (ClaimablePrefix) only ever passes a `later` drawn from
 // the offered set itself, so a candidate equal to `later` is always in
 // `inOffer` and skipped.
-func (s *Scheduler) blockingLoopBodyAbsent(later *db.Step, inOffer map[int]bool) bool {
+func (s *Scheduler) blockingLoopBodyAbsent(later *store.Step, inOffer map[int]bool) bool {
 	def := s.defs[later.WorkflowID]
 	if def == nil {
 		return false
@@ -165,7 +165,7 @@ func (s *Scheduler) blockingLoopBodyAbsent(later *db.Step, inOffer map[int]bool)
 		if candidate.WorkflowID != later.WorkflowID || candidate.Ordinal != later.Ordinal {
 			continue
 		}
-		if db.StepTerminal(candidate.Status) || inOffer[candidate.ID] {
+		if store.StepTerminal(candidate.Status) || inOffer[candidate.ID] {
 			continue
 		}
 		if !s.holdsTree(candidate) {

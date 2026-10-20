@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The transaction-scoped reads and writes the fat transaction needs.
@@ -24,7 +24,7 @@ import (
 // Labels come along because binding evaluates `[match]` against them and the
 // snapshot freezes them — two stages that must see the same list, which they
 // will only do if it is read once.
-func loadIssues(tx *sql.Tx, runIssues []*db.RunIssue) (map[int]*model.Issue, error) {
+func loadIssues(tx *sql.Tx, runIssues []*store.RunIssue) (map[int]*model.Issue, error) {
 	out := make(map[int]*model.Issue, len(runIssues))
 
 	for _, ri := range runIssues {
@@ -64,7 +64,7 @@ func issueTx(tx *sql.Tx, id int) (*model.Issue, error) {
 		&issue.Kind, &issue.Size, &createdAt, &updatedAt, &issue.Version,
 	)
 	if err == sql.ErrNoRows {
-		return nil, notFoundErr(db.ErrNotFound, "issue %s not found", model.FormatID(id))
+		return nil, notFoundErr(store.ErrNotFound, "issue %s not found", model.FormatID(id))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading issue %s: %w", model.FormatID(id), err)
@@ -232,7 +232,7 @@ func moveIssueStatusTx(
 // stamped from the SAME `nowMS` — the transition and its narration carry one
 // time, not two clock reads.
 func commentEngineEvent(tx *sql.Tx, issueID int, body string, nowMS int64) error {
-	if _, err := db.InsertEngineComment(tx, issueID, body, nowMS); err != nil {
+	if _, err := store.TxOn(tx).InsertEngineComment(issueID, body, nowMS); err != nil {
 		return fmt.Errorf("recording an activity comment on %s: %w", model.FormatID(issueID), err)
 	}
 	return nil
@@ -288,7 +288,7 @@ func releaseAbandonedIssueTx(tx *sql.Tx, issueID int, nowMS int64) (bool, error)
 // `in-progress` still narrates ITS OWN claim — the trail is about the step
 // claimed, not about whether the issue's status happened to move because of
 // it.
-func reflectIssueOnClaim(tx *sql.Tx, step *db.Step, nowMS int64) error {
+func reflectIssueOnClaim(tx *sql.Tx, step *store.Step, nowMS int64) error {
 	moved, err := moveIssueStatusTx(tx, step.IssueID, model.StatusTodo, model.StatusInProgress, nowMS)
 	if err != nil {
 		return err
