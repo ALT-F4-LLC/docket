@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket doctor` — DKT-1285.
@@ -73,8 +73,8 @@ type DoctorOptions struct {
 	// already opened read-write to reach this verb, re-verified directly.
 	DBPath string
 	// ProjectID is the project the invocation resolved to, as the root hook
-	// decided it: a registered row's id, db.DefaultProjectID on a
-	// single-tenant store, or db.UnregisteredProjectID when Identity has no
+	// decided it: a registered row's id, store.DefaultProjectID on a
+	// single-tenant store, or store.UnregisteredProjectID when Identity has no
 	// row. Doctor reports it and never changes it.
 	ProjectID int
 	// Identity is the invocation's project identity as config resolved it,
@@ -177,7 +177,7 @@ func checkDoctorStore(dbPath string) DoctorCheck {
 //
 // The root hook resolved the project before this verb ran, and doctor is a
 // read-only leaf verb, so an identity with no row resolves to
-// db.UnregisteredProjectID rather than minting one. That is the case this
+// store.UnregisteredProjectID rather than minting one. That is the case this
 // check exists to make visible: before doctor joined the read verbs, running
 // it from an unbound repository claimed the store's default row for that
 // repository and logged a project-registered event with verb doctor — the
@@ -190,12 +190,12 @@ func checkDoctorStore(dbPath string) DoctorCheck {
 // is the whole store, and the check reports that rather than "unbound".
 func checkDoctorProject(conn *sql.DB, projectID int, identity string) DoctorCheck {
 	const check = "project"
-	if projectID == db.UnregisteredProjectID {
+	if projectID == store.UnregisteredProjectID {
 		return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: fmt.Sprintf(
 			"no project registered for %s; doctor does not register one — "+
 				"the first writing verb run here does", identity)}
 	}
-	p, err := db.GetProject(conn, db.DefaultProjectIDOr(projectID))
+	p, err := store.StoreOn(conn).GetProject(store.DefaultProjectIDOr(projectID))
 	if err != nil {
 		return DoctorCheck{Check: check, Verdict: DoctorFail,
 			Detail: fmt.Sprintf("resolved project %d: %v", projectID, err)}
