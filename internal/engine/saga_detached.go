@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -92,7 +92,7 @@ func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (Detache
 	if err := e.resumeSaga(conn, stepID, nowMS); err != nil {
 		return run, err
 	}
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return run, err
 	}
@@ -108,7 +108,7 @@ func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (Detache
 // runs inside the saga. A step whose spec cannot be resolved reports false, so
 // it runs inline.
 func (e *Engine) hasCompletionGates(conn *sql.DB, stepID int) bool {
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return false
 	}
@@ -145,7 +145,7 @@ func (e *Engine) ResumeStrandedSagas(conn *sql.DB, runID int, nowMS int64) error
 		`SELECT id FROM steps
 		  WHERE run_id = ? AND saga_stage IS NOT NULL AND saga_stage NOT IN ('', ?)
 		    AND kind != ? AND updated_at_ms < ?`,
-		runID, db.SagaHeld, workflow.ClassAction, nowMS-strandedSagaGraceMS)
+		runID, store.SagaHeld, workflow.ClassAction, nowMS-strandedSagaGraceMS)
 	if err != nil {
 		return fmt.Errorf("listing stranded sagas: %w", err)
 	}

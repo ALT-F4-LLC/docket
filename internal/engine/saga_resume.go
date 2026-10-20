@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -27,7 +27,7 @@ import (
 // The two halves are both necessary. A `gate-started` with no result is the
 // crash window. A result with no start cannot happen — the event commits first,
 // which is the entire reason the saga orders them that way.
-func gateWasStartedButNotRecorded(conn *sql.DB, step *db.Step, gate string) (bool, error) {
+func gateWasStartedButNotRecorded(conn *sql.DB, step *store.Step, gate string) (bool, error) {
 	var started bool
 	err := conn.QueryRow(
 		`SELECT EXISTS(
@@ -41,7 +41,7 @@ func gateWasStartedButNotRecorded(conn *sql.DB, step *db.Step, gate string) (boo
 		return false, nil
 	}
 
-	recorded, err := db.HasGateResult(conn, step.ID, gate)
+	recorded, err := store.StoreOn(conn).HasGateResult(step.ID, gate)
 	if err != nil {
 		return false, err
 	}
@@ -55,7 +55,7 @@ func gateWasStartedButNotRecorded(conn *sql.DB, step *db.Step, gate string) (boo
 // what the operator declares about this command NOW, and a revocation between
 // the crash and the resume must take effect.
 func (e *Engine) resolveInterruptedGate(
-	conn *sql.DB, step *db.Step, gate workflow.Gate, stage string, nowMS int64,
+	conn *sql.DB, step *store.Step, gate workflow.Gate, stage string, nowMS int64,
 ) error {
 	entry, reason, err := e.reRunnableEntryFor(gate, step)
 	if err != nil {
@@ -106,7 +106,7 @@ func (e *Engine) resolveInterruptedGate(
 // that already succeeded, which is precisely the double-execution forbidden
 // here.
 func (e *Engine) reRunnableEntryFor(
-	gate workflow.Gate, step *db.Step,
+	gate workflow.Gate, step *store.Step,
 ) (*trust.Entry, string, error) {
 	runner := execRunnerBehind(e.Gates)
 	if runner == nil {
@@ -195,7 +195,7 @@ func execRunnerBehind(g GateRunner) *ExecRunner {
 // trail carries why: an operator opening the step sees the interrupted gate and
 // the reason, rather than a `waiting-human` with no explanation.
 func (e *Engine) parkInterruptedGate(
-	conn *sql.DB, step *db.Step, gate workflow.Gate, reason string, nowMS int64,
+	conn *sql.DB, step *store.Step, gate workflow.Gate, reason string, nowMS int64,
 ) error {
 	tx, err := conn.Begin()
 	if err != nil {
@@ -231,9 +231,9 @@ func (e *Engine) parkInterruptedGate(
 	}); err != nil {
 		return err
 	}
-	if err := db.SetStepRoutingTx(tx, step.ID,
+	if err := store.TxOn(tx).SetStepRoutingTx(step.ID,
 		workflow.OnFailWaitingHuman, reason,
-		db.StepWaitingHuman, db.ParkClassGateUnmatched, nowMS); err != nil {
+		store.StepWaitingHuman, store.ParkClassGateUnmatched, nowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
@@ -275,7 +275,7 @@ func (e *Engine) parkInterruptedGate(
 	// Reconciling above and refusing the stage here are different things: the
 	// first is the routing's own consequences, the second is whether the saga
 	// machine takes another turn.
-	if err := db.AdvanceSagaTx(tx, step.ID, step.SagaStage, "", nowMS); err != nil {
+	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, step.SagaStage, "", nowMS); err != nil {
 		return err
 	}
 	return tx.Commit()
