@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // TokenEnvVar is the environment variable carrying a capability token.
@@ -80,7 +80,7 @@ func optionalToken(stdin io.Reader) string {
 // inside the verb's own transaction, and a run bound after this read refuses
 // the empty token there rather than being ruled on without one.
 func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
-	hash, err := db.RunConductorHash(conn, runID)
+	hash, err := store.StoreOn(conn).RunConductorHash(runID)
 	if err != nil || hash == "" {
 		return ""
 	}
@@ -91,7 +91,7 @@ func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
 // step's run is what the capability is bound to. A step that does not exist
 // yields "" and leaves the NOT_FOUND to the engine, which owns that refusal.
 func stepConductorToken(conn *sql.DB, stepID int, stdin io.Reader) string {
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return ""
 	}
@@ -117,17 +117,17 @@ func errMissingToken() error {
 // log line or a CI transcript is a live capability.
 func leaseError(err error, label string) error {
 	switch {
-	case errors.Is(err, db.ErrLeaseHeld):
+	case errors.Is(err, store.ErrLeaseHeld):
 		return cmdErr(
 			fmt.Errorf("%s is already claimed by another holder", label),
 			output.ErrConflict,
 		)
-	case errors.Is(err, db.ErrNotHolder):
+	case errors.Is(err, store.ErrNotHolder):
 		return cmdErr(
 			fmt.Errorf("%s: the supplied token does not hold this lease", label),
 			output.ErrAuth,
 		)
-	case errors.Is(err, db.ErrLeaseExpired):
+	case errors.Is(err, store.ErrLeaseExpired):
 		return cmdErr(
 			fmt.Errorf("%s: the lease has expired; claim it again to continue", label),
 			output.ErrStaleLease,
