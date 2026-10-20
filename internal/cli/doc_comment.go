@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -26,14 +26,14 @@ var docCommentAddCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		id, err := model.ParseDocID(args[0])
 		if err != nil {
 			return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
 		}
 
-		doc, err := db.GetDoc(conn, id)
+		doc, err := st.GetDoc(id)
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
 				return e
@@ -116,18 +116,18 @@ var docCommentAddCmd = &cobra.Command{
 			return err
 		}
 
-		commentID, err := db.CreateDocCommentIdempotent(conn, &comment, idempotencyKey)
+		commentID, err := st.CreateDocCommentIdempotent(&comment, idempotencyKey)
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrConflict) {
+			if errors.Is(err, store.ErrConflict) {
 				return cmdErr(err, output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
 		}
 
-		created, err := db.GetDocComment(conn, commentID)
+		created, err := st.GetDocComment(commentID)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching created comment: %w", err), output.ErrGeneral)
 		}

@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -20,14 +20,14 @@ var docCommentListCmd = &cobra.Command{
 }
 
 func runDocCommentList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	id, err := model.ParseDocID(args[0])
 	if err != nil {
 		return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
 	}
 
-	comments, err := db.ListDocComments(conn, id)
+	comments, err := st.ListDocComments(id)
 	if err != nil {
 		if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
 			return e
